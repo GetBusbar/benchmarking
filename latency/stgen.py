@@ -38,7 +38,7 @@ def pct(sorted_vals, q):
     return sorted_vals[k]
 
 
-def worker(args, body, n, headers, met_vals, wall_vals, errs, lock, ttft):
+def worker(args, body, n, headers, met_vals, wall_vals, errs, lock, ttft, deadline):
     parsed = urlparse(args.url)
     host = parsed.hostname
     port = parsed.port or (443 if parsed.scheme == "https" else 80)
@@ -59,6 +59,8 @@ def worker(args, body, n, headers, met_vals, wall_vals, errs, lock, ttft):
     conn = mk()
     mets, wl, e = {}, [], 0
     for _ in range(n):
+        if deadline and time.perf_counter() >= deadline:
+            break  # overall wall deadline hit (stalled upstream guard)
         t0 = time.perf_counter_ns()
         try:
             conn.request("POST", args.path, body=body, headers=headers)
@@ -123,27 +125,71 @@ def main():
     ap.add_argument("--warmup", type=int, default=1000)
     ap.add_argument("--token", default="")
     ap.add_argument("--api", choices=["openai", "anthropic"], default="openai")
+    ap.add_argument("--protocol",
+                    choices=["openai", "anthropic", "responses", "cohere", "gemini", "bedrock"],
+                    help="when set, build the request (path + body + auth header) for this wire protocol "
+                         "against pool --model; overrides --api/--path. The same-protocol passthrough.")
     ap.add_argument("--header", action="append", default=[],
                     help="extra header 'Key: Value'; value 'env:NAME' is read from the environment")
     ap.add_argument("--model", default="m")
     ap.add_argument("--prompt-tokens", type=int, default=1, help="approx prompt size for the payload sweep")
     ap.add_argument("--max-tokens", type=int, default=16)
     ap.add_argument("--label", default="")
+    ap.add_argument("--max-seconds", type=float, default=0,
+                    help="overall wall deadline; stop firing once exceeded (0 = no limit). Guards "
+                         "against a stalled upstream wedging the run for hours.")
     a = ap.parse_args()
 
-    # ~4 chars/token padding so we can sweep payload size; same shape for both protocols.
     prompt = ("ping " * max(1, a.prompt_tokens)).strip()
-    body = {"model": a.model, "max_tokens": a.max_tokens,
-            "messages": [{"role": "user", "content": prompt}]}
-    if a.mode == "ttft":
-        body["stream"] = True
-    bb = json.dumps(body).encode("utf-8")
-
+    pool = a.model
     headers = {"Content-Type": "application/json", "Connection": "keep-alive"}
-    if a.api == "anthropic":
-        headers["anthropic-version"] = "2023-06-01"
-    if a.token:
-        headers["Authorization"] = f"Bearer {a.token}"
+    path = a.path
+
+    if a.protocol:
+        # Build the native request for the chosen wire protocol (same-protocol passthrough).
+        bearer = lambda: headers.__setitem__("Authorization", f"Bearer {a.token}") if a.token else None
+        if a.protocol == "openai":
+            path = "/v1/chat/completions"
+            body = {"model": pool, "max_tokens": a.max_tokens, "messages": [{"role": "user", "content": prompt}]}
+            bearer()
+        elif a.protocol == "anthropic":
+            path = f"/{pool}/v1/messages"
+            body = {"model": pool, "max_tokens": a.max_tokens, "messages": [{"role": "user", "content": prompt}]}
+            headers["anthropic-version"] = "2023-06-01"
+            if a.token:
+                headers["x-api-key"] = a.token
+        elif a.protocol == "responses":
+            path = "/v1/responses"
+            body = {"model": pool, "max_output_tokens": a.max_tokens, "input": prompt}
+            bearer()
+        elif a.protocol == "cohere":
+            path = "/v2/chat"
+            body = {"model": pool, "max_tokens": a.max_tokens, "messages": [{"role": "user", "content": prompt}]}
+            bearer()
+        elif a.protocol == "gemini":
+            path = f"/v1beta/models/{pool}:generateContent"
+            body = {"contents": [{"parts": [{"text": prompt}]}], "generationConfig": {"maxOutputTokens": a.max_tokens}}
+            if a.token:
+                headers["x-goog-api-key"] = a.token
+        elif a.protocol == "bedrock":
+            path = f"/model/{pool}/converse"
+            body = {"messages": [{"role": "user", "content": [{"text": prompt}]}],
+                    "inferenceConfig": {"maxTokens": a.max_tokens}}
+            bearer()
+        if a.mode == "ttft" and a.protocol in ("openai", "anthropic"):
+            body["stream"] = True
+    else:
+        # Legacy path: openai/anthropic body shape, explicit --path.
+        body = {"model": pool, "max_tokens": a.max_tokens, "messages": [{"role": "user", "content": prompt}]}
+        if a.mode == "ttft":
+            body["stream"] = True
+        if a.api == "anthropic":
+            headers["anthropic-version"] = "2023-06-01"
+        if a.token:
+            headers["Authorization"] = f"Bearer {a.token}"
+
+    a.path = path
+    bb = json.dumps(body).encode("utf-8")
     for h in a.header:
         k, _, v = h.partition(":")
         v = v.strip()
@@ -156,7 +202,9 @@ def main():
     def fire(total):
         mets, wl, er, lk = {}, [], [0], threading.Lock()
         per = max(1, total // a.concurrency)
-        ts = [threading.Thread(target=worker, args=(a, bb, per, headers, mets, wl, er, lk, ttft))
+        deadline = (time.perf_counter() + a.max_seconds) if a.max_seconds > 0 else 0
+        ts = [threading.Thread(target=worker,
+                               args=(a, bb, per, headers, mets, wl, er, lk, ttft, deadline))
               for _ in range(a.concurrency)]
         for t in ts:
             t.start()
