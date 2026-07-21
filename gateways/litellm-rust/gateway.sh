@@ -63,4 +63,9 @@ YAML
 
 gw_rss() { awk '/VmRSS/{printf "%.1f", $2/1024}' "/proc/$(pgrep -f litellm-ai-gateway | head -1)/status" 2>/dev/null; }
 
+gw_diag() {
+  echo "proc: $(pgrep -af litellm-ai-gateway | head -c 200)"
+  echo "run.log:"; tail -n 20 /tmp/litellm_rust.mem.log 2>/dev/null
+}
+
 gw_stop() { pkill -f litellm-ai-gateway 2>/dev/null; }

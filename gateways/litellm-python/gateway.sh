@@ -11,10 +11,23 @@ LP_VENV="${LP_VENV:-$GW_DIR/venv}"
 gw_build() {
   [ -x "$LP_VENV/bin/litellm" ] && return 0
   python3 -m venv "$LP_VENV"
-  "$LP_VENV/bin/pip" install -q --upgrade pip "${LITELLM_PY_SPEC:-litellm[proxy]}" >/dev/null 2>&1
+  # Keep the install log — a silent pip failure is why the version once showed up as "?".
+  "$LP_VENV/bin/pip" install -q --upgrade pip "${LITELLM_PY_SPEC:-litellm[proxy]}" >"$GW_DIR/pip.log" 2>&1
 }
 
-gw_version() { echo "litellm==$("$LP_VENV/bin/python" -c 'import litellm;print(litellm.__version__)' 2>/dev/null || echo '?')"; }
+# Prefer `pip show` (works even if `import litellm` emits warnings that trip -c); fall back to import.
+gw_version() {
+  local v
+  v=$("$LP_VENV/bin/pip" show litellm 2>/dev/null | awk '/^Version:/{print $2}')
+  [ -z "$v" ] && v=$("$LP_VENV/bin/python" -c 'import litellm;print(litellm.__version__)' 2>/dev/null)
+  echo "litellm==${v:-?}"
+}
+
+gw_diag() {
+  echo "proc: $(pgrep -af "litellm.*--port $GW_PORT" | head -c 200)"
+  echo "pip.log tail: $(tail -n 3 "$GW_DIR/pip.log" 2>/dev/null | tr '\n' ' ' | head -c 200)"
+  echo "run.log:"; tail -n 20 /tmp/litellm_py.mem.log 2>/dev/null
+}
 
 gw_launch() {
   cat > "$GW_DIR/config.gen.yaml" <<YAML

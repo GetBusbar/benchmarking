@@ -39,10 +39,15 @@ const ANTHROPIC: &[u8] = br#"{"id":"msg_x","type":"message","role":"assistant","
 const GEMINI: &[u8] = br#"{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP","index":0}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":2,"totalTokenCount":12}}"#;
 const BEDROCK: &[u8] = br#"{"output":{"message":{"role":"assistant","content":[{"text":"ok"}]}},"stopReason":"end_turn","usage":{"inputTokens":10,"outputTokens":2,"totalTokens":12}}"#;
 const COHERE: &[u8] = br#"{"id":"x","finish_reason":"COMPLETE","message":{"role":"assistant","content":[{"type":"text","text":"ok"}]},"usage":{"tokens":{"input_tokens":10,"output_tokens":2}}}"#;
+// GET /v1/models — a real OpenAI-shaped model list. Some gateways (e.g. GoModel) discover routable
+// models by calling the upstream's /models at boot and register nothing if it isn't a proper list.
+const MODELS: &[u8] = br#"{"object":"list","data":[{"id":"gpt-4o-mini","object":"model","created":1,"owned_by":"mock"},{"id":"gpt-4o","object":"model","created":1,"owned_by":"mock"},{"id":"gpt-3.5-turbo","object":"model","created":1,"owned_by":"mock"},{"id":"claude-3-5-sonnet","object":"model","created":1,"owned_by":"mock"}]}"#;
 
 /// Pick the response body from the request path — protocol detection, ordered so specific paths win.
 fn body_for(path: &str) -> &'static [u8] {
-    if path.contains("/chat/completions") {
+    if path.ends_with("/models") || path.contains("/models?") {
+        MODELS
+    } else if path.contains("/chat/completions") {
         OPENAI
     } else if path.contains("/responses") {
         RESPONSES

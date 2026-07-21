@@ -33,4 +33,8 @@ gw_rss() {
   awk -v k="$total" 'BEGIN{printf "%.1f", k/1024}'
 }
 gw_version() { npm view "${PORTKEY_SPEC:-@portkey-ai/gateway}" version 2>/dev/null | sed 's/^/@portkey-ai\/gateway@/' || echo "@portkey-ai/gateway (npx latest)"; }
+gw_diag() {
+  echo "proc: $(pgrep -af '@portkey-ai/gateway' | head -c 200)"
+  echo "run.log:"; tail -n 20 /tmp/portkey.mem.log 2>/dev/null
+}
 gw_stop() { pkill -f '@portkey-ai/gateway' 2>/dev/null; }

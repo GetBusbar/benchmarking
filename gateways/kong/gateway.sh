@@ -12,7 +12,15 @@ GW_PATH=/v1/chat/completions
 GW_MODEL=gpt-4o-mini
 GW_AUTH=dummy
 
-gw_version() { echo "${KONG_IMAGE:-kong:3.8}"; }
+KONG_IMAGE="${KONG_IMAGE:-kong:3.8}"
+gw_version() {
+  local dg; dg=$(sudo docker inspect --format '{{index .RepoDigests 0}}' "$KONG_IMAGE" 2>/dev/null)
+  echo "${KONG_IMAGE}${dg:+ (@${dg##*@})}"
+}
+gw_diag() {
+  echo "container: $(sudo docker ps -a --filter name=kong-bench --format '{{.Status}}' 2>/dev/null)"
+  echo "logs:"; sudo docker logs --tail 25 kong-bench 2>&1
+}
 
 gw_build() {
   cat > "$GW_DIR/kong.gen.yml" <<YAML

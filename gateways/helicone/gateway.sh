@@ -1,53 +1,71 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
-# Gateway manifest: Helicone AI Gateway (helicone/ai-gateway, Rust, docker).
+# Gateway manifest: Helicone AI Gateway (Helicone/ai-gateway, Rust) — BUILT FROM SOURCE, run native.
 #
-# OpenAI-compatible router. We override the `openai` provider's base-url to the mock and expose a
-# `default` router, so /router/default/chat/completions forwards to the mock. HELICONE_IMAGE is
-# pinned in gateways/versions.env. Runs without the Helicone control plane (no key) for a pure
-# proxy-overhead measurement.
-GW_KIND=docker
+# Helicone publishes no linux/arm64 image (`helicone/ai-gateway:latest` is amd64-only), so on Graviton
+# we build the `ai-gateway` crate from source — exactly the pattern we use for LiteLLM-Rust — and run
+# the release binary natively (real process RSS, no container overhead). Refs are pinned in
+# gateways/versions.env. Pure-proxy mode: helicone.features=none → no control plane, no auth, no key
+# required; the built-in `openai` provider's base-url is overridden to the mock.
+GW_KIND=native
 GW_PORT=8787
 GW_PATH=/router/default/chat/completions
-GW_MODEL=gpt-4o-mini
+# Helicone's router requires the unified "{provider}/{model}" form (it errors on a bare model name);
+# the mock ignores the model and answers the OpenAI shape regardless.
+GW_MODEL=openai/gpt-4o-mini
 GW_AUTH=dummy
-
-gw_version() { echo "${HELICONE_IMAGE:-helicone/ai-gateway:latest}"; }
+HELICONE_SRC="${HELICONE_SRC:-$HOME/helicone-ai-gateway-src}"
 
 gw_build() {
+  command -v cargo >/dev/null || { echo "need cargo (rust) for helicone"; return 1; }
+  if [ ! -d "$HELICONE_SRC" ]; then
+    git clone "${HELICONE_REPO}" "$HELICONE_SRC" || return 1
+    [ -n "${HELICONE_COMMIT:-}" ] && git -C "$HELICONE_SRC" checkout -q "$HELICONE_COMMIT"
+  fi
+  # Release build uses LTO + codegen-units=1 (slow, RAM-hungry) — fine on the 8-core bench box.
+  ( cd "$HELICONE_SRC" && cargo build --release -p ai-gateway ) || return 1
+  HELICONE_BIN="$HELICONE_SRC/target/release/ai-gateway"
+  [ -x "$HELICONE_BIN" ] || { echo "helicone binary not found after build"; return 1; }
+}
+
+gw_version() {
+  local sha; sha="$(git -C "$HELICONE_SRC" rev-parse --short HEAD 2>/dev/null)"
+  echo "Helicone/ai-gateway@${sha:-?} (source build)"
+}
+
+gw_launch() {
+  # base-url gets "v1/chat/completions" appended by the gateway → hits the mock's OpenAI endpoint.
   cat > "$GW_DIR/config.gen.yaml" <<YAML
+server:
+  address: 0.0.0.0
+  port: $GW_PORT
+helicone:
+  features: none
+providers:
+  openai:
+    base-url: "http://127.0.0.1:$MOCK_PORT/"
 routers:
   default:
     load-balance:
       chat:
-        strategy: latency
-        targets:
-          - openai
-providers:
-  openai:
-    base-url: http://127.0.0.1:$MOCK_PORT
-    models:
-      - $GW_MODEL
+        strategy: weighted
+        providers:
+          - provider: openai
+            weight: 1.0
 YAML
-  sudo docker pull "${HELICONE_IMAGE:-helicone/ai-gateway:latest}" >/dev/null 2>&1 || true
+  pkill -f 'target/release/ai-gateway' 2>/dev/null; sleep 1
+  setsid taskset -c "$CORES" env \
+    OPENAI_API_KEY=sk-dummy \
+    AI_GATEWAY__SERVER__PORT="$GW_PORT" \
+    AI_GATEWAY__SERVER__ADDRESS=0.0.0.0 \
+    "$HELICONE_BIN" -c "$GW_DIR/config.gen.yaml" </dev/null >/tmp/helicone.bench.log 2>&1 &
 }
 
-gw_launch() {
-  sudo docker rm -f helicone-bench >/dev/null 2>&1; sleep 1
-  sudo docker run -d --name helicone-bench --network host --cpuset-cpus="$CORES" \
-    -e AI_GATEWAY__SERVER__ADDRESS=0.0.0.0 \
-    -e OPENAI_API_KEY=dummy \
-    -v "$GW_DIR/config.gen.yaml:/config.yaml:ro" \
-    "${HELICONE_IMAGE:-helicone/ai-gateway:latest}" --config /config.yaml >/dev/null 2>&1
+gw_rss() { awk '/VmRSS/{printf "%.1f", $2/1024}' "/proc/$(pgrep -f 'target/release/ai-gateway' | head -1)/status" 2>/dev/null; }
+
+gw_diag() {
+  echo "proc: $(pgrep -af 'target/release/ai-gateway' | head -c 200)"
+  echo "run.log:"; tail -n 25 /tmp/helicone.bench.log 2>/dev/null
 }
 
-gw_rss() {
-  local m; m=$(sudo docker stats --no-stream --format '{{.MemUsage}}' helicone-bench 2>/dev/null | awk '{print $1}')
-  case "$m" in
-    *GiB) awk -v x="${m%GiB}" 'BEGIN{printf "%.1f", x*1024}' ;;
-    *MiB) echo "${m%MiB}" ;;
-    *) echo 0 ;;
-  esac
-}
-
-gw_stop() { sudo docker rm -f helicone-bench >/dev/null 2>&1; }
+gw_stop() { pkill -f 'target/release/ai-gateway' 2>/dev/null; }
