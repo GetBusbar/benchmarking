@@ -16,7 +16,12 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
+
+# When this render happened (UTC). Stamped into every report page + chart footer so a re-run always
+# refreshes and re-commits ALL readmes and ALL images, even when the underlying numbers didn't change.
+RENDER_TS = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
 # matplotlib is imported lazily (in render) so the report pages can be generated with plain JSON even
 # where matplotlib isn't installed. plt is filled in by _mpl().
@@ -29,7 +34,8 @@ RESULTS = ROOT / "results"
 BRAND = "#00b34a"   # busbar green — the "won this metric" color
 BRAND_DK = "#059142"
 SLATE = "#3a3f4b"   # everyone else's primary bar
-MUTE = "#cdd0d7"    # secondary/idle bars
+MUTE = "#9aa2b2"    # secondary/idle bars — mid grey so idle RSS stays readable, not near-invisible
+MUTE_TXT = "#525a6b"  # idle-bar value labels: dark enough to read on white
 INK = "#1c2430"     # titles
 GRAY = "#8a90a0"    # captions
 GRID = "#eef0f3"
@@ -236,9 +242,9 @@ def render(chart: Chart, only_keys=None, out_stem: str | None = None) -> None:
                     txt, col, weight = "✕ did not serve", "#c2410c", "bold"
                 ax.text(tx, cy, txt, va="center", ha="left", fontsize=9.5,
                         fontweight=weight, color=col, zorder=4)
-            elif v > 0:  # secondary series (e.g. idle RSS): quiet label, skip empty bars
-                ax.text(tx, cy, _fmt(v), va="center", ha="left", fontsize=8,
-                        fontweight="normal", color=GRAY, zorder=4)
+            elif v > 0:  # secondary series (e.g. idle RSS): readable label, skip empty bars
+                ax.text(tx, cy, _fmt(v), va="center", ha="left", fontsize=9,
+                        fontweight="normal", color=MUTE_TXT, zorder=4)
 
     ax.set_yticks(y0)
     ax.set_yticklabels([r["_label"] for r in rows], fontsize=11.5, color=INK, fontweight="medium")
@@ -279,12 +285,12 @@ def render(chart: Chart, only_keys=None, out_stem: str | None = None) -> None:
     if "concurrency" in meta and "payload_bytes" in meta:
         bits.append(f"{meta['concurrency']}× {int(meta['payload_bytes'])//1000}KB sustained")
     bits.append("green = measured best")
-    fig.text(0.008, 0.012, "  ·  ".join(bits) + "     getbusbar.com/bench — every number regenerates from raw results",
+    fig.text(0.008, 0.012, "  ·  ".join(bits) + f"     getbusbar.com/bench — regenerated {RENDER_TS} from raw results",
              fontsize=7.3, color=GRAY)
 
     fig.tight_layout(rect=(0, 0.05, 1, 0.93))
     out = RESULTS / f"{out_stem or chart.name}.png"
-    fig.savefig(out, dpi=200, bbox_inches="tight", facecolor="white")
+    fig.savefig(out, dpi=300, bbox_inches="tight", facecolor="white")
     plt.close(fig)
     print(f"wrote {out}")
 
@@ -409,6 +415,8 @@ def _report_md(rows: list, title: str, charts: list, pending: tuple = (), chart_
                  "ceiling = highest sustained req/s with p99 < 1 s and zero errors; RSS idle = after "
                  "first 200, peak = under sustained load. Same box, same mock, same load, one gateway "
                  "at a time. Source refs pinned in `gateways/versions.env`; the built commit is in each row.")
+    lines.append("")
+    lines.append(f"<sub>Page + charts regenerated **{RENDER_TS}** from the raw `results/*.json`.</sub>")
     return "\n".join(lines) + "\n"
 
 
