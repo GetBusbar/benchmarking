@@ -95,6 +95,7 @@ class Chart:
     series: list          # list[Series]; the FIRST series decides the winner + sort order
     log: bool = False
     higher_better: bool = False   # RPS: bigger wins (green to the max, sort desc)
+    money: bool = False           # format bar labels + axis as USD ($0.0015)
 
 
 CHARTS = [
@@ -350,7 +351,7 @@ def _report_md(rows: list, title: str, charts: list, pending: tuple = (), chart_
         # is never mistaken for a clean win.
         lat_cell = "—"
         if lat is not None:
-            lat_cell = f"{lat} µs" + (" †" if served is False else "")
+            lat_cell = f"{lat:,} µs" + (" †" if served is False else "")
             if served is False:
                 dnf_seen = True
         rss = lambda v: f"{v:.0f} MiB" if v is not None else "—"
