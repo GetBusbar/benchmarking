@@ -5,10 +5,11 @@ Portkey, Kong, Helicone, GoModel, Busbar, and whatever else you drop in.** Same 
 same cpu pin, for every gateway. One command runs it; the charts regenerate from raw results; every
 source ref is pinned in the open and the built commit is stamped into the output.
 
-The chart colors the winner **by measurement, not by name** — whichever gateway measures best on a
-metric is green, full stop. No cherry-picked idle snapshots, no "believe us," no numbers you can't
-regenerate. If a gateway can't serve the endpoint, the result says `served: false` instead of quietly
-dropping it. Add your gateway (or fix how we run yours) with a one-file [manifest](gateways/README.md).
+The chart highlights the winner **by measurement, not by name** — whichever gateway measures best on a
+metric gets the highlight (a neutral colour, not a brand colour), so a highlighted bar can't be
+misread as the sponsor. Every number regenerates from committed JSON. If a gateway can't serve the
+endpoint, the result says `served: false` instead of quietly dropping it. Add your gateway (or fix how
+we run yours) with a one-file [manifest](gateways/README.md).
 
 ## Results
 
@@ -98,15 +99,16 @@ faster.
 
 - **added latency (µs)** — p99 the gateway adds over the upstream at concurrency 1
   (gateway p99 − direct-to-mock p99). Microseconds, because at this scale ms hides the story.
-- **RPS ceiling** — highest sustained requests/sec with p99 under 1 s and **zero errors** —
+- **RPS ceiling** — highest sustained requests/sec with p99 under 1 s and **a <0.1% error rate** —
   "how much can it carry before it falls over."
 
 **`memory/`** — resident memory across a request's life (matters most at GB scale):
 
 - **idle RSS** — right after the gateway first answers `200`, before any load.
 - **peak RSS** — highest RSS under sustained large-payload load.
-- **post-load RSS** — 15 s after load stops: does it release, or stay pinned? A gateway that pools
-  memory and never returns it looks fine on a boot-time `docker stats` and then eats your node.
+- **post-load RSS** — 60 s after load stops: does it release, or stay pinned? A gateway that pools
+  memory and never returns it looks bounded on a boot-time `docker stats` but stays pinned at peak
+  under sustained load.
 
 ## Methodology — the choices, explained
 
@@ -129,7 +131,7 @@ flattering metric," so we report both, same 20 ms delay for every gateway:
 - **Max proxy throughput** (instant mock): raw forwarding speed — trivial requests/sec the gateway
   pushes. The metric behind "busbar does ~40k rps on 4 cores."
 - **Sustained RPS @ 20 ms** (delayed mock): **AIGatewayBench's exact metric** — how many concurrent
-  in-flight requests the gateway holds while the model takes 20 ms, at p99 < 1 s with zero errors.
+  in-flight requests the gateway holds while the model takes 20 ms, at p99 < 1 s with <0.1% errors.
   Production-shaped (a gateway's real job is holding thousands of slow calls) and directly comparable
   to their published numbers.
 

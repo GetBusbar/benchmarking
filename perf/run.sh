@@ -5,7 +5,7 @@
 # LATENCY + THROUGHPUT — pluggable across gateways (same gateways/<name>/gateway.sh manifests as
 # the memory suite). On ONE box against ONE instant mock, per gateway it measures:
 #   * added latency (µs) at concurrency 1 = gateway p99 − direct-to-mock p99, small payloads
-#   * RPS ceiling = the highest sustained requests/sec where p99 < 1000 ms AND zero errors
+#   * RPS ceiling = the highest sustained requests/sec where p99 < 1000 ms AND a <0.1% error rate
 # and writes results/perf/<gateway>.json (+ a concurrency sweep for the latency-vs-load chart).
 #
 #   GATEWAY=busbar BUSBAR_BIN=~/busbar perf/run.sh

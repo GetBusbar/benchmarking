@@ -118,7 +118,7 @@ CHARTS = [
         name="rps_max_proxy",
         suite="perf",
         title="Max proxy throughput — raw forwarding speed",
-        subtitle="highest sustained req/s with p99 < 1s, zero errors, instant upstream (higher is better)",
+        subtitle="highest sustained req/s with p99 < 1s, <0.1% errors, instant upstream (higher is better)",
         unit="requests / sec",
         series=[Series("rps_max_proxy", "max proxy RPS", "rank")],
         higher_better=True,
@@ -127,7 +127,7 @@ CHARTS = [
         name="rps_sustained_20ms",
         suite="perf",
         title="Sustained throughput under 20 ms LLM latency",
-        subtitle="AIGatewayBench's metric: req/s held with p99 < 1s + zero errors, 20 ms upstream (higher is better)",
+        subtitle="AIGatewayBench's metric: req/s held with p99 < 1s + <0.1% errors, 20 ms upstream (higher is better)",
         unit="requests / sec",
         series=[Series("rps_sustained_20ms", "sustained RPS @20ms", "rank")],
         higher_better=True,
@@ -145,7 +145,33 @@ CHARTS = [
         ],
         log=True,
     ),
+    # ── cost framing (AIGatewayBench's $/vCPU lens) ───────────────────────────────────────────────
+    Chart(
+        name="rps_per_dollar",
+        suite="perf",
+        title="Throughput per dollar",
+        subtitle="sustained req/s @20ms per $/hr of the pinned 4-core (m7g.xlarge) slice (higher is better)",
+        unit="sustained RPS per $/hr",
+        series=[Series("rps_per_dollar", "RPS per $/hr", "rank")],
+        higher_better=True,
+    ),
+    Chart(
+        name="cost_per_million",
+        suite="perf",
+        title="Cost per million requests",
+        subtitle="$ to serve 1M sustained requests on the pinned 4-core slice (lower is better)",
+        unit="$ / 1M requests",
+        series=[Series("cost_per_million_usd", "cost / 1M", "rank")],
+        money=True,
+    ),
 ]
+
+
+# Cost model: the gateway is pinned to 4 cores = an m7g.xlarge (the class AIGatewayBench costs on).
+# us-east-1 on-demand ≈ $0.1632/hr for that slice. Derived per-gateway from the SUSTAINED @20ms ceiling
+# (the realistic in-flight capacity), so a gateway that can't sustain load has no cost basis (renders
+# as "did not sustain"). Override with GATEWAY_HOURLY_USD.
+GATEWAY_HOURLY_USD = 0.1632
 
 
 def _load(suite: str) -> list[dict]:
@@ -157,6 +183,11 @@ def _load(suite: str) -> list[dict]:
             continue
         obj = json.loads(p.read_text())
         obj["_key"], obj["_label"] = key, label
+        if suite == "perf":
+            sust = float(obj.get("rps_sustained_20ms") or 0)
+            # sustained req/s you get per $/hr, and $ per 1M sustained requests. 0 when it can't sustain.
+            obj["rps_per_dollar"] = (sust / GATEWAY_HOURLY_USD) if sust > 0 else 0
+            obj["cost_per_million_usd"] = (GATEWAY_HOURLY_USD / (sust * 3600) * 1e6) if sust > 0 else 0
         rows.append(obj)
     return rows
 
@@ -215,6 +246,15 @@ def render(chart: Chart, only_keys=None, out_stem: str | None = None) -> None:
     bar_h = group_h / ns
     y0 = list(range(n))
 
+    def _numlab(v: float) -> str:
+        # Money → "$0.0015". Time (µs) → the FULL number with commas ("7,807"), never "7.8k" — for
+        # latency the exact microseconds read clearest. Everything else → compact ("44k").
+        if chart.money:
+            return "$0" if v <= 0 else f"${v:,.4g}"
+        if chart.unit == "µs":
+            return f"{int(round(v)):,}"
+        return _fmt(v)
+
     for si, s in enumerate(chart.series):
         offset = group_h / 2 - bar_h / 2 - si * bar_h
         vals = [float(r.get(s.field, 0) or 0) for r in rows]
@@ -239,17 +279,17 @@ def render(chart: Chart, only_keys=None, out_stem: str | None = None) -> None:
             cy = bar.get_y() + bar.get_height() / 2
             if rank:
                 if served and v > 0:
-                    txt, col, weight = _fmt(v), INK, "bold"
-                elif served:  # came up, but no tested load held p99 < 1 s with zero errors
+                    txt, col, weight = _numlab(v), INK, "bold"
+                elif served:  # came up, but no tested load held p99 < 1 s at <0.1% errors
                     txt, col, weight = "0  ·  no load held p99 < 1 s", "#c2410c", "bold"
                 elif v > 0:   # a concurrency-1 number exists, but it collapsed under load
-                    txt, col, weight = f"{_fmt(v)}   ✕ did not serve under load", "#c2410c", "bold"
+                    txt, col, weight = f"{_numlab(v)}   ✕ did not serve under load", "#c2410c", "bold"
                 else:
                     txt, col, weight = "✕ did not serve", "#c2410c", "bold"
                 ax.text(tx, cy, txt, va="center", ha="left", fontsize=9.5,
                         fontweight=weight, color=col, zorder=4)
             elif v > 0:  # secondary series (e.g. idle RSS): readable label, skip empty bars
-                ax.text(tx, cy, _fmt(v), va="center", ha="left", fontsize=9,
+                ax.text(tx, cy, _numlab(v), va="center", ha="left", fontsize=9,
                         fontweight="normal", color=MUTE_TXT, zorder=4)
 
     ax.set_yticks(y0)
@@ -267,7 +307,10 @@ def render(chart: Chart, only_keys=None, out_stem: str | None = None) -> None:
     # axes (not 10³/10⁴), "10,000 / 20,000" on the linear RPS axis (not 10000). Minor log ticks stay
     # unlabeled so the decade labels don't get crowded.
     from matplotlib.ticker import FuncFormatter, NullFormatter
-    ax.xaxis.set_major_formatter(FuncFormatter(lambda v, _pos: f"{int(round(v)):,}" if v > 0 else "0"))
+    if chart.money:
+        ax.xaxis.set_major_formatter(FuncFormatter(lambda v, _pos: f"${v:,.4g}" if v > 0 else "$0"))
+    else:
+        ax.xaxis.set_major_formatter(FuncFormatter(lambda v, _pos: f"{int(round(v)):,}" if v > 0 else "0"))
     if chart.log:
         ax.xaxis.set_minor_formatter(NullFormatter())
     better = "higher is better" if chart.higher_better else "lower is better"
@@ -331,7 +374,7 @@ def _report_md(rows: list, title: str, charts: list, pending: tuple = (), chart_
     fail_notes = []  # (gateway, serve_error) for every ❌ row — the receipt behind "did not serve"
 
     def rps_cell(val, bound, served):
-        # ✕ = never served under load; 0 = served but no tested load held p99<1s + zero errors.
+        # ✕ = never served under load; 0 = served but no tested load held p99<1s + <0.1% errors.
         if served is False:
             return "✕"
         if not val:
@@ -389,7 +432,7 @@ def _report_md(rows: list, title: str, charts: list, pending: tuple = (), chart_
     zero_or_x = any(True for _, r in rows if r.get("served") is False) or zero_load_seen
     if zero_or_x:
         legend.append("**✕** = did not serve under load (0 successful req/s).")
-        legend.append("**0** = came up, but no tested concurrency held p99 < 1 s with zero errors.")
+        legend.append("**0** = came up, but no tested concurrency held p99 < 1 s with <0.1% errors.")
     if dnf_seen:
         legend.append("**†** = a concurrency-1 latency exists, but the gateway failed under load — "
                       "not a clean result.")
@@ -418,7 +461,7 @@ def _report_md(rows: list, title: str, charts: list, pending: tuple = (), chart_
             lines.append("")
     lines.append("---")
     lines.append("Method: added latency = gateway p99 − direct-to-mock p99 at concurrency 1; RPS "
-                 "ceiling = highest sustained req/s with p99 < 1 s and zero errors; RSS idle = after "
+                 "ceiling = highest sustained req/s with p99 < 1 s and <0.1% errors; RSS idle = after "
                  "first 200, peak = under sustained load. Same box, same mock, same load, one gateway "
                  "at a time. Source refs pinned in `gateways/versions.env`; the built commit is in each row.")
     lines.append("")
