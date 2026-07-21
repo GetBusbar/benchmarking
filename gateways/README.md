@@ -40,14 +40,14 @@ and it just works. The mock answers both shapes (OpenAI by default, Anthropic fo
 | `litellm-python/` | LiteLLM `[proxy]` CLI | pip-installed on first run |
 | `portkey/` | Portkey OSS gateway (npx) | routes via `x-portkey-*` headers |
 | `kong/` | Kong Gateway + `ai-proxy` (docker, DB-less) | `upstream_url` → mock; config verified locally, mock-hop needs the Linux box (Docker-Desktop host-net) |
-| `helicone/` | Helicone AI Gateway (Rust, docker) | `openai` provider `base-url` → mock |
-| `gomodel/` | GoModel (ENTERPILOT/GOModel, Go, docker) | `OPENAI_BASE_URL` → mock; unprotected for pure proxy-overhead |
+| `helicone/` | Helicone AI Gateway (Rust) — **built from source, run native** | no arm64 image is published, so we compile it (pinned commit in `versions.env`) like litellm-rust; `openai` provider `base-url` → mock |
+| `gomodel/` | GoModel (ENTERPILOT/GOModel, Go, docker) | `OPENAI_BASE_URL` → mock; discovers routable models from the mock's `/v1/models`; unprotected for pure proxy-overhead |
+| `one-api/` | One-API (songquanpeng/one-api, docker) | pinned to `v0.6.10` (the tag that ships an arm64 image); its channel + token are bootstrapped over the admin API automatically in `gw_launch` |
 
 **Documented but opt-in by name** (need multi-container / k8s bring-up — run `run-all.sh <name>` explicitly; each `gateway.sh` header explains what's required):
 
 | dir | what | blocker |
 |---|---|---|
-| `one-api/` | One-API (songquanpeng/one-api) | channels + tokens are runtime admin-API state, not declarative |
 | `gptrouter/` | GPTRouter (Writesonic) | docker-compose stack (router + Postgres + queue) + runtime provider registration |
 | `arch/` | Arch (Katanemo) | Envoy + Arch services via the `archgw` CLI |
 | `envoy-ai/` | Envoy AI Gateway | Kubernetes-native (Envoy Gateway + CRDs) |

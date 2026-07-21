@@ -29,9 +29,9 @@ exact build/commit measured, plus the charts below.
 ## Prerequisites
 
 **To run locally on your own box:**
-- **Rust** (`cargo`) — builds the mock (`mock/`, a hyper server that answers all six wire protocols and sustains 100s of k RPS, so it's never the bottleneck).
+- **Rust** (`cargo`) — builds the mock (`mock/`, a hyper server that answers all six wire protocols and sustains 100s of k RPS, so it's never the bottleneck), plus the gateways compiled from source (LiteLLM-Rust, Helicone). Source builds also need `cmake`, `clang`, and `protobuf-compiler`.
 - **Go** — builds the load generator (`loadgen/`).
-- **Docker** — for the container-based gateways (Bifrost, Kong, Helicone, …).
+- **Docker** — for the container-based gateways (Bifrost, Kong, GoModel, One-API, …).
 - **Python 3 + matplotlib** — draws the charts (`pip install matplotlib`). Optional; JSON results are written either way.
 - A gateway binary/image for whatever you're testing (e.g. `BUSBAR_BIN=/path/to/busbar`). Competitor gateways build/pull themselves on first run.
 
@@ -60,9 +60,17 @@ regenerates the charts and the report pages. Out comes `results/perf/<gateway>.j
 back, and **terminates the box**. Only needs AWS CLI v2 configured.
 
 ```sh
-./run-on-ec2.sh                     # every gateway, one-click
+./run-on-ec2.sh                     # every gateway, one-click (Graviton/arm64)
 ./run-on-ec2.sh litellm-rust bifrost   # a subset
+ARCH=x86 ./run-on-ec2.sh            # the whole field on Intel instead — one flip
 ```
+
+**Architecture is one knob.** `ARCH=arm64` (default) runs the field on Graviton (`m7g`); `ARCH=x86`
+runs the same field on Intel (`m7i`). One switch picks the instance family *and* the matching Ubuntu
+AMI; every gateway builds/pulls for that arch on its own box, and the arch is recorded in each result
+so runs from different arches never get conflated. Every gateway here runs natively on **both** —
+including Helicone and One-API, which publish x86-only images (we build Helicone from source and pin
+One-API to its arm64 tag), so nothing is quietly arm64-only or x86-only.
 
 A gateway that can't be stood up (unreachable, or needs infra a single container can't provide) is
 recorded `served: false` and shown as such — never silently dropped. To pin a different build of any
