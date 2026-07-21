@@ -1,15 +1,18 @@
 {
   "gateway": "helicone",
-  "build": "helicone/ai-gateway:latest",
-  "served": false,
-  "idle_rss_mib": 0,
-  "peak_rss_mib": 0,
-  "post_load_rss_mib": 0,
+  "build": "Helicone/ai-gateway@9649b27 (source build)",
+  "served": true,
+  "last_http_status": "200",
+  "serve_error": "",
+  "idle_rss_mib": 42.5,
+  "peak_rss_mib": 1138.5,
+  "post_load_rss_mib": 388.9,
   "payload_bytes": 150000,
   "concurrency": 1500,
   "duration_s": 120,
   "endpoint": "/router/default/chat/completions",
-  "model": "gpt-4o-mini",
-  "hardware": "AWS m7g.2xlarge (Graviton3, 8 cores / 32 GB). Gateway pinned to 4 cores (m7g.xlarge class), mock+loadgen on the other 4, Ubuntu 24.04. One dedicated box per gateway.",
-  "measured_at": "2026-07-21T06:15:58Z"
+  "model": "openai/gpt-4o-mini",
+  "arch": "arm64",
+  "hardware": "AWS m7g.2xlarge (Graviton3, 8 cores / 32 GB). Gateway pinned to 4 cores, mock+loadgen on the other 4, Ubuntu 24.04. One dedicated box per gateway.",
+  "measured_at": "2026-07-21T15:50:30Z"
 }
