@@ -47,10 +47,12 @@ DEFAULT_GATEWAYS=(busbar litellm-rust litellm-python bifrost portkey kong helico
 if [[ $# -gt 0 ]]; then GATEWAYS=("$@"); else GATEWAYS=("${DEFAULT_GATEWAYS[@]}"); fi
 
 # ── shared AWS setup (key + SG), done once ────────────────────────────────────────────────────────
-if [[ ! -f "$KEYFILE" ]]; then
-  aws ec2 delete-key-pair --key-name "$KEYNAME" >/dev/null 2>&1 || true
-  aws ec2 create-key-pair --key-name "$KEYNAME" --query KeyMaterial --output text > "$KEYFILE"; chmod 600 "$KEYFILE"
-fi
+# Always (re)create the keypair AND its local private key together. A leftover key from a previous run
+# — e.g. in a different $TMPDIR — would silently mismatch a newly-created AWS keypair, and the only
+# symptom is every box reporting "ssh never came up". Recreating both in lockstep makes them match.
+aws ec2 delete-key-pair --key-name "$KEYNAME" >/dev/null 2>&1 || true
+rm -f "$KEYFILE"
+aws ec2 create-key-pair --key-name "$KEYNAME" --query KeyMaterial --output text > "$KEYFILE"; chmod 600 "$KEYFILE"
 SG=$(aws ec2 describe-security-groups --group-names "$SGNAME" --query 'SecurityGroups[0].GroupId' --output text 2>/dev/null || true)
 [[ -z "$SG" || "$SG" == "None" ]] && SG=$(aws ec2 create-security-group --group-name "$SGNAME" --description "gateway bench SSH" --query GroupId --output text)
 MYIP=$(curl -s https://checkip.amazonaws.com)
