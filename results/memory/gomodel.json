@@ -1,15 +1,18 @@
 {
   "gateway": "gomodel",
-  "build": "enterpilot/gomodel:0.1.55",
-  "served": false,
-  "idle_rss_mib": 22.88,
-  "peak_rss_mib": 2200.6,
-  "post_load_rss_mib": 138.6,
+  "build": "enterpilot/gomodel:0.1.55 (@sha256:606151f909bdc4b87ac290678c9c3a45e3e510a696697d2ce26eda49b1b562ac)",
+  "served": true,
+  "last_http_status": "200",
+  "serve_error": "",
+  "idle_rss_mib": 24.94,
+  "peak_rss_mib": 5060.6,
+  "post_load_rss_mib": 2935.8,
   "payload_bytes": 150000,
   "concurrency": 1500,
   "duration_s": 120,
   "endpoint": "/v1/chat/completions",
   "model": "gpt-4o-mini",
-  "hardware": "AWS m7g.2xlarge (Graviton3, 8 cores / 32 GB). Gateway pinned to 4 cores (m7g.xlarge class), mock+loadgen on the other 4, Ubuntu 24.04. One dedicated box per gateway.",
-  "measured_at": "2026-07-21T06:14:12Z"
+  "arch": "arm64",
+  "hardware": "AWS m7g.2xlarge (Graviton3, 8 cores / 32 GB). Gateway pinned to 4 cores, mock+loadgen on the other 4, Ubuntu 24.04. One dedicated box per gateway.",
+  "measured_at": "2026-07-21T15:41:45Z"
 }
