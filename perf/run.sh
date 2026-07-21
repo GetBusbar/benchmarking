@@ -112,6 +112,22 @@ read -r _grps _gfail GP99 GP50 < <(probe "$GURL" 1 "$C1_DUR")
 OVER_P99=$(( ${GP99:-0} - ${DP99:-0} )); OVER_P50=$(( ${GP50:-0} - ${DP50:-0} ))
 log "[$GATEWAY] c1: gw p99=${GP99}µs direct p99=${DP99}µs → added p99=${OVER_P99}µs (p50 added=${OVER_P50}µs)"
 
+# ── the gateway's OWN self-reported compute (Server-Timing dur), same box + same c1 condition ────────
+# Neutral: we record whatever the gateway emits in `Server-Timing: <name>;dur=`. Only a gateway that
+# self-reports produces a value (today only busbar, via `busbar;dur`); every other gateway → null. This
+# lets the end-to-end added latency decompose on ONE run: self_reported_dur ⊂ added_latency (the rest is
+# the extra network hop). Skipped if the gateway never served.
+STDUR_P50=null; STDUR_P99=null; STDUR_N=0
+if [ "$ok" = 1 ]; then
+  ST_JSON=$(python3 "$HERE/stdur.py" "$GURL" "${STDUR_SAMPLES:-3000}" "$GW_MODEL" "$GW_AUTH" "${GW_HEADERS[@]:-}" 2>/dev/null || echo '{"n":0}')
+  STDUR_N=$(printf '%s' "$ST_JSON" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("n",0))' 2>/dev/null || echo 0)
+  if [ "${STDUR_N:-0}" -gt 0 ]; then
+    STDUR_P50=$(printf '%s' "$ST_JSON" | python3 -c 'import sys,json;print(json.load(sys.stdin)["p50_us"])' 2>/dev/null || echo null)
+    STDUR_P99=$(printf '%s' "$ST_JSON" | python3 -c 'import sys,json;print(json.load(sys.stdin)["p99_us"])' 2>/dev/null || echo null)
+    log "[$GATEWAY] self-reported Server-Timing dur: p50=${STDUR_P50}µs p99=${STDUR_P99}µs (n=${STDUR_N})"
+  fi
+fi
+
 # ── two throughput sweeps ──────────────────────────────────────────────────────────────────────────
 # One sweep at a given mock delay + concurrency list. Restarts the mock at that delay, measures the
 # mock's OWN ceiling (load→mock direct at the top concurrency) as the guardrail reference, then ramps
@@ -169,6 +185,9 @@ cat > "$RESULTS/$GATEWAY.json" <<JSON
   "added_latency_p99_us": $OVER_P99,
   "gateway_c1_p99_us": ${GP99:-0},
   "direct_c1_p99_us": ${DP99:-0},
+  "server_timing_dur_p50_us": ${STDUR_P50:-null},
+  "server_timing_dur_p99_us": ${STDUR_P99:-null},
+  "server_timing_dur_n": ${STDUR_N:-0},
   "rps_max_proxy": $PROXY_RPS,
   "rps_max_proxy_concurrency": $PROXY_CONC,
   "rps_max_proxy_mock_ceiling": $PROXY_MOCK,
