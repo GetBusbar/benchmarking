@@ -17,8 +17,11 @@ set -euo pipefail
 export AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-us-east-1}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"   # this repo (benchmarking) root
 GATEWAYS_ARG="$*"
-ITYPE="${ITYPE:-m7g.4xlarge}"
-HW_LABEL="AWS ${ITYPE} (Graviton3, 16 vCPU / 64 GB), Ubuntu 24.04"
+# m7g.2xlarge = 8 real Graviton3 cores (no hyperthreading). The gateway-under-test is pinned to 4
+# cores (= an m7g.xlarge, the class AIGatewayBench uses); the mock + load generator get the other 4,
+# so the harness can never steal cycles from or bottleneck the gateway.
+ITYPE="${ITYPE:-m7g.2xlarge}"
+HW_LABEL="AWS ${ITYPE} (Graviton3, 8 cores / 32 GB) — gateway pinned to 4 cores (m7g.xlarge class), mock+loadgen on the other 4, Ubuntu 24.04"
 SSM="/aws/service/canonical/ubuntu/server/24.04/stable/current/arm64/hvm/ebs-gp3/ami-id"
 KEYNAME="gateway-bench-key"; KEYFILE="${TMPDIR:-/tmp}/${KEYNAME}.pem"; SGNAME="gateway-bench-sg"
 SSHOPT="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=12 -i $KEYFILE"
@@ -64,7 +67,9 @@ log "running the benchmark from the fresh repo (latency + RPS + memory)"
 # (it extracts the released image's binary). Nothing gateway-specific to pass here.
 ssh $SSHOPT ubuntu@"$IP" "source ~/.cargo/env; cd ~/benchmarking
   export BENCH_HARDWARE='$HW_LABEL'
-  export CORES=0-7 LOADCORES=8-13 MOCKCORES=14-15
+  # Gateway pinned to 4 cores (m7g.xlarge class); loadgen + mock isolated on the other 4.
+  export CORES=0-3 LOADCORES=4-5 MOCKCORES=6-7
+  export CAP_MIB=24000   # 32 GB box: watchdog kills the load before the box OOMs
   export SUITES=\"${SUITES:-perf memory}\"
   sudo -n true 2>/dev/null && sudo chmod 666 /var/run/docker.sock || true
   bash run-all.sh $GATEWAYS_ARG" 2>&1 | sed 's/^/  [bench] /'

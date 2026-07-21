@@ -21,8 +21,19 @@ export GW_DIR="$ROOT/gateways/$GATEWAY"
 [ -f "$GW_DIR/gateway.sh" ] || { echo "unknown gateway '$GATEWAY'"; exit 2; }
 
 C1_DUR="${C1_DUR:-20}"; SWEEP_DUR="${SWEEP_DUR:-10}"; PSIZE="${PSIZE:-256}"
-SWEEP="${SWEEP:-1 8 16 32 64 128 256 512 1024}"
+# Throughput sweep runs against a mock with a realistic per-request delay (SWEEP_TTFT_MS), so the
+# ceiling is the gateway's concurrent-in-flight capacity (the real production bottleneck), not a race
+# against an instant mock's CPU. Same delay for every gateway. Concurrency ramps high to find the
+# ceiling of the fast (Rust) gateways; the slow (Python) ones collapse early.
+# Two throughput sweeps per gateway (see below). Instant-mock = "max proxy throughput" (CPU-bound,
+# busbar's own published metric); 20ms-mock = "sustained RPS under LLM latency" (AIGatewayBench's
+# exact metric, concurrency-bound → ramp higher). Same for every gateway.
+SWEEP_INSTANT="${SWEEP_INSTANT:-16 32 64 128 256 512 1024}"
+SWEEP_DELAYED="${SWEEP_DELAYED:-256 1024 4096 8192 16384}"
+SWEEP_TTFT_MS="${SWEEP_TTFT_MS:-20}"
 P99_CEIL_MS="${P99_CEIL_MS:-1000}"
+# raise the fd limit so high-concurrency sweeps aren't capped by open sockets
+ulimit -n 1048576 2>/dev/null || ulimit -n 65536 2>/dev/null || true
 export CORES="${CORES:-0-3}"; LOADCORES="${LOADCORES:-0-3}"; MOCKCORES="${MOCKCORES:-0-3}"
 export MOCK_PORT="${MOCK_PORT:-8000}"
 RESULTS="$ROOT/results/perf"; mkdir -p "$RESULTS"
@@ -77,33 +88,47 @@ read -r _grps _gfail GP99 GP50 < <(probe "$GURL" 1 "$C1_DUR")
 OVER_P99=$(( ${GP99:-0} - ${DP99:-0} )); OVER_P50=$(( ${GP50:-0} - ${DP50:-0} ))
 log "[$GATEWAY] c1: gw p99=${GP99}µs direct p99=${DP99}µs → added p99=${OVER_P99}µs (p50 added=${OVER_P50}µs)"
 
-# ── mock-ceiling guardrail: an RPS ceiling is only the GATEWAY's if the mock + load generator both
-# out-run it. Measure the mock's OWN sustained RPS (load→mock direct, at the top of the sweep) so a
-# mock-bound result is flagged, never hidden. ────────────────────────────────────────────────────
-MOCK_CONC=1; for w in $SWEEP; do MOCK_CONC=$w; done   # highest concurrency in the sweep
-read -r MOCK_CEIL_RPS _mf _mp99 _mp50 < <(probe "$DURL" "$MOCK_CONC" "$SWEEP_DUR")
-MOCK_CEIL_RPS=${MOCK_CEIL_RPS:-0}
-log "[$GATEWAY] mock ceiling (load→mock direct, c=$MOCK_CONC) = $MOCK_CEIL_RPS rps"
+# ── two throughput sweeps ──────────────────────────────────────────────────────────────────────────
+# One sweep at a given mock delay + concurrency list. Restarts the mock at that delay, measures the
+# mock's OWN ceiling (load→mock direct at the top concurrency) as the guardrail reference, then ramps
+# the gateway. Sets SW_CEIL_RPS / SW_CEIL_CONC / SW_CEIL_P99 / SW_MOCK_CEIL / SW_BOUND / SW_JSON.
+run_sweep() { # ttft_ms  conc_list
+  local ttft="$1" concs="$2"
+  pkill -f "$MOCK" 2>/dev/null; sleep 1
+  setsid taskset -c "$MOCKCORES" env MOCK_TTFT_MS="$ttft" "$MOCK" -port "$MOCK_PORT" </dev/null >/dev/null 2>&1 &
+  sleep 1
+  local top=1 w; for w in $concs; do top=$w; done
+  local mrps _a _b _c; read -r mrps _a _b _c < <(probe "$DURL" "$top" "$SWEEP_DUR"); SW_MOCK_CEIL=${mrps:-0}
+  SW_CEIL_RPS=0; SW_CEIL_CONC=0; SW_CEIL_P99=0; SW_JSON=""
+  local conc rps fail p99 _p50
+  for conc in $concs; do
+    read -r rps fail p99 _p50 < <(probe "$GURL" "$conc" "$SWEEP_DUR")
+    rps=${rps:-0}; fail=${fail:-1}; p99=${p99:-99999999}
+    log "[$GATEWAY]   (ttft=${ttft}ms) c=$conc → rps=$rps p99=$((p99/1000))ms fail=$fail"
+    SW_JSON="${SW_JSON}${SW_JSON:+,}{\"conc\":$conc,\"rps\":$rps,\"p99_us\":$p99,\"fail\":$fail}"
+    if [ "$fail" -eq 0 ] && [ "$p99" -lt $((P99_CEIL_MS*1000)) ] && [ "$rps" -gt "$SW_CEIL_RPS" ]; then
+      SW_CEIL_RPS=$rps; SW_CEIL_CONC=$conc; SW_CEIL_P99=$p99
+    fi
+  done
+  SW_BOUND=false
+  if [ "${SW_MOCK_CEIL:-0}" -gt 0 ] && awk -v c="$SW_CEIL_RPS" -v m="$SW_MOCK_CEIL" 'BEGIN{exit !(c>=0.9*m)}'; then SW_BOUND=true; fi
+}
 
-# ── throughput ceiling: ramp concurrency, keep max sustained rps with p99<ceil AND 0 errors ────────
-CEIL_RPS=0; CEIL_CONC=0; CEIL_P99=0; SWEEP_JSON=""
-for conc in $SWEEP; do
-  read -r rps fail p99 _p50 < <(probe "$GURL" "$conc" "$SWEEP_DUR")
-  rps=${rps:-0}; fail=${fail:-1}; p99=${p99:-99999999}
-  log "[$GATEWAY]   c=$conc → rps=$rps p99=$((p99/1000))ms fail=$fail"
-  SWEEP_JSON="${SWEEP_JSON}${SWEEP_JSON:+,}{\"conc\":$conc,\"rps\":$rps,\"p99_us\":$p99,\"fail\":$fail}"
-  if [ "$fail" -eq 0 ] && [ "$p99" -lt $((P99_CEIL_MS*1000)) ] && [ "$rps" -gt "$CEIL_RPS" ]; then
-    CEIL_RPS=$rps; CEIL_CONC=$conc; CEIL_P99=$p99
-  fi
-done
-log "[$GATEWAY] RPS ceiling = $CEIL_RPS rps @ c=$CEIL_CONC (p99 $((CEIL_P99/1000))ms, 0 errors)"
+# (A) MAX PROXY THROUGHPUT — instant mock. Raw forward speed; busbar's own published metric.
+log "[$GATEWAY] sweep A — max proxy throughput (instant mock)"
+run_sweep 0 "$SWEEP_INSTANT"
+PROXY_RPS=$SW_CEIL_RPS; PROXY_CONC=$SW_CEIL_CONC; PROXY_MOCK=$SW_MOCK_CEIL; PROXY_BOUND=$SW_BOUND; PROXY_JSON="$SW_JSON"
+[ "$PROXY_BOUND" = true ] && log "[$GATEWAY] ⚠ max-proxy ceiling ($PROXY_RPS) within 10% of mock ($PROXY_MOCK) — MOCK-BOUND floor"
+log "[$GATEWAY] max proxy throughput = $PROXY_RPS rps @ c=$PROXY_CONC"
 
-# A ceiling within 10% of the mock's own ceiling isn't the gateway's limit — it's the harness's.
-MOCK_BOUND=false
-if [ "${MOCK_CEIL_RPS:-0}" -gt 0 ] && awk -v c="$CEIL_RPS" -v m="$MOCK_CEIL_RPS" 'BEGIN{exit !(c>=0.9*m)}'; then
-  MOCK_BOUND=true
-  log "[$GATEWAY] ⚠ WARNING: RPS ceiling ($CEIL_RPS) is within 10% of the mock's own ceiling ($MOCK_CEIL_RPS) — MOCK-BOUND; the gateway may sustain more on a faster mock/box. Treat this ceiling as a floor."
-fi
+# (B) SUSTAINED RPS @ ${SWEEP_TTFT_MS}ms — AIGatewayBench's exact metric: concurrent in-flight capacity
+# under realistic LLM latency. Concurrency ramps high; the delayed mock mostly sleeps so it isn't the
+# limit until very high RPS (flagged if so).
+log "[$GATEWAY] sweep B — sustained RPS @ ${SWEEP_TTFT_MS}ms LLM latency (AIGatewayBench metric)"
+run_sweep "$SWEEP_TTFT_MS" "$SWEEP_DELAYED"
+LLM_RPS=$SW_CEIL_RPS; LLM_CONC=$SW_CEIL_CONC; LLM_MOCK=$SW_MOCK_CEIL; LLM_BOUND=$SW_BOUND; LLM_JSON="$SW_JSON"
+[ "$LLM_BOUND" = true ] && log "[$GATEWAY] ⚠ @${SWEEP_TTFT_MS}ms ceiling ($LLM_RPS) within 10% of mock ($LLM_MOCK) — MOCK-BOUND floor"
+log "[$GATEWAY] sustained RPS @${SWEEP_TTFT_MS}ms = $LLM_RPS rps @ c=$LLM_CONC"
 
 BUILD="$(gw_version 2>/dev/null | tr -d '\n' | sed 's/"/\\"/g')"
 cat > "$RESULTS/$GATEWAY.json" <<JSON
@@ -115,22 +140,29 @@ cat > "$RESULTS/$GATEWAY.json" <<JSON
   "added_latency_p99_us": $OVER_P99,
   "gateway_c1_p99_us": ${GP99:-0},
   "direct_c1_p99_us": ${DP99:-0},
-  "rps_ceiling": $CEIL_RPS,
-  "rps_ceiling_concurrency": $CEIL_CONC,
-  "rps_ceiling_p99_us": $CEIL_P99,
-  "mock_ceiling_rps": ${MOCK_CEIL_RPS:-0},
-  "mock_bound": $MOCK_BOUND,
+  "rps_max_proxy": $PROXY_RPS,
+  "rps_max_proxy_concurrency": $PROXY_CONC,
+  "rps_max_proxy_mock_ceiling": $PROXY_MOCK,
+  "rps_max_proxy_mock_bound": $PROXY_BOUND,
+  "rps_sustained_20ms": $LLM_RPS,
+  "rps_sustained_20ms_concurrency": $LLM_CONC,
+  "rps_sustained_20ms_mock_ceiling": $LLM_MOCK,
+  "rps_sustained_20ms_mock_bound": $LLM_BOUND,
+  "sweep_ttft_ms": $SWEEP_TTFT_MS,
   "p99_ceiling_ms": $P99_CEIL_MS,
-  "sweep": [$SWEEP_JSON],
+  "sweep_max_proxy": [$PROXY_JSON],
+  "sweep_sustained_20ms": [$LLM_JSON],
   "payload_bytes": $PSIZE,
   "endpoint": "$GW_PATH",
   "model": "$GW_MODEL",
+  "cores": "gateway=${CORES} loadgen=${LOADCORES} mock=${MOCKCORES}",
   "hardware": "${BENCH_HARDWARE:-$(uname -m) $(nproc 2>/dev/null || echo '?')vCPU}",
   "measured_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 }
 JSON
 echo "================================================================"
-echo " gateway=$GATEWAY   added latency p99=${OVER_P99}µs   RPS ceiling=${CEIL_RPS} @ c=${CEIL_CONC}"
-echo " mock ceiling=${MOCK_CEIL_RPS:-0} rps   mock_bound=${MOCK_BOUND}"
+echo " gateway=$GATEWAY   added latency p99=${OVER_P99}µs"
+echo "   max proxy throughput = ${PROXY_RPS} rps @ c=${PROXY_CONC}  (mock_bound=${PROXY_BOUND})"
+echo "   sustained @ ${SWEEP_TTFT_MS}ms      = ${LLM_RPS} rps @ c=${LLM_CONC}  (mock_bound=${LLM_BOUND})"
 echo " -> $RESULTS/$GATEWAY.json"
 echo "================================================================"

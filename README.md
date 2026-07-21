@@ -100,6 +100,38 @@ faster.
 - **post-load RSS** — 15 s after load stops: does it release, or stay pinned? A gateway that pools
   memory and never returns it looks fine on a boot-time `docker stats` and then eats your node.
 
+## Methodology — the choices, explained
+
+**Machine.** `m7g.2xlarge` — 8 real Graviton3 cores (Graviton doesn't hyperthread: 1 vCPU = 1 core).
+The **gateway under test is pinned to 4 cores** (= an `m7g.xlarge`, the 4-vCPU class AIGatewayBench
+uses); the **mock + load generator get the other 4**, isolated. That's stricter than a co-located
+4-vCPU run where the load tool steals cycles from the gateway — here the gateway gets a clean 4 cores
+and the harness can't bottleneck it. All loopback; no network noise.
+
+**The mock.** A deterministic Rust server (`mock/`) that answers all six wire protocols by path and
+holds hundreds of thousands of concurrent requests so it's never the limit. One knob: `MOCK_TTFT_MS`,
+a per-request delay simulating the model doing work.
+
+**Latency — instant mock.** Added latency is `gateway p99 − direct-to-mock p99` at concurrency 1
+against a **zero-delay** mock. Zero base keeps the overhead a clean microsecond delta; a 20 ms base
+would just add noise to a sub-millisecond number.
+
+**Throughput — two honest numbers, not one.** A single throughput figure invites "you picked the
+flattering metric," so we report both, same 20 ms delay for every gateway:
+- **Max proxy throughput** (instant mock): raw forwarding speed — trivial requests/sec the gateway
+  pushes. The metric behind "busbar does ~40k rps on 4 cores."
+- **Sustained RPS @ 20 ms** (delayed mock): **AIGatewayBench's exact metric** — how many concurrent
+  in-flight requests the gateway holds while the model takes 20 ms, at p99 < 1 s with zero errors.
+  Production-shaped (a gateway's real job is holding thousands of slow calls) and directly comparable
+  to their published numbers.
+
+A **mock-ceiling guardrail** measures the mock's own throughput each sweep and flags (⚠) any result
+within 10% of it — so a number that's really the *harness's* limit is marked a floor, never sold as
+the gateway's ceiling.
+
+**Memory.** Sustained 150 KB payloads at high concurrency, sampling idle / peak / post-load RSS — the
+arc that separates a bounded working set from an unbounded pool that eats the node.
+
 ## Add a gateway
 
 Drop a directory under [`gateways/`](gateways/) with a `gateway.sh` manifest — four variables, four

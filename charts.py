@@ -102,12 +102,21 @@ CHARTS = [
         log=True,
     ),
     Chart(
-        name="rps_ceiling",
+        name="rps_max_proxy",
         suite="perf",
-        title="Throughput ceiling — how much the gateway can carry",
-        subtitle="highest sustained requests/sec with p99 < 1s and zero errors (higher is better)",
+        title="Max proxy throughput — raw forwarding speed",
+        subtitle="highest sustained req/s with p99 < 1s, zero errors, instant upstream (higher is better)",
         unit="requests / sec",
-        series=[Series("rps_ceiling", "RPS ceiling", "rank")],
+        series=[Series("rps_max_proxy", "max proxy RPS", "rank")],
+        higher_better=True,
+    ),
+    Chart(
+        name="rps_sustained_20ms",
+        suite="perf",
+        title="Sustained throughput under 20 ms LLM latency",
+        subtitle="AIGatewayBench's metric: req/s held with p99 < 1s + zero errors, 20 ms upstream (higher is better)",
+        unit="requests / sec",
+        series=[Series("rps_sustained_20ms", "sustained RPS @20ms", "rank")],
         higher_better=True,
     ),
     # ── supporting: memory (matters at scale) ─────────────────────────────────────────────────────
@@ -250,33 +259,45 @@ def _report_md(rows: list, title: str, charts: list) -> str:
     lines.append("Every number below is regenerated from the raw `results/*.json` — re-run "
                  "`run-all.sh` and this page updates. Green in the charts = measured best.")
     lines.append("")
-    lines.append("| Gateway | Added latency (p99) | RPS ceiling | Idle RSS | Peak RSS | Serves? | Built |")
-    lines.append("|---|--:|--:|--:|--:|:-:|---|")
+    lines.append("| Gateway | Added latency (p99) | Max proxy RPS | Sustained RPS @20ms | Idle RSS | Peak RSS | Serves? | Built |")
+    lines.append("|---|--:|--:|--:|--:|--:|:-:|---|")
     mock_bound_seen = False
+
+    def rps_cell(val, bound):
+        if not val:
+            return "—"
+        cell = f"{int(val):,}"
+        if bound:  # ceiling within 10% of the mock's own — a floor, not a limit
+            cell += " ⚠"
+        return cell
+
     for key, r in rows:
         lat = r.get("added_latency_p99_us")
-        rps = r.get("rps_ceiling")
         idle = r.get("idle_rss_mib")
         peak = r.get("peak_rss_mib")
         served = r.get("served", None)
-        rps_cell = f"{int(rps):,}" if rps else "—"
-        if r.get("mock_bound"):  # ceiling was within 10% of the mock's own — a floor, not a limit
-            rps_cell += " ⚠"
+        proxy = rps_cell(r.get("rps_max_proxy"), r.get("rps_max_proxy_mock_bound"))
+        llm = rps_cell(r.get("rps_sustained_20ms"), r.get("rps_sustained_20ms_mock_bound"))
+        if r.get("rps_max_proxy_mock_bound") or r.get("rps_sustained_20ms_mock_bound"):
             mock_bound_seen = True
         lines.append(
             f"| {GATEWAYS[key]} "
             f"| {f'{lat} µs' if lat is not None else '—'} "
-            f"| {rps_cell} "
+            f"| {proxy} "
+            f"| {llm} "
             f"| {f'{idle:.0f} MiB' if idle is not None else '—'} "
             f"| {f'{peak:.0f} MiB' if peak is not None else '—'} "
             f"| {'—' if served is None else ('✅' if served else '❌')} "
             f"| `{(r.get('build') or '').strip()[:38]}` |"
         )
     lines.append("")
+    lines.append("Two throughput numbers: **max proxy RPS** (instant upstream — raw forwarding speed) "
+                 "and **sustained RPS @20ms** (AIGatewayBench's metric — concurrent in-flight capacity "
+                 "under realistic LLM latency).")
     if mock_bound_seen:
-        lines.append("⚠ = the RPS ceiling was within 10% of the mock's own throughput ceiling — treat "
-                     "it as a **floor**; the gateway may sustain more on a faster mock/box.")
-        lines.append("")
+        lines.append("⚠ = that ceiling was within 10% of the mock's own throughput ceiling — treat it as "
+                     "a **floor**; the gateway may sustain more on a faster mock/box.")
+    lines.append("")
     for c in charts:
         if (RESULTS / f"{c}.png").exists():
             lines.append(f"![{c}](../../{c}.png)")
@@ -293,7 +314,7 @@ def write_reports() -> None:
     gws = _merge()
     if not gws:
         return
-    ranked = sorted(gws.items(), key=lambda kv: kv[1].get("rps_ceiling", 0), reverse=True)
+    ranked = sorted(gws.items(), key=lambda kv: kv[1].get("rps_sustained_20ms", 0) or kv[1].get("rps_max_proxy", 0), reverse=True)
     charts = [c.name for c in CHARTS]
     (RESULTS / "reports" / "all").mkdir(parents=True, exist_ok=True)
     (RESULTS / "reports" / "top5").mkdir(parents=True, exist_ok=True)
