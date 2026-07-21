@@ -1,19 +1,25 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 //
-// Deterministic mock upstream for the gateway benchmark. Answers ANY path with a 200 and a fixed
-// small JSON body — OpenAI chat-completion shape by default, Anthropic Messages shape for a path
-// containing `/messages` (so a gateway whose only working path is the Anthropic Messages API — e.g.
-// LiteLLM-Rust's azure_ai route — gets a response it can actually parse).
+// Deterministic, blazing-fast mock upstream for the gateway benchmark. Answers a 200 with a valid,
+// minimal response body for EVERY wire protocol a gateway might forward in — chosen by request path —
+// so any gateway works against it regardless of which provider API it speaks upstream:
+//
+//   /chat/completions      -> OpenAI chat.completion
+//   /responses             -> OpenAI Responses
+//   /messages              -> Anthropic Messages
+//   …:generateContent      -> Google Gemini
+//   /converse | /model/…   -> AWS Bedrock (Converse)
+//   /v2/chat | /v1/chat    -> Cohere
+//   (anything else)        -> OpenAI chat.completion (safe default)
 //
 // It is deliberately dumb and deliberately fast: hyper on a multi-threaded tokio runtime, static
-// response bytes, the request body drained but never processed. The point of a throughput benchmark
-// is to find the GATEWAY's ceiling — so the mock must never be the ceiling. On a few cores this
-// sustains hundreds of thousands of requests/sec; the harness also records the mock's own ceiling
-// each run and flags any gateway result that gets close to it, so mock-boundedness can't hide.
+// response bytes, the request body drained but never processed. A throughput benchmark must find the
+// GATEWAY's ceiling, so the mock must never be the ceiling — this sustains 100s of k RPS, and the
+// harness records the mock's own ceiling each run so mock-boundedness can't hide.
 //
-//   mock -port 8000            # instant responses
-//   MOCK_TTFT_MS=20 mock -port 8000   # add a fixed 20 ms delay (latency-isolation runs)
+//   mock -port 8000                    # instant responses
+//   MOCK_TTFT_MS=20 mock -port 8000    # add a fixed delay (latency-isolation runs)
 
 use std::convert::Infallible;
 use std::net::SocketAddr;
@@ -27,17 +33,39 @@ use hyper::{Request, Response};
 use hyper_util::rt::TokioIo;
 use tokio::net::TcpListener;
 
-const OPENAI: &[u8] = br#"{"id":"chatcmpl-x","object":"chat.completion","created":1,"model":"gpt-4o-mini","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12}}"#;
-const ANTHROPIC: &[u8] = br#"{"id":"msg_x","type":"message","role":"assistant","model":"claude","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":2}}"#;
+const OPENAI: &[u8] = br#"{"id":"chatcmpl-x","object":"chat.completion","created":1,"model":"mock","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12}}"#;
+const RESPONSES: &[u8] = br#"{"id":"resp_x","object":"response","created_at":1,"status":"completed","model":"mock","output":[{"type":"message","id":"msg_x","role":"assistant","content":[{"type":"output_text","text":"ok"}]}],"usage":{"input_tokens":10,"output_tokens":2,"total_tokens":12}}"#;
+const ANTHROPIC: &[u8] = br#"{"id":"msg_x","type":"message","role":"assistant","model":"mock","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":2}}"#;
+const GEMINI: &[u8] = br#"{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP","index":0}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":2,"totalTokenCount":12}}"#;
+const BEDROCK: &[u8] = br#"{"output":{"message":{"role":"assistant","content":[{"text":"ok"}]}},"stopReason":"end_turn","usage":{"inputTokens":10,"outputTokens":2,"totalTokens":12}}"#;
+const COHERE: &[u8] = br#"{"id":"x","finish_reason":"COMPLETE","message":{"role":"assistant","content":[{"type":"text","text":"ok"}]},"usage":{"tokens":{"input_tokens":10,"output_tokens":2}}}"#;
+
+/// Pick the response body from the request path — protocol detection, ordered so specific paths win.
+fn body_for(path: &str) -> &'static [u8] {
+    if path.contains("/chat/completions") {
+        OPENAI
+    } else if path.contains("/responses") {
+        RESPONSES
+    } else if path.contains("/messages") {
+        ANTHROPIC
+    } else if path.contains("generateContent") || path.contains("/v1beta/") {
+        GEMINI
+    } else if path.contains("/converse") || path.contains("/model/") || path.contains("/invoke") {
+        BEDROCK
+    } else if path.contains("/v2/chat") || path.contains("/v1/chat") {
+        COHERE
+    } else {
+        OPENAI
+    }
+}
 
 async fn handle(req: Request<Incoming>, ttft_ms: u64) -> Result<Response<Full<Bytes>>, Infallible> {
-    let is_messages = req.uri().path().contains("/messages");
+    let body = body_for(req.uri().path());
     // Drain the request body so the connection stays keep-alive; we never look at it.
     let _ = req.into_body().collect().await;
     if ttft_ms > 0 {
         tokio::time::sleep(Duration::from_millis(ttft_ms)).await;
     }
-    let body = if is_messages { ANTHROPIC } else { OPENAI };
     Ok(Response::builder()
         .header("content-type", "application/json")
         .body(Full::new(Bytes::from_static(body)))
@@ -46,7 +74,6 @@ async fn handle(req: Request<Incoming>, ttft_ms: u64) -> Result<Response<Full<By
 
 #[tokio::main]
 async fn main() {
-    // args: -port <n>  (default 8000);  env MOCK_TTFT_MS (default 0)
     let mut port: u16 = 8000;
     let args: Vec<String> = std::env::args().collect();
     if let Some(i) = args.iter().position(|a| a == "-port" || a == "--port") {
@@ -58,7 +85,7 @@ async fn main() {
 
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     let listener = TcpListener::bind(addr).await.expect("bind");
-    eprintln!("mock listening on {addr} (ttft={ttft_ms}ms)");
+    eprintln!("mock listening on {addr} (ttft={ttft_ms}ms) — OpenAI/Responses/Anthropic/Gemini/Bedrock/Cohere");
     loop {
         let (stream, _) = match listener.accept().await {
             Ok(s) => s,

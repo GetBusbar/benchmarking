@@ -1,12 +1,25 @@
-# busbar gateway benchmarks
+# AI gateway benchmarks
 
-Head-to-head benchmarks for AI gateways — **busbar** against **LiteLLM (Rust)**, **LiteLLM
-(Python)**, **Bifrost**, and whatever else you drop in. Same box, same mock, same load, same cpu
-pin, for every gateway. One command runs it; the charts regenerate from raw results; every source
-ref is pinned in the open and the built commit is stamped into the output.
+A fair, reproducible benchmark for self-hostable AI gateways — **LiteLLM (Rust & Python), Bifrost,
+Portkey, Kong, Helicone, busbar, and whatever else you drop in.** Same box, same mock, same load,
+same cpu pin, for every gateway. One command runs it; the charts regenerate from raw results; every
+source ref is pinned in the open and the built commit is stamped into the output.
 
-No cherry-picked idle snapshots, no "believe us," no numbers you can't regenerate. If a gateway
-can't serve the endpoint, the result says `served: false` instead of quietly dropping it.
+The chart colors the winner **by measurement, not by name** — whichever gateway measures best on a
+metric is green, full stop. No cherry-picked idle snapshots, no "believe us," no numbers you can't
+regenerate. If a gateway can't serve the endpoint, the result says `served: false` instead of quietly
+dropping it. Add your gateway (or fix how we run yours) with a one-file [manifest](gateways/README.md).
+
+## Prerequisites
+
+**To run locally on your own box:**
+- **Rust** (`cargo`) — builds the mock (`mock/`, a hyper server that answers all six wire protocols and sustains 100s of k RPS, so it's never the bottleneck).
+- **Go** — builds the load generator (`loadgen/`).
+- **Docker** — for the container-based gateways (Bifrost, Kong, Helicone, …).
+- **Python 3 + matplotlib** — draws the charts (`pip install matplotlib`). Optional; JSON results are written either way.
+- A gateway binary/image for whatever you're testing (e.g. `BUSBAR_BIN=/path/to/busbar`). Competitor gateways build/pull themselves on first run.
+
+**To run the one-click cloud version** (`run-on-ec2.sh`) the *only* extra dependency is **AWS CLI v2**, configured (`aws configure` — creds + a default region). The script launches a fresh Graviton box, installs everything on it, runs the full suite, pulls the results back, and **terminates the box** — nothing to set up, nothing to clean up.
 
 ## Run it — one command, every metric
 
