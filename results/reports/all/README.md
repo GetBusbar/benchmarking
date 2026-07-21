@@ -9,11 +9,11 @@ Every number below is regenerated from the raw `results/*.json` — re-run `run-
 | LiteLLM · Rust | 142 µs | 41,293 | 33,344 | 263 MiB | 627 MiB | ✅ | `litellm_rust_gateway_v1_messages_route` |
 | Busbar | 148 µs | 44,544 | 32,040 | 9 MiB | 320 MiB | ✅ | `busbar 1.4.1` |
 | Kong | 1164 µs | 13,859 | 13,095 | 516 MiB | 724 MiB | ✅ | `kong:3.8` |
-| Portkey | 6241 µs | 451 | — | 246 MiB | 666 MiB | ✅ | `@portkey-ai/gateway@1.15.2` |
-| LiteLLM · Python | 6475 µs | 174 | — | 290 MiB | 489 MiB | ✅ | `litellm==?` |
-| Bifrost | 561 µs | — | — | 182 MiB | 1858 MiB | ❌ | `maximhq/bifrost:v1.6.4` |
-| Helicone | -82 µs | — | — | 0 MiB | 0 MiB | ❌ | `helicone/ai-gateway:latest` |
-| GoModel | 130 µs | — | — | 23 MiB | 2201 MiB | ❌ | `enterpilot/gomodel:0.1.55` |
+| Portkey | 6241 µs | 451 | 0 | 246 MiB | 666 MiB | ✅ | `@portkey-ai/gateway@1.15.2` |
+| LiteLLM · Python | 6475 µs | 174 | 0 | 290 MiB | 489 MiB | ✅ | `litellm==?` |
+| Bifrost | 561 µs † | ✕ | ✕ | 182 MiB | 1858 MiB | ❌ | `maximhq/bifrost:v1.6.4` |
+| Helicone | -82 µs † | ✕ | ✕ | 0 MiB | 0 MiB | ❌ | `helicone/ai-gateway:latest` |
+| GoModel | 130 µs † | ✕ | ✕ | 23 MiB | 2201 MiB | ❌ | `enterpilot/gomodel:0.1.55` |
 | One-API | — | — | — | — | — | ⏳ | *pending measurement* |
 | GPTRouter | — | — | — | — | — | ⏳ | *pending measurement* |
 | Arch | — | — | — | — | — | ⏳ | *pending measurement* |
@@ -22,6 +22,7 @@ Every number below is regenerated from the raw `results/*.json` — re-run `run-
 ⏳ **Pending measurement** (a manifest exists; not yet run on the rig): One-API, GPTRouter, Arch, Envoy AI Gateway. These land here as their runs complete — nothing is hidden.
 
 Two throughput numbers: **max proxy RPS** (instant upstream — raw forwarding speed) and **sustained RPS @20ms** (AIGatewayBench's metric — concurrent in-flight capacity under realistic LLM latency).
+**✅ served** / **❌ did not serve** under load / **⏳ not yet run**. &nbsp; **✕** = did not serve under load (0 successful req/s). &nbsp; **0** = came up, but no tested concurrency held p99 < 1 s with zero errors. &nbsp; **†** = a concurrency-1 latency exists, but the gateway failed under load — not a clean result.
 
 ![added_latency](../../added_latency.png)
 
