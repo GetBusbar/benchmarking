@@ -39,8 +39,11 @@ model_list:
       api_key: dummy
 YAML
   pkill -f "litellm.*--port $GW_PORT" 2>/dev/null; sleep 1
+  # Scale uvicorn workers to the pinned core count so LiteLLM uses all 4 cores it's given, not one
+  # (single-worker on a 4-core pin under-serves it — fairness M5). The gw_rss sums the whole group.
+  local ncore=$(( ${CORES##*-} - ${CORES%%-*} + 1 ))
   setsid taskset -c "$CORES" env LITELLM_MASTER_KEY="$GW_AUTH" \
-    "$LP_VENV/bin/litellm" --config "$GW_DIR/config.gen.yaml" --port "$GW_PORT" \
+    "$LP_VENV/bin/litellm" --config "$GW_DIR/config.gen.yaml" --port "$GW_PORT" --num_workers "$ncore" \
     </dev/null >/tmp/litellm_py.mem.log 2>&1 &
 }
 

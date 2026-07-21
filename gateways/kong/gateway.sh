@@ -59,13 +59,6 @@ gw_launch() {
     "${KONG_IMAGE:-kong:3.8}" >/dev/null 2>&1
 }
 
-gw_rss() {
-  local m; m=$(sudo docker stats --no-stream --format '{{.MemUsage}}' kong-bench 2>/dev/null | awk '{print $1}')
-  case "$m" in
-    *GiB) awk -v x="${m%GiB}" 'BEGIN{printf "%.1f", x*1024}' ;;
-    *MiB) echo "${m%MiB}" ;;
-    *) echo 0 ;;
-  esac
-}
+gw_rss() { container_rss_mib kong-bench; }  # summed process-tree VmRSS (same method as native gateways)
 
 gw_stop() { sudo docker rm -f kong-bench >/dev/null 2>&1; }

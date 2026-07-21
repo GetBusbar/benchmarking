@@ -65,10 +65,7 @@ gw_launch() {
     "$APISIX_IMAGE" >"$GW_DIR/launch.log" 2>&1 || true
 }
 
-gw_rss() {
-  local m; m=$(sudo docker stats --no-stream --format '{{.MemUsage}}' apisix-bench 2>/dev/null | awk '{print $1}')
-  case "$m" in *GiB) awk -v x="${m%GiB}" 'BEGIN{printf "%.1f", x*1024}';; *MiB) echo "${m%MiB}";; *) echo 0;; esac
-}
+gw_rss() { container_rss_mib apisix-bench; }  # summed process-tree VmRSS (same method as native gateways)
 
 gw_diag() {
   echo "container: $(sudo docker ps -a --filter name=apisix-bench --format '{{.Status}}' 2>/dev/null)"

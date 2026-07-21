@@ -43,10 +43,7 @@ gw_launch() {
     "$TENSORZERO_IMAGE" --config-file config/tensorzero.toml >"$GW_DIR/launch.log" 2>&1 || true
 }
 
-gw_rss() {
-  local m; m=$(sudo docker stats --no-stream --format '{{.MemUsage}}' tensorzero-bench 2>/dev/null | awk '{print $1}')
-  case "$m" in *GiB) awk -v x="${m%GiB}" 'BEGIN{printf "%.1f", x*1024}';; *MiB) echo "${m%MiB}";; *) echo 0;; esac
-}
+gw_rss() { container_rss_mib tensorzero-bench; }  # summed process-tree VmRSS (same method as native gateways)
 
 gw_diag() {
   echo "container: $(sudo docker ps -a --filter name=tensorzero-bench --format '{{.Status}}' 2>/dev/null)"

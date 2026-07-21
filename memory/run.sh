@@ -48,6 +48,26 @@ UGEN_BIN="$ROOT/loadgen/ugen"
 [ -f "$ROOT/gateways/versions.env" ] && source "$ROOT/gateways/versions.env"
 gw_version() { echo "unknown"; }  # default; the manifest below may override
 gw_diag(){ :; }  # a manifest may override to print WHY it failed to serve (docker logs / native log tail)
+
+# ONE memory-measurement method for every gateway, native or docker: sum the resident memory (VmRSS)
+# of the whole process tree from /proc — the SAME thing the native manifests do. We deliberately do
+# NOT use `docker stats`, whose cgroup MemUsage includes page cache and everything else in the
+# container and is not comparable to a native process's VmRSS. This is the M1 fairness fix.
+_rss_tree_mib() { # root_pid  → summed VmRSS of pid + all descendants, in MiB
+  local root="$1"; [ -z "$root" ] || [ "$root" = 0 ] && { echo 0; return; }
+  local pids="$root" frontier="$root" next total=0 kb p c
+  while [ -n "$frontier" ]; do
+    next=""
+    for p in $frontier; do for c in $(pgrep -P "$p" 2>/dev/null); do pids="$pids $c"; next="$next $c"; done; done
+    frontier="$next"
+  done
+  for p in $pids; do kb=$(awk '/VmRSS/{print $2}' "/proc/$p/status" 2>/dev/null); total=$((total + ${kb:-0})); done
+  awk -v k="$total" 'BEGIN{printf "%.1f", k/1024}'
+}
+container_rss_mib() { # container_name → its process tree's VmRSS via the host PID (same units as native)
+  local pid; pid=$(sudo docker inspect -f '{{.State.Pid}}' "$1" 2>/dev/null)
+  _rss_tree_mib "$pid"
+}
 json_escape(){ printf '%s' "$1" | tr -d '\000' | head -c 1600 \
   | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read())[1:-1])' 2>/dev/null \
   || printf '%s' "$1" | tr '\n\t"\\' '    ' | head -c 1600; }

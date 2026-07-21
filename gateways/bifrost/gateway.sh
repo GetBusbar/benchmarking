@@ -18,14 +18,16 @@ gw_build() {
   # Generate Bifrost's config against the runner's actual mock port (the openai provider's base_url is
   # the mock; the model gpt-4o-mini is registered so Bifrost can auto-resolve it to this provider —
   # without a registered provider Bifrost returns "could not auto resolve a provider").
+  # Run Bifrost on its DEFAULT pool sizing — we don't inject a throughput-tuned pool (its own bench
+  # config uses initial_pool_size 15000, which is what inflates memory under sustained load; scoring a
+  # competitor's throughput-tuned config on memory isn't fair). Just the provider + mock base_url.
   mkdir -p "$GW_DIR/bfdata"
   cat > "$GW_DIR/bfdata/config.json" <<JSON
 {
   "providers": {
     "openai": {
       "keys": [{ "value": "sk-dummy", "models": ["gpt-4o-mini"], "weight": 1 }],
-      "network_config": { "base_url": "http://127.0.0.1:$MOCK_PORT" },
-      "concurrency_and_buffer_size": { "initial_pool_size": 15000, "buffer_size": 20000 }
+      "network_config": { "base_url": "http://127.0.0.1:$MOCK_PORT" }
     }
   }
 }
@@ -47,13 +49,6 @@ gw_diag() {
   echo "logs:"; sudo docker logs --tail 25 bifrost 2>&1
 }
 
-gw_rss() {
-  local m; m=$(sudo docker stats --no-stream --format '{{.MemUsage}}' bifrost 2>/dev/null | awk '{print $1}')
-  case "$m" in
-    *GiB) awk -v x="${m%GiB}" 'BEGIN{printf "%.1f", x*1024}' ;;
-    *MiB) echo "${m%MiB}" ;;
-    *) echo 0 ;;
-  esac
-}
+gw_rss() { container_rss_mib bifrost; }  # summed process-tree VmRSS (same method as native gateways)
 
 gw_stop() { sudo docker rm -f bifrost >/dev/null 2>&1; }

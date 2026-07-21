@@ -41,13 +41,6 @@ gw_diag() {
   echo "logs:"; sudo docker logs --tail 25 gomodel-bench 2>&1
 }
 
-gw_rss() {
-  local m; m=$(sudo docker stats --no-stream --format '{{.MemUsage}}' gomodel-bench 2>/dev/null | awk '{print $1}')
-  case "$m" in
-    *GiB) awk -v x="${m%GiB}" 'BEGIN{printf "%.1f", x*1024}' ;;
-    *MiB) echo "${m%MiB}" ;;
-    *) echo 0 ;;
-  esac
-}
+gw_rss() { container_rss_mib gomodel-bench; }  # summed process-tree VmRSS (same method as native gateways)
 
 gw_stop() { sudo docker rm -f gomodel-bench >/dev/null 2>&1; }

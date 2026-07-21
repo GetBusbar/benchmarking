@@ -2,18 +2,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # Gateway manifest: One-API (songquanpeng/one-api), OpenAI-compatible OSS gateway, docker.
 #
-# One-API is a single Go container (SQLite by default) but it has no declarative upstream config:
-# providers ("channels") are added at runtime via its admin API after login, and requests need a
-# generated per-user token. gw_build brings the container up and scripts a channel that points its
-# OpenAI base_url at the mock, then mints a token. This is best-effort and NOT yet verified serving
-# end-to-end against the mock — left OUT of run-all.sh's default list until a box run confirms it.
-# ONE_API_IMAGE is pinned in gateways/versions.env.
+# One-API is a single Go container (SQLite by default) with no declarative upstream config: providers
+# ("channels") are added at runtime via its admin API after login, and requests need a generated
+# per-user token. gw_launch scripts the login → channel (base_url = mock) → token bootstrap. It's in
+# the default field (bootstrap verified on the rig). NOTE ON ITS NUMBERS: One-API writes a per-request
+# usage/quota row to its DB on EVERY call by design — that accounting is intrinsic to how it works and
+# is NOT a disableable "logging" knob, so its latency/throughput reflect a gateway that bills each
+# request, not a bare proxy. That's the honest measurement of One-API as it ships. Pin in versions.env.
 GW_KIND=docker
 GW_PORT=3000
 GW_PATH=/v1/chat/completions
 GW_MODEL=gpt-4o-mini
 GW_AUTH=""   # filled with a minted token in gw_launch
-ONE_API_IMAGE="${ONE_API_IMAGE:-justsong/one-api:latest}"
+ONE_API_IMAGE="${ONE_API_IMAGE:-justsong/one-api:v0.6.10}"
 OA_JAR="$GW_DIR/cookies.txt"; OA_LOG="$GW_DIR/bootstrap.log"
 
 gw_version() {
@@ -76,8 +77,5 @@ gw_diag() {
   echo "logs:"; sudo docker logs --tail 15 one-api-bench 2>&1
 }
 
-gw_rss() {
-  local m; m=$(sudo docker stats --no-stream --format '{{.MemUsage}}' one-api-bench 2>/dev/null | awk '{print $1}')
-  case "$m" in *GiB) awk -v x="${m%GiB}" 'BEGIN{printf "%.1f", x*1024}';; *MiB) echo "${m%MiB}";; *) echo 0;; esac
-}
+gw_rss() { container_rss_mib one-api-bench; }  # summed process-tree VmRSS (same method as native gateways)
 gw_stop() { sudo docker rm -f one-api-bench >/dev/null 2>&1; }
