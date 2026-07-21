@@ -1,12 +1,12 @@
 {
-  "gateway": "kong",
-  "build": "kong:3.8 (@sha256:dd6cd1d94a7aae8c5a4d245ccbee6b81230d41a4312d76d076c4e9c6db65611c)",
+  "gateway": "apisix",
+  "build": "apache/apisix:3.17.0-debian (@sha256:6cbf65f3085d1386bfd636b7e88400c163c3641841909e674af7896a5766b092)",
   "served": true,
   "last_http_status": "200",
   "serve_error": "",
-  "idle_rss_mib": 704.3,
-  "peak_rss_mib": 801.5,
-  "post_load_rss_mib": 803.1,
+  "idle_rss_mib": 180.7,
+  "peak_rss_mib": 754.2,
+  "post_load_rss_mib": 546.5,
   "payload_bytes": 150000,
   "concurrency": 1500,
   "duration_s": 120,
@@ -14,5 +14,5 @@
   "model": "gpt-4o-mini",
   "arch": "arm64",
   "hardware": "AWS m7g.2xlarge (Graviton3, 8 cores / 32 GB). Gateway pinned to 4 cores, mock+loadgen on the other 4, Ubuntu 24.04. One dedicated box per gateway.",
-  "measured_at": "2026-07-21T17:21:56Z"
+  "measured_at": "2026-07-21T17:17:43Z"
 }
