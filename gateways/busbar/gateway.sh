@@ -41,6 +41,10 @@ providers:
     api_key_env: BENCH_MOCK_KEY
 models:
   gpt-4o-mini:
+    # max_concurrent is a REQUIRED field in busbar's model config (no default; see the config schema),
+    # so it must be set. 8000 is above the sweep's winning concurrency band so it's a ceiling, not the
+    # limiter — the equivalent of running every other gateway on its defaults (unbounded), not a tuned
+    # advantage. max_requests: -1 = unmetered.
     provider: mock
     max_concurrent: 8000
     max_requests: -1
