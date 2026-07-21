@@ -185,6 +185,7 @@ cat > "$RESULTS/$GATEWAY.json" <<JSON
   "endpoint": "$GW_PATH",
   "model": "$GW_MODEL",
   "cores": "gateway=${CORES} loadgen=${LOADCORES} mock=${MOCKCORES}",
+  "mock_proto": "h1+h2c",
   "arch": "${BENCH_ARCH:-$(uname -m)}",
   "hardware": "${BENCH_HARDWARE:-$(uname -m) $(nproc 2>/dev/null || echo '?')vCPU}",
   "measured_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"

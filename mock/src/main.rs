@@ -27,10 +27,10 @@ use std::time::Duration;
 
 use http_body_util::{BodyExt, Full};
 use hyper::body::{Bytes, Incoming};
-use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Request, Response};
-use hyper_util::rt::TokioIo;
+use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::server::conn::auto;
 use tokio::net::TcpListener;
 
 const OPENAI: &[u8] = br#"{"id":"chatcmpl-x","object":"chat.completion","created":1,"model":"mock","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12}}"#;
@@ -93,7 +93,7 @@ async fn main() {
     // --network-host and native gateways use is unchanged.
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     let listener = TcpListener::bind(addr).await.expect("bind");
-    eprintln!("mock listening on {addr} (ttft={ttft_ms}ms) — OpenAI/Responses/Anthropic/Gemini/Bedrock/Cohere");
+    eprintln!("mock listening on {addr} (ttft={ttft_ms}ms, proto=h1+h2c) — OpenAI/Responses/Anthropic/Gemini/Bedrock/Cohere");
     loop {
         let (stream, _) = match listener.accept().await {
             Ok(s) => s,
@@ -102,8 +102,12 @@ async fn main() {
         let _ = stream.set_nodelay(true);
         let io = TokioIo::new(stream);
         tokio::spawn(async move {
-            let _ = http1::Builder::new()
-                .keep_alive(true)
+            // auto::Builder sniffs the HTTP/2 preface and serves h2c to clients that speak it, h1 to
+            // those that don't — so gateways that multiplex to the upstream (like a real HTTP/2
+            // provider) exercise that path, while h1-only gateways are served exactly as before. No
+            // TLS: keeps the mock cheap so it stays off the critical path. (An opt-in TLS+ALPN variant
+            // can be added later for a separate full-realism column.)
+            let _ = auto::Builder::new(TokioExecutor::new())
                 .serve_connection(io, service_fn(move |r| handle(r, ttft_ms)))
                 .await;
         });
