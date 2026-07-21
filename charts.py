@@ -64,6 +64,7 @@ GATEWAYS = {
     "litellm-python": "LiteLLM · Python",
     "kong": "Kong",
     "helicone": "Helicone",
+    "gomodel": "GoModel",
     "one-api": "One-API",
     "gptrouter": "GPTRouter",
     "arch": "Arch",
@@ -249,7 +250,7 @@ def _merge() -> dict:
     return gws
 
 
-def _report_md(rows: list, title: str, charts: list) -> str:
+def _report_md(rows: list, title: str, charts: list, pending: tuple = ()) -> str:
     """A self-contained result page: machine, table (ranked), charts, provenance."""
     hw = next((r.get("hardware") for _, r in rows if r.get("hardware")), "unknown")
     when = next((r.get("measured_at") for _, r in rows if r.get("measured_at")), "")
@@ -290,7 +291,17 @@ def _report_md(rows: list, title: str, charts: list) -> str:
             f"| {'—' if served is None else ('✅' if served else '❌')} "
             f"| `{(r.get('build') or '').strip()[:38]}` |"
         )
+    # Gateways we intend to measure but haven't yet — shown so the field is transparent, never hidden.
+    for key in pending:
+        lines.append(
+            f"| {GATEWAYS[key]} | — | — | — | — | — | ⏳ | *pending measurement* |"
+        )
     lines.append("")
+    if pending:
+        names = ", ".join(GATEWAYS[k] for k in pending)
+        lines.append(f"⏳ **Pending measurement** (a manifest exists; not yet run on the rig): {names}. "
+                     "These land here as their runs complete — nothing is hidden.")
+        lines.append("")
     lines.append("Two throughput numbers: **max proxy RPS** (instant upstream — raw forwarding speed) "
                  "and **sustained RPS @20ms** (AIGatewayBench's metric — concurrent in-flight capacity "
                  "under realistic LLM latency).")
@@ -315,11 +326,13 @@ def write_reports() -> None:
     if not gws:
         return
     ranked = sorted(gws.items(), key=lambda kv: kv[1].get("rps_sustained_20ms", 0) or kv[1].get("rps_max_proxy", 0), reverse=True)
+    # Known gateways with a manifest but no result yet → listed as "pending measurement" on the all page.
+    pending = tuple(k for k in GATEWAYS if k not in gws)
     charts = [c.name for c in CHARTS]
     (RESULTS / "reports" / "all").mkdir(parents=True, exist_ok=True)
     (RESULTS / "reports" / "top5").mkdir(parents=True, exist_ok=True)
     (RESULTS / "reports" / "all" / "README.md").write_text(
-        _report_md(ranked, "All gateways — full field", charts))
+        _report_md(ranked, "All gateways — full field", charts, pending=pending))
     (RESULTS / "reports" / "top5" / "README.md").write_text(
         _report_md(ranked[:5], "Top 5 gateways (by throughput ceiling)", charts))
     print(f"wrote results/reports/all + top5 ({len(ranked)} gateways)")

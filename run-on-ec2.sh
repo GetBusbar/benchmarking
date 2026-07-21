@@ -2,31 +2,33 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (C) 2026 Busbar Inc and contributors
 #
-# One-click: launch a fresh Graviton box, run the WHOLE benchmark FROM A FRESH COPY OF THIS REPO
-# (latency + RPS + memory for every gateway), pull results/ back, and TERMINATE the box. Running from
-# a fresh copy is the point — it proves the repo works standalone on a cold machine, exactly as a
-# stranger cloning it would experience.
+# One-click, FAIR-BY-ISOLATION: launch ONE fresh Graviton box PER GATEWAY, all in parallel, each from
+# a fresh copy of THIS repo. Every gateway is measured on a pristine machine — no chance one gateway's
+# leftover page cache, disk, or docker state skews the next. Same total cost as a single sequential box
+# (N boxes for ~1/N the wall-clock), and much faster end to end.
 #
-#   run-on-ec2.sh                                   # all gateways, all metrics
-#   run-on-ec2.sh litellm-rust bifrost              # a subset
+#   run-on-ec2.sh                                   # all gateways, one box each, in parallel
+#   run-on-ec2.sh litellm-rust bifrost              # a subset, one box each
 #
-# Requires awscli v2 (configured), ssh, rsync. Instance is m7g.4xlarge (16 vCPU / 64 GB Graviton3) so
-# no gateway OOMs the box; the in-rig watchdog still caps the load. EVERY gateway build/pulls itself
-# on the box from the ref pinned in gateways/versions.env — nothing gateway-specific to pass.
-set -euo pipefail
+# Requires awscli v2 (configured), ssh, rsync. Each box is m7g.2xlarge (8 real Graviton3 cores): the
+# gateway-under-test is pinned to 4 cores (= an m7g.xlarge, the class AIGatewayBench uses); the mock +
+# load generator get the other 4, so the harness can never steal cycles from the gateway. EVERY gateway
+# build/pulls itself on its box from the ref pinned in gateways/versions.env.
+set -uo pipefail
 export AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-us-east-1}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"   # this repo (benchmarking) root
-GATEWAYS_ARG="$*"
-# m7g.2xlarge = 8 real Graviton3 cores (no hyperthreading). The gateway-under-test is pinned to 4
-# cores (= an m7g.xlarge, the class AIGatewayBench uses); the mock + load generator get the other 4,
-# so the harness can never steal cycles from or bottleneck the gateway.
 ITYPE="${ITYPE:-m7g.2xlarge}"
-HW_LABEL="AWS ${ITYPE} (Graviton3, 8 cores / 32 GB) — gateway pinned to 4 cores (m7g.xlarge class), mock+loadgen on the other 4, Ubuntu 24.04"
+HW_LABEL="AWS ${ITYPE} (Graviton3, 8 cores / 32 GB). Gateway pinned to 4 cores (m7g.xlarge class), mock+loadgen on the other 4, Ubuntu 24.04. One dedicated box per gateway."
 SSM="/aws/service/canonical/ubuntu/server/24.04/stable/current/arm64/hvm/ebs-gp3/ami-id"
 KEYNAME="gateway-bench-key"; KEYFILE="${TMPDIR:-/tmp}/${KEYNAME}.pem"; SGNAME="gateway-bench-sg"
 SSHOPT="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=12 -i $KEYFILE"
 log(){ echo "[$(date +%H:%M:%S)] $*"; }
 
+# Default field: every gateway that serves the mock as a single-box drop-in (matches run-all.sh).
+DEFAULT_GATEWAYS=(busbar litellm-rust litellm-python bifrost portkey kong helicone gomodel)
+if [[ $# -gt 0 ]]; then GATEWAYS=("$@"); else GATEWAYS=("${DEFAULT_GATEWAYS[@]}"); fi
+
+# ── shared AWS setup (key + SG), done once ────────────────────────────────────────────────────────
 if [[ ! -f "$KEYFILE" ]]; then
   aws ec2 delete-key-pair --key-name "$KEYNAME" >/dev/null 2>&1 || true
   aws ec2 create-key-pair --key-name "$KEYNAME" --query KeyMaterial --output text > "$KEYFILE"; chmod 600 "$KEYFILE"
@@ -35,45 +37,81 @@ SG=$(aws ec2 describe-security-groups --group-names "$SGNAME" --query 'SecurityG
 [[ -z "$SG" || "$SG" == "None" ]] && SG=$(aws ec2 create-security-group --group-name "$SGNAME" --description "gateway bench SSH" --query GroupId --output text)
 MYIP=$(curl -s https://checkip.amazonaws.com)
 aws ec2 authorize-security-group-ingress --group-id "$SG" --protocol tcp --port 22 --cidr "${MYIP}/32" >/dev/null 2>&1 || true
-
 AMI=$(aws ssm get-parameter --name "$SSM" --query Parameter.Value --output text)
-log "launching $ITYPE ($AMI)"
-IID=$(aws ec2 run-instances --image-id "$AMI" --instance-type "$ITYPE" --key-name "$KEYNAME" \
-  --security-group-ids "$SG" \
-  --block-device-mappings 'DeviceName=/dev/sda1,Ebs={VolumeSize=60,VolumeType=gp3}' \
-  --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=gateway-bench},{Key=purpose,Value=gateway-bench}]' \
-  --query 'Instances[0].InstanceId' --output text)
-trap 'log "TERMINATING $IID"; aws ec2 terminate-instances --instance-ids "$IID" >/dev/null 2>&1 || true' EXIT
-aws ec2 wait instance-running --instance-ids "$IID"
-IP=$(aws ec2 describe-instances --instance-ids "$IID" --query 'Reservations[0].Instances[0].PublicIpAddress' --output text)
-log "ip=$IP — waiting for ssh"
-for _ in $(seq 1 40); do ssh $SSHOPT ubuntu@"$IP" true 2>/dev/null && break || sleep 8; done
 
-log "installing deps (rust, go, docker, python, node)"
-ssh $SSHOPT ubuntu@"$IP" 'set -e
-  sudo apt-get update -q
-  sudo apt-get install -y -q build-essential pkg-config libssl-dev python3-venv python3-pip golang-go docker.io git nodejs npm
-  sudo usermod -aG docker ubuntu || true
-  command -v cargo >/dev/null || (curl -sSf https://sh.rustup.rs | sh -s -- -y)
-  python3 -m pip install --user -q --break-system-packages matplotlib psutil 2>/dev/null || pip3 install -q matplotlib psutil || true' 2>&1 | sed 's/^/  [setup] /'
+mkdir -p "$HERE/results/perf" "$HERE/results/memory"
 
-log "rsync THIS repo up (fresh copy) → ~/benchmarking"
-rsync -az --delete -e "ssh $SSHOPT" \
-  --exclude .git --exclude '*/target' --exclude target --exclude results --exclude node_modules \
-  "$HERE/" ubuntu@"$IP":~/benchmarking/
+# ── one box, one gateway (runs in the background, self-terminates) ─────────────────────────────────
+bench_gateway() {
+  local gw="$1" iid="" ip=""
+  local tag="gateway-bench-$gw"
+  local glog="$HERE/results/fanout-$gw.log"
+  : > "$glog"
+  glog_echo(){ echo "[$(date +%H:%M:%S)] [$gw] $*" | tee -a "$glog"; }
 
-log "running the benchmark from the fresh repo (latency + RPS + memory)"
-# Every gateway self-provisions from the ref pinned in gateways/versions.env — Busbar included
-# (it extracts the released image's binary). Nothing gateway-specific to pass here.
-ssh $SSHOPT ubuntu@"$IP" "source ~/.cargo/env; cd ~/benchmarking
-  export BENCH_HARDWARE='$HW_LABEL'
-  # Gateway pinned to 4 cores (m7g.xlarge class); loadgen + mock isolated on the other 4.
-  export CORES=0-3 LOADCORES=4-5 MOCKCORES=6-7
-  export CAP_MIB=24000   # 32 GB box: watchdog kills the load before the box OOMs
-  export SUITES=\"${SUITES:-perf memory}\"
-  sudo -n true 2>/dev/null && sudo chmod 666 /var/run/docker.sock || true
-  bash run-all.sh $GATEWAYS_ARG" 2>&1 | sed 's/^/  [bench] /'
+  # provision
+  iid=$(aws ec2 run-instances --image-id "$AMI" --instance-type "$ITYPE" --key-name "$KEYNAME" \
+    --security-group-ids "$SG" \
+    --block-device-mappings 'DeviceName=/dev/sda1,Ebs={VolumeSize=60,VolumeType=gp3}' \
+    --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=$tag},{Key=purpose,Value=gateway-bench}]" \
+    --query 'Instances[0].InstanceId' --output text 2>>"$glog") || { glog_echo "run-instances FAILED (vCPU limit?)"; return 1; }
+  glog_echo "launched $iid"
+  # self-terminate this box no matter how we exit
+  trap 'aws ec2 terminate-instances --instance-ids "'"$iid"'" >/dev/null 2>&1 || true' RETURN
 
-log "pulling results/ back"
-rsync -az -e "ssh $SSHOPT" ubuntu@"$IP":~/benchmarking/results/ "$HERE/results/" || true
+  aws ec2 wait instance-running --instance-ids "$iid" 2>>"$glog" || { glog_echo "wait running FAILED"; return 1; }
+  ip=$(aws ec2 describe-instances --instance-ids "$iid" --query 'Reservations[0].Instances[0].PublicIpAddress' --output text)
+  glog_echo "ip=$ip — waiting for ssh"
+  local ok=0; for _ in $(seq 1 40); do ssh $SSHOPT ubuntu@"$ip" true 2>/dev/null && { ok=1; break; } || sleep 8; done
+  [[ $ok == 1 ]] || { glog_echo "ssh never came up"; return 1; }
+
+  glog_echo "installing deps"
+  ssh $SSHOPT ubuntu@"$ip" 'set -e
+    sudo apt-get update -q
+    sudo apt-get install -y -q build-essential pkg-config libssl-dev python3-venv python3-pip golang-go docker.io git nodejs npm
+    sudo usermod -aG docker ubuntu || true
+    command -v cargo >/dev/null || (curl -sSf https://sh.rustup.rs | sh -s -- -y)
+    python3 -m pip install --user -q --break-system-packages matplotlib psutil 2>/dev/null || pip3 install -q matplotlib psutil || true' >>"$glog" 2>&1
+
+  glog_echo "rsync repo up"
+  rsync -az --delete -e "ssh $SSHOPT" \
+    --exclude .git --exclude '*/target' --exclude target --exclude results --exclude node_modules \
+    "$HERE/" ubuntu@"$ip":~/benchmarking/ >>"$glog" 2>&1
+
+  glog_echo "running $gw (latency + RPS + memory)"
+  ssh $SSHOPT ubuntu@"$ip" "source ~/.cargo/env; cd ~/benchmarking
+    export BENCH_HARDWARE='$HW_LABEL'
+    export CORES=0-3 LOADCORES=4-5 MOCKCORES=6-7
+    export CAP_MIB=24000
+    export SUITES=\"${SUITES:-perf memory}\"
+    sudo -n true 2>/dev/null && sudo chmod 666 /var/run/docker.sock || true
+    bash run-all.sh $gw" >>"$glog" 2>&1
+
+  glog_echo "pulling $gw results back"
+  rsync -az -e "ssh $SSHOPT" "ubuntu@$ip:~/benchmarking/results/perf/$gw.json"   "$HERE/results/perf/"   >>"$glog" 2>&1 || true
+  rsync -az -e "ssh $SSHOPT" "ubuntu@$ip:~/benchmarking/results/memory/$gw.json" "$HERE/results/memory/" >>"$glog" 2>&1 || true
+  if [[ -f "$HERE/results/perf/$gw.json" ]]; then glog_echo "DONE"; else glog_echo "NO RESULT FILE (see log)"; fi
+}
+
+log "fanning out ${#GATEWAYS[@]} boxes (one per gateway): ${GATEWAYS[*]}"
+pids=()
+for gw in "${GATEWAYS[@]}"; do
+  bench_gateway "$gw" &
+  pids+=($!)
+  sleep 3   # stagger the AWS API calls a touch
+done
+fail=0
+for p in "${pids[@]}"; do wait "$p" || fail=$((fail+1)); done
+log "all boxes done ($fail job(s) reported an issue — check results/fanout-*.log)"
+
+# ── regenerate charts + reports locally from the collected JSONs ──────────────────────────────────
+log "regenerating charts + reports locally"
+VENV="${TMPDIR:-/tmp}/bench-charts-venv"
+if [[ ! -d "$VENV" ]]; then python3 -m venv "$VENV" >/dev/null 2>&1 || true; fi
+"$VENV/bin/pip" install -q matplotlib >/dev/null 2>&1 || true
+if "$VENV/bin/python" "$HERE/charts.py"; then
+  log "charts + reports regenerated"
+else
+  log "local chart regen failed (matplotlib?) — JSON results are still in results/; run charts.py yourself"
+fi
 log "done — results/reports/{all,top5}/README.md + results/*.png"
