@@ -15,7 +15,7 @@
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
-MEM="$ROOT/memory"                              # reuse its mock.go + ugen.go
+MEM="$ROOT/memory"                              # the memory suite's dir (shared knobs)
 GATEWAY="${GATEWAY:-busbar}"
 export GW_DIR="$ROOT/gateways/$GATEWAY"
 [ -f "$GW_DIR/gateway.sh" ] || { echo "unknown gateway '$GATEWAY'"; exit 2; }

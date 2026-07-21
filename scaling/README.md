@@ -1,51 +1,51 @@
-# Busbar throughput & scaling benchmark
+# Busbar core-scaling analysis (historical, separate rig)
 
-The harness and raw data behind the [`/performance`](https://getbusbar.com/performance) headline: **Busbar
-scales linearly with cores — ~7,650 req/s per core, ~122,650 req/s on 16 cores at 100% success — while its
-own added latency (`Server-Timing: busbar;dur`) stays flat at ~38 µs.** It also runs the *identical* sweep
-against Bifrost for the [`/vs/bifrost`](https://getbusbar.com/vs/bifrost) head-to-head.
+> **Scope + provenance.** This is a **Busbar-specific** analysis of how one gateway's throughput scales
+> with core count, from a **2026-07-19 run on a different rig** (`c7g.8xlarge`, 16-core pin, a Go mock +
+> `oha`) than the neutral cross-gateway field benchmark (`m7g.2xlarge`, 4-core, the Rust mock). The
+> latency figure here is Busbar's **self-reported** `Server-Timing: busbar;dur` — its own internal
+> compute time, **not** an externally-measured added-latency, and **not comparable** to another
+> gateway's externally-clocked number. For the neutral, externally-measured, apples-to-apples
+> comparison across all gateways, use [`../results/reports/`](../results/reports/) — not this page.
 
-## The method (one variable at a time, honest)
+## Method
 
-- **Hardware: one `c7g.8xlarge` (32 vCPU Graviton3).** Graviton has **no hyperthreading**, so 1 vCPU = 1
-  physical core — per-core scaling is real, not muddied by shared execution units.
-- **The gateway under test is pinned to N cores** (`taskset -c 0..N-1`); the **load generator** gets its own
-  cores (16–27) and the **mock upstream** gets its own (28–31). The gateway is never starved, and the mock
-  (a fast Go server, ~250k req/s ceiling) is never the bottleneck.
-- **Unique request bodies.** `ugen.go` puts a distinct payload in every request. This matters: identical
-  bodies let a gateway *cache* and answer without proxying, inflating throughput past what the upstream can
-  serve. Unique traffic = every request is real proxy work.
-- **Sweep 2 → 16 cores** for both gateways; record req/s at 100% success, plus (for Busbar) `busbar;dur`
-  p50/p99 at concurrency 1 and peak RSS.
+- **Hardware: one `c7g.8xlarge` (32 vCPU Graviton3).** Graviton has no hyperthreading, so 1 vCPU = 1
+  physical core — per-core scaling is real.
+- **The gateway under test is pinned to N cores** (`taskset -c 0..N-1`); the load generator and mock get
+  their own cores, so the gateway is never starved and the mock is never the bottleneck.
+- **Unique request bodies** (`ugen.go`) so no gateway can cache-and-skip the proxy work.
+- **Sweep 2 → 16 cores**, recording req/s at 100% success and peak RSS. Busbar additionally records its
+  own `busbar;dur` (self-reported internal compute) at concurrency 1.
 
 ## Files
 
 | File | Role |
 |---|---|
-| `ugen.go` | Unique-body load generator (Go). `-url -c <conns> -d <secs> -model -pad <bytes>`. Reports rps / success / p50 / p99. |
-| `latency.py` | Concurrency-1 client that reads `Server-Timing: busbar;dur` and reports p50/p90/p99 in µs. |
-| `bb_grav.sh` | Busbar sweep: pins Busbar to 2..16 cores, measures throughput + `busbar;dur` + RSS per point. |
-| `bf_grav.sh` | Bifrost sweep: identical, via `docker --network host --cpuset-cpus`. |
-| `bb_grav.csv` / `bf_grav.csv` | Raw per-core results from the canonical 2026-07-19 run. |
+| `ugen.go` | Unique-body load generator (Go). Reports rps / success / p50 / p99. |
+| `latency.py` | Concurrency-1 client that reads the `Server-Timing: busbar;dur` header (Busbar's self-report). |
+| `bb_grav.sh` / `bf_grav.sh` | Per-core sweeps for Busbar and Bifrost (both record client-measured rps + p50/p99). |
+| `bb_grav.csv` / `bf_grav.csv` | Raw per-core results from the 2026-07-19 run (both gateways' externally-measured latency is in the CSVs). |
 
-## Results (2026-07-19, c7g.8xlarge, unique traffic, 100% success)
+## Throughput scaling (2026-07-19, c7g.8xlarge, unique traffic, 100% success)
 
-| cores | Busbar req/s | Busbar `busbar;dur` p99 | Bifrost req/s |
-|--:|--:|--:|--:|
-| 2 | 15,692 | 40 µs | 2,761 |
-| 4 | 30,920 | 37 µs | 5,597 |
-| 8 | 63,453 | 37 µs | 10,854 |
-| 12 | 93,876 | 38 µs | 15,904 |
-| 16 | **122,650** | 38 µs | **20,682** |
+Externally-measured req/s per core (both gateways, same box, same method):
 
-Busbar is linear at ~7,666 req/s per core; Bifrost is linear at ~1,290 — **~6× the work per core, same
-box, same method.** Full method + every gotcha (why `--network host`, why unique bodies, the
-`BUSBAR_WORKER_THREADS` default, the mock-ceiling sanity check) is in the internal benchmark runbook.
+| cores | Busbar req/s | Bifrost req/s |
+|--:|--:|--:|
+| 2 | 15,692 | 2,761 |
+| 4 | 30,920 | 5,597 |
+| 8 | 63,453 | 10,854 |
+| 12 | 93,876 | 15,904 |
+| 16 | 122,650 | 20,682 |
+
+Both scale roughly linearly with cores on this rig. Client-measured p50/p99 latency for **both**
+gateways is in the CSVs; Busbar's `busbar;dur` (its self-reported internal compute) held ~37–40 µs p99
+across the sweep — a Busbar-only internal number, listed here for transparency, not as a cross-gateway
+latency comparison.
 
 ## Reproduce
 
-Launch a `c7g.8xlarge` (AL2023 arm64). Install `git golang docker python3`, build the Go mock
-(`maximhq/bifrost-benchmarking/mocker`), fetch `oha` (arm64) and the released Busbar arm64 binary, build
-`ugen`. Then run `bb_grav.sh` and `bf_grav.sh`. Note: pre-1.4 Busbar caps worker threads at `min(cores,4)`
-by default — the scripts set `BUSBAR_WORKER_THREADS=N` to unlock full-core scaling (1.4.0 makes that the
-default). Tear the box down when done.
+Launch a `c7g.8xlarge` (AL2023 arm64), install `git golang docker python3`, build the Go mock and
+`ugen`, fetch `oha` + the released Busbar arm64 binary, then run `bb_grav.sh` and `bf_grav.sh`. Tear the
+box down when done.

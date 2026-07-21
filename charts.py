@@ -334,7 +334,7 @@ def render(chart: Chart, only_keys=None, out_stem: str | None = None) -> None:
     if "concurrency" in meta and "payload_bytes" in meta:
         bits.append(f"{meta['concurrency']}× {int(meta['payload_bytes'])//1000}KB sustained")
     bits.append("highlighted = measured best")
-    fig.text(0.008, 0.012, "  ·  ".join(bits) + f"     getbusbar.com/bench — regenerated {RENDER_TS} from raw results",
+    fig.text(0.008, 0.012, "  ·  ".join(bits) + f"     github.com/GetBusbar/benchmarking — regenerated {RENDER_TS} from raw results",
              fontsize=7.3, color=GRAY)
 
     fig.tight_layout(rect=(0, 0.05, 1, 0.93))
