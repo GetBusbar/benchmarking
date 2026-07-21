@@ -7,13 +7,13 @@ Every number below is regenerated from the raw `results/*.json` — re-run `run-
 | Gateway | Added latency (p99) | Max proxy RPS | Sustained RPS @20ms | Idle RSS | Peak RSS | Built |
 |---|--:|--:|--:|--:|--:|---|
 | LiteLLM · Rust | 142 µs | 41,293 | 33,344 | 263 MiB | 627 MiB | `litellm_rust_gateway_v1_messages_route` |
-| Busbar | 148 µs | 44,544 | 32,040 | 9 MiB | 320 MiB | `busbar 1.4.1` |
+| Busbar | 154 µs | 44,030 | 30,163 | 9 MiB | 316 MiB | `busbar 1.4.1` |
 | Kong | 1164 µs | 13,859 | 13,095 | 516 MiB | 724 MiB | `kong:3.8` |
+| GoModel | 390 µs | 12,751 | 10,094 | 25 MiB | 5061 MiB | `enterpilot/gomodel:0.1.55 (@sha256:606` |
+| Bifrost | 951 µs | 5,420 | 5,381 | 68 MiB | 15309 MiB | `maximhq/bifrost:v1.6.4 (@sha256:5f1fed` |
 | Portkey | 6241 µs | 451 | 0 | 246 MiB | 666 MiB | `@portkey-ai/gateway@1.15.2` |
 | LiteLLM · Python | 6475 µs | 174 | 0 | 290 MiB | 489 MiB | `litellm==?` |
-| Bifrost | 561 µs † | ✕ | ✕ | 182 MiB | 1858 MiB | `maximhq/bifrost:v1.6.4` |
 | Helicone | -82 µs † | ✕ | ✕ | 0 MiB | 0 MiB | `helicone/ai-gateway:latest` |
-| GoModel | 130 µs † | ✕ | ✕ | 23 MiB | 2201 MiB | `enterpilot/gomodel:0.1.55` |
 | One-API | ⏳ *pending* | — | — | — | — | *pending measurement* |
 | GPTRouter | ⏳ *pending* | — | — | — | — | *pending measurement* |
 | Arch | ⏳ *pending* | — | — | — | — | *pending measurement* |
