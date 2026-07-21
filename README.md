@@ -39,21 +39,40 @@ exact build/commit measured, plus the charts below.
 
 ## Run it — one command, every metric
 
+Clone, then run one script. Everything is at the repo root.
+
 ```sh
-BUSBAR_BIN=/path/to/busbar bench/run-all.sh                 # all gateways, all metrics
-BUSBAR_BIN=/path/to/busbar bench/run-all.sh busbar litellm-rust   # a subset
+git clone https://github.com/GetBusbar/benchmarking && cd benchmarking
+
+# Every gateway that builds/pulls itself (LiteLLM, Bifrost, Portkey, Kong, Helicone), all metrics:
+./run-all.sh
+
+# A subset:
+./run-all.sh litellm-rust bifrost
+
+# Include the busbar row — point BUSBAR_BIN at a busbar binary. Get one with either:
+#   docker create --name b getbusbar/busbar:1.4.1 && docker cp b:/busbar ./busbar && docker rm b
+#   (or download it from https://github.com/GetBusbar/busbar/releases)
+BUSBAR_BIN=./busbar ./run-all.sh
 ```
 
 One run measures **latency, throughput, and memory** for every gateway on the same box, then
-regenerates the charts. On a fresh cloud box (builds every gateway, pulls results back, terminates
-the box — nothing to set up):
+regenerates the charts and the report pages. Out comes `results/perf/<gateway>.json`,
+`results/memory/<gateway>.json`, `results/reports/{all,top5}/README.md`, and the chart PNGs.
+
+### On a fresh cloud box (nothing to install)
+
+`run-on-ec2.sh` launches a Graviton box, installs everything, runs the full suite, pulls results
+back, and **terminates the box**. Only needs AWS CLI v2 configured.
 
 ```sh
-BUSBAR_REPO=/path/to/busbarAI bench/run-on-ec2.sh          # one-click, Graviton
+./run-on-ec2.sh                                              # every self-building gateway
+# also build + include busbar at a released tag (from a local busbar checkout):
+BUSBAR_REF=v1.4.1 BUSBAR_REPO=/path/to/busbar-checkout ./run-on-ec2.sh
 ```
 
-Out comes `results/perf/<gateway>.json`, `results/memory/<gateway>.json`, and the chart PNGs
-(`results/added_latency.png`, `results/rps_ceiling.png`, `results/memory_rss.png`).
+A gateway that can't be stood up (missing binary, unreachable, or needs infra a single container
+can't provide) is recorded `served: false` and shown as such — never silently dropped.
 
 ### How long it takes
 

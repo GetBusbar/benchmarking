@@ -11,10 +11,10 @@
 #   * post-load RSS — resident memory ~15 s after load stops (does it release, or stay pinned?)
 # and writes results/memory/<gateway>.json for the chart generator.
 #
-#   GATEWAY=busbar        BUSBAR_BIN=~/busbar   bench/memory/run.sh
-#   GATEWAY=bifrost                             bench/memory/run.sh
-#   GATEWAY=litellm-rust                        bench/memory/run.sh
-#   GATEWAY=litellm-python                      bench/memory/run.sh
+#   GATEWAY=busbar        BUSBAR_BIN=~/busbar   memory/run.sh
+#   GATEWAY=bifrost                             memory/run.sh
+#   GATEWAY=litellm-rust                        memory/run.sh
+#   GATEWAY=litellm-python                      memory/run.sh
 #
 # Knobs (env): PSIZE (payload bytes, default 150000), CONC (default 1500), DUR (seconds, default 120),
 #   CAP_MIB (watchdog ceiling — kills the load if RSS crosses it, default 40000), CORES (gateway pin).

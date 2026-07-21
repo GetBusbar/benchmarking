@@ -10,7 +10,7 @@ metric, so if busbar loses, busbar isn't green.
 Add a chart = append one `Chart(...)` to CHARTS below. Add a gateway = it shows up automatically
 once it has a result file (label/order from GATEWAYS). Run after the benchmark:
 
-    python3 bench/charts.py
+    python3 charts.py
 """
 from __future__ import annotations
 
