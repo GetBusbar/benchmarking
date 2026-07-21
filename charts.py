@@ -157,10 +157,12 @@ def _fmt(v: float) -> str:
     return f"{v:.0f}" if v >= 10 else f"{v:.1f}"
 
 
-def render(chart: Chart) -> None:
+def render(chart: Chart, only_keys=None, out_stem: str | None = None) -> None:
     if _mpl() is None:
         return  # no matplotlib — reports still generate from JSON
     rows = _load(chart.suite)
+    if only_keys is not None:  # subset (e.g. top-5): draw just these gateways, to its own PNG
+        rows = [r for r in rows if r["_key"] in only_keys]
     if not rows:
         print(f"skip {chart.name}: no results/{chart.suite}/*.json yet")
         return
@@ -249,6 +251,13 @@ def render(chart: Chart) -> None:
         ax.set_xscale("log")
     ax.xaxis.grid(True, color=GRID, zorder=0)
     ax.set_axisbelow(True)
+    # Human tick labels: comma-separated integers on BOTH axes — "1,000 / 10,000" on the log µs/MiB
+    # axes (not 10³/10⁴), "10,000 / 20,000" on the linear RPS axis (not 10000). Minor log ticks stay
+    # unlabeled so the decade labels don't get crowded.
+    from matplotlib.ticker import FuncFormatter, NullFormatter
+    ax.xaxis.set_major_formatter(FuncFormatter(lambda v, _pos: f"{int(round(v)):,}" if v > 0 else "0"))
+    if chart.log:
+        ax.xaxis.set_minor_formatter(NullFormatter())
     better = "higher is better" if chart.higher_better else "lower is better"
     ax.set_xlabel(f"{chart.unit}   ·   {better}" + ("   (log scale)" if chart.log else ""),
                   fontsize=9, color=GRAY)
@@ -274,7 +283,7 @@ def render(chart: Chart) -> None:
              fontsize=7.3, color=GRAY)
 
     fig.tight_layout(rect=(0, 0.05, 1, 0.93))
-    out = RESULTS / f"{chart.name}.png"
+    out = RESULTS / f"{out_stem or chart.name}.png"
     fig.savefig(out, dpi=200, bbox_inches="tight", facecolor="white")
     plt.close(fig)
     print(f"wrote {out}")
@@ -292,7 +301,7 @@ def _merge() -> dict:
     return gws
 
 
-def _report_md(rows: list, title: str, charts: list, pending: tuple = ()) -> str:
+def _report_md(rows: list, title: str, charts: list, pending: tuple = (), chart_prefix: str = "") -> str:
     """A self-contained result page: machine, table (ranked), charts, provenance."""
     hw = next((r.get("hardware") for _, r in rows if r.get("hardware")), "unknown")
     when = next((r.get("measured_at") for _, r in rows if r.get("measured_at")), "")
@@ -391,8 +400,9 @@ def _report_md(rows: list, title: str, charts: list, pending: tuple = ()) -> str
             lines.append(f"- **{name}** — {err}")
         lines.append("")
     for c in charts:
-        if (RESULTS / f"{c}.png").exists():
-            lines.append(f"![{c}](../../{c}.png)")
+        png = f"{chart_prefix}{c}"  # top5 report points at its own top5_*.png set
+        if (RESULTS / f"{png}.png").exists():
+            lines.append(f"![{c}](../../{png}.png)")
             lines.append("")
     lines.append("---")
     lines.append("Method: added latency = gateway p99 − direct-to-mock p99 at concurrency 1; RPS "
@@ -402,11 +412,17 @@ def _report_md(rows: list, title: str, charts: list, pending: tuple = ()) -> str
     return "\n".join(lines) + "\n"
 
 
-def write_reports() -> None:
+def _ranked() -> list:
+    """Gateways with results, ranked by throughput ceiling (sustained, then max-proxy)."""
     gws = _merge()
-    if not gws:
+    return sorted(gws.items(), key=lambda kv: kv[1].get("rps_sustained_20ms", 0) or kv[1].get("rps_max_proxy", 0), reverse=True)
+
+
+def write_reports() -> None:
+    ranked = _ranked()
+    if not ranked:
         return
-    ranked = sorted(gws.items(), key=lambda kv: kv[1].get("rps_sustained_20ms", 0) or kv[1].get("rps_max_proxy", 0), reverse=True)
+    gws = dict(ranked)
     # Known gateways with a manifest but no result yet → listed as "pending measurement" on the all page.
     pending = tuple(k for k in GATEWAYS if k not in gws)
     charts = [c.name for c in CHARTS]
@@ -414,16 +430,20 @@ def write_reports() -> None:
     (RESULTS / "reports" / "top5").mkdir(parents=True, exist_ok=True)
     (RESULTS / "reports" / "all" / "README.md").write_text(
         _report_md(ranked, "All gateways — full field", charts, pending=pending))
+    # top5 report points at its own top5_*.png charts (rendered in main), so its charts match its table.
     (RESULTS / "reports" / "top5" / "README.md").write_text(
-        _report_md(ranked[:5], "Top 5 gateways (by throughput ceiling)", charts))
+        _report_md(ranked[:5], "Top 5 gateways (by throughput ceiling)", charts, chart_prefix="top5_"))
     print(f"wrote results/reports/all + top5 ({len(ranked)} gateways)")
 
 
 def main() -> None:
     RESULTS.mkdir(exist_ok=True)
+    top5 = {k for k, _ in _ranked()[:5]}
     any_done = False
     for c in CHARTS:
-        render(c)
+        render(c)                                       # full field → <name>.png
+        if top5:
+            render(c, only_keys=top5, out_stem=f"top5_{c.name}")   # top-5 only → top5_<name>.png
         any_done = any_done or (RESULTS / f"{c.name}.png").exists()
     write_reports()
     if not any_done:
