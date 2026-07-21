@@ -302,8 +302,8 @@ def _report_md(rows: list, title: str, charts: list, pending: tuple = ()) -> str
     lines.append("Every number below is regenerated from the raw `results/*.json` — re-run "
                  "`run-all.sh` and this page updates. Green in the charts = measured best.")
     lines.append("")
-    lines.append("| Gateway | Added latency (p99) | Max proxy RPS | Sustained RPS @20ms | Idle RSS | Peak RSS | Serves? | Built |")
-    lines.append("|---|--:|--:|--:|--:|--:|:-:|---|")
+    lines.append("| Gateway | Added latency (p99) | Max proxy RPS | Sustained RPS @20ms | Idle RSS | Peak RSS | Built |")
+    lines.append("|---|--:|--:|--:|--:|--:|---|")
     mock_bound_seen = False
     zero_load_seen = False
     dnf_seen = False
@@ -348,13 +348,12 @@ def _report_md(rows: list, title: str, charts: list, pending: tuple = ()) -> str
             f"| {llm} "
             f"| {rss(idle)} "
             f"| {rss(peak)} "
-            f"| {'—' if served is None else ('✅' if served else '❌')} "
             f"| `{(r.get('build') or '').strip()[:38]}` |"
         )
     # Gateways we intend to measure but haven't yet — shown so the field is transparent, never hidden.
     for key in pending:
         lines.append(
-            f"| {GATEWAYS[key]} | — | — | — | — | — | ⏳ | *pending measurement* |"
+            f"| {GATEWAYS[key]} | ⏳ *pending* | — | — | — | — | *pending measurement* |"
         )
     lines.append("")
     if pending:
@@ -365,20 +364,25 @@ def _report_md(rows: list, title: str, charts: list, pending: tuple = ()) -> str
     lines.append("Two throughput numbers: **max proxy RPS** (instant upstream — raw forwarding speed) "
                  "and **sustained RPS @20ms** (AIGatewayBench's metric — concurrent in-flight capacity "
                  "under realistic LLM latency).")
-    legend = ["**✅ served** / **❌ did not serve** under load / **⏳ not yet run**.",
-              "**✕** = did not serve under load (0 successful req/s).",
-              "**0** = came up, but no tested concurrency held p99 < 1 s with zero errors."]
+    legend = []
+    zero_or_x = any(True for _, r in rows if r.get("served") is False) or zero_load_seen
+    if zero_or_x:
+        legend.append("**✕** = did not serve under load (0 successful req/s).")
+        legend.append("**0** = came up, but no tested concurrency held p99 < 1 s with zero errors.")
     if dnf_seen:
         legend.append("**†** = a concurrency-1 latency exists, but the gateway failed under load — "
                       "not a clean result.")
     if mock_bound_seen:
         legend.append("**⚠** = ceiling within 10% of the mock's own — treat as a **floor**, not a limit.")
-    lines.append(" &nbsp; ".join(legend))
-    lines.append("")
-    # The receipt: WHY each ❌ gateway did not serve — captured status + its own logs, so the claim is
-    # evidence, not an assertion.
+    if pending:
+        legend.append("**⏳** = a manifest exists but it hasn't been run on the rig yet.")
+    if legend:
+        lines.append(" &nbsp; ".join(legend))
+        lines.append("")
+    # The receipt: WHY each gateway that didn't serve failed — captured status + its own logs, so the
+    # claim is evidence, not an assertion.
     if fail_notes:
-        lines.append("**Why the ❌ gateways did not serve** (captured live, verbatim from the run):")
+        lines.append("**Why the ✕ gateways did not serve** (captured live, verbatim from the run):")
         lines.append("")
         for name, err in fail_notes:
             err = err.replace("|", "\\|").strip()
