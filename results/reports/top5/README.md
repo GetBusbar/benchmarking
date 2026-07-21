@@ -1,14 +1,21 @@
 # Top 5 gateways (by throughput ceiling)
 
-**Ran on:** aarch64 16vCPU  ·  2026-07-21T02:38:22Z
+**Ran on:** AWS m7g.2xlarge (Graviton3, 8 cores / 32 GB) — gateway pinned to 4 cores (m7g.xlarge class), mock+loadgen on the other 4, Ubuntu 24.04  ·  2026-07-21T04:46:26Z
 
-Every number below is regenerated from the raw `results/*.json` — re-run `bench/run-all.sh` and this page updates. Green in the charts = measured best.
+Every number below is regenerated from the raw `results/*.json` — re-run `run-all.sh` and this page updates. Green in the charts = measured best.
 
-| Gateway | Added latency (p99) | RPS ceiling | Idle RSS | Peak RSS | Serves? | Built |
-|---|--:|--:|--:|--:|:-:|---|
-| LiteLLM · Rust | — | — | 263 MiB | 665 MiB | ✅ | `litellm_rust_gateway_v1_messages_route` |
-| Bifrost | — | — | 106 MiB | 16609 MiB | ✅ | `maximhq/bifrost:v1.6.4` |
-| LiteLLM · Python | — | — | 290 MiB | 827 MiB | ✅ | `litellm==?` |
+| Gateway | Added latency (p99) | Max proxy RPS | Sustained RPS @20ms | Idle RSS | Peak RSS | Serves? | Built |
+|---|--:|--:|--:|--:|--:|:-:|---|
+| LiteLLM · Rust | 138 µs | 42,559 | 33,459 | 263 MiB | 646 MiB | ✅ | `litellm_rust_gateway_v1_messages_route` |
+| Busbar | 149 µs | 44,972 | 32,083 | 9 MiB | 323 MiB | ✅ | `busbar 1.4.1` |
+
+Two throughput numbers: **max proxy RPS** (instant upstream — raw forwarding speed) and **sustained RPS @20ms** (AIGatewayBench's metric — concurrent in-flight capacity under realistic LLM latency).
+
+![added_latency](../../added_latency.png)
+
+![rps_max_proxy](../../rps_max_proxy.png)
+
+![rps_sustained_20ms](../../rps_sustained_20ms.png)
 
 ![memory_rss](../../memory_rss.png)
 

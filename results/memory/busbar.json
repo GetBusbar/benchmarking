@@ -1,0 +1,15 @@
+{
+  "gateway": "busbar",
+  "build": "busbar 1.4.1",
+  "served": true,
+  "idle_rss_mib": 8.7,
+  "peak_rss_mib": 322.9,
+  "post_load_rss_mib": 56.5,
+  "payload_bytes": 150000,
+  "concurrency": 1500,
+  "duration_s": 120,
+  "endpoint": "/v1/chat/completions",
+  "model": "gpt-4o-mini",
+  "hardware": "AWS m7g.2xlarge (Graviton3, 8 cores / 32 GB) — gateway pinned to 4 cores (m7g.xlarge class), mock+loadgen on the other 4, Ubuntu 24.04",
+  "measured_at": "2026-07-21T04:38:37Z"
+}
