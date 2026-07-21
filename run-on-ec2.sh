@@ -8,16 +8,14 @@
 # stranger cloning it would experience.
 #
 #   run-on-ec2.sh                                   # all gateways, all metrics
-#   run-on-ec2.sh busbar litellm-rust               # a subset
-#   BUSBAR_REPO=/path/to/busbar run-on-ec2.sh       # also build busbar from source (for the busbar row)
+#   run-on-ec2.sh litellm-rust bifrost              # a subset
 #
 # Requires awscli v2 (configured), ssh, rsync. Instance is m7g.4xlarge (16 vCPU / 64 GB Graviton3) so
-# no gateway OOMs the box; the in-rig watchdog still caps the load. Competitor gateways build/pull
-# themselves on the box from the refs pinned in gateways/versions.env.
+# no gateway OOMs the box; the in-rig watchdog still caps the load. EVERY gateway build/pulls itself
+# on the box from the ref pinned in gateways/versions.env — nothing gateway-specific to pass.
 set -euo pipefail
 export AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-us-east-1}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"   # this repo (benchmarking) root
-BUSBAR_REPO="${BUSBAR_REPO:-}"                          # busbar source to build (optional; for the busbar row)
 GATEWAYS_ARG="$*"
 ITYPE="${ITYPE:-m7g.4xlarge}"
 HW_LABEL="AWS ${ITYPE} (Graviton3, 16 vCPU / 64 GB), Ubuntu 24.04"
@@ -61,27 +59,10 @@ rsync -az --delete -e "ssh $SSHOPT" \
   --exclude .git --exclude '*/target' --exclude target --exclude results --exclude node_modules \
   "$HERE/" ubuntu@"$IP":~/benchmarking/
 
-BB_ENV=""
-if [[ -n "$BUSBAR_REPO" ]]; then
-  # Build the RELEASED busbar users can download. BUSBAR_REF pins the exact tag (e.g. v1.4.1) — we
-  # ship that tag's tree via `git archive` (rsync strips .git, so a tag checkout isn't possible on the
-  # box). Unset BUSBAR_REF = the working tree (HEAD), for local dev only.
-  if [[ -n "${BUSBAR_REF:-}" ]]; then
-    log "shipping busbar source at ref ${BUSBAR_REF} (git archive) + build (release, jemalloc)"
-    ssh $SSHOPT ubuntu@"$IP" 'rm -rf ~/busbar-src && mkdir -p ~/busbar-src'
-    git -C "$BUSBAR_REPO" archive --format=tar "$BUSBAR_REF" | ssh $SSHOPT ubuntu@"$IP" 'tar -x -C ~/busbar-src'
-  else
-    log "rsync busbar working tree + build (release, jemalloc)"
-    rsync -az --delete -e "ssh $SSHOPT" --exclude target --exclude .git --exclude node_modules \
-      "$BUSBAR_REPO/" ubuntu@"$IP":~/busbar-src/
-  fi
-  ssh $SSHOPT ubuntu@"$IP" 'source ~/.cargo/env; cd ~/busbar-src && cargo build --release -p busbar 2>&1 | tail -3' 2>&1 | sed 's/^/  [busbar] /'
-  BB_ENV='export BUSBAR_BIN=~/busbar-src/target/release/busbar'
-fi
-
 log "running the benchmark from the fresh repo (latency + RPS + memory)"
+# Every gateway self-provisions from the ref pinned in gateways/versions.env — Busbar included
+# (it extracts the released image's binary). Nothing gateway-specific to pass here.
 ssh $SSHOPT ubuntu@"$IP" "source ~/.cargo/env; cd ~/benchmarking
-  $BB_ENV
   export BENCH_HARDWARE='$HW_LABEL'
   export CORES=0-7 LOADCORES=8-13 MOCKCORES=14-15
   export SUITES=\"${SUITES:-perf memory}\"

@@ -39,21 +39,15 @@ exact build/commit measured, plus the charts below.
 
 ## Run it — one command, every metric
 
-Clone, then run one script. Everything is at the repo root.
+Clone, then run one script. Everything is at the repo root, and **every gateway provisions itself**
+from the ref pinned in [`gateways/versions.env`](gateways/versions.env) — Docker images, pip, source,
+or (for a native gateway) its released image's binary. Nothing to fetch by hand for any of them.
 
 ```sh
 git clone https://github.com/GetBusbar/benchmarking && cd benchmarking
 
-# Every gateway that builds/pulls itself (LiteLLM, Bifrost, Portkey, Kong, Helicone), all metrics:
-./run-all.sh
-
-# A subset:
-./run-all.sh litellm-rust bifrost
-
-# Include the Busbar row — point BUSBAR_BIN at a busbar binary. Get one with either:
-#   docker create --name b getbusbar/busbar:1.4.1 && docker cp b:/busbar ./busbar && docker rm b
-#   (or download it from https://github.com/GetBusbar/busbar/releases)
-BUSBAR_BIN=./busbar ./run-all.sh
+./run-all.sh                     # every gateway, all metrics (latency + throughput + memory)
+./run-all.sh litellm-rust bifrost   # a subset
 ```
 
 One run measures **latency, throughput, and memory** for every gateway on the same box, then
@@ -66,13 +60,14 @@ regenerates the charts and the report pages. Out comes `results/perf/<gateway>.j
 back, and **terminates the box**. Only needs AWS CLI v2 configured.
 
 ```sh
-./run-on-ec2.sh                                              # every self-building gateway
-# also build + include Busbar at a released tag (from a local busbar checkout):
-BUSBAR_REF=v1.4.1 BUSBAR_REPO=/path/to/busbar-checkout ./run-on-ec2.sh
+./run-on-ec2.sh                     # every gateway, one-click
+./run-on-ec2.sh litellm-rust bifrost   # a subset
 ```
 
-A gateway that can't be stood up (missing binary, unreachable, or needs infra a single container
-can't provide) is recorded `served: false` and shown as such — never silently dropped.
+A gateway that can't be stood up (unreachable, or needs infra a single container can't provide) is
+recorded `served: false` and shown as such — never silently dropped. To pin a different build of any
+gateway, edit its line in `gateways/versions.env` (or override the env var); the exact ref is stamped
+into every result.
 
 ### How long it takes
 
