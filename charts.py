@@ -16,6 +16,7 @@ once it has a result file (label/order from GATEWAYS). Run after the benchmark:
 from __future__ import annotations
 
 import json
+import os
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -30,6 +31,12 @@ RENDER_TS = _NOW.strftime("%Y-%m-%d %H:%M UTC")
 # markdown) has updated. A per-render query string changes the URL each time, so the image refreshes
 # in lockstep with the numbers. (Costs nothing; the file on disk is unchanged.)
 CACHE_BUSTER = _NOW.strftime("%Y%m%d%H%M")
+# Absolute base for chart <img>s in the report. Must be the raw.githubusercontent host so GitHub
+# camo-proxies the images (a relative repo path is NOT proxied, so its ?v= is ignored and the picture
+# goes stale while the table updates). Override IMG_BASE for a fork; defaults to this repo's main.
+IMG_BASE = os.environ.get(
+    "IMG_BASE", "https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results"
+)
 
 # matplotlib is imported lazily (in render) so the report pages can be generated with plain JSON even
 # where matplotlib isn't installed. plt is filled in by _mpl().
@@ -522,7 +529,12 @@ def _report_md(rows: list, title: str, charts: list, pending: tuple = (), chart_
     for c in charts:
         png = f"{chart_prefix}{c}"  # top5 report points at its own top5_*.png set
         if (RESULTS / f"{png}.png").exists():
-            lines.append(f"![{c}](../../{png}.png?v={CACHE_BUSTER})")
+            # ABSOLUTE raw URL, not a relative path. GitHub only routes EXTERNAL image URLs through its
+            # camo proxy (which honors the ?v= cache-buster); relative same-repo paths are served by a
+            # CDN that ignores the query string, so a relative ?v= never actually busts and the stale png
+            # keeps showing (the exact symptom: table updates, image doesn't). An absolute raw URL is
+            # camo'd → ?v= creates a new cache key each render → the image refreshes with the numbers.
+            lines.append(f"![{c}]({IMG_BASE}/{png}.png?v={CACHE_BUSTER})")
             lines.append("")
     lines.append("---")
     lines.append("Method: added latency = gateway p99 − direct-to-mock p99 at concurrency 1; RPS "
