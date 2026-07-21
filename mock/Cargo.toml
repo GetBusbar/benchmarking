@@ -1,0 +1,21 @@
+[package]
+name = "mock-upstream"
+version = "0.1.0"
+edition = "2021"
+description = "Deterministic, blazing-fast mock upstream for the gateway benchmark. Answers any path with a fixed small JSON body (OpenAI shape, or Anthropic shape for /messages) so the measured number is the gateway's cost, never the upstream's. Built to sustain 100s of thousands of RPS so it is never the bottleneck."
+
+[[bin]]
+name = "mock"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "time"] }
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"

@@ -35,10 +35,13 @@ log(){ echo "[$(date +%H:%M:%S)] $*"; }
 # taskset may be absent (macOS); shim it to a no-op wrapper so the rig still runs locally.
 command -v taskset >/dev/null || taskset(){ shift 2; "$@"; }
 
-command -v go >/dev/null || { echo "need Go to build the mock + load gen"; exit 1; }
-log "building mock + ugen"
-go build -o "$HERE/mock" "$HERE/mock.go"
-go build -o "$HERE/ugen" "$HERE/ugen.go"
+command -v go >/dev/null || { echo "need Go (load generator)"; exit 1; }
+command -v cargo >/dev/null || { echo "need cargo (rust mock)"; exit 1; }
+log "building mock (rust) + loadgen (go)"
+( cd "$ROOT/mock" && cargo build --release >/dev/null 2>&1 ) || { echo "mock build failed"; exit 1; }
+MOCK_BIN="$ROOT/mock/target/release/mock"
+go build -o "$ROOT/loadgen/ugen" "$ROOT/loadgen/ugen.go"
+UGEN_BIN="$ROOT/loadgen/ugen"
 
 # Source refs (branches/tags/versions) are pinned + overridable in ONE place, and recorded below.
 # shellcheck source=/dev/null
@@ -49,11 +52,11 @@ GW_HEADERS=()  # a manifest may set extra request headers (e.g. Portkey routing,
 source "$GW_DIR/gateway.sh"
 
 log "starting mock on :$MOCK_PORT"
-pkill -f "$HERE/mock" 2>/dev/null; sleep 1
-setsid taskset -c "$MOCKCORES" "$HERE/mock" -port "$MOCK_PORT" </dev/null >/dev/null 2>&1 &
+pkill -f "$MOCK_BIN" 2>/dev/null; sleep 1
+setsid taskset -c "$MOCKCORES" "$MOCK_BIN" -port "$MOCK_PORT" </dev/null >/dev/null 2>&1 &
 sleep 1
 
-cleanup(){ gw_stop 2>/dev/null; pkill -f "$HERE/mock" 2>/dev/null; }
+cleanup(){ gw_stop 2>/dev/null; pkill -f "$MOCK_BIN" 2>/dev/null; }
 trap cleanup EXIT
 
 log "[$GATEWAY] build"; gw_build || { echo "build failed"; exit 1; }
@@ -83,7 +86,7 @@ PEAK=0; STOP=/tmp/mem.stop; rm -f "$STOP" /tmp/mem.peak; echo 0 >/tmp/mem.peak
   done ) & SP=$!
 
 log "[$GATEWAY] load: ${PSIZE}B payloads, c=$CONC, ${DUR}s (watchdog cap ${CAP_MIB} MiB)"
-taskset -c "$LOADCORES" "$HERE/ugen" -url "http://127.0.0.1:$GW_PORT$GW_PATH" \
+taskset -c "$LOADCORES" "$UGEN_BIN" -url "http://127.0.0.1:$GW_PORT$GW_PATH" \
   -model "$GW_MODEL" -auth "$GW_AUTH" -c "$CONC" -d "$DUR" -psize "$PSIZE" "${UGEN_H[@]}" || true
 touch "$STOP"; kill "$SP" 2>/dev/null
 PEAK=$(cat /tmp/mem.peak)

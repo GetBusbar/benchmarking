@@ -10,3 +10,8 @@ gateways/*/venv/
 gateways/*/bfdata/
 # transient EC2 driver logs (the results JSON + charts are the durable evidence)
 results/*.log
+
+# rust mock build artifacts
+mock/target/
+# go loadgen binary
+loadgen/ugen

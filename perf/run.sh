@@ -28,11 +28,14 @@ export MOCK_PORT="${MOCK_PORT:-8000}"
 RESULTS="$ROOT/results/perf"; mkdir -p "$RESULTS"
 log(){ echo "[$(date +%H:%M:%S)] $*"; }
 command -v taskset >/dev/null || taskset(){ shift 2; "$@"; }
-command -v go >/dev/null || { echo "need Go"; exit 1; }
+command -v go >/dev/null || { echo "need Go (load generator)"; exit 1; }
+command -v cargo >/dev/null || { echo "need cargo (rust mock)"; exit 1; }
 
-log "building mock + ugen"
-go build -o "$MEM/mock" "$MEM/mock.go"; go build -o "$MEM/ugen" "$MEM/ugen.go"
-MOCK="$MEM/mock"; UGEN="$MEM/ugen"
+log "building mock (rust) + loadgen (go)"
+( cd "$ROOT/mock" && cargo build --release >/dev/null 2>&1 ) || { echo "mock build failed"; exit 1; }
+MOCK="$ROOT/mock/target/release/mock"
+go build -o "$ROOT/loadgen/ugen" "$ROOT/loadgen/ugen.go"
+UGEN="$ROOT/loadgen/ugen"
 
 [ -f "$ROOT/gateways/versions.env" ] && source "$ROOT/gateways/versions.env"
 gw_version(){ echo unknown; }; GW_HEADERS=()
