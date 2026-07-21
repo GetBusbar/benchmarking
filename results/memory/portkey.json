@@ -1,15 +1,15 @@
 {
-  "gateway": "busbar",
-  "build": "busbar 1.4.1",
+  "gateway": "portkey",
+  "build": "@portkey-ai/gateway@1.15.2",
   "served": true,
-  "idle_rss_mib": 8.8,
-  "peak_rss_mib": 319.5,
-  "post_load_rss_mib": 39.1,
+  "idle_rss_mib": 245.8,
+  "peak_rss_mib": 666.0,
+  "post_load_rss_mib": 213.2,
   "payload_bytes": 150000,
   "concurrency": 1500,
   "duration_s": 120,
-  "endpoint": "/v1/chat/completions",
-  "model": "gpt-4o-mini",
+  "endpoint": "/v1/messages",
+  "model": "anthropic/mock",
   "hardware": "AWS m7g.2xlarge (Graviton3, 8 cores / 32 GB). Gateway pinned to 4 cores (m7g.xlarge class), mock+loadgen on the other 4, Ubuntu 24.04. One dedicated box per gateway.",
-  "measured_at": "2026-07-21T06:16:49Z"
+  "measured_at": "2026-07-21T06:15:36Z"
 }

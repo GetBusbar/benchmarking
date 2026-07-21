@@ -3,13 +3,13 @@
   "build": "litellm_rust_gateway_v1_messages_route@698072308b (python-config litellm==?)",
   "served": true,
   "idle_rss_mib": 262.8,
-  "peak_rss_mib": 645.7,
-  "post_load_rss_mib": 620.5,
+  "peak_rss_mib": 627.0,
+  "post_load_rss_mib": 599.8,
   "payload_bytes": 150000,
   "concurrency": 1500,
   "duration_s": 120,
   "endpoint": "/v1/messages",
   "model": "azure_ai/mock",
-  "hardware": "AWS m7g.2xlarge (Graviton3, 8 cores / 32 GB) — gateway pinned to 4 cores (m7g.xlarge class), mock+loadgen on the other 4, Ubuntu 24.04",
-  "measured_at": "2026-07-21T04:46:26Z"
+  "hardware": "AWS m7g.2xlarge (Graviton3, 8 cores / 32 GB). Gateway pinned to 4 cores (m7g.xlarge class), mock+loadgen on the other 4, Ubuntu 24.04. One dedicated box per gateway.",
+  "measured_at": "2026-07-21T06:16:34Z"
 }
