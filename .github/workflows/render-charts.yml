@@ -1,0 +1,45 @@
+name: render-charts
+
+# Push new raw results → the charts + report tables regenerate themselves. Nothing is hand-drawn:
+# the rig (or anyone) commits results/<suite>/<gateway>.json and this Action re-runs charts.py and
+# commits the regenerated PNGs + report READMEs back. "Push new results, boom, done."
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'results/**/*.json'   # a new/changed measurement
+      - 'charts.py'           # or a change to how they're drawn
+  workflow_dispatch: {}       # or trigger it by hand
+
+permissions:
+  contents: write
+
+# Never let two renders race; let an in-flight one finish so no commit is lost.
+concurrency:
+  group: render-charts
+  cancel-in-progress: false
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: install matplotlib
+        run: python3 -m pip install --quiet matplotlib
+      - name: regenerate charts + report pages from results/*.json
+        run: python3 charts.py
+      - name: commit regenerated charts + tables
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add results/*.png results/reports
+          if git diff --cached --quiet; then
+            echo "charts already up to date — nothing to commit"
+          else
+            # [skip ci] so this generated-artifact commit doesn't retrigger the workflow.
+            git commit -m "chore(charts): regenerate from results [skip ci]"
+            git push
+          fi
