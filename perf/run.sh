@@ -50,6 +50,14 @@ UGEN="$ROOT/loadgen/ugen"
 
 [ -f "$ROOT/gateways/versions.env" ] && source "$ROOT/gateways/versions.env"
 gw_version(){ echo unknown; }; GW_HEADERS=()
+# gw_diag: a manifest MAY override this to print WHY it failed to serve (docker logs / native log
+# tail). Captured verbatim into the result when served=false, so "did not serve" is evidence, not an
+# assertion a competitor can wave away. Default: nothing to add.
+gw_diag(){ :; }
+# json_escape: fold arbitrary log text into a one-line JSON string value (trimmed to keep results small).
+json_escape(){ printf '%s' "$1" | tr -d '\000' | head -c 1600 \
+  | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read())[1:-1])' 2>/dev/null \
+  || printf '%s' "$1" | tr '\n\t"\\' '    ' | head -c 1600; }
 # shellcheck source=/dev/null
 source "$GW_DIR/gateway.sh"
 
@@ -77,7 +85,16 @@ for i in $(seq 1 60); do
       -d "{\"model\":\"$GW_MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"warm\"}],\"max_tokens\":16}")
   [ "$c" = 200 ] && { ok=1; break; }; sleep 1
 done
-[ "$ok" = 1 ] || log "[$GATEWAY] WARNING never got 200 (last=$c) — served=false"
+SERVE_ERR=""
+if [ "$ok" != 1 ]; then
+  # Capture the response body of one more attempt + the gateway's own logs, so the failure is provable.
+  body="$(curl -s -m3 "http://127.0.0.1:$GW_PORT$GW_PATH" -X POST \
+      -H "content-type: application/json" -H "authorization: Bearer $GW_AUTH" "${CURL_H[@]}" \
+      -d "{\"model\":\"$GW_MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"warm\"}],\"max_tokens\":16}" 2>&1 | head -c 400)"
+  SERVE_ERR="HTTP $c on POST $GW_PATH; body=[$body]; diag=[$(gw_diag 2>&1 | tail -n 20)]"
+  log "[$GATEWAY] WARNING never got 200 (last=$c) — served=false"
+  log "[$GATEWAY] serve_error: $(printf '%s' "$SERVE_ERR" | head -c 300)"
+fi
 
 # ── direct baseline (mock, same path/body) + gateway c1 → overhead µs ──────────────────────────────
 DURL="http://127.0.0.1:$MOCK_PORT$GW_PATH"; GURL="http://127.0.0.1:$GW_PORT$GW_PATH"
@@ -136,6 +153,8 @@ cat > "$RESULTS/$GATEWAY.json" <<JSON
   "gateway": "$GATEWAY",
   "build": "$BUILD",
   "served": $([ "$ok" = 1 ] && echo true || echo false),
+  "last_http_status": "$c",
+  "serve_error": "$(json_escape "$SERVE_ERR")",
   "added_latency_p50_us": $OVER_P50,
   "added_latency_p99_us": $OVER_P99,
   "gateway_c1_p99_us": ${GP99:-0},
@@ -156,6 +175,7 @@ cat > "$RESULTS/$GATEWAY.json" <<JSON
   "endpoint": "$GW_PATH",
   "model": "$GW_MODEL",
   "cores": "gateway=${CORES} loadgen=${LOADCORES} mock=${MOCKCORES}",
+  "arch": "${BENCH_ARCH:-$(uname -m)}",
   "hardware": "${BENCH_HARDWARE:-$(uname -m) $(nproc 2>/dev/null || echo '?')vCPU}",
   "measured_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 }

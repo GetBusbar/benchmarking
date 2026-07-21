@@ -47,6 +47,10 @@ UGEN_BIN="$ROOT/loadgen/ugen"
 # shellcheck source=/dev/null
 [ -f "$ROOT/gateways/versions.env" ] && source "$ROOT/gateways/versions.env"
 gw_version() { echo "unknown"; }  # default; the manifest below may override
+gw_diag(){ :; }  # a manifest may override to print WHY it failed to serve (docker logs / native log tail)
+json_escape(){ printf '%s' "$1" | tr -d '\000' | head -c 1600 \
+  | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read())[1:-1])' 2>/dev/null \
+  || printf '%s' "$1" | tr '\n\t"\\' '    ' | head -c 1600; }
 GW_HEADERS=()  # a manifest may set extra request headers (e.g. Portkey routing, or a minted busbar vkey)
 # shellcheck source=/dev/null
 source "$GW_DIR/gateway.sh"
@@ -73,7 +77,15 @@ for i in $(seq 1 60); do
       -d "{\"model\":\"$GW_MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"warm\"}],\"max_tokens\":16}")
   [ "$c" = "200" ] && { ok=1; break; }; sleep 1
 done
-[ "$ok" = 1 ] || log "[$GATEWAY] WARNING: never got 200 (last=$c) — recording anyway, served=false"
+SERVE_ERR=""
+if [ "$ok" != 1 ]; then
+  body="$(curl -s -m3 "http://127.0.0.1:$GW_PORT$GW_PATH" -X POST \
+      -H "content-type: application/json" -H "authorization: Bearer $GW_AUTH" "${CURL_H[@]}" \
+      -d "{\"model\":\"$GW_MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"warm\"}],\"max_tokens\":16}" 2>&1 | head -c 400)"
+  SERVE_ERR="HTTP $c on POST $GW_PATH; body=[$body]; diag=[$(gw_diag 2>&1 | tail -n 20)]"
+  log "[$GATEWAY] WARNING: never got 200 (last=$c) — recording anyway, served=false"
+  log "[$GATEWAY] serve_error: $(printf '%s' "$SERVE_ERR" | head -c 300)"
+fi
 IDLE=$(gw_rss); log "[$GATEWAY] idle RSS: ${IDLE:-?} MiB (served=$([ "$ok" = 1 ] && echo true || echo false))"
 
 # ── sampler + watchdog ──────────────────────────────────────────────────────────────────────────
@@ -104,6 +116,8 @@ cat > "$RESULTS/$GATEWAY.json" <<JSON
   "gateway": "$GATEWAY",
   "build": "$BUILD",
   "served": $([ "$ok" = 1 ] && echo true || echo false),
+  "last_http_status": "$c",
+  "serve_error": "$(json_escape "$SERVE_ERR")",
   "idle_rss_mib": ${IDLE:-0},
   "peak_rss_mib": ${PEAK:-0},
   "post_load_rss_mib": ${POST:-0},
@@ -112,6 +126,7 @@ cat > "$RESULTS/$GATEWAY.json" <<JSON
   "duration_s": $DUR,
   "endpoint": "$GW_PATH",
   "model": "$GW_MODEL",
+  "arch": "${BENCH_ARCH:-$(uname -m)}",
   "hardware": "$HW",
   "measured_at": "$MEASURED_AT"
 }

@@ -17,15 +17,33 @@
 set -uo pipefail
 export AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-us-east-1}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"   # this repo (benchmarking) root
-ITYPE="${ITYPE:-m7g.2xlarge}"
-HW_LABEL="AWS ${ITYPE} (Graviton3, 8 cores / 32 GB). Gateway pinned to 4 cores (m7g.xlarge class), mock+loadgen on the other 4, Ubuntu 24.04. One dedicated box per gateway."
-SSM="/aws/service/canonical/ubuntu/server/24.04/stable/current/arm64/hvm/ebs-gp3/ami-id"
+
+# ── ARCHITECTURE: the easy flip ───────────────────────────────────────────────────────────────────
+# ARCH=arm64 (default) runs the whole field on Graviton (m7g); ARCH=x86 runs it on Intel (m7i). One
+# knob picks the instance family AND the matching Ubuntu AMI. Every gateway builds/pulls for that arch
+# on its own box, and the arch is recorded in each result so runs from different arches never get
+# confused. (To measure BOTH, run twice with RESULTS_ARCH_SUBDIR set — see the header of run-all.sh.)
+ARCH="${ARCH:-arm64}"
+case "$ARCH" in
+  arm64|aarch64|graviton)
+    ARCH=arm64
+    ITYPE="${ITYPE:-m7g.2xlarge}"
+    SSM="/aws/service/canonical/ubuntu/server/24.04/stable/current/arm64/hvm/ebs-gp3/ami-id"
+    CPU_LABEL="Graviton3" ;;
+  x86|x86_64|amd64|intel)
+    ARCH=x86
+    ITYPE="${ITYPE:-m7i.2xlarge}"
+    SSM="/aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id"
+    CPU_LABEL="Intel (Sapphire Rapids)" ;;
+  *) echo "unknown ARCH='$ARCH' (use arm64 or x86)"; exit 2 ;;
+esac
+HW_LABEL="AWS ${ITYPE} (${CPU_LABEL}, 8 cores / 32 GB). Gateway pinned to 4 cores, mock+loadgen on the other 4, Ubuntu 24.04. One dedicated box per gateway."
 KEYNAME="gateway-bench-key"; KEYFILE="${TMPDIR:-/tmp}/${KEYNAME}.pem"; SGNAME="gateway-bench-sg"
 SSHOPT="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=12 -i $KEYFILE"
 log(){ echo "[$(date +%H:%M:%S)] $*"; }
 
 # Default field: every gateway that serves the mock as a single-box drop-in (matches run-all.sh).
-DEFAULT_GATEWAYS=(busbar litellm-rust litellm-python bifrost portkey kong helicone gomodel)
+DEFAULT_GATEWAYS=(busbar litellm-rust litellm-python bifrost portkey kong helicone gomodel one-api)
 if [[ $# -gt 0 ]]; then GATEWAYS=("$@"); else GATEWAYS=("${DEFAULT_GATEWAYS[@]}"); fi
 
 # ── shared AWS setup (key + SG), done once ────────────────────────────────────────────────────────
@@ -68,7 +86,7 @@ bench_gateway() {
   glog_echo "installing deps"
   ssh $SSHOPT ubuntu@"$ip" 'set -e
     sudo apt-get update -q
-    sudo apt-get install -y -q build-essential pkg-config libssl-dev python3-venv python3-pip golang-go docker.io git nodejs npm
+    sudo apt-get install -y -q build-essential pkg-config libssl-dev python3-venv python3-pip golang-go docker.io git nodejs npm cmake clang protobuf-compiler jq
     sudo usermod -aG docker ubuntu || true
     command -v cargo >/dev/null || (curl -sSf https://sh.rustup.rs | sh -s -- -y)
     python3 -m pip install --user -q --break-system-packages matplotlib psutil 2>/dev/null || pip3 install -q matplotlib psutil || true' >>"$glog" 2>&1
@@ -81,6 +99,7 @@ bench_gateway() {
   glog_echo "running $gw (latency + RPS + memory)"
   ssh $SSHOPT ubuntu@"$ip" "source ~/.cargo/env; cd ~/benchmarking
     export BENCH_HARDWARE='$HW_LABEL'
+    export BENCH_ARCH='$ARCH'
     export CORES=0-3 LOADCORES=4-5 MOCKCORES=6-7
     export CAP_MIB=24000
     export SUITES=\"${SUITES:-perf memory}\"
