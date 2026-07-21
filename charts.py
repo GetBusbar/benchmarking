@@ -62,6 +62,12 @@ GATEWAYS = {
     "bifrost": "Bifrost",
     "portkey": "Portkey",
     "litellm-python": "LiteLLM · Python",
+    "kong": "Kong",
+    "helicone": "Helicone",
+    "one-api": "One-API",
+    "gptrouter": "GPTRouter",
+    "arch": "Arch",
+    "envoy-ai": "Envoy AI Gateway",
 }
 
 
@@ -246,22 +252,31 @@ def _report_md(rows: list, title: str, charts: list) -> str:
     lines.append("")
     lines.append("| Gateway | Added latency (p99) | RPS ceiling | Idle RSS | Peak RSS | Serves? | Built |")
     lines.append("|---|--:|--:|--:|--:|:-:|---|")
+    mock_bound_seen = False
     for key, r in rows:
         lat = r.get("added_latency_p99_us")
         rps = r.get("rps_ceiling")
         idle = r.get("idle_rss_mib")
         peak = r.get("peak_rss_mib")
         served = r.get("served", None)
+        rps_cell = f"{int(rps):,}" if rps else "—"
+        if r.get("mock_bound"):  # ceiling was within 10% of the mock's own — a floor, not a limit
+            rps_cell += " ⚠"
+            mock_bound_seen = True
         lines.append(
             f"| {GATEWAYS[key]} "
             f"| {f'{lat} µs' if lat is not None else '—'} "
-            f"| {f'{int(rps):,}' if rps else '—'} "
+            f"| {rps_cell} "
             f"| {f'{idle:.0f} MiB' if idle is not None else '—'} "
             f"| {f'{peak:.0f} MiB' if peak is not None else '—'} "
             f"| {'—' if served is None else ('✅' if served else '❌')} "
             f"| `{(r.get('build') or '').strip()[:38]}` |"
         )
     lines.append("")
+    if mock_bound_seen:
+        lines.append("⚠ = the RPS ceiling was within 10% of the mock's own throughput ceiling — treat "
+                     "it as a **floor**; the gateway may sustain more on a faster mock/box.")
+        lines.append("")
     for c in charts:
         if (RESULTS / f"{c}.png").exists():
             lines.append(f"![{c}](../../{c}.png)")

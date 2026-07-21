@@ -30,12 +30,26 @@ and it just works. The mock answers both shapes (OpenAI by default, Anthropic fo
 
 ## Shipped gateways
 
+**In the default run** (serve the mock as a single-box drop-in):
+
 | dir | what | notes |
 |---|---|---|
-| `busbar/` | Busbar single binary | needs `BUSBAR_BIN` |
+| `busbar/` | Busbar single binary | needs `BUSBAR_BIN`; governance-memory + minted vkey |
 | `bifrost/` | maximhq/bifrost (docker), documented pool config | needs Docker |
-| `litellm-rust/` | BerriAI compiled AI-gateway beta | **only serves `/v1/messages` via `azure_ai` + the `python-config` reader** — see its `gateway.sh` header for why (verified against their source) |
+| `litellm-rust/` | BerriAI compiled AI-gateway beta | **only serves `/v1/messages` via `azure_ai` + the `python-config` reader** — see its `gateway.sh` header (verified against their source) |
 | `litellm-python/` | LiteLLM `[proxy]` CLI | pip-installed on first run |
+| `portkey/` | Portkey OSS gateway (npx) | routes via `x-portkey-*` headers |
+| `kong/` | Kong Gateway + `ai-proxy` (docker, DB-less) | `upstream_url` → mock; config verified locally, mock-hop needs the Linux box (Docker-Desktop host-net) |
+| `helicone/` | Helicone AI Gateway (Rust, docker) | `openai` provider `base-url` → mock |
+
+**Documented but opt-in by name** (need multi-container / k8s bring-up — run `run-all.sh <name>` explicitly; each `gateway.sh` header explains what's required):
+
+| dir | what | blocker |
+|---|---|---|
+| `one-api/` | One-API (songquanpeng/one-api) | channels + tokens are runtime admin-API state, not declarative |
+| `gptrouter/` | GPTRouter (Writesonic) | docker-compose stack (router + Postgres + queue) + runtime provider registration |
+| `arch/` | Arch (Katanemo) | Envoy + Arch services via the `archgw` CLI |
+| `envoy-ai/` | Envoy AI Gateway | Kubernetes-native (Envoy Gateway + CRDs) |
 
 ## Fairness
 

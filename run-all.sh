@@ -13,7 +13,10 @@
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GATEWAYS=("$@")
-[ ${#GATEWAYS[@]} -eq 0 ] && GATEWAYS=(busbar litellm-rust litellm-python bifrost portkey)
+# Default field = every gateway that serves the mock as a single-box drop-in. The heavier ones
+# (one-api, gptrouter, arch, envoy-ai) have manifests too but need multi-container/k8s bring-up, so
+# they're opt-in by name (see their gateways/<name>/gateway.sh headers) rather than in the default run.
+[ ${#GATEWAYS[@]} -eq 0 ] && GATEWAYS=(busbar litellm-rust litellm-python bifrost portkey kong helicone)
 log(){ echo "[$(date +%H:%M:%S)] $*"; }
 
 # Which suites to run (headline first): perf = latency + RPS ceiling; memory = idle/peak RSS.

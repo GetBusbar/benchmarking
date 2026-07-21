@@ -15,3 +15,7 @@ results/*.log
 mock/target/
 # go loadgen binary
 loadgen/ugen
+# any per-run generated gateway config
+gateways/*/*.gen.*
+gateways/*/bfdata/
+gateways/*/kong.gen.yml

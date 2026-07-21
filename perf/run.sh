@@ -77,6 +77,14 @@ read -r _grps _gfail GP99 GP50 < <(probe "$GURL" 1 "$C1_DUR")
 OVER_P99=$(( ${GP99:-0} - ${DP99:-0} )); OVER_P50=$(( ${GP50:-0} - ${DP50:-0} ))
 log "[$GATEWAY] c1: gw p99=${GP99}µs direct p99=${DP99}µs → added p99=${OVER_P99}µs (p50 added=${OVER_P50}µs)"
 
+# ── mock-ceiling guardrail: an RPS ceiling is only the GATEWAY's if the mock + load generator both
+# out-run it. Measure the mock's OWN sustained RPS (load→mock direct, at the top of the sweep) so a
+# mock-bound result is flagged, never hidden. ────────────────────────────────────────────────────
+MOCK_CONC=1; for w in $SWEEP; do MOCK_CONC=$w; done   # highest concurrency in the sweep
+read -r MOCK_CEIL_RPS _mf _mp99 _mp50 < <(probe "$DURL" "$MOCK_CONC" "$SWEEP_DUR")
+MOCK_CEIL_RPS=${MOCK_CEIL_RPS:-0}
+log "[$GATEWAY] mock ceiling (load→mock direct, c=$MOCK_CONC) = $MOCK_CEIL_RPS rps"
+
 # ── throughput ceiling: ramp concurrency, keep max sustained rps with p99<ceil AND 0 errors ────────
 CEIL_RPS=0; CEIL_CONC=0; CEIL_P99=0; SWEEP_JSON=""
 for conc in $SWEEP; do
@@ -89,6 +97,13 @@ for conc in $SWEEP; do
   fi
 done
 log "[$GATEWAY] RPS ceiling = $CEIL_RPS rps @ c=$CEIL_CONC (p99 $((CEIL_P99/1000))ms, 0 errors)"
+
+# A ceiling within 10% of the mock's own ceiling isn't the gateway's limit — it's the harness's.
+MOCK_BOUND=false
+if [ "${MOCK_CEIL_RPS:-0}" -gt 0 ] && awk -v c="$CEIL_RPS" -v m="$MOCK_CEIL_RPS" 'BEGIN{exit !(c>=0.9*m)}'; then
+  MOCK_BOUND=true
+  log "[$GATEWAY] ⚠ WARNING: RPS ceiling ($CEIL_RPS) is within 10% of the mock's own ceiling ($MOCK_CEIL_RPS) — MOCK-BOUND; the gateway may sustain more on a faster mock/box. Treat this ceiling as a floor."
+fi
 
 BUILD="$(gw_version 2>/dev/null | tr -d '\n' | sed 's/"/\\"/g')"
 cat > "$RESULTS/$GATEWAY.json" <<JSON
@@ -103,6 +118,8 @@ cat > "$RESULTS/$GATEWAY.json" <<JSON
   "rps_ceiling": $CEIL_RPS,
   "rps_ceiling_concurrency": $CEIL_CONC,
   "rps_ceiling_p99_us": $CEIL_P99,
+  "mock_ceiling_rps": ${MOCK_CEIL_RPS:-0},
+  "mock_bound": $MOCK_BOUND,
   "p99_ceiling_ms": $P99_CEIL_MS,
   "sweep": [$SWEEP_JSON],
   "payload_bytes": $PSIZE,
@@ -114,5 +131,6 @@ cat > "$RESULTS/$GATEWAY.json" <<JSON
 JSON
 echo "================================================================"
 echo " gateway=$GATEWAY   added latency p99=${OVER_P99}µs   RPS ceiling=${CEIL_RPS} @ c=${CEIL_CONC}"
+echo " mock ceiling=${MOCK_CEIL_RPS:-0} rps   mock_bound=${MOCK_BOUND}"
 echo " -> $RESULTS/$GATEWAY.json"
 echo "================================================================"
