@@ -23,7 +23,13 @@ from pathlib import Path
 
 # When this render happened (UTC). Stamped into every report page + chart footer so a re-run always
 # refreshes and re-commits ALL readmes and ALL images, even when the underlying numbers didn't change.
-RENDER_TS = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+_NOW = datetime.now(timezone.utc)
+RENDER_TS = _NOW.strftime("%Y-%m-%d %H:%M UTC")
+# Cache-buster appended to every chart <img> URL in the report. GitHub proxies README images through
+# its camo cache keyed on the full URL — a stable path serves a STALE png long after the table (plain
+# markdown) has updated. A per-render query string changes the URL each time, so the image refreshes
+# in lockstep with the numbers. (Costs nothing; the file on disk is unchanged.)
+CACHE_BUSTER = _NOW.strftime("%Y%m%d%H%M")
 
 # matplotlib is imported lazily (in render) so the report pages can be generated with plain JSON even
 # where matplotlib isn't installed. plt is filled in by _mpl().
@@ -57,10 +63,22 @@ def _mpl():
         import matplotlib.pyplot as _plt
     except ImportError:
         return None
-    for _f in ("Inter", "Helvetica Neue", "Arial", "DejaVu Sans"):
-        if any(_f.lower() in f.name.lower() for f in fm.fontManager.ttflist):
-            _plt.rcParams["font.family"] = _f
-            break
+    # Inter is BUNDLED in the repo (assets/fonts/) and registered here, so the charts render
+    # identically on any machine — a dev laptop, CI, whatever — regardless of what fonts the OS has.
+    # (CI runners have neither Inter nor a "medium" weight, so relying on system fonts silently fell
+    # back to DejaVu and dropped the medium weight. Registering our own TTFs removes that dependency.)
+    fonts_dir = ROOT / "assets" / "fonts"
+    have_inter = False
+    for ttf in sorted(fonts_dir.glob("Inter-*.ttf")):
+        fm.fontManager.addfont(str(ttf))
+        have_inter = True
+    if have_inter:
+        _plt.rcParams["font.family"] = "Inter"
+    else:  # no bundled fonts (shouldn't happen in-repo) — fall back to something always present
+        for _f in ("Helvetica Neue", "Arial", "DejaVu Sans"):
+            if any(_f.lower() in f.name.lower() for f in fm.fontManager.ttflist):
+                _plt.rcParams["font.family"] = _f
+                break
     _plt.rcParams.update({"axes.edgecolor": "#d7dae0", "svg.fonttype": "none"})
     plt = _plt
     return plt
@@ -504,7 +522,7 @@ def _report_md(rows: list, title: str, charts: list, pending: tuple = (), chart_
     for c in charts:
         png = f"{chart_prefix}{c}"  # top5 report points at its own top5_*.png set
         if (RESULTS / f"{png}.png").exists():
-            lines.append(f"![{c}](../../{png}.png)")
+            lines.append(f"![{c}](../../{png}.png?v={CACHE_BUSTER})")
             lines.append("")
     lines.append("---")
     lines.append("Method: added latency = gateway p99 − direct-to-mock p99 at concurrency 1; RPS "
