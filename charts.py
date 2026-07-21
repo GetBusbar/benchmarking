@@ -187,7 +187,7 @@ CHARTS = [
         name="rps_sustained_20ms",
         suite="perf",
         title="Sustained throughput under 20 ms LLM latency",
-        subtitle="AIGatewayBench's metric: req/s held with p99 < 1s + <0.1% errors, 20 ms upstream (higher is better)",
+        subtitle="req/s held with p99 < 1s + <0.1% errors under a realistic 20 ms model delay (higher is better)",
         unit="requests / sec",
         series=[Series("rps_sustained_20ms", "sustained RPS @20ms", "rank")],
         higher_better=True,
@@ -378,10 +378,13 @@ def render(chart: Chart, only_keys=None, out_stem: str | None = None) -> None:
                   fontsize=9, color=GRAY)
     ax.set_xlim(right=xmax * (2.9 if chart.log else 1.28))
 
-    # Title + subtitle stacked above the axes with real vertical separation (no overlap). pad lifts
-    # the title clear of the plot; the subtitle sits just below it, still above the top gridline.
-    ax.set_title(chart.title, fontsize=15, fontweight="bold", color=INK, loc="left", pad=38)
-    ax.text(0, 1.035, chart.subtitle, transform=ax.transAxes, fontsize=10.5, color=GRAY, va="bottom")
+    # Title + subtitle stacked above the axes with real vertical separation (no overlap). Both anchored
+    # in POINTS above the axes top (not axes-fraction) so the gap is identical on every chart regardless
+    # of its height: subtitle 10 pt up, title 40 pt up → a fixed ~30 pt gap. (Axes-fraction spacing
+    # collided once the taller Inter metrics replaced DejaVu — the reported title/subtitle cramping.)
+    ax.set_title(chart.title, fontsize=15, fontweight="bold", color=INK, loc="left", pad=40)
+    ax.annotate(chart.subtitle, xy=(0, 1), xycoords="axes fraction", xytext=(0, 10),
+                textcoords="offset points", fontsize=10.5, color=GRAY, va="bottom", ha="left")
 
     # Language legend (swatch per language present) + a note for the secondary series (e.g. idle RAM).
     from matplotlib.patches import Patch
