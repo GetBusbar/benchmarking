@@ -1,15 +1,18 @@
 {
   "gateway": "litellm-python",
-  "build": "litellm==?",
+  "build": "litellm==1.93.0",
   "served": true,
+  "last_http_status": "200",
+  "serve_error": "",
   "idle_rss_mib": 290.5,
-  "peak_rss_mib": 489.0,
-  "post_load_rss_mib": 478.3,
+  "peak_rss_mib": 1047.6,
+  "post_load_rss_mib": 1042.9,
   "payload_bytes": 150000,
   "concurrency": 1500,
   "duration_s": 120,
   "endpoint": "/v1/chat/completions",
   "model": "gpt-4o-mini",
-  "hardware": "AWS m7g.2xlarge (Graviton3, 8 cores / 32 GB). Gateway pinned to 4 cores (m7g.xlarge class), mock+loadgen on the other 4, Ubuntu 24.04. One dedicated box per gateway.",
-  "measured_at": "2026-07-21T06:16:24Z"
+  "arch": "arm64",
+  "hardware": "AWS m7g.2xlarge (Graviton3, 8 cores / 32 GB). Gateway pinned to 4 cores, mock+loadgen on the other 4, Ubuntu 24.04. One dedicated box per gateway.",
+  "measured_at": "2026-07-21T15:46:13Z"
 }

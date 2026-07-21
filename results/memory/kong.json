@@ -1,15 +1,18 @@
 {
   "gateway": "kong",
-  "build": "kong:3.8",
+  "build": "kong:3.8 (@sha256:dd6cd1d94a7aae8c5a4d245ccbee6b81230d41a4312d76d076c4e9c6db65611c)",
   "served": true,
-  "idle_rss_mib": 516.5,
-  "peak_rss_mib": 723.7,
-  "post_load_rss_mib": 724.7,
+  "last_http_status": "200",
+  "serve_error": "",
+  "idle_rss_mib": 518.4,
+  "peak_rss_mib": 846,
+  "post_load_rss_mib": 842.6,
   "payload_bytes": 150000,
   "concurrency": 1500,
   "duration_s": 120,
   "endpoint": "/v1/chat/completions",
   "model": "gpt-4o-mini",
-  "hardware": "AWS m7g.2xlarge (Graviton3, 8 cores / 32 GB). Gateway pinned to 4 cores (m7g.xlarge class), mock+loadgen on the other 4, Ubuntu 24.04. One dedicated box per gateway.",
-  "measured_at": "2026-07-21T06:14:47Z"
+  "arch": "arm64",
+  "hardware": "AWS m7g.2xlarge (Graviton3, 8 cores / 32 GB). Gateway pinned to 4 cores, mock+loadgen on the other 4, Ubuntu 24.04. One dedicated box per gateway.",
+  "measured_at": "2026-07-21T15:43:30Z"
 }
