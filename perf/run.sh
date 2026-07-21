@@ -53,8 +53,8 @@ UGEN="$ROOT/loadgen/ugen"
 [ -f "$ROOT/gateways/versions.env" ] && source "$ROOT/gateways/versions.env"
 gw_version(){ echo unknown; }; GW_HEADERS=()
 # gw_diag: a manifest MAY override this to print WHY it failed to serve (docker logs / native log
-# tail). Captured verbatim into the result when served=false, so "did not serve" is evidence, not an
-# assertion a competitor can wave away. Default: nothing to add.
+# tail). Captured verbatim into the result when served=false, so a "did not serve" row carries the
+# captured status + logs as evidence rather than a bare assertion. Default: nothing to add.
 gw_diag(){ :; }
 # json_escape: fold arbitrary log text into a one-line JSON string value (trimmed to keep results small).
 json_escape(){ printf '%s' "$1" | tr -d '\000' | head -c 1600 \

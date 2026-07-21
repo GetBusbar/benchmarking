@@ -8,7 +8,7 @@
 # It records, on ONE box against ONE mock with ONE load profile:
 #   * idle RSS      — resident memory right after the gateway answers 200, before any load
 #   * peak RSS      — highest resident memory sampled during sustained load
-#   * post-load RSS — resident memory ~15 s after load stops (does it release, or stay pinned?)
+#   * post-load RSS — resident memory 60 s after load stops (does it release, or stay pinned?)
 # and writes results/memory/<gateway>.json for the chart generator.
 #
 #   GATEWAY=busbar        BUSBAR_BIN=~/busbar   memory/run.sh
@@ -156,6 +156,6 @@ echo "================================================================"
 echo " gateway=$GATEWAY  payload=${PSIZE}B  conc=$CONC  dur=${DUR}s"
 echo "   idle RSS:      ${IDLE:-?} MiB"
 echo "   PEAK RSS:      ${PEAK:-?} MiB   (under load)"
-echo "   post-load RSS: ${POST:-?} MiB   (15s after load stops)"
+echo "   post-load RSS: ${POST:-?} MiB   (60s after load stops)"
 echo " -> $RESULTS/$GATEWAY.json"
 echo "================================================================"

@@ -165,6 +165,7 @@ functions. The runners are gateway-agnostic; there is nothing else to edit. See
 
 ## Why this exists
 
-Gateway vendors publish memory and latency numbers that don't survive a re-run — measured on
-undisclosed hardware, from configs that don't serve the endpoint, with the winner hardcoded. This
-repo is the opposite: click, run, get the answer, check our work. That's the whole point.
+Published gateway numbers are often hard to reproduce — the hardware isn't disclosed, the config may
+not actually serve the endpoint, and the chart can't be regenerated from raw data. This repo is built
+to be the opposite: disclosed hardware, configs that serve (or are recorded as not serving), and every
+number regenerating from committed JSON. Clone it, run it, and check the work — including ours.
