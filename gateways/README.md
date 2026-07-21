@@ -41,6 +41,7 @@ and it just works. The mock answers both shapes (OpenAI by default, Anthropic fo
 | `portkey/` | Portkey OSS gateway (npx) | routes via `x-portkey-*` headers |
 | `kong/` | Kong Gateway + `ai-proxy` (docker, DB-less) | `upstream_url` → mock; config verified locally, mock-hop needs the Linux box (Docker-Desktop host-net) |
 | `helicone/` | Helicone AI Gateway (Rust, docker) | `openai` provider `base-url` → mock |
+| `gomodel/` | GoModel (ENTERPILOT/GOModel, Go, docker) | `OPENAI_BASE_URL` → mock; unprotected for pure proxy-overhead |
 
 **Documented but opt-in by name** (need multi-container / k8s bring-up — run `run-all.sh <name>` explicitly; each `gateway.sh` header explains what's required):
 

@@ -1,7 +1,7 @@
 # AI gateway benchmarks
 
 A fair, reproducible benchmark for self-hostable AI gateways — **LiteLLM (Rust & Python), Bifrost,
-Portkey, Kong, Helicone, Busbar, and whatever else you drop in.** Same box, same mock, same load,
+Portkey, Kong, Helicone, GoModel, Busbar, and whatever else you drop in.** Same box, same mock, same load,
 same cpu pin, for every gateway. One command runs it; the charts regenerate from raw results; every
 source ref is pinned in the open and the built commit is stamped into the output.
 
