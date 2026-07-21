@@ -21,7 +21,11 @@ Two throughput numbers: **max proxy RPS** (instant upstream — raw forwarding s
 
 ![memory_rss](../../top5_memory_rss.png)
 
----
-Method: added latency = gateway p99 − direct-to-mock p99 at concurrency 1; RPS ceiling = highest sustained req/s with p99 < 1 s and zero errors; RSS idle = after first 200, peak = under sustained load. Same box, same mock, same load, one gateway at a time. Source refs pinned in `gateways/versions.env`; the built commit is in each row.
+![rps_per_dollar](../../top5_rps_per_dollar.png)
 
-<sub>Page + charts regenerated **2026-07-21 16:42 UTC** from the raw `results/*.json`.</sub>
+![cost_per_million](../../top5_cost_per_million.png)
+
+---
+Method: added latency = gateway p99 − direct-to-mock p99 at concurrency 1; RPS ceiling = highest sustained req/s with p99 < 1 s and <0.1% errors; RSS idle = after first 200, peak = under sustained load. Same box, same mock, same load, one gateway at a time. Source refs pinned in `gateways/versions.env`; the built commit is in each row.
+
+<sub>Page + charts regenerated **2026-07-21 17:02 UTC** from the raw `results/*.json`.</sub>

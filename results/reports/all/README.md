@@ -23,7 +23,7 @@ Every number below is regenerated from the raw `results/*.json` — re-run `run-
 ⏳ **Pending measurement** (a manifest exists; not yet run on the rig): APISIX, Arch, Envoy AI Gateway, TensorZero. These land here as their runs complete — nothing is hidden.
 
 Two throughput numbers: **max proxy RPS** (instant upstream — raw forwarding speed) and **sustained RPS @20ms** (AIGatewayBench's metric — concurrent in-flight capacity under realistic LLM latency).
-**✕** = did not serve under load (0 successful req/s). &nbsp; **0** = came up, but no tested concurrency held p99 < 1 s with zero errors. &nbsp; **⏳** = a manifest exists but it hasn't been run on the rig yet.
+**✕** = did not serve under load (0 successful req/s). &nbsp; **0** = came up, but no tested concurrency held p99 < 1 s with <0.1% errors. &nbsp; **⏳** = a manifest exists but it hasn't been run on the rig yet.
 
 ![added_latency](../../added_latency.png)
 
@@ -33,7 +33,11 @@ Two throughput numbers: **max proxy RPS** (instant upstream — raw forwarding s
 
 ![memory_rss](../../memory_rss.png)
 
----
-Method: added latency = gateway p99 − direct-to-mock p99 at concurrency 1; RPS ceiling = highest sustained req/s with p99 < 1 s and zero errors; RSS idle = after first 200, peak = under sustained load. Same box, same mock, same load, one gateway at a time. Source refs pinned in `gateways/versions.env`; the built commit is in each row.
+![rps_per_dollar](../../rps_per_dollar.png)
 
-<sub>Page + charts regenerated **2026-07-21 16:42 UTC** from the raw `results/*.json`.</sub>
+![cost_per_million](../../cost_per_million.png)
+
+---
+Method: added latency = gateway p99 − direct-to-mock p99 at concurrency 1; RPS ceiling = highest sustained req/s with p99 < 1 s and <0.1% errors; RSS idle = after first 200, peak = under sustained load. Same box, same mock, same load, one gateway at a time. Source refs pinned in `gateways/versions.env`; the built commit is in each row.
+
+<sub>Page + charts regenerated **2026-07-21 17:02 UTC** from the raw `results/*.json`.</sub>
