@@ -91,8 +91,8 @@ taskset -c "$LOADCORES" "$UGEN_BIN" -url "http://127.0.0.1:$GW_PORT$GW_PATH" \
 touch "$STOP"; kill "$SP" 2>/dev/null
 PEAK=$(cat /tmp/mem.peak)
 
-log "[$GATEWAY] load stopped — waiting 15s to see if memory releases"
-sleep 15
+log "[$GATEWAY] load stopped — waiting 60s to see if memory releases"
+sleep 60
 POST=$(gw_rss)
 
 MEASURED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
