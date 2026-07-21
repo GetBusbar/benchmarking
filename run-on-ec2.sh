@@ -42,8 +42,9 @@ KEYNAME="gateway-bench-key"; KEYFILE="${TMPDIR:-/tmp}/${KEYNAME}.pem"; SGNAME="g
 SSHOPT="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=12 -i $KEYFILE"
 log(){ echo "[$(date +%H:%M:%S)] $*"; }
 
-# Default field: every gateway that serves the mock as a single-box drop-in (matches run-all.sh).
-DEFAULT_GATEWAYS=(busbar litellm-rust litellm-python bifrost portkey kong helicone gomodel one-api)
+# Default field: every gateway that serves the mock as a single-box drop-in (alphabetical; matches
+# run-all.sh). Arch (archgw CLI) + Envoy AI Gateway (kind k8s) are opt-in — non-standard bring-up.
+DEFAULT_GATEWAYS=(apisix bifrost busbar gomodel helicone kong litellm-python litellm-rust one-api portkey tensorzero)
 if [[ $# -gt 0 ]]; then GATEWAYS=("$@"); else GATEWAYS=("${DEFAULT_GATEWAYS[@]}"); fi
 
 # ── shared AWS setup (key + SG), done once ────────────────────────────────────────────────────────

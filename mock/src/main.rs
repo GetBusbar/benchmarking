@@ -88,7 +88,10 @@ async fn main() {
     }
     let ttft_ms: u64 = std::env::var("MOCK_TTFT_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
 
-    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    // Bind 0.0.0.0 (not just loopback) so container-networked gateways (Arch via host.docker.internal,
+    // Envoy AI via the kind bridge IP) can reach the mock — the loopback path 127.0.0.1 that the
+    // --network-host and native gateways use is unchanged.
+    let addr = SocketAddr::from(([0, 0, 0, 0], port));
     let listener = TcpListener::bind(addr).await.expect("bind");
     eprintln!("mock listening on {addr} (ttft={ttft_ms}ms) — OpenAI/Responses/Anthropic/Gemini/Bedrock/Cohere");
     loop {

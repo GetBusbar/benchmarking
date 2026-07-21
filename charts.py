@@ -4,8 +4,9 @@
 """Render benchmark charts from results/ — pretty, and pluggable.
 
 Nothing is hard-coded: every number is read from results/<suite>/<gateway>.json (written by the
-runners). Bars are colored by MEASUREMENT — green goes to whichever gateway measured best on the
-metric, so if busbar loses, busbar isn't green.
+runners). Bars are colored by MEASUREMENT — a neutral highlight goes to whichever gateway measured
+best on the metric, so if busbar loses, busbar isn't highlighted. The highlight is deliberately not a
+brand color.
 
 Add a chart = append one `Chart(...)` to CHARTS below. Add a gateway = it shows up automatically
 once it has a result file (label/order from GATEWAYS). Run after the benchmark:
@@ -31,8 +32,9 @@ ROOT = Path(__file__).resolve().parent
 RESULTS = ROOT / "results"
 
 # ── house style ──────────────────────────────────────────────────────────────────────────────────
-BRAND = "#00b34a"   # busbar green — the "won this metric" color
-BRAND_DK = "#059142"
+BRAND = "#2f6fed"   # winner highlight — a NEUTRAL blue, deliberately not a brand color, so a
+                    # highlighted bar can never be misread as "the sponsor won."
+BRAND_DK = "#1e5bd8"
 SLATE = "#3a3f4b"   # everyone else's primary bar
 MUTE = "#9aa2b2"    # secondary/idle bars — mid grey so idle RSS stays readable, not near-invisible
 MUTE_TXT = "#525a6b"  # idle-bar value labels: dark enough to read on white
@@ -63,18 +65,21 @@ def _mpl():
 
 # display order + labels. A gateway appears in a chart only if it has a result file this run.
 GATEWAYS = {
-    "busbar": "Busbar",
-    "litellm-rust": "LiteLLM · Rust",
-    "bifrost": "Bifrost",
-    "portkey": "Portkey",
-    "litellm-python": "LiteLLM · Python",
-    "kong": "Kong",
-    "helicone": "Helicone",
-    "gomodel": "GoModel",
-    "one-api": "One-API",
-    "gptrouter": "GPTRouter",
+    # Alphabetical by key — deliberately NOT busbar-first. Order here is only the input/load order;
+    # every chart and the report tables sort by the MEASURED value, so placement never favors anyone.
+    "apisix": "APISIX",
     "arch": "Arch",
+    "bifrost": "Bifrost",
+    "busbar": "Busbar",
     "envoy-ai": "Envoy AI Gateway",
+    "gomodel": "GoModel",
+    "helicone": "Helicone",
+    "kong": "Kong",
+    "litellm-python": "LiteLLM · Python",
+    "litellm-rust": "LiteLLM · Rust",
+    "one-api": "One-API",
+    "portkey": "Portkey",
+    "tensorzero": "TensorZero",
 }
 
 
@@ -285,7 +290,7 @@ def render(chart: Chart, only_keys=None, out_stem: str | None = None) -> None:
         bits.append(str(meta["hardware"]))
     if "concurrency" in meta and "payload_bytes" in meta:
         bits.append(f"{meta['concurrency']}× {int(meta['payload_bytes'])//1000}KB sustained")
-    bits.append("green = measured best")
+    bits.append("highlighted = measured best")
     fig.text(0.008, 0.012, "  ·  ".join(bits) + f"     getbusbar.com/bench — regenerated {RENDER_TS} from raw results",
              fontsize=7.3, color=GRAY)
 
@@ -316,7 +321,7 @@ def _report_md(rows: list, title: str, charts: list, pending: tuple = (), chart_
     lines.append(f"**Ran on:** {hw}  ·  {when}")
     lines.append("")
     lines.append("Every number below is regenerated from the raw `results/*.json` — re-run "
-                 "`run-all.sh` and this page updates. Green in the charts = measured best.")
+                 "`run-all.sh` and this page updates. The highlighted bar in each chart = measured best.")
     lines.append("")
     lines.append("| Gateway | Added latency (p99) | Max proxy RPS | Sustained RPS @20ms | Idle RSS | Peak RSS | Built |")
     lines.append("|---|--:|--:|--:|--:|--:|---|")

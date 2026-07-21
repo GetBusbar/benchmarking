@@ -32,25 +32,28 @@ and it just works. The mock answers both shapes (OpenAI by default, Anthropic fo
 
 **In the default run** (serve the mock as a single-box drop-in):
 
+Listed alphabetically — no gateway is seated first.
+
 | dir | what | notes |
 |---|---|---|
-| `busbar/` | Busbar single binary | needs `BUSBAR_BIN`; governance-memory + minted vkey |
-| `bifrost/` | maximhq/bifrost (docker), documented pool config | needs Docker |
+| `apisix/` | Apache APISIX + `ai-proxy` (docker, DB-less standalone) | `override.endpoint` → mock; no etcd; access log off, workers = pinned cores |
+| `bifrost/` | maximhq/bifrost (docker) | openai provider base_url → mock; runs its stock config |
+| `busbar/` | Busbar single binary | pulls the RELEASED image, extracts the binary, runs native |
+| `gomodel/` | GoModel (ENTERPILOT/GOModel, Go, docker) | `OPENAI_BASE_URL` → mock; discovers routable models from the mock's `/v1/models` |
+| `helicone/` | Helicone AI Gateway (Rust) — **built from source, run native** | no arm64 image published, so we compile it (pinned commit in `versions.env`); `openai` base-url → mock |
+| `kong/` | Kong Gateway + `ai-proxy` (docker, DB-less) | `upstream_url` → mock |
+| `litellm-python/` | LiteLLM `[proxy]` CLI | pip-installed; multi-worker to its pinned cores |
 | `litellm-rust/` | BerriAI compiled AI-gateway beta | **only serves `/v1/messages` via `azure_ai` + the `python-config` reader** — see its `gateway.sh` header (verified against their source) |
-| `litellm-python/` | LiteLLM `[proxy]` CLI | pip-installed on first run |
+| `one-api/` | One-API (songquanpeng/one-api, docker) | pinned to `v0.6.10` (arm64 tag); channel + token bootstrapped over the admin API in `gw_launch` |
 | `portkey/` | Portkey OSS gateway (npx) | routes via `x-portkey-*` headers |
-| `kong/` | Kong Gateway + `ai-proxy` (docker, DB-less) | `upstream_url` → mock; config verified locally, mock-hop needs the Linux box (Docker-Desktop host-net) |
-| `helicone/` | Helicone AI Gateway (Rust) — **built from source, run native** | no arm64 image is published, so we compile it (pinned commit in `versions.env`) like litellm-rust; `openai` provider `base-url` → mock |
-| `gomodel/` | GoModel (ENTERPILOT/GOModel, Go, docker) | `OPENAI_BASE_URL` → mock; discovers routable models from the mock's `/v1/models`; unprotected for pure proxy-overhead |
-| `one-api/` | One-API (songquanpeng/one-api, docker) | pinned to `v0.6.10` (the tag that ships an arm64 image); its channel + token are bootstrapped over the admin API automatically in `gw_launch` |
+| `tensorzero/` | TensorZero (Rust, docker) | arm64 multiarch image; observability off; provider base_url → mock |
 
-**Documented but opt-in by name** (need multi-container / k8s bring-up — run `run-all.sh <name>` explicitly; each `gateway.sh` header explains what's required):
+**Documented but opt-in by name** (need non-standard bring-up — run `run-all.sh <name>` explicitly; each `gateway.sh` header explains what's required):
 
 | dir | what | blocker |
 |---|---|---|
-| `gptrouter/` | GPTRouter (Writesonic) | docker-compose stack (router + Postgres + queue) + runtime provider registration |
 | `arch/` | Arch (Katanemo) | Envoy + Arch services via the `archgw` CLI |
-| `envoy-ai/` | Envoy AI Gateway | Kubernetes-native (Envoy Gateway + CRDs) |
+| `envoy-ai/` | Envoy AI Gateway | Kubernetes-native (needs a kind cluster + Envoy Gateway/AI CRDs) |
 
 ## Fairness
 

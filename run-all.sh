@@ -13,11 +13,10 @@
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GATEWAYS=("$@")
-# Default field = every gateway that serves the mock as a single-box drop-in. The heavier ones
-# one-api now serves as a single-box drop-in (its channel/token bootstrap is scripted), so it's in the
-# default field. gptrouter, arch, envoy-ai still need multi-container/k8s bring-up, so they stay opt-in
-# by name (see their gateways/<name>/gateway.sh headers) rather than in the default run.
-[ ${#GATEWAYS[@]} -eq 0 ] && GATEWAYS=(busbar litellm-rust litellm-python bifrost portkey kong helicone gomodel one-api)
+# Default field = every gateway that serves the mock as a single-box drop-in (alphabetical, no
+# gateway seated first). Arch (archgw CLI) and Envoy AI Gateway (kind k8s cluster) need non-standard
+# bring-up, so they're opt-in by name — see their gateways/<name>/gateway.sh headers.
+[ ${#GATEWAYS[@]} -eq 0 ] && GATEWAYS=(apisix bifrost busbar gomodel helicone kong litellm-python litellm-rust one-api portkey tensorzero)
 log(){ echo "[$(date +%H:%M:%S)] $*"; }
 
 # Which suites to run (headline first): perf = latency + RPS ceiling; memory = idle/peak RSS.
