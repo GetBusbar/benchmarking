@@ -1,7 +1,7 @@
 # AI gateway benchmarks
 
 A fair, reproducible benchmark for self-hostable AI gateways — **LiteLLM (Rust & Python), Bifrost,
-Portkey, Kong, Helicone, busbar, and whatever else you drop in.** Same box, same mock, same load,
+Portkey, Kong, Helicone, Busbar, and whatever else you drop in.** Same box, same mock, same load,
 same cpu pin, for every gateway. One command runs it; the charts regenerate from raw results; every
 source ref is pinned in the open and the built commit is stamped into the output.
 
@@ -50,7 +50,7 @@ git clone https://github.com/GetBusbar/benchmarking && cd benchmarking
 # A subset:
 ./run-all.sh litellm-rust bifrost
 
-# Include the busbar row — point BUSBAR_BIN at a busbar binary. Get one with either:
+# Include the Busbar row — point BUSBAR_BIN at a busbar binary. Get one with either:
 #   docker create --name b getbusbar/busbar:1.4.1 && docker cp b:/busbar ./busbar && docker rm b
 #   (or download it from https://github.com/GetBusbar/busbar/releases)
 BUSBAR_BIN=./busbar ./run-all.sh
@@ -67,7 +67,7 @@ back, and **terminates the box**. Only needs AWS CLI v2 configured.
 
 ```sh
 ./run-on-ec2.sh                                              # every self-building gateway
-# also build + include busbar at a released tag (from a local busbar checkout):
+# also build + include Busbar at a released tag (from a local busbar checkout):
 BUSBAR_REF=v1.4.1 BUSBAR_REPO=/path/to/busbar-checkout ./run-on-ec2.sh
 ```
 
@@ -126,7 +126,7 @@ functions. The runners are gateway-agnostic; there is nothing else to edit. See
 - **The mock is deterministic and dumb** — it answers any path with a fixed small body (OpenAI shape,
   or Anthropic shape for `/messages`), so the number is the *gateway's* cost, not the upstream's.
 - **The chart colors by measurement, not by name.** Green goes to whichever gateway measured lowest.
-  If busbar loses a metric, busbar isn't green on it.
+  If Busbar loses a metric, Busbar isn't green on it.
 
 ## Why this exists
 
