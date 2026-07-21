@@ -29,9 +29,8 @@ comparable to a native process's RSS.
   into any gateway and then score it on memory; each is launched as it ships (see its
   `gateways/<name>/gateway.sh`).
 - **A watchdog caps the run.** An unbounded gateway can exhaust the box, so `run.sh` kills the load the
-  instant sampled memory crosses `CAP_MIB`, and container gateways run under a hard `--memory` cap so
-  the kernel OOM-kills the container, never the host. A gateway that hits the cap is recorded as such,
-  not hidden.
+  instant sampled memory crosses `CAP_MIB` (default in the runner). A gateway that hits the cap is
+  recorded as such, not hidden.
 
 ## Run it
 

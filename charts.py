@@ -37,7 +37,8 @@ BRAND = "#2f6fed"   # winner highlight — a NEUTRAL blue, deliberately not a br
 BRAND_DK = "#1e5bd8"
 SLATE = "#3a3f4b"   # everyone else's primary bar
 MUTE = "#9aa2b2"    # secondary/idle bars — mid grey so idle RSS stays readable, not near-invisible
-MUTE_TXT = "#525a6b"  # idle-bar value labels: dark enough to read on white
+MUTE_TXT = "#2b3140"  # idle-bar value labels: near-ink for clear contrast on white (kept smaller/lighter
+                      # weight than the peak label so the hierarchy still reads)
 INK = "#1c2430"     # titles
 GRAY = "#8a90a0"    # captions
 GRID = "#eef0f3"
@@ -71,7 +72,6 @@ GATEWAYS = {
     "arch": "Arch",
     "bifrost": "Bifrost",
     "busbar": "Busbar",
-    "envoy-ai": "Envoy AI Gateway",
     "gomodel": "GoModel",
     "helicone": "Helicone",
     "kong": "Kong",
@@ -136,12 +136,12 @@ CHARTS = [
     Chart(
         name="memory_rss",
         suite="memory",
-        title="Gateway memory under sustained load",
-        subtitle="idle vs peak resident memory — same box, same mock, same load",
-        unit="MiB",
+        title="Gateway RAM under sustained load",
+        subtitle="idle vs peak RAM (resident memory) — same box, same mock, same load",
+        unit="MiB RAM",
         series=[
-            Series("peak_rss_mib", "peak RSS (under load)", "rank"),
-            Series("idle_rss_mib", "idle RSS (before load)", MUTE),
+            Series("peak_rss_mib", "peak RAM (under load)", "rank"),
+            Series("idle_rss_mib", "idle RAM (before load)", MUTE),
         ],
         log=True,
     ),
@@ -364,9 +364,10 @@ def _report_md(rows: list, title: str, charts: list, pending: tuple = (), chart_
     lines.append(f"**Ran on:** {hw}  ·  {when}")
     lines.append("")
     lines.append("Every number below is regenerated from the raw `results/*.json` — re-run "
-                 "`run-all.sh` and this page updates. The highlighted bar in each chart = measured best.")
+                 "`run-all.sh` and this page updates. The highlighted bar in each chart = measured best. "
+                 "**Rows are sorted by added latency (p99), lowest first.**")
     lines.append("")
-    lines.append("| Gateway | Added latency (p99) | Max proxy RPS | Sustained RPS @20ms | Idle RSS | Peak RSS | Built |")
+    lines.append("| Gateway | Added latency (p99) | Sustained RPS @20ms | Max proxy RPS | Idle RAM | Peak RAM | Built |")
     lines.append("|---|--:|--:|--:|--:|--:|---|")
     mock_bound_seen = False
     zero_load_seen = False
@@ -408,11 +409,11 @@ def _report_md(rows: list, title: str, charts: list, pending: tuple = (), chart_
         lines.append(
             f"| {GATEWAYS[key]} "
             f"| {lat_cell} "
-            f"| {proxy} "
             f"| {llm} "
+            f"| {proxy} "
             f"| {rss(idle)} "
             f"| {rss(peak)} "
-            f"| `{(r.get('build') or '').strip()[:38]}` |"
+            f"| `{(r.get('build') or '').strip()[:46]}` |"
         )
     # Gateways we intend to measure but haven't yet — shown so the field is transparent, never hidden.
     for key in pending:
@@ -470,9 +471,17 @@ def _report_md(rows: list, title: str, charts: list, pending: tuple = (), chart_
 
 
 def _ranked() -> list:
-    """Gateways with results, ranked by throughput ceiling (sustained, then max-proxy)."""
+    """Ranked by ADDED LATENCY p99, ascending — the table's first column, the headline overhead, and
+    lower-is-better, so the table reads intuitively top-down. Served gateways with a real latency sort
+    first; a gateway that didn't serve (no clean latency) sinks to the bottom."""
     gws = _merge()
-    return sorted(gws.items(), key=lambda kv: kv[1].get("rps_sustained_20ms", 0) or kv[1].get("rps_max_proxy", 0), reverse=True)
+    def key(kv):
+        d = kv[1]
+        lat = d.get("added_latency_p99_us")
+        if d.get("served", True) and lat is not None:
+            return (0, lat)
+        return (1, float("inf"))
+    return sorted(gws.items(), key=key)
 
 
 def write_reports() -> None:
@@ -489,7 +498,7 @@ def write_reports() -> None:
         _report_md(ranked, "All gateways — full field", charts, pending=pending))
     # top5 report points at its own top5_*.png charts (rendered in main), so its charts match its table.
     (RESULTS / "reports" / "top5" / "README.md").write_text(
-        _report_md(ranked[:5], "Top 5 gateways (by throughput ceiling)", charts, chart_prefix="top5_"))
+        _report_md(ranked[:5], "Top 5 gateways (lowest added latency)", charts, chart_prefix="top5_"))
     print(f"wrote results/reports/all + top5 ({len(ranked)} gateways)")
 
 

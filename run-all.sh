@@ -14,9 +14,9 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GATEWAYS=("$@")
 # Default field = every gateway that serves the mock as a single-box drop-in (alphabetical, no
-# gateway seated first). Arch (archgw CLI) and Envoy AI Gateway (kind k8s cluster) need non-standard
-# bring-up, so they're opt-in by name — see their gateways/<name>/gateway.sh headers.
-[ ${#GATEWAYS[@]} -eq 0 ] && GATEWAYS=(apisix bifrost busbar gomodel helicone kong litellm-python litellm-rust one-api portkey tensorzero)
+# gateway seated first). Arch is a single-box drop-in (archgw CLI). Envoy AI Gateway is intentionally
+# excluded — it is Kubernetes-native (needs a cluster), which is out of scope for this single-box harness.
+[ ${#GATEWAYS[@]} -eq 0 ] && GATEWAYS=(apisix arch bifrost busbar gomodel helicone kong litellm-python litellm-rust one-api portkey tensorzero)
 log(){ echo "[$(date +%H:%M:%S)] $*"; }
 
 # Which suites to run (headline first): perf = latency + RPS ceiling; memory = idle/peak RSS.

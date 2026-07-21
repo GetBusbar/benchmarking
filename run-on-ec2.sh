@@ -43,8 +43,8 @@ SSHOPT="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTi
 log(){ echo "[$(date +%H:%M:%S)] $*"; }
 
 # Default field: every gateway that serves the mock as a single-box drop-in (alphabetical; matches
-# run-all.sh). Arch (archgw CLI) + Envoy AI Gateway (kind k8s) are opt-in — non-standard bring-up.
-DEFAULT_GATEWAYS=(apisix bifrost busbar gomodel helicone kong litellm-python litellm-rust one-api portkey tensorzero)
+# run-all.sh). Arch is a single-box drop-in (archgw CLI). Envoy AI Gateway is excluded (k8s-native).
+DEFAULT_GATEWAYS=(apisix arch bifrost busbar gomodel helicone kong litellm-python litellm-rust one-api portkey tensorzero)
 if [[ $# -gt 0 ]]; then GATEWAYS=("$@"); else GATEWAYS=("${DEFAULT_GATEWAYS[@]}"); fi
 
 # ── shared AWS setup (key + SG), done once ────────────────────────────────────────────────────────

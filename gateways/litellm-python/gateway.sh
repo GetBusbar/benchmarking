@@ -47,13 +47,13 @@ YAML
     </dev/null >/tmp/litellm_py.mem.log 2>&1 &
 }
 
-# The proxy is uvicorn workers; sum RSS across the litellm process group for an honest peak.
+# --num_workers spawns uvicorn WORKER children whose cmdlines don't contain "--port", so a pattern
+# match catches only the parent (constant RSS) and misses where memory actually grows. Sum the whole
+# process tree from the parent PID — the SAME method (_rss_tree_mib, in memory/run.sh) as every other
+# gateway. (m11 fix: was reporting a flat idle==peak because the workers were invisible.)
 gw_rss() {
-  local total=0 kb
-  for p in $(pgrep -f "litellm.*--port $GW_PORT"); do
-    kb=$(awk '/VmRSS/{print $2}' "/proc/$p/status" 2>/dev/null); total=$((total + ${kb:-0}))
-  done
-  awk -v k="$total" 'BEGIN{printf "%.1f", k/1024}'
+  local master; master=$(pgrep -f "litellm.*--port $GW_PORT" | head -1)
+  _rss_tree_mib "$master"
 }
 
 gw_stop() { pkill -f "litellm.*--port $GW_PORT" 2>/dev/null; }

@@ -37,6 +37,7 @@ Listed alphabetically — no gateway is seated first.
 | dir | what | notes |
 |---|---|---|
 | `apisix/` | Apache APISIX + `ai-proxy` (docker, DB-less standalone) | `override.endpoint` → mock; no etcd; access log off, workers = pinned cores |
+| `arch/` | Arch (Katanemo, `archgw` CLI) | Envoy + Arch services in one arm64 container; egress-only config → mock; containers pinned to the gateway cores |
 | `bifrost/` | maximhq/bifrost (docker) | openai provider base_url → mock; runs its stock config |
 | `busbar/` | Busbar single binary | pulls the RELEASED image, extracts the binary, runs native |
 | `gomodel/` | GoModel (ENTERPILOT/GOModel, Go, docker) | `OPENAI_BASE_URL` → mock; discovers routable models from the mock's `/v1/models` |
@@ -48,12 +49,8 @@ Listed alphabetically — no gateway is seated first.
 | `portkey/` | Portkey OSS gateway (npx) | routes via `x-portkey-*` headers |
 | `tensorzero/` | TensorZero (Rust, docker) | arm64 multiarch image; observability off; provider base_url → mock |
 
-**Documented but opt-in by name** (need non-standard bring-up — run `run-all.sh <name>` explicitly; each `gateway.sh` header explains what's required):
-
-| dir | what | blocker |
-|---|---|---|
-| `arch/` | Arch (Katanemo) | Envoy + Arch services via the `archgw` CLI |
-| `envoy-ai/` | Envoy AI Gateway | Kubernetes-native (needs a kind cluster + Envoy Gateway/AI CRDs) |
+**Out of scope:** Envoy AI Gateway is Kubernetes-native (Envoy Gateway + CRDs, a full cluster), not a
+single-box drop-in, so it is intentionally not in this harness.
 
 ## Fairness
 
