@@ -13,19 +13,19 @@ Every number below is regenerated from the raw `results/*.json` — re-run `run-
 | [APISIX](https://github.com/apache/apisix) | 486 µs | 17,326 | 19,117 | 181 MiB | 754 MiB | `apache/apisix:3.17.0-debian (@sha256:6cbf65f30` |
 
 Two throughput numbers: **max proxy RPS** (instant upstream — raw forwarding speed) and **sustained RPS @20ms** (AIGatewayBench's metric — concurrent in-flight capacity under realistic LLM latency).
-![added_latency](../../top5_added_latency.png?v=202607211817)
+![added_latency](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/top5_added_latency.png?v=202607211821)
 
-![rps_max_proxy](../../top5_rps_max_proxy.png?v=202607211817)
+![rps_max_proxy](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/top5_rps_max_proxy.png?v=202607211821)
 
-![rps_sustained_20ms](../../top5_rps_sustained_20ms.png?v=202607211817)
+![rps_sustained_20ms](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/top5_rps_sustained_20ms.png?v=202607211821)
 
-![memory_rss](../../top5_memory_rss.png?v=202607211817)
+![memory_rss](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/top5_memory_rss.png?v=202607211821)
 
-![rps_per_dollar](../../top5_rps_per_dollar.png?v=202607211817)
+![rps_per_dollar](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/top5_rps_per_dollar.png?v=202607211821)
 
-![cost_per_million](../../top5_cost_per_million.png?v=202607211817)
+![cost_per_million](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/top5_cost_per_million.png?v=202607211821)
 
 ---
 Method: added latency = gateway p99 − direct-to-mock p99 at concurrency 1; RPS ceiling = highest sustained req/s with p99 < 1 s and <0.1% errors; RSS idle = after first 200, peak = under sustained load. Same box, same mock, same load, one gateway at a time. Source refs pinned in `gateways/versions.env`; the built commit is in each row.
 
-<sub>Page + charts regenerated **2026-07-21 18:17 UTC** from the raw `results/*.json`.</sub>
+<sub>Page + charts regenerated **2026-07-21 18:21 UTC** from the raw `results/*.json`.</sub>
