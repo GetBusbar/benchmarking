@@ -248,7 +248,7 @@ def _report_md(rows: list, title: str, charts: list) -> str:
     lines.append(f"**Ran on:** {hw}  ·  {when}")
     lines.append("")
     lines.append("Every number below is regenerated from the raw `results/*.json` — re-run "
-                 "`bench/run-all.sh` and this page updates. Green in the charts = measured best.")
+                 "`run-all.sh` and this page updates. Green in the charts = measured best.")
     lines.append("")
     lines.append("| Gateway | Added latency (p99) | RPS ceiling | Idle RSS | Peak RSS | Serves? | Built |")
     lines.append("|---|--:|--:|--:|--:|:-:|---|")
@@ -312,7 +312,7 @@ def main() -> None:
         any_done = any_done or (RESULTS / f"{c.name}.png").exists()
     write_reports()
     if not any_done:
-        print("no charts drawn — run the benchmark first (bench/run-all.sh)")
+        print("no charts drawn — run the benchmark first (run-all.sh)")
 
 
 if __name__ == "__main__":
