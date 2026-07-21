@@ -55,6 +55,21 @@ BUSBAR_REPO=/path/to/busbarAI bench/run-on-ec2.sh          # one-click, Graviton
 Out comes `results/perf/<gateway>.json`, `results/memory/<gateway>.json`, and the chart PNGs
 (`results/added_latency.png`, `results/rps_ceiling.png`, `results/memory_rss.png`).
 
+### How long it takes
+
+Plan for it — this is a build-and-measure benchmark, not a quick script:
+
+- **Full field, all metrics** (`run-on-ec2.sh` with the default gateways): **~60–75 min** on an
+  `m7g.4xlarge`. Most of that is *building* — LiteLLM-Rust from source is the long pole (~15–20 min),
+  plus the LiteLLM/Kong/Helicone images and busbar. The measurement itself is only ~5–6 min per
+  gateway (latency + throughput sweep + a memory soak).
+- **A single gateway** (e.g. `run-all.sh busbar`): **~8–12 min**, or ~2–3 min if it's already built.
+- **Locally**, subtract the box provisioning (~2–3 min) but expect the same build/measure times.
+
+The one-click EC2 script does all of this unattended and terminates the box when done, so the wall
+clock is hands-off. First run is slowest (cold builds + image pulls); re-runs on a warm box are much
+faster.
+
 ## What it measures
 
 **`perf/`** — what the system can *do* (the metrics that matter most):
