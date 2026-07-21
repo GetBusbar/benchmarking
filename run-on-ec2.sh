@@ -63,9 +63,18 @@ rsync -az --delete -e "ssh $SSHOPT" \
 
 BB_ENV=""
 if [[ -n "$BUSBAR_REPO" ]]; then
-  log "rsync busbar source + build (release, jemalloc)"
-  rsync -az --delete -e "ssh $SSHOPT" --exclude target --exclude .git --exclude node_modules \
-    "$BUSBAR_REPO/" ubuntu@"$IP":~/busbar-src/
+  # Build the RELEASED busbar users can download. BUSBAR_REF pins the exact tag (e.g. v1.4.1) — we
+  # ship that tag's tree via `git archive` (rsync strips .git, so a tag checkout isn't possible on the
+  # box). Unset BUSBAR_REF = the working tree (HEAD), for local dev only.
+  if [[ -n "${BUSBAR_REF:-}" ]]; then
+    log "shipping busbar source at ref ${BUSBAR_REF} (git archive) + build (release, jemalloc)"
+    ssh $SSHOPT ubuntu@"$IP" 'rm -rf ~/busbar-src && mkdir -p ~/busbar-src'
+    git -C "$BUSBAR_REPO" archive --format=tar "$BUSBAR_REF" | ssh $SSHOPT ubuntu@"$IP" 'tar -x -C ~/busbar-src'
+  else
+    log "rsync busbar working tree + build (release, jemalloc)"
+    rsync -az --delete -e "ssh $SSHOPT" --exclude target --exclude .git --exclude node_modules \
+      "$BUSBAR_REPO/" ubuntu@"$IP":~/busbar-src/
+  fi
   ssh $SSHOPT ubuntu@"$IP" 'source ~/.cargo/env; cd ~/busbar-src && cargo build --release -p busbar 2>&1 | tail -3' 2>&1 | sed 's/^/  [busbar] /'
   BB_ENV='export BUSBAR_BIN=~/busbar-src/target/release/busbar'
 fi
