@@ -15,15 +15,12 @@ once it has a result file (label/order from GATEWAYS). Run after the benchmark:
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
-import matplotlib
-
-matplotlib.use("Agg")
-import matplotlib.font_manager as fm
-import matplotlib.pyplot as plt
-from matplotlib.patches import FancyBboxPatch  # noqa: F401  (kept for future annotations)
+# matplotlib is imported lazily (in render) so the report pages can be generated with plain JSON even
+# where matplotlib isn't installed. plt is filled in by _mpl().
+plt = None
 
 ROOT = Path(__file__).resolve().parent
 RESULTS = ROOT / "results"
@@ -36,11 +33,27 @@ MUTE = "#cdd0d7"    # secondary/idle bars
 INK = "#1c2430"     # titles
 GRAY = "#8a90a0"    # captions
 GRID = "#eef0f3"
-for _f in ("Inter", "Helvetica Neue", "Arial", "DejaVu Sans"):
-    if any(_f.lower() in f.name.lower() for f in fm.fontManager.ttflist):
-        plt.rcParams["font.family"] = _f
-        break
-plt.rcParams.update({"axes.edgecolor": "#d7dae0", "svg.fonttype": "none"})
+
+
+def _mpl():
+    """Import matplotlib on demand; set the house font once. Returns pyplot or None if unavailable."""
+    global plt
+    if plt is not None:
+        return plt
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.font_manager as fm
+        import matplotlib.pyplot as _plt
+    except ImportError:
+        return None
+    for _f in ("Inter", "Helvetica Neue", "Arial", "DejaVu Sans"):
+        if any(_f.lower() in f.name.lower() for f in fm.fontManager.ttflist):
+            _plt.rcParams["font.family"] = _f
+            break
+    _plt.rcParams.update({"axes.edgecolor": "#d7dae0", "svg.fonttype": "none"})
+    plt = _plt
+    return plt
 
 # display order + labels. A gateway appears in a chart only if it has a result file this run.
 GATEWAYS = {
@@ -127,6 +140,8 @@ def _fmt(v: float) -> str:
 
 
 def render(chart: Chart) -> None:
+    if _mpl() is None:
+        return  # no matplotlib — reports still generate from JSON
     rows = _load(chart.suite)
     if not rows:
         print(f"skip {chart.name}: no results/{chart.suite}/*.json yet")
@@ -207,12 +222,80 @@ def render(chart: Chart) -> None:
     print(f"wrote {out}")
 
 
+def _merge() -> dict:
+    """One dict per gateway, merging its perf/ + memory/ result files."""
+    gws: dict = {}
+    for suite in ("perf", "memory"):
+        d = RESULTS / suite
+        for key in GATEWAYS:
+            p = d / f"{key}.json"
+            if p.exists():
+                gws.setdefault(key, {}).update(json.loads(p.read_text()))
+    return gws
+
+
+def _report_md(rows: list, title: str, charts: list) -> str:
+    """A self-contained result page: machine, table (ranked), charts, provenance."""
+    hw = next((r.get("hardware") for _, r in rows if r.get("hardware")), "unknown")
+    when = next((r.get("measured_at") for _, r in rows if r.get("measured_at")), "")
+    lines = [f"# {title}", ""]
+    lines.append(f"**Ran on:** {hw}  ·  {when}")
+    lines.append("")
+    lines.append("Every number below is regenerated from the raw `results/*.json` — re-run "
+                 "`bench/run-all.sh` and this page updates. Green in the charts = measured best.")
+    lines.append("")
+    lines.append("| Gateway | Added latency (p99) | RPS ceiling | Idle RSS | Peak RSS | Serves? | Built |")
+    lines.append("|---|--:|--:|--:|--:|:-:|---|")
+    for key, r in rows:
+        lat = r.get("added_latency_p99_us")
+        rps = r.get("rps_ceiling")
+        idle = r.get("idle_rss_mib")
+        peak = r.get("peak_rss_mib")
+        served = r.get("served", None)
+        lines.append(
+            f"| {GATEWAYS[key]} "
+            f"| {f'{lat} µs' if lat is not None else '—'} "
+            f"| {f'{int(rps):,}' if rps else '—'} "
+            f"| {f'{idle:.0f} MiB' if idle is not None else '—'} "
+            f"| {f'{peak:.0f} MiB' if peak is not None else '—'} "
+            f"| {'—' if served is None else ('✅' if served else '❌')} "
+            f"| `{(r.get('build') or '').strip()[:38]}` |"
+        )
+    lines.append("")
+    for c in charts:
+        if (RESULTS / f"{c}.png").exists():
+            lines.append(f"![{c}](../../{c}.png)")
+            lines.append("")
+    lines.append("---")
+    lines.append("Method: added latency = gateway p99 − direct-to-mock p99 at concurrency 1; RPS "
+                 "ceiling = highest sustained req/s with p99 < 1 s and zero errors; RSS idle = after "
+                 "first 200, peak = under sustained load. Same box, same mock, same load, one gateway "
+                 "at a time. Source refs pinned in `gateways/versions.env`; the built commit is in each row.")
+    return "\n".join(lines) + "\n"
+
+
+def write_reports() -> None:
+    gws = _merge()
+    if not gws:
+        return
+    ranked = sorted(gws.items(), key=lambda kv: kv[1].get("rps_ceiling", 0), reverse=True)
+    charts = [c.name for c in CHARTS]
+    (RESULTS / "reports" / "all").mkdir(parents=True, exist_ok=True)
+    (RESULTS / "reports" / "top5").mkdir(parents=True, exist_ok=True)
+    (RESULTS / "reports" / "all" / "README.md").write_text(
+        _report_md(ranked, "All gateways — full field", charts))
+    (RESULTS / "reports" / "top5" / "README.md").write_text(
+        _report_md(ranked[:5], "Top 5 gateways (by throughput ceiling)", charts))
+    print(f"wrote results/reports/all + top5 ({len(ranked)} gateways)")
+
+
 def main() -> None:
     RESULTS.mkdir(exist_ok=True)
     any_done = False
     for c in CHARTS:
         render(c)
         any_done = any_done or (RESULTS / f"{c.name}.png").exists()
+    write_reports()
     if not any_done:
         print("no charts drawn — run the benchmark first (bench/run-all.sh)")
 

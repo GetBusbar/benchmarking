@@ -108,7 +108,7 @@ cat > "$RESULTS/$GATEWAY.json" <<JSON
   "payload_bytes": $PSIZE,
   "endpoint": "$GW_PATH",
   "model": "$GW_MODEL",
-  "hardware": "$(uname -m) $(nproc 2>/dev/null || echo '?')vCPU",
+  "hardware": "${BENCH_HARDWARE:-$(uname -m) $(nproc 2>/dev/null || echo '?')vCPU}",
   "measured_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 }
 JSON

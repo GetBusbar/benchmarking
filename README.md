@@ -10,6 +10,22 @@ metric is green, full stop. No cherry-picked idle snapshots, no "believe us," no
 regenerate. If a gateway can't serve the endpoint, the result says `served: false` instead of quietly
 dropping it. Add your gateway (or fix how we run yours) with a one-file [manifest](gateways/README.md).
 
+## Results
+
+**Ran on:** AWS `m7g.xlarge`-class Graviton3 (ARM64), Ubuntu 24.04 — the same 4 vCPU / $0.04-per-vCPU
+machine class the gateways-under-test benchmark themselves on. The exact instance type and vCPU count
+are recorded in every `results/*.json` and printed at the top of each report page.
+
+Full, auto-generated result pages (regenerated from the raw JSON on every run — no hand-typed numbers):
+
+- **[Top 5 gateways →](results/reports/top5/)** — the field leaders by throughput ceiling.
+- **[All gateways →](results/reports/all/)** — the complete field, including any that couldn't serve the endpoint (marked, not hidden).
+
+Each page shows added latency (µs), RPS ceiling, idle/peak memory, whether the gateway served, and the
+exact build/commit measured, plus the charts below.
+
+> Numbers land here as runs complete. Re-run `run-all.sh` and these pages + charts update in place.
+
 ## Prerequisites
 
 **To run locally on your own box:**

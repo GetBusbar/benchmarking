@@ -96,7 +96,7 @@ sleep 15
 POST=$(gw_rss)
 
 MEASURED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-HW="$(uname -m) $(nproc 2>/dev/null || echo '?')vCPU"
+HW="${BENCH_HARDWARE:-$(uname -m) $(nproc 2>/dev/null || echo '?')vCPU}"
 BUILD="$(gw_version 2>/dev/null | tr -d '\n' | sed 's/"/\\"/g')"
 log "[$GATEWAY] built: $BUILD"
 cat > "$RESULTS/$GATEWAY.json" <<JSON
