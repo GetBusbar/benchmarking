@@ -13,13 +13,13 @@ Every number below is regenerated from the raw `results/*.json` — re-run `run-
 | Helicone | 622 µs | 10,363 | 9,532 | 42 MiB | 1138 MiB | `Helicone/ai-gateway@9649b27 (source bu` |
 
 Two throughput numbers: **max proxy RPS** (instant upstream — raw forwarding speed) and **sustained RPS @20ms** (AIGatewayBench's metric — concurrent in-flight capacity under realistic LLM latency).
-![added_latency](../../added_latency.png)
+![added_latency](../../top5_added_latency.png)
 
-![rps_max_proxy](../../rps_max_proxy.png)
+![rps_max_proxy](../../top5_rps_max_proxy.png)
 
-![rps_sustained_20ms](../../rps_sustained_20ms.png)
+![rps_sustained_20ms](../../top5_rps_sustained_20ms.png)
 
-![memory_rss](../../memory_rss.png)
+![memory_rss](../../top5_memory_rss.png)
 
 ---
 Method: added latency = gateway p99 − direct-to-mock p99 at concurrency 1; RPS ceiling = highest sustained req/s with p99 < 1 s and zero errors; RSS idle = after first 200, peak = under sustained load. Same box, same mock, same load, one gateway at a time. Source refs pinned in `gateways/versions.env`; the built commit is in each row.
