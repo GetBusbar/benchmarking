@@ -2,14 +2,17 @@
   "gateway": "busbar",
   "build": "busbar 1.4.1",
   "served": true,
+  "last_http_status": "200",
+  "serve_error": "",
   "idle_rss_mib": 8.8,
-  "peak_rss_mib": 319.5,
-  "post_load_rss_mib": 39.1,
+  "peak_rss_mib": 316.2,
+  "post_load_rss_mib": 38.3,
   "payload_bytes": 150000,
   "concurrency": 1500,
   "duration_s": 120,
   "endpoint": "/v1/chat/completions",
   "model": "gpt-4o-mini",
-  "hardware": "AWS m7g.2xlarge (Graviton3, 8 cores / 32 GB). Gateway pinned to 4 cores (m7g.xlarge class), mock+loadgen on the other 4, Ubuntu 24.04. One dedicated box per gateway.",
-  "measured_at": "2026-07-21T06:16:49Z"
+  "arch": "arm64",
+  "hardware": "AWS m7g.2xlarge (Graviton3, 8 cores / 32 GB). Gateway pinned to 4 cores, mock+loadgen on the other 4, Ubuntu 24.04. One dedicated box per gateway.",
+  "measured_at": "2026-07-21T15:41:17Z"
 }
