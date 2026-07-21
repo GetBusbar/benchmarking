@@ -5,6 +5,11 @@
 # Routes to the mock via Portkey's own headers: x-portkey-provider + x-portkey-custom-host
 # (the same way AIGatewayBench drives it). Anthropic Messages path.
 GW_KIND=native
+# Self-describing manifest metadata — charts.py + the run lists read these, so a gateway
+# is fully defined by its own dir (add/remove a dir → it appears/disappears everywhere).
+GW_DISPLAY="Portkey"                      # label in charts + report tables
+GW_LANG=Node                            # implementation language → bar color bucket
+GW_REPO=https://github.com/Portkey-AI/gateway   # linked from the gateway name in the report table
 GW_PORT=8787
 GW_PATH=/v1/messages
 GW_MODEL=anthropic/mock

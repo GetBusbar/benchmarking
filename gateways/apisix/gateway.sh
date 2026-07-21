@@ -7,6 +7,11 @@
 # logging off, worker_processes = pinned core count, no observability plugins → pure proxy overhead.
 # APISIX_IMAGE is pinned in gateways/versions.env.
 GW_KIND=docker
+# Self-describing manifest metadata — charts.py + the run lists read these, so a gateway
+# is fully defined by its own dir (add/remove a dir → it appears/disappears everywhere).
+GW_DISPLAY="APISIX"                      # label in charts + report tables
+GW_LANG=Other                            # implementation language → bar color bucket
+GW_REPO=https://github.com/apache/apisix   # linked from the gateway name in the report table
 GW_PORT=9080
 GW_PATH=/v1/chat/completions
 GW_MODEL=gpt-4o-mini

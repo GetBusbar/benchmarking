@@ -42,9 +42,10 @@ KEYNAME="gateway-bench-key"; KEYFILE="${TMPDIR:-/tmp}/${KEYNAME}.pem"; SGNAME="g
 SSHOPT="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=12 -i $KEYFILE"
 log(){ echo "[$(date +%H:%M:%S)] $*"; }
 
-# Default field: every gateway that serves the mock as a single-box drop-in (alphabetical; matches
-# run-all.sh). Arch is a single-box drop-in (archgw CLI). Envoy AI Gateway is excluded (k8s-native).
-DEFAULT_GATEWAYS=(apisix arch bifrost busbar gomodel helicone kong litellm-python litellm-rust one-api portkey tensorzero)
+# Default field: every gateway with a manifest under gateways/ (discovered from disk, alphabetical;
+# same source as run-all.sh — add/remove a dir and both follow). Envoy AI Gateway is absent (k8s-native).
+DEFAULT_GATEWAYS=()
+for d in "$HERE"/gateways/*/gateway.sh; do DEFAULT_GATEWAYS+=("$(basename "$(dirname "$d")")"); done
 if [[ $# -gt 0 ]]; then GATEWAYS=("$@"); else GATEWAYS=("${DEFAULT_GATEWAYS[@]}"); fi
 
 # ── shared AWS setup (key + SG), done once ────────────────────────────────────────────────────────

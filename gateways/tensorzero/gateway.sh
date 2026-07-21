@@ -6,6 +6,11 @@
 # Graviton. Pure-proxy mode: observability OFF (no ClickHouse/Postgres), api_key_location = none, one
 # model whose provider base_url is the mock. TENSORZERO_IMAGE is pinned in gateways/versions.env.
 GW_KIND=docker
+# Self-describing manifest metadata — charts.py + the run lists read these, so a gateway
+# is fully defined by its own dir (add/remove a dir → it appears/disappears everywhere).
+GW_DISPLAY="TensorZero"                      # label in charts + report tables
+GW_LANG=Rust                            # implementation language → bar color bucket
+GW_REPO=https://github.com/tensorzero/tensorzero   # linked from the gateway name in the report table
 GW_PORT=3000
 GW_PATH=/openai/v1/chat/completions
 GW_MODEL=tensorzero::model_name::mock

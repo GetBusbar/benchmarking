@@ -10,6 +10,11 @@
 # is NOT a disableable "logging" knob, so its latency/throughput reflect a gateway that bills each
 # request, not a bare proxy. That's the honest measurement of One-API as it ships. Pin in versions.env.
 GW_KIND=docker
+# Self-describing manifest metadata — charts.py + the run lists read these, so a gateway
+# is fully defined by its own dir (add/remove a dir → it appears/disappears everywhere).
+GW_DISPLAY="One-API"                      # label in charts + report tables
+GW_LANG=Go                            # implementation language → bar color bucket
+GW_REPO=https://github.com/songquanpeng/one-api   # linked from the gateway name in the report table
 GW_PORT=3000
 GW_PATH=/v1/chat/completions
 GW_MODEL=gpt-4o-mini

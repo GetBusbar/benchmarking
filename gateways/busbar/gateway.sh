@@ -7,6 +7,11 @@
 # process so we measure the real process RSS/latency. Override with BUSBAR_BIN to point at a local
 # working-tree build instead. Config: token auth, one model to the mock — no special setup.
 GW_KIND=native
+# Self-describing manifest metadata — charts.py + the run lists read these, so a gateway
+# is fully defined by its own dir (add/remove a dir → it appears/disappears everywhere).
+GW_DISPLAY="Busbar"                      # label in charts + report tables
+GW_LANG=Rust                            # implementation language → bar color bucket
+GW_REPO=https://github.com/GetBusbar/busbar   # linked from the gateway name in the report table
 GW_PORT=8080
 GW_PATH=/v1/chat/completions
 GW_MODEL=gpt-4o-mini

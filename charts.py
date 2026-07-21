@@ -16,6 +16,7 @@ once it has a result file (label/order from GATEWAYS). Run after the benchmark:
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -64,23 +65,57 @@ def _mpl():
     plt = _plt
     return plt
 
-# display order + labels. A gateway appears in a chart only if it has a result file this run.
-GATEWAYS = {
-    # Alphabetical by key — deliberately NOT busbar-first. Order here is only the input/load order;
-    # every chart and the report tables sort by the MEASURED value, so placement never favors anyone.
-    "apisix": "APISIX",
-    "arch": "Arch",
-    "bifrost": "Bifrost",
-    "busbar": "Busbar",
-    "gomodel": "GoModel",
-    "helicone": "Helicone",
-    "kong": "Kong",
-    "litellm-python": "LiteLLM · Python",
-    "litellm-rust": "LiteLLM · Rust",
-    "one-api": "One-API",
-    "portkey": "Portkey",
-    "tensorzero": "TensorZero",
+# ── the field is discovered from the manifests, nothing is hard-coded here ─────────────────────────
+# Each gateway is fully defined by its own dir: gateways/<key>/gateway.sh declares GW_DISPLAY (label),
+# GW_LANG (color bucket), and GW_REPO (linked from the name in the report table). Add a dir → it shows
+# up in the charts/tables/run-lists; delete it → it's gone everywhere. A gateway only appears in a
+# chart once it also has a result file this run. Alphabetical by key — deliberately NOT busbar-first;
+# order here is only load order, every chart + table sorts by the MEASURED value.
+def _manifest_meta():
+    out = {}
+    for man in sorted((ROOT / "gateways").glob("*/gateway.sh")):
+        key = man.parent.name
+        txt = man.read_text()
+
+        def grab(var, default=""):
+            m = re.search(rf'^{var}=(.*)$', txt, re.M)
+            if not m:
+                return default
+            v = m.group(1).split("#", 1)[0].strip()          # drop trailing comment
+            return v.strip('"').strip("'").strip()
+
+        out[key] = {
+            "display": grab("GW_DISPLAY", key),
+            "lang": grab("GW_LANG", "Other"),
+            "repo": grab("GW_REPO"),
+        }
+    return out
+
+_META = _manifest_meta()
+GATEWAYS = {k: v["display"] for k, v in _META.items()}   # key → display label
+LANGS = {k: v["lang"] for k, v in _META.items()}         # key → language bucket
+REPOS = {k: v["repo"] for k, v in _META.items()}         # key → GitHub URL (may be "")
+
+
+def _linked(key: str) -> str:
+    """Gateway display name for the report table, linked to its GitHub repo when the manifest gives one."""
+    name = GATEWAYS.get(key, key)
+    repo = REPOS.get(key)
+    return f"[{name}]({repo})" if repo else name
+
+# Bars are colored by the gateway's IMPLEMENTATION LANGUAGE — informative (you can see the Rust/Go/
+# Python clustering) and neutral (no "winner" highlight for the sponsor; the best is already the top
+# bar since rows are sorted). A gateway that didn't serve is drawn grey regardless.
+# Five buckets: Rust / Go / Python / Node / Other (Lua/OpenResty, Envoy/C++, … fold into Other).
+LANG_ORDER = ["Rust", "Go", "Python", "Node", "Other"]
+LANG_COLORS = {
+    "Rust": "#c4602d",     # orange
+    "Go": "#00a0c6",       # cyan
+    "Python": "#3b6ea5",   # blue
+    "Node": "#c59b2d",     # amber
+    "Other": "#6b7280",    # grey
 }
+LANG_DEFAULT = "#6b7280"
 
 
 @dataclass(frozen=True)
@@ -260,10 +295,10 @@ def render(chart: Chart, only_keys=None, out_stem: str | None = None) -> None:
         vals = [float(r.get(s.field, 0) or 0) for r in rows]
         rank = s.kind == "rank"
         if rank:
-            # green = served winner; slate = served; muted = did-not-serve (bar is context only).
-            colors = [BRAND if (best is not None and _served(r) and v == best)
-                      else (SLATE if _served(r) else MUTE)
-                      for r, v in zip(rows, vals)]
+            # colored by implementation language (served); did-not-serve is drawn grey. No winner
+            # highlight — the best is already the top bar (rows are sorted).
+            colors = [LANG_COLORS.get(LANGS.get(r["_key"], ""), LANG_DEFAULT) if _served(r) else MUTE
+                      for r in rows]
         else:
             colors = [s.kind] * n
         # On a log axis a bar can't start at 0, and a negative/zero value can't be drawn at all.
@@ -323,9 +358,19 @@ def render(chart: Chart, only_keys=None, out_stem: str | None = None) -> None:
     ax.set_title(chart.title, fontsize=15, fontweight="bold", color=INK, loc="left", pad=38)
     ax.text(0, 1.035, chart.subtitle, transform=ax.transAxes, fontsize=10.5, color=GRAY, va="bottom")
 
-    # legend (only multi-series charts need it)
-    if ns > 1:
-        ax.legend(loc="lower right", fontsize=9, frameon=False, ncols=ns)
+    # Language legend (swatch per language present) + a note for the secondary series (e.g. idle RAM).
+    from matplotlib.patches import Patch
+    present = [l for l in LANG_ORDER if any(_served(r) and LANGS.get(r["_key"]) == l for r in rows)]
+    handles = [Patch(facecolor=LANG_COLORS[l], label=l) for l in present]
+    if any(not _served(r) for r in rows):
+        handles.append(Patch(facecolor=MUTE, label="did not serve"))
+    if ns > 1:  # a muted secondary series (idle RAM) — label it too
+        handles.append(Patch(facecolor=MUTE, label=chart.series[1].legend))
+    if handles:
+        # "best" so the swatch box lands in whitespace (top bars are short on the log charts, longest
+        # bars crowd the bottom) instead of sitting over a bar.
+        ax.legend(handles=handles, loc="best", fontsize=8.5, frameon=False,
+                  ncols=min(len(handles), 6), title="colored by language")
 
     meta = rows[0]
     bits = []
@@ -333,7 +378,7 @@ def render(chart: Chart, only_keys=None, out_stem: str | None = None) -> None:
         bits.append(str(meta["hardware"]))
     if "concurrency" in meta and "payload_bytes" in meta:
         bits.append(f"{meta['concurrency']}× {int(meta['payload_bytes'])//1000}KB sustained")
-    bits.append("highlighted = measured best")
+    bits.append("bars colored by implementation language")
     fig.text(0.008, 0.012, "  ·  ".join(bits) + f"     github.com/GetBusbar/benchmarking — regenerated {RENDER_TS} from raw results",
              fontsize=7.3, color=GRAY)
 
@@ -364,8 +409,9 @@ def _report_md(rows: list, title: str, charts: list, pending: tuple = (), chart_
     lines.append(f"**Ran on:** {hw}  ·  {when}")
     lines.append("")
     lines.append("Every number below is regenerated from the raw `results/*.json` — re-run "
-                 "`run-all.sh` and this page updates. The highlighted bar in each chart = measured best. "
-                 "**Rows are sorted by added latency (p99), lowest first.**")
+                 "`run-all.sh` and this page updates. Chart bars are **colored by implementation "
+                 "language** (Rust / Go / Python / Node / Other). **Rows are sorted by added latency "
+                 "(p99), lowest first.**")
     lines.append("")
     lines.append("| Gateway | Added latency (p99) | Sustained RPS @20ms | Max proxy RPS | Idle RAM | Peak RAM | Built |")
     lines.append("|---|--:|--:|--:|--:|--:|---|")
@@ -407,7 +453,7 @@ def _report_md(rows: list, title: str, charts: list, pending: tuple = (), chart_
         if served is False and r.get("serve_error"):
             fail_notes.append((GATEWAYS[key], str(r.get("serve_error"))))
         lines.append(
-            f"| {GATEWAYS[key]} "
+            f"| {_linked(key)} "
             f"| {lat_cell} "
             f"| {llm} "
             f"| {proxy} "
@@ -418,7 +464,7 @@ def _report_md(rows: list, title: str, charts: list, pending: tuple = (), chart_
     # Gateways we intend to measure but haven't yet — shown so the field is transparent, never hidden.
     for key in pending:
         lines.append(
-            f"| {GATEWAYS[key]} | ⏳ *pending* | — | — | — | — | *pending measurement* |"
+            f"| {_linked(key)} | ⏳ *pending* | — | — | — | — | *pending measurement* |"
         )
     lines.append("")
     if pending:

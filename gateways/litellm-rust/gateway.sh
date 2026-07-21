@@ -11,6 +11,11 @@
 # embeds CPython and loads the full `litellm` package (~275 MB RSS). That is the honest,
 # only-working launch, not a strawman.
 GW_KIND=native
+# Self-describing manifest metadata — charts.py + the run lists read these, so a gateway
+# is fully defined by its own dir (add/remove a dir → it appears/disappears everywhere).
+GW_DISPLAY="LiteLLM · Rust"                      # label in charts + report tables
+GW_LANG=Rust                            # implementation language → bar color bucket
+GW_REPO=https://github.com/BerriAI/litellm   # linked from the gateway name in the report table
 GW_PORT=8101
 GW_PATH=/v1/messages
 GW_MODEL=azure_ai/mock

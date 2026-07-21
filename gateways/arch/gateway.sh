@@ -7,6 +7,11 @@
 # prompt_targets / routing / guards, so the guard/router models never run (pure proxy overhead). The
 # CLI runs the container(s), which we then pin to $CORES. ARCH_VERSION is in gateways/versions.env.
 GW_KIND=docker
+# Self-describing manifest metadata — charts.py + the run lists read these, so a gateway
+# is fully defined by its own dir (add/remove a dir → it appears/disappears everywhere).
+GW_DISPLAY="Arch"                      # label in charts + report tables
+GW_LANG=Other                            # implementation language → bar color bucket
+GW_REPO=https://github.com/katanemo/archgw   # linked from the gateway name in the report table
 GW_PORT=12000
 GW_PATH=/v1/chat/completions
 GW_MODEL=openai/gpt-4o-mini

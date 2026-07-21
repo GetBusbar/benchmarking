@@ -13,10 +13,13 @@
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GATEWAYS=("$@")
-# Default field = every gateway that serves the mock as a single-box drop-in (alphabetical, no
-# gateway seated first). Arch is a single-box drop-in (archgw CLI). Envoy AI Gateway is intentionally
-# excluded — it is Kubernetes-native (needs a cluster), which is out of scope for this single-box harness.
-[ ${#GATEWAYS[@]} -eq 0 ] && GATEWAYS=(apisix arch bifrost busbar gomodel helicone kong litellm-python litellm-rust one-api portkey tensorzero)
+# Default field = every gateway with a manifest under gateways/ (each dir is a self-contained drop-in;
+# add a dir → it runs here, delete it → it's gone). Discovered, not hard-coded, so the list can never
+# drift from what's on disk. Alphabetical (ls), so no gateway is seated first. Envoy AI Gateway is
+# intentionally absent — it is Kubernetes-native (needs a cluster), out of scope for this single-box harness.
+if [ ${#GATEWAYS[@]} -eq 0 ]; then
+  for d in "$HERE"/gateways/*/gateway.sh; do GATEWAYS+=("$(basename "$(dirname "$d")")"); done
+fi
 log(){ echo "[$(date +%H:%M:%S)] $*"; }
 
 # Which suites to run (headline first): perf = latency + RPS ceiling; memory = idle/peak RSS.

@@ -7,6 +7,11 @@
 # DB-less declarative config, generated in gw_launch against the runner's mock port. KONG_IMAGE is
 # pinned in gateways/versions.env.
 GW_KIND=docker
+# Self-describing manifest metadata — charts.py + the run lists read these, so a gateway
+# is fully defined by its own dir (add/remove a dir → it appears/disappears everywhere).
+GW_DISPLAY="Kong"                      # label in charts + report tables
+GW_LANG=Other                            # implementation language → bar color bucket
+GW_REPO=https://github.com/Kong/kong   # linked from the gateway name in the report table
 GW_PORT=8080
 GW_PATH=/v1/chat/completions
 GW_MODEL=gpt-4o-mini

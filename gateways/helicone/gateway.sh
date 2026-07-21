@@ -8,6 +8,11 @@
 # gateways/versions.env. Pure-proxy mode: helicone.features=none → no control plane, no auth, no key
 # required; the built-in `openai` provider's base-url is overridden to the mock.
 GW_KIND=native
+# Self-describing manifest metadata — charts.py + the run lists read these, so a gateway
+# is fully defined by its own dir (add/remove a dir → it appears/disappears everywhere).
+GW_DISPLAY="Helicone"                      # label in charts + report tables
+GW_LANG=Rust                            # implementation language → bar color bucket
+GW_REPO=https://github.com/Helicone/ai-gateway   # linked from the gateway name in the report table
 GW_PORT=8787
 GW_PATH=/router/default/chat/completions
 # Helicone's router requires the unified "{provider}/{model}" form (it errors on a bare model name);

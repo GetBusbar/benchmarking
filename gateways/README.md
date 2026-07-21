@@ -6,10 +6,21 @@ directory.** The runners (`memory/run.sh`, and friends) are gateway-agnostic: th
 
 ## The contract
 
-`gateways/<name>/gateway.sh` sets four variables and defines four functions:
+A gateway is defined **entirely by its own directory** — nothing about it is hard-coded in the
+runners, the charts, or the run lists. `run-all.sh`, `run-on-ec2.sh`, and `charts.py` all discover the
+field by scanning `gateways/*/gateway.sh`, so **adding a dir adds the gateway everywhere and deleting a
+dir removes it everywhere.** No list to keep in sync.
+
+`gateways/<name>/gateway.sh` sets these variables and defines four functions:
 
 ```sh
 GW_KIND=native|docker      # informational
+
+# Self-describing metadata — charts.py + the report tables read these straight from the manifest.
+GW_DISPLAY="Busbar"        # label shown in charts and the report table
+GW_LANG=Rust               # implementation language → bar color bucket (Rust|Go|Python|Node|Other)
+GW_REPO=https://github.com/GetBusbar/busbar   # the gateway name in the table links here
+
 GW_PORT=8080               # port the gateway listens on
 GW_PATH=/v1/chat/completions   # request path used to probe + load it
 GW_MODEL=gpt-4o-mini       # model string put in the request body
@@ -21,6 +32,11 @@ gw_rss()    { :; }         # echo current resident memory in MiB
 gw_stop()   { :; }         # stop + clean up
 ```
 
+`GW_LANG` colors the bars by language (Rust / Go / Python / Node / Other — anything else, e.g.
+OpenResty/Lua or an Envoy/C++ data plane, folds into Other). There is **no winner highlight**: charts
+sort by the measured value, so the best is already the top bar. A gateway that didn't serve is drawn
+grey regardless of language.
+
 The runner exports for you: `$MOCK_PORT` (deterministic mock upstream), `$CORES` (cpu pin),
 `$GW_DIR` (this gateway's directory, for config files).
 
@@ -30,12 +46,12 @@ and it just works. The mock answers both shapes (OpenAI by default, Anthropic fo
 
 ## Shipped gateways
 
-**In the default run** (serve the mock as a single-box drop-in):
-
-Listed alphabetically — no gateway is seated first.
+**In the default run** (serve the mock as a single-box drop-in). This table is illustrative — the
+actual field is whatever dirs exist here; alphabetical, no gateway seated first.
 
 | dir | what | notes |
 |---|---|---|
+| `agentgateway/` | agentgateway (Rust data plane, docker) | `ai` backend `hostOverride`/`pathOverride` → mock; no backendAuth/backendTLS; observability off |
 | `apisix/` | Apache APISIX + `ai-proxy` (docker, DB-less standalone) | `override.endpoint` → mock; no etcd; access log off, workers = pinned cores |
 | `arch/` | Arch (Katanemo, `archgw` CLI) | Envoy + Arch services in one arm64 container; egress-only config → mock; containers pinned to the gateway cores |
 | `bifrost/` | maximhq/bifrost (docker) | openai provider base_url → mock; runs its stock config |

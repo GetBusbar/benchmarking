@@ -7,6 +7,11 @@
 # unset) for a pure proxy-overhead measurement — the default posture. Image pinned in
 # gateways/versions.env; the resolved tag is recorded in the result.
 GW_KIND=docker
+# Self-describing manifest metadata — charts.py + the run lists read these, so a gateway
+# is fully defined by its own dir (add/remove a dir → it appears/disappears everywhere).
+GW_DISPLAY="GoModel"                      # label in charts + report tables
+GW_LANG=Go                            # implementation language → bar color bucket
+GW_REPO=https://github.com/ENTERPILOT/GOModel   # linked from the gateway name in the report table
 GW_PORT=8080
 GW_PATH=/v1/chat/completions
 GW_MODEL=gpt-4o-mini

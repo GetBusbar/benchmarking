@@ -2,6 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # Gateway manifest: LiteLLM Python proxy (the shipping `litellm[proxy]` CLI).
 GW_KIND=native
+# Self-describing manifest metadata — charts.py + the run lists read these, so a gateway
+# is fully defined by its own dir (add/remove a dir → it appears/disappears everywhere).
+GW_DISPLAY="LiteLLM · Python"                      # label in charts + report tables
+GW_LANG=Python                            # implementation language → bar color bucket
+GW_REPO=https://github.com/BerriAI/litellm   # linked from the gateway name in the report table
 GW_PORT=8102
 GW_PATH=/v1/chat/completions
 GW_MODEL=gpt-4o-mini
