@@ -23,13 +23,15 @@ export GW_DIR="$ROOT/gateways/$GATEWAY"
 C1_DUR="${C1_DUR:-20}"; SWEEP_DUR="${SWEEP_DUR:-10}"; PSIZE="${PSIZE:-256}"
 # Throughput sweep runs against a mock with a realistic per-request delay (SWEEP_TTFT_MS), so the
 # ceiling is the gateway's concurrent-in-flight capacity (the real production bottleneck), not a race
-# against an instant mock's CPU. Same delay for every gateway. Concurrency ramps high to find the
-# ceiling of the fast (Rust) gateways; the slow (Python) ones collapse early.
-# Two throughput sweeps per gateway (see below). Instant-mock = "max proxy throughput" (CPU-bound,
-# busbar's own published metric); 20ms-mock = "sustained RPS under LLM latency" (AIGatewayBench's
-# exact metric, concurrency-bound → ramp higher). Same for every gateway.
+# against an instant mock's CPU. Same delay for every gateway. Concurrency spans low→high so EVERY
+# gateway — fast or slow — is offered a load it can pass; the sweep records where each holds p99 under
+# the ceiling with a sub-0.1% error rate, and the ceiling is the best qualifying point.
+# Two throughput sweeps per gateway (see below). Instant-mock = "max proxy throughput" (CPU-bound);
+# 20ms-mock = "sustained RPS under LLM latency" (AIGatewayBench's metric, concurrency-bound → ramps
+# higher). The delayed sweep starts low (8) so slow gateways get a concurrency they can hold. Same
+# grid for every gateway.
 SWEEP_INSTANT="${SWEEP_INSTANT:-16 32 64 128 256 512 1024}"
-SWEEP_DELAYED="${SWEEP_DELAYED:-256 1024 4096 8192 16384}"
+SWEEP_DELAYED="${SWEEP_DELAYED:-8 32 128 256 1024 4096 8192 16384}"
 SWEEP_TTFT_MS="${SWEEP_TTFT_MS:-20}"
 P99_CEIL_MS="${P99_CEIL_MS:-1000}"
 # raise the fd limit so high-concurrency sweeps aren't capped by open sockets
@@ -98,6 +100,11 @@ fi
 
 # ── direct baseline (mock, same path/body) + gateway c1 → overhead µs ──────────────────────────────
 DURL="http://127.0.0.1:$MOCK_PORT$GW_PATH"; GURL="http://127.0.0.1:$GW_PORT$GW_PATH"
+# Discarded warm-up so JIT/interpreted gateways (Node, Python) aren't charged first-request/cold-start
+# cost inside the measured window. Identical for the direct baseline and the gateway — same for all.
+WARMUP_DUR="${WARMUP_DUR:-5}"
+log "[$GATEWAY] warm-up ${WARMUP_DUR}s (discarded, both paths)"
+probe "$DURL" 1 "$WARMUP_DUR" >/dev/null 2>&1; probe "$GURL" 1 "$WARMUP_DUR" >/dev/null 2>&1
 log "[$GATEWAY] c1 baseline (direct→mock) ${C1_DUR}s"
 read -r _drps _dfail DP99 DP50 < <(probe "$DURL" 1 "$C1_DUR")
 log "[$GATEWAY] c1 gateway ${C1_DUR}s"
@@ -123,7 +130,10 @@ run_sweep() { # ttft_ms  conc_list
     rps=${rps:-0}; fail=${fail:-1}; p99=${p99:-99999999}
     log "[$GATEWAY]   (ttft=${ttft}ms) c=$conc → rps=$rps p99=$((p99/1000))ms fail=$fail"
     SW_JSON="${SW_JSON}${SW_JSON:+,}{\"conc\":$conc,\"rps\":$rps,\"p99_us\":$p99,\"fail\":$fail}"
-    if [ "$fail" -eq 0 ] && [ "$p99" -lt $((P99_CEIL_MS*1000)) ] && [ "$rps" -gt "$SW_CEIL_RPS" ]; then
+    # Gate on error RATE (< 0.1%), not literal zero — a single failure in tens of thousands shouldn't
+    # zero a gateway's whole result. Plus p99 under the ceiling, and a new best.
+    if awk -v f="$fail" -v r="$rps" -v d="$SWEEP_DUR" 'BEGIN{tot=r*d+f; exit !(tot>0 && f<=0.001*tot)}' \
+       && [ "$p99" -lt $((P99_CEIL_MS*1000)) ] && [ "$rps" -gt "$SW_CEIL_RPS" ]; then
       SW_CEIL_RPS=$rps; SW_CEIL_CONC=$conc; SW_CEIL_P99=$p99
     fi
   done
