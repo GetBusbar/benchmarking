@@ -152,6 +152,8 @@ def _load(suite: str) -> list[dict]:
 def _fmt(v: float) -> str:
     if v >= 1000:
         return f"{v/1000:.1f}k" if v < 100000 else f"{v/1000:.0f}k"
+    if v <= 0:
+        return "0"
     return f"{v:.0f}" if v >= 10 else f"{v:.1f}"
 
 
@@ -163,10 +165,32 @@ def render(chart: Chart) -> None:
         print(f"skip {chart.name}: no results/{chart.suite}/*.json yet")
         return
     primary = chart.series[0].field
-    vals_all = [float(r.get(primary, 0)) for r in rows]
-    # winner = max if higher-is-better (RPS), else min; sort so the winner sits on top.
-    best = max(vals_all) if chart.higher_better else min(vals_all)
-    rows.sort(key=lambda r: float(r.get(primary, 0)), reverse=chart.higher_better)
+
+    def _served(r) -> bool:
+        return bool(r.get("served", True))
+
+    def _val(r, field=primary) -> float:
+        return float(r.get(field, 0) or 0)
+
+    # Winner is decided ONLY among gateways that actually served — a gateway that failed under
+    # load (or never came up) never colors green, even if a concurrency-1 number looks good.
+    served_vals = [_val(r) for r in rows if _served(r) and _val(r) > 0]
+    best = (max(served_vals) if chart.higher_better else min(served_vals)) if served_vals else None
+
+    # Sort winners to the top. Broken gateways (did-not-serve, or a non-positive/zero metric) sink
+    # to the bottom regardless of metric direction, so a failure never lands at the "best" end.
+    def _sortkey(r):
+        ok = _served(r) and _val(r) > 0
+        if not ok:
+            return (1, 0.0)
+        return (0, -_val(r) if chart.higher_better else _val(r))
+    rows.sort(key=_sortkey)
+
+    # A positive floor for the log axis: negative/zero bars can't be drawn on a log scale, so their
+    # labels get anchored here instead of vanishing off-canvas.
+    xmax = max((_val(r) for r in rows), default=1.0) or 1.0
+    pos = [_val(r) for r in rows if _val(r) > 0]
+    floor_x = min(pos) if pos else 1.0
 
     n = len(rows)
     ns = len(chart.series)
@@ -179,24 +203,40 @@ def render(chart: Chart) -> None:
 
     for si, s in enumerate(chart.series):
         offset = group_h / 2 - bar_h / 2 - si * bar_h
-        vals = [float(r.get(s.field, 0)) for r in rows]
-        if s.kind == "rank":
-            colors = [BRAND if v == best else SLATE for v in vals]
+        vals = [float(r.get(s.field, 0) or 0) for r in rows]
+        rank = s.kind == "rank"
+        if rank:
+            # green = served winner; slate = served; muted = did-not-serve (bar is context only).
+            colors = [BRAND if (best is not None and _served(r) and v == best)
+                      else (SLATE if _served(r) else MUTE)
+                      for r, v in zip(rows, vals)]
         else:
             colors = [s.kind] * n
-        bars = ax.barh([y + offset for y in y0], vals, height=bar_h * 0.92,
+        # On a log axis a bar can't start at 0, and a negative/zero value can't be drawn at all.
+        draw = [v if (not chart.log or v > 0) else 0 for v in vals]
+        bars = ax.barh([y + offset for y in y0], draw, height=bar_h * 0.92,
                        color=colors, zorder=3, label=s.legend)
         for r, bar, v in zip(rows, bars, vals):
-            served = r.get("served", True)
-            x = bar.get_width()
-            ax.text(x * (1.06 if chart.log else 1.0) + (0 if chart.log else best * 0.02),
-                    bar.get_y() + bar.get_height() / 2, _fmt(v),
-                    va="center", ha="left", fontsize=9.5 if s.kind == "rank" else 8,
-                    fontweight="bold" if s.kind == "rank" else "normal",
-                    color=INK if s.kind == "rank" else GRAY, zorder=4)
-            if s.kind == "rank" and not served:
-                ax.text(x * 1.06, bar.get_y() + bar.get_height() / 2, "  ⚠ did not serve",
-                        va="center", ha="left", fontsize=8, color="#c2410c", zorder=4)
+            served = _served(r)
+            # Anchor at the bar's end; when the bar is absent (≤0), pin to the axis floor on a log
+            # scale, else to the left edge — so every "0"/"did not serve" note lines up on the left.
+            anchor = bar.get_width() if bar.get_width() > 0 else (floor_x if chart.log else 0.0)
+            tx = anchor * 1.06 if chart.log else anchor + xmax * 0.012
+            cy = bar.get_y() + bar.get_height() / 2
+            if rank:
+                if served and v > 0:
+                    txt, col, weight = _fmt(v), INK, "bold"
+                elif served:  # came up, but no tested load held p99 < 1 s with zero errors
+                    txt, col, weight = "0  ·  no load held p99 < 1 s", "#c2410c", "bold"
+                elif v > 0:   # a concurrency-1 number exists, but it collapsed under load
+                    txt, col, weight = f"{_fmt(v)}   ✕ did not serve under load", "#c2410c", "bold"
+                else:
+                    txt, col, weight = "✕ did not serve", "#c2410c", "bold"
+                ax.text(tx, cy, txt, va="center", ha="left", fontsize=9.5,
+                        fontweight=weight, color=col, zorder=4)
+            elif v > 0:  # secondary series (e.g. idle RSS): quiet label, skip empty bars
+                ax.text(tx, cy, _fmt(v), va="center", ha="left", fontsize=8,
+                        fontweight="normal", color=GRAY, zorder=4)
 
     ax.set_yticks(y0)
     ax.set_yticklabels([r["_label"] for r in rows], fontsize=11.5, color=INK, fontweight="medium")
@@ -209,13 +249,15 @@ def render(chart: Chart) -> None:
         ax.set_xscale("log")
     ax.xaxis.grid(True, color=GRID, zorder=0)
     ax.set_axisbelow(True)
-    ax.set_xlabel(f"{chart.unit}   ·   lower is better" + ("   (log scale)" if chart.log else ""),
+    better = "higher is better" if chart.higher_better else "lower is better"
+    ax.set_xlabel(f"{chart.unit}   ·   {better}" + ("   (log scale)" if chart.log else ""),
                   fontsize=9, color=GRAY)
-    xmax = max(float(r.get(chart.series[0].field, 0)) for r in rows)
-    ax.set_xlim(right=xmax * (2.6 if chart.log else 1.22))
+    ax.set_xlim(right=xmax * (2.9 if chart.log else 1.28))
 
-    ax.set_title(chart.title, fontsize=15, fontweight="bold", color=INK, loc="left", pad=18)
-    ax.text(0, 1.03, chart.subtitle, transform=ax.transAxes, fontsize=10.5, color=GRAY, va="bottom")
+    # Title + subtitle stacked above the axes with real vertical separation (no overlap). pad lifts
+    # the title clear of the plot; the subtitle sits just below it, still above the top gridline.
+    ax.set_title(chart.title, fontsize=15, fontweight="bold", color=INK, loc="left", pad=38)
+    ax.text(0, 1.035, chart.subtitle, transform=ax.transAxes, fontsize=10.5, color=GRAY, va="bottom")
 
     # legend (only multi-series charts need it)
     if ns > 1:
@@ -231,7 +273,7 @@ def render(chart: Chart) -> None:
     fig.text(0.008, 0.012, "  ·  ".join(bits) + "     getbusbar.com/bench — every number regenerates from raw results",
              fontsize=7.3, color=GRAY)
 
-    fig.tight_layout(rect=(0, 0.045, 1, 0.99))
+    fig.tight_layout(rect=(0, 0.05, 1, 0.93))
     out = RESULTS / f"{chart.name}.png"
     fig.savefig(out, dpi=200, bbox_inches="tight", facecolor="white")
     plt.close(fig)
@@ -263,10 +305,16 @@ def _report_md(rows: list, title: str, charts: list, pending: tuple = ()) -> str
     lines.append("| Gateway | Added latency (p99) | Max proxy RPS | Sustained RPS @20ms | Idle RSS | Peak RSS | Serves? | Built |")
     lines.append("|---|--:|--:|--:|--:|--:|:-:|---|")
     mock_bound_seen = False
+    zero_load_seen = False
+    dnf_seen = False
+    fail_notes = []  # (gateway, serve_error) for every ❌ row — the receipt behind "did not serve"
 
-    def rps_cell(val, bound):
+    def rps_cell(val, bound, served):
+        # ✕ = never served under load; 0 = served but no tested load held p99<1s + zero errors.
+        if served is False:
+            return "✕"
         if not val:
-            return "—"
+            return "0"
         cell = f"{int(val):,}"
         if bound:  # ceiling within 10% of the mock's own — a floor, not a limit
             cell += " ⚠"
@@ -277,17 +325,29 @@ def _report_md(rows: list, title: str, charts: list, pending: tuple = ()) -> str
         idle = r.get("idle_rss_mib")
         peak = r.get("peak_rss_mib")
         served = r.get("served", None)
-        proxy = rps_cell(r.get("rps_max_proxy"), r.get("rps_max_proxy_mock_bound"))
-        llm = rps_cell(r.get("rps_sustained_20ms"), r.get("rps_sustained_20ms_mock_bound"))
+        proxy = rps_cell(r.get("rps_max_proxy"), r.get("rps_max_proxy_mock_bound"), served)
+        llm = rps_cell(r.get("rps_sustained_20ms"), r.get("rps_sustained_20ms_mock_bound"), served)
         if r.get("rps_max_proxy_mock_bound") or r.get("rps_sustained_20ms_mock_bound"):
             mock_bound_seen = True
+        if served is not False and (not r.get("rps_max_proxy") or not r.get("rps_sustained_20ms")):
+            zero_load_seen = True
+        # Latency cell: a did-not-serve gateway may still have a concurrency-1 number — flag it † so it
+        # is never mistaken for a clean win.
+        lat_cell = "—"
+        if lat is not None:
+            lat_cell = f"{lat} µs" + (" †" if served is False else "")
+            if served is False:
+                dnf_seen = True
+        rss = lambda v: f"{v:.0f} MiB" if v is not None else "—"
+        if served is False and r.get("serve_error"):
+            fail_notes.append((GATEWAYS[key], str(r.get("serve_error"))))
         lines.append(
             f"| {GATEWAYS[key]} "
-            f"| {f'{lat} µs' if lat is not None else '—'} "
+            f"| {lat_cell} "
             f"| {proxy} "
             f"| {llm} "
-            f"| {f'{idle:.0f} MiB' if idle is not None else '—'} "
-            f"| {f'{peak:.0f} MiB' if peak is not None else '—'} "
+            f"| {rss(idle)} "
+            f"| {rss(peak)} "
             f"| {'—' if served is None else ('✅' if served else '❌')} "
             f"| `{(r.get('build') or '').strip()[:38]}` |"
         )
@@ -305,10 +365,27 @@ def _report_md(rows: list, title: str, charts: list, pending: tuple = ()) -> str
     lines.append("Two throughput numbers: **max proxy RPS** (instant upstream — raw forwarding speed) "
                  "and **sustained RPS @20ms** (AIGatewayBench's metric — concurrent in-flight capacity "
                  "under realistic LLM latency).")
+    legend = ["**✅ served** / **❌ did not serve** under load / **⏳ not yet run**.",
+              "**✕** = did not serve under load (0 successful req/s).",
+              "**0** = came up, but no tested concurrency held p99 < 1 s with zero errors."]
+    if dnf_seen:
+        legend.append("**†** = a concurrency-1 latency exists, but the gateway failed under load — "
+                      "not a clean result.")
     if mock_bound_seen:
-        lines.append("⚠ = that ceiling was within 10% of the mock's own throughput ceiling — treat it as "
-                     "a **floor**; the gateway may sustain more on a faster mock/box.")
+        legend.append("**⚠** = ceiling within 10% of the mock's own — treat as a **floor**, not a limit.")
+    lines.append(" &nbsp; ".join(legend))
     lines.append("")
+    # The receipt: WHY each ❌ gateway did not serve — captured status + its own logs, so the claim is
+    # evidence, not an assertion.
+    if fail_notes:
+        lines.append("**Why the ❌ gateways did not serve** (captured live, verbatim from the run):")
+        lines.append("")
+        for name, err in fail_notes:
+            err = err.replace("|", "\\|").strip()
+            if len(err) > 300:
+                err = err[:300] + "…"
+            lines.append(f"- **{name}** — {err}")
+        lines.append("")
     for c in charts:
         if (RESULTS / f"{c}.png").exists():
             lines.append(f"![{c}](../../{c}.png)")
