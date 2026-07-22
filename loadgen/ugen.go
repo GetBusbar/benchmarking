@@ -12,6 +12,7 @@ func main(){
  conc:=flag.Int("c",200,"");dur:=flag.Int("d",12,"");psize:=flag.Int("psize",0,"pad content to N bytes")
  stream:=flag.Bool("stream",false,"SSE mode: request stream:true, consume frames, report TTFT/gaps")
  shape:=flag.String("shape","openai","request shape: openai (default, unchanged) | anthropic (Messages body + x-api-key/anthropic-version headers)")
+ rawbody:=flag.String("body","","verbatim request body for every request (matrix per-cell sweep: the exact ingress-dialect probe body); overrides -shape/-psize body construction. Headers still come from -auth/-H")
  expframes:=flag.Int("expframes",0,"expected content frames per stream (delivered%% denominator; 0=skip)")
  stallus:=flag.Int64("stallus",0,"per-stream stall threshold µs — any content-frame gap above it marks the stream stalled (0=off)")
  var extra hdrs; flag.Var(&extra,"H","extra request header 'Key: Value' (repeatable)"); flag.Parse()
@@ -30,7 +31,9 @@ func main(){
   for time.Now().Before(deadline){n++
    sfield:="";if *stream{sfield=`,"stream":true`}
    var body []byte
-   if *shape=="anthropic"{ // Anthropic Messages: max_tokens is REQUIRED, so it leads the body
+   if *rawbody!=""{
+    body=[]byte(*rawbody)
+   }else if *shape=="anthropic"{ // Anthropic Messages: max_tokens is REQUIRED, so it leads the body
     body=[]byte(fmt.Sprintf(`{"model":"%s","max_tokens":64,"messages":[{"role":"user","content":"u-%d-%d-%s"}]%s}`,*model,id,n,pad,sfield))
    }else{
     body=[]byte(fmt.Sprintf(`{"model":"%s","messages":[{"role":"user","content":"u-%d-%d-%s"}],"max_tokens":16%s}`,*model,id,n,pad,sfield))

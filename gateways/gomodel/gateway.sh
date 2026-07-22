@@ -15,7 +15,12 @@ GW_CLASS="Gateway"   # the project's OWN self-description (no unambiguous self-d
 GW_REPO=https://github.com/ENTERPILOT/GOModel   # linked from the gateway name in the report table
 GW_PORT=8080
 GW_PATH=/v1/chat/completions
-GW_MODEL=gpt-4o-mini
+# Provider-QUALIFIED model: GoModel discovers models from every configured provider's /models and
+# routes a BARE name by alphabetical-first provider. Our bench points all four provider base URLs at
+# one mock whose /models returns the same catalog everywhere, so a bare `gpt-4o-mini` is registered
+# under multiple providers and misroutes to `anthropic`. The `openai/` prefix is GoModel's own
+# disambiguation (how you run it against multiple real providers) and pins it to the openai upstream.
+GW_MODEL=openai/gpt-4o-mini
 GW_AUTH=dummy
 
 GOMODEL_IMAGE="${GOMODEL_IMAGE:-enterpilot/gomodel:0.1.55}"
@@ -77,7 +82,7 @@ GW_MATRIX_CAP_NOTE="GoModel 0.1.55 has no Cohere adapter and no COHERE_BASE_URL 
 GW_MATRIX_EGRESS="openai openai-responses anthropic gemini bedrock"
 gw_matrix_egress() {
   case "$1" in
-    openai|openai-responses) GW_MODEL=gpt-4o-mini;;
+    openai|openai-responses) GW_MODEL=openai/gpt-4o-mini;;
     anthropic)               GW_MODEL=claude-3-5-sonnet-20241022;;
     gemini)                  GW_MODEL=gemini-1.5-pro;;
     bedrock)                 GW_MODEL=anthropic.claude-3-sonnet-20240229-v1:0;;

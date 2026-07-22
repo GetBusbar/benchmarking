@@ -336,23 +336,10 @@ CHARTS = [
         zero_ok=True,
         auto_ms=True,
     ),
-    # ── governance: throughput with keys + limits + budgets enforced ──────────────────────────────
-    Chart(
-        name="governed_throughput",
-        suite="governed",
-        title="Throughput with governance active",
-        subtitle="sustained req/s @20ms with key auth, rate limits and budgets enforced, vs the same gateway plain (higher is better)",
-        unit="requests / sec",
-        series=[
-            Series("governed_rps_sustained_20ms", "governed RPS @20ms", "rank"),
-            Series("plain_rps_sustained_20ms", "plain RPS (no governance)", MUTE),
-        ],
-        higher_better=True,
-        served_field="governed_served",
-        not_served_text="✕ no native key governance",
-        annot=lambda r: (lambda p: f"{float(p):+.1f}% vs plain" if p is not None else None)(
-            r.get("governed_vs_plain_sustained_pct")),
-    ),
+    # Governance is intentionally NOT charted on the neutral board: the governed suite is a
+    # non-default, busbar-only launch (only busbar's manifest wires it), so a comparison would
+    # spotlight busbar and read "not tested" for the rest. Governance overhead belongs on the
+    # advocacy site. The governed suite still runs and its data is kept for that use.
 ]
 
 
@@ -719,16 +706,15 @@ def _report_md(rows: list, title: str, charts: list, pending: tuple = (), chart_
     row_keys = [k for k, _ in rows]
     lane_keys = [k for k in row_keys if k in stream_m or k in xlate_m or k in governed_m]
     if lane_keys:
-        lines.append("## Streaming, translation and governance")
+        lines.append("## Streaming and translation")
         lines.append("")
         lines.append("Same box, same mock, one gateway at a time. Streaming figures are the overhead "
                      "the gateway adds on top of the mock's paced SSE stream; translation is an "
                      "Anthropic client against an OpenAI-shape upstream (the conversion is the work "
-                     "being measured); governed is sustained throughput with key auth, rate limits "
-                     "and budgets enforced, next to the same gateway running plain.")
+                     "being measured).")
         lines.append("")
-        lines.append("| Gateway | Added TTFT (p99) | Added per-token (p99) | SSE streams | Translated RPS @20ms | Governed RPS @20ms | Governed vs plain |")
-        lines.append("|---|--:|--:|--:|--:|--:|--:|")
+        lines.append("| Gateway | Added TTFT (p99) | Added per-token (p99) | SSE streams | Translated RPS @20ms |")
+        lines.append("|---|--:|--:|--:|--:|")
 
         def us_cell(r, field):
             v = r.get(field)
@@ -752,19 +738,15 @@ def _report_md(rows: list, title: str, charts: list, pending: tuple = (), chart_
                     streams += f" ({fps:,.0f} fps)"
             if x is None:
                 xl = "n/a"
+            elif x.get("xlate_passthrough"):
+                # Returned the upstream body untranslated: a wrong answer to an Anthropic client,
+                # distinct from an honest refusal - name it so the two are not conflated.
+                xl = "✕ untranslated passthrough"
             elif not x.get("xlate_served"):
                 xl = "✕ cannot translate"
             else:
                 xl = f"{int(x.get('xlate_rps_sustained_20ms') or 0):,}"
-            if g is None:
-                gv = pct = "n/a"
-            elif not g.get("governed_served"):
-                gv, pct = "✕ no native key governance", "n/a"
-            else:
-                gv = f"{int(g.get('governed_rps_sustained_20ms') or 0):,}"
-                p = g.get("governed_vs_plain_sustained_pct")
-                pct = f"{float(p):+.1f}%" if p is not None else "n/a"
-            lines.append(f"| {_linked(key)} | {ttft} | {gap} | {streams} | {xl} | {gv} | {pct} |")
+            lines.append(f"| {_linked(key)} | {ttft} | {gap} | {streams} | {xl} |")
         lines.append("")
         lines.append("**✕** cells are measured refusals, not gaps: the gateway was offered the load "
                      "and could not do the thing (buffered instead of streaming, rejected the "

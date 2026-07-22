@@ -72,7 +72,15 @@ const gateways = gatewayKeys.map((key) => {
     const j = readJson(join(ROOT, "results", suite, `${key}.json`));
     if (j) g[suite] = j;
   }
-  if (g.matrix) normalizeMatrix(g.matrix);
+  if (g.matrix) {
+    normalizeMatrix(g.matrix);
+    // Per-cell perf (matrix v2 + sweep): the gateway's BEST green cell by sustained RPS @20ms,
+    // with its ingress -> egress path. The Performance tab ranks each gateway on this cell; the
+    // matrix hover shows every other green cell's deviation from it. Absent (older results
+    // without per-cell sweeps) the site falls back to the perf suite's single-path number.
+    const bc = bestCell(g.matrix);
+    if (bc) g.best_cell = bc;
+  }
   // "Supports governance" is a DECLARED CAPABILITY, not a per-run measurement outcome. A gateway is
   // governance-capable if its manifest wires a governed launch - i.e. the governed note is anything
   // OTHER than "manifest defines no ..." (the string write_unserved emits when no gw_governed_launch
@@ -88,6 +96,21 @@ const gateways = gatewayKeys.map((key) => {
 // the v2 shape so the site renders exactly one structure: the one measured egress column becomes
 // `upstreams`, and the columns v1 never probed stay absent (the site renders them "not measured",
 // which is the honest reading of a v1 run: unmeasured, not "not configurable").
+// Best green cell across the full grid: max rps_sustained_20ms among served===true cells that
+// carry a per-cell perf object. Returns { ingress, egress, ...perf } or null.
+function bestCell(m) {
+  if (!m.upstreams) return null;
+  let best = null;
+  for (const [egress, up] of Object.entries(m.upstreams)) {
+    for (const [ingress, cell] of Object.entries((up && up.cells) || {})) {
+      if (cell.served !== true || !cell.perf || cell.perf.rps_sustained_20ms == null) continue;
+      if (!best || cell.perf.rps_sustained_20ms > best.rps_sustained_20ms)
+        best = { ingress, egress, ...cell.perf };
+    }
+  }
+  return best;
+}
+
 function normalizeMatrix(m) {
   if (m.upstreams || !m.cells) return;
   const shape = m.upstream_shape || "openai";
@@ -111,7 +134,9 @@ const hardware = [...hwCounts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] || 
 // ---- charts: copy results/*.png into site/charts/ ---------------------------
 const resultsDir = join(ROOT, "results");
 const chartFiles = existsSync(resultsDir)
-  ? readdirSync(resultsDir).filter((f) => f.endsWith(".png")).sort()
+  // Governance is not a neutral-board metric (the governed suite is a non-default, busbar-only
+  // launch), so its chart is excluded from the public gallery even if the PNG is present.
+  ? readdirSync(resultsDir).filter((f) => f.endsWith(".png") && !f.includes("governed")).sort()
   : [];
 mkdirSync(join(OUT, "charts"), { recursive: true });
 const charts = [];

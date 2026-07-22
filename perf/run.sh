@@ -41,6 +41,7 @@ export MOCK_PORT="${MOCK_PORT:-8000}"
 RESULTS="$ROOT/results/perf"; mkdir -p "$RESULTS"
 log(){ echo "[$(date +%H:%M:%S)] $*"; }
 command -v taskset >/dev/null || taskset(){ shift 2; "$@"; }
+command -v setsid  >/dev/null || setsid(){ "$@"; }
 command -v go >/dev/null || { echo "need Go (load generator)"; exit 1; }
 command -v cargo >/dev/null || { echo "need cargo (rust mock)"; exit 1; }
 
@@ -62,6 +63,10 @@ d=sys.stdin.buffer.read()[:1600].decode("utf-8","replace")
 sys.stdout.write(json.dumps(d)[1:-1])'; }
 # shellcheck source=/dev/null
 source "$ROOT/lib/harness.sh"
+# Shared sweep + c1 added-latency implementation (lib/sweep.sh): sweep_probe / sweep_c1 / run_sweep.
+# The SAME code the matrix suite runs per green cell, so per-cell perf and this suite can never drift.
+# shellcheck source=/dev/null
+source "$ROOT/lib/sweep.sh"
 # shellcheck source=/dev/null
 source "$GW_DIR/gateway.sh"
 suite_deadline_start
@@ -72,15 +77,6 @@ setsid taskset -c "$MOCKCORES" "$MOCK" -port "$MOCK_PORT" </dev/null >/dev/null 
 sleep 1
 cleanup(){ gw_stop 2>/dev/null; pkill -f "$MOCK" 2>/dev/null; }
 trap cleanup EXIT
-
-# run ugen, echo "rps fail p99us" parsed from its output line. HARD TIMEOUT: a probe against an
-# unresponsive gateway (arch under load) must fail fast, not block the suite on the loadgen's tail
-# request timeout across every hung worker. tmo caps the whole invocation at dur+grace; if it fires,
-# ugen printed nothing and the caller's `read`/awk see empty → rps/fail default to 0/1 (not-served).
-probe(){ # url conc dur
-  tmo "$(probe_budget "$3")" "$UGEN" -url "$1" -model "$GW_MODEL" -auth "$GW_AUTH" -c "$2" -d "$3" -psize "$PSIZE" "${UGEN_H[@]}" 2>/dev/null \
-    | awk '{for(i=1;i<=NF;i++){split($i,a,"=");v[a[1]]=a[2]}; print v["rps"],v["fail"],v["p99us"],v["p50us"]}'
-}
 
 log "[$GATEWAY] build"; gw_build || { echo "build failed"; exit 1; }
 # Readiness probe used by the retry loop. Rebuilds the header arrays FIRST (a manifest can mint a key
@@ -113,35 +109,18 @@ else
 fi
 
 # ── direct baseline (mock, same path/body) + gateway c1 → overhead µs ──────────────────────────────
+# sweep_c1 (lib/sweep.sh) runs the discarded warm-up + both c1 windows and gates the window's
+# HONESTY (C1_OK=0 when the window had errors / no valid 200 sample - a fabricated added-latency
+# number). Here that demotes the whole lane to served=false with the provable reason (same
+# convention as the never-got-200 path) instead of publishing a 0 or an error-path win.
 DURL="http://127.0.0.1:$MOCK_PORT$GW_PATH"; GURL="http://127.0.0.1:$GW_PORT$GW_PATH"
-# Discarded warm-up so JIT/interpreted gateways (Node, Python) aren't charged first-request/cold-start
-# cost inside the measured window. Identical for the direct baseline and the gateway — same for all.
-WARMUP_DUR="${WARMUP_DUR:-5}"
-log "[$GATEWAY] warm-up ${WARMUP_DUR}s (discarded, both paths)"
-probe "$DURL" 1 "$WARMUP_DUR" >/dev/null 2>&1; probe "$GURL" 1 "$WARMUP_DUR" >/dev/null 2>&1
-log "[$GATEWAY] c1 baseline (direct→mock) ${C1_DUR}s"
-read -r _drps _dfail DP99 DP50 < <(probe "$DURL" 1 "$C1_DUR")
-log "[$GATEWAY] c1 gateway ${C1_DUR}s"
-read -r _grps _gfail GP99 GP50 < <(probe "$GURL" 1 "$C1_DUR")
-# Gate the added-latency lane on the c1 window's HONESTY. probe() only pools latencies from 200s now,
-# so GP99=0 means no successful sample; a material error rate means the gateway 429/5xx'd the window
-# and any latency we DID pool is not a trustworthy proxy latency. In either case the added-latency
-# number is fabricated - demote the whole lane to served=false with a provable reason (same convention
-# as the never-got-200 path) instead of publishing a 0 or an error-path win. Baseline (direct→mock)
-# must also produce a real sample, else OVER_P99 would be the gateway's full absolute latency.
-if [ "$ok" = 1 ]; then
-  _gtot=$(( ${_grps:-0} * C1_DUR + ${_gfail:-0} )); _dtot=$(( ${_drps:-0} * C1_DUR + ${_dfail:-0} ))
-  if [ "${GP99:-0}" -le 0 ] || [ "${DP99:-0}" -le 0 ] \
-     || ! awk -v f="${_gfail:-1}" -v t="$_gtot" 'BEGIN{exit !(t>0 && f<=0.001*t)}' \
-     || ! awk -v f="${_dfail:-1}" -v t="$_dtot" 'BEGIN{exit !(t>0 && f<=0.001*t)}'; then
-    ok=0; c="c1-err"
-    SERVE_ERR="c1 latency window unreliable: gw ok=${_grps:-0}/s fail=${_gfail:-?} p99=${GP99:-0}us; direct ok=${_drps:-0}/s fail=${_dfail:-?} p99=${DP99:-0}us; diag=[$(gw_diag 2>&1 | tail -n 20)]"
-    log "[$GATEWAY] WARNING c1 window had errors / no valid sample - served=false"
-    log "[$GATEWAY] serve_error: $(printf '%s' "$SERVE_ERR" | head -c 300)"
-  fi
+sweep_c1
+if [ "$ok" = 1 ] && [ "$C1_OK" != 1 ]; then
+  ok=0; c="c1-err"
+  SERVE_ERR="$C1_ERR; diag=[$(gw_diag 2>&1 | tail -n 20)]"
+  log "[$GATEWAY] WARNING c1 window had errors / no valid sample - served=false"
+  log "[$GATEWAY] serve_error: $(printf '%s' "$SERVE_ERR" | head -c 300)"
 fi
-OVER_P99=$(( ${GP99:-0} - ${DP99:-0} )); OVER_P50=$(( ${GP50:-0} - ${DP50:-0} ))
-log "[$GATEWAY] c1: gw p99=${GP99}µs direct p99=${DP99}µs → added p99=${OVER_P99}µs (p50 added=${OVER_P50}µs)"
 
 # ── the gateway's OWN self-reported compute (Server-Timing dur), same box + same c1 condition ────────
 # Neutral: we record whatever the gateway emits in `Server-Timing: <name>;dur=`. Only a gateway that
@@ -159,35 +138,8 @@ if [ "$ok" = 1 ]; then
   fi
 fi
 
-# ── two throughput sweeps ──────────────────────────────────────────────────────────────────────────
-# One sweep at a given mock delay + concurrency list. Restarts the mock at that delay, measures the
-# mock's OWN ceiling (load→mock direct at the top concurrency) as the guardrail reference, then ramps
-# the gateway. Sets SW_CEIL_RPS / SW_CEIL_CONC / SW_CEIL_P99 / SW_MOCK_CEIL / SW_BOUND / SW_JSON.
-run_sweep() { # ttft_ms  conc_list
-  local ttft="$1" concs="$2"
-  pkill -f "$MOCK" 2>/dev/null; sleep 1
-  setsid taskset -c "$MOCKCORES" env MOCK_TTFT_MS="$ttft" "$MOCK" -port "$MOCK_PORT" </dev/null >/dev/null 2>&1 &
-  sleep 1
-  local top=1 w; for w in $concs; do top=$w; done
-  local mrps _a _b _c; read -r mrps _a _b _c < <(probe "$DURL" "$top" "$SWEEP_DUR"); SW_MOCK_CEIL=${mrps:-0}
-  SW_CEIL_RPS=0; SW_CEIL_CONC=0; SW_CEIL_P99=0; SW_JSON=""
-  local conc rps fail p99 _p50
-  for conc in $concs; do
-    if suite_deadline_expired; then log "[$GATEWAY] suite wall-clock ceiling reached mid-sweep - stopping sweep, recording what we have"; break; fi
-    read -r rps fail p99 _p50 < <(probe "$GURL" "$conc" "$SWEEP_DUR")
-    rps=${rps:-0}; fail=${fail:-1}; p99=${p99:-99999999}
-    log "[$GATEWAY]   (ttft=${ttft}ms) c=$conc → rps=$rps p99=$((p99/1000))ms fail=$fail"
-    SW_JSON="${SW_JSON}${SW_JSON:+,}{\"conc\":$conc,\"rps\":$rps,\"p99_us\":$p99,\"fail\":$fail}"
-    # Gate on error RATE (< 0.1%), not literal zero — a single failure in tens of thousands shouldn't
-    # zero a gateway's whole result. Plus p99 under the ceiling, and a new best.
-    if awk -v f="$fail" -v r="$rps" -v d="$SWEEP_DUR" 'BEGIN{tot=r*d+f; exit !(tot>0 && f<=0.001*tot)}' \
-       && [ "$p99" -lt $((P99_CEIL_MS*1000)) ] && [ "$rps" -gt "$SW_CEIL_RPS" ]; then
-      SW_CEIL_RPS=$rps; SW_CEIL_CONC=$conc; SW_CEIL_P99=$p99
-    fi
-  done
-  SW_BOUND=false
-  if [ "${SW_MOCK_CEIL:-0}" -gt 0 ] && awk -v c="$SW_CEIL_RPS" -v m="$SW_MOCK_CEIL" 'BEGIN{exit !(c>=0.9*m)}'; then SW_BOUND=true; fi
-}
+# ── two throughput sweeps (run_sweep from lib/sweep.sh: restarts the mock at the given delay,
+# measures the mock's OWN ceiling as the guardrail reference, then ramps the gateway) ──────────────
 
 # (A) MAX PROXY THROUGHPUT — instant mock. Raw forward speed; busbar's own published metric.
 log "[$GATEWAY] sweep A — max proxy throughput (instant mock)"

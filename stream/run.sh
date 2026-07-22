@@ -113,9 +113,13 @@ if [ "$ok" = 1 ]; then
       -H "content-type: application/json" -H "authorization: Bearer $GW_AUTH" \
       -H "accept: text/event-stream" "${CURL_H[@]}" \
       -d "{\"model\":\"$GW_MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"warm\"}],\"max_tokens\":16,\"stream\":true}" 2>&1)"
-  if printf '%s' "$sbody" | grep -q '^data:'; then STREAM_OK=1
+  # here-string, not a pipe: with `set -o pipefail`, `printf ... | grep -q` reports the pipeline as
+  # failed when grep matches early and printf takes SIGPIPE (141) -- a false negative even though the
+  # body is full of frames. grep on a here-string reads the whole string and returns grep's own status
+  # (same fix as streamcpu/run.sh).
+  if grep -q '^data:' <<< "$sbody"; then STREAM_OK=1
   else STREAM_ERR="no SSE frames on stream:true; body=[$(printf '%s' "$sbody" | head -c 400)]; diag=[$(gw_diag 2>&1 | tail -n 20)]"
-       log "[$GATEWAY] WARNING stream:true produced no SSE frames — stream_served=false"
+       log "[$GATEWAY] WARNING stream:true produced no SSE frames - stream_served=false"
   fi
 fi
 

@@ -38,7 +38,7 @@
          being benchmarked. Gateways today; future categories slot in beside it. -->
     <nav class="catnav" id="catnav" aria-label="Benchmark categories"></nav>
     <nav class="tabs" id="tabs">
-      <a class="tab active" data-view="results" href="/gateways">Results</a>
+      <a class="tab active" data-view="results" href="/gateways">Performance</a>
       <a class="tab" data-view="matrix" href="/gateways/matrix">Protocol matrix</a>
       <a class="tab" data-view="charts" href="/gateways/charts">Charts</a>
       <a class="tab" data-view="method" href="/gateways/method">Method</a>
@@ -58,6 +58,7 @@
       </div>
       <span id="row-count" class="muted count"></span>
     </div>
+    <p class="fineprint">Each gateway on its best-performing supported path. Hover any matrix cell for that path's numbers.</p>
     <div class="table-scroll">
       <table id="results-table">
         <thead></thead>
@@ -99,6 +100,7 @@
           <li><b>Added latency (p50/p99, microseconds)</b>: at concurrency 1, gateway p99 minus direct-to-mock p99, small payloads.</li>
           <li><b>Max proxy RPS</b>: highest sustained requests per second against an instant mock where p99 stays under 1000 ms and the error rate stays under 0.1 percent (CPU-bound ceiling).</li>
           <li><b>Sustained RPS at 20 ms</b>: the same gates, but the mock sleeps 20 ms per request to model real LLM latency, so the ceiling is concurrent-in-flight capacity, the real production bottleneck. Same concurrency grid for every gateway.</li>
+          <li>The Performance tab shows these metrics on each gateway's best-performing supported path, measured per matrix cell with this same sweep; no path is picked by us.</li>
         </ul>
       </article>
       <article class="method-card">
@@ -127,17 +129,11 @@
         </ul>
       </article>
       <article class="method-card">
-        <h3><a id="lnk-governed" target="_blank" rel="noopener">governed/run.sh</a> Governance</h3>
-        <ul>
-          <li>The same sustained-RPS-at-20ms sweep as perf, but with the gateway's native key/limit governance active: per-request virtual-key resolution, rate-limit accounting, and budget check-and-charge on the hot path.</li>
-          <li>Each run also repeats the identical sweep against the plain, ungoverned launch, so one result file self-contains the governance overhead percentage from one box on one day, with no cross-run subtraction. Minted limits are generous enough that no cap ever trips: the cost measured is the check, not the limit.</li>
-        </ul>
-      </article>
-      <article class="method-card">
         <h3><a id="lnk-matrix" target="_blank" rel="noopener">matrix/run.sh</a> Protocol matrix</h3>
         <ul>
-          <li>A capability suite, not a latency suite: one probe per ingress protocol cell (OpenAI, OpenAI Responses, Anthropic, Gemini, Cohere, Bedrock Converse) against the fixed OpenAI upstream.</li>
-          <li>Envelope validation per cell, a passthrough guard that rejects the mock's canned bodies as untranslated proxying, and an unprobed_auth state for ingresses that demand signatures the harness does not forge.</li>
+          <li>A capability suite first: one probe per (ingress, upstream) cell across the full 6x6 (OpenAI, OpenAI Responses, Anthropic, Gemini, Cohere, Bedrock Converse), relaunching the gateway per upstream dialect.</li>
+          <li>Envelope validation per cell, a passthrough guard that rejects the mock's canned bodies as untranslated proxying, an upstream round-trip check (the mock records which endpoint the gateway actually called), and an unprobed_auth state for ingresses that demand signatures the harness does not forge.</li>
+          <li><b>Per-cell perf</b>: every passing (green) cell also gets the perf suite's exact sweep on that path (added latency at concurrency 1, sustained RPS at 20 ms, max proxy RPS). The Performance tab ranks each gateway on its best cell; every other green cell shows its deviation from that best on hover.</li>
         </ul>
       </article>
     </div>
