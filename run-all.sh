@@ -23,8 +23,9 @@ fi
 log(){ echo "[$(date +%H:%M:%S)] $*"; }
 
 # Which suites to run (headline first): perf = latency + RPS ceiling; memory = idle/peak RSS.
-# stream = SSE added-TTFT / inter-frame overhead / streams sustained; opt in with
-# SUITES="perf memory stream" (see stream/run.sh).
+# stream = SSE added-TTFT / inter-frame overhead / streams sustained; governed = the same latency +
+# sustained-RPS run with native key/limit governance active, paired against a plain run in one JSON.
+# Opt in with SUITES="perf memory stream governed" (see stream/run.sh, governed/run.sh).
 SUITES="${SUITES:-perf memory}"
 for gw in "${GATEWAYS[@]}"; do
   [ -f "$HERE/gateways/$gw/gateway.sh" ] || { log "skip unknown gateway '$gw'"; continue; }
