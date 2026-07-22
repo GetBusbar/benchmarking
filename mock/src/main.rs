@@ -20,18 +20,29 @@
 //
 //   mock -port 8000                    # instant responses
 //   MOCK_TTFT_MS=20 mock -port 8000    # add a fixed delay (latency-isolation runs)
+//
+// STREAMING: when (and only when) the request body says "stream":true, the OpenAI and Anthropic
+// paths answer a valid SSE stream instead — role/message_start, then N content deltas paced at a
+// fixed interval, then finish + [DONE] (message_stop for Anthropic). The pacing is the "model
+// generating tokens"; the stream suite measures what a gateway ADDS on top of it. Knobs:
+//   MOCK_STREAM_CHUNKS=64        content-delta frames per stream
+//   MOCK_STREAM_INTERVAL_MS=20   pause before each content delta after the first
+//   MOCK_STREAM_CHUNK_BYTES=16   text payload bytes per content delta
+// Other protocols (Gemini/Bedrock/Cohere) ignore stream:true and answer their normal JSON.
 
 use std::convert::Infallible;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Duration;
 
-use http_body_util::{BodyExt, Full};
-use hyper::body::{Bytes, Incoming};
+use http_body_util::{BodyExt, Full, StreamBody};
+use hyper::body::{Bytes, Frame, Incoming};
 use hyper::service::service_fn;
 use hyper::{Request, Response};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto;
 use tokio::net::TcpListener;
+use tokio_stream::wrappers::ReceiverStream;
 
 const OPENAI: &[u8] = br#"{"id":"chatcmpl-x","object":"chat.completion","created":1,"model":"mock","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12}}"#;
 const RESPONSES: &[u8] = br#"{"id":"resp_x","object":"response","created_at":1,"status":"completed","model":"mock","output":[{"type":"message","id":"msg_x","role":"assistant","content":[{"type":"output_text","text":"ok"}]}],"usage":{"input_tokens":10,"output_tokens":2,"total_tokens":12}}"#;
@@ -64,16 +75,103 @@ fn body_for(path: &str) -> &'static [u8] {
     }
 }
 
-async fn handle(req: Request<Incoming>, ttft_ms: u64) -> Result<Response<Full<Bytes>>, Infallible> {
-    let body = body_for(req.uri().path());
-    // Drain the request body so the connection stays keep-alive; we never look at it.
-    let _ = req.into_body().collect().await;
+/// The SSE frames for one stream, prebuilt once at boot (Bytes clones are refcount bumps).
+/// `head` goes out immediately, then each `delta` after an interval sleep (first delta is
+/// unpaced so direct-to-mock TTFT stays near zero), then `tail`.
+struct StreamFrames {
+    openai_head: Vec<Bytes>,
+    openai_delta: Bytes,
+    openai_tail: Vec<Bytes>,
+    anthropic_head: Vec<Bytes>,
+    anthropic_delta: Bytes,
+    anthropic_tail: Vec<Bytes>,
+    chunks: u32,
+    interval: Duration,
+}
+
+impl StreamFrames {
+    fn build(chunks: u32, interval_ms: u64, chunk_bytes: usize) -> Self {
+        let pad = "x".repeat(chunk_bytes.max(1));
+        let b = |s: String| Bytes::from(s);
+        StreamFrames {
+            openai_head: vec![b(r#"data: {"id":"chatcmpl-x","object":"chat.completion.chunk","created":1,"model":"mock","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}"#.to_string() + "\n\n")],
+            openai_delta: b(format!("data: {{\"id\":\"chatcmpl-x\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"mock\",\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"{pad}\"}},\"finish_reason\":null}}]}}\n\n")),
+            openai_tail: vec![
+                b(r#"data: {"id":"chatcmpl-x","object":"chat.completion.chunk","created":1,"model":"mock","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#.to_string() + "\n\n"),
+                b("data: [DONE]\n\n".to_string()),
+            ],
+            anthropic_head: vec![
+                b("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_x\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"mock\",\"content\":[],\"stop_reason\":null,\"usage\":{\"input_tokens\":10,\"output_tokens\":0}}}\n\n".to_string()),
+                b("event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n".to_string()),
+            ],
+            anthropic_delta: b(format!("event: content_block_delta\ndata: {{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{{\"type\":\"text_delta\",\"text\":\"{pad}\"}}}}\n\n")),
+            anthropic_tail: vec![
+                b("event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n".to_string()),
+                b(format!("event: message_delta\ndata: {{\"type\":\"message_delta\",\"delta\":{{\"stop_reason\":\"end_turn\"}},\"usage\":{{\"output_tokens\":{chunks}}}}}\n\n")),
+                b("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n".to_string()),
+            ],
+            chunks,
+            interval: Duration::from_millis(interval_ms),
+        }
+    }
+}
+
+/// Does the request body ask for streaming? Cheap substring scan — no JSON parse on the hot path.
+fn wants_stream(body: &[u8]) -> bool {
+    body.windows(13).any(|w| w == b"\"stream\":true") || body.windows(14).any(|w| w == b"\"stream\": true")
+}
+
+type OutBody = http_body_util::combinators::BoxBody<Bytes, Infallible>;
+
+fn sse_response(frames: Arc<StreamFrames>, anthropic: bool, ttft_ms: u64) -> Response<OutBody> {
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Frame<Bytes>, Infallible>>(8);
+    tokio::spawn(async move {
+        if ttft_ms > 0 {
+            tokio::time::sleep(Duration::from_millis(ttft_ms)).await;
+        }
+        let (head, delta, tail) = if anthropic {
+            (&frames.anthropic_head, &frames.anthropic_delta, &frames.anthropic_tail)
+        } else {
+            (&frames.openai_head, &frames.openai_delta, &frames.openai_tail)
+        };
+        for f in head {
+            if tx.send(Ok(Frame::data(f.clone()))).await.is_err() { return; }
+        }
+        for i in 0..frames.chunks {
+            if i > 0 {
+                tokio::time::sleep(frames.interval).await;
+            }
+            if tx.send(Ok(Frame::data(delta.clone()))).await.is_err() { return; }
+        }
+        for f in tail {
+            if tx.send(Ok(Frame::data(f.clone()))).await.is_err() { return; }
+        }
+    });
+    Response::builder()
+        .header("content-type", "text/event-stream")
+        .header("cache-control", "no-cache")
+        .body(StreamBody::new(ReceiverStream::new(rx)).boxed())
+        .unwrap()
+}
+
+async fn handle(
+    req: Request<Incoming>,
+    ttft_ms: u64,
+    frames: Arc<StreamFrames>,
+) -> Result<Response<OutBody>, Infallible> {
+    let path = req.uri().path().to_string();
+    let body = body_for(&path);
+    // Drain the request body so the connection stays keep-alive; only the stream flag is looked at.
+    let reqbody = req.into_body().collect().await.map(|c| c.to_bytes()).unwrap_or_default();
+    if wants_stream(&reqbody) && (std::ptr::eq(body, OPENAI) || std::ptr::eq(body, ANTHROPIC)) {
+        return Ok(sse_response(frames, std::ptr::eq(body, ANTHROPIC), ttft_ms));
+    }
     if ttft_ms > 0 {
         tokio::time::sleep(Duration::from_millis(ttft_ms)).await;
     }
     Ok(Response::builder()
         .header("content-type", "application/json")
-        .body(Full::new(Bytes::from_static(body)))
+        .body(Full::new(Bytes::from_static(body)).boxed())
         .unwrap())
 }
 
@@ -87,13 +185,18 @@ async fn main() {
         }
     }
     let ttft_ms: u64 = std::env::var("MOCK_TTFT_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+    let envn = |k: &str, d: u64| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
+    let s_chunks = envn("MOCK_STREAM_CHUNKS", 64) as u32;
+    let s_interval = envn("MOCK_STREAM_INTERVAL_MS", 20);
+    let s_bytes = envn("MOCK_STREAM_CHUNK_BYTES", 16) as usize;
+    let frames = Arc::new(StreamFrames::build(s_chunks, s_interval, s_bytes));
 
     // Bind 0.0.0.0 (not just loopback) so container-networked gateways (Arch via host.docker.internal,
     // Envoy AI via the kind bridge IP) can reach the mock — the loopback path 127.0.0.1 that the
     // --network-host and native gateways use is unchanged.
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     let listener = TcpListener::bind(addr).await.expect("bind");
-    eprintln!("mock listening on {addr} (ttft={ttft_ms}ms, proto=h1+h2c) — OpenAI/Responses/Anthropic/Gemini/Bedrock/Cohere");
+    eprintln!("mock listening on {addr} (ttft={ttft_ms}ms, proto=h1+h2c, stream={s_chunks}x{s_bytes}B@{s_interval}ms on stream:true) — OpenAI/Responses/Anthropic/Gemini/Bedrock/Cohere");
     loop {
         let (stream, _) = match listener.accept().await {
             Ok(s) => s,
@@ -101,6 +204,7 @@ async fn main() {
         };
         let _ = stream.set_nodelay(true);
         let io = TokioIo::new(stream);
+        let frames = frames.clone();
         tokio::spawn(async move {
             // auto::Builder sniffs the HTTP/2 preface and serves h2c to clients that speak it, h1 to
             // those that don't — so gateways that multiplex to the upstream (like a real HTTP/2
@@ -108,7 +212,7 @@ async fn main() {
             // TLS: keeps the mock cheap so it stays off the critical path. (An opt-in TLS+ALPN variant
             // can be added later for a separate full-realism column.)
             let _ = auto::Builder::new(TokioExecutor::new())
-                .serve_connection(io, service_fn(move |r| handle(r, ttft_ms)))
+                .serve_connection(io, service_fn(move |r| handle(r, ttft_ms, frames.clone())))
                 .await;
         });
     }

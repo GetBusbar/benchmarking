@@ -13,6 +13,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "time"]
 hyper = { version = "1", features = ["server", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["tokio", "server-auto"] }
 http-body-util = "0.1"
+tokio-stream = { version = "0.1", default-features = false }
 
 [profile.release]
 opt-level = 3
