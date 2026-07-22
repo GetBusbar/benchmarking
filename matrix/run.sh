@@ -85,8 +85,39 @@ gw_diag(){ :; }
 json_escape(){ printf '%s' "$1" | python3 -c 'import json,sys
 d=sys.stdin.buffer.read()[:1600].decode("utf-8","replace")
 sys.stdout.write(json.dumps(d)[1:-1])'; }
+
+# ── per-cell perf sweep (ADDITIVE: capability verdicts above are untouched) ──────────────────────
+# Every cell that PASSES the capability verdict as served (green) additionally gets a throughput +
+# latency sweep on that exact (ingress path, egress config) pair: the SAME sweep implementation as
+# perf/run.sh (lib/sweep.sh - same concurrency grids, same 20ms sustained gate p99 < 1000ms with
+# < 0.1% errors, same mock-ceiling mock_bound guard), driving the cell's exact ingress-dialect
+# probe body against the cell's ingress path. The added-latency baseline is direct-to-mock on the
+# matching dialect endpoint, exactly as perf/xlate subtract theirs. Grey (not declared), red
+# (served-but-wrong), unprobed_auth and boot-failed cells carry NO perf. MATRIX_SWEEP=0 disables.
+MATRIX_SWEEP="${MATRIX_SWEEP:-1}"
+if [ "$MATRIX_SWEEP" = 1 ] && ! command -v go >/dev/null; then
+  echo "WARNING: no Go toolchain - per-cell perf sweep disabled (capability matrix still runs)"
+  MATRIX_SWEEP=0
+fi
+UGEN="$ROOT/loadgen/ugen"
+if [ "$MATRIX_SWEEP" = 1 ]; then
+  log "building loadgen (go) for the per-cell perf sweep"
+  go build -o "$UGEN" "$ROOT/loadgen/ugen.go" || { echo "WARNING: loadgen build failed - per-cell perf sweep disabled"; MATRIX_SWEEP=0; }
+fi
+# Same knobs + defaults as perf/run.sh so the per-cell numbers are directly comparable.
+C1_DUR="${C1_DUR:-20}"; SWEEP_DUR="${SWEEP_DUR:-10}"; PSIZE="${PSIZE:-256}"
+SWEEP_INSTANT="${SWEEP_INSTANT:-16 32 64 128 256 512 1024}"
+SWEEP_DELAYED="${SWEEP_DELAYED:-8 32 128 256 1024 4096 8192 16384}"
+SWEEP_TTFT_MS="${SWEEP_TTFT_MS:-20}"
+P99_CEIL_MS="${P99_CEIL_MS:-1000}"
+# Sweeping every green cell multiplies the suite's wall time (by design: that is the whole point of
+# per-cell perf), so the default suite ceiling rises from harness.sh's 45 min to 4 h when sweeps are
+# on. An explicit HARNESS_SUITE_CEIL_S still wins, and the ceiling still backstops a wedged gateway.
+[ "$MATRIX_SWEEP" = 1 ] && HARNESS_SUITE_CEIL_S="${HARNESS_SUITE_CEIL_S:-14400}"
 # shellcheck source=/dev/null
 source "$ROOT/lib/harness.sh"
+# shellcheck source=/dev/null
+source "$ROOT/lib/sweep.sh"
 # shellcheck source=/dev/null
 source "$GW_DIR/gateway.sh"
 suite_deadline_start
@@ -162,10 +193,29 @@ ingress_path(){ case "$1" in
   anthropic) echo "$P_ANTHROPIC";; gemini) echo "$P_GEMINI";;
   cohere) echo "$P_COHERE";; bedrock) echo "$P_BEDROCK";; esac; }
 
+# The capability probes need the RECORDING mock (instant, MOCK_RECORD=1: leg 3 evidence); the
+# per-cell perf sweep needs the exact serving conditions perf/run.sh measures under (no recording,
+# run_sweep restarts it per delay). These helpers flip between the two; every capability probe is
+# preceded by mock_start_record, so a sweep can never leave a non-recording mock in front of a
+# leg-3 check (mock_hit would honestly report "norecord" even if one slipped through).
+mock_start_record(){
+  pkill -f "$MOCK" 2>/dev/null; sleep 1
+  setsid taskset -c "$MOCKCORES" env MOCK_RECORD=1 "$MOCK" -port "$MOCK_PORT" </dev/null >/dev/null 2>&1 &
+  local i
+  for i in $(seq 1 15); do
+    curl -s -m2 "http://127.0.0.1:$MOCK_PORT/__mock/state" 2>/dev/null | grep -q '"recording":true' && return 0
+    sleep 1
+  done
+  log "WARNING: recording mock did not come back on :$MOCK_PORT"
+  return 1
+}
+mock_start_plain(){ # instant, NO recording: the identical mock perf/run.sh measures c1 against
+  pkill -f "$MOCK" 2>/dev/null; sleep 1
+  setsid taskset -c "$MOCKCORES" "$MOCK" -port "$MOCK_PORT" </dev/null >/dev/null 2>&1 &
+  sleep 1
+}
 log "starting mock :$MOCK_PORT (instant, all six dialects by path, request recording ON)"
-pkill -f "$MOCK" 2>/dev/null; sleep 1
-setsid taskset -c "$MOCKCORES" env MOCK_RECORD=1 "$MOCK" -port "$MOCK_PORT" </dev/null >/dev/null 2>&1 &
-sleep 1
+mock_start_record
 cleanup(){ gw_stop 2>/dev/null; pkill -f "$MOCK" 2>/dev/null; }
 trap cleanup EXIT
 
@@ -304,10 +354,89 @@ ingress_body(){ # dialect -> probe body on stdout
   esac
 }
 
+# ── per-cell perf sweep (green cells only) ──────────────────────────────────────────────────────
+# The direct-to-mock baseline endpoint for each ingress dialect: the mock speaks every dialect by
+# path, so the added-latency subtraction is direct-on-the-SAME-shape, exactly as perf (openai) and
+# xlate (anthropic) compute theirs. Canonical mock paths, independent of any per-gateway ingress
+# path override (the mock routes by these markers; a manifest's custom gateway path may not).
+mock_direct_path(){ case "$1" in
+  openai) echo "/v1/chat/completions";; openai-responses) echo "/v1/responses";;
+  anthropic) echo "/v1/messages";; gemini) echo "/v1beta/models/$GW_MODEL:generateContent";;
+  cohere) echo "/v2/chat";; bedrock) echo "/model/$GW_MODEL/converse";; esac; }
+
+# matrix_cell_perf <egress> <cell> <path> <body> [extra -H header...]
+# Runs the shared c1 added-latency measurement + BOTH throughput sweeps (lib/sweep.sh, the same
+# implementation perf/run.sh runs) on one green cell: the cell's exact probe body at load, against
+# the cell's ingress path, under the egress config the gateway is CURRENTLY launched with. Sets
+# CELL_PERF_JSON (empty on skip); emit_cell folds it into the cell object. The mock is switched to
+# the plain non-recording build for the measurement (perf's exact serving conditions) and the
+# recording mock is restored before the next capability probe.
+CELL_PERF_JSON=""
+matrix_cell_perf(){
+  local egress="$1" cell="$2" path="$3" data="$4"; shift 4
+  CELL_PERF_JSON=""
+  [ "$MATRIX_SWEEP" = 1 ] || return 0
+  if suite_deadline_expired; then
+    log "[$GATEWAY]   $egress <- $cell : suite ceiling reached - skipping the perf sweep (capability verdict stands)"
+    return 0
+  fi
+  log "[$GATEWAY]   $egress <- $cell : green - measuring per-cell perf (c1 added latency + 2 sweeps)"
+  # Loadgen headers = the manifest's GW_HEADERS (already -H pairs in CURL_H) + this cell's dialect
+  # headers (anthropic-version/x-api-key, x-goog-api-key, ...), matching the capability probe.
+  UGEN_H=( ${CURL_H[@]+"${CURL_H[@]}"} "$@" )
+  SWEEP_BODY="$data"
+  GURL="http://127.0.0.1:$GW_PORT$path"
+  DURL="http://127.0.0.1:$MOCK_PORT$(mock_direct_path "$cell")"
+  mock_start_plain
+  sweep_c1
+  run_sweep 0 "$SWEEP_INSTANT"
+  local prps=$SW_CEIL_RPS pbound=$SW_BOUND
+  run_sweep "$SWEEP_TTFT_MS" "$SWEEP_DELAYED"
+  local lrps=$SW_CEIL_RPS lbound=$SW_BOUND
+  SWEEP_BODY=""; UGEN_H=()
+  mock_start_record
+  # The sweep restarted the mock, so the gateway's upstream connection pool may hold dead sockets.
+  # Fire a couple of discarded warm requests through the gateway so the re-verify probe below (and
+  # the NEXT cell's capability probe) can never eat a stale-connection failure. Their record entries
+  # are wiped by the mock_reset that immediately follows.
+  local _w
+  for _w in 1 2; do
+    curl -s -m3 -o /dev/null "http://127.0.0.1:$GW_PORT$P_OPENAI" -X POST \
+      -H "content-type: application/json" -H "authorization: Bearer $GW_AUTH" ${CURL_H[@]+"${CURL_H[@]}"} \
+      -d "{\"model\":\"$GW_MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"warm\"}],\"max_tokens\":16}" 2>/dev/null
+    sleep 1
+  done
+  # C1b - LEG-3 RE-VERIFY AFTER LOAD. The capability probe proved this cell hits the intended egress
+  # dialect endpoint at concurrency 1, but perf/stream historically recorded HTTP-200-only numbers
+  # that hid a misroute (the gomodel-class bug: an openai request served from the mock's anthropic
+  # endpoint). The sweep just hammered the gateway on a NON-recording mock, so we re-run THIS cell's
+  # exact probe (same body + headers, same ingress path) against the recording mock and re-assert
+  # leg 3: the mock must have received a request on the $egress endpoint carrying the $egress shape.
+  # If the gateway misroutes under (or after) load, perf is DROPPED for this cell with the evidence -
+  # a misrouted cell never carries a green perf number.
+  mock_reset
+  probe "$path" "$data" "$@"
+  local reverify; reverify="$(mock_hit "$egress")"
+  if [ "$reverify" != ok ]; then
+    log "[$GATEWAY]   $egress <- $cell : LEG-3 RE-VERIFY FAILED after load ($reverify) - dropping perf (possible misroute)"
+    CELL_PERF_JSON=", \"perf_dropped\": \"$(json_escape "leg-3 re-verify after load did not confirm the $egress egress endpoint: $reverify; perf withheld to avoid recording a misrouted number")\""
+    return 0
+  fi
+  local lat50=$OVER_P50 lat99=$OVER_P99 g99=${GP99:-0} d99=${DP99:-0} c1note=""
+  if [ "$C1_OK" != 1 ]; then
+    # No trustworthy c1 sample: latency fields go null with the evidence, the sweeps still stand.
+    lat50=null; lat99=null; g99=null; d99=null
+    c1note=", \"c1_note\": \"$(json_escape "$C1_ERR")\""
+  fi
+  CELL_PERF_JSON=", \"perf\": {\"added_latency_p50_us\": $lat50, \"added_latency_p99_us\": $lat99, \"gateway_c1_p99_us\": $g99, \"direct_c1_p99_us\": $d99, \"rps_sustained_20ms\": $lrps, \"rps_sustained_20ms_mock_bound\": $lbound, \"rps_max_proxy\": $prps, \"rps_max_proxy_mock_bound\": $pbound, \"egress_reverified\": true$c1note}"
+  log "[$GATEWAY]   $egress <- $cell : perf added_p99=${lat99}us sustained@${SWEEP_TTFT_MS}ms=${lrps}rps max_proxy=${prps}rps (leg-3 re-verified)"
+}
+
 CELLS_JSON=""
-emit_cell(){ # cell served status path note snippet
+emit_cell(){ # cell served status path note snippet  (+ CELL_PERF_JSON, cleared after use)
   CELLS_JSON="${CELLS_JSON}${CELLS_JSON:+,}
-      \"$1\": {\"served\": $2, \"status\": \"$3\", \"path\": \"$4\", \"verdict_note\": \"$(json_escape "$5")\", \"body_snippet\": \"$(json_escape "$6")\"}"
+      \"$1\": {\"served\": $2, \"status\": \"$3\", \"path\": \"$4\", \"verdict_note\": \"$(json_escape "$5")\", \"body_snippet\": \"$(json_escape "$6")\"$CELL_PERF_JSON}"
+  CELL_PERF_JSON=""
 }
 
 WARM_OK=0; WARM_LAST=000; SERVE_ERR=""
@@ -362,6 +491,11 @@ run_cell(){ # egress cell path body extra-header...
   fi
   snip="$(printf '%s' "$LAST_BODY" | head -c 200)"
   log "[$GATEWAY]   $egress <- $cell : served=$served ($note)"
+  # ADDITIVE per-cell perf: only a green (served=true) cell is swept; the capability verdict above
+  # is already final and is not re-derived from the sweep in any way.
+  if [ "$served" = true ]; then
+    matrix_cell_perf "$egress" "$cell" "$path" "$data" "$@"
+  fi
   emit_cell "$cell" "$served" "$LAST_STATUS" "$path" "$note" "$snip"
 }
 
@@ -474,6 +608,9 @@ cat > "$RESULTS/$GATEWAY.json" <<JSON
   "upstream_note": "v2: full 6x6. Top-level cells are the $COMPAT_SHAPE-egress row for v1 compatibility; the full grid is under upstreams.<egress>.cells keyed by ingress dialect.",
   "egress_configured": "$GW_MATRIX_EGRESS",
   "cap_note": "$(json_escape "$GW_MATRIX_CAP_NOTE")",
+  "cell_perf_sweep": $([ "$MATRIX_SWEEP" = 1 ] && echo true || echo false),
+  "sweep_ttft_ms": $SWEEP_TTFT_MS,
+  "p99_ceiling_ms": $P99_CEIL_MS,
   "cells": {$COMPAT_CELLS
   },
   "upstreams": {$UPSTREAMS_JSON

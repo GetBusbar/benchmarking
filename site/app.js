@@ -109,6 +109,17 @@ function lane(g, suite, flag, errKey, pick) {
   return pick(j);
 }
 
+/* bestOrPerf: the Performance tab ranks each gateway on its BEST-performing green matrix cell
+   (g.best_cell, from the per-cell matrix sweep: max sustained RPS @20ms among the paths the
+   gateway actually supports). Results predating the per-cell sweep have no best_cell; those fall
+   back to the perf suite's single-path number so the table never goes blank. */
+function bestOrPerf(g, key, fmt) {
+  if (g.best_cell && g.best_cell[key] != null)
+    return { v: g.best_cell[key], text: fmt(g.best_cell[key]), na: false };
+  return lane(g, "perf", "served", "serve_error", (j) =>
+    j[key] != null ? { v: j[key], text: fmt(j[key]), na: false } : { v: null, text: "n/a", na: true });
+}
+
 /* ---- column model ----------------------------------------------------------- */
 /* get(g) returns {v, text, na}: v is the sortable value (null = none), text the cell
    text, na marks a muted "not measured / not served" cell. sortable:false columns
@@ -134,6 +145,13 @@ const COLUMNS = [
     },
   },
   {
+    id: "bestpath", label: "Best path", desc: false,
+    title: "The gateway's best-performing supported path (ingress → upstream), ranked by sustained RPS @20ms from the per-cell matrix sweep",
+    get: (g) => g.best_cell
+      ? { v: `${g.best_cell.ingress}→${g.best_cell.egress}`, text: `${g.best_cell.ingress} → ${g.best_cell.egress}`, na: false }
+      : { v: null, text: "n/a", na: true },
+  },
+  {
     id: "cls", label: "Class", desc: false,
     /* Class is each project's own self-description (from its manifest GW_CLASS,
        sourced from that project's README/site tagline), not our editorial. */
@@ -150,19 +168,16 @@ const COLUMNS = [
     },
   },
   {
-    id: "rps20", label: "Sustained RPS @20ms", desc: true, title: "Sustained requests/sec with a 20 ms mock LLM latency (p99 < 1 s, <0.1% errors)",
-    get: (g) => lane(g, "perf", "served", "serve_error",
-      (j) => ({ v: j.rps_sustained_20ms, text: fmtInt(j.rps_sustained_20ms), na: false })),
+    id: "lat", label: "Added latency p99 (µs)", desc: false, title: "Gateway p99 minus direct-to-mock p99 at concurrency 1, on the gateway's best supported path",
+    get: (g) => bestOrPerf(g, "added_latency_p99_us", fmtAdded),
   },
   {
-    id: "rpsmax", label: "Max proxy RPS", desc: true, title: "Throughput ceiling against an instant mock (p99 < 1 s, <0.1% errors)",
-    get: (g) => lane(g, "perf", "served", "serve_error",
-      (j) => ({ v: j.rps_max_proxy, text: fmtInt(j.rps_max_proxy), na: false })),
+    id: "rps20", label: "Sustained RPS @20ms", desc: true, title: "Sustained requests/sec with a 20 ms mock LLM latency (p99 < 1 s, <0.1% errors), on the gateway's best supported path",
+    get: (g) => bestOrPerf(g, "rps_sustained_20ms", fmtInt),
   },
   {
-    id: "lat", label: "Added latency p99 (µs)", desc: false, title: "Gateway p99 minus direct-to-mock p99 at concurrency 1",
-    get: (g) => lane(g, "perf", "served", "serve_error",
-      (j) => ({ v: j.added_latency_p99_us, text: fmtAdded(j.added_latency_p99_us), na: false })),
+    id: "rpsmax", label: "Max proxy RPS", desc: true, title: "Throughput ceiling against an instant mock (p99 < 1 s, <0.1% errors), on the gateway's best supported path",
+    get: (g) => bestOrPerf(g, "rps_max_proxy", fmtInt),
   },
   {
     id: "memidle", label: "Mem idle (MiB)", desc: false, title: "Process RSS after launch, before load",
@@ -829,6 +844,20 @@ function matrixCellTip(cell) {
     return `not verified: the harness could not get this gateway serving under this upstream config${cell.verdict_note ? " (" + cell.verdict_note + ")" : ""}`;
   return `${label}. ${cell.verdict_note || ""}`;
 }
+/* Per-cell perf line for a GREEN cell's tooltip/detail: this path's sustained RPS + added latency
+   p99, and its deviation from THIS gateway's best cell (cell.rps / best.rps - 1, signed %). The
+   best cell itself reads "best path". Grey/red/unprobed cells carry no perf and return "". */
+function cellPerfTip(cell, ingress, egress, best) {
+  const p = cell && cell.served === true ? cell.perf : null;
+  if (!p || p.rps_sustained_20ms == null) return "";
+  let s = `${fmtInt(p.rps_sustained_20ms)} req/s @20ms`;
+  if (p.added_latency_p99_us != null) s += `, +${fmtInt(p.added_latency_p99_us)} µs p99 added`;
+  if (best && best.rps_sustained_20ms > 0) {
+    if (best.ingress === ingress && best.egress === egress) s += " - best path";
+    else s += ` - ${fmtPct((p.rps_sustained_20ms / best.rps_sustained_20ms - 1) * 100)} vs best (${best.ingress}→${best.egress})`;
+  }
+  return s;
+}
 function renderMatrix() {
   const withMatrix = state.data.gateways.filter((g) => g.matrix && (g.matrix.upstreams || g.matrix.cells));
   if (!withMatrix.length) {
@@ -874,7 +903,8 @@ function renderMatrix() {
             if (!cell) return `<td class="na" title="not measured (v1 result: this upstream dialect was not probed)">n/a</td>`;
             const [cls] = cellState(cell);
             const diag = e === c ? " diag" : "";
-            const tip = matrixCellTip(cell);
+            const perf = cellPerfTip(cell, c, e, g.best_cell);
+            const tip = matrixCellTip(cell) + (perf ? ` | ${perf}` : "");
             return `<td><span class="cell ${cls}${diag}" data-gw="${esc(g.key)}" data-egress="${esc(e)}" data-cell="${esc(c)}" title="${esc(g.display)} / ${esc(MATRIX_LABELS[c])} in, ${esc(MATRIX_LABELS[e])} upstream: ${esc(tip)}"></span></td>`;
           }).join("")
         }</tr>`).join("")
@@ -894,6 +924,10 @@ function renderMatrix() {
         `<h4>${esc(g.display)} / ${esc(MATRIX_LABELS[el.dataset.cell])} ingress, ${esc(MATRIX_LABELS[el.dataset.egress])} upstream: ${label}${
           cell.status ? ` (HTTP ${esc(cell.status)}, ${esc(cell.path || "")})` : ""
         }</h4>` +
+        (() => {
+          const perf = cellPerfTip(cell, el.dataset.cell, el.dataset.egress, g.best_cell);
+          return perf ? `<div><b>${esc(perf)}</b></div>` : "";
+        })() +
         `<div>${esc(cell.verdict_note || "no verdict note")}</div>` +
         (cell.body_snippet ? `<pre>${esc(cell.body_snippet)}</pre>` : "");
       detail.scrollIntoView({ behavior: "smooth", block: "nearest" });
@@ -1101,7 +1135,7 @@ if (NODE) {
     newState, encodeUrl, decodeUrl, viewPath, applyFilters,
     fmtStamp, fmtAge, stampWithAge,
     drawSweep, niceStep, fmtTick, COLUMNS, LANES, naText,
-    cellState, matrixCellTip, CATEGORIES, DEFAULT_CATEGORY, VIEWS,
+    cellState, matrixCellTip, cellPerfTip, bestOrPerf, CATEGORIES, DEFAULT_CATEGORY, VIEWS,
   };
 } else {
   boot();

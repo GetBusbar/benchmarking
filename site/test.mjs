@@ -180,7 +180,24 @@ test("naText keeps long diagnostic notes out of cell values", () => {
   const unsupported = data.gateways.find((g) =>
     g.governed && g.governed.governed_served === false && /manifest defines no/.test(g.governed.governed_note || ""));
   assert.ok(unsupported, "expected a gateway without native governance");
-  assert.equal(app.naText(unsupported.governed, "governed_served", "governed_note").text, "not supported");
+  // "manifest defines no <hook>" = the harness never probed it: "not tested", never a capability verdict
+  assert.equal(app.naText(unsupported.governed, "governed_served", "governed_note").text, "not tested");
+});
+
+// ---- per-cell perf: best-path deviation on the matrix hover -----------------
+test("cellPerfTip shows a green cell's perf and its deviation from the gateway's best cell", () => {
+  const best = { ingress: "openai", egress: "openai", rps_sustained_20ms: 30000 };
+  const green = { served: true, perf: { rps_sustained_20ms: 25500, added_latency_p99_us: 900 } };
+  const tip = app.cellPerfTip(green, "anthropic", "openai", best);
+  assert.ok(tip.includes("25,500 req/s @20ms"), tip);
+  assert.ok(tip.includes("+900 µs p99 added"), tip);
+  assert.ok(tip.includes("-15.0% vs best (openai→openai)"), tip);
+  const bestTip = app.cellPerfTip({ served: true, perf: best }, "openai", "openai", best);
+  assert.ok(bestTip.includes("best path"), bestTip);
+  // red/grey/unprobed cells and perf-less greens carry NO perf line
+  assert.equal(app.cellPerfTip({ served: false, perf: { rps_sustained_20ms: 1 } }, "a", "b", best), "");
+  assert.equal(app.cellPerfTip({ served: "not_configurable" }, "a", "b", best), "");
+  assert.equal(app.cellPerfTip({ served: true }, "a", "b", best), "");
 });
 
 // ---- sweep chart on a stub canvas with real committed data ------------------
