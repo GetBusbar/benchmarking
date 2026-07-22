@@ -177,7 +177,7 @@ auth:
 governance:
   # The released entrant (getbusbar/busbar:1.4.1) still has the governance on/off switch and a
   # SQLite-backed store: `enabled: true` ACTIVATES enforcement (without it admin_token is inert and
-  # the admin API rejects the mint with 401 — the "never minted a key" failure), and db_path must be
+  # the admin API rejects the mint with 401 - the "never minted a key" failure), and db_path must be
   # ":memory:" because the default (busbar-governance.db next to the config) cannot be opened on the
   # bench's read-only working dir. :memory: is ephemeral, so per-run keys never leak across runs.
   enabled: true

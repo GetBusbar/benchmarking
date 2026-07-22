@@ -133,7 +133,7 @@ if [ "$STREAM_OK" = 1 ]; then
     STREAM_OK=0
     STREAM_ERR="${STREAM_ERR:+$STREAM_ERR; }c1 stream window unreliable: gw streams=${_gs:-0} fail=${_gf:-?} frames=${_gfr:-0} ttft_p99=${GT99:-0}us; direct streams=${_ds:-0} fail=${_df:-?} frames=${_dfr:-0}"
     GT50=0; GT99=0; DT50=0; DT99=0; GG50=0; GG99=0; DG50=0; DG99=0
-    log "[$GATEWAY] WARNING stream c1 window had errors / no frames — stream_served=false"
+    log "[$GATEWAY] WARNING stream c1 window had errors / no frames - stream_served=false"
   fi
   ADD_T50=$(( ${GT50:-0} - ${DT50:-0} )); ADD_T99=$(( ${GT99:-0} - ${DT99:-0} ))
   ADD_G50=$(( ${GG50:-0} - ${DG50:-0} )); ADD_G99=$(( ${GG99:-0} - ${DG99:-0} ))

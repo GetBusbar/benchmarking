@@ -139,7 +139,7 @@ if [ "$XLATE_OK" = 1 ]; then
   log "[$GATEWAY] c1 gateway (ANTHROPIC shape on $XPATH_A) ${C1_DUR}s"
   read -r _grps _gfail GP99 GP50 < <(aprobe "$XURL" 1 "$C1_DUR")
   # Gate the translation-latency lane on c1 honesty: aprobe/oprobe only pool 200 latencies, so GP99=0
-  # means no successful sample and a material error rate means the window was 429/5xx'd — either way
+  # means no successful sample and a material error rate means the window was 429/5xx'd - either way
   # the added-latency number is fabricated. Demote xlate_served=false with a provable reason instead
   # of publishing 0 or an error-path win (matches the no-2xx-envelope path above).
   _gtot=$(( ${_grps:-0} * C1_DUR + ${_gfail:-0} )); _dtot=$(( ${_drps:-0} * C1_DUR + ${_dfail:-0} ))
@@ -149,7 +149,7 @@ if [ "$XLATE_OK" = 1 ]; then
     XLATE_OK=0
     XLATE_ERR="${XLATE_ERR:+$XLATE_ERR; }c1 latency window unreliable: gw ok=${_grps:-0}/s fail=${_gfail:-?} p99=${GP99:-0}us; direct ok=${_drps:-0}/s fail=${_dfail:-?} p99=${DP99:-0}us"
     GP99=0; GP50=0; DP99=0; DP50=0
-    log "[$GATEWAY] WARNING xlate c1 window had errors / no valid sample — xlate_served=false"
+    log "[$GATEWAY] WARNING xlate c1 window had errors / no valid sample - xlate_served=false"
   fi
   OVER_P99=$(( ${GP99:-0} - ${DP99:-0} )); OVER_P50=$(( ${GP50:-0} - ${DP50:-0} ))
   log "[$GATEWAY] c1: gw p99=${GP99}µs direct p99=${DP99}µs → added (incl. translation) p99=${OVER_P99}µs (p50=${OVER_P50}µs)"

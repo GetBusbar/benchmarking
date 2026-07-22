@@ -67,7 +67,7 @@ const gateways = gatewayKeys.map((key) => {
   }
   if (g.matrix) normalizeMatrix(g.matrix);
   // "Supports governance" is a DECLARED CAPABILITY, not a per-run measurement outcome. A gateway is
-  // governance-capable if its manifest wires a governed launch — i.e. the governed note is anything
+  // governance-capable if its manifest wires a governed launch - i.e. the governed note is anything
   // OTHER than "manifest defines no ..." (the string write_unserved emits when no gw_governed_launch
   // hook exists). So a capable gateway whose measurement failed on a given run (e.g. busbar's launch
   // hiccup) still reads as capable; only genuinely-unsupported gateways are excluded from the filter.

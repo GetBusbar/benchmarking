@@ -91,7 +91,7 @@ _hwm_tree_mib() { # root_pid → summed VmHWM of pid + descendants, in MiB
 # to sum VmHWM over the SAME process(es) its gw_rss() sums VmRSS over (native pid tree, or the
 # container's host-pid tree via container_hwm_mib). The default below is a safe no-op that returns
 # empty (recorded as null downstream) so a manifest without the hook never fabricates a number and
-# never trips `set -u` — it is gateway-agnostic and never references a hardcoded process name.
+# never trips `set -u` - it is gateway-agnostic and never references a hardcoded process name.
 gw_hwm() { echo ""; }
 json_escape(){ printf '%s' "$1" | python3 -c 'import json,sys
 d=sys.stdin.buffer.read()[:1600].decode("utf-8","replace")

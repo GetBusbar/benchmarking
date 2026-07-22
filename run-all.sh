@@ -25,7 +25,7 @@ log(){ echo "[$(date +%H:%M:%S)] $*"; }
 # Between-suite port drain. Each suite's EXIT trap kills the gateway; the next suite relaunches the
 # SAME gateway on the SAME port seconds later. A gateway that binds WITHOUT SO_REUSEADDR (busbar,
 # and others) then hits 'address already in use' because the prior listener sits in TIME_WAIT for up
-# to a minute — the suite records served=false, a FALSE failure verdict for a working gateway. A
+# to a minute - the suite records served=false, a FALSE failure verdict for a working gateway. A
 # connect probe can't see TIME_WAIT, so we test actual BINDABILITY: a plain bind (no SO_REUSEADDR)
 # fails with EADDRINUSE exactly while the port is unbindable, which is the condition we must clear.
 # Wait for GW_PORT and its two derived admin ports (matrix uses +1, governed uses +2) to be bindable.
@@ -45,7 +45,7 @@ PY
       then ok=1; break; fi
       sleep 1
     done
-    [ "$ok" = 1 ] || log "WARNING port $p still not bindable after 90s — launching anyway"
+    [ "$ok" = 1 ] || log "WARNING port $p still not bindable after 90s - launching anyway"
   done
 }
 
@@ -70,7 +70,7 @@ for gw in "${GATEWAYS[@]}"; do
   first=1
   for suite in $SUITES; do
     # Between suites (not before the first), wait for the prior suite's listener to fully release the
-    # port so the next suite's launch can bind — avoids the TIME_WAIT false 'did not serve'. Cover the
+    # port so the next suite's launch can bind - avoids the TIME_WAIT false 'did not serve'. Cover the
     # data port and the two admin ports suites derive from it (matrix GW_PORT+1, governed GW_PORT+2).
     if [ "$first" != 1 ]; then
       log "$gw: waiting for ports $gwport/$((gwport+1))/$((gwport+2)) to be bindable before $suite"

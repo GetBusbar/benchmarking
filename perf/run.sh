@@ -112,7 +112,7 @@ read -r _grps _gfail GP99 GP50 < <(probe "$GURL" 1 "$C1_DUR")
 # Gate the added-latency lane on the c1 window's HONESTY. probe() only pools latencies from 200s now,
 # so GP99=0 means no successful sample; a material error rate means the gateway 429/5xx'd the window
 # and any latency we DID pool is not a trustworthy proxy latency. In either case the added-latency
-# number is fabricated — demote the whole lane to served=false with a provable reason (same convention
+# number is fabricated - demote the whole lane to served=false with a provable reason (same convention
 # as the never-got-200 path) instead of publishing a 0 or an error-path win. Baseline (direct→mock)
 # must also produce a real sample, else OVER_P99 would be the gateway's full absolute latency.
 if [ "$ok" = 1 ]; then
@@ -122,7 +122,7 @@ if [ "$ok" = 1 ]; then
      || ! awk -v f="${_dfail:-1}" -v t="$_dtot" 'BEGIN{exit !(t>0 && f<=0.001*t)}'; then
     ok=0; c="c1-err"
     SERVE_ERR="c1 latency window unreliable: gw ok=${_grps:-0}/s fail=${_gfail:-?} p99=${GP99:-0}us; direct ok=${_drps:-0}/s fail=${_dfail:-?} p99=${DP99:-0}us; diag=[$(gw_diag 2>&1 | tail -n 20)]"
-    log "[$GATEWAY] WARNING c1 window had errors / no valid sample — served=false"
+    log "[$GATEWAY] WARNING c1 window had errors / no valid sample - served=false"
     log "[$GATEWAY] serve_error: $(printf '%s' "$SERVE_ERR" | head -c 300)"
   fi
 fi

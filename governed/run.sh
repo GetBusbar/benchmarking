@@ -118,7 +118,7 @@ measure_phase(){
   probe "$DURL" 1 "${WARMUP_DUR:-5}" "$token" >/dev/null 2>&1
   probe "$GURL" 1 "${WARMUP_DUR:-5}" "$token" >/dev/null 2>&1
   # Reset every output BEFORE the reads: `read` on empty probe output (gateway died mid-c1) leaves the
-  # variables at their PREVIOUS values, and measure_phase runs twice (plain, then governed) — without
+  # variables at their PREVIOUS values, and measure_phase runs twice (plain, then governed) - without
   # this reset the governed phase would silently copy the plain phase's numbers and report ~0 overhead.
   local drps dfail grps gfail _dp50=0 _gp50=0
   PH_DP99=0; PH_GP99=0; PH_OVER_P99=0; PH_OVER_P50=0; PH_C1_OK=1
@@ -127,7 +127,7 @@ measure_phase(){
   log "[$GATEWAY] c1 gateway ${C1_DUR}s"
   read -r grps gfail PH_GP99 _gp50 < <(probe "$GURL" 1 "$C1_DUR" "$token")
   # Gate on c1 honesty: probe() only pools 200 latencies, so PH_GP99=0 means no successful sample and a
-  # material error rate means the window was 429/5xx'd (e.g. a minted key that stopped working) — the
+  # material error rate means the window was 429/5xx'd (e.g. a minted key that stopped working) - the
   # added-latency number would be fabricated. Flag it so the caller records governed_served=false.
   local _gtot=$(( ${grps:-0} * C1_DUR + ${gfail:-0} )) _dtot=$(( ${drps:-0} * C1_DUR + ${dfail:-0} ))
   if [ "${PH_GP99:-0}" -le 0 ] || [ "${PH_DP99:-0}" -le 0 ] \
