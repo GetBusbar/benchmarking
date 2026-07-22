@@ -618,11 +618,21 @@ const MATRIX_LABELS = {
   openai: "OpenAI", "openai-responses": "OpenAI Responses", anthropic: "Anthropic",
   gemini: "Gemini", cohere: "Cohere", bedrock: "Bedrock Converse",
 };
+/* A served===false cell is one of two very different things, and a neutral board must not
+   conflate them. If the gateway never served the warm-up under this egress config (or never
+   answered at all, status 000), the harness could not get it into a testable state: that is
+   our config, not the gateway's translation, so it renders "not verified", never a red fail.
+   Only a gateway that actually served and returned a wrong or untranslated body is red. */
+const isHarnessGap = (cell) => {
+  const note = (cell.verdict_note || "").toLowerCase();
+  return cell.status === "000" || (note.includes("never served") && note.includes("warm-up"));
+};
 const cellState = (cell) =>
   cell.served === true ? ["served", "served"]
     : cell.served === "unprobed_auth" ? ["unprobed", "unprobed (auth)"]
       : cell.served === "not_configurable" ? ["notconf", "not declared"]
-        : ["failed", "not served"];
+        : isHarnessGap(cell) ? ["unverified", "not verified"]
+          : ["failed", "not served"];
 
 function laneStamp(j) {
   const bits = [];
@@ -812,9 +822,11 @@ function matrixCell(g, egress, ingress) {
    "we didn't test it". Green/red show the verdict label + note as before. */
 function matrixCellTip(cell) {
   const [, label] = cellState(cell);
-  return cell.served === "not_configurable"
-    ? `not declared supported by this gateway${cell.verdict_note ? ": " + cell.verdict_note : ""}`
-    : `${label}. ${cell.verdict_note || ""}`;
+  if (cell.served === "not_configurable")
+    return `not declared supported by this gateway${cell.verdict_note ? ": " + cell.verdict_note : ""}`;
+  if (cell.served !== true && cell.served !== "unprobed_auth" && isHarnessGap(cell))
+    return `not verified: the harness could not get this gateway serving under this upstream config${cell.verdict_note ? " (" + cell.verdict_note + ")" : ""}`;
+  return `${label}. ${cell.verdict_note || ""}`;
 }
 function renderMatrix() {
   const withMatrix = state.data.gateways.filter((g) => g.matrix && (g.matrix.upstreams || g.matrix.cells));
@@ -825,13 +837,14 @@ function renderMatrix() {
   }
   /* per-gateway tallies over the full grid; sorted by measurement: pass count desc, then name */
   const tally = (g) => {
-    const t = { pass: 0, fail: 0, notconf: 0, unprobed: 0 };
+    const t = { pass: 0, fail: 0, notconf: 0, unprobed: 0, unverified: 0 };
     for (const e of MATRIX_CELLS) for (const c of MATRIX_CELLS) {
       const cell = matrixCell(g, e, c);
       if (!cell) continue;
       if (cell.served === true) t.pass++;
       else if (cell.served === "not_configurable") t.notconf++;
       else if (cell.served === "unprobed_auth") t.unprobed++;
+      else if (isHarnessGap(cell)) t.unverified++;
       else t.fail++;
     }
     return t;
@@ -844,6 +857,7 @@ function renderMatrix() {
     const bits = [`<b class="pass-count">${t.pass}</b>/36 pass`];
     if (t.fail) bits.push(`${t.fail} fail`);
     if (t.notconf) bits.push(`${t.notconf} not declared`);
+    if (t.unverified) bits.push(`${t.unverified} not verified`);
     if (t.unprobed) bits.push(`${t.unprobed} unprobed (auth)`);
     return `<section class="matrix-gw">
       <header class="matrix-gw-head"><h3>${

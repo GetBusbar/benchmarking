@@ -264,6 +264,9 @@ tbody tr { cursor: pointer; }
 .cell.unprobed { background: var(--grey); }
 /* not configurable: neutral, visibly distinct from both a red fail and the grey unprobed_auth */
 .cell.notconf { background: var(--bg-hover); border: 1px solid var(--border); }
+/* not verified: the harness could not get the gateway serving under this egress config; a dashed
+   grey border reads as "we could not test this", visibly distinct from the solid "not declared". */
+.cell.unverified { background: var(--bg-hover); border: 1px dashed var(--fg-dim); }
 /* diagonal cells (same dialect in and out, no translation required): subtle ring */
 .cell.diag { outline: 1px solid var(--fg-dim); outline-offset: 1px; }
 /* compact cell legend: one line of colored squares + short labels, mirrors the cell classes */
@@ -276,6 +279,7 @@ tbody tr { cursor: pointer; }
 .matrix-legend .lg-pass { background: var(--green); }
 .matrix-legend .lg-fail { background: var(--red); }
 .matrix-legend .lg-notconf { background: var(--bg-hover); border: 1px solid var(--border); }
+.matrix-legend .lg-unverified { background: var(--bg-hover); border: 1px dashed var(--fg-dim); }
 .matrix-legend .lg-diag { background: var(--bg-hover); outline: 1px solid var(--fg-dim); outline-offset: 1px; }
 .matrix-legend-note { font-size: .78rem; margin: 0 0 .8rem; }
 .matrix-detail {

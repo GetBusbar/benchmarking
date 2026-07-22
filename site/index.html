@@ -73,9 +73,10 @@
       <li><span class="lg lg-pass"></span>supported, passing</li>
       <li><span class="lg lg-fail"></span>supported, failing</li>
       <li><span class="lg lg-notconf"></span>not supported</li>
+      <li><span class="lg lg-unverified"></span>not verified</li>
       <li><span class="lg lg-diag"></span>same-dialect passthrough</li>
     </ul>
-    <p class="matrix-legend-note muted">Support is each gateway's own declared capability.</p>
+    <p class="matrix-legend-note muted">Support is each gateway's own declared capability. A red cell is a gateway that served and returned a wrong or untranslated body; "not verified" means the harness could not get that gateway serving under this upstream config, so no pass or fail is claimed.</p>
     <div id="matrix-grid"></div>
     <div id="matrix-detail" class="matrix-detail hidden"></div>
     <p id="matrix-empty" class="muted hidden">Protocol matrix results are coming soon: no results/matrix JSONs are committed yet.</p>
