@@ -157,6 +157,31 @@ Manifests may override `GW_ANTHROPIC_PATH` (default `/v1/messages`) and add
 `GW_ANTHROPIC_AUTH_HEADER`; the load generator sends the token as both `Authorization: Bearer` and
 `x-api-key`, so most manifests need nothing.
 
+**`matrix/`** (opt-in: `GATEWAY=<name> matrix/run.sh`) is the protocol support matrix, a
+capability suite rather than a latency suite. One gateway is probed across six ingress protocol
+shapes (OpenAI chat completions, OpenAI Responses, Anthropic Messages, Gemini `generateContent`,
+Cohere v2 chat with a v1 fallback, Bedrock Converse) while the upstream mock stays fixed on the
+OpenAI shape, so every non-OpenAI cell is a translation claim: the gateway must convert the request
+out and the response back. One probe per cell validates the response envelope, not just the status
+code (`choices[0].message`, a Responses envelope, `"type":"message"` plus a content array,
+`candidates[0].content`, `message.content`, `output.message.content`). The xlate passthrough guard
+generalizes to every cell: the mock answers all six protocols by path, so a gateway that proxies an
+ingress path verbatim gets a plausible 200 from the mock's canned constant; every translation cell
+rejects that canned body as untranslated passthrough. Bedrock gets one extra honesty rule: real
+Bedrock clients sign with AWS SigV4, and a gateway that answers 401/403 to the probe's bearer token
+records `"unprobed_auth"` (distinct from false) with the evidence, because the harness does not
+forge signatures and a red it did not earn would be a lie. Each cell writes
+`{served, status, verdict_note, body_snippet}` to `results/matrix/<gateway>.json`, valid JSON
+always, exit 0 always. v1 records no per-cell latency (the load generator only speaks the OpenAI
+and Anthropic shapes today) and fixes the upstream to the OpenAI dialect; the full six-by-six grid
+with every upstream dialect is future work. Manifests may override `GW_MATRIX_PATH_OPENAI`,
+`GW_MATRIX_PATH_RESPONSES`, `GW_MATRIX_PATH_ANTHROPIC` (defaults to the shared
+`GW_ANTHROPIC_PATH`), `GW_MATRIX_PATH_GEMINI`, `GW_MATRIX_PATH_COHERE`, `GW_MATRIX_PATH_BEDROCK`;
+most need nothing. A self-test fixture lives at `matrix/mock-gateway/` (outside `gateways/` so
+discovery never fields it): a second mock posing as the gateway, expected to score OpenAI true
+incidentally and every translation cell false as passthrough. If the fixture ever goes green on a
+translation cell, the guard has a hole.
+
 **`memory/`** — resident memory across a request's life (matters most at GB scale):
 
 - **idle RSS** — right after the gateway first answers `200`, before any load.
