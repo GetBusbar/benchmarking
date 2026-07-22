@@ -24,12 +24,15 @@
 <main class="wrap">
   <section id="view-results" class="view">
     <div class="controls" id="controls">
+      <input type="search" id="search" placeholder="Search gateways" aria-label="Search gateways by name">
+      <div class="control-group" id="class-filters" aria-label="Filter by class (each project's own self-description)"></div>
       <div class="control-group" id="lang-filters" aria-label="Filter by language"></div>
       <div class="control-group" id="lane-filters">
         <label class="toggle"><input type="checkbox" id="f-stream"> supports streaming</label>
         <label class="toggle"><input type="checkbox" id="f-xlate"> supports translation</label>
         <label class="toggle"><input type="checkbox" id="f-governed"> supports governance</label>
       </div>
+      <span id="row-count" class="muted count"></span>
     </div>
     <div class="table-scroll">
       <table id="results-table">
@@ -37,7 +40,7 @@
         <tbody></tbody>
       </table>
     </div>
-    <p class="fineprint">Click a column header to sort. Rows are ordered by measurement, never by name. A muted cell means the lane was not measured; an explicit label means the suite probed it and recorded that the gateway does not serve it.</p>
+    <p class="fineprint">Click a column header to sort; click a row for the full per-gateway detail, sweeps included; tick up to three checkboxes to compare side by side. The Class chip is each project's own self-description, taken from its README or site, not our editorial. Rows are ordered by measurement, never by name. A muted cell means the lane was not measured; an explicit label means the suite probed it and recorded that the gateway does not serve it. Filters, sort, search, compare and the open drawer all live in the URL hash, so any view can be shared as a link.</p>
   </section>
 
   <section id="view-matrix" class="view hidden">
@@ -118,6 +121,22 @@
     <p><a id="repo-link" target="_blank" rel="noopener">Benchmark repository on GitHub</a></p>
   </div>
 </footer>
+
+<div id="compare-bar" class="compare-bar hidden"></div>
+
+<div id="backdrop" class="backdrop hidden"></div>
+<aside id="drawer" class="drawer hidden" aria-label="Gateway detail">
+  <button id="drawer-close" class="close" title="Close">✕</button>
+  <div id="drawer-body"></div>
+</aside>
+
+<div id="compare-panel" class="compare-panel hidden" aria-label="Compare gateways">
+  <div class="compare-inner">
+    <button id="compare-close" class="close" title="Close">✕</button>
+    <h2>Compare</h2>
+    <div id="compare-body"></div>
+  </div>
+</div>
 
 <script src="app.js"></script>
 </body>
