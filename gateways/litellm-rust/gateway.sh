@@ -54,7 +54,10 @@ gw_build() {
 gw_version() {
   local sha ver
   sha="$(git -C "$LITELLM_SRC" rev-parse --short HEAD 2>/dev/null)"
-  ver="$("$LR_VENV/bin/python" -c 'import litellm;print(litellm.__version__)' 2>/dev/null)"
+  # Prefer `pip show` (robust) over `import litellm.__version__`, which some litellm builds do not
+  # expose (or emit import warnings that trip -c) - that is why the version once disclosed as "?".
+  ver="$("$LR_VENV/bin/pip" show litellm 2>/dev/null | awk '/^Version:/{print $2}')"
+  [ -z "$ver" ] && ver="$("$LR_VENV/bin/python" -c 'import litellm;print(litellm.__version__)' 2>/dev/null)"
   echo "${LITELLM_RUST_BRANCH}@${sha:-?} (python-config litellm==${ver:-?})"
 }
 

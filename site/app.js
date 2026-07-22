@@ -83,10 +83,18 @@ function esc(s) {
    drawer still shows the note verbatim as evidence. */
 function naText(j, flag, errKey) {
   if (!j) return { text: "not measured", note: "" };
-  const note = j[errKey] || "";
+  const note = j[errKey] || j.serve_error || "";
   let text = "not served";
   if (j.xlate_passthrough === true || note.startsWith("UNTRANSLATED passthrough")) text = "n/a (passthrough)";
-  else if (note.includes("manifest defines no")) text = "not supported";
+  // "manifest defines no <hook>" means THIS harness did not implement that suite's probe for this
+  // gateway (e.g. the governed suite is only wired for gateways whose manifest defines the hook).
+  // That is "not tested", NOT "not supported": we must never assert a capability verdict about a
+  // gateway we did not actually exercise (several here have native governance we simply did not probe).
+  else if (note.includes("manifest defines no")) text = "not tested";
+  // A boot/build failure is OUR environment failing to start the gateway, not the gateway refusing
+  // a probe: it must read as "did not run", never as a capability verdict against the gateway. Same
+  // honesty rule as the protocol matrix (status 000 / "failed to boot" / never became ready).
+  else if (String(j.last_http_status || "") === "000" || /failed to boot|no such file|not listening|never became ready|build failed/i.test(note)) text = "did not run";
   return { text, note };
 }
 

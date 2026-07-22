@@ -1,13 +1,13 @@
 {
   "gateway": "litellm-rust",
-  "build": "litellm_rust_gateway_v1_messages_route@698072308b (python-config litellm==?)",
-  "served": false,
-  "last_http_status": "400",
-  "serve_error": "failed to boot after 3 attempts: attempt 1: launch_rc=0, not ready; port 8101 LISTEN; diag=[proc: 14393 /home/ubuntu/litellm-rust-src/litellm-rust/target/release/litellm-ai-gateway run.log: config load failed (routing error: read_model_list failed: ModuleNotFoundError: No module named 'litellm'); falling back to env deployment warning: OPENAI_API_KEY is not set; realtime requests will fail with auth errors realtime connection pool enabled: target 4 warm sockets/key, max idle 30s litellm-ai-gateway listening on 127.0.0.1:8101 ] || attempt 2: launch_rc=0, not ready; port 8101 LISTEN; diag=[proc: 14546 /home/ubuntu/litellm-rust-src/litellm-rust/target/release/litellm-ai-gateway run.log: config load failed (routing error: read_model_list failed: ModuleNotFoundError: No module named 'litellm'); falling back to env deployment warning: OPENAI_API_KEY is not set; realtime requests will fail with auth errors realtime connection pool enabled: target 4 warm sockets/key, max idle 30s litellm-ai-gateway listening on 127.0.0.1:8101 ] || attempt 3: launch_rc=0, not ready; port 8101 LISTEN; diag=[proc: 14694 /home/ubuntu/litellm-rust-src/litellm-rust/target/release/litellm-ai-gateway run.log: config load failed (routing error: read_model_list failed: ModuleNotFoundError: No module named 'litellm'); falling back to env deployment warning: OPENAI_API_KEY is not set; realtime requests will fail with auth errors realtime connection pool enabled: target 4 warm sockets/key, max idle 30s litellm-ai-gateway listening on 127.0.0.1:8101 ]; last body=[]",
-  "idle_rss_mib": 0,
-  "peak_rss_mib": 0,
-  "peak_rss_hwm_mib": 0,
-  "post_load_rss_mib": 0,
+  "build": "litellm_rust_gateway_v1_messages_route@698072308b (python-config litellm==1.93.0)",
+  "served": true,
+  "last_http_status": "200",
+  "serve_error": "",
+  "idle_rss_mib": 262.9,
+  "peak_rss_mib": 657.8,
+  "peak_rss_hwm_mib": 659.4,
+  "post_load_rss_mib": 632.1,
   "payload_bytes": 150000,
   "concurrency": 1500,
   "duration_s": 120,
@@ -15,5 +15,5 @@
   "model": "azure_ai/mock",
   "arch": "arm64",
   "hardware": "AWS m7g.2xlarge (Graviton3, 8 cores / 32 GB). Gateway pinned to 4 cores, mock+loadgen on the other 4, Ubuntu 24.04. One dedicated box per gateway.",
-  "measured_at": "2026-07-22T18:20:43Z"
+  "measured_at": "2026-07-22T21:14:19Z"
 }

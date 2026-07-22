@@ -58,7 +58,7 @@
       "bedrock": {"served": "not_configurable", "status": "", "path": "/model/openai/gpt-4o-mini/converse", "verdict_note": "archgw 0.3.22 has no native Gemini generateContent transform (Gemini is OpenAI-compat only) and no Cohere provider (absent from the repo); those cells are grey by that capability limit (hermesllm endpoints.rs)", "body_snippet": ""}
     }},
     "bedrock": {"configurable": true, "served": true, "serve_error": "", "cells": {
-      "openai": {"served": true, "status": "200", "path": "/v1/chat/completions", "verdict_note": "HTTP 200, openai envelope validated; mock received a bedrock-shaped request on its bedrock endpoint", "body_snippet": "{\"id\":\"bedrock-1784745700216414000\",\"object\":\"chat.completion\",\"created\":1784745700,\"model\":\"bedrock-model\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":\"stop\"}]"},
+      "openai": {"served": true, "status": "200", "path": "/v1/chat/completions", "verdict_note": "HTTP 200, openai envelope validated; mock received a bedrock-shaped request on its bedrock endpoint", "body_snippet": "{\"id\":\"bedrock-1784753682454057000\",\"object\":\"chat.completion\",\"created\":1784753682,\"model\":\"bedrock-model\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":\"stop\"}]"},
       "openai-responses": {"served": "not_configurable", "status": "", "path": "/v1/responses", "verdict_note": "archgw 0.3.22 has no native Gemini generateContent transform (Gemini is OpenAI-compat only) and no Cohere provider (absent from the repo); those cells are grey by that capability limit (hermesllm endpoints.rs)", "body_snippet": ""},
       "anthropic": {"served": "not_configurable", "status": "", "path": "/v1/messages", "verdict_note": "archgw 0.3.22 has no native Gemini generateContent transform (Gemini is OpenAI-compat only) and no Cohere provider (absent from the repo); those cells are grey by that capability limit (hermesllm endpoints.rs)", "body_snippet": ""},
       "gemini": {"served": "not_configurable", "status": "", "path": "/v1beta/models/openai/gpt-4o-mini:generateContent", "verdict_note": "archgw 0.3.22 has no native Gemini generateContent transform (Gemini is OpenAI-compat only) and no Cohere provider (absent from the repo); those cells are grey by that capability limit (hermesllm endpoints.rs)", "body_snippet": ""},
@@ -70,5 +70,5 @@
   "upstream_endpoint": "/v1/chat/completions",
   "arch": "arm64",
   "hardware": "AWS m7g.2xlarge (Graviton3, 8 cores / 32 GB). Gateway pinned to 4 cores, mock+loadgen on the other 4, Ubuntu 24.04. One dedicated box per gateway.",
-  "measured_at": "2026-07-22T18:41:40Z"
+  "measured_at": "2026-07-22T20:54:42Z"
 }

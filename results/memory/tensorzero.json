@@ -4,10 +4,10 @@
   "served": true,
   "last_http_status": "200",
   "serve_error": "",
-  "idle_rss_mib": 49.4,
-  "peak_rss_mib": 738.3,
-  "peak_rss_hwm_mib": 738.1,
-  "post_load_rss_mib": 291.1,
+  "idle_rss_mib": 49.1,
+  "peak_rss_mib": 766.2,
+  "peak_rss_hwm_mib": 765.9,
+  "post_load_rss_mib": 315.8,
   "payload_bytes": 150000,
   "concurrency": 1500,
   "duration_s": 120,
@@ -15,5 +15,5 @@
   "model": "tensorzero::model_name::mock",
   "arch": "arm64",
   "hardware": "AWS m7g.2xlarge (Graviton3, 8 cores / 32 GB). Gateway pinned to 4 cores, mock+loadgen on the other 4, Ubuntu 24.04. One dedicated box per gateway.",
-  "measured_at": "2026-07-22T18:15:07Z"
+  "measured_at": "2026-07-22T20:27:56Z"
 }
