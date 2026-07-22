@@ -70,6 +70,21 @@ YAML
 #   bedrock           bedrock/converse/<model> + aws_bedrock_runtime_endpoint (dummy static creds;
 #                     the mock ignores the SigV4 signature)                  -> /model/<m>/converse
 # The client-side model name stays $GW_MODEL in every case, so the six ingress probes never change.
+# Declared capability (rows=ingress, cols=egress; order openai openai-responses anthropic gemini
+# cohere bedrock): LiteLLM's core value is the OpenAI-canonical ingress translated to ANY provider
+# upstream, so the openai row is 1 across all six egress dialects. LiteLLM also exposes native
+# Anthropic (/v1/messages) and Responses (/v1/responses) ingress surfaces, so those two diagonals are
+# 1. Gemini/cohere/bedrock INGRESS are not declared here (grey) - LiteLLM's documented translation is
+# OpenAI-in, not a full ingress cross-product.
+GW_MATRIX_CAP="
+111111
+010000
+001000
+000000
+000000
+000000
+"
+GW_MATRIX_CAP_NOTE="LiteLLM accepts OpenAI ingress into any provider plus native Anthropic/Responses ingress diagonals; other ingress rows are grey by declaration"
 GW_MATRIX_EGRESS="openai openai-responses anthropic gemini cohere bedrock"
 gw_matrix_egress() {
   local params

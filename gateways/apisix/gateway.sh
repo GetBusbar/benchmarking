@@ -40,27 +40,97 @@ nginx_config:
   http:
     enable_access_log: false
 YAML
-  # The ai-proxy route: upstream is owned by the plugin via override.endpoint (full mock URL). The
-  # trailing #END marker is REQUIRED by the yaml config provider.
+  _apisix_write_routes openai-compatible
+  sudo docker pull "$APISIX_IMAGE" >/dev/null 2>&1 || true
+}
+
+# _apisix_write_routes <provider>: emit the ai-proxy route(s). override.endpoint overrides the HOST
+# (documented for PrivateLink/reverse-proxy) while ai-proxy keeps the provider's native upstream
+# PATH, so we point endpoint at the mock host and the plugin posts to the dialect's own path
+# (/v1/chat/completions, /v1/responses, /v1/messages, /model/<m>/converse). One route per ingress URI
+# we probe; APISIX auto-detects the client protocol from body+URI (ai-protocols/init.lua) and either
+# passes it through (native to the provider) or applies its single anthropic-messages->openai-chat
+# converter. The trailing #END marker is REQUIRED by the yaml config provider.
+_apisix_write_routes() {
+  local prov="$1" host="http://127.0.0.1:$MOCK_PORT"
   cat > "$GW_DIR/apisix.gen.yaml" <<YAML
 routes:
-  - id: ai-proxy-bench
-    uri: $GW_PATH
-    methods:
-      - POST
+  - id: ai-proxy-chat
+    uri: /v1/chat/completions
+    methods: [POST]
     plugins:
       ai-proxy:
-        provider: openai-compatible
-        auth:
-          header:
-            Authorization: "Bearer $GW_AUTH"
-        options:
-          model: $GW_MODEL
-        override:
-          endpoint: "http://127.0.0.1:$MOCK_PORT$GW_PATH"
+        provider: $prov
+        auth: { header: { Authorization: "Bearer $GW_AUTH" } }
+        options: { model: $GW_MODEL }
+        override: { endpoint: "$host" }
+  - id: ai-proxy-responses
+    uri: /v1/responses
+    methods: [POST]
+    plugins:
+      ai-proxy:
+        provider: $prov
+        auth: { header: { Authorization: "Bearer $GW_AUTH" } }
+        options: { model: $GW_MODEL }
+        override: { endpoint: "$host" }
+  - id: ai-proxy-messages
+    uri: /v1/messages
+    methods: [POST]
+    plugins:
+      ai-proxy:
+        provider: $prov
+        auth: { header: { Authorization: "Bearer $GW_AUTH" } }
+        options: { model: $GW_MODEL }
+        override: { endpoint: "$host" }
+  - id: ai-proxy-converse
+    uri: /model/$GW_MODEL/converse
+    methods: [POST]
+    plugins:
+      ai-proxy:
+        provider: $prov
+        auth: { header: { Authorization: "Bearer $GW_AUTH" } }
+        options: { model: $GW_MODEL }
+        override: { endpoint: "$host" }
 #END
 YAML
-  sudo docker pull "$APISIX_IMAGE" >/dev/null 2>&1 || true
+}
+
+# ── matrix suite: declared capability + egress wiring ─────────────────────────────────────────────
+# Declared 6x6 (rows=ingress, cols=egress), axis order: openai openai-responses anthropic gemini
+# cohere bedrock. APISIX 3.17.0 ai-proxy auto-detects the client protocol and applies a THREE-way
+# rule (ai-proxy/base.lua): native passthrough when the provider's capabilities contain the detected
+# protocol, else a registered converter, else HTTP 400. The converter registry
+# (ai-protocols/converters/init.lua) has exactly ONE relevant bridge: anthropic-messages ->
+# openai-chat. So the capable cells are the DIAGONAL of the four protocols APISIX has both a provider
+# and a native protocol emitter for - openai (/v1/chat/completions), openai-responses
+# (/v1/responses), anthropic (/v1/messages), bedrock (/model/<m>/converse) - PLUS the single
+# off-diagonal anthropic-ingress -> openai-egress (that one converter). NOT declared: gemini (the
+# gemini/vertex providers expose only an OpenAI-compat capability, no native generateContent emitter)
+# and cohere (no provider at all at tag 3.17.0) - both grey with the cited reason. There is NO
+# OpenAI-chat -> anthropic/bedrock fan-out (no such converter), so those off-diagonal cells are 0.
+# Evidence: apisix/plugins/ai-providers/schema.lua (provider enum), ai-proxy/base.lua (3-way route),
+# ai-protocols/converters/init.lua (only anthropic->openai bridge), tag 3.17.0.
+GW_MATRIX_CAP="
+100000
+010000
+101000
+000000
+000000
+000001
+"
+GW_MATRIX_CAP_NOTE="APISIX 3.17.0 ai-proxy has no native Gemini generateContent or Cohere provider, and no OpenAI-to-Anthropic/Bedrock converter (only anthropic->openai); other cells are grey by that capability limit (ai-proxy/base.lua, ai-protocols/converters/init.lua)"
+GW_MATRIX_EGRESS="openai openai-responses anthropic bedrock"
+gw_matrix_egress() {
+  local prov
+  case "$1" in
+    openai)           prov=openai-compatible;;
+    openai-responses) prov=openai-compatible;;
+    anthropic)        prov=anthropic;;
+    bedrock)          prov=bedrock;;
+    *) return 1;;
+  esac
+  _apisix_write_routes "$prov"
+  gw_launch
 }
 
 gw_launch() {
@@ -82,9 +152,7 @@ gw_diag() {
 
 gw_stop() { sudo docker rm -f apisix-bench >/dev/null 2>&1; }
 
-# matrix suite (6x6): no gw_matrix_egress hook is defined for this manifest, so every egress
-# column beyond the default upstream renders "not configurable" (neutral, distinct from
-# tried-and-failed). Reason: the ai-proxy provider surface in this APISIX release is OpenAI-
-# compatible only (provider: openai-compatible with an endpoint override). There is no
-# anthropic/gemini/cohere/ bedrock upstream dialect to configure, so the absence is a fact about the
-# gateway config, not missing harness work.
+# gw_matrix_egress + the declared capability matrix are defined above (before gw_launch). The
+# non-openai egress columns are wired-pending-field-verification (dev-box docker host networking is
+# unreliable); the EC2 field run turns each declared-1 cell green or red. Every grey cell is a cited
+# capability limit, never untested generosity.

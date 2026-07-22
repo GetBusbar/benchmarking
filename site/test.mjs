@@ -188,4 +188,38 @@ test("sweep chart degrades cleanly with no data", () => {
   assert.equal(app.drawSweep(canvas, [{ label: "empty", color: "#fff", points: [] }], {}), null);
 });
 
+// ---- protocol matrix: cell states + grey-cell cited tooltip -----------------
+test("matrix cell states map served to the three visible states", () => {
+  assert.equal(app.cellState({ served: true })[0], "served");
+  assert.equal(app.cellState({ served: false })[0], "failed");
+  assert.equal(app.cellState({ served: "not_configurable" })[0], "notconf");
+  // the grey label reads as a declaration, not our omission
+  assert.equal(app.cellState({ served: "not_configurable" })[1], "not declared");
+});
+
+test("a grey (not_configurable) cell tooltip shows the gateway's cited reason", () => {
+  const reason = "Kong 3.8 ai-proxy accepts only OpenAI-canonical ingress and emits no OpenAI-Responses route_type";
+  const tip = app.matrixCellTip({ served: "not_configurable", verdict_note: reason });
+  assert.ok(tip.includes("not declared supported by this gateway"), "declares incapability, not omission");
+  assert.ok(tip.includes(reason), "carries the cited capability-limit reason");
+  // no reason present: still an honest declaration, never a bare "untested"
+  const bare = app.matrixCellTip({ served: "not_configurable" });
+  assert.ok(bare.includes("not declared supported by this gateway"));
+});
+
+test("gen-data preserves the per-cell verdict_note reason for grey cells", () => {
+  const withGrey = data.gateways.find((g) =>
+    g.matrix && g.matrix.upstreams &&
+    Object.values(g.matrix.upstreams).some((u) =>
+      u.cells && Object.values(u.cells).some((c) => c.served === "not_configurable" && c.verdict_note)));
+  // Once field results with declared-0 cells land, the cited reason must survive gen-data. If no
+  // committed matrix result carries one yet, skip rather than fail (vacuous pre-field-run).
+  if (withGrey) {
+    const cell = Object.values(withGrey.matrix.upstreams)
+      .flatMap((u) => Object.values(u.cells || {}))
+      .find((c) => c.served === "not_configurable" && c.verdict_note);
+    assert.ok(typeof cell.verdict_note === "string" && cell.verdict_note.length > 0);
+  }
+});
+
 console.log(`\n${passed} tests passed`);

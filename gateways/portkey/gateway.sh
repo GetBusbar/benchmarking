@@ -36,6 +36,23 @@ gw_build() { command -v npx >/dev/null || { echo "need node/npx for portkey"; re
 # suites drive portkey's anthropic lane), but the matrix's openai cell and warm-up need the chat
 # route, which portkey serves on every provider.
 GW_MATRIX_PATH_OPENAI=/v1/chat/completions
+# Declared capability (rows=ingress, cols=egress; order openai openai-responses anthropic gemini
+# cohere bedrock): Portkey accepts the OpenAI and Anthropic ingress surfaces and routes either to any
+# of its six providers (openai, anthropic, google, cohere, bedrock) - those two rows are 1 across
+# {openai, anthropic, gemini, cohere, bedrock}. It has NO chat->responses bridge, so openai/anthropic
+# ingress -> responses egress is NOT declared (grey); the only responses cell is the responses->
+# responses diagonal (portkey's /v1/responses route passes through to the upstream Responses
+# endpoint). Gemini/cohere/bedrock/responses INGRESS (other than that diagonal) are not accepted by
+# this manifest's probes, so those rows are grey by declaration.
+GW_MATRIX_CAP="
+101111
+010000
+101111
+000000
+000000
+000000
+"
+GW_MATRIX_CAP_NOTE="Portkey accepts OpenAI and Anthropic ingress into any provider but has no chat-to-Responses bridge (only the Responses passthrough diagonal); other cells are grey by that capability limit"
 GW_MATRIX_EGRESS="openai openai-responses anthropic gemini cohere bedrock"
 gw_matrix_egress() {
   local host="http://127.0.0.1:${MOCK_PORT:-8000}"

@@ -59,9 +59,11 @@ gw_launch() {
   # 3) raise root quota so a long throughput run can't exhaust it (UpdateUser needs a full-ish object)
   curl -s -b "$OA_JAR" -X PUT "$base/api/user/" -H 'content-type: application/json' \
     -d '{"id":1,"username":"root","display_name":"Root User","role":100,"status":1,"quota":1000000000000,"group":"default"}' >>"$OA_LOG" 2>&1
-  # 4) create an OpenAI-type channel (type=1) whose upstream base_url is the mock (it appends /v1/...)
+  # 4) create the upstream channel whose base_url is the mock (One-API appends the provider's native
+  #    path). The channel TYPE selects the native egress dialect (1=OpenAI, 14=Anthropic, 24=Gemini);
+  #    gw_matrix_egress sets OA_CH_TYPE/OA_CH_MODEL per column, defaulting to the OpenAI channel.
   curl -s -b "$OA_JAR" -X POST "$base/api/channel/" -H 'content-type: application/json' \
-    -d "{\"name\":\"mock\",\"type\":1,\"key\":\"sk-mock\",\"base_url\":\"http://127.0.0.1:$MOCK_PORT\",\"models\":\"$GW_MODEL\",\"group\":\"default\",\"status\":1}" >>"$OA_LOG" 2>&1
+    -d "{\"name\":\"mock\",\"type\":${OA_CH_TYPE:-1},\"key\":\"sk-mock\",\"base_url\":\"http://127.0.0.1:$MOCK_PORT\",\"models\":\"${OA_CH_MODEL:-$GW_MODEL}\",\"group\":\"default\",\"status\":1}" >>"$OA_LOG" 2>&1
   # 5) mint an unlimited token — AddToken generates the key itself and returns it in .data.key
   local key; key=$(curl -s -b "$OA_JAR" -X POST "$base/api/token/" -H 'content-type: application/json' \
     -d '{"name":"bench","expired_time":-1,"remain_quota":0,"unlimited_quota":true}' | _oa_get data key)
@@ -87,9 +89,35 @@ gw_rss() { container_rss_mib one-api-bench; }  # summed process-tree VmRSS (same
 gw_hwm() { container_hwm_mib one-api-bench; }  # summed process-tree VmHWM (kernel high-water mark)
 gw_stop() { sudo docker rm -f one-api-bench >/dev/null 2>&1; }
 
-# matrix suite (6x6): no gw_matrix_egress hook is defined for this manifest, so every egress
-# column beyond the default upstream renders "not configurable" (neutral, distinct from
-# tried-and-failed). Reason: channels are provisioned at runtime over the admin API with type=1
-# (OpenAI). Other channel types exist (Anthropic, Gemini, ...), but each has its own base_url
-# semantics and none has been verified against the recording mock from this harness, so wiring them
-# blind would risk false tried-and-failed reds.
+# ── matrix suite: declared capability + egress wiring ─────────────────────────────────────────────
+# Declared 6x6 (rows=ingress, cols=egress), axis order: openai openai-responses anthropic gemini
+# cohere bedrock. One-API v0.6.10 provisions upstream "channels" at runtime; the channel TYPE selects
+# the native egress dialect and its base_url is overridable to the mock: type=1 OpenAI, type=14
+# Anthropic (-> /v1/messages), type=24 Gemini (-> :generateContent) (relay/channeltype/define.go +
+# per-provider relay/adaptor/*). The OpenAI-canonical ingress is translated to the channel's native
+# upstream shape. So the capable row is openai-ingress into {openai, anthropic, gemini}. NOT declared:
+# openai-responses (no responses relay mode/adaptor in v0.6.10), cohere (type=35 emits the Cohere *v1*
+# /v1/chat shape, not the v2 dialect this suite probes) and bedrock (the AWS channel type=33 ignores
+# base_url and signs SigV4 to the real regional host - the mock is unreachable) - all grey with the
+# cited reason.
+# Evidence: relay/channeltype/define.go (type constants), relay/adaptor/{anthropic,gemini,cohere,aws},
+# relay/relaymode/define.go (no responses), tag v0.6.10. Wired-pending-field-verification.
+GW_MATRIX_CAP="
+101100
+000000
+000000
+000000
+000000
+000000
+"
+GW_MATRIX_CAP_NOTE="One-API v0.6.10 has no OpenAI-Responses relay mode, emits Cohere v1 (not v2), and its AWS/Bedrock channel ignores base_url (SigV4 to the real host); those cells are grey by that capability limit (relay/channeltype, relay/adaptor/aws)"
+GW_MATRIX_EGRESS="openai anthropic gemini"
+gw_matrix_egress() {
+  case "$1" in
+    openai)    OA_CH_TYPE=1;  OA_CH_MODEL="gpt-4o-mini";                  GW_MODEL="gpt-4o-mini";;
+    anthropic) OA_CH_TYPE=14; OA_CH_MODEL="claude-3-5-sonnet-20240620";  GW_MODEL="claude-3-5-sonnet-20240620";;
+    gemini)    OA_CH_TYPE=24; OA_CH_MODEL="gemini-1.5-pro";              GW_MODEL="gemini-1.5-pro";;
+    *) return 1;;
+  esac
+  gw_launch
+}

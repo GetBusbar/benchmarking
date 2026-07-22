@@ -40,6 +40,17 @@ gw_version() { local v; v="$("$BUSBAR_BIN" --version 2>/dev/null | head -1)"; ec
 # Busbar's provider config is protocol-first: `protocol: <dialect>` + `base_url` is the whole story,
 # so all six upstream dialects are one providers.gen.yaml rewrite each. The matrix runner calls
 # gw_matrix_egress <dialect> per column; it relaunches with the mock as an upstream of that shape.
+# Declared capability: busbar claims ALL 36 (rows=ingress, cols=egress) - it accepts every ingress
+# dialect and translates to every upstream dialect. Every cell is probed for a real pass/fail.
+GW_MATRIX_CAP="
+111111
+111111
+111111
+111111
+111111
+111111
+"
+GW_MATRIX_CAP_NOTE="busbar declares full 6x6 translation support"
 GW_MATRIX_EGRESS="openai openai-responses anthropic gemini cohere bedrock"
 
 _busbar_launch_common() { # proto mock-key

@@ -72,8 +72,20 @@ YAML
 # upstream's /v1/messages: an ANTHROPIC-shaped endpoint. So its one configurable egress dialect is
 # anthropic, and the launch for it is exactly the normal launch. No other upstream dialect is
 # reachable: messages_provider_config() serves only azure_ai, and its api_base is the /v1/messages
-# URL by construction, so openai/gemini/cohere/bedrock/responses egress columns are honestly
-# "not configurable" rather than tried-and-failed.
+# URL by construction.
+# Declared capability (rows=ingress, cols=egress; order openai openai-responses anthropic gemini
+# cohere bedrock): the single working route is Anthropic ingress (/v1/messages) -> Anthropic upstream,
+# a native passthrough diagonal. That one cell (anthropic->anthropic) is declared 1; every other cell
+# is grey - the beta exposes no other ingress or upstream dialect.
+GW_MATRIX_CAP="
+000000
+000000
+001000
+000000
+000000
+000000
+"
+GW_MATRIX_CAP_NOTE="LiteLLM-Rust beta serves only the Anthropic /v1/messages route (azure_ai upstream); no other ingress or upstream dialect exists, so those cells are grey by that capability limit"
 GW_MATRIX_EGRESS="anthropic"
 gw_matrix_egress() {
   case "$1" in

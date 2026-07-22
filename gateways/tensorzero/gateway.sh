@@ -23,7 +23,10 @@ gw_version() {
   echo "${TENSORZERO_IMAGE}${dg:+ (@${dg##*@})}"
 }
 
-gw_build() {
+# _tz_write_config <provider-block-body>: emit tensorzero.toml with the given provider block for the
+# single model "mock". The provider block selects the native egress dialect + its api_base/
+# endpoint_url override to the mock.
+_tz_write_config() {
   mkdir -p "$GW_DIR/config"
   cat > "$GW_DIR/config/tensorzero.toml" <<TOML
 [gateway.observability]
@@ -33,12 +36,63 @@ enabled = false
 routing = ["mock"]
 
 [models.mock.providers.mock]
-type = "openai"
-api_base = "http://127.0.0.1:$MOCK_PORT/v1"
-model_name = "gpt-4o-mini"
-api_key_location = "none"
+$1
 TOML
+}
+
+gw_build() {
+  _tz_write_config 'type = "openai"
+api_base = "http://127.0.0.1:'"$MOCK_PORT"'/v1"
+model_name = "gpt-4o-mini"
+api_key_location = "none"'
   sudo docker pull "$TENSORZERO_IMAGE" >/dev/null 2>&1 || true
+}
+
+# ── matrix suite: declared capability + egress wiring ─────────────────────────────────────────────
+# Declared 6x6 (rows=ingress, cols=egress), axis order: openai openai-responses anthropic gemini
+# cohere bedrock. TensorZero 2026.6.0's provider `type` enum includes {openai, anthropic, aws_bedrock,
+# ...} (crates/tensorzero-core/src/model.rs). The OpenAI-compat ingress (/openai/v1/chat/completions)
+# is translated to the routed provider's NATIVE upstream shape: anthropic (type="anthropic", api_base
+# -> {base}/messages), aws_bedrock (endpoint_url -> {url}/model/<id>/converse), and openai-responses
+# (type="openai" + api_type="responses" + api_base -> {base}/responses). So the capable row is
+# openai-ingress into {openai, openai-responses, anthropic, bedrock}. NOT declared: gemini (both
+# google_ai_studio_gemini and gcp_vertex_gemini hardcode *.googleapis.com with NO api_base override,
+# so the mock is unreachable) and cohere (no cohere provider type exists at all) - both grey with the
+# cited reason.
+# Evidence: model.rs (type enum + no cohere), configuration-reference.mdx (api_base/endpoint_url),
+# google_ai_studio_gemini.rs (hardcoded host, no api_base), tag 2026.6.0. Wired-pending-field-verify.
+GW_MATRIX_CAP="
+111001
+000000
+000000
+000000
+000000
+000000
+"
+GW_MATRIX_CAP_NOTE="TensorZero 2026.6.0 has no Cohere provider type and its Gemini providers hardcode googleapis.com with no api_base override (cannot reach a custom upstream); those cells are grey by that capability limit (model.rs, google_ai_studio_gemini.rs)"
+GW_MATRIX_EGRESS="openai openai-responses anthropic bedrock"
+gw_matrix_egress() {
+  case "$1" in
+    openai)           _tz_write_config 'type = "openai"
+api_base = "http://127.0.0.1:'"$MOCK_PORT"'/v1"
+model_name = "gpt-4o-mini"
+api_key_location = "none"';;
+    openai-responses) _tz_write_config 'type = "openai"
+api_type = "responses"
+api_base = "http://127.0.0.1:'"$MOCK_PORT"'/v1"
+model_name = "gpt-4o-mini"
+api_key_location = "none"';;
+    anthropic)        _tz_write_config 'type = "anthropic"
+api_base = "http://127.0.0.1:'"$MOCK_PORT"'/v1/"
+model_name = "claude-3-5-sonnet-20241022"
+api_key_location = "none"';;
+    bedrock)          _tz_write_config 'type = "aws_bedrock"
+endpoint_url = "http://127.0.0.1:'"$MOCK_PORT"'"
+model_id = "anthropic.claude-3-sonnet-20240229-v1:0"
+region = "us-east-1"';;
+    *) return 1;;
+  esac
+  gw_launch
 }
 
 gw_launch() {
@@ -60,9 +114,6 @@ gw_diag() {
 
 gw_stop() { sudo docker rm -f tensorzero-bench >/dev/null 2>&1; }
 
-# matrix suite (6x6): no gw_matrix_egress hook is defined for this manifest, so every egress
-# column beyond the default upstream renders "not configurable" (neutral, distinct from
-# tried-and-failed). Reason: the model provider here is type = "openai" with an api_base override.
-# TensorZero's config has other provider types (anthropic and more), but none has been verified
-# against the recording mock from this harness, so wiring them blind would risk false tried-and-
-# failed reds.
+# gw_matrix_egress + the declared capability matrix are defined above (before gw_launch). The
+# non-openai egress columns are wired-pending-field-verification; the EC2 field run turns each
+# declared-1 cell green or red. Every grey cell is a cited capability limit.

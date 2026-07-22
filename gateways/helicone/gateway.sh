@@ -39,8 +39,11 @@ gw_version() {
   echo "Helicone/ai-gateway@${sha:-?} (source build)"
 }
 
-gw_launch() {
-  # base-url gets "v1/chat/completions" appended by the gateway → hits the mock's OpenAI endpoint.
+# _helicone_launch <provider>: write the router config wiring exactly ONE provider (base-url ->
+# mock) and boot the binary. Helicone appends the provider's native path to base-url, so pointing it
+# at the mock host makes each provider POST that dialect's native upstream shape to the mock.
+_helicone_launch() {
+  local prov="$1"
   cat > "$GW_DIR/config.gen.yaml" <<YAML
 server:
   address: 0.0.0.0
@@ -48,7 +51,7 @@ server:
 helicone:
   features: none
 providers:
-  openai:
+  $prov:
     base-url: "http://127.0.0.1:$MOCK_PORT/"
 routers:
   default:
@@ -56,15 +59,54 @@ routers:
       chat:
         strategy: weighted
         providers:
-          - provider: openai
+          - provider: $prov
             weight: 1.0
 YAML
   pkill -f 'target/release/ai-gateway' 2>/dev/null; sleep 1
   setsid taskset -c "$CORES" env \
-    OPENAI_API_KEY=sk-dummy \
+    OPENAI_API_KEY=sk-dummy ANTHROPIC_API_KEY=sk-dummy GEMINI_API_KEY=sk-dummy \
+    AWS_ACCESS_KEY_ID=AKIAMOCKACCESSKEY AWS_SECRET_ACCESS_KEY=mock-secret-access-key AWS_REGION=us-east-1 \
     AI_GATEWAY__SERVER__PORT="$GW_PORT" \
     AI_GATEWAY__SERVER__ADDRESS=0.0.0.0 \
     "$HELICONE_BIN" -c "$GW_DIR/config.gen.yaml" </dev/null >/tmp/helicone.bench.log 2>&1 &
+}
+
+gw_launch() {
+  # base-url gets "v1/chat/completions" appended by the gateway → hits the mock's OpenAI endpoint.
+  _helicone_launch openai
+}
+
+# ── matrix suite: declared capability + egress wiring ─────────────────────────────────────────────
+# Declared 6x6 (rows=ingress, cols=egress), axis order: openai openai-responses anthropic gemini
+# cohere bedrock. Helicone's typed InferenceProvider enum with a native converter is {openai,
+# anthropic, bedrock, gemini, ollama} (ai-gateway/src/types/provider.rs; converter registry
+# middleware/mapper/registry.rs). The router accepts the OpenAI-canonical ingress and translates it
+# to the routed provider's NATIVE upstream shape (anthropic AnthropicConverter -> /v1/messages,
+# gemini Google::generate_contents -> :generateContent, bedrock BedrockConverter -> converse), each
+# provider's base-url overridable to the mock. So the capable row is openai-ingress into {openai,
+# anthropic, gemini, bedrock}. NOT declared: openai-responses (the OpenAI endpoint enum has only
+# ChatCompletions, no Responses converter) and cohere (no cohere dialect; cohere appears only as a
+# Bedrock model family) - both grey with the cited reason.
+# Evidence: ai-gateway/src/types/provider.rs (InferenceProvider enum), middleware/mapper/registry.rs
+# (converters), endpoints/openai/mod.rs (ChatCompletions only). Wired-pending-field-verification.
+GW_MATRIX_CAP="
+101101
+000000
+000000
+000000
+000000
+000000
+"
+GW_MATRIX_CAP_NOTE="Helicone AI Gateway has no OpenAI-Responses converter (endpoints/openai only ChatCompletions) and no native Cohere dialect (cohere is only a Bedrock model family); those cells are grey by that capability limit"
+GW_MATRIX_EGRESS="openai anthropic gemini bedrock"
+gw_matrix_egress() {
+  case "$1" in
+    openai)    GW_MODEL="openai/gpt-4o-mini";                      _helicone_launch openai;;
+    anthropic) GW_MODEL="anthropic/claude-3-5-sonnet";            _helicone_launch anthropic;;
+    gemini)    GW_MODEL="gemini/gemini-2.5-flash";                _helicone_launch gemini;;
+    bedrock)   GW_MODEL="bedrock/anthropic.claude-3-5-sonnet-v1:0"; _helicone_launch bedrock;;
+    *) return 1;;
+  esac
 }
 
 gw_rss() { awk '/VmRSS/{printf "%.1f", $2/1024}' "/proc/$(pgrep -f 'target/release/ai-gateway' | head -1)/status" 2>/dev/null; }
@@ -77,9 +119,6 @@ gw_diag() {
 
 gw_stop() { pkill -f 'target/release/ai-gateway' 2>/dev/null; }
 
-# matrix suite (6x6): no gw_matrix_egress hook is defined for this manifest, so every egress
-# column beyond the default upstream renders "not configurable" (neutral, distinct from
-# tried-and-failed). Reason: this manifest wires the openai provider in the router's providers
-# registry with a base-url override. The router lists other providers, but none has been verified
-# against the recording mock from this harness, so wiring them blind would risk false tried-and-
-# failed reds.
+# gw_matrix_egress + the declared capability matrix are defined above (before gw_launch). The
+# anthropic/gemini/bedrock egress columns are wired-pending-field-verification; the EC2 field run
+# turns each declared-1 cell green or red. Every grey cell is a cited capability limit.

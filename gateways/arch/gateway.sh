@@ -48,7 +48,10 @@ gw_hwm() {  # kernel VmHWM summed over every archgw container's process tree (sa
   [ "$any" = 1 ] && echo "$total" || echo ""
 }
 
-gw_launch() {
+# _arch_launch <model>: write the egress-only config with the given provider-prefixed model and boot
+# via the archgw CLI. archgw picks the upstream provider (and thus the native egress dialect its
+# hermesllm transforms emit) from the model-name prefix: openai/, anthropic/, amazon_bedrock/.
+_arch_launch() {
   # Egress-only config = pure proxy. host.docker.internal (the CLI adds host-gateway) reaches the mock
   # bound on 0.0.0.0. No access_key → no real provider key needed.
   cat > "$GW_DIR/arch_config.yaml" <<YAML
@@ -60,7 +63,7 @@ listeners:
     message_format: openai
     timeout: 30s
 llm_providers:
-  - model: $GW_MODEL
+  - model: $1
     base_url: http://host.docker.internal:$MOCK_PORT
     default: true
 YAML
@@ -74,6 +77,43 @@ YAML
     done ) &
 }
 
+gw_launch() { _arch_launch "$GW_MODEL"; }
+
+# ── matrix suite: declared capability + egress wiring ─────────────────────────────────────────────
+# Declared 6x6 (rows=ingress, cols=egress), axis order: openai openai-responses anthropic gemini
+# cohere bedrock. archgw 0.3.22's hermesllm has a FIXED set of upstream APIs it transforms into:
+# SupportedUpstreamAPIs = {OpenAIChatCompletions, AnthropicMessagesAPI, AmazonBedrockConverse,
+# ConverseStream, OpenAIResponsesAPI} (crates/hermesllm/src/clients/endpoints.rs). The egress
+# message_format is openai and archgw translates that ingress into the provider's native upstream
+# shape (from_openai.rs: OpenAI->Anthropic, OpenAI->Bedrock); the provider is chosen by the model
+# prefix, base_url overridable to the mock. So the capable row is openai-ingress into {openai,
+# openai-responses, anthropic, bedrock}. NOT declared: gemini (no native generateContent module;
+# Gemini is treated as OpenAI-compat) and cohere (absent from the repo at tag 0.3.22) - both grey with
+# the cited reason.
+# Evidence: hermesllm/src/clients/endpoints.rs (5 upstream APIs), providers/id.rs (routing),
+# transforms/request/from_openai.rs, tag 0.3.22. Wired-pending-field-verification.
+GW_MATRIX_CAP="
+111001
+000000
+000000
+000000
+000000
+000000
+"
+GW_MATRIX_CAP_NOTE="archgw 0.3.22 has no native Gemini generateContent transform (Gemini is OpenAI-compat only) and no Cohere provider (absent from the repo); those cells are grey by that capability limit (hermesllm endpoints.rs)"
+GW_MATRIX_EGRESS="openai openai-responses anthropic bedrock"
+gw_matrix_egress() {
+  # GW_MODEL rides in the ingress request body (openai message_format), so it must name the same
+  # provider-prefixed model archgw is configured with, else the default provider is not selected.
+  case "$1" in
+    openai|openai-responses) GW_MODEL="openai/gpt-4o-mini";;
+    anthropic)               GW_MODEL="anthropic/claude-3-5-sonnet-20241022";;
+    bedrock)                 GW_MODEL="amazon_bedrock/anthropic.claude-3-sonnet-20240229-v1:0";;
+    *) return 1;;
+  esac
+  _arch_launch "$GW_MODEL"
+}
+
 gw_diag() {
   echo "archgw ps: $(_arch_cids | tr '\n' ' ')"
   echo "launch.log:"; tail -n 20 "$GW_DIR/launch.log" 2>/dev/null
@@ -83,8 +123,6 @@ gw_diag() {
 
 gw_stop() { "$ARCH_VENV/bin/archgw" down >/dev/null 2>&1; }
 
-# matrix suite (6x6): no gw_matrix_egress hook is defined for this manifest, so every egress
-# column beyond the default upstream renders "not configurable" (neutral, distinct from
-# tried-and-failed). Reason: llm_providers entries carry a base_url with the provider inferred from
-# the model name; whether a non-openai-shaped upstream dialect can be selected that way has not been
-# verified against the recording mock from this harness.
+# gw_matrix_egress + the declared capability matrix are defined above (before gw_launch). The
+# non-openai egress columns are wired-pending-field-verification; the EC2 field run turns each
+# declared-1 cell green or red. Every grey cell is a cited capability limit.

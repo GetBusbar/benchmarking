@@ -24,7 +24,11 @@ gw_version() {
   echo "${AGENTGATEWAY_IMAGE}${dg:+ (@${dg##*@})}"
 }
 
-gw_build() {
+# _agentgw_write_config <name> <pathOverride> <provider-yaml>: emit the ai-backend config. The `ai`
+# backend's hostOverride/pathOverride point the upstream at the mock's per-dialect endpoint while the
+# provider block selects the native egress dialect (agentgateway's per-provider translation emits
+# that dialect's request shape). Indentation must match the provider: block's nesting.
+_agentgw_write_config() {
   cat > "$GW_DIR/config.gen.yaml" <<YAML
 binds:
 - port: $GW_PORT
@@ -34,14 +38,58 @@ binds:
     routes:
     - backends:
       - ai:
-          name: openai
+          name: $1
           hostOverride: "127.0.0.1:$MOCK_PORT"
-          pathOverride: $GW_PATH
+          pathOverride: $2
           provider:
-            openAI:
-              model: $GW_MODEL
+$3
 YAML
+}
+
+gw_build() {
+  _agentgw_write_config openai "$GW_PATH" "            openAI:
+              model: $GW_MODEL"
   sudo docker pull "$AGENTGATEWAY_IMAGE" >/dev/null 2>&1 || true
+}
+
+# ── matrix suite: declared capability + egress wiring ─────────────────────────────────────────────
+# Declared 6x6 (rows=ingress, cols=egress), axis order: openai openai-responses anthropic gemini
+# cohere bedrock. agentgateway v1.3.1's AIProvider enum is {openAI, gemini, vertex, anthropic,
+# bedrock, azure, copilot, custom} (crates/agentgateway/src/llm/mod.rs). The ai backend accepts the
+# OpenAI-canonical ingress and translates it to the routed provider's NATIVE upstream shape for
+# anthropic (to_anthropic -> /v1/messages), bedrock (to_bedrock ConverseRequest -> /model/<m>/converse)
+# and openai-responses (RouteType::Responses -> /v1/responses); host/pathOverride point each at the
+# mock. So the capable row is openai-ingress into {openai, openai-responses, anthropic, bedrock}. NOT
+# declared: gemini (v1.3.1 targets Google's OpenAI-compat surface /v1beta/openai/chat/completions,
+# NOT native :generateContent, so it would not produce the gemini upstream shape this suite checks)
+# and cohere (absent from the AIProvider enum; only reachable via a synthetic `custom` backend) -
+# both grey with the cited reason.
+# Evidence: llm/mod.rs (AIProvider enum + RouteType::Responses), llm/anthropic.rs (/v1/messages),
+# llm/bedrock.rs (converse), llm/gemini.rs (OpenAI-compat path), tag v1.3.1.
+GW_MATRIX_CAP="
+111001
+000000
+000000
+000000
+000000
+000000
+"
+GW_MATRIX_CAP_NOTE="agentgateway v1.3.1 emits Gemini only via Google's OpenAI-compat surface (not native generateContent) and has no Cohere provider in its AIProvider enum; those cells are grey by that capability limit (llm/mod.rs, llm/gemini.rs)"
+GW_MATRIX_EGRESS="openai openai-responses anthropic bedrock"
+gw_matrix_egress() {
+  case "$1" in
+    openai)           _agentgw_write_config openai "/v1/chat/completions" "            openAI:
+              model: $GW_MODEL";;
+    openai-responses) _agentgw_write_config openai "/v1/responses" "            openAI:
+              model: $GW_MODEL";;
+    anthropic)        _agentgw_write_config anthropic "/v1/messages" "            anthropic:
+              model: claude-3-5-sonnet-20241022";;
+    bedrock)          _agentgw_write_config bedrock "/model/$GW_MODEL/converse" "            bedrock:
+              model: $GW_MODEL
+              region: us-east-1";;
+    *) return 1;;
+  esac
+  gw_launch
 }
 
 gw_launch() {
@@ -63,8 +111,6 @@ gw_diag() {
 
 gw_stop() { sudo docker rm -f agentgateway-bench >/dev/null 2>&1; }
 
-# matrix suite (6x6): no gw_matrix_egress hook is defined for this manifest, so every egress
-# column beyond the default upstream renders "not configurable" (neutral, distinct from
-# tried-and-failed). Reason: this manifest configures the openAI provider block (hostOverride to the
-# mock). agentgateway's config schema has other provider blocks, but none has been verified against
-# the recording mock from this harness, so wiring them blind would risk false tried-and-failed reds.
+# gw_matrix_egress + the declared capability matrix are defined above (before gw_launch). The
+# non-openai egress columns are wired-pending-field-verification; the EC2 field run turns each
+# declared-1 cell green or red. Every grey cell is a cited capability limit.

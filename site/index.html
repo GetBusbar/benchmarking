@@ -65,11 +65,16 @@
 
   <section id="view-matrix" class="view hidden">
     <h2>Protocol support matrix (6x6)</h2>
-    <p class="lede">Each gateway gets a full grid: six ingress protocol shapes (rows) against six upstream provider dialects it is configured to route to (columns). Off-diagonal cells are translation claims, checked three ways: the response is a valid envelope of the ingress dialect, it is not the mock upstream's canned body (passthrough guard), and the mock actually received a request in the upstream dialect's shape on that dialect's endpoint. Diagonal cells need no translation, so a faithful passthrough that provably round-trips through the gateway passes there.</p>
+    <ul class="matrix-legend" aria-label="cell legend">
+      <li><span class="lg lg-pass"></span>supported, passing</li>
+      <li><span class="lg lg-fail"></span>supported, failing</li>
+      <li><span class="lg lg-notconf"></span>not supported</li>
+      <li><span class="lg lg-diag"></span>same-dialect passthrough</li>
+    </ul>
+    <p class="matrix-legend-note muted">Support is each gateway's own declared capability.</p>
     <div id="matrix-grid"></div>
     <div id="matrix-detail" class="matrix-detail hidden"></div>
     <p id="matrix-empty" class="muted hidden">Protocol matrix results are coming soon: no results/matrix JSONs are committed yet.</p>
-    <p class="fineprint">Green: pass, envelope validated and the round trip to the mock upstream confirmed (on the diagonal a passthrough pass says so in its note). Red: tried and failed, with the probe status and body snippet as evidence. Neutral outline: not configurable, the gateway's manifest defines no egress config for that upstream dialect, which is distinct from tried-and-failed. Grey: unprobed_auth, the gateway insists on an auth scheme (such as AWS SigV4) that this harness does not forge, recorded honestly instead of as a false red. Click a cell for the verdict note and body evidence.</p>
   </section>
 
   <section id="view-charts" class="view hidden">

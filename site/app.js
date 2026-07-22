@@ -732,6 +732,15 @@ function matrixCell(g, egress, ingress) {
   const up = g.matrix.upstreams && g.matrix.upstreams[egress];
   return up && up.cells ? up.cells[ingress] : null;
 }
+/* Tooltip text for a cell. A grey (not_configurable) cell is the gateway's OWN declared
+   incapability, so it shows the cited capability-limit reason (verdict_note) - never a bare
+   "we didn't test it". Green/red show the verdict label + note as before. */
+function matrixCellTip(cell) {
+  const [, label] = cellState(cell);
+  return cell.served === "not_configurable"
+    ? `not declared supported by this gateway${cell.verdict_note ? ": " + cell.verdict_note : ""}`
+    : `${label}. ${cell.verdict_note || ""}`;
+}
 function renderMatrix() {
   const withMatrix = state.data.gateways.filter((g) => g.matrix && (g.matrix.upstreams || g.matrix.cells));
   if (!withMatrix.length) {
@@ -773,11 +782,9 @@ function renderMatrix() {
           MATRIX_CELLS.map((e) => {
             const cell = matrixCell(g, e, c);
             if (!cell) return `<td class="na" title="not measured (v1 result: this upstream dialect was not probed)">n/a</td>`;
-            const [cls, label] = cellState(cell);
+            const [cls] = cellState(cell);
             const diag = e === c ? " diag" : "";
-            const tip = cell.served === "not_configurable"
-              ? `not declared supported by this gateway${cell.verdict_note ? ": " + cell.verdict_note : ""}`
-              : `${label}. ${cell.verdict_note || ""}`;
+            const tip = matrixCellTip(cell);
             return `<td><span class="cell ${cls}${diag}" data-gw="${esc(g.key)}" data-egress="${esc(e)}" data-cell="${esc(c)}" title="${esc(g.display)} / ${esc(MATRIX_LABELS[c])} in, ${esc(MATRIX_LABELS[e])} upstream: ${esc(tip)}"></span></td>`;
           }).join("")
         }</tr>`).join("")
@@ -950,6 +957,7 @@ if (NODE) {
   module.exports = {
     newState, encodeState, decodeState, applyFilters,
     drawSweep, niceStep, fmtTick, COLUMNS, LANES, naText,
+    cellState, matrixCellTip,
   };
 } else {
   boot();
