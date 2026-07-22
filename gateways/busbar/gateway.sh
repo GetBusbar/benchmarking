@@ -11,6 +11,7 @@ GW_KIND=native
 # is fully defined by its own dir (add/remove a dir → it appears/disappears everywhere).
 GW_DISPLAY="Busbar"                      # label in charts + report tables
 GW_LANG=Rust                            # implementation language → bar color bucket
+GW_CLASS="Control plane"   # the project's OWN self-description (Busbar's own site: control plane), not our editorial
 GW_REPO=https://github.com/GetBusbar/busbar   # linked from the gateway name in the report table
 GW_PORT=8080
 GW_PATH=/v1/chat/completions

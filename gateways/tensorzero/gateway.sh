@@ -10,6 +10,7 @@ GW_KIND=docker
 # is fully defined by its own dir (add/remove a dir → it appears/disappears everywhere).
 GW_DISPLAY="TensorZero"                      # label in charts + report tables
 GW_LANG=Rust                            # implementation language → bar color bucket
+GW_CLASS="Model gateway"   # the project's OWN self-description (docs: 'the TensorZero Gateway is a high-performance model gateway'), not our editorial
 GW_REPO=https://github.com/tensorzero/tensorzero   # linked from the gateway name in the report table
 GW_PORT=3000
 GW_PATH=/openai/v1/chat/completions

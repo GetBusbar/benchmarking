@@ -12,6 +12,7 @@ GW_KIND=native
 # is fully defined by its own dir (add/remove a dir → it appears/disappears everywhere).
 GW_DISPLAY="Helicone"                      # label in charts + report tables
 GW_LANG=Rust                            # implementation language → bar color bucket
+GW_CLASS="AI gateway"   # the project's OWN self-description (README: 'the fastest, lightest AI gateway'), not our editorial
 GW_REPO=https://github.com/Helicone/ai-gateway   # linked from the gateway name in the report table
 GW_PORT=8787
 GW_PATH=/router/default/chat/completions

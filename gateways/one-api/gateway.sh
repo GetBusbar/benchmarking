@@ -14,6 +14,7 @@ GW_KIND=docker
 # is fully defined by its own dir (add/remove a dir → it appears/disappears everywhere).
 GW_DISPLAY="One-API"                      # label in charts + report tables
 GW_LANG=Go                            # implementation language → bar color bucket
+GW_CLASS="API distribution system"   # the project's OWN self-description (README: OpenAI key management & distribution system), not our editorial
 GW_REPO=https://github.com/songquanpeng/one-api   # linked from the gateway name in the report table
 GW_PORT=3000
 GW_PATH=/v1/chat/completions

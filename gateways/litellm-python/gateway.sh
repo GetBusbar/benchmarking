@@ -6,6 +6,7 @@ GW_KIND=native
 # is fully defined by its own dir (add/remove a dir → it appears/disappears everywhere).
 GW_DISPLAY="LiteLLM · Python"                      # label in charts + report tables
 GW_LANG=Python                            # implementation language → bar color bucket
+GW_CLASS="LLM gateway"   # the project's OWN self-description (README: 'Proxy Server (LLM Gateway)'), not our editorial
 GW_REPO=https://github.com/BerriAI/litellm   # linked from the gateway name in the report table
 GW_PORT=8102
 GW_PATH=/v1/chat/completions

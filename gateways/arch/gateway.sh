@@ -11,6 +11,7 @@ GW_KIND=docker
 # is fully defined by its own dir (add/remove a dir → it appears/disappears everywhere).
 GW_DISPLAY="Arch"                      # label in charts + report tables
 GW_LANG=Other                            # implementation language → bar color bucket
+GW_CLASS="AI-native proxy"   # the project's OWN self-description (README: 'AI-native proxy server for agents'), not our editorial
 GW_REPO=https://github.com/katanemo/archgw   # linked from the gateway name in the report table
 GW_PORT=12000
 GW_PATH=/v1/chat/completions

@@ -11,6 +11,7 @@ GW_KIND=docker
 # is fully defined by its own dir (add/remove a dir → it appears/disappears everywhere).
 GW_DISPLAY="agentgateway"                      # label in charts + report tables
 GW_LANG=Rust                            # implementation language → bar color bucket
+GW_CLASS="Data plane"   # the project's OWN self-description (README: 'open source data plane optimized for agentic AI connectivity'), not our editorial
 GW_REPO=https://github.com/agentgateway/agentgateway   # linked from the gateway name in the report table
 GW_PORT=8080
 GW_PATH=/v1/chat/completions

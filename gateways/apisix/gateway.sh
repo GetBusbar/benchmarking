@@ -11,6 +11,7 @@ GW_KIND=docker
 # is fully defined by its own dir (add/remove a dir → it appears/disappears everywhere).
 GW_DISPLAY="APISIX"                      # label in charts + report tables
 GW_LANG=Other                            # implementation language → bar color bucket
+GW_CLASS="API gateway"   # the project's OWN self-description (README: 'dynamic, real-time, high-performance cloud-native API gateway'), not our editorial
 GW_REPO=https://github.com/apache/apisix   # linked from the gateway name in the report table
 GW_PORT=9080
 GW_PATH=/v1/chat/completions
