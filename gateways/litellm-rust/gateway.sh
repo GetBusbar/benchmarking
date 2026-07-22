@@ -27,8 +27,20 @@ LR_VENV="${LR_VENV:-$GW_DIR/venv}"
 
 gw_build() {
   command -v cargo >/dev/null || { echo "need cargo (rust) for litellm-rust"; return 1; }
-  [ -x "$LR_VENV/bin/python" ] || python3 -m venv "$LR_VENV"
-  "$LR_VENV/bin/pip" install -q --upgrade pip "${LITELLM_PY_SPEC:-litellm[proxy]}" >/dev/null 2>&1 || true
+  # BULLETPROOF: the python-config feature LOADS the `litellm` package to read the gateway config,
+  # so a silent pip failure here means the gateway cannot boot - which the suites used to record as
+  # a published served=false / 0-RPS result (and the build string showed `litellm==?`). Verify the
+  # import actually works; retry; fail the build loudly rather than proceed to a boot failure.
+  local attempt rc
+  for attempt in 1 2 3; do
+    [ -x "$LR_VENV/bin/python" ] || python3 -m venv "$LR_VENV"
+    "$LR_VENV/bin/pip" install -q --upgrade pip >/dev/null 2>&1
+    rc=0; "$LR_VENV/bin/pip" install -q "${LITELLM_PY_SPEC:-litellm[proxy]}" >/dev/null 2>&1 || rc=$?
+    if [ "$rc" = 0 ] && "$LR_VENV/bin/python" -c 'import litellm' >/dev/null 2>&1; then break; fi
+    echo "litellm-rust python-config: attempt $attempt pip rc=$rc, import ok=$("$LR_VENV/bin/python" -c 'import litellm' >/dev/null 2>&1 && echo yes || echo NO)" >&2
+    [ "$attempt" = 3 ] && { echo "BUILD FAILED: litellm python-config package would not import after 3 attempts"; return 1; }
+    rm -rf "$LR_VENV"; sleep $((attempt*5))
+  done
   if [ ! -d "$LITELLM_SRC" ]; then
     git clone -b "${LITELLM_RUST_BRANCH}" "${LITELLM_RUST_REPO}" "$LITELLM_SRC"
     [ -n "${LITELLM_RUST_COMMIT:-}" ] && git -C "$LITELLM_SRC" checkout -q "$LITELLM_RUST_COMMIT"

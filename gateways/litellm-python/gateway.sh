@@ -15,10 +15,28 @@ GW_AUTH=gwbench
 LP_VENV="${LP_VENV:-$GW_DIR/venv}"
 
 gw_build() {
-  [ -x "$LP_VENV/bin/litellm" ] && return 0
-  python3 -m venv "$LP_VENV"
-  # Keep the install log — a silent pip failure is why the version once showed up as "?".
-  "$LP_VENV/bin/pip" install -q --upgrade pip "${LITELLM_PY_SPEC:-litellm[proxy]}" >"$GW_DIR/pip.log" 2>&1
+  [ -x "$LP_VENV/bin/litellm" ] && "$LP_VENV/bin/litellm" --version >/dev/null 2>&1 && return 0
+  # BULLETPROOF: a silent pip failure used to leave NO `litellm` entrypoint, gw_build returned 0
+  # anyway, and the gateway then "failed to boot" at launch - which the suites recorded as a
+  # published served=false / 0-RPS result. A build that does not produce a runnable binary is a
+  # BUILD failure, full stop: retry pip, check its exit code, and VERIFY the entrypoint runs before
+  # returning 0. Returning non-zero makes run.sh `gw_build || exit 1` abort this gateway BEFORE any
+  # 0 is written, so prior-good data is never overwritten by an environment failure on our side.
+  local attempt rc
+  for attempt in 1 2 3; do
+    rm -rf "$LP_VENV"
+    python3 -m venv "$LP_VENV" || { echo "venv create failed (attempt $attempt)" >>"$GW_DIR/pip.log"; sleep $((attempt*5)); continue; }
+    "$LP_VENV/bin/pip" install -q --upgrade pip >>"$GW_DIR/pip.log" 2>&1
+    rc=0
+    "$LP_VENV/bin/pip" install -q "${LITELLM_PY_SPEC:-litellm[proxy]}" >>"$GW_DIR/pip.log" 2>&1 || rc=$?
+    if [ "$rc" = 0 ] && [ -x "$LP_VENV/bin/litellm" ] && "$LP_VENV/bin/litellm" --version >/dev/null 2>&1; then
+      return 0
+    fi
+    echo "attempt $attempt: pip rc=$rc, entrypoint=$([ -x "$LP_VENV/bin/litellm" ] && echo present || echo MISSING)" >>"$GW_DIR/pip.log"
+    sleep $((attempt*5))
+  done
+  echo "BUILD FAILED: litellm[proxy] did not install a runnable litellm entrypoint after 3 attempts (see $GW_DIR/pip.log)" >&2
+  return 1
 }
 
 # Prefer `pip show` (works even if `import litellm` emits warnings that trip -c); fall back to import.
