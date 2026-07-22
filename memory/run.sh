@@ -93,9 +93,9 @@ _hwm_tree_mib() { # root_pid → summed VmHWM of pid + descendants, in MiB
 # empty (recorded as null downstream) so a manifest without the hook never fabricates a number and
 # never trips `set -u` — it is gateway-agnostic and never references a hardcoded process name.
 gw_hwm() { echo ""; }
-json_escape(){ printf '%s' "$1" | tr -d '\000' | head -c 1600 \
-  | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read())[1:-1])' 2>/dev/null \
-  || printf '%s' "$1" | tr '\n\t"\\' '    ' | head -c 1600; }
+json_escape(){ printf '%s' "$1" | python3 -c 'import json,sys
+d=sys.stdin.buffer.read()[:1600].decode("utf-8","replace")
+sys.stdout.write(json.dumps(d)[1:-1])'; }
 GW_HEADERS=()  # a manifest may set extra request headers (e.g. Portkey routing, or a minted busbar vkey)
 # shellcheck source=/dev/null
 source "$GW_DIR/gateway.sh"

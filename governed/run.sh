@@ -54,9 +54,9 @@ UGEN="$ROOT/loadgen/ugen"
 [ -f "$ROOT/gateways/versions.env" ] && source "$ROOT/gateways/versions.env"
 gw_version(){ echo unknown; }; GW_HEADERS=()
 gw_diag(){ :; }
-json_escape(){ printf '%s' "$1" | tr -d '\000' | head -c 1600 \
-  | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read())[1:-1])' 2>/dev/null \
-  || printf '%s' "$1" | tr '\n\t"\\' '    ' | head -c 1600; }
+json_escape(){ printf '%s' "$1" | python3 -c 'import json,sys
+d=sys.stdin.buffer.read()[:1600].decode("utf-8","replace")
+sys.stdout.write(json.dumps(d)[1:-1])'; }
 # shellcheck source=/dev/null
 source "$GW_DIR/gateway.sh"
 BUILD_STR(){ gw_version 2>/dev/null | tr -d '\n' | sed 's/"/\\"/g'; }
