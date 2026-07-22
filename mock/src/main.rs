@@ -21,6 +21,14 @@
 //   mock -port 8000                    # instant responses
 //   MOCK_TTFT_MS=20 mock -port 8000    # add a fixed delay (latency-isolation runs)
 //
+// RECORDING (matrix suite): with MOCK_RECORD=1 the mock additionally records, per protocol
+// dialect, how many requests arrived on that dialect's endpoint and whether the LAST request body
+// looked like that dialect's request shape (loose marker check). GET /__mock/state returns the
+// record as JSON; POST /__mock/reset zeroes it. This lets the matrix runner prove a request
+// actually round-tripped through the gateway to the intended egress dialect. The recording is
+// entirely skipped (one branch on a bool) when MOCK_RECORD is unset, so the perf suites' hot path
+// is untouched.
+//
 // STREAMING: when (and only when) the request body says "stream":true, the OpenAI and Anthropic
 // paths answer a valid SSE stream instead — role/message_start, then N content deltas paced at a
 // fixed interval, then finish + [DONE] (message_stop for Anthropic). The pacing is the "model
@@ -73,6 +81,94 @@ fn body_for(path: &str) -> &'static [u8] {
     } else {
         OPENAI
     }
+}
+
+/// The dialect NAME a request path lands on — same routing as body_for, but only for paths that
+/// unambiguously belong to a dialect. The fallback default ("anything else answers OPENAI") is
+/// deliberately NOT reported as openai here: the matrix runner needs "the gateway posted to the
+/// openai chat endpoint" to mean exactly that, so unrecognized paths record under "other".
+fn dialect_for(path: &str) -> &'static str {
+    if path.contains("/chat/completions") {
+        "openai"
+    } else if path.contains("/responses") {
+        "openai-responses"
+    } else if path.contains("/messages") {
+        "anthropic"
+    } else if path.contains("generateContent") || path.contains("/v1beta/") {
+        "gemini"
+    } else if path.contains("/converse") || path.contains("/model/") || path.contains("/invoke") {
+        "bedrock"
+    } else if path.contains("/v2/chat") || path.contains("/v1/chat") {
+        "cohere"
+    } else {
+        "other"
+    }
+}
+
+/// Loose request-shape marker check per dialect: does the body carry the fields a client of that
+/// dialect must send? Deliberately shallow (substring, no JSON parse) — the matrix runner only
+/// needs "the gateway sent something recognizably shaped like that dialect's request".
+fn request_shape_ok(dialect: &str, body: &[u8]) -> bool {
+    let has = |needle: &str| body.windows(needle.len()).any(|w| w == needle.as_bytes());
+    match dialect {
+        "openai" | "bedrock" | "cohere" => has("\"messages\""),
+        "openai-responses" => has("\"input\"") || has("\"instructions\""),
+        "anthropic" => has("\"messages\"") && has("\"max_tokens\""),
+        "gemini" => has("\"contents\""),
+        _ => false,
+    }
+}
+
+const DIALECTS: [&str; 7] =
+    ["openai", "openai-responses", "anthropic", "gemini", "cohere", "bedrock", "other"];
+
+/// Per-dialect request record (matrix suite, MOCK_RECORD=1 only): request count, whether the last
+/// body passed the dialect's shape check, and the last path + a body snippet as evidence.
+#[derive(Default, Clone)]
+struct DialectRecord {
+    count: u64,
+    body_ok: bool,
+    last_path: String,
+    last_snippet: String,
+}
+
+type Recorder = std::sync::Mutex<std::collections::HashMap<&'static str, DialectRecord>>;
+
+fn json_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 8);
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+fn state_json(rec: &Recorder, recording: bool) -> String {
+    let map = rec.lock().unwrap();
+    let mut out = format!("{{\"recording\":{recording},\"dialects\":{{");
+    for (i, d) in DIALECTS.iter().enumerate() {
+        let r = map.get(d).cloned().unwrap_or_default();
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str(&format!(
+            "\"{}\":{{\"count\":{},\"body_ok\":{},\"last_path\":\"{}\",\"last_snippet\":\"{}\"}}",
+            d,
+            r.count,
+            r.body_ok,
+            json_escape(&r.last_path),
+            json_escape(&r.last_snippet)
+        ));
+    }
+    out.push_str("}}");
+    out
 }
 
 /// The SSE frames for one stream, prebuilt once at boot (Bytes clones are refcount bumps).
@@ -158,11 +254,37 @@ async fn handle(
     req: Request<Incoming>,
     ttft_ms: u64,
     frames: Arc<StreamFrames>,
+    recorder: Arc<Recorder>,
+    recording: bool,
 ) -> Result<Response<OutBody>, Infallible> {
     let path = req.uri().path().to_string();
+    // Matrix-runner control endpoints — served regardless of MOCK_RECORD so the runner can tell
+    // recording apart from "no requests arrived" (state carries a `recording` flag).
+    if path == "/__mock/state" {
+        return Ok(Response::builder()
+            .header("content-type", "application/json")
+            .body(Full::new(Bytes::from(state_json(&recorder, recording))).boxed())
+            .unwrap());
+    }
+    if path == "/__mock/reset" {
+        recorder.lock().unwrap().clear();
+        return Ok(Response::builder()
+            .header("content-type", "application/json")
+            .body(Full::new(Bytes::from_static(b"{\"ok\":true}")).boxed())
+            .unwrap());
+    }
     let body = body_for(&path);
     // Drain the request body so the connection stays keep-alive; only the stream flag is looked at.
     let reqbody = req.into_body().collect().await.map(|c| c.to_bytes()).unwrap_or_default();
+    if recording {
+        let d = dialect_for(&path);
+        let mut map = recorder.lock().unwrap();
+        let r = map.entry(d).or_default();
+        r.count += 1;
+        r.body_ok = request_shape_ok(d, &reqbody);
+        r.last_path = path.clone();
+        r.last_snippet = String::from_utf8_lossy(&reqbody[..reqbody.len().min(200)]).into_owned();
+    }
     if wants_stream(&reqbody) && (std::ptr::eq(body, OPENAI) || std::ptr::eq(body, ANTHROPIC)) {
         return Ok(sse_response(frames, std::ptr::eq(body, ANTHROPIC), ttft_ms));
     }
@@ -190,6 +312,8 @@ async fn main() {
     let s_interval = envn("MOCK_STREAM_INTERVAL_MS", 20);
     let s_bytes = envn("MOCK_STREAM_CHUNK_BYTES", 16) as usize;
     let frames = Arc::new(StreamFrames::build(s_chunks, s_interval, s_bytes));
+    let recording = std::env::var("MOCK_RECORD").map(|v| v == "1").unwrap_or(false);
+    let recorder: Arc<Recorder> = Arc::new(Recorder::default());
 
     // Bind 0.0.0.0 (not just loopback) so container-networked gateways (Arch via host.docker.internal,
     // Envoy AI via the kind bridge IP) can reach the mock — the loopback path 127.0.0.1 that the
@@ -205,6 +329,7 @@ async fn main() {
         let _ = stream.set_nodelay(true);
         let io = TokioIo::new(stream);
         let frames = frames.clone();
+        let recorder = recorder.clone();
         tokio::spawn(async move {
             // auto::Builder sniffs the HTTP/2 preface and serves h2c to clients that speak it, h1 to
             // those that don't — so gateways that multiplex to the upstream (like a real HTTP/2
@@ -212,7 +337,12 @@ async fn main() {
             // TLS: keeps the mock cheap so it stays off the critical path. (An opt-in TLS+ALPN variant
             // can be added later for a separate full-realism column.)
             let _ = auto::Builder::new(TokioExecutor::new())
-                .serve_connection(io, service_fn(move |r| handle(r, ttft_ms, frames.clone())))
+                .serve_connection(
+                    io,
+                    service_fn(move |r| {
+                        handle(r, ttft_ms, frames.clone(), recorder.clone(), recording)
+                    }),
+                )
                 .await;
         });
     }
