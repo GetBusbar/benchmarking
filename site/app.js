@@ -21,10 +21,14 @@ const CMP_COLORS = ["#4cc38a", "#6cb6ff", "#e5a54b"];
 
 const fmtInt = (v) => Math.round(v).toLocaleString("en-US");
 // Added-latency metrics are a difference of two independently measured percentiles
-// (through-gateway minus direct-to-mock). When the true overhead is below the timer
-// noise floor that difference can come out slightly negative; render it as "~0"
-// rather than implying the gateway makes requests faster.
-const fmtAdded = (v) => (v < 0 ? "~0" : fmtInt(v));
+// (through-gateway minus direct-to-mock). Subtracting two noisy p99s has a jitter of
+// roughly +/-15 us, so any result inside that band - negative OR a tiny positive - is
+// statistically zero, not real overhead. Collapse the whole sub-noise band to "~0" so
+// a genuine tie does not read as a win or loss on the sign alone. On the 20ms-paced
+// stream suite the per-frame CPU cost is smaller than this floor by construction; the
+// CPU-bound stream bench is what would resolve it.
+const ADDED_NOISE_FLOOR_US = 15;
+const fmtAdded = (v) => (Math.abs(v) < ADDED_NOISE_FLOOR_US ? "~0" : fmtInt(v));
 const fmt1 = (v) => v.toLocaleString("en-US", { minimumFractionDigits: 1, maximumFractionDigits: 1 });
 const fmtPct = (v) => `${v > 0 ? "+" : ""}${v.toFixed(1)}%`;
 
