@@ -123,6 +123,40 @@ A gateway that answers 200 but buffers the stream (never frames) is recorded
 `stream_*` fields are additive; existing result files stay valid. Knobs: `STREAM_CHUNKS`,
 `STREAM_INTERVAL_MS`, `STREAM_CHUNK_BYTES`, `STALL_X`, `SWEEP`, `SWEEP_DUR`.
 
+**`governed/`** (opt-in: `SUITES="perf memory governed" ./run-all.sh`) measures what governance
+costs. Every published gateway number in `perf/` is an ungoverned pass-through; production traffic
+usually runs behind per-caller keys, rate limits, and budgets. This lane repeats the c1
+added-latency measurement and the sustained-RPS-@20ms sweep with the gateway's native key/limit
+governance active, so every request pays virtual-key resolution, rate-limit accounting, and the
+budget check on the hot path. The same run then repeats the identical sweep against the plain
+launch, so `results/governed/<gateway>.json` self-contains the overhead
+(`governed_vs_plain_sustained_pct`, `governed_vs_plain_added_p99_delta_us`) from one box in one
+sitting, never a cross-day subtraction. The minted key carries no caps (unlimited RPM/TPM/budget,
+all pools): nothing can trip at benchmark rates, so the number is the cost of the check, not a
+limit. A gateway opts in through two optional manifest hooks (`gw_governed_launch`,
+`gw_governed_token`); a manifest without them gets a valid `governed_served: false` result, never a
+crash. Today busbar is wired (governance activates when `governance.admin_token` is set; the run
+mints a virtual key over `POST /api/v1/admin/keys` and uses the once-shown secret as the bench
+token). LiteLLM-Rust is recorded `governed_served: false` because its key mint path requires the
+Python proxy plus a Postgres database, which this single-box harness does not provision.
+
+**`xlate/`** (opt-in: `SUITES="perf memory xlate" ./run-all.sh`) measures protocol translation.
+The client speaks Anthropic (POST `/v1/messages`, a Messages body, `anthropic-version` and
+`x-api-key` headers) while the upstream mock speaks OpenAI on the manifest's `GW_PATH`, so the
+gateway must translate the request out and the response back. The mock is untouched; that is the
+point. The lane repeats the c1 added-latency measurement and the sustained-RPS-@20ms sweep on the
+translation path and writes `results/xlate/<gateway>.json` (`xlate_added_latency_p99_us`,
+`xlate_rps_sustained_20ms`). One honest asymmetry, recorded in the JSON as
+`xlate_baseline_shape: openai`: the mock does not translate, so the direct baseline is the OpenAI
+shape straight to the mock, and the added-latency figure therefore includes the translation work,
+which is exactly what this lane exists to price. Many gateways cannot serve Anthropic ingress
+against an OpenAI upstream at all; one probe decides, and a non-2xx, a non-Anthropic body, or the
+mock's own canned `/messages` body (proof the path was proxied verbatim, not translated) is
+recorded `xlate_served: false` with the probe status and body snippet as evidence, never a crash.
+Manifests may override `GW_ANTHROPIC_PATH` (default `/v1/messages`) and add
+`GW_ANTHROPIC_AUTH_HEADER`; the load generator sends the token as both `Authorization: Bearer` and
+`x-api-key`, so most manifests need nothing.
+
 **`memory/`** — resident memory across a request's life (matters most at GB scale):
 
 - **idle RSS** — right after the gateway first answers `200`, before any load.

@@ -74,3 +74,8 @@ gw_diag() {
 }
 
 gw_stop() { pkill -f litellm-ai-gateway 2>/dev/null; }
+
+# Governed lane: intentionally not wired. LiteLLM's virtual-key surface (/key/generate) lives in
+# the Python proxy and requires a Postgres database (DATABASE_URL) behind the master key; the Rust
+# gateway beta exposes no self-contained key-mint path this harness could script against a local
+# mock. governed/run.sh records governed_served=false for this manifest.
