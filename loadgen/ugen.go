@@ -44,8 +44,13 @@ func main(){
    resp,err:=cl.Do(req);if err!=nil{atomic.AddInt64(&fail,1);continue}
    if !*stream{
     io.Copy(io.Discard,resp.Body);resp.Body.Close()
-    if resp.StatusCode==200{atomic.AddInt64(&ok,1)}else{atomic.AddInt64(&fail,1)}
-    ms:=float64(time.Since(st).Microseconds())/1000.0;mu.Lock();lat=append(lat,ms);mu.Unlock();continue}
+    // a latency percentile must reflect only SUCCESSFUL proxied requests: a non-200 (429/5xx/auth)
+    // is a failure, not a fast request, so its round-trip time must NOT enter the percentile pool.
+    if resp.StatusCode==200{
+     atomic.AddInt64(&ok,1)
+     ms:=float64(time.Since(st).Microseconds())/1000.0;mu.Lock();lat=append(lat,ms);mu.Unlock()
+    }else{atomic.AddInt64(&fail,1)}
+    continue}
    // SSE: read line by line, timestamp every content frame as it lands
    var ttft float64=-1;var prev time.Time;var nf int64;fin:=false;mygaps:=[]float64{};mymax:=0.0
    sc:=bufio.NewScanner(resp.Body);sc.Buffer(make([]byte,64*1024),1024*1024)

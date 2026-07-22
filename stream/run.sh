@@ -120,12 +120,26 @@ if [ "$STREAM_OK" = 1 ]; then
   log "[$GATEWAY] warm-up ${WARMUP_DUR}s (discarded, both paths)"
   sprobe "$DURL" 1 "$WARMUP_DUR" >/dev/null 2>&1; sprobe "$GURL" 1 "$WARMUP_DUR" >/dev/null 2>&1
   log "[$GATEWAY] c1 stream baseline (direct→mock) ${C1_DUR}s"
-  read -r _s _c _f _st _fr _fp _d DT50 DT99 DG50 DG99 < <(sprobe "$DURL" 1 "$C1_DUR")
+  read -r _ds _dc _df _dst _dfr _dfp _dd DT50 DT99 DG50 DG99 < <(sprobe "$DURL" 1 "$C1_DUR")
   log "[$GATEWAY] c1 stream gateway ${C1_DUR}s"
-  read -r _s _c _f _st _fr _fp _d GT50 GT99 GG50 GG99 < <(sprobe "$GURL" 1 "$C1_DUR")
+  read -r _gs _gc _gf _gst _gfr _gfp _gd GT50 GT99 GG50 GG99 < <(sprobe "$GURL" 1 "$C1_DUR")
+  # Gate the streaming-latency lane on c1 honesty. ugen counts a 200-that-never-framed as fail and only
+  # timestamps content frames, so TTFT/gap percentiles already reflect only real streams; but a window
+  # that mostly errored (buffered/429/5xx) must not publish an error-path added-TTFT as a win. Require
+  # real frames on both paths and a stream error rate under 0.1%, else demote stream_served=false.
+  if [ "${_gfr:-0}" -le 0 ] || [ "${_dfr:-0}" -le 0 ] || [ "${GT99:-0}" -le 0 ] || [ "${DT99:-0}" -le 0 ] \
+     || ! awk -v f="${_gf:-1}" -v s="${_gs:-0}" 'BEGIN{exit !(s>0 && f<=0.001*s)}' \
+     || ! awk -v f="${_df:-1}" -v s="${_ds:-0}" 'BEGIN{exit !(s>0 && f<=0.001*s)}'; then
+    STREAM_OK=0
+    STREAM_ERR="${STREAM_ERR:+$STREAM_ERR; }c1 stream window unreliable: gw streams=${_gs:-0} fail=${_gf:-?} frames=${_gfr:-0} ttft_p99=${GT99:-0}us; direct streams=${_ds:-0} fail=${_df:-?} frames=${_dfr:-0}"
+    GT50=0; GT99=0; DT50=0; DT99=0; GG50=0; GG99=0; DG50=0; DG99=0
+    log "[$GATEWAY] WARNING stream c1 window had errors / no frames — stream_served=false"
+  fi
   ADD_T50=$(( ${GT50:-0} - ${DT50:-0} )); ADD_T99=$(( ${GT99:-0} - ${DT99:-0} ))
   ADD_G50=$(( ${GG50:-0} - ${DG50:-0} )); ADD_G99=$(( ${GG99:-0} - ${DG99:-0} ))
   log "[$GATEWAY] c1: added TTFT p99=${ADD_T99}µs (p50=${ADD_T50}µs)  added gap p99=${ADD_G99}µs (p50=${ADD_G50}µs)"
+fi
+if [ "$STREAM_OK" = 1 ]; then
 
   # ── streams-sustained sweep ─────────────────────────────────────────────────────────────────────
   # A point qualifies when ≥99.9% of expected content frames delivered, zero streams stalled past

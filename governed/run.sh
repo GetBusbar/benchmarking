@@ -117,11 +117,27 @@ measure_phase(){
   log "[$GATEWAY] warm-up ${WARMUP_DUR:-5}s (discarded, both paths)"
   probe "$DURL" 1 "${WARMUP_DUR:-5}" "$token" >/dev/null 2>&1
   probe "$GURL" 1 "${WARMUP_DUR:-5}" "$token" >/dev/null 2>&1
-  local drps dfail grps gfail
+  # Reset every output BEFORE the reads: `read` on empty probe output (gateway died mid-c1) leaves the
+  # variables at their PREVIOUS values, and measure_phase runs twice (plain, then governed) — without
+  # this reset the governed phase would silently copy the plain phase's numbers and report ~0 overhead.
+  local drps dfail grps gfail _dp50=0 _gp50=0
+  PH_DP99=0; PH_GP99=0; PH_OVER_P99=0; PH_OVER_P50=0; PH_C1_OK=1
   log "[$GATEWAY] c1 baseline (direct->mock) ${C1_DUR}s"
   read -r drps dfail PH_DP99 _dp50 < <(probe "$DURL" 1 "$C1_DUR" "$token")
   log "[$GATEWAY] c1 gateway ${C1_DUR}s"
   read -r grps gfail PH_GP99 _gp50 < <(probe "$GURL" 1 "$C1_DUR" "$token")
+  # Gate on c1 honesty: probe() only pools 200 latencies, so PH_GP99=0 means no successful sample and a
+  # material error rate means the window was 429/5xx'd (e.g. a minted key that stopped working) — the
+  # added-latency number would be fabricated. Flag it so the caller records governed_served=false.
+  local _gtot=$(( ${grps:-0} * C1_DUR + ${gfail:-0} )) _dtot=$(( ${drps:-0} * C1_DUR + ${dfail:-0} ))
+  if [ "${PH_GP99:-0}" -le 0 ] || [ "${PH_DP99:-0}" -le 0 ] \
+     || ! awk -v f="${gfail:-1}" -v t="$_gtot" 'BEGIN{exit !(t>0 && f<=0.001*t)}' \
+     || ! awk -v f="${dfail:-1}" -v t="$_dtot" 'BEGIN{exit !(t>0 && f<=0.001*t)}'; then
+    PH_C1_OK=0
+    PH_C1_ERR="c1 latency window unreliable: gw ok=${grps:-0}/s fail=${gfail:-?} p99=${PH_GP99:-0}us; direct ok=${drps:-0}/s fail=${dfail:-?} p99=${PH_DP99:-0}us"
+    PH_DP99=0; PH_GP99=0; _dp50=0; _gp50=0
+    log "[$GATEWAY] WARNING c1 window had errors / no valid sample"
+  fi
   PH_OVER_P99=$(( ${PH_GP99:-0} - ${PH_DP99:-0} )); PH_OVER_P50=$(( ${_gp50:-0} - ${_dp50:-0} ))
   log "[$GATEWAY] c1: gw p99=${PH_GP99}us direct p99=${PH_DP99}us -> added p99=${PH_OVER_P99}us"
 
@@ -159,6 +175,10 @@ if ! wait_200 "$GW_AUTH"; then
   exit 0
 fi
 measure_phase "$GW_AUTH"
+if [ "${PH_C1_OK:-1}" != 1 ]; then
+  write_unserved "plain (ungoverned) c1 latency window unreliable: ${PH_C1_ERR:-}; diag=[$(gw_diag 2>&1 | tail -n 20)]"
+  exit 0
+fi
 PL_OVER_P50=$PH_OVER_P50; PL_OVER_P99=$PH_OVER_P99; PL_GP99=$PH_GP99; PL_DP99=$PH_DP99
 PL_RPS=$PH_RPS; PL_CONC=$PH_CONC; PL_MOCK=$PH_MOCK; PL_BOUND=$PH_BOUND; PL_JSON="$PH_JSON"
 gw_stop; sleep 1
@@ -196,6 +216,10 @@ if ! wait_200 "$GOV_TOKEN"; then
   exit 0
 fi
 measure_phase "$GOV_TOKEN"
+if [ "${PH_C1_OK:-1}" != 1 ]; then
+  write_unserved "governed c1 latency window unreliable (the minted key served warm-up but errored the window): ${PH_C1_ERR:-}; diag=[$(gw_diag 2>&1 | tail -n 20)]"
+  exit 0
+fi
 GV_OVER_P50=$PH_OVER_P50; GV_OVER_P99=$PH_OVER_P99; GV_GP99=$PH_GP99; GV_DP99=$PH_DP99
 GV_RPS=$PH_RPS; GV_CONC=$PH_CONC; GV_MOCK=$PH_MOCK; GV_BOUND=$PH_BOUND; GV_JSON="$PH_JSON"
 
