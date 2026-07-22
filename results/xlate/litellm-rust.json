@@ -1,13 +1,13 @@
 {
   "gateway": "litellm-rust",
   "build": "litellm_rust_gateway_v1_messages_route@698072308b (python-config litellm==?)",
-  "served": true,
+  "served": false,
   "xlate_served": false,
-  "xlate_passthrough": true,
-  "last_http_status": "200",
-  "xlate_probe_status": "200",
-  "serve_error": "",
-  "xlate_error": "UNTRANSLATED passthrough: gateway returned the mock's canned /messages body (id msg_x) \u2014 it proxied the path, it did not translate; body=[{\"content\":[{\"text\":\"ok\",\"type\":\"text\"}],\"id\":\"msg_x\",\"model\":\"mock\",\"role\":\"assistant\",\"stop_reason\":\"end_turn\",\"stop_sequence\":null,\"type\":\"message\",\"usage\":{\"input_tokens\":10,\"output_tokens\":2}}]",
+  "xlate_passthrough": false,
+  "last_http_status": "400",
+  "xlate_probe_status": "000",
+  "serve_error": "failed to boot after 3 attempts: attempt 1: launch_rc=0, not ready; port 8101 LISTEN; diag=[proc: 19348 /home/ubuntu/litellm-rust-src/litellm-rust/target/release/litellm-ai-gateway run.log: config load failed (routing error: read_model_list failed: ModuleNotFoundError: No module named 'litellm'); falling back to env deployment warning: OPENAI_API_KEY is not set; realtime requests will fail with auth errors realtime connection pool enabled: target 4 warm sockets/key, max idle 30s litellm-ai-gateway listening on 127.0.0.1:8101 ] || attempt 2: launch_rc=0, not ready; port 8101 LISTEN; diag=[proc: 19497 /home/ubuntu/litellm-rust-src/litellm-rust/target/release/litellm-ai-gateway run.log: config load failed (routing error: read_model_list failed: ModuleNotFoundError: No module named 'litellm'); falling back to env deployment warning: OPENAI_API_KEY is not set; realtime requests will fail with auth errors realtime connection pool enabled: target 4 warm sockets/key, max idle 30s litellm-ai-gateway listening on 127.0.0.1:8101 ] || attempt 3: launch_rc=0, not ready; port 8101 LISTEN; diag=[proc: 19645 /home/ubuntu/litellm-rust-src/litellm-rust/target/release/litellm-ai-gateway run.log: config load failed (routing error: read_model_list failed: ModuleNotFoundError: No module named 'litellm'); falling back to env deployment warning: OPENAI_API_KEY is not set; realtime requests will fail with auth errors realtime connection pool enabled: target 4 warm sockets/key, max idle 30s litellm-ai-gateway listening on 127.0.0.1:8101 ]",
+  "xlate_error": "",
   "xlate_added_latency_p50_us": 0,
   "xlate_added_latency_p99_us": 0,
   "xlate_gateway_c1_p99_us": 0,
@@ -29,5 +29,5 @@
   "mock_proto": "h1+h2c",
   "arch": "arm64",
   "hardware": "AWS m7g.2xlarge (Graviton3, 8 cores / 32 GB). Gateway pinned to 4 cores, mock+loadgen on the other 4, Ubuntu 24.04. One dedicated box per gateway.",
-  "measured_at": "2026-07-22T05:45:02Z"
+  "measured_at": "2026-07-22T18:30:31Z"
 }

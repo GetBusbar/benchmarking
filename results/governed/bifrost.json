@@ -3,5 +3,5 @@
   "build": "maximhq/bifrost:v1.6.4 (@sha256:5f1fed63b5c2c78c51f25d80d5d2d683d79f74587ea0906e8c03fbd256ab52e0)",
   "governed_served": false,
   "governed_note": "manifest defines no gw_governed_launch/gw_governed_token (no native key/limit governance, or not yet wired)",
-  "measured_at": "2026-07-22T16:55:13Z"
+  "measured_at": "2026-07-22T18:18:54Z"
 }

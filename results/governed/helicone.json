@@ -3,5 +3,5 @@
   "build": "Helicone/ai-gateway@9649b27 (source build)",
   "governed_served": false,
   "governed_note": "manifest defines no gw_governed_launch/gw_governed_token (no native key/limit governance, or not yet wired)",
-  "measured_at": "2026-07-22T17:03:24Z"
+  "measured_at": "2026-07-22T18:27:44Z"
 }
