@@ -1,0 +1,21 @@
+{
+  "gateway": "arch",
+  "build": "katanemo/archgw:0.3.22 (archgw CLI)",
+  "served": true,
+  "serve_error": "",
+  "upstream_shape": "openai",
+  "upstream_note": "v1 fixes the upstream to the OpenAI shape on /v1/chat/completions; every non-openai cell is a translation claim. The full 6x6 (all upstream dialects) is future work.",
+  "cells": {
+    "openai": {"served": true, "status": "200", "path": "/v1/chat/completions", "verdict_note": "HTTP 200, openai envelope validated", "body_snippet": "{\"id\":\"chatcmpl-x\",\"object\":\"chat.completion\",\"created\":1,\"model\":\"mock\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"compl"},
+    "openai-responses": {"served": false, "status": "200", "path": "/v1/responses", "verdict_note": "HTTP 200 on POST /v1/responses: bad not JSON", "body_snippet": ""},
+    "anthropic": {"served": true, "status": "200", "path": "/v1/messages", "verdict_note": "HTTP 200, anthropic envelope validated", "body_snippet": "{\"id\":\"chatcmpl-x\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"ok\"}],\"model\":\"mock\",\"stop_reason\":\"end_turn\",\"usage\":{\"input_tokens\":10,\"output_tokens\":2}}"},
+    "gemini": {"served": false, "status": "404", "path": "/v1beta/models/openai/gpt-4o-mini:generateContent", "verdict_note": "HTTP 404 on POST /v1beta/models/openai/gpt-4o-mini:generateContent: bad not JSON", "body_snippet": ""},
+    "cohere": {"served": false, "status": "404", "path": "/v1/chat", "verdict_note": "HTTP 404/405 on /v2/chat, then HTTP 404 on fallback /v1/chat: bad not JSON", "body_snippet": ""},
+    "bedrock": {"served": false, "status": "404", "path": "/model/openai/gpt-4o-mini/converse", "verdict_note": "HTTP 404 on POST /model/openai/gpt-4o-mini/converse: bad not JSON", "body_snippet": ""}
+  },
+  "model": "openai/gpt-4o-mini",
+  "upstream_endpoint": "/v1/chat/completions",
+  "arch": "arm64",
+  "hardware": "AWS m7g.2xlarge (Graviton3, 8 cores / 32 GB). Gateway pinned to 4 cores, mock+loadgen on the other 4, Ubuntu 24.04. One dedicated box per gateway.",
+  "measured_at": "2026-07-22T06:04:14Z"
+}

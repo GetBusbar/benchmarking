@@ -1,0 +1,7 @@
+{
+  "gateway": "busbar",
+  "build": "busbar 1.4.1",
+  "governed_served": false,
+  "governed_note": "gw_governed_launch failed; diag=[]",
+  "measured_at": "2026-07-22T05:48:31Z"
+}

@@ -1,0 +1,21 @@
+{
+  "gateway": "bifrost",
+  "build": "maximhq/bifrost:v1.6.4 (@sha256:5f1fed63b5c2c78c51f25d80d5d2d683d79f74587ea0906e8c03fbd256ab52e0)",
+  "served": true,
+  "serve_error": "",
+  "upstream_shape": "openai",
+  "upstream_note": "v1 fixes the upstream to the OpenAI shape on /v1/chat/completions; every non-openai cell is a translation claim. The full 6x6 (all upstream dialects) is future work.",
+  "cells": {
+    "openai": {"served": true, "status": "200", "path": "/v1/chat/completions", "verdict_note": "HTTP 200, openai envelope validated", "body_snippet": "{\"id\":\"chatcmpl-x\",\"choices\":[{\"index\":0,\"finish_reason\":\"stop\",\"message\":{\"role\":\"assistant\",\"content\":\"ok\"}}],\"created\":1,\"model\":\"mock\",\"object\":\"chat.completion\",\"system_fingerprint\":\"\",\"usage\":{\""},
+    "openai-responses": {"served": false, "status": "200", "path": "/v1/responses", "verdict_note": "UNTRANSLATED passthrough mock canned /responses body (id resp_x) \u2014 the gateway proxied /v1/responses through verbatim instead of translating (HTTP 200)", "body_snippet": "{\"id\":\"resp_x\",\"object\":\"response\",\"created_at\":1,\"completed_at\":null,\"error\":null,\"incomplete_details\":null,\"instructions\":null,\"max_output_tokens\":null,\"max_tool_calls\":null,\"model\":\"mock\",\"output\":"},
+    "anthropic": {"served": false, "status": "405", "path": "/v1/messages", "verdict_note": "HTTP 405 on POST /v1/messages: bad not JSON", "body_snippet": "Method Not Allowed"},
+    "gemini": {"served": false, "status": "405", "path": "/v1beta/models/gpt-4o-mini:generateContent", "verdict_note": "HTTP 405 on POST /v1beta/models/gpt-4o-mini:generateContent: bad not JSON", "body_snippet": "Method Not Allowed"},
+    "cohere": {"served": false, "status": "405", "path": "/v1/chat", "verdict_note": "HTTP 404/405 on /v2/chat, then HTTP 405 on fallback /v1/chat: bad not JSON", "body_snippet": "Method Not Allowed"},
+    "bedrock": {"served": false, "status": "405", "path": "/model/gpt-4o-mini/converse", "verdict_note": "HTTP 405 on POST /model/gpt-4o-mini/converse: bad not JSON", "body_snippet": "Method Not Allowed"}
+  },
+  "model": "gpt-4o-mini",
+  "upstream_endpoint": "/v1/chat/completions",
+  "arch": "arm64",
+  "hardware": "AWS m7g.2xlarge (Graviton3, 8 cores / 32 GB). Gateway pinned to 4 cores, mock+loadgen on the other 4, Ubuntu 24.04. One dedicated box per gateway.",
+  "measured_at": "2026-07-22T05:42:18Z"
+}

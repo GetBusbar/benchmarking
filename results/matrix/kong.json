@@ -1,0 +1,21 @@
+{
+  "gateway": "kong",
+  "build": "kong:3.8 (@sha256:dd6cd1d94a7aae8c5a4d245ccbee6b81230d41a4312d76d076c4e9c6db65611c)",
+  "served": true,
+  "serve_error": "",
+  "upstream_shape": "openai",
+  "upstream_note": "v1 fixes the upstream to the OpenAI shape on /v1/chat/completions; every non-openai cell is a translation claim. The full 6x6 (all upstream dialects) is future work.",
+  "cells": {
+    "openai": {"served": true, "status": "200", "path": "/v1/chat/completions", "verdict_note": "HTTP 200, openai envelope validated", "body_snippet": "{\"id\":\"chatcmpl-x\",\"object\":\"chat.completion\",\"created\":1,\"model\":\"mock\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"compl"},
+    "openai-responses": {"served": false, "status": "404", "path": "/v1/responses", "verdict_note": "HTTP 404 on POST /v1/responses: bad no Responses envelope (output/output_text/type=response)", "body_snippet": "{\n  \"message\":\"no Route matched with those values\",\n  \"request_id\":\"e04ace1d45260f31981e6879b312c875\"\n}"},
+    "anthropic": {"served": false, "status": "404", "path": "/v1/messages", "verdict_note": "HTTP 404 on POST /v1/messages: bad no anthropic envelope (\"type\":\"message\" + content array)", "body_snippet": "{\n  \"message\":\"no Route matched with those values\",\n  \"request_id\":\"fb761743acb39b185afecd5937bc8a0c\"\n}"},
+    "gemini": {"served": false, "status": "404", "path": "/v1beta/models/gpt-4o-mini:generateContent", "verdict_note": "HTTP 404 on POST /v1beta/models/gpt-4o-mini:generateContent: bad no candidates[0].content", "body_snippet": "{\n  \"message\":\"no Route matched with those values\",\n  \"request_id\":\"ad5cc5230de24974dca2de278b4fa871\"\n}"},
+    "cohere": {"served": false, "status": "404", "path": "/v1/chat", "verdict_note": "HTTP 404/405 on /v2/chat, then HTTP 404 on fallback /v1/chat: bad no cohere v2 chat envelope (message.content or text)", "body_snippet": "{\n  \"message\":\"no Route matched with those values\",\n  \"request_id\":\"56b4ea03430e0360983cdc4a8a9aa105\"\n}"},
+    "bedrock": {"served": false, "status": "404", "path": "/model/gpt-4o-mini/converse", "verdict_note": "HTTP 404 on POST /model/gpt-4o-mini/converse: bad no output.message.content (Converse)", "body_snippet": "{\n  \"message\":\"no Route matched with those values\",\n  \"request_id\":\"8b2c6f41ecb0540f5f3cae6f8240941d\"\n}"}
+  },
+  "model": "gpt-4o-mini",
+  "upstream_endpoint": "/v1/chat/completions",
+  "arch": "arm64",
+  "hardware": "AWS m7g.2xlarge (Graviton3, 8 cores / 32 GB). Gateway pinned to 4 cores, mock+loadgen on the other 4, Ubuntu 24.04. One dedicated box per gateway.",
+  "measured_at": "2026-07-22T05:43:23Z"
+}
