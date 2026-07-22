@@ -102,6 +102,27 @@ faster.
 - **RPS ceiling** — highest sustained requests/sec with p99 under 1 s and **a <0.1% error rate** —
   "how much can it carry before it falls over."
 
+**`stream/`** (opt-in: `SUITES="perf memory stream" ./run-all.sh`) — what the gateway adds to a
+token stream. The mock answers `stream:true` with a valid SSE stream: a role chunk, then 64
+content deltas paced at 20 ms, then finish + `[DONE]` (Anthropic event shape on `/messages`).
+Against that fixed pace, per gateway:
+
+- **added TTFT (µs)** — time to the first content frame through the gateway minus direct-to-mock,
+  at concurrency 1. The delay a user waits before the first token appears.
+- **added inter-frame latency (µs)** — p50/p99 of the gateway's content-frame gap minus the
+  direct-to-mock gap. Both sides carry the mock's 20 ms pace and the same timer jitter, so the
+  subtraction isolates the gateway's per-frame overhead.
+- **streams sustained** — the highest concurrent stream count where at least 99.9% of expected
+  frames deliver, no stream stalls past 2x the pacing interval, and the stream error rate stays
+  under 0.1%; plus the frames/sec carried there. The mock-ceiling guardrail applies here too: the
+  mock's own frames/sec at top concurrency is recorded and a result within 10% is flagged
+  mock-bound.
+
+A gateway that answers 200 but buffers the stream (never frames) is recorded
+`stream_served: false` in `results/stream/<gateway>.json` rather than crashing the run. The
+`stream_*` fields are additive; existing result files stay valid. Knobs: `STREAM_CHUNKS`,
+`STREAM_INTERVAL_MS`, `STREAM_CHUNK_BYTES`, `STALL_X`, `SWEEP`, `SWEEP_DUR`.
+
 **`memory/`** — resident memory across a request's life (matters most at GB scale):
 
 - **idle RSS** — right after the gateway first answers `200`, before any load.

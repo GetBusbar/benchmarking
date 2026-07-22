@@ -23,6 +23,8 @@ fi
 log(){ echo "[$(date +%H:%M:%S)] $*"; }
 
 # Which suites to run (headline first): perf = latency + RPS ceiling; memory = idle/peak RSS.
+# stream = SSE added-TTFT / inter-frame overhead / streams sustained; opt in with
+# SUITES="perf memory stream" (see stream/run.sh).
 SUITES="${SUITES:-perf memory}"
 for gw in "${GATEWAYS[@]}"; do
   [ -f "$HERE/gateways/$gw/gateway.sh" ] || { log "skip unknown gateway '$gw'"; continue; }
