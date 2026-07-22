@@ -47,6 +47,30 @@ const fmtAdded = fmtInt;
 const fmt1 = (v) => v.toLocaleString("en-US", { minimumFractionDigits: 1, maximumFractionDigits: 1 });
 const fmtPct = (v) => `${v > 0 ? "+" : ""}${v.toFixed(1)}%`;
 
+/* Footer timestamps: a clean UTC date/time plus a COARSE relative age (hours or
+   days only, deliberately imprecise). Age is computed client-side against now,
+   so it stays fresh without a rebuild. Pure; covered by site/test.mjs. */
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+function fmtStamp(iso) {
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) return String(iso || "unknown");
+  const d = new Date(t);
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${MONTHS[d.getUTCMonth()]} ${d.getUTCDate()}, ${d.getUTCFullYear()} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())} UTC`;
+}
+function fmtAge(iso, now = Date.now()) {
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t) || now < t) return "";
+  const hours = Math.floor((now - t) / 3600000);
+  if (hours < 1) return "just now";
+  if (hours < 48) return `${hours} hour${hours === 1 ? "" : "s"} ago`;
+  return `${Math.floor(hours / 24)} days ago`;
+}
+function stampWithAge(iso, now = Date.now()) {
+  const age = fmtAge(iso, now);
+  return age ? `${fmtStamp(iso)} (${age})` : fmtStamp(iso);
+}
+
 function esc(s) {
   return String(s).replace(/[&<>"']/g, (c) =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -922,8 +946,8 @@ function renderStatic() {
   const hw = document.getElementById("hw-stamp");
   const bits = [];
   if (state.data.hardware) bits.push(`Ran on: ${state.data.hardware}`);
-  if (state.data.latest_measured_at) bits.push(`Latest measurement: ${state.data.latest_measured_at}`);
-  bits.push(`Site data generated: ${state.data.generated_at || "unknown"}`);
+  if (state.data.latest_measured_at) bits.push(`Latest measurement: ${stampWithAge(state.data.latest_measured_at)}`);
+  bits.push(`Site data generated: ${state.data.generated_at ? stampWithAge(state.data.generated_at) : "unknown"}`);
   hw.textContent = bits.join(" · ");
 }
 
@@ -1061,6 +1085,7 @@ if (NODE) {
   /* Exports for the node smoke test (site/test.mjs). */
   module.exports = {
     newState, encodeUrl, decodeUrl, viewPath, applyFilters,
+    fmtStamp, fmtAge, stampWithAge,
     drawSweep, niceStep, fmtTick, COLUMNS, LANES, naText,
     cellState, matrixCellTip, CATEGORIES, DEFAULT_CATEGORY, VIEWS,
   };

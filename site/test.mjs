@@ -145,6 +145,23 @@ test("decode rejects a bogus sort column", () => {
   assert.equal(back.sortCol, "rps20");
 });
 
+// ---- footer timestamps: clean UTC stamp + coarse relative age ----------------
+test("footer timestamps format cleanly with a coarse age", () => {
+  const iso = "2026-07-22T17:52:46.101Z";
+  assert.equal(app.fmtStamp(iso), "Jul 22, 2026 17:52 UTC");
+  const t = Date.parse(iso);
+  const H = 3600000;
+  assert.equal(app.fmtAge(iso, t + 10 * 60000), "just now");            // < 1 hour
+  assert.equal(app.fmtAge(iso, t + 1 * H + 1), "1 hour ago");           // hours, coarse
+  assert.equal(app.fmtAge(iso, t + 47.5 * H), "47 hours ago");          // still hours at 47
+  assert.equal(app.fmtAge(iso, t + 48 * H), "2 days ago");              // days from 48 hours
+  assert.equal(app.fmtAge(iso, t + 10 * 24 * H + 5 * H), "10 days ago"); // whole days only
+  assert.equal(app.stampWithAge(iso, t + 3 * H), "Jul 22, 2026 17:52 UTC (3 hours ago)");
+  // garbage in: fall back to the raw string, no age
+  assert.equal(app.fmtStamp("not-a-date"), "not-a-date");
+  assert.equal(app.fmtAge("not-a-date"), "");
+});
+
 // ---- compact not-served labels (compare + results cells) --------------------
 test("naText keeps long diagnostic notes out of cell values", () => {
   assert.deepEqual(app.naText(null, "xlate_served", "xlate_error"), { text: "not measured", note: "" });
