@@ -224,7 +224,7 @@ tbody tr { cursor: pointer; }
 .matrix-table th.axis { font-weight: 400; color: var(--fg-dim); font-size: .74rem; }
 .matrix-table td.na { color: var(--fg-dim); font-size: .74rem; }
 .cell {
-  display: inline-block; width: 1.5rem; height: 1.05rem; border-radius: 4px; cursor: pointer;
+  display: inline-block; width: 1.1rem; height: 1.1rem; border-radius: 3px; cursor: pointer;
 }
 .cell.served { background: var(--green); }
 .cell.failed { background: var(--red); }
@@ -322,7 +322,7 @@ tbody tr { cursor: pointer; }
   .compare-panel { padding: 2vh .5rem; }
   .gallery, .method-grid { grid-template-columns: 1fr; }
   .matrix-table th, .matrix-table td { padding: .35rem .4rem; }
-  .cell { width: 1.3rem; }
+  .cell { width: 1.2rem; height: 1.2rem; }
 }
 @media (max-width: 400px) {
   .site-header h1 { font-size: 1.2rem; }
