@@ -17,6 +17,7 @@
 import { readdirSync, readFileSync, statSync, existsSync, mkdirSync, copyFileSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createHash } from "node:crypto";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = process.argv[2] || join(HERE, "..");
@@ -65,6 +66,13 @@ const gateways = gatewayKeys.map((key) => {
     if (j) g[suite] = j;
   }
   if (g.matrix) normalizeMatrix(g.matrix);
+  // "Supports governance" is a DECLARED CAPABILITY, not a per-run measurement outcome. A gateway is
+  // governance-capable if its manifest wires a governed launch — i.e. the governed note is anything
+  // OTHER than "manifest defines no ..." (the string write_unserved emits when no gw_governed_launch
+  // hook exists). So a capable gateway whose measurement failed on a given run (e.g. busbar's launch
+  // hiccup) still reads as capable; only genuinely-unsupported gateways are excluded from the filter.
+  const gnote = (g.governed && typeof g.governed.governed_note === "string") ? g.governed.governed_note : "";
+  g.supports_governed = !!g.governed && !gnote.includes("manifest defines no");
   return g;
 });
 
@@ -101,8 +109,13 @@ const chartFiles = existsSync(resultsDir)
 mkdirSync(join(OUT, "charts"), { recursive: true });
 const charts = [];
 for (const f of chartFiles) {
-  copyFileSync(join(resultsDir, f), join(OUT, "charts", f));
-  charts.push({ file: `charts/${f}` });
+  const bytes = readFileSync(join(resultsDir, f));
+  writeFileSync(join(OUT, "charts", f), bytes);
+  // Content-hash cache-buster: the filename is stable across runs, so a browser would
+  // serve a stale cached PNG when the chart content changes. Append a short hash of the
+  // bytes so the query changes only when the image actually does.
+  const v = createHash("sha1").update(bytes).digest("hex").slice(0, 8);
+  charts.push({ file: `charts/${f}?v=${v}` });
 }
 
 // ---- fonts: copy the repo's bundled Inter faces -----------------------------

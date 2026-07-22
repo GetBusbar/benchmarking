@@ -270,7 +270,9 @@ function applyFilters(gateways, st) {
     if (st.langs.size && !st.langs.has(g.lang)) return false;
     if (st.needStream && !(g.stream && g.stream.stream_served)) return false;
     if (st.needXlate && !(g.xlate && g.xlate.xlate_served)) return false;
-    if (st.needGoverned && !(g.governed && g.governed.governed_served)) return false;
+    // Filter on DECLARED capability (supports_governed), not on a single run's measurement success,
+    // so a governance-capable gateway whose measurement failed still shows under "supports governance".
+    if (st.needGoverned && !g.supports_governed) return false;
     return true;
   });
 }
@@ -818,7 +820,7 @@ const CHART_CAPTIONS = {
   governed_throughput: "Sustained RPS with native governance active vs the plain launch. Closer bars mean cheaper governance.",
 };
 function chartCaption(file) {
-  const base = file.replace(/^charts\//, "").replace(/\.png$/, "");
+  const base = file.replace(/^charts\//, "").replace(/\?.*$/, "").replace(/\.png$/, "");
   const top5 = base.startsWith("top5_");
   const key = top5 ? base.slice(5) : base;
   const body = CHART_CAPTIONS[key] || key.replace(/_/g, " ");

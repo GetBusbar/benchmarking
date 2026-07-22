@@ -74,6 +74,25 @@ test("language filter and capability toggles combine", () => {
   assert.ok(streaming.every((g) => g.stream && g.stream.stream_served));
 });
 
+// ---- "supports governance" filters on DECLARED capability, not run outcome ----
+test("governance filter keys on capability (supports_governed), not measurement success", () => {
+  const st = app.newState();
+  st.needGoverned = true;
+  const shown = app.applyFilters(data.gateways, st);
+  // Every gateway the filter keeps must be capability-flagged (supports_governed), regardless of
+  // whether a given run served — a capable gateway whose measurement failed must NOT be excluded.
+  assert.ok(shown.every((g) => g.supports_governed));
+  // A gateway whose governed note says the manifest defines no governed launch is genuinely
+  // unsupported and must be excluded; a capable one whose note is a launch failure must be kept.
+  const capableButFailed = data.gateways.find(
+    (g) => g.governed && g.governed.governed_served === false
+      && !/manifest defines no/.test(g.governed.governed_note || ""));
+  const genuinelyUnsupported = data.gateways.find(
+    (g) => g.governed && /manifest defines no/.test(g.governed.governed_note || ""));
+  if (capableButFailed) assert.ok(shown.includes(capableButFailed), "capable-but-failed gateway must still show");
+  if (genuinelyUnsupported) assert.ok(!shown.includes(genuinelyUnsupported), "genuinely-unsupported gateway must be filtered out");
+});
+
 // ---- URL hash state round-trip ----------------------------------------------
 test("hash state round-trips", () => {
   const st = app.newState();
