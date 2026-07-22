@@ -68,6 +68,27 @@ container_rss_mib() { # container_name → its process tree's VmRSS via the host
   local pid; pid=$(sudo docker inspect -f '{{.State.Pid}}' "$1" 2>/dev/null)
   _rss_tree_mib "$pid"
 }
+# VmHWM = the kernel's own per-process high-water mark. The 0.3 s VmRSS poll above can miss a
+# sub-interval allocation spike entirely; VmHWM cannot (the kernel updates it on every charge), so
+# it is the honest PEAK for the memory story. Read at teardown (it survives until process exit).
+_hwm_tree_mib() { # root_pid → summed VmHWM of pid + descendants, in MiB
+  local root="$1"; [ -z "$root" ] || [ "$root" = 0 ] && { echo 0; return; }
+  local pids="$root" frontier="$root" next total=0 kb p c
+  while [ -n "$frontier" ]; do
+    next=""
+    for p in $frontier; do for c in $(pgrep -P "$p" 2>/dev/null); do pids="$pids $c"; next="$next $c"; done; done
+    frontier="$next"
+  done
+  for p in $pids; do kb=$(awk '/VmHWM/{print $2}' "/proc/$p/status" 2>/dev/null); total=$((total + ${kb:-0})); done
+  awk -v k="$total" 'BEGIN{printf "%.1f", k/1024}'
+}
+gw_hwm() { # best-effort: native pgrep root, else docker root pid; empty if neither resolves
+  local pid
+  pid=$(pgrep -x busbar 2>/dev/null | head -1)
+  [ -z "$pid" ] && pid=$(pgrep -f "$GW_PROC_HINT" 2>/dev/null | head -1)
+  [ -n "$pid" ] && { _hwm_tree_mib "$pid"; return; }
+  echo ""
+}
 json_escape(){ printf '%s' "$1" | tr -d '\000' | head -c 1600 \
   | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read())[1:-1])' 2>/dev/null \
   || printf '%s' "$1" | tr '\n\t"\\' '    ' | head -c 1600; }
@@ -123,6 +144,10 @@ taskset -c "$LOADCORES" "$UGEN_BIN" -url "http://127.0.0.1:$GW_PORT$GW_PATH" \
 touch "$STOP"; kill "$SP" 2>/dev/null
 PEAK=$(cat /tmp/mem.peak)
 
+# VmHWM must be read BEFORE the gateway stops (the counter dies with the process).
+HWM=$(gw_hwm)
+log "[$GATEWAY] kernel high-water mark: ${HWM:-n/a} MiB (VmHWM; sampled peak: ${PEAK:-0})"
+
 log "[$GATEWAY] load stopped — waiting 60s to see if memory releases"
 sleep 60
 POST=$(gw_rss)
@@ -140,6 +165,7 @@ cat > "$RESULTS/$GATEWAY.json" <<JSON
   "serve_error": "$(json_escape "$SERVE_ERR")",
   "idle_rss_mib": ${IDLE:-0},
   "peak_rss_mib": ${PEAK:-0},
+  "peak_rss_hwm_mib": ${HWM:-0},
   "post_load_rss_mib": ${POST:-0},
   "payload_bytes": $PSIZE,
   "concurrency": $CONC,
