@@ -1,0 +1,5 @@
+# Cloudflare Pages SPA fallback: serve the app shell for every path so clean
+# client-side routes like /gateways/matrix?sort=mempeak&dir=asc resolve on
+# direct load. Real static assets (data.json, charts/, fonts/, app.js, ...)
+# are served first; this 200 rewrite only catches paths with no asset.
+/*  /index.html  200

@@ -2,11 +2,18 @@
 // SPDX-License-Identifier: Apache-2.0
 // gen-data.mjs: build the static data bundle for the results site. No dependencies.
 //
+// The site (onthebench.ai) is a category-based benchmark platform; this script emits the
+// data bundle for the GATEWAYS category, today served as site/data.json. CATEGORY SEAM:
+// when a second category lands (e.g. models), give each category its own bundle under
+// site/data/<category>.json (a per-category generator or a section here), and register it
+// in CATEGORIES in app.js; the emitted `category` field names which bundle this is.
+//
 // Scans gateways/*/gateway.sh (the self-describing manifests: GW_DISPLAY, GW_LANG, GW_REPO)
 // plus results/{perf,memory,stream,streamcpu,xlate,governed,matrix}/<gateway>.json, and emits
 // site/data.json. Also copies the generated chart PNGs (results/*.png) into site/charts/
 // and the bundled Inter fonts (assets/fonts) into site/fonts/ so the site/ directory is a
-// self-contained Pages artifact.
+// self-contained Pages artifact, and writes 404.html (a copy of the app shell) so hosts
+// without _redirects support (GitHub Pages) still deep-link into /gateways/<view> paths.
 //
 //   node site/gen-data.mjs [repoRoot] [outDir]
 //
@@ -125,8 +132,18 @@ if (existsSync(fontsDir)) {
   for (const f of readdirSync(fontsDir)) copyFileSync(join(fontsDir, f), join(OUT, "fonts", f));
 }
 
+// ---- SPA fallback for deep links (/gateways/matrix, ...) --------------------
+// Cloudflare Pages reads site/_redirects (committed) for the /* -> /index.html 200
+// rewrite; GitHub Pages has no rewrite support but serves 404.html for unknown
+// paths, so a copy of the app shell there makes the same deep links render.
+const shell = join(HERE, "index.html");
+if (existsSync(shell)) copyFileSync(shell, join(OUT, "404.html"));
+const redirects = join(HERE, "_redirects");
+if (existsSync(redirects) && OUT !== HERE) copyFileSync(redirects, join(OUT, "_redirects"));
+
 // ---- emit -------------------------------------------------------------------
 const data = {
+  category: "gateways", // which category bundle this is (see CATEGORIES in app.js)
   generated_at: new Date().toISOString(),
   hardware,
   latest_measured_at: latest,
