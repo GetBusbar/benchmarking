@@ -22,6 +22,40 @@ if [ ${#GATEWAYS[@]} -eq 0 ]; then
 fi
 log(){ echo "[$(date +%H:%M:%S)] $*"; }
 
+# Between-suite port drain. Each suite's EXIT trap kills the gateway; the next suite relaunches the
+# SAME gateway on the SAME port seconds later. A gateway that binds WITHOUT SO_REUSEADDR (busbar,
+# and others) then hits 'address already in use' because the prior listener sits in TIME_WAIT for up
+# to a minute — the suite records served=false, a FALSE failure verdict for a working gateway. A
+# connect probe can't see TIME_WAIT, so we test actual BINDABILITY: a plain bind (no SO_REUSEADDR)
+# fails with EADDRINUSE exactly while the port is unbindable, which is the condition we must clear.
+# Wait for GW_PORT and its two derived admin ports (matrix uses +1, governed uses +2) to be bindable.
+wait_ports_bindable(){ # port [port...]
+  local p; for p in "$@"; do
+    local i ok=0
+    for i in $(seq 1 90); do
+      if python3 - "$p" <<'PY' 2>/dev/null
+import socket,sys
+s=socket.socket(socket.AF_INET,socket.SOCK_STREAM)
+# NO SO_REUSEADDR: bind fails while a prior listener is still in TIME_WAIT, which is what we wait out.
+try:
+    s.bind(("127.0.0.1",int(sys.argv[1]))); s.close(); sys.exit(0)
+except OSError:
+    sys.exit(1)
+PY
+      then ok=1; break; fi
+      sleep 1
+    done
+    [ "$ok" = 1 ] || log "WARNING port $p still not bindable after 90s — launching anyway"
+  done
+}
+
+# Read a manifest's GW_PORT without running its launch/build logic (the assignment is a plain top-level
+# line). Falls back to 8080 (the harness default) if the manifest doesn't set one literally.
+manifest_gw_port(){ # gateway
+  local port; port=$(grep -m1 -E '^GW_PORT=' "$HERE/gateways/$1/gateway.sh" 2>/dev/null | cut -d= -f2 | tr -dc '0-9')
+  echo "${port:-8080}"
+}
+
 # Which suites to run (headline first): perf = latency + RPS ceiling; memory = idle/peak RSS.
 # stream = SSE added-TTFT / inter-frame overhead / streams sustained; streamcpu = CPU-bound streaming
 # relay throughput (unpaced frames/sec per gateway, the streaming analogue of perf's max-proxy RPS);
@@ -32,7 +66,17 @@ log(){ echo "[$(date +%H:%M:%S)] $*"; }
 SUITES="${SUITES:-perf memory}"
 for gw in "${GATEWAYS[@]}"; do
   [ -f "$HERE/gateways/$gw/gateway.sh" ] || { log "skip unknown gateway '$gw'"; continue; }
+  gwport="$(manifest_gw_port "$gw")"
+  first=1
   for suite in $SUITES; do
+    # Between suites (not before the first), wait for the prior suite's listener to fully release the
+    # port so the next suite's launch can bind — avoids the TIME_WAIT false 'did not serve'. Cover the
+    # data port and the two admin ports suites derive from it (matrix GW_PORT+1, governed GW_PORT+2).
+    if [ "$first" != 1 ]; then
+      log "$gw: waiting for ports $gwport/$((gwport+1))/$((gwport+2)) to be bindable before $suite"
+      wait_ports_bindable "$gwport" "$((gwport+1))" "$((gwport+2))"
+    fi
+    first=0
     log "══ $gw · $suite ══"
     GATEWAY="$gw" bash "$HERE/$suite/run.sh" || log "$gw $suite run failed (continuing)"
   done
