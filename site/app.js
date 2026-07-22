@@ -20,6 +20,11 @@ const LANG_COLORS = {
 const CMP_COLORS = ["#4cc38a", "#6cb6ff", "#e5a54b"];
 
 const fmtInt = (v) => Math.round(v).toLocaleString("en-US");
+// Added-latency metrics are a difference of two independently measured percentiles
+// (through-gateway minus direct-to-mock). When the true overhead is below the timer
+// noise floor that difference can come out slightly negative; render it as "~0"
+// rather than implying the gateway makes requests faster.
+const fmtAdded = (v) => (v < 0 ? "~0" : fmtInt(v));
 const fmt1 = (v) => v.toLocaleString("en-US", { minimumFractionDigits: 1, maximumFractionDigits: 1 });
 const fmtPct = (v) => `${v > 0 ? "+" : ""}${v.toFixed(1)}%`;
 
@@ -106,7 +111,7 @@ const COLUMNS = [
   {
     id: "lat", label: "Added latency p99 (µs)", desc: false, title: "Gateway p99 minus direct-to-mock p99 at concurrency 1",
     get: (g) => lane(g, "perf", "served", "serve_error",
-      (j) => ({ v: j.added_latency_p99_us, text: fmtInt(j.added_latency_p99_us), na: false })),
+      (j) => ({ v: j.added_latency_p99_us, text: fmtAdded(j.added_latency_p99_us), na: false })),
   },
   {
     id: "memidle", label: "Mem idle (MiB)", desc: false, title: "Process RSS after launch, before load",
@@ -121,12 +126,12 @@ const COLUMNS = [
   {
     id: "sttft", label: "Stream added TTFT p99 (µs)", desc: false, title: "Gateway first-content-frame time minus direct-to-mock TTFT",
     get: (g) => lane(g, "stream", "stream_served", "stream_error",
-      (j) => ({ v: j.stream_added_ttft_p99_us, text: fmtInt(j.stream_added_ttft_p99_us), na: false })),
+      (j) => ({ v: j.stream_added_ttft_p99_us, text: fmtAdded(j.stream_added_ttft_p99_us), na: false })),
   },
   {
     id: "sgap", label: "Stream added per-token p99 (µs)", desc: false, title: "Gateway content-frame gap minus direct-to-mock gap",
     get: (g) => lane(g, "stream", "stream_served", "stream_error",
-      (j) => ({ v: j.stream_added_gap_p99_us, text: fmtInt(j.stream_added_gap_p99_us), na: false })),
+      (j) => ({ v: j.stream_added_gap_p99_us, text: fmtAdded(j.stream_added_gap_p99_us), na: false })),
   },
   {
     id: "streams", label: "Streams sustained", desc: true, title: "Max concurrent SSE streams with >=99.9% frame delivery, no stalls, <0.1% errors",
@@ -151,8 +156,8 @@ const LANES = [
   {
     key: "perf", label: "Latency & throughput", flag: "served", err: "serve_error",
     metrics: [
-      { k: "added_latency_p50_us", label: "Added latency p50 (µs)", best: "min", fmt: fmtInt },
-      { k: "added_latency_p99_us", label: "Added latency p99 (µs)", best: "min", fmt: fmtInt },
+      { k: "added_latency_p50_us", label: "Added latency p50 (µs)", best: "min", fmt: fmtAdded },
+      { k: "added_latency_p99_us", label: "Added latency p99 (µs)", best: "min", fmt: fmtAdded },
       { k: "rps_max_proxy", label: "Max proxy RPS", best: "max", fmt: fmtInt },
       { k: "rps_sustained_20ms", label: "Sustained RPS @20ms", best: "max", fmt: fmtInt },
     ],
@@ -167,8 +172,8 @@ const LANES = [
   {
     key: "stream", label: "Streaming", flag: "stream_served", err: "stream_error",
     metrics: [
-      { k: "stream_added_ttft_p99_us", label: "Added TTFT p99 (µs)", best: "min", fmt: fmtInt },
-      { k: "stream_added_gap_p99_us", label: "Added per-token p99 (µs)", best: "min", fmt: fmtInt },
+      { k: "stream_added_ttft_p99_us", label: "Added TTFT p99 (µs)", best: "min", fmt: fmtAdded },
+      { k: "stream_added_gap_p99_us", label: "Added per-token p99 (µs)", best: "min", fmt: fmtAdded },
       { k: "stream_sustained_streams", label: "Streams sustained", best: "max", fmt: fmtInt },
     ],
   },
