@@ -3,7 +3,7 @@
 // gen-data.mjs: build the static data bundle for the results site. No dependencies.
 //
 // Scans gateways/*/gateway.sh (the self-describing manifests: GW_DISPLAY, GW_LANG, GW_REPO)
-// plus results/{perf,memory,stream,xlate,governed,matrix}/<gateway>.json, and emits
+// plus results/{perf,memory,stream,streamcpu,xlate,governed,matrix}/<gateway>.json, and emits
 // site/data.json. Also copies the generated chart PNGs (results/*.png) into site/charts/
 // and the bundled Inter fonts (assets/fonts) into site/fonts/ so the site/ directory is a
 // self-contained Pages artifact.
@@ -22,7 +22,7 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = process.argv[2] || join(HERE, "..");
 const OUT = process.argv[3] || HERE;
 
-const SUITES = ["perf", "memory", "stream", "xlate", "governed", "matrix"];
+const SUITES = ["perf", "memory", "stream", "streamcpu", "xlate", "governed", "matrix"];
 
 // ---- gateway manifests ------------------------------------------------------
 function parseManifest(text) {
@@ -64,8 +64,21 @@ const gateways = gatewayKeys.map((key) => {
     const j = readJson(join(ROOT, "results", suite, `${key}.json`));
     if (j) g[suite] = j;
   }
+  if (g.matrix) normalizeMatrix(g.matrix);
   return g;
 });
+
+// Matrix v1 results carry one upstream shape (fixed openai) as top-level `cells`; v2 carries the
+// full 6x6 under `upstreams.<egress>.cells` plus the same top-level compat row. Normalize v1 into
+// the v2 shape so the site renders exactly one structure: the one measured egress column becomes
+// `upstreams`, and the columns v1 never probed stay absent (the site renders them "not measured",
+// which is the honest reading of a v1 run: unmeasured, not "not configurable").
+function normalizeMatrix(m) {
+  if (m.upstreams || !m.cells) return;
+  const shape = m.upstream_shape || "openai";
+  m.matrix_version = 1;
+  m.upstreams = { [shape]: { configurable: true, served: m.served !== false, cells: m.cells } };
+}
 
 // ---- hardware stamp (most common perf/memory "hardware" string) -------------
 const hwCounts = new Map();

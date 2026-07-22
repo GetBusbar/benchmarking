@@ -275,6 +275,22 @@ CHARTS = [
         annot=lambda r: (lambda f: f"{f:,.0f} frames/s" if f > 0 else None)(
             float(r.get("stream_sustained_fps") or 0)),
     ),
+    # ── streaming (CPU-bound): sustained relay throughput under an unpaced firehose ────────────────
+    Chart(
+        name="streamcpu_fps",
+        suite="streamcpu",
+        title="Streaming relay throughput (CPU-bound)",
+        subtitle="sustained SSE content-frames/sec relayed under an unpaced firehose, gateway pinned (higher is better)",
+        unit="frames / sec",
+        series=[Series("streamcpu_frames_per_sec", "sustained frames/sec", "rank")],
+        higher_better=True,
+        served_field="stream_served",
+        not_served_text="✕ no SSE streaming",
+        zero_text="0  ·  no stream load qualified",
+        annot=lambda r: (lambda b, f: (f"MOCK-BOUND ({f:,.0f}/core)" if b else f"{f:,.0f}/core")
+                         if f > 0 else None)(
+            bool(r.get("streamcpu_mock_bound")), float(r.get("streamcpu_fps_per_core") or 0)),
+    ),
     # ── translation: Anthropic client to OpenAI provider ──────────────────────────────────────────
     Chart(
         name="xlate_rps_sustained_20ms",
