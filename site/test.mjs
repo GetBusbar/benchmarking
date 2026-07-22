@@ -112,6 +112,27 @@ test("decode rejects a bogus sort column", () => {
   assert.equal(back.sortCol, "rps20");
 });
 
+// ---- compact not-served labels (compare + results cells) --------------------
+test("naText keeps long diagnostic notes out of cell values", () => {
+  assert.deepEqual(app.naText(null, "xlate_served", "xlate_error"), { text: "not measured", note: "" });
+  for (const g of data.gateways) {
+    for (const l of app.LANES) {
+      const j = g[l.key];
+      if (!j || j[l.flag] !== false) continue;
+      const na = app.naText(j, l.flag, l.err);
+      assert.ok(na.text.length <= 24, `${g.key}/${l.key}: label too long: ${na.text}`);
+      assert.equal(na.note, j[l.err] || "", `${g.key}/${l.key}: full note preserved`);
+    }
+  }
+  const pass = data.gateways.find((g) => g.xlate && g.xlate.xlate_passthrough === true);
+  assert.ok(pass, "expected at least one passthrough gateway in the field");
+  assert.equal(app.naText(pass.xlate, "xlate_served", "xlate_error").text, "n/a (passthrough)");
+  const unsupported = data.gateways.find((g) =>
+    g.governed && g.governed.governed_served === false && /manifest defines no/.test(g.governed.governed_note || ""));
+  assert.ok(unsupported, "expected a gateway without native governance");
+  assert.equal(app.naText(unsupported.governed, "governed_served", "governed_note").text, "not supported");
+});
+
 // ---- sweep chart on a stub canvas with real committed data ------------------
 function stubCanvas() {
   const calls = { lineTo: 0, fillText: 0, stroke: 0, arc: 0 };

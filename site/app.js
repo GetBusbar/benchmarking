@@ -28,12 +28,28 @@ function esc(s) {
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
-/* laneVal: if the suite file exists but the served flag is false, surface the suite's
-   own explicit label instead of a number; if the file is absent, "not measured". */
+/* naText: compact honest label for a lane that was not served. The suites emit
+   long diagnostic notes (passthrough evidence, launch errors); those must never
+   be dumped as metric values or they blow the table layout wide open. The cell
+   shows a short badge and the full note travels in the title tooltip; the
+   drawer still shows the note verbatim as evidence. */
+function naText(j, flag, errKey) {
+  if (!j) return { text: "not measured", note: "" };
+  const note = j[errKey] || "";
+  let text = "not served";
+  if (j.xlate_passthrough === true || note.startsWith("UNTRANSLATED passthrough")) text = "n/a (passthrough)";
+  else if (note.includes("manifest defines no")) text = "not supported";
+  return { text, note };
+}
+
+/* laneVal: if the suite file exists but the served flag is false, surface a
+   compact label (full note in .note); if the file is absent, "not measured". */
 function lane(g, suite, flag, errKey, pick) {
   const j = g[suite];
-  if (!j) return { v: null, text: "not measured", na: true };
-  if (j[flag] === false) return { v: null, text: j[errKey] || "not served", na: true };
+  if (!j || j[flag] === false) {
+    const na = naText(j, flag, errKey);
+    return { v: null, text: na.text, note: na.note, na: true };
+  }
   return pick(j);
 }
 
@@ -433,7 +449,9 @@ function renderTable() {
     `<tr data-gw="${esc(g.key)}">` + COLUMNS.map((c) => {
       if (c.render) return c.render(g, state);
       const cell = c.get(g);
-      return cell.na ? `<td class="na">${esc(cell.text)}</td>` : `<td>${esc(cell.text)}</td>`;
+      return cell.na
+        ? `<td class="na" title="${esc(cell.note || "")}">${esc(cell.text)}</td>`
+        : `<td>${esc(cell.text)}</td>`;
     }).join("") + "</tr>"
   ).join("");
 
@@ -635,23 +653,29 @@ function renderCompare() {
   h += `<tr><td class="metric">Language</td>${gws.map((g) => `<td>${esc(g.lang)}</td>`).join("")}</tr>`;
   h += `<tr><td class="metric">Build</td>${gws.map((g) => {
     const j = LANES.map((l) => g[l.key]).find((x) => x && x.build);
-    return `<td>${esc(j ? j.build : "?")}</td>`;
+    const full = j ? j.build : "?";
+    /* image digests and long refs stay in the tooltip; the cell stays compact */
+    let short = full.replace(/\s*\(@sha256:[0-9a-f]+\)/, "");
+    if (short.length > 40) short = short.slice(0, 37) + "...";
+    return `<td title="${esc(full)}">${esc(short)}</td>`;
   }).join("")}</tr>`;
 
   for (const l of LANES) {
+    /* skip the whole lane only when no gateway measured it at all; an all
+       not-served lane still renders rows so the header is never left bare */
+    if (gws.every((g) => !g[l.key])) continue;
     h += `<tr class="lane-row"><td colspan="${gws.length + 1}">${esc(l.label)}</td></tr>`;
     for (const m of l.metrics) {
       const vals = gws.map((g) => {
         const j = g[l.key];
         return j && j[l.flag] !== false && j[m.k] != null ? j[m.k] : null;
       });
-      if (vals.every((v) => v == null)) continue;
       const bi = bestIndex(vals, m.best);
       h += `<tr><td class="metric">${esc(m.label)}</td>` + vals.map((v, i) => {
         if (v == null) {
           const j = gws[i][l.key];
-          const txt = !j ? "not measured" : (j[l.flag] === false ? (j[l.err] || "not served") : "n/a");
-          return `<td class="na">${esc(txt)}</td>`;
+          const na = j && j[l.flag] !== false ? { text: "n/a", note: "" } : naText(j, l.flag, l.err);
+          return `<td class="na" title="${esc(na.note)}">${esc(na.text)}</td>`;
         }
         return `<td class="${i === bi ? "best" : ""}">${esc(m.fmt(v))}</td>`;
       }).join("") + `</tr>`;
@@ -803,6 +827,16 @@ function applyState(st) {
   });
 }
 
+/* Drop selections that reference gateways no longer in data.json (removed
+   entrants linger in shared URLs); a shrunken compare set must not leave the
+   panel open on a partial table. */
+function sanitizeState() {
+  const gws = state.data.gateways;
+  state.cmp = state.cmp.filter((k) => gws.some((g) => g.key === k));
+  if (state.cmp.length < 2) state.cmpOpen = false;
+  if (state.drawer && !gws.some((g) => g.key === state.drawer)) state.drawer = null;
+}
+
 function renderAll() {
   showView(state.view);
   renderFilters();
@@ -821,8 +855,7 @@ function boot() {
     .then((data) => {
       applyState(decodeState(location.hash));
       state.data = data;
-      state.cmp = state.cmp.filter((k) => data.gateways.some((g) => g.key === k));
-      if (state.drawer && !data.gateways.some((g) => g.key === state.drawer)) state.drawer = null;
+      sanitizeState();
       initTabs();
       initFilterControls();
       renderAll();
@@ -837,6 +870,7 @@ function boot() {
       });
       window.addEventListener("hashchange", () => {
         applyState(decodeState(location.hash));
+        sanitizeState();
         if (!state.drawer) { document.getElementById("drawer").classList.add("hidden"); document.getElementById("backdrop").classList.add("hidden"); }
         if (!state.cmpOpen) document.getElementById("compare-panel").classList.add("hidden");
         renderAll();
@@ -852,7 +886,7 @@ if (NODE) {
   /* Exports for the node smoke test (site/test.mjs). */
   module.exports = {
     newState, encodeState, decodeState, applyFilters,
-    drawSweep, niceStep, fmtTick, COLUMNS, LANES,
+    drawSweep, niceStep, fmtTick, COLUMNS, LANES, naText,
   };
 } else {
   boot();
