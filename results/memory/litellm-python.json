@@ -1,13 +1,13 @@
 {
   "gateway": "litellm-python",
-  "build": "litellm==1.93.0",
-  "served": true,
-  "last_http_status": "200",
-  "serve_error": "",
-  "idle_rss_mib": 1339.2,
-  "peak_rss_mib": 2266.9,
+  "build": "litellm==?",
+  "served": false,
+  "last_http_status": "000",
+  "serve_error": "failed to boot after 3 attempts: attempt 1: launch_rc=0, not ready; port 8102 not listening; diag=[proc:  pip.log tail:  run.log: env: \u2018/home/ubuntu/benchmarking/gateways/litellm-python/venv/bin/litellm\u2019: No such file or directory ] || attempt 2: launch_rc=0, not ready; port 8102 not listening; diag=[proc:  pip.log tail:  run.log: env: \u2018/home/ubuntu/benchmarking/gateways/litellm-python/venv/bin/litellm\u2019: No such file or directory ] || attempt 3: launch_rc=0, not ready; port 8102 not listening; diag=[proc:  pip.log tail:  run.log: env: \u2018/home/ubuntu/benchmarking/gateways/litellm-python/venv/bin/litellm\u2019: No such file or directory ]; last body=[]",
+  "idle_rss_mib": 0,
+  "peak_rss_mib": 0,
   "peak_rss_hwm_mib": 0,
-  "post_load_rss_mib": 2262.1,
+  "post_load_rss_mib": 0,
   "payload_bytes": 150000,
   "concurrency": 1500,
   "duration_s": 120,
@@ -15,5 +15,5 @@
   "model": "gpt-4o-mini",
   "arch": "arm64",
   "hardware": "AWS m7g.2xlarge (Graviton3, 8 cores / 32 GB). Gateway pinned to 4 cores, mock+loadgen on the other 4, Ubuntu 24.04. One dedicated box per gateway.",
-  "measured_at": "2026-07-22T08:08:59Z"
+  "measured_at": "2026-07-22T18:19:23Z"
 }

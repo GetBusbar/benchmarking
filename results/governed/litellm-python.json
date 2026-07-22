@@ -1,7 +1,7 @@
 {
   "gateway": "litellm-python",
-  "build": "litellm==1.93.0",
+  "build": "litellm==?",
   "governed_served": false,
   "governed_note": "manifest defines no gw_governed_launch/gw_governed_token (no native key/limit governance, or not yet wired)",
-  "measured_at": "2026-07-22T08:16:18Z"
+  "measured_at": "2026-07-22T18:29:09Z"
 }
