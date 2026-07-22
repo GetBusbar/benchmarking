@@ -94,8 +94,12 @@ BUSBAR_ADMIN_TOKEN="${BUSBAR_ADMIN_TOKEN:-bench-admin-token}"
 BUSBAR_VKEY=""
 
 gw_governed_launch() {
+  # The admin plane always runs on its OWN listener (admin_listen, default loopback :8081), never
+  # on the data listener — pin it explicitly so the mint below can't drift from a default change.
+  BUSBAR_ADMIN_PORT=$(( GW_PORT + 1 ))
   cat > "$GW_DIR/config.gen.yaml" <<YAML
 listen: "127.0.0.1:$GW_PORT"
+admin_listen: "127.0.0.1:$BUSBAR_ADMIN_PORT"
 observability:
   emit_server_timing: true
 auth:
@@ -139,7 +143,7 @@ YAML
   # returned exactly once in the 201 body; it becomes the bench bearer token.
   local i resp
   for i in $(seq 1 60); do
-    resp="$(curl -s -m3 -X POST "http://127.0.0.1:$GW_PORT/api/v1/admin/keys" \
+    resp="$(curl -s -m3 -X POST "http://127.0.0.1:$BUSBAR_ADMIN_PORT/api/v1/admin/keys" \
       -H "x-admin-token: $BUSBAR_ADMIN_TOKEN" -H "content-type: application/json" \
       -d '{"name":"governed-bench"}' 2>/dev/null)"
     BUSBAR_VKEY="$(printf '%s' "$resp" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("secret",""))' 2>/dev/null)"

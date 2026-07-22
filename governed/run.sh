@@ -88,7 +88,7 @@ trap cleanup EXIT
 
 # run ugen with an explicit bearer token, echo "rps fail p99us p50us"
 probe(){ # url conc dur token
-  "$UGEN" -url "$1" -model "$GW_MODEL" -auth "$4" -c "$2" -d "$3" -psize "$PSIZE" "${UGEN_H[@]}" 2>/dev/null \
+  "$UGEN" -url "$1" -model "$GW_MODEL" -auth "$4" -c "$2" -d "$3" -psize "$PSIZE" ${UGEN_H[@]+"${UGEN_H[@]}"} 2>/dev/null \
     | awk '{for(i=1;i<=NF;i++){split($i,a,"=");v[a[1]]=a[2]}; print v["rps"],v["fail"],v["p99us"],v["p50us"]}'
 }
 
@@ -102,7 +102,7 @@ wait_200(){ # token → 0 if the gateway answers 200 within 60s (sets W_CODE)
   local i; W_CODE=000
   for i in $(seq 1 60); do
     W_CODE=$(curl -s -m3 -o /dev/null -w "%{http_code}" "$GURL" -X POST \
-        -H "content-type: application/json" -H "authorization: Bearer $1" "${CURL_H[@]}" \
+        -H "content-type: application/json" -H "authorization: Bearer $1" ${CURL_H[@]+"${CURL_H[@]}"} \
         -d "{\"model\":\"$GW_MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"warm\"}],\"max_tokens\":16}")
     [ "$W_CODE" = 200 ] && return 0; sleep 1
   done
