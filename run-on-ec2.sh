@@ -128,6 +128,9 @@ fail=0
 for p in "${pids[@]}"; do wait "$p" || fail=$((fail+1)); done
 log "all boxes done ($fail job(s) reported an issue — check results/fanout-*.log)"
 
+# ── append this run to the append-only history (results/history/<gw>.jsonl) ─────────────────────
+python3 "$HERE/history/append.py" || true
+
 # ── regenerate charts + reports locally from the collected JSONs ──────────────────────────────────
 log "regenerating charts + reports locally"
 VENV="${TMPDIR:-/tmp}/bench-charts-venv"
