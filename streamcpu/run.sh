@@ -136,13 +136,27 @@ SERVE_ERR=""
 # does the gateway actually stream? one probe, then fail gracefully if not (same guard as stream/).
 STREAM_OK=0; STREAM_ERR=""
 if [ "$ok" = 1 ]; then
-  sbody="$(curl -sN -m 15 "http://127.0.0.1:$GW_PORT$GW_PATH" -X POST \
-      -H "content-type: application/json" -H "authorization: Bearer $GW_AUTH" \
-      -H "accept: text/event-stream" "${CURL_H[@]}" \
-      -d "{\"model\":\"$GW_MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"warm\"}],\"max_tokens\":16,\"stream\":true}" 2>&1)"
-  if printf '%s' "$sbody" | grep -q '^data:'; then STREAM_OK=1
-  else STREAM_ERR="no SSE frames on stream:true; body=[$(printf '%s' "$sbody" | head -c 400)]; diag=[$(gw_diag 2>&1 | tail -n 20)]"
-       log "[$GATEWAY] WARNING stream:true produced no SSE frames -- stream_served=false"
+  # Retry the SSE readiness probe: a gateway can answer the non-stream warm-up 200 a beat before its
+  # upstream stream pool is warm, so the very first stream request can race cold -- returning nothing,
+  # or HANGING the connection open with no frames until timeout. So give the gateway a brief settle,
+  # then retry up to 15 times with a SHORT per-attempt timeout (a real unpaced stream frames in well
+  # under a second; a cold hang must not eat the whole retry budget) before declaring stream_served=false.
+  sleep "${STREAM_SETTLE:-2}"
+  sbody=""
+  for i in $(seq 1 15); do
+    sbody="$(curl -sN -m "${STREAM_PROBE_TO:-6}" "http://127.0.0.1:$GW_PORT$GW_PATH" -X POST \
+        -H "content-type: application/json" -H "authorization: Bearer $GW_AUTH" \
+        -H "accept: text/event-stream" "${CURL_H[@]}" \
+        -d "{\"model\":\"$GW_MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"warm\"}],\"max_tokens\":16,\"stream\":true}" 2>&1)"
+    # here-string, not a pipe: with `set -o pipefail`, `printf ... | grep -q` reports the pipeline as
+    # failed when grep matches early and printf takes SIGPIPE (141) -- a false negative even though the
+    # body is full of frames. grep on a here-string reads the whole string and returns grep's own status.
+    if grep -q '^data:' <<< "$sbody"; then STREAM_OK=1; break; fi
+    sleep 1
+  done
+  if [ "$STREAM_OK" != 1 ]; then
+    STREAM_ERR="no SSE frames on stream:true after 15 tries; body=[$(printf '%s' "$sbody" | head -c 400)]; diag=[$(gw_diag 2>&1 | tail -n 20)]"
+    log "[$GATEWAY] WARNING stream:true produced no SSE frames -- stream_served=false"
   fi
 fi
 
