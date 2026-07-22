@@ -58,7 +58,10 @@ json_escape(){ printf '%s' "$1" | python3 -c 'import json,sys
 d=sys.stdin.buffer.read()[:1600].decode("utf-8","replace")
 sys.stdout.write(json.dumps(d)[1:-1])'; }
 # shellcheck source=/dev/null
+source "$ROOT/lib/harness.sh"
+# shellcheck source=/dev/null
 source "$GW_DIR/gateway.sh"
+suite_deadline_start
 BUILD_STR(){ gw_version 2>/dev/null | tr -d '\n' | sed 's/"/\\"/g'; }
 
 # write_unserved <note> — valid JSON + exit 0 for a gateway with no governed mode (or one that
@@ -86,9 +89,10 @@ DURL="http://127.0.0.1:$MOCK_PORT$GW_PATH"; GURL="http://127.0.0.1:$GW_PORT$GW_P
 cleanup(){ gw_stop 2>/dev/null; pkill -f "$MOCK" 2>/dev/null; }
 trap cleanup EXIT
 
-# run ugen with an explicit bearer token, echo "rps fail p99us p50us"
+# run ugen with an explicit bearer token, echo "rps fail p99us p50us". Hard-timeout wrapped: a
+# gateway that stops responding mid-window fails fast at dur+grace instead of blocking the phase.
 probe(){ # url conc dur token
-  "$UGEN" -url "$1" -model "$GW_MODEL" -auth "$4" -c "$2" -d "$3" -psize "$PSIZE" ${UGEN_H[@]+"${UGEN_H[@]}"} 2>/dev/null \
+  tmo "$(probe_budget "$3")" "$UGEN" -url "$1" -model "$GW_MODEL" -auth "$4" -c "$2" -d "$3" -psize "$PSIZE" ${UGEN_H[@]+"${UGEN_H[@]}"} 2>/dev/null \
     | awk '{for(i=1;i<=NF;i++){split($i,a,"=");v[a[1]]=a[2]}; print v["rps"],v["fail"],v["p99us"],v["p50us"]}'
 }
 
@@ -165,13 +169,17 @@ measure_phase(){
 log "[$GATEWAY] build"; gw_build || { echo "build failed"; exit 1; }
 
 # ── phase 1: PLAIN (ungoverned) reference — the exact perf/ launch, same box, same minute ─────────
-log "[$GATEWAY] phase 1/2 — PLAIN launch (ungoverned reference)"
+# Readiness rebuilds the headers (a manifest can mint a key in gw_launch), then waits for 200 with the
+# plain token. harness_launch_ready re-runs gw_launch + this probe up to N attempts before giving up.
+_plain_ready(){
+  UGEN_H=(); CURL_H=()
+  for h in "${GW_HEADERS[@]:-}"; do [ -n "$h" ] && { UGEN_H+=(-H "$h"); CURL_H+=(-H "$h"); }; done
+  wait_200 "$GW_AUTH"
+}
+log "[$GATEWAY] phase 1/2 — PLAIN launch (ungoverned reference; robust boot, up to $HARNESS_BOOT_ATTEMPTS attempts)"
 start_mock 0
-gw_launch
-UGEN_H=(); CURL_H=()
-for h in "${GW_HEADERS[@]:-}"; do [ -n "$h" ] && { UGEN_H+=(-H "$h"); CURL_H+=(-H "$h"); }; done
-if ! wait_200 "$GW_AUTH"; then
-  write_unserved "plain (ungoverned) launch never answered 200 (last=$W_CODE); diag=[$(gw_diag 2>&1 | tail -n 20)]"
+if ! harness_launch_ready gw_launch _plain_ready; then
+  write_unserved "plain (ungoverned) $HARNESS_SERVE_ERR (last=$W_CODE)"
   exit 0
 fi
 measure_phase "$GW_AUTH"
@@ -198,21 +206,22 @@ done
 # entirely (admin plane derives +1 from GW_PORT inside gw_governed_launch).
 GW_PORT=$(( GW_PORT + 2 ))
 GURL="http://127.0.0.1:$GW_PORT$GW_PATH"
-log "[$GATEWAY] phase 2/2 — GOVERNED launch (virtual-key resolution + rate + budget on the hot path)"
+log "[$GATEWAY] phase 2/2 — GOVERNED launch (virtual-key resolution + rate + budget on the hot path; robust boot, up to $HARNESS_BOOT_ATTEMPTS attempts)"
 start_mock 0
-if ! gw_governed_launch; then
-  write_unserved "gw_governed_launch failed; diag=[$(gw_diag 2>&1 | tail -n 20)]"
-  exit 0
-fi
-GOV_TOKEN="$(gw_governed_token)"
-if [ -z "$GOV_TOKEN" ]; then
-  write_unserved "gw_governed_token produced no credential; diag=[$(gw_diag 2>&1 | tail -n 20)]"
-  exit 0
-fi
-UGEN_H=(); CURL_H=()
-for h in "${GW_HEADERS[@]:-}"; do [ -n "$h" ] && { UGEN_H+=(-H "$h"); CURL_H+=(-H "$h"); }; done
-if ! wait_200 "$GOV_TOKEN"; then
-  write_unserved "governed launch never answered 200 with the minted key (last=$W_CODE); diag=[$(gw_diag 2>&1 | tail -n 20)]"
+# Readiness for the governed phase: the caller credential is minted INSIDE gw_governed_launch, so the
+# probe reads it fresh via gw_governed_token each attempt (a re-run of gw_governed_launch mints a new
+# key), rebuilds headers, then waits for 200 with that minted key. A launch that fails to mint (empty
+# token) or never answers 200 is a failed attempt → harness_launch_ready retries the whole launch.
+GOV_TOKEN=""
+_gov_ready(){
+  GOV_TOKEN="$(gw_governed_token)"
+  [ -n "$GOV_TOKEN" ] || { log "[$GATEWAY] governed: gw_governed_token produced no credential"; return 1; }
+  UGEN_H=(); CURL_H=()
+  for h in "${GW_HEADERS[@]:-}"; do [ -n "$h" ] && { UGEN_H+=(-H "$h"); CURL_H+=(-H "$h"); }; done
+  wait_200 "$GOV_TOKEN"
+}
+if ! harness_launch_ready gw_governed_launch _gov_ready; then
+  write_unserved "governed $HARNESS_SERVE_ERR (last=${W_CODE:-n/a})"
   exit 0
 fi
 measure_phase "$GOV_TOKEN"
