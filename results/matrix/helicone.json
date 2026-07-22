@@ -1,21 +1,73 @@
 {
   "gateway": "helicone",
   "build": "Helicone/ai-gateway@9649b27 (source build)",
+  "matrix_version": 2,
   "served": true,
   "serve_error": "",
   "upstream_shape": "openai",
-  "upstream_note": "v1 fixes the upstream to the OpenAI shape on /router/default/chat/completions; every non-openai cell is a translation claim. The full 6x6 (all upstream dialects) is future work.",
+  "upstream_note": "v2: full 6x6. Top-level cells are the openai-egress row for v1 compatibility; the full grid is under upstreams.<egress>.cells keyed by ingress dialect.",
+  "egress_configured": "openai",
   "cells": {
-    "openai": {"served": true, "status": "200", "path": "/router/default/chat/completions", "verdict_note": "HTTP 200, openai envelope validated", "body_snippet": "{\"id\":\"chatcmpl-x\",\"choices\":[{\"index\":0,\"message\":{\"content\":\"ok\",\"refusal\":null,\"tool_calls\":null,\"role\":\"assistant\",\"function_call\":null,\"audio\":null},\"finish_reason\":\"stop\",\"logprobs\":null}],\"crea"},
-    "openai-responses": {"served": false, "status": "400", "path": "/v1/responses", "verdict_note": "HTTP 400 on POST /v1/responses: bad no Responses envelope (output/output_text/type=response)", "body_snippet": "{\"error\":{\"message\":\"Unsupported provider: v1\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}"},
-    "anthropic": {"served": false, "status": "400", "path": "/v1/messages", "verdict_note": "HTTP 400 on POST /v1/messages: bad no anthropic envelope (\"type\":\"message\" + content array)", "body_snippet": "{\"error\":{\"message\":\"Unsupported provider: v1\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}"},
-    "gemini": {"served": false, "status": "400", "path": "/v1beta/models/openai/gpt-4o-mini:generateContent", "verdict_note": "HTTP 400 on POST /v1beta/models/openai/gpt-4o-mini:generateContent: bad no candidates[0].content", "body_snippet": "{\"error\":{\"message\":\"Unsupported provider: v1beta\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}"},
-    "cohere": {"served": false, "status": "400", "path": "/v2/chat", "verdict_note": "HTTP 400 on POST /v2/chat: bad no cohere v2 chat envelope (message.content or text)", "body_snippet": "{\"error\":{\"message\":\"Unsupported provider: v2\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}"},
-    "bedrock": {"served": false, "status": "400", "path": "/model/openai/gpt-4o-mini/converse", "verdict_note": "HTTP 400 on POST /model/openai/gpt-4o-mini/converse: bad no output.message.content (Converse)", "body_snippet": "{\"error\":{\"message\":\"Unsupported provider: model\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}"}
+      "openai": {"served": true, "status": "200", "path": "/router/default/chat/completions", "verdict_note": "HTTP 200, passthrough (same dialect, no translation required); round trip to the mock's openai endpoint confirmed", "body_snippet": "{\"id\":\"chatcmpl-x\",\"choices\":[{\"index\":0,\"message\":{\"content\":\"ok\",\"refusal\":null,\"tool_calls\":null,\"role\":\"assistant\",\"function_call\":null,\"audio\":null},\"finish_reason\":\"stop\",\"logprobs\":null}],\"crea"},
+      "openai-responses": {"served": false, "status": "400", "path": "/v1/responses", "verdict_note": "HTTP 400 on POST /v1/responses: bad no Responses envelope (output/output_text/type=response)", "body_snippet": "{\"error\":{\"message\":\"Unsupported provider: v1\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}"},
+      "anthropic": {"served": false, "status": "400", "path": "/v1/messages", "verdict_note": "HTTP 400 on POST /v1/messages: bad no anthropic envelope (\"type\":\"message\" + content array)", "body_snippet": "{\"error\":{\"message\":\"Unsupported provider: v1\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}"},
+      "gemini": {"served": false, "status": "400", "path": "/v1beta/models/openai/gpt-4o-mini:generateContent", "verdict_note": "HTTP 400 on POST /v1beta/models/openai/gpt-4o-mini:generateContent: bad no candidates[0].content", "body_snippet": "{\"error\":{\"message\":\"Unsupported provider: v1beta\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}"},
+      "cohere": {"served": false, "status": "400", "path": "/v2/chat", "verdict_note": "HTTP 400 on POST /v2/chat: bad no cohere v2 chat envelope (message.content or text)", "body_snippet": "{\"error\":{\"message\":\"Unsupported provider: v2\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}"},
+      "bedrock": {"served": false, "status": "400", "path": "/model/openai/gpt-4o-mini/converse", "verdict_note": "HTTP 400 on POST /model/openai/gpt-4o-mini/converse: bad no output.message.content (Converse)", "body_snippet": "{\"error\":{\"message\":\"Unsupported provider: model\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}"}
+  },
+  "upstreams": {
+    "openai": {"configurable": true, "served": true, "serve_error": "", "cells": {
+      "openai": {"served": true, "status": "200", "path": "/router/default/chat/completions", "verdict_note": "HTTP 200, passthrough (same dialect, no translation required); round trip to the mock's openai endpoint confirmed", "body_snippet": "{\"id\":\"chatcmpl-x\",\"choices\":[{\"index\":0,\"message\":{\"content\":\"ok\",\"refusal\":null,\"tool_calls\":null,\"role\":\"assistant\",\"function_call\":null,\"audio\":null},\"finish_reason\":\"stop\",\"logprobs\":null}],\"crea"},
+      "openai-responses": {"served": false, "status": "400", "path": "/v1/responses", "verdict_note": "HTTP 400 on POST /v1/responses: bad no Responses envelope (output/output_text/type=response)", "body_snippet": "{\"error\":{\"message\":\"Unsupported provider: v1\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}"},
+      "anthropic": {"served": false, "status": "400", "path": "/v1/messages", "verdict_note": "HTTP 400 on POST /v1/messages: bad no anthropic envelope (\"type\":\"message\" + content array)", "body_snippet": "{\"error\":{\"message\":\"Unsupported provider: v1\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}"},
+      "gemini": {"served": false, "status": "400", "path": "/v1beta/models/openai/gpt-4o-mini:generateContent", "verdict_note": "HTTP 400 on POST /v1beta/models/openai/gpt-4o-mini:generateContent: bad no candidates[0].content", "body_snippet": "{\"error\":{\"message\":\"Unsupported provider: v1beta\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}"},
+      "cohere": {"served": false, "status": "400", "path": "/v2/chat", "verdict_note": "HTTP 400 on POST /v2/chat: bad no cohere v2 chat envelope (message.content or text)", "body_snippet": "{\"error\":{\"message\":\"Unsupported provider: v2\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}"},
+      "bedrock": {"served": false, "status": "400", "path": "/model/openai/gpt-4o-mini/converse", "verdict_note": "HTTP 400 on POST /model/openai/gpt-4o-mini/converse: bad no output.message.content (Converse)", "body_snippet": "{\"error\":{\"message\":\"Unsupported provider: model\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}"}
+    }},
+    "openai-responses": {"configurable": false, "served": false, "cells": {
+      "openai": {"served": "not_configurable", "status": "", "path": "/router/default/chat/completions", "verdict_note": "manifest defines no egress config for the openai-responses upstream dialect; the gateway was not launched against that upstream shape", "body_snippet": ""},
+      "openai-responses": {"served": "not_configurable", "status": "", "path": "/v1/responses", "verdict_note": "manifest defines no egress config for the openai-responses upstream dialect; the gateway was not launched against that upstream shape", "body_snippet": ""},
+      "anthropic": {"served": "not_configurable", "status": "", "path": "/v1/messages", "verdict_note": "manifest defines no egress config for the openai-responses upstream dialect; the gateway was not launched against that upstream shape", "body_snippet": ""},
+      "gemini": {"served": "not_configurable", "status": "", "path": "/v1beta/models/openai/gpt-4o-mini:generateContent", "verdict_note": "manifest defines no egress config for the openai-responses upstream dialect; the gateway was not launched against that upstream shape", "body_snippet": ""},
+      "cohere": {"served": "not_configurable", "status": "", "path": "/v2/chat", "verdict_note": "manifest defines no egress config for the openai-responses upstream dialect; the gateway was not launched against that upstream shape", "body_snippet": ""},
+      "bedrock": {"served": "not_configurable", "status": "", "path": "/model/openai/gpt-4o-mini/converse", "verdict_note": "manifest defines no egress config for the openai-responses upstream dialect; the gateway was not launched against that upstream shape", "body_snippet": ""}
+    }},
+    "anthropic": {"configurable": false, "served": false, "cells": {
+      "openai": {"served": "not_configurable", "status": "", "path": "/router/default/chat/completions", "verdict_note": "manifest defines no egress config for the anthropic upstream dialect; the gateway was not launched against that upstream shape", "body_snippet": ""},
+      "openai-responses": {"served": "not_configurable", "status": "", "path": "/v1/responses", "verdict_note": "manifest defines no egress config for the anthropic upstream dialect; the gateway was not launched against that upstream shape", "body_snippet": ""},
+      "anthropic": {"served": "not_configurable", "status": "", "path": "/v1/messages", "verdict_note": "manifest defines no egress config for the anthropic upstream dialect; the gateway was not launched against that upstream shape", "body_snippet": ""},
+      "gemini": {"served": "not_configurable", "status": "", "path": "/v1beta/models/openai/gpt-4o-mini:generateContent", "verdict_note": "manifest defines no egress config for the anthropic upstream dialect; the gateway was not launched against that upstream shape", "body_snippet": ""},
+      "cohere": {"served": "not_configurable", "status": "", "path": "/v2/chat", "verdict_note": "manifest defines no egress config for the anthropic upstream dialect; the gateway was not launched against that upstream shape", "body_snippet": ""},
+      "bedrock": {"served": "not_configurable", "status": "", "path": "/model/openai/gpt-4o-mini/converse", "verdict_note": "manifest defines no egress config for the anthropic upstream dialect; the gateway was not launched against that upstream shape", "body_snippet": ""}
+    }},
+    "gemini": {"configurable": false, "served": false, "cells": {
+      "openai": {"served": "not_configurable", "status": "", "path": "/router/default/chat/completions", "verdict_note": "manifest defines no egress config for the gemini upstream dialect; the gateway was not launched against that upstream shape", "body_snippet": ""},
+      "openai-responses": {"served": "not_configurable", "status": "", "path": "/v1/responses", "verdict_note": "manifest defines no egress config for the gemini upstream dialect; the gateway was not launched against that upstream shape", "body_snippet": ""},
+      "anthropic": {"served": "not_configurable", "status": "", "path": "/v1/messages", "verdict_note": "manifest defines no egress config for the gemini upstream dialect; the gateway was not launched against that upstream shape", "body_snippet": ""},
+      "gemini": {"served": "not_configurable", "status": "", "path": "/v1beta/models/openai/gpt-4o-mini:generateContent", "verdict_note": "manifest defines no egress config for the gemini upstream dialect; the gateway was not launched against that upstream shape", "body_snippet": ""},
+      "cohere": {"served": "not_configurable", "status": "", "path": "/v2/chat", "verdict_note": "manifest defines no egress config for the gemini upstream dialect; the gateway was not launched against that upstream shape", "body_snippet": ""},
+      "bedrock": {"served": "not_configurable", "status": "", "path": "/model/openai/gpt-4o-mini/converse", "verdict_note": "manifest defines no egress config for the gemini upstream dialect; the gateway was not launched against that upstream shape", "body_snippet": ""}
+    }},
+    "cohere": {"configurable": false, "served": false, "cells": {
+      "openai": {"served": "not_configurable", "status": "", "path": "/router/default/chat/completions", "verdict_note": "manifest defines no egress config for the cohere upstream dialect; the gateway was not launched against that upstream shape", "body_snippet": ""},
+      "openai-responses": {"served": "not_configurable", "status": "", "path": "/v1/responses", "verdict_note": "manifest defines no egress config for the cohere upstream dialect; the gateway was not launched against that upstream shape", "body_snippet": ""},
+      "anthropic": {"served": "not_configurable", "status": "", "path": "/v1/messages", "verdict_note": "manifest defines no egress config for the cohere upstream dialect; the gateway was not launched against that upstream shape", "body_snippet": ""},
+      "gemini": {"served": "not_configurable", "status": "", "path": "/v1beta/models/openai/gpt-4o-mini:generateContent", "verdict_note": "manifest defines no egress config for the cohere upstream dialect; the gateway was not launched against that upstream shape", "body_snippet": ""},
+      "cohere": {"served": "not_configurable", "status": "", "path": "/v2/chat", "verdict_note": "manifest defines no egress config for the cohere upstream dialect; the gateway was not launched against that upstream shape", "body_snippet": ""},
+      "bedrock": {"served": "not_configurable", "status": "", "path": "/model/openai/gpt-4o-mini/converse", "verdict_note": "manifest defines no egress config for the cohere upstream dialect; the gateway was not launched against that upstream shape", "body_snippet": ""}
+    }},
+    "bedrock": {"configurable": false, "served": false, "cells": {
+      "openai": {"served": "not_configurable", "status": "", "path": "/router/default/chat/completions", "verdict_note": "manifest defines no egress config for the bedrock upstream dialect; the gateway was not launched against that upstream shape", "body_snippet": ""},
+      "openai-responses": {"served": "not_configurable", "status": "", "path": "/v1/responses", "verdict_note": "manifest defines no egress config for the bedrock upstream dialect; the gateway was not launched against that upstream shape", "body_snippet": ""},
+      "anthropic": {"served": "not_configurable", "status": "", "path": "/v1/messages", "verdict_note": "manifest defines no egress config for the bedrock upstream dialect; the gateway was not launched against that upstream shape", "body_snippet": ""},
+      "gemini": {"served": "not_configurable", "status": "", "path": "/v1beta/models/openai/gpt-4o-mini:generateContent", "verdict_note": "manifest defines no egress config for the bedrock upstream dialect; the gateway was not launched against that upstream shape", "body_snippet": ""},
+      "cohere": {"served": "not_configurable", "status": "", "path": "/v2/chat", "verdict_note": "manifest defines no egress config for the bedrock upstream dialect; the gateway was not launched against that upstream shape", "body_snippet": ""},
+      "bedrock": {"served": "not_configurable", "status": "", "path": "/model/openai/gpt-4o-mini/converse", "verdict_note": "manifest defines no egress config for the bedrock upstream dialect; the gateway was not launched against that upstream shape", "body_snippet": ""}
+    }}
   },
   "model": "openai/gpt-4o-mini",
   "upstream_endpoint": "/router/default/chat/completions",
   "arch": "arm64",
   "hardware": "AWS m7g.2xlarge (Graviton3, 8 cores / 32 GB). Gateway pinned to 4 cores, mock+loadgen on the other 4, Ubuntu 24.04. One dedicated box per gateway.",
-  "measured_at": "2026-07-22T05:51:28Z"
+  "measured_at": "2026-07-22T17:03:33Z"
 }

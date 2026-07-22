@@ -4,10 +4,10 @@
   "served": true,
   "last_http_status": "200",
   "serve_error": "",
-  "idle_rss_mib": 54.0,
-  "peak_rss_mib": 5128.0,
-  "peak_rss_hwm_mib": 0,
-  "post_load_rss_mib": 3484.8,
+  "idle_rss_mib": 53.9,
+  "peak_rss_mib": 5040.1,
+  "peak_rss_hwm_mib": 5040.0,
+  "post_load_rss_mib": 3711.6,
   "payload_bytes": 150000,
   "concurrency": 1500,
   "duration_s": 120,
@@ -15,5 +15,5 @@
   "model": "gpt-4o-mini",
   "arch": "arm64",
   "hardware": "AWS m7g.2xlarge (Graviton3, 8 cores / 32 GB). Gateway pinned to 4 cores, mock+loadgen on the other 4, Ubuntu 24.04. One dedicated box per gateway.",
-  "measured_at": "2026-07-22T05:39:40Z"
+  "measured_at": "2026-07-22T16:49:05Z"
 }

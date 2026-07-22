@@ -1,21 +1,73 @@
 {
   "gateway": "tensorzero",
   "build": "tensorzero/gateway:2026.6.0 (@sha256:c939db4f27e41aa3a37a87909430a0c8f898f9c952f402dcbdc17e1708597bcb)",
+  "matrix_version": 2,
   "served": true,
   "serve_error": "",
   "upstream_shape": "openai",
-  "upstream_note": "v1 fixes the upstream to the OpenAI shape on /openai/v1/chat/completions; every non-openai cell is a translation claim. The full 6x6 (all upstream dialects) is future work.",
+  "upstream_note": "v2: full 6x6. Top-level cells are the openai-egress row for v1 compatibility; the full grid is under upstreams.<egress>.cells keyed by ingress dialect.",
+  "egress_configured": "openai",
   "cells": {
-    "openai": {"served": true, "status": "200", "path": "/openai/v1/chat/completions", "verdict_note": "HTTP 200, openai envelope validated", "body_snippet": "{\"id\":\"019f885f-036d-7f42-85f1-c927bb93d019\",\"episode_id\":\"019f885f-036d-7f42-85f1-c932079f7127\",\"choices\":[{\"index\":0,\"finish_reason\":\"stop\",\"message\":{\"role\":\"assistant\",\"content\":\"ok\"}}],\"created\":"},
-    "openai-responses": {"served": false, "status": "404", "path": "/v1/responses", "verdict_note": "HTTP 404 on POST /v1/responses: bad no Responses envelope (output/output_text/type=response)", "body_snippet": "{\"error\":\"Route not found: POST /v1/responses\"}"},
-    "anthropic": {"served": false, "status": "404", "path": "/v1/messages", "verdict_note": "HTTP 404 on POST /v1/messages: bad no anthropic envelope (\"type\":\"message\" + content array)", "body_snippet": "{\"error\":\"Route not found: POST /v1/messages\"}"},
-    "gemini": {"served": false, "status": "404", "path": "/v1beta/models/tensorzero::model_name::mock:generateContent", "verdict_note": "HTTP 404 on POST /v1beta/models/tensorzero::model_name::mock:generateContent: bad no candidates[0].content", "body_snippet": "{\"error\":\"Route not found: POST /v1beta/models/tensorzero::model_name::mock:generateContent\"}"},
-    "cohere": {"served": false, "status": "404", "path": "/v1/chat", "verdict_note": "HTTP 404/405 on /v2/chat, then HTTP 404 on fallback /v1/chat: bad no cohere v2 chat envelope (message.content or text)", "body_snippet": "{\"error\":\"Route not found: POST /v1/chat\"}"},
-    "bedrock": {"served": false, "status": "404", "path": "/model/tensorzero::model_name::mock/converse", "verdict_note": "HTTP 404 on POST /model/tensorzero::model_name::mock/converse: bad no output.message.content (Converse)", "body_snippet": "{\"error\":\"Route not found: POST /model/tensorzero::model_name::mock/converse\"}"}
+      "openai": {"served": true, "status": "200", "path": "/openai/v1/chat/completions", "verdict_note": "HTTP 200, openai envelope validated (same dialect, no translation required); round trip to the mock's openai endpoint confirmed", "body_snippet": "{\"id\":\"019f8ac0-1772-7f52-a612-69e65c59b5ce\",\"episode_id\":\"019f8ac0-1772-7f52-a612-69f94fa41282\",\"choices\":[{\"index\":0,\"finish_reason\":\"stop\",\"message\":{\"role\":\"assistant\",\"content\":\"ok\"}}],\"created\":"},
+      "openai-responses": {"served": false, "status": "404", "path": "/v1/responses", "verdict_note": "HTTP 404 on POST /v1/responses: bad no Responses envelope (output/output_text/type=response)", "body_snippet": "{\"error\":\"Route not found: POST /v1/responses\"}"},
+      "anthropic": {"served": false, "status": "404", "path": "/v1/messages", "verdict_note": "HTTP 404 on POST /v1/messages: bad no anthropic envelope (\"type\":\"message\" + content array)", "body_snippet": "{\"error\":\"Route not found: POST /v1/messages\"}"},
+      "gemini": {"served": false, "status": "404", "path": "/v1beta/models/tensorzero::model_name::mock:generateContent", "verdict_note": "HTTP 404 on POST /v1beta/models/tensorzero::model_name::mock:generateContent: bad no candidates[0].content", "body_snippet": "{\"error\":\"Route not found: POST /v1beta/models/tensorzero::model_name::mock:generateContent\"}"},
+      "cohere": {"served": false, "status": "404", "path": "/v1/chat", "verdict_note": "HTTP 404 on POST /v1/chat: bad no cohere v2 chat envelope (message.content or text)", "body_snippet": "{\"error\":\"Route not found: POST /v1/chat\"}"},
+      "bedrock": {"served": false, "status": "404", "path": "/model/tensorzero::model_name::mock/converse", "verdict_note": "HTTP 404 on POST /model/tensorzero::model_name::mock/converse: bad no output.message.content (Converse)", "body_snippet": "{\"error\":\"Route not found: POST /model/tensorzero::model_name::mock/converse\"}"}
+  },
+  "upstreams": {
+    "openai": {"configurable": true, "served": true, "serve_error": "", "cells": {
+      "openai": {"served": true, "status": "200", "path": "/openai/v1/chat/completions", "verdict_note": "HTTP 200, openai envelope validated (same dialect, no translation required); round trip to the mock's openai endpoint confirmed", "body_snippet": "{\"id\":\"019f8ac0-1772-7f52-a612-69e65c59b5ce\",\"episode_id\":\"019f8ac0-1772-7f52-a612-69f94fa41282\",\"choices\":[{\"index\":0,\"finish_reason\":\"stop\",\"message\":{\"role\":\"assistant\",\"content\":\"ok\"}}],\"created\":"},
+      "openai-responses": {"served": false, "status": "404", "path": "/v1/responses", "verdict_note": "HTTP 404 on POST /v1/responses: bad no Responses envelope (output/output_text/type=response)", "body_snippet": "{\"error\":\"Route not found: POST /v1/responses\"}"},
+      "anthropic": {"served": false, "status": "404", "path": "/v1/messages", "verdict_note": "HTTP 404 on POST /v1/messages: bad no anthropic envelope (\"type\":\"message\" + content array)", "body_snippet": "{\"error\":\"Route not found: POST /v1/messages\"}"},
+      "gemini": {"served": false, "status": "404", "path": "/v1beta/models/tensorzero::model_name::mock:generateContent", "verdict_note": "HTTP 404 on POST /v1beta/models/tensorzero::model_name::mock:generateContent: bad no candidates[0].content", "body_snippet": "{\"error\":\"Route not found: POST /v1beta/models/tensorzero::model_name::mock:generateContent\"}"},
+      "cohere": {"served": false, "status": "404", "path": "/v1/chat", "verdict_note": "HTTP 404 on POST /v1/chat: bad no cohere v2 chat envelope (message.content or text)", "body_snippet": "{\"error\":\"Route not found: POST /v1/chat\"}"},
+      "bedrock": {"served": false, "status": "404", "path": "/model/tensorzero::model_name::mock/converse", "verdict_note": "HTTP 404 on POST /model/tensorzero::model_name::mock/converse: bad no output.message.content (Converse)", "body_snippet": "{\"error\":\"Route not found: POST /model/tensorzero::model_name::mock/converse\"}"}
+    }},
+    "openai-responses": {"configurable": false, "served": false, "cells": {
+      "openai": {"served": "not_configurable", "status": "", "path": "/openai/v1/chat/completions", "verdict_note": "manifest defines no egress config for the openai-responses upstream dialect; the gateway was not launched against that upstream shape", "body_snippet": ""},
+      "openai-responses": {"served": "not_configurable", "status": "", "path": "/v1/responses", "verdict_note": "manifest defines no egress config for the openai-responses upstream dialect; the gateway was not launched against that upstream shape", "body_snippet": ""},
+      "anthropic": {"served": "not_configurable", "status": "", "path": "/v1/messages", "verdict_note": "manifest defines no egress config for the openai-responses upstream dialect; the gateway was not launched against that upstream shape", "body_snippet": ""},
+      "gemini": {"served": "not_configurable", "status": "", "path": "/v1beta/models/tensorzero::model_name::mock:generateContent", "verdict_note": "manifest defines no egress config for the openai-responses upstream dialect; the gateway was not launched against that upstream shape", "body_snippet": ""},
+      "cohere": {"served": "not_configurable", "status": "", "path": "/v2/chat", "verdict_note": "manifest defines no egress config for the openai-responses upstream dialect; the gateway was not launched against that upstream shape", "body_snippet": ""},
+      "bedrock": {"served": "not_configurable", "status": "", "path": "/model/tensorzero::model_name::mock/converse", "verdict_note": "manifest defines no egress config for the openai-responses upstream dialect; the gateway was not launched against that upstream shape", "body_snippet": ""}
+    }},
+    "anthropic": {"configurable": false, "served": false, "cells": {
+      "openai": {"served": "not_configurable", "status": "", "path": "/openai/v1/chat/completions", "verdict_note": "manifest defines no egress config for the anthropic upstream dialect; the gateway was not launched against that upstream shape", "body_snippet": ""},
+      "openai-responses": {"served": "not_configurable", "status": "", "path": "/v1/responses", "verdict_note": "manifest defines no egress config for the anthropic upstream dialect; the gateway was not launched against that upstream shape", "body_snippet": ""},
+      "anthropic": {"served": "not_configurable", "status": "", "path": "/v1/messages", "verdict_note": "manifest defines no egress config for the anthropic upstream dialect; the gateway was not launched against that upstream shape", "body_snippet": ""},
+      "gemini": {"served": "not_configurable", "status": "", "path": "/v1beta/models/tensorzero::model_name::mock:generateContent", "verdict_note": "manifest defines no egress config for the anthropic upstream dialect; the gateway was not launched against that upstream shape", "body_snippet": ""},
+      "cohere": {"served": "not_configurable", "status": "", "path": "/v2/chat", "verdict_note": "manifest defines no egress config for the anthropic upstream dialect; the gateway was not launched against that upstream shape", "body_snippet": ""},
+      "bedrock": {"served": "not_configurable", "status": "", "path": "/model/tensorzero::model_name::mock/converse", "verdict_note": "manifest defines no egress config for the anthropic upstream dialect; the gateway was not launched against that upstream shape", "body_snippet": ""}
+    }},
+    "gemini": {"configurable": false, "served": false, "cells": {
+      "openai": {"served": "not_configurable", "status": "", "path": "/openai/v1/chat/completions", "verdict_note": "manifest defines no egress config for the gemini upstream dialect; the gateway was not launched against that upstream shape", "body_snippet": ""},
+      "openai-responses": {"served": "not_configurable", "status": "", "path": "/v1/responses", "verdict_note": "manifest defines no egress config for the gemini upstream dialect; the gateway was not launched against that upstream shape", "body_snippet": ""},
+      "anthropic": {"served": "not_configurable", "status": "", "path": "/v1/messages", "verdict_note": "manifest defines no egress config for the gemini upstream dialect; the gateway was not launched against that upstream shape", "body_snippet": ""},
+      "gemini": {"served": "not_configurable", "status": "", "path": "/v1beta/models/tensorzero::model_name::mock:generateContent", "verdict_note": "manifest defines no egress config for the gemini upstream dialect; the gateway was not launched against that upstream shape", "body_snippet": ""},
+      "cohere": {"served": "not_configurable", "status": "", "path": "/v2/chat", "verdict_note": "manifest defines no egress config for the gemini upstream dialect; the gateway was not launched against that upstream shape", "body_snippet": ""},
+      "bedrock": {"served": "not_configurable", "status": "", "path": "/model/tensorzero::model_name::mock/converse", "verdict_note": "manifest defines no egress config for the gemini upstream dialect; the gateway was not launched against that upstream shape", "body_snippet": ""}
+    }},
+    "cohere": {"configurable": false, "served": false, "cells": {
+      "openai": {"served": "not_configurable", "status": "", "path": "/openai/v1/chat/completions", "verdict_note": "manifest defines no egress config for the cohere upstream dialect; the gateway was not launched against that upstream shape", "body_snippet": ""},
+      "openai-responses": {"served": "not_configurable", "status": "", "path": "/v1/responses", "verdict_note": "manifest defines no egress config for the cohere upstream dialect; the gateway was not launched against that upstream shape", "body_snippet": ""},
+      "anthropic": {"served": "not_configurable", "status": "", "path": "/v1/messages", "verdict_note": "manifest defines no egress config for the cohere upstream dialect; the gateway was not launched against that upstream shape", "body_snippet": ""},
+      "gemini": {"served": "not_configurable", "status": "", "path": "/v1beta/models/tensorzero::model_name::mock:generateContent", "verdict_note": "manifest defines no egress config for the cohere upstream dialect; the gateway was not launched against that upstream shape", "body_snippet": ""},
+      "cohere": {"served": "not_configurable", "status": "", "path": "/v2/chat", "verdict_note": "manifest defines no egress config for the cohere upstream dialect; the gateway was not launched against that upstream shape", "body_snippet": ""},
+      "bedrock": {"served": "not_configurable", "status": "", "path": "/model/tensorzero::model_name::mock/converse", "verdict_note": "manifest defines no egress config for the cohere upstream dialect; the gateway was not launched against that upstream shape", "body_snippet": ""}
+    }},
+    "bedrock": {"configurable": false, "served": false, "cells": {
+      "openai": {"served": "not_configurable", "status": "", "path": "/openai/v1/chat/completions", "verdict_note": "manifest defines no egress config for the bedrock upstream dialect; the gateway was not launched against that upstream shape", "body_snippet": ""},
+      "openai-responses": {"served": "not_configurable", "status": "", "path": "/v1/responses", "verdict_note": "manifest defines no egress config for the bedrock upstream dialect; the gateway was not launched against that upstream shape", "body_snippet": ""},
+      "anthropic": {"served": "not_configurable", "status": "", "path": "/v1/messages", "verdict_note": "manifest defines no egress config for the bedrock upstream dialect; the gateway was not launched against that upstream shape", "body_snippet": ""},
+      "gemini": {"served": "not_configurable", "status": "", "path": "/v1beta/models/tensorzero::model_name::mock:generateContent", "verdict_note": "manifest defines no egress config for the bedrock upstream dialect; the gateway was not launched against that upstream shape", "body_snippet": ""},
+      "cohere": {"served": "not_configurable", "status": "", "path": "/v2/chat", "verdict_note": "manifest defines no egress config for the bedrock upstream dialect; the gateway was not launched against that upstream shape", "body_snippet": ""},
+      "bedrock": {"served": "not_configurable", "status": "", "path": "/model/tensorzero::model_name::mock/converse", "verdict_note": "manifest defines no egress config for the bedrock upstream dialect; the gateway was not launched against that upstream shape", "body_snippet": ""}
+    }}
   },
   "model": "tensorzero::model_name::mock",
   "upstream_endpoint": "/openai/v1/chat/completions",
   "arch": "arm64",
   "hardware": "AWS m7g.2xlarge (Graviton3, 8 cores / 32 GB). Gateway pinned to 4 cores, mock+loadgen on the other 4, Ubuntu 24.04. One dedicated box per gateway.",
-  "measured_at": "2026-07-22T05:49:16Z"
+  "measured_at": "2026-07-22T16:54:34Z"
 }
