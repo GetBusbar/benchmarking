@@ -2,16 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (C) 2026 Busbar Inc and contributors
 #
-# PROTOCOL SUPPORT MATRIX — pluggable across gateways (same gateways/<name>/gateway.sh manifests as
-# perf/memory/stream/xlate). ONE gateway is probed across SIX ingress protocol shapes while the
-# upstream mock stays fixed on the OPENAI shape at the manifest's GW_PATH — so every non-openai cell
-# forces the gateway to translate the request out and the response back. The mock is untouched; that
-# is the point. This is a CAPABILITY suite, not a latency suite: one probe per cell, envelope
-# validation (not just the status code), served true/false per cell with evidence, valid JSON always,
-# exit 0 always. (v1 records no per-cell latency: the load generator only speaks the openai and
-# anthropic shapes, so a fair c1 number for the other four cells needs loadgen work first.)
+# PROTOCOL SUPPORT MATRIX v2: the FULL 6x6. Pluggable across gateways (same gateways/<name>/gateway.sh
+# manifests as perf/memory/stream/xlate). ONE gateway is probed across SIX ingress protocol shapes
+# for EACH of the SIX upstream (egress) dialects it can be configured for: 36 cells per gateway.
+# This is a CAPABILITY suite, not a latency suite: one probe per cell, envelope validation (not just
+# the status code), valid JSON always, exit 0 always.
 #
-# The six ingress cells (client speaks X → gateway → openai upstream):
+# The six dialects (both axes):
 #   openai            POST /v1/chat/completions        verdict: choices[0].message present
 #   openai-responses  POST /v1/responses               verdict: Responses envelope (output / output_text / type=response)
 #   anthropic         POST /v1/messages                verdict: "type":"message" + content array (same probe as xlate/)
@@ -19,27 +16,46 @@
 #   cohere            POST /v2/chat (fallback /v1/chat)         verdict: message.content or text (v2 chat shape)
 #   bedrock           POST /model/{m}/converse         verdict: output.message.content (Converse shape)
 #
-# PASSTHROUGH GUARD (generalizes xlate's msg_x check): the mock answers ALL six protocols by path, so
-# a gateway that merely proxies /v1/messages (or /v2/chat, or …) verbatim gets a plausible-looking
-# body back — from the MOCK's canned constant, not from a translation of the openai upstream. Every
-# non-openai cell therefore rejects the mock's own canned body (byte-identical match, plus the canned
-# ids resp_x / msg_x where they exist) as UNTRANSLATED passthrough → served=false with the evidence.
-# The openai cell is exempt: the upstream IS openai, so a straight proxy is the correct behavior.
+# EGRESS HOOK (per-gateway, optional): a manifest declares which upstream dialects it can be
+# configured for with GW_MATRIX_EGRESS="openai anthropic ..." (default: "openai", the classic
+# launch) and, when the list has more than the default, defines
+#     gw_matrix_egress <dialect>
+# which reconfigures + relaunches the gateway so GW_MODEL routes to the mock upstream speaking
+# <dialect>. When gw_matrix_egress is defined the runner calls it for EVERY dialect in the list
+# (including openai); when it is not, only the openai column runs via the plain gw_launch. A dialect
+# absent from the list renders every cell in that column "not_configurable": an honest "this
+# manifest defines no way to route to that upstream shape", distinct from tried-and-failed.
 #
-# BEDROCK AUTH HONESTY: real Bedrock SDK clients sign with AWS SigV4, and gateways differ in whether
-# they also accept a bearer-style token on that ingress (busbar does: its auth chain reads
-# `Authorization: Bearer` first and only enters SigV4 verification when the request actually carries
-# an AWS4-HMAC-SHA256 header). The probe sends the bearer token; if the gateway answers 401/403 —
-# i.e. it insists on a signature this harness does not forge — the cell records
-# served="unprobed_auth" (distinct from false) with the evidence. Honesty over a false red.
+# FAIRNESS RULE (diagonal): a cell where ingress dialect == egress dialect requires NO translation.
+# Faithful passthrough is a PASS there: the verdict is (a) the response is a valid envelope of the
+# dialect and (b) the request actually round-tripped through the gateway to the mock, proven by the
+# mock's per-dialect request record (MOCK_RECORD=1: GET /__mock/state, POST /__mock/reset). A
+# diagonal pass whose body is the mock's canned constant is annotated "passthrough (same dialect,
+# no translation required)".
+#
+# OFF-DIAGONAL cells are translation claims, all three legs checked:
+#   1. the response is a valid envelope of the INGRESS dialect;
+#   2. it is NOT the mock's canned body for that ingress dialect (byte-identical, or the canned
+#      sentinel ids chatcmpl-x / resp_x / msg_x in their own dialect) - the passthrough guard;
+#   3. the mock RECEIVED a request on the EGRESS dialect's endpoint carrying that dialect's request
+#      shape (the mock records last-request shape per endpoint; the runner resets + reads it per cell).
+# Leg 3 is what makes the 6x6 honest: a gateway that answers from its own canned logic without ever
+# calling the upstream fails with that evidence.
+#
+# BEDROCK AUTH HONESTY (ingress): real Bedrock SDK clients sign with AWS SigV4, and gateways differ
+# in whether they also accept a bearer-style token on that ingress. The probe sends the bearer
+# token; if the gateway answers 401/403, i.e. it insists on a signature this harness does not forge,
+# the cell records served="unprobed_auth" (distinct from false) with the evidence.
 #
 #   GATEWAY=busbar BUSBAR_BIN=~/busbar matrix/run.sh
 #   GATEWAY=mock-gateway matrix/run.sh     # graceful-path fixture: a second mock posing as the gateway
 #
 # Manifest overrides (all optional): GW_MATRIX_PATH_OPENAI, GW_MATRIX_PATH_RESPONSES,
 # GW_MATRIX_PATH_ANTHROPIC (defaults to GW_ANTHROPIC_PATH, i.e. shared with xlate/),
-# GW_MATRIX_PATH_GEMINI, GW_MATRIX_PATH_COHERE, GW_MATRIX_PATH_BEDROCK, and
-# GW_ANTHROPIC_AUTH_HEADER (anthropic cell only, same as xlate/). Results: results/matrix/<gateway>.json.
+# GW_MATRIX_PATH_GEMINI, GW_MATRIX_PATH_COHERE, GW_MATRIX_PATH_BEDROCK, GW_MATRIX_EGRESS,
+# gw_matrix_egress, and GW_ANTHROPIC_AUTH_HEADER (anthropic cell only, same as xlate/).
+# Results: results/matrix/<gateway>.json - v2 shape {upstreams:{<egress>:{cells:{<ingress>:...}}}}
+# plus the v1 compat keys (top-level cells = the openai-egress row, or the first configured egress).
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
@@ -71,8 +87,11 @@ json_escape(){ printf '%s' "$1" | tr -d '\000' | head -c 1600 \
   || printf '%s' "$1" | tr '\n\t"\\' '    ' | head -c 1600; }
 # shellcheck source=/dev/null
 source "$GW_DIR/gateway.sh"
+GW_MATRIX_EGRESS="${GW_MATRIX_EGRESS:-openai}"
+EGRESS_ALL="openai openai-responses anthropic gemini cohere bedrock"
+INGRESS_ALL="openai openai-responses anthropic gemini cohere bedrock"
 
-# Per-cell ingress paths — manifest override wins, else the protocol's canonical default. The
+# Per-cell ingress paths: manifest override wins, else the protocol's canonical default. The
 # anthropic cell reuses xlate's GW_ANTHROPIC_PATH so a manifest wired for xlate needs nothing new.
 P_OPENAI="${GW_MATRIX_PATH_OPENAI:-$GW_PATH}"
 P_RESPONSES="${GW_MATRIX_PATH_RESPONSES:-/v1/responses}"
@@ -81,30 +100,58 @@ P_GEMINI="${GW_MATRIX_PATH_GEMINI:-/v1beta/models/$GW_MODEL:generateContent}"
 P_COHERE="${GW_MATRIX_PATH_COHERE:-/v2/chat}"
 P_COHERE_FB="/v1/chat"
 P_BEDROCK="${GW_MATRIX_PATH_BEDROCK:-/model/$GW_MODEL/converse}"
+ingress_path(){ case "$1" in
+  openai) echo "$P_OPENAI";; openai-responses) echo "$P_RESPONSES";;
+  anthropic) echo "$P_ANTHROPIC";; gemini) echo "$P_GEMINI";;
+  cohere) echo "$P_COHERE";; bedrock) echo "$P_BEDROCK";; esac; }
 
-log "starting mock :$MOCK_PORT (instant, openai upstream on $GW_PATH)"
+log "starting mock :$MOCK_PORT (instant, all six dialects by path, request recording ON)"
 pkill -f "$MOCK" 2>/dev/null; sleep 1
-setsid taskset -c "$MOCKCORES" "$MOCK" -port "$MOCK_PORT" </dev/null >/dev/null 2>&1 &
+setsid taskset -c "$MOCKCORES" env MOCK_RECORD=1 "$MOCK" -port "$MOCK_PORT" </dev/null >/dev/null 2>&1 &
 sleep 1
 cleanup(){ gw_stop 2>/dev/null; pkill -f "$MOCK" 2>/dev/null; }
 trap cleanup EXIT
 
-log "[$GATEWAY] build + launch"; gw_build || { echo "build failed"; exit 1; }; gw_launch
-# Header arrays built AFTER launch so a manifest can mint a key in gw_launch (busbar vkey).
-CURL_H=(); XH=()
-for h in "${GW_HEADERS[@]:-}"; do [ -n "$h" ] && CURL_H+=(-H "$h"); done
-[ -n "${GW_ANTHROPIC_AUTH_HEADER:-}" ] && XH+=(-H "$GW_ANTHROPIC_AUTH_HEADER")
+log "[$GATEWAY] build"; gw_build || { echo "build failed"; exit 1; }
+BUILD="$(gw_version 2>/dev/null | tr -d '\n' | sed 's/"/\\"/g')"
 
-log "[$GATEWAY] wait 200 on $P_OPENAI (openai warm — is the gateway up at all?)"; ok=0; c=000
-for i in $(seq 1 60); do
-  c=$(curl -s -m3 -o /dev/null -w "%{http_code}" "http://127.0.0.1:$GW_PORT$P_OPENAI" -X POST \
-      -H "content-type: application/json" -H "authorization: Bearer $GW_AUTH" ${CURL_H[@]+"${CURL_H[@]}"} \
-      -d "{\"model\":\"$GW_MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"warm\"}],\"max_tokens\":16}")
-  [ "$c" = 200 ] && { ok=1; break; }; sleep 1
-done
-SERVE_ERR=""
-[ "$ok" != 1 ] && { SERVE_ERR="HTTP $c on POST $P_OPENAI; diag=[$(gw_diag 2>&1 | tail -n 20)]"; \
-  log "[$GATEWAY] WARNING never got 200 (last=$c) — every cell will carry that evidence"; }
+# Header arrays are rebuilt after EVERY (re)launch: a manifest can mint a key in gw_launch (busbar
+# vkey) or swap provider-selecting headers per egress (portkey style).
+CURL_H=(); XH=()
+rebuild_headers(){
+  CURL_H=(); XH=()
+  local h
+  for h in "${GW_HEADERS[@]:-}"; do [ -n "$h" ] && CURL_H+=(-H "$h"); done
+  [ -n "${GW_ANTHROPIC_AUTH_HEADER:-}" ] && XH+=(-H "$GW_ANTHROPIC_AUTH_HEADER")
+}
+
+# ── mock record helpers: reset before each cell, read the egress-dialect record after the probe ──
+mock_reset(){ curl -s -m3 -X POST "http://127.0.0.1:$MOCK_PORT/__mock/reset" >/dev/null 2>&1; }
+mock_hit(){ # egress-dialect -> "ok" | "badshape <snippet>" | "miss"
+  # State rides in an env var: python reads its program from stdin (heredoc), so stdin is taken,
+  # exactly the same constraint verdict() documents for MATRIX_BODY.
+  MOCK_STATE_JSON="$(curl -s -m3 "http://127.0.0.1:$MOCK_PORT/__mock/state" 2>/dev/null)" \
+  python3 - "$1" <<'PY'
+import json, os, sys
+try:
+    s = json.loads(os.environ.get("MOCK_STATE_JSON", ""))
+except Exception:
+    print("miss"); sys.exit(0)
+ds = s.get("dialects", {})
+d = ds.get(sys.argv[1], {})
+if not d.get("count"):
+    hit = [k for k, v in ds.items() if v.get("count")]
+    # Distinguish "never called the upstream at all" from "called it, but on a DIFFERENT dialect's
+    # endpoint" (e.g. a gateway that forwards Responses ingress to the upstream Responses endpoint
+    # even when configured for the chat-completions dialect): both fail this cell, but the evidence
+    # differs and the note should say what actually happened.
+    print("misdialect " + ",".join(hit) if hit else "miss")
+elif d.get("body_ok"):
+    print("ok")
+else:
+    print("badshape " + d.get("last_snippet", "")[:160].replace("\n", " "))
+PY
+}
 
 # ── one probe per cell: POST, capture status + body, verdict on the ENVELOPE ─────────────────────
 LAST_STATUS=000; LAST_BODY=""
@@ -119,14 +166,17 @@ probe(){ # path body extra-header...
 
 # Envelope verdicts + passthrough guard, in one place (python: nested-field checks beat grep here).
 # Body rides in $MATRIX_BODY (python reads its program from stdin, so stdin is taken); argv = cell
-# name; prints one line: "ok", "passthrough <why>", or "bad <why>".
-verdict(){ # cell  (body in $MATRIX_BODY)
-  MATRIX_BODY="$LAST_BODY" python3 - "$1" <<'PY'
+# name + egress dialect; prints one line: "ok", "ok passthrough" (diagonal, canned body),
+# "passthrough <why>" (off-diagonal guard tripped), or "bad <why>".
+verdict(){ # cell egress  (body in $MATRIX_BODY)
+  MATRIX_BODY="$LAST_BODY" python3 - "$1" "$2" <<'PY'
 import json, os, sys
-cell = sys.argv[1]; raw = os.environ.get("MATRIX_BODY", "")
+cell, egress = sys.argv[1], sys.argv[2]
+raw = os.environ.get("MATRIX_BODY", "")
 # The mock's canned constants (mock/src/main.rs). A gateway that proxied the ingress path verbatim
-# hands the client one of these BYTE-IDENTICAL — a translating gateway reserializes and never does.
+# hands the client one of these BYTE-IDENTICAL; a translating gateway reserializes and never does.
 CANNED = {
+ "openai": '{"id":"chatcmpl-x","object":"chat.completion","created":1,"model":"mock","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12}}',
  "openai-responses": '{"id":"resp_x","object":"response","created_at":1,"status":"completed","model":"mock","output":[{"type":"message","id":"msg_x","role":"assistant","content":[{"type":"output_text","text":"ok"}]}],"usage":{"input_tokens":10,"output_tokens":2,"total_tokens":12}}',
  "anthropic": '{"id":"msg_x","type":"message","role":"assistant","model":"mock","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":2}}',
  "gemini": '{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP","index":0}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":2,"totalTokenCount":12}}',
@@ -134,13 +184,18 @@ CANNED = {
  "cohere": '{"id":"x","finish_reason":"COMPLETE","message":{"role":"assistant","content":[{"type":"text","text":"ok"}]},"usage":{"tokens":{"input_tokens":10,"output_tokens":2}}}',
 }
 body = raw.strip()
-if cell != "openai":  # openai upstream: a straight proxy IS the served behavior for that cell
-    if body == CANNED.get(cell, "\0"):
+canned_own = body == CANNED.get(cell, "\0")
+sentinel_own = ((cell == "anthropic" and '"id":"msg_x"' in body)
+                or (cell == "openai-responses" and '"id":"resp_x"' in body)
+                or (cell == "openai" and '"id":"chatcmpl-x"' in body))
+if cell != egress:
+    # Off-diagonal: this cell CLAIMS a translation, so the mock's own canned ingress-dialect body
+    # (or its sentinel id, which no translation of a different upstream body would carry) is proof
+    # of untranslated proxying.
+    if canned_own:
         print("passthrough byte-identical to the mock's canned %s body" % cell); sys.exit(0)
-    if cell == "anthropic" and '"id":"msg_x"' in body:
-        print("passthrough mock canned /messages body (id msg_x)"); sys.exit(0)
-    if cell == "openai-responses" and '"id":"resp_x"' in body:
-        print("passthrough mock canned /responses body (id resp_x)"); sys.exit(0)
+    if sentinel_own:
+        print("passthrough mock canned %s body (sentinel id present)" % cell); sys.exit(0)
 try:
     j = json.loads(body)
 except Exception:
@@ -168,74 +223,170 @@ elif cell == "cohere":
     why = "no cohere v2 chat envelope (message.content or text)"
 elif cell == "bedrock":
     ok = has(j, "output", "message", "content"); why = "no output.message.content (Converse)"
-print("ok" if ok else "bad " + why)
+if ok and cell == egress and (canned_own or sentinel_own):
+    print("ok passthrough")
+elif ok:
+    print("ok")
+else:
+    print("bad " + why)
 PY
 }
 
-CELLS_JSON=""
-run_cell(){ # cell path body extra-header...
-  local cell="$1" path="$2" data="$3"; shift 3
-  local served=false note="" v snip
-  if [ "$ok" != 1 ]; then
-    LAST_STATUS="$c"; LAST_BODY=""
-    note="gateway never served the openai warm-up; not probed. $SERVE_ERR"
-  else
-    probe "$path" "$data" "$@"
-    v="$(verdict "$cell")"
-    if [ "${LAST_STATUS#2}" != "$LAST_STATUS" ] && [ "$v" = ok ]; then
-      served=true; note="HTTP $LAST_STATUS, $cell envelope validated"
-    elif [ "$cell" = cohere ] && { [ "$LAST_STATUS" = 404 ] || [ "$LAST_STATUS" = 405 ]; }; then
-      # cohere fallback: some gateways mount v1 chat only
-      probe "$P_COHERE_FB" "$data" "$@"
-      v="$(verdict "$cell")"
-      if [ "${LAST_STATUS#2}" != "$LAST_STATUS" ] && [ "$v" = ok ]; then
-        served=true; path="$P_COHERE_FB"; note="HTTP $LAST_STATUS on fallback $P_COHERE_FB, cohere envelope validated"
-      else
-        note="HTTP 404/405 on $path, then HTTP $LAST_STATUS on fallback $P_COHERE_FB: $v"; path="$P_COHERE_FB"
-      fi
-    elif [ "$cell" = bedrock ] && { [ "$LAST_STATUS" = 401 ] || [ "$LAST_STATUS" = 403 ]; }; then
-      # the gateway rejected the bearer token on the bedrock ingress — it wants SigV4, which this
-      # harness does not forge. Distinct verdict: not served, but not a red either.
-      served='"unprobed_auth"'
-      note="HTTP $LAST_STATUS with a bearer token; gateway appears to require inbound SigV4 on the bedrock ingress, which this probe does not sign"
-    elif printf '%s' "$v" | grep -q '^passthrough'; then
-      note="UNTRANSLATED $v — the gateway proxied $path through verbatim instead of translating (HTTP $LAST_STATUS)"
-    else
-      note="HTTP $LAST_STATUS on POST $path: $v"
-    fi
-  fi
-  snip="$(printf '%s' "$LAST_BODY" | head -c 200)"
-  log "[$GATEWAY]   $cell → served=$served ($note)"
-  CELLS_JSON="${CELLS_JSON}${CELLS_JSON:+,}
-    \"$cell\": {\"served\": $served, \"status\": \"$LAST_STATUS\", \"path\": \"$path\", \"verdict_note\": \"$(json_escape "$note")\", \"body_snippet\": \"$(json_escape "$snip")\"}"
+ingress_body(){ # dialect -> probe body on stdout
+  case "$1" in
+    openai) echo "{\"model\":\"$GW_MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}],\"max_tokens\":16}";;
+    openai-responses) echo "{\"model\":\"$GW_MODEL\",\"input\":\"hello\"}";;
+    anthropic) echo "{\"model\":\"$GW_MODEL\",\"max_tokens\":64,\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}";;
+    gemini) echo '{"contents":[{"parts":[{"text":"hello"}]}]}';;
+    cohere) echo "{\"model\":\"$GW_MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}";;
+    bedrock) echo '{"messages":[{"role":"user","content":[{"text":"hello"}]}]}';;
+  esac
 }
 
-log "[$GATEWAY] probing the six ingress cells (upstream fixed: openai)"
-run_cell openai "$P_OPENAI" \
-  "{\"model\":\"$GW_MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}],\"max_tokens\":16}"
-run_cell openai-responses "$P_RESPONSES" \
-  "{\"model\":\"$GW_MODEL\",\"input\":\"hello\"}"
-run_cell anthropic "$P_ANTHROPIC" \
-  "{\"model\":\"$GW_MODEL\",\"max_tokens\":64,\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}" \
-  -H "anthropic-version: 2023-06-01" -H "x-api-key: $GW_AUTH" ${XH[@]+"${XH[@]}"}
-run_cell gemini "$P_GEMINI" \
-  '{"contents":[{"parts":[{"text":"hello"}]}]}' \
-  -H "x-goog-api-key: $GW_AUTH"
-run_cell cohere "$P_COHERE" \
-  "{\"model\":\"$GW_MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}"
-run_cell bedrock "$P_BEDROCK" \
-  '{"messages":[{"role":"user","content":[{"text":"hello"}]}]}'
+CELLS_JSON=""
+emit_cell(){ # cell served status path note snippet
+  CELLS_JSON="${CELLS_JSON}${CELLS_JSON:+,}
+      \"$1\": {\"served\": $2, \"status\": \"$3\", \"path\": \"$4\", \"verdict_note\": \"$(json_escape "$5")\", \"body_snippet\": \"$(json_escape "$6")\"}"
+}
 
-BUILD="$(gw_version 2>/dev/null | tr -d '\n' | sed 's/"/\\"/g')"
+WARM_OK=0; WARM_LAST=000; SERVE_ERR=""
+run_cell(){ # egress cell path body extra-header...
+  local egress="$1" cell="$2" path="$3" data="$4"; shift 4
+  local served=false note="" v m snip
+  if [ "$WARM_OK" != 1 ]; then
+    LAST_STATUS="$WARM_LAST"; LAST_BODY=""
+    note="gateway never served the openai warm-up under the $egress egress config; not probed. $SERVE_ERR"
+    emit_cell "$cell" "$served" "$LAST_STATUS" "$path" "$note" ""
+    log "[$GATEWAY]   $egress <- $cell : served=false (warm-up failed)"
+    return
+  fi
+  mock_reset
+  probe "$path" "$data" "$@"
+  v="$(verdict "$cell" "$egress")"
+  if [ "$cell" = cohere ] && { [ "$LAST_STATUS" = 404 ] || [ "$LAST_STATUS" = 405 ]; }; then
+    # cohere fallback: some gateways mount v1 chat only
+    probe "$P_COHERE_FB" "$data" "$@"
+    v="$(verdict "$cell" "$egress")"
+    path="$P_COHERE_FB"
+  fi
+  m="$(mock_hit "$egress")"
+  if [ "${LAST_STATUS#2}" != "$LAST_STATUS" ] && { [ "$v" = ok ] || [ "$v" = "ok passthrough" ]; }; then
+    if [ "$m" = ok ]; then
+      served=true
+      if [ "$v" = "ok passthrough" ]; then
+        note="HTTP $LAST_STATUS, passthrough (same dialect, no translation required); round trip to the mock's $egress endpoint confirmed"
+      elif [ "$cell" = "$egress" ]; then
+        note="HTTP $LAST_STATUS, $cell envelope validated (same dialect, no translation required); round trip to the mock's $egress endpoint confirmed"
+      else
+        note="HTTP $LAST_STATUS, $cell envelope validated; mock received a $egress-shaped request on its $egress endpoint"
+      fi
+    elif [ "$m" = miss ]; then
+      note="HTTP $LAST_STATUS with a valid $cell envelope, but the mock never received a request on the $egress endpoint: the gateway answered without contacting the configured upstream"
+    elif [ "${m#misdialect }" != "$m" ]; then
+      note="HTTP $LAST_STATUS with a valid $cell envelope, but the gateway did not speak the $egress dialect to the upstream: the mock received the request on the ${m#misdialect } endpoint instead"
+    else
+      note="HTTP $LAST_STATUS with a valid $cell envelope, but the request that reached the mock's $egress endpoint did not carry the $egress request shape: ${m#badshape }"
+    fi
+  elif [ "$cell" = bedrock ] && { [ "$LAST_STATUS" = 401 ] || [ "$LAST_STATUS" = 403 ]; }; then
+    # the gateway rejected the bearer token on the bedrock ingress: it wants SigV4, which this
+    # harness does not forge. Distinct verdict: not served, but not a red either.
+    served='"unprobed_auth"'
+    note="HTTP $LAST_STATUS with a bearer token; gateway appears to require inbound SigV4 on the bedrock ingress, which this probe does not sign"
+  elif printf '%s' "$v" | grep -q '^passthrough'; then
+    note="UNTRANSLATED $v; the gateway proxied $path through verbatim instead of translating (HTTP $LAST_STATUS)"
+  else
+    note="HTTP $LAST_STATUS on POST $path: $v"
+  fi
+  snip="$(printf '%s' "$LAST_BODY" | head -c 200)"
+  log "[$GATEWAY]   $egress <- $cell : served=$served ($note)"
+  emit_cell "$cell" "$served" "$LAST_STATUS" "$path" "$note" "$snip"
+}
+
+# ── egress loop: (re)configure + relaunch the gateway per upstream dialect, probe all 6 ingress ──
+launch_egress(){ # dialect -> 0 launched, 1 launch failed
+  gw_stop 2>/dev/null; sleep 1
+  if declare -f gw_matrix_egress >/dev/null; then gw_matrix_egress "$1" || return 1
+  else gw_launch || return 1; fi
+  rebuild_headers
+  return 0
+}
+
+warm_up(){ # egress
+  WARM_OK=0; WARM_LAST=000
+  local i
+  for i in $(seq 1 45); do
+    WARM_LAST=$(curl -s -m3 -o /dev/null -w "%{http_code}" "http://127.0.0.1:$GW_PORT$P_OPENAI" -X POST \
+        -H "content-type: application/json" -H "authorization: Bearer $GW_AUTH" ${CURL_H[@]+"${CURL_H[@]}"} \
+        -d "{\"model\":\"$GW_MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"warm\"}],\"max_tokens\":16}")
+    [ "$WARM_LAST" = 200 ] && { WARM_OK=1; return 0; }
+    sleep 1
+  done
+  SERVE_ERR="HTTP $WARM_LAST on POST $P_OPENAI; diag=[$(gw_diag 2>&1 | tail -n 20)]"
+  log "[$GATEWAY] WARNING: no 200 on the openai warm-up for egress=$1 (last=$WARM_LAST)"
+  return 1
+}
+
+egress_listed(){ # dialect in GW_MATRIX_EGRESS?
+  case " $GW_MATRIX_EGRESS " in *" $1 "*) return 0;; *) return 1;; esac
+}
+
+UPSTREAMS_JSON=""
+COMPAT_CELLS=""; COMPAT_SHAPE=""; COMPAT_SERVED=false; COMPAT_ERR=""
+for EGRESS in $EGRESS_ALL; do
+  CELLS_JSON=""
+  if ! egress_listed "$EGRESS"; then
+    log "[$GATEWAY] egress=$EGRESS: not configurable (manifest defines no egress config for this dialect)"
+    for CELL in $INGRESS_ALL; do
+      emit_cell "$CELL" '"not_configurable"' "" "$(ingress_path "$CELL")" \
+        "manifest defines no egress config for the $EGRESS upstream dialect; the gateway was not launched against that upstream shape" ""
+    done
+    UPSTREAMS_JSON="${UPSTREAMS_JSON}${UPSTREAMS_JSON:+,}
+    \"$EGRESS\": {\"configurable\": false, \"served\": false, \"cells\": {$CELLS_JSON
+    }}"
+    continue
+  fi
+  log "[$GATEWAY] egress=$EGRESS: launching"
+  if ! launch_egress "$EGRESS"; then
+    WARM_OK=0; SERVE_ERR="gw_matrix_egress $EGRESS returned nonzero (launch/config failed)"
+    WARM_LAST=000
+    log "[$GATEWAY] egress=$EGRESS: launch failed"
+  else
+    warm_up "$EGRESS" || true
+  fi
+  EG_SERVED=$([ "$WARM_OK" = 1 ] && echo true || echo false)
+  for CELL in $INGRESS_ALL; do
+    BODY="$(ingress_body "$CELL")"
+    case "$CELL" in
+      anthropic) run_cell "$EGRESS" "$CELL" "$(ingress_path "$CELL")" "$BODY" \
+        -H "anthropic-version: 2023-06-01" -H "x-api-key: $GW_AUTH" ${XH[@]+"${XH[@]}"};;
+      gemini) run_cell "$EGRESS" "$CELL" "$(ingress_path "$CELL")" "$BODY" \
+        -H "x-goog-api-key: $GW_AUTH";;
+      *) run_cell "$EGRESS" "$CELL" "$(ingress_path "$CELL")" "$BODY";;
+    esac
+  done
+  UPSTREAMS_JSON="${UPSTREAMS_JSON}${UPSTREAMS_JSON:+,}
+    \"$EGRESS\": {\"configurable\": true, \"served\": $EG_SERVED, \"serve_error\": \"$(json_escape "$SERVE_ERR")\", \"cells\": {$CELLS_JSON
+    }}"
+  # v1 compat row: the openai-egress cells when configured, else the first configured egress.
+  if [ "$EGRESS" = openai ] || [ -z "$COMPAT_SHAPE" ]; then
+    COMPAT_SHAPE="$EGRESS"; COMPAT_CELLS="$CELLS_JSON"; COMPAT_SERVED="$EG_SERVED"; COMPAT_ERR="$SERVE_ERR"
+  fi
+  SERVE_ERR=""
+done
+
 cat > "$RESULTS/$GATEWAY.json" <<JSON
 {
   "gateway": "$GATEWAY",
   "build": "$BUILD",
-  "served": $([ "$ok" = 1 ] && echo true || echo false),
-  "serve_error": "$(json_escape "$SERVE_ERR")",
-  "upstream_shape": "openai",
-  "upstream_note": "v1 fixes the upstream to the OpenAI shape on $GW_PATH; every non-openai cell is a translation claim. The full 6x6 (all upstream dialects) is future work.",
-  "cells": {$CELLS_JSON
+  "matrix_version": 2,
+  "served": $COMPAT_SERVED,
+  "serve_error": "$(json_escape "$COMPAT_ERR")",
+  "upstream_shape": "$COMPAT_SHAPE",
+  "upstream_note": "v2: full 6x6. Top-level cells are the $COMPAT_SHAPE-egress row for v1 compatibility; the full grid is under upstreams.<egress>.cells keyed by ingress dialect.",
+  "egress_configured": "$GW_MATRIX_EGRESS",
+  "cells": {$COMPAT_CELLS
+  },
+  "upstreams": {$UPSTREAMS_JSON
   },
   "model": "$GW_MODEL",
   "upstream_endpoint": "$GW_PATH",
@@ -245,12 +396,18 @@ cat > "$RESULTS/$GATEWAY.json" <<JSON
 }
 JSON
 echo "================================================================"
-echo " gateway=$GATEWAY   protocol support matrix (ingress → openai upstream)"
+echo " gateway=$GATEWAY   protocol support matrix (rows=ingress, cols=egress)"
 python3 - "$RESULTS/$GATEWAY.json" <<'PY'
 import json, sys
 j = json.load(open(sys.argv[1]))
-for cell, r in j["cells"].items():
-    print("   %-17s served=%-14s status=%s" % (cell, r["served"], r["status"]))
+ups = j.get("upstreams", {})
+egs = list(ups.keys())
+sym = {True: "PASS", False: "fail", "not_configurable": "n/c ", "unprobed_auth": "auth"}
+print("   %-17s" % "ingress \\ egress" + "".join("%-18s" % e for e in egs))
+cells0 = next(iter(ups.values()))["cells"]
+for cell in cells0:
+    row = ["%-18s" % sym.get(ups[e]["cells"][cell]["served"], "?") for e in egs]
+    print("   %-17s" % cell + "".join(row))
 PY
 echo " -> $RESULTS/$GATEWAY.json"
 echo "================================================================"

@@ -7,10 +7,12 @@
 # fields it. What it proves: the matrix runner's verdicts stay honest against a server that
 # answers a plausible 200 on EVERY protocol path without translating anything.
 #
-# Expected verdicts: openai=true (incidental — the "gateway" IS an openai-shaped server, and the
-# openai cell rightly accepts a straight proxy), every other cell false, with the non-openai cells
-# that echo the mock's canned bodies flagged as UNTRANSLATED passthrough. If this fixture ever goes
-# green on a translation cell, the passthrough guard has a hole.
+# Expected verdicts (matrix v2): EVERY cell false. The non-openai ingress cells echo the mock's
+# canned bodies and are flagged as UNTRANSLATED passthrough; the openai cell, which v1 passed
+# incidentally, now fails too because the v2 diagonal rule demands a proven round trip to the
+# upstream mock and this fixture answers from its own canned constants without ever calling it.
+# All non-openai egress columns render not_configurable (no gw_matrix_egress here, on purpose).
+# If this fixture ever goes green on any cell, the guard has a hole.
 GW_KIND=native
 GW_DISPLAY="Mock (fixture)"
 GW_LANG=Rust
