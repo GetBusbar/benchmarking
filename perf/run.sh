@@ -61,7 +61,10 @@ json_escape(){ printf '%s' "$1" | python3 -c 'import json,sys
 d=sys.stdin.buffer.read()[:1600].decode("utf-8","replace")
 sys.stdout.write(json.dumps(d)[1:-1])'; }
 # shellcheck source=/dev/null
+source "$ROOT/lib/harness.sh"
+# shellcheck source=/dev/null
 source "$GW_DIR/gateway.sh"
+suite_deadline_start
 
 log "starting mock :$MOCK_PORT (instant)"
 pkill -f "$MOCK" 2>/dev/null; sleep 1
@@ -70,31 +73,42 @@ sleep 1
 cleanup(){ gw_stop 2>/dev/null; pkill -f "$MOCK" 2>/dev/null; }
 trap cleanup EXIT
 
-# run ugen, echo "rps fail p99us" parsed from its output line
+# run ugen, echo "rps fail p99us" parsed from its output line. HARD TIMEOUT: a probe against an
+# unresponsive gateway (arch under load) must fail fast, not block the suite on the loadgen's tail
+# request timeout across every hung worker. tmo caps the whole invocation at dur+grace; if it fires,
+# ugen printed nothing and the caller's `read`/awk see empty → rps/fail default to 0/1 (not-served).
 probe(){ # url conc dur
-  "$UGEN" -url "$1" -model "$GW_MODEL" -auth "$GW_AUTH" -c "$2" -d "$3" -psize "$PSIZE" "${UGEN_H[@]}" 2>/dev/null \
+  tmo "$(probe_budget "$3")" "$UGEN" -url "$1" -model "$GW_MODEL" -auth "$GW_AUTH" -c "$2" -d "$3" -psize "$PSIZE" "${UGEN_H[@]}" 2>/dev/null \
     | awk '{for(i=1;i<=NF;i++){split($i,a,"=");v[a[1]]=a[2]}; print v["rps"],v["fail"],v["p99us"],v["p50us"]}'
 }
 
-log "[$GATEWAY] build + launch"; gw_build || { echo "build failed"; exit 1; }; gw_launch
-# Header arrays built AFTER launch so a manifest can mint a key in gw_launch (busbar vkey).
-UGEN_H=(); CURL_H=()
-for h in "${GW_HEADERS[@]:-}"; do [ -n "$h" ] && { UGEN_H+=(-H "$h"); CURL_H+=(-H "$h"); }; done
-log "[$GATEWAY] wait 200 on $GW_PATH"; ok=0; c=000
-for i in $(seq 1 60); do
-  c=$(curl -s -m3 -o /dev/null -w "%{http_code}" "http://127.0.0.1:$GW_PORT$GW_PATH" -X POST \
-      -H "content-type: application/json" -H "authorization: Bearer $GW_AUTH" "${CURL_H[@]}" \
-      -d "{\"model\":\"$GW_MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"warm\"}],\"max_tokens\":16}")
-  [ "$c" = 200 ] && { ok=1; break; }; sleep 1
-done
+log "[$GATEWAY] build"; gw_build || { echo "build failed"; exit 1; }
+# Readiness probe used by the retry loop. Rebuilds the header arrays FIRST (a manifest can mint a key
+# in gw_launch, e.g. busbar's vkey), then polls for a 200 with a per-request hard timeout (-m3). It
+# does its OWN bounded wait; harness_launch_ready re-runs gw_launch + this probe up to N times.
+UGEN_H=(); CURL_H=(); ok=0; c=000
+_perf_ready(){
+  UGEN_H=(); CURL_H=()
+  for h in "${GW_HEADERS[@]:-}"; do [ -n "$h" ] && { UGEN_H+=(-H "$h"); CURL_H+=(-H "$h"); }; done
+  local i
+  for i in $(seq 1 60); do
+    c=$(curl -s -m3 -o /dev/null -w "%{http_code}" "http://127.0.0.1:$GW_PORT$GW_PATH" -X POST \
+        -H "content-type: application/json" -H "authorization: Bearer $GW_AUTH" "${CURL_H[@]}" \
+        -d "{\"model\":\"$GW_MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"warm\"}],\"max_tokens\":16}")
+    [ "$c" = 200 ] && return 0; sleep 1
+  done
+  return 1
+}
+log "[$GATEWAY] launch + wait 200 on $GW_PATH (robust boot, up to $HARNESS_BOOT_ATTEMPTS attempts)"
 SERVE_ERR=""
-if [ "$ok" != 1 ]; then
-  # Capture the response body of one more attempt + the gateway's own logs, so the failure is provable.
+if harness_launch_ready gw_launch _perf_ready; then
+  ok=1
+else
+  # Honest not-served after N failed boots: capture one more body + the retry diagnostics as evidence.
   body="$(curl -s -m3 "http://127.0.0.1:$GW_PORT$GW_PATH" -X POST \
       -H "content-type: application/json" -H "authorization: Bearer $GW_AUTH" "${CURL_H[@]}" \
       -d "{\"model\":\"$GW_MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"warm\"}],\"max_tokens\":16}" 2>&1 | head -c 400)"
-  SERVE_ERR="HTTP $c on POST $GW_PATH; body=[$body]; diag=[$(gw_diag 2>&1 | tail -n 20)]"
-  log "[$GATEWAY] WARNING never got 200 (last=$c) — served=false"
+  SERVE_ERR="$HARNESS_SERVE_ERR; last body=[$body]"
   log "[$GATEWAY] serve_error: $(printf '%s' "$SERVE_ERR" | head -c 300)"
 fi
 
