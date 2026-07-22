@@ -1,6 +1,12 @@
 /* AI Gateway Benchmarks results site. Vanilla JS, no dependencies.
-   Reads data.json (emitted by gen-data.mjs) and renders the four views. */
+   Reads data.json (emitted by gen-data.mjs) and renders the views: results table with
+   search/filters, per-gateway drawer, compare mode, protocol matrix, charts, method.
+   State (filters, sort, search, compare, drawer) round-trips through location.hash so
+   every view is permalinkable. Pure logic (filtering, hash codec, sweep chart) is
+   exported for the node smoke test in site/test.mjs. */
 "use strict";
+
+const NODE = typeof window === "undefined";
 
 /* Language chip colours: kept in sync with LANG_COLORS in charts.py. */
 const LANG_COLORS = {
@@ -10,14 +16,20 @@ const LANG_COLORS = {
   Node: "#c59b2d",
   Other: "#6b7280",
 };
+/* Distinct series colours for compare overlays (max 3 gateways). */
+const CMP_COLORS = ["#4cc38a", "#6cb6ff", "#e5a54b"];
 
 const fmtInt = (v) => Math.round(v).toLocaleString("en-US");
 const fmt1 = (v) => v.toLocaleString("en-US", { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+const fmtPct = (v) => `${v > 0 ? "+" : ""}${v.toFixed(1)}%`;
 
-/* Column model. get(g) returns {v, text, na} where v is the sortable number (null = no
-   value), text is the rendered cell, and na marks a muted "not measured / not served" cell.
-   laneLabel(j, flag, err): if the suite file exists but the served flag is false, surface the
-   suite's own explicit label instead of a number; if the file is absent, "not measured". */
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+/* laneVal: if the suite file exists but the served flag is false, surface the suite's
+   own explicit label instead of a number; if the file is absent, "not measured". */
 function lane(g, suite, flag, errKey, pick) {
   const j = g[suite];
   if (!j) return { v: null, text: "not measured", na: true };
@@ -25,7 +37,20 @@ function lane(g, suite, flag, errKey, pick) {
   return pick(j);
 }
 
+/* ---- column model ----------------------------------------------------------- */
+/* get(g) returns {v, text, na}: v is the sortable value (null = none), text the cell
+   text, na marks a muted "not measured / not served" cell. sortable:false columns
+   (the compare checkbox) take no part in sorting. */
 const COLUMNS = [
+  {
+    id: "sel", label: "", sortable: false,
+    get: () => ({ v: null, text: "", na: false }),
+    render: (g, st) => {
+      const on = st.cmp.includes(g.key);
+      const full = !on && st.cmp.length >= 3;
+      return `<td class="sel"><input type="checkbox" data-cmp="${esc(g.key)}" ${on ? "checked" : ""} ${full ? "disabled" : ""} title="Select for compare (max 3)"></td>`;
+    },
+  },
   {
     id: "name", label: "Gateway", desc: false,
     get: (g) => ({ v: g.display.toLowerCase(), text: null, na: false }),
@@ -35,6 +60,14 @@ const COLUMNS = [
         : esc(g.display);
       return `<td class="name">${a}</td>`;
     },
+  },
+  {
+    id: "cls", label: "Class", desc: false,
+    /* Class is each project's own self-description (from its manifest GW_CLASS,
+       sourced from that project's README/site tagline), not our editorial. */
+    title: "How the project describes itself, from its own README or site",
+    get: (g) => ({ v: g.cls || "Gateway", text: null, na: false }),
+    render: (g) => `<td><span class="cls-chip">${esc(g.cls || "Gateway")}</span></td>`,
   },
   {
     id: "lang", label: "Lang", desc: false,
@@ -92,27 +125,282 @@ const COLUMNS = [
   {
     id: "gov", label: "Governed overhead", desc: true, title: "Sustained-RPS change with native key/limit governance active vs the plain launch",
     get: (g) => lane(g, "governed", "governed_served", "governed_note",
-      (j) => ({
-        v: j.governed_vs_plain_sustained_pct,
-        text: `${j.governed_vs_plain_sustained_pct > 0 ? "+" : ""}${j.governed_vs_plain_sustained_pct.toFixed(1)}%`,
-        na: false,
-      })),
+      (j) => ({ v: j.governed_vs_plain_sustained_pct, text: fmtPct(j.governed_vs_plain_sustained_pct), na: false })),
   },
 ];
 
-const state = {
-  data: null,
-  sortCol: "rps20",
-  sortDesc: true,
-  langs: new Set(),
-  needStream: false,
-  needXlate: false,
-  needGoverned: false,
-};
+/* Metric groups per lane: drives the drawer and the compare table.
+   best: "min"/"max" picks the neutral best-value highlight by measurement. */
+const LANES = [
+  {
+    key: "perf", label: "Latency & throughput", flag: "served", err: "serve_error",
+    metrics: [
+      { k: "added_latency_p50_us", label: "Added latency p50 (µs)", best: "min", fmt: fmtInt },
+      { k: "added_latency_p99_us", label: "Added latency p99 (µs)", best: "min", fmt: fmtInt },
+      { k: "rps_max_proxy", label: "Max proxy RPS", best: "max", fmt: fmtInt },
+      { k: "rps_sustained_20ms", label: "Sustained RPS @20ms", best: "max", fmt: fmtInt },
+    ],
+  },
+  {
+    key: "memory", label: "Memory", flag: "served", err: "serve_error",
+    metrics: [
+      { k: "idle_rss_mib", label: "Idle RSS (MiB)", best: "min", fmt: fmt1 },
+      { k: "peak_rss_mib", label: "Peak RSS (MiB)", best: "min", fmt: fmt1 },
+    ],
+  },
+  {
+    key: "stream", label: "Streaming", flag: "stream_served", err: "stream_error",
+    metrics: [
+      { k: "stream_added_ttft_p99_us", label: "Added TTFT p99 (µs)", best: "min", fmt: fmtInt },
+      { k: "stream_added_gap_p99_us", label: "Added per-token p99 (µs)", best: "min", fmt: fmtInt },
+      { k: "stream_sustained_streams", label: "Streams sustained", best: "max", fmt: fmtInt },
+    ],
+  },
+  {
+    key: "xlate", label: "Translation", flag: "xlate_served", err: "xlate_error",
+    metrics: [
+      { k: "xlate_added_latency_p99_us", label: "Added latency p99 (µs)", best: "min", fmt: fmtInt },
+      { k: "xlate_rps_sustained_20ms", label: "Sustained RPS @20ms", best: "max", fmt: fmtInt },
+    ],
+  },
+  {
+    key: "governed", label: "Governance", flag: "governed_served", err: "governed_note",
+    metrics: [
+      { k: "governed_vs_plain_sustained_pct", label: "Governed vs plain sustained", best: "max", fmt: fmtPct },
+    ],
+  },
+];
 
-function esc(s) {
-  return String(s).replace(/[&<>"']/g, (c) =>
-    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+/* ---- state + URL hash codec ------------------------------------------------- */
+function newState() {
+  return {
+    data: null,
+    view: "results",
+    q: "",
+    sortCol: "rps20",
+    sortDesc: true,
+    langs: new Set(),
+    classes: new Set(),
+    needStream: false,
+    needXlate: false,
+    needGoverned: false,
+    cmp: [],        /* gateway keys selected for compare, max 3 */
+    cmpOpen: false, /* compare panel visible */
+    drawer: null,   /* gateway key open in the drawer */
+  };
+}
+const state = newState();
+
+const CAPS = [["needStream", "stream"], ["needXlate", "xlate"], ["needGoverned", "governed"]];
+
+/* Serialize the shareable parts of state into a hash query string. Defaults are
+   omitted so the pristine view keeps a clean URL. */
+function encodeState(st) {
+  const p = new URLSearchParams();
+  if (st.view && st.view !== "results") p.set("view", st.view);
+  if (st.q) p.set("q", st.q);
+  if (st.classes.size) p.set("cls", [...st.classes].sort().join("|"));
+  if (st.langs.size) p.set("lang", [...st.langs].sort().join("|"));
+  const caps = CAPS.filter(([k]) => st[k]).map(([, name]) => name);
+  if (caps.length) p.set("cap", caps.join("|"));
+  if (st.sortCol !== "rps20" || st.sortDesc !== true) {
+    p.set("sort", st.sortCol);
+    p.set("dir", st.sortDesc ? "desc" : "asc");
+  }
+  if (st.cmp.length) p.set("cmp", st.cmp.join("|"));
+  if (st.cmpOpen) p.set("cv", "1");
+  if (st.drawer) p.set("gw", st.drawer);
+  return p.toString();
+}
+
+function decodeState(hash) {
+  const st = newState();
+  const p = new URLSearchParams(String(hash || "").replace(/^#/, ""));
+  const list = (k) => (p.get(k) || "").split("|").filter(Boolean);
+  if (p.get("view")) st.view = p.get("view");
+  st.q = p.get("q") || "";
+  st.classes = new Set(list("cls"));
+  st.langs = new Set(list("lang"));
+  for (const cap of list("cap")) {
+    const hit = CAPS.find(([, name]) => name === cap);
+    if (hit) st[hit[0]] = true;
+  }
+  if (p.get("sort") && COLUMNS.some((c) => c.id === p.get("sort") && c.sortable !== false)) {
+    st.sortCol = p.get("sort");
+    st.sortDesc = p.get("dir") !== "asc";
+  }
+  st.cmp = list("cmp").slice(0, 3);
+  st.cmpOpen = p.get("cv") === "1" && st.cmp.length >= 2;
+  st.drawer = p.get("gw") || null;
+  return st;
+}
+
+function syncHash() {
+  if (NODE) return;
+  const s = encodeState(state);
+  history.replaceState(null, "", s ? `#${s}` : location.pathname + location.search);
+}
+
+/* ---- filtering (pure) ------------------------------------------------------- */
+function applyFilters(gateways, st) {
+  const q = st.q.trim().toLowerCase();
+  return gateways.filter((g) => {
+    if (q && !g.display.toLowerCase().includes(q) && !g.key.toLowerCase().includes(q)) return false;
+    if (st.classes.size && !st.classes.has(g.cls || "Gateway")) return false;
+    if (st.langs.size && !st.langs.has(g.lang)) return false;
+    if (st.needStream && !(g.stream && g.stream.stream_served)) return false;
+    if (st.needXlate && !(g.xlate && g.xlate.xlate_served)) return false;
+    if (st.needGoverned && !(g.governed && g.governed.governed_served)) return false;
+    return true;
+  });
+}
+
+/* ---- sweep chart: dependency-free canvas line chart -------------------------
+   series: [{label, color, points: [{x, y}]}], x is concurrency (log scale),
+   y linear. Returns the geometry (for tests and the hover handler) or null when
+   there is nothing to draw. */
+function niceStep(raw) {
+  const pow = Math.pow(10, Math.floor(Math.log10(raw)));
+  const m = raw / pow;
+  return (m <= 1 ? 1 : m <= 2 ? 2 : m <= 5 ? 5 : 10) * pow;
+}
+function fmtTick(v) {
+  if (v >= 1e6) return `${+(v / 1e6).toFixed(1)}M`;
+  if (v >= 1e3) return `${+(v / 1e3).toFixed(1)}k`;
+  return String(Math.round(v));
+}
+
+function drawSweep(canvas, series, opts = {}) {
+  const ctx = canvas.getContext && canvas.getContext("2d");
+  if (!ctx) return null;
+  const drawable = series.filter((s) => s.points && s.points.length);
+  const pts = drawable.flatMap((s) => s.points);
+  const W = canvas.width, H = canvas.height;
+  ctx.clearRect(0, 0, W, H);
+  const padL = 58, padR = 14, padT = 16, padB = 34;
+  const fg = opts.fg || "#9aa4b2", grid = opts.grid || "rgba(154,164,178,.18)";
+  if (!pts.length) {
+    ctx.fillStyle = fg;
+    ctx.font = "12px Inter, sans-serif";
+    ctx.fillText("no sweep data", padL, H / 2);
+    return null;
+  }
+  const lx = pts.map((p) => Math.log10(p.x));
+  let x0 = Math.min(...lx), x1 = Math.max(...lx);
+  if (x0 === x1) { x0 -= 0.3; x1 += 0.3; }
+  let yMax = Math.max(...pts.map((p) => p.y)) * 1.06;
+  if (!(yMax > 0)) yMax = 1;
+  const X = (v) => padL + ((Math.log10(v) - x0) / (x1 - x0)) * (W - padL - padR);
+  const Y = (v) => H - padB - (v / yMax) * (H - padT - padB);
+
+  ctx.font = "11px Inter, sans-serif";
+  ctx.lineWidth = 1;
+
+  /* y grid + ticks */
+  const step = niceStep(yMax / 4);
+  ctx.textAlign = "right"; ctx.textBaseline = "middle";
+  for (let v = 0; v <= yMax; v += step) {
+    ctx.strokeStyle = grid;
+    ctx.beginPath(); ctx.moveTo(padL, Y(v)); ctx.lineTo(W - padR, Y(v)); ctx.stroke();
+    ctx.fillStyle = fg;
+    ctx.fillText(fmtTick(v), padL - 6, Y(v));
+  }
+  /* x ticks: up to 7 of the distinct measured concurrencies */
+  const xs = [...new Set(pts.map((p) => p.x))].sort((a, b) => a - b);
+  const stride = Math.ceil(xs.length / 7);
+  ctx.textAlign = "center"; ctx.textBaseline = "top";
+  xs.filter((_, i) => i % stride === 0 || i === xs.length - 1).forEach((v) => {
+    ctx.strokeStyle = grid;
+    ctx.beginPath(); ctx.moveTo(X(v), padT); ctx.lineTo(X(v), H - padB); ctx.stroke();
+    ctx.fillStyle = fg;
+    ctx.fillText(fmtTick(v), X(v), H - padB + 5);
+  });
+  /* axes */
+  ctx.strokeStyle = fg;
+  ctx.beginPath(); ctx.moveTo(padL, padT); ctx.lineTo(padL, H - padB); ctx.lineTo(W - padR, H - padB); ctx.stroke();
+  /* axis labels */
+  ctx.fillStyle = fg;
+  ctx.textAlign = "center";
+  ctx.fillText(opts.xLabel || "concurrency (log)", padL + (W - padL - padR) / 2, H - 14);
+  ctx.save();
+  ctx.translate(12, padT + (H - padT - padB) / 2); ctx.rotate(-Math.PI / 2);
+  ctx.fillText(opts.yLabel || "", 0, 0);
+  ctx.restore();
+
+  /* series */
+  for (const s of drawable) {
+    const sp = s.points.slice().sort((a, b) => a.x - b.x);
+    ctx.strokeStyle = s.color; ctx.fillStyle = s.color; ctx.lineWidth = 1.6;
+    ctx.beginPath();
+    sp.forEach((p, i) => { if (i === 0) ctx.moveTo(X(p.x), Y(p.y)); else ctx.lineTo(X(p.x), Y(p.y)); });
+    ctx.stroke();
+    for (const p of sp) { ctx.beginPath(); ctx.arc(X(p.x), Y(p.y), 2.4, 0, Math.PI * 2); ctx.fill(); }
+  }
+  /* legend, top-right */
+  if (opts.legend !== false && drawable.length > 1) {
+    ctx.textAlign = "left"; ctx.textBaseline = "middle";
+    let ly = padT + 4;
+    for (const s of drawable) {
+      ctx.fillStyle = s.color;
+      ctx.fillRect(W - padR - 118, ly - 3, 14, 3);
+      ctx.fillStyle = fg;
+      ctx.fillText(s.label, W - padR - 100, ly - 1);
+      ly += 15;
+    }
+  }
+  return { X, Y, series: drawable, padL, padR, padT, padB, W, H };
+}
+
+/* Cheap hover readout: nearest point across all series by pixel distance. */
+function attachSweepHover(canvas, series, opts) {
+  if (!canvas.addEventListener) return;
+  const redraw = () => drawSweep(canvas, series, opts);
+  canvas.addEventListener("mousemove", (ev) => {
+    const geo = redraw();
+    if (!geo) return;
+    const r = canvas.getBoundingClientRect();
+    const mx = (ev.clientX - r.left) * (canvas.width / r.width);
+    const my = (ev.clientY - r.top) * (canvas.height / r.height);
+    let best = null;
+    for (const s of geo.series) for (const p of s.points) {
+      const d = Math.hypot(geo.X(p.x) - mx, geo.Y(p.y) - my);
+      if (!best || d < best.d) best = { d, p, s };
+    }
+    if (!best || best.d > 40) return;
+    const ctx = canvas.getContext("2d");
+    ctx.strokeStyle = best.s.color;
+    ctx.beginPath(); ctx.arc(geo.X(best.p.x), geo.Y(best.p.y), 4.2, 0, Math.PI * 2); ctx.stroke();
+    ctx.font = "11px Inter, sans-serif"; ctx.textAlign = "left"; ctx.textBaseline = "top";
+    ctx.fillStyle = opts.fg || "#e6edf3";
+    ctx.fillText(`${best.s.label}  conc ${fmtInt(best.p.x)}: ${fmtInt(best.p.y)} ${opts.unit || ""}`, geo.padL + 6, 2);
+  });
+  canvas.addEventListener("mouseleave", redraw);
+}
+
+/* Render both sweep charts (rps and p99 vs concurrency) into a container.
+   series come as [{label, color, sweep: [{conc,rps,p99_us}]}]. */
+function renderSweepCharts(container, sweepSeries, theme) {
+  const usable = sweepSeries.filter((s) => s.sweep && s.sweep.length);
+  if (!usable.length) {
+    container.innerHTML = `<p class="muted">No sweep data recorded.</p>`;
+    return;
+  }
+  container.innerHTML =
+    `<figure class="sweep"><figcaption>RPS vs concurrency</figcaption><canvas width="520" height="230"></canvas></figure>` +
+    `<figure class="sweep"><figcaption>p99 latency vs concurrency (µs)</figcaption><canvas width="520" height="230"></canvas></figure>`;
+  const [c1, c2] = container.querySelectorAll("canvas");
+  const rps = usable.map((s) => ({ label: s.label, color: s.color, points: s.sweep.map((p) => ({ x: p.conc, y: p.rps })) }));
+  const p99 = usable.map((s) => ({ label: s.label, color: s.color, points: s.sweep.map((p) => ({ x: p.conc, y: p.p99_us })) }));
+  const o1 = { yLabel: "RPS", unit: "rps", ...theme };
+  const o2 = { yLabel: "p99 (µs)", unit: "µs p99", ...theme };
+  drawSweep(c1, rps, o1); attachSweepHover(c1, rps, o1);
+  drawSweep(c2, p99, o2); attachSweepHover(c2, p99, o2);
+}
+
+function chartTheme() {
+  if (NODE) return {};
+  const cs = getComputedStyle(document.documentElement);
+  return { fg: cs.getPropertyValue("--fg-dim").trim() || "#9aa4b2" };
 }
 
 /* ---- results table ---------------------------------------------------------- */
@@ -124,18 +412,14 @@ function renderTable() {
   thead.innerHTML = "<tr>" + COLUMNS.map((c) => {
     const sorted = state.sortCol === c.id;
     const dir = sorted ? `<span class="dir">${state.sortDesc ? " ▾" : " ▴"}</span>` : "";
-    return `<th data-col="${c.id}" class="${sorted ? "sorted" : ""}" title="${esc(c.title || "")}">${esc(c.label)}${dir}</th>`;
+    return `<th data-col="${c.id}" class="${sorted ? "sorted" : ""}${c.sortable === false ? " nosort" : ""}" title="${esc(c.title || "")}">${esc(c.label)}${dir}</th>`;
   }).join("") + "</tr>";
 
-  let rows = data.gateways.filter((g) => {
-    if (state.langs.size && !state.langs.has(g.lang)) return false;
-    if (state.needStream && !(g.stream && g.stream.stream_served)) return false;
-    if (state.needXlate && !(g.xlate && g.xlate.xlate_served)) return false;
-    if (state.needGoverned && !(g.governed && g.governed.governed_served)) return false;
-    return true;
-  });
+  let rows = applyFilters(data.gateways, state);
+  const count = document.getElementById("row-count");
+  if (count) count.textContent = `${rows.length} of ${data.gateways.length}`;
 
-  const col = COLUMNS.find((c) => c.id === state.sortCol);
+  const col = COLUMNS.find((c) => c.id === state.sortCol) || COLUMNS.find((c) => c.id === "rps20");
   rows = rows.slice().sort((a, b) => {
     const va = col.get(a).v, vb = col.get(b).v;
     if (va === null && vb === null) return a.display.localeCompare(b.display);
@@ -146,8 +430,8 @@ function renderTable() {
   });
 
   tbody.innerHTML = rows.map((g) =>
-    "<tr>" + COLUMNS.map((c) => {
-      if (c.render) return c.render(g);
+    `<tr data-gw="${esc(g.key)}">` + COLUMNS.map((c) => {
+      if (c.render) return c.render(g, state);
       const cell = c.get(g);
       return cell.na ? `<td class="na">${esc(cell.text)}</td>` : `<td>${esc(cell.text)}</td>`;
     }).join("") + "</tr>"
@@ -156,43 +440,241 @@ function renderTable() {
   thead.querySelectorAll("th").forEach((th) => {
     th.addEventListener("click", () => {
       const id = th.dataset.col;
+      const c = COLUMNS.find((x) => x.id === id);
+      if (!c || c.sortable === false) return;
       if (state.sortCol === id) state.sortDesc = !state.sortDesc;
-      else {
-        state.sortCol = id;
-        state.sortDesc = !!COLUMNS.find((c) => c.id === id).desc;
-      }
-      renderTable();
+      else { state.sortCol = id; state.sortDesc = !!c.desc; }
+      renderTable(); syncHash();
+    });
+  });
+  tbody.querySelectorAll("input[data-cmp]").forEach((cb) => {
+    cb.addEventListener("change", () => toggleCompare(cb.dataset.cmp));
+    cb.addEventListener("click", (ev) => ev.stopPropagation());
+  });
+  tbody.querySelectorAll("tr").forEach((tr) => {
+    tr.addEventListener("click", (ev) => {
+      if (ev.target.closest("a, input")) return;
+      openDrawer(tr.dataset.gw);
     });
   });
 }
 
-function renderFilters() {
-  const langs = [...new Set(state.data.gateways.map((g) => g.lang))].sort();
-  const box = document.getElementById("lang-filters");
-  box.innerHTML = langs.map((l) => `<button class="chip-filter" data-lang="${esc(l)}">${esc(l)}</button>`).join("");
+/* ---- filter bar ------------------------------------------------------------- */
+function chipGroup(boxId, values, set, colorFor) {
+  const box = document.getElementById(boxId);
+  box.innerHTML = values.map((v) => `<button class="chip-filter" data-v="${esc(v)}">${esc(v)}</button>`).join("");
   box.querySelectorAll("button").forEach((b) => {
+    const apply = () => {
+      const on = set.has(b.dataset.v);
+      b.classList.toggle("on", on);
+      b.style.background = on ? (colorFor ? colorFor(b.dataset.v) : "var(--grey)") : "";
+    };
+    apply();
     b.addEventListener("click", () => {
-      const l = b.dataset.lang;
-      if (state.langs.has(l)) { state.langs.delete(l); b.classList.remove("on"); b.style.background = ""; }
-      else { state.langs.add(l); b.classList.add("on"); b.style.background = LANG_COLORS[l] || LANG_COLORS.Other; }
-      renderTable();
+      if (set.has(b.dataset.v)) set.delete(b.dataset.v); else set.add(b.dataset.v);
+      apply(); renderTable(); syncHash();
     });
   });
-  for (const [id, key] of [["f-stream", "needStream"], ["f-xlate", "needXlate"], ["f-governed", "needGoverned"]]) {
-    document.getElementById(id).addEventListener("change", (e) => {
-      state[key] = e.target.checked;
-      renderTable();
-    });
+}
+
+/* Wire the persistent inputs exactly once (renderFilters may re-run on hashchange). */
+function initFilterControls() {
+  const search = document.getElementById("search");
+  search.addEventListener("input", () => { state.q = search.value; renderTable(); syncHash(); });
+  for (const [key, name] of CAPS) {
+    const el = document.getElementById(`f-${name}`);
+    el.addEventListener("change", () => { state[key] = el.checked; renderTable(); syncHash(); });
   }
 }
 
-/* ---- protocol matrix -------------------------------------------------------- */
+function renderFilters() {
+  const gws = state.data.gateways;
+  chipGroup("class-filters", [...new Set(gws.map((g) => g.cls || "Gateway"))].sort(), state.classes, null);
+  chipGroup("lang-filters", [...new Set(gws.map((g) => g.lang))].sort(), state.langs,
+    (l) => LANG_COLORS[l] || LANG_COLORS.Other);
+  document.getElementById("search").value = state.q;
+  for (const [key, name] of CAPS) document.getElementById(`f-${name}`).checked = state[key];
+}
+
+/* ---- per-gateway drawer ----------------------------------------------------- */
 const MATRIX_CELLS = ["openai", "openai-responses", "anthropic", "gemini", "cohere", "bedrock"];
 const MATRIX_LABELS = {
   openai: "OpenAI", "openai-responses": "OpenAI Responses", anthropic: "Anthropic",
   gemini: "Gemini", cohere: "Cohere", bedrock: "Bedrock Converse",
 };
+const cellState = (cell) =>
+  cell.served === true ? ["served", "served"]
+    : cell.served === "unprobed_auth" ? ["unprobed", "unprobed (auth)"]
+      : ["failed", "not served"];
 
+function laneStamp(j) {
+  const bits = [];
+  if (j.build) bits.push(j.build);
+  if (j.measured_at) bits.push(j.measured_at);
+  return bits.length ? `<div class="stamp muted">${esc(bits.join(" · "))}</div>` : "";
+}
+
+function drawerHtml(g) {
+  const langC = LANG_COLORS[g.lang] || LANG_COLORS.Other;
+  let h = `<header class="drawer-head">
+    <h3>${g.repo ? `<a href="${g.repo}" target="_blank" rel="noopener">${esc(g.display)}</a>` : esc(g.display)}</h3>
+    <div class="chips"><span class="cls-chip">${esc(g.cls || "Gateway")}</span>
+    <span class="lang-chip" style="background:${langC}">${esc(g.lang)}</span></div>
+  </header>`;
+
+  const hw = LANES.map((l) => g[l.key]).find((j) => j && j.hardware);
+  if (hw) h += `<p class="stamp muted">${esc(hw.hardware)}${hw.arch ? ` (${esc(hw.arch)})` : ""}</p>`;
+
+  for (const l of LANES) {
+    const j = g[l.key];
+    h += `<section class="drawer-lane"><h4>${esc(l.label)}</h4>`;
+    if (!j) h += `<p class="muted">not measured</p>`;
+    else if (j[l.flag] === false) h += `<p class="muted">${esc(j[l.err] || "not served")}</p>${laneStamp(j)}`;
+    else {
+      h += `<dl>` + l.metrics.filter((m) => j[m.k] != null).map((m) =>
+        `<div><dt>${esc(m.label)}</dt><dd>${esc(m.fmt(j[m.k]))}</dd></div>`).join("") + `</dl>${laneStamp(j)}`;
+    }
+    h += `</section>`;
+  }
+
+  /* protocol matrix row with evidence */
+  h += `<section class="drawer-lane"><h4>Protocol matrix</h4>`;
+  if (!(g.matrix && g.matrix.cells)) h += `<p class="muted">not measured</p>`;
+  else {
+    h += `<ul class="matrix-list">` + MATRIX_CELLS.map((c) => {
+      const cell = g.matrix.cells[c];
+      if (!cell) return `<li><span class="cell na"></span> ${esc(MATRIX_LABELS[c])}: <span class="muted">n/a</span></li>`;
+      const [cls, label] = cellState(cell);
+      return `<li><span class="cell ${cls}"></span> <b>${esc(MATRIX_LABELS[c])}</b>: ${label}` +
+        ` <span class="muted">(HTTP ${esc(cell.status || "?")}, ${esc(cell.path || "")})</span>` +
+        (cell.verdict_note ? `<div class="muted evidence">${esc(cell.verdict_note)}</div>` : "") +
+        (cell.served !== true && cell.body_snippet ? `<pre>${esc(cell.body_snippet)}</pre>` : "") +
+        `</li>`;
+    }).join("") + `</ul>${laneStamp(g.matrix)}`;
+  }
+  h += `</section>`;
+
+  h += `<section class="drawer-lane"><h4>Throughput sweeps</h4><div id="drawer-sweeps" class="sweeps"></div></section>`;
+  return h;
+}
+
+function openDrawer(key) {
+  const g = state.data.gateways.find((x) => x.key === key);
+  if (!g) return;
+  state.drawer = key;
+  document.getElementById("drawer-body").innerHTML = drawerHtml(g);
+  document.getElementById("drawer").classList.remove("hidden");
+  document.getElementById("backdrop").classList.remove("hidden");
+  const box = document.getElementById("drawer-sweeps");
+  const series = [];
+  if (g.perf && g.perf.served !== false) {
+    series.push({ label: "sustained @20ms", color: "#4cc38a", sweep: g.perf.sweep_sustained_20ms });
+    series.push({ label: "max proxy", color: "#6cb6ff", sweep: g.perf.sweep_max_proxy });
+  }
+  renderSweepCharts(box, series, chartTheme());
+  syncHash();
+}
+function closeDrawer() {
+  state.drawer = null;
+  document.getElementById("drawer").classList.add("hidden");
+  document.getElementById("backdrop").classList.add("hidden");
+  syncHash();
+}
+
+/* ---- compare mode ----------------------------------------------------------- */
+function toggleCompare(key) {
+  const i = state.cmp.indexOf(key);
+  if (i >= 0) state.cmp.splice(i, 1);
+  else if (state.cmp.length < 3) state.cmp.push(key);
+  if (state.cmp.length < 2) state.cmpOpen = false;
+  renderTable(); renderCompareBar();
+  if (state.cmpOpen) renderCompare(); else closeCompare(false);
+  syncHash();
+}
+
+function renderCompareBar() {
+  const bar = document.getElementById("compare-bar");
+  if (!state.cmp.length) { bar.classList.add("hidden"); return; }
+  bar.classList.remove("hidden");
+  const names = state.cmp.map((k) => {
+    const g = state.data.gateways.find((x) => x.key === k);
+    return g ? g.display : k;
+  });
+  bar.innerHTML = `<span>Compare: <b>${names.map(esc).join(", ")}</b> <span class="muted">(${state.cmp.length}/3)</span></span>
+    <span class="bar-actions">
+      <button id="cmp-open" ${state.cmp.length < 2 ? "disabled" : ""}>Compare</button>
+      <button id="cmp-clear" class="ghost">Clear</button>
+    </span>`;
+  document.getElementById("cmp-open").addEventListener("click", () => { state.cmpOpen = true; renderCompare(); syncHash(); });
+  document.getElementById("cmp-clear").addEventListener("click", () => {
+    state.cmp = []; state.cmpOpen = false;
+    renderTable(); renderCompareBar(); closeCompare(false); syncHash();
+  });
+}
+
+function bestIndex(vals, best) {
+  let bi = -1;
+  vals.forEach((v, i) => {
+    if (v == null) return;
+    if (bi < 0 || (best === "min" ? v < vals[bi] : v > vals[bi])) bi = i;
+  });
+  /* only highlight when there is an actual contest */
+  return vals.filter((v) => v != null).length >= 2 ? bi : -1;
+}
+
+function renderCompare() {
+  const gws = state.cmp.map((k) => state.data.gateways.find((g) => g.key === k)).filter(Boolean);
+  if (gws.length < 2) return;
+  state.cmpOpen = true;
+  const panel = document.getElementById("compare-panel");
+  panel.classList.remove("hidden");
+
+  let h = `<div class="table-scroll"><table class="cmp-table"><thead><tr><th></th>` + gws.map((g, i) =>
+    `<th><span class="dot" style="background:${CMP_COLORS[i]}"></span>${esc(g.display)}</th>`).join("") + `</tr></thead><tbody>`;
+  h += `<tr><td class="metric">Class</td>${gws.map((g) => `<td>${esc(g.cls || "Gateway")}</td>`).join("")}</tr>`;
+  h += `<tr><td class="metric">Language</td>${gws.map((g) => `<td>${esc(g.lang)}</td>`).join("")}</tr>`;
+  h += `<tr><td class="metric">Build</td>${gws.map((g) => {
+    const j = LANES.map((l) => g[l.key]).find((x) => x && x.build);
+    return `<td>${esc(j ? j.build : "?")}</td>`;
+  }).join("")}</tr>`;
+
+  for (const l of LANES) {
+    h += `<tr class="lane-row"><td colspan="${gws.length + 1}">${esc(l.label)}</td></tr>`;
+    for (const m of l.metrics) {
+      const vals = gws.map((g) => {
+        const j = g[l.key];
+        return j && j[l.flag] !== false && j[m.k] != null ? j[m.k] : null;
+      });
+      if (vals.every((v) => v == null)) continue;
+      const bi = bestIndex(vals, m.best);
+      h += `<tr><td class="metric">${esc(m.label)}</td>` + vals.map((v, i) => {
+        if (v == null) {
+          const j = gws[i][l.key];
+          const txt = !j ? "not measured" : (j[l.flag] === false ? (j[l.err] || "not served") : "n/a");
+          return `<td class="na">${esc(txt)}</td>`;
+        }
+        return `<td class="${i === bi ? "best" : ""}">${esc(m.fmt(v))}</td>`;
+      }).join("") + `</tr>`;
+    }
+  }
+  h += `</tbody></table></div>`;
+  h += `<p class="fineprint">Best value per row is highlighted, decided by the measurement (lower latency and memory, higher throughput). Sweep overlays below use the sustained @20ms sweep.</p>`;
+  h += `<div id="cmp-sweeps" class="sweeps"></div>`;
+  document.getElementById("compare-body").innerHTML = h;
+
+  const series = gws.map((g, i) => ({
+    label: g.display, color: CMP_COLORS[i],
+    sweep: g.perf && g.perf.served !== false ? g.perf.sweep_sustained_20ms : null,
+  }));
+  renderSweepCharts(document.getElementById("cmp-sweeps"), series, chartTheme());
+}
+function closeCompare(sync = true) {
+  state.cmpOpen = false;
+  document.getElementById("compare-panel").classList.add("hidden");
+  if (sync) syncHash();
+}
+
+/* ---- protocol matrix view --------------------------------------------------- */
 function renderMatrix() {
   const withMatrix = state.data.gateways.filter((g) => g.matrix && g.matrix.cells);
   if (!withMatrix.length) {
@@ -214,8 +696,7 @@ function renderMatrix() {
       MATRIX_CELLS.map((c) => {
         const cell = g.matrix.cells[c];
         if (!cell) return `<td class="na">n/a</td>`;
-        const cls = cell.served === true ? "served" : cell.served === "unprobed_auth" ? "unprobed" : "failed";
-        const label = cell.served === true ? "served" : cell.served === "unprobed_auth" ? "unprobed (auth)" : "not served";
+        const [cls, label] = cellState(cell);
         return `<td><span class="cell ${cls}" data-gw="${esc(g.key)}" data-cell="${esc(c)}" title="${esc(g.display)} / ${esc(MATRIX_LABELS[c])}: ${label}. ${esc(cell.verdict_note || "")}"></span></td>`;
       }).join("")
     }</tr>`).join("")
@@ -225,7 +706,7 @@ function renderMatrix() {
     el.addEventListener("click", () => {
       const g = state.data.gateways.find((x) => x.key === el.dataset.gw);
       const cell = g.matrix.cells[el.dataset.cell];
-      const label = cell.served === true ? "served" : cell.served === "unprobed_auth" ? "unprobed (auth)" : "not served";
+      const [, label] = cellState(cell);
       const detail = document.getElementById("matrix-detail");
       detail.classList.remove("hidden");
       detail.innerHTML =
@@ -301,28 +782,78 @@ function renderStatic() {
 }
 
 /* ---- tabs ------------------------------------------------------------------- */
+function showView(view) {
+  state.view = view;
+  document.querySelectorAll(".tab").forEach((x) => x.classList.toggle("active", x.dataset.view === view));
+  document.querySelectorAll(".view").forEach((v) => v.classList.toggle("hidden", v.id !== `view-${view}`));
+}
 function initTabs() {
-  const tabs = document.querySelectorAll(".tab");
-  tabs.forEach((t) => t.addEventListener("click", () => {
-    tabs.forEach((x) => x.classList.toggle("active", x === t));
-    document.querySelectorAll(".view").forEach((v) =>
-      v.classList.toggle("hidden", v.id !== `view-${t.dataset.view}`));
+  document.querySelectorAll(".tab").forEach((t) => t.addEventListener("click", () => {
+    showView(t.dataset.view); syncHash();
   }));
 }
 
 /* ---- boot ------------------------------------------------------------------- */
-fetch("data.json")
-  .then((r) => { if (!r.ok) throw new Error(`data.json: HTTP ${r.status}`); return r.json(); })
-  .then((data) => {
-    state.data = data;
-    initTabs();
-    renderFilters();
-    renderTable();
-    renderMatrix();
-    renderCharts();
-    renderStatic();
-  })
-  .catch((err) => {
-    document.querySelector("main").innerHTML =
-      `<p class="muted">Could not load data.json (${esc(err.message)}). Run <code>node site/gen-data.mjs</code> first.</p>`;
+function applyState(st) {
+  Object.assign(state, {
+    view: st.view, q: st.q, sortCol: st.sortCol, sortDesc: st.sortDesc,
+    langs: st.langs, classes: st.classes,
+    needStream: st.needStream, needXlate: st.needXlate, needGoverned: st.needGoverned,
+    cmp: st.cmp, cmpOpen: st.cmpOpen, drawer: st.drawer,
   });
+}
+
+function renderAll() {
+  showView(state.view);
+  renderFilters();
+  renderTable();
+  renderCompareBar();
+  renderMatrix();
+  renderCharts();
+  renderStatic();
+  if (state.drawer) openDrawer(state.drawer);
+  if (state.cmpOpen && state.cmp.length >= 2) renderCompare();
+}
+
+function boot() {
+  fetch("data.json")
+    .then((r) => { if (!r.ok) throw new Error(`data.json: HTTP ${r.status}`); return r.json(); })
+    .then((data) => {
+      applyState(decodeState(location.hash));
+      state.data = data;
+      state.cmp = state.cmp.filter((k) => data.gateways.some((g) => g.key === k));
+      if (state.drawer && !data.gateways.some((g) => g.key === state.drawer)) state.drawer = null;
+      initTabs();
+      initFilterControls();
+      renderAll();
+
+      document.getElementById("backdrop").addEventListener("click", closeDrawer);
+      document.getElementById("drawer-close").addEventListener("click", closeDrawer);
+      document.getElementById("compare-close").addEventListener("click", () => closeCompare());
+      document.addEventListener("keydown", (ev) => {
+        if (ev.key !== "Escape") return;
+        if (state.drawer) closeDrawer();
+        else if (state.cmpOpen) closeCompare();
+      });
+      window.addEventListener("hashchange", () => {
+        applyState(decodeState(location.hash));
+        if (!state.drawer) { document.getElementById("drawer").classList.add("hidden"); document.getElementById("backdrop").classList.add("hidden"); }
+        if (!state.cmpOpen) document.getElementById("compare-panel").classList.add("hidden");
+        renderAll();
+      });
+    })
+    .catch((err) => {
+      document.querySelector("main").innerHTML =
+        `<p class="muted">Could not load data.json (${esc(err.message)}). Run <code>node site/gen-data.mjs</code> first.</p>`;
+    });
+}
+
+if (NODE) {
+  /* Exports for the node smoke test (site/test.mjs). */
+  module.exports = {
+    newState, encodeState, decodeState, applyFilters,
+    drawSweep, niceStep, fmtTick, COLUMNS, LANES,
+  };
+} else {
+  boot();
+}
