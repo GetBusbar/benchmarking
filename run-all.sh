@@ -63,7 +63,7 @@ manifest_gw_port(){ # gateway
 # against a plain run in one JSON; xlate = protocol translation (anthropic client -> openai upstream)
 # added latency + sustained RPS. Opt in with SUITES="perf memory stream streamcpu governed xlate"
 # (see stream/run.sh, streamcpu/run.sh, governed/run.sh, xlate/run.sh).
-SUITES="${SUITES:-perf memory}"
+SUITES="${SUITES:-perf memory stream streamcpu xlate governed matrix}"
 for gw in "${GATEWAYS[@]}"; do
   [ -f "$HERE/gateways/$gw/gateway.sh" ] || { log "skip unknown gateway '$gw'"; continue; }
   gwport="$(manifest_gw_port "$gw")"

@@ -106,7 +106,7 @@ bench_gateway() {
     export BENCH_ARCH='$ARCH'
     export CORES=0-3 LOADCORES=4-5 MOCKCORES=6-7
     export CAP_MIB=24000
-    export SUITES=\"${SUITES:-perf memory}\"
+    export SUITES=\"${SUITES:-perf memory stream streamcpu xlate governed matrix}\"
     sudo -n true 2>/dev/null && sudo chmod 666 /var/run/docker.sock || true
     bash run-all.sh $gw" >>"$glog" 2>&1
 
