@@ -20,15 +20,10 @@ const LANG_COLORS = {
 const CMP_COLORS = ["#4cc38a", "#6cb6ff", "#e5a54b"];
 
 const fmtInt = (v) => Math.round(v).toLocaleString("en-US");
-// Added-latency metrics are a difference of two independently measured percentiles
-// (through-gateway minus direct-to-mock). Subtracting two noisy p99s has a jitter of
-// roughly +/-15 us, so any result inside that band - negative OR a tiny positive - is
-// statistically zero, not real overhead. Collapse the whole sub-noise band to "~0" so
-// a genuine tie does not read as a win or loss on the sign alone. On the 20ms-paced
-// stream suite the per-frame CPU cost is smaller than this floor by construction; the
-// CPU-bound stream bench is what would resolve it.
-const ADDED_NOISE_FLOOR_US = 15;
-const fmtAdded = (v) => (Math.abs(v) < ADDED_NOISE_FLOOR_US ? "~0" : fmtInt(v));
+// Added-latency deltas are shown raw (no noise-floor smoothing). On the paced stream
+// suite the per-frame value is noise-dominated and can flip sign run-to-run; the honest
+// per-frame number comes from the CPU-bound stream suite, not from massaging this one.
+const fmtAdded = fmtInt;
 const fmt1 = (v) => v.toLocaleString("en-US", { minimumFractionDigits: 1, maximumFractionDigits: 1 });
 const fmtPct = (v) => `${v > 0 ? "+" : ""}${v.toFixed(1)}%`;
 
