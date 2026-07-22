@@ -39,6 +39,14 @@ gw_rss() {
   done
   echo "$total"
 }
+gw_hwm() {  # kernel VmHWM summed over every archgw container's process tree (same set as gw_rss)
+  local total=0 pid c any=0
+  for c in $(_arch_cids); do
+    any=1; pid=$(sudo docker inspect -f '{{.State.Pid}}' "$c" 2>/dev/null)
+    total=$(awk -v a="$total" -v b="$(_hwm_tree_mib "$pid")" 'BEGIN{printf "%.1f", a+b}')
+  done
+  [ "$any" = 1 ] && echo "$total" || echo ""
+}
 
 gw_launch() {
   # Egress-only config = pure proxy. host.docker.internal (the CLI adds host-gateway) reaches the mock

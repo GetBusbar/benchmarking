@@ -53,6 +53,7 @@ gw_launch() {
 }
 
 gw_rss() { container_rss_mib agentgateway-bench; }  # summed process-tree VmRSS (same method as native)
+gw_hwm() { container_hwm_mib agentgateway-bench; }  # summed process-tree VmHWM (kernel high-water mark)
 
 gw_diag() {
   echo "container: $(sudo docker ps -a --filter name=agentgateway-bench --format '{{.Status}}' 2>/dev/null)"

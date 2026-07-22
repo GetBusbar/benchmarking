@@ -68,6 +68,7 @@ YAML
 }
 
 gw_rss() { awk '/VmRSS/{printf "%.1f", $2/1024}' "/proc/$(pgrep -f 'target/release/ai-gateway' | head -1)/status" 2>/dev/null; }
+gw_hwm() { _hwm_tree_mib "$(pgrep -f 'target/release/ai-gateway' 2>/dev/null | head -1)"; }  # kernel VmHWM of the ai-gateway tree
 
 gw_diag() {
   echo "proc: $(pgrep -af 'target/release/ai-gateway' | head -c 200)"

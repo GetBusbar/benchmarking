@@ -72,6 +72,7 @@ gw_launch() {
 }
 
 gw_rss() { container_rss_mib apisix-bench; }  # summed process-tree VmRSS (same method as native gateways)
+gw_hwm() { container_hwm_mib apisix-bench; }  # summed process-tree VmHWM (kernel high-water mark)
 
 gw_diag() {
   echo "container: $(sudo docker ps -a --filter name=apisix-bench --format '{{.Status}}' 2>/dev/null)"

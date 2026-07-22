@@ -68,6 +68,10 @@ container_rss_mib() { # container_name → its process tree's VmRSS via the host
   local pid; pid=$(sudo docker inspect -f '{{.State.Pid}}' "$1" 2>/dev/null)
   _rss_tree_mib "$pid"
 }
+container_hwm_mib() { # container_name → its process tree's VmHWM via the host PID (same units as native)
+  local pid; pid=$(sudo docker inspect -f '{{.State.Pid}}' "$1" 2>/dev/null)
+  _hwm_tree_mib "$pid"
+}
 # VmHWM = the kernel's own per-process high-water mark. The 0.3 s VmRSS poll above can miss a
 # sub-interval allocation spike entirely; VmHWM cannot (the kernel updates it on every charge), so
 # it is the honest PEAK for the memory story. Read at teardown (it survives until process exit).
@@ -82,13 +86,13 @@ _hwm_tree_mib() { # root_pid → summed VmHWM of pid + descendants, in MiB
   for p in $pids; do kb=$(awk '/VmHWM/{print $2}' "/proc/$p/status" 2>/dev/null); total=$((total + ${kb:-0})); done
   awk -v k="$total" 'BEGIN{printf "%.1f", k/1024}'
 }
-gw_hwm() { # best-effort: native pgrep root, else docker root pid; empty if neither resolves
-  local pid
-  pid=$(pgrep -x busbar 2>/dev/null | head -1)
-  [ -z "$pid" ] && pid=$(pgrep -f "$GW_PROC_HINT" 2>/dev/null | head -1)
-  [ -n "$pid" ] && { _hwm_tree_mib "$pid"; return; }
-  echo ""
-}
+# Kernel high-water mark (VmHWM) for the ACTUAL gateway process(es) this run launched.
+# This is a manifest hook, exactly like gw_rss: each gateways/<name>/gateway.sh overrides gw_hwm()
+# to sum VmHWM over the SAME process(es) its gw_rss() sums VmRSS over (native pid tree, or the
+# container's host-pid tree via container_hwm_mib). The default below is a safe no-op that returns
+# empty (recorded as null downstream) so a manifest without the hook never fabricates a number and
+# never trips `set -u` — it is gateway-agnostic and never references a hardcoded process name.
+gw_hwm() { echo ""; }
 json_escape(){ printf '%s' "$1" | tr -d '\000' | head -c 1600 \
   | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read())[1:-1])' 2>/dev/null \
   || printf '%s' "$1" | tr '\n\t"\\' '    ' | head -c 1600; }
@@ -165,7 +169,7 @@ cat > "$RESULTS/$GATEWAY.json" <<JSON
   "serve_error": "$(json_escape "$SERVE_ERR")",
   "idle_rss_mib": ${IDLE:-0},
   "peak_rss_mib": ${PEAK:-0},
-  "peak_rss_hwm_mib": ${HWM:-0},
+  "peak_rss_hwm_mib": ${HWM:-null},
   "post_load_rss_mib": ${POST:-0},
   "payload_bytes": $PSIZE,
   "concurrency": $CONC,

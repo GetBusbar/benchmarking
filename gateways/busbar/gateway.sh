@@ -144,6 +144,7 @@ YAML
 }
 
 gw_rss() { awk '/VmRSS/{printf "%.1f", $2/1024}' "/proc/$(pgrep -x busbar)/status" 2>/dev/null; }
+gw_hwm() { _hwm_tree_mib "$(pgrep -x busbar 2>/dev/null | head -1)"; }  # kernel VmHWM of the busbar tree
 gw_stop() { pkill -x busbar 2>/dev/null; }
 
 # ── governed lane (governed/run.sh) ────────────────────────────────────────────────────────────────

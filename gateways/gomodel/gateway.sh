@@ -48,6 +48,7 @@ gw_diag() {
 }
 
 gw_rss() { container_rss_mib gomodel-bench; }  # summed process-tree VmRSS (same method as native gateways)
+gw_hwm() { container_hwm_mib gomodel-bench; }  # summed process-tree VmHWM (kernel high-water mark)
 
 gw_stop() { sudo docker rm -f gomodel-bench >/dev/null 2>&1; }
 

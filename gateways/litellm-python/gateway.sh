@@ -113,5 +113,9 @@ gw_rss() {
   local master; master=$(pgrep -f "litellm.*--port $GW_PORT" | head -1)
   _rss_tree_mib "$master"
 }
+gw_hwm() {  # kernel VmHWM summed over the master + uvicorn worker tree (same tree as gw_rss)
+  local master; master=$(pgrep -f "litellm.*--port $GW_PORT" | head -1)
+  _hwm_tree_mib "$master"
+}
 
 gw_stop() { pkill -f "litellm.*--port $GW_PORT" 2>/dev/null; }

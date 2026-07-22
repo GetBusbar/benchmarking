@@ -56,6 +56,7 @@ gw_diag() {
 }
 
 gw_rss() { container_rss_mib bifrost; }  # summed process-tree VmRSS (same method as native gateways)
+gw_hwm() { container_hwm_mib bifrost; }  # summed process-tree VmHWM (kernel high-water mark)
 
 gw_stop() { sudo docker rm -f bifrost >/dev/null 2>&1; }
 

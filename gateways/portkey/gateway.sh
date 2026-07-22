@@ -73,6 +73,13 @@ gw_rss() {
   done
   awk -v k="$total" 'BEGIN{printf "%.1f", k/1024}'
 }
+gw_hwm() {  # kernel VmHWM summed over the node process + its workers (same tree as gw_rss)
+  local pid total=0 kb; pid="$(_pk_pid)"; [ -z "$pid" ] && { echo ""; return; }
+  for p in $pid $(pgrep -P "$pid" 2>/dev/null); do
+    kb=$(awk '/VmHWM/{print $2}' "/proc/$p/status" 2>/dev/null); total=$((total + ${kb:-0}))
+  done
+  awk -v k="$total" 'BEGIN{printf "%.1f", k/1024}'
+}
 gw_version() { npm view "${PORTKEY_SPEC:-@portkey-ai/gateway}" version 2>/dev/null | sed 's/^/@portkey-ai\/gateway@/' || echo "@portkey-ai/gateway (npx latest)"; }
 gw_diag() {
   echo "proc: $(pgrep -af '@portkey-ai/gateway' | head -c 200)"
