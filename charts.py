@@ -45,6 +45,22 @@ plt = None
 ROOT = Path(__file__).resolve().parent
 RESULTS = ROOT / "results"
 
+
+def _read_result(p: Path) -> dict:
+    """Load one results JSON, failing LOUDLY with the offending path.
+
+    A single malformed result file used to crash the whole chart/report pipeline with a
+    cryptic json.decoder.JSONDecodeError that named no file. Name the file, and the byte/line
+    of the parse error, so the bad result is obvious instead of blocking every gateway's render.
+    """
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        raise SystemExit(
+            f"charts.py: invalid result file {p.relative_to(ROOT)}: {e}\n"
+            f"  fix or remove that file and re-run; the suite's json_escape should never emit invalid JSON."
+        )
+
 # ── house style ──────────────────────────────────────────────────────────────────────────────────
 BRAND = "#2f6fed"   # winner highlight — a NEUTRAL blue, deliberately not a brand color, so a
                     # highlighted bar can never be misread as "the sponsor won."
@@ -354,7 +370,7 @@ def _load(suite: str) -> list[dict]:
         p = d / f"{key}.json"
         if not p.exists():
             continue
-        obj = json.loads(p.read_text())
+        obj = _read_result(p)
         obj["_key"], obj["_label"] = key, label
         if suite == "perf":
             sust = float(obj.get("rps_sustained_20ms") or 0)
@@ -578,7 +594,7 @@ def _suite_map(suite: str) -> dict:
     for key in GATEWAYS:
         p = d / f"{key}.json"
         if p.exists():
-            out[key] = json.loads(p.read_text())
+            out[key] = _read_result(p)
     return out
 
 
@@ -590,7 +606,7 @@ def _merge() -> dict:
         for key in GATEWAYS:
             p = d / f"{key}.json"
             if p.exists():
-                gws.setdefault(key, {}).update(json.loads(p.read_text()))
+                gws.setdefault(key, {}).update(_read_result(p))
     return gws
 
 
