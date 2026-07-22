@@ -86,7 +86,10 @@ json_escape(){ printf '%s' "$1" | python3 -c 'import json,sys
 d=sys.stdin.buffer.read()[:1600].decode("utf-8","replace")
 sys.stdout.write(json.dumps(d)[1:-1])'; }
 # shellcheck source=/dev/null
+source "$ROOT/lib/harness.sh"
+# shellcheck source=/dev/null
 source "$GW_DIR/gateway.sh"
+suite_deadline_start
 GW_MATRIX_EGRESS="${GW_MATRIX_EGRESS:-openai}"
 EGRESS_ALL="openai openai-responses anthropic gemini cohere bedrock"
 INGRESS_ALL="openai openai-responses anthropic gemini cohere bedrock"
@@ -340,6 +343,20 @@ UPSTREAMS_JSON=""
 COMPAT_CELLS=""; COMPAT_SHAPE=""; COMPAT_SERVED=false; COMPAT_ERR=""
 for EGRESS in $EGRESS_ALL; do
   CELLS_JSON=""
+  # Wall-clock backstop: if a pathological gateway has already burned the suite ceiling, stop probing
+  # further egress columns and record them not-served (timeout) so run-all can never wedge here.
+  if egress_listed "$EGRESS" && suite_deadline_expired; then
+    log "[$GATEWAY] egress=$EGRESS: suite wall-clock ceiling reached — recording not served, moving on"
+    WARM_OK=0
+    for CELL in $INGRESS_ALL; do
+      emit_cell "$CELL" false "" "$(ingress_path "$CELL")" \
+        "suite wall-clock ceiling (${HARNESS_SUITE_CEIL_S}s) reached before this egress column was probed" ""
+    done
+    UPSTREAMS_JSON="${UPSTREAMS_JSON}${UPSTREAMS_JSON:+,}
+    \"$EGRESS\": {\"configurable\": true, \"served\": false, \"serve_error\": \"suite wall-clock ceiling reached\", \"cells\": {$CELLS_JSON
+    }}"
+    continue
+  fi
   if ! egress_listed "$EGRESS"; then
     log "[$GATEWAY] egress=$EGRESS: not configurable (manifest defines no egress config for this dialect)"
     for CELL in $INGRESS_ALL; do
@@ -351,13 +368,17 @@ for EGRESS in $EGRESS_ALL; do
     }}"
     continue
   fi
-  log "[$GATEWAY] egress=$EGRESS: launching"
-  if ! launch_egress "$EGRESS"; then
-    WARM_OK=0; SERVE_ERR="gw_matrix_egress $EGRESS returned nonzero (launch/config failed)"
-    WARM_LAST=000
-    log "[$GATEWAY] egress=$EGRESS: launch failed"
-  else
-    warm_up "$EGRESS" || true
+  log "[$GATEWAY] egress=$EGRESS: launching (robust boot, up to $HARNESS_BOOT_ATTEMPTS attempts)"
+  # Ready fn for this egress column: warm_up sets WARM_OK/WARM_LAST/SERVE_ERR and returns non-zero if
+  # the gateway never answered 200 under this egress config. harness_launch_ready re-runs
+  # launch_egress <dialect> + this probe up to N attempts, so a transient per-egress boot failure
+  # doesn't zero the whole column; only after all attempts fail is the column recorded not-served.
+  _egress_ready(){ warm_up "$EGRESS"; }
+  if ! harness_launch_ready launch_egress _egress_ready "$EGRESS"; then
+    # WARM_OK is already 0 and SERVE_ERR carries warm_up's last diagnostic; annotate with the retry note.
+    WARM_OK=0; WARM_LAST="${WARM_LAST:-000}"
+    SERVE_ERR="${HARNESS_SERVE_ERR}${SERVE_ERR:+; }${SERVE_ERR:-}"
+    log "[$GATEWAY] egress=$EGRESS: not ready after $HARNESS_BOOT_ATTEMPTS attempts"
   fi
   EG_SERVED=$([ "$WARM_OK" = 1 ] && echo true || echo false)
   for CELL in $INGRESS_ALL; do
