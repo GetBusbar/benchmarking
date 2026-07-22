@@ -123,19 +123,25 @@ thead th {
 }
 thead th:first-child, tbody td:first-child { text-align: left; }
 /* Lock the identity columns (checkbox, Gateway, Class, Lang) so they stay visible while
-   the metric columns scroll horizontally. Fixed widths give each sticky column a stable
-   left offset equal to the sum of the widths before it. */
-thead th:nth-child(1), tbody td:nth-child(1),
-thead th:nth-child(2), tbody td:nth-child(2),
-thead th:nth-child(3), tbody td:nth-child(3),
-thead th:nth-child(4), tbody td:nth-child(4) { position: sticky; z-index: 1; background: var(--bg-raise); }
-thead th:nth-child(1), thead th:nth-child(2), thead th:nth-child(3), thead th:nth-child(4) { z-index: 3; }
-thead th:nth-child(1), tbody td:nth-child(1) { left: 0; width: 2.4rem; }
-thead th:nth-child(2), tbody td:nth-child(2) { left: 2.4rem; width: 9rem; }
-thead th:nth-child(3), tbody td:nth-child(3) { left: 11.4rem; width: 12rem; }
-thead th:nth-child(4), tbody td:nth-child(4) { left: 23.4rem; width: 5rem; box-shadow: inset -1px 0 0 var(--border); }
-tbody tr:hover td:nth-child(1), tbody tr:hover td:nth-child(2),
-tbody tr:hover td:nth-child(3), tbody tr:hover td:nth-child(4) { background: var(--bg-hover); }
+   the metric columns scroll horizontally. Scoped to the results table only (not the matrix
+   grid or the compare table, which share .table-scroll). Fixed widths give each sticky
+   column a stable left offset equal to the sum of the widths before it. */
+#results-table thead th:nth-child(1), #results-table tbody td:nth-child(1),
+#results-table thead th:nth-child(2), #results-table tbody td:nth-child(2),
+#results-table thead th:nth-child(3), #results-table tbody td:nth-child(3),
+#results-table thead th:nth-child(4), #results-table tbody td:nth-child(4) { position: sticky; z-index: 1; background: var(--bg-raise); }
+#results-table thead th:nth-child(1), #results-table thead th:nth-child(2), #results-table thead th:nth-child(3), #results-table thead th:nth-child(4) { z-index: 3; }
+#results-table thead th:nth-child(1), #results-table tbody td:nth-child(1) { left: 0; width: 2.4rem; }
+#results-table thead th:nth-child(2), #results-table tbody td:nth-child(2) { left: 2.4rem; width: 9rem; }
+#results-table thead th:nth-child(3), #results-table tbody td:nth-child(3) { left: 11.4rem; width: 12rem; }
+#results-table thead th:nth-child(4), #results-table tbody td:nth-child(4) { left: 23.4rem; width: 5rem; box-shadow: inset -1px 0 0 var(--border); }
+#results-table tbody tr:hover td:nth-child(1), #results-table tbody tr:hover td:nth-child(2),
+#results-table tbody tr:hover td:nth-child(3), #results-table tbody tr:hover td:nth-child(4) { background: var(--bg-hover); }
+/* Even, full-width matrix columns: fixed layout so the six upstream columns share the row
+   equally instead of clumping by header-text width. */
+.matrix-table table { table-layout: fixed; width: 100%; }
+.matrix-table th.axis, .matrix-table td.name { width: 8.5rem; }
+.matrix-table th:not(.axis), .matrix-table td:not(.name) { text-align: center; }
 thead th.sorted { color: var(--fg); }
 thead th .dir { color: var(--accent); }
 tbody td { padding: .5rem .7rem; text-align: right; border-bottom: 1px solid var(--border); white-space: nowrap; }
@@ -324,9 +330,9 @@ tbody tr { cursor: pointer; }
 
   /* On a phone, locking three wide columns would eat the whole viewport, so relax to just
      the checkbox + Gateway columns; Class and Lang scroll with the rest. */
-  thead th:nth-child(3), tbody td:nth-child(3),
-  thead th:nth-child(4), tbody td:nth-child(4) { position: static; width: auto; box-shadow: none; }
-  thead th:nth-child(2), tbody td:nth-child(2) { box-shadow: inset -1px 0 0 var(--border); }
+  #results-table thead th:nth-child(3), #results-table tbody td:nth-child(3),
+  #results-table thead th:nth-child(4), #results-table tbody td:nth-child(4) { position: static; width: auto; box-shadow: none; }
+  #results-table thead th:nth-child(2), #results-table tbody td:nth-child(2) { box-shadow: inset -1px 0 0 var(--border); }
   thead th, tbody td { padding: .5rem .55rem; }
 
   .drawer { width: 100vw; padding: 1rem 1.1rem 2rem; }
