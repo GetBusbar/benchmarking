@@ -35,6 +35,16 @@ gw_diag() {
   echo "run.log:"; tail -n 20 /tmp/litellm_py.mem.log 2>/dev/null
 }
 
+_lp_spawn() {
+  pkill -f "litellm.*--port $GW_PORT" 2>/dev/null; sleep 1
+  # Scale uvicorn workers to the pinned core count so LiteLLM uses all 4 cores it's given, not one
+  # (single-worker on a 4-core pin under-serves it — fairness M5). The gw_rss sums the whole group.
+  local ncore=$(( ${CORES##*-} - ${CORES%%-*} + 1 ))
+  setsid taskset -c "$CORES" env LITELLM_MASTER_KEY="$GW_AUTH" \
+    "$LP_VENV/bin/litellm" --config "$GW_DIR/config.gen.yaml" --port "$GW_PORT" --num_workers "$ncore" \
+    </dev/null >/tmp/litellm_py.mem.log 2>&1 &
+}
+
 gw_launch() {
   cat > "$GW_DIR/config.gen.yaml" <<YAML
 model_list:
@@ -44,13 +54,55 @@ model_list:
       api_base: http://127.0.0.1:$MOCK_PORT/v1
       api_key: dummy
 YAML
-  pkill -f "litellm.*--port $GW_PORT" 2>/dev/null; sleep 1
-  # Scale uvicorn workers to the pinned core count so LiteLLM uses all 4 cores it's given, not one
-  # (single-worker on a 4-core pin under-serves it — fairness M5). The gw_rss sums the whole group.
-  local ncore=$(( ${CORES##*-} - ${CORES%%-*} + 1 ))
-  setsid taskset -c "$CORES" env LITELLM_MASTER_KEY="$GW_AUTH" \
-    "$LP_VENV/bin/litellm" --config "$GW_DIR/config.gen.yaml" --port "$GW_PORT" --num_workers "$ncore" \
-    </dev/null >/tmp/litellm_py.mem.log 2>&1 &
+  _lp_spawn
+}
+
+# ── matrix suite: full 6x6 egress support ─────────────────────────────────────────────────────────
+# LiteLLM's model_list selects the upstream dialect by provider prefix, each with an api_base
+# override, so all six egress dialects are one config rewrite each. Every mapping below was
+# verified against the recording mock (litellm 1.93.0): the request landed on the intended
+# dialect endpoint with that dialect's request shape.
+#   openai            openai/<model>, api_base <mock>/v1                     -> /v1/chat/completions
+#   openai-responses  openai/responses/<model> (Responses bridge), same base -> /v1/responses
+#   anthropic         anthropic/<claude>, api_base <mock>  (appends the path)-> /v1/messages
+#   gemini            gemini/<model>, api_base <mock>                        -> /models/<m>:generateContent
+#   cohere            cohere_chat/<model>, api_base <mock>/v2/chat (verbatim)-> /v2/chat
+#   bedrock           bedrock/converse/<model> + aws_bedrock_runtime_endpoint (dummy static creds;
+#                     the mock ignores the SigV4 signature)                  -> /model/<m>/converse
+# The client-side model name stays $GW_MODEL in every case, so the six ingress probes never change.
+GW_MATRIX_EGRESS="openai openai-responses anthropic gemini cohere bedrock"
+gw_matrix_egress() {
+  local params
+  case "$1" in
+    openai) params="model: openai/$GW_MODEL
+      api_base: http://127.0.0.1:$MOCK_PORT/v1
+      api_key: dummy";;
+    openai-responses) params="model: openai/responses/$GW_MODEL
+      api_base: http://127.0.0.1:$MOCK_PORT/v1
+      api_key: dummy";;
+    anthropic) params="model: anthropic/claude-3-5-sonnet-20241022
+      api_base: http://127.0.0.1:$MOCK_PORT
+      api_key: dummy";;
+    gemini) params="model: gemini/gemini-1.5-flash
+      api_base: http://127.0.0.1:$MOCK_PORT
+      api_key: dummy";;
+    cohere) params="model: cohere_chat/command-r
+      api_base: http://127.0.0.1:$MOCK_PORT/v2/chat
+      api_key: dummy";;
+    bedrock) params="model: bedrock/converse/anthropic.claude-3-sonnet-20240229-v1:0
+      aws_bedrock_runtime_endpoint: http://127.0.0.1:$MOCK_PORT
+      aws_access_key_id: AKIAMOCKACCESSKEY
+      aws_secret_access_key: mock-secret-access-key
+      aws_region_name: us-east-1";;
+    *) return 1;;
+  esac
+  cat > "$GW_DIR/config.gen.yaml" <<YAML
+model_list:
+  - model_name: $GW_MODEL
+    litellm_params:
+      $params
+YAML
+  _lp_spawn
 }
 
 # --num_workers spawns uvicorn WORKER children whose cmdlines don't contain "--port", so a pattern

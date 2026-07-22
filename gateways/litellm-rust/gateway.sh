@@ -67,6 +67,21 @@ YAML
     "$LR_BIN" </dev/null >/tmp/litellm_rust.mem.log 2>&1 &
 }
 
+# ── matrix suite egress support ───────────────────────────────────────────────────────────────────
+# The ONLY working route in this gateway (azure_ai via python-config, see the header) targets the
+# upstream's /v1/messages: an ANTHROPIC-shaped endpoint. So its one configurable egress dialect is
+# anthropic, and the launch for it is exactly the normal launch. No other upstream dialect is
+# reachable: messages_provider_config() serves only azure_ai, and its api_base is the /v1/messages
+# URL by construction, so openai/gemini/cohere/bedrock/responses egress columns are honestly
+# "not configurable" rather than tried-and-failed.
+GW_MATRIX_EGRESS="anthropic"
+gw_matrix_egress() {
+  case "$1" in
+    anthropic) gw_launch ;;
+    *) return 1 ;;
+  esac
+}
+
 gw_rss() { awk '/VmRSS/{printf "%.1f", $2/1024}' "/proc/$(pgrep -f litellm-ai-gateway | head -1)/status" 2>/dev/null; }
 
 gw_diag() {
