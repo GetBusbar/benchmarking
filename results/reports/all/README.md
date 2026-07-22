@@ -19,23 +19,26 @@ Every number below is regenerated from the raw `results/*.json` — re-run `run-
 | [One-API](https://github.com/songquanpeng/one-api) | 34,637 µs | 0 | 0 | 84 MiB | 20124 MiB | `justsong/one-api:v0.6.10 (@sha256:e667221a2e19` |
 | [TensorZero](https://github.com/tensorzero/tensorzero) | 40,946 µs | 4,179 | 12,141 | 49 MiB | 700 MiB | `tensorzero/gateway:2026.6.0 (@sha256:c939db4f2` |
 | [Arch](https://github.com/katanemo/archgw) | 255,873 µs | 0 | 0 | 471 MiB | 1325 MiB | `katanemo/archgw:0.3.22 (archgw CLI)` |
+| [Busbar (main)](https://github.com/GetBusbar/busbar) | ⏳ *pending* | — | — | — | — | *pending measurement* |
+
+⏳ **Pending measurement** (a manifest exists; not yet run on the rig): Busbar (main). These land here as their runs complete — nothing is hidden.
 
 Two throughput numbers: **max proxy RPS** (instant upstream — raw forwarding speed) and **sustained RPS @20ms** (AIGatewayBench's metric — concurrent in-flight capacity under realistic LLM latency).
-**✕** = did not serve under load (0 successful req/s). &nbsp; **0** = came up, but no tested concurrency held p99 < 1 s with <0.1% errors.
+**✕** = did not serve under load (0 successful req/s). &nbsp; **0** = came up, but no tested concurrency held p99 < 1 s with <0.1% errors. &nbsp; **⏳** = a manifest exists but it hasn't been run on the rig yet.
 
-![added_latency](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/added_latency.png?v=202607220450)
+![added_latency](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/added_latency.png?v=202607220538)
 
-![rps_max_proxy](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/rps_max_proxy.png?v=202607220450)
+![rps_max_proxy](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/rps_max_proxy.png?v=202607220538)
 
-![rps_sustained_20ms](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/rps_sustained_20ms.png?v=202607220450)
+![rps_sustained_20ms](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/rps_sustained_20ms.png?v=202607220538)
 
-![memory_rss](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/memory_rss.png?v=202607220450)
+![memory_rss](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/memory_rss.png?v=202607220538)
 
-![rps_per_dollar](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/rps_per_dollar.png?v=202607220450)
+![rps_per_dollar](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/rps_per_dollar.png?v=202607220538)
 
-![cost_per_million](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/cost_per_million.png?v=202607220450)
+![cost_per_million](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/cost_per_million.png?v=202607220538)
 
 ---
 Method: added latency = gateway p99 − direct-to-mock p99 at concurrency 1; RPS ceiling = highest sustained req/s with p99 < 1 s and <0.1% errors; RSS idle = after first 200, peak = under sustained load. Same box, same mock, same load, one gateway at a time. Source refs pinned in `gateways/versions.env`; the built commit is in each row.
 
-<sub>Page + charts regenerated **2026-07-22 04:50 UTC** from the raw `results/*.json`.</sub>
+<sub>Page + charts regenerated **2026-07-22 05:38 UTC** from the raw `results/*.json`.</sub>
