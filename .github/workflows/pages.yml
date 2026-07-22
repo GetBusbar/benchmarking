@@ -1,0 +1,47 @@
+# Build and deploy the results site to GitHub Pages.
+# gen-data.mjs scans gateways/*/gateway.sh + results/**/*.json, copies the chart PNGs and
+# bundled fonts into site/, and the finished site/ directory is the Pages artifact.
+name: pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "results/**"
+      - "gateways/**"
+      - "site/**"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Generate site data
+        run: node site/gen-data.mjs
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
