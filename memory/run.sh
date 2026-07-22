@@ -98,7 +98,10 @@ d=sys.stdin.buffer.read()[:1600].decode("utf-8","replace")
 sys.stdout.write(json.dumps(d)[1:-1])'; }
 GW_HEADERS=()  # a manifest may set extra request headers (e.g. Portkey routing, or a minted busbar vkey)
 # shellcheck source=/dev/null
+source "$ROOT/lib/harness.sh"
+# shellcheck source=/dev/null
 source "$GW_DIR/gateway.sh"
+suite_deadline_start
 
 log "starting mock on :$MOCK_PORT"
 pkill -f "$MOCK_BIN" 2>/dev/null; sleep 1
@@ -109,26 +112,30 @@ cleanup(){ gw_stop 2>/dev/null; pkill -f "$MOCK_BIN" 2>/dev/null; }
 trap cleanup EXIT
 
 log "[$GATEWAY] build"; gw_build || { echo "build failed"; exit 1; }
-log "[$GATEWAY] launch (pin $CORES, upstream mock :$MOCK_PORT)"; gw_launch
-# Header arrays built AFTER launch so a manifest can mint a key in gw_launch (busbar vkey).
-CURL_H=(); UGEN_H=()
-for h in "${GW_HEADERS[@]:-}"; do [ -n "$h" ] && { CURL_H+=(-H "$h"); UGEN_H+=(-H "$h"); }; done
-
-log "[$GATEWAY] waiting for 200 on $GW_PATH"
-ok=0; c=000
-for i in $(seq 1 60); do
-  c=$(curl -s -m3 -o /dev/null -w "%{http_code}" "http://127.0.0.1:$GW_PORT$GW_PATH" \
-      -X POST -H "content-type: application/json" -H "authorization: Bearer $GW_AUTH" "${CURL_H[@]}" \
-      -d "{\"model\":\"$GW_MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"warm\"}],\"max_tokens\":16}")
-  [ "$c" = "200" ] && { ok=1; break; }; sleep 1
-done
+# Readiness probe (rebuilds headers first so a gw_launch-minted key is picked up), bounded 60x1s with
+# a -m3 per-request timeout. harness_launch_ready re-runs gw_launch + this probe up to N attempts.
+CURL_H=(); UGEN_H=(); ok=0; c=000
+_mem_ready(){
+  CURL_H=(); UGEN_H=()
+  for h in "${GW_HEADERS[@]:-}"; do [ -n "$h" ] && { CURL_H+=(-H "$h"); UGEN_H+=(-H "$h"); }; done
+  local i
+  for i in $(seq 1 60); do
+    c=$(curl -s -m3 -o /dev/null -w "%{http_code}" "http://127.0.0.1:$GW_PORT$GW_PATH" \
+        -X POST -H "content-type: application/json" -H "authorization: Bearer $GW_AUTH" "${CURL_H[@]}" \
+        -d "{\"model\":\"$GW_MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"warm\"}],\"max_tokens\":16}")
+    [ "$c" = "200" ] && return 0; sleep 1
+  done
+  return 1
+}
+log "[$GATEWAY] launch + wait 200 on $GW_PATH (robust boot, up to $HARNESS_BOOT_ATTEMPTS attempts)"
 SERVE_ERR=""
-if [ "$ok" != 1 ]; then
+if harness_launch_ready gw_launch _mem_ready; then
+  ok=1
+else
   body="$(curl -s -m3 "http://127.0.0.1:$GW_PORT$GW_PATH" -X POST \
       -H "content-type: application/json" -H "authorization: Bearer $GW_AUTH" "${CURL_H[@]}" \
       -d "{\"model\":\"$GW_MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"warm\"}],\"max_tokens\":16}" 2>&1 | head -c 400)"
-  SERVE_ERR="HTTP $c on POST $GW_PATH; body=[$body]; diag=[$(gw_diag 2>&1 | tail -n 20)]"
-  log "[$GATEWAY] WARNING: never got 200 (last=$c) — recording anyway, served=false"
+  SERVE_ERR="$HARNESS_SERVE_ERR; last body=[$body]"
   log "[$GATEWAY] serve_error: $(printf '%s' "$SERVE_ERR" | head -c 300)"
 fi
 IDLE=$(gw_rss); log "[$GATEWAY] idle RSS: ${IDLE:-?} MiB (served=$([ "$ok" = 1 ] && echo true || echo false))"
