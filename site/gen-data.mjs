@@ -32,7 +32,10 @@ function parseManifest(text) {
     const m = text.match(new RegExp(`^${name}=(?:"([^"]*)"|(\\S+))`, "m"));
     return m ? (m[1] ?? m[2]) : null;
   };
-  return { display: get("GW_DISPLAY"), lang: get("GW_LANG"), repo: get("GW_REPO") };
+  // GW_CLASS is each project's OWN self-description (its README/site tagline: "control
+  // plane", "LLM gateway", "API gateway", ...), never our editorial classification.
+  // Missing/unknown falls back to the neutral "Gateway".
+  return { display: get("GW_DISPLAY"), lang: get("GW_LANG"), repo: get("GW_REPO"), cls: get("GW_CLASS") };
 }
 
 const gatewaysDir = join(ROOT, "gateways");
@@ -54,6 +57,7 @@ const gateways = gatewayKeys.map((key) => {
     key,
     display: meta.display || key,
     lang: meta.lang || "Other",
+    cls: meta.cls || "Gateway",
     repo: meta.repo || null,
   };
   for (const suite of SUITES) {
