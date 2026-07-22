@@ -1,0 +1,57 @@
+{
+    "gateway": "busbar",
+    "build": "busbar 1.5.0",
+    "served": true,
+    "serve_error": "",
+    "upstream_shape": "openai",
+    "upstream_note": "v1 fixes the upstream to the OpenAI shape on /v1/chat/completions; every non-openai cell is a translation claim. The full 6x6 (all upstream dialects) is future work.",
+    "cells": {
+        "openai": {
+            "served": true,
+            "status": "200",
+            "path": "/v1/chat/completions",
+            "verdict_note": "HTTP 200, openai envelope validated",
+            "body_snippet": "{\"id\":\"chatcmpl-x\",\"object\":\"chat.completion\",\"created\":1,\"model\":\"mock\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"compl"
+        },
+        "openai-responses": {
+            "served": true,
+            "status": "200",
+            "path": "/v1/responses",
+            "verdict_note": "HTTP 200, openai-responses envelope validated",
+            "body_snippet": "{\"created_at\":1,\"error\":null,\"id\":\"resp_HSvin9VwW5p8brvbI9dFEuPg3f6v5Nsi4v09YIiBPLkQDVSW\",\"model\":\"mock\",\"object\":\"response\",\"output\":[{\"content\":[{\"annotations\":[],\"text\":\"ok\",\"type\":\"output_text\"}],"
+        },
+        "anthropic": {
+            "served": true,
+            "status": "200",
+            "path": "/v1/messages",
+            "verdict_note": "HTTP 200, anthropic envelope validated",
+            "body_snippet": "{\"content\":[{\"text\":\"ok\",\"type\":\"text\"}],\"id\":\"msg_01amV5hQC09laNAslxtt9aT9JE\",\"model\":\"mock\",\"role\":\"assistant\",\"stop_reason\":\"end_turn\",\"stop_sequence\":null,\"type\":\"message\",\"usage\":{\"input_tokens\":"
+        },
+        "gemini": {
+            "served": true,
+            "status": "200",
+            "path": "/v1beta/models/gpt-4o-mini:generateContent",
+            "verdict_note": "HTTP 200, gemini envelope validated",
+            "body_snippet": "{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"ok\"}],\"role\":\"model\"},\"finishReason\":\"STOP\"}],\"modelVersion\":\"mock\",\"responseId\":\"iEx4q0s50CYI2Rnk\",\"usageMetadata\":{\"candidatesTokenCount\":2,\"promptTokenC"
+        },
+        "cohere": {
+            "served": true,
+            "status": "200",
+            "path": "/v2/chat",
+            "verdict_note": "HTTP 200, cohere envelope validated",
+            "body_snippet": "{\"finish_reason\":\"COMPLETE\",\"id\":\"c898ac98-42f5-413e-86fb-9e2b6daf6d37\",\"message\":{\"content\":[{\"text\":\"ok\",\"type\":\"text\"}],\"role\":\"assistant\"},\"model\":\"mock\",\"usage\":{\"tokens\":{\"input_tokens\":10,\"outp"
+        },
+        "bedrock": {
+            "served": true,
+            "status": "200",
+            "path": "/model/gpt-4o-mini/converse",
+            "verdict_note": "HTTP 200, bedrock envelope validated",
+            "body_snippet": "{\"metrics\":{\"latencyMs\":0},\"output\":{\"message\":{\"content\":[{\"text\":\"ok\"}],\"role\":\"assistant\"}},\"stopReason\":\"end_turn\",\"usage\":{\"inputTokens\":10,\"outputTokens\":2,\"totalTokens\":12}}"
+        }
+    },
+    "model": "gpt-4o-mini",
+    "upstream_endpoint": "/v1/chat/completions",
+    "arch": "arm64",
+    "hardware": "arm64 ?vCPU",
+    "measured_at": "2026-07-22T04:48:24Z"
+}
