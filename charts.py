@@ -161,6 +161,14 @@ class Chart:
     log: bool = False
     higher_better: bool = False   # RPS: bigger wins (green to the max, sort desc)
     money: bool = False           # format bar labels + axis as USD ($0.0015)
+    # ── suite-specific behavior (streaming / translation / governance lanes) ──────────────────────
+    served_field: str = "served"  # json key that decides "did this gateway do the thing at all"
+    not_served_text: str = "✕ did not serve"   # label + legend entry when served_field is false
+    zero_text: str = "0  ·  no load held p99 < 1 s"  # served, but the metric came out 0
+    clamp_negatives: bool = False  # clamp sub-noise negatives to 0 (footnoted) — never a negative bar
+    zero_ok: bool = False          # a clamped/true 0 is a GOOD result (sorts to the winning end)
+    auto_ms: bool = False          # µs metric: relabel the whole chart in ms once the max is >= 1 ms
+    annot: object = None           # optional fn(row) -> str appended after the primary bar label
 
 
 CHARTS = [
@@ -224,6 +232,92 @@ CHARTS = [
         series=[Series("cost_per_million_usd", "cost / 1M", "rank")],
         money=True,
     ),
+    # ── streaming: what the gateway costs an SSE stream ───────────────────────────────────────────
+    Chart(
+        name="stream_added_ttft",
+        suite="stream",
+        title="Streaming time-to-first-token overhead",
+        subtitle="p99 TTFT the gateway adds on top of the mock's paced SSE stream, concurrency 1 (lower is better)",
+        unit="µs",
+        series=[Series("stream_added_ttft_p99_us", "p99 added TTFT", "rank")],
+        log=True,
+        served_field="stream_served",
+        not_served_text="✕ no SSE streaming",
+        clamp_negatives=True,
+        zero_ok=True,
+        auto_ms=True,
+    ),
+    Chart(
+        name="stream_added_gap",
+        suite="stream",
+        title="Streaming per-token overhead",
+        subtitle="p99 the gateway adds to each inter-token gap vs direct-to-mock, concurrency 1 (lower is better)",
+        unit="µs",
+        series=[Series("stream_added_gap_p99_us", "p99 added inter-token gap", "rank")],
+        log=True,
+        served_field="stream_served",
+        not_served_text="✕ no SSE streaming",
+        clamp_negatives=True,
+        zero_ok=True,
+        auto_ms=True,
+    ),
+    Chart(
+        name="stream_sustained",
+        suite="stream",
+        title="Concurrent SSE streams sustained",
+        subtitle="max concurrent streams with 99.9% of frames delivered, no stalls, <0.1% errors (higher is better)",
+        unit="concurrent streams",
+        series=[Series("stream_sustained_streams", "sustained streams", "rank")],
+        higher_better=True,
+        served_field="stream_served",
+        not_served_text="✕ no SSE streaming",
+        zero_text="0  ·  no stream load qualified",
+        annot=lambda r: (lambda f: f"{f:,.0f} frames/s" if f > 0 else None)(
+            float(r.get("stream_sustained_fps") or 0)),
+    ),
+    # ── translation: Anthropic client to OpenAI provider ──────────────────────────────────────────
+    Chart(
+        name="xlate_rps_sustained_20ms",
+        suite="xlate",
+        title="Cross-protocol translation: Anthropic client to OpenAI provider",
+        subtitle="sustained req/s translating Anthropic requests to an OpenAI upstream, p99 < 1s, <0.1% errors, 20 ms model delay (higher is better)",
+        unit="requests / sec",
+        series=[Series("xlate_rps_sustained_20ms", "translated RPS @20ms", "rank")],
+        higher_better=True,
+        served_field="xlate_served",
+        not_served_text="✕ cannot translate",
+    ),
+    Chart(
+        name="xlate_added_latency",
+        suite="xlate",
+        title="Cross-protocol translation: added latency",
+        subtitle="p99 added on the Anthropic-to-OpenAI path vs the OpenAI shape straight to the mock, concurrency 1 (lower is better)",
+        unit="µs",
+        series=[Series("xlate_added_latency_p99_us", "p99 added latency (translated)", "rank")],
+        log=True,
+        served_field="xlate_served",
+        not_served_text="✕ cannot translate",
+        clamp_negatives=True,
+        zero_ok=True,
+        auto_ms=True,
+    ),
+    # ── governance: throughput with keys + limits + budgets enforced ──────────────────────────────
+    Chart(
+        name="governed_throughput",
+        suite="governed",
+        title="Throughput with governance active",
+        subtitle="sustained req/s @20ms with key auth, rate limits and budgets enforced, vs the same gateway plain (higher is better)",
+        unit="requests / sec",
+        series=[
+            Series("governed_rps_sustained_20ms", "governed RPS @20ms", "rank"),
+            Series("plain_rps_sustained_20ms", "plain RPS (no governance)", MUTE),
+        ],
+        higher_better=True,
+        served_field="governed_served",
+        not_served_text="✕ no native key governance",
+        annot=lambda r: (lambda p: f"{float(p):+.1f}% vs plain" if p is not None else None)(
+            r.get("governed_vs_plain_sustained_pct")),
+    ),
 ]
 
 
@@ -272,10 +366,31 @@ def render(chart: Chart, only_keys=None, out_stem: str | None = None) -> None:
     primary = chart.series[0].field
 
     def _served(r) -> bool:
-        return bool(r.get("served", True))
+        return bool(r.get(chart.served_field, True))
 
     def _val(r, field=primary) -> float:
         return float(r.get(field, 0) or 0)
+
+    # Suite-specific preprocessing on a working COPY of the rows (never mutate the loaded dicts):
+    # clamp sub-noise negatives to 0 (footnoted — never a negative bar), and relabel a µs chart in ms
+    # once the biggest value crosses 1 ms so the numbers stay readable.
+    unit = chart.unit
+    clamped = False
+    if chart.clamp_negatives or chart.auto_ms:
+        rows = [dict(r) for r in rows]
+        fields = [s.field for s in chart.series]
+        if chart.clamp_negatives:
+            for r in rows:
+                for f in fields:
+                    if float(r.get(f, 0) or 0) < 0:
+                        clamped = True
+                        r[f] = 0.0
+        if chart.auto_ms and unit == "µs":
+            if max((_val(r) for r in rows), default=0.0) >= 1000:
+                unit = "ms"
+                for r in rows:
+                    for f in fields:
+                        r[f] = float(r.get(f, 0) or 0) / 1000.0
 
     # Winner is decided ONLY among gateways that actually served — a gateway that failed under
     # load (or never came up) never colors green, even if a concurrency-1 number looks good.
@@ -283,17 +398,19 @@ def render(chart: Chart, only_keys=None, out_stem: str | None = None) -> None:
     best = (max(served_vals) if chart.higher_better else min(served_vals)) if served_vals else None
 
     # Sort winners to the top. Broken gateways (did-not-serve, or a non-positive/zero metric) sink
-    # to the bottom regardless of metric direction, so a failure never lands at the "best" end.
+    # to the bottom regardless of metric direction, so a failure never lands at the "best" end —
+    # except on a zero_ok chart, where a served 0 is sub-noise overhead, i.e. the winning end.
     def _sortkey(r):
-        ok = _served(r) and _val(r) > 0
+        ok = _served(r) and (_val(r) > 0 or chart.zero_ok)
         if not ok:
             return (1, 0.0)
         return (0, -_val(r) if chart.higher_better else _val(r))
     rows.sort(key=_sortkey)
 
     # A positive floor for the log axis: negative/zero bars can't be drawn on a log scale, so their
-    # labels get anchored here instead of vanishing off-canvas.
-    xmax = max((_val(r) for r in rows), default=1.0) or 1.0
+    # labels get anchored here instead of vanishing off-canvas. xmax spans EVERY series so a longer
+    # secondary bar (e.g. plain RPS behind governed RPS) never runs off the right edge.
+    xmax = max((float(r.get(s.field, 0) or 0) for r in rows for s in chart.series), default=1.0) or 1.0
     pos = [_val(r) for r in rows if _val(r) > 0]
     floor_x = min(pos) if pos else 1.0
 
@@ -311,7 +428,11 @@ def render(chart: Chart, only_keys=None, out_stem: str | None = None) -> None:
         # latency the exact microseconds read clearest. Everything else → compact ("44k").
         if chart.money:
             return "$0" if v <= 0 else f"${v:,.4g}"
-        if chart.unit == "µs":
+        if unit == "µs":
+            return f"{int(round(v)):,}"
+        if unit == "ms":  # auto-relabeled µs chart — one decimal keeps 1.2 ms vs 12.0 ms readable
+            return f"{v:,.1f}"
+        if unit == "concurrent streams":  # a discrete count — "1,024", never "1.0k"
             return f"{int(round(v)):,}"
         return _fmt(v)
 
@@ -340,12 +461,21 @@ def render(chart: Chart, only_keys=None, out_stem: str | None = None) -> None:
             if rank:
                 if served and v > 0:
                     txt, col, weight = _numlab(v), INK, "bold"
-                elif served:  # came up, but no tested load held p99 < 1 s at <0.1% errors
-                    txt, col, weight = "0  ·  no load held p99 < 1 s", "#c2410c", "bold"
-                elif v > 0:   # a concurrency-1 number exists, but it collapsed under load
-                    txt, col, weight = f"{_numlab(v)}   ✕ did not serve under load", "#c2410c", "bold"
+                    if chart.annot:  # extra per-bar context (frames/s, governed-vs-plain %)
+                        extra = chart.annot(r)
+                        if extra:
+                            txt = f"{txt}  ·  {extra}"
+                elif served and chart.zero_ok:  # sub-noise overhead — a 0 here is the winning end
+                    txt, col, weight = "0", INK, "bold"
+                elif served:  # came up, but the metric came out 0 (see chart.zero_text for why)
+                    txt, col, weight = chart.zero_text, "#c2410c", "bold"
+                elif v > 0:   # a number exists, but the gateway failed the suite's serve gate
+                    nst = chart.not_served_text
+                    if nst == "✕ did not serve":  # the perf suites' historical phrasing
+                        nst += " under load"
+                    txt, col, weight = f"{_numlab(v)}   {nst}", "#c2410c", "bold"
                 else:
-                    txt, col, weight = "✕ did not serve", "#c2410c", "bold"
+                    txt, col, weight = chart.not_served_text, "#c2410c", "bold"
                 ax.text(tx, cy, txt, va="center", ha="left", fontsize=9.5,
                         fontweight=weight, color=col, zorder=4)
             elif v > 0:  # secondary series (e.g. idle RSS): readable label, skip empty bars
@@ -369,12 +499,14 @@ def render(chart: Chart, only_keys=None, out_stem: str | None = None) -> None:
     from matplotlib.ticker import FuncFormatter, NullFormatter
     if chart.money:
         ax.xaxis.set_major_formatter(FuncFormatter(lambda v, _pos: f"${v:,.4g}" if v > 0 else "$0"))
+    elif unit == "ms":  # sub-integer ticks are real on a relabeled ms axis (0.5, 1, 2, …)
+        ax.xaxis.set_major_formatter(FuncFormatter(lambda v, _pos: f"{v:,.3g}" if v > 0 else "0"))
     else:
         ax.xaxis.set_major_formatter(FuncFormatter(lambda v, _pos: f"{int(round(v)):,}" if v > 0 else "0"))
     if chart.log:
         ax.xaxis.set_minor_formatter(NullFormatter())
     better = "higher is better" if chart.higher_better else "lower is better"
-    ax.set_xlabel(f"{chart.unit}   ·   {better}" + ("   (log scale)" if chart.log else ""),
+    ax.set_xlabel(f"{unit}   ·   {better}" + ("   (log scale)" if chart.log else ""),
                   fontsize=9, color=GRAY)
     ax.set_xlim(right=xmax * (2.9 if chart.log else 1.28))
 
@@ -391,7 +523,7 @@ def render(chart: Chart, only_keys=None, out_stem: str | None = None) -> None:
     present = [l for l in LANG_ORDER if any(_served(r) and LANGS.get(r["_key"]) == l for r in rows)]
     handles = [Patch(facecolor=LANG_COLORS[l], label=l) for l in present]
     if any(not _served(r) for r in rows):
-        handles.append(Patch(facecolor=MUTE, label="did not serve"))
+        handles.append(Patch(facecolor=MUTE, label=chart.not_served_text.lstrip("✕ ").strip()))
     if ns > 1:  # a muted secondary series (idle RAM) — label it too
         handles.append(Patch(facecolor=MUTE, label=chart.series[1].legend))
     if handles:
@@ -406,6 +538,8 @@ def render(chart: Chart, only_keys=None, out_stem: str | None = None) -> None:
         bits.append(str(meta["hardware"]))
     if "concurrency" in meta and "payload_bytes" in meta:
         bits.append(f"{meta['concurrency']}× {int(meta['payload_bytes'])//1000}KB sustained")
+    if clamped:  # a gateway measured faster than direct-to-mock, i.e. inside measurement noise
+        bits.append("sub-noise negative differences are shown as 0")
     bits.append("bars colored by implementation language")
     fig.text(0.008, 0.012, "  ·  ".join(bits) + f"     github.com/GetBusbar/benchmarking — regenerated {RENDER_TS} from raw results",
              fontsize=7.3, color=GRAY)
@@ -415,6 +549,18 @@ def render(chart: Chart, only_keys=None, out_stem: str | None = None) -> None:
     fig.savefig(out, dpi=300, bbox_inches="tight", facecolor="white")
     plt.close(fig)
     print(f"wrote {out}")
+
+
+def _suite_map(suite: str) -> dict:
+    """key → parsed results/<suite>/<key>.json for every gateway with a result file. {} when the
+    suite hasn't been run yet, so the lane table/charts degrade to absent instead of crashing."""
+    d = RESULTS / suite
+    out = {}
+    for key in GATEWAYS:
+        p = d / f"{key}.json"
+        if p.exists():
+            out[key] = json.loads(p.read_text())
+    return out
 
 
 def _merge() -> dict:
@@ -528,6 +674,67 @@ def _report_md(rows: list, title: str, charts: list, pending: tuple = (), chart_
             if len(err) > 300:
                 err = err[:300] + "…"
             lines.append(f"- **{name}** — {err}")
+        lines.append("")
+    # ── the lane suites: streaming / translation / governance ────────────────────────────────────
+    # Their own table, built from results/{stream,xlate,governed}/<gateway>.json. A suite that
+    # hasn't been run yet simply contributes empty cells; the whole section disappears when none
+    # of the three has any result. "cannot" cells ARE the story: a gateway that answers 200 but
+    # never frames, or cannot take an Anthropic request, is recorded, not hidden.
+    stream_m, xlate_m, governed_m = _suite_map("stream"), _suite_map("xlate"), _suite_map("governed")
+    row_keys = [k for k, _ in rows]
+    lane_keys = [k for k in row_keys if k in stream_m or k in xlate_m or k in governed_m]
+    if lane_keys:
+        lines.append("## Streaming, translation and governance")
+        lines.append("")
+        lines.append("Same box, same mock, one gateway at a time. Streaming figures are the overhead "
+                     "the gateway adds on top of the mock's paced SSE stream; translation is an "
+                     "Anthropic client against an OpenAI-shape upstream (the conversion is the work "
+                     "being measured); governed is sustained throughput with key auth, rate limits "
+                     "and budgets enforced, next to the same gateway running plain.")
+        lines.append("")
+        lines.append("| Gateway | Added TTFT (p99) | Added per-token (p99) | SSE streams | Translated RPS @20ms | Governed RPS @20ms | Governed vs plain |")
+        lines.append("|---|--:|--:|--:|--:|--:|--:|")
+
+        def us_cell(r, field):
+            v = r.get(field)
+            if v is None:
+                return "n/a"
+            v = max(float(v), 0.0)  # sub-noise negatives read as 0, matching the charts
+            return f"{v/1000:,.1f} ms" if v >= 1000 else f"{int(round(v)):,} µs"
+
+        for key in lane_keys:
+            s, x, g = stream_m.get(key), xlate_m.get(key), governed_m.get(key)
+            if s is None:
+                ttft = gap = streams = "n/a"
+            elif not s.get("stream_served"):
+                ttft = gap = streams = "✕ no SSE streaming"
+            else:
+                ttft = us_cell(s, "stream_added_ttft_p99_us")
+                gap = us_cell(s, "stream_added_gap_p99_us")
+                streams = f"{int(s.get('stream_sustained_streams') or 0):,}"
+                fps = float(s.get("stream_sustained_fps") or 0)
+                if fps > 0:
+                    streams += f" ({fps:,.0f} fps)"
+            if x is None:
+                xl = "n/a"
+            elif not x.get("xlate_served"):
+                xl = "✕ cannot translate"
+            else:
+                xl = f"{int(x.get('xlate_rps_sustained_20ms') or 0):,}"
+            if g is None:
+                gv = pct = "n/a"
+            elif not g.get("governed_served"):
+                gv, pct = "✕ no native key governance", "n/a"
+            else:
+                gv = f"{int(g.get('governed_rps_sustained_20ms') or 0):,}"
+                p = g.get("governed_vs_plain_sustained_pct")
+                pct = f"{float(p):+.1f}%" if p is not None else "n/a"
+            lines.append(f"| {_linked(key)} | {ttft} | {gap} | {streams} | {xl} | {gv} | {pct} |")
+        lines.append("")
+        lines.append("**✕** cells are measured refusals, not gaps: the gateway was offered the load "
+                     "and could not do the thing (buffered instead of streaming, rejected the "
+                     "Anthropic shape, or has no native key/limit governance). **n/a** = that suite "
+                     "hasn't been run for this gateway yet.")
         lines.append("")
     for c in charts:
         png = f"{chart_prefix}{c}"  # top5 report points at its own top5_*.png set
