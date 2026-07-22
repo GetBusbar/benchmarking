@@ -1,0 +1,25 @@
+# Infrastructure-as-code for the onthebench.ai Plausible reverse-proxy Worker.
+#
+# Deploy:  cd site/workers && npx wrangler@4 deploy --config wrangler.plausible-relay.toml
+# Dry-run: npx wrangler@4 deploy --config wrangler.plausible-relay.toml --dry-run
+#
+# account_id is an identifier, not a secret. The Worker needs no secrets.
+#
+# The routes below only resolve once onthebench.ai's nameservers point at
+# Cloudflare (the zone must be active). Deploying the script before cutover is
+# safe; adding the routes is the step that goes live at cutover time.
+
+name = "onthebench-plausible-relay"
+main = "plausible-relay.mjs"
+compatibility_date = "2026-07-01"
+account_id = "91612b184a379a695266d84761cbee8f"
+
+# Serve the proxied Plausible script and event endpoint on the production
+# hostname under /relay/. Enable these at cutover (see runbook).
+[[routes]]
+pattern = "onthebench.ai/relay/js/script.js"
+zone_name = "onthebench.ai"
+
+[[routes]]
+pattern = "onthebench.ai/relay/api/event"
+zone_name = "onthebench.ai"

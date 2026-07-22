@@ -1,0 +1,46 @@
+# Deploy the results site to Cloudflare Pages (onthebench.ai).
+#
+# Replaces the GitHub Pages workflow (pages.yml). Once this is confirmed green
+# and the nameserver cutover to Cloudflare is complete, pages.yml can be deleted.
+#
+# gen-data.mjs scans gateways/*/gateway.sh + results/**/*.json, copies the chart
+# PNGs and bundled fonts into site/, and the finished site/ directory is the
+# artifact that wrangler uploads to Cloudflare Pages.
+#
+# Requires two repo secrets (Settings -> Secrets and variables -> Actions):
+#   CLOUDFLARE_API_TOKEN   token with Pages:Edit on the account
+#   CLOUDFLARE_ACCOUNT_ID  91612b184a379a695266d84761cbee8f
+name: cf-pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "results/**"
+      - "gateways/**"
+      - "site/**"
+      - ".github/workflows/cf-pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cf-pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Generate site data
+        run: node site/gen-data.mjs
+      - name: Deploy to Cloudflare Pages
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: npx wrangler@4 pages deploy site --project-name=onthebench --branch=main
