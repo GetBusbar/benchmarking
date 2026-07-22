@@ -546,7 +546,7 @@ const MATRIX_LABELS = {
 const cellState = (cell) =>
   cell.served === true ? ["served", "served"]
     : cell.served === "unprobed_auth" ? ["unprobed", "unprobed (auth)"]
-      : cell.served === "not_configurable" ? ["notconf", "not configurable"]
+      : cell.served === "not_configurable" ? ["notconf", "not declared"]
         : ["failed", "not served"];
 
 function laneStamp(j) {
@@ -759,7 +759,7 @@ function renderMatrix() {
     const t = tally(g);
     const bits = [`<b class="pass-count">${t.pass}</b>/36 pass`];
     if (t.fail) bits.push(`${t.fail} fail`);
-    if (t.notconf) bits.push(`${t.notconf} not configurable`);
+    if (t.notconf) bits.push(`${t.notconf} not declared`);
     if (t.unprobed) bits.push(`${t.unprobed} unprobed (auth)`);
     return `<section class="matrix-gw">
       <header class="matrix-gw-head"><h3>${
@@ -776,7 +776,7 @@ function renderMatrix() {
             const [cls, label] = cellState(cell);
             const diag = e === c ? " diag" : "";
             const tip = cell.served === "not_configurable"
-              ? "not configurable: the manifest defines no egress config for that dialect"
+              ? `not declared supported by this gateway${cell.verdict_note ? ": " + cell.verdict_note : ""}`
               : `${label}. ${cell.verdict_note || ""}`;
             return `<td><span class="cell ${cls}${diag}" data-gw="${esc(g.key)}" data-egress="${esc(e)}" data-cell="${esc(c)}" title="${esc(g.display)} / ${esc(MATRIX_LABELS[c])} in, ${esc(MATRIX_LABELS[e])} upstream: ${esc(tip)}"></span></td>`;
           }).join("")

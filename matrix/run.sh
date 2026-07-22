@@ -90,9 +90,63 @@ source "$ROOT/lib/harness.sh"
 # shellcheck source=/dev/null
 source "$GW_DIR/gateway.sh"
 suite_deadline_start
-GW_MATRIX_EGRESS="${GW_MATRIX_EGRESS:-openai}"
 EGRESS_ALL="openai openai-responses anthropic gemini cohere bedrock"
 INGRESS_ALL="openai openai-responses anthropic gemini cohere bedrock"
+
+# ── declared capability matrix (GW_MATRIX_CAP) ──────────────────────────────────────────────────
+# Every manifest declares a 6x6 (ingress x egress) matrix of 1/0: the gateway's OWN claim, per its
+# project documentation, that it can translate that ingress dialect into that upstream (egress)
+# dialect. This is the maintainer's declaration (populated by us from each project's docs as a
+# stand-in until real maintainers PR their own). The rule the site enforces:
+#   declared 1 -> we PROBE the cell -> PASS (green) or FAIL (red). A red can ONLY appear for a cell
+#                 the gateway CLAIMED and then failed on the field run, so we can never be accused of
+#                 unfairly failing a gateway on something it never claimed.
+#   declared 0 -> NOT PROBED -> not_configurable (grey): the maintainer says "we do not do this".
+# Grey is thus always a cited capability limit (GW_MATRIX_CAP_NOTE names why), never our generosity
+# and never "we didn't get to it".
+#
+# Format: 6 whitespace-separated rows (rows = ingress in EGRESS_ALL order), each row 6 chars of 1/0
+# (cols = egress in EGRESS_ALL order). Blank/unset => back-compat: derive a full column of 1s for
+# every egress dialect listed in GW_MATRIX_EGRESS (the pre-cap behaviour), 0 elsewhere.
+declare -A CAP
+_cap_col_any=""   # space-list of egress dialects with >=1 declared-1 cell (drives which cols launch)
+build_cap(){
+  local rows i j r ing eg
+  # normalise: strip whitespace to a flat 36-char string in row-major (ingress-major) order.
+  rows="$(printf '%s' "${GW_MATRIX_CAP:-}" | tr -cd '01')"
+  if [ "${#rows}" -ne 36 ]; then
+    # No (or malformed) declaration: fall back to GW_MATRIX_EGRESS as a full-column claim.
+    local egr="${GW_MATRIX_EGRESS:-openai}"
+    i=0
+    for ing in $INGRESS_ALL; do
+      for eg in $EGRESS_ALL; do
+        case " $egr " in *" $eg "*) CAP["$ing/$eg"]=1;; *) CAP["$ing/$eg"]=0;; esac
+      done
+    done
+  else
+    i=0
+    for ing in $INGRESS_ALL; do
+      j=0
+      for eg in $EGRESS_ALL; do
+        CAP["$ing/$eg"]="${rows:$((i*6+j)):1}"; j=$((j+1))
+      done
+      i=$((i+1))
+    done
+  fi
+  # Which egress columns have any capable cell? Those (and only those) get launched + probed.
+  for eg in $EGRESS_ALL; do
+    for ing in $INGRESS_ALL; do
+      if [ "${CAP["$ing/$eg"]}" = 1 ]; then _cap_col_any="$_cap_col_any $eg"; break; fi
+    done
+  done
+}
+cap(){ echo "${CAP["$1/$2"]:-0}"; }   # cap <ingress> <egress> -> 1|0
+col_capable(){ case " $_cap_col_any " in *" $1 "*) return 0;; *) return 1;; esac; }
+build_cap
+# Reason shown on a declared-0 (grey) cell's tooltip; a manifest overrides it with a cited string.
+GW_MATRIX_CAP_NOTE="${GW_MATRIX_CAP_NOTE:-this gateway does not declare support for this ingress/upstream dialect pair}"
+# GW_MATRIX_EGRESS still drives the actual relaunch wiring; ensure every capable column is launchable.
+GW_MATRIX_EGRESS="${GW_MATRIX_EGRESS:-openai}"
 
 # Per-cell ingress paths: manifest override wins, else the protocol's canonical default. The
 # anthropic cell reuses xlate's GW_ANTHROPIC_PATH so a manifest wired for xlate needs nothing new.
@@ -335,9 +389,6 @@ warm_up(){ # egress
   return 1
 }
 
-egress_listed(){ # dialect in GW_MATRIX_EGRESS?
-  case " $GW_MATRIX_EGRESS " in *" $1 "*) return 0;; *) return 1;; esac
-}
 
 UPSTREAMS_JSON=""
 COMPAT_CELLS=""; COMPAT_SHAPE=""; COMPAT_SERVED=false; COMPAT_ERR=""
@@ -345,7 +396,7 @@ for EGRESS in $EGRESS_ALL; do
   CELLS_JSON=""
   # Wall-clock backstop: if a pathological gateway has already burned the suite ceiling, stop probing
   # further egress columns and record them not-served (timeout) so run-all can never wedge here.
-  if egress_listed "$EGRESS" && suite_deadline_expired; then
+  if col_capable "$EGRESS" && suite_deadline_expired; then
     log "[$GATEWAY] egress=$EGRESS: suite wall-clock ceiling reached — recording not served, moving on"
     WARM_OK=0
     for CELL in $INGRESS_ALL; do
@@ -357,14 +408,17 @@ for EGRESS in $EGRESS_ALL; do
     }}"
     continue
   fi
-  if ! egress_listed "$EGRESS"; then
-    log "[$GATEWAY] egress=$EGRESS: not configurable (manifest defines no egress config for this dialect)"
+  if ! col_capable "$EGRESS"; then
+    # No cell in this egress column is declared capable: the gateway does not claim ANY translation
+    # into this upstream dialect. Emit every cell grey with its cited capability-limit reason; never
+    # launch or probe. Grey here is a declared limit, not untested generosity.
+    log "[$GATEWAY] egress=$EGRESS: not declared (no capability claim for this upstream dialect)"
     for CELL in $INGRESS_ALL; do
       emit_cell "$CELL" '"not_configurable"' "" "$(ingress_path "$CELL")" \
-        "manifest defines no egress config for the $EGRESS upstream dialect; the gateway was not launched against that upstream shape" ""
+        "$GW_MATRIX_CAP_NOTE" ""
     done
     UPSTREAMS_JSON="${UPSTREAMS_JSON}${UPSTREAMS_JSON:+,}
-    \"$EGRESS\": {\"configurable\": false, \"served\": false, \"cells\": {$CELLS_JSON
+    \"$EGRESS\": {\"configurable\": false, \"served\": false, \"cap_note\": \"$(json_escape "$GW_MATRIX_CAP_NOTE")\", \"cells\": {$CELLS_JSON
     }}"
     continue
   fi
@@ -382,6 +436,14 @@ for EGRESS in $EGRESS_ALL; do
   fi
   EG_SERVED=$([ "$WARM_OK" = 1 ] && echo true || echo false)
   for CELL in $INGRESS_ALL; do
+    # Per-cell capability gate: a declared-0 (ingress,egress) pair is grey without probing even when
+    # the egress column is launched (the gateway claims SOME translations into this upstream but not
+    # this ingress). Only declared-1 cells are probed for a real pass/fail.
+    if [ "$(cap "$CELL" "$EGRESS")" != 1 ]; then
+      emit_cell "$CELL" '"not_configurable"' "" "$(ingress_path "$CELL")" "$GW_MATRIX_CAP_NOTE" ""
+      log "[$GATEWAY]   $EGRESS <- $CELL : not declared (grey)"
+      continue
+    fi
     BODY="$(ingress_body "$CELL")"
     case "$CELL" in
       anthropic) run_cell "$EGRESS" "$CELL" "$(ingress_path "$CELL")" "$BODY" \
@@ -411,6 +473,7 @@ cat > "$RESULTS/$GATEWAY.json" <<JSON
   "upstream_shape": "$COMPAT_SHAPE",
   "upstream_note": "v2: full 6x6. Top-level cells are the $COMPAT_SHAPE-egress row for v1 compatibility; the full grid is under upstreams.<egress>.cells keyed by ingress dialect.",
   "egress_configured": "$GW_MATRIX_EGRESS",
+  "cap_note": "$(json_escape "$GW_MATRIX_CAP_NOTE")",
   "cells": {$COMPAT_CELLS
   },
   "upstreams": {$UPSTREAMS_JSON
