@@ -1,12 +1,32 @@
-/* AI Gateway Benchmarks results site. Vanilla JS, no dependencies.
-   Reads data.json (emitted by gen-data.mjs) and renders the views: results table with
+/* On the Bench: AI tool benchmark results site. Vanilla JS, no dependencies.
+   The benchmarked thing is a CATEGORY (today: gateways). Each category reads its
+   data bundle (emitted by gen-data.mjs) and renders the views: results table with
    search/filters, per-gateway drawer, compare mode, protocol matrix, charts, method.
-   State (filters, sort, search, compare, drawer) round-trips through location.hash so
-   every view is permalinkable. Pure logic (filtering, hash codec, sweep chart) is
-   exported for the node smoke test in site/test.mjs. */
+   State round-trips through clean path URLs: /<category>/<view>?<params> via the
+   History API, so every view is permalinkable. Pure logic (filtering, URL codec,
+   sweep chart) is exported for the node smoke test in site/test.mjs. */
 "use strict";
 
 const NODE = typeof window === "undefined";
+
+/* ---- category model ---------------------------------------------------------
+   A category is the class of AI tool being benchmarked. Each entry declares its
+   id (the first URL path segment), nav label, page tagline, and data source.
+   EXTENSION SEAM: to add a category (e.g. models), add an entry here with its own
+   data bundle (convention: data/<category>.json, emitted by that category's
+   generator) and teach gen-data.mjs to emit it. Routing, nav, and permalinks pick
+   it up automatically; the per-category views/columns stay category-specific. */
+const CATEGORIES = {
+  gateways: {
+    id: "gateways",
+    label: "Gateways",
+    tagline: "Reproducible gateway overhead measurement on neutral hardware. Same box, same mock upstream, same load, same CPU pin for every gateway; every number regenerates from committed JSON.",
+    data: "/data.json",
+  },
+};
+const DEFAULT_CATEGORY = "gateways";
+const VIEWS = ["results", "matrix", "charts", "method"];
+const VIEW_LABELS = { results: "Results", matrix: "Protocol matrix", charts: "Charts", method: "Method" };
 
 /* Language chip colours: kept in sync with LANG_COLORS in charts.py. */
 const LANG_COLORS = {
@@ -191,10 +211,11 @@ const LANES = [
   },
 ];
 
-/* ---- state + URL hash codec ------------------------------------------------- */
+/* ---- state + URL codec ------------------------------------------------------ */
 function newState() {
   return {
     data: null,
+    category: DEFAULT_CATEGORY,
     view: "results",
     q: "",
     sortCol: "rps20",
@@ -213,11 +234,12 @@ const state = newState();
 
 const CAPS = [["needStream", "stream"], ["needXlate", "xlate"], ["needGoverned", "governed"]];
 
-/* Serialize the shareable parts of state into a hash query string. Defaults are
-   omitted so the pristine view keeps a clean URL. */
-function encodeState(st) {
+/* Serialize the shareable parts of state into a clean path URL:
+   /<category>/<view>?<params>. The default view (results) omits the view segment
+   and default params are omitted, so the pristine view keeps a clean URL
+   (/gateways). Returns path + query, e.g. /gateways/matrix?sort=mempeak&dir=asc. */
+function encodeUrl(st) {
   const p = new URLSearchParams();
-  if (st.view && st.view !== "results") p.set("view", st.view);
   if (st.q) p.set("q", st.q);
   if (st.classes.size) p.set("cls", [...st.classes].sort().join("|"));
   if (st.langs.size) p.set("lang", [...st.langs].sort().join("|"));
@@ -230,14 +252,27 @@ function encodeState(st) {
   if (st.cmp.length) p.set("cmp", st.cmp.join("|"));
   if (st.cmpOpen) p.set("cv", "1");
   if (st.drawer) p.set("gw", st.drawer);
-  return p.toString();
+  const cat = CATEGORIES[st.category] ? st.category : DEFAULT_CATEGORY;
+  const path = st.view && st.view !== "results" ? `/${cat}/${st.view}` : `/${cat}`;
+  const qs = p.toString();
+  return qs ? `${path}?${qs}` : path;
 }
 
-function decodeState(hash) {
+/* Parse a path + query (+ optional legacy #hash) back into state.
+   Unknown categories and views fall back to the defaults, so / normalizes to
+   /gateways (results). Pre-path-routing links carried everything in the hash
+   (#view=matrix&sort=...); when the hash holds params, it wins over the query so
+   old shared URLs keep resolving, and boot() then rewrites them to path form. */
+function decodeUrl(pathname, search, hash) {
   const st = newState();
-  const p = new URLSearchParams(String(hash || "").replace(/^#/, ""));
+  const segs = String(pathname || "/").split("/").filter(Boolean);
+  let i = 0;
+  if (segs[i] && CATEGORIES[segs[i]]) st.category = segs[i++];
+  if (segs[i] && VIEWS.includes(segs[i])) st.view = segs[i];
+  const legacy = String(hash || "").replace(/^#/, "");
+  const p = new URLSearchParams(legacy.includes("=") ? legacy : String(search || "").replace(/^\?/, ""));
   const list = (k) => (p.get(k) || "").split("|").filter(Boolean);
-  if (p.get("view")) st.view = p.get("view");
+  if (p.get("view") && VIEWS.includes(p.get("view"))) st.view = p.get("view"); /* legacy hash form */
   st.q = p.get("q") || "";
   st.classes = new Set(list("cls"));
   st.langs = new Set(list("lang"));
@@ -255,10 +290,27 @@ function decodeState(hash) {
   return st;
 }
 
-function syncHash() {
+/* Push a history entry for navigation-shaped interactions (tabs, sorts, filter
+   clicks, compare, drawer) so back/forward walks through them; replace for
+   continuous input (search typing) so it never spams history. */
+function syncUrl(push = false) {
   if (NODE) return;
-  const s = encodeState(state);
-  history.replaceState(null, "", s ? `#${s}` : location.pathname + location.search);
+  const url = encodeUrl(state);
+  const cur = location.pathname + location.search;
+  try {
+    if (url !== cur || location.hash) {
+      if (push) history.pushState(null, "", url);
+      else history.replaceState(null, "", url);
+    }
+  } catch (e) { /* file:// or sandboxed: the URL bar goes stale but the app still works */ }
+  updateTitle();
+}
+
+function updateTitle() {
+  if (NODE) return;
+  const cat = CATEGORIES[state.category] || CATEGORIES[DEFAULT_CATEGORY];
+  const view = state.view !== "results" ? ` ${VIEW_LABELS[state.view] || state.view}` : "";
+  document.title = `${cat.label}${view} · On the Bench · AI tool benchmarks`;
 }
 
 /* ---- filtering (pure) ------------------------------------------------------- */
@@ -485,7 +537,7 @@ function renderTable() {
       if (!c || c.sortable === false) return;
       if (state.sortCol === id) state.sortDesc = !state.sortDesc;
       else { state.sortCol = id; state.sortDesc = !!c.desc; }
-      renderTable(); syncHash();
+      renderTable(); syncUrl(true);
     });
   });
   tbody.querySelectorAll("input[data-cmp]").forEach((cb) => {
@@ -495,7 +547,7 @@ function renderTable() {
   tbody.querySelectorAll("tr").forEach((tr) => {
     tr.addEventListener("click", (ev) => {
       if (ev.target.closest("a, input")) return;
-      openDrawer(tr.dataset.gw);
+      openDrawer(tr.dataset.gw, true);
     });
   });
 }
@@ -513,7 +565,7 @@ function chipGroup(boxId, values, set, colorFor) {
     apply();
     b.addEventListener("click", () => {
       if (set.has(b.dataset.v)) set.delete(b.dataset.v); else set.add(b.dataset.v);
-      apply(); renderTable(); syncHash();
+      apply(); renderTable(); syncUrl(true);
     });
   });
 }
@@ -521,10 +573,10 @@ function chipGroup(boxId, values, set, colorFor) {
 /* Wire the persistent inputs exactly once (renderFilters may re-run on hashchange). */
 function initFilterControls() {
   const search = document.getElementById("search");
-  search.addEventListener("input", () => { state.q = search.value; renderTable(); syncHash(); });
+  search.addEventListener("input", () => { state.q = search.value; renderTable(); syncUrl(false); });
   for (const [key, name] of CAPS) {
     const el = document.getElementById(`f-${name}`);
-    el.addEventListener("change", () => { state[key] = el.checked; renderTable(); syncHash(); });
+    el.addEventListener("change", () => { state[key] = el.checked; renderTable(); syncUrl(true); });
   }
 }
 
@@ -600,7 +652,7 @@ function drawerHtml(g) {
   return h;
 }
 
-function openDrawer(key) {
+function openDrawer(key, push = false) {
   const g = state.data.gateways.find((x) => x.key === key);
   if (!g) return;
   state.drawer = key;
@@ -614,13 +666,13 @@ function openDrawer(key) {
     series.push({ label: "max proxy", color: "#6cb6ff", sweep: g.perf.sweep_max_proxy });
   }
   renderSweepCharts(box, series, chartTheme());
-  syncHash();
+  syncUrl(push);
 }
 function closeDrawer() {
   state.drawer = null;
   document.getElementById("drawer").classList.add("hidden");
   document.getElementById("backdrop").classList.add("hidden");
-  syncHash();
+  syncUrl(true);
 }
 
 /* ---- compare mode ----------------------------------------------------------- */
@@ -631,7 +683,7 @@ function toggleCompare(key) {
   if (state.cmp.length < 2) state.cmpOpen = false;
   renderTable(); renderCompareBar();
   if (state.cmpOpen) renderCompare(); else closeCompare(false);
-  syncHash();
+  syncUrl(true);
 }
 
 function renderCompareBar() {
@@ -647,10 +699,10 @@ function renderCompareBar() {
       <button id="cmp-open" ${state.cmp.length < 2 ? "disabled" : ""}>Compare</button>
       <button id="cmp-clear" class="ghost">Clear</button>
     </span>`;
-  document.getElementById("cmp-open").addEventListener("click", () => { state.cmpOpen = true; renderCompare(); syncHash(); });
+  document.getElementById("cmp-open").addEventListener("click", () => { state.cmpOpen = true; renderCompare(); syncUrl(true); });
   document.getElementById("cmp-clear").addEventListener("click", () => {
     state.cmp = []; state.cmpOpen = false;
-    renderTable(); renderCompareBar(); closeCompare(false); syncHash();
+    renderTable(); renderCompareBar(); closeCompare(false); syncUrl(true);
   });
 }
 
@@ -719,7 +771,7 @@ function renderCompare() {
 function closeCompare(sync = true) {
   state.cmpOpen = false;
   document.getElementById("compare-panel").classList.add("hidden");
-  if (sync) syncHash();
+  if (sync) syncUrl(true);
 }
 
 /* ---- protocol matrix view --------------------------------------------------- */
@@ -844,8 +896,10 @@ function renderCharts() {
   /* full-field charts first, then top5 variants */
   const ordered = charts.slice().sort((a, b) =>
     (a.file.includes("top5_") - b.file.includes("top5_")) || a.file.localeCompare(b.file));
+  /* Root-absolute src: the page URL may be a deep path (/gateways/charts), so a
+     relative charts/ path would resolve under the route, not the site root. */
   gallery.innerHTML = ordered.map((c) =>
-    `<figure data-src="${esc(c.file)}"><img src="${esc(c.file)}" alt="${esc(chartCaption(c.file))}" loading="lazy"><figcaption>${esc(chartCaption(c.file))}</figcaption></figure>`
+    `<figure data-src="/${esc(c.file)}"><img src="/${esc(c.file)}" alt="${esc(chartCaption(c.file))}" loading="lazy"><figcaption>${esc(chartCaption(c.file))}</figcaption></figure>`
   ).join("");
   gallery.querySelectorAll("figure").forEach((f) => {
     f.addEventListener("click", () => {
@@ -874,22 +928,56 @@ function renderStatic() {
   hw.textContent = bits.join(" · ");
 }
 
-/* ---- tabs ------------------------------------------------------------------- */
+/* ---- category nav + view tabs ----------------------------------------------- */
+function viewPath(category, view) {
+  return view && view !== "results" ? `/${category}/${view}` : `/${category}`;
+}
+
+/* The category row above the tabs. One category today; new CATEGORIES entries
+   appear here automatically. The links are real anchors (open-in-new-tab works)
+   with the click intercepted into a pushState navigation. */
+function renderCatNav() {
+  const nav = document.getElementById("catnav");
+  if (!nav) return;
+  nav.innerHTML = `<span class="catnav-label">Benchmarking</span>` +
+    Object.values(CATEGORIES).map((c) =>
+      `<a class="cat${c.id === state.category ? " active" : ""}" data-cat="${esc(c.id)}" href="/${esc(c.id)}">${esc(c.label)}</a>`
+    ).join("");
+  nav.querySelectorAll("a.cat").forEach((a) => a.addEventListener("click", (ev) => {
+    if (ev.metaKey || ev.ctrlKey || ev.shiftKey) return; /* let new-tab clicks through */
+    ev.preventDefault();
+    const fresh = newState();
+    fresh.category = a.dataset.cat;
+    applyState(fresh);
+    syncUrl(true);
+    ensureData().then(renderAll);
+  }));
+  const tagline = document.getElementById("tagline");
+  const cat = CATEGORIES[state.category] || CATEGORIES[DEFAULT_CATEGORY];
+  if (tagline) tagline.textContent = cat.tagline;
+}
+
 function showView(view) {
   state.view = view;
-  document.querySelectorAll(".tab").forEach((x) => x.classList.toggle("active", x.dataset.view === view));
+  document.querySelectorAll(".tab").forEach((x) => {
+    x.classList.toggle("active", x.dataset.view === view);
+    x.setAttribute("href", viewPath(state.category, x.dataset.view));
+  });
   document.querySelectorAll(".view").forEach((v) => v.classList.toggle("hidden", v.id !== `view-${view}`));
+  updateTitle();
 }
 function initTabs() {
-  document.querySelectorAll(".tab").forEach((t) => t.addEventListener("click", () => {
-    showView(t.dataset.view); syncHash();
+  document.querySelectorAll(".tab").forEach((t) => t.addEventListener("click", (ev) => {
+    if (ev.metaKey || ev.ctrlKey || ev.shiftKey) return;
+    ev.preventDefault();
+    showView(t.dataset.view); syncUrl(true);
   }));
 }
 
 /* ---- boot ------------------------------------------------------------------- */
 function applyState(st) {
   Object.assign(state, {
-    view: st.view, q: st.q, sortCol: st.sortCol, sortDesc: st.sortDesc,
+    category: st.category, view: st.view, q: st.q, sortCol: st.sortCol, sortDesc: st.sortDesc,
     langs: st.langs, classes: st.classes,
     needStream: st.needStream, needXlate: st.needXlate, needGoverned: st.needGoverned,
     cmp: st.cmp, cmpOpen: st.cmpOpen, drawer: st.drawer,
@@ -907,6 +995,7 @@ function sanitizeState() {
 }
 
 function renderAll() {
+  renderCatNav();
   showView(state.view);
   renderFilters();
   renderTable();
@@ -918,13 +1007,28 @@ function renderAll() {
   if (state.cmpOpen && state.cmp.length >= 2) renderCompare();
 }
 
-function boot() {
-  fetch("data.json")
-    .then((r) => { if (!r.ok) throw new Error(`data.json: HTTP ${r.status}`); return r.json(); })
+/* Fetch the current category's data bundle if it is not the one already loaded.
+   With one category this runs once at boot; the seam is what a future second
+   category navigates through. */
+let loadedCategory = null;
+function ensureData() {
+  const cat = CATEGORIES[state.category] || CATEGORIES[DEFAULT_CATEGORY];
+  if (loadedCategory === cat.id && state.data) return Promise.resolve(state.data);
+  return fetch(cat.data)
+    .then((r) => { if (!r.ok) throw new Error(`${cat.data}: HTTP ${r.status}`); return r.json(); })
     .then((data) => {
-      applyState(decodeState(location.hash));
       state.data = data;
+      loadedCategory = cat.id;
       sanitizeState();
+      return data;
+    });
+}
+
+function boot() {
+  applyState(decodeUrl(location.pathname, location.search, location.hash));
+  ensureData()
+    .then(() => {
+      syncUrl(false); /* normalize: / -> /gateways, legacy #hash -> path form */
       initTabs();
       initFilterControls();
       initThemeToggle();
@@ -938,26 +1042,28 @@ function boot() {
         if (state.drawer) closeDrawer();
         else if (state.cmpOpen) closeCompare();
       });
-      window.addEventListener("hashchange", () => {
-        applyState(decodeState(location.hash));
-        sanitizeState();
-        if (!state.drawer) { document.getElementById("drawer").classList.add("hidden"); document.getElementById("backdrop").classList.add("hidden"); }
-        if (!state.cmpOpen) document.getElementById("compare-panel").classList.add("hidden");
-        renderAll();
+      window.addEventListener("popstate", () => {
+        applyState(decodeUrl(location.pathname, location.search, location.hash));
+        ensureData().then(() => {
+          sanitizeState();
+          if (!state.drawer) { document.getElementById("drawer").classList.add("hidden"); document.getElementById("backdrop").classList.add("hidden"); }
+          if (!state.cmpOpen) document.getElementById("compare-panel").classList.add("hidden");
+          renderAll();
+        });
       });
     })
     .catch((err) => {
       document.querySelector("main").innerHTML =
-        `<p class="muted">Could not load data.json (${esc(err.message)}). Run <code>node site/gen-data.mjs</code> first.</p>`;
+        `<p class="muted">Could not load site data (${esc(err.message)}). Run <code>node site/gen-data.mjs</code> first.</p>`;
     });
 }
 
 if (NODE) {
   /* Exports for the node smoke test (site/test.mjs). */
   module.exports = {
-    newState, encodeState, decodeState, applyFilters,
+    newState, encodeUrl, decodeUrl, viewPath, applyFilters,
     drawSweep, niceStep, fmtTick, COLUMNS, LANES, naText,
-    cellState, matrixCellTip,
+    cellState, matrixCellTip, CATEGORIES, DEFAULT_CATEGORY, VIEWS,
   };
 } else {
   boot();

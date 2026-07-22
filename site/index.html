@@ -3,9 +3,11 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>AI Gateway Benchmarks</title>
-<meta name="description" content="Reproducible overhead measurements for self-hostable AI gateways: same box, same mock, same load, same CPU pin for every gateway.">
-<link rel="stylesheet" href="style.css">
+<title>Gateways · On the Bench · AI tool benchmarks</title>
+<meta name="description" content="On the Bench: reproducible AI tool benchmarks. Current category: self-hostable AI gateways, measured on the same box, same mock, same load, same CPU pin.">
+<!-- Root-absolute asset URLs: the SPA fallback serves this shell for deep paths
+     like /gateways/matrix, where relative hrefs would resolve under the route. -->
+<link rel="stylesheet" href="/style.css">
 <script>
 /* Set the theme before first paint so there is no flash of the wrong palette.
    Stored choice wins; otherwise follow the OS prefers-color-scheme. */
@@ -30,13 +32,16 @@
       <span class="tt-label tt-sun">Light</span>
       <span class="tt-label tt-moon">Dark</span>
     </button>
-    <h1>AI Gateway Benchmarks</h1>
-    <p class="tagline">Reproducible gateway overhead measurement on neutral hardware. Same box, same mock upstream, same load, same CPU pin for every gateway; every number regenerates from committed JSON.</p>
+    <h1>On the Bench <span class="brand-sub">AI tool benchmarks</span></h1>
+    <p class="tagline" id="tagline">Reproducible gateway overhead measurement on neutral hardware. Same box, same mock upstream, same load, same CPU pin for every gateway; every number regenerates from committed JSON.</p>
+    <!-- Benchmark category row (populated by app.js from CATEGORIES): the thing
+         being benchmarked. Gateways today; future categories slot in beside it. -->
+    <nav class="catnav" id="catnav" aria-label="Benchmark categories"></nav>
     <nav class="tabs" id="tabs">
-      <button class="tab active" data-view="results">Results</button>
-      <button class="tab" data-view="matrix">Protocol matrix</button>
-      <button class="tab" data-view="charts">Charts</button>
-      <button class="tab" data-view="method">Method</button>
+      <a class="tab active" data-view="results" href="/gateways">Results</a>
+      <a class="tab" data-view="matrix" href="/gateways/matrix">Protocol matrix</a>
+      <a class="tab" data-view="charts" href="/gateways/charts">Charts</a>
+      <a class="tab" data-view="method" href="/gateways/method">Method</a>
     </nav>
   </div>
 </header>
@@ -163,6 +168,6 @@
   </div>
 </div>
 
-<script src="app.js"></script>
+<script src="/app.js"></script>
 </body>
 </html>

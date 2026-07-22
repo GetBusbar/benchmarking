@@ -1,14 +1,15 @@
 #!/usr/bin/env node
 // SPDX-License-Identifier: Apache-2.0
 // test.mjs: node smoke test for the results site. No dependencies, no browser:
-// app.js exports its pure logic (filtering, hash codec, sweep chart) when run
+// app.js exports its pure logic (filtering, URL codec, sweep chart) when run
 // under node, and the canvas is exercised through a recording 2d-context stub.
 //
 //   node site/test.mjs
 //
 // Covers: gen-data emits GW_CLASS for every gateway; search/class/lang/capability
-// filtering; URL-hash state round-trip; the sweep chart component drawing real
-// committed sweep data through the stub canvas.
+// filtering; path-URL state round-trip (/<category>/<view>?<params>) including
+// legacy-hash decoding; the sweep chart component drawing real committed sweep
+// data through the stub canvas.
 
 import { execFileSync } from "node:child_process";
 import { readFileSync, mkdtempSync, rmSync } from "node:fs";
@@ -93,10 +94,15 @@ test("governance filter keys on capability (supports_governed), not measurement 
   if (genuinelyUnsupported) assert.ok(!shown.includes(genuinelyUnsupported), "genuinely-unsupported gateway must be filtered out");
 });
 
-// ---- URL hash state round-trip ----------------------------------------------
-test("hash state round-trips", () => {
+// ---- path-URL state round-trip ----------------------------------------------
+const parts = (url) => {
+  const u = new URL(url, "https://onthebench.ai");
+  return [u.pathname, u.search];
+};
+
+test("url state round-trips through /<category>/<view>?<params>", () => {
   const st = app.newState();
-  st.view = "results";
+  st.view = "matrix";
   st.q = "bus bar & co";
   st.classes = new Set(["Control plane", "LLM gateway"]);
   st.langs = new Set(["Rust"]);
@@ -106,9 +112,10 @@ test("hash state round-trips", () => {
   st.cmp = ["busbar", "bifrost"];
   st.cmpOpen = true;
   st.drawer = "busbar";
-  const hash = app.encodeState(st);
-  const back = app.decodeState(`#${hash}`);
-  for (const k of ["view", "q", "sortCol", "sortDesc", "needStream", "needXlate", "needGoverned", "cmpOpen", "drawer"]) {
+  const url = app.encodeUrl(st);
+  assert.ok(url.startsWith("/gateways/matrix?"), `path carries category+view: ${url}`);
+  const back = app.decodeUrl(...parts(url));
+  for (const k of ["category", "view", "q", "sortCol", "sortDesc", "needStream", "needXlate", "needGoverned", "cmpOpen", "drawer"]) {
     assert.deepEqual(back[k], st[k], `field ${k}`);
   }
   assert.deepEqual([...back.classes].sort(), [...st.classes].sort());
@@ -116,18 +123,44 @@ test("hash state round-trips", () => {
   assert.deepEqual(back.cmp, st.cmp);
 });
 
-test("default state encodes to an empty hash and decodes back to defaults", () => {
-  assert.equal(app.encodeState(app.newState()), "");
-  const back = app.decodeState("");
+test("default state encodes to /gateways and decodes back to defaults", () => {
+  assert.equal(app.encodeUrl(app.newState()), "/gateways");
+  const back = app.decodeUrl("/gateways", "");
   const def = app.newState();
+  assert.equal(back.category, "gateways");
+  assert.equal(back.view, "results");
   assert.equal(back.sortCol, def.sortCol);
   assert.equal(back.sortDesc, def.sortDesc);
   assert.equal(back.drawer, null);
   assert.deepEqual(back.cmp, []);
 });
 
+test("root, unknown paths and unknown views normalize to gateways results", () => {
+  assert.equal(app.decodeUrl("/", "").category, "gateways");
+  assert.equal(app.decodeUrl("/", "").view, "results");
+  assert.equal(app.decodeUrl("/index.html", "").view, "results");
+  assert.equal(app.decodeUrl("/no-such-category/matrix", "").category, "gateways");
+  assert.equal(app.decodeUrl("/gateways/no-such-view", "").view, "results");
+  // the documented deep link shape
+  const st = app.decodeUrl("/gateways/matrix", "?sort=mempeak&dir=asc");
+  assert.equal(st.view, "matrix");
+  assert.equal(st.sortCol, "mempeak");
+  assert.equal(st.sortDesc, false);
+});
+
+test("legacy hash URLs (#view=...&sort=...) still decode", () => {
+  const st = app.decodeUrl("/", "", "#view=matrix&sort=mempeak&dir=asc&lang=Rust");
+  assert.equal(st.category, "gateways");
+  assert.equal(st.view, "matrix");
+  assert.equal(st.sortCol, "mempeak");
+  assert.equal(st.sortDesc, false);
+  assert.deepEqual([...st.langs], ["Rust"]);
+  // and re-encoding a legacy state yields the clean path form
+  assert.ok(app.encodeUrl(st).startsWith("/gateways/matrix?"));
+});
+
 test("decode rejects a bogus sort column", () => {
-  const back = app.decodeState("#sort=evil&dir=asc");
+  const back = app.decodeUrl("/gateways", "?sort=evil&dir=asc");
   assert.equal(back.sortCol, "rps20");
 });
 
