@@ -174,12 +174,18 @@ fn state_json(rec: &Recorder, recording: bool) -> String {
 /// The SSE frames for one stream, prebuilt once at boot (Bytes clones are refcount bumps).
 /// `head` goes out immediately, then each `delta` after an interval sleep (first delta is
 /// unpaced so direct-to-mock TTFT stays near zero), then `tail`.
+///
+/// The deltas are prebuilt as a VECTOR of `chunks` distinct frames, one per index, with the frame
+/// index embedded in the padding text so no two consecutive content frames are byte-identical. This
+/// costs nothing on the hot path (still a refcount bump per send) but keeps every gateway fair: a
+/// gateway with a repetition/loop guard (e.g. LiteLLM aborts a stream on identical consecutive
+/// chunks) is not tripped by synthetic identical tokens the way a single reused delta would trip it.
 struct StreamFrames {
     openai_head: Vec<Bytes>,
-    openai_delta: Bytes,
+    openai_deltas: Vec<Bytes>,
     openai_tail: Vec<Bytes>,
     anthropic_head: Vec<Bytes>,
-    anthropic_delta: Bytes,
+    anthropic_deltas: Vec<Bytes>,
     anthropic_tail: Vec<Bytes>,
     chunks: u32,
     interval: Duration,
@@ -187,11 +193,31 @@ struct StreamFrames {
 
 impl StreamFrames {
     fn build(chunks: u32, interval_ms: u64, chunk_bytes: usize) -> Self {
-        let pad = "x".repeat(chunk_bytes.max(1));
         let b = |s: String| Bytes::from(s);
+        let width = chunk_bytes.max(1);
+        // One distinct payload per frame index: the index (as decimal) followed by 'x' padding to
+        // `width` bytes, so frame i differs from frame i-1 but every frame is the same size.
+        let pad_for = |i: u32| -> String {
+            let tag = i.to_string();
+            if tag.len() >= width {
+                tag[..width].to_string()
+            } else {
+                let mut s = tag;
+                s.push_str(&"x".repeat(width - s.len()));
+                s
+            }
+        };
+        let openai_deltas: Vec<Bytes> = (0..chunks.max(1)).map(|i| {
+            let pad = pad_for(i);
+            b(format!("data: {{\"id\":\"chatcmpl-x\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"mock\",\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"{pad}\"}},\"finish_reason\":null}}]}}\n\n"))
+        }).collect();
+        let anthropic_deltas: Vec<Bytes> = (0..chunks.max(1)).map(|i| {
+            let pad = pad_for(i);
+            b(format!("event: content_block_delta\ndata: {{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{{\"type\":\"text_delta\",\"text\":\"{pad}\"}}}}\n\n"))
+        }).collect();
         StreamFrames {
             openai_head: vec![b(r#"data: {"id":"chatcmpl-x","object":"chat.completion.chunk","created":1,"model":"mock","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}"#.to_string() + "\n\n")],
-            openai_delta: b(format!("data: {{\"id\":\"chatcmpl-x\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"mock\",\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"{pad}\"}},\"finish_reason\":null}}]}}\n\n")),
+            openai_deltas,
             openai_tail: vec![
                 b(r#"data: {"id":"chatcmpl-x","object":"chat.completion.chunk","created":1,"model":"mock","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#.to_string() + "\n\n"),
                 b("data: [DONE]\n\n".to_string()),
@@ -200,7 +226,7 @@ impl StreamFrames {
                 b("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_x\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"mock\",\"content\":[],\"stop_reason\":null,\"usage\":{\"input_tokens\":10,\"output_tokens\":0}}}\n\n".to_string()),
                 b("event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n".to_string()),
             ],
-            anthropic_delta: b(format!("event: content_block_delta\ndata: {{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{{\"type\":\"text_delta\",\"text\":\"{pad}\"}}}}\n\n")),
+            anthropic_deltas,
             anthropic_tail: vec![
                 b("event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n".to_string()),
                 b(format!("event: message_delta\ndata: {{\"type\":\"message_delta\",\"delta\":{{\"stop_reason\":\"end_turn\"}},\"usage\":{{\"output_tokens\":{chunks}}}}}\n\n")),
@@ -225,10 +251,10 @@ fn sse_response(frames: Arc<StreamFrames>, anthropic: bool, ttft_ms: u64) -> Res
         if ttft_ms > 0 {
             tokio::time::sleep(Duration::from_millis(ttft_ms)).await;
         }
-        let (head, delta, tail) = if anthropic {
-            (&frames.anthropic_head, &frames.anthropic_delta, &frames.anthropic_tail)
+        let (head, deltas, tail) = if anthropic {
+            (&frames.anthropic_head, &frames.anthropic_deltas, &frames.anthropic_tail)
         } else {
-            (&frames.openai_head, &frames.openai_delta, &frames.openai_tail)
+            (&frames.openai_head, &frames.openai_deltas, &frames.openai_tail)
         };
         for f in head {
             if tx.send(Ok(Frame::data(f.clone()))).await.is_err() { return; }
@@ -237,6 +263,8 @@ fn sse_response(frames: Arc<StreamFrames>, anthropic: bool, ttft_ms: u64) -> Res
             if i > 0 {
                 tokio::time::sleep(frames.interval).await;
             }
+            // distinct frame per index (index embedded in the pad) so a gateway repeat-guard is fair
+            let delta = &deltas[(i as usize) % deltas.len()];
             if tx.send(Ok(Frame::data(delta.clone()))).await.is_err() { return; }
         }
         for f in tail {
