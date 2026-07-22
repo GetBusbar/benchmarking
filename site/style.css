@@ -122,6 +122,20 @@ thead th {
   border-bottom: 1px solid var(--border); cursor: pointer; user-select: none;
 }
 thead th:first-child, tbody td:first-child { text-align: left; }
+/* Lock the identity columns (checkbox, Gateway, Class, Lang) so they stay visible while
+   the metric columns scroll horizontally. Fixed widths give each sticky column a stable
+   left offset equal to the sum of the widths before it. */
+thead th:nth-child(1), tbody td:nth-child(1),
+thead th:nth-child(2), tbody td:nth-child(2),
+thead th:nth-child(3), tbody td:nth-child(3),
+thead th:nth-child(4), tbody td:nth-child(4) { position: sticky; z-index: 1; background: var(--bg-raise); }
+thead th:nth-child(1), thead th:nth-child(2), thead th:nth-child(3), thead th:nth-child(4) { z-index: 3; }
+thead th:nth-child(1), tbody td:nth-child(1) { left: 0; width: 2.4rem; }
+thead th:nth-child(2), tbody td:nth-child(2) { left: 2.4rem; width: 9rem; }
+thead th:nth-child(3), tbody td:nth-child(3) { left: 11.4rem; width: 12rem; }
+thead th:nth-child(4), tbody td:nth-child(4) { left: 23.4rem; width: 5rem; box-shadow: inset -1px 0 0 var(--border); }
+tbody tr:hover td:nth-child(1), tbody tr:hover td:nth-child(2),
+tbody tr:hover td:nth-child(3), tbody tr:hover td:nth-child(4) { background: var(--bg-hover); }
 thead th.sorted { color: var(--fg); }
 thead th .dir { color: var(--accent); }
 tbody td { padding: .5rem .7rem; text-align: right; border-bottom: 1px solid var(--border); white-space: nowrap; }
@@ -308,12 +322,11 @@ tbody tr { cursor: pointer; }
   .chip-filter { padding: .3rem .8rem; }
   .count { margin-left: 0; flex: 1 1 100%; }
 
-  /* results table: horizontal scroll with a sticky first column (gateway name) */
-  thead th:first-child, tbody td:first-child {
-    position: sticky; left: 0; z-index: 1; background: var(--bg-raise);
-  }
-  thead th:first-child { z-index: 2; }
-  tbody tr:hover td:first-child { background: var(--bg-hover); }
+  /* On a phone, locking three wide columns would eat the whole viewport, so relax to just
+     the checkbox + Gateway columns; Class and Lang scroll with the rest. */
+  thead th:nth-child(3), tbody td:nth-child(3),
+  thead th:nth-child(4), tbody td:nth-child(4) { position: static; width: auto; box-shadow: none; }
+  thead th:nth-child(2), tbody td:nth-child(2) { box-shadow: inset -1px 0 0 var(--border); }
   thead th, tbody td { padding: .5rem .55rem; }
 
   .drawer { width: 100vw; padding: 1rem 1.1rem 2rem; }
