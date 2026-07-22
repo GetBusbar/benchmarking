@@ -11,9 +11,11 @@ func main(){
  url:=flag.String("url","","");model:=flag.String("model","gpt-4o-mini","");auth:=flag.String("auth","sk-dummy","")
  conc:=flag.Int("c",200,"");dur:=flag.Int("d",12,"");psize:=flag.Int("psize",0,"pad content to N bytes")
  stream:=flag.Bool("stream",false,"SSE mode: request stream:true, consume frames, report TTFT/gaps")
+ shape:=flag.String("shape","openai","request shape: openai (default, unchanged) | anthropic (Messages body + x-api-key/anthropic-version headers)")
  expframes:=flag.Int("expframes",0,"expected content frames per stream (delivered%% denominator; 0=skip)")
  stallus:=flag.Int64("stallus",0,"per-stream stall threshold µs — any content-frame gap above it marks the stream stalled (0=off)")
  var extra hdrs; flag.Var(&extra,"H","extra request header 'Key: Value' (repeatable)"); flag.Parse()
+ if *shape!="openai"&&*shape!="anthropic"{fmt.Println("unknown -shape (want openai|anthropic)");return}
  pad:=strings.Repeat("x",*psize)
  var ok,fail int64; var mu sync.Mutex; lat:=[]float64{}
  // stream-mode pools (µs): TTFT per stream, content-frame gaps across all streams
@@ -27,8 +29,16 @@ func main(){
  for w:=0;w<*conc;w++{wg.Add(1);go func(id int){defer wg.Done();n:=0
   for time.Now().Before(deadline){n++
    sfield:="";if *stream{sfield=`,"stream":true`}
-   body:=[]byte(fmt.Sprintf(`{"model":"%s","messages":[{"role":"user","content":"u-%d-%d-%s"}],"max_tokens":16%s}`,*model,id,n,pad,sfield))
+   var body []byte
+   if *shape=="anthropic"{ // Anthropic Messages: max_tokens is REQUIRED, so it leads the body
+    body=[]byte(fmt.Sprintf(`{"model":"%s","max_tokens":64,"messages":[{"role":"user","content":"u-%d-%d-%s"}]%s}`,*model,id,n,pad,sfield))
+   }else{
+    body=[]byte(fmt.Sprintf(`{"model":"%s","messages":[{"role":"user","content":"u-%d-%d-%s"}],"max_tokens":16%s}`,*model,id,n,pad,sfield))
+   }
    st:=time.Now();req,_:=http.NewRequest("POST",*url,bytes.NewReader(body));req.Header.Set("content-type","application/json");req.Header.Set("authorization","Bearer "+*auth)
+   // anthropic shape sends BOTH auth carriers (x-api-key like the Anthropic SDK, plus the Bearer
+   // above) so a gateway honoring either accepts it; -H can still override either header.
+   if *shape=="anthropic"{req.Header.Set("anthropic-version","2023-06-01");req.Header.Set("x-api-key",*auth)}
    if *stream{req.Header.Set("accept","text/event-stream")}
    for _,h:=range extra{if i:=strings.Index(h,":");i>0{req.Header.Set(strings.TrimSpace(h[:i]),strings.TrimSpace(h[i+1:]))}}
    resp,err:=cl.Do(req);if err!=nil{atomic.AddInt64(&fail,1);continue}
