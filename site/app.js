@@ -544,7 +544,8 @@ const MATRIX_LABELS = {
 const cellState = (cell) =>
   cell.served === true ? ["served", "served"]
     : cell.served === "unprobed_auth" ? ["unprobed", "unprobed (auth)"]
-      : ["failed", "not served"];
+      : cell.served === "not_configurable" ? ["notconf", "not configurable"]
+        : ["failed", "not served"];
 
 function laneStamp(j) {
   const bits = [];
@@ -720,42 +721,80 @@ function closeCompare(sync = true) {
 }
 
 /* ---- protocol matrix view --------------------------------------------------- */
+/* v2: one 6x6 grid per gateway, rows = ingress dialect, cols = upstream (egress) dialect.
+   Cell states: pass (green), fail (red), not configurable (neutral: the manifest defines no egress
+   config for that dialect), unprobed_auth (grey), and n/a for egress columns a v1-era result never
+   measured. The diagonal needs no translation; a faithful passthrough passes there by design and
+   its verdict note says so. gen-data normalizes v1 results into the same upstreams shape. */
+function matrixCell(g, egress, ingress) {
+  const up = g.matrix.upstreams && g.matrix.upstreams[egress];
+  return up && up.cells ? up.cells[ingress] : null;
+}
 function renderMatrix() {
-  const withMatrix = state.data.gateways.filter((g) => g.matrix && g.matrix.cells);
+  const withMatrix = state.data.gateways.filter((g) => g.matrix && (g.matrix.upstreams || g.matrix.cells));
   if (!withMatrix.length) {
     document.getElementById("matrix-empty").classList.remove("hidden");
     document.getElementById("matrix-grid").classList.add("hidden");
     return;
   }
-  /* sorted by measurement: served-cell count desc, then name */
-  const count = (g) => MATRIX_CELLS.filter((c) => g.matrix.cells[c] && g.matrix.cells[c].served === true).length;
-  withMatrix.sort((a, b) => count(b) - count(a) || a.display.localeCompare(b.display));
+  /* per-gateway tallies over the full grid; sorted by measurement: pass count desc, then name */
+  const tally = (g) => {
+    const t = { pass: 0, fail: 0, notconf: 0, unprobed: 0 };
+    for (const e of MATRIX_CELLS) for (const c of MATRIX_CELLS) {
+      const cell = matrixCell(g, e, c);
+      if (!cell) continue;
+      if (cell.served === true) t.pass++;
+      else if (cell.served === "not_configurable") t.notconf++;
+      else if (cell.served === "unprobed_auth") t.unprobed++;
+      else t.fail++;
+    }
+    return t;
+  };
+  withMatrix.sort((a, b) => tally(b).pass - tally(a).pass || a.display.localeCompare(b.display));
 
   const grid = document.getElementById("matrix-grid");
-  grid.innerHTML = `<div class="table-scroll matrix-table"><table><thead><tr><th>Gateway</th>${
-    MATRIX_CELLS.map((c) => `<th>${esc(MATRIX_LABELS[c])}</th>`).join("")
-  }</tr></thead><tbody>${
-    withMatrix.map((g) => `<tr><td class="name">${
-      g.repo ? `<a href="${g.repo}" target="_blank" rel="noopener">${esc(g.display)}</a>` : esc(g.display)
-    }</td>${
-      MATRIX_CELLS.map((c) => {
-        const cell = g.matrix.cells[c];
-        if (!cell) return `<td class="na">n/a</td>`;
-        const [cls, label] = cellState(cell);
-        return `<td><span class="cell ${cls}" data-gw="${esc(g.key)}" data-cell="${esc(c)}" title="${esc(g.display)} / ${esc(MATRIX_LABELS[c])}: ${label}. ${esc(cell.verdict_note || "")}"></span></td>`;
-      }).join("")
-    }</tr>`).join("")
-  }</tbody></table></div>`;
+  grid.innerHTML = withMatrix.map((g) => {
+    const t = tally(g);
+    const bits = [`<b class="pass-count">${t.pass}</b>/36 pass`];
+    if (t.fail) bits.push(`${t.fail} fail`);
+    if (t.notconf) bits.push(`${t.notconf} not configurable`);
+    if (t.unprobed) bits.push(`${t.unprobed} unprobed (auth)`);
+    return `<section class="matrix-gw">
+      <header class="matrix-gw-head"><h3>${
+        g.repo ? `<a href="${g.repo}" target="_blank" rel="noopener">${esc(g.display)}</a>` : esc(g.display)
+      }</h3><span class="muted">${bits.join(" · ")}</span></header>
+      <div class="table-scroll matrix-table"><table>
+        <thead><tr><th class="axis">ingress &#8595; \\ upstream &#8594;</th>${
+          MATRIX_CELLS.map((e) => `<th>${esc(MATRIX_LABELS[e])}</th>`).join("")
+        }</tr></thead><tbody>${
+        MATRIX_CELLS.map((c) => `<tr><td class="name">${esc(MATRIX_LABELS[c])}</td>${
+          MATRIX_CELLS.map((e) => {
+            const cell = matrixCell(g, e, c);
+            if (!cell) return `<td class="na" title="not measured (v1 result: this upstream dialect was not probed)">n/a</td>`;
+            const [cls, label] = cellState(cell);
+            const diag = e === c ? " diag" : "";
+            const tip = cell.served === "not_configurable"
+              ? "not configurable: the manifest defines no egress config for that dialect"
+              : `${label}. ${cell.verdict_note || ""}`;
+            return `<td><span class="cell ${cls}${diag}" data-gw="${esc(g.key)}" data-egress="${esc(e)}" data-cell="${esc(c)}" title="${esc(g.display)} / ${esc(MATRIX_LABELS[c])} in, ${esc(MATRIX_LABELS[e])} upstream: ${esc(tip)}"></span></td>`;
+          }).join("")
+        }</tr>`).join("")
+      }</tbody></table></div>
+    </section>`;
+  }).join("");
 
   grid.querySelectorAll(".cell").forEach((el) => {
     el.addEventListener("click", () => {
       const g = state.data.gateways.find((x) => x.key === el.dataset.gw);
-      const cell = g.matrix.cells[el.dataset.cell];
+      const cell = matrixCell(g, el.dataset.egress, el.dataset.cell);
+      if (!cell) return;
       const [, label] = cellState(cell);
       const detail = document.getElementById("matrix-detail");
       detail.classList.remove("hidden");
       detail.innerHTML =
-        `<h4>${esc(g.display)} / ${esc(MATRIX_LABELS[el.dataset.cell])}: ${label} (HTTP ${esc(cell.status || "?")}, ${esc(cell.path || "")})</h4>` +
+        `<h4>${esc(g.display)} / ${esc(MATRIX_LABELS[el.dataset.cell])} ingress, ${esc(MATRIX_LABELS[el.dataset.egress])} upstream: ${label}${
+          cell.status ? ` (HTTP ${esc(cell.status)}, ${esc(cell.path || "")})` : ""
+        }</h4>` +
         `<div>${esc(cell.verdict_note || "no verdict note")}</div>` +
         (cell.body_snippet ? `<pre>${esc(cell.body_snippet)}</pre>` : "");
       detail.scrollIntoView({ behavior: "smooth", block: "nearest" });
