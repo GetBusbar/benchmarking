@@ -131,10 +131,13 @@ thead th:first-child, tbody td:first-child { text-align: left; }
 #results-table thead th:nth-child(3), #results-table tbody td:nth-child(3),
 #results-table thead th:nth-child(4), #results-table tbody td:nth-child(4) { position: sticky; z-index: 1; background: var(--bg-raise); }
 #results-table thead th:nth-child(1), #results-table thead th:nth-child(2), #results-table thead th:nth-child(3), #results-table thead th:nth-child(4) { z-index: 3; }
-#results-table thead th:nth-child(1), #results-table tbody td:nth-child(1) { left: 0; width: 2.4rem; }
-#results-table thead th:nth-child(2), #results-table tbody td:nth-child(2) { left: 2.4rem; width: 9rem; }
-#results-table thead th:nth-child(3), #results-table tbody td:nth-child(3) { left: 11.4rem; width: 12rem; }
-#results-table thead th:nth-child(4), #results-table tbody td:nth-child(4) { left: 23.4rem; width: 5rem; box-shadow: inset -1px 0 0 var(--border); }
+/* Widths must be >= the widest content in each column (auto table-layout would otherwise
+   grow the real column past these and the left offsets, which sum the widths, would drift
+   and the sticky columns would overlap the first metric column). min-width pins them hard. */
+#results-table thead th:nth-child(1), #results-table tbody td:nth-child(1) { left: 0; width: 2.4rem; min-width: 2.4rem; }
+#results-table thead th:nth-child(2), #results-table tbody td:nth-child(2) { left: 2.4rem; width: 11rem; min-width: 11rem; }
+#results-table thead th:nth-child(3), #results-table tbody td:nth-child(3) { left: 13.4rem; width: 13.5rem; min-width: 13.5rem; }
+#results-table thead th:nth-child(4), #results-table tbody td:nth-child(4) { left: 26.9rem; width: 5.5rem; min-width: 5.5rem; box-shadow: inset -1px 0 0 var(--border); }
 #results-table tbody tr:hover td:nth-child(1), #results-table tbody tr:hover td:nth-child(2),
 #results-table tbody tr:hover td:nth-child(3), #results-table tbody tr:hover td:nth-child(4) { background: var(--bg-hover); }
 /* Even, full-width matrix columns: fixed layout so the six upstream columns share the row
@@ -253,6 +256,18 @@ tbody tr { cursor: pointer; }
 .cell.notconf { background: var(--bg-hover); border: 1px solid var(--border); }
 /* diagonal cells (same dialect in and out, no translation required): subtle ring */
 .cell.diag { outline: 1px solid var(--fg-dim); outline-offset: 1px; }
+/* compact cell legend: one line of colored squares + short labels, mirrors the cell classes */
+.matrix-legend {
+  list-style: none; margin: .2rem 0 .1rem; padding: 0;
+  display: flex; flex-wrap: wrap; gap: .3rem 1rem; font-size: .8rem; color: var(--fg-dim);
+}
+.matrix-legend li { display: flex; align-items: center; gap: .4rem; }
+.matrix-legend .lg { display: inline-block; width: .9rem; height: .9rem; border-radius: 3px; }
+.matrix-legend .lg-pass { background: var(--green); }
+.matrix-legend .lg-fail { background: var(--red); }
+.matrix-legend .lg-notconf { background: var(--bg-hover); border: 1px solid var(--border); }
+.matrix-legend .lg-diag { background: var(--bg-hover); outline: 1px solid var(--fg-dim); outline-offset: 1px; }
+.matrix-legend-note { font-size: .78rem; margin: 0 0 .8rem; }
 .matrix-detail {
   margin-top: 1rem; border: 1px solid var(--border); border-radius: 8px;
   background: var(--bg-raise); padding: .9rem 1.1rem; font-size: .86rem;
