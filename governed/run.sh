@@ -162,6 +162,14 @@ measure_phase "$GW_AUTH"
 PL_OVER_P50=$PH_OVER_P50; PL_OVER_P99=$PH_OVER_P99; PL_GP99=$PH_GP99; PL_DP99=$PH_DP99
 PL_RPS=$PH_RPS; PL_CONC=$PH_CONC; PL_MOCK=$PH_MOCK; PL_BOUND=$PH_BOUND; PL_JSON="$PH_JSON"
 gw_stop; sleep 1
+# The governed launch binds the same ports; a lingering plain-phase process makes the new bind fail
+# ("address already in use") and the mint hit the OLD token-less admin plane (401). Wait until the
+# data port is actually free before phase 2, killing again if the first stop did not land.
+for _ in $(seq 1 20); do
+  if ! (exec 3<>/dev/tcp/127.0.0.1/${GW_PORT} ) 2>/dev/null; then break; fi
+  exec 3>&- 2>/dev/null || true
+  gw_stop 2>/dev/null; pkill -x busbar 2>/dev/null; sleep 1
+done
 
 # ── phase 2: GOVERNED launch — governance active, caller is a minted/provisioned key ──────────────
 log "[$GATEWAY] phase 2/2 — GOVERNED launch (virtual-key resolution + rate + budget on the hot path)"
