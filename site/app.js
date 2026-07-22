@@ -26,7 +26,7 @@ const CATEGORIES = {
 };
 const DEFAULT_CATEGORY = "gateways";
 const VIEWS = ["results", "matrix", "charts", "method"];
-const VIEW_LABELS = { results: "Results", matrix: "Protocol matrix", charts: "Charts", method: "Method" };
+const VIEW_LABELS = { results: "Performance", matrix: "Protocol matrix", charts: "Charts", method: "Method" };
 
 /* Language chip colours: kept in sync with LANG_COLORS in charts.py. */
 const LANG_COLORS = {
@@ -194,11 +194,10 @@ const COLUMNS = [
     get: (g) => lane(g, "xlate", "xlate_served", "xlate_error",
       (j) => ({ v: j.xlate_rps_sustained_20ms, text: fmtInt(j.xlate_rps_sustained_20ms), na: false })),
   },
-  {
-    id: "gov", label: "Governed overhead", desc: true, title: "Sustained-RPS change with native key/limit governance active vs the plain launch",
-    get: (g) => lane(g, "governed", "governed_served", "governed_note",
-      (j) => ({ v: j.governed_vs_plain_sustained_pct, text: fmtPct(j.governed_vs_plain_sustained_pct), na: false })),
-  },
+  // Governance is intentionally NOT a neutral-board column. onthebench measures every gateway at its
+  // default, out-of-the-box config; the governed suite runs a non-default governance-enabled launch
+  // that only busbar's manifest wires, so a comparative column would spotlight busbar and read
+  // "not tested" for the rest. Governance overhead lives on the advocacy site, not the neutral board.
 ];
 
 /* Metric groups per lane: drives the drawer and the compare table.
@@ -233,12 +232,6 @@ const LANES = [
     metrics: [
       { k: "xlate_added_latency_p99_us", label: "Added latency p99 (µs)", best: "min", fmt: fmtInt },
       { k: "xlate_rps_sustained_20ms", label: "Sustained RPS @20ms", best: "max", fmt: fmtInt },
-    ],
-  },
-  {
-    key: "governed", label: "Governance", flag: "governed_served", err: "governed_note",
-    metrics: [
-      { k: "governed_vs_plain_sustained_pct", label: "Governed vs plain sustained", best: "max", fmt: fmtPct },
     ],
   },
 ];
@@ -921,7 +914,6 @@ const CHART_CAPTIONS = {
   stream_sustained: "Streaming: max concurrent SSE streams sustained without frame loss or stalls. Higher is better.",
   xlate_added_latency: "Translation (Anthropic in, OpenAI upstream): added latency p99. Lower is better.",
   xlate_rps_sustained_20ms: "Translation path: sustained RPS at 20 ms LLM latency. Higher is better.",
-  governed_throughput: "Sustained RPS with native governance active vs the plain launch. Closer bars mean cheaper governance.",
 };
 function chartCaption(file) {
   const base = file.replace(/^charts\//, "").replace(/\?.*$/, "").replace(/\.png$/, "");
@@ -960,7 +952,7 @@ function renderCharts() {
 /* ---- method links + footer -------------------------------------------------- */
 function renderStatic() {
   const repo = state.data.repo || "https://github.com/GetBusbar/benchmarking";
-  for (const suite of ["perf", "memory", "stream", "xlate", "governed", "matrix"]) {
+  for (const suite of ["perf", "memory", "stream", "xlate", "matrix"]) {
     const a = document.getElementById(`lnk-${suite}`);
     if (a) a.href = `${repo}/blob/main/${suite}/run.sh`;
   }

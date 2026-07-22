@@ -111,7 +111,9 @@ const hardware = [...hwCounts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] || 
 // ---- charts: copy results/*.png into site/charts/ ---------------------------
 const resultsDir = join(ROOT, "results");
 const chartFiles = existsSync(resultsDir)
-  ? readdirSync(resultsDir).filter((f) => f.endsWith(".png")).sort()
+  // Governance is not a neutral-board metric (the governed suite is a non-default, busbar-only
+  // launch), so its chart is excluded from the public gallery even if the PNG is present.
+  ? readdirSync(resultsDir).filter((f) => f.endsWith(".png") && !f.includes("governed")).sort()
   : [];
 mkdirSync(join(OUT, "charts"), { recursive: true });
 const charts = [];

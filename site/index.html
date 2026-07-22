@@ -8,6 +8,16 @@
 <!-- Root-absolute asset URLs: the SPA fallback serves this shell for deep paths
      like /gateways/matrix, where relative hrefs would resolve under the route. -->
 <link rel="stylesheet" href="/style.css">
+<!-- Privacy-friendly analytics by Plausible: cookieless, no PII, aggregate only.
+     Site-specific pa-<id> script (onthebench.ai is registered in Plausible; the id
+     encodes the site, so no data-domain attribute is needed). The script auto-tracks
+     history.pushState navigations, so the SPA virtual pageviews (Performance/matrix/
+     charts/method routes) are counted without any manual trigger. -->
+<script async src="https://plausible.io/js/pa-duWXDrBvUrYVaSx6gqjuS.js"></script>
+<script>
+  window.plausible=window.plausible||function(){(plausible.q=plausible.q||[]).push(arguments)},plausible.init=plausible.init||function(i){plausible.o=i||{}};
+  plausible.init()
+</script>
 <script>
 /* Set the theme before first paint so there is no flash of the wrong palette.
    Stored choice wins; otherwise follow the OS prefers-color-scheme. */
@@ -38,7 +48,7 @@
          being benchmarked. Gateways today; future categories slot in beside it. -->
     <nav class="catnav" id="catnav" aria-label="Benchmark categories"></nav>
     <nav class="tabs" id="tabs">
-      <a class="tab active" data-view="results" href="/gateways">Results</a>
+      <a class="tab active" data-view="results" href="/gateways">Performance</a>
       <a class="tab" data-view="matrix" href="/gateways/matrix">Protocol matrix</a>
       <a class="tab" data-view="charts" href="/gateways/charts">Charts</a>
       <a class="tab" data-view="method" href="/gateways/method">Method</a>
@@ -124,13 +134,6 @@
           <li>The client speaks Anthropic (POST /v1/messages) while the upstream mock speaks OpenAI, so the gateway must translate both directions. The mock is untouched; that is the point.</li>
           <li><b>Added latency (p99)</b> and <b>sustained RPS at 20 ms</b> on the translation path, same gates as perf. The direct baseline is the OpenAI shape straight to the mock, so the added-latency figure deliberately includes the translation work.</li>
           <li>A gateway that cannot serve Anthropic ingress against an OpenAI upstream records xlate_served=false with the probe status and body snippet as evidence.</li>
-        </ul>
-      </article>
-      <article class="method-card">
-        <h3><a id="lnk-governed" target="_blank" rel="noopener">governed/run.sh</a> Governance</h3>
-        <ul>
-          <li>The same sustained-RPS-at-20ms sweep as perf, but with the gateway's native key/limit governance active: per-request virtual-key resolution, rate-limit accounting, and budget check-and-charge on the hot path.</li>
-          <li>Each run also repeats the identical sweep against the plain, ungoverned launch, so one result file self-contains the governance overhead percentage from one box on one day, with no cross-run subtraction. Minted limits are generous enough that no cap ever trips: the cost measured is the check, not the limit.</li>
         </ul>
       </article>
       <article class="method-card">
