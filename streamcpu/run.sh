@@ -98,7 +98,10 @@ json_escape(){ printf '%s' "$1" | tr -d '\000' | head -c 1600 \
   | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read())[1:-1])' 2>/dev/null \
   || printf '%s' "$1" | tr '\n\t"\\' '    ' | head -c 1600; }
 # shellcheck source=/dev/null
+source "$ROOT/lib/harness.sh"
+# shellcheck source=/dev/null
 source "$GW_DIR/gateway.sh"
+suite_deadline_start
 
 # Start the mock UNPACED: interval 0 = every content frame emitted back to back. Long bursts.
 log "starting mock :$MOCK_PORT (UNPACED stream ${SC_CHUNKS}x${SC_FRAME_BYTES}B @ 0ms)"
@@ -113,25 +116,30 @@ trap cleanup EXIT
 
 # run ugen in SSE mode, echo the k=v result fields in a fixed order (same parser style as stream/).
 sprobe(){ # url conc dur
-  taskset -c "$LOADCORES" "$UGEN" -url "$1" -model "$GW_MODEL" -auth "$GW_AUTH" -c "$2" -d "$3" \
+  tmo "$(probe_budget "$3")" taskset -c "$LOADCORES" "$UGEN" -url "$1" -model "$GW_MODEL" -auth "$GW_AUTH" -c "$2" -d "$3" \
     -psize "$PSIZE" -stream -expframes "$SC_CHUNKS" -stallus "$SC_STALL_US" "${UGEN_H[@]}" 2>/dev/null \
     | awk '{for(i=1;i<=NF;i++){split($i,a,"=");v[a[1]]=a[2]};
         print v["streams"],v["complete"],v["fail"],v["stalled"],v["frames"],v["fps"],v["delivered"]}'
 }
 
-log "[$GATEWAY] build + launch (pinned to cores $CORES = ${NCORES} core(s))"; gw_build || { echo "build failed"; exit 1; }; gw_launch
-UGEN_H=(); CURL_H=()
-for h in "${GW_HEADERS[@]:-}"; do [ -n "$h" ] && { UGEN_H+=(-H "$h"); CURL_H+=(-H "$h"); }; done
-log "[$GATEWAY] wait 200 on $GW_PATH"; ok=0; c=000
-for i in $(seq 1 60); do
-  c=$(curl -s -m3 -o /dev/null -w "%{http_code}" "http://127.0.0.1:$GW_PORT$GW_PATH" -X POST \
-      -H "content-type: application/json" -H "authorization: Bearer $GW_AUTH" "${CURL_H[@]}" \
-      -d "{\"model\":\"$GW_MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"warm\"}],\"max_tokens\":16}")
-  [ "$c" = 200 ] && { ok=1; break; }; sleep 1
-done
+log "[$GATEWAY] build (pinned to cores $CORES = ${NCORES} core(s))"; gw_build || { echo "build failed"; exit 1; }
+UGEN_H=(); CURL_H=(); ok=0; c=000
+_scpu_ready(){
+  UGEN_H=(); CURL_H=()
+  for h in "${GW_HEADERS[@]:-}"; do [ -n "$h" ] && { UGEN_H+=(-H "$h"); CURL_H+=(-H "$h"); }; done
+  local i
+  for i in $(seq 1 60); do
+    c=$(curl -s -m3 -o /dev/null -w "%{http_code}" "http://127.0.0.1:$GW_PORT$GW_PATH" -X POST \
+        -H "content-type: application/json" -H "authorization: Bearer $GW_AUTH" "${CURL_H[@]}" \
+        -d "{\"model\":\"$GW_MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"warm\"}],\"max_tokens\":16}")
+    [ "$c" = 200 ] && return 0; sleep 1
+  done
+  return 1
+}
+log "[$GATEWAY] launch + wait 200 on $GW_PATH (robust boot, up to $HARNESS_BOOT_ATTEMPTS attempts)"
 SERVE_ERR=""
-[ "$ok" != 1 ] && { SERVE_ERR="HTTP $c on POST $GW_PATH; diag=[$(gw_diag 2>&1 | tail -n 20)]"; \
-  log "[$GATEWAY] WARNING never got 200 (last=$c) -- served=false"; }
+if harness_launch_ready gw_launch _scpu_ready; then ok=1
+else SERVE_ERR="$HARNESS_SERVE_ERR"; fi
 
 # does the gateway actually stream? one probe, then fail gracefully if not (same guard as stream/).
 STREAM_OK=0; STREAM_ERR=""

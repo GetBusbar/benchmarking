@@ -63,7 +63,10 @@ json_escape(){ printf '%s' "$1" | python3 -c 'import json,sys
 d=sys.stdin.buffer.read()[:1600].decode("utf-8","replace")
 sys.stdout.write(json.dumps(d)[1:-1])'; }
 # shellcheck source=/dev/null
+source "$ROOT/lib/harness.sh"
+# shellcheck source=/dev/null
 source "$GW_DIR/gateway.sh"
+suite_deadline_start
 XPATH_A="${GW_ANTHROPIC_PATH:-/v1/messages}"
 
 log "starting mock :$MOCK_PORT (instant, openai upstream on $GW_PATH)"
@@ -75,31 +78,38 @@ trap cleanup EXIT
 
 # openai-shape probe (direct baseline + mock guardrail) — identical to perf/run.sh's probe
 oprobe(){ # url conc dur
-  "$UGEN" -url "$1" -model "$GW_MODEL" -auth "$GW_AUTH" -c "$2" -d "$3" -psize "$PSIZE" ${UGEN_H[@]+"${UGEN_H[@]}"} 2>/dev/null \
+  tmo "$(probe_budget "$3")" "$UGEN" -url "$1" -model "$GW_MODEL" -auth "$GW_AUTH" -c "$2" -d "$3" -psize "$PSIZE" ${UGEN_H[@]+"${UGEN_H[@]}"} 2>/dev/null \
     | awk '{for(i=1;i<=NF;i++){split($i,a,"=");v[a[1]]=a[2]}; print v["rps"],v["fail"],v["p99us"],v["p50us"]}'
 }
-# anthropic-shape probe (the translation path through the gateway)
+# anthropic-shape probe (the translation path through the gateway). Hard-timeout wrapped: a gateway
+# that stops responding under load must fail this probe fast, not block the suite (the arch failure).
 aprobe(){ # url conc dur
-  "$UGEN" -url "$1" -shape anthropic -model "$GW_MODEL" -auth "$GW_AUTH" -c "$2" -d "$3" -psize "$PSIZE" \
+  tmo "$(probe_budget "$3")" "$UGEN" -url "$1" -shape anthropic -model "$GW_MODEL" -auth "$GW_AUTH" -c "$2" -d "$3" -psize "$PSIZE" \
     ${UGEN_H[@]+"${UGEN_H[@]}"} ${XH[@]+"${XH[@]}"} 2>/dev/null \
     | awk '{for(i=1;i<=NF;i++){split($i,a,"=");v[a[1]]=a[2]}; print v["rps"],v["fail"],v["p99us"],v["p50us"]}'
 }
 
-log "[$GATEWAY] build + launch"; gw_build || { echo "build failed"; exit 1; }; gw_launch
-# Header arrays built AFTER launch so a manifest can mint a key in gw_launch (busbar vkey).
-UGEN_H=(); CURL_H=(); XH=()
-for h in "${GW_HEADERS[@]:-}"; do [ -n "$h" ] && { UGEN_H+=(-H "$h"); CURL_H+=(-H "$h"); }; done
-[ -n "${GW_ANTHROPIC_AUTH_HEADER:-}" ] && XH+=(-H "$GW_ANTHROPIC_AUTH_HEADER")
-log "[$GATEWAY] wait 200 on $GW_PATH (openai warm — is the gateway up at all?)"; ok=0; c=000
-for i in $(seq 1 60); do
-  c=$(curl -s -m3 -o /dev/null -w "%{http_code}" "http://127.0.0.1:$GW_PORT$GW_PATH" -X POST \
-      -H "content-type: application/json" -H "authorization: Bearer $GW_AUTH" ${CURL_H[@]+"${CURL_H[@]}"} \
-      -d "{\"model\":\"$GW_MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"warm\"}],\"max_tokens\":16}")
-  [ "$c" = 200 ] && { ok=1; break; }; sleep 1
-done
+log "[$GATEWAY] build"; gw_build || { echo "build failed"; exit 1; }
+# Header arrays rebuilt inside the readiness probe (AFTER launch) so a manifest can mint a key in
+# gw_launch (busbar vkey). harness_launch_ready re-runs gw_launch + this probe up to N attempts.
+UGEN_H=(); CURL_H=(); XH=(); ok=0; c=000
+_xlate_ready(){
+  UGEN_H=(); CURL_H=(); XH=()
+  for h in "${GW_HEADERS[@]:-}"; do [ -n "$h" ] && { UGEN_H+=(-H "$h"); CURL_H+=(-H "$h"); }; done
+  [ -n "${GW_ANTHROPIC_AUTH_HEADER:-}" ] && XH+=(-H "$GW_ANTHROPIC_AUTH_HEADER")
+  local i
+  for i in $(seq 1 60); do
+    c=$(curl -s -m3 -o /dev/null -w "%{http_code}" "http://127.0.0.1:$GW_PORT$GW_PATH" -X POST \
+        -H "content-type: application/json" -H "authorization: Bearer $GW_AUTH" ${CURL_H[@]+"${CURL_H[@]}"} \
+        -d "{\"model\":\"$GW_MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"warm\"}],\"max_tokens\":16}")
+    [ "$c" = 200 ] && return 0; sleep 1
+  done
+  return 1
+}
+log "[$GATEWAY] launch + wait 200 on $GW_PATH (openai warm; robust boot, up to $HARNESS_BOOT_ATTEMPTS attempts)"
 SERVE_ERR=""
-[ "$ok" != 1 ] && { SERVE_ERR="HTTP $c on POST $GW_PATH; diag=[$(gw_diag 2>&1 | tail -n 20)]"; \
-  log "[$GATEWAY] WARNING never got 200 (last=$c) — served=false"; }
+if harness_launch_ready gw_launch _xlate_ready; then ok=1
+else SERVE_ERR="$HARNESS_SERVE_ERR"; fi
 
 # ── can the gateway translate at all? one probe, then fail gracefully if not ──────────────────────
 # Requires: 2xx, an Anthropic message envelope ("type":"message" or a content array) in the body,
