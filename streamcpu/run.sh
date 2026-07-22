@@ -199,6 +199,7 @@ if [ "$STREAM_OK" = 1 ]; then
   local_min_del="${SC_MIN_DELIVERED:-0.5}"
   log "[$GATEWAY] streamcpu sweep -- sustained frames/sec (qualify: complete>=99%, stalls=0, delivered>=${local_min_del})"
   for conc in $SC_SWEEP; do
+    if suite_deadline_expired; then log "[$GATEWAY] suite wall-clock ceiling reached mid-sweep -- stopping sweep, recording what we have"; break; fi
     read -r streams complete fail stalled frames fps delivered < <(sprobe "$GURL" "$conc" "$SC_DUR")
     streams=${streams:-0}; complete=${complete:-0}; fail=${fail:-1}; stalled=${stalled:-1}; fps=${fps:-0}; delivered=${delivered:-0}
     log "[$GATEWAY]   c=$conc -> fps=$fps delivered=$delivered complete=$complete stalled=$stalled fail=$fail streams=$streams"

@@ -159,6 +159,7 @@ if [ "$STREAM_OK" = 1 ]; then
   read -r _s _c _f _st _fr MOCK_FPS _d _t1 _t2 _g1 _g2 < <(sprobe "$DURL" "$top" "$SWEEP_DUR")
   log "[$GATEWAY] sweep — streams sustained (mock ceiling ${MOCK_FPS:-0} fps @ c=$top)"
   for conc in $SWEEP; do
+    if suite_deadline_expired; then log "[$GATEWAY] suite wall-clock ceiling reached mid-sweep — stopping sweep, recording what we have"; break; fi
     read -r streams complete fail stalled frames fps delivered t50 t99 g50 g99 < <(sprobe "$GURL" "$conc" "$SWEEP_DUR")
     streams=${streams:-0}; fail=${fail:-1}; stalled=${stalled:-1}; fps=${fps:-0}; delivered=${delivered:-0}
     log "[$GATEWAY]   c=$conc → streams=$streams fps=$fps delivered=$delivered stalled=$stalled fail=$fail gap_p99=$((${g99:-0}/1000))ms"

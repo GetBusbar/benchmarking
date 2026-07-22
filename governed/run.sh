@@ -152,6 +152,7 @@ measure_phase(){
   PH_RPS=0; PH_CONC=0; PH_P99=0; PH_JSON=""
   local conc rps fail p99 _p50
   for conc in $SWEEP_DELAYED; do
+    if suite_deadline_expired; then log "[$GATEWAY] suite wall-clock ceiling reached mid-sweep -- stopping sweep, recording what we have"; break; fi
     read -r rps fail p99 _p50 < <(probe "$GURL" "$conc" "$SWEEP_DUR" "$token")
     rps=${rps:-0}; fail=${fail:-1}; p99=${p99:-99999999}
     log "[$GATEWAY]   c=$conc -> rps=$rps p99=$((p99/1000))ms fail=$fail"

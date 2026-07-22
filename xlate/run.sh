@@ -174,6 +174,7 @@ if [ "$XLATE_OK" = 1 ]; then
   top=1; for w in $SWEEP_DELAYED; do top=$w; done
   read -r mrps _a _b _c2 < <(oprobe "$DURL" "$top" "$SWEEP_DUR"); LLM_MOCK=${mrps:-0}
   for conc in $SWEEP_DELAYED; do
+    if suite_deadline_expired; then log "[$GATEWAY] suite wall-clock ceiling reached mid-sweep — stopping sweep, recording what we have"; break; fi
     read -r rps fail p99 _p50 < <(aprobe "$XURL" "$conc" "$SWEEP_DUR")
     rps=${rps:-0}; fail=${fail:-1}; p99=${p99:-99999999}
     log "[$GATEWAY]   (ttft=${SWEEP_TTFT_MS}ms) c=$conc → rps=$rps p99=$((p99/1000))ms fail=$fail"

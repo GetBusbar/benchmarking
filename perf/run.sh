@@ -173,6 +173,7 @@ run_sweep() { # ttft_ms  conc_list
   SW_CEIL_RPS=0; SW_CEIL_CONC=0; SW_CEIL_P99=0; SW_JSON=""
   local conc rps fail p99 _p50
   for conc in $concs; do
+    if suite_deadline_expired; then log "[$GATEWAY] suite wall-clock ceiling reached mid-sweep — stopping sweep, recording what we have"; break; fi
     read -r rps fail p99 _p50 < <(probe "$GURL" "$conc" "$SWEEP_DUR")
     rps=${rps:-0}; fail=${fail:-1}; p99=${p99:-99999999}
     log "[$GATEWAY]   (ttft=${ttft}ms) c=$conc → rps=$rps p99=$((p99/1000))ms fail=$fail"
