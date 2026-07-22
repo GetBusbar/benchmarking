@@ -224,7 +224,6 @@ function newState() {
     classes: new Set(),
     needStream: false,
     needXlate: false,
-    needGoverned: false,
     cmp: [],        /* gateway keys selected for compare, max 3 */
     cmpOpen: false, /* compare panel visible */
     drawer: null,   /* gateway key open in the drawer */
@@ -232,7 +231,10 @@ function newState() {
 }
 const state = newState();
 
-const CAPS = [["needStream", "stream"], ["needXlate", "xlate"], ["needGoverned", "governed"]];
+/* Capability filter toggles. Governance is deliberately NOT here: it is only
+   measured for one gateway, so a field-wide filter on it would mislead; the
+   governed data still shows per-gateway in the table column and drawer. */
+const CAPS = [["needStream", "stream"], ["needXlate", "xlate"]];
 
 /* Serialize the shareable parts of state into a clean path URL:
    /<category>/<view>?<params>. The default view (results) omits the view segment
@@ -322,9 +324,6 @@ function applyFilters(gateways, st) {
     if (st.langs.size && !st.langs.has(g.lang)) return false;
     if (st.needStream && !(g.stream && g.stream.stream_served)) return false;
     if (st.needXlate && !(g.xlate && g.xlate.xlate_served)) return false;
-    // Filter on DECLARED capability (supports_governed), not on a single run's measurement success,
-    // so a governance-capable gateway whose measurement failed still shows under "supports governance".
-    if (st.needGoverned && !g.supports_governed) return false;
     return true;
   });
 }
@@ -979,7 +978,7 @@ function applyState(st) {
   Object.assign(state, {
     category: st.category, view: st.view, q: st.q, sortCol: st.sortCol, sortDesc: st.sortDesc,
     langs: st.langs, classes: st.classes,
-    needStream: st.needStream, needXlate: st.needXlate, needGoverned: st.needGoverned,
+    needStream: st.needStream, needXlate: st.needXlate,
     cmp: st.cmp, cmpOpen: st.cmpOpen, drawer: st.drawer,
   });
 }
