@@ -1,5 +1,7 @@
 # AI gateway benchmarks
 
+> **Browse the results:** [getbusbar.github.io/benchmarking](https://getbusbar.github.io/benchmarking/) — sortable tables, protocol matrix, charts, methodology.
+
 A fair, reproducible benchmark for self-hostable AI gateways — **LiteLLM (Rust & Python), Bifrost,
 Portkey, Kong, Helicone, GoModel, Busbar, and whatever else you drop in.** Same box, same mock, same load,
 same cpu pin, for every gateway. One command runs it; the charts regenerate from raw results; every
