@@ -172,6 +172,12 @@ for _ in $(seq 1 20); do
 done
 
 # ── phase 2: GOVERNED launch — governance active, caller is a minted/provisioned key ──────────────
+# Fresh ports for phase 2: even with the plain process dead, its listener can sit in TIME_WAIT for
+# up to a minute (busbar binds without SO_REUSEADDR), so re-binding the same port fails with
+# "address already in use" while a connect probe reports it free. Shifting +2 sidesteps the state
+# entirely (admin plane derives +1 from GW_PORT inside gw_governed_launch).
+GW_PORT=$(( GW_PORT + 2 ))
+GURL="http://127.0.0.1:$GW_PORT$GW_PATH"
 log "[$GATEWAY] phase 2/2 — GOVERNED launch (virtual-key resolution + rate + budget on the hot path)"
 start_mock 0
 if ! gw_governed_launch; then
