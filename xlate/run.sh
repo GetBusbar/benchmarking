@@ -1,0 +1,210 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (C) 2026 Busbar Inc and contributors
+#
+# TRANSLATION — pluggable across gateways (same gateways/<name>/gateway.sh manifests as perf/memory/
+# stream). The client speaks ANTHROPIC (POST /v1/messages, Messages body, anthropic-version +
+# x-api-key) while the upstream mock speaks OPENAI on the manifest's GW_PATH — so the gateway must
+# translate anthropic-in to openai-out and translate the response back. The mock is untouched; that
+# is the point. Per gateway it measures on the translation path:
+#   * added latency (µs) at concurrency 1 = gateway p99 − direct-to-mock p99
+#   * sustained RPS @ SWEEP_TTFT_MS ms LLM latency (p99 < 1 s, <0.1% error rate)
+# and writes results/xlate/<gateway>.json.
+#
+# HONEST ASYMMETRY: the mock does not translate, so the direct baseline is the OPENAI shape straight
+# to the mock (the same baseline perf/run.sh subtracts). The gateway side carries the anthropic
+# ingress + both protocol conversions; the added-latency figure therefore INCLUDES the translation
+# work — which is exactly what this lane exists to price. Recorded as baseline_shape=openai.
+#
+# FAIRNESS: many gateways cannot serve anthropic ingress against an openai upstream at all. One probe
+# decides: a non-2xx, a body without the Anthropic message envelope, or the mock's own canned
+# /messages body (id "msg_x" — meaning the gateway proxied the path through UNTRANSLATED) writes
+# xlate_served=false with the probe status + body snippet as evidence, valid JSON, exit 0.
+#
+#   GATEWAY=busbar BUSBAR_BIN=~/busbar xlate/run.sh
+#
+# Manifest overrides (optional): GW_ANTHROPIC_PATH (default /v1/messages), GW_ANTHROPIC_AUTH_HEADER
+# (a full "Name: value" header added on the anthropic side only; the loadgen already sends the token
+# as BOTH `authorization: Bearer` and `x-api-key`, so this is for gateways needing something else).
+# Knobs (env): C1_DUR (default 20), SWEEP_DELAYED ("8 32 128 256 1024 4096 8192 16384"), SWEEP_DUR
+#   (seconds per point, default 10), SWEEP_TTFT_MS (default 20), PSIZE (payload bytes, 256), CORES pin.
+set -uo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$HERE/.." && pwd)"
+GATEWAY="${GATEWAY:-busbar}"
+export GW_DIR="$ROOT/gateways/$GATEWAY"
+[ -f "$GW_DIR/gateway.sh" ] || { echo "unknown gateway '$GATEWAY'"; exit 2; }
+
+C1_DUR="${C1_DUR:-20}"; SWEEP_DUR="${SWEEP_DUR:-10}"; PSIZE="${PSIZE:-256}"
+# Same delayed grid + gates as perf's sweep B: the mock sleeps SWEEP_TTFT_MS per request so the
+# ceiling is concurrent-in-flight capacity on the TRANSLATION path, not a race against mock CPU.
+SWEEP_DELAYED="${SWEEP_DELAYED:-8 32 128 256 1024 4096 8192 16384}"
+SWEEP_TTFT_MS="${SWEEP_TTFT_MS:-20}"
+P99_CEIL_MS="${P99_CEIL_MS:-1000}"
+ulimit -n 1048576 2>/dev/null || ulimit -n 65536 2>/dev/null || true
+export CORES="${CORES:-0-3}"; LOADCORES="${LOADCORES:-0-3}"; MOCKCORES="${MOCKCORES:-0-3}"
+export MOCK_PORT="${MOCK_PORT:-8000}"
+RESULTS="$ROOT/results/xlate"; mkdir -p "$RESULTS"
+log(){ echo "[$(date +%H:%M:%S)] $*"; }
+command -v taskset >/dev/null || taskset(){ shift 2; "$@"; }
+command -v go >/dev/null || { echo "need Go (load generator)"; exit 1; }
+command -v cargo >/dev/null || { echo "need cargo (rust mock)"; exit 1; }
+
+log "building mock (rust) + loadgen (go)"
+( cd "$ROOT/mock" && cargo build --release >/dev/null 2>&1 ) || { echo "mock build failed"; exit 1; }
+MOCK="$ROOT/mock/target/release/mock"
+go build -o "$ROOT/loadgen/ugen" "$ROOT/loadgen/ugen.go"
+UGEN="$ROOT/loadgen/ugen"
+
+[ -f "$ROOT/gateways/versions.env" ] && source "$ROOT/gateways/versions.env"
+gw_version(){ echo unknown; }; GW_HEADERS=()
+gw_diag(){ :; }
+json_escape(){ printf '%s' "$1" | tr -d '\000' | head -c 1600 \
+  | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read())[1:-1])' 2>/dev/null \
+  || printf '%s' "$1" | tr '\n\t"\\' '    ' | head -c 1600; }
+# shellcheck source=/dev/null
+source "$GW_DIR/gateway.sh"
+XPATH_A="${GW_ANTHROPIC_PATH:-/v1/messages}"
+
+log "starting mock :$MOCK_PORT (instant, openai upstream on $GW_PATH)"
+pkill -f "$MOCK" 2>/dev/null; sleep 1
+setsid taskset -c "$MOCKCORES" "$MOCK" -port "$MOCK_PORT" </dev/null >/dev/null 2>&1 &
+sleep 1
+cleanup(){ gw_stop 2>/dev/null; pkill -f "$MOCK" 2>/dev/null; }
+trap cleanup EXIT
+
+# openai-shape probe (direct baseline + mock guardrail) — identical to perf/run.sh's probe
+oprobe(){ # url conc dur
+  "$UGEN" -url "$1" -model "$GW_MODEL" -auth "$GW_AUTH" -c "$2" -d "$3" -psize "$PSIZE" ${UGEN_H[@]+"${UGEN_H[@]}"} 2>/dev/null \
+    | awk '{for(i=1;i<=NF;i++){split($i,a,"=");v[a[1]]=a[2]}; print v["rps"],v["fail"],v["p99us"],v["p50us"]}'
+}
+# anthropic-shape probe (the translation path through the gateway)
+aprobe(){ # url conc dur
+  "$UGEN" -url "$1" -shape anthropic -model "$GW_MODEL" -auth "$GW_AUTH" -c "$2" -d "$3" -psize "$PSIZE" \
+    ${UGEN_H[@]+"${UGEN_H[@]}"} ${XH[@]+"${XH[@]}"} 2>/dev/null \
+    | awk '{for(i=1;i<=NF;i++){split($i,a,"=");v[a[1]]=a[2]}; print v["rps"],v["fail"],v["p99us"],v["p50us"]}'
+}
+
+log "[$GATEWAY] build + launch"; gw_build || { echo "build failed"; exit 1; }; gw_launch
+# Header arrays built AFTER launch so a manifest can mint a key in gw_launch (busbar vkey).
+UGEN_H=(); CURL_H=(); XH=()
+for h in "${GW_HEADERS[@]:-}"; do [ -n "$h" ] && { UGEN_H+=(-H "$h"); CURL_H+=(-H "$h"); }; done
+[ -n "${GW_ANTHROPIC_AUTH_HEADER:-}" ] && XH+=(-H "$GW_ANTHROPIC_AUTH_HEADER")
+log "[$GATEWAY] wait 200 on $GW_PATH (openai warm — is the gateway up at all?)"; ok=0; c=000
+for i in $(seq 1 60); do
+  c=$(curl -s -m3 -o /dev/null -w "%{http_code}" "http://127.0.0.1:$GW_PORT$GW_PATH" -X POST \
+      -H "content-type: application/json" -H "authorization: Bearer $GW_AUTH" ${CURL_H[@]+"${CURL_H[@]}"} \
+      -d "{\"model\":\"$GW_MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"warm\"}],\"max_tokens\":16}")
+  [ "$c" = 200 ] && { ok=1; break; }; sleep 1
+done
+SERVE_ERR=""
+[ "$ok" != 1 ] && { SERVE_ERR="HTTP $c on POST $GW_PATH; diag=[$(gw_diag 2>&1 | tail -n 20)]"; \
+  log "[$GATEWAY] WARNING never got 200 (last=$c) — served=false"; }
+
+# ── can the gateway translate at all? one probe, then fail gracefully if not ──────────────────────
+# Requires: 2xx, an Anthropic message envelope ("type":"message" or a content array) in the body,
+# and NOT the mock's canned /messages body (id "msg_x") — that would mean the gateway proxied the
+# path through verbatim instead of translating (the openai upstream never emits msg_x).
+XLATE_OK=0; XLATE_ERR=""; XLATE_PASSTHROUGH=false; XC=000
+ABODY="{\"model\":\"$GW_MODEL\",\"max_tokens\":64,\"messages\":[{\"role\":\"user\",\"content\":\"warm\"}]}"
+AH=(-H "content-type: application/json" -H "anthropic-version: 2023-06-01" \
+    -H "x-api-key: $GW_AUTH" -H "authorization: Bearer $GW_AUTH")
+if [ "$ok" = 1 ]; then
+  xbody="$(curl -s -m5 -w '\n%{http_code}' "http://127.0.0.1:$GW_PORT$XPATH_A" -X POST \
+      "${AH[@]}" ${CURL_H[@]+"${CURL_H[@]}"} ${XH[@]+"${XH[@]}"} -d "$ABODY" 2>&1)"
+  XC="${xbody##*$'\n'}"; xbody="${xbody%$'\n'*}"
+  if printf '%s' "$xbody" | grep -q '"id":"msg_x"'; then
+    XLATE_PASSTHROUGH=true
+    XLATE_ERR="UNTRANSLATED passthrough: gateway returned the mock's canned /messages body (id msg_x) — it proxied the path, it did not translate; body=[$(printf '%s' "$xbody" | head -c 400)]"
+    log "[$GATEWAY] WARNING passthrough, not translation — xlate_served=false"
+  elif [ "${XC#2}" != "$XC" ] && printf '%s' "$xbody" | grep -Eq '"type"[[:space:]]*:[[:space:]]*"message"|"content"[[:space:]]*:[[:space:]]*\['; then
+    XLATE_OK=1
+    log "[$GATEWAY] translation probe OK (HTTP $XC, anthropic envelope): $(printf '%s' "$xbody" | head -c 160)"
+  else
+    XLATE_ERR="HTTP $XC on POST $XPATH_A (anthropic shape); body=[$(printf '%s' "$xbody" | head -c 400)]; diag=[$(gw_diag 2>&1 | tail -n 20)]"
+    log "[$GATEWAY] WARNING no anthropic-shaped 2xx on $XPATH_A — xlate_served=false"
+  fi
+fi
+
+DURL="http://127.0.0.1:$MOCK_PORT$GW_PATH"; XURL="http://127.0.0.1:$GW_PORT$XPATH_A"
+DP99=0; DP50=0; GP99=0; GP50=0; OVER_P99=0; OVER_P50=0
+LLM_RPS=0; LLM_CONC=0; LLM_MOCK=0; LLM_BOUND=false; LLM_JSON=""
+if [ "$XLATE_OK" = 1 ]; then
+  # ── c1: direct baseline (openai → mock) + gateway (anthropic → gateway) → added µs ──────────────
+  WARMUP_DUR="${WARMUP_DUR:-5}"
+  log "[$GATEWAY] warm-up ${WARMUP_DUR}s (discarded, both paths)"
+  oprobe "$DURL" 1 "$WARMUP_DUR" >/dev/null 2>&1; aprobe "$XURL" 1 "$WARMUP_DUR" >/dev/null 2>&1
+  log "[$GATEWAY] c1 baseline (direct→mock, OPENAI shape — the mock does not translate) ${C1_DUR}s"
+  read -r _drps _dfail DP99 DP50 < <(oprobe "$DURL" 1 "$C1_DUR")
+  log "[$GATEWAY] c1 gateway (ANTHROPIC shape on $XPATH_A) ${C1_DUR}s"
+  read -r _grps _gfail GP99 GP50 < <(aprobe "$XURL" 1 "$C1_DUR")
+  OVER_P99=$(( ${GP99:-0} - ${DP99:-0} )); OVER_P50=$(( ${GP50:-0} - ${DP50:-0} ))
+  log "[$GATEWAY] c1: gw p99=${GP99}µs direct p99=${DP99}µs → added (incl. translation) p99=${OVER_P99}µs (p50=${OVER_P50}µs)"
+
+  # ── sustained RPS @ ${SWEEP_TTFT_MS}ms on the translation path ──────────────────────────────────
+  log "[$GATEWAY] sweep — sustained RPS @ ${SWEEP_TTFT_MS}ms LLM latency (translation path)"
+  pkill -f "$MOCK" 2>/dev/null; sleep 1
+  setsid taskset -c "$MOCKCORES" env MOCK_TTFT_MS="$SWEEP_TTFT_MS" "$MOCK" -port "$MOCK_PORT" </dev/null >/dev/null 2>&1 &
+  sleep 1
+  top=1; for w in $SWEEP_DELAYED; do top=$w; done
+  read -r mrps _a _b _c2 < <(oprobe "$DURL" "$top" "$SWEEP_DUR"); LLM_MOCK=${mrps:-0}
+  for conc in $SWEEP_DELAYED; do
+    read -r rps fail p99 _p50 < <(aprobe "$XURL" "$conc" "$SWEEP_DUR")
+    rps=${rps:-0}; fail=${fail:-1}; p99=${p99:-99999999}
+    log "[$GATEWAY]   (ttft=${SWEEP_TTFT_MS}ms) c=$conc → rps=$rps p99=$((p99/1000))ms fail=$fail"
+    LLM_JSON="${LLM_JSON}${LLM_JSON:+,}{\"conc\":$conc,\"rps\":$rps,\"p99_us\":$p99,\"fail\":$fail}"
+    if awk -v f="$fail" -v r="$rps" -v d="$SWEEP_DUR" 'BEGIN{tot=r*d+f; exit !(tot>0 && f<=0.001*tot)}' \
+       && [ "$p99" -lt $((P99_CEIL_MS*1000)) ] && [ "$rps" -gt "$LLM_RPS" ]; then
+      LLM_RPS=$rps; LLM_CONC=$conc
+    fi
+  done
+  if [ "${LLM_MOCK:-0}" -gt 0 ] && awk -v c="$LLM_RPS" -v m="$LLM_MOCK" 'BEGIN{exit !(c>=0.9*m)}'; then LLM_BOUND=true; fi
+  [ "$LLM_BOUND" = true ] && log "[$GATEWAY] ⚠ ceiling ($LLM_RPS) within 10% of mock ($LLM_MOCK) — MOCK-BOUND floor"
+  log "[$GATEWAY] sustained RPS @${SWEEP_TTFT_MS}ms (translating) = $LLM_RPS rps @ c=$LLM_CONC"
+fi
+
+BUILD="$(gw_version 2>/dev/null | tr -d '\n' | sed 's/"/\\"/g')"
+cat > "$RESULTS/$GATEWAY.json" <<JSON
+{
+  "gateway": "$GATEWAY",
+  "build": "$BUILD",
+  "served": $([ "$ok" = 1 ] && echo true || echo false),
+  "xlate_served": $([ "$XLATE_OK" = 1 ] && echo true || echo false),
+  "xlate_passthrough": $XLATE_PASSTHROUGH,
+  "last_http_status": "$c",
+  "xlate_probe_status": "$XC",
+  "serve_error": "$(json_escape "$SERVE_ERR")",
+  "xlate_error": "$(json_escape "$XLATE_ERR")",
+  "xlate_added_latency_p50_us": $OVER_P50,
+  "xlate_added_latency_p99_us": $OVER_P99,
+  "xlate_gateway_c1_p99_us": ${GP99:-0},
+  "xlate_direct_c1_p99_us": ${DP99:-0},
+  "xlate_baseline_shape": "openai",
+  "xlate_baseline_note": "direct baseline is the OPENAI shape straight to the mock (the mock does not translate); the gateway figure carries anthropic ingress + both conversions, so added latency includes the translation work by design",
+  "xlate_rps_sustained_20ms": $LLM_RPS,
+  "xlate_rps_sustained_20ms_concurrency": $LLM_CONC,
+  "xlate_rps_sustained_20ms_mock_ceiling": $LLM_MOCK,
+  "xlate_rps_sustained_20ms_mock_bound": $LLM_BOUND,
+  "sweep_ttft_ms": $SWEEP_TTFT_MS,
+  "p99_ceiling_ms": $P99_CEIL_MS,
+  "sweep_sustained_20ms": [$LLM_JSON],
+  "payload_bytes": $PSIZE,
+  "endpoint": "$XPATH_A",
+  "upstream_endpoint": "$GW_PATH",
+  "model": "$GW_MODEL",
+  "cores": "gateway=${CORES} loadgen=${LOADCORES} mock=${MOCKCORES}",
+  "mock_proto": "h1+h2c",
+  "arch": "${BENCH_ARCH:-$(uname -m)}",
+  "hardware": "${BENCH_HARDWARE:-$(uname -m) $(nproc 2>/dev/null || echo '?')vCPU}",
+  "measured_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+}
+JSON
+echo "================================================================"
+if [ "$XLATE_OK" = 1 ]; then
+  echo " gateway=$GATEWAY   translation added latency p99=${OVER_P99}µs (anthropic-in → openai-out)"
+  echo "   sustained @ ${SWEEP_TTFT_MS}ms translating = ${LLM_RPS} rps @ c=${LLM_CONC}  (mock_bound=${LLM_BOUND})"
+else
+  echo " gateway=$GATEWAY   did not translate (xlate_served=false, passthrough=$XLATE_PASSTHROUGH)"
+fi
+echo " -> $RESULTS/$GATEWAY.json"
+echo "================================================================"
