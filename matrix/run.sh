@@ -397,7 +397,7 @@ for EGRESS in $EGRESS_ALL; do
   # Wall-clock backstop: if a pathological gateway has already burned the suite ceiling, stop probing
   # further egress columns and record them not-served (timeout) so run-all can never wedge here.
   if col_capable "$EGRESS" && suite_deadline_expired; then
-    log "[$GATEWAY] egress=$EGRESS: suite wall-clock ceiling reached — recording not served, moving on"
+    log "[$GATEWAY] egress=$EGRESS: suite wall-clock ceiling reached - recording not served, moving on"
     WARM_OK=0
     for CELL in $INGRESS_ALL; do
       emit_cell "$CELL" false "" "$(ingress_path "$CELL")" \

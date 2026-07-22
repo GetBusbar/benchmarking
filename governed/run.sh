@@ -177,7 +177,7 @@ _plain_ready(){
   for h in "${GW_HEADERS[@]:-}"; do [ -n "$h" ] && { UGEN_H+=(-H "$h"); CURL_H+=(-H "$h"); }; done
   wait_200 "$GW_AUTH"
 }
-log "[$GATEWAY] phase 1/2 — PLAIN launch (ungoverned reference; robust boot, up to $HARNESS_BOOT_ATTEMPTS attempts)"
+log "[$GATEWAY] phase 1/2 - PLAIN launch (ungoverned reference; robust boot, up to $HARNESS_BOOT_ATTEMPTS attempts)"
 start_mock 0
 if ! harness_launch_ready gw_launch _plain_ready; then
   write_unserved "plain (ungoverned) $HARNESS_SERVE_ERR (last=$W_CODE)"
@@ -207,7 +207,7 @@ done
 # entirely (admin plane derives +1 from GW_PORT inside gw_governed_launch).
 GW_PORT=$(( GW_PORT + 2 ))
 GURL="http://127.0.0.1:$GW_PORT$GW_PATH"
-log "[$GATEWAY] phase 2/2 — GOVERNED launch (virtual-key resolution + rate + budget on the hot path; robust boot, up to $HARNESS_BOOT_ATTEMPTS attempts)"
+log "[$GATEWAY] phase 2/2 - GOVERNED launch (virtual-key resolution + rate + budget on the hot path; robust boot, up to $HARNESS_BOOT_ATTEMPTS attempts)"
 start_mock 0
 # Readiness for the governed phase: the caller credential is minted INSIDE gw_governed_launch, so the
 # probe reads it fresh via gw_governed_token each attempt (a re-run of gw_governed_launch mints a new

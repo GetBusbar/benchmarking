@@ -2,10 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (C) 2026 Busbar Inc and contributors
 #
-# SHARED HARNESS ROBUSTNESS LAYER — sourced by every suite (perf/memory/stream/streamcpu/xlate/
+# SHARED HARNESS ROBUSTNESS LAYER - sourced by every suite (perf/memory/stream/streamcpu/xlate/
 # governed/matrix). It exists so a flaky gateway boot or an unresponsive gateway under load can NEVER
 # (a) zero out a gateway on a single transient boot failure, or (b) hang a suite indefinitely. Both
-# guarantees are implemented ONCE here and applied uniformly to every gateway — no per-manifest
+# guarantees are implemented ONCE here and applied uniformly to every gateway - no per-manifest
 # special-casing, the same retry count and timeout policy for all.
 #
 # WHAT IT PROVIDES
@@ -32,7 +32,7 @@
 #   suite_deadline_start   /   suite_deadline_expired
 #       Overall per-suite wall-clock ceiling backstop (HARNESS_SUITE_CEIL_S, default 45 min). A suite
 #       polls suite_deadline_expired at each sweep point; if the ceiling is crossed it stops probing,
-#       records what it has, and moves on — so a pathological gateway can never wedge run-all.sh.
+#       records what it has, and moves on - so a pathological gateway can never wedge run-all.sh.
 #
 # TUNABLES (env, same for every gateway so the field stays fair):
 #   HARNESS_BOOT_ATTEMPTS   boot attempts before served=false            (default 3)
@@ -46,7 +46,7 @@ HARNESS_PROBE_GRACE="${HARNESS_PROBE_GRACE:-45}"
 HARNESS_SUITE_CEIL_S="${HARNESS_SUITE_CEIL_S:-2700}"
 
 # ── tmo: hard timeout around one command ────────────────────────────────────────────────────────
-# Kills the command (and, via a fresh process group when possible, its children — a ugen probe forks
+# Kills the command (and, via a fresh process group when possible, its children - a ugen probe forks
 # nothing but a docker/native gateway probe path might) if it runs longer than <seconds>. Returns the
 # command's own status on completion, or non-zero (124, matching coreutils timeout) if it timed out.
 if command -v timeout >/dev/null 2>&1; then
@@ -89,12 +89,12 @@ _harness_port_state(){
 
 # ── harness_launch_ready: THE robust boot-with-retry, shared by every suite ───────────────────────
 # Usage: harness_launch_ready <launch_fn> <ready_fn> [launch_arg...]
-#   <launch_fn>  a shell function that (re)launches the gateway. It is the gateway's OWN hook —
-#                gw_launch / gw_governed_launch / gw_matrix_egress — so this works for docker, pip,
+#   <launch_fn>  a shell function that (re)launches the gateway. It is the gateway's OWN hook -
+#                gw_launch / gw_governed_launch / gw_matrix_egress - so this works for docker, pip,
 #                cargo, native alike; we never assume a process model, we just re-run the hook.
 #   <ready_fn>   a shell function returning 0 once the gateway answers its readiness probe. It must
 #                do its OWN internal wait (the existing per-suite curl-200 loop, already -m3 bounded),
-#                and must NOT loop forever — a bounded ~60x1s loop is expected.
+#                and must NOT loop forever - a bounded ~60x1s loop is expected.
 #   launch_arg   optional args passed through to <launch_fn> (e.g. the matrix egress dialect).
 # Returns 0 on the first attempt that both launches AND passes readiness. On total failure returns 1
 # and sets HARNESS_SERVE_ERR to an honest "failed to boot after N attempts" string with the captured
@@ -107,7 +107,7 @@ harness_launch_ready(){
   for attempt in $(seq 1 "$HARNESS_BOOT_ATTEMPTS"); do
     [ "$attempt" -gt 1 ] && log "[${GATEWAY:-gw}] boot retry $attempt/$HARNESS_BOOT_ATTEMPTS (previous attempt did not become ready)"
     # Re-run the gateway's own launch hook. A nonzero launch (config/build/mint failure) is itself a
-    # failed attempt — capture it and retry rather than bailing.
+    # failed attempt - capture it and retry rather than bailing.
     rc=0; "$launch_fn" "$@" || rc=$?
     if [ "$rc" = 0 ] && "$ready_fn"; then
       [ "$attempt" -gt 1 ] && log "[${GATEWAY:-gw}] booted on attempt $attempt"
@@ -125,6 +125,6 @@ harness_launch_ready(){
     fi
   done
   HARNESS_SERVE_ERR="failed to boot after $HARNESS_BOOT_ATTEMPTS attempts: $tries"
-  log "[${GATEWAY:-gw}] WARNING served=false — $HARNESS_SERVE_ERR"
+  log "[${GATEWAY:-gw}] WARNING served=false - $HARNESS_SERVE_ERR"
   return 1
 }
