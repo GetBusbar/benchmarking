@@ -155,8 +155,8 @@ gw_stop() { pkill -x busbar 2>/dev/null; }
 # gw_launch plus the governance block, boots busbar, then mints one virtual key over the admin API
 # (POST /api/v1/admin/keys, x-admin-token auth). The key is minted with NO rpm/tpm/budget caps
 # (absent = unlimited) and no pool ACL (empty allowed_pools = all pools): at 40k+ rps nothing can
-# ever trip, so the lane measures the cost of the CHECK, not a limit. Store: memory (the default),
-# so per-run keys never leak into a durable store.
+# ever trip, so the lane measures the cost of the CHECK, not a limit. Store: sqlite :memory: (the
+# entrant 1.4.1 governance store is SQLite; :memory: is ephemeral), so per-run keys never persist.
 BUSBAR_ADMIN_TOKEN="${BUSBAR_ADMIN_TOKEN:-bench-admin-token}"
 BUSBAR_VKEY=""
 
@@ -175,8 +175,14 @@ auth:
   client_tokens:
     - "bench-token"
 governance:
-  # store: memory is the default (ephemeral). admin_token ACTIVATES enforcement:
-  # every request below must carry a minted virtual key, checked per request.
+  # The released entrant (getbusbar/busbar:1.4.1) still has the governance on/off switch and a
+  # SQLite-backed store: `enabled: true` ACTIVATES enforcement (without it admin_token is inert and
+  # the admin API rejects the mint with 401 — the "never minted a key" failure), and db_path must be
+  # ":memory:" because the default (busbar-governance.db next to the config) cannot be opened on the
+  # bench's read-only working dir. :memory: is ephemeral, so per-run keys never leak across runs.
+  enabled: true
+  db_path: ":memory:"
+  # admin_token ACTIVATES the admin plane: every request below must carry a minted virtual key.
   admin_token: "$BUSBAR_ADMIN_TOKEN"
 providers:
   mock:
