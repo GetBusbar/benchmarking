@@ -43,6 +43,10 @@ gw_version() { local v; v="$("$BUSBAR_BIN" --version 2>/dev/null | head -1)"; ec
 GW_MATRIX_EGRESS="openai openai-responses anthropic gemini cohere bedrock"
 
 _busbar_launch_common() { # proto mock-key
+  # Note on state: busbar 1.5+ snapshots runtime state (breaker cells included) to
+  # busbar-state.json next to the config and restores it on boot. A bench launch must be
+  # deterministic and stateless, a tripped breaker from a previous run must never carry over,
+  # so every launch here sets BUSBAR_STATE_FILE= (empty disables persistence).
   local proto="$1" key="$2"
   cat > "$GW_DIR/providers.gen.yaml" <<YAML
 mock:
@@ -55,6 +59,7 @@ YAML
     BUSBAR_WORKER_THREADS="$(( ${CORES##*-} + 1 ))" \
     BUSBAR_PROVIDERS="$GW_DIR/providers.gen.yaml" \
     BUSBAR_CONFIG="$GW_DIR/config.gen.yaml" \
+    BUSBAR_STATE_FILE= \
     BENCH_MOCK_KEY="$key" \
     "$BUSBAR_BIN" </dev/null >/tmp/busbar.bench.log 2>&1 &
 }
@@ -133,6 +138,7 @@ YAML
     BUSBAR_WORKER_THREADS="$(( ${CORES##*-} + 1 ))" \
     BUSBAR_PROVIDERS="$GW_DIR/providers.gen.yaml" \
     BUSBAR_CONFIG="$GW_DIR/config.gen.yaml" \
+    BUSBAR_STATE_FILE= \
     BENCH_MOCK_KEY=x \
     "$BUSBAR_BIN" </dev/null >/tmp/busbar.bench.log 2>&1 &
 }
@@ -197,6 +203,7 @@ YAML
     BUSBAR_WORKER_THREADS="$(( ${CORES##*-} + 1 ))" \
     BUSBAR_PROVIDERS="$GW_DIR/providers.gen.yaml" \
     BUSBAR_CONFIG="$GW_DIR/config.gen.yaml" \
+    BUSBAR_STATE_FILE= \
     BENCH_MOCK_KEY=x \
     "$BUSBAR_BIN" </dev/null >/tmp/busbar.governed.log 2>&1 &
   # Wait for the admin plane, then mint the run's virtual key. The secret (sk-bb-<32 hex>) is

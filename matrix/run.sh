@@ -136,7 +136,11 @@ import json, os, sys
 try:
     s = json.loads(os.environ.get("MOCK_STATE_JSON", ""))
 except Exception:
-    print("miss"); sys.exit(0)
+    print("norecord"); sys.exit(0)
+if not s.get("recording"):
+    # A mock without MOCK_RECORD=1 answered on our port: some other run replaced our mock. Fail
+    # loudly rather than reporting a false "the gateway never called the upstream".
+    print("norecord"); sys.exit(0)
 ds = s.get("dialects", {})
 d = ds.get(sys.argv[1], {})
 if not d.get("count"):
@@ -284,6 +288,8 @@ run_cell(){ # egress cell path body extra-header...
       note="HTTP $LAST_STATUS with a valid $cell envelope, but the mock never received a request on the $egress endpoint: the gateway answered without contacting the configured upstream"
     elif [ "${m#misdialect }" != "$m" ]; then
       note="HTTP $LAST_STATUS with a valid $cell envelope, but the gateway did not speak the $egress dialect to the upstream: the mock received the request on the ${m#misdialect } endpoint instead"
+    elif [ "$m" = norecord ]; then
+      note="HTTP $LAST_STATUS with a valid $cell envelope, but the recording mock's state was unavailable (another process replaced the mock on :$MOCK_PORT?); round trip unverifiable, recorded as not served rather than guessed"
     else
       note="HTTP $LAST_STATUS with a valid $cell envelope, but the request that reached the mock's $egress endpoint did not carry the $egress request shape: ${m#badshape }"
     fi
