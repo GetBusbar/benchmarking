@@ -177,16 +177,26 @@ if [ "$STREAM_OK" = 1 ]; then
   log "[$GATEWAY] direct-to-mock ceiling = ${DIRECT_CEIL} frames/sec @ c=$top (guardrail)"
 
   # Gateway sweep: aggregate content-frames/sec sustained at each concurrency. A point counts toward
-  # the best only if it actually relayed frames cleanly: >=99% of expected frames delivered, no stream
-  # stalled past SC_STALL_MS, and error rate under 0.1%. The best qualifying fps is the headline.
-  log "[$GATEWAY] streamcpu sweep -- sustained frames/sec"
+  # the best only if the gateway relayed the stream cleanly:
+  #   * error rate under 0.1% (a 200 that never framed counts as failed in ugen), AND
+  #   * COMPLETION rate >= 99% -- each stream reached the finish marker ([DONE]/message_stop), so the
+  #     gateway did not truncate or drop the tail, AND
+  #   * no stream stalled past SC_STALL_MS (a starved, not-relaying stream), AND
+  #   * a LENIENT delivered-frames floor (SC_MIN_DELIVERED, default 0.5). delivered = content frames
+  #     seen / frames the mock sent. It is deliberately NOT required to be ~1.0: a gateway may
+  #     legitimately RE-CHUNK (coalesce) the upstream SSE into fewer, larger frames (LiteLLM does this
+  #     ~256->100), which is valid relay behavior, not a fault. The floor only catches gross content
+  #     loss. A coalescing gateway is then judged on its real frames/sec, not zeroed for re-chunking.
+  # The best qualifying fps is the headline.
+  local_min_del="${SC_MIN_DELIVERED:-0.5}"
+  log "[$GATEWAY] streamcpu sweep -- sustained frames/sec (qualify: complete>=99%, stalls=0, delivered>=${local_min_del})"
   for conc in $SC_SWEEP; do
     read -r streams complete fail stalled frames fps delivered < <(sprobe "$GURL" "$conc" "$SC_DUR")
-    streams=${streams:-0}; fail=${fail:-1}; stalled=${stalled:-1}; fps=${fps:-0}; delivered=${delivered:-0}
-    log "[$GATEWAY]   c=$conc -> fps=$fps delivered=$delivered stalled=$stalled fail=$fail streams=$streams"
-    SWEEP_JSON="${SWEEP_JSON}${SWEEP_JSON:+,}{\"conc\":$conc,\"streams\":$streams,\"complete\":${complete:-0},\"fail\":$fail,\"stalled\":$stalled,\"frames\":${frames:-0},\"fps\":$fps,\"delivered\":$delivered}"
-    if awk -v f="$fail" -v s="$streams" -v d="$delivered" -v st="$stalled" \
-         'BEGIN{exit !(s>0 && f<=0.001*s && d>=0.99 && st==0)}' \
+    streams=${streams:-0}; complete=${complete:-0}; fail=${fail:-1}; stalled=${stalled:-1}; fps=${fps:-0}; delivered=${delivered:-0}
+    log "[$GATEWAY]   c=$conc -> fps=$fps delivered=$delivered complete=$complete stalled=$stalled fail=$fail streams=$streams"
+    SWEEP_JSON="${SWEEP_JSON}${SWEEP_JSON:+,}{\"conc\":$conc,\"streams\":$streams,\"complete\":${complete},\"fail\":$fail,\"stalled\":$stalled,\"frames\":${frames:-0},\"fps\":$fps,\"delivered\":$delivered}"
+    if awk -v f="$fail" -v s="$streams" -v cm="$complete" -v d="$delivered" -v st="$stalled" -v md="$local_min_del" \
+         'BEGIN{exit !(s>0 && f<=0.001*s && cm>=0.99*s && d>=md && st==0)}' \
        && awk -v a="$fps" -v b="$BEST_FPS" 'BEGIN{exit !(a>b)}'; then
       BEST_FPS=$fps; BEST_CONC=$conc
     fi
@@ -224,6 +234,7 @@ cat > "$RESULTS/$GATEWAY.json" <<JSON
   "streamcpu_concurrency": $BEST_CONC,
   "streamcpu_direct_ceiling_fps": ${DIRECT_CEIL:-0},
   "streamcpu_mock_bound": $MOCK_BOUND,
+  "streamcpu_valid": $([ "$STREAM_OK" = 1 ] && [ "$MOCK_BOUND" = false ] && [ "$BEST_FPS" -gt 0 ] && echo true || echo false),
   "streamcpu_added_per_frame_us": ${ADDED_PER_FRAME_US:-null},
   "streamcpu_frames_per_stream": $SC_CHUNKS,
   "streamcpu_frame_bytes": $SC_FRAME_BYTES,

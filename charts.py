@@ -284,12 +284,15 @@ CHARTS = [
         unit="frames / sec",
         series=[Series("streamcpu_frames_per_sec", "sustained frames/sec", "rank")],
         higher_better=True,
-        served_field="stream_served",
-        not_served_text="✕ no SSE streaming",
+        # served_field is streamcpu_valid (streamed AND not mock-bound): a mock-bound result is not a
+        # valid gateway-vs-ceiling comparison, so it renders as "not proven" rather than a clean bar.
+        # On an UNPINNED box every result is mock-bound; only the EC2 field run (real core pinning)
+        # yields streamcpu_valid=true, so unproven laptop numbers are never surfaced as a comparison.
+        served_field="streamcpu_valid",
+        not_served_text="✕ not measured (needs pinned field run)",
         zero_text="0  ·  no stream load qualified",
-        annot=lambda r: (lambda b, f: (f"MOCK-BOUND ({f:,.0f}/core)" if b else f"{f:,.0f}/core")
-                         if f > 0 else None)(
-            bool(r.get("streamcpu_mock_bound")), float(r.get("streamcpu_fps_per_core") or 0)),
+        annot=lambda r: (lambda f: f"{f:,.0f}/core" if f > 0 else None)(
+            float(r.get("streamcpu_fps_per_core") or 0)),
     ),
     # ── translation: Anthropic client to OpenAI provider ──────────────────────────────────────────
     Chart(
