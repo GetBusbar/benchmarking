@@ -50,3 +50,9 @@ gw_diag() {
 gw_rss() { container_rss_mib gomodel-bench; }  # summed process-tree VmRSS (same method as native gateways)
 
 gw_stop() { sudo docker rm -f gomodel-bench >/dev/null 2>&1; }
+
+# matrix suite (6x6): no gw_matrix_egress hook is defined for this manifest, so every egress
+# column beyond the default upstream renders "not configurable" (neutral, distinct from
+# tried-and-failed). Reason: the only upstream configuration this manifest can drive is the
+# OPENAI_BASE_URL env var. The project describes itself as OpenAI + Anthropic compatible, but no
+# verified env/config path for a non-openai-shaped upstream is known to this harness.

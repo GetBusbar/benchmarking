@@ -58,3 +58,11 @@ gw_diag() {
 gw_rss() { container_rss_mib bifrost; }  # summed process-tree VmRSS (same method as native gateways)
 
 gw_stop() { sudo docker rm -f bifrost >/dev/null 2>&1; }
+
+# matrix suite (6x6): no gw_matrix_egress hook is defined for this manifest, so every egress
+# column beyond the default upstream renders "not configurable" (neutral, distinct from
+# tried-and-failed). Reason: Bifrost's config.json takes named providers (anthropic, bedrock, ...)
+# with a network_config.base_url override, so anthropic egress looks wireable in principle, but that
+# configuration has not been verified against the recording mock from this harness (the local
+# verification rig cannot reach docker host networking), so it stays unwired rather than risking
+# false tried-and-failed reds.

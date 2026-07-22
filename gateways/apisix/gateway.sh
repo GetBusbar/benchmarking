@@ -80,3 +80,10 @@ gw_diag() {
 }
 
 gw_stop() { sudo docker rm -f apisix-bench >/dev/null 2>&1; }
+
+# matrix suite (6x6): no gw_matrix_egress hook is defined for this manifest, so every egress
+# column beyond the default upstream renders "not configurable" (neutral, distinct from
+# tried-and-failed). Reason: the ai-proxy provider surface in this APISIX release is OpenAI-
+# compatible only (provider: openai-compatible with an endpoint override). There is no
+# anthropic/gemini/cohere/ bedrock upstream dialect to configure, so the absence is a fact about the
+# gateway config, not missing harness work.

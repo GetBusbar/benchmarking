@@ -68,3 +68,10 @@ gw_launch() {
 gw_rss() { container_rss_mib kong-bench; }  # summed process-tree VmRSS (same method as native gateways)
 
 gw_stop() { sudo docker rm -f kong-bench >/dev/null 2>&1; }
+
+# matrix suite (6x6): no gw_matrix_egress hook is defined for this manifest, so every egress
+# column beyond the default upstream renders "not configurable" (neutral, distinct from
+# tried-and-failed). Reason: Kong's ai-proxy is pinned here to provider openai with an upstream_url
+# override. The plugin does document other provider types, but each one changes the
+# route/auth/request template, and none of those configurations has been verified against this
+# harness's recording mock, so wiring them blind would risk false tried-and-failed reds.

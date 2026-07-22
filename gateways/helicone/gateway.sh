@@ -75,3 +75,10 @@ gw_diag() {
 }
 
 gw_stop() { pkill -f 'target/release/ai-gateway' 2>/dev/null; }
+
+# matrix suite (6x6): no gw_matrix_egress hook is defined for this manifest, so every egress
+# column beyond the default upstream renders "not configurable" (neutral, distinct from
+# tried-and-failed). Reason: this manifest wires the openai provider in the router's providers
+# registry with a base-url override. The router lists other providers, but none has been verified
+# against the recording mock from this harness, so wiring them blind would risk false tried-and-
+# failed reds.

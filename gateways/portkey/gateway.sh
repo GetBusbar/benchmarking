@@ -23,6 +23,41 @@ GW_HEADERS=(
 
 gw_build() { command -v npx >/dev/null || { echo "need node/npx for portkey"; return 1; }; }
 
+# ── matrix suite: egress support ──────────────────────────────────────────────────────────────────
+# Portkey selects the upstream provider PER REQUEST via x-portkey-provider + x-portkey-custom-host,
+# so an egress "relaunch" is just a header swap. Every mapping below was verified against the
+# recording mock: the request landed on the intended dialect endpoint with that dialect's request
+# shape (google -> /v1beta/models/<m>:generateContent, cohere -> /v2/chat, bedrock (SigV4 with the
+# dummy creds below, which the mock ignores) -> /model/<m>/converse, anthropic -> /v1/messages,
+# openai -> /v1/chat/completions). openai-responses shares the openai provider: portkey's
+# /v1/responses route passes through to the upstream Responses endpoint (its legitimate diagonal),
+# but it has no chat->responses bridge, so those off-diagonal cells fail with the evidence.
+# The openai ingress path override matters: this manifest's GW_PATH is /v1/messages (the perf
+# suites drive portkey's anthropic lane), but the matrix's openai cell and warm-up need the chat
+# route, which portkey serves on every provider.
+GW_MATRIX_PATH_OPENAI=/v1/chat/completions
+GW_MATRIX_EGRESS="openai openai-responses anthropic gemini cohere bedrock"
+gw_matrix_egress() {
+  local host="http://127.0.0.1:${MOCK_PORT:-8000}"
+  case "$1" in
+    openai|openai-responses)
+      GW_HEADERS=("x-portkey-provider: openai" "x-portkey-custom-host: $host/v1");;
+    anthropic)
+      GW_HEADERS=("x-portkey-provider: anthropic" "x-portkey-custom-host: $host/v1");;
+    gemini)
+      GW_HEADERS=("x-portkey-provider: google" "x-portkey-custom-host: $host");;
+    cohere)
+      GW_HEADERS=("x-portkey-provider: cohere" "x-portkey-custom-host: $host");;
+    bedrock)
+      GW_HEADERS=("x-portkey-provider: bedrock" "x-portkey-custom-host: $host"
+        "x-portkey-aws-access-key-id: AKIAMOCKACCESSKEY"
+        "x-portkey-aws-secret-access-key: mock-secret-access-key"
+        "x-portkey-aws-region: us-east-1");;
+    *) return 1;;
+  esac
+  gw_launch
+}
+
 gw_launch() {
   pkill -f '@portkey-ai/gateway' 2>/dev/null; sleep 1
   setsid taskset -c "$CORES" npx -y "${PORTKEY_SPEC:-@portkey-ai/gateway}" \

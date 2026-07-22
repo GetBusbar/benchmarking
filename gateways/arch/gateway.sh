@@ -74,3 +74,9 @@ gw_diag() {
 }
 
 gw_stop() { "$ARCH_VENV/bin/archgw" down >/dev/null 2>&1; }
+
+# matrix suite (6x6): no gw_matrix_egress hook is defined for this manifest, so every egress
+# column beyond the default upstream renders "not configurable" (neutral, distinct from
+# tried-and-failed). Reason: llm_providers entries carry a base_url with the provider inferred from
+# the model name; whether a non-openai-shaped upstream dialect can be selected that way has not been
+# verified against the recording mock from this harness.
