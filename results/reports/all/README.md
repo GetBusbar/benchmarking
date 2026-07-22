@@ -23,55 +23,53 @@ Every number below is regenerated from the raw `results/*.json` — re-run `run-
 Two throughput numbers: **max proxy RPS** (instant upstream — raw forwarding speed) and **sustained RPS @20ms** (AIGatewayBench's metric — concurrent in-flight capacity under realistic LLM latency).
 **✕** = did not serve under load (0 successful req/s). &nbsp; **0** = came up, but no tested concurrency held p99 < 1 s with <0.1% errors.
 
-## Streaming, translation and governance
+## Streaming and translation
 
-Same box, same mock, one gateway at a time. Streaming figures are the overhead the gateway adds on top of the mock's paced SSE stream; translation is an Anthropic client against an OpenAI-shape upstream (the conversion is the work being measured); governed is sustained throughput with key auth, rate limits and budgets enforced, next to the same gateway running plain.
+Same box, same mock, one gateway at a time. Streaming figures are the overhead the gateway adds on top of the mock's paced SSE stream; translation is an Anthropic client against an OpenAI-shape upstream (the conversion is the work being measured).
 
-| Gateway | Added TTFT (p99) | Added per-token (p99) | SSE streams | Translated RPS @20ms | Governed RPS @20ms | Governed vs plain |
-|---|--:|--:|--:|--:|--:|--:|
-| [LiteLLM · Rust](https://github.com/BerriAI/litellm) | 40.8 ms | 5 µs | 512 (22,481 fps) | ✕ cannot translate | ✕ no native key governance | n/a |
-| [Busbar](https://github.com/GetBusbar/busbar) | 344 µs | 2 µs | 512 (22,585 fps) | 28,863 | 15,272 | -51.8% |
-| [agentgateway](https://github.com/agentgateway/agentgateway) | 372 µs | 5 µs | 128 (6,118 fps) | ✕ cannot translate | ✕ no native key governance | n/a |
-| [GoModel](https://github.com/ENTERPILOT/GOModel) | 523 µs | 13 µs | 128 (6,135 fps) | ✕ cannot translate | ✕ no native key governance | n/a |
-| [APISIX](https://github.com/apache/apisix) | 12.2 ms | 9.0 ms | 512 (24,287 fps) | 15,107 | ✕ no native key governance | n/a |
-| [Helicone](https://github.com/Helicone/ai-gateway) | 857 µs | 19.1 ms | 0 | ✕ cannot translate | ✕ no native key governance | n/a |
-| [Bifrost](https://github.com/maximhq/bifrost) | ✕ no SSE streaming | ✕ no SSE streaming | ✕ no SSE streaming | ✕ cannot translate | ✕ no native key governance | n/a |
-| [Kong](https://github.com/Kong/kong) | 106.2 ms | 168.7 ms | 0 | ✕ cannot translate | ✕ no native key governance | n/a |
-| [Portkey](https://github.com/Portkey-AI/gateway) | ✕ no SSE streaming | ✕ no SSE streaming | ✕ no SSE streaming | ✕ cannot translate | ✕ no native key governance | n/a |
-| [LiteLLM · Python](https://github.com/BerriAI/litellm) | 8.8 ms | 2.6 ms | 1 (47 fps) | 490 | ✕ no native key governance | n/a |
-| [One-API](https://github.com/songquanpeng/one-api) | 34.6 ms | 5 µs | 32 (1,340 fps) | ✕ cannot translate | ✕ no native key governance | n/a |
-| [TensorZero](https://github.com/tensorzero/tensorzero) | ✕ no SSE streaming | ✕ no SSE streaming | ✕ no SSE streaming | ✕ cannot translate | ✕ no native key governance | n/a |
-| [Arch](https://github.com/katanemo/archgw) | 248.1 ms | 235 µs | 1 (42 fps) | 0 | ✕ no native key governance | n/a |
+| Gateway | Added TTFT (p99) | Added per-token (p99) | SSE streams | Translated RPS @20ms |
+|---|--:|--:|--:|--:|
+| [LiteLLM · Rust](https://github.com/BerriAI/litellm) | 40.8 ms | 5 µs | 512 (22,481 fps) | ✕ untranslated passthrough |
+| [Busbar](https://github.com/GetBusbar/busbar) | 344 µs | 2 µs | 512 (22,585 fps) | 28,863 |
+| [agentgateway](https://github.com/agentgateway/agentgateway) | 372 µs | 5 µs | 128 (6,118 fps) | ✕ cannot translate |
+| [GoModel](https://github.com/ENTERPILOT/GOModel) | 523 µs | 13 µs | 128 (6,135 fps) | ✕ untranslated passthrough |
+| [APISIX](https://github.com/apache/apisix) | 12.2 ms | 9.0 ms | 512 (24,287 fps) | 15,107 |
+| [Helicone](https://github.com/Helicone/ai-gateway) | 857 µs | 19.1 ms | 0 | ✕ cannot translate |
+| [Bifrost](https://github.com/maximhq/bifrost) | ✕ no SSE streaming | ✕ no SSE streaming | ✕ no SSE streaming | ✕ cannot translate |
+| [Kong](https://github.com/Kong/kong) | 106.2 ms | 168.7 ms | 0 | ✕ cannot translate |
+| [Portkey](https://github.com/Portkey-AI/gateway) | ✕ no SSE streaming | ✕ no SSE streaming | ✕ no SSE streaming | ✕ untranslated passthrough |
+| [LiteLLM · Python](https://github.com/BerriAI/litellm) | 8.8 ms | 2.6 ms | 1 (47 fps) | 490 |
+| [One-API](https://github.com/songquanpeng/one-api) | 34.6 ms | 5 µs | 32 (1,340 fps) | ✕ cannot translate |
+| [TensorZero](https://github.com/tensorzero/tensorzero) | ✕ no SSE streaming | ✕ no SSE streaming | ✕ no SSE streaming | ✕ cannot translate |
+| [Arch](https://github.com/katanemo/archgw) | 248.1 ms | 235 µs | 1 (42 fps) | 0 |
 
 **✕** cells are measured refusals, not gaps: the gateway was offered the load and could not do the thing (buffered instead of streaming, rejected the Anthropic shape, or has no native key/limit governance). **n/a** = that suite hasn't been run for this gateway yet.
 
-![added_latency](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/added_latency.png?v=202607222123)
+![added_latency](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/added_latency.png?v=202607222317)
 
-![rps_max_proxy](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/rps_max_proxy.png?v=202607222123)
+![rps_max_proxy](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/rps_max_proxy.png?v=202607222317)
 
-![rps_sustained_20ms](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/rps_sustained_20ms.png?v=202607222123)
+![rps_sustained_20ms](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/rps_sustained_20ms.png?v=202607222317)
 
-![memory_rss](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/memory_rss.png?v=202607222123)
+![memory_rss](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/memory_rss.png?v=202607222317)
 
-![rps_per_dollar](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/rps_per_dollar.png?v=202607222123)
+![rps_per_dollar](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/rps_per_dollar.png?v=202607222317)
 
-![cost_per_million](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/cost_per_million.png?v=202607222123)
+![cost_per_million](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/cost_per_million.png?v=202607222317)
 
-![stream_added_ttft](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/stream_added_ttft.png?v=202607222123)
+![stream_added_ttft](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/stream_added_ttft.png?v=202607222317)
 
-![stream_added_gap](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/stream_added_gap.png?v=202607222123)
+![stream_added_gap](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/stream_added_gap.png?v=202607222317)
 
-![stream_sustained](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/stream_sustained.png?v=202607222123)
+![stream_sustained](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/stream_sustained.png?v=202607222317)
 
-![streamcpu_fps](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/streamcpu_fps.png?v=202607222123)
+![streamcpu_fps](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/streamcpu_fps.png?v=202607222317)
 
-![xlate_rps_sustained_20ms](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/xlate_rps_sustained_20ms.png?v=202607222123)
+![xlate_rps_sustained_20ms](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/xlate_rps_sustained_20ms.png?v=202607222317)
 
-![xlate_added_latency](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/xlate_added_latency.png?v=202607222123)
-
-![governed_throughput](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/governed_throughput.png?v=202607222123)
+![xlate_added_latency](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/xlate_added_latency.png?v=202607222317)
 
 ---
 Method: added latency = gateway p99 − direct-to-mock p99 at concurrency 1; RPS ceiling = highest sustained req/s with p99 < 1 s and <0.1% errors; RSS idle = after first 200, peak = under sustained load. Same box, same mock, same load, one gateway at a time. Source refs pinned in `gateways/versions.env`; the built commit is in each row.
 
-<sub>Page + charts regenerated **2026-07-22 21:23 UTC** from the raw `results/*.json`.</sub>
+<sub>Page + charts regenerated **2026-07-22 23:17 UTC** from the raw `results/*.json`.</sub>
