@@ -61,7 +61,7 @@ MYIP=$(curl -s https://checkip.amazonaws.com)
 aws ec2 authorize-security-group-ingress --group-id "$SG" --protocol tcp --port 22 --cidr "${MYIP}/32" >/dev/null 2>&1 || true
 AMI=$(aws ssm get-parameter --name "$SSM" --query Parameter.Value --output text)
 
-mkdir -p "$HERE/results/perf" "$HERE/results/memory"
+mkdir -p "$HERE"/results/{perf,memory,stream,xlate,governed,matrix}
 
 # ── one box, one gateway (runs in the background, self-terminates) ─────────────────────────────────
 bench_gateway() {
@@ -111,8 +111,9 @@ bench_gateway() {
     bash run-all.sh $gw" >>"$glog" 2>&1
 
   glog_echo "pulling $gw results back"
-  rsync -az -e "ssh $SSHOPT" "ubuntu@$ip:~/benchmarking/results/perf/$gw.json"   "$HERE/results/perf/"   >>"$glog" 2>&1 || true
-  rsync -az -e "ssh $SSHOPT" "ubuntu@$ip:~/benchmarking/results/memory/$gw.json" "$HERE/results/memory/" >>"$glog" 2>&1 || true
+  for suite in perf memory stream xlate governed matrix; do
+    rsync -az -e "ssh $SSHOPT" "ubuntu@$ip:~/benchmarking/results/$suite/$gw.json" "$HERE/results/$suite/" >>"$glog" 2>&1 || true
+  done
   if [[ -f "$HERE/results/perf/$gw.json" ]]; then glog_echo "DONE"; else glog_echo "NO RESULT FILE (see log)"; fi
 }
 
