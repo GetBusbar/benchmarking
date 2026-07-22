@@ -6,10 +6,30 @@
 <title>AI Gateway Benchmarks</title>
 <meta name="description" content="Reproducible overhead measurements for self-hostable AI gateways: same box, same mock, same load, same CPU pin for every gateway.">
 <link rel="stylesheet" href="style.css">
+<script>
+/* Set the theme before first paint so there is no flash of the wrong palette.
+   Stored choice wins; otherwise follow the OS prefers-color-scheme. */
+(function () {
+  try {
+    var stored = localStorage.getItem("theme");
+    var theme = stored === "light" || stored === "dark" ? stored
+      : (window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");
+    document.documentElement.setAttribute("data-theme", theme);
+  } catch (e) {
+    document.documentElement.setAttribute("data-theme", "dark");
+  }
+})();
+</script>
 </head>
 <body>
 <header class="site-header">
-  <div class="wrap">
+  <div class="wrap header-top">
+    <button id="theme-toggle" class="theme-toggle" type="button" aria-label="Toggle light or dark theme">
+      <span class="tt-icon tt-sun" aria-hidden="true">&#9728;</span>
+      <span class="tt-icon tt-moon" aria-hidden="true">&#9789;</span>
+      <span class="tt-label tt-sun">Light</span>
+      <span class="tt-label tt-moon">Dark</span>
+    </button>
     <h1>AI Gateway Benchmarks</h1>
     <p class="tagline">Reproducible gateway overhead measurement on neutral hardware. Same box, same mock upstream, same load, same CPU pin for every gateway; every number regenerates from committed JSON.</p>
     <nav class="tabs" id="tabs">
@@ -44,12 +64,12 @@
   </section>
 
   <section id="view-matrix" class="view hidden">
-    <h2>Ingress protocol support matrix</h2>
-    <p class="lede">Each gateway is probed across six ingress protocol shapes while the upstream mock stays fixed on the OpenAI shape, so every non-OpenAI cell is a translation claim: the gateway must translate the request out and the response back. One probe per cell, envelope validation rather than just the status code, and a passthrough guard that rejects the mock's own canned body as untranslated proxying.</p>
+    <h2>Protocol support matrix (6x6)</h2>
+    <p class="lede">Each gateway gets a full grid: six ingress protocol shapes (rows) against six upstream provider dialects it is configured to route to (columns). Off-diagonal cells are translation claims, checked three ways: the response is a valid envelope of the ingress dialect, it is not the mock upstream's canned body (passthrough guard), and the mock actually received a request in the upstream dialect's shape on that dialect's endpoint. Diagonal cells need no translation, so a faithful passthrough that provably round-trips through the gateway passes there.</p>
     <div id="matrix-grid"></div>
     <div id="matrix-detail" class="matrix-detail hidden"></div>
     <p id="matrix-empty" class="muted hidden">Protocol matrix results are coming soon: no results/matrix JSONs are committed yet.</p>
-    <p class="fineprint">Green: served and envelope validated. Red: not served, with the probe status and body snippet as evidence. Grey: unprobed_auth, the gateway insists on an auth scheme (such as AWS SigV4) that this harness does not forge, recorded honestly instead of as a false red. Click a cell for the verdict note and body evidence.</p>
+    <p class="fineprint">Green: pass, envelope validated and the round trip to the mock upstream confirmed (on the diagonal a passthrough pass says so in its note). Red: tried and failed, with the probe status and body snippet as evidence. Neutral outline: not configurable, the gateway's manifest defines no egress config for that upstream dialect, which is distinct from tried-and-failed. Grey: unprobed_auth, the gateway insists on an auth scheme (such as AWS SigV4) that this harness does not forge, recorded honestly instead of as a false red. Click a cell for the verdict note and body evidence.</p>
   </section>
 
   <section id="view-charts" class="view hidden">

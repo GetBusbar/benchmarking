@@ -420,7 +420,24 @@ function renderSweepCharts(container, sweepSeries, theme) {
 function chartTheme() {
   if (NODE) return {};
   const cs = getComputedStyle(document.documentElement);
-  return { fg: cs.getPropertyValue("--fg-dim").trim() || "#9aa4b2" };
+  return {
+    fg: cs.getPropertyValue("--fg-dim").trim() || "#9aa4b2",
+    grid: cs.getPropertyValue("--grid").trim() || "rgba(154,164,178,.18)",
+  };
+}
+
+/* Theme switcher: persist the choice, flip data-theme on <html>, and re-render
+   so the canvas charts re-read the palette via chartTheme(). The initial
+   data-theme is set by the inline <head> script before first paint. */
+function initThemeToggle() {
+  const btn = document.getElementById("theme-toggle");
+  if (!btn) return;
+  btn.addEventListener("click", () => {
+    const next = document.documentElement.getAttribute("data-theme") === "light" ? "dark" : "light";
+    document.documentElement.setAttribute("data-theme", next);
+    try { localStorage.setItem("theme", next); } catch (e) { /* private mode: ignore */ }
+    renderAll();
+  });
 }
 
 /* ---- results table ---------------------------------------------------------- */
@@ -862,6 +879,7 @@ function boot() {
       sanitizeState();
       initTabs();
       initFilterControls();
+      initThemeToggle();
       renderAll();
 
       document.getElementById("backdrop").addEventListener("click", closeDrawer);
