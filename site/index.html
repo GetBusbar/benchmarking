@@ -129,6 +129,7 @@
         <h3><a id="lnk-stream" target="_blank" rel="noopener">stream/run.sh</a> Streaming</h3>
         <ul>
           <li>The mock answers stream:true with a paced SSE stream; the suite measures what the gateway adds on top of that pace.</li>
+          <li>The mock's <em>first</em> token is instant (it then paces later tokens), so the first-token figure deliberately includes the gateway's first-write network behaviour, not just its compute. Against a real model, whose own first token takes hundreds of milliseconds, that component is largely hidden; here it is exposed on purpose. A benchmark whose mock waits before its first token, or that times the first SSE event of any kind rather than the first content token, will report a near-zero first-token overhead by construction.</li>
           <li><b>Added wait for the first token (p99)</b>, also called TTFT (time to first token): gateway first-content-frame time minus direct-to-mock, at concurrency 1.</li>
           <li><b>Added gap between tokens (p99)</b>: gateway content-frame gap minus direct-to-mock gap.</li>
           <li><b>Streams sustained</b>: max concurrent streams where at least 99.9 percent of expected frames deliver, no stream stalls beyond twice the pacing interval, and the stream error rate stays under 0.1 percent.</li>
