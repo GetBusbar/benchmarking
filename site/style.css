@@ -293,6 +293,24 @@ tbody tr { cursor: pointer; }
   font-size: .76rem; color: var(--fg-dim); max-height: 12rem; overflow: auto;
 }
 
+/* Best-dialect sub-line under the gateway name in the results table (small + muted, so the
+   horizontal room goes to the metric columns; the label is the same-dialect passthrough measured). */
+.results-table td.name .best-path {
+  font-size: .72rem; font-weight: 400; color: var(--fg-dim); margin-top: .1rem; letter-spacing: .01em;
+}
+
+/* Floating hover popup for matrix cells: a small card that follows the hovered cell. */
+.matrix-pop {
+  position: absolute; z-index: 50; max-width: 22rem; pointer-events: none;
+  border: 1px solid var(--border); border-radius: 8px; background: var(--bg-raise);
+  padding: .55rem .7rem; font-size: .8rem; box-shadow: 0 6px 20px rgba(0,0,0,.28);
+}
+.matrix-pop.hidden { display: none; }
+.matrix-pop h4 { margin: 0 0 .3rem; font-size: .82rem; }
+.matrix-pop .pop-perf { font-weight: 600; margin-bottom: .2rem; }
+.matrix-pop .pop-note { color: var(--fg-dim); font-size: .76rem; }
+.cell { cursor: default; }
+
 /* charts */
 .gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 1.1rem; }
 .gallery figure {

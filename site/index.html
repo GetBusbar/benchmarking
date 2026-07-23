@@ -68,7 +68,7 @@
       </div>
       <span id="row-count" class="muted count"></span>
     </div>
-    <p class="fineprint">Each gateway on its best-performing supported path. Hover any matrix cell for that path's numbers.</p>
+    <p class="fineprint">Each gateway on same-dialect passthrough (its fastest native dialect, no translation) - the fair apples-to-apples forwarding number. Hover any matrix cell for that path's numbers.</p>
     <div class="table-scroll">
       <table id="results-table">
         <thead></thead>
@@ -110,7 +110,7 @@
           <li><b>Added latency (p50/p99, microseconds)</b>: at concurrency 1, gateway p99 minus direct-to-mock p99, small payloads.</li>
           <li><b>Max proxy RPS</b>: highest sustained requests per second against an instant mock where p99 stays under 1000 ms and the error rate stays under 0.1 percent (CPU-bound ceiling).</li>
           <li><b>Sustained RPS at 20 ms</b>: the same gates, but the mock sleeps 20 ms per request to model real LLM latency, so the ceiling is concurrent-in-flight capacity, the real production bottleneck. Same concurrency grid for every gateway.</li>
-          <li>The Performance tab shows these metrics on each gateway's best-performing supported path, measured per matrix cell with this same sweep; no path is picked by us.</li>
+          <li>The Performance tab shows these metrics on each gateway's same-dialect passthrough diagonal (openai when served, else its native dialect), measured per matrix cell with this same sweep - pure forwarding, so no translation noise and no path picked by us.</li>
         </ul>
       </article>
       <article class="method-card">

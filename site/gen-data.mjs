@@ -96,19 +96,30 @@ const gateways = gatewayKeys.map((key) => {
 // the v2 shape so the site renders exactly one structure: the one measured egress column becomes
 // `upstreams`, and the columns v1 never probed stay absent (the site renders them "not measured",
 // which is the honest reading of a v1 run: unmeasured, not "not configurable").
-// Best green cell across the full grid: max rps_sustained_20ms among served===true cells that
-// carry a per-cell perf object. Returns { ingress, egress, ...perf } or null.
+// The gateway's REPRESENTATIVE perf cell for the Performance tab. Deliberately the SAME-DIALECT
+// PASSTHROUGH (diagonal: ingress === egress) - pure forwarding overhead, NOT a translation cell. A
+// translation does strictly more work than passthrough, so a translation cell that measures "faster"
+// than the diagonal is run-to-run noise; ranking by best-of-any-cell promotes that noise. The
+// diagonal is the honest, stable, apples-to-apples number.
+// Path choice is DETERMINISTIC (no noisy pick): the canonical `openai` diagonal when the gateway
+// serves it (every gateway measured on the identical fair workload), else the gateway's best NATIVE
+// diagonal (e.g. litellm-rust => anthropic). "Best" among natives = LOWEST added latency p99 (a
+// proxy's quality is its overhead; RPS is capacity-bound and noisier). Returns {ingress, egress,
+// ...perf} or null. `dialect` (== ingress == egress) is the label the tab shows.
 function bestCell(m) {
   if (!m.upstreams) return null;
-  let best = null;
+  // collect green diagonal cells that carry perf
+  const diag = [];
   for (const [egress, up] of Object.entries(m.upstreams)) {
-    for (const [ingress, cell] of Object.entries((up && up.cells) || {})) {
-      if (cell.served !== true || !cell.perf || cell.perf.rps_sustained_20ms == null) continue;
-      if (!best || cell.perf.rps_sustained_20ms > best.rps_sustained_20ms)
-        best = { ingress, egress, ...cell.perf };
-    }
+    const cell = up && up.cells && up.cells[egress];        // ingress === egress
+    if (cell && cell.served === true && cell.perf && cell.perf.added_latency_p99_us != null)
+      diag.push({ ingress: egress, egress, dialect: egress, ...cell.perf });
   }
-  return best;
+  if (!diag.length) return null;
+  // canonical openai diagonal wins outright; else the lowest-added-latency native diagonal
+  const openai = diag.find((d) => d.dialect === "openai");
+  if (openai) return openai;
+  return diag.reduce((a, b) => (b.added_latency_p99_us < a.added_latency_p99_us ? b : a));
 }
 
 function normalizeMatrix(m) {

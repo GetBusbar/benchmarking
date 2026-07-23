@@ -137,19 +137,20 @@ const COLUMNS = [
   {
     id: "name", label: "Gateway", desc: false,
     get: (g) => ({ v: g.display.toLowerCase(), text: null, na: false }),
+    /* The gateway name, with its BEST-performing supported path as a small muted sub-line beneath
+       (ingress → upstream, ranked by sustained RPS @20ms from the per-cell matrix sweep). Kept out
+       of its own column so the horizontal room goes to the metrics; the full per-cell numbers for
+       any path live in the matrix hover. */
     render: (g) => {
       const a = g.repo
         ? `<a href="${g.repo}" target="_blank" rel="noopener">${esc(g.display)}</a>`
         : esc(g.display);
-      return `<td class="name">${a}</td>`;
+      // Same-dialect passthrough is the measured path, so show just the dialect (ingress === egress).
+      const path = g.best_cell
+        ? `<div class="best-path" title="Measured on same-dialect passthrough (${esc(g.best_cell.dialect)} in, ${esc(g.best_cell.dialect)} out) - pure forwarding, no translation">${esc(g.best_cell.dialect)}</div>`
+        : "";
+      return `<td class="name">${a}${path}</td>`;
     },
-  },
-  {
-    id: "bestpath", label: "Best path", desc: false,
-    title: "The gateway's best-performing supported path (ingress → upstream), ranked by sustained RPS @20ms from the per-cell matrix sweep",
-    get: (g) => g.best_cell
-      ? { v: `${g.best_cell.ingress}→${g.best_cell.egress}`, text: `${g.best_cell.ingress} → ${g.best_cell.egress}`, na: false }
-      : { v: null, text: "n/a", na: true },
   },
   {
     id: "cls", label: "Class", desc: false,
@@ -912,26 +913,45 @@ function renderMatrix() {
     </section>`;
   }).join("");
 
+  // Floating hover popup: a single reused element that follows the hovered cell. Richer than the
+  // native title tooltip (perf line + verdict + body), appears on hover, no click needed.
+  let pop = document.getElementById("matrix-pop");
+  if (!pop) {
+    pop = document.createElement("div");
+    pop.id = "matrix-pop";
+    pop.className = "matrix-pop hidden";
+    document.body.appendChild(pop);
+  }
+  const cellPopHtml = (g, ing, eg) => {
+    const cell = matrixCell(g, eg, ing);
+    if (!cell) return "";
+    const [, label] = cellState(cell);
+    const perf = cellPerfTip(cell, ing, eg, g.best_cell);
+    return `<h4>${esc(g.display)}: ${esc(MATRIX_LABELS[ing])} in / ${esc(MATRIX_LABELS[eg])} upstream - ${esc(label)}${
+      cell.status ? ` (HTTP ${esc(cell.status)})` : ""
+    }</h4>` +
+      (perf ? `<div class="pop-perf">${esc(perf)}</div>` : "") +
+      (cell.verdict_note ? `<div class="pop-note">${esc(cell.verdict_note)}</div>` : "");
+  };
+  const showPop = (el) => {
+    const g = state.data.gateways.find((x) => x.key === el.dataset.gw);
+    const html = g && cellPopHtml(g, el.dataset.cell, el.dataset.egress);
+    if (!html) return;
+    pop.innerHTML = html;
+    pop.classList.remove("hidden");
+    const r = el.getBoundingClientRect();
+    // position above the cell, clamped to the viewport
+    const pr = pop.getBoundingClientRect();
+    let left = r.left + window.scrollX + r.width / 2 - pr.width / 2;
+    left = Math.max(8 + window.scrollX, Math.min(left, window.scrollX + document.documentElement.clientWidth - pr.width - 8));
+    let top = r.top + window.scrollY - pr.height - 8;
+    if (top < window.scrollY + 8) top = r.bottom + window.scrollY + 8;   // flip below if no room above
+    pop.style.left = `${left}px`;
+    pop.style.top = `${top}px`;
+  };
   grid.querySelectorAll(".cell").forEach((el) => {
-    el.addEventListener("click", () => {
-      const g = state.data.gateways.find((x) => x.key === el.dataset.gw);
-      const cell = matrixCell(g, el.dataset.egress, el.dataset.cell);
-      if (!cell) return;
-      const [, label] = cellState(cell);
-      const detail = document.getElementById("matrix-detail");
-      detail.classList.remove("hidden");
-      detail.innerHTML =
-        `<h4>${esc(g.display)} / ${esc(MATRIX_LABELS[el.dataset.cell])} ingress, ${esc(MATRIX_LABELS[el.dataset.egress])} upstream: ${label}${
-          cell.status ? ` (HTTP ${esc(cell.status)}, ${esc(cell.path || "")})` : ""
-        }</h4>` +
-        (() => {
-          const perf = cellPerfTip(cell, el.dataset.cell, el.dataset.egress, g.best_cell);
-          return perf ? `<div><b>${esc(perf)}</b></div>` : "";
-        })() +
-        `<div>${esc(cell.verdict_note || "no verdict note")}</div>` +
-        (cell.body_snippet ? `<pre>${esc(cell.body_snippet)}</pre>` : "");
-      detail.scrollIntoView({ behavior: "smooth", block: "nearest" });
-    });
+    el.addEventListener("mouseenter", () => showPop(el));
+    el.addEventListener("mouseleave", () => pop.classList.add("hidden"));
   });
 }
 
