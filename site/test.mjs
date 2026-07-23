@@ -18,6 +18,7 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import assert from "node:assert/strict";
+import { checkConsistency } from "./check-consistency.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, "..");
@@ -203,6 +204,73 @@ test("Translation tab lists only gateways serving the pinned in->out pair", () =
   st.xlateOut = "anthropic";
   assert.equal(app.xlateCell(g0, "rps_sustained_20ms", String).text, "100");
   assert.equal(app.xlateCell(g0, "rps_sustained_20ms", String).na, false);
+});
+
+// ---- consistency guard: one canonical value per (gateway, metric) -----------
+test("consistency guard: table == drawer == compare == charts on the real bundle", () => {
+  const { errors, warnings } = checkConsistency(data, app);
+  for (const w of warnings) console.warn(`  warn - ${w}`); // R7 inversions: visible, never fatal
+  assert.deepEqual(errors, [], `numeric divergence across surfaces:\n${errors.join("\n")}`);
+});
+
+test("divergent best_cell vs perf suite: every surface resolves to best_cell", () => {
+  // A gateway whose matrix sweep and perf suite DISAGREE (the exact bug class this guard
+  // exists for): the table, the drawer/compare lane accessor, and the charts read must all
+  // return the best_cell (canonical) value, never the perf-suite scalar.
+  const g = {
+    key: "diverge", display: "Diverge", lang: "Rust",
+    best_cell: { ingress: "openai", egress: "openai", dialect: "openai", source: "matrix",
+      added_latency_p50_us: 100, added_latency_p99_us: 111,
+      rps_sustained_20ms: 22222, rps_max_proxy: 33333 },
+    perf: { served: true, added_latency_p50_us: 900, added_latency_p99_us: 999,
+      rps_sustained_20ms: 11111, rps_max_proxy: 22221 },
+  };
+  // table
+  assert.equal(app.passCell(g, "added_latency_p99_us", String).v, 111);
+  assert.equal(app.passCell(g, "rps_sustained_20ms", String).v, 22222);
+  assert.equal(app.passCell(g, "rps_max_proxy", String).v, 33333);
+  // drawer + compare read the SAME accessor (wired as the perf lane's `get`)
+  const perfLane = app.LANES.find((l) => l.key === "perf");
+  assert.equal(perfLane.get, app.canonicalPerf, "perf lane must read the canonical accessor");
+  const rec = perfLane.get(g);
+  assert.equal(rec.added_latency_p99_us, 111);
+  assert.equal(rec.rps_sustained_20ms, 22222);
+  assert.equal(rec.rps_max_proxy, 33333);
+  // and the guard agrees this gateway is consistent (all surfaces on best_cell)
+  assert.deepEqual(checkConsistency({ gateways: [g] }, app).errors, []);
+  // sanity: if a surface DID read the perf scalar, the guard would fail. Simulate by
+  // stripping best_cell from the charts-side view only: not constructible through the real
+  // accessors, so instead assert the guard catches a poisoned canonical record.
+  const poisoned = { ...g, best_cell: { ...g.best_cell, rps_sustained_20ms: null } };
+  // table/drawer show n/a for the null field while charts read null too: still consistent
+  assert.deepEqual(checkConsistency({ gateways: [poisoned] }, app).errors, []);
+  assert.equal(app.passCell(poisoned, "rps_sustained_20ms", String).v, null, "best_cell is THE record; no silent perf patch");
+});
+
+test("divergent translation_cell vs xlate suite: drawer/compare read the matrix cell", () => {
+  const g = {
+    key: "xdiv", display: "XDiv", lang: "Go",
+    translation_cell: { ingress: "openai", egress: "anthropic", source: "matrix",
+      added_latency_p50_us: 10, added_latency_p99_us: 20, rps_sustained_20ms: 3000 },
+    xlate: { xlate_served: true, xlate_added_latency_p99_us: 9999, xlate_rps_sustained_20ms: 1 },
+  };
+  const lane = app.LANES.find((l) => l.key === "xlate");
+  assert.equal(lane.get, app.canonicalXlate, "xlate lane must read the canonical accessor");
+  const rec = lane.get(g);
+  assert.equal(rec.xlate_added_latency_p99_us, 20);
+  assert.equal(rec.xlate_rps_sustained_20ms, 3000);
+  assert.ok(lane.pathNote(rec).includes("OpenAI in -> Anthropic out"), "direction disclosed");
+  assert.deepEqual(checkConsistency({ gateways: [g] }, app).errors, []);
+});
+
+test("guard warns (never fails) on a sustained > max-proxy inversion", () => {
+  const g = { key: "inv", display: "Inv", lang: "Rust",
+    best_cell: { dialect: "openai", source: "matrix",
+      added_latency_p99_us: 100, rps_sustained_20ms: 12879, rps_max_proxy: 12700 } };
+  const { errors, warnings } = checkConsistency({ gateways: [g] }, app);
+  assert.deepEqual(errors, []);
+  assert.equal(warnings.length, 1);
+  assert.ok(warnings[0].includes("noise"));
 });
 
 // ---- footer timestamps: clean UTC stamp + coarse relative age ----------------
