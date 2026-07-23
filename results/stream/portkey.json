@@ -5,7 +5,8 @@
   "stream_served": false,
   "last_http_status": "200",
   "serve_error": "",
-  "stream_error": "no SSE frames on stream:true; body=[{\"status\":\"failure\",\"message\":\"Something went wrong\"}]; diag=[proc: 17496 node /usr/bin/npx -y @portkey-ai/gateway\nrun.log:\ntryTargetsRecursively error:  immutable undefined TypeError: immutable\n    at Headers.append (node:internal/deps/undici/undici:1948:17)\n    at ru.updateHeaders (file:///home/ubuntu/.npm/_npx/548a07a06b2635c0/node_modules/@portkey-ai/gateway/build/start-server.js:2:434559)\n    at ru.create (file:///home/ubuntu/.npm/_npx/548a07a06b2635c0/node_modules/@portkey-ai/gateway/build/start-server.js:2:434117)\n    at su (file:///home/ubuntu/.npm/_npx/548a07a06b2635c0/node_modules/@portkey-ai/gateway/build/start-server.js:2:439372)\n    at process.processTicksAndRejections (node:internal/process/task_queues:95:5)\n    at async iu (file:///home/ubuntu/.npm/_npx/548a07a06b2635c0/node_modules/@portkey-ai/gateway/build/start-server.js:2:443092)\n    at async file:///home/ubuntu/.npm/_npx/548a07a06b2635c0/node_modules/@portkey-ai/gateway/build/start-server.js:2:472268\n    at async dispatch (file:///home/ubuntu/.npm/_npx/548a07a06b2635c0/node_modules/hono/dist/compose.js:22:17)\n    at async dispatch (file:///home/ubuntu/.npm/_npx/548a07a06b2635c0/node_modules/hono/dist/compose.js:22:17)\n    at async dispatch (file:///home/ubuntu/.npm/_npx/548a07a06b2635c0/node_modules/hono/dist/compose.js:22:17)]",
+  "stream_error": "no SSE frames on stream:true; body=[{\"status\":\"failure\",\"message\":\"Something went wrong\"}]; diag=[proc: 17085 node /usr/bin/npx -y @portkey-ai/gateway\nrun.log:\ntryTargetsRecursively error:  immutable undefined TypeError: immutable\n    at Headers.append (node:internal/deps/undici/undici:1948:17)\n    at ru.updateHeaders (file:///home/ubuntu/.npm/_npx/548a07a06b2635c0/node_modules/@portkey-ai/gateway/build/start-server.js:2:434559)\n    at ru.create (file:///home/ubuntu/.npm/_npx/548a07a06b2635c0/node_modules/@portkey-ai/gateway/build/start-server.js:2:434117)\n    at su (file:///home/ubuntu/.npm/_npx/548a07a06b2635c0/node_modules/@portkey-ai/gateway/build/start-server.js:2:439372)\n    at process.processTicksAndRejections (node:internal/process/task_queues:95:5)\n    at async iu (file:///home/ubuntu/.npm/_npx/548a07a06b2635c0/node_modules/@portkey-ai/gateway/build/start-server.js:2:443092)\n    at async file:///home/ubuntu/.npm/_npx/548a07a06b2635c0/node_modules/@portkey-ai/gateway/build/start-server.js:2:472268\n    at async dispatch (file:///home/ubuntu/.npm/_npx/548a07a06b2635c0/node_modules/hono/dist/compose.js:22:17)\n    at async dispatch (file:///home/ubuntu/.npm/_npx/548a07a06b2635c0/node_modules/hono/dist/compose.js:22:17)\n    at async dispatch (file:///home/ubuntu/.npm/_npx/548a07a06b2635c0/node_modules/hono/dist/compose.js:22:17)]",
+  "stream_note": "stream:true fails on the Node (npx) runtime with 'tryTargetsRecursively error: immutable' - Portkey-AI/gateway#1389 (open; same class as #1550, fixes #1390/#1551 unmerged as of 2026-07): an upstream bug in the shipped artifact, not a harness gap",
   "stream_added_ttft_p50_us": 0,
   "stream_added_ttft_p99_us": 0,
   "stream_gateway_ttft_p50_us": 0,
@@ -20,6 +21,9 @@
   "stream_direct_gap_p99_us": 0,
   "stream_sustained_streams": 0,
   "stream_sustained_fps": 0,
+  "stream_sustained_gate": "delivery: >=99% of expected content frames delivered, <0.1% stream errors; stalls are recorded per sweep point and priced by the added-gap percentiles, not zeroed",
+  "stream_stallfree_streams": 0,
+  "stream_stallfree_gate": "strict pacing: >=99.9% delivered, zero streams with any inter-frame gap > 2x the 20ms interval, <0.1% errors",
   "stream_mock_ceiling_fps": 0,
   "stream_mock_bound": false,
   "stream_chunks": 64,
@@ -34,5 +38,5 @@
   "mock_proto": "h1+h2c",
   "arch": "arm64",
   "hardware": "AWS m7g.2xlarge (Graviton3, 8 cores / 32 GB). Gateway pinned to 4 cores, mock+loadgen on the other 4, Ubuntu 24.04. One dedicated box per gateway.",
-  "measured_at": "2026-07-23T00:09:30Z"
+  "measured_at": "2026-07-23T04:52:20Z"
 }
