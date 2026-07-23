@@ -26,6 +26,20 @@
 # Manifest overrides (optional): GW_ANTHROPIC_PATH (default /v1/messages), GW_ANTHROPIC_AUTH_HEADER
 # (a full "Name: value" header added on the anthropic side only; the loadgen already sends the token
 # as BOTH `authorization: Bearer` and `x-api-key`, so this is for gateways needing something else).
+#
+# PER-LANE HOOKS (optional, generic - any manifest may use them, the runner special-cases nobody):
+#   gw_xlate_env       - a function the runner calls right after sourcing the manifest, BEFORE the
+#                        launch: the manifest adjusts its own knobs for THIS lane (e.g. swap a
+#                        provider-selecting header set, point GW_ANTHROPIC_PATH at its anthropic
+#                        ingress route). Needed because a manifest's default GW_HEADERS are chosen
+#                        for the perf lanes and may pin a different upstream provider.
+#   GW_XLATE_HEADERS   - an array of "Name: value" headers that REPLACES GW_HEADERS for this lane
+#                        only (warm-up + probes + loadgen), for manifests whose provider routing
+#                        rides in headers (the portkey pattern). Unset = GW_HEADERS as before.
+#   GW_XLATE_CAP=0     - the gateway does NOT claim anthropic-in -> openai-out translation; the
+#                        runner records xlate_declared=false with the manifest's cited
+#                        GW_XLATE_CAP_NOTE instead of probing, so a never-claimed capability can
+#                        never be published as a failure (same rule as the matrix capability grid).
 # Knobs (env): C1_DUR (default 20), SWEEP_DELAYED ("8 32 128 256 1024 4096 8192 16384"), SWEEP_DUR
 #   (seconds per point, default 10), SWEEP_TTFT_MS (default 20), PSIZE (payload bytes, 256), CORES pin.
 set -uo pipefail
@@ -67,7 +81,56 @@ source "$ROOT/lib/harness.sh"
 # shellcheck source=/dev/null
 source "$GW_DIR/gateway.sh"
 suite_deadline_start
+# Per-lane hook: the manifest adapts its own knobs for the translation lane (headers, anthropic
+# ingress path, env). Generic: the runner calls it for ANY manifest that defines it.
+if declare -f gw_xlate_env >/dev/null; then gw_xlate_env; fi
 XPATH_A="${GW_ANTHROPIC_PATH:-/v1/messages}"
+
+# Declared-capability gate: a manifest that declares GW_XLATE_CAP=0 (with a cited GW_XLATE_CAP_NOTE)
+# does not claim this translation at all - record that honestly and exit; never probe, so a
+# never-claimed capability can never be published as a red failure.
+GW_XLATE_CAP="${GW_XLATE_CAP:-1}"
+if [ "$GW_XLATE_CAP" != 1 ]; then
+  CAPNOTE="${GW_XLATE_CAP_NOTE:-this gateway does not declare anthropic-ingress to openai-upstream translation}"
+  BUILD="$(gw_version 2>/dev/null | tr -d '\n' | sed 's/"/\\"/g')"
+  log "[$GATEWAY] xlate not declared (capability limit): $CAPNOTE"
+  cat > "$RESULTS/$GATEWAY.json" <<JSON
+{
+  "gateway": "$GATEWAY",
+  "build": "$BUILD",
+  "served": false,
+  "xlate_served": false,
+  "xlate_declared": false,
+  "xlate_passthrough": false,
+  "last_http_status": "",
+  "xlate_probe_status": "",
+  "serve_error": "",
+  "xlate_error": "not declared: $(json_escape "$CAPNOTE")",
+  "xlate_cap_note": "$(json_escape "$CAPNOTE")",
+  "xlate_added_latency_p50_us": 0,
+  "xlate_added_latency_p99_us": 0,
+  "xlate_gateway_c1_p99_us": 0,
+  "xlate_direct_c1_p99_us": 0,
+  "xlate_baseline_shape": "openai",
+  "xlate_rps_sustained_20ms": 0,
+  "xlate_rps_sustained_20ms_concurrency": 0,
+  "xlate_rps_sustained_20ms_mock_ceiling": 0,
+  "xlate_rps_sustained_20ms_mock_bound": false,
+  "sweep_ttft_ms": $SWEEP_TTFT_MS,
+  "p99_ceiling_ms": $P99_CEIL_MS,
+  "sweep_sustained_20ms": [],
+  "payload_bytes": $PSIZE,
+  "endpoint": "$XPATH_A",
+  "upstream_endpoint": "$GW_PATH",
+  "model": "$GW_MODEL",
+  "arch": "${BENCH_ARCH:-$(uname -m)}",
+  "hardware": "${BENCH_HARDWARE:-$(uname -m) $(nproc 2>/dev/null || echo '?')vCPU}",
+  "measured_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+}
+JSON
+  echo " -> $RESULTS/$GATEWAY.json (xlate not declared - capability limit, cited)"
+  exit 0
+fi
 
 log "starting mock :$MOCK_PORT (instant, openai upstream on $GW_PATH)"
 pkill -f "$MOCK" 2>/dev/null; sleep 1
@@ -95,7 +158,16 @@ log "[$GATEWAY] build"; gw_build || { echo "build failed"; exit 1; }
 UGEN_H=(); CURL_H=(); XH=(); ok=0; c=000
 _xlate_ready(){
   UGEN_H=(); CURL_H=(); XH=()
-  for h in "${GW_HEADERS[@]:-}"; do [ -n "$h" ] && { UGEN_H+=(-H "$h"); CURL_H+=(-H "$h"); }; done
+  # Per-lane header hook: GW_XLATE_HEADERS (when set, non-empty) replaces GW_HEADERS for this lane
+  # only - generic, for any manifest whose upstream-provider routing rides in request headers.
+  local _hsrc=()
+  if [ -n "${GW_XLATE_HEADERS+x}" ] && [ "${#GW_XLATE_HEADERS[@]}" -gt 0 ]; then
+    _hsrc=("${GW_XLATE_HEADERS[@]}")
+  else
+    _hsrc=(${GW_HEADERS[@]+"${GW_HEADERS[@]}"})
+  fi
+  local h
+  for h in ${_hsrc[@]+"${_hsrc[@]}"}; do [ -n "$h" ] && { UGEN_H+=(-H "$h"); CURL_H+=(-H "$h"); }; done
   [ -n "${GW_ANTHROPIC_AUTH_HEADER:-}" ] && XH+=(-H "$GW_ANTHROPIC_AUTH_HEADER")
   local i
   for i in $(seq 1 60); do
@@ -196,6 +268,7 @@ cat > "$RESULTS/$GATEWAY.json" <<JSON
   "build": "$BUILD",
   "served": $([ "$ok" = 1 ] && echo true || echo false),
   "xlate_served": $([ "$XLATE_OK" = 1 ] && echo true || echo false),
+  "xlate_declared": true,
   "xlate_passthrough": $XLATE_PASSTHROUGH,
   "last_http_status": "$c",
   "xlate_probe_status": "$XC",
