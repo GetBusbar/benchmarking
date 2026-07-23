@@ -176,6 +176,18 @@ col_capable(){ case " $_cap_col_any " in *" $1 "*) return 0;; *) return 1;; esac
 build_cap
 # Reason shown on a declared-0 (grey) cell's tooltip; a manifest overrides it with a cited string.
 GW_MATRIX_CAP_NOTE="${GW_MATRIX_CAP_NOTE:-this gateway does not declare support for this ingress/upstream dialect pair}"
+
+# ── untestable cells (mock-reachability limit, NOT incapability) ────────────────────────────────
+# Some gateways DO speak a dialect in production but hardcode the real cloud host for it (no
+# base-URL override), so this harness's localhost mock is unreachable: that is OUR test rig's
+# limit, not the gateway's incapability, and it must not render as either grey-incapable or red.
+# A manifest declares such cells (also declared 0 in GW_MATRIX_CAP so they are never probed) as
+#   GW_MATRIX_UNTESTABLE="<ingress>/<egress> <ingress>/<egress> ..."
+# with a cited GW_MATRIX_UNTESTABLE_NOTE; the runner emits served:"untestable" +
+# reason:"no_base_url_override" for them. Generic: any manifest can use it, the runner names nobody.
+GW_MATRIX_UNTESTABLE="${GW_MATRIX_UNTESTABLE:-}"
+GW_MATRIX_UNTESTABLE_NOTE="${GW_MATRIX_UNTESTABLE_NOTE:-the gateway supports this pair in production but pins the real cloud host (no upstream base-URL override), so the test mock is unreachable}"
+cell_untestable(){ case " $GW_MATRIX_UNTESTABLE " in *" $1/$2 "*) return 0;; *) return 1;; esac; }
 # GW_MATRIX_EGRESS still drives the actual relaunch wiring; ensure every capable column is launchable.
 GW_MATRIX_EGRESS="${GW_MATRIX_EGRESS:-openai}"
 
@@ -399,11 +411,14 @@ matrix_cell_perf(){
   # Fire a couple of discarded warm requests through the gateway so the re-verify probe below (and
   # the NEXT cell's capability probe) can never eat a stale-connection failure. Their record entries
   # are wiped by the mock_reset that immediately follows.
+  # Warm with THIS cell's own probe (path/body/headers): the openai ingress is not necessarily
+  # declared (or even servable) under every egress config, and a warm request must never depend on
+  # an undeclared bridge.
   local _w
   for _w in 1 2; do
-    curl -s -m3 -o /dev/null "http://127.0.0.1:$GW_PORT$P_OPENAI" -X POST \
+    curl -s -m3 -o /dev/null "http://127.0.0.1:$GW_PORT$path" -X POST \
       -H "content-type: application/json" -H "authorization: Bearer $GW_AUTH" ${CURL_H[@]+"${CURL_H[@]}"} \
-      -d "{\"model\":\"$GW_MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"warm\"}],\"max_tokens\":16}" 2>/dev/null
+      "$@" -d "$data" 2>/dev/null
     sleep 1
   done
   # C1b - LEG-3 RE-VERIFY AFTER LOAD. The capability probe proved this cell hits the intended egress
@@ -453,21 +468,38 @@ matrix_cell_perf(){
 }
 
 CELLS_JSON=""
-emit_cell(){ # cell served status path note snippet  (+ CELL_PERF_JSON, cleared after use)
+# emit_cell <cell> <served> <status> <path> <note> <snippet> [reason]
+# `reason` is the MACHINE-READABLE verdict class, so consumers never have to regex English prose:
+#   (green)          absent                - served=true
+#   wrong_answer     served=false          - the gateway SERVED and returned a wrong/untranslated
+#                                            body, or answered without contacting the upstream: a
+#                                            genuine, evidenced failure (the only red class)
+#   harness_boot_failure / suite_ceiling / mock_norecord
+#                    served="not_verified" - the HARNESS could not get a fair reading (gateway never
+#                                            warmed under this egress config, wall-clock ceiling,
+#                                            recording mock displaced): never a red
+#   not_declared     served="not_configurable" - the capability grid declares 0 (cited note)
+#   no_base_url_override  served="untestable"  - mock-reachability limit (cited note), NOT incapability
+#   inbound_sigv4    served="unprobed_auth"    - gateway insists on inbound SigV4 we do not forge
+emit_cell(){
+  local reason="${7:-}"
   CELLS_JSON="${CELLS_JSON}${CELLS_JSON:+,}
-      \"$1\": {\"served\": $2, \"status\": \"$3\", \"path\": \"$4\", \"verdict_note\": \"$(json_escape "$5")\", \"body_snippet\": \"$(json_escape "$6")\"$CELL_PERF_JSON}"
+      \"$1\": {\"served\": $2, ${reason:+\"reason\": \"$reason\", }\"status\": \"$3\", \"path\": \"$4\", \"verdict_note\": \"$(json_escape "$5")\", \"body_snippet\": \"$(json_escape "$6")\"$CELL_PERF_JSON}"
   CELL_PERF_JSON=""
 }
 
-WARM_OK=0; WARM_LAST=000; SERVE_ERR=""
+WARM_OK=0; WARM_LAST=000; WARM_CELL=openai; SERVE_ERR=""
 run_cell(){ # egress cell path body extra-header...
   local egress="$1" cell="$2" path="$3" data="$4"; shift 4
   local served=false note="" v m snip
   if [ "$WARM_OK" != 1 ]; then
     LAST_STATUS="$WARM_LAST"; LAST_BODY=""
-    note="gateway never served the openai warm-up under the $egress egress config; not probed. $SERVE_ERR"
-    emit_cell "$cell" "$served" "$LAST_STATUS" "$path" "$note" ""
-    log "[$GATEWAY]   $egress <- $cell : served=false (warm-up failed)"
+    # A warm-up/boot failure means the HARNESS never got the gateway serving under this egress
+    # config - we could not fairly test the cell. That is machine-readably "not_verified", never a
+    # red: only a gateway that actually served and answered wrongly is a failure.
+    note="gateway never served the $WARM_CELL warm-up under the $egress egress config; not probed. $SERVE_ERR"
+    emit_cell "$cell" '"not_verified"' "$LAST_STATUS" "$path" "$note" "" harness_boot_failure
+    log "[$GATEWAY]   $egress <- $cell : served=not_verified (warm-up failed)"
     return
   fi
   mock_reset
@@ -480,6 +512,7 @@ run_cell(){ # egress cell path body extra-header...
     path="$P_COHERE_FB"
   fi
   m="$(mock_hit "$egress")"
+  local reason=""
   if [ "${LAST_STATUS#2}" != "$LAST_STATUS" ] && { [ "$v" = ok ] || [ "$v" = "ok passthrough" ]; }; then
     if [ "$m" = ok ]; then
       served=true
@@ -491,22 +524,29 @@ run_cell(){ # egress cell path body extra-header...
         note="HTTP $LAST_STATUS, $cell envelope validated; mock received a $egress-shaped request on its $egress endpoint"
       fi
     elif [ "$m" = miss ]; then
+      reason=wrong_answer
       note="HTTP $LAST_STATUS with a valid $cell envelope, but the mock never received a request on the $egress endpoint: the gateway answered without contacting the configured upstream"
     elif [ "${m#misdialect }" != "$m" ]; then
+      reason=wrong_answer
       note="HTTP $LAST_STATUS with a valid $cell envelope, but the gateway did not speak the $egress dialect to the upstream: the mock received the request on the ${m#misdialect } endpoint instead"
     elif [ "$m" = norecord ]; then
-      note="HTTP $LAST_STATUS with a valid $cell envelope, but the recording mock's state was unavailable (another process replaced the mock on :$MOCK_PORT?); round trip unverifiable, recorded as not served rather than guessed"
+      # The recording mock was displaced by something on our rig: a HARNESS gap, not gateway fault.
+      served='"not_verified"'; reason=mock_norecord
+      note="HTTP $LAST_STATUS with a valid $cell envelope, but the recording mock's state was unavailable (another process replaced the mock on :$MOCK_PORT?); round trip unverifiable, recorded as not_verified rather than guessed either way"
     else
+      reason=wrong_answer
       note="HTTP $LAST_STATUS with a valid $cell envelope, but the request that reached the mock's $egress endpoint did not carry the $egress request shape: ${m#badshape }"
     fi
   elif [ "$cell" = bedrock ] && { [ "$LAST_STATUS" = 401 ] || [ "$LAST_STATUS" = 403 ]; }; then
     # the gateway rejected the bearer token on the bedrock ingress: it wants SigV4, which this
     # harness does not forge. Distinct verdict: not served, but not a red either.
-    served='"unprobed_auth"'
+    served='"unprobed_auth"'; reason=inbound_sigv4
     note="HTTP $LAST_STATUS with a bearer token; gateway appears to require inbound SigV4 on the bedrock ingress, which this probe does not sign"
   elif printf '%s' "$v" | grep -q '^passthrough'; then
+    reason=wrong_answer
     note="UNTRANSLATED $v; the gateway proxied $path through verbatim instead of translating (HTTP $LAST_STATUS)"
   else
+    reason=wrong_answer
     note="HTTP $LAST_STATUS on POST $path: $v"
   fi
   snip="$(printf '%s' "$LAST_BODY" | head -c 200)"
@@ -516,7 +556,7 @@ run_cell(){ # egress cell path body extra-header...
   if [ "$served" = true ]; then
     matrix_cell_perf "$egress" "$cell" "$path" "$data" "$@"
   fi
-  emit_cell "$cell" "$served" "$LAST_STATUS" "$path" "$note" "$snip"
+  emit_cell "$cell" "$served" "$LAST_STATUS" "$path" "$note" "$snip" "$reason"
 }
 
 # ── egress loop: (re)configure + relaunch the gateway per upstream dialect, probe all 6 ingress ──
@@ -528,18 +568,37 @@ launch_egress(){ # dialect -> 0 launched, 1 launch failed
   return 0
 }
 
+# The warm-up must probe a cell the gateway actually DECLARES for this egress column. Warming with
+# the openai ingress unconditionally punished gateways that (honestly) declare no openai-ingress
+# bridge into an egress dialect (e.g. a Converse-only diagonal): the openai warm-up can never 200
+# there, so the whole column was published as a boot failure - a harness bug, not the gateway's.
+# Generic rule: warm on the FIRST declared-1 ingress dialect of the column, with that dialect's own
+# probe body, path and headers.
+warm_dialect_headers(){ # dialect -> extra -H pairs on stdout-less: sets WARM_H array
+  WARM_H=()
+  case "$1" in
+    anthropic) WARM_H=(-H "anthropic-version: 2023-06-01" -H "x-api-key: $GW_AUTH" ${XH[@]+"${XH[@]}"});;
+    gemini)    WARM_H=(-H "x-goog-api-key: $GW_AUTH");;
+  esac
+}
 warm_up(){ # egress
   WARM_OK=0; WARM_LAST=000
-  local i
+  local ing; WARM_CELL=openai
+  for ing in $INGRESS_ALL; do
+    if [ "$(cap "$ing" "$1")" = 1 ] && ! cell_untestable "$ing" "$1"; then WARM_CELL="$ing"; break; fi
+  done
+  local wpath wbody i
+  wpath="$(ingress_path "$WARM_CELL")"; wbody="$(ingress_body "$WARM_CELL")"
+  warm_dialect_headers "$WARM_CELL"
   for i in $(seq 1 45); do
-    WARM_LAST=$(curl -s -m3 -o /dev/null -w "%{http_code}" "http://127.0.0.1:$GW_PORT$P_OPENAI" -X POST \
+    WARM_LAST=$(curl -s -m3 -o /dev/null -w "%{http_code}" "http://127.0.0.1:$GW_PORT$wpath" -X POST \
         -H "content-type: application/json" -H "authorization: Bearer $GW_AUTH" ${CURL_H[@]+"${CURL_H[@]}"} \
-        -d "{\"model\":\"$GW_MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"warm\"}],\"max_tokens\":16}")
+        ${WARM_H[@]+"${WARM_H[@]}"} -d "$wbody")
     [ "$WARM_LAST" = 200 ] && { WARM_OK=1; return 0; }
     sleep 1
   done
-  SERVE_ERR="HTTP $WARM_LAST on POST $P_OPENAI; diag=[$(gw_diag 2>&1 | tail -n 20)]"
-  log "[$GATEWAY] WARNING: no 200 on the openai warm-up for egress=$1 (last=$WARM_LAST)"
+  SERVE_ERR="HTTP $WARM_LAST on POST $wpath ($WARM_CELL warm-up); diag=[$(gw_diag 2>&1 | tail -n 20)]"
+  log "[$GATEWAY] WARNING: no 200 on the $WARM_CELL warm-up for egress=$1 (last=$WARM_LAST)"
   return 1
 }
 
@@ -554,8 +613,8 @@ for EGRESS in $EGRESS_ALL; do
     log "[$GATEWAY] egress=$EGRESS: suite wall-clock ceiling reached - recording not served, moving on"
     WARM_OK=0
     for CELL in $INGRESS_ALL; do
-      emit_cell "$CELL" false "" "$(ingress_path "$CELL")" \
-        "suite wall-clock ceiling (${HARNESS_SUITE_CEIL_S}s) reached before this egress column was probed" ""
+      emit_cell "$CELL" '"not_verified"' "" "$(ingress_path "$CELL")" \
+        "suite wall-clock ceiling (${HARNESS_SUITE_CEIL_S}s) reached before this egress column was probed" "" suite_ceiling
     done
     UPSTREAMS_JSON="${UPSTREAMS_JSON}${UPSTREAMS_JSON:+,}
     \"$EGRESS\": {\"configurable\": true, \"served\": false, \"serve_error\": \"suite wall-clock ceiling reached\", \"cells\": {$CELLS_JSON
@@ -568,8 +627,13 @@ for EGRESS in $EGRESS_ALL; do
     # launch or probe. Grey here is a declared limit, not untested generosity.
     log "[$GATEWAY] egress=$EGRESS: not declared (no capability claim for this upstream dialect)"
     for CELL in $INGRESS_ALL; do
-      emit_cell "$CELL" '"not_configurable"' "" "$(ingress_path "$CELL")" \
-        "$GW_MATRIX_CAP_NOTE" ""
+      if cell_untestable "$CELL" "$EGRESS"; then
+        emit_cell "$CELL" '"untestable"' "" "$(ingress_path "$CELL")" \
+          "untestable: no upstream base-URL override reaches the test mock (a mock-reachability limit of this rig, not gateway incapability). $GW_MATRIX_UNTESTABLE_NOTE" "" no_base_url_override
+      else
+        emit_cell "$CELL" '"not_configurable"' "" "$(ingress_path "$CELL")" \
+          "$GW_MATRIX_CAP_NOTE" "" not_declared
+      fi
     done
     UPSTREAMS_JSON="${UPSTREAMS_JSON}${UPSTREAMS_JSON:+,}
     \"$EGRESS\": {\"configurable\": false, \"served\": false, \"cap_note\": \"$(json_escape "$GW_MATRIX_CAP_NOTE")\", \"cells\": {$CELLS_JSON
@@ -594,8 +658,14 @@ for EGRESS in $EGRESS_ALL; do
     # the egress column is launched (the gateway claims SOME translations into this upstream but not
     # this ingress). Only declared-1 cells are probed for a real pass/fail.
     if [ "$(cap "$CELL" "$EGRESS")" != 1 ]; then
-      emit_cell "$CELL" '"not_configurable"' "" "$(ingress_path "$CELL")" "$GW_MATRIX_CAP_NOTE" ""
-      log "[$GATEWAY]   $EGRESS <- $CELL : not declared (grey)"
+      if cell_untestable "$CELL" "$EGRESS"; then
+        emit_cell "$CELL" '"untestable"' "" "$(ingress_path "$CELL")" \
+          "untestable: no upstream base-URL override reaches the test mock (a mock-reachability limit of this rig, not gateway incapability). $GW_MATRIX_UNTESTABLE_NOTE" "" no_base_url_override
+        log "[$GATEWAY]   $EGRESS <- $CELL : untestable (no base-URL override, cited)"
+      else
+        emit_cell "$CELL" '"not_configurable"' "" "$(ingress_path "$CELL")" "$GW_MATRIX_CAP_NOTE" "" not_declared
+        log "[$GATEWAY]   $EGRESS <- $CELL : not declared (grey)"
+      fi
       continue
     fi
     BODY="$(ingress_body "$CELL")"
@@ -649,7 +719,8 @@ import json, sys
 j = json.load(open(sys.argv[1]))
 ups = j.get("upstreams", {})
 egs = list(ups.keys())
-sym = {True: "PASS", False: "fail", "not_configurable": "n/c ", "unprobed_auth": "auth"}
+sym = {True: "PASS", False: "fail", "not_configurable": "n/c ", "unprobed_auth": "auth",
+       "not_verified": "n/v ", "untestable": "mock"}
 print("   %-17s" % "ingress \\ egress" + "".join("%-18s" % e for e in egs))
 cells0 = next(iter(ups.values()))["cells"]
 for cell in cells0:
