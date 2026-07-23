@@ -117,23 +117,42 @@ bench_gateway() {
     bash run-all.sh $gw" >>"$glog" 2>&1
 
   glog_echo "pulling $gw results back"
+  local pull_failed=0
   for suite in perf memory stream streamcpu xlate governed matrix; do
     mkdir -p "$HERE/results/$suite"
     # Pull to a staging file, then let the promote guard decide. BULLETPROOF: a boot/build failure
     # (status 000, "failed to boot", missing entrypoint) must NEVER overwrite a committed served
     # result. The guard keeps the good data and logs loudly; a real result promotes normally.
     local staged="$HERE/results/$suite/.incoming-$gw.json"
-    rm -f "$staged"
-    if rsync -az -e "ssh $SSHOPT" "ubuntu@$ip:~/benchmarking/results/$suite/$gw.json" "$staged" >>"$glog" 2>&1 && [[ -f "$staged" ]]; then
+    # RETRY the rsync: a dropped SSH/rsync ("unexpected end of file") must NOT silently leave stale
+    # data behind - that is how a refresh betrays trust. Try up to 4 times with a pause, and if the
+    # remote file genuinely does not exist (the suite produced no result) rsync returns 23, which we
+    # treat as "no fresh result for this suite" and flag loudly, NOT a transient we retry forever.
+    rm -f "$staged"; local ok=0 attempt rc
+    for attempt in 1 2 3 4; do
+      rsync -az --timeout=60 -e "ssh $SSHOPT" "ubuntu@$ip:~/benchmarking/results/$suite/$gw.json" "$staged" >>"$glog" 2>&1
+      rc=$?
+      if [[ $rc -eq 0 && -f "$staged" ]]; then ok=1; break; fi
+      if [[ $rc -eq 23 ]]; then break; fi   # remote file missing: no fresh result, do not retry
+      glog_echo "rsync $suite/$gw.json attempt $attempt failed (rc=$rc) - retrying in 10s"
+      sleep 10
+    done
+    if [[ $ok -eq 1 ]]; then
       if python3 "$HERE/lib/promote_guard.py" "$suite" "$HERE/results/$suite/$gw.json" "$staged" >>"$glog" 2>&1; then
         mv -f "$staged" "$HERE/results/$suite/$gw.json"
       else
-        glog_echo "GUARD kept prior $suite/$gw.json (incoming was a boot/build failure)"
-        rm -f "$staged"
+        glog_echo "GUARD kept prior $suite/$gw.json (incoming was a boot/build failure)"; rm -f "$staged"; pull_failed=1
       fi
+    else
+      glog_echo "PULL FAILED for $suite/$gw.json (rc=$rc) - fresh result NOT retrieved; committed data for this suite is STALE"
+      pull_failed=1; rm -f "$staged"
     fi
   done
-  if [[ -f "$HERE/results/perf/$gw.json" ]]; then glog_echo "DONE"; else glog_echo "NO RESULT FILE (see log)"; fi
+  # DONE means a CLEAN, fully-pulled fresh run. If any suite's pull failed or the guard kept old data,
+  # this gateway did NOT cleanly refresh - say so loudly so the freshness guard's later hard-fail is
+  # never a surprise and the gateway can be re-run.
+  if [[ "$pull_failed" -eq 0 && -f "$HERE/results/perf/$gw.json" ]]; then glog_echo "DONE"
+  else glog_echo "INCOMPLETE (a suite failed to pull or was guard-held; this gateway did NOT fully refresh - re-run it)"; fi
 }
 
 log "fanning out ${#GATEWAYS[@]} boxes (one per gateway): ${GATEWAYS[*]}"
