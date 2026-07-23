@@ -64,9 +64,15 @@ export function checkConsistency(data, app) {
         }
       }
     }
-    // ---- plausibility (WARN only, R7): two independent measured ceilings may invert on noise
+    // ---- plausibility (WARN only, R7): two independent measured ceilings may invert on noise.
+    // DISTINCT case (H4): max-proxy === 0 means the ceiling run found NO tested load that held
+    // p99 < 1 s at <0.1% errors, i.e. that run did not qualify at all. That is NOT sweep noise
+    // and must never be filed under the small-inversion story (arch's 18-vs-0 is this case).
     const bc = g.best_cell;
-    if (bc && bc.rps_sustained_20ms != null && bc.rps_max_proxy != null && bc.rps_sustained_20ms > bc.rps_max_proxy) {
+    if (bc && bc.rps_max_proxy === 0) {
+      warnings.push(`${g.key}: max-proxy run did not qualify (rps_max_proxy=0: no tested load held ` +
+        `p99 < 1 s at <0.1% errors); not noise, shipped as measured`);
+    } else if (bc && bc.rps_sustained_20ms != null && bc.rps_max_proxy != null && bc.rps_sustained_20ms > bc.rps_max_proxy) {
       warnings.push(`${g.key}: sustained@20ms ${bc.rps_sustained_20ms} > max-proxy ${bc.rps_max_proxy} ` +
         `(independent per-cell sweep ceilings; noise, shipped unclamped)`);
     }

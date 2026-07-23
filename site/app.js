@@ -166,6 +166,16 @@ function passCell(g, key, fmt) {
     j[key] != null ? { v: j[key], text: fmt(j[key]), na: false } : { v: null, text: "n/a", na: true });
 }
 
+/* A throughput cell of 0 is a real, honest measurement, not a broken benchmark: the gateway
+   served, but NO tested load level passed the qualifying gates (p99 < 1 s at <0.1% errors), so
+   that run has no qualifying throughput ceiling. Distinct from sweep noise (see the caption and
+   the check-consistency guard, which flags max=0 separately from a small inversion). The cell
+   still shows "0" and this note travels in its title tooltip. */
+const ZERO_RPS_NOTE = "served, but no tested load held p99 < 1 s at <0.1% errors (no qualifying throughput ceiling)";
+function withZeroNote(cell) {
+  return !cell.na && cell.v === 0 ? { ...cell, note: ZERO_RPS_NOTE } : cell;
+}
+
 /* xlateMatrixCell: the perf object for a gateway's ingress->egress translation cell, straight from the
    matrix (upstreams[egress].cells[ingress]). Returns cell.perf when that exact pair is served and
    measured, else null. The Translation tab pins BOTH ends (state.xlateIn/xlateOut) so every row is the
@@ -247,9 +257,9 @@ const COLUMN_SETS = {
     { id: "lat", label: "Added latency p99 (µs)", desc: false, title: "Gateway p99 minus direct-to-mock p99 at concurrency 1 on the gateway's best same-dialect passthrough (the Tested-on dialect) - pure forwarding, no translation",
       get: (g) => passCell(g, "added_latency_p99_us", fmtAdded) },
     { id: "rps20", label: "Sustained RPS @20ms", desc: true, title: "Sustained requests/sec with a 20 ms mock LLM latency (p99 < 1 s, <0.1% errors) on the Tested-on dialect (see the pill)",
-      get: (g) => passCell(g, "rps_sustained_20ms", fmtInt) },
+      get: (g) => withZeroNote(passCell(g, "rps_sustained_20ms", fmtInt)) },
     { id: "rpsmax", label: "Max proxy RPS", desc: true, title: "Throughput ceiling against an instant mock (p99 < 1 s, <0.1% errors) on the Tested-on dialect (see the pill)",
-      get: (g) => passCell(g, "rps_max_proxy", fmtInt) },
+      get: (g) => withZeroNote(passCell(g, "rps_max_proxy", fmtInt)) },
     { id: "memidle", label: "Mem idle (MiB)", desc: false, title: "Process RSS after launch, before load",
       get: (g) => lane(g, "memory", "served", "serve_error", (j) => ({ v: j.idle_rss_mib, text: fmt1(j.idle_rss_mib), na: false })) },
     { id: "mempeak", label: "Mem peak (MiB)", desc: false, title: "Peak process RSS under large-payload load",
@@ -266,9 +276,9 @@ const COLUMN_SETS = {
     { id: "xllat", label: "Added latency p99 (µs)", desc: false, title: "Gateway p99 minus direct-to-mock p99 at concurrency 1 on the selected path",
       get: (g) => xlateCell(g, "added_latency_p99_us", fmtAdded) },
     { id: "xlrps", label: "Sustained RPS @20ms", desc: true, title: "Sustained RPS @20ms on the selected path (p99 < 1 s, <0.1% errors)",
-      get: (g) => xlateCell(g, "rps_sustained_20ms", fmtInt) },
+      get: (g) => withZeroNote(xlateCell(g, "rps_sustained_20ms", fmtInt)) },
     { id: "xlmax", label: "Max proxy RPS", desc: true, title: "Throughput ceiling against an instant mock on the selected path (p99 < 1 s, <0.1% errors)",
-      get: (g) => xlateCell(g, "rps_max_proxy", fmtInt) },
+      get: (g) => withZeroNote(xlateCell(g, "rps_max_proxy", fmtInt)) },
   ],
   // Streaming: SSE passthrough, its own stall-gated ceiling.
   streaming: [
@@ -670,6 +680,7 @@ const TABLE_CAPTIONS = {
     "Each gateway on its best same-dialect path; the pill shows which dialect.",
     "Everyone appears. For one strict dialect, pin the same in and out in Translation.",
     "Sustained @20ms and max proxy RPS are independently measured ceilings; a small inversion between them is sweep noise, not an error.",
+    "A 0 is not noise: the gateway served, but no tested load held p99 < 1 s at <0.1% errors, so that run found no qualifying ceiling.",
   ],
   streaming: [
     "Streaming responses (server-sent events).",
@@ -743,7 +754,7 @@ function renderTable() {
       const cell = c.get(g);
       return cell.na
         ? `<td class="na${sc}" title="${esc(cell.note || "")}">${esc(cell.text)}</td>`
-        : `<td class="${sc.trim()}">${esc(cell.text)}</td>`;
+        : `<td class="${sc.trim()}"${cell.note ? ` title="${esc(cell.note)}"` : ""}>${esc(cell.text)}</td>`;
     }).join("") + "</tr>"
   ).join("");
 

@@ -273,6 +273,33 @@ test("guard warns (never fails) on a sustained > max-proxy inversion", () => {
   assert.ok(warnings[0].includes("noise"));
 });
 
+test("guard treats max-proxy=0 as a DISTINCT did-not-qualify warning, never noise", () => {
+  // arch's real shape: sustained 18, max 0. The ceiling run failed to qualify at every tested
+  // load; filing that under "small inversion is sweep noise" would misdescribe a real failure.
+  const g = { key: "zeromax", display: "ZeroMax", lang: "Rust",
+    best_cell: { dialect: "openai", source: "matrix",
+      added_latency_p99_us: 100, rps_sustained_20ms: 18, rps_max_proxy: 0 } };
+  const { errors, warnings } = checkConsistency({ gateways: [g] }, app);
+  assert.deepEqual(errors, []);
+  assert.equal(warnings.length, 1);
+  assert.ok(warnings[0].includes("did not qualify"), warnings[0]);
+  assert.ok(warnings[0].includes("not noise"), warnings[0]);
+});
+
+test("a zero RPS cell renders 0 with the no-qualifying-ceiling tooltip", () => {
+  const zero = { best_cell: { dialect: "openai", source: "matrix",
+    rps_sustained_20ms: 18, rps_max_proxy: 0 } };
+  const cols = app.COLUMN_SETS.passthrough;
+  const rpsmax = cols.find((c) => c.id === "rpsmax").get(zero);
+  assert.equal(rpsmax.text, "0");
+  assert.equal(rpsmax.na, false);
+  assert.ok(/no tested load held p99 < 1 s/.test(rpsmax.note), "tooltip explains the 0");
+  // a non-zero cell carries no note
+  const rps20 = cols.find((c) => c.id === "rps20").get(zero);
+  assert.equal(rps20.text, "18");
+  assert.ok(!rps20.note);
+});
+
 // ---- footer timestamps: clean UTC stamp + coarse relative age ----------------
 test("footer timestamps format cleanly with a coarse age", () => {
   const iso = "2026-07-22T17:52:46.101Z";
