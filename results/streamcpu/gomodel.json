@@ -6,10 +6,11 @@
   "last_http_status": "200",
   "serve_error": "",
   "stream_error": "",
-  "streamcpu_frames_per_sec": 158755,
-  "streamcpu_fps_per_core": 39689,
+  "stream_note": "",
+  "streamcpu_frames_per_sec": 139752,
+  "streamcpu_fps_per_core": 34938,
   "streamcpu_concurrency": 256,
-  "streamcpu_direct_ceiling_fps": 157290,
+  "streamcpu_direct_ceiling_fps": 136818,
   "streamcpu_mock_bound": true,
   "streamcpu_valid": false,
   "streamcpu_added_per_frame_us": null,
@@ -17,7 +18,7 @@
   "streamcpu_frame_bytes": 16,
   "streamcpu_cores": 4,
   "streamcpu_stall_ms": 250,
-  "sweep_streamcpu": [{"conc":8,"streams":296,"complete":296,"fail":0,"stalled":0,"frames":151552,"fps":7416,"delivered":1.0000},{"conc":32,"streams":1120,"complete":1120,"fail":0,"stalled":0,"frames":573440,"fps":27867,"delivered":1.0000},{"conc":64,"streams":2240,"complete":2240,"fail":0,"stalled":0,"frames":1146880,"fps":56423,"delivered":1.0000},{"conc":128,"streams":3839,"complete":3839,"fail":0,"stalled":0,"frames":1965568,"fps":95102,"delivered":1.0000},{"conc":256,"streams":6400,"complete":6400,"fail":0,"stalled":0,"frames":3276800,"fps":158755,"delivered":1.0000}],
+  "sweep_streamcpu": [{"conc":8,"streams":296,"complete":296,"fail":0,"stalled":0,"frames":151552,"fps":7405,"delivered":1.0000},{"conc":32,"streams":1120,"complete":1120,"fail":0,"stalled":0,"frames":573440,"fps":28273,"delivered":1.0000},{"conc":64,"streams":2304,"complete":2304,"fail":0,"stalled":0,"frames":1179648,"fps":57794,"delivered":1.0000},{"conc":128,"streams":3584,"complete":3584,"fail":0,"stalled":0,"frames":1835008,"fps":88901,"delivered":1.0000},{"conc":256,"streams":5632,"complete":5632,"fail":0,"stalled":0,"frames":2883584,"fps":139752,"delivered":1.0000}],
   "payload_bytes": 256,
   "endpoint": "/v1/chat/completions",
   "model": "openai/gpt-4o-mini",
@@ -25,5 +26,5 @@
   "mock_proto": "h1+h2c",
   "arch": "arm64",
   "hardware": "AWS m7g.2xlarge (Graviton3, 8 cores / 32 GB). Gateway pinned to 4 cores, mock+loadgen on the other 4, Ubuntu 24.04. One dedicated box per gateway.",
-  "measured_at": "2026-07-23T00:09:50Z"
+  "measured_at": "2026-07-23T04:51:49Z"
 }
