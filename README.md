@@ -24,7 +24,7 @@ are recorded in every `results/*.json` and printed at the top of each report pag
 
 Full, auto-generated result pages (regenerated from the raw JSON on every run — no hand-typed numbers):
 
-- **[Top 5 gateways →](results/reports/top5/)** — the field leaders by throughput ceiling.
+- **[Top 5 gateways →](results/reports/top5/)** — the top 5 by lowest added latency, the same five on every chart.
 - **[All gateways →](results/reports/all/)** — the complete field, including any that couldn't serve the endpoint (marked, not hidden).
 
 Each page shows added latency (µs), RPS ceiling, idle/peak memory, whether the gateway served, and the

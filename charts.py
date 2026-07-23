@@ -902,8 +902,11 @@ def write_reports() -> None:
     (RESULTS / "reports" / "all" / "README.md").write_text(
         _report_md(ranked, "All gateways — full field", charts, pending=pending))
     # top5 report points at its own top5_*.png charts (rendered in main), so its charts match its table.
+    # ONE stated criterion everywhere (site caption, README, here): top 5 by lowest added latency,
+    # the same five gateways on every chart - never re-picked per metric.
     (RESULTS / "reports" / "top5" / "README.md").write_text(
-        _report_md(ranked[:5], "Top 5 gateways (lowest added latency)", charts, chart_prefix="top5_"))
+        _report_md(ranked[:5], "Top 5 gateways: lowest added latency, the same five on every chart",
+                   charts, chart_prefix="top5_"))
     print(f"wrote results/reports/all + top5 ({len(ranked)} gateways)")
 
 

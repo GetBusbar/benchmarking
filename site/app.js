@@ -1210,7 +1210,11 @@ function chartCaption(file) {
   const top5 = base.startsWith("top5_");
   const key = top5 ? base.slice(5) : base;
   const body = CHART_CAPTIONS[key] || key.replace(/_/g, " ");
-  return (top5 ? "Top 5 field leaders. " : "All gateways. ") + body;
+  // The top5 subset is selected ONCE, by lowest added latency, and the SAME five gateways are
+  // drawn on every top5 chart (charts.py _ranked()[:5]). Said explicitly so a reader is never
+  // surprised that a top5 RPS chart can omit the true #4 by RPS: the cut is by latency, not
+  // re-computed per metric.
+  return (top5 ? "Top 5 by lowest added latency, the same five on every chart. " : "All gateways. ") + body;
 }
 
 function renderCharts() {
