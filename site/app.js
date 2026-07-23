@@ -113,6 +113,9 @@ function naText(j, flag, errKey) {
   // a probe: it must read as "did not run", never as a capability verdict against the gateway. Same
   // honesty rule as the protocol matrix (status 000 / "failed to boot" / never became ready).
   else if (String(j.last_http_status || "") === "000" || /failed to boot|no such file|not listening|never became ready|build failed/i.test(note)) text = "did not run";
+  // A MEASURED streaming refusal (answered, but never framed SSE): "did not stream", with the
+  // evidence in the note/tooltip. Same wording family as the stream charts' "no SSE streaming".
+  else if (flag === "stream_served") text = "did not stream";
   return { text, note };
 }
 
@@ -490,12 +493,14 @@ function applyFilters(gateways, st) {
     if (st.langs.size && !st.langs.has(g.lang)) return false;
     if (st.needStream && !(g.stream && g.stream.stream_served)) return false;
     if (st.needXlate && !hasTranslation(g)) return false;
-    // View-implicit filter: Translation/Streaming list only gateways that serve that path. Passthrough
-    // is DELIBERATELY unfiltered: every gateway must appear on its best passthrough (fairness beats
-    // strict same-dialect - filtering a competitor out reads as hiding it). A gateway that serves no
-    // openai passthrough shows on its best native diagonal instead (pill discloses the dialect).
+    // View-implicit filter: Translation lists only gateways that serve the pinned pair (every row
+    // must be the identical path or the ranking lies). Passthrough is DELIBERATELY unfiltered:
+    // every gateway must appear on its best passthrough (fairness beats strict same-dialect -
+    // filtering a competitor out reads as hiding it). Streaming follows the same principle: a
+    // MEASURED streaming refusal (stream_served:false, e.g. Portkey's) is a result, not a gap, so
+    // those gateways stay in the table as muted "did not stream" rows sunk to the bottom (null
+    // metric values sort last), matching the stream charts' "no SSE streaming" bars.
     if (st.view === "translation" && !servesXlatePair(g, st.xlateIn, st.xlateOut)) return false;
-    if (st.view === "streaming" && !(g.stream && g.stream.stream_served)) return false;
     return true;
   });
 }
@@ -686,6 +691,7 @@ const TABLE_CAPTIONS = {
     "Streaming responses (server-sent events).",
     "Added columns: extra time the gateway adds, before the first token and between tokens. Lower is better.",
     "Streams sustained: concurrent streams held without stalling. Higher is better.",
+    "A gateway that answered but never framed SSE shows as \"did not stream\" (evidence in its tooltip): measured, not hidden.",
   ],
 };
 function updateTableCaption(view) {

@@ -188,6 +188,28 @@ test("Passthrough is BEST-OF: every gateway shows on its best diagonal, none fil
   assert.equal(rows.length, 1);
 });
 
+test("Streaming tab keeps measured streaming refusals as visible rows", () => {
+  // Principle 3: filtering a competitor out reads as hiding it. A stream_served:false gateway
+  // (Portkey's measured refusal) must stay in the Streaming row set; its null metrics sink it to
+  // the bottom as a muted row, and naText labels it "did not stream" with the evidence.
+  const st = app.newState();
+  st.view = "streaming";
+  const streams = { display: "s", key: "s", lang: "Go", stream: { stream_served: true, stream_added_ttft_p99_us: 1 } };
+  const refused = { display: "r", key: "r", lang: "Node",
+    stream: { stream_served: false, stream_error: "no SSE frames on stream:true" } };
+  const rows = app.applyFilters([streams, refused], st);
+  assert.deepEqual(rows.map((g) => g.key).sort(), ["r", "s"], "refusal row is not filtered out");
+  const na = app.naText(refused.stream, "stream_served", "stream_error");
+  assert.equal(na.text, "did not stream");
+  assert.equal(na.note, "no SSE frames on stream:true");
+  // the real field: any committed stream_served:false gateway gets the same label
+  for (const g of data.gateways) {
+    if (g.stream && g.stream.stream_served === false) {
+      assert.equal(app.naText(g.stream, "stream_served", "stream_error").text, "did not stream", g.key);
+    }
+  }
+});
+
 test("Translation tab lists only gateways serving the pinned in->out pair", () => {
   // g0 serves openai->anthropic (the default pair), g1 serves only openai->gemini.
   const g0 = { display: "g0", key: "g0", lang: "Rust",
