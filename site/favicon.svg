@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- On the Bench favicon: a neutral three-bar chart on the site's dark panel.
+       Bar colours are the compare-series palette (app.js CMP_COLORS), no brand colour. -->
+  <rect width="64" height="64" rx="12" fill="#101623"/>
+  <rect x="11" y="34" width="11" height="19" rx="2" fill="#4cc38a"/>
+  <rect x="26.5" y="24" width="11" height="29" rx="2" fill="#6cb6ff"/>
+  <rect x="42" y="13" width="11" height="40" rx="2" fill="#e5a54b"/>
+</svg>
