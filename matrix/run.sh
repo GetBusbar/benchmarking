@@ -287,6 +287,16 @@ probe(){ # path body extra-header...
   LAST_STATUS="${out##*$'\n'}"; LAST_BODY="${out%$'\n'*}"
 }
 
+# A TRANSIENT failure is a transport/reachability problem, NOT an answer: the gateway never handed us
+# a real application response we could judge. In this controlled rig the upstream is always the local
+# mock, so a 5xx or a curl-level 000 is the gateway failing to REACH its upstream (a dead socket after
+# a mock restart, an upstream-pool hiccup, a connection reset), never the gateway "answering wrongly".
+# We must retry such a probe BEFORE recording anything - never publish a transient blip as a red, then
+# re-run the whole box. A 2xx/3xx/4xx is a real application response (right or wrong) and is NOT retried.
+probe_transient(){ case "$LAST_STATUS" in 000|5[0-9][0-9]) return 0 ;; *) return 1 ;; esac; }
+MATRIX_TRANSIENT_RETRIES="${MATRIX_TRANSIENT_RETRIES:-3}"   # total attempts on a transient probe
+MATRIX_TRANSIENT_PAUSE="${MATRIX_TRANSIENT_PAUSE:-120}"     # seconds between transient retries
+
 # Envelope verdicts + passthrough guard, in one place (python: nested-field checks beat grep here).
 # Body rides in $MATRIX_BODY (python reads its program from stdin, so stdin is taken); argv = cell
 # name + egress dialect; prints one line: "ok", "ok passthrough" (diagonal, canned body),
@@ -511,8 +521,30 @@ run_cell(){ # egress cell path body extra-header...
     v="$(verdict "$cell" "$egress")"
     path="$P_COHERE_FB"
   fi
-  m="$(mock_hit "$egress")"
+  # TRANSIENT dead-socket retry (BEFORE any verdict is recorded): a 5xx/000 is the gateway failing to
+  # reach the local mock, never a wrong answer. Retry the whole probe up to MATRIX_TRANSIENT_RETRIES,
+  # pausing MATRIX_TRANSIENT_PAUSE between so a stale upstream socket has time to recycle.
+  local attempt=1
+  while probe_transient && [ "$attempt" -lt "$MATRIX_TRANSIENT_RETRIES" ]; do
+    log "[$GATEWAY]   $egress <- $cell : transient status $LAST_STATUS (upstream unreachable) - retry $attempt/$((MATRIX_TRANSIENT_RETRIES-1)) in ${MATRIX_TRANSIENT_PAUSE}s"
+    sleep "$MATRIX_TRANSIENT_PAUSE"
+    mock_reset
+    probe "$path" "$data" "$@"
+    v="$(verdict "$cell" "$egress")"
+    attempt=$((attempt+1))
+  done
   local reason=""
+  if probe_transient; then
+    # Still transient after all retries: the harness could not get a fair reading (the gateway never
+    # completed a round trip to the upstream), so this is machine-readably not_verified, NEVER a red.
+    served='"not_verified"'; reason=upstream_unreachable
+    note="HTTP $LAST_STATUS after $MATRIX_TRANSIENT_RETRIES attempts: the gateway did not complete a round trip to the upstream (transient transport failure, e.g. a dead upstream socket); recorded as not_verified rather than a wrong-answer red"
+    snip="$(printf '%s' "$LAST_BODY" | head -c 200)"
+    log "[$GATEWAY]   $egress <- $cell : served=not_verified ($note)"
+    emit_cell "$cell" "$served" "$LAST_STATUS" "$path" "$note" "$snip" "$reason"
+    return
+  fi
+  m="$(mock_hit "$egress")"
   if [ "${LAST_STATUS#2}" != "$LAST_STATUS" ] && { [ "$v" = ok ] || [ "$v" = "ok passthrough" ]; }; then
     if [ "$m" = ok ]; then
       served=true
