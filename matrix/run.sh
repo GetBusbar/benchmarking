@@ -581,6 +581,12 @@ run_cell(){ # egress cell path body extra-header...
     reason=wrong_answer
     note="HTTP $LAST_STATUS on POST $path: $v"
   fi
+  # Snapshot the CAPABILITY-PROBE status + body NOW, before matrix_cell_perf's post-load leg-3
+  # re-verify calls probe() again and overwrites LAST_STATUS/LAST_BODY. Otherwise a green cell whose
+  # leg-3 re-verify hit a transient dead socket would be EMITTED with that transient's status (a green
+  # cell tagged 502/000), contradicting its own "HTTP 200 ..." note. The recorded status must be the
+  # status the capability verdict was decided on.
+  local cap_status="$LAST_STATUS"
   snip="$(printf '%s' "$LAST_BODY" | head -c 200)"
   log "[$GATEWAY]   $egress <- $cell : served=$served ($note)"
   # ADDITIVE per-cell perf: only a green (served=true) cell is swept; the capability verdict above
@@ -588,7 +594,7 @@ run_cell(){ # egress cell path body extra-header...
   if [ "$served" = true ]; then
     matrix_cell_perf "$egress" "$cell" "$path" "$data" "$@"
   fi
-  emit_cell "$cell" "$served" "$LAST_STATUS" "$path" "$note" "$snip" "$reason"
+  emit_cell "$cell" "$served" "$cap_status" "$path" "$note" "$snip" "$reason"
 }
 
 # ── egress loop: (re)configure + relaunch the gateway per upstream dialect, probe all 6 ingress ──
