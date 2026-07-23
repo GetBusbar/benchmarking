@@ -293,10 +293,12 @@ tbody tr { cursor: pointer; }
   font-size: .76rem; color: var(--fg-dim); max-height: 12rem; overflow: auto;
 }
 
-/* Best-dialect sub-line under the gateway name in the results table (small + muted, so the
-   horizontal room goes to the metric columns; the label is the same-dialect passthrough measured). */
-.results-table td.name .best-path {
-  font-size: .72rem; font-weight: 400; color: var(--fg-dim); margin-top: .1rem; letter-spacing: .01em;
+/* "Tested on" pill: the same-dialect passthrough the perf numbers were measured on. Neutral
+   (bordered, muted) - it is a measurement label, NOT a claim that the gateway is that protocol. */
+.tested-pill {
+  display: inline-block; font-size: .72rem; padding: .1rem .5rem; border-radius: 999px;
+  border: 1px solid var(--border); color: var(--fg-dim); background: var(--bg);
+  white-space: nowrap; font-variant: small-caps; letter-spacing: .02em;
 }
 
 /* Floating hover popup for matrix cells: a small card that follows the hovered cell. */

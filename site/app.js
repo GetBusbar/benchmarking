@@ -137,19 +137,11 @@ const COLUMNS = [
   {
     id: "name", label: "Gateway", desc: false,
     get: (g) => ({ v: g.display.toLowerCase(), text: null, na: false }),
-    /* The gateway name, with its BEST-performing supported path as a small muted sub-line beneath
-       (ingress → upstream, ranked by sustained RPS @20ms from the per-cell matrix sweep). Kept out
-       of its own column so the horizontal room goes to the metrics; the full per-cell numbers for
-       any path live in the matrix hover. */
     render: (g) => {
       const a = g.repo
         ? `<a href="${g.repo}" target="_blank" rel="noopener">${esc(g.display)}</a>`
         : esc(g.display);
-      // Same-dialect passthrough is the measured path, so show just the dialect (ingress === egress).
-      const path = g.best_cell
-        ? `<div class="best-path" title="Measured on same-dialect passthrough (${esc(g.best_cell.dialect)} in, ${esc(g.best_cell.dialect)} out) - pure forwarding, no translation">${esc(g.best_cell.dialect)}</div>`
-        : "";
-      return `<td class="name">${a}${path}</td>`;
+      return `<td class="name">${a}</td>`;
     },
   },
   {
@@ -167,6 +159,18 @@ const COLUMNS = [
       const c = LANG_COLORS[g.lang] || LANG_COLORS.Other;
       return `<td><span class="lang-chip" style="background:${c}">${esc(g.lang)}</span></td>`;
     },
+  },
+  {
+    /* Which dialect the perf numbers were measured on: the gateway's same-dialect passthrough
+       (pure forwarding). A neutral pill right before the metrics, NOT under the name (that read as
+       "this gateway IS OpenAI"). openai for everyone that serves it; a gateway's native dialect
+       otherwise (litellm-rust -> anthropic). */
+    id: "tested", label: "Tested on", desc: false,
+    title: "The same-dialect passthrough the perf numbers were measured on (openai when served, else the gateway's native dialect) - pure forwarding, no translation",
+    get: (g) => ({ v: g.best_cell ? g.best_cell.dialect : "", text: null, na: !g.best_cell }),
+    render: (g) => g.best_cell
+      ? `<td class="tested"><span class="tested-pill" title="measured on ${esc(g.best_cell.dialect)}-in / ${esc(g.best_cell.dialect)}-out passthrough">${esc(g.best_cell.dialect)}</span></td>`
+      : `<td class="tested"><span class="muted">n/a</span></td>`,
   },
   {
     id: "lat", label: "Added latency p99 (µs)", desc: false, title: "Gateway p99 minus direct-to-mock p99 at concurrency 1, on the gateway's best supported path",
