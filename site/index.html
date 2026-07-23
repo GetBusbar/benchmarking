@@ -128,8 +128,8 @@
         <h3><a id="lnk-stream" target="_blank" rel="noopener">stream/run.sh</a> Streaming</h3>
         <ul>
           <li>The mock answers stream:true with a paced SSE stream; the suite measures what the gateway adds on top of that pace.</li>
-          <li><b>Added TTFT (p99)</b>: gateway first-content-frame time minus direct-to-mock TTFT at concurrency 1.</li>
-          <li><b>Added per-token latency (p99)</b>: gateway content-frame gap minus direct-to-mock gap.</li>
+          <li><b>Added wait for the first token (p99)</b>, also called TTFT (time to first token): gateway first-content-frame time minus direct-to-mock, at concurrency 1.</li>
+          <li><b>Added gap between tokens (p99)</b>: gateway content-frame gap minus direct-to-mock gap.</li>
           <li><b>Streams sustained</b>: max concurrent streams where at least 99.9 percent of expected frames deliver, no stream stalls beyond twice the pacing interval, and the stream error rate stays under 0.1 percent.</li>
           <li>A gateway that answers 200 but buffers the whole response is recorded stream_served=false: measured, not hidden.</li>
         </ul>

@@ -237,9 +237,9 @@ const COLUMN_SETS = {
   // Streaming: SSE passthrough, its own stall-gated ceiling.
   streaming: [
     COL_SEL, COL_NAME, COL_LANG,
-    { id: "sttft", label: "Stream added TTFT p99 (µs)", desc: false, title: "Gateway first-content-frame time minus direct-to-mock TTFT",
+    { id: "sttft", label: "Added wait for 1st token p99 (µs)", desc: false, title: "Time to first token (TTFT): the extra wait before the stream's first token, gateway minus direct-to-mock, at concurrency 1. Lower is better.",
       get: (g) => lane(g, "stream", "stream_served", "stream_error", (j) => ({ v: j.stream_added_ttft_p99_us, text: fmtAdded(j.stream_added_ttft_p99_us), na: false })) },
-    { id: "sgap", label: "Stream added per-token p99 (µs)", desc: false, title: "Gateway content-frame gap minus direct-to-mock gap",
+    { id: "sgap", label: "Added gap between tokens p99 (µs)", desc: false, title: "The extra pause the gateway adds between streamed tokens, gateway minus direct-to-mock. Lower is better.",
       get: (g) => lane(g, "stream", "stream_served", "stream_error", (j) => ({ v: j.stream_added_gap_p99_us, text: fmtAdded(j.stream_added_gap_p99_us), na: false })) },
     { id: "streams", label: "Streams sustained", desc: true, title: "Max concurrent SSE streams with >=99.9% frame delivery, no stalls, <0.1% errors",
       get: (g) => lane(g, "stream", "stream_served", "stream_error", (j) => ({ v: j.stream_sustained_streams, text: fmtInt(j.stream_sustained_streams), na: false })) },
@@ -613,7 +613,7 @@ function initThemeToggle() {
    has to guess what the ranking compares. No em dashes (house style). */
 const TABLE_CAPTIONS = {
   passthrough: "Each gateway on its best same-dialect passthrough: pure forwarding, no translation. The Tested-on pill shows which dialect (OpenAI when served, else the gateway's fastest native one), so every gateway appears and nothing is hidden. For a strict single-dialect comparison, pin the same dialect on both sides in the Translation tab.",
-  streaming: "Server-sent-event passthrough. Streams sustained is each gateway's stall-free concurrent-stream ceiling; added TTFT and per-token are gateway minus direct-to-mock.",
+  streaming: "Streaming responses (server-sent events). The added columns are the extra time the gateway adds on top of the upstream: the wait before the first token (TTFT) and the pause between tokens. Streams sustained is how many concurrent streams it holds without stalling. Lower delay is better; higher streams is better.",
 };
 function updateTableCaption(view) {
   const el = document.getElementById("table-caption");
