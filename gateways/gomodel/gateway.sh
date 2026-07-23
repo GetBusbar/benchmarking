@@ -41,15 +41,27 @@ gw_launch() {
   # that provider's native upstream shape. Which provider a request hits is chosen by GW_MODEL, set
   # per egress in gw_matrix_egress. Wiring all four here keeps gw_launch (openai) and the matrix
   # relaunches identical except for the model.
+  # GoModel discovers models AT BOOT from each provider's model-list endpoint and 404s any request
+  # whose model is not in that registry (registry_init.go fetchAllProviderModels, router.go
+  # "model not found") - so the base URLs below must make the mock answer each provider's list with
+  # that provider's OWN catalog, and GW_MODEL must be a name from it. Previously ANTHROPIC_BASE_URL
+  # had no provider marker, so the mock answered its openai catalog and no claude model was ever
+  # registered -> every anthropic-egress request 404ed at warm-up, which we mispublished as a
+  # GoModel failure. /anthropic in the base path is the mock's provider marker (the anthropic
+  # adapter appends /models?limit=1000 to the base, anthropic.go:229). Bedrock discovery is the
+  # SigV4 control-plane ListFoundationModels call the mock does not implement; GoModel's own
+  # documented escape hatch is the BEDROCK_MODELS allowlist (.env.template), used verbatim.
+  # All four egress paths verified locally against enterpilot/gomodel:0.1.55 + the recording mock.
   sudo docker run -d --name gomodel-bench --network host --cpuset-cpus="$CORES" \
     -e PORT="$GW_PORT" \
     -e OPENAI_BASE_URL="http://127.0.0.1:$MOCK_PORT/v1" \
     -e OPENAI_API_KEY=dummy \
-    -e ANTHROPIC_BASE_URL="http://127.0.0.1:$MOCK_PORT" \
+    -e ANTHROPIC_BASE_URL="http://127.0.0.1:$MOCK_PORT/anthropic" \
     -e ANTHROPIC_API_KEY=dummy \
     -e GEMINI_BASE_URL="http://127.0.0.1:$MOCK_PORT/v1beta" \
     -e GEMINI_API_KEY=dummy \
     -e BEDROCK_BASE_URL="http://127.0.0.1:$MOCK_PORT" \
+    -e BEDROCK_MODELS="anthropic.claude-3-sonnet-20240229-v1:0" \
     -e AWS_ACCESS_KEY_ID=AKIAMOCKACCESSKEY -e AWS_SECRET_ACCESS_KEY=mock-secret-access-key -e AWS_REGION=us-east-1 \
     -e MODELS_ENABLED_BY_DEFAULT=true \
     -e STORAGE_TYPE=sqlite \
@@ -63,27 +75,35 @@ gw_launch() {
 # bedrock, each with its own <PROVIDER>_BASE_URL env override (internal/providers/config.go); the
 # OpenAI ingress is routed by model name to the matching adapter, which emits that provider's native
 # upstream shape (anthropic -> /messages, gemini native generateContent with
-# USE_GOOGLE_GEMINI_NATIVE_API on by default, bedrock Converse). OPENAI_BASE_URL also serves the
-# /v1/responses upstream. So the capable row is openai-ingress into {openai, openai-responses,
-# anthropic, gemini, bedrock}. NOT declared: cohere (no cohere adapter and no COHERE_BASE_URL exists
-# in the repo at all) - grey with the cited reason. (Bedrock egress is SigV4-signed; the mock ignores
-# the signature.)
+# USE_GOOGLE_GEMINI_NATIVE_API on by default, bedrock Converse). It also serves /v1/messages
+# (Anthropic-format ingress) and /v1/responses (Responses-format ingress, via the responses->chat
+# adapter, internal/providers/responses_adapter.go) as their own ingress surfaces. NOT declared:
+# cohere (no cohere adapter and no COHERE_BASE_URL exists in the repo at all), and openai-chat ->
+# responses-upstream (no ChatViaResponses bridge exists anywhere in the tree - the earlier declared
+# 1 there manufactured a red GoModel never claimed). Declared-1 cells beyond the openai row were
+# each verified locally against 0.1.55 + the recording mock:
+#   responses->openai-responses (the openai provider serves Responses natively at {base}/responses),
+#   responses->anthropic (ResponsesViaChat -> native /messages upstream),
+#   anthropic->openai (/v1/messages ingress translated to the chat upstream),
+#   anthropic->anthropic (native /messages round trip).
 # Evidence: .env.template + internal/providers/config.go (per-provider BASE_URL vars, no cohere),
-# internal/providers/ dir listing (no cohere adapter), GoModel main. Wired-pending-field-verify.
+# internal/providers/responses_adapter.go (ResponsesViaChat, no ChatViaResponses), local runs.
 GW_MATRIX_CAP="
-111101
-000000
-001000
+101101
+011000
+101000
 000000
 000000
 000000
 "
-GW_MATRIX_CAP_NOTE="GoModel 0.1.55 has no Cohere adapter and no COHERE_BASE_URL env var (cohere is absent from the repo); that cell is grey by that capability limit (internal/providers)"
+GW_MATRIX_CAP_NOTE="GoModel 0.1.55 has no Cohere adapter (no COHERE_BASE_URL in the repo) and no chat-to-Responses bridge (responses_adapter.go implements ResponsesViaChat only); those cells are grey by that capability limit"
 GW_MATRIX_EGRESS="openai openai-responses anthropic gemini bedrock"
 gw_matrix_egress() {
+  # Models must exist in the boot-time registry (see gw_launch): the mock's anthropic catalog lists
+  # claude-3-5-sonnet (undated), and the provider/model prefix form is GoModel's own disambiguation.
   case "$1" in
     openai|openai-responses) GW_MODEL=openai/gpt-4o-mini;;
-    anthropic)               GW_MODEL=claude-3-5-sonnet-20241022;;
+    anthropic)               GW_MODEL=anthropic/claude-3-5-sonnet;;
     gemini)                  GW_MODEL=gemini-1.5-pro;;
     bedrock)                 GW_MODEL=anthropic.claude-3-sonnet-20240229-v1:0;;
     *) return 1;;
