@@ -132,23 +132,10 @@ function lane(g, suite, flag, errKey, pick) {
 function passCell(g, key, fmt) {
   if (g.best_cell && g.best_cell[key] != null)
     return { v: g.best_cell[key], text: fmt(g.best_cell[key]), na: false };
-  // No swept openai diagonal. Fall back to the perf suite ONLY when the gateway genuinely serves
-  // openai passthrough (matrix openai->openai is green but its per-cell sweep has not landed, e.g.
-  // bifrost mid-re-run), or has no matrix at all. A gateway whose openai->openai is not_configurable
-  // (e.g. litellm-rust) does NOT serve openai passthrough, so it reads n/a rather than borrowing its
-  // native-dialect perf number under an OpenAI-passthrough header.
-  if (servesOpenaiPassthrough(g))
-    return lane(g, "perf", "served", "serve_error", (j) =>
-      j[key] != null ? { v: j[key], text: fmt(j[key]), na: false } : { v: null, text: "n/a", na: true });
-  return { v: null, text: "n/a", na: true };
-}
-/* Does this gateway serve the openai->openai passthrough at all? True when it has no matrix (legacy
-   single-path run, perf suite IS its passthrough) or its matrix openai->openai cell is green. */
-function servesOpenaiPassthrough(g) {
-  if (!g.matrix || !g.matrix.upstreams) return true;
-  const up = g.matrix.upstreams.openai;
-  const cell = up && up.cells && up.cells.openai;
-  return !!(cell && cell.served === true);
+  // No swept diagonal (e.g. bifrost mid-re-run): fall back to the perf suite's single-path number so
+  // the row is never blank. BEST-OF passthrough shows every gateway; nobody is filtered.
+  return lane(g, "perf", "served", "serve_error", (j) =>
+    j[key] != null ? { v: j[key], text: fmt(j[key]), na: false } : { v: null, text: "n/a", na: true });
 }
 
 /* xlateMatrixCell: the perf object for a gateway's ingress->egress translation cell, straight from the
@@ -210,11 +197,18 @@ const COL_LANG = {
 };
 
 const COLUMN_SETS = {
-  // Passthrough: openai->openai only. No "Tested on" pill (every row is openai, so it would be a
-  // column of identical chips); a caption above the table states the dialect once.
+  // Passthrough (BEST-OF): each gateway on its best same-dialect passthrough diagonal. The "Tested on"
+  // pill discloses which dialect that is (openai for most; a native dialect where openai is not served,
+  // e.g. litellm-rust -> anthropic), so every gateway appears and the dialect is never hidden.
   passthrough: [
     COL_SEL, COL_NAME, COL_LANG,
-    { id: "lat", label: "Added latency p99 (µs)", desc: false, title: "Gateway p99 minus direct-to-mock p99 at concurrency 1 on the OpenAI-in / OpenAI-out passthrough - pure forwarding, no translation",
+    { id: "tested", label: "Tested on", desc: false,
+      title: "The same-dialect passthrough these numbers were measured on (openai when served, else the gateway's fastest native dialect) - pure forwarding, no translation",
+      get: (g) => ({ v: g.best_cell ? g.best_cell.dialect : "", text: null, na: !g.best_cell }),
+      render: (g) => g.best_cell
+        ? `<td class="tested"><span class="tested-pill" title="measured on ${esc(g.best_cell.dialect)}-in / ${esc(g.best_cell.dialect)}-out passthrough">${esc(MATRIX_LABELS[g.best_cell.dialect] || g.best_cell.dialect)}</span></td>`
+        : `<td class="tested"><span class="muted">n/a</span></td>` },
+    { id: "lat", label: "Added latency p99 (µs)", desc: false, title: "Gateway p99 minus direct-to-mock p99 at concurrency 1 on the gateway's best same-dialect passthrough (the Tested-on dialect) - pure forwarding, no translation",
       get: (g) => passCell(g, "added_latency_p99_us", fmtAdded) },
     { id: "rps20", label: "Sustained RPS @20ms", desc: true, title: "Sustained requests/sec with a 20 ms mock LLM latency (p99 < 1 s, <0.1% errors) on the OpenAI passthrough",
       get: (g) => passCell(g, "rps_sustained_20ms", fmtInt) },
@@ -225,15 +219,20 @@ const COLUMN_SETS = {
     { id: "mempeak", label: "Mem peak (MiB)", desc: false, title: "Peak process RSS under large-payload load",
       get: (g) => lane(g, "memory", "served", "serve_error", (j) => ({ v: j.peak_rss_mib, text: fmt1(j.peak_rss_mib), na: false })) },
   ],
-  // Translation: the pinned ingress->egress pair (state.xlateIn/xlateOut), chosen by the two
-  // dropdowns above the table. Every row is the identical translation; the path is the dropdowns,
-  // so there is no per-row Path pill. Only gateways serving this exact pair appear.
+  // Translation: the pinned ingress->egress pair (state.xlateIn/xlateOut) chosen by the two dropdowns.
+  // Every row is the identical path, so no per-row pill. When in == out the pair IS a passthrough
+  // (same dialect, no translation), so this tab doubles as the per-dialect passthrough explorer. Same
+  // metric depth as Passthrough (added latency p50/p99, sustained RPS, max proxy RPS).
   translation: [
     COL_SEL, COL_NAME, COL_LANG,
-    { id: "xllat", label: "Added latency p99 (µs)", desc: false, title: "Gateway p99 minus direct-to-mock p99 on the selected translation path",
+    { id: "xll50", label: "Added latency p50 (µs)", desc: false, title: "Gateway p50 minus direct-to-mock p50 at concurrency 1 on the selected path",
+      get: (g) => xlateCell(g, "added_latency_p50_us", fmtAdded) },
+    { id: "xllat", label: "Added latency p99 (µs)", desc: false, title: "Gateway p99 minus direct-to-mock p99 at concurrency 1 on the selected path",
       get: (g) => xlateCell(g, "added_latency_p99_us", fmtAdded) },
-    { id: "xlrps", label: "Sustained RPS @20ms", desc: true, title: "Sustained RPS @20ms on the selected translation path (p99 < 1 s, <0.1% errors)",
+    { id: "xlrps", label: "Sustained RPS @20ms", desc: true, title: "Sustained RPS @20ms on the selected path (p99 < 1 s, <0.1% errors)",
       get: (g) => xlateCell(g, "rps_sustained_20ms", fmtInt) },
+    { id: "xlmax", label: "Max proxy RPS", desc: true, title: "Throughput ceiling against an instant mock on the selected path (p99 < 1 s, <0.1% errors)",
+      get: (g) => xlateCell(g, "rps_max_proxy", fmtInt) },
   ],
   // Streaming: SSE passthrough, its own stall-gated ceiling.
   streaming: [
@@ -429,9 +428,10 @@ function applyFilters(gateways, st) {
     if (st.langs.size && !st.langs.has(g.lang)) return false;
     if (st.needStream && !(g.stream && g.stream.stream_served)) return false;
     if (st.needXlate && !hasTranslation(g)) return false;
-    // View-implicit filter: the Translation tab lists only gateways that serve the pinned
-    // ingress->egress pair (so every row is the identical translation); the Streaming tab only ones
-    // that serve SSE. A gateway absent from a pair simply does not serve it.
+    // View-implicit filter: Translation/Streaming list only gateways that serve that path. Passthrough
+    // is DELIBERATELY unfiltered: every gateway must appear on its best passthrough (fairness beats
+    // strict same-dialect - filtering a competitor out reads as hiding it). A gateway that serves no
+    // openai passthrough shows on its best native diagonal instead (pill discloses the dialect).
     if (st.view === "translation" && !servesXlatePair(g, st.xlateIn, st.xlateOut)) return false;
     if (st.view === "streaming" && !(g.stream && g.stream.stream_served)) return false;
     return true;
@@ -612,7 +612,7 @@ function initThemeToggle() {
 /* Per-tab caption: states in one line exactly which path this tab's numbers are, so a reader never
    has to guess what the ranking compares. No em dashes (house style). */
 const TABLE_CAPTIONS = {
-  passthrough: "OpenAI ingress to OpenAI upstream: pure passthrough, no translation. Every gateway runs the identical dialect, so the ranking is apples-to-apples. A gateway that does not serve OpenAI ingress reads n/a.",
+  passthrough: "Each gateway on its best same-dialect passthrough: pure forwarding, no translation. The Tested-on pill shows which dialect (OpenAI when served, else the gateway's fastest native one), so every gateway appears and nothing is hidden. For a strict single-dialect comparison, pin the same dialect on both sides in the Translation tab.",
   streaming: "Server-sent-event passthrough. Streams sustained is each gateway's stall-free concurrent-stream ceiling; added TTFT and per-token are gateway minus direct-to-mock.",
 };
 function updateTableCaption(view) {
@@ -621,7 +621,9 @@ function updateTableCaption(view) {
   if (view === "translation") {
     const inL = (MATRIX_LABELS[state.xlateIn] || state.xlateIn);
     const outL = (MATRIX_LABELS[state.xlateOut] || state.xlateOut);
-    el.textContent = `Client speaks ${inL}, upstream speaks ${outL}: the gateway translates every request and response on this exact path. Only gateways that serve this pair appear, and every row is the identical translation, so the ranking is apples-to-apples.`;
+    el.textContent = state.xlateIn === state.xlateOut
+      ? `${inL} ingress to ${outL} upstream: same dialect, so this is pure passthrough (no translation). Only gateways that serve this dialect appear, and every row is the identical path, so the ranking is apples-to-apples.`
+      : `Client speaks ${inL}, upstream speaks ${outL}: the gateway translates every request and response on this exact path. Only gateways that serve this pair appear, and every row is the identical translation, so the ranking is apples-to-apples.`;
     return;
   }
   el.textContent = TABLE_CAPTIONS[view] || TABLE_CAPTIONS.passthrough;

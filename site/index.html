@@ -114,7 +114,7 @@
           <li><b>Added latency (p50/p99, microseconds)</b>: at concurrency 1, gateway p99 minus direct-to-mock p99, small payloads.</li>
           <li><b>Max proxy RPS</b>: highest sustained requests per second against an instant mock where p99 stays under 1000 ms and the error rate stays under 0.1 percent (CPU-bound ceiling).</li>
           <li><b>Sustained RPS at 20 ms</b>: the same gates, but the mock sleeps 20 ms per request to model real LLM latency, so the ceiling is concurrent-in-flight capacity, the real production bottleneck. Same concurrency grid for every gateway.</li>
-          <li>The Passthrough tab shows these metrics strictly on the OpenAI-in / OpenAI-out cell, so every gateway is ranked on the identical dialect with no translation and no path picked by us. A gateway that does not serve OpenAI ingress reads n/a there rather than borrowing a different-dialect number.</li>
+          <li>The Passthrough tab shows these metrics on each gateway's best same-dialect passthrough (pure forwarding, no translation); the Tested-on pill names the dialect (OpenAI when served, else the gateway's fastest native one). Best-of, so every gateway appears on its strongest passthrough and none is filtered out. For a strict single-dialect comparison, pin the same dialect on both sides in the Translation tab.</li>
         </ul>
       </article>
       <article class="method-card">
@@ -139,7 +139,7 @@
         <ul>
           <li>The client speaks Anthropic (POST /v1/messages) while the upstream mock speaks OpenAI, so the gateway must translate both directions. The mock is untouched; that is the point.</li>
           <li><b>Added latency (p99)</b> and <b>sustained RPS at 20 ms</b> on the translation path, same gates as perf. The direct baseline is the OpenAI shape straight to the mock, so the added-latency figure deliberately includes the translation work.</li>
-          <li>The Translation tab fixes the ingress to OpenAI and shows each gateway on the fastest non-OpenAI egress it serves (the Path pill), so the input side is identical across gateways and only translators appear.</li>
+          <li>The Translation tab pins both ends with a pair of dropdowns (client dialect and upstream dialect), so every row is the identical path and the ranking is apples-to-apples; only gateways that serve the chosen pair appear. Pick the same dialect on both sides and it becomes that dialect's strict passthrough.</li>
           <li>A gateway that cannot serve Anthropic ingress against an OpenAI upstream records xlate_served=false with the probe status and body snippet as evidence.</li>
         </ul>
       </article>

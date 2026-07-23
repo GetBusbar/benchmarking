@@ -98,18 +98,24 @@ const gateways = gatewayKeys.map((key) => {
 // the v2 shape so the site renders exactly one structure: the one measured egress column becomes
 // `upstreams`, and the columns v1 never probed stay absent (the site renders them "not measured",
 // which is the honest reading of a v1 run: unmeasured, not "not configurable").
-// The gateway's PASSTHROUGH cell for the Passthrough tab: STRICTLY the openai->openai diagonal, so
-// every gateway ranks on the IDENTICAL dialect and workload (truly apples-to-apples). Pure forwarding
-// overhead, never a translation cell. A gateway that does not serve openai ingress in our grid returns
-// null here and reads "n/a" on the tab rather than borrowing a different-dialect number under an
-// OpenAI-passthrough header. `dialect` is always "openai" (kept for the tab's pill/label compat).
+// The gateway's BEST passthrough cell for the Passthrough tab (BEST-OF): its same-dialect diagonal
+// (ingress === egress, pure forwarding, no translation), chosen deterministically as the canonical
+// `openai` diagonal when served (every gateway on the identical fair workload), else the gateway's
+// fastest NATIVE diagonal by lowest added latency (e.g. litellm-rust -> anthropic). BEST-OF, not
+// strict-openai, so EVERY gateway appears on its best passthrough; filtering a competitor out reads
+// as hiding it. `dialect` (== ingress == egress) is the label the tab's "Tested on" pill shows.
 function bestCell(m) {
   if (!m.upstreams) return null;
-  const up = m.upstreams.openai;
-  const cell = up && up.cells && up.cells.openai;           // openai ingress -> openai upstream
-  if (cell && cell.served === true && cell.perf && cell.perf.added_latency_p99_us != null)
-    return { ingress: "openai", egress: "openai", dialect: "openai", ...cell.perf };
-  return null;
+  const diag = [];
+  for (const [egress, up] of Object.entries(m.upstreams)) {
+    const cell = up && up.cells && up.cells[egress];        // ingress === egress
+    if (cell && cell.served === true && cell.perf && cell.perf.added_latency_p99_us != null)
+      diag.push({ ingress: egress, egress, dialect: egress, ...cell.perf });
+  }
+  if (!diag.length) return null;
+  const openai = diag.find((d) => d.dialect === "openai");
+  if (openai) return openai;
+  return diag.reduce((a, b) => (b.added_latency_p99_us < a.added_latency_p99_us ? b : a));
 }
 
 // The gateway's TRANSLATION cell for the Translation tab: openai INGRESS (fixed fair input) translated

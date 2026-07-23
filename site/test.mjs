@@ -168,20 +168,23 @@ const mkMatrix = (cells) => ({ upstreams: Object.fromEntries(
   Object.entries(cells).map(([eg, ing]) => [eg, { cells: Object.fromEntries(
     Object.entries(ing).map(([i, c]) => [i, c])) }])) });
 
-test("Passthrough reads the openai diagonal, n/a when openai is not_configurable", () => {
-  // served openai diagonal with perf -> that number
-  const green = { best_cell: { rps_sustained_20ms: 30000, dialect: "openai" },
-    matrix: mkMatrix({ openai: { openai: { served: true, perf: { rps_sustained_20ms: 30000 } } } }) };
+test("Passthrough is BEST-OF: every gateway shows on its best diagonal, none filtered", () => {
+  // best_cell (openai diagonal) -> that number
+  const green = { best_cell: { rps_sustained_20ms: 30000, dialect: "openai" } };
   assert.equal(app.passCell(green, "rps_sustained_20ms", String).na, false);
-  // openai green but sweep not landed yet -> fall back to the perf suite (still openai passthrough)
+  // no swept diagonal -> fall back to the perf suite so the row is never blank
   const unswept = { perf: { served: true, rps_sustained_20ms: 5541 },
     matrix: mkMatrix({ openai: { openai: { served: true } } }) };
   assert.equal(app.passCell(unswept, "rps_sustained_20ms", String).text, "5541");
-  // openai not_configurable -> n/a, never borrow a native-dialect number
-  const native = { perf: { served: true, rps_sustained_20ms: 32354 },
-    matrix: mkMatrix({ openai: { openai: { served: "not_configurable" } },
-      anthropic: { anthropic: { served: true, perf: { rps_sustained_20ms: 32354 } } } }) };
-  assert.equal(app.passCell(native, "rps_sustained_20ms", String).na, true);
+  // openai not served: BEST-OF shows the native diagonal (litellm-rust -> anthropic), NOT n/a and
+  // NOT filtered. gen-data picks it; here best_cell carries the anthropic number.
+  const native = { best_cell: { rps_sustained_20ms: 32354, dialect: "anthropic" } };
+  assert.equal(app.passCell(native, "rps_sustained_20ms", String).na, false);
+  assert.equal(app.passCell(native, "rps_sustained_20ms", String).text, "32354");
+  // and Passthrough does NOT filter: a gateway with only a native diagonal still appears
+  const st = app.newState(); // view passthrough
+  const rows = app.applyFilters([{ display: "x", key: "x", lang: "Rust", ...native }], st);
+  assert.equal(rows.length, 1);
 });
 
 test("Translation tab lists only gateways serving the pinned in->out pair", () => {
