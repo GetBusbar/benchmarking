@@ -899,7 +899,9 @@ function drawerHtml(g) {
   }
   h += `</section>`;
 
-  h += `<section class="drawer-lane"><h4>Throughput sweeps</h4><div id="drawer-sweeps" class="sweeps"></div></section>`;
+  h += `<section class="drawer-lane"><h4>Throughput sweeps</h4>` +
+    `<p class="lane-note muted">Sweep curves are measured on the perf-suite default path, not the matrix per-cell sweep; the headline numbers above are the canonical record.</p>` +
+    `<div id="drawer-sweeps" class="sweeps"></div></section>`;
   return h;
 }
 
@@ -1016,7 +1018,7 @@ function renderCompare() {
     }
   }
   h += `</tbody></table></div>`;
-  h += `<p class="fineprint">Best value per row is highlighted, decided by the measurement (lower latency and memory, higher throughput). Sweep overlays below use the sustained @20ms sweep.</p>`;
+  h += `<p class="fineprint">Best value per row is highlighted, decided by the measurement (lower latency and memory, higher throughput). Sweep overlays below use the sustained @20ms sweep, measured on the perf-suite default path (not the matrix per-cell sweep the headline rows read).</p>`;
   h += `<div id="cmp-sweeps" class="sweeps"></div>`;
   document.getElementById("compare-body").innerHTML = h;
 
