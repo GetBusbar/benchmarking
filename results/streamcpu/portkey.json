@@ -22,9 +22,9 @@
   "payload_bytes": 256,
   "endpoint": "/v1/messages",
   "model": "anthropic/mock",
-  "cores": "gateway=0-3 loadgen=4-5 mock=6-7",
+  "cores": "gateway=0-3 loadgen=4-9 mock=10-15",
   "mock_proto": "h1+h2c",
   "arch": "arm64",
-  "hardware": "AWS m7g.2xlarge (Graviton3, 8 cores / 32 GB). Gateway pinned to 4 cores, mock+loadgen on the other 4, Ubuntu 24.04. One dedicated box per gateway.",
-  "measured_at": "2026-07-23T04:54:13Z"
+  "hardware": "AWS m7g.4xlarge (Graviton3, 16 cores / 64 GB). Gateway-under-test pinned to 4 cores (the comparable basis); mock and load generator on 6 cores each so the mock never bottlenecks the streaming sweep. Ubuntu 24.04. One dedicated box per gateway.",
+  "measured_at": "2026-07-23T22:16:25Z"
 }

@@ -221,18 +221,23 @@ if (latest && generatedAt < latest) {
     `a raw result is future-dated (rig clock skew?). Refusing to emit a bundle that would read stale.`);
 }
 // FRESHNESS GUARD (trust): a full field run puts every one of a gateway's suites on ONE box,
-// sequentially, so their measured_at timestamps cluster tightly (empirically < ~1.1h for even the
-// heaviest gateway). If a gateway's own suites span more than MAX_SPAN_H, its row is a FRANKEN-MIX
-// of different runs - a stale suite survived a refresh (the exact busbar-streaming bug: stream from
-// an 00:07Z run while the rest were hours newer). That is the one thing a benchmark board must never
-// ship silently, so this HARD-FAILS the build. A refresh you cannot trust is worse than no refresh.
-// Re-run the gateway (all suites, one clean pass) to clear it.
+// sequentially. Most gateways cluster tightly (their whole run is < ~1h), but the MATRIX suite is
+// the outlier: for a gateway that does real cross-protocol translation on every egress cell it runs
+// ~2.3h (busbar), vs 17-45 min for passthrough gateways. So a LEGITIMATE single clean busbar box run
+// spans ~2.6h (fast suites 18:32-18:48, matrix 21:08) - that is NOT a franken-mix. MAX_SPAN_H must
+// therefore clear the slowest gateway's real single-run span, or busbar can never publish (it did
+// exactly this: MAX_SPAN_H=2 hard-failed every clean busbar run because its matrix alone is > 2h).
+// Set to 3h: still well under a genuine franken-mix (the busbar-streaming bug shipped a `stream`
+// suite from a run HOURS/days older than the rest - a span far past 3h) and still backstopped by the
+// LAG guard below, but no longer a false-positive on busbar's inherently long matrix.
+// FOLLOW-UP: parallelize the matrix suite (harness task) so even busbar's run is < 1h, then this can
+// drop back toward the fast-gateway cluster width; until then 3h is the honest floor.
 // Newest suite timestamp per gateway, and the board-wide newest. A single field run launches all
-// boxes together and they finish within ~1h of each other, so a gateway whose newest suite lags the
-// board-wide newest by more than MAX_LAG_H did NOT refresh in the latest run (its box failed, or the
-// rsync pull dropped and promote_guard kept old data): its whole row is stale, self-consistent but
-// old. That is the SECOND way a refresh betrays trust (busbar-streaming was the FIRST, a mixed row).
-const MAX_SPAN_H = 2;   // a gateway's own suites must cluster (one clean box run)
+// boxes together and they finish within a few hours of each other, so a gateway whose newest suite
+// lags the board-wide newest by more than MAX_LAG_H did NOT refresh in the latest run (its box
+// failed, or the rsync pull dropped and promote_guard kept old data): its whole row is stale,
+// self-consistent but old. That is the SECOND way a refresh betrays trust (a whole stale row).
+const MAX_SPAN_H = 3;   // a gateway's own suites must be from one box run; 3h clears busbar's matrix
 const MAX_LAG_H = 3;    // no gateway may lag the board-wide newest measurement by more than this
 const newestOf = (g) => Math.max(...SUITES.map((s) => g[s] && g[s].measured_at).filter(Boolean).map((a) => Date.parse(a)).concat([0]));
 const boardNewest = Math.max(...gateways.map(newestOf), 0);
