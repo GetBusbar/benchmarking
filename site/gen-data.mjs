@@ -219,16 +219,30 @@ if (latest && generatedAt < latest) {
 // an 00:07Z run while the rest were hours newer). That is the one thing a benchmark board must never
 // ship silently, so this HARD-FAILS the build. A refresh you cannot trust is worse than no refresh.
 // Re-run the gateway (all suites, one clean pass) to clear it.
-const MAX_SPAN_H = 2;
+// Newest suite timestamp per gateway, and the board-wide newest. A single field run launches all
+// boxes together and they finish within ~1h of each other, so a gateway whose newest suite lags the
+// board-wide newest by more than MAX_LAG_H did NOT refresh in the latest run (its box failed, or the
+// rsync pull dropped and promote_guard kept old data): its whole row is stale, self-consistent but
+// old. That is the SECOND way a refresh betrays trust (busbar-streaming was the FIRST, a mixed row).
+const MAX_SPAN_H = 2;   // a gateway's own suites must cluster (one clean box run)
+const MAX_LAG_H = 3;    // no gateway may lag the board-wide newest measurement by more than this
+const newestOf = (g) => Math.max(...SUITES.map((s) => g[s] && g[s].measured_at).filter(Boolean).map((a) => Date.parse(a)).concat([0]));
+const boardNewest = Math.max(...gateways.map(newestOf), 0);
 for (const g of gateways) {
   const ats = SUITES.map((s) => g[s] && g[s].measured_at).filter(Boolean).map((a) => Date.parse(a));
   if (ats.length < 2) continue;
   const spanH = (Math.max(...ats) - Math.min(...ats)) / 3600000;
+  const per = () => SUITES.filter((s) => g[s] && g[s].measured_at).map((s) => `${s}=${g[s].measured_at}`).join(", ");
   if (spanH > MAX_SPAN_H) {
-    const per = SUITES.filter((s) => g[s] && g[s].measured_at).map((s) => `${s}=${g[s].measured_at}`).join(", ");
     throw new Error(
-      `gen-data: FRESHNESS FAILURE: ${g.key}'s suites span ${spanH.toFixed(1)}h (> ${MAX_SPAN_H}h), so its row mixes different runs ` +
-      `(a stale suite survived a refresh). Re-run ${g.key} in one clean pass. Per-suite measured_at: ${per}`);
+      `gen-data: FRESHNESS FAILURE (mixed row): ${g.key}'s suites span ${spanH.toFixed(1)}h (> ${MAX_SPAN_H}h), so its row mixes ` +
+      `different runs (a stale suite survived a refresh). Re-run ${g.key} in one clean pass. Per-suite: ${per()}`);
+  }
+  const lagH = (boardNewest - Math.max(...ats)) / 3600000;
+  if (lagH > MAX_LAG_H) {
+    throw new Error(
+      `gen-data: FRESHNESS FAILURE (stale row): ${g.key}'s data lags the newest board measurement by ${lagH.toFixed(1)}h (> ${MAX_LAG_H}h) ` +
+      `- it did NOT refresh in the latest run (box failed or the pull dropped and old data was kept). Re-run ${g.key}. Per-suite: ${per()}`);
   }
 }
 
