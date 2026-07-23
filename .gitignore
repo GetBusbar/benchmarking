@@ -19,3 +19,4 @@ loadgen/ugen
 gateways/*/*.gen.*
 gateways/*/bfdata/
 gateways/*/kong.gen.yml
+.claude/worktrees/
