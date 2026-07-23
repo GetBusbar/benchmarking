@@ -24,12 +24,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
       - name: install matplotlib
         run: python3 -m pip install --quiet matplotlib
-      - name: regenerate charts + report pages from results/*.json
+      # charts.py reads the CANONICAL per-gateway passthrough/translation numbers from
+      # site/data.json (emitted by gen-data.mjs from this same results tree), so the PNGs and
+      # report tables always match the site table. gen-data must therefore run first.
+      - name: generate canonical site data (charts.py reads it)
+        run: node site/gen-data.mjs
+      - name: regenerate charts + report pages from the canonical data
         run: python3 charts.py
       - name: commit regenerated charts + tables
         run: |

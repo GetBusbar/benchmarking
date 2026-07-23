@@ -1176,17 +1176,17 @@ function renderMatrix() {
 
 /* ---- charts gallery --------------------------------------------------------- */
 const CHART_CAPTIONS = {
-  added_latency: "Added latency vs direct-to-mock, p99 in microseconds, concurrency 1. Lower is better.",
-  rps_sustained_20ms: "Sustained RPS with a 20 ms mock LLM latency (p99 under 1 s, error rate under 0.1 percent). Higher is better.",
-  rps_max_proxy: "Max proxy RPS against an instant mock. Higher is better.",
+  added_latency: "Added latency vs direct-to-mock, p99 in microseconds, concurrency 1, on each gateway's best same-dialect passthrough (the same canonical record the table ranks). Lower is better.",
+  rps_sustained_20ms: "Sustained RPS with a 20 ms mock LLM latency (p99 under 1 s, error rate under 0.1 percent), best same-dialect passthrough. Higher is better.",
+  rps_max_proxy: "Max proxy RPS against an instant mock, best same-dialect passthrough. Higher is better.",
   memory_rss: "Process RSS in MiB: idle after launch and peak under large-payload load. Lower is better.",
-  cost_per_million: "Instance cost per million requests at the sustained rate. Lower is better.",
-  rps_per_dollar: "Sustained RPS per dollar of hourly instance cost. Higher is better.",
+  cost_per_million: "Instance cost per million requests at the canonical sustained rate. Lower is better.",
+  rps_per_dollar: "Canonical sustained RPS per dollar of hourly instance cost. Higher is better.",
   stream_added_ttft: "Streaming: added time-to-first-token vs direct-to-mock, p99. Lower is better.",
   stream_added_gap: "Streaming: added inter-frame (per-token) latency vs direct-to-mock, p99. Lower is better.",
   stream_sustained: "Streaming: max concurrent SSE streams sustained without frame loss or stalls. Higher is better.",
-  xlate_added_latency: "Translation (Anthropic in, OpenAI upstream): added latency p99. Lower is better.",
-  xlate_rps_sustained_20ms: "Translation path: sustained RPS at 20 ms LLM latency. Higher is better.",
+  xlate_added_latency: "Translation on each gateway's canonical path (direction named on the bar; matrix per-cell sweep): added latency p99. Lower is better.",
+  xlate_rps_sustained_20ms: "Translation on each gateway's canonical path (direction named on the bar): sustained RPS at 20 ms LLM latency. Higher is better.",
 };
 function chartCaption(file) {
   const base = file.replace(/^charts\//, "").replace(/\?.*$/, "").replace(/\.png$/, "");

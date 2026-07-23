@@ -44,6 +44,64 @@ plt = None
 
 ROOT = Path(__file__).resolve().parent
 RESULTS = ROOT / "results"
+SITE_DATA = ROOT / "site" / "data.json"
+
+
+# ── canonical numbers (single source of truth) ────────────────────────────────────────────────────
+# CANONICAL RULE: the matrix per-cell sweep is the single source of truth for all passthrough +
+# translation perf; the standalone perf/xlate suites are FALLBACK ONLY. site/gen-data.mjs applies
+# that rule once and emits the result as best_cell / translation_cell (with a `source` provenance
+# tag) in site/data.json, the SAME bundle the site table reads. charts.py reads those canonical
+# records instead of re-deriving numbers from results/perf + results/xlate, so a chart can never
+# show a different value (or a different #1) than the table. memory/stream/streamcpu stay read
+# directly from results/ (single-source already; no matrix equivalent).
+# ORDERING: run `node site/gen-data.mjs` BEFORE charts.py (CI: gen-data → charts.py → gen-data,
+# the second pass copying the fresh PNGs into site/charts/).
+def _canonical() -> dict:
+    if not SITE_DATA.exists():
+        raise SystemExit(
+            "charts.py: site/data.json not found - run `node site/gen-data.mjs` first.\n"
+            "  Charts read the canonical per-gateway passthrough/translation numbers from that\n"
+            "  bundle (matrix per-cell sweep, perf/xlate-suite fallback) so every surface -\n"
+            "  table, drawer, compare, charts - shows the same value."
+        )
+    data = json.loads(SITE_DATA.read_text(encoding="utf-8"))
+    return {g["key"]: g for g in data.get("gateways", [])}
+
+
+CANON = _canonical()
+_PERF_FIELDS = ("added_latency_p50_us", "added_latency_p99_us", "rps_sustained_20ms", "rps_max_proxy")
+
+
+def _overlay_perf(key: str, obj: dict) -> None:
+    """Overwrite a perf-suite row's headline metrics with the canonical best_cell record."""
+    bc = (CANON.get(key) or {}).get("best_cell")
+    if not bc:
+        return  # no canonical record (gateway never served): the raw suite verdict stands
+    for f in _PERF_FIELDS:
+        if bc.get(f) is not None:
+            obj[f] = bc[f]
+    obj["served"] = True  # best_cell only exists for a served path
+    obj["_dialect"] = bc.get("dialect")
+    obj["_perf_source"] = bc.get("source")
+
+
+def _overlay_xlate(key: str, obj: dict) -> None:
+    """Overwrite an xlate-suite row with the canonical translation_cell record (direction included)."""
+    tc = (CANON.get(key) or {}).get("translation_cell")
+    if not tc:
+        return
+    obj["xlate_served"] = True
+    obj["xlate_passthrough"] = False
+    if tc.get("added_latency_p50_us") is not None:
+        obj["xlate_added_latency_p50_us"] = tc["added_latency_p50_us"]
+    if tc.get("added_latency_p99_us") is not None:
+        obj["xlate_added_latency_p99_us"] = tc["added_latency_p99_us"]
+    if tc.get("rps_sustained_20ms") is not None:
+        obj["xlate_rps_sustained_20ms"] = tc["rps_sustained_20ms"]
+    obj["_xlate_ingress"] = tc.get("ingress")
+    obj["_xlate_egress"] = tc.get("egress")
+    obj["_xlate_source"] = tc.get("source")
 
 
 def _read_result(p: Path) -> dict:
@@ -187,34 +245,48 @@ class Chart:
     annot: object = None           # optional fn(row) -> str appended after the primary bar label
 
 
+# Per-bar provenance note on the canonical passthrough charts: name the dialect when it is not
+# the common openai diagonal, and disclose a perf-suite fallback (no matrix per-cell sweep yet).
+def _perf_annot(r):
+    if r.get("_perf_source") == "perf-fallback":
+        return "perf-suite default path"
+    d = r.get("_dialect")
+    return f"on {d}" if d and d != "openai" else None
+
+
 CHARTS = [
     # ── the headline: what the system can DO ──────────────────────────────────────────────────────
+    # The three passthrough charts read the CANONICAL best_cell numbers (matrix per-cell sweep,
+    # via site/data.json), the same record the site's Passthrough table ranks.
     Chart(
         name="added_latency",
         suite="perf",
         title="Added latency — what the gateway costs you",
-        subtitle="p99 the gateway adds on top of the upstream, concurrency 1 (lower is better)",
+        subtitle="p99 the gateway adds on top of the upstream, concurrency 1, best same-dialect passthrough (lower is better)",
         unit="µs",
         series=[Series("added_latency_p99_us", "p99 added latency", "rank")],
         log=True,
+        annot=_perf_annot,
     ),
     Chart(
         name="rps_max_proxy",
         suite="perf",
         title="Max proxy throughput — raw forwarding speed",
-        subtitle="highest sustained req/s with p99 < 1s, <0.1% errors, instant upstream (higher is better)",
+        subtitle="highest sustained req/s with p99 < 1s, <0.1% errors, instant upstream, best same-dialect passthrough (higher is better)",
         unit="requests / sec",
         series=[Series("rps_max_proxy", "max proxy RPS", "rank")],
         higher_better=True,
+        annot=_perf_annot,
     ),
     Chart(
         name="rps_sustained_20ms",
         suite="perf",
         title="Sustained throughput under 20 ms LLM latency",
-        subtitle="req/s held with p99 < 1s + <0.1% errors under a realistic 20 ms model delay (higher is better)",
+        subtitle="req/s held with p99 < 1s + <0.1% errors under a realistic 20 ms model delay, best same-dialect passthrough (higher is better)",
         unit="requests / sec",
         series=[Series("rps_sustained_20ms", "sustained RPS @20ms", "rank")],
         higher_better=True,
+        annot=_perf_annot,
     ),
     # ── supporting: memory (matters at scale) ─────────────────────────────────────────────────────
     Chart(
@@ -310,23 +382,30 @@ CHARTS = [
         annot=lambda r: (lambda f: f"{f:,.0f}/core" if f > 0 else None)(
             float(r.get("streamcpu_fps_per_core") or 0)),
     ),
-    # ── translation: Anthropic client to OpenAI provider ──────────────────────────────────────────
+    # ── translation: the CANONICAL translation cell (matrix per-cell sweep) ───────────────────────
+    # Same record the site's Translation surfaces read: OpenAI ingress translated to the gateway's
+    # measured egress (named per bar). A gateway with no matrix translation cell falls back to the
+    # legacy xlate suite (Anthropic in -> OpenAI out) and the bar says so; direction is never mixed
+    # silently across surfaces.
     Chart(
         name="xlate_rps_sustained_20ms",
         suite="xlate",
-        title="Cross-protocol translation: Anthropic client to OpenAI provider",
-        subtitle="sustained req/s translating Anthropic requests to an OpenAI upstream, p99 < 1s, <0.1% errors, 20 ms model delay (higher is better)",
+        title="Cross-protocol translation: throughput",
+        subtitle="sustained req/s on each gateway's canonical translation path (direction on the bar), p99 < 1s, <0.1% errors, 20 ms model delay (higher is better)",
         unit="requests / sec",
         series=[Series("xlate_rps_sustained_20ms", "translated RPS @20ms", "rank")],
         higher_better=True,
         served_field="xlate_served",
         not_served_text="✕ cannot translate",
+        annot=lambda r: (f"{r.get('_xlate_ingress')} → {r.get('_xlate_egress')}"
+                         + (" (xlate suite)" if r.get("_xlate_source") == "xlate-fallback" else ""))
+                        if r.get("_xlate_ingress") else None,
     ),
     Chart(
         name="xlate_added_latency",
         suite="xlate",
         title="Cross-protocol translation: added latency",
-        subtitle="p99 added on the Anthropic-to-OpenAI path vs the OpenAI shape straight to the mock, concurrency 1 (lower is better)",
+        subtitle="p99 added on each gateway's canonical translation path (direction on the bar) vs the egress shape straight to the mock, concurrency 1 (lower is better)",
         unit="µs",
         series=[Series("xlate_added_latency_p99_us", "p99 added latency (translated)", "rank")],
         log=True,
@@ -335,6 +414,9 @@ CHARTS = [
         clamp_negatives=True,
         zero_ok=True,
         auto_ms=True,
+        annot=lambda r: (f"{r.get('_xlate_ingress')} → {r.get('_xlate_egress')}"
+                         + (" (xlate suite)" if r.get("_xlate_source") == "xlate-fallback" else ""))
+                        if r.get("_xlate_ingress") else None,
     ),
     # Governance is intentionally NOT charted on the neutral board: the governed suite is a
     # non-default, busbar-only launch (only busbar's manifest wires it), so a comparison would
@@ -359,6 +441,12 @@ def _load(suite: str) -> list[dict]:
             continue
         obj = _read_result(p)
         obj["_key"], obj["_label"] = key, label
+        # Canonical overlay BEFORE any derived metric (cost per million derives from the
+        # canonical sustained ceiling, so the cost charts match the table too).
+        if suite == "perf":
+            _overlay_perf(key, obj)
+        elif suite == "xlate":
+            _overlay_xlate(key, obj)
         if suite == "perf":
             sust = float(obj.get("rps_sustained_20ms") or 0)
             # sustained req/s you get per $/hr, and $ per 1M sustained requests. 0 when it can't sustain.
@@ -581,7 +669,10 @@ def _suite_map(suite: str) -> dict:
     for key in GATEWAYS:
         p = d / f"{key}.json"
         if p.exists():
-            out[key] = _read_result(p)
+            obj = _read_result(p)
+            if suite == "xlate":       # report lane table shows the canonical translation number
+                _overlay_xlate(key, obj)
+            out[key] = obj
     return out
 
 
@@ -594,6 +685,10 @@ def _merge() -> dict:
             p = d / f"{key}.json"
             if p.exists():
                 gws.setdefault(key, {}).update(_read_result(p))
+    # Canonical overlay LAST so the report table + top-5 ranking use the same best_cell
+    # numbers as the site table and the charts.
+    for key, obj in gws.items():
+        _overlay_perf(key, obj)
     return gws
 
 
@@ -605,7 +700,10 @@ def _report_md(rows: list, title: str, charts: list, pending: tuple = (), chart_
     lines.append(f"**Ran on:** {hw}  ·  {when}")
     lines.append("")
     lines.append("Every number below is regenerated from the raw `results/*.json` — re-run "
-                 "`run-all.sh` and this page updates. Chart bars are **colored by implementation "
+                 "`run-all.sh` and this page updates. Passthrough and translation figures are the "
+                 "canonical per-gateway records (matrix per-cell sweep, perf/xlate-suite fallback) "
+                 "from `site/data.json`, the same values the site table ranks. Chart bars are "
+                 "**colored by implementation "
                  "language** (Rust / Go / Python / Node / Other). **Rows are sorted by added latency "
                  "(p99), lowest first.**")
     lines.append("")
@@ -709,9 +807,11 @@ def _report_md(rows: list, title: str, charts: list, pending: tuple = (), chart_
         lines.append("## Streaming and translation")
         lines.append("")
         lines.append("Same box, same mock, one gateway at a time. Streaming figures are the overhead "
-                     "the gateway adds on top of the mock's paced SSE stream; translation is an "
-                     "Anthropic client against an OpenAI-shape upstream (the conversion is the work "
-                     "being measured).")
+                     "the gateway adds on top of the mock's paced SSE stream; translation is the "
+                     "gateway's canonical translation path (matrix per-cell sweep: OpenAI client in, "
+                     "the gateway's measured egress out; direction named per row). A gateway with no "
+                     "matrix translation cell falls back to the legacy xlate suite (Anthropic in, "
+                     "OpenAI out), marked as such. The conversion is the work being measured.")
         lines.append("")
         lines.append("| Gateway | Added TTFT (p99) | Added per-token (p99) | SSE streams | Translated RPS @20ms |")
         lines.append("|---|--:|--:|--:|--:|")
@@ -746,6 +846,8 @@ def _report_md(rows: list, title: str, charts: list, pending: tuple = (), chart_
                 xl = "✕ cannot translate"
             else:
                 xl = f"{int(x.get('xlate_rps_sustained_20ms') or 0):,}"
+                if x.get("_xlate_ingress"):  # canonical direction, named so no two surfaces mix paths
+                    xl += f" ({x['_xlate_ingress']} → {x['_xlate_egress']})"
             lines.append(f"| {_linked(key)} | {ttft} | {gap} | {streams} | {xl} |")
         lines.append("")
         lines.append("**✕** cells are measured refusals, not gaps: the gateway was offered the load "
