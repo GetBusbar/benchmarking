@@ -1000,16 +1000,17 @@ function matrixCellTip(cell) {
   return `${label}. ${cell.verdict_note || ""}`;
 }
 /* Per-cell perf line for a GREEN cell's tooltip/detail: this path's sustained RPS + added latency
-   p99, and its deviation from THIS gateway's best cell (cell.rps / best.rps - 1, signed %). The
-   best cell itself reads "best path". Grey/red/unprobed cells carry no perf and return "". */
+   p99, and its RPS delta vs THIS gateway's REFERENCE cell (the one the Passthrough tab ranks; not
+   necessarily the fastest, so it is named, never called "best"). Grey/red/unprobed cells carry no
+   perf and return "". */
 function cellPerfTip(cell, ingress, egress, best) {
   const p = cell && cell.served === true ? cell.perf : null;
   if (!p || p.rps_sustained_20ms == null) return "";
   let s = `${fmtInt(p.rps_sustained_20ms)} req/s @20ms`;
   if (p.added_latency_p99_us != null) s += `, +${fmtInt(p.added_latency_p99_us)} µs p99 added`;
   if (best && best.rps_sustained_20ms > 0) {
-    if (best.ingress === ingress && best.egress === egress) s += " - best path";
-    else s += ` - ${fmtPct((p.rps_sustained_20ms / best.rps_sustained_20ms - 1) * 100)} vs best (${best.ingress}→${best.egress})`;
+    if (best.ingress === ingress && best.egress === egress) s += " - reference cell (ranks the table)";
+    else s += ` - ${fmtPct((p.rps_sustained_20ms / best.rps_sustained_20ms - 1) * 100)} req/s vs the ${best.ingress}→${best.egress} cell`;
   }
   return s;
 }

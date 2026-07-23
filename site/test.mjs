@@ -251,9 +251,9 @@ test("cellPerfTip shows a green cell's perf and its deviation from the gateway's
   const tip = app.cellPerfTip(green, "anthropic", "openai", best);
   assert.ok(tip.includes("25,500 req/s @20ms"), tip);
   assert.ok(tip.includes("+900 µs p99 added"), tip);
-  assert.ok(tip.includes("-15.0% vs best (openai→openai)"), tip);
+  assert.ok(tip.includes("-15.0% req/s vs the openai→openai cell"), tip);
   const bestTip = app.cellPerfTip({ served: true, perf: best }, "openai", "openai", best);
-  assert.ok(bestTip.includes("best path"), bestTip);
+  assert.ok(bestTip.includes("reference cell"), bestTip);
   // red/grey/unprobed cells and perf-less greens carry NO perf line
   assert.equal(app.cellPerfTip({ served: false, perf: { rps_sustained_20ms: 1 } }, "a", "b", best), "");
   assert.equal(app.cellPerfTip({ served: "not_configurable" }, "a", "b", best), "");

@@ -150,7 +150,7 @@
         <ul>
           <li>A capability suite first: one probe per (ingress, upstream) cell across the full 6x6 (OpenAI, OpenAI Responses, Anthropic, Gemini, Cohere, Bedrock Converse), relaunching the gateway per upstream dialect.</li>
           <li>Envelope validation per cell, a passthrough guard that rejects the mock's canned bodies as untranslated proxying, an upstream round-trip check (the mock records which endpoint the gateway actually called), and an unprobed_auth state for ingresses that demand signatures the harness does not forge.</li>
-          <li><b>Per-cell perf</b>: every passing (green) cell also gets the perf suite's exact sweep on that path (added latency at concurrency 1, sustained RPS at 20 ms, max proxy RPS). The Passthrough and Translation tabs read specific cells from this sweep; hovering any green cell shows that path's numbers and its deviation from the gateway's best cell.</li>
+          <li><b>Per-cell perf</b>: every passing (green) cell also gets the perf suite's exact sweep on that path (added latency at concurrency 1, sustained RPS at 20 ms, max proxy RPS). The Passthrough and Translation tabs read specific cells from this sweep; hovering any green cell shows that path's numbers and its RPS delta vs the gateway's reference cell (named, not called "best").</li>
         </ul>
       </article>
     </div>
