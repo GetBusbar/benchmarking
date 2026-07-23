@@ -63,8 +63,15 @@ routers:
             weight: 1.0
 YAML
   pkill -f 'target/release/ai-gateway' 2>/dev/null; sleep 1
+  # AWS creds: helicone's bedrock SigV4 signer reads AWS_ACCESS_KEY / AWS_SECRET_KEY (NOT the SDK's
+  # AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY - src/types/provider.rs:218-229 builds
+  # ProviderKey::AwsCredentials from those two names, region from AWS_REGION). With them absent,
+  # extract_and_sign_aws_headers returns AuthError::InvalidCredentials -> HTTP 401 before any
+  # egress, which we mispublished as a Helicone bedrock failure. Both spellings are exported so
+  # any code path resolves; the mock ignores the signature.
   setsid taskset -c "$CORES" env \
     OPENAI_API_KEY=sk-dummy ANTHROPIC_API_KEY=sk-dummy GEMINI_API_KEY=sk-dummy \
+    AWS_ACCESS_KEY=AKIAMOCKACCESSKEY AWS_SECRET_KEY=mock-secret-access-key \
     AWS_ACCESS_KEY_ID=AKIAMOCKACCESSKEY AWS_SECRET_ACCESS_KEY=mock-secret-access-key AWS_REGION=us-east-1 \
     AI_GATEWAY__SERVER__PORT="$GW_PORT" \
     AI_GATEWAY__SERVER__ADDRESS=0.0.0.0 \
@@ -78,27 +85,41 @@ gw_launch() {
 
 # ── matrix suite: declared capability + egress wiring ─────────────────────────────────────────────
 # Declared 6x6 (rows=ingress, cols=egress), axis order: openai openai-responses anthropic gemini
-# cohere bedrock. Helicone's typed InferenceProvider enum with a native converter is {openai,
-# anthropic, bedrock, gemini, ollama} (ai-gateway/src/types/provider.rs; converter registry
-# middleware/mapper/registry.rs). The router accepts the OpenAI-canonical ingress and translates it
-# to the routed provider's NATIVE upstream shape (anthropic AnthropicConverter -> /v1/messages,
-# gemini Google::generate_contents -> :generateContent, bedrock BedrockConverter -> converse), each
-# provider's base-url overridable to the mock. So the capable row is openai-ingress into {openai,
-# anthropic, gemini, bedrock}. NOT declared: openai-responses (the OpenAI endpoint enum has only
-# ChatCompletions, no Responses converter) and cohere (no cohere dialect; cohere appears only as a
-# Bedrock model family) - both grey with the cited reason.
+# cohere bedrock. Helicone accepts the OpenAI-canonical ingress and translates it to the routed
+# provider's NATIVE upstream shape for anthropic (AnthropicConverter -> /v1/messages) and bedrock
+# (BedrockConverter -> model/{id}/converse), each provider's base-url overridable to the mock. So
+# the capable row is openai-ingress into {openai, anthropic, bedrock}. NOT declared:
+#   gemini - despite the endpoint's name, Google's mapping targets Gemini's OPENAI-COMPAT surface,
+#     not native generateContent: endpoints/google/generate_contents.rs pins
+#     PATH = "v1beta/openai/chat/completions" with OpenAI request/response types (its own test in
+#     tests/single_provider.rs:62 confirms the proxied target). This suite's gemini egress means
+#     the native generateContent dialect, so declaring it manufactured an 'untranslated
+#     passthrough' red for behavior Helicone never claimed;
+#   openai-responses - the OpenAI endpoint enum has only ChatCompletions, no Responses converter;
+#   cohere - no cohere dialect (cohere appears only as a Bedrock model family).
 # Evidence: ai-gateway/src/types/provider.rs (InferenceProvider enum), middleware/mapper/registry.rs
-# (converters), endpoints/openai/mod.rs (ChatCompletions only). Wired-pending-field-verification.
+# (converters), endpoints/openai/mod.rs (ChatCompletions only), endpoints/google/generate_contents.rs
+# (OpenAI-compat path), commit 9649b27.
 GW_MATRIX_CAP="
-101101
+101001
 000000
 000000
 000000
 000000
 000000
 "
-GW_MATRIX_CAP_NOTE="Helicone AI Gateway has no OpenAI-Responses converter (endpoints/openai only ChatCompletions) and no native Cohere dialect (cohere is only a Bedrock model family); those cells are grey by that capability limit"
-GW_MATRIX_EGRESS="openai anthropic gemini bedrock"
+GW_MATRIX_CAP_NOTE="Helicone AI Gateway has no OpenAI-Responses converter (endpoints/openai only ChatCompletions), no native Cohere dialect, and its Gemini egress targets Google's OpenAI-compat surface v1beta/openai/chat/completions rather than native generateContent (endpoints/google/generate_contents.rs); those cells are grey by that capability limit"
+GW_MATRIX_EGRESS="openai anthropic bedrock"
+
+# ── xlate lane: not declared (no anthropic-format ingress) ───────────────────────────────────────
+# Ingress is OpenAI-format only: the router's EndpointRoute defines exactly (ChatCompletions,
+# "chat/completions") and ApiEndpoint::new only constructs an OpenAI source endpoint
+# (src/endpoints/mod.rs:58-85, src/router/service.rs:138). A bare /v1/messages parses its first
+# segment as a provider name ("Unsupported provider: v1", src/router/meta.rs) and the only
+# anthropic-format path is the UNMAPPED /anthropic/... direct passthrough (router/direct.rs) - no
+# anthropic->openai translation exists on any route, so the lane is not a claimed capability.
+GW_XLATE_CAP=0
+GW_XLATE_CAP_NOTE="Helicone AI Gateway ingress is OpenAI-format only (EndpointRoute registers only chat/completions; ApiEndpoint::new constructs only an OpenAI source endpoint, endpoints/mod.rs:58-85); anthropic-format requests exist only as the unmapped /anthropic passthrough, so anthropic-in -> openai-out translation is not a claimed capability (commit 9649b27)"
 gw_matrix_egress() {
   case "$1" in
     openai)    GW_MODEL="openai/gpt-4o-mini";                      _helicone_launch openai;;
