@@ -6,10 +6,11 @@
   "last_http_status": "200",
   "serve_error": "",
   "stream_error": "",
+  "stream_note": "",
   "streamcpu_frames_per_sec": 0,
   "streamcpu_fps_per_core": 0,
   "streamcpu_concurrency": 0,
-  "streamcpu_direct_ceiling_fps": 140138,
+  "streamcpu_direct_ceiling_fps": 155502,
   "streamcpu_mock_bound": false,
   "streamcpu_valid": false,
   "streamcpu_added_per_frame_us": null,
@@ -17,7 +18,7 @@
   "streamcpu_frame_bytes": 16,
   "streamcpu_cores": 4,
   "streamcpu_stall_ms": 250,
-  "sweep_streamcpu": [{"conc":8,"streams":280,"complete":0,"fail":0,"stalled":0,"frames":143360,"fps":7099,"delivered":1.0000},{"conc":32,"streams":1056,"complete":0,"fail":0,"stalled":0,"frames":540672,"fps":26689,"delivered":1.0000},{"conc":64,"streams":2176,"complete":0,"fail":0,"stalled":0,"frames":1114112,"fps":54781,"delivered":1.0000},{"conc":128,"streams":3712,"complete":0,"fail":0,"stalled":0,"frames":1900544,"fps":92178,"delivered":1.0000},{"conc":256,"streams":5705,"complete":0,"fail":0,"stalled":0,"frames":2920960,"fps":141320,"delivered":1.0000}],
+  "sweep_streamcpu": [{"conc":8,"streams":280,"complete":0,"fail":0,"stalled":0,"frames":143360,"fps":7051,"delivered":1.0000},{"conc":32,"streams":1056,"complete":0,"fail":0,"stalled":0,"frames":540672,"fps":26843,"delivered":1.0000},{"conc":64,"streams":2112,"complete":0,"fail":0,"stalled":0,"frames":1081344,"fps":52542,"delivered":1.0000},{"conc":128,"streams":3840,"complete":0,"fail":0,"stalled":0,"frames":1966080,"fps":96141,"delivered":1.0000},{"conc":256,"streams":6400,"complete":0,"fail":0,"stalled":0,"frames":3276800,"fps":159052,"delivered":1.0000}],
   "payload_bytes": 256,
   "endpoint": "/router/default/chat/completions",
   "model": "openai/gpt-4o-mini",
@@ -25,5 +26,5 @@
   "mock_proto": "h1+h2c",
   "arch": "arm64",
   "hardware": "AWS m7g.2xlarge (Graviton3, 8 cores / 32 GB). Gateway pinned to 4 cores, mock+loadgen on the other 4, Ubuntu 24.04. One dedicated box per gateway.",
-  "measured_at": "2026-07-23T00:18:39Z"
+  "measured_at": "2026-07-23T05:00:31Z"
 }

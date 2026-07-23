@@ -3,5 +3,5 @@
   "build": "ghcr.io/agentgateway/agentgateway:v1.3.1 (@sha256:c3ce7b75da90fef70239befcc1c3adc05152d7b9dd21fcb8351178026a2c4381)",
   "governed_served": false,
   "governed_note": "manifest defines no gw_governed_launch/gw_governed_token (no native key/limit governance, or not yet wired)",
-  "measured_at": "2026-07-23T00:11:37Z"
+  "measured_at": "2026-07-23T04:55:17Z"
 }
