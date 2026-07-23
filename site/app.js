@@ -173,15 +173,15 @@ const COLUMNS = [
       : `<td class="tested"><span class="muted">n/a</span></td>`,
   },
   {
-    id: "lat", label: "Added latency p99 (µs)", desc: false, title: "Gateway p99 minus direct-to-mock p99 at concurrency 1, on the gateway's best supported path",
+    id: "lat", label: "Added latency p99 (µs)", desc: false, title: "Gateway p99 minus direct-to-mock p99 at concurrency 1, on the gateway's same-dialect passthrough (the 'Tested on' dialect); the cell is chosen by lowest added latency, pure forwarding",
     get: (g) => bestOrPerf(g, "added_latency_p99_us", fmtAdded),
   },
   {
-    id: "rps20", label: "Sustained RPS @20ms", desc: true, title: "Sustained requests/sec with a 20 ms mock LLM latency (p99 < 1 s, <0.1% errors), on the gateway's best supported path",
+    id: "rps20", label: "Sustained RPS @20ms", desc: true, title: "Sustained requests/sec with a 20 ms mock LLM latency (p99 < 1 s, <0.1% errors), on the gateway's same-dialect passthrough (the 'Tested on' dialect); the cell is chosen by lowest added latency, pure forwarding",
     get: (g) => bestOrPerf(g, "rps_sustained_20ms", fmtInt),
   },
   {
-    id: "rpsmax", label: "Max proxy RPS", desc: true, title: "Throughput ceiling against an instant mock (p99 < 1 s, <0.1% errors), on the gateway's best supported path",
+    id: "rpsmax", label: "Max proxy RPS", desc: true, title: "Throughput ceiling against an instant mock (p99 < 1 s, <0.1% errors), on the gateway's same-dialect passthrough (the 'Tested on' dialect); the cell is chosen by lowest added latency, pure forwarding",
     get: (g) => bestOrPerf(g, "rps_max_proxy", fmtInt),
   },
   {
