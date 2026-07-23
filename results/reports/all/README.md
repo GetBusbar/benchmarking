@@ -15,7 +15,7 @@ Every number below is regenerated from the raw `results/*.json` — re-run `run-
 | [Bifrost](https://github.com/maximhq/bifrost) | 1,038 µs | 5,228 | 5,344 | 135 MiB | 15336 MiB | `maximhq/bifrost:v1.6.4 (@sha256:5f1fed63b5c2c7` |
 | [Kong](https://github.com/Kong/kong) | 1,447 µs | 12,721 | 13,203 | 713 MiB | 999 MiB | `kong:3.8 (@sha256:dd6cd1d94a7aae8c5a4d245ccbee` |
 | [Portkey](https://github.com/Portkey-AI/gateway) | 5,544 µs | 458 | 468 | 141 MiB | 546 MiB | `@portkey-ai/gateway@1.15.2` |
-| [LiteLLM · Python](https://github.com/BerriAI/litellm) | 7,183 µs | 591 | 588 | 1339 MiB | 2341 MiB | `litellm==1.93.0` |
+| [LiteLLM · Python](https://github.com/BerriAI/litellm) | 6,536 µs | 612 | 642 | 1339 MiB | 2799 MiB | `litellm==1.93.0` |
 | [One-API](https://github.com/songquanpeng/one-api) | 34,540 µs | 0 | 0 | 87 MiB | 19111 MiB | `justsong/one-api:v0.6.10 (@sha256:e667221a2e19` |
 | [TensorZero](https://github.com/tensorzero/tensorzero) | 40,941 µs | 4,169 | 12,002 | 49 MiB | 759 MiB | `tensorzero/gateway:2026.6.0 (@sha256:c939db4f2` |
 | [Arch](https://github.com/katanemo/archgw) | 226,989 µs | 0 | 0 | 469 MiB | 1422 MiB | `katanemo/archgw:0.3.22 (archgw CLI)` |
@@ -38,38 +38,38 @@ Same box, same mock, one gateway at a time. Streaming figures are the overhead t
 | [Bifrost](https://github.com/maximhq/bifrost) | ✕ no SSE streaming | ✕ no SSE streaming | ✕ no SSE streaming | ✕ cannot translate |
 | [Kong](https://github.com/Kong/kong) | 106.4 ms | 168.7 ms | 128 (6,137 fps) | ✕ cannot translate |
 | [Portkey](https://github.com/Portkey-AI/gateway) | ✕ no SSE streaming | ✕ no SSE streaming | ✕ no SSE streaming | ✕ cannot translate |
-| [LiteLLM · Python](https://github.com/BerriAI/litellm) | 8.5 ms | 2.6 ms | 1 (47 fps) | 435 |
+| [LiteLLM · Python](https://github.com/BerriAI/litellm) | 596.7 ms | 2.5 ms | 1,024 (4,533 fps) | 495 |
 | [One-API](https://github.com/songquanpeng/one-api) | 42.3 ms | 4 µs | 32 (1,339 fps) | ✕ cannot translate |
 | [TensorZero](https://github.com/tensorzero/tensorzero) | 41.1 ms | 4 µs | 128 (6,123 fps) | ✕ cannot translate |
 | [Arch](https://github.com/katanemo/archgw) | 231.8 ms | 210 µs | 128 (1,127 fps) | 0 |
 
 **✕** cells are measured refusals, not gaps: the gateway was offered the load and could not do the thing (buffered instead of streaming, rejected the Anthropic shape, or has no native key/limit governance). **n/a** = that suite hasn't been run for this gateway yet.
 
-![added_latency](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/added_latency.png?v=202607230543)
+![added_latency](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/added_latency.png?v=202607230613)
 
-![rps_max_proxy](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/rps_max_proxy.png?v=202607230543)
+![rps_max_proxy](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/rps_max_proxy.png?v=202607230613)
 
-![rps_sustained_20ms](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/rps_sustained_20ms.png?v=202607230543)
+![rps_sustained_20ms](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/rps_sustained_20ms.png?v=202607230613)
 
-![memory_rss](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/memory_rss.png?v=202607230543)
+![memory_rss](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/memory_rss.png?v=202607230613)
 
-![rps_per_dollar](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/rps_per_dollar.png?v=202607230543)
+![rps_per_dollar](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/rps_per_dollar.png?v=202607230613)
 
-![cost_per_million](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/cost_per_million.png?v=202607230543)
+![cost_per_million](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/cost_per_million.png?v=202607230613)
 
-![stream_added_ttft](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/stream_added_ttft.png?v=202607230543)
+![stream_added_ttft](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/stream_added_ttft.png?v=202607230613)
 
-![stream_added_gap](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/stream_added_gap.png?v=202607230543)
+![stream_added_gap](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/stream_added_gap.png?v=202607230613)
 
-![stream_sustained](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/stream_sustained.png?v=202607230543)
+![stream_sustained](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/stream_sustained.png?v=202607230613)
 
-![streamcpu_fps](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/streamcpu_fps.png?v=202607230543)
+![streamcpu_fps](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/streamcpu_fps.png?v=202607230613)
 
-![xlate_rps_sustained_20ms](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/xlate_rps_sustained_20ms.png?v=202607230543)
+![xlate_rps_sustained_20ms](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/xlate_rps_sustained_20ms.png?v=202607230613)
 
-![xlate_added_latency](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/xlate_added_latency.png?v=202607230543)
+![xlate_added_latency](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/xlate_added_latency.png?v=202607230613)
 
 ---
 Method: added latency = gateway p99 − direct-to-mock p99 at concurrency 1; RPS ceiling = highest sustained req/s with p99 < 1 s and <0.1% errors; RSS idle = after first 200, peak = under sustained load. Same box, same mock, same load, one gateway at a time. Source refs pinned in `gateways/versions.env`; the built commit is in each row.
 
-<sub>Page + charts regenerated **2026-07-23 05:43 UTC** from the raw `results/*.json`.</sub>
+<sub>Page + charts regenerated **2026-07-23 06:13 UTC** from the raw `results/*.json`.</sub>
