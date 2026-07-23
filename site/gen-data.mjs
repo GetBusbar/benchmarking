@@ -212,17 +212,23 @@ if (latest && generatedAt < latest) {
   throw new Error(`gen-data: generated_at ${generatedAt} predates the newest embedded measured_at ${latest}; ` +
     `a raw result is future-dated (rig clock skew?). Refusing to emit a bundle that would read stale.`);
 }
-// Loud (non-fatal) warning when a gateway's suite lags the newest raw measurement by a lot: a
-// field re-run that skipped a suite leaves mixed-age numbers on one row, which is worth seeing
-// in the build log even though it is honest (each lane is stamped with its own measured_at).
-const LAG_DAYS = 30;
+// FRESHNESS GUARD (trust): a full field run puts every one of a gateway's suites on ONE box,
+// sequentially, so their measured_at timestamps cluster tightly (empirically < ~1.1h for even the
+// heaviest gateway). If a gateway's own suites span more than MAX_SPAN_H, its row is a FRANKEN-MIX
+// of different runs - a stale suite survived a refresh (the exact busbar-streaming bug: stream from
+// an 00:07Z run while the rest were hours newer). That is the one thing a benchmark board must never
+// ship silently, so this HARD-FAILS the build. A refresh you cannot trust is worse than no refresh.
+// Re-run the gateway (all suites, one clean pass) to clear it.
+const MAX_SPAN_H = 2;
 for (const g of gateways) {
-  for (const suite of SUITES) {
-    const at = g[suite] && g[suite].measured_at;
-    if (!at || !latest) continue;
-    const lag = (Date.parse(latest) - Date.parse(at)) / 86400000;
-    if (lag > LAG_DAYS) console.warn(
-      `gen-data: WARNING: ${g.key}/${suite} measured_at ${at} lags the newest raw measurement (${latest}) by ${Math.round(lag)} days`);
+  const ats = SUITES.map((s) => g[s] && g[s].measured_at).filter(Boolean).map((a) => Date.parse(a));
+  if (ats.length < 2) continue;
+  const spanH = (Math.max(...ats) - Math.min(...ats)) / 3600000;
+  if (spanH > MAX_SPAN_H) {
+    const per = SUITES.filter((s) => g[s] && g[s].measured_at).map((s) => `${s}=${g[s].measured_at}`).join(", ");
+    throw new Error(
+      `gen-data: FRESHNESS FAILURE: ${g.key}'s suites span ${spanH.toFixed(1)}h (> ${MAX_SPAN_H}h), so its row mixes different runs ` +
+      `(a stale suite survived a refresh). Re-run ${g.key} in one clean pass. Per-suite measured_at: ${per}`);
   }
 }
 

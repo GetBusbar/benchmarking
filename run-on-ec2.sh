@@ -27,17 +27,23 @@ ARCH="${ARCH:-arm64}"
 case "$ARCH" in
   arm64|aarch64|graviton)
     ARCH=arm64
-    ITYPE="${ITYPE:-m7g.2xlarge}"
+    # 4xlarge (16 cores): the gateway-under-test still gets EXACTLY 4 pinned cores (the fair,
+    # comparable basis - perf/RPS/memory are unchanged vs the old 2xlarge), but the mock + load
+    # generator get 6 cores each instead of 2. At 2 cores the mock topped out ~48k frames/sec, so a
+    # 1024-stream sweep (~51k fps needed) saturated the MOCK, not the gateway, and mock-late frames
+    # showed up as gateway "stalls". With 6 mock cores the ceiling is ~3x, so the high-concurrency
+    # streaming rungs measure the gateway, not the rig.
+    ITYPE="${ITYPE:-m7g.4xlarge}"
     SSM="/aws/service/canonical/ubuntu/server/24.04/stable/current/arm64/hvm/ebs-gp3/ami-id"
     CPU_LABEL="Graviton3" ;;
   x86|x86_64|amd64|intel)
     ARCH=x86
-    ITYPE="${ITYPE:-m7i.2xlarge}"
+    ITYPE="${ITYPE:-m7i.4xlarge}"
     SSM="/aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id"
     CPU_LABEL="Intel (Sapphire Rapids)" ;;
   *) echo "unknown ARCH='$ARCH' (use arm64 or x86)"; exit 2 ;;
 esac
-HW_LABEL="AWS ${ITYPE} (${CPU_LABEL}, 8 cores / 32 GB). Gateway pinned to 4 cores, mock+loadgen on the other 4, Ubuntu 24.04. One dedicated box per gateway."
+HW_LABEL="AWS ${ITYPE} (${CPU_LABEL}, 16 cores / 64 GB). Gateway-under-test pinned to 4 cores (the comparable basis); mock and load generator on 6 cores each so the mock never bottlenecks the streaming sweep. Ubuntu 24.04. One dedicated box per gateway."
 KEYNAME="gateway-bench-key"; KEYFILE="${TMPDIR:-/tmp}/${KEYNAME}.pem"; SGNAME="gateway-bench-sg"
 SSHOPT="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=12 -i $KEYFILE"
 log(){ echo "[$(date +%H:%M:%S)] $*"; }
@@ -104,7 +110,7 @@ bench_gateway() {
   ssh $SSHOPT ubuntu@"$ip" "source ~/.cargo/env; cd ~/benchmarking
     export BENCH_HARDWARE='$HW_LABEL'
     export BENCH_ARCH='$ARCH'
-    export CORES=0-3 LOADCORES=4-5 MOCKCORES=6-7
+    export CORES=0-3 LOADCORES=4-9 MOCKCORES=10-15
     export CAP_MIB=24000
     export SUITES=\"${SUITES:-perf memory stream streamcpu xlate governed matrix}\"
     sudo -n true 2>/dev/null && sudo chmod 666 /var/run/docker.sock || true

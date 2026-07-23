@@ -43,7 +43,7 @@ STALL_US=$(( STREAM_INTERVAL_MS * STALL_X * 1000 ))
 C1_DUR="${C1_DUR:-30}"; SWEEP_DUR="${SWEEP_DUR:-15}"; PSIZE="${PSIZE:-256}"
 # Concurrency = simultaneously open SSE streams. Spans low→high so every gateway — fast or slow —
 # is offered a load it can hold; the qualifying maximum is the sustained figure. Same grid for all.
-SWEEP="${SWEEP:-1 8 32 128 512 1024}"
+SWEEP="${SWEEP:-1 8 32 128 256 512 1024 2048}"
 # raise the fd limit so high-concurrency sweeps aren't capped by open sockets
 ulimit -n 1048576 2>/dev/null || ulimit -n 65536 2>/dev/null || true
 export CORES="${CORES:-0-3}"; LOADCORES="${LOADCORES:-0-3}"; MOCKCORES="${MOCKCORES:-0-3}"
@@ -194,7 +194,7 @@ if [ "$STREAM_OK" = 1 ]; then
   done
   if [ "${MOCK_FPS:-0}" -gt 0 ] && awk -v c="$SUST_FPS" -v m="$MOCK_FPS" 'BEGIN{exit !(c>=0.9*m)}'; then MOCK_BOUND=true; fi
   [ "$MOCK_BOUND" = true ] && log "[$GATEWAY] ⚠ sustained fps ($SUST_FPS) within 10% of mock ($MOCK_FPS) — MOCK-BOUND floor"
-  log "[$GATEWAY] streams sustained = $SUST_STREAMS (${SUST_FPS} frames/sec)"
+  log "[$GATEWAY] streams sustained (clean, no stall/fail) = $STALLFREE_STREAMS; delivered (stalls ignored) = $SUST_STREAMS"
 fi
 
 BUILD="$(gw_version 2>/dev/null | tr -d '\n' | sed 's/"/\\"/g')"
@@ -220,11 +220,11 @@ cat > "$RESULTS/$GATEWAY.json" <<JSON
   "stream_gateway_gap_p99_us": ${GG99:-0},
   "stream_direct_gap_p50_us": ${DG50:-0},
   "stream_direct_gap_p99_us": ${DG99:-0},
-  "stream_sustained_streams": $SUST_STREAMS,
+  "stream_sustained_streams": $STALLFREE_STREAMS,
   "stream_sustained_fps": $SUST_FPS,
-  "stream_sustained_gate": "delivery: >=99% of expected content frames delivered, <0.1% stream errors; stalls are recorded per sweep point and priced by the added-gap percentiles, not zeroed",
-  "stream_stallfree_streams": $STALLFREE_STREAMS,
-  "stream_stallfree_gate": "strict pacing: >=99.9% delivered, zero streams with any inter-frame gap > ${STALL_X}x the ${STREAM_INTERVAL_MS}ms interval, <0.1% errors",
+  "stream_sustained_gate": "clean streaming: the highest concurrency where EVERY stream stayed clean - zero errored/dropped streams AND zero streams with any inter-frame gap > ${STALL_X}x the ${STREAM_INTERVAL_MS}ms pacing interval (a stall), >=99.9% frames delivered. This is the honest 'streams held without stalling' number the column shows.",
+  "stream_delivered_streams": $SUST_STREAMS,
+  "stream_delivered_gate": "looser: >=99% of frames delivered and <0.1% errored streams, IGNORING stalls (a stream that delivered every frame but late still counts). Kept for transparency; stalls are priced by the added-gap p99.",
   "stream_mock_ceiling_fps": ${MOCK_FPS:-0},
   "stream_mock_bound": $MOCK_BOUND,
   "stream_chunks": $STREAM_CHUNKS,
