@@ -80,6 +80,7 @@ code { background: var(--bg-raise); border: 1px solid var(--border); border-radi
 .muted { color: var(--fg-mute); }
 .fineprint { color: var(--fg-mute); font-size: .82rem; margin-top: 1rem; }
 .lede { color: var(--fg-dim); max-width: 70ch; }
+#table-caption { line-height: 1.7; margin: .3rem 0 .9rem; }
 .method-lede { color: var(--fg-dim); max-width: 74ch; margin: .6rem 0 0; padding-left: 1.1rem; }
 .method-lede li { margin: .45rem 0; line-height: 1.5; }
 .method-lede li b { color: var(--fg); font-weight: 600; }

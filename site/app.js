@@ -611,22 +611,36 @@ function initThemeToggle() {
 /* ---- results table ---------------------------------------------------------- */
 /* Per-tab caption: states in one line exactly which path this tab's numbers are, so a reader never
    has to guess what the ranking compares. No em dashes (house style). */
+// Short, one-idea-per-line captions (rendered on their own lines). Keep each line terse and concrete.
 const TABLE_CAPTIONS = {
-  passthrough: "Each gateway on its best same-dialect passthrough: pure forwarding, no translation. The Tested-on pill shows which dialect (OpenAI when served, else the gateway's fastest native one), so every gateway appears and nothing is hidden. For a strict single-dialect comparison, pin the same dialect on both sides in the Translation tab.",
-  streaming: "Streaming responses (server-sent events). The added columns are the extra time the gateway adds on top of the upstream: the wait before the first token (TTFT) and the pause between tokens. Streams sustained is how many concurrent streams it holds without stalling. Lower delay is better; higher streams is better.",
+  passthrough: [
+    "Pure forwarding, no translation.",
+    "Each gateway on its best same-dialect path; the pill shows which dialect.",
+    "Everyone appears. For one strict dialect, pin the same in and out in Translation.",
+  ],
+  streaming: [
+    "Streaming responses (server-sent events).",
+    "Added columns: extra time the gateway adds, before the first token and between tokens. Lower is better.",
+    "Streams sustained: concurrent streams held without stalling. Higher is better.",
+  ],
 };
 function updateTableCaption(view) {
   const el = document.getElementById("table-caption");
   if (!el) return;
+  let lines;
   if (view === "translation") {
     const inL = (MATRIX_LABELS[state.xlateIn] || state.xlateIn);
     const outL = (MATRIX_LABELS[state.xlateOut] || state.xlateOut);
-    el.textContent = state.xlateIn === state.xlateOut
-      ? `${inL} ingress to ${outL} upstream: same dialect, so this is pure passthrough (no translation). Only gateways that serve this dialect appear, and every row is the identical path, so the ranking is apples-to-apples.`
-      : `Client speaks ${inL}, upstream speaks ${outL}: the gateway translates every request and response on this exact path. Only gateways that serve this pair appear, and every row is the identical translation, so the ranking is apples-to-apples.`;
-    return;
+    lines = state.xlateIn === state.xlateOut
+      ? [`${inL} in, ${outL} out: same dialect, so this is passthrough (no translation).`,
+         "Only gateways that serve this dialect appear."]
+      : [`Client speaks ${inL}, upstream speaks ${outL}; the gateway translates both ways.`,
+         "Only gateways that serve this exact pair appear.",
+         "Every row is the identical path, so the ranking is apples-to-apples."];
+  } else {
+    lines = TABLE_CAPTIONS[view] || TABLE_CAPTIONS.passthrough;
   }
-  el.textContent = TABLE_CAPTIONS[view] || TABLE_CAPTIONS.passthrough;
+  el.innerHTML = lines.map((l) => esc(l)).join("<br>");
 }
 function renderTable() {
   const { data } = state;
