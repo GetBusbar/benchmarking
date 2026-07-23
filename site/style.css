@@ -194,6 +194,14 @@ td.sel input { accent-color: var(--accent); cursor: pointer; }
 thead th.nosort { cursor: default; }
 tbody tr { cursor: pointer; }
 
+/* Gateways overview roster: a neutral alphabetical roster, not a ranked perf table.
+   Headers are not sortable, rows open nothing, and there is no sorted-column tint. */
+#gateways-table thead th, #gateways-table tbody td { text-align: left; }
+#gateways-table thead th.stars, #gateways-table tbody td.stars { text-align: right; }
+#gateways-table thead th { cursor: default; }
+#gateways-table tbody tr { cursor: default; }
+#gateways-table td.cls { color: var(--fg-dim); }
+
 /* drawer (per-gateway slide-over) */
 .backdrop { position: fixed; inset: 0; background: var(--overlay); z-index: 60; }
 .drawer {

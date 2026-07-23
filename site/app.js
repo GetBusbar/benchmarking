@@ -29,9 +29,14 @@ const DEFAULT_CATEGORY = "gateways";
 //   passthrough = openai->openai only (every gateway on the identical dialect, no translation)
 //   translation = openai-in -> best non-openai egress (fixed fair ingress, egress varies)
 //   streaming   = SSE passthrough (its own stall-gated ceiling)
-// matrix + method round out the five. `charts` folds into method; `results` was the old blended tab.
-const VIEWS = ["passthrough", "translation", "streaming", "matrix", "method"];
-const VIEW_LABELS = { passthrough: "Passthrough", translation: "Translation", streaming: "Streaming", matrix: "Protocol matrix", method: "Method" };
+// The board leads with a NEUTRAL ROSTER (the `gateways` overview: who is on the bench, in
+// alphabetical order, no perf numbers) and the rankings come second; matrix + method round it
+// out. `charts` folds into method; `results` was the old blended tab.
+const VIEWS = ["gateways", "passthrough", "translation", "streaming", "matrix", "method"];
+const VIEW_LABELS = { gateways: "Gateways", passthrough: "Passthrough", translation: "Translation", streaming: "Streaming", matrix: "Protocol matrix", method: "Method" };
+// The default (bare /gateways) view: the roster overview. The old default, passthrough, stays a
+// real tab at /gateways/passthrough.
+const DEFAULT_VIEW = "gateways";
 const PERF_VIEWS = new Set(["passthrough", "translation", "streaming"]);
 // Old shared URLs pointed at results/charts; map them onto the new tabs so links keep resolving.
 const VIEW_ALIASES = { results: "passthrough", charts: "method" };
@@ -371,7 +376,7 @@ function newState() {
   return {
     data: null,
     category: DEFAULT_CATEGORY,
-    view: "passthrough",
+    view: DEFAULT_VIEW,
     q: "",
     sortCol: "rps20",
     sortDesc: true,
@@ -397,9 +402,10 @@ const state = newState();
 const CAPS = [["needStream", "stream"], ["needXlate", "xlate"]];
 
 /* Serialize the shareable parts of state into a clean path URL:
-   /<category>/<view>?<params>. The default view (results) omits the view segment
-   and default params are omitted, so the pristine view keeps a clean URL
-   (/gateways). Returns path + query, e.g. /gateways/matrix?sort=mempeak&dir=asc. */
+   /<category>/<view>?<params>. The default view (the roster overview) omits the
+   view segment and default params are omitted, so the pristine view keeps a clean
+   URL (/gateways = the category root). Returns path + query, e.g.
+   /gateways/matrix?sort=mempeak&dir=asc. */
 function encodeUrl(st) {
   const p = new URLSearchParams();
   if (st.q) p.set("q", st.q);
@@ -422,14 +428,14 @@ function encodeUrl(st) {
   if (st.xlateIn !== "openai") p.set("xin", st.xlateIn);
   if (st.xlateOut !== "anthropic") p.set("xout", st.xlateOut);
   const cat = CATEGORIES[st.category] ? st.category : DEFAULT_CATEGORY;
-  const path = st.view && st.view !== "passthrough" ? `/${cat}/${st.view}` : `/${cat}`;
+  const path = st.view && st.view !== DEFAULT_VIEW ? `/${cat}/${st.view}` : `/${cat}`;
   const qs = p.toString();
   return qs ? `${path}?${qs}` : path;
 }
 
 /* Parse a path + query (+ optional legacy #hash) back into state.
    Unknown categories and views fall back to the defaults, so / normalizes to
-   /gateways (results). Pre-path-routing links carried everything in the hash
+   /gateways (the roster overview). Pre-path-routing links carried everything in the hash
    (#view=matrix&sort=...); when the hash holds params, it wins over the query so
    old shared URLs keep resolving, and boot() then rewrites them to path form. */
 function decodeUrl(pathname, search, hash) {
@@ -492,7 +498,7 @@ function syncUrl(push = false) {
 function updateTitle() {
   if (NODE) return;
   const cat = CATEGORIES[state.category] || CATEGORIES[DEFAULT_CATEGORY];
-  const view = state.view !== "passthrough" ? ` ${VIEW_LABELS[state.view] || state.view}` : "";
+  const view = state.view !== DEFAULT_VIEW ? ` ${VIEW_LABELS[state.view] || state.view}` : "";
   document.title = `${cat.label}${view} · On the Bench · AI tool benchmarks`;
 }
 
@@ -1291,9 +1297,44 @@ function renderStatic() {
   hw.textContent = bits.join(" · ");
 }
 
+/* ---- gateways overview: the neutral roster ----------------------------------
+   The landing view is a ROSTER, not a ranking: every gateway in alphabetical
+   order (display name, case-insensitive), with its language, a committed star
+   snapshot, and its OWN self-description (g.cls). No perf numbers, no winner
+   highlighting; the other tabs measure how they perform. busbar gets the exact
+   same row treatment as everyone else. */
+const rosterRows = (gateways) =>
+  gateways.slice().sort((a, b) => a.display.toLowerCase().localeCompare(b.display.toLowerCase()));
+/* Star counts render compact: 12345 -> "12.3k", below 1000 the full int. Null (no
+   snapshot entry) stays null; the cell renders it muted. */
+const fmtStars = (v) => (v == null ? null : v >= 1000 ? `${(v / 1000).toFixed(1)}k` : String(Math.round(v)));
+
+function renderGateways() {
+  const tbody = document.querySelector("#gateways-table tbody");
+  if (!tbody || !state.data) return;
+  const rows = rosterRows(state.data.gateways);
+  tbody.innerHTML = rows.map((g) => {
+    const c = LANG_COLORS[g.lang] || LANG_COLORS.Other;
+    const name = g.repo
+      ? `<a href="${g.repo}" target="_blank" rel="noopener">${esc(g.display)}</a>`
+      : esc(g.display);
+    const stars = fmtStars(g.stars);
+    return `<tr>
+      <td class="name">${name}</td>
+      <td><span class="lang-chip" style="background:${c}">${esc(g.lang)}</span></td>
+      <td class="stars">${stars != null ? esc(stars) : `<span class="muted">n/a</span>`}</td>
+      <td class="cls">${esc(g.cls || "Gateway")}</td>
+    </tr>`;
+  }).join("");
+  // "as of" disclosure for the star snapshot: the newest snapshot date in the bundle.
+  const asOf = rows.map((g) => g.stars_as_of).filter(Boolean).sort().pop();
+  const note = document.getElementById("stars-asof");
+  if (note) note.textContent = asOf ? `Star counts are a GitHub snapshot as of ${asOf}, refreshed with the data, not live.` : "";
+}
+
 /* ---- category nav + view tabs ----------------------------------------------- */
 function viewPath(category, view) {
-  return view && view !== "passthrough" ? `/${category}/${view}` : `/${category}`;
+  return view && view !== DEFAULT_VIEW ? `/${category}/${view}` : `/${category}`;
 }
 
 /* The category row above the tabs. One category today; new CATEGORIES entries
@@ -1368,6 +1409,7 @@ function sanitizeState() {
 function renderAll() {
   renderCatNav();
   showView(state.view);
+  renderGateways();
   renderFilters();
   renderTable();
   renderCompareBar();
@@ -1436,7 +1478,7 @@ if (NODE) {
     fmtStamp, fmtAge, stampWithAge,
     drawSweep, niceStep, fmtTick, COLUMN_SETS, columnsFor, PERF_VIEWS, VIEW_SORT, LANES, naText, stripRigPaths,
     cellState, matrixCellTip, cellPerfTip, passCell, xlateCell, hasTranslation, CATEGORIES, DEFAULT_CATEGORY, VIEWS,
-    canonicalPerf, canonicalXlate,
+    canonicalPerf, canonicalXlate, DEFAULT_VIEW, VIEW_LABELS, rosterRows, fmtStars,
   };
 } else {
   boot();

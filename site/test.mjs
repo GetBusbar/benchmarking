@@ -140,24 +140,32 @@ test("url state round-trips through /<category>/<view>?<params>", () => {
 });
 
 test("default state encodes to /gateways and decodes back to defaults", () => {
+  // The category root is the OVERVIEW (the neutral roster), not a ranking tab.
+  assert.equal(app.DEFAULT_VIEW, "gateways");
+  assert.equal(app.newState().view, "gateways");
   assert.equal(app.encodeUrl(app.newState()), "/gateways");
   const back = app.decodeUrl("/gateways", "");
   const def = app.newState();
   assert.equal(back.category, "gateways");
-  assert.equal(back.view, "passthrough");
+  assert.equal(back.view, "gateways");
   assert.equal(back.sortCol, def.sortCol);
   assert.equal(back.sortDesc, def.sortDesc);
   assert.equal(back.drawer, null);
   assert.deepEqual(back.cmp, []);
+  // Passthrough is a real tab at its own path now, no longer the landing view.
+  assert.equal(app.decodeUrl("/gateways/passthrough", "").view, "passthrough");
+  const st = app.newState();
+  st.view = "passthrough";
+  assert.equal(app.encodeUrl(st), "/gateways/passthrough");
 });
 
-test("root, unknown paths and unknown views normalize to gateways passthrough", () => {
+test("root, unknown paths and unknown views normalize to the gateways overview", () => {
   assert.equal(app.decodeUrl("/", "").category, "gateways");
-  assert.equal(app.decodeUrl("/", "").view, "passthrough");
-  assert.equal(app.decodeUrl("/index.html", "").view, "passthrough");
+  assert.equal(app.decodeUrl("/", "").view, "gateways");
+  assert.equal(app.decodeUrl("/index.html", "").view, "gateways");
   assert.equal(app.decodeUrl("/no-such-category/matrix", "").category, "gateways");
-  assert.equal(app.decodeUrl("/gateways/no-such-view", "").view, "passthrough");
-  // legacy view aliases still resolve onto the new tabs
+  assert.equal(app.decodeUrl("/gateways/no-such-view", "").view, "gateways");
+  // legacy view aliases still resolve onto live tabs (the old default stays reachable)
   assert.equal(app.decodeUrl("/gateways/results", "").view, "passthrough");
   assert.equal(app.decodeUrl("/gateways/charts", "").view, "method");
   // the documented deep link shape
@@ -185,7 +193,7 @@ test("decode rejects a bogus sort column", () => {
 
 test("a direct URL load defaults each tab to its column's natural direction", () => {
   // Passthrough / Translation headline on Sustained RPS -> descending (higher is better)
-  const pass = app.decodeUrl("/gateways", "");
+  const pass = app.decodeUrl("/gateways/passthrough", "");
   assert.equal(pass.sortCol, "rps20");
   assert.equal(pass.sortDesc, true);
   const xlate = app.decodeUrl("/gateways/translation", "");
@@ -196,6 +204,34 @@ test("a direct URL load defaults each tab to its column's natural direction", ()
   const stream = app.decodeUrl("/gateways/streaming", "");
   assert.equal(stream.sortCol, "sttft");
   assert.equal(stream.sortDesc, false);
+});
+
+// ---- gateways overview: the neutral roster ----------------------------------
+test("gateways overview lists every gateway alphabetically, busbar treated like the rest", () => {
+  const rows = app.rosterRows(data.gateways);
+  assert.equal(rows.length, data.gateways.length, "no gateway filtered out of the roster");
+  const names = rows.map((g) => g.display.toLowerCase());
+  assert.deepEqual(names, names.slice().sort(), "roster is alphabetical, case-insensitive");
+  assert.ok(rows.some((g) => g.key === "busbar"), "busbar is a plain roster row like the others");
+  // the roster is a VIEW of the data, never a mutation of it
+  assert.notEqual(rows, data.gateways);
+});
+
+test("star counts format compactly and degrade to null", () => {
+  assert.equal(app.fmtStars(614), "614");
+  assert.equal(app.fmtStars(12345), "12.3k");
+  assert.equal(app.fmtStars(54500), "54.5k");
+  assert.equal(app.fmtStars(0), "0");
+  assert.equal(app.fmtStars(null), null);
+  assert.equal(app.fmtStars(undefined), null);
+});
+
+test("Gateways leads the tab order and is not a perf view", () => {
+  assert.deepEqual(app.VIEWS, ["gateways", "passthrough", "translation", "streaming", "matrix", "method"]);
+  assert.equal(app.VIEW_LABELS.gateways, "Gateways");
+  // the overview is a roster section, not a ranked perf table
+  assert.ok(!app.PERF_VIEWS.has("gateways"));
+  assert.ok(!(app.VIEW_SORT && "gateways" in app.VIEW_SORT));
 });
 
 // ---- three-tab split: honest passthrough / translation sourcing ---------------
