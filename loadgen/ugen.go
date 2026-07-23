@@ -6,7 +6,14 @@ func(h *hdrs)Set(v string)error{*h=append(*h,v);return nil}
 func pct(v []float64,q float64)float64{if len(v)==0{return 0};sort.Float64s(v);i:=int(float64(len(v))*q);if i>=len(v){i=len(v)-1};return v[i]}
 // isContent: a data frame that carries actual delta text — OpenAI `"content":"…"` or Anthropic
 // `"text":"…"` — and not an empty-string placeholder (content_block_start carries `"text":""`).
-func isContent(l string)bool{return (strings.Contains(l,`"content":"`)||strings.Contains(l,`"text":"`))&&!strings.Contains(l,`:""`)}
+// The emptiness check is scoped to the content/text KEYS themselves: the previous blanket `:""`
+// scan silently discarded every frame from gateways that reserialize chunks with unrelated
+// empty-string fields (e.g. TensorZero's `"system_fingerprint":""`), zeroing their delivered-frame
+// counts - a harness bug that was published as a gateway streaming failure.
+func isContent(l string)bool{
+ return (strings.Contains(l,`"content":"`)&&!strings.Contains(l,`"content":""`))||
+  (strings.Contains(l,`"text":"`)&&!strings.Contains(l,`"text":""`))
+}
 func main(){
  url:=flag.String("url","","");model:=flag.String("model","gpt-4o-mini","");auth:=flag.String("auth","sk-dummy","")
  conc:=flag.Int("c",200,"");dur:=flag.Int("d",12,"");psize:=flag.Int("psize",0,"pad content to N bytes")
