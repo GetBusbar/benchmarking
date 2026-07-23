@@ -146,14 +146,6 @@ const COLUMNS = [
     },
   },
   {
-    id: "cls", label: "Class", desc: false,
-    /* Class is each project's own self-description (from its manifest GW_CLASS,
-       sourced from that project's README/site tagline), not our editorial. */
-    title: "How the project describes itself, from its own README or site",
-    get: (g) => ({ v: g.cls || "Gateway", text: null, na: false }),
-    render: (g) => `<td><span class="cls-chip">${esc(g.cls || "Gateway")}</span></td>`,
-  },
-  {
     id: "lang", label: "Lang", desc: false,
     get: (g) => ({ v: g.lang, text: null, na: false }),
     render: (g) => {
