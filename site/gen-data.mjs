@@ -253,11 +253,14 @@ if (existsSync(fontsDir)) {
 }
 
 // ---- SPA fallback for deep links (/gateways/matrix, ...) --------------------
-// Cloudflare Pages reads site/_redirects (committed) for the /* -> /index.html 200
-// rewrite; GitHub Pages has no rewrite support but serves 404.html for unknown
-// paths, so a copy of the app shell there makes the same deep links render.
-const shell = join(HERE, "index.html");
-if (existsSync(shell)) copyFileSync(shell, join(OUT, "404.html"));
+// The host is Cloudflare Pages, which reads site/_redirects (committed) for the
+// /* -> /index.html 200 rewrite so every deep link resolves with a 200 status.
+// We deliberately DO NOT emit a 404.html: on CF Pages a 404.html SHADOWS the
+// _redirects rewrite (CF serves the 404.html with a 404 status instead of the
+// 200-rewrite), which is exactly the deep-link-404 bug. Verified on a preview:
+// with 404.html present every /gateways/* is 404; with it removed the same paths
+// are 200. GitHub Pages is retired (pages.yml dormant), so the 404.html fallback
+// it needed is no longer relevant.
 const redirects = join(HERE, "_redirects");
 if (existsSync(redirects) && OUT !== HERE) copyFileSync(redirects, join(OUT, "_redirects"));
 
