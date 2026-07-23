@@ -37,7 +37,11 @@ const PERF_VIEWS = new Set(["passthrough", "translation", "streaming"]);
 const VIEW_ALIASES = { results: "passthrough", charts: "method" };
 // Each perf tab's default (and honest headline) sort column; a clean URL omits the sort when it
 // equals this, and switching tabs snaps to it unless the URL pins another.
-const VIEW_SORT = { passthrough: "rps20", translation: "xlrps", streaming: "streams" };
+// Streaming defaults to added TTFT (asc), NOT streams-sustained: the sustained count saturates at the
+// harness cap (512) so it ties several gateways and breaks ties by name, floating a slow-TTFT gateway
+// above a fast one at the same count. Added TTFT is the streaming-overhead discriminator that a user
+// actually feels first and it does not saturate.
+const VIEW_SORT = { passthrough: "rps20", translation: "xlrps", streaming: "sttft" };
 
 /* Language chip colours: kept in sync with LANG_COLORS in charts.py. */
 const LANG_COLORS = {
