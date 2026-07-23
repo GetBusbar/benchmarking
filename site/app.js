@@ -669,6 +669,7 @@ const TABLE_CAPTIONS = {
     "Pure forwarding, no translation.",
     "Each gateway on its best same-dialect path; the pill shows which dialect.",
     "Everyone appears. For one strict dialect, pin the same in and out in Translation.",
+    "Sustained @20ms and max proxy RPS are independently measured ceilings; a small inversion between them is sweep noise, not an error.",
   ],
   streaming: [
     "Streaming responses (server-sent events).",
