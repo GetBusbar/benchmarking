@@ -110,8 +110,24 @@ GW_MATRIX_CAP="
 000000
 000000
 "
-GW_MATRIX_CAP_NOTE="One-API v0.6.10 has no OpenAI-Responses relay mode, emits Cohere v1 (not v2), and its AWS/Bedrock channel ignores base_url (SigV4 to the real host); those cells are grey by that capability limit (relay/channeltype, relay/adaptor/aws)"
+GW_MATRIX_CAP_NOTE="One-API v0.6.10 has no OpenAI-Responses relay mode and its Cohere channel emits the Cohere v1 /v1/chat shape, not the v2 dialect this suite probes (relay/channeltype/define.go, relay/adaptor/cohere/adaptor.go GetRequestURL); those cells are grey by that capability limit"
+# Bedrock is NOT incapability: One-API relays Bedrock in production, but its AWS channel (type 33)
+# builds an aws-sdk-go-v2 bedrockruntime client with no BaseEndpoint override and bypasses the
+# generic base_url relay entirely (relay/adaptor/aws/adaptor.go Init(); GetRequestURL returns "").
+# SigV4 goes to the real bedrock-runtime.<region>.amazonaws.com, so this rig's mock cannot stand
+# in - recorded as untestable, distinct from declared-incapable.
+GW_MATRIX_UNTESTABLE="openai/bedrock"
+GW_MATRIX_UNTESTABLE_NOTE="One-API v0.6.10's AWS/Bedrock channel constructs the aws-sdk bedrockruntime client with no endpoint override and skips the base_url relay path (relay/adaptor/aws/adaptor.go), so the harness mock cannot stand in for the upstream; One-API does relay Bedrock in production"
 GW_MATRIX_EGRESS="openai anthropic gemini"
+
+# ── xlate lane: not declared (no /v1/messages ingress at v0.6.10) ────────────────────────────────
+# router/relay.go at tag v0.6.10 registers only OpenAI-shaped relay paths (/v1/chat/completions,
+# /v1/completions, embeddings, audio, images, ...); the only "messages" routes are the OpenAI
+# Assistants thread stubs bound to RelayNotImplemented. There is no Claude-Messages ingress (the
+# new-api FORK added one; upstream one-api main still has none), so the probe's 404 "Invalid URL"
+# was the router's correct answer, not a failed translation.
+GW_XLATE_CAP=0
+GW_XLATE_CAP_NOTE="One-API v0.6.10 has no Anthropic /v1/messages ingress route (router/relay.go registers only OpenAI-shaped relay paths; the Claude-Messages ingress exists only in the new-api fork), so anthropic-in translation is not a claimed capability"
 gw_matrix_egress() {
   case "$1" in
     openai)    OA_CH_TYPE=1;  OA_CH_MODEL="gpt-4o-mini";                  GW_MODEL="gpt-4o-mini";;

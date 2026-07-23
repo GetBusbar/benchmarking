@@ -109,6 +109,16 @@ gw_matrix_egress() {
   esac
 }
 
+# ── xlate lane: not declared (no openai upstream exists in this beta) ────────────────────────────
+# The xlate lane requires anthropic-in -> OPENAI-upstream translation. This gateway's single
+# working route serves /v1/messages against an anthropic-SHAPED upstream (azure_ai via
+# complete_azure_anthropic_url, api_base pinned to the /v1/messages URL by construction;
+# messages_provider_config() returns None for anthropic/openai - see the header). No openai
+# upstream dialect is reachable at all, so the lane's 'UNTRANSLATED passthrough' verdict was a
+# statement about a capability the beta never claimed; declared 0 with that citation instead.
+GW_XLATE_CAP=0
+GW_XLATE_CAP_NOTE="LiteLLM-Rust beta's only working route is anthropic-in -> anthropic-shaped azure_ai upstream (/v1/messages passthrough; messages_provider_config serves only azure_ai, commit 698072308) - no openai upstream dialect exists, so anthropic-to-openai translation is not a claimed capability"
+
 gw_rss() { awk '/VmRSS/{printf "%.1f", $2/1024}' "/proc/$(pgrep -f litellm-ai-gateway | head -1)/status" 2>/dev/null; }
 gw_hwm() { _hwm_tree_mib "$(pgrep -f litellm-ai-gateway 2>/dev/null | head -1)"; }  # kernel VmHWM of the gateway tree
 
