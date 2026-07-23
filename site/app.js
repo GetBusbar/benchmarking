@@ -91,14 +91,22 @@ function esc(s) {
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
+/* Absolute rig paths (the bench box's own filesystem: /home/ubuntu/.npm/..., file:///home/...)
+   are harness noise inside captured diagnostics, not evidence a reader needs; leaking them into
+   tooltips reads as sloppy. Scrub them to a neutral placeholder wherever a note is surfaced. */
+const RIG_PATH_RE = /(?:file:\/\/)?\/(?:home|root)\/[^\s'"):,]+/g;
+function stripRigPaths(s) {
+  return String(s || "").replace(RIG_PATH_RE, "<rig path>");
+}
+
 /* naText: compact honest label for a lane that was not served. The suites emit
    long diagnostic notes (passthrough evidence, launch errors); those must never
    be dumped as metric values or they blow the table layout wide open. The cell
-   shows a short badge and the full note travels in the title tooltip; the
-   drawer still shows the note verbatim as evidence. */
+   shows a short badge and the full note (rig paths scrubbed) travels in the
+   title tooltip; the drawer shows the first line plus a folded Evidence block. */
 function naText(j, flag, errKey) {
   if (!j) return { text: "not measured", note: "" };
-  const note = j[errKey] || j.serve_error || "";
+  const note = stripRigPaths(j[errKey] || j.serve_error || "");
   let text = "not served";
   // A lane the gateway never CLAIMED (manifest declares the capability 0, with a cited note) is
   // "not declared", never a failure - same rule as the matrix capability grid.
@@ -891,7 +899,18 @@ function drawerHtml(g) {
     const j = l.get ? l.get(g) : g[l.key];
     h += `<section class="drawer-lane"><h4>${esc(l.label)}</h4>`;
     if (!j) h += `<p class="muted">not measured</p>`;
-    else if (j[l.flag] === false) h += `<p class="muted">${esc(j[l.err] || "not served")}</p>${laneStamp(j)}`;
+    else if (j[l.flag] === false) {
+      // A multi-line diagnostic (e.g. a captured stack trace) must not dump ~25 raw lines into
+      // the drawer: show the first line as the verdict, fold the rest into a collapsed Evidence
+      // block, and scrub absolute rig paths (harness noise, not evidence).
+      const note = stripRigPaths(j[l.err] || "not served");
+      const nl = note.indexOf("\n");
+      const head = nl >= 0 ? note.slice(0, nl) : note;
+      const rest = nl >= 0 ? note.slice(nl + 1).trim() : "";
+      h += `<p class="muted">${esc(head)}</p>`;
+      if (rest) h += `<details class="evidence-fold"><summary>Evidence</summary><pre>${esc(rest)}</pre></details>`;
+      h += laneStamp(j);
+    }
     else {
       if (l.pathNote) h += `<p class="lane-note muted">${esc(l.pathNote(j))}</p>`;
       h += `<dl>` + l.metrics.filter((m) => j[m.k] != null).map((m) =>
@@ -1402,7 +1421,7 @@ if (NODE) {
   module.exports = {
     newState, encodeUrl, decodeUrl, viewPath, applyFilters,
     fmtStamp, fmtAge, stampWithAge,
-    drawSweep, niceStep, fmtTick, COLUMN_SETS, columnsFor, PERF_VIEWS, VIEW_SORT, LANES, naText,
+    drawSweep, niceStep, fmtTick, COLUMN_SETS, columnsFor, PERF_VIEWS, VIEW_SORT, LANES, naText, stripRigPaths,
     cellState, matrixCellTip, cellPerfTip, passCell, xlateCell, hasTranslation, CATEGORIES, DEFAULT_CATEGORY, VIEWS,
     canonicalPerf, canonicalXlate,
   };

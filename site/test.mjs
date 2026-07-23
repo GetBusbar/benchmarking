@@ -348,7 +348,8 @@ test("naText keeps long diagnostic notes out of cell values", () => {
       if (!j || j[l.flag] !== false) continue;
       const na = app.naText(j, l.flag, l.err);
       assert.ok(na.text.length <= 24, `${g.key}/${l.key}: label too long: ${na.text}`);
-      assert.equal(na.note, j[l.err] || "", `${g.key}/${l.key}: full note preserved`);
+      assert.equal(na.note, app.stripRigPaths(j[l.err] || ""), `${g.key}/${l.key}: full note preserved (rig paths scrubbed)`);
+      assert.ok(!/\/home\//.test(na.note), `${g.key}/${l.key}: tooltip leaks a rig path`);
     }
   }
   // Data-dependent: the field may or may not currently contain an untranslated-passthrough
@@ -362,6 +363,17 @@ test("naText keeps long diagnostic notes out of cell values", () => {
   assert.ok(unsupported, "expected a gateway without native governance");
   // "manifest defines no <hook>" = the harness never probed it: "not tested", never a capability verdict
   assert.equal(app.naText(unsupported.governed, "governed_served", "governed_note").text, "not tested");
+});
+
+test("stripRigPaths scrubs absolute bench-box paths from diagnostic notes", () => {
+  const note = "boom at file:///home/ubuntu/.npm/_npx/abc/node_modules/x/y.js:2:434559\n" +
+    "    at dispatch (/home/ubuntu/.npm/_npx/abc/node_modules/hono/dist/compose.js:22:17)";
+  const out = app.stripRigPaths(note);
+  assert.ok(!out.includes("/home/"), out);
+  assert.ok(out.includes("<rig path>"));
+  // and naText tooltips get the scrubbed note
+  const na = app.naText({ stream_served: false, stream_error: note }, "stream_served", "stream_error");
+  assert.ok(!na.note.includes("/home/"));
 });
 
 // ---- per-cell perf: best-path deviation on the matrix hover -----------------

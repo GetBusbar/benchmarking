@@ -225,6 +225,10 @@ tbody tr { cursor: pointer; }
 .matrix-list .cell { width: .9rem; height: .9rem; vertical-align: -2px; cursor: default; }
 .matrix-list .cell.na { background: var(--bg-hover); border: 1px solid var(--border); }
 .matrix-list .evidence { font-size: .78rem; margin-left: 1.3rem; }
+/* drawer: folded multi-line diagnostic (first line shows; the rest opens on demand) */
+.drawer-lane details.evidence-fold { margin: .3rem 0 .2rem; font-size: .78rem; }
+.drawer-lane details.evidence-fold summary { cursor: pointer; color: var(--fg-mute); }
+.drawer-lane details.evidence-fold pre { white-space: pre-wrap; word-break: break-word; margin: .4rem 0 0; }
 .matrix-list pre {
   margin: .25rem 0 0 1.3rem; padding: .45rem; background: var(--bg); border: 1px solid var(--border);
   border-radius: 6px; white-space: pre-wrap; word-break: break-all; font-size: .72rem;
