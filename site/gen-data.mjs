@@ -78,7 +78,21 @@ const gateways = gatewayKeys.map((key) => {
     // with its ingress -> egress path. The Performance tab ranks each gateway on this cell; the
     // matrix hover shows every other green cell's deviation from it. Absent (older results
     // without per-cell sweeps) the site falls back to the perf suite's single-path number.
-    const bc = bestCell(g.matrix);
+    let bc = bestCell(g.matrix);
+    if (!bc && g.perf && g.perf.served === true && g.perf.added_latency_p99_us != null) {
+      // No swept diagonal (e.g. bifrost mid-re-run), but the perf suite ran the gateway's default
+      // passthrough. Synthesize best_cell from it, inferring the dialect from the served diagonal, so
+      // the Tested-on pill and the numbers below it always name the SAME dialect (never a metric with
+      // an n/a pill). The field re-run replaces this with a real swept cell.
+      const dia = passthroughDialect(g.matrix);
+      bc = {
+        ingress: dia, egress: dia, dialect: dia,
+        added_latency_p50_us: g.perf.added_latency_p50_us,
+        added_latency_p99_us: g.perf.added_latency_p99_us,
+        rps_sustained_20ms: g.perf.rps_sustained_20ms,
+        rps_max_proxy: g.perf.rps_max_proxy,
+      };
+    }
     if (bc) g.best_cell = bc;
     const tc = translationCell(g.matrix);
     if (tc) g.translation_cell = tc;
@@ -134,6 +148,19 @@ function translationCell(m) {
   }
   if (!cands.length) return null;
   return cands.reduce((a, b) => (b.added_latency_p99_us < a.added_latency_p99_us ? b : a));
+}
+
+// The dialect a perf-suite fallback was measured on: the gateway's default passthrough. Prefer the
+// openai diagonal when green (the common default), else the first served diagonal, else openai.
+function passthroughDialect(m) {
+  if (!m || !m.upstreams) return "openai";
+  const oa = m.upstreams.openai;
+  if (oa && oa.cells && oa.cells.openai && oa.cells.openai.served === true) return "openai";
+  for (const [egress, up] of Object.entries(m.upstreams)) {
+    const cell = up && up.cells && up.cells[egress];
+    if (cell && cell.served === true) return egress;
+  }
+  return "openai";
 }
 
 function normalizeMatrix(m) {
