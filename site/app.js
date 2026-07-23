@@ -233,9 +233,17 @@ const COLUMN_SETS = {
     { id: "tested", label: "Tested on", desc: false,
       title: "The same-dialect passthrough these numbers were measured on (openai when served, else the gateway's fastest native dialect) - pure forwarding, no translation",
       get: (g) => ({ v: g.best_cell ? g.best_cell.dialect : "", text: null, na: !g.best_cell }),
-      render: (g) => g.best_cell
-        ? `<td class="tested"><span class="tested-pill" title="measured on ${esc(g.best_cell.dialect)}-in / ${esc(g.best_cell.dialect)}-out passthrough">${esc(MATRIX_LABELS[g.best_cell.dialect] || g.best_cell.dialect)}</span></td>`
-        : `<td class="tested"><span class="muted">n/a</span></td>` },
+      render: (g) => {
+        if (!g.best_cell) return `<td class="tested"><span class="muted">n/a</span></td>`;
+        const d = g.best_cell.dialect;
+        // Provenance disclosure (R4): a perf-fallback row was NOT measured by the matrix
+        // per-cell sweep like the rest of the field; the pill says so (asterisk + tooltip).
+        const fb = g.best_cell.source === "perf-fallback";
+        const title = fb
+          ? `measured on the perf-suite default path (${esc(d)} passthrough; no matrix per-cell sweep for this gateway yet)`
+          : `measured on ${esc(d)}-in / ${esc(d)}-out passthrough (matrix per-cell sweep)`;
+        return `<td class="tested"><span class="tested-pill" title="${title}">${esc(MATRIX_LABELS[d] || d)}${fb ? " *" : ""}</span></td>`;
+      } },
     { id: "lat", label: "Added latency p99 (µs)", desc: false, title: "Gateway p99 minus direct-to-mock p99 at concurrency 1 on the gateway's best same-dialect passthrough (the Tested-on dialect) - pure forwarding, no translation",
       get: (g) => passCell(g, "added_latency_p99_us", fmtAdded) },
     { id: "rps20", label: "Sustained RPS @20ms", desc: true, title: "Sustained requests/sec with a 20 ms mock LLM latency (p99 < 1 s, <0.1% errors) on the OpenAI passthrough",
