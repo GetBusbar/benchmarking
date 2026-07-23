@@ -76,6 +76,22 @@ export function checkConsistency(data, app) {
       warnings.push(`${g.key}: sustained@20ms ${bc.rps_sustained_20ms} > max-proxy ${bc.rps_max_proxy} ` +
         `(independent per-cell sweep ceilings; noise, shipped unclamped)`);
     }
+    // ---- coverage (WARN, M7): a served (green) matrix cell with NO per-cell perf renders as an
+    // all-n/a row on any tab that reads that exact cell (the bifrost translation-row case). The
+    // cell is honest (served, unmeasured), but an unmeasured green cell should be loud in the
+    // build log so a half-finished sweep never ships silently.
+    if (g.matrix && g.matrix.upstreams) {
+      const unswept = [];
+      for (const [egress, up] of Object.entries(g.matrix.upstreams)) {
+        for (const [ingress, cell] of Object.entries((up && up.cells) || {})) {
+          if (cell && cell.served === true && !cell.perf) unswept.push(`${ingress}->${egress}`);
+        }
+      }
+      if (unswept.length) {
+        warnings.push(`${g.key}: ${unswept.length} served matrix cell(s) with no per-cell perf ` +
+          `(${unswept.join(", ")}); these render all-n/a on the tabs that read them`);
+      }
+    }
   }
   return { errors, warnings };
 }

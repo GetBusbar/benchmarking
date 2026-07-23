@@ -322,6 +322,38 @@ test("a zero RPS cell renders 0 with the no-qualifying-ceiling tooltip", () => {
   assert.ok(!rps20.note);
 });
 
+test("guard warns on a served matrix cell with no per-cell perf", () => {
+  const g = { key: "unswept", display: "Unswept", lang: "Go",
+    matrix: mkMatrix({ anthropic: { openai: { served: true } } }) };
+  const { errors, warnings } = checkConsistency({ gateways: [g] }, app);
+  assert.deepEqual(errors, []);
+  assert.equal(warnings.length, 1);
+  assert.ok(warnings[0].includes("no per-cell perf"), warnings[0]);
+  assert.ok(warnings[0].includes("openai->anthropic"), warnings[0]);
+});
+
+test("default translation pair has no silent all-n/a served row", () => {
+  // The Translation tab's default pair (openai -> anthropic): any gateway that serves it should
+  // have per-cell perf, or its row is a table of n/a cells. A gateway whose per-cell sweep never
+  // ran AT ALL (mid re-run, e.g. a best_cell synthesized as perf-fallback) is known-pending and
+  // covered by the guard's no-per-cell-perf WARNING above; anything else all-n/a is a bug.
+  const st = app.newState();
+  st.view = "translation"; // pinned pair defaults to openai -> anthropic
+  const KEYS = ["added_latency_p50_us", "added_latency_p99_us", "rps_sustained_20ms", "rps_max_proxy"];
+  for (const g of app.applyFilters(data.gateways, st)) {
+    const sweptAny = Object.values(g.matrix.upstreams || {}).some((u) =>
+      Object.values(u.cells || {}).some((c) => c && c.served === true && c.perf));
+    if (!sweptAny) {
+      // no per-cell sweep for this gateway at all: must at least trip the coverage warning
+      const { warnings } = checkConsistency({ gateways: [g] }, app);
+      assert.ok(warnings.some((w) => w.includes("no per-cell perf")), `${g.key}: unswept but unflagged`);
+      continue;
+    }
+    const anyVal = KEYS.some((k) => app.xlateCell(g, k, String).v != null);
+    assert.ok(anyVal, `${g.key} serves the default translation pair but every metric is n/a`);
+  }
+});
+
 // ---- footer timestamps: clean UTC stamp + coarse relative age ----------------
 test("footer timestamps format cleanly with a coarse age", () => {
   const iso = "2026-07-22T17:52:46.101Z";
