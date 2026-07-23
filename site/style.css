@@ -285,6 +285,9 @@ tbody tr { cursor: pointer; }
 /* not verified: the harness could not get the gateway serving under this egress config; a dashed
    grey border reads as "we could not test this", visibly distinct from the solid "not declared". */
 .cell.unverified { background: var(--bg-hover); border: 1px dashed var(--fg-dim); }
+/* untestable: the gateway supports the pair in production but pins the real cloud host (no
+   base-URL override), so our mock cannot stand in - a rig limit, dotted border, never a red. */
+.cell.untestable { background: var(--bg-hover); border: 1px dotted var(--grey); }
 /* diagonal cells (same dialect in and out, no translation required): subtle ring */
 .cell.diag { outline: 1px solid var(--fg-dim); outline-offset: 1px; }
 /* compact cell legend: one line of colored squares + short labels, mirrors the cell classes */
@@ -298,6 +301,7 @@ tbody tr { cursor: pointer; }
 .matrix-legend .lg-fail { background: var(--red); }
 .matrix-legend .lg-notconf { background: var(--bg-hover); border: 1px solid var(--border); }
 .matrix-legend .lg-unverified { background: var(--bg-hover); border: 1px dashed var(--fg-dim); }
+.matrix-legend .lg-untestable { background: var(--bg-hover); border: 1px dotted var(--grey); }
 .matrix-legend .lg-diag { background: var(--bg-hover); outline: 1px solid var(--fg-dim); outline-offset: 1px; }
 .matrix-legend-note { font-size: .78rem; margin: 0 0 .8rem; }
 .matrix-detail {
