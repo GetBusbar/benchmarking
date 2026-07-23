@@ -6,10 +6,11 @@
   "last_http_status": "200",
   "serve_error": "",
   "stream_error": "",
+  "stream_note": "",
   "streamcpu_frames_per_sec": 0,
   "streamcpu_fps_per_core": 0,
   "streamcpu_concurrency": 0,
-  "streamcpu_direct_ceiling_fps": 158054,
+  "streamcpu_direct_ceiling_fps": 153531,
   "streamcpu_mock_bound": false,
   "streamcpu_valid": false,
   "streamcpu_added_per_frame_us": null,
@@ -17,7 +18,7 @@
   "streamcpu_frame_bytes": 16,
   "streamcpu_cores": 4,
   "streamcpu_stall_ms": 250,
-  "sweep_streamcpu": [{"conc":8,"streams":244,"complete":244,"fail":0,"stalled":21,"frames":124928,"fps":6012,"delivered":1.0000},{"conc":32,"streams":286,"complete":286,"fail":0,"stalled":237,"frames":146432,"fps":6778,"delivered":1.0000},{"conc":64,"streams":276,"complete":275,"fail":1,"stalled":234,"frames":140800,"fps":4848,"delivered":0.9964},{"conc":128,"streams":387,"complete":379,"fail":8,"stalled":320,"frames":194048,"fps":5644,"delivered":0.9793},{"conc":256,"streams":509,"complete":503,"fail":6,"stalled":357,"frames":257536,"fps":5412,"delivered":0.9882}],
+  "sweep_streamcpu": [{"conc":8,"streams":208,"complete":208,"fail":0,"stalled":68,"frames":106496,"fps":5208,"delivered":1.0000},{"conc":32,"streams":254,"complete":254,"fail":0,"stalled":212,"frames":130048,"fps":5635,"delivered":1.0000},{"conc":64,"streams":319,"complete":319,"fail":0,"stalled":269,"frames":163328,"fps":6555,"delivered":1.0000},{"conc":128,"streams":388,"complete":380,"fail":8,"stalled":361,"frames":194560,"fps":5404,"delivered":0.9794},{"conc":256,"streams":487,"complete":474,"fail":13,"stalled":453,"frames":242688,"fps":3882,"delivered":0.9733}],
   "payload_bytes": 256,
   "endpoint": "/v1/chat/completions",
   "model": "gpt-4o-mini",
@@ -25,5 +26,5 @@
   "mock_proto": "h1+h2c",
   "arch": "arm64",
   "hardware": "AWS m7g.2xlarge (Graviton3, 8 cores / 32 GB). Gateway pinned to 4 cores, mock+loadgen on the other 4, Ubuntu 24.04. One dedicated box per gateway.",
-  "measured_at": "2026-07-23T00:15:33Z"
+  "measured_at": "2026-07-23T04:58:59Z"
 }
