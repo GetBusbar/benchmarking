@@ -55,12 +55,16 @@ for d in "$HERE"/gateways/*/gateway.sh; do DEFAULT_GATEWAYS+=("$(basename "$(dir
 if [[ $# -gt 0 ]]; then GATEWAYS=("$@"); else GATEWAYS=("${DEFAULT_GATEWAYS[@]}"); fi
 
 # ── shared AWS setup (key + SG), done once ────────────────────────────────────────────────────────
-# Always (re)create the keypair AND its local private key together. A leftover key from a previous run
-# — e.g. in a different $TMPDIR — would silently mismatch a newly-created AWS keypair, and the only
-# symptom is every box reporting "ssh never came up". Recreating both in lockstep makes them match.
-aws ec2 delete-key-pair --key-name "$KEYNAME" >/dev/null 2>&1 || true
-rm -f "$KEYFILE"
-aws ec2 create-key-pair --key-name "$KEYNAME" --query KeyMaterial --output text > "$KEYFILE"; chmod 600 "$KEYFILE"
+# The keypair + local private key are created together and then REUSED across invocations. We must
+# NOT delete-and-recreate on every run: a second (or concurrent) invocation that recreates the AWS
+# keypair invalidates the private key that boxes from a still-running invocation were launched with,
+# so every later `ssh`/rsync to those boxes fails with "Permission denied (publickey)" and their
+# results can never be pulled. Reuse the existing keyfile when present; only (re)create the pair when
+# the local key is missing (first run, or a wiped $TMPDIR), keeping AWS + local in lockstep.
+if [[ ! -s "$KEYFILE" ]]; then
+  aws ec2 delete-key-pair --key-name "$KEYNAME" >/dev/null 2>&1 || true
+  aws ec2 create-key-pair --key-name "$KEYNAME" --query KeyMaterial --output text > "$KEYFILE"; chmod 600 "$KEYFILE"
+fi
 SG=$(aws ec2 describe-security-groups --group-names "$SGNAME" --query 'SecurityGroups[0].GroupId' --output text 2>/dev/null || true)
 [[ -z "$SG" || "$SG" == "None" ]] && SG=$(aws ec2 create-security-group --group-name "$SGNAME" --description "gateway bench SSH" --query GroupId --output text)
 MYIP=$(curl -s https://checkip.amazonaws.com)
