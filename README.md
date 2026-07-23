@@ -1,8 +1,8 @@
 # AI gateway benchmarks
 
-> **Browse the results:** [getbusbar.github.io/benchmarking](https://getbusbar.github.io/benchmarking/) — sortable tables, protocol matrix, charts, methodology.
+> **Browse the results:** [getbusbar.github.io/benchmarking](https://getbusbar.github.io/benchmarking/) - sortable tables, protocol matrix, charts, methodology.
 
-A fair, reproducible benchmark for self-hostable AI gateways — **LiteLLM (Rust & Python), Bifrost,
+A fair, reproducible benchmark for self-hostable AI gateways - **LiteLLM (Rust & Python), Bifrost,
 Portkey, Kong, Helicone, GoModel, Busbar, and whatever else you drop in.** Same box, same mock, same load,
 same cpu pin, for every gateway. One command runs it; the charts regenerate from raw results; every
 source ref is pinned in the open and the built commit is stamped into the output.
@@ -14,18 +14,18 @@ dropping it. Add your gateway (or fix how we run yours) with a one-file [manifes
 
 On the Bench is built and operated by the Busbar team, and busbar is one of the entrants. It stays honest
 structurally: one shared harness with no per-gateway special-casing, every number from the committed JSON,
-fully open source. Don't take our word for it — read the code and re-run it.
+fully open source. Don't take our word for it - read the code and re-run it.
 
 ## Results
 
-**Ran on:** AWS `m7g.xlarge`-class Graviton3 (ARM64), Ubuntu 24.04 — the same 4 vCPU / $0.04-per-vCPU
+**Ran on:** AWS `m7g.xlarge`-class Graviton3 (ARM64), Ubuntu 24.04 - the same 4 vCPU / $0.04-per-vCPU
 machine class the gateways-under-test benchmark themselves on. The exact instance type and vCPU count
 are recorded in every `results/*.json` and printed at the top of each report page.
 
-Full, auto-generated result pages (regenerated from the raw JSON on every run — no hand-typed numbers):
+Full, auto-generated result pages (regenerated from the raw JSON on every run - no hand-typed numbers):
 
-- **[Top 5 gateways →](results/reports/top5/)** — the top 5 by lowest added latency, the same five on every chart.
-- **[All gateways →](results/reports/all/)** — the complete field, including any that couldn't serve the endpoint (marked, not hidden).
+- **[Top 5 gateways →](results/reports/top5/)** - the top 5 by lowest added latency, the same five on every chart.
+- **[All gateways →](results/reports/all/)** - the complete field, including any that couldn't serve the endpoint (marked, not hidden).
 
 Each page shows added latency (µs), RPS ceiling, idle/peak memory, whether the gateway served, and the
 exact build/commit measured, plus the charts below.
@@ -35,18 +35,18 @@ exact build/commit measured, plus the charts below.
 ## Prerequisites
 
 **To run locally on your own box:**
-- **Rust** (`cargo`) — builds the mock (`mock/`, a hyper server that answers all six wire protocols and sustains 100s of k RPS, so it's never the bottleneck), plus the gateways compiled from source (LiteLLM-Rust, Helicone). Source builds also need `cmake`, `clang`, and `protobuf-compiler`.
-- **Go** — builds the load generator (`loadgen/`).
-- **Docker** — for the container-based gateways (Bifrost, Kong, GoModel, One-API, …).
-- **Python 3 + matplotlib** — draws the charts (`pip install matplotlib`). Optional; JSON results are written either way.
+- **Rust** (`cargo`) - builds the mock (`mock/`, a hyper server that answers all six wire protocols and sustains 100s of k RPS, so it's never the bottleneck), plus the gateways compiled from source (LiteLLM-Rust, Helicone). Source builds also need `cmake`, `clang`, and `protobuf-compiler`.
+- **Go** - builds the load generator (`loadgen/`).
+- **Docker** - for the container-based gateways (Bifrost, Kong, GoModel, One-API, …).
+- **Python 3 + matplotlib** - draws the charts (`pip install matplotlib`). Optional; JSON results are written either way.
 - A gateway binary/image for whatever you're testing (e.g. `BUSBAR_BIN=/path/to/busbar`). Competitor gateways build/pull themselves on first run.
 
-**To run the one-click cloud version** (`run-on-ec2.sh`) the *only* extra dependency is **AWS CLI v2**, configured (`aws configure` — creds + a default region). The script launches a fresh Graviton box, installs everything on it, runs the full suite, pulls the results back, and **terminates the box** — nothing to set up, nothing to clean up.
+**To run the one-click cloud version** (`run-on-ec2.sh`) the *only* extra dependency is **AWS CLI v2**, configured (`aws configure` - creds + a default region). The script launches a fresh Graviton box, installs everything on it, runs the full suite, pulls the results back, and **terminates the box** - nothing to set up, nothing to clean up.
 
-## Run it — one command, every metric
+## Run it - one command, every metric
 
 Clone, then run one script. Everything is at the repo root, and **every gateway provisions itself**
-from the ref pinned in [`gateways/versions.env`](gateways/versions.env) — Docker images, pip, source,
+from the ref pinned in [`gateways/versions.env`](gateways/versions.env) - Docker images, pip, source,
 or (for a native gateway) its released image's binary. Nothing to fetch by hand for any of them.
 
 ```sh
@@ -68,27 +68,27 @@ back, and **terminates the box**. Only needs AWS CLI v2 configured.
 ```sh
 ./run-on-ec2.sh                     # every gateway, one-click (Graviton/arm64)
 ./run-on-ec2.sh litellm-rust bifrost   # a subset
-ARCH=x86 ./run-on-ec2.sh            # the whole field on Intel instead — one flip
+ARCH=x86 ./run-on-ec2.sh            # the whole field on Intel instead - one flip
 ```
 
 **Architecture is one knob.** `ARCH=arm64` (default) runs the field on Graviton (`m7g`); `ARCH=x86`
 runs the same field on Intel (`m7i`). One switch picks the instance family *and* the matching Ubuntu
 AMI; every gateway builds/pulls for that arch on its own box, and the arch is recorded in each result
-so runs from different arches never get conflated. Every gateway here runs natively on **both** —
+so runs from different arches never get conflated. Every gateway here runs natively on **both** -
 including Helicone and One-API, which publish x86-only images (we build Helicone from source and pin
 One-API to its arm64 tag), so nothing is quietly arm64-only or x86-only.
 
 A gateway that can't be stood up (unreachable, or needs infra a single container can't provide) is
-recorded `served: false` and shown as such — never silently dropped. To pin a different build of any
+recorded `served: false` and shown as such - never silently dropped. To pin a different build of any
 gateway, edit its line in `gateways/versions.env` (or override the env var); the exact ref is stamped
 into every result.
 
 ### How long it takes
 
-Plan for it — this is a build-and-measure benchmark, not a quick script:
+Plan for it - this is a build-and-measure benchmark, not a quick script:
 
 - **Full field, all metrics** (`run-on-ec2.sh` with the default gateways): **~60–75 min** on an
-  `m7g.4xlarge`. Most of that is *building* — LiteLLM-Rust from source is the long pole (~15–20 min),
+  `m7g.4xlarge`. Most of that is *building* - LiteLLM-Rust from source is the long pole (~15–20 min),
   plus the LiteLLM/Kong/Helicone images and busbar. The measurement itself is only ~5–6 min per
   gateway (latency + throughput sweep + a memory soak).
 - **A single gateway** (e.g. `run-all.sh busbar`): **~8–12 min**, or ~2–3 min if it's already built.
@@ -100,24 +100,24 @@ faster.
 
 ## What it measures
 
-**`perf/`** — what the system can *do* (the metrics that matter most):
+**`perf/`** - what the system can *do* (the metrics that matter most):
 
-- **added latency (µs)** — p99 the gateway adds over the upstream at concurrency 1
+- **added latency (µs)** - p99 the gateway adds over the upstream at concurrency 1
   (gateway p99 − direct-to-mock p99). Microseconds, because at this scale ms hides the story.
-- **RPS ceiling** — highest sustained requests/sec with p99 under 1 s and **a <0.1% error rate** —
+- **RPS ceiling** - highest sustained requests/sec with p99 under 1 s and **a <0.1% error rate** -
   "how much can it carry before it falls over."
 
-**`stream/`** (opt-in: `SUITES="perf memory stream" ./run-all.sh`) — what the gateway adds to a
+**`stream/`** (opt-in: `SUITES="perf memory stream" ./run-all.sh`) - what the gateway adds to a
 token stream. The mock answers `stream:true` with a valid SSE stream: a role chunk, then 64
 content deltas paced at 20 ms, then finish + `[DONE]` (Anthropic event shape on `/messages`).
 Against that fixed pace, per gateway:
 
-- **added TTFT (µs)** — time to the first content frame through the gateway minus direct-to-mock,
+- **added TTFT (µs)** - time to the first content frame through the gateway minus direct-to-mock,
   at concurrency 1. The delay a user waits before the first token appears.
-- **added inter-frame latency (µs)** — p50/p99 of the gateway's content-frame gap minus the
+- **added inter-frame latency (µs)** - p50/p99 of the gateway's content-frame gap minus the
   direct-to-mock gap. Both sides carry the mock's 20 ms pace and the same timer jitter, so the
   subtraction isolates the gateway's per-frame overhead.
-- **streams sustained** — the highest concurrent stream count where at least 99.9% of expected
+- **streams sustained** - the highest concurrent stream count where at least 99.9% of expected
   frames deliver, no stream stalls past 2x the pacing interval, and the stream error rate stays
   under 0.1%; plus the frames/sec carried there. The mock-ceiling guardrail applies here too: the
   mock's own frames/sec at top concurrency is recorded and a result within 10% is flagged
@@ -187,49 +187,49 @@ discovery never fields it): a second mock posing as the gateway, expected to sco
 incidentally and every translation cell false as passthrough. If the fixture ever goes green on a
 translation cell, the guard has a hole.
 
-**`memory/`** — resident memory across a request's life (matters most at GB scale):
+**`memory/`** - resident memory across a request's life (matters most at GB scale):
 
-- **idle RSS** — right after the gateway first answers `200`, before any load.
-- **peak RSS** — highest RSS under sustained large-payload load.
-- **post-load RSS** — 60 s after load stops: does it release, or stay pinned? A gateway that pools
+- **idle RSS** - right after the gateway first answers `200`, before any load.
+- **peak RSS** - highest RSS under sustained large-payload load.
+- **post-load RSS** - 60 s after load stops: does it release, or stay pinned? A gateway that pools
   memory and never returns it looks bounded on a boot-time `docker stats` but stays pinned at peak
   under sustained load.
 
-## Methodology — the choices, explained
+## Methodology - the choices, explained
 
-**Machine.** `m7g.2xlarge` — 8 real Graviton3 cores (Graviton doesn't hyperthread: 1 vCPU = 1 core).
+**Machine.** `m7g.2xlarge` - 8 real Graviton3 cores (Graviton doesn't hyperthread: 1 vCPU = 1 core).
 The **gateway under test is pinned to 4 cores** (= an `m7g.xlarge`, the 4-vCPU class AIGatewayBench
 uses); the **mock + load generator get the other 4**, isolated. That's stricter than a co-located
-4-vCPU run where the load tool steals cycles from the gateway — here the gateway gets a clean 4 cores
+4-vCPU run where the load tool steals cycles from the gateway - here the gateway gets a clean 4 cores
 and the harness can't bottleneck it. All loopback; no network noise.
 
 **The mock.** A deterministic Rust server (`mock/`) that answers all six wire protocols by path and
 holds hundreds of thousands of concurrent requests so it's never the limit. One knob: `MOCK_TTFT_MS`,
 a per-request delay simulating the model doing work.
 
-**Latency — instant mock.** Added latency is `gateway p99 − direct-to-mock p99` at concurrency 1
+**Latency - instant mock.** Added latency is `gateway p99 − direct-to-mock p99` at concurrency 1
 against a **zero-delay** mock. Zero base keeps the overhead a clean microsecond delta; a 20 ms base
 would just add noise to a sub-millisecond number.
 
-**Throughput — two honest numbers, not one.** A single throughput figure invites "you picked the
+**Throughput - two honest numbers, not one.** A single throughput figure invites "you picked the
 flattering metric," so we report both, same 20 ms delay for every gateway:
-- **Max proxy throughput** (instant mock): raw forwarding speed — trivial requests/sec the gateway
+- **Max proxy throughput** (instant mock): raw forwarding speed - trivial requests/sec the gateway
   pushes, its CPU-bound ceiling.
-- **Sustained RPS @ 20 ms** (delayed mock): **AIGatewayBench's exact metric** — how many concurrent
+- **Sustained RPS @ 20 ms** (delayed mock): **AIGatewayBench's exact metric** - how many concurrent
   in-flight requests the gateway holds while the model takes 20 ms, at p99 < 1 s with <0.1% errors.
   Production-shaped (a gateway's real job is holding thousands of slow calls) and directly comparable
   to their published numbers.
 
 A **mock-ceiling guardrail** measures the mock's own throughput each sweep and flags (⚠) any result
-within 10% of it — so a number that's really the *harness's* limit is marked a floor, never sold as
+within 10% of it - so a number that's really the *harness's* limit is marked a floor, never sold as
 the gateway's ceiling.
 
-**Memory.** Sustained 150 KB payloads at high concurrency, sampling idle / peak / post-load RSS — the
+**Memory.** Sustained 150 KB payloads at high concurrency, sampling idle / peak / post-load RSS - the
 arc that separates a bounded working set from an unbounded pool that eats the node.
 
 ## Add a gateway
 
-Drop a directory under [`gateways/`](gateways/) with a `gateway.sh` manifest — four variables, four
+Drop a directory under [`gateways/`](gateways/) with a `gateway.sh` manifest - four variables, four
 functions. The runners are gateway-agnostic; there is nothing else to edit. See
 [`gateways/README.md`](gateways/README.md).
 
@@ -241,18 +241,18 @@ functions. The runners are gateway-agnostic; there is nothing else to edit. See
   pointing at the file and the recorded commit.
 - **Each gateway is launched the only way it actually serves the endpoint.** For example,
   LiteLLM-Rust's `/v1/messages` route only serves the `azure_ai` provider *and* only serves at all
-  under its `python-config` reader (the lean env config returns `400`) — verified against its own
+  under its `python-config` reader (the lean env config returns `400`) - verified against its own
   source. We launch it that way and record what it costs, rather than quoting an idle number from a
   config that doesn't serve. The reasoning is in
   [`gateways/litellm-rust/gateway.sh`](gateways/litellm-rust/gateway.sh).
-- **The mock is deterministic and dumb** — it answers any path with a fixed small body (OpenAI shape,
+- **The mock is deterministic and dumb** - it answers any path with a fixed small body (OpenAI shape,
   or Anthropic shape for `/messages`), so the number is the *gateway's* cost, not the upstream's.
 - **The chart colors by measurement, not by name.** Green goes to whichever gateway measured lowest.
   If Busbar loses a metric, Busbar isn't green on it.
 
 ## Why this exists
 
-Published gateway numbers are often hard to reproduce — the hardware isn't disclosed, the config may
+Published gateway numbers are often hard to reproduce - the hardware isn't disclosed, the config may
 not actually serve the endpoint, and the chart can't be regenerated from raw data. This repo is built
 to be the opposite: disclosed hardware, configs that serve (or are recorded as not serving), and every
-number regenerating from committed JSON. Clone it, run it, and check the work — including ours.
+number regenerating from committed JSON. Clone it, run it, and check the work - including ours.

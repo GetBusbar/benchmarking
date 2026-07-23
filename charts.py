@@ -261,7 +261,7 @@ CHARTS = [
     Chart(
         name="added_latency",
         suite="perf",
-        title="Added latency — what the gateway costs you",
+        title="Added latency - what the gateway costs you",
         subtitle="p99 the gateway adds on top of the upstream, concurrency 1, best same-dialect passthrough (lower is better)",
         unit="µs",
         series=[Series("added_latency_p99_us", "p99 added latency", "rank")],
@@ -271,7 +271,7 @@ CHARTS = [
     Chart(
         name="rps_max_proxy",
         suite="perf",
-        title="Max proxy throughput — raw forwarding speed",
+        title="Max proxy throughput - raw forwarding speed",
         subtitle="highest sustained req/s with p99 < 1s, <0.1% errors, instant upstream, best same-dialect passthrough (higher is better)",
         unit="requests / sec",
         series=[Series("rps_max_proxy", "max proxy RPS", "rank")],
@@ -293,7 +293,7 @@ CHARTS = [
         name="memory_rss",
         suite="memory",
         title="Gateway RAM under sustained load",
-        subtitle="idle vs peak RAM (resident memory) — same box, same mock, same load",
+        subtitle="idle vs peak RAM (resident memory) - same box, same mock, same load",
         unit="MiB RAM",
         series=[
             Series("peak_rss_mib", "peak RAM (under load)", "rank"),
@@ -651,7 +651,7 @@ def render(chart: Chart, only_keys=None, out_stem: str | None = None) -> None:
     if clamped:  # a gateway measured faster than direct-to-mock, i.e. inside measurement noise
         bits.append("sub-noise negative differences are shown as 0")
     bits.append("bars colored by implementation language")
-    fig.text(0.008, 0.012, "  ·  ".join(bits) + f"     github.com/GetBusbar/benchmarking — regenerated {RENDER_TS} from raw results",
+    fig.text(0.008, 0.012, "  ·  ".join(bits) + f"     github.com/GetBusbar/benchmarking - regenerated {RENDER_TS} from raw results",
              fontsize=7.3, color=GRAY)
 
     fig.tight_layout(rect=(0, 0.05, 1, 0.93))
@@ -699,7 +699,7 @@ def _report_md(rows: list, title: str, charts: list, pending: tuple = (), chart_
     lines = [f"# {title}", ""]
     lines.append(f"**Ran on:** {hw}  ·  {when}")
     lines.append("")
-    lines.append("Every number below is regenerated from the raw `results/*.json` — re-run "
+    lines.append("Every number below is regenerated from the raw `results/*.json` - re-run "
                  "`run-all.sh` and this page updates. Passthrough and translation figures are the "
                  "canonical per-gateway records (matrix per-cell sweep, perf/xlate-suite fallback) "
                  "from `site/data.json`, the same values the site table ranks. Chart bars are "
@@ -738,12 +738,12 @@ def _report_md(rows: list, title: str, charts: list, pending: tuple = (), chart_
             zero_load_seen = True
         # Latency cell: a did-not-serve gateway may still have a concurrency-1 number — flag it † so it
         # is never mistaken for a clean win.
-        lat_cell = "—"
+        lat_cell = "-"
         if lat is not None:
             lat_cell = f"{lat:,} µs" + (" †" if served is False else "")
             if served is False:
                 dnf_seen = True
-        rss = lambda v: f"{v:.0f} MiB" if v is not None else "—"
+        rss = lambda v: f"{v:.0f} MiB" if v is not None else "-"
         if served is False and r.get("serve_error"):
             fail_notes.append((GATEWAYS[key], str(r.get("serve_error"))))
         lines.append(
@@ -758,16 +758,16 @@ def _report_md(rows: list, title: str, charts: list, pending: tuple = (), chart_
     # Gateways we intend to measure but haven't yet — shown so the field is transparent, never hidden.
     for key in pending:
         lines.append(
-            f"| {_linked(key)} | ⏳ *pending* | — | — | — | — | *pending measurement* |"
+            f"| {_linked(key)} | ⏳ *pending* | - | - | - | - | *pending measurement* |"
         )
     lines.append("")
     if pending:
         names = ", ".join(GATEWAYS[k] for k in pending)
         lines.append(f"⏳ **Pending measurement** (a manifest exists; not yet run on the rig): {names}. "
-                     "These land here as their runs complete — nothing is hidden.")
+                     "These land here as their runs complete - nothing is hidden.")
         lines.append("")
-    lines.append("Two throughput numbers: **max proxy RPS** (instant upstream — raw forwarding speed) "
-                 "and **sustained RPS @20ms** (AIGatewayBench's metric — concurrent in-flight capacity "
+    lines.append("Two throughput numbers: **max proxy RPS** (instant upstream - raw forwarding speed) "
+                 "and **sustained RPS @20ms** (AIGatewayBench's metric - concurrent in-flight capacity "
                  "under realistic LLM latency).")
     legend = []
     zero_or_x = any(True for _, r in rows if r.get("served") is False) or zero_load_seen
@@ -775,10 +775,10 @@ def _report_md(rows: list, title: str, charts: list, pending: tuple = (), chart_
         legend.append("**✕** = did not serve under load (0 successful req/s).")
         legend.append("**0** = came up, but no tested concurrency held p99 < 1 s with <0.1% errors.")
     if dnf_seen:
-        legend.append("**†** = a concurrency-1 latency exists, but the gateway failed under load — "
+        legend.append("**†** = a concurrency-1 latency exists, but the gateway failed under load: "
                       "not a clean result.")
     if mock_bound_seen:
-        legend.append("**⚠** = ceiling within 10% of the mock's own — treat as a **floor**, not a limit.")
+        legend.append("**⚠** = ceiling within 10% of the mock's own: treat as a **floor**, not a limit.")
     if pending:
         legend.append("**⏳** = a manifest exists but it hasn't been run on the rig yet.")
     if legend:
@@ -793,7 +793,7 @@ def _report_md(rows: list, title: str, charts: list, pending: tuple = (), chart_
             err = err.replace("|", "\\|").strip()
             if len(err) > 300:
                 err = err[:300] + "…"
-            lines.append(f"- **{name}** — {err}")
+            lines.append(f"- **{name}** - {err}")
         lines.append("")
     # ── the lane suites: streaming / translation / governance ────────────────────────────────────
     # Their own table, built from results/{stream,xlate,governed}/<gateway>.json. A suite that
