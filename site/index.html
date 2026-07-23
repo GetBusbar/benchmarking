@@ -85,12 +85,13 @@
     <ul class="matrix-legend" aria-label="cell legend">
       <li><span class="lg lg-pass"></span>supported, passing</li>
       <li><span class="lg lg-fail"></span>supported, failing</li>
-      <li><span class="lg lg-notconf"></span>not supported</li>
+      <li><span class="lg lg-notconf"></span>not declared</li>
       <li><span class="lg lg-unverified"></span>not verified</li>
       <li><span class="lg lg-untestable"></span>untestable (mock limit)</li>
+      <li><span class="lg lg-unprobed"></span>unprobed (auth)</li>
       <li><span class="lg lg-diag"></span>same-dialect passthrough</li>
     </ul>
-    <p class="matrix-legend-note muted">Which cells are tested vs grey is drafted by the Busbar team from each project's public docs, a stand-in until maintainers confirm their own grid.<br>Maintainers are welcome to PR their real capability grid.</p>
+    <p class="matrix-legend-note muted">The set of cells each gateway is expected to serve (green vs grey) was drafted by the Busbar team from each project's public docs; it stands in until maintainers confirm their own grid.<br>Maintainers are welcome to PR their real capability grid.</p>
     <div id="matrix-grid"></div>
     <div id="matrix-detail" class="matrix-detail hidden"></div>
     <p id="matrix-empty" class="muted hidden">Protocol matrix results are coming soon: no results/matrix JSONs are committed yet.</p>

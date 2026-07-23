@@ -305,6 +305,7 @@ tbody tr { cursor: pointer; }
 .matrix-legend .lg-notconf { background: var(--bg-hover); border: 1px solid var(--border); }
 .matrix-legend .lg-unverified { background: var(--bg-hover); border: 1px dashed var(--fg-dim); }
 .matrix-legend .lg-untestable { background: var(--bg-hover); border: 1px dotted var(--grey); }
+.matrix-legend .lg-unprobed { background: var(--grey); }
 .matrix-legend .lg-diag { background: var(--bg-hover); outline: 1px solid var(--fg-dim); outline-offset: 1px; }
 .matrix-legend-note { font-size: .78rem; margin: 0 0 .8rem; }
 .matrix-detail {
