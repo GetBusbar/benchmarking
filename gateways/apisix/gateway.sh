@@ -53,6 +53,30 @@ YAML
 # converter. The trailing #END marker is REQUIRED by the yaml config provider.
 _apisix_write_routes() {
   local prov="$1" host="http://127.0.0.1:$MOCK_PORT"
+  # Provider-specific plugin config. The bedrock provider's schema REQUIRES auth.aws
+  # (access_key_id + secret_access_key) and provider_conf.region for SigV4 (ai-proxy/schema.lua +
+  # validate_provider_requirements @3.17.0); a schema-invalid route is silently DROPPED by the
+  # yaml config provider (core/config_yaml.lua logs and skips it, APISIX still boots) - which is
+  # exactly how our earlier bedrock config (header auth, no region) turned into a published 404
+  # "boot failure". Dummy AWS keys sign fine; the mock ignores the signature. Verified locally
+  # against apache/apisix:3.17.0-debian + the recording mock (converse ingress -> 200, bedrock
+  # dialect recorded).
+  local plugcfg
+  if [ "$prov" = bedrock ]; then
+    plugcfg="provider: $prov
+        provider_conf: { region: \"us-east-1\" }
+        auth:
+          aws:
+            access_key_id: \"AKIAMOCKACCESSKEY\"
+            secret_access_key: \"mock-secret-access-key\"
+        options: { model: $GW_MODEL }
+        override: { endpoint: \"$host\" }"
+  else
+    plugcfg="provider: $prov
+        auth: { header: { Authorization: \"Bearer $GW_AUTH\" } }
+        options: { model: $GW_MODEL }
+        override: { endpoint: \"$host\" }"
+  fi
   cat > "$GW_DIR/apisix.gen.yaml" <<YAML
 routes:
   - id: ai-proxy-chat
@@ -60,37 +84,25 @@ routes:
     methods: [POST]
     plugins:
       ai-proxy:
-        provider: $prov
-        auth: { header: { Authorization: "Bearer $GW_AUTH" } }
-        options: { model: $GW_MODEL }
-        override: { endpoint: "$host" }
+        $plugcfg
   - id: ai-proxy-responses
     uri: /v1/responses
     methods: [POST]
     plugins:
       ai-proxy:
-        provider: $prov
-        auth: { header: { Authorization: "Bearer $GW_AUTH" } }
-        options: { model: $GW_MODEL }
-        override: { endpoint: "$host" }
+        $plugcfg
   - id: ai-proxy-messages
     uri: /v1/messages
     methods: [POST]
     plugins:
       ai-proxy:
-        provider: $prov
-        auth: { header: { Authorization: "Bearer $GW_AUTH" } }
-        options: { model: $GW_MODEL }
-        override: { endpoint: "$host" }
+        $plugcfg
   - id: ai-proxy-converse
     uri: /model/$GW_MODEL/converse
     methods: [POST]
     plugins:
       ai-proxy:
-        provider: $prov
-        auth: { header: { Authorization: "Bearer $GW_AUTH" } }
-        options: { model: $GW_MODEL }
-        override: { endpoint: "$host" }
+        $plugcfg
 #END
 YAML
 }
