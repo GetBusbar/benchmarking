@@ -12,6 +12,12 @@ GW_PORT=8080
 GW_PATH=/v1/chat/completions
 GW_MODEL=gpt-4o-mini
 GW_AUTH=sk-dummy
+# Bifrost's Anthropic-format ingress is the DROP-IN integration prefix, not a bare /v1/messages:
+# transports/bifrost-http/integrations/anthropic.go@v1.6.4 mounts POST /anthropic/v1/messages
+# (a bare /v1/messages hits the dashboard's GET catch-all and 405s - which our xlate lane used to
+# publish as a Bifrost translation failure; that was OUR wrong path, verified locally: the correct
+# path translates and returns an Anthropic-shaped envelope through the openai provider).
+GW_ANTHROPIC_PATH=/anthropic/v1/messages
 # BIFROST_IMAGE comes from gateways/versions.env — override there.
 BIFROST_IMAGE="${BIFROST_IMAGE:-maximhq/bifrost:v1.6.4}"
 
@@ -55,23 +61,33 @@ JSON
 # {openai, anthropic, cohere, gemini, mistral, ollama, vllm, sgl} (core/schemas/bifrost.go,
 # provider.go). The OpenAI ingress fans out to the resolved provider's NATIVE upstream shape:
 # anthropic -> /v1/messages, cohere -> /v2/chat, gemini -> /models/<m>:generateContent. Bifrost also
-# has a native Responses INBOUND surface (responses-ingress -> openai provider -> /v1/responses). So
-# the capable cells are openai-ingress into {openai, anthropic, gemini, cohere} plus the
-# openai-responses diagonal. NOT declared: bedrock (the bedrock key IS native Converse but its host
-# is hardcoded to bedrock-runtime.<region>.amazonaws.com - NetworkConfig.BaseURL is never read at
-# runtime, so the mock is unreachable) - grey with the cited reason. openai-chat -> responses is not
-# a declared bridge, so that off-diagonal is 0.
+# has a native Responses INBOUND surface (responses-ingress -> openai provider -> /v1/responses),
+# and an Anthropic-Messages INBOUND surface at /anthropic/v1/messages that converts to a Bifrost
+# ResponsesRequest and hits the routed provider's Responses API - so anthropic-ingress ->
+# openai-responses-egress is a real translation (verified locally at v1.6.4: anthropic body in,
+# anthropic envelope out, mock records the openai-responses dialect). It is NOT declared into the
+# openai-chat egress column because the translation targets the Responses upstream endpoint, not
+# chat/completions. So the capable cells are openai-ingress into {openai, anthropic, gemini,
+# cohere}, the openai-responses diagonal, and anthropic-ingress -> openai-responses. openai-chat ->
+# responses is not a declared bridge, so that off-diagonal is 0.
 # Evidence: core/schemas/bifrost.go (key enum), provider.go (BaseURL-overridable set),
-# bedrock/bedrock.go (hardcoded host, no BaseURL), tag transports/v1.6.4. Wired-pending-field-verify.
+# transports/bifrost-http/integrations/anthropic.go (drop-in Messages ingress), tag
+# transports/v1.6.4, local verification runs.
 GW_MATRIX_CAP="
 101110
+010000
 010000
 000000
 000000
 000000
-000000
 "
-GW_MATRIX_CAP_NOTE="Bifrost v1.6.4 ignores network_config.base_url for the bedrock provider (host hardcoded to bedrock-runtime.<region>.amazonaws.com), so a custom Bedrock upstream is unreachable; that cell is grey by that capability limit (bedrock/bedrock.go)"
+GW_MATRIX_CAP_NOTE="Bifrost v1.6.4 has no openai-chat -> responses bridge and no gemini/cohere/bedrock-format ingress; undeclared cells are grey by that capability limit"
+# Bedrock is NOT incapability: Bifrost speaks Bedrock Converse in production, but at v1.6.4 the
+# bedrock provider hardcodes bedrock-runtime.<region>.amazonaws.com (core/providers/bedrock/
+# bedrock.go builds the request URL from region only; network_config.base_url is consulted for
+# headers/TLS/proxy/timeouts, never the host), so this rig's localhost mock cannot stand in.
+GW_MATRIX_UNTESTABLE="openai/bedrock"
+GW_MATRIX_UNTESTABLE_NOTE="Bifrost v1.6.4 hardcodes the Bedrock host (bedrock-runtime.<region>.amazonaws.com, core/providers/bedrock/bedrock.go; network_config.base_url never overrides it), so the harness mock cannot stand in for the upstream; Bifrost does serve Bedrock Converse in production"
 GW_MATRIX_EGRESS="openai openai-responses anthropic gemini cohere"
 gw_matrix_egress() {
   case "$1" in
