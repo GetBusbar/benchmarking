@@ -6,10 +6,11 @@
 //
 //   node site/test.mjs
 //
-// Covers: gen-data emits GW_CLASS for every gateway; search/class/lang/capability
-// filtering; path-URL state round-trip (/<category>/<view>?<params>) including
-// legacy-hash decoding; the sweep chart component drawing real committed sweep
-// data through the stub canvas.
+// Covers: gen-data emits GW_CLASS for every gateway; search/capability filtering
+// (the class/lang chip rows are retired; stale params must be ignored); path-URL
+// state round-trip (/<category>/<view>?<params>) including legacy-hash decoding
+// and the HOME landing page at the site root; the sweep chart component drawing
+// real committed sweep data through the stub canvas.
 
 import { execFileSync } from "node:child_process";
 import { readFileSync, mkdtempSync, rmSync } from "node:fs";
@@ -91,23 +92,31 @@ test("search filters rows by name", () => {
   assert.equal(app.applyFilters(data.gateways, st).length, 0);
 });
 
-test("class filter matches the manifest self-description", () => {
+test("capability toggle filters without crashing on missing suites", () => {
   const st = app.newState();
-  st.classes = new Set(["Control plane"]);
-  const rows = app.applyFilters(data.gateways, st);
-  assert.deepEqual(rows.map((g) => g.key), ["busbar"]);
-});
-
-test("language filter and capability toggles combine", () => {
-  const st = app.newState();
-  st.langs = new Set(["Rust"]);
-  const rust = app.applyFilters(data.gateways, st);
-  assert.ok(rust.length > 0 && rust.every((g) => g.lang === "Rust"));
-  // stream results are not committed yet: the capability toggle must degrade to
-  // an empty (not crashing) result set, never a throw.
   st.needStream = true;
   const streaming = app.applyFilters(data.gateways, st);
   assert.ok(streaming.every((g) => g.stream && g.stream.stream_served));
+});
+
+test("the class/lang filter chip rows are gone; stale URL params are ignored", () => {
+  // The chip rows were removed from the perf-tab controls (the roster tab already
+  // shows language and class); the shell must not carry their containers.
+  const shell = readFileSync(join(HERE, "index.html"), "utf8");
+  assert.ok(!shell.includes("class-filters"), "index.html still has #class-filters");
+  assert.ok(!shell.includes("lang-filters"), "index.html still has #lang-filters");
+  // A stale ?cls= / ?lang= from an old shared URL decodes without error and
+  // without filtering (no invisible filter with no UI to clear); the rest of the
+  // params on the same URL still apply.
+  const st = app.decodeUrl("/gateways/passthrough", "?cls=Control%20plane&lang=Rust&q=bus");
+  assert.equal(st.view, "passthrough");
+  assert.equal(st.q, "bus");
+  assert.ok(!("classes" in st) && !("langs" in st), "retired filter state fields are gone");
+  st.q = "";
+  assert.equal(app.applyFilters(data.gateways, st).length, data.gateways.length, "stale params filter nothing");
+  // and encoding never re-emits them
+  assert.ok(!app.encodeUrl(st).includes("cls="));
+  assert.ok(!app.encodeUrl(st).includes("lang="));
 });
 
 // ---- path-URL state round-trip ----------------------------------------------
@@ -120,8 +129,6 @@ test("url state round-trips through /<category>/<view>?<params>", () => {
   const st = app.newState();
   st.view = "matrix";
   st.q = "bus bar & co";
-  st.classes = new Set(["Control plane", "LLM gateway"]);
-  st.langs = new Set(["Rust"]);
   st.needXlate = true;
   st.sortCol = "lat";
   st.sortDesc = false;
@@ -134,8 +141,6 @@ test("url state round-trips through /<category>/<view>?<params>", () => {
   for (const k of ["category", "view", "q", "sortCol", "sortDesc", "needStream", "needXlate", "cmpOpen", "drawer"]) {
     assert.deepEqual(back[k], st[k], `field ${k}`);
   }
-  assert.deepEqual([...back.classes].sort(), [...st.classes].sort());
-  assert.deepEqual([...back.langs].sort(), [...st.langs].sort());
   assert.deepEqual(back.cmp, st.cmp);
 });
 
@@ -186,7 +191,7 @@ test("home renders one CTA card per category plus the coming-soon placeholder", 
   assert.ok(app.homeCardsHtml(null).includes("Self-hostable AI gateways"));
   assert.ok(!app.homeCardsHtml(null).includes("null "));
   // no em dashes in rendered strings (house style)
-  assert.ok(!html.includes("—"), "no em dashes in home cards");
+  assert.ok(!html.includes("\u2014"), "no em dashes in home cards");
 });
 
 test("unknown paths land on home; unknown views land on the category overview", () => {
@@ -210,7 +215,6 @@ test("legacy hash URLs (#view=...&sort=...) still decode", () => {
   assert.equal(st.view, "matrix");
   assert.equal(st.sortCol, "mempeak");
   assert.equal(st.sortDesc, false);
-  assert.deepEqual([...st.langs], ["Rust"]);
   // and re-encoding a legacy state yields the clean path form
   assert.ok(app.encodeUrl(st).startsWith("/gateways/matrix?"));
 });

@@ -380,8 +380,6 @@ function newState() {
     q: "",
     sortCol: "rps20",
     sortDesc: true,
-    langs: new Set(),
-    classes: new Set(),
     needStream: false,
     needXlate: false,
     // Translation tab: the pinned ingress->egress pair the whole table is ranked on. Both ends are
@@ -411,8 +409,6 @@ function encodeUrl(st) {
   if (st.view === HOME_VIEW) return "/";
   const p = new URLSearchParams();
   if (st.q) p.set("q", st.q);
-  if (st.classes.size) p.set("cls", [...st.classes].sort().join("|"));
-  if (st.langs.size) p.set("lang", [...st.langs].sort().join("|"));
   const caps = CAPS.filter(([k]) => st[k]).map(([, name]) => name);
   if (caps.length) p.set("cap", caps.join("|"));
   // Each perf tab's clean URL omits the sort when it equals that tab's default column + direction.
@@ -462,8 +458,8 @@ function decodeUrl(pathname, search, hash) {
   const list = (k) => (p.get(k) || "").split("|").filter(Boolean);
   if (p.get("view") && resolveView(p.get("view"))) st.view = resolveView(p.get("view")); /* legacy hash form */
   st.q = p.get("q") || "";
-  st.classes = new Set(list("cls"));
-  st.langs = new Set(list("lang"));
+  // Retired class/language chip filters: a stale ?cls= / ?lang= in an old shared
+  // URL is IGNORED (never an error, never an invisible filter with no UI to clear).
   for (const cap of list("cap")) {
     const hit = CAPS.find(([, name]) => name === cap);
     if (hit) st[hit[0]] = true;
@@ -518,8 +514,6 @@ function applyFilters(gateways, st) {
   const q = st.q.trim().toLowerCase();
   return gateways.filter((g) => {
     if (q && !g.display.toLowerCase().includes(q) && !g.key.toLowerCase().includes(q)) return false;
-    if (st.classes.size && !st.classes.has(g.cls || "Gateway")) return false;
-    if (st.langs.size && !st.langs.has(g.lang)) return false;
     if (st.needStream && !(g.stream && g.stream.stream_served)) return false;
     if (st.needXlate && !hasTranslation(g)) return false;
     // View-implicit filter: Translation lists only gateways that serve the pinned pair (every row
@@ -822,23 +816,10 @@ function renderTable() {
   });
 }
 
-/* ---- filter bar ------------------------------------------------------------- */
-function chipGroup(boxId, values, set, colorFor) {
-  const box = document.getElementById(boxId);
-  box.innerHTML = values.map((v) => `<button class="chip-filter" data-v="${esc(v)}">${esc(v)}</button>`).join("");
-  box.querySelectorAll("button").forEach((b) => {
-    const apply = () => {
-      const on = set.has(b.dataset.v);
-      b.classList.toggle("on", on);
-      b.style.background = on ? (colorFor ? colorFor(b.dataset.v) : "var(--grey)") : "";
-    };
-    apply();
-    b.addEventListener("click", () => {
-      if (set.has(b.dataset.v)) set.delete(b.dataset.v); else set.add(b.dataset.v);
-      apply(); renderTable(); syncUrl(true);
-    });
-  });
-}
+/* ---- filter bar -------------------------------------------------------------
+   Deliberately compact: search only. The class/language chip rows were retired
+   (they burned vertical space above a 13-row table, and the roster tab already
+   shows language + class); a stale ?cls= / ?lang= URL param is ignored. */
 
 /* Wire the persistent inputs exactly once (renderFilters may re-run on hashchange). */
 function initFilterControls() {
@@ -863,10 +844,6 @@ function initFilterControls() {
 }
 
 function renderFilters() {
-  const gws = state.data.gateways;
-  chipGroup("class-filters", [...new Set(gws.map((g) => g.cls || "Gateway"))].sort(), state.classes, null);
-  chipGroup("lang-filters", [...new Set(gws.map((g) => g.lang))].sort(), state.langs,
-    (l) => LANG_COLORS[l] || LANG_COLORS.Other);
   document.getElementById("search").value = state.q;
   for (const [, name] of CAPS) { const el = document.getElementById(`f-${name}`); if (el) el.checked = state[CAPS.find(([, n]) => n === name)[0]]; }
   const xin = document.getElementById("xlate-in"); if (xin) xin.value = state.xlateIn;
@@ -1457,7 +1434,6 @@ function initTabs() {
 function applyState(st) {
   Object.assign(state, {
     category: st.category, view: st.view, q: st.q, sortCol: st.sortCol, sortDesc: st.sortDesc,
-    langs: st.langs, classes: st.classes,
     needStream: st.needStream, needXlate: st.needXlate,
     xlateIn: st.xlateIn, xlateOut: st.xlateOut,
     cmp: st.cmp, cmpOpen: st.cmpOpen, drawer: st.drawer,
