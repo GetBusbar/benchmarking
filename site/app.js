@@ -109,10 +109,11 @@ function lane(g, suite, flag, errKey, pick) {
   return pick(j);
 }
 
-/* bestOrPerf: the Performance tab ranks each gateway on its BEST-performing green matrix cell
-   (g.best_cell, from the per-cell matrix sweep: max sustained RPS @20ms among the paths the
-   gateway actually supports). Results predating the per-cell sweep have no best_cell; those fall
-   back to the perf suite's single-path number so the table never goes blank. */
+/* bestOrPerf: the Performance tab reads each gateway's REPRESENTATIVE cell (g.best_cell) - the
+   same-dialect passthrough diagonal chosen INTERNALLY by lowest added latency (openai when served,
+   else the native dialect), never a translation cell. Latency selects the cell; sustained RPS is
+   the EXTERNAL comparison metric the table ranks/sorts on. Results predating the per-cell sweep have
+   no best_cell; those fall back to the perf suite's single-path number so the table never blanks. */
 function bestOrPerf(g, key, fmt) {
   if (g.best_cell && g.best_cell[key] != null)
     return { v: g.best_cell[key], text: fmt(g.best_cell[key]), na: false };
