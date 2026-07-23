@@ -40,6 +40,23 @@ grey regardless of language.
 The runner exports for you: `$MOCK_PORT` (deterministic mock upstream), `$CORES` (cpu pin),
 `$GW_DIR` (this gateway's directory, for config files).
 
+**Optional per-lane hooks** (all generic — the shared runners branch on a hook's presence, never on
+a gateway's name; per-gateway values live only in the manifest):
+
+```sh
+GW_MATRIX_CAP="…"           # 6x6 declared capability grid (matrix/run.sh header documents it)
+GW_MATRIX_CAP_NOTE="…"      # cited reason shown on declared-0 (grey) cells
+GW_MATRIX_UNTESTABLE="ing/eg …"   # pairs the gateway serves in production but whose real cloud
+GW_MATRIX_UNTESTABLE_NOTE="…"     # host is hardcoded (no base-URL override): served:"untestable",
+                                  # a mock-reachability limit, distinct from declared-incapable
+gw_xlate_env() { :; }       # adjust manifest knobs for the translation lane (runs before launch)
+GW_XLATE_HEADERS=(…)        # header set replacing GW_HEADERS for the xlate lane only
+GW_XLATE_CAP=0              # gateway does not claim anthropic-in -> openai-out translation;
+GW_XLATE_CAP_NOTE="…"       # recorded as xlate_declared=false with this citation, never probed
+GW_STREAM_NOTE="…"          # cited note attached to stream/streamcpu results (e.g. a link to the
+                            # project's own open issue when a stream failure is a known upstream bug)
+```
+
 The load body is `{"model","messages":[…],"max_tokens":16}` — valid for both OpenAI
 `/v1/chat/completions` and Anthropic `/v1/messages`, so a gateway picks its `GW_PATH`/`GW_MODEL`
 and it just works. The mock answers both shapes (OpenAI by default, Anthropic for `/messages`).
