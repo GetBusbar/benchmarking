@@ -78,6 +78,13 @@ code { background: var(--bg-raise); border: 1px solid var(--border); border-radi
 .muted { color: var(--fg-mute); }
 .fineprint { color: var(--fg-mute); font-size: .82rem; margin-top: 1rem; }
 .lede { color: var(--fg-dim); max-width: 70ch; }
+/* Conflict-of-interest disclosure: prominent, not buried. Left accent bar, own card. */
+.disclosure {
+  max-width: 70ch; margin: 0 0 1rem; padding: .7rem .9rem; font-size: .9rem;
+  border: 1px solid var(--border); border-left: 3px solid var(--fg-dim);
+  border-radius: 6px; background: var(--bg-raise); color: var(--fg);
+}
+.disclosure strong { color: var(--fg); }
 
 /* header */
 .site-header { border-bottom: 1px solid var(--border); background: var(--bg-raise); padding-top: 2.2rem; }

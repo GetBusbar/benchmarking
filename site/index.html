@@ -101,6 +101,7 @@
 
   <section id="view-method" class="view hidden">
     <h2>Method</h2>
+    <p class="disclosure"><strong>Who runs this.</strong> On the Bench is built and operated by the Busbar team, and busbar is one of the entrants measured here alongside the others. We keep it honest structurally: every gateway runs through the same shared harness with no per-gateway special-casing, every number regenerates from the committed result JSON, and the whole thing is open source. Do not take our word for it, <a href="https://github.com/GetBusbar/benchmarking" target="_blank" rel="noopener">read the code and re-run it yourself</a>.</p>
     <p class="lede">Every gateway is measured the same way: one box, one instant Rust mock upstream, one Go load generator, fixed CPU pinning (gateway on one core set, mock and loadgen on the others). A guardrail flags any measurement where the gateway approaches the mock's own ceiling, so the mock is not silently the bottleneck. The added-latency figures are gateway-minus-direct: the same load is run straight against the mock and the direct baseline subtracted, so the figure is what the gateway adds, not what the network or the mock costs; the throughput figures are each gateway's own qualifying ceiling, not a subtraction. Hardware, architecture, build version and timestamp are stamped into every result JSON. A gateway is fully defined by its own directory: a one-file manifest declares how to build, launch and probe it, so adding or removing a directory adds or removes it everywhere.</p>
 
     <div class="method-grid" id="method-grid">
@@ -153,6 +154,7 @@
 <footer class="site-footer">
   <div class="wrap">
     <p id="hw-stamp" class="muted"></p>
+    <p class="muted">Built and operated by the Busbar team; busbar is one of the entrants. Same harness for every gateway, every number from the committed JSON, open source, re-runnable by anyone.</p>
     <p class="muted">Reproduce this: <code>git clone https://github.com/GetBusbar/benchmarking && cd benchmarking && ./run-on-ec2.sh</code> (needs only a configured AWS CLI; the script launches a fresh Graviton box, runs the full suite, pulls the results back and terminates the box).</p>
     <p><a id="repo-link" target="_blank" rel="noopener">Benchmark repository on GitHub</a></p>
   </div>
