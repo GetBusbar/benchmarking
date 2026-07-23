@@ -37,7 +37,41 @@ gw_build() {
 # ai-proxy always accepts the OpenAI-canonical ingress on /v1/chat/completions (route_type
 # llm/v1/chat) and TRANSFORMS it into the provider's native upstream shape; model.options.upstream_url
 # overrides the full egress URL so we point it at the mock's per-dialect endpoint.
+#
+# Per-provider REQUIRED config (kong/llm/schemas/init.lua @3.8.0 - omitting these was OUR bug that
+# published boot failures as Kong reds):
+#   anthropic - model.options.anthropic_version is entity-check REQUIRED
+#               (conditional_at_least_one_of: "must set %s for anthropic provider"); without it the
+#               declarative config fails validation and Kong never boots.
+#   bedrock   - configure_request SigV4-signs every request (drivers/bedrock.lua); with no
+#               auth.aws_access_key_id/aws_secret_access_key and no ambient AWS credentials the
+#               signer fails ("failed to sign AWS request") -> HTTP 500 on the first request. Dummy
+#               keys + model.options.bedrock.aws_region satisfy the signer; the mock ignores the
+#               signature. upstream_url override is honored by the bedrock driver.
+# Both fixed configs verified locally against kong:3.8 + the recording mock (anthropic ->
+# /v1/messages anthropic-shaped, bedrock -> /model/<m>/converse Converse-shaped, HTTP 200).
 _kong_write_config() {
+  local prov="$1" url="$2" auth extra
+  case "$prov" in
+    bedrock)
+      auth='auth:
+            aws_access_key_id: "AKIAMOCKACCESSKEY"
+            aws_secret_access_key: "mock-secret-access-key"'
+      extra='
+              bedrock:
+                aws_region: "us-east-1"';;
+    anthropic)
+      auth='auth:
+            header_name: Authorization
+            header_value: "Bearer dummy"'
+      extra='
+              anthropic_version: "2023-06-01"';;
+    *)
+      auth='auth:
+            header_name: Authorization
+            header_value: "Bearer dummy"'
+      extra='';;
+  esac
   cat > "$GW_DIR/kong.gen.yml" <<YAML
 _format_version: "3.0"
 services:
@@ -51,14 +85,12 @@ services:
       - name: ai-proxy
         config:
           route_type: llm/v1/chat
-          auth:
-            header_name: Authorization
-            header_value: "Bearer dummy"
+          $auth
           model:
-            provider: $1
+            provider: $prov
             name: $GW_MODEL
-            options:
-              upstream_url: "$2"
+            options:$extra
+              upstream_url: "$url"
 YAML
 }
 
@@ -85,6 +117,14 @@ GW_MATRIX_CAP="
 "
 GW_MATRIX_CAP_NOTE="Kong 3.8 ai-proxy accepts only OpenAI-canonical ingress and emits no OpenAI-Responses route_type or Cohere v2 upstream shape (kong/llm/init.lua, drivers/shared.lua)"
 GW_MATRIX_EGRESS="openai anthropic gemini bedrock"
+
+# ── xlate lane: not declared (no anthropic-format ingress at 3.8) ────────────────────────────────
+# Kong 3.8's ai-proxy ingress detector (kong/llm/init.lua identify_request) keys on the
+# OpenAI-canonical body only (messages[]/prompt); there is no Anthropic-Messages ingress detector
+# and no /v1/messages route in this manifest's declarative config, so the probe's 404 "no Route
+# matched" was Kong's correct answer, not a failed translation.
+GW_XLATE_CAP=0
+GW_XLATE_CAP_NOTE="Kong 3.8 ai-proxy accepts only OpenAI-canonical ingress (llm/init.lua identify_request has no Anthropic-Messages detector), so anthropic-in -> openai-out translation is not a claimed capability"
 gw_matrix_egress() {
   local host="http://127.0.0.1:$MOCK_PORT" prov url
   case "$1" in
