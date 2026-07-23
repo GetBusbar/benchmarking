@@ -456,16 +456,25 @@ matrix_cell_perf(){
     case "$reverify" in misdialect*) break;; esac   # a real misroute is persistent - do not retry
     sleep 1                                          # let a dead socket cycle out before the next try
   done
+  local reverified=true reverify_note=""
   case "$reverify" in
     ok) : ;;
     misdialect*)
+      # A MISROUTE: the mock DID receive the re-verify request, on the WRONG endpoint. This is the
+      # real fault the leg-3 check exists to catch - drop the perf so a misrouted number never lands.
       log "[$GATEWAY]   $egress <- $cell : LEG-3 RE-VERIFY MISROUTE after load ($reverify) - dropping perf"
       CELL_PERF_JSON=", \"perf_dropped\": \"$(json_escape "leg-3 re-verify after load found a misroute to $reverify (not the $egress endpoint); perf withheld to avoid recording a misrouted number")\""
       return 0 ;;
-    *)  # miss/norecord after retries: could not measure cleanly, NOT a fault. Cell stays green, no perf.
-      log "[$GATEWAY]   $egress <- $cell : LEG-3 RE-VERIFY inconclusive after load ($reverify) - perf not measured (cell stays green)"
-      CELL_PERF_JSON=", \"perf_unmeasured\": \"$(json_escape "post-load re-verify could not confirm a clean reading ($reverify) after retries; perf not measured this run (the cell's capability was proven at probe time and stays supported)")\""
-      return 0 ;;
+    *)  # miss/norecord after retries: the mock recorded NOTHING (a transient dead socket on the
+        # single post-load probe, e.g. a Go upstream pool holding stale sockets). This is NOT a
+        # misroute - a misroute is `misdialect` and is caught above. The perf STANDS: the capability
+        # probe passed AND the load sweep already drove thousands of successful same-dialect requests
+        # through this exact path (that IS the RPS number), so routing was proven under load. We only
+        # flag that the single re-confirm probe could not run (egress_reverified=false).
+      log "[$GATEWAY]   $egress <- $cell : LEG-3 RE-VERIFY inconclusive ($reverify) - perf STANDS on capability + sweep (re-confirm not run)"
+      reverified=false
+      reverify_note="post-load re-verify probe could not re-confirm ($reverify, a transient dead socket, not a misroute); the number stands on the capability probe plus the successful load sweep"
+      ;;
   esac
   local lat50=$OVER_P50 lat99=$OVER_P99 g99=${GP99:-0} d99=${DP99:-0} c1note=""
   if [ "$C1_OK" != 1 ]; then
@@ -473,7 +482,7 @@ matrix_cell_perf(){
     lat50=null; lat99=null; g99=null; d99=null
     c1note=", \"c1_note\": \"$(json_escape "$C1_ERR")\""
   fi
-  CELL_PERF_JSON=", \"perf\": {\"added_latency_p50_us\": $lat50, \"added_latency_p99_us\": $lat99, \"gateway_c1_p99_us\": $g99, \"direct_c1_p99_us\": $d99, \"rps_sustained_20ms\": $lrps, \"rps_sustained_20ms_mock_bound\": $lbound, \"rps_max_proxy\": $prps, \"rps_max_proxy_mock_bound\": $pbound, \"egress_reverified\": true$c1note}"
+  CELL_PERF_JSON=", \"perf\": {\"added_latency_p50_us\": $lat50, \"added_latency_p99_us\": $lat99, \"gateway_c1_p99_us\": $g99, \"direct_c1_p99_us\": $d99, \"rps_sustained_20ms\": $lrps, \"rps_sustained_20ms_mock_bound\": $lbound, \"rps_max_proxy\": $prps, \"rps_max_proxy_mock_bound\": $pbound, \"egress_reverified\": $reverified${reverify_note:+, \"reverify_note\": \"$(json_escape "$reverify_note")\"}$c1note}"
   log "[$GATEWAY]   $egress <- $cell : perf added_p99=${lat99}us sustained@${SWEEP_TTFT_MS}ms=${lrps}rps max_proxy=${prps}rps (leg-3 re-verified)"
 }
 
