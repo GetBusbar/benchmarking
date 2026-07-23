@@ -424,7 +424,7 @@ test("cellPerfTip shows a green cell's perf and its deviation from the gateway's
   const tip = app.cellPerfTip(green, "anthropic", "openai", best);
   assert.ok(tip.includes("25,500 req/s @20ms"), tip);
   assert.ok(tip.includes("+900 µs p99 added"), tip);
-  assert.ok(tip.includes("-15.0% req/s vs the openai→openai cell"), tip);
+  assert.ok(tip.includes("-15.0% req/s vs the OpenAI→OpenAI cell"), tip); // human labels, not raw dialect keys
   const bestTip = app.cellPerfTip({ served: true, perf: best }, "openai", "openai", best);
   assert.ok(bestTip.includes("reference cell"), bestTip);
   // red/grey/unprobed cells and perf-less greens carry NO perf line

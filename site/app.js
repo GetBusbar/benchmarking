@@ -38,9 +38,9 @@ const VIEW_ALIASES = { results: "passthrough", charts: "method" };
 // Each perf tab's default (and honest headline) sort column; a clean URL omits the sort when it
 // equals this, and switching tabs snaps to it unless the URL pins another.
 // Streaming defaults to added TTFT (asc), NOT streams-sustained: the sustained count saturates at the
-// harness cap (512) so it ties several gateways and breaks ties by name, floating a slow-TTFT gateway
-// above a fast one at the same count. Added TTFT is the streaming-overhead discriminator that a user
-// actually feels first and it does not saturate.
+// harness cap (1024 in the current field data) so it ties several gateways and breaks ties by name,
+// floating a slow-TTFT gateway above a fast one at the same count. Added TTFT is the streaming-overhead
+// discriminator that a user actually feels first and it does not saturate.
 const VIEW_SORT = { passthrough: "rps20", translation: "xlrps", streaming: "sttft" };
 
 /* Language chip colours: kept in sync with LANG_COLORS in charts.py. */
@@ -775,6 +775,13 @@ function renderTable() {
         : `<td class="${sc.trim()}"${cell.note ? ` title="${esc(cell.note)}"` : ""}>${esc(cell.text)}</td>`;
     }).join("") + "</tr>"
   ).join("");
+  // Empty-state line: a pinned translation pair no gateway serves (or filters that clear the
+  // table) must never render as a bare header over nothing.
+  if (!rows.length) {
+    tbody.innerHTML = `<tr><td colspan="${cols.length}" class="na">${
+      view === "translation" ? "No gateway serves this pair on this rig." : "No gateways match the current filters."
+    }</td></tr>`;
+  }
 
   thead.querySelectorAll("th").forEach((th) => {
     th.addEventListener("click", () => {
@@ -1112,7 +1119,8 @@ function cellPerfTip(cell, ingress, egress, best) {
   if (p.added_latency_p99_us != null) s += `, +${fmtInt(p.added_latency_p99_us)} µs p99 added`;
   if (best && best.rps_sustained_20ms > 0) {
     if (best.ingress === ingress && best.egress === egress) s += " - reference cell (ranks the table)";
-    else s += ` - ${fmtPct((p.rps_sustained_20ms / best.rps_sustained_20ms - 1) * 100)} req/s vs the ${best.ingress}→${best.egress} cell`;
+    // Human dialect labels (MATRIX_LABELS), never the raw dialect keys, in the hover popup.
+    else s += ` - ${fmtPct((p.rps_sustained_20ms / best.rps_sustained_20ms - 1) * 100)} req/s vs the ${MATRIX_LABELS[best.ingress] || best.ingress}→${MATRIX_LABELS[best.egress] || best.egress} cell`;
   }
   return s;
 }
