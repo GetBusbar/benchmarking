@@ -234,9 +234,12 @@ test("naText keeps long diagnostic notes out of cell values", () => {
       assert.equal(na.note, j[l.err] || "", `${g.key}/${l.key}: full note preserved`);
     }
   }
+  // Data-dependent: the field may or may not currently contain an untranslated-passthrough
+  // gateway (it comes and goes with re-runs). Assert the label only when one exists; always
+  // assert the mapping itself on a synthetic record so the rule stays covered.
   const pass = data.gateways.find((g) => g.xlate && g.xlate.xlate_passthrough === true);
-  assert.ok(pass, "expected at least one passthrough gateway in the field");
-  assert.equal(app.naText(pass.xlate, "xlate_served", "xlate_error").text, "n/a (passthrough)");
+  if (pass) assert.equal(app.naText(pass.xlate, "xlate_served", "xlate_error").text, "n/a (passthrough)");
+  assert.equal(app.naText({ xlate_served: false, xlate_passthrough: true }, "xlate_served", "xlate_error").text, "n/a (passthrough)");
   const unsupported = data.gateways.find((g) =>
     g.governed && g.governed.governed_served === false && /manifest defines no/.test(g.governed.governed_note || ""));
   assert.ok(unsupported, "expected a gateway without native governance");
