@@ -109,19 +109,22 @@ test("default state encodes to /gateways and decodes back to defaults", () => {
   const back = app.decodeUrl("/gateways", "");
   const def = app.newState();
   assert.equal(back.category, "gateways");
-  assert.equal(back.view, "results");
+  assert.equal(back.view, "passthrough");
   assert.equal(back.sortCol, def.sortCol);
   assert.equal(back.sortDesc, def.sortDesc);
   assert.equal(back.drawer, null);
   assert.deepEqual(back.cmp, []);
 });
 
-test("root, unknown paths and unknown views normalize to gateways results", () => {
+test("root, unknown paths and unknown views normalize to gateways passthrough", () => {
   assert.equal(app.decodeUrl("/", "").category, "gateways");
-  assert.equal(app.decodeUrl("/", "").view, "results");
-  assert.equal(app.decodeUrl("/index.html", "").view, "results");
+  assert.equal(app.decodeUrl("/", "").view, "passthrough");
+  assert.equal(app.decodeUrl("/index.html", "").view, "passthrough");
   assert.equal(app.decodeUrl("/no-such-category/matrix", "").category, "gateways");
-  assert.equal(app.decodeUrl("/gateways/no-such-view", "").view, "results");
+  assert.equal(app.decodeUrl("/gateways/no-such-view", "").view, "passthrough");
+  // legacy view aliases still resolve onto the new tabs
+  assert.equal(app.decodeUrl("/gateways/results", "").view, "passthrough");
+  assert.equal(app.decodeUrl("/gateways/charts", "").view, "method");
   // the documented deep link shape
   const st = app.decodeUrl("/gateways/matrix", "?sort=mempeak&dir=asc");
   assert.equal(st.view, "matrix");
@@ -143,6 +146,38 @@ test("legacy hash URLs (#view=...&sort=...) still decode", () => {
 test("decode rejects a bogus sort column", () => {
   const back = app.decodeUrl("/gateways", "?sort=evil&dir=asc");
   assert.equal(back.sortCol, "rps20");
+});
+
+// ---- three-tab split: honest passthrough / translation sourcing ---------------
+const mkMatrix = (cells) => ({ upstreams: Object.fromEntries(
+  Object.entries(cells).map(([eg, ing]) => [eg, { cells: Object.fromEntries(
+    Object.entries(ing).map(([i, c]) => [i, c])) }])) });
+
+test("Passthrough reads the openai diagonal, n/a when openai is not_configurable", () => {
+  // served openai diagonal with perf -> that number
+  const green = { best_cell: { rps_sustained_20ms: 30000, dialect: "openai" },
+    matrix: mkMatrix({ openai: { openai: { served: true, perf: { rps_sustained_20ms: 30000 } } } }) };
+  assert.equal(app.passCell(green, "rps_sustained_20ms", String).na, false);
+  // openai green but sweep not landed yet -> fall back to the perf suite (still openai passthrough)
+  const unswept = { perf: { served: true, rps_sustained_20ms: 5541 },
+    matrix: mkMatrix({ openai: { openai: { served: true } } }) };
+  assert.equal(app.passCell(unswept, "rps_sustained_20ms", String).text, "5541");
+  // openai not_configurable -> n/a, never borrow a native-dialect number
+  const native = { perf: { served: true, rps_sustained_20ms: 32354 },
+    matrix: mkMatrix({ openai: { openai: { served: "not_configurable" } },
+      anthropic: { anthropic: { served: true, perf: { rps_sustained_20ms: 32354 } } } }) };
+  assert.equal(app.passCell(native, "rps_sustained_20ms", String).na, true);
+});
+
+test("Translation tab lists only gateways that translate", () => {
+  const translator = { translation_cell: { egress: "anthropic", rps_sustained_20ms: 100 } };
+  const proxy = { matrix: mkMatrix({ openai: { openai: { served: true } } }) }; // no translation cell
+  assert.equal(app.hasTranslation(translator), true);
+  assert.equal(app.hasTranslation(proxy), false);
+  const st = app.newState();
+  st.view = "translation";
+  const rows = app.applyFilters([translator, proxy].map((g, i) => ({ display: "g" + i, key: "g" + i, lang: "Rust", ...g })), st);
+  assert.deepEqual(rows.map((g) => g.key), ["g0"]);
 });
 
 // ---- footer timestamps: clean UTC stamp + coarse relative age ----------------
@@ -248,11 +283,12 @@ test("matrix cell states map served to the three visible states", () => {
 test("a grey (not_configurable) cell tooltip shows the gateway's cited reason", () => {
   const reason = "Kong 3.8 ai-proxy accepts only OpenAI-canonical ingress and emits no OpenAI-Responses route_type";
   const tip = app.matrixCellTip({ served: "not_configurable", verdict_note: reason });
-  assert.ok(tip.includes("not declared supported by this gateway"), "declares incapability, not omission");
+  // HONEST wording: grey = not in the grid WE drafted, not a claim the maintainer declined it.
+  assert.ok(tip.includes("not in the capability grid we drafted"), "reads as our omission, not the gateway's declared incapability");
   assert.ok(tip.includes(reason), "carries the cited capability-limit reason");
-  // no reason present: still an honest declaration, never a bare "untested"
+  // no reason present: still honest, never a bare "untested"
   const bare = app.matrixCellTip({ served: "not_configurable" });
-  assert.ok(bare.includes("not declared supported by this gateway"));
+  assert.ok(bare.includes("not in the capability grid we drafted"));
 });
 
 test("gen-data preserves the per-cell verdict_note reason for grey cells", () => {

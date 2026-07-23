@@ -80,6 +80,8 @@ const gateways = gatewayKeys.map((key) => {
     // without per-cell sweeps) the site falls back to the perf suite's single-path number.
     const bc = bestCell(g.matrix);
     if (bc) g.best_cell = bc;
+    const tc = translationCell(g.matrix);
+    if (tc) g.translation_cell = tc;
   }
   // "Supports governance" is a DECLARED CAPABILITY, not a per-run measurement outcome. A gateway is
   // governance-capable if its manifest wires a governed launch - i.e. the governed note is anything
@@ -96,30 +98,36 @@ const gateways = gatewayKeys.map((key) => {
 // the v2 shape so the site renders exactly one structure: the one measured egress column becomes
 // `upstreams`, and the columns v1 never probed stay absent (the site renders them "not measured",
 // which is the honest reading of a v1 run: unmeasured, not "not configurable").
-// The gateway's REPRESENTATIVE perf cell for the Performance tab. Deliberately the SAME-DIALECT
-// PASSTHROUGH (diagonal: ingress === egress) - pure forwarding overhead, NOT a translation cell. A
-// translation does strictly more work than passthrough, so a translation cell that measures "faster"
-// than the diagonal is run-to-run noise; ranking by best-of-any-cell promotes that noise. The
-// diagonal is the honest, stable, apples-to-apples number.
-// Path choice is DETERMINISTIC (no noisy pick): the canonical `openai` diagonal when the gateway
-// serves it (every gateway measured on the identical fair workload), else the gateway's best NATIVE
-// diagonal (e.g. litellm-rust => anthropic). "Best" among natives = LOWEST added latency p99 (a
-// proxy's quality is its overhead; RPS is capacity-bound and noisier). Returns {ingress, egress,
-// ...perf} or null. `dialect` (== ingress == egress) is the label the tab shows.
+// The gateway's PASSTHROUGH cell for the Passthrough tab: STRICTLY the openai->openai diagonal, so
+// every gateway ranks on the IDENTICAL dialect and workload (truly apples-to-apples). Pure forwarding
+// overhead, never a translation cell. A gateway that does not serve openai ingress in our grid returns
+// null here and reads "n/a" on the tab rather than borrowing a different-dialect number under an
+// OpenAI-passthrough header. `dialect` is always "openai" (kept for the tab's pill/label compat).
 function bestCell(m) {
   if (!m.upstreams) return null;
-  // collect green diagonal cells that carry perf
-  const diag = [];
+  const up = m.upstreams.openai;
+  const cell = up && up.cells && up.cells.openai;           // openai ingress -> openai upstream
+  if (cell && cell.served === true && cell.perf && cell.perf.added_latency_p99_us != null)
+    return { ingress: "openai", egress: "openai", dialect: "openai", ...cell.perf };
+  return null;
+}
+
+// The gateway's TRANSLATION cell for the Translation tab: openai INGRESS (fixed fair input) translated
+// to its best non-openai EGRESS. "Best" = LOWEST added latency p99 (a proxy's quality is its overhead;
+// RPS is capacity-bound and noisier). Fixing ingress to openai keeps the input side identical across
+// gateways; the egress varies and is shown as the row's path pill. Returns {ingress:"openai", egress,
+// ...perf} or null when the gateway serves no openai-in translation path.
+function translationCell(m) {
+  if (!m.upstreams) return null;
+  const cands = [];
   for (const [egress, up] of Object.entries(m.upstreams)) {
-    const cell = up && up.cells && up.cells[egress];        // ingress === egress
+    if (egress === "openai") continue;                      // openai->openai is passthrough, not translation
+    const cell = up && up.cells && up.cells.openai;         // openai ingress -> this egress
     if (cell && cell.served === true && cell.perf && cell.perf.added_latency_p99_us != null)
-      diag.push({ ingress: egress, egress, dialect: egress, ...cell.perf });
+      cands.push({ ingress: "openai", egress, ...cell.perf });
   }
-  if (!diag.length) return null;
-  // canonical openai diagonal wins outright; else the lowest-added-latency native diagonal
-  const openai = diag.find((d) => d.dialect === "openai");
-  if (openai) return openai;
-  return diag.reduce((a, b) => (b.added_latency_p99_us < a.added_latency_p99_us ? b : a));
+  if (!cands.length) return null;
+  return cands.reduce((a, b) => (b.added_latency_p99_us < a.added_latency_p99_us ? b : a));
 }
 
 function normalizeMatrix(m) {

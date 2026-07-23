@@ -33,6 +33,7 @@
   --shadow-soft: rgba(0,0,0,.3);
   --overlay: rgba(0,0,0,.5);
   --best: rgba(108,182,255,.14);
+  --sorted-col-bg: rgba(76,195,138,.08);
   --img-bg: #fff;
 }
 [data-theme="light"] {
@@ -57,6 +58,7 @@
   --shadow-soft: rgba(31,35,40,.12);
   --overlay: rgba(31,35,40,.4);
   --best: rgba(9,105,218,.12);
+  --sorted-col-bg: rgba(26,127,75,.07);
   --img-bg: #fff;
 }
 
@@ -78,6 +80,9 @@ code { background: var(--bg-raise); border: 1px solid var(--border); border-radi
 .muted { color: var(--fg-mute); }
 .fineprint { color: var(--fg-mute); font-size: .82rem; margin-top: 1rem; }
 .lede { color: var(--fg-dim); max-width: 70ch; }
+.method-lede { color: var(--fg-dim); max-width: 74ch; margin: .6rem 0 0; padding-left: 1.1rem; }
+.method-lede li { margin: .45rem 0; line-height: 1.5; }
+.method-lede li b { color: var(--fg); font-weight: 600; }
 /* Conflict-of-interest disclosure: prominent, not buried. Left accent bar, own card. */
 .disclosure {
   max-width: 70ch; margin: 0 0 1rem; padding: .7rem .9rem; font-size: .9rem;
@@ -164,6 +169,11 @@ thead th:first-child, tbody td:first-child { text-align: left; }
 .matrix-table th:not(.axis), .matrix-table td:not(.name) { text-align: center; }
 thead th.sorted { color: var(--fg); }
 thead th .dir { color: var(--accent); }
+/* Sorted column gets a faint tint so the eye tracks which column ranks the table. */
+thead th.sorted, tbody td.sorted-col { background: var(--sorted-col-bg); }
+/* keep the two sticky left columns opaque even when they are the sorted one */
+#results-table tbody td.sorted-col:nth-child(1),
+#results-table tbody td.sorted-col:nth-child(2) { background: var(--sorted-col-bg); }
 tbody td { padding: .5rem .7rem; text-align: right; border-bottom: 1px solid var(--border); white-space: nowrap; }
 tbody tr:last-child td { border-bottom: none; }
 tbody tr:hover td { background: var(--bg-hover); }
@@ -320,7 +330,8 @@ tbody tr { cursor: pointer; }
 .matrix-pop .pop-note { color: var(--fg-dim); font-size: .76rem; }
 .cell { cursor: default; }
 
-/* charts */
+/* charts (now folded into the Method tab, below the suite cards) */
+.charts-heading { margin: 2.2rem 0 .2rem; padding-top: 1.4rem; border-top: 1px solid var(--border); }
 .gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 1.1rem; }
 .gallery figure {
   margin: 0; background: var(--bg-raise); border: 1px solid var(--border);

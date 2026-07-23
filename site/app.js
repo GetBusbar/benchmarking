@@ -25,8 +25,19 @@ const CATEGORIES = {
   },
 };
 const DEFAULT_CATEGORY = "gateways";
-const VIEWS = ["results", "matrix", "charts", "method"];
-const VIEW_LABELS = { results: "Performance", matrix: "Protocol matrix", charts: "Charts", method: "Method" };
+// The three perf tabs each rank an INTERNALLY COHERENT path so a single sort is honest:
+//   passthrough = openai->openai only (every gateway on the identical dialect, no translation)
+//   translation = openai-in -> best non-openai egress (fixed fair ingress, egress varies)
+//   streaming   = SSE passthrough (its own stall-gated ceiling)
+// matrix + method round out the five. `charts` folds into method; `results` was the old blended tab.
+const VIEWS = ["passthrough", "translation", "streaming", "matrix", "method"];
+const VIEW_LABELS = { passthrough: "Passthrough", translation: "Translation", streaming: "Streaming", matrix: "Protocol matrix", method: "Method" };
+const PERF_VIEWS = new Set(["passthrough", "translation", "streaming"]);
+// Old shared URLs pointed at results/charts; map them onto the new tabs so links keep resolving.
+const VIEW_ALIASES = { results: "passthrough", charts: "method" };
+// Each perf tab's default (and honest headline) sort column; a clean URL omits the sort when it
+// equals this, and switching tabs snaps to it unless the URL pins another.
+const VIEW_SORT = { passthrough: "rps20", translation: "xlrps", streaming: "streams" };
 
 /* Language chip colours: kept in sync with LANG_COLORS in charts.py. */
 const LANG_COLORS = {
@@ -109,109 +120,129 @@ function lane(g, suite, flag, errKey, pick) {
   return pick(j);
 }
 
-/* bestOrPerf: the Performance tab reads each gateway's REPRESENTATIVE cell (g.best_cell) - the
-   same-dialect passthrough diagonal chosen INTERNALLY by lowest added latency (openai when served,
-   else the native dialect), never a translation cell. Latency selects the cell; sustained RPS is
-   the EXTERNAL comparison metric the table ranks/sorts on. Results predating the per-cell sweep have
-   no best_cell; those fall back to the perf suite's single-path number so the table never blanks. */
-function bestOrPerf(g, key, fmt) {
+/* passCell: the Passthrough tab reads ONLY the openai->openai diagonal (g.best_cell, which gen-data
+   now restricts to that single dialect) so every row ranks on identical work. A gateway that has a
+   matrix but no green openai diagonal genuinely does not serve openai passthrough in our grid, so it
+   reads n/a rather than borrowing a different-dialect number under an OpenAI-passthrough header.
+   Only a gateway with NO matrix at all (legacy single-path run) falls back to its perf suite. */
+function passCell(g, key, fmt) {
   if (g.best_cell && g.best_cell[key] != null)
     return { v: g.best_cell[key], text: fmt(g.best_cell[key]), na: false };
-  return lane(g, "perf", "served", "serve_error", (j) =>
-    j[key] != null ? { v: j[key], text: fmt(j[key]), na: false } : { v: null, text: "n/a", na: true });
+  // No swept openai diagonal. Fall back to the perf suite ONLY when the gateway genuinely serves
+  // openai passthrough (matrix openai->openai is green but its per-cell sweep has not landed, e.g.
+  // bifrost mid-re-run), or has no matrix at all. A gateway whose openai->openai is not_configurable
+  // (e.g. litellm-rust) does NOT serve openai passthrough, so it reads n/a rather than borrowing its
+  // native-dialect perf number under an OpenAI-passthrough header.
+  if (servesOpenaiPassthrough(g))
+    return lane(g, "perf", "served", "serve_error", (j) =>
+      j[key] != null ? { v: j[key], text: fmt(j[key]), na: false } : { v: null, text: "n/a", na: true });
+  return { v: null, text: "n/a", na: true };
+}
+/* Does this gateway serve the openai->openai passthrough at all? True when it has no matrix (legacy
+   single-path run, perf suite IS its passthrough) or its matrix openai->openai cell is green. */
+function servesOpenaiPassthrough(g) {
+  if (!g.matrix || !g.matrix.upstreams) return true;
+  const up = g.matrix.upstreams.openai;
+  const cell = up && up.cells && up.cells.openai;
+  return !!(cell && cell.served === true);
+}
+
+/* xlateCell: the Translation tab reads the openai-in -> best non-openai egress cell (g.translation_cell,
+   chosen by gen-data on lowest added latency, fixed fair ingress). Absent a matrix, fall back to the
+   legacy xlate suite (anthropic-in / openai-out). Keys are cell.perf keys (added_latency_p99_us, ...). */
+function xlateCell(g, key, fmt) {
+  if (g.translation_cell && g.translation_cell[key] != null)
+    return { v: g.translation_cell[key], text: fmt(g.translation_cell[key]), na: false };
+  if (!g.matrix || !g.matrix.upstreams) {
+    const legacy = { added_latency_p99_us: "xlate_added_latency_p99_us", rps_sustained_20ms: "xlate_rps_sustained_20ms" }[key] || key;
+    return lane(g, "xlate", "xlate_served", "xlate_error", (j) =>
+      j[legacy] != null ? { v: j[legacy], text: fmt(j[legacy]), na: false } : { v: null, text: "n/a", na: true });
+  }
+  return { v: null, text: "n/a", na: true };
 }
 
 /* ---- column model ----------------------------------------------------------- */
 /* get(g) returns {v, text, na}: v is the sortable value (null = none), text the cell
    text, na marks a muted "not measured / not served" cell. sortable:false columns
-   (the compare checkbox) take no part in sorting. */
-const COLUMNS = [
-  {
-    id: "sel", label: "", sortable: false,
-    get: () => ({ v: null, text: "", na: false }),
-    render: (g, st) => {
-      const on = st.cmp.includes(g.key);
-      const full = !on && st.cmp.length >= 3;
-      return `<td class="sel"><input type="checkbox" data-cmp="${esc(g.key)}" ${on ? "checked" : ""} ${full ? "disabled" : ""} title="Select for compare (max 3)"></td>`;
-    },
+   (the compare checkbox) take no part in sorting. Columns are grouped into per-tab sets
+   (COLUMN_SETS) so each perf tab ranks one coherent path; the shared leading columns
+   (select / name / lang) are reused across all three. */
+const COL_SEL = {
+  id: "sel", label: "", sortable: false,
+  get: () => ({ v: null, text: "", na: false }),
+  render: (g, st) => {
+    const on = st.cmp.includes(g.key);
+    const full = !on && st.cmp.length >= 3;
+    return `<td class="sel"><input type="checkbox" data-cmp="${esc(g.key)}" ${on ? "checked" : ""} ${full ? "disabled" : ""} title="Select for compare (max 3)"></td>`;
   },
-  {
-    id: "name", label: "Gateway", desc: false,
-    get: (g) => ({ v: g.display.toLowerCase(), text: null, na: false }),
-    render: (g) => {
-      const a = g.repo
-        ? `<a href="${g.repo}" target="_blank" rel="noopener">${esc(g.display)}</a>`
-        : esc(g.display);
-      return `<td class="name">${a}</td>`;
-    },
+};
+const COL_NAME = {
+  id: "name", label: "Gateway", desc: false,
+  get: (g) => ({ v: g.display.toLowerCase(), text: null, na: false }),
+  render: (g) => {
+    const a = g.repo
+      ? `<a href="${g.repo}" target="_blank" rel="noopener">${esc(g.display)}</a>`
+      : esc(g.display);
+    return `<td class="name">${a}</td>`;
   },
-  {
-    id: "lang", label: "Lang", desc: false,
-    get: (g) => ({ v: g.lang, text: null, na: false }),
-    render: (g) => {
-      const c = LANG_COLORS[g.lang] || LANG_COLORS.Other;
-      return `<td><span class="lang-chip" style="background:${c}">${esc(g.lang)}</span></td>`;
-    },
+};
+const COL_LANG = {
+  id: "lang", label: "Lang", desc: false,
+  get: (g) => ({ v: g.lang, text: null, na: false }),
+  render: (g) => {
+    const c = LANG_COLORS[g.lang] || LANG_COLORS.Other;
+    return `<td><span class="lang-chip" style="background:${c}">${esc(g.lang)}</span></td>`;
   },
-  {
-    /* Which dialect the perf numbers were measured on: the gateway's same-dialect passthrough
-       (pure forwarding). A neutral pill right before the metrics, NOT under the name (that read as
-       "this gateway IS OpenAI"). openai for everyone that serves it; a gateway's native dialect
-       otherwise (litellm-rust -> anthropic). */
-    id: "tested", label: "Tested on", desc: false,
-    title: "The same-dialect passthrough the perf numbers were measured on (openai when served, else the gateway's native dialect) - pure forwarding, no translation",
-    get: (g) => ({ v: g.best_cell ? g.best_cell.dialect : "", text: null, na: !g.best_cell }),
-    render: (g) => g.best_cell
-      ? `<td class="tested"><span class="tested-pill" title="measured on ${esc(g.best_cell.dialect)}-in / ${esc(g.best_cell.dialect)}-out passthrough">${esc(g.best_cell.dialect)}</span></td>`
-      : `<td class="tested"><span class="muted">n/a</span></td>`,
-  },
-  {
-    id: "lat", label: "Added latency p99 (µs)", desc: false, title: "Gateway p99 minus direct-to-mock p99 at concurrency 1, on the gateway's same-dialect passthrough (the 'Tested on' dialect); the cell is chosen by lowest added latency, pure forwarding",
-    get: (g) => bestOrPerf(g, "added_latency_p99_us", fmtAdded),
-  },
-  {
-    id: "rps20", label: "Sustained RPS @20ms", desc: true, title: "Sustained requests/sec with a 20 ms mock LLM latency (p99 < 1 s, <0.1% errors), on the gateway's same-dialect passthrough (the 'Tested on' dialect); the cell is chosen by lowest added latency, pure forwarding",
-    get: (g) => bestOrPerf(g, "rps_sustained_20ms", fmtInt),
-  },
-  {
-    id: "rpsmax", label: "Max proxy RPS", desc: true, title: "Throughput ceiling against an instant mock (p99 < 1 s, <0.1% errors), on the gateway's same-dialect passthrough (the 'Tested on' dialect); the cell is chosen by lowest added latency, pure forwarding",
-    get: (g) => bestOrPerf(g, "rps_max_proxy", fmtInt),
-  },
-  {
-    id: "memidle", label: "Mem idle (MiB)", desc: false, title: "Process RSS after launch, before load",
-    get: (g) => lane(g, "memory", "served", "serve_error",
-      (j) => ({ v: j.idle_rss_mib, text: fmt1(j.idle_rss_mib), na: false })),
-  },
-  {
-    id: "mempeak", label: "Mem peak (MiB)", desc: false, title: "Peak process RSS under large-payload load",
-    get: (g) => lane(g, "memory", "served", "serve_error",
-      (j) => ({ v: j.peak_rss_mib, text: fmt1(j.peak_rss_mib), na: false })),
-  },
-  {
-    id: "sttft", label: "Stream added TTFT p99 (µs)", desc: false, title: "Gateway first-content-frame time minus direct-to-mock TTFT",
-    get: (g) => lane(g, "stream", "stream_served", "stream_error",
-      (j) => ({ v: j.stream_added_ttft_p99_us, text: fmtAdded(j.stream_added_ttft_p99_us), na: false })),
-  },
-  {
-    id: "sgap", label: "Stream added per-token p99 (µs)", desc: false, title: "Gateway content-frame gap minus direct-to-mock gap",
-    get: (g) => lane(g, "stream", "stream_served", "stream_error",
-      (j) => ({ v: j.stream_added_gap_p99_us, text: fmtAdded(j.stream_added_gap_p99_us), na: false })),
-  },
-  {
-    id: "streams", label: "Streams sustained", desc: true, title: "Max concurrent SSE streams with >=99.9% frame delivery, no stalls, <0.1% errors",
-    get: (g) => lane(g, "stream", "stream_served", "stream_error",
-      (j) => ({ v: j.stream_sustained_streams, text: fmtInt(j.stream_sustained_streams), na: false })),
-  },
-  {
-    id: "xlate", label: "Xlate sustained RPS", desc: true, title: "Sustained RPS @20ms on the Anthropic-in / OpenAI-out translation path",
-    get: (g) => lane(g, "xlate", "xlate_served", "xlate_error",
-      (j) => ({ v: j.xlate_rps_sustained_20ms, text: fmtInt(j.xlate_rps_sustained_20ms), na: false })),
-  },
-  // Governance is intentionally NOT a neutral-board column. onthebench measures every gateway at its
-  // default, out-of-the-box config; the governed suite runs a non-default governance-enabled launch
-  // that only busbar's manifest wires, so a comparative column would spotlight busbar and read
-  // "not tested" for the rest. Governance overhead lives on the advocacy site, not the neutral board.
-];
+};
+
+const COLUMN_SETS = {
+  // Passthrough: openai->openai only. No "Tested on" pill (every row is openai, so it would be a
+  // column of identical chips); a caption above the table states the dialect once.
+  passthrough: [
+    COL_SEL, COL_NAME, COL_LANG,
+    { id: "lat", label: "Added latency p99 (µs)", desc: false, title: "Gateway p99 minus direct-to-mock p99 at concurrency 1 on the OpenAI-in / OpenAI-out passthrough - pure forwarding, no translation",
+      get: (g) => passCell(g, "added_latency_p99_us", fmtAdded) },
+    { id: "rps20", label: "Sustained RPS @20ms", desc: true, title: "Sustained requests/sec with a 20 ms mock LLM latency (p99 < 1 s, <0.1% errors) on the OpenAI passthrough",
+      get: (g) => passCell(g, "rps_sustained_20ms", fmtInt) },
+    { id: "rpsmax", label: "Max proxy RPS", desc: true, title: "Throughput ceiling against an instant mock (p99 < 1 s, <0.1% errors) on the OpenAI passthrough",
+      get: (g) => passCell(g, "rps_max_proxy", fmtInt) },
+    { id: "memidle", label: "Mem idle (MiB)", desc: false, title: "Process RSS after launch, before load",
+      get: (g) => lane(g, "memory", "served", "serve_error", (j) => ({ v: j.idle_rss_mib, text: fmt1(j.idle_rss_mib), na: false })) },
+    { id: "mempeak", label: "Mem peak (MiB)", desc: false, title: "Peak process RSS under large-payload load",
+      get: (g) => lane(g, "memory", "served", "serve_error", (j) => ({ v: j.peak_rss_mib, text: fmt1(j.peak_rss_mib), na: false })) },
+  ],
+  // Translation: openai-in -> best non-openai egress. A path pill shows which egress this row's
+  // number is; only gateways that actually translate appear (view-implicit filter).
+  translation: [
+    COL_SEL, COL_NAME, COL_LANG,
+    { id: "xlpath", label: "Path", desc: false, title: "OpenAI ingress translated to this egress dialect - the fastest translation path this gateway serves (chosen by lowest added latency)",
+      get: (g) => ({ v: g.translation_cell ? g.translation_cell.egress : "", text: null, na: !g.translation_cell }),
+      render: (g) => g.translation_cell
+        ? `<td class="tested"><span class="tested-pill" title="OpenAI ingress translated to ${esc(g.translation_cell.egress)} upstream">openai&nbsp;&rarr;&nbsp;${esc(g.translation_cell.egress)}</span></td>`
+        : `<td class="tested"><span class="muted">n/a</span></td>` },
+    { id: "xllat", label: "Added latency p99 (µs)", desc: false, title: "Gateway p99 minus direct-to-mock p99 on the OpenAI-in translation path",
+      get: (g) => xlateCell(g, "added_latency_p99_us", fmtAdded) },
+    { id: "xlrps", label: "Sustained RPS @20ms", desc: true, title: "Sustained RPS @20ms on the OpenAI-in translation path (p99 < 1 s, <0.1% errors)",
+      get: (g) => xlateCell(g, "rps_sustained_20ms", fmtInt) },
+  ],
+  // Streaming: SSE passthrough, its own stall-gated ceiling.
+  streaming: [
+    COL_SEL, COL_NAME, COL_LANG,
+    { id: "sttft", label: "Stream added TTFT p99 (µs)", desc: false, title: "Gateway first-content-frame time minus direct-to-mock TTFT",
+      get: (g) => lane(g, "stream", "stream_served", "stream_error", (j) => ({ v: j.stream_added_ttft_p99_us, text: fmtAdded(j.stream_added_ttft_p99_us), na: false })) },
+    { id: "sgap", label: "Stream added per-token p99 (µs)", desc: false, title: "Gateway content-frame gap minus direct-to-mock gap",
+      get: (g) => lane(g, "stream", "stream_served", "stream_error", (j) => ({ v: j.stream_added_gap_p99_us, text: fmtAdded(j.stream_added_gap_p99_us), na: false })) },
+    { id: "streams", label: "Streams sustained", desc: true, title: "Max concurrent SSE streams with >=99.9% frame delivery, no stalls, <0.1% errors",
+      get: (g) => lane(g, "stream", "stream_served", "stream_error", (j) => ({ v: j.stream_sustained_streams, text: fmtInt(j.stream_sustained_streams), na: false })) },
+  ],
+  // Governance is intentionally NO tab. onthebench measures every gateway at its default, out-of-the-box
+  // config; the governed suite runs a non-default governance-enabled launch that only busbar's manifest
+  // wires, so a comparative tab would spotlight busbar and read "not tested" for the rest.
+};
+/* The set of columns for a view; perf tabs use COLUMN_SETS, everything else has no table. */
+function columnsFor(view) { return COLUMN_SETS[view] || COLUMN_SETS.passthrough; }
+/* Every column id across all tabs - used to validate a sort id coming from a shared URL. */
+const ALL_COLUMN_IDS = new Set(Object.values(COLUMN_SETS).flat().map((c) => c.id));
 
 /* Metric groups per lane: drives the drawer and the compare table.
    best: "min"/"max" picks the neutral best-value highlight by measurement. */
@@ -254,7 +285,7 @@ function newState() {
   return {
     data: null,
     category: DEFAULT_CATEGORY,
-    view: "results",
+    view: "passthrough",
     q: "",
     sortCol: "rps20",
     sortDesc: true,
@@ -285,7 +316,11 @@ function encodeUrl(st) {
   if (st.langs.size) p.set("lang", [...st.langs].sort().join("|"));
   const caps = CAPS.filter(([k]) => st[k]).map(([, name]) => name);
   if (caps.length) p.set("cap", caps.join("|"));
-  if (st.sortCol !== "rps20" || st.sortDesc !== true) {
+  // Each perf tab's clean URL omits the sort when it equals that tab's default column + direction.
+  const defSort = VIEW_SORT[st.view] || "rps20";
+  const defCol = columnsFor(st.view).find((c) => c.id === defSort);
+  const defDesc = defCol ? defCol.desc !== false : true;
+  if (st.sortCol !== defSort || st.sortDesc !== defDesc) {
     p.set("sort", st.sortCol);
     p.set("dir", st.sortDesc ? "desc" : "asc");
   }
@@ -293,7 +328,7 @@ function encodeUrl(st) {
   if (st.cmpOpen) p.set("cv", "1");
   if (st.drawer) p.set("gw", st.drawer);
   const cat = CATEGORIES[st.category] ? st.category : DEFAULT_CATEGORY;
-  const path = st.view && st.view !== "results" ? `/${cat}/${st.view}` : `/${cat}`;
+  const path = st.view && st.view !== "passthrough" ? `/${cat}/${st.view}` : `/${cat}`;
   const qs = p.toString();
   return qs ? `${path}?${qs}` : path;
 }
@@ -306,13 +341,16 @@ function encodeUrl(st) {
 function decodeUrl(pathname, search, hash) {
   const st = newState();
   const segs = String(pathname || "/").split("/").filter(Boolean);
+  // Resolve a raw view token to a real view, honoring legacy aliases (results->passthrough,
+  // charts->method) so old shared/deep links keep landing on a live tab.
+  const resolveView = (v) => (VIEWS.includes(v) ? v : VIEW_ALIASES[v] || null);
   let i = 0;
   if (segs[i] && CATEGORIES[segs[i]]) st.category = segs[i++];
-  if (segs[i] && VIEWS.includes(segs[i])) st.view = segs[i];
+  if (segs[i] && resolveView(segs[i])) st.view = resolveView(segs[i]);
   const legacy = String(hash || "").replace(/^#/, "");
   const p = new URLSearchParams(legacy.includes("=") ? legacy : String(search || "").replace(/^\?/, ""));
   const list = (k) => (p.get(k) || "").split("|").filter(Boolean);
-  if (p.get("view") && VIEWS.includes(p.get("view"))) st.view = p.get("view"); /* legacy hash form */
+  if (p.get("view") && resolveView(p.get("view"))) st.view = resolveView(p.get("view")); /* legacy hash form */
   st.q = p.get("q") || "";
   st.classes = new Set(list("cls"));
   st.langs = new Set(list("lang"));
@@ -320,9 +358,13 @@ function decodeUrl(pathname, search, hash) {
     const hit = CAPS.find(([, name]) => name === cap);
     if (hit) st[hit[0]] = true;
   }
-  if (p.get("sort") && COLUMNS.some((c) => c.id === p.get("sort") && c.sortable !== false)) {
+  // Accept any real, sortable column id from any tab; renderTable snaps it back to the tab's
+  // default if it does not belong to the resolved view.
+  if (p.get("sort") && ALL_COLUMN_IDS.has(p.get("sort")) && p.get("sort") !== "sel") {
     st.sortCol = p.get("sort");
     st.sortDesc = p.get("dir") !== "asc";
+  } else {
+    st.sortCol = VIEW_SORT[st.view] || "rps20";
   }
   st.cmp = list("cmp").slice(0, 3);
   st.cmpOpen = p.get("cv") === "1" && st.cmp.length >= 2;
@@ -349,7 +391,7 @@ function syncUrl(push = false) {
 function updateTitle() {
   if (NODE) return;
   const cat = CATEGORIES[state.category] || CATEGORIES[DEFAULT_CATEGORY];
-  const view = state.view !== "results" ? ` ${VIEW_LABELS[state.view] || state.view}` : "";
+  const view = state.view !== "passthrough" ? ` ${VIEW_LABELS[state.view] || state.view}` : "";
   document.title = `${cat.label}${view} · On the Bench · AI tool benchmarks`;
 }
 
@@ -361,9 +403,19 @@ function applyFilters(gateways, st) {
     if (st.classes.size && !st.classes.has(g.cls || "Gateway")) return false;
     if (st.langs.size && !st.langs.has(g.lang)) return false;
     if (st.needStream && !(g.stream && g.stream.stream_served)) return false;
-    if (st.needXlate && !(g.xlate && g.xlate.xlate_served)) return false;
+    if (st.needXlate && !hasTranslation(g)) return false;
+    // View-implicit filter: the Translation tab lists only gateways that actually translate, the
+    // Streaming tab only ones that serve SSE. A pure proxy that never translates simply is not in
+    // the translation ranking (rather than sitting there as a row of n/a).
+    if (st.view === "translation" && !hasTranslation(g)) return false;
+    if (st.view === "streaming" && !(g.stream && g.stream.stream_served)) return false;
     return true;
   });
+}
+/* A gateway "translates" if it has a measured openai-in translation cell, or (legacy, no matrix) it
+   served the xlate suite. Drives both the translation tab's implicit filter and the capability toggle. */
+function hasTranslation(g) {
+  return !!(g.translation_cell || (g.xlate && g.xlate.xlate_served));
 }
 
 /* ---- sweep chart: dependency-free canvas line chart -------------------------
@@ -532,12 +584,36 @@ function initThemeToggle() {
 }
 
 /* ---- results table ---------------------------------------------------------- */
+/* Per-tab caption: states in one line exactly which path this tab's numbers are, so a reader never
+   has to guess what the ranking compares. No em dashes (house style). */
+const TABLE_CAPTIONS = {
+  passthrough: "OpenAI ingress to OpenAI upstream: pure passthrough, no translation. Every gateway runs the identical dialect, so the ranking is apples-to-apples. A gateway that does not serve OpenAI ingress reads n/a.",
+  translation: "OpenAI ingress translated to another dialect. Each gateway is shown on the fastest translation path it serves (the Path pill). Only gateways that actually translate appear here.",
+  streaming: "Server-sent-event passthrough. Streams sustained is each gateway's stall-free concurrent-stream ceiling; added TTFT and per-token are gateway minus direct-to-mock.",
+};
+function updateTableCaption(view) {
+  const el = document.getElementById("table-caption");
+  if (el) el.textContent = TABLE_CAPTIONS[view] || TABLE_CAPTIONS.passthrough;
+}
 function renderTable() {
   const { data } = state;
   const thead = document.querySelector("#results-table thead");
   const tbody = document.querySelector("#results-table tbody");
 
-  thead.innerHTML = "<tr>" + COLUMNS.map((c) => {
+  // Which tab's columns to render. matrix/method have no table, so fall back to passthrough
+  // (the section is hidden anyway) and never mutate the sort while off a perf tab.
+  const view = PERF_VIEWS.has(state.view) ? state.view : "passthrough";
+  const cols = columnsFor(view);
+  // Snap the sort onto this tab if the current column does not belong to it (e.g. after switching
+  // tabs, or a cross-tab sort id arrived from a shared URL).
+  if (PERF_VIEWS.has(state.view) && !cols.some((c) => c.id === state.sortCol && c.sortable !== false)) {
+    state.sortCol = VIEW_SORT[view] || "rps20";
+    const dc = cols.find((c) => c.id === state.sortCol);
+    state.sortDesc = dc ? dc.desc !== false : true;
+  }
+  updateTableCaption(view);
+
+  thead.innerHTML = "<tr>" + cols.map((c) => {
     const sorted = state.sortCol === c.id;
     const dir = sorted ? `<span class="dir">${state.sortDesc ? " ▾" : " ▴"}</span>` : "";
     return `<th data-col="${c.id}" class="${sorted ? "sorted" : ""}${c.sortable === false ? " nosort" : ""}" title="${esc(c.title || "")}">${esc(c.label)}${dir}</th>`;
@@ -547,7 +623,7 @@ function renderTable() {
   const count = document.getElementById("row-count");
   if (count) count.textContent = `${rows.length} of ${data.gateways.length}`;
 
-  const col = COLUMNS.find((c) => c.id === state.sortCol) || COLUMNS.find((c) => c.id === "rps20");
+  const col = cols.find((c) => c.id === state.sortCol) || cols.find((c) => c.id === VIEW_SORT[view]) || cols[3];
   rows = rows.slice().sort((a, b) => {
     const va = col.get(a).v, vb = col.get(b).v;
     if (va === null && vb === null) return a.display.localeCompare(b.display);
@@ -558,19 +634,23 @@ function renderTable() {
   });
 
   tbody.innerHTML = rows.map((g) =>
-    `<tr data-gw="${esc(g.key)}">` + COLUMNS.map((c) => {
-      if (c.render) return c.render(g, state);
+    `<tr data-gw="${esc(g.key)}">` + cols.map((c) => {
+      const sc = c.id === state.sortCol ? " sorted-col" : "";
+      if (c.render) {
+        // render columns emit their own <td>; tint the sorted one by injecting the class.
+        return sc ? c.render(g, state).replace("<td", `<td class="sorted-col"`).replace('class="sorted-col" class="', 'class="sorted-col ') : c.render(g, state);
+      }
       const cell = c.get(g);
       return cell.na
-        ? `<td class="na" title="${esc(cell.note || "")}">${esc(cell.text)}</td>`
-        : `<td>${esc(cell.text)}</td>`;
+        ? `<td class="na${sc}" title="${esc(cell.note || "")}">${esc(cell.text)}</td>`
+        : `<td class="${sc.trim()}">${esc(cell.text)}</td>`;
     }).join("") + "</tr>"
   ).join("");
 
   thead.querySelectorAll("th").forEach((th) => {
     th.addEventListener("click", () => {
       const id = th.dataset.col;
-      const c = COLUMNS.find((x) => x.id === id);
+      const c = cols.find((x) => x.id === id);
       if (!c || c.sortable === false) return;
       if (state.sortCol === id) state.sortDesc = !state.sortDesc;
       else { state.sortCol = id; state.sortDesc = !!c.desc; }
@@ -611,9 +691,11 @@ function chipGroup(boxId, values, set, colorFor) {
 function initFilterControls() {
   const search = document.getElementById("search");
   search.addEventListener("input", () => { state.q = search.value; renderTable(); syncUrl(false); });
+  // The capability toggles are now implicit per tab (Translation/Streaming self-filter), so the DOM
+  // checkboxes were retired; the state fields + URL param survive for back-compat. Wire only if present.
   for (const [key, name] of CAPS) {
     const el = document.getElementById(`f-${name}`);
-    el.addEventListener("change", () => { state[key] = el.checked; renderTable(); syncUrl(true); });
+    if (el) el.addEventListener("change", () => { state[key] = el.checked; renderTable(); syncUrl(true); });
   }
 }
 
@@ -623,7 +705,7 @@ function renderFilters() {
   chipGroup("lang-filters", [...new Set(gws.map((g) => g.lang))].sort(), state.langs,
     (l) => LANG_COLORS[l] || LANG_COLORS.Other);
   document.getElementById("search").value = state.q;
-  for (const [key, name] of CAPS) document.getElementById(`f-${name}`).checked = state[key];
+  for (const [, name] of CAPS) { const el = document.getElementById(`f-${name}`); if (el) el.checked = state[CAPS.find(([, n]) => n === name)[0]]; }
 }
 
 /* ---- per-gateway drawer ----------------------------------------------------- */
@@ -904,9 +986,9 @@ function renderMatrix() {
             if (!cell) return `<td class="na" title="not measured (v1 result: this upstream dialect was not probed)">n/a</td>`;
             const [cls] = cellState(cell);
             const diag = e === c ? " diag" : "";
-            const perf = cellPerfTip(cell, c, e, g.best_cell);
-            const tip = matrixCellTip(cell) + (perf ? ` | ${perf}` : "");
-            return `<td><span class="cell ${cls}${diag}" data-gw="${esc(g.key)}" data-egress="${esc(e)}" data-cell="${esc(c)}" title="${esc(g.display)} / ${esc(MATRIX_LABELS[c])} in, ${esc(MATRIX_LABELS[e])} upstream: ${esc(tip)}"></span></td>`;
+            // No native `title` here: the richer hover popup (cellPopHtml/showPop) carries the
+            // verdict + perf, and a native title on top of it would double up.
+            return `<td><span class="cell ${cls}${diag}" data-gw="${esc(g.key)}" data-egress="${esc(e)}" data-cell="${esc(c)}"></span></td>`;
           }).join("")
         }</tr>`).join("")
       }</tbody></table></div>
@@ -1021,7 +1103,7 @@ function renderStatic() {
 
 /* ---- category nav + view tabs ----------------------------------------------- */
 function viewPath(category, view) {
-  return view && view !== "results" ? `/${category}/${view}` : `/${category}`;
+  return view && view !== "passthrough" ? `/${category}/${view}` : `/${category}`;
 }
 
 /* The category row above the tabs. One category today; new CATEGORIES entries
@@ -1050,11 +1132,15 @@ function renderCatNav() {
 
 function showView(view) {
   state.view = view;
+  // The three perf tabs share one table container (#view-table); matrix/method have their own.
+  const containerId = PERF_VIEWS.has(view) ? "view-table" : `view-${view}`;
   document.querySelectorAll(".tab").forEach((x) => {
     x.classList.toggle("active", x.dataset.view === view);
     x.setAttribute("href", viewPath(state.category, x.dataset.view));
   });
-  document.querySelectorAll(".view").forEach((v) => v.classList.toggle("hidden", v.id !== `view-${view}`));
+  document.querySelectorAll(".view").forEach((v) => v.classList.toggle("hidden", v.id !== containerId));
+  // Switching between perf tabs changes columns/caption/filtering, so re-render the table.
+  if (PERF_VIEWS.has(view) && state.data) renderTable();
   updateTitle();
 }
 function initTabs() {
@@ -1154,8 +1240,8 @@ if (NODE) {
   module.exports = {
     newState, encodeUrl, decodeUrl, viewPath, applyFilters,
     fmtStamp, fmtAge, stampWithAge,
-    drawSweep, niceStep, fmtTick, COLUMNS, LANES, naText,
-    cellState, matrixCellTip, cellPerfTip, bestOrPerf, CATEGORIES, DEFAULT_CATEGORY, VIEWS,
+    drawSweep, niceStep, fmtTick, COLUMN_SETS, columnsFor, PERF_VIEWS, VIEW_SORT, LANES, naText,
+    cellState, matrixCellTip, cellPerfTip, passCell, xlateCell, hasTranslation, CATEGORIES, DEFAULT_CATEGORY, VIEWS,
   };
 } else {
   boot();
