@@ -69,8 +69,22 @@ GW_MATRIX_CAP="
 000000
 000000
 "
-GW_MATRIX_CAP_NOTE="TensorZero 2026.6.0 has no Cohere provider type and its Gemini providers hardcode googleapis.com with no api_base override (cannot reach a custom upstream); those cells are grey by that capability limit (model.rs, google_ai_studio_gemini.rs)"
+GW_MATRIX_CAP_NOTE="TensorZero 2026.6.0 has no Cohere provider type; that cell is grey by that capability limit (model.rs)"
+# Gemini is NOT incapability: TensorZero speaks Gemini in production, but both its Gemini provider
+# types hardcode *.googleapis.com with no api_base override, so this rig's localhost mock cannot
+# stand in - a mock-reachability limit, recorded as untestable (distinct from declared-incapable).
+GW_MATRIX_UNTESTABLE="openai/gemini"
+GW_MATRIX_UNTESTABLE_NOTE="TensorZero's google_ai_studio_gemini / gcp_vertex_gemini providers hardcode googleapis.com with no api_base override (google_ai_studio_gemini.rs @2026.6.0), so the harness mock cannot stand in for the upstream; TensorZero does serve Gemini in production"
 GW_MATRIX_EGRESS="openai openai-responses anthropic bedrock"
+
+# ── xlate lane: not declared (no anthropic-format ingress exists) ────────────────────────────────
+# The gateway's complete external route set (crates/gateway/src/routes/external.rs @2026.6.0) is
+# /inference, /batch_inference, /feedback plus the OpenAI-compatible /openai/v1/chat/completions +
+# /openai/v1/embeddings (endpoints/openai_compatible/mod.rs) - there is NO /v1/messages or any
+# Anthropic-Messages-format ingress, so anthropic-in -> openai-out translation is not a claimed
+# capability; the 404 the probe used to publish as a failure was the router's correct answer.
+GW_XLATE_CAP=0
+GW_XLATE_CAP_NOTE="TensorZero exposes no Anthropic-Messages-format ingress (external.rs + openai_compatible/mod.rs @2026.6.0 register only /inference, /batch_inference, /feedback and the OpenAI-compatible chat/embeddings routes), so anthropic-in translation is not a claimed capability"
 gw_matrix_egress() {
   case "$1" in
     openai)           _tz_write_config 'type = "openai"
@@ -84,8 +98,7 @@ model_name = "gpt-4o-mini"
 api_key_location = "none"';;
     anthropic)        _tz_write_config 'type = "anthropic"
 api_base = "http://127.0.0.1:'"$MOCK_PORT"'/v1/"
-model_name = "claude-3-5-sonnet-20241022"
-api_key_location = "none"';;
+model_name = "claude-3-5-sonnet-20241022"';;
     bedrock)          _tz_write_config 'type = "aws_bedrock"
 endpoint_url = "http://127.0.0.1:'"$MOCK_PORT"'"
 model_id = "anthropic.claude-3-sonnet-20240229-v1:0"
@@ -97,8 +110,21 @@ region = "us-east-1"';;
 
 gw_launch() {
   sudo docker rm -f tensorzero-bench >/dev/null 2>&1; sleep 1
+  # Credential env, required per provider type (verified against tensorzero-core @2026.6.0):
+  #  - ANTHROPIC_API_KEY: the anthropic provider does NOT accept api_key_location="none"
+  #    (TryFrom<Credential> in providers/anthropic.rs rejects Credential::None: "Invalid
+  #    api_key_location for Anthropic provider", asserted by its own unit test) - the config
+  #    default is env::ANTHROPIC_API_KEY, so a dummy value here is the supported no-real-key path.
+  #    Omitting it made the gateway refuse to start, which we then mispublished as a boot failure.
+  #  - AWS_*: aws_bedrock hand-signs SigV4 via the SDK default credential chain (aws_common.rs);
+  #    with no resolvable credentials every request fails and surfaces as the generic 502
+  #    AllVariantsFailed wrapper (tensorzero-error/src/lib.rs). Dummy keys sign fine; the mock
+  #    ignores the signature. endpoint_url accepts plain http:// (no allow_http knob needed).
   sudo docker run -d --name tensorzero-bench --network host --cpuset-cpus="$CORES" \
     -e TENSORZERO_DISABLE_PSEUDONYMOUS_USAGE_ANALYTICS=1 \
+    -e ANTHROPIC_API_KEY=dummy \
+    -e AWS_ACCESS_KEY_ID=AKIAMOCKACCESSKEY -e AWS_SECRET_ACCESS_KEY=mock-secret-access-key \
+    -e AWS_REGION=us-east-1 \
     -v "$GW_DIR/config:/app/config:ro" \
     "$TENSORZERO_IMAGE" --config-file config/tensorzero.toml >"$GW_DIR/launch.log" 2>&1 || true
 }
