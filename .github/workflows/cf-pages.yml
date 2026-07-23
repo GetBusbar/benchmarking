@@ -3,6 +3,11 @@
 # Replaces the GitHub Pages workflow (pages.yml). Once this is confirmed green
 # and the nameserver cutover to Cloudflare is complete, pages.yml can be deleted.
 #
+# This deploy is SELF-SUFFICIENT on charts: it regenerates the PNGs from results/*.json with
+# charts.py, THEN gen-data.mjs copies the fresh PNGs + fonts into site/. So a plain `results/` commit
+# always deploys fresh charts + data in one shot - no dependency on render-charts.yml's timing (whose
+# regenerated-PNG commit carries [skip ci] and would otherwise leave the deployed charts a push behind).
+#
 # gen-data.mjs scans gateways/*/gateway.sh + results/**/*.json, copies the chart
 # PNGs and bundled fonts into site/, and the finished site/ directory is the
 # artifact that wrangler uploads to Cloudflare Pages.
@@ -37,6 +42,13 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Regenerate charts from results
+        run: |
+          python3 -m pip install --quiet matplotlib
+          python3 charts.py
       - name: Generate site data
         run: node site/gen-data.mjs
       - name: Deploy to Cloudflare Pages
