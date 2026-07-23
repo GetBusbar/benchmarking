@@ -318,6 +318,14 @@ tbody tr { cursor: pointer; }
   white-space: nowrap; font-variant: small-caps; letter-spacing: .02em;
 }
 
+/* Translation ingress/egress picker (Translation tab only) */
+.xlate-picker label { display: inline-flex; align-items: center; gap: .4rem; color: var(--fg-dim); font-size: .85rem; }
+.xlate-picker select {
+  background: var(--bg-raise); color: var(--fg); border: 1px solid var(--border);
+  border-radius: 6px; padding: .25rem .5rem; font-size: .85rem; font-family: inherit;
+}
+.xlate-picker .xlate-arrow { color: var(--fg-mute); }
+
 /* Floating hover popup for matrix cells: a small card that follows the hovered cell. */
 .matrix-pop {
   position: absolute; z-index: 50; max-width: 22rem; pointer-events: none;

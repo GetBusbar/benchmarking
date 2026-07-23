@@ -151,17 +151,27 @@ function servesOpenaiPassthrough(g) {
   return !!(cell && cell.served === true);
 }
 
-/* xlateCell: the Translation tab reads the openai-in -> best non-openai egress cell (g.translation_cell,
-   chosen by gen-data on lowest added latency, fixed fair ingress). Absent a matrix, fall back to the
-   legacy xlate suite (anthropic-in / openai-out). Keys are cell.perf keys (added_latency_p99_us, ...). */
+/* xlateMatrixCell: the perf object for a gateway's ingress->egress translation cell, straight from the
+   matrix (upstreams[egress].cells[ingress]). Returns cell.perf when that exact pair is served and
+   measured, else null. The Translation tab pins BOTH ends (state.xlateIn/xlateOut) so every row is the
+   identical translation and the ranking is apples-to-apples. */
+function xlateMatrixCell(g, ingress, egress) {
+  const up = g.matrix && g.matrix.upstreams && g.matrix.upstreams[egress];
+  const cell = up && up.cells && up.cells[ingress];
+  return (cell && cell.served === true && cell.perf) ? cell.perf : null;
+}
+/* Does the gateway serve the pinned translation pair at all (green cell), measured or not? Drives the
+   Translation tab's row set: only gateways that serve this exact ingress->egress path appear. */
+function servesXlatePair(g, ingress, egress) {
+  const up = g.matrix && g.matrix.upstreams && g.matrix.upstreams[egress];
+  const cell = up && up.cells && up.cells[ingress];
+  return !!(cell && cell.served === true);
+}
+/* Column reader for the Translation tab: the pinned-pair cell's metric, n/a when the pair is served
+   but unmeasured (perf sweep did not land). */
 function xlateCell(g, key, fmt) {
-  if (g.translation_cell && g.translation_cell[key] != null)
-    return { v: g.translation_cell[key], text: fmt(g.translation_cell[key]), na: false };
-  if (!g.matrix || !g.matrix.upstreams) {
-    const legacy = { added_latency_p99_us: "xlate_added_latency_p99_us", rps_sustained_20ms: "xlate_rps_sustained_20ms" }[key] || key;
-    return lane(g, "xlate", "xlate_served", "xlate_error", (j) =>
-      j[legacy] != null ? { v: j[legacy], text: fmt(j[legacy]), na: false } : { v: null, text: "n/a", na: true });
-  }
+  const perf = xlateMatrixCell(g, state.xlateIn, state.xlateOut);
+  if (perf && perf[key] != null) return { v: perf[key], text: fmt(perf[key]), na: false };
   return { v: null, text: "n/a", na: true };
 }
 
@@ -215,18 +225,14 @@ const COLUMN_SETS = {
     { id: "mempeak", label: "Mem peak (MiB)", desc: false, title: "Peak process RSS under large-payload load",
       get: (g) => lane(g, "memory", "served", "serve_error", (j) => ({ v: j.peak_rss_mib, text: fmt1(j.peak_rss_mib), na: false })) },
   ],
-  // Translation: openai-in -> best non-openai egress. A path pill shows which egress this row's
-  // number is; only gateways that actually translate appear (view-implicit filter).
+  // Translation: the pinned ingress->egress pair (state.xlateIn/xlateOut), chosen by the two
+  // dropdowns above the table. Every row is the identical translation; the path is the dropdowns,
+  // so there is no per-row Path pill. Only gateways serving this exact pair appear.
   translation: [
     COL_SEL, COL_NAME, COL_LANG,
-    { id: "xlpath", label: "Path", desc: false, title: "OpenAI ingress translated to this egress dialect - the fastest translation path this gateway serves (chosen by lowest added latency)",
-      get: (g) => ({ v: g.translation_cell ? g.translation_cell.egress : "", text: null, na: !g.translation_cell }),
-      render: (g) => g.translation_cell
-        ? `<td class="tested"><span class="tested-pill" title="OpenAI ingress translated to ${esc(g.translation_cell.egress)} upstream">openai&nbsp;&rarr;&nbsp;${esc(g.translation_cell.egress)}</span></td>`
-        : `<td class="tested"><span class="muted">n/a</span></td>` },
-    { id: "xllat", label: "Added latency p99 (µs)", desc: false, title: "Gateway p99 minus direct-to-mock p99 on the OpenAI-in translation path",
+    { id: "xllat", label: "Added latency p99 (µs)", desc: false, title: "Gateway p99 minus direct-to-mock p99 on the selected translation path",
       get: (g) => xlateCell(g, "added_latency_p99_us", fmtAdded) },
-    { id: "xlrps", label: "Sustained RPS @20ms", desc: true, title: "Sustained RPS @20ms on the OpenAI-in translation path (p99 < 1 s, <0.1% errors)",
+    { id: "xlrps", label: "Sustained RPS @20ms", desc: true, title: "Sustained RPS @20ms on the selected translation path (p99 < 1 s, <0.1% errors)",
       get: (g) => xlateCell(g, "rps_sustained_20ms", fmtInt) },
   ],
   // Streaming: SSE passthrough, its own stall-gated ceiling.
@@ -297,6 +303,11 @@ function newState() {
     classes: new Set(),
     needStream: false,
     needXlate: false,
+    // Translation tab: the pinned ingress->egress pair the whole table is ranked on. Both ends are
+    // fixed so every row does the identical translation (apples-to-apples); a gateway that does not
+    // serve this exact pair is absent. Default is the fullest-served pair.
+    xlateIn: "openai",
+    xlateOut: "anthropic",
     cmp: [],        /* gateway keys selected for compare, max 3 */
     cmpOpen: false, /* compare panel visible */
     drawer: null,   /* gateway key open in the drawer */
@@ -331,6 +342,9 @@ function encodeUrl(st) {
   if (st.cmp.length) p.set("cmp", st.cmp.join("|"));
   if (st.cmpOpen) p.set("cv", "1");
   if (st.drawer) p.set("gw", st.drawer);
+  // Carry a non-default translation pair so a shared link opens the same ranking.
+  if (st.xlateIn !== "openai") p.set("xin", st.xlateIn);
+  if (st.xlateOut !== "anthropic") p.set("xout", st.xlateOut);
   const cat = CATEGORIES[st.category] ? st.category : DEFAULT_CATEGORY;
   const path = st.view && st.view !== "passthrough" ? `/${cat}/${st.view}` : `/${cat}`;
   const qs = p.toString();
@@ -378,6 +392,8 @@ function decodeUrl(pathname, search, hash) {
   st.cmp = list("cmp").slice(0, 3);
   st.cmpOpen = p.get("cv") === "1" && st.cmp.length >= 2;
   st.drawer = p.get("gw") || null;
+  if (MATRIX_CELLS.includes(p.get("xin"))) st.xlateIn = p.get("xin");
+  if (MATRIX_CELLS.includes(p.get("xout"))) st.xlateOut = p.get("xout");
   return st;
 }
 
@@ -413,10 +429,10 @@ function applyFilters(gateways, st) {
     if (st.langs.size && !st.langs.has(g.lang)) return false;
     if (st.needStream && !(g.stream && g.stream.stream_served)) return false;
     if (st.needXlate && !hasTranslation(g)) return false;
-    // View-implicit filter: the Translation tab lists only gateways that actually translate, the
-    // Streaming tab only ones that serve SSE. A pure proxy that never translates simply is not in
-    // the translation ranking (rather than sitting there as a row of n/a).
-    if (st.view === "translation" && !hasTranslation(g)) return false;
+    // View-implicit filter: the Translation tab lists only gateways that serve the pinned
+    // ingress->egress pair (so every row is the identical translation); the Streaming tab only ones
+    // that serve SSE. A gateway absent from a pair simply does not serve it.
+    if (st.view === "translation" && !servesXlatePair(g, st.xlateIn, st.xlateOut)) return false;
     if (st.view === "streaming" && !(g.stream && g.stream.stream_served)) return false;
     return true;
   });
@@ -597,12 +613,18 @@ function initThemeToggle() {
    has to guess what the ranking compares. No em dashes (house style). */
 const TABLE_CAPTIONS = {
   passthrough: "OpenAI ingress to OpenAI upstream: pure passthrough, no translation. Every gateway runs the identical dialect, so the ranking is apples-to-apples. A gateway that does not serve OpenAI ingress reads n/a.",
-  translation: "OpenAI ingress translated to another dialect. Each gateway is shown on the fastest translation path it serves (the Path pill). Only gateways that actually translate appear here.",
   streaming: "Server-sent-event passthrough. Streams sustained is each gateway's stall-free concurrent-stream ceiling; added TTFT and per-token are gateway minus direct-to-mock.",
 };
 function updateTableCaption(view) {
   const el = document.getElementById("table-caption");
-  if (el) el.textContent = TABLE_CAPTIONS[view] || TABLE_CAPTIONS.passthrough;
+  if (!el) return;
+  if (view === "translation") {
+    const inL = (MATRIX_LABELS[state.xlateIn] || state.xlateIn);
+    const outL = (MATRIX_LABELS[state.xlateOut] || state.xlateOut);
+    el.textContent = `Client speaks ${inL}, upstream speaks ${outL}: the gateway translates every request and response on this exact path. Only gateways that serve this pair appear, and every row is the identical translation, so the ranking is apples-to-apples.`;
+    return;
+  }
+  el.textContent = TABLE_CAPTIONS[view] || TABLE_CAPTIONS.passthrough;
 }
 function renderTable() {
   const { data } = state;
@@ -706,6 +728,16 @@ function initFilterControls() {
     const el = document.getElementById(`f-${name}`);
     if (el) el.addEventListener("change", () => { state[key] = el.checked; renderTable(); syncUrl(true); });
   }
+  // Translation ingress/egress pickers: populate the six dialects and re-rank on change.
+  const xin = document.getElementById("xlate-in");
+  const xout = document.getElementById("xlate-out");
+  if (xin && xout) {
+    const opts = MATRIX_CELLS.map((d) => `<option value="${esc(d)}">${esc(MATRIX_LABELS[d] || d)}</option>`).join("");
+    xin.innerHTML = opts; xout.innerHTML = opts;
+    const onPick = () => { state.xlateIn = xin.value; state.xlateOut = xout.value; renderTable(); syncUrl(true); };
+    xin.addEventListener("change", onPick);
+    xout.addEventListener("change", onPick);
+  }
 }
 
 function renderFilters() {
@@ -715,6 +747,8 @@ function renderFilters() {
     (l) => LANG_COLORS[l] || LANG_COLORS.Other);
   document.getElementById("search").value = state.q;
   for (const [, name] of CAPS) { const el = document.getElementById(`f-${name}`); if (el) el.checked = state[CAPS.find(([, n]) => n === name)[0]]; }
+  const xin = document.getElementById("xlate-in"); if (xin) xin.value = state.xlateIn;
+  const xout = document.getElementById("xlate-out"); if (xout) xout.value = state.xlateOut;
 }
 
 /* ---- per-gateway drawer ----------------------------------------------------- */
@@ -1148,6 +1182,9 @@ function showView(view) {
     x.setAttribute("href", viewPath(state.category, x.dataset.view));
   });
   document.querySelectorAll(".view").forEach((v) => v.classList.toggle("hidden", v.id !== containerId));
+  // The translation ingress/egress pickers only make sense on the Translation tab.
+  const picker = document.getElementById("xlate-picker");
+  if (picker) picker.classList.toggle("hidden", view !== "translation");
   // Switching between perf tabs changes columns/caption/filtering, so re-render the table.
   if (PERF_VIEWS.has(view) && state.data) renderTable();
   updateTitle();
@@ -1166,6 +1203,7 @@ function applyState(st) {
     category: st.category, view: st.view, q: st.q, sortCol: st.sortCol, sortDesc: st.sortDesc,
     langs: st.langs, classes: st.classes,
     needStream: st.needStream, needXlate: st.needXlate,
+    xlateIn: st.xlateIn, xlateOut: st.xlateOut,
     cmp: st.cmp, cmpOpen: st.cmpOpen, drawer: st.drawer,
   });
 }

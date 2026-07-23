@@ -184,15 +184,22 @@ test("Passthrough reads the openai diagonal, n/a when openai is not_configurable
   assert.equal(app.passCell(native, "rps_sustained_20ms", String).na, true);
 });
 
-test("Translation tab lists only gateways that translate", () => {
-  const translator = { translation_cell: { egress: "anthropic", rps_sustained_20ms: 100 } };
-  const proxy = { matrix: mkMatrix({ openai: { openai: { served: true } } }) }; // no translation cell
-  assert.equal(app.hasTranslation(translator), true);
-  assert.equal(app.hasTranslation(proxy), false);
+test("Translation tab lists only gateways serving the pinned in->out pair", () => {
+  // g0 serves openai->anthropic (the default pair), g1 serves only openai->gemini.
+  const g0 = { display: "g0", key: "g0", lang: "Rust",
+    matrix: mkMatrix({ anthropic: { openai: { served: true, perf: { rps_sustained_20ms: 100, added_latency_p99_us: 200 } } } }) };
+  const g1 = { display: "g1", key: "g1", lang: "Go",
+    matrix: mkMatrix({ gemini: { openai: { served: true, perf: { rps_sustained_20ms: 90, added_latency_p99_us: 300 } } } }) };
   const st = app.newState();
-  st.view = "translation";
-  const rows = app.applyFilters([translator, proxy].map((g, i) => ({ display: "g" + i, key: "g" + i, lang: "Rust", ...g })), st);
-  assert.deepEqual(rows.map((g) => g.key), ["g0"]);
+  st.view = "translation"; // default pair openai -> anthropic
+  assert.deepEqual(app.applyFilters([g0, g1], st).map((g) => g.key), ["g0"]);
+  // repin to openai -> gemini and the row set follows the pair
+  st.xlateOut = "gemini";
+  assert.deepEqual(app.applyFilters([g0, g1], st).map((g) => g.key), ["g1"]);
+  // the cell reader returns the pinned pair's perf
+  st.xlateOut = "anthropic";
+  assert.equal(app.xlateCell(g0, "rps_sustained_20ms", String).text, "100");
+  assert.equal(app.xlateCell(g0, "rps_sustained_20ms", String).na, false);
 });
 
 // ---- footer timestamps: clean UTC stamp + coarse relative age ----------------

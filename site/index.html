@@ -63,6 +63,11 @@
       <input type="search" id="search" placeholder="Search gateways" aria-label="Search gateways by name">
       <div class="control-group" id="class-filters" aria-label="Filter by class (each project's own self-description)"></div>
       <div class="control-group" id="lang-filters" aria-label="Filter by language"></div>
+      <div class="control-group xlate-picker hidden" id="xlate-picker">
+        <label>Translate <select id="xlate-in" aria-label="Ingress dialect the client speaks"></select>
+        <span class="xlate-arrow">&rarr;</span>
+        <select id="xlate-out" aria-label="Egress dialect the upstream speaks"></select></label>
+      </div>
       <span id="row-count" class="muted count"></span>
     </div>
     <p id="table-caption" class="fineprint"></p>
