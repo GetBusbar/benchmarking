@@ -232,6 +232,13 @@ test("Gateways leads the tab order and is not a perf view", () => {
   // the overview is a roster section, not a ranked perf table
   assert.ok(!app.PERF_VIEWS.has("gateways"));
   assert.ok(!(app.VIEW_SORT && "gateways" in app.VIEW_SORT));
+  // the perf tabs are pure measurement: no implementation-language column anywhere.
+  // Language lives only on the Gateways overview roster.
+  for (const [view, cols] of Object.entries(app.COLUMN_SETS)) {
+    assert.ok(!cols.some((c) => c.id === "lang"), `${view} still carries a lang column`);
+  }
+  // the measurement-fact pill (Tested on) stays on Passthrough
+  assert.ok(app.COLUMN_SETS.passthrough.some((c) => c.id === "tested"));
 });
 
 // ---- three-tab split: honest passthrough / translation sourcing ---------------

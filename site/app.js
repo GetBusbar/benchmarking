@@ -225,7 +225,9 @@ function xlateCell(g, key, fmt) {
    text, na marks a muted "not measured / not served" cell. sortable:false columns
    (the compare checkbox) take no part in sorting. Columns are grouped into per-tab sets
    (COLUMN_SETS) so each perf tab ranks one coherent path; the shared leading columns
-   (select / name / lang) are reused across all three. */
+   (select / name) are reused across all three. Implementation language is NOT a perf
+   column: the perf tabs are pure measurement (the "Tested on" pill stays, a measurement
+   fact); language lives on the Gateways overview roster. */
 const COL_SEL = {
   id: "sel", label: "", sortable: false,
   get: () => ({ v: null, text: "", na: false }),
@@ -245,21 +247,12 @@ const COL_NAME = {
     return `<td class="name">${a}</td>`;
   },
 };
-const COL_LANG = {
-  id: "lang", label: "Lang", desc: false,
-  get: (g) => ({ v: g.lang, text: null, na: false }),
-  render: (g) => {
-    const c = LANG_COLORS[g.lang] || LANG_COLORS.Other;
-    return `<td><span class="lang-chip" style="background:${c}">${esc(g.lang)}</span></td>`;
-  },
-};
-
 const COLUMN_SETS = {
   // Passthrough (BEST-OF): each gateway on its best same-dialect passthrough diagonal. The "Tested on"
   // pill discloses which dialect that is (openai for most; a native dialect where openai is not served,
   // e.g. litellm-rust -> anthropic), so every gateway appears and the dialect is never hidden.
   passthrough: [
-    COL_SEL, COL_NAME, COL_LANG,
+    COL_SEL, COL_NAME,
     { id: "tested", label: "Tested on", desc: false,
       title: "The same-dialect passthrough these numbers were measured on (openai when served, else the gateway's fastest native dialect) - pure forwarding, no translation",
       get: (g) => ({ v: g.best_cell ? g.best_cell.dialect : "", text: null, na: !g.best_cell }),
@@ -290,7 +283,7 @@ const COLUMN_SETS = {
   // (same dialect, no translation), so this tab doubles as the per-dialect passthrough explorer. Same
   // metric depth as Passthrough (added latency p50/p99, sustained RPS, max proxy RPS).
   translation: [
-    COL_SEL, COL_NAME, COL_LANG,
+    COL_SEL, COL_NAME,
     { id: "xll50", label: "Added latency p50 (µs)", desc: false, title: "Gateway p50 minus direct-to-mock p50 at concurrency 1 on the selected path",
       get: (g) => xlateCell(g, "added_latency_p50_us", fmtAdded) },
     { id: "xllat", label: "Added latency p99 (µs)", desc: false, title: "Gateway p99 minus direct-to-mock p99 at concurrency 1 on the selected path",
@@ -302,7 +295,7 @@ const COLUMN_SETS = {
   ],
   // Streaming: SSE passthrough, its own stall-gated ceiling.
   streaming: [
-    COL_SEL, COL_NAME, COL_LANG,
+    COL_SEL, COL_NAME,
     { id: "sttft", label: "Added wait for 1st token p99 (µs)", desc: false, title: "Time to first token (TTFT): the extra wait before the stream's first token, gateway minus direct-to-mock, at concurrency 1. Lower is better.",
       get: (g) => lane(g, "stream", "stream_served", "stream_error", (j) => ({ v: j.stream_added_ttft_p99_us, text: fmtUsMs(j.stream_added_ttft_p99_us), na: false })) },
     { id: "sgap", label: "Added gap between tokens p99 (µs)", desc: false, title: "The extra pause the gateway adds between streamed tokens, gateway minus direct-to-mock. Lower is better.",
