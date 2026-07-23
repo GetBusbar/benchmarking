@@ -148,6 +148,21 @@ test("decode rejects a bogus sort column", () => {
   assert.equal(back.sortCol, "rps20");
 });
 
+test("a direct URL load defaults each tab to its column's natural direction", () => {
+  // Passthrough / Translation headline on Sustained RPS -> descending (higher is better)
+  const pass = app.decodeUrl("/gateways", "");
+  assert.equal(pass.sortCol, "rps20");
+  assert.equal(pass.sortDesc, true);
+  const xlate = app.decodeUrl("/gateways/translation", "");
+  assert.equal(xlate.sortCol, "xlrps");
+  assert.equal(xlate.sortDesc, true);
+  // Streaming headline on added TTFT -> ASCENDING (lower is better); the hard-refresh bug
+  // was this defaulting to descending and floating the worst gateway to the top.
+  const stream = app.decodeUrl("/gateways/streaming", "");
+  assert.equal(stream.sortCol, "sttft");
+  assert.equal(stream.sortDesc, false);
+});
+
 // ---- three-tab split: honest passthrough / translation sourcing ---------------
 const mkMatrix = (cells) => ({ upstreams: Object.fromEntries(
   Object.entries(cells).map(([eg, ing]) => [eg, { cells: Object.fromEntries(

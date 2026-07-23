@@ -368,7 +368,12 @@ function decodeUrl(pathname, search, hash) {
     st.sortCol = p.get("sort");
     st.sortDesc = p.get("dir") !== "asc";
   } else {
+    // No sort param: default to this view's headline column AND its natural direction. Leaving
+    // sortDesc at the global default would sort added-latency defaults (sttft) descending, i.e.
+    // worst-first. Derive the direction from the column's own `desc` flag.
     st.sortCol = VIEW_SORT[st.view] || "rps20";
+    const dc = columnsFor(st.view).find((c) => c.id === st.sortCol);
+    st.sortDesc = dc ? dc.desc !== false : true;
   }
   st.cmp = list("cmp").slice(0, 3);
   st.cmpOpen = p.get("cv") === "1" && st.cmp.length >= 2;
