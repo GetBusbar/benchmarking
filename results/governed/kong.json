@@ -3,5 +3,5 @@
   "build": "kong:3.8 (@sha256:dd6cd1d94a7aae8c5a4d245ccbee6b81230d41a4312d76d076c4e9c6db65611c)",
   "governed_served": false,
   "governed_note": "manifest defines no gw_governed_launch/gw_governed_token (no native key/limit governance, or not yet wired)",
-  "measured_at": "2026-07-22T20:33:42Z"
+  "measured_at": "2026-07-23T00:12:27Z"
 }

@@ -4,16 +4,16 @@
   "served": true,
   "last_http_status": "200",
   "serve_error": "",
-  "idle_rss_mib": 55.9,
-  "peak_rss_mib": 5423.6,
-  "peak_rss_hwm_mib": 5422.9,
-  "post_load_rss_mib": 3790.6,
+  "idle_rss_mib": 55.8,
+  "peak_rss_mib": 5224.9,
+  "peak_rss_hwm_mib": 5227.0,
+  "post_load_rss_mib": 3468.7,
   "payload_bytes": 150000,
   "concurrency": 1500,
   "duration_s": 120,
   "endpoint": "/v1/chat/completions",
-  "model": "gpt-4o-mini",
+  "model": "openai/gpt-4o-mini",
   "arch": "arm64",
   "hardware": "AWS m7g.2xlarge (Graviton3, 8 cores / 32 GB). Gateway pinned to 4 cores, mock+loadgen on the other 4, Ubuntu 24.04. One dedicated box per gateway.",
-  "measured_at": "2026-07-22T20:25:43Z"
+  "measured_at": "2026-07-23T00:04:16Z"
 }

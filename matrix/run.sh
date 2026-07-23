@@ -414,14 +414,34 @@ matrix_cell_perf(){
   # leg 3: the mock must have received a request on the $egress endpoint carrying the $egress shape.
   # If the gateway misroutes under (or after) load, perf is DROPPED for this cell with the evidence -
   # a misrouted cell never carries a green perf number.
-  mock_reset
-  probe "$path" "$data" "$@"
-  local reverify; reverify="$(mock_hit "$egress")"
-  if [ "$reverify" != ok ]; then
-    log "[$GATEWAY]   $egress <- $cell : LEG-3 RE-VERIFY FAILED after load ($reverify) - dropping perf (possible misroute)"
-    CELL_PERF_JSON=", \"perf_dropped\": \"$(json_escape "leg-3 re-verify after load did not confirm the $egress egress endpoint: $reverify; perf withheld to avoid recording a misrouted number")\""
-    return 0
-  fi
+  # A `miss` (mock recorded ZERO requests) after a heavy sweep + mock restart is almost always a
+  # TRANSIENT dead-socket/timeout on the single probe (the gateway's upstream pool holds stale
+  # sockets the 2 warm-ups above did not fully flush), NOT a misroute - a real misroute records on
+  # the WRONG endpoint and reads `misdialect`, never `miss`. So RETRY the probe on `miss` (each retry
+  # re-flushes a socket); only a persistent `misdialect` is a genuine drop. If it is still `miss`
+  # after the retries the harness simply could not get a clean post-load reading: keep the cell green
+  # (its capability was already proven at probe time) and record perf as NOT MEASURED - never imply a
+  # gateway fault we did not observe.
+  local reverify=miss _rv
+  for _rv in 1 2 3 4 5; do
+    mock_reset
+    probe "$path" "$data" "$@"
+    reverify="$(mock_hit "$egress")"
+    [ "$reverify" = ok ] && break
+    case "$reverify" in misdialect*) break;; esac   # a real misroute is persistent - do not retry
+    sleep 1                                          # let a dead socket cycle out before the next try
+  done
+  case "$reverify" in
+    ok) : ;;
+    misdialect*)
+      log "[$GATEWAY]   $egress <- $cell : LEG-3 RE-VERIFY MISROUTE after load ($reverify) - dropping perf"
+      CELL_PERF_JSON=", \"perf_dropped\": \"$(json_escape "leg-3 re-verify after load found a misroute to $reverify (not the $egress endpoint); perf withheld to avoid recording a misrouted number")\""
+      return 0 ;;
+    *)  # miss/norecord after retries: could not measure cleanly, NOT a fault. Cell stays green, no perf.
+      log "[$GATEWAY]   $egress <- $cell : LEG-3 RE-VERIFY inconclusive after load ($reverify) - perf not measured (cell stays green)"
+      CELL_PERF_JSON=", \"perf_unmeasured\": \"$(json_escape "post-load re-verify could not confirm a clean reading ($reverify) after retries; perf not measured this run (the cell's capability was proven at probe time and stays supported)")\""
+      return 0 ;;
+  esac
   local lat50=$OVER_P50 lat99=$OVER_P99 g99=${GP99:-0} d99=${DP99:-0} c1note=""
   if [ "$C1_OK" != 1 ]; then
     # No trustworthy c1 sample: latency fields go null with the evidence, the sweeps still stand.

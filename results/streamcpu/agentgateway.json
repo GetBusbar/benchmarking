@@ -6,10 +6,10 @@
   "last_http_status": "200",
   "serve_error": "",
   "stream_error": "",
-  "streamcpu_frames_per_sec": 158008,
-  "streamcpu_fps_per_core": 39502,
+  "streamcpu_frames_per_sec": 159673,
+  "streamcpu_fps_per_core": 39918,
   "streamcpu_concurrency": 256,
-  "streamcpu_direct_ceiling_fps": 148394,
+  "streamcpu_direct_ceiling_fps": 148411,
   "streamcpu_mock_bound": true,
   "streamcpu_valid": false,
   "streamcpu_added_per_frame_us": null,
@@ -17,7 +17,7 @@
   "streamcpu_frame_bytes": 16,
   "streamcpu_cores": 4,
   "streamcpu_stall_ms": 250,
-  "sweep_streamcpu": [{"conc":8,"streams":296,"complete":296,"fail":0,"stalled":0,"frames":151552,"fps":7461,"delivered":1.0000},{"conc":32,"streams":1120,"complete":1120,"fail":0,"stalled":0,"frames":573440,"fps":27931,"delivered":1.0000},{"conc":64,"streams":2206,"complete":2206,"fail":0,"stalled":0,"frames":1129472,"fps":54863,"delivered":1.0000},{"conc":128,"streams":3838,"complete":3838,"fail":0,"stalled":0,"frames":1965056,"fps":96597,"delivered":1.0000},{"conc":256,"streams":6399,"complete":6399,"fail":0,"stalled":0,"frames":3276288,"fps":158008,"delivered":1.0000}],
+  "sweep_streamcpu": [{"conc":8,"streams":296,"complete":296,"fail":0,"stalled":0,"frames":151552,"fps":7452,"delivered":1.0000},{"conc":32,"streams":1121,"complete":1121,"fail":0,"stalled":0,"frames":573952,"fps":27949,"delivered":1.0000},{"conc":64,"streams":2174,"complete":2174,"fail":0,"stalled":0,"frames":1113088,"fps":54350,"delivered":1.0000},{"conc":128,"streams":3967,"complete":3967,"fail":0,"stalled":0,"frames":2031104,"fps":99201,"delivered":1.0000},{"conc":256,"streams":6428,"complete":6428,"fail":0,"stalled":0,"frames":3291136,"fps":159673,"delivered":1.0000}],
   "payload_bytes": 256,
   "endpoint": "/v1/chat/completions",
   "model": "gpt-4o-mini",
@@ -25,5 +25,5 @@
   "mock_proto": "h1+h2c",
   "arch": "arm64",
   "hardware": "AWS m7g.2xlarge (Graviton3, 8 cores / 32 GB). Gateway pinned to 4 cores, mock+loadgen on the other 4, Ubuntu 24.04. One dedicated box per gateway.",
-  "measured_at": "2026-07-22T20:33:07Z"
+  "measured_at": "2026-07-23T00:11:33Z"
 }

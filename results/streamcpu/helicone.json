@@ -9,7 +9,7 @@
   "streamcpu_frames_per_sec": 0,
   "streamcpu_fps_per_core": 0,
   "streamcpu_concurrency": 0,
-  "streamcpu_direct_ceiling_fps": 155444,
+  "streamcpu_direct_ceiling_fps": 140138,
   "streamcpu_mock_bound": false,
   "streamcpu_valid": false,
   "streamcpu_added_per_frame_us": null,
@@ -17,7 +17,7 @@
   "streamcpu_frame_bytes": 16,
   "streamcpu_cores": 4,
   "streamcpu_stall_ms": 250,
-  "sweep_streamcpu": [{"conc":8,"streams":280,"complete":0,"fail":0,"stalled":0,"frames":143360,"fps":7041,"delivered":1.0000},{"conc":32,"streams":1088,"complete":0,"fail":0,"stalled":0,"frames":557056,"fps":27080,"delivered":1.0000},{"conc":64,"streams":2112,"complete":0,"fail":0,"stalled":0,"frames":1081344,"fps":52733,"delivered":1.0000},{"conc":128,"streams":3946,"complete":0,"fail":0,"stalled":0,"frames":2020352,"fps":98027,"delivered":1.0000},{"conc":256,"streams":6400,"complete":0,"fail":0,"stalled":0,"frames":3276800,"fps":159069,"delivered":1.0000}],
+  "sweep_streamcpu": [{"conc":8,"streams":280,"complete":0,"fail":0,"stalled":0,"frames":143360,"fps":7099,"delivered":1.0000},{"conc":32,"streams":1056,"complete":0,"fail":0,"stalled":0,"frames":540672,"fps":26689,"delivered":1.0000},{"conc":64,"streams":2176,"complete":0,"fail":0,"stalled":0,"frames":1114112,"fps":54781,"delivered":1.0000},{"conc":128,"streams":3712,"complete":0,"fail":0,"stalled":0,"frames":1900544,"fps":92178,"delivered":1.0000},{"conc":256,"streams":5705,"complete":0,"fail":0,"stalled":0,"frames":2920960,"fps":141320,"delivered":1.0000}],
   "payload_bytes": 256,
   "endpoint": "/router/default/chat/completions",
   "model": "openai/gpt-4o-mini",
@@ -25,5 +25,5 @@
   "mock_proto": "h1+h2c",
   "arch": "arm64",
   "hardware": "AWS m7g.2xlarge (Graviton3, 8 cores / 32 GB). Gateway pinned to 4 cores, mock+loadgen on the other 4, Ubuntu 24.04. One dedicated box per gateway.",
-  "measured_at": "2026-07-22T20:40:07Z"
+  "measured_at": "2026-07-23T00:18:39Z"
 }

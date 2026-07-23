@@ -7,7 +7,7 @@
   "last_http_status": "200",
   "xlate_probe_status": "200",
   "serve_error": "",
-  "xlate_error": "HTTP 200 on POST /v1/messages (anthropic shape); body=[{\"model\":\"mock\",\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"total_tokens\":12},\"choices\":[{\"message\":{\"content\":\"ok\",\"role\":\"assistant\"},\"index\":0,\"finish_reason\":\"stop\"}],\"id\":\"chatcmpl-x\",\"object\":\"chat.completion\",\"created\":1}]; diag=[container: Up Less than a second\nrun.log: f5278906c54dcfbecc82909336fdedb71c92fc27243e5e67369e7d10cbc9dd43 \nlogs:]",
+  "xlate_error": "HTTP 200 on POST /v1/messages (anthropic shape); body=[{\"model\":\"mock\",\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"total_tokens\":12},\"choices\":[{\"message\":{\"content\":\"ok\",\"role\":\"assistant\"},\"index\":0,\"finish_reason\":\"stop\"}],\"id\":\"chatcmpl-x\",\"object\":\"chat.completion\",\"created\":1}]; diag=[container: Up Less than a second\nrun.log: 1cf42f5c63b70127558087c6e9c8592bda5d0e18ccbceab93e4949e26046e15f \nlogs:]",
   "xlate_added_latency_p50_us": 0,
   "xlate_added_latency_p99_us": 0,
   "xlate_gateway_c1_p99_us": 0,
@@ -29,5 +29,5 @@
   "mock_proto": "h1+h2c",
   "arch": "arm64",
   "hardware": "AWS m7g.2xlarge (Graviton3, 8 cores / 32 GB). Gateway pinned to 4 cores, mock+loadgen on the other 4, Ubuntu 24.04. One dedicated box per gateway.",
-  "measured_at": "2026-07-22T20:33:11Z"
+  "measured_at": "2026-07-23T00:11:37Z"
 }
