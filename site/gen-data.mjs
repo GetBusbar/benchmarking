@@ -203,6 +203,29 @@ for (const g of gateways) {
 }
 const hardware = [...hwCounts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] || null;
 
+// ---- staleness guard (R2) ---------------------------------------------------
+// The bundle is regenerated from the raw results tree on every run, so generated_at must never
+// precede the newest embedded measurement: if it does, a raw result is future-dated (clock skew
+// on the rig) and a "fresh" bundle would look older than its data. Hard fail; never ship it.
+const generatedAt = new Date().toISOString();
+if (latest && generatedAt < latest) {
+  throw new Error(`gen-data: generated_at ${generatedAt} predates the newest embedded measured_at ${latest}; ` +
+    `a raw result is future-dated (rig clock skew?). Refusing to emit a bundle that would read stale.`);
+}
+// Loud (non-fatal) warning when a gateway's suite lags the newest raw measurement by a lot: a
+// field re-run that skipped a suite leaves mixed-age numbers on one row, which is worth seeing
+// in the build log even though it is honest (each lane is stamped with its own measured_at).
+const LAG_DAYS = 30;
+for (const g of gateways) {
+  for (const suite of SUITES) {
+    const at = g[suite] && g[suite].measured_at;
+    if (!at || !latest) continue;
+    const lag = (Date.parse(latest) - Date.parse(at)) / 86400000;
+    if (lag > LAG_DAYS) console.warn(
+      `gen-data: WARNING: ${g.key}/${suite} measured_at ${at} lags the newest raw measurement (${latest}) by ${Math.round(lag)} days`);
+  }
+}
+
 // ---- charts: copy results/*.png into site/charts/ ---------------------------
 const resultsDir = join(ROOT, "results");
 const chartFiles = existsSync(resultsDir)
@@ -241,7 +264,7 @@ if (existsSync(redirects) && OUT !== HERE) copyFileSync(redirects, join(OUT, "_r
 // ---- emit -------------------------------------------------------------------
 const data = {
   category: "gateways", // which category bundle this is (see CATEGORIES in app.js)
-  generated_at: new Date().toISOString(),
+  generated_at: generatedAt,
   hardware,
   latest_measured_at: latest,
   repo: "https://github.com/GetBusbar/benchmarking",
