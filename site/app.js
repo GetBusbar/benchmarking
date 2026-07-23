@@ -1384,12 +1384,15 @@ function renderHome() {
   grid.innerHTML = homeCardsHtml(state.data);
   grid.querySelectorAll("[data-nav]").forEach(wireNav);
 }
-/* Static home links (repo, method): wired exactly once at boot. */
+/* Static home links (repo, method) + the header brand link (wordmark -> home):
+   wired exactly once at boot. */
 function initHomeLinks() {
   const repo = (state.data && state.data.repo) || "https://github.com/GetBusbar/benchmarking";
   const a = document.getElementById("home-repo");
   if (a) a.href = repo;
   document.querySelectorAll(".home-links [data-nav]").forEach(wireNav);
+  const brand = document.getElementById("brand-link");
+  if (brand) wireNav(brand);
 }
 
 /* ---- category nav + view tabs ----------------------------------------------- */

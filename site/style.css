@@ -92,11 +92,22 @@ code { background: var(--bg-raise); border: 1px solid var(--border); border-radi
 }
 .disclosure strong { color: var(--fg); }
 
-/* header */
-.site-header { border-bottom: 1px solid var(--border); background: var(--bg-raise); padding-top: 2.2rem; }
-.site-header h1 { margin: 0 0 .35rem; font-size: 1.7rem; font-weight: 700; letter-spacing: -.01em; }
-.brand-sub { color: var(--fg-mute); font-size: .95rem; font-weight: 500; margin-left: .45rem; letter-spacing: 0; }
-.tagline { margin: 0 0 1rem; color: var(--fg-dim); max-width: 72ch; }
+/* header: brand mark + wordmark, an accent hairline up top, a designed hierarchy.
+   Subtle on purpose: it should read intentional, not redecorated. */
+.site-header { position: relative; border-bottom: 1px solid var(--border); background: var(--bg-raise); padding-top: 2rem; }
+.site-header::before {
+  content: ""; position: absolute; top: 0; left: 0; right: 0; height: 2px;
+  background: linear-gradient(90deg, var(--accent), var(--link) 45%, transparent 80%);
+  opacity: .65;
+}
+.site-header h1.brand { margin: 0 0 .45rem; font-size: 1.55rem; font-weight: 700; letter-spacing: -.01em; }
+.brand a { display: inline-flex; align-items: center; gap: .55rem; color: var(--fg); text-decoration: none; }
+.brand a:hover { text-decoration: none; }
+.brand a:hover .brand-name { color: var(--accent); }
+.brand-mark { display: block; width: 28px; height: 28px; border-radius: 7px; }
+.brand-name { line-height: 1; transition: color .12s ease; }
+.brand-sub { color: var(--fg-mute); font-size: .9rem; font-weight: 500; margin-left: .2rem; letter-spacing: 0; align-self: flex-end; padding-bottom: .1rem; }
+.tagline { margin: 0 0 1rem; color: var(--fg-dim); max-width: 72ch; font-size: .95rem; }
 /* category row: the benchmarked thing (gateways today), above the view tabs */
 .catnav { display: flex; align-items: center; gap: .55rem; margin: 0 0 .7rem; }
 .catnav-label { color: var(--fg-mute); font-size: .74rem; font-weight: 600; text-transform: uppercase; letter-spacing: .08em; }
@@ -444,8 +455,13 @@ tbody tr { cursor: pointer; }
   html { font-size: 14px; }
   .wrap { padding: 0 1rem; }
   .site-header { padding-top: 1.2rem; }
-  .site-header h1 { font-size: 1.35rem; padding-right: 3rem; }
-  .brand-sub { display: block; margin: .15rem 0 0; font-size: .78rem; }
+  .site-header h1.brand { font-size: 1.35rem; padding-right: 3rem; }
+  .brand a { flex-wrap: wrap; gap: .45rem; }
+  .brand-mark { width: 24px; height: 24px; border-radius: 6px; }
+  /* wordmark line first; the sub-line wraps beneath, aligned under the wordmark */
+  .brand-sub { flex-basis: 100%; margin: 0 0 0 calc(24px + .45rem); padding-bottom: 0; font-size: .78rem; }
+  .hero { padding: 1.6rem 0 .2rem; }
+  .hero-word { font-size: 1.7rem; }
   .catnav { flex-wrap: wrap; gap: .4rem; }
   .theme-toggle .tt-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
   .theme-toggle { min-width: 44px; padding: 0; }
@@ -471,6 +487,6 @@ tbody tr { cursor: pointer; }
   .cell { width: 1.2rem; height: 1.2rem; }
 }
 @media (max-width: 400px) {
-  .site-header h1 { font-size: 1.2rem; }
+  .site-header h1.brand { font-size: 1.2rem; }
   .tab { padding: .55rem .55rem; font-size: .9rem; }
 }
