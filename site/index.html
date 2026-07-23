@@ -143,6 +143,7 @@
           <li><b>Added latency (p99)</b> and <b>sustained RPS at 20 ms</b> on the translation path, same gates as perf. The direct baseline is the OpenAI shape straight to the mock, so the added-latency figure deliberately includes the translation work.</li>
           <li>The Translation tab pins both ends with a pair of dropdowns (client dialect and upstream dialect), so every row is the identical path and the ranking is apples-to-apples; only gateways that serve the chosen pair appear. Pick the same dialect on both sides and it becomes that dialect's strict passthrough.</li>
           <li>A gateway that cannot serve Anthropic ingress against an OpenAI upstream records xlate_served=false with the probe status and body snippet as evidence.</li>
+          <li>Headline translation numbers (table, drawer, compare, charts) all come from one canonical record per gateway: the matrix per-cell sweep's OpenAI-in cell. This suite's Anthropic-to-OpenAI numbers are the fallback for a gateway with no measured matrix translation cell, and every surface labels the direction it shows.</li>
         </ul>
       </article>
       <article class="method-card">
