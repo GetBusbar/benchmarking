@@ -837,7 +837,10 @@ function matrixCell(g, egress, ingress) {
 function matrixCellTip(cell) {
   const [, label] = cellState(cell);
   if (cell.served === "not_configurable")
-    return `not declared supported by this gateway${cell.verdict_note ? ": " + cell.verdict_note : ""}`;
+    // HONEST wording: the capability grid is authored by the busbar team from each project's docs
+    // as a stand-in until that project's maintainers confirm their own grid. So a grey cell is "not
+    // in the grid we drafted / not tested", NOT a claim the gateway's own maintainer declined it.
+    return `not tested (this cell is not in the capability grid we drafted from the project's docs; the maintainers have not confirmed their own grid yet)${cell.verdict_note ? ": " + cell.verdict_note : ""}`;
   if (cell.served !== true && cell.served !== "unprobed_auth" && isHarnessGap(cell))
     return `not verified: the harness could not get this gateway serving under this upstream config${cell.verdict_note ? " (" + cell.verdict_note + ")" : ""}`;
   return `${label}. ${cell.verdict_note || ""}`;

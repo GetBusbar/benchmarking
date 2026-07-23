@@ -7,11 +7,14 @@ Portkey, Kong, Helicone, GoModel, Busbar, and whatever else you drop in.** Same 
 same cpu pin, for every gateway. One command runs it; the charts regenerate from raw results; every
 source ref is pinned in the open and the built commit is stamped into the output.
 
-The chart highlights the winner **by measurement, not by name** — whichever gateway measures best on a
-metric gets the highlight (a neutral colour, not a brand colour), so a highlighted bar can't be
-misread as the sponsor. Every number regenerates from committed JSON. If a gateway can't serve the
-endpoint, the result says `served: false` instead of quietly dropping it. Add your gateway (or fix how
-we run yours) with a one-file [manifest](gateways/README.md).
+Chart bars are coloured by **implementation language** (a neutral property), never by rank or brand, so
+the colour can't be misread as favouring the sponsor. Every number regenerates from committed JSON. If a
+gateway can't serve the endpoint, the result says `served: false` with the evidence, instead of quietly
+dropping it. Add your gateway (or fix how we run yours) with a one-file [manifest](gateways/README.md).
+
+On the Bench is built and operated by the Busbar team, and busbar is one of the entrants. It stays honest
+structurally: one shared harness with no per-gateway special-casing, every number from the committed JSON,
+fully open source. Don't take our word for it — read the code and re-run it.
 
 ## Results
 
@@ -211,7 +214,7 @@ would just add noise to a sub-millisecond number.
 **Throughput — two honest numbers, not one.** A single throughput figure invites "you picked the
 flattering metric," so we report both, same 20 ms delay for every gateway:
 - **Max proxy throughput** (instant mock): raw forwarding speed — trivial requests/sec the gateway
-  pushes. The metric behind "busbar does ~40k rps on 4 cores."
+  pushes, its CPU-bound ceiling.
 - **Sustained RPS @ 20 ms** (delayed mock): **AIGatewayBench's exact metric** — how many concurrent
   in-flight requests the gateway holds while the model takes 20 ms, at p99 < 1 s with <0.1% errors.
   Production-shaped (a gateway's real job is holding thousands of slow calls) and directly comparable
