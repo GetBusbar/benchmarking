@@ -74,28 +74,48 @@ const gateways = gatewayKeys.map((key) => {
   }
   if (g.matrix) {
     normalizeMatrix(g.matrix);
+    // CANONICAL RULE: the per-cell MATRIX sweep is the single source of truth for all
+    // passthrough + translation perf; the standalone perf/xlate suites are FALLBACK ONLY
+    // (a gateway with no matrix sweep). g.best_cell / g.translation_cell are the ONE
+    // canonical record every surface reads (table, drawer, compare, charts.py); the
+    // `source` tag ("matrix" | "perf-fallback" | "xlate-fallback") discloses provenance.
+    //
     // Per-cell perf (matrix v2 + sweep): the gateway's BEST green cell by sustained RPS @20ms,
-    // with its ingress -> egress path. The Performance tab ranks each gateway on this cell; the
-    // matrix hover shows every other green cell's deviation from it. Absent (older results
-    // without per-cell sweeps) the site falls back to the perf suite's single-path number.
-    let bc = bestCell(g.matrix);
-    if (!bc && g.perf && g.perf.served === true && g.perf.added_latency_p99_us != null) {
-      // No swept diagonal (e.g. bifrost mid-re-run), but the perf suite ran the gateway's default
-      // passthrough. Synthesize best_cell from it, inferring the dialect from the served diagonal, so
-      // the Tested-on pill and the numbers below it always name the SAME dialect (never a metric with
-      // an n/a pill). The field re-run replaces this with a real swept cell.
-      const dia = passthroughDialect(g.matrix);
-      bc = {
-        ingress: dia, egress: dia, dialect: dia,
-        added_latency_p50_us: g.perf.added_latency_p50_us,
-        added_latency_p99_us: g.perf.added_latency_p99_us,
-        rps_sustained_20ms: g.perf.rps_sustained_20ms,
-        rps_max_proxy: g.perf.rps_max_proxy,
-      };
-    }
-    if (bc) g.best_cell = bc;
+    // with its ingress -> egress path. The Passthrough tab ranks each gateway on this cell; the
+    // matrix hover shows every other green cell's deviation from it.
+    const bc = bestCell(g.matrix);
+    if (bc) g.best_cell = { ...bc, source: "matrix", build: g.matrix.build ?? null, measured_at: g.matrix.measured_at ?? null };
     const tc = translationCell(g.matrix);
-    if (tc) g.translation_cell = tc;
+    if (tc) g.translation_cell = { ...tc, source: "matrix", build: g.matrix.build ?? null, measured_at: g.matrix.measured_at ?? null };
+  }
+  if (!g.best_cell && g.perf && g.perf.served === true && g.perf.added_latency_p99_us != null) {
+    // No swept diagonal (e.g. bifrost mid-re-run), but the perf suite ran the gateway's default
+    // passthrough. Synthesize best_cell from it, inferring the dialect from the served diagonal, so
+    // the Tested-on pill and the numbers below it always name the SAME dialect (never a metric with
+    // an n/a pill). The field re-run replaces this with a real swept cell. source:"perf-fallback"
+    // makes the provenance visible on every surface (pill tooltip, drawer, charts).
+    const dia = passthroughDialect(g.matrix);
+    g.best_cell = {
+      ingress: dia, egress: dia, dialect: dia, source: "perf-fallback",
+      added_latency_p50_us: g.perf.added_latency_p50_us,
+      added_latency_p99_us: g.perf.added_latency_p99_us,
+      rps_sustained_20ms: g.perf.rps_sustained_20ms,
+      rps_max_proxy: g.perf.rps_max_proxy,
+      build: g.perf.build ?? null, measured_at: g.perf.measured_at ?? null,
+    };
+  }
+  if (!g.translation_cell && g.xlate && g.xlate.xlate_served === true && g.xlate.xlate_added_latency_p99_us != null) {
+    // No measured openai-in matrix translation cell, but the legacy xlate suite ran. Its direction
+    // is the OPPOSITE of the matrix cell (anthropic in -> openai out), so it is normalized into the
+    // same canonical shape WITH its real direction and an explicit source tag; every surface labels
+    // the direction from these fields, so the two paths can never be confused.
+    g.translation_cell = {
+      ingress: "anthropic", egress: "openai", source: "xlate-fallback",
+      added_latency_p50_us: g.xlate.xlate_added_latency_p50_us,
+      added_latency_p99_us: g.xlate.xlate_added_latency_p99_us,
+      rps_sustained_20ms: g.xlate.xlate_rps_sustained_20ms,
+      build: g.xlate.build ?? null, measured_at: g.xlate.measured_at ?? null,
+    };
   }
   // "Supports governance" is a DECLARED CAPABILITY, not a per-run measurement outcome. A gateway is
   // governance-capable if its manifest wires a governed launch - i.e. the governed note is anything

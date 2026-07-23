@@ -127,16 +127,41 @@ function lane(g, suite, flag, errKey, pick) {
   return pick(j);
 }
 
-/* passCell: the Passthrough tab reads ONLY the openai->openai diagonal (g.best_cell, which gen-data
-   now restricts to that single dialect) so every row ranks on identical work. A gateway that has a
-   matrix but no green openai diagonal genuinely does not serve openai passthrough in our grid, so it
-   reads n/a rather than borrowing a different-dialect number under an OpenAI-passthrough header.
-   Only a gateway with NO matrix at all (legacy single-path run) falls back to its perf suite. */
+/* canonicalPerf: THE single passthrough perf record every surface reads (table, drawer,
+   compare; charts.py reads the same best_cell from data.json). gen-data emits g.best_cell
+   from the matrix per-cell sweep, or synthesizes it from the perf suite when no swept
+   diagonal exists (source:"perf-fallback"). Only a legacy bundle with no best_cell at all
+   falls back to the raw perf suite object (whose field names match). */
+function canonicalPerf(g) {
+  if (g.best_cell) return { served: true, ...g.best_cell };
+  return g.perf || null;
+}
+/* canonicalXlate: the ONE Translation record for the drawer/compare: the SAME matrix cell
+   the Translation surfaces use (openai in -> the gateway's measured egress), normalized by
+   gen-data into g.translation_cell (source:"matrix" | "xlate-fallback", direction in
+   ingress/egress). Metric keys are normalized onto the lane's xlate_* names. Legacy bundles
+   without translation_cell fall back to the raw xlate suite object. */
+function canonicalXlate(g) {
+  const t = g.translation_cell;
+  if (t) return {
+    xlate_served: true, source: t.source, ingress: t.ingress, egress: t.egress,
+    build: t.build, measured_at: t.measured_at,
+    xlate_added_latency_p50_us: t.added_latency_p50_us,
+    xlate_added_latency_p99_us: t.added_latency_p99_us,
+    xlate_rps_sustained_20ms: t.rps_sustained_20ms,
+  };
+  return g.xlate || null;
+}
+
+/* passCell: the Passthrough tab reads ONLY the canonical record (g.best_cell). When best_cell
+   exists it is THE record: a field it lacks reads n/a, never silently patched from a different
+   source (that is exactly the numeric divergence this rule exists to kill). Only a gateway with
+   NO best_cell at all (legacy bundle) falls back to its perf suite. */
 function passCell(g, key, fmt) {
-  if (g.best_cell && g.best_cell[key] != null)
-    return { v: g.best_cell[key], text: fmt(g.best_cell[key]), na: false };
-  // No swept diagonal (e.g. bifrost mid-re-run): fall back to the perf suite's single-path number so
-  // the row is never blank. BEST-OF passthrough shows every gateway; nobody is filtered.
+  if (g.best_cell)
+    return g.best_cell[key] != null
+      ? { v: g.best_cell[key], text: fmt(g.best_cell[key]), na: false }
+      : { v: null, text: "n/a", na: true };
   return lane(g, "perf", "served", "serve_error", (j) =>
     j[key] != null ? { v: j[key], text: fmt(j[key]), na: false } : { v: null, text: "n/a", na: true });
 }
@@ -257,10 +282,20 @@ function columnsFor(view) { return COLUMN_SETS[view] || COLUMN_SETS.passthrough;
 const ALL_COLUMN_IDS = new Set(Object.values(COLUMN_SETS).flat().map((c) => c.id));
 
 /* Metric groups per lane: drives the drawer and the compare table.
-   best: "min"/"max" picks the neutral best-value highlight by measurement. */
+   best: "min"/"max" picks the neutral best-value highlight by measurement.
+   `get` (optional) returns the CANONICAL record for the lane instead of the raw suite file
+   (g[key]); the perf and xlate lanes read the same canonical objects the table reads, so the
+   drawer/compare can never show a different number than the table (the R1/R3 rule).
+   `pathNote` (optional) returns a one-line disclosure of WHICH path the record measured. */
+const laneDialect = (d) => (MATRIX_LABELS[d] || d || "?");
 const LANES = [
   {
     key: "perf", label: "Latency & throughput", flag: "served", err: "serve_error",
+    get: canonicalPerf,
+    pathNote: (j) => !j.source ? "measured on the perf-suite default path (legacy result)"
+      : j.source === "perf-fallback"
+        ? `measured on the perf-suite default path (${laneDialect(j.dialect)} passthrough; no matrix per-cell sweep for this gateway yet)`
+        : `measured on the ${laneDialect(j.dialect)} passthrough (matrix per-cell sweep, the same record the table ranks)`,
     metrics: [
       { k: "added_latency_p50_us", label: "Added latency p50 (µs)", best: "min", fmt: fmtAdded },
       { k: "added_latency_p99_us", label: "Added latency p99 (µs)", best: "min", fmt: fmtAdded },
@@ -285,7 +320,13 @@ const LANES = [
   },
   {
     key: "xlate", label: "Translation", flag: "xlate_served", err: "xlate_error",
+    get: canonicalXlate,
+    pathNote: (j) => !j.source ? "Anthropic in -> OpenAI out (legacy xlate suite)"
+      : j.source === "xlate-fallback"
+        ? `${laneDialect(j.ingress)} in -> ${laneDialect(j.egress)} out (xlate suite; no matrix translation cell for this gateway yet)`
+        : `${laneDialect(j.ingress)} in -> ${laneDialect(j.egress)} out (matrix per-cell sweep, the same cell the Translation tab reads)`,
     metrics: [
+      { k: "xlate_added_latency_p50_us", label: "Added latency p50 (µs)", best: "min", fmt: fmtInt },
       { k: "xlate_added_latency_p99_us", label: "Added latency p99 (µs)", best: "min", fmt: fmtInt },
       { k: "xlate_rps_sustained_20ms", label: "Sustained RPS @20ms", best: "max", fmt: fmtInt },
     ],
@@ -819,11 +860,14 @@ function drawerHtml(g) {
   if (hw) h += `<p class="stamp muted">${esc(hw.hardware)}${hw.arch ? ` (${esc(hw.arch)})` : ""}</p>`;
 
   for (const l of LANES) {
-    const j = g[l.key];
+    // Canonical lanes (perf, xlate) read the SAME record the table reads via l.get; the raw
+    // suite object is only the legacy fallback inside the accessor itself.
+    const j = l.get ? l.get(g) : g[l.key];
     h += `<section class="drawer-lane"><h4>${esc(l.label)}</h4>`;
     if (!j) h += `<p class="muted">not measured</p>`;
     else if (j[l.flag] === false) h += `<p class="muted">${esc(j[l.err] || "not served")}</p>${laneStamp(j)}`;
     else {
+      if (l.pathNote) h += `<p class="lane-note muted">${esc(l.pathNote(j))}</p>`;
       h += `<dl>` + l.metrics.filter((m) => j[m.k] != null).map((m) =>
         `<div><dt>${esc(m.label)}</dt><dd>${esc(m.fmt(j[m.k]))}</dd></div>`).join("") + `</dl>${laneStamp(j)}`;
     }
@@ -936,19 +980,26 @@ function renderCompare() {
   }).join("")}</tr>`;
 
   for (const l of LANES) {
-    /* skip the whole lane only when no gateway measured it at all; an all
-       not-served lane still renders rows so the header is never left bare */
-    if (gws.every((g) => !g[l.key])) continue;
+    /* Canonical lanes read the SAME record the table reads (l.get), so compare can never
+       disagree with the table. Skip the whole lane only when no gateway measured it at all;
+       an all not-served lane still renders rows so the header is never left bare */
+    const recs = gws.map((g) => (l.get ? l.get(g) : g[l.key]));
+    if (recs.every((j) => !j)) continue;
     h += `<tr class="lane-row"><td colspan="${gws.length + 1}">${esc(l.label)}</td></tr>`;
+    if (l.pathNote) {
+      /* one disclosure row per canonical lane: WHICH path each gateway's numbers measured */
+      h += `<tr><td class="metric">Measured path</td>` + recs.map((j) =>
+        j && j[l.flag] !== false
+          ? `<td class="muted lane-note">${esc(l.pathNote(j))}</td>`
+          : `<td class="na"></td>`).join("") + `</tr>`;
+    }
     for (const m of l.metrics) {
-      const vals = gws.map((g) => {
-        const j = g[l.key];
-        return j && j[l.flag] !== false && j[m.k] != null ? j[m.k] : null;
-      });
+      const vals = recs.map((j) =>
+        j && j[l.flag] !== false && j[m.k] != null ? j[m.k] : null);
       const bi = bestIndex(vals, m.best);
       h += `<tr><td class="metric">${esc(m.label)}</td>` + vals.map((v, i) => {
         if (v == null) {
-          const j = gws[i][l.key];
+          const j = recs[i];
           const na = j && j[l.flag] !== false ? { text: "n/a", note: "" } : naText(j, l.flag, l.err);
           return `<td class="na" title="${esc(na.note)}">${esc(na.text)}</td>`;
         }
@@ -1321,6 +1372,7 @@ if (NODE) {
     fmtStamp, fmtAge, stampWithAge,
     drawSweep, niceStep, fmtTick, COLUMN_SETS, columnsFor, PERF_VIEWS, VIEW_SORT, LANES, naText,
     cellState, matrixCellTip, cellPerfTip, passCell, xlateCell, hasTranslation, CATEGORIES, DEFAULT_CATEGORY, VIEWS,
+    canonicalPerf, canonicalXlate,
   };
 } else {
   boot();

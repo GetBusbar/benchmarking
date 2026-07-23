@@ -213,6 +213,9 @@ tbody tr { cursor: pointer; }
 .stamp { font-size: .78rem; margin: .3rem 0 0; }
 .drawer-lane { border-top: 1px solid var(--border); margin-top: .9rem; padding-top: .7rem; }
 .drawer-lane h4 { margin: 0 0 .45rem; font-size: .92rem; }
+/* one-line disclosure of WHICH path a lane's canonical numbers were measured on */
+.lane-note { font-size: .78rem; margin: 0 0 .4rem; }
+.cmp-table td.lane-note { font-size: .74rem; font-weight: 400; }
 .drawer-lane dl { margin: 0; }
 .drawer-lane dl > div { display: flex; justify-content: space-between; gap: 1rem; padding: .16rem 0; }
 .drawer-lane dt { color: var(--fg-dim); }
