@@ -60,6 +60,26 @@ test("gen-data emits gateways with a class for every entry", () => {
   assert.equal(busbar.cls, "Control plane");
 });
 
+test("star snapshot covers the field and gen-data attaches it", () => {
+  // The committed snapshot (gateways/stars.json, refreshed by gateways/fetch-stars.mjs)
+  // must cover every gateway with an integer count and an ISO date.
+  const snap = JSON.parse(readFileSync(join(ROOT, "gateways", "stars.json"), "utf8"));
+  for (const g of data.gateways) {
+    const s = snap[g.key];
+    assert.ok(s, `${g.key} missing from gateways/stars.json`);
+    assert.ok(Number.isInteger(s.stars) && s.stars >= 0, `${g.key} stars not an integer`);
+    assert.ok(/^\d{4}-\d{2}-\d{2}$/.test(s.as_of), `${g.key} as_of not YYYY-MM-DD`);
+  }
+  // A bundle emitted by the CURRENT gen-data carries the attached fields. The committed
+  // fallback bundle (mid-refresh) may predate them; assert only when present.
+  for (const g of data.gateways) {
+    if ("stars" in g) {
+      assert.equal(g.stars, snap[g.key].stars, `${g.key} bundle stars != snapshot`);
+      assert.equal(g.stars_as_of, snap[g.key].as_of, `${g.key} bundle as_of != snapshot`);
+    }
+  }
+});
+
 // ---- filtering --------------------------------------------------------------
 test("search filters rows by name", () => {
   const st = app.newState();

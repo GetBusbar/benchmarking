@@ -1,0 +1,54 @@
+{
+ "agentgateway": {
+  "stars": 4022,
+  "as_of": "2026-07-23"
+ },
+ "apisix": {
+  "stars": 16901,
+  "as_of": "2026-07-23"
+ },
+ "arch": {
+  "stars": 6889,
+  "as_of": "2026-07-23"
+ },
+ "bifrost": {
+  "stars": 6739,
+  "as_of": "2026-07-23"
+ },
+ "busbar": {
+  "stars": 109,
+  "as_of": "2026-07-23"
+ },
+ "gomodel": {
+  "stars": 1013,
+  "as_of": "2026-07-23"
+ },
+ "helicone": {
+  "stars": 614,
+  "as_of": "2026-07-23"
+ },
+ "kong": {
+  "stars": 43844,
+  "as_of": "2026-07-23"
+ },
+ "litellm-python": {
+  "stars": 54500,
+  "as_of": "2026-07-23"
+ },
+ "litellm-rust": {
+  "stars": 54500,
+  "as_of": "2026-07-23"
+ },
+ "one-api": {
+  "stars": 35911,
+  "as_of": "2026-07-23"
+ },
+ "portkey": {
+  "stars": 12516,
+  "as_of": "2026-07-23"
+ },
+ "tensorzero": {
+  "stars": 11691,
+  "as_of": "2026-07-23"
+ }
+}

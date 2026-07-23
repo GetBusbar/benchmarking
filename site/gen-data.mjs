@@ -59,6 +59,12 @@ function readJson(path) {
   try { return JSON.parse(readFileSync(path, "utf8")); } catch { return null; }
 }
 
+// GitHub star snapshot for the Gateways overview: a COMMITTED build-time file
+// (gateways/stars.json, refreshed by `node gateways/fetch-stars.mjs`), never a live
+// API call, so the bundle stays reproducible and CI needs no network. Absent file or
+// absent key degrades to null; the site renders those muted.
+const starsSnap = readJson(join(gatewaysDir, "stars.json")) || {};
+
 const gateways = gatewayKeys.map((key) => {
   const meta = parseManifest(readFileSync(join(gatewaysDir, key, "gateway.sh"), "utf8"));
   const g = {
@@ -67,6 +73,8 @@ const gateways = gatewayKeys.map((key) => {
     lang: meta.lang || "Other",
     cls: meta.cls || "Gateway",
     repo: meta.repo || null,
+    stars: starsSnap[key]?.stars ?? null,
+    stars_as_of: starsSnap[key]?.as_of ?? null,
   };
   for (const suite of SUITES) {
     const j = readJson(join(ROOT, "results", suite, `${key}.json`));
