@@ -3,5 +3,5 @@
   "build": "enterpilot/gomodel:0.1.55 (@sha256:606151f909bdc4b87ac290678c9c3a45e3e510a696697d2ce26eda49b1b562ac)",
   "governed_served": false,
   "governed_note": "manifest defines no gw_governed_launch/gw_governed_token (no native key/limit governance, or not yet wired)",
-  "measured_at": "2026-07-23T04:54:21Z"
+  "measured_at": "2026-07-23T22:17:53Z"
 }

@@ -4,16 +4,16 @@
   "served": true,
   "last_http_status": "200",
   "serve_error": "",
-  "idle_rss_mib": 713.3,
-  "peak_rss_mib": 999.0,
-  "peak_rss_hwm_mib": 1000.8,
-  "post_load_rss_mib": 1000.3,
+  "idle_rss_mib": 1365.0,
+  "peak_rss_mib": 1479.5,
+  "peak_rss_hwm_mib": 1495.9,
+  "post_load_rss_mib": 1478.4,
   "payload_bytes": 150000,
   "concurrency": 1500,
   "duration_s": 120,
   "endpoint": "/v1/chat/completions",
   "model": "gpt-4o-mini",
   "arch": "arm64",
-  "hardware": "AWS m7g.2xlarge (Graviton3, 8 cores / 32 GB). Gateway pinned to 4 cores, mock+loadgen on the other 4, Ubuntu 24.04. One dedicated box per gateway.",
-  "measured_at": "2026-07-23T04:49:10Z"
+  "hardware": "AWS m7g.4xlarge (Graviton3, 16 cores / 64 GB). Gateway-under-test pinned to 4 cores (the comparable basis); mock and load generator on 6 cores each so the mock never bottlenecks the streaming sweep. Ubuntu 24.04. One dedicated box per gateway.",
+  "measured_at": "2026-07-23T22:10:46Z"
 }

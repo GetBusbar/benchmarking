@@ -5,15 +5,15 @@
   "last_http_status": "200",
   "serve_error": "",
   "idle_rss_mib": 262.9,
-  "peak_rss_mib": 661.8,
-  "peak_rss_hwm_mib": 666.5,
-  "post_load_rss_mib": 631.1,
+  "peak_rss_mib": 680.9,
+  "peak_rss_hwm_mib": 682.6,
+  "post_load_rss_mib": 658.2,
   "payload_bytes": 150000,
   "concurrency": 1500,
   "duration_s": 120,
   "endpoint": "/v1/messages",
   "model": "azure_ai/mock",
   "arch": "arm64",
-  "hardware": "AWS m7g.2xlarge (Graviton3, 8 cores / 32 GB). Gateway pinned to 4 cores, mock+loadgen on the other 4, Ubuntu 24.04. One dedicated box per gateway.",
-  "measured_at": "2026-07-23T04:49:53Z"
+  "hardware": "AWS m7g.4xlarge (Graviton3, 16 cores / 64 GB). Gateway-under-test pinned to 4 cores (the comparable basis); mock and load generator on 6 cores each so the mock never bottlenecks the streaming sweep. Ubuntu 24.04. One dedicated box per gateway.",
+  "measured_at": "2026-07-23T22:11:23Z"
 }
