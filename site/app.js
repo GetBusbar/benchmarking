@@ -21,10 +21,17 @@ const CATEGORIES = {
     id: "gateways",
     label: "Gateways",
     tagline: "Reproducible gateway overhead measurement on neutral hardware. Same box, same mock upstream, same load, same CPU pin for every gateway; every number regenerates from committed JSON.",
+    // Home-page CTA card copy; homeCardsHtml prefixes the live entrant count when the
+    // category's data bundle is loaded ("13 self-hostable AI gateways, ...").
+    card: "Self-hostable AI gateways, measured for overhead, throughput, streaming, and protocol translation.",
     data: "/data.json",
   },
 };
 const DEFAULT_CATEGORY = "gateways";
+/* The site root (/) is the HOME landing page: the level ABOVE the categories.
+   It is not a category tab; the category nav and view tabs render only inside a
+   category. Encoded as a pseudo-view so state/URL plumbing stays one codepath. */
+const HOME_VIEW = "home";
 // The three perf tabs each rank an INTERNALLY COHERENT path so a single sort is honest:
 //   passthrough = openai->openai only (every gateway on the identical dialect, no translation)
 //   translation = openai-in -> best non-openai egress (fixed fair ingress, egress varies)
@@ -400,6 +407,8 @@ const CAPS = [["needStream", "stream"], ["needXlate", "xlate"]];
    URL (/gateways = the category root). Returns path + query, e.g.
    /gateways/matrix?sort=mempeak&dir=asc. */
 function encodeUrl(st) {
+  // Home is the bare site root: no category segment, no params.
+  if (st.view === HOME_VIEW) return "/";
   const p = new URLSearchParams();
   if (st.q) p.set("q", st.q);
   if (st.classes.size) p.set("cls", [...st.classes].sort().join("|"));
@@ -427,8 +436,9 @@ function encodeUrl(st) {
 }
 
 /* Parse a path + query (+ optional legacy #hash) back into state.
-   Unknown categories and views fall back to the defaults, so / normalizes to
-   /gateways (the roster overview). Pre-path-routing links carried everything in the hash
+   The bare root (and any unknown first segment) is the HOME landing page; a
+   known category segment enters that category, with unknown views falling back
+   to its default (the roster). Pre-path-routing links carried everything in the hash
    (#view=matrix&sort=...); when the hash holds params, it wins over the query so
    old shared URLs keep resolving, and boot() then rewrites them to path form. */
 function decodeUrl(pathname, search, hash) {
@@ -438,8 +448,15 @@ function decodeUrl(pathname, search, hash) {
   // charts->method) so old shared/deep links keep landing on a live tab.
   const resolveView = (v) => (VIEWS.includes(v) ? v : VIEW_ALIASES[v] || null);
   let i = 0;
-  if (segs[i] && CATEGORIES[segs[i]]) st.category = segs[i++];
-  if (segs[i] && resolveView(segs[i])) st.view = resolveView(segs[i]);
+  if (segs[i] && CATEGORIES[segs[i]]) {
+    st.category = segs[i++];
+    if (segs[i] && resolveView(segs[i])) st.view = resolveView(segs[i]);
+  } else {
+    // No (or an unknown) category segment: the site root, i.e. the HOME landing
+    // page above the category nav. A legacy hash carrying view= (below) still
+    // pulls the state back into the default category so old links keep landing.
+    st.view = HOME_VIEW;
+  }
   const legacy = String(hash || "").replace(/^#/, "");
   const p = new URLSearchParams(legacy.includes("=") ? legacy : String(search || "").replace(/^\?/, ""));
   const list = (k) => (p.get(k) || "").split("|").filter(Boolean);
@@ -490,6 +507,7 @@ function syncUrl(push = false) {
 
 function updateTitle() {
   if (NODE) return;
+  if (state.view === HOME_VIEW) { document.title = "On the Bench · AI tool benchmarks"; return; }
   const cat = CATEGORIES[state.category] || CATEGORIES[DEFAULT_CATEGORY];
   const view = state.view !== DEFAULT_VIEW ? ` ${VIEW_LABELS[state.view] || state.view}` : "";
   document.title = `${cat.label}${view} · On the Bench · AI tool benchmarks`;
@@ -1325,6 +1343,55 @@ function renderGateways() {
   if (note) note.textContent = asOf ? `Star counts are a GitHub snapshot as of ${asOf}, refreshed with the data, not live.` : "";
 }
 
+/* ---- home landing page ------------------------------------------------------
+   The site root (/) is a designed landing page, not a data dump: hero, pitch,
+   neutrality line, and one CTA card per CATEGORY (the extension seam: a new
+   category entry gets its card automatically). Pure HTML builder exported for
+   the node smoke test. */
+function homeCardsHtml(data) {
+  // Live entrant count for the category whose bundle is loaded (gateways today).
+  const counts = { gateways: data && Array.isArray(data.gateways) ? data.gateways.length : null };
+  const cards = Object.values(CATEGORIES).map((c) => {
+    const n = counts[c.id];
+    const body = c.card || "";
+    const desc = n != null ? `${n} ${body.charAt(0).toLowerCase()}${body.slice(1)}` : body;
+    return `<a class="home-card" data-nav href="/${esc(c.id)}">` +
+      `<h3>${esc(c.label)}</h3><p>${esc(desc)}</p>` +
+      `<span class="card-cta">See the results &rarr;</span></a>`;
+  });
+  // Muted placeholder: signals the grid grows, promises nothing it cannot keep.
+  cards.push(`<div class="home-card soon"><h3>Models</h3><p>Coming soon.</p></div>`);
+  return cards.join("");
+}
+
+/* SPA navigation to any internal path (home cards, brand link, method link). */
+function navigateTo(path) {
+  applyState(decodeUrl(path, "", ""));
+  syncUrl(true);
+  ensureData().then(renderAll);
+}
+function wireNav(el) {
+  el.addEventListener("click", (ev) => {
+    if (ev.metaKey || ev.ctrlKey || ev.shiftKey) return; /* let new-tab clicks through */
+    ev.preventDefault();
+    navigateTo(el.getAttribute("href"));
+  });
+}
+
+function renderHome() {
+  const grid = document.getElementById("home-cards");
+  if (!grid) return;
+  grid.innerHTML = homeCardsHtml(state.data);
+  grid.querySelectorAll("[data-nav]").forEach(wireNav);
+}
+/* Static home links (repo, method): wired exactly once at boot. */
+function initHomeLinks() {
+  const repo = (state.data && state.data.repo) || "https://github.com/GetBusbar/benchmarking";
+  const a = document.getElementById("home-repo");
+  if (a) a.href = repo;
+  document.querySelectorAll(".home-links [data-nav]").forEach(wireNav);
+}
+
 /* ---- category nav + view tabs ----------------------------------------------- */
 function viewPath(category, view) {
   return view && view !== DEFAULT_VIEW ? `/${category}/${view}` : `/${category}`;
@@ -1356,7 +1423,12 @@ function renderCatNav() {
 
 function showView(view) {
   state.view = view;
-  // The three perf tabs share one table container (#view-table); matrix/method have their own.
+  // Home is the root above the category nav: the header's category row, tab bar
+  // and category tagline belong to the category view only, so a body class hides
+  // them (style.css) while the home hero carries the brand treatment instead.
+  document.body.classList.toggle("home", view === HOME_VIEW);
+  // The three perf tabs share one table container (#view-table); matrix/method
+  // have their own; home renders #view-home.
   const containerId = PERF_VIEWS.has(view) ? "view-table" : `view-${view}`;
   document.querySelectorAll(".tab").forEach((x) => {
     x.classList.toggle("active", x.dataset.view === view);
@@ -1402,6 +1474,7 @@ function sanitizeState() {
 function renderAll() {
   renderCatNav();
   showView(state.view);
+  renderHome();
   renderGateways();
   renderFilters();
   renderTable();
@@ -1434,10 +1507,11 @@ function boot() {
   applyState(decodeUrl(location.pathname, location.search, location.hash));
   ensureData()
     .then(() => {
-      syncUrl(false); /* normalize: / -> /gateways, legacy #hash -> path form */
+      syncUrl(false); /* normalize: legacy #hash URLs -> clean path form */
       initTabs();
       initFilterControls();
       initThemeToggle();
+      initHomeLinks();
       renderAll();
 
       document.getElementById("backdrop").addEventListener("click", closeDrawer);
@@ -1472,6 +1546,7 @@ if (NODE) {
     drawSweep, niceStep, fmtTick, COLUMN_SETS, columnsFor, PERF_VIEWS, VIEW_SORT, LANES, naText, stripRigPaths,
     cellState, matrixCellTip, cellPerfTip, passCell, xlateCell, hasTranslation, CATEGORIES, DEFAULT_CATEGORY, VIEWS,
     canonicalPerf, canonicalXlate, DEFAULT_VIEW, VIEW_LABELS, rosterRows, fmtStars,
+    HOME_VIEW, homeCardsHtml,
   };
 } else {
   boot();

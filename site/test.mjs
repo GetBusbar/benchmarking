@@ -159,12 +159,41 @@ test("default state encodes to /gateways and decodes back to defaults", () => {
   assert.equal(app.encodeUrl(st), "/gateways/passthrough");
 });
 
-test("root, unknown paths and unknown views normalize to the gateways overview", () => {
-  assert.equal(app.decodeUrl("/", "").category, "gateways");
-  assert.equal(app.decodeUrl("/", "").view, "gateways");
-  assert.equal(app.decodeUrl("/index.html", "").view, "gateways");
-  assert.equal(app.decodeUrl("/no-such-category/matrix", "").category, "gateways");
+test("the site root is the HOME landing page, above the category nav", () => {
+  // / decodes to home (not a category tab) and a home state encodes back to /.
+  assert.equal(app.HOME_VIEW, "home");
+  const home = app.decodeUrl("/", "");
+  assert.equal(home.view, "home");
+  const st = app.newState();
+  st.view = app.HOME_VIEW;
+  assert.equal(app.encodeUrl(st), "/");
+  // /gateways is the category, defaulting to the roster overview.
+  const cat = app.decodeUrl("/gateways", "");
+  assert.equal(cat.category, "gateways");
+  assert.equal(cat.view, "gateways");
+  // home is NOT one of the category's view tabs
+  assert.ok(!app.VIEWS.includes("home"));
+  assert.ok(!app.PERF_VIEWS.has("home"));
+});
+
+test("home renders one CTA card per category plus the coming-soon placeholder", () => {
+  const html = app.homeCardsHtml(data);
+  assert.ok(html.includes(`href="/gateways"`), "gateways card links to the category");
+  assert.ok(html.includes(`${data.gateways.length} self-hostable AI gateways`), "card carries the live entrant count");
+  assert.ok(/overhead, throughput, streaming, and protocol translation/.test(html));
+  assert.ok(html.includes("Coming soon"), "muted future-category placeholder");
+  // no data yet: the card still renders, just without a count
+  assert.ok(app.homeCardsHtml(null).includes("Self-hostable AI gateways"));
+  assert.ok(!app.homeCardsHtml(null).includes("null "));
+  // no em dashes in rendered strings (house style)
+  assert.ok(!html.includes("—"), "no em dashes in home cards");
+});
+
+test("unknown paths land on home; unknown views land on the category overview", () => {
+  assert.equal(app.decodeUrl("/index.html", "").view, "home");
+  assert.equal(app.decodeUrl("/no-such-category/matrix", "").view, "home");
   assert.equal(app.decodeUrl("/gateways/no-such-view", "").view, "gateways");
+  assert.equal(app.decodeUrl("/gateways/no-such-view", "").category, "gateways");
   // legacy view aliases still resolve onto live tabs (the old default stays reachable)
   assert.equal(app.decodeUrl("/gateways/results", "").view, "passthrough");
   assert.equal(app.decodeUrl("/gateways/charts", "").view, "method");

@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Gateways · On the Bench · AI tool benchmarks</title>
+<title>On the Bench · AI tool benchmarks</title>
 <meta name="description" content="On the Bench: reproducible AI tool benchmarks. Current category: self-hostable AI gateways, measured on the same box, same mock, same load, same CPU pin.">
 <link rel="canonical" href="https://onthebench.ai/">
 <meta property="og:title" content="On the Bench: AI tool benchmarks">
@@ -69,8 +69,26 @@
 </header>
 
 <main class="wrap">
-  <!-- Gateways overview: the landing view. A NEUTRAL alphabetical roster (no perf
-       numbers, no ranking, no winner highlighting); the other tabs do the measuring. -->
+  <!-- Home: the landing page at the site root (/). The level ABOVE the category
+       nav: hero, pitch, neutrality line, and one CTA card per benchmark category
+       (grid populated by app.js from CATEGORIES). No perf tables here. -->
+  <section id="view-home" class="view hidden">
+    <div class="hero">
+      <img class="hero-mark" src="/favicon.svg" alt="" width="56" height="56">
+      <h2 class="hero-word">On the Bench</h2>
+      <p class="hero-tag">Reproducible, honest benchmarks for the AI tooling you actually run.</p>
+    </div>
+    <div class="home-pitch">
+      <p>Every entrant is measured the same way, on neutral hardware: same box, same mock upstream, same load, same CPU pin.</p>
+      <p>Every number regenerates from committed JSON. Fully open source, re-runnable by anyone.</p>
+    </div>
+    <p class="home-neutrality">Built and operated by the Busbar team, who are also one of the entrants. Same harness for everyone. A failure is our bug until proven the gateway's.</p>
+    <div class="home-cards" id="home-cards"></div>
+    <p class="home-links fineprint"><a id="home-repo" target="_blank" rel="noopener">Benchmark repository on GitHub</a> · <a data-nav href="/gateways/method">How we measure</a></p>
+  </section>
+
+  <!-- Gateways overview: the category's default view. A NEUTRAL alphabetical roster
+       (no perf numbers, no ranking, no winner highlighting); the other tabs do the measuring. -->
   <section id="view-gateways" class="view">
     <p class="fineprint">Every gateway on the board, in alphabetical order. Language, stars (snapshot), and each project's own self-description. The other tabs measure how they perform.</p>
     <div class="table-scroll">

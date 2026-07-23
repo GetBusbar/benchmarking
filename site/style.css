@@ -116,6 +116,40 @@ code { background: var(--bg-raise); border: 1px solid var(--border); border-radi
 .tab.active { color: var(--fg); border-bottom-color: var(--accent); }
 
 main { padding: 1.6rem 0 3rem; }
+
+/* ---- home landing page (site root) ------------------------------------------
+   The header's category row, tab bar and category tagline belong to the category
+   view; on home (body.home, set by showView) they hide and the hero carries the
+   brand treatment instead. */
+body.home .catnav, body.home .tabs, body.home .tagline { display: none; }
+body.home .site-header { padding-bottom: 1.4rem; }
+.hero { padding: 2.6rem 0 .4rem; }
+.hero-mark { display: block; width: 56px; height: 56px; border-radius: 12px; margin-bottom: 1rem; }
+.hero-word { margin: 0 0 .5rem; font-size: 2.1rem; font-weight: 700; letter-spacing: -.02em; }
+.hero-tag { margin: 0; font-size: 1.08rem; color: var(--fg-dim); max-width: 46ch; }
+.home-pitch { margin-top: 1.3rem; max-width: 62ch; color: var(--fg-dim); }
+.home-pitch p { margin: .35rem 0; }
+/* Neutrality disclosure: same accent-bar treatment as the Method tab's card. */
+.home-neutrality {
+  max-width: 62ch; margin: 1.3rem 0 0; padding: .7rem .9rem; font-size: .9rem;
+  border: 1px solid var(--border); border-left: 3px solid var(--accent);
+  border-radius: 6px; background: var(--bg-raise); color: var(--fg);
+}
+.home-cards {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 1.1rem; margin-top: 1.8rem;
+}
+.home-card {
+  display: flex; flex-direction: column; gap: .35rem;
+  background: var(--bg-raise); border: 1px solid var(--border); border-radius: 10px;
+  padding: 1.1rem 1.2rem 1rem; color: var(--fg); text-decoration: none;
+}
+a.home-card:hover { border-color: var(--accent); text-decoration: none; }
+.home-card h3 { margin: 0; font-size: 1.05rem; }
+.home-card p { margin: 0; color: var(--fg-dim); font-size: .9rem; }
+.home-card .card-cta { margin-top: .5rem; color: var(--accent); font-size: .86rem; font-weight: 600; }
+.home-card.soon { opacity: .55; }
+.home-links { margin-top: 2rem; }
 .view h2 { font-size: 1.2rem; margin: .2rem 0 .6rem; }
 
 /* controls */
