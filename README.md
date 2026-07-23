@@ -1,6 +1,6 @@
 # AI gateway benchmarks
 
-> **Browse the results:** [getbusbar.github.io/benchmarking](https://getbusbar.github.io/benchmarking/) - sortable tables, protocol matrix, charts, methodology.
+> **Browse the results:** [onthebench.ai](https://onthebench.ai) - sortable tables, protocol matrix, charts, methodology.
 
 A fair, reproducible benchmark for self-hostable AI gateways - **LiteLLM (Rust & Python), Bifrost,
 Portkey, Kong, Helicone, GoModel, Busbar, and whatever else you drop in.** Same box, same mock, same load,
@@ -18,9 +18,11 @@ fully open source. Don't take our word for it - read the code and re-run it.
 
 ## Results
 
-**Ran on:** AWS `m7g.xlarge`-class Graviton3 (ARM64), Ubuntu 24.04 - the same 4 vCPU / $0.04-per-vCPU
-machine class the gateways-under-test benchmark themselves on. The exact instance type and vCPU count
-are recorded in every `results/*.json` and printed at the top of each report page.
+**Ran on:** AWS `m7g.2xlarge` Graviton3 (ARM64, 8 cores), Ubuntu 24.04 - the gateway under test
+pinned to 4 of them (an `m7g.xlarge`-class slice, the same 4 vCPU / $0.04-per-vCPU machine class the
+gateways-under-test benchmark themselves on); the mock + load generator get the other 4. The exact
+instance type and vCPU count are recorded in every `results/*.json` and printed at the top of each
+report page.
 
 Full, auto-generated result pages (regenerated from the raw JSON on every run - no hand-typed numbers):
 
