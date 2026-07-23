@@ -81,34 +81,39 @@ gw_launch() { _arch_launch "$GW_MODEL"; }
 
 # ── matrix suite: declared capability + egress wiring ─────────────────────────────────────────────
 # Declared 6x6 (rows=ingress, cols=egress), axis order: openai openai-responses anthropic gemini
-# cohere bedrock. archgw 0.3.22's hermesllm has a FIXED set of upstream APIs it transforms into:
-# SupportedUpstreamAPIs = {OpenAIChatCompletions, AnthropicMessagesAPI, AmazonBedrockConverse,
-# ConverseStream, OpenAIResponsesAPI} (crates/hermesllm/src/clients/endpoints.rs). The egress
-# message_format is openai and archgw translates that ingress into the provider's native upstream
-# shape (from_openai.rs: OpenAI->Anthropic, OpenAI->Bedrock); the provider is chosen by the model
-# prefix, base_url overridable to the mock. So the capable row is openai-ingress into {openai,
-# openai-responses, anthropic, bedrock}. NOT declared: gemini (no native generateContent module;
-# Gemini is treated as OpenAI-compat) and cohere (absent from the repo at tag 0.3.22) - both grey with
-# the cited reason.
-# Evidence: hermesllm/src/clients/endpoints.rs (5 upstream APIs), providers/id.rs (routing),
-# transforms/request/from_openai.rs, tag 0.3.22. Wired-pending-field-verification.
+# cohere bedrock. archgw 0.3.22 routes by MODEL PREFIX (config_generator.py) and its dialect matrix
+# (crates/hermesllm/src/providers/id.rs compatible_api_for_client) decides the upstream API per
+# (provider, client-API) pair. For OpenAI-chat ingress the ONLY native translation that exists is
+# Bedrock ((prefix amazon_bedrock) -> ConverseRequest, /model/<id>/converse); the Anthropic
+# provider maps (Anthropic, OpenAIChatCompletions) -> OpenAIChatCompletions, i.e. archgw BY DESIGN
+# targets Anthropic's OpenAI-compat surface and never emits native /v1/messages for openai-chat
+# ingress (endpoints.rs target_endpoint_for_provider default arm -> /v1/chat/completions; native
+# messages egress happens only when the CLIENT speaks the Anthropic Messages API). Likewise the
+# Responses API exists only as its own ingress (OpenAI passthrough /responses); chat ingress is
+# never upgraded to a Responses upstream. The earlier grid declared openai->anthropic and
+# openai->responses anyway, and both published as 'untranslated passthrough' reds for behavior the
+# project never claimed - they are grey capability limits, with the anthropic-INGRESS translation
+# (anthropic->openai, which archgw does implement) exercised by the xlate lane instead. So the
+# capable row is openai-ingress into {openai, bedrock}. NOT declared: openai-responses egress,
+# anthropic egress (OpenAI-compat only), gemini (no native generateContent) and cohere (absent).
+# Evidence: hermesllm providers/id.rs (compatible_api_for_client matrix), clients/endpoints.rs
+# (target_endpoint_for_provider), transforms/request/from_openai.rs (Bedrock only), tag 0.3.22.
 GW_MATRIX_CAP="
-111001
+100001
 000000
 000000
 000000
 000000
 000000
 "
-GW_MATRIX_CAP_NOTE="archgw 0.3.22 has no native Gemini generateContent transform (Gemini is OpenAI-compat only) and no Cohere provider (absent from the repo); those cells are grey by that capability limit (hermesllm endpoints.rs)"
-GW_MATRIX_EGRESS="openai openai-responses anthropic bedrock"
+GW_MATRIX_CAP_NOTE="archgw 0.3.22 translates openai-chat ingress natively only to Bedrock Converse; Anthropic egress rides Anthropic's OpenAI-compat surface (id.rs maps (Anthropic, OpenAIChatCompletions) -> OpenAIChatCompletions, never native /v1/messages), Responses is ingress-only, and Gemini/Cohere have no native module; those cells are grey by that capability limit"
+GW_MATRIX_EGRESS="openai bedrock"
 gw_matrix_egress() {
   # GW_MODEL rides in the ingress request body (openai message_format), so it must name the same
   # provider-prefixed model archgw is configured with, else the default provider is not selected.
   case "$1" in
-    openai|openai-responses) GW_MODEL="openai/gpt-4o-mini";;
-    anthropic)               GW_MODEL="anthropic/claude-3-5-sonnet-20241022";;
-    bedrock)                 GW_MODEL="amazon_bedrock/anthropic.claude-3-sonnet-20240229-v1:0";;
+    openai)  GW_MODEL="openai/gpt-4o-mini";;
+    bedrock) GW_MODEL="amazon_bedrock/anthropic.claude-3-sonnet-20240229-v1:0";;
     *) return 1;;
   esac
   _arch_launch "$GW_MODEL"
