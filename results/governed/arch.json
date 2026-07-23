@@ -3,5 +3,5 @@
   "build": "katanemo/archgw:0.3.22 (archgw CLI)",
   "governed_served": false,
   "governed_note": "manifest defines no gw_governed_launch/gw_governed_token (no native key/limit governance, or not yet wired)",
-  "measured_at": "2026-07-23T00:31:35Z"
+  "measured_at": "2026-07-23T05:12:13Z"
 }
