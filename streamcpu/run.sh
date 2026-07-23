@@ -238,6 +238,7 @@ cat > "$RESULTS/$GATEWAY.json" <<JSON
   "last_http_status": "$c",
   "serve_error": "$(json_escape "$SERVE_ERR")",
   "stream_error": "$(json_escape "$STREAM_ERR")",
+  "stream_note": "$(json_escape "${GW_STREAM_NOTE:-}")",
   "streamcpu_frames_per_sec": $BEST_FPS,
   "streamcpu_fps_per_core": $FPS_PER_CORE,
   "streamcpu_concurrency": $BEST_CONC,

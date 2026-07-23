@@ -7,8 +7,14 @@
 # INTERVAL ms, then finish + [DONE]); the suite measures what the GATEWAY adds on top of that pace:
 #   * added TTFT (µs) at concurrency 1 = gateway first-content-frame time − direct-to-mock TTFT
 #   * added inter-frame latency (µs)   = gateway content-frame gap − direct-to-mock gap (p50/p99)
-#   * streams sustained = max concurrent streams where ≥99.9% of expected frames deliver, no
-#     stream stalls > STALL_X× the interval, and the stream error rate stays under 0.1%
+#   * streams sustained = max concurrent streams where >=99% of expected content frames deliver and
+#     the stream error rate stays under 0.1%. Pacing is NOT part of this gate: a gateway that
+#     re-chunks/coalesces the upstream SSE (Kong's documented parse-and-reframe pipeline, for
+#     example) still DELIVERS everything, and streamcpu/run.sh already treats coalescing as
+#     legitimate relay behavior - so a ~100%-delivery run must never publish a zero here. Pacing
+#     fidelity is published separately: stream_stallfree_streams is the max concurrency with the
+#     old strict gate (>=99.9% delivery, ZERO streams with any inter-frame gap > STALL_X x the
+#     interval), and the added-gap percentiles price the coalescing directly.
 #   * frames/sec at that concurrency
 # and writes results/stream/<gateway>.json. A gateway that answers 200 but never frames (buffers
 # the whole response) is recorded stream_served=false — measured, not hidden.
@@ -19,6 +25,9 @@
 #   default 20), STREAM_CHUNK_BYTES (delta payload, default 16), STALL_X (stall = gap > X×interval,
 #   default 2), C1_DUR (c1 run seconds, default 30), SWEEP ("1 8 32 128 512 1024"), SWEEP_DUR
 #   (seconds per sweep point, default 15), PSIZE (request payload bytes, default 256), CORES pin.
+# Manifest hook (optional, generic): GW_STREAM_NOTE - a cited, human-readable note the manifest
+#   attaches to this gateway's stream result (e.g. a link to the project's own open issue when a
+#   stream failure is a known upstream bug); emitted verbatim as "stream_note" in the JSON.
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
@@ -126,7 +135,7 @@ fi
 DURL="http://127.0.0.1:$MOCK_PORT$GW_PATH"; GURL="http://127.0.0.1:$GW_PORT$GW_PATH"
 DT50=0; DT99=0; DG50=0; DG99=0; GT50=0; GT99=0; GG50=0; GG99=0
 ADD_T50=0; ADD_T99=0; ADD_G50=0; ADD_G99=0
-SUST_STREAMS=0; SUST_FPS=0; MOCK_FPS=0; MOCK_BOUND=false; SWEEP_JSON=""
+SUST_STREAMS=0; SUST_FPS=0; STALLFREE_STREAMS=0; MOCK_FPS=0; MOCK_BOUND=false; SWEEP_JSON=""
 if [ "$STREAM_OK" = 1 ]; then
   # ── c1: direct baseline + gateway → added TTFT / added inter-frame gap (µs) ─────────────────────
   # Same discarded warm-up for both paths, mirroring perf/run.sh.
@@ -156,9 +165,13 @@ fi
 if [ "$STREAM_OK" = 1 ]; then
 
   # ── streams-sustained sweep ─────────────────────────────────────────────────────────────────────
-  # A point qualifies when ≥99.9% of expected content frames delivered, zero streams stalled past
-  # STALL_X× the interval, and the stream error rate is under 0.1% (same gate style as perf).
-  # Guardrail: the mock's own frames/sec at the top concurrency, so a harness limit is flagged.
+  # HEADLINE gate (delivery): a point qualifies when >=99% of expected content frames were delivered
+  # and the stream error rate is under 0.1%. Stall counts are RECORDED per point (and priced by the
+  # added-gap percentiles) but do NOT zero the headline: a gateway that re-chunks/coalesces its SSE
+  # relay still delivered the content, and streamcpu/run.sh already treats coalescing as legitimate.
+  # The former absolute gate (>=99.9% delivered AND zero stalled streams) zeroed gateways that
+  # delivered ~100% of frames (one stalled stream of thousands disqualified the point); it is kept
+  # as the SECONDARY stall-free figure below, never as the headline.
   top=1; for w in $SWEEP; do top=$w; done
   read -r _s _c _f _st _fr MOCK_FPS _d _t1 _t2 _g1 _g2 < <(sprobe "$DURL" "$top" "$SWEEP_DUR")
   log "[$GATEWAY] sweep — streams sustained (mock ceiling ${MOCK_FPS:-0} fps @ c=$top)"
@@ -168,10 +181,15 @@ if [ "$STREAM_OK" = 1 ]; then
     streams=${streams:-0}; fail=${fail:-1}; stalled=${stalled:-1}; fps=${fps:-0}; delivered=${delivered:-0}
     log "[$GATEWAY]   c=$conc → streams=$streams fps=$fps delivered=$delivered stalled=$stalled fail=$fail gap_p99=$((${g99:-0}/1000))ms"
     SWEEP_JSON="${SWEEP_JSON}${SWEEP_JSON:+,}{\"conc\":$conc,\"streams\":$streams,\"complete\":${complete:-0},\"fail\":$fail,\"stalled\":$stalled,\"fps\":$fps,\"delivered\":$delivered,\"ttft_p99_us\":${t99:-0},\"gap_p99_us\":${g99:-0}}"
-    if awk -v f="$fail" -v s="$streams" -v d="$delivered" -v st="$stalled" \
-         'BEGIN{exit !(s>0 && f<=0.001*s && d>=0.999 && st==0)}' \
+    if awk -v f="$fail" -v s="$streams" -v d="$delivered" \
+         'BEGIN{exit !(s>0 && f<=0.001*s && d>=0.99)}' \
        && [ "$conc" -gt "$SUST_STREAMS" ]; then
       SUST_STREAMS=$conc; SUST_FPS=$fps
+    fi
+    if awk -v f="$fail" -v s="$streams" -v d="$delivered" -v st="$stalled" \
+         'BEGIN{exit !(s>0 && f<=0.001*s && d>=0.999 && st==0)}' \
+       && [ "$conc" -gt "$STALLFREE_STREAMS" ]; then
+      STALLFREE_STREAMS=$conc
     fi
   done
   if [ "${MOCK_FPS:-0}" -gt 0 ] && awk -v c="$SUST_FPS" -v m="$MOCK_FPS" 'BEGIN{exit !(c>=0.9*m)}'; then MOCK_BOUND=true; fi
@@ -189,6 +207,7 @@ cat > "$RESULTS/$GATEWAY.json" <<JSON
   "last_http_status": "$c",
   "serve_error": "$(json_escape "$SERVE_ERR")",
   "stream_error": "$(json_escape "$STREAM_ERR")",
+  "stream_note": "$(json_escape "${GW_STREAM_NOTE:-}")",
   "stream_added_ttft_p50_us": $ADD_T50,
   "stream_added_ttft_p99_us": $ADD_T99,
   "stream_gateway_ttft_p50_us": ${GT50:-0},
@@ -203,6 +222,9 @@ cat > "$RESULTS/$GATEWAY.json" <<JSON
   "stream_direct_gap_p99_us": ${DG99:-0},
   "stream_sustained_streams": $SUST_STREAMS,
   "stream_sustained_fps": $SUST_FPS,
+  "stream_sustained_gate": "delivery: >=99% of expected content frames delivered, <0.1% stream errors; stalls are recorded per sweep point and priced by the added-gap percentiles, not zeroed",
+  "stream_stallfree_streams": $STALLFREE_STREAMS,
+  "stream_stallfree_gate": "strict pacing: >=99.9% delivered, zero streams with any inter-frame gap > ${STALL_X}x the ${STREAM_INTERVAL_MS}ms interval, <0.1% errors",
   "stream_mock_ceiling_fps": ${MOCK_FPS:-0},
   "stream_mock_bound": $MOCK_BOUND,
   "stream_chunks": $STREAM_CHUNKS,
@@ -223,7 +245,7 @@ JSON
 echo "================================================================"
 if [ "$STREAM_OK" = 1 ]; then
   echo " gateway=$GATEWAY   added TTFT p99=${ADD_T99}µs   added inter-frame p99=${ADD_G99}µs"
-  echo "   streams sustained = ${SUST_STREAMS} (${SUST_FPS} frames/sec, mock_bound=${MOCK_BOUND})"
+  echo "   streams sustained = ${SUST_STREAMS} (${SUST_FPS} frames/sec, mock_bound=${MOCK_BOUND}; stall-free = ${STALLFREE_STREAMS})"
 else
   echo " gateway=$GATEWAY   did not stream (stream_served=false)"
 fi
