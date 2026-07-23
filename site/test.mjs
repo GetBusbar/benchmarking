@@ -365,6 +365,15 @@ test("naText keeps long diagnostic notes out of cell values", () => {
   assert.equal(app.naText(unsupported.governed, "governed_served", "governed_note").text, "not tested");
 });
 
+test("streaming latency cells annotate >=1ms values with their ms equivalent", () => {
+  const cols = app.COLUMN_SETS.streaming;
+  const sttft = cols.find((c) => c.id === "sttft");
+  const big = { stream: { stream_served: true, stream_added_ttft_p99_us: 596693 } };
+  assert.equal(sttft.get(big).text, "596,693 (596.7 ms)");
+  const small = { stream: { stream_served: true, stream_added_ttft_p99_us: 397 } };
+  assert.equal(sttft.get(small).text, "397");
+});
+
 test("stripRigPaths scrubs absolute bench-box paths from diagnostic notes", () => {
   const note = "boom at file:///home/ubuntu/.npm/_npx/abc/node_modules/x/y.js:2:434559\n" +
     "    at dispatch (/home/ubuntu/.npm/_npx/abc/node_modules/hono/dist/compose.js:22:17)";

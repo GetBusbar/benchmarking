@@ -60,6 +60,10 @@ const fmtInt = (v) => Math.round(v).toLocaleString("en-US");
 // per-frame number comes from the CPU-bound stream suite, not from massaging this one.
 const fmtAdded = fmtInt;
 const fmt1 = (v) => v.toLocaleString("en-US", { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+// Streaming latency cells: the column is µs (headers say so), but several gateways land in the
+// hundreds of ms where a bare "596,693" invites misreading. Annotate any value >= 1 ms with its
+// ms equivalent ("596,693 (596.7 ms)"); the charts' auto-ms relabel tells the same story.
+const fmtUsMs = (v) => (v >= 1000 ? `${fmtInt(v)} (${fmt1(v / 1000)} ms)` : fmtAdded(v));
 const fmtPct = (v) => `${v > 0 ? "+" : ""}${v.toFixed(1)}%`;
 
 /* Footer timestamps: a clean UTC date/time plus a COARSE relative age (hours or
@@ -295,9 +299,9 @@ const COLUMN_SETS = {
   streaming: [
     COL_SEL, COL_NAME, COL_LANG,
     { id: "sttft", label: "Added wait for 1st token p99 (µs)", desc: false, title: "Time to first token (TTFT): the extra wait before the stream's first token, gateway minus direct-to-mock, at concurrency 1. Lower is better.",
-      get: (g) => lane(g, "stream", "stream_served", "stream_error", (j) => ({ v: j.stream_added_ttft_p99_us, text: fmtAdded(j.stream_added_ttft_p99_us), na: false })) },
+      get: (g) => lane(g, "stream", "stream_served", "stream_error", (j) => ({ v: j.stream_added_ttft_p99_us, text: fmtUsMs(j.stream_added_ttft_p99_us), na: false })) },
     { id: "sgap", label: "Added gap between tokens p99 (µs)", desc: false, title: "The extra pause the gateway adds between streamed tokens, gateway minus direct-to-mock. Lower is better.",
-      get: (g) => lane(g, "stream", "stream_served", "stream_error", (j) => ({ v: j.stream_added_gap_p99_us, text: fmtAdded(j.stream_added_gap_p99_us), na: false })) },
+      get: (g) => lane(g, "stream", "stream_served", "stream_error", (j) => ({ v: j.stream_added_gap_p99_us, text: fmtUsMs(j.stream_added_gap_p99_us), na: false })) },
     { id: "streams", label: "Streams sustained", desc: true, title: "Max concurrent SSE streams with >=99.9% frame delivery, no stalls, <0.1% errors",
       get: (g) => lane(g, "stream", "stream_served", "stream_error", (j) => ({ v: j.stream_sustained_streams, text: fmtInt(j.stream_sustained_streams), na: false })) },
   ],
@@ -342,8 +346,8 @@ const LANES = [
   {
     key: "stream", label: "Streaming", flag: "stream_served", err: "stream_error",
     metrics: [
-      { k: "stream_added_ttft_p99_us", label: "Added TTFT p99 (µs)", best: "min", fmt: fmtAdded },
-      { k: "stream_added_gap_p99_us", label: "Added per-token p99 (µs)", best: "min", fmt: fmtAdded },
+      { k: "stream_added_ttft_p99_us", label: "Added TTFT p99 (µs)", best: "min", fmt: fmtUsMs },
+      { k: "stream_added_gap_p99_us", label: "Added per-token p99 (µs)", best: "min", fmt: fmtUsMs },
       { k: "stream_sustained_streams", label: "Streams sustained", best: "max", fmt: fmtInt },
     ],
   },
@@ -1221,6 +1225,7 @@ const CHART_CAPTIONS = {
   stream_added_ttft: "Streaming: added time-to-first-token vs direct-to-mock, p99. Lower is better.",
   stream_added_gap: "Streaming: added inter-frame (per-token) latency vs direct-to-mock, p99. Lower is better.",
   stream_sustained: "Streaming: max concurrent SSE streams sustained without frame loss or stalls. Higher is better.",
+  streamcpu_fps: "Streaming relay throughput under an unpaced firehose (CPU-bound): sustained content frames/sec. Higher is better.",
   xlate_added_latency: "Translation on each gateway's canonical path (direction named on the bar; matrix per-cell sweep): added latency p99. Lower is better.",
   xlate_rps_sustained_20ms: "Translation on each gateway's canonical path (direction named on the bar): sustained RPS at 20 ms LLM latency. Higher is better.",
 };
