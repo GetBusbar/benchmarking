@@ -230,13 +230,21 @@ build_cap(){
       done
     done
   else
-    i=0
+    # MEDIUM-8: GW_MATRIX_CAP is ALWAYS the canonical full 6x6 (row-major: ingress-major, both axes in
+    # the canonical dialect order openai openai-responses anthropic gemini cohere bedrock). When
+    # MATRIX_EGRESS_ONLY / MATRIX_INGRESS_ONLY prunes an axis, the pruned-loop counters i/j no longer
+    # map to the canonical 6-column position, so `rows:(i*6+j)` would read the WRONG bit (e.g. a
+    # single-egress subset would read column 0 for every dialect) → wrong capability bit → misdirected
+    # warm-up + patience → a healthy column recorded not_verified. Index by each dialect's CANONICAL
+    # position, never the pruned counters.
+    local _canon="openai openai-responses anthropic gemini cohere bedrock"
+    canon_idx(){ local x="$1" n=0 y; for y in $_canon; do [ "$y" = "$x" ] && { echo "$n"; return; }; n=$((n+1)); done; echo -1; }
     for ing in $INGRESS_ALL; do
-      j=0
+      i="$(canon_idx "$ing")"
       for eg in $EGRESS_ALL; do
-        CAP["$ing/$eg"]="${rows:$((i*6+j)):1}"; j=$((j+1))
+        j="$(canon_idx "$eg")"
+        if [ "$i" -ge 0 ] && [ "$j" -ge 0 ]; then CAP["$ing/$eg"]="${rows:$((i*6+j)):1}"; else CAP["$ing/$eg"]=0; fi
       done
-      i=$((i+1))
     done
   fi
   # Advisory only: which egress columns have any declared cell (warm-up + patience hints).
@@ -303,7 +311,15 @@ mock_start_plain(){ # instant, NO recording: the identical mock perf/run.sh meas
   sleep 1
 }
 log "starting mock :$MOCK_PORT (instant, all six dialects by path, request recording ON)"
-mock_start_record
+# MEDIUM-7: mock_start_record returns 1 if the recording mock never rebound :$MOCK_PORT (the script is
+# set -uo pipefail, NOT -e, so the return is otherwise silently dropped). A dead port at STARTUP means
+# every one of the 36 cells probes a dead socket → the whole board reads not_verified while the script
+# still exits 0, publishing an all-not_verified board as if it were valid. Abort the run non-zero
+# instead — a board that could never have been fairly measured must never be published.
+if ! mock_start_record; then
+  echo "FATAL: recording mock failed to bind :$MOCK_PORT at startup — every cell would probe a dead port (all not_verified). Aborting rather than publishing an unmeasurable board." >&2
+  exit 1
+fi
 cleanup(){ gw_stop 2>/dev/null; [ -n "$MOCK" ] && pkill -f "$MOCK" 2>/dev/null; }
 trap cleanup EXIT
 
@@ -480,7 +496,7 @@ mock_direct_path(){ case "$1" in
   cohere) echo "/v2/chat";; bedrock) echo "/model/$GW_MODEL/converse";; esac; }
 
 # ── per-cell STREAMING (lib/stream_measure.sh) ───────────────────────────────────────────────────
-# matrix_cell_stream <cell> <path> <body> [extra -H header...]
+# matrix_cell_stream <egress> <cell> <path> <body> [extra -H header...]
 # Runs the shared streaming measurement (lib/stream_measure.sh) on one green cell, on the SAME ingress
 # path + egress config matrix_cell_perf just swept. Two lanes, each restarting the mock into its own
 # streaming shape:
@@ -492,8 +508,23 @@ mock_direct_path(){ case "$1" in
 # (curl -N for SSE frames); a non-streaming cell records stream_served:false with the evidence — never
 # a crash, never a fabricated number. Caller has UGEN_H set to this cell's dialect headers already.
 CELL_STREAM_JSON=""
+# MEDIUM-3 (FIX b): the mock only emits native SSE for the OpenAI and Anthropic EGRESS dialects (an
+# openai chat.completion.chunk / anthropic content_block_delta stream). For a responses/gemini/cohere/
+# bedrock EGRESS the mock returns plain JSON even on stream:true — Bedrock's Converse stream in
+# particular is AWS's BINARY event-stream framing (application/vnd.amazon.eventstream), not SSE, which
+# this mock deliberately does not synthesize. So a gateway whose best diagonal is one of those egress
+# dialects cannot produce an upstream SSE stream through THIS rig no matter how correct it is: the
+# missing frames are the MOCK's limit, not the gateway's. Such a cell must record served:"untestable"
+# (a rig-reachability limit, like GW_MATRIX_UNTESTABLE), NOT stream_served:false (a gateway fault).
+# (FIX a — teaching the mock all six native SSE shapes — was rejected: Bedrock's binary event-stream
+# cannot be synthesized correctly as SSE, so an all-six claim would itself be dishonest.)
+mock_streams_egress(){ case "$1" in openai|anthropic) return 0;; *) return 1;; esac; }
 matrix_cell_stream(){
-  local cell="$1" path="$2" data="$3"; shift 3
+  local egress="$1" cell="$2" path="$3" data="$4"; shift 4
+  # SM_STREAM_BODY (MEDIUM-2) is dynamically scoped to this call: stream_probe (in the searches
+  # below) reads it as the -body to POST, and `local` auto-clears it on return so it never leaks to
+  # the standalone stream/streamcpu suites or the next cell.
+  local SM_STREAM_BODY=""
   CELL_STREAM_JSON=""
   [ "$MATRIX_STREAM" = 1 ] || return 0
   if suite_deadline_expired; then
@@ -505,17 +536,38 @@ matrix_cell_stream(){
   # Does this cell actually stream? One curl -N probe for SSE frames (paced mock up). A cell that 200s
   # the non-stream sweep but buffers/rejects stream:true records stream_served:false — measured, honest.
   stream_mock_start "$MATRIX_STREAM_CHUNKS" "$MATRIX_STREAM_INTERVAL_MS" "$MATRIX_STREAM_CHUNK_BYTES"
-  local stream_ok=0 stream_err="" sbody probe_to
+  # HIGH-6: after a mock restart (which pkilled the prior cell's mock and relaunched WITHOUT
+  # SO_REUSEADDR), the fresh mock can still be racing the dying one for MOCK_PORT — a single un-retried
+  # SSE probe below would then read no `data:` frames and fabricate stream_served:false BEFORE any
+  # measurement. Gate on stream_mock_ready (a retried 1-stream liveness probe) first, exactly as the
+  # sustained-bisect + cpu-fps lanes already do before their searches.
+  stream_mock_ready 30 || log "[$GATEWAY]   $cell : stream mock did not become ready before the served-gating probe"
+  local stream_ok=0 stream_err="" sbody probe_to sdata
+  # MEDIUM-2: the streaming probes must POST the cell's REAL ingress-dialect body (stream-flagged),
+  # not ugen's default openai body — a gemini/cohere/bedrock/responses/anthropic ingress path 400s an
+  # openai body, faking a streaming failure that contradicts the cell's own passing RPS sweep. Build
+  # the stream-flagged body ONCE here; use it for the gating curl below AND (via SM_STREAM_BODY) for
+  # every stream_probe in stream_c1/stream_sustained_bisect/streamcpu_peak_fps.
+  sdata="$(printf '%s' "$data" | sed 's/}$/,"stream":true}/')"
+  SM_STREAM_BODY="$sdata"
   probe_to=$(( MATRIX_STREAM_CHUNKS * MATRIX_STREAM_INTERVAL_MS / 1000 + 10 ))
   sbody="$(curl -sN -m "$probe_to" "$GURL" -X POST \
       -H "content-type: application/json" -H "authorization: Bearer $GW_AUTH" \
       -H "accept: text/event-stream" ${CURL_H[@]+"${CURL_H[@]}"} "$@" \
-      -d "$(printf '%s' "$data" | sed 's/}$/,"stream":true}/')" 2>&1)"
+      -d "$sdata" 2>&1)"
   if grep -q '^data:' <<< "$sbody"; then stream_ok=1
   else stream_err="no SSE frames on stream:true; body=[$(strip_ctrl "$(printf '%s' "$sbody" | head -c 300)")]"
        log "[$GATEWAY]   $cell : stream:true produced no SSE frames - stream_served=false"
   fi
   if [ "$stream_ok" != 1 ]; then
+    # MEDIUM-3 (FIX b): distinguish a MOCK limit from a GATEWAY fault. If the mock cannot emit SSE for
+    # this EGRESS dialect, no correct gateway could have produced an upstream stream through this rig,
+    # so the absent frames are untestable (a rig limit), NOT a stream_served:false gateway fault.
+    if ! mock_streams_egress "$egress"; then
+      CELL_STREAM_JSON=", \"stream\": {\"stream_served\": \"untestable\", \"reason\": \"mock_no_sse_for_egress\", \"stream_error\": \"$(json_escape "the test mock does not synthesize an SSE stream for the $egress egress dialect (Bedrock's Converse stream is AWS binary event-stream framing, not SSE; responses/gemini/cohere are not streamed by this mock), so an upstream stream is unreachable through this rig — a mock-reachability limit, not a gateway fault")\"}"
+      log "[$GATEWAY]   $cell : stream untestable (mock does not stream the $egress egress dialect)"
+      return 0
+    fi
     CELL_STREAM_JSON=", \"stream\": {\"stream_served\": false, \"stream_error\": \"$(json_escape "$stream_err")\"}"
     return 0
   fi
@@ -588,9 +640,20 @@ matrix_cell_perf(){
   # UGEN_H still carries this cell's dialect headers. matrix_cell_stream restarts the mock into the
   # streaming shapes it needs (paced for c1+sustained, unpaced for cpu-fps) and restores nothing — the
   # mock_start_record below re-establishes the recording mock for the leg-3 re-verify regardless.
-  matrix_cell_stream "$cell" "$path" "$data" "$@"
+  matrix_cell_stream "$egress" "$cell" "$path" "$data" "$@"
   UGEN_H=()
-  mock_start_record
+  # MEDIUM-7: restore the recording mock for the leg-3 re-verify. If it fails to rebind :$MOCK_PORT
+  # (set -uo pipefail, no -e, so the return is otherwise dropped), the re-verify + the NEXT cell's
+  # capability probe would hit a dead port and be mislabeled. Retry a couple of times; if it still
+  # can't come back the rig is wedged and continuing would silently corrupt every following cell —
+  # abort non-zero rather than publish mislabeled cells.
+  if ! mock_start_record; then
+    log "[$GATEWAY]   $egress <- $cell : recording mock did not rebind :$MOCK_PORT after the sweep — retrying"
+    if ! mock_start_record; then
+      echo "FATAL: recording mock could not be restored on :$MOCK_PORT after the $egress<-$cell sweep — every following cell would probe a dead port. Aborting rather than mislabeling them." >&2
+      exit 1
+    fi
+  fi
   # The sweep restarted the mock, so the gateway's upstream connection pool may hold dead sockets.
   # Fire a couple of discarded warm requests through the gateway so the re-verify probe below (and
   # the NEXT cell's capability probe) can never eat a stale-connection failure. Their record entries

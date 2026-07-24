@@ -66,9 +66,18 @@ stream_mock_start(){ # chunks interval_ms chunk_bytes
 # ── stream_probe: one ugen SSE probe, fixed-order k=v fields (same parser as stream/streamcpu) ─────
 # HARD TIMEOUT (tmo): an unresponsive gateway that leaves streams open must not block on ugen's tail
 # client timeout across every hung worker; cap at dur+grace and treat empty output as not-served.
-stream_probe(){ # url conc dur
+# BODY (audit MEDIUM-2): the streaming probe must POST the SAME ingress-dialect body the RPS sweep
+# probes with, NOT ugen's default openai body — a gemini/cohere/bedrock/responses/anthropic ingress
+# path 400s an openai body, faking a streaming failure that contradicts the cell's passing RPS sweep.
+# The 4th arg (default $SM_STREAM_BODY, set by matrix_cell_stream) is passed verbatim as ugen -body,
+# which OVERRIDES ugen's -shape body construction. ugen does NOT inject "stream":true into a -body
+# (rawbody is verbatim), so the caller's body must already carry it — matrix_cell_stream stream-flags
+# it before threading it in. -stream still sets the accept: text/event-stream header regardless. When
+# no body is threaded (the standalone stream/streamcpu suites), ugen builds its -shape body as before.
+stream_probe(){ # url conc dur [body]
+  local _body="${4:-${SM_STREAM_BODY:-}}"
   tmo "$(probe_budget "$3")" taskset -c "$LOADCORES" "$UGEN" -url "$1" -model "$GW_MODEL" -auth "$GW_AUTH" -c "$2" -d "$3" \
-    -psize "$PSIZE" -stream -expframes "$SM_EXPFRAMES" -stallus "$SM_STALL_US" ${UGEN_H[@]+"${UGEN_H[@]}"} 2>/dev/null \
+    -psize "$PSIZE" -stream -expframes "$SM_EXPFRAMES" -stallus "$SM_STALL_US" ${_body:+-body "$_body"} ${UGEN_H[@]+"${UGEN_H[@]}"} 2>/dev/null \
     | awk '{for(i=1;i<=NF;i++){split($i,a,"=");v[a[1]]=a[2]};
         print v["streams"],v["complete"],v["fail"],v["stalled"],v["frames"],v["fps"],v["delivered"],
               v["ttft_p50us"],v["ttft_p99us"],v["gap_p50us"],v["gap_p99us"]}'
@@ -128,8 +137,12 @@ _sm_probe_c(){ # conc
     read -r streams complete fail stalled frames fps delivered t50 t99 g50 g99 < <(stream_probe "$GURL" "$c" "$SM_SWEEP_DUR")
     streams=${streams:-0}; complete=${complete:-0}; fail=${fail:-1}; stalled=${stalled:-1}; fps=${fps:-0}; delivered=${delivered:-0}
     SM_PROBE_FPS[$c]=$fps
-    if awk -v f="$fail" -v s="$streams" -v d="$delivered" -v st="$stalled" -v md="$SM_DELIV" \
-         'BEGIN{exit !(s>0 && f<=0.001*s && d>=md && st==0)}'; then SM_PROBE_OK[$c]=1; else SM_PROBE_OK[$c]=0; fi
+    # Gate: real streams, <0.1% errored, >=SM_DELIV delivered, zero stalled. SM_GATE_MIN_COMPLETE
+    # (default 0, a no-op) additionally requires >=that fraction of streams COMPLETE — the cpu-fps
+    # lane sets it to 0.99 to match streamcpu/run.sh's `cm>=0.99*s` qualifier (audit NIT); the paced
+    # sustained lane leaves it 0 (stream/run.sh's sustained gate has no complete floor).
+    if awk -v f="$fail" -v s="$streams" -v cm="$complete" -v d="$delivered" -v st="$stalled" -v md="$SM_DELIV" -v mc="${SM_GATE_MIN_COMPLETE:-0}" \
+         'BEGIN{exit !(s>0 && f<=0.001*s && d>=md && st==0 && cm>=mc*s)}'; then SM_PROBE_OK[$c]=1; else SM_PROBE_OK[$c]=0; fi
     SM_PROBE_STREAMS[$c]=$streams
     SM_JSON_ACC="${SM_JSON_ACC}${SM_JSON_ACC:+,}{\"conc\":$c,\"streams\":$streams,\"complete\":$complete,\"fail\":$fail,\"stalled\":$stalled,\"frames\":${frames:-0},\"fps\":$fps,\"delivered\":$delivered,\"ttft_p99_us\":${t99:-0},\"gap_p99_us\":${g99:-0}}"
     log "[$GATEWAY]   c=$c → streams=$streams fps=$fps delivered=$delivered stalled=$stalled fail=$fail (gate=${SM_PROBE_OK[$c]})"
@@ -212,11 +225,20 @@ streamcpu_peak_fps(){ # lo hi
   local lo="$1" hi="$2"
   SM_PROBE_STREAMS=(); SM_PROBE_FPS=(); SM_PROBE_OK=(); SM_JSON_ACC=""
   SM_FPS_PEAK=0; SM_FPS_PEAK_CONC=0
+  # cpu-fps gate parity with streamcpu/run.sh (audit NIT): require >=99% of streams COMPLETE (dynamic
+  # scope — _sm_probe_c reads this global; `local` auto-restores it to the sustained lane's 0 on return).
+  local SM_GATE_MIN_COMPLETE=0.99
+  # Discarded warm-up on both paths (JIT/interpreted gateways not charged cold start), mirroring
+  # streamcpu/run.sh:170-173 + stream_c1. Without it the first firehose rung eats the gateway's cold
+  # start and can spuriously fail the gate. Probed at the low bound, results discarded.
+  local WARMUP_DUR="${WARMUP_DUR:-5}"
+  log "[$GATEWAY] cpu-fps warm-up ${WARMUP_DUR}s (discarded, both paths)"
+  stream_probe "$DURL" "$lo" "$WARMUP_DUR" >/dev/null 2>&1; stream_probe "$GURL" "$lo" "$WARMUP_DUR" >/dev/null 2>&1
   # Direct-to-mock ceiling at the grid top (the guardrail): if a gateway approaches it the run is
   # mock-bound. Measured at the top like streamcpu/run.sh (unpaced firehose saturates the rig here).
   local _a _b _c _d _e _rest
   read -r _a _b _c _d _e SM_DIRECT_CEIL _rest < <(stream_probe "$DURL" "$hi" "$SM_SWEEP_DUR")
-  SM_DIRECT_CEIL=${SM_DIRECT_CEIL:-0}
+  SM_DIRECT_CEIL=${SM_DIRECT_CEIL:-0}; SM_DIRECT_CEIL_CONC=$hi   # re-probed at the winner in _sm_fps_finish_bound (MEDIUM-4)
   log "[$GATEWAY] cpu-fps peak-search [$lo,$hi] (direct ceiling ${SM_DIRECT_CEIL} fps @ c=$hi)"
   _sm_eff(){ if [ "${SM_PROBE_OK[$1]:-0}" = 1 ]; then printf '%s' "${SM_PROBE_FPS[$1]:-0}"; else printf 0; fi; }
   local a=$lo b=$lo pr=0 c cr
@@ -253,8 +275,20 @@ streamcpu_peak_fps(){ # lo hi
   _sm_fps_finish_bound
 }
 
-# mock-bound decision for the cpu-fps peak (direct ceiling was measured at the grid top).
+# mock-bound decision for the cpu-fps peak. The direct ceiling is initially measured at the GRID TOP
+# ($hi), but the mock's fps is concurrency-dependent (far higher at c=512 than at c=32), so comparing a
+# gateway peaking at a LOW concurrency against the grid-top ceiling never flags a genuinely mock-bound
+# low-concurrency winner (audit MEDIUM-4). Re-probe the direct-to-mock ceiling at the WINNER
+# concurrency (SM_FPS_PEAK_CONC) before the decision — mirroring _sm_finish_bound in the sustained lane
+# — and compare the winner's peak fps against the ceiling MEASURED AT THE SAME CONCURRENCY. Adopt the
+# re-probed ceiling whenever the winner concurrency differs from where the grid-top ceiling was taken.
 _sm_fps_finish_bound(){
+  if [ "${SM_FPS_PEAK_CONC:-0}" -gt 0 ] && [ "${SM_FPS_PEAK_CONC}" -ne "${SM_DIRECT_CEIL_CONC:-0}" ]; then
+    local _a _b _c _d _e _rc _rest
+    read -r _a _b _c _d _e _rc _rest < <(stream_probe "$DURL" "$SM_FPS_PEAK_CONC" "$SM_SWEEP_DUR"); _rc=${_rc:-0}
+    log "[$GATEWAY] cpu-fps direct ceiling re-probed at winner c=$SM_FPS_PEAK_CONC: ${SM_DIRECT_CEIL} -> $_rc fps"
+    SM_DIRECT_CEIL=$_rc; SM_DIRECT_CEIL_CONC=$SM_FPS_PEAK_CONC
+  fi
   if [ "${SM_DIRECT_CEIL:-0}" -le 0 ]; then SM_FPS_MOCK_BOUND=null
   else
     SM_FPS_MOCK_BOUND=false
