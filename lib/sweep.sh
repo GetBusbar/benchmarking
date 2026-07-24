@@ -140,22 +140,107 @@ _sw_pass(){
     && [ "${_rp[$i]}" -lt $((P99_CEIL_MS*1000)) ]
 }
 
-run_sweep() { # ttft_ms  conc_list
-  local ttft="$1" concs="$2"
+# ── concurrency-keyed probe helpers (for the BISECT sweep) ──────────────────────────────────────
+# Unlike the index-based ladder helpers above, these probe an ARBITRARY concurrency value (bisection
+# lands on values that are not preset rungs), memoised by conc so a re-probe is free. Results live in
+# the caller's _RC_rps/_RC_fail/_RC_p99 assoc arrays (dynamic scope) and every probed conc is appended
+# to _PROBED. Returns 1 only when the suite deadline fired mid-probe.
+_sw_probe_c(){ # conc
+  local c="$1"
+  if [ -z "${_RC_rps[$c]:-}" ]; then
+    if suite_deadline_expired; then log "[$GATEWAY] suite wall-clock ceiling reached mid-sweep - stopping, recording what we have"; return 1; fi
+    local rps fail p99 _p50
+    read -r rps fail p99 _p50 < <(sweep_probe "$GURL" "$c" "$SWEEP_DUR")
+    _RC_rps[$c]=${rps:-0}; _RC_fail[$c]=${fail:-1}; _RC_p99[$c]=${p99:-99999999}
+    _PROBED="$_PROBED $c"
+    log "[$GATEWAY]   (ttft=${ttft}ms) c=$c → rps=${_RC_rps[$c]} p99=$(( ${_RC_p99[$c]} / 1000 ))ms fail=${_RC_fail[$c]}"
+  fi
+  return 0
+}
+_sw_pass_c(){ # conc : the SAME sustained gate as _sw_pass (error rate < 0.1% AND p99 < ceiling)
+  local c="$1"
+  awk -v f="${_RC_fail[$c]}" -v r="${_RC_rps[$c]}" -v d="$SWEEP_DUR" 'BEGIN{tot=r*d+f; exit !(tot>0 && f<=0.001*tot)}' \
+    && [ "${_RC_p99[$c]}" -lt $((P99_CEIL_MS*1000)) ]
+}
+_sw_mockbound_c(){ # conc : rps at conc is within 10% of the mock's own ceiling (rig-limited, not gateway)
+  [ "${SW_MOCK_CEIL:-0}" -gt 0 ] && awk -v r="${_RC_rps[$1]}" -v m="$SW_MOCK_CEIL" 'BEGIN{exit !(r>=0.9*m)}'
+}
+
+run_sweep() { # ttft_ms  conc_list_or_bounds  [mode: ladder|bisect]
+  local ttft="$1" concs="$2" mode="${3:-ladder}"
   pkill -f "$MOCK" 2>/dev/null; sleep 1
   setsid taskset -c "$MOCKCORES" env MOCK_TTFT_MS="$ttft" "$MOCK" -port "$MOCK_PORT" </dev/null >/dev/null 2>&1 &
   sleep 1
   local top=1 w; for w in $concs; do top=$w; done
+  # The bisect MAX (last bound) is a huge safety rail (never reached: the mock-bound guard stops the
+  # ramp first) so a faster-than-expected gateway is never boundary-capped. But the mock-ceiling probe
+  # must NOT run at that rail - driving the loadgen to tens of thousands of connections is
+  # unrepresentative and the mock saturates far lower. Probe it at a sane fixed concurrency instead.
+  local mock_conc=$top; [ "$mock_conc" -gt "${SWEEP_MOCKCEIL_CONC:-2048}" ] && mock_conc="${SWEEP_MOCKCEIL_CONC:-2048}"
   # Mock-ceiling reference: a property of the RIG (mock + loadgen on their own pinned cores, at this
   # ttft/path/body/psize), never of the gateway - so under a cache key it is measured once and reused.
   local _mk="${SWEEP_CACHE_KEY:-}"; [ -n "$_mk" ] && _mk="$_mk|$ttft"
   if [ -n "$_mk" ] && [ -n "${SWEEP_MOCKCEIL_CACHE[$_mk]:-}" ]; then
     SW_MOCK_CEIL="${SWEEP_MOCKCEIL_CACHE[$_mk]}"
   else
-    local mrps _a _b _c; read -r mrps _a _b _c < <(sweep_probe "$DURL" "$top" "$SWEEP_DUR"); SW_MOCK_CEIL=${mrps:-0}
+    local mrps _a _b _c; read -r mrps _a _b _c < <(sweep_probe "$DURL" "$mock_conc" "$SWEEP_DUR"); SW_MOCK_CEIL=${mrps:-0}
     [ -n "$_mk" ] && [ "${SW_MOCK_CEIL:-0}" -gt 0 ] && SWEEP_MOCKCEIL_CACHE[$_mk]="$SW_MOCK_CEIL"
   fi
   SW_CEIL_RPS=0; SW_CEIL_CONC=0; SW_CEIL_P99=0; SW_JSON=""
+  if [ "$mode" = bisect ]; then
+    # ── BISECT: find each gateway's OWN true concurrency ceiling to ±TOL, not a coarse-grid rung. ──
+    # The sustained-under-latency metric is concurrency-bound and unimodal (rps climbs with conc,
+    # then the gate fails - p99 blows past the ceiling or connections collapse). So: exponentially
+    # ramp (double) from a start hint until a rung FAILS the gate (or hits the mock's rig ceiling),
+    # giving a bracket [last_pass, first_fail]; then binary-search that bracket to TOL. Every gateway
+    # lands on its own real ceiling instead of being quantised onto a shared rung. Probes ~log(range)
+    # rungs, so it is also strictly cheaper than a fine fixed ladder (this is the matrix speed-up).
+    local -A _RC_rps=() _RC_fail=() _RC_p99=(); local _PROBED="" c
+    local _min=1 _max="$top"; for c in $concs; do _min="$c"; break; done
+    local TOL="${SWEEP_BISECT_TOL:-64}"
+    local start="${SWEEP_PRIOR[$ttft]:-}"; [ -z "$start" ] && start="${SWEEP_START:-256}"   # fixed, NOT max/8
+    [ "$start" -lt "$_min" ] && start=$_min; [ "$start" -gt "$_max" ] && start=$_max
+    local last_pass=0 first_fail=0
+    if _sw_probe_c "$start"; then
+      if _sw_pass_c "$start"; then
+        last_pass=$start
+        if ! _sw_mockbound_c "$start"; then                          # ramp UP by doubling
+          c=$start
+          while [ "$c" -lt "$_max" ]; do
+            c=$(( c*2 > _max ? _max : c*2 ))
+            _sw_probe_c "$c" || break
+            if _sw_pass_c "$c"; then last_pass=$c; _sw_mockbound_c "$c" && break
+            else first_fail=$c; break; fi
+          done
+        fi
+      else                                                            # start FAILED: ramp DOWN to a pass
+        first_fail=$start; c=$start
+        while [ "$c" -gt "$_min" ]; do
+          c=$(( c/2 < _min ? _min : c/2 ))
+          _sw_probe_c "$c" || break
+          if _sw_pass_c "$c"; then last_pass=$c; break; else first_fail=$c; fi
+        done
+      fi
+      if [ "$last_pass" -gt 0 ] && [ "$first_fail" -gt "$last_pass" ]; then   # BISECT the bracket
+        local lo=$last_pass hi=$first_fail mid
+        while [ $(( hi - lo )) -gt "$TOL" ]; do
+          mid=$(( (lo+hi)/2 ))
+          _sw_probe_c "$mid" || break
+          if _sw_pass_c "$mid"; then lo=$mid; _sw_mockbound_c "$mid" && break; else hi=$mid; fi
+        done
+      fi
+    fi
+    for c in $(printf '%s\n' $_PROBED | sort -n -u); do               # aggregate ascending; max passing rps wins
+      SW_JSON="${SW_JSON}${SW_JSON:+,}{\"conc\":$c,\"rps\":${_RC_rps[$c]},\"p99_us\":${_RC_p99[$c]},\"fail\":${_RC_fail[$c]}}"
+      if _sw_pass_c "$c" && [ "${_RC_rps[$c]}" -gt "$SW_CEIL_RPS" ]; then
+        SW_CEIL_RPS=${_RC_rps[$c]}; SW_CEIL_CONC=$c; SW_CEIL_P99=${_RC_p99[$c]}
+      fi
+    done
+    if [ "${SWEEP_ADAPTIVE:-0}" = 1 ] && [ "$SW_CEIL_RPS" -gt 0 ]; then SWEEP_PRIOR[$ttft]="$SW_CEIL_CONC"; fi
+    SW_BOUND=false
+    if [ "${SW_MOCK_CEIL:-0}" -gt 0 ] && awk -v c="$SW_CEIL_RPS" -v m="$SW_MOCK_CEIL" 'BEGIN{exit !(c>=0.9*m)}'; then SW_BOUND=true; fi
+    return 0
+  fi
   # The ladder as indexed arrays; _rr[i] set = rung i probed (helpers see these via dynamic scope).
   local -a _rc=() _rr=() _rf=() _rp=()
   local _n=0 c i

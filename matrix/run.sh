@@ -111,7 +111,8 @@ fi
 # Same knobs + defaults as perf/run.sh so the per-cell numbers are directly comparable.
 C1_DUR="${C1_DUR:-20}"; SWEEP_DUR="${SWEEP_DUR:-10}"; PSIZE="${PSIZE:-256}"
 SWEEP_INSTANT="${SWEEP_INSTANT:-16 32 64 128 256 512 1024}"
-SWEEP_DELAYED="${SWEEP_DELAYED:-8 32 128 256 1024 4096 8192 16384}"
+# BISECT search bounds (min max), not a fixed ladder - see lib/sweep.sh mode=bisect + perf/run.sh.
+SWEEP_DELAYED="${SWEEP_DELAYED:-32 65536}"
 SWEEP_TTFT_MS="${SWEEP_TTFT_MS:-20}"
 P99_CEIL_MS="${P99_CEIL_MS:-1000}"
 # ADAPTIVE RUNG SELECTION + shared rig baselines (lib/sweep.sh knobs; see its header). A gateway
@@ -450,7 +451,7 @@ matrix_cell_perf(){
   sweep_c1
   run_sweep 0 "$SWEEP_INSTANT"
   local prps=$SW_CEIL_RPS pbound=$SW_BOUND
-  run_sweep "$SWEEP_TTFT_MS" "$SWEEP_DELAYED"
+  run_sweep "$SWEEP_TTFT_MS" "$SWEEP_DELAYED" bisect
   local lrps=$SW_CEIL_RPS lbound=$SW_BOUND
   SWEEP_BODY=""; UGEN_H=(); SWEEP_CACHE_KEY=""
   mock_start_record
