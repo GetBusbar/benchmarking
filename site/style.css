@@ -134,9 +134,11 @@ main { padding: 1.6rem 0 3rem; }
    brand treatment instead. */
 body.home .catnav, body.home .tabs, body.home .tagline { display: none; }
 body.home .site-header { padding-bottom: 1.4rem; }
+/* The footer duplicates the home body (neutrality + repo + reproduce); it earns its place on the
+   DATA views (hardware stamp + reproduce command), so hide it only on home. */
+body.home .site-footer { display: none; }
 .hero { padding: 2.6rem 0 .4rem; }
-.hero-mark { display: block; width: 56px; height: 56px; border-radius: 12px; margin-bottom: 1rem; }
-.hero-word { margin: 0 0 .5rem; font-size: 2.1rem; font-weight: 700; letter-spacing: -.02em; }
+.hero-word { margin: 0 0 .5rem; font-size: 1.75rem; font-weight: 700; letter-spacing: -.02em; line-height: 1.2; max-width: 24ch; }
 .hero-tag { margin: 0; font-size: 1.08rem; color: var(--fg-dim); max-width: 46ch; }
 .home-pitch { margin-top: 1.3rem; max-width: 62ch; color: var(--fg-dim); }
 .home-pitch p { margin: .35rem 0; }
