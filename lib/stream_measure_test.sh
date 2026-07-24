@@ -57,6 +57,17 @@ stream_probe(){ # url conc dur
                      # mock-bound decision fires, symmetric with the cpu-fps lane's mock-bound gate.
       local mm=$(( 20000 + c*400 )); [ "$mm" -gt 400000 ] && mm=400000
       echo "$c $c 0 0 $((c*SM_EXPFRAMES)) $mm 1.0 100 200 20 40" ;;
+    sust_mockbound_low)  # MEDIUM-R3-4: gateway SATURATES at a LOW concurrency (c<=256) where its fps
+                         # TRACKS the mock's paced ceiling (m=20000+c*400) — i.e. rig/pacing-limited at
+                         # its own operating point — and FAILS above. The reference ceiling SM_MOCK_FPS is
+                         # measured at SM_MOCKCEIL_CONC=2048 (m=839200, capped 400000), far above the
+                         # winner fps (~122k @ c=256). The old "adopt re-probe only when LARGER" kept the
+                         # inflated 400000 ceiling -> winner 122k < 0.9*400000 -> mock_bound=FALSE (the
+                         # bias). The fix adopts the winner-concurrency re-probe UNCONDITIONALLY (m@256 ~
+                         # 122k), so winner 122k >= 0.9*122k -> mock_bound=TRUE, symmetric with cpu-fps.
+      if [ "$c" -le 256 ]; then local mm=$(( 20000 + c*400 )); [ "$mm" -gt 400000 ] && mm=400000
+        echo "$c $c 0 0 $((c*SM_EXPFRAMES)) $mm 1.0 100 200 20 40"
+      else echo "$c $((c/2)) $((c/3)) 5 $((c*SM_EXPFRAMES/2)) $((c*10)) 0.60 100 900000 20 900000"; fi ;;
     c1_clean)   # stream_c1 GATEWAY path (the DURL baseline is the reference branch at the top: t99=200,
                 # g99=40). Gateway frames cleanly, 0 errors, ttft_p99=520 gap_p99=60 -> SM_C1_OK=1 and
                 # added = gw - direct = 320 (ttft) / 20 (gap), a positive honest subtraction.
@@ -109,6 +120,16 @@ CURVE=sust_mockbound; stream_sustained_bisect 8 2048
 #       an unusable ceiling (the H6/R3-H1 analog on the sustained lane).
 CURVE=sust_grid_top; MOCK_DEAD=1 stream_sustained_bisect 8 2048
 [ "$SM_MOCK_BOUND" = null ] && echo "ok   - sustained mock_bound=null over a dead reference (never a false)" || { echo "FAIL - sustained mock_bound=$SM_MOCK_BOUND (want null over a 0-fps reference)"; fail=1; }
+#   (d) MEDIUM-R3-4: a gateway rig-limited at a LOW winner concurrency (well below SM_MOCKCEIL_CONC).
+#       The reference ceiling is taken at c=2048 (inflated); the winner saturates ~256 with fps tracking
+#       the mock at THAT concurrency. Pre-fix (adopt re-probe only when LARGER) kept the inflated ceiling
+#       and read mock_bound=FALSE; the unconditional winner-concurrency re-probe (symmetric with cpu-fps)
+#       measures the ceiling at c~256 and correctly reads TRUE. Also assert the ceiling was actually
+#       adopted at the winner concurrency (SM_MOCK_FPS_CONC == the winner), proving the unconditional swap.
+CURVE=sust_mockbound_low; stream_sustained_bisect 8 4096
+assert_range "sustained mock-bound winner saturates at a low concurrency (~256)" "$SM_SUST_STREAMS" 240 256
+[ "$SM_MOCK_BOUND" = true ] && echo "ok   - sustained mock_bound=true via UNCONDITIONAL winner-concurrency ceiling re-probe (MEDIUM-R3-4)" || { echo "FAIL - sustained mock_bound=$SM_MOCK_BOUND (want true; the c=2048 ceiling would have hidden this)"; fail=1; }
+[ "${SM_MOCK_FPS_CONC:-0}" = "$SM_SUST_STREAMS" ] && echo "ok   - sustained mock ceiling re-probed + adopted at the winner concurrency (SM_MOCK_FPS_CONC=$SM_MOCK_FPS_CONC)" || { echo "FAIL - sustained mock ceiling not adopted at the winner (SM_MOCK_FPS_CONC=${SM_MOCK_FPS_CONC:-unset}, winner=$SM_SUST_STREAMS)"; fail=1; }
 
 # ── stream_c1: concurrency-1 added-TTFT / added-gap + the honesty gate ───────────────────────────────
 # The per-cell added-latency numbers every matrix stream cell publishes. Assert the clean subtraction

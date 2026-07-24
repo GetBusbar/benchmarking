@@ -192,19 +192,25 @@ stream_sustained_bisect(){ # lo hi
 }
 
 # Fair-ceiling re-probe + mock-bound decision for the sustained figure (ported from stream/run.sh).
-# Re-probe the rig once at the winner's concurrency (capped 4x the reference) and adopt the LARGER fps
-# as the fair ceiling; then SM_MOCK_BOUND=true iff the winner's fps is within 10% of it. null when the
-# reference is unusable (0 ceiling) — never a trustworthy-looking false over a dead reference.
+# Re-probe the rig once at the winner's concurrency (capped 4x the reference) and adopt that fps as the
+# fair ceiling; then SM_MOCK_BOUND=true iff the winner's fps is within 10% of it. null when the reference
+# is unusable (0 ceiling) — never a trustworthy-looking false over a dead reference.
+#
+# MEDIUM-R3-4: the re-probe adoption is UNCONDITIONAL, exactly matching the cpu-fps lane's
+# _sm_fps_finish_bound (SM_DIRECT_CEIL=$_rc). Paced fps scales ~linearly with concurrency, so a gateway
+# that saturates BELOW the reference concurrency (the normal case) re-probes a LOWER ceiling at its winner
+# concurrency. The old "adopt only when LARGER" discarded that lower re-probe and kept the high reference
+# ceiling, so SM_SUST_FPS >= 0.9*SM_MOCK_FPS was ~never true → SM_MOCK_BOUND biased FALSE, letting a
+# rig/pacing-limited sustained bar rank on the public board. Adopting the winner-concurrency ceiling
+# unconditionally makes the comparison at the gateway's ACTUAL operating point (symmetric with cpu-fps).
 _sm_finish_bound(){
   if [ "${SM_SUST_STREAMS:-0}" -gt 0 ] && [ "${SM_SUST_STREAMS}" -ne "${SM_MOCK_FPS_CONC:-0}" ] && [ "${SM_MOCK_FPS:-0}" -gt 0 ]; then
     local reprobe=$SM_SUST_STREAMS capc=$(( SM_MOCK_FPS_CONC>0 ? SM_MOCK_FPS_CONC*4 : SM_SUST_STREAMS ))
     [ "$reprobe" -gt "$capc" ] && reprobe=$capc
     local _a _b _c _d _e _rm _rest
     read -r _a _b _c _d _e _rm _rest < <(stream_probe "$DURL" "$reprobe" "$SM_SWEEP_DUR"); _rm=${_rm:-0}
-    if [ "$_rm" -gt "${SM_MOCK_FPS:-0}" ]; then
-      log "[$GATEWAY] mock-ceiling re-probed at winner c=$reprobe: ${SM_MOCK_FPS} -> $_rm fps"
-      SM_MOCK_FPS=$_rm; SM_MOCK_FPS_CONC=$reprobe
-    fi
+    log "[$GATEWAY] mock-ceiling re-probed at winner c=$reprobe: ${SM_MOCK_FPS} -> $_rm fps"
+    SM_MOCK_FPS=$_rm; SM_MOCK_FPS_CONC=$reprobe
   fi
   if [ "${SM_MOCK_FPS:-0}" -le 0 ]; then SM_MOCK_BOUND=null
   else
