@@ -145,6 +145,10 @@ MATRIX_STREAMCPU_FPS_BOUNDS="${MATRIX_STREAMCPU_FPS_BOUNDS:-8 512}"  # [lo,hi] f
 MATRIX_MEMORY="${MATRIX_MEMORY:-1}"
 MEM_PSIZE="${MEM_PSIZE:-150000}"; MEM_CONC="${MEM_CONC:-1500}"; MEM_DUR="${MEM_DUR:-120}"
 MEM_CAP_MIB="${MEM_CAP_MIB:-40000}"
+# Post-load settle wait: after the sustained load stops, how long to wait before reading post-load RSS
+# (does memory release?). Field default 60s; a local dev verifier shrinks it (MEM_SETTLE_S=2) so the
+# minutes-long local run isn't dominated by a fixed 60s sleep. The measurement itself is unchanged.
+MEM_SETTLE_S="${MEM_SETTLE_S:-60}"
 # ADAPTIVE RUNG SELECTION + shared rig baselines (lib/sweep.sh knobs; see its header). A gateway
 # that serves the whole 6x6 sweeps up to 36 cells, and the naive per-cell cost (~4 min: 15 fixed
 # ladder rungs + a re-measured direct c1 baseline + 2 re-measured mock ceilings, per cell) put this
@@ -176,6 +180,17 @@ source "$GW_DIR/gateway.sh"
 suite_deadline_start
 EGRESS_ALL="openai openai-responses anthropic gemini cohere bedrock"
 INGRESS_ALL="openai openai-responses anthropic gemini cohere bedrock"
+# DEV SUBSET (local fast verifier only; field runs leave these unset → the full 6x6). Restrict the
+# egress columns and/or ingress rows PROBED so a local end-to-end smoke run of the whole pipeline
+# finishes in minutes instead of exercising all 36 cells. The gen-data headline/streaming/memory
+# projections only need the openai diagonal cell, so MATRIX_EGRESS_ONLY="openai" MATRIX_INGRESS_ONLY=
+# "openai" drives the full producer path (probe → per-cell perf + streaming → memory-once → OOTB) on a
+# single cell. Space-separated dialect lists; any value not in the canonical set is ignored.
+_subset(){ local want="$1" all="$2" out="" x y; for x in $want; do for y in $all; do [ "$x" = "$y" ] && out="$out $y"; done; done; echo "${out# }"; }
+if [ -n "${MATRIX_EGRESS_ONLY:-}" ]; then EGRESS_ALL="$(_subset "$MATRIX_EGRESS_ONLY" "$EGRESS_ALL")"; fi
+if [ -n "${MATRIX_INGRESS_ONLY:-}" ]; then INGRESS_ALL="$(_subset "$MATRIX_INGRESS_ONLY" "$INGRESS_ALL")"; fi
+[ -n "$EGRESS_ALL" ] || { echo "MATRIX_EGRESS_ONLY matched no valid egress dialect"; exit 2; }
+[ -n "$INGRESS_ALL" ] || { echo "MATRIX_INGRESS_ONLY matched no valid ingress dialect"; exit 2; }
 
 # ── PROBE-FIRST: the capability matrix (GW_MATRIX_CAP) is ADVISORY ──────────────────────────────
 # The runner attempts ALL 36 cells for EVERY gateway. Each cell gets a cheap capability probe (one
@@ -910,8 +925,8 @@ matrix_measure_memory(){
     PEAK=$(cat "$PEAKF" 2>/dev/null); PEAK=${PEAK:-0}
     HWM=$(gw_hwm)   # VmHWM must be read BEFORE the gateway stops (the counter dies with the process)
     log "[$GATEWAY] memory-once high-water mark: ${HWM:-n/a} MiB (VmHWM; sampled peak ${PEAK} MiB)"
-    log "[$GATEWAY] memory-once load stopped — waiting 60s to see if memory releases"
-    sleep 60
+    log "[$GATEWAY] memory-once load stopped — waiting ${MEM_SETTLE_S}s to see if memory releases"
+    sleep "$MEM_SETTLE_S"
     POST=$(gw_rss)
     rm -f "$STOP" "$PEAKF" "$LOADPIDF" 2>/dev/null
   fi

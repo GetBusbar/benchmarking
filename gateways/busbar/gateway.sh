@@ -64,11 +64,11 @@ GW_ANTHROPIC_PATH=/v1/messages
 BUSBAR_IMAGE="${BUSBAR_IMAGE:-getbusbar/busbar:1.4.1}"
 
 gw_build() {
-  sudo docker pull "$BUSBAR_IMAGE" >/dev/null 2>&1 || true
+  ${BENCH_DOCKER:-sudo docker} pull "$BUSBAR_IMAGE" >/dev/null 2>&1 || true
 }
 
 gw_version() {
-  local dg; dg=$(sudo docker inspect --format '{{index .RepoDigests 0}}' "$BUSBAR_IMAGE" 2>/dev/null)
+  local dg; dg=$(${BENCH_DOCKER:-sudo docker} inspect --format '{{index .RepoDigests 0}}' "$BUSBAR_IMAGE" 2>/dev/null)
   echo "${BUSBAR_IMAGE}${dg:+ (@${dg##*@})}"
 }
 
@@ -100,8 +100,8 @@ GW_MATRIX_EGRESS="openai openai-responses anthropic gemini cohere bedrock"
 # one-per-core via available_parallelism, which already honors --cpuset-cpus (fairness: no scaling
 # knob). BUSBAR_STATE_FILE= disables state persistence for a stateless deterministic run.
 _busbar_run() {
-  sudo docker rm -f busbar-bench >/dev/null 2>&1; sleep 1
-  sudo docker run -d --name busbar-bench --network host --cpuset-cpus="$CORES" \
+  ${BENCH_DOCKER:-sudo docker} rm -f busbar-bench >/dev/null 2>&1; sleep 1
+  ${BENCH_DOCKER:-sudo docker} run -d --name busbar-bench --network host --cpuset-cpus="$CORES" \
     -e BUSBAR_STATE_FILE= \
     -e BENCH_MOCK_KEY=dummy \
     -e BENCH_BEDROCK_KEY="AKIAMOCKACCESSKEY:mock-secret-access-key" \
@@ -255,12 +255,12 @@ gw_rss() { container_rss_mib busbar-bench; }  # summed process-tree VmRSS (same 
 gw_hwm() { container_hwm_mib busbar-bench; }  # summed process-tree VmHWM (kernel high-water mark)
 
 gw_diag() {
-  echo "container: $(sudo docker ps -a --filter name=busbar-bench --format '{{.Status}}' 2>/dev/null)"
+  echo "container: $(${BENCH_DOCKER:-sudo docker} ps -a --filter name=busbar-bench --format '{{.Status}}' 2>/dev/null)"
   echo "run.log: $(cat "$GW_DIR/launch.log" 2>/dev/null | tr '\n' ' ' | head -c 300)"
-  echo "logs:"; sudo docker logs --tail 25 busbar-bench 2>&1
+  echo "logs:"; ${BENCH_DOCKER:-sudo docker} logs --tail 25 busbar-bench 2>&1
 }
 
-gw_stop() { sudo docker rm -f busbar-bench >/dev/null 2>&1; }
+gw_stop() { ${BENCH_DOCKER:-sudo docker} rm -f busbar-bench >/dev/null 2>&1; }
 
 # ── governed lane (governed/run.sh) ────────────────────────────────────────────────────────────────
 # Busbar's governance layer is always compiled in but INERT until governance.admin_token is set.

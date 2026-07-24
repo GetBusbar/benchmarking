@@ -109,12 +109,15 @@ _hwm_tree_mib() { # root_pid → summed VmHWM of pid + descendants, in MiB
   for p in $pids; do kb=$(awk '/VmHWM/{print $2}' "/proc/$p/status" 2>/dev/null); total=$((total + ${kb:-0})); done
   awk -v k="$total" 'BEGIN{printf "%.1f", k/1024}'
 }
+# BENCH_DOCKER: the docker invocation (default "sudo docker" — the EC2 field default, unchanged). Local
+# dev boxes where docker runs rootless can export BENCH_DOCKER=docker so no suite prompts for a password.
+BENCH_DOCKER="${BENCH_DOCKER:-sudo docker}"
 container_rss_mib() { # container_name → its process tree's VmRSS via the host PID (same units as native)
-  local pid; pid=$(sudo docker inspect -f '{{.State.Pid}}' "$1" 2>/dev/null)
+  local pid; pid=$($BENCH_DOCKER inspect -f '{{.State.Pid}}' "$1" 2>/dev/null)
   _rss_tree_mib "$pid"
 }
 container_hwm_mib() { # container_name → its process tree's VmHWM via the host PID (same units as native)
-  local pid; pid=$(sudo docker inspect -f '{{.State.Pid}}' "$1" 2>/dev/null)
+  local pid; pid=$($BENCH_DOCKER inspect -f '{{.State.Pid}}' "$1" 2>/dev/null)
   _hwm_tree_mib "$pid"
 }
 
