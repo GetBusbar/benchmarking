@@ -239,11 +239,14 @@ td.sel input { accent-color: var(--accent); cursor: pointer; }
 thead th.nosort { cursor: default; }
 tbody tr { cursor: pointer; }
 
-/* Gateways overview roster: a neutral alphabetical roster, not a ranked perf table.
-   Headers are not sortable, rows open nothing, and there is no sorted-column tint. */
+/* Gateways overview roster: a neutral roster, not a ranked perf table. Sortable by any column,
+   defaulting to name A→Z; rows open nothing; no sorted-column tint. */
 #gateways-table thead th, #gateways-table tbody td { text-align: left; }
 #gateways-table thead th.stars, #gateways-table tbody td.stars { text-align: right; }
-#gateways-table thead th { cursor: default; }
+#gateways-table thead th[data-sort] { cursor: pointer; user-select: none; }
+/* Active-sort arrow: ▲ ascending / ▼ descending, appended after the header label. */
+#gateways-table thead th[data-dir="asc"]::after { content: " \25B2"; font-size: .7em; color: var(--fg-mute); }
+#gateways-table thead th[data-dir="desc"]::after { content: " \25BC"; font-size: .7em; color: var(--fg-mute); }
 #gateways-table tbody tr { cursor: default; }
 #gateways-table td.cls { color: var(--fg-dim); }
 
