@@ -416,6 +416,23 @@ for (const g of gateways) {
   // NEGATIVE "measured Nd ago" badge. Re-derive the badge stamp from the non-future ats only, so the
   // promised protection is real even if the :313 board-wide future-date hard-fail is ever weakened.
   if (sawFuture) g.measured_at = ats.length ? new Date(Math.max(...ats)).toISOString() : null;
+  // LOW-2: a served matrix row whose DISPLAYED numbers project from g.matrix (best_cell / streaming /
+  // memory_read / translation_cell, source:"matrix") but that carries NO valid (non-future) matrix
+  // measured_at is CORRUPT: run.sh:1145 ALWAYS writes measured_at via `date -u`, so a null/absent matrix
+  // stamp is only reachable via truncation / hand-edit / producer bug. Left unguarded such a row bypasses
+  // EVERY freshness guard — best_cell still projects and ranks, `latest` (:306) skips it so the future-
+  // date hard-fail never sees it, displayedMeasuredMs returns 0 so it is exempt from the 180d floor, and
+  // ats.length<1 hits the `continue` below BEFORE g.stale is set, so it publishes FRESH with no badge. A
+  // stamp-less served matrix row must never publish clean: flag it stale (drives the app.js badge) and
+  // warn, consistent with treating a null matrix stamp as corruption rather than a legitimate reading.
+  const matrixProjected = (g.best_cell || g.translation_cell || g.streaming || g.memory_read) &&
+    [g.best_cell, g.translation_cell, g.streaming, g.memory_read].some((r) => r && r.source === "matrix");
+  if (g.matrix && matrixProjected && matrixAt == null) {
+    console.warn(`gen-data: WARNING: ${g.key} projects displayed numbers from a served matrix but its ` +
+      `matrix.measured_at is missing/invalid (=${g.matrix.measured_at}) — run.sh always stamps a matrix, ` +
+      `so this is corruption/hand-edit. Flagging the row STALE so it never publishes fresh without a badge.`);
+    g.stale = true;
+  }
   if (ats.length < 1) continue;
   // NIT-R2-2: NO-OP under matrix atomicity. A matrix row carries at most ONE matrix stamp, so
   // matrixSpanAts is length 0 or 1 and the `>= 2` gate below NEVER fires today — this is an inert
