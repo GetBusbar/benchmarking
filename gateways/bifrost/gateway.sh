@@ -27,27 +27,49 @@ gw_version() {
 }
 
 gw_build() {
-  # Generate Bifrost's config against the runner's actual mock port (the openai provider's base_url is
-  # the mock; the model gpt-4o-mini is registered so Bifrost can auto-resolve it to this provider —
-  # without a registered provider Bifrost returns "could not auto resolve a provider").
+  # Generate Bifrost's ONE canonical config against the runner's actual mock port. Bifrost auto-resolves
+  # the provider from the request's model name, so ALL mock-reachable declared-egress providers are
+  # wired simultaneously (openai, anthropic, gemini, cohere) with their base_url pointed at the mock —
+  # the perf/memory/throughput/stream lanes and the matrix all run this SAME multi-provider config, the
+  # matrix just names a different model. (bedrock is declared UNTESTABLE, not wired: v1.6.4 hardcodes
+  # the bedrock-runtime host, network_config.base_url can't redirect it — see GW_MATRIX_UNTESTABLE.)
   # Run Bifrost on its DEFAULT pool sizing — we don't inject a throughput-tuned pool (its own bench
   # config uses initial_pool_size 15000, which is what inflates memory under sustained load; scoring a
-  # competitor's throughput-tuned config on memory isn't fair). Just the provider + mock base_url.
-  _bifrost_write_config openai gpt-4o-mini
+  # competitor's throughput-tuned config on memory isn't fair). Just the providers + mock base_url.
+  _bifrost_write_config
   sudo docker pull "$BIFROST_IMAGE" >/dev/null 2>&1 || true
 }
 
-# _bifrost_write_config <provider> <model>: emit config.json wiring one provider whose base_url is
-# the mock. Bifrost auto-resolves the provider from the request's model name, so GW_MODEL is set to a
-# model registered under <provider>; the provider's translation emits that dialect's native upstream
-# shape to the mock (network_config.base_url is honoured at runtime for openai/anthropic/cohere/gemini).
+# _bifrost_write_config: emit config.json wiring every mock-reachable declared provider, each whose
+# base_url is the mock. Bifrost auto-resolves the provider from the request's model name (the model
+# lists below register which names map to which provider), and each provider's translation emits that
+# dialect's native upstream shape to the mock (network_config.base_url is honoured at runtime for
+# openai/anthropic/cohere/gemini — provider.go BaseURL-overridable set). sk-dummy is the required
+# provider key (Bifrost needs a key entry to register a provider); never a live secret.
+# SINGLE SOURCE: ncore = number of pinned cores (e.g. 0-3 → 4), not the last core index. Defined once
+# here and read by both gw_launch (GOMAXPROCS docker -e flag) and gw_config (published artifact), so the
+# benchmarked value and the published value cannot drift.
+_bifrost_ncore() { echo $(( ${CORES##*-} - ${CORES%%-*} + 1 )); }
+
 _bifrost_write_config() {
   mkdir -p "$GW_DIR/bfdata"
   cat > "$GW_DIR/bfdata/config.json" <<JSON
 {
   "providers": {
-    "$1": {
-      "keys": [{ "value": "sk-dummy", "models": ["$2"], "weight": 1 }],
+    "openai": {
+      "keys": [{ "value": "sk-dummy", "models": ["gpt-4o-mini"], "weight": 1 }],
+      "network_config": { "base_url": "http://127.0.0.1:$MOCK_PORT" }
+    },
+    "anthropic": {
+      "keys": [{ "value": "sk-dummy", "models": ["claude-3-5-sonnet-20241022"], "weight": 1 }],
+      "network_config": { "base_url": "http://127.0.0.1:$MOCK_PORT" }
+    },
+    "gemini": {
+      "keys": [{ "value": "sk-dummy", "models": ["gemini-1.5-pro"], "weight": 1 }],
+      "network_config": { "base_url": "http://127.0.0.1:$MOCK_PORT" }
+    },
+    "cohere": {
+      "keys": [{ "value": "sk-dummy", "models": ["command-r-plus"], "weight": 1 }],
       "network_config": { "base_url": "http://127.0.0.1:$MOCK_PORT" }
     }
   }
@@ -90,12 +112,14 @@ GW_MATRIX_UNTESTABLE="openai/bedrock"
 GW_MATRIX_UNTESTABLE_NOTE="Bifrost v1.6.4 hardcodes the Bedrock host (bedrock-runtime.<region>.amazonaws.com, core/providers/bedrock/bedrock.go; network_config.base_url never overrides it), so the harness mock cannot stand in for the upstream; Bifrost does serve Bedrock Converse in production"
 GW_MATRIX_EGRESS="openai openai-responses anthropic gemini cohere"
 gw_matrix_egress() {
+  # All egress providers are already wired in the ONE config (see _bifrost_write_config); Bifrost picks
+  # the provider from the request model name, so the matrix only flips GW_MODEL — no config rewrite. The
+  # relaunch runs the identical all-providers config.
   case "$1" in
-    openai)           GW_MODEL=gpt-4o-mini;             _bifrost_write_config openai    gpt-4o-mini;;
-    openai-responses) GW_MODEL=gpt-4o-mini;             _bifrost_write_config openai    gpt-4o-mini;;
-    anthropic)        GW_MODEL=claude-3-5-sonnet-20241022; _bifrost_write_config anthropic claude-3-5-sonnet-20241022;;
-    gemini)           GW_MODEL=gemini-1.5-pro;          _bifrost_write_config gemini    gemini-1.5-pro;;
-    cohere)           GW_MODEL=command-r-plus;          _bifrost_write_config cohere    command-r-plus;;
+    openai|openai-responses) GW_MODEL=gpt-4o-mini;;
+    anthropic)               GW_MODEL=claude-3-5-sonnet-20241022;;
+    gemini)                  GW_MODEL=gemini-1.5-pro;;
+    cohere)                  GW_MODEL=command-r-plus;;
     *) return 1;;
   esac
   gw_launch
@@ -103,16 +127,32 @@ gw_matrix_egress() {
 
 gw_launch() {
   sudo docker rm -f bifrost >/dev/null 2>&1; sleep 1
-  # GOMAXPROCS = number of pinned cores (e.g. 0-3 → 4), not the last core index.
-  local ncore=$(( ${CORES##*-} - ${CORES%%-*} + 1 ))
   sudo docker run -d --name bifrost --network host --cpuset-cpus="$CORES" \
-    -e GOMAXPROCS="$ncore" -v "$GW_DIR/bfdata:/app/data" "$BIFROST_IMAGE" >"$GW_DIR/launch.log" 2>&1 || true
+    -e GOMAXPROCS="$(_bifrost_ncore)" -v "$GW_DIR/bfdata:/app/data" "$BIFROST_IMAGE" >"$GW_DIR/launch.log" 2>&1 || true
 }
 
 gw_diag() {
   echo "container: $(sudo docker ps -a --filter name=bifrost --format '{{.Status}}' 2>/dev/null)"
   echo "run.log: $(cat "$GW_DIR/launch.log" 2>/dev/null | tr '\n' ' ' | head -c 300)"
   echo "logs:"; sudo docker logs --tail 25 bifrost 2>&1
+}
+
+# ── OOTB config artifact (file-driven) ────────────────────────────────────────────────────────────
+# gw_config prints the canonical OOTB config this gateway launches with — the rendered config.json
+# exactly as mounted at /app/data (read from the file gw_build produced so it can never drift; falls
+# back to rendering it if not present yet). The provider keys are the dummy sk-dummy Bifrost requires to
+# register a provider — never a live secret. OOTB posture: DEFAULT pool sizing (no throughput-tuned
+# initial_pool_size injected), all four mock-reachable providers wired; the only deviations are the
+# permitted ones — provider base_urls → mock and dummy keys. GOMAXPROCS in the launch env is the CPU-
+# pinning run-mechanic (= pinned core count). No feature strips, no perf/pool tuning.
+gw_config() {
+  local cfg="$GW_DIR/bfdata/config.json"
+  echo "# ── /app/data/config.json (rendered; mounted read-write, Bifrost's data dir) ──"
+  [ -f "$cfg" ] || _bifrost_write_config
+  cat "$cfg"
+  echo
+  echo "# ── launch env (non-secret; GOMAXPROCS = pinned core count, CPU-pinning run-mechanic) ──"
+  echo "GOMAXPROCS=$(_bifrost_ncore)"
 }
 
 gw_rss() { container_rss_mib bifrost; }  # summed process-tree VmRSS (same method as native gateways)

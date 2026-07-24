@@ -12,6 +12,19 @@ _rig_log(){ echo "[rig] $*" >&2; }
 fetch_rig() { # <repo-root>
   local root="$1" arch="${BENCH_ARCH:-arm64}" err
   mkdir -p "$root/bin"
+  # LOCAL-DEV OVERRIDE (audit: opt-in, never on a field/CI box). The prebuilt rig is a Linux ELF; on a
+  # non-Linux dev host (macOS) it cannot exec natively. RIG_MOCK_CMD / RIG_UGEN_CMD let a local verifier
+  # supply an already-usable mock + loadgen (e.g. the mock as a --network-host Linux container wrapper +
+  # a natively-built ugen) so the SAME harness code path runs unchanged. Both must be set together; each
+  # must be an executable path. When set we skip the GitHub fetch entirely and honestly log the source.
+  if [ -n "${RIG_MOCK_CMD:-}" ] && [ -n "${RIG_UGEN_CMD:-}" ]; then
+    MOCK="$RIG_MOCK_CMD"; UGEN="$RIG_UGEN_CMD"
+    [ -x "$MOCK" ] || { _rig_log "FATAL mock: RIG_MOCK_CMD '$MOCK' is not executable"; return 1; }
+    [ -x "$UGEN" ] || { _rig_log "FATAL ugen: RIG_UGEN_CMD '$UGEN' is not executable"; return 1; }
+    _rig_log "mock: LOCAL OVERRIDE RIG_MOCK_CMD=$MOCK — NOT the pinned GitHub rig (local dev)"
+    _rig_log "ugen: LOCAL OVERRIDE RIG_UGEN_CMD=$UGEN — NOT the pinned GitHub rig (local dev)"
+    return 0
+  fi
   # Cache under an ARCH-STAMPED name (audit R3-LOW-3). Keying only on "bin/mock is executable" silently
   # reused a wrong-arch binary on a reused local workdir when BENCH_ARCH was switched (an arm64 binary
   # passes -x on an arm64 host), attributing numbers to the wrong rig. The arch in the filename makes a

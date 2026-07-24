@@ -51,43 +51,10 @@ MOCK_BIN="$MOCK"; UGEN_BIN="$UGEN"
 gw_version() { echo "unknown"; }  # default; the manifest below may override
 gw_diag(){ :; }  # a manifest may override to print WHY it failed to serve (docker logs / native log tail)
 
-# ONE memory-measurement method for every gateway, native or docker: sum the resident memory (VmRSS)
-# of the whole process tree from /proc — the SAME thing the native manifests do. We deliberately do
-# NOT use `docker stats`, whose cgroup MemUsage includes page cache and everything else in the
-# container and is not comparable to a native process's VmRSS. This is the M1 fairness fix.
-_rss_tree_mib() { # root_pid  → summed VmRSS of pid + all descendants, in MiB
-  local root="$1"; [ -z "$root" ] || [ "$root" = 0 ] && { echo 0; return; }
-  local pids="$root" frontier="$root" next total=0 kb p c
-  while [ -n "$frontier" ]; do
-    next=""
-    for p in $frontier; do for c in $(pgrep -P "$p" 2>/dev/null); do pids="$pids $c"; next="$next $c"; done; done
-    frontier="$next"
-  done
-  for p in $pids; do kb=$(awk '/VmRSS/{print $2}' "/proc/$p/status" 2>/dev/null); total=$((total + ${kb:-0})); done
-  awk -v k="$total" 'BEGIN{printf "%.1f", k/1024}'
-}
-container_rss_mib() { # container_name → its process tree's VmRSS via the host PID (same units as native)
-  local pid; pid=$(sudo docker inspect -f '{{.State.Pid}}' "$1" 2>/dev/null)
-  _rss_tree_mib "$pid"
-}
-container_hwm_mib() { # container_name → its process tree's VmHWM via the host PID (same units as native)
-  local pid; pid=$(sudo docker inspect -f '{{.State.Pid}}' "$1" 2>/dev/null)
-  _hwm_tree_mib "$pid"
-}
-# VmHWM = the kernel's own per-process high-water mark. The 0.3 s VmRSS poll above can miss a
-# sub-interval allocation spike entirely; VmHWM cannot (the kernel updates it on every charge), so
-# it is the honest PEAK for the memory story. Read at teardown (it survives until process exit).
-_hwm_tree_mib() { # root_pid → summed VmHWM of pid + descendants, in MiB
-  local root="$1"; [ -z "$root" ] || [ "$root" = 0 ] && { echo 0; return; }
-  local pids="$root" frontier="$root" next total=0 kb p c
-  while [ -n "$frontier" ]; do
-    next=""
-    for p in $frontier; do for c in $(pgrep -P "$p" 2>/dev/null); do pids="$pids $c"; next="$next $c"; done; done
-    frontier="$next"
-  done
-  for p in $pids; do kb=$(awk '/VmHWM/{print $2}' "/proc/$p/status" 2>/dev/null); total=$((total + ${kb:-0})); done
-  awk -v k="$total" 'BEGIN{printf "%.1f", k/1024}'
-}
+# The RSS/HWM process-tree measurement (_rss_tree_mib / _hwm_tree_mib / container_rss_mib /
+# container_hwm_mib) is now defined ONCE in lib/harness.sh (sourced below), so both this memory suite
+# AND the matrix suite's folded-in memory-once measurement share the identical method. The gateway
+# manifests' gw_rss()/gw_hwm() hooks call these helpers; harness.sh must be sourced before gw_rss runs.
 # Kernel high-water mark (VmHWM) for the ACTUAL gateway process(es) this run launched.
 # This is a manifest hook, exactly like gw_rss: each gateways/<name>/gateway.sh overrides gw_hwm()
 # to sum VmHWM over the SAME process(es) its gw_rss() sums VmRSS over (native pid tree, or the

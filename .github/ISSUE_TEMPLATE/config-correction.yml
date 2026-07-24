@@ -1,0 +1,75 @@
+# GitHub issue Form for OOTB config corrections. The results board deep-links here per gateway:
+#   .../issues/new?template=config-correction.yml&title=Config+correction:+<gateway>&gateway=<gateway>
+# GitHub maps ?<field-id>=<value> onto matching form fields, so the `gateway` field below is
+# pre-filled from the drawer's "Suggest a correction" link (site/app.js configCorrectionUrl).
+name: Config correction
+description: Propose a fix to a gateway's published out-of-the-box (OOTB) benchmark config.
+title: "Config correction: <gateway>"
+labels: ["config-correction"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The config shown for each gateway is our **best-effort out-of-the-box (OOTB) attempt**,
+        published for transparency so anyone can reproduce "fresh install + this config → these
+        numbers". Spotted something off? Propose a fix here — you do not need to be a maintainer.
+
+        The OOTB standard: every gateway runs from its as-shipped **default** config, with only these
+        permitted changes — upstream base_url → our mock, dummy auth where the gateway requires a key,
+        the tested provider(s) only, the gateway's real route for the lane, and run-mechanics
+        (embedded store, CPU pinning, arm64, telemetry off). Disabling default features, perf tuning,
+        and caching are **forbidden**. Corrections that push a config away from that standard are as
+        welcome as ones that push toward it.
+  - type: input
+    id: gateway
+    attributes:
+      label: Gateway
+      description: The gateway whose published config needs a correction (pre-filled from the board link).
+      placeholder: e.g. TensorZero
+    validations:
+      required: true
+  - type: textarea
+    id: whats-wrong
+    attributes:
+      label: What's wrong
+      description: Which config line(s) / env var(s) are incorrect, or what is missing.
+      placeholder: e.g. LOGGING_ENABLED=false strips a default-on feature; under OOTB it should stay at its default.
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why / evidence
+      description: Why this is wrong under the OOTB standard. Link the gateway's own source, docs, or defaults.
+      placeholder: |
+        e.g. The upstream ships this feature enabled by default (link to the repo's default config /
+        docs). Disabling it is a forbidden feature-strip under the OOTB rule.
+    validations:
+      required: true
+  - type: input
+    id: source
+    attributes:
+      label: Source reference
+      description: A link to the gateway's source of truth (default config file, docs page, or release).
+      placeholder: https://github.com/<org>/<gateway>/blob/<ref>/config/default.toml
+    validations:
+      required: true
+  - type: textarea
+    id: proposed
+    attributes:
+      label: Proposed config change
+      description: The exact change you propose — the corrected line(s), env var(s), or config block.
+      render: text
+      placeholder: |
+        - LOGGING_ENABLED=false      # remove: default-on feature, forbidden strip
+        + (line removed; log at default)
+    validations:
+      required: true
+  - type: textarea
+    id: as-shown
+    attributes:
+      label: Config as shown (optional)
+      description: Paste the current published config from the board's Config drawer, for reference.
+      render: text
+    validations:
+      required: false

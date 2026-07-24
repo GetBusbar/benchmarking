@@ -13,6 +13,8 @@ gateways/*/venv/
 gateways/*/bfdata/
 # transient EC2 driver logs (the results JSON + charts are the durable evidence)
 results/*.log
+# per-run gateway launch log (each docker manifest writes gateways/<gw>/launch.log at gw_launch)
+gateways/*/launch.log
 # rust mock build artifacts
 mock/target/
 mock/target-linux/

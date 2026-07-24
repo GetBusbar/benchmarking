@@ -25,14 +25,79 @@ RUN_ID="${RUN_ID:-$(date +%Y%m%d-%H%M%S)-$$}"
 CREATED_KEY=0; CREATED_SG=0   # only delete the shared key/SG on exit if THIS invocation created them
 
 # Box self-terminate safety net (audit R5-#4). This `shutdown -h +N` is the LEAKED-BOX backstop - it
-# must fire only when the orchestrator has lost the box, NEVER during a legitimate run. The matrix
-# suite alone raises its OWN wall-clock ceiling to 14400s = 240 min (matrix/run.sh: HARNESS_SUITE_CEIL_S
-# default 14400 when MATRIX_SWEEP=1), and it runs LAST after 6 other suites. A 150-min box timer was
-# SHORTER than that single ceiling, so a heavy gateway's matrix sweep could still believe it had
-# headroom while AWS terminated the box mid-run - discarding every already-written suite JSON. Set the
-# net strictly ABOVE the longest legitimate run: matrix 240 min + a generous 120-min margin for the
-# other six suites = 360 min. Overridable, but the default can never fire during a real run.
-BENCH_MAX_MIN="${BENCH_MAX_MIN:-360}"
+# must fire only when the orchestrator has lost the box, NEVER during a legitimate run. Matrix is now
+# the SOLE producer and raises its OWN wall-clock ceiling to 21600s = 360 min (matrix/run.sh:171:
+# HARNESS_SUITE_CEIL_S default 21600 when MATRIX_SWEEP=1). CRITICAL TIMING: `shutdown -h +N` is armed at
+# CLOUD-INIT, minutes BEFORE the matrix clock even starts (apt + docker + rsync + gateway build take
+# ~5-10 min first), so the box clock LEADS the matrix clock. A box timer merely EQUAL to the 360-min
+# matrix ceiling therefore fires mid-sweep on a slow gateway — and with matrix as the sole producer that
+# AWS termination forfeits the ENTIRE result, not just one suite. Set the net strictly ABOVE the matrix
+# ceiling PLUS startup/build lead: 360-min ceiling + ~120-min margin (startup lead + slow-gateway
+# variance) = 480 min. Overridable, but the default can never fire during a real matrix run.
+BENCH_MAX_MIN="${BENCH_MAX_MIN:-480}"
+
+# ── INCREMENTAL PER-GATEWAY PUBLISH (matrix-sole-source) ──────────────────────────────────────────
+# Each gateway's ENTIRE benchmark is now ONE atomic matrix run, and gateways publish INDEPENDENTLY (the
+# relaxed freshness guard in site/gen-data.mjs no longer hard-fails a board with mixed per-gateway
+# ages). So instead of the operator publishing everything by hand at the very end, we commit + push
+# EACH gateway's result the moment its box finishes cleanly (DONE, all suites pulled, promote guard
+# passed). The board then fills in gateway-by-gateway; the Pages deploy regenerates data.json from all
+# committed results/ on every push, so pushing one fresh gateway updates just its row.
+#
+# The SINGLE-GATEWAY path falls straight out of this: `run-on-ec2.sh busbar` re-runs only busbar, and
+# only busbar's result is committed + pushed (the "new busbar version → update just busbar" flow).
+#
+# PUBLISH gates the auto-push. Default ON for the field run; set PUBLISH=0 for a local/dry run so a
+# development run never pushes. When off, results are still pulled + committed-nothing (left in the
+# working tree) exactly as before — the operator can inspect and publish by hand.
+PUBLISH="${PUBLISH:-1}"
+# Branch to push results to (the Pages deploy watches this). Overridable for a test branch.
+PUBLISH_BRANCH="${PUBLISH_BRANCH:-$(git -C "$HERE" rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)}"
+PUBLISH_REMOTE="${PUBLISH_REMOTE:-origin}"
+# Serialize all git operations across the parallel per-gateway boxes: commit + push touch the shared
+# index/refs, so two boxes finishing at once would race (one's `git add` sees the other's half-staged
+# tree, or two concurrent pushes collide). A single lock dir makes publish strictly one-at-a-time.
+PUBLISH_LOCK="${TMPDIR:-/tmp}/gateway-bench-publish-${RUN_ID}.lock"
+
+# push_with_rebase <tag> <log_fn> — fetch/rebase-then-push, retried in a bounded loop (audit HIGH-5).
+# The old publish path pushed the box's stale local HEAD with NO fetch/rebase, so with 13 boxes plus the
+# render-charts.yml bot pushing to the same branch, the remote ref moves constantly and every push after
+# the first is rejected non-fast-forward — that gateway then strands as an unpushed local commit. Here we
+# fetch the remote tip and rebase our local commit(s) onto it before each push, retrying up to 5 times
+# (re-fetch + re-rebase each pass) to survive a ref that moves again between our fetch and our push.
+# MUST be called while holding the publish lock (callers already do). Prints via $2, returns 0 on a
+# successful push, 1 if all attempts failed (commit stays local — logged loudly, never stranded silently).
+# Conflict safety: each gateway commits only its OWN result paths, so a rebase rarely conflicts; the one
+# realistic overlap is a bot chart commit touching results/*.png. We rebase with -X theirs (favor the
+# already-published remote side on any overlap) so the rebase can NEVER halt mid-way leaving a detached,
+# conflicted, un-pushable state; a genuine conflict is logged loudly rather than stranding the publish.
+push_with_rebase() {
+  local _tag="$1" _log="$2" _attempt=0 _max=5
+  while [ "$_attempt" -lt "$_max" ]; do
+    _attempt=$((_attempt+1))
+    # Pull the remote tip in and replay our local commit(s) on top. Non-interactive; -X theirs so an
+    # overlapping bot chart commit never aborts the rebase.
+    if ! git -C "$HERE" fetch "$PUBLISH_REMOTE" "$PUBLISH_BRANCH" >/dev/null 2>&1; then
+      "$_log" "$_tag publish: fetch $PUBLISH_REMOTE/$PUBLISH_BRANCH FAILED (attempt $_attempt/$_max) — retrying"
+      sleep 3; continue
+    fi
+    if ! git -C "$HERE" rebase -X theirs "$PUBLISH_REMOTE/$PUBLISH_BRANCH" >/dev/null 2>&1; then
+      # A conflict -X theirs could not auto-resolve (should be rare). Abort the rebase to return to a
+      # clean, pushable local HEAD and log loudly — do NOT leave a half-rebased detached state.
+      git -C "$HERE" rebase --abort >/dev/null 2>&1 || true
+      "$_log" "$_tag publish: rebase onto $PUBLISH_REMOTE/$PUBLISH_BRANCH CONFLICTED (attempt $_attempt/$_max) — aborted rebase, retrying"
+      sleep 3; continue
+    fi
+    if git -C "$HERE" push "$PUBLISH_REMOTE" "HEAD:$PUBLISH_BRANCH" >/dev/null 2>&1; then
+      return 0
+    fi
+    # Push rejected — the ref moved again between our fetch and our push. Loop to re-fetch + re-rebase.
+    "$_log" "$_tag publish: push rejected (ref moved; attempt $_attempt/$_max) — re-fetch + rebase + retry"
+    sleep 3
+  done
+  "$_log" "$_tag publish: push to $PUBLISH_REMOTE/$PUBLISH_BRANCH FAILED after $_max attempts (commit is local; retry by hand or re-run)"
+  return 1
+}
 
 # `run-on-ec2.sh kill` — terminate EVERY gateway-bench box right now, reliably. Uses xargs so the
 # instance IDs are split into separate args (piping `--output text` straight into `--instance-ids`
@@ -162,6 +227,64 @@ AMI=$(aws ssm get-parameter --name "$SSM" --query Parameter.Value --output text)
 
 mkdir -p "$HERE"/results/{perf,memory,stream,xlate,governed,matrix}
 
+# ── commit + push ONE gateway's result (incremental publish) ──────────────────────────────────────
+# Called from bench_gateway the moment that box has cleanly finished (DONE). Commits ONLY this
+# gateway's freshly-pulled result files (its per-suite JSONs, its append-only history line, its OOTB
+# config sidecar, and any regenerated per-gateway chart) and pushes them, so the board updates just
+# this row. No-op (returns 0) when PUBLISH=0 so a local/dry run never pushes. Serialized under a flock
+# so the parallel boxes commit + push strictly one-at-a-time (shared index/refs). Best-effort: a push
+# failure is logged loudly and returns non-zero (counted as a run issue) but never aborts other boxes.
+publish_gateway() { # gw glog_echo_fn
+  local gw="$1"
+  [[ "$PUBLISH" == "1" ]] || { echo "[$gw] PUBLISH=0 — not committing/pushing (result left in the working tree)"; return 0; }
+  # Serialize: only one box commits/pushes at a time. flock on a lock fd; fall back to a mkdir spin-lock
+  # on hosts without util-linux flock (macOS orchestrator). The subshell holds the lock for its body.
+  (
+    if command -v flock >/dev/null 2>&1; then
+      exec 9>"$PUBLISH_LOCK"; flock 9
+    else
+      # mkdir spin-lock: atomic create; wait (bounded) for a peer box to finish its push.
+      local _spun=0
+      until mkdir "${PUBLISH_LOCK}.d" 2>/dev/null; do sleep 2; _spun=$((_spun+2)); [ "$_spun" -ge 600 ] && break; done
+      trap 'rmdir "${PUBLISH_LOCK}.d" 2>/dev/null || true' EXIT
+    fi
+    # Stage ONLY this gateway's artifacts (never a sibling box's in-flight files):
+    #   - its per-suite result JSONs (results/<suite>/<gw>.json)
+    #   - its append-only history line (results/history/<gw>.jsonl)
+    #   - its OOTB config sidecar (results/config/<gw>.txt)
+    #   - any per-gateway chart the local regen produced for it (results/*<gw>*.png) — usually charts
+    #     are regenerated field-wide at the very end, but staging a per-gw one here is harmless.
+    local -a paths=()
+    local f
+    for f in "$HERE"/results/*/"$gw".json "$HERE"/results/history/"$gw".jsonl "$HERE"/results/config/"$gw".txt; do
+      [ -e "$f" ] && paths+=("$f")
+    done
+    for f in "$HERE"/results/*"$gw"*.png; do [ -e "$f" ] && paths+=("$f"); done
+    if [ "${#paths[@]}" -eq 0 ]; then echo "[$gw] publish: no result files to commit (nothing pulled?)"; exit 0; fi
+    git -C "$HERE" add -- "${paths[@]}" 2>/dev/null || true
+    # Nothing actually changed vs HEAD (identical re-run) → skip the empty commit, still try a push in
+    # case a prior push failed and left commits unpushed.
+    if git -C "$HERE" diff --cached --quiet; then
+      echo "[$gw] publish: no content change vs HEAD — skipping commit"
+    else
+      git -C "$HERE" commit -q -m "bench($gw): publish matrix run result
+
+Incremental per-gateway publish: $gw's box finished cleanly, committing only
+its result so the board updates just this row (matrix-sole-source)." \
+        || { echo "[$gw] publish: git commit FAILED"; exit 1; }
+      echo "[$gw] committed $gw's result"
+    fi
+    # Fetch/rebase-then-push in a bounded retry loop (audit HIGH-5) — 13 boxes + the render-charts bot
+    # move the remote ref constantly, so a bare push of our stale HEAD is rejected non-fast-forward and
+    # strands the gateway. Still inside the flock so the whole fetch→rebase→push is serialized across boxes.
+    if push_with_rebase "[$gw]" echo; then
+      echo "[$gw] pushed to $PUBLISH_REMOTE/$PUBLISH_BRANCH — the board will regenerate data.json and update $gw's row"
+    else
+      exit 1
+    fi
+  )
+}
+
 # ── one box, one gateway (runs in the background, self-terminates) ─────────────────────────────────
 bench_gateway() {
   local gw="$1" iid="" ip=""
@@ -175,7 +298,7 @@ bench_gateway() {
   # `instance-initiated-shutdown-behavior=terminate` makes that a TERMINATE, not a stop. A leaked box
   # can therefore bleed cost for at most BENCH_MAX_MIN, never indefinitely (2026-07-24: 48 leaked boxes
   # ran for hours because the trap missed SIGTERM and the manual cleanups silently no-op'd). BENCH_MAX_MIN
-  # is set ABOVE the matrix suite's own 240-min ceiling (see top of file) so it never fires mid-run.
+  # is set ABOVE the matrix suite's own 360-min ceiling + startup lead (see top of file) so it never fires mid-run.
   iid=$(aws ec2 run-instances --image-id "$AMI" --instance-type "$ITYPE" --key-name "$KEYNAME" \
     --security-group-ids "$SG" \
     --instance-initiated-shutdown-behavior terminate \
@@ -287,7 +410,11 @@ bench_gateway() {
     fi
   }
 
-  local ALL_SUITES="${SUITES:-perf memory stream streamcpu xlate governed matrix}"
+  # Matrix is the SOLE producer now — the standalone perf/memory/stream/streamcpu/xlate/governed suites
+  # are RETIRED. Default to the same `matrix` run-all.sh uses (run-all.sh:75); an explicit SUITES override
+  # still lets an operator re-run a legacy suite ad hoc. Defaulting to the old 7-suite list here would
+  # override run-all.sh's matrix default on the box and re-run all six dormant suites (audit HIGH-2).
+  local ALL_SUITES="${SUITES:-matrix}"
   declare -A _pull_state=() _pull_rc=(); local suite
   for suite in $ALL_SUITES; do _pull_state[$suite]=unset; _pull_rc[$suite]=0; done
 
@@ -377,11 +504,20 @@ bench_gateway() {
   # DONE means a CLEAN, fully-pulled fresh run. If any suite's pull failed or the guard kept old data,
   # this gateway did NOT cleanly refresh - say so loudly so the freshness guard's later hard-fail is
   # never a surprise and the gateway can be re-run.
-  if [[ "$pull_failed" -eq 0 && "$run_failed" -eq 0 && -f "$HERE/results/perf/$gw.json" ]]; then glog_echo "DONE"
+  if [[ "$pull_failed" -eq 0 && "$run_failed" -eq 0 && -f "$HERE/results/matrix/$gw.json" ]]; then
+    glog_echo "DONE"
+    # INCREMENTAL PUBLISH: this box finished cleanly and the promote guard passed for every suite, so
+    # commit + push ONLY this gateway's result now (gated on PUBLISH, serialized across boxes). The
+    # board fills in gateway-by-gateway; a single-gateway invocation pushes just that one row. We do
+    # NOT fail the box on a publish hiccup — the result is safely on disk and the operator can push by
+    # hand — but a publish failure is logged and counted as a run issue via the || below.
+    if ! publish_gateway "$gw" 2>&1 | tee -a "$glog"; then
+      glog_echo "publish reported an issue for $gw (result IS committed/on disk; push may need a manual retry)"
+    fi
   else glog_echo "INCOMPLETE (a suite crashed, failed to pull, or was guard-held; this gateway did NOT fully refresh - re-run it)"; fi
   # Propagate the issue to the caller's `wait "$p" || fail=…` so the summary's issue count is accurate
   # and a run missing whole suites is never reported as "0 issues" (audit R3-M4/M5).
-  if [[ "$pull_failed" -ne 0 || "$run_failed" -ne 0 || ! -f "$HERE/results/perf/$gw.json" ]]; then return 1; fi
+  if [[ "$pull_failed" -ne 0 || "$run_failed" -ne 0 || ! -f "$HERE/results/matrix/$gw.json" ]]; then return 1; fi
   return 0
 }
 
@@ -419,3 +555,50 @@ else
   log "local chart regen failed (matplotlib?) — JSON results are still in results/; run charts.py yourself"
 fi
 log "done — results/reports/{all,top5}/README.md + results/*.png"
+
+# ── final publish sweep: history + regenerated charts/reports ─────────────────────────────────────
+# The per-gateway incremental publishes above push each gateway's result as its box finishes, but the
+# APPEND-ONLY HISTORY (history/append.py) and the FIELD-WIDE CHARTS/REPORTS (charts.py) are produced
+# HERE, after all boxes are done — so they are not yet committed. Push them now (gated on PUBLISH) so
+# the board's charts + reports are fresh too. Uses the same serialized commit/push discipline; by now
+# the boxes are joined so there is no contention. A single-gateway invocation still lands here and
+# pushes only the artifacts that changed (typically that gateway's history line + the charts it moved).
+if [[ "$PUBLISH" == "1" ]]; then
+  # Same serialized commit + fetch/rebase/push discipline as publish_gateway (audit HIGH-5): the boxes
+  # are joined by now so there is no box-vs-box contention, but the render-charts bot can still move the
+  # remote ref, so a bare push of our local HEAD is rejected non-fast-forward. Hold the same flock and
+  # push via push_with_rebase (bounded fetch→rebase→push retry) so history + charts never strand locally.
+  (
+    if command -v flock >/dev/null 2>&1; then
+      exec 9>"$PUBLISH_LOCK"; flock 9
+    else
+      _spun=0
+      until mkdir "${PUBLISH_LOCK}.d" 2>/dev/null; do sleep 2; _spun=$((_spun+2)); [ "$_spun" -ge 600 ] && break; done
+      trap 'rmdir "${PUBLISH_LOCK}.d" 2>/dev/null || true' EXIT
+    fi
+    git -C "$HERE" add -- "$HERE/results/history" "$HERE"/results/*.png "$HERE/results/reports" 2>/dev/null || true
+    if git -C "$HERE" diff --cached --quiet; then
+      log "final publish: no history/chart changes to push"
+    elif git -C "$HERE" commit -q -m "bench: publish run history + regenerated charts/reports
+
+Field-wide artifacts produced after all boxes finished (append-only history + charts.py output)."; then
+      if push_with_rebase "final publish:" log; then
+        log "final publish: pushed history + charts to $PUBLISH_REMOTE/$PUBLISH_BRANCH"
+      else
+        exit 1
+      fi
+    else
+      log "WARNING final publish: git commit FAILED for history + charts"; exit 2
+    fi
+  )
+  case $? in
+    0) : ;;
+    *) fail=$((fail+1)) ;;
+  esac
+else
+  log "PUBLISH=0 — not pushing history/charts (left in the working tree)"
+fi
+# Clean up the publish lock artifacts this run created.
+rm -f "$PUBLISH_LOCK" 2>/dev/null || true; rmdir "${PUBLISH_LOCK}.d" 2>/dev/null || true
+
+exit "$fail"

@@ -45,6 +45,82 @@ HARNESS_BOOT_BACKOFF_S="${HARNESS_BOOT_BACKOFF_S:-3}"
 HARNESS_PROBE_GRACE="${HARNESS_PROBE_GRACE:-45}"
 HARNESS_SUITE_CEIL_S="${HARNESS_SUITE_CEIL_S:-2700}"
 
+# ── harness_write_config: capture the gateway's OOTB config artifact (once per run) ───────────────
+# The OOTB standard: every gateway runs from its as-shipped DEFAULT config (pointed at the mock) and we
+# PUBLISH the exact config it used, so the board can show "fresh install + this config → these numbers".
+# A manifest OPTIONALLY defines gw_config(), which prints that canonical config to stdout:
+#   * file-driven gateway → the rendered config-file contents (+ any non-secret launch env)
+#   * env-driven gateway  → a `KEY=value\n` env manifest
+# with every secret rendered as its dummy value (there are none on the isolated rig, but the mechanism
+# must NEVER emit a live key). This function writes that once to results/config/<gateway>.txt (committed
+# like every other result) and echoes the sidecar-relative pointer ("config/<gateway>.txt") for the
+# caller to fold into its result JSON as "ootb_config". It is idempotent + cheap (one function call +
+# one file write) and safe to call from any suite; the perf suite is the natural home (it always runs
+# and already sources the manifest).
+#
+# GRACEFUL DEGRADATION: a gateway with no gw_config() (the 12 not yet fanned out) prints nothing here
+# and NO sidecar is written — harness_write_config returns non-zero and emits no pointer, so gen-data
+# and the board simply render "not published" for that gateway. A gw_config() that errors or prints
+# only whitespace is treated the same (never writes an empty/garbage artifact).
+#   Usage:  ptr="$(harness_write_config "$GATEWAY" "$RESULTS_ROOT")"  # ptr="config/<gw>.txt" or ""
+# where RESULTS_ROOT is the repo's results/ dir. Prints the pointer (or nothing) on stdout.
+harness_write_config(){
+  local gw="$1" results_root="$2"
+  # No hook → nothing to publish. This is the 12-not-yet-wired path; degrade silently.
+  declare -F gw_config >/dev/null 2>&1 || return 1
+  local body; body="$(gw_config 2>/dev/null)" || return 1
+  # Reject an empty / whitespace-only artifact rather than committing a blank file.
+  [ -n "$(printf '%s' "$body" | tr -d '[:space:]')" ] || return 1
+  local dir="$results_root/config"
+  mkdir -p "$dir" || return 1
+  printf '%s\n' "$body" > "$dir/$gw.txt" || return 1
+  printf 'config/%s.txt' "$gw"
+}
+
+# ── RSS / HWM process-tree helpers (shared: memory/ AND the matrix's memory-once measurement) ─────
+# ONE memory-measurement method for every gateway, native or docker: sum the resident memory (VmRSS)
+# — or the kernel high-water mark (VmHWM) — of the whole process tree from /proc. The SAME thing the
+# native manifests do; deliberately NOT `docker stats` (its cgroup MemUsage includes page cache and is
+# not comparable to a native process's VmRSS). A gateway manifest's gw_rss()/gw_hwm() hook calls these
+# (directly for native, via container_*_mib for docker), so they must live in the shared layer both
+# the memory suite and the matrix suite source — not only in memory/run.sh (audit: matrix folds the
+# memory measurement in and calls gw_rss()/gw_hwm(), which reference these).
+_rss_tree_mib() { # root_pid  → summed VmRSS of pid + all descendants, in MiB
+  local root="$1"; [ -z "$root" ] || [ "$root" = 0 ] && { echo 0; return; }
+  local pids="$root" frontier="$root" next total=0 kb p c
+  while [ -n "$frontier" ]; do
+    next=""
+    for p in $frontier; do for c in $(pgrep -P "$p" 2>/dev/null); do pids="$pids $c"; next="$next $c"; done; done
+    frontier="$next"
+  done
+  for p in $pids; do kb=$(awk '/VmRSS/{print $2}' "/proc/$p/status" 2>/dev/null); total=$((total + ${kb:-0})); done
+  awk -v k="$total" 'BEGIN{printf "%.1f", k/1024}'
+}
+# VmHWM = the kernel's own per-process high-water mark. A periodic VmRSS poll can miss a sub-interval
+# allocation spike; VmHWM cannot (the kernel updates it on every charge), so it is the honest PEAK.
+_hwm_tree_mib() { # root_pid → summed VmHWM of pid + descendants, in MiB
+  local root="$1"; [ -z "$root" ] || [ "$root" = 0 ] && { echo 0; return; }
+  local pids="$root" frontier="$root" next total=0 kb p c
+  while [ -n "$frontier" ]; do
+    next=""
+    for p in $frontier; do for c in $(pgrep -P "$p" 2>/dev/null); do pids="$pids $c"; next="$next $c"; done; done
+    frontier="$next"
+  done
+  for p in $pids; do kb=$(awk '/VmHWM/{print $2}' "/proc/$p/status" 2>/dev/null); total=$((total + ${kb:-0})); done
+  awk -v k="$total" 'BEGIN{printf "%.1f", k/1024}'
+}
+# BENCH_DOCKER: the docker invocation (default "sudo docker" — the EC2 field default, unchanged). Local
+# dev boxes where docker runs rootless can export BENCH_DOCKER=docker so no suite prompts for a password.
+BENCH_DOCKER="${BENCH_DOCKER:-sudo docker}"
+container_rss_mib() { # container_name → its process tree's VmRSS via the host PID (same units as native)
+  local pid; pid=$($BENCH_DOCKER inspect -f '{{.State.Pid}}' "$1" 2>/dev/null)
+  _rss_tree_mib "$pid"
+}
+container_hwm_mib() { # container_name → its process tree's VmHWM via the host PID (same units as native)
+  local pid; pid=$($BENCH_DOCKER inspect -f '{{.State.Pid}}' "$1" 2>/dev/null)
+  _hwm_tree_mib "$pid"
+}
+
 # ── tmo: hard timeout around one command ────────────────────────────────────────────────────────
 # Kills the command (and, via a fresh process group when possible, its children - a ugen probe forks
 # nothing but a docker/native gateway probe path might) if it runs longer than <seconds>. Returns the

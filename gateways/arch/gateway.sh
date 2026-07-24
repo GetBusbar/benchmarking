@@ -2,10 +2,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # Gateway manifest: Arch (katanemo/archgw) — Envoy data plane + Arch services, one arm64 container.
 #
-# Brought up via the archgw CLI (pip-installed) from an arch_config.yaml. We use ONLY the egress LLM
-# gateway (port 12000, OpenAI passthrough) with a single llm_provider whose base_url is the mock — no
-# prompt_targets / routing / guards, so the guard/router models never run (pure proxy overhead). The
-# CLI runs the container(s), which we then pin to $CORES. ARCH_VERSION is in gateways/versions.env.
+# Brought up via the archgw CLI (pip-installed) from an arch_config.yaml. This is archgw's canonical
+# egress LLM-gateway config (port 12000, OpenAI ingress): a plain `llm_providers` list whose base_urls
+# are the mock. prompt_targets / routing / guards are OPT-IN features you ADD by configuring them (they
+# ship absent, not on-by-default), so an egress-only config is archgw's real-world default posture for
+# "use me as an LLM proxy", not a feature-strip — nothing that ships enabled is being disabled. ALL the
+# mock-reachable declared-egress providers are wired at once (openai default + amazon_bedrock), so the
+# perf/memory/throughput/stream lanes and the matrix run the SAME config; the matrix only varies which
+# provider-prefixed model the request body names. The CLI runs the container(s), which we then pin to
+# $CORES. ARCH_VERSION is in gateways/versions.env.
 GW_KIND=docker
 # Self-describing manifest metadata — charts.py + the run lists read these, so a gateway
 # is fully defined by its own dir (add/remove a dir → it appears/disappears everywhere).
@@ -48,12 +53,26 @@ gw_hwm() {  # kernel VmHWM summed over every archgw container's process tree (sa
   [ "$any" = 1 ] && echo "$total" || echo ""
 }
 
-# _arch_launch <model>: write the egress-only config with the given provider-prefixed model and boot
-# via the archgw CLI. archgw picks the upstream provider (and thus the native egress dialect its
-# hermesllm transforms emit) from the model-name prefix: openai/, anthropic/, amazon_bedrock/.
-_arch_launch() {
-  # Egress-only config = pure proxy. host.docker.internal (the CLI adds host-gateway) reaches the mock
-  # bound on 0.0.0.0. No access_key → no real provider key needed.
+# _arch_write_config: write archgw's ONE canonical egress config wiring every mock-reachable declared
+# provider at once. archgw picks the upstream provider (and thus the native egress dialect its hermesllm
+# transforms emit) from the request model-name prefix (openai/, amazon_bedrock/), so both providers are
+# listed here simultaneously and the matrix just names one in the request body — no per-lane config
+# swap. base_url is honoured by every provider (config_generator.py parses it into an explicit Envoy
+# cluster); amazon_bedrock REQUIRES base_url, which we point at the mock (the SigV4/Converse request
+# shape still applies, the mock ignores the signature). host.docker.internal (the CLI adds host-gateway)
+# reaches the mock bound on 0.0.0.0. No access_key → no real provider key needed (dummy is implicit).
+# openai is default:true so a bare/unprefixed model still routes somewhere sane.
+#
+# KNOWN LIMITATION (disclosed, not silently unfair): arch runs Envoy via the archgw CLI, and Envoy's
+# worker concurrency defaults to std::thread::hardware_concurrency() = the HOST cpu count, blind to
+# --cpuset-cpus (the same cpuset-blindness the nginx gateways have with `worker_processes auto` and Go
+# had with GOMAXPROCS). Envoy's fix would be its `--concurrency <ncore>` CLI flag, but that flag lives
+# in the Envoy bootstrap the archgw CLI generates and controls — there is no clean env we can inject
+# through `archgw up` to pin it, and hacking archgw's internal bootstrap is out of scope. So Envoy's
+# worker concurrency is NOT pinned to the cpuset here (unlike apisix/kong nginx worker_processes and the
+# Go GOMAXPROCS pin). This is disclosed as a known measurement caveat, not silently ignored; arch serves
+# only one matrix cell (openai->bedrock), bounding the impact.
+_arch_write_config() {
   cat > "$GW_DIR/arch_config.yaml" <<YAML
 version: v0.1.0
 listeners:
@@ -63,10 +82,16 @@ listeners:
     message_format: openai
     timeout: 30s
 llm_providers:
-  - model: $1
+  - model: openai/gpt-4o-mini
     base_url: http://host.docker.internal:$MOCK_PORT
     default: true
+  - model: amazon_bedrock/anthropic.claude-3-sonnet-20240229-v1:0
+    base_url: http://host.docker.internal:$MOCK_PORT
 YAML
+}
+
+_arch_launch() {
+  _arch_write_config
   "$ARCH_VENV/bin/archgw" down >/dev/null 2>&1
   "$ARCH_VENV/bin/archgw" up "$GW_DIR/arch_config.yaml" >"$GW_DIR/launch.log" 2>&1 || true
   # pin the arch containers to the gateway's cores once they're up (the CLI doesn't cpuset them)
@@ -77,7 +102,21 @@ YAML
     done ) &
 }
 
-gw_launch() { _arch_launch "$GW_MODEL"; }
+gw_launch() { _arch_launch; }
+
+# ── OOTB config artifact (file-driven) ────────────────────────────────────────────────────────────
+# gw_config prints the canonical OOTB config this gateway launches with — the rendered arch_config.yaml
+# exactly as the archgw CLI loads it (read from the file _arch_write_config produced, so it can never
+# drift; falls back to rendering it if not present yet). archgw needs no provider API key for this mock
+# wiring, so there is no secret to dummy out. OOTB posture: an egress-only llm_providers config is
+# archgw's real-world "LLM proxy" default (prompt_targets/routing/guards ship absent, not stripped); the
+# only deviations are the permitted ones — provider base_urls → mock. No feature strips or perf tuning.
+gw_config() {
+  local cfg="$GW_DIR/arch_config.yaml"
+  echo "# ── arch_config.yaml (rendered; loaded via 'archgw up arch_config.yaml') ──"
+  [ -f "$cfg" ] || _arch_write_config
+  cat "$cfg"
+}
 
 # ── matrix suite: declared capability + egress wiring ─────────────────────────────────────────────
 # Declared 6x6 (rows=ingress, cols=egress), axis order: openai openai-responses anthropic gemini
@@ -109,14 +148,15 @@ GW_MATRIX_CAP="
 GW_MATRIX_CAP_NOTE="archgw 0.3.22 translates openai-chat ingress natively only to Bedrock Converse; Anthropic egress rides Anthropic's OpenAI-compat surface (id.rs maps (Anthropic, OpenAIChatCompletions) -> OpenAIChatCompletions, never native /v1/messages), Responses is ingress-only, and Gemini/Cohere have no native module; those cells are grey by that capability limit"
 GW_MATRIX_EGRESS="openai bedrock"
 gw_matrix_egress() {
-  # GW_MODEL rides in the ingress request body (openai message_format), so it must name the same
-  # provider-prefixed model archgw is configured with, else the default provider is not selected.
+  # Both providers are already wired in the ONE config (see _arch_write_config); GW_MODEL rides in the
+  # ingress request body (openai message_format) and selects which by its provider prefix, so no config
+  # rewrite is needed — the relaunch runs the identical all-providers config, just naming a new model.
   case "$1" in
     openai)  GW_MODEL="openai/gpt-4o-mini";;
     bedrock) GW_MODEL="amazon_bedrock/anthropic.claude-3-sonnet-20240229-v1:0";;
     *) return 1;;
   esac
-  _arch_launch "$GW_MODEL"
+  gw_launch
 }
 
 gw_diag() {

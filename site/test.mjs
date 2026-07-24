@@ -52,13 +52,16 @@ try {
   rmSync(out, { recursive: true, force: true });
 }
 
-// ---- freshness guard: POSITIVELY assert it throws on a stale board, passes on a fresh one ----
-// The main data load above FALLS BACK to the committed bundle when the guard trips, so the guard is
-// never positively exercised there - a widened MAX_SPAN_H, a flipped lag comparison, or a missing
-// absolute board-age floor would all go undetected. Here we build a throwaway synthetic repo (a couple
-// of gateway manifests + result JSONs with controlled measured_at) and run gen-data against it,
-// asserting: (1) a wholesale-stale board (every measurement > MAX_BOARD_AGE_H old, so BOTH relative
-// guards pass) HARD-FAILS on the new absolute floor (audit R4-M1); (2) a fresh, coherent board passes.
+// ---- freshness guard (matrix-sole-source): relaxed rules ----
+// Under matrix-sole-source each gateway is ONE atomic matrix run (hours long) published INDEPENDENTLY,
+// so the board legitimately carries mixed per-gateway ages. The old RELATIVE guards are gone:
+//   - intra-row SPAN hard-fail (mixed suites from different runs): REMOVED — replaced by a generous
+//     sanity cap (12h) that only a corrupt/future-dated timestamp can trip;
+//   - cross-gateway LAG hard-fail (a row lagging the board-newest): REMOVED — mixed cadences are honest.
+// KEPT: the wholesale-stale ABSOLUTE floor (nothing on the board younger than MAX_BOARD_AGE_DAYS).
+// NEW: a PER-GATEWAY staleness SIGNAL (g.stale set when a row's own data ages past MAX_GATEWAY_AGE_DAYS)
+// — a badge, NOT a build failure. These tests positively exercise all of that against a synthetic repo,
+// since the main data load above falls back to the committed bundle when the guard trips.
 function buildSyntheticRepo(measuredAtByGw) {
   // measuredAtByGw: { key: { perf: isoString, matrix?: isoString, ... }, ... }
   const root = mkdtempSync(join(tmpdir(), "site-fresh-"));
@@ -88,29 +91,153 @@ function genThrows(root) {
     rmSync(root, { recursive: true, force: true });
   }
 }
+// Like genThrows but returns the emitted data.json on success (so tests can assert per-gateway
+// staleness flags / measured_at). Returns { err } on failure, { data } on success.
+function genData(root) {
+  const outDir = mkdtempSync(join(tmpdir(), "site-fresh-out-"));
+  try {
+    execFileSync(process.execPath, [join(HERE, "gen-data.mjs"), root, outDir], { stdio: "pipe" });
+    return { data: JSON.parse(readFileSync(join(outDir, "data.json"), "utf8")) };
+  } catch (e) {
+    return { err: String(e.stderr || e.message || "") };
+  } finally {
+    rmSync(outDir, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true });
+  }
+}
 const isoAgo = (h) => new Date(Date.now() - h * 3600000).toISOString();
+const isoDaysAgo = (d) => new Date(Date.now() - d * 86400000).toISOString();
 
-test("freshness guard HARD-FAILS a wholesale-stale board (absolute age floor, R4-M1)", () => {
-  // Every gateway carries timestamps from the SAME ~7-day-old run: each row's span is tiny (< MAX_SPAN_H)
-  // and every row's lag vs boardNewest is ~0 (< MAX_LAG_H), so BOTH relative guards pass. Only the
-  // absolute board-age floor (> 48h) can catch it.
-  const stale = isoAgo(24 * 7); // a week old
+test("freshness guard HARD-FAILS a wholesale-stale board (absolute age floor kept)", () => {
+  // The whole board is older than MAX_BOARD_AGE_DAYS (180d): NOTHING has refreshed at all. This is the
+  // one absolute floor kept under matrix-sole-source — publishing generated_at=now over a board where
+  // the newest measurement anywhere is >180d old is dishonest. Hard fail.
+  const stale = isoDaysAgo(200);
   const msg = genThrows(buildSyntheticRepo({
-    alpha: { perf: stale, matrix: stale },
-    bravo: { perf: stale, matrix: stale },
+    alpha: { matrix: stale },
+    bravo: { matrix: stale },
   }));
   assert.ok(msg, "expected gen-data to THROW on a wholesale-stale board, but it succeeded");
   assert.ok(/FRESHNESS FAILURE \(stale board\)/.test(msg), `expected the stale-board failure, got: ${msg}`);
 });
 
-test("freshness guard PASSES a fresh, coherent board", () => {
-  // Every gateway measured within the last couple hours: span tiny, lag ~0, board age well under 48h.
-  const t = isoAgo(1);
-  const msg = genThrows(buildSyntheticRepo({
-    alpha: { perf: t, matrix: isoAgo(2) },
-    bravo: { perf: isoAgo(0.5), matrix: isoAgo(1.5) },
+test("freshness guard PASSES a board with MIXED per-gateway ages (independent cadences are honest)", () => {
+  // The core relaxation: busbar measured today, kong measured 3 weeks ago. Under the OLD lag guard the
+  // 3-week-old row would hard-fail (it "lags the board-newest"); now that is honest and expected on a
+  // living board where any one gateway is re-run alone. Board must PASS.
+  const { err, data } = genData(buildSyntheticRepo({
+    busbar: { matrix: isoAgo(1) },        // today
+    kong: { matrix: isoDaysAgo(21) },     // 3 weeks ago — would have hard-failed the old lag guard
   }));
-  assert.equal(msg, null, `expected a fresh board to pass gen-data, but it threw: ${msg}`);
+  assert.equal(err, undefined, `expected a mixed-age board to PASS gen-data, but it threw: ${err}`);
+  // Neither is stale (both < 60d), and each carries its OWN measured_at.
+  const byKey = Object.fromEntries(data.gateways.map((g) => [g.key, g]));
+  assert.equal(byKey.busbar.stale, false, "busbar (today) must not be flagged stale");
+  assert.equal(byKey.kong.stale, false, "kong (3 weeks) must not be flagged stale (< 60d)");
+  assert.ok(byKey.busbar.measured_at && byKey.kong.measured_at, "each gateway carries its OWN measured_at");
+  assert.notEqual(byKey.busbar.measured_at, byKey.kong.measured_at, "per-gateway measured_at survives independently");
+});
+
+test("freshness guard does NOT hard-fail a legitimate hours-long single matrix run (span check relaxed)", () => {
+  // One atomic matrix run legitimately spans HOURS (busbar ~5h): timestamps 5h apart within a row are
+  // a real run, not a franken-mix. The old MAX_SPAN_H=3 hard-failed exactly this; now only a >12h
+  // sanity cap can trip. Board must PASS.
+  const msg = genThrows(buildSyntheticRepo({
+    busbar: { perf: isoAgo(6), matrix: isoAgo(1) }, // 5h span — a real long matrix run
+  }));
+  assert.equal(msg, null, `expected an hours-long single run to PASS, but it threw: ${msg}`);
+});
+
+test("freshness guard sets the PER-GATEWAY stale flag past MAX_GATEWAY_AGE_DAYS (badge, not a failure)", () => {
+  // A gateway whose own data has aged past 60d gets g.stale=true (drives the app.js badge) WITHOUT
+  // failing the build — as long as some OTHER gateway keeps the board under the wholesale floor.
+  const { err, data } = genData(buildSyntheticRepo({
+    fresh: { matrix: isoAgo(2) },          // keeps the board off the wholesale floor
+    old: { matrix: isoDaysAgo(75) },       // > 60d → flagged stale, but NOT a hard fail
+  }));
+  assert.equal(err, undefined, `a per-gateway-stale board must still build (badge, not failure): ${err}`);
+  const byKey = Object.fromEntries(data.gateways.map((g) => [g.key, g]));
+  assert.equal(byKey.old.stale, true, "a gateway older than 60d must be flagged stale");
+  assert.equal(byKey.fresh.stale, false, "a fresh gateway must not be flagged stale");
+});
+
+test("HIGH-3: the span cap is MATRIX-scoped — a matrix-only re-run past a weeks-old legacy stamp PASSES", () => {
+  // The core HIGH-3 fix: legacy suites (perf/stream/streamcpu/memory) are fallback-only and are NEVER
+  // refreshed by a matrix-only re-run, so they legitimately carry weeks-old stamps while matrix=today.
+  // Folding them into the span made an honest incremental matrix re-run trip the >12h cap and abort the
+  // deploy. The span cap now considers ONLY the matrix suite's own timestamps, so this must PASS.
+  const msg = genThrows(buildSyntheticRepo({
+    incr: { perf: isoDaysAgo(21), matrix: isoAgo(1) }, // matrix today, legacy 3 weeks old — honest re-run
+  }));
+  assert.equal(msg, null, `expected a matrix-only re-run past a weeks-old legacy stamp to PASS, but it threw: ${msg}`);
+});
+
+test("HIGH-3: a per-gateway FUTURE measured_at is warned and never posts a negative age badge", () => {
+  // NIT (future-date, per-gateway): the board-wide floor only checks the max stamp; a lone clock-skewed
+  // FUTURE stamp on one gateway would slip past and render a negative "measured Nd ago" badge. gen-data
+  // must skip the future stamp from the age computation (and the board floor throw catches a future
+  // matrix stamp outright). Here a legacy suite is future-dated: the board floor throws on it first
+  // (generated_at would predate the newest embedded measured_at), which is the honest hard-fail.
+  const msg = genThrows(buildSyntheticRepo({
+    fresh: { matrix: isoAgo(2) },
+    skewed: { matrix: isoAgo(1), perf: isoAgo(-48) }, // perf 2 days in the FUTURE (rig clock skew)
+  }));
+  assert.ok(msg, "expected a future-dated stamp to be caught");
+  assert.ok(/predates the newest embedded measured_at|future-dated/.test(msg),
+    `expected the future-date hard-fail, got: ${msg}`);
+});
+
+test("OOTB config artifact round-trips into data.json (results/config/<gw>.txt → g.ootb_config)", () => {
+  // Config transparency: a gateway whose run captured results/config/<key>.txt must carry that exact
+  // text into the bundle as g.ootb_config (app.js renders it in the Config drawer). Build a fresh,
+  // coherent synthetic repo (so the freshness guard passes), drop a config sidecar for ONE gateway,
+  // reference it via that gateway's perf.ootb_config pointer, run gen-data for real, and assert the
+  // artifact appears verbatim on that gateway and is ABSENT on the gateway with no sidecar (graceful
+  // degradation — the not-yet-wired gateways).
+  const t = isoAgo(1);
+  const root = buildSyntheticRepo({
+    withcfg: { perf: t, matrix: isoAgo(2) },
+    nocfg: { perf: isoAgo(0.5), matrix: isoAgo(1.5) },
+  });
+  const CFG = "PORT=8080\nOPENAI_BASE_URL=http://127.0.0.1:8000/v1\nOPENAI_API_KEY=dummy\nSTORAGE_TYPE=sqlite\n";
+  mkdirSync(join(root, "results", "config"), { recursive: true });
+  writeFileSync(join(root, "results", "config", "withcfg.txt"), CFG);
+  // Record the pointer in the perf result, exactly as the perf suite does.
+  const perfPath = join(root, "results", "perf", "withcfg.json");
+  const perf = JSON.parse(readFileSync(perfPath, "utf8"));
+  perf.ootb_config = "config/withcfg.txt";
+  writeFileSync(perfPath, JSON.stringify(perf));
+  const outDir = mkdtempSync(join(tmpdir(), "site-cfg-out-"));
+  try {
+    execFileSync(process.execPath, [join(HERE, "gen-data.mjs"), root, outDir], { stdio: "pipe" });
+    const d = JSON.parse(readFileSync(join(outDir, "data.json"), "utf8"));
+    const withCfg = d.gateways.find((g) => g.key === "withcfg");
+    const noCfg = d.gateways.find((g) => g.key === "nocfg");
+    assert.ok(withCfg, "expected the withcfg gateway in the bundle");
+    assert.equal(withCfg.ootb_config, CFG, "OOTB config artifact must round-trip verbatim into g.ootb_config");
+    assert.ok(!("ootb_config" in noCfg) || noCfg.ootb_config == null,
+      "a gateway with no config sidecar must have no ootb_config (graceful degradation)");
+  } finally {
+    rmSync(outDir, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("config-correction deep link is a per-gateway, template-referencing, fully-encoded GitHub URL", () => {
+  const url = app.configCorrectionUrl({ key: "tensorzero", display: "TensorZero" });
+  assert.ok(url.startsWith(app.BENCH_REPO + "/issues/new?"), `must target the benchmarking repo new-issue endpoint, got ${url}`);
+  const u = new URL(url);
+  assert.equal(u.searchParams.get("template"), "config-correction.yml", "must reference the issue-form template");
+  assert.equal(u.searchParams.get("title"), "Config correction: TensorZero", "title must be pre-set per gateway (decoded)");
+  assert.equal(u.searchParams.get("gateway"), "TensorZero", "gateway field must be injected per gateway");
+  // A display name with spaces/specials must be encoded, never break the URL.
+  const tricky = app.configCorrectionUrl({ key: "x", display: 'A & B "gw"' });
+  assert.doesNotThrow(() => new URL(tricky), "special chars in the display name must stay URL-safe");
+  assert.equal(new URL(tricky).searchParams.get("gateway"), 'A & B "gw"');
+  // The referenced template must actually exist in the repo.
+  assert.ok(
+    readFileSync(join(ROOT, ".github", "ISSUE_TEMPLATE", "config-correction.yml"), "utf8").includes("id: gateway"),
+    "the config-correction issue template the deep link references must exist and define the gateway field");
 });
 
 test("gen-data emits gateways with a class for every entry", () => {
@@ -460,6 +587,50 @@ test("guard catches a null best_cell field masking a non-null perf fallback (R5-
     `guard must flag the null-field/non-null-perf divergence; got: ${JSON.stringify(errors)}`);
 });
 
+test("guard: the published headline MUST be a point on its own charted sweep (one source of truth)", () => {
+  // The two-sources bug: the drawer headline (rps_max_proxy) and the sweep chart's peak came from
+  // DIFFERENT code paths, so the headline was never a point on its own curve. The guard now asserts
+  // the headline == max() of the charted sweep_* array (value AND concurrency).
+  const sweep = [
+    { conc: 32, rps: 45061, p99_us: 700000, fail: 0 },
+    { conc: 52, rps: 45995, p99_us: 720000, fail: 0 },
+    { conc: 64, rps: 45787, p99_us: 740000, fail: 0 },
+    { conc: 256, rps: 39747, p99_us: 900000, fail: 0 },
+  ];
+  const base = {
+    ingress: "openai", egress: "openai", dialect: "openai", source: "matrix",
+    added_latency_p99_us: 111,
+    rps_sustained_20ms: 35616, rps_sustained_20ms_concurrency: 832,
+    rps_max_proxy: 45995, rps_max_proxy_concurrency: 52,
+    sweep_max_proxy: sweep,
+    sweep_sustained_20ms: [{ conc: 832, rps: 35616, p99_us: 990000, fail: 0 }],
+  };
+  // consistent: headline 45995 @ c=52 is exactly the max point of sweep_max_proxy
+  const good = { key: "onesrc", display: "OneSrc", lang: "Rust", best_cell: base };
+  assert.deepEqual(checkConsistency({ gateways: [good] }, app).errors, [],
+    "a headline that IS the charted peak must pass");
+
+  // BROKEN VALUE (the live-data bug): headline 46497 but the curve peaks at 45995 -> FAIL
+  const badVal = { key: "badval", display: "BadVal", lang: "Rust",
+    best_cell: { ...base, rps_max_proxy: 46497 } };
+  const eVal = checkConsistency({ gateways: [badVal] }, app).errors;
+  assert.ok(eVal.some((e) => e.includes("badval.rps_max_proxy") && e.includes("46497") && e.includes("45995")),
+    `guard must flag a headline that is not on its own sweep curve; got: ${JSON.stringify(eVal)}`);
+
+  // BROKEN CONCURRENCY: right value, wrong operating concurrency vs the charted peak -> FAIL
+  const badConc = { key: "badconc", display: "BadConc", lang: "Rust",
+    best_cell: { ...base, rps_max_proxy_concurrency: 999 } };
+  const eConc = checkConsistency({ gateways: [badConc] }, app).errors;
+  assert.ok(eConc.some((e) => e.includes("badconc.rps_max_proxy") && e.includes("concurrency")),
+    `guard must flag a headline concurrency that does not match the charted peak; got: ${JSON.stringify(eConc)}`);
+
+  // legacy record with NO charted array: silently skipped (no false positive)
+  const legacy = { key: "legacy", display: "Legacy", lang: "Rust",
+    best_cell: { dialect: "openai", source: "matrix", rps_max_proxy: 12345, rps_sustained_20ms: 6789 } };
+  assert.deepEqual(checkConsistency({ gateways: [legacy] }, app).errors, [],
+    "a record with no charted sweep array must not trip the one-source guard");
+});
+
 test("divergent translation_cell vs xlate suite: drawer/compare read the matrix cell", () => {
   const g = {
     key: "xdiv", display: "XDiv", lang: "Go",
@@ -523,6 +694,175 @@ test("guard warns on a served matrix cell with no per-cell perf", () => {
   assert.ok(warnings[0].includes("openai->anthropic"), warnings[0]);
 });
 
+// ---- matrix is the single source: streaming + memory projection + download ----------------------
+// A representative diagonal cell's streaming record + a top-level matrix memory read, as matrix/run.sh
+// now emits them. gen-data must project g.streaming (best diagonal cell's stream) + g.memory_read.
+const STREAM_CELL = {
+  stream_served: true, added_ttft_p50_us: 40, added_ttft_p99_us: 90,
+  added_gap_p50_us: 5, added_gap_p99_us: 12, streams_sustained: 1300, streams_sustained_fps: 39000,
+  streams_sustained_mock_bound: false, cpu_fps: 48000, cpu_fps_concurrency: 768, cpu_fps_mock_bound: false,
+};
+function buildStreamMemRepo() {
+  const root = mkdtempSync(join(tmpdir(), "site-strm-"));
+  mkdirSync(join(root, "gateways", "sgw"), { recursive: true });
+  writeFileSync(join(root, "gateways", "sgw", "gateway.sh"),
+    `#!/usr/bin/env bash\nGW_DISPLAY="sgw"\nGW_LANG=Rust\nGW_CLASS="Gateway"\n`);
+  mkdirSync(join(root, "results", "matrix"), { recursive: true });
+  const iso = new Date(Date.now() - 3600000).toISOString();
+  const perf = { added_latency_p50_us: 10, added_latency_p99_us: 20, rps_sustained_20ms: 45000,
+    rps_sustained_20ms_concurrency: 512, rps_max_proxy: 50000, rps_max_proxy_concurrency: 256,
+    sweep_max_proxy: [{ conc: 256, rps: 50000, p99_us: 100, fail: 0 }],
+    sweep_sustained_20ms: [{ conc: 512, rps: 45000, p99_us: 200, fail: 0 }] };
+  const matrix = {
+    gateway: "sgw", build: "ok", matrix_version: 2, served: true, measured_at: iso,
+    memory: { served: true, idle_rss_mib: 120.5, peak_rss_mib: 890.2, peak_rss_hwm_mib: 910, post_load_rss_mib: 300 },
+    upstreams: { openai: { configurable: true, served: true, cells: {
+      openai: { served: true, perf, stream: { ...STREAM_CELL } } } } },
+    cells: { openai: { served: true, perf, stream: { ...STREAM_CELL } } },
+  };
+  writeFileSync(join(root, "results", "matrix", "sgw.json"), JSON.stringify(matrix));
+  return root;
+}
+function genInto(root) {
+  const outDir = mkdtempSync(join(tmpdir(), "site-strm-out-"));
+  try {
+    execFileSync(process.execPath, [join(HERE, "gen-data.mjs"), root, outDir], { stdio: "pipe" });
+    return JSON.parse(readFileSync(join(outDir, "data.json"), "utf8"));
+  } finally {
+    rmSync(outDir, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+test("gen-data projects streaming from the best diagonal matrix cell", () => {
+  const bundle = genInto(buildStreamMemRepo());
+  const g = bundle.gateways.find((x) => x.key === "sgw");
+  assert.ok(g.streaming, "expected a projected g.streaming");
+  assert.equal(g.streaming.source, "matrix");
+  assert.equal(g.streaming.dialect, "openai");
+  assert.equal(g.streaming.added_ttft_p99_us, 90);
+  assert.equal(g.streaming.streams_sustained, 1300);
+  assert.equal(g.streaming.cpu_fps, 48000);
+  // the table accessor reads the same projected value
+  assert.equal(app.streamCell(g, "streams_sustained", String).text, "1300");
+  assert.equal(app.streamCell(g, "cpu_fps", String).text, "48000");
+});
+
+test("MEDIUM-1: a NON-streaming diagonal cell does NOT project g.streaming (stream_served gate)", () => {
+  // A cell that did not stream still carries a stream record ({stream_served:false, …}). The old
+  // truthiness projection surfaced it as a served streamer; gen-data must now project ONLY when the
+  // diagonal cell's stream_served === true, so g.streaming is ABSENT for a non-streaming cell.
+  const root = buildStreamMemRepo();  // sgw streams (STREAM_CELL.stream_served === true)
+  // Add a second gateway whose diagonal cell served perf but DID NOT stream.
+  mkdirSync(join(root, "gateways", "nostream"), { recursive: true });
+  writeFileSync(join(root, "gateways", "nostream", "gateway.sh"),
+    `#!/usr/bin/env bash\nGW_DISPLAY="nostream"\nGW_LANG=Go\nGW_CLASS="Gateway"\n`);
+  const iso = new Date(Date.now() - 3600000).toISOString();
+  const perf = { added_latency_p50_us: 10, added_latency_p99_us: 20, rps_sustained_20ms: 40000,
+    rps_sustained_20ms_concurrency: 512, rps_max_proxy: 44000, rps_max_proxy_concurrency: 256,
+    sweep_max_proxy: [{ conc: 256, rps: 44000, p99_us: 100, fail: 0 }],
+    sweep_sustained_20ms: [{ conc: 512, rps: 40000, p99_us: 200, fail: 0 }] };
+  const nonStreamCell = { served: true, perf, stream: { stream_served: false, stream_error: "buffered, no SSE frames" } };
+  const matrix = { gateway: "nostream", build: "ok", matrix_version: 2, served: true, measured_at: iso,
+    upstreams: { openai: { configurable: true, served: true, cells: { openai: nonStreamCell } } },
+    cells: { openai: nonStreamCell } };
+  writeFileSync(join(root, "results", "matrix", "nostream.json"), JSON.stringify(matrix));
+  const bundle = genInto(root);
+  const streamer = bundle.gateways.find((x) => x.key === "sgw");
+  const quiet = bundle.gateways.find((x) => x.key === "nostream");
+  assert.ok(streamer.streaming, "a streaming cell still projects g.streaming");
+  assert.ok(!quiet.streaming, "a non-streaming cell must NOT project g.streaming (stream_served gate)");
+  // the table accessor renders n/a, not a fabricated streaming number
+  assert.equal(app.streamCell(quiet, "streams_sustained", String).na, true);
+});
+
+test("MEDIUM-6: cpu_fps is gated on cpu_fps_mock_bound === false across the site + guard", () => {
+  // Certified (explicit false): visible on every surface.
+  const certified = { key: "cert", display: "Cert", lang: "Rust",
+    streaming: { dialect: "openai", source: "matrix", stream_served: true,
+      added_ttft_p99_us: 90, added_gap_p99_us: 12, streams_sustained: 1300,
+      cpu_fps: 48000, cpu_fps_mock_bound: false } };
+  assert.equal(app.cpuFpsCertified(certified.streaming), true);
+  assert.equal(app.streamCell(certified, "cpu_fps", String).text, "48000");
+  assert.equal(app.canonicalStreaming(certified).cpu_fps, 48000);
+  // Mock-bound (true): suppressed → n/a on the site, matching the chart's suppressed bar.
+  const bound = { ...certified, key: "bound",
+    streaming: { ...certified.streaming, cpu_fps_mock_bound: true } };
+  assert.equal(app.cpuFpsCertified(bound.streaming), false);
+  assert.equal(app.streamCell(bound, "cpu_fps", String).na, true, "mock-bound cpu_fps reads n/a");
+  assert.equal(app.canonicalStreaming(bound).cpu_fps, null);
+  // NULL flag (unverifiable — ceiling probe read 0): also suppressed (the MEDIUM-5 leak).
+  const nullFlag = { ...certified, key: "nullflag",
+    streaming: { ...certified.streaming, cpu_fps_mock_bound: null } };
+  assert.equal(app.cpuFpsCertified(nullFlag.streaming), false, "null mock-bound is NOT certified");
+  assert.equal(app.streamCell(nullFlag, "cpu_fps", String).na, true, "null mock-bound cpu_fps reads n/a");
+  // and the other streaming metrics stay visible regardless of cpu_fps gating
+  assert.equal(app.streamCell(bound, "streams_sustained", String).text, "1300");
+});
+
+test("MEDIUM-6 guard: site cpu-fps visibility must equal the chart's streamcpu_valid rule", () => {
+  // The check-consistency assertion tying the two together. A matrix streaming projection whose
+  // diagonal cell is mock-bound: the site hides cpu_fps AND the chart draws no bar → consistent.
+  const stream = { stream_served: true, added_ttft_p99_us: 90, added_gap_p99_us: 12,
+    streams_sustained: 1300, cpu_fps: 48000, cpu_fps_mock_bound: false };
+  const cell = { served: true, perf: { added_latency_p99_us: 20 }, stream };
+  const matrix = { upstreams: { openai: { cells: { openai: cell } } } };
+  const consistent = { key: "cok", display: "Cok", lang: "Rust",
+    streaming: { dialect: "openai", source: "matrix", ...stream }, matrix };
+  assert.deepEqual(checkConsistency({ gateways: [consistent] }, app).errors, [],
+    "certified cpu_fps: site shows it, chart draws it — consistent");
+  // Now make the cell mock-bound but leave a stale certified headline: the guard must catch that the
+  // site would (via the raw headline) diverge from the chart. Here headline says certified, cell says
+  // mock-bound → gated values differ (headline gated stays 48000, cell gated → null) → FAIL.
+  const boundCell = { ...cell, stream: { ...stream, cpu_fps_mock_bound: true } };
+  const drift = { key: "cdrift", display: "CDrift", lang: "Rust",
+    streaming: { dialect: "openai", source: "matrix", ...stream },  // headline still certified
+    matrix: { upstreams: { openai: { cells: { openai: boundCell } } } } };
+  const eDrift = checkConsistency({ gateways: [drift] }, app).errors;
+  assert.ok(eDrift.some((e) => e.includes("cdrift.streaming.cpu_fps")),
+    `guard must catch a cpu_fps that is certified on the headline but mock-bound on its diagonal cell; got: ${JSON.stringify(eDrift)}`);
+});
+
+test("gen-data projects memory from the matrix's one process-level read", () => {
+  const bundle = genInto(buildStreamMemRepo());
+  const g = bundle.gateways.find((x) => x.key === "sgw");
+  assert.ok(g.memory_read, "expected a projected g.memory_read");
+  assert.equal(g.memory_read.source, "matrix");
+  assert.equal(g.memory_read.idle_rss_mib, 120.5);
+  assert.equal(g.memory_read.peak_rss_mib, 890.2);
+  assert.equal(app.memCell(g, "peak_rss_mib", String).text, "890.2");
+});
+
+test("streaming guard: headline streaming MUST be the diagonal cell's streaming it's projected from", () => {
+  const cell = { served: true, perf: { added_latency_p99_us: 20 }, stream: { ...STREAM_CELL } };
+  const matrix = { upstreams: { openai: { cells: { openai: cell } } } };
+  // consistent: g.streaming IS the diagonal cell's stream
+  const good = { key: "sg", display: "SG", lang: "Rust",
+    streaming: { dialect: "openai", source: "matrix", ...STREAM_CELL }, matrix };
+  assert.deepEqual(checkConsistency({ gateways: [good] }, app).errors, [],
+    "a streaming headline equal to its diagonal cell must pass");
+  // BROKEN: the projected headline diverges from the cell (streams_sustained tampered)
+  const bad = { key: "bs", display: "BS", lang: "Rust",
+    streaming: { dialect: "openai", source: "matrix", ...STREAM_CELL, streams_sustained: 9999 }, matrix };
+  const eBad = checkConsistency({ gateways: [bad] }, app).errors;
+  assert.ok(eBad.some((e) => e.includes("bs.streaming.streams_sustained") && e.includes("9999")),
+    `guard must flag a streaming headline that is not its diagonal cell's; got: ${JSON.stringify(eBad)}`);
+});
+
+test("download: gatewayResultsJson is the gateway's complete record as parseable JSON", () => {
+  const g = { key: "dgw", display: "DGW", lang: "Rust",
+    matrix: { upstreams: { openai: { cells: { openai: { served: true } } } }, memory: { served: true, idle_rss_mib: 100 } },
+    ootb_config: "port: 8080\n", best_cell: { dialect: "openai", rps_max_proxy: 50000 } };
+  const json = app.gatewayResultsJson(g);
+  const round = JSON.parse(json);   // must be valid JSON
+  assert.equal(round.key, "dgw");
+  assert.ok(round.matrix && round.matrix.upstreams, "the download carries the full matrix (6x6 cells)");
+  assert.ok(round.matrix.memory, "the download carries the memory read");
+  assert.equal(round.ootb_config, "port: 8080\n", "the download carries the OOTB config");
+  // the download filename convention is <gateway>-results.json (asserted at the call site by using g.key)
+  assert.equal(`${g.key}-results.json`, "dgw-results.json");
+});
+
 test("default translation pair has no silent all-n/a served row", () => {
   // The Translation tab's default pair (openai -> anthropic): any gateway that serves it should
   // have per-cell perf, or its row is a table of n/a cells. A gateway whose per-cell sweep never
@@ -562,6 +902,23 @@ test("footer timestamps format cleanly with a coarse age", () => {
   assert.equal(app.fmtAge("not-a-date"), "");
 });
 
+test("measuredBadge shows a gateway's own measured_at + a stale pill only when flagged", () => {
+  const iso = "2026-07-22T17:52:46.101Z";
+  const t = Date.parse(iso);
+  const H = 3600000;
+  // Fresh, not flagged: relative age, full stamp in the title, NO stale pill.
+  const fresh = app.measuredBadge({ measured_at: iso, stale: false }, t + 3 * H);
+  assert.ok(/measured 3 hours ago/.test(fresh), `expected the relative age, got: ${fresh}`);
+  assert.ok(/Jul 22, 2026 17:52 UTC \(3 hours ago\)/.test(fresh), "full stamp travels in the title");
+  assert.ok(!/stale-pill/.test(fresh), "a fresh gateway shows no stale pill");
+  // Flagged stale: the greyed pill appears.
+  const stale = app.measuredBadge({ measured_at: iso, stale: true }, t + 70 * 24 * H);
+  assert.ok(/class="stale-pill"/.test(stale), `a stale gateway shows the stale pill, got: ${stale}`);
+  // No measurement at all → renders nothing (graceful).
+  assert.equal(app.measuredBadge({ measured_at: null, stale: false }), "");
+  assert.equal(app.measuredBadge(null), "");
+});
+
 // ---- compact not-served labels (compare + results cells) --------------------
 test("naText keeps long diagnostic notes out of cell values", () => {
   assert.deepEqual(app.naText(null, "xlate_served", "xlate_error"), { text: "not measured", note: "" });
@@ -581,11 +938,12 @@ test("naText keeps long diagnostic notes out of cell values", () => {
   const pass = data.gateways.find((g) => g.xlate && g.xlate.xlate_passthrough === true);
   if (pass) assert.equal(app.naText(pass.xlate, "xlate_served", "xlate_error").text, "n/a (passthrough)");
   assert.equal(app.naText({ xlate_served: false, xlate_passthrough: true }, "xlate_served", "xlate_error").text, "n/a (passthrough)");
-  const unsupported = data.gateways.find((g) =>
-    g.governed && g.governed.governed_served === false && /manifest defines no/.test(g.governed.governed_note || ""));
-  assert.ok(unsupported, "expected a gateway without native governance");
-  // "manifest defines no <hook>" = the harness never probed it: "not tested", never a capability verdict
-  assert.equal(app.naText(unsupported.governed, "governed_served", "governed_note").text, "not tested");
+  // "manifest defines no <hook>" = the harness never probed that lane: "not tested", never a capability
+  // verdict. (Governance is retired from the board, so this is asserted on a synthetic record — the
+  // naText rule itself still applies to any suite whose note carries that string.)
+  assert.equal(
+    app.naText({ served: false, serve_error: "manifest defines no gw_governed_launch hook" }, "served", "serve_error").text,
+    "not tested");
 });
 
 test("streaming latency cells annotate >=1ms values with their ms equivalent", () => {
@@ -653,6 +1011,24 @@ test("sweep chart draws real committed sweep data", () => {
   // log-x: pixel spacing between 8 and 32 equals spacing between 32 and 128
   const d1 = geo.X(32) - geo.X(8), d2 = geo.X(128) - geo.X(32);
   assert.ok(Math.abs(d1 - d2) < 1e-6, "x axis is logarithmic");
+});
+
+test("sweep chart marks the published peak and honors a shared x-domain", () => {
+  const canvas = stubCanvas();
+  const series = [{
+    label: "max proxy", color: "#6cb6ff",
+    points: [{ x: 32, y: 45061 }, { x: 52, y: 45995 }, { x: 256, y: 39747 }],
+    mark: { x: 52, y: 45995, label: "45,995 @ c=52" },
+  }];
+  // shared x-domain wider than this series' own probed range: X() must span the shared domain, so
+  // the two stacked charts (RPS + p99) align on ONE concurrency axis.
+  const geo = app.drawSweep(canvas, series, { yLabel: "RPS", xDomain: [8, 2048] });
+  assert.ok(geo, "geometry back");
+  // the shared domain sets the axis extremes (log scale): X(8) is the left edge, X(2048) the right
+  assert.ok(geo.X(2048) - geo.X(8) > geo.X(256) - geo.X(32), "axis spans the shared domain, not just the points");
+  // a peak marker was drawn (extra arc strokes + a label beyond the plain point dots + ticks)
+  assert.ok(canvas.calls.arc >= series[0].points.length + 2, "peak marker ring + dot drawn on top of the point dots");
+  assert.ok(canvas.calls.fillText > 4, "peak label + axis text drawn");
 });
 
 test("sweep chart degrades cleanly with no data", () => {

@@ -236,6 +236,18 @@ td.name a { color: var(--fg); font-weight: 600; }
   border: 1px solid var(--border); color: var(--fg-dim); font-size: .74rem; font-weight: 500;
   white-space: nowrap;
 }
+/* Per-gateway freshness signal (matrix-sole-source: each gateway is measured + published
+   independently, so the board carries mixed per-gateway ages — surfaced, not hidden). */
+.row-measured { margin-top: .15rem; }
+.measured-at { font-size: .7rem; color: var(--fg-mute); }
+.measured-at.stale { color: var(--fg-mute); }
+.drawer-measured { margin-top: .35rem; font-size: .74rem; color: var(--fg-mute); }
+.stale-pill {
+  display: inline-block; margin-left: .3rem; padding: .02rem .4rem; border-radius: 999px;
+  border: 1px solid var(--border); background: var(--bg); color: var(--fg-mute);
+  font-size: .66rem; font-weight: 600; text-transform: uppercase; letter-spacing: .04em;
+  vertical-align: middle;
+}
 td.sel { width: 1.6rem; }
 td.sel input { accent-color: var(--accent); cursor: pointer; }
 thead th.nosort { cursor: default; }
@@ -297,6 +309,30 @@ tbody tr { cursor: pointer; }
   border-radius: 6px; white-space: pre-wrap; word-break: break-all; font-size: .72rem;
   color: var(--fg-dim); max-height: 8rem; overflow: auto;
 }
+
+/* OOTB config artifact: monospace, scrollable, copy-friendly */
+.config-block { position: relative; }
+.config-block .config-pre {
+  margin: 0; padding: .55rem .6rem; background: var(--bg); border: 1px solid var(--border);
+  border-radius: 6px; white-space: pre; overflow: auto; max-height: 22rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .74rem;
+  line-height: 1.5; color: var(--fg-dim); tab-size: 2;
+}
+.config-block .config-copy {
+  position: absolute; top: .4rem; right: .4rem; z-index: 1; font: inherit; font-size: .72rem;
+  font-weight: 600; cursor: pointer; color: var(--fg-dim); background: var(--bg-raise);
+  border: 1px solid var(--border); border-radius: 5px; padding: .12rem .55rem;
+}
+.config-block .config-copy:hover { color: var(--fg); border-color: var(--fg-mute); }
+.config-correct { font-size: .74rem; margin: .45rem 0 0; }
+/* Download results button: the config-copy look (font/border/weight) but in normal flow (no <pre> to
+   anchor an absolute button against), so it sits as a plain inline-block control in the Results lane. */
+.results-download {
+  display: inline-block; font: inherit; font-size: .72rem; font-weight: 600; cursor: pointer;
+  color: var(--fg-dim); background: var(--bg-raise); border: 1px solid var(--border);
+  border-radius: 5px; padding: .22rem .6rem;
+}
+.results-download:hover { color: var(--fg); border-color: var(--fg-mute); }
 
 /* sweep charts */
 .sweeps { display: flex; flex-direction: column; gap: .9rem; }

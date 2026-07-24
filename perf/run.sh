@@ -82,6 +82,15 @@ cleanup(){ gw_stop 2>/dev/null; [ -n "$MOCK" ] && pkill -f "$MOCK" 2>/dev/null; 
 trap cleanup EXIT
 
 log "[$GATEWAY] build"; gw_build || { echo "build failed"; exit 1; }
+
+# ── OOTB config transparency: capture the as-shipped config this gateway launches with ──────────────
+# Written once per run to results/config/<gateway>.txt (committed like every other result) via the
+# shared harness hook; the pointer below goes into the result JSON so gen-data + the board can publish
+# the exact OOTB config. Runs AFTER gw_build so file-driven manifests (tensorzero) have rendered their
+# config file. A gateway with no gw_config() hook degrades to an empty pointer (published as
+# "not published"); see lib/harness.sh:harness_write_config. Cheap + idempotent.
+OOTB_CONFIG="$(harness_write_config "$GATEWAY" "$ROOT/results" 2>/dev/null || true)"
+[ -n "$OOTB_CONFIG" ] && log "[$GATEWAY] OOTB config captured -> results/$OOTB_CONFIG"
 # Readiness probe used by the retry loop. Rebuilds the header arrays FIRST (a manifest can mint a key
 # in gw_launch, e.g. busbar's vkey), then polls for a 200 with a per-request hard timeout (-m3). It
 # does its OWN bounded wait; harness_launch_ready re-runs gw_launch + this probe up to N times.
@@ -165,6 +174,7 @@ cat > "$RESULTS/$GATEWAY.json" <<JSON
 {
   "gateway": "$GATEWAY",
   "build": "$BUILD",
+  "ootb_config": $([ -n "$OOTB_CONFIG" ] && printf '"%s"' "$OOTB_CONFIG" || echo null),
   "served": $([ "$ok" = 1 ] && echo true || echo false),
   "last_http_status": "$c",
   "serve_error": "$(json_escape "$SERVE_ERR")",

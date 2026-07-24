@@ -102,9 +102,45 @@ function stampWithAge(iso, now = Date.now()) {
   return age ? `${fmtStamp(iso)} (${age})` : fmtStamp(iso);
 }
 
+/* Per-gateway freshness badge. Under matrix-sole-source each gateway is measured + published
+   INDEPENDENTLY, so the board legitimately carries mixed per-gateway ages (busbar today, kong 3
+   weeks ago) — that is honest, not a bug. We surface each row's OWN measured_at ("measured 3d ago",
+   full stamp in the tooltip) and, when gen-data set g.stale (its data aged past MAX_GATEWAY_AGE_DAYS),
+   a greyed "stale" pill. Returns "" when the gateway has no measurement at all (renders nothing).
+   Pure; covered by site/test.mjs. */
+function measuredBadge(g, now = Date.now()) {
+  if (!g || !g.measured_at) return "";
+  const age = fmtAge(g.measured_at, now);
+  const rel = age ? `measured ${age}` : "measured";
+  const stalePill = g.stale
+    ? ` <span class="stale-pill" title="This gateway's data has aged past the freshness threshold; re-run it to refresh.">stale</span>`
+    : "";
+  return `<span class="measured-at${g.stale ? " stale" : ""}" title="${esc(stampWithAge(g.measured_at, now))}">${esc(rel)}</span>${stalePill}`;
+}
+
 function esc(s) {
   return String(s).replace(/[&<>"']/g, (c) =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+/* The benchmarking repo where config corrections are filed. */
+const BENCH_REPO = "https://github.com/GetBusbar/benchmarking";
+
+/* configCorrectionUrl: a per-gateway deep link to a PRE-FILLED GitHub issue in the benchmarking repo,
+   so anyone (not just maintainers) can propose a fix to a gateway's published OOTB config. Uses the
+   config-correction issue-form template (?template=config-correction.yml) and pre-sets the title +
+   the gateway field, encoding every param. GitHub issue Forms map ?<field-id>=<value> onto the form's
+   fields, so `gateway=<display>` lands in the template's "gateway" input. Everything is
+   encodeURIComponent'd, so a display name with spaces/specials can't break the URL. */
+function configCorrectionUrl(g) {
+  const label = g.display || g.key;
+  const p = new URLSearchParams({
+    template: "config-correction.yml",
+    title: `Config correction: ${label}`,
+    labels: "config-correction",
+    gateway: label,
+  });
+  return `${BENCH_REPO}/issues/new?${p.toString()}`;
 }
 
 /* Absolute rig paths (the bench box's own filesystem: /home/ubuntu/.npm/..., file:///home/...)
@@ -180,6 +216,38 @@ function canonicalXlate(g) {
   return g.xlate || null;
 }
 
+/* canonicalStreaming: THE single streaming record every surface reads. gen-data projects it from the
+   BEST DIAGONAL matrix cell's streaming (g.streaming, source:"matrix") — the SAME cell the passthrough
+   headline is projected from, so streaming and RPS/latency are read off one cell (one source of truth;
+   check-consistency asserts the headline streaming == this cell's). Returns a record with
+   stream_served + normalized keys, or the legacy stream-fallback g.streaming, or null. */
+// MEDIUM-6: the cpu-fps relay is a valid gateway-vs-ceiling comparison ONLY when the harness certified
+// it — cpu_fps present + positive AND explicitly NOT mock-bound (cpu_fps_mock_bound === false). A null
+// mock-bound flag means the ceiling probe read 0 and the number could NOT be certified (unverifiable),
+// and a true flag means an unpinned box floored it. In BOTH cases charts.py suppresses the bar
+// (streamcpu_valid=false); the drawer/compare "CPU-bound fps (peak)" metric MUST match that visibility
+// or the site shows a number the chart does not (check-consistency asserts this can't diverge). We drop
+// cpu_fps from the canonical record unless it is explicitly certified, so every site surface reads n/a
+// exactly when the chart draws no bar. The raw value stays on g.streaming for provenance/download.
+function cpuFpsCertified(s) {
+  return s != null && s.cpu_fps != null && Number(s.cpu_fps) > 0 && s.cpu_fps_mock_bound === false;
+}
+function canonicalStreaming(g) {
+  const s = g.streaming;
+  if (!s) return null;
+  const rec = { stream_served: true, ...s };
+  if (!cpuFpsCertified(s)) rec.cpu_fps = null;   // uncertified/mock-bound → n/a on every site surface
+  return rec;
+}
+/* canonicalMemory: THE single memory record. gen-data projects it from the matrix's ONE process-level
+   RSS read (g.memory_read, source:"matrix"), or the legacy memory suite (source:"memory-fallback").
+   Returns a record with served + the idle/peak fields, or null. */
+function canonicalMemory(g) {
+  const m = g.memory_read;
+  if (m) return { served: true, ...m };
+  return null;
+}
+
 /* passCell: the Passthrough tab reads ONLY the canonical record (g.best_cell). When best_cell
    exists it is THE record: a field it lacks reads n/a, never silently patched from a different
    source (that is exactly the numeric divergence this rule exists to kill). Only a gateway with
@@ -190,6 +258,40 @@ function passCell(g, key, fmt) {
       ? { v: g.best_cell[key], text: fmt(g.best_cell[key]), na: false }
       : { v: null, text: "n/a", na: true };
   return lane(g, "perf", "served", "serve_error", (j) =>
+    j[key] != null ? { v: j[key], text: fmt(j[key]), na: false } : { v: null, text: "n/a", na: true });
+}
+
+/* streamCell: the Streaming tab reads ONLY the canonical streaming record (g.streaming, projected by
+   gen-data from the best diagonal matrix cell's stream, or a legacy stream-fallback). A field it lacks
+   reads n/a; a gateway that did not stream (no g.streaming) shows the legacy stream suite's not-served
+   evidence when present, else a plain n/a. Same one-source discipline as passCell. */
+function streamCell(g, key, fmt) {
+  const s = canonicalStreaming(g);
+  if (s)
+    return s[key] != null
+      ? { v: s[key], text: fmt(s[key]), na: false }
+      : { v: null, text: "n/a", na: true };
+  // Legacy fallback (a bundle whose gen-data did not project g.streaming): the raw stream suite uses
+  // stream_*-prefixed keys, so map the canonical key onto the suite key.
+  const legacyKey = {
+    added_ttft_p99_us: "stream_added_ttft_p99_us",
+    added_gap_p99_us: "stream_added_gap_p99_us",
+    streams_sustained: "stream_sustained_streams",
+    cpu_fps: null,   // cpu-fps lived in the separate streamcpu suite; not on the stream lane
+  }[key] ?? key;
+  if (legacyKey == null) return { v: null, text: "n/a", na: true };
+  return lane(g, "stream", "stream_served", "stream_error", (j) =>
+    j[legacyKey] != null ? { v: j[legacyKey], text: fmt(j[legacyKey]), na: false } : { v: null, text: "n/a", na: true });
+}
+/* memCell: the memory columns read ONLY the canonical memory record (g.memory_read, the matrix's one
+   process-level RSS read, or a legacy memory-fallback). Same discipline as passCell/streamCell. */
+function memCell(g, key, fmt) {
+  const m = canonicalMemory(g);
+  if (m)
+    return m[key] != null
+      ? { v: m[key], text: fmt(m[key]), na: false }
+      : { v: null, text: "n/a", na: true };
+  return lane(g, "memory", "served", "serve_error", (j) =>
     j[key] != null ? { v: j[key], text: fmt(j[key]), na: false } : { v: null, text: "n/a", na: true });
 }
 
@@ -264,7 +366,10 @@ const COL_NAME = {
     const a = g.repo
       ? `<a href="${g.repo}" target="_blank" rel="noopener">${esc(g.display)}</a>`
       : esc(g.display);
-    return `<td class="name">${a}</td>`;
+    // Per-gateway freshness under the name: each row shows its OWN measured_at + a stale pill when
+    // flagged, so a living board's independent update cadences are visible and honest (not hidden).
+    const badge = measuredBadge(g);
+    return `<td class="name">${a}${badge ? `<div class="row-measured">${badge}</div>` : ""}</td>`;
   },
 };
 const COLUMN_SETS = {
@@ -293,10 +398,10 @@ const COLUMN_SETS = {
       get: (g) => sustainedCell(g) },
     { id: "rpsmax", label: "Max proxy RPS", desc: true, title: "Throughput ceiling against an instant mock (p99 < 1 s, <0.1% errors) on the Tested-on dialect (see the pill)",
       get: (g) => withZeroNote(passCell(g, "rps_max_proxy", fmtInt)) },
-    { id: "memidle", label: "Mem idle (MiB)", desc: false, title: "Process RSS after launch, before load",
-      get: (g) => lane(g, "memory", "served", "serve_error", (j) => ({ v: j.idle_rss_mib, text: fmt1(j.idle_rss_mib), na: false })) },
-    { id: "mempeak", label: "Mem peak (MiB)", desc: false, title: "Peak process RSS under large-payload load",
-      get: (g) => lane(g, "memory", "served", "serve_error", (j) => ({ v: j.peak_rss_mib, text: fmt1(j.peak_rss_mib), na: false })) },
+    { id: "memidle", label: "Mem idle (MiB)", desc: false, title: "Process RSS after launch, before load (the matrix run's one memory read)",
+      get: (g) => memCell(g, "idle_rss_mib", fmt1) },
+    { id: "mempeak", label: "Mem peak (MiB)", desc: false, title: "Peak process RSS under large-payload load (the matrix run's one memory read)",
+      get: (g) => memCell(g, "peak_rss_mib", fmt1) },
   ],
   // Translation: the pinned ingress->egress pair (state.xlateIn/xlateOut) chosen by the two dropdowns.
   // Every row is the identical path, so no per-row pill. When in == out the pair IS a passthrough
@@ -316,16 +421,18 @@ const COLUMN_SETS = {
   // Streaming: SSE passthrough, its own stall-gated ceiling.
   streaming: [
     COL_SEL, COL_NAME,
-    { id: "sttft", label: "Added wait for 1st token p99 (µs)", desc: false, title: "Time to first token (TTFT): the extra wait before the stream's first token, gateway minus direct-to-mock, at concurrency 1. Lower is better.",
-      get: (g) => lane(g, "stream", "stream_served", "stream_error", (j) => ({ v: j.stream_added_ttft_p99_us, text: fmtUsMs(j.stream_added_ttft_p99_us), na: false })) },
-    { id: "sgap", label: "Added gap between tokens p99 (µs)", desc: false, title: "The extra pause the gateway adds between streamed tokens, gateway minus direct-to-mock. Lower is better.",
-      get: (g) => lane(g, "stream", "stream_served", "stream_error", (j) => ({ v: j.stream_added_gap_p99_us, text: fmtUsMs(j.stream_added_gap_p99_us), na: false })) },
-    { id: "streams", label: "Streams sustained", desc: true, title: "Max concurrent SSE streams with >=99.9% frame delivery, no stalls, <0.1% errors",
-      get: (g) => lane(g, "stream", "stream_served", "stream_error", (j) => ({ v: j.stream_sustained_streams, text: fmtInt(j.stream_sustained_streams), na: false })) },
+    { id: "sttft", label: "Added wait for 1st token p99 (µs)", desc: false, title: "Time to first token (TTFT): the extra wait before the stream's first token, gateway minus direct-to-mock, at concurrency 1, on the gateway's best same-dialect passthrough cell. Lower is better.",
+      get: (g) => streamCell(g, "added_ttft_p99_us", fmtUsMs) },
+    { id: "sgap", label: "Added gap between tokens p99 (µs)", desc: false, title: "The extra pause the gateway adds between streamed tokens, gateway minus direct-to-mock, on the best same-dialect passthrough cell. Lower is better.",
+      get: (g) => streamCell(g, "added_gap_p99_us", fmtUsMs) },
+    { id: "streams", label: "Streams sustained", desc: true, title: "Max concurrent SSE streams sustained (bisected true concurrency) with >=99.9% frame delivery, no stalls, <0.1% errors, on the best same-dialect passthrough cell",
+      get: (g) => streamCell(g, "streams_sustained", fmtInt) },
   ],
-  // Governance is intentionally NO tab. onthebench measures every gateway at its default, out-of-the-box
-  // config; the governed suite runs a non-default governance-enabled launch that only busbar's manifest
-  // wires, so a comparative tab would spotlight busbar and read "not tested" for the rest.
+  // Governance is RETIRED under matrix-sole-source: it is no tab AND no column. onthebench measures
+  // every gateway at its default, out-of-the-box config; the governed suite was a non-default,
+  // busbar-only launch (only busbar's manifest wired it), so it is not a neutral-board metric and the
+  // board neither ranks it nor shows a governed column/drawer section. governed/run.sh stays on disk
+  // (unused); gen-data.mjs no longer scans it and emits no supports_governed flag.
 };
 /* The set of columns for a view; perf tabs use COLUMN_SETS, everything else has no table. */
 function columnsFor(view) { return COLUMN_SETS[view] || COLUMN_SETS.passthrough; }
@@ -350,12 +457,18 @@ const LANES = [
     metrics: [
       { k: "added_latency_p50_us", label: "Added latency p50 (µs)", best: "min", fmt: fmtAdded },
       { k: "added_latency_p99_us", label: "Added latency p99 (µs)", best: "min", fmt: fmtAdded },
-      { k: "rps_max_proxy", label: "Max proxy RPS", best: "max", fmt: fmtInt },
-      { k: "rps_sustained_20ms", label: "Sustained RPS @20ms", best: "max", fmt: fmtInt },
+      // The operating concurrency (concKey) is carried by the SAME record; the drawer shows it as
+      // "(@ c=Y)" so the headline surfaces the load level its marked sweep peak sat at.
+      { k: "rps_max_proxy", label: "Max proxy RPS", best: "max", fmt: fmtInt, concKey: "rps_max_proxy_concurrency" },
+      { k: "rps_sustained_20ms", label: "Sustained RPS @20ms", best: "max", fmt: fmtInt, concKey: "rps_sustained_20ms_concurrency" },
     ],
   },
   {
     key: "memory", label: "Memory", flag: "served", err: "serve_error",
+    get: canonicalMemory,
+    pathNote: (j) => j.source === "matrix"
+      ? "the matrix run's one process-level RSS read (default config, sustained large-payload load)"
+      : "the memory suite's RSS read (legacy result)",
     metrics: [
       { k: "idle_rss_mib", label: "Idle RSS (MiB)", best: "min", fmt: fmt1 },
       { k: "peak_rss_mib", label: "Peak RSS (MiB)", best: "min", fmt: fmt1 },
@@ -363,10 +476,15 @@ const LANES = [
   },
   {
     key: "stream", label: "Streaming", flag: "stream_served", err: "stream_error",
+    get: canonicalStreaming,
+    pathNote: (j) => j.source === "matrix"
+      ? `measured on the ${laneDialect(j.dialect)} passthrough (the same best diagonal cell the headline is projected from)`
+      : "measured on the stream suite's default path (legacy result)",
     metrics: [
-      { k: "stream_added_ttft_p99_us", label: "Added TTFT p99 (µs)", best: "min", fmt: fmtUsMs },
-      { k: "stream_added_gap_p99_us", label: "Added per-token p99 (µs)", best: "min", fmt: fmtUsMs },
-      { k: "stream_sustained_streams", label: "Streams sustained", best: "max", fmt: fmtInt },
+      { k: "added_ttft_p99_us", label: "Added TTFT p99 (µs)", best: "min", fmt: fmtUsMs },
+      { k: "added_gap_p99_us", label: "Added per-token p99 (µs)", best: "min", fmt: fmtUsMs },
+      { k: "streams_sustained", label: "Streams sustained", best: "max", fmt: fmtInt },
+      { k: "cpu_fps", label: "CPU-bound fps (peak)", best: "max", fmt: fmtInt },
     ],
   },
   {
@@ -407,9 +525,8 @@ function newState() {
 }
 const state = newState();
 
-/* Capability filter toggles. Governance is deliberately NOT here: it is only
-   measured for one gateway, so a field-wide filter on it would mislead; the
-   governed data still shows per-gateway in the table column and drawer. */
+/* Capability filter toggles. Governance is RETIRED (matrix-sole-source): it is neither a filter,
+   a column, nor a drawer section — the governed suite was busbar-only and is not a board metric. */
 const CAPS = [["needStream", "stream"], ["needXlate", "xlate"]];
 
 /* Serialize the shareable parts of state into a clean path URL:
@@ -527,7 +644,7 @@ function applyFilters(gateways, st) {
   const q = st.q.trim().toLowerCase();
   return gateways.filter((g) => {
     if (q && !g.display.toLowerCase().includes(q) && !g.key.toLowerCase().includes(q)) return false;
-    if (st.needStream && !(g.stream && g.stream.stream_served)) return false;
+    if (st.needStream && !canonicalStreaming(g)) return false;
     if (st.needXlate && !hasTranslation(g)) return false;
     // View-implicit filter: Translation lists only gateways that serve the pinned pair (every row
     // must be the identical path or the ranking lies). Passthrough is DELIBERATELY unfiltered:
@@ -576,7 +693,9 @@ function drawSweep(canvas, series, opts = {}) {
     ctx.fillText("no sweep data", padL, H / 2);
     return null;
   }
-  const lx = pts.map((p) => Math.log10(p.x));
+  // x-axis domain: honor a shared concurrency domain (opts.xDomain) so stacked charts align on the
+  // SAME x-axis; else fall back to this chart's own probed concurrencies.
+  const lx = (opts.xDomain ? opts.xDomain : pts.map((p) => p.x)).map((v) => Math.log10(v));
   let x0 = Math.min(...lx), x1 = Math.max(...lx);
   if (x0 === x1) { x0 -= 0.3; x1 += 0.3; }
   let yMax = Math.max(...pts.map((p) => p.y)) * 1.06;
@@ -626,6 +745,21 @@ function drawSweep(canvas, series, opts = {}) {
     sp.forEach((p, i) => { if (i === 0) ctx.moveTo(X(p.x), Y(p.y)); else ctx.lineTo(X(p.x), Y(p.y)); });
     ctx.stroke();
     for (const p of sp) { ctx.beginPath(); ctx.arc(X(p.x), Y(p.y), 2.4, 0, Math.PI * 2); ctx.fill(); }
+  }
+  /* published-peak markers: a distinct labeled dot at each series' peak (its headline value at its
+     operating concurrency). It sits ON the curve because the headline is max() over these points. */
+  ctx.font = "11px Inter, sans-serif"; ctx.textAlign = "left"; ctx.textBaseline = "bottom";
+  for (const s of drawable) {
+    if (!s.mark) continue;
+    const px = X(s.mark.x), py = Y(s.mark.y);
+    ctx.strokeStyle = s.color; ctx.fillStyle = s.color; ctx.lineWidth = 1.6;
+    ctx.beginPath(); ctx.arc(px, py, 4.6, 0, Math.PI * 2); ctx.stroke();
+    ctx.beginPath(); ctx.arc(px, py, 2.0, 0, Math.PI * 2); ctx.fill();
+    // keep the label inside the plot: flip left of the dot near the right edge
+    const label = s.mark.label;
+    const wide = (ctx.measureText ? ctx.measureText(label).width : label.length * 6) + 10;
+    const lx0 = px + 7 + wide > W - padR ? px - 7 - wide : px + 7;
+    ctx.fillText(label, lx0, py - 6);
   }
   /* legend, top-right */
   if (opts.legend !== false && drawable.length > 1) {
@@ -680,10 +814,20 @@ function renderSweepCharts(container, sweepSeries, theme) {
     `<figure class="sweep"><figcaption>RPS vs concurrency</figcaption><canvas width="520" height="230"></canvas></figure>` +
     `<figure class="sweep"><figcaption>p99 latency vs concurrency (µs)</figcaption><canvas width="520" height="230"></canvas></figure>`;
   const [c1, c2] = container.querySelectorAll("canvas");
-  const rps = usable.map((s) => ({ label: s.label, color: s.color, points: s.sweep.map((p) => ({ x: p.conc, y: p.rps })) }));
+  // Mark the PUBLISHED peak on the RPS curve: a labeled dot at (peak.conc, peak.rps). By construction
+  // that point is one of the probed sweep points (the headline is max() over this same array), so the
+  // marker lands ON the curve and names the operating concurrency.
+  const rps = usable.map((s) => ({ label: s.label, color: s.color,
+    points: s.sweep.map((p) => ({ x: p.conc, y: p.rps })),
+    mark: s.peak && s.peak.rps > 0 && s.peak.conc != null
+      ? { x: s.peak.conc, y: s.peak.rps, label: `${fmtInt(s.peak.rps)} @ c=${fmtInt(s.peak.conc)}` } : null }));
   const p99 = usable.map((s) => ({ label: s.label, color: s.color, points: s.sweep.map((p) => ({ x: p.conc, y: p.p99_us })) }));
-  const o1 = { yLabel: "RPS", unit: "rps", ...theme };
-  const o2 = { yLabel: "p99 (µs)", unit: "µs p99", ...theme };
+  // SAME x-axis: both charts share ONE concurrency domain (min..max across BOTH series) so they stack
+  // and align vertically. Compute it from every probed concurrency on either chart.
+  const allX = [...rps, ...p99].flatMap((s) => s.points.map((p) => p.x));
+  const xDomain = allX.length ? [Math.min(...allX), Math.max(...allX)] : null;
+  const o1 = { yLabel: "RPS", unit: "rps", xDomain, ...theme };
+  const o2 = { yLabel: "p99 (µs)", unit: "µs p99", xDomain, ...theme };
   drawSweep(c1, rps, o1); attachSweepHover(c1, rps, o1);
   drawSweep(c2, p99, o2); attachSweepHover(c2, p99, o2);
 }
@@ -910,10 +1054,14 @@ function laneStamp(j) {
 
 function drawerHtml(g) {
   const langC = LANG_COLORS[g.lang] || LANG_COLORS.Other;
+  // The gateway's OWN freshness stamp in the drawer head: measured_at + a stale badge when flagged,
+  // the same per-gateway signal the table row shows (independent update cadences, made honest).
+  const badge = measuredBadge(g);
   let h = `<header class="drawer-head">
     <h3>${g.repo ? `<a href="${g.repo}" target="_blank" rel="noopener">${esc(g.display)}</a>` : esc(g.display)}</h3>
     <div class="chips"><span class="cls-chip">${esc(g.cls || "Gateway")}</span>
     <span class="lang-chip" style="background:${langC}">${esc(g.lang)}</span></div>
+    ${badge ? `<div class="drawer-measured">${badge}</div>` : ""}
   </header>`;
 
   const hw = LANES.map((l) => g[l.key]).find((j) => j && j.hardware);
@@ -939,8 +1087,10 @@ function drawerHtml(g) {
     }
     else {
       if (l.pathNote) h += `<p class="lane-note muted">${esc(l.pathNote(j))}</p>`;
-      h += `<dl>` + l.metrics.filter((m) => j[m.k] != null).map((m) =>
-        `<div><dt>${esc(m.label)}</dt><dd>${esc(m.fmt(j[m.k]))}</dd></div>`).join("") + `</dl>${laneStamp(j)}`;
+      h += `<dl>` + l.metrics.filter((m) => j[m.k] != null).map((m) => {
+        const cc = m.concKey && j[m.concKey] != null && j[m.k] > 0 ? ` (@ c=${fmtInt(j[m.concKey])})` : "";
+        return `<div><dt>${esc(m.label)}</dt><dd>${esc(m.fmt(j[m.k]) + cc)}</dd></div>`;
+      }).join("") + `</dl>${laneStamp(j)}`;
     }
     h += `</section>`;
   }
@@ -963,9 +1113,42 @@ function drawerHtml(g) {
   h += `</section>`;
 
   h += `<section class="drawer-lane"><h4>Throughput sweeps</h4>` +
-    `<p class="lane-note muted">Sweep curves are measured on the perf-suite default path, not the matrix per-cell sweep; the headline numbers above are the canonical record.</p>` +
+    `<p class="lane-note muted">Every point is a real probe; the search sweeps then bisects to the peak; the marked dot is the published number at its operating concurrency. The headline numbers above are that same marked peak.</p>` +
     `<div id="drawer-sweeps" class="sweeps"></div></section>`;
+
+  /* OOTB config artifact: the exact as-shipped default config this gateway ran from (pointed at the
+     mock). Monospace, scrollable, copy-friendly. Absent (not-yet-wired gateway) → "not published".
+     A per-gateway "Suggest a correction" link opens a pre-filled GitHub issue so anyone — not just
+     maintainers — can propose a fix; the published config is a best-effort OOTB attempt. */
+  h += `<section class="drawer-lane"><h4>Config</h4>`;
+  if (typeof g.ootb_config === "string" && g.ootb_config.trim()) {
+    h += `<p class="lane-note muted">As-shipped default, pointed at the mock — reproduce with: fresh install + this config.</p>` +
+      `<div class="config-block">` +
+      `<button type="button" class="config-copy" data-config-copy title="Copy config">Copy</button>` +
+      `<pre class="config-pre">${esc(g.ootb_config.replace(/\n+$/, ""))}</pre>` +
+      `</div>` +
+      `<p class="config-correct muted">Best-effort OOTB config. Spot something off? ` +
+      `<a href="${esc(configCorrectionUrl(g))}" target="_blank" rel="noopener">Suggest a correction</a>.</p>`;
+  } else {
+    h += `<p class="muted">not published</p>`;
+  }
+  h += `</section>`;
+  // ── Download results ──────────────────────────────────────────────────────────────────────────
+  // The downloadable per-gateway artifact IS the matrix result: its full 6x6 cell matrix (with the
+  // per-cell perf + streaming), the one memory read, the OOTB config, and the build/version stamp —
+  // the gateway's COMPLETE record from data.json. Client-side blob, no server (see openDrawer's
+  // [data-results-download] handler). Styled like the config Copy button.
+  h += `<section class="drawer-lane"><h4>Results</h4>` +
+    `<p class="lane-note muted">The gateway's complete record — the full 6×6 matrix (per-cell perf + streaming), the memory read, the OOTB config, and the build stamp.</p>` +
+    `<button type="button" class="results-download" data-results-download title="Download this gateway's full results as JSON">Download results (JSON)</button>` +
+    `</section>`;
   return h;
+}
+
+/* The per-gateway results artifact: the gateway's COMPLETE record from data.json (matrix 6x6 cells +
+   memory + OOTB config + build/version). Returned as pretty JSON for the client-side download. */
+function gatewayResultsJson(g) {
+  return JSON.stringify(g, null, 2);
 }
 
 function openDrawer(key, push = false) {
@@ -975,11 +1158,38 @@ function openDrawer(key, push = false) {
   document.getElementById("drawer-body").innerHTML = drawerHtml(g);
   document.getElementById("drawer").classList.remove("hidden");
   document.getElementById("backdrop").classList.remove("hidden");
+  // Copy-to-clipboard for the OOTB config block (copies the raw published text, not the escaped HTML).
+  const copyBtn = document.querySelector("#drawer-body [data-config-copy]");
+  if (copyBtn && typeof g.ootb_config === "string") {
+    copyBtn.addEventListener("click", () => {
+      const done = () => { copyBtn.textContent = "Copied"; setTimeout(() => { copyBtn.textContent = "Copy"; }, 1500); };
+      if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(g.ootb_config).then(done, () => {});
+    });
+  }
+  // Download the gateway's complete record as <gateway>-results.json (client-side blob, no server).
+  const dlBtn = document.querySelector("#drawer-body [data-results-download]");
+  if (dlBtn) {
+    dlBtn.addEventListener("click", () => {
+      const blob = new Blob([gatewayResultsJson(g)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url; a.download = `${g.key}-results.json`;
+      document.body.appendChild(a); a.click(); a.remove();
+      URL.revokeObjectURL(url);
+      dlBtn.textContent = "Downloaded"; setTimeout(() => { dlBtn.textContent = "Download results (JSON)"; }, 1500);
+    });
+  }
   const box = document.getElementById("drawer-sweeps");
+  // ONE source of truth: the drawer curve reads the SAME canonical record the headline rows read
+  // (best_cell via canonicalPerf), so the marked peak on the curve IS the published rps_max_proxy /
+  // rps_sustained_20ms at its operating concurrency - never a separate perf-suite run.
+  const perf = canonicalPerf(g);
   const series = [];
-  if (g.perf && g.perf.served !== false) {
-    series.push({ label: "sustained @20ms", color: "#4cc38a", sweep: g.perf.sweep_sustained_20ms });
-    series.push({ label: "max proxy", color: "#6cb6ff", sweep: g.perf.sweep_max_proxy });
+  if (perf && perf.served !== false) {
+    series.push({ label: "sustained @20ms", color: "#4cc38a", sweep: perf.sweep_sustained_20ms,
+      peak: { rps: perf.rps_sustained_20ms, conc: perf.rps_sustained_20ms_concurrency } });
+    series.push({ label: "max proxy", color: "#6cb6ff", sweep: perf.sweep_max_proxy,
+      peak: { rps: perf.rps_max_proxy, conc: perf.rps_max_proxy_concurrency } });
   }
   renderSweepCharts(box, series, chartTheme());
   syncUrl(push);
@@ -1081,14 +1291,21 @@ function renderCompare() {
     }
   }
   h += `</tbody></table></div>`;
-  h += `<p class="fineprint">Best value per row is highlighted, decided by the measurement (lower latency and memory, higher throughput). Sweep overlays below use the sustained @20ms sweep, measured on the perf-suite default path (not the matrix per-cell sweep the headline rows read).</p>`;
+  h += `<p class="fineprint">Best value per row is highlighted, decided by the measurement (lower latency and memory, higher throughput). Sweep overlays below use the sustained @20ms sweep read off the SAME canonical record as the headline rows; every point is a real probe and the marked dot is the published number at its operating concurrency.</p>`;
   h += `<div id="cmp-sweeps" class="sweeps"></div>`;
   document.getElementById("compare-body").innerHTML = h;
 
-  const series = gws.map((g, i) => ({
-    label: g.display, color: CMP_COLORS[i],
-    sweep: g.perf && g.perf.served !== false ? g.perf.sweep_sustained_20ms : null,
-  }));
+  const series = gws.map((g, i) => {
+    // Same canonical record as the headline rows (best_cell via canonicalPerf), so the marked peak
+    // is the published sustained@20ms at its operating concurrency - not a separate perf-suite run.
+    const perf = canonicalPerf(g);
+    return {
+      label: g.display, color: CMP_COLORS[i],
+      sweep: perf && perf.served !== false ? perf.sweep_sustained_20ms : null,
+      peak: perf && perf.served !== false
+        ? { rps: perf.rps_sustained_20ms, conc: perf.rps_sustained_20ms_concurrency } : null,
+    };
+  });
   renderSweepCharts(document.getElementById("cmp-sweeps"), series, chartTheme());
 }
 function closeCompare(sync = true) {
@@ -1693,10 +1910,11 @@ if (NODE) {
   /* Exports for the node smoke test (site/test.mjs). */
   module.exports = {
     newState, encodeUrl, decodeUrl, viewPath, applyFilters,
-    fmtStamp, fmtAge, stampWithAge,
+    fmtStamp, fmtAge, stampWithAge, measuredBadge,
     drawSweep, niceStep, fmtTick, COLUMN_SETS, columnsFor, PERF_VIEWS, VIEW_SORT, LANES, naText, stripRigPaths,
-    cellState, matrixCellTip, cellPerfTip, passCell, xlateCell, hasTranslation, CATEGORIES, DEFAULT_CATEGORY, VIEWS,
-    canonicalPerf, canonicalXlate, DEFAULT_VIEW, VIEW_LABELS, rosterRows, fmtStars,
+    cellState, matrixCellTip, cellPerfTip, passCell, xlateCell, streamCell, memCell, hasTranslation, CATEGORIES, DEFAULT_CATEGORY, VIEWS,
+    canonicalPerf, canonicalXlate, canonicalStreaming, canonicalMemory, cpuFpsCertified, gatewayResultsJson, DEFAULT_VIEW, VIEW_LABELS, rosterRows, fmtStars,
+    configCorrectionUrl, BENCH_REPO,
     HOME_VIEW, homeCardsHtml,
   };
 } else {
