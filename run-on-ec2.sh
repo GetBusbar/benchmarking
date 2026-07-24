@@ -10,13 +10,19 @@
 #   run-on-ec2.sh                                   # all gateways, one box each, in parallel
 #   run-on-ec2.sh litellm-rust bifrost              # a subset, one box each
 #
-# Requires awscli v2 (configured), ssh, rsync. Each box is m7g.2xlarge (8 real Graviton3 cores): the
+# Requires awscli v2 (configured), ssh, rsync. Each box is m7g.4xlarge (16 real Graviton3 cores): the
 # gateway-under-test is pinned to 4 cores (= an m7g.xlarge, the class AIGatewayBench uses); the mock +
-# load generator get the other 4, so the harness can never steal cycles from the gateway. EVERY gateway
-# build/pulls itself on its box from the ref pinned in gateways/versions.env.
+# load generator get 6 cores each, so the harness can never steal cycles from the gateway. EVERY
+# gateway build/pulls itself on its box from the ref pinned in gateways/versions.env.
 set -uo pipefail
 export AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-us-east-1}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"   # this repo (benchmarking) root
+
+# Per-invocation run id: every box THIS run launches is tagged run=$RUN_ID, and teardown filters on
+# it so a second (or concurrent) invocation NEVER terminates the first run's boxes / pulls the rug on
+# its results (audit H4). The global `kill` subcommand stays the cross-run cleanup.
+RUN_ID="${RUN_ID:-$(date +%Y%m%d-%H%M%S)-$$}"
+CREATED_KEY=0; CREATED_SG=0   # only delete the shared key/SG on exit if THIS invocation created them
 
 # `run-on-ec2.sh kill` — terminate EVERY gateway-bench box right now, reliably. Uses xargs so the
 # instance IDs are split into separate args (piping `--output text` straight into `--instance-ids`
@@ -86,24 +92,30 @@ if [[ ! -s "$KEYFILE" ]] || ! aws ec2 describe-key-pairs --key-names "$KEYNAME" 
   aws ec2 delete-key-pair --key-name "$KEYNAME" >/dev/null 2>&1 || true
   rm -f "$KEYFILE"
   aws ec2 create-key-pair --key-name "$KEYNAME" --query KeyMaterial --output text > "$KEYFILE"; chmod 600 "$KEYFILE"
+  CREATED_KEY=1
 fi
 SG=$(aws ec2 describe-security-groups --group-names "$SGNAME" --query 'SecurityGroups[0].GroupId' --output text 2>/dev/null || true)
-[[ -z "$SG" || "$SG" == "None" ]] && SG=$(aws ec2 create-security-group --group-name "$SGNAME" --description "gateway bench SSH" --query GroupId --output text)
+if [[ -z "$SG" || "$SG" == "None" ]]; then
+  SG=$(aws ec2 create-security-group --group-name "$SGNAME" --description "gateway bench SSH" --query GroupId --output text)
+  CREATED_SG=1
+fi
 MYIP=$(curl -s https://checkip.amazonaws.com)
 aws ec2 authorize-security-group-ingress --group-id "$SG" --protocol tcp --port 22 --cidr "${MYIP}/32" >/dev/null 2>&1 || true
 
-# TIDINESS + COST: on ANY exit (normal, error, Ctrl-C, SIGTERM) terminate every gateway-bench box and
-# delete the shared keypair + SG, so a run NEVER leaves instances/keys/SGs lying around. (SIGKILL
-# can't be trapped; the boxes' own `shutdown -h` timer is the backstop for that case.) IDs are split
-# via xargs — piping --output text straight into --instance-ids passes a tab-joined blob that no-ops.
-# The SG delete is best-effort (only succeeds once its instances are fully gone); a harmless, free SG
-# may briefly remain and is cleaned by the next run or `run-on-ec2.sh kill`.
+# TIDINESS + COST: on ANY exit (normal, error, Ctrl-C, SIGTERM) terminate ONLY the boxes THIS run
+# launched — filtered by tag:run=$RUN_ID, NOT the shared purpose=gateway-bench tag — so a second or
+# concurrent invocation never terminates another run's still-live boxes before their results are
+# pulled (audit H4). (SIGKILL can't be trapped; the boxes' own `shutdown -h` timer is the backstop.)
+# IDs are split via xargs — piping --output text straight into --instance-ids passes a tab-joined
+# blob that no-ops. The shared keypair/SG are deleted only if THIS invocation created them (otherwise
+# a concurrent run's ssh/rsync would break with "Permission denied (publickey)"); `run-on-ec2.sh kill`
+# stays the global cleanup for the shared key/SG.
 teardown() {
-  aws ec2 describe-instances --filters "Name=tag:purpose,Values=gateway-bench" \
+  aws ec2 describe-instances --filters "Name=tag:run,Values=$RUN_ID" \
     "Name=instance-state-name,Values=running,pending" --query 'Reservations[].Instances[].InstanceId' --output text 2>/dev/null \
     | tr '\t' '\n' | grep -E '^i-' | xargs -r -n25 aws ec2 terminate-instances --output text --instance-ids >/dev/null 2>&1
-  aws ec2 delete-key-pair --key-name "$KEYNAME" >/dev/null 2>&1 || true; rm -f "$KEYFILE"
-  aws ec2 delete-security-group --group-id "$SG" >/dev/null 2>&1 || true
+  if [[ "$CREATED_KEY" == 1 ]]; then aws ec2 delete-key-pair --key-name "$KEYNAME" >/dev/null 2>&1 || true; rm -f "$KEYFILE"; fi
+  if [[ "$CREATED_SG" == 1 ]]; then aws ec2 delete-security-group --group-id "$SG" >/dev/null 2>&1 || true; fi
 }
 trap teardown EXIT INT TERM
 
@@ -129,7 +141,7 @@ bench_gateway() {
     --instance-initiated-shutdown-behavior terminate \
     --user-data "$(printf '#!/bin/bash\nshutdown -h +%s\n' "${BENCH_MAX_MIN:-150}")" \
     --block-device-mappings 'DeviceName=/dev/sda1,Ebs={VolumeSize=60,VolumeType=gp3}' \
-    --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=$tag},{Key=purpose,Value=gateway-bench}]" \
+    --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=$tag},{Key=purpose,Value=gateway-bench},{Key=run,Value=$RUN_ID}]" \
     --query 'Instances[0].InstanceId' --output text 2>>"$glog") || { glog_echo "run-instances FAILED: $(tail -1 "$glog" | sed 's/.*: //' | cut -c1-140)"; return 1; }
   glog_echo "launched $iid"
   # self-terminate this box no matter how we exit
