@@ -375,8 +375,12 @@ CHARTS = [
         unit="concurrent streams",
         series=[Series("stream_sustained_streams", "sustained streams", "rank")],
         higher_better=True,
-        served_field="stream_served",
-        not_served_text="✕ no SSE streaming",
+        # served_field is stream_sustained_valid (streamed AND not mock-bound), mirroring streamcpu_fps
+        # below (MEDIUM-R2-2): a rig-limited sustained count is not a valid gateway-vs-ceiling reading, so
+        # it renders "not proven" rather than a clean bar. A mock-bound / unverifiable count never draws a
+        # full bar or ranks in the top-N — the same discipline the cpu-fps lane already applies.
+        served_field="stream_sustained_valid",
+        not_served_text="✕ not measured (rig-limited / needs field run)",
         zero_text="0  ·  no stream load qualified",
         annot=lambda r: (lambda f: f"{f:,.0f} frames/s" if f > 0 else None)(
             float(r.get("stream_sustained_fps") or 0)),
@@ -480,6 +484,14 @@ def _proj_streaming(key: str) -> dict | None:
     # harness certified as NOT mock-bound (explicit False) is valid; null/True both suppress the bar
     # (mirrors app.js cpuFpsCertified, which the site + check-consistency use for the identical rule).
     cpu_valid = cpu is not None and float(cpu or 0) > 0 and s.get("cpu_fps_mock_bound") is False
+    # MEDIUM-R2-2: streams_sustained gets the SAME mock-bound gate as cpu-fps (above). A sustained count
+    # whose bisect saturated near the paced-mock ceiling (streams_sustained_mock_bound=true) is rig-
+    # limited, not gateway-limited; a null flag (reference ceiling unread) is unverifiable. Both must
+    # suppress the bar so a mock bottleneck never draws a full sustained bar / ranks top-N — exactly the
+    # asymmetry the cpu-fps lane already closes. Mirrors app.js sustainedCertified (site + check-
+    # consistency use the identical rule); only an explicit False survives.
+    sust = s.get("streams_sustained")
+    sust_valid = sust is not None and float(sust or 0) > 0 and s.get("streams_sustained_mock_bound") is False
     return {
         # MEDIUM-1(b): carry the cell's ACTUAL stream_served through, never hardcode True. gen-data now
         # only projects g.streaming for a cell that actually streamed (stream_served === true), but a
@@ -491,6 +503,7 @@ def _proj_streaming(key: str) -> dict | None:
         "stream_added_gap_p99_us": s.get("added_gap_p99_us"),
         "stream_sustained_streams": s.get("streams_sustained"),
         "stream_sustained_fps": s.get("streams_sustained_fps"),
+        "stream_sustained_valid": sust_valid,
         "streamcpu_frames_per_sec": cpu,
         # NIT: the matrix never emits cpu_fps_per_core, so this is ALWAYS null today. Kept null-safe (the
         # per-core chart tolerates a null via `float(r.get(...) or 0)`); emitting a real value is a

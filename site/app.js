@@ -232,11 +232,23 @@ function canonicalXlate(g) {
 function cpuFpsCertified(s) {
   return s != null && s.cpu_fps != null && Number(s.cpu_fps) > 0 && s.cpu_fps_mock_bound === false;
 }
+// MEDIUM-R2-2: streams_sustained is gated EXACTLY like cpu_fps. A rig-limited sustained count
+// (streams_sustained_mock_bound=true — the bisect saturated near the paced-mock ceiling) or an
+// unverifiable one (mock-bound=null — the reference ceiling read 0) is NOT a gateway limit; it must
+// not draw a full bar, rank in the top-N, or win the best:max compare. charts.py suppresses the bar
+// via stream_sustained_valid (present + >0 + NOT mock-bound); the site must read n/a on every surface
+// exactly when the chart draws no bar (check-consistency asserts they can never diverge). Only an
+// explicitly-certified (mock_bound === false) count survives — the raw value stays on g.streaming for
+// provenance/download, symmetric with cpuFpsCertified.
+function sustainedCertified(s) {
+  return s != null && s.streams_sustained != null && Number(s.streams_sustained) > 0 && s.streams_sustained_mock_bound === false;
+}
 function canonicalStreaming(g) {
   const s = g.streaming;
   if (!s) return null;
   const rec = { stream_served: true, ...s };
   if (!cpuFpsCertified(s)) rec.cpu_fps = null;   // uncertified/mock-bound → n/a on every site surface
+  if (!sustainedCertified(s)) rec.streams_sustained = null;  // rig-limited/unverifiable → n/a, no bar
   return rec;
 }
 /* canonicalMemory: THE single memory record. gen-data projects it from the matrix's ONE process-level
@@ -1913,7 +1925,7 @@ if (NODE) {
     fmtStamp, fmtAge, stampWithAge, measuredBadge,
     drawSweep, niceStep, fmtTick, COLUMN_SETS, columnsFor, PERF_VIEWS, VIEW_SORT, LANES, naText, stripRigPaths,
     cellState, matrixCellTip, cellPerfTip, passCell, xlateCell, streamCell, memCell, hasTranslation, CATEGORIES, DEFAULT_CATEGORY, VIEWS,
-    canonicalPerf, canonicalXlate, canonicalStreaming, canonicalMemory, cpuFpsCertified, gatewayResultsJson, DEFAULT_VIEW, VIEW_LABELS, rosterRows, fmtStars,
+    canonicalPerf, canonicalXlate, canonicalStreaming, canonicalMemory, cpuFpsCertified, sustainedCertified, gatewayResultsJson, DEFAULT_VIEW, VIEW_LABELS, rosterRows, fmtStars,
     configCorrectionUrl, BENCH_REPO,
     HOME_VIEW, homeCardsHtml,
   };
