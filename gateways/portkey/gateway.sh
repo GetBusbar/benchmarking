@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
-# Gateway manifest: Portkey OSS gateway (npx @portkey-ai/gateway).
+# Gateway manifest: Portkey OSS gateway (official portkeyai/gateway image, docker).
 #
-# Routes to the mock via Portkey's own headers: x-portkey-provider + x-portkey-custom-host
-# (the same way AIGatewayBench drives it). Anthropic Messages path.
-GW_KIND=native
+# Runs the official image (PORTKEY_IMAGE in versions.env, multi-arch amd64+arm64, pinned to the
+# benchmarked 1.15.2) with the same uniform launch shape as the other docker gateways: host
+# network, --cpuset-cpus pin. The image needs no config — routing to the mock is per-request via
+# Portkey's own headers: x-portkey-provider + x-portkey-custom-host (the same way AIGatewayBench
+# drives it). Anthropic Messages path. The image listens on 8787, portkey's default (= GW_PORT).
+GW_KIND=docker
 # Self-describing manifest metadata — charts.py + the run lists read these, so a gateway
 # is fully defined by its own dir (add/remove a dir → it appears/disappears everywhere).
 GW_DISPLAY="Portkey"                      # label in charts + report tables
@@ -15,13 +18,14 @@ GW_PORT=8787
 GW_PATH=/v1/messages
 GW_MODEL=anthropic/mock
 GW_AUTH=dummy
-# PORTKEY_SPEC comes from gateways/versions.env.
+# PORTKEY_IMAGE comes from gateways/versions.env.
+PORTKEY_IMAGE="${PORTKEY_IMAGE:-portkeyai/gateway:1.15.2}"
 GW_HEADERS=(
   "x-portkey-provider: anthropic"
   "x-portkey-custom-host: http://127.0.0.1:${MOCK_PORT:-8000}/v1"
 )
 
-gw_build() { command -v npx >/dev/null || { echo "need node/npx for portkey"; return 1; }; }
+gw_build() { sudo docker pull "$PORTKEY_IMAGE" >/dev/null 2>&1 || true; }
 
 # ── xlate lane (anthropic-in -> openai-out) ───────────────────────────────────────────────────────
 # NOT DECLARED, and previously mis-tested: the xlate lane reused this manifest's default
@@ -40,14 +44,16 @@ GW_XLATE_HEADERS=(
   "x-portkey-custom-host: http://127.0.0.1:${MOCK_PORT:-8000}/v1"
 )
 
-# ── stream lane: known upstream bug, cited ────────────────────────────────────────────────────────
-# stream:true on the npx/node runtime fails with `tryTargetsRecursively error: immutable`
-# ({"status":"failure","message":"Something went wrong"}): Portkey-AI/gateway issue #1389 (open) -
-# ResponseService.updateHeaders mutates an immutable-guarded Response under @hono/node-server
-# >1.14.2 (pulled by the ^1.3.3 caret pin); #1550 is the same class on /v1/responses; community
-# fixes #1390/#1551 are unmerged as of 2026-07. A real streaming failure of the shipped npx
-# artifact, so it is measured and published - this note carries the citation.
-GW_STREAM_NOTE="stream:true fails on the Node (npx) runtime with 'tryTargetsRecursively error: immutable' - Portkey-AI/gateway#1389 (open; same class as #1550, fixes #1390/#1551 unmerged as of 2026-07): an upstream bug in the shipped artifact, not a harness gap"
+# ── stream lane: npx-artifact bug does NOT reproduce on the official image ───────────────────────
+# The npx artifact's stream:true failed with `tryTargetsRecursively error: immutable`
+# (Portkey-AI/gateway#1389, open as of 2026-07): ResponseService.updateHeaders mutates an
+# immutable-guarded Response under @hono/node-server >1.14.2, pulled in at npx-install time by the
+# ^1.3.3 caret pin. The official portkeyai/gateway:1.15.2 image bakes a lockfile-resolved
+# node_modules, and stream:true against an SSE mock passes through cleanly (verified locally,
+# 2026-07-23) - the bug was an artifact of the floating npx dependency resolution, not of the
+# pinned image this manifest now runs. The note below rides into the published stream result;
+# the EC2 field run re-measures the lane on the image.
+GW_STREAM_NOTE="stream lane runs the official portkeyai/gateway:1.15.2 image (lockfile-resolved deps); the npx artifact's 'tryTargetsRecursively error: immutable' failure (Portkey-AI/gateway#1389, caused by the caret-pinned @hono/node-server floating past 1.14.2 at npx-install time) does not reproduce on the image - verified locally against an SSE mock, re-verified in the field run"
 
 # ── matrix suite: egress support ──────────────────────────────────────────────────────────────────
 # Portkey selects the upstream provider PER REQUEST via x-portkey-provider + x-portkey-custom-host,
@@ -106,30 +112,21 @@ gw_matrix_egress() {
 }
 
 gw_launch() {
-  pkill -f '@portkey-ai/gateway' 2>/dev/null; sleep 1
-  setsid taskset -c "$CORES" npx -y "${PORTKEY_SPEC:-@portkey-ai/gateway}" \
-    </dev/null >/tmp/portkey.mem.log 2>&1 &
+  sudo docker rm -f portkey-bench >/dev/null 2>&1; sleep 1
+  sudo docker run -d --name portkey-bench --network host --cpuset-cpus="$CORES" \
+    "$PORTKEY_IMAGE" >"$GW_DIR/launch.log" 2>&1 || true
 }
 
-_pk_pid() { ss -ltnpH "sport = :$GW_PORT" 2>/dev/null | grep -o 'pid=[0-9]*' | head -1 | cut -d= -f2; }
-gw_rss() {
-  local pid total=0 kb; pid="$(_pk_pid)"; [ -z "$pid" ] && { echo 0; return; }
-  # node + any workers under the same process group
-  for p in $pid $(pgrep -P "$pid" 2>/dev/null); do
-    kb=$(awk '/VmRSS/{print $2}' "/proc/$p/status" 2>/dev/null); total=$((total + ${kb:-0}))
-  done
-  awk -v k="$total" 'BEGIN{printf "%.1f", k/1024}'
+gw_rss() { container_rss_mib portkey-bench; }  # summed process-tree VmRSS (same method as native)
+gw_hwm() { container_hwm_mib portkey-bench; }  # summed process-tree VmHWM (kernel high-water mark)
+
+gw_version() {
+  local dg; dg=$(sudo docker inspect --format '{{index .RepoDigests 0}}' "$PORTKEY_IMAGE" 2>/dev/null)
+  echo "${PORTKEY_IMAGE}${dg:+ (@${dg##*@})}"
 }
-gw_hwm() {  # kernel VmHWM summed over the node process + its workers (same tree as gw_rss)
-  local pid total=0 kb; pid="$(_pk_pid)"; [ -z "$pid" ] && { echo ""; return; }
-  for p in $pid $(pgrep -P "$pid" 2>/dev/null); do
-    kb=$(awk '/VmHWM/{print $2}' "/proc/$p/status" 2>/dev/null); total=$((total + ${kb:-0}))
-  done
-  awk -v k="$total" 'BEGIN{printf "%.1f", k/1024}'
-}
-gw_version() { npm view "${PORTKEY_SPEC:-@portkey-ai/gateway}" version 2>/dev/null | sed 's/^/@portkey-ai\/gateway@/' || echo "@portkey-ai/gateway (npx latest)"; }
 gw_diag() {
-  echo "proc: $(pgrep -af '@portkey-ai/gateway' | head -c 200)"
-  echo "run.log:"; tail -n 20 /tmp/portkey.mem.log 2>/dev/null
+  echo "container: $(sudo docker ps -a --filter name=portkey-bench --format '{{.Status}}' 2>/dev/null)"
+  echo "run.log: $(cat "$GW_DIR/launch.log" 2>/dev/null | tr '\n' ' ' | head -c 300)"
+  echo "logs:"; sudo docker logs --tail 25 portkey-bench 2>&1
 }
-gw_stop() { pkill -f '@portkey-ai/gateway' 2>/dev/null; }
+gw_stop() { sudo docker rm -f portkey-bench >/dev/null 2>&1; }

@@ -41,7 +41,7 @@ exact build/commit measured, plus the charts below.
 - **Go** - builds the load generator (`loadgen/`).
 - **Docker** - for the container-based gateways (Bifrost, Kong, GoModel, One-API, …).
 - **Python 3 + matplotlib** - draws the charts (`pip install matplotlib`). Optional; JSON results are written either way.
-- A gateway binary/image for whatever you're testing (e.g. `BUSBAR_BIN=/path/to/busbar`). Competitor gateways build/pull themselves on first run.
+- Docker. Every gateway pulls its own pinned official image on first run (see `gateways/versions.env`); helicone and litellm-rust build from pinned source (no arm64 image exists — see their manifests).
 
 **To run the one-click cloud version** (`run-on-ec2.sh`) the *only* extra dependency is **AWS CLI v2**, configured (`aws configure` - creds + a default region). The script launches a fresh Graviton box, installs everything on it, runs the full suite, pulls the results back, and **terminates the box** - nothing to set up, nothing to clean up.
 

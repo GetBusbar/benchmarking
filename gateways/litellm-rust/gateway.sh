@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
-# Gateway manifest: LiteLLM-Rust (BerriAI's compiled AI-gateway beta).
+# Gateway manifest: LiteLLM-Rust (BerriAI's compiled AI-gateway beta) — BUILT FROM SOURCE, run native.
+#
+# EXCEPTION to the everything-runs-its-official-docker-image rule, kept deliberately: no official
+# image ships the code this benchmark measures. ghcr.io/berriai/litellm-rust (checked 2026-07-23)
+# publishes only v1.89.3/main-v1.89.3 — linux/amd64-only (no arm64 for the Graviton bench boxes)
+# AND built from a ref that predates the /v1/messages route, which exists ONLY on the
+# litellm_rust_gateway_v1_messages_route branch pinned in versions.env (never in any published
+# image). Inventing our own image would defeat the official-artifact rule, so this stays a pinned
+# source build until BerriAI publishes an arm64 image containing the route.
 #
 # IMPORTANT (verified against their source at commit 698072308, the public
 # `litellm_rust_gateway_v1_messages_route` branch): the /v1/messages route serves ONLY the

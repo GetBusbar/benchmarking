@@ -11,7 +11,7 @@
 #   * post-load RSS — resident memory 60 s after load stops (does it release, or stay pinned?)
 # and writes results/memory/<gateway>.json for the chart generator.
 #
-#   GATEWAY=busbar        BUSBAR_BIN=~/busbar   memory/run.sh
+#   GATEWAY=busbar        memory/run.sh
 #   GATEWAY=bifrost                             memory/run.sh
 #   GATEWAY=litellm-rust                        memory/run.sh
 #   GATEWAY=litellm-python                      memory/run.sh
