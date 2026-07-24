@@ -125,7 +125,12 @@ const gateways = gatewayKeys.map((key) => {
     // g.streaming carries the diagonal cell's dialect + its full stream record.
     if (bc) {
       const cell = g.matrix.upstreams?.[bc.dialect]?.cells?.[bc.dialect];
-      if (cell && cell.stream) {
+      // MEDIUM-1(a): only project streaming when the diagonal cell ACTUALLY STREAMED. A non-streaming
+      // cell still carries a stream record ({stream_served:false, …}), so the old truthiness check
+      // (`cell.stream`) projected it — surfacing a did-not-stream cell as a served streamer. Mirror the
+      // memory guard (line 136, `.served === true`): require stream_served === true so g.streaming is
+      // ABSENT for a non-streaming cell and the board renders "did not stream".
+      if (cell && cell.stream && cell.stream.stream_served === true) {
         g.streaming = { dialect: bc.dialect, source: "matrix",
           build: g.matrix.build ?? null, measured_at: g.matrix.measured_at ?? null, ...cell.stream };
       }

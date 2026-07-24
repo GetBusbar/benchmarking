@@ -221,10 +221,23 @@ function canonicalXlate(g) {
    headline is projected from, so streaming and RPS/latency are read off one cell (one source of truth;
    check-consistency asserts the headline streaming == this cell's). Returns a record with
    stream_served + normalized keys, or the legacy stream-fallback g.streaming, or null. */
+// MEDIUM-6: the cpu-fps relay is a valid gateway-vs-ceiling comparison ONLY when the harness certified
+// it — cpu_fps present + positive AND explicitly NOT mock-bound (cpu_fps_mock_bound === false). A null
+// mock-bound flag means the ceiling probe read 0 and the number could NOT be certified (unverifiable),
+// and a true flag means an unpinned box floored it. In BOTH cases charts.py suppresses the bar
+// (streamcpu_valid=false); the drawer/compare "CPU-bound fps (peak)" metric MUST match that visibility
+// or the site shows a number the chart does not (check-consistency asserts this can't diverge). We drop
+// cpu_fps from the canonical record unless it is explicitly certified, so every site surface reads n/a
+// exactly when the chart draws no bar. The raw value stays on g.streaming for provenance/download.
+function cpuFpsCertified(s) {
+  return s != null && s.cpu_fps != null && Number(s.cpu_fps) > 0 && s.cpu_fps_mock_bound === false;
+}
 function canonicalStreaming(g) {
   const s = g.streaming;
-  if (s) return { stream_served: true, ...s };
-  return null;
+  if (!s) return null;
+  const rec = { stream_served: true, ...s };
+  if (!cpuFpsCertified(s)) rec.cpu_fps = null;   // uncertified/mock-bound → n/a on every site surface
+  return rec;
 }
 /* canonicalMemory: THE single memory record. gen-data projects it from the matrix's ONE process-level
    RSS read (g.memory_read, source:"matrix"), or the legacy memory suite (source:"memory-fallback").
@@ -1900,7 +1913,7 @@ if (NODE) {
     fmtStamp, fmtAge, stampWithAge, measuredBadge,
     drawSweep, niceStep, fmtTick, COLUMN_SETS, columnsFor, PERF_VIEWS, VIEW_SORT, LANES, naText, stripRigPaths,
     cellState, matrixCellTip, cellPerfTip, passCell, xlateCell, streamCell, memCell, hasTranslation, CATEGORIES, DEFAULT_CATEGORY, VIEWS,
-    canonicalPerf, canonicalXlate, canonicalStreaming, canonicalMemory, gatewayResultsJson, DEFAULT_VIEW, VIEW_LABELS, rosterRows, fmtStars,
+    canonicalPerf, canonicalXlate, canonicalStreaming, canonicalMemory, cpuFpsCertified, gatewayResultsJson, DEFAULT_VIEW, VIEW_LABELS, rosterRows, fmtStars,
     configCorrectionUrl, BENCH_REPO,
     HOME_VIEW, homeCardsHtml,
   };

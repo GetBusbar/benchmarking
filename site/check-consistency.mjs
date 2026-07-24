@@ -88,13 +88,34 @@ export function checkConsistency(data, app) {
         const skeys = ["added_ttft_p99_us", "added_gap_p99_us", "streams_sustained", "cpu_fps"];
         for (const key of skeys) {
           const table = app.streamCell(g, key, String).v;   // n/a -> undefined via .v
-          const headline = s[key] ?? null;
-          const cellVal = cellStream[key] ?? null;
+          let headline = s[key] ?? null;
+          let cellVal = cellStream[key] ?? null;
+          // MEDIUM-6: cpu_fps is GATED — the site (streamCell/canonicalStreaming) shows it only when the
+          // number is certified (present + positive + cpu_fps_mock_bound === false), exactly the rule
+          // charts.py uses for streamcpu_valid (which suppresses the bar otherwise). So for cpu_fps the
+          // canonical comparison target is the GATED value on BOTH the projected headline and the
+          // diagonal cell: an uncertified/mock-bound cpu_fps reads n/a on every surface, matching the
+          // chart's suppressed bar. Comparing the raw cell value here would (wrongly) demand the site
+          // render a number the chart deliberately hides.
+          if (key === "cpu_fps") {
+            headline = app.cpuFpsCertified(s) ? headline : null;
+            cellVal = app.cpuFpsCertified(cellStream) ? cellVal : null;
+          }
           const tableVal = table == null ? null : table;
           if (!(tableVal === headline && headline === cellVal)) {
             errors.push(`${g.key}.streaming.${key}: table=${tableVal} headline=${headline} diagonal-cell=${cellVal} ` +
               `(the streaming headline must be the best diagonal cell's streaming it is projected from)`);
           }
+        }
+        // MEDIUM-6 (explicit visibility tie): the site's cpu-fps VISIBILITY must equal the chart's
+        // streamcpu_valid rule so the two can never silently diverge again. streamcpu_valid (charts.py
+        // _proj_streaming) = cpu present + positive + NOT mock-bound; the site shows cpu_fps iff
+        // cpuFpsCertified. Assert the two booleans are identical for this projected streaming record.
+        const siteShowsCpu = app.streamCell(g, "cpu_fps", String).v != null;
+        const chartCpuValid = app.cpuFpsCertified(s);   // mirrors charts.py streamcpu_valid on this record
+        if (siteShowsCpu !== chartCpuValid) {
+          errors.push(`${g.key}.streaming.cpu_fps: site-visible=${siteShowsCpu} but chart streamcpu_valid=${chartCpuValid} ` +
+            `(the drawer/table must show cpu-fps exactly when the chart draws its bar — same mock-bound rule)`);
         }
       }
     }
