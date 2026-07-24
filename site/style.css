@@ -246,6 +246,10 @@ tbody tr { cursor: pointer; }
 #gateways-table thead th, #gateways-table tbody td { text-align: left; }
 #gateways-table thead th.stars, #gateways-table tbody td.stars { text-align: right; }
 #gateways-table thead th.lastrun, #gateways-table tbody td.lastrun { white-space: nowrap; }
+/* Run-mode mark (docker vs native binary) that prefixes the last-benchmarked date. Muted, so it
+   reads as quiet context next to the date, not a badge competing with it. */
+#gateways-table td.lastrun .runmode { margin-right: .45em; color: var(--fg-mute); cursor: help; }
+.rm-ico { width: 13px; height: 13px; display: inline-block; vertical-align: -2px; }
 #gateways-table thead th[data-sort] { cursor: pointer; user-select: none; }
 /* Active-sort arrow: ▲ ascending / ▼ descending, appended after the header label. */
 #gateways-table thead th[data-dir="asc"]::after { content: " \25B2"; font-size: .7em; color: var(--fg-mute); }

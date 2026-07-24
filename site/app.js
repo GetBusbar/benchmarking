@@ -1356,6 +1356,26 @@ const gatewayBuild = (g) => {
   const j = LANES.map((l) => g[l.key]).find((x) => x && x.build);
   return j ? j.build : null;
 };
+/* HOW the gateway was run for the benchmark: its official Docker image vs a native/source binary.
+   Inferred from the build stamp - an image ref (registry/repo:tag or an @sha256 digest) is docker;
+   a bare version/commit ("...@9649b27 (source build)") is a native binary. This is real context, not
+   decoration: a containerised gateway and a native one differ in base image, fd limits, and startup,
+   so the reader deserves to see which each number was measured under. Null when no build is stamped. */
+const runMode = (g) => {
+  const b = gatewayBuild(g); if (!b) return null;
+  return (/@sha256:/.test(b) || /[\w.\-]+\/[\w.\-]+:[\w.\-]+/.test(b)) ? "docker" : "binary";
+};
+/* Compact monochrome run-mode marks (currentColor, so they sit muted beside the date); the tooltip
+   carries the words. docker = container/whale; binary = a terminal with a shell prompt. */
+const RUNMODE_ICON = {
+  docker: '<svg class="rm-ico" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M4 10h3v3H4zm4 0h3v3H8zm4 0h3v3h-3zM8 6h3v3H8zm4 0h3v3h-3z"/><path d="M23 12.3c-.6-.4-1.8-.6-2.8-.4-.1-.9-.7-1.8-1.6-2.4l-.5-.3-.3.5c-.4.7-.6 1.6-.1 2.4-.3.2-1 .4-1.7.4H2c-.2 1.4.1 2.9.9 4.1C4 18.9 6.6 20 10 20c6.9 0 12-3.2 14.3-9 .9.1 2.2 0 2.7-1.4-1.6-.9-3.7-.6-4-.3z" transform="translate(-2 0)"/></svg>',
+  binary: '<svg class="rm-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.5" y="4.5" width="19" height="15" rx="2"/><path d="M6.5 9.5l3 2.5-3 2.5M13 15h4.5"/></svg>',
+};
+const runModeCell = (g) => {
+  const m = runMode(g); if (!m) return "";
+  const label = m === "docker" ? "Measured running its official Docker image" : "Measured as a native / source-built binary";
+  return `<span class="runmode ${m}" title="${label}" aria-label="${label}">${RUNMODE_ICON[m]}</span>`;
+};
 /* The VERSION token alone for the table cell - the tag, package version, or short commit;
    the full build string (image path, digest, annotations) stays in the tooltip.
    "ghcr.io/x/y:v1.3.1" -> "v1.3.1"; "litellm==1.93.0" -> "1.93.0"; "repo@9649b27..." -> "@9649b27";
@@ -1439,7 +1459,7 @@ function renderGateways() {
       <td class="name">${name}</td>
       <td><span class="lang-chip" style="background:${c}">${esc(g.lang)}</span></td>
       <td class="build">${build ? `<span title="${esc(build)}">${esc(fmtBuild(build))}</span>` : `<span class="muted">n/a</span>`}</td>
-      <td class="lastrun">${lastRunTxt ? `<span title="last benchmarked ${esc(lastRun.toISOString().slice(0, 16).replace("T", " "))} UTC">${esc(lastRunTxt)}</span>` : `<span class="muted">n/a</span>`}</td>
+      <td class="lastrun">${lastRunTxt ? `${runModeCell(g)}<span title="last benchmarked ${esc(lastRun.toISOString().slice(0, 16).replace("T", " "))} UTC">${esc(lastRunTxt)}</span>` : `<span class="muted">n/a</span>`}</td>
       <td class="age">${age ? `<span title="first commit ${esc(g.first_commit)}">${esc(age)}</span>` : `<span class="muted">n/a</span>`}</td>
       <td class="stars">${stars != null ? esc(stars) : `<span class="muted">n/a</span>`}</td>
       <td class="cls">${esc(g.cls || "Gateway")}</td>
