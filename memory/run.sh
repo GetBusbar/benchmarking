@@ -32,6 +32,12 @@ export MOCK_PORT="${MOCK_PORT:-8000}"
 RESULTS="$ROOT/results/memory"; mkdir -p "$RESULTS"
 log(){ echo "[$(date +%H:%M:%S)] $*"; }
 
+# Raise the fd ceiling to match the other six suites (perf/stream/streamcpu/xlate/governed/matrix):
+# native gateways (helicone, litellm-rust) inherit this shell's RLIMIT_NOFILE, so a ~1024 default
+# caps them at ~1024 concurrent connections at CONC=1500 (EMFILE) while docker gateways inherit the
+# daemon's 1048576 default-ulimit - biasing native peak-RSS downward (audit R2-M1).
+ulimit -n 1048576 2>/dev/null || ulimit -n 65536 2>/dev/null || true
+
 # taskset may be absent (macOS); shim it to a no-op wrapper so the rig still runs locally.
 command -v taskset >/dev/null || taskset(){ shift 2; "$@"; }
 
