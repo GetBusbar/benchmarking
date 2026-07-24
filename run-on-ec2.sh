@@ -86,6 +86,22 @@ SG=$(aws ec2 describe-security-groups --group-names "$SGNAME" --query 'SecurityG
 [[ -z "$SG" || "$SG" == "None" ]] && SG=$(aws ec2 create-security-group --group-name "$SGNAME" --description "gateway bench SSH" --query GroupId --output text)
 MYIP=$(curl -s https://checkip.amazonaws.com)
 aws ec2 authorize-security-group-ingress --group-id "$SG" --protocol tcp --port 22 --cidr "${MYIP}/32" >/dev/null 2>&1 || true
+
+# TIDINESS + COST: on ANY exit (normal, error, Ctrl-C, SIGTERM) terminate every gateway-bench box and
+# delete the shared keypair + SG, so a run NEVER leaves instances/keys/SGs lying around. (SIGKILL
+# can't be trapped; the boxes' own `shutdown -h` timer is the backstop for that case.) IDs are split
+# via xargs — piping --output text straight into --instance-ids passes a tab-joined blob that no-ops.
+# The SG delete is best-effort (only succeeds once its instances are fully gone); a harmless, free SG
+# may briefly remain and is cleaned by the next run or `run-on-ec2.sh kill`.
+teardown() {
+  aws ec2 describe-instances --filters "Name=tag:purpose,Values=gateway-bench" \
+    "Name=instance-state-name,Values=running,pending" --query 'Reservations[].Instances[].InstanceId' --output text 2>/dev/null \
+    | tr '\t' '\n' | grep -E '^i-' | xargs -r -n25 aws ec2 terminate-instances --output text --instance-ids >/dev/null 2>&1
+  aws ec2 delete-key-pair --key-name "$KEYNAME" >/dev/null 2>&1 || true; rm -f "$KEYFILE"
+  aws ec2 delete-security-group --group-id "$SG" >/dev/null 2>&1 || true
+}
+trap teardown EXIT INT TERM
+
 AMI=$(aws ssm get-parameter --name "$SSM" --query Parameter.Value --output text)
 
 mkdir -p "$HERE"/results/{perf,memory,stream,xlate,governed,matrix}
