@@ -1,6 +1,6 @@
 {
   "gateway": "portkey",
-  "build": "@portkey-ai/gateway@1.15.2",
+  "build": "portkeyai/gateway:1.15.2 (@sha256:97f094d9c8a764cbfaa2a7138c0017b247ca923bb06db1b4c13b7f8a33b5200d)",
   "served": false,
   "xlate_served": false,
   "xlate_declared": false,
@@ -28,5 +28,5 @@
   "model": "anthropic/mock",
   "arch": "arm64",
   "hardware": "AWS m7g.4xlarge (Graviton3, 16 cores / 64 GB). Gateway-under-test pinned to 4 cores (the comparable basis); mock and load generator on 6 cores each so the mock never bottlenecks the streaming sweep. Ubuntu 24.04. One dedicated box per gateway.",
-  "measured_at": "2026-07-23T22:17:57Z"
+  "measured_at": "2026-07-24T01:33:57Z"
 }

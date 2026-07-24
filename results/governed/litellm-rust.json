@@ -3,5 +3,5 @@
   "build": "litellm_rust_gateway_v1_messages_route@698072308b (python-config litellm==1.93.0)",
   "governed_served": false,
   "governed_note": "manifest defines no gw_governed_launch/gw_governed_token (no native key/limit governance, or not yet wired)",
-  "measured_at": "2026-07-23T22:17:49Z"
+  "measured_at": "2026-07-24T01:31:23Z"
 }

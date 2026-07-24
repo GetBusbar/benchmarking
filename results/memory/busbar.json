@@ -1,13 +1,13 @@
 {
   "gateway": "busbar",
-  "build": "busbar 1.4.1",
+  "build": "getbusbar/busbar:1.4.1 (@sha256:a5ba83034be882972be8a2706e51e66b117da5a769f9176fe496c275dfb53be7)",
   "served": true,
   "last_http_status": "200",
   "serve_error": "",
-  "idle_rss_mib": 8.7,
-  "peak_rss_mib": 284.0,
-  "peak_rss_hwm_mib": 286.2,
-  "post_load_rss_mib": 42.3,
+  "idle_rss_mib": 8.8,
+  "peak_rss_mib": 303.9,
+  "peak_rss_hwm_mib": 304.2,
+  "post_load_rss_mib": 43.0,
   "payload_bytes": 150000,
   "concurrency": 1500,
   "duration_s": 120,
@@ -15,5 +15,5 @@
   "model": "gpt-4o-mini",
   "arch": "arm64",
   "hardware": "AWS m7g.4xlarge (Graviton3, 16 cores / 64 GB). Gateway-under-test pinned to 4 cores (the comparable basis); mock and load generator on 6 cores each so the mock never bottlenecks the streaming sweep. Ubuntu 24.04. One dedicated box per gateway.",
-  "measured_at": "2026-07-23T18:35:06Z"
+  "measured_at": "2026-07-24T01:25:09Z"
 }

@@ -10,7 +10,7 @@
   "streamcpu_frames_per_sec": 0,
   "streamcpu_fps_per_core": 0,
   "streamcpu_concurrency": 0,
-  "streamcpu_direct_ceiling_fps": 198701,
+  "streamcpu_direct_ceiling_fps": 194134,
   "streamcpu_mock_bound": false,
   "streamcpu_valid": false,
   "streamcpu_added_per_frame_us": null,
@@ -18,7 +18,7 @@
   "streamcpu_frame_bytes": 16,
   "streamcpu_cores": 4,
   "streamcpu_stall_ms": 250,
-  "sweep_streamcpu": [{"conc":8,"streams":12,"complete":3,"fail":8,"stalled":0,"frames":1885,"fps":59,"delivered":0.3068},{"conc":32,"streams":41,"complete":3,"fail":32,"stalled":0,"frames":3119,"fps":97,"delivered":0.1486},{"conc":64,"streams":69,"complete":1,"fail":68,"stalled":0,"frames":512,"fps":15,"delivered":0.0145},{"conc":128,"streams":128,"complete":0,"fail":128,"stalled":0,"frames":0,"fps":0,"delivered":0.0000},{"conc":256,"streams":256,"complete":0,"fail":256,"stalled":0,"frames":0,"fps":0,"delivered":0.0000}],
+  "sweep_streamcpu": [{"conc":8,"streams":13,"complete":5,"fail":8,"stalled":0,"frames":2560,"fps":76,"delivered":0.3846},{"conc":32,"streams":32,"complete":0,"fail":32,"stalled":0,"frames":0,"fps":0,"delivered":0.0000},{"conc":64,"streams":64,"complete":0,"fail":64,"stalled":0,"frames":0,"fps":0,"delivered":0.0000},{"conc":128,"streams":128,"complete":0,"fail":128,"stalled":0,"frames":0,"fps":0,"delivered":0.0000},{"conc":256,"streams":256,"complete":0,"fail":256,"stalled":0,"frames":0,"fps":0,"delivered":0.0000}],
   "payload_bytes": 256,
   "endpoint": "/v1/chat/completions",
   "model": "openai/gpt-4o-mini",
@@ -26,5 +26,5 @@
   "mock_proto": "h1+h2c",
   "arch": "arm64",
   "hardware": "AWS m7g.4xlarge (Graviton3, 16 cores / 64 GB). Gateway-under-test pinned to 4 cores (the comparable basis); mock and load generator on 6 cores each so the mock never bottlenecks the streaming sweep. Ubuntu 24.04. One dedicated box per gateway.",
-  "measured_at": "2026-07-23T22:34:20Z"
+  "measured_at": "2026-07-24T01:48:37Z"
 }
