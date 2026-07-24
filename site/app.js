@@ -1296,6 +1296,18 @@ const rosterRows = (gateways) =>
 /* Star counts render compact: 12345 -> "12.3k", below 1000 the full int. Null (no
    snapshot entry) stays null; the cell renders it muted. */
 const fmtStars = (v) => (v == null ? null : v >= 1000 ? `${(v / 1000).toFixed(1)}k` : String(Math.round(v)));
+/* The gateway's measured BUILD string (version/tag as run): the first suite record carrying one -
+   every suite of a gateway ran the same single-box build, so any lane's stamp is THE stamp. */
+const gatewayBuild = (g) => {
+  const j = LANES.map((l) => g[l.key]).find((x) => x && x.build);
+  return j ? j.build : null;
+};
+/* Compact form for a table cell: image digests and long refs stay in the tooltip. */
+const fmtBuild = (full) => {
+  let short = String(full).replace(/\s*\(@sha256:[0-9a-f]+\)/, "");
+  if (short.length > 32) short = short.slice(0, 29) + "...";
+  return short;
+};
 
 function renderGateways() {
   const tbody = document.querySelector("#gateways-table tbody");
@@ -1307,9 +1319,11 @@ function renderGateways() {
       ? `<a href="${g.repo}" target="_blank" rel="noopener">${esc(g.display)}</a>`
       : esc(g.display);
     const stars = fmtStars(g.stars);
+    const build = gatewayBuild(g);
     return `<tr>
       <td class="name">${name}</td>
       <td><span class="lang-chip" style="background:${c}">${esc(g.lang)}</span></td>
+      <td class="build">${build ? `<span title="${esc(build)}">${esc(fmtBuild(build))}</span>` : `<span class="muted">n/a</span>`}</td>
       <td class="stars">${stars != null ? esc(stars) : `<span class="muted">n/a</span>`}</td>
       <td class="cls">${esc(g.cls || "Gateway")}</td>
     </tr>`;
