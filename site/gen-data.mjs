@@ -125,7 +125,12 @@ const gateways = gatewayKeys.map((key) => {
     // g.streaming carries the diagonal cell's dialect + its full stream record.
     if (bc) {
       const cell = g.matrix.upstreams?.[bc.dialect]?.cells?.[bc.dialect];
-      if (cell && cell.stream) {
+      // MEDIUM-1(a): only project streaming when the diagonal cell ACTUALLY STREAMED. A non-streaming
+      // cell still carries a stream record ({stream_served:false, …}), so the old truthiness check
+      // (`cell.stream`) projected it — surfacing a did-not-stream cell as a served streamer. Mirror the
+      // memory guard (line 136, `.served === true`): require stream_served === true so g.streaming is
+      // ABSENT for a non-streaming cell and the board renders "did not stream".
+      if (cell && cell.stream && cell.stream.stream_served === true) {
         g.streaming = { dialect: bc.dialect, source: "matrix",
           build: g.matrix.build ?? null, measured_at: g.matrix.measured_at ?? null, ...cell.stream };
       }
@@ -301,7 +306,11 @@ function newestMeasuredMs(g) {
 // precede the newest embedded measurement: if it does, a raw result is future-dated (clock skew
 // on the rig) and a "fresh" bundle would look older than its data. Hard fail; never ship it.
 const generatedAt = new Date().toISOString();
-if (latest && generatedAt < latest) {
+// NIT: compare as parsed epoch ms, not raw ISO strings. A lexicographic `generatedAt < latest`
+// is only correct when both are the SAME ISO precision/zone; a fractional-second vs whole-second
+// mismatch can mis-order two instants that are microseconds apart (this is what forced
+// verify-local.sh's `sleep 2` workaround — Date.parse comparison lets it drop that; not touched here).
+if (latest && Date.parse(generatedAt) < Date.parse(latest)) {
   throw new Error(`gen-data: generated_at ${generatedAt} predates the newest embedded measured_at ${latest}; ` +
     `a raw result is future-dated (rig clock skew?). Refusing to emit a bundle that would read stale.`);
 }
@@ -338,24 +347,49 @@ if (boardNewest > 0) {
       `Refusing to publish generated_at=${generatedAt} over stale data. Re-run the field.`);
   }
 }
+const nowMs = Date.parse(generatedAt);
 for (const g of gateways) {
-  const ats = SUITES.map((s) => g[s] && g[s].measured_at).filter(Boolean).map((a) => Date.parse(a));
   g.stale = false;
+  // PER-GATEWAY future-date sanity assert (HIGH-3 sibling / NIT): a single gateway's own measured_at
+  // must never be in the FUTURE. The board-wide floor above only checks the max; a lone clock-skewed
+  // future stamp on one gateway would slip past it and render as a NEGATIVE "measured Nd ago" badge.
+  // Skip any future suite stamp so a skewed row can never post a negative age (matrix run is atomic;
+  // one bad stamp is corruption, not a legitimate run).
+  for (const s of SUITES) {
+    const at = g[s] && g[s].measured_at;
+    if (at && Date.parse(at) > nowMs) {
+      console.warn(`gen-data: WARNING: ${g.key}.${s}.measured_at ${at} is in the FUTURE (> generated_at ${generatedAt}); ` +
+        `clock skew on the rig. Skipping this stamp for the freshness/age computation so the badge never reads negative.`);
+    }
+  }
+  // SANITY-ONLY span cap (HIGH-3): the span the cap bounds is ONE atomic matrix run. Restrict the span
+  // computation to the MATRIX suite's measured_at ONLY. The retired legacy suites (perf/stream/streamcpu/
+  // memory) are fallback-only and are NEVER refreshed by a matrix-only re-run, so they carry weeks-old
+  // stamps; folding them into the span made an honest matrix-only re-run (matrix=today, legacy=weeks ago)
+  // trip the >12h cap and abort the deploy — defeating incremental publish. The matrix is the single
+  // source; only its own timestamps define the run this cap sanity-checks.
+  const matrixAt = g.matrix && g.matrix.measured_at && Date.parse(g.matrix.measured_at) <= nowMs
+    ? Date.parse(g.matrix.measured_at) : null;
+  // The staleness SIGNAL below still considers every suite's newest (non-future) stamp, so a gateway
+  // whose ONLY data is a legacy suite still ages correctly; the SPAN cap is what is matrix-scoped.
+  const ats = SUITES.map((s) => g[s] && g[s].measured_at).filter(Boolean)
+    .map((a) => Date.parse(a)).filter((ms) => ms <= nowMs);
   if (ats.length < 1) continue;
-  const per = () => SUITES.filter((s) => g[s] && g[s].measured_at).map((s) => `${s}=${g[s].measured_at}`).join(", ");
-  // SANITY-ONLY span cap: one atomic matrix run spans hours; a span past MAX_ROW_SPAN_SANITY_H means a
-  // corrupt/future-dated timestamp, not a legitimate long run. This is NOT the old mixed-run guard.
-  if (ats.length >= 2) {
-    const spanH = (Math.max(...ats) - Math.min(...ats)) / 3600000;
+  // Under matrix-sole-source a row has at most ONE matrix stamp, so an intra-matrix span is 0. The cap
+  // stays as a defensive guard should a future matrix result ever embed multiple internal timestamps
+  // (kept null-safe: matrixSpanAts is the matrix suite's stamps only).
+  const matrixSpanAts = matrixAt != null ? [matrixAt] : [];
+  if (matrixSpanAts.length >= 2) {
+    const spanH = (Math.max(...matrixSpanAts) - Math.min(...matrixSpanAts)) / 3600000;
     if (spanH > MAX_ROW_SPAN_SANITY_H) {
       throw new Error(
-        `gen-data: FRESHNESS FAILURE (corrupt row): ${g.key}'s timestamps span ${spanH.toFixed(1)}h (> ${MAX_ROW_SPAN_SANITY_H}h sanity cap) — ` +
-        `a corrupt or future-dated timestamp (one atomic matrix run is hours, never this). Per-suite: ${per()}`);
+        `gen-data: FRESHNESS FAILURE (corrupt row): ${g.key}'s MATRIX timestamps span ${spanH.toFixed(1)}h (> ${MAX_ROW_SPAN_SANITY_H}h sanity cap) — ` +
+        `a corrupt or future-dated timestamp (one atomic matrix run is hours, never this). matrix.measured_at=${g.matrix.measured_at}`);
     }
   }
   // PER-GATEWAY staleness SIGNAL (not a failure): flag a row whose own data has aged past the
   // threshold so app.js can show a "stale" badge. A living board with mixed cadences is fine.
-  const ageDays = (Date.parse(generatedAt) - Math.max(...ats)) / 86400000;
+  const ageDays = (nowMs - Math.max(...ats)) / 86400000;
   g.stale = ageDays > MAX_GATEWAY_AGE_DAYS;
 }
 

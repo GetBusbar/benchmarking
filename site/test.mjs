@@ -161,14 +161,30 @@ test("freshness guard sets the PER-GATEWAY stale flag past MAX_GATEWAY_AGE_DAYS 
   assert.equal(byKey.fresh.stale, false, "a fresh gateway must not be flagged stale");
 });
 
-test("freshness guard sanity-caps a corrupt/future-dated in-row timestamp (>12h span)", () => {
-  // The span check is retired as a mixed-run guard but kept as a pure sanity cap: a >12h intra-row span
-  // is not a real run, it is a corrupt or future-dated stamp. Hard fail on that alone.
+test("HIGH-3: the span cap is MATRIX-scoped — a matrix-only re-run past a weeks-old legacy stamp PASSES", () => {
+  // The core HIGH-3 fix: legacy suites (perf/stream/streamcpu/memory) are fallback-only and are NEVER
+  // refreshed by a matrix-only re-run, so they legitimately carry weeks-old stamps while matrix=today.
+  // Folding them into the span made an honest incremental matrix re-run trip the >12h cap and abort the
+  // deploy. The span cap now considers ONLY the matrix suite's own timestamps, so this must PASS.
   const msg = genThrows(buildSyntheticRepo({
-    corrupt: { perf: isoAgo(20), matrix: isoAgo(1) }, // 19h apart — impossible for one run
+    incr: { perf: isoDaysAgo(21), matrix: isoAgo(1) }, // matrix today, legacy 3 weeks old — honest re-run
   }));
-  assert.ok(msg, "expected a >12h in-row span to THROW");
-  assert.ok(/FRESHNESS FAILURE \(corrupt row\)/.test(msg), `expected the corrupt-row failure, got: ${msg}`);
+  assert.equal(msg, null, `expected a matrix-only re-run past a weeks-old legacy stamp to PASS, but it threw: ${msg}`);
+});
+
+test("HIGH-3: a per-gateway FUTURE measured_at is warned and never posts a negative age badge", () => {
+  // NIT (future-date, per-gateway): the board-wide floor only checks the max stamp; a lone clock-skewed
+  // FUTURE stamp on one gateway would slip past and render a negative "measured Nd ago" badge. gen-data
+  // must skip the future stamp from the age computation (and the board floor throw catches a future
+  // matrix stamp outright). Here a legacy suite is future-dated: the board floor throws on it first
+  // (generated_at would predate the newest embedded measured_at), which is the honest hard-fail.
+  const msg = genThrows(buildSyntheticRepo({
+    fresh: { matrix: isoAgo(2) },
+    skewed: { matrix: isoAgo(1), perf: isoAgo(-48) }, // perf 2 days in the FUTURE (rig clock skew)
+  }));
+  assert.ok(msg, "expected a future-dated stamp to be caught");
+  assert.ok(/predates the newest embedded measured_at|future-dated/.test(msg),
+    `expected the future-date hard-fail, got: ${msg}`);
 });
 
 test("OOTB config artifact round-trips into data.json (results/config/<gw>.txt → g.ootb_config)", () => {
@@ -730,6 +746,81 @@ test("gen-data projects streaming from the best diagonal matrix cell", () => {
   // the table accessor reads the same projected value
   assert.equal(app.streamCell(g, "streams_sustained", String).text, "1300");
   assert.equal(app.streamCell(g, "cpu_fps", String).text, "48000");
+});
+
+test("MEDIUM-1: a NON-streaming diagonal cell does NOT project g.streaming (stream_served gate)", () => {
+  // A cell that did not stream still carries a stream record ({stream_served:false, …}). The old
+  // truthiness projection surfaced it as a served streamer; gen-data must now project ONLY when the
+  // diagonal cell's stream_served === true, so g.streaming is ABSENT for a non-streaming cell.
+  const root = buildStreamMemRepo();  // sgw streams (STREAM_CELL.stream_served === true)
+  // Add a second gateway whose diagonal cell served perf but DID NOT stream.
+  mkdirSync(join(root, "gateways", "nostream"), { recursive: true });
+  writeFileSync(join(root, "gateways", "nostream", "gateway.sh"),
+    `#!/usr/bin/env bash\nGW_DISPLAY="nostream"\nGW_LANG=Go\nGW_CLASS="Gateway"\n`);
+  const iso = new Date(Date.now() - 3600000).toISOString();
+  const perf = { added_latency_p50_us: 10, added_latency_p99_us: 20, rps_sustained_20ms: 40000,
+    rps_sustained_20ms_concurrency: 512, rps_max_proxy: 44000, rps_max_proxy_concurrency: 256,
+    sweep_max_proxy: [{ conc: 256, rps: 44000, p99_us: 100, fail: 0 }],
+    sweep_sustained_20ms: [{ conc: 512, rps: 40000, p99_us: 200, fail: 0 }] };
+  const nonStreamCell = { served: true, perf, stream: { stream_served: false, stream_error: "buffered, no SSE frames" } };
+  const matrix = { gateway: "nostream", build: "ok", matrix_version: 2, served: true, measured_at: iso,
+    upstreams: { openai: { configurable: true, served: true, cells: { openai: nonStreamCell } } },
+    cells: { openai: nonStreamCell } };
+  writeFileSync(join(root, "results", "matrix", "nostream.json"), JSON.stringify(matrix));
+  const bundle = genInto(root);
+  const streamer = bundle.gateways.find((x) => x.key === "sgw");
+  const quiet = bundle.gateways.find((x) => x.key === "nostream");
+  assert.ok(streamer.streaming, "a streaming cell still projects g.streaming");
+  assert.ok(!quiet.streaming, "a non-streaming cell must NOT project g.streaming (stream_served gate)");
+  // the table accessor renders n/a, not a fabricated streaming number
+  assert.equal(app.streamCell(quiet, "streams_sustained", String).na, true);
+});
+
+test("MEDIUM-6: cpu_fps is gated on cpu_fps_mock_bound === false across the site + guard", () => {
+  // Certified (explicit false): visible on every surface.
+  const certified = { key: "cert", display: "Cert", lang: "Rust",
+    streaming: { dialect: "openai", source: "matrix", stream_served: true,
+      added_ttft_p99_us: 90, added_gap_p99_us: 12, streams_sustained: 1300,
+      cpu_fps: 48000, cpu_fps_mock_bound: false } };
+  assert.equal(app.cpuFpsCertified(certified.streaming), true);
+  assert.equal(app.streamCell(certified, "cpu_fps", String).text, "48000");
+  assert.equal(app.canonicalStreaming(certified).cpu_fps, 48000);
+  // Mock-bound (true): suppressed → n/a on the site, matching the chart's suppressed bar.
+  const bound = { ...certified, key: "bound",
+    streaming: { ...certified.streaming, cpu_fps_mock_bound: true } };
+  assert.equal(app.cpuFpsCertified(bound.streaming), false);
+  assert.equal(app.streamCell(bound, "cpu_fps", String).na, true, "mock-bound cpu_fps reads n/a");
+  assert.equal(app.canonicalStreaming(bound).cpu_fps, null);
+  // NULL flag (unverifiable — ceiling probe read 0): also suppressed (the MEDIUM-5 leak).
+  const nullFlag = { ...certified, key: "nullflag",
+    streaming: { ...certified.streaming, cpu_fps_mock_bound: null } };
+  assert.equal(app.cpuFpsCertified(nullFlag.streaming), false, "null mock-bound is NOT certified");
+  assert.equal(app.streamCell(nullFlag, "cpu_fps", String).na, true, "null mock-bound cpu_fps reads n/a");
+  // and the other streaming metrics stay visible regardless of cpu_fps gating
+  assert.equal(app.streamCell(bound, "streams_sustained", String).text, "1300");
+});
+
+test("MEDIUM-6 guard: site cpu-fps visibility must equal the chart's streamcpu_valid rule", () => {
+  // The check-consistency assertion tying the two together. A matrix streaming projection whose
+  // diagonal cell is mock-bound: the site hides cpu_fps AND the chart draws no bar → consistent.
+  const stream = { stream_served: true, added_ttft_p99_us: 90, added_gap_p99_us: 12,
+    streams_sustained: 1300, cpu_fps: 48000, cpu_fps_mock_bound: false };
+  const cell = { served: true, perf: { added_latency_p99_us: 20 }, stream };
+  const matrix = { upstreams: { openai: { cells: { openai: cell } } } };
+  const consistent = { key: "cok", display: "Cok", lang: "Rust",
+    streaming: { dialect: "openai", source: "matrix", ...stream }, matrix };
+  assert.deepEqual(checkConsistency({ gateways: [consistent] }, app).errors, [],
+    "certified cpu_fps: site shows it, chart draws it — consistent");
+  // Now make the cell mock-bound but leave a stale certified headline: the guard must catch that the
+  // site would (via the raw headline) diverge from the chart. Here headline says certified, cell says
+  // mock-bound → gated values differ (headline gated stays 48000, cell gated → null) → FAIL.
+  const boundCell = { ...cell, stream: { ...stream, cpu_fps_mock_bound: true } };
+  const drift = { key: "cdrift", display: "CDrift", lang: "Rust",
+    streaming: { dialect: "openai", source: "matrix", ...stream },  // headline still certified
+    matrix: { upstreams: { openai: { cells: { openai: boundCell } } } } };
+  const eDrift = checkConsistency({ gateways: [drift] }, app).errors;
+  assert.ok(eDrift.some((e) => e.includes("cdrift.streaming.cpu_fps")),
+    `guard must catch a cpu_fps that is certified on the headline but mock-bound on its diagonal cell; got: ${JSON.stringify(eDrift)}`);
 });
 
 test("gen-data projects memory from the matrix's one process-level read", () => {

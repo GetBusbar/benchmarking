@@ -473,14 +473,29 @@ def _proj_streaming(key: str) -> dict | None:
     # it was actually measured (cpu_fps present + positive) AND was NOT mock-bound (an unpinned box is
     # mock-bound → not proven). Mirrors the retired suite's streamcpu_valid = streamed && !mock_bound.
     cpu = s.get("cpu_fps")
-    cpu_valid = cpu is not None and float(cpu or 0) > 0 and not s.get("cpu_fps_mock_bound")
+    # MEDIUM-5: require the mock-bound flag to be EXPLICITLY False. `cpu_fps_mock_bound=null` means the
+    # harness could NOT certify the number (the ceiling probe read 0), so the number is UNVERIFIABLE —
+    # not proven. The old `not s.get(...)` treated null as "not mock-bound" (Python `not None` is True),
+    # leaking an unverifiable number through as a proven gateway-vs-ceiling comparison. Only a value the
+    # harness certified as NOT mock-bound (explicit False) is valid; null/True both suppress the bar
+    # (mirrors app.js cpuFpsCertified, which the site + check-consistency use for the identical rule).
+    cpu_valid = cpu is not None and float(cpu or 0) > 0 and s.get("cpu_fps_mock_bound") is False
     return {
-        "stream_served": True,
+        # MEDIUM-1(b): carry the cell's ACTUAL stream_served through, never hardcode True. gen-data now
+        # only projects g.streaming for a cell that actually streamed (stream_served === true), but a
+        # legacy stream-fallback record could still carry stream_served=false; hardcoding True drew a
+        # did-not-stream cell as a served streamer. Default True only when the key is absent (a matrix
+        # projection with no explicit flag is, by construction, a streamed cell).
+        "stream_served": s.get("stream_served", True),
         "stream_added_ttft_p99_us": s.get("added_ttft_p99_us"),
         "stream_added_gap_p99_us": s.get("added_gap_p99_us"),
         "stream_sustained_streams": s.get("streams_sustained"),
         "stream_sustained_fps": s.get("streams_sustained_fps"),
         "streamcpu_frames_per_sec": cpu,
+        # NIT: the matrix never emits cpu_fps_per_core, so this is ALWAYS null today. Kept null-safe (the
+        # per-core chart tolerates a null via `float(r.get(...) or 0)`); emitting a real value is a
+        # matrix/run.sh change (out of scope here). Left in place so the column reappears automatically
+        # once the harness does emit it, rather than silently dropping the plumbing.
         "streamcpu_fps_per_core": s.get("cpu_fps_per_core"),
         "streamcpu_valid": cpu_valid,
     }
@@ -913,7 +928,14 @@ def _report_md(rows: list, title: str, charts: list, pending: tuple = (), chart_
     # hasn't been run yet simply contributes empty cells; the whole section disappears when none
     # of the three has any result. "cannot" cells ARE the story: a gateway that answers 200 but
     # never frames, or cannot take an Anthropic request, is recorded, not hidden.
-    stream_m, xlate_m, governed_m = _suite_map("stream"), _suite_map("xlate"), _suite_map("governed")
+    # NIT (charts.py:916): the streaming column must read the SAME source the streaming PNGs use — the
+    # matrix projection (g.streaming via _proj_streaming), NOT the RETIRED results/stream/*.json suite.
+    # Reading the legacy suite here put weeks-old stale numbers (or ✕ rows for a gateway that no longer
+    # has a legacy file) in the README table while the PNGs showed the fresh matrix projection. Build the
+    # stream map from _proj_streaming so the table and the charts agree. xlate/governed unchanged
+    # (translation is already the canonical matrix cell via _overlay_xlate; governed is retired/absent).
+    stream_m = {k: r for k in GATEWAYS if (r := _proj_streaming(k)) is not None}
+    xlate_m, governed_m = _suite_map("xlate"), _suite_map("governed")
     row_keys = [k for k, _ in rows]
     lane_keys = [k for k in row_keys if k in stream_m or k in xlate_m or k in governed_m]
     if lane_keys:
