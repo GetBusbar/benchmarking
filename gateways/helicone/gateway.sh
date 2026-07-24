@@ -9,8 +9,24 @@
 # no public image. The bench boxes are Graviton arm64, so on them we build the `ai-gateway` crate
 # from source — exactly the pattern we use for LiteLLM-Rust — and run the release binary natively
 # (real process RSS, no container overhead). Convert to the official image if/when Helicone ships
-# arm64. Refs are pinned in gateways/versions.env. Pure-proxy mode: helicone.features=none → no control plane, no auth, no key
-# required; the built-in `openai` provider's base-url is overridden to the mock.
+# arm64. Refs are pinned in gateways/versions.env.
+#
+# ── OOTB posture (one-config standard) ────────────────────────────────────────────────────────────
+# This is the config a real user deploys, used unchanged for EVERY lane. Helicone runs at its as-
+# shipped defaults; the only deviations are the permitted ones:
+#   * each provider's base-url → the mock (all mock-reachable dialects wired below; the matrix
+#     exercises them and memory/throughput are measured on this same all-providers config, NOT scoped
+#     per-lane);
+#   * dummy provider keys / AWS signing material (the mock ignores them);
+#   * telemetry.exporter: stdout — the disclosed telemetry-off run-mechanic (it is ALSO the default,
+#     so this only pins that no OTLP egress can happen on the isolated rig).
+# NOT a strip — kept because it IS the default: `helicone.features: none`. Verified against the config
+# structs at the pinned commit (config/helicone.rs): HeliconeFeatures defaults to None whether the key
+# is present or omitted. None = no auth checks and NO control-plane/websocket calls to api.helicone.ai,
+# so the gateway boots UNPROTECTED and makes no outbound connection except to the upstream provider —
+# exactly the OOTB default. It is written explicitly here only for transparency; deleting it would be
+# behavior-identical. Helicone ships unprotected, so we keep it unprotected (GW_AUTH is a dummy bearer
+# the open router ignores). No feature is disabled to save RAM/latency; no perf knob is set.
 GW_KIND=native
 # Self-describing manifest metadata — charts.py + the run lists read these, so a gateway
 # is fully defined by its own dir (add/remove a dir → it appears/disappears everywhere).
@@ -54,36 +70,51 @@ gw_version() {
   echo "Helicone/ai-gateway@${sha:-?} (source build)"
 }
 
-# _helicone_launch <provider>: write the router config wiring exactly ONE provider (base-url ->
-# mock) and boot the binary. Helicone appends the provider's native path to base-url, so pointing it
-# at the mock host makes each provider POST that dialect's native upstream shape to the mock.
-_helicone_launch() {
-  local prov="$1"
+# _helicone_write_config: render the ONE OOTB router config. Every dialect Helicone can translate AND
+# whose base-url the mock can stand in for is wired here (all → mock), load-balanced under one router.
+# Helicone appends each provider's native path to base-url, so pointing every provider at the mock host
+# makes each POST that dialect's native upstream shape. Providers wired: openai, anthropic, bedrock —
+# Helicone's first-class translating dialects reachable via a base-url override (types/provider.rs
+# InferenceProvider). Gemini is deliberately NOT wired: Helicone's Gemini egress targets Google's
+# OpenAI-COMPAT surface (v1beta/openai/chat/completions), not native generateContent, so it is a
+# capability limit the matrix records grey — wiring it would manufacture an 'untranslated' red for
+# behavior Helicone never claims. Cohere has no dialect at this commit. features omitted-equivalent
+# (=none, unprotected default); telemetry pinned to stdout (its own default → no OTLP egress).
+_helicone_write_config() {
   cat > "$GW_DIR/config.gen.yaml" <<YAML
 server:
   address: 0.0.0.0
   port: $GW_PORT
 helicone:
   features: none
+telemetry:
+  exporter: stdout
 providers:
-  $prov:
+  openai:
+    base-url: "http://127.0.0.1:$MOCK_PORT/"
+  anthropic:
+    base-url: "http://127.0.0.1:$MOCK_PORT/"
+  bedrock:
     base-url: "http://127.0.0.1:$MOCK_PORT/"
 routers:
   default:
     load-balance:
       chat:
-        strategy: weighted
+        strategy: latency
         providers:
-          - provider: $prov
-            weight: 1.0
+          - openai
+          - anthropic
+          - bedrock
 YAML
+}
+
+_helicone_spawn() {
   pkill -f 'target/release/ai-gateway' 2>/dev/null; sleep 1
   # AWS creds: helicone's bedrock SigV4 signer reads AWS_ACCESS_KEY / AWS_SECRET_KEY (NOT the SDK's
-  # AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY - src/types/provider.rs:218-229 builds
-  # ProviderKey::AwsCredentials from those two names, region from AWS_REGION). With them absent,
-  # extract_and_sign_aws_headers returns AuthError::InvalidCredentials -> HTTP 401 before any
-  # egress, which we mispublished as a Helicone bedrock failure. Both spellings are exported so
-  # any code path resolves; the mock ignores the signature.
+  # AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY - src/types/provider.rs builds ProviderKey::AwsCredentials
+  # from those two names, region from AWS_REGION). With them absent, extract_and_sign_aws_headers
+  # returns AuthError::InvalidCredentials -> HTTP 401 before any egress. Both spellings are exported so
+  # any code path resolves; the mock ignores the signature. All keys are dummy on the isolated rig.
   setsid taskset -c "$CORES" env \
     OPENAI_API_KEY=sk-dummy ANTHROPIC_API_KEY=sk-dummy GEMINI_API_KEY=sk-dummy \
     AWS_ACCESS_KEY=AKIAMOCKACCESSKEY AWS_SECRET_KEY=mock-secret-access-key \
@@ -94,21 +125,20 @@ YAML
 }
 
 gw_launch() {
-  # base-url gets "v1/chat/completions" appended by the gateway → hits the mock's OpenAI endpoint.
-  _helicone_launch openai
+  _helicone_write_config
+  _helicone_spawn
 }
 
 # ── matrix suite: declared capability + egress wiring ─────────────────────────────────────────────
 # Declared 6x6 (rows=ingress, cols=egress), axis order: openai openai-responses anthropic gemini
 # cohere bedrock. Helicone accepts the OpenAI-canonical ingress and translates it to the routed
 # provider's NATIVE upstream shape for anthropic (AnthropicConverter -> /v1/messages) and bedrock
-# (BedrockConverter -> model/{id}/converse), each provider's base-url overridable to the mock. So
-# the capable row is openai-ingress into {openai, anthropic, bedrock}. NOT declared:
+# (BedrockConverter -> model/{id}/converse) — both wired to the mock in the single OOTB config above.
+# So the capable row is openai-ingress into {openai, anthropic, bedrock}. NOT declared:
 #   gemini - despite the endpoint's name, Google's mapping targets Gemini's OPENAI-COMPAT surface,
 #     not native generateContent: endpoints/google/generate_contents.rs pins
-#     PATH = "v1beta/openai/chat/completions" with OpenAI request/response types (its own test in
-#     tests/single_provider.rs:62 confirms the proxied target). This suite's gemini egress means
-#     the native generateContent dialect, so declaring it manufactured an 'untranslated
+#     PATH = "v1beta/openai/chat/completions" with OpenAI request/response types. This suite's gemini
+#     egress means the native generateContent dialect, so declaring it manufactured an 'untranslated
 #     passthrough' red for behavior Helicone never claimed;
 #   openai-responses - the OpenAI endpoint enum has only ChatCompletions, no Responses converter;
 #   cohere - no cohere dialect (cohere appears only as a Bedrock model family).
@@ -135,14 +165,44 @@ GW_MATRIX_EGRESS="openai anthropic bedrock"
 # anthropic->openai translation exists on any route, so the lane is not a claimed capability.
 GW_XLATE_CAP=0
 GW_XLATE_CAP_NOTE="Helicone AI Gateway ingress is OpenAI-format only (EndpointRoute registers only chat/completions; ApiEndpoint::new constructs only an OpenAI source endpoint, endpoints/mod.rs:58-85); anthropic-format requests exist only as the unmapped /anthropic passthrough, so anthropic-in -> openai-out translation is not a claimed capability (commit 9649b27)"
+# The single OOTB config already load-balances every reachable egress dialect (all → mock), so each
+# matrix column just selects the provider-prefixed model; no per-lane relaunch or config rewrite. The
+# gateway is launched once and every column is probed against the same all-providers config.
 gw_matrix_egress() {
   case "$1" in
-    openai)    GW_MODEL="openai/gpt-4o-mini";                      _helicone_launch openai;;
-    anthropic) GW_MODEL="anthropic/claude-3-5-sonnet";            _helicone_launch anthropic;;
-    gemini)    GW_MODEL="gemini/gemini-2.5-flash";                _helicone_launch gemini;;
-    bedrock)   GW_MODEL="bedrock/anthropic.claude-3-5-sonnet-v1:0"; _helicone_launch bedrock;;
+    openai)    GW_MODEL="openai/gpt-4o-mini";;
+    anthropic) GW_MODEL="anthropic/claude-3-5-sonnet";;
+    bedrock)   GW_MODEL="bedrock/anthropic.claude-3-5-sonnet-v1:0";;
     *) return 1;;
   esac
+  _helicone_write_config
+  _helicone_spawn
+}
+
+# ── OOTB config artifact (file-driven) ────────────────────────────────────────────────────────────
+# gw_config prints the canonical OOTB config Helicone launches with. It is file-driven, so the artifact
+# is the rendered router config (exactly what -c loads) PLUS the non-secret launch env (all provider /
+# AWS keys are dummy on the isolated rig — never a live secret). Read from the file _helicone_write_
+# config just rendered (falls back to rendering it if absent), so it can never drift from what the
+# gateway loaded. OOTB posture: features=none (unprotected default), telemetry=stdout (no egress),
+# openai+anthropic+bedrock all wired to the mock; no feature strip or perf knob.
+gw_config() {
+  local cfg="$GW_DIR/config.gen.yaml"
+  echo "# ── config.gen.yaml (rendered; loaded via -c config.gen.yaml) ──"
+  [ -f "$cfg" ] || _helicone_write_config
+  cat "$cfg"
+  echo
+  echo "# ── launch env (non-secret; provider/AWS keys are dummy on the isolated rig) ──"
+  cat <<ENV
+OPENAI_API_KEY=sk-dummy
+ANTHROPIC_API_KEY=sk-dummy
+GEMINI_API_KEY=sk-dummy
+AWS_ACCESS_KEY=AKIAMOCKACCESSKEY
+AWS_SECRET_KEY=mock-secret-access-key
+AWS_ACCESS_KEY_ID=AKIAMOCKACCESSKEY
+AWS_SECRET_ACCESS_KEY=mock-secret-access-key
+AWS_REGION=us-east-1
+ENV
 }
 
 gw_rss() { awk '/VmRSS/{printf "%.1f", $2/1024}' "/proc/$(pgrep -f 'target/release/ai-gateway' | head -1)/status" 2>/dev/null; }
@@ -154,7 +214,3 @@ gw_diag() {
 }
 
 gw_stop() { pkill -f 'target/release/ai-gateway' 2>/dev/null; }
-
-# gw_matrix_egress + the declared capability matrix are defined above (before gw_launch). The
-# anthropic/gemini/bedrock egress columns are wired-pending-field-verification; the EC2 field run
-# turns each declared-1 cell green or red. Every grey cell is a cited capability limit.

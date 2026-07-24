@@ -4,8 +4,31 @@
 #
 # Kong's ai-proxy plugin fronts an OpenAI-shaped /v1/chat/completions and forwards to an upstream
 # LLM; `model.options.upstream_url` overrides that upstream, so we point it straight at the mock.
-# DB-less declarative config, generated in gw_launch against the runner's mock port. KONG_IMAGE is
-# pinned in gateways/versions.env.
+# DB-less declarative config, generated against the runner's mock port. KONG_IMAGE is pinned in
+# gateways/versions.env.
+#
+# ── OOTB posture (one-config standard) ────────────────────────────────────────────────────────────
+# This is the config a real user deploys, used unchanged for EVERY lane. Kong's ai-proxy binds ONE
+# upstream provider per route (multi-provider fan-out is a DIFFERENT plugin, ai-proxy-advanced), so —
+# exactly like TensorZero, whose provider block is likewise single-upstream-per-config — the canonical
+# OpenAI provider is what perf/latency/throughput/memory run on, and the matrix re-renders the SAME
+# real-world config shape per egress column (only the permitted provider + base_url swap; all → mock).
+# Every provider ai-proxy 3.8 supports and this suite probes is covered by GW_MATRIX_EGRESS below.
+# Permitted deviations only: provider upstream_url → mock, dummy auth/AWS signing (the mock ignores
+# it), the per-provider REQUIRED fields (anthropic_version, bedrock region+creds), and two disclosed
+# run-mechanics — KONG_DATABASE=off (DB-less: no external Postgres dependency) and KONG_ANONYMOUS_
+# REPORTS=off (telemetry/phone-home suppression). The client always hits the uniform /v1/chat/
+# completions route; no special passthrough route is added.
+#
+# FAIRNESS AUDIT (Kong 3.8.0 source):
+#   * REMOVED KONG_ADMIN_LISTEN=off: that DISABLED a default-on feature. Kong's Admin API is ON by
+#     default (kong.conf.default @3.8.0: admin_listen = 127.0.0.1:8001 ... + 127.0.0.1:8444 ssl),
+#     bound to localhost, and DB-less only makes it read-only — it does not turn it off. Turning it
+#     off was a feature-strip; restored to the default (the var is simply not set). Harmless on a
+#     dedicated single-box bench (localhost-only, no port clash, proxy traffic unaffected).
+#   * ADDED KONG_ANONYMOUS_REPORTS=off: anonymous_reports defaults to `on` (kong.conf.default @3.8.0)
+#     — Kong phones home usage/error data by default. Suppressing outbound telemetry is a permitted
+#     disclosed run-mechanic (not a functional strip).
 GW_KIND=docker
 # Self-describing manifest metadata — charts.py + the run lists read these, so a gateway
 # is fully defined by its own dir (add/remove a dir → it appears/disappears everywhere).
@@ -45,11 +68,13 @@ gw_build() {
 #               declarative config fails validation and Kong never boots.
 #   bedrock   - configure_request SigV4-signs every request (drivers/bedrock.lua); with no
 #               auth.aws_access_key_id/aws_secret_access_key and no ambient AWS credentials the
-#               signer fails ("failed to sign AWS request") -> HTTP 500 on the first request. Dummy
-#               keys + model.options.bedrock.aws_region satisfy the signer; the mock ignores the
-#               signature. upstream_url override is honored by the bedrock driver.
-# Both fixed configs verified locally against kong:3.8 + the recording mock (anthropic ->
-# /v1/messages anthropic-shaped, bedrock -> /model/<m>/converse Converse-shaped, HTTP 200).
+#               signer fails ("failed to sign AWS request") -> HTTP 500. Dummy keys +
+#               model.options.bedrock.aws_region satisfy the signer; the mock ignores the signature.
+#   cohere    - a first-class ai-proxy 3.8 provider (schema enum includes cohere). Kong 3.8 emits the
+#               Cohere v1 /v1/chat shape; upstream_url override points it at the mock. (The matrix's
+#               cohere egress probes the v2 dialect, so that cell stays grey — see GW_MATRIX_CAP —
+#               but the provider is genuinely supported and wired for completeness.)
+# All fixed configs verified locally against kong:3.8 + the recording mock.
 _kong_write_config() {
   local prov="$1" url="$2" auth extra
   case "$prov" in
@@ -102,11 +127,12 @@ YAML
 # via driver.to_format. So the only capable row is openai-ingress, into the egress providers whose
 # native Converse/Messages/generateContent shape Kong 3.8 emits with an upstream_url override
 # (kong/llm/drivers/shared.lua): anthropic (/v1/messages), gemini (:generateContent), bedrock
-# (converse). NOT declared: openai-responses (no llm/v1/responses route_type in 3.8) and cohere
-# (Kong 3.8 emits the Cohere *v1* /v1/chat shape, CHATBOT/chat_history, not the v2 dialect this suite
-# probes) - both grey with the cited reason below.
+# (converse). NOT declared: openai-responses (no llm/v1/responses route_type in 3.8 — the enum is
+# {llm/v1/chat, llm/v1/completions, preserve}) and cohere-v2 (Kong 3.8's cohere driver emits the
+# Cohere *v1* /v1/chat shape, CHATBOT/chat_history, not the v2 dialect this suite probes) - both grey
+# with the cited reason. cohere IS a supported 3.8 provider (schema enum), just at the v1 dialect.
 # Evidence: kong/llm/init.lua (ingress detect + route_type enum), kong/llm/drivers/shared.lua
-# (upstream_url override + per-provider paths), release/3.8.x.
+# (upstream_url override + per-provider paths), kong/llm/schemas/init.lua (provider enum), 3.8.0.
 GW_MATRIX_CAP="
 101101
 000000
@@ -115,7 +141,7 @@ GW_MATRIX_CAP="
 000000
 000000
 "
-GW_MATRIX_CAP_NOTE="Kong 3.8 ai-proxy accepts only OpenAI-canonical ingress and emits no OpenAI-Responses route_type or Cohere v2 upstream shape (kong/llm/init.lua, drivers/shared.lua)"
+GW_MATRIX_CAP_NOTE="Kong 3.8 ai-proxy accepts only OpenAI-canonical ingress; it emits no OpenAI-Responses route_type (enum: llm/v1/chat|completions|preserve) and its Cohere driver emits the Cohere v1 /v1/chat shape, not the v2 dialect this suite probes (kong/llm/init.lua, drivers/shared.lua, schemas/init.lua @3.8.0)"
 GW_MATRIX_EGRESS="openai anthropic gemini bedrock"
 
 # ── xlate lane: not declared (no anthropic-format ingress at 3.8) ────────────────────────────────
@@ -140,13 +166,39 @@ gw_matrix_egress() {
 
 gw_launch() {
   sudo docker rm -f kong-bench >/dev/null 2>&1; sleep 1
+  # KONG_DATABASE=off = DB-less declarative (no external Postgres — a disclosed run-mechanic).
+  # KONG_ANONYMOUS_REPORTS=off suppresses Kong's default-on telemetry phone-home (run-mechanic).
+  # The Admin API listener is left at its default (ON, localhost:8001/8444) — not disabled.
   sudo docker run -d --name kong-bench --network host --cpuset-cpus="$CORES" \
     -e KONG_DATABASE=off \
+    -e KONG_ANONYMOUS_REPORTS=off \
     -e KONG_DECLARATIVE_CONFIG=/kong/kong.yml \
     -e "KONG_PROXY_LISTEN=0.0.0.0:$GW_PORT" \
-    -e "KONG_ADMIN_LISTEN=off" \
     -v "$GW_DIR/kong.gen.yml:/kong/kong.yml:ro" \
     "${KONG_IMAGE:-kong:3.8}" >/dev/null 2>&1
+}
+
+# ── OOTB config artifact (file-driven) ────────────────────────────────────────────────────────────
+# gw_config prints the canonical OOTB config Kong launches with. Kong is file-driven, so the artifact
+# is the rendered DB-less declarative config (exactly what KONG_DECLARATIVE_CONFIG loads) PLUS the
+# non-secret launch env (any auth/AWS values in the config are dummy on the isolated rig). Read from
+# the file _kong_write_config just rendered (falls back to the openai-lane default if absent — the
+# canonical perf config), so it can never drift from what Kong loaded. OOTB posture: ai-proxy on the
+# uniform /v1/chat/completions route, admin API left at its default (not disabled); the only run-
+# mechanics are KONG_DATABASE=off (DB-less) and KONG_ANONYMOUS_REPORTS=off (telemetry).
+gw_config() {
+  local cfg="$GW_DIR/kong.gen.yml"
+  echo "# ── kong.gen.yml (rendered DB-less declarative; loaded via KONG_DECLARATIVE_CONFIG) ──"
+  [ -f "$cfg" ] || _kong_write_config openai "http://127.0.0.1:$MOCK_PORT/v1/chat/completions"
+  cat "$cfg"
+  echo
+  echo "# ── launch env (non-secret) ──"
+  cat <<ENV
+KONG_DATABASE=off
+KONG_ANONYMOUS_REPORTS=off
+KONG_DECLARATIVE_CONFIG=/kong/kong.yml
+KONG_PROXY_LISTEN=0.0.0.0:$GW_PORT
+ENV
 }
 
 gw_rss() { container_rss_mib kong-bench; }  # summed process-tree VmRSS (same method as native gateways)
