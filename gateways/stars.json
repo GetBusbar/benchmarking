@@ -1,54 +1,67 @@
 {
  "agentgateway": {
   "stars": 4024,
+  "first_commit": "2025-03-18",
   "as_of": "2026-07-24"
  },
  "apisix": {
   "stars": 16902,
+  "first_commit": "2019-04-10",
   "as_of": "2026-07-24"
  },
  "arch": {
   "stars": 6888,
+  "first_commit": "2024-07-09",
   "as_of": "2026-07-24"
  },
  "bifrost": {
-  "stars": 6743,
+  "stars": 6744,
+  "first_commit": "2025-03-19",
   "as_of": "2026-07-24"
  },
  "busbar": {
   "stars": 110,
+  "first_commit": "2026-05-29",
   "as_of": "2026-07-24"
  },
  "gomodel": {
   "stars": 1014,
+  "first_commit": "2025-12-13",
   "as_of": "2026-07-24"
  },
  "helicone": {
   "stars": 614,
+  "first_commit": "2025-04-01",
   "as_of": "2026-07-24"
  },
  "kong": {
   "stars": 43844,
+  "first_commit": "2014-11-17",
   "as_of": "2026-07-24"
  },
  "litellm-python": {
-  "stars": 54515,
+  "stars": 54516,
+  "first_commit": "2023-07-27",
   "as_of": "2026-07-24"
  },
  "litellm-rust": {
-  "stars": 54515,
+  "stars": 54516,
+  "first_commit": "2023-07-27",
   "as_of": "2026-07-24"
  },
  "one-api": {
   "stars": 35914,
+  "first_commit": "2023-04-22",
   "as_of": "2026-07-24"
  },
  "portkey": {
-  "stars": 12519,
+  "stars": 12520,
+  "first_commit": "2023-08-23",
   "as_of": "2026-07-24"
  },
  "tensorzero": {
   "stars": 11689,
+  "first_commit": "2024-07-16",
   "as_of": "2026-07-24"
  }
 }

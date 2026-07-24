@@ -32,8 +32,26 @@ const headers = { "user-agent": "onthebench-stars-snapshot", accept: "applicatio
 if (process.env.GITHUB_TOKEN) headers.authorization = `Bearer ${process.env.GITHUB_TOKEN}`;
 
 const asOf = new Date().toISOString().slice(0, 10);
+
+// The date of a repo's FIRST commit (project age) — deliberately NOT `created_at`, which resets
+// on renames/re-imports (archgw -> plano would look newborn). GitHub's commits list is
+// newest-first with no reverse order, so: page the list at per_page=1, read the `last` page
+// number from the Link header, fetch that page — its single commit is the root.
+async function firstCommitDate(slug) {
+  const url = `https://api.github.com/repos/${slug}/commits?per_page=1`;
+  const r = await fetch(url, { headers });
+  if (!r.ok) throw new Error(`GitHub API ${r.status} for ${slug} commits`);
+  const last = r.headers.get("link")?.match(/[?&]page=(\d+)>; rel="last"/)?.[1];
+  const page = last ? await (async () => {
+    const r2 = await fetch(`${url}&page=${last}`, { headers });
+    if (!r2.ok) throw new Error(`GitHub API ${r2.status} for ${slug} root commit`);
+    return r2.json();
+  })() : await r.json();
+  return page[0]?.commit?.committer?.date?.slice(0, 10) ?? null;
+}
+
 const out = {};
-const cache = new Map(); // owner/repo -> stars (shared repos fetched once)
+const cache = new Map(); // owner/repo -> {stars, first_commit} (shared repos fetched once)
 for (const key of keys) {
   const text = readFileSync(join(HERE, key, "gateway.sh"), "utf8");
   const m = text.match(/^GW_REPO=(?:"([^"]*)"|(\S+))/m);
@@ -46,10 +64,10 @@ for (const key of keys) {
   if (!cache.has(slug)) {
     const r = await fetch(`https://api.github.com/repos/${slug}`, { headers });
     if (!r.ok) throw new Error(`GitHub API ${r.status} for ${slug} (rate-limited? set GITHUB_TOKEN or use: gh api repos/${slug} --jq .stargazers_count)`);
-    cache.set(slug, (await r.json()).stargazers_count);
+    cache.set(slug, { stars: (await r.json()).stargazers_count, first_commit: await firstCommitDate(slug) });
   }
-  out[key] = { stars: cache.get(slug), as_of: asOf };
-  console.log(`${key}: ${out[key].stars} (${slug})`);
+  out[key] = { stars: cache.get(slug).stars, first_commit: cache.get(slug).first_commit, as_of: asOf };
+  console.log(`${key}: ${out[key].stars} stars, since ${out[key].first_commit} (${slug})`);
 }
 
 writeFileSync(OUT, JSON.stringify(out, null, 1) + "\n");

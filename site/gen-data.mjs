@@ -75,6 +75,10 @@ const gateways = gatewayKeys.map((key) => {
     repo: meta.repo || null,
     stars: starsSnap[key]?.stars ?? null,
     stars_as_of: starsSnap[key]?.as_of ?? null,
+    // Project age context: the repo's FIRST-commit date (not created_at, which resets on
+    // renames). Rendered as a simple relative age — 43k stars over 10 years and 100 over 3
+    // weeks are different statements.
+    first_commit: starsSnap[key]?.first_commit ?? null,
   };
   for (const suite of SUITES) {
     const j = readJson(join(ROOT, "results", suite, `${key}.json`));
