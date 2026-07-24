@@ -35,6 +35,7 @@ stream_probe(){ # url conc dur
     # a gateway peaking well below the rig never spuriously reads mock-bound. The `mockbound_low` curve
     # below overrides this to sit NEAR the ceiling at a LOW winner conc, proving the re-probe (which
     # measures the ceiling at that low winner, not the inflated grid top) correctly flags it.
+    if [ "${MOCK_DEAD:-0}" = 1 ]; then echo "0 0 0 0 0 0 0.0 0 0 0 0"; return; fi  # dead reference: fps 0
     local m=$(( 20000 + c*400 )); [ "$m" -gt 400000 ] && m=400000
     echo "$c $c 0 0 $((c*SM_EXPFRAMES)) $m 1.0 100 200 20 40"; return
   fi
@@ -49,6 +50,21 @@ stream_probe(){ # url conc dur
       echo "$c $c 0 0 $((c*SM_EXPFRAMES)) $((c*25)) 1.0 100 200 20 40" ;;
     sust_none)  # even the low bound fails the gate (a gateway that stalls at any concurrency) -> 0.
       echo "$c 0 $c $c 0 0 0.0 100 900000 20 900000" ;;
+    sust_mockbound)  # MEDIUM-R2-2 signal: gateway sustains to the grid top and its fps TRACKS the mock's
+                     # own paced ceiling (m=20000+c*400, capped 400000) — i.e. rig-limited. _sm_finish_bound
+                     # must set SM_MOCK_BOUND=true (winner fps within 10% of the re-probed reference). A
+                     # rung-blind check against a low reference would miss it; this proves the sustained
+                     # mock-bound decision fires, symmetric with the cpu-fps lane's mock-bound gate.
+      local mm=$(( 20000 + c*400 )); [ "$mm" -gt 400000 ] && mm=400000
+      echo "$c $c 0 0 $((c*SM_EXPFRAMES)) $mm 1.0 100 200 20 40" ;;
+    c1_clean)   # stream_c1 GATEWAY path (the DURL baseline is the reference branch at the top: t99=200,
+                # g99=40). Gateway frames cleanly, 0 errors, ttft_p99=520 gap_p99=60 -> SM_C1_OK=1 and
+                # added = gw - direct = 320 (ttft) / 20 (gap), a positive honest subtraction.
+      echo "$c $c 0 0 $((c*SM_EXPFRAMES)) $((c*30)) 1.0 300 520 30 60" ;;
+    c1_dirty)   # stream_c1 honesty gate: the GATEWAY path errors on every stream and frames nothing ->
+                # the window is unreliable, SM_C1_OK=0 and every added-latency field is ZEROED (never a
+                # garbage negative from subtracting a 0 gw ttft off the direct baseline).
+      echo "$c 0 $c $c 0 0 0.0 0 0 0 0" ;;
     fpspeak_768) # cpu-fps: fps unimodal, peak ~48000 at c=768 (BETWEEN doublings 512 and 1024).
                  # Declines both sides. All probed rungs pass the gate. A doubling-only method tops out
                  # below the true peak; the peak-search must land near 768.
@@ -77,6 +93,41 @@ CURVE=sust_1300;     stream_sustained_bisect 8 4096; assert_range "sustained bis
 [ "$SM_SUST_FPS" -gt 0 ] && echo "ok   - sustained carries fps at the winning concurrency ($SM_SUST_FPS)" || { echo "FAIL - sustained fps not set"; fail=1; }
 CURVE=sust_grid_top; stream_sustained_bisect 8 2048; assert_range "sustained ceiling at/above grid top -> reports top" "$SM_SUST_STREAMS" 2048 2048
 CURVE=sust_none;     stream_sustained_bisect 8 2048; assert_range "no sustainable concurrency -> 0" "$SM_SUST_STREAMS" 0 0
+
+# ── MEDIUM-R2-2: the SUSTAINED lane's mock-bound decision (SM_MOCK_BOUND) is set and correct ─────────
+# The sustained streams count is now gated on streams_sustained_mock_bound on every published surface
+# (charts.py stream_sustained_valid / app.js sustainedCertified / check-consistency), so the shell
+# decision that FEEDS that flag must be covered. Three cases, mirroring the cpu-fps lane:
+#   (a) a fast gateway well below the rig ceiling -> mock_bound=false (a real gateway number).
+CURVE=sust_1300; stream_sustained_bisect 8 4096
+[ "$SM_MOCK_BOUND" = false ] && echo "ok   - sustained mock_bound=false when the gateway sits below the rig ceiling" || { echo "FAIL - sustained mock_bound=$SM_MOCK_BOUND (want false)"; fail=1; }
+#   (b) a gateway whose fps TRACKS the mock's paced ceiling (rig-limited) -> mock_bound=true: the exact
+#       class MEDIUM-R2-2 suppresses on the board so a mock bottleneck never draws a full sustained bar.
+CURVE=sust_mockbound; stream_sustained_bisect 8 2048
+[ "$SM_MOCK_BOUND" = true ] && echo "ok   - sustained mock_bound=true when the winner fps is within 10% of the rig ceiling (MEDIUM-R2-2)" || { echo "FAIL - sustained mock_bound=$SM_MOCK_BOUND (want true; a rig-limited count must be flagged)"; fail=1; }
+#   (c) a DEAD reference (mock frames 0 fps) -> mock_bound=null, NEVER a trustworthy-looking false over
+#       an unusable ceiling (the H6/R3-H1 analog on the sustained lane).
+CURVE=sust_grid_top; MOCK_DEAD=1 stream_sustained_bisect 8 2048
+[ "$SM_MOCK_BOUND" = null ] && echo "ok   - sustained mock_bound=null over a dead reference (never a false)" || { echo "FAIL - sustained mock_bound=$SM_MOCK_BOUND (want null over a 0-fps reference)"; fail=1; }
+
+# ── stream_c1: concurrency-1 added-TTFT / added-gap + the honesty gate ───────────────────────────────
+# The per-cell added-latency numbers every matrix stream cell publishes. Assert the clean subtraction
+# (gw - direct, positive, no sign inversion) AND the gate that zeroes the fields on an unreliable window.
+CURVE=c1_clean; stream_c1
+[ "${SM_C1_OK:-x}" = 1 ] && echo "ok   - stream_c1 clean window: SM_C1_OK=1" || { echo "FAIL - stream_c1 clean window SM_C1_OK=${SM_C1_OK:-unset} (want 1)"; fail=1; }
+assert_range "stream_c1 added TTFT p99 = gw520 - direct200 = 320 (no sign inversion)" "$SM_ADD_T99" 320 320
+assert_range "stream_c1 added gap p99 = gw60 - direct40 = 20" "$SM_ADD_G99" 20 20
+CURVE=c1_dirty; stream_c1
+[ "${SM_C1_OK:-x}" = 0 ] && echo "ok   - stream_c1 dirty window trips the honesty gate: SM_C1_OK=0" || { echo "FAIL - stream_c1 dirty window SM_C1_OK=${SM_C1_OK:-unset} (want 0)"; fail=1; }
+assert_range "stream_c1 dirty window zeroes added TTFT (never a garbage negative)" "$SM_ADD_T99" 0 0
+assert_range "stream_c1 dirty window zeroes added gap" "$SM_ADD_G99" 0 0
+
+# ── stream_mock_ready: the dead-mock path (the H6 analog) ────────────────────────────────────────────
+# A LIVE mock frames a 1-stream probe (fps>0) -> ready (rc 0). A DEAD mock never frames -> the poll
+# exhausts its tries and returns non-zero so the caller flags the reference unusable (rather than reading
+# a 0 ceiling as a silently-passing mock-bound no-op).
+CURVE=sust_grid_top; stream_mock_ready 3 && echo "ok   - stream_mock_ready returns 0 for a live framing mock" || { echo "FAIL - stream_mock_ready failed against a live mock"; fail=1; }
+CURVE=sust_grid_top; if MOCK_DEAD=1 stream_mock_ready 2; then echo "FAIL - stream_mock_ready returned 0 for a DEAD mock (must be non-zero)"; fail=1; else echo "ok   - stream_mock_ready returns non-zero for a dead mock (reference flagged unusable)"; fi
 
 # ── cpu-fps PEAK max-search ───────────────────────────────────────────────────────────────────────
 CURVE=fpspeak_768; streamcpu_peak_fps 8 8192

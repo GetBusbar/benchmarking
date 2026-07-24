@@ -10,6 +10,10 @@ on:
     paths:
       - "lib/sweep.sh"
       - "lib/sweep_peak_test.sh"
+      - "lib/stream_measure.sh"
+      - "lib/stream_measure_test.sh"
+      - "lib/promote_guard.py"
+      - "lib/promote_guard_test.py"
       - "loadgen/**"
       - "mock/**"
       - ".github/workflows/bench-tests.yml"
@@ -17,6 +21,10 @@ on:
     paths:
       - "lib/sweep.sh"
       - "lib/sweep_peak_test.sh"
+      - "lib/stream_measure.sh"
+      - "lib/stream_measure_test.sh"
+      - "lib/promote_guard.py"
+      - "lib/promote_guard_test.py"
       - "loadgen/**"
       - "mock/**"
       - ".github/workflows/bench-tests.yml"
@@ -30,10 +38,22 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Parse-check the sweep shell files
-        run: bash -n lib/sweep.sh && bash -n lib/sweep_peak_test.sh
+      - name: Parse-check the sweep + stream-measure shell files
+        run: bash -n lib/sweep.sh && bash -n lib/sweep_peak_test.sh && bash -n lib/stream_measure.sh && bash -n lib/stream_measure_test.sh
       - name: Peak-search regression test (H5) + adaptive/prior (M5) + sweep_c1 (M6)
         run: bash lib/sweep_peak_test.sh
+      # lib/stream_measure.sh produces EVERY published streams_sustained / cpu_fps / added-TTFT number but
+      # had ZERO CI coverage (MEDIUM-R2-4): the sustained/cpu-fps bisect+peak searches, the sustained
+      # SM_MOCK_BOUND decision (the MEDIUM-R2-2 gate's source signal), stream_c1's added-latency honesty
+      # gate, and the dead-mock stream_mock_ready path. Gate it so a sign inversion / inverted mock-bound
+      # comparison / false-over-a-dead-reference can never ship silently.
+      - name: Stream-measure regression test (sustained/cpu-fps search + mock-bound + stream_c1 + dead-mock)
+        run: bash lib/stream_measure_test.sh
+      # lib/promote_guard.py decides whether an incoming result may overwrite the committed one; a bug
+      # there republishes a regression as an honest failure (R4-M2). Covers MEDIUM-R2-3 (matrix all-dead
+      # 000 detection) + the anchored-marker / status-000 / honest-not-served behaviours.
+      - name: Promote-guard regression test (matrix all-dead 000 + anchored marker + honest not-served)
+        run: python3 lib/promote_guard_test.py
       - uses: actions/setup-go@v5
         with:
           go-version-file: loadgen/go.mod
