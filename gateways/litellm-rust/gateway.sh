@@ -101,6 +101,41 @@ YAML
     "$LR_BIN" </dev/null >/tmp/litellm_rust.mem.log 2>&1 &
 }
 
+# ── OOTB config artifact (file + env) ─────────────────────────────────────────────────────────────
+# gw_config prints the canonical OOTB config this gateway launches with. LiteLLM-Rust is file-driven
+# (a model_list YAML read via the python-config reader) PLUS the launch env, so the artifact is the
+# RENDERED config.gen.yaml (exactly what LITELLM_CONFIG_PATH loads) followed by the non-secret launch
+# env. The suite runner captures this once per run into results/config/litellm-rust.txt and the board
+# publishes it, so "fresh source build + this config → these numbers" is reproducible. The YAML is
+# read from the file gw_launch just rendered (falls back to rendering it if not present yet), so it
+# can never drift from what the gateway actually loaded.
+# OOTB posture: there are NO feature strips or perf tuning here — this is the ONLY configuration that
+# serves the /v1/messages route at all (azure_ai via the python-config reader; the lean env config
+# returns HTTP 400 — see the header). LITELLM_MASTER_KEY is the gateway's own mandatory auth (the Rust
+# beta requires it to boot), shown as its dummy value; api_key is dummy (no live secret on the rig).
+gw_config() {
+  local cfg="$GW_DIR/config.gen.yaml"
+  echo "# ── config.gen.yaml (rendered; loaded via LITELLM_CONFIG_PATH, python-config reader) ──"
+  if [ ! -f "$cfg" ]; then
+    cat > "$cfg" <<YAML
+model_list:
+  - model_name: $GW_MODEL
+    litellm_params:
+      model: $GW_MODEL
+      api_base: http://127.0.0.1:$MOCK_PORT/v1/messages
+      api_key: dummy
+YAML
+  fi
+  cat "$cfg"
+  echo
+  echo "# ── launch env (non-secret; LITELLM_MASTER_KEY is the gateway's mandatory auth, dummy on the isolated rig) ──"
+  cat <<ENV
+LITELLM_MASTER_KEY=$GW_AUTH
+LITELLM_CONFIG_PATH=$GW_DIR/config.gen.yaml
+PORT=$GW_PORT
+ENV
+}
+
 # ── matrix suite egress support ───────────────────────────────────────────────────────────────────
 # The ONLY working route in this gateway (azure_ai via python-config, see the header) targets the
 # upstream's /v1/messages: an ANTHROPIC-shaped endpoint. So its one configurable egress dialect is

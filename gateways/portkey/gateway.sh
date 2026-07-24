@@ -117,6 +117,30 @@ gw_launch() {
     "$PORTKEY_IMAGE" >"$GW_DIR/launch.log" 2>&1 || true
 }
 
+# ── OOTB config artifact (image needs no config; per-request header routing) ──────────────────────
+# gw_config prints the canonical OOTB config this gateway launches with. Portkey's OSS image needs NO
+# config file — it boots with ALL its providers available and the upstream is selected PER REQUEST via
+# x-portkey-provider + x-portkey-custom-host headers (the same way Portkey itself documents driving the
+# self-hosted gateway). So the artifact is the launch invariants: the pinned image, the run-mechanics
+# (host network + CPU pin), and the default request headers this manifest sends (the anthropic lane's
+# GW_HEADERS; the matrix swaps the provider per column). The suite runner captures this once per run
+# into results/config/portkey.txt and the board publishes it.
+# OOTB posture: the image runs UNMODIFIED — no config, no feature strips, no perf tuning, nothing
+# disabled. The gateway ships UNPROTECTED by default (no gateway-level auth key), so we keep it
+# unprotected (GW_AUTH=dummy is a placeholder; the OSS gateway enforces no key). Provider selection is
+# a runtime header, not a config change. The only deviation from a stock invocation is x-portkey-
+# custom-host pointing the upstream at the mock — the permitted base_url override.
+gw_config() {
+  cat <<ENV
+# image (run unmodified; no config file — the OSS gateway needs none)
+PORTKEY_IMAGE=$PORTKEY_IMAGE
+# run-mechanics
+docker run --network host --cpuset-cpus=$CORES
+# default request headers (per-request provider selection; matrix swaps the provider per column)
+$(printf '%s\n' "${GW_HEADERS[@]}")
+ENV
+}
+
 gw_rss() { container_rss_mib portkey-bench; }  # summed process-tree VmRSS (same method as native)
 gw_hwm() { container_hwm_mib portkey-bench; }  # summed process-tree VmHWM (kernel high-water mark)
 
