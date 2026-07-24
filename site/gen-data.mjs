@@ -411,10 +411,14 @@ for (const g of gateways) {
   // whose ONLY data is a legacy suite still ages correctly; the SPAN cap is what is matrix-scoped.
   const ats = SUITES.map((s) => g[s] && g[s].measured_at).filter(Boolean)
     .map((a) => Date.parse(a)).filter((ms) => ms <= nowMs);
-  // NIT-R2-4: actually PERFORM the skip the warn loop promises. g.measured_at was assigned from the
-  // future-INCLUSIVE newestMeasuredMs (:217-218), so a lone skewed-future stamp would still drive a
-  // NEGATIVE "measured Nd ago" badge. Re-derive the badge stamp from the non-future ats only, so the
-  // promised protection is real even if the :313 board-wide future-date hard-fail is ever weakened.
+  // NIT-R2-4 / NIT-R5-4 (comment accuracy): actually PERFORM the skip the warn loop promises. g.measured_at
+  // was assigned from the future-INCLUSIVE newestMeasuredMs (:227), so a lone skewed-future stamp would
+  // otherwise drive a NEGATIVE "measured Nd ago" badge; re-derive the badge stamp from the non-future ats
+  // only. HONEST SCOPE: this is DEFENSE-IN-DEPTH, not a live guard. ANY future stamp (matrix OR legacy —
+  // the loop at :306 folds every suite into `latest`) already trips the board-wide future-date hard-fail
+  // at :343, which THROWS before this line is reached, so no bad badge can ship today. This re-derivation
+  // only becomes reachable if that :343 hard-fail is ever weakened/removed; it is retained as a belt-and-
+  // suspenders backstop for the per-row badge, NOT because a live path reaches it.
   if (sawFuture) g.measured_at = ats.length ? new Date(Math.max(...ats)).toISOString() : null;
   // LOW-2: a served matrix row whose DISPLAYED numbers project from g.matrix (best_cell / streaming /
   // memory_read / translation_cell, source:"matrix") but that carries NO valid (non-future) matrix
@@ -434,11 +438,12 @@ for (const g of gateways) {
     g.stale = true;
   }
   if (ats.length < 1) continue;
-  // NIT-R2-2: NO-OP under matrix atomicity. A matrix row carries at most ONE matrix stamp, so
-  // matrixSpanAts is length 0 or 1 and the `>= 2` gate below NEVER fires today — this is an inert
-  // placeholder, not an active corruption guard (the real future-date protection lives at :313). It is
-  // retained (null-safe, matrix-scoped) so the span check reactivates automatically should a future
-  // matrix result ever embed multiple internal timestamps.
+  // NIT-R2-2 / NIT-R5-2: INERT PLACEHOLDER — dead code today, NOT a live safeguard. A matrix row carries
+  // at most ONE matrix stamp, so matrixSpanAts is length 0 or 1 and the `>= 2` gate below NEVER fires;
+  // it performs no cross-timestamp check on any current data. The live corruption/freshness guards are
+  // the board-wide future-date hard-fail (:343) and the 180-day wholesale-stale floor (:376) — NOT this
+  // block. It is retained (null-safe, matrix-scoped) purely so the span check reactivates automatically
+  // should a future matrix result ever embed multiple internal timestamps; until then it is a no-op.
   const matrixSpanAts = matrixAt != null ? [matrixAt] : [];
   if (matrixSpanAts.length >= 2) {
     const spanH = (Math.max(...matrixSpanAts) - Math.min(...matrixSpanAts)) / 3600000;
