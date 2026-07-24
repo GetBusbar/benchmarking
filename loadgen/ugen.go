@@ -91,7 +91,13 @@ func main(){
     int64(pct(ttfts,0.5)),int64(pct(ttfts,0.99)),int64(pct(gaps,0.5)),int64(pct(gaps,0.99)))
   return}
  sort.Float64s(lat);p:=func(q float64)float64{if len(lat)==0{return 0};return lat[int(float64(len(lat))*q)]}
+ // rps over the ACTUAL elapsed wall time, not the nominal -d: workers only re-check the deadline at
+ // the top of the next iteration, so the request in flight when the deadline passes still completes
+ // and is counted in `ok`. Dividing those extra successes by the nominal *dur (a shorter window than
+ // they really spanned) over-counts, and the over-count scales with per-request latency - inflating
+ // higher-latency / near-saturation gateways. Divide by real elapsed (as the stream path does).
+ elapsed:=time.Since(start).Seconds();if elapsed<=0{elapsed=float64(*dur)}
  // ms for humans; us (integer microseconds) for sub-ms precision the perf suite parses.
  fmt.Printf("rps=%d fail=%d p50=%.2f p99=%.2f p50us=%d p99us=%d ok=%d\n",
-   int64(float64(ok)/float64(*dur)),fail,p(0.5),p(0.99),int64(p(0.5)*1000),int64(p(0.99)*1000),ok)
+   int64(float64(ok)/elapsed),fail,p(0.5),p(0.99),int64(p(0.5)*1000),int64(p(0.99)*1000),ok)
 }
