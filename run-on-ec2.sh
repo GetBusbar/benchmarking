@@ -25,14 +25,16 @@ RUN_ID="${RUN_ID:-$(date +%Y%m%d-%H%M%S)-$$}"
 CREATED_KEY=0; CREATED_SG=0   # only delete the shared key/SG on exit if THIS invocation created them
 
 # Box self-terminate safety net (audit R5-#4). This `shutdown -h +N` is the LEAKED-BOX backstop - it
-# must fire only when the orchestrator has lost the box, NEVER during a legitimate run. The matrix
-# suite alone raises its OWN wall-clock ceiling to 14400s = 240 min (matrix/run.sh: HARNESS_SUITE_CEIL_S
-# default 14400 when MATRIX_SWEEP=1), and it runs LAST after 6 other suites. A 150-min box timer was
-# SHORTER than that single ceiling, so a heavy gateway's matrix sweep could still believe it had
-# headroom while AWS terminated the box mid-run - discarding every already-written suite JSON. Set the
-# net strictly ABOVE the longest legitimate run: matrix 240 min + a generous 120-min margin for the
-# other six suites = 360 min. Overridable, but the default can never fire during a real run.
-BENCH_MAX_MIN="${BENCH_MAX_MIN:-360}"
+# must fire only when the orchestrator has lost the box, NEVER during a legitimate run. Matrix is now
+# the SOLE producer and raises its OWN wall-clock ceiling to 21600s = 360 min (matrix/run.sh:171:
+# HARNESS_SUITE_CEIL_S default 21600 when MATRIX_SWEEP=1). CRITICAL TIMING: `shutdown -h +N` is armed at
+# CLOUD-INIT, minutes BEFORE the matrix clock even starts (apt + docker + rsync + gateway build take
+# ~5-10 min first), so the box clock LEADS the matrix clock. A box timer merely EQUAL to the 360-min
+# matrix ceiling therefore fires mid-sweep on a slow gateway — and with matrix as the sole producer that
+# AWS termination forfeits the ENTIRE result, not just one suite. Set the net strictly ABOVE the matrix
+# ceiling PLUS startup/build lead: 360-min ceiling + ~120-min margin (startup lead + slow-gateway
+# variance) = 480 min. Overridable, but the default can never fire during a real matrix run.
+BENCH_MAX_MIN="${BENCH_MAX_MIN:-480}"
 
 # ── INCREMENTAL PER-GATEWAY PUBLISH (matrix-sole-source) ──────────────────────────────────────────
 # Each gateway's ENTIRE benchmark is now ONE atomic matrix run, and gateways publish INDEPENDENTLY (the
@@ -253,7 +255,7 @@ bench_gateway() {
   # `instance-initiated-shutdown-behavior=terminate` makes that a TERMINATE, not a stop. A leaked box
   # can therefore bleed cost for at most BENCH_MAX_MIN, never indefinitely (2026-07-24: 48 leaked boxes
   # ran for hours because the trap missed SIGTERM and the manual cleanups silently no-op'd). BENCH_MAX_MIN
-  # is set ABOVE the matrix suite's own 240-min ceiling (see top of file) so it never fires mid-run.
+  # is set ABOVE the matrix suite's own 360-min ceiling + startup lead (see top of file) so it never fires mid-run.
   iid=$(aws ec2 run-instances --image-id "$AMI" --instance-type "$ITYPE" --key-name "$KEYNAME" \
     --security-group-ids "$SG" \
     --instance-initiated-shutdown-behavior terminate \
