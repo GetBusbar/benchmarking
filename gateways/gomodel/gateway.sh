@@ -65,8 +65,36 @@ gw_launch() {
     -e AWS_ACCESS_KEY_ID=AKIAMOCKACCESSKEY -e AWS_SECRET_ACCESS_KEY=mock-secret-access-key -e AWS_REGION=us-east-1 \
     -e MODELS_ENABLED_BY_DEFAULT=true \
     -e STORAGE_TYPE=sqlite \
-    -e LOGGING_ENABLED=false \
     "$GOMODEL_IMAGE" >"$GW_DIR/launch.log" 2>&1 || true
+}
+
+# ── OOTB config artifact (env-driven) ─────────────────────────────────────────────────────────────
+# gw_config prints the canonical OOTB config this gateway launches with. GoModel is env-driven, so the
+# artifact is its ENV MANIFEST: the exact `KEY=value` list gw_launch passes with `-e`, one per line,
+# secrets already shown as their dummy values (there are no live secrets on the isolated rig). The
+# suite runner captures this once per run into results/config/gomodel.txt and the board publishes it,
+# so "fresh install + this env → these numbers" is reproducible. Kept in lockstep with gw_launch by
+# construction: the same values, sourced from the same $GW_PORT/$MOCK_PORT/$GW_MODEL the launch uses.
+# OOTB posture: default features stay ON (no LOGGING_ENABLED/budget/ratelimit/admin/mcp strips); the
+# only deviations are the four permitted ones — provider base_urls → mock, dummy keys, OpenAI-lane
+# provider scope, and the STORAGE_TYPE=sqlite / MODELS_ENABLED_BY_DEFAULT run-mechanics.
+gw_config() {
+  cat <<ENV
+PORT=$GW_PORT
+OPENAI_BASE_URL=http://127.0.0.1:$MOCK_PORT/v1
+OPENAI_API_KEY=dummy
+ANTHROPIC_BASE_URL=http://127.0.0.1:$MOCK_PORT/anthropic
+ANTHROPIC_API_KEY=dummy
+GEMINI_BASE_URL=http://127.0.0.1:$MOCK_PORT/v1beta
+GEMINI_API_KEY=dummy
+BEDROCK_BASE_URL=http://127.0.0.1:$MOCK_PORT
+BEDROCK_MODELS=anthropic.claude-3-sonnet-20240229-v1:0
+AWS_ACCESS_KEY_ID=AKIAMOCKACCESSKEY
+AWS_SECRET_ACCESS_KEY=mock-secret-access-key
+AWS_REGION=us-east-1
+MODELS_ENABLED_BY_DEFAULT=true
+STORAGE_TYPE=sqlite
+ENV
 }
 
 # ── matrix suite: declared capability + egress wiring ─────────────────────────────────────────────

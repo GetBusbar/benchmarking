@@ -88,6 +88,18 @@ const gateways = gatewayKeys.map((key) => {
     const j = readJson(join(ROOT, "results", suite, `${key}.json`));
     if (j) g[suite] = j;
   }
+  // ---- OOTB config artifact -------------------------------------------------
+  // Config transparency: the gateway ran from its as-shipped DEFAULT config (pointed at the mock) and
+  // the exact config it used is captured to results/config/<key>.txt (see lib/harness.sh
+  // harness_write_config + the perf suite's "ootb_config" pointer). Carry the raw text verbatim into
+  // the bundle as g.ootb_config so app.js can render a per-gateway "Config" drawer. Prefer the pointer
+  // the result JSON recorded (perf.ootb_config), else fall back to the conventional path; a gateway
+  // with no artifact (the not-yet-wired ones) stays absent and the board renders "not published".
+  const cfgPointer = (g.perf && typeof g.perf.ootb_config === "string") ? g.perf.ootb_config : `config/${key}.txt`;
+  const cfgPath = join(ROOT, "results", cfgPointer);
+  if (existsSync(cfgPath)) {
+    try { g.ootb_config = readFileSync(cfgPath, "utf8"); } catch { /* unreadable → absent */ }
+  }
   if (g.matrix) {
     normalizeMatrix(g.matrix);
     // CANONICAL RULE: the per-cell MATRIX sweep is the single source of truth for all

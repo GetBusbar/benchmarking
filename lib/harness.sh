@@ -45,6 +45,38 @@ HARNESS_BOOT_BACKOFF_S="${HARNESS_BOOT_BACKOFF_S:-3}"
 HARNESS_PROBE_GRACE="${HARNESS_PROBE_GRACE:-45}"
 HARNESS_SUITE_CEIL_S="${HARNESS_SUITE_CEIL_S:-2700}"
 
+# ── harness_write_config: capture the gateway's OOTB config artifact (once per run) ───────────────
+# The OOTB standard: every gateway runs from its as-shipped DEFAULT config (pointed at the mock) and we
+# PUBLISH the exact config it used, so the board can show "fresh install + this config → these numbers".
+# A manifest OPTIONALLY defines gw_config(), which prints that canonical config to stdout:
+#   * file-driven gateway → the rendered config-file contents (+ any non-secret launch env)
+#   * env-driven gateway  → a `KEY=value\n` env manifest
+# with every secret rendered as its dummy value (there are none on the isolated rig, but the mechanism
+# must NEVER emit a live key). This function writes that once to results/config/<gateway>.txt (committed
+# like every other result) and echoes the sidecar-relative pointer ("config/<gateway>.txt") for the
+# caller to fold into its result JSON as "ootb_config". It is idempotent + cheap (one function call +
+# one file write) and safe to call from any suite; the perf suite is the natural home (it always runs
+# and already sources the manifest).
+#
+# GRACEFUL DEGRADATION: a gateway with no gw_config() (the 12 not yet fanned out) prints nothing here
+# and NO sidecar is written — harness_write_config returns non-zero and emits no pointer, so gen-data
+# and the board simply render "not published" for that gateway. A gw_config() that errors or prints
+# only whitespace is treated the same (never writes an empty/garbage artifact).
+#   Usage:  ptr="$(harness_write_config "$GATEWAY" "$RESULTS_ROOT")"  # ptr="config/<gw>.txt" or ""
+# where RESULTS_ROOT is the repo's results/ dir. Prints the pointer (or nothing) on stdout.
+harness_write_config(){
+  local gw="$1" results_root="$2"
+  # No hook → nothing to publish. This is the 12-not-yet-wired path; degrade silently.
+  declare -F gw_config >/dev/null 2>&1 || return 1
+  local body; body="$(gw_config 2>/dev/null)" || return 1
+  # Reject an empty / whitespace-only artifact rather than committing a blank file.
+  [ -n "$(printf '%s' "$body" | tr -d '[:space:]')" ] || return 1
+  local dir="$results_root/config"
+  mkdir -p "$dir" || return 1
+  printf '%s\n' "$body" > "$dir/$gw.txt" || return 1
+  printf 'config/%s.txt' "$gw"
+}
+
 # ── tmo: hard timeout around one command ────────────────────────────────────────────────────────
 # Kills the command (and, via a fresh process group when possible, its children - a ugen probe forks
 # nothing but a docker/native gateway probe path might) if it runs longer than <seconds>. Returns the

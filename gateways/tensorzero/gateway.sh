@@ -129,6 +129,41 @@ gw_launch() {
     "$TENSORZERO_IMAGE" --config-file config/tensorzero.toml >"$GW_DIR/launch.log" 2>&1 || true
 }
 
+# ── OOTB config artifact (file-driven) ────────────────────────────────────────────────────────────
+# gw_config prints the canonical OOTB config this gateway launches with. TensorZero is file-driven, so
+# the artifact is the RENDERED tensorzero.toml (exactly what --config-file loads) PLUS the non-secret
+# launch env (the credential env is dummy-only and required per provider type; shown for reproducibility,
+# never a live secret — there are none on the isolated rig). The suite runner captures this once per run
+# into results/config/tensorzero.txt and the board publishes it, so "fresh install + this config → these
+# numbers" is reproducible. The toml is read from the file gw_build/_tz_write_config just rendered (falls
+# back to rendering the openai-lane default if the file isn't present yet), so it can never drift from
+# what the gateway actually loaded. OOTB posture: the only non-default line is observability=false, which
+# is the required run-mechanic to avoid a ClickHouse/Postgres dependency (embedded/no external store);
+# TENSORZERO_DISABLE_PSEUDONYMOUS_USAGE_ANALYTICS=1 is the allowed telemetry-off run-mechanic. No feature
+# strips or perf tuning are present.
+gw_config() {
+  local toml="$GW_DIR/config/tensorzero.toml"
+  echo "# ── tensorzero.toml (rendered; loaded via --config-file config/tensorzero.toml) ──"
+  if [ -f "$toml" ]; then
+    cat "$toml"
+  else
+    _tz_write_config 'type = "openai"
+api_base = "http://127.0.0.1:'"$MOCK_PORT"'/v1"
+model_name = "gpt-4o-mini"
+api_key_location = "none"'
+    cat "$toml"
+  fi
+  echo
+  echo "# ── launch env (non-secret; credential values are dummy on the isolated rig) ──"
+  cat <<ENV
+TENSORZERO_DISABLE_PSEUDONYMOUS_USAGE_ANALYTICS=1
+ANTHROPIC_API_KEY=dummy
+AWS_ACCESS_KEY_ID=AKIAMOCKACCESSKEY
+AWS_SECRET_ACCESS_KEY=mock-secret-access-key
+AWS_REGION=us-east-1
+ENV
+}
+
 gw_rss() { container_rss_mib tensorzero-bench; }  # summed process-tree VmRSS (same method as native gateways)
 gw_hwm() { container_hwm_mib tensorzero-bench; }  # summed process-tree VmHWM (kernel high-water mark)
 

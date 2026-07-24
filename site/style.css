@@ -298,6 +298,22 @@ tbody tr { cursor: pointer; }
   color: var(--fg-dim); max-height: 8rem; overflow: auto;
 }
 
+/* OOTB config artifact: monospace, scrollable, copy-friendly */
+.config-block { position: relative; }
+.config-block .config-pre {
+  margin: 0; padding: .55rem .6rem; background: var(--bg); border: 1px solid var(--border);
+  border-radius: 6px; white-space: pre; overflow: auto; max-height: 22rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .74rem;
+  line-height: 1.5; color: var(--fg-dim); tab-size: 2;
+}
+.config-block .config-copy {
+  position: absolute; top: .4rem; right: .4rem; z-index: 1; font: inherit; font-size: .72rem;
+  font-weight: 600; cursor: pointer; color: var(--fg-dim); background: var(--bg-raise);
+  border: 1px solid var(--border); border-radius: 5px; padding: .12rem .55rem;
+}
+.config-block .config-copy:hover { color: var(--fg); border-color: var(--fg-mute); }
+.config-correct { font-size: .74rem; margin: .45rem 0 0; }
+
 /* sweep charts */
 .sweeps { display: flex; flex-direction: column; gap: .9rem; }
 .sweeps figure.sweep { margin: 0; }

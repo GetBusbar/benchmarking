@@ -107,6 +107,26 @@ function esc(s) {
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
+/* The benchmarking repo where config corrections are filed. */
+const BENCH_REPO = "https://github.com/GetBusbar/benchmarking";
+
+/* configCorrectionUrl: a per-gateway deep link to a PRE-FILLED GitHub issue in the benchmarking repo,
+   so anyone (not just maintainers) can propose a fix to a gateway's published OOTB config. Uses the
+   config-correction issue-form template (?template=config-correction.yml) and pre-sets the title +
+   the gateway field, encoding every param. GitHub issue Forms map ?<field-id>=<value> onto the form's
+   fields, so `gateway=<display>` lands in the template's "gateway" input. Everything is
+   encodeURIComponent'd, so a display name with spaces/specials can't break the URL. */
+function configCorrectionUrl(g) {
+  const label = g.display || g.key;
+  const p = new URLSearchParams({
+    template: "config-correction.yml",
+    title: `Config correction: ${label}`,
+    labels: "config-correction",
+    gateway: label,
+  });
+  return `${BENCH_REPO}/issues/new?${p.toString()}`;
+}
+
 /* Absolute rig paths (the bench box's own filesystem: /home/ubuntu/.npm/..., file:///home/...)
    are harness noise inside captured diagnostics, not evidence a reader needs; leaking them into
    tooltips reads as sloppy. Scrub them to a neutral placeholder wherever a note is surfaced. */
@@ -965,6 +985,24 @@ function drawerHtml(g) {
   h += `<section class="drawer-lane"><h4>Throughput sweeps</h4>` +
     `<p class="lane-note muted">Sweep curves are measured on the perf-suite default path, not the matrix per-cell sweep; the headline numbers above are the canonical record.</p>` +
     `<div id="drawer-sweeps" class="sweeps"></div></section>`;
+
+  /* OOTB config artifact: the exact as-shipped default config this gateway ran from (pointed at the
+     mock). Monospace, scrollable, copy-friendly. Absent (not-yet-wired gateway) → "not published".
+     A per-gateway "Suggest a correction" link opens a pre-filled GitHub issue so anyone — not just
+     maintainers — can propose a fix; the published config is a best-effort OOTB attempt. */
+  h += `<section class="drawer-lane"><h4>Config</h4>`;
+  if (typeof g.ootb_config === "string" && g.ootb_config.trim()) {
+    h += `<p class="lane-note muted">As-shipped default, pointed at the mock — reproduce with: fresh install + this config.</p>` +
+      `<div class="config-block">` +
+      `<button type="button" class="config-copy" data-config-copy title="Copy config">Copy</button>` +
+      `<pre class="config-pre">${esc(g.ootb_config.replace(/\n+$/, ""))}</pre>` +
+      `</div>` +
+      `<p class="config-correct muted">Best-effort OOTB config. Spot something off? ` +
+      `<a href="${esc(configCorrectionUrl(g))}" target="_blank" rel="noopener">Suggest a correction</a>.</p>`;
+  } else {
+    h += `<p class="muted">not published</p>`;
+  }
+  h += `</section>`;
   return h;
 }
 
@@ -975,6 +1013,14 @@ function openDrawer(key, push = false) {
   document.getElementById("drawer-body").innerHTML = drawerHtml(g);
   document.getElementById("drawer").classList.remove("hidden");
   document.getElementById("backdrop").classList.remove("hidden");
+  // Copy-to-clipboard for the OOTB config block (copies the raw published text, not the escaped HTML).
+  const copyBtn = document.querySelector("#drawer-body [data-config-copy]");
+  if (copyBtn && typeof g.ootb_config === "string") {
+    copyBtn.addEventListener("click", () => {
+      const done = () => { copyBtn.textContent = "Copied"; setTimeout(() => { copyBtn.textContent = "Copy"; }, 1500); };
+      if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(g.ootb_config).then(done, () => {});
+    });
+  }
   const box = document.getElementById("drawer-sweeps");
   const series = [];
   if (g.perf && g.perf.served !== false) {
@@ -1697,6 +1743,7 @@ if (NODE) {
     drawSweep, niceStep, fmtTick, COLUMN_SETS, columnsFor, PERF_VIEWS, VIEW_SORT, LANES, naText, stripRigPaths,
     cellState, matrixCellTip, cellPerfTip, passCell, xlateCell, hasTranslation, CATEGORIES, DEFAULT_CATEGORY, VIEWS,
     canonicalPerf, canonicalXlate, DEFAULT_VIEW, VIEW_LABELS, rosterRows, fmtStars,
+    configCorrectionUrl, BENCH_REPO,
     HOME_VIEW, homeCardsHtml,
   };
 } else {

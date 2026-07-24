@@ -113,6 +113,59 @@ test("freshness guard PASSES a fresh, coherent board", () => {
   assert.equal(msg, null, `expected a fresh board to pass gen-data, but it threw: ${msg}`);
 });
 
+test("OOTB config artifact round-trips into data.json (results/config/<gw>.txt → g.ootb_config)", () => {
+  // Config transparency: a gateway whose run captured results/config/<key>.txt must carry that exact
+  // text into the bundle as g.ootb_config (app.js renders it in the Config drawer). Build a fresh,
+  // coherent synthetic repo (so the freshness guard passes), drop a config sidecar for ONE gateway,
+  // reference it via that gateway's perf.ootb_config pointer, run gen-data for real, and assert the
+  // artifact appears verbatim on that gateway and is ABSENT on the gateway with no sidecar (graceful
+  // degradation — the not-yet-wired gateways).
+  const t = isoAgo(1);
+  const root = buildSyntheticRepo({
+    withcfg: { perf: t, matrix: isoAgo(2) },
+    nocfg: { perf: isoAgo(0.5), matrix: isoAgo(1.5) },
+  });
+  const CFG = "PORT=8080\nOPENAI_BASE_URL=http://127.0.0.1:8000/v1\nOPENAI_API_KEY=dummy\nSTORAGE_TYPE=sqlite\n";
+  mkdirSync(join(root, "results", "config"), { recursive: true });
+  writeFileSync(join(root, "results", "config", "withcfg.txt"), CFG);
+  // Record the pointer in the perf result, exactly as the perf suite does.
+  const perfPath = join(root, "results", "perf", "withcfg.json");
+  const perf = JSON.parse(readFileSync(perfPath, "utf8"));
+  perf.ootb_config = "config/withcfg.txt";
+  writeFileSync(perfPath, JSON.stringify(perf));
+  const outDir = mkdtempSync(join(tmpdir(), "site-cfg-out-"));
+  try {
+    execFileSync(process.execPath, [join(HERE, "gen-data.mjs"), root, outDir], { stdio: "pipe" });
+    const d = JSON.parse(readFileSync(join(outDir, "data.json"), "utf8"));
+    const withCfg = d.gateways.find((g) => g.key === "withcfg");
+    const noCfg = d.gateways.find((g) => g.key === "nocfg");
+    assert.ok(withCfg, "expected the withcfg gateway in the bundle");
+    assert.equal(withCfg.ootb_config, CFG, "OOTB config artifact must round-trip verbatim into g.ootb_config");
+    assert.ok(!("ootb_config" in noCfg) || noCfg.ootb_config == null,
+      "a gateway with no config sidecar must have no ootb_config (graceful degradation)");
+  } finally {
+    rmSync(outDir, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("config-correction deep link is a per-gateway, template-referencing, fully-encoded GitHub URL", () => {
+  const url = app.configCorrectionUrl({ key: "tensorzero", display: "TensorZero" });
+  assert.ok(url.startsWith(app.BENCH_REPO + "/issues/new?"), `must target the benchmarking repo new-issue endpoint, got ${url}`);
+  const u = new URL(url);
+  assert.equal(u.searchParams.get("template"), "config-correction.yml", "must reference the issue-form template");
+  assert.equal(u.searchParams.get("title"), "Config correction: TensorZero", "title must be pre-set per gateway (decoded)");
+  assert.equal(u.searchParams.get("gateway"), "TensorZero", "gateway field must be injected per gateway");
+  // A display name with spaces/specials must be encoded, never break the URL.
+  const tricky = app.configCorrectionUrl({ key: "x", display: 'A & B "gw"' });
+  assert.doesNotThrow(() => new URL(tricky), "special chars in the display name must stay URL-safe");
+  assert.equal(new URL(tricky).searchParams.get("gateway"), 'A & B "gw"');
+  // The referenced template must actually exist in the repo.
+  assert.ok(
+    readFileSync(join(ROOT, ".github", "ISSUE_TEMPLATE", "config-correction.yml"), "utf8").includes("id: gateway"),
+    "the config-correction issue template the deep link references must exist and define the gateway field");
+});
+
 test("gen-data emits gateways with a class for every entry", () => {
   assert.ok(data.gateways.length >= 10, `expected a full field, got ${data.gateways.length}`);
   for (const g of data.gateways) {
