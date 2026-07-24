@@ -133,10 +133,8 @@
     <ul class="matrix-legend" aria-label="cell legend">
       <li><span class="lg lg-pass"></span>probe passed (translation verified)</li>
       <li><span class="lg lg-notconf"></span>not configured (probe failed; evidence on hover)</li>
-      <li><span class="lg lg-fail"></span>not served (legacy pre-probe-first result)</li>
-      <li><span class="lg lg-unverified"></span>not verified</li>
+      <li><span class="lg lg-unverified"></span>not verified (harness could not get it serving)</li>
       <li><span class="lg lg-untestable"></span>untestable (mock limit)</li>
-      <li><span class="lg lg-unprobed"></span>unprobed (auth)</li>
       <li><span class="lg lg-diag"></span>same-dialect passthrough</li>
     </ul>
     <p class="matrix-legend-note muted">Probe-first: every ingress&#8594;upstream pairing of every gateway is attempted with a correctness-checked round trip (response validated in the ingress protocol's shape, upstream leg verified against the recording mock). A green cell passed; a grey cell's probe failed and its hover shows the probe's own evidence. No gateway is graded red for a pairing it does not serve.</p>
