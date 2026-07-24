@@ -3,25 +3,22 @@ memory/mock
 memory/ugen
 perf/mock
 perf/ugen
+loadgen/ugen
 # per-run generated configs + gateway build/venv artifacts
 gateways/*/config.gen.yaml
 gateways/*/providers.gen.yaml
+gateways/*/*.gen.*
+gateways/*/kong.gen.yml
 gateways/*/venv/
 gateways/*/bfdata/
 # transient EC2 driver logs (the results JSON + charts are the durable evidence)
 results/*.log
-
 # rust mock build artifacts
 mock/target/
-# go loadgen binary
-loadgen/ugen
-# any per-run generated gateway config
-gateways/*/*.gen.*
-gateways/*/bfdata/
-gateways/*/kong.gen.yml
-.claude/worktrees/
-
-# bench rig: prebuilt binaries live in the `rig` GitHub release, not git
-bin/
 mock/target-linux/
 mock/target-x86/
+# python bytecode cache
+__pycache__/
+*.pyc
+# prebuilt bench rig binaries live in the `rig` GitHub release, not git
+bin/
