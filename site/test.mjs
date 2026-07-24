@@ -161,14 +161,30 @@ test("freshness guard sets the PER-GATEWAY stale flag past MAX_GATEWAY_AGE_DAYS 
   assert.equal(byKey.fresh.stale, false, "a fresh gateway must not be flagged stale");
 });
 
-test("freshness guard sanity-caps a corrupt/future-dated in-row timestamp (>12h span)", () => {
-  // The span check is retired as a mixed-run guard but kept as a pure sanity cap: a >12h intra-row span
-  // is not a real run, it is a corrupt or future-dated stamp. Hard fail on that alone.
+test("HIGH-3: the span cap is MATRIX-scoped — a matrix-only re-run past a weeks-old legacy stamp PASSES", () => {
+  // The core HIGH-3 fix: legacy suites (perf/stream/streamcpu/memory) are fallback-only and are NEVER
+  // refreshed by a matrix-only re-run, so they legitimately carry weeks-old stamps while matrix=today.
+  // Folding them into the span made an honest incremental matrix re-run trip the >12h cap and abort the
+  // deploy. The span cap now considers ONLY the matrix suite's own timestamps, so this must PASS.
   const msg = genThrows(buildSyntheticRepo({
-    corrupt: { perf: isoAgo(20), matrix: isoAgo(1) }, // 19h apart — impossible for one run
+    incr: { perf: isoDaysAgo(21), matrix: isoAgo(1) }, // matrix today, legacy 3 weeks old — honest re-run
   }));
-  assert.ok(msg, "expected a >12h in-row span to THROW");
-  assert.ok(/FRESHNESS FAILURE \(corrupt row\)/.test(msg), `expected the corrupt-row failure, got: ${msg}`);
+  assert.equal(msg, null, `expected a matrix-only re-run past a weeks-old legacy stamp to PASS, but it threw: ${msg}`);
+});
+
+test("HIGH-3: a per-gateway FUTURE measured_at is warned and never posts a negative age badge", () => {
+  // NIT (future-date, per-gateway): the board-wide floor only checks the max stamp; a lone clock-skewed
+  // FUTURE stamp on one gateway would slip past and render a negative "measured Nd ago" badge. gen-data
+  // must skip the future stamp from the age computation (and the board floor throw catches a future
+  // matrix stamp outright). Here a legacy suite is future-dated: the board floor throws on it first
+  // (generated_at would predate the newest embedded measured_at), which is the honest hard-fail.
+  const msg = genThrows(buildSyntheticRepo({
+    fresh: { matrix: isoAgo(2) },
+    skewed: { matrix: isoAgo(1), perf: isoAgo(-48) }, // perf 2 days in the FUTURE (rig clock skew)
+  }));
+  assert.ok(msg, "expected a future-dated stamp to be caught");
+  assert.ok(/predates the newest embedded measured_at|future-dated/.test(msg),
+    `expected the future-date hard-fail, got: ${msg}`);
 });
 
 test("OOTB config artifact round-trips into data.json (results/config/<gw>.txt → g.ootb_config)", () => {
