@@ -1,21 +1,42 @@
 # lib/rig.sh — fetch the prebuilt bench "rig" (mock + loadgen) so a bench box needs NO build
 # toolchain: bare OS + docker is enough. Downloads mock-<arch> / ugen-<arch> from the benchmarking
 # `rig` GitHub release (rebuilt by .github/workflows/bench-rig.yml on every mock/ or loadgen/ change,
-# for both arm64 and x86). Falls back to building from source ONLY if the download fails AND the
-# toolchain happens to be present (local dev). Sets $MOCK and $UGEN. Idempotent — cached under bin/.
+# for both arm64 and x86). Sets $MOCK and $UGEN. Idempotent — cached under bin/.
+#
+# HONESTY: which binary won is logged LOUDLY. A field/CI run must FAIL if the prebuilt rig can't be
+# fetched rather than silently substituting a stale/locally-modified build that would produce numbers
+# the caller believes came from the pinned reproducible rig (audit M4). The source fallback is
+# therefore OPT-IN: set RIG_ALLOW_SOURCE=1 (local dev only) to permit building from the local tree.
 RIG_URL="${RIG_URL:-https://github.com/GetBusbar/benchmarking/releases/download/rig}"
+_rig_log(){ echo "[rig] $*" >&2; }
 fetch_rig() { # <repo-root>
-  local root="$1" arch="${BENCH_ARCH:-arm64}"
+  local root="$1" arch="${BENCH_ARCH:-arm64}" err
   mkdir -p "$root/bin"
   MOCK="$root/bin/mock"; UGEN="$root/bin/ugen"
+  if [ -x "$MOCK" ]; then _rig_log "mock: reusing cached $MOCK"; fi
   if [ ! -x "$MOCK" ]; then
-    if curl -fsSL "$RIG_URL/mock-$arch" -o "$MOCK" 2>/dev/null && [ -s "$MOCK" ]; then chmod +x "$MOCK"
-    elif ( cd "$root/mock" && cargo build --release >/dev/null 2>&1 ); then cp "$root/mock/target/release/mock" "$MOCK"
-    else echo "rig: cannot get mock ($RIG_URL/mock-$arch) and no rust toolchain to build it"; return 1; fi
+    err="$(curl -fsSL "$RIG_URL/mock-$arch" -o "$MOCK" 2>&1)"
+    if [ $? -eq 0 ] && [ -s "$MOCK" ]; then
+      chmod +x "$MOCK"; _rig_log "mock: prebuilt mock-$arch ($RIG_URL/mock-$arch)"
+    elif [ "${RIG_ALLOW_SOURCE:-0}" = 1 ] && ( cd "$root/mock" && cargo build --release >/dev/null 2>&1 ); then
+      cp "$root/mock/target/release/mock" "$MOCK"
+      _rig_log "mock: FELL BACK to local cargo build (RIG_ALLOW_SOURCE=1) — NOT the pinned rig"
+    else
+      _rig_log "FATAL mock: cannot fetch $RIG_URL/mock-$arch (${err:-download failed})"
+      [ "${RIG_ALLOW_SOURCE:-0}" = 1 ] || _rig_log "  (source fallback is opt-in: set RIG_ALLOW_SOURCE=1 for local dev)"
+      return 1
+    fi
   fi
   if [ ! -x "$UGEN" ]; then
-    if curl -fsSL "$RIG_URL/ugen-$arch" -o "$UGEN" 2>/dev/null && [ -s "$UGEN" ]; then chmod +x "$UGEN"
-    elif go build -o "$UGEN" "$root/loadgen/ugen.go" 2>/dev/null; then :
-    else echo "rig: cannot get ugen ($RIG_URL/ugen-$arch) and no go toolchain to build it"; return 1; fi
+    err="$(curl -fsSL "$RIG_URL/ugen-$arch" -o "$UGEN" 2>&1)"
+    if [ $? -eq 0 ] && [ -s "$UGEN" ]; then
+      chmod +x "$UGEN"; _rig_log "ugen: prebuilt ugen-$arch ($RIG_URL/ugen-$arch)"
+    elif [ "${RIG_ALLOW_SOURCE:-0}" = 1 ] && go build -o "$UGEN" "$root/loadgen/ugen.go" 2>/dev/null; then
+      _rig_log "ugen: FELL BACK to local go build (RIG_ALLOW_SOURCE=1) — NOT the pinned rig"
+    else
+      _rig_log "FATAL ugen: cannot fetch $RIG_URL/ugen-$arch (${err:-download failed})"
+      [ "${RIG_ALLOW_SOURCE:-0}" = 1 ] || _rig_log "  (source fallback is opt-in: set RIG_ALLOW_SOURCE=1 for local dev)"
+      return 1
+    fi
   fi
 }
