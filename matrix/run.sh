@@ -110,6 +110,20 @@ SWEEP_INSTANT="${SWEEP_INSTANT:-16 32 64 128 256 512 1024}"
 SWEEP_DELAYED="${SWEEP_DELAYED:-8 32 128 256 1024 4096 8192 16384}"
 SWEEP_TTFT_MS="${SWEEP_TTFT_MS:-20}"
 P99_CEIL_MS="${P99_CEIL_MS:-1000}"
+# ADAPTIVE RUNG SELECTION + shared rig baselines (lib/sweep.sh knobs; see its header). A gateway
+# that serves the whole 6x6 sweeps up to 36 cells, and the naive per-cell cost (~4 min: 15 fixed
+# ladder rungs + a re-measured direct c1 baseline + 2 re-measured mock ceilings, per cell) put this
+# suite at ~2.3 h on the field box - a RUNTIME problem, not a fidelity one, because most of that
+# wall time re-measures rig constants or probes ladder rungs far from the winner. With
+# SWEEP_ADAPTIVE=1 every probed rung is measured EXACTLY as before (same loadgen invocation, same
+# window, same gates) but a sweep starts at the previous winner's rung and expands only while the
+# best gate-passing rung sits on the probed window's edge; the FIRST sweep at each ttft still walks
+# the full ladder (seeding the prior), and a window with no gate-passing rung falls back to the
+# full ladder. Direct-to-mock numbers (c1 baseline + mock ceilings, keyed by ingress dialect via
+# SWEEP_CACHE_KEY below) are measured once per dialect and reused: they measure the rig, never the
+# gateway. Every gateway-facing measurement still runs fresh on every cell.
+# MATRIX_SWEEP_ADAPTIVE=0 restores the full ladder on every cell (the A/B validation knob).
+SWEEP_ADAPTIVE="${MATRIX_SWEEP_ADAPTIVE:-1}"
 # Sweeping every green cell multiplies the suite's wall time (by design: that is the whole point of
 # per-cell perf), so the default suite ceiling rises from harness.sh's 45 min to 4 h when sweeps are
 # on. An explicit HARNESS_SUITE_CEIL_S still wins, and the ceiling still backstops a wedged gateway.
@@ -407,6 +421,10 @@ matrix_cell_perf(){
   # headers (anthropic-version/x-api-key, x-goog-api-key, ...), matching the capability probe.
   UGEN_H=( ${CURL_H[@]+"${CURL_H[@]}"} "$@" )
   SWEEP_BODY="$data"
+  # Rig-baseline cache key = the INGRESS dialect: it fixes the direct-to-mock path AND the probe
+  # body, i.e. everything the c1 direct baseline and the mock ceilings depend on. Gateway-side
+  # measurements ignore this key entirely.
+  SWEEP_CACHE_KEY="$cell"
   GURL="http://127.0.0.1:$GW_PORT$path"
   DURL="http://127.0.0.1:$MOCK_PORT$(mock_direct_path "$cell")"
   mock_start_plain
@@ -415,7 +433,7 @@ matrix_cell_perf(){
   local prps=$SW_CEIL_RPS pbound=$SW_BOUND
   run_sweep "$SWEEP_TTFT_MS" "$SWEEP_DELAYED"
   local lrps=$SW_CEIL_RPS lbound=$SW_BOUND
-  SWEEP_BODY=""; UGEN_H=()
+  SWEEP_BODY=""; UGEN_H=(); SWEEP_CACHE_KEY=""
   mock_start_record
   # The sweep restarted the mock, so the gateway's upstream connection pool may hold dead sockets.
   # Fire a couple of discarded warm requests through the gateway so the re-verify probe below (and
@@ -746,6 +764,7 @@ cat > "$RESULTS/$GATEWAY.json" <<JSON
   "egress_configured": "$GW_MATRIX_EGRESS",
   "cap_note": "$(json_escape "$GW_MATRIX_CAP_NOTE")",
   "cell_perf_sweep": $([ "$MATRIX_SWEEP" = 1 ] && echo true || echo false),
+  "sweep_rung_selection": "$([ "${SWEEP_ADAPTIVE:-0}" = 1 ] && echo adaptive || echo full-ladder)",
   "sweep_ttft_ms": $SWEEP_TTFT_MS,
   "p99_ceiling_ms": $P99_CEIL_MS,
   "cells": {$COMPAT_CELLS
