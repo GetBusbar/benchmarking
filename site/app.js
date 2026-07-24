@@ -1304,8 +1304,35 @@ function renderStatic() {
    snapshot, and its OWN self-description (g.cls). No perf numbers, no winner
    highlighting; the other tabs measure how they perform. busbar gets the exact
    same row treatment as everyone else. */
-const rosterRows = (gateways) =>
-  gateways.slice().sort((a, b) => a.display.toLowerCase().localeCompare(b.display.toLowerCase()));
+/* Roster sort state: the overview is sortable by any column, DEFAULTING to name A→Z (the neutral
+   ordering — no metric, no ranking). Clicking a header sorts by it; clicking the active header
+   flips direction. `name` is the tiebreaker for every column so ties are stable and alphabetical. */
+let rosterSort = { col: "name", dir: "asc" };
+/* Per-column sort key: a comparable value (string or number) for gateway `g`. `null`/`n/a` sorts
+   LAST regardless of direction (a missing value is never "best"). */
+const ROSTER_KEY = {
+  name: (g) => g.display.toLowerCase(),
+  lang: (g) => (g.lang || "").toLowerCase(),
+  version: (g) => { const b = gatewayBuild(g); return b ? fmtBuild(b).toLowerCase() : null; },
+  age: (g) => (g.first_commit ? new Date(g.first_commit).getTime() : null), // older = smaller ms
+  stars: (g) => (g.stars == null ? null : g.stars),
+  cls: (g) => (g.cls || "Gateway").toLowerCase(),
+};
+const rosterRows = (gateways) => {
+  const key = ROSTER_KEY[rosterSort.col] || ROSTER_KEY.name;
+  const dir = rosterSort.dir === "desc" ? -1 : 1;
+  const cmp = (a, b) => {
+    const ka = key(a), kb = key(b);
+    // Null always sinks to the bottom, independent of dir.
+    if (ka == null && kb == null) return a.display.toLowerCase().localeCompare(b.display.toLowerCase());
+    if (ka == null) return 1;
+    if (kb == null) return -1;
+    let r = typeof ka === "number" ? ka - kb : String(ka).localeCompare(String(kb));
+    if (r === 0) r = a.display.toLowerCase().localeCompare(b.display.toLowerCase()); // stable by name
+    return r * dir;
+  };
+  return gateways.slice().sort(cmp);
+};
 /* Star counts render compact: 12345 -> "12.3k", below 1000 the full int. Null (no
    snapshot entry) stays null; the cell renders it muted. */
 const fmtStars = (v) => (v == null ? null : v >= 1000 ? `${(v / 1000).toFixed(1)}k` : String(Math.round(v)));
@@ -1348,9 +1375,43 @@ const fmtBuild = (full) => {
   return head.length > 24 ? head.slice(0, 21) + "..." : head;
 };
 
+/* The newest `measured_at` across every gateway's suites: WHEN the field was last benchmarked.
+   Honest label for the board — a single clock for "how fresh is this data". Null if none stamped. */
+function lastBenchmarkRun(gateways) {
+  let newest = 0;
+  for (const g of gateways) {
+    for (const l of LANES) {
+      const t = g[l.key] && g[l.key].measured_at;
+      if (t) { const ms = new Date(t).getTime(); if (ms > newest) newest = ms; }
+    }
+  }
+  return newest ? new Date(newest) : null;
+}
+
 function renderGateways() {
   const tbody = document.querySelector("#gateways-table tbody");
   if (!tbody || !state.data) return;
+  // Sort-indicator + click wiring on the header (once): each <th data-sort="key"> becomes clickable.
+  const thead = document.querySelector("#gateways-table thead");
+  if (thead && !thead.dataset.wired) {
+    thead.dataset.wired = "1";
+    thead.querySelectorAll("th[data-sort]").forEach((th) => {
+      th.classList.add("sortable");
+      th.addEventListener("click", () => {
+        const col = th.dataset.sort;
+        if (rosterSort.col === col) rosterSort.dir = rosterSort.dir === "asc" ? "desc" : "asc";
+        else rosterSort = { col, dir: "asc" };
+        renderGateways();
+      });
+    });
+  }
+  if (thead) {
+    thead.querySelectorAll("th[data-sort]").forEach((th) => {
+      const active = th.dataset.sort === rosterSort.col;
+      th.setAttribute("aria-sort", active ? (rosterSort.dir === "asc" ? "ascending" : "descending") : "none");
+      th.dataset.dir = active ? rosterSort.dir : "";
+    });
+  }
   const rows = rosterRows(state.data.gateways);
   tbody.innerHTML = rows.map((g) => {
     const c = LANG_COLORS[g.lang] || LANG_COLORS.Other;
@@ -1373,6 +1434,14 @@ function renderGateways() {
   const asOf = rows.map((g) => g.stars_as_of).filter(Boolean).sort().pop();
   const note = document.getElementById("stars-asof");
   if (note) note.textContent = asOf ? `Star counts are a GitHub snapshot as of ${asOf}, refreshed with the data, not live.` : "";
+  // When the field was last benchmarked (newest measured_at across all gateways), UTC.
+  const run = lastBenchmarkRun(rows);
+  const runNote = document.getElementById("lastrun");
+  if (runNote) {
+    runNote.textContent = run
+      ? `Benchmarks last run ${run.toISOString().slice(0, 16).replace("T", " ")} UTC.`
+      : "";
+  }
 }
 
 /* ---- home landing page ------------------------------------------------------
