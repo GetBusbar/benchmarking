@@ -130,7 +130,7 @@ fi
 DURL="http://127.0.0.1:$MOCK_PORT$GW_PATH"; GURL="http://127.0.0.1:$GW_PORT$GW_PATH"
 DT50=0; DT99=0; DG50=0; DG99=0; GT50=0; GT99=0; GG50=0; GG99=0
 ADD_T50=0; ADD_T99=0; ADD_G50=0; ADD_G99=0
-SUST_STREAMS=0; SUST_FPS=0; STALLFREE_STREAMS=0; MOCK_FPS=0; MOCK_BOUND=false; SWEEP_JSON=""
+SUST_STREAMS=0; SUST_FPS=0; STALLFREE_STREAMS=0; STALLFREE_FPS=0; MOCK_FPS=0; MOCK_BOUND=false; SWEEP_JSON=""
 if [ "$STREAM_OK" = 1 ]; then
   # ── c1: direct baseline + gateway → added TTFT / added inter-frame gap (µs) ─────────────────────
   # Same discarded warm-up for both paths, mirroring perf/run.sh.
@@ -184,11 +184,16 @@ if [ "$STREAM_OK" = 1 ]; then
     if awk -v f="$fail" -v s="$streams" -v d="$delivered" -v st="$stalled" \
          'BEGIN{exit !(s>0 && f<=0.001*s && d>=0.999 && st==0)}' \
        && [ "$conc" -gt "$STALLFREE_STREAMS" ]; then
-      STALLFREE_STREAMS=$conc
+      STALLFREE_STREAMS=$conc; STALLFREE_FPS=$fps
     fi
   done
-  if [ "${MOCK_FPS:-0}" -gt 0 ] && awk -v c="$SUST_FPS" -v m="$MOCK_FPS" 'BEGIN{exit !(c>=0.9*m)}'; then MOCK_BOUND=true; fi
-  [ "$MOCK_BOUND" = true ] && log "[$GATEWAY] ⚠ sustained fps ($SUST_FPS) within 10% of mock ($MOCK_FPS) — MOCK-BOUND floor"
+  # Headline pairs the stall-free stream count with the fps measured AT that same operating point
+  # (STALLFREE_FPS), not SUST_FPS — which is the looser delivered gate's fps at a possibly HIGHER,
+  # stall-inclusive concurrency. Publishing SUST_FPS beside STALLFREE_STREAMS overstated the frames/
+  # sec the reported stream count achieves and mock-bounded the wrong point (audit R2-H2). SUST_FPS is
+  # retained only for the transparency stream_delivered_streams field.
+  if [ "${MOCK_FPS:-0}" -gt 0 ] && awk -v c="$STALLFREE_FPS" -v m="$MOCK_FPS" 'BEGIN{exit !(c>=0.9*m)}'; then MOCK_BOUND=true; fi
+  [ "$MOCK_BOUND" = true ] && log "[$GATEWAY] ⚠ sustained fps ($STALLFREE_FPS) within 10% of mock ($MOCK_FPS) — MOCK-BOUND floor"
   log "[$GATEWAY] streams sustained (clean, no stall/fail) = $STALLFREE_STREAMS; delivered (stalls ignored) = $SUST_STREAMS"
 fi
 
@@ -216,7 +221,7 @@ cat > "$RESULTS/$GATEWAY.json" <<JSON
   "stream_direct_gap_p50_us": ${DG50:-0},
   "stream_direct_gap_p99_us": ${DG99:-0},
   "stream_sustained_streams": $STALLFREE_STREAMS,
-  "stream_sustained_fps": $SUST_FPS,
+  "stream_sustained_fps": $STALLFREE_FPS,
   "stream_sustained_gate": "clean streaming: the highest concurrency where EVERY stream stayed clean - zero errored/dropped streams AND zero streams with any inter-frame gap > ${STALL_X}x the ${STREAM_INTERVAL_MS}ms pacing interval (a stall), >=99.9% frames delivered. This is the honest 'streams held without stalling' number the column shows.",
   "stream_delivered_streams": $SUST_STREAMS,
   "stream_delivered_gate": "looser: >=99% of frames delivered and <0.1% errored streams, IGNORING stalls (a stream that delivered every frame but late still counts). Kept for transparency; stalls are priced by the added-gap p99.",
@@ -240,7 +245,7 @@ JSON
 echo "================================================================"
 if [ "$STREAM_OK" = 1 ]; then
   echo " gateway=$GATEWAY   added TTFT p99=${ADD_T99}µs   added inter-frame p99=${ADD_G99}µs"
-  echo "   streams sustained = ${SUST_STREAMS} (${SUST_FPS} frames/sec, mock_bound=${MOCK_BOUND}; stall-free = ${STALLFREE_STREAMS})"
+  echo "   streams sustained (stall-free) = ${STALLFREE_STREAMS} (${STALLFREE_FPS} frames/sec, mock_bound=${MOCK_BOUND}; delivered = ${SUST_STREAMS} @ ${SUST_FPS} fps)"
 else
   echo " gateway=$GATEWAY   did not stream (stream_served=false)"
 fi
