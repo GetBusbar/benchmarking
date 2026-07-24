@@ -3,9 +3,11 @@
 # Gateway manifest: Apache APISIX + the ai-proxy plugin (DB-less standalone, docker).
 #
 # APISIX runs in data-plane/standalone mode (no etcd): routes are read from conf/apisix.yaml. The
-# ai-proxy plugin fronts an OpenAI-shaped route and forwards to the mock via override.endpoint. Access
-# logging off, worker_processes = pinned core count, no observability plugins → pure proxy overhead.
-# APISIX_IMAGE is pinned in gateways/versions.env.
+# ai-proxy plugin fronts an OpenAI-shaped route and forwards to the mock via override.endpoint. OOTB
+# config.yaml carries ONLY the DB-less standalone run-mechanic (data_plane role + yaml config_provider)
+# + the port binding; admin API, worker_processes and access logging are all left at APISIX's shipped
+# defaults (enable_admin on / worker_processes auto / enable_access_log on). APISIX_IMAGE pinned in
+# gateways/versions.env.
 GW_KIND=docker
 # Self-describing manifest metadata — charts.py + the run lists read these, so a gateway
 # is fully defined by its own dir (add/remove a dir → it appears/disappears everywhere).

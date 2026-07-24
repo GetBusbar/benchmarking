@@ -46,6 +46,11 @@ gw_build() {
 # dialect's native upstream shape to the mock (network_config.base_url is honoured at runtime for
 # openai/anthropic/cohere/gemini — provider.go BaseURL-overridable set). sk-dummy is the required
 # provider key (Bifrost needs a key entry to register a provider); never a live secret.
+# SINGLE SOURCE: ncore = number of pinned cores (e.g. 0-3 → 4), not the last core index. Defined once
+# here and read by both gw_launch (GOMAXPROCS docker -e flag) and gw_config (published artifact), so the
+# benchmarked value and the published value cannot drift.
+_bifrost_ncore() { echo $(( ${CORES##*-} - ${CORES%%-*} + 1 )); }
+
 _bifrost_write_config() {
   mkdir -p "$GW_DIR/bfdata"
   cat > "$GW_DIR/bfdata/config.json" <<JSON
@@ -122,10 +127,8 @@ gw_matrix_egress() {
 
 gw_launch() {
   sudo docker rm -f bifrost >/dev/null 2>&1; sleep 1
-  # GOMAXPROCS = number of pinned cores (e.g. 0-3 → 4), not the last core index.
-  local ncore=$(( ${CORES##*-} - ${CORES%%-*} + 1 ))
   sudo docker run -d --name bifrost --network host --cpuset-cpus="$CORES" \
-    -e GOMAXPROCS="$ncore" -v "$GW_DIR/bfdata:/app/data" "$BIFROST_IMAGE" >"$GW_DIR/launch.log" 2>&1 || true
+    -e GOMAXPROCS="$(_bifrost_ncore)" -v "$GW_DIR/bfdata:/app/data" "$BIFROST_IMAGE" >"$GW_DIR/launch.log" 2>&1 || true
 }
 
 gw_diag() {
@@ -149,8 +152,7 @@ gw_config() {
   cat "$cfg"
   echo
   echo "# ── launch env (non-secret; GOMAXPROCS = pinned core count, CPU-pinning run-mechanic) ──"
-  local ncore=$(( ${CORES##*-} - ${CORES%%-*} + 1 ))
-  echo "GOMAXPROCS=$ncore"
+  echo "GOMAXPROCS=$(_bifrost_ncore)"
 }
 
 gw_rss() { container_rss_mib bifrost; }  # summed process-tree VmRSS (same method as native gateways)

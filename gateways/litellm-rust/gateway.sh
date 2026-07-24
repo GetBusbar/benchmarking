@@ -80,9 +80,13 @@ gw_version() {
   echo "${LITELLM_RUST_BRANCH}@${sha:-?} (python-config litellm==${ver:-?})"
 }
 
-gw_launch() {
-  # azure_ai model pointing at the mock; api_base ending in /v1/messages is used verbatim by
-  # complete_azure_anthropic_url, so it hits the mock's Messages endpoint directly.
+# SINGLE SOURCE OF TRUTH: _lr_write_config() is the ONE renderer of the model_list config.
+# azure_ai model pointing at the mock; api_base ending in /v1/messages is used verbatim by
+# complete_azure_anthropic_url, so it hits the mock's Messages endpoint directly. gw_launch renders it
+# and loads it via LITELLM_CONFIG_PATH; gw_config cats the SAME file (rendering via this helper only if
+# absent) — so the benchmarked config and the published artifact cannot drift.
+_lr_write_config() {
+  mkdir -p "$GW_DIR"
   cat > "$GW_DIR/config.gen.yaml" <<YAML
 model_list:
   - model_name: $GW_MODEL
@@ -91,6 +95,10 @@ model_list:
       api_base: http://127.0.0.1:$MOCK_PORT/v1/messages
       api_key: dummy
 YAML
+}
+
+gw_launch() {
+  _lr_write_config
   local site; site="$("$LR_VENV/bin/python" -c 'import site;print(site.getsitepackages()[0])' 2>/dev/null)"
   pkill -f litellm-ai-gateway 2>/dev/null; sleep 1
   setsid taskset -c "$CORES" env \
@@ -116,16 +124,7 @@ YAML
 gw_config() {
   local cfg="$GW_DIR/config.gen.yaml"
   echo "# ── config.gen.yaml (rendered; loaded via LITELLM_CONFIG_PATH, python-config reader) ──"
-  if [ ! -f "$cfg" ]; then
-    cat > "$cfg" <<YAML
-model_list:
-  - model_name: $GW_MODEL
-    litellm_params:
-      model: $GW_MODEL
-      api_base: http://127.0.0.1:$MOCK_PORT/v1/messages
-      api_key: dummy
-YAML
-  fi
+  [ -f "$cfg" ] || _lr_write_config
   cat "$cfg"
   echo
   echo "# ── launch env (non-secret; LITELLM_MASTER_KEY is the gateway's mandatory auth, dummy on the isolated rig) ──"
