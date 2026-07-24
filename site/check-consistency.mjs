@@ -25,11 +25,16 @@ import { createRequire } from "node:module";
 
 const PASS_KEYS = ["added_latency_p99_us", "rps_sustained_20ms", "rps_max_proxy"];
 
-/* What charts.py reads for a gateway's passthrough metric: best_cell verbatim (its overlay),
-   else the raw perf suite when served (no canonical record = raw suite verdict stands).
-   Mirrored here in JS so the guard covers the python reader without executing it. */
+/* What charts.py reads for a gateway's passthrough metric. This must mirror charts.py:_overlay_perf
+   at the FIELD level (audit R5-#5): _overlay_perf overwrites obj[f] only when best_cell[f] is not null,
+   so a best_cell that is present but carries a NULL field falls THROUGH to the raw perf-suite value in
+   the PNG - it does not force null. The prior mirror returned null whenever best_cell existed, so a
+   present-but-null best_cell field beside a non-null perf fallback let the guard see table===drawer===
+   charts===null and pass the bundle "consistent" while the chart actually drew the perf number. Mirror
+   the overlay: use best_cell[key] when non-null, else fall through to the raw perf value exactly as
+   _overlay_perf does. */
 function chartsPassValue(g, key) {
-  if (g.best_cell) return g.best_cell[key] ?? null;
+  if (g.best_cell && g.best_cell[key] != null) return g.best_cell[key];
   const j = g.perf;
   return j && j.served !== false && j[key] != null ? j[key] : null;
 }

@@ -28,6 +28,14 @@ func rpsOver(ok int64, elapsed float64, dur int) int64{
  if elapsed<=0{return 0}
  return int64(float64(ok)/elapsed)
 }
+// fpsOver: content-frames per wall second, with the SAME non-positive-elapsed guard as rpsOver (audit
+// R5-NIT). Unreachable with a real monotonic clock, but symmetric with rpsOver so a zero/negative
+// elapsed can never divide-by-zero the streaming fps.
+func fpsOver(frames int64, elapsed float64, dur int) int64{
+ if elapsed<=0{elapsed=float64(dur)}
+ if elapsed<=0{return 0}
+ return int64(float64(frames)/elapsed)
+}
 // buildRequest constructs the POST for one loadgen iteration. Isolated so the audit-L1 NewRequest
 // ERROR path (a malformed URL must increment fail and continue, never panic on a nil req) is testable.
 func buildRequest(url,body,auth,shape string,stream bool,extra []string)(*http.Request,error){
@@ -110,7 +118,7 @@ func main(){
   if *expframes>0&&started>0{del=float64(frames)/float64(started*int64(*expframes))}
   // streams= completed-or-not opened; fps = content frames per wall second over the whole window
   fmt.Printf("streams=%d complete=%d fail=%d stalled=%d frames=%d fps=%d delivered=%.4f ttft_p50us=%d ttft_p99us=%d gap_p50us=%d gap_p99us=%d\n",
-    started,done,fail,stalled,frames,int64(float64(frames)/elapsed),del,
+    started,done,fail,stalled,frames,fpsOver(frames,elapsed,*dur),del,
     int64(pct(ttfts,0.5)),int64(pct(ttfts,0.99)),int64(pct(gaps,0.5)),int64(pct(gaps,0.99)))
   return}
  sort.Float64s(lat);p:=func(q float64)float64{if len(lat)==0{return 0};i:=int(float64(len(lat))*q);if i>=len(lat){i=len(lat)-1};return lat[i]}

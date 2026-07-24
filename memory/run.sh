@@ -110,7 +110,14 @@ pkill -f "$MOCK_BIN" 2>/dev/null; sleep 1
 setsid taskset -c "$MOCKCORES" "$MOCK_BIN" -port "$MOCK_PORT" </dev/null >/dev/null 2>&1 &
 sleep 1
 
-cleanup(){ gw_stop 2>/dev/null; pkill -f "$MOCK_BIN" 2>/dev/null; rm -f "${STOP:-}" "${PEAKF:-}" "${LOADPIDF:-}" 2>/dev/null; }
+# On a trap-triggered EXIT before the sampler is stopped normally (line ~164), the sampler subshell
+# `while [ ! -f "$STOP" ]` must be broken and reaped or it orphans and busy-loops calling gw_rss every
+# 0.3s (audit R5-NIT). So CREATE the STOP file (its presence ends the loop) and kill the sampler pid
+# ($SP, may be unset if we exit before it launches) BEFORE removing the temp files - never rm STOP while
+# the loop still watches for it. Harmless on EC2 (the box self-terminates) but leaks a poller on local dev.
+cleanup(){ gw_stop 2>/dev/null; pkill -f "$MOCK_BIN" 2>/dev/null
+  touch "${STOP:-}" 2>/dev/null || true; kill "${SP:-}" 2>/dev/null || true
+  rm -f "${STOP:-}" "${PEAKF:-}" "${LOADPIDF:-}" 2>/dev/null; }
 trap cleanup EXIT
 
 log "[$GATEWAY] build"; gw_build || { echo "build failed"; exit 1; }

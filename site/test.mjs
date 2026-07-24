@@ -431,13 +431,33 @@ test("divergent best_cell vs perf suite: every surface resolves to best_cell", (
   assert.equal(rec.rps_max_proxy, 33333);
   // and the guard agrees this gateway is consistent (all surfaces on best_cell)
   assert.deepEqual(checkConsistency({ gateways: [g] }, app).errors, []);
-  // sanity: if a surface DID read the perf scalar, the guard would fail. Simulate by
-  // stripping best_cell from the charts-side view only: not constructible through the real
-  // accessors, so instead assert the guard catches a poisoned canonical record.
-  const poisoned = { ...g, best_cell: { ...g.best_cell, rps_sustained_20ms: null } };
-  // table/drawer show n/a for the null field while charts read null too: still consistent
+  // A best_cell that carries a NULL field: the table/drawer resolve to n/a (null) for that field,
+  // and the charts reader must too, so the bundle stays consistent. Here the perf fallback ALSO
+  // resolves to null for that field (perf omits it), so all three surfaces agree on null.
+  const poisoned = { ...g, best_cell: { ...g.best_cell, rps_sustained_20ms: null },
+    perf: { ...g.perf, rps_sustained_20ms: null } };
   assert.deepEqual(checkConsistency({ gateways: [poisoned] }, app).errors, []);
   assert.equal(app.passCell(poisoned, "rps_sustained_20ms", String).v, null, "best_cell is THE record; no silent perf patch");
+});
+
+test("guard catches a null best_cell field masking a non-null perf fallback (R5-#5)", () => {
+  // The exact blind spot: best_cell is PRESENT but carries a NULL sustained field while the perf
+  // suite carries a REAL number. charts.py:_overlay_perf overwrites obj[f] only when best_cell[f] is
+  // not null, so the PNG falls THROUGH to the perf number (11111), while the table + drawer both read
+  // best_cell's null (n/a). The old JS mirror returned null whenever best_cell existed, so the guard
+  // saw table===drawer===charts===null and passed the bundle "consistent" - hiding a chart-vs-board
+  // divergence. With the field-level fallback the guard must now FAIL and name the metric.
+  const g = {
+    key: "nullmask", display: "NullMask", lang: "Rust",
+    best_cell: { ingress: "openai", egress: "openai", dialect: "openai", source: "matrix",
+      added_latency_p50_us: 100, added_latency_p99_us: 111,
+      rps_sustained_20ms: null, rps_max_proxy: 33333 },
+    perf: { served: true, added_latency_p50_us: 100, added_latency_p99_us: 111,
+      rps_sustained_20ms: 11111, rps_max_proxy: 33333 },
+  };
+  const { errors } = checkConsistency({ gateways: [g] }, app);
+  assert.ok(errors.some((e) => e.includes("nullmask.rps_sustained_20ms")),
+    `guard must flag the null-field/non-null-perf divergence; got: ${JSON.stringify(errors)}`);
 });
 
 test("divergent translation_cell vs xlate suite: drawer/compare read the matrix cell", () => {
