@@ -220,8 +220,10 @@ const gateways = gatewayKeys.map((key) => {
   // ago" badge while the shown matrix numbers were 90d old — the badge overstating freshness. Prefer the
   // matrix stamp; fall back to the newest-across-suites only when there is no matrix (a legacy-only row
   // whose numbers age by that stamp anyway). The staleness flag below is re-derived on the same basis.
-  const matrixAtMs = g.matrix && g.matrix.measured_at ? Date.parse(g.matrix.measured_at) : 0;
-  const gAtMs = matrixAtMs > 0 ? matrixAtMs : newestMeasuredMs(g);
+  // LOW-R3-3 / MED-1: the per-row badge stamp ages the DISPLAYED (matrix-preferring) numbers — the SAME
+  // shared basis the board-level footer + wholesale-stale floor now use (displayedMeasuredMs). Hoisted
+  // function declaration, so it is callable here even though it is defined below.
+  const gAtMs = displayedMeasuredMs(g);
   g.measured_at = gAtMs > 0 ? new Date(gAtMs).toISOString() : null;
   return g;
 });
@@ -305,11 +307,28 @@ for (const g of gateways) {
   }
 }
 const hardware = [...hwCounts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] || null;
+// MED-1: the board footer "Latest measurement: Nd ago" must reflect the DISPLAYED numbers (matrix-
+// preferring), NOT the max across all suites (which folds a never-displayed legacy re-run and overstates
+// freshness). `latest` above still folds all suites for the future-date corruption hard-fail (:324) —
+// a future-dated legacy stamp is still corruption — but the PUBLISHED footer uses the displayed basis.
+const latestDisplayedMs = Math.max(...gateways.map(displayedMeasuredMs), 0);
+const latestDisplayed = latestDisplayedMs > 0 ? new Date(latestDisplayedMs).toISOString() : null;
 
 // The newest embedded measurement across a gateway's own suites, in epoch ms (0 when it has none).
-// Used both for each gateway's own g.measured_at stamp and for the wholesale-stale board floor below.
 function newestMeasuredMs(g) {
   return Math.max(...SUITES.map((s) => g[s] && g[s].measured_at).filter(Boolean).map((a) => Date.parse(a)).concat([0]));
+}
+
+// MED-1 / MED-2: the stamp that actually drives what the board DISPLAYS, in epoch ms (0 when none).
+// EVERY displayed number now projects from g.matrix ONLY (best_cell / streaming / memory_read), so the
+// board-level freshness footer AND the wholesale-stale hard-fail must age those displayed numbers — the
+// matrix stamp when present, falling back to the newest-across-suites only for a legacy-only row (whose
+// numbers legitimately age by that stamp). This is the SAME basis the per-gateway ageBasisMs (:415) uses.
+// Folding retired legacy suite timestamps in (newestMeasuredMs) let a never-displayed ad-hoc SUITES=perf
+// re-run make a wholesale-stale matrix board look fresh (MED-1) or slip past the 180-day floor (MED-2).
+function displayedMeasuredMs(g) {
+  const matrixAt = g.matrix && g.matrix.measured_at ? Date.parse(g.matrix.measured_at) : 0;
+  return matrixAt > 0 ? matrixAt : newestMeasuredMs(g);
 }
 
 // ---- freshness guard (matrix-sole-source) -----------------------------------
@@ -348,13 +367,18 @@ if (latest && Date.parse(generatedAt) < Date.parse(latest)) {
 const MAX_ROW_SPAN_SANITY_H = 12;  // sanity-only: one atomic matrix run is hours; >12h means a corrupt/skewed stamp
 const MAX_GATEWAY_AGE_DAYS = 60;   // per-gateway staleness SIGNAL (badge), never a build failure
 const MAX_BOARD_AGE_DAYS = 180;    // wholesale-stale floor (soft anchor): the whole board older than this = hard fail
-const boardNewest = Math.max(...gateways.map(newestMeasuredMs), 0);
+// MED-2: base the wholesale-stale floor on the DISPLAYED (matrix-preferring) stamps, not the max across
+// all suites. Otherwise a single untouched results/perf/<gw>.json re-run yesterday makes boardNewest =
+// yesterday while every DISPLAYED matrix number is 179d old — the 180-day hard-fail (the one absolute
+// guard the rewrite KEPT) never fires and a wholesale-stale matrix board publishes generated_at=now.
+// The floor now ages exactly what the board shows (same basis as MED-1's footer + the per-row badge).
+const boardNewest = Math.max(...gateways.map(displayedMeasuredMs), 0);
 if (boardNewest > 0) {
   const boardAgeDays = (Date.parse(generatedAt) - boardNewest) / 86400000;
   if (boardAgeDays > MAX_BOARD_AGE_DAYS) {
     throw new Error(
-      `gen-data: FRESHNESS FAILURE (stale board): the newest measurement anywhere on the board is ${boardAgeDays.toFixed(1)}d old ` +
-      `(> ${MAX_BOARD_AGE_DAYS}d) — the WHOLE board is wholesale-stale (nothing has refreshed at all). ` +
+      `gen-data: FRESHNESS FAILURE (stale board): the newest DISPLAYED measurement anywhere on the board is ${boardAgeDays.toFixed(1)}d old ` +
+      `(> ${MAX_BOARD_AGE_DAYS}d) — the WHOLE board is wholesale-stale (nothing displayed has refreshed at all). ` +
       `Refusing to publish generated_at=${generatedAt} over stale data. Re-run the field.`);
   }
 }
@@ -460,7 +484,8 @@ const data = {
   category: "gateways", // which category bundle this is (see CATEGORIES in app.js)
   generated_at: generatedAt,
   hardware,
-  latest_measured_at: latest,
+  // MED-1: the DISPLAYED-number freshness stamp (matrix-preferring), not the max across all suites.
+  latest_measured_at: latestDisplayed,
   repo: "https://github.com/GetBusbar/benchmarking",
   gateways,
   charts,
