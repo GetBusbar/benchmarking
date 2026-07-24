@@ -3,5 +3,5 @@
   "build": "tensorzero/gateway:2026.6.0 (@sha256:c939db4f27e41aa3a37a87909430a0c8f898f9c952f402dcbdc17e1708597bcb)",
   "governed_served": false,
   "governed_note": "manifest defines no gw_governed_launch/gw_governed_token (no native key/limit governance, or not yet wired)",
-  "measured_at": "2026-07-23T22:19:27Z"
+  "measured_at": "2026-07-24T01:32:12Z"
 }

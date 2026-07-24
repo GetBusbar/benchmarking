@@ -7,10 +7,10 @@
   "serve_error": "",
   "stream_error": "",
   "stream_note": "",
-  "streamcpu_frames_per_sec": 209515,
-  "streamcpu_fps_per_core": 52379,
+  "streamcpu_frames_per_sec": 204204,
+  "streamcpu_fps_per_core": 51051,
   "streamcpu_concurrency": 256,
-  "streamcpu_direct_ceiling_fps": 211387,
+  "streamcpu_direct_ceiling_fps": 197842,
   "streamcpu_mock_bound": true,
   "streamcpu_valid": false,
   "streamcpu_added_per_frame_us": null,
@@ -18,7 +18,7 @@
   "streamcpu_frame_bytes": 16,
   "streamcpu_cores": 4,
   "streamcpu_stall_ms": 250,
-  "sweep_streamcpu": [{"conc":8,"streams":280,"complete":280,"fail":0,"stalled":0,"frames":143360,"fps":7053,"delivered":1.0000},{"conc":32,"streams":1088,"complete":1088,"fail":0,"stalled":0,"frames":557056,"fps":27241,"delivered":1.0000},{"conc":64,"streams":2112,"complete":2112,"fail":0,"stalled":0,"frames":1081344,"fps":53608,"delivered":1.0000},{"conc":128,"streams":3972,"complete":3972,"fail":0,"stalled":0,"frames":2033664,"fps":98788,"delivered":1.0000},{"conc":256,"streams":8438,"complete":8438,"fail":0,"stalled":0,"frames":4320256,"fps":209515,"delivered":1.0000}],
+  "sweep_streamcpu": [{"conc":8,"streams":280,"complete":280,"fail":0,"stalled":0,"frames":143360,"fps":7102,"delivered":1.0000},{"conc":32,"streams":1088,"complete":1088,"fail":0,"stalled":0,"frames":557056,"fps":27528,"delivered":1.0000},{"conc":64,"streams":2176,"complete":2176,"fail":0,"stalled":0,"frames":1114112,"fps":54769,"delivered":1.0000},{"conc":128,"streams":4224,"complete":4224,"fail":0,"stalled":0,"frames":2162688,"fps":105231,"delivered":1.0000},{"conc":256,"streams":8193,"complete":8193,"fail":0,"stalled":0,"frames":4194816,"fps":204204,"delivered":1.0000}],
   "payload_bytes": 256,
   "endpoint": "/v1/messages",
   "model": "azure_ai/mock",
@@ -26,5 +26,5 @@
   "mock_proto": "h1+h2c",
   "arch": "arm64",
   "hardware": "AWS m7g.4xlarge (Graviton3, 16 cores / 64 GB). Gateway-under-test pinned to 4 cores (the comparable basis); mock and load generator on 6 cores each so the mock never bottlenecks the streaming sweep. Ubuntu 24.04. One dedicated box per gateway.",
-  "measured_at": "2026-07-23T22:17:48Z"
+  "measured_at": "2026-07-24T01:31:22Z"
 }
