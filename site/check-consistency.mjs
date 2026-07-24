@@ -138,6 +138,19 @@ export function checkConsistency(data, app) {
           errors.push(`${g.key}.streaming.streams_sustained: site-visible=${siteShowsSust} but chart stream_sustained_valid=${chartSustValid} ` +
             `(the drawer/table must show sustained-streams exactly when the chart draws its bar — same mock-bound rule)`);
         }
+        // MEDIUM-R3-3 (explicit visibility tie): the added-TTFT / added-gap PNGs use null_not_served, so a
+        // NULL added-TTFT/gap (an unreliable streaming c1 window sets it null while stream_served stays
+        // true) draws NO bar and never ranks — it must not become a bold served "0". The site table shows
+        // n/a for the same null. Assert the two agree: the site shows the value iff it is non-null, exactly
+        // when the chart draws a bar. Without this the chart's null→0 coercion could diverge from the table.
+        for (const key of ["added_ttft_p99_us", "added_gap_p99_us"]) {
+          const siteShows = app.streamCell(g, key, String).v != null;
+          const chartDrawsBar = (s[key] ?? null) !== null;   // mirrors charts.py null_not_served (bar iff non-null)
+          if (siteShows !== chartDrawsBar) {
+            errors.push(`${g.key}.streaming.${key}: site-visible=${siteShows} but chart draws-bar=${chartDrawsBar} ` +
+              `(a null added-TTFT/gap must read n/a on the table AND draw no bar / not rank on the chart — never a served "0")`);
+          }
+        }
       }
     }
     // ---- ONE SOURCE OF TRUTH (sweep chart vs headline): the published headline MUST be a point on

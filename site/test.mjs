@@ -919,6 +919,42 @@ test("MEDIUM-R2-2 guard: site sustained visibility must equal the chart's stream
     `guard must catch a streams_sustained certified on the headline but mock-bound on its diagonal cell; got: ${JSON.stringify(eDrift)}`);
 });
 
+test("MEDIUM-R3-3 guard: a null added-TTFT/gap must read n/a on the table AND draw no bar (never a served 0)", () => {
+  // An unreliable streaming c1 window sets add_ttft/gap to null while stream_served stays true. The site
+  // table renders that null as n/a; the chart (null_not_served) must draw NO bar and never rank it as a
+  // bold "0". The consistency guard ties the two: site-visible === chart draws-bar (value non-null).
+  // A cell with a REAL measured added-TTFT/gap: site shows it, chart draws it → consistent.
+  const okStream = { stream_served: true, added_ttft_p99_us: 90, added_gap_p99_us: 12,
+    streams_sustained: 1300, streams_sustained_mock_bound: false, cpu_fps: 48000, cpu_fps_mock_bound: false };
+  const okCell = { served: true, perf: { added_latency_p99_us: 20 }, stream: okStream };
+  const okGw = { key: "tok", display: "Tok", lang: "Rust",
+    streaming: { dialect: "openai", source: "matrix", ...okStream },
+    matrix: { upstreams: { openai: { cells: { openai: okCell } } } } };
+  assert.deepEqual(checkConsistency({ gateways: [okGw] }, app).errors, [],
+    "measured added-TTFT/gap: site shows it, chart draws it — consistent");
+  // A cell whose added-TTFT + gap are NULL (unreliable c1) but still stream_served: n/a on the table AND
+  // no bar on the chart → still consistent (both suppress it). Proves the guard does not demand a number.
+  const nullStream = { stream_served: true, added_ttft_p99_us: null, added_gap_p99_us: null,
+    streams_sustained: 1300, streams_sustained_mock_bound: false, cpu_fps: 48000, cpu_fps_mock_bound: false };
+  const nullCell = { served: true, perf: { added_latency_p99_us: 20 }, stream: nullStream };
+  const nullGw = { key: "tnull", display: "Tnull", lang: "Rust",
+    streaming: { dialect: "openai", source: "matrix", ...nullStream },
+    matrix: { upstreams: { openai: { cells: { openai: nullCell } } } } };
+  assert.equal(app.streamCell(nullGw, "added_ttft_p99_us", String).na, true, "null added-TTFT reads n/a on the table");
+  assert.equal(app.streamCell(nullGw, "added_gap_p99_us", String).na, true, "null added-gap reads n/a on the table");
+  assert.deepEqual(checkConsistency({ gateways: [nullGw] }, app).errors, [],
+    "null added-TTFT/gap: n/a on the table AND no bar on the chart — consistent (no served 0)");
+  // Now DRIFT: the headline carries a measured TTFT while its diagonal cell is null. The table (which
+  // reads the cell via canonicalStreaming) shows n/a, but the raw headline the chart would rank is a real
+  // number → site-visible (false) != chart draws-bar (true) → the guard must FAIL.
+  const drift = { key: "tdrift", display: "TDrift", lang: "Rust",
+    streaming: { dialect: "openai", source: "matrix", ...okStream },  // headline: measured TTFT
+    matrix: { upstreams: { openai: { cells: { openai: nullCell } } } } };  // cell: null TTFT
+  const eDrift = checkConsistency({ gateways: [drift] }, app).errors;
+  assert.ok(eDrift.some((e) => e.includes("tdrift.streaming.added_ttft_p99_us")),
+    `guard must catch a TTFT measured on the headline but null on its diagonal cell; got: ${JSON.stringify(eDrift)}`);
+});
+
 test("gen-data projects memory from the matrix's one process-level read", () => {
   const bundle = genInto(buildStreamMemRepo());
   const g = bundle.gateways.find((x) => x.key === "sgw");

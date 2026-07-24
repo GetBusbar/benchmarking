@@ -242,9 +242,17 @@ class Chart:
     # ── suite-specific behavior (streaming / translation / governance lanes) ──────────────────────
     served_field: str = "served"  # json key that decides "did this gateway do the thing at all"
     not_served_text: str = "✕ did not serve"   # label + legend entry when served_field is false
+    not_measured_text: str = ""                 # label for a null (unmeasured) primary metric when null_not_served (falls back to not_served_text)
     zero_text: str = "0  ·  no load held p99 < 1 s"  # served, but the metric came out 0
     clamp_negatives: bool = False  # clamp sub-noise negatives to 0 (footnoted) — never a negative bar
     zero_ok: bool = False          # a clamped/true 0 is a GOOD result (sorts to the winning end)
+    # MEDIUM-R3-3: on a zero_ok chart a MEASURED sub-noise <=0 is the winning end, but a NULL primary
+    # metric is UNMEASURED (e.g. an unreliable streaming c1 window sets added_ttft/gap to null while
+    # stream_served stays true). float(null or 0) would coerce it to a served 0 that ranks #1 as a bold
+    # "0 perfect streamer" while the table shows n/a — a single-source divergence. When set, a null
+    # primary value is treated as NOT-served on this chart (no bar, out of top-N, "not measured" label),
+    # matching how the site table renders the null.
+    null_not_served: bool = False
     auto_ms: bool = False          # µs metric: relabel the whole chart in ms once the max is >= 1 ms
     annot: object = None           # optional fn(row) -> str appended after the primary bar label
 
@@ -349,8 +357,10 @@ CHARTS = [
         log=True,
         served_field="stream_served",
         not_served_text="✕ no SSE streaming",
+        not_measured_text="✕ TTFT not measured (unreliable c1 window)",
         clamp_negatives=True,
         zero_ok=True,
+        null_not_served=True,
         auto_ms=True,
     ),
     Chart(
@@ -363,8 +373,10 @@ CHARTS = [
         log=True,
         served_field="stream_served",
         not_served_text="✕ no SSE streaming",
+        not_measured_text="✕ inter-token gap not measured (unreliable c1 window)",
         clamp_negatives=True,
         zero_ok=True,
+        null_not_served=True,
         auto_ms=True,
     ),
     Chart(
@@ -584,7 +596,12 @@ def _topn_keys(chart: Chart, n: int = 5) -> set:
     field = chart.series[0].field
 
     def _served(r) -> bool:
-        return bool(r.get(chart.served_field, True))
+        if not bool(r.get(chart.served_field, True)):
+            return False
+        # MEDIUM-R3-3: a null primary metric on a null_not_served chart is UNMEASURED, not a served 0.
+        if chart.null_not_served and r.get(field) is None:
+            return False
+        return True
 
     def _val(r) -> float:
         return float(r.get(field, 0) or 0)
@@ -607,8 +624,18 @@ def render(chart: Chart, only_keys=None, out_stem: str | None = None) -> None:
         return
     primary = chart.series[0].field
 
+    # MEDIUM-R3-3: capture whether the PRIMARY metric is null BEFORE any clamp/auto-ms mutation coerces
+    # None→0.0 below, so a null_not_served chart can still tell "unmeasured (null)" from "measured 0".
+    if chart.null_not_served:
+        for r in rows:
+            r["_primary_null"] = r.get(primary) is None
+
     def _served(r) -> bool:
-        return bool(r.get(chart.served_field, True))
+        if not bool(r.get(chart.served_field, True)):
+            return False
+        if chart.null_not_served and r.get("_primary_null"):
+            return False
+        return True
 
     def _val(r, field=primary) -> float:
         return float(r.get(field, 0) or 0)
@@ -722,6 +749,10 @@ def render(chart: Chart, only_keys=None, out_stem: str | None = None) -> None:
                     if nst == "✕ did not serve":  # the perf suites' historical phrasing
                         nst += " under load"
                     txt, col, weight = f"{_numlab(v)}   {nst}", "#c2410c", "bold"
+                elif chart.null_not_served and r.get("_primary_null"):
+                    # MEDIUM-R3-3: streamed, but the primary metric is null (unmeasured) — say so, do
+                    # NOT draw it as a served 0. Matches the site table's n/a for the same null.
+                    txt, col, weight = (chart.not_measured_text or chart.not_served_text), "#c2410c", "bold"
                 else:
                     txt, col, weight = chart.not_served_text, "#c2410c", "bold"
                 ax.text(tx, cy, txt, va="center", ha="left", fontsize=9.5,
