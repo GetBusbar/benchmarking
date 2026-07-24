@@ -28,6 +28,10 @@ sweep_probe(){ # url conc dur -> "rps fail p99us p50us"
                    # at best 38810 (@c=1024); peak search must beat that and land near c=1300.
                    local d=$(( (c-1300)/8 )); local r=$(( 40000 - $(sqr "$d") )); [ "$r" -lt 500 ] && r=500
                    echo "$r 0 $(( 20000 + c*100 )) 15000" ;;
+    peak_low)      # max-proxy shape: peak 45000 @ c=64, BELOW the default start (256). Exercises the
+                   # bidirectional ramp walking DOWN to the peak. All rungs pass the gate.
+                   local d=$(( (c-64)/2 )); local r=$(( 45000 - $(sqr "$d") )); [ "$r" -lt 500 ] && r=500
+                   echo "$r 0 $(( 20000 + c*50 )) 14000" ;;
   esac
 }
 fail=0
@@ -42,4 +46,5 @@ run_case cliff1000;    assert "cliff/collapse -> plateau, not zero" "$SW_CEIL_RP
 run_case slow200;      assert "slow gateway (ramp-down)"            "$SW_CEIL_RPS" "$SW_BOUND" "$SW_CEIL_CONC"  4500  5000 false
 run_case mockbound;    assert "mock-bound flagged"                  "$SW_CEIL_RPS" "$SW_BOUND" "$SW_CEIL_CONC" 51000 57000 true
 run_case peak_between; assert "peak BETWEEN doublings (not low)"    "$SW_CEIL_RPS" "$SW_BOUND" "$SW_CEIL_CONC" 39500 40000 false 1150 1450
+run_case peak_low;     assert "peak BELOW start (ramp down)"        "$SW_CEIL_RPS" "$SW_BOUND" "$SW_CEIL_CONC" 44000 45000 false 32 128
 [ "$fail" = 0 ] && echo "all peak-search sweep tests passed" || { echo "PEAK-SEARCH SWEEP TESTS FAILED"; exit 1; }

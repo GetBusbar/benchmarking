@@ -110,7 +110,7 @@ if [ "$MATRIX_SWEEP" = 1 ]; then
 fi
 # Same knobs + defaults as perf/run.sh so the per-cell numbers are directly comparable.
 C1_DUR="${C1_DUR:-20}"; SWEEP_DUR="${SWEEP_DUR:-10}"; PSIZE="${PSIZE:-256}"
-SWEEP_INSTANT="${SWEEP_INSTANT:-16 32 64 128 256 512 1024}"
+SWEEP_INSTANT="${SWEEP_INSTANT:-16 8192}"   # [min,max] bounds for the peak search (see perf/run.sh)
 # BISECT search bounds (min max), not a fixed ladder - see lib/sweep.sh mode=bisect + perf/run.sh.
 SWEEP_DELAYED="${SWEEP_DELAYED:-32 65536}"
 SWEEP_TTFT_MS="${SWEEP_TTFT_MS:-20}"
@@ -449,7 +449,7 @@ matrix_cell_perf(){
   DURL="http://127.0.0.1:$MOCK_PORT$(mock_direct_path "$cell")"
   mock_start_plain
   sweep_c1
-  run_sweep 0 "$SWEEP_INSTANT"
+  run_sweep 0 "$SWEEP_INSTANT" peak
   local prps=$SW_CEIL_RPS pbound=$SW_BOUND
   run_sweep "$SWEEP_TTFT_MS" "$SWEEP_DELAYED" peak
   local lrps=$SW_CEIL_RPS lbound=$SW_BOUND

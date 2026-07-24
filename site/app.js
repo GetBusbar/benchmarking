@@ -203,6 +203,19 @@ function withZeroNote(cell) {
   return !cell.na && cell.v === 0 ? { ...cell, note: ZERO_RPS_NOTE } : cell;
 }
 
+/* The sustained@20ms cell carries the WINNING CONCURRENCY in its tooltip. rps and concurrency are
+   bound by Little's law (rps <= concurrency / mock_delay), so the concurrency IS the latency story
+   behind the throughput - e.g. 31,288 req/s peaked at ~1,024 in flight = ~33 ms effective latency.
+   It's the in-flight load level at which the gateway's throughput was highest while still holding the
+   gate (p99 < 1 s, <0.1% errors). Falls back cleanly when concurrency wasn't recorded (legacy). */
+function sustainedCell(g) {
+  const cell = withZeroNote(passCell(g, "rps_sustained_20ms", fmtInt));
+  const cc = g.best_cell ? g.best_cell.rps_sustained_20ms_concurrency : null;
+  if (!cell.na && cell.v > 0 && cc != null)
+    return { ...cell, note: `Peaked at ${fmtInt(cell.v)} req/s with ${fmtInt(cc)} concurrent requests in flight - the load level that maximised sustained throughput under 20 ms LLM latency (higher concurrency added latency without more throughput).` };
+  return cell;
+}
+
 /* xlateMatrixCell: the perf object for a gateway's ingress->egress translation cell, straight from the
    matrix (upstreams[egress].cells[ingress]). Returns cell.perf when that exact pair is served and
    measured, else null. The Translation tab pins BOTH ends (state.xlateIn/xlateOut) so every row is the
@@ -276,8 +289,8 @@ const COLUMN_SETS = {
       } },
     { id: "lat", label: "Added latency p99 (µs)", desc: false, title: "Gateway p99 minus direct-to-mock p99 at concurrency 1 on the gateway's best same-dialect passthrough (the Tested-on dialect) - pure forwarding, no translation",
       get: (g) => passCell(g, "added_latency_p99_us", fmtAdded) },
-    { id: "rps20", label: "Sustained RPS @20ms", desc: true, title: "Sustained requests/sec with a 20 ms mock LLM latency (p99 < 1 s, <0.1% errors) on the Tested-on dialect (see the pill)",
-      get: (g) => withZeroNote(passCell(g, "rps_sustained_20ms", fmtInt)) },
+    { id: "rps20", label: "Sustained RPS @20ms", desc: true, title: "Sustained requests/sec with a 20 ms mock LLM latency (p99 < 1 s, <0.1% errors) on the Tested-on dialect (see the pill). Hover a cell for the concurrency it peaked at.",
+      get: (g) => sustainedCell(g) },
     { id: "rpsmax", label: "Max proxy RPS", desc: true, title: "Throughput ceiling against an instant mock (p99 < 1 s, <0.1% errors) on the Tested-on dialect (see the pill)",
       get: (g) => withZeroNote(passCell(g, "rps_max_proxy", fmtInt)) },
     { id: "memidle", label: "Mem idle (MiB)", desc: false, title: "Process RSS after launch, before load",

@@ -207,26 +207,44 @@ run_sweep() { # ttft_ms  conc_list_or_bounds  [mode: ladder|bisect]
     [ "$start" -lt "$_min" ] && start=$_min; [ "$start" -gt "$_max" ] && start=$_max
     local a=0 b=0 hi=0 pr=0 cr=0 x xr
     if _sw_probe_c "$start"; then
-      pr=$(_sw_eff "$start"); b=$start; a=$(( start/2 >= _min ? start/2 : _min ))
-      if [ "$pr" -gt 0 ] && ! _sw_mockbound_c "$start"; then
-        c=$start
-        while [ "$c" -lt "$_max" ]; do                       # ramp UP while rps RISES
-          c=$(( c*2 > _max ? _max : c*2 ))
-          _sw_probe_c "$c" || break
-          cr=$(_sw_eff "$c")
-          if [ "$cr" -gt "$pr" ]; then a=$b; b=$c; pr=$cr
-            if _sw_mockbound_c "$c"; then hi=$c; break; fi
-          else hi=$c; break; fi                              # declined (or gate failed): peak is in [a,c]
-        done
-        [ "$hi" = 0 ] && hi=$b                                # rose all the way to _max
-      elif [ "$pr" -le 0 ]; then                             # start FAILED the gate: ramp DOWN to a pass
+      # BIDIRECTIONAL ramp: the peak can sit ABOVE the start (sustained@20ms, ~c=1024) or BELOW it
+      # (max-proxy@0ms, ~c=64), so we first learn which way rps rises from the start, then ramp that
+      # way until it stops rising. This makes ONE search work for both metrics (bisect on rise/fall).
+      pr=$(_sw_eff "$start"); b=$start
+      if [ "$pr" -le 0 ]; then                               # start FAILED the gate: ramp DOWN to a passing rung
         hi=$start; b=0; c=$start
         while [ "$c" -gt "$_min" ]; do
           c=$(( c/2 < _min ? _min : c/2 ))
           _sw_probe_c "$c" || break
           if [ "$(_sw_eff "$c")" -gt 0 ]; then b=$c; pr=$(_sw_eff "$c"); a=$(( c/2 >= _min ? c/2 : _min )); break; else hi=$c; fi
         done
-      else hi=$start; fi                                     # mock-bound at start: nothing above to gain
+      elif _sw_mockbound_c "$start"; then                    # mock-bound at start: rig-limited, nothing to gain
+        a=$(( start/2 >= _min ? start/2 : _min )); hi=$start
+      else                                                   # start passes, gateway-bound: which SIDE is the peak?
+        local up=$(( start*2 > _max ? _max : start*2 )) dn=$(( start/2 < _min ? _min : start/2 )) ur=0 dr=0
+        [ "$up" -gt "$start" ] && { _sw_probe_c "$up" && ur=$(_sw_eff "$up"); }
+        if [ "$ur" -gt "$pr" ]; then                         # rps rising going UP -> peak is ABOVE start
+          a=$start; b=$up; pr=$ur; c=$up
+          while [ "$c" -lt "$_max" ]; do
+            c=$(( c*2 > _max ? _max : c*2 )); _sw_probe_c "$c" || break; cr=$(_sw_eff "$c")
+            if [ "$cr" -gt "$pr" ]; then a=$b; b=$c; pr=$cr; _sw_mockbound_c "$c" && { hi=$c; break; }
+            else hi=$c; break; fi
+          done
+          [ "$hi" = 0 ] && hi=$b                             # rose all the way to _max
+        else
+          [ "$dn" -lt "$start" ] && { _sw_probe_c "$dn" && dr=$(_sw_eff "$dn"); }
+          if [ "$dr" -gt "$pr" ]; then                       # rps rising going DOWN -> peak is BELOW start
+            hi=$start; b=$dn; pr=$dr; c=$dn
+            while [ "$c" -gt "$_min" ]; do
+              local nc=$(( c/2 < _min ? _min : c/2 )); [ "$nc" = "$c" ] && { a=$_min; break; }
+              _sw_probe_c "$nc" || break; local ncr=$(_sw_eff "$nc")
+              if [ "$ncr" -gt "$pr" ]; then hi=$c; b=$nc; pr=$ncr; c=$nc
+              else a=$nc; break; fi
+            done
+            [ "$a" = 0 ] && a=$_min
+          else a=$dn; hi=$up; b=$start; fi                   # both neighbours lower -> start IS the peak
+        fi
+      fi
       if [ "$b" -gt 0 ] && [ "$hi" -gt "$a" ]; then          # refine the peak in [a,hi] (unimodal max-search)
         while [ $(( hi - a )) -gt "$TOL" ]; do
           if [ $(( b - a )) -ge $(( hi - b )) ]; then x=$(( (a + b)/2 )); else x=$(( (b + hi)/2 )); fi

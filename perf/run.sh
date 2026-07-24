@@ -30,7 +30,10 @@ C1_DUR="${C1_DUR:-20}"; SWEEP_DUR="${SWEEP_DUR:-10}"; PSIZE="${PSIZE:-256}"
 # 20ms-mock = "sustained RPS under LLM latency" (AIGatewayBench's metric, concurrency-bound → ramps
 # higher). The delayed sweep starts low (8) so slow gateways get a concurrency they can hold. Same
 # grid for every gateway.
-SWEEP_INSTANT="${SWEEP_INSTANT:-16 32 64 128 256 512 1024}"
+# Both throughput sweeps are now the SAME peak search (rise/fall bisect); these are just its [min,max]
+# search bounds. Max-proxy's peak sits at LOW concurrency (0ms upstream saturates the CPU fast), which
+# the bidirectional ramp walks DOWN to find - so one method, both metrics, each to its true peak.
+SWEEP_INSTANT="${SWEEP_INSTANT:-16 8192}"
 # The 20ms sweep is now a BISECT (lib/sweep.sh mode=bisect): these are the search BOUNDS, not a fixed
 # ladder - min (slow gateways still get a concurrency they can hold) and max (well past the mock's
 # ~1176-concurrent ceiling, so every gateway's real limit is bracketed below the mock-bound zone).
@@ -147,7 +150,7 @@ fi
 
 # (A) MAX PROXY THROUGHPUT — instant mock. Raw forward speed; busbar's own published metric.
 log "[$GATEWAY] sweep A — max proxy throughput (instant mock)"
-run_sweep 0 "$SWEEP_INSTANT"
+run_sweep 0 "$SWEEP_INSTANT" peak
 PROXY_RPS=$SW_CEIL_RPS; PROXY_CONC=$SW_CEIL_CONC; PROXY_MOCK=$SW_MOCK_CEIL; PROXY_BOUND=$SW_BOUND; PROXY_JSON="$SW_JSON"
 [ "$PROXY_BOUND" = true ] && log "[$GATEWAY] ⚠ max-proxy ceiling ($PROXY_RPS) within 10% of mock ($PROXY_MOCK) — MOCK-BOUND floor"
 log "[$GATEWAY] max proxy throughput = $PROXY_RPS rps @ c=$PROXY_CONC"
