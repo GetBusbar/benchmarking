@@ -187,50 +187,60 @@ run_sweep() { # ttft_ms  conc_list_or_bounds  [mode: ladder|bisect]
     [ -n "$_mk" ] && [ "${SW_MOCK_CEIL:-0}" -gt 0 ] && SWEEP_MOCKCEIL_CACHE[$_mk]="$SW_MOCK_CEIL"
   fi
   SW_CEIL_RPS=0; SW_CEIL_CONC=0; SW_CEIL_P99=0; SW_JSON=""
-  if [ "$mode" = bisect ]; then
-    # ── BISECT: find each gateway's OWN true concurrency ceiling to ±TOL, not a coarse-grid rung. ──
-    # The sustained-under-latency metric is concurrency-bound and unimodal (rps climbs with conc,
-    # then the gate fails - p99 blows past the ceiling or connections collapse). So: exponentially
-    # ramp (double) from a start hint until a rung FAILS the gate (or hits the mock's rig ceiling),
-    # giving a bracket [last_pass, first_fail]; then binary-search that bracket to TOL. Every gateway
-    # lands on its own real ceiling instead of being quantised onto a shared rung. Probes ~log(range)
-    # rungs, so it is also strictly cheaper than a fine fixed ladder (this is the matrix speed-up).
+  if [ "$mode" = peak ]; then
+    # ── PEAK SEARCH: "sustained rps under LLM latency" is UNIMODAL in rps - throughput CLIMBS with
+    # concurrency while the gateway keeps up, then DECLINES past saturation (contention adds latency),
+    # all while still passing the p99 gate; and rps is bound to concurrency by Little's law
+    # (rps <= conc / mock_delay). The answer is the PEAK rps. Boundary bisection is WRONG here: it
+    # chases the far p99 cliff (wasted probes) AND quantises the peak onto a doubling rung, leaving the
+    # true max - which sits BETWEEN doublings - unmeasured, understating the fastest gateways. Instead:
+    # ramp (double) until rps STOPS rising (peak bracketed [a,hi] around best b), then a unimodal
+    # max-search (probe the wider gap; keep the side holding the higher rps) refines to +-TOL. Finds
+    # the true peak and STOPS at it. SW_CEIL_CONC (the winning concurrency) is reported alongside rps.
     local -A _RC_rps=() _RC_fail=() _RC_p99=(); local _PROBED="" c
     local _min=1 _max="$top"; for c in $concs; do _min="$c"; break; done
-    local TOL="${SWEEP_BISECT_TOL:-64}"
-    local start="${SWEEP_PRIOR[$ttft]:-}"; [ -z "$start" ] && start="${SWEEP_START:-256}"   # fixed, NOT max/8
+    local TOL="${SWEEP_PEAK_TOL:-128}"
+    # eff <conc>: the value the search maximises - measured rps if the rung passes the gate, else 0
+    # (a gate-failing rung can never be the peak, so the search moves away from it).
+    _sw_eff(){ if _sw_pass_c "$1"; then printf '%s' "${_RC_rps[$1]}"; else printf 0; fi; }
+    local start="${SWEEP_PRIOR[$ttft]:-}"; [ -z "$start" ] && start="${SWEEP_START:-256}"
     [ "$start" -lt "$_min" ] && start=$_min; [ "$start" -gt "$_max" ] && start=$_max
-    local last_pass=0 first_fail=0
+    local a=0 b=0 hi=0 pr=0 cr=0 x xr
     if _sw_probe_c "$start"; then
-      if _sw_pass_c "$start"; then
-        last_pass=$start
-        if ! _sw_mockbound_c "$start"; then                          # ramp UP by doubling
-          c=$start
-          while [ "$c" -lt "$_max" ]; do
-            c=$(( c*2 > _max ? _max : c*2 ))
-            _sw_probe_c "$c" || break
-            if _sw_pass_c "$c"; then last_pass=$c; _sw_mockbound_c "$c" && break
-            else first_fail=$c; break; fi
-          done
-        fi
-      else                                                            # start FAILED: ramp DOWN to a pass
-        first_fail=$start; c=$start
+      pr=$(_sw_eff "$start"); b=$start; a=$(( start/2 >= _min ? start/2 : _min ))
+      if [ "$pr" -gt 0 ] && ! _sw_mockbound_c "$start"; then
+        c=$start
+        while [ "$c" -lt "$_max" ]; do                       # ramp UP while rps RISES
+          c=$(( c*2 > _max ? _max : c*2 ))
+          _sw_probe_c "$c" || break
+          cr=$(_sw_eff "$c")
+          if [ "$cr" -gt "$pr" ]; then a=$b; b=$c; pr=$cr
+            if _sw_mockbound_c "$c"; then hi=$c; break; fi
+          else hi=$c; break; fi                              # declined (or gate failed): peak is in [a,c]
+        done
+        [ "$hi" = 0 ] && hi=$b                                # rose all the way to _max
+      elif [ "$pr" -le 0 ]; then                             # start FAILED the gate: ramp DOWN to a pass
+        hi=$start; b=0; c=$start
         while [ "$c" -gt "$_min" ]; do
           c=$(( c/2 < _min ? _min : c/2 ))
           _sw_probe_c "$c" || break
-          if _sw_pass_c "$c"; then last_pass=$c; break; else first_fail=$c; fi
+          if [ "$(_sw_eff "$c")" -gt 0 ]; then b=$c; pr=$(_sw_eff "$c"); a=$(( c/2 >= _min ? c/2 : _min )); break; else hi=$c; fi
         done
-      fi
-      if [ "$last_pass" -gt 0 ] && [ "$first_fail" -gt "$last_pass" ]; then   # BISECT the bracket
-        local lo=$last_pass hi=$first_fail mid
-        while [ $(( hi - lo )) -gt "$TOL" ]; do
-          mid=$(( (lo+hi)/2 ))
-          _sw_probe_c "$mid" || break
-          if _sw_pass_c "$mid"; then lo=$mid; _sw_mockbound_c "$mid" && break; else hi=$mid; fi
+      else hi=$start; fi                                     # mock-bound at start: nothing above to gain
+      if [ "$b" -gt 0 ] && [ "$hi" -gt "$a" ]; then          # refine the peak in [a,hi] (unimodal max-search)
+        while [ $(( hi - a )) -gt "$TOL" ]; do
+          if [ $(( b - a )) -ge $(( hi - b )) ]; then x=$(( (a + b)/2 )); else x=$(( (b + hi)/2 )); fi
+          if [ "$x" = "$a" ] || [ "$x" = "$b" ] || [ "$x" = "$hi" ]; then break; fi
+          _sw_probe_c "$x" || break; xr=$(_sw_eff "$x")
+          if [ "$x" -lt "$b" ]; then
+            if [ "$xr" -gt "$pr" ]; then hi=$b; b=$x; pr=$xr; else a=$x; fi
+          else
+            if [ "$xr" -gt "$pr" ]; then a=$b; b=$x; pr=$xr; else hi=$x; fi
+          fi
         done
       fi
     fi
-    for c in $(printf '%s\n' $_PROBED | sort -n -u); do               # aggregate ascending; max passing rps wins
+    for c in $(printf '%s\n' $_PROBED | sort -n -u); do       # aggregate ascending; max PASSING rps wins
       SW_JSON="${SW_JSON}${SW_JSON:+,}{\"conc\":$c,\"rps\":${_RC_rps[$c]},\"p99_us\":${_RC_p99[$c]},\"fail\":${_RC_fail[$c]}}"
       if _sw_pass_c "$c" && [ "${_RC_rps[$c]}" -gt "$SW_CEIL_RPS" ]; then
         SW_CEIL_RPS=${_RC_rps[$c]}; SW_CEIL_CONC=$c; SW_CEIL_P99=${_RC_p99[$c]}
