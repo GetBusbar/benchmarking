@@ -21,6 +21,10 @@ if [ ${#GATEWAYS[@]} -eq 0 ]; then
   for d in "$HERE"/gateways/*/gateway.sh; do GATEWAYS+=("$(basename "$(dirname "$d")")"); done
 fi
 log(){ echo "[$(date +%H:%M:%S)] $*"; }
+# Count of suite runs that exited non-zero (crashed). A run missing whole suites must never report as
+# clean: run-all.sh exits non-zero if any suite crashed, so the remote ssh in run-on-ec2.sh sees it and
+# the top-level summary counts it as an issue (audit R3-M4).
+SUITE_FAILS=0
 
 # Between-suite port drain. Each suite's EXIT trap kills the gateway; the next suite relaunches the
 # SAME gateway on the SAME port seconds later. A gateway that binds WITHOUT SO_REUSEADDR (busbar,
@@ -78,7 +82,10 @@ for gw in "${GATEWAYS[@]}"; do
     fi
     first=0
     log "══ $gw · $suite ══"
-    GATEWAY="$gw" bash "$HERE/$suite/run.sh" || log "$gw $suite run failed (continuing)"
+    if ! GATEWAY="$gw" bash "$HERE/$suite/run.sh"; then
+      SUITE_FAILS=$((SUITE_FAILS+1))
+      log "$gw $suite run failed (continuing; will exit non-zero)"
+    fi
   done
 done
 
@@ -89,3 +96,9 @@ else
   log "matplotlib not present — results/memory/*.json written; run 'pip install matplotlib && python3 bench/charts.py' to draw"
 fi
 log "done — results/ + results/memory_rss.png"
+# Propagate a crashed suite as a non-zero run-level status (audit R3-M4/M5): a run missing whole
+# suites must never be reported "clean" by the orchestrator's remote-ssh exit check.
+if [ "$SUITE_FAILS" -gt 0 ]; then
+  log "run-all.sh: $SUITE_FAILS suite run(s) failed — exiting non-zero"
+  exit 1
+fi

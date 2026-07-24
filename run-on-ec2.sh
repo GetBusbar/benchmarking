@@ -44,8 +44,10 @@ fi
 # ── ARCHITECTURE: the easy flip ───────────────────────────────────────────────────────────────────
 # ARCH=arm64 (default) runs the whole field on Graviton (m7g); ARCH=x86 runs it on Intel (m7i). One
 # knob picks the instance family AND the matching Ubuntu AMI. Every gateway builds/pulls for that arch
-# on its own box, and the arch is recorded in each result so runs from different arches never get
-# confused. (To measure BOTH, run twice with RESULTS_ARCH_SUBDIR set — see the header of run-all.sh.)
+# on its own box, and the arch is recorded INSIDE each result JSON ("arch": …) so runs from different
+# arches never get confused. NOTE: results paths are NOT arch-namespaced (they are results/<suite>/<gw>.json
+# for every arch), so a back-to-back run on the other arch OVERWRITES the file; the arch tag inside the
+# JSON is the dedupe key. To keep both arches' data, copy results/ aside between the two runs.
 ARCH="${ARCH:-arm64}"
 case "$ARCH" in
   arm64|aarch64|graviton)
@@ -187,7 +189,16 @@ bench_gateway() {
   # fetches the 2 rig binaries from the release (lib/rig.sh) and builds its own gateway (docker pull, or
   # gw_build for the 2 source gateways). A stray local venv (litellm's 564MB) or bin/ must never be
   # uploaded to 13 boxes. Log the payload size + transfer time so a slow rsync is never a silent hang.
-  local _pl; _pl=$(du -sh --exclude=.git --exclude='*/target' --exclude=target --exclude=results --exclude=node_modules --exclude='*/venv' --exclude=venv --exclude=__pycache__ --exclude=bin "$HERE" 2>/dev/null | cut -f1)
+  # Payload size for the tripwire (added after the 564MB-venv incident so a slow rsync is never a
+  # silent hang). GNU `du --exclude` is rejected by the BSD `du` on the darwin orchestrator (always
+  # logged "?"), defeating the check on the real host. Derive the size from a LOCAL rsync DRY RUN with
+  # the SAME excludes the real transfer uses (below): portable, no network, and exactly the bytes about
+  # to ship. `--stats` prints "Total file size: N bytes"; humanise it (a number beats "?").
+  local _pl; _pl=$(rsync -an --stats \
+    --exclude .git --exclude '*/target' --exclude target --exclude results --exclude node_modules \
+    --exclude '*/venv' --exclude venv --exclude __pycache__ --exclude bin --exclude '*.pem' --exclude '*.log' --exclude '.incoming-*' \
+    "$HERE/" "${TMPDIR:-/tmp}/bench-rsync-sizecheck-dst/" 2>/dev/null \
+    | awk -F: '/Total file size/{gsub(/[^0-9]/,"",$2); b=$2+0; if(b>=1073741824)printf "%.1fG",b/1073741824; else if(b>=1048576)printf "%.1fM",b/1048576; else if(b>=1024)printf "%.1fK",b/1024; else printf "%dB",b}')
   glog_echo "rsync harness up (${_pl:-?}) ..."; local _t0=$SECONDS
   rsync -az --delete -e "ssh $SSHOPT" \
     --exclude .git --exclude '*/target' --exclude target --exclude results --exclude node_modules \
@@ -204,6 +215,15 @@ bench_gateway() {
     export SUITES=\"${SUITES:-perf memory stream streamcpu xlate governed matrix}\"
     sudo -n true 2>/dev/null && sudo chmod 666 /var/run/docker.sock || true
     bash run-all.sh $gw" >>"$glog" 2>&1
+  local ssh_rc=$?
+  # run-all.sh now exits non-zero if any suite crashed (audit R3-M4/M5). Because bench_gateway runs in
+  # a background subshell with only `set -uo pipefail` (no errexit), an ssh/remote failure was silently
+  # ignored - the log jumped straight to PULL FAILED with no "ssh FAILED" line. Record it as an issue.
+  local run_failed=0
+  if [ "$ssh_rc" -ne 0 ]; then
+    glog_echo "run-all.sh ssh FAILED (rc=$ssh_rc) - remote crashed or a suite exited non-zero; results may be incomplete"
+    run_failed=1
+  fi
 
   glog_echo "pulling $gw results back"
   local pull_failed=0
@@ -240,8 +260,12 @@ bench_gateway() {
   # DONE means a CLEAN, fully-pulled fresh run. If any suite's pull failed or the guard kept old data,
   # this gateway did NOT cleanly refresh - say so loudly so the freshness guard's later hard-fail is
   # never a surprise and the gateway can be re-run.
-  if [[ "$pull_failed" -eq 0 && -f "$HERE/results/perf/$gw.json" ]]; then glog_echo "DONE"
-  else glog_echo "INCOMPLETE (a suite failed to pull or was guard-held; this gateway did NOT fully refresh - re-run it)"; fi
+  if [[ "$pull_failed" -eq 0 && "$run_failed" -eq 0 && -f "$HERE/results/perf/$gw.json" ]]; then glog_echo "DONE"
+  else glog_echo "INCOMPLETE (a suite crashed, failed to pull, or was guard-held; this gateway did NOT fully refresh - re-run it)"; fi
+  # Propagate the issue to the caller's `wait "$p" || fail=…` so the summary's issue count is accurate
+  # and a run missing whole suites is never reported as "0 issues" (audit R3-M4/M5).
+  if [[ "$pull_failed" -ne 0 || "$run_failed" -ne 0 || ! -f "$HERE/results/perf/$gw.json" ]]; then return 1; fi
+  return 0
 }
 
 log "fanning out ${#GATEWAYS[@]} boxes (one per gateway): ${GATEWAYS[*]}"
@@ -256,13 +280,22 @@ for p in "${pids[@]}"; do wait "$p" || fail=$((fail+1)); done
 log "all boxes done ($fail job(s) reported an issue — check results/fanout-*.log)"
 
 # ── append this run to the append-only history (results/history/<gw>.jsonl) ─────────────────────
-python3 "$HERE/history/append.py" || true
+# Do NOT swallow a failure with `|| true` (audit R3-LOW-4): a malformed result JSON or an unwritable
+# results/history/ would otherwise complete the run "successfully" with the append-only history
+# silently missing the whole run. Log loudly and count it as a run-level issue instead.
+if ! python3 "$HERE/history/append.py"; then
+  log "WARNING history/append.py FAILED - the append-only history was NOT updated for this run (investigate results/ JSON validity + results/history writability)"
+  fail=$((fail+1))
+fi
 
 # ── regenerate charts + reports locally from the collected JSONs ──────────────────────────────────
 log "regenerating charts + reports locally"
 VENV="${TMPDIR:-/tmp}/bench-charts-venv"
-if [[ ! -d "$VENV" ]]; then python3 -m venv "$VENV" >/dev/null 2>&1 || true; fi
-"$VENV/bin/pip" install -q matplotlib >/dev/null 2>&1 || true
+if [[ ! -d "$VENV" ]]; then python3 -m venv "$VENV" >/dev/null 2>&1 || log "WARNING python3 -m venv failed - charts may not render (is python3-venv installed?)"; fi
+"$VENV/bin/pip" install -q matplotlib >/dev/null 2>&1 || log "WARNING pip install matplotlib failed in the charts venv - charts.py will likely fail below"
+# Warn loudly if matplotlib is genuinely absent BEFORE invoking charts.py, so a broken toolchain is a
+# visible warning rather than a soft-logged no-op that leaves a "completed" run with no charts (R3-LOW-4).
+"$VENV/bin/python" -c 'import matplotlib' 2>/dev/null || log "WARNING matplotlib not importable in the charts venv - charts will NOT be regenerated this run"
 if "$VENV/bin/python" "$HERE/charts.py"; then
   log "charts + reports regenerated"
 else
