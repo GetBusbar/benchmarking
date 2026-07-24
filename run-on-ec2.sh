@@ -78,8 +78,13 @@ if [[ $# -gt 0 ]]; then GATEWAYS=("$@"); else GATEWAYS=("${DEFAULT_GATEWAYS[@]}"
 # so every later `ssh`/rsync to those boxes fails with "Permission denied (publickey)" and their
 # results can never be pulled. Reuse the existing keyfile when present; only (re)create the pair when
 # the local key is missing (first run, or a wiped $TMPDIR), keeping AWS + local in lockstep.
-if [[ ! -s "$KEYFILE" ]]; then
+# (Re)create the pair when the local key is missing OR the AWS keypair no longer exists - the latter
+# happens when the keypair was cleaned up out-of-band (teardown, `kill`, manual) while the local .pem
+# lingered; reusing that stale local key launches every box into "key pair does not exist". Checking
+# AWS too keeps them in lockstep.
+if [[ ! -s "$KEYFILE" ]] || ! aws ec2 describe-key-pairs --key-names "$KEYNAME" >/dev/null 2>&1; then
   aws ec2 delete-key-pair --key-name "$KEYNAME" >/dev/null 2>&1 || true
+  rm -f "$KEYFILE"
   aws ec2 create-key-pair --key-name "$KEYNAME" --query KeyMaterial --output text > "$KEYFILE"; chmod 600 "$KEYFILE"
 fi
 SG=$(aws ec2 describe-security-groups --group-names "$SGNAME" --query 'SecurityGroups[0].GroupId' --output text 2>/dev/null || true)
