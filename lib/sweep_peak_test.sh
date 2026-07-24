@@ -37,6 +37,14 @@ sweep_probe(){ # url conc dur -> "rps fail p99us p50us"
                    # and the search settles on c=64/128. The relative TOL (audit H5) must resolve it.
                    local d=$(( (c-96) )); local r=$(( 45000 - $(sqr "$d") )); [ "$r" -lt 500 ] && r=500
                    echo "$r 0 $(( 20000 + c*30 )) 14000" ;;
+    cliff_peaklow) # true peak 40000 @ c=200, declining above; HARD p99 cliff for c>1024. Seeded with a
+                   # stale prior ABOVE the cliff (2048), the search ramps DOWN to the first passing rung
+                   # near the cliff. The ramp-down low bound must be _min (audit R2-H1) or the true peak
+                   # at c=200 is below the clipped bracket and never probed (was ~31164 @ c=576).
+                   if [ "$c" -le 1024 ]; then
+                     local d=$(( (c-200)/6 )); local r=$(( 40000 - $(sqr "$d") )); [ "$r" -lt 500 ] && r=500
+                     echo "$r 0 $(( 20000 + c*50 )) 15000"
+                   else echo "40 900000 90000 80000"; fi ;;
   esac
 }
 fail=0
@@ -68,6 +76,12 @@ assert "adaptive cell 1 seeds the prior (peak_low)" "$SW_CEIL_RPS" "$SW_BOUND" "
   || { echo "FAIL - adaptive prior not seeded (got '${SWEEP_PRIOR[20]:-unset}', wanted 64)"; fail=1; }
 CURVE=peak_between; run_sweep 20 "32 65536" peak     # KEEP the stale prior=64 from cell 1
 assert "adaptive cell 2 (stale prior=64) still finds true peak" "$SW_CEIL_RPS" "$SW_BOUND" "$SW_CEIL_CONC" 39500 40000 false 1150 1450
+# cell 3: prior seeded ABOVE the p99 cliff (2048) on a curve whose true peak is LOW (c=200). The
+# ramp-down must bracket the whole passing region below the cliff, not stop at ~c/2 near the cliff
+# (audit R2-H1: was 31164 @ c=576, a 22% understatement of 40000 @ c=200).
+SWEEP_PRIOR[20]=2048
+CURVE=cliff_peaklow; run_sweep 20 "32 65536" peak
+assert "adaptive prior ABOVE cliff still finds low true peak (R2-H1)" "$SW_CEIL_RPS" "$SW_BOUND" "$SW_CEIL_CONC" 39500 40000 false 150 260
 SWEEP_ADAPTIVE=0
 
 # ── M6: sweep_c1() added-latency + C1_OK/C1_ERR honesty gate ───────────────────────────────────────

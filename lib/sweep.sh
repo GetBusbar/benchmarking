@@ -223,7 +223,11 @@ run_sweep() { # ttft_ms  conc_list_or_bounds  [mode: ladder|bisect]
         while [ "$c" -gt "$_min" ]; do
           c=$(( c/2 < _min ? _min : c/2 ))
           _sw_probe_c "$c" || break
-          if [ "$(_sw_eff "$c")" -gt 0 ]; then b=$c; pr=$(_sw_eff "$c"); a=$(( c/2 >= _min ? c/2 : _min )); break; else hi=$c; fi
+          # Set the low bound to _min (not c/2): the true peak can sit ANYWHERE below this first
+          # gate-passing rung (e.g. a stale prior seeded ABOVE the p99 cliff lands the ramp-down on a
+          # rung near the cliff, well above a low-concurrency peak). a=c/2 would clip the refine
+          # bracket to [c/2, hi] and never probe the true peak below c/2 (audit R2-H1).
+          if [ "$(_sw_eff "$c")" -gt 0 ]; then b=$c; pr=$(_sw_eff "$c"); a=$_min; break; else hi=$c; fi
         done
       elif _sw_mockbound_c "$start"; then                    # mock-bound at start: rig-limited, nothing to gain
         a=$(( start/2 >= _min ? start/2 : _min )); hi=$start
