@@ -378,12 +378,10 @@ const COL_NAME = {
     const a = g.repo
       ? `<a href="${g.repo}" target="_blank" rel="noopener">${esc(g.display)}</a>`
       : esc(g.display);
-    // Per-gateway freshness: the board-wide "last benchmarked" (roster tab + homepage) already covers
-    // the normal one-run case, so a per-row date on every perf row is redundant bloat. Show the per-row
-    // measured_at + stale pill ONLY when this gateway is OUT OF SYNC with the board (g.stale) — the
-    // honest signal for an independent update cadence — and otherwise keep the row compact.
-    const badge = g.stale ? measuredBadge(g) : "";
-    return `<td class="name">${a}${badge ? `<div class="row-measured">${badge}</div>` : ""}</td>`;
+    // No per-row date: the board is one atomic run (matrix-sole-source = one source of truth), so
+    // every gateway shares a single timestamp — the board-wide "last benchmarked" (roster tab + home)
+    // IS the freshness, and a per-row date is pure redundant bloat. Just the name.
+    return `<td class="name">${a}</td>`;
   },
 };
 const COLUMN_SETS = {
