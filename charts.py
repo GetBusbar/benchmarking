@@ -77,37 +77,6 @@ CANON = _canonical()
 _PERF_FIELDS = ("added_latency_p50_us", "added_latency_p99_us", "rps_sustained_20ms", "rps_max_proxy")
 
 
-def _overlay_perf(key: str, obj: dict) -> None:
-    """Overwrite a perf-suite row's headline metrics with the canonical best_cell record."""
-    bc = (CANON.get(key) or {}).get("best_cell")
-    if not bc:
-        return  # no canonical record (gateway never served): the raw suite verdict stands
-    for f in _PERF_FIELDS:
-        if bc.get(f) is not None:
-            obj[f] = bc[f]
-    obj["served"] = True  # best_cell only exists for a served path
-    obj["_dialect"] = bc.get("dialect")
-    obj["_perf_source"] = bc.get("source")
-
-
-def _overlay_xlate(key: str, obj: dict) -> None:
-    """Overwrite an xlate-suite row with the canonical translation_cell record (direction included)."""
-    tc = (CANON.get(key) or {}).get("translation_cell")
-    if not tc:
-        return
-    obj["xlate_served"] = True
-    obj["xlate_passthrough"] = False
-    if tc.get("added_latency_p50_us") is not None:
-        obj["xlate_added_latency_p50_us"] = tc["added_latency_p50_us"]
-    if tc.get("added_latency_p99_us") is not None:
-        obj["xlate_added_latency_p99_us"] = tc["added_latency_p99_us"]
-    if tc.get("rps_sustained_20ms") is not None:
-        obj["xlate_rps_sustained_20ms"] = tc["rps_sustained_20ms"]
-    obj["_xlate_ingress"] = tc.get("ingress")
-    obj["_xlate_egress"] = tc.get("egress")
-    obj["_xlate_source"] = tc.get("source")
-
-
 def _read_result(p: Path) -> dict:
     """Load one results JSON, failing LOUDLY with the offending path.
 
@@ -302,6 +271,12 @@ CHARTS = [
         unit="requests / sec",
         series=[Series("rps_max_proxy", "max proxy RPS", "rank")],
         higher_better=True,
+        # MED-3: gate the bar on the mock-bound honesty flag (rps_max_proxy_valid = >0 AND NOT
+        # mock-bound), mirroring the streaming lane (stream_sustained_valid / streamcpu_valid). A
+        # rig-limited (mock-bound) throughput must not draw a full bar or rank #1 — it renders "not
+        # proven" instead. The site (canonicalPerf) + check-consistency assert the identical rule.
+        served_field="rps_max_proxy_valid",
+        not_served_text="✕ not measured (rig-limited / needs field run)",
         annot=_perf_annot,
     ),
     Chart(
@@ -312,6 +287,9 @@ CHARTS = [
         unit="requests / sec",
         series=[Series("rps_sustained_20ms", "sustained RPS @20ms", "rank")],
         higher_better=True,
+        # MED-3: same mock-bound gate as max-proxy above (rps_sustained_20ms_valid).
+        served_field="rps_sustained_20ms_valid",
+        not_served_text="✕ not measured (rig-limited / needs field run)",
         annot=_perf_annot,
     ),
     # ── supporting: memory (matters at scale) ─────────────────────────────────────────────────────
@@ -336,6 +314,10 @@ CHARTS = [
         unit="sustained RPS per $/hr",
         series=[Series("rps_per_dollar", "RPS per $/hr", "rank")],
         higher_better=True,
+        # MED-3: the cost lanes derive from the sustained@20ms ceiling, so a rig-limited (mock-bound)
+        # sustained number must not draw a cost bar or rank #1 either — gate on the same validity flag.
+        served_field="rps_sustained_20ms_valid",
+        not_served_text="✕ not measured (rig-limited / needs field run)",
     ),
     Chart(
         name="cost_per_million",
@@ -345,6 +327,9 @@ CHARTS = [
         unit="$ / 1M requests",
         series=[Series("cost_per_million_usd", "cost / 1M", "rank")],
         money=True,
+        # MED-3: derived from the sustained@20ms ceiling — gate on the same mock-bound validity flag.
+        served_field="rps_sustained_20ms_valid",
+        not_served_text="✕ not measured (rig-limited / needs field run)",
     ),
     # ── streaming: what the gateway costs an SSE stream ───────────────────────────────────────────
     Chart(
@@ -551,28 +536,102 @@ def _load_projected(suite: str) -> list[dict]:
     return rows
 
 
+def _perf_derived(obj: dict) -> None:
+    """Derive the cost lanes from the canonical sustained ceiling (so the cost charts match the table)."""
+    sust = float(obj.get("rps_sustained_20ms") or 0)
+    # sustained req/s you get per $/hr, and $ per 1M sustained requests. 0 when it can't sustain.
+    obj["rps_per_dollar"] = (sust / GATEWAY_HOURLY_USD) if sust > 0 else 0
+    obj["cost_per_million_usd"] = (GATEWAY_HOURLY_USD / (sust * 3600) * 1e6) if sust > 0 else 0
+
+
+def _proj_perf(key: str) -> dict | None:
+    """HIGH-1: the passthrough perf chart row, projected from the CANONICAL best_cell (matrix per-cell
+    sweep / perf-fallback via site/data.json) — NOT the RETIRED results/perf/<key>.json. Mirrors the
+    site's canonicalPerf: a gateway with a best_cell is a served passthrough row; without one it is
+    absent from the chart, exactly as the site table ranks it. Reading the retired disk file made the
+    first matrix-only gateway (no results/perf file) silently vanish from every passthrough PNG while
+    the site table still showed its best_cell — the single-source violation this closes."""
+    g = CANON.get(key) or {}
+    bc = g.get("best_cell")
+    if not bc:
+        return None
+    obj: dict = {}
+    for f in _PERF_FIELDS:
+        if bc.get(f) is not None:
+            obj[f] = bc[f]
+    obj["served"] = True  # best_cell only exists for a served path
+    obj["_dialect"] = bc.get("dialect")
+    obj["_perf_source"] = bc.get("source")
+    # MED-3: carry the mock-bound honesty flags through so the report's rps_cell (⚠) AND the RPS
+    # charts' validity gate see them — a rig-limited (mock-bound) throughput must not draw a full bar
+    # or rank #1. Also carry build/measured_at (report row provenance) + hardware (from the memory
+    # read, since best_cell carries no hardware stamp) so the report header + rows keep their context.
+    obj["rps_max_proxy_mock_bound"] = bc.get("rps_max_proxy_mock_bound")
+    obj["rps_sustained_20ms_mock_bound"] = bc.get("rps_sustained_20ms_mock_bound")
+    # MED-3: per-metric VALIDITY (served_field) for the RPS charts. A POSITIVE throughput that is
+    # mock-bound (rig-limited) or unverifiable (mock_bound !== False) is NOT a valid gateway-vs-ceiling
+    # reading — it is suppressed (draws no bar, never ranks top-N, shows "not measured (rig-limited)"),
+    # mirroring app.js perfRpsSuppressed and the check-consistency RPS visibility assertion. A legitimate
+    # measured 0 (served but no tested load held p99 < 1 s) is NOT suppressed: it stays "served" so the
+    # chart shows its zero_text ("0 · no load held"), distinct from a rig-ceiling number. So a row is
+    # valid (served) unless it is a positive value the harness could not certify as gateway-limited.
+    for _m in ("rps_max_proxy", "rps_sustained_20ms"):
+        _v = obj.get(_m)
+        _suppressed = (_v is not None and float(_v or 0) > 0
+                       and bc.get(f"{_m}_mock_bound") is not False)
+        obj[f"{_m}_valid"] = (_v is not None and not _suppressed)
+    obj["build"] = bc.get("build")
+    obj["measured_at"] = bc.get("measured_at")
+    mem = g.get("memory_read") or {}
+    if mem.get("hardware"):
+        obj["hardware"] = mem["hardware"]
+    if mem.get("concurrency") is not None:
+        obj["concurrency"] = mem["concurrency"]
+    if mem.get("payload_bytes") is not None:
+        obj["payload_bytes"] = mem["payload_bytes"]
+    _perf_derived(obj)
+    return obj
+
+
+def _proj_xlate(key: str) -> dict | None:
+    """HIGH-1: the translation chart row, projected from the CANONICAL translation_cell (matrix per-cell
+    sweep / xlate-fallback via site/data.json) — NOT the RETIRED results/xlate/<key>.json. Mirrors the
+    site's canonicalXlate; a gateway with no translation_cell is absent from the translation charts."""
+    tc = (CANON.get(key) or {}).get("translation_cell")
+    if not tc:
+        return None
+    obj: dict = {"xlate_served": True, "xlate_passthrough": False}
+    if tc.get("added_latency_p50_us") is not None:
+        obj["xlate_added_latency_p50_us"] = tc["added_latency_p50_us"]
+    if tc.get("added_latency_p99_us") is not None:
+        obj["xlate_added_latency_p99_us"] = tc["added_latency_p99_us"]
+    if tc.get("rps_sustained_20ms") is not None:
+        obj["xlate_rps_sustained_20ms"] = tc["rps_sustained_20ms"]
+    obj["_xlate_ingress"] = tc.get("ingress")
+    obj["_xlate_egress"] = tc.get("egress")
+    obj["_xlate_source"] = tc.get("source")
+    return obj
+
+
 def _load(suite: str) -> list[dict]:
     if suite in _PROJECTED_SUITES:
         return _load_projected(suite)
-    d = RESULTS / suite
+    # HIGH-1: perf + xlate are projected from CANON (best_cell / translation_cell), NOT read from the
+    # RETIRED results/perf|xlate/<key>.json by disk-presence. Enumerate every gateway with a canonical
+    # record so a matrix-only gateway (no legacy suite file) appears on the PNG + report exactly as it
+    # appears on the site table — one source of truth. A gateway with no canonical record is absent.
     rows = []
     for key, label in GATEWAYS.items():
-        p = d / f"{key}.json"
-        if not p.exists():
-            continue
-        obj = _read_result(p)
+        obj = _proj_perf(key) if suite == "perf" else _proj_xlate(key) if suite == "xlate" else None
+        if obj is None:
+            # Any other (non-projected) suite still reads its own results/<suite>/<key>.json.
+            if suite in ("perf", "xlate"):
+                continue
+            p = RESULTS / suite / f"{key}.json"
+            if not p.exists():
+                continue
+            obj = _read_result(p)
         obj["_key"], obj["_label"] = key, label
-        # Canonical overlay BEFORE any derived metric (cost per million derives from the
-        # canonical sustained ceiling, so the cost charts match the table too).
-        if suite == "perf":
-            _overlay_perf(key, obj)
-        elif suite == "xlate":
-            _overlay_xlate(key, obj)
-        if suite == "perf":
-            sust = float(obj.get("rps_sustained_20ms") or 0)
-            # sustained req/s you get per $/hr, and $ per 1M sustained requests. 0 when it can't sustain.
-            obj["rps_per_dollar"] = (sust / GATEWAY_HOURLY_USD) if sust > 0 else 0
-            obj["cost_per_million_usd"] = (GATEWAY_HOURLY_USD / (sust * 3600) * 1e6) if sust > 0 else 0
         rows.append(obj)
     return rows
 
@@ -834,33 +893,38 @@ def render(chart: Chart, only_keys=None, out_stem: str | None = None) -> None:
 
 
 def _suite_map(suite: str) -> dict:
-    """key → parsed results/<suite>/<key>.json for every gateway with a result file. {} when the
-    suite hasn't been run yet, so the lane table/charts degrade to absent instead of crashing."""
+    """key → the lane row for every gateway that HAS one. For xlate the row is the CANONICAL
+    translation_cell projection (HIGH-1 / NIT-1) — NOT the RETIRED results/xlate/<key>.json — so the
+    README translation table enumerates the same matrix-projected gateways the PNGs do. Any other
+    suite still reads its own results/<suite>/<key>.json by disk-presence."""
+    if suite == "xlate":
+        return {k: r for k in GATEWAYS if (r := _proj_xlate(k)) is not None}
     d = RESULTS / suite
     out = {}
     for key in GATEWAYS:
         p = d / f"{key}.json"
         if p.exists():
-            obj = _read_result(p)
-            if suite == "xlate":       # report lane table shows the canonical translation number
-                _overlay_xlate(key, obj)
-            out[key] = obj
+            out[key] = _read_result(p)
     return out
 
 
 def _merge() -> dict:
-    """One dict per gateway, merging its perf/ + memory/ result files."""
+    """One dict per gateway for the README leaderboard: the CANONICAL passthrough perf (best_cell,
+    HIGH-1 / NIT-1) merged with the matrix-projected memory read — enumerated from CANON, NOT from
+    the RETIRED results/perf/<key>.json by disk-presence. A matrix-only gateway (no legacy perf file)
+    therefore appears in the report leaderboard exactly as it appears on the site table."""
     gws: dict = {}
-    for suite in ("perf", "memory"):
-        d = RESULTS / suite
-        for key in GATEWAYS:
-            p = d / f"{key}.json"
-            if p.exists():
-                gws.setdefault(key, {}).update(_read_result(p))
-    # Canonical overlay LAST so the report table + top-5 ranking use the same best_cell
-    # numbers as the site table and the charts.
-    for key, obj in gws.items():
-        _overlay_perf(key, obj)
+    for key in GATEWAYS:
+        perf = _proj_perf(key)
+        mem = _proj_memory(key)
+        if perf is None and mem is None:
+            continue
+        obj: dict = {}
+        if perf is not None:
+            obj.update(perf)
+        if mem is not None:
+            obj.update(mem)
+        gws[key] = obj
     return gws
 
 

@@ -25,16 +25,17 @@ import { createRequire } from "node:module";
 
 const PASS_KEYS = ["added_latency_p99_us", "rps_sustained_20ms", "rps_max_proxy"];
 
-/* What charts.py reads for a gateway's passthrough metric. This must mirror charts.py:_overlay_perf
-   at the FIELD level (audit R5-#5): _overlay_perf overwrites obj[f] only when best_cell[f] is not null,
-   so a best_cell that is present but carries a NULL field falls THROUGH to the raw perf-suite value in
-   the PNG - it does not force null. The prior mirror returned null whenever best_cell existed, so a
-   present-but-null best_cell field beside a non-null perf fallback let the guard see table===drawer===
-   charts===null and pass the bundle "consistent" while the chart actually drew the perf number. Mirror
-   the overlay: use best_cell[key] when non-null, else fall through to the raw perf value exactly as
-   _overlay_perf does. */
-function chartsPassValue(g, key) {
-  if (g.best_cell && g.best_cell[key] != null) return g.best_cell[key];
+/* What charts.py plots for a gateway's passthrough metric. HIGH-1: charts.py now PROJECTS the perf row
+   from the canonical best_cell (_proj_perf) and NEVER reads the retired results/perf suite. So when a
+   best_cell exists it is THE source: a field it lacks is null (no bar), with NO fallthrough to the perf
+   suite (the fallthrough that _overlay_perf used to do is gone). Only a gateway with NO best_cell at all
+   (a legacy bundle) is charted from the raw perf suite. MED-3: a mock-bound/unverifiable POSITIVE RPS is
+   suppressed (no bar) exactly as the table reads n/a, so the three surfaces agree. */
+function chartsPassValue(g, key, app) {
+  if (g.best_cell) {
+    if ((key === "rps_max_proxy" || key === "rps_sustained_20ms") && app.perfRpsSuppressed(g.best_cell, key)) return null;
+    return g.best_cell[key] != null ? g.best_cell[key] : null;   // best_cell is THE source; no perf fallthrough
+  }
   const j = g.perf;
   return j && j.served !== false && j[key] != null ? j[key] : null;
 }
@@ -48,9 +49,38 @@ export function checkConsistency(data, app) {
     for (const key of PASS_KEYS) {
       const table = app.passCell(g, key, String).v;
       const drawer = laneRec && laneRec.served !== false && laneRec[key] != null ? laneRec[key] : null;
-      const charts = chartsPassValue(g, key);
+      const charts = chartsPassValue(g, key, app);
       if (!(table === drawer && drawer === charts)) {
         errors.push(`${g.key}.${key}: table=${table} drawer/compare=${drawer} charts=${charts} (must be one canonical value)`);
+      }
+    }
+    // ---- MED-3: passthrough RPS mock-bound VISIBILITY tie. The two RPS metrics are gated on the
+    // mock-bound honesty flag: charts.py suppresses the bar via rps_*_valid (present + >0 + NOT
+    // mock-bound), and the site (passCell / canonicalPerf) reads n/a on the identical rule
+    // (perfRpsCertified). Assert the two booleans agree so a rig-limited throughput can never draw a
+    // #1 bar while the table hides it (or vice-versa) — the exact asymmetry the streaming lane closes.
+    if (g.best_cell) {
+      for (const m of ["rps_max_proxy", "rps_sustained_20ms"]) {
+        // A mock-bound/unverifiable POSITIVE throughput is SUPPRESSED: n/a on the table (site) AND no
+        // bar / out of top-N on the chart (charts.py rps_*_valid=false). Assert the two suppressions
+        // agree so a rig-limited number can never draw a #1 bar while the table hides it (or vice-versa).
+        // A legitimate measured 0 is NOT suppressed on either surface (site "0" / chart zero_text).
+        const raw = g.best_cell[m];
+        if (raw == null) continue;   // no published number for this metric; nothing to gate
+        const suppressed = app.perfRpsSuppressed(g.best_cell, m);   // the shared mock-bound rule
+        // The site table's ACTUAL accessor: a suppressed positive reads n/a (v==null); a certified
+        // positive OR a legitimate 0 shows a number.
+        const tableShows = app.passCell(g, m, String).v != null;
+        // chartsPassValue mirrors what the PNG plots: null (no bar) exactly when suppressed.
+        const chartShows = chartsPassValue(g, m, app) != null;
+        if (tableShows !== !suppressed) {
+          errors.push(`${g.key}.${m}: mock-bound-suppressed=${suppressed} but the table ${tableShows ? "shows a number" : "reads n/a"} ` +
+            `(a mock-bound/unverifiable throughput must read n/a on the table)`);
+        }
+        if (tableShows !== chartShows) {
+          errors.push(`${g.key}.${m}: table-visible=${tableShows} but chart-visible=${chartShows} ` +
+            `(a mock-bound/unverifiable throughput must read n/a on the table AND draw no bar / not rank — same mock-bound rule)`);
+        }
       }
     }
     // ---- translation: drawer/compare (canonicalXlate) == canonical translation_cell (charts)
@@ -160,7 +190,12 @@ export function checkConsistency(data, app) {
     // the max of the curve won't match the headline and this FAILS - exactly the two-sources bug.
     // Only asserted when the canonical record carries the sweep array (a regenerated bundle); a legacy
     // bundle with no array is silently skipped (the coverage/other guards cover its provenance).
-    const canon = app.canonicalPerf(g);
+    // MED-3: this integrity check reads the RAW best_cell RPS (not the display-gated canonicalPerf,
+    // which nulls a mock-bound value for n/a). "The headline is the max of its own charted sweep" is a
+    // measurement-integrity assertion that must hold even for a mock-bound (rig-limited) headline — the
+    // gating only decides VISIBILITY, not whether the number sits on its own curve. Fall back to
+    // canonicalPerf for a legacy bundle with no best_cell.
+    const canon = g.best_cell ? { served: true, ...g.best_cell } : app.canonicalPerf(g);
     if (canon && canon.served !== false) {
       // HIGH-R2-1: the headline (SW_CEIL_RPS) is the max rps over GATE-PASSING rungs only — lib/sweep.sh
       // advances the ceiling exclusively on rungs where _sw_pass_c is true (:338), i.e. error rate < 0.1%

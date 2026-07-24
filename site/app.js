@@ -195,8 +195,33 @@ function lane(g, suite, flag, errKey, pick) {
    from the matrix per-cell sweep, or synthesizes it from the perf suite when no swept
    diagonal exists (source:"perf-fallback"). Only a legacy bundle with no best_cell at all
    falls back to the raw perf suite object (whose field names match). */
+// MED-3: a passthrough RPS is a valid gateway-vs-ceiling reading ONLY when the harness certified it —
+// present + positive AND explicitly NOT mock-bound (rps_*_mock_bound === false). A rig-limited
+// (mock_bound===true) or unverifiable (mock_bound===null, ceiling probe read 0) throughput must NOT
+// draw a full bar, rank top-N, or win the compare — exactly the gate the streaming lane already applies
+// via sustainedCertified / cpuFpsCertified. charts.py suppresses the bar via rps_*_valid; the site MUST
+// read n/a on every surface exactly when the chart draws no bar (check-consistency asserts they agree).
+function perfRpsCertified(bc, metric) {
+  return bc != null && bc[metric] != null && Number(bc[metric]) > 0 && bc[`${metric}_mock_bound`] === false;
+}
+// The DISPLAY suppression for a passthrough RPS: hide (read n/a) a POSITIVE value that is mock-bound
+// (rig-limited) or unverifiable (mock_bound !== false). A legitimate measured 0 (served but no tested
+// load held p99 < 1 s) is NOT suppressed — it renders "0" with the no-qualifying-ceiling note, honest
+// and distinct from a rig-ceiling number. Only a positive number the harness could not certify as
+// gateway-limited is hidden (the chart draws no bar for it either).
+function perfRpsSuppressed(bc, metric) {
+  return bc != null && bc[metric] != null && Number(bc[metric]) > 0 && bc[`${metric}_mock_bound`] !== false;
+}
 function canonicalPerf(g) {
-  if (g.best_cell) return { served: true, ...g.best_cell };
+  if (g.best_cell) {
+    const rec = { served: true, ...g.best_cell };
+    // Null a mock-bound / unverifiable POSITIVE RPS so the table/drawer/compare read n/a — the raw value
+    // stays on g.best_cell for provenance/download, symmetric with canonicalStreaming's cpu_fps/sustained.
+    for (const m of ["rps_max_proxy", "rps_sustained_20ms"]) {
+      if (perfRpsSuppressed(g.best_cell, m)) rec[m] = null;
+    }
+    return rec;
+  }
   return g.perf || null;
 }
 /* canonicalXlate: the ONE Translation record for the drawer/compare: the SAME matrix cell
@@ -265,10 +290,17 @@ function canonicalMemory(g) {
    source (that is exactly the numeric divergence this rule exists to kill). Only a gateway with
    NO best_cell at all (legacy bundle) falls back to its perf suite. */
 function passCell(g, key, fmt) {
-  if (g.best_cell)
-    return g.best_cell[key] != null
-      ? { v: g.best_cell[key], text: fmt(g.best_cell[key]), na: false }
+  if (g.best_cell) {
+    // MED-3: the two passthrough RPS metrics are GATED on the mock-bound honesty flag (present + >0 +
+    // NOT mock-bound), exactly like the streaming lane's sustained/cpu-fps and the RPS PNGs' rps_*_valid.
+    // A rig-limited/unverifiable throughput reads n/a on the table just as it draws no bar on the chart
+    // (check-consistency asserts the two visibilities agree). Latency + all other fields read raw.
+    const gated = (key === "rps_max_proxy" || key === "rps_sustained_20ms");
+    const v = (gated && perfRpsSuppressed(g.best_cell, key)) ? null : g.best_cell[key];
+    return v != null
+      ? { v, text: fmt(v), na: false }
       : { v: null, text: "n/a", na: true };
+  }
   return lane(g, "perf", "served", "serve_error", (j) =>
     j[key] != null ? { v: j[key], text: fmt(j[key]), na: false } : { v: null, text: "n/a", na: true });
 }
@@ -1933,7 +1965,7 @@ if (NODE) {
     fmtStamp, fmtAge, stampWithAge, measuredBadge,
     drawSweep, niceStep, fmtTick, COLUMN_SETS, columnsFor, PERF_VIEWS, VIEW_SORT, LANES, naText, stripRigPaths,
     cellState, matrixCellTip, cellPerfTip, passCell, xlateCell, streamCell, memCell, hasTranslation, CATEGORIES, DEFAULT_CATEGORY, VIEWS,
-    canonicalPerf, canonicalXlate, canonicalStreaming, canonicalMemory, cpuFpsCertified, sustainedCertified, gatewayResultsJson, DEFAULT_VIEW, VIEW_LABELS, rosterRows, fmtStars,
+    canonicalPerf, canonicalXlate, canonicalStreaming, canonicalMemory, cpuFpsCertified, sustainedCertified, perfRpsCertified, perfRpsSuppressed, gatewayResultsJson, DEFAULT_VIEW, VIEW_LABELS, rosterRows, fmtStars,
     configCorrectionUrl, BENCH_REPO,
     HOME_VIEW, homeCardsHtml,
   };

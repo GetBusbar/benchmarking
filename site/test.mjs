@@ -13,7 +13,7 @@
 // real committed sweep data through the stub canvas.
 
 import { execFileSync } from "node:child_process";
-import { readFileSync, writeFileSync, mkdtempSync, mkdirSync, rmSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdtempSync, mkdirSync, rmSync, existsSync, readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -469,7 +469,8 @@ const mkMatrix = (cells) => ({ upstreams: Object.fromEntries(
 
 test("Passthrough is BEST-OF: every gateway shows on its best diagonal, none filtered", () => {
   // best_cell (openai diagonal) -> that number
-  const green = { best_cell: { rps_sustained_20ms: 30000, dialect: "openai" } };
+  // MED-3: a shown RPS must carry mock_bound:false (harness-certified, not rig-limited) or it reads n/a.
+  const green = { best_cell: { rps_sustained_20ms: 30000, rps_sustained_20ms_mock_bound: false, dialect: "openai" } };
   assert.equal(app.passCell(green, "rps_sustained_20ms", String).na, false);
   // no swept diagonal -> fall back to the perf suite so the row is never blank
   const unswept = { perf: { served: true, rps_sustained_20ms: 5541 },
@@ -477,7 +478,7 @@ test("Passthrough is BEST-OF: every gateway shows on its best diagonal, none fil
   assert.equal(app.passCell(unswept, "rps_sustained_20ms", String).text, "5541");
   // openai not served: BEST-OF shows the native diagonal (litellm-rust -> anthropic), NOT n/a and
   // NOT filtered. gen-data picks it; here best_cell carries the anthropic number.
-  const native = { best_cell: { rps_sustained_20ms: 32354, dialect: "anthropic" } };
+  const native = { best_cell: { rps_sustained_20ms: 32354, rps_sustained_20ms_mock_bound: false, dialect: "anthropic" } };
   assert.equal(app.passCell(native, "rps_sustained_20ms", String).na, false);
   assert.equal(app.passCell(native, "rps_sustained_20ms", String).text, "32354");
   // and Passthrough does NOT filter: a gateway with only a native diagonal still appears
@@ -541,7 +542,8 @@ test("divergent best_cell vs perf suite: every surface resolves to best_cell", (
     key: "diverge", display: "Diverge", lang: "Rust",
     best_cell: { ingress: "openai", egress: "openai", dialect: "openai", source: "matrix",
       added_latency_p50_us: 100, added_latency_p99_us: 111,
-      rps_sustained_20ms: 22222, rps_max_proxy: 33333 },
+      rps_sustained_20ms: 22222, rps_sustained_20ms_mock_bound: false,
+      rps_max_proxy: 33333, rps_max_proxy_mock_bound: false },
     perf: { served: true, added_latency_p50_us: 900, added_latency_p99_us: 999,
       rps_sustained_20ms: 11111, rps_max_proxy: 22221 },
   };
@@ -567,24 +569,23 @@ test("divergent best_cell vs perf suite: every surface resolves to best_cell", (
   assert.equal(app.passCell(poisoned, "rps_sustained_20ms", String).v, null, "best_cell is THE record; no silent perf patch");
 });
 
-test("guard catches a null best_cell field masking a non-null perf fallback (R5-#5)", () => {
-  // The exact blind spot: best_cell is PRESENT but carries a NULL sustained field while the perf
-  // suite carries a REAL number. charts.py:_overlay_perf overwrites obj[f] only when best_cell[f] is
-  // not null, so the PNG falls THROUGH to the perf number (11111), while the table + drawer both read
-  // best_cell's null (n/a). The old JS mirror returned null whenever best_cell existed, so the guard
-  // saw table===drawer===charts===null and passed the bundle "consistent" - hiding a chart-vs-board
-  // divergence. With the field-level fallback the guard must now FAIL and name the metric.
+test("HIGH-1: a null best_cell field reads n/a on EVERY surface (charts no longer fall through to perf)", () => {
+  // HIGH-1 changed the sourcing: charts.py now PROJECTS the perf row from best_cell (via _proj_perf) and
+  // NEVER reads the retired results/perf suite. So a best_cell that is PRESENT but carries a NULL field
+  // reads n/a on the table, the drawer, AND the chart (no bar) — all three agree on null, and the bundle
+  // is consistent. (Previously _overlay_perf let the PNG fall through to the perf number, a chart-vs-board
+  // divergence the guard had to catch; that fallthrough is gone, so the divergence cannot arise.)
   const g = {
     key: "nullmask", display: "NullMask", lang: "Rust",
     best_cell: { ingress: "openai", egress: "openai", dialect: "openai", source: "matrix",
       added_latency_p50_us: 100, added_latency_p99_us: 111,
-      rps_sustained_20ms: null, rps_max_proxy: 33333 },
+      rps_sustained_20ms: null, rps_max_proxy: 33333, rps_max_proxy_mock_bound: false },
     perf: { served: true, added_latency_p50_us: 100, added_latency_p99_us: 111,
       rps_sustained_20ms: 11111, rps_max_proxy: 33333 },
   };
-  const { errors } = checkConsistency({ gateways: [g] }, app);
-  assert.ok(errors.some((e) => e.includes("nullmask.rps_sustained_20ms")),
-    `guard must flag the null-field/non-null-perf divergence; got: ${JSON.stringify(errors)}`);
+  assert.equal(app.passCell(g, "rps_sustained_20ms", String).v, null, "best_cell is THE record; no perf fallthrough");
+  assert.deepEqual(checkConsistency({ gateways: [g] }, app).errors, [],
+    "a null best_cell field is n/a everywhere now — consistent, not a divergence");
 });
 
 test("guard: the published headline MUST be a point on its own charted sweep (one source of truth)", () => {
@@ -600,8 +601,8 @@ test("guard: the published headline MUST be a point on its own charted sweep (on
   const base = {
     ingress: "openai", egress: "openai", dialect: "openai", source: "matrix",
     added_latency_p99_us: 111,
-    rps_sustained_20ms: 35616, rps_sustained_20ms_concurrency: 832,
-    rps_max_proxy: 45995, rps_max_proxy_concurrency: 52,
+    rps_sustained_20ms: 35616, rps_sustained_20ms_concurrency: 832, rps_sustained_20ms_mock_bound: false,
+    rps_max_proxy: 45995, rps_max_proxy_concurrency: 52, rps_max_proxy_mock_bound: false,
     sweep_max_proxy: sweep,
     sweep_sustained_20ms: [{ conc: 832, rps: 35616, p99_us: 990000, fail: 0 }],
   };
@@ -760,7 +761,8 @@ test("guard treats max-proxy=0 as a DISTINCT did-not-qualify warning, never nois
 
 test("a zero RPS cell renders 0 with the no-qualifying-ceiling tooltip", () => {
   const zero = { best_cell: { dialect: "openai", source: "matrix",
-    rps_sustained_20ms: 18, rps_max_proxy: 0 } };
+    rps_sustained_20ms: 18, rps_sustained_20ms_mock_bound: false,
+    rps_max_proxy: 0, rps_max_proxy_mock_bound: false } };
   const cols = app.COLUMN_SETS.passthrough;
   const rpsmax = cols.find((c) => c.id === "rpsmax").get(zero);
   assert.equal(rpsmax.text, "0");
@@ -1165,8 +1167,36 @@ function stubCanvas() {
   return { width: 520, height: 230, getContext: () => ctx, calls };
 }
 
+// NIT-4: prefer the CANONICAL matrix best_cell sweep arrays (the single source the drawer actually
+// charts) over the RETIRED results/perf/<gw>.json. Scan every gateway's matrix diagonal for a cell that
+// carries the sweep arrays; fall back to the perf suite only if no matrix arrays exist yet (the shipped
+// bundle predates the array-emitting matrix/run.sh — MED-5 coverage gap). existsSync-guarded so a
+// cleaned results/perf/ (retirement) never ENOENT-crashes this test.
+function committedSweep() {
+  const mdir = join(ROOT, "results", "matrix");
+  if (existsSync(mdir)) {
+    for (const f of readdirSync(mdir).filter((x) => x.endsWith(".json"))) {
+      let m; try { m = JSON.parse(readFileSync(join(mdir, f), "utf8")); } catch { continue; }
+      for (const up of Object.values(m.upstreams || {})) {
+        for (const c of Object.values((up && up.cells) || {})) {
+          const p = c && c.perf;
+          if (p && Array.isArray(p.sweep_sustained_20ms) && p.sweep_sustained_20ms.length > 3
+              && Array.isArray(p.sweep_max_proxy)) return p;
+        }
+      }
+    }
+  }
+  const legacy = join(ROOT, "results", "perf", "busbar.json");
+  if (existsSync(legacy)) {
+    const p = JSON.parse(readFileSync(legacy, "utf8"));
+    if (Array.isArray(p.sweep_sustained_20ms) && p.sweep_sustained_20ms.length > 3) return p;
+  }
+  return null;
+}
+
 test("sweep chart draws real committed sweep data", () => {
-  const perf = JSON.parse(readFileSync(join(ROOT, "results", "perf", "busbar.json"), "utf8"));
+  const perf = committedSweep();
+  if (!perf) { console.log("  (skip: no committed sweep arrays in results/matrix or results/perf yet)"); return; }
   assert.ok(Array.isArray(perf.sweep_sustained_20ms) && perf.sweep_sustained_20ms.length > 3);
   const canvas = stubCanvas();
   const series = [
