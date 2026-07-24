@@ -68,9 +68,13 @@ PUBLISH_LOCK="${TMPDIR:-/tmp}/gateway-bench-publish-${RUN_ID}.lock"
 # MUST be called while holding the publish lock (callers already do). Prints via $2, returns 0 on a
 # successful push, 1 if all attempts failed (commit stays local — logged loudly, never stranded silently).
 # Conflict safety: each gateway commits only its OWN result paths, so a rebase rarely conflicts; the one
-# realistic overlap is a bot chart commit touching results/*.png. We rebase with -X theirs (favor the
-# already-published remote side on any overlap) so the rebase can NEVER halt mid-way leaving a detached,
-# conflicted, un-pushable state; a genuine conflict is logged loudly rather than stranding the publish.
+# realistic overlap is a bot chart commit touching results/*.png. We rebase with -X theirs so the rebase
+# can NEVER halt mid-way leaving a detached, conflicted, un-pushable state; a genuine conflict is logged
+# loudly rather than stranding the publish. NIT-R2-1: note the direction — during a rebase "ours" is the
+# upstream being replayed ONTO and "theirs" is the local commit being replayed, so `-X theirs` keeps OUR
+# freshly-committed side on overlap. That is the desired outcome for per-gateway result JSON (this run's
+# fresh result wins). The one cost: an overlapping bot-regenerated results/*.png keeps our stale local PNG
+# rather than the bot's newer one — harmless because charts are regenerated field-wide in the final sweep.
 push_with_rebase() {
   local _tag="$1" _log="$2" _attempt=0 _max=5
   while [ "$_attempt" -lt "$_max" ]; do
@@ -410,6 +414,28 @@ bench_gateway() {
     fi
   }
 
+  # MEDIUM-R2-1: the OOTB config sidecar is written on the box by harness_write_config to
+  # ~/benchmarking/results/config/<gw>.txt (lib/harness.sh:74-77) and publish_gateway STAGES it
+  # (run-on-ec2.sh:259), but pull_suite only ever rsync'd the per-suite result JSONs — the sidecar was
+  # NEVER pulled off the box, so [ -e "$f" ] was always false, nothing was committed, and gen-data.mjs
+  # (:101-104) rendered "not published" for EVERY gateway's config. Pull the sidecar alongside the suite
+  # JSONs. rc=23 (remote absent: a gateway with no gw_config hook writes no sidecar) is treated as "no
+  # config", exactly like a missing suite JSON — not an error, not retried forever.
+  pull_config() {
+    mkdir -p "$HERE/results/config"
+    local dest="$HERE/results/config/$gw.txt" staged="$HERE/results/config/.incoming-$gw.txt"
+    rm -f "$staged"; local attempt rc
+    for attempt in 1 2 3 4; do
+      rsync -az --timeout=60 -e "ssh $SSHOPT" "ubuntu@$ip:~/benchmarking/results/config/$gw.txt" "$staged" >>"$glog" 2>&1
+      rc=$?
+      if [[ $rc -eq 0 && -f "$staged" ]]; then mv -f "$staged" "$dest"; glog_echo "pulled config/$gw.txt"; return 0; fi
+      if [[ $rc -eq 23 ]]; then rm -f "$staged"; return 1; fi   # no sidecar on the box (no gw_config hook)
+      glog_echo "rsync config/$gw.txt attempt $attempt failed (rc=$rc) - retrying in 10s"
+      sleep 10
+    done
+    rm -f "$staged"; return 1
+  }
+
   # Matrix is the SOLE producer now — the standalone perf/memory/stream/streamcpu/xlate/governed suites
   # are RETIRED. Default to the same `matrix` run-all.sh uses (run-all.sh:75); an explicit SUITES override
   # still lets an operator re-run a legacy suite ad hoc. Defaulting to the old 7-suite list here would
@@ -501,6 +527,9 @@ bench_gateway() {
       *)       glog_echo "PULL FAILED for $suite/$gw.json (rc=${_pull_rc[$suite]}) - fresh result NOT retrieved; committed data for this suite is STALE"; pull_failed=1 ;;
     esac
   done
+  # Pull the OOTB config sidecar too (best-effort). A gateway with no gw_config hook writes none — that
+  # is "no config", not a pull failure, so it never contributes to pull_failed.
+  if [ "$reachable" -eq 1 ]; then pull_config || true; fi
   # DONE means a CLEAN, fully-pulled fresh run. If any suite's pull failed or the guard kept old data,
   # this gateway did NOT cleanly refresh - say so loudly so the freshness guard's later hard-fail is
   # never a surprise and the gateway can be re-run.
