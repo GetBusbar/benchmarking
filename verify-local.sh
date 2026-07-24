@@ -343,13 +343,30 @@ const bc = g.best_cell;
 A(!!bc && bc.added_latency_p99_us != null, "best_cell headline populated (added_latency_p99_us set)");
 A(!!bc && Array.isArray(bc.sweep_max_proxy) && bc.sweep_max_proxy.length > 0, "best_cell carries a non-empty charted sweep_max_proxy array");
 
-// (b') single-source: headline RPS == max of its OWN charted sweep array (value + concurrency).
-// This mirrors check-consistency.mjs:120-127 as an independent double-check on the produced bundle.
+// (b') single-source: headline RPS == max of its OWN charted GATE-PASSING sweep rungs (value + conc).
+// This mirrors check-consistency.mjs's peak reducer as an independent double-check on the produced
+// bundle. LOW-R3-2: it MUST apply the SAME p99 + error-rate gate (rungPasses) the canonical guard uses
+// (check-consistency.mjs:180-187) BEFORE reducing. A gate-BLIND max() would pick the terminal p99-cliff
+// rung (probed one-past the peak, higher raw rps but FAILING the gate — the HIGH-R2-1 shape test.mjs
+// covers), find peak.rps !== headline on a CORRECT bundle, and fire a spurious FAIL that blocks a valid
+// local deploy while telling the developer the single-source property is broken. Gate first, then reduce.
+const p99CeilMs = (g.matrix && g.matrix.p99_ceiling_ms) != null ? g.matrix.p99_ceiling_ms : 1000;
+const sweepDur = (g.matrix && g.matrix.sweep_dur) != null ? g.matrix.sweep_dur : 10;
+const rungPasses = (r) => {
+  if (r == null || r.rps == null) return false;
+  const p99 = r.p99_us;
+  if (p99 != null && !(p99 < p99CeilMs * 1000)) return false; // p99 gate (missing p99 → not disqualified)
+  const fail = r.fail != null ? r.fail : 0;
+  const tot = r.rps * sweepDur + fail;
+  return tot > 0 && fail <= 0.001 * tot;                       // error-rate gate < 0.1%
+};
 const checkSweep = (rpsKey, concKey, arrKey) => {
   const arr = bc && bc[arrKey];
   if (!Array.isArray(arr) || arr.length === 0) { A(false, arrKey + " present + non-empty"); return; }
-  const peak = arr.reduce((a, b) => (b.rps > a.rps ? b : a));
-  A(peak.rps === bc[rpsKey], "headline " + rpsKey + " (" + bc[rpsKey] + ") == max of " + arrKey + " (" + peak.rps + ")");
+  const eligible = arr.filter(rungPasses);
+  if (eligible.length === 0) { A(false, arrKey + " has >=1 gate-passing rung to compare the headline against"); return; }
+  const peak = eligible.reduce((a, b) => (b.rps > a.rps ? b : a));
+  A(peak.rps === bc[rpsKey], "headline " + rpsKey + " (" + bc[rpsKey] + ") == gate-passing max of " + arrKey + " (" + peak.rps + ")");
   A(peak.conc === bc[concKey], "headline " + concKey + " (" + bc[concKey] + ") == winning conc of " + arrKey + " (" + peak.conc + ")");
 };
 checkSweep("rps_max_proxy", "rps_max_proxy_concurrency", "sweep_max_proxy");

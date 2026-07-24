@@ -631,6 +631,37 @@ test("guard: the published headline MUST be a point on its own charted sweep (on
     "a record with no charted sweep array must not trip the one-source guard");
 });
 
+test("LOW-R3-4: a MATRIX headline missing its sweep array is a coverage WARNING, not a silent skip", () => {
+  // A source:"matrix" headline with a real ceiling but NO charted sweep array would previously be skipped
+  // silently, shipping "verified against nothing". It must now surface a coverage warning (never a hard
+  // error — the currently-shipped bundle predates the array-emitting matrix/run.sh). Both keys warn.
+  const bare = { key: "bare", display: "Bare", lang: "Rust",
+    best_cell: { dialect: "openai", source: "matrix", added_latency_p99_us: 100,
+      rps_max_proxy: 12345, rps_sustained_20ms: 6789 } };  // no sweep arrays
+  const r = checkConsistency({ gateways: [bare] }, app);
+  assert.deepEqual(r.errors, [], "a missing matrix sweep array is a WARNING, never a hard error");
+  assert.ok(r.warnings.some((w) => w.includes("bare.rps_max_proxy") && w.includes("sweep array")),
+    `must warn on the missing matrix sweep array (max-proxy); got: ${JSON.stringify(r.warnings)}`);
+  assert.ok(r.warnings.some((w) => w.includes("bare.rps_sustained_20ms") && w.includes("sweep array")),
+    `must warn on the missing matrix sweep array (sustained); got: ${JSON.stringify(r.warnings)}`);
+  // A did-not-qualify headline (rps_max_proxy=0) is NOT a missing-array gap (no gate-passing rung exists);
+  // it is covered by the max-proxy=0 warning, so the missing-array warning must NOT fire for that key.
+  const zero = { key: "zq", display: "ZQ", lang: "Rust",
+    best_cell: { dialect: "openai", source: "matrix", added_latency_p99_us: 100,
+      rps_max_proxy: 0, rps_sustained_20ms: 500,
+      sweep_sustained_20ms: [{ conc: 8, rps: 500, p99_us: 400, fail: 0 }] } };
+  const rz = checkConsistency({ gateways: [zero] }, app);
+  assert.ok(!rz.warnings.some((w) => w.includes("zq.rps_max_proxy") && w.includes("sweep array")),
+    `a did-not-qualify (0) headline must NOT get a missing-array warning; got: ${JSON.stringify(rz.warnings)}`);
+  // A NON-matrix (legacy/perf-fallback) headline missing its array is still silently skipped — no warning.
+  const fallback = { key: "fb", display: "FB", lang: "Rust",
+    best_cell: { dialect: "openai", source: "perf-fallback", added_latency_p99_us: 100,
+      rps_max_proxy: 12345, rps_sustained_20ms: 6789 } };
+  const rf = checkConsistency({ gateways: [fallback] }, app);
+  assert.ok(!rf.warnings.some((w) => w.includes("sweep array")),
+    `a perf-fallback headline missing its array must NOT warn (legacy is legitimately arrayless); got: ${JSON.stringify(rf.warnings)}`);
+});
+
 test("HIGH-R2-1: guard mirrors the p99/error gate — a cliff-above-peak gateway must PASS", () => {
   // The ordinary max-proxy / sustained shape: raw rps keeps climbing while the ramp probes ONE rung
   // past the peak, and that terminal rung crosses the p99 cliff (p99 >= P99_CEIL_MS*1000). lib/sweep.sh
@@ -698,9 +729,13 @@ test("divergent translation_cell vs xlate suite: drawer/compare read the matrix 
 });
 
 test("guard warns (never fails) on a sustained > max-proxy inversion", () => {
+  // carry the matching gate-passing sweep arrays so the LOW-R3-4 "matrix headline missing its sweep
+  // array" coverage warning does not fire — this test is about the inversion warning specifically.
   const g = { key: "inv", display: "Inv", lang: "Rust",
     best_cell: { dialect: "openai", source: "matrix",
-      added_latency_p99_us: 100, rps_sustained_20ms: 12879, rps_max_proxy: 12700 } };
+      added_latency_p99_us: 100, rps_sustained_20ms: 12879, rps_max_proxy: 12700,
+      sweep_max_proxy: [{ conc: 256, rps: 12700, p99_us: 500, fail: 0 }],
+      sweep_sustained_20ms: [{ conc: 256, rps: 12879, p99_us: 500, fail: 0 }] } };
   const { errors, warnings } = checkConsistency({ gateways: [g] }, app);
   assert.deepEqual(errors, []);
   assert.equal(warnings.length, 1);
@@ -710,9 +745,12 @@ test("guard warns (never fails) on a sustained > max-proxy inversion", () => {
 test("guard treats max-proxy=0 as a DISTINCT did-not-qualify warning, never noise", () => {
   // arch's real shape: sustained 18, max 0. The ceiling run failed to qualify at every tested
   // load; filing that under "small inversion is sweep noise" would misdescribe a real failure.
+  // sustained carries its sweep array (rps_max_proxy=0 is did-not-qualify: no gate-passing rung, so no
+  // sweep_max_proxy to require) — keeps LOW-R3-4's missing-array warning from firing on this fixture.
   const g = { key: "zeromax", display: "ZeroMax", lang: "Rust",
     best_cell: { dialect: "openai", source: "matrix",
-      added_latency_p99_us: 100, rps_sustained_20ms: 18, rps_max_proxy: 0 } };
+      added_latency_p99_us: 100, rps_sustained_20ms: 18, rps_max_proxy: 0,
+      sweep_sustained_20ms: [{ conc: 8, rps: 18, p99_us: 500, fail: 0 }] } };
   const { errors, warnings } = checkConsistency({ gateways: [g] }, app);
   assert.deepEqual(errors, []);
   assert.equal(warnings.length, 1);

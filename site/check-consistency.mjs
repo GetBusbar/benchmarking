@@ -191,8 +191,24 @@ export function checkConsistency(data, app) {
       ];
       for (const [rk, ck, ak] of pairs) {
         const arr = canon[ak];
-        if (!Array.isArray(arr) || !arr.length) continue; // legacy / no charted array: skip
         const head = canon[rk];
+        // LOW-R3-4: a MATRIX-sourced headline SHOULD carry its own charted sweep array. matrix/run.sh
+        // always emits the arrays now, so a matrix headline with a value but no array is a stale/partial
+        // record shipping "verified against nothing" — which the guard used to `continue` past SILENTLY.
+        // Surface it as a coverage WARNING (not a hard ERROR: the currently-shipped data.json predates the
+        // array-emitting matrix/run.sh, so a hard fail would block the board until a full re-run — a full
+        // re-run closes it). A legacy/perf-fallback headline (source !== "matrix") is still silently skipped.
+        if (!Array.isArray(arr) || !arr.length) {
+          // head > 0: a real ceiling that MUST have a sweep to verify against. head === 0 is a
+          // did-not-qualify run (no gate-passing rung exists) — covered by the max-proxy=0 warning below,
+          // not a missing-array gap. null head has no published number to verify.
+          if (canon.source === "matrix" && head != null && head > 0) {
+            warnings.push(`${g.key}.${rk}: matrix-sourced headline=${head} but its charted ${ak} sweep array ` +
+              `is absent/empty — the single-source sweep assertion cannot verify this headline (stale/pre-re-run ` +
+              `record; matrix/run.sh now always emits the array). Re-run this gateway to close the gap.`);
+          }
+          continue; // legacy / no charted array (or warned above): nothing to reduce against
+        }
         if (head == null) continue;
         // The published headline is the max rps of the GATE-PASSING rungs, exactly how SW_CEIL_RPS was
         // derived. Reduce over that subset so the guard's "peak" matches how "head" was computed; a

@@ -214,7 +214,14 @@ const gateways = gatewayKeys.map((key) => {
   // Different gateways legitimately have different measured_at (busbar today, kong 3 weeks ago) — that
   // is honest on a living board where any one gateway can be re-run alone. The staleness flag drives a
   // per-row badge in app.js; it is NOT a build failure (see the freshness guard below).
-  const gAtMs = newestMeasuredMs(g);
+  // LOW-R3-3: the badge stamp must reflect the age of the DISPLAYED numbers, which are projected from
+  // g.matrix ONLY (best_cell / streaming / memory_read). Deriving it from the MAX across all suites let a
+  // newer legacy results/perf/<gw>.json (reachable via an ad-hoc SUITES=perf re-run) drive a "measured 5d
+  // ago" badge while the shown matrix numbers were 90d old — the badge overstating freshness. Prefer the
+  // matrix stamp; fall back to the newest-across-suites only when there is no matrix (a legacy-only row
+  // whose numbers age by that stamp anyway). The staleness flag below is re-derived on the same basis.
+  const matrixAtMs = g.matrix && g.matrix.measured_at ? Date.parse(g.matrix.measured_at) : 0;
+  const gAtMs = matrixAtMs > 0 ? matrixAtMs : newestMeasuredMs(g);
   g.measured_at = gAtMs > 0 ? new Date(gAtMs).toISOString() : null;
   return g;
 });
@@ -402,7 +409,11 @@ for (const g of gateways) {
   }
   // PER-GATEWAY staleness SIGNAL (not a failure): flag a row whose own data has aged past the
   // threshold so app.js can show a "stale" badge. A living board with mixed cadences is fine.
-  const ageDays = (nowMs - Math.max(...ats)) / 86400000;
+  // LOW-R3-3: age the DISPLAYED numbers — matrix.measured_at when present (best_cell/streaming/memory
+  // all project from it), so a stale matrix is flagged even if a newer legacy suite stamp is around;
+  // fall back to the newest non-future suite stamp only for a legacy-only row (no matrix).
+  const ageBasisMs = matrixAt != null ? matrixAt : Math.max(...ats);
+  const ageDays = (nowMs - ageBasisMs) / 86400000;
   g.stale = ageDays > MAX_GATEWAY_AGE_DAYS;
 }
 
