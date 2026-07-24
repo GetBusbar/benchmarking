@@ -406,11 +406,23 @@ A(!!dl && dl.matrix && dl.best_cell, "download JSON carries matrix + best_cell")
 // at least one non-served cell EXISTS in the bundle (so the no-bar path is genuinely exercised) OR that
 // the matrix is fully green (in which case there is nothing to suppress — also valid).
 let nonServed = total - served;
-// NIT-3: `nonServed >= 0` is an arithmetic IDENTITY (always true), so it never proved the no-bar path was
-// exercised. Assert the real intent from the comment above: EITHER at least one non-served cell exists (so
-// the validity gate's zero-width path is genuinely exercised) OR the matrix is fully green (served ===
-// total — nothing to suppress, also valid). This can now actually FAIL if `total`/`served` are miscounted.
-A(nonServed >= 1 || total === served, "no-bar path: " + nonServed + " non-served cell(s) present (charts.py validity gate zeroes them; check-consistency asserted surfaces agree), OR the matrix is fully green");
+// NIT-R5-1: the prior `nonServed >= 1 || total === served` is ALGEBRAICALLY a tautology — since
+// nonServed = total - served, it reduces to `total >= served`, which holds by construction (served is
+// only incremented inside the total loop), so it can never fail and never proved the no-bar path. Assert
+// the REAL intent non-tautologically: when non-served cells exist, actually FIND one in the raw matrix
+// and prove it carries served !== true (the exact gate input charts.py's validity gate zeroes to no bar);
+// when the matrix is fully green, assert served === total explicitly (nothing to suppress). Either branch
+// can genuinely FAIL if the raw matrix or the counting is malformed. The full surface-agreement coverage
+// still lives in check-consistency + test.mjs; this only proves the gate's zero-width INPUT is present.
+if (nonServed >= 1) {
+  let foundUnserved = false;
+  for (const eg of Object.keys(ups || {})) for (const ing of Object.keys(ups[eg].cells || {})) {
+    if (ups[eg].cells[ing].served !== true) { foundUnserved = true; break; }
+  }
+  A(foundUnserved, "no-bar path exercised: a non-served cell (served !== true) exists in the raw matrix — the exact input charts.py's validity gate zeroes to no bar (" + nonServed + " non-served)");
+} else {
+  A(served === total, "matrix fully green (" + served + "/" + total + " served) — no cell to suppress, no-bar path not applicable");
+}
 
 // charts PNG landed (when a renderer was available)
 if (chartsOk === "1") {

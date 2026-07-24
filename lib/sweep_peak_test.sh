@@ -151,4 +151,44 @@ _c1mode=dirty; sweep_c1
 if [ "$C1_OK" = 0 ] && [ -n "$C1_ERR" ]; then echo "ok   - sweep_c1 dirty gate (C1_OK=$C1_OK, reason set)";
 else echo "FAIL - sweep_c1 dirty: C1_OK=$C1_OK (want 0), C1_ERR='$C1_ERR'"; fail=1; fi
 
+# ── R5-NIT: SW_JSON aggregation is populated + well-formed ─────────────────────────────────────────
+# The base cases assert SW_CEIL_RPS/CONC/BOUND but NEVER SW_JSON — the per-rung sweep array charts.py
+# and check-consistency read to prove the headline == max of the charted rungs. A regression that built
+# an empty or malformed SW_JSON (e.g. an aggregation-loop off-by-one) would pass every case above and
+# only surface at deploy via check-consistency. Assert it here: after a normal peak run SW_JSON must be
+# non-empty and every rung must carry the four numeric keys the downstream reducer requires.
+SWEEP_CACHE_KEY=""; SWEEP_ADAPTIVE=0
+CURVE=peak_between; unset 'SWEEP_PRIOR[20]'; run_sweep 20 "32 65536" peak
+if [ -n "${SW_JSON:-}" ]; then echo "ok   - SW_JSON aggregation populated (${#SW_JSON} chars)";
+else echo "FAIL - SW_JSON empty after a normal peak run (aggregation produced no rungs)"; fail=1; fi
+# Each rung object must carry conc/rps/p99_us/fail (the exact shape rungPasses + the peak reducer read).
+_rungs=$(printf '%s' "${SW_JSON:-}" | grep -o '"conc":' | wc -l | tr -d ' ')
+_shaped=$(printf '%s' "${SW_JSON:-}" | grep -o '{"conc":[0-9]*,"rps":[0-9]*,"p99_us":[0-9]*,"fail":[0-9]*}' | wc -l | tr -d ' ')
+if [ "${_rungs:-0}" -ge 1 ] && [ "${_shaped:-0}" = "${_rungs:-0}" ]; then
+  echo "ok   - SW_JSON rungs well-formed ($_shaped/$_rungs carry conc/rps/p99_us/fail)";
+else echo "FAIL - SW_JSON malformed: $_shaped of $_rungs rungs carry the full conc/rps/p99_us/fail shape"; fail=1; fi
+
+# ── R5-NIT: mock-ceiling CACHE-HIT branch (lib/sweep.sh:244-245) ────────────────────────────────────
+# The cache-hit branch is never exercised above: with SWEEP_CACHE_KEY empty _mk is empty, so every run
+# re-probes DURL for the ceiling (:247). A staleness/keying bug in the cache read would go uncaught. Here
+# we prime the cache under a key, then re-run with a sweep_probe that would report a WILDLY DIFFERENT
+# ceiling for DURL — if the cache HIT works, SW_MOCK_CEIL must be REUSED (unchanged), not re-measured.
+SWEEP_CACHE_KEY="ck-test"; SWEEP_ADAPTIVE=0
+CURVE=mockbound; unset 'SWEEP_PRIOR[20]'; run_sweep 20 "32 65536" peak    # cold: probes + caches the ceiling
+_cached_ceil="${SW_MOCK_CEIL:-0}"
+if [ -n "${SWEEP_MOCKCEIL_CACHE[ck-test|20]:-}" ] && [ "${_cached_ceil:-0}" -gt 0 ]; then
+  echo "ok   - cold run cached the mock ceiling under the key (SW_MOCK_CEIL=$_cached_ceil)";
+else echo "FAIL - cold run did NOT cache the mock ceiling (cache='${SWEEP_MOCKCEIL_CACHE[ck-test|20]:-unset}', SW_MOCK_CEIL=${_cached_ceil})"; fail=1; fi
+# Warm run: swap in a DURL response an order of magnitude different. A cache HIT ignores it (reuses the
+# primed value); a cache MISS/keying bug would re-probe and adopt the new number, which this catches.
+sweep_probe(){ # url conc dur -> "rps fail p99us p50us"
+  if [ "$1" = "$DURL" ]; then echo "999999 0 400000 300000"; return; fi        # would-be NEW (huge) ceiling
+  local r=$(( $2*60 )); [ "$r" -gt 57000 ] && r=57000; echo "$r 0 $(( 20000 + $2*15 )) 14000"
+}
+CURVE=mockbound; unset 'SWEEP_PRIOR[20]'; run_sweep 20 "32 65536" peak
+if [ "${SW_MOCK_CEIL:-0}" = "$_cached_ceil" ]; then
+  echo "ok   - warm run REUSED the cached ceiling (SW_MOCK_CEIL=$SW_MOCK_CEIL, ignored the 999999 re-probe)";
+else echo "FAIL - warm run did NOT reuse the cache (SW_MOCK_CEIL=${SW_MOCK_CEIL:-unset}, wanted the cached $_cached_ceil)"; fail=1; fi
+SWEEP_CACHE_KEY=""
+
 [ "$fail" = 0 ] && echo "all peak-search sweep tests passed" || { echo "PEAK-SEARCH SWEEP TESTS FAILED"; exit 1; }
