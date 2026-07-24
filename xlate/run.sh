@@ -50,8 +50,12 @@ export GW_DIR="$ROOT/gateways/$GATEWAY"
 [ -f "$GW_DIR/gateway.sh" ] || { echo "unknown gateway '$GATEWAY'"; exit 2; }
 
 C1_DUR="${C1_DUR:-20}"; SWEEP_DUR="${SWEEP_DUR:-10}"; PSIZE="${PSIZE:-256}"
-# Same delayed grid + gates as perf's sweep B: the mock sleeps SWEEP_TTFT_MS per request so the
-# ceiling is concurrent-in-flight capacity on the TRANSLATION path, not a race against mock CPU.
+# The mock sleeps SWEEP_TTFT_MS per request so the ceiling is concurrent-in-flight capacity on the
+# TRANSLATION path, not a race against mock CPU. NOTE (estimator drift, audit M2): this lane still
+# walks a FIXED delayed ladder here, whereas perf/matrix migrated to lib/sweep.sh's peak search
+# (run_sweep ... peak). The two conversion probe shapes (openai direct vs anthropic gateway) make a
+# drop-in run_sweep adoption invasive, so the ladder is kept for now; the mock-ceiling probe below is
+# capped to match perf (audit M3). The gates (p99 < ceiling, <0.1% err) are identical.
 SWEEP_DELAYED="${SWEEP_DELAYED:-8 32 128 256 1024 4096 8192 16384}"
 SWEEP_TTFT_MS="${SWEEP_TTFT_MS:-20}"
 P99_CEIL_MS="${P99_CEIL_MS:-1000}"
@@ -61,14 +65,10 @@ export MOCK_PORT="${MOCK_PORT:-8000}"
 RESULTS="$ROOT/results/xlate"; mkdir -p "$RESULTS"
 log(){ echo "[$(date +%H:%M:%S)] $*"; }
 command -v taskset >/dev/null || taskset(){ shift 2; "$@"; }
-command -v go >/dev/null || { echo "need Go (load generator)"; exit 1; }
-command -v cargo >/dev/null || { echo "need cargo (rust mock)"; exit 1; }
+command -v setsid  >/dev/null || setsid(){ "$@"; }
 
-log "building mock (rust) + loadgen (go)"
-( cd "$ROOT/mock" && cargo build --release >/dev/null 2>&1 ) || { echo "mock build failed"; exit 1; }
-MOCK="$ROOT/mock/target/release/mock"
-go build -o "$ROOT/loadgen/ugen" "$ROOT/loadgen/ugen.go"
-UGEN="$ROOT/loadgen/ugen"
+log "fetching prebuilt rig (mock + loadgen) — no on-box toolchain needed"
+. "$ROOT/lib/rig.sh"; fetch_rig "$ROOT" || { echo "rig fetch failed"; exit 1; }
 
 [ -f "$ROOT/gateways/versions.env" ] && source "$ROOT/gateways/versions.env"
 gw_version(){ echo unknown; }; GW_HEADERS=()
@@ -141,13 +141,13 @@ trap cleanup EXIT
 
 # openai-shape probe (direct baseline + mock guardrail) — identical to perf/run.sh's probe
 oprobe(){ # url conc dur
-  tmo "$(probe_budget "$3")" "$UGEN" -url "$1" -model "$GW_MODEL" -auth "$GW_AUTH" -c "$2" -d "$3" -psize "$PSIZE" ${UGEN_H[@]+"${UGEN_H[@]}"} 2>/dev/null \
+  tmo "$(probe_budget "$3")" taskset -c "$LOADCORES" "$UGEN" -url "$1" -model "$GW_MODEL" -auth "$GW_AUTH" -c "$2" -d "$3" -psize "$PSIZE" ${UGEN_H[@]+"${UGEN_H[@]}"} 2>/dev/null \
     | awk '{for(i=1;i<=NF;i++){split($i,a,"=");v[a[1]]=a[2]}; print v["rps"],v["fail"],v["p99us"],v["p50us"]}'
 }
 # anthropic-shape probe (the translation path through the gateway). Hard-timeout wrapped: a gateway
 # that stops responding under load must fail this probe fast, not block the suite (the arch failure).
 aprobe(){ # url conc dur
-  tmo "$(probe_budget "$3")" "$UGEN" -url "$1" -shape anthropic -model "$GW_MODEL" -auth "$GW_AUTH" -c "$2" -d "$3" -psize "$PSIZE" \
+  tmo "$(probe_budget "$3")" taskset -c "$LOADCORES" "$UGEN" -url "$1" -shape anthropic -model "$GW_MODEL" -auth "$GW_AUTH" -c "$2" -d "$3" -psize "$PSIZE" \
     ${UGEN_H[@]+"${UGEN_H[@]}"} ${XH[@]+"${XH[@]}"} 2>/dev/null \
     | awk '{for(i=1;i<=NF;i++){split($i,a,"=");v[a[1]]=a[2]}; print v["rps"],v["fail"],v["p99us"],v["p50us"]}'
 }
@@ -244,7 +244,12 @@ if [ "$XLATE_OK" = 1 ]; then
   setsid taskset -c "$MOCKCORES" env MOCK_TTFT_MS="$SWEEP_TTFT_MS" "$MOCK" -port "$MOCK_PORT" </dev/null >/dev/null 2>&1 &
   sleep 1
   top=1; for w in $SWEEP_DELAYED; do top=$w; done
-  read -r mrps _a _b _c2 < <(oprobe "$DURL" "$top" "$SWEEP_DUR"); LLM_MOCK=${mrps:-0}
+  # Mock-ceiling reference: cap the probe concurrency the same way perf's peak lane does
+  # (lib/sweep.sh SWEEP_MOCKCEIL_CONC:-2048). At the ladder top (16384) the loadgen + mock are both
+  # overloaded, so the reference comes out LOW and the mock_bound guard fires against a degraded
+  # ceiling; capping keeps the reference honest and comparable to perf's for the identical rig.
+  mock_conc=$top; [ "$mock_conc" -gt "${SWEEP_MOCKCEIL_CONC:-2048}" ] && mock_conc="${SWEEP_MOCKCEIL_CONC:-2048}"
+  read -r mrps _a _b _c2 < <(oprobe "$DURL" "$mock_conc" "$SWEEP_DUR"); LLM_MOCK=${mrps:-0}
   for conc in $SWEEP_DELAYED; do
     if suite_deadline_expired; then log "[$GATEWAY] suite wall-clock ceiling reached mid-sweep - stopping sweep, recording what we have"; break; fi
     read -r rps fail p99 _p50 < <(aprobe "$XURL" "$conc" "$SWEEP_DUR")

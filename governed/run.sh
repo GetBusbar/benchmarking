@@ -30,8 +30,13 @@ export GW_DIR="$ROOT/gateways/$GATEWAY"
 [ -f "$GW_DIR/gateway.sh" ] || { echo "unknown gateway '$GATEWAY'"; exit 2; }
 
 C1_DUR="${C1_DUR:-20}"; SWEEP_DUR="${SWEEP_DUR:-10}"; PSIZE="${PSIZE:-256}"
-# Same delayed-mock grid + gates as perf/run.sh sweep B (sustained RPS @ 20ms) — identical load,
-# so the governed and plain numbers differ ONLY by what the gateway does per request.
+# Delayed-mock grid + gates for the sustained-RPS-@20ms sweep — identical load for the plain and
+# governed phases, so those two numbers differ ONLY by what the gateway does per request. NOTE
+# (estimator drift, audit M2): this lane still walks a FIXED ladder here, while perf/matrix migrated
+# to lib/sweep.sh's peak search (run_sweep ... peak); governed's per-phase token threading makes a
+# drop-in run_sweep adoption invasive, so the ladder is kept for now. The plain-vs-governed pct is
+# internally consistent (both phases ladder); only governed-plain-vs-perf uses a different estimator.
+# The mock-ceiling probe below is capped to match perf (audit M3); the gates are identical.
 SWEEP_DELAYED="${SWEEP_DELAYED:-8 32 128 256 1024 4096 8192 16384}"
 SWEEP_TTFT_MS="${SWEEP_TTFT_MS:-20}"
 P99_CEIL_MS="${P99_CEIL_MS:-1000}"
@@ -42,14 +47,9 @@ RESULTS="$ROOT/results/governed"; mkdir -p "$RESULTS"
 log(){ echo "[$(date +%H:%M:%S)] $*"; }
 command -v taskset >/dev/null || taskset(){ shift 2; "$@"; }
 command -v setsid  >/dev/null || setsid(){ "$@"; }
-command -v go >/dev/null || { echo "need Go (load generator)"; exit 1; }
-command -v cargo >/dev/null || { echo "need cargo (rust mock)"; exit 1; }
 
-log "building mock (rust) + loadgen (go)"
-( cd "$ROOT/mock" && cargo build --release >/dev/null 2>&1 ) || { echo "mock build failed"; exit 1; }
-MOCK="$ROOT/mock/target/release/mock"
-go build -o "$ROOT/loadgen/ugen" "$ROOT/loadgen/ugen.go"
-UGEN="$ROOT/loadgen/ugen"
+log "fetching prebuilt rig (mock + loadgen) — no on-box toolchain needed"
+. "$ROOT/lib/rig.sh"; fetch_rig "$ROOT" || { echo "rig fetch failed"; exit 1; }
 
 [ -f "$ROOT/gateways/versions.env" ] && source "$ROOT/gateways/versions.env"
 gw_version(){ echo unknown; }; GW_HEADERS=()
@@ -92,7 +92,7 @@ trap cleanup EXIT
 # run ugen with an explicit bearer token, echo "rps fail p99us p50us". Hard-timeout wrapped: a
 # gateway that stops responding mid-window fails fast at dur+grace instead of blocking the phase.
 probe(){ # url conc dur token
-  tmo "$(probe_budget "$3")" "$UGEN" -url "$1" -model "$GW_MODEL" -auth "$4" -c "$2" -d "$3" -psize "$PSIZE" ${UGEN_H[@]+"${UGEN_H[@]}"} 2>/dev/null \
+  tmo "$(probe_budget "$3")" taskset -c "$LOADCORES" "$UGEN" -url "$1" -model "$GW_MODEL" -auth "$4" -c "$2" -d "$3" -psize "$PSIZE" ${UGEN_H[@]+"${UGEN_H[@]}"} 2>/dev/null \
     | awk '{for(i=1;i<=NF;i++){split($i,a,"=");v[a[1]]=a[2]}; print v["rps"],v["fail"],v["p99us"],v["p50us"]}'
 }
 
@@ -148,7 +148,11 @@ measure_phase(){
   log "[$GATEWAY] sustained sweep @ ${SWEEP_TTFT_MS}ms"
   start_mock "$SWEEP_TTFT_MS"
   local top=1 w; for w in $SWEEP_DELAYED; do top=$w; done
-  local mrps _a _b _c; read -r mrps _a _b _c < <(probe "$DURL" "$top" "$SWEEP_DUR" "$token"); PH_MOCK=${mrps:-0}
+  # Mock-ceiling reference: cap the probe concurrency like perf's peak lane (SWEEP_MOCKCEIL_CONC:-2048).
+  # At the ladder top (16384) loadgen+mock are both overloaded, degrading the reference and firing
+  # mock_bound inconsistently; capping keeps it comparable to perf for the identical rig (audit M3).
+  local mock_conc=$top; [ "$mock_conc" -gt "${SWEEP_MOCKCEIL_CONC:-2048}" ] && mock_conc="${SWEEP_MOCKCEIL_CONC:-2048}"
+  local mrps _a _b _c; read -r mrps _a _b _c < <(probe "$DURL" "$mock_conc" "$SWEEP_DUR" "$token"); PH_MOCK=${mrps:-0}
   PH_RPS=0; PH_CONC=0; PH_P99=0; PH_JSON=""
   local conc rps fail p99 _p50
   for conc in $SWEEP_DELAYED; do
