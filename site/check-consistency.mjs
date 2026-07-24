@@ -92,10 +92,29 @@ export function checkConsistency(data, app) {
         ["rps_sustained_20ms", "xlate_rps_sustained_20ms"],
       ];
       for (const [ck, lk] of pairs) {
-        const canon = t[ck] ?? null;
+        // MED-3 (mirrored): rps_sustained_20ms is GATED — a mock-bound/unverifiable positive reads n/a on
+        // every surface (charts.py suppresses the bar via xlate_rps_sustained_20ms_valid). So the canonical
+        // comparison target is the GATED value; comparing the raw cell value would wrongly demand the site
+        // render a number the chart deliberately hides. Latency (added_latency_p99_us) is never gated.
+        const canon = (ck === "rps_sustained_20ms" && app.xlateRpsSuppressed(t, ck)) ? null : (t[ck] ?? null);
         const lane = x && x.xlate_served !== false && x[lk] != null ? x[lk] : null;
         if (canon !== lane) {
           errors.push(`${g.key}.translation.${ck}: canonical=${canon} drawer/compare=${lane} (must be one canonical value)`);
+        }
+      }
+      // MED-3 (mirrored) translation-lane RPS mock-bound VISIBILITY tie: the drawer/compare shows the
+      // sustained translation RPS exactly when the chart draws its bar (xlate_rps_sustained_20ms_valid =
+      // present && >0 && NOT mock-bound). Assert the two suppressions agree so a rig-limited translation
+      // throughput can never draw a #1 bar while the site hides it (or vice-versa) — the exact asymmetry
+      // MED-3 closed for passthrough, now enforced on translation too.
+      if (t.rps_sustained_20ms != null) {
+        const suppressed = app.xlateRpsSuppressed(t, "rps_sustained_20ms");   // the shared mock-bound rule
+        const siteShows = x && x.xlate_served !== false && x.xlate_rps_sustained_20ms != null;   // drawer/compare
+        const chartShows = !suppressed;   // mirrors charts.py xlate_rps_sustained_20ms_valid on this record
+        if (siteShows !== chartShows) {
+          errors.push(`${g.key}.translation.rps_sustained_20ms: mock-bound-suppressed=${suppressed} but the site ` +
+            `${siteShows ? "shows a number" : "reads n/a"} while the chart ${chartShows ? "draws a bar" : "draws no bar"} ` +
+            `(a rig-limited translation throughput must read n/a on the site AND draw no bar — same mock-bound rule)`);
         }
       }
     }
