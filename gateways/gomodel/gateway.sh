@@ -52,34 +52,33 @@ gw_launch() {
   # SigV4 control-plane ListFoundationModels call the mock does not implement; GoModel's own
   # documented escape hatch is the BEDROCK_MODELS allowlist (.env.template), used verbatim.
   # All four egress paths verified locally against enterpilot/gomodel:0.1.55 + the recording mock.
+  # SINGLE SOURCE OF TRUTH: _gomodel_env() is the ONE definition of the OOTB env. gw_launch turns each
+  # KEY=value into a docker -e flag; gw_config publishes the SAME bytes. The benchmarked config and the
+  # website-published config are therefore identical by construction and cannot drift.
+  local args=() line
+  while IFS= read -r line; do [ -n "$line" ] && args+=(-e "$line"); done < <(_gomodel_env)
   sudo docker run -d --name gomodel-bench --network host --cpuset-cpus="$CORES" \
-    -e PORT="$GW_PORT" \
-    -e OPENAI_BASE_URL="http://127.0.0.1:$MOCK_PORT/v1" \
-    -e OPENAI_API_KEY=dummy \
-    -e ANTHROPIC_BASE_URL="http://127.0.0.1:$MOCK_PORT/anthropic" \
-    -e ANTHROPIC_API_KEY=dummy \
-    -e GEMINI_BASE_URL="http://127.0.0.1:$MOCK_PORT/v1beta" \
-    -e GEMINI_API_KEY=dummy \
-    -e BEDROCK_BASE_URL="http://127.0.0.1:$MOCK_PORT" \
-    -e BEDROCK_MODELS="anthropic.claude-3-sonnet-20240229-v1:0" \
-    -e AWS_ACCESS_KEY_ID=AKIAMOCKACCESSKEY -e AWS_SECRET_ACCESS_KEY=mock-secret-access-key -e AWS_REGION=us-east-1 \
-    -e MODELS_ENABLED_BY_DEFAULT=true \
-    -e STORAGE_TYPE=sqlite \
+    "${args[@]}" \
     "$GOMODEL_IMAGE" >"$GW_DIR/launch.log" 2>&1 || true
 }
 
-# ── OOTB config artifact (env-driven) ─────────────────────────────────────────────────────────────
-# gw_config prints the canonical OOTB config this gateway launches with. GoModel is env-driven, so the
-# artifact is its ENV MANIFEST: the exact `KEY=value` list gw_launch passes with `-e`, one per line,
-# secrets already shown as their dummy values (there are no live secrets on the isolated rig). The
-# suite runner captures this once per run into results/config/gomodel.txt and the board publishes it,
-# so "fresh install + this env → these numbers" is reproducible. Kept in lockstep with gw_launch by
-# construction: the same values, sourced from the same $GW_PORT/$MOCK_PORT/$GW_MODEL the launch uses.
-# OOTB posture: default features stay ON (no LOGGING_ENABLED/budget/ratelimit/admin/mcp strips); the
-# only deviations are the four permitted ones — provider base_urls → mock, dummy keys, OpenAI-lane
-# provider scope, and the STORAGE_TYPE=sqlite / MODELS_ENABLED_BY_DEFAULT run-mechanics.
-gw_config() {
+# ── OOTB config (SINGLE SOURCE: the benchmark run and the published website artifact both read this) ─
+# _gomodel_env is the ONE canonical OOTB env manifest. gw_launch consumes it as docker -e flags;
+# gw_config prints it verbatim into results/config/gomodel.txt, which the board publishes — so
+# "fresh install + this env → these numbers" is reproducible and the run can never differ from the
+# published config. Everything is env-driven, so this function IS the whole config.
+#   GOMAXPROCS = pinned core count (0-3 → 4): GoModel is Go, and Go (pre-1.25) reads the HOST cpu count
+#     for GOMAXPROCS, NOT the --cpuset-cpus limit — so without it GoModel runs 16 Ps thrashing 4 pinned
+#     cores, a scheduler-contention HANDICAP the Rust gateways (tokio available_parallelism respects
+#     cpuset) never pay. Pinning to the cpuset count emulates the same 4-core box every gateway is
+#     measured on — the identical CPU-pinning run-mechanic bifrost also uses (Go-field parity).
+#   OOTB posture: default features stay ON (no LOGGING_ENABLED/budget/ratelimit/admin/mcp strips); the
+#     only deviations are the permitted ones — provider base_urls → mock, dummy keys, OpenAI-lane
+#     provider scope, and the STORAGE_TYPE=sqlite / MODELS_ENABLED_BY_DEFAULT run-mechanics.
+_gomodel_env() {
+  local ncore=$(( ${CORES##*-} - ${CORES%%-*} + 1 ))
   cat <<ENV
+GOMAXPROCS=$ncore
 PORT=$GW_PORT
 OPENAI_BASE_URL=http://127.0.0.1:$MOCK_PORT/v1
 OPENAI_API_KEY=dummy
@@ -96,6 +95,8 @@ MODELS_ENABLED_BY_DEFAULT=true
 STORAGE_TYPE=sqlite
 ENV
 }
+
+gw_config() { _gomodel_env; }
 
 # ── matrix suite: declared capability + egress wiring ─────────────────────────────────────────────
 # Declared 6x6 (rows=ingress, cols=egress), axis order: openai openai-responses anthropic gemini
