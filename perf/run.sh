@@ -156,7 +156,7 @@ log "[$GATEWAY] max proxy throughput = $PROXY_RPS rps @ c=$PROXY_CONC"
 # under realistic LLM latency. Concurrency ramps high; the delayed mock mostly sleeps so it isn't the
 # limit until very high RPS (flagged if so).
 log "[$GATEWAY] sweep B — sustained RPS @ ${SWEEP_TTFT_MS}ms LLM latency (AIGatewayBench metric)"
-run_sweep "$SWEEP_TTFT_MS" "$SWEEP_DELAYED" bisect
+run_sweep "$SWEEP_TTFT_MS" "$SWEEP_DELAYED" peak
 LLM_RPS=$SW_CEIL_RPS; LLM_CONC=$SW_CEIL_CONC; LLM_MOCK=$SW_MOCK_CEIL; LLM_BOUND=$SW_BOUND; LLM_JSON="$SW_JSON"
 [ "$LLM_BOUND" = true ] && log "[$GATEWAY] ⚠ @${SWEEP_TTFT_MS}ms ceiling ($LLM_RPS) within 10% of mock ($LLM_MOCK) — MOCK-BOUND floor"
 log "[$GATEWAY] sustained RPS @${SWEEP_TTFT_MS}ms = $LLM_RPS rps @ c=$LLM_CONC"

@@ -451,7 +451,7 @@ matrix_cell_perf(){
   sweep_c1
   run_sweep 0 "$SWEEP_INSTANT"
   local prps=$SW_CEIL_RPS pbound=$SW_BOUND
-  run_sweep "$SWEEP_TTFT_MS" "$SWEEP_DELAYED" bisect
+  run_sweep "$SWEEP_TTFT_MS" "$SWEEP_DELAYED" peak
   local lrps=$SW_CEIL_RPS lbound=$SW_BOUND
   SWEEP_BODY=""; UGEN_H=(); SWEEP_CACHE_KEY=""
   mock_start_record
