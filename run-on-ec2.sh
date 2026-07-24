@@ -99,8 +99,20 @@ if [[ -z "$SG" || "$SG" == "None" ]]; then
   SG=$(aws ec2 create-security-group --group-name "$SGNAME" --description "gateway bench SSH" --query GroupId --output text)
   CREATED_SG=1
 fi
-MYIP=$(curl -s https://checkip.amazonaws.com)
-aws ec2 authorize-security-group-ingress --group-id "$SG" --protocol tcp --port 22 --cidr "${MYIP}/32" >/dev/null 2>&1 || true
+# Fetch our public IP for the SSH ingress rule. A transient checkip hiccup that returns an empty/
+# malformed MYIP would make `--cidr "/32"` get rejected by AWS and swallowed by `|| true`; on a
+# freshly-created SG that leaves NO port-22 rule, so ssh to every box times out and the whole run
+# records a field-wide false "did not serve" while burning N boxes (audit R2-M2). Retry, then fail
+# loudly if we still don't have a valid IPv4 - do NOT authorize a malformed CIDR.
+MYIP=""
+for _try in 1 2 3; do
+  MYIP=$(curl -fsS --max-time 10 https://checkip.amazonaws.com | tr -d '[:space:]')
+  [[ "$MYIP" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] && break
+  MYIP=""; sleep 2
+done
+[[ -n "$MYIP" ]] || { echo "FATAL: could not determine a valid public IPv4 from checkip.amazonaws.com (3 tries) - refusing to launch boxes into an SG with no SSH ingress rule" >&2; exit 1; }
+aws ec2 authorize-security-group-ingress --group-id "$SG" --protocol tcp --port 22 --cidr "${MYIP}/32" >/dev/null 2>&1 \
+  || echo "note: SSH ingress rule for ${MYIP}/32 not added (likely already present on an existing SG)"
 
 # TIDINESS + COST: on ANY exit (normal, error, Ctrl-C, SIGTERM) terminate ONLY the boxes THIS run
 # launched — filtered by tag:run=$RUN_ID, NOT the shared purpose=gateway-bench tag — so a second or
