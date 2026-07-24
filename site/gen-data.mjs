@@ -115,6 +115,51 @@ const gateways = gatewayKeys.map((key) => {
     if (bc) g.best_cell = { ...bc, source: "matrix", build: g.matrix.build ?? null, measured_at: g.matrix.measured_at ?? null };
     const tc = translationCell(g.matrix);
     if (tc) g.translation_cell = { ...tc, source: "matrix", build: g.matrix.build ?? null, measured_at: g.matrix.measured_at ?? null };
+    // STREAMING projection (matrix is the single source): the streaming shown on the board is the
+    // BEST DIAGONAL cell's streaming — the same (ingress==egress) passthrough cell the headline perf
+    // is projected from, so the streaming numbers are read off the SAME cell as the RPS/latency
+    // headline (one source of truth; check-consistency asserts headline streaming == this cell's).
+    // g.streaming carries the diagonal cell's dialect + its full stream record.
+    if (bc) {
+      const cell = g.matrix.upstreams?.[bc.dialect]?.cells?.[bc.dialect];
+      if (cell && cell.stream) {
+        g.streaming = { dialect: bc.dialect, source: "matrix",
+          build: g.matrix.build ?? null, measured_at: g.matrix.measured_at ?? null, ...cell.stream };
+      }
+    }
+    // MEMORY projection (matrix is the single source): the one process-level RSS read the matrix run
+    // takes (matrix.memory). A gateway whose matrix run served no memory (or ran with MATRIX_MEMORY=0)
+    // leaves g.memory_read absent and the board falls back to the legacy memory suite below.
+    if (g.matrix.memory && g.matrix.memory.served === true) {
+      g.memory_read = { source: "matrix", build: g.matrix.build ?? null,
+        measured_at: g.matrix.measured_at ?? null, ...g.matrix.memory };
+    }
+  }
+  // LEGACY FALLBACK — old bundles only. Before the matrix folded streaming + memory in, they came from
+  // the standalone stream/streamcpu/memory suites. Keep those as a fallback so an OLD bundle (matrix
+  // with no per-cell stream / no matrix.memory) still renders. A fresh matrix bundle sets g.streaming /
+  // g.memory_read above and these no-ops. Clearly a legacy path — the matrix is the primary source.
+  if (!g.streaming && g.stream && g.stream.stream_served === true) {
+    // The old stream suite measured the gateway's default passthrough; label it with that dialect so
+    // the pill and numbers name the same path. streamcpu (if present) supplies the cpu-fps.
+    const dia = passthroughDialect(g.matrix);
+    g.streaming = {
+      dialect: dia, source: "stream-fallback",
+      added_ttft_p50_us: g.stream.stream_added_ttft_p50_us,
+      added_ttft_p99_us: g.stream.stream_added_ttft_p99_us,
+      added_gap_p50_us: g.stream.stream_added_gap_p50_us,
+      added_gap_p99_us: g.stream.stream_added_gap_p99_us,
+      streams_sustained: g.stream.stream_sustained_streams,
+      streams_sustained_fps: g.stream.stream_sustained_fps,
+      streams_sustained_mock_bound: g.stream.stream_mock_bound ?? null,
+      cpu_fps: g.streamcpu ? g.streamcpu.streamcpu_frames_per_sec : null,
+      cpu_fps_concurrency: g.streamcpu ? g.streamcpu.streamcpu_concurrency : null,
+      cpu_fps_mock_bound: g.streamcpu ? g.streamcpu.streamcpu_mock_bound : null,
+      build: g.stream.build ?? null, measured_at: g.stream.measured_at ?? null,
+    };
+  }
+  if (!g.memory_read && g.memory && g.memory.served === true) {
+    g.memory_read = { source: "memory-fallback", ...g.memory };
   }
   if (!g.best_cell && g.perf && g.perf.served === true && g.perf.added_latency_p99_us != null) {
     // No swept diagonal (e.g. bifrost mid-re-run), but the perf suite ran the gateway's default

@@ -200,6 +200,25 @@ function canonicalXlate(g) {
   return g.xlate || null;
 }
 
+/* canonicalStreaming: THE single streaming record every surface reads. gen-data projects it from the
+   BEST DIAGONAL matrix cell's streaming (g.streaming, source:"matrix") — the SAME cell the passthrough
+   headline is projected from, so streaming and RPS/latency are read off one cell (one source of truth;
+   check-consistency asserts the headline streaming == this cell's). Returns a record with
+   stream_served + normalized keys, or the legacy stream-fallback g.streaming, or null. */
+function canonicalStreaming(g) {
+  const s = g.streaming;
+  if (s) return { stream_served: true, ...s };
+  return null;
+}
+/* canonicalMemory: THE single memory record. gen-data projects it from the matrix's ONE process-level
+   RSS read (g.memory_read, source:"matrix"), or the legacy memory suite (source:"memory-fallback").
+   Returns a record with served + the idle/peak fields, or null. */
+function canonicalMemory(g) {
+  const m = g.memory_read;
+  if (m) return { served: true, ...m };
+  return null;
+}
+
 /* passCell: the Passthrough tab reads ONLY the canonical record (g.best_cell). When best_cell
    exists it is THE record: a field it lacks reads n/a, never silently patched from a different
    source (that is exactly the numeric divergence this rule exists to kill). Only a gateway with
@@ -210,6 +229,40 @@ function passCell(g, key, fmt) {
       ? { v: g.best_cell[key], text: fmt(g.best_cell[key]), na: false }
       : { v: null, text: "n/a", na: true };
   return lane(g, "perf", "served", "serve_error", (j) =>
+    j[key] != null ? { v: j[key], text: fmt(j[key]), na: false } : { v: null, text: "n/a", na: true });
+}
+
+/* streamCell: the Streaming tab reads ONLY the canonical streaming record (g.streaming, projected by
+   gen-data from the best diagonal matrix cell's stream, or a legacy stream-fallback). A field it lacks
+   reads n/a; a gateway that did not stream (no g.streaming) shows the legacy stream suite's not-served
+   evidence when present, else a plain n/a. Same one-source discipline as passCell. */
+function streamCell(g, key, fmt) {
+  const s = canonicalStreaming(g);
+  if (s)
+    return s[key] != null
+      ? { v: s[key], text: fmt(s[key]), na: false }
+      : { v: null, text: "n/a", na: true };
+  // Legacy fallback (a bundle whose gen-data did not project g.streaming): the raw stream suite uses
+  // stream_*-prefixed keys, so map the canonical key onto the suite key.
+  const legacyKey = {
+    added_ttft_p99_us: "stream_added_ttft_p99_us",
+    added_gap_p99_us: "stream_added_gap_p99_us",
+    streams_sustained: "stream_sustained_streams",
+    cpu_fps: null,   // cpu-fps lived in the separate streamcpu suite; not on the stream lane
+  }[key] ?? key;
+  if (legacyKey == null) return { v: null, text: "n/a", na: true };
+  return lane(g, "stream", "stream_served", "stream_error", (j) =>
+    j[legacyKey] != null ? { v: j[legacyKey], text: fmt(j[legacyKey]), na: false } : { v: null, text: "n/a", na: true });
+}
+/* memCell: the memory columns read ONLY the canonical memory record (g.memory_read, the matrix's one
+   process-level RSS read, or a legacy memory-fallback). Same discipline as passCell/streamCell. */
+function memCell(g, key, fmt) {
+  const m = canonicalMemory(g);
+  if (m)
+    return m[key] != null
+      ? { v: m[key], text: fmt(m[key]), na: false }
+      : { v: null, text: "n/a", na: true };
+  return lane(g, "memory", "served", "serve_error", (j) =>
     j[key] != null ? { v: j[key], text: fmt(j[key]), na: false } : { v: null, text: "n/a", na: true });
 }
 
@@ -313,10 +366,10 @@ const COLUMN_SETS = {
       get: (g) => sustainedCell(g) },
     { id: "rpsmax", label: "Max proxy RPS", desc: true, title: "Throughput ceiling against an instant mock (p99 < 1 s, <0.1% errors) on the Tested-on dialect (see the pill)",
       get: (g) => withZeroNote(passCell(g, "rps_max_proxy", fmtInt)) },
-    { id: "memidle", label: "Mem idle (MiB)", desc: false, title: "Process RSS after launch, before load",
-      get: (g) => lane(g, "memory", "served", "serve_error", (j) => ({ v: j.idle_rss_mib, text: fmt1(j.idle_rss_mib), na: false })) },
-    { id: "mempeak", label: "Mem peak (MiB)", desc: false, title: "Peak process RSS under large-payload load",
-      get: (g) => lane(g, "memory", "served", "serve_error", (j) => ({ v: j.peak_rss_mib, text: fmt1(j.peak_rss_mib), na: false })) },
+    { id: "memidle", label: "Mem idle (MiB)", desc: false, title: "Process RSS after launch, before load (the matrix run's one memory read)",
+      get: (g) => memCell(g, "idle_rss_mib", fmt1) },
+    { id: "mempeak", label: "Mem peak (MiB)", desc: false, title: "Peak process RSS under large-payload load (the matrix run's one memory read)",
+      get: (g) => memCell(g, "peak_rss_mib", fmt1) },
   ],
   // Translation: the pinned ingress->egress pair (state.xlateIn/xlateOut) chosen by the two dropdowns.
   // Every row is the identical path, so no per-row pill. When in == out the pair IS a passthrough
@@ -336,12 +389,12 @@ const COLUMN_SETS = {
   // Streaming: SSE passthrough, its own stall-gated ceiling.
   streaming: [
     COL_SEL, COL_NAME,
-    { id: "sttft", label: "Added wait for 1st token p99 (µs)", desc: false, title: "Time to first token (TTFT): the extra wait before the stream's first token, gateway minus direct-to-mock, at concurrency 1. Lower is better.",
-      get: (g) => lane(g, "stream", "stream_served", "stream_error", (j) => ({ v: j.stream_added_ttft_p99_us, text: fmtUsMs(j.stream_added_ttft_p99_us), na: false })) },
-    { id: "sgap", label: "Added gap between tokens p99 (µs)", desc: false, title: "The extra pause the gateway adds between streamed tokens, gateway minus direct-to-mock. Lower is better.",
-      get: (g) => lane(g, "stream", "stream_served", "stream_error", (j) => ({ v: j.stream_added_gap_p99_us, text: fmtUsMs(j.stream_added_gap_p99_us), na: false })) },
-    { id: "streams", label: "Streams sustained", desc: true, title: "Max concurrent SSE streams with >=99.9% frame delivery, no stalls, <0.1% errors",
-      get: (g) => lane(g, "stream", "stream_served", "stream_error", (j) => ({ v: j.stream_sustained_streams, text: fmtInt(j.stream_sustained_streams), na: false })) },
+    { id: "sttft", label: "Added wait for 1st token p99 (µs)", desc: false, title: "Time to first token (TTFT): the extra wait before the stream's first token, gateway minus direct-to-mock, at concurrency 1, on the gateway's best same-dialect passthrough cell. Lower is better.",
+      get: (g) => streamCell(g, "added_ttft_p99_us", fmtUsMs) },
+    { id: "sgap", label: "Added gap between tokens p99 (µs)", desc: false, title: "The extra pause the gateway adds between streamed tokens, gateway minus direct-to-mock, on the best same-dialect passthrough cell. Lower is better.",
+      get: (g) => streamCell(g, "added_gap_p99_us", fmtUsMs) },
+    { id: "streams", label: "Streams sustained", desc: true, title: "Max concurrent SSE streams sustained (bisected true concurrency) with >=99.9% frame delivery, no stalls, <0.1% errors, on the best same-dialect passthrough cell",
+      get: (g) => streamCell(g, "streams_sustained", fmtInt) },
   ],
   // Governance is intentionally NO tab. onthebench measures every gateway at its default, out-of-the-box
   // config; the governed suite runs a non-default governance-enabled launch that only busbar's manifest
@@ -378,6 +431,10 @@ const LANES = [
   },
   {
     key: "memory", label: "Memory", flag: "served", err: "serve_error",
+    get: canonicalMemory,
+    pathNote: (j) => j.source === "matrix"
+      ? "the matrix run's one process-level RSS read (default config, sustained large-payload load)"
+      : "the memory suite's RSS read (legacy result)",
     metrics: [
       { k: "idle_rss_mib", label: "Idle RSS (MiB)", best: "min", fmt: fmt1 },
       { k: "peak_rss_mib", label: "Peak RSS (MiB)", best: "min", fmt: fmt1 },
@@ -385,10 +442,15 @@ const LANES = [
   },
   {
     key: "stream", label: "Streaming", flag: "stream_served", err: "stream_error",
+    get: canonicalStreaming,
+    pathNote: (j) => j.source === "matrix"
+      ? `measured on the ${laneDialect(j.dialect)} passthrough (the same best diagonal cell the headline is projected from)`
+      : "measured on the stream suite's default path (legacy result)",
     metrics: [
-      { k: "stream_added_ttft_p99_us", label: "Added TTFT p99 (µs)", best: "min", fmt: fmtUsMs },
-      { k: "stream_added_gap_p99_us", label: "Added per-token p99 (µs)", best: "min", fmt: fmtUsMs },
-      { k: "stream_sustained_streams", label: "Streams sustained", best: "max", fmt: fmtInt },
+      { k: "added_ttft_p99_us", label: "Added TTFT p99 (µs)", best: "min", fmt: fmtUsMs },
+      { k: "added_gap_p99_us", label: "Added per-token p99 (µs)", best: "min", fmt: fmtUsMs },
+      { k: "streams_sustained", label: "Streams sustained", best: "max", fmt: fmtInt },
+      { k: "cpu_fps", label: "CPU-bound fps (peak)", best: "max", fmt: fmtInt },
     ],
   },
   {
@@ -549,7 +611,7 @@ function applyFilters(gateways, st) {
   const q = st.q.trim().toLowerCase();
   return gateways.filter((g) => {
     if (q && !g.display.toLowerCase().includes(q) && !g.key.toLowerCase().includes(q)) return false;
-    if (st.needStream && !(g.stream && g.stream.stream_served)) return false;
+    if (st.needStream && !canonicalStreaming(g)) return false;
     if (st.needXlate && !hasTranslation(g)) return false;
     // View-implicit filter: Translation lists only gateways that serve the pinned pair (every row
     // must be the identical path or the ranking lies). Passthrough is DELIBERATELY unfiltered:
@@ -1785,8 +1847,8 @@ if (NODE) {
     newState, encodeUrl, decodeUrl, viewPath, applyFilters,
     fmtStamp, fmtAge, stampWithAge,
     drawSweep, niceStep, fmtTick, COLUMN_SETS, columnsFor, PERF_VIEWS, VIEW_SORT, LANES, naText, stripRigPaths,
-    cellState, matrixCellTip, cellPerfTip, passCell, xlateCell, hasTranslation, CATEGORIES, DEFAULT_CATEGORY, VIEWS,
-    canonicalPerf, canonicalXlate, DEFAULT_VIEW, VIEW_LABELS, rosterRows, fmtStars,
+    cellState, matrixCellTip, cellPerfTip, passCell, xlateCell, streamCell, memCell, hasTranslation, CATEGORIES, DEFAULT_CATEGORY, VIEWS,
+    canonicalPerf, canonicalXlate, canonicalStreaming, canonicalMemory, DEFAULT_VIEW, VIEW_LABELS, rosterRows, fmtStars,
     configCorrectionUrl, BENCH_REPO,
     HOME_VIEW, homeCardsHtml,
   };
