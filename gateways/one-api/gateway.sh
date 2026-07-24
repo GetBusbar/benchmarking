@@ -59,11 +59,23 @@ gw_launch() {
   # 3) raise root quota so a long throughput run can't exhaust it (UpdateUser needs a full-ish object)
   curl -s -b "$OA_JAR" -X PUT "$base/api/user/" -H 'content-type: application/json' \
     -d '{"id":1,"username":"root","display_name":"Root User","role":100,"status":1,"quota":1000000000000,"group":"default"}' >>"$OA_LOG" 2>&1
-  # 4) create the upstream channel whose base_url is the mock (One-API appends the provider's native
-  #    path). The channel TYPE selects the native egress dialect (1=OpenAI, 14=Anthropic, 24=Gemini);
-  #    gw_matrix_egress sets OA_CH_TYPE/OA_CH_MODEL per column, defaulting to the OpenAI channel.
-  curl -s -b "$OA_JAR" -X POST "$base/api/channel/" -H 'content-type: application/json' \
-    -d "{\"name\":\"mock\",\"type\":${OA_CH_TYPE:-1},\"key\":\"sk-mock\",\"base_url\":\"http://127.0.0.1:$MOCK_PORT\",\"models\":\"${OA_CH_MODEL:-$GW_MODEL}\",\"group\":\"default\",\"status\":1}" >>"$OA_LOG" 2>&1
+  # 4) wire ALL supported upstream providers as channels, base_url = mock (One-API appends each
+  #    provider's native path). This is the OOTB deployment a real user runs: every provider they
+  #    support is a live channel, all present simultaneously — so memory/throughput/latency measure
+  #    the full multi-provider gateway, not a single-channel slice. The channel TYPE selects the
+  #    native egress dialect (1=OpenAI, 14=Anthropic, 24=Gemini). Routing keys on (group=default,
+  #    model) via the abilities table — channel TYPE is NOT part of selection
+  #    (model/ability.go GetRandomSatisfiedChannel: WHERE group=? AND model=? … ORDER BY RANDOM()).
+  #    So the three model lists are kept STRICTLY DISJOINT (gpt-* | claude-* | gemini-*): each model
+  #    resolves 1:1 to its channel with no equal-priority random tiebreak. gw_matrix_egress sets
+  #    GW_MODEL per column to a model unique to one channel, exercising exactly that provider.
+  _oa_channel(){ # <type> <model-csv>
+    curl -s -b "$OA_JAR" -X POST "$base/api/channel/" -H 'content-type: application/json' \
+      -d "{\"name\":\"mock-$1\",\"type\":$1,\"key\":\"sk-mock\",\"base_url\":\"http://127.0.0.1:$MOCK_PORT\",\"models\":\"$2\",\"group\":\"default\",\"status\":1}" >>"$OA_LOG" 2>&1
+  }
+  _oa_channel 1  "gpt-4o-mini"                     # OpenAI dialect
+  _oa_channel 14 "claude-3-5-sonnet-20240620"      # Anthropic dialect (-> /v1/messages)
+  _oa_channel 24 "gemini-1.5-pro"                  # Gemini dialect (-> :generateContent)
   # 5) mint an unlimited token — AddToken generates the key itself and returns it in .data.key
   local key; key=$(curl -s -b "$OA_JAR" -X POST "$base/api/token/" -H 'content-type: application/json' \
     -d '{"name":"bench","expired_time":-1,"remain_quota":0,"unlimited_quota":true}' | _oa_get data key)
@@ -128,12 +140,44 @@ GW_MATRIX_EGRESS="openai anthropic gemini"
 # was the router's correct answer, not a failed translation.
 GW_XLATE_CAP=0
 GW_XLATE_CAP_NOTE="One-API v0.6.10 has no Anthropic /v1/messages ingress route (router/relay.go registers only OpenAI-shaped relay paths; the Claude-Messages ingress exists only in the new-api fork), so anthropic-in translation is not a claimed capability"
+# All three channels are wired in every launch (see gw_launch step 4); the matrix just selects which
+# provider a probe exercises by setting GW_MODEL to a model unique to one channel. gw_launch re-runs
+# the identical all-provider bootstrap.
 gw_matrix_egress() {
   case "$1" in
-    openai)    OA_CH_TYPE=1;  OA_CH_MODEL="gpt-4o-mini";                  GW_MODEL="gpt-4o-mini";;
-    anthropic) OA_CH_TYPE=14; OA_CH_MODEL="claude-3-5-sonnet-20240620";  GW_MODEL="claude-3-5-sonnet-20240620";;
-    gemini)    OA_CH_TYPE=24; OA_CH_MODEL="gemini-1.5-pro";              GW_MODEL="gemini-1.5-pro";;
+    openai)    GW_MODEL="gpt-4o-mini";;
+    anthropic) GW_MODEL="claude-3-5-sonnet-20240620";;
+    gemini)    GW_MODEL="gemini-1.5-pro";;
     *) return 1;;
   esac
   gw_launch
+}
+
+# ── OOTB config artifact (runtime admin-API state, not a file) ────────────────────────────────────
+# gw_config prints the canonical OOTB config this gateway launches with. One-API has NO declarative
+# config file — its upstream providers are runtime admin-API state (channels + a token), scripted in
+# gw_launch. So the artifact is that provisioned state, rendered as the exact admin-API calls the
+# bootstrap makes: the container run flags, then the three channels (all providers wired, base_url =
+# mock, disjoint model lists) and the minted token. The suite runner captures this once per run into
+# results/config/one-api.txt and the board publishes it, so "fresh container + these admin calls →
+# these numbers" is reproducible. Kept in lockstep with gw_launch by construction (same values).
+# OOTB posture: nothing is stripped or tuned. One-API's per-request usage/quota accounting is
+# structural (preConsumeQuota/postConsumeQuota run unconditionally — NOT a disableable knob), and
+# consume-logging is default-ON (LogConsumeEnabled=true); both stay on, exactly as it ships. The only
+# deviations are the permitted ones: provider base_urls → mock, dummy channel key (sk-mock), the
+# minted bench token (its own mandatory auth — every relay request needs a token), and SQL_DSN=""
+# (the embedded-SQLite run-mechanic: no external DB). Auth values are dummy on the isolated rig.
+gw_config() {
+  cat <<ENV
+# container (embedded SQLite — SQL_DSN="" is the no-external-DB run-mechanic)
+docker run --network host --cpuset-cpus=$CORES -e SQL_DSN="" $ONE_API_IMAGE
+# admin bootstrap (default root/123456; token auth is One-API's own mandatory per-request auth)
+POST /api/user/login              {"username":"root","password":"123456"}
+# all supported providers wired as channels (base_url = mock; model lists disjoint for 1:1 routing)
+POST /api/channel/  type=1   models=gpt-4o-mini                   base_url=http://127.0.0.1:$MOCK_PORT  key=sk-mock  group=default
+POST /api/channel/  type=14  models=claude-3-5-sonnet-20240620    base_url=http://127.0.0.1:$MOCK_PORT  key=sk-mock  group=default
+POST /api/channel/  type=24  models=gemini-1.5-pro                base_url=http://127.0.0.1:$MOCK_PORT  key=sk-mock  group=default
+# minted per-request token (unlimited quota) -> sent as the bench bearer
+POST /api/token/                  {"name":"bench","expired_time":-1,"unlimited_quota":true}
+ENV
 }
