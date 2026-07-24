@@ -40,13 +40,13 @@ const HOME_VIEW = "home";
 // alphabetical order, no perf numbers) and the rankings come second; matrix + method round it
 // out. `charts` folds into method; `results` was the old blended tab.
 const VIEWS = ["gateways", "passthrough", "translation", "streaming", "matrix", "method"];
-const VIEW_LABELS = { gateways: "Gateways", passthrough: "Passthrough", translation: "Translation", streaming: "Streaming", matrix: "Protocol matrix", method: "Method" };
+const VIEW_LABELS = { gateways: "Gateways", passthrough: "Peak", translation: "Matched", streaming: "Streaming", matrix: "Protocol matrix", method: "Method" };
 // The default (bare /gateways) view: the roster overview. The old default, passthrough, stays a
 // real tab at /gateways/passthrough.
 const DEFAULT_VIEW = "gateways";
 const PERF_VIEWS = new Set(["passthrough", "translation", "streaming"]);
 // Old shared URLs pointed at results/charts; map them onto the new tabs so links keep resolving.
-const VIEW_ALIASES = { results: "passthrough", charts: "method" };
+const VIEW_ALIASES = { results: "passthrough", charts: "method", peak: "passthrough", matched: "translation" };
 // Each perf tab's default (and honest headline) sort column; a clean URL omits the sort when it
 // equals this, and switching tabs snaps to it unless the URL pins another.
 // Streaming defaults to added TTFT (asc), NOT streams-sustained: the sustained count saturates at the

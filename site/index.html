@@ -63,8 +63,8 @@
     <nav class="catnav" id="catnav" aria-label="Benchmark categories"></nav>
     <nav class="tabs" id="tabs">
       <a class="tab active" data-view="gateways" href="/gateways">Gateways</a>
-      <a class="tab" data-view="passthrough" href="/gateways/passthrough">Passthrough</a>
-      <a class="tab" data-view="translation" href="/gateways/translation">Translation</a>
+      <a class="tab" data-view="passthrough" href="/gateways/passthrough">Peak</a>
+      <a class="tab" data-view="translation" href="/gateways/translation">Matched</a>
       <a class="tab" data-view="streaming" href="/gateways/streaming">Streaming</a>
       <a class="tab" data-view="matrix" href="/gateways/matrix">Protocol matrix</a>
       <a class="tab" data-view="method" href="/gateways/method">Method</a>
@@ -162,7 +162,7 @@
           <li><b>Max proxy RPS</b>: highest requests per second against an instant mock, found by a <b>peak search</b> — concurrency ramps (bidirectionally) until RPS stops rising, then a unimodal refinement locates the true peak — subject to p99 &lt; 1000 ms and error rate &lt; 0.1%. This replaces a fixed concurrency grid, which could miss a peak sitting between rungs and understate the fastest gateways. The winning concurrency is recorded alongside the RPS figure.</li>
           <li><b>Sustained RPS at 20 ms</b>: the same peak-search method and the same gates (p99 &lt; 1000 ms, &lt; 0.1% errors), but the mock sleeps 20 ms per request to model real LLM latency, so the ceiling is concurrent-in-flight capacity — the real production bottleneck. At a 20 ms mock delay, Little's law bounds throughput (RPS ≤ concurrency ÷ 0.020 s), so the peak typically sits at much higher concurrency than the instant-mock sweep; the bidirectional ramp finds it regardless of which direction it lies from the search start. The winning concurrency is shown in the cell tooltip.</li>
           <li><b>File-descriptor fairness.</b> Containerised gateways run with the Docker daemon's <code>nofile</code> limit raised to 1 048 576, matching the limit native gateways and the load generator already have. Without this fix, a fast containerised gateway would hit the kernel's default socket limit (~1024 open files) mid-sweep and collapse — understating its true throughput. This is applied uniformly; no gateway is singled out.</li>
-          <li>The Passthrough tab shows these metrics on each gateway's best same-dialect passthrough (pure forwarding, no translation); the Tested-on pill names the dialect (OpenAI when served, else the gateway's fastest native one). Best-of, so every gateway appears on its strongest passthrough and none is filtered out. For a strict single-dialect comparison, pin the same dialect on both sides in the Translation tab.</li>
+          <li>The <b>Peak</b> tab shows these metrics on each gateway's best same-dialect path (pure forwarding, no translation); the Tested-on pill names the dialect (OpenAI when served, else the gateway's fastest native one). Best-of, so every gateway appears on its strongest path and none is filtered out — the ceiling each gateway can post. For a strict, identical-path comparison, use the <b>Matched</b> tab.</li>
         </ul>
       </article>
       <article class="method-card">
@@ -188,9 +188,19 @@
         <ul>
           <li>The client speaks Anthropic (POST /v1/messages) while the upstream mock speaks OpenAI, so the gateway must translate both directions. The mock is untouched; that is the point.</li>
           <li><b>Added latency (p99)</b> and <b>sustained RPS at 20 ms</b> on the translation path, same gates as perf. The direct baseline is the OpenAI shape straight to the mock, so the added-latency figure deliberately includes the translation work.</li>
-          <li>The Translation tab pins both ends with a pair of dropdowns (client dialect and upstream dialect), so every row is the identical path and the ranking is apples-to-apples; only gateways that serve the chosen pair appear. Pick the same dialect on both sides and it becomes that dialect's strict passthrough.</li>
+          <li>The <b>Matched</b> tab pins both ends with a pair of dropdowns (client dialect and upstream dialect), so every row is the identical path and the ranking is apples-to-apples; only gateways that serve the chosen pair appear. Pick the same dialect on both sides and it becomes that dialect's strict passthrough.</li>
           <li>A gateway that cannot serve Anthropic ingress against an OpenAI upstream records xlate_served=false with the probe status and body snippet as evidence.</li>
           <li>Headline translation numbers (table, drawer, compare, charts) all come from one canonical record per gateway: the matrix per-cell sweep's OpenAI-in cell. This suite's Anthropic-to-OpenAI numbers are the fallback for a gateway with no measured matrix translation cell, and every surface labels the direction it shows.</li>
+        </ul>
+      </article>
+      <article class="method-card">
+        <h3>Why we measure <code>/v1</code>, not passthrough endpoints</h3>
+        <ul>
+          <li>Some gateways expose a separate <b>passthrough</b> route — a provider-specific endpoint that forwards your request to one named upstream and skips the gateway's protocol translation. It is faster, but it is a different thing than what most integrations use.</li>
+          <li><b>We measure the unified OpenAI-compatible route</b> — the endpoint a stock SDK points at — for every gateway, on the same terms.</li>
+          <li><b>It is the path people actually take.</b> Using a passthrough route means changing your code and hard-coding which provider you are calling. The unified endpoint is the "point your SDK here and go" experience these gateways are built to sell.</li>
+          <li><b>Not every gateway has one.</b> A passthrough column would compare a special route on some gateways against the normal route on others — apples to oranges.</li>
+          <li><b>It's pinned to one provider.</b> A passthrough route is named after a single provider — the provider is part of the URL path — so calls on it go to that one provider and bypass the cross-provider routing and failover the gateway offers on its unified endpoint. Measuring it would rank a single-provider forward against the multi-provider route people actually deploy.</li>
         </ul>
       </article>
       <article class="method-card">
@@ -198,7 +208,7 @@
         <ul>
           <li>A capability suite first: one probe per (ingress, upstream) cell across the full 6x6 (OpenAI, OpenAI Responses, Anthropic, Gemini, Cohere, Bedrock Converse), relaunching the gateway per upstream dialect.</li>
           <li>Envelope validation per cell, a passthrough guard that rejects the mock's canned bodies as untranslated proxying, an upstream round-trip check (the mock records which endpoint the gateway actually called), and an unprobed_auth state for ingresses that demand signatures the harness does not forge.</li>
-          <li><b>Per-cell perf</b>: every passing (green) cell also gets the perf suite's exact sweep on that path (added latency at concurrency 1, sustained RPS at 20 ms, max proxy RPS). The Passthrough and Translation tabs read specific cells from this sweep; hovering any green cell shows that path's numbers and its RPS delta vs the gateway's reference cell (named, not called "best").</li>
+          <li><b>Per-cell perf</b>: every passing (green) cell also gets the perf suite's exact sweep on that path (added latency at concurrency 1, sustained RPS at 20 ms, max proxy RPS). The Peak and Matched tabs read specific cells from this sweep; hovering any green cell shows that path's numbers and its RPS delta vs the gateway's reference cell (named, not called "best").</li>
         </ul>
       </article>
     </div>
