@@ -321,8 +321,11 @@ let fail = 0;
 const A = (cond, msg) => { if (cond) { console.log("  ok  " + msg); } else { console.error("  FAIL " + msg); fail++; } };
 
 const data = JSON.parse(fs.readFileSync(dataPath, "utf8"));
-const raw  = JSON.parse(fs.readFileSync(resultPath, "utf8"));   // asserts the raw matrix JSON parses
-A(true, "results matrix JSON parses (" + resultPath + ")");
+const raw  = JSON.parse(fs.readFileSync(resultPath, "utf8"));
+// Assert the parsed matrix result is actually a matrix record (not just that JSON.parse didn't throw):
+// it must be an object carrying its per-cell matrix, so the pipeline read a real result, not an empty/stub file.
+A(raw && typeof raw === "object" && (raw.cells || raw.matrix || raw.gateway),
+  "results matrix JSON is a matrix record (" + resultPath + ")");
 
 const g = (data.gateways || []).find(x => x.key === key);
 A(!!g, "gateway '" + key + "' present in site/data.json");
