@@ -320,8 +320,20 @@ if ! mock_start_record; then
   echo "FATAL: recording mock failed to bind :$MOCK_PORT at startup — every cell would probe a dead port (all not_verified). Aborting rather than publishing an unmeasurable board." >&2
   exit 1
 fi
-cleanup(){ gw_stop 2>/dev/null; [ -n "$MOCK" ] && pkill -f "$MOCK" 2>/dev/null; }
-trap cleanup EXIT
+# LOW-6: the memory-once RSS sampler runs as a background subshell ( … ) & whose STOP-file + PID must be
+# reachable from the EXIT/INT/TERM trap. matrix_measure_memory used LOCAL vars for these, so on a ctrl-C /
+# watchdog SIGKILL mid-sampling cleanup() could not stop the poller — it orphaned and busy-polled gw_rss
+# every 0.3s (the retired memory/run.sh touch/kill'd exactly this; the matrix port dropped it). Promote
+# the STOP file + sampler PID to FILE SCOPE so cleanup() can stop them, mirroring the retired suite.
+MEM_STOP="" MEM_SP=""
+cleanup(){
+  gw_stop 2>/dev/null
+  [ -n "$MOCK" ] && pkill -f "$MOCK" 2>/dev/null
+  # Stop an in-flight memory sampler (LOW-6): signal via its STOP file, then hard-kill the poller PID.
+  [ -n "$MEM_STOP" ] && touch "$MEM_STOP" 2>/dev/null
+  [ -n "$MEM_SP" ] && kill "$MEM_SP" 2>/dev/null
+}
+trap cleanup EXIT INT TERM
 
 log "[$GATEWAY] build"; gw_build || { echo "build failed"; exit 1; }
 BUILD="$(gw_version 2>/dev/null | tr -d '\n' | sed 's/"/\\"/g')"
@@ -536,12 +548,24 @@ matrix_cell_stream(){
   # Does this cell actually stream? One curl -N probe for SSE frames (paced mock up). A cell that 200s
   # the non-stream sweep but buffers/rejects stream:true records stream_served:false — measured, honest.
   stream_mock_start "$MATRIX_STREAM_CHUNKS" "$MATRIX_STREAM_INTERVAL_MS" "$MATRIX_STREAM_CHUNK_BYTES"
-  # HIGH-6: after a mock restart (which pkilled the prior cell's mock and relaunched WITHOUT
+  # HIGH-6 / HIGH-2: after a mock restart (which pkilled the prior cell's mock and relaunched WITHOUT
   # SO_REUSEADDR), the fresh mock can still be racing the dying one for MOCK_PORT — a single un-retried
   # SSE probe below would then read no `data:` frames and fabricate stream_served:false BEFORE any
   # measurement. Gate on stream_mock_ready (a retried 1-stream liveness probe) first, exactly as the
   # sustained-bisect + cpu-fps lanes already do before their searches.
-  stream_mock_ready 30 || log "[$GATEWAY]   $cell : stream mock did not become ready before the served-gating probe"
+  #
+  # HIGH-2: the old code WARN-and-PROCEEDED here — on a lost MOCK_PORT race it logged, then fell through
+  # to the served-gating curl against a DEAD port, read no frames, and recorded stream_served:false for a
+  # gateway that streams fine (a false "did not stream" published on the public board). That is a RIG
+  # readiness failure, NOT a gateway fault. Mirror the recording-mock-restore path's FATAL/abort
+  # discipline (:650-655): stream_mock_ready ALREADY retries a bounded loop internally, so if it STILL
+  # cannot bind the mock, do NOT run the fabricating probe. Record the cell's streaming as UNTESTABLE
+  # (rig-unavailable), leaving it unmeasured — never a gateway stream_served:false.
+  if ! stream_mock_ready 30; then
+    log "[$GATEWAY]   $cell : stream mock did not become ready (lost MOCK_PORT race) — marking streaming UNTESTABLE (rig readiness failure), NOT fabricating stream_served:false"
+    CELL_STREAM_JSON=", \"stream\": {\"stream_served\": \"untestable\", \"reason\": \"stream_mock_unready\", \"stream_error\": \"$(json_escape "the streaming mock did not rebind :$MOCK_PORT after a per-cell restart (a lost MOCK_PORT race, no SO_REUSEADDR); probing a dead port would fabricate a false stream_served:false, so this cell's streaming is left UNMEASURED (a rig-readiness limit, not a gateway fault)")\"}"
+    return 0
+  fi
   local stream_ok=0 stream_err="" sbody probe_to sdata
   # MEDIUM-2: the streaming probes must POST the cell's REAL ingress-dialect body (stream-flagged),
   # not ugen's default openai body — a gemini/cohere/bedrock/responses/anthropic ingress path 400s an
@@ -625,6 +649,13 @@ matrix_cell_perf(){
   GURL="http://127.0.0.1:$GW_PORT$path"
   DURL="http://127.0.0.1:$MOCK_PORT$(mock_direct_path "$cell")"
   mock_start_plain
+  # LOW-1: mock_start_plain only sleeps 1s — unlike run_sweep (_sw_mock_ready) and the stream lanes
+  # (stream_mock_ready), it does NOT poll for readiness. Under prior high-concurrency load the plain mock
+  # can still be racing the dying prior mock for MOCK_PORT when sweep_c1 fires its direct-to-mock c1
+  # baseline, so sweep_c1's honesty gate (C1_OK=0) would spuriously null this cell's added-latency for a
+  # dead-port probe. Poll the fresh mock (DURL is set above) before the c1 baseline, matching every other
+  # mock (re)start site. Non-fatal: sweep_c1's own gate still nulls a genuinely-unusable window.
+  _sw_mock_ready 30 || log "[$GATEWAY]   $egress <- $cell : plain mock did not become ready before the c1 baseline (a lost MOCK_PORT race); sweep_c1's honesty gate will null the c1 latency if the port is dead"
   sweep_c1
   run_sweep 0 "$SWEEP_INSTANT" peak
   # ONE source of truth: the charted array (SW_JSON, every ramp AND bisect probe this sweep made)
@@ -974,17 +1005,21 @@ matrix_measure_memory(){
   if [ "$mem_ok" = 1 ]; then
     STOP="${TMPDIR:-/tmp}/mtxmem.$$.stop"; PEAKF="${TMPDIR:-/tmp}/mtxmem.$$.peak"; LOADPIDF="${TMPDIR:-/tmp}/mtxmem.$$.loadpid"
     rm -f "$STOP" "$PEAKF" "$LOADPIDF"; echo 0 >"$PEAKF"
+    # LOW-6: publish the STOP file to FILE SCOPE before the sampler launches so the EXIT/INT/TERM trap can
+    # stop it on an early exit; MEM_SP is set to the poller PID immediately after launch.
+    MEM_STOP="$STOP"
     ( PEAK=0; while [ ! -f "$STOP" ]; do
         v=$(gw_rss); [ -z "$v" ] && v=0
         awk -v v="$v" -v p="$PEAK" 'BEGIN{exit !(v+0>p+0)}' && { PEAK=$v; echo "$PEAK" >"$PEAKF"; }
         awk -v v="$v" -v c="$MEM_CAP_MIB" 'BEGIN{exit !(v+0>c+0)}' && { echo "[watchdog] $v MiB > cap $MEM_CAP_MIB — killing load"; lp=$(cat "$LOADPIDF" 2>/dev/null); [ -n "$lp" ] && kill "$lp" 2>/dev/null; touch "$STOP"; }
         sleep 0.3
-      done ) & SP=$!
+      done ) & SP=$!; MEM_SP=$SP
     log "[$GATEWAY] memory-once load: ${MEM_PSIZE}B payloads, c=$MEM_CONC, ${MEM_DUR}s (watchdog cap ${MEM_CAP_MIB} MiB)"
     taskset -c "$LOADCORES" "$UGEN" -url "http://127.0.0.1:$GW_PORT$GW_PATH" \
       -model "$GW_MODEL" -auth "$GW_AUTH" -c "$MEM_CONC" -d "$MEM_DUR" -psize "$MEM_PSIZE" ${CURL_H[@]+"${CURL_H[@]}"} &
     local LOAD_PID=$!; echo "$LOAD_PID" >"$LOADPIDF"; wait "$LOAD_PID" 2>/dev/null || true
     touch "$STOP"; kill "$SP" 2>/dev/null
+    MEM_STOP="" MEM_SP=""   # LOW-6: sampler stopped normally — clear the trap handles so cleanup is a no-op
     PEAK=$(cat "$PEAKF" 2>/dev/null); PEAK=${PEAK:-0}
     HWM=$(gw_hwm)   # VmHWM must be read BEFORE the gateway stops (the counter dies with the process)
     log "[$GATEWAY] memory-once high-water mark: ${HWM:-n/a} MiB (VmHWM; sampled peak ${PEAK} MiB)"
