@@ -33,8 +33,19 @@ GW_AUTH=gwbench
 LITELLM_SRC="${LITELLM_SRC:-$HOME/litellm-rust-src}"
 LR_VENV="${LR_VENV:-$GW_DIR/venv}"
 
+# This gateway builds from source (Rust binary + a Python venv for the python-config reader), so ITS
+# box installs the toolchain + venv deps. The base image is bare OS + docker only (run-on-ec2.sh);
+# docker gateways never pay for this. Idempotent.
+gw_prereqs() {
+  command -v cargo >/dev/null && command -v git >/dev/null && python3 -m venv --help >/dev/null 2>&1 && return 0
+  sudo apt-get install -y -q git build-essential pkg-config libssl-dev python3-venv python3-pip >/dev/null 2>&1 || true
+  command -v cargo >/dev/null || (curl -sSf https://sh.rustup.rs | sh -s -- -y >/dev/null 2>&1)
+  . "$HOME/.cargo/env" 2>/dev/null || true
+  command -v cargo >/dev/null || { echo "litellm-rust: rust toolchain unavailable"; return 1; }
+}
+
 gw_build() {
-  command -v cargo >/dev/null || { echo "need cargo (rust) for litellm-rust"; return 1; }
+  gw_prereqs || return 1
   # BULLETPROOF: the python-config feature LOADS the `litellm` package to read the gateway config,
   # so a silent pip failure here means the gateway cannot boot - which the suites used to record as
   # a published served=false / 0-RPS result (and the build string showed `litellm==?`). Verify the

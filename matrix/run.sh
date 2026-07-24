@@ -77,11 +77,8 @@ RESULTS="$ROOT/results/matrix"; mkdir -p "$RESULTS"
 log(){ echo "[$(date +%H:%M:%S)] $*"; }
 command -v taskset >/dev/null || taskset(){ shift 2; "$@"; }
 command -v setsid  >/dev/null || setsid(){ "$@"; }
-command -v cargo >/dev/null || { echo "need cargo (rust mock)"; exit 1; }
-
-log "building mock (rust)"
-( cd "$ROOT/mock" && cargo build --release >/dev/null 2>&1 ) || { echo "mock build failed"; exit 1; }
-MOCK="$ROOT/mock/target/release/mock"
+log "fetching prebuilt rig (mock + loadgen) — no on-box toolchain needed"
+. "$ROOT/lib/rig.sh"; fetch_rig "$ROOT" || { echo "rig fetch failed"; exit 1; }
 
 [ -f "$ROOT/gateways/versions.env" ] && source "$ROOT/gateways/versions.env"
 gw_version(){ echo unknown; }; GW_HEADERS=()
@@ -99,15 +96,8 @@ sys.stdout.write(json.dumps(d)[1:-1])'; }
 # matching dialect endpoint, exactly as perf/xlate subtract theirs. Grey (not declared), red
 # (served-but-wrong), unprobed_auth and boot-failed cells carry NO perf. MATRIX_SWEEP=0 disables.
 MATRIX_SWEEP="${MATRIX_SWEEP:-1}"
-if [ "$MATRIX_SWEEP" = 1 ] && ! command -v go >/dev/null; then
-  echo "WARNING: no Go toolchain - per-cell perf sweep disabled (capability matrix still runs)"
-  MATRIX_SWEEP=0
-fi
-UGEN="$ROOT/loadgen/ugen"
-if [ "$MATRIX_SWEEP" = 1 ]; then
-  log "building loadgen (go) for the per-cell perf sweep"
-  go build -o "$UGEN" "$ROOT/loadgen/ugen.go" || { echo "WARNING: loadgen build failed - per-cell perf sweep disabled"; MATRIX_SWEEP=0; }
-fi
+# UGEN was set by fetch_rig above (prebuilt loadgen); MATRIX_SWEEP stays a manual disable knob.
+[ "$MATRIX_SWEEP" = 1 ] && [ ! -x "$UGEN" ] && { echo "WARNING: no loadgen - per-cell perf sweep disabled (capability matrix still runs)"; MATRIX_SWEEP=0; }
 # Same knobs + defaults as perf/run.sh so the per-cell numbers are directly comparable.
 C1_DUR="${C1_DUR:-20}"; SWEEP_DUR="${SWEEP_DUR:-10}"; PSIZE="${PSIZE:-256}"
 SWEEP_INSTANT="${SWEEP_INSTANT:-16 8192}"   # [min,max] bounds for the peak search (see perf/run.sh)

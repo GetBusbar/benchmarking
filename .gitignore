@@ -20,3 +20,8 @@ gateways/*/*.gen.*
 gateways/*/bfdata/
 gateways/*/kong.gen.yml
 .claude/worktrees/
+
+# bench rig: prebuilt binaries live in the `rig` GitHub release, not git
+bin/
+mock/target-linux/
+mock/target-x86/

@@ -26,8 +26,19 @@ GW_MODEL=openai/gpt-4o-mini
 GW_AUTH=dummy
 HELICONE_SRC="${HELICONE_SRC:-$HOME/helicone-ai-gateway-src}"
 
+# This gateway builds from source, so ITS box (and only its box) installs the Rust toolchain + git +
+# build deps. The base image ships bare OS + docker only (see run-on-ec2.sh); docker gateways never
+# pay for this. Idempotent - a no-op once the toolchain is present.
+gw_prereqs() {
+  command -v cargo >/dev/null && command -v git >/dev/null && return 0
+  sudo apt-get install -y -q git build-essential pkg-config libssl-dev >/dev/null 2>&1 || true
+  command -v cargo >/dev/null || (curl -sSf https://sh.rustup.rs | sh -s -- -y >/dev/null 2>&1)
+  . "$HOME/.cargo/env" 2>/dev/null || true
+  command -v cargo >/dev/null || { echo "helicone: rust toolchain unavailable"; return 1; }
+}
+
 gw_build() {
-  command -v cargo >/dev/null || { echo "need cargo (rust) for helicone"; return 1; }
+  gw_prereqs || return 1
   if [ ! -d "$HELICONE_SRC" ]; then
     git clone "${HELICONE_REPO}" "$HELICONE_SRC" || return 1
     [ -n "${HELICONE_COMMIT:-}" ] && git -C "$HELICONE_SRC" checkout -q "$HELICONE_COMMIT"

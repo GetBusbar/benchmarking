@@ -97,21 +97,23 @@ bench_gateway() {
   local ok=0; for _ in $(seq 1 40); do ssh $SSHOPT ubuntu@"$ip" true 2>/dev/null && { ok=1; break; } || sleep 8; done
   [[ $ok == 1 ]] || { glog_echo "ssh never came up"; return 1; }
 
-  glog_echo "installing deps"
+  glog_echo "installing deps (bare base: docker + psutil; the rig is a prebuilt download, and each"
+  glog_echo "gateway installs its OWN prereqs via gw_prereqs — no blanket build toolchain on every box)"
   ssh $SSHOPT ubuntu@"$ip" 'set -e
     sudo apt-get update -q
-    sudo apt-get install -y -q build-essential pkg-config libssl-dev python3-venv python3-pip golang-go docker.io git nodejs npm cmake clang protobuf-compiler jq
+    # BARE base only: docker (for the image gateways), curl (fetch the prebuilt rig), jq, and python3
+    # + psutil (the memory suite reads RSS). NO build-essential/rust/go/node here — the mock+loadgen
+    # are prebuilt binaries pulled from the rig release, and the 2 source-built gateways pull their
+    # own toolchain via gw_prereqs() on their box ALONE. Docker-image gateways are up in ~2 min.
+    sudo apt-get install -y -q docker.io curl ca-certificates jq python3-pip
     sudo usermod -aG docker ubuntu || true
     # FAIRNESS: a container inherits the docker DAEMON fd limit, NOT the host-shell ulimit that
     # perf/run.sh raises for native gateways + the loadgen/mock. Left at the ~1024 default, a
     # containerised gateway fast enough to hold >1024 concurrent connections hits EMFILE and
-    # COLLAPSES at exactly c=1024 (busbar did: ~850k conn failures, sustained@20ms fell to 1/3),
-    # while native gateways run uncapped - an artefact that silently flattens the FASTEST gateways.
-    # Raise the daemon default so every container gets the same high fd ceiling native gateways have.
+    # COLLAPSES at exactly c=1024 (busbar did: ~850k conn failures, sustained@20ms fell to 1/3).
     echo "{ \"default-ulimits\": { \"nofile\": { \"Name\": \"nofile\", \"Hard\": 1048576, \"Soft\": 1048576 } } }" | sudo tee /etc/docker/daemon.json >/dev/null
     sudo systemctl restart docker || sudo service docker restart || true
-    command -v cargo >/dev/null || (curl -sSf https://sh.rustup.rs | sh -s -- -y)
-    python3 -m pip install --user -q --break-system-packages matplotlib psutil 2>/dev/null || pip3 install -q matplotlib psutil || true' >>"$glog" 2>&1
+    python3 -m pip install --user -q --break-system-packages psutil 2>/dev/null || pip3 install -q psutil || true' >>"$glog" 2>&1
 
   glog_echo "rsync repo up"
   rsync -az --delete -e "ssh $SSHOPT" \
