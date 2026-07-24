@@ -110,7 +110,7 @@ pkill -f "$MOCK_BIN" 2>/dev/null; sleep 1
 setsid taskset -c "$MOCKCORES" "$MOCK_BIN" -port "$MOCK_PORT" </dev/null >/dev/null 2>&1 &
 sleep 1
 
-cleanup(){ gw_stop 2>/dev/null; pkill -f "$MOCK_BIN" 2>/dev/null; }
+cleanup(){ gw_stop 2>/dev/null; pkill -f "$MOCK_BIN" 2>/dev/null; rm -f "${STOP:-}" "${PEAKF:-}" "${LOADPIDF:-}" 2>/dev/null; }
 trap cleanup EXIT
 
 log "[$GATEWAY] build"; gw_build || { echo "build failed"; exit 1; }
@@ -143,19 +143,26 @@ fi
 IDLE=$(gw_rss); log "[$GATEWAY] idle RSS: ${IDLE:-?} MiB (served=$([ "$ok" = 1 ] && echo true || echo false))"
 
 # ── sampler + watchdog ──────────────────────────────────────────────────────────────────────────
-PEAK=0; STOP=/tmp/mem.stop; rm -f "$STOP" /tmp/mem.peak; echo 0 >/tmp/mem.peak
+# Temp paths + the watchdog kill are scoped to THIS run's PID (not host-global /tmp/mem.{stop,peak}
+# and `pkill -x ugen`): two concurrent memory/run.sh on one host would otherwise reset each other's
+# peak file mid-sample and kill each other's loadgen by name, fabricating peak_rss_mib (audit R2-M3).
+PEAK=0; STOP="${TMPDIR:-/tmp}/mem.$$.stop"; PEAKF="${TMPDIR:-/tmp}/mem.$$.peak"; LOADPIDF="${TMPDIR:-/tmp}/mem.$$.loadpid"
+rm -f "$STOP" "$PEAKF" "$LOADPIDF"; echo 0 >"$PEAKF"
 ( while [ ! -f "$STOP" ]; do
     v=$(gw_rss); [ -z "$v" ] && v=0
-    awk -v v="$v" -v p="$PEAK" 'BEGIN{exit !(v+0>p+0)}' && { PEAK=$v; echo "$PEAK" >/tmp/mem.peak; }
-    awk -v v="$v" -v c="$CAP_MIB" 'BEGIN{exit !(v+0>c+0)}' && { echo "[watchdog] $v MiB > cap $CAP_MIB — killing load"; pkill -x ugen; touch "$STOP"; }
+    awk -v v="$v" -v p="$PEAK" 'BEGIN{exit !(v+0>p+0)}' && { PEAK=$v; echo "$PEAK" >"$PEAKF"; }
+    awk -v v="$v" -v c="$CAP_MIB" 'BEGIN{exit !(v+0>c+0)}' && { echo "[watchdog] $v MiB > cap $CAP_MIB — killing load"; lp=$(cat "$LOADPIDF" 2>/dev/null); [ -n "$lp" ] && kill "$lp" 2>/dev/null; touch "$STOP"; }
     sleep 0.3
   done ) & SP=$!
 
 log "[$GATEWAY] load: ${PSIZE}B payloads, c=$CONC, ${DUR}s (watchdog cap ${CAP_MIB} MiB)"
+# Run the loadgen in the background so the watchdog can kill THIS run's loadgen by recorded PID (not
+# `pkill -x ugen`, which would hit a concurrent run's loadgen too).
 taskset -c "$LOADCORES" "$UGEN_BIN" -url "http://127.0.0.1:$GW_PORT$GW_PATH" \
-  -model "$GW_MODEL" -auth "$GW_AUTH" -c "$CONC" -d "$DUR" -psize "$PSIZE" "${UGEN_H[@]}" || true
+  -model "$GW_MODEL" -auth "$GW_AUTH" -c "$CONC" -d "$DUR" -psize "$PSIZE" "${UGEN_H[@]}" &
+LOAD_PID=$!; echo "$LOAD_PID" >"$LOADPIDF"; wait "$LOAD_PID" 2>/dev/null || true
 touch "$STOP"; kill "$SP" 2>/dev/null
-PEAK=$(cat /tmp/mem.peak)
+PEAK=$(cat "$PEAKF")
 
 # VmHWM must be read BEFORE the gateway stops (the counter dies with the process).
 HWM=$(gw_hwm)
