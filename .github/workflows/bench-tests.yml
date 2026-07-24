@@ -14,6 +14,8 @@ on:
       - "lib/stream_measure_test.sh"
       - "lib/promote_guard.py"
       - "lib/promote_guard_test.py"
+      - "charts.py"
+      - "charts_test.py"
       - "loadgen/**"
       - "mock/**"
       - ".github/workflows/bench-tests.yml"
@@ -25,6 +27,8 @@ on:
       - "lib/stream_measure_test.sh"
       - "lib/promote_guard.py"
       - "lib/promote_guard_test.py"
+      - "charts.py"
+      - "charts_test.py"
       - "loadgen/**"
       - "mock/**"
       - ".github/workflows/bench-tests.yml"
@@ -52,8 +56,16 @@ jobs:
       # lib/promote_guard.py decides whether an incoming result may overwrite the committed one; a bug
       # there republishes a regression as an honest failure (R4-M2). Covers MEDIUM-R2-3 (matrix all-dead
       # 000 detection) + the anchored-marker / status-000 / honest-not-served behaviours.
-      - name: Promote-guard regression test (matrix all-dead 000 + anchored marker + honest not-served)
+      - name: Promote-guard regression test (matrix all-dead 000/5xx-warm + anchored marker + honest not-served)
         run: python3 lib/promote_guard_test.py
+      # charts.py's validity gate + top-N ranking (the matrix-sole-source rewrite artifact) had ZERO
+      # Python tests (MEDIUM-R3-6): check-consistency asserts site==chart by calling JS re-implementations,
+      # never the real Python rules, so a regression to _proj_streaming (cpu_valid/sust_valid), _topn_keys
+      # (eligibility + sort direction), _served, or the null-TTFT suppression (M3) would keep every test
+      # green while the PNGs drew a bar for a row the table hides. Gate the Python rules directly. No
+      # matplotlib needed (render() is not exercised).
+      - name: Charts validity-gate test (streamcpu/sustained/TTFT gates + top-N ranking)
+        run: python3 charts_test.py
       - uses: actions/setup-go@v5
         with:
           go-version-file: loadgen/go.mod

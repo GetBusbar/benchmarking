@@ -979,9 +979,12 @@ def _report_md(rows: list, title: str, charts: list, pending: tuple = (), chart_
     # stream map from _proj_streaming so the table and the charts agree. xlate/governed unchanged
     # (translation is already the canonical matrix cell via _overlay_xlate; governed is retired/absent).
     stream_m = {k: r for k in GATEWAYS if (r := _proj_streaming(k)) is not None}
-    xlate_m, governed_m = _suite_map("xlate"), _suite_map("governed")
+    # NIT-R3-N2: drop the retired `governed` read. The matrix never produces results/governed/*.json, so
+    # governed_m was normally empty; but a stale results/governed/<gw>.json left on a box tree could inject
+    # a governance-only gateway as an all-n/a stream row (governance columns aren't rendered here anyway).
+    xlate_m = _suite_map("xlate")
     row_keys = [k for k, _ in rows]
-    lane_keys = [k for k in row_keys if k in stream_m or k in xlate_m or k in governed_m]
+    lane_keys = [k for k in row_keys if k in stream_m or k in xlate_m]
     if lane_keys:
         lines.append("## Streaming and translation")
         lines.append("")
@@ -1003,7 +1006,7 @@ def _report_md(rows: list, title: str, charts: list, pending: tuple = (), chart_
             return f"{v/1000:,.1f} ms" if v >= 1000 else f"{int(round(v)):,} µs"
 
         for key in lane_keys:
-            s, x, g = stream_m.get(key), xlate_m.get(key), governed_m.get(key)
+            s, x = stream_m.get(key), xlate_m.get(key)
             if s is None:
                 ttft = gap = streams = "n/a"
             elif not s.get("stream_served"):
@@ -1011,10 +1014,19 @@ def _report_md(rows: list, title: str, charts: list, pending: tuple = (), chart_
             else:
                 ttft = us_cell(s, "stream_added_ttft_p99_us")
                 gap = us_cell(s, "stream_added_gap_p99_us")
-                streams = f"{int(s.get('stream_sustained_streams') or 0):,}"
-                fps = float(s.get("stream_sustained_fps") or 0)
-                if fps > 0:
-                    streams += f" ({fps:,.0f} fps)"
+                # MEDIUM-R3-5: gate the sustained count on stream_sustained_valid (streamed AND not
+                # mock-bound), matching the stream_sustained PNG (served_field=stream_sustained_valid)
+                # and the site drawer. Reading stream_sustained_streams raw would print a concrete count
+                # (e.g. "256") for a gateway whose bisect saturated near the paced-mock ceiling — a
+                # rig-limited number the chart renders "not measured (rig-limited)" — two published
+                # surfaces diverging from the same record.
+                if not s.get("stream_sustained_valid"):
+                    streams = "✕ not measured (rig-limited)"
+                else:
+                    streams = f"{int(s.get('stream_sustained_streams') or 0):,}"
+                    fps = float(s.get("stream_sustained_fps") or 0)
+                    if fps > 0:
+                        streams += f" ({fps:,.0f} fps)"
             if x is None:
                 xl = "n/a"
             elif x.get("xlate_passthrough"):
