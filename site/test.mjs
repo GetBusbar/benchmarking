@@ -161,6 +161,49 @@ test("freshness guard sets the PER-GATEWAY stale flag past MAX_GATEWAY_AGE_DAYS 
   assert.equal(byKey.fresh.stale, false, "a fresh gateway must not be flagged stale");
 });
 
+test("MED-2: the wholesale-stale floor is MATRIX-scoped — a never-displayed legacy re-run cannot mask a stale board", () => {
+  // Every DISPLAYED number is 200d old (matrix ancient) but one untouched results/perf/<gw>.json was
+  // re-run 'yesterday'. Folding the retired suite made boardNewest=yesterday, so the 180d hard-fail
+  // (the KEPT last line of defense) never fired and a wholesale-stale matrix board published. The floor
+  // now ages the DISPLAYED (matrix-preferring) stamps, so the legacy re-run does NOT save it: hard fail.
+  const msg = genThrows(buildSyntheticRepo({
+    alpha: { matrix: isoDaysAgo(200), perf: isoAgo(24) },  // displayed=200d old; legacy=1d (never shown)
+    bravo: { matrix: isoDaysAgo(200) },
+  }));
+  assert.ok(msg, "expected gen-data to THROW: a never-displayed legacy stamp must not mask a stale matrix board");
+  assert.ok(/FRESHNESS FAILURE \(stale board\)/.test(msg), `expected the stale-board failure, got: ${msg}`);
+});
+
+test("MED-1: latest_measured_at reflects the DISPLAYED (matrix) stamp, not a newer never-displayed legacy re-run", () => {
+  // All matrix data is 90d old; one gateway had an ad-hoc SUITES=perf re-run 1h ago. The board footer
+  // 'Latest measurement' must age the DISPLAYED numbers (90d), NOT claim '1h ago' off a legacy stamp
+  // that is never shown. latest_measured_at must equal the newest MATRIX stamp, not the perf stamp.
+  const matrixNewer = isoDaysAgo(90), legacyFresh = isoAgo(1);
+  const { err, data } = genData(buildSyntheticRepo({
+    alpha: { matrix: matrixNewer, perf: legacyFresh },  // legacy fresher than the displayed matrix
+    bravo: { matrix: isoDaysAgo(120) },
+  }));
+  assert.equal(err, undefined, `expected a 90d board to PASS (< 180d floor): ${err}`);
+  assert.equal(data.latest_measured_at, matrixNewer,
+    `latest_measured_at must be the newest DISPLAYED matrix stamp (${matrixNewer}), not the never-displayed legacy perf stamp (${legacyFresh}); got ${data.latest_measured_at}`);
+});
+
+test("NIT-5: the per-gateway badge stamp (ageBasisMs) prefers the MATRIX stamp over a newer legacy suite", () => {
+  // LOW-R3-3 regression guard: g.measured_at (the per-row 'measured Nd ago' badge) must age the DISPLAYED
+  // numbers — the matrix stamp — even when a newer legacy results/perf/<gw>.json is present. Deriving it
+  // from the max-across-suites would drive a 'measured 1h ago' badge over 90d-old shown numbers.
+  const matrixStamp = isoDaysAgo(90), legacyFresh = isoAgo(1);
+  const { err, data } = genData(buildSyntheticRepo({
+    alpha: { matrix: matrixStamp, perf: legacyFresh },
+    bravo: { matrix: isoAgo(2) },  // keeps the board under the wholesale floor
+  }));
+  assert.equal(err, undefined, `board must build: ${err}`);
+  const alpha = data.gateways.find((g) => g.key === "alpha");
+  assert.equal(alpha.measured_at, matrixStamp,
+    `the badge stamp must be the matrix stamp (${matrixStamp}), not the newer legacy perf stamp (${legacyFresh}); got ${alpha.measured_at}`);
+  assert.equal(alpha.stale, true, "alpha's displayed numbers are 90d old (> 60d) → stale badge, matrix-aged");
+});
+
 test("HIGH-3: the span cap is MATRIX-scoped — a matrix-only re-run past a weeks-old legacy stamp PASSES", () => {
   // The core HIGH-3 fix: legacy suites (perf/stream/streamcpu/memory) are fallback-only and are NEVER
   // refreshed by a matrix-only re-run, so they legitimately carry weeks-old stamps while matrix=today.
