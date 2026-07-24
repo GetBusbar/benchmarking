@@ -45,7 +45,7 @@ func main(){
    }else{
     body=[]byte(fmt.Sprintf(`{"model":"%s","messages":[{"role":"user","content":"u-%d-%d-%s"}],"max_tokens":16%s}`,*model,id,n,pad,sfield))
    }
-   st:=time.Now();req,_:=http.NewRequest("POST",*url,bytes.NewReader(body));req.Header.Set("content-type","application/json");req.Header.Set("authorization","Bearer "+*auth)
+   st:=time.Now();req,rerr:=http.NewRequest("POST",*url,bytes.NewReader(body));if rerr!=nil{atomic.AddInt64(&fail,1);continue};req.Header.Set("content-type","application/json");req.Header.Set("authorization","Bearer "+*auth)
    // anthropic shape sends BOTH auth carriers (x-api-key like the Anthropic SDK, plus the Bearer
    // above) so a gateway honoring either accepts it; -H can still override either header.
    if *shape=="anthropic"{req.Header.Set("anthropic-version","2023-06-01");req.Header.Set("x-api-key",*auth)}
@@ -90,7 +90,7 @@ func main(){
     started,done,fail,stalled,frames,int64(float64(frames)/elapsed),del,
     int64(pct(ttfts,0.5)),int64(pct(ttfts,0.99)),int64(pct(gaps,0.5)),int64(pct(gaps,0.99)))
   return}
- sort.Float64s(lat);p:=func(q float64)float64{if len(lat)==0{return 0};return lat[int(float64(len(lat))*q)]}
+ sort.Float64s(lat);p:=func(q float64)float64{if len(lat)==0{return 0};i:=int(float64(len(lat))*q);if i>=len(lat){i=len(lat)-1};return lat[i]}
  // rps over the ACTUAL elapsed wall time, not the nominal -d: workers only re-check the deadline at
  // the top of the next iteration, so the request in flight when the deadline passes still completes
  // and is counted in `ok`. Dividing those extra successes by the nominal *dur (a shorter window than
