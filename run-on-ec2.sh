@@ -159,10 +159,17 @@ bench_gateway() {
     sudo systemctl restart docker || sudo service docker restart || true
     python3 -m pip install --user -q --break-system-packages psutil 2>/dev/null || pip3 install -q psutil || true' >>"$glog" 2>&1
 
-  glog_echo "rsync repo up"
+  # Ship ONLY the harness (scripts + configs, a few MB). Exclude every build/runtime artifact: the box
+  # fetches the 2 rig binaries from the release (lib/rig.sh) and builds its own gateway (docker pull, or
+  # gw_build for the 2 source gateways). A stray local venv (litellm's 564MB) or bin/ must never be
+  # uploaded to 13 boxes. Log the payload size + transfer time so a slow rsync is never a silent hang.
+  local _pl; _pl=$(du -sh --exclude=.git --exclude='*/target' --exclude=target --exclude=results --exclude=node_modules --exclude='*/venv' --exclude=venv --exclude=__pycache__ --exclude=bin "$HERE" 2>/dev/null | cut -f1)
+  glog_echo "rsync harness up (${_pl:-?}) ..."; local _t0=$SECONDS
   rsync -az --delete -e "ssh $SSHOPT" \
     --exclude .git --exclude '*/target' --exclude target --exclude results --exclude node_modules \
+    --exclude '*/venv' --exclude venv --exclude __pycache__ --exclude bin --exclude '*.pem' --exclude '*.log' --exclude '.incoming-*' \
     "$HERE/" ubuntu@"$ip":~/benchmarking/ >>"$glog" 2>&1
+  glog_echo "rsync done (${_pl:-?} in $((SECONDS-_t0))s)"
 
   glog_echo "running $gw (latency + RPS + memory)"
   ssh $SSHOPT ubuntu@"$ip" "source ~/.cargo/env; cd ~/benchmarking
