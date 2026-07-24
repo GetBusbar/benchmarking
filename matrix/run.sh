@@ -101,7 +101,7 @@ MATRIX_SWEEP="${MATRIX_SWEEP:-1}"
 # Same knobs + defaults as perf/run.sh so the per-cell numbers are directly comparable.
 C1_DUR="${C1_DUR:-20}"; SWEEP_DUR="${SWEEP_DUR:-10}"; PSIZE="${PSIZE:-256}"
 SWEEP_INSTANT="${SWEEP_INSTANT:-16 8192}"   # [min,max] bounds for the peak search (see perf/run.sh)
-# BISECT search bounds (min max), not a fixed ladder - see lib/sweep.sh mode=bisect + perf/run.sh.
+# PEAK search bounds (min max), not a fixed ladder - see lib/sweep.sh mode=peak + perf/run.sh.
 SWEEP_DELAYED="${SWEEP_DELAYED:-32 65536}"
 SWEEP_TTFT_MS="${SWEEP_TTFT_MS:-20}"
 P99_CEIL_MS="${P99_CEIL_MS:-1000}"

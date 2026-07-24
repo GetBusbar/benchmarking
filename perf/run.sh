@@ -34,10 +34,11 @@ C1_DUR="${C1_DUR:-20}"; SWEEP_DUR="${SWEEP_DUR:-10}"; PSIZE="${PSIZE:-256}"
 # search bounds. Max-proxy's peak sits at LOW concurrency (0ms upstream saturates the CPU fast), which
 # the bidirectional ramp walks DOWN to find - so one method, both metrics, each to its true peak.
 SWEEP_INSTANT="${SWEEP_INSTANT:-16 8192}"
-# The 20ms sweep is now a BISECT (lib/sweep.sh mode=bisect): these are the search BOUNDS, not a fixed
-# ladder - min (slow gateways still get a concurrency they can hold) and max (well past the mock's
-# ~1176-concurrent ceiling, so every gateway's real limit is bracketed below the mock-bound zone).
-# The bisect resolves each gateway's OWN ceiling to +/-64 concurrent in ~5-7 probes.
+# The 20ms sweep is now a PEAK search (lib/sweep.sh mode=peak; there is no `bisect` branch): these
+# are the search BOUNDS, not a fixed ladder - min (slow gateways still get a concurrency they can
+# hold) and max (well past the mock's ~1176-concurrent ceiling, so every gateway's real limit is
+# bracketed below the mock-bound zone). The rise/fall search resolves each gateway's OWN ceiling to
+# +/-64 concurrent in ~5-7 probes.
 SWEEP_DELAYED="${SWEEP_DELAYED:-32 65536}"
 SWEEP_TTFT_MS="${SWEEP_TTFT_MS:-20}"
 P99_CEIL_MS="${P99_CEIL_MS:-1000}"
