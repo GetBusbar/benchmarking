@@ -165,18 +165,79 @@ _sw_pass_c(){ # conc : the SAME sustained gate as _sw_pass (error rate < 0.1% AN
 _sw_mockbound_c(){ # conc : rps at conc is within 10% of the mock's own ceiling (rig-limited, not gateway)
   [ "${SW_MOCK_CEIL:-0}" -gt 0 ] && awk -v r="${_RC_rps[$1]}" -v m="$SW_MOCK_CEIL" 'BEGIN{exit !(r>=0.9*m)}'
 }
+# Set SW_BOUND from the winning rps vs the mock-ceiling reference. Emits a JSON `null` (unknown) - NOT
+# `false` - when the reference is unusable (mock never became ready, R3-H1; or the ceiling probe read
+# 0), so an overstated ceiling is never silently published as a trustworthy mock_bound=false. `true`
+# only when the winner is within 10% of a REAL ceiling AND that ceiling was measured at a concurrency
+# representative of the winner's operating point (R3-M1, see _sw_ceil_ref_ok).
+_sw_set_bound(){
+  if [ "${SW_MOCK_READY:-1}" != 1 ] || [ "${SW_MOCK_CEIL:-0}" -le 0 ]; then SW_BOUND=null; return; fi
+  SW_BOUND=false
+  if _sw_ceil_ref_ok && awk -v c="$SW_CEIL_RPS" -v m="$SW_MOCK_CEIL" 'BEGIN{exit !(c>=0.9*m)}'; then SW_BOUND=true; fi
+}
+# Fair-ceiling guard for the mock_bound assertion (audit R3-M1). The reference is measured at
+# SW_MOCK_CEIL_CONC (capped at SWEEP_MOCKCEIL_CONC, default 2048). Under the 20ms delay throughput is
+# Little's-law-bound (rps <= conc/0.020), so the mock's REAL serving ceiling RISES with concurrency:
+# a fast gateway whose true peak sits ABOVE the reference concurrency forwards more in-flight than the
+# reference ever drove, where the mock can serve far more than the 2048-measured number - so comparing
+# its rps to the low reference fires mock_bound spuriously and truncates the fastest gateways' peak.
+# When the winner sits at/below the reference concurrency the reference IS a fair ceiling for its
+# operating point -> ok. When it sits ABOVE, re-probe the mock ONCE at the winner's concurrency (a
+# single reference probe at the gateway's actual operating point - NOT the 65536 rail the cap was
+# added to avoid) and adopt the larger of the two as the fair ceiling before asserting bound.
+_sw_ceil_ref_ok(){
+  local rc="${SW_MOCK_CEIL_CONC:-0}" wc="${SW_CEIL_CONC:-0}"
+  [ "$wc" -le 0 ] && return 0
+  [ "$wc" -le "$rc" ] && return 0
+  # Winner is above the reference point: the low reference under-measures the ceiling. Re-probe the
+  # rig at the winner's concurrency for a fair ceiling, capping the re-probe at 4x the reference conc
+  # so we never chase the multi-thousand-connection rail the mock-ceiling cap exists to avoid.
+  local reprobe=$wc capc=$(( rc>0 ? rc*4 : wc )); [ "$reprobe" -gt "$capc" ] && reprobe=$capc
+  local mrps _a _b _c; read -r mrps _a _b _c < <(sweep_probe "$DURL" "$reprobe" "$SWEEP_DUR"); mrps=${mrps:-0}
+  if [ "$mrps" -gt "${SW_MOCK_CEIL:-0}" ]; then
+    log "[$GATEWAY] mock-ceiling re-probed at winner c=$reprobe: ${SW_MOCK_CEIL} -> $mrps rps (winner c=$wc above reference c=$rc)"
+    SW_MOCK_CEIL=$mrps; SW_MOCK_CEIL_CONC=$reprobe
+  fi
+  return 0
+}
+
+# Mock readiness gate (audit R3-H1). After a high-concurrency rung the tokio mock can hold thousands
+# of ESTABLISHED sockets and outlive a blind `sleep 1`; the relaunched mock then races the dying one
+# for the port and TcpListener::bind panics on EADDRINUSE - the very next ceiling probe hits nothing,
+# SW_MOCK_CEIL=0, and ALL three mock-bound guards (gated on >0) silently no-op, shipping an overstated
+# ceiling with mock_bound=false. Poll a cheap 1-conn probe against the fresh mock until it answers a
+# real throughput sample (rps>0) before proceeding. A 1-conn sweep_probe both proves the port is bound
+# AND is exactly the rig-shaped request the ceiling probe uses. Returns non-zero if the mock never came
+# up so the caller can fail loud / flag the reference unreliable rather than ship a 0 ceiling.
+_sw_mock_ready(){ # tries
+  local i="${1:-30}" rps _a _b _c
+  while [ "$i" -gt 0 ]; do
+    read -r rps _a _b _c < <(sweep_probe "$DURL" 1 1)
+    [ "${rps:-0}" -gt 0 ] 2>/dev/null && return 0
+    i=$((i-1)); sleep 1
+  done
+  return 1
+}
 
 run_sweep() { # ttft_ms  conc_list_or_bounds  [mode: ladder|bisect]
   local ttft="$1" concs="$2" mode="${3:-ladder}"
-  pkill -f "$MOCK" 2>/dev/null; sleep 1
+  [ -n "$MOCK" ] && pkill -f "$MOCK" 2>/dev/null; sleep 1
   setsid taskset -c "$MOCKCORES" env MOCK_TTFT_MS="$ttft" "$MOCK" -port "$MOCK_PORT" </dev/null >/dev/null 2>&1 &
   sleep 1
+  # Do not proceed until the fresh mock is actually bound + answering; otherwise the ceiling probe
+  # below reads a dead port -> SW_MOCK_CEIL=0 -> the mock-bound guard silently disables.
+  SW_MOCK_READY=1
+  if ! _sw_mock_ready 30; then
+    SW_MOCK_READY=0
+    log "[$GATEWAY] WARNING mock did not become ready after restart (ttft=${ttft}ms): the mock-ceiling reference is unreliable; mock_bound guard cannot run this sweep"
+  fi
   local top=1 w; for w in $concs; do top=$w; done
   # The bisect MAX (last bound) is a huge safety rail (never reached: the mock-bound guard stops the
   # ramp first) so a faster-than-expected gateway is never boundary-capped. But the mock-ceiling probe
   # must NOT run at that rail - driving the loadgen to tens of thousands of connections is
   # unrepresentative and the mock saturates far lower. Probe it at a sane fixed concurrency instead.
   local mock_conc=$top; [ "$mock_conc" -gt "${SWEEP_MOCKCEIL_CONC:-2048}" ] && mock_conc="${SWEEP_MOCKCEIL_CONC:-2048}"
+  SW_MOCK_CEIL_CONC=$mock_conc   # the concurrency the reference ceiling was measured at (R3-M1)
   # Mock-ceiling reference: a property of the RIG (mock + loadgen on their own pinned cores, at this
   # ttft/path/body/psize), never of the gateway - so under a cache key it is measured once and reused.
   local _mk="${SWEEP_CACHE_KEY:-}"; [ -n "$_mk" ] && _mk="$_mk|$ttft"
@@ -279,8 +340,7 @@ run_sweep() { # ttft_ms  conc_list_or_bounds  [mode: ladder|bisect]
       fi
     done
     if [ "${SWEEP_ADAPTIVE:-0}" = 1 ] && [ "$SW_CEIL_RPS" -gt 0 ]; then SWEEP_PRIOR[$ttft]="$SW_CEIL_CONC"; fi
-    SW_BOUND=false
-    if [ "${SW_MOCK_CEIL:-0}" -gt 0 ] && awk -v c="$SW_CEIL_RPS" -v m="$SW_MOCK_CEIL" 'BEGIN{exit !(c>=0.9*m)}'; then SW_BOUND=true; fi
+    _sw_set_bound
     return 0
   fi
   # The ladder as indexed arrays; _rr[i] set = rung i probed (helpers see these via dynamic scope).
@@ -332,6 +392,5 @@ run_sweep() { # ttft_ms  conc_list_or_bounds  [mode: ladder|bisect]
   done
   # Seed/refresh the prior for the next sweep at this ttft (adaptive callers only).
   if [ "${SWEEP_ADAPTIVE:-0}" = 1 ] && [ "$SW_CEIL_RPS" -gt 0 ]; then SWEEP_PRIOR[$ttft]="$SW_CEIL_CONC"; fi
-  SW_BOUND=false
-  if [ "${SW_MOCK_CEIL:-0}" -gt 0 ] && awk -v c="$SW_CEIL_RPS" -v m="$SW_MOCK_CEIL" 'BEGIN{exit !(c>=0.9*m)}'; then SW_BOUND=true; fi
+  _sw_set_bound
 }

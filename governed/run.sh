@@ -86,7 +86,7 @@ if ! declare -F gw_governed_launch >/dev/null || ! declare -F gw_governed_token 
 fi
 
 DURL="http://127.0.0.1:$MOCK_PORT$GW_PATH"; GURL="http://127.0.0.1:$GW_PORT$GW_PATH"
-cleanup(){ gw_stop 2>/dev/null; pkill -f "$MOCK" 2>/dev/null; }
+cleanup(){ gw_stop 2>/dev/null; [ -n "$MOCK" ] && pkill -f "$MOCK" 2>/dev/null; }
 trap cleanup EXIT
 
 # run ugen with an explicit bearer token, echo "rps fail p99us p50us". Hard-timeout wrapped: a
@@ -97,9 +97,23 @@ probe(){ # url conc dur token
 }
 
 start_mock(){ # ttft_ms
-  pkill -f "$MOCK" 2>/dev/null; sleep 1
+  [ -n "$MOCK" ] && pkill -f "$MOCK" 2>/dev/null; sleep 1
   setsid taskset -c "$MOCKCORES" env MOCK_TTFT_MS="$1" "$MOCK" -port "$MOCK_PORT" </dev/null >/dev/null 2>&1 &
   sleep 1
+  # Readiness gate (audit R3-H1): a slow-exiting mock from a prior high-concurrency rung can still hold
+  # the port, so the relaunched mock panics on EADDRINUSE and the ceiling probe below hits nothing
+  # (PH_MOCK=0), silently disabling the mock_bound guard. Poll a cheap 1-conn probe (an unauthenticated
+  # direct-to-mock request; the mock ignores auth) until the fresh mock actually answers. MOCK_READY=0
+  # marks the reference unusable so measure_phase emits mock_bound=null, not a false `false`.
+  MOCK_READY=0
+  local i rc
+  for i in $(seq 1 30); do
+    rc=$(curl -s -o /dev/null -m1 -w "%{http_code}" "$DURL" -X POST -H "content-type: application/json" \
+         -d "{\"model\":\"$GW_MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"ready\"}],\"max_tokens\":16}" 2>/dev/null)
+    [ "$rc" = 200 ] && { MOCK_READY=1; break; }
+    sleep 1
+  done
+  [ "$MOCK_READY" = 1 ] || log "[$GATEWAY] WARNING mock did not become ready after restart (ttft=$1ms): mock-ceiling reference unreliable, mock_bound guard disabled for this phase"
 }
 
 wait_200(){ # token → 0 if the gateway answers 200 within 60s (sets W_CODE)
@@ -166,8 +180,26 @@ measure_phase(){
       PH_RPS=$rps; PH_CONC=$conc; PH_P99=$p99
     fi
   done
-  PH_BOUND=false
-  if [ "${PH_MOCK:-0}" -gt 0 ] && awk -v c="$PH_RPS" -v m="$PH_MOCK" 'BEGIN{exit !(c>=0.9*m)}'; then PH_BOUND=true; fi
+  # Fair-ceiling guard (audit R3-M1): the reference is measured at mock_conc (capped 2048), but under
+  # 20ms delay throughput is Little's-law-bound (rps<=conc/0.020) so the mock's real ceiling rises with
+  # concurrency. If the winner sits ABOVE the reference conc, re-probe the rig once at the winner's
+  # concurrency (capped at 4x the reference so we never chase the ladder rail the cap avoids) so a fast
+  # gateway isn't mislabelled mock_bound against a low reference.
+  if [ "$PH_CONC" -gt "$mock_conc" ] && [ "${PH_MOCK:-0}" -gt 0 ]; then
+    local reprobe=$PH_CONC capc=$(( mock_conc*4 )); [ "$reprobe" -gt "$capc" ] && reprobe=$capc
+    local mrps2 _x _y _z; read -r mrps2 _x _y _z < <(probe "$DURL" "$reprobe" "$SWEEP_DUR" "$token"); mrps2=${mrps2:-0}
+    if [ "$mrps2" -gt "${PH_MOCK:-0}" ]; then
+      log "[$GATEWAY] mock-ceiling re-probed at winner c=$reprobe: ${PH_MOCK} -> $mrps2 rps (winner above reference c=$mock_conc)"
+      PH_MOCK=$mrps2
+    fi
+  fi
+  # mock_bound=null (not false) when the mock never became ready (R3-H1) or the ceiling read 0: an
+  # overstated ceiling must never publish as a trustworthy mock_bound=false.
+  if [ "${MOCK_READY:-1}" != 1 ] || [ "${PH_MOCK:-0}" -le 0 ]; then PH_BOUND=null
+  else
+    PH_BOUND=false
+    awk -v c="$PH_RPS" -v m="$PH_MOCK" 'BEGIN{exit !(c>=0.9*m)}' && PH_BOUND=true
+  fi
   log "[$GATEWAY] sustained @${SWEEP_TTFT_MS}ms = $PH_RPS rps @ c=$PH_CONC (mock_bound=$PH_BOUND)"
 }
 
