@@ -378,9 +378,11 @@ const COL_NAME = {
     const a = g.repo
       ? `<a href="${g.repo}" target="_blank" rel="noopener">${esc(g.display)}</a>`
       : esc(g.display);
-    // Per-gateway freshness under the name: each row shows its OWN measured_at + a stale pill when
-    // flagged, so a living board's independent update cadences are visible and honest (not hidden).
-    const badge = measuredBadge(g);
+    // Per-gateway freshness: the board-wide "last benchmarked" (roster tab + homepage) already covers
+    // the normal one-run case, so a per-row date on every perf row is redundant bloat. Show the per-row
+    // measured_at + stale pill ONLY when this gateway is OUT OF SYNC with the board (g.stale) — the
+    // honest signal for an independent update cadence — and otherwise keep the row compact.
+    const badge = g.stale ? measuredBadge(g) : "";
     return `<td class="name">${a}${badge ? `<div class="row-measured">${badge}</div>` : ""}</td>`;
   },
 };
@@ -1697,7 +1699,7 @@ function renderGateways() {
     const age = fmtProjectAge(g.first_commit);
     const lastRun = gatewayLastRun(g);
     const lastRunTxt = fmtLastRun(lastRun);
-    return `<tr>
+    return `<tr data-gw="${esc(g.key)}" class="rowlink">
       <td class="name">${name}</td>
       <td><span class="lang-chip" style="background:${c}">${esc(g.lang)}</span></td>
       <td class="build">${build ? `<span title="${esc(build)}">${esc(fmtBuild(build))}</span>` : `<span class="muted">n/a</span>`}</td>
@@ -1707,6 +1709,14 @@ function renderGateways() {
       <td class="cls">${esc(g.cls || "Gateway")}</td>
     </tr>`;
   }).join("");
+  // Row click opens the per-gateway drawer (same as the perf tabs) — /gateways rows are clickable too.
+  // A click on the repo link (<a>) opens the repo, not the drawer.
+  tbody.querySelectorAll("tr[data-gw]").forEach((tr) => {
+    tr.addEventListener("click", (ev) => {
+      if (ev.target.closest("a")) return;
+      openDrawer(tr.dataset.gw, true);
+    });
+  });
   // "as of" disclosure for the star snapshot: the newest snapshot date in the bundle.
   const asOf = rows.map((g) => g.stars_as_of).filter(Boolean).sort().pop();
   const note = document.getElementById("stars-asof");
