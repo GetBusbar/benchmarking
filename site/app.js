@@ -1314,6 +1314,7 @@ const ROSTER_KEY = {
   name: (g) => g.display.toLowerCase(),
   lang: (g) => (g.lang || "").toLowerCase(),
   version: (g) => { const b = gatewayBuild(g); return b ? fmtBuild(b).toLowerCase() : null; },
+  lastrun: (g) => { const d = gatewayLastRun(g); return d ? d.getTime() : null; }, // newer = larger ms
   age: (g) => (g.first_commit ? new Date(g.first_commit).getTime() : null), // older = smaller ms
   stars: (g) => (g.stars == null ? null : g.stars),
   cls: (g) => (g.cls || "Gateway").toLowerCase(),
@@ -1375,18 +1376,29 @@ const fmtBuild = (full) => {
   return head.length > 24 ? head.slice(0, 21) + "..." : head;
 };
 
-/* The newest `measured_at` across every gateway's suites: WHEN the field was last benchmarked.
-   Honest label for the board — a single clock for "how fresh is this data". Null if none stamped. */
-function lastBenchmarkRun(gateways) {
+/* The newest `measured_at` across ONE gateway's suites: WHEN that gateway was last benchmarked.
+   Null if it carries no stamp on any lane. */
+function gatewayLastRun(g) {
   let newest = 0;
-  for (const g of gateways) {
-    for (const l of LANES) {
-      const t = g[l.key] && g[l.key].measured_at;
-      if (t) { const ms = new Date(t).getTime(); if (ms > newest) newest = ms; }
-    }
+  for (const l of LANES) {
+    const t = g[l.key] && g[l.key].measured_at;
+    if (t) { const ms = new Date(t).getTime(); if (ms > newest) newest = ms; }
   }
   return newest ? new Date(newest) : null;
 }
+/* The newest `measured_at` across every gateway's suites: WHEN the field was last benchmarked.
+   Honest label for the board — a single clock for "how fresh is this data". Null if none stamped. */
+function lastBenchmarkRun(gateways) {
+  let newest = null;
+  for (const g of gateways) {
+    const d = gatewayLastRun(g);
+    if (d && (!newest || d > newest)) newest = d;
+  }
+  return newest;
+}
+/* Per-gateway last-benchmarked date for the roster cell: a plain UTC date (YYYY-MM-DD); the full
+   timestamp rides the tooltip. Null renders muted. */
+const fmtLastRun = (d) => (d ? d.toISOString().slice(0, 10) : null);
 
 function renderGateways() {
   const tbody = document.querySelector("#gateways-table tbody");
@@ -1421,10 +1433,13 @@ function renderGateways() {
     const stars = fmtStars(g.stars);
     const build = gatewayBuild(g);
     const age = fmtProjectAge(g.first_commit);
+    const lastRun = gatewayLastRun(g);
+    const lastRunTxt = fmtLastRun(lastRun);
     return `<tr>
       <td class="name">${name}</td>
       <td><span class="lang-chip" style="background:${c}">${esc(g.lang)}</span></td>
       <td class="build">${build ? `<span title="${esc(build)}">${esc(fmtBuild(build))}</span>` : `<span class="muted">n/a</span>`}</td>
+      <td class="lastrun">${lastRunTxt ? `<span title="last benchmarked ${esc(lastRun.toISOString().slice(0, 16).replace("T", " "))} UTC">${esc(lastRunTxt)}</span>` : `<span class="muted">n/a</span>`}</td>
       <td class="age">${age ? `<span title="first commit ${esc(g.first_commit)}">${esc(age)}</span>` : `<span class="muted">n/a</span>`}</td>
       <td class="stars">${stars != null ? esc(stars) : `<span class="muted">n/a</span>`}</td>
       <td class="cls">${esc(g.cls || "Gateway")}</td>

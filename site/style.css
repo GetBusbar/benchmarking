@@ -245,6 +245,7 @@ tbody tr { cursor: pointer; }
    defaulting to name A→Z; rows open nothing; no sorted-column tint. */
 #gateways-table thead th, #gateways-table tbody td { text-align: left; }
 #gateways-table thead th.stars, #gateways-table tbody td.stars { text-align: right; }
+#gateways-table thead th.lastrun, #gateways-table tbody td.lastrun { white-space: nowrap; }
 #gateways-table thead th[data-sort] { cursor: pointer; user-select: none; }
 /* Active-sort arrow: ▲ ascending / ▼ descending, appended after the header label. */
 #gateways-table thead th[data-dir="asc"]::after { content: " \25B2"; font-size: .7em; color: var(--fg-mute); }
