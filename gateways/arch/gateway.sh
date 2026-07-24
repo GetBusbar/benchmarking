@@ -62,6 +62,16 @@ gw_hwm() {  # kernel VmHWM summed over every archgw container's process tree (sa
 # shape still applies, the mock ignores the signature). host.docker.internal (the CLI adds host-gateway)
 # reaches the mock bound on 0.0.0.0. No access_key → no real provider key needed (dummy is implicit).
 # openai is default:true so a bare/unprefixed model still routes somewhere sane.
+#
+# KNOWN LIMITATION (disclosed, not silently unfair): arch runs Envoy via the archgw CLI, and Envoy's
+# worker concurrency defaults to std::thread::hardware_concurrency() = the HOST cpu count, blind to
+# --cpuset-cpus (the same cpuset-blindness the nginx gateways have with `worker_processes auto` and Go
+# had with GOMAXPROCS). Envoy's fix would be its `--concurrency <ncore>` CLI flag, but that flag lives
+# in the Envoy bootstrap the archgw CLI generates and controls — there is no clean env we can inject
+# through `archgw up` to pin it, and hacking archgw's internal bootstrap is out of scope. So Envoy's
+# worker concurrency is NOT pinned to the cpuset here (unlike apisix/kong nginx worker_processes and the
+# Go GOMAXPROCS pin). This is disclosed as a known measurement caveat, not silently ignored; arch serves
+# only one matrix cell (openai->bedrock), bounding the impact.
 _arch_write_config() {
   cat > "$GW_DIR/arch_config.yaml" <<YAML
 version: v0.1.0
