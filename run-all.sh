@@ -5,8 +5,8 @@
 # One command → answers. Runs the memory benchmark for every listed gateway on THIS box (same mock,
 # same load, same pin), one at a time, then regenerates the chart from results/. Nothing to debug.
 #
-#   BUSBAR_BIN=~/busbar bench/run-all.sh                       # all gateways
-#   BUSBAR_BIN=~/busbar bench/run-all.sh busbar litellm-rust   # a subset
+#   bench/run-all.sh                                            # all gateways
+#   bench/run-all.sh busbar litellm-rust                        # a subset
 #
 # Each gateway is a drop-in dir under gateways/ (see gateways/README.md). Bifrost needs Docker;
 # LiteLLM (Rust/Python) build from source/pip on first run.

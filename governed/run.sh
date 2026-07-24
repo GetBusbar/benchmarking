@@ -9,7 +9,7 @@
 # the governance overhead (governed_vs_plain_sustained_pct etc.) from ONE box on ONE day — no
 # cross-run subtraction.
 #
-#   GATEWAY=busbar BUSBAR_BIN=~/busbar governed/run.sh
+#   GATEWAY=busbar governed/run.sh
 #
 # A gateway opts in by defining TWO OPTIONAL manifest hooks in gateways/<name>/gateway.sh:
 #   gw_governed_launch  — launch with governance active AND provision a caller credential for the

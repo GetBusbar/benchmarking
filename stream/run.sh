@@ -19,7 +19,7 @@
 # and writes results/stream/<gateway>.json. A gateway that answers 200 but never frames (buffers
 # the whole response) is recorded stream_served=false — measured, not hidden.
 #
-#   GATEWAY=busbar BUSBAR_BIN=~/busbar stream/run.sh
+#   GATEWAY=busbar stream/run.sh
 #
 # Knobs (env): STREAM_CHUNKS (content deltas per stream, default 64), STREAM_INTERVAL_MS (pace,
 #   default 20), STREAM_CHUNK_BYTES (delta payload, default 16), STALL_X (stall = gap > X×interval,
