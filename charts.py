@@ -53,8 +53,12 @@ SITE_DATA = ROOT / "site" / "data.json"
 # that rule once and emits the result as best_cell / translation_cell (with a `source` provenance
 # tag) in site/data.json, the SAME bundle the site table reads. charts.py reads those canonical
 # records instead of re-deriving numbers from results/perf + results/xlate, so a chart can never
-# show a different value (or a different #1) than the table. memory/stream/streamcpu stay read
-# directly from results/ (single-source already; no matrix equivalent).
+# show a different value (or a different #1) than the table. Streaming (stream/streamcpu) and memory
+# are ALSO projected from the matrix now: the standalone stream/streamcpu/memory suites were RETIRED
+# (run-all.sh runs ONLY the matrix), so gen-data.mjs projects the matrix's best-diagonal streaming
+# into g.streaming and its one process RSS read into g.memory_read. charts.py reads those projected
+# fields (via _load_projected → canonicalStreaming/canonicalMemory mirrors) so the streaming/memory
+# PNGs match the site's in-browser streaming/memory charts.
 # ORDERING: run `node site/gen-data.mjs` BEFORE charts.py (CI: gen-data → charts.py → gen-data,
 # the second pass copying the fresh PNGs into site/charts/).
 def _canonical() -> dict:
@@ -245,13 +249,27 @@ class Chart:
     annot: object = None           # optional fn(row) -> str appended after the primary bar label
 
 
+# Dialect display labels — the SAME branded casing the site uses (MATRIX_LABELS in site/app.js), so a
+# PNG bar reads "OpenAI → Anthropic" exactly like the in-browser Translation surfaces, never the raw
+# lowercase key ("openai → anthropic"). Unknown dialects fall through to their raw key (audit LOW:
+# "anthropic" capitalization consistency).
+_DIALECT_LABELS = {
+    "openai": "OpenAI", "openai-responses": "OpenAI Responses", "anthropic": "Anthropic",
+    "gemini": "Gemini", "cohere": "Cohere", "bedrock": "Bedrock Converse",
+}
+
+
+def _dialect(d):
+    return _DIALECT_LABELS.get(d, d) if d else d
+
+
 # Per-bar provenance note on the canonical passthrough charts: name the dialect when it is not
 # the common openai diagonal, and disclose a perf-suite fallback (no matrix per-cell sweep yet).
 def _perf_annot(r):
     if r.get("_perf_source") == "perf-fallback":
         return "perf-suite default path"
     d = r.get("_dialect")
-    return f"on {d}" if d and d != "openai" else None
+    return f"on {_dialect(d)}" if d and d != "openai" else None
 
 
 CHARTS = [
@@ -397,7 +415,7 @@ CHARTS = [
         higher_better=True,
         served_field="xlate_served",
         not_served_text="✕ cannot translate",
-        annot=lambda r: (f"{r.get('_xlate_ingress')} → {r.get('_xlate_egress')}"
+        annot=lambda r: (f"{_dialect(r.get('_xlate_ingress'))} → {_dialect(r.get('_xlate_egress'))}"
                          + (" (xlate suite)" if r.get("_xlate_source") == "xlate-fallback" else ""))
                         if r.get("_xlate_ingress") else None,
     ),
@@ -414,7 +432,7 @@ CHARTS = [
         clamp_negatives=True,
         zero_ok=True,
         auto_ms=True,
-        annot=lambda r: (f"{r.get('_xlate_ingress')} → {r.get('_xlate_egress')}"
+        annot=lambda r: (f"{_dialect(r.get('_xlate_ingress'))} → {_dialect(r.get('_xlate_egress'))}"
                          + (" (xlate suite)" if r.get("_xlate_source") == "xlate-fallback" else ""))
                         if r.get("_xlate_ingress") else None,
     ),
@@ -432,7 +450,70 @@ CHARTS = [
 GATEWAY_HOURLY_USD = 0.1632
 
 
+# ── projected lanes: streaming / memory now come from the matrix via site/data.json ───────────────
+# The harness was consolidated (run-all.sh runs ONLY the matrix; the standalone stream/streamcpu/
+# memory suites are RETIRED). gen-data.mjs projects the matrix's best-diagonal streaming into
+# g.streaming and its one process RSS read into g.memory_read — the SAME canonical records the site
+# reads via canonicalStreaming()/canonicalMemory(). These loaders mirror those two functions so the
+# PNGs and the in-browser charts show identical numbers. A gateway with no projected record is simply
+# absent from the chart (rendered "not measured"), exactly as the board renders it.
+_PROJECTED_SUITES = ("stream", "streamcpu", "memory")
+
+
+def _proj_streaming(key: str) -> dict | None:
+    """canonicalStreaming(g) mirror → a row carrying the chart's legacy stream_*/streamcpu_* keys.
+
+    g.streaming (source:"matrix" or a legacy stream-fallback) carries the matrix-native field names
+    (added_ttft_p99_us, added_gap_p99_us, streams_sustained, cpu_fps, …). A present record means the
+    gateway streamed, so stream_served is true (matching canonicalStreaming's `stream_served: true`)."""
+    s = (CANON.get(key) or {}).get("streaming")
+    if not s:
+        return None
+    # streamcpu validity: the cpu-fps relay number is a valid gateway-vs-ceiling comparison only when
+    # it was actually measured (cpu_fps present + positive) AND was NOT mock-bound (an unpinned box is
+    # mock-bound → not proven). Mirrors the retired suite's streamcpu_valid = streamed && !mock_bound.
+    cpu = s.get("cpu_fps")
+    cpu_valid = cpu is not None and float(cpu or 0) > 0 and not s.get("cpu_fps_mock_bound")
+    return {
+        "stream_served": True,
+        "stream_added_ttft_p99_us": s.get("added_ttft_p99_us"),
+        "stream_added_gap_p99_us": s.get("added_gap_p99_us"),
+        "stream_sustained_streams": s.get("streams_sustained"),
+        "stream_sustained_fps": s.get("streams_sustained_fps"),
+        "streamcpu_frames_per_sec": cpu,
+        "streamcpu_fps_per_core": s.get("cpu_fps_per_core"),
+        "streamcpu_valid": cpu_valid,
+    }
+
+
+def _proj_memory(key: str) -> dict | None:
+    """canonicalMemory(g) mirror → a row carrying peak_rss_mib / idle_rss_mib. g.memory_read
+    (source:"matrix" or a legacy memory-fallback) is the matrix run's one process-level RSS read."""
+    m = (CANON.get(key) or {}).get("memory_read")
+    if not m:
+        return None
+    return {
+        "served": True,
+        "idle_rss_mib": m.get("idle_rss_mib"),
+        "peak_rss_mib": m.get("peak_rss_mib"),
+    }
+
+
+def _load_projected(suite: str) -> list[dict]:
+    """Rows for a projected lane (streaming / streamcpu / memory), built from CANON, not results/."""
+    rows = []
+    for key, label in GATEWAYS.items():
+        obj = _proj_memory(key) if suite == "memory" else _proj_streaming(key)
+        if obj is None:
+            continue
+        obj["_key"], obj["_label"] = key, label
+        rows.append(obj)
+    return rows
+
+
 def _load(suite: str) -> list[dict]:
+    if suite in _PROJECTED_SUITES:
+        return _load_projected(suite)
     d = RESULTS / suite
     rows = []
     for key, label in GATEWAYS.items():
@@ -462,6 +543,29 @@ def _fmt(v: float) -> str:
     if v <= 0:
         return "0"
     return f"{v:.0f}" if v >= 10 else f"{v:.1f}"
+
+
+def _topn_keys(chart: Chart, n: int = 5) -> set:
+    """The top-N gateway keys for THIS chart, ranked by ITS OWN primary metric, among ONLY the rows
+    that have a VALID value for that metric (audit HIGH). A gateway that did not serve the chart's
+    metric — did-not-stream, cannot-translate, streamcpu-not-proven — is never eligible for the
+    ranking, so it can never appear in a top-N chart it has no valid number for. Each chart therefore
+    ranks its own top-N (a latency top-5 no longer leaks a 'cannot translate' gateway into the
+    translation top-5)."""
+    rows = _load(chart.suite)
+    field = chart.series[0].field
+
+    def _served(r) -> bool:
+        return bool(r.get(chart.served_field, True))
+
+    def _val(r) -> float:
+        return float(r.get(field, 0) or 0)
+
+    # Eligible = a valid served measurement. A served 0 counts on a zero_ok chart (sub-noise overhead
+    # is the winning end); elsewhere a non-positive metric is not a real value and is not ranked.
+    eligible = [r for r in rows if _served(r) and (_val(r) > 0 or chart.zero_ok)]
+    eligible.sort(key=lambda r: (-_val(r) if chart.higher_better else _val(r)))
+    return {r["_key"] for r in eligible[:n]}
 
 
 def render(chart: Chart, only_keys=None, out_stem: str | None = None) -> None:
@@ -557,8 +661,14 @@ def render(chart: Chart, only_keys=None, out_stem: str | None = None) -> None:
                       for r in rows]
         else:
             colors = [s.kind] * n
-        # On a log axis a bar can't start at 0, and a negative/zero value can't be drawn at all.
-        draw = [v if (not chart.log or v > 0) else 0 for v in vals]
+        # VALIDITY GATE (audit HIGH): a bar is drawn ONLY for a row that is a valid served
+        # measurement on THIS chart's metric — the served_field (streamcpu → streamcpu_valid,
+        # xlate → xlate_served, streaming → stream_served, …). An invalid/unmeasured row draws
+        # ZERO (no visual bar) so the bar matches its "not measured"/"cannot translate" label
+        # instead of a full bar off a raw value. On a log axis a bar also can't start at 0, and
+        # a negative/zero value can't be drawn at all.
+        draw = [v if (_served(r) and (not chart.log or v > 0)) else 0
+                for r, v in zip(rows, vals)]
         bars = ax.barh([y + offset for y in y0], draw, height=bar_h * 0.92,
                        color=colors, zorder=3, label=s.legend)
         for r, bar, v in zip(rows, bars, vals):
@@ -637,10 +747,13 @@ def render(chart: Chart, only_keys=None, out_stem: str | None = None) -> None:
     if ns > 1:  # a muted secondary series (idle RAM) — label it too
         handles.append(Patch(facecolor=MUTE, label=chart.series[1].legend))
     if handles:
-        # "best" so the swatch box lands in whitespace (top bars are short on the log charts, longest
-        # bars crowd the bottom) instead of sitting over a bar.
-        ax.legend(handles=handles, loc="best", fontsize=8.5, frameon=False,
-                  ncols=min(len(handles), 6), title="colored by language")
+        # FIXED placement (audit LOW): "best" would drift onto the title/subtitle or the first bar
+        # (the streamcpu "colored by language" overlap). Pin to the lower-right corner with padding so
+        # the swatch box always lands in the right-edge headroom below the shortest (bottom) bars,
+        # clear of the title/subtitle up top and never on top of a bar.
+        ax.legend(handles=handles, loc="lower right", fontsize=8.5, frameon=False,
+                  ncols=min(len(handles), 6), title="colored by language",
+                  borderaxespad=0.8)
 
     meta = rows[0]
     bits = []
@@ -901,21 +1014,24 @@ def write_reports() -> None:
     (RESULTS / "reports" / "top5").mkdir(parents=True, exist_ok=True)
     (RESULTS / "reports" / "all" / "README.md").write_text(
         _report_md(ranked, "All gateways — full field", charts, pending=pending))
-    # top5 report points at its own top5_*.png charts (rendered in main), so its charts match its table.
-    # ONE stated criterion everywhere (site caption, README, here): top 5 by lowest added latency,
-    # the same five gateways on every chart - never re-picked per metric.
+    # top5 report points at its own top5_*.png charts (rendered in main). The TABLE below is the 5
+    # lowest-added-latency gateways; each CHART shows the top 5 by ITS OWN metric among gateways with a
+    # valid value for that metric (audit HIGH) — a gateway that cannot do a thing is never ranked into
+    # that thing's chart, so a "cannot translate" gateway never appears on the translation top-5.
     (RESULTS / "reports" / "top5" / "README.md").write_text(
-        _report_md(ranked[:5], "Top 5 gateways: lowest added latency, the same five on every chart",
+        _report_md(ranked[:5], "Top 5 gateways (table: lowest added latency; each chart: top 5 by its own metric)",
                    charts, chart_prefix="top5_"))
     print(f"wrote results/reports/all + top5 ({len(ranked)} gateways)")
 
 
 def main() -> None:
     RESULTS.mkdir(exist_ok=True)
-    top5 = {k for k, _ in _ranked()[:5]}
     any_done = False
     for c in CHARTS:
         render(c)                                       # full field → <name>.png
+        # top-5 by THIS chart's OWN metric among rows with a valid value for it (audit HIGH), never a
+        # single latency top-5 reused across every metric (which leaked invalid rows into a ranking).
+        top5 = _topn_keys(c, 5)
         if top5:
             render(c, only_keys=top5, out_stem=f"top5_{c.name}")   # top-5 only → top5_<name>.png
         any_done = any_done or (RESULTS / f"{c.name}.png").exists()
