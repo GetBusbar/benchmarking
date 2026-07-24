@@ -554,10 +554,14 @@ test("Streaming tab keeps measured streaming refusals as visible rows", () => {
 
 test("Translation tab lists only gateways serving the pinned in->out pair", () => {
   // g0 serves openai->anthropic (the default pair), g1 serves only openai->gemini.
+  // MED-3 (mirrored onto translation): the translation RPS columns are GATED on the mock-bound
+  // honesty flag exactly like the passthrough columns — a positive value is shown ONLY when
+  // rps_sustained_20ms_mock_bound === false (certified gateway-limited). Stamp the fixtures certified
+  // so the cell reads a number; an unstamped/mock-bound value would (correctly) read n/a instead.
   const g0 = { display: "g0", key: "g0", lang: "Rust",
-    matrix: mkMatrix({ anthropic: { openai: { served: true, perf: { rps_sustained_20ms: 100, added_latency_p99_us: 200 } } } }) };
+    matrix: mkMatrix({ anthropic: { openai: { served: true, perf: { rps_sustained_20ms: 100, rps_sustained_20ms_mock_bound: false, added_latency_p99_us: 200 } } } }) };
   const g1 = { display: "g1", key: "g1", lang: "Go",
-    matrix: mkMatrix({ gemini: { openai: { served: true, perf: { rps_sustained_20ms: 90, added_latency_p99_us: 300 } } } }) };
+    matrix: mkMatrix({ gemini: { openai: { served: true, perf: { rps_sustained_20ms: 90, rps_sustained_20ms_mock_bound: false, added_latency_p99_us: 300 } } } }) };
   const st = app.newState();
   st.view = "translation"; // default pair openai -> anthropic
   assert.deepEqual(app.applyFilters([g0, g1], st).map((g) => g.key), ["g0"]);
@@ -759,8 +763,10 @@ test("HIGH-R2-1: guard mirrors the p99/error gate — a cliff-above-peak gateway
 test("divergent translation_cell vs xlate suite: drawer/compare read the matrix cell", () => {
   const g = {
     key: "xdiv", display: "XDiv", lang: "Go",
+    // MED-3 (mirrored): stamp the translation RPS certified (mock_bound === false) so the gated
+    // canonicalXlate/xlateCell surface the number; an unstamped value would correctly read n/a.
     translation_cell: { ingress: "openai", egress: "anthropic", source: "matrix",
-      added_latency_p50_us: 10, added_latency_p99_us: 20, rps_sustained_20ms: 3000 },
+      added_latency_p50_us: 10, added_latency_p99_us: 20, rps_sustained_20ms: 3000, rps_sustained_20ms_mock_bound: false },
     xlate: { xlate_served: true, xlate_added_latency_p99_us: 9999, xlate_rps_sustained_20ms: 1 },
   };
   const lane = app.LANES.find((l) => l.key === "xlate");
@@ -1000,6 +1006,47 @@ test("MEDIUM-R2-2 guard: site sustained visibility must equal the chart's stream
   const eDrift = checkConsistency({ gateways: [drift] }, app).errors;
   assert.ok(eDrift.some((e) => e.includes("sdrift.streaming.streams_sustained")),
     `guard must catch a streams_sustained certified on the headline but mock-bound on its diagonal cell; got: ${JSON.stringify(eDrift)}`);
+});
+
+test("MEDIUM-1 (round-5): translation RPS is gated on the mock-bound flag across the Translation tab, drawer, and guard", () => {
+  // MED-3 mirrored onto the translation lane: a rig-limited (mock-bound) or unverifiable (null-flag)
+  // translation RPS must read n/a on the Translation-tab columns (xlateCell) AND the drawer/compare
+  // (canonicalXlate), matching charts.py suppressing the xlate_rps_sustained_20ms bar — so a rig ceiling
+  // never draws a full translation bar or ranks #1. Only a certified (mock_bound === false) value shows.
+  const mkPerf = (bound) => ({ added_latency_p99_us: 200,
+    rps_sustained_20ms: 5000, rps_sustained_20ms_mock_bound: bound,
+    rps_max_proxy: 6000, rps_max_proxy_mock_bound: bound });
+  // xlateCell reads the module's default state pair (openai -> anthropic), so the matrix cell + the
+  // translation_cell below both pin that pair — the same convention the "Translation tab" test above uses.
+  const mkG = (bound) => ({ key: "xg", display: "XG", lang: "Rust",
+    translation_cell: { ingress: "openai", egress: "anthropic", source: "matrix", ...mkPerf(bound) },
+    matrix: mkMatrix({ anthropic: { openai: { served: true, perf: mkPerf(bound) } } }) });
+  // Certified (false): both Translation-tab RPS columns + the drawer show the number.
+  const cert = mkG(false);
+  assert.equal(app.xlateRpsSuppressed(cert.translation_cell, "rps_sustained_20ms"), false);
+  assert.equal(app.xlateCell(cert, "rps_sustained_20ms", String).text, "5000");
+  assert.equal(app.xlateCell(cert, "rps_max_proxy", String).text, "6000");
+  assert.equal(app.canonicalXlate(cert).xlate_rps_sustained_20ms, 5000);
+  assert.deepEqual(checkConsistency({ gateways: [cert] }, app).errors, []);
+  // Mock-bound (true): suppressed → n/a on BOTH columns + the drawer, matching the chart's no-bar.
+  const bound = mkG(true);
+  assert.equal(app.xlateRpsSuppressed(bound.translation_cell, "rps_sustained_20ms"), true);
+  assert.equal(app.xlateCell(bound, "rps_sustained_20ms", String).na, true, "mock-bound translation RPS reads n/a");
+  assert.equal(app.xlateCell(bound, "rps_max_proxy", String).na, true, "mock-bound translation max-proxy reads n/a");
+  assert.equal(app.canonicalXlate(bound).xlate_rps_sustained_20ms, null, "drawer/compare suppresses a mock-bound value");
+  assert.deepEqual(checkConsistency({ gateways: [bound] }, app).errors, [],
+    "a fully mock-bound cell is suppressed on BOTH surfaces → the guard's gated compare + visibility tie agree");
+  // NULL flag (unverifiable — the reference ceiling read 0): also suppressed, like the streaming lanes.
+  const nullFlag = mkG(null);
+  assert.equal(app.xlateRpsSuppressed(nullFlag.translation_cell, "rps_sustained_20ms"), true, "null flag is NOT certified");
+  assert.equal(app.xlateCell(nullFlag, "rps_sustained_20ms", String).na, true, "null-flag translation RPS reads n/a");
+  assert.equal(app.canonicalXlate(nullFlag).xlate_rps_sustained_20ms, null);
+  // A LEGITIMATE 0 is NOT suppressed (served but no tested load held the gate) — distinct from a rig ceiling.
+  const zero = { key: "xz", display: "XZ", lang: "Rust",
+    translation_cell: { ingress: "openai", egress: "anthropic", source: "matrix",
+      added_latency_p99_us: 200, rps_sustained_20ms: 0, rps_sustained_20ms_mock_bound: null } };
+  assert.equal(app.xlateRpsSuppressed(zero.translation_cell, "rps_sustained_20ms"), false, "a measured 0 is never suppressed");
+  assert.equal(app.canonicalXlate(zero).xlate_rps_sustained_20ms, 0, "a measured 0 stays 0, not n/a");
 });
 
 test("MEDIUM-R3-3 guard: a null added-TTFT/gap must read n/a on the table AND draw no bar (never a served 0)", () => {
