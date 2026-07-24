@@ -129,15 +129,15 @@
   <section id="view-matrix" class="view hidden">
     <h2>Protocol support matrix (6x6)</h2>
     <ul class="matrix-legend" aria-label="cell legend">
-      <li><span class="lg lg-pass"></span>supported, passing</li>
-      <li><span class="lg lg-fail"></span>supported, failing</li>
-      <li><span class="lg lg-notconf"></span>not declared</li>
+      <li><span class="lg lg-pass"></span>probe passed (translation verified)</li>
+      <li><span class="lg lg-notconf"></span>not configured (probe failed; evidence on hover)</li>
+      <li><span class="lg lg-fail"></span>not served (legacy pre-probe-first result)</li>
       <li><span class="lg lg-unverified"></span>not verified</li>
       <li><span class="lg lg-untestable"></span>untestable (mock limit)</li>
       <li><span class="lg lg-unprobed"></span>unprobed (auth)</li>
       <li><span class="lg lg-diag"></span>same-dialect passthrough</li>
     </ul>
-    <p class="matrix-legend-note muted">The set of cells each gateway is expected to serve (green vs grey) was drafted by the Busbar team from each project's public docs; it stands in until maintainers confirm their own grid.<br>Maintainers are welcome to PR their real capability grid.</p>
+    <p class="matrix-legend-note muted">Probe-first: every ingress&#8594;upstream pairing of every gateway is attempted with a correctness-checked round trip (response validated in the ingress protocol's shape, upstream leg verified against the recording mock). A green cell passed; a grey cell's probe failed and its hover shows the probe's own evidence. No gateway is graded red for a pairing it does not serve.</p>
     <div id="matrix-grid"></div>
     <div id="matrix-detail" class="matrix-detail hidden"></div>
     <p id="matrix-empty" class="muted hidden">Protocol matrix results are coming soon: no results/matrix JSONs are committed yet.</p>

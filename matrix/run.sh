@@ -16,15 +16,19 @@
 #   cohere            POST /v2/chat (fallback /v1/chat)         verdict: message.content or text (v2 chat shape)
 #   bedrock           POST /model/{m}/converse         verdict: output.message.content (Converse shape)
 #
-# EGRESS HOOK (per-gateway, optional): a manifest declares which upstream dialects it can be
-# configured for with GW_MATRIX_EGRESS="openai anthropic ..." (default: "openai", the classic
-# launch) and, when the list has more than the default, defines
+# PROBE-FIRST (v3): ALL 36 cells are attempted for EVERY gateway. Each cell gets one cheap
+# correctness-checked round trip (the three-leg verdict below); pass -> green + per-cell perf sweep,
+# fail -> served:"not_configured" with the probe's error evidence in probe_note - NEVER a red.
+# GW_MATRIX_CAP is advisory citation metadata only (warm-up preference + transient patience).
+#
+# EGRESS HOOK (per-gateway, optional): a manifest may define
 #     gw_matrix_egress <dialect>
 # which reconfigures + relaunches the gateway so GW_MODEL routes to the mock upstream speaking
-# <dialect>. When gw_matrix_egress is defined the runner calls it for EVERY dialect in the list
-# (including openai); when it is not, only the openai column runs via the plain gw_launch. A dialect
-# absent from the list renders every cell in that column "not_configurable": an honest "this
-# manifest defines no way to route to that upstream shape", distinct from tried-and-failed.
+# <dialect>. When defined, the runner calls it for EVERY egress dialect; a dialect the writer
+# rejects (returns non-zero) falls back to the gateway's DEFAULT config, still probed - the leg-3
+# evidence then honestly records where requests actually went. Without gw_matrix_egress the default
+# config is launched once and every column is probed against it. GW_MATRIX_EGRESS remains as
+# advisory metadata recorded in the JSON.
 #
 # FAIRNESS RULE (diagonal): a cell where ingress dialect == egress dialect requires NO translation.
 # Faithful passthrough is a PASS there: the verdict is (a) the response is a valid envelope of the
@@ -138,23 +142,30 @@ suite_deadline_start
 EGRESS_ALL="openai openai-responses anthropic gemini cohere bedrock"
 INGRESS_ALL="openai openai-responses anthropic gemini cohere bedrock"
 
-# ── declared capability matrix (GW_MATRIX_CAP) ──────────────────────────────────────────────────
-# Every manifest declares a 6x6 (ingress x egress) matrix of 1/0: the gateway's OWN claim, per its
-# project documentation, that it can translate that ingress dialect into that upstream (egress)
-# dialect. This is the maintainer's declaration (populated by us from each project's docs as a
-# stand-in until real maintainers PR their own). The rule the site enforces:
-#   declared 1 -> we PROBE the cell -> PASS (green) or FAIL (red). A red can ONLY appear for a cell
-#                 the gateway CLAIMED and then failed on the field run, so we can never be accused of
-#                 unfairly failing a gateway on something it never claimed.
-#   declared 0 -> NOT PROBED -> not_configurable (grey): the maintainer says "we do not do this".
-# Grey is thus always a cited capability limit (GW_MATRIX_CAP_NOTE names why), never our generosity
-# and never "we didn't get to it".
+# ── PROBE-FIRST: the capability matrix (GW_MATRIX_CAP) is ADVISORY ──────────────────────────────
+# The runner attempts ALL 36 cells for EVERY gateway. Each cell gets a cheap capability probe (one
+# correctness-checked round trip: the ingress dialect's request through the gateway, response
+# verified as a valid INGRESS-dialect envelope, and the mock's per-dialect request record proving
+# the EGRESS leg - the same three-leg verdict as always). Probe passes -> the cell is green and gets
+# its per-cell perf sweep. Probe fails -> served:"not_configured" with the probe's error evidence
+# (HTTP status / verdict / first bytes) in probe_note - NEVER a red: a failed probe on a cell nobody
+# wired is "this pairing is not configured/supported here", with the evidence to say why.
+#
+# GW_MATRIX_CAP survives as ADVISORY CITATION METADATA only (published as capability_note context +
+# per-cell hints). It no longer gates probing. It still informs two HARNESS-SIDE choices that never
+# touch a verdict:
+#   - warm-up preference: each egress column warms on the first advisory-declared ingress (a cell
+#     expected to 200), falling back to openai;
+#   - transient patience: a declared cell that answers 000/5xx gets the full transient-retry budget
+#     (it is expected to work, so a dead socket is worth waiting out); an undeclared cell gets a
+#     short budget (a persistent 5xx there is overwhelmingly "not wired", and the worst case is a
+#     grey not_configured carrying that evidence, never a red).
 #
 # Format: 6 whitespace-separated rows (rows = ingress in EGRESS_ALL order), each row 6 chars of 1/0
 # (cols = egress in EGRESS_ALL order). Blank/unset => back-compat: derive a full column of 1s for
 # every egress dialect listed in GW_MATRIX_EGRESS (the pre-cap behaviour), 0 elsewhere.
 declare -A CAP
-_cap_col_any=""   # space-list of egress dialects with >=1 declared-1 cell (drives which cols launch)
+_cap_col_any=""   # space-list of egress dialects with >=1 declared-1 cell (advisory)
 build_cap(){
   local rows i j r ing eg
   # normalise: strip whitespace to a flat 36-char string in row-major (ingress-major) order.
@@ -178,31 +189,32 @@ build_cap(){
       i=$((i+1))
     done
   fi
-  # Which egress columns have any capable cell? Those (and only those) get launched + probed.
+  # Advisory only: which egress columns have any declared cell (warm-up + patience hints).
   for eg in $EGRESS_ALL; do
     for ing in $INGRESS_ALL; do
       if [ "${CAP["$ing/$eg"]}" = 1 ]; then _cap_col_any="$_cap_col_any $eg"; break; fi
     done
   done
 }
-cap(){ echo "${CAP["$1/$2"]:-0}"; }   # cap <ingress> <egress> -> 1|0
-col_capable(){ case " $_cap_col_any " in *" $1 "*) return 0;; *) return 1;; esac; }
+cap(){ echo "${CAP["$1/$2"]:-0}"; }   # cap <ingress> <egress> -> 1|0 (ADVISORY, never a verdict)
 build_cap
-# Reason shown on a declared-0 (grey) cell's tooltip; a manifest overrides it with a cited string.
+# Advisory context published with the result (tooltips); a manifest overrides it with a cited string.
 GW_MATRIX_CAP_NOTE="${GW_MATRIX_CAP_NOTE:-this gateway does not declare support for this ingress/upstream dialect pair}"
 
 # ── untestable cells (mock-reachability limit, NOT incapability) ────────────────────────────────
 # Some gateways DO speak a dialect in production but hardcode the real cloud host for it (no
 # base-URL override), so this harness's localhost mock is unreachable: that is OUR test rig's
 # limit, not the gateway's incapability, and it must not render as either grey-incapable or red.
-# A manifest declares such cells (also declared 0 in GW_MATRIX_CAP so they are never probed) as
+# A manifest declares such cells (the one remaining probe exemption under probe-first) as
 #   GW_MATRIX_UNTESTABLE="<ingress>/<egress> <ingress>/<egress> ..."
 # with a cited GW_MATRIX_UNTESTABLE_NOTE; the runner emits served:"untestable" +
 # reason:"no_base_url_override" for them. Generic: any manifest can use it, the runner names nobody.
 GW_MATRIX_UNTESTABLE="${GW_MATRIX_UNTESTABLE:-}"
 GW_MATRIX_UNTESTABLE_NOTE="${GW_MATRIX_UNTESTABLE_NOTE:-the gateway supports this pair in production but pins the real cloud host (no upstream base-URL override), so the test mock is unreachable}"
 cell_untestable(){ case " $GW_MATRIX_UNTESTABLE " in *" $1/$2 "*) return 0;; *) return 1;; esac; }
-# GW_MATRIX_EGRESS still drives the actual relaunch wiring; ensure every capable column is launchable.
+# GW_MATRIX_EGRESS is advisory metadata (recorded in the JSON); under probe-first EVERY egress
+# column is attempted: gw_matrix_egress <dialect> when the manifest defines it (falling back to the
+# default gw_launch config when the writer rejects a dialect), else the default config for all six.
 GW_MATRIX_EGRESS="${GW_MATRIX_EGRESS:-openai}"
 
 # Per-cell ingress paths: manifest override wins, else the protocol's canonical default. The
@@ -308,8 +320,15 @@ probe(){ # path body extra-header...
 # We must retry such a probe BEFORE recording anything - never publish a transient blip as a red, then
 # re-run the whole box. A 2xx/3xx/4xx is a real application response (right or wrong) and is NOT retried.
 probe_transient(){ case "$LAST_STATUS" in 000|5[0-9][0-9]) return 0 ;; *) return 1 ;; esac; }
-MATRIX_TRANSIENT_RETRIES="${MATRIX_TRANSIENT_RETRIES:-3}"   # total attempts on a transient probe
-MATRIX_TRANSIENT_PAUSE="${MATRIX_TRANSIENT_PAUSE:-120}"     # seconds between transient retries
+MATRIX_TRANSIENT_RETRIES="${MATRIX_TRANSIENT_RETRIES:-3}"   # total attempts on a declared cell
+MATRIX_TRANSIENT_PAUSE="${MATRIX_TRANSIENT_PAUSE:-120}"     # seconds between its retries
+# Probe-first patience budget for ADVISORY-UNDECLARED cells: all 36 cells are probed, and a cell
+# nobody wired often answers 5xx (an upstream config that can't work) rather than 404. Waiting the
+# declared budget (2 x 120s) on ~30 dead cells would add hours per gateway; a short budget keeps a
+# genuinely-transient blip retried while a truly-dead cell costs seconds. Verdicts are unaffected:
+# a persistent transient is still not_verified (upstream_unreachable), never a red.
+MATRIX_PROBE_TRANSIENT_RETRIES="${MATRIX_PROBE_TRANSIENT_RETRIES:-2}"
+MATRIX_PROBE_TRANSIENT_PAUSE="${MATRIX_PROBE_TRANSIENT_PAUSE:-10}"
 
 # Envelope verdicts + passthrough guard, in one place (python: nested-field checks beat grep here).
 # Body rides in $MATRIX_BODY (python reads its program from stdin, so stdin is taken); argv = cell
@@ -324,7 +343,7 @@ raw = os.environ.get("MATRIX_BODY", "")
 # hands the client one of these BYTE-IDENTICAL; a translating gateway reserializes and never does.
 CANNED = {
  "openai": '{"id":"chatcmpl-x","object":"chat.completion","created":1,"model":"mock","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12}}',
- "openai-responses": '{"id":"resp_x","object":"response","created_at":1,"status":"completed","model":"mock","output":[{"type":"message","id":"msg_x","role":"assistant","content":[{"type":"output_text","text":"ok"}]}],"usage":{"input_tokens":10,"output_tokens":2,"total_tokens":12}}',
+ "openai-responses": '{"id":"resp_x","object":"response","created_at":1,"status":"completed","model":"mock","output":[{"type":"message","id":"msg_x","status":"completed","role":"assistant","content":[{"type":"output_text","text":"ok","annotations":[]}]}],"usage":{"input_tokens":10,"output_tokens":2,"total_tokens":12}}',
  "anthropic": '{"id":"msg_x","type":"message","role":"assistant","model":"mock","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":2}}',
  "gemini": '{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP","index":0}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":2,"totalTokenCount":12}}',
  "bedrock": '{"output":{"message":{"role":"assistant","content":[{"text":"ok"}]}},"stopReason":"end_turn","usage":{"inputTokens":10,"outputTokens":2,"totalTokens":12}}',
@@ -504,25 +523,30 @@ matrix_cell_perf(){
   log "[$GATEWAY]   $egress <- $cell : perf added_p99=${lat99}us sustained@${SWEEP_TTFT_MS}ms=${lrps}rps max_proxy=${prps}rps (leg-3 re-verified)"
 }
 
-CELLS_JSON=""
+CELLS_JSON=""; CELL_PROBE_NOTE=""
 # emit_cell <cell> <served> <status> <path> <note> <snippet> [reason]
 # `reason` is the MACHINE-READABLE verdict class, so consumers never have to regex English prose:
-#   (green)          absent                - served=true
-#   wrong_answer     served=false          - the gateway SERVED and returned a wrong/untranslated
-#                                            body, or answered without contacting the upstream: a
-#                                            genuine, evidenced failure (the only red class)
+#   (green)          absent                - served=true (probe passed; per-cell perf follows)
+#   probe_failed     served="not_configured" - PROBE-FIRST: the capability probe on this cell did
+#                                            not produce a correct three-leg round trip. The probe's
+#                                            error evidence rides in probe_note. This is "the
+#                                            pairing is not configured/supported here", NEVER a red:
+#                                            no gateway is failed on a cell, it just doesn't light up.
 #   harness_boot_failure / suite_ceiling / mock_norecord
 #                    served="not_verified" - the HARNESS could not get a fair reading (gateway never
 #                                            warmed under this egress config, wall-clock ceiling,
-#                                            recording mock displaced): never a red
-#   not_declared     served="not_configurable" - the capability grid declares 0 (cited note)
+#                                            recording mock displaced): never graded either way
 #   no_base_url_override  served="untestable"  - mock-reachability limit (cited note), NOT incapability
 #   inbound_sigv4    served="unprobed_auth"    - gateway insists on inbound SigV4 we do not forge
 emit_cell(){
   local reason="${7:-}"
+  # CELL_PROBE_NOTE (set by run_cell for not_configured cells, cleared here like CELL_PERF_JSON):
+  # the capability probe's raw error evidence - HTTP status / verdict class / what the mock recorded.
+  local probe_json=""
+  [ -n "$CELL_PROBE_NOTE" ] && probe_json=", \"probe_note\": \"$(json_escape "$CELL_PROBE_NOTE")\""
   CELLS_JSON="${CELLS_JSON}${CELLS_JSON:+,}
-      \"$1\": {\"served\": $2, ${reason:+\"reason\": \"$reason\", }\"status\": \"$3\", \"path\": \"$4\", \"verdict_note\": \"$(json_escape "$5")\", \"body_snippet\": \"$(json_escape "$6")\"$CELL_PERF_JSON}"
-  CELL_PERF_JSON=""
+      \"$1\": {\"served\": $2, ${reason:+\"reason\": \"$reason\", }\"status\": \"$3\", \"path\": \"$4\", \"verdict_note\": \"$(json_escape "$5")\", \"body_snippet\": \"$(json_escape "$6")\"$probe_json$CELL_PERF_JSON}"
+  CELL_PERF_JSON=""; CELL_PROBE_NOTE=""
 }
 
 WARM_OK=0; WARM_LAST=000; WARM_CELL=openai; SERVE_ERR=""
@@ -549,12 +573,17 @@ run_cell(){ # egress cell path body extra-header...
     path="$P_COHERE_FB"
   fi
   # TRANSIENT dead-socket retry (BEFORE any verdict is recorded): a 5xx/000 is the gateway failing to
-  # reach the local mock, never a wrong answer. Retry the whole probe up to MATRIX_TRANSIENT_RETRIES,
-  # pausing MATRIX_TRANSIENT_PAUSE between so a stale upstream socket has time to recycle.
+  # reach the local mock, never a wrong answer. Patience is budgeted by the ADVISORY capability grid
+  # (see the cap section): a declared cell gets the full budget, an undeclared probe-first cell a
+  # short one - the verdict class is identical either way.
+  local _retries="$MATRIX_TRANSIENT_RETRIES" _pause="$MATRIX_TRANSIENT_PAUSE"
+  if [ "$(cap "$cell" "$egress")" != 1 ]; then
+    _retries="$MATRIX_PROBE_TRANSIENT_RETRIES"; _pause="$MATRIX_PROBE_TRANSIENT_PAUSE"
+  fi
   local attempt=1
-  while probe_transient && [ "$attempt" -lt "$MATRIX_TRANSIENT_RETRIES" ]; do
-    log "[$GATEWAY]   $egress <- $cell : transient status $LAST_STATUS (upstream unreachable) - retry $attempt/$((MATRIX_TRANSIENT_RETRIES-1)) in ${MATRIX_TRANSIENT_PAUSE}s"
-    sleep "$MATRIX_TRANSIENT_PAUSE"
+  while probe_transient && [ "$attempt" -lt "$_retries" ]; do
+    log "[$GATEWAY]   $egress <- $cell : transient status $LAST_STATUS (upstream unreachable) - retry $attempt/$((_retries-1)) in ${_pause}s"
+    sleep "$_pause"
     mock_reset
     probe "$path" "$data" "$@"
     v="$(verdict "$cell" "$egress")"
@@ -562,12 +591,30 @@ run_cell(){ # egress cell path body extra-header...
   done
   local reason=""
   if probe_transient; then
-    # Still transient after all retries: the harness could not get a fair reading (the gateway never
-    # completed a round trip to the upstream), so this is machine-readably not_verified, NEVER a red.
-    served='"not_verified"'; reason=upstream_unreachable
-    note="HTTP $LAST_STATUS after $MATRIX_TRANSIENT_RETRIES attempts: the gateway did not complete a round trip to the upstream (transient transport failure, e.g. a dead upstream socket); recorded as not_verified rather than a wrong-answer red"
+    # Persistent 5xx/000 after all retries. Two very different things can look like this:
+    #   - a RIG/transport failure (gateway or mock unreachable, dead sockets): not_verified, the
+    #     harness could not get a fair reading - never graded either way;
+    #   - a DETERMINISTIC application rejection of a probe-first cell (e.g. a gateway 503ing
+    #     "failed to parse request" on an ingress shape it has no route type for): that IS the
+    #     probe's honest answer - the pairing is not configured - and labeling it "not verified"
+    #     would hide real probe evidence.
+    # Discriminate on observables: the gateway ANSWERED (a real 5xx, not 000) while the mock is
+    # verifiably healthy, on a cell the manifest never declared -> not_configured with the 5xx
+    # evidence. Anything else (000, sick mock, or a DECLARED cell, where a persistent 5xx is more
+    # plausibly a rig failure worth a human look than a capability verdict) stays not_verified.
+    local _mock_ok=0
+    curl -s -m3 "http://127.0.0.1:$MOCK_PORT/__mock/state" 2>/dev/null | grep -q '"recording":true' && _mock_ok=1
     snip="$(printf '%s' "$LAST_BODY" | head -c 200)"
-    log "[$GATEWAY]   $egress <- $cell : served=not_verified ($note)"
+    if [ "$_mock_ok" = 1 ] && [ "$LAST_STATUS" != 000 ] && [ "$(cap "$cell" "$egress")" != 1 ]; then
+      served='"not_configured"'; reason=probe_failed
+      note="HTTP $LAST_STATUS on POST $path, persistent across $_retries attempts with the mock verifiably healthy: a deterministic application-level rejection of this ingress/egress pairing, not a transport failure"
+      CELL_PROBE_NOTE="probe failed: HTTP $LAST_STATUS on POST $path (persistent across $_retries attempts, mock healthy); first bytes: $(printf '%s' "$LAST_BODY" | head -c 160)"
+      log "[$GATEWAY]   $egress <- $cell : served=not_configured ($note)"
+    else
+      served='"not_verified"'; reason=upstream_unreachable
+      note="HTTP $LAST_STATUS after $_retries attempts: the gateway did not complete a round trip to the upstream (transport failure, e.g. a dead upstream socket or unhealthy rig); recorded as not_verified rather than graded"
+      log "[$GATEWAY]   $egress <- $cell : served=not_verified ($note)"
+    fi
     emit_cell "$cell" "$served" "$LAST_STATUS" "$path" "$note" "$snip" "$reason"
     return
   fi
@@ -583,30 +630,35 @@ run_cell(){ # egress cell path body extra-header...
         note="HTTP $LAST_STATUS, $cell envelope validated; mock received a $egress-shaped request on its $egress endpoint"
       fi
     elif [ "$m" = miss ]; then
-      reason=wrong_answer
+      served='"not_configured"'; reason=probe_failed
       note="HTTP $LAST_STATUS with a valid $cell envelope, but the mock never received a request on the $egress endpoint: the gateway answered without contacting the configured upstream"
+      CELL_PROBE_NOTE="probe failed: HTTP $LAST_STATUS; valid $cell envelope but zero requests recorded on the mock's $egress endpoint (answered without calling the upstream)"
     elif [ "${m#misdialect }" != "$m" ]; then
-      reason=wrong_answer
+      served='"not_configured"'; reason=probe_failed
       note="HTTP $LAST_STATUS with a valid $cell envelope, but the gateway did not speak the $egress dialect to the upstream: the mock received the request on the ${m#misdialect } endpoint instead"
+      CELL_PROBE_NOTE="probe failed: HTTP $LAST_STATUS; upstream request landed on the ${m#misdialect } endpoint, not the $egress endpoint (this pairing is not wired to a $egress upstream)"
     elif [ "$m" = norecord ]; then
       # The recording mock was displaced by something on our rig: a HARNESS gap, not gateway fault.
       served='"not_verified"'; reason=mock_norecord
       note="HTTP $LAST_STATUS with a valid $cell envelope, but the recording mock's state was unavailable (another process replaced the mock on :$MOCK_PORT?); round trip unverifiable, recorded as not_verified rather than guessed either way"
     else
-      reason=wrong_answer
+      served='"not_configured"'; reason=probe_failed
       note="HTTP $LAST_STATUS with a valid $cell envelope, but the request that reached the mock's $egress endpoint did not carry the $egress request shape: ${m#badshape }"
+      CELL_PROBE_NOTE="probe failed: HTTP $LAST_STATUS; the upstream request reached the $egress endpoint but did not carry the $egress request shape (${m#badshape })"
     fi
   elif [ "$cell" = bedrock ] && { [ "$LAST_STATUS" = 401 ] || [ "$LAST_STATUS" = 403 ]; }; then
     # the gateway rejected the bearer token on the bedrock ingress: it wants SigV4, which this
-    # harness does not forge. Distinct verdict: not served, but not a red either.
+    # harness does not forge. Distinct verdict: not served, but not graded either.
     served='"unprobed_auth"'; reason=inbound_sigv4
     note="HTTP $LAST_STATUS with a bearer token; gateway appears to require inbound SigV4 on the bedrock ingress, which this probe does not sign"
   elif printf '%s' "$v" | grep -q '^passthrough'; then
-    reason=wrong_answer
+    served='"not_configured"'; reason=probe_failed
     note="UNTRANSLATED $v; the gateway proxied $path through verbatim instead of translating (HTTP $LAST_STATUS)"
+    CELL_PROBE_NOTE="probe failed: HTTP $LAST_STATUS; response was the upstream's $cell body proxied verbatim, not a translation ($v)"
   else
-    reason=wrong_answer
+    served='"not_configured"'; reason=probe_failed
     note="HTTP $LAST_STATUS on POST $path: $v"
+    CELL_PROBE_NOTE="probe failed: HTTP $LAST_STATUS on POST $path; $v; first bytes: $(printf '%s' "$LAST_BODY" | head -c 160)"
   fi
   # Snapshot the CAPABILITY-PROBE status + body NOW, before matrix_cell_perf's post-load leg-3
   # re-verify calls probe() again and overwrites LAST_STATUS/LAST_BODY. Otherwise a green cell whose
@@ -625,10 +677,27 @@ run_cell(){ # egress cell path body extra-header...
 }
 
 # ── egress loop: (re)configure + relaunch the gateway per upstream dialect, probe all 6 ingress ──
+# PROBE-FIRST launch ladder for a column:
+#   1. manifest defines gw_matrix_egress and it accepts this dialect -> dedicated egress config;
+#   2. the writer REJECTS the dialect (no writer for it)            -> the gateway's DEFAULT config
+#      (gw_launch): the column is still probed, and each cell's leg-3 evidence records honestly
+#      where the requests actually went (not_configured, never a boot failure, never a red);
+#   3. no gw_matrix_egress at all -> the default config serves every column (launched ONCE and
+#      reused: the config is identical per column, so re-booting it 6x would measure nothing).
+EGRESS_CONFIG=""   # "dedicated" | "default" - what this column actually ran under (recorded in JSON)
 launch_egress(){ # dialect -> 0 launched, 1 launch failed
   gw_stop 2>/dev/null; sleep 1
-  if declare -f gw_matrix_egress >/dev/null; then gw_matrix_egress "$1" || return 1
-  else gw_launch || return 1; fi
+  EGRESS_CONFIG=dedicated
+  if declare -f gw_matrix_egress >/dev/null; then
+    if ! gw_matrix_egress "$1"; then
+      log "[$GATEWAY] egress=$1: manifest has no egress writer for this dialect - probing under the default config"
+      EGRESS_CONFIG=default
+      gw_launch || return 1
+    fi
+  else
+    EGRESS_CONFIG=default
+    gw_launch || return 1
+  fi
   rebuild_headers
   return 0
 }
@@ -670,11 +739,16 @@ warm_up(){ # egress
 
 UPSTREAMS_JSON=""
 COMPAT_CELLS=""; COMPAT_SHAPE=""; COMPAT_SERVED=false; COMPAT_ERR=""
+# Default-config reuse across columns (launch ladder case 3): the config is identical for every
+# egress dialect, so the launch + warm-up verdict from the first column carries over instead of
+# re-booting the same process six times.
+HAVE_EGRESS_FN=0; declare -f gw_matrix_egress >/dev/null && HAVE_EGRESS_FN=1
+DEFAULT_UP=0; DEFAULT_WARM_OK=0; DEFAULT_WARM_LAST=000; DEFAULT_SERVE_ERR=""; DEFAULT_WARM_CELL=openai
 for EGRESS in $EGRESS_ALL; do
   CELLS_JSON=""
   # Wall-clock backstop: if a pathological gateway has already burned the suite ceiling, stop probing
   # further egress columns and record them not-served (timeout) so run-all can never wedge here.
-  if col_capable "$EGRESS" && suite_deadline_expired; then
+  if suite_deadline_expired; then
     log "[$GATEWAY] egress=$EGRESS: suite wall-clock ceiling reached - recording not served, moving on"
     WARM_OK=0
     for CELL in $INGRESS_ALL; do
@@ -686,51 +760,40 @@ for EGRESS in $EGRESS_ALL; do
     }}"
     continue
   fi
-  if ! col_capable "$EGRESS"; then
-    # No cell in this egress column is declared capable: the gateway does not claim ANY translation
-    # into this upstream dialect. Emit every cell grey with its cited capability-limit reason; never
-    # launch or probe. Grey here is a declared limit, not untested generosity.
-    log "[$GATEWAY] egress=$EGRESS: not declared (no capability claim for this upstream dialect)"
-    for CELL in $INGRESS_ALL; do
-      if cell_untestable "$CELL" "$EGRESS"; then
-        emit_cell "$CELL" '"untestable"' "" "$(ingress_path "$CELL")" \
-          "untestable: no upstream base-URL override reaches the test mock (a mock-reachability limit of this rig, not gateway incapability). $GW_MATRIX_UNTESTABLE_NOTE" "" no_base_url_override
-      else
-        emit_cell "$CELL" '"not_configurable"' "" "$(ingress_path "$CELL")" \
-          "$GW_MATRIX_CAP_NOTE" "" not_declared
-      fi
-    done
-    UPSTREAMS_JSON="${UPSTREAMS_JSON}${UPSTREAMS_JSON:+,}
-    \"$EGRESS\": {\"configurable\": false, \"served\": false, \"cap_note\": \"$(json_escape "$GW_MATRIX_CAP_NOTE")\", \"cells\": {$CELLS_JSON
-    }}"
-    continue
-  fi
-  log "[$GATEWAY] egress=$EGRESS: launching (robust boot, up to $HARNESS_BOOT_ATTEMPTS attempts)"
-  # Ready fn for this egress column: warm_up sets WARM_OK/WARM_LAST/SERVE_ERR and returns non-zero if
-  # the gateway never answered 200 under this egress config. harness_launch_ready re-runs
-  # launch_egress <dialect> + this probe up to N attempts, so a transient per-egress boot failure
-  # doesn't zero the whole column; only after all attempts fail is the column recorded not-served.
-  _egress_ready(){ warm_up "$EGRESS"; }
-  if ! harness_launch_ready launch_egress _egress_ready "$EGRESS"; then
-    # WARM_OK is already 0 and SERVE_ERR carries warm_up's last diagnostic; annotate with the retry note.
-    WARM_OK=0; WARM_LAST="${WARM_LAST:-000}"
-    SERVE_ERR="${HARNESS_SERVE_ERR}${SERVE_ERR:+; }${SERVE_ERR:-}"
-    log "[$GATEWAY] egress=$EGRESS: not ready after $HARNESS_BOOT_ATTEMPTS attempts"
+  # PROBE-FIRST: every egress column is attempted - launch (dedicated writer or default-config
+  # fallback, see launch_egress) and probe all six ingress cells. A manifest without any
+  # gw_matrix_egress runs its ONE default config: launch it once and probe every column against it
+  # (the leg-3 evidence tells each column's cells honestly where the requests actually went).
+  if [ "$HAVE_EGRESS_FN" = 1 ] || [ "$DEFAULT_UP" = 0 ]; then
+    log "[$GATEWAY] egress=$EGRESS: launching (robust boot, up to $HARNESS_BOOT_ATTEMPTS attempts)"
+    # Ready fn for this egress column: warm_up sets WARM_OK/WARM_LAST/SERVE_ERR and returns non-zero if
+    # the gateway never answered 200 under this egress config. harness_launch_ready re-runs
+    # launch_egress <dialect> + this probe up to N attempts, so a transient per-egress boot failure
+    # doesn't zero the whole column; only after all attempts fail is the column recorded not-served.
+    _egress_ready(){ warm_up "$EGRESS"; }
+    if ! harness_launch_ready launch_egress _egress_ready "$EGRESS"; then
+      # WARM_OK is already 0 and SERVE_ERR carries warm_up's last diagnostic; annotate with the retry note.
+      WARM_OK=0; WARM_LAST="${WARM_LAST:-000}"
+      SERVE_ERR="${HARNESS_SERVE_ERR}${SERVE_ERR:+; }${SERVE_ERR:-}"
+      log "[$GATEWAY] egress=$EGRESS: not ready after $HARNESS_BOOT_ATTEMPTS attempts"
+    fi
+    if [ "$HAVE_EGRESS_FN" = 0 ]; then
+      DEFAULT_UP=1; DEFAULT_WARM_OK="$WARM_OK"; DEFAULT_WARM_LAST="$WARM_LAST"
+      DEFAULT_SERVE_ERR="$SERVE_ERR"; DEFAULT_WARM_CELL="$WARM_CELL"
+    fi
+  else
+    # Same process, same config: the first column's launch + warm-up verdict carries over.
+    log "[$GATEWAY] egress=$EGRESS: no per-egress writer - probing the running default config"
+    WARM_OK="$DEFAULT_WARM_OK"; WARM_LAST="$DEFAULT_WARM_LAST"
+    SERVE_ERR="$DEFAULT_SERVE_ERR"; WARM_CELL="$DEFAULT_WARM_CELL"; EGRESS_CONFIG=default
   fi
   EG_SERVED=$([ "$WARM_OK" = 1 ] && echo true || echo false)
   for CELL in $INGRESS_ALL; do
-    # Per-cell capability gate: a declared-0 (ingress,egress) pair is grey without probing even when
-    # the egress column is launched (the gateway claims SOME translations into this upstream but not
-    # this ingress). Only declared-1 cells are probed for a real pass/fail.
-    if [ "$(cap "$CELL" "$EGRESS")" != 1 ]; then
-      if cell_untestable "$CELL" "$EGRESS"; then
-        emit_cell "$CELL" '"untestable"' "" "$(ingress_path "$CELL")" \
-          "untestable: no upstream base-URL override reaches the test mock (a mock-reachability limit of this rig, not gateway incapability). $GW_MATRIX_UNTESTABLE_NOTE" "" no_base_url_override
-        log "[$GATEWAY]   $EGRESS <- $CELL : untestable (no base-URL override, cited)"
-      else
-        emit_cell "$CELL" '"not_configurable"' "" "$(ingress_path "$CELL")" "$GW_MATRIX_CAP_NOTE" "" not_declared
-        log "[$GATEWAY]   $EGRESS <- $CELL : not declared (grey)"
-      fi
+    # The ONE probe exemption: a manifest-cited mock-reachability limit (real cloud host pinned).
+    if cell_untestable "$CELL" "$EGRESS"; then
+      emit_cell "$CELL" '"untestable"' "" "$(ingress_path "$CELL")" \
+        "untestable: no upstream base-URL override reaches the test mock (a mock-reachability limit of this rig, not gateway incapability). $GW_MATRIX_UNTESTABLE_NOTE" "" no_base_url_override
+      log "[$GATEWAY]   $EGRESS <- $CELL : untestable (no base-URL override, cited)"
       continue
     fi
     BODY="$(ingress_body "$CELL")"
@@ -743,7 +806,7 @@ for EGRESS in $EGRESS_ALL; do
     esac
   done
   UPSTREAMS_JSON="${UPSTREAMS_JSON}${UPSTREAMS_JSON:+,}
-    \"$EGRESS\": {\"configurable\": true, \"served\": $EG_SERVED, \"serve_error\": \"$(json_escape "$SERVE_ERR")\", \"cells\": {$CELLS_JSON
+    \"$EGRESS\": {\"configurable\": true, \"served\": $EG_SERVED, \"egress_config\": \"${EGRESS_CONFIG:-default}\", \"serve_error\": \"$(json_escape "$SERVE_ERR")\", \"cells\": {$CELLS_JSON
     }}"
   # v1 compat row: the openai-egress cells when configured, else the first configured egress.
   if [ "$EGRESS" = openai ] || [ -z "$COMPAT_SHAPE" ]; then
@@ -762,7 +825,8 @@ cat > "$RESULTS/$GATEWAY.json" <<JSON
   "upstream_shape": "$COMPAT_SHAPE",
   "upstream_note": "v2: full 6x6. Top-level cells are the $COMPAT_SHAPE-egress row for v1 compatibility; the full grid is under upstreams.<egress>.cells keyed by ingress dialect.",
   "egress_configured": "$GW_MATRIX_EGRESS",
-  "cap_note": "$(json_escape "$GW_MATRIX_CAP_NOTE")",
+  "probe_first": true,
+  "capability_note": "$(json_escape "advisory context only (probe-first: every cell is probed regardless): $GW_MATRIX_CAP_NOTE")",
   "cell_perf_sweep": $([ "$MATRIX_SWEEP" = 1 ] && echo true || echo false),
   "sweep_rung_selection": "$([ "${SWEEP_ADAPTIVE:-0}" = 1 ] && echo adaptive || echo full-ladder)",
   "sweep_ttft_ms": $SWEEP_TTFT_MS,
@@ -785,8 +849,8 @@ import json, sys
 j = json.load(open(sys.argv[1]))
 ups = j.get("upstreams", {})
 egs = list(ups.keys())
-sym = {True: "PASS", False: "fail", "not_configurable": "n/c ", "unprobed_auth": "auth",
-       "not_verified": "n/v ", "untestable": "mock"}
+sym = {True: "PASS", False: "fail", "not_configured": "n/c ", "not_configurable": "n/c ",
+       "unprobed_auth": "auth", "not_verified": "n/v ", "untestable": "mock"}
 print("   %-17s" % "ingress \\ egress" + "".join("%-18s" % e for e in egs))
 cells0 = next(iter(ups.values()))["cells"]
 for cell in cells0:

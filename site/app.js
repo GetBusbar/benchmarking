@@ -863,7 +863,11 @@ const MATRIX_LABELS = {
      served:"untestable" (+ reason no_base_url_override) - the gateway supports this pair in
        production but pins the real cloud host, so our mock is unreachable: a limit of this rig,
        not gateway incapability;
-     served:false (+ reason wrong_answer) - the gateway SERVED and answered wrongly: the only red.
+     served:"not_configured" (+ reason probe_failed, probe_note evidence) - PROBE-FIRST (matrix v3):
+       the cell was probed and the round trip was not a correct translation; renders grey with the
+       probe evidence, NEVER a red;
+     served:false (+ reason wrong_answer) - LEGACY (pre-probe-first) red: the gateway served a
+       declared cell and answered wrongly. New results never emit it; old ones still render.
    The prose-note heuristic below survives ONLY as a fallback for results that predate the
    machine-readable served/reason fields. */
 const isHarnessGap = (cell) => {
@@ -875,10 +879,14 @@ const isHarnessGap = (cell) => {
 const cellState = (cell) =>
   cell.served === true ? ["served", "served"]
     : cell.served === "unprobed_auth" ? ["unprobed", "unprobed (auth)"]
-      : cell.served === "not_configurable" ? ["notconf", "not declared"]
-        : cell.served === "untestable" ? ["untestable", "untestable (mock limit)"]
-          : isHarnessGap(cell) ? ["unverified", "not verified"]
-          : ["failed", "not served"];
+      // PROBE-FIRST (matrix v3): every cell is probed; a failed probe is "not configured" with the
+      // probe's evidence (probe_note) - it renders like the old declaration-grey, never as a red.
+      : cell.served === "not_configured" ? ["notconf", "not configured"]
+        // legacy results (pre-probe-first): grey by the drafted capability grid, not by a probe
+        : cell.served === "not_configurable" ? ["notconf", "not declared"]
+          : cell.served === "untestable" ? ["untestable", "untestable (mock limit)"]
+            : isHarnessGap(cell) ? ["unverified", "not verified"]
+            : ["failed", "not served"];
 
 function laneStamp(j) {
   const bits = [];
@@ -1091,6 +1099,11 @@ function matrixCell(g, egress, ingress) {
    "we didn't test it". Green/red show the verdict label + note as before. */
 function matrixCellTip(cell) {
   const [, label] = cellState(cell);
+  if (cell.served === "not_configured")
+    // PROBE-FIRST grey: this cell WAS probed and the probe failed - show the probe's own evidence
+    // (probe_note), falling back to the verdict prose. Honest wording: not configured/supported on
+    // this pairing, never "the gateway failed" - no cell is graded red under probe-first.
+    return `not configured: the capability probe on this ingress/upstream pairing did not complete a correct translation round trip${cell.probe_note ? " - " + cell.probe_note : cell.verdict_note ? " - " + cell.verdict_note : ""}`;
   if (cell.served === "not_configurable")
     // HONEST wording: the capability grid is authored by the busbar team from each project's docs
     // as a stand-in until that project's maintainers confirm their own grid. So a grey cell is "not
@@ -1132,7 +1145,7 @@ function renderMatrix() {
       const cell = matrixCell(g, e, c);
       if (!cell) continue;
       if (cell.served === true) t.pass++;
-      else if (cell.served === "not_configurable") t.notconf++;
+      else if (cell.served === "not_configured" || cell.served === "not_configurable") t.notconf++;
       else if (cell.served === "unprobed_auth") t.unprobed++;
       else if (cell.served === "untestable") t.untestable++;
       else if (isHarnessGap(cell)) t.unverified++;
@@ -1147,7 +1160,7 @@ function renderMatrix() {
     const t = tally(g);
     const bits = [`<b class="pass-count">${t.pass}</b>/36 pass`];
     if (t.fail) bits.push(`${t.fail} fail`);
-    if (t.notconf) bits.push(`${t.notconf} not declared`);
+    if (t.notconf) bits.push(`${t.notconf} not configured`);
     if (t.untestable) bits.push(`${t.untestable} untestable (mock limit)`);
     if (t.unverified) bits.push(`${t.unverified} not verified`);
     if (t.unprobed) bits.push(`${t.unprobed} unprobed (auth)`);
