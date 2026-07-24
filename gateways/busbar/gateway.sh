@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
-# Gateway manifest: Busbar.
+# Gateway manifest: Busbar (docker).
 #
-# Self-provisions like every other gateway — pulls the RELEASED image (BUSBAR_IMAGE in
-# versions.env, e.g. getbusbar/busbar:1.4.1), extracts the static binary, and runs it as a native
-# process so we measure the real process RSS/latency. Override with BUSBAR_BIN to point at a local
-# working-tree build instead. Config: token auth, one model to the mock — no special setup.
-GW_KIND=native
+# Runs the RELEASED image users download (BUSBAR_IMAGE in versions.env, e.g. getbusbar/busbar:1.4.1,
+# multi-arch amd64+arm64) as its own container — the same uniform launch shape as every other docker
+# gateway (host network, pinned cpuset, config mounted read-only). RSS/HWM are read from the
+# container's host-pid process tree (container_rss_mib), the same units as a native process.
+# Override BUSBAR_IMAGE to benchmark a locally-built image. Config: token auth, one model to the
+# mock — no special setup.
+GW_KIND=docker
 # Self-describing manifest metadata — charts.py + the run lists read these, so a gateway
 # is fully defined by its own dir (add/remove a dir → it appears/disappears everywhere).
 GW_DISPLAY="Busbar"                      # label in charts + report tables
@@ -22,19 +24,16 @@ GW_AUTH=bench-token
 # either carrier (Authorization: Bearer or x-api-key), so no auth override is needed.
 GW_ANTHROPIC_PATH=/v1/messages
 
+BUSBAR_IMAGE="${BUSBAR_IMAGE:-getbusbar/busbar:1.4.1}"
+
 gw_build() {
-  if [ -z "${BUSBAR_BIN:-}" ]; then
-    command -v docker >/dev/null || { echo "[busbar] need docker, or set BUSBAR_BIN"; return 1; }
-    docker pull "${BUSBAR_IMAGE}" >/dev/null 2>&1 || { echo "[busbar] cannot pull ${BUSBAR_IMAGE}"; return 1; }
-    docker rm -f busbar-extract >/dev/null 2>&1
-    docker create --name busbar-extract "${BUSBAR_IMAGE}" >/dev/null 2>&1
-    docker cp busbar-extract:/busbar "$GW_DIR/busbar" >/dev/null 2>&1 \
-      || { echo "[busbar] no /busbar in ${BUSBAR_IMAGE}"; docker rm -f busbar-extract >/dev/null 2>&1; return 1; }
-    docker rm -f busbar-extract >/dev/null 2>&1
-    chmod +x "$GW_DIR/busbar"; BUSBAR_BIN="$GW_DIR/busbar"
-  fi
+  sudo docker pull "$BUSBAR_IMAGE" >/dev/null 2>&1 || true
 }
-gw_version() { local v; v="$("$BUSBAR_BIN" --version 2>/dev/null | head -1)"; echo "${v:-${BUSBAR_IMAGE:-busbar}}"; }
+
+gw_version() {
+  local dg; dg=$(sudo docker inspect --format '{{index .RepoDigests 0}}' "$BUSBAR_IMAGE" 2>/dev/null)
+  echo "${BUSBAR_IMAGE}${dg:+ (@${dg##*@})}"
+}
 
 # ── matrix suite: full 6x6 egress support ─────────────────────────────────────────────────────────
 # Busbar's provider config is protocol-first: `protocol: <dialect>` + `base_url` is the whole story,
@@ -53,11 +52,27 @@ GW_MATRIX_CAP="
 GW_MATRIX_CAP_NOTE="busbar declares full 6x6 translation support"
 GW_MATRIX_EGRESS="openai openai-responses anthropic gemini cohere bedrock"
 
+# _busbar_run <mock-key>: the single docker launch every lane shares. The image's entrypoint is
+# /busbar and its baked-in defaults already point BUSBAR_CONFIG/BUSBAR_PROVIDERS at
+# /etc/busbar/{config,providers}.yaml — the generated configs are mounted read-only onto exactly
+# those paths. Host network keeps 127.0.0.1:$MOCK_PORT/$GW_PORT semantics identical to the old
+# native launch; --cpuset-cpus is the same core pin taskset gave the native binary.
+# Note on state: busbar 1.5+ snapshots runtime state (breaker cells included) to busbar-state.json
+# next to the config and restores it on boot. A bench launch must be deterministic and stateless,
+# a tripped breaker from a previous run must never carry over, so every launch here sets
+# BUSBAR_STATE_FILE= (empty disables persistence).
+_busbar_run() { # mock-key
+  sudo docker rm -f busbar-bench >/dev/null 2>&1; sleep 1
+  sudo docker run -d --name busbar-bench --network host --cpuset-cpus="$CORES" \
+    -e BUSBAR_WORKER_THREADS="$(( ${CORES##*-} + 1 ))" \
+    -e BUSBAR_STATE_FILE= \
+    -e BENCH_MOCK_KEY="$1" \
+    -v "$GW_DIR/config.gen.yaml:/etc/busbar/config.yaml:ro" \
+    -v "$GW_DIR/providers.gen.yaml:/etc/busbar/providers.yaml:ro" \
+    "$BUSBAR_IMAGE" >"$GW_DIR/launch.log" 2>&1 || true
+}
+
 _busbar_launch_common() { # proto mock-key
-  # Note on state: busbar 1.5+ snapshots runtime state (breaker cells included) to
-  # busbar-state.json next to the config and restores it on boot. A bench launch must be
-  # deterministic and stateless, a tripped breaker from a previous run must never carry over,
-  # so every launch here sets BUSBAR_STATE_FILE= (empty disables persistence).
   local proto="$1" key="$2"
   cat > "$GW_DIR/providers.gen.yaml" <<YAML
 mock:
@@ -65,14 +80,7 @@ mock:
   base_url: http://127.0.0.1:$MOCK_PORT
   error_map: {}
 YAML
-  pkill -x busbar 2>/dev/null; sleep 1
-  setsid taskset -c "$CORES" env \
-    BUSBAR_WORKER_THREADS="$(( ${CORES##*-} + 1 ))" \
-    BUSBAR_PROVIDERS="$GW_DIR/providers.gen.yaml" \
-    BUSBAR_CONFIG="$GW_DIR/config.gen.yaml" \
-    BUSBAR_STATE_FILE= \
-    BENCH_MOCK_KEY="$key" \
-    "$BUSBAR_BIN" </dev/null >/tmp/busbar.bench.log 2>&1 &
+  _busbar_run "$key"
 }
 
 gw_matrix_egress() {
@@ -144,19 +152,19 @@ mock:
   base_url: http://127.0.0.1:$MOCK_PORT
   error_map: {}
 YAML
-  pkill -x busbar 2>/dev/null; sleep 1
-  setsid taskset -c "$CORES" env \
-    BUSBAR_WORKER_THREADS="$(( ${CORES##*-} + 1 ))" \
-    BUSBAR_PROVIDERS="$GW_DIR/providers.gen.yaml" \
-    BUSBAR_CONFIG="$GW_DIR/config.gen.yaml" \
-    BUSBAR_STATE_FILE= \
-    BENCH_MOCK_KEY=x \
-    "$BUSBAR_BIN" </dev/null >/tmp/busbar.bench.log 2>&1 &
+  _busbar_run x
 }
 
-gw_rss() { awk '/VmRSS/{printf "%.1f", $2/1024}' "/proc/$(pgrep -x busbar)/status" 2>/dev/null; }
-gw_hwm() { _hwm_tree_mib "$(pgrep -x busbar 2>/dev/null | head -1)"; }  # kernel VmHWM of the busbar tree
-gw_stop() { pkill -x busbar 2>/dev/null; }
+gw_rss() { container_rss_mib busbar-bench; }  # summed process-tree VmRSS (same method as native)
+gw_hwm() { container_hwm_mib busbar-bench; }  # summed process-tree VmHWM (kernel high-water mark)
+
+gw_diag() {
+  echo "container: $(sudo docker ps -a --filter name=busbar-bench --format '{{.Status}}' 2>/dev/null)"
+  echo "run.log: $(cat "$GW_DIR/launch.log" 2>/dev/null | tr '\n' ' ' | head -c 300)"
+  echo "logs:"; sudo docker logs --tail 25 busbar-bench 2>&1
+}
+
+gw_stop() { sudo docker rm -f busbar-bench >/dev/null 2>&1; }
 
 # ── governed lane (governed/run.sh) ────────────────────────────────────────────────────────────────
 # Busbar's governance layer is always compiled in but INERT until governance.admin_token is set.
@@ -216,14 +224,7 @@ mock:
   base_url: http://127.0.0.1:$MOCK_PORT
   error_map: {}
 YAML
-  pkill -x busbar 2>/dev/null; sleep 1
-  setsid taskset -c "$CORES" env \
-    BUSBAR_WORKER_THREADS="$(( ${CORES##*-} + 1 ))" \
-    BUSBAR_PROVIDERS="$GW_DIR/providers.gen.yaml" \
-    BUSBAR_CONFIG="$GW_DIR/config.gen.yaml" \
-    BUSBAR_STATE_FILE= \
-    BENCH_MOCK_KEY=x \
-    "$BUSBAR_BIN" </dev/null >/tmp/busbar.governed.log 2>&1 &
+  _busbar_run x
   # Wait for the admin plane, then mint the run's virtual key. The secret (sk-bb-<32 hex>) is
   # returned exactly once in the 201 body; it becomes the bench bearer token.
   local i resp
