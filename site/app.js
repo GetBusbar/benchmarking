@@ -1296,6 +1296,19 @@ const rosterRows = (gateways) =>
 /* Star counts render compact: 12345 -> "12.3k", below 1000 the full int. Null (no
    snapshot entry) stays null; the cell renders it muted. */
 const fmtStars = (v) => (v == null ? null : v >= 1000 ? `${(v / 1000).toFixed(1)}k` : String(Math.round(v)));
+/* Project age from the repo's first-commit date, in ONE simple floored unit: "11+ years",
+   "7+ months", "3+ weeks". Context for the star counts and scores - a decade-old project and a
+   three-week-old one earn them differently. Null (no snapshot) renders muted. */
+const fmtProjectAge = (firstCommit) => {
+  if (!firstCommit) return null;
+  const days = Math.max(0, (Date.now() - new Date(firstCommit).getTime()) / 86400e3);
+  // Floored, so the "+" is honest: 11.7 years reads "11+ years".
+  if (days >= 365) return `${Math.floor(days / 365)}+ year${days >= 730 ? "s" : ""}`;
+  if (days >= 30.44) return `${Math.floor(days / 30.44)}+ month${days >= 61 ? "s" : ""}`;
+  if (days >= 7) return `${Math.floor(days / 7)}+ week${days >= 14 ? "s" : ""}`;
+  return `${Math.max(1, Math.floor(days))} days`;
+};
+
 /* The gateway's measured BUILD string (version/tag as run): the first suite record carrying one -
    every suite of a gateway ran the same single-box build, so any lane's stamp is THE stamp. */
 const gatewayBuild = (g) => {
@@ -1333,10 +1346,12 @@ function renderGateways() {
       : esc(g.display);
     const stars = fmtStars(g.stars);
     const build = gatewayBuild(g);
+    const age = fmtProjectAge(g.first_commit);
     return `<tr>
       <td class="name">${name}</td>
       <td><span class="lang-chip" style="background:${c}">${esc(g.lang)}</span></td>
       <td class="build">${build ? `<span title="${esc(build)}">${esc(fmtBuild(build))}</span>` : `<span class="muted">n/a</span>`}</td>
+      <td class="age">${age ? `<span title="first commit ${esc(g.first_commit)}">${esc(age)}</span>` : `<span class="muted">n/a</span>`}</td>
       <td class="stars">${stars != null ? esc(stars) : `<span class="muted">n/a</span>`}</td>
       <td class="cls">${esc(g.cls || "Gateway")}</td>
     </tr>`;
