@@ -4,10 +4,10 @@
   "served": true,
   "last_http_status": "200",
   "serve_error": "",
-  "idle_rss_mib": 177.3,
-  "peak_rss_mib": 421.8,
-  "peak_rss_hwm_mib": 455.6,
-  "post_load_rss_mib": 141.1,
+  "idle_rss_mib": 177.9,
+  "peak_rss_mib": 439.3,
+  "peak_rss_hwm_mib": 473.4,
+  "post_load_rss_mib": 185.0,
   "payload_bytes": 150000,
   "concurrency": 1500,
   "duration_s": 120,
@@ -15,5 +15,5 @@
   "model": "anthropic/mock",
   "arch": "arm64",
   "hardware": "AWS m7g.4xlarge (Graviton3, 16 cores / 64 GB). Gateway-under-test pinned to 4 cores (the comparable basis); mock and load generator on 6 cores each so the mock never bottlenecks the streaming sweep. Ubuntu 24.04. One dedicated box per gateway.",
-  "measured_at": "2026-07-24T01:26:06Z"
+  "measured_at": "2026-07-24T08:44:43Z"
 }

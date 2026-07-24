@@ -3,5 +3,5 @@
   "build": "justsong/one-api:v0.6.10 (@sha256:e667221a2e197f005bdf3aba300885ac165fde37a0de9773e478678a9e04b24a)",
   "governed_served": false,
   "governed_note": "manifest defines no gw_governed_launch/gw_governed_token (no native key/limit governance, or not yet wired)",
-  "measured_at": "2026-07-24T01:35:24Z"
+  "measured_at": "2026-07-24T08:53:07Z"
 }

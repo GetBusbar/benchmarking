@@ -3,5 +3,5 @@
   "build": "portkeyai/gateway:1.15.2 (@sha256:97f094d9c8a764cbfaa2a7138c0017b247ca923bb06db1b4c13b7f8a33b5200d)",
   "governed_served": false,
   "governed_note": "manifest defines no gw_governed_launch/gw_governed_token (no native key/limit governance, or not yet wired)",
-  "measured_at": "2026-07-24T01:33:57Z"
+  "measured_at": "2026-07-24T08:52:22Z"
 }

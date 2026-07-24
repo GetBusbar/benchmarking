@@ -3,5 +3,5 @@
   "build": "ghcr.io/berriai/litellm:v1.93.0 (@sha256:a1745e629abfb17d434426ff48b115f54f4f4c4a0f5af241de569e93c63c411e)",
   "governed_served": false,
   "governed_note": "manifest defines no gw_governed_launch/gw_governed_token (no native key/limit governance, or not yet wired)",
-  "measured_at": "2026-07-24T01:41:35Z"
+  "measured_at": "2026-07-24T09:00:08Z"
 }

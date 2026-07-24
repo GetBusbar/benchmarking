@@ -28,5 +28,5 @@
   "model": "tensorzero::model_name::mock",
   "arch": "arm64",
   "hardware": "AWS m7g.4xlarge (Graviton3, 16 cores / 64 GB). Gateway-under-test pinned to 4 cores (the comparable basis); mock and load generator on 6 cores each so the mock never bottlenecks the streaming sweep. Ubuntu 24.04. One dedicated box per gateway.",
-  "measured_at": "2026-07-24T01:32:12Z"
+  "measured_at": "2026-07-24T08:51:57Z"
 }

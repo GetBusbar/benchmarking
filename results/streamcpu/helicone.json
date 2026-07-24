@@ -10,15 +10,16 @@
   "streamcpu_frames_per_sec": 0,
   "streamcpu_fps_per_core": 0,
   "streamcpu_concurrency": 0,
-  "streamcpu_direct_ceiling_fps": 204117,
+  "streamcpu_direct_ceiling_fps": 206351,
   "streamcpu_mock_bound": false,
   "streamcpu_valid": false,
+  "streamcpu_note": "",
   "streamcpu_added_per_frame_us": null,
   "streamcpu_frames_per_stream": 512,
   "streamcpu_frame_bytes": 16,
   "streamcpu_cores": 4,
   "streamcpu_stall_ms": 250,
-  "sweep_streamcpu": [{"conc":8,"streams":280,"complete":0,"fail":0,"stalled":0,"frames":143360,"fps":7047,"delivered":1.0000},{"conc":32,"streams":1088,"complete":0,"fail":0,"stalled":0,"frames":557056,"fps":27443,"delivered":1.0000},{"conc":64,"streams":2130,"complete":0,"fail":0,"stalled":0,"frames":1090560,"fps":52953,"delivered":1.0000},{"conc":128,"streams":4096,"complete":0,"fail":0,"stalled":0,"frames":2097152,"fps":101884,"delivered":1.0000},{"conc":256,"streams":8118,"complete":0,"fail":0,"stalled":0,"frames":4156416,"fps":201317,"delivered":1.0000}],
+  "sweep_streamcpu": [{"conc":8,"streams":280,"complete":0,"fail":0,"stalled":0,"frames":143360,"fps":7062,"delivered":1.0000},{"conc":32,"streams":1092,"complete":0,"fail":0,"stalled":0,"frames":559104,"fps":27177,"delivered":1.0000},{"conc":64,"streams":2176,"complete":0,"fail":0,"stalled":0,"frames":1114112,"fps":54699,"delivered":1.0000},{"conc":128,"streams":4129,"complete":0,"fail":0,"stalled":0,"frames":2114048,"fps":102591,"delivered":1.0000},{"conc":256,"streams":8187,"complete":0,"fail":0,"stalled":0,"frames":4191744,"fps":203551,"delivered":1.0000}],
   "payload_bytes": 256,
   "endpoint": "/router/default/chat/completions",
   "model": "openai/gpt-4o-mini",
@@ -26,5 +27,5 @@
   "mock_proto": "h1+h2c",
   "arch": "arm64",
   "hardware": "AWS m7g.4xlarge (Graviton3, 16 cores / 64 GB). Gateway-under-test pinned to 4 cores (the comparable basis); mock and load generator on 6 cores each so the mock never bottlenecks the streaming sweep. Ubuntu 24.04. One dedicated box per gateway.",
-  "measured_at": "2026-07-24T01:37:14Z"
+  "measured_at": "2026-07-24T08:58:37Z"
 }
