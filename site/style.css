@@ -80,7 +80,7 @@ code { background: var(--bg-raise); border: 1px solid var(--border); border-radi
 .muted { color: var(--fg-mute); }
 .fineprint { color: var(--fg-mute); font-size: .82rem; margin-top: 1rem; }
 .lede { color: var(--fg-dim); max-width: 70ch; }
-#table-caption { line-height: 1.7; margin: .3rem 0 .9rem; }
+#table-caption { line-height: 1.55; margin: .3rem 0 .9rem; }
 .method-lede { color: var(--fg-dim); max-width: 74ch; margin: .6rem 0 0; padding-left: 1.1rem; }
 .method-lede li { margin: .45rem 0; line-height: 1.5; }
 .method-lede li b { color: var(--fg); font-weight: 600; }
@@ -166,7 +166,13 @@ a.home-card:hover { border-color: var(--accent); text-decoration: none; }
 .view h2 { font-size: 1.2rem; margin: .2rem 0 .6rem; }
 
 /* controls */
+/* Head band: caption text left, search + count stacked top-right in the same
+   vertical space the note already occupies — no dedicated search row. */
+.table-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 1.4rem; margin-top: 1rem; }
+.table-head #table-caption { flex: 1 1 auto; margin: 0 0 .9rem; }
 .controls { display: flex; flex-wrap: wrap; gap: 1.2rem; align-items: center; margin-top: 1.4rem; margin-bottom: .9rem; }
+.table-head .controls { flex: 0 0 auto; flex-direction: column; align-items: flex-end; gap: .5rem; margin: 0; }
+.table-head .count { margin: 0; }
 .control-group { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; }
 .toggle { color: var(--fg-dim); font-size: .86rem; display: inline-flex; gap: .35rem; align-items: center; cursor: pointer; }
 .toggle input { accent-color: var(--accent); }
@@ -515,6 +521,9 @@ tbody tr { cursor: pointer; }
   .tabs::-webkit-scrollbar { display: none; }
   .tab { padding: .6rem .7rem; white-space: nowrap; }
 
+  /* Narrow: unstack — caption above, search back to a normal full-width row. */
+  .table-head { flex-direction: column; gap: .5rem; }
+  .table-head .controls { flex-direction: row; align-items: center; width: 100%; }
   .controls { gap: .7rem; }
   #search { flex: 1 1 100%; min-width: 0; padding: .5rem .6rem; }
   .control-group { gap: .45rem; }

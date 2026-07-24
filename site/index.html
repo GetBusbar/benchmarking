@@ -104,18 +104,20 @@
   </section>
 
   <section id="view-table" class="view hidden">
-    <div class="controls" id="controls">
-      <!-- No class/language chip rows here: the perf tabs are a compact 13-row
-           table and the roster tab already shows language and class. Search only. -->
-      <input type="search" id="search" placeholder="Search gateways" aria-label="Search gateways by name">
-      <div class="control-group xlate-picker hidden" id="xlate-picker">
-        <label>Translate <select id="xlate-in" aria-label="Ingress dialect the client speaks"></select>
-        <span class="xlate-arrow">&rarr;</span>
-        <select id="xlate-out" aria-label="Egress dialect the upstream speaks"></select></label>
+    <!-- Caption note on the left, search + count stacked top-right in the caption's
+         own vertical band, so the controls cost no extra row (saves height). -->
+    <div class="table-head">
+      <p id="table-caption" class="fineprint"></p>
+      <div class="controls" id="controls">
+        <input type="search" id="search" placeholder="Search gateways" aria-label="Search gateways by name">
+        <div class="control-group xlate-picker hidden" id="xlate-picker">
+          <label>Translate <select id="xlate-in" aria-label="Ingress dialect the client speaks"></select>
+          <span class="xlate-arrow">&rarr;</span>
+          <select id="xlate-out" aria-label="Egress dialect the upstream speaks"></select></label>
+        </div>
+        <span id="row-count" class="muted count"></span>
       </div>
-      <span id="row-count" class="muted count"></span>
     </div>
-    <p id="table-caption" class="fineprint"></p>
     <div class="table-scroll">
       <table id="results-table">
         <thead></thead>
