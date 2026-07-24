@@ -236,6 +236,18 @@ td.name a { color: var(--fg); font-weight: 600; }
   border: 1px solid var(--border); color: var(--fg-dim); font-size: .74rem; font-weight: 500;
   white-space: nowrap;
 }
+/* Per-gateway freshness signal (matrix-sole-source: each gateway is measured + published
+   independently, so the board carries mixed per-gateway ages — surfaced, not hidden). */
+.row-measured { margin-top: .15rem; }
+.measured-at { font-size: .7rem; color: var(--fg-mute); }
+.measured-at.stale { color: var(--fg-mute); }
+.drawer-measured { margin-top: .35rem; font-size: .74rem; color: var(--fg-mute); }
+.stale-pill {
+  display: inline-block; margin-left: .3rem; padding: .02rem .4rem; border-radius: 999px;
+  border: 1px solid var(--border); background: var(--bg); color: var(--fg-mute);
+  font-size: .66rem; font-weight: 600; text-transform: uppercase; letter-spacing: .04em;
+  vertical-align: middle;
+}
 td.sel { width: 1.6rem; }
 td.sel input { accent-color: var(--accent); cursor: pointer; }
 thead th.nosort { cursor: default; }

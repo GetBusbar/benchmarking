@@ -9,7 +9,7 @@
 // in CATEGORIES in app.js; the emitted `category` field names which bundle this is.
 //
 // Scans gateways/*/gateway.sh (the self-describing manifests: GW_DISPLAY, GW_LANG, GW_REPO)
-// plus results/{perf,memory,stream,streamcpu,xlate,governed,matrix}/<gateway>.json, and emits
+// plus results/{perf,memory,stream,streamcpu,xlate,matrix}/<gateway>.json, and emits
 // site/data.json. Also copies the generated chart PNGs (results/*.png) into site/charts/
 // and the bundled Inter fonts (assets/fonts) into site/fonts/ so the site/ directory is a
 // self-contained Pages artifact, and writes 404.html (a copy of the app shell) so hosts
@@ -30,7 +30,10 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = process.argv[2] || join(HERE, "..");
 const OUT = process.argv[3] || HERE;
 
-const SUITES = ["perf", "memory", "stream", "streamcpu", "xlate", "governed", "matrix"];
+// GOVERNANCE RETIRED (matrix-sole-source): governance is not measured on the board — the governed
+// suite was busbar-only and is retired. `governed/run.sh` stays on disk (unused) but the suite is
+// no longer scanned into the bundle and no governed column/derivation is emitted. See app.js.
+const SUITES = ["perf", "memory", "stream", "streamcpu", "xlate", "matrix"];
 
 // ---- gateway manifests ------------------------------------------------------
 function parseManifest(text) {
@@ -197,13 +200,17 @@ const gateways = gatewayKeys.map((key) => {
       build: g.xlate.build ?? null, measured_at: g.xlate.measured_at ?? null,
     };
   }
-  // "Supports governance" is a DECLARED CAPABILITY, not a per-run measurement outcome. A gateway is
-  // governance-capable if its manifest wires a governed launch - i.e. the governed note is anything
-  // OTHER than "manifest defines no ..." (the string write_unserved emits when no gw_governed_launch
-  // hook exists). So a capable gateway whose measurement failed on a given run (e.g. busbar's launch
-  // hiccup) still reads as capable; only genuinely-unsupported gateways are excluded from the filter.
-  const gnote = (g.governed && typeof g.governed.governed_note === "string") ? g.governed.governed_note : "";
-  g.supports_governed = !!g.governed && !gnote.includes("manifest defines no");
+  // GOVERNANCE RETIRED: no `supports_governed` derivation. Under matrix-sole-source governance is not
+  // a board metric (the governed suite was busbar-only and is retired), so the board neither emits a
+  // governed column nor a supports_governed capability flag.
+  //
+  // PER-GATEWAY freshness stamp: each gateway carries its OWN newest measurement so the board can show
+  // an independent "measured Nd ago" per row and flag a row that has aged past MAX_GATEWAY_AGE_DAYS.
+  // Different gateways legitimately have different measured_at (busbar today, kong 3 weeks ago) — that
+  // is honest on a living board where any one gateway can be re-run alone. The staleness flag drives a
+  // per-row badge in app.js; it is NOT a build failure (see the freshness guard below).
+  const gAtMs = newestMeasuredMs(g);
+  g.measured_at = gAtMs > 0 ? new Date(gAtMs).toISOString() : null;
   return g;
 });
 
@@ -283,7 +290,13 @@ for (const g of gateways) {
 }
 const hardware = [...hwCounts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] || null;
 
-// ---- staleness guard (R2) ---------------------------------------------------
+// The newest embedded measurement across a gateway's own suites, in epoch ms (0 when it has none).
+// Used both for each gateway's own g.measured_at stamp and for the wholesale-stale board floor below.
+function newestMeasuredMs(g) {
+  return Math.max(...SUITES.map((s) => g[s] && g[s].measured_at).filter(Boolean).map((a) => Date.parse(a)).concat([0]));
+}
+
+// ---- freshness guard (matrix-sole-source) -----------------------------------
 // The bundle is regenerated from the raw results tree on every run, so generated_at must never
 // precede the newest embedded measurement: if it does, a raw result is future-dated (clock skew
 // on the rig) and a "fresh" bundle would look older than its data. Hard fail; never ship it.
@@ -292,65 +305,58 @@ if (latest && generatedAt < latest) {
   throw new Error(`gen-data: generated_at ${generatedAt} predates the newest embedded measured_at ${latest}; ` +
     `a raw result is future-dated (rig clock skew?). Refusing to emit a bundle that would read stale.`);
 }
-// FRESHNESS GUARD (trust): a full field run puts every one of a gateway's suites on ONE box,
-// sequentially. Most gateways cluster tightly (their whole run is < ~1h), but the MATRIX suite is
-// the outlier: for a gateway that does real cross-protocol translation on every egress cell it runs
-// ~2.3h (busbar), vs 17-45 min for passthrough gateways. So a LEGITIMATE single clean busbar box run
-// spans ~2.6h (fast suites 18:32-18:48, matrix 21:08) - that is NOT a franken-mix. MAX_SPAN_H must
-// therefore clear the slowest gateway's real single-run span, or busbar can never publish (it did
-// exactly this: MAX_SPAN_H=2 hard-failed every clean busbar run because its matrix alone is > 2h).
-// Set to 3h: still well under a genuine franken-mix (the busbar-streaming bug shipped a `stream`
-// suite from a run HOURS/days older than the rest - a span far past 3h) and still backstopped by the
-// LAG guard below, but no longer a false-positive on busbar's inherently long matrix.
-// FOLLOW-UP: parallelize the matrix suite (harness task) so even busbar's run is < 1h, then this can
-// drop back toward the fast-gateway cluster width; until then 3h is the honest floor.
-// Newest suite timestamp per gateway, and the board-wide newest. A single field run launches all
-// boxes together and they finish within a few hours of each other, so a gateway whose newest suite
-// lags the board-wide newest by more than MAX_LAG_H did NOT refresh in the latest run (its box
-// failed, or the rsync pull dropped and promote_guard kept old data): its whole row is stale,
-// self-consistent but old. That is the SECOND way a refresh betrays trust (a whole stale row).
-const MAX_SPAN_H = 3;   // a gateway's own suites must be from one box run; 3h clears busbar's matrix
-const MAX_LAG_H = 3;    // no gateway may lag the board-wide newest measurement by more than this
-// ABSOLUTE board-age floor (trust anchor). The two guards above are RELATIVE - span is row-internal,
-// lag is row-vs-boardNewest - so a WHOLESALE-stale board (every box failed to refresh and
-// promote_guard republished the SAME old timestamps for every gateway) sails through: each row's
-// span is tiny and every row's lag against boardNewest is ~0. Nothing relative can see that the whole
-// board is old. This absolute floor is the honesty backstop: if the newest measurement ANYWHERE on
-// the board is older than MAX_BOARD_AGE_H, the board is stale as a whole and must NOT publish
-// generated_at=now over week-old data. Board timestamps are the anchor; a stale board is a hard fail.
-const MAX_BOARD_AGE_H = 48;
-const newestOf = (g) => Math.max(...SUITES.map((s) => g[s] && g[s].measured_at).filter(Boolean).map((a) => Date.parse(a)).concat([0]));
-const boardNewest = Math.max(...gateways.map(newestOf), 0);
+
+// WHAT CHANGED (matrix-sole-source). A gateway's ENTIRE benchmark is now ONE atomic matrix run that
+// legitimately takes HOURS (busbar ~5h), and gateways are published INDEPENDENTLY (busbar can be
+// re-run and pushed alone, kong's row stays from 3 weeks ago). The two RELATIVE guards the old model
+// used are therefore both WRONG now and are REMOVED:
+//   - The intra-row SPAN hard-fail (MAX_SPAN_H ~3h) assumed a row mixed several short suites from
+//     different runs. Under one atomic matrix run there are no "mixed suites" to catch, and a single
+//     legitimate run's timestamps span hours — so the span check false-fails every real run. Replaced
+//     by a GENEROUS sanity cap (MAX_ROW_SPAN_SANITY_H) far above any real run, purely to catch a
+//     clearly-corrupt/future-dated timestamp within a row; a real run never approaches it.
+//   - The cross-gateway LAG hard-fail (MAX_LAG_H) assumed one field run updated every box together, so
+//     a lagging row meant a failed refresh. On a living board with per-gateway cadences, different
+//     measured_at is HONEST and EXPECTED — updating just busbar must not make every other gateway a
+//     hard-fail. REMOVED entirely.
+// KEPT: the wholesale-stale ABSOLUTE floor (soft anchor) — if the newest measurement ANYWHERE on the
+// board is older than MAX_BOARD_AGE_DAYS, the WHOLE board is stale (nothing refreshed at all) and the
+// bundle must not publish generated_at=now over it.
+// NEW: a PER-GATEWAY absolute age SIGNAL. A gateway whose own newest measurement is older than
+// MAX_GATEWAY_AGE_DAYS gets a per-row `stale` flag (drives the app.js badge) — NOT a build failure.
+// This makes independent update cadences visible without blocking per-gateway updates.
+const MAX_ROW_SPAN_SANITY_H = 12;  // sanity-only: one atomic matrix run is hours; >12h means a corrupt/skewed stamp
+const MAX_GATEWAY_AGE_DAYS = 60;   // per-gateway staleness SIGNAL (badge), never a build failure
+const MAX_BOARD_AGE_DAYS = 180;    // wholesale-stale floor (soft anchor): the whole board older than this = hard fail
+const boardNewest = Math.max(...gateways.map(newestMeasuredMs), 0);
 if (boardNewest > 0) {
-  const boardAgeH = (Date.parse(generatedAt) - boardNewest) / 3600000;
-  if (boardAgeH > MAX_BOARD_AGE_H) {
+  const boardAgeDays = (Date.parse(generatedAt) - boardNewest) / 86400000;
+  if (boardAgeDays > MAX_BOARD_AGE_DAYS) {
     throw new Error(
-      `gen-data: FRESHNESS FAILURE (stale board): the newest measurement anywhere on the board is ${boardAgeH.toFixed(1)}h old ` +
-      `(> ${MAX_BOARD_AGE_H}h) - the WHOLE board is wholesale-stale (every box failed to refresh and old timestamps were republished). ` +
+      `gen-data: FRESHNESS FAILURE (stale board): the newest measurement anywhere on the board is ${boardAgeDays.toFixed(1)}d old ` +
+      `(> ${MAX_BOARD_AGE_DAYS}d) — the WHOLE board is wholesale-stale (nothing has refreshed at all). ` +
       `Refusing to publish generated_at=${generatedAt} over stale data. Re-run the field.`);
   }
 }
 for (const g of gateways) {
   const ats = SUITES.map((s) => g[s] && g[s].measured_at).filter(Boolean).map((a) => Date.parse(a));
+  g.stale = false;
   if (ats.length < 1) continue;
   const per = () => SUITES.filter((s) => g[s] && g[s].measured_at).map((s) => `${s}=${g[s].measured_at}`).join(", ");
-  // The span (mixed-row) check needs >=2 suites; the lag (stale-row) check needs only ONE timestamp,
-  // so it must ALSO apply to single-suite gateways - a box that failed partway (one suite on disk)
-  // from a run days ago would otherwise ship stale to the board (audit R2-L3).
+  // SANITY-ONLY span cap: one atomic matrix run spans hours; a span past MAX_ROW_SPAN_SANITY_H means a
+  // corrupt/future-dated timestamp, not a legitimate long run. This is NOT the old mixed-run guard.
   if (ats.length >= 2) {
     const spanH = (Math.max(...ats) - Math.min(...ats)) / 3600000;
-    if (spanH > MAX_SPAN_H) {
+    if (spanH > MAX_ROW_SPAN_SANITY_H) {
       throw new Error(
-        `gen-data: FRESHNESS FAILURE (mixed row): ${g.key}'s suites span ${spanH.toFixed(1)}h (> ${MAX_SPAN_H}h), so its row mixes ` +
-        `different runs (a stale suite survived a refresh). Re-run ${g.key} in one clean pass. Per-suite: ${per()}`);
+        `gen-data: FRESHNESS FAILURE (corrupt row): ${g.key}'s timestamps span ${spanH.toFixed(1)}h (> ${MAX_ROW_SPAN_SANITY_H}h sanity cap) — ` +
+        `a corrupt or future-dated timestamp (one atomic matrix run is hours, never this). Per-suite: ${per()}`);
     }
   }
-  const lagH = (boardNewest - Math.max(...ats)) / 3600000;
-  if (lagH > MAX_LAG_H) {
-    throw new Error(
-      `gen-data: FRESHNESS FAILURE (stale row): ${g.key}'s data lags the newest board measurement by ${lagH.toFixed(1)}h (> ${MAX_LAG_H}h) ` +
-      `- it did NOT refresh in the latest run (box failed or the pull dropped and old data was kept). Re-run ${g.key}. Per-suite: ${per()}`);
-  }
+  // PER-GATEWAY staleness SIGNAL (not a failure): flag a row whose own data has aged past the
+  // threshold so app.js can show a "stale" badge. A living board with mixed cadences is fine.
+  const ageDays = (Date.parse(generatedAt) - Math.max(...ats)) / 86400000;
+  g.stale = ageDays > MAX_GATEWAY_AGE_DAYS;
 }
 
 // ---- charts: copy results/*.png into site/charts/ ---------------------------

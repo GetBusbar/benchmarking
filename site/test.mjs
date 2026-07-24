@@ -52,13 +52,16 @@ try {
   rmSync(out, { recursive: true, force: true });
 }
 
-// ---- freshness guard: POSITIVELY assert it throws on a stale board, passes on a fresh one ----
-// The main data load above FALLS BACK to the committed bundle when the guard trips, so the guard is
-// never positively exercised there - a widened MAX_SPAN_H, a flipped lag comparison, or a missing
-// absolute board-age floor would all go undetected. Here we build a throwaway synthetic repo (a couple
-// of gateway manifests + result JSONs with controlled measured_at) and run gen-data against it,
-// asserting: (1) a wholesale-stale board (every measurement > MAX_BOARD_AGE_H old, so BOTH relative
-// guards pass) HARD-FAILS on the new absolute floor (audit R4-M1); (2) a fresh, coherent board passes.
+// ---- freshness guard (matrix-sole-source): relaxed rules ----
+// Under matrix-sole-source each gateway is ONE atomic matrix run (hours long) published INDEPENDENTLY,
+// so the board legitimately carries mixed per-gateway ages. The old RELATIVE guards are gone:
+//   - intra-row SPAN hard-fail (mixed suites from different runs): REMOVED — replaced by a generous
+//     sanity cap (12h) that only a corrupt/future-dated timestamp can trip;
+//   - cross-gateway LAG hard-fail (a row lagging the board-newest): REMOVED — mixed cadences are honest.
+// KEPT: the wholesale-stale ABSOLUTE floor (nothing on the board younger than MAX_BOARD_AGE_DAYS).
+// NEW: a PER-GATEWAY staleness SIGNAL (g.stale set when a row's own data ages past MAX_GATEWAY_AGE_DAYS)
+// — a badge, NOT a build failure. These tests positively exercise all of that against a synthetic repo,
+// since the main data load above falls back to the committed bundle when the guard trips.
 function buildSyntheticRepo(measuredAtByGw) {
   // measuredAtByGw: { key: { perf: isoString, matrix?: isoString, ... }, ... }
   const root = mkdtempSync(join(tmpdir(), "site-fresh-"));
@@ -88,29 +91,84 @@ function genThrows(root) {
     rmSync(root, { recursive: true, force: true });
   }
 }
+// Like genThrows but returns the emitted data.json on success (so tests can assert per-gateway
+// staleness flags / measured_at). Returns { err } on failure, { data } on success.
+function genData(root) {
+  const outDir = mkdtempSync(join(tmpdir(), "site-fresh-out-"));
+  try {
+    execFileSync(process.execPath, [join(HERE, "gen-data.mjs"), root, outDir], { stdio: "pipe" });
+    return { data: JSON.parse(readFileSync(join(outDir, "data.json"), "utf8")) };
+  } catch (e) {
+    return { err: String(e.stderr || e.message || "") };
+  } finally {
+    rmSync(outDir, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true });
+  }
+}
 const isoAgo = (h) => new Date(Date.now() - h * 3600000).toISOString();
+const isoDaysAgo = (d) => new Date(Date.now() - d * 86400000).toISOString();
 
-test("freshness guard HARD-FAILS a wholesale-stale board (absolute age floor, R4-M1)", () => {
-  // Every gateway carries timestamps from the SAME ~7-day-old run: each row's span is tiny (< MAX_SPAN_H)
-  // and every row's lag vs boardNewest is ~0 (< MAX_LAG_H), so BOTH relative guards pass. Only the
-  // absolute board-age floor (> 48h) can catch it.
-  const stale = isoAgo(24 * 7); // a week old
+test("freshness guard HARD-FAILS a wholesale-stale board (absolute age floor kept)", () => {
+  // The whole board is older than MAX_BOARD_AGE_DAYS (180d): NOTHING has refreshed at all. This is the
+  // one absolute floor kept under matrix-sole-source — publishing generated_at=now over a board where
+  // the newest measurement anywhere is >180d old is dishonest. Hard fail.
+  const stale = isoDaysAgo(200);
   const msg = genThrows(buildSyntheticRepo({
-    alpha: { perf: stale, matrix: stale },
-    bravo: { perf: stale, matrix: stale },
+    alpha: { matrix: stale },
+    bravo: { matrix: stale },
   }));
   assert.ok(msg, "expected gen-data to THROW on a wholesale-stale board, but it succeeded");
   assert.ok(/FRESHNESS FAILURE \(stale board\)/.test(msg), `expected the stale-board failure, got: ${msg}`);
 });
 
-test("freshness guard PASSES a fresh, coherent board", () => {
-  // Every gateway measured within the last couple hours: span tiny, lag ~0, board age well under 48h.
-  const t = isoAgo(1);
-  const msg = genThrows(buildSyntheticRepo({
-    alpha: { perf: t, matrix: isoAgo(2) },
-    bravo: { perf: isoAgo(0.5), matrix: isoAgo(1.5) },
+test("freshness guard PASSES a board with MIXED per-gateway ages (independent cadences are honest)", () => {
+  // The core relaxation: busbar measured today, kong measured 3 weeks ago. Under the OLD lag guard the
+  // 3-week-old row would hard-fail (it "lags the board-newest"); now that is honest and expected on a
+  // living board where any one gateway is re-run alone. Board must PASS.
+  const { err, data } = genData(buildSyntheticRepo({
+    busbar: { matrix: isoAgo(1) },        // today
+    kong: { matrix: isoDaysAgo(21) },     // 3 weeks ago — would have hard-failed the old lag guard
   }));
-  assert.equal(msg, null, `expected a fresh board to pass gen-data, but it threw: ${msg}`);
+  assert.equal(err, undefined, `expected a mixed-age board to PASS gen-data, but it threw: ${err}`);
+  // Neither is stale (both < 60d), and each carries its OWN measured_at.
+  const byKey = Object.fromEntries(data.gateways.map((g) => [g.key, g]));
+  assert.equal(byKey.busbar.stale, false, "busbar (today) must not be flagged stale");
+  assert.equal(byKey.kong.stale, false, "kong (3 weeks) must not be flagged stale (< 60d)");
+  assert.ok(byKey.busbar.measured_at && byKey.kong.measured_at, "each gateway carries its OWN measured_at");
+  assert.notEqual(byKey.busbar.measured_at, byKey.kong.measured_at, "per-gateway measured_at survives independently");
+});
+
+test("freshness guard does NOT hard-fail a legitimate hours-long single matrix run (span check relaxed)", () => {
+  // One atomic matrix run legitimately spans HOURS (busbar ~5h): timestamps 5h apart within a row are
+  // a real run, not a franken-mix. The old MAX_SPAN_H=3 hard-failed exactly this; now only a >12h
+  // sanity cap can trip. Board must PASS.
+  const msg = genThrows(buildSyntheticRepo({
+    busbar: { perf: isoAgo(6), matrix: isoAgo(1) }, // 5h span — a real long matrix run
+  }));
+  assert.equal(msg, null, `expected an hours-long single run to PASS, but it threw: ${msg}`);
+});
+
+test("freshness guard sets the PER-GATEWAY stale flag past MAX_GATEWAY_AGE_DAYS (badge, not a failure)", () => {
+  // A gateway whose own data has aged past 60d gets g.stale=true (drives the app.js badge) WITHOUT
+  // failing the build — as long as some OTHER gateway keeps the board under the wholesale floor.
+  const { err, data } = genData(buildSyntheticRepo({
+    fresh: { matrix: isoAgo(2) },          // keeps the board off the wholesale floor
+    old: { matrix: isoDaysAgo(75) },       // > 60d → flagged stale, but NOT a hard fail
+  }));
+  assert.equal(err, undefined, `a per-gateway-stale board must still build (badge, not failure): ${err}`);
+  const byKey = Object.fromEntries(data.gateways.map((g) => [g.key, g]));
+  assert.equal(byKey.old.stale, true, "a gateway older than 60d must be flagged stale");
+  assert.equal(byKey.fresh.stale, false, "a fresh gateway must not be flagged stale");
+});
+
+test("freshness guard sanity-caps a corrupt/future-dated in-row timestamp (>12h span)", () => {
+  // The span check is retired as a mixed-run guard but kept as a pure sanity cap: a >12h intra-row span
+  // is not a real run, it is a corrupt or future-dated stamp. Hard fail on that alone.
+  const msg = genThrows(buildSyntheticRepo({
+    corrupt: { perf: isoAgo(20), matrix: isoAgo(1) }, // 19h apart — impossible for one run
+  }));
+  assert.ok(msg, "expected a >12h in-row span to THROW");
+  assert.ok(/FRESHNESS FAILURE \(corrupt row\)/.test(msg), `expected the corrupt-row failure, got: ${msg}`);
 });
 
 test("OOTB config artifact round-trips into data.json (results/config/<gw>.txt → g.ootb_config)", () => {
@@ -753,6 +811,23 @@ test("footer timestamps format cleanly with a coarse age", () => {
   assert.equal(app.fmtAge("not-a-date"), "");
 });
 
+test("measuredBadge shows a gateway's own measured_at + a stale pill only when flagged", () => {
+  const iso = "2026-07-22T17:52:46.101Z";
+  const t = Date.parse(iso);
+  const H = 3600000;
+  // Fresh, not flagged: relative age, full stamp in the title, NO stale pill.
+  const fresh = app.measuredBadge({ measured_at: iso, stale: false }, t + 3 * H);
+  assert.ok(/measured 3 hours ago/.test(fresh), `expected the relative age, got: ${fresh}`);
+  assert.ok(/Jul 22, 2026 17:52 UTC \(3 hours ago\)/.test(fresh), "full stamp travels in the title");
+  assert.ok(!/stale-pill/.test(fresh), "a fresh gateway shows no stale pill");
+  // Flagged stale: the greyed pill appears.
+  const stale = app.measuredBadge({ measured_at: iso, stale: true }, t + 70 * 24 * H);
+  assert.ok(/class="stale-pill"/.test(stale), `a stale gateway shows the stale pill, got: ${stale}`);
+  // No measurement at all → renders nothing (graceful).
+  assert.equal(app.measuredBadge({ measured_at: null, stale: false }), "");
+  assert.equal(app.measuredBadge(null), "");
+});
+
 // ---- compact not-served labels (compare + results cells) --------------------
 test("naText keeps long diagnostic notes out of cell values", () => {
   assert.deepEqual(app.naText(null, "xlate_served", "xlate_error"), { text: "not measured", note: "" });
@@ -772,11 +847,12 @@ test("naText keeps long diagnostic notes out of cell values", () => {
   const pass = data.gateways.find((g) => g.xlate && g.xlate.xlate_passthrough === true);
   if (pass) assert.equal(app.naText(pass.xlate, "xlate_served", "xlate_error").text, "n/a (passthrough)");
   assert.equal(app.naText({ xlate_served: false, xlate_passthrough: true }, "xlate_served", "xlate_error").text, "n/a (passthrough)");
-  const unsupported = data.gateways.find((g) =>
-    g.governed && g.governed.governed_served === false && /manifest defines no/.test(g.governed.governed_note || ""));
-  assert.ok(unsupported, "expected a gateway without native governance");
-  // "manifest defines no <hook>" = the harness never probed it: "not tested", never a capability verdict
-  assert.equal(app.naText(unsupported.governed, "governed_served", "governed_note").text, "not tested");
+  // "manifest defines no <hook>" = the harness never probed that lane: "not tested", never a capability
+  // verdict. (Governance is retired from the board, so this is asserted on a synthetic record — the
+  // naText rule itself still applies to any suite whose note carries that string.)
+  assert.equal(
+    app.naText({ served: false, serve_error: "manifest defines no gw_governed_launch hook" }, "served", "serve_error").text,
+    "not tested");
 });
 
 test("streaming latency cells annotate >=1ms values with their ms equivalent", () => {

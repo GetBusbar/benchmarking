@@ -102,6 +102,22 @@ function stampWithAge(iso, now = Date.now()) {
   return age ? `${fmtStamp(iso)} (${age})` : fmtStamp(iso);
 }
 
+/* Per-gateway freshness badge. Under matrix-sole-source each gateway is measured + published
+   INDEPENDENTLY, so the board legitimately carries mixed per-gateway ages (busbar today, kong 3
+   weeks ago) — that is honest, not a bug. We surface each row's OWN measured_at ("measured 3d ago",
+   full stamp in the tooltip) and, when gen-data set g.stale (its data aged past MAX_GATEWAY_AGE_DAYS),
+   a greyed "stale" pill. Returns "" when the gateway has no measurement at all (renders nothing).
+   Pure; covered by site/test.mjs. */
+function measuredBadge(g, now = Date.now()) {
+  if (!g || !g.measured_at) return "";
+  const age = fmtAge(g.measured_at, now);
+  const rel = age ? `measured ${age}` : "measured";
+  const stalePill = g.stale
+    ? ` <span class="stale-pill" title="This gateway's data has aged past the freshness threshold; re-run it to refresh.">stale</span>`
+    : "";
+  return `<span class="measured-at${g.stale ? " stale" : ""}" title="${esc(stampWithAge(g.measured_at, now))}">${esc(rel)}</span>${stalePill}`;
+}
+
 function esc(s) {
   return String(s).replace(/[&<>"']/g, (c) =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -337,7 +353,10 @@ const COL_NAME = {
     const a = g.repo
       ? `<a href="${g.repo}" target="_blank" rel="noopener">${esc(g.display)}</a>`
       : esc(g.display);
-    return `<td class="name">${a}</td>`;
+    // Per-gateway freshness under the name: each row shows its OWN measured_at + a stale pill when
+    // flagged, so a living board's independent update cadences are visible and honest (not hidden).
+    const badge = measuredBadge(g);
+    return `<td class="name">${a}${badge ? `<div class="row-measured">${badge}</div>` : ""}</td>`;
   },
 };
 const COLUMN_SETS = {
@@ -396,9 +415,11 @@ const COLUMN_SETS = {
     { id: "streams", label: "Streams sustained", desc: true, title: "Max concurrent SSE streams sustained (bisected true concurrency) with >=99.9% frame delivery, no stalls, <0.1% errors, on the best same-dialect passthrough cell",
       get: (g) => streamCell(g, "streams_sustained", fmtInt) },
   ],
-  // Governance is intentionally NO tab. onthebench measures every gateway at its default, out-of-the-box
-  // config; the governed suite runs a non-default governance-enabled launch that only busbar's manifest
-  // wires, so a comparative tab would spotlight busbar and read "not tested" for the rest.
+  // Governance is RETIRED under matrix-sole-source: it is no tab AND no column. onthebench measures
+  // every gateway at its default, out-of-the-box config; the governed suite was a non-default,
+  // busbar-only launch (only busbar's manifest wired it), so it is not a neutral-board metric and the
+  // board neither ranks it nor shows a governed column/drawer section. governed/run.sh stays on disk
+  // (unused); gen-data.mjs no longer scans it and emits no supports_governed flag.
 };
 /* The set of columns for a view; perf tabs use COLUMN_SETS, everything else has no table. */
 function columnsFor(view) { return COLUMN_SETS[view] || COLUMN_SETS.passthrough; }
@@ -491,9 +512,8 @@ function newState() {
 }
 const state = newState();
 
-/* Capability filter toggles. Governance is deliberately NOT here: it is only
-   measured for one gateway, so a field-wide filter on it would mislead; the
-   governed data still shows per-gateway in the table column and drawer. */
+/* Capability filter toggles. Governance is RETIRED (matrix-sole-source): it is neither a filter,
+   a column, nor a drawer section — the governed suite was busbar-only and is not a board metric. */
 const CAPS = [["needStream", "stream"], ["needXlate", "xlate"]];
 
 /* Serialize the shareable parts of state into a clean path URL:
@@ -1021,10 +1041,14 @@ function laneStamp(j) {
 
 function drawerHtml(g) {
   const langC = LANG_COLORS[g.lang] || LANG_COLORS.Other;
+  // The gateway's OWN freshness stamp in the drawer head: measured_at + a stale badge when flagged,
+  // the same per-gateway signal the table row shows (independent update cadences, made honest).
+  const badge = measuredBadge(g);
   let h = `<header class="drawer-head">
     <h3>${g.repo ? `<a href="${g.repo}" target="_blank" rel="noopener">${esc(g.display)}</a>` : esc(g.display)}</h3>
     <div class="chips"><span class="cls-chip">${esc(g.cls || "Gateway")}</span>
     <span class="lang-chip" style="background:${langC}">${esc(g.lang)}</span></div>
+    ${badge ? `<div class="drawer-measured">${badge}</div>` : ""}
   </header>`;
 
   const hw = LANES.map((l) => g[l.key]).find((j) => j && j.hardware);
@@ -1873,7 +1897,7 @@ if (NODE) {
   /* Exports for the node smoke test (site/test.mjs). */
   module.exports = {
     newState, encodeUrl, decodeUrl, viewPath, applyFilters,
-    fmtStamp, fmtAge, stampWithAge,
+    fmtStamp, fmtAge, stampWithAge, measuredBadge,
     drawSweep, niceStep, fmtTick, COLUMN_SETS, columnsFor, PERF_VIEWS, VIEW_SORT, LANES, naText, stripRigPaths,
     cellState, matrixCellTip, cellPerfTip, passCell, xlateCell, streamCell, memCell, hasTranslation, CATEGORIES, DEFAULT_CATEGORY, VIEWS,
     canonicalPerf, canonicalXlate, canonicalStreaming, canonicalMemory, gatewayResultsJson, DEFAULT_VIEW, VIEW_LABELS, rosterRows, fmtStars,
