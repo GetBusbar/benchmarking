@@ -21,7 +21,7 @@
 # /messages body (id "msg_x" — meaning the gateway proxied the path through UNTRANSLATED) writes
 # xlate_served=false with the probe status + body snippet as evidence, valid JSON, exit 0.
 #
-#   GATEWAY=busbar BUSBAR_BIN=~/busbar xlate/run.sh
+#   GATEWAY=busbar xlate/run.sh
 #
 # Manifest overrides (optional): GW_ANTHROPIC_PATH (default /v1/messages), GW_ANTHROPIC_AUTH_HEADER
 # (a full "Name: value" header added on the anthropic side only; the loadgen already sends the token

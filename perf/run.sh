@@ -8,7 +8,7 @@
 #   * RPS ceiling = the highest sustained requests/sec where p99 < 1000 ms AND a <0.1% error rate
 # and writes results/perf/<gateway>.json (+ a concurrency sweep for the latency-vs-load chart).
 #
-#   GATEWAY=busbar BUSBAR_BIN=~/busbar perf/run.sh
+#   GATEWAY=busbar perf/run.sh
 #
 # Knobs (env): C1_DUR (c1 latency run seconds, default 20), SWEEP ("1 8 16 32 64 128 256 512 1024"),
 #   SWEEP_DUR (seconds per sweep point, default 10), PSIZE (payload bytes, default 256), CORES pin.

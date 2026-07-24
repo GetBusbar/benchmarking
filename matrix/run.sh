@@ -47,7 +47,7 @@
 # token; if the gateway answers 401/403, i.e. it insists on a signature this harness does not forge,
 # the cell records served="unprobed_auth" (distinct from false) with the evidence.
 #
-#   GATEWAY=busbar BUSBAR_BIN=~/busbar matrix/run.sh
+#   GATEWAY=busbar matrix/run.sh
 #   GATEWAY=mock-gateway matrix/run.sh     # graceful-path fixture: a second mock posing as the gateway
 #
 # Manifest overrides (all optional): GW_MATRIX_PATH_OPENAI, GW_MATRIX_PATH_RESPONSES,

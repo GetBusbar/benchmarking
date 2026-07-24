@@ -40,7 +40,7 @@
 #   sweep_streamcpu[]             per-concurrency curve (fps, delivered%, stalled, fail)
 #   plus served/stream_served/build/hardware/measured_at/frame_bytes/... (same style as stream/).
 #
-#   GATEWAY=busbar BUSBAR_BIN=~/busbar streamcpu/run.sh
+#   GATEWAY=busbar streamcpu/run.sh
 #
 # Knobs (env): SC_CHUNKS (content frames per stream, default 512 -- long bursts so per-frame cost
 #   dominates per-stream setup), SC_FRAME_BYTES (token-sized SSE delta payload, default 16),
