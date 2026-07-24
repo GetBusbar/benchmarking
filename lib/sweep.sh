@@ -199,7 +199,14 @@ run_sweep() { # ttft_ms  conc_list_or_bounds  [mode: ladder|bisect]
     # the true peak and STOPS at it. SW_CEIL_CONC (the winning concurrency) is reported alongside rps.
     local -A _RC_rps=() _RC_fail=() _RC_p99=(); local _PROBED="" c
     local _min=1 _max="$top"; for c in $concs; do _min="$c"; break; done
-    local TOL="${SWEEP_PEAK_TOL:-128}"
+    # Refinement tolerance. A FIXED 128 leaves a peak that sits between two LOW-concurrency doublings
+    # unresolved: e.g. bracket [a=32,hi=128] has width 96 < 128, the refine loop never runs, and the
+    # true peak (say c=96) is never probed - understating a fast gateway whose max-proxy peak lands at
+    # low concurrency. Make the tolerance RELATIVE to the low edge of the bracket (~a/4), floored at 1
+    # and capped at SWEEP_PEAK_TOL, so at low concurrency the search keeps bisecting down to a couple
+    # of integers while high-concurrency brackets still stop within the fixed cap (no extra probes
+    # where a doubling-scale peak is already well resolved). Recomputed inside the loop as `a` moves.
+    local _TOLMAX="${SWEEP_PEAK_TOL:-128}" TOL
     # eff <conc>: the value the search maximises - measured rps if the rung passes the gate, else 0
     # (a gate-failing rung can never be the peak, so the search moves away from it).
     _sw_eff(){ if _sw_pass_c "$1"; then printf '%s' "${_RC_rps[$1]}"; else printf 0; fi; }
@@ -246,7 +253,10 @@ run_sweep() { # ttft_ms  conc_list_or_bounds  [mode: ladder|bisect]
         fi
       fi
       if [ "$b" -gt 0 ] && [ "$hi" -gt "$a" ]; then          # refine the peak in [a,hi] (unimodal max-search)
+        TOL=$(( a/4 )); [ "$TOL" -gt "$_TOLMAX" ] && TOL=$_TOLMAX; [ "$TOL" -lt 1 ] && TOL=1
         while [ $(( hi - a )) -gt "$TOL" ]; do
+          TOL=$(( a/4 )); [ "$TOL" -gt "$_TOLMAX" ] && TOL=$_TOLMAX; [ "$TOL" -lt 1 ] && TOL=1
+          [ $(( hi - a )) -gt "$TOL" ] || break
           if [ $(( b - a )) -ge $(( hi - b )) ]; then x=$(( (a + b)/2 )); else x=$(( (b + hi)/2 )); fi
           if [ "$x" = "$a" ] || [ "$x" = "$b" ] || [ "$x" = "$hi" ]; then break; fi
           _sw_probe_c "$x" || break; xr=$(_sw_eff "$x")

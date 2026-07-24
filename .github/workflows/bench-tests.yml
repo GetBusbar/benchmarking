@@ -1,0 +1,34 @@
+# Enforced gate for the sweep engine (lib/sweep.sh) — the component that produces EVERY published
+# throughput number. Runs lib/sweep_peak_test.sh on push, so a change that re-quantises fast gateways
+# onto doubling rungs (the exact off-by-one class the test guards, incl. the H5 relative-TOL fix) or
+# regresses the adaptive/prior-seeded path (M5) or the sweep_c1 honesty gate (M6) fails CI instead of
+# shipping silently (audit H6). Fast (stubbed loadgen/rig, no network, seconds).
+name: bench-tests
+
+on:
+  push:
+    paths:
+      - "lib/sweep.sh"
+      - "lib/sweep_peak_test.sh"
+      - "loadgen/**"
+      - ".github/workflows/bench-tests.yml"
+  pull_request:
+    paths:
+      - "lib/sweep.sh"
+      - "lib/sweep_peak_test.sh"
+      - "loadgen/**"
+      - ".github/workflows/bench-tests.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  peak-search:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Parse-check the sweep shell files
+        run: bash -n lib/sweep.sh && bash -n lib/sweep_peak_test.sh
+      - name: Peak-search regression test (H5) + adaptive/prior (M5) + sweep_c1 (M6)
+        run: bash lib/sweep_peak_test.sh
