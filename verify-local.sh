@@ -272,12 +272,12 @@ ok "matrix result written: $RESULT_JSON"
 # STEP 4 — gen-data → guards → charts
 # ════════════════════════════════════════════════════════════════════════════════════════════════════
 say "step 4: gen-data → check-consistency → test → charts"
-# Freshness-guard settle. matrix stamps measured_at at whole-second resolution ("…55Z"); gen-data's
-# generated_at carries ms ("…55.644Z"). In a minutes-fast local run the matrix can finish and gen-data
-# start inside the SAME wall second, and gen-data's guard does a STRING compare — "…55.644Z" < "…55Z"
-# (because '.' < 'Z') falsely trips "generated_at predates measured_at". Wait past the whole second so
-# generated_at unambiguously sorts after any same-second measured_at. (The field run never hits this: a
-# 5h matrix ends many seconds before gen-data.)
+# Freshness-guard settle. NIT-6: gen-data's future-date guard now compares PARSED epoch ms
+# (Date.parse(generatedAt) < Date.parse(latest), gen-data.mjs:324) — NOT a raw ISO-STRING compare — so
+# the old "…55.644Z" < "…55Z" (because '.' < 'Z') mis-order that motivated this sleep can no longer trip
+# it. The sleep is kept as harmless belt-and-braces (a minutes-fast local run finishing in the SAME wall
+# second as gen-data is otherwise fine now); the field run never hits this (a 5h matrix ends many seconds
+# before gen-data). Left in place so a future guard-precision regression still has a margin.
 sleep 2
 node "$ROOT/site/gen-data.mjs" >"$WORK/gendata.log" 2>&1 || { cat "$WORK/gendata.log"; die "gen-data.mjs failed"; }
 [ -f "$ROOT/site/data.json" ] || die "gen-data produced no site/data.json"
@@ -403,7 +403,11 @@ A(!!dl && dl.matrix && dl.best_cell, "download JSON carries matrix + best_cell")
 // at least one non-served cell EXISTS in the bundle (so the no-bar path is genuinely exercised) OR that
 // the matrix is fully green (in which case there is nothing to suppress — also valid).
 let nonServed = total - served;
-A(nonServed >= 0, "no-bar path: " + nonServed + " non-served cell(s) present (charts.py validity gate zeroes them; check-consistency asserted surfaces agree)");
+// NIT-3: `nonServed >= 0` is an arithmetic IDENTITY (always true), so it never proved the no-bar path was
+// exercised. Assert the real intent from the comment above: EITHER at least one non-served cell exists (so
+// the validity gate's zero-width path is genuinely exercised) OR the matrix is fully green (served ===
+// total — nothing to suppress, also valid). This can now actually FAIL if `total`/`served` are miscounted.
+A(nonServed >= 1 || total === served, "no-bar path: " + nonServed + " non-served cell(s) present (charts.py validity gate zeroes them; check-consistency asserted surfaces agree), OR the matrix is fully green");
 
 // charts PNG landed (when a renderer was available)
 if (chartsOk === "1") {
