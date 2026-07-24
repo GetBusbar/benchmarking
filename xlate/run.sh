@@ -144,6 +144,22 @@ oprobe(){ # url conc dur
   tmo "$(probe_budget "$3")" taskset -c "$LOADCORES" "$UGEN" -url "$1" -model "$GW_MODEL" -auth "$GW_AUTH" -c "$2" -d "$3" -psize "$PSIZE" ${UGEN_H[@]+"${UGEN_H[@]}"} 2>/dev/null \
     | awk '{for(i=1;i<=NF;i++){split($i,a,"=");v[a[1]]=a[2]}; print v["rps"],v["fail"],v["p99us"],v["p50us"]}'
 }
+# Mock readiness gate (audit R3-H1 / R5-#3, ported from lib/sweep.sh:_sw_mock_ready). The sweep-mock
+# restart below is a blind `pkill; sleep 1; setsid; sleep 1` with no readiness check: after the c1
+# phase's high-concurrency run holds the port, the relaunched mock can race the dying one for the bind
+# and the ceiling probe then reads mrps=0. With the guard gated on LLM_MOCK>0 that silently ships an
+# overstated ceiling as a clean mock_bound=false. Poll a cheap 1-conn openai probe (the exact shape the
+# ceiling probe uses) until it answers a real rps before trusting the reference. Non-zero return =>
+# reference unusable => xlate_rps_sustained_20ms_mock_bound is published as JSON null, never false.
+_xlate_mock_ready(){ # tries
+  local i="${1:-30}" rps _a _b _c
+  while [ "$i" -gt 0 ]; do
+    read -r rps _a _b _c < <(oprobe "$DURL" 1 1)
+    [ "${rps:-0}" -gt 0 ] 2>/dev/null && return 0
+    i=$((i-1)); sleep 1
+  done
+  return 1
+}
 # anthropic-shape probe (the translation path through the gateway). Hard-timeout wrapped: a gateway
 # that stops responding under load must fail this probe fast, not block the suite (the arch failure).
 aprobe(){ # url conc dur
@@ -210,7 +226,7 @@ fi
 
 DURL="http://127.0.0.1:$MOCK_PORT$GW_PATH"; XURL="http://127.0.0.1:$GW_PORT$XPATH_A"
 DP99=0; DP50=0; GP99=0; GP50=0; OVER_P99=0; OVER_P50=0
-LLM_RPS=0; LLM_CONC=0; LLM_MOCK=0; LLM_BOUND=false; LLM_JSON=""
+LLM_RPS=0; LLM_CONC=0; LLM_MOCK=0; LLM_MOCK_CONC=0; MOCK_READY=1; LLM_BOUND=false; LLM_JSON=""
 if [ "$XLATE_OK" = 1 ]; then
   # ── c1: direct baseline (openai → mock) + gateway (anthropic → gateway) → added µs ──────────────
   WARMUP_DUR="${WARMUP_DUR:-5}"
@@ -243,12 +259,21 @@ if [ "$XLATE_OK" = 1 ]; then
   [ -n "$MOCK" ] && pkill -f "$MOCK" 2>/dev/null; sleep 1
   setsid taskset -c "$MOCKCORES" env MOCK_TTFT_MS="$SWEEP_TTFT_MS" "$MOCK" -port "$MOCK_PORT" </dev/null >/dev/null 2>&1 &
   sleep 1
+  # Readiness poll on the sweep-mock restart (R5-#3): do not trust the ceiling reference until the fresh
+  # mock actually answers. If it never binds (lost the port race), the reference is unusable and
+  # xlate_rps_sustained_20ms_mock_bound must publish JSON null, not a clean-looking false.
+  MOCK_READY=1
+  if ! _xlate_mock_ready 30; then
+    MOCK_READY=0
+    log "[$GATEWAY] WARNING sweep mock did not become ready after restart: the mock-ceiling reference is unreliable; mock_bound cannot be decided this run (null)"
+  fi
   top=1; for w in $SWEEP_DELAYED; do top=$w; done
   # Mock-ceiling reference: cap the probe concurrency the same way perf's peak lane does
   # (lib/sweep.sh SWEEP_MOCKCEIL_CONC:-2048). At the ladder top (16384) the loadgen + mock are both
   # overloaded, so the reference comes out LOW and the mock_bound guard fires against a degraded
   # ceiling; capping keeps the reference honest and comparable to perf's for the identical rig.
   mock_conc=$top; [ "$mock_conc" -gt "${SWEEP_MOCKCEIL_CONC:-2048}" ] && mock_conc="${SWEEP_MOCKCEIL_CONC:-2048}"
+  LLM_MOCK_CONC=$mock_conc
   read -r mrps _a _b _c2 < <(oprobe "$DURL" "$mock_conc" "$SWEEP_DUR"); LLM_MOCK=${mrps:-0}
   for conc in $SWEEP_DELAYED; do
     if suite_deadline_expired; then log "[$GATEWAY] suite wall-clock ceiling reached mid-sweep - stopping sweep, recording what we have"; break; fi
@@ -261,8 +286,35 @@ if [ "$XLATE_OK" = 1 ]; then
       LLM_RPS=$rps; LLM_CONC=$conc
     fi
   done
-  if [ "${LLM_MOCK:-0}" -gt 0 ] && awk -v c="$LLM_RPS" -v m="$LLM_MOCK" 'BEGIN{exit !(c>=0.9*m)}'; then LLM_BOUND=true; fi
-  [ "$LLM_BOUND" = true ] && log "[$GATEWAY] ⚠ ceiling ($LLM_RPS) within 10% of mock ($LLM_MOCK) — MOCK-BOUND floor"
+  # Fair-ceiling re-probe (audit R5-#2, ported from lib/sweep.sh:_sw_ceil_ref_ok). LLM_MOCK was measured
+  # at the capped reference concurrency (LLM_MOCK_CONC, <=2048) but the ladder tops at 16384: a fast
+  # translator whose peak lands at 4096/8192/16384 (LLM_CONC > LLM_MOCK_CONC) is otherwise compared to a
+  # ceiling measured far below its operating point. Under the 20ms delay the mock's real serving ceiling
+  # RISES with concurrency (rps <= conc/0.020), so the low reference is understated and mock_bound=true
+  # fires spuriously on the fastest translators. When the winner sits ABOVE the reference conc, re-probe
+  # the rig ONCE at the winner's concurrency (capped at 4x the reference, never the multi-thousand rail
+  # the cap exists to avoid) and adopt the LARGER rps as the fair ceiling before asserting bound.
+  if [ "$MOCK_READY" = 1 ] && [ "${LLM_CONC:-0}" -gt 0 ] && [ "${LLM_CONC}" -gt "${LLM_MOCK_CONC:-0}" ]; then
+    reprobe=$LLM_CONC
+    capc=$(( LLM_MOCK_CONC>0 ? LLM_MOCK_CONC*4 : LLM_CONC )); [ "$reprobe" -gt "$capc" ] && reprobe=$capc
+    read -r _rm _a2 _b2 _c3 < <(oprobe "$DURL" "$reprobe" "$SWEEP_DUR"); _rm=${_rm:-0}
+    if [ "$_rm" -gt "${LLM_MOCK:-0}" ]; then
+      log "[$GATEWAY] mock-ceiling re-probed at winner c=$reprobe: ${LLM_MOCK} -> $_rm rps (winner c=$LLM_CONC above reference c=$LLM_MOCK_CONC)"
+      LLM_MOCK=$_rm; LLM_MOCK_CONC=$reprobe
+    fi
+  fi
+  # Set the mock-bound flag from the winner's rps vs the (now fair) ceiling. Emit JSON null ("unknown")
+  # - NOT a clean false - when the reference is unusable (mock never became ready, or the ceiling probe
+  # read 0), so an overstated ceiling is never silently published as a trustworthy mock_bound=false
+  # (audit R5-#3). This mirrors lib/sweep.sh:_sw_set_bound and streamcpu's streamcpu_valid honesty.
+  if [ "$MOCK_READY" != 1 ] || [ "${LLM_MOCK:-0}" -le 0 ]; then
+    LLM_BOUND=null
+  else
+    LLM_BOUND=false
+    awk -v c="$LLM_RPS" -v m="$LLM_MOCK" 'BEGIN{exit !(c>=0.9*m)}' && LLM_BOUND=true
+  fi
+  [ "$LLM_BOUND" = true ] && log "[$GATEWAY] ⚠ ceiling ($LLM_RPS) within 10% of mock ($LLM_MOCK @ c=$LLM_MOCK_CONC) — MOCK-BOUND floor"
+  [ "$LLM_BOUND" = null ] && log "[$GATEWAY] xlate mock_bound=null: mock-ceiling reference unusable (ready=$MOCK_READY, ceiling=${LLM_MOCK} rps)"
   log "[$GATEWAY] sustained RPS @${SWEEP_TTFT_MS}ms (translating) = $LLM_RPS rps @ c=$LLM_CONC"
 fi
 

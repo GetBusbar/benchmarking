@@ -77,6 +77,22 @@ sleep 1
 cleanup(){ gw_stop 2>/dev/null; [ -n "$MOCK" ] && pkill -f "$MOCK" 2>/dev/null; }
 trap cleanup EXIT
 
+# Mock readiness gate (audit R3-H1 / R5-#3, ported from lib/sweep.sh:_sw_mock_ready). After a blind
+# `sleep 1` the mock may not yet be bound (or, after a high-concurrency phase, may still be losing the
+# bind race to the dying one): the ceiling probe then reads 0 fps, the mock-bound guard silently no-ops,
+# and an overstated ceiling ships as a clean mock_bound=false. Poll a cheap 1-stream probe until it
+# frames (fps>0) before trusting the ceiling reference. MOCK_READY=0 => the reference is unusable and
+# stream_mock_bound is published as JSON null ("unknown"), never a trustworthy-looking false.
+_stream_mock_ready(){ # tries
+  local i="${1:-30}" _s _c _f _st _fr fps _rest
+  while [ "$i" -gt 0 ]; do
+    read -r _s _c _f _st _fr fps _rest < <(sprobe "$DURL" 1 1)
+    [ "${fps:-0}" -gt 0 ] 2>/dev/null && return 0
+    i=$((i-1)); sleep 1
+  done
+  return 1
+}
+
 # run ugen in SSE mode, echo the k=v result fields in a fixed order. HARD TIMEOUT (tmo): an
 # unresponsive gateway that leaves streams open must not block on ugen's 120s tail client timeout
 # across every hung worker; cap the invocation at dur+grace and treat empty output as not-served.
@@ -130,7 +146,7 @@ fi
 DURL="http://127.0.0.1:$MOCK_PORT$GW_PATH"; GURL="http://127.0.0.1:$GW_PORT$GW_PATH"
 DT50=0; DT99=0; DG50=0; DG99=0; GT50=0; GT99=0; GG50=0; GG99=0
 ADD_T50=0; ADD_T99=0; ADD_G50=0; ADD_G99=0
-SUST_STREAMS=0; SUST_FPS=0; STALLFREE_STREAMS=0; STALLFREE_FPS=0; MOCK_FPS=0; MOCK_BOUND=false; SWEEP_JSON=""
+SUST_STREAMS=0; SUST_FPS=0; STALLFREE_STREAMS=0; STALLFREE_FPS=0; MOCK_FPS=0; MOCK_FPS_CONC=0; MOCK_READY=1; MOCK_BOUND=false; SWEEP_JSON=""
 if [ "$STREAM_OK" = 1 ]; then
   # ── c1: direct baseline + gateway → added TTFT / added inter-frame gap (µs) ─────────────────────
   # Same discarded warm-up for both paths, mirroring perf/run.sh.
@@ -168,8 +184,21 @@ if [ "$STREAM_OK" = 1 ]; then
   # delivered ~100% of frames (one stalled stream of thousands disqualified the point); it is kept
   # as the SECONDARY stall-free figure below, never as the headline.
   top=1; for w in $SWEEP; do top=$w; done
-  read -r _s _c _f _st _fr MOCK_FPS _d _t1 _t2 _g1 _g2 < <(sprobe "$DURL" "$top" "$SWEEP_DUR")
-  log "[$GATEWAY] sweep — streams sustained (mock ceiling ${MOCK_FPS:-0} fps @ c=$top)"
+  # Mock readiness gate (R5-#3): do not trust the ceiling reference until the fresh mock actually frames.
+  # If it never comes up the reference is unusable and stream_mock_bound must publish JSON null, not false.
+  MOCK_READY=1
+  if ! _stream_mock_ready 30; then
+    MOCK_READY=0
+    log "[$GATEWAY] WARNING stream mock did not become ready: the mock-ceiling reference is unreliable; stream_mock_bound cannot be decided this run (null)"
+  fi
+  # Mock-ceiling reference. Cap the reference concurrency the same way perf's peak lane does
+  # (lib/sweep.sh SWEEP_MOCKCEIL_CONC:-2048): at very high concurrency the loadgen+mock are both
+  # overloaded and the reference comes out artificially LOW, firing the guard against a degraded ceiling.
+  mock_conc=$top; [ "$mock_conc" -gt "${SWEEP_MOCKCEIL_CONC:-2048}" ] && mock_conc="${SWEEP_MOCKCEIL_CONC:-2048}"
+  MOCK_FPS_CONC=$mock_conc
+  read -r _s _c _f _st _fr MOCK_FPS _d _t1 _t2 _g1 _g2 < <(sprobe "$DURL" "$mock_conc" "$SWEEP_DUR")
+  MOCK_FPS=${MOCK_FPS:-0}
+  log "[$GATEWAY] sweep — streams sustained (mock ceiling ${MOCK_FPS} fps @ c=$mock_conc)"
   for conc in $SWEEP; do
     if suite_deadline_expired; then log "[$GATEWAY] suite wall-clock ceiling reached mid-sweep - stopping sweep, recording what we have"; break; fi
     read -r streams complete fail stalled frames fps delivered t50 t99 g50 g99 < <(sprobe "$GURL" "$conc" "$SWEEP_DUR")
@@ -187,13 +216,37 @@ if [ "$STREAM_OK" = 1 ]; then
       STALLFREE_STREAMS=$conc; STALLFREE_FPS=$fps
     fi
   done
-  # Headline pairs the stall-free stream count with the fps measured AT that same operating point
-  # (STALLFREE_FPS), not SUST_FPS — which is the looser delivered gate's fps at a possibly HIGHER,
-  # stall-inclusive concurrency. Publishing SUST_FPS beside STALLFREE_STREAMS overstated the frames/
-  # sec the reported stream count achieves and mock-bounded the wrong point (audit R2-H2). SUST_FPS is
-  # retained only for the transparency stream_delivered_streams field.
-  if [ "${MOCK_FPS:-0}" -gt 0 ] && awk -v c="$STALLFREE_FPS" -v m="$MOCK_FPS" 'BEGIN{exit !(c>=0.9*m)}'; then MOCK_BOUND=true; fi
-  [ "$MOCK_BOUND" = true ] && log "[$GATEWAY] ⚠ sustained fps ($STALLFREE_FPS) within 10% of mock ($MOCK_FPS) — MOCK-BOUND floor"
+  # Fair-ceiling re-probe (audit R5-#1, ported from lib/sweep.sh:_sw_ceil_ref_ok). The headline pairs
+  # the stall-free stream count (STALLFREE_STREAMS) with the fps measured AT that same operating point
+  # (STALLFREE_FPS), typically a LOWER concurrency than the ladder top. But MOCK_FPS was probed at the
+  # capped reference concurrency (mock_conc). Under 20ms SSE pacing fps is Little's-law-bound and scales
+  # ~linearly with concurrency, so a reference measured at a DIFFERENT concurrency than the winner is
+  # not a fair ceiling: at a HIGHER reference conc it over-measures (winner never within 10% -> a
+  # genuinely rig-limited stream ships mock_bound=false, audit R2-H2 residue); at a LOWER one it
+  # under-measures. Re-probe the rig ONCE at the winner's own concurrency (capped at 4x the reference,
+  # never the multi-thousand rail the cap exists to avoid) and adopt the LARGER fps as the fair ceiling
+  # before deciding bound - exactly as _sw_ceil_ref_ok does for the perf lane.
+  if [ "$MOCK_READY" = 1 ] && [ "${STALLFREE_STREAMS:-0}" -gt 0 ] && [ "${STALLFREE_STREAMS}" -ne "${MOCK_FPS_CONC:-0}" ]; then
+    reprobe=$STALLFREE_STREAMS
+    capc=$(( MOCK_FPS_CONC>0 ? MOCK_FPS_CONC*4 : STALLFREE_STREAMS )); [ "$reprobe" -gt "$capc" ] && reprobe=$capc
+    read -r _s _c _f _st _fr _rm _d _t1 _t2 _g1 _g2 < <(sprobe "$DURL" "$reprobe" "$SWEEP_DUR"); _rm=${_rm:-0}
+    if [ "$_rm" -gt "${MOCK_FPS:-0}" ]; then
+      log "[$GATEWAY] mock-ceiling re-probed at winner c=$reprobe: ${MOCK_FPS} -> $_rm fps (winner c=$STALLFREE_STREAMS vs reference c=$MOCK_FPS_CONC)"
+      MOCK_FPS=$_rm; MOCK_FPS_CONC=$reprobe
+    fi
+  fi
+  # Set the mock-bound flag from the winner's fps vs the (now fair) ceiling. Emit JSON null ("unknown")
+  # - NOT a clean false - when the reference is unusable (mock never became ready, or the ceiling probe
+  # read 0), so an overstated ceiling is never silently published as a trustworthy mock_bound=false
+  # (audit R5-#3). This mirrors lib/sweep.sh:_sw_set_bound and streamcpu's streamcpu_valid honesty.
+  if [ "$MOCK_READY" != 1 ] || [ "${MOCK_FPS:-0}" -le 0 ]; then
+    MOCK_BOUND=null
+  else
+    MOCK_BOUND=false
+    awk -v c="$STALLFREE_FPS" -v m="$MOCK_FPS" 'BEGIN{exit !(c>=0.9*m)}' && MOCK_BOUND=true
+  fi
+  [ "$MOCK_BOUND" = true ] && log "[$GATEWAY] ⚠ sustained fps ($STALLFREE_FPS) within 10% of mock ($MOCK_FPS @ c=$MOCK_FPS_CONC) — MOCK-BOUND floor"
+  [ "$MOCK_BOUND" = null ] && log "[$GATEWAY] stream_mock_bound=null: mock-ceiling reference unusable (ready=$MOCK_READY, ceiling=${MOCK_FPS} fps)"
   log "[$GATEWAY] streams sustained (clean, no stall/fail) = $STALLFREE_STREAMS; delivered (stalls ignored) = $SUST_STREAMS"
 fi
 
