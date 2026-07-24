@@ -164,7 +164,7 @@ if [ "$ok" = 1 ]; then
 fi
 
 DURL="http://127.0.0.1:$MOCK_PORT$GW_PATH"; GURL="http://127.0.0.1:$GW_PORT$GW_PATH"
-BEST_FPS=0; BEST_CONC=0; DIRECT_CEIL=0; MOCK_BOUND=false; ADDED_PER_FRAME_US=null; SWEEP_JSON=""
+BEST_FPS=0; BEST_CONC=0; DIRECT_CEIL=0; MOCK_BOUND=false; ADDED_PER_FRAME_US=null; SWEEP_JSON=""; STREAMCPU_NOTE=""
 FPS_PER_CORE=0
 if [ "$STREAM_OK" = 1 ]; then
   # Discarded warm-up for both paths (JIT/interpreted gateways not charged cold start), mirroring perf.
@@ -178,6 +178,10 @@ if [ "$STREAM_OK" = 1 ]; then
   read -r _s _c _f _st _fr DIRECT_CEIL _d < <(sprobe "$DURL" "$top" "$SC_DUR")
   DIRECT_CEIL=${DIRECT_CEIL:-0}
   log "[$GATEWAY] direct-to-mock ceiling = ${DIRECT_CEIL} frames/sec @ c=$top (guardrail)"
+  # An empty ceiling probe (mock cold after restart, timeout, EMFILE) leaves DIRECT_CEIL=0, which
+  # DISABLES the mock-bound guard below (line ~213) - so a rig-limited fps could otherwise ship as a
+  # valid gateway measurement. Record it so streamcpu_valid can require a working reference (R2-H3).
+  [ "${DIRECT_CEIL:-0}" -gt 0 ] || STREAMCPU_NOTE="direct-to-mock ceiling probe returned 0 fps (mock cold/timeout/EMFILE): mock-bound guard could not run, so this fps is unverified against the rig ceiling"
 
   # Gateway sweep: aggregate content-frames/sec sustained at each concurrency. A point counts toward
   # the best only if the gateway relayed the stream cleanly:
@@ -239,7 +243,8 @@ cat > "$RESULTS/$GATEWAY.json" <<JSON
   "streamcpu_concurrency": $BEST_CONC,
   "streamcpu_direct_ceiling_fps": ${DIRECT_CEIL:-0},
   "streamcpu_mock_bound": $MOCK_BOUND,
-  "streamcpu_valid": $([ "$STREAM_OK" = 1 ] && [ "$MOCK_BOUND" = false ] && [ "$BEST_FPS" -gt 0 ] && echo true || echo false),
+  "streamcpu_valid": $([ "$STREAM_OK" = 1 ] && [ "${DIRECT_CEIL:-0}" -gt 0 ] && [ "$MOCK_BOUND" = false ] && [ "$BEST_FPS" -gt 0 ] && echo true || echo false),
+  "streamcpu_note": "$(json_escape "$STREAMCPU_NOTE")",
   "streamcpu_added_per_frame_us": ${ADDED_PER_FRAME_US:-null},
   "streamcpu_frames_per_stream": $SC_CHUNKS,
   "streamcpu_frame_bytes": $SC_FRAME_BYTES,
