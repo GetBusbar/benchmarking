@@ -23,6 +23,28 @@ GW_AUTH=""   # filled with a minted token in gw_launch
 ONE_API_IMAGE="${ONE_API_IMAGE:-justsong/one-api:v0.6.10}"
 OA_JAR="$GW_DIR/cookies.txt"; OA_LOG="$GW_DIR/bootstrap.log"
 
+# ── SINGLE SOURCE OF TRUTH ────────────────────────────────────────────────────────────────────────
+# _oa_channels() is the ONE definition of the provider channels this gateway wires. Each line is
+#   <type> <model-csv>  (type selects the native egress dialect: 1=OpenAI, 14=Anthropic, 24=Gemini).
+# gw_launch reads these lines and POSTs each as a /api/channel/ create; gw_config reads the SAME lines
+# and prints them into the published artifact. The benchmarked channels and the website-published
+# channels are therefore identical by construction and cannot drift. Model lists are STRICTLY DISJOINT
+# (gpt-* | claude-* | gemini-*) so each model resolves 1:1 to its channel (see routing note in gw_launch).
+_oa_channels() {
+  cat <<CH
+1 gpt-4o-mini
+14 claude-3-5-sonnet-20240620
+24 gemini-1.5-pro
+CH
+}
+# ncore = pinned core count (0-3 → 4). One-API is Go, and Go (pre-1.25) reads the HOST cpu count for
+# GOMAXPROCS, NOT the --cpuset-cpus limit — so without it One-API runs a P per host core thrashing the
+# few pinned cores, a scheduler-contention HANDICAP the Rust gateways (tokio available_parallelism
+# respects cpuset) never pay. Pinning to the cpuset count emulates the 4-core box every gateway is
+# measured on — the same Go-field parity fix gomodel and bifrost carry. Defined once, read by both
+# gw_launch (docker -e flag) and gw_config (published artifact).
+_oa_ncore() { echo $(( ${CORES##*-} - ${CORES%%-*} + 1 )); }
+
 gw_version() {
   local dg; dg=$(sudo docker inspect --format '{{index .RepoDigests 0}}' "$ONE_API_IMAGE" 2>/dev/null)
   echo "${ONE_API_IMAGE}${dg:+ (@${dg##*@})}"
@@ -44,7 +66,7 @@ gw_launch() {
   : > "$OA_LOG"; rm -f "$OA_JAR"
   sudo docker rm -f one-api-bench >/dev/null 2>&1; sleep 1
   sudo docker run -d --name one-api-bench --network host --cpuset-cpus="$CORES" \
-    -e SQL_DSN="" "$ONE_API_IMAGE" >>"$OA_LOG" 2>&1
+    -e GOMAXPROCS="$(_oa_ncore)" -e SQL_DSN="" "$ONE_API_IMAGE" >>"$OA_LOG" 2>&1
   local base="http://127.0.0.1:$GW_PORT"
   # 1) wait for the admin UI/API to answer
   local up=0 i; for i in $(seq 1 40); do
@@ -73,9 +95,12 @@ gw_launch() {
     curl -s -b "$OA_JAR" -X POST "$base/api/channel/" -H 'content-type: application/json' \
       -d "{\"name\":\"mock-$1\",\"type\":$1,\"key\":\"sk-mock\",\"base_url\":\"http://127.0.0.1:$MOCK_PORT\",\"models\":\"$2\",\"group\":\"default\",\"status\":1}" >>"$OA_LOG" 2>&1
   }
-  _oa_channel 1  "gpt-4o-mini"                     # OpenAI dialect
-  _oa_channel 14 "claude-3-5-sonnet-20240620"      # Anthropic dialect (-> /v1/messages)
-  _oa_channel 24 "gemini-1.5-pro"                  # Gemini dialect (-> :generateContent)
+  # Wire each channel from the SINGLE-SOURCE _oa_channels list (type=1 OpenAI, 14 Anthropic -> /v1/messages,
+  # 24 Gemini -> :generateContent). gw_config publishes the SAME list, so run and artifact cannot drift.
+  local ctype cmodels
+  while read -r ctype cmodels; do
+    [ -n "$ctype" ] && _oa_channel "$ctype" "$cmodels"
+  done < <(_oa_channels)
   # 5) mint an unlimited token — AddToken generates the key itself and returns it in .data.key
   local key; key=$(curl -s -b "$OA_JAR" -X POST "$base/api/token/" -H 'content-type: application/json' \
     -d '{"name":"bench","expired_time":-1,"remain_quota":0,"unlimited_quota":true}' | _oa_get data key)
@@ -168,15 +193,22 @@ gw_matrix_egress() {
 # minted bench token (its own mandatory auth — every relay request needs a token), and SQL_DSN=""
 # (the embedded-SQLite run-mechanic: no external DB). Auth values are dummy on the isolated rig.
 gw_config() {
+  # DERIVED from the SAME single-source values gw_launch runs: the run flags (image + GOMAXPROCS core-pin
+  # + SQL_DSN run-mechanic) and the channel lines (from _oa_channels). Nothing here is hand-restated, so
+  # the published artifact is exactly what gw_launch provisioned.
   cat <<ENV
-# container (embedded SQLite — SQL_DSN="" is the no-external-DB run-mechanic)
-docker run --network host --cpuset-cpus=$CORES -e SQL_DSN="" $ONE_API_IMAGE
+# container (embedded SQLite — SQL_DSN="" is the no-external-DB run-mechanic; GOMAXPROCS = pinned core count)
+docker run --network host --cpuset-cpus=$CORES -e GOMAXPROCS=$(_oa_ncore) -e SQL_DSN="" $ONE_API_IMAGE
 # admin bootstrap (default root/123456; token auth is One-API's own mandatory per-request auth)
 POST /api/user/login              {"username":"root","password":"123456"}
 # all supported providers wired as channels (base_url = mock; model lists disjoint for 1:1 routing)
-POST /api/channel/  type=1   models=gpt-4o-mini                   base_url=http://127.0.0.1:$MOCK_PORT  key=sk-mock  group=default
-POST /api/channel/  type=14  models=claude-3-5-sonnet-20240620    base_url=http://127.0.0.1:$MOCK_PORT  key=sk-mock  group=default
-POST /api/channel/  type=24  models=gemini-1.5-pro                base_url=http://127.0.0.1:$MOCK_PORT  key=sk-mock  group=default
+ENV
+  local ctype cmodels
+  while read -r ctype cmodels; do
+    [ -n "$ctype" ] && printf 'POST /api/channel/  type=%-3s models=%-32s base_url=http://127.0.0.1:%s  key=sk-mock  group=default\n' \
+      "$ctype" "$cmodels" "$MOCK_PORT"
+  done < <(_oa_channels)
+  cat <<ENV
 # minted per-request token (unlimited quota) -> sent as the bench bearer
 POST /api/token/                  {"name":"bench","expired_time":-1,"unlimited_quota":true}
 ENV
