@@ -631,6 +631,56 @@ test("guard: the published headline MUST be a point on its own charted sweep (on
     "a record with no charted sweep array must not trip the one-source guard");
 });
 
+test("HIGH-R2-1: guard mirrors the p99/error gate — a cliff-above-peak gateway must PASS", () => {
+  // The ordinary max-proxy / sustained shape: raw rps keeps climbing while the ramp probes ONE rung
+  // past the peak, and that terminal rung crosses the p99 cliff (p99 >= P99_CEIL_MS*1000). lib/sweep.sh
+  // advances SW_CEIL_RPS only on gate-PASSING rungs (_sw_pass_c, :338), so the headline = 45995 (the max
+  // of the passing rungs), NOT 52000 (the failing terminal rung). But SW_JSON records EVERY probed rung
+  // (:337), so the failing 52000 rung IS in the charted array. A gate-blind max() reducer would pick
+  // 52000, find peak.rps !== head, and process.exit(1) the ENTIRE board publish for an honest build.
+  // The fixed reducer applies the SAME gate the headline used → the failing rung is not eligible for the
+  // peak → the guard PASSES. This is the fixture the round-2 audit demanded before the honest re-run.
+  const cliffSweep = [
+    { conc: 128, rps: 40000, p99_us: 700000, fail: 0 },
+    { conc: 256, rps: 44000, p99_us: 800000, fail: 0 },
+    { conc: 512, rps: 45995, p99_us: 900000, fail: 0 },  // peak of the gate-PASSING rungs (headline)
+    { conc: 1024, rps: 52000, p99_us: 1400000, fail: 0 }, // higher RAW rps but p99 cliff FAILS the 1s gate
+  ];
+  const cliffBase = {
+    ingress: "openai", egress: "openai", dialect: "openai", source: "matrix",
+    added_latency_p99_us: 111,
+    rps_max_proxy: 45995, rps_max_proxy_concurrency: 512,
+    rps_sustained_20ms: 45995, rps_sustained_20ms_concurrency: 512,
+    sweep_max_proxy: cliffSweep,
+    sweep_sustained_20ms: cliffSweep,
+  };
+  const cliff = { key: "cliff", display: "Cliff", lang: "Rust", best_cell: cliffBase,
+    matrix: { p99_ceiling_ms: 1000, sweep_dur: 10 } };
+  assert.deepEqual(checkConsistency({ gateways: [cliff] }, app).errors, [],
+    "a gateway whose highest-rps rung FAILS the p99 gate must PASS (headline == max of gate-PASSING rungs)");
+
+  // And the gate still catches a genuinely wrong headline (46497 is not any gate-passing rung).
+  const cliffBad = { key: "cliffbad", display: "CliffBad", lang: "Rust",
+    best_cell: { ...cliffBase, rps_max_proxy: 46497 },
+    matrix: { p99_ceiling_ms: 1000, sweep_dur: 10 } };
+  const eBad = checkConsistency({ gateways: [cliffBad] }, app).errors;
+  assert.ok(eBad.some((e) => e.includes("cliffbad.rps_max_proxy") && e.includes("46497") && e.includes("45995")),
+    `the gate-passing reducer must still flag a headline that is no gate-passing rung; got: ${JSON.stringify(eBad)}`);
+
+  // A cliff rung failing on ERROR RATE (not p99) is likewise ineligible: raw 60000 rps with fail high
+  // enough to exceed 0.1% (tot = 60000*10 + 700 = 600700; 700 > 0.001*600700=600.7 → fails).
+  const errSweep = [
+    { conc: 256, rps: 44000, p99_us: 800000, fail: 0 },
+    { conc: 512, rps: 45995, p99_us: 900000, fail: 0 },  // headline
+    { conc: 1024, rps: 60000, p99_us: 950000, fail: 700 }, // p99 ok but error rate > 0.1% → gate FAILS
+  ];
+  const errCliff = { key: "errcliff", display: "ErrCliff", lang: "Rust",
+    best_cell: { ...cliffBase, sweep_max_proxy: errSweep, sweep_sustained_20ms: errSweep },
+    matrix: { p99_ceiling_ms: 1000, sweep_dur: 10 } };
+  assert.deepEqual(checkConsistency({ gateways: [errCliff] }, app).errors, [],
+    "a higher-rps rung that FAILS the error-rate gate must not be treated as the peak");
+});
+
 test("divergent translation_cell vs xlate suite: drawer/compare read the matrix cell", () => {
   const g = {
     key: "xdiv", display: "XDiv", lang: "Go",
@@ -780,7 +830,7 @@ test("MEDIUM-6: cpu_fps is gated on cpu_fps_mock_bound === false across the site
   // Certified (explicit false): visible on every surface.
   const certified = { key: "cert", display: "Cert", lang: "Rust",
     streaming: { dialect: "openai", source: "matrix", stream_served: true,
-      added_ttft_p99_us: 90, added_gap_p99_us: 12, streams_sustained: 1300,
+      added_ttft_p99_us: 90, added_gap_p99_us: 12, streams_sustained: 1300, streams_sustained_mock_bound: false,
       cpu_fps: 48000, cpu_fps_mock_bound: false } };
   assert.equal(app.cpuFpsCertified(certified.streaming), true);
   assert.equal(app.streamCell(certified, "cpu_fps", String).text, "48000");
@@ -804,7 +854,7 @@ test("MEDIUM-6 guard: site cpu-fps visibility must equal the chart's streamcpu_v
   // The check-consistency assertion tying the two together. A matrix streaming projection whose
   // diagonal cell is mock-bound: the site hides cpu_fps AND the chart draws no bar → consistent.
   const stream = { stream_served: true, added_ttft_p99_us: 90, added_gap_p99_us: 12,
-    streams_sustained: 1300, cpu_fps: 48000, cpu_fps_mock_bound: false };
+    streams_sustained: 1300, streams_sustained_mock_bound: false, cpu_fps: 48000, cpu_fps_mock_bound: false };
   const cell = { served: true, perf: { added_latency_p99_us: 20 }, stream };
   const matrix = { upstreams: { openai: { cells: { openai: cell } } } };
   const consistent = { key: "cok", display: "Cok", lang: "Rust",
@@ -821,6 +871,52 @@ test("MEDIUM-6 guard: site cpu-fps visibility must equal the chart's streamcpu_v
   const eDrift = checkConsistency({ gateways: [drift] }, app).errors;
   assert.ok(eDrift.some((e) => e.includes("cdrift.streaming.cpu_fps")),
     `guard must catch a cpu_fps that is certified on the headline but mock-bound on its diagonal cell; got: ${JSON.stringify(eDrift)}`);
+});
+
+test("MEDIUM-R2-2: streams_sustained is gated on streams_sustained_mock_bound === false across site + guard", () => {
+  // Symmetric with the cpu-fps gate: a rig-limited (mock-bound) or unverifiable (null) sustained count
+  // must read n/a on every site surface, matching charts.py suppressing its bar — so a mock bottleneck
+  // never draws a full sustained bar, ranks top-N, or wins the best:max compare.
+  const certified = { key: "scert", display: "SCert", lang: "Rust",
+    streaming: { dialect: "openai", source: "matrix", stream_served: true,
+      added_ttft_p99_us: 90, added_gap_p99_us: 12, streams_sustained: 1300, streams_sustained_mock_bound: false,
+      cpu_fps: 48000, cpu_fps_mock_bound: false } };
+  assert.equal(app.sustainedCertified(certified.streaming), true);
+  assert.equal(app.streamCell(certified, "streams_sustained", String).text, "1300");
+  assert.equal(app.canonicalStreaming(certified).streams_sustained, 1300);
+  // Mock-bound (true): suppressed → n/a, matching the chart's suppressed bar.
+  const bound = { ...certified, key: "sbound",
+    streaming: { ...certified.streaming, streams_sustained_mock_bound: true } };
+  assert.equal(app.sustainedCertified(bound.streaming), false);
+  assert.equal(app.streamCell(bound, "streams_sustained", String).na, true, "mock-bound streams_sustained reads n/a");
+  assert.equal(app.canonicalStreaming(bound).streams_sustained, null);
+  // NULL flag (unverifiable — reference ceiling read 0): also suppressed.
+  const nullFlag = { ...certified, key: "snull",
+    streaming: { ...certified.streaming, streams_sustained_mock_bound: null } };
+  assert.equal(app.sustainedCertified(nullFlag.streaming), false, "null mock-bound is NOT certified");
+  assert.equal(app.streamCell(nullFlag, "streams_sustained", String).na, true, "null mock-bound streams_sustained reads n/a");
+  // cpu_fps stays visible independent of the sustained gate (the two lanes gate independently)
+  assert.equal(app.streamCell(bound, "cpu_fps", String).text, "48000");
+});
+
+test("MEDIUM-R2-2 guard: site sustained visibility must equal the chart's stream_sustained_valid rule", () => {
+  // A certified cell: site shows streams_sustained AND chart draws its bar → consistent.
+  const stream = { stream_served: true, added_ttft_p99_us: 90, added_gap_p99_us: 12,
+    streams_sustained: 1300, streams_sustained_mock_bound: false, cpu_fps: 48000, cpu_fps_mock_bound: false };
+  const cell = { served: true, perf: { added_latency_p99_us: 20 }, stream };
+  const consistent = { key: "sok", display: "Sok", lang: "Rust",
+    streaming: { dialect: "openai", source: "matrix", ...stream },
+    matrix: { upstreams: { openai: { cells: { openai: cell } } } } };
+  assert.deepEqual(checkConsistency({ gateways: [consistent] }, app).errors, [],
+    "certified streams_sustained: site shows it, chart draws it — consistent");
+  // Cell mock-bound but stale certified headline: gated values diverge (headline 1300, cell → null) → FAIL.
+  const boundCell = { ...cell, stream: { ...stream, streams_sustained_mock_bound: true } };
+  const drift = { key: "sdrift", display: "SDrift", lang: "Rust",
+    streaming: { dialect: "openai", source: "matrix", ...stream },  // headline still certified
+    matrix: { upstreams: { openai: { cells: { openai: boundCell } } } } };
+  const eDrift = checkConsistency({ gateways: [drift] }, app).errors;
+  assert.ok(eDrift.some((e) => e.includes("sdrift.streaming.streams_sustained")),
+    `guard must catch a streams_sustained certified on the headline but mock-bound on its diagonal cell; got: ${JSON.stringify(eDrift)}`);
 });
 
 test("gen-data projects memory from the matrix's one process-level read", () => {

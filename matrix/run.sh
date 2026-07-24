@@ -1096,6 +1096,7 @@ cat > "$RESULTS/$GATEWAY.json" <<JSON
   "sweep_rung_selection": "$([ "${SWEEP_ADAPTIVE:-0}" = 1 ] && echo adaptive || echo full-ladder)",
   "sweep_ttft_ms": $SWEEP_TTFT_MS,
   "p99_ceiling_ms": $P99_CEIL_MS,
+  "sweep_dur": $SWEEP_DUR,
   "cell_stream": $([ "$MATRIX_STREAM" = 1 ] && echo true || echo false),$MEMORY_JSON
   "cells": {$COMPAT_CELLS
   },
