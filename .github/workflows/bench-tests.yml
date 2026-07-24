@@ -11,12 +11,14 @@ on:
       - "lib/sweep.sh"
       - "lib/sweep_peak_test.sh"
       - "loadgen/**"
+      - "mock/**"
       - ".github/workflows/bench-tests.yml"
   pull_request:
     paths:
       - "lib/sweep.sh"
       - "lib/sweep_peak_test.sh"
       - "loadgen/**"
+      - "mock/**"
       - ".github/workflows/bench-tests.yml"
   workflow_dispatch:
 
@@ -32,3 +34,25 @@ jobs:
         run: bash -n lib/sweep.sh && bash -n lib/sweep_peak_test.sh
       - name: Peak-search regression test (H5) + adaptive/prior (M5) + sweep_c1 (M6)
         run: bash lib/sweep_peak_test.sh
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: loadgen/go.mod
+      # ugen's rps/p99/delivered ARE every published board number, but had zero unit tests and CI only
+      # parse-checked the sweep's CONSUMPTION of the number, never ugen's COMPUTATION (audit R3-H2).
+      # Gate the numeric core: rps-over-elapsed (R2-M1), pct() + its clamp (N2), the NewRequest-error
+      # path (L1), isContent's empty-placeholder handling. loadgen is a self-contained stdlib module.
+      - name: loadgen vet
+        run: go vet -C loadgen ./...
+      - name: loadgen unit tests (rps/pct/isContent/buildRequest)
+        run: go test -C loadgen ./...
+
+  mock-shape:
+    # The mock must never bottleneck and must serve every dialect identically; its per-dialect
+    # request_shape_ok is what the matrix's leg-3 body_ok trusts. Gate it so the bedrock/cohere
+    # tightening (R3-M6 — reject an unconverted OpenAI body) can never silently regress.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: mock unit tests (request_shape_ok per dialect + routing)
+        run: cargo test --manifest-path mock/Cargo.toml --tests

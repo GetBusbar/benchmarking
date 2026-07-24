@@ -3,6 +3,10 @@ import ("bufio";"bytes";"flag";"fmt";"io";"math";"net/http";"sort";"strings";"sy
 type hdrs []string
 func(h *hdrs)String()string{return strings.Join(*h,",")}
 func(h *hdrs)Set(v string)error{*h=append(*h,v);return nil}
+// pct sorts v IN PLACE and returns its q-quantile with the index clamped to the last element (so
+// q=1.0 or a rounding overshoot can never index out of bounds). NOTE: the in-place sort mutates the
+// shared slice; it is only race-free because every caller runs AFTER wg.Wait() on the single output
+// goroutine. If output formatting is ever parallelised, copy v (or guard) before sorting.
 func pct(v []float64,q float64)float64{if len(v)==0{return 0};sort.Float64s(v);i:=int(float64(len(v))*q);if i>=len(v){i=len(v)-1};return v[i]}
 // isContent: a data frame that carries actual delta text — OpenAI `"content":"…"` or Anthropic
 // `"text":"…"` — and not an empty-string placeholder (content_block_start carries `"text":""`).
@@ -13,6 +17,27 @@ func pct(v []float64,q float64)float64{if len(v)==0{return 0};sort.Float64s(v);i
 func isContent(l string)bool{
  return (strings.Contains(l,`"content":"`)&&!strings.Contains(l,`"content":""`))||
   (strings.Contains(l,`"text":"`)&&!strings.Contains(l,`"text":""`))
+}
+// rpsOver: requests/sec over the ACTUAL elapsed wall time (never the nominal -d). Isolated so the
+// audit-M1 "divide by measured elapsed, not nominal dur" fix has a regression test: dividing extra
+// tail successes (a request in flight when the deadline passes still completes and is counted) by a
+// shorter nominal window over-counts, and the over-count scales with latency, inflating slower
+// gateways. A non-positive elapsed falls back to dur so we never divide by zero.
+func rpsOver(ok int64, elapsed float64, dur int) int64{
+ if elapsed<=0{elapsed=float64(dur)}
+ if elapsed<=0{return 0}
+ return int64(float64(ok)/elapsed)
+}
+// buildRequest constructs the POST for one loadgen iteration. Isolated so the audit-L1 NewRequest
+// ERROR path (a malformed URL must increment fail and continue, never panic on a nil req) is testable.
+func buildRequest(url,body,auth,shape string,stream bool,extra []string)(*http.Request,error){
+ req,err:=http.NewRequest("POST",url,bytes.NewReader([]byte(body)))
+ if err!=nil{return nil,err}
+ req.Header.Set("content-type","application/json");req.Header.Set("authorization","Bearer "+auth)
+ if shape=="anthropic"{req.Header.Set("anthropic-version","2023-06-01");req.Header.Set("x-api-key",auth)}
+ if stream{req.Header.Set("accept","text/event-stream")}
+ for _,h:=range extra{if i:=strings.Index(h,":");i>0{req.Header.Set(strings.TrimSpace(h[:i]),strings.TrimSpace(h[i+1:]))}}
+ return req,nil
 }
 func main(){
  url:=flag.String("url","","");model:=flag.String("model","gpt-4o-mini","");auth:=flag.String("auth","sk-dummy","")
@@ -45,12 +70,10 @@ func main(){
    }else{
     body=[]byte(fmt.Sprintf(`{"model":"%s","messages":[{"role":"user","content":"u-%d-%d-%s"}],"max_tokens":16%s}`,*model,id,n,pad,sfield))
    }
-   st:=time.Now();req,rerr:=http.NewRequest("POST",*url,bytes.NewReader(body));if rerr!=nil{atomic.AddInt64(&fail,1);continue};req.Header.Set("content-type","application/json");req.Header.Set("authorization","Bearer "+*auth)
-   // anthropic shape sends BOTH auth carriers (x-api-key like the Anthropic SDK, plus the Bearer
-   // above) so a gateway honoring either accepts it; -H can still override either header.
-   if *shape=="anthropic"{req.Header.Set("anthropic-version","2023-06-01");req.Header.Set("x-api-key",*auth)}
-   if *stream{req.Header.Set("accept","text/event-stream")}
-   for _,h:=range extra{if i:=strings.Index(h,":");i>0{req.Header.Set(strings.TrimSpace(h[:i]),strings.TrimSpace(h[i+1:]))}}
+   // anthropic shape sends BOTH auth carriers (x-api-key like the Anthropic SDK, plus the Bearer)
+   // so a gateway honoring either accepts it; -H can still override either header. A NewRequest error
+   // (malformed URL) increments fail and continues — never a nil-req panic (audit L1).
+   st:=time.Now();req,rerr:=buildRequest(*url,string(body),*auth,*shape,*stream,extra);if rerr!=nil{atomic.AddInt64(&fail,1);continue}
    resp,err:=cl.Do(req);if err!=nil{atomic.AddInt64(&fail,1);continue}
    if !*stream{
     io.Copy(io.Discard,resp.Body);resp.Body.Close()
@@ -96,8 +119,8 @@ func main(){
  // and is counted in `ok`. Dividing those extra successes by the nominal *dur (a shorter window than
  // they really spanned) over-counts, and the over-count scales with per-request latency - inflating
  // higher-latency / near-saturation gateways. Divide by real elapsed (as the stream path does).
- elapsed:=time.Since(start).Seconds();if elapsed<=0{elapsed=float64(*dur)}
+ elapsed:=time.Since(start).Seconds()
  // ms for humans; us (integer microseconds) for sub-ms precision the perf suite parses.
  fmt.Printf("rps=%d fail=%d p50=%.2f p99=%.2f p50us=%d p99us=%d ok=%d\n",
-   int64(float64(ok)/elapsed),fail,p(0.5),p(0.99),int64(p(0.5)*1000),int64(p(0.99)*1000),ok)
+   rpsOver(ok,elapsed,*dur),fail,p(0.5),p(0.99),int64(p(0.5)*1000),int64(p(0.99)*1000),ok)
 }
