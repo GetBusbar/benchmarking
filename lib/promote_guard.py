@@ -16,13 +16,23 @@
 import json
 import sys
 
+# A boot/build failure is our ENVIRONMENT never getting the gateway to answer at all - it must be
+# distinguishable from a gateway that BOOTED and then honestly refused the probe (a real HTTP status),
+# because refusing the honest not-served result and republishing last run's stale served=true biases
+# the board in that gateway's favor (audit R4-M2).
+#
+# The ONLY authoritative in-band boot-failure sentinel is the one lib/harness.sh:127 emits when
+# harness_launch_ready() exhausts every attempt: HARNESS_SERVE_ERR = "failed to boot after N attempts:
+# ...". That string is anchored (it always LEADS the serve_error) and subsumes the per-attempt
+# "not ready;" / "port ... not listening" diagnostics. The bare tokens we used to match - "venv",
+# "not ready", "not listening", "no such file or directory" - are NOT harness sentinels: they only
+# ever appear inside the verbatim `gw_diag=[...]` tail (or a gateway's own captured stderr), so a
+# genuinely-booted gateway whose diagnostic body happens to contain any of them was misclassified as
+# "never booted" and had its honest failure discarded. ("build failed" exits the suite with `exit 1`
+# and never reaches a JSON field, so it was dead weight.) We anchor to the real sentinel; a
+# connection-level failure (last_http_status "000", no HTTP response at all) is handled separately.
 BOOT_FAILURE_MARKERS = (
-    "failed to boot",
-    "no such file or directory",
-    "not listening",
-    "not ready",
-    "venv",
-    "build failed",
+    "failed to boot after",
 )
 
 

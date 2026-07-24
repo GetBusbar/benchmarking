@@ -248,8 +248,25 @@ if (latest && generatedAt < latest) {
 // self-consistent but old. That is the SECOND way a refresh betrays trust (a whole stale row).
 const MAX_SPAN_H = 3;   // a gateway's own suites must be from one box run; 3h clears busbar's matrix
 const MAX_LAG_H = 3;    // no gateway may lag the board-wide newest measurement by more than this
+// ABSOLUTE board-age floor (trust anchor). The two guards above are RELATIVE - span is row-internal,
+// lag is row-vs-boardNewest - so a WHOLESALE-stale board (every box failed to refresh and
+// promote_guard republished the SAME old timestamps for every gateway) sails through: each row's
+// span is tiny and every row's lag against boardNewest is ~0. Nothing relative can see that the whole
+// board is old. This absolute floor is the honesty backstop: if the newest measurement ANYWHERE on
+// the board is older than MAX_BOARD_AGE_H, the board is stale as a whole and must NOT publish
+// generated_at=now over week-old data. Board timestamps are the anchor; a stale board is a hard fail.
+const MAX_BOARD_AGE_H = 48;
 const newestOf = (g) => Math.max(...SUITES.map((s) => g[s] && g[s].measured_at).filter(Boolean).map((a) => Date.parse(a)).concat([0]));
 const boardNewest = Math.max(...gateways.map(newestOf), 0);
+if (boardNewest > 0) {
+  const boardAgeH = (Date.parse(generatedAt) - boardNewest) / 3600000;
+  if (boardAgeH > MAX_BOARD_AGE_H) {
+    throw new Error(
+      `gen-data: FRESHNESS FAILURE (stale board): the newest measurement anywhere on the board is ${boardAgeH.toFixed(1)}h old ` +
+      `(> ${MAX_BOARD_AGE_H}h) - the WHOLE board is wholesale-stale (every box failed to refresh and old timestamps were republished). ` +
+      `Refusing to publish generated_at=${generatedAt} over stale data. Re-run the field.`);
+  }
+}
 for (const g of gateways) {
   const ats = SUITES.map((s) => g[s] && g[s].measured_at).filter(Boolean).map((a) => Date.parse(a));
   if (ats.length < 1) continue;

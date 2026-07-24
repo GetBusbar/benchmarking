@@ -7,7 +7,7 @@
 # an existing (suite, measured_at) pair for that gateway is skipped, never rewritten, so
 # re-running after a partial field run only adds the new rows. History lives in git, so the
 # file's own commit log is a second, tamper-evident record.
-import json, os
+import json, os, sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RES = os.path.join(ROOT, "results")
@@ -30,6 +30,7 @@ KEEP = {
 def main():
     os.makedirs(HIST, exist_ok=True)
     added = 0
+    skipped = []   # result files that failed to parse (corrupt/truncated) - each is a LOST history row
     for suite in SUITES:
         d = os.path.join(RES, suite)
         if not os.path.isdir(d):
@@ -38,9 +39,18 @@ def main():
             if not fn.endswith(".json"):
                 continue
             gw = fn[:-5]
+            src = os.path.join(d, fn)
             try:
-                data = json.load(open(os.path.join(d, fn)))
-            except Exception:
+                with open(src) as f:
+                    data = json.load(f)
+            except Exception as e:
+                # A corrupt/truncated result JSON (e.g. a here-doc that failed mid-write when the box
+                # hit its shutdown timer, or a partially-pulled file) must NOT be silently skipped: this
+                # is the append-only, git-tracked, tamper-evident history and skipping loses that
+                # (gateway, suite) row forever. Record it and exit non-zero so the caller's
+                # `if ! append.py` guard fires (audit R4-M3).
+                print(f"history: SKIPPED corrupt {suite}/{fn}: {e}", file=sys.stderr)
+                skipped.append(f"{suite}/{fn}")
                 continue
             measured = data.get("measured_at")
             if not measured:
@@ -67,6 +77,11 @@ def main():
                 f.write(json.dumps(rec, separators=(",", ":")) + "\n")
             added += 1
     print(f"history: appended {added} record(s)")
+    if skipped:
+        print(f"history: WARNING {len(skipped)} corrupt result file(s) skipped - "
+              f"their history row(s) were LOST: {', '.join(skipped)}", file=sys.stderr)
+        return 1
+    return 0
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

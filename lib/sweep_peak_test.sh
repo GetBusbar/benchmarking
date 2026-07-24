@@ -18,8 +18,28 @@ log(){ :; }
 sqr(){ echo $(( $1 * $1 )); }
 sweep_probe(){ # url conc dur -> "rps fail p99us p50us"
   local url="$1" c="$2"
-  if [ "$url" = "$DURL" ]; then echo "58000 0 500000 400000"; return; fi
+  if [ "$url" = "$DURL" ]; then
+    # The mock-ceiling reference probe (and _sw_mock_ready's 1-conn liveness probe) hit DURL. Two
+    # curves need a NON-default DURL response to exercise the R3 fixes the base suite never touches:
+    case "$CURVE" in
+      # (a) R3-H1 dead-mock: the mock NEVER answers -> _sw_mock_ready's 1-conn probe returns rps=0 for
+      # all 30 tries -> SW_MOCK_READY=0 -> SW_BOUND must be null (unknown), never false/true. A dead
+      # mock that still reported a ceiling would ship an overstated mock_bound=false.
+      deadmock) echo "0 0 0 0"; return ;;
+      # (b) R3-M1 winner-above-reference re-probe: the mock ceiling is conc-dependent. At the reference
+      # conc (<=2048) it reads LOW (30000); when _sw_ceil_ref_ok re-probes at the winner's higher conc
+      # it must read HIGHER (up to 60000) and ADOPT the larger ceiling. A base fixed DURL would hide
+      # the re-probe entirely (the winner never exceeds 2048 in the 8 base cases).
+      peak_high) local m=$(( 50000 + c*20 )); [ "$m" -gt 130000 ] && m=130000; echo "$m 0 400000 300000"; return ;;
+      *) echo "58000 0 500000 400000"; return ;;
+    esac
+  fi
   case "$CURVE" in
+    deadmock)      local r=$(( c*50 )); [ "$r" -gt 40000 ] && r=40000; echo "$r 0 $(( 20000 + c*20 )) 15000" ;;
+    peak_high)     # true peak ~55000 @ c=3000 (ABOVE the 2048 reference conc): forces _sw_ceil_ref_ok
+                   # to re-probe the rig at the winner concurrency for a fair, higher ceiling (R3-M1).
+                   local d=$(( (c-3000)/16 )); local r=$(( 55000 - $(sqr "$d") )); [ "$r" -lt 500 ] && r=500
+                   echo "$r 0 $(( 20000 + c*8 )) 15000" ;;
     cliff1000)     if [ "$c" -le 1000 ]; then local r=$(( c*50 )); [ "$r" -gt 45000 ] && r=45000; echo "$r 0 $(( 20000 + c*20 )) 15000"; else echo "40 900000 90000 80000"; fi ;;
     slow200)       if [ "$c" -le 200 ];  then local r=$(( c*25 )); [ "$r" -gt 5000 ]  && r=5000;  echo "$r 0 $(( 20000 + c*30 )) 15000"; else echo "10 500000 95000 90000"; fi ;;
     mockbound)     local r=$(( c*60 )); [ "$r" -gt 57000 ] && r=57000; echo "$r 0 $(( 20000 + c*15 )) 14000" ;;
@@ -61,6 +81,30 @@ run_case mockbound;    assert "mock-bound flagged"                  "$SW_CEIL_RP
 run_case peak_between; assert "peak BETWEEN doublings (not low)"    "$SW_CEIL_RPS" "$SW_BOUND" "$SW_CEIL_CONC" 39500 40000 false 1150 1450
 run_case peak_low;     assert "peak BELOW start (ramp down)"        "$SW_CEIL_RPS" "$SW_BOUND" "$SW_CEIL_CONC" 44000 45000 false 32 128
 run_case peak_between_low "16 8192"; assert "peak BETWEEN low doublings (relative TOL, H5)" "$SW_CEIL_RPS" "$SW_BOUND" "$SW_CEIL_CONC" 44550 45000 false 88 104
+
+# ── R3-H1: dead/never-ready mock -> SW_BOUND=null (the mock_bound=null-when-unready guard) ──────────
+# The 8 cases above always answer DURL with rps>0, so _sw_mock_ready never fails and SW_BOUND=null is
+# never asserted. Here the mock NEVER answers (DURL rps=0): _sw_mock_ready exhausts its tries,
+# SW_MOCK_READY=0, and _sw_set_bound MUST emit null (unknown) - never false/true - so an overstated
+# ceiling from a dead-mock reference is never published as a trustworthy mock_bound. A regression that
+# shipped `false` instead of `null` on a dead mock would fail this case (audit R4 NIT).
+run_case deadmock; assert "dead mock -> mock_bound=null (never false)" "$SW_CEIL_RPS" "$SW_BOUND" "$SW_CEIL_CONC" 39000 40000 null
+[ "${SW_MOCK_READY:-x}" = 0 ] && echo "ok   - dead mock flagged SW_MOCK_READY=0" \
+  || { echo "FAIL - dead mock did not clear SW_MOCK_READY (got '${SW_MOCK_READY:-unset}')"; fail=1; }
+
+# ── R3-M1: winner concurrency ABOVE the reference -> _sw_ceil_ref_ok re-probes + adopts larger ceiling
+# The base cases peak at c<=~1300, never above the 2048 reference conc, so _sw_ceil_ref_ok always
+# early-exits and the re-probe branch is dead. Here the true peak sits at c~3000 (> 2048): the initial
+# mock ceiling is measured LOW at the reference conc (~2048 -> ~30000), then re-probed at the winner's
+# higher conc where the rig reports HIGHER (~60000). The guard MUST adopt the larger ceiling, and
+# SW_MOCK_CEIL_CONC must move to the re-probe concurrency. A regression that inverted the comparison
+# (kept the smaller reference) would fire mock_bound spuriously and truncate the fastest gateways.
+run_case peak_high "32 65536"
+assert "winner above reference conc (re-probe branch)" "$SW_CEIL_RPS" "$SW_BOUND" "$SW_CEIL_CONC" 54000 55000 false 2500 3500
+[ "${SW_MOCK_CEIL:-0}" -gt 30000 ] && echo "ok   - re-probe adopted larger mock ceiling (SW_MOCK_CEIL=$SW_MOCK_CEIL > reference 30000)" \
+  || { echo "FAIL - re-probe did NOT adopt the larger ceiling (SW_MOCK_CEIL=${SW_MOCK_CEIL:-unset}, wanted > 30000)"; fail=1; }
+[ "${SW_MOCK_CEIL_CONC:-0}" -gt 2048 ] && echo "ok   - re-probe moved the ceiling conc above the reference (SW_MOCK_CEIL_CONC=$SW_MOCK_CEIL_CONC)" \
+  || { echo "FAIL - re-probe ceiling conc not moved above 2048 (got '${SW_MOCK_CEIL_CONC:-unset}')"; fail=1; }
 
 # ── M5: adaptive / SWEEP_PRIOR-seeded path (the matrix suite's production config) ──────────────────
 # matrix runs run_sweep ... peak with SWEEP_ADAPTIVE=1, seeding SWEEP_PRIOR[ttft] from the previous

@@ -13,7 +13,7 @@
 // real committed sweep data through the stub canvas.
 
 import { execFileSync } from "node:child_process";
-import { readFileSync, mkdtempSync, rmSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -51,6 +51,67 @@ try {
 } finally {
   rmSync(out, { recursive: true, force: true });
 }
+
+// ---- freshness guard: POSITIVELY assert it throws on a stale board, passes on a fresh one ----
+// The main data load above FALLS BACK to the committed bundle when the guard trips, so the guard is
+// never positively exercised there - a widened MAX_SPAN_H, a flipped lag comparison, or a missing
+// absolute board-age floor would all go undetected. Here we build a throwaway synthetic repo (a couple
+// of gateway manifests + result JSONs with controlled measured_at) and run gen-data against it,
+// asserting: (1) a wholesale-stale board (every measurement > MAX_BOARD_AGE_H old, so BOTH relative
+// guards pass) HARD-FAILS on the new absolute floor (audit R4-M1); (2) a fresh, coherent board passes.
+function buildSyntheticRepo(measuredAtByGw) {
+  // measuredAtByGw: { key: { perf: isoString, matrix?: isoString, ... }, ... }
+  const root = mkdtempSync(join(tmpdir(), "site-fresh-"));
+  for (const [key, suites] of Object.entries(measuredAtByGw)) {
+    mkdirSync(join(root, "gateways", key), { recursive: true });
+    writeFileSync(join(root, "gateways", key, "gateway.sh"),
+      `#!/usr/bin/env bash\nGW_DISPLAY="${key}"\nGW_LANG=Rust\nGW_CLASS="Gateway"\n`);
+    for (const [suite, iso] of Object.entries(suites)) {
+      mkdirSync(join(root, "results", suite), { recursive: true });
+      const doc = { gateway: key, build: "ok", served: true, measured_at: iso,
+        added_latency_p50_us: 100, added_latency_p99_us: 200,
+        rps_sustained_20ms: 10000, rps_max_proxy: 12000 };
+      writeFileSync(join(root, "results", suite, `${key}.json`), JSON.stringify(doc));
+    }
+  }
+  return root;
+}
+function genThrows(root) {
+  try {
+    const outDir = mkdtempSync(join(tmpdir(), "site-fresh-out-"));
+    execFileSync(process.execPath, [join(HERE, "gen-data.mjs"), root, outDir], { stdio: "pipe" });
+    rmSync(outDir, { recursive: true, force: true });
+    return null; // did not throw
+  } catch (e) {
+    return String(e.stderr || e.message || "");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+const isoAgo = (h) => new Date(Date.now() - h * 3600000).toISOString();
+
+test("freshness guard HARD-FAILS a wholesale-stale board (absolute age floor, R4-M1)", () => {
+  // Every gateway carries timestamps from the SAME ~7-day-old run: each row's span is tiny (< MAX_SPAN_H)
+  // and every row's lag vs boardNewest is ~0 (< MAX_LAG_H), so BOTH relative guards pass. Only the
+  // absolute board-age floor (> 48h) can catch it.
+  const stale = isoAgo(24 * 7); // a week old
+  const msg = genThrows(buildSyntheticRepo({
+    alpha: { perf: stale, matrix: stale },
+    bravo: { perf: stale, matrix: stale },
+  }));
+  assert.ok(msg, "expected gen-data to THROW on a wholesale-stale board, but it succeeded");
+  assert.ok(/FRESHNESS FAILURE \(stale board\)/.test(msg), `expected the stale-board failure, got: ${msg}`);
+});
+
+test("freshness guard PASSES a fresh, coherent board", () => {
+  // Every gateway measured within the last couple hours: span tiny, lag ~0, board age well under 48h.
+  const t = isoAgo(1);
+  const msg = genThrows(buildSyntheticRepo({
+    alpha: { perf: t, matrix: isoAgo(2) },
+    bravo: { perf: isoAgo(0.5), matrix: isoAgo(1.5) },
+  }));
+  assert.equal(msg, null, `expected a fresh board to pass gen-data, but it threw: ${msg}`);
+});
 
 test("gen-data emits gateways with a class for every entry", () => {
   assert.ok(data.gateways.length >= 10, `expected a full field, got ${data.gateways.length}`);
