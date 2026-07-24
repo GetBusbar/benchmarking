@@ -60,6 +60,49 @@ all_dead = {
 }
 check("all-dead matrix (every cell 000, no marker) must NOT overwrite a served result", guard("matrix", SERVED_MATRIX, all_dead), 1)
 
+# ── HIGH-R3-H1: a process that LISTENS but warms 502/503 under every egress (harness_launch_ready
+# exhausted its warm-up attempts) is a REAL boot failure. Every cell is not_verified with a non-000
+# 5xx status, and the top-level serve_error carries the anchored "failed to boot after" marker. The old
+# `bool(doc.get("cells"))` served-fallback treated this fully-populated grid as "served", short-circuiting
+# is_boot_failure() before the marker / all-dead check could veto it → it promoted OVER a served result
+# and blanked the row. It must now KEEP the prior served result.
+warm_502 = {
+    "served": False,
+    "serve_error": "failed to boot after 5 attempts: HTTP 502 on POST /v1/chat/completions",
+    "cells": {"openai": {"served": "not_verified", "status": "502"}},
+    "upstreams": {
+        "openai": {"served": False, "cells": {"openai": {"served": "not_verified", "status": "502"}}},
+        "anthropic": {"served": False, "cells": {"anthropic": {"served": "not_verified", "status": "503"}}},
+    },
+}
+check("502-warm boot-failed matrix (all 5xx + anchored marker) must NOT overwrite a served result", guard("matrix", SERVED_MATRIX, warm_502), 1)
+
+# Even WITHOUT the anchored marker, an all-5xx grid (every cell not_verified, server-errored under every
+# egress, none served) is the boot-failure signature and must KEEP the prior served result (belt-and-braces
+# for a serve_error that lost the marker).
+warm_502_no_marker = {
+    "served": False,
+    "serve_error": "HTTP 502",  # NO anchored "failed to boot after" marker
+    "upstreams": {
+        "openai": {"served": False, "cells": {"openai": {"served": "not_verified", "status": "502"}}},
+        "anthropic": {"served": False, "cells": {"anthropic": {"served": "not_verified", "status": "500"}}},
+    },
+}
+check("all-5xx matrix (no marker) is a boot-failure signature → must KEEP a served result", guard("matrix", SERVED_MATRIX, warm_502_no_marker), 1)
+
+# A 4xx CLIENT refusal across the grid (a booted gateway that honestly refused every dialect) is an honest
+# not-served, NOT a boot failure, and must PROMOTE — the conservative boundary of the H1 fix.
+refused_4xx = {
+    "served": False,
+    "serve_error": "all cells 403",
+    "upstreams": {
+        "openai": {"served": False, "cells": {"openai": {"served": False, "status": "403"}}},
+        "anthropic": {"served": False, "cells": {"anthropic": {"served": False, "status": "404"}}},
+    },
+}
+check("all-4xx matrix (booted, honest client refusal) must PROMOTE", guard("matrix", SERVED_MATRIX, refused_4xx), 0)
+
+
 # A legitimately-partial matrix: one cell answered with a REAL HTTP status (a booted gateway that refused
 # a dialect) — that is an honest not-served, NOT an environment boot failure, so it must PROMOTE.
 partial = {

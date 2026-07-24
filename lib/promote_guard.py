@@ -57,7 +57,16 @@ def is_served(doc, suite):
         for u in ups.values():
             if isinstance(u, dict) and u.get("served"):
                 return True
-        return bool(doc.get("cells"))
+        # HIGH-R3-H1: the old `bool(doc.get("cells"))` fallback treated a fully-populated grid of
+        # exclusively NOT-served cells (e.g. a process that listens but warms 502 under every egress —
+        # a real boot failure) as "served", short-circuiting is_boot_failure() before the anchored
+        # marker / all-dead check could veto it → a boot-failed matrix promoted over prior good data
+        # and blanked the row. Require at least one cell that ACTUALLY served (served True/"verified"),
+        # matching _matrix_all_dead's own served test, so a grid of not_verified cells is not "served".
+        for c in _matrix_cells(doc):
+            if c.get("served") is True or c.get("served") == "verified":
+                return True
+        return False
     return doc.get(served_field(suite)) is True
 
 
@@ -90,19 +99,33 @@ def _matrix_all_dead(doc):
     prevent). Detect that connection-level boot failure directly from the per-cell statuses.
 
     CONSERVATIVE by design: require BOTH (a) no served cell anywhere, AND (b) at least one cell present
-    with a status, AND (c) EVERY cell that carries a status shows "000". A legitimately-partial matrix
-    (some cell served, or some cell answered with a real HTTP status like 404/501) is NOT all-dead and
-    is allowed through as an honest not-served result."""
+    with a status, AND (c) EVERY cell that carries a status shows a boot-failure signature — a
+    connection-level "000" OR a cell the harness NEVER VERIFIED as serving (served=="not_verified").
+
+    R3-H1 case: the process listens but warms 502/503 under every egress, so harness_launch_ready
+    exhausts its warm-up attempts and every cell is emitted served="not_verified" with a non-000 status
+    (the warm-up curl's %{http_code}). That is a real boot failure, not a gateway limitation — but the
+    per-cell status is "502", not "000", so the status-only branch missed it. We key on the served field
+    instead: "not_verified" means the harness gave up warming the cell, whereas served==False with a real
+    HTTP status is a gateway that BOOTED and honestly refused that dialect (403/404/501) — an honest
+    not-served that must PROMOTE and age normally. A legitimately-partial matrix (some cell served, or a
+    cell explicitly served==False with a real status) is NOT all-dead."""
     saw_status = False
     for c in _matrix_cells(doc):
-        if c.get("served") is True or c.get("served") == "verified":
+        served = c.get("served")
+        if served is True or served == "verified":
             return False  # something served → not all-dead
         st = c.get("status")
         if st in (None, ""):
             continue
         saw_status = True
-        if str(st) != "000":
-            return False  # a cell got a real HTTP response → gateway booted, honest not-served
+        sst = str(st)
+        if sst == "000":
+            continue  # dead socket → boot-failure signature
+        if served == "not_verified":
+            continue  # process answered but harness never verified serving → warm-boot failure (R3-H1)
+        # a cell explicitly served==False WITH a real HTTP status → booted, honest not-served (403/404/…)
+        return False
     return saw_status
 
 
