@@ -112,6 +112,7 @@ const gateways = gatewayKeys.map((key) => {
       added_latency_p50_us: g.perf.added_latency_p50_us,
       added_latency_p99_us: g.perf.added_latency_p99_us,
       rps_sustained_20ms: g.perf.rps_sustained_20ms,
+      rps_sustained_20ms_concurrency: g.perf.rps_sustained_20ms_concurrency ?? null,
       rps_max_proxy: g.perf.rps_max_proxy,
       build: g.perf.build ?? null, measured_at: g.perf.measured_at ?? null,
     };
