@@ -51,14 +51,9 @@ export MOCK_PORT="${MOCK_PORT:-8000}"
 RESULTS="$ROOT/results/stream"; mkdir -p "$RESULTS"
 log(){ echo "[$(date +%H:%M:%S)] $*"; }
 command -v taskset >/dev/null || taskset(){ shift 2; "$@"; }
-command -v go >/dev/null || { echo "need Go (load generator)"; exit 1; }
-command -v cargo >/dev/null || { echo "need cargo (rust mock)"; exit 1; }
 
-log "building mock (rust) + loadgen (go)"
-( cd "$ROOT/mock" && cargo build --release >/dev/null 2>&1 ) || { echo "mock build failed"; exit 1; }
-MOCK="$ROOT/mock/target/release/mock"
-go build -o "$ROOT/loadgen/ugen" "$ROOT/loadgen/ugen.go"
-UGEN="$ROOT/loadgen/ugen"
+log "fetching prebuilt rig (mock + loadgen) — no on-box toolchain needed"
+. "$ROOT/lib/rig.sh"; fetch_rig "$ROOT" || { echo "rig fetch failed"; exit 1; }
 
 [ -f "$ROOT/gateways/versions.env" ] && source "$ROOT/gateways/versions.env"
 gw_version(){ echo unknown; }; GW_HEADERS=()

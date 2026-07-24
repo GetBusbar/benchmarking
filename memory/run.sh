@@ -35,13 +35,9 @@ log(){ echo "[$(date +%H:%M:%S)] $*"; }
 # taskset may be absent (macOS); shim it to a no-op wrapper so the rig still runs locally.
 command -v taskset >/dev/null || taskset(){ shift 2; "$@"; }
 
-command -v go >/dev/null || { echo "need Go (load generator)"; exit 1; }
-command -v cargo >/dev/null || { echo "need cargo (rust mock)"; exit 1; }
-log "building mock (rust) + loadgen (go)"
-( cd "$ROOT/mock" && cargo build --release >/dev/null 2>&1 ) || { echo "mock build failed"; exit 1; }
-MOCK_BIN="$ROOT/mock/target/release/mock"
-go build -o "$ROOT/loadgen/ugen" "$ROOT/loadgen/ugen.go"
-UGEN_BIN="$ROOT/loadgen/ugen"
+log "fetching prebuilt rig (mock + loadgen) — no on-box toolchain needed"
+. "$ROOT/lib/rig.sh"; fetch_rig "$ROOT" || { echo "rig fetch failed"; exit 1; }
+MOCK_BIN="$MOCK"; UGEN_BIN="$UGEN"
 
 # Source refs (branches/tags/versions) are pinned + overridable in ONE place, and recorded below.
 # shellcheck source=/dev/null

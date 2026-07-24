@@ -49,8 +49,6 @@ RESULTS="$ROOT/results/perf"; mkdir -p "$RESULTS"
 log(){ echo "[$(date +%H:%M:%S)] $*"; }
 command -v taskset >/dev/null || taskset(){ shift 2; "$@"; }
 command -v setsid  >/dev/null || setsid(){ "$@"; }
-command -v go >/dev/null || { echo "need Go (load generator)"; exit 1; }
-command -v cargo >/dev/null || { echo "need cargo (rust mock)"; exit 1; }
 
 log "fetching prebuilt rig (mock + loadgen) — no on-box toolchain needed"
 . "$ROOT/lib/rig.sh"; fetch_rig "$ROOT" || { echo "rig fetch failed"; exit 1; }
