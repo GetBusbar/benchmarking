@@ -110,13 +110,14 @@
       <p id="table-caption" class="fineprint"></p>
       <div class="controls" id="controls">
         <input type="search" id="search" placeholder="Search gateways" aria-label="Search gateways by name">
-        <div class="control-group xlate-picker hidden" id="xlate-picker">
-          <label>Translate <select id="xlate-in" aria-label="Ingress dialect the client speaks"></select>
-          <span class="xlate-arrow">&rarr;</span>
-          <select id="xlate-out" aria-label="Egress dialect the upstream speaks"></select></label>
-        </div>
         <span id="row-count" class="muted count"></span>
       </div>
+    </div>
+    <!-- Translate in/out picker (Matched tab only): its own row, not stacked with search/count. -->
+    <div class="control-group xlate-picker hidden" id="xlate-picker">
+      <label>Translate <select id="xlate-in" aria-label="Ingress dialect the client speaks"></select>
+      <span class="xlate-arrow">&rarr;</span>
+      <select id="xlate-out" aria-label="Egress dialect the upstream speaks"></select></label>
     </div>
     <div class="table-scroll">
       <table id="results-table">
