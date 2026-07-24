@@ -72,7 +72,11 @@ const gateways = gatewayKeys.map((key) => {
     display: meta.display || key,
     lang: meta.lang || "Other",
     cls: meta.cls || "Gateway",
-    repo: meta.repo || null,
+    // Only accept an https:// repo URL. app.js interpolates g.repo RAW into href="${g.repo}" at four
+    // render sites (display is esc()'d, href is not), so a manifest GW_REPO like
+    // `x" onfocus=alert(...) autofocus="` or a `javascript:` scheme would inject on the public board.
+    // Validating the scheme/format here (reject to null otherwise) closes that sink (audit R2-L2).
+    repo: (typeof meta.repo === "string" && /^https:\/\/[^\s"'<>]+$/.test(meta.repo)) ? meta.repo : null,
     stars: starsSnap[key]?.stars ?? null,
     stars_as_of: starsSnap[key]?.as_of ?? null,
     // Project age context: the repo's FIRST-commit date (not created_at, which resets on
@@ -248,13 +252,18 @@ const newestOf = (g) => Math.max(...SUITES.map((s) => g[s] && g[s].measured_at).
 const boardNewest = Math.max(...gateways.map(newestOf), 0);
 for (const g of gateways) {
   const ats = SUITES.map((s) => g[s] && g[s].measured_at).filter(Boolean).map((a) => Date.parse(a));
-  if (ats.length < 2) continue;
-  const spanH = (Math.max(...ats) - Math.min(...ats)) / 3600000;
+  if (ats.length < 1) continue;
   const per = () => SUITES.filter((s) => g[s] && g[s].measured_at).map((s) => `${s}=${g[s].measured_at}`).join(", ");
-  if (spanH > MAX_SPAN_H) {
-    throw new Error(
-      `gen-data: FRESHNESS FAILURE (mixed row): ${g.key}'s suites span ${spanH.toFixed(1)}h (> ${MAX_SPAN_H}h), so its row mixes ` +
-      `different runs (a stale suite survived a refresh). Re-run ${g.key} in one clean pass. Per-suite: ${per()}`);
+  // The span (mixed-row) check needs >=2 suites; the lag (stale-row) check needs only ONE timestamp,
+  // so it must ALSO apply to single-suite gateways - a box that failed partway (one suite on disk)
+  // from a run days ago would otherwise ship stale to the board (audit R2-L3).
+  if (ats.length >= 2) {
+    const spanH = (Math.max(...ats) - Math.min(...ats)) / 3600000;
+    if (spanH > MAX_SPAN_H) {
+      throw new Error(
+        `gen-data: FRESHNESS FAILURE (mixed row): ${g.key}'s suites span ${spanH.toFixed(1)}h (> ${MAX_SPAN_H}h), so its row mixes ` +
+        `different runs (a stale suite survived a refresh). Re-run ${g.key} in one clean pass. Per-suite: ${per()}`);
+    }
   }
   const lagH = (boardNewest - Math.max(...ats)) / 3600000;
   if (lagH > MAX_LAG_H) {
