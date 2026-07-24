@@ -103,6 +103,63 @@ push_with_rebase() {
   return 1
 }
 
+# ── serialize the publish critical section (audit R3-M1) ──────────────────────────────────────────
+# The Darwin orchestrator has NO util-linux `flock`, so the mkdir spin-lock is the LIVE publish path.
+# The old spin-lock had two data-integrity bugs (6 finders): (a) on the 600s timeout it `break`d and
+# fell THROUGH into the critical section with NO lock held — parallel boxes then committed/pushed the
+# shared index simultaneously; and (b) a timed-out waiter's UNCONDITIONAL EXIT-trap `rmdir` deleted the
+# lock dir the REAL holder still owned, so a third box could grab it and race the holder.
+#
+# Fixes: capture whether WE created the dir; on timeout ABORT (return non-zero — the caller counts it as
+# a publish issue) rather than proceeding unlocked; and only arm the cleanup rmdir when THIS process owns
+# the lock, verified by the PID we wrote into the lockdir — never blindly rmdir another holder's lock.
+# flock stays the fast path where available (Linux boxes / any host with util-linux).
+#
+# Usage:  publish_lock_acquire "<tag>" <log_fn>  || return 1   # (subshell: `exit 1`)
+#         ... critical section ...
+#         publish_lock_release
+# Sets PUBLISH_LOCK_FD (flock path) or PUBLISH_LOCK_OWNED=1 (mkdir path) for the release.
+publish_lock_acquire() {
+  local _tag="$1" _log="$2"
+  PUBLISH_LOCK_FD=""; PUBLISH_LOCK_OWNED=0
+  if command -v flock >/dev/null 2>&1; then
+    exec 9>"$PUBLISH_LOCK"; flock 9; PUBLISH_LOCK_FD=9
+    return 0
+  fi
+  # mkdir spin-lock: `mkdir` is atomic, so exactly one waiter wins the create. Bounded wait for a peer.
+  local _spun=0
+  until mkdir "${PUBLISH_LOCK}.d" 2>/dev/null; do
+    sleep 2; _spun=$((_spun+2))
+    if [ "$_spun" -ge 600 ]; then
+      "$_log" "$_tag publish: could NOT acquire the publish lock after ${_spun}s (a peer box is holding it) — ABORTING this publish rather than pushing UNLOCKED (retry by hand or re-run)"
+      return 1
+    fi
+  done
+  # We created the dir → we own the lock. Record our PID so release only ever removes OUR lock.
+  echo "$$" > "${PUBLISH_LOCK}.d/pid" 2>/dev/null || true
+  PUBLISH_LOCK_OWNED=1
+  return 0
+}
+
+# Release ONLY a lock this process owns. For the mkdir path, re-verify the PID inside the lockdir still
+# matches ours before rmdir'ing — so a stale/handed-off dir is never deleted out from under a real holder.
+publish_lock_release() {
+  if [ -n "${PUBLISH_LOCK_FD:-}" ]; then
+    flock -u "$PUBLISH_LOCK_FD" 2>/dev/null || true
+    eval "exec ${PUBLISH_LOCK_FD}>&-" 2>/dev/null || true
+    PUBLISH_LOCK_FD=""
+    return 0
+  fi
+  if [ "${PUBLISH_LOCK_OWNED:-0}" = 1 ]; then
+    local _owner=""; _owner=$(cat "${PUBLISH_LOCK}.d/pid" 2>/dev/null || echo "")
+    if [ "$_owner" = "$$" ]; then
+      rm -f "${PUBLISH_LOCK}.d/pid" 2>/dev/null || true
+      rmdir "${PUBLISH_LOCK}.d" 2>/dev/null || true
+    fi
+    PUBLISH_LOCK_OWNED=0
+  fi
+}
+
 # `run-on-ec2.sh kill` — terminate EVERY gateway-bench box right now, reliably. Uses xargs so the
 # instance IDs are split into separate args (piping `--output text` straight into `--instance-ids`
 # passes one tab-joined blob → InvalidInstanceID.Malformed → a silent no-op, which is exactly how 48
@@ -244,14 +301,11 @@ publish_gateway() { # gw glog_echo_fn
   # Serialize: only one box commits/pushes at a time. flock on a lock fd; fall back to a mkdir spin-lock
   # on hosts without util-linux flock (macOS orchestrator). The subshell holds the lock for its body.
   (
-    if command -v flock >/dev/null 2>&1; then
-      exec 9>"$PUBLISH_LOCK"; flock 9
-    else
-      # mkdir spin-lock: atomic create; wait (bounded) for a peer box to finish its push.
-      local _spun=0
-      until mkdir "${PUBLISH_LOCK}.d" 2>/dev/null; do sleep 2; _spun=$((_spun+2)); [ "$_spun" -ge 600 ] && break; done
-      trap 'rmdir "${PUBLISH_LOCK}.d" 2>/dev/null || true' EXIT
-    fi
+    # Acquire the publish lock (flock fast-path, else PID-owned mkdir spin-lock). On timeout ABORT this
+    # publish (exit 1 — counted as an issue) rather than pushing UNLOCKED (audit R3-M1). The release trap
+    # only removes a lock THIS subshell owns.
+    trap 'publish_lock_release' EXIT
+    publish_lock_acquire "[$gw]" echo || exit 1
     # Stage ONLY this gateway's artifacts (never a sibling box's in-flight files):
     #   - its per-suite result JSONs (results/<suite>/<gw>.json)
     #   - its append-only history line (results/history/<gw>.jsonl)
@@ -265,7 +319,15 @@ publish_gateway() { # gw glog_echo_fn
     done
     for f in "$HERE"/results/*"$gw"*.png; do [ -e "$f" ] && paths+=("$f"); done
     if [ "${#paths[@]}" -eq 0 ]; then echo "[$gw] publish: no result files to commit (nothing pulled?)"; exit 0; fi
-    git -C "$HERE" add -- "${paths[@]}" 2>/dev/null || true
+    # Do NOT swallow a staging failure (audit R3-M2): a failed `git add` (index.lock held, disk full,
+    # perms) would otherwise leave an EMPTY stage, `diff --cached --quiet` would "skip commit", the
+    # unchanged HEAD would push (trivially succeeds), and the gateway's row would silently NOT update
+    # while the publish reported success. On a stage failure, log loudly and exit non-zero so the box's
+    # return code counts it as a real publish issue.
+    if ! git -C "$HERE" add -- "${paths[@]}"; then
+      echo "[$gw] publish: git add FAILED (result staged nothing; NOT pushing an empty change) — aborting this publish"
+      exit 1
+    fi
     # Nothing actually changed vs HEAD (identical re-run) → skip the empty commit, still try a push in
     # case a prior push failed and left commits unpushed.
     if git -C "$HERE" diff --cached --quiet; then
@@ -533,20 +595,26 @@ bench_gateway() {
   # DONE means a CLEAN, fully-pulled fresh run. If any suite's pull failed or the guard kept old data,
   # this gateway did NOT cleanly refresh - say so loudly so the freshness guard's later hard-fail is
   # never a surprise and the gateway can be re-run.
+  local publish_failed=0
   if [[ "$pull_failed" -eq 0 && "$run_failed" -eq 0 && -f "$HERE/results/matrix/$gw.json" ]]; then
     glog_echo "DONE"
     # INCREMENTAL PUBLISH: this box finished cleanly and the promote guard passed for every suite, so
     # commit + push ONLY this gateway's result now (gated on PUBLISH, serialized across boxes). The
-    # board fills in gateway-by-gateway; a single-gateway invocation pushes just that one row. We do
-    # NOT fail the box on a publish hiccup — the result is safely on disk and the operator can push by
-    # hand — but a publish failure is logged and counted as a run issue via the || below.
-    if ! publish_gateway "$gw" 2>&1 | tee -a "$glog"; then
-      glog_echo "publish reported an issue for $gw (result IS committed/on disk; push may need a manual retry)"
+    # board fills in gateway-by-gateway; a single-gateway invocation pushes just that one row. The
+    # result is safely on disk (operator can push by hand), but a publish failure — a stranded/unpushed
+    # commit — MUST be counted in the run's issue tally (audit R3-L1) so the summary never reads
+    # "0 issues" while a row is missing from the pushed board.
+    #   NB: `publish_gateway | tee` makes `$?` reflect `tee` (always 0), so key on PIPESTATUS[0].
+    publish_gateway "$gw" 2>&1 | tee -a "$glog"
+    if [[ "${PIPESTATUS[0]}" -ne 0 ]]; then
+      publish_failed=1
+      glog_echo "publish reported an issue for $gw (result IS committed/on disk; push may need a manual retry) — counting it as a run issue"
     fi
   else glog_echo "INCOMPLETE (a suite crashed, failed to pull, or was guard-held; this gateway did NOT fully refresh - re-run it)"; fi
   # Propagate the issue to the caller's `wait "$p" || fail=…` so the summary's issue count is accurate
-  # and a run missing whole suites is never reported as "0 issues" (audit R3-M4/M5).
-  if [[ "$pull_failed" -ne 0 || "$run_failed" -ne 0 || ! -f "$HERE/results/matrix/$gw.json" ]]; then return 1; fi
+  # and a run missing whole suites — OR a gateway whose publish never reached the remote — is never
+  # reported as "0 issues" (audit R3-M4/M5 + R3-L1).
+  if [[ "$pull_failed" -ne 0 || "$run_failed" -ne 0 || "$publish_failed" -ne 0 || ! -f "$HERE/results/matrix/$gw.json" ]]; then return 1; fi
   return 0
 }
 
@@ -598,14 +666,19 @@ if [[ "$PUBLISH" == "1" ]]; then
   # remote ref, so a bare push of our local HEAD is rejected non-fast-forward. Hold the same flock and
   # push via push_with_rebase (bounded fetch→rebase→push retry) so history + charts never strand locally.
   (
-    if command -v flock >/dev/null 2>&1; then
-      exec 9>"$PUBLISH_LOCK"; flock 9
-    else
-      _spun=0
-      until mkdir "${PUBLISH_LOCK}.d" 2>/dev/null; do sleep 2; _spun=$((_spun+2)); [ "$_spun" -ge 600 ] && break; done
-      trap 'rmdir "${PUBLISH_LOCK}.d" 2>/dev/null || true' EXIT
+    # Same PID-owned lock + abort-on-timeout discipline as publish_gateway (audit R3-M1). ABORT rather
+    # than pushing unlocked; release only a lock we own.
+    trap 'publish_lock_release' EXIT
+    publish_lock_acquire "final publish:" log || exit 1
+    # Do NOT swallow a staging failure (audit R3-M2): a failed add here would push an empty/unchanged
+    # HEAD and silently drop the run's history + regenerated charts while reporting success. Build the
+    # path list explicitly so an EMPTY png glob (no charts this run — a benign case) is not mistaken for
+    # a staging failure; a genuine `git add` error still aborts.
+    _final_paths=( "$HERE/results/history" "$HERE/results/reports" )
+    for _f in "$HERE"/results/*.png; do [ -e "$_f" ] && _final_paths+=("$_f"); done
+    if ! git -C "$HERE" add -- "${_final_paths[@]}"; then
+      log "WARNING final publish: git add FAILED for history + charts — NOT pushing an empty change"; exit 2
     fi
-    git -C "$HERE" add -- "$HERE/results/history" "$HERE"/results/*.png "$HERE/results/reports" 2>/dev/null || true
     if git -C "$HERE" diff --cached --quiet; then
       log "final publish: no history/chart changes to push"
     elif git -C "$HERE" commit -q -m "bench: publish run history + regenerated charts/reports
