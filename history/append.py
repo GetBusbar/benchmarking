@@ -12,13 +12,15 @@ import json, os
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RES = os.path.join(ROOT, "results")
 HIST = os.path.join(RES, "history")
-SUITES = ["perf", "memory", "stream", "xlate", "governed", "matrix"]
+SUITES = ["perf", "memory", "stream", "streamcpu", "xlate", "governed", "matrix"]
 KEEP = {
     "perf": ["build", "rps_sustained_20ms", "rps_max_proxy", "added_latency_p50_us",
              "added_latency_p99_us", "server_timing_dur_p50_us", "server_timing_dur_p99_us"],
     "memory": ["build", "idle_rss_mib", "peak_rss_mib", "peak_rss_hwm_mib", "post_load_rss_mib"],
     "stream": ["build", "stream_served", "stream_added_ttft_p99_us", "stream_added_gap_p99_us",
                "stream_sustained_streams", "stream_sustained_fps"],
+    "streamcpu": ["build", "stream_served", "streamcpu_frames_per_sec", "streamcpu_fps_per_core",
+                  "streamcpu_direct_ceiling_fps", "streamcpu_mock_bound", "streamcpu_valid"],
     "xlate": ["build", "xlate_served", "xlate_added_latency_p99_us", "xlate_rps_sustained_20ms"],
     "governed": ["build", "governed_served", "governed_rps_sustained_20ms",
                  "plain_rps_sustained_20ms", "governed_vs_plain_sustained_pct"],
