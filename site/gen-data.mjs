@@ -290,7 +290,11 @@ for (const g of gateways) {
     const j = g[suite];
     if (!j) continue;
     if (j.hardware) hwCounts.set(j.hardware, (hwCounts.get(j.hardware) || 0) + 1);
-    if (j.measured_at && (!latest || j.measured_at > latest)) latest = j.measured_at;
+    // NIT-R2-3: pick the newest instant by PARSED epoch ms, not a lexicographic ISO-string compare.
+    // A mixed-precision compare mis-orders sibling stamps ('...06Z' sorts above '...06.5Z' because
+    // 'Z' > '.'), which could under-select the true-newest instant the future-date hard-fail (:313)
+    // then relies on. Match the Date.parse comparison used everywhere else (:300-302/313/340/376/392).
+    if (j.measured_at && (!latest || Date.parse(j.measured_at) > Date.parse(latest))) latest = j.measured_at;
   }
 }
 const hardware = [...hwCounts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] || null;
@@ -355,9 +359,11 @@ for (const g of gateways) {
   // future stamp on one gateway would slip past it and render as a NEGATIVE "measured Nd ago" badge.
   // Skip any future suite stamp so a skewed row can never post a negative age (matrix run is atomic;
   // one bad stamp is corruption, not a legitimate run).
+  let sawFuture = false;
   for (const s of SUITES) {
     const at = g[s] && g[s].measured_at;
     if (at && Date.parse(at) > nowMs) {
+      sawFuture = true;
       console.warn(`gen-data: WARNING: ${g.key}.${s}.measured_at ${at} is in the FUTURE (> generated_at ${generatedAt}); ` +
         `clock skew on the rig. Skipping this stamp for the freshness/age computation so the badge never reads negative.`);
     }
@@ -374,10 +380,17 @@ for (const g of gateways) {
   // whose ONLY data is a legacy suite still ages correctly; the SPAN cap is what is matrix-scoped.
   const ats = SUITES.map((s) => g[s] && g[s].measured_at).filter(Boolean)
     .map((a) => Date.parse(a)).filter((ms) => ms <= nowMs);
+  // NIT-R2-4: actually PERFORM the skip the warn loop promises. g.measured_at was assigned from the
+  // future-INCLUSIVE newestMeasuredMs (:217-218), so a lone skewed-future stamp would still drive a
+  // NEGATIVE "measured Nd ago" badge. Re-derive the badge stamp from the non-future ats only, so the
+  // promised protection is real even if the :313 board-wide future-date hard-fail is ever weakened.
+  if (sawFuture) g.measured_at = ats.length ? new Date(Math.max(...ats)).toISOString() : null;
   if (ats.length < 1) continue;
-  // Under matrix-sole-source a row has at most ONE matrix stamp, so an intra-matrix span is 0. The cap
-  // stays as a defensive guard should a future matrix result ever embed multiple internal timestamps
-  // (kept null-safe: matrixSpanAts is the matrix suite's stamps only).
+  // NIT-R2-2: NO-OP under matrix atomicity. A matrix row carries at most ONE matrix stamp, so
+  // matrixSpanAts is length 0 or 1 and the `>= 2` gate below NEVER fires today — this is an inert
+  // placeholder, not an active corruption guard (the real future-date protection lives at :313). It is
+  // retained (null-safe, matrix-scoped) so the span check reactivates automatically should a future
+  // matrix result ever embed multiple internal timestamps.
   const matrixSpanAts = matrixAt != null ? [matrixAt] : [];
   if (matrixSpanAts.length >= 2) {
     const spanH = (Math.max(...matrixSpanAts) - Math.min(...matrixSpanAts)) / 3600000;
