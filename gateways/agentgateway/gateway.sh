@@ -2,10 +2,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # Gateway manifest: agentgateway (agentgateway/agentgateway, Rust data plane, docker).
 #
-# OpenAI-compatible bare proxy: the `ai` backend's openAI provider takes hostOverride + pathOverride
-# to point the upstream at the mock. No backendAuth (no key added) and no backendTLS (plain HTTP to the
-# mock). Tracing is off unless an OTLP endpoint is set; metrics are pull-only; admin/stats pinned to
-# loopback and RUST_LOG=error → clean overhead. AGENTGATEWAY_IMAGE is pinned in gateways/versions.env.
+# OpenAI-compatible LLM gateway using agentgateway's canonical MULTI-PROVIDER surface — the top-level
+# `llm:` block (LocalLLMConfig), NOT the hand-wired single-provider `binds` route. `llm.models[]` wires
+# every mock-reachable declared-egress provider at once (openAI, anthropic, bedrock) and the built-in
+# ModelRouter dispatches each request to the provider whose model name it carries — so the SAME config
+# serves the perf/memory/throughput/stream lanes and every matrix egress, all on the uniform /v1 route.
+# The `llm:` block auto-populates the SAME path→RouteType ingress classifier the old policies.ai.routes
+# map provided (/v1/chat/completions→Completions, /v1/messages→Messages, /v1/responses→Responses;
+# local.rs llm_route_types + policy/mod.rs resolve_route), so the verified matrix ingress classification
+# is preserved. Each provider's baseUrl points at the mock (plaintext http://). No feature strips: no
+# RUST_LOG/admin/stats overrides (see gw_launch) — tracing stays off only because no OTLP endpoint is
+# set (its real default), metrics/admin/readiness bind as a fresh install does. AGENTGATEWAY_IMAGE is
+# pinned in gateways/versions.env.
 GW_KIND=docker
 # Self-describing manifest metadata — charts.py + the run lists read these, so a gateway
 # is fully defined by its own dir (add/remove a dir → it appears/disappears everywhere).
@@ -24,57 +32,51 @@ gw_version() {
   echo "${AGENTGATEWAY_IMAGE}${dg:+ (@${dg##*@})}"
 }
 
-# _agentgw_write_config <name> <pathOverride|""> <provider-yaml>: emit the ai-backend config. The
-# `ai` backend's hostOverride (and optional pathOverride) point the upstream at the mock while the
-# provider block selects the native egress dialect (agentgateway's per-provider translation emits
-# that dialect's request shape). Indentation must match the provider: block's nesting.
-#
-# INGRESS CLASSIFICATION (the fix that unlocks v1.3.1's real translation support): a request's
-# ingress format is the route's llm-policy `routes` map (path suffix -> RouteType,
-# llm/policy/mod.rs resolve_route, config key policies.ai.routes). WITHOUT it every request
-# defaults to RouteType::Completions (proxy/httpproxy.rs `.unwrap_or(RouteType::Completions)`),
-# which is why /v1/messages ingress previously came back as an untranslated OpenAI envelope (an
-# Anthropic Messages body PARSES as a chat.completions request - both carry `messages`) and
-# /v1/responses 503'd with "missing field messages" (a Responses body has `input`). With the
-# classifier the v1.3.1 dispatch (llm/mod.rs:980) genuinely supports: Completions ingress -> all
-# providers; Messages -> Anthropic/OpenAI/Bedrock/Gemini/...; Responses -> OpenAI/Bedrock/Gemini.
-# PATH SELECTION: with hostOverride and NO pathPrefix, v1.3.1 keeps the CLIENT's original path
-# verbatim (llm/mod.rs set_default_path early-returns), so a translated body lands on the ingress
-# path's endpoint - e.g. a Messages->Completions translation still POSTs /v1/messages. Setting
-# pathPrefix ("/v1", the provider's own DEFAULT_BASE_PATH) re-enables the provider's native
-# per-route-type path (openai: /chat/completions for Completions+Messages, /responses for
-# Responses; anthropic: /messages for everything), which is what the mock's per-dialect endpoints
-# verify. A non-empty $2 instead forces ONE exact upstream path via pathOverride (bedrock's
-# /model/<m>/converse); pass "" to use pathPrefix routing.
+# _agentgw_write_config: emit agentgateway's ONE canonical multi-provider `llm:` config. Each
+# llm.models[] entry names the request model that selects it (ModelRouter, model_router.rs) and a
+# provider enum (bare string) plus a params block whose baseUrl points that provider's upstream at the
+# mock over plaintext http://. All mock-reachable declared providers are wired at once:
+#   - openAI     (model gpt-4o-mini) — the /v1 OpenAI-SDK default;
+#   - anthropic  (claude-3-5-sonnet-20241022);
+#   - bedrock    (a claude bedrock model id) — params.awsRegion is REQUIRED or boot fails
+#     (local.rs "bedrock requires aws_region"); SigV4 creds come from the AWS env (dummy AWS_* in
+#     gw_launch), the mock ignores the signature.
+# INGRESS CLASSIFICATION is auto-populated by the llm: block: llm_route_types() hardcodes
+# /v1/chat/completions→Completions, /v1/messages→Messages, /v1/responses→Responses on the synthesized
+# catch-all route, and Policy::resolve_route matches by path suffix (policy/mod.rs) — the exact
+# classifier the old policies.ai.routes map gave, so Messages/Responses ingress translate as verified.
+# apiKey values are the dummy keys agentgateway auto-detects from config (never a live key); the mock
+# ignores auth. gemini is NOT wired: its provider targets Google's OpenAI-compat surface, not the native
+# generateContent wire this rig's mock verifies (declared grey in GW_MATRIX_CAP) — wiring it would imply
+# a capability the matrix greys. cohere has no provider in the AIProvider enum.
 _agentgw_write_config() {
-  local pathline="          pathPrefix: /v1"
-  [ -n "$2" ] && pathline="          pathOverride: $2"
   cat > "$GW_DIR/config.gen.yaml" <<YAML
-binds:
-- port: $GW_PORT
-  listeners:
-  - name: llm
-    protocol: HTTP
-    routes:
-    - policies:
-        ai:
-          routes:
-            "/v1/chat/completions": completions
-            "/v1/messages": messages
-            "/v1/responses": responses
-      backends:
-      - ai:
-          name: $1
-          hostOverride: "127.0.0.1:$MOCK_PORT"
-$pathline
-          provider:
-$3
+llm:
+  port: $GW_PORT
+  models:
+  - name: gpt-4o-mini
+    provider: openAI
+    params:
+      model: gpt-4o-mini
+      apiKey: "sk-dummy-openai"
+      baseUrl: "http://127.0.0.1:$MOCK_PORT"
+  - name: claude-3-5-sonnet-20241022
+    provider: anthropic
+    params:
+      model: claude-3-5-sonnet-20241022
+      apiKey: "sk-ant-dummy"
+      baseUrl: "http://127.0.0.1:$MOCK_PORT"
+  - name: anthropic.claude-3-sonnet-20240229-v1:0
+    provider: bedrock
+    params:
+      model: anthropic.claude-3-sonnet-20240229-v1:0
+      awsRegion: us-east-1
+      baseUrl: "http://127.0.0.1:$MOCK_PORT"
 YAML
 }
 
 gw_build() {
-  _agentgw_write_config openai "" "            openAI:
-              model: $GW_MODEL"
+  _agentgw_write_config
   sudo docker pull "$AGENTGATEWAY_IMAGE" >/dev/null 2>&1 || true
 }
 
@@ -106,40 +108,66 @@ GW_MATRIX_CAP="
 000000
 000000
 "
-GW_MATRIX_CAP_NOTE="agentgateway v1.3.1 (with per-route ingress classification via policies.ai.routes): Completions/Messages/Responses ingress translate to the openAI/anthropic/bedrock providers' native wire; gemini egress exists only via Google's OpenAI-compat surface (not native generateContent), cohere is absent from the AIProvider enum, and gemini/cohere/bedrock request shapes have no ingress RouteType"
+GW_MATRIX_CAP_NOTE="agentgateway v1.3.1 (llm: block auto-populates the same path→RouteType ingress classifier, local.rs llm_route_types): Completions/Messages/Responses ingress translate to the openAI/anthropic/bedrock providers' native wire; gemini egress exists only via Google's OpenAI-compat surface (not native generateContent), cohere is absent from the AIProvider enum, and gemini/cohere/bedrock request shapes have no ingress RouteType"
 GW_MATRIX_EGRESS="openai openai-responses anthropic bedrock"
 gw_matrix_egress() {
+  # All egress providers are already wired in the ONE llm: config (see _agentgw_write_config); the
+  # ModelRouter picks the provider from the request model name, so the matrix only flips GW_MODEL — no
+  # config rewrite. The relaunch runs the identical all-providers config. openai + openai-responses
+  # share the openAI model (the path classifier routes Completions→/v1/chat/completions,
+  # Responses→/v1/responses on the same backend), so both use gpt-4o-mini.
   case "$1" in
-    # openai + openai-responses egress share the ONE OpenAI-provider config with NO pathOverride:
-    # each classified route type takes the provider's native path (Completions+Messages ->
-    # /v1/chat/completions, Responses -> /v1/responses), so the leg-3 record attributes every cell
-    # to the endpoint the gateway actually spoke. A forced pathOverride would smash Responses onto
-    # the chat path and manufacture failures.
-    openai|openai-responses) _agentgw_write_config openai "" "            openAI:
-              model: $GW_MODEL";;
-    anthropic)        _agentgw_write_config anthropic "" "            anthropic:
-              model: claude-3-5-sonnet-20241022";;
-    bedrock)          _agentgw_write_config bedrock "/model/$GW_MODEL/converse" "            bedrock:
-              model: $GW_MODEL
-              region: us-east-1";;
-    *) return 1;;   # no writer: the probe-first runner probes this column under the default config
+    openai|openai-responses) GW_MODEL=gpt-4o-mini;;
+    anthropic)               GW_MODEL=claude-3-5-sonnet-20241022;;
+    bedrock)                 GW_MODEL=anthropic.claude-3-sonnet-20240229-v1:0;;
+    *) return 1;;
   esac
   gw_launch
 }
 
 # ── xlate lane note ───────────────────────────────────────────────────────────────────────────────
 # The historical xlate failure at v1.3.1 (Anthropic ingress answered with an untranslated OpenAI
-# envelope) was THIS manifest's config gap, not the gateway's: without policies.ai.routes every
-# request was classified Completions (an Anthropic Messages body parses as chat.completions - both
-# carry `messages`), so no translation was ever attempted. The default config now classifies
-# /v1/messages as Messages ingress; the field run re-verifies the lane end to end.
+# envelope) was a config gap, not the gateway's: without a path→RouteType classifier every request was
+# classified Completions (an Anthropic Messages body parses as chat.completions - both carry `messages`),
+# so no translation was attempted. The llm: block now auto-classifies /v1/messages as Messages ingress
+# (llm_route_types); the field run re-verifies the lane end to end.
 
 gw_launch() {
   sudo docker rm -f agentgateway-bench >/dev/null 2>&1; sleep 1
+  # OOTB posture — no feature-strip env overrides. Previously this passed RUST_LOG=error (agentgateway's
+  # default log level is info, telemetry.rs default_filter; error SUPPRESSES its default info-level
+  # request logging — a logging strip, removed) and ADMIN_ADDR/STATS_ADDR pins (admin already defaults to
+  # localhost, but the stats/metrics server defaults to 0.0.0.0:15020 — pinning it to loopback narrowed
+  # the default bind posture; both removed so admin, stats and readiness bind exactly as a fresh install
+  # does). The only env passed is dummy AWS creds — the bedrock provider signs SigV4 from the AWS env
+  # (there is no per-model AWS key field at the llm: surface); the mock ignores the signature. Nothing is
+  # disabled: all default servers stay on.
   sudo docker run -d --name agentgateway-bench --network host --cpuset-cpus="$CORES" \
-    -e ADMIN_ADDR=127.0.0.1:15000 -e STATS_ADDR=127.0.0.1:15020 -e RUST_LOG=error \
+    -e AWS_ACCESS_KEY_ID=AKIAMOCKACCESSKEY -e AWS_SECRET_ACCESS_KEY=mock-secret-access-key -e AWS_REGION=us-east-1 \
     -v "$GW_DIR/config.gen.yaml:/config.yaml:ro" \
     "$AGENTGATEWAY_IMAGE" -f /config.yaml >"$GW_DIR/launch.log" 2>&1 || true
+}
+
+# ── OOTB config artifact (file-driven) ────────────────────────────────────────────────────────────
+# gw_config prints the canonical OOTB config this gateway launches with — the rendered config.gen.yaml
+# (the top-level llm: block) exactly as mounted at /config.yaml (read from the file gw_build produced so
+# it can never drift; falls back to rendering it if not present yet) PLUS the non-secret launch env (the
+# dummy AWS creds bedrock's SigV4 needs). apiKey values are dummy; there are no live secrets on the
+# isolated rig. OOTB posture: no feature strips — no RUST_LOG/admin/stats overrides in gw_launch; the
+# llm: block is the gateway's own multi-provider surface, wiring all mock-reachable declared providers.
+# The only deviations are the permitted ones — provider baseUrls → mock and dummy keys.
+gw_config() {
+  local cfg="$GW_DIR/config.gen.yaml"
+  echo "# ── /config.yaml (rendered; loaded via agentgateway -f /config.yaml) ──"
+  [ -f "$cfg" ] || _agentgw_write_config
+  cat "$cfg"
+  echo
+  echo "# ── launch env (non-secret; dummy AWS creds for the bedrock provider's SigV4) ──"
+  cat <<ENV
+AWS_ACCESS_KEY_ID=AKIAMOCKACCESSKEY
+AWS_SECRET_ACCESS_KEY=mock-secret-access-key
+AWS_REGION=us-east-1
+ENV
 }
 
 gw_rss() { container_rss_mib agentgateway-bench; }  # summed process-tree VmRSS (same method as native)
