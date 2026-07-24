@@ -928,7 +928,14 @@ def _report_md(rows: list, title: str, charts: list, pending: tuple = (), chart_
     # hasn't been run yet simply contributes empty cells; the whole section disappears when none
     # of the three has any result. "cannot" cells ARE the story: a gateway that answers 200 but
     # never frames, or cannot take an Anthropic request, is recorded, not hidden.
-    stream_m, xlate_m, governed_m = _suite_map("stream"), _suite_map("xlate"), _suite_map("governed")
+    # NIT (charts.py:916): the streaming column must read the SAME source the streaming PNGs use — the
+    # matrix projection (g.streaming via _proj_streaming), NOT the RETIRED results/stream/*.json suite.
+    # Reading the legacy suite here put weeks-old stale numbers (or ✕ rows for a gateway that no longer
+    # has a legacy file) in the README table while the PNGs showed the fresh matrix projection. Build the
+    # stream map from _proj_streaming so the table and the charts agree. xlate/governed unchanged
+    # (translation is already the canonical matrix cell via _overlay_xlate; governed is retired/absent).
+    stream_m = {k: r for k in GATEWAYS if (r := _proj_streaming(k)) is not None}
+    xlate_m, governed_m = _suite_map("xlate"), _suite_map("governed")
     row_keys = [k for k, _ in rows]
     lane_keys = [k for k in row_keys if k in stream_m or k in xlate_m or k in governed_m]
     if lane_keys:
