@@ -85,11 +85,29 @@ push_with_rebase() {
       "$_log" "$_tag publish: fetch $PUBLISH_REMOTE/$PUBLISH_BRANCH FAILED (attempt $_attempt/$_max) — retrying"
       sleep 3; continue
     fi
-    if ! git -C "$HERE" rebase -X theirs "$PUBLISH_REMOTE/$PUBLISH_BRANCH" >/dev/null 2>&1; then
-      # A conflict -X theirs could not auto-resolve (should be rare). Abort the rebase to return to a
-      # clean, pushable local HEAD and log loudly — do NOT leave a half-rebased detached state.
-      git -C "$HERE" rebase --abort >/dev/null 2>&1 || true
-      "$_log" "$_tag publish: rebase onto $PUBLISH_REMOTE/$PUBLISH_BRANCH CONFLICTED (attempt $_attempt/$_max) — aborted rebase, retrying"
+    # HIGH-3 / MED-4: `git rebase` REFUSES to start with a dirty tracked file ("cannot rebase: You have
+    # unstaged changes."). All bench_gateway jobs share ONE repo at $HERE, and the incremental pull loops
+    # `mv -f` a fresh results/matrix/<other>.json over a previously-committed TRACKED file OUTSIDE the
+    # publish lock — so while THIS box holds the lock and rebases, a PEER box can leave an unstaged tracked
+    # change and abort our rebase. The old code caught that non-zero, MISCLASSIFIED it as a merge CONFLICT,
+    # `rebase --abort`ed and retried 5× — but a peer keeps a file dirty throughout, so all 5 fail and the
+    # commit strands (then MED-4's final sweep can't recover it either). Fix: `-c rebase.autostash=true`
+    # stashes the peer's unstaged change before the rebase and pops it after, so an unstaged tracked file
+    # no longer aborts the rebase. (rebase.autostash is unset globally + locally on the rig; set it per
+    # invocation so we do not depend on repo config.) The stash/pop restores the peer's incremental pull.
+    if ! _rebase_err="$(git -C "$HERE" -c rebase.autostash=true rebase -X theirs "$PUBLISH_REMOTE/$PUBLISH_BRANCH" 2>&1)"; then
+      # Distinguish a GENUINE merge conflict (a rebase is left in progress — .git/rebase-merge exists)
+      # from a start-time refusal. With autostash on, the "unstaged changes" refusal no longer happens,
+      # but if a stash POP fails after a clean rebase the tree can carry a conflicted stash — either way,
+      # if a rebase is mid-flight abort it to a clean pushable HEAD; else it never started, so nothing to
+      # abort. Both retry (a transient peer-dirty state clears on the next pass).
+      local _gitdir; _gitdir="$(git -C "$HERE" rev-parse --git-dir 2>/dev/null)"
+      if [ -d "$HERE/$_gitdir/rebase-merge" ] || [ -d "$HERE/$_gitdir/rebase-apply" ] || [ -d "$_gitdir/rebase-merge" ] || [ -d "$_gitdir/rebase-apply" ]; then
+        git -C "$HERE" rebase --abort >/dev/null 2>&1 || true
+        "$_log" "$_tag publish: rebase onto $PUBLISH_REMOTE/$PUBLISH_BRANCH CONFLICTED (attempt $_attempt/$_max) — aborted rebase, retrying"
+      else
+        "$_log" "$_tag publish: rebase could not start (attempt $_attempt/$_max; likely a peer's unstaged results write — autostash should absorb it): ${_rebase_err%%$'\n'*} — retrying"
+      fi
       sleep 3; continue
     fi
     if git -C "$HERE" push "$PUBLISH_REMOTE" "HEAD:$PUBLISH_BRANCH" >/dev/null 2>&1; then
@@ -111,20 +129,32 @@ push_with_rebase() {
 # lock dir the REAL holder still owned, so a third box could grab it and race the holder.
 #
 # Fixes: capture whether WE created the dir; on timeout ABORT (return non-zero — the caller counts it as
-# a publish issue) rather than proceeding unlocked; and only arm the cleanup rmdir when THIS process owns
-# the lock, verified by the PID we wrote into the lockdir — never blindly rmdir another holder's lock.
-# flock stays the fast path where available (Linux boxes / any host with util-linux).
+# a publish issue) rather than proceeding unlocked; and only arm the cleanup rmdir when THIS publish owns
+# the lock, verified by a UNIQUE per-publish TOKEN we wrote into the lockdir (M1/R4-LOW-2: the old `$$`
+# token collided across all `&` bench_gateway subshells of one orchestrator, so the ownership check was a
+# no-op — the token is now RUN_ID:tag:BASHPID:random, distinct per publish) — never blindly rmdir another
+# holder's lock. flock stays the fast path where available (Linux boxes / any host with util-linux).
 #
 # Usage:  publish_lock_acquire "<tag>" <log_fn>  || return 1   # (subshell: `exit 1`)
 #         ... critical section ...
 #         publish_lock_release
-# Sets PUBLISH_LOCK_FD (flock path) or PUBLISH_LOCK_OWNED=1 (mkdir path) for the release.
+# Sets PUBLISH_LOCK_FD (flock path) or PUBLISH_LOCK_OWNED=1 + PUBLISH_LOCK_TOKEN (mkdir path) for release.
 publish_lock_acquire() {
   local _tag="$1" _log="$2"
-  PUBLISH_LOCK_FD=""; PUBLISH_LOCK_OWNED=0
+  PUBLISH_LOCK_FD=""; PUBLISH_LOCK_OWNED=0; PUBLISH_LOCK_TOKEN=""
   if command -v flock >/dev/null 2>&1; then
-    exec 9>"$PUBLISH_LOCK"; flock 9; PUBLISH_LOCK_FD=9
-    return 0
+    # LOW-4: bound the flock wait too (matching the mkdir path's 600s ceiling). Without -w a hung lock
+    # holder on a Linux orchestrator blocks every peer INDEFINITELY, unlike the Darwin mkdir spin-lock
+    # which aborts at 600s. On timeout, ABORT this publish (return 1 — counted as an issue) rather than
+    # blocking forever; close the fd so no half-open lock leaks.
+    exec 9>"$PUBLISH_LOCK"
+    if flock -w 600 9; then
+      PUBLISH_LOCK_FD=9
+      return 0
+    fi
+    "$_log" "$_tag publish: could NOT acquire the publish flock after 600s (a peer box is holding it) — ABORTING this publish rather than blocking forever (retry by hand or re-run)"
+    eval "exec 9>&-" 2>/dev/null || true
+    return 1
   fi
   # mkdir spin-lock: `mkdir` is atomic, so exactly one waiter wins the create. Bounded wait for a peer.
   local _spun=0
@@ -135,14 +165,24 @@ publish_lock_acquire() {
       return 1
     fi
   done
-  # We created the dir → we own the lock. Record our PID so release only ever removes OUR lock.
-  echo "$$" > "${PUBLISH_LOCK}.d/pid" 2>/dev/null || true
+  # M1 / R4-LOW-2 (round-3 M1 shipped NON-FUNCTIONAL): the old owner token was `$$`, which is IDENTICAL
+  # across every `&` background subshell of one orchestrator (only $BASHPID differs) — so "release only
+  # if WE own the lock" never distinguished holders and provided zero cross-box protection. Write a
+  # UNIQUE per-publish token instead: RUN_ID + gateway tag + $BASHPID + a random id, distinct for every
+  # bench_gateway subshell of the same parent. release only rmdir's when the token in the lockdir still
+  # matches ours, so a stale/handed-off dir is never deleted out from under a real holder.
+  local _rand=""
+  _rand="$(od -An -N8 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"
+  [ -n "$_rand" ] || _rand="${RANDOM}${RANDOM}"
+  PUBLISH_LOCK_TOKEN="${RUN_ID:-run}:${_tag}:${BASHPID:-$$}:${_rand}"
+  printf '%s\n' "$PUBLISH_LOCK_TOKEN" > "${PUBLISH_LOCK}.d/token" 2>/dev/null || true
   PUBLISH_LOCK_OWNED=1
   return 0
 }
 
-# Release ONLY a lock this process owns. For the mkdir path, re-verify the PID inside the lockdir still
-# matches ours before rmdir'ing — so a stale/handed-off dir is never deleted out from under a real holder.
+# Release ONLY a lock this process owns. For the mkdir path, re-verify the UNIQUE token inside the lockdir
+# still matches the one THIS publish wrote before rmdir'ing — so a stale/handed-off dir (a peer that
+# re-acquired after we timed out and lost ownership) is never deleted out from under its real holder.
 publish_lock_release() {
   if [ -n "${PUBLISH_LOCK_FD:-}" ]; then
     flock -u "$PUBLISH_LOCK_FD" 2>/dev/null || true
@@ -151,12 +191,12 @@ publish_lock_release() {
     return 0
   fi
   if [ "${PUBLISH_LOCK_OWNED:-0}" = 1 ]; then
-    local _owner=""; _owner=$(cat "${PUBLISH_LOCK}.d/pid" 2>/dev/null || echo "")
-    if [ "$_owner" = "$$" ]; then
-      rm -f "${PUBLISH_LOCK}.d/pid" 2>/dev/null || true
+    local _owner=""; _owner=$(cat "${PUBLISH_LOCK}.d/token" 2>/dev/null || echo "")
+    if [ -n "${PUBLISH_LOCK_TOKEN:-}" ] && [ "$_owner" = "$PUBLISH_LOCK_TOKEN" ]; then
+      rm -f "${PUBLISH_LOCK}.d/token" 2>/dev/null || true
       rmdir "${PUBLISH_LOCK}.d" 2>/dev/null || true
     fi
-    PUBLISH_LOCK_OWNED=0
+    PUBLISH_LOCK_OWNED=0; PUBLISH_LOCK_TOKEN=""
   fi
 }
 
@@ -280,7 +320,26 @@ teardown() {
     "Name=instance-state-name,Values=running,pending" --query 'Reservations[].Instances[].InstanceId' --output text 2>/dev/null \
     | tr '\t' '\n' | grep -E '^i-' | xargs -r -n25 aws ec2 terminate-instances --output text --instance-ids >/dev/null 2>&1
   if [[ "$CREATED_KEY" == 1 ]]; then aws ec2 delete-key-pair --key-name "$KEYNAME" >/dev/null 2>&1 || true; rm -f "$KEYFILE"; fi
-  if [[ "$CREATED_SG" == 1 ]]; then aws ec2 delete-security-group --group-id "$SG" >/dev/null 2>&1 || true; fi
+  if [[ "$CREATED_SG" == 1 ]]; then
+    # LOW-5: the just-terminated instances are `shutting-down`, not `running/pending`, but they STILL hold
+    # ENI associations to this SG for a short window — so an IMMEDIATE delete-security-group fails with
+    # DependencyViolation (swallowed by `|| true`) and the SG persists (a first-run-only cost leak). Wait
+    # for the instances THIS run launched to reach `terminated` (ENIs detached) before deleting the SG.
+    # Best-effort + time-bounded so teardown never hangs; the SG is shared/reused so a leaked one is minor.
+    local _tids
+    _tids=$(aws ec2 describe-instances --filters "Name=tag:run,Values=$RUN_ID" \
+      --query 'Reservations[].Instances[].InstanceId' --output text 2>/dev/null | tr '\t' '\n' | grep -E '^i-' | tr '\n' ' ')
+    if [[ -n "${_tids// }" ]]; then
+      # aws ec2 wait has its own ~600s ceiling; wrap in a timeout where available (Linux) so a wedged wait
+      # can't hang teardown. macOS has no `timeout` — fall back to the bare wait (its own ceiling applies).
+      if command -v timeout >/dev/null 2>&1; then
+        timeout 300 aws ec2 wait instance-terminated --instance-ids $_tids >/dev/null 2>&1 || true
+      else
+        aws ec2 wait instance-terminated --instance-ids $_tids >/dev/null 2>&1 || true
+      fi
+    fi
+    aws ec2 delete-security-group --group-id "$SG" >/dev/null 2>&1 || true
+  fi
 }
 trap teardown EXIT INT TERM
 
@@ -680,7 +739,18 @@ if [[ "$PUBLISH" == "1" ]]; then
       log "WARNING final publish: git add FAILED for history + charts — NOT pushing an empty change"; exit 2
     fi
     if git -C "$HERE" diff --cached --quiet; then
-      log "final publish: no history/chart changes to push"
+      # MED-4: an EMPTY staged diff does NOT mean there is nothing to push. If every per-gateway push
+      # failed (e.g. HIGH-3 stranded them all) each gateway's commit is local-only, and a same-measured_at
+      # re-run adds no new history line / unchanged charts, so the final stage is empty. The old code
+      # logged "nothing to push" and exited WITHOUT push_with_rebase — stranding all those local commits
+      # permanently. Mirror the per-gateway path (which pushes even on an empty staged diff): still call
+      # push_with_rebase so any locally-stranded HEAD gets pushed and the board recovers.
+      log "final publish: no history/chart changes to stage — checking for locally-stranded commits to push"
+      if push_with_rebase "final publish (recover-stranded):" log; then
+        log "final publish: pushed (recovered any stranded local commits) to $PUBLISH_REMOTE/$PUBLISH_BRANCH"
+      else
+        exit 1
+      fi
     elif git -C "$HERE" commit -q -m "bench: publish run history + regenerated charts/reports
 
 Field-wide artifacts produced after all boxes finished (append-only history + charts.py output)."; then
