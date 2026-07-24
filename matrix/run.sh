@@ -112,6 +112,39 @@ SWEEP_INSTANT="${SWEEP_INSTANT:-16 8192}"   # [min,max] bounds for the peak sear
 SWEEP_DELAYED="${SWEEP_DELAYED:-32 65536}"
 SWEEP_TTFT_MS="${SWEEP_TTFT_MS:-20}"
 P99_CEIL_MS="${P99_CEIL_MS:-1000}"
+
+# ── per-cell STREAMING (folded in via lib/stream_measure.sh) ──────────────────────────────────────
+# Every served cell that gets a perf sweep ALSO gets a streaming measurement on the SAME (ingress
+# path, egress config) pair: added TTFT p99, added per-token-gap p99 (paced c1), streams-sustained
+# (BISECTED true concurrency), and cpu-fps (PEAK unpaced throughput). MATRIX_STREAM=0 disables it
+# (leaving the RPS/latency sweep intact) — the escape hatch for a fast A/B run. Knobs mirror
+# stream/run.sh (paced lane) + streamcpu/run.sh (unpaced lane) so the numbers are directly comparable.
+MATRIX_STREAM="${MATRIX_STREAM:-1}"
+# Paced lane (stream/run.sh parity): TTFT + inter-frame gap under realistic ~20ms token cadence.
+MATRIX_STREAM_CHUNKS="${MATRIX_STREAM_CHUNKS:-64}"
+MATRIX_STREAM_INTERVAL_MS="${MATRIX_STREAM_INTERVAL_MS:-20}"
+MATRIX_STREAM_CHUNK_BYTES="${MATRIX_STREAM_CHUNK_BYTES:-16}"
+MATRIX_STREAM_STALL_X="${MATRIX_STREAM_STALL_X:-2}"
+MATRIX_STREAM_C1_DUR="${MATRIX_STREAM_C1_DUR:-20}"
+MATRIX_STREAM_SWEEP_DUR="${MATRIX_STREAM_SWEEP_DUR:-12}"
+MATRIX_STREAM_SUST_BOUNDS="${MATRIX_STREAM_SUST_BOUNDS:-8 2048}"   # [lo,hi] for the sustained bisect
+MATRIX_STREAM_DELIV="${MATRIX_STREAM_DELIV:-0.999}"               # sustained gate delivered-frames floor
+# Unpaced lane (streamcpu/run.sh parity): CPU-bound relay throughput (frames/sec) — long back-to-back
+# bursts so per-frame relay cost dominates. cpu-fps is the PEAK of the fps-vs-concurrency curve.
+MATRIX_STREAMCPU_CHUNKS="${MATRIX_STREAMCPU_CHUNKS:-512}"
+MATRIX_STREAMCPU_FRAME_BYTES="${MATRIX_STREAMCPU_FRAME_BYTES:-16}"
+MATRIX_STREAMCPU_STALL_MS="${MATRIX_STREAMCPU_STALL_MS:-250}"
+MATRIX_STREAMCPU_DUR="${MATRIX_STREAMCPU_DUR:-16}"
+MATRIX_STREAMCPU_FPS_BOUNDS="${MATRIX_STREAMCPU_FPS_BOUNDS:-8 512}"  # [lo,hi] for the cpu-fps peak search
+
+# ── memory ONCE (folded in via memory/run.sh's logic, relocated here) ─────────────────────────────
+# Idle + peak RSS is a PROCESS-LEVEL number (not per-cell), measured ONE time during the matrix run
+# under a sustained load against the gateway's default config. MATRIX_MEMORY=0 disables it. Knobs
+# mirror memory/run.sh. The gateway's own gw_rss()/gw_hwm() manifest hooks are the measurement, so a
+# manifest with no gw_rss (the mock-gateway fixture) degrades to 0/null, exactly like memory/run.sh.
+MATRIX_MEMORY="${MATRIX_MEMORY:-1}"
+MEM_PSIZE="${MEM_PSIZE:-150000}"; MEM_CONC="${MEM_CONC:-1500}"; MEM_DUR="${MEM_DUR:-120}"
+MEM_CAP_MIB="${MEM_CAP_MIB:-40000}"
 # ADAPTIVE RUNG SELECTION + shared rig baselines (lib/sweep.sh knobs; see its header). A gateway
 # that serves the whole 6x6 sweeps up to 36 cells, and the naive per-cell cost (~4 min: 15 fixed
 # ladder rungs + a re-measured direct c1 baseline + 2 re-measured mock ceilings, per cell) put this
@@ -127,13 +160,17 @@ P99_CEIL_MS="${P99_CEIL_MS:-1000}"
 # MATRIX_SWEEP_ADAPTIVE=0 restores the full ladder on every cell (the A/B validation knob).
 SWEEP_ADAPTIVE="${MATRIX_SWEEP_ADAPTIVE:-1}"
 # Sweeping every green cell multiplies the suite's wall time (by design: that is the whole point of
-# per-cell perf), so the default suite ceiling rises from harness.sh's 45 min to 4 h when sweeps are
-# on. An explicit HARNESS_SUITE_CEIL_S still wins, and the ceiling still backstops a wedged gateway.
-[ "$MATRIX_SWEEP" = 1 ] && HARNESS_SUITE_CEIL_S="${HARNESS_SUITE_CEIL_S:-14400}"
+# per-cell perf), and folding a per-cell STREAMING measurement in on top of that lengthens it further
+# (a paced c1 window + a sustained-streams bisect + an unpaced cpu-fps peak search per cell). So the
+# default suite ceiling rises from harness.sh's 45 min to 6 h when the sweep+stream are on. An
+# explicit HARNESS_SUITE_CEIL_S still wins, and the ceiling still backstops a wedged gateway.
+[ "$MATRIX_SWEEP" = 1 ] && HARNESS_SUITE_CEIL_S="${HARNESS_SUITE_CEIL_S:-21600}"
 # shellcheck source=/dev/null
 source "$ROOT/lib/harness.sh"
 # shellcheck source=/dev/null
 source "$ROOT/lib/sweep.sh"
+# shellcheck source=/dev/null
+source "$ROOT/lib/stream_measure.sh"
 # shellcheck source=/dev/null
 source "$GW_DIR/gateway.sh"
 suite_deadline_start
@@ -257,6 +294,12 @@ trap cleanup EXIT
 
 log "[$GATEWAY] build"; gw_build || { echo "build failed"; exit 1; }
 BUILD="$(gw_version 2>/dev/null | tr -d '\n' | sed 's/"/\\"/g')"
+# OOTB config artifact — capture the gateway's as-shipped default config to results/config/<gw>.txt
+# and record the sidecar pointer. Previously the perf suite was the natural home (it always ran); now
+# that the matrix is the sole producer it captures the config too (cheap + idempotent). A gateway with
+# no gw_config() hook degrades to an empty pointer, published as "not published". See
+# lib/harness.sh:harness_write_config + site/gen-data.mjs (reads matrix.ootb_config, else config/<gw>.txt).
+OOTB_CONFIG="$(harness_write_config "$GATEWAY" "$ROOT/results" 2>/dev/null || true)"
 
 # Header arrays are rebuilt after EVERY (re)launch: a manifest can mint a key in gw_launch (busbar
 # vkey) or swap provider-selecting headers per egress (portkey style).
@@ -421,6 +464,72 @@ mock_direct_path(){ case "$1" in
   anthropic) echo "/v1/messages";; gemini) echo "/v1beta/models/$GW_MODEL:generateContent";;
   cohere) echo "/v2/chat";; bedrock) echo "/model/$GW_MODEL/converse";; esac; }
 
+# ── per-cell STREAMING (lib/stream_measure.sh) ───────────────────────────────────────────────────
+# matrix_cell_stream <cell> <path> <body> [extra -H header...]
+# Runs the shared streaming measurement (lib/stream_measure.sh) on one green cell, on the SAME ingress
+# path + egress config matrix_cell_perf just swept. Two lanes, each restarting the mock into its own
+# streaming shape:
+#   * PACED (~20ms cadence): c1 added TTFT p99 + added per-token-gap p99, then the streams-sustained
+#     BISECT (the true max sustainable concurrency between grid rungs);
+#   * UNPACED (interval 0): the cpu-fps PEAK (max sustained aggregate frames/sec).
+# Sets CELL_STREAM_JSON (a leading `, "stream": {...}` fragment, empty on skip); emit_cell folds it
+# into the cell object beside "perf". Whether the gateway actually streams this cell is probed once
+# (curl -N for SSE frames); a non-streaming cell records stream_served:false with the evidence — never
+# a crash, never a fabricated number. Caller has UGEN_H set to this cell's dialect headers already.
+CELL_STREAM_JSON=""
+matrix_cell_stream(){
+  local cell="$1" path="$2" data="$3"; shift 3
+  CELL_STREAM_JSON=""
+  [ "$MATRIX_STREAM" = 1 ] || return 0
+  if suite_deadline_expired; then
+    log "[$GATEWAY]   $cell : suite ceiling reached - skipping the per-cell stream measurement"
+    return 0
+  fi
+  GURL="http://127.0.0.1:$GW_PORT$path"
+  DURL="http://127.0.0.1:$MOCK_PORT$(mock_direct_path "$cell")"
+  # Does this cell actually stream? One curl -N probe for SSE frames (paced mock up). A cell that 200s
+  # the non-stream sweep but buffers/rejects stream:true records stream_served:false — measured, honest.
+  stream_mock_start "$MATRIX_STREAM_CHUNKS" "$MATRIX_STREAM_INTERVAL_MS" "$MATRIX_STREAM_CHUNK_BYTES"
+  local stream_ok=0 stream_err="" sbody probe_to
+  probe_to=$(( MATRIX_STREAM_CHUNKS * MATRIX_STREAM_INTERVAL_MS / 1000 + 10 ))
+  sbody="$(curl -sN -m "$probe_to" "$GURL" -X POST \
+      -H "content-type: application/json" -H "authorization: Bearer $GW_AUTH" \
+      -H "accept: text/event-stream" ${CURL_H[@]+"${CURL_H[@]}"} "$@" \
+      -d "$(printf '%s' "$data" | sed 's/}$/,"stream":true}/')" 2>&1)"
+  if grep -q '^data:' <<< "$sbody"; then stream_ok=1
+  else stream_err="no SSE frames on stream:true; body=[$(strip_ctrl "$(printf '%s' "$sbody" | head -c 300)")]"
+       log "[$GATEWAY]   $cell : stream:true produced no SSE frames - stream_served=false"
+  fi
+  if [ "$stream_ok" != 1 ]; then
+    CELL_STREAM_JSON=", \"stream\": {\"stream_served\": false, \"stream_error\": \"$(json_escape "$stream_err")\"}"
+    return 0
+  fi
+  # ── PACED lane: c1 added TTFT/gap + streams-sustained bisect ──
+  SM_EXPFRAMES="$MATRIX_STREAM_CHUNKS"; SM_STALL_US=$(( MATRIX_STREAM_INTERVAL_MS * MATRIX_STREAM_STALL_X * 1000 ))
+  SM_C1_DUR="$MATRIX_STREAM_C1_DUR"; SM_SWEEP_DUR="$MATRIX_STREAM_SWEEP_DUR"; SM_DELIV="$MATRIX_STREAM_DELIV"
+  stream_c1
+  local lat_c1_ok="$SM_C1_OK"
+  local add_t50=$SM_ADD_T50 add_t99=$SM_ADD_T99 add_g50=$SM_ADD_G50 add_g99=$SM_ADD_G99 c1note=""
+  if [ "$lat_c1_ok" != 1 ]; then
+    add_t50=null; add_t99=null; add_g50=null; add_g99=null
+    c1note=", \"stream_c1_note\": \"$(json_escape "$SM_C1_ERR")\""
+  fi
+  stream_mock_ready 30 || log "[$GATEWAY]   $cell : stream mock did not become ready before the sustained bisect"
+  local sust_lo sust_hi; read -r sust_lo sust_hi <<< "$MATRIX_STREAM_SUST_BOUNDS"
+  stream_sustained_bisect "$sust_lo" "$sust_hi"
+  local sust_streams=$SM_SUST_STREAMS sust_fps=$SM_SUST_FPS sust_bound=$SM_MOCK_BOUND sust_json="$SM_JSON_ACC"
+  # ── UNPACED lane: cpu-fps peak ──
+  stream_mock_start "$MATRIX_STREAMCPU_CHUNKS" 0 "$MATRIX_STREAMCPU_FRAME_BYTES"
+  SM_EXPFRAMES="$MATRIX_STREAMCPU_CHUNKS"; SM_STALL_US=$(( MATRIX_STREAMCPU_STALL_MS * 1000 ))
+  SM_SWEEP_DUR="$MATRIX_STREAMCPU_DUR"; SM_DELIV="${MATRIX_STREAMCPU_DELIV:-0.5}"
+  stream_mock_ready 30 || log "[$GATEWAY]   $cell : unpaced mock did not become ready before the cpu-fps peak"
+  local fps_lo fps_hi; read -r fps_lo fps_hi <<< "$MATRIX_STREAMCPU_FPS_BOUNDS"
+  streamcpu_peak_fps "$fps_lo" "$fps_hi"
+  local fps_peak=$SM_FPS_PEAK fps_conc=$SM_FPS_PEAK_CONC fps_bound=$SM_FPS_MOCK_BOUND fps_json="$SM_JSON_ACC"
+  CELL_STREAM_JSON=", \"stream\": {\"stream_served\": true, \"added_ttft_p50_us\": $add_t50, \"added_ttft_p99_us\": $add_t99, \"added_gap_p50_us\": $add_g50, \"added_gap_p99_us\": $add_g99, \"streams_sustained\": $sust_streams, \"streams_sustained_fps\": $sust_fps, \"streams_sustained_mock_bound\": $sust_bound, \"cpu_fps\": $fps_peak, \"cpu_fps_concurrency\": $fps_conc, \"cpu_fps_mock_bound\": $fps_bound, \"sweep_streams\": [$sust_json], \"sweep_cpu_fps\": [$fps_json]$c1note}"
+  log "[$GATEWAY]   $cell : stream added_ttft_p99=${add_t99}us streams_sustained=${sust_streams} cpu_fps=${fps_peak}"
+}
+
 # matrix_cell_perf <egress> <cell> <path> <body> [extra -H header...]
 # Runs the shared c1 added-latency measurement + BOTH throughput sweeps (lib/sweep.sh, the same
 # implementation perf/run.sh runs) on one green cell: the cell's exact probe body at load, against
@@ -458,7 +567,14 @@ matrix_cell_perf(){
   local prps=$SW_CEIL_RPS pconc=$SW_CEIL_CONC pbound=$SW_BOUND pjson="$SW_JSON"
   run_sweep "$SWEEP_TTFT_MS" "$SWEEP_DELAYED" peak
   local lrps=$SW_CEIL_RPS lconc=$SW_CEIL_CONC lbound=$SW_BOUND ljson="$SW_JSON"
-  SWEEP_BODY=""; UGEN_H=(); SWEEP_CACHE_KEY=""
+  SWEEP_BODY=""; SWEEP_CACHE_KEY=""
+  # ── per-cell STREAMING (same ingress path + egress config, still on the plain mock) ─────────────
+  # Fold the streaming measurement in here, while the gateway is launched under THIS egress config and
+  # UGEN_H still carries this cell's dialect headers. matrix_cell_stream restarts the mock into the
+  # streaming shapes it needs (paced for c1+sustained, unpaced for cpu-fps) and restores nothing — the
+  # mock_start_record below re-establishes the recording mock for the leg-3 re-verify regardless.
+  matrix_cell_stream "$cell" "$path" "$data" "$@"
+  UGEN_H=()
   mock_start_record
   # The sweep restarted the mock, so the gateway's upstream connection pool may hold dead sockets.
   # Fire a couple of discarded warm requests through the gateway so the re-verify probe below (and
@@ -505,8 +621,11 @@ matrix_cell_perf(){
     misdialect*)
       # A MISROUTE: the mock DID receive the re-verify request, on the WRONG endpoint. This is the
       # real fault the leg-3 check exists to catch - drop the perf so a misrouted number never lands.
-      log "[$GATEWAY]   $egress <- $cell : LEG-3 RE-VERIFY MISROUTE after load ($reverify) - dropping perf"
-      CELL_PERF_JSON=", \"perf_dropped\": \"$(json_escape "leg-3 re-verify after load found a misroute to $reverify (not the $egress endpoint); perf withheld to avoid recording a misrouted number")\""
+      log "[$GATEWAY]   $egress <- $cell : LEG-3 RE-VERIFY MISROUTE after load ($reverify) - dropping perf + stream"
+      # The stream measurement drove the SAME misrouted path, so its numbers are equally suspect: drop
+      # it alongside perf (never publish a misrouted streaming number).
+      CELL_STREAM_JSON=""
+      CELL_PERF_JSON=", \"perf_dropped\": \"$(json_escape "leg-3 re-verify after load found a misroute to $reverify (not the $egress endpoint); perf + stream withheld to avoid recording a misrouted number")\""
       return 0 ;;
     *)  # miss/norecord after retries: the mock recorded NOTHING (a transient dead socket on the
         # single post-load probe, e.g. a Go upstream pool holding stale sockets). This is NOT a
@@ -551,8 +670,8 @@ emit_cell(){
   local probe_json=""
   [ -n "$CELL_PROBE_NOTE" ] && probe_json=", \"probe_note\": \"$(json_escape "$CELL_PROBE_NOTE")\""
   CELLS_JSON="${CELLS_JSON}${CELLS_JSON:+,}
-      \"$1\": {\"served\": $2, ${reason:+\"reason\": \"$reason\", }\"status\": \"$3\", \"path\": \"$4\", \"verdict_note\": \"$(json_escape "$5")\", \"body_snippet\": \"$(json_escape "$6")\"$probe_json$CELL_PERF_JSON}"
-  CELL_PERF_JSON=""; CELL_PROBE_NOTE=""
+      \"$1\": {\"served\": $2, ${reason:+\"reason\": \"$reason\", }\"status\": \"$3\", \"path\": \"$4\", \"verdict_note\": \"$(json_escape "$5")\", \"body_snippet\": \"$(json_escape "$6")\"$probe_json$CELL_PERF_JSON$CELL_STREAM_JSON}"
+  CELL_PERF_JSON=""; CELL_STREAM_JSON=""; CELL_PROBE_NOTE=""
 }
 
 WARM_OK=0; WARM_LAST=000; WARM_CELL=openai; SERVE_ERR=""
@@ -742,6 +861,64 @@ warm_up(){ # egress
   return 1
 }
 
+# ── memory ONCE (relocated from memory/run.sh) ───────────────────────────────────────────────────
+# Idle + peak RSS is a PROCESS-LEVEL number, so it is measured ONE time per gateway (not per cell).
+# Relaunch the gateway under its DEFAULT config (gw_launch), point it at a plain mock, warm it, record
+# idle RSS, then drive a sustained large-payload load while a 0.3s sampler tracks peak VmRSS (and a
+# watchdog kills the load at MEM_CAP_MIB so an unbounded gateway can't OOM the box). VmHWM is read at
+# teardown (survives until process exit), and post-load RSS 60s after load stops (does it release?).
+# The measurement is the gateway's own gw_rss()/gw_hwm() manifest hooks (shared /proc tree helpers in
+# lib/harness.sh); a manifest without gw_rss (the mock-gateway fixture) degrades to 0/null cleanly.
+# Sets MEMORY_JSON (a top-level `"memory": {...}` object) folded into the final result.
+MEMORY_JSON=""
+matrix_measure_memory(){
+  [ "$MATRIX_MEMORY" = 1 ] || return 0
+  if suite_deadline_expired; then log "[$GATEWAY] suite ceiling reached - skipping the memory-once measurement"; return 0; fi
+  log "[$GATEWAY] memory-once: relaunching under the default config for idle/peak RSS"
+  gw_stop 2>/dev/null; sleep 1
+  # Plain instant mock (no recording, no streaming): the same serving conditions memory/run.sh uses.
+  mock_start_plain
+  local mem_ok=0 mem_err=""
+  _mem_ready(){
+    rebuild_headers
+    local i st
+    for i in $(seq 1 60); do
+      st=$(curl -s -m3 -o /dev/null -w "%{http_code}" "http://127.0.0.1:$GW_PORT$GW_PATH" -X POST \
+          -H "content-type: application/json" -H "authorization: Bearer $GW_AUTH" ${CURL_H[@]+"${CURL_H[@]}"} \
+          -d "{\"model\":\"$GW_MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"warm\"}],\"max_tokens\":16}")
+      [ "$st" = 200 ] && return 0; sleep 1
+    done
+    return 1
+  }
+  if harness_launch_ready gw_launch _mem_ready; then mem_ok=1; else mem_err="$HARNESS_SERVE_ERR"; fi
+  local IDLE PEAK=0 HWM POST STOP PEAKF LOADPIDF SP
+  IDLE=$(gw_rss); log "[$GATEWAY] memory-once idle RSS: ${IDLE:-?} MiB (served=$([ "$mem_ok" = 1 ] && echo true || echo false))"
+  if [ "$mem_ok" = 1 ]; then
+    STOP="${TMPDIR:-/tmp}/mtxmem.$$.stop"; PEAKF="${TMPDIR:-/tmp}/mtxmem.$$.peak"; LOADPIDF="${TMPDIR:-/tmp}/mtxmem.$$.loadpid"
+    rm -f "$STOP" "$PEAKF" "$LOADPIDF"; echo 0 >"$PEAKF"
+    ( PEAK=0; while [ ! -f "$STOP" ]; do
+        v=$(gw_rss); [ -z "$v" ] && v=0
+        awk -v v="$v" -v p="$PEAK" 'BEGIN{exit !(v+0>p+0)}' && { PEAK=$v; echo "$PEAK" >"$PEAKF"; }
+        awk -v v="$v" -v c="$MEM_CAP_MIB" 'BEGIN{exit !(v+0>c+0)}' && { echo "[watchdog] $v MiB > cap $MEM_CAP_MIB — killing load"; lp=$(cat "$LOADPIDF" 2>/dev/null); [ -n "$lp" ] && kill "$lp" 2>/dev/null; touch "$STOP"; }
+        sleep 0.3
+      done ) & SP=$!
+    log "[$GATEWAY] memory-once load: ${MEM_PSIZE}B payloads, c=$MEM_CONC, ${MEM_DUR}s (watchdog cap ${MEM_CAP_MIB} MiB)"
+    taskset -c "$LOADCORES" "$UGEN" -url "http://127.0.0.1:$GW_PORT$GW_PATH" \
+      -model "$GW_MODEL" -auth "$GW_AUTH" -c "$MEM_CONC" -d "$MEM_DUR" -psize "$MEM_PSIZE" ${CURL_H[@]+"${CURL_H[@]}"} &
+    local LOAD_PID=$!; echo "$LOAD_PID" >"$LOADPIDF"; wait "$LOAD_PID" 2>/dev/null || true
+    touch "$STOP"; kill "$SP" 2>/dev/null
+    PEAK=$(cat "$PEAKF" 2>/dev/null); PEAK=${PEAK:-0}
+    HWM=$(gw_hwm)   # VmHWM must be read BEFORE the gateway stops (the counter dies with the process)
+    log "[$GATEWAY] memory-once high-water mark: ${HWM:-n/a} MiB (VmHWM; sampled peak ${PEAK} MiB)"
+    log "[$GATEWAY] memory-once load stopped — waiting 60s to see if memory releases"
+    sleep 60
+    POST=$(gw_rss)
+    rm -f "$STOP" "$PEAKF" "$LOADPIDF" 2>/dev/null
+  fi
+  MEMORY_JSON="
+  \"memory\": {\"served\": $([ "$mem_ok" = 1 ] && echo true || echo false), \"serve_error\": \"$(json_escape "$mem_err")\", \"idle_rss_mib\": ${IDLE:-0}, \"peak_rss_mib\": ${PEAK:-0}, \"peak_rss_hwm_mib\": ${HWM:-null}, \"post_load_rss_mib\": ${POST:-0}, \"payload_bytes\": $MEM_PSIZE, \"concurrency\": $MEM_CONC, \"duration_s\": $MEM_DUR},"
+  log "[$GATEWAY] memory-once: idle=${IDLE:-0} peak=${PEAK:-0} hwm=${HWM:-n/a} post=${POST:-0} MiB"
+}
 
 UPSTREAMS_JSON=""
 COMPAT_CELLS=""; COMPAT_SHAPE=""; COMPAT_SERVED=false; COMPAT_ERR=""
@@ -821,6 +998,10 @@ for EGRESS in $EGRESS_ALL; do
   SERVE_ERR=""
 done
 
+# Memory ONCE, after the 6x6 (it relaunches the gateway under the default config with a large-payload
+# sustained load — a process-level number, not per-cell). Folded into the result as top-level "memory".
+matrix_measure_memory
+
 cat > "$RESULTS/$GATEWAY.json" <<JSON
 {
   "gateway": "$GATEWAY",
@@ -837,12 +1018,14 @@ cat > "$RESULTS/$GATEWAY.json" <<JSON
   "sweep_rung_selection": "$([ "${SWEEP_ADAPTIVE:-0}" = 1 ] && echo adaptive || echo full-ladder)",
   "sweep_ttft_ms": $SWEEP_TTFT_MS,
   "p99_ceiling_ms": $P99_CEIL_MS,
+  "cell_stream": $([ "$MATRIX_STREAM" = 1 ] && echo true || echo false),$MEMORY_JSON
   "cells": {$COMPAT_CELLS
   },
   "upstreams": {$UPSTREAMS_JSON
   },
   "model": "$GW_MODEL",
   "upstream_endpoint": "$GW_PATH",
+  "ootb_config": $([ -n "$OOTB_CONFIG" ] && printf '"%s"' "$OOTB_CONFIG" || echo null),
   "arch": "${BENCH_ARCH:-$(uname -m)}",
   "hardware": "${BENCH_HARDWARE:-$(uname -m) $(nproc 2>/dev/null || echo '?')vCPU}",
   "measured_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"

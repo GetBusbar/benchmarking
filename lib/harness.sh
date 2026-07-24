@@ -77,6 +77,47 @@ harness_write_config(){
   printf 'config/%s.txt' "$gw"
 }
 
+# ── RSS / HWM process-tree helpers (shared: memory/ AND the matrix's memory-once measurement) ─────
+# ONE memory-measurement method for every gateway, native or docker: sum the resident memory (VmRSS)
+# — or the kernel high-water mark (VmHWM) — of the whole process tree from /proc. The SAME thing the
+# native manifests do; deliberately NOT `docker stats` (its cgroup MemUsage includes page cache and is
+# not comparable to a native process's VmRSS). A gateway manifest's gw_rss()/gw_hwm() hook calls these
+# (directly for native, via container_*_mib for docker), so they must live in the shared layer both
+# the memory suite and the matrix suite source — not only in memory/run.sh (audit: matrix folds the
+# memory measurement in and calls gw_rss()/gw_hwm(), which reference these).
+_rss_tree_mib() { # root_pid  → summed VmRSS of pid + all descendants, in MiB
+  local root="$1"; [ -z "$root" ] || [ "$root" = 0 ] && { echo 0; return; }
+  local pids="$root" frontier="$root" next total=0 kb p c
+  while [ -n "$frontier" ]; do
+    next=""
+    for p in $frontier; do for c in $(pgrep -P "$p" 2>/dev/null); do pids="$pids $c"; next="$next $c"; done; done
+    frontier="$next"
+  done
+  for p in $pids; do kb=$(awk '/VmRSS/{print $2}' "/proc/$p/status" 2>/dev/null); total=$((total + ${kb:-0})); done
+  awk -v k="$total" 'BEGIN{printf "%.1f", k/1024}'
+}
+# VmHWM = the kernel's own per-process high-water mark. A periodic VmRSS poll can miss a sub-interval
+# allocation spike; VmHWM cannot (the kernel updates it on every charge), so it is the honest PEAK.
+_hwm_tree_mib() { # root_pid → summed VmHWM of pid + descendants, in MiB
+  local root="$1"; [ -z "$root" ] || [ "$root" = 0 ] && { echo 0; return; }
+  local pids="$root" frontier="$root" next total=0 kb p c
+  while [ -n "$frontier" ]; do
+    next=""
+    for p in $frontier; do for c in $(pgrep -P "$p" 2>/dev/null); do pids="$pids $c"; next="$next $c"; done; done
+    frontier="$next"
+  done
+  for p in $pids; do kb=$(awk '/VmHWM/{print $2}' "/proc/$p/status" 2>/dev/null); total=$((total + ${kb:-0})); done
+  awk -v k="$total" 'BEGIN{printf "%.1f", k/1024}'
+}
+container_rss_mib() { # container_name → its process tree's VmRSS via the host PID (same units as native)
+  local pid; pid=$(sudo docker inspect -f '{{.State.Pid}}' "$1" 2>/dev/null)
+  _rss_tree_mib "$pid"
+}
+container_hwm_mib() { # container_name → its process tree's VmHWM via the host PID (same units as native)
+  local pid; pid=$(sudo docker inspect -f '{{.State.Pid}}' "$1" 2>/dev/null)
+  _hwm_tree_mib "$pid"
+}
+
 # ── tmo: hard timeout around one command ────────────────────────────────────────────────────────
 # Kills the command (and, via a fresh process group when possible, its children - a ugen probe forks
 # nothing but a docker/native gateway probe path might) if it runs longer than <seconds>. Returns the
