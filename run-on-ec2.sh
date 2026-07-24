@@ -18,6 +18,23 @@ set -uo pipefail
 export AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-us-east-1}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"   # this repo (benchmarking) root
 
+# `run-on-ec2.sh kill` — terminate EVERY gateway-bench box right now, reliably. Uses xargs so the
+# instance IDs are split into separate args (piping `--output text` straight into `--instance-ids`
+# passes one tab-joined blob → InvalidInstanceID.Malformed → a silent no-op, which is exactly how 48
+# boxes leaked on 2026-07-24). Run this if a run is ever interrupted and you want a guaranteed cleanup.
+if [[ "${1:-}" == "kill" || "${1:-}" == "--kill" ]]; then
+  echo "terminating all gateway-bench instances in $AWS_DEFAULT_REGION ..."
+  aws ec2 describe-instances --filters "Name=tag:purpose,Values=gateway-bench" \
+    "Name=instance-state-name,Values=running,pending,stopping,stopped" \
+    --query 'Reservations[].Instances[].InstanceId' --output text 2>/dev/null \
+    | tr '\t' '\n' | grep -E '^i-' \
+    | xargs -r -n 25 aws ec2 terminate-instances --output text --instance-ids >/dev/null 2>&1
+  left=$(aws ec2 describe-instances --filters "Name=tag:purpose,Values=gateway-bench" \
+    "Name=instance-state-name,Values=running,pending" --query 'length(Reservations[].Instances[])' --output text 2>/dev/null)
+  echo "done — running/pending remaining: ${left:-?}"
+  exit 0
+fi
+
 # ── ARCHITECTURE: the easy flip ───────────────────────────────────────────────────────────────────
 # ARCH=arm64 (default) runs the whole field on Graviton (m7g); ARCH=x86 runs it on Intel (m7i). One
 # knob picks the instance family AND the matching Ubuntu AMI. Every gateway builds/pulls for that arch
@@ -81,12 +98,18 @@ bench_gateway() {
   : > "$glog"
   glog_echo(){ echo "[$(date +%H:%M:%S)] [$gw] $*" | tee -a "$glog"; }
 
-  # provision
+  # provision. COST SAFETY NET: the box self-terminates after BENCH_MAX_MIN minutes no matter what -
+  # even if this orchestrator is killed (so its RETURN-trap never fires) the box shuts itself down and
+  # `instance-initiated-shutdown-behavior=terminate` makes that a TERMINATE, not a stop. A leaked box
+  # can therefore bleed cost for at most BENCH_MAX_MIN, never indefinitely (2026-07-24: 48 leaked boxes
+  # ran for hours because the trap missed SIGTERM and the manual cleanups silently no-op'd).
   iid=$(aws ec2 run-instances --image-id "$AMI" --instance-type "$ITYPE" --key-name "$KEYNAME" \
     --security-group-ids "$SG" \
+    --instance-initiated-shutdown-behavior terminate \
+    --user-data "$(printf '#!/bin/bash\nshutdown -h +%s\n' "${BENCH_MAX_MIN:-150}")" \
     --block-device-mappings 'DeviceName=/dev/sda1,Ebs={VolumeSize=60,VolumeType=gp3}' \
     --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=$tag},{Key=purpose,Value=gateway-bench}]" \
-    --query 'Instances[0].InstanceId' --output text 2>>"$glog") || { glog_echo "run-instances FAILED (vCPU limit?)"; return 1; }
+    --query 'Instances[0].InstanceId' --output text 2>>"$glog") || { glog_echo "run-instances FAILED: $(tail -1 "$glog" | sed 's/.*: //' | cut -c1-140)"; return 1; }
   glog_echo "launched $iid"
   # self-terminate this box no matter how we exit
   trap 'aws ec2 terminate-instances --instance-ids "'"$iid"'" >/dev/null 2>&1 || true' RETURN
