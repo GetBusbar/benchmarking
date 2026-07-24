@@ -134,7 +134,19 @@ fn dialect_for(path: &str) -> &'static str {
 fn request_shape_ok(dialect: &str, body: &[u8]) -> bool {
     let has = |needle: &str| body.windows(needle.len()).any(|w| w == needle.as_bytes());
     match dialect {
-        "openai" | "bedrock" | "cohere" => has("\"messages\""),
+        "openai" => has("\"messages\""),
+        // Bedrock Converse (audit R3-M6): the body carries `messages` whose content is an ARRAY of
+        // content BLOCKS ({"text":…}) — NOT OpenAI's `"content":"<string>"`. Requiring the block marker
+        // (a `{"text":` content block, or an `inferenceConfig`) rejects a raw OpenAI chat body that a
+        // gateway forwarded to /converse WITHOUT building the Converse shape, which the old blanket
+        // `"messages"` check accepted as a false body_ok=true.
+        "bedrock" => {
+            let block_content = has("\"content\":[") && has("\"text\":");
+            has("\"messages\"") && (block_content || has("\"inferenceConfig\""))
+        }
+        // Cohere: v2 chat carries `messages`; v1 chat carries `message`/`chat_history`. Accept either
+        // dialect's marker (still shallow, but at least a per-dialect arm rather than the shared one).
+        "cohere" => has("\"messages\"") || has("\"message\"") || has("\"chat_history\""),
         "openai-responses" => has("\"input\"") || has("\"instructions\""),
         "anthropic" => has("\"messages\"") && has("\"max_tokens\""),
         "gemini" => has("\"contents\""),
@@ -396,5 +408,79 @@ async fn main() {
                 )
                 .await;
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{dialect_for, request_shape_ok};
+
+    // The mock must serve every dialect identically and the matrix's leg-3 body_ok must PROVE the
+    // gateway spoke that dialect's request shape. These tests pin request_shape_ok per dialect,
+    // including the R3-M6 tightening that rejects an unconverted OpenAI body on the bedrock/cohere
+    // legs (previously any {"messages":[…]} satisfied all three).
+
+    #[test]
+    fn openai_accepts_messages() {
+        assert!(request_shape_ok("openai", br#"{"model":"m","messages":[{"role":"user","content":"hi"}]}"#));
+        assert!(!request_shape_ok("openai", br#"{"model":"m","input":"hi"}"#));
+    }
+
+    #[test]
+    fn bedrock_requires_converse_content_blocks_not_raw_openai() {
+        // real Converse egress (the harness's bedrock ingress probe shape): messages with {"text":…}
+        // content BLOCKS -> ok
+        assert!(request_shape_ok(
+            "bedrock",
+            br#"{"messages":[{"role":"user","content":[{"text":"hello"}]}]}"#
+        ));
+        // an inferenceConfig marker also proves Converse
+        assert!(request_shape_ok(
+            "bedrock",
+            br#"{"messages":[{"role":"user","content":[{"text":"x"}]}],"inferenceConfig":{"maxTokens":16}}"#
+        ));
+        // a RAW OpenAI chat body forwarded to /converse without building the Converse shape:
+        // messages present but content is a plain string -> must be REJECTED (the M6 fix)
+        assert!(!request_shape_ok(
+            "bedrock",
+            br#"{"model":"m","messages":[{"role":"user","content":"hello"}]}"#
+        ));
+    }
+
+    #[test]
+    fn cohere_accepts_v2_and_v1_shapes() {
+        assert!(request_shape_ok("cohere", br#"{"model":"m","messages":[{"role":"user","content":"hi"}]}"#)); // v2 chat
+        assert!(request_shape_ok("cohere", br#"{"message":"hi","chat_history":[]}"#)); // v1 chat
+        assert!(!request_shape_ok("cohere", br#"{"input":"hi"}"#));
+    }
+
+    #[test]
+    fn anthropic_requires_messages_and_max_tokens() {
+        assert!(request_shape_ok("anthropic", br#"{"model":"m","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}"#));
+        assert!(!request_shape_ok("anthropic", br#"{"model":"m","messages":[{"role":"user","content":"hi"}]}"#));
+    }
+
+    #[test]
+    fn responses_and_gemini_markers() {
+        assert!(request_shape_ok("openai-responses", br#"{"input":"hi"}"#));
+        assert!(request_shape_ok("openai-responses", br#"{"instructions":"be brief"}"#));
+        assert!(request_shape_ok("gemini", br#"{"contents":[{"parts":[{"text":"hi"}]}]}"#));
+        assert!(!request_shape_ok("gemini", br#"{"messages":[]}"#));
+    }
+
+    #[test]
+    fn unknown_dialect_never_ok() {
+        assert!(!request_shape_ok("other", br#"{"messages":[]}"#));
+    }
+
+    #[test]
+    fn dialect_routing_is_unambiguous() {
+        assert_eq!(dialect_for("/v1/chat/completions"), "openai");
+        assert_eq!(dialect_for("/v1/responses"), "openai-responses");
+        assert_eq!(dialect_for("/v1/messages"), "anthropic");
+        assert_eq!(dialect_for("/model/m/converse"), "bedrock");
+        assert_eq!(dialect_for("/v2/chat"), "cohere");
+        assert_eq!(dialect_for("/v1beta/models/m:generateContent"), "gemini");
+        assert_eq!(dialect_for("/something/else"), "other");
     }
 }
