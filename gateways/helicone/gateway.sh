@@ -2,10 +2,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # Gateway manifest: Helicone AI Gateway (Helicone/ai-gateway, Rust) — BUILT FROM SOURCE, run native.
 #
-# Helicone publishes no linux/arm64 image (`helicone/ai-gateway:latest` is amd64-only), so on Graviton
-# we build the `ai-gateway` crate from source — exactly the pattern we use for LiteLLM-Rust — and run
-# the release binary natively (real process RSS, no container overhead). Refs are pinned in
-# gateways/versions.env. Pure-proxy mode: helicone.features=none → no control plane, no auth, no key
+# EXCEPTION to the everything-runs-its-official-docker-image rule, kept deliberately: Helicone
+# publishes no linux/arm64 image at all. Re-verified 2026-07-23 — EVERY tag on
+# docker.io/helicone/ai-gateway (latest, main, all sha-<commit> and versioned tags, including the
+# sha tag for the pinned commit below) is linux/amd64-only, and ghcr.io/helicone/ai-gateway serves
+# no public image. The bench boxes are Graviton arm64, so on them we build the `ai-gateway` crate
+# from source — exactly the pattern we use for LiteLLM-Rust — and run the release binary natively
+# (real process RSS, no container overhead). Convert to the official image if/when Helicone ships
+# arm64. Refs are pinned in gateways/versions.env. Pure-proxy mode: helicone.features=none → no control plane, no auth, no key
 # required; the built-in `openai` provider's base-url is overridden to the mock.
 GW_KIND=native
 # Self-describing manifest metadata — charts.py + the run lists read these, so a gateway
