@@ -266,7 +266,7 @@ tbody tr { cursor: pointer; }
 /* Active-sort arrow: ▲ ascending / ▼ descending, appended after the header label. */
 #gateways-table thead th[data-dir="asc"]::after { content: " \25B2"; font-size: .7em; color: var(--fg-mute); }
 #gateways-table thead th[data-dir="desc"]::after { content: " \25BC"; font-size: .7em; color: var(--fg-mute); }
-#gateways-table tbody tr { cursor: default; }
+#gateways-table tbody tr { cursor: pointer; }
 #gateways-table td.cls { color: var(--fg-dim); }
 
 /* drawer (per-gateway slide-over) */
