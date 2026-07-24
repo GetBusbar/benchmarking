@@ -60,14 +60,19 @@ manifest_gw_port(){ # gateway
   echo "${port:-8080}"
 }
 
-# Which suites to run (headline first): perf = latency + RPS ceiling; memory = idle/peak RSS.
-# stream = SSE added-TTFT / inter-frame overhead / streams sustained; streamcpu = CPU-bound streaming
-# relay throughput (unpaced frames/sec per gateway, the streaming analogue of perf's max-proxy RPS);
-# governed = the same latency + sustained-RPS run with native key/limit governance active, paired
-# against a plain run in one JSON; xlate = protocol translation (anthropic client -> openai upstream)
-# added latency + sustained RPS. Opt in with SUITES="perf memory stream streamcpu governed xlate"
-# (see stream/run.sh, streamcpu/run.sh, governed/run.sh, xlate/run.sh).
-SUITES="${SUITES:-perf memory stream streamcpu xlate governed matrix}"
+# Which suites to run. THE MATRIX IS THE SINGLE PRODUCER: the 6x6 matrix run now folds in everything
+# the board displays — the OpenAI->OpenAI diagonal cell IS the old "perf" numbers, an off-diagonal
+# cell IS the old "xlate", each served cell also carries streaming (added TTFT/gap, bisected
+# streams-sustained, peak cpu-fps), and the run takes ONE process-level memory read. So run-all runs
+# ONLY the matrix by default.
+#
+# The standalone perf / stream / streamcpu / xlate / memory suite files are LEFT IN PLACE (not deleted)
+# but are no longer run here — they remain usable ad hoc via an explicit SUITES override, e.g.
+#   SUITES="perf memory stream streamcpu xlate governed matrix" bench/run-all.sh
+# governed is NOT in the default set (it is a non-default, busbar-only governance-enabled launch, off
+# the neutral out-of-the-box board); opt into it the same way. gen-data reads whatever is on disk and
+# projects the board from the matrix, falling back to any legacy suite results still present.
+SUITES="${SUITES:-matrix}"
 for gw in "${GATEWAYS[@]}"; do
   [ -f "$HERE/gateways/$gw/gateway.sh" ] || { log "skip unknown gateway '$gw'"; continue; }
   gwport="$(manifest_gw_port "$gw")"
