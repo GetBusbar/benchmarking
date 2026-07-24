@@ -71,7 +71,7 @@ elif [ -f "$HERE/$GATEWAY/gateway.sh" ]; then export GW_DIR="$HERE/$GATEWAY"
 else echo "unknown gateway '$GATEWAY'"; exit 2; fi
 
 ulimit -n 1048576 2>/dev/null || ulimit -n 65536 2>/dev/null || true
-export CORES="${CORES:-0-3}"; MOCKCORES="${MOCKCORES:-0-3}"
+export CORES="${CORES:-0-3}"; LOADCORES="${LOADCORES:-0-3}"; MOCKCORES="${MOCKCORES:-0-3}"
 export MOCK_PORT="${MOCK_PORT:-8000}"
 RESULTS="$ROOT/results/matrix"; mkdir -p "$RESULTS"
 log(){ echo "[$(date +%H:%M:%S)] $*"; }

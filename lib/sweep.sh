@@ -65,7 +65,7 @@ declare -gA SWEEP_PRIOR 2>/dev/null || true
 sweep_probe(){ # url conc dur
   local _sb=()
   [ -n "${SWEEP_BODY:-}" ] && _sb=(-body "$SWEEP_BODY")
-  tmo "$(probe_budget "$3")" "$UGEN" -url "$1" -model "$GW_MODEL" -auth "$GW_AUTH" -c "$2" -d "$3" -psize "$PSIZE" \
+  tmo "$(probe_budget "$3")" taskset -c "$LOADCORES" "$UGEN" -url "$1" -model "$GW_MODEL" -auth "$GW_AUTH" -c "$2" -d "$3" -psize "$PSIZE" \
       ${_sb[@]+"${_sb[@]}"} ${UGEN_H[@]+"${UGEN_H[@]}"} 2>/dev/null \
     | awk '{for(i=1;i<=NF;i++){split($i,a,"=");v[a[1]]=a[2]}; print v["rps"],v["fail"],v["p99us"],v["p50us"]}'
 }
