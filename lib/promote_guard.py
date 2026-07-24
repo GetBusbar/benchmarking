@@ -61,6 +61,51 @@ def is_served(doc, suite):
     return doc.get(served_field(suite)) is True
 
 
+def _matrix_cells(doc):
+    """Yield every cell dict in a matrix result: the top-level v1-compat `cells` row plus every
+    `upstreams.<egress>.cells.<ingress>` cell. Cells may be duplicated across the two shapes; that is
+    fine — we only inspect their status/served fields."""
+    cells = doc.get("cells")
+    if isinstance(cells, dict):
+        for c in cells.values():
+            if isinstance(c, dict):
+                yield c
+    ups = doc.get("upstreams")
+    if isinstance(ups, dict):
+        for u in ups.values():
+            if isinstance(u, dict):
+                ucells = u.get("cells")
+                if isinstance(ucells, dict):
+                    for c in ucells.values():
+                        if isinstance(c, dict):
+                            yield c
+
+
+def _matrix_all_dead(doc):
+    """MEDIUM-R2-3: matrix emits NO top-level `last_http_status` (status lives per-cell,
+    matrix/run.sh emit_cell), so the guard's `status == "000"` connection-level branch is dead for the
+    sole producer. A genuinely all-dead matrix run — every cell reached a dead socket (status "000") and
+    NOT ONE served — whose top-level serve_error happens to lack the anchored "failed to boot after"
+    marker would otherwise promote OVER a prior served=true result (the R4-M2 bias this guard exists to
+    prevent). Detect that connection-level boot failure directly from the per-cell statuses.
+
+    CONSERVATIVE by design: require BOTH (a) no served cell anywhere, AND (b) at least one cell present
+    with a status, AND (c) EVERY cell that carries a status shows "000". A legitimately-partial matrix
+    (some cell served, or some cell answered with a real HTTP status like 404/501) is NOT all-dead and
+    is allowed through as an honest not-served result."""
+    saw_status = False
+    for c in _matrix_cells(doc):
+        if c.get("served") is True or c.get("served") == "verified":
+            return False  # something served → not all-dead
+        st = c.get("status")
+        if st in (None, ""):
+            continue
+        saw_status = True
+        if str(st) != "000":
+            return False  # a cell got a real HTTP response → gateway booted, honest not-served
+    return saw_status
+
+
 def is_boot_failure(doc, suite):
     """True when the incoming non-result is our environment failing to build/boot the gateway,
     as opposed to a gateway that booted and honestly refused the probe."""
@@ -75,7 +120,13 @@ def is_boot_failure(doc, suite):
     ).lower()
     if status == "000":
         return True
-    return any(m in err for m in BOOT_FAILURE_MARKERS)
+    if any(m in err for m in BOOT_FAILURE_MARKERS):
+        return True
+    # matrix has no top-level last_http_status, so mirror the "000" branch at the per-cell level: an
+    # all-dead matrix (every cell a connection-level 000, none served) is a boot/transport failure.
+    if suite == "matrix" and _matrix_all_dead(doc):
+        return True
+    return False
 
 
 def main():
