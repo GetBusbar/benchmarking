@@ -1302,11 +1302,24 @@ const gatewayBuild = (g) => {
   const j = LANES.map((l) => g[l.key]).find((x) => x && x.build);
   return j ? j.build : null;
 };
-/* Compact form for a table cell: image digests and long refs stay in the tooltip. */
+/* The VERSION token alone for the table cell - the tag, package version, or short commit;
+   the full build string (image path, digest, annotations) stays in the tooltip.
+   "ghcr.io/x/y:v1.3.1" -> "v1.3.1"; "litellm==1.93.0" -> "1.93.0"; "repo@9649b27..." -> "@9649b27";
+   "busbar 1.4.1" -> "1.4.1". Anything unparsable falls back to a truncated string. */
 const fmtBuild = (full) => {
-  let short = String(full).replace(/\s*\(@sha256:[0-9a-f]+\)/, "");
-  if (short.length > 32) short = short.slice(0, 29) + "...";
-  return short;
+  const head = String(full).split(" (")[0].trim();
+  const first = head.split(/\s+/)[0];
+  const colon = first.lastIndexOf(":");
+  if (colon > 0 && !first.slice(colon + 1).includes("/")) return first.slice(colon + 1);
+  if (first.includes("==")) return first.split("==").pop();
+  if (first.includes("@")) {
+    const ref = first.split("@").pop();
+    // A bare commit sha keeps an "@" marker; a version-looking ref (npm "pkg@1.15.2") does not.
+    return /^[0-9a-f]{7,40}$/.test(ref) ? "@" + ref.slice(0, 7) : ref;
+  }
+  const tail = head.match(/\s(v?\d[\w.\-]*)$/);
+  if (tail) return tail[1];
+  return head.length > 24 ? head.slice(0, 21) + "..." : head;
 };
 
 function renderGateways() {
