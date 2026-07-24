@@ -164,16 +164,39 @@ gw_matrix_egress() {
   gw_launch
 }
 
+# _kong_env: the ONE definition of Kong's non-secret launch env — the single source of truth that
+# gw_launch turns into docker -e flags (like gomodel's _gomodel_env) and gw_config publishes verbatim,
+# so the benchmarked env and the website-published env cannot drift.
+#   KONG_DATABASE=off        = DB-less declarative (no external Postgres — a disclosed run-mechanic).
+#   KONG_ANONYMOUS_REPORTS=off suppresses Kong's default-on telemetry phone-home (run-mechanic).
+#   KONG_NGINX_WORKER_PROCESSES = pinned to the cpuset core count (0-3 → 4), NOT Kong's default `auto`.
+#     Kong is nginx/OpenResty, and nginx's `worker_processes auto` reads the HOST cpu count via
+#     sysconf(_SC_NPROCESSORS_ONLN) — it is BLIND to --cpuset-cpus, so on a 4-core-pinned container it
+#     spawns 16 workers thrashing 4 cores, a scheduler-contention HANDICAP the Rust gateways (tokio
+#     available_parallelism respects cpuset) never pay. Pinning to the cpuset count emulates the same
+#     N-core box every gateway is measured on — the identical CPU-pinning run-mechanic the Go gateways
+#     use with GOMAXPROCS (and exactly what nginx `auto` WOULD read on a real 4-core box). Run-mechanic
+#     correcting nginx's cpuset-blindness, not a perf/concurrency tune.
+#   The Admin API listener is left at its default (ON, localhost:8001/8444) — not disabled.
+_kong_env() {
+  local ncore=$(( ${CORES##*-} - ${CORES%%-*} + 1 ))
+  cat <<ENV
+KONG_DATABASE=off
+KONG_ANONYMOUS_REPORTS=off
+KONG_NGINX_WORKER_PROCESSES=$ncore
+KONG_DECLARATIVE_CONFIG=/kong/kong.yml
+KONG_PROXY_LISTEN=0.0.0.0:$GW_PORT
+ENV
+}
+
 gw_launch() {
   sudo docker rm -f kong-bench >/dev/null 2>&1; sleep 1
-  # KONG_DATABASE=off = DB-less declarative (no external Postgres — a disclosed run-mechanic).
-  # KONG_ANONYMOUS_REPORTS=off suppresses Kong's default-on telemetry phone-home (run-mechanic).
-  # The Admin API listener is left at its default (ON, localhost:8001/8444) — not disabled.
+  # SINGLE SOURCE: _kong_env() is the one env manifest; gw_launch turns each KEY=value into a docker
+  # -e flag and gw_config prints the same bytes, so the run and the published config cannot drift.
+  local args=() line
+  while IFS= read -r line; do [ -n "$line" ] && args+=(-e "$line"); done < <(_kong_env)
   sudo docker run -d --name kong-bench --network host --cpuset-cpus="$CORES" \
-    -e KONG_DATABASE=off \
-    -e KONG_ANONYMOUS_REPORTS=off \
-    -e KONG_DECLARATIVE_CONFIG=/kong/kong.yml \
-    -e "KONG_PROXY_LISTEN=0.0.0.0:$GW_PORT" \
+    "${args[@]}" \
     -v "$GW_DIR/kong.gen.yml:/kong/kong.yml:ro" \
     "${KONG_IMAGE:-kong:3.8}" >/dev/null 2>&1
 }
@@ -183,9 +206,12 @@ gw_launch() {
 # is the rendered DB-less declarative config (exactly what KONG_DECLARATIVE_CONFIG loads) PLUS the
 # non-secret launch env (any auth/AWS values in the config are dummy on the isolated rig). Read from
 # the file _kong_write_config just rendered (falls back to the openai-lane default if absent — the
-# canonical perf config), so it can never drift from what Kong loaded. OOTB posture: ai-proxy on the
-# uniform /v1/chat/completions route, admin API left at its default (not disabled); the only run-
-# mechanics are KONG_DATABASE=off (DB-less) and KONG_ANONYMOUS_REPORTS=off (telemetry).
+# canonical perf config), so it can never drift from what Kong loaded. The launch env is printed from
+# the SAME _kong_env() gw_launch consumes, so the two cannot drift. OOTB posture: ai-proxy on the
+# uniform /v1/chat/completions route, admin API left at its default (not disabled); the run-mechanics
+# are KONG_DATABASE=off (DB-less), KONG_ANONYMOUS_REPORTS=off (telemetry), and KONG_NGINX_WORKER_
+# PROCESSES pinned to the cpuset core count (nginx `auto` misreads the host's cores under --cpuset-cpus;
+# same CPU-pinning run-mechanic as the Go gateways' GOMAXPROCS — a run-mechanic, not a perf tune).
 gw_config() {
   local cfg="$GW_DIR/kong.gen.yml"
   echo "# ── kong.gen.yml (rendered DB-less declarative; loaded via KONG_DECLARATIVE_CONFIG) ──"
@@ -193,12 +219,7 @@ gw_config() {
   cat "$cfg"
   echo
   echo "# ── launch env (non-secret) ──"
-  cat <<ENV
-KONG_DATABASE=off
-KONG_ANONYMOUS_REPORTS=off
-KONG_DECLARATIVE_CONFIG=/kong/kong.yml
-KONG_PROXY_LISTEN=0.0.0.0:$GW_PORT
-ENV
+  _kong_env
 }
 
 gw_rss() { container_rss_mib kong-bench; }  # summed process-tree VmRSS (same method as native gateways)

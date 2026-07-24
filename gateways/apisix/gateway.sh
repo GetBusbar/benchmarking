@@ -4,10 +4,12 @@
 #
 # APISIX runs in data-plane/standalone mode (no etcd): routes are read from conf/apisix.yaml. The
 # ai-proxy plugin fronts an OpenAI-shaped route and forwards to the mock via override.endpoint. OOTB
-# config.yaml carries ONLY the DB-less standalone run-mechanic (data_plane role + yaml config_provider)
-# + the port binding; admin API, worker_processes and access logging are all left at APISIX's shipped
-# defaults (enable_admin on / worker_processes auto / enable_access_log on). APISIX_IMAGE pinned in
-# gateways/versions.env.
+# config.yaml carries the DB-less standalone run-mechanic (data_plane role + yaml config_provider)
+# + the port binding + the cpuset worker-process pin; admin API and access logging are left at APISIX's
+# shipped defaults (enable_admin on / enable_access_log on). worker_processes is PINNED to the cpuset
+# core count — nginx `auto` reads the HOST cpu count (blind to --cpuset-cpus) and over-spawns workers on
+# the pinned cores, so we pin it to emulate the real N-core box (same CPU-pinning run-mechanic the Go
+# gateways use with GOMAXPROCS), not left at "auto". APISIX_IMAGE pinned in gateways/versions.env.
 GW_KIND=docker
 # Self-describing manifest metadata — charts.py + the run lists read these, so a gateway
 # is fully defined by its own dir (add/remove a dir → it appears/disappears everywhere).
@@ -27,17 +29,38 @@ gw_version() {
 }
 
 gw_build() {
-  # OOTB config.yaml: ONLY the run-mechanic that lets APISIX run without an external etcd — the DB-less
+  # OOTB config.yaml: the run-mechanic that lets APISIX run without an external etcd — the DB-less
   # standalone data_plane role with the yaml config_provider (routes from conf/apisix.yaml) — plus the
-  # port binding. Everything else is left at APISIX's shipped defaults, honestly:
+  # port binding and the cpuset worker-process pin. Everything else is left at APISIX's shipped
+  # defaults, honestly:
   #   * enable_admin: DEFAULT true (kept) — the Admin API boots fine in DB-less yaml mode with no etcd
   #     (ops.lua skips init_etcd for the data_plane role; admin/init.lua runs its standalone branch and
   #     returns before any etcd sync). The shipped default admin_key satisfies the token check, so no
   #     extra config is needed. Previously we set it false — a gratuitous feature-strip, removed.
-  #   * nginx_config.worker_processes: DEFAULT "auto" (kept) — previously pinned to the core count, a
-  #     perf/concurrency tuning knob; removed so APISIX self-sizes like every fresh install.
+  #   * nginx_config.worker_processes: PINNED to the cpuset core count (0-3 → 4), NOT left at "auto".
+  #     APISIX is nginx/OpenResty, and nginx's `worker_processes auto` reads the HOST cpu count via
+  #     sysconf(_SC_NPROCESSORS_ONLN) — it is BLIND to --cpuset-cpus, so on a 4-core-pinned container
+  #     it spawns 16 workers thrashing 4 cores, a scheduler-contention HANDICAP the Rust gateways
+  #     (tokio available_parallelism respects cpuset) never pay. Pinning to the cpuset count emulates
+  #     the same N-core box every gateway is measured on — the identical CPU-pinning run-mechanic the
+  #     Go gateways use with GOMAXPROCS (and exactly what nginx `auto` WOULD read on a real 4-core
+  #     box). This corrects nginx's cpuset-blindness; it is a run-mechanic, not a perf/concurrency tune.
   #   * nginx_config.http.enable_access_log: DEFAULT true (kept) — previously false, which suppressed
   #     APISIX's default HTTP request/access logging; that logging is on by default and stays on.
+  _apisix_write_config
+  _apisix_write_routes
+  sudo docker pull "$APISIX_IMAGE" >/dev/null 2>&1 || true
+}
+
+# _apisix_write_config: emit APISIX's ONE canonical conf/config.yaml — the DB-less standalone
+# run-mechanic (data_plane role + yaml config_provider), the port binding, and the cpuset
+# worker-process pin. SINGLE SOURCE: rendered here once and called from BOTH gw_build and the
+# gw_config fallback (mirroring _apisix_write_routes), so the two can never drift. worker_processes
+# is pinned to the pinned-core count (ncore, computed exactly as the Go gateways compute it for
+# GOMAXPROCS): nginx `auto` would misread the host's 16 cores under --cpuset-cpus, so this is the
+# CPU-pinning run-mechanic that matches the real N-core box, not a perf tune.
+_apisix_write_config() {
+  local ncore=$(( ${CORES##*-} - ${CORES%%-*} + 1 ))
   cat > "$GW_DIR/config.gen.yaml" <<YAML
 deployment:
   role: data_plane
@@ -46,9 +69,9 @@ deployment:
 apisix:
   node_listen:
     - $GW_PORT
+nginx_config:
+  worker_processes: $ncore
 YAML
-  _apisix_write_routes
-  sudo docker pull "$APISIX_IMAGE" >/dev/null 2>&1 || true
 }
 
 # _apisix_plugcfg <provider> <model>: emit one ai-proxy plugin block for the given provider, correctly
@@ -169,21 +192,16 @@ gw_launch() {
 # (the ai-proxy routes wiring every mock-reachable declared provider). Read from the files gw_build just
 # produced so they can never drift; falls back to rendering them if not present yet. Secrets are dummy:
 # the openai/anthropic routes carry the dummy Bearer key ai-proxy's schema requires, bedrock the dummy
-# AWS SigV4 keys its schema requires — never a live key. OOTB posture: config.yaml carries ONLY the
-# etcd-avoidance run-mechanic (data_plane + yaml config_provider) + port; enable_admin, worker_processes
-# and access_log are all left at their shipped defaults (on/auto/on). No feature strips, no perf tuning.
+# AWS SigV4 keys its schema requires — never a live key. OOTB posture: config.yaml carries the
+# etcd-avoidance run-mechanic (data_plane + yaml config_provider) + port + the cpuset worker-process
+# pin; enable_admin and access_log are left at their shipped defaults (on/on). worker_processes is
+# PINNED to the cpuset core count — NOT left at "auto", which under --cpuset-cpus misreads the host's
+# cores (nginx `auto` = sysconf(_SC_NPROCESSORS_ONLN) = host 16, blind to the cpuset) and over-spawns
+# workers on the pinned cores. That pin is the CPU-pinning run-mechanic emulating the real N-core box
+# every gateway is measured on — the same justification as the Go gateways' GOMAXPROCS. No perf tuning.
 gw_config() {
   local cfg="$GW_DIR/config.gen.yaml" routes="$GW_DIR/apisix.gen.yaml"
-  [ -f "$cfg" ]    || { cat > "$cfg" <<YAML
-deployment:
-  role: data_plane
-  role_data_plane:
-    config_provider: yaml
-apisix:
-  node_listen:
-    - $GW_PORT
-YAML
-  }
+  [ -f "$cfg" ]    || _apisix_write_config
   [ -f "$routes" ] || _apisix_write_routes
   echo "# ── conf/config.yaml (rendered; mounted read-only) ──"
   cat "$cfg"
