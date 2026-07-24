@@ -1096,7 +1096,22 @@ function drawerHtml(g) {
     h += `<p class="muted">not published</p>`;
   }
   h += `</section>`;
+  // ── Download results ──────────────────────────────────────────────────────────────────────────
+  // The downloadable per-gateway artifact IS the matrix result: its full 6x6 cell matrix (with the
+  // per-cell perf + streaming), the one memory read, the OOTB config, and the build/version stamp —
+  // the gateway's COMPLETE record from data.json. Client-side blob, no server (see openDrawer's
+  // [data-results-download] handler). Styled like the config Copy button.
+  h += `<section class="drawer-lane"><h4>Results</h4>` +
+    `<p class="lane-note muted">The gateway's complete record — the full 6×6 matrix (per-cell perf + streaming), the memory read, the OOTB config, and the build stamp.</p>` +
+    `<button type="button" class="results-download" data-results-download title="Download this gateway's full results as JSON">Download results (JSON)</button>` +
+    `</section>`;
   return h;
+}
+
+/* The per-gateway results artifact: the gateway's COMPLETE record from data.json (matrix 6x6 cells +
+   memory + OOTB config + build/version). Returned as pretty JSON for the client-side download. */
+function gatewayResultsJson(g) {
+  return JSON.stringify(g, null, 2);
 }
 
 function openDrawer(key, push = false) {
@@ -1112,6 +1127,19 @@ function openDrawer(key, push = false) {
     copyBtn.addEventListener("click", () => {
       const done = () => { copyBtn.textContent = "Copied"; setTimeout(() => { copyBtn.textContent = "Copy"; }, 1500); };
       if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(g.ootb_config).then(done, () => {});
+    });
+  }
+  // Download the gateway's complete record as <gateway>-results.json (client-side blob, no server).
+  const dlBtn = document.querySelector("#drawer-body [data-results-download]");
+  if (dlBtn) {
+    dlBtn.addEventListener("click", () => {
+      const blob = new Blob([gatewayResultsJson(g)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url; a.download = `${g.key}-results.json`;
+      document.body.appendChild(a); a.click(); a.remove();
+      URL.revokeObjectURL(url);
+      dlBtn.textContent = "Downloaded"; setTimeout(() => { dlBtn.textContent = "Download results (JSON)"; }, 1500);
     });
   }
   const box = document.getElementById("drawer-sweeps");
@@ -1848,7 +1876,7 @@ if (NODE) {
     fmtStamp, fmtAge, stampWithAge,
     drawSweep, niceStep, fmtTick, COLUMN_SETS, columnsFor, PERF_VIEWS, VIEW_SORT, LANES, naText, stripRigPaths,
     cellState, matrixCellTip, cellPerfTip, passCell, xlateCell, streamCell, memCell, hasTranslation, CATEGORIES, DEFAULT_CATEGORY, VIEWS,
-    canonicalPerf, canonicalXlate, canonicalStreaming, canonicalMemory, DEFAULT_VIEW, VIEW_LABELS, rosterRows, fmtStars,
+    canonicalPerf, canonicalXlate, canonicalStreaming, canonicalMemory, gatewayResultsJson, DEFAULT_VIEW, VIEW_LABELS, rosterRows, fmtStars,
     configCorrectionUrl, BENCH_REPO,
     HOME_VIEW, homeCardsHtml,
   };

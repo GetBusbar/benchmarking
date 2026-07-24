@@ -313,6 +313,14 @@ tbody tr { cursor: pointer; }
 }
 .config-block .config-copy:hover { color: var(--fg); border-color: var(--fg-mute); }
 .config-correct { font-size: .74rem; margin: .45rem 0 0; }
+/* Download results button: the config-copy look (font/border/weight) but in normal flow (no <pre> to
+   anchor an absolute button against), so it sits as a plain inline-block control in the Results lane. */
+.results-download {
+  display: inline-block; font: inherit; font-size: .72rem; font-weight: 600; cursor: pointer;
+  color: var(--fg-dim); background: var(--bg-raise); border: 1px solid var(--border);
+  border-radius: 5px; padding: .22rem .6rem;
+}
+.results-download:hover { color: var(--fg); border-color: var(--fg-mute); }
 
 /* sweep charts */
 .sweeps { display: flex; flex-direction: column; gap: .9rem; }

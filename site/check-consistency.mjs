@@ -69,6 +69,35 @@ export function checkConsistency(data, app) {
         }
       }
     }
+    // ---- streaming: the SAME single-source rule as passthrough. The streaming headline shown on the
+    // board (table via streamCell, drawer/compare via canonicalStreaming) MUST be the streaming of the
+    // BEST DIAGONAL matrix cell it is projected from — i.e. the same (ingress==egress) passthrough cell
+    // the perf headline is projected from. If the projected streaming diverges from that cell's own
+    // stream record, the two were read off different sources and this FAILS. Only asserted for a
+    // matrix-sourced projection with a matrix present (a legacy stream-fallback carries no matrix cell
+    // to compare against and is covered by the coverage guard instead).
+    const s = g.streaming;
+    if (s && s.source === "matrix" && g.matrix && g.matrix.upstreams) {
+      const cell = g.matrix.upstreams[s.dialect]?.cells?.[s.dialect];
+      const cellStream = cell && cell.stream;
+      if (!cellStream) {
+        errors.push(`${g.key}.streaming: projected from the ${s.dialect} diagonal but that matrix cell has no stream record`);
+      } else {
+        // table == drawer/compare: both read canonicalStreaming, so compare the table accessor against
+        // the diagonal cell's own numbers to prove the projection did not drift from its source.
+        const skeys = ["added_ttft_p99_us", "added_gap_p99_us", "streams_sustained", "cpu_fps"];
+        for (const key of skeys) {
+          const table = app.streamCell(g, key, String).v;   // n/a -> undefined via .v
+          const headline = s[key] ?? null;
+          const cellVal = cellStream[key] ?? null;
+          const tableVal = table == null ? null : table;
+          if (!(tableVal === headline && headline === cellVal)) {
+            errors.push(`${g.key}.streaming.${key}: table=${tableVal} headline=${headline} diagonal-cell=${cellVal} ` +
+              `(the streaming headline must be the best diagonal cell's streaming it is projected from)`);
+          }
+        }
+      }
+    }
     // ---- ONE SOURCE OF TRUTH (sweep chart vs headline): the published headline MUST be a point on
     // its OWN charted sweep. rps_max_proxy/_concurrency must equal the max-rps point of the charted
     // sweep_max_proxy array (same value AND concurrency), and likewise sustained@20ms vs

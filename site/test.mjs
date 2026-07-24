@@ -620,6 +620,100 @@ test("guard warns on a served matrix cell with no per-cell perf", () => {
   assert.ok(warnings[0].includes("openai->anthropic"), warnings[0]);
 });
 
+// ---- matrix is the single source: streaming + memory projection + download ----------------------
+// A representative diagonal cell's streaming record + a top-level matrix memory read, as matrix/run.sh
+// now emits them. gen-data must project g.streaming (best diagonal cell's stream) + g.memory_read.
+const STREAM_CELL = {
+  stream_served: true, added_ttft_p50_us: 40, added_ttft_p99_us: 90,
+  added_gap_p50_us: 5, added_gap_p99_us: 12, streams_sustained: 1300, streams_sustained_fps: 39000,
+  streams_sustained_mock_bound: false, cpu_fps: 48000, cpu_fps_concurrency: 768, cpu_fps_mock_bound: false,
+};
+function buildStreamMemRepo() {
+  const root = mkdtempSync(join(tmpdir(), "site-strm-"));
+  mkdirSync(join(root, "gateways", "sgw"), { recursive: true });
+  writeFileSync(join(root, "gateways", "sgw", "gateway.sh"),
+    `#!/usr/bin/env bash\nGW_DISPLAY="sgw"\nGW_LANG=Rust\nGW_CLASS="Gateway"\n`);
+  mkdirSync(join(root, "results", "matrix"), { recursive: true });
+  const iso = new Date(Date.now() - 3600000).toISOString();
+  const perf = { added_latency_p50_us: 10, added_latency_p99_us: 20, rps_sustained_20ms: 45000,
+    rps_sustained_20ms_concurrency: 512, rps_max_proxy: 50000, rps_max_proxy_concurrency: 256,
+    sweep_max_proxy: [{ conc: 256, rps: 50000, p99_us: 100, fail: 0 }],
+    sweep_sustained_20ms: [{ conc: 512, rps: 45000, p99_us: 200, fail: 0 }] };
+  const matrix = {
+    gateway: "sgw", build: "ok", matrix_version: 2, served: true, measured_at: iso,
+    memory: { served: true, idle_rss_mib: 120.5, peak_rss_mib: 890.2, peak_rss_hwm_mib: 910, post_load_rss_mib: 300 },
+    upstreams: { openai: { configurable: true, served: true, cells: {
+      openai: { served: true, perf, stream: { ...STREAM_CELL } } } } },
+    cells: { openai: { served: true, perf, stream: { ...STREAM_CELL } } },
+  };
+  writeFileSync(join(root, "results", "matrix", "sgw.json"), JSON.stringify(matrix));
+  return root;
+}
+function genInto(root) {
+  const outDir = mkdtempSync(join(tmpdir(), "site-strm-out-"));
+  try {
+    execFileSync(process.execPath, [join(HERE, "gen-data.mjs"), root, outDir], { stdio: "pipe" });
+    return JSON.parse(readFileSync(join(outDir, "data.json"), "utf8"));
+  } finally {
+    rmSync(outDir, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+test("gen-data projects streaming from the best diagonal matrix cell", () => {
+  const bundle = genInto(buildStreamMemRepo());
+  const g = bundle.gateways.find((x) => x.key === "sgw");
+  assert.ok(g.streaming, "expected a projected g.streaming");
+  assert.equal(g.streaming.source, "matrix");
+  assert.equal(g.streaming.dialect, "openai");
+  assert.equal(g.streaming.added_ttft_p99_us, 90);
+  assert.equal(g.streaming.streams_sustained, 1300);
+  assert.equal(g.streaming.cpu_fps, 48000);
+  // the table accessor reads the same projected value
+  assert.equal(app.streamCell(g, "streams_sustained", String).text, "1300");
+  assert.equal(app.streamCell(g, "cpu_fps", String).text, "48000");
+});
+
+test("gen-data projects memory from the matrix's one process-level read", () => {
+  const bundle = genInto(buildStreamMemRepo());
+  const g = bundle.gateways.find((x) => x.key === "sgw");
+  assert.ok(g.memory_read, "expected a projected g.memory_read");
+  assert.equal(g.memory_read.source, "matrix");
+  assert.equal(g.memory_read.idle_rss_mib, 120.5);
+  assert.equal(g.memory_read.peak_rss_mib, 890.2);
+  assert.equal(app.memCell(g, "peak_rss_mib", String).text, "890.2");
+});
+
+test("streaming guard: headline streaming MUST be the diagonal cell's streaming it's projected from", () => {
+  const cell = { served: true, perf: { added_latency_p99_us: 20 }, stream: { ...STREAM_CELL } };
+  const matrix = { upstreams: { openai: { cells: { openai: cell } } } };
+  // consistent: g.streaming IS the diagonal cell's stream
+  const good = { key: "sg", display: "SG", lang: "Rust",
+    streaming: { dialect: "openai", source: "matrix", ...STREAM_CELL }, matrix };
+  assert.deepEqual(checkConsistency({ gateways: [good] }, app).errors, [],
+    "a streaming headline equal to its diagonal cell must pass");
+  // BROKEN: the projected headline diverges from the cell (streams_sustained tampered)
+  const bad = { key: "bs", display: "BS", lang: "Rust",
+    streaming: { dialect: "openai", source: "matrix", ...STREAM_CELL, streams_sustained: 9999 }, matrix };
+  const eBad = checkConsistency({ gateways: [bad] }, app).errors;
+  assert.ok(eBad.some((e) => e.includes("bs.streaming.streams_sustained") && e.includes("9999")),
+    `guard must flag a streaming headline that is not its diagonal cell's; got: ${JSON.stringify(eBad)}`);
+});
+
+test("download: gatewayResultsJson is the gateway's complete record as parseable JSON", () => {
+  const g = { key: "dgw", display: "DGW", lang: "Rust",
+    matrix: { upstreams: { openai: { cells: { openai: { served: true } } } }, memory: { served: true, idle_rss_mib: 100 } },
+    ootb_config: "port: 8080\n", best_cell: { dialect: "openai", rps_max_proxy: 50000 } };
+  const json = app.gatewayResultsJson(g);
+  const round = JSON.parse(json);   // must be valid JSON
+  assert.equal(round.key, "dgw");
+  assert.ok(round.matrix && round.matrix.upstreams, "the download carries the full matrix (6x6 cells)");
+  assert.ok(round.matrix.memory, "the download carries the memory read");
+  assert.equal(round.ootb_config, "port: 8080\n", "the download carries the OOTB config");
+  // the download filename convention is <gateway>-results.json (asserted at the call site by using g.key)
+  assert.equal(`${g.key}-results.json`, "dgw-results.json");
+});
+
 test("default translation pair has no silent all-n/a served row", () => {
   // The Translation tab's default pair (openai -> anthropic): any gateway that serves it should
   // have per-cell perf, or its row is a table of n/a cells. A gateway whose per-cell sweep never
