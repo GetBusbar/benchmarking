@@ -370,8 +370,10 @@ const LANES = [
     metrics: [
       { k: "added_latency_p50_us", label: "Added latency p50 (µs)", best: "min", fmt: fmtAdded },
       { k: "added_latency_p99_us", label: "Added latency p99 (µs)", best: "min", fmt: fmtAdded },
-      { k: "rps_max_proxy", label: "Max proxy RPS", best: "max", fmt: fmtInt },
-      { k: "rps_sustained_20ms", label: "Sustained RPS @20ms", best: "max", fmt: fmtInt },
+      // The operating concurrency (concKey) is carried by the SAME record; the drawer shows it as
+      // "(@ c=Y)" so the headline surfaces the load level its marked sweep peak sat at.
+      { k: "rps_max_proxy", label: "Max proxy RPS", best: "max", fmt: fmtInt, concKey: "rps_max_proxy_concurrency" },
+      { k: "rps_sustained_20ms", label: "Sustained RPS @20ms", best: "max", fmt: fmtInt, concKey: "rps_sustained_20ms_concurrency" },
     ],
   },
   {
@@ -596,7 +598,9 @@ function drawSweep(canvas, series, opts = {}) {
     ctx.fillText("no sweep data", padL, H / 2);
     return null;
   }
-  const lx = pts.map((p) => Math.log10(p.x));
+  // x-axis domain: honor a shared concurrency domain (opts.xDomain) so stacked charts align on the
+  // SAME x-axis; else fall back to this chart's own probed concurrencies.
+  const lx = (opts.xDomain ? opts.xDomain : pts.map((p) => p.x)).map((v) => Math.log10(v));
   let x0 = Math.min(...lx), x1 = Math.max(...lx);
   if (x0 === x1) { x0 -= 0.3; x1 += 0.3; }
   let yMax = Math.max(...pts.map((p) => p.y)) * 1.06;
@@ -646,6 +650,21 @@ function drawSweep(canvas, series, opts = {}) {
     sp.forEach((p, i) => { if (i === 0) ctx.moveTo(X(p.x), Y(p.y)); else ctx.lineTo(X(p.x), Y(p.y)); });
     ctx.stroke();
     for (const p of sp) { ctx.beginPath(); ctx.arc(X(p.x), Y(p.y), 2.4, 0, Math.PI * 2); ctx.fill(); }
+  }
+  /* published-peak markers: a distinct labeled dot at each series' peak (its headline value at its
+     operating concurrency). It sits ON the curve because the headline is max() over these points. */
+  ctx.font = "11px Inter, sans-serif"; ctx.textAlign = "left"; ctx.textBaseline = "bottom";
+  for (const s of drawable) {
+    if (!s.mark) continue;
+    const px = X(s.mark.x), py = Y(s.mark.y);
+    ctx.strokeStyle = s.color; ctx.fillStyle = s.color; ctx.lineWidth = 1.6;
+    ctx.beginPath(); ctx.arc(px, py, 4.6, 0, Math.PI * 2); ctx.stroke();
+    ctx.beginPath(); ctx.arc(px, py, 2.0, 0, Math.PI * 2); ctx.fill();
+    // keep the label inside the plot: flip left of the dot near the right edge
+    const label = s.mark.label;
+    const wide = (ctx.measureText ? ctx.measureText(label).width : label.length * 6) + 10;
+    const lx0 = px + 7 + wide > W - padR ? px - 7 - wide : px + 7;
+    ctx.fillText(label, lx0, py - 6);
   }
   /* legend, top-right */
   if (opts.legend !== false && drawable.length > 1) {
@@ -700,10 +719,20 @@ function renderSweepCharts(container, sweepSeries, theme) {
     `<figure class="sweep"><figcaption>RPS vs concurrency</figcaption><canvas width="520" height="230"></canvas></figure>` +
     `<figure class="sweep"><figcaption>p99 latency vs concurrency (µs)</figcaption><canvas width="520" height="230"></canvas></figure>`;
   const [c1, c2] = container.querySelectorAll("canvas");
-  const rps = usable.map((s) => ({ label: s.label, color: s.color, points: s.sweep.map((p) => ({ x: p.conc, y: p.rps })) }));
+  // Mark the PUBLISHED peak on the RPS curve: a labeled dot at (peak.conc, peak.rps). By construction
+  // that point is one of the probed sweep points (the headline is max() over this same array), so the
+  // marker lands ON the curve and names the operating concurrency.
+  const rps = usable.map((s) => ({ label: s.label, color: s.color,
+    points: s.sweep.map((p) => ({ x: p.conc, y: p.rps })),
+    mark: s.peak && s.peak.rps > 0 && s.peak.conc != null
+      ? { x: s.peak.conc, y: s.peak.rps, label: `${fmtInt(s.peak.rps)} @ c=${fmtInt(s.peak.conc)}` } : null }));
   const p99 = usable.map((s) => ({ label: s.label, color: s.color, points: s.sweep.map((p) => ({ x: p.conc, y: p.p99_us })) }));
-  const o1 = { yLabel: "RPS", unit: "rps", ...theme };
-  const o2 = { yLabel: "p99 (µs)", unit: "µs p99", ...theme };
+  // SAME x-axis: both charts share ONE concurrency domain (min..max across BOTH series) so they stack
+  // and align vertically. Compute it from every probed concurrency on either chart.
+  const allX = [...rps, ...p99].flatMap((s) => s.points.map((p) => p.x));
+  const xDomain = allX.length ? [Math.min(...allX), Math.max(...allX)] : null;
+  const o1 = { yLabel: "RPS", unit: "rps", xDomain, ...theme };
+  const o2 = { yLabel: "p99 (µs)", unit: "µs p99", xDomain, ...theme };
   drawSweep(c1, rps, o1); attachSweepHover(c1, rps, o1);
   drawSweep(c2, p99, o2); attachSweepHover(c2, p99, o2);
 }
@@ -959,8 +988,10 @@ function drawerHtml(g) {
     }
     else {
       if (l.pathNote) h += `<p class="lane-note muted">${esc(l.pathNote(j))}</p>`;
-      h += `<dl>` + l.metrics.filter((m) => j[m.k] != null).map((m) =>
-        `<div><dt>${esc(m.label)}</dt><dd>${esc(m.fmt(j[m.k]))}</dd></div>`).join("") + `</dl>${laneStamp(j)}`;
+      h += `<dl>` + l.metrics.filter((m) => j[m.k] != null).map((m) => {
+        const cc = m.concKey && j[m.concKey] != null && j[m.k] > 0 ? ` (@ c=${fmtInt(j[m.concKey])})` : "";
+        return `<div><dt>${esc(m.label)}</dt><dd>${esc(m.fmt(j[m.k]) + cc)}</dd></div>`;
+      }).join("") + `</dl>${laneStamp(j)}`;
     }
     h += `</section>`;
   }
@@ -983,7 +1014,7 @@ function drawerHtml(g) {
   h += `</section>`;
 
   h += `<section class="drawer-lane"><h4>Throughput sweeps</h4>` +
-    `<p class="lane-note muted">Sweep curves are measured on the perf-suite default path, not the matrix per-cell sweep; the headline numbers above are the canonical record.</p>` +
+    `<p class="lane-note muted">Every point is a real probe; the search sweeps then bisects to the peak; the marked dot is the published number at its operating concurrency. The headline numbers above are that same marked peak.</p>` +
     `<div id="drawer-sweeps" class="sweeps"></div></section>`;
 
   /* OOTB config artifact: the exact as-shipped default config this gateway ran from (pointed at the
@@ -1022,10 +1053,16 @@ function openDrawer(key, push = false) {
     });
   }
   const box = document.getElementById("drawer-sweeps");
+  // ONE source of truth: the drawer curve reads the SAME canonical record the headline rows read
+  // (best_cell via canonicalPerf), so the marked peak on the curve IS the published rps_max_proxy /
+  // rps_sustained_20ms at its operating concurrency - never a separate perf-suite run.
+  const perf = canonicalPerf(g);
   const series = [];
-  if (g.perf && g.perf.served !== false) {
-    series.push({ label: "sustained @20ms", color: "#4cc38a", sweep: g.perf.sweep_sustained_20ms });
-    series.push({ label: "max proxy", color: "#6cb6ff", sweep: g.perf.sweep_max_proxy });
+  if (perf && perf.served !== false) {
+    series.push({ label: "sustained @20ms", color: "#4cc38a", sweep: perf.sweep_sustained_20ms,
+      peak: { rps: perf.rps_sustained_20ms, conc: perf.rps_sustained_20ms_concurrency } });
+    series.push({ label: "max proxy", color: "#6cb6ff", sweep: perf.sweep_max_proxy,
+      peak: { rps: perf.rps_max_proxy, conc: perf.rps_max_proxy_concurrency } });
   }
   renderSweepCharts(box, series, chartTheme());
   syncUrl(push);
@@ -1127,14 +1164,21 @@ function renderCompare() {
     }
   }
   h += `</tbody></table></div>`;
-  h += `<p class="fineprint">Best value per row is highlighted, decided by the measurement (lower latency and memory, higher throughput). Sweep overlays below use the sustained @20ms sweep, measured on the perf-suite default path (not the matrix per-cell sweep the headline rows read).</p>`;
+  h += `<p class="fineprint">Best value per row is highlighted, decided by the measurement (lower latency and memory, higher throughput). Sweep overlays below use the sustained @20ms sweep read off the SAME canonical record as the headline rows; every point is a real probe and the marked dot is the published number at its operating concurrency.</p>`;
   h += `<div id="cmp-sweeps" class="sweeps"></div>`;
   document.getElementById("compare-body").innerHTML = h;
 
-  const series = gws.map((g, i) => ({
-    label: g.display, color: CMP_COLORS[i],
-    sweep: g.perf && g.perf.served !== false ? g.perf.sweep_sustained_20ms : null,
-  }));
+  const series = gws.map((g, i) => {
+    // Same canonical record as the headline rows (best_cell via canonicalPerf), so the marked peak
+    // is the published sustained@20ms at its operating concurrency - not a separate perf-suite run.
+    const perf = canonicalPerf(g);
+    return {
+      label: g.display, color: CMP_COLORS[i],
+      sweep: perf && perf.served !== false ? perf.sweep_sustained_20ms : null,
+      peak: perf && perf.served !== false
+        ? { rps: perf.rps_sustained_20ms, conc: perf.rps_sustained_20ms_concurrency } : null,
+    };
+  });
   renderSweepCharts(document.getElementById("cmp-sweeps"), series, chartTheme());
 }
 function closeCompare(sync = true) {

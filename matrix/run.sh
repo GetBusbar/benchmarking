@@ -451,9 +451,13 @@ matrix_cell_perf(){
   mock_start_plain
   sweep_c1
   run_sweep 0 "$SWEEP_INSTANT" peak
-  local prps=$SW_CEIL_RPS pbound=$SW_BOUND
+  # ONE source of truth: the charted array (SW_JSON, every ramp AND bisect probe this sweep made)
+  # and the headline (SW_CEIL_RPS/SW_CEIL_CONC = max gate-passing point in THAT SAME array) come out
+  # of the single run_sweep call. Carry BOTH into the cell so the drawer's headline is, by
+  # construction, one of the points on its own sweep curve - never a separate perf-suite measurement.
+  local prps=$SW_CEIL_RPS pconc=$SW_CEIL_CONC pbound=$SW_BOUND pjson="$SW_JSON"
   run_sweep "$SWEEP_TTFT_MS" "$SWEEP_DELAYED" peak
-  local lrps=$SW_CEIL_RPS lbound=$SW_BOUND
+  local lrps=$SW_CEIL_RPS lconc=$SW_CEIL_CONC lbound=$SW_BOUND ljson="$SW_JSON"
   SWEEP_BODY=""; UGEN_H=(); SWEEP_CACHE_KEY=""
   mock_start_record
   # The sweep restarted the mock, so the gateway's upstream connection pool may hold dead sockets.
@@ -521,7 +525,7 @@ matrix_cell_perf(){
     lat50=null; lat99=null; g99=null; d99=null
     c1note=", \"c1_note\": \"$(json_escape "$C1_ERR")\""
   fi
-  CELL_PERF_JSON=", \"perf\": {\"added_latency_p50_us\": $lat50, \"added_latency_p99_us\": $lat99, \"gateway_c1_p99_us\": $g99, \"direct_c1_p99_us\": $d99, \"rps_sustained_20ms\": $lrps, \"rps_sustained_20ms_mock_bound\": $lbound, \"rps_max_proxy\": $prps, \"rps_max_proxy_mock_bound\": $pbound, \"egress_reverified\": $reverified${reverify_note:+, \"reverify_note\": \"$(json_escape "$reverify_note")\"}$c1note}"
+  CELL_PERF_JSON=", \"perf\": {\"added_latency_p50_us\": $lat50, \"added_latency_p99_us\": $lat99, \"gateway_c1_p99_us\": $g99, \"direct_c1_p99_us\": $d99, \"rps_sustained_20ms\": $lrps, \"rps_sustained_20ms_concurrency\": $lconc, \"rps_sustained_20ms_mock_bound\": $lbound, \"rps_max_proxy\": $prps, \"rps_max_proxy_concurrency\": $pconc, \"rps_max_proxy_mock_bound\": $pbound, \"sweep_max_proxy\": [$pjson], \"sweep_sustained_20ms\": [$ljson], \"egress_reverified\": $reverified${reverify_note:+, \"reverify_note\": \"$(json_escape "$reverify_note")\"}$c1note}"
   log "[$GATEWAY]   $egress <- $cell : perf added_p99=${lat99}us sustained@${SWEEP_TTFT_MS}ms=${lrps}rps max_proxy=${prps}rps (leg-3 re-verified)"
 }
 

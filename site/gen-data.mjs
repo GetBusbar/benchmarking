@@ -130,6 +130,12 @@ const gateways = gatewayKeys.map((key) => {
       rps_sustained_20ms: g.perf.rps_sustained_20ms,
       rps_sustained_20ms_concurrency: g.perf.rps_sustained_20ms_concurrency ?? null,
       rps_max_proxy: g.perf.rps_max_proxy,
+      rps_max_proxy_concurrency: g.perf.rps_max_proxy_concurrency ?? null,
+      // The charted sweep arrays travel WITH the headline so the drawer curve and the headline are
+      // read off the SAME record (best_cell): the marked peak on the curve IS rps_max_proxy /
+      // rps_sustained_20ms. The perf suite emits the same array shape run_sweep produced.
+      sweep_max_proxy: g.perf.sweep_max_proxy ?? null,
+      sweep_sustained_20ms: g.perf.sweep_sustained_20ms ?? null,
       build: g.perf.build ?? null, measured_at: g.perf.measured_at ?? null,
     };
   }

@@ -513,6 +513,50 @@ test("guard catches a null best_cell field masking a non-null perf fallback (R5-
     `guard must flag the null-field/non-null-perf divergence; got: ${JSON.stringify(errors)}`);
 });
 
+test("guard: the published headline MUST be a point on its own charted sweep (one source of truth)", () => {
+  // The two-sources bug: the drawer headline (rps_max_proxy) and the sweep chart's peak came from
+  // DIFFERENT code paths, so the headline was never a point on its own curve. The guard now asserts
+  // the headline == max() of the charted sweep_* array (value AND concurrency).
+  const sweep = [
+    { conc: 32, rps: 45061, p99_us: 700000, fail: 0 },
+    { conc: 52, rps: 45995, p99_us: 720000, fail: 0 },
+    { conc: 64, rps: 45787, p99_us: 740000, fail: 0 },
+    { conc: 256, rps: 39747, p99_us: 900000, fail: 0 },
+  ];
+  const base = {
+    ingress: "openai", egress: "openai", dialect: "openai", source: "matrix",
+    added_latency_p99_us: 111,
+    rps_sustained_20ms: 35616, rps_sustained_20ms_concurrency: 832,
+    rps_max_proxy: 45995, rps_max_proxy_concurrency: 52,
+    sweep_max_proxy: sweep,
+    sweep_sustained_20ms: [{ conc: 832, rps: 35616, p99_us: 990000, fail: 0 }],
+  };
+  // consistent: headline 45995 @ c=52 is exactly the max point of sweep_max_proxy
+  const good = { key: "onesrc", display: "OneSrc", lang: "Rust", best_cell: base };
+  assert.deepEqual(checkConsistency({ gateways: [good] }, app).errors, [],
+    "a headline that IS the charted peak must pass");
+
+  // BROKEN VALUE (the live-data bug): headline 46497 but the curve peaks at 45995 -> FAIL
+  const badVal = { key: "badval", display: "BadVal", lang: "Rust",
+    best_cell: { ...base, rps_max_proxy: 46497 } };
+  const eVal = checkConsistency({ gateways: [badVal] }, app).errors;
+  assert.ok(eVal.some((e) => e.includes("badval.rps_max_proxy") && e.includes("46497") && e.includes("45995")),
+    `guard must flag a headline that is not on its own sweep curve; got: ${JSON.stringify(eVal)}`);
+
+  // BROKEN CONCURRENCY: right value, wrong operating concurrency vs the charted peak -> FAIL
+  const badConc = { key: "badconc", display: "BadConc", lang: "Rust",
+    best_cell: { ...base, rps_max_proxy_concurrency: 999 } };
+  const eConc = checkConsistency({ gateways: [badConc] }, app).errors;
+  assert.ok(eConc.some((e) => e.includes("badconc.rps_max_proxy") && e.includes("concurrency")),
+    `guard must flag a headline concurrency that does not match the charted peak; got: ${JSON.stringify(eConc)}`);
+
+  // legacy record with NO charted array: silently skipped (no false positive)
+  const legacy = { key: "legacy", display: "Legacy", lang: "Rust",
+    best_cell: { dialect: "openai", source: "matrix", rps_max_proxy: 12345, rps_sustained_20ms: 6789 } };
+  assert.deepEqual(checkConsistency({ gateways: [legacy] }, app).errors, [],
+    "a record with no charted sweep array must not trip the one-source guard");
+});
+
 test("divergent translation_cell vs xlate suite: drawer/compare read the matrix cell", () => {
   const g = {
     key: "xdiv", display: "XDiv", lang: "Go",
@@ -706,6 +750,24 @@ test("sweep chart draws real committed sweep data", () => {
   // log-x: pixel spacing between 8 and 32 equals spacing between 32 and 128
   const d1 = geo.X(32) - geo.X(8), d2 = geo.X(128) - geo.X(32);
   assert.ok(Math.abs(d1 - d2) < 1e-6, "x axis is logarithmic");
+});
+
+test("sweep chart marks the published peak and honors a shared x-domain", () => {
+  const canvas = stubCanvas();
+  const series = [{
+    label: "max proxy", color: "#6cb6ff",
+    points: [{ x: 32, y: 45061 }, { x: 52, y: 45995 }, { x: 256, y: 39747 }],
+    mark: { x: 52, y: 45995, label: "45,995 @ c=52" },
+  }];
+  // shared x-domain wider than this series' own probed range: X() must span the shared domain, so
+  // the two stacked charts (RPS + p99) align on ONE concurrency axis.
+  const geo = app.drawSweep(canvas, series, { yLabel: "RPS", xDomain: [8, 2048] });
+  assert.ok(geo, "geometry back");
+  // the shared domain sets the axis extremes (log scale): X(8) is the left edge, X(2048) the right
+  assert.ok(geo.X(2048) - geo.X(8) > geo.X(256) - geo.X(32), "axis spans the shared domain, not just the points");
+  // a peak marker was drawn (extra arc strokes + a label beyond the plain point dots + ticks)
+  assert.ok(canvas.calls.arc >= series[0].points.length + 2, "peak marker ring + dot drawn on top of the point dots");
+  assert.ok(canvas.calls.fillText > 4, "peak label + axis text drawn");
 });
 
 test("sweep chart degrades cleanly with no data", () => {

@@ -69,6 +69,35 @@ export function checkConsistency(data, app) {
         }
       }
     }
+    // ---- ONE SOURCE OF TRUTH (sweep chart vs headline): the published headline MUST be a point on
+    // its OWN charted sweep. rps_max_proxy/_concurrency must equal the max-rps point of the charted
+    // sweep_max_proxy array (same value AND concurrency), and likewise sustained@20ms vs
+    // sweep_sustained_20ms. If the headline is measured by one code path and the curve by another,
+    // the max of the curve won't match the headline and this FAILS - exactly the two-sources bug.
+    // Only asserted when the canonical record carries the sweep array (a regenerated bundle); a legacy
+    // bundle with no array is silently skipped (the coverage/other guards cover its provenance).
+    const canon = app.canonicalPerf(g);
+    if (canon && canon.served !== false) {
+      const pairs = [
+        ["rps_max_proxy", "rps_max_proxy_concurrency", "sweep_max_proxy"],
+        ["rps_sustained_20ms", "rps_sustained_20ms_concurrency", "sweep_sustained_20ms"],
+      ];
+      for (const [rk, ck, ak] of pairs) {
+        const arr = canon[ak];
+        if (!Array.isArray(arr) || !arr.length) continue; // legacy / no charted array: skip
+        const head = canon[rk];
+        if (head == null) continue;
+        // The max-rps point of the charted array is what the curve peaks at. The headline must BE it.
+        const peak = arr.reduce((a, b) => (b.rps > a.rps ? b : a));
+        if (peak.rps !== head) {
+          errors.push(`${g.key}.${rk}: headline=${head} but charted ${ak} peaks at ${peak.rps} ` +
+            `(@ conc=${peak.conc}); the published number must be a point on its own sweep curve`);
+        } else if (canon[ck] != null && peak.conc !== canon[ck]) {
+          errors.push(`${g.key}.${rk}: headline concurrency=${canon[ck]} but the charted peak of ${ak} ` +
+            `is at conc=${peak.conc}; the marked operating concurrency must match the headline`);
+        }
+      }
+    }
     // ---- plausibility (WARN only, R7): two independent measured ceilings may invert on noise.
     // DISTINCT case (H4): max-proxy === 0 means the ceiling run found NO tested load that held
     // p99 < 1 s at <0.1% errors, i.e. that run did not qualify at all. That is NOT sweep noise
