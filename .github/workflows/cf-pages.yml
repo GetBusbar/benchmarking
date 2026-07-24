@@ -54,6 +54,13 @@ jobs:
       # site/charts/ and re-stamps data.json; both artifacts come from the one results tree in
       # this same checkout, so they can never diverge. The consistency guard (site/test.mjs)
       # fails the deploy if any surface would resolve a metric to a different value.
+      # Stars are refreshed AT BUILD TIME so the deployed board is exact at publish (Matthew's
+      # rule: 100% at time of build). On any API failure the committed snapshot stays - the
+      # script throws BEFORE writing, so a rate-limited build deploys the last-good counts.
+      - name: Refresh star snapshot (live at build; committed snapshot is the fallback)
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node gateways/fetch-stars.mjs || echo "stars refresh failed; deploying the committed snapshot"
       - name: Generate canonical site data
         run: node site/gen-data.mjs
       - name: Regenerate charts from the canonical data

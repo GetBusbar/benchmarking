@@ -64,7 +64,7 @@ GW_MATRIX_EGRESS="openai openai-responses anthropic gemini cohere bedrock"
 _busbar_run() { # mock-key
   sudo docker rm -f busbar-bench >/dev/null 2>&1; sleep 1
   sudo docker run -d --name busbar-bench --network host --cpuset-cpus="$CORES" \
-    -e BUSBAR_WORKER_THREADS="$(( ${CORES##*-} + 1 ))" \
+    -e BUSBAR_WORKER_THREADS="$(( ${CORES##*-} - ${CORES%%-*} + 1 ))" \
     -e BUSBAR_STATE_FILE= \
     -e BENCH_MOCK_KEY="$1" \
     -v "$GW_DIR/config.gen.yaml:/etc/busbar/config.yaml:ro" \
