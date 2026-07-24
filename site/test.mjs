@@ -612,6 +612,22 @@ test("a grey (not_configurable) cell tooltip shows the gateway's cited reason", 
   assert.ok(bare.includes("not in the capability grid we drafted"));
 });
 
+test("probe-first: a not_configured cell renders grey with the probe evidence, never a red", () => {
+  // state class: same visual bucket as the legacy declaration-grey, its own honest label
+  assert.equal(app.cellState({ served: "not_configured", reason: "probe_failed" })[0], "notconf");
+  assert.equal(app.cellState({ served: "not_configured", reason: "probe_failed" })[1], "not configured");
+  // tooltip leads with "not configured" and carries the probe's own evidence (probe_note)
+  const ev = "probe failed: HTTP 404; upstream request landed on the openai endpoint, not the gemini endpoint";
+  const tip = app.matrixCellTip({ served: "not_configured", reason: "probe_failed", probe_note: ev });
+  assert.ok(tip.startsWith("not configured"), "leads with the state, not a failure verdict");
+  assert.ok(tip.includes(ev), "carries the probe evidence");
+  // no probe_note (defensive): fall back to the verdict prose, still never a bare grey
+  const tip2 = app.matrixCellTip({ served: "not_configured", verdict_note: "HTTP 404 on POST /v2/chat" });
+  assert.ok(tip2.includes("HTTP 404 on POST /v2/chat"));
+  // and it is NEVER counted or shown as a failure
+  assert.notEqual(app.cellState({ served: "not_configured" })[0], "failed");
+});
+
 test("gen-data preserves the per-cell verdict_note reason for grey cells", () => {
   const withGrey = data.gateways.find((g) =>
     g.matrix && g.matrix.upstreams &&
