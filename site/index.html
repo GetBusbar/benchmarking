@@ -155,61 +155,82 @@
       <li><b>A gateway is its own directory.</b> A one-file manifest declares how to build, launch and probe it; add or remove a directory and it appears or disappears everywhere.</li>
     </ul>
 
+    <h3 class="method-section-head">What each suite measures</h3>
+    <p class="method-section-sub">Four measurement suites, one per dimension. Each runs the same way for every gateway and writes its own committed JSON.</p>
     <div class="method-grid" id="method-grid">
       <article class="method-card">
-        <h3><a id="lnk-perf" target="_blank" rel="noopener">perf/run.sh</a> Latency and throughput</h3>
+        <span class="card-kicker"><a id="lnk-perf" target="_blank" rel="noopener">perf/run.sh</a></span>
+        <h3>Latency and throughput</h3>
         <ul>
-          <li><b>Added latency (p50/p99, microseconds)</b>: at concurrency 1, gateway p99 minus direct-to-mock p99, small payloads.</li>
-          <li><b>Max proxy RPS</b>: highest requests per second against an instant mock, found by a <b>peak search</b> — concurrency ramps (bidirectionally) until RPS stops rising, then a unimodal refinement locates the true peak — subject to p99 &lt; 1000 ms and error rate &lt; 0.1%. This replaces a fixed concurrency grid, which could miss a peak sitting between rungs and understate the fastest gateways. The winning concurrency is recorded alongside the RPS figure.</li>
-          <li><b>Sustained RPS at 20 ms</b>: the same peak-search method and the same gates (p99 &lt; 1000 ms, &lt; 0.1% errors), but the mock sleeps 20 ms per request to model real LLM latency, so the ceiling is concurrent-in-flight capacity — the real production bottleneck. At a 20 ms mock delay, Little's law bounds throughput (RPS ≤ concurrency ÷ 0.020 s), so the peak typically sits at much higher concurrency than the instant-mock sweep; the bidirectional ramp finds it regardless of which direction it lies from the search start. The winning concurrency is shown in the cell tooltip.</li>
-          <li><b>File-descriptor fairness.</b> Containerised gateways run with the Docker daemon's <code>nofile</code> limit raised to 1 048 576, matching the limit native gateways and the load generator already have. Without this fix, a fast containerised gateway would hit the kernel's default socket limit (~1024 open files) mid-sweep and collapse — understating its true throughput. This is applied uniformly; no gateway is singled out.</li>
-          <li>The <b>Peak</b> tab shows these metrics on each gateway's best same-dialect path (pure forwarding, no translation); the Tested-on pill names the dialect (OpenAI when served, else the gateway's fastest native one). Best-of, so every gateway appears on its strongest path and none is filtered out — the ceiling each gateway can post. For a strict, identical-path comparison, use the <b>Matched</b> tab.</li>
+          <li><b>Added latency (p50/p99, microseconds).</b> At concurrency 1, gateway p99 minus direct-to-mock p99, on small payloads.</li>
+          <li><b>Max proxy RPS.</b> Highest requests per second against an instant mock, subject to p99 &lt; 1000 ms and error rate &lt; 0.1%.
+            <ul>
+              <li>Found by a <b>peak search</b>: concurrency ramps bidirectionally until RPS stops rising, then a unimodal refinement locates the true peak. A fixed concurrency grid could miss a peak sitting between rungs and understate the fastest gateways.</li>
+              <li>The winning concurrency is recorded alongside the RPS figure.</li>
+            </ul>
+          </li>
+          <li><b>Sustained RPS at 20 ms.</b> The same peak-search method and gates (p99 &lt; 1000 ms, &lt; 0.1% errors), but the mock sleeps 20 ms per request to model real LLM latency. The ceiling becomes concurrent-in-flight capacity — the real production bottleneck.
+            <ul>
+              <li>At a 20 ms delay, Little's law bounds throughput (RPS &le; concurrency &divide; 0.020 s), so the peak sits at much higher concurrency than the instant-mock sweep. The bidirectional ramp finds it either way. Winning concurrency shows in the cell tooltip.</li>
+            </ul>
+          </li>
+          <li><b>File-descriptor fairness.</b> Containerised gateways run with the Docker daemon's <code>nofile</code> limit raised to 1 048 576, matching what native gateways and the load generator already have. Without it, a fast containerised gateway would hit the kernel's default ~1024-socket limit mid-sweep and collapse, understating its throughput. Applied uniformly; no gateway is singled out.</li>
+          <li><b>Which path.</b> The <b>Peak</b> tab shows these metrics on each gateway's best same-dialect path (pure forwarding, no translation); the Tested-on pill names the dialect (OpenAI when served, else the gateway's fastest native one). Best-of, so every gateway appears on its strongest path — the ceiling it can post. For a strict identical-path comparison, use the <b>Matched</b> tab.</li>
         </ul>
       </article>
       <article class="method-card">
-        <h3><a id="lnk-memory" target="_blank" rel="noopener">memory/run.sh</a> Memory</h3>
+        <span class="card-kicker"><a id="lnk-memory" target="_blank" rel="noopener">memory/run.sh</a></span>
+        <h3>Memory</h3>
         <ul>
-          <li><b>Idle RSS</b>: process resident set after launch, before load.</li>
-          <li><b>Peak RSS</b>: maximum resident set while sustaining large-payload load at high concurrency.</li>
+          <li><b>Idle RSS.</b> Process resident set after launch, before load.</li>
+          <li><b>Peak RSS.</b> Maximum resident set while sustaining large-payload load at high concurrency.</li>
         </ul>
       </article>
       <article class="method-card">
-        <h3><a id="lnk-stream" target="_blank" rel="noopener">stream/run.sh</a> Streaming</h3>
+        <span class="card-kicker"><a id="lnk-stream" target="_blank" rel="noopener">stream/run.sh</a></span>
+        <h3>Streaming</h3>
         <ul>
-          <li>The mock answers stream:true with a paced SSE stream; the suite measures what the gateway adds on top of that pace.</li>
-          <li>The mock's <em>first</em> token is instant (it then paces later tokens), so the first-token figure deliberately includes the gateway's first-write network behaviour, not just its compute. Against a real model, whose own first token takes hundreds of milliseconds, that component is largely hidden; here it is exposed on purpose. A benchmark whose mock waits before its first token, or that times the first SSE event of any kind rather than the first content token, will report a near-zero first-token overhead by construction.</li>
-          <li><b>Added wait for the first token (p99)</b>, also called TTFT (time to first token): gateway first-content-frame time minus direct-to-mock, at concurrency 1.</li>
-          <li><b>Added gap between tokens (p99)</b>: gateway content-frame gap minus direct-to-mock gap.</li>
-          <li><b>Streams sustained</b>: max concurrent streams where at least 99.9 percent of expected frames deliver, no stream stalls beyond twice the pacing interval, and the stream error rate stays under 0.1 percent.</li>
-          <li>A gateway that answers 200 but buffers the whole response is recorded stream_served=false: measured, not hidden.</li>
+          <li>The mock answers <code>stream:true</code> with a paced SSE stream; the suite measures what the gateway adds on top of that pace.</li>
+          <li><b>Added wait for the first token (p99)</b> — TTFT, time to first token: gateway first-content-frame time minus direct-to-mock, at concurrency 1.</li>
+          <li><b>Added gap between tokens (p99).</b> Gateway content-frame gap minus direct-to-mock gap.</li>
+          <li><b>Streams sustained.</b> Max concurrent streams where &ge; 99.9% of expected frames deliver, no stall exceeds twice the pacing interval, and the stream error rate stays under 0.1%.</li>
+          <li><b>First token is deliberately exposed.</b> The mock's first token is instant (it paces only later tokens), so the first-token figure includes the gateway's first-write network behaviour, not just its compute. Against a real model, whose own first token takes hundreds of milliseconds, that component is largely hidden; here it is surfaced on purpose. A benchmark whose mock waits before its first token — or that times the first SSE event of any kind rather than the first content token — reports a near-zero first-token overhead by construction.</li>
+          <li>A gateway that answers 200 but buffers the whole response is recorded <code>stream_served=false</code>: measured, not hidden.</li>
         </ul>
       </article>
       <article class="method-card">
-        <h3><a id="lnk-xlate" target="_blank" rel="noopener">xlate/run.sh</a> Translation</h3>
+        <span class="card-kicker"><a id="lnk-xlate" target="_blank" rel="noopener">xlate/run.sh</a></span>
+        <h3>Translation</h3>
         <ul>
-          <li>The client speaks Anthropic (POST /v1/messages) while the upstream mock speaks OpenAI, so the gateway must translate both directions. The mock is untouched; that is the point.</li>
+          <li>The client speaks Anthropic (<code>POST /v1/messages</code>) while the upstream mock speaks OpenAI, so the gateway must translate both directions. The mock is untouched; that is the point.</li>
           <li><b>Added latency (p99)</b> and <b>sustained RPS at 20 ms</b> on the translation path, same gates as perf. The direct baseline is the OpenAI shape straight to the mock, so the added-latency figure deliberately includes the translation work.</li>
-          <li>The <b>Matched</b> tab pins both ends with a pair of dropdowns (client dialect and upstream dialect), so every row is the identical path and the ranking is apples-to-apples; only gateways that serve the chosen pair appear. Pick the same dialect on both sides and it becomes that dialect's strict passthrough.</li>
-          <li>A gateway that cannot serve Anthropic ingress against an OpenAI upstream records xlate_served=false with the probe status and body snippet as evidence.</li>
-          <li>Headline translation numbers (table, drawer, compare, charts) all come from one canonical record per gateway: the matrix per-cell sweep's OpenAI-in cell. This suite's Anthropic-to-OpenAI numbers are the fallback for a gateway with no measured matrix translation cell, and every surface labels the direction it shows.</li>
+          <li><b>The Matched tab pins both ends</b> with a pair of dropdowns (client dialect, upstream dialect), so every row is the identical path and the ranking is apples-to-apples; only gateways that serve the chosen pair appear. Pick the same dialect on both sides and it becomes that dialect's strict passthrough.</li>
+          <li><b>Headline numbers have one source.</b> The table, drawer, compare and charts all read one canonical record per gateway: the matrix per-cell sweep's OpenAI-in cell. This suite's Anthropic-to-OpenAI numbers are the fallback for a gateway with no measured matrix translation cell, and every surface labels the direction it shows.</li>
+          <li>A gateway that cannot serve Anthropic ingress against an OpenAI upstream records <code>xlate_served=false</code> with the probe status and body snippet as evidence.</li>
+        </ul>
+      </article>
+    </div>
+
+    <h3 class="method-section-head">Capability grid</h3>
+    <p class="method-section-sub">One probe per protocol pairing, feeding the per-cell perf the other tabs read.</p>
+    <div class="method-grid">
+      <article class="method-card">
+        <span class="card-kicker"><a id="lnk-matrix" target="_blank" rel="noopener">matrix/run.sh</a></span>
+        <h3>Protocol matrix</h3>
+        <ul>
+          <li><b>A capability suite first.</b> One probe per (ingress, upstream) cell across the full 6&times;6 — OpenAI, OpenAI Responses, Anthropic, Gemini, Cohere, Bedrock Converse — relaunching the gateway per upstream dialect.</li>
+          <li><b>Each cell is validated four ways:</b> envelope validation; a passthrough guard that rejects the mock's canned bodies as untranslated proxying; an upstream round-trip check (the mock records which endpoint the gateway actually called); and an <code>unprobed_auth</code> state for ingresses that demand signatures the harness does not forge.</li>
+          <li><b>Per-cell perf.</b> Every passing (green) cell also gets the perf suite's exact sweep on that path — added latency at concurrency 1, sustained RPS at 20 ms, max proxy RPS. The Peak and Matched tabs read specific cells from this sweep; hovering any green cell shows that path's numbers and its RPS delta versus the gateway's reference cell (named, never called "best").</li>
         </ul>
       </article>
       <article class="method-card">
         <h3>Why we measure <code>/v1</code>, not passthrough endpoints</h3>
         <ul>
-          <li>Some gateways expose a separate <b>passthrough</b> route — a provider-specific endpoint that forwards your request to one named upstream and skips the gateway's protocol translation. It is faster, but it is a different thing than what most integrations use.</li>
           <li><b>We measure the unified OpenAI-compatible route</b> — the endpoint a stock SDK points at — for every gateway, on the same terms.</li>
-          <li><b>It is the path people actually take.</b> Using a passthrough route means changing your code and hard-coding which provider you are calling. The unified endpoint is the "point your SDK here and go" experience these gateways are built to sell.</li>
-          <li><b>Not every gateway has one.</b> A passthrough column would compare a special route on some gateways against the normal route on others — apples to oranges.</li>
-          <li><b>It's pinned to one provider.</b> A passthrough route is named after a single provider — the provider is part of the URL path — so calls on it go to that one provider and bypass the cross-provider routing and failover the gateway offers on its unified endpoint. Measuring it would rank a single-provider forward against the multi-provider route people actually deploy.</li>
-        </ul>
-      </article>
-      <article class="method-card">
-        <h3><a id="lnk-matrix" target="_blank" rel="noopener">matrix/run.sh</a> Protocol matrix</h3>
-        <ul>
-          <li>A capability suite first: one probe per (ingress, upstream) cell across the full 6x6 (OpenAI, OpenAI Responses, Anthropic, Gemini, Cohere, Bedrock Converse), relaunching the gateway per upstream dialect.</li>
-          <li>Envelope validation per cell, a passthrough guard that rejects the mock's canned bodies as untranslated proxying, an upstream round-trip check (the mock records which endpoint the gateway actually called), and an unprobed_auth state for ingresses that demand signatures the harness does not forge.</li>
-          <li><b>Per-cell perf</b>: every passing (green) cell also gets the perf suite's exact sweep on that path (added latency at concurrency 1, sustained RPS at 20 ms, max proxy RPS). The Peak and Matched tabs read specific cells from this sweep; hovering any green cell shows that path's numbers and its RPS delta vs the gateway's reference cell (named, not called "best").</li>
+          <li>Some gateways also expose a separate <b>passthrough</b> route: a provider-specific endpoint that forwards to one named upstream and skips the gateway's protocol translation. It is faster, but it is a different thing than what most integrations use.</li>
+          <li><b>It is the path people actually take.</b> A passthrough route means changing your code and hard-coding which provider you call. The unified endpoint is the "point your SDK here and go" experience these gateways are built to sell.</li>
+          <li><b>Not every gateway has one.</b> A passthrough column would pit a special route on some gateways against the normal route on others — apples to oranges.</li>
+          <li><b>It is pinned to one provider.</b> The provider is part of the URL path, so calls on it bypass the cross-provider routing and failover the gateway offers on its unified endpoint. Measuring it would rank a single-provider forward against the multi-provider route people actually deploy.</li>
         </ul>
       </article>
     </div>

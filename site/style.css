@@ -465,12 +465,35 @@ tbody tr { cursor: pointer; }
 .gallery figcaption { color: var(--fg-dim); font-size: .8rem; padding: .55rem .2rem 0; }
 
 /* method */
-.method-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 1.1rem; margin-top: 1.2rem; }
-.method-card { background: var(--bg-raise); border: 1px solid var(--border); border-radius: 8px; padding: 1rem 1.2rem; }
-.method-card h3 { margin: 0 0 .5rem; font-size: .95rem; }
-.method-card h3 a { font-family: ui-monospace, monospace; font-size: .85rem; margin-right: .4rem; }
-.method-card ul { margin: 0; padding-left: 1.1rem; color: var(--fg-dim); font-size: .86rem; }
-.method-card li { margin-bottom: .35rem; }
+/* A quiet section heading above each band of cards, so the page reads as grouped
+   suites rather than one long scroll. Matches the .charts-heading rule below. */
+.method-section-head { margin: 2.2rem 0 .1rem; font-size: 1.05rem; }
+.method-section-sub { margin: .1rem 0 0; color: var(--fg-dim); font-size: .88rem; max-width: 74ch; }
+.method-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 1.1rem; margin-top: 1.1rem; align-items: start; }
+.method-card { background: var(--bg-raise); border: 1px solid var(--border); border-radius: 8px; padding: 1rem 1.2rem 1.1rem; }
+/* Card header: a monospace "kicker" (the script that produces the numbers) sits
+   ABOVE the human title, so the title reads as a heading instead of running on
+   from a filename. Cards with no script just carry the title. */
+.method-card .card-kicker {
+  display: block; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: .74rem; font-weight: 600; letter-spacing: .01em; color: var(--fg-mute);
+  margin-bottom: .15rem;
+}
+.method-card .card-kicker a { color: var(--fg-mute); }
+.method-card .card-kicker a:hover { color: var(--accent); }
+.method-card h3 { margin: 0 0 .55rem; font-size: 1rem; line-height: 1.3; padding-bottom: .5rem; border-bottom: 1px solid var(--border); }
+.method-card ul { margin: 0; padding-left: 1.05rem; color: var(--fg-dim); font-size: .86rem; line-height: 1.5; }
+.method-card li { margin-bottom: .5rem; }
+.method-card li:last-child { margin-bottom: 0; }
+/* Nested sub-points: quieter marker, tighter, so a bullet can carry a lead claim
+   with its supporting detail folded beneath it instead of one long sentence. */
+.method-card li > ul { margin: .35rem 0 .1rem; padding-left: 1rem; font-size: .82rem; }
+.method-card li > ul > li { margin-bottom: .3rem; }
+.method-card li > ul ::marker { content: "\2013  "; }
+/* Lead-in term at the start of a bullet: give it the full-strength foreground so
+   each point announces its subject and the list scans top-to-bottom. */
+.method-card li > b:first-child { color: var(--fg); font-weight: 600; }
+.method-card li ::marker { color: var(--fg-mute); }
 
 /* footer */
 .site-footer { border-top: 1px solid var(--border); background: var(--bg-raise); padding: 1.4rem 0 2rem; font-size: .84rem; }
