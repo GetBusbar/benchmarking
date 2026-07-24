@@ -212,6 +212,14 @@ function perfRpsCertified(bc, metric) {
 function perfRpsSuppressed(bc, metric) {
   return bc != null && bc[metric] != null && Number(bc[metric]) > 0 && bc[`${metric}_mock_bound`] !== false;
 }
+// MED-3 (mirrored onto the translation lane): the DISPLAY suppression for a translation-cell RPS. A
+// translation cell's perf object carries the same raw rps_*_mock_bound flags as a passthrough best_cell,
+// so the rule is identical: hide (read n/a) a POSITIVE value that is mock-bound (rig-limited) or
+// unverifiable (mock_bound !== false); a legitimate measured 0 is NOT suppressed. Keeps the Translation
+// tab's RPS columns honest exactly as the passthrough columns and the xlate_rps_sustained_20ms PNG.
+function xlateRpsSuppressed(perf, metric) {
+  return perf != null && perf[metric] != null && Number(perf[metric]) > 0 && perf[`${metric}_mock_bound`] !== false;
+}
 function canonicalPerf(g) {
   if (g.best_cell) {
     const rec = { served: true, ...g.best_cell };
@@ -236,7 +244,9 @@ function canonicalXlate(g) {
     build: t.build, measured_at: t.measured_at,
     xlate_added_latency_p50_us: t.added_latency_p50_us,
     xlate_added_latency_p99_us: t.added_latency_p99_us,
-    xlate_rps_sustained_20ms: t.rps_sustained_20ms,
+    // MED-3 (mirrored): null a mock-bound / unverifiable POSITIVE translation RPS so the drawer/compare
+    // read n/a — the raw value stays on g.translation_cell for provenance, symmetric with canonicalPerf.
+    xlate_rps_sustained_20ms: xlateRpsSuppressed(t, "rps_sustained_20ms") ? null : t.rps_sustained_20ms,
   };
   return g.xlate || null;
 }
@@ -382,7 +392,13 @@ function servesXlatePair(g, ingress, egress) {
    but unmeasured (perf sweep did not land). */
 function xlateCell(g, key, fmt) {
   const perf = xlateMatrixCell(g, state.xlateIn, state.xlateOut);
-  if (perf && perf[key] != null) return { v: perf[key], text: fmt(perf[key]), na: false };
+  // MED-3 (mirrored): the two translation RPS columns are GATED on the mock-bound honesty flag exactly
+  // like the passthrough columns and the xlate_rps_sustained_20ms PNG — a rig-limited/unverifiable
+  // throughput reads n/a on the table just as it draws no bar on the chart (check-consistency asserts
+  // the sustained metric's two visibilities agree). Latency + all other columns read raw.
+  const gated = (key === "rps_max_proxy" || key === "rps_sustained_20ms");
+  const v = (perf && gated && xlateRpsSuppressed(perf, key)) ? null : (perf ? perf[key] : null);
+  if (v != null) return { v, text: fmt(v), na: false };
   return { v: null, text: "n/a", na: true };
 }
 
@@ -1965,7 +1981,7 @@ if (NODE) {
     fmtStamp, fmtAge, stampWithAge, measuredBadge,
     drawSweep, niceStep, fmtTick, COLUMN_SETS, columnsFor, PERF_VIEWS, VIEW_SORT, LANES, naText, stripRigPaths,
     cellState, matrixCellTip, cellPerfTip, passCell, xlateCell, streamCell, memCell, hasTranslation, CATEGORIES, DEFAULT_CATEGORY, VIEWS,
-    canonicalPerf, canonicalXlate, canonicalStreaming, canonicalMemory, cpuFpsCertified, sustainedCertified, perfRpsCertified, perfRpsSuppressed, gatewayResultsJson, DEFAULT_VIEW, VIEW_LABELS, rosterRows, fmtStars,
+    canonicalPerf, canonicalXlate, canonicalStreaming, canonicalMemory, cpuFpsCertified, sustainedCertified, perfRpsCertified, perfRpsSuppressed, xlateRpsSuppressed, gatewayResultsJson, DEFAULT_VIEW, VIEW_LABELS, rosterRows, fmtStars,
     configCorrectionUrl, BENCH_REPO,
     HOME_VIEW, homeCardsHtml,
   };

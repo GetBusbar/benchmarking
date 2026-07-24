@@ -414,8 +414,14 @@ CHARTS = [
         unit="requests / sec",
         series=[Series("xlate_rps_sustained_20ms", "translated RPS @20ms", "rank")],
         higher_better=True,
-        served_field="xlate_served",
-        not_served_text="✕ cannot translate",
+        # MED-3 (mirrored onto translation): gate on the mock-bound honesty flag
+        # (xlate_rps_sustained_20ms_valid = present && >0 && NOT mock-bound), exactly like the
+        # passthrough RPS charts (rps_sustained_20ms_valid). A rig-limited translation throughput must
+        # not draw a full bar or rank #1 — it renders "not measured (rig-limited)" instead. The site
+        # (canonicalXlate / xlateCell) + check-consistency assert the identical rule. A gateway that
+        # cannot translate at all has no xlate row (xlate_served absent) and is off the chart entirely.
+        served_field="xlate_rps_sustained_20ms_valid",
+        not_served_text="✕ not measured (rig-limited / needs field run)",
         annot=lambda r: (f"{_dialect(r.get('_xlate_ingress'))} → {_dialect(r.get('_xlate_egress'))}"
                          + (" (xlate suite)" if r.get("_xlate_source") == "xlate-fallback" else ""))
                         if r.get("_xlate_ingress") else None,
@@ -607,6 +613,16 @@ def _proj_xlate(key: str) -> dict | None:
         obj["xlate_added_latency_p99_us"] = tc["added_latency_p99_us"]
     if tc.get("rps_sustained_20ms") is not None:
         obj["xlate_rps_sustained_20ms"] = tc["rps_sustained_20ms"]
+    # MED-3 (mirrored onto the translation lane): a rig-limited (mock-bound) translation RPS is NOT a
+    # valid gateway-vs-ceiling reading — it must not draw a full bar or rank #1 on the translation chart,
+    # exactly as a mock-bound passthrough RPS is suppressed via rps_sustained_20ms_valid. Carry the
+    # honesty flag through and emit xlate_rps_sustained_20ms_valid (present && >0 && mock_bound is False).
+    # A legitimate measured 0 stays served (chart shows its zero_text), distinct from a rig-ceiling number.
+    obj["rps_sustained_20ms_mock_bound"] = tc.get("rps_sustained_20ms_mock_bound")
+    _v = obj.get("xlate_rps_sustained_20ms")
+    _suppressed = (_v is not None and float(_v or 0) > 0
+                   and tc.get("rps_sustained_20ms_mock_bound") is not False)
+    obj["xlate_rps_sustained_20ms_valid"] = (_v is not None and not _suppressed)
     obj["_xlate_ingress"] = tc.get("ingress")
     obj["_xlate_egress"] = tc.get("egress")
     obj["_xlate_source"] = tc.get("source")
