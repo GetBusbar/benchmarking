@@ -365,7 +365,11 @@ bench_gateway() {
     fi
   }
 
-  local ALL_SUITES="${SUITES:-perf memory stream streamcpu xlate governed matrix}"
+  # Matrix is the SOLE producer now — the standalone perf/memory/stream/streamcpu/xlate/governed suites
+  # are RETIRED. Default to the same `matrix` run-all.sh uses (run-all.sh:75); an explicit SUITES override
+  # still lets an operator re-run a legacy suite ad hoc. Defaulting to the old 7-suite list here would
+  # override run-all.sh's matrix default on the box and re-run all six dormant suites (audit HIGH-2).
+  local ALL_SUITES="${SUITES:-matrix}"
   declare -A _pull_state=() _pull_rc=(); local suite
   for suite in $ALL_SUITES; do _pull_state[$suite]=unset; _pull_rc[$suite]=0; done
 
@@ -455,7 +459,7 @@ bench_gateway() {
   # DONE means a CLEAN, fully-pulled fresh run. If any suite's pull failed or the guard kept old data,
   # this gateway did NOT cleanly refresh - say so loudly so the freshness guard's later hard-fail is
   # never a surprise and the gateway can be re-run.
-  if [[ "$pull_failed" -eq 0 && "$run_failed" -eq 0 && -f "$HERE/results/perf/$gw.json" ]]; then
+  if [[ "$pull_failed" -eq 0 && "$run_failed" -eq 0 && -f "$HERE/results/matrix/$gw.json" ]]; then
     glog_echo "DONE"
     # INCREMENTAL PUBLISH: this box finished cleanly and the promote guard passed for every suite, so
     # commit + push ONLY this gateway's result now (gated on PUBLISH, serialized across boxes). The
@@ -468,7 +472,7 @@ bench_gateway() {
   else glog_echo "INCOMPLETE (a suite crashed, failed to pull, or was guard-held; this gateway did NOT fully refresh - re-run it)"; fi
   # Propagate the issue to the caller's `wait "$p" || fail=…` so the summary's issue count is accurate
   # and a run missing whole suites is never reported as "0 issues" (audit R3-M4/M5).
-  if [[ "$pull_failed" -ne 0 || "$run_failed" -ne 0 || ! -f "$HERE/results/perf/$gw.json" ]]; then return 1; fi
+  if [[ "$pull_failed" -ne 0 || "$run_failed" -ne 0 || ! -f "$HERE/results/matrix/$gw.json" ]]; then return 1; fi
   return 0
 }
 
