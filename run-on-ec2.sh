@@ -24,6 +24,16 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"   # this repo (benchmarking
 RUN_ID="${RUN_ID:-$(date +%Y%m%d-%H%M%S)-$$}"
 CREATED_KEY=0; CREATED_SG=0   # only delete the shared key/SG on exit if THIS invocation created them
 
+# Box self-terminate safety net (audit R5-#4). This `shutdown -h +N` is the LEAKED-BOX backstop - it
+# must fire only when the orchestrator has lost the box, NEVER during a legitimate run. The matrix
+# suite alone raises its OWN wall-clock ceiling to 14400s = 240 min (matrix/run.sh: HARNESS_SUITE_CEIL_S
+# default 14400 when MATRIX_SWEEP=1), and it runs LAST after 6 other suites. A 150-min box timer was
+# SHORTER than that single ceiling, so a heavy gateway's matrix sweep could still believe it had
+# headroom while AWS terminated the box mid-run - discarding every already-written suite JSON. Set the
+# net strictly ABOVE the longest legitimate run: matrix 240 min + a generous 120-min margin for the
+# other six suites = 360 min. Overridable, but the default can never fire during a real run.
+BENCH_MAX_MIN="${BENCH_MAX_MIN:-360}"
+
 # `run-on-ec2.sh kill` — terminate EVERY gateway-bench box right now, reliably. Uses xargs so the
 # instance IDs are split into separate args (piping `--output text` straight into `--instance-ids`
 # passes one tab-joined blob → InvalidInstanceID.Malformed → a silent no-op, which is exactly how 48
@@ -93,7 +103,9 @@ if [[ $# -gt 0 ]]; then GATEWAYS=("$@"); else GATEWAYS=("${DEFAULT_GATEWAYS[@]}"
 if [[ ! -s "$KEYFILE" ]] || ! aws ec2 describe-key-pairs --key-names "$KEYNAME" >/dev/null 2>&1; then
   aws ec2 delete-key-pair --key-name "$KEYNAME" >/dev/null 2>&1 || true
   rm -f "$KEYFILE"
-  aws ec2 create-key-pair --key-name "$KEYNAME" --query KeyMaterial --output text > "$KEYFILE"; chmod 600 "$KEYFILE"
+  # Create the private key under a 077 umask so it is 600 from birth - no sub-millisecond window at the
+  # default umask between create and chmod (audit R5-NIT). The chmod stays as a belt-and-braces backstop.
+  ( umask 077; aws ec2 create-key-pair --key-name "$KEYNAME" --query KeyMaterial --output text > "$KEYFILE" ); chmod 600 "$KEYFILE"
   CREATED_KEY=1
 fi
 SG=$(aws ec2 describe-security-groups --group-names "$SGNAME" --query 'SecurityGroups[0].GroupId' --output text 2>/dev/null || true)
@@ -162,11 +174,12 @@ bench_gateway() {
   # even if this orchestrator is killed (so its RETURN-trap never fires) the box shuts itself down and
   # `instance-initiated-shutdown-behavior=terminate` makes that a TERMINATE, not a stop. A leaked box
   # can therefore bleed cost for at most BENCH_MAX_MIN, never indefinitely (2026-07-24: 48 leaked boxes
-  # ran for hours because the trap missed SIGTERM and the manual cleanups silently no-op'd).
+  # ran for hours because the trap missed SIGTERM and the manual cleanups silently no-op'd). BENCH_MAX_MIN
+  # is set ABOVE the matrix suite's own 240-min ceiling (see top of file) so it never fires mid-run.
   iid=$(aws ec2 run-instances --image-id "$AMI" --instance-type "$ITYPE" --key-name "$KEYNAME" \
     --security-group-ids "$SG" \
     --instance-initiated-shutdown-behavior terminate \
-    --user-data "$(printf '#!/bin/bash\nshutdown -h +%s\n' "${BENCH_MAX_MIN:-150}")" \
+    --user-data "$(printf '#!/bin/bash\nshutdown -h +%s\n' "$BENCH_MAX_MIN")" \
     --block-device-mappings 'DeviceName=/dev/sda1,Ebs={VolumeSize=60,VolumeType=gp3,DeleteOnTermination=true}' \
     --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=$tag},{Key=purpose,Value=gateway-bench},{Key=run,Value=$RUN_ID}]" \
     --query 'Instances[0].InstanceId' --output text 2>>"$glog") || { glog_echo "run-instances FAILED: $(tail -1 "$glog" | sed 's/.*: //' | cut -c1-140)"; return 1; }
@@ -234,56 +247,132 @@ bench_gateway() {
   fi
   glog_echo "rsync done (${_pl:-?} in $((SECONDS-_t0))s)"
 
-  glog_echo "running $gw (latency + RPS + memory)"
-  ssh $SSHOPT ubuntu@"$ip" "source ~/.cargo/env; cd ~/benchmarking
-    export BENCH_HARDWARE='$HW_LABEL'
-    export BENCH_ARCH='$ARCH'
-    export CORES=0-3 LOADCORES=4-9 MOCKCORES=10-15
-    export CAP_MIB=24000
-    export SUITES=\"${SUITES:-perf memory stream streamcpu xlate governed matrix}\"
-    sudo -n true 2>/dev/null && sudo chmod 666 /var/run/docker.sock || true
-    bash run-all.sh $gw" >>"$glog" 2>&1
-  local ssh_rc=$?
-  # run-all.sh now exits non-zero if any suite crashed (audit R3-M4/M5). Because bench_gateway runs in
-  # a background subshell with only `set -uo pipefail` (no errexit), an ssh/remote failure was silently
-  # ignored - the log jumped straight to PULL FAILED with no "ssh FAILED" line. Record it as an issue.
-  local run_failed=0
-  if [ "$ssh_rc" -ne 0 ]; then
-    glog_echo "run-all.sh ssh FAILED (rc=$ssh_rc) - remote crashed or a suite exited non-zero; results may be incomplete"
-    run_failed=1
-  fi
-
-  glog_echo "pulling $gw results back"
-  local pull_failed=0
-  for suite in perf memory stream streamcpu xlate governed matrix; do
+  # ── per-suite staged pull + promote guard, factored out so it can run INCREMENTALLY during the run
+  # AND once more at the end (audit R5-#4b). Idempotent: pulls results/<suite>/<gw>.json to a staging
+  # file and lets the promote guard decide. Sets three caller-scope maps by suite: _pull_state (unset |
+  # ok | stale | missing) and _pull_rc. Returns 0 when a fresh result was promoted (so the incremental
+  # loop can stop re-pulling a suite it already captured); 1 when there is nothing (new) to promote.
+  #   0 = promoted a fresh result   1 = no fresh result this call (missing/guard-held/transient)
+  pull_suite() { # suite
+    local suite="$1"
     mkdir -p "$HERE/results/$suite"
-    # Pull to a staging file, then let the promote guard decide. BULLETPROOF: a boot/build failure
-    # (status 000, "failed to boot", missing entrypoint) must NEVER overwrite a committed served
-    # result. The guard keeps the good data and logs loudly; a real result promotes normally.
     local staged="$HERE/results/$suite/.incoming-$gw.json"
     # RETRY the rsync: a dropped SSH/rsync ("unexpected end of file") must NOT silently leave stale
-    # data behind - that is how a refresh betrays trust. Try up to 4 times with a pause, and if the
-    # remote file genuinely does not exist (the suite produced no result) rsync returns 23, which we
-    # treat as "no fresh result for this suite" and flag loudly, NOT a transient we retry forever.
+    # data behind. Try up to 4 times with a pause; rsync 23 = remote file genuinely absent (the suite
+    # has not produced a result YET, or produced none), which we treat as "nothing to pull", NOT a
+    # transient to retry forever.
     rm -f "$staged"; local ok=0 attempt rc
     for attempt in 1 2 3 4; do
       rsync -az --timeout=60 -e "ssh $SSHOPT" "ubuntu@$ip:~/benchmarking/results/$suite/$gw.json" "$staged" >>"$glog" 2>&1
       rc=$?
       if [[ $rc -eq 0 && -f "$staged" ]]; then ok=1; break; fi
-      if [[ $rc -eq 23 ]]; then break; fi   # remote file missing: no fresh result, do not retry
+      if [[ $rc -eq 23 ]]; then break; fi   # remote file missing: no result yet, do not retry
       glog_echo "rsync $suite/$gw.json attempt $attempt failed (rc=$rc) - retrying in 10s"
       sleep 10
     done
+    _pull_rc[$suite]=$rc
     if [[ $ok -eq 1 ]]; then
+      # Pull to a staging file, then let the promote guard decide. BULLETPROOF: a boot/build failure
+      # (status 000, "failed to boot", missing entrypoint) must NEVER overwrite a committed served
+      # result. The guard keeps the good data and logs loudly; a real result promotes normally.
       if python3 "$HERE/lib/promote_guard.py" "$suite" "$HERE/results/$suite/$gw.json" "$staged" >>"$glog" 2>&1; then
-        mv -f "$staged" "$HERE/results/$suite/$gw.json"
+        mv -f "$staged" "$HERE/results/$suite/$gw.json"; _pull_state[$suite]=ok
+        glog_echo "pulled $suite/$gw.json"; return 0
       else
-        glog_echo "GUARD kept prior $suite/$gw.json (incoming was a boot/build failure)"; rm -f "$staged"; pull_failed=1
+        glog_echo "GUARD kept prior $suite/$gw.json (incoming was a boot/build failure)"; rm -f "$staged"
+        _pull_state[$suite]=stale; return 1
       fi
     else
-      glog_echo "PULL FAILED for $suite/$gw.json (rc=$rc) - fresh result NOT retrieved; committed data for this suite is STALE"
-      pull_failed=1; rm -f "$staged"
+      rm -f "$staged"; _pull_state[$suite]=missing; return 1
     fi
+  }
+
+  local ALL_SUITES="${SUITES:-perf memory stream streamcpu xlate governed matrix}"
+  declare -A _pull_state=() _pull_rc=(); local suite
+  for suite in $ALL_SUITES; do _pull_state[$suite]=unset; _pull_rc[$suite]=0; done
+
+  glog_echo "running $gw (latency + RPS + memory) — detached on box; pulling each suite as it completes"
+  # Launch run-all.sh DETACHED on the box (setsid + nohup) writing a sentinel with its real exit code on
+  # completion, instead of a single BLOCKING ssh. Why (audit R5-#4b): the old blocking ssh returned only
+  # when run-all.sh finished, and EVERY per-suite pull happened AFTER it returned - so if the box
+  # self-terminated mid-run (a heavy matrix sweep outliving the box timer), the ssh died and ALL SEVEN
+  # already-written suite JSONs were forfeited, not just the in-flight one. Detaching lets us stream each
+  # suite's result OFF-box as run-all.sh writes it, so a late box death loses at most the running suite.
+  ssh $SSHOPT ubuntu@"$ip" "cd ~/benchmarking && rm -f .run-done .run.log && \
+    setsid nohup bash -lc '
+      source ~/.cargo/env 2>/dev/null || true
+      export BENCH_HARDWARE=\"$HW_LABEL\"
+      export BENCH_ARCH=\"$ARCH\"
+      export CORES=0-3 LOADCORES=4-9 MOCKCORES=10-15
+      export CAP_MIB=24000
+      export SUITES=\"$ALL_SUITES\"
+      sudo -n true 2>/dev/null && sudo chmod 666 /var/run/docker.sock || true
+      bash run-all.sh $gw; echo \$? > .run-done
+    ' > .run.log 2>&1 < /dev/null &" >>"$glog" 2>&1
+  local launch_rc=$?
+  local run_failed=0
+  if [ "$launch_rc" -ne 0 ]; then
+    glog_echo "detached run-all.sh launch FAILED (ssh rc=$launch_rc) - could not start the remote run"
+    run_failed=1
+  fi
+
+  # ── incremental pull loop: while the remote run is alive (no .run-done sentinel yet) and the box is
+  # still reachable, pull any suite whose result has landed but not yet been promoted. A box that dies
+  # mid-run (self-terminate, spot reclaim) then still leaves us every suite that had written its JSON.
+  # Cap the total wait at the box's own self-terminate ceiling + a margin so a wedged box can never hang
+  # the orchestrator forever; the box timer (BENCH_MAX_MIN) is the ultimate cost backstop underneath.
+  local sentinel="" reachable=1 waited=0
+  local max_wait_s=$(( (BENCH_MAX_MIN + 30) * 60 ))
+  if [ "$run_failed" -eq 0 ]; then
+    while :; do
+      # sentinel present? read the remote exit code and stop.
+      sentinel="$(ssh $SSHOPT ubuntu@"$ip" 'cat ~/benchmarking/.run-done 2>/dev/null' 2>/dev/null)"
+      if [ -n "$sentinel" ]; then break; fi
+      # box gone? one cheap liveness ssh; a failure here means the box is unreachable (terminated/spot
+      # reclaim) - stop polling and salvage whatever was already pulled.
+      if ! ssh $SSHOPT ubuntu@"$ip" true 2>/dev/null; then reachable=0; break; fi
+      # opportunistic incremental pull of any suite not yet captured.
+      for suite in $ALL_SUITES; do
+        [ "${_pull_state[$suite]}" = ok ] && continue
+        pull_suite "$suite" || true
+      done
+      [ "$waited" -ge "$max_wait_s" ] && { glog_echo "incremental pull loop hit max wait (${max_wait_s}s) - giving up on the run"; reachable=0; break; }
+      sleep 30; waited=$((waited+30))
+    done
+  fi
+
+  # Interpret the run outcome. A present sentinel = run-all.sh finished; its value is the exit code
+  # (non-zero = a suite crashed, audit R3-M4/M5). No sentinel = the box died before finishing.
+  if [ "$run_failed" -eq 0 ]; then
+    if [ -n "$sentinel" ]; then
+      if [ "$sentinel" != 0 ]; then
+        glog_echo "run-all.sh finished non-zero (exit=$sentinel) - a suite crashed or exited non-zero; results may be incomplete"
+        run_failed=1
+      fi
+    else
+      glog_echo "run-all.sh did NOT complete (no .run-done sentinel; box unreachable at ${waited}s) - salvaging suites already pulled"
+      run_failed=1
+    fi
+  fi
+
+  # Pull the remote run log into the fanout log (best-effort) so run-all.sh's output is preserved for
+  # debugging even though the run was detached rather than streamed over the blocking ssh.
+  if [ "$reachable" -eq 1 ]; then
+    ssh $SSHOPT ubuntu@"$ip" 'cat ~/benchmarking/.run.log 2>/dev/null' >>"$glog" 2>/dev/null || true
+  fi
+
+  # ── final pull pass: catch any suite written just before completion (and re-attempt any still-missing
+  # one while the box may briefly linger). Incremental + final passes together mean a mid-run box death
+  # forfeits at most the one in-flight suite, never the six already on disk.
+  glog_echo "final pull pass for $gw results"
+  local pull_failed=0
+  for suite in $ALL_SUITES; do
+    if [ "${_pull_state[$suite]}" != ok ] && [ "$reachable" -eq 1 ]; then pull_suite "$suite" || true; fi
+    case "${_pull_state[$suite]}" in
+      ok)      : ;;
+      stale)   glog_echo "GUARD held $suite/$gw.json (incoming was a boot/build failure) - committed data for this suite is STALE"; pull_failed=1 ;;
+      *)       glog_echo "PULL FAILED for $suite/$gw.json (rc=${_pull_rc[$suite]}) - fresh result NOT retrieved; committed data for this suite is STALE"; pull_failed=1 ;;
+    esac
   done
   # DONE means a CLEAN, fully-pulled fresh run. If any suite's pull failed or the guard kept old data,
   # this gateway did NOT cleanly refresh - say so loudly so the freshness guard's later hard-fail is
