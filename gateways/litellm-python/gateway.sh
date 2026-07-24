@@ -1,7 +1,14 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
-# Gateway manifest: LiteLLM Python proxy (the shipping `litellm[proxy]` CLI).
-GW_KIND=native
+# Gateway manifest: LiteLLM Python proxy (official ghcr.io/berriai/litellm image, docker).
+#
+# Runs the official proxy image (LITELLM_PY_IMAGE in versions.env, multi-arch amd64+arm64, pinned
+# to the benchmarked litellm==1.93.0) with the same uniform launch shape as the other docker
+# gateways: host network, --cpuset-cpus pin, config mounted read-only. The image's entrypoint is
+# the litellm CLI, so the --config/--port/--num_workers args are identical to the old pip-venv
+# launch. RSS/HWM are read from the container's host-pid process tree (container_rss_mib), which
+# sums the uvicorn workers exactly like the old _rss_tree_mib fix (m11).
+GW_KIND=docker
 # Self-describing manifest metadata — charts.py + the run lists read these, so a gateway
 # is fully defined by its own dir (add/remove a dir → it appears/disappears everywhere).
 GW_DISPLAY="LiteLLM · Python"                      # label in charts + report tables
@@ -12,55 +19,33 @@ GW_PORT=8102
 GW_PATH=/v1/chat/completions
 GW_MODEL=gpt-4o-mini
 GW_AUTH=gwbench
-LP_VENV="${LP_VENV:-$GW_DIR/venv}"
+LITELLM_PY_IMAGE="${LITELLM_PY_IMAGE:-ghcr.io/berriai/litellm:v1.93.0}"
 
 gw_build() {
-  [ -x "$LP_VENV/bin/litellm" ] && "$LP_VENV/bin/litellm" --version >/dev/null 2>&1 && return 0
-  # BULLETPROOF: a silent pip failure used to leave NO `litellm` entrypoint, gw_build returned 0
-  # anyway, and the gateway then "failed to boot" at launch - which the suites recorded as a
-  # published served=false / 0-RPS result. A build that does not produce a runnable binary is a
-  # BUILD failure, full stop: retry pip, check its exit code, and VERIFY the entrypoint runs before
-  # returning 0. Returning non-zero makes run.sh `gw_build || exit 1` abort this gateway BEFORE any
-  # 0 is written, so prior-good data is never overwritten by an environment failure on our side.
-  local attempt rc
-  for attempt in 1 2 3; do
-    rm -rf "$LP_VENV"
-    python3 -m venv "$LP_VENV" || { echo "venv create failed (attempt $attempt)" >>"$GW_DIR/pip.log"; sleep $((attempt*5)); continue; }
-    "$LP_VENV/bin/pip" install -q --upgrade pip >>"$GW_DIR/pip.log" 2>&1
-    rc=0
-    "$LP_VENV/bin/pip" install -q "${LITELLM_PY_SPEC:-litellm[proxy]}" >>"$GW_DIR/pip.log" 2>&1 || rc=$?
-    if [ "$rc" = 0 ] && [ -x "$LP_VENV/bin/litellm" ] && "$LP_VENV/bin/litellm" --version >/dev/null 2>&1; then
-      return 0
-    fi
-    echo "attempt $attempt: pip rc=$rc, entrypoint=$([ -x "$LP_VENV/bin/litellm" ] && echo present || echo MISSING)" >>"$GW_DIR/pip.log"
-    sleep $((attempt*5))
-  done
-  echo "BUILD FAILED: litellm[proxy] did not install a runnable litellm entrypoint after 3 attempts (see $GW_DIR/pip.log)" >&2
-  return 1
+  sudo docker pull "$LITELLM_PY_IMAGE" >/dev/null 2>&1 || true
 }
 
-# Prefer `pip show` (works even if `import litellm` emits warnings that trip -c); fall back to import.
 gw_version() {
-  local v
-  v=$("$LP_VENV/bin/pip" show litellm 2>/dev/null | awk '/^Version:/{print $2}')
-  [ -z "$v" ] && v=$("$LP_VENV/bin/python" -c 'import litellm;print(litellm.__version__)' 2>/dev/null)
-  echo "litellm==${v:-?}"
+  local dg; dg=$(sudo docker inspect --format '{{index .RepoDigests 0}}' "$LITELLM_PY_IMAGE" 2>/dev/null)
+  echo "${LITELLM_PY_IMAGE}${dg:+ (@${dg##*@})}"
 }
 
 gw_diag() {
-  echo "proc: $(pgrep -af "litellm.*--port $GW_PORT" | head -c 200)"
-  echo "pip.log tail: $(tail -n 3 "$GW_DIR/pip.log" 2>/dev/null | tr '\n' ' ' | head -c 200)"
-  echo "run.log:"; tail -n 20 /tmp/litellm_py.mem.log 2>/dev/null
+  echo "container: $(sudo docker ps -a --filter name=litellm-python-bench --format '{{.Status}}' 2>/dev/null)"
+  echo "run.log: $(cat "$GW_DIR/launch.log" 2>/dev/null | tr '\n' ' ' | head -c 300)"
+  echo "logs:"; sudo docker logs --tail 25 litellm-python-bench 2>&1
 }
 
 _lp_spawn() {
-  pkill -f "litellm.*--port $GW_PORT" 2>/dev/null; sleep 1
+  sudo docker rm -f litellm-python-bench >/dev/null 2>&1; sleep 1
   # Scale uvicorn workers to the pinned core count so LiteLLM uses all 4 cores it's given, not one
   # (single-worker on a 4-core pin under-serves it — fairness M5). The gw_rss sums the whole group.
   local ncore=$(( ${CORES##*-} - ${CORES%%-*} + 1 ))
-  setsid taskset -c "$CORES" env LITELLM_MASTER_KEY="$GW_AUTH" \
-    "$LP_VENV/bin/litellm" --config "$GW_DIR/config.gen.yaml" --port "$GW_PORT" --num_workers "$ncore" \
-    </dev/null >/tmp/litellm_py.mem.log 2>&1 &
+  sudo docker run -d --name litellm-python-bench --network host --cpuset-cpus="$CORES" \
+    -e LITELLM_MASTER_KEY="$GW_AUTH" \
+    -v "$GW_DIR/config.gen.yaml:/config.gen.yaml:ro" \
+    "$LITELLM_PY_IMAGE" --config /config.gen.yaml --port "$GW_PORT" --num_workers "$ncore" \
+    >"$GW_DIR/launch.log" 2>&1 || true
 }
 
 gw_launch() {
@@ -138,17 +123,11 @@ YAML
   _lp_spawn
 }
 
-# --num_workers spawns uvicorn WORKER children whose cmdlines don't contain "--port", so a pattern
-# match catches only the parent (constant RSS) and misses where memory actually grows. Sum the whole
-# process tree from the parent PID — the SAME method (_rss_tree_mib, in memory/run.sh) as every other
-# gateway. (m11 fix: was reporting a flat idle==peak because the workers were invisible.)
-gw_rss() {
-  local master; master=$(pgrep -f "litellm.*--port $GW_PORT" | head -1)
-  _rss_tree_mib "$master"
-}
-gw_hwm() {  # kernel VmHWM summed over the master + uvicorn worker tree (same tree as gw_rss)
-  local master; master=$(pgrep -f "litellm.*--port $GW_PORT" | head -1)
-  _hwm_tree_mib "$master"
-}
+# --num_workers spawns uvicorn WORKER children; container_rss_mib sums the container's whole
+# host-pid process tree (same _rss_tree_mib method as native gateways), so the workers are counted
+# — preserving the m11 fix (a parent-only match reported flat idle==peak because the workers were
+# invisible).
+gw_rss() { container_rss_mib litellm-python-bench; }  # summed process-tree VmRSS (same method as native)
+gw_hwm() { container_hwm_mib litellm-python-bench; }  # summed process-tree VmHWM (kernel high-water mark)
 
-gw_stop() { pkill -f "litellm.*--port $GW_PORT" 2>/dev/null; }
+gw_stop() { sudo docker rm -f litellm-python-bench >/dev/null 2>&1; }
