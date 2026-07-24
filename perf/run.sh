@@ -31,7 +31,11 @@ C1_DUR="${C1_DUR:-20}"; SWEEP_DUR="${SWEEP_DUR:-10}"; PSIZE="${PSIZE:-256}"
 # higher). The delayed sweep starts low (8) so slow gateways get a concurrency they can hold. Same
 # grid for every gateway.
 SWEEP_INSTANT="${SWEEP_INSTANT:-16 32 64 128 256 512 1024}"
-SWEEP_DELAYED="${SWEEP_DELAYED:-8 32 128 256 1024 4096 8192 16384}"
+# The 20ms sweep is now a BISECT (lib/sweep.sh mode=bisect): these are the search BOUNDS, not a fixed
+# ladder - min (slow gateways still get a concurrency they can hold) and max (well past the mock's
+# ~1176-concurrent ceiling, so every gateway's real limit is bracketed below the mock-bound zone).
+# The bisect resolves each gateway's OWN ceiling to +/-64 concurrent in ~5-7 probes.
+SWEEP_DELAYED="${SWEEP_DELAYED:-32 65536}"
 SWEEP_TTFT_MS="${SWEEP_TTFT_MS:-20}"
 P99_CEIL_MS="${P99_CEIL_MS:-1000}"
 # raise the fd limit so high-concurrency sweeps aren't capped by open sockets
@@ -152,7 +156,7 @@ log "[$GATEWAY] max proxy throughput = $PROXY_RPS rps @ c=$PROXY_CONC"
 # under realistic LLM latency. Concurrency ramps high; the delayed mock mostly sleeps so it isn't the
 # limit until very high RPS (flagged if so).
 log "[$GATEWAY] sweep B — sustained RPS @ ${SWEEP_TTFT_MS}ms LLM latency (AIGatewayBench metric)"
-run_sweep "$SWEEP_TTFT_MS" "$SWEEP_DELAYED"
+run_sweep "$SWEEP_TTFT_MS" "$SWEEP_DELAYED" bisect
 LLM_RPS=$SW_CEIL_RPS; LLM_CONC=$SW_CEIL_CONC; LLM_MOCK=$SW_MOCK_CEIL; LLM_BOUND=$SW_BOUND; LLM_JSON="$SW_JSON"
 [ "$LLM_BOUND" = true ] && log "[$GATEWAY] ⚠ @${SWEEP_TTFT_MS}ms ceiling ($LLM_RPS) within 10% of mock ($LLM_MOCK) — MOCK-BOUND floor"
 log "[$GATEWAY] sustained RPS @${SWEEP_TTFT_MS}ms = $LLM_RPS rps @ c=$LLM_CONC"

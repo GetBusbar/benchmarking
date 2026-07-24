@@ -102,6 +102,14 @@ bench_gateway() {
     sudo apt-get update -q
     sudo apt-get install -y -q build-essential pkg-config libssl-dev python3-venv python3-pip golang-go docker.io git nodejs npm cmake clang protobuf-compiler jq
     sudo usermod -aG docker ubuntu || true
+    # FAIRNESS: a container inherits the docker DAEMON fd limit, NOT the host-shell ulimit that
+    # perf/run.sh raises for native gateways + the loadgen/mock. Left at the ~1024 default, a
+    # containerised gateway fast enough to hold >1024 concurrent connections hits EMFILE and
+    # COLLAPSES at exactly c=1024 (busbar did: ~850k conn failures, sustained@20ms fell to 1/3),
+    # while native gateways run uncapped - an artefact that silently flattens the FASTEST gateways.
+    # Raise the daemon default so every container gets the same high fd ceiling native gateways have.
+    echo "{ \"default-ulimits\": { \"nofile\": { \"Name\": \"nofile\", \"Hard\": 1048576, \"Soft\": 1048576 } } }" | sudo tee /etc/docker/daemon.json >/dev/null
+    sudo systemctl restart docker || sudo service docker restart || true
     command -v cargo >/dev/null || (curl -sSf https://sh.rustup.rs | sh -s -- -y)
     python3 -m pip install --user -q --break-system-packages matplotlib psutil 2>/dev/null || pip3 install -q matplotlib psutil || true' >>"$glog" 2>&1
 
