@@ -113,8 +113,21 @@ for _try in 1 2 3; do
   MYIP=""; sleep 2
 done
 [[ -n "$MYIP" ]] || { echo "FATAL: could not determine a valid public IPv4 from checkip.amazonaws.com (3 tries) - refusing to launch boxes into an SG with no SSH ingress rule" >&2; exit 1; }
-aws ec2 authorize-security-group-ingress --group-id "$SG" --protocol tcp --port 22 --cidr "${MYIP}/32" >/dev/null 2>&1 \
-  || echo "note: SSH ingress rule for ${MYIP}/32 not added (likely already present on an existing SG)"
+# Add the port-22 ingress for THIS IP idempotently. On a REUSED SG (CREATED_SG=0, the norm after any
+# SIGKILL'd run) each run from a new IP would otherwise accrete a /32 rule that is never revoked; at
+# the AWS default 60-rule cap `authorize` starts failing and, if that failure is swallowed, the
+# current IP ends up with NO SSH ingress and every ssh/rsync times out (audit R4-LOW-6). So: treat the
+# EXPECTED "rule already present" (InvalidPermission.Duplicate) as success, but a GENUINE failure
+# (anything else - malformed CIDR, RulesPerSecurityGroupLimitExceeded at the cap) as FATAL rather than
+# a soft note, since a box fleet launched into an SG with no reachable SSH just burns cost.
+_sg_err=$(aws ec2 authorize-security-group-ingress --group-id "$SG" --protocol tcp --port 22 --cidr "${MYIP}/32" 2>&1) \
+  && echo "authorized SSH ingress for ${MYIP}/32 on $SG" \
+  || { case "$_sg_err" in
+         *InvalidPermission.Duplicate*) echo "SSH ingress for ${MYIP}/32 already present on $SG (ok)" ;;
+         *) echo "FATAL: authorize-security-group-ingress for ${MYIP}/32 failed: $_sg_err" >&2
+            echo "       (SG rule cap reached, or malformed CIDR - refusing to launch boxes into an SG the current IP cannot reach)" >&2
+            exit 1 ;;
+       esac; }
 
 # TIDINESS + COST: on ANY exit (normal, error, Ctrl-C, SIGTERM) terminate ONLY the boxes THIS run
 # launched — filtered by tag:run=$RUN_ID, NOT the shared purpose=gateway-bench tag — so a second or
@@ -154,7 +167,7 @@ bench_gateway() {
     --security-group-ids "$SG" \
     --instance-initiated-shutdown-behavior terminate \
     --user-data "$(printf '#!/bin/bash\nshutdown -h +%s\n' "${BENCH_MAX_MIN:-150}")" \
-    --block-device-mappings 'DeviceName=/dev/sda1,Ebs={VolumeSize=60,VolumeType=gp3}' \
+    --block-device-mappings 'DeviceName=/dev/sda1,Ebs={VolumeSize=60,VolumeType=gp3,DeleteOnTermination=true}' \
     --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=$tag},{Key=purpose,Value=gateway-bench},{Key=run,Value=$RUN_ID}]" \
     --query 'Instances[0].InstanceId' --output text 2>>"$glog") || { glog_echo "run-instances FAILED: $(tail -1 "$glog" | sed 's/.*: //' | cut -c1-140)"; return 1; }
   glog_echo "launched $iid"
@@ -194,16 +207,31 @@ bench_gateway() {
   # logged "?"), defeating the check on the real host. Derive the size from a LOCAL rsync DRY RUN with
   # the SAME excludes the real transfer uses (below): portable, no network, and exactly the bytes about
   # to ship. `--stats` prints "Total file size: N bytes"; humanise it (a number beats "?").
+  # Dedicated per-gateway sizecheck dst under a mktemp -d, removed right after we read --stats: the old
+  # fixed path (${TMPDIR:-/tmp}/bench-rsync-sizecheck-dst/) was NEVER cleaned, so on macOS /tmp (not
+  # cleared on reboot) it accreted the harness skeleton for every gateway x every run (audit R4-LOW-7).
+  local _szdst; _szdst=$(mktemp -d "${TMPDIR:-/tmp}/bench-rsync-sizecheck-XXXXXX")
   local _pl; _pl=$(rsync -an --stats \
     --exclude .git --exclude '*/target' --exclude target --exclude results --exclude node_modules \
     --exclude '*/venv' --exclude venv --exclude __pycache__ --exclude bin --exclude '*.pem' --exclude '*.log' --exclude '.incoming-*' \
-    "$HERE/" "${TMPDIR:-/tmp}/bench-rsync-sizecheck-dst/" 2>/dev/null \
+    "$HERE/" "$_szdst/" 2>/dev/null \
     | awk -F: '/Total file size/{gsub(/[^0-9]/,"",$2); b=$2+0; if(b>=1073741824)printf "%.1fG",b/1073741824; else if(b>=1048576)printf "%.1fM",b/1048576; else if(b>=1024)printf "%.1fK",b/1024; else printf "%dB",b}')
+  rm -rf "$_szdst"
   glog_echo "rsync harness up (${_pl:-?}) ..."; local _t0=$SECONDS
   rsync -az --delete -e "ssh $SSHOPT" \
     --exclude .git --exclude '*/target' --exclude target --exclude results --exclude node_modules \
     --exclude '*/venv' --exclude venv --exclude __pycache__ --exclude bin --exclude '*.pem' --exclude '*.log' --exclude '.incoming-*' \
     "$HERE/" ubuntu@"$ip":~/benchmarking/ >>"$glog" 2>&1
+  # bench_gateway runs under `set -uo pipefail` (no errexit), so a transient SSH drop that makes the
+  # UPWARD rsync exit non-zero would otherwise be ignored and "rsync done" logged regardless - leaving
+  # the box running whatever partial/stale harness tree survived from a prior run. Measuring the wrong
+  # code is indistinguishable from a correct run and passes the promote guard. Abort this box instead:
+  # a stale/partial tree must never be measured (audit R4-LOW-4). RETURN trap terminates the box.
+  local _up_rc=$?
+  if [ "$_up_rc" -ne 0 ]; then
+    glog_echo "rsync UP FAILED (rc=$_up_rc) - harness upload incomplete; refusing to measure a partial/stale tree, tearing down this box"
+    return 1
+  fi
   glog_echo "rsync done (${_pl:-?} in $((SECONDS-_t0))s)"
 
   glog_echo "running $gw (latency + RPS + memory)"
