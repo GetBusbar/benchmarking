@@ -68,13 +68,13 @@ source "$GW_DIR/gateway.sh"
 suite_deadline_start
 
 log "starting mock :$MOCK_PORT (stream ${STREAM_CHUNKS}x${STREAM_CHUNK_BYTES}B @ ${STREAM_INTERVAL_MS}ms)"
-pkill -f "$MOCK" 2>/dev/null; sleep 1
+[ -n "$MOCK" ] && pkill -f "$MOCK" 2>/dev/null; sleep 1
 setsid taskset -c "$MOCKCORES" env \
   MOCK_STREAM_CHUNKS="$STREAM_CHUNKS" MOCK_STREAM_INTERVAL_MS="$STREAM_INTERVAL_MS" \
   MOCK_STREAM_CHUNK_BYTES="$STREAM_CHUNK_BYTES" \
   "$MOCK" -port "$MOCK_PORT" </dev/null >/dev/null 2>&1 &
 sleep 1
-cleanup(){ gw_stop 2>/dev/null; pkill -f "$MOCK" 2>/dev/null; }
+cleanup(){ gw_stop 2>/dev/null; [ -n "$MOCK" ] && pkill -f "$MOCK" 2>/dev/null; }
 trap cleanup EXIT
 
 # run ugen in SSE mode, echo the k=v result fields in a fixed order. HARD TIMEOUT (tmo): an

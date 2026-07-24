@@ -133,10 +133,10 @@ JSON
 fi
 
 log "starting mock :$MOCK_PORT (instant, openai upstream on $GW_PATH)"
-pkill -f "$MOCK" 2>/dev/null; sleep 1
+[ -n "$MOCK" ] && pkill -f "$MOCK" 2>/dev/null; sleep 1
 setsid taskset -c "$MOCKCORES" "$MOCK" -port "$MOCK_PORT" </dev/null >/dev/null 2>&1 &
 sleep 1
-cleanup(){ gw_stop 2>/dev/null; pkill -f "$MOCK" 2>/dev/null; }
+cleanup(){ gw_stop 2>/dev/null; [ -n "$MOCK" ] && pkill -f "$MOCK" 2>/dev/null; }
 trap cleanup EXIT
 
 # openai-shape probe (direct baseline + mock guardrail) — identical to perf/run.sh's probe
@@ -240,7 +240,7 @@ if [ "$XLATE_OK" = 1 ]; then
 
   # ── sustained RPS @ ${SWEEP_TTFT_MS}ms on the translation path ──────────────────────────────────
   log "[$GATEWAY] sweep — sustained RPS @ ${SWEEP_TTFT_MS}ms LLM latency (translation path)"
-  pkill -f "$MOCK" 2>/dev/null; sleep 1
+  [ -n "$MOCK" ] && pkill -f "$MOCK" 2>/dev/null; sleep 1
   setsid taskset -c "$MOCKCORES" env MOCK_TTFT_MS="$SWEEP_TTFT_MS" "$MOCK" -port "$MOCK_PORT" </dev/null >/dev/null 2>&1 &
   sleep 1
   top=1; for w in $SWEEP_DELAYED; do top=$w; done

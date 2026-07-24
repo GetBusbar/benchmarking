@@ -75,6 +75,13 @@ export CORES="${CORES:-0-3}"; LOADCORES="${LOADCORES:-0-3}"; MOCKCORES="${MOCKCO
 export MOCK_PORT="${MOCK_PORT:-8000}"
 RESULTS="$ROOT/results/matrix"; mkdir -p "$RESULTS"
 log(){ echo "[$(date +%H:%M:%S)] $*"; }
+# Strip control chars from gateway-controlled bytes before they reach the operator terminal / the
+# committed fanout log (audit R3-LOW-2). A gateway-under-test is arbitrary third-party software; a
+# crafted request/response body with ANSI/OSC escapes (\x1b[2J, title-set OSC, cursor codes) would
+# otherwise inject into the live terminal and corrupt the committed log via the raw `log "... $note"`
+# lines. Keep printable + whitespace, replace everything else with '?'. (json_escape handles JSON
+# safety separately; this covers the human-facing path json_escape does not.)
+strip_ctrl(){ printf '%s' "$1" | tr -c '[:print:][:space:]' '?'; }
 command -v taskset >/dev/null || taskset(){ shift 2; "$@"; }
 command -v setsid  >/dev/null || setsid(){ "$@"; }
 log "fetching prebuilt rig (mock + loadgen) — no on-box toolchain needed"
@@ -228,7 +235,7 @@ ingress_path(){ case "$1" in
 # preceded by mock_start_record, so a sweep can never leave a non-recording mock in front of a
 # leg-3 check (mock_hit would honestly report "norecord" even if one slipped through).
 mock_start_record(){
-  pkill -f "$MOCK" 2>/dev/null; sleep 1
+  [ -n "$MOCK" ] && pkill -f "$MOCK" 2>/dev/null; sleep 1
   setsid taskset -c "$MOCKCORES" env MOCK_RECORD=1 "$MOCK" -port "$MOCK_PORT" </dev/null >/dev/null 2>&1 &
   local i
   for i in $(seq 1 15); do
@@ -239,13 +246,13 @@ mock_start_record(){
   return 1
 }
 mock_start_plain(){ # instant, NO recording: the identical mock perf/run.sh measures c1 against
-  pkill -f "$MOCK" 2>/dev/null; sleep 1
+  [ -n "$MOCK" ] && pkill -f "$MOCK" 2>/dev/null; sleep 1
   setsid taskset -c "$MOCKCORES" "$MOCK" -port "$MOCK_PORT" </dev/null >/dev/null 2>&1 &
   sleep 1
 }
 log "starting mock :$MOCK_PORT (instant, all six dialects by path, request recording ON)"
 mock_start_record
-cleanup(){ gw_stop 2>/dev/null; pkill -f "$MOCK" 2>/dev/null; }
+cleanup(){ gw_stop 2>/dev/null; [ -n "$MOCK" ] && pkill -f "$MOCK" 2>/dev/null; }
 trap cleanup EXIT
 
 log "[$GATEWAY] build"; gw_build || { echo "build failed"; exit 1; }
@@ -289,7 +296,11 @@ if not d.get("count"):
 elif d.get("body_ok"):
     print("ok")
 else:
-    print("badshape " + d.get("last_snippet", "")[:160].replace("\n", " "))
+    # Strip control chars from the gateway-controlled snippet (audit R3-LOW-2): it flows into a raw
+    # `log "... $note"` line to the operator terminal + committed fanout log; ANSI/OSC escapes must not.
+    _snip = d.get("last_snippet", "")[:160]
+    _snip = "".join(ch if (ch.isprintable() or ch == " ") else "?" for ch in _snip)
+    print("badshape " + _snip)
 PY
 }
 
@@ -595,11 +606,11 @@ run_cell(){ # egress cell path body extra-header...
     # plausibly a rig failure worth a human look than a capability verdict) stays not_verified.
     local _mock_ok=0
     curl -s -m3 "http://127.0.0.1:$MOCK_PORT/__mock/state" 2>/dev/null | grep -q '"recording":true' && _mock_ok=1
-    snip="$(printf '%s' "$LAST_BODY" | head -c 200)"
+    snip="$(strip_ctrl "$(printf '%s' "$LAST_BODY" | head -c 200)")"
     if [ "$_mock_ok" = 1 ] && [ "$LAST_STATUS" != 000 ] && [ "$(cap "$cell" "$egress")" != 1 ]; then
       served='"not_configured"'; reason=probe_failed
       note="HTTP $LAST_STATUS on POST $path, persistent across $_retries attempts with the mock verifiably healthy: a deterministic application-level rejection of this ingress/egress pairing, not a transport failure"
-      CELL_PROBE_NOTE="probe failed: HTTP $LAST_STATUS on POST $path (persistent across $_retries attempts, mock healthy); first bytes: $(printf '%s' "$LAST_BODY" | head -c 160)"
+      CELL_PROBE_NOTE="probe failed: HTTP $LAST_STATUS on POST $path (persistent across $_retries attempts, mock healthy); first bytes: $(strip_ctrl "$(printf '%s' "$LAST_BODY" | head -c 160)")"
       log "[$GATEWAY]   $egress <- $cell : served=not_configured ($note)"
     else
       served='"not_verified"'; reason=upstream_unreachable
@@ -649,7 +660,7 @@ run_cell(){ # egress cell path body extra-header...
   else
     served='"not_configured"'; reason=probe_failed
     note="HTTP $LAST_STATUS on POST $path: $v"
-    CELL_PROBE_NOTE="probe failed: HTTP $LAST_STATUS on POST $path; $v; first bytes: $(printf '%s' "$LAST_BODY" | head -c 160)"
+    CELL_PROBE_NOTE="probe failed: HTTP $LAST_STATUS on POST $path; $v; first bytes: $(strip_ctrl "$(printf '%s' "$LAST_BODY" | head -c 160)")"
   fi
   # Snapshot the CAPABILITY-PROBE status + body NOW, before matrix_cell_perf's post-load leg-3
   # re-verify calls probe() again and overwrites LAST_STATUS/LAST_BODY. Otherwise a green cell whose
@@ -657,7 +668,7 @@ run_cell(){ # egress cell path body extra-header...
   # cell tagged 502/000), contradicting its own "HTTP 200 ..." note. The recorded status must be the
   # status the capability verdict was decided on.
   local cap_status="$LAST_STATUS"
-  snip="$(printf '%s' "$LAST_BODY" | head -c 200)"
+  snip="$(strip_ctrl "$(printf '%s' "$LAST_BODY" | head -c 200)")"
   log "[$GATEWAY]   $egress <- $cell : served=$served ($note)"
   # ADDITIVE per-cell perf: only a green (served=true) cell is swept; the capability verdict above
   # is already final and is not re-derived from the sweep in any way.

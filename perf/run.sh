@@ -75,10 +75,10 @@ source "$GW_DIR/gateway.sh"
 suite_deadline_start
 
 log "starting mock :$MOCK_PORT (instant)"
-pkill -f "$MOCK" 2>/dev/null; sleep 1
+[ -n "$MOCK" ] && pkill -f "$MOCK" 2>/dev/null; sleep 1
 setsid taskset -c "$MOCKCORES" "$MOCK" -port "$MOCK_PORT" </dev/null >/dev/null 2>&1 &
 sleep 1
-cleanup(){ gw_stop 2>/dev/null; pkill -f "$MOCK" 2>/dev/null; }
+cleanup(){ gw_stop 2>/dev/null; [ -n "$MOCK" ] && pkill -f "$MOCK" 2>/dev/null; }
 trap cleanup EXIT
 
 log "[$GATEWAY] build"; gw_build || { echo "build failed"; exit 1; }

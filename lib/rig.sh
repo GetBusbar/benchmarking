@@ -12,7 +12,11 @@ _rig_log(){ echo "[rig] $*" >&2; }
 fetch_rig() { # <repo-root>
   local root="$1" arch="${BENCH_ARCH:-arm64}" err
   mkdir -p "$root/bin"
-  MOCK="$root/bin/mock"; UGEN="$root/bin/ugen"
+  # Cache under an ARCH-STAMPED name (audit R3-LOW-3). Keying only on "bin/mock is executable" silently
+  # reused a wrong-arch binary on a reused local workdir when BENCH_ARCH was switched (an arm64 binary
+  # passes -x on an arm64 host), attributing numbers to the wrong rig. The arch in the filename makes a
+  # switch re-fetch instead of reuse. EC2 boxes are unaffected (rsync --exclude bin gives a clean bin/).
+  MOCK="$root/bin/mock-$arch"; UGEN="$root/bin/ugen-$arch"
   if [ -x "$MOCK" ]; then _rig_log "mock: reusing cached $MOCK"; fi
   if [ ! -x "$MOCK" ]; then
     err="$(curl -fsSL "$RIG_URL/mock-$arch" -o "$MOCK" 2>&1)"

@@ -100,13 +100,13 @@ suite_deadline_start
 
 # Start the mock UNPACED: interval 0 = every content frame emitted back to back. Long bursts.
 log "starting mock :$MOCK_PORT (UNPACED stream ${SC_CHUNKS}x${SC_FRAME_BYTES}B @ 0ms)"
-pkill -f "$MOCK" 2>/dev/null; sleep 1
+[ -n "$MOCK" ] && pkill -f "$MOCK" 2>/dev/null; sleep 1
 setsid taskset -c "$MOCKCORES" env \
   MOCK_STREAM_CHUNKS="$SC_CHUNKS" MOCK_STREAM_INTERVAL_MS=0 \
   MOCK_STREAM_CHUNK_BYTES="$SC_FRAME_BYTES" \
   "$MOCK" -port "$MOCK_PORT" </dev/null >/dev/null 2>&1 &
 sleep 1
-cleanup(){ gw_stop 2>/dev/null; pkill -f "$MOCK" 2>/dev/null; }
+cleanup(){ gw_stop 2>/dev/null; [ -n "$MOCK" ] && pkill -f "$MOCK" 2>/dev/null; }
 trap cleanup EXIT
 
 # run ugen in SSE mode, echo the k=v result fields in a fixed order (same parser style as stream/).
