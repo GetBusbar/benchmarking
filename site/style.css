@@ -438,25 +438,52 @@ tbody tr { cursor: pointer; }
   white-space: nowrap; font-variant: small-caps; letter-spacing: .02em;
 }
 
-/* Translation ingress/egress picker (Translation tab only) */
-.xlate-picker label { display: inline-flex; align-items: center; gap: .4rem; color: var(--fg-dim); font-size: .85rem; }
-.xlate-picker select {
+/* Cell chooser (Performance + Streaming): the Peak | Same | Custom segmented control + dialect dropdowns. */
+.cell-chooser { display: flex; flex-wrap: wrap; gap: .6rem; align-items: center; }
+.cell-chooser.hidden { display: none; }
+.cell-chooser label { display: inline-flex; align-items: center; gap: .4rem; color: var(--fg-dim); font-size: .85rem; }
+.cell-chooser label.hidden { display: none; }
+.cell-chooser select {
   background: var(--bg-raise); color: var(--fg); border: 1px solid var(--border);
   border-radius: 6px; padding: .25rem .5rem; font-size: .85rem; font-family: inherit;
 }
-.xlate-picker .xlate-arrow { color: var(--fg-mute); }
+.cell-chooser .xlate-arrow { color: var(--fg-mute); }
+/* Segmented Peak | Same | Custom control. */
+.seg { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.seg-btn {
+  appearance: none; border: 0; border-right: 1px solid var(--border); background: var(--bg-raise);
+  color: var(--fg-dim); font: inherit; font-size: .82rem; padding: .3rem .8rem; cursor: pointer;
+}
+.seg-btn:last-child { border-right: 0; }
+.seg-btn:hover { color: var(--fg); }
+.seg-btn.active { background: var(--accent, #4cc38a); color: #06120c; font-weight: 600; }
 
 /* Floating hover popup for matrix cells: a small card that follows the hovered cell. */
 .matrix-pop {
-  position: absolute; z-index: 50; max-width: 22rem; pointer-events: none;
+  position: absolute; z-index: 50; max-width: 24rem; pointer-events: none;
   border: 1px solid var(--border); border-radius: 8px; background: var(--bg-raise);
   padding: .55rem .7rem; font-size: .8rem; box-shadow: 0 6px 20px rgba(0,0,0,.28);
 }
 .matrix-pop.hidden { display: none; }
-.matrix-pop h4 { margin: 0 0 .3rem; font-size: .82rem; }
+.matrix-pop h4 { margin: 0 0 .35rem; font-size: .82rem; }
 .matrix-pop .pop-perf { font-weight: 600; margin-bottom: .2rem; }
+.matrix-pop .pop-metrics { display: grid; grid-template-columns: auto auto; gap: .05rem .8rem; margin-bottom: .3rem; }
+.matrix-pop .pop-metrics > div { display: contents; }
+.matrix-pop .pop-metrics span { color: var(--fg-dim); }
+.matrix-pop .pop-metrics b { text-align: right; font-variant-numeric: tabular-nums; }
+.matrix-pop .pop-delta { font-size: .77rem; color: var(--fg); margin-bottom: .2rem; }
+.matrix-pop .pop-delta.muted { color: var(--fg-dim); }
 .matrix-pop .pop-note { color: var(--fg-dim); font-size: .76rem; }
+.matrix-pop .pop-cta { font-size: .72rem; margin-top: .3rem; }
 .cell { cursor: default; }
+/* A served (green) matrix cell is clickable → Performance Custom. */
+.cell.served { cursor: pointer; }
+
+/* Memory tab: the recovery-curve column cell + the memory chart region under the table. */
+td.memcurve { min-width: 260px; }
+td.memcurve.na { color: var(--fg-mute); }
+.memory-charts.hidden { display: none; }
+.memory-charts { margin-top: 1.5rem; }
 
 /* charts (now folded into the Method tab, below the suite cards) */
 .charts-heading { margin: 2.2rem 0 .2rem; padding-top: 1.4rem; border-top: 1px solid var(--border); }

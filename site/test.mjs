@@ -339,8 +339,8 @@ test("the class/lang filter chip rows are gone; stale URL params are ignored", (
   // A stale ?cls= / ?lang= from an old shared URL decodes without error and
   // without filtering (no invisible filter with no UI to clear); the rest of the
   // params on the same URL still apply.
-  const st = app.decodeUrl("/gateways/passthrough", "?cls=Control%20plane&lang=Rust&q=bus");
-  assert.equal(st.view, "passthrough");
+  const st = app.decodeUrl("/gateways/performance", "?cls=Control%20plane&lang=Rust&q=bus");
+  assert.equal(st.view, "performance");
   assert.equal(st.q, "bus");
   assert.ok(!("classes" in st) && !("langs" in st), "retired filter state fields are gone");
   st.q = "";
@@ -388,11 +388,11 @@ test("default state encodes to /gateways and decodes back to defaults", () => {
   assert.equal(back.sortDesc, def.sortDesc);
   assert.equal(back.drawer, null);
   assert.deepEqual(back.cmp, []);
-  // Passthrough is a real tab at its own path now, no longer the landing view.
-  assert.equal(app.decodeUrl("/gateways/passthrough", "").view, "passthrough");
+  // Performance is a real tab at its own path now, no longer the landing view.
+  assert.equal(app.decodeUrl("/gateways/performance", "").view, "performance");
   const st = app.newState();
-  st.view = "passthrough";
-  assert.equal(app.encodeUrl(st), "/gateways/passthrough");
+  st.view = "performance";
+  assert.equal(app.encodeUrl(st), "/gateways/performance");
 });
 
 test("the site root is the HOME landing page, above the category nav", () => {
@@ -430,8 +430,13 @@ test("unknown paths land on home; unknown views land on the category overview", 
   assert.equal(app.decodeUrl("/no-such-category/matrix", "").view, "home");
   assert.equal(app.decodeUrl("/gateways/no-such-view", "").view, "gateways");
   assert.equal(app.decodeUrl("/gateways/no-such-view", "").category, "gateways");
-  // legacy view aliases still resolve onto live tabs (the old default stays reachable)
-  assert.equal(app.decodeUrl("/gateways/results", "").view, "passthrough");
+  // legacy view aliases still resolve onto live tabs (the old Peak/Matched/passthrough/translation
+  // tabs all fold into Performance; results/charts keep their old targets)
+  assert.equal(app.decodeUrl("/gateways/results", "").view, "performance");
+  assert.equal(app.decodeUrl("/gateways/peak", "").view, "performance");
+  assert.equal(app.decodeUrl("/gateways/matched", "").view, "performance");
+  assert.equal(app.decodeUrl("/gateways/passthrough", "").view, "performance");
+  assert.equal(app.decodeUrl("/gateways/translation", "").view, "performance");
   assert.equal(app.decodeUrl("/gateways/charts", "").view, "method");
   // the documented deep link shape
   const st = app.decodeUrl("/gateways/matrix", "?sort=mempeak&dir=asc");
@@ -456,13 +461,14 @@ test("decode rejects a bogus sort column", () => {
 });
 
 test("a direct URL load defaults each tab to its column's natural direction", () => {
-  // Passthrough / Translation headline on Sustained RPS -> descending (higher is better)
-  const pass = app.decodeUrl("/gateways/passthrough", "");
+  // Performance headline on Sustained RPS -> descending (higher is better)
+  const pass = app.decodeUrl("/gateways/performance", "");
   assert.equal(pass.sortCol, "rps20");
   assert.equal(pass.sortDesc, true);
-  const xlate = app.decodeUrl("/gateways/translation", "");
-  assert.equal(xlate.sortCol, "xlrps");
-  assert.equal(xlate.sortDesc, true);
+  // Memory headline on Peak RSS -> ascending (lower is better)
+  const mem = app.decodeUrl("/gateways/memory", "");
+  assert.equal(mem.sortCol, "mempeak");
+  assert.equal(mem.sortDesc, false);
   // Streaming headline on added TTFT -> ASCENDING (lower is better); the hard-refresh bug
   // was this defaulting to descending and floating the worst gateway to the top.
   const stream = app.decodeUrl("/gateways/streaming", "");
@@ -490,19 +496,24 @@ test("star counts format compactly and degrade to null", () => {
   assert.equal(app.fmtStars(undefined), null);
 });
 
-test("Gateways leads the tab order and is not a perf view", () => {
-  assert.deepEqual(app.VIEWS, ["gateways", "passthrough", "translation", "streaming", "matrix", "method"]);
+test("the unified tab order: Gateways · Memory · Performance · Streaming · matrix · method", () => {
+  assert.deepEqual(app.VIEWS, ["gateways", "memory", "performance", "streaming", "matrix", "method"]);
   assert.equal(app.VIEW_LABELS.gateways, "Gateways");
+  assert.equal(app.VIEW_LABELS.memory, "Memory");
+  assert.equal(app.VIEW_LABELS.performance, "Performance");
   // the overview is a roster section, not a ranked perf table
   assert.ok(!app.PERF_VIEWS.has("gateways"));
   assert.ok(!(app.VIEW_SORT && "gateways" in app.VIEW_SORT));
+  // Memory is a table view (its own per-gateway columns) but NOT cell-chooser driven.
+  assert.ok(app.TABLE_VIEWS.has("memory") && !app.PERF_VIEWS.has("memory"));
+  assert.ok(app.PERF_VIEWS.has("performance") && app.PERF_VIEWS.has("streaming"));
   // the perf tabs are pure measurement: no implementation-language column anywhere.
   // Language lives only on the Gateways overview roster.
   for (const [view, cols] of Object.entries(app.COLUMN_SETS)) {
     assert.ok(!cols.some((c) => c.id === "lang"), `${view} still carries a lang column`);
   }
-  // the measurement-fact pill (Tested on) stays on Passthrough
-  assert.ok(app.COLUMN_SETS.passthrough.some((c) => c.id === "tested"));
+  // the measurement-fact pill (Tested on) stays on Performance (shown in Peak mode)
+  assert.ok(app.COLUMN_SETS.performance.some((c) => c.id === "tested"));
 });
 
 // ---- three-tab split: honest passthrough / translation sourcing ---------------
@@ -552,26 +563,25 @@ test("Streaming tab keeps measured streaming refusals as visible rows", () => {
   }
 });
 
-test("Translation tab lists only gateways serving the pinned in->out pair", () => {
-  // g0 serves openai->anthropic (the default pair), g1 serves only openai->gemini.
-  // MED-3 (mirrored onto translation): the translation RPS columns are GATED on the mock-bound
-  // honesty flag exactly like the passthrough columns — a positive value is shown ONLY when
-  // rps_sustained_20ms_mock_bound === false (certified gateway-limited). Stamp the fixtures certified
-  // so the cell reads a number; an unstamped/mock-bound value would (correctly) read n/a instead.
+test("Performance Custom shows EVERY gateway (unfiltered); a gateway lacking the pinned cell reads n/a", () => {
+  // Unlike the old Matched tab, Performance Custom NEVER filters a competitor out: every gateway
+  // appears, and one that does not serve the pinned in->out cell simply reads n/a on that row.
+  // g0 serves openai->anthropic, g1 serves only openai->gemini.
   const g0 = { display: "g0", key: "g0", lang: "Rust",
     matrix: mkMatrix({ anthropic: { openai: { served: true, perf: { rps_sustained_20ms: 100, rps_sustained_20ms_mock_bound: false, added_latency_p99_us: 200 } } } }) };
   const g1 = { display: "g1", key: "g1", lang: "Go",
     matrix: mkMatrix({ gemini: { openai: { served: true, perf: { rps_sustained_20ms: 90, rps_sustained_20ms_mock_bound: false, added_latency_p99_us: 300 } } } }) };
-  const st = app.newState();
-  st.view = "translation"; // default pair openai -> anthropic
-  assert.deepEqual(app.applyFilters([g0, g1], st).map((g) => g.key), ["g0"]);
-  // repin to openai -> gemini and the row set follows the pair
-  st.xlateOut = "gemini";
-  assert.deepEqual(app.applyFilters([g0, g1], st).map((g) => g.key), ["g1"]);
-  // the cell reader returns the pinned pair's perf
-  st.xlateOut = "anthropic";
-  assert.equal(app.xlateCell(g0, "rps_sustained_20ms", String).text, "100");
-  assert.equal(app.xlateCell(g0, "rps_sustained_20ms", String).na, false);
+  const st = { ...app.newState(), view: "performance", mode: "custom", xlateIn: "openai", xlateOut: "anthropic" };
+  // BOTH gateways appear (no filtering in Custom mode).
+  assert.deepEqual(app.applyFilters([g0, g1], st).map((g) => g.key), ["g0", "g1"]);
+  // g0 serves the pinned cell -> a number; g1 does not -> n/a.
+  assert.equal(app.chooserPerfCell(g0, "rps_sustained_20ms", String, st).text, "100");
+  assert.equal(app.chooserPerfCell(g1, "rps_sustained_20ms", String, st).na, true);
+  // Repin to openai->gemini: now g1 reads a number and g0 reads n/a, still both present.
+  const st2 = { ...st, xlateOut: "gemini" };
+  assert.equal(app.chooserPerfCell(g1, "rps_sustained_20ms", String, st2).text, "90");
+  assert.equal(app.chooserPerfCell(g0, "rps_sustained_20ms", String, st2).na, true);
+  assert.deepEqual(app.applyFilters([g0, g1], st2).map((g) => g.key), ["g0", "g1"]);
 });
 
 // ---- consistency guard: one canonical value per (gateway, metric) -----------
@@ -812,7 +822,7 @@ test("a zero RPS cell renders 0 with the no-qualifying-ceiling tooltip", () => {
   const zero = { best_cell: { dialect: "openai", source: "matrix",
     rps_sustained_20ms: 18, rps_sustained_20ms_mock_bound: false,
     rps_max_proxy: 0, rps_max_proxy_mock_bound: false } };
-  const cols = app.COLUMN_SETS.passthrough;
+  const cols = app.COLUMN_SETS.performance;
   const rpsmax = cols.find((c) => c.id === "rpsmax").get(zero);
   assert.equal(rpsmax.text, "0");
   assert.equal(rpsmax.na, false);
@@ -1114,9 +1124,9 @@ test("memory recovery column: present shows the value, absent renders muted n/a 
   assert.equal(naCell.na, true, "an absent recovered_rss_mib must render n/a");
   assert.equal(naCell.text, "n/a");
   assert.equal(naCell.v, null, "an absent recovered_rss_mib carries a null value, never 0");
-  // The board carries the Recovered column, gated best = min (lower recovery releases more).
-  const col = app.COLUMN_SETS.passthrough.find((c) => c.id === "memrecov");
-  assert.ok(col, "the Recovered (MiB) column exists on the board");
+  // The Memory tab carries the Recovered column, gated best = min (lower recovery releases more).
+  const col = app.COLUMN_SETS.memory.find((c) => c.id === "memrecov");
+  assert.ok(col, "the Recovered @60s column exists on the Memory tab");
   assert.ok(/release memory/.test(col.title), "the column tooltip explains the recovery signal");
   const rec = app.LANES.find((l) => l.key === "memory").metrics.find((m) => m.k === "recovered_rss_mib");
   assert.ok(rec && rec.best === "min", "the memory lane ranks recovered_rss_mib best = min");
@@ -1163,25 +1173,23 @@ test("download: gatewayResultsJson is the gateway's complete record as parseable
   assert.equal(`${g.key}-results.json`, "dgw-results.json");
 });
 
-test("default translation pair has no silent all-n/a served row", () => {
-  // The Translation tab's default pair (openai -> anthropic): any gateway that serves it should
-  // have per-cell perf, or its row is a table of n/a cells. A gateway whose per-cell sweep never
-  // ran AT ALL (mid re-run, e.g. a best_cell synthesized as perf-fallback) is known-pending and
-  // covered by the guard's no-per-cell-perf WARNING above; anything else all-n/a is a bug.
-  const st = app.newState();
-  st.view = "translation"; // pinned pair defaults to openai -> anthropic
+test("Performance Custom (openai->anthropic) has no silent all-n/a served row", () => {
+  // In Custom mode on a pinned pair, any gateway that SERVES that cell should have per-cell perf,
+  // or its row is all n/a. A gateway whose per-cell sweep never ran AT ALL (mid re-run) is
+  // known-pending and covered by the guard's no-per-cell-perf WARNING; anything else all-n/a is a bug.
+  const st = { ...app.newState(), view: "performance", mode: "custom", xlateIn: "openai", xlateOut: "anthropic" };
   const KEYS = ["added_latency_p50_us", "added_latency_p99_us", "rps_sustained_20ms", "rps_max_proxy"];
-  for (const g of app.applyFilters(data.gateways, st)) {
+  for (const g of data.gateways) {
+    if (!(g.matrix && app.chooserHasCell(g, st))) continue;   // only rows that serve the pinned cell
     const sweptAny = Object.values(g.matrix.upstreams || {}).some((u) =>
       Object.values(u.cells || {}).some((c) => c && c.served === true && c.perf));
     if (!sweptAny) {
-      // no per-cell sweep for this gateway at all: must at least trip the coverage warning
       const { warnings } = checkConsistency({ gateways: [g] }, app);
       assert.ok(warnings.some((w) => w.includes("no per-cell perf")), `${g.key}: unswept but unflagged`);
       continue;
     }
-    const anyVal = KEYS.some((k) => app.xlateCell(g, k, String).v != null);
-    assert.ok(anyVal, `${g.key} serves the default translation pair but every metric is n/a`);
+    const anyVal = KEYS.some((k) => app.chooserPerfCell(g, k, String, st).v != null);
+    assert.ok(anyVal, `${g.key} serves the pinned cell but every metric is n/a`);
   }
 });
 
