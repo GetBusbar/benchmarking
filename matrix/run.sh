@@ -64,6 +64,18 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 GATEWAY="${GATEWAY:-busbar}"
+# ── RUN CLOCK ────────────────────────────────────────────────────────────────────────────────────
+# How long THIS gateway's suite took on THIS box on THIS day. matrix/run.sh is the sole producer, so
+# the script's own lifetime IS the gateway's run: stamp t0 here, at the very top, before any work.
+# Published as started_at / finished_at / duration_s (+ a phase_s breakdown) on the matrix json and
+# the snapshot. Previously this was only recoverable by parsing the orchestrator log, which is not
+# published — so a snapshot could not answer "how long did this gateway take", and a duration that
+# jumps run-over-run (slow box, build regression, a sweep taking more rungs) went unnoticed.
+# measured_at stays exactly what it was: the single instant the results were stamped, which the board
+# ages by. These describe the RUN, not the measurement instant.
+RUN_T0=$(date +%s)
+RUN_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+BUILD_S=null; MATRIX_6X6_S=null; MEMORY_WINDOW_S=null   # phases that never ran stay null, never 0
 # Manifests live in gateways/<name>/ as everywhere else; matrix/mock-gateway/ is the one extra
 # fixture (kept OUT of gateways/ on purpose so run-all discovery never fields it as a contender).
 if [ -f "$ROOT/gateways/$GATEWAY/gateway.sh" ]; then export GW_DIR="$ROOT/gateways/$GATEWAY"
@@ -367,7 +379,9 @@ cleanup(){
 }
 trap cleanup EXIT INT TERM
 
+_PHASE_T0=$(date +%s)
 log "[$GATEWAY] build"; gw_build || { echo "build failed"; exit 1; }
+BUILD_S=$(( $(date +%s) - _PHASE_T0 ))
 BUILD="$(gw_version 2>/dev/null | tr -d '\n' | sed 's/"/\\"/g')"
 # OOTB config artifact — capture the gateway's as-shipped default config to results/config/<gw>.txt
 # and record the sidecar pointer. Previously the perf suite was the natural home (it always ran); now
@@ -1112,6 +1126,7 @@ COMPAT_CELLS=""; COMPAT_SHAPE=""; COMPAT_SERVED=false; COMPAT_ERR=""
 # re-booting the same process six times.
 HAVE_EGRESS_FN=0; declare -f gw_matrix_egress >/dev/null && HAVE_EGRESS_FN=1
 DEFAULT_UP=0; DEFAULT_WARM_OK=0; DEFAULT_WARM_LAST=000; DEFAULT_SERVE_ERR=""; DEFAULT_WARM_CELL=openai
+_PHASE_T0=$(date +%s)   # phase clock: the whole 6x6 (probe + per-cell perf sweep + per-cell streaming)
 for EGRESS in $EGRESS_ALL; do
   CELLS_JSON=""
   # Wall-clock backstop: if a pathological gateway has already burned the suite ceiling, stop probing
@@ -1182,6 +1197,7 @@ for EGRESS in $EGRESS_ALL; do
   fi
   SERVE_ERR=""
 done
+MATRIX_6X6_S=$(( $(date +%s) - _PHASE_T0 ))
 
 # ── the memory window: AFTER the 6x6, on the peak cell, in a FRESH cold-restarted process ──────────
 # Picks load_cell = the highest-rps_max_proxy served cell whose sweep was CERTIFIED (not mock/rig-
@@ -1398,10 +1414,16 @@ _mem_median(){
 
 # THE MEMORY WINDOW: runs AFTER the whole 6x6 above. Picks the peak cell from the served cells recorded
 # during the loop, cold-restarts a fresh process for it, and runs idle -> fixed load -> recovery.
+_PHASE_T0=$(date +%s)
 matrix_memory_window
+MEMORY_WINDOW_S=$(( $(date +%s) - _PHASE_T0 ))
 
 # ONE canonical measured_at for both the per-suite matrix json AND the snapshot artifact (same instant).
 MEASURED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+# Close the run clock here, at the same instant as measured_at: everything after this point is the
+# (sub-second) snapshot assembly + the printed summary table, not measurement work.
+RUN_FINISHED_AT="$MEASURED_AT"
+RUN_DURATION_S=$(( $(date +%s) - RUN_T0 ))
 
 cat > "$RESULTS/$GATEWAY.json" <<JSON
 {
@@ -1431,7 +1453,11 @@ cat > "$RESULTS/$GATEWAY.json" <<JSON
   "arch": "${BENCH_ARCH:-$(uname -m)}",
   "hardware": "${BENCH_HARDWARE:-$(uname -m) $(nproc 2>/dev/null || echo '?')vCPU}",
   "rig": $(command -v rig_provenance_json >/dev/null 2>&1 && rig_provenance_json || echo null),
-  "measured_at": "$MEASURED_AT"
+  "measured_at": "$MEASURED_AT",
+  "started_at": "$RUN_STARTED_AT",
+  "finished_at": "$RUN_FINISHED_AT",
+  "duration_s": $RUN_DURATION_S,
+  "phase_s": { "build": $BUILD_S, "matrix_6x6": $MATRIX_6X6_S, "memory_window": $MEMORY_WINDOW_S }
 }
 JSON
 echo "================================================================"
@@ -1493,6 +1519,14 @@ snap = {
     "gateway": m.get("gateway"),
     "build": m.get("build"),
     "measured_at": m.get("measured_at"),
+    # RUN TIMING: how long this gateway's suite took on this box on this day. measured_at above is the
+    # instant the results were stamped (what the board ages by); these describe the RUN. phase_s shows
+    # WHERE a long run went (build vs the 6x6 vs the post-6x6 memory window). All .get() -> null-safe:
+    # snapshots written before this existed simply carry null, and every reader must tolerate absence.
+    "started_at": m.get("started_at"),
+    "finished_at": m.get("finished_at"),
+    "duration_s": m.get("duration_s"),
+    "phase_s": m.get("phase_s"),
     "arch": m.get("arch"),
     "hardware": m.get("hardware"),
     # RIG PROVENANCE (audit #21): WHICH measurement instrument produced these numbers. The rig binaries
