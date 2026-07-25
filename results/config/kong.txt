@@ -1,24 +1,85 @@
 # ── kong.gen.yml (rendered DB-less declarative; loaded via KONG_DECLARATIVE_CONFIG) ──
 _format_version: "3.0"
+# ONE static config, four upstream providers. The client picks the upstream with a request header on
+# the SAME uniform OpenAI path: `x-llm-provider: anthropic|gemini|bedrock`; no header = openai.
+# Route priority puts every header-matched route above the header-less openai fallback
+# (kong/router/transform.lua get_priority: match_weight occupies the top 3 bits).
 services:
   - name: llm
+    # Placeholder: ai-proxy overrides host/port/scheme/path per plugin instance via
+    # kong.service.set_target() + set_path() from model.options.upstream_url.
     url: http://127.0.0.1:1
     routes:
+      - name: chat-anthropic
+        paths: ["/v1/chat/completions"]
+        headers:
+          x-llm-provider: ["anthropic"]
+        strip_path: false
+        plugins:
+          - name: ai-proxy
+            config:
+              route_type: llm/v1/chat
+              auth:
+                header_name: Authorization
+                header_value: "Bearer dummy"
+              model:
+                provider: anthropic
+                name: gpt-4o-mini
+                options:
+                  anthropic_version: "2023-06-01"
+                  upstream_url: "http://127.0.0.1:8000/v1/messages"
+      - name: chat-gemini
+        paths: ["/v1/chat/completions"]
+        headers:
+          x-llm-provider: ["gemini"]
+        strip_path: false
+        plugins:
+          - name: ai-proxy
+            config:
+              route_type: llm/v1/chat
+              auth:
+                header_name: Authorization
+                header_value: "Bearer dummy"
+              model:
+                provider: gemini
+                name: gpt-4o-mini
+                options:
+                  upstream_url: "http://127.0.0.1:8000/v1beta/models/gpt-4o-mini:generateContent"
+      - name: chat-bedrock
+        paths: ["/v1/chat/completions"]
+        headers:
+          x-llm-provider: ["bedrock"]
+        strip_path: false
+        plugins:
+          - name: ai-proxy
+            config:
+              route_type: llm/v1/chat
+              auth:
+                aws_access_key_id: "AKIAMOCKACCESSKEY"
+                aws_secret_access_key: "mock-secret-access-key"
+              model:
+                provider: bedrock
+                name: gpt-4o-mini
+                options:
+                  bedrock:
+                    aws_region: "us-east-1"
+                  upstream_url: "http://127.0.0.1:8000/model/gpt-4o-mini/converse"
+      # Header-less fallback: the OOTB OpenAI client experience (lowest route priority).
       - name: chat
         paths: ["/v1/chat/completions"]
         strip_path: false
-    plugins:
-      - name: ai-proxy
-        config:
-          route_type: llm/v1/chat
-          auth:
-            header_name: Authorization
-            header_value: "Bearer dummy"
-          model:
-            provider: openai
-            name: gpt-4o-mini
-            options:
-              upstream_url: "http://127.0.0.1:8000/v1/chat/completions"
+        plugins:
+          - name: ai-proxy
+            config:
+              route_type: llm/v1/chat
+              auth:
+                header_name: Authorization
+                header_value: "Bearer dummy"
+              model:
+                provider: openai
+                name: gpt-4o-mini
+                options:
+                  upstream_url: "http://127.0.0.1:8000/v1/chat/completions"
 
 # ── launch env (non-secret) ──
 KONG_DATABASE=off

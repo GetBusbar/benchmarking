@@ -1,0 +1,668 @@
+{
+ "schema_version": 1,
+ "gateway": "kong",
+ "build": "kong:3.8",
+ "measured_at": "2026-07-25T16:30:43Z",
+ "started_at": "2026-07-25T16:28:58Z",
+ "finished_at": "2026-07-25T16:30:43Z",
+ "duration_s": 105,
+ "phase_s": {
+  "build": 0,
+  "matrix_6x6": 105,
+  "memory_window": 0
+ },
+ "arch": "arm64",
+ "hardware": "AWS m7g.4xlarge (Graviton3, 16 cores / 64 GB). Gateway-under-test pinned to 4 cores (the comparable basis); mock and load generator on 6 cores each so the mock never bottlenecks the streaming sweep. Ubuntu 24.04. One dedicated box per gateway.",
+ "rig": {
+  "arch": "arm64",
+  "release_url": "https://github.com/GetBusbar/benchmarking/releases/download/rig",
+  "mock": {
+   "origin": "cached",
+   "sha256": "43763f41981bf7eef1b1f614310bd6548f21a9c5e78ec03ced6346ac07406ec6",
+   "asset_updated_at": "2026-07-25T09:40:40Z"
+  },
+  "ugen": {
+   "origin": "cached",
+   "sha256": "ff8be365f53f6ea1bf4cea580c3ffb9d25da2c70767119e8c638aa978a792bcc",
+   "asset_updated_at": "2026-07-25T09:40:40Z"
+  },
+  "box_qualify": {
+   "verdict": "pass",
+   "attempts": 1,
+   "reason": "ok/gateway_fault",
+   "detail": "floor p99 70us, drift -5.41% vs baseline 74us (band +/-4.0%), spread 2.86%, p99/p50 1.35 | the gateway did not become ready during the replay (gateway did not become ready (last HTTP 000 on /v1/chat/completions)) \u2014 a GATEWAY fault, not a box verdict; proceeding so the run records it honestly",
+   "thresholds": {
+    "floor_drift_pct": 4.0,
+    "floor_ratchet_pct": 8.0,
+    "floor_abs_us": [
+     45,
+     115
+    ],
+    "jitter_spread_pct": 25,
+    "jitter_p99_p50_max": 4.0,
+    "peak_drift_pct": 100000,
+    "peak_ratchet_pct": 40,
+    "baseline_window": 5,
+    "provisional": true,
+    "recalibration_target_pct": 2.5
+   },
+   "stage1": {
+    "stage": 1,
+    "arch": "arm64",
+    "hardware": "AWS m7g.4xlarge (Graviton3, 16 cores / 64 GB). Gateway-under-test pinned to 4 cores (the comparable basis); mock and load generator on 6 cores each so the mock never bottlenecks the streaming sweep. Ubuntu 24.04. One dedicated box per gateway.",
+    "measured_at": "2026-07-25T16:28:02Z",
+    "probe_s": 24,
+    "samples": 7,
+    "sample_dur_s": 3,
+    "samples_p99_us": [
+     70,
+     71,
+     69,
+     71,
+     70,
+     70,
+     71
+    ],
+    "samples_p50_us": [
+     51,
+     50,
+     52,
+     52,
+     52,
+     53,
+     52
+    ],
+    "samples_rps": [
+     18955,
+     19322,
+     18831,
+     18796,
+     18703,
+     18521,
+     18635
+    ],
+    "floor_p99_us_median": 70,
+    "floor_p99_us_min": 69,
+    "floor_p99_us_max": 71,
+    "floor_p50_us_median": 52,
+    "c1_rps_median": 18796
+   },
+   "stage2": {
+    "stage": 2,
+    "error": "gateway did not become ready (last HTTP 000 on /v1/chat/completions)",
+    "gateway_fault": true,
+    "cell": "openai>gemini",
+    "replay_rps": null
+   },
+   "baseline": {
+    "floor_p99_us": 74.0,
+    "floor_oldest_p99_us": 74.0,
+    "floor_runs": 1.0,
+    "peak_rps": 16221.0,
+    "peak_oldest_rps": 16221.0,
+    "peak_runs": 1.0,
+    "peak_cell": "openai>gemini"
+   }
+  }
+ },
+ "config": {
+  "files": {
+   "kong.txt": "# \u2500\u2500 kong.gen.yml (rendered DB-less declarative; loaded via KONG_DECLARATIVE_CONFIG) \u2500\u2500\n_format_version: \"3.0\"\n# ONE static config, four upstream providers. The client picks the upstream with a request header on\n# the SAME uniform OpenAI path: `x-llm-provider: anthropic|gemini|bedrock`; no header = openai.\n# Route priority puts every header-matched route above the header-less openai fallback\n# (kong/router/transform.lua get_priority: match_weight occupies the top 3 bits).\nservices:\n  - name: llm\n    # Placeholder: ai-proxy overrides host/port/scheme/path per plugin instance via\n    # kong.service.set_target() + set_path() from model.options.upstream_url.\n    url: http://127.0.0.1:1\n    routes:\n      - name: chat-anthropic\n        paths: [\"/v1/chat/completions\"]\n        headers:\n          x-llm-provider: [\"anthropic\"]\n        strip_path: false\n        plugins:\n          - name: ai-proxy\n            config:\n              route_type: llm/v1/chat\n              auth:\n                header_name: Authorization\n                header_value: \"Bearer dummy\"\n              model:\n                provider: anthropic\n                name: gpt-4o-mini\n                options:\n                  anthropic_version: \"2023-06-01\"\n                  upstream_url: \"http://127.0.0.1:8000/v1/messages\"\n      - name: chat-gemini\n        paths: [\"/v1/chat/completions\"]\n        headers:\n          x-llm-provider: [\"gemini\"]\n        strip_path: false\n        plugins:\n          - name: ai-proxy\n            config:\n              route_type: llm/v1/chat\n              auth:\n                header_name: Authorization\n                header_value: \"Bearer dummy\"\n              model:\n                provider: gemini\n                name: gpt-4o-mini\n                options:\n                  upstream_url: \"http://127.0.0.1:8000/v1beta/models/gpt-4o-mini:generateContent\"\n      - name: chat-bedrock\n        paths: [\"/v1/chat/completions\"]\n        headers:\n          x-llm-provider: [\"bedrock\"]\n        strip_path: false\n        plugins:\n          - name: ai-proxy\n            config:\n              route_type: llm/v1/chat\n              auth:\n                aws_access_key_id: \"AKIAMOCKACCESSKEY\"\n                aws_secret_access_key: \"mock-secret-access-key\"\n              model:\n                provider: bedrock\n                name: gpt-4o-mini\n                options:\n                  bedrock:\n                    aws_region: \"us-east-1\"\n                  upstream_url: \"http://127.0.0.1:8000/model/gpt-4o-mini/converse\"\n      # Header-less fallback: the OOTB OpenAI client experience (lowest route priority).\n      - name: chat\n        paths: [\"/v1/chat/completions\"]\n        strip_path: false\n        plugins:\n          - name: ai-proxy\n            config:\n              route_type: llm/v1/chat\n              auth:\n                header_name: Authorization\n                header_value: \"Bearer dummy\"\n              model:\n                provider: openai\n                name: gpt-4o-mini\n                options:\n                  upstream_url: \"http://127.0.0.1:8000/v1/chat/completions\"\n\n# \u2500\u2500 launch env (non-secret) \u2500\u2500\nKONG_DATABASE=off\nKONG_ANONYMOUS_REPORTS=off\nKONG_NGINX_WORKER_PROCESSES=4\nKONG_DECLARATIVE_CONFIG=/kong/kong.yml\nKONG_PROXY_LISTEN=0.0.0.0:8080\n"
+  }
+ },
+ "matrix": {
+  "gateway": "kong",
+  "build": "kong:3.8",
+  "matrix_version": 2,
+  "served": false,
+  "serve_error": "failed to boot after 3 attempts: attempt 1: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 2: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 3: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ]",
+  "upstream_shape": "openai",
+  "upstream_note": "v2: full 6x6. Top-level cells are the openai-egress row for v1 compatibility; the full grid is under upstreams.<egress>.cells keyed by ingress dialect.",
+  "egress_configured": "openai anthropic gemini bedrock",
+  "probe_first": true,
+  "capability_note": "advisory context only (probe-first: every cell is probed regardless): Kong 3.8 ai-proxy accepts only OpenAI-canonical ingress; it emits no OpenAI-Responses route_type (enum: llm/v1/chat|completions|preserve) and its Cohere driver emits the Cohere v1 /v1/chat shape, not the v2 dialect this suite probes (kong/llm/init.lua, drivers/shared.lua, schemas/init.lua @3.8.0)",
+  "cell_perf_sweep": true,
+  "sweep_rung_selection": "adaptive",
+  "sweep_ttft_ms": 20,
+  "p99_ceiling_ms": 1000,
+  "sweep_dur": 10,
+  "cell_stream": true,
+  "memory": {
+   "protocol": "post-6x6, fresh cold restart: 60s COLD idle (measured before the process serves any request) -> fixed load on the peak cell (c=64, payload=4096B, 120s, identical on every gateway) -> 60s recovery",
+   "served": false,
+   "serve_error": "no served cell in the 6x6 sweep",
+   "load_cell": null,
+   "load_recipe": {
+    "concurrency": 64,
+    "payload_bytes": 4096,
+    "duration_s": 120
+   },
+   "idle_rss_mib": null,
+   "peak_rss_mib": null,
+   "peak_rss_hwm_mib": null,
+   "post_load_rss_mib": null,
+   "recovered_rss_mib": null,
+   "rss_series": null,
+   "idle_window_s": 60,
+   "recovery_window_s": 60
+  },
+  "cells": {
+   "openai": {
+    "served": "not_verified",
+    "reason": "harness_boot_failure",
+    "status": "000",
+    "path": "/v1/chat/completions",
+    "verdict_note": "gateway never served the openai warm-up under the openai egress config; not probed. failed to boot after 3 attempts: attempt 1: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 2: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 3: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ]",
+    "body_snippet": ""
+   },
+   "openai-responses": {
+    "served": "not_verified",
+    "reason": "harness_boot_failure",
+    "status": "000",
+    "path": "/v1/responses",
+    "verdict_note": "gateway never served the openai warm-up under the openai egress config; not probed. failed to boot after 3 attempts: attempt 1: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 2: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 3: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ]",
+    "body_snippet": ""
+   },
+   "anthropic": {
+    "served": "not_verified",
+    "reason": "harness_boot_failure",
+    "status": "000",
+    "path": "/v1/messages",
+    "verdict_note": "gateway never served the openai warm-up under the openai egress config; not probed. failed to boot after 3 attempts: attempt 1: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 2: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 3: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ]",
+    "body_snippet": ""
+   },
+   "gemini": {
+    "served": "not_verified",
+    "reason": "harness_boot_failure",
+    "status": "000",
+    "path": "/v1beta/models/gpt-4o-mini:generateContent",
+    "verdict_note": "gateway never served the openai warm-up under the openai egress config; not probed. failed to boot after 3 attempts: attempt 1: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 2: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 3: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ]",
+    "body_snippet": ""
+   },
+   "cohere": {
+    "served": "not_verified",
+    "reason": "harness_boot_failure",
+    "status": "000",
+    "path": "/v2/chat",
+    "verdict_note": "gateway never served the openai warm-up under the openai egress config; not probed. failed to boot after 3 attempts: attempt 1: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 2: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 3: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ]",
+    "body_snippet": ""
+   },
+   "bedrock": {
+    "served": "not_verified",
+    "reason": "harness_boot_failure",
+    "status": "000",
+    "path": "/model/gpt-4o-mini/converse",
+    "verdict_note": "gateway never served the openai warm-up under the openai egress config; not probed. failed to boot after 3 attempts: attempt 1: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 2: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 3: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ]",
+    "body_snippet": ""
+   }
+  },
+  "upstreams": {
+   "openai": {
+    "configurable": true,
+    "served": false,
+    "egress_config": "default",
+    "serve_error": "failed to boot after 3 attempts: attempt 1: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 2: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 3: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ]",
+    "cells": {
+     "openai": {
+      "served": "not_verified",
+      "reason": "harness_boot_failure",
+      "status": "000",
+      "path": "/v1/chat/completions",
+      "verdict_note": "gateway never served the openai warm-up under the openai egress config; not probed. failed to boot after 3 attempts: attempt 1: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 2: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 3: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ]",
+      "body_snippet": ""
+     },
+     "openai-responses": {
+      "served": "not_verified",
+      "reason": "harness_boot_failure",
+      "status": "000",
+      "path": "/v1/responses",
+      "verdict_note": "gateway never served the openai warm-up under the openai egress config; not probed. failed to boot after 3 attempts: attempt 1: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 2: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 3: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ]",
+      "body_snippet": ""
+     },
+     "anthropic": {
+      "served": "not_verified",
+      "reason": "harness_boot_failure",
+      "status": "000",
+      "path": "/v1/messages",
+      "verdict_note": "gateway never served the openai warm-up under the openai egress config; not probed. failed to boot after 3 attempts: attempt 1: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 2: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 3: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ]",
+      "body_snippet": ""
+     },
+     "gemini": {
+      "served": "not_verified",
+      "reason": "harness_boot_failure",
+      "status": "000",
+      "path": "/v1beta/models/gpt-4o-mini:generateContent",
+      "verdict_note": "gateway never served the openai warm-up under the openai egress config; not probed. failed to boot after 3 attempts: attempt 1: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 2: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 3: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ]",
+      "body_snippet": ""
+     },
+     "cohere": {
+      "served": "not_verified",
+      "reason": "harness_boot_failure",
+      "status": "000",
+      "path": "/v2/chat",
+      "verdict_note": "gateway never served the openai warm-up under the openai egress config; not probed. failed to boot after 3 attempts: attempt 1: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 2: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 3: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ]",
+      "body_snippet": ""
+     },
+     "bedrock": {
+      "served": "not_verified",
+      "reason": "harness_boot_failure",
+      "status": "000",
+      "path": "/model/gpt-4o-mini/converse",
+      "verdict_note": "gateway never served the openai warm-up under the openai egress config; not probed. failed to boot after 3 attempts: attempt 1: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 2: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 3: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ]",
+      "body_snippet": ""
+     }
+    }
+   },
+   "openai-responses": {
+    "configurable": true,
+    "served": false,
+    "egress_config": "default",
+    "serve_error": "failed to boot after 3 attempts: attempt 1: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 2: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 3: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ]",
+    "cells": {
+     "openai": {
+      "served": "not_verified",
+      "reason": "harness_boot_failure",
+      "status": "000",
+      "path": "/v1/chat/completions",
+      "verdict_note": "gateway never served the openai warm-up under the openai-responses egress config; not probed. failed to boot after 3 attempts: attempt 1: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 2: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 3: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ]",
+      "body_snippet": ""
+     },
+     "openai-responses": {
+      "served": "not_verified",
+      "reason": "harness_boot_failure",
+      "status": "000",
+      "path": "/v1/responses",
+      "verdict_note": "gateway never served the openai warm-up under the openai-responses egress config; not probed. failed to boot after 3 attempts: attempt 1: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 2: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 3: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ]",
+      "body_snippet": ""
+     },
+     "anthropic": {
+      "served": "not_verified",
+      "reason": "harness_boot_failure",
+      "status": "000",
+      "path": "/v1/messages",
+      "verdict_note": "gateway never served the openai warm-up under the openai-responses egress config; not probed. failed to boot after 3 attempts: attempt 1: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 2: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 3: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ]",
+      "body_snippet": ""
+     },
+     "gemini": {
+      "served": "not_verified",
+      "reason": "harness_boot_failure",
+      "status": "000",
+      "path": "/v1beta/models/gpt-4o-mini:generateContent",
+      "verdict_note": "gateway never served the openai warm-up under the openai-responses egress config; not probed. failed to boot after 3 attempts: attempt 1: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 2: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 3: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ]",
+      "body_snippet": ""
+     },
+     "cohere": {
+      "served": "not_verified",
+      "reason": "harness_boot_failure",
+      "status": "000",
+      "path": "/v2/chat",
+      "verdict_note": "gateway never served the openai warm-up under the openai-responses egress config; not probed. failed to boot after 3 attempts: attempt 1: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 2: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 3: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ]",
+      "body_snippet": ""
+     },
+     "bedrock": {
+      "served": "not_verified",
+      "reason": "harness_boot_failure",
+      "status": "000",
+      "path": "/model/gpt-4o-mini/converse",
+      "verdict_note": "gateway never served the openai warm-up under the openai-responses egress config; not probed. failed to boot after 3 attempts: attempt 1: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 2: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 3: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ]",
+      "body_snippet": ""
+     }
+    }
+   },
+   "anthropic": {
+    "configurable": true,
+    "served": false,
+    "egress_config": "default",
+    "serve_error": "failed to boot after 3 attempts: attempt 1: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 2: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 3: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ]",
+    "cells": {
+     "openai": {
+      "served": "not_verified",
+      "reason": "harness_boot_failure",
+      "status": "000",
+      "path": "/v1/chat/completions",
+      "verdict_note": "gateway never served the openai warm-up under the anthropic egress config; not probed. failed to boot after 3 attempts: attempt 1: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 2: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 3: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ]",
+      "body_snippet": ""
+     },
+     "openai-responses": {
+      "served": "not_verified",
+      "reason": "harness_boot_failure",
+      "status": "000",
+      "path": "/v1/responses",
+      "verdict_note": "gateway never served the openai warm-up under the anthropic egress config; not probed. failed to boot after 3 attempts: attempt 1: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 2: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 3: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ]",
+      "body_snippet": ""
+     },
+     "anthropic": {
+      "served": "not_verified",
+      "reason": "harness_boot_failure",
+      "status": "000",
+      "path": "/v1/messages",
+      "verdict_note": "gateway never served the openai warm-up under the anthropic egress config; not probed. failed to boot after 3 attempts: attempt 1: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 2: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 3: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ]",
+      "body_snippet": ""
+     },
+     "gemini": {
+      "served": "not_verified",
+      "reason": "harness_boot_failure",
+      "status": "000",
+      "path": "/v1beta/models/gpt-4o-mini:generateContent",
+      "verdict_note": "gateway never served the openai warm-up under the anthropic egress config; not probed. failed to boot after 3 attempts: attempt 1: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 2: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 3: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ]",
+      "body_snippet": ""
+     },
+     "cohere": {
+      "served": "not_verified",
+      "reason": "harness_boot_failure",
+      "status": "000",
+      "path": "/v2/chat",
+      "verdict_note": "gateway never served the openai warm-up under the anthropic egress config; not probed. failed to boot after 3 attempts: attempt 1: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 2: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 3: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ]",
+      "body_snippet": ""
+     },
+     "bedrock": {
+      "served": "not_verified",
+      "reason": "harness_boot_failure",
+      "status": "000",
+      "path": "/model/gpt-4o-mini/converse",
+      "verdict_note": "gateway never served the openai warm-up under the anthropic egress config; not probed. failed to boot after 3 attempts: attempt 1: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 2: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 3: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ]",
+      "body_snippet": ""
+     }
+    }
+   },
+   "gemini": {
+    "configurable": true,
+    "served": false,
+    "egress_config": "default",
+    "serve_error": "failed to boot after 3 attempts: attempt 1: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 2: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 3: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ]",
+    "cells": {
+     "openai": {
+      "served": "not_verified",
+      "reason": "harness_boot_failure",
+      "status": "000",
+      "path": "/v1/chat/completions",
+      "verdict_note": "gateway never served the openai warm-up under the gemini egress config; not probed. failed to boot after 3 attempts: attempt 1: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 2: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 3: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ]",
+      "body_snippet": ""
+     },
+     "openai-responses": {
+      "served": "not_verified",
+      "reason": "harness_boot_failure",
+      "status": "000",
+      "path": "/v1/responses",
+      "verdict_note": "gateway never served the openai warm-up under the gemini egress config; not probed. failed to boot after 3 attempts: attempt 1: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 2: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 3: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ]",
+      "body_snippet": ""
+     },
+     "anthropic": {
+      "served": "not_verified",
+      "reason": "harness_boot_failure",
+      "status": "000",
+      "path": "/v1/messages",
+      "verdict_note": "gateway never served the openai warm-up under the gemini egress config; not probed. failed to boot after 3 attempts: attempt 1: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 2: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 3: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ]",
+      "body_snippet": ""
+     },
+     "gemini": {
+      "served": "not_verified",
+      "reason": "harness_boot_failure",
+      "status": "000",
+      "path": "/v1beta/models/gpt-4o-mini:generateContent",
+      "verdict_note": "gateway never served the openai warm-up under the gemini egress config; not probed. failed to boot after 3 attempts: attempt 1: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 2: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 3: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ]",
+      "body_snippet": ""
+     },
+     "cohere": {
+      "served": "not_verified",
+      "reason": "harness_boot_failure",
+      "status": "000",
+      "path": "/v2/chat",
+      "verdict_note": "gateway never served the openai warm-up under the gemini egress config; not probed. failed to boot after 3 attempts: attempt 1: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 2: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 3: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ]",
+      "body_snippet": ""
+     },
+     "bedrock": {
+      "served": "not_verified",
+      "reason": "harness_boot_failure",
+      "status": "000",
+      "path": "/model/gpt-4o-mini/converse",
+      "verdict_note": "gateway never served the openai warm-up under the gemini egress config; not probed. failed to boot after 3 attempts: attempt 1: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 2: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 3: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ]",
+      "body_snippet": ""
+     }
+    }
+   },
+   "cohere": {
+    "configurable": true,
+    "served": false,
+    "egress_config": "default",
+    "serve_error": "failed to boot after 3 attempts: attempt 1: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 2: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 3: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ]",
+    "cells": {
+     "openai": {
+      "served": "not_verified",
+      "reason": "harness_boot_failure",
+      "status": "000",
+      "path": "/v1/chat/completions",
+      "verdict_note": "gateway never served the openai warm-up under the cohere egress config; not probed. failed to boot after 3 attempts: attempt 1: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 2: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 3: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ]",
+      "body_snippet": ""
+     },
+     "openai-responses": {
+      "served": "not_verified",
+      "reason": "harness_boot_failure",
+      "status": "000",
+      "path": "/v1/responses",
+      "verdict_note": "gateway never served the openai warm-up under the cohere egress config; not probed. failed to boot after 3 attempts: attempt 1: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 2: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 3: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ]",
+      "body_snippet": ""
+     },
+     "anthropic": {
+      "served": "not_verified",
+      "reason": "harness_boot_failure",
+      "status": "000",
+      "path": "/v1/messages",
+      "verdict_note": "gateway never served the openai warm-up under the cohere egress config; not probed. failed to boot after 3 attempts: attempt 1: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 2: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 3: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ]",
+      "body_snippet": ""
+     },
+     "gemini": {
+      "served": "not_verified",
+      "reason": "harness_boot_failure",
+      "status": "000",
+      "path": "/v1beta/models/gpt-4o-mini:generateContent",
+      "verdict_note": "gateway never served the openai warm-up under the cohere egress config; not probed. failed to boot after 3 attempts: attempt 1: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 2: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 3: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ]",
+      "body_snippet": ""
+     },
+     "cohere": {
+      "served": "not_verified",
+      "reason": "harness_boot_failure",
+      "status": "000",
+      "path": "/v2/chat",
+      "verdict_note": "gateway never served the openai warm-up under the cohere egress config; not probed. failed to boot after 3 attempts: attempt 1: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 2: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 3: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ]",
+      "body_snippet": ""
+     },
+     "bedrock": {
+      "served": "not_verified",
+      "reason": "harness_boot_failure",
+      "status": "000",
+      "path": "/model/gpt-4o-mini/converse",
+      "verdict_note": "gateway never served the openai warm-up under the cohere egress config; not probed. failed to boot after 3 attempts: attempt 1: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 2: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 3: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ]",
+      "body_snippet": ""
+     }
+    }
+   },
+   "bedrock": {
+    "configurable": true,
+    "served": false,
+    "egress_config": "default",
+    "serve_error": "failed to boot after 3 attempts: attempt 1: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 2: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 3: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ]",
+    "cells": {
+     "openai": {
+      "served": "not_verified",
+      "reason": "harness_boot_failure",
+      "status": "000",
+      "path": "/v1/chat/completions",
+      "verdict_note": "gateway never served the openai warm-up under the bedrock egress config; not probed. failed to boot after 3 attempts: attempt 1: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 2: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 3: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ]",
+      "body_snippet": ""
+     },
+     "openai-responses": {
+      "served": "not_verified",
+      "reason": "harness_boot_failure",
+      "status": "000",
+      "path": "/v1/responses",
+      "verdict_note": "gateway never served the openai warm-up under the bedrock egress config; not probed. failed to boot after 3 attempts: attempt 1: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 2: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 3: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ]",
+      "body_snippet": ""
+     },
+     "anthropic": {
+      "served": "not_verified",
+      "reason": "harness_boot_failure",
+      "status": "000",
+      "path": "/v1/messages",
+      "verdict_note": "gateway never served the openai warm-up under the bedrock egress config; not probed. failed to boot after 3 attempts: attempt 1: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 2: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 3: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ]",
+      "body_snippet": ""
+     },
+     "gemini": {
+      "served": "not_verified",
+      "reason": "harness_boot_failure",
+      "status": "000",
+      "path": "/v1beta/models/gpt-4o-mini:generateContent",
+      "verdict_note": "gateway never served the openai warm-up under the bedrock egress config; not probed. failed to boot after 3 attempts: attempt 1: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 2: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 3: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ]",
+      "body_snippet": ""
+     },
+     "cohere": {
+      "served": "not_verified",
+      "reason": "harness_boot_failure",
+      "status": "000",
+      "path": "/v2/chat",
+      "verdict_note": "gateway never served the openai warm-up under the bedrock egress config; not probed. failed to boot after 3 attempts: attempt 1: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 2: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 3: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ]",
+      "body_snippet": ""
+     },
+     "bedrock": {
+      "served": "not_verified",
+      "reason": "harness_boot_failure",
+      "status": "000",
+      "path": "/model/gpt-4o-mini/converse",
+      "verdict_note": "gateway never served the openai warm-up under the bedrock egress config; not probed. failed to boot after 3 attempts: attempt 1: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 2: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ] || attempt 3: launch_rc=1, not ready; port 8080 not listening; diag=[container:  logs: sudo: docker: command not found ]",
+      "body_snippet": ""
+     }
+    }
+   }
+  },
+  "model": "gpt-4o-mini",
+  "upstream_endpoint": "/v1/chat/completions",
+  "ootb_config": "config/kong.txt",
+  "arch": "arm64",
+  "hardware": "AWS m7g.4xlarge (Graviton3, 16 cores / 64 GB). Gateway-under-test pinned to 4 cores (the comparable basis); mock and load generator on 6 cores each so the mock never bottlenecks the streaming sweep. Ubuntu 24.04. One dedicated box per gateway.",
+  "rig": {
+   "arch": "arm64",
+   "release_url": "https://github.com/GetBusbar/benchmarking/releases/download/rig",
+   "mock": {
+    "origin": "cached",
+    "sha256": "43763f41981bf7eef1b1f614310bd6548f21a9c5e78ec03ced6346ac07406ec6",
+    "asset_updated_at": "2026-07-25T09:40:40Z"
+   },
+   "ugen": {
+    "origin": "cached",
+    "sha256": "ff8be365f53f6ea1bf4cea580c3ffb9d25da2c70767119e8c638aa978a792bcc",
+    "asset_updated_at": "2026-07-25T09:40:40Z"
+   },
+   "box_qualify": {
+    "verdict": "pass",
+    "attempts": 1,
+    "reason": "ok/gateway_fault",
+    "detail": "floor p99 70us, drift -5.41% vs baseline 74us (band +/-4.0%), spread 2.86%, p99/p50 1.35 | the gateway did not become ready during the replay (gateway did not become ready (last HTTP 000 on /v1/chat/completions)) \u2014 a GATEWAY fault, not a box verdict; proceeding so the run records it honestly",
+    "thresholds": {
+     "floor_drift_pct": 4.0,
+     "floor_ratchet_pct": 8.0,
+     "floor_abs_us": [
+      45,
+      115
+     ],
+     "jitter_spread_pct": 25,
+     "jitter_p99_p50_max": 4.0,
+     "peak_drift_pct": 100000,
+     "peak_ratchet_pct": 40,
+     "baseline_window": 5,
+     "provisional": true,
+     "recalibration_target_pct": 2.5
+    },
+    "stage1": {
+     "stage": 1,
+     "arch": "arm64",
+     "hardware": "AWS m7g.4xlarge (Graviton3, 16 cores / 64 GB). Gateway-under-test pinned to 4 cores (the comparable basis); mock and load generator on 6 cores each so the mock never bottlenecks the streaming sweep. Ubuntu 24.04. One dedicated box per gateway.",
+     "measured_at": "2026-07-25T16:28:02Z",
+     "probe_s": 24,
+     "samples": 7,
+     "sample_dur_s": 3,
+     "samples_p99_us": [
+      70,
+      71,
+      69,
+      71,
+      70,
+      70,
+      71
+     ],
+     "samples_p50_us": [
+      51,
+      50,
+      52,
+      52,
+      52,
+      53,
+      52
+     ],
+     "samples_rps": [
+      18955,
+      19322,
+      18831,
+      18796,
+      18703,
+      18521,
+      18635
+     ],
+     "floor_p99_us_median": 70,
+     "floor_p99_us_min": 69,
+     "floor_p99_us_max": 71,
+     "floor_p50_us_median": 52,
+     "c1_rps_median": 18796
+    },
+    "stage2": {
+     "stage": 2,
+     "error": "gateway did not become ready (last HTTP 000 on /v1/chat/completions)",
+     "gateway_fault": true,
+     "cell": "openai>gemini",
+     "replay_rps": null
+    },
+    "baseline": {
+     "floor_p99_us": 74.0,
+     "floor_oldest_p99_us": 74.0,
+     "floor_runs": 1.0,
+     "peak_rps": 16221.0,
+     "peak_oldest_rps": 16221.0,
+     "peak_runs": 1.0,
+     "peak_cell": "openai>gemini"
+    }
+   }
+  },
+  "measured_at": "2026-07-25T16:30:43Z",
+  "started_at": "2026-07-25T16:28:58Z",
+  "finished_at": "2026-07-25T16:30:43Z",
+  "duration_s": 105,
+  "phase_s": {
+   "build": 0,
+   "matrix_6x6": 105,
+   "memory_window": 0
+  },
+  "build_env": {
+   "prereqs": false,
+   "quiesce": "quiesced"
+  }
+ },
+ "memory": {
+  "protocol": "post-6x6, fresh cold restart: 60s COLD idle (measured before the process serves any request) -> fixed load on the peak cell (c=64, payload=4096B, 120s, identical on every gateway) -> 60s recovery",
+  "served": false,
+  "serve_error": "no served cell in the 6x6 sweep",
+  "load_cell": null,
+  "load_recipe": {
+   "concurrency": 64,
+   "payload_bytes": 4096,
+   "duration_s": 120
+  },
+  "idle_rss_mib": null,
+  "peak_rss_mib": null,
+  "peak_rss_hwm_mib": null,
+  "post_load_rss_mib": null,
+  "recovered_rss_mib": null,
+  "rss_series": null,
+  "idle_window_s": 60,
+  "recovery_window_s": 60
+ },
+ "streaming": null
+}

@@ -105,11 +105,37 @@ rig_provenance_json(){
   # Empty (no qualification file / unparseable) -> the literal null, exactly like every other field
   # here: a consumer must be able to tell "this run was not qualified" from "it qualified at 0".
   local bq; bq="$(_rig_box_qualify_json)"
-  printf '{"arch": %s, "release_url": %s, "mock": {"origin": %s, "sha256": %s, "asset_updated_at": %s}, "ugen": {"origin": %s, "sha256": %s, "asset_updated_at": %s}, "box_qualify": %s}' \
+  local eng; eng="$(_rig_engine_json)"
+  printf '{"arch": %s, "release_url": %s, "engine": %s, "mock": {"origin": %s, "sha256": %s, "asset_updated_at": %s}, "ugen": {"origin": %s, "sha256": %s, "asset_updated_at": %s}, "box_qualify": %s}' \
     "$(_rig_json_str "$arch")" "$(_rig_json_str "$RIG_URL")" \
+    "${eng:-null}" \
     "$(_rig_json_str "${RIG_MOCK_ORIGIN:-}")" "$(_rig_json_str "$msha")" "$(_rig_json_str "$mat")" \
     "$(_rig_json_str "${RIG_UGEN_ORIGIN:-}")" "$(_rig_json_str "$usha")" "$(_rig_json_str "$uat")" \
     "${bq:-null}"
+}
+# ── THE ENGINE STAMP ──────────────────────────────────────────────────────────────────────────────
+# WHY. Results are only comparable if they were produced by the SAME harness. A memory bug on one
+# gateway is a memory bug on all thirteen, so a fix mid-field invalidates every number taken before
+# it, and a board that mixes engines is comparing gateways through two different instruments. That
+# already happened here: a mock rebuild landed between two runs and silently changed cell verdicts
+# across the whole field, and it cost hours to work out that the instrument had moved rather than the
+# gateways. Recording the commit makes that a one-line check instead of an investigation.
+#
+# CAPTURED ORCHESTRATOR-SIDE. run-on-ec2.sh exports BENCH_ENGINE_COMMIT/_DIRTY before the harness is
+# rsynced, because the copy that lands on the box has no .git to interrogate. The local git fallback
+# below is for verify-local.sh and any in-tree run.
+#
+# DIRTY IS RECORDED, NOT HIDDEN. A run from a modified working tree is not identified by its commit,
+# so `dirty: true` marks it as not reproducible. The board can then refuse to compare it rather than
+# quietly treating it as if it were the commit it sits on.
+_rig_engine_json(){
+  local sha="${BENCH_ENGINE_COMMIT:-}" dirty="${BENCH_ENGINE_DIRTY:-}"
+  if [ -z "$sha" ] && [ -n "${RIG_ROOT:-}" ] && git -C "$RIG_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+    sha="$(git -C "$RIG_ROOT" rev-parse HEAD 2>/dev/null)"
+    if [ -n "$(git -C "$RIG_ROOT" status --porcelain 2>/dev/null)" ]; then dirty=1; else dirty=0; fi
+  fi
+  [ -n "$sha" ] || { printf 'null'; return; }
+  printf '{"commit": %s, "dirty": %s}' "$(_rig_json_str "$sha")" "$([ "$dirty" = 1 ] && echo true || echo false)"
 }
 fetch_rig() { # <repo-root>
   local root="$1" arch="${BENCH_ARCH:-arm64}" err

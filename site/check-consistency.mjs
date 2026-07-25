@@ -89,10 +89,19 @@ export function c7HwmBelowPeak(gwKey, rawMatrix) {
 //
 // Exported and pure (AUDIT #21) so its RED-before test can INJECT an inversion into a synthetic matrix
 // instead of depending on a real gateway staying broken.
+// C6 IS A HARD FAILURE, NOT A WARNING. It was demoted to a warning on the theory that two
+// independently-swept ceilings can overlap on measurement noise. That theory was wrong, and it hid a
+// real defect for weeks: the sustained sweep searched 16-8192 while the peak sweep searched 32-65536,
+// so the peak search was terminating on its own upper bound rather than on the gateway's ceiling.
+// sustained > max_proxy does not mean the two numbers disagree within noise. It means the number the
+// board publishes as a MAXIMUM was exceeded by a different measurement on the same box against the
+// same mock, which makes it not a maximum. Both sweeps now share the single SWEEP constant, so there
+// is no longer any mechanism by which this can be benign, and a run that produces one is not
+// publishable.
 export function c6Inversions(gwKey, rawMatrix) {
-  const warnings = [];
+  const violations = [];
   let cellsChecked = 0;
-  if (!rawMatrix || !rawMatrix.upstreams) return { warnings, cellsChecked };
+  if (!rawMatrix || !rawMatrix.upstreams) return { violations, cellsChecked };
   for (const [egress, up] of Object.entries(rawMatrix.upstreams)) {
     for (const [ingress, cell] of Object.entries((up && up.cells) || {})) {
       const perf = cell && cell.served === true && cell.perf;
@@ -101,11 +110,49 @@ export function c6Inversions(gwKey, rawMatrix) {
       if (sus == null || max == null || max === 0) continue;
       cellsChecked += 1;
       if (sus > max)
-        warnings.push(`${gwKey}.${ingress}->${egress}: sustained@20ms ${sus} > max_proxy ${max} ` +
-          `(a ${((sus / max - 1) * 100).toFixed(2)}% inversion — two independently-swept ceilings overlapping on measurement noise; re-measure this cell)`);
+        violations.push(`${gwKey}.${ingress}->${egress}: sustained@20ms ${sus} > max_proxy ${max} ` +
+          `(a ${((sus / max - 1) * 100).toFixed(2)}% inversion — the published maximum was exceeded by another sweep on the same box, so it is not a maximum; the peak sweep terminated early or the two sweeps did not share SWEEP)`);
     }
   }
-  return { warnings, cellsChecked };
+  return { violations, cellsChecked };
+}
+
+// ---- C8: ONE ENGINE PER BOARD ---------------------------------------------------------------------
+// The board's whole claim is that thirteen gateways were measured by the same instrument, so the only
+// thing that differs between two columns is the gateway. That claim is false the moment two snapshots
+// were produced by different harness commits, and it has already failed silently here: a mock rebuild
+// landed mid-field and changed which cells were judged served across the entire board, which read as
+// thirteen simultaneous gateway regressions until someone worked out that the instrument had moved.
+//
+// So the engine commit is now data, and disagreement is a publish failure rather than something a
+// human has to notice. Three ways to fail:
+//   - two published gateways carry different engine commits (a mixed board)
+//   - a gateway carries `dirty: true` (a modified tree does not identify what actually ran)
+//   - a gateway carries no engine stamp at all, while another does (silently pre-stamp data mixed in)
+// A board where NO gateway is stamped is left alone: that is entirely pre-stamp data, and failing it
+// would only punish history it cannot fix. The moment one stamped run lands, all of them must be.
+export function engineAgreement(gwKeys, resolve = (k) => newestSnapshotOnDisk(k)) {
+  const errors = [];
+  const seen = new Map();   // commit -> [gwKey]
+  const unstamped = [];
+  let checked = 0;
+  for (const k of gwKeys) {
+    const found = resolve(k);
+    const eng = found && found.snap && found.snap.rig && found.snap.rig.engine;
+    if (!eng || !eng.commit) { unstamped.push(k); continue; }
+    checked += 1;
+    if (eng.dirty === true)
+      errors.push(`C8: ${k} was measured by a DIRTY harness tree (engine.commit=${eng.commit.slice(0, 12)} with uncommitted edits) — the commit does not identify what ran, so this run is not reproducible and must be re-measured on a clean tree`);
+    if (!seen.has(eng.commit)) seen.set(eng.commit, []);
+    seen.get(eng.commit).push(k);
+  }
+  if (checked > 0 && unstamped.length > 0)
+    errors.push(`C8: ${unstamped.length} gateway(s) carry no engine stamp (${unstamped.join(", ")}) while ${checked} do — the board would be mixing pre-stamp data with stamped data and cannot show they came from the same harness; re-measure the unstamped gateways`);
+  if (seen.size > 1) {
+    const groups = [...seen.entries()].map(([c, ks]) => `${c.slice(0, 12)}: ${ks.join(", ")}`).join(" | ");
+    errors.push(`C8: the board mixes ${seen.size} harness engines (${groups}) — columns measured by different instruments are not comparable, so a defect fixed between those commits applies to only part of the field; re-run the lagging gateways on the newest engine`);
+  }
+  return { errors, checked, commits: [...seen.keys()] };
 }
 
 // The raw matrix on disk — the INDEPENDENT oracle (Design F R1). Never read through the accessor.
@@ -387,7 +434,7 @@ export function checkConsistency(data, app, opts = {}) {
     // proof is "the bug is still in the data" fails the day the data gets better.
     const c6 = c6Inversions(g.key, rawMatrix(g.key));
     if (c6.cellsChecked > 0) covered("C6.cell");
-    warnings.push(...c6.warnings);
+    errors.push(...c6.violations);
     const c7 = c7HwmBelowPeak(g.key, rawMatrix(g.key));
     if (c7.checked > 0) covered("C7.hwm");
     warnings.push(...c7.warnings);
@@ -542,6 +589,13 @@ export function checkConsistency(data, app, opts = {}) {
     if (unoracled.length)
       errors.push(`R2: coverage — ${unoracled.length} gateway(s) publish matrix-sourced numbers that the independent oracle never verified: ${unoracled.join(", ")} ` +
         `(a per-gateway bypass is exactly the inert-check failure R2 exists to catch)`);
+  }
+  // C8: one engine per board. Same guard as the oracle — a hand-built fixture has no snapshots on
+  // disk to stamp, so there is nothing to agree about.
+  if (publishesMatrix && !syntheticFixture) {
+    const eng = engineAgreement([...matrixPublishers].sort());
+    if (eng.checked > 0) covered("C8.engine");
+    errors.push(...eng.errors);
   }
   const requiredNow = publishesMatrix && !syntheticFixture
     ? [...REQUIRED, "C6.cell", "C7.hwm", "R1.oracle", "R3.selection"] : REQUIRED;

@@ -225,6 +225,20 @@ fi
 # for every arch), so a back-to-back run on the other arch OVERWRITES the file; the arch tag inside the
 # JSON is the dedupe key. To keep both arches' data, copy results/ aside between the two runs.
 ARCH="${ARCH:-arm64}"
+
+# ── THE ENGINE STAMP ──────────────────────────────────────────────────────────────────────────────
+# Every box in a field run must measure with the SAME harness, because a defect in the instrument is
+# a defect in all thirteen columns at once. Captured HERE, once, from the tree that is about to be
+# rsynced, and carried to each box as an env var: the copy that lands on the box has no .git, so it
+# cannot work its own commit out. lib/rig.sh folds this into each snapshot's rig provenance, and
+# scripts/check-engine.sh refuses a board whose snapshots disagree.
+#
+# A DIRTY TREE IS RECORDED AS DIRTY. Uncommitted edits mean the commit does not identify what ran, so
+# the run is marked non-reproducible rather than being filed under a commit it does not match.
+BENCH_ENGINE_COMMIT="$(git -C "$HERE" rev-parse HEAD 2>/dev/null || echo '')"
+if [ -n "$(git -C "$HERE" status --porcelain 2>/dev/null)" ]; then BENCH_ENGINE_DIRTY=1; else BENCH_ENGINE_DIRTY=0; fi
+export BENCH_ENGINE_COMMIT BENCH_ENGINE_DIRTY
+
 case "$ARCH" in
   arm64|aarch64|graviton)
     ARCH=arm64
@@ -482,7 +496,7 @@ qualify_box() {
   local gw="$1" ip="$2" glog="$3" _log="$4" attempt="$5"
   local s1="$QUALIFY_DIR/$gw.stage1.json" s2="$QUALIFY_DIR/$gw.stage2.json"
   rm -f "$s1" "$s2"
-  local remote_env="BENCH_ARCH='$ARCH' BENCH_HARDWARE='$HW_LABEL' CORES=0-3 LOADCORES=4-9 MOCKCORES=10-15 GATEWAY='$gw'"
+  local remote_env="BENCH_ARCH='$ARCH' BENCH_HARDWARE='$HW_LABEL' BENCH_ENGINE_COMMIT='$BENCH_ENGINE_COMMIT' BENCH_ENGINE_DIRTY='$BENCH_ENGINE_DIRTY' CORES=0-3 LOADCORES=4-9 MOCKCORES=10-15 GATEWAY='$gw'"
 
   # The ROLLING baseline: the median of the last N QUALIFIED runs for this gateway+arch, never just
   # the previous run (one contaminated run would otherwise become the next run's reference and the
@@ -804,6 +818,7 @@ bench_gateway_once() {
       source ~/.cargo/env 2>/dev/null || true
       export BENCH_HARDWARE=\"$HW_LABEL\"
       export BENCH_ARCH=\"$ARCH\"
+      export BENCH_ENGINE_COMMIT=\"$BENCH_ENGINE_COMMIT\" BENCH_ENGINE_DIRTY=\"$BENCH_ENGINE_DIRTY\"
       export CORES=0-3 LOADCORES=4-9 MOCKCORES=10-15
       export CAP_MIB=24000
       export SUITES=\"$ALL_SUITES\"

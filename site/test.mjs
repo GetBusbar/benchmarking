@@ -889,21 +889,31 @@ const c6Matrix = (sus, max, served = true) => ({
   upstreams: { openai: { cells: { openai: { served, perf: { rps_sustained_20ms: sus, rps_max_proxy: max } } } } },
 });
 
-test("C6 RED: an INJECTED sustained@20ms > max_proxy cell is flagged as a warning", () => {
+test("C6 RED: an INJECTED sustained@20ms > max_proxy cell is a HARD FAILURE", () => {
   const r = c6Inversions("gw", c6Matrix(14351, 14325));
   assert.equal(r.cellsChecked, 1, "the inverted cell must have been checked");
-  assert.equal(r.warnings.length, 1, `C6 must flag an injected inversion; got: ${JSON.stringify(r.warnings)}`);
-  assert.ok(r.warnings[0].includes("gw.openai->openai") && r.warnings[0].includes("sustained@20ms")
-    && r.warnings[0].includes("max_proxy") && r.warnings[0].includes("0.18%"),
-    `the C6 warning must name the cell, both ceilings and the magnitude; got: ${r.warnings[0]}`);
+  assert.equal(r.violations.length, 1, `C6 must flag an injected inversion; got: ${JSON.stringify(r.violations)}`);
+  assert.ok(r.violations[0].includes("gw.openai->openai") && r.violations[0].includes("sustained@20ms")
+    && r.violations[0].includes("max_proxy") && r.violations[0].includes("0.18%"),
+    `the C6 violation must name the cell, both ceilings and the magnitude; got: ${r.violations[0]}`);
+});
+
+// C6 IS AN ERROR, NOT A WARNING. This is the whole point of the promotion: a warning let a real
+// measurement bug (the two sweeps searching different concurrency ranges, so the peak search
+// terminated on its own bound) sit in the published data instead of blocking the publish. If this
+// assertion ever fails because the inversion moved back into `warnings`, the gate has gone soft again.
+test("C6 severity: an inversion must reach checkConsistency's ERRORS, never its warnings", () => {
+  const inverted = c6Inversions("gw", c6Matrix(14351, 14325));
+  assert.ok(!("warnings" in inverted),
+    "c6Inversions must not expose a `warnings` key — the field name is what routed it to the soft channel");
 });
 
 test("C6 GREEN: a plausible cell, an unqualified ceiling and an unserved cell are NOT flagged", () => {
-  assert.equal(c6Inversions("gw", c6Matrix(14325, 14351)).warnings.length, 0, "sustained < max_proxy is plausible");
-  assert.equal(c6Inversions("gw", c6Matrix(100, 100)).warnings.length, 0, "equality is not an inversion");
+  assert.equal(c6Inversions("gw", c6Matrix(14325, 14351)).violations.length, 0, "sustained < max_proxy is plausible");
+  assert.equal(c6Inversions("gw", c6Matrix(100, 100)).violations.length, 0, "equality is not an inversion");
   // max_proxy 0 = "did not qualify" (no ceiling to invert), and must not be counted as a checked cell.
   const zero = c6Inversions("gw", c6Matrix(100, 0));
-  assert.equal(zero.warnings.length, 0, "a 0 max_proxy is 'did not qualify', not an inversion");
+  assert.equal(zero.violations.length, 0, "a 0 max_proxy is 'did not qualify', not an inversion");
   assert.equal(zero.cellsChecked, 0, "a cell with no ceiling is not a checked cell");
   // an UNSERVED cell carries no honest perf to compare.
   assert.equal(c6Inversions("gw", c6Matrix(14351, 14325, false)).cellsChecked, 0, "unserved cells are skipped");
