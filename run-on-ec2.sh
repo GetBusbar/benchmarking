@@ -573,16 +573,25 @@ bench_gateway() {
   # error, exactly like a missing suite JSON.
   pull_snapshots() {
     mkdir -p "$HERE/results/snapshots"
-    local attempt rc
+    local attempt rc before after
+    before=$(ls -1 "$HERE"/results/snapshots/result_"$gw"_*.json 2>/dev/null | wc -l | tr -d ' ')
     for attempt in 1 2 3 4; do
+      # Filter with rsync's OWN --include/--exclude rather than a wildcard in the remote path: a remote
+      # glob only works if the remote shell expands it, which rsync's --protect-args (default-on in some
+      # builds) suppresses. The filter is evaluated by rsync itself, so it behaves identically either
+      # way — and it can never pull a SIBLING gateway's snapshot into this box's publish.
       rsync -az --timeout=60 -e "ssh $SSHOPT" \
-        "ubuntu@$ip:~/benchmarking/results/snapshots/result_${gw}_*.json" "$HERE/results/snapshots/" >>"$glog" 2>&1
+        --include="result_${gw}_*.json" --exclude='*' \
+        "ubuntu@$ip:~/benchmarking/results/snapshots/" "$HERE/results/snapshots/" >>"$glog" 2>&1
       rc=$?
       if [[ $rc -eq 0 ]]; then
-        local n; n=$(ls -1 "$HERE"/results/snapshots/result_"$gw"_*.json 2>/dev/null | wc -l | tr -d ' ')
-        glog_echo "pulled snapshots/result_${gw}_*.json (${n} on disk)"; return 0
+        after=$(ls -1 "$HERE"/results/snapshots/result_"$gw"_*.json 2>/dev/null | wc -l | tr -d ' ')
+        if [[ "${after:-0}" -gt "${before:-0}" ]]; then
+          glog_echo "pulled snapshots/result_${gw}_*.json ($(( after - before )) new, ${after} on disk)"; return 0
+        fi
+        glog_echo "no NEW snapshot artifact on the box for $gw (${after} already on disk)"; return 1
       fi
-      if [[ $rc -eq 23 ]]; then glog_echo "no snapshot artifact on the box for $gw (nothing to pull)"; return 1; fi
+      if [[ $rc -eq 23 ]]; then glog_echo "no results/snapshots/ on the box for $gw (nothing to pull)"; return 1; fi
       glog_echo "rsync snapshots/result_${gw}_*.json attempt $attempt failed (rc=$rc) - retrying in 10s"
       sleep 10
     done
