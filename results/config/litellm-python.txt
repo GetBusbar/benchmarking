@@ -1,0 +1,10 @@
+# ── config.gen.yaml (rendered; loaded via --config /config.gen.yaml) ──
+model_list:
+  - model_name: gpt-4o-mini
+    litellm_params:
+      model: openai/gpt-4o-mini
+      api_base: http://127.0.0.1:8000/v1
+      api_key: dummy
+
+# ── launch argv (non-secret; provider api keys above are dummy on the isolated rig) ──
+litellm --config /config.gen.yaml --port 8102 --telemetry False
