@@ -164,7 +164,7 @@ stream_sustained_bisect(){ # lo hi
   # is not artificially low. Fair-ceiling re-probe at the winner mirrors lib/sweep.sh:_sw_ceil_ref_ok.
   local mock_conc=$hi; [ "$mock_conc" -gt "${SM_MOCKCEIL_CONC:-2048}" ] && mock_conc="${SM_MOCKCEIL_CONC:-2048}"
   SM_MOCK_FPS_CONC=$mock_conc
-  local _mf _a _b _c _d
+  local _mf _a _b _c _d _e _rest   # FINDING 28: _e and _rest must be local too, else they leak to the caller
   read -r _a _b _c _d _e SM_MOCK_FPS _rest < <(stream_probe "$DURL" "$mock_conc" "$SM_SWEEP_DUR")
   SM_MOCK_FPS=${SM_MOCK_FPS:-0}
   log "[$GATEWAY] sustained-streams bisect [$lo,$hi] (mock ceiling ${SM_MOCK_FPS} fps @ c=$mock_conc)"

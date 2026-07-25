@@ -574,6 +574,18 @@ matrix_cell_stream(){
   # cannot bind the mock, do NOT run the fabricating probe. Record the cell's streaming as UNTESTABLE
   # (rig-unavailable), leaving it unmeasured — never a gateway stream_served:false.
   if ! stream_mock_ready 30; then
+    # FINDING 18: stream_mock_ready probes $DURL — the mock's DIRECT path for THIS cell's ingress dialect
+    # (mock_direct_path "$cell"). The mock only synthesizes native SSE for the openai + anthropic direct
+    # dialects (mock_streams_egress); for a gemini/cohere/bedrock/responses direct dialect it returns plain
+    # JSON on stream:true, so the readiness probe reads fps=0 and fails EVERY time — not because of a lost
+    # MOCK_PORT race. Publishing "stream_mock_unready / lost MOCK_PORT race" for such a cell mislabels an
+    # ingress-dialect rig limit as a transient port race. Distinguish the two: a dialect the mock does not
+    # SSE-stream at all gets its own honest reason; only a dialect the mock CAN stream gets the race reason.
+    if ! mock_streams_egress "$cell"; then
+      CELL_STREAM_JSON=", \"stream\": {\"stream_served\": \"untestable\", \"reason\": \"mock_no_sse_for_ingress\", \"stream_error\": \"$(json_escape "the test mock does not synthesize an SSE direct-path stream for the $cell ingress dialect (only the openai + anthropic direct paths stream; gemini/cohere/bedrock/responses return plain JSON on stream:true), so the direct-to-mock streaming baseline is unreachable through this rig — a mock-reachability limit for this ingress dialect, not a gateway fault")\"}"
+      log "[$GATEWAY]   $cell : stream untestable (mock does not SSE-stream the $cell ingress direct path)"
+      return 0
+    fi
     log "[$GATEWAY]   $cell : stream mock did not become ready (lost MOCK_PORT race) — marking streaming UNTESTABLE (rig readiness failure), NOT fabricating stream_served:false"
     CELL_STREAM_JSON=", \"stream\": {\"stream_served\": \"untestable\", \"reason\": \"stream_mock_unready\", \"stream_error\": \"$(json_escape "the streaming mock did not rebind :$MOCK_PORT after a per-cell restart (a lost MOCK_PORT race, no SO_REUSEADDR); probing a dead port would fabricate a false stream_served:false, so this cell's streaming is left UNMEASURED (a rig-readiness limit, not a gateway fault)")\"}"
     return 0

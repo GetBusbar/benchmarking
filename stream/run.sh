@@ -51,6 +51,9 @@ export MOCK_PORT="${MOCK_PORT:-8000}"
 RESULTS="$ROOT/results/stream"; mkdir -p "$RESULTS"
 log(){ echo "[$(date +%H:%M:%S)] $*"; }
 command -v taskset >/dev/null || taskset(){ shift 2; "$@"; }
+# FINDING 29: setsid is optional (absent on macOS / minimal images); run directly if missing, matching
+# the fallback shim matrix/run.sh:86 + perf/run.sh:52 already use.
+command -v setsid  >/dev/null || setsid(){ "$@"; }
 
 log "fetching prebuilt rig (mock + loadgen) — no on-box toolchain needed"
 . "$ROOT/lib/rig.sh"; fetch_rig "$ROOT" || { echo "rig fetch failed"; exit 1; }
@@ -224,16 +227,21 @@ if [ "$STREAM_OK" = 1 ]; then
   # not a fair ceiling: at a HIGHER reference conc it over-measures (winner never within 10% -> a
   # genuinely rig-limited stream ships mock_bound=false, audit R2-H2 residue); at a LOWER one it
   # under-measures. Re-probe the rig ONCE at the winner's own concurrency (capped at 4x the reference,
-  # never the multi-thousand rail the cap exists to avoid) and adopt the LARGER fps as the fair ceiling
+  # never the multi-thousand rail the cap exists to avoid) and adopt that fps as the fair ceiling
   # before deciding bound - exactly as _sw_ceil_ref_ok does for the perf lane.
-  if [ "$MOCK_READY" = 1 ] && [ "${STALLFREE_STREAMS:-0}" -gt 0 ] && [ "${STALLFREE_STREAMS}" -ne "${MOCK_FPS_CONC:-0}" ]; then
+  # FINDING 17 (align with lib/stream_measure.sh:_sm_sust_finish_bound): the adoption is UNCONDITIONAL,
+  # not "adopt only when LARGER". A gateway that saturates BELOW the reference concurrency (the normal
+  # case) re-probes a LOWER fair ceiling at its winner; the old "only if larger" discarded that and kept
+  # the inflated high-conc reference, so STALLFREE_FPS >= 0.9*MOCK_FPS was ~never true and MOCK_BOUND
+  # biased FALSE — letting a genuinely rig-bound stream ship as certified. Adopt the re-probe as-is; a
+  # re-probe that reads 0 drops MOCK_FPS to 0 and the honesty guard below emits null (unknown), never a
+  # clean false. Mirrors the cpu-fps lane's unconditional re-probe.
+  if [ "$MOCK_READY" = 1 ] && [ "${STALLFREE_STREAMS:-0}" -gt 0 ] && [ "${STALLFREE_STREAMS}" -ne "${MOCK_FPS_CONC:-0}" ] && [ "${MOCK_FPS:-0}" -gt 0 ]; then
     reprobe=$STALLFREE_STREAMS
     capc=$(( MOCK_FPS_CONC>0 ? MOCK_FPS_CONC*4 : STALLFREE_STREAMS )); [ "$reprobe" -gt "$capc" ] && reprobe=$capc
     read -r _s _c _f _st _fr _rm _d _t1 _t2 _g1 _g2 < <(sprobe "$DURL" "$reprobe" "$SWEEP_DUR"); _rm=${_rm:-0}
-    if [ "$_rm" -gt "${MOCK_FPS:-0}" ]; then
-      log "[$GATEWAY] mock-ceiling re-probed at winner c=$reprobe: ${MOCK_FPS} -> $_rm fps (winner c=$STALLFREE_STREAMS vs reference c=$MOCK_FPS_CONC)"
-      MOCK_FPS=$_rm; MOCK_FPS_CONC=$reprobe
-    fi
+    log "[$GATEWAY] mock-ceiling re-probed at winner c=$reprobe: ${MOCK_FPS} -> $_rm fps (winner c=$STALLFREE_STREAMS vs reference c=$MOCK_FPS_CONC)"
+    MOCK_FPS=$_rm; MOCK_FPS_CONC=$reprobe
   fi
   # Set the mock-bound flag from the winner's fps vs the (now fair) ceiling. Emit JSON null ("unknown")
   # - NOT a clean false - when the reference is unusable (mock never became ready, or the ceiling probe
