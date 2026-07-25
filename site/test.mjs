@@ -1632,7 +1632,7 @@ test("Memory tab renders idle/peak/recovered/sparkline, n/a when a field is abse
 
 test("Memory tab attributes each gateway's peak cell (load_cell) and states the fixed-load basis", () => {
   const cols = app.COLUMN_SETS.memory;
-  const memcell = cols.find((c) => c.id === "memcell");
+  const memcell = cols.find((c) => c.id === "tested");
   assert.ok(memcell, "the memory tab has a Tested-on (load_cell) column");
   // A gateway measured on its anthropic>anthropic peak cell shows that cell, prettified.
   const g = { key: "m", display: "M", lang: "Rust", memory_read: memRec({
@@ -1644,6 +1644,7 @@ test("Memory tab attributes each gateway's peak cell (load_cell) and states the 
   // A gateway with no load_cell (no served cell) reads n/a, never a fabricated cell.
   const bare = { key: "b", display: "B", lang: "Rust", memory_read: memRec({ idle_rss_mib: 40, peak_rss_mib: null, recovered_rss_mib: null }) };
   assert.equal(memcell.get(bare).na, true);
+  assert.ok(!memcell.render(bare).includes("tested-pill"), "no load_cell -> no pill");
   // The caption states the fixed identical load + cold-restart, NOT a "6x6 drives memory" claim.
   const cap = app.memoryCaption({ gateways: [] }).join(" ");
   assert.ok(/identical fixed load/i.test(cap) && /cold-?restart/i.test(cap), "caption states the fair fixed-load basis + cold restart");
@@ -2218,6 +2219,40 @@ test("#1 CLASS: the Tested-on pill renders its OWN lane's provenance in every ch
   assert.match(noRec, /n\/a/, "no streaming record for this cell -> no pill");
   assert.ok(!noRec.includes("tested-pill"), "a pill must never be painted without a record");
   assert.equal(testedIn(cols.streaming).get(g, same).na, true, "and the column sorts as not-measured");
+});
+
+test("#1 CLASS: the MEMORY tab's Tested-on cell is the SAME pill, showing the memory lane's own load_cell", () => {
+  // A gateway whose PERF peak cell (openai) differs from the cell its MEMORY window ran on (anthropic).
+  const g = {
+    key: "mm", display: "MM", lang: "Rust",
+    best_cell: bcCell({ dialect: "openai" }),
+    memory_read: memRec({ load_cell: "anthropic>anthropic",
+      load_recipe: { concurrency: 64, payload_bytes: 4096, duration_s: 120 },
+      idle_rss_mib: 40, peak_rss_mib: 900, recovered_rss_mib: 55 }),
+  };
+  const st = { ...app.newState(), mode: "peak", data: { gateways: [g] } };
+  const memTested = app.COLUMN_SETS.memory.find((c) => c.id === "tested");
+  const perfTested = app.COLUMN_SETS.performance.find((c) => c.id === "tested");
+  assert.ok(memTested, "the memory tab carries the shared Tested-on column");
+  // ONE renderer, not N copies: the memory column is produced by the same colTested factory.
+  assert.equal(memTested.render.toString(), perfTested.render.toString(),
+    "the memory tab must reuse the SHARED tested-on renderer, not a bespoke plain-text cell");
+  const pill = memTested.render(g, st);
+  // Same PILL markup as every other tab.
+  assert.ok(pill.includes("tested-pill"), "the memory tested-on cell renders as a pill");
+  assert.match(pill, /<td class="tested"/, "and uses the shared tested-on cell class");
+  // PROVENANCE HONESTY: the pill names the cell the MEMORY window ran on (load_cell), not the perf cell.
+  const label = (pill.match(/<span class="tested-pill"[^>]*>([^<]*)<\/span>/) || [])[1];
+  assert.equal(label, "Anthropic",
+    "the memory pill's chip is the memory window's own load_cell, a single dialect for a passthrough cell");
+  assert.ok(!/OpenAI/.test(pill), "the memory pill must NOT advertise the perf cell");
+  // The memory record is matrix-sourced → no fallback star; the tooltip keeps the memory window's own
+  // caption plus the fixed-load basis (the disclosure the bespoke cell used to carry).
+  assert.ok(!pill.includes(" *"), "a matrix-sourced memory row must not be starred");
+  assert.match(pill, /memory window/, "the tooltip renders the MEMORY record's own provenance stamp");
+  assert.match(pill, /identical fixed load/, "the tooltip keeps the fair fixed-load basis");
+  // The perf tab is unchanged by all this.
+  assert.match(perfTested.render(g, st), /OpenAI/, "the perf pill still names the perf cell");
 });
 
 console.log(`\n${passed} tests passed`);
