@@ -141,6 +141,18 @@ bq_drift_pct(){
 }
 # bq_abs <n> -> |n| (empty in, empty out)
 bq_abs(){ awk -v v="${1:-}" 'BEGIN{ if(v=="") exit; if(v+0<0) v=-v; printf "%.2f", v }'; }
+# bq_regression <drift_pct> <sense> -> the magnitude of the deviation in the DEGRADING direction only,
+# or 0 when the deviation is an improvement. THE BANDS ARE ONE-SIDED, and this is why:
+#   a box cannot randomly get FASTER. Contention, throttling and noisy neighbours only ever ADD
+#   latency and REMOVE throughput. So a floor that beats its baseline is not a contamination signal —
+#   it is the box showing its true clean-hardware speed (and it implies the BASELINE was the noisy
+#   measurement, not this run). Rejecting it would terminate good boxes, burn the replacement budget,
+#   and eventually skip the gateway entirely.
+#   sense=lat -> higher is worse (p99 latency): a POSITIVE drift is the regression.
+#   sense=rps -> higher is better (throughput): a NEGATIVE drift is the regression.
+# Absurd values in the improving direction are still bounded by the absolute envelope
+# (BQ_FLOOR_ABS_MIN_US/BQ_FLOOR_ABS_MAX_US), which is two-sided on purpose.
+bq_regression(){ awk -v v="${1:-}" -v s="${2:-lat}" 'BEGIN{ if(v=="") exit; if(s=="rps") v=-v; if(v+0<0) v=0; printf "%.2f", v }'; }
 # bq_le <a> <b> -> 0 when a <= b. Empty a is treated as "not measured" -> NOT a violation (the caller
 # decides what an unmeasurable signal means; a gate must never fail on a value it never obtained).
 bq_le(){ [ -n "${1:-}" ] || return 0; awk -v a="$1" -v b="$2" 'BEGIN{exit !(a+0<=b+0)}'; }
@@ -361,15 +373,15 @@ bq_stage1_verdict(){
     return 0
   fi
   # 5. PRIMARY: drift vs the ROLLING baseline (median of the last N qualified runs, not the last run).
-  if ! bq_le "$(bq_abs "$BQ_DRIFT_PCT")" "$BQ_FLOOR_DRIFT_PCT"; then
+  if ! bq_le "$(bq_regression "$BQ_DRIFT_PCT" lat)" "$BQ_FLOOR_DRIFT_PCT"; then
     BQ_VERDICT=fail; BQ_REASON=floor_drift
-    BQ_DETAIL="floor p99 ${med}us drifted ${BQ_DRIFT_PCT}% from this gateway+arch's rolling baseline ${base}us (band +/-${BQ_FLOOR_DRIFT_PCT}%)"
+    BQ_DETAIL="floor p99 ${med}us is ${BQ_DRIFT_PCT}% SLOWER than this gateway+arch's rolling baseline ${base}us (one-sided band +${BQ_FLOOR_DRIFT_PCT}%; a faster floor never fails)"
     return 0
   fi
   # 6. ANTI-RATCHET: cumulative creep against the oldest retained qualified median.
-  if [ -n "$oldest" ] && ! bq_le "$(bq_abs "$BQ_RATCHET_PCT")" "$BQ_FLOOR_RATCHET_PCT"; then
+  if [ -n "$oldest" ] && ! bq_le "$(bq_regression "$BQ_RATCHET_PCT" lat)" "$BQ_FLOOR_RATCHET_PCT"; then
     BQ_VERDICT=fail; BQ_REASON=floor_ratchet
-    BQ_DETAIL="floor p99 ${med}us is ${BQ_RATCHET_PCT}% from the OLDEST retained qualified floor ${oldest}us (anti-ratchet bound +/-${BQ_FLOOR_RATCHET_PCT}%): the box population has crept even though each step passed"
+    BQ_DETAIL="floor p99 ${med}us is ${BQ_RATCHET_PCT}% SLOWER than the OLDEST retained qualified floor ${oldest}us (one-sided anti-ratchet bound +${BQ_FLOOR_RATCHET_PCT}%): the box population has crept slower even though each step passed"
     return 0
   fi
   BQ_DETAIL="floor p99 ${med}us, drift ${BQ_DRIFT_PCT}% vs baseline ${base}us (band +/-${BQ_FLOOR_DRIFT_PCT}%), spread ${BQ_JITTER_PCT}%, p99/p50 ${BQ_JITTER_RATIO}"
@@ -401,14 +413,14 @@ bq_stage2_verdict(){
     BQ_DETAIL="the peak replay of $cell delivered no successful throughput sample (baseline ${base} rps): the gateway or the box is not serving"
     return 0
   fi
-  if ! bq_le "$(bq_abs "$BQ_DRIFT_PCT")" "$BQ_PEAK_DRIFT_PCT"; then
+  if ! bq_le "$(bq_regression "$BQ_DRIFT_PCT" rps)" "$BQ_PEAK_DRIFT_PCT"; then
     BQ_VERDICT=fail; BQ_REASON=peak_drift
-    BQ_DETAIL="peak replay of $cell reached ${obs} rps, ${BQ_DRIFT_PCT}% from the rolling baseline ${base} rps (band +/-${BQ_PEAK_DRIFT_PCT}%)"
+    BQ_DETAIL="peak replay of $cell reached ${obs} rps, ${BQ_DRIFT_PCT}% BELOW the rolling baseline ${base} rps (one-sided band -${BQ_PEAK_DRIFT_PCT}%; exceeding the baseline never fails)"
     return 0
   fi
-  if [ -n "$oldest" ] && ! bq_le "$(bq_abs "$BQ_RATCHET_PCT")" "$BQ_PEAK_RATCHET_PCT"; then
+  if [ -n "$oldest" ] && ! bq_le "$(bq_regression "$BQ_RATCHET_PCT" rps)" "$BQ_PEAK_RATCHET_PCT"; then
     BQ_VERDICT=fail; BQ_REASON=peak_ratchet
-    BQ_DETAIL="peak replay of $cell reached ${obs} rps, ${BQ_RATCHET_PCT}% from the OLDEST retained qualified peak ${oldest} rps (anti-ratchet bound +/-${BQ_PEAK_RATCHET_PCT}%)"
+    BQ_DETAIL="peak replay of $cell reached ${obs} rps, ${BQ_RATCHET_PCT}% BELOW the OLDEST retained qualified peak ${oldest} rps (one-sided anti-ratchet bound -${BQ_PEAK_RATCHET_PCT}%)"
     return 0
   fi
   BQ_DETAIL="peak replay of $cell reached ${obs} rps, drift ${BQ_DRIFT_PCT}% vs baseline ${base} rps (band +/-${BQ_PEAK_DRIFT_PCT}%)"
