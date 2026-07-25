@@ -440,7 +440,7 @@ its result so the board updates just this row (matrix-sole-source)." \
 # ═════════════════════════════════════════════════════════════════════════════════════════════════
 # BOX QUALIFICATION — "new box and test if that happens before it ever runs in full".
 #
-# THE INCIDENT. On 2026-07-25 one box (gomodel's) was contaminated. The 6x6 ran to completion on it,
+# THE INCIDENT. On 2026-07-25 one box was contaminated. The 6x6 ran to completion on it,
 # for hours, and the result was published as a GATEWAY REGRESSION. It was not: the rig's own no-gateway
 # floor on that box (direct_c1_p99_us — the loadgen hitting the mock with no gateway in the path) had
 # moved +5.4% against its own prior run while the nine healthy boxes moved -2.6%..+3.8%, and its peak
@@ -665,7 +665,7 @@ bench_gateway_once() {
 
   # Ship ONLY the harness (scripts + configs, a few MB). Exclude every build/runtime artifact: the box
   # fetches the 2 rig binaries from the release (lib/rig.sh) and builds its own gateway (docker pull, or
-  # gw_build for the 2 source gateways). A stray local venv (litellm's 564MB) or bin/ must never be
+  # gw_build for the 2 source gateways). A stray local venv (one gateway's, 564MB) or bin/ must never be
   # uploaded to 13 boxes. Log the payload size + transfer time so a slow rsync is never a silent hang.
   # Payload size for the tripwire (added after the 564MB-venv incident so a slow rsync is never a
   # silent hang). GNU `du --exclude` is rejected by the BSD `du` on the darwin orchestrator (always

@@ -142,7 +142,7 @@ jobs:
       # GATEWAY to one specific name; verify-local.sh tore down a hardcoded container name, so it
       # killed the wrong container whenever it was handed any other gateway; gateways/versions.env
       # held every gateway's pinned ref, so a source-built entrant needed a block in a file it did
-      # not own; and lib/box_qualify_test.sh asserted "gomodel fails" about what is really a
+      # not own; and lib/box_qualify_test.sh asserted "one gateway fails" about what is really a
       # hardware gate. lib/gateways.sh is now the one shell-side discovery choke point and this lint
       # enforces the invariant as a class: it enumerates gateways/*/ AT RUNTIME (never a hardcoded
       # roster of its own) and fails if any gateway's name or declared alias appears in the CODE of

@@ -268,7 +268,7 @@ MATRIX_MEM_PAYLOAD="${MATRIX_MEM_PAYLOAD:-${MEM_PSIZE:-4096}}" # per-request pay
 # agreed one, with no record, is not a thing to launch a 7-hour run on. Cost of restoring it: a plateau
 # cannot be declared before 60s of load, so a fast-settling cell pays about +30s, roughly +18 min on a
 # fully-served gateway against an 8h ceiling. Replayed against the last field run's real series, the only
-# verdict this changes is portkey's, and portkey was still ramping when that 120s load stopped.
+# verdict this changes is one gateway's, and it was still ramping when that 120s load stopped.
 MEM_PLATEAU_WINDOW_S="${MEM_PLATEAU_WINDOW_S:-60}"   # trailing window the steadiness test runs over
 MEM_PLATEAU_TREND_PCT="${MEM_PLATEAU_TREND_PCT:-1}"  # max upward drift, 2nd-half mean vs 1st-half mean
 MEM_PLATEAU_RANGE_PCT="${MEM_PLATEAU_RANGE_PCT:-2}"  # max (max-min) spread inside the window
@@ -487,8 +487,8 @@ _PHASE_T0=$(date +%s)
 log "[$GATEWAY] build"; gw_build || { echo "build failed"; exit 1; }
 BUILD_S=$(( $(date +%s) - _PHASE_T0 ))
 # ── THE BUILD/MEASURE BOUNDARY (environment parity) ──────────────────────────────────────────────
-# Three of the thirteen manifests build from source and pull their own toolchain in gw_prereqs (aisix
-# + helicone: rust/git/build deps; litellm-rust: those plus a ~564MB python venv), because no usable
+# Three of the thirteen manifests build from source and pull their own toolchain in gw_prereqs (two
+# need rust/git/build deps; the third those plus a ~564MB python venv), because no usable
 # arm64 image exists for them. That means three boxes carry software the other ten never see, on a
 # benchmark whose premise is "same box, same load, one gateway at a time". Each box runs exactly ONE
 # gateway and every gw_prereqs runs inside gw_build, so nothing installed is resident when we start
@@ -512,7 +512,7 @@ BUILD="$(gw_version 2>/dev/null | tr -d '\n' | sed 's/"/\\"/g')"
 OOTB_CONFIG="$(harness_write_config "$GATEWAY" "$ROOT/results" 2>/dev/null || true)"
 
 # Header arrays are rebuilt after EVERY (re)launch: a manifest can mint a key in gw_launch (busbar
-# vkey) or swap provider-selecting headers per egress (portkey style).
+# vkey) or swap provider-selecting headers per egress.
 CURL_H=(); XH=()
 rebuild_headers(){
   CURL_H=(); XH=()
@@ -523,9 +523,9 @@ rebuild_headers(){
 
 # ── manifest BASELINE: the values every egress column starts from ────────────────────────────────
 # Same bug class as the frozen ingress paths above, from the other end: gw_matrix_egress MUTATES the
-# manifest's own routing state in place (GW_MODEL for most, GW_HEADERS for portkey) and nothing ever
+# manifest's own routing state in place (GW_MODEL for most, GW_HEADERS for one) and nothing ever
 # put it back, so column N+1 inherited column N's mutation. A manifest that derives its per-column
-# model from the current value — litellm-python's `GW_MODEL="${GW_MODEL}-anthropic"` — therefore
+# model from the current value, one gateway's `GW_MODEL="${GW_MODEL}-anthropic"`, therefore
 # COMPOUNDED across the 6x6: the published run recorded model
 # "gpt-4o-mini-responses-anthropic-gemini-cohere-bedrock-responses", i.e. every column after the first
 # asked for a model that does not exist. Snapshot the baseline ONCE (after gw_build, before any
@@ -949,7 +949,7 @@ matrix_cell_perf(){
   done
   # C1b - LEG-3 RE-VERIFY AFTER LOAD. The capability probe proved this cell hits the intended egress
   # dialect endpoint at concurrency 1, but perf/stream historically recorded HTTP-200-only numbers
-  # that hid a misroute (the gomodel-class bug: an openai request served from the mock's anthropic
+  # that hid a misroute (the same bug class: an openai request served from the mock's anthropic
   # endpoint). The sweep just hammered the gateway on a NON-recording mock, so we re-run THIS cell's
   # exact probe (same body + headers, same ingress path) against the recording mock and re-assert
   # leg 3: the mock must have received a request on the $egress endpoint carrying the $egress shape.
@@ -1411,7 +1411,7 @@ matrix_cell_memory(){
           # is TRAILING, so a pass at `elapsed` means the span [elapsed-window, elapsed] was steady: the
           # RSS stopped moving at the START of that window and the remaining time is our instrument
           # satisfying itself. Publishing `elapsed` overstated every settling time by exactly one window
-          # (kong went flat at ~120s and would have been published as "settled after 180 s"), and worse,
+          # (one gateway went flat at ~120s, would have been published as "settled after 180 s"), and worse,
           # it made a number ABOUT THE GATEWAY move whenever MEM_PLATEAU_WINDOW_S moved - the stopping
           # point deciding the answer, which is the defect this whole design exists to remove. Reporting
           # the window start makes it window-independent to within one sample. Zero is a real and

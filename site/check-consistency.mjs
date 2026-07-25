@@ -53,7 +53,7 @@ function isEnvelope(x) { return x != null && typeof x === "object" && typeof x.c
 // ---- C7: peak_rss_mib <= peak_rss_hwm_mib (a second physical-plausibility invariant) ------------
 // VmHWM is the KERNEL's own high-water mark, updated on every charge, so it cannot be lower than any
 // RSS the sampler ever observed for the same process tree. The shipped data violates it on two
-// gateways (one-api 165.1 > 164.7, agentgateway 45.0 > 44.7), which is physically impossible for a
+// gateways (one gateway at 165.1 > 164.7, another at 45.0 > 44.7), which is physically impossible for a
 // FIXED process tree — and that is the tell. Both readers sum over the tree ENUMERATED AT READ TIME
 // (lib/harness.sh _proc_tree_field_mib): the sampled peak sums VmRSS over the tree alive DURING the
 // load, while VmHWM is summed AFTER it. A worker that exits in between is counted in the peak and
@@ -111,7 +111,7 @@ export function c7HwmBelowPeak(gwKey, rawMatrix) {
 // and every resulting inversion was excused as noise. It was then promoted to a hard error, which is
 // correct for that defect and wrong for the opposite case: on a CPU-bound gateway the two sweeps measure
 // THE SAME ceiling in two separate phases, so which one comes out higher is decided by run-to-run
-// variation. litellm-python's openai>openai cell is the worked example - its max-proxy sweep reads
+// variation. one gateway's openai>openai cell is the worked example, its max-proxy sweep reads
 // 170,174,176,178,180,181 across its rungs and its sustained sweep reads 171..185 across its own, one
 // flat CPU-bound curve sampled twice. Calling the 4 rps between the two winners a violated maximum
 // makes the board unpublishable for a reason that is not a property of the gateway.
@@ -519,16 +519,16 @@ export function checkConsistency(data, app, opts = {}) {
     // the RAW matrix cell (Design F R1 — the independent oracle), never via the accessor. Empirically EVERY
     // inversion in the shipped data is a CROSS-PHASE measurement artefact: sustained@20ms and max_proxy are
     // swept in SEPARATE phases, each with its own noise band, so two independent ceilings legitimately
-    // overlap — the margin scales with 1/throughput (sub-1% on fast gateways like kong 0.18%, up to ~8% on
-    // a ~500-rps gateway like litellm-python). None is a real "sustained beat the ceiling". So C6 FLAGS
+    // overlap: the margin scales with 1/throughput (sub-1% on a fast gateway, up to ~8% on
+    // a ~500-rps one). None is a real "sustained beat the ceiling". So C6 FLAGS
     // every inverted cell as a WARNING — visible in the build log so the FIELD RUN re-measures the offender
-    // (kong's 14,351 vs 14,325 is the seed case) — but does NOT hard-fail the build: a hard assert would
+    // (one gateway's 14,351 vs 14,325 is the seed case) but does NOT hard-fail: a hard assert would
     // false-fail every honest run on sub-measurement-noise, blocking all publishing. A max_proxy of 0 is
     // "did not qualify" (no ceiling), not an inversion, and is skipped. The magnitude is stamped so a GROSS
     // (implausible) inversion stands out in the log for a human to escalate at re-measure time.
     // AUDIT #21: C6 is a PURE EXPORTED FUNCTION (c6Inversions, below) so it has a RED-before proof that
     // does not depend on a particular gateway still being inverted in the shipped data. The old test
-    // asserted on kong's LIVE 14,351>14,325 cell; the fresh field run resolved it, and a check whose only
+    // asserted on one gateway's LIVE 14,351>14,325 cell; the field run resolved it, and a check whose only
     // proof is "the bug is still in the data" fails the day the data gets better.
     const c6 = c6Inversions(g.key, rawMatrix(g.key));
     if (c6.cellsChecked > 0) covered("C6.cell");

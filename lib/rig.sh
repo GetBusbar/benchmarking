@@ -60,7 +60,7 @@ _rig_json_str(){ if [ -z "${1:-}" ]; then printf 'null'; else printf '"%s"' "$1"
 
 # BOX QUALIFICATION PROVENANCE (the same idea, one step further out). The rig binaries are one half of
 # the instrument; the BOX they run on is the other. A contaminated box publishes a fake gateway
-# regression exactly as a silently-rebuilt mock does — that is what happened to gomodel on 2026-07-25,
+# regression exactly as a silently-rebuilt mock does: that happened to one gateway on 2026-07-25,
 # whose no-gateway floor (77-81us) sat INSIDE the healthy population's absolute range (73-82us) yet was
 # 5.4% off its own prior run, and whose peak throughput collapsed 86%. So the box's qualifying
 # measurement — the no-gateway floor median + jitter stats, and the gateway's own peak replay, with the

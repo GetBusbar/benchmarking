@@ -7,7 +7,7 @@
 # peak RSS observed. For any gateway still climbing when the timer expired, that number described when
 # we stopped looking rather than the gateway: a longer load would have produced a larger number. In the
 # 2026-07-25 field run two of thirteen gateways were still rising at the moment the load stopped
-# (busbar climbed for 111s of the 120s window; bifrost for 126s of it), so their published peaks were
+# (one climbed for 111s of the 120s window, another for 126s of it), so their published peaks were
 # duration artifacts. Terminating on a measured condition instead makes the number mean something you
 # can name: the steady-state RSS under this load.
 #
