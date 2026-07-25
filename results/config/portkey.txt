@@ -1,0 +1,7 @@
+# image (run unmodified; no config file — the OSS gateway needs none)
+PORTKEY_IMAGE=portkeyai/gateway:1.15.2
+# run-mechanics
+docker run --network host --cpuset-cpus=0-3
+# default request headers (per-request provider selection; matrix swaps the provider per column)
+x-portkey-provider: anthropic
+x-portkey-custom-host: http://127.0.0.1:8000/v1
