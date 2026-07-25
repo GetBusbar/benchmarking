@@ -123,7 +123,8 @@ container_hwm_mib() { # container_name → its process tree's VmHWM via the host
 
 # rss_series_json <series_file> → a compact JSON array [{"t_s":<int>,"rss_mib":<float>},…] for the
 # recovery curve, built from a whitespace-separated `<t_s> <rss_mib>` per-line sample file the memory
-# sampler appends to across the WHOLE run (idle → ramp → load → the settle window). Malformed/blank
+# sampler appends to across the WHOLE run (60 s idle-before → the entire 6x6 sweep → the 60 s recovery
+# window after the last cell — matrix/run.sh matrix_memory_start/_finish). Malformed/blank
 # lines are skipped, and the array is DOWNSAMPLED to at most ~120 points (keeping first+last) so a very
 # long run stays bounded. A missing/empty file yields [] (never a fabricated point) — the downstream
 # projection then treats an empty series as absent. Same MiB units/RSS source as idle/peak/recovered.
