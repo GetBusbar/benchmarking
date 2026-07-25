@@ -1845,9 +1845,11 @@ function renderCharts() {
 /* ---- method links + footer -------------------------------------------------- */
 function renderStatic() {
   const repo = state.data.repo || "https://github.com/GetBusbar/benchmarking";
-  for (const suite of ["perf", "memory", "stream", "xlate", "matrix"]) {
-    const a = document.getElementById(`lnk-${suite}`);
-    if (a) a.href = `${repo}/blob/main/${suite}/run.sh`;
+  // The matrix is the SOLE producer now: latency/throughput/streaming/memory all come from matrix/run.sh.
+  // Both method links (the matrix card + the memory card) point at it; a missing id is skipped.
+  for (const id of ["matrix", "memory"]) {
+    const a = document.getElementById(`lnk-${id}`);
+    if (a) a.href = `${repo}/blob/main/matrix/run.sh`;
   }
   document.getElementById("repo-link").href = repo;
   const hw = document.getElementById("hw-stamp");
