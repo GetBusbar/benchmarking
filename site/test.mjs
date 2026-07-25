@@ -1966,6 +1966,38 @@ function writeSnapshot(root, key, { measuredAt, matrix, files }) {
   writeFileSync(join(root, "results", "snapshots", `result_${key}_${measuredAt.replace(/[:.]/g, "-")}.json`),
     JSON.stringify({ gateway: key, measured_at: measuredAt, matrix, config: files ? { files } : undefined }));
 }
+test("the ootb_config pointer is UNTRUSTED: a path that escapes results/ is refused, never read", () => {
+  // The pointer arrives inside a producer-written results JSON and its CONTENTS are published verbatim
+  // onto a public page. A `..` in it therefore reads an arbitrary local file straight onto the board.
+  // Nothing malicious is required for this to bite - a producer bug writing an absolute or relative
+  // path would exfiltrate a file rather than fail - so the shape the harness actually writes
+  // (config/<key>.txt) is allowlisted and anything else is refused LOUDLY, not silently ignored.
+  for (const bad of ["../../lib/harness.sh", "/etc/passwd", "config/../../README.md",
+    "config/sub/dir.txt", "notconfig/x.txt", "config/x.yaml"]) {
+    const root = buildStreamMemRepo();
+    const mpath = join(root, "results", "matrix", "sgw.json");
+    const m = JSON.parse(readFileSync(mpath, "utf8"));
+    m.ootb_config = bad;
+    writeFileSync(mpath, JSON.stringify(m));
+    assert.throws(() => genInto(root), (e) => {
+      assert.match(e.message, /is not a results-relative config artifact/);
+      return true;
+    }, `a pointer of ${JSON.stringify(bad)} must be refused`);
+  }
+  // The legitimate shape still reads.
+  {
+    const root = buildStreamMemRepo();
+    const mpath = join(root, "results", "matrix", "sgw.json");
+    const m = JSON.parse(readFileSync(mpath, "utf8"));
+    m.ootb_config = "config/sgw.txt";
+    writeFileSync(mpath, JSON.stringify(m));
+    mkdirSync(join(root, "results", "config"), { recursive: true });
+    writeFileSync(join(root, "results", "config", "sgw.txt"), "port: 8080\n");
+    const g = genInto(root).gateways.find((x) => x.key === "sgw");
+    assert.equal(g.ootb_config, "port: 8080\n", "the allowlisted pointer must still be read");
+  }
+});
+
 test("a DEGRADED-MODE snapshot must never become the board's source just by being newer", () => {
   // THE REAL INCIDENT: helicone's board row became a probe-only laptop run (1 cell, no perf, no
   // streaming, no memory, no best_cell) that shadowed a complete field run from the same morning,

@@ -399,6 +399,24 @@ check("memory_rss: a gateway that never settled is NOT eligible (no steady state
       "leaks" in rss_topn, False)
 check("memory_rss: the never-settled bar says so, and quantifies it with the growth rate",
       "never settled: +42.5 MiB/min" in (charts._mem_annot(mrows["leaks"]) or ""), True)
+# ...and it KEEPS its measured cold-idle number. The idle sample is taken cold, before the gateway
+# serves a single request, so it is valid whether or not the RSS later went steady. Deleting it because
+# the steady state (a different field on the same record) is null would apply "unmeasurable means
+# absent" to something that WAS measured - and on the last field run four of eleven gateways never
+# settled, so four real idle bars would have silently vanished from the one chart that shows idle.
+check("memory_rss: a never-settled gateway KEEPS its measured idle value",
+      mrows["leaks"]["idle_rss_mib"], 20)
+# ...but a window the PRODUCER disclosed as not-served contributes nothing at all, idle included. The
+# producer sets memory.served=false when the fixed load stopped delivering or the delivered payload was
+# not the declared one; in that state a relaunch race can leave the "cold" idle sample belonging to the
+# previous cell's post-load process, so the whole window is absent rather than partially charted.
+charts.CANON = {"disclosed": _mem(idle_rss_mib=33, steady_state_rss_mib=None)}
+charts.CANON["disclosed"]["matrix"]["upstreams"]["openai"]["cells"]["openai"]["memory"]["served"] = False
+charts.GATEWAYS = {k: k for k in charts.CANON}
+_drow = {r["_key"]: r for r in charts._load("memory")}["disclosed"]
+check("a window disclosed served=false still gets a ROW (every measured gateway appears)",
+      _drow["_mem_unserved"], True)
+check("...but contributes NO numbers, its idle included", _drow["idle_rss_mib"], None)
 check("memory_rss: every row names the ONE cell every gateway was compared on",
       mrows["measured"]["_mem_load_cell"], "openai>openai")
 
