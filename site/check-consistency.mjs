@@ -35,16 +35,11 @@ import { createRequire } from "node:module";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, "..");
 
-// The gated (honesty-flag-bearing) metric field names + their sibling *_mock_bound flags. C1 asserts none
-// of these appear as a BARE scalar, and no *_mock_bound key survives, anywhere in the bundle.
-const GATED_FIELDS = ["rps_sustained_20ms", "rps_max_proxy", "streams_sustained", "cpu_fps"];
-// The full envelope-valued metric field set (gated + ungated), on any projected cell / matrix cell.
-const METRIC_FIELDS = [
-  ...GATED_FIELDS,
-  "added_latency_p50_us", "added_latency_p99_us", "gateway_c1_p99_us", "direct_c1_p99_us",
-  "added_ttft_p50_us", "added_ttft_p99_us", "added_gap_p50_us", "added_gap_p99_us", "streams_sustained_fps",
-  "idle_rss_mib", "peak_rss_mib", "recovered_rss_mib",
-];
+// AUDIT #11: the metric-field vocabulary is IMPORTED from seal.mjs — the SAME list gen-data seals from.
+// A local whitelist here had already lagged the producer (peak_rss_hwm_mib / post_load_rss_mib were
+// shipping unsealed and C1 could not see them, because C1's whitelist did not know they existed). One
+// shared list + a shape rule (any *_rss_mib) means a new producer field is checked the day it appears.
+import { GATED_FIELDS, isMetricField } from "./seal.mjs";
 // The origins a projected cell's source.kind may honestly carry: the single end-state "matrix" path plus
 // the LIVE deferred fallbacks (kept until the field run; sealed honestly, never mislabelled as matrix).
 const SOURCE_KINDS = new Set(["matrix", "perf-fallback", "xlate-fallback", "stream-fallback"]);
@@ -70,11 +65,143 @@ function readSrc(rel) {
   return existsSync(p) ? readFileSync(p, "utf8") : "";
 }
 
-export function checkConsistency(data, app) {
+// ---- the lints, as PURE EXPORTED FUNCTIONS (audit #20) -----------------------------------------
+// Each lint used to be an inline loop over the repo's own source, which meant it could only ever be
+// observed in its GREEN state: there was no way to write a RED-before test proving the lint FIRES on the
+// bug it claims to catch (and C5's could not fire at all — see below). Extracted as pure
+// source-text -> findings functions, they are unit-testable against synthetic source that CONTAINS the
+// violation, so "the lint works" is proven rather than assumed.
+
+// (1) SWEEP-KEY LEAK (C3a): the internal sweep keys are caption VOCABULARY and live ONLY in the caption
+// table / the seal. A key appearing as a user-facing string literal anywhere else is caption drift.
+export const SWEEP_KEY_RE = /"(?:6x6-diagonal|6x6-translation|6x6-memory-window|6x6-stream-diagonal|6x6-stream-translation|perf-suite|xlate-suite|stream-suite)"/;
+export function lintSweepKeys(src, name, allowRegion) {
+  const errors = [];
+  let inAllowed = false, sawRegion = false;
+  src.split("\n").forEach((line, i) => {
+    if (allowRegion.enter.test(line)) { inAllowed = true; sawRegion = true; }
+    if (inAllowed) { if (allowRegion.exit.test(line)) inAllowed = false; return; }
+    const code = line.replace(/\/\/.*$/, "").replace(/#.*$/, "");
+    if (!SWEEP_KEY_RE.test(code)) return;
+    // rec.source = {…sweep: "6x6-diagonal"…} is legitimate PROVENANCE DATA assignment, not a caption.
+    if (/\bsource\b|\bsweep\b\s*:/.test(code)) return;
+    errors.push(`C3: ${name}:${i + 1} a sweep-key token leaked into a caption literal (keys live only in SWEEP_CAPTION): ${line.trim().slice(0, 80)}`);
+  });
+  // COVERAGE means "the scanner actually parsed this file and FOUND its allowed region" — proof the lint
+  // is live. The old tag was set by the EXEMPTION path (and by the error path), so a lint that never
+  // scanned anything still reported itself covered (audit #20).
+  return { errors, scanned: sawRegion };
+}
+
+// (2) ACCESSOR ROUTING (C5): every read of a sealed metric's number must go through metric()/mval().
+// AUDIT #15: the old lint looked for the literal text `.<gatedField>.value` on ONE line of app.js. The
+// codebase does not read metrics that way — it binds the envelope to a local first
+// (`const env = p[key]` / `const env = p && p.rps_sustained_20ms`) and then reads `env.value`, often on a
+// LATER line — so the lint could not fire, and app.js contained two real violations it should have
+// caught. This version is TAINT-BASED and whole-file: any identifier handed to an envelope predicate or
+// accessor (isEnvelope/metric/mval, or _is_env/mval in Python) IS an envelope, and reading its raw
+// `.value` / `.get("value")` outside the accessor definitions themselves bypasses the reader.
+const JS_ACCESSOR_DEFS = /^\s*(?:export\s+)?function\s+(?:metric|mval|isEnvelope)\b|^\s*(?:export\s+)?const\s+(?:metric|mval|isEnvelope)\s*=/;
+const PY_ACCESSOR_DEFS = /^\s*def\s+(?:mval|mvalid|menote|_is_env)\b/;
+export function lintAccessorRouting(src, name, lang = "js") {
+  const errors = [];
+  const lines = src.split("\n");
+  const isPy = lang === "py";
+  const accessorDef = isPy ? PY_ACCESSOR_DEFS : JS_ACCESSOR_DEFS;
+  const predicate = isPy ? /\b(?:_is_env|mval|mvalid|menote)\(\s*([A-Za-z_$][\w$]*)\s*[),]/g
+    : /\b(?:isEnvelope|metric|mval)\(\s*([A-Za-z_$][\w$]*)\s*[),]/g;
+  const valueRead = (v) => isPy
+    ? new RegExp(`\\b${v}\\.get\\(\\s*["']value["']`)
+    : new RegExp(`\\b${v}\\.value\\b`);
+  // PASS 1 (whole file, so a deref on a LATER line than the binding is still caught): every identifier
+  // ever handed to an envelope accessor/predicate is an envelope-typed local.
+  const tainted = new Set();
+  for (const m of src.matchAll(predicate)) tainted.add(m[1]);
+  // PASS 2: mark the line ranges that ARE the accessor definitions — the one place `.value` is legal.
+  const inAccessor = new Array(lines.length).fill(false);
+  for (let i = 0; i < lines.length; i++) {
+    if (!accessorDef.test(lines[i])) continue;
+    const indent = (lines[i].match(/^\s*/) || [""])[0].length;
+    for (let j = i; j < lines.length; j++) {
+      inAccessor[j] = true;
+      if (j > i && lines[j].trim() && (lines[j].match(/^\s*/) || [""])[0].length <= indent &&
+        !/^\s*[})\]]/.test(lines[j])) break;
+      if (j > i && new RegExp(`^\\s{0,${indent}}[}]`).test(lines[j])) break;
+    }
+  }
+  lines.forEach((line, i) => {
+    if (inAccessor[i]) return;
+    const code = isPy ? line.replace(/#.*$/, "") : line.replace(/\/\/.*$/, "");
+    // (a) the direct form: a metric FIELD dereferenced straight to its raw number.
+    for (const f of GATED_FIELDS) {
+      const re = isPy ? new RegExp(`\\.${f}\\b[^\\n]*\\.get\\(\\s*["']value["']`) : new RegExp(`\\.${f}\\.value\\b`);
+      if (re.test(code))
+        errors.push(`C5: ${name}:${i + 1} reads .${f}'s raw value directly (must route through metric()/mval()): ${line.trim().slice(0, 80)}`);
+    }
+    // (b) the form the codebase ACTUALLY uses: an envelope bound to a local, then dereferenced.
+    for (const v of tainted) {
+      if (valueRead(v).test(code))
+        errors.push(`C5: ${name}:${i + 1} reads the raw value off envelope-typed \`${v}\` (must route through metric()/mval()): ${line.trim().slice(0, 80)}`);
+    }
+  });
+  return { errors, scanned: lines.length > 1, tainted };
+}
+
+// (3) PER-LANE chart provenance (C3b). AUDIT #2: the old check asserted only that `_sweep_label(`
+// appears SOMEWHERE in charts.py — so the streaming lane could (and did) ship four PNGs with zero
+// provenance disclosure while the perf + xlate lanes disclosed theirs, and the lint stayed green.
+// Assert it PER LANE: each lane's own `_<lane>_source` stamp must be fed to _sweep_label.
+export const CHART_PROVENANCE_LANES = ["_perf_source", "_xlate_source", "_stream_source"];
+export function lintChartLaneProvenance(chartsSrc) {
+  const errors = [];
+  const flat = chartsSrc.replace(/\s+/g, " ");
+  for (const lane of CHART_PROVENANCE_LANES) {
+    if (!new RegExp(`_sweep_label\\(\\s*\\{\\s*"sweep":\\s*r\\.get\\(\\s*"${lane}"`).test(flat))
+      errors.push(`C3: charts.py lane ${lane} never reaches _sweep_label — that lane's PNGs publish numbers with NO provenance disclosure while its sibling lanes disclose theirs`);
+  }
+  return { errors, scanned: !!chartsSrc };
+}
+
+// (4) CROSS-LANGUAGE caption parity (C3c). AUDIT #22: charts.py's comment CLAIMED check-consistency
+// asserts its SWEEP_CAPTION keys match app.js's — it did not, so the two caption vocabularies could
+// silently drift (and a new key added on one side only would render on one surface and throw on the
+// other). Implemented: parse the Python key set and compare it to the JS table's keys.
+export function lintCaptionParity(chartsSrc, jsCaptionKeys) {
+  const errors = [];
+  const m = chartsSrc.match(/SWEEP_CAPTION\s*=\s*\{([\s\S]*?)\}/);
+  if (!m) return { errors: [`C3: charts.py has no SWEEP_CAPTION key set to compare with app.js (the caption vocabularies cannot be proven in sync)`], scanned: false };
+  const pyKeys = new Set([...m[1].matchAll(/"([^"]+)"/g)].map((x) => x[1]));
+  const js = new Set(jsCaptionKeys);
+  for (const k of js) if (!pyKeys.has(k)) errors.push(`C3: SWEEP_CAPTION key "${k}" exists in app.js but NOT in charts.py (the caption vocabularies have drifted)`);
+  for (const k of pyKeys) if (!js.has(k)) errors.push(`C3: SWEEP_CAPTION key "${k}" exists in charts.py but NOT in app.js (the caption vocabularies have drifted)`);
+  return { errors, scanned: true };
+}
+
+// ---- the INDEPENDENT ORACLE (Design F R1) --------------------------------------------------------
+// oracleExpected(raw, flag, gated): re-derive what a metric MUST display, from the RAW value + its own
+// _mock_bound flag, through a path DISJOINT from metric()/seal.mjs. A gated metric is shown only when it
+// is null-free and either a measured 0 (honest) or a positive value the harness certified (flag===false).
+export function oracleExpected(raw, flag, gated) {
+  if (raw == null) return null;
+  if (!gated) return raw;
+  if (raw === 0) return 0;                     // measured zero: honest, always shown
+  return (raw > 0 && flag === false) ? raw : null;   // suppressed -> n/a
+}
+
+// opts.syntheticFixture: this bundle is a HAND-BUILT fixture with no on-disk oracle (an invariant
+// unit-test), so the "a matrix-sourced publish must be oracle-verifiable" requirement is waived. AUDIT
+// #18: this replaces the old SILENT hatch (`no results/matrix on disk anywhere => the whole oracle layer
+// is not required`), which the REAL bundle could fall into — an unverifiable publish would then pass. The
+// waiver is now an EXPLICIT caller opt-in that the CLI never passes, so a real bundle can never take it.
+export function checkConsistency(data, app, opts = {}) {
+  const { syntheticFixture = false } = opts;
   const errors = [];
   const warnings = [];
   const cover = new Set();
   const covered = (tag) => cover.add(tag);
+  // AUDIT #16: how many independent-oracle comparisons ACTUALLY ran. Coverage is claimed from this
+  // counter, never from merely reaching the branch.
+  let oracleCompared = 0;
 
   // ---- C1 + C2: envelope integrity across the WHOLE bundle -------------------
   // Walk every object. (C1) a *_mock_bound key must not survive; a gated metric field must be an envelope,
@@ -87,7 +214,7 @@ export function checkConsistency(data, app) {
         errors.push(`C1: ${path}.${k} — a raw *_mock_bound flag survives in the bundle (must be consumed at seal time)`);
         covered("C1.mock_bound");
       }
-      if (METRIC_FIELDS.includes(k)) {
+      if (isMetricField(k)) {
         covered("C1.field");
         if (!isEnvelope(v) && typeof v === "number") {
           errors.push(`C1: ${path}.${k}=${v} is a BARE scalar, not a sealed envelope (a raw ungated metric field survives)`);
@@ -153,28 +280,63 @@ export function checkConsistency(data, app) {
         }
       }
     }
-    // ---- R1 independent oracle: the projected best_cell headline == the RAW matrix diagonal cell -------
+    // ---- R1 independent oracle -------------------------------------------------------------------
+    // AUDIT #16: coverage is claimed ONLY when a comparison ACTUALLY HAPPENED. The tag used to fire
+    // before the rawPerf guard, so a bundle whose oracle compared NOTHING (raw cell missing/renamed)
+    // still reported "R1.oracle covered" and R2 passed on an oracle that had done no work.
+    // AUDIT #17: the oracle no longer re-derives ONLY best_cell's two RPS fields (2 of 36 cells' worth
+    // of numbers). It now independently re-derives EVERY sealed matrix cell (all perf + stream metrics),
+    // the translation cell, the streaming record and the memory block — the surfaces that were unoracled.
     const m = rawMatrix(g.key);
-    if (m && m.upstreams && g.best_cell && g.best_cell.source && g.best_cell.source.kind === "matrix") {
-      covered("R1.oracle");
-      const dia = g.best_cell.path && g.best_cell.path.dialect;
-      const rawCell = dia && m.upstreams[dia] && m.upstreams[dia].cells && m.upstreams[dia].cells[dia];
-      const rawPerf = rawCell && rawCell.perf;
-      if (rawPerf) {
-        for (const key of ["rps_sustained_20ms", "rps_max_proxy"]) {
-          // Re-derive the EXPECTED display value from the RAW cell (value + its own _mock_bound flag),
-          // through a path DISJOINT from metric(): a positive value certified only when flag === false;
-          // a positive uncertified value is n/a; a 0 is honest (measured-zero).
-          const raw = rawPerf[key];
-          const flag = rawPerf[`${key}_mock_bound`];
-          const expected = raw == null ? null
-            : raw === 0 ? 0
-            : (raw > 0 && flag === false) ? raw : null;   // suppressed -> n/a
-          const shown = app.metric(g.best_cell[key]).v;
-          if (shown !== expected)
-            errors.push(`R1: ${g.key}.${key}: raw matrix diagonal cell implies displayed=${expected} but the sealed envelope shows ${shown} (independent-oracle mismatch)`);
+    // AUDIT #18: the escape hatch is CLOSED. A gateway that publishes matrix-sourced numbers MUST be
+    // oracle-checkable: if its raw matrix is not on disk (and it did not come from a snapshot, which is
+    // its own self-describing artifact), the whole oracle layer would silently become "not required".
+    const matrixSourced = [g.best_cell, g.translation_cell, g.streaming, g.memory_read]
+      .some((r) => r && r.source && r.source.kind === "matrix");
+    if (matrixSourced && !m && !g.matrix_from_snapshot && !syntheticFixture)
+      errors.push(`R2: ${g.key} publishes matrix-sourced numbers but results/matrix/${g.key}.json is absent — the independent oracle cannot verify a single one of them (an unverifiable publish is a failure, not an exemption)`);
+    // A snapshot-sourced matrix legitimately differs from the per-suite file on disk; comparing the two
+    // would be a false failure, so the oracle skips that gateway and says so.
+    if (m && !g.matrix_from_snapshot) {
+      const cmp = (label, shown, expected) => {
+        oracleCompared += 1;
+        if (shown !== expected)
+          errors.push(`R1: ${g.key}.${label}: the RAW matrix on disk implies displayed=${expected} but the sealed envelope shows ${shown} (independent-oracle mismatch)`);
+      };
+      const rawCellAt = (ingress, egress) => {
+        const up = m.upstreams && m.upstreams[egress];
+        return (up && up.cells && up.cells[ingress]) || null;
+      };
+      // (a) EVERY sealed matrix cell (36 of them), perf + stream, gated + ungated.
+      for (const [egress, up] of Object.entries((g.matrix && g.matrix.upstreams) || {})) {
+        for (const [ingress, cell] of Object.entries((up && up.cells) || {})) {
+          const rawCell = rawCellAt(ingress, egress);
+          if (!rawCell) continue;
+          for (const [sealedSub, rawSub] of [[cell && cell.perf, rawCell.perf], [cell && cell.stream, rawCell.stream]]) {
+            if (!sealedSub || !rawSub) continue;
+            for (const k of Object.keys(sealedSub)) {
+              if (!isMetricField(k)) continue;
+              cmp(`matrix[${ingress}->${egress}].${k}`, app.metric(sealedSub[k]).v,
+                oracleExpected(rawSub[k], rawSub[`${k}_mock_bound`], GATED_FIELDS.includes(k) || k === "streams_sustained_fps"));
+            }
+          }
         }
       }
+      // (b) the PROJECTED records: best_cell, translation_cell, streaming, memory_read.
+      for (const [name, rec, raw] of [
+        ["best_cell", g.best_cell, (() => { const p = g.best_cell && g.best_cell.path; const c = p && rawCellAt(p.dialect, p.dialect); return c && c.perf; })()],
+        ["translation_cell", g.translation_cell, (() => { const p = g.translation_cell && g.translation_cell.path; const c = p && rawCellAt(p.ingress, p.egress); return c && c.perf; })()],
+        ["streaming", g.streaming, (() => { const p = g.streaming && g.streaming.path; const c = p && p.dialect && rawCellAt(p.dialect, p.dialect); return c && c.stream; })()],
+        ["memory_read", g.memory_read, m.memory],
+      ]) {
+        if (!rec || !raw || !rec.source || rec.source.kind !== "matrix") continue;
+        for (const k of Object.keys(rec)) {
+          if (!isMetricField(k)) continue;
+          cmp(`${name}.${k}`, app.metric(rec[k]).v,
+            oracleExpected(raw[k], raw[`${k}_mock_bound`], GATED_FIELDS.includes(k) || k === "streams_sustained_fps"));
+        }
+      }
+      if (oracleCompared > 0) covered("R1.oracle");
     }
   }
 
@@ -188,64 +350,63 @@ export function checkConsistency(data, app) {
   const chartsSrc = readSrc("../charts.py");
   // (a) the SWEEP-KEY tokens must not appear as a bare string literal in a caption renderer. They live
   // ONLY in SWEEP_CAPTION (app.js), the _sweep_label/SWEEP_CAPTION set (charts.py), and seal.mjs (data).
-  const SWEEP_KEY = /"(?:6x6-diagonal|6x6-translation|6x6-memory-window|6x6-stream-diagonal|perf-suite|xlate-suite|stream-suite)"/;
-  const scanKeys = (src, name, allowRegion) => {
-    let inAllowed = false;
-    src.split("\n").forEach((line, i) => {
-      if (allowRegion.enter.test(line)) inAllowed = true;
-      if (inAllowed) { if (allowRegion.exit.test(line)) inAllowed = false; return; }
-      const code = line.replace(/\/\/.*$/, "");
-      if (SWEEP_KEY.test(code)) {
-        // rec.source = {…sweep: "6x6-diagonal"…} is legitimate PROVENANCE DATA assignment, not a caption.
-        if (/\bsource\b|\bsweep\b\s*:/.test(code)) { covered("C3.lint"); return; }
-        errors.push(`C3: ${name}:${i + 1} a sweep-key token leaked into a caption literal (keys live only in SWEEP_CAPTION): ${line.trim().slice(0, 80)}`);
-        covered("C3.lint");
-      }
-    });
-  };
-  scanKeys(appSrc, "app.js", { enter: /const SWEEP_CAPTION\s*=/, exit: /^\};\s*$/m });
-  scanKeys(chartsSrc, "charts.py", { enter: /SWEEP_CAPTION\s*=|def _sweep_label/, exit: /^def (?!_sweep_label)/ });
+  for (const [src, name, region] of [
+    [appSrc, "app.js", { enter: /const SWEEP_CAPTION\s*=/, exit: /^\};\s*$/m }],
+    [chartsSrc, "charts.py", { enter: /SWEEP_CAPTION\s*=|def _sweep_label/, exit: /^def (?!_sweep_label)/ }],
+  ]) {
+    const r = lintSweepKeys(src, name, region);
+    errors.push(...r.errors);
+    if (r.scanned) covered("C3.lint");   // the SCANNER ran and found its region — not the exemption path
+  }
   // (b) the LANES pathNotes + COL_TESTED provenance + charts annot must route through the vocabulary.
   if (!/pathNote:\s*\(j\)\s*=>\s*j && j\.source \? caption\(j\)/.test(appSrc.replace(/\s+/g, " ")))
     errors.push(`C3: app.js LANES pathNotes must route provenance through caption(j) (found a pathNote not using caption())`);
   else covered("C3.route");
-  if (!/_sweep_label\(/.test(chartsSrc))
-    errors.push(`C3: charts.py provenance annotations must route through _sweep_label(source) (the SWEEP_CAPTION mirror)`);
-  else covered("C3.route");
+  // AUDIT #2: PER-LANE, not "the string _sweep_label( appears somewhere in the file".
+  {
+    const r = lintChartLaneProvenance(chartsSrc);
+    errors.push(...r.errors);
+    if (r.scanned) covered("C3.route");
+  }
+  // AUDIT #22: the cross-language caption parity charts.py's comment claimed but nothing asserted.
+  {
+    const r = lintCaptionParity(chartsSrc, Object.keys(app.SWEEP_CAPTION || {}));
+    errors.push(...r.errors);
+    if (r.scanned) covered("C3.parity");
+  }
 
-  // ---- C5 lint: every gated-field read in app.js routes through metric()/mval() ----
-  // A bare `.rps_sustained_20ms.value` deref (outside metric/mval/isEnvelope) or a numeric compare of a
-  // metric field would bypass the reader. Scan app.js for a gated field immediately followed by `.value`
-  // or a numeric comparison; the only allowed `.value` reads are inside metric()/mval().
-  appSrc.split("\n").forEach((line, i) => {
-    const code = line.replace(/\/\/.*$/, "");
-    for (const f of GATED_FIELDS) {
-      // a direct `.<field>.value` deref bypasses metric(); metric()/mval() themselves read `env.value`.
-      const re = new RegExp(`\\.${f}\\.value\\b`);
-      if (re.test(code) && !/function metric|function mval|isEnvelope\(/.test(code)) {
-        errors.push(`C5: app.js:${i + 1} reads .${f}.value directly (must route through metric()/mval()): ${line.trim().slice(0, 80)}`);
-        covered("C5.lint");
-      }
-    }
-    if (/\bmetric\(|\bmval\(/.test(code)) covered("C5.route");
-  });
+  // ---- C5 lint: every sealed-metric read routes through metric()/mval() ----
+  // AUDIT #15: taint-based and whole-file, and applied to charts.py too — the old version was same-line,
+  // app.js-only, and matched an access style the codebase does not use, so it could not fire.
+  for (const [src, name, lang] of [[appSrc, "app.js", "js"], [chartsSrc, "charts.py", "py"]]) {
+    const r = lintAccessorRouting(src, name, lang);
+    errors.push(...r.errors);
+    if (r.scanned) covered("C5.lint");
+  }
+  if (/\bmetric\(|\bmval\(/.test(appSrc)) covered("C5.route");
 
   // ---- R2 coverage: every declared invariant branch must be exercised --------
   const CHECK_BRANCHES = [
     "C1.field", "C1.certified", "C1.mock_bound", "C2.suppressed",
-    "C3.stamp", "C3.lint", "C3.route", "C4.cell", "C4.leak", "C6.cell", "R1.oracle", "C5.route",
+    "C3.stamp", "C3.lint", "C3.route", "C3.parity", "C4.cell", "C4.leak", "C6.cell", "R1.oracle",
+    "C5.route", "C5.lint",
   ];
-  // C1.mock_bound / C2.suppressed / C4.leak / C5.lint are ERROR-only branches: they fire only on a
-  // violation, so they are NOT required to be covered by a healthy bundle (their absence is the GOOD
-  // state). REQUIRED = the branches a healthy bundle with projected cells MUST exercise.
-  const REQUIRED = ["C1.field", "C1.certified", "C3.stamp", "C3.route", "C4.cell", "C5.route"];
-  // ORACLE branches (C6.cell, R1.oracle) need the RAW matrix snapshot on disk (results/matrix/<gw>.json).
-  // The REAL bundle always has it; a SYNTHETIC single-gateway fixture (RED-before test) legitimately does
-  // not, so these are required ONLY when at least one gateway's raw matrix was found — otherwise their
-  // absence is "not applicable to this bundle", not an inert check. This keeps R2 honest on the CI bundle
-  // while letting invariant unit-tests run on synthetic data.
-  const sawRawMatrix = (data.gateways || []).some((g) => rawMatrix(g.key));
-  const requiredNow = sawRawMatrix ? [...REQUIRED, "C6.cell", "R1.oracle"] : REQUIRED;
+  // C1.mock_bound / C2.suppressed / C4.leak are ERROR-only branches: they fire only on a violation, so
+  // they are NOT required to be covered by a healthy bundle (their absence is the GOOD state). REQUIRED =
+  // the branches a healthy bundle with projected cells MUST exercise. AUDIT #20: C3.lint and C5.lint are
+  // now coverable in the GOOD state too — they are tagged when the SCANNER ran, not when it found a
+  // violation or took an exemption — so an inert (never-scanning) lint is now itself a coverage failure.
+  const REQUIRED = ["C1.field", "C1.certified", "C3.stamp", "C3.route", "C3.parity",
+    "C3.lint", "C5.lint", "C4.cell", "C5.route"];
+  // AUDIT #18: the "no raw matrix on disk => the oracle is not required" escape hatch is CLOSED. The
+  // oracle branches are required whenever the bundle publishes ANY matrix-sourced number; a gateway that
+  // publishes matrix numbers with no on-disk matrix is already an error above (its numbers are
+  // unverifiable). A bundle with NO matrix-sourced cells at all (a pure-fallback or synthetic fixture)
+  // legitimately has nothing to oracle — that, and only that, exempts these branches.
+  const publishesMatrix = (data.gateways || []).some((g) =>
+    [g.best_cell, g.translation_cell, g.streaming, g.memory_read]
+      .some((r) => r && r.source && r.source.kind === "matrix"));
+  const requiredNow = publishesMatrix && !syntheticFixture ? [...REQUIRED, "C6.cell", "R1.oracle"] : REQUIRED;
   const missing = requiredNow.filter((b) => !cover.has(b));
   if (missing.length)
     errors.push(`R2: coverage — required invariant branch(es) never exercised by this bundle: ${missing.join(", ")} ` +

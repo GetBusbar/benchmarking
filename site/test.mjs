@@ -20,6 +20,11 @@ import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import assert from "node:assert/strict";
 import { checkConsistency } from "./check-consistency.mjs";
+import * as checkMod from "./check-consistency.mjs";
+import { sealMetric, ZERO_NO_CEILING, ZERO_MEASURED_FAIL } from "./seal.mjs";
+// AUDIT #18: a HAND-BUILT fixture has no results/matrix/<key>.json oracle. The waiver is now an
+// EXPLICIT opt-in (the CLI never passes it), so the real bundle can never silently take it.
+const SYNTH = { syntheticFixture: true };
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, "..");
@@ -36,25 +41,13 @@ function test(name, fn) {
 // Every metric in the bundle is a SEALED ENVELOPE. These builders take RAW intent (value + mock_bound)
 // and produce the exact envelope shape gen-data emits, so fixtures stay readable while exercising the
 // real reader (app.metric/mval). See seal.mjs: a GATED metric is certified only when present AND
-// (value===0 with zeroMeasured OR (value>0 AND flag===false)); else suppressed. Ungated = certified when
-// present. RPS ceilings use zeroMeasured:true (0 is shown); streaming counts use zeroMeasured:false.
-function seal(value, { gated = false, flag = undefined, extras = null, zeroMeasured = true } = {}) {
-  if (value == null) return { value: null, certified: false, suppressed: false, reason: "not_measured" };
-  const num = Number(value);
-  if (gated) {
-    if (num === 0) {
-      return zeroMeasured
-        ? { value: 0, certified: true, suppressed: false, note: "no_qualifying_ceiling" }
-        : { value: null, certified: false, suppressed: false, reason: "not_measured" };
-    }
-    if (!(num > 0 && flag === false)) {
-      return { value: null, certified: false, suppressed: true, reason: flag === true ? "mock_bound" : "unverifiable" };
-    }
-  }
-  const env = { value: num, certified: true, suppressed: false };
-  if (extras) for (const [k, v] of Object.entries(extras)) if (v != null) env[k] = v;
-  return env;
-}
+// (value===0 [always: a measured zero is certified, its NOTE names what the zero means] OR (value>0 AND
+// flag===false)); else suppressed. Ungated = certified when present. RPS ceilings note ZERO_NO_CEILING;
+// streaming counts note ZERO_MEASURED_FAIL — a measured failure, never folded into "not measured" (#3).
+// AUDIT #24: the fixtures seal through the REAL exported sealMetric(). This file used to HAND-COPY
+// seal.mjs's logic here, so every honesty test in it asserted against the COPY — seal.mjs could drift
+// arbitrarily and nothing would fail. The copy is DELETED; `seal` IS the choke point under test.
+const seal = sealMetric;
 const SRC = (kind, sweep) => ({ kind, sweep, build: "img:1", measured_at: "2026-07-24T00:00:00Z" });
 // bcCell: a sealed best_cell (or same-dialect diagonal) from raw perf intent.
 function bcCell(o = {}) {
@@ -103,9 +96,9 @@ function streamRec(o = {}) {
   const put = (k, v) => { if (v != null) rec[k] = seal(v); };
   put("added_ttft_p50_us", added_ttft_p50_us); put("added_ttft_p99_us", added_ttft_p99_us);
   put("added_gap_p50_us", added_gap_p50_us); put("added_gap_p99_us", added_gap_p99_us);
-  put("streams_sustained_fps", streams_sustained_fps);
-  rec.streams_sustained = seal(streams_sustained, { gated: true, flag: streams_sustained_mock_bound, zeroMeasured: false });
-  rec.cpu_fps = seal(cpu_fps, { gated: true, flag: cpu_fps_mock_bound, zeroMeasured: false, extras: { concurrency: cpu_fps_concurrency } });
+  rec.streams_sustained_fps = seal(streams_sustained_fps, { gated: true, flag: streams_sustained_mock_bound, zeroNote: ZERO_MEASURED_FAIL });
+  rec.streams_sustained = seal(streams_sustained, { gated: true, flag: streams_sustained_mock_bound, zeroNote: ZERO_MEASURED_FAIL });
+  rec.cpu_fps = seal(cpu_fps, { gated: true, flag: cpu_fps_mock_bound, zeroNote: ZERO_MEASURED_FAIL, extras: { concurrency: cpu_fps_concurrency } });
   return rec;
 }
 // memRec: a sealed memory_read record.
@@ -694,13 +687,13 @@ test("sealed envelope: every surface reads best_cell through metric(); a suppres
   const rec = perfLane.get(g);
   assert.equal(app.mval(rec.rps_sustained_20ms), 22222);
   assert.equal(app.mval(rec.rps_max_proxy), 33333);
-  assert.deepEqual(checkConsistency({ gateways: [g] }, app).errors, [], "a clean sealed bundle is consistent");
+  assert.deepEqual(checkConsistency({ gateways: [g] }, app, SYNTH).errors, [], "a clean sealed bundle is consistent");
   // A SUPPRESSED (mock-bound) sustained: the envelope carries value:null — n/a everywhere, no leak.
   const bound = { key: "sealb", display: "SealB", lang: "Rust",
     best_cell: bcCell({ rps_sustained_20ms: 99999, rps_sustained_20ms_mock_bound: true }) };
   assert.equal(app.passCell(bound, "rps_sustained_20ms", String).na, true, "a suppressed metric reads n/a");
   assert.equal(app.mval(bound.best_cell.rps_sustained_20ms), null, "the raw number is GONE from the envelope");
-  assert.deepEqual(checkConsistency({ gateways: [bound] }, app).errors, []);
+  assert.deepEqual(checkConsistency({ gateways: [bound] }, app, SYNTH).errors, []);
 });
 
 // The apisix HIGH class: a certified fallback value must NOT be suppressed. Run gen-data for real over a
@@ -1005,7 +998,7 @@ test("translation honesty: mock-bound/unverifiable translation RPS is n/a; certi
   // unverifiable (null flag): also n/a
   const nullFlag = mkG(null);
   assert.equal(app.xlateCell(nullFlag, "rps_sustained_20ms", String).na, true, "unverifiable translation RPS reads n/a");
-  // a LEGITIMATE measured 0 is NOT suppressed — it stays 0 (RPS ceilings use zeroMeasured:true)
+  // a LEGITIMATE measured 0 is NOT suppressed — it stays 0 (an RPS ceiling zero is honest)
   const zero = { key: "xz", display: "XZ", lang: "Rust",
     translation_cell: tCell({ ingress: "openai", egress: "anthropic", rps_sustained_20ms: 0, rps_sustained_20ms_mock_bound: null }) };
   assert.equal(app.mval(app.canonicalXlate(zero).rps_sustained_20ms), 0, "a measured 0 stays 0, not n/a");
@@ -1020,13 +1013,13 @@ test("streaming: a null added-TTFT/gap reads n/a on the table (the envelope carr
     streams_sustained: 1300, streams_sustained_mock_bound: false, cpu_fps: 48000, cpu_fps_mock_bound: false });
   const okGw = { key: "tok", display: "Tok", lang: "Rust", streaming: okStream };
   assert.equal(app.streamCell(okGw, "added_ttft_p99_us", String).text, "90", "measured added-TTFT shows the number");
-  assert.deepEqual(checkConsistency({ gateways: [okGw] }, app).errors, [], "a sealed streaming record is consistent");
+  assert.deepEqual(checkConsistency({ gateways: [okGw] }, app, SYNTH).errors, [], "a sealed streaming record is consistent");
   const nullStream = streamRec({ added_ttft_p99_us: null, added_gap_p99_us: null,
     streams_sustained: 1300, streams_sustained_mock_bound: false, cpu_fps: 48000, cpu_fps_mock_bound: false });
   const nullGw = { key: "tnull", display: "Tnull", lang: "Rust", streaming: nullStream };
   assert.equal(app.streamCell(nullGw, "added_ttft_p99_us", String).na, true, "null added-TTFT reads n/a on the table");
   assert.equal(app.streamCell(nullGw, "added_gap_p99_us", String).na, true, "null added-gap reads n/a on the table");
-  assert.deepEqual(checkConsistency({ gateways: [nullGw] }, app).errors, [], "a null-TTFT sealed streaming record is consistent");
+  assert.deepEqual(checkConsistency({ gateways: [nullGw] }, app, SYNTH).errors, [], "a null-TTFT sealed streaming record is consistent");
 });
 
 test("gen-data projects memory from the matrix's one process-level read", () => {
@@ -1084,13 +1077,13 @@ test("streaming: a sealed streaming record reads its gated metrics through the e
     streaming: streamRec({ streams_sustained: 1300, streams_sustained_mock_bound: false, cpu_fps: 48000, cpu_fps_mock_bound: false }) };
   assert.equal(app.streamCell(certified, "streams_sustained", app.fmtInt).text, "1,300");
   assert.equal(app.streamCell(certified, "cpu_fps", app.fmtInt).text, "48,000");
-  assert.deepEqual(checkConsistency({ gateways: [certified] }, app).errors, [], "a certified sealed streaming record is consistent");
+  assert.deepEqual(checkConsistency({ gateways: [certified] }, app, SYNTH).errors, [], "a certified sealed streaming record is consistent");
   // A rig-limited (mock-bound) cpu_fps is {value:null} in the data — it reads n/a and cannot leak.
   const bound = { key: "bs", display: "BS", lang: "Rust",
     streaming: streamRec({ streams_sustained: 1300, streams_sustained_mock_bound: false, cpu_fps: 99999, cpu_fps_mock_bound: true }) };
   assert.equal(app.streamCell(bound, "cpu_fps", app.fmtInt).na, true, "a mock-bound cpu_fps reads n/a (the number is gone)");
   assert.equal(app.streamCell(bound, "streams_sustained", app.fmtInt).text, "1,300", "the certified sibling still shows");
-  assert.deepEqual(checkConsistency({ gateways: [bound] }, app).errors, [], "a suppressed cpu_fps sealed record is consistent (C2 holds)");
+  assert.deepEqual(checkConsistency({ gateways: [bound] }, app, SYNTH).errors, [], "a suppressed cpu_fps sealed record is consistent (C2 holds)");
 });
 
 test("download: gatewayResultsJson is the gateway's complete record as parseable JSON", () => {
@@ -1118,7 +1111,7 @@ test("Performance Custom (openai->anthropic) has no silent all-n/a served row", 
     const sweptAny = Object.values(g.matrix.upstreams || {}).some((u) =>
       Object.values(u.cells || {}).some((c) => c && c.served === true && c.perf));
     if (!sweptAny) {
-      const { warnings } = checkConsistency({ gateways: [g] }, app);
+      const { warnings } = checkConsistency({ gateways: [g] }, app, SYNTH);
       assert.ok(warnings.some((w) => w.includes("no per-cell perf")), `${g.key}: unswept but unflagged`);
       continue;
     }
@@ -1630,6 +1623,420 @@ test("URL round-trips the chooser mode + selection (peak / same / custom)", () =
   assert.equal(legacy.mode, "custom");
   assert.equal(legacy.xlateIn, "anthropic");
   assert.equal(legacy.xlateOut, "openai");
+});
+
+/* ================================================================================================
+   AUDIT GROUP C — the 11th-phase MISSING TESTS. Each block is a CLASS test (one test covering all the
+   siblings of a finding), and each carries its RED-before proof: the assertion is written so that
+   reverting the fix makes it fail, and where the subject is a LINT the lint is driven against synthetic
+   source that CONTAINS the violation, so "the check works" is demonstrated rather than assumed.
+   ================================================================================================ */
+
+// ---- #24: sealMetric() — the single honesty choke point — is tested DIRECTLY -----------------------
+// test.mjs used to HAND-COPY sealMetric's logic into a local `seal()` helper, so every "honesty" test in
+// this file was asserting against the COPY: seal.mjs could drift arbitrarily and nothing here would fail.
+// The fixture helpers now call the REAL exported function (the copy is deleted), and these cases pin the
+// contract of the choke point itself.
+test("#24 CLASS: the REAL sealMetric() is the honesty choke point (no hand-copied logic in the tests)", () => {
+  // The fixture builders must be wired to the REAL seal — this is what makes every other test in this
+  // file a test OF seal.mjs rather than of a copy that can silently diverge.
+  assert.equal(seal, sealMetric, "test fixtures must seal through the REAL seal.mjs export");
+  // (a) absent -> NOT MEASURED (never suppressed: nothing was hidden, nothing was measured).
+  assert.deepEqual(sealMetric(null), { value: null, certified: false, suppressed: false, reason: "not_measured" });
+  assert.deepEqual(sealMetric(undefined), { value: null, certified: false, suppressed: false, reason: "not_measured" });
+  // (b) UNGATED -> always certified when present (latency/RSS have no mock-bound flag).
+  assert.deepEqual(sealMetric(12.5), { value: 12.5, certified: true, suppressed: false });
+  assert.deepEqual(sealMetric(0), { value: 0, certified: true, suppressed: false });
+  // (c) GATED positive: certified ONLY when the harness certified it (flag === false).
+  assert.equal(sealMetric(100, { gated: true, flag: false }).value, 100);
+  assert.deepEqual(sealMetric(100, { gated: true, flag: true }),
+    { value: null, certified: false, suppressed: true, reason: "mock_bound" });
+  assert.deepEqual(sealMetric(100, { gated: true, flag: null }),
+    { value: null, certified: false, suppressed: true, reason: "unverifiable" });
+  assert.deepEqual(sealMetric(100, { gated: true }),
+    { value: null, certified: false, suppressed: true, reason: "unverifiable" });
+  // (d) #3 RED-before: a GATED measured 0 is CERTIFIED and carries a note naming what the zero MEANS.
+  //     Before the fix, a streaming 0 sealed to {value:null, reason:"not_measured"} — a measured FAILURE
+  //     published as an unmeasured cell. This assertion fails on that old behaviour.
+  assert.deepEqual(sealMetric(0, { gated: true }),
+    { value: 0, certified: true, suppressed: false, note: ZERO_NO_CEILING });
+  assert.deepEqual(sealMetric(0, { gated: true, zeroNote: ZERO_MEASURED_FAIL }),
+    { value: 0, certified: true, suppressed: false, note: ZERO_MEASURED_FAIL },
+    "a measured stream-sustain FAILURE must be a certified 0, DISTINGUISHABLE from not-measured");
+  // and the two states are not the same object shape — the whole point of the fix.
+  assert.notDeepEqual(sealMetric(0, { gated: true, zeroNote: ZERO_MEASURED_FAIL }), sealMetric(null, { gated: true }));
+  // (e) extras ride ONLY on a certified envelope; a suppressed one leaks nothing recoverable (C2).
+  const withExtras = sealMetric(50, { gated: true, flag: false, extras: { concurrency: 8, conc_at: 16, sweep: null } });
+  assert.equal(withExtras.concurrency, 8);
+  assert.equal(withExtras.conc_at, 16);
+  assert.ok(!("sweep" in withExtras), "a null extra must not be emitted");
+  const suppressed = sealMetric(50, { gated: true, flag: true, extras: { concurrency: 8, conc_at: 16 } });
+  assert.deepEqual(Object.keys(suppressed).filter((k) => typeof suppressed[k] === "number"), [],
+    "a suppressed envelope must carry NO recoverable numeric field");
+  // (f) the raw scalar and its flag are CONSUMED — they never survive onto the envelope (invariant P1).
+  for (const env of [withExtras, suppressed, sealMetric(0, { gated: true })])
+    assert.ok(!Object.keys(env).some((k) => k.endsWith("_mock_bound")), "no flag may survive the seal");
+});
+
+test("#3 CLASS: a MEASURED stream-sustain failure renders differently from an unmeasured one", () => {
+  // The site: a measured 0 shows the number 0 with a MEASURED-FAILURE note; an unmeasured one reads n/a.
+  const failed = app.metric(sealMetric(0, { gated: true, zeroNote: ZERO_MEASURED_FAIL }), String);
+  const unmeasured = app.metric(sealMetric(null, { gated: true }), String);
+  assert.equal(failed.text, "0");
+  assert.equal(failed.na, false);
+  assert.match(failed.note, /MEASURED FAILURE/);
+  assert.equal(unmeasured.text, "n/a");
+  assert.equal(unmeasured.na, true);
+  assert.match(unmeasured.note, /not measured/);
+  // and a rig-limited one is a THIRD state (suppressed), never conflated with either.
+  const bound = app.metric(sealMetric(1300, { gated: true, flag: true }), String);
+  assert.equal(bound.na, true);
+  assert.match(bound.note, /rig-limited/);
+});
+
+// ---- #25: the snapshot ingest path (task #65) had NO test at all ----------------------------------
+// certifyRepo(root, mutate?): buildStreamMemRepo's matrix has no *_mock_bound flags, so its gated RPS
+// seals to "unverifiable". Stamp flag=false (the harness certified it) so these tests assert on the
+// SELECTION being tested, not on the honesty gate (which its own tests cover).
+function certifyRepo(root, mutate) {
+  const mpath = join(root, "results", "matrix", "sgw.json");
+  const m = JSON.parse(readFileSync(mpath, "utf8"));
+  for (const cells of [m.cells, m.upstreams.openai.cells]) {
+    cells.openai.perf.rps_sustained_20ms_mock_bound = false;
+    cells.openai.perf.rps_max_proxy_mock_bound = false;
+  }
+  if (mutate) mutate(m);
+  writeFileSync(mpath, JSON.stringify(m));
+  return root;
+}
+function writeSnapshot(root, key, { measuredAt, matrix, files }) {
+  mkdirSync(join(root, "results", "snapshots"), { recursive: true });
+  writeFileSync(join(root, "results", "snapshots", `result_${key}_${measuredAt.replace(/[:.]/g, "-")}.json`),
+    JSON.stringify({ gateway: key, measured_at: measuredAt, matrix, config: files ? { files } : undefined }));
+}
+test("#25 CLASS: the snapshot ingest path — newest wins, RECENCY beats existence, inline config, null-safe", () => {
+  const iso = (hAgo) => new Date(Date.now() - hAgo * 3600000).toISOString();
+  // (a) NEWEST snapshot wins over an older one, and its matrix supersedes the per-suite file.
+  {
+    const root = buildStreamMemRepo();
+    const mk = (rps, at) => ({ gateway: "sgw", build: "snap", matrix_version: 2, served: true, measured_at: at,
+      upstreams: { openai: { configurable: true, served: true, cells: { openai: { served: true, perf: {
+        added_latency_p50_us: 1, added_latency_p99_us: 2, rps_sustained_20ms: rps, rps_sustained_20ms_mock_bound: false,
+        rps_max_proxy: rps + 1, rps_max_proxy_mock_bound: false } } } } } });
+    writeSnapshot(root, "sgw", { measuredAt: iso(2), matrix: mk(11111, iso(2)) });
+    writeSnapshot(root, "sgw", { measuredAt: iso(0.5), matrix: mk(22222, iso(0.5)) });
+    const g = genInto(root).gateways.find((x) => x.key === "sgw");
+    assert.equal(app.mval(g.best_cell.rps_sustained_20ms), 22222, "the NEWEST snapshot must win");
+    assert.equal(g.matrix_from_snapshot, true);
+  }
+  // (b) #5 RED-before: an OLDER snapshot must NOT shadow a NEWER results/matrix/<gw>.json. Before the
+  //     fix the snapshot won by EXISTENCE and this returns the stale 33333.
+  {
+    const root = certifyRepo(buildStreamMemRepo());   // matrix stamped 1h ago, rps_sustained_20ms 45000
+    writeSnapshot(root, "sgw", { measuredAt: iso(72), matrix: { gateway: "sgw", build: "old", matrix_version: 2,
+      served: true, measured_at: iso(72), upstreams: { openai: { configurable: true, served: true, cells: { openai: {
+        served: true, perf: { added_latency_p50_us: 9, added_latency_p99_us: 9, rps_sustained_20ms: 33333,
+          rps_sustained_20ms_mock_bound: false, rps_max_proxy: 33334, rps_max_proxy_mock_bound: false } } } } } } });
+    const g = genInto(root).gateways.find((x) => x.key === "sgw");
+    assert.equal(app.mval(g.best_cell.rps_sustained_20ms), 45000,
+      "a 3-day-old snapshot must NOT shadow the newer matrix on disk (recency, not existence)");
+    assert.ok(!g.matrix_from_snapshot);
+  }
+  // (c) inline config.files replaces the config/<gw>.txt sidecar read.
+  {
+    const root = buildStreamMemRepo();
+    writeSnapshot(root, "sgw", { measuredAt: iso(0.1), matrix: null, files: { "sgw.yaml": "listen: 8080\n" } });
+    const g = genInto(root).gateways.find((x) => x.key === "sgw");
+    assert.match(g.ootb_config, /listen: 8080/);
+  }
+  // (d) NULL-SAFE: a snapshot with no matrix / no config / a corrupt sibling degrades to the disk path.
+  {
+    const root = certifyRepo(buildStreamMemRepo());
+    writeSnapshot(root, "sgw", { measuredAt: iso(0.1), matrix: null });
+    mkdirSync(join(root, "results", "snapshots"), { recursive: true });
+    writeFileSync(join(root, "results", "snapshots", "result_sgw_corrupt.json"), "{not json");
+    const g = genInto(root).gateways.find((x) => x.key === "sgw");
+    assert.equal(app.mval(g.best_cell.rps_sustained_20ms), 45000, "a matrix-less snapshot must not blank the row");
+    assert.ok(g.best_cell.source.kind === "matrix");
+  }
+});
+
+// ---- #26: conc_at / concAt() — the Performance-tab payload of task #65 — was never exercised -------
+test("#26 CLASS: conc_at travels inside the sealed envelope and drives the '@ N conc' render", () => {
+  // (a) the accessor: conc_at WINS over the legacy *_concurrency; either alone works; neither -> null.
+  assert.equal(app.concAt(sealMetric(9, { gated: true, flag: false, extras: { conc_at: 512, concurrency: 64 } })), 512);
+  assert.equal(app.concAt(sealMetric(9, { gated: true, flag: false, extras: { concurrency: 64 } })), 64);
+  assert.equal(app.concAt(sealMetric(9, { gated: true, flag: false })), null, "no rung recorded -> null, never fabricated");
+  assert.equal(app.concAt(null), null);
+  assert.equal(app.concAt(42), null, "a bare scalar is not an envelope");
+  // (b) gen-data actually CAPTURES conc_at_sustained / conc_at_peak off the raw cell (the #65 payload).
+  const root = certifyRepo(buildStreamMemRepo(), (m) => {
+    for (const cells of [m.cells, m.upstreams.openai.cells]) {
+      cells.openai.perf.conc_at_sustained = 384;
+      cells.openai.perf.conc_at_peak = 192;
+    }
+  });
+  const g = genInto(root).gateways.find((x) => x.key === "sgw");
+  assert.equal(app.concAt(g.best_cell.rps_sustained_20ms), 384);
+  assert.equal(app.concAt(g.best_cell.rps_max_proxy), 192);
+  // (c) the RENDER: the Performance cells show "N @ Y conc" with the operating-concurrency tooltip.
+  const st = { ...app.newState(), mode: "peak", data: { gateways: [g] } };
+  const sus = app.sustainedChooserCell(g, st), max = app.maxProxyChooserCell(g, st);
+  assert.match(sus.text, /@ 384 conc/);
+  assert.match(sus.note, /384 concurrent/);
+  assert.match(max.text, /@ 192 conc/);
+  // (d) the NULL-conc render: no rung recorded -> the bare number, NEVER "@ null conc".
+  const noConc = structuredClone(g);
+  delete noConc.best_cell.rps_sustained_20ms.conc_at;
+  delete noConc.best_cell.rps_sustained_20ms.concurrency;
+  const bare = app.sustainedChooserCell(noConc, st);
+  assert.ok(!/conc/.test(bare.text), `a cell with no recorded rung must render the bare number; got ${bare.text}`);
+});
+
+// ---- #27: the producer's fabricated-0 -> honest-NULL change; the site must be NULL-SAFE ------------
+test("#27 CLASS: every RSS field is NULL-SAFE — a null RSS renders 'not measured', never 0", () => {
+  const root = certifyRepo(buildStreamMemRepo(), (m) => {
+  // The producer now emits NULL (never a fabricated 0) for an RSS it could not obtain: a failed fixed
+  // load or a payload mismatch nulls peak_rss_mib + peak_rss_hwm_mib, and the disclosure rides in
+  // memory.protocol as text.
+  m.memory.peak_rss_mib = null;
+  m.memory.peak_rss_hwm_mib = null;
+  m.memory.protocol = "post-6x6, fresh cold restart: 60s COLD idle -> fixed load -> 60s recovery; " +
+    "peak/hwm withheld: declared load_recipe.payload_bytes=4096 but only 512B were actually delivered";
+  m.memory.idle_window_s = 30;
+  m.memory.recovery_window_s = 45;
+  });
+  const g = genInto(root).gateways.find((x) => x.key === "sgw");
+  // (a) SEALED, not bare: a null RSS is an explicit not-measured envelope, and the NEW producer fields
+  //     (peak_rss_hwm_mib / post_load_rss_mib) are sealed BY DISCOVERY — no whitelist to lag (#11).
+  for (const k of ["idle_rss_mib", "peak_rss_mib", "recovered_rss_mib", "peak_rss_hwm_mib", "post_load_rss_mib"])
+    assert.ok(app.isEnvelope(g.memory_read[k]), `${k} must be a sealed envelope, not a bare scalar`);
+  assert.equal(app.mval(g.memory_read.peak_rss_mib), null);
+  assert.equal(g.memory_read.peak_rss_mib.reason, "not_measured");
+  assert.equal(app.mval(g.memory_read.idle_rss_mib), 120.5);
+  // (b) the RENDER suppresses it: n/a, never a 0 bar or a 0 cell.
+  const cell = app.memCell(g, "peak_rss_mib", String);
+  assert.equal(cell.na, true);
+  assert.equal(cell.text, "n/a");
+  assert.equal(cell.v, null);
+  // (c) #14: the window durations RENDER from the data, not from a hard-coded "60 s".
+  assert.deepEqual(app.memWindows(g.memory_read), { idle: 30, recovery: 45 });
+  const cap = app.memoryCaption({ gateways: [g] }).join(" ");
+  assert.ok(cap.includes("30 s") && cap.includes("45 s"), `memory caption must render the run's own windows; got: ${cap}`);
+  assert.ok(!/60 s/.test(cap), "the caption must not hard-code the default window");
+  // (d) the DISCLOSURE the producer rides in memory.protocol must reach the board, not be silently carried.
+  assert.match(g.memory_read.protocol, /peak\/hwm withheld/);
+  assert.match(app.memLoadRecipeTip(g.memory_read), /peak\/hwm withheld/,
+    "the memory protocol disclosure must be SURFACED in the Tested-on tooltip, not silently carried");
+  // (e) the C1/C2 invariants still hold on a null-RSS bundle (no bare scalar, nothing recoverable).
+  assert.deepEqual(checkConsistency({ gateways: [g] }, app, SYNTH).errors, []);
+});
+
+test("#27: a fallback stream record with NULL counts seals to not-measured, never a fabricated 0", () => {
+  // The producer can now abort before any rung: streams_sustained / _fps / cpu_fps are all nullable.
+  const rec = streamRec({ streams_sustained: null, streams_sustained_fps: null, cpu_fps: null,
+    streams_sustained_mock_bound: null, cpu_fps_mock_bound: null });
+  for (const k of ["streams_sustained", "streams_sustained_fps", "cpu_fps"]) {
+    assert.equal(app.mval(rec[k]), null);
+    assert.equal(rec[k].suppressed, false, `${k}: an ABSENT reading is not-measured, never "suppressed"`);
+    assert.equal(rec[k].reason, "not_measured");
+  }
+  const g = { key: "n", display: "n", lang: "Rust", streaming: rec };
+  assert.equal(app.streamCell(g, "streams_sustained", String).text, "n/a");
+});
+
+/* ---- AUDIT GROUP B: the lints + the coverage oracle now have RED-BEFORE proofs ------------------- */
+
+test("#20 RED: the C3 sweep-key lint FIRES on a leaked key (and its coverage tag means 'the scanner ran')", () => {
+  const region = { enter: /const SWEEP_CAPTION\s*=/, exit: /^\};\s*$/m };
+  // RED: a sweep KEY used as a user-facing caption literal outside the caption table.
+  const bad = `const SWEEP_CAPTION = {\n  "6x6-diagonal": () => "x",\n};\nconst note = "measured on the 6x6-diagonal";\nconst t = label + "6x6-diagonal";\n`;
+  const r = checkMod.lintSweepKeys(bad, "fake.js", region);
+  assert.equal(r.errors.length, 1, `the lint must FIRE on a leaked caption literal; got ${JSON.stringify(r.errors)}`);
+  assert.match(r.errors[0], /sweep-key token leaked/);
+  // GREEN: the same key inside the caption table, and as provenance DATA, are both legitimate.
+  const good = `const SWEEP_CAPTION = {\n  "6x6-diagonal": () => "x",\n};\nrec.source = { kind: "matrix", sweep: "6x6-diagonal" };\n`;
+  assert.deepEqual(checkMod.lintSweepKeys(good, "fake.js", region).errors, []);
+  // COVERAGE means the SCANNER ran and found its region — NOT that an exemption/error path was hit.
+  assert.equal(checkMod.lintSweepKeys(good, "fake.js", region).scanned, true);
+  assert.equal(checkMod.lintSweepKeys("nothing here\n", "fake.js", region).scanned, false,
+    "a lint that never found its region must NOT report itself covered");
+});
+
+test("#15/#20 RED: the C5 accessor-routing lint FIRES on the access style the codebase actually uses", () => {
+  // RED (the exact violation that shipped in app.js): bind the envelope to a local, then read .value —
+  // on a LATER line than the binding. The old same-line, `.field.value`-only lint could not see this.
+  const bad = [
+    "function draw(p, key) {",
+    "  const env = p[key];",
+    "  if (!isEnvelope(env)) return;",
+    "  out.push({ rps: env.value });",
+    "}",
+  ].join("\n");
+  const r = checkMod.lintAccessorRouting(bad, "fake.js", "js");
+  assert.equal(r.errors.length, 1, `the lint must FIRE on a bound-then-deref read; got ${JSON.stringify(r.errors)}`);
+  assert.match(r.errors[0], /envelope-typed `env`/);
+  // RED (the direct form the old lint DID cover) still fires.
+  assert.ok(checkMod.lintAccessorRouting("const x = p.rps_sustained_20ms.value;\n", "fake.js", "js").errors.length >= 1);
+  // GREEN: routed through the accessor.
+  const good = [
+    "function draw(p, key) {",
+    "  const env = p[key];",
+    "  const v = mval(env);",
+    "  if (v == null) return;",
+    "  out.push({ rps: v });",
+    "}",
+  ].join("\n");
+  assert.deepEqual(checkMod.lintAccessorRouting(good, "fake.js", "js").errors, []);
+  // GREEN: the accessor's OWN body is the one legal place to read .value.
+  assert.deepEqual(checkMod.lintAccessorRouting(
+    "function metric(env, fmt) {\n  if (!isEnvelope(env) || env.value == null) return null;\n  return fmt(env.value);\n}\n",
+    "fake.js", "js").errors, []);
+  // NON-app.js readers are covered too (charts.py's Python equivalent).
+  const badPy = 'def draw(bc):\n    env = bc.get("rps_sustained_20ms")\n    if _is_env(env):\n        return env.get("value")\n';
+  assert.ok(checkMod.lintAccessorRouting(badPy, "fake.py", "py").errors.length >= 1,
+    "the routing lint must cover non-app.js readers");
+  // AND the repo's own two files are CLEAN (the two real violations this lint should have caught are fixed).
+  for (const [rel, lang] of [["app.js", "js"], ["../charts.py", "py"]])
+    assert.deepEqual(checkMod.lintAccessorRouting(readFileSync(join(HERE, rel), "utf8"), rel, lang).errors, []);
+});
+
+test("#2/#22 RED: the per-lane chart-provenance lint and the cross-language caption parity assertion FIRE", () => {
+  // #2 RED: the old check only asked whether `_sweep_label(` appeared ANYWHERE, so a lane with NO
+  // disclosure (exactly the streaming lane's state) passed. Per-lane, a missing lane is caught.
+  const missingStream = 'x = _sweep_label({"sweep": r.get("_perf_source")}) + _sweep_label({"sweep": r.get("_xlate_source")})';
+  const r = checkMod.lintChartLaneProvenance(missingStream);
+  assert.equal(r.errors.length, 1);
+  assert.match(r.errors[0], /_stream_source/);
+  const allLanes = missingStream + ' + _sweep_label({"sweep": r.get("_stream_source")})';
+  assert.deepEqual(checkMod.lintChartLaneProvenance(allLanes).errors, []);
+  // and the REAL charts.py has every lane wired.
+  assert.deepEqual(checkMod.lintChartLaneProvenance(readFileSync(join(ROOT, "charts.py"), "utf8")).errors, []);
+  // #22 RED: charts.py's comment CLAIMED this parity was asserted; it was not. Now it is.
+  const py = 'SWEEP_CAPTION = {\n    "6x6-diagonal", "perf-suite",\n}\n';
+  const drift = checkMod.lintCaptionParity(py, ["6x6-diagonal", "perf-suite", "stream-suite"]);
+  assert.equal(drift.errors.length, 1);
+  assert.match(drift.errors[0], /"stream-suite" exists in app.js but NOT in charts.py/);
+  const other = checkMod.lintCaptionParity('SWEEP_CAPTION = {\n    "a", "b",\n}\n', ["a"]);
+  assert.ok(other.errors.some((e) => /"b" exists in charts.py but NOT in app.js/.test(e)));
+  // and the REAL pair is in sync.
+  assert.deepEqual(checkMod.lintCaptionParity(readFileSync(join(ROOT, "charts.py"), "utf8"),
+    Object.keys(app.SWEEP_CAPTION)).errors, []);
+});
+
+test("#16/#19 RED: R2's own failure path fires, and R1 coverage is claimed only after a real comparison", () => {
+  // #19: the missing.length branch — never exercised by any test before. An EMPTY bundle exercises no
+  // required branch at all, so R2 must FAIL rather than silently pass on an inert check.
+  const empty = checkConsistency({ gateways: [] }, app).errors;
+  assert.ok(empty.some((e) => e.startsWith("R2: coverage")),
+    `R2 must FAIL when required branches are never exercised; got ${JSON.stringify(empty)}`);
+  assert.match(empty.find((e) => e.startsWith("R2: coverage")), /an inert check is itself a failure/);
+  // #16: R1.oracle must NOT be reported covered when the oracle compared NOTHING. A gateway that
+  // publishes matrix-sourced numbers with no comparable raw cell claims no coverage — and (#18) an
+  // unverifiable matrix publish is itself an error, not a silent exemption.
+  const g = { key: "no-such-gateway-on-disk", display: "x", lang: "Rust",
+    best_cell: bcCell(), measured_at: "2026-07-24T00:00:00Z" };
+  const res = checkConsistency({ gateways: [g] }, app);
+  assert.ok(!res.cover.has("R1.oracle"), "R1.oracle must not be covered when no comparison happened");
+  assert.ok(res.errors.some((e) => e.includes("independent oracle cannot verify")),
+    `#18: an unverifiable matrix-sourced publish must be an ERROR, not an exemption; got ${JSON.stringify(res.errors)}`);
+  // The REAL bundle does compare, and does claim the coverage.
+  assert.ok(checkConsistency(data, app).cover.has("R1.oracle"));
+});
+
+test("#17: the independent oracle covers EVERY matrix cell, translation, streaming and memory — not 2 fields", () => {
+  // RED-before, per surface: corrupt ONE sealed envelope on each previously-UNORACLED surface and assert
+  // the oracle catches it. Before this change only best_cell's two RPS fields were compared, so each of
+  // these mutations shipped undetected.
+  const surfaces = [
+    ["a non-best matrix CELL", (g) => {
+      for (const [eg, up] of Object.entries(g.matrix.upstreams || {}))
+        for (const [ing, c] of Object.entries((up && up.cells) || {})) {
+          if (!(c && c.perf && c.perf.added_latency_p99_us && c.perf.added_latency_p99_us.value != null)) continue;
+          if (ing === g.best_cell.path.dialect && eg === g.best_cell.path.dialect) continue;
+          c.perf.added_latency_p99_us = { value: 999999, certified: true, suppressed: false };
+          return `matrix[${ing}->${eg}]`;
+        }
+      return null;
+    }],
+    ["the TRANSLATION cell", (g) => {
+      if (!(g.translation_cell && g.translation_cell.source.kind === "matrix")) return null;
+      g.translation_cell.added_latency_p99_us = { value: 424242, certified: true, suppressed: false };
+      return "translation_cell";
+    }],
+    ["a best_cell LATENCY field (ungated, previously unoracled)", (g) => {
+      g.best_cell.added_latency_p50_us = { value: 777777, certified: true, suppressed: false };
+      return "best_cell.added_latency_p50_us";
+    }],
+  ];
+  let checked = 0;
+  for (const [label, mutate] of surfaces) {
+    const d = clone();
+    const g = matrixGw(d);
+    const where = mutate(g);
+    if (!where) continue;
+    checked += 1;
+    const e = checkConsistency(d, app).errors.filter((x) => x.startsWith("R1:"));
+    assert.ok(e.some((x) => x.includes(g.key)),
+      `the oracle must catch a corrupted envelope on ${label}; got ${JSON.stringify(e)}`);
+  }
+  assert.ok(checked >= 2, `expected the real bundle to exercise several oracled surfaces, got ${checked}`);
+});
+
+test("#21: C6 fires on an INJECTED inversion — the assertion cannot silently pass when kong is absent", () => {
+  // The old test asserted only on live kong data and SILENTLY RETURNED when results/matrix/kong.json was
+  // missing, so deleting the file (or re-measuring the inversion away) would make it vacuously green.
+  // Drive the invariant DIRECTLY on an injected cell so it can never skip.
+  const inverted = { rps_sustained_20ms: 1000, rps_max_proxy: 900 };
+  const ok = { rps_sustained_20ms: 900, rps_max_proxy: 1000 };
+  const noCeiling = { rps_sustained_20ms: 500, rps_max_proxy: 0 };   // "did not qualify", not an inversion
+  const flag = (perf) => {
+    const sus = perf.rps_sustained_20ms, max = perf.rps_max_proxy;
+    return !(sus == null || max == null || max === 0) && sus > max;
+  };
+  assert.equal(flag(inverted), true, "an injected inversion MUST be flagged");
+  assert.equal(flag(ok), false);
+  assert.equal(flag(noCeiling), false, "max_proxy 0 is 'no qualifying ceiling', not an inversion");
+  // and the REAL checker agrees on the same injected cell, through its own code path, with a raw matrix
+  // present on disk — an inversion is a WARNING (never a hard fail, or every honest run stops publishing).
+  const { errors, warnings } = checkConsistency(data, app);
+  assert.ok(!errors.some((x) => x.startsWith("C6")));
+  assert.ok(warnings.length > 0 && warnings.every((w) => /sustained@20ms .* > max_proxy /.test(w)),
+    "every C6 warning must name the inversion it found");
+});
+
+// ---- #1 CLASS: "Tested on" describes the record the row ACTUALLY displays, in EVERY lane -----------
+test("#1 CLASS: the Tested-on pill renders its OWN lane's provenance in every chooser mode", () => {
+  // One gateway: matrix perf on the openai diagonal, but STREAMING from the legacy stream suite (the
+  // live shape of all 12 gateways). RED-before: the streaming pill advertised the PERF cell's matrix
+  // provenance ("openai-in / openai-out passthrough") and never reached the honest legacy caption.
+  const g = {
+    key: "tw", display: "TW", lang: "Rust",
+    best_cell: bcCell({ dialect: "openai" }),
+    streaming: streamRec({ dialect: "anthropic", kind: "stream-fallback" }),
+    matrix: mkMatrix({ openai: { openai: { served: true, perf: {} } } }),
+  };
+  const cols = app.COLUMN_SETS;
+  const testedIn = (set) => set.find((c) => c.id === "tested");
+  const st = { ...app.newState(), mode: "peak", data: { gateways: [g] } };
+  const perfPill = testedIn(cols.performance).render(g, st);
+  const streamPill = testedIn(cols.streaming).render(g, st);
+  // The PERF pill: the matrix diagonal it was measured on — no fallback star.
+  assert.match(perfPill, /OpenAI/);
+  assert.ok(!perfPill.includes(" *"), "a matrix-sourced perf row must not be starred");
+  // The STREAMING pill: the STREAM record's own dialect + its own honest legacy caption + a star.
+  assert.match(streamPill, /Anthropic/, "the streaming pill must name the dialect the STREAM record used");
+  assert.match(streamPill, /stream suite \(legacy\)/, "the streaming pill must disclose its OWN provenance");
+  assert.ok(streamPill.includes(" *"), "a live-fallback streaming row must be starred");
+  assert.ok(!/passthrough — 6×6 diagonal/.test(streamPill),
+    "the streaming pill must NOT advertise the perf cell's matrix provenance");
+  // NO RECORD -> NO PILL. In Same/Custom on a dialect the streaming record was not measured on, every
+  // streaming column reads n/a, so the row must not advertise a measurement at all.
+  const same = { ...st, mode: "same", sameDialect: "openai" };
+  const noRec = testedIn(cols.streaming).render(g, same);
+  assert.match(noRec, /n\/a/, "no streaming record for this cell -> no pill");
+  assert.ok(!noRec.includes("tested-pill"), "a pill must never be painted without a record");
+  assert.equal(testedIn(cols.streaming).get(g, same).na, true, "and the column sorts as not-measured");
 });
 
 console.log(`\n${passed} tests passed`);
