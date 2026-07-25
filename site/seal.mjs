@@ -43,10 +43,12 @@ export const GATED_FIELDS = ["rps_sustained_20ms", "rps_max_proxy", "streams_sus
 export const UNGATED_LAT_FIELDS = ["added_latency_p50_us", "added_latency_p99_us", "gateway_c1_p99_us", "direct_c1_p99_us"];
 // UNGATED, latency/rate-shaped, on a stream record.
 export const UNGATED_STREAM_FIELDS = ["added_ttft_p50_us", "added_ttft_p99_us", "added_gap_p50_us", "added_gap_p99_us"];
-// RSS metrics are sealed BY DISCOVERY, not by a whitelist: ANY `*_rss_mib` field the producer emits
-// (idle/peak/recovered today; peak_rss_hwm_mib / post_load_rss_mib added later) is a metric and must be
-// sealed. A new producer RSS field therefore cannot ship as a bare unsealed scalar (audit #11).
-export const RSS_FIELD_RE = /_rss_mib$/;
+// RSS metrics are sealed BY DISCOVERY, not by a whitelist: ANY RSS-in-MiB field the producer emits is a
+// metric and must be sealed — idle/peak/recovered today, plus the qualified variants the producer has
+// already added (peak_rss_HWM_mib, post_load_rss_mib). The pattern deliberately allows a qualifier
+// between `rss` and `mib`, because a whitelist (and an over-narrow `_rss_mib$`) is exactly how
+// peak_rss_hwm_mib came to ship as a BARE unsealed scalar (audit #11).
+export const RSS_FIELD_RE = /_rss_(?:[a-z0-9]+_)*mib$/;
 // isMetricField(k): is this key a sealed-envelope metric field? The single predicate both gen-data
 // (what to seal) and check-consistency (what must BE an envelope) use.
 export function isMetricField(k) {

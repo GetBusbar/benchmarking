@@ -116,11 +116,11 @@ def mvalid(env) -> bool:
 
 
 # ---- provenance-driven captions (Python mirror of app.js SWEEP_CAPTION) -----------------------------
-# The class test (check-consistency) asserts this dict's KEYS match the JS SWEEP_CAPTION so the two
+# AUDIT #22: check-consistency NOW ACTUALLY asserts this set's keys match the JS SWEEP_CAPTION (lintCaptionParity) so the two
 # caption vocabularies can never drift. Every source label a chart/README emits is keyed by source.sweep.
 SWEEP_CAPTION = {
     "6x6-diagonal", "6x6-translation", "6x6-memory-window", "6x6-stream-diagonal",
-    "perf-suite", "xlate-suite", "stream-suite",
+    "6x6-stream-translation", "perf-suite", "xlate-suite", "stream-suite",
 }
 
 

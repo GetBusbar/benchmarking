@@ -312,7 +312,17 @@ function memLoadRecipeTip(m) {
   const w = memWindows(m);
   const basis = r ? `identical fixed load: ${fmtInt(r.concurrency)} concurrent, ${fmtInt(r.payload_bytes)} B payload, ${fmtInt(r.duration_s)} s` : "identical fixed load for every gateway";
   return `peak cell ${memLoadCellLabel(m && m.load_cell)} — ${basis}, on a fresh cold-restarted process ` +
-    `(${memWindowLabel(w.idle)} idle → load → ${memWindowLabel(w.recovery)} recovery)`;
+    `(${memWindowLabel(w.idle)} idle → load → ${memWindowLabel(w.recovery)} recovery)${memDisclosure(m)}`;
+}
+/* memDisclosure(m): the producer rides its HONESTY DISCLOSURES inside memory.protocol as text — an
+   uncertified peak-cell basis, a payload mismatch, a failed fixed load (each of which is why a peak RSS
+   came back NULL). Carrying that string in the bundle without ever rendering it would hide the reason a
+   column reads n/a, so it is SURFACED wherever the memory record is attributed. Everything after the
+   protocol's leading recipe sentence is a disclosure clause. */
+function memDisclosure(m) {
+  const p = m && typeof m.protocol === "string" ? m.protocol : "";
+  const parts = p.split(";").slice(1).map((x) => x.trim()).filter(Boolean);
+  return parts.length ? ` — DISCLOSED: ${parts.join("; ")}` : "";
 }
 
 /* passCell: the Passthrough tab reads ONLY the canonical record (g.best_cell). When best_cell
@@ -562,9 +572,9 @@ function concAt(env) {
 // sustainedChooserCell: the sustained@20ms cell for the chosen cell, carrying the winning-concurrency
 // tooltip when the chosen cell records it (the concurrency travels INSIDE the sealed envelope). The
 // concurrency is ALSO shown inline on the cell text ("N @ Y conc") — snapshot #65's Performance-tab ask.
-function sustainedChooserCell(g) {
-  const cell = withZeroNote(chooserPerfCell(g, "rps_sustained_20ms", fmtInt));
-  const p = chooserCellPerf(g);
+function sustainedChooserCell(g, st = state) {
+  const cell = withZeroNote(chooserPerfCell(g, "rps_sustained_20ms", fmtInt, st));
+  const p = chooserCellPerf(g, st);
   const cc = p ? concAt(p.rps_sustained_20ms) : null;
   if (!cell.na && cell.v > 0 && cc != null)
     return { ...cell, text: `${cell.text} @ ${fmtInt(cc)} conc`,
@@ -573,9 +583,9 @@ function sustainedChooserCell(g) {
 }
 // maxProxyChooserCell: the max-proxy cell for the chosen cell, showing its own peak concurrency inline
 // ("N @ Y conc") next to the number — the sibling of sustainedChooserCell for the peak throughput.
-function maxProxyChooserCell(g) {
-  const cell = withZeroNote(chooserPerfCell(g, "rps_max_proxy", fmtInt));
-  const p = chooserCellPerf(g);
+function maxProxyChooserCell(g, st = state) {
+  const cell = withZeroNote(chooserPerfCell(g, "rps_max_proxy", fmtInt, st));
+  const p = chooserCellPerf(g, st);
   const cc = p ? concAt(p.rps_max_proxy) : null;
   if (!cell.na && cell.v > 0 && cc != null)
     return { ...cell, text: `${cell.text} @ ${fmtInt(cc)} conc`,
@@ -594,9 +604,9 @@ const COLUMN_SETS = {
     { id: "lat", label: "Added latency p99 (µs)", desc: false, title: "Gateway p99 minus direct-to-mock p99 at concurrency 1 on the chosen cell",
       get: (g) => chooserPerfCell(g, "added_latency_p99_us", fmtAdded) },
     { id: "rps20", label: "Sustained RPS @20ms", desc: true, title: "Sustained requests/sec with a 20 ms mock LLM latency (p99 < 1 s, <0.1% errors) on the chosen cell. Hover a cell for the concurrency it peaked at.",
-      get: (g) => sustainedChooserCell(g) },
+      get: (g, st = state) => sustainedChooserCell(g, st) },
     { id: "rpsmax", label: "Max proxy RPS", desc: true, title: "Throughput ceiling against an instant mock (p99 < 1 s, <0.1% errors) on the chosen cell. Shows the concurrency it peaked at.",
-      get: (g) => maxProxyChooserCell(g) },
+      get: (g, st = state) => maxProxyChooserCell(g, st) },
   ],
   // STREAMING (Peak | Same | Custom): per-cell SSE columns from the SAME run. Per-cell streaming is
   // measured on the diagonal today, so Same reads it only on the gateway's own measured diagonal and
@@ -683,9 +693,11 @@ const LANES = [
     get: canonicalMemory,
     pathNote: (j) => {
       const base = j && j.source ? caption(j) : "";
-      return j && j.load_cell
+      const note = j && j.load_cell
         ? `${base} — identical fixed load on ${memLoadCellLabel(j.load_cell)} (this gateway's peak cell)`
         : base;
+      // The producer's honesty disclosures ride in memory.protocol; surface them, never carry silently.
+      return `${note}${memDisclosure(j)}`;
     },
     // The recovery curve (idle→load→recovery, one process lifecycle). Renders ONLY when rss_series
     // exists (≥2 points); a bundle without a series → extra() returns "" and the drawer shows just the numbers.
@@ -2427,9 +2439,10 @@ if (NODE) {
     drawSweep, niceStep, fmtTick, COLUMN_SETS, columnsFor, PERF_VIEWS, TABLE_VIEWS, VIEW_SORT, LANES, naText, stripRigPaths,
     cellState, matrixCellTip, cellPerfTip, passCell, xlateCell, streamCell, memCell, rssSparkline, hasTranslation, CATEGORIES, DEFAULT_CATEGORY, VIEWS,
     CHOOSER_MODES, chooserCellPerf, chooserDialects, chooserPerfCell, chooserCellStream, chooserStreamCell, chooserHasCell, deltaToPeak, cellPopFull,
-    laneRecord, lanePathNote, perfSweepSeries,
+    laneRecord, lanePathNote, perfSweepSeries, concAt, sustainedChooserCell, maxProxyChooserCell,
+    colTested, gatewayBuild, gatewayHardware, runMode, laneAgeSummary,
     chooserCaption, chooserLead, streamingProvenance,
-    memoryCaption, memWindows, boardMemWindows, memLoadCellLabel, memLoadRecipeTip,
+    memoryCaption, memWindows, boardMemWindows, memLoadCellLabel, memLoadRecipeTip, memDisclosure,
     canonicalPerf, canonicalXlate, canonicalStreaming, canonicalMemory, metric, mval, isEnvelope, caption, SWEEP_CAPTION, gatewayResultsJson, DEFAULT_VIEW, VIEW_LABELS, rosterRows, fmtStars,
     configCorrectionUrl, BENCH_REPO, fmtInt, fmtAdded,
     HOME_VIEW, homeCardsHtml,
