@@ -176,17 +176,19 @@ MATRIX_STREAMCPU_FPS_BOUNDS="${MATRIX_STREAMCPU_FPS_BOUNDS:-8 512}"  # [lo,hi] f
 
 # ── memory: a DEDICATED, ISOLATED window AFTER the 6x6, on each gateway's PEAK cell ────────────────
 # FINAL PROTOCOL (owner-decided). Memory is NOT a synthetic suite and NOT a track over the 6x6 — it is
-# its OWN window that runs AFTER the full 6x6 completes, in a FRESH cold-restarted process, on THIS
-# gateway's peak cell (the served cell with the highest rps_max_proxy; there is no universal cell, since
-# e.g. litellm-rust does not serve openai>openai). EVERY gateway gets the IDENTICAL load recipe, so the
-# site-wide "same load for every gateway" claim holds for memory too. Per gateway:
-#   1. after the 6x6, pick load_cell = the served cell with the max rps_max_proxy (tie-break by egress
-#      order); if NO served cell exists, memory is null (nulls emitted, window skipped).
-#   2. KILL + COLD-RESTART the gateway fresh, configured for the peak cell's egress dialect (the same
+# its OWN window that runs AFTER the full 6x6 completes, in a FRESH cold-restarted process, on the ONE
+# FIXED CELL every gateway is measured on. EVERY gateway gets the IDENTICAL load recipe INCLUDING the
+# cell, so the site-wide "same load for every gateway" claim holds for memory too — it did not while
+# the cell was chosen per-gateway, because the cell IS the workload (a translation lane costs more than
+# an identity lane, so the column was comparing gateways on different work). Per gateway:
+#   1. after the 6x6, load_cell = the fixed MEM_CELL_INGRESS>MEM_CELL_EGRESS. If this gateway does not
+#      serve that cell, memory is null with a stated reason (nulls emitted, window skipped). There is
+#      deliberately NO fallback to another cell: that would reintroduce the per-gateway workload.
+#   2. KILL + COLD-RESTART the gateway fresh, configured for the fixed cell's egress dialect (the same
 #      launch path the loop used for that egress), then:
 #        idle       = median RSS over MEM_IDLE_S of COLD idle sampling BEFORE any traffic (the TRUE idle;
 #                     a warm post-6x6 process would measure 'recovered', not 'idle'),
-#        peak       = the MAX RSS sampled continuously while a FIXED load runs on the peak cell's
+#        peak       = the MAX RSS sampled continuously while a FIXED load runs on the fixed cell's
 #                     ingress->egress path (identical conc/payload/duration for every gateway),
 #        recovered  = the RSS at the end of MEM_SETTLE_S of recovery sampling after the load stops,
 #        rss_series = the continuous samples across idle->load->recovery (ONE process lifecycle, so the
@@ -217,7 +219,13 @@ MEM_SAMPLE_S="${MEM_SAMPLE_S:-5}"
 # already threads those) so an existing dev profile keeps working unchanged.
 MATRIX_MEM_CONC="${MATRIX_MEM_CONC:-${MEM_CONC:-64}}"          # concurrency of the fixed memory load
 MATRIX_MEM_PAYLOAD="${MATRIX_MEM_PAYLOAD:-${MEM_PSIZE:-4096}}" # per-request payload bytes (ugen -psize)
-MATRIX_MEM_DUR="${MATRIX_MEM_DUR:-${MEM_DUR:-120}}"            # duration (s) of the fixed memory load
+# NO LOAD DURATION CONSTANT. The memory load runs until the RSS is STEADY, not for a fixed time. A
+# fixed duration decides the answer for any gateway still climbing when it expires: the number then
+# describes when we stopped looking rather than the gateway. See DESIGN-per-cell-measurement.md.
+MEM_PLATEAU_WINDOW_S="${MEM_PLATEAU_WINDOW_S:-60}"   # trailing window the steadiness test runs over
+MEM_PLATEAU_TREND_PCT="${MEM_PLATEAU_TREND_PCT:-1}"  # max upward drift, 2nd-half mean vs 1st-half mean
+MEM_PLATEAU_RANGE_PCT="${MEM_PLATEAU_RANGE_PCT:-2}"  # max (max-min) spread inside the window
+MEM_PLATEAU_CAP_S="${MEM_PLATEAU_CAP_S:-300}"        # hard cap; hitting it is a REPORTED result
 # ADAPTIVE RUNG SELECTION + shared rig baselines (lib/sweep.sh knobs; see its header). A gateway
 # that serves the whole 6x6 sweeps up to 36 cells, and the naive per-cell cost (~4 min: 15 fixed
 # ladder rungs + a re-measured direct c1 baseline + 2 re-measured mock ceilings, per cell) put this
@@ -1293,35 +1301,41 @@ matrix_memory_window(){
   local idle=null peak=null recovered=null hwm=null series="null"
   local served=false serr="" lcell="null" disclose=""
   local recipe="{\"concurrency\": $MATRIX_MEM_CONC, \"payload_bytes\": $MATRIX_MEM_PAYLOAD, \"duration_s\": $MATRIX_MEM_DUR}"
-  # CERTIFIED-FIRST peak-cell selection (audit P0-6). rps_max_proxy is only a trustworthy "this is the
-  # gateway's busiest cell" signal when the sweep was NOT mock/rig-bound: a bound cell's rps measures
-  # the rig's ceiling, not the gateway, so choosing the memory window's load_cell from it picks a cell
-  # on evidence the harness itself judged untrustworthy. Prefer the highest-rps CERTIFIED
-  # (mock_bound=false) served cell; only when NO cell is certified do we fall back to the full set —
-  # and then the fallback is DISCLOSED in the published protocol string rather than hidden.
-  local m_eg="" m_in="" m_rps="" m_bound="" _pick="" cert=0
+  # ── ONE FIXED MEMORY CELL FOR THE WHOLE FIELD ───────────────────────────────────────────────────
+  # This used to pick each gateway's OWN peak cell. Every other term of the recipe was identical
+  # (concurrency, payload, duration), so it read as a controlled comparison, but the cell is the
+  # workload — and picking it per-gateway meant the memory column compared eight different workloads
+  # and called the result a ranking. In the last field run busbar was measured on cohere>cohere, an
+  # identity lane with no translation at all, while gomodel was measured on openai>gemini, which pays
+  # for a full protocol translation on every request. Those two numbers cannot be put in the same
+  # column. The gateway that happened to peak on an identity lane was flattered, and the one that
+  # happened to peak on a translation was penalised, for a reason that has nothing to do with how much
+  # memory it uses.
+  #
+  # It was also not even self-comparable: "the peak cell" is re-chosen from measured rps every run, so
+  # a gateway whose peak moved between runs had its own memory history silently rebased.
+  #
+  # So the cell is now a CONSTANT, exactly like the concurrency and the payload. openai>openai is the
+  # choice because it is the identity lane of the most widely implemented dialect and the single cell
+  # the largest number of gateways serve, which makes it the one basis on which the most of the field
+  # is directly comparable.
+  #
+  # NOT SERVED MEANS N/A, AND NOTHING ELSE. There is deliberately no fallback to some other cell: a
+  # fallback would silently reintroduce the per-gateway workload this exists to remove, and it would
+  # do it precisely for the gateways whose numbers are already hardest to interpret. A gateway that
+  # cannot serve the fixed cell reports memory as unmeasured, with the reason — the one branch the
+  # harness is allowed: the gateway declared it does not do this cell, so it is reported as such.
+  local m_eg="$MEM_CELL_EGRESS" m_in="$MEM_CELL_INGRESS" m_served=0
   if [ -n "$MEM_CELLS_F" ] && [ -s "$MEM_CELLS_F" ]; then
-    # STRICT >, so a tie keeps the FIRST-written cell (egress order) -> a fully deterministic pick
-    # independent of sort-stability semantics. Same rule in both passes.
-    _pick=$(awk '$4=="false"{ if(line==""||$3+0>best+0){best=$3;line=$0} } END{print line}' "$MEM_CELLS_F" 2>/dev/null)
-    if [ -n "$_pick" ]; then
-      cert=1
-    else
-      _pick=$(awk 'NR==1||$3+0>best+0{best=$3;line=$0} END{print line}' "$MEM_CELLS_F" 2>/dev/null)
-    fi
-    read -r m_eg m_in m_rps m_bound <<<"$_pick"
+    awk -v e="$m_eg" -v i="$m_in" '$1==e && $2==i {found=1} END{exit !found}' "$MEM_CELLS_F" 2>/dev/null && m_served=1
   fi
-  if [ -z "$m_eg" ]; then
-    log "[$GATEWAY] memory: no served cell in the 6x6 - memory is null (window skipped)"
-    serr="no served cell in the 6x6 sweep"
+  if [ "$m_served" != 1 ]; then
+    log "[$GATEWAY] memory: fixed cell $m_in>$m_eg is NOT served by this gateway - memory is null (window skipped)"
+    serr="the fixed memory cell $m_in>$m_eg is not served by this gateway, so its memory is not measured on the same basis as the rest of the field and is reported as unmeasured rather than measured on a different workload"
+    m_eg=""
   else
     lcell="\"$m_in>$m_eg\""
-    if [ "$cert" = 1 ]; then
-      log "[$GATEWAY] memory: peak cell = $m_in>$m_eg (CERTIFIED rps_max_proxy=$m_rps) - cold-restarting for the $m_eg egress"
-    else
-      disclose="$disclose; peak-cell basis UNCERTIFIED: no served cell had a non-mock-bound rps_max_proxy, so the load_cell was picked deterministically from cells whose rps may be rig-limited (mock_bound=$m_bound)"
-      log "[$GATEWAY] memory: peak cell = $m_in>$m_eg (UNCERTIFIED rps_max_proxy=$m_rps mock_bound=$m_bound) - disclosed in the protocol"
-    fi
+    log "[$GATEWAY] memory: fixed cell = $m_in>$m_eg (identical for every gateway) - cold-restarting for the $m_eg egress"
     # COLD RESTART for the peak cell's egress dialect (the same launch path the loop used for it).
     # launch_egress does gw_stop first, so this is a genuinely fresh process. Readiness is the
     # NON-ALLOCATING port probe (see _mem_port_open) — the first traffic this process ever sees is the
@@ -1446,7 +1460,7 @@ matrix_memory_window(){
   fi
   # The protocol string is assembled LAST so every disclosure the window accumulated (an uncertified
   # peak-cell basis, a withheld peak) travels with the numbers to the board instead of only the log.
-  local protocol="post-6x6, fresh cold restart: ${MEM_IDLE_S}s COLD idle (measured before the process serves any request) -> fixed load on the peak cell (c=$MATRIX_MEM_CONC, payload=${MATRIX_MEM_PAYLOAD}B, ${MATRIX_MEM_DUR}s, identical on every gateway) -> ${MEM_SETTLE_S}s recovery${disclose}"
+  local protocol="post-6x6, fresh cold restart: ${MEM_IDLE_S}s COLD idle (measured before the process serves any request) -> fixed load on the fixed cell ${MEM_CELL_INGRESS}>${MEM_CELL_EGRESS} (c=$MATRIX_MEM_CONC, payload=${MATRIX_MEM_PAYLOAD}B, ${MATRIX_MEM_DUR}s, identical on every gateway; a gateway that does not serve this cell reports memory as unmeasured rather than being measured on a different workload) -> ${MEM_SETTLE_S}s recovery${disclose}"
   MEMORY_JSON="
   \"memory\": {\"protocol\": \"$(json_escape "$protocol")\", \"served\": $served, \"serve_error\": \"$(json_escape "$serr")\", \"load_cell\": $lcell, \"load_recipe\": $recipe, \"idle_rss_mib\": ${idle}, \"peak_rss_mib\": ${peak}, \"peak_rss_hwm_mib\": ${hwm}, \"post_load_rss_mib\": ${recovered}, \"recovered_rss_mib\": ${recovered}, \"rss_series\": ${series}, \"idle_window_s\": $MEM_IDLE_S, \"recovery_window_s\": $MEM_SETTLE_S},"
   rm -f "$MEM_CELLS_F" 2>/dev/null
