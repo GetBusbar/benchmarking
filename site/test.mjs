@@ -788,6 +788,69 @@ test("divergent translation_cell vs xlate suite: drawer/compare read the matrix 
   assert.deepEqual(checkConsistency({ gateways: [g] }, app).errors, []);
 });
 
+test("Cluster-A: perf/xlate fallback synthesis carries mock_bound flags so a CERTIFIED value is NOT suppressed", () => {
+  // The fallback synthesis (gen-data ~176/205) rebuilds best_cell/translation_cell field-by-field from
+  // the legacy perf/xlate suites. If it drops rps_*_mock_bound, the downstream suppressor reads
+  // undefined !== false = true and HIDES a fully-certified (mock_bound:false) number. Run gen-data for
+  // real over a matrix that yields NO swept diagonal (so the fallback fires) plus legacy perf + xlate
+  // suites carrying certified values, then assert the table accessors surface them (not n/a).
+  const root = mkdtempSync(join(tmpdir(), "site-fb-"));
+  mkdirSync(join(root, "gateways", "fbgw"), { recursive: true });
+  writeFileSync(join(root, "gateways", "fbgw", "gateway.sh"),
+    `#!/usr/bin/env bash\nGW_DISPLAY="fbgw"\nGW_LANG=Rust\nGW_CLASS="Gateway"\n`);
+  const iso = new Date(Date.now() - 3600000).toISOString();
+  // Matrix is SERVED (fresh) but its diagonal cell carries no perf.added_latency_p99_us, so bestCell()
+  // and translationCell() both return null → the legacy fallbacks synthesize best_cell/translation_cell.
+  mkdirSync(join(root, "results", "matrix"), { recursive: true });
+  writeFileSync(join(root, "results", "matrix", "fbgw.json"), JSON.stringify({
+    gateway: "fbgw", build: "ok", matrix_version: 2, served: true, measured_at: iso,
+    upstreams: { openai: { configurable: true, served: true, cells: { openai: { served: true } } } },
+    cells: { openai: { served: true } },
+  }));
+  // Legacy perf suite: certified sustained + max (mock_bound:false).
+  mkdirSync(join(root, "results", "perf"), { recursive: true });
+  writeFileSync(join(root, "results", "perf", "fbgw.json"), JSON.stringify({
+    gateway: "fbgw", build: "ok", served: true, measured_at: iso,
+    added_latency_p50_us: 10, added_latency_p99_us: 20,
+    rps_sustained_20ms: 19286, rps_sustained_20ms_concurrency: 576, rps_sustained_20ms_mock_bound: false,
+    rps_max_proxy: 19721, rps_max_proxy_concurrency: 96, rps_max_proxy_mock_bound: false,
+    sweep_sustained_20ms: [{ conc: 576, rps: 19286, p99_us: 200, fail: 0 }],
+    sweep_max_proxy: [{ conc: 96, rps: 19721, p99_us: 100, fail: 0 }],
+  }));
+  // Legacy xlate suite: certified translation RPS (mock_bound:false) — apisix's real 17,437 shape.
+  mkdirSync(join(root, "results", "xlate"), { recursive: true });
+  writeFileSync(join(root, "results", "xlate", "fbgw.json"), JSON.stringify({
+    gateway: "fbgw", build: "ok", xlate_served: true, measured_at: iso,
+    xlate_added_latency_p50_us: 15, xlate_added_latency_p99_us: 30,
+    xlate_rps_sustained_20ms: 17437, xlate_rps_sustained_20ms_concurrency: 1024,
+    xlate_rps_sustained_20ms_mock_bound: false,
+  }));
+  const outDir = mkdtempSync(join(tmpdir(), "site-fb-out-"));
+  let bundle;
+  try {
+    execFileSync(process.execPath, [join(HERE, "gen-data.mjs"), root, outDir], { stdio: "pipe" });
+    bundle = JSON.parse(readFileSync(join(outDir, "data.json"), "utf8"));
+  } finally {
+    rmSync(outDir, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true });
+  }
+  const g = bundle.gateways.find((x) => x.key === "fbgw");
+  assert.ok(g, "fbgw present");
+  // Provenance confirms the fallback path actually fired (not a real matrix cell).
+  assert.equal(g.best_cell.source, "perf-fallback", "best_cell came from the perf fallback");
+  assert.equal(g.translation_cell.source, "xlate-fallback", "translation_cell came from the xlate fallback");
+  // The flags survived the synthesis…
+  assert.equal(g.best_cell.rps_sustained_20ms_mock_bound, false, "perf-fallback carried sustained mock_bound");
+  assert.equal(g.best_cell.rps_max_proxy_mock_bound, false, "perf-fallback carried max-proxy mock_bound");
+  assert.equal(g.translation_cell.rps_sustained_20ms_mock_bound, false, "xlate-fallback carried mock_bound");
+  // …so the suppressors leave the certified numbers ALONE (the bug: undefined→suppressed→n/a).
+  assert.equal(app.perfRpsSuppressed(g.best_cell, "rps_sustained_20ms"), false, "certified sustained NOT suppressed");
+  assert.equal(app.perfRpsSuppressed(g.best_cell, "rps_max_proxy"), false, "certified max-proxy NOT suppressed");
+  assert.equal(app.xlateRpsSuppressed(g.translation_cell, "rps_sustained_20ms"), false, "certified xlate RPS NOT suppressed");
+  // And the table accessor surfaces the real number, not n/a.
+  assert.equal(app.canonicalXlate(g).xlate_rps_sustained_20ms, 17437, "certified xlate RPS reaches the table");
+});
+
 test("guard warns (never fails) on a sustained > max-proxy inversion", () => {
   // carry the matching gate-passing sweep arrays so the LOW-R3-4 "matrix headline missing its sweep
   // array" coverage warning does not fire — this test is about the inversion warning specifically.

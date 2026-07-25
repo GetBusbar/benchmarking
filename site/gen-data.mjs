@@ -186,8 +186,14 @@ const gateways = gatewayKeys.map((key) => {
       added_latency_p99_us: g.perf.added_latency_p99_us,
       rps_sustained_20ms: g.perf.rps_sustained_20ms,
       rps_sustained_20ms_concurrency: g.perf.rps_sustained_20ms_concurrency ?? null,
+      // Carry the honesty flags THROUGH the synthesis. Without them the downstream suppressor
+      // (perfRpsSuppressed: `_mock_bound !== false`) reads undefined !== false = true and hides a
+      // fully-certified perf-suite RPS. `?? null` keeps an old perf record (no flag) explicitly
+      // unverifiable rather than fabricating a certification.
+      rps_sustained_20ms_mock_bound: g.perf.rps_sustained_20ms_mock_bound ?? null,
       rps_max_proxy: g.perf.rps_max_proxy,
       rps_max_proxy_concurrency: g.perf.rps_max_proxy_concurrency ?? null,
+      rps_max_proxy_mock_bound: g.perf.rps_max_proxy_mock_bound ?? null,
       // The charted sweep arrays travel WITH the headline so the drawer curve and the headline are
       // read off the SAME record (best_cell): the marked peak on the curve IS rps_max_proxy /
       // rps_sustained_20ms. The perf suite emits the same array shape run_sweep produced.
@@ -206,6 +212,12 @@ const gateways = gatewayKeys.map((key) => {
       added_latency_p50_us: g.xlate.xlate_added_latency_p50_us,
       added_latency_p99_us: g.xlate.xlate_added_latency_p99_us,
       rps_sustained_20ms: g.xlate.xlate_rps_sustained_20ms,
+      rps_sustained_20ms_concurrency: g.xlate.xlate_rps_sustained_20ms_concurrency ?? null,
+      // Carry the honesty flag THROUGH the synthesis. Without it xlateRpsSuppressed
+      // (`_mock_bound !== false`) reads undefined !== false = true and hides a fully-certified
+      // xlate-suite RPS (apisix's certified 17,437 req/s was disappearing here). `?? null` keeps an
+      // old xlate record with no flag explicitly unverifiable rather than fabricating a certification.
+      rps_sustained_20ms_mock_bound: g.xlate.xlate_rps_sustained_20ms_mock_bound ?? null,
       build: g.xlate.build ?? null, measured_at: g.xlate.measured_at ?? null,
     };
   }
