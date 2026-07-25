@@ -12,6 +12,7 @@
 #![cfg_attr(test, allow(clippy::panic, clippy::unwrap_used, clippy::expect_used))]
 
 pub mod measurement;
+pub mod probe;
 pub mod search;
 pub mod stats;
 
