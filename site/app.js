@@ -1205,7 +1205,9 @@ function chooserLead(view, data) {
   // fallback (or no data yet): the streaming figures come from the standalone stream suite, not the matrix.
   // AUDIT #8: age this tab by the STREAM SUITE's own stamp — the row badge ages the matrix, which this
   // tab does not show, so quoting the matrix age here would overstate the freshness of every number on it.
-  return `Streaming from the standalone stream suite (not the 6x6 matrix); the passthrough it measured${laneAgeSummary(data, "stream")}.`;
+  // laneAgeSummary contributes ", measured 23 hours ago", so the clause it attaches to must not already
+  // end in "measured" — the old wording rendered "the passthrough it measured, measured 23 hours ago".
+  return `Streaming from the standalone stream suite, not the 6x6 matrix${laneAgeSummary(data, "stream")}; each row's pill names the passthrough it ran on.`;
 }
 function chooserCaption(view, st, data) {
   const lead = chooserLead(view, data);
