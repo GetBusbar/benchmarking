@@ -1721,6 +1721,26 @@ test("Memory tab renders idle/peak/recovered/sparkline, n/a when a field is abse
   assert.equal(cols.find((c) => c.id === "memidle").get(none).na, true);
 });
 
+test("Memory tab attributes each gateway's peak cell (load_cell) and states the fixed-load basis", () => {
+  const cols = app.COLUMN_SETS.memory;
+  const memcell = cols.find((c) => c.id === "memcell");
+  assert.ok(memcell, "the memory tab has a Tested-on (load_cell) column");
+  // A gateway measured on its anthropic>anthropic peak cell shows that cell, prettified.
+  const g = { key: "m", display: "M", lang: "Rust", memory_read: { source: "matrix",
+    load_cell: "anthropic>anthropic", load_recipe: { concurrency: 64, payload_bytes: 4096, duration_s: 120 },
+    idle_rss_mib: 40, peak_rss_mib: 900, recovered_rss_mib: 55 } };
+  const cell = memcell.render(g);
+  assert.ok(/Anthropic/.test(cell), "the Tested-on cell names the peak cell's dialect");
+  assert.ok(/64|4,?096|120/.test(cell), "the Tested-on tooltip states the fixed-load recipe (the fair-load basis)");
+  // A gateway with no load_cell (no served cell) reads n/a, never a fabricated cell.
+  const bare = { key: "b", display: "B", lang: "Rust", memory_read: { source: "matrix", idle_rss_mib: 40 } };
+  assert.equal(memcell.get(bare).na, true);
+  // The caption states the fixed identical load + cold-restart, NOT a "6x6 drives memory" claim.
+  const cap = app.MEMORY_CAPTION.join(" ");
+  assert.ok(/identical fixed load/i.test(cap) && /cold-?restart/i.test(cap), "caption states the fair fixed-load basis + cold restart");
+  assert.ok(!/6x6 (sweep )?drives/i.test(cap), "caption drops any 6x6-drives-memory wording");
+});
+
 test("URL round-trips the chooser mode + selection (peak / same / custom)", () => {
   const rt = (path, search) => {
     const st = app.decodeUrl(path, search);
