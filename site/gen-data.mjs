@@ -40,6 +40,8 @@ const OUT = process.argv[3] || HERE;
 const SUITES = ["perf", "stream", "streamcpu", "xlate", "matrix"];
 // The ungated (non-honesty-gated) latency-shaped metrics on a perf cell: always certified when present.
 const UNGATED_LAT = ["added_latency_p50_us", "added_latency_p99_us", "gateway_c1_p99_us", "direct_c1_p99_us"];
+// The RSS metric fields on a memory block (ungated — no mock-bound flag).
+const MEM_RSS = ["idle_rss_mib", "peak_rss_mib", "recovered_rss_mib"];
 
 // ---- gateway manifests ------------------------------------------------------
 function parseManifest(text) {
@@ -319,9 +321,10 @@ function sealMemory(mem, source) {
     if (mem[k] != null) rec[k] = mem[k];
   return rec;
 }
-// sealMatrixCellsInPlace: replace every served cell's raw perf/stream with SEALED envelopes so the matrix
-// popup + Protocol view read envelopes, never raw scalars, and NO _mock_bound flag survives in the bundle
-// (invariant C1). Non-metric cell fields (served/status/path/verdict_note/body_snippet) are untouched.
+// sealMatrixCellsInPlace: replace every served cell's raw perf/stream AND the top-level memory block's raw
+// RSS with SEALED envelopes, so the matrix popup + Protocol view + the embedded/snapshot matrix carry
+// envelopes, never raw scalars — NO ungated metric field survives anywhere in the bundle (invariant C1).
+// Non-metric fields (served/status/path/verdict_note/load_cell/rss_series/…) are untouched.
 function sealMatrixCellsInPlace(m) {
   const seen = new Set();   // v1 shares m.cells with upstreams[shape].cells (same refs) — seal once.
   const cellGroups = [m.cells, ...Object.values(m.upstreams || {}).map((u) => u && u.cells)];
@@ -335,6 +338,11 @@ function sealMatrixCellsInPlace(m) {
         cell.stream = { stream_served: true, ...sealStreamRecord(cell.stream) };
       }
     }
+  }
+  // The raw memory block (the source for the g.memory_read projection) also travels in the bundle (embedded
+  // in g.matrix + the snapshot); seal its RSS scalars so no bare ungated field survives.
+  if (m.memory && typeof m.memory === "object") {
+    for (const k of MEM_RSS) if (k in m.memory) m.memory[k] = sealMetric(m.memory[k], {});
   }
 }
 
