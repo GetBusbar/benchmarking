@@ -45,6 +45,68 @@ HARNESS_BOOT_BACKOFF_S="${HARNESS_BOOT_BACKOFF_S:-3}"
 HARNESS_PROBE_GRACE="${HARNESS_PROBE_GRACE:-45}"
 HARNESS_SUITE_CEIL_S="${HARNESS_SUITE_CEIL_S:-2700}"
 
+# ── gw_prereqs: the BUILD-PHASE-ONLY toolchain contract, and the boundary that enforces it ────────
+# THE PARITY QUESTION (audit): gw_prereqs is implemented on only 3 of the 13 manifests — aisix and
+# helicone install a Rust toolchain + build deps, litellm-rust additionally a ~564 MB python venv —
+# so three boxes end up with software the other ten never see. The premise of this benchmark is "same
+# box, same load, one gateway at a time", and a differently-provisioned box is prima facie a parity
+# break. It is NOT one, but the reason has to be enforced rather than asserted:
+#
+#   1. ONE GATEWAY PER BOX. run-on-ec2.sh launches a dedicated m7g/m7i.4xlarge per gateway from the
+#      same bare AMI, so a toolchain installed for aisix is never present while helicone is measured,
+#      and never present at all on the ten image-based boxes. There is no shared box to contaminate.
+#   2. BUILD PHASE ONLY. Every gw_prereqs is called from that manifest's gw_build and nowhere else,
+#      and matrix/run.sh runs gw_build BEFORE the mock, the warm-up, the 36 probes, the sweeps and
+#      the memory window. Nothing it installs is running when the first measurement is taken — which
+#      is a claim about process residency, so harness_build_quiesce (below) VERIFIES it and the run
+#      JSON publishes the answer, rather than us taking it on trust.
+#   3. NOT A RESIDENT COST. The published memory numbers are per-process VmRSS/VmHWM summed over the
+#      gateway's own process tree (the readers above) — never host free memory or cgroup usage — so
+#      an idle toolchain on disk, and even a warm page cache the build left behind, cannot enter
+#      them. The published latency/throughput numbers come from a gateway pinned to $CORES with the
+#      loadgen and mock on disjoint cores; the build has exited before any of that is pinned, and
+#      m7g/m7i are fixed-performance instances with no burst credits for a long build to spend.
+#   4. THE ONE GENUINE RUNTIME DEPENDENCY IS CHARGED HONESTLY. litellm-rust's venv is not only build
+#      tooling: its gateway launches with PYTHONPATH pointing into that venv and LOADS the `litellm`
+#      package to read its config (gateways/litellm-rust/gateway.sh gw_launch). That resident cost is
+#      the gateway's own, it lands inside its process tree, and it is measured as such — which is
+#      correct, not a contaminant.
+#
+# THE CONTRACT this file enforces, uniformly for all 13 manifests (the ten without gw_prereqs pass
+# trivially, which IS the parity statement — same gate, same evidence, every box):
+#   * gw_prereqs may run only inside gw_build. harness_seal_prereqs() disables it immediately after
+#     the build phase, so no later hook (gw_launch, gw_matrix_egress, a re-launch between egress
+#     columns) can install a toolchain while measurements are in flight.
+#   * the build phase must be QUIESCENT before measurement starts: harness_build_quiesce() waits for
+#     compilers/package managers to exit and reports what, if anything, was still resident.
+HARNESS_BUILD_QUIESCE_S="${HARNESS_BUILD_QUIESCE_S:-60}"   # bounded wait for build tooling to exit
+# Tight ERE: compilers, linkers, package managers and toolchain installers. Deliberately NOT "make" or
+# "go" — too easy to match a gateway's own runtime process and report a false residual.
+HARNESS_BUILD_TOOL_PAT="${HARNESS_BUILD_TOOL_PAT:-(^|/)(cargo|rustc|rustup|cc1|cc1plus|collect2|ar|ranlib|protoc)( |$)|(^|/)pip[0-9.]*( |$)|(^|/)(apt-get|dpkg|unattended-upgrade)( |$)}"
+
+# harness_build_quiesce -> prints "quiesced" or "residual: <cmd>; <cmd>"; exit 0 either way.
+# EVIDENCE, not a gate: it never fails a run (a false positive must not cost a 5 h field slot), it
+# waits up to HARNESS_BUILD_QUIESCE_S for build tooling to exit and then states plainly what it saw,
+# so the parity claim in the published JSON is something a reader can check instead of believe.
+harness_build_quiesce() {
+  local deadline=$(( $(date +%s) + HARNESS_BUILD_QUIESCE_S )) residual=""
+  while :; do
+    residual="$(pgrep -af "$HARNESS_BUILD_TOOL_PAT" 2>/dev/null | cut -c1-100 | paste -sd';' - )"
+    [ -z "$residual" ] && { printf 'quiesced'; return 0; }
+    [ "$(date +%s)" -ge "$deadline" ] && break
+    sleep 2
+  done
+  printf 'residual: %s' "$residual"
+}
+
+# harness_seal_prereqs: after the build phase, make gw_prereqs inert for the rest of the run. A
+# manifest that calls it again (directly, or from a re-launch between egress columns) gets a no-op
+# and a loud line in the log instead of an apt-get/rustup running against a box under measurement.
+harness_seal_prereqs() {
+  declare -F gw_prereqs >/dev/null 2>&1 || return 0
+  eval 'gw_prereqs(){ echo "[harness] gw_prereqs called AFTER the build phase - refused (measurement environment is frozen once building ends)" >&2; return 0; }'
+}
+
 # ── harness_write_config: capture the gateway's OOTB config artifact (once per run) ───────────────
 # The OOTB standard: every gateway runs from its as-shipped DEFAULT config (pointed at the mock) and we
 # PUBLISH the exact config it used, so the board can show "fresh install + this config → these numbers".
