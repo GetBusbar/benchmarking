@@ -54,6 +54,22 @@ impl Outcome {
     }
 }
 
+/// Which direction of deviation is the BAD one.
+///
+/// THE BANDS ARE ONE-SIDED, and that is deliberate rather than an oversight to tidy up. A box cannot
+/// randomly get faster: contention, throttling and noisy neighbours only ever ADD latency and REMOVE
+/// throughput. A floor that beats its baseline is the box showing its true clean-hardware speed, and
+/// it implies the BASELINE was the noisy measurement rather than this run. Failing it would terminate
+/// healthy boxes, burn the replacement budget, and eventually skip the gateway entirely. The absolute
+/// envelope, which IS two-sided, is what bounds an absurd improvement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Sense {
+    /// Higher is worse (p99 latency): a POSITIVE drift is the regression.
+    LowerIsBetter,
+    /// Higher is better (throughput): a NEGATIVE drift is the regression.
+    HigherIsBetter,
+}
+
 /// Percentage drift of an observation from a baseline. Positive means the observation is higher.
 fn drift_pct(observed: f64, baseline: f64) -> Option<f64> {
     if !baseline.is_finite() || baseline == 0.0 || !observed.is_finite() {
@@ -62,22 +78,47 @@ fn drift_pct(observed: f64, baseline: f64) -> Option<f64> {
     Some((observed - baseline) / baseline * 100.0)
 }
 
+/// The magnitude of a deviation in the DEGRADING direction only, or 0 when it is an improvement.
+pub fn regression(drift: f64, sense: Sense) -> f64 {
+    let d = match sense {
+        Sense::LowerIsBetter => drift,
+        Sense::HigherIsBetter => -drift,
+    };
+    if d < 0.0 {
+        0.0
+    } else {
+        d
+    }
+}
+
 /// Judge an observation against a rolling baseline.
 ///
 /// `baseline` absent means no history: the run seeds rather than passing, because "within band of
-/// nothing" is not a measurement. That distinction is the whole reason `Seed` exists as its own
-/// outcome rather than being folded into `Pass`.
-pub fn judge(observed: Measurement<f64>, baseline: Measurement<f64>, band_pct: f64) -> (Outcome, Measurement<f64>) {
+/// nothing" is not a measurement. That distinction is why `Seed` exists as its own outcome.
+///
+/// `observed` absent is a FAIL, not a pass and not a shrug. We cannot qualify a box we failed to
+/// measure, and running a full matrix on one is exactly the incident this gate exists to prevent.
+pub fn judge(
+    observed: Measurement<f64>,
+    baseline: Measurement<f64>,
+    band_pct: f64,
+    sense: Sense,
+) -> (Outcome, Measurement<f64>) {
     let Some(&obs) = observed.value() else {
-        return (Outcome::Skipped, Measurement::absent(Absent::NotMeasured));
+        return (
+            Outcome::Fail,
+            Measurement::absent_because(Absent::NotMeasured, "the stage produced no usable observation"),
+        );
     };
     let Some(&base) = baseline.value() else {
         return (Outcome::Seed, Measurement::absent_because(Absent::NotMeasured, "no baseline yet"));
     };
     match drift_pct(obs, base) {
+        // A gate must never fail on a value it never obtained: an unusable baseline means this
+        // particular check does not fire, which is not the same as the observation being unmeasured.
         None => (Outcome::Skipped, Measurement::absent_because(Absent::NotMeasured, "baseline is not a usable number")),
         Some(d) => {
-            let outcome = if d.abs() <= band_pct { Outcome::Pass } else { Outcome::Fail };
+            let outcome = if regression(d, sense) <= band_pct { Outcome::Pass } else { Outcome::Fail };
             (outcome, Measurement::Measured(d))
         }
     }
@@ -125,36 +166,69 @@ mod tests {
     // nothing" starts reading as a real comparison.
     #[test]
     fn no_baseline_seeds_rather_than_passing() {
-        let (outcome, drift) = judge(Measurement::Measured(77.5), Measurement::absent(Absent::NotMeasured), FLOOR_DRIFT_PCT);
+        let (outcome, drift) = judge(Measurement::Measured(77.5), Measurement::absent(Absent::NotMeasured), FLOOR_DRIFT_PCT, Sense::LowerIsBetter);
         assert_eq!(outcome, Outcome::Seed);
         assert_eq!(drift.copied(), None, "there is no drift against a baseline that does not exist");
     }
 
-    // Nothing observed is a statement about the stage, not about the box.
+    // THE SHELL IS EXPLICIT: we cannot qualify a box we failed to measure, and running a full
+    // matrix on one is exactly the incident this gate exists to prevent. An unmeasured stage is a
+    // hard fail, never a neutral shrug. My first version returned Skipped here, which would have let
+    // an unmeasurable box slip past the gate entirely.
     #[test]
-    fn nothing_observed_is_skipped_not_failed() {
-        let (outcome, drift) = judge(Measurement::absent(Absent::NotMeasured), Measurement::Measured(77.5), FLOOR_DRIFT_PCT);
-        assert_eq!(outcome, Outcome::Skipped);
+    fn nothing_observed_is_a_fail_not_a_shrug() {
+        let (outcome, drift) = judge(
+            Measurement::absent(Absent::NotMeasured),
+            Measurement::Measured(77.5),
+            FLOOR_DRIFT_PCT,
+            Sense::LowerIsBetter,
+        );
+        assert_eq!(outcome, Outcome::Fail, "an unmeasurable stage must not bypass the gate");
         assert_eq!(drift.copied(), None);
     }
 
+    // THE BANDS ARE ONE-SIDED, and this test exists because I got it wrong first. A box cannot
+    // randomly get faster: contention only ever adds latency and removes throughput. A floor that
+    // beats its baseline means the BASELINE was the noisy measurement, and failing it would
+    // terminate healthy boxes and burn the replacement budget.
     #[test]
-    fn drift_inside_the_band_passes_and_outside_fails() {
-        let base = Measurement::Measured(100.0);
-        let (o, d) = judge(Measurement::Measured(103.0), base.clone(), 4.0);
+    fn an_improvement_never_fails_the_gate() {
+        // Latency: 10% FASTER than baseline, far outside a 4% band, and still a pass.
+        let (o, d) = judge(Measurement::Measured(90.0), Measurement::Measured(100.0), 4.0, Sense::LowerIsBetter);
+        assert_eq!(o, Outcome::Pass, "a faster floor is a clean box, not a contaminated one");
+        assert!((d.copied().unwrap_or_default() + 10.0).abs() < 1e-9, "the drift is still reported as -10%");
+        // Throughput: 30% HIGHER than baseline, outside a 25% band, and still a pass.
+        let (o, _) = judge(Measurement::Measured(130.0), Measurement::Measured(100.0), 25.0, Sense::HigherIsBetter);
+        assert_eq!(o, Outcome::Pass, "more throughput is not a regression");
+    }
+
+    #[test]
+    fn only_the_degrading_direction_counts_toward_the_band() {
+        assert_eq!(regression(-10.0, Sense::LowerIsBetter), 0.0);
+        assert_eq!(regression(10.0, Sense::LowerIsBetter), 10.0);
+        assert_eq!(regression(10.0, Sense::HigherIsBetter), 0.0);
+        assert_eq!(regression(-10.0, Sense::HigherIsBetter), 10.0);
+    }
+
+    #[test]
+    fn degradation_beyond_the_band_still_fails() {
+        // Slower latency and lower throughput are the real regressions, and both must trip.
+        let (o, _) = judge(Measurement::Measured(110.0), Measurement::Measured(100.0), 4.0, Sense::LowerIsBetter);
+        assert_eq!(o, Outcome::Fail);
+        let (o, _) = judge(Measurement::Measured(70.0), Measurement::Measured(100.0), 25.0, Sense::HigherIsBetter);
+        assert_eq!(o, Outcome::Fail);
+    }
+
+    #[test]
+    fn drift_inside_the_band_passes() {
+        let (o, d) = judge(Measurement::Measured(103.0), Measurement::Measured(100.0), 4.0, Sense::LowerIsBetter);
         assert_eq!(o, Outcome::Pass);
         assert!((d.copied().unwrap_or_default() - 3.0).abs() < 1e-9);
-        let (o, _) = judge(Measurement::Measured(105.0), base.clone(), 4.0);
-        assert_eq!(o, Outcome::Fail);
-        // Drift is judged on magnitude: a floor that improved impossibly is as suspect as one that
-        // degraded, because both mean the box is not the box the baseline was taken on.
-        let (o, _) = judge(Measurement::Measured(95.0), base, 4.0);
-        assert_eq!(o, Outcome::Fail);
     }
 
     #[test]
     fn exactly_at_the_band_edge_passes() {
-        let (o, _) = judge(Measurement::Measured(104.0), Measurement::Measured(100.0), 4.0);
+        let (o, _) = judge(Measurement::Measured(104.0), Measurement::Measured(100.0), 4.0, Sense::LowerIsBetter);
         assert_eq!(o, Outcome::Pass, "the band is inclusive at its edge");
     }
 
@@ -181,7 +255,7 @@ mod tests {
 
     #[test]
     fn a_zero_baseline_is_not_a_usable_comparison() {
-        let (o, d) = judge(Measurement::Measured(50.0), Measurement::Measured(0.0), 4.0);
+        let (o, d) = judge(Measurement::Measured(50.0), Measurement::Measured(0.0), 4.0, Sense::LowerIsBetter);
         assert_eq!(o, Outcome::Skipped, "dividing by a zero baseline is not a drift measurement");
         assert_eq!(d.copied(), None);
     }
