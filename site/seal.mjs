@@ -49,11 +49,17 @@ export const UNGATED_STREAM_FIELDS = ["added_ttft_p50_us", "added_ttft_p99_us", 
 // between `rss` and `mib`, because a whitelist (and an over-narrow `_rss_mib$`) is exactly how
 // peak_rss_hwm_mib came to ship as a BARE unsealed scalar (audit #11).
 export const RSS_FIELD_RE = /_rss_(?:[a-z0-9]+_)*mib$/;
+// UNGATED, memory-shaped, on a per-cell memory window. These are NOT RSS values (so RSS_FIELD_RE cannot
+// discover them) but they ARE published numbers: the growth rate is the leak rate when a gateway never
+// reached a steady state, i.e. the most load-bearing number the memory metric produces. Leaving them out
+// of the vocabulary would let them ship as bare unsealed scalars: the peak_rss_hwm_mib bug again.
+export const UNGATED_MEM_FIELDS = ["growth_rate_mib_per_min", "time_to_plateau_s"];
 // isMetricField(k): is this key a sealed-envelope metric field? The single predicate both gen-data
 // (what to seal) and check-consistency (what must BE an envelope) use.
 export function isMetricField(k) {
   return GATED_FIELDS.includes(k) || UNGATED_LAT_FIELDS.includes(k) ||
-    UNGATED_STREAM_FIELDS.includes(k) || k === "streams_sustained_fps" || RSS_FIELD_RE.test(k);
+    UNGATED_STREAM_FIELDS.includes(k) || UNGATED_MEM_FIELDS.includes(k) ||
+    k === "streams_sustained_fps" || RSS_FIELD_RE.test(k);
 }
 
 // makeSource: the provenance stamp carried by every cell + every envelope. `kind` is the coarse

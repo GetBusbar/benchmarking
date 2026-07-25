@@ -231,7 +231,7 @@ function readSrc(rel) {
 
 // (1) SWEEP-KEY LEAK (C3a): the internal sweep keys are caption VOCABULARY and live ONLY in the caption
 // table / the seal. A key appearing as a user-facing string literal anywhere else is caption drift.
-export const SWEEP_KEY_RE = /"(?:6x6-diagonal|6x6-translation|6x6-memory-window|6x6-stream-diagonal|6x6-stream-translation|perf-suite|xlate-suite|stream-suite)"/;
+export const SWEEP_KEY_RE = /"(?:6x6-diagonal|6x6-translation|6x6-memory-window|6x6-memory-diagonal|6x6-memory-translation|6x6-stream-diagonal|6x6-stream-translation|perf-suite|xlate-suite|stream-suite)"/;
 export function lintSweepKeys(src, name, allowRegion) {
   const errors = [];
   let inAllowed = false, sawRegion = false;

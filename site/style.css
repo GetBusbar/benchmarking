@@ -438,7 +438,21 @@ tbody tr { cursor: pointer; }
   white-space: nowrap; font-variant: small-caps; letter-spacing: .02em;
 }
 
-/* Cell chooser (Performance + Streaming): the Peak | Same | Custom segmented control + dialect dropdowns. */
+/* The size of the set a Min/Max extremum was selected from, beside the Tested-on pill ("of 26 served").
+   An extremum without its candidate count is not comparable across rows, so it rides next to the cell. */
+.tested-of { font-size: .68rem; margin-left: .35rem; white-space: nowrap; }
+/* Gateway-level plateau verdict on the Memory tab: RSS never went steady on ANY cell this gateway serves.
+   Warm-toned rather than neutral, because unlike the freshness pill it is a finding about the gateway. */
+.noplateau-pill {
+  display: inline-block; margin-left: .35rem; padding: .02rem .4rem; border-radius: 999px;
+  border: 1px solid var(--red); background: var(--bg); color: var(--red);
+  font-size: .64rem; font-weight: 600; text-transform: uppercase; letter-spacing: .04em;
+  vertical-align: middle; cursor: help;
+}
+/* A gateway that produced NO protocol matrix still gets a row (all n/a); this carries the reason. */
+.matrix-nores { color: var(--fg-mute); font-style: italic; }
+
+/* Cell chooser (Performance, Streaming, Memory): the segmented mode control + dialect dropdowns. */
 .cell-chooser { display: flex; flex-wrap: wrap; gap: .6rem; align-items: center; }
 .cell-chooser.hidden { display: none; }
 .cell-chooser label { display: inline-flex; align-items: center; gap: .4rem; color: var(--fg-dim); font-size: .85rem; }

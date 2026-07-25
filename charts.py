@@ -121,6 +121,9 @@ def mvalid(env) -> bool:
 SWEEP_CAPTION = {
     "6x6-diagonal", "6x6-translation", "6x6-memory-window", "6x6-stream-diagonal",
     "6x6-stream-translation", "perf-suite", "xlate-suite", "stream-suite",
+    # Per-cell memory windows (one cold-started process per cell, load run to plateau). The single
+    # post-6x6 "6x6-memory-window" above is the LEGACY shape and stays for bundles that carry it.
+    "6x6-memory-diagonal", "6x6-memory-translation",
 }
 
 
