@@ -6,6 +6,34 @@
 # via OPENAI_BASE_URL, so /v1/chat/completions forwards there. Left unprotected (GOMODEL_MASTER_KEY
 # unset) for a pure proxy-overhead measurement — the default posture. Image pinned in
 # gateways/versions.env; the resolved tag is recorded in the result.
+#
+# ── NOTE ON ITS NUMBERS: GoModel AUDIT-LOGS EVERY REQUEST BY DEFAULT ─────────────────────────────
+# Same disclosure One-API carries, for the same reason. GoModel ships audit logging ON: LOGGING_ENABLED
+# defaults true, and so do LOGGING_LOG_BODIES and LOGGING_LOG_HEADERS (.env.template:275-281 — "When
+# enabled, all requests and responses are logged to the configured storage"; config/logging.go). With
+# the default STORAGE_TYPE=sqlite that means a per-request entry — full request AND response body, plus
+# headers — captured on the request path (internal/auditlog/middleware.go captureLoggedRequestBody /
+# captureLoggedResponseBody) and batch-written by the flush loop (internal/auditlog/logger.go). Its
+# latency/throughput therefore reflect A GATEWAY THAT AUDIT-LOGS EVERY CALL WITH BODIES, not a bare
+# proxy — the honest measurement of GoModel as it ships. There is no external infra involved (sqlite in
+# the image's own /app/data, which the upstream Dockerfile creates and does not mount as a volume), so
+# turning it off would be a forbidden feature strip, not a permitted run-mechanic.
+#
+# ***RUN-OVER-RUN COMPARISONS ACROSS 2026-07-24 ARE INVALID FOR GOMODEL — DO NOT PUBLISH THE DELTA AS A
+# GOMODEL REGRESSION.*** Every run up to and including 2026-07-24T01:20Z was measured with an
+# `-e LOGGING_ENABLED=false` FEATURE STRIP that no other gateway in the field received; commit 2951b97
+# ("bench(ootb): config-transparency mechanism") removed that strip later the same day, correctly. The
+# image never changed — results/history/gomodel.jsonl records the identical
+# enterpilot/gomodel:0.1.55 @sha256:606151f9…b562ac digest on BOTH sides of the boundary — and the
+# 2026-07-25 rig floor was healthy (direct_c1_p99_us 74→81us, +7..9%). So the observed
+# rps_max_proxy 16000→2576 and added p99 306→2552us is NOT a GoModel regression and NOT box noise: it
+# is the cost of the audit-log feature the strip used to hide. The pre-07-24 numbers were the
+# flattering ones. The load-sweep signature agrees — throughput pins at ~2500rps flat from c=32 to
+# c=512 (results/fanout-gomodel.log), a saturation ceiling, not a scheduling artifact.
+# STILL UNEXPLAINED (flagged, not fixed): the openai-responses→openai-responses cell measured ~100rps
+# with p50 added ≈10.09ms, ~25x worse than the other served cells and flat across concurrency. That is
+# a second, distinct serialization we have not root-caused; treat that ONE cell's perf as suspect until
+# a targeted re-measure explains it.
 GW_KIND=docker
 # Self-describing manifest metadata — charts.py + the run lists read these, so a gateway
 # is fully defined by its own dir (add/remove a dir → it appears/disappears everywhere).
@@ -75,6 +103,10 @@ gw_launch() {
 #   OOTB posture: default features stay ON (no LOGGING_ENABLED/budget/ratelimit/admin/mcp strips); the
 #     only deviations are the permitted ones — provider base_urls → mock, dummy keys, OpenAI-lane
 #     provider scope, and the STORAGE_TYPE=sqlite / MODELS_ENABLED_BY_DEFAULT run-mechanics.
+#     LOGGING_ENABLED is DELIBERATELY ABSENT so GoModel's default audit logging (bodies + headers →
+#     sqlite, on the request path) stays on. Re-adding LOGGING_ENABLED=false here would restore the
+#     pre-2026-07-24 feature strip and silently re-inflate its throughput ~6x — see the "NOTE ON ITS
+#     NUMBERS" block at the top of this file before touching this list.
 _gomodel_env() {
   local ncore=$(( ${CORES##*-} - ${CORES%%-*} + 1 ))
   cat <<ENV
