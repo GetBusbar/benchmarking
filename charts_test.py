@@ -277,6 +277,21 @@ check("memory_recovery: a gateway that RELEASES ranks over one that stays pinned
 check("memory_recovery: a pre-recovery bundle (null recovered) is NOT eligible (never a fabricated 0)",
       "oldbundle" in rec_topn, False)
 
+# ── memory RSS: peak_rss_mib is null_not_served — a gateway with NO served cell (peak None) must NOT ───
+# draw a fabricated served-0 peak bar or rank (audit #7/#23). A gateway with a real peak is ranked.
+rss_chart = chart_by_name("memory_rss")
+check("memory_rss chart is null_not_served (no fabricated 0 peak for a no-served-cell gateway)",
+      rss_chart.null_not_served, True)
+charts.CANON = {
+    "measured": {"memory_read": {"idle_rss_mib": 40, "peak_rss_mib": 900}},
+    "nocell":   {"memory_read": {"idle_rss_mib": None, "peak_rss_mib": None}},  # no served cell → nulls
+}
+charts.GATEWAYS = {k: k for k in charts.CANON}
+rss_topn = charts._topn_keys(rss_chart, n=5)
+check("memory_rss: a gateway with a real peak is ranked", "measured" in rss_topn, True)
+check("memory_rss: a no-served-cell gateway (null peak) is NOT eligible (never a fabricated 0 bar)",
+      "nocell" in rss_topn, False)
+
 
 if _fail == 0:
     print("all charts.py validity-gate tests passed")

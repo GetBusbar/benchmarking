@@ -296,14 +296,19 @@ CHARTS = [
     Chart(
         name="memory_rss",
         suite="memory",
-        title="Gateway RAM under sustained load",
-        subtitle="idle vs peak RAM (resident memory) - same box, same mock, same load",
+        title="Gateway RAM under a fixed load",
+        subtitle="cold idle vs peak RAM under an identical fixed load on each gateway's peak cell",
         unit="MiB RAM",
         series=[
             Series("peak_rss_mib", "peak RAM (under load)", "rank"),
-            Series("idle_rss_mib", "idle RAM (before load)", MUTE),
+            Series("idle_rss_mib", "idle RAM (cold, before load)", MUTE),
         ],
         log=True,
+        # NULL-SAFE (audit #7/#23): a gateway with no served cell has peak_rss_mib None → drawn "not
+        # measured", never a fabricated served-0 bar. The secondary (idle) label is likewise suppressed
+        # for such a row (see render), so a not-measured gateway shows no idle number either.
+        null_not_served=True,
+        not_measured_text="✕ not measured (no served cell)",
     ),
     # ── supporting: memory RECOVERY (does it release?) ────────────────────────────────────────────
     # Raw peak is a weak signal — every gateway spikes under the 150KB x 1500 x 120s load. The honest
@@ -855,7 +860,9 @@ def render(chart: Chart, only_keys=None, out_stem: str | None = None) -> None:
                     txt, col, weight = chart.not_served_text, "#c2410c", "bold"
                 ax.text(tx, cy, txt, va="center", ha="left", fontsize=9.5,
                         fontweight=weight, color=col, zorder=4)
-            elif v > 0:  # secondary series (e.g. idle RSS): readable label, skip empty bars
+            elif v > 0 and served:  # secondary series (e.g. idle RSS): readable label, skip empty bars.
+                # GATED on the row being served (audit #7/#23): a not-served / null-primary row (its
+                # primary bar reads "not measured") must NOT show a secondary idle number beside it.
                 ax.text(tx, cy, _numlab(v), va="center", ha="left", fontsize=9,
                         fontweight="normal", color=MUTE_TXT, zorder=4)
 
