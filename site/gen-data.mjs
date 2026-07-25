@@ -33,7 +33,10 @@ const OUT = process.argv[3] || HERE;
 // GOVERNANCE RETIRED (matrix-sole-source): governance is not measured on the board — the governed
 // suite was busbar-only and is retired. `governed/run.sh` stays on disk (unused) but the suite is
 // no longer scanned into the bundle and no governed column/derivation is emitted. See app.js.
-const SUITES = ["perf", "memory", "stream", "streamcpu", "xlate", "matrix"];
+// NOTE: "memory" is intentionally NOT scanned. The retired standalone memory suite wrote synthetic
+// burst numbers (conc=1500, 150KB payload, 120s) that mislabelled as 6x6 provenance; memory now comes
+// SOLELY from the matrix's post-6x6 peak-cell window (g.matrix.memory, projected below). No fallback.
+const SUITES = ["perf", "stream", "streamcpu", "xlate", "matrix"];
 
 // ---- gateway manifests ------------------------------------------------------
 function parseManifest(text) {
@@ -135,22 +138,25 @@ const gateways = gatewayKeys.map((key) => {
           build: g.matrix.build ?? null, measured_at: g.matrix.measured_at ?? null, ...cell.stream };
       }
     }
-    // MEMORY projection (matrix is the single source): the one process-level RSS read the matrix run
-    // takes (matrix.memory). A gateway whose matrix run served no memory (or ran with MATRIX_MEMORY=0)
-    // leaves g.memory_read absent and the board falls back to the legacy memory suite below.
-    // The spread carries EVERY measured memory field through verbatim, incl. the recovery signals
-    // recovered_rss_mib (RSS 60s after the load ends — does it release?) and rss_series (the bounded
-    // idle→peak→recovery curve). Both are NULL-SAFE by construction: an old matrix.memory that predates
-    // them simply lacks the keys, so g.memory_read lacks them too — never fabricated, never zero-filled.
+    // MEMORY projection (matrix is the SOLE source): the matrix's dedicated post-6x6 memory window
+    // (matrix.memory) — a fixed identical load on THIS gateway's peak cell (load_cell), measured on a
+    // fresh cold-restarted process (idle → load → recovery). A gateway whose window did not serve (no
+    // served cell, or MATRIX_MEMORY=0) leaves g.memory_read absent and the board renders n/a; there is
+    // NO synthetic-suite fallback (the retired burst suite is gone). The spread carries EVERY measured
+    // field verbatim, incl. load_cell + load_recipe (the fair-load basis), the recovery signal
+    // recovered_rss_mib, and rss_series (the single-lifecycle idle→peak→recovery curve). NULL-SAFE by
+    // construction: any field the window could not measure is null/absent — never fabricated, never 0.
     if (g.matrix.memory && g.matrix.memory.served === true) {
       g.memory_read = { source: "matrix", build: g.matrix.build ?? null,
         measured_at: g.matrix.measured_at ?? null, ...g.matrix.memory };
     }
   }
-  // LEGACY FALLBACK — old bundles only. Before the matrix folded streaming + memory in, they came from
-  // the standalone stream/streamcpu/memory suites. Keep those as a fallback so an OLD bundle (matrix
-  // with no per-cell stream / no matrix.memory) still renders. A fresh matrix bundle sets g.streaming /
-  // g.memory_read above and these no-ops. Clearly a legacy path — the matrix is the primary source.
+  // LEGACY FALLBACK — old bundles only. Before the matrix folded streaming in, it came from the
+  // standalone stream/streamcpu suites. Keep those as a fallback so an OLD bundle (matrix with no
+  // per-cell stream) still renders. A fresh matrix bundle sets g.streaming above and this no-ops.
+  // NOTE: there is NO memory fallback — the retired synthetic memory suite (results/memory/<gw>.json,
+  // conc=1500/150KB/120s burst) mislabelled as 6x6 provenance, so it is neither scanned nor read;
+  // memory is SOLELY the matrix's post-6x6 peak-cell window. A gateway without matrix.memory reads n/a.
   if (!g.streaming && g.stream && g.stream.stream_served === true) {
     // The old stream suite measured the gateway's default passthrough; label it with that dialect so
     // the pill and numbers name the same path. streamcpu (if present) supplies the cpu-fps.
@@ -169,9 +175,6 @@ const gateways = gatewayKeys.map((key) => {
       cpu_fps_mock_bound: g.streamcpu ? g.streamcpu.streamcpu_mock_bound : null,
       build: g.stream.build ?? null, measured_at: g.stream.measured_at ?? null,
     };
-  }
-  if (!g.memory_read && g.memory && g.memory.served === true) {
-    g.memory_read = { source: "memory-fallback", ...g.memory };
   }
   if (!g.best_cell && g.perf && g.perf.served === true && g.perf.added_latency_p99_us != null) {
     // No swept diagonal (e.g. bifrost mid-re-run), but the perf suite ran the gateway's default

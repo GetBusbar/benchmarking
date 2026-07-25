@@ -163,7 +163,7 @@
     <p class="disclosure"><strong>Who runs this.</strong> Built and operated by the Busbar team; busbar is one of the entrants. Same shared harness for every gateway, no per-gateway special-casing, every number from committed JSON, fully open source. <a href="https://github.com/GetBusbar/benchmarking" target="_blank" rel="noopener">Read the code and re-run it yourself</a>. Gateway creators are welcome to PR and own their own <code>gateway.sh</code>.</p>
     <p class="lede">We run the 6&times;6 protocol matrix <b>once</b>. Every view is a <b>pick</b> of that one run.</p>
     <ul class="method-lede">
-      <li><b>One run, one source.</b> For each gateway the harness sweeps the full 6&times;6 protocol matrix — every ingress dialect the client can speak against every upstream dialect the mock can speak — a single time. Every number on the board (latency, throughput, streaming, memory) is read out of that one run. There is no second measurement and no separate suite to disagree with it.</li>
+      <li><b>One run, one source.</b> For each gateway the harness sweeps the full 6&times;6 protocol matrix — every ingress dialect the client can speak against every upstream dialect the mock can speak — a single time. Latency, throughput and streaming are all read out of that one run; there is no separate perf/stream suite to disagree with it. Memory is measured in a dedicated window <em>after</em> that same run, on each gateway's peak cell under an identical fixed load (see the Memory card) — one producer, <code>matrix/run.sh</code>, still the single source for every number.</li>
       <li><b>One rig.</b> One box, one instant Rust mock upstream, one Go load generator, fixed CPU pinning (gateway on one core set, mock and loadgen on the others).</li>
       <li><b>Added latency is gateway-minus-direct.</b> The same load runs straight against the mock and that baseline is subtracted, so the figure is what the gateway adds, not the network or the mock.</li>
       <li><b>Throughput is each gateway's own qualifying ceiling</b>, not a subtraction. A guardrail flags any run approaching the mock's own ceiling, so the mock is never silently the bottleneck; a rig-limited number reads n/a rather than a fabricated bar.</li>
@@ -195,13 +195,14 @@
       </article>
       <article class="method-card">
         <span class="card-kicker"><a id="lnk-memory" target="_blank" rel="noopener">matrix/run.sh (memory)</a></span>
-        <h3>Memory: one continuous track</h3>
+        <h3>Memory: a fixed load on each gateway's peak cell</h3>
         <ul>
-          <li>Memory is not a separate load. It is one continuous process-RSS track across the SAME 6&times;6 run, per gateway:</li>
-          <li><b>Idle.</b> RSS sampled over the <b>60 s before</b> the run starts — the gateway launched, answering 200, under no load. Reported as the settled idle at the end of that window.</li>
-          <li><b>Peak.</b> The MAX RSS observed continuously <b>across the entire 6&times;6 sweep</b> (all cells) — the real working-set peak the run drives, not a synthetic spike.</li>
-          <li><b>Recovered @60 s.</b> RSS at the end of a <b>60 s window after</b> the last cell — whether the gateway <em>releases</em> what it took or stays pinned near its peak. This, not raw peak, is the memory story: a gateway that peaks near 1 GB and settles to tens of MiB behaves very differently from one that holds it.</li>
-          <li><b>Recovery curve.</b> RSS sampled at a steady cadence across the whole thing — idle-before &rarr; the 6&times;6 &rarr; the 60 s after — drawn as an idle&rarr;peak&rarr;recovery sparkline on the Memory tab. A gateway measured before this signal existed reads n/a, never a fabricated line.</li>
+          <li>Memory is a <b>dedicated window that runs after the full 6&times;6</b>, per gateway. First the 6&times;6 runs; then the harness picks each gateway's <b>peak cell</b> — its served cell with the highest max-proxy throughput (there is no universal cell, since some gateways do not serve OpenAI&rarr;OpenAI) — and runs an <b>identical fixed load</b> on it. Every gateway gets the same load recipe, so the memory comparison is apples-to-apples; only the cell differs (shown under <em>Tested on</em>). The recipe (concurrency &times; payload bytes &times; duration) travels in each gateway's record.</li>
+          <li><b>Fresh cold restart.</b> The gateway is killed and cold-restarted for the peak cell's egress dialect, on a brand-new process — so idle is a true cold-start baseline, not a warm post-6&times;6 process (which would measure recovery, not idle).</li>
+          <li><b>Idle.</b> RSS sampled for <b>60 s with no traffic</b> on the fresh process; reported as the median of that cold-idle window.</li>
+          <li><b>Peak.</b> The MAX RSS sampled continuously while the <b>fixed load</b> runs on the peak cell — the real working-set peak under a fair, identical load, not a synthetic burst.</li>
+          <li><b>Recovered @60 s.</b> RSS at the end of a <b>60 s window after the load stops</b> — whether the gateway <em>releases</em> what it took or stays pinned near its peak. This, not raw peak, is the memory story: a gateway that peaks near 1 GB and settles to tens of MiB behaves very differently from one that holds it.</li>
+          <li><b>Recovery curve.</b> RSS sampled at a steady cadence across the whole window on <em>one process lifecycle</em> — cold idle &rarr; fixed load &rarr; recovery — drawn as an idle&rarr;peak&rarr;recovery sparkline on the Memory tab. A gateway with no served cell reads n/a, never a fabricated line.</li>
         </ul>
       </article>
       <article class="method-card">

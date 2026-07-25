@@ -301,13 +301,28 @@ function canonicalStreaming(g) {
   if (!sustainedCertified(s)) rec.streams_sustained = null;  // rig-limited/unverifiable → n/a, no bar
   return rec;
 }
-/* canonicalMemory: THE single memory record. gen-data projects it from the matrix's ONE process-level
-   RSS read (g.memory_read, source:"matrix"), or the legacy memory suite (source:"memory-fallback").
-   Returns a record with served + the idle/peak fields, or null. */
+/* canonicalMemory: THE single memory record. gen-data projects it SOLELY from the matrix's dedicated
+   post-6x6 memory window (g.memory_read, source:"matrix"): a fixed identical load on this gateway's
+   peak cell (load_cell), measured on a fresh cold-restarted process. There is no synthetic-suite
+   fallback. Returns a record with served + idle/peak/recovered + load_cell/load_recipe, or null. */
 function canonicalMemory(g) {
   const m = g.memory_read;
   if (m) return { served: true, ...m };
   return null;
+}
+
+/* memLoadCellLabel: pretty "ingress → egress" for a memory record's load_cell ("ingress>egress"). */
+function memLoadCellLabel(lc) {
+  if (typeof lc !== "string" || !lc.includes(">")) return lc || "?";
+  const [ing, eg] = lc.split(">");
+  const L = (d) => (MATRIX_LABELS[d] || d || "?");
+  return `${L(ing)} → ${L(eg)}`;
+}
+/* memLoadRecipeTip: the fixed-load basis + peak cell, for the "Tested on" cell tooltip. */
+function memLoadRecipeTip(m) {
+  const r = m && m.load_recipe;
+  const basis = r ? `identical fixed load: ${fmtInt(r.concurrency)} concurrent, ${fmtInt(r.payload_bytes)} B payload, ${fmtInt(r.duration_s)} s` : "identical fixed load for every gateway";
+  return `peak cell ${memLoadCellLabel(m && m.load_cell)} — ${basis}, on a fresh cold-restarted process (60 s idle → load → 60 s recovery)`;
 }
 
 /* passCell: the Passthrough tab reads ONLY the canonical record (g.best_cell). When best_cell
@@ -352,16 +367,16 @@ function streamCell(g, key, fmt) {
   return lane(g, "stream", "stream_served", "stream_error", (j) =>
     j[legacyKey] != null ? { v: j[legacyKey], text: fmt(j[legacyKey]), na: false } : { v: null, text: "n/a", na: true });
 }
-/* memCell: the memory columns read ONLY the canonical memory record (g.memory_read, the matrix's one
-   process-level RSS read, or a legacy memory-fallback). Same discipline as passCell/streamCell. */
+/* memCell: the memory columns read ONLY the canonical memory record (g.memory_read, the matrix's
+   post-6x6 peak-cell window). No suite fallback — a gateway without a matrix memory window reads n/a.
+   Same one-source discipline as passCell/streamCell. */
 function memCell(g, key, fmt) {
   const m = canonicalMemory(g);
   if (m)
     return m[key] != null
       ? { v: m[key], text: fmt(m[key]), na: false }
       : { v: null, text: "n/a", na: true };
-  return lane(g, "memory", "served", "serve_error", (j) =>
-    j[key] != null ? { v: j[key], text: fmt(j[key]), na: false } : { v: null, text: "n/a", na: true });
+  return { v: null, text: "n/a", na: true };
 }
 
 /* A throughput cell of 0 is a real, honest measurement, not a broken benchmark: the gateway
@@ -582,18 +597,25 @@ const COLUMN_SETS = {
       get: (g) => chooserStreamCell(g, "cpu_fps", fmtInt) },
   ],
   // MEMORY (per-gateway, one row per gateway — NOT cell-chooser driven): idle / peak / recovered RSS
-  // (best = min), plus a recovery-curve sparkline. Reads ONLY the canonical memory record; a gateway
-  // without a field reads n/a, and the sparkline renders only with a series (never a fabricated line).
+  // (best = min), the peak cell each gateway was measured on (load_cell), plus a recovery-curve
+  // sparkline. Every gateway ran the IDENTICAL fixed load on a fresh cold-restarted process, so the
+  // numbers are apples-to-apples. Reads ONLY the canonical memory record; a gateway without a field
+  // reads n/a, and the sparkline renders only with a series (never a fabricated line).
   memory: [
     COL_SEL, COL_NAME,
-    { id: "memidle", label: "Idle RSS (MiB)", desc: false, title: "Process RSS after launch, before load (60 s idle window before the 6x6 run). Lower is better.",
+    { id: "memcell", label: "Tested on", desc: false, sortable: false,
+      title: "The peak cell this gateway was measured on (its highest-throughput served cell). The fixed load recipe is identical for every gateway; only the cell differs.",
+      get: (g) => { const m = canonicalMemory(g); const lc = m && m.load_cell; return lc ? { v: null, text: memLoadCellLabel(lc), na: false } : { v: null, text: "n/a", na: true }; },
+      render: (g) => { const m = canonicalMemory(g); const lc = m && m.load_cell;
+        return lc ? `<td class="memcell" title="${esc(memLoadRecipeTip(m))}">${esc(memLoadCellLabel(lc))}</td>` : `<td class="memcell na">n/a</td>`; } },
+    { id: "memidle", label: "Idle RSS (MiB)", desc: false, title: "Cold idle process RSS: median over a 60 s window on a fresh cold-restarted process, before any load. Lower is better.",
       get: (g) => memCell(g, "idle_rss_mib", fmt1) },
-    { id: "mempeak", label: "Peak RSS (MiB)", desc: false, title: "Max process RSS observed across the entire 6x6 sweep. Lower is better.",
+    { id: "mempeak", label: "Peak RSS (MiB)", desc: false, title: "Max process RSS observed while the identical fixed load runs on this gateway's peak cell. Same load recipe for every gateway. Lower is better.",
       get: (g) => memCell(g, "peak_rss_mib", fmt1) },
-    { id: "memrecov", label: "Recovered @60s (MiB)", desc: false, title: "Process RSS at the end of the 60 s recovery window after the last cell — does the gateway release memory? Lower is better.",
+    { id: "memrecov", label: "Recovered @60s (MiB)", desc: false, title: "Process RSS at the end of the 60 s recovery window after the fixed load stops — does the gateway release memory? Lower is better.",
       get: (g) => memCell(g, "recovered_rss_mib", fmt1) },
     { id: "memcurve", label: "Recovery curve", desc: false, sortable: false,
-      title: "RSS across the whole run: 60 s idle before → the 6x6 sweep → 60 s recovery after",
+      title: "RSS across the memory window on one process lifecycle: 60 s cold idle → fixed load on the peak cell → 60 s recovery",
       get: (g) => { const m = canonicalMemory(g); return { v: null, text: "", na: !(m && Array.isArray(m.rss_series) && m.rss_series.length >= 2) }; },
       render: (g) => {
         const m = canonicalMemory(g);
@@ -635,11 +657,11 @@ const LANES = [
   {
     key: "memory", label: "Memory", flag: "served", err: "serve_error",
     get: canonicalMemory,
-    pathNote: (j) => j.source === "matrix"
-      ? "the matrix run's one process-level RSS read (default config, sustained large-payload load)"
-      : "the memory suite's RSS read (legacy result)",
-    // The recovery curve (idle→peak→recovery). Renders ONLY when rss_series exists (≥2 points); a
-    // pre-recovery bundle has no series → extra() returns "" and the drawer shows just the numbers.
+    pathNote: (j) => j.load_cell
+      ? `the identical fixed load on ${memLoadCellLabel(j.load_cell)} (this gateway's peak cell), on a fresh cold-restarted process (60 s idle → load → 60 s recovery)`
+      : "the matrix's post-6x6 memory window (identical fixed load on this gateway's peak cell, fresh cold-restarted process)",
+    // The recovery curve (idle→load→recovery, one process lifecycle). Renders ONLY when rss_series
+    // exists (≥2 points); a bundle without a series → extra() returns "" and the drawer shows just the numbers.
     extra: (j) => rssSparkline(j.rss_series),
     metrics: [
       { k: "idle_rss_mib", label: "Idle RSS (MiB)", best: "min", fmt: fmt1 },
@@ -1159,9 +1181,9 @@ function chooserCaption(view, st, data) {
        "Every row is the identical cell, so it is apples-to-apples; a gateway that does not serve it reads n/a."];
 }
 const MEMORY_CAPTION = [
-  "One continuous per-gateway RSS track across the same 6x6 run.",
-  "Idle: RSS over the 60 s before the run (launched, no load). Peak: max RSS across the whole sweep. Recovered @60s: RSS after a 60 s settle — does it release?",
-  "Lower is better on every column. A gateway without a field reads n/a; the curve draws only when a series was recorded.",
+  "An identical fixed load on each gateway's PEAK cell, measured on a fresh cold-restarted process (60 s idle → load → 60 s recovery). Same load recipe for every gateway, so it is apples-to-apples; only the cell differs (shown under Tested on).",
+  "Idle: cold-start RSS (median, no load). Peak: max RSS under the fixed load. Recovered @60s: RSS 60 s after the load stops — does it release?",
+  "Lower is better on every column. A gateway with no served cell reads n/a; the curve draws only when a series was recorded.",
 ];
 function updateTableCaption(view) {
   const el = document.getElementById("table-caption");
@@ -1875,8 +1897,8 @@ const CHART_CAPTIONS = {
   added_latency: "Added latency vs direct-to-mock, p99 in microseconds, concurrency 1, on each gateway's best same-dialect passthrough (the same canonical record the table ranks). Lower is better.",
   rps_sustained_20ms: "Sustained RPS with a 20 ms mock LLM latency (p99 under 1 s, error rate under 0.1 percent), best same-dialect passthrough. Higher is better.",
   rps_max_proxy: "Max proxy RPS against an instant mock, best same-dialect passthrough. Higher is better.",
-  memory_rss: "Process RSS in MiB: idle before the run and peak across the 6x6 sweep. Lower is better.",
-  memory_recovery: "RSS 60 s after the last cell (recovered) vs the peak across the run: does the gateway release the memory it took? Lower recovery is better.",
+  memory_rss: "Process RSS in MiB: cold idle vs peak under an identical fixed load on each gateway's peak cell (fresh cold-restarted process). Same load for every gateway. Lower is better.",
+  memory_recovery: "RSS 60 s after the fixed load stops (recovered) vs the peak under load: does the gateway release the memory it took? Lower recovery is better.",
   cost_per_million: "Instance cost per million requests at the canonical sustained rate. Lower is better.",
   rps_per_dollar: "Canonical sustained RPS per dollar of hourly instance cost. Higher is better.",
   stream_added_ttft: "Streaming: added time-to-first-token vs direct-to-mock, p99. Lower is better.",
@@ -2344,6 +2366,7 @@ if (NODE) {
     CHOOSER_MODES, chooserCellPerf, chooserDialects, chooserPerfCell, chooserCellStream, chooserStreamCell, chooserHasCell, deltaToPeak, cellPopFull,
     laneRecord, lanePathNote, perfSweepSeries,
     chooserCaption, chooserLead, streamingProvenance,
+    MEMORY_CAPTION, memLoadCellLabel, memLoadRecipeTip,
     canonicalPerf, canonicalXlate, canonicalStreaming, canonicalMemory, cpuFpsCertified, sustainedCertified, perfRpsCertified, perfRpsSuppressed, xlateRpsSuppressed, gatewayResultsJson, DEFAULT_VIEW, VIEW_LABELS, rosterRows, fmtStars,
     configCorrectionUrl, BENCH_REPO, fmtInt, fmtAdded,
     HOME_VIEW, homeCardsHtml,
