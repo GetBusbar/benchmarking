@@ -1,0 +1,12 @@
+# ── config.gen.yaml (rendered; loaded via LITELLM_CONFIG_PATH, python-config reader) ──
+model_list:
+  - model_name: azure_ai/mock
+    litellm_params:
+      model: azure_ai/mock
+      api_base: http://127.0.0.1:8021/v1/messages
+      api_key: dummy
+
+# ── launch env (non-secret; LITELLM_MASTER_KEY is the gateway's mandatory auth, dummy on the isolated rig) ──
+LITELLM_MASTER_KEY=gwbench
+LITELLM_CONFIG_PATH=/home/ubuntu/benchmarking/gateways/litellm-rust/config.gen.yaml
+PORT=8101
