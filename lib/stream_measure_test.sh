@@ -227,4 +227,44 @@ assert_range "cpu-fps mock-bound peak concentrated at low conc (~64)" "$SM_FPS_P
   rm -f "$FAKEUGEN" "$ARGVF"
 ) || fail=1
 
+# ── PROBE PARAMETERS MUST PRECEDE THE FIRST PROBE (2026-07-25 field finding) ──────────────────────
+# RED-BEFORE. matrix/run.sh called stream_mock_ready -> stream_probe BEFORE assigning SM_EXPFRAMES.
+# Under `set -u` the probe aborted on the unbound variable before reaching the mock, printed nothing,
+# and the readiness loop scored that silence as "mock not ready" for all 30 tries. Result: every cell
+# the mock CAN stream published stream_served:"untestable" with reason stream_mock_unready: the entire
+# streaming lane gone from the board, each row blaming a rig race for a bug in our own ordering. This
+# whole suite stayed green throughout, because it sets SM_EXPFRAMES at the top of the file (line 13)
+# and so could never reproduce the caller's mistake. Two guards, because one alone would not have
+# caught it: (a) the contract is enforced at the callee, and (b) the caller's ORDERING is asserted
+# statically, which is the check that actually fires on the real defect.
+(
+  # (a) callee-side: an unset probe parameter aborts, and does NOT return silence a caller can
+  # mistake for an unready mock. Must be non-zero exit, not an empty successful read.
+  out="$(SM_EXPFRAMES= real_stream_probe http://gw 1 1 2>&1)"; rc=$?
+  if [ "$rc" = 0 ]; then
+    echo "FAIL - stream_probe with SM_EXPFRAMES unset returned success (out=[$out]); a caller reads that as 'mock not ready'"; exit 1
+  fi
+  echo "ok   - stream_probe refuses to probe unparameterised (exit $rc) instead of returning caller-misreadable silence"
+  out="$(SM_STALL_US= real_stream_probe http://gw 1 1 2>&1)"; rc=$?
+  [ "$rc" = 0 ] && { echo "FAIL - stream_probe with SM_STALL_US unset returned success"; exit 1; }
+  echo "ok   - stream_probe refuses to probe with SM_STALL_US unset"
+) || fail=1
+(
+  # (b) caller-side ORDERING in matrix/run.sh: the first assignment of SM_EXPFRAMES must come before
+  # the first stream_mock_ready gate. This is the assertion that fires on the actual field defect.
+  R="$B/matrix/run.sh"
+  set_ln="$(grep -n '^[[:space:]]*SM_EXPFRAMES=' "$R" | head -1 | cut -d: -f1)"
+  # Only real CALL sites: matrix/run.sh discusses stream_mock_ready at length in comments, and a
+  # comment mentioning the gate is not the gate. Skip lines whose first non-blank char is '#'.
+  gate_ln="$(grep -n 'stream_mock_ready' "$R" | grep -v ':[[:space:]]*#' | head -1 | cut -d: -f1)"
+  if [ -z "$set_ln" ] || [ -z "$gate_ln" ]; then
+    echo "FAIL - could not locate SM_EXPFRAMES assignment (${set_ln:-none}) or stream_mock_ready gate (${gate_ln:-none}) in matrix/run.sh"; exit 1
+  fi
+  if [ "$set_ln" -ge "$gate_ln" ]; then
+    echo "FAIL - matrix/run.sh assigns SM_EXPFRAMES at line $set_ln but probes via stream_mock_ready at line $gate_ln;"
+    echo "       the readiness gate will die on an unbound variable and mark every streamable cell untestable"; exit 1
+  fi
+  echo "ok   - matrix/run.sh sets SM_EXPFRAMES (line $set_ln) before its first stream_mock_ready gate (line $gate_ln)"
+) || fail=1
+
 [ "$fail" = 0 ] && echo "all stream-measure tests passed" || { echo "STREAM-MEASURE TESTS FAILED"; exit 1; }

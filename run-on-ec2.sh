@@ -25,15 +25,22 @@ RUN_ID="${RUN_ID:-$(date +%Y%m%d-%H%M%S)-$$}"
 CREATED_KEY=0; CREATED_SG=0   # only delete the shared key/SG on exit if THIS invocation created them
 
 # Box self-terminate safety net (audit R5-#4). This `shutdown -h +N` is the LEAKED-BOX backstop - it
-# must fire only when the orchestrator has lost the box, NEVER during a legitimate run. Matrix is now
-# the SOLE producer and raises its OWN wall-clock ceiling to 21600s = 360 min (matrix/run.sh:171:
-# HARNESS_SUITE_CEIL_S default 21600 when MATRIX_SWEEP=1). CRITICAL TIMING: `shutdown -h +N` is armed at
+# must fire only when the orchestrator has lost the box, NEVER during a legitimate run. Matrix is the
+# SOLE producer and raises its OWN wall-clock ceiling to 28800s = 480 min (matrix/run.sh:
+# HARNESS_SUITE_CEIL_S default 28800 when MATRIX_SWEEP=1). CRITICAL TIMING: `shutdown -h +N` is armed at
 # CLOUD-INIT, minutes BEFORE the matrix clock even starts (apt + docker + rsync + gateway build take
-# ~5-10 min first), so the box clock LEADS the matrix clock. A box timer merely EQUAL to the 360-min
-# matrix ceiling therefore fires mid-sweep on a slow gateway — and with matrix as the sole producer that
-# AWS termination forfeits the ENTIRE result, not just one suite. Set the net strictly ABOVE the matrix
-# ceiling PLUS startup/build lead: 360-min ceiling + ~120-min margin (startup lead + slow-gateway
-# variance) = 480 min. Overridable, but the default can never fire during a real matrix run.
+# ~5-10 min first), so the box clock LEADS the matrix clock by that startup lead.
+#
+# THE TWO LIMITS ARE NOW EQUAL AT 480 MIN, AND THAT IS DELIBERATE. 8 h is the hard per-box budget; the
+# matrix ceiling is set to the same 8 h so it acts purely as a wedge backstop and never truncates a
+# healthy run (the slowest gateway measured ~6.1 h, leaving ~2 h of slack). Because the box clock leads,
+# the ORDER OF FIRING on a genuinely wedged gateway is: AWS terminates at 480 min box-time, a few
+# minutes BEFORE the matrix ceiling would have tripped at 480 min matrix-time. The consequence is
+# explicit and accepted: a wedged box forfeits its partial results to AWS termination rather than
+# exiting cleanly with a capped, partial grid. That trade is correct here, because a partial grid from a
+# wedged gateway is not a result we would want to publish anyway: the ceiling exists to reclaim the
+# box, not to salvage the run. Both are overridable; raise BOTH together, keeping the box net at or
+# above the matrix ceiling, if a gateway ever legitimately needs more than 8 h.
 BENCH_MAX_MIN="${BENCH_MAX_MIN:-480}"
 
 # ── INCREMENTAL PER-GATEWAY PUBLISH (matrix-sole-source) ──────────────────────────────────────────
@@ -619,7 +626,8 @@ bench_gateway_once() {
   # `instance-initiated-shutdown-behavior=terminate` makes that a TERMINATE, not a stop. A leaked box
   # can therefore bleed cost for at most BENCH_MAX_MIN, never indefinitely (2026-07-24: 48 leaked boxes
   # ran for hours because the trap missed SIGTERM and the manual cleanups silently no-op'd). BENCH_MAX_MIN
-  # is set ABOVE the matrix suite's own 360-min ceiling + startup lead (see top of file) so it never fires mid-run.
+  # is set EQUAL to the matrix suite's own 480-min ceiling (see the BENCH_MAX_MIN block at the top of this
+  # file for why they are deliberately equal, and which of the two fires first on a wedged box).
   iid=$(aws ec2 run-instances --image-id "$AMI" --instance-type "$ITYPE" --key-name "$KEYNAME" \
     --security-group-ids "$SG" \
     --instance-initiated-shutdown-behavior terminate \

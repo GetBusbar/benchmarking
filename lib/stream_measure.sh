@@ -78,6 +78,23 @@ stream_mock_start(){ # chunks interval_ms chunk_bytes
 # it before threading it in. -stream still sets the accept: text/event-stream header regardless. When
 # no body is threaded (the standalone stream/streamcpu suites), ugen builds its -shape body as before.
 stream_probe(){ # url conc dur [body]
+  # CONTRACT ENFORCEMENT (2026-07-25 field finding). SM_EXPFRAMES/SM_STALL_US are documented above as
+  # caller-set globals, and matrix/run.sh once called stream_mock_ready -> stream_probe BEFORE setting
+  # them. Under `set -u` the expansion below aborted the probe subshell before it reached the mock; the
+  # probe printed nothing, the readiness loop read that silence as "mock not ready", and EVERY streamable
+  # cell on the board published stream_served:"untestable" / stream_mock_unready. A bug in our ordering
+  # wore a rig failure's clothes, on every row, and nothing in the run was louder than a shell warning.
+  # An unset probe parameter is a PROGRAMMING error, and a programming error must stop the suite - never
+  # decay into a per-cell "untestable" that reads, to anyone looking at the board, like measured evidence
+  # about the rig. Checked explicitly (not left to `set -u`) so the message names the actual cause.
+  if [ -z "${SM_EXPFRAMES:-}" ] || [ -z "${SM_STALL_US:-}" ]; then
+    log "FATAL: stream_probe called with SM_EXPFRAMES='${SM_EXPFRAMES:-}' SM_STALL_US='${SM_STALL_US:-}'." \
+        "Both are caller-set globals (see the caller contract at the top of lib/stream_measure.sh) and must" \
+        "be assigned BEFORE any probe, including the stream_mock_ready liveness gate. Refusing to probe:" \
+        "an unparameterised probe cannot distinguish a dead mock from a misconfigured harness, and would" \
+        "publish this cell's streaming as an untestable RIG limit when the fault is in the harness."
+    exit 1
+  fi
   local _body="${4:-${SM_STREAM_BODY:-}}"
   tmo "$(probe_budget "$3")" taskset -c "$LOADCORES" "$UGEN" -url "$1" -model "$GW_MODEL" -auth "$GW_AUTH" -c "$2" -d "$3" \
     -psize "$PSIZE" -stream -expframes "$SM_EXPFRAMES" -stallus "$SM_STALL_US" ${_body:+-body "$_body"} ${UGEN_H[@]+"${UGEN_H[@]}"} 2>/dev/null \
