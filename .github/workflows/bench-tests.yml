@@ -22,6 +22,8 @@ on:
       - "lib/ingress_path_test.sh"
       - "lib/box_qualify.sh"
       - "lib/box_qualify_test.sh"
+      - "lib/gateways.sh"
+      - "lib/gateway_isolation_test.sh"
       - "lib/rig.sh"
       - "matrix/qualify-box.sh"
       - "matrix/run.sh"
@@ -48,6 +50,8 @@ on:
       - "lib/ingress_path_test.sh"
       - "lib/box_qualify.sh"
       - "lib/box_qualify_test.sh"
+      - "lib/gateways.sh"
+      - "lib/gateway_isolation_test.sh"
       - "lib/rig.sh"
       - "matrix/qualify-box.sh"
       - "matrix/run.sh"
@@ -123,6 +127,20 @@ jobs:
       # qualification seed the next run's baseline fails CI instead of shipping.
       - name: Box-qualification test (floor drift + jitter + anti-ratchet + peak replay + baseline hygiene)
         run: bash -n lib/box_qualify.sh && bash -n lib/box_qualify_test.sh && bash -n matrix/qualify-box.sh && bash -n lib/rig.sh && bash lib/box_qualify_test.sh
+      # THE STRUCTURAL INVARIANT: "adding a gateway is exactly, drop in gateways/<name>/gateway.sh".
+      # It was not true. bench-status.sh iterated a frozen 13-name string; five runners defaulted
+      # GATEWAY to one specific name; verify-local.sh tore down a hardcoded container name, so it
+      # killed the wrong container whenever it was handed any other gateway; gateways/versions.env
+      # held every gateway's pinned ref, so a source-built entrant needed a block in a file it did
+      # not own; and lib/box_qualify_test.sh asserted "gomodel fails" about what is really a
+      # hardware gate. lib/gateways.sh is now the one shell-side discovery choke point and this lint
+      # enforces the invariant as a class: it enumerates gateways/*/ AT RUNTIME (never a hardcoded
+      # roster of its own) and fails if any gateway's name or declared alias appears in the CODE of
+      # a file outside its own directory, or if any single line enumerates three or more of them.
+      # It self-tests first, so a scanner that silently matched nothing aborts instead of reporting
+      # a green tree.
+      - name: Gateway-isolation lint (a gateway is named only inside its own directory; no frozen rosters)
+        run: bash -n lib/gateways.sh && bash -n lib/gateway_isolation_test.sh && bash -n bench-status.sh && bash -n verify-local.sh && bash lib/gateway_isolation_test.sh
       # lib/promote_guard.py decides whether an incoming result may overwrite the committed one; a bug
       # there republishes a regression as an honest failure (R4-M2). Covers MEDIUM-R2-3 (matrix all-dead
       # 000 detection) + the anchored-marker / status-000 / honest-not-served behaviours.
