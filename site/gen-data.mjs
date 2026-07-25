@@ -25,6 +25,7 @@ import { readdirSync, readFileSync, statSync, existsSync, mkdirSync, copyFileSyn
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
+import { sealMetric, makeSource, SWEEP } from "./seal.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = process.argv[2] || join(HERE, "..");
@@ -37,6 +38,8 @@ const OUT = process.argv[3] || HERE;
 // burst numbers (conc=1500, 150KB payload, 120s) that mislabelled as 6x6 provenance; memory now comes
 // SOLELY from the matrix's post-6x6 peak-cell window (g.matrix.memory, projected below). No fallback.
 const SUITES = ["perf", "stream", "streamcpu", "xlate", "matrix"];
+// The ungated (non-honesty-gated) latency-shaped metrics on a perf cell: always certified when present.
+const UNGATED_LAT = ["added_latency_p50_us", "added_latency_p99_us", "gateway_c1_p99_us", "direct_c1_p99_us"];
 
 // ---- gateway manifests ------------------------------------------------------
 function parseManifest(text) {
@@ -63,6 +66,22 @@ const gatewayKeys = existsSync(gatewaysDir)
 
 function readJson(path) {
   try { return JSON.parse(readFileSync(path, "utf8")); } catch { return null; }
+}
+
+// newestSnapshot(key): the newest results/snapshots/result_<key>_<ts>.json by its own measured_at (an
+// on-disk archive of every run; the newest wins). Returns the parsed snapshot or null (no snapshot yet).
+const SNAP_DIR = join(ROOT, "results", "snapshots");
+function newestSnapshot(key) {
+  if (!existsSync(SNAP_DIR)) return null;
+  let best = null, bestMs = -1;
+  for (const f of readdirSync(SNAP_DIR)) {
+    if (!f.startsWith(`result_${key}_`) || !f.endsWith(".json")) continue;
+    const snap = readJson(join(SNAP_DIR, f));
+    if (!snap) continue;
+    const ms = snap.measured_at ? Date.parse(snap.measured_at) : 0;
+    if (ms > bestMs) { bestMs = ms; best = snap; }
+  }
+  return best;
 }
 
 // GitHub star snapshot for the Gateways overview: a COMMITTED build-time file
@@ -94,75 +113,79 @@ const gateways = gatewayKeys.map((key) => {
     const j = readJson(join(ROOT, "results", suite, `${key}.json`));
     if (j) g[suite] = j;
   }
-  // ---- OOTB config artifact -------------------------------------------------
-  // Config transparency: the gateway ran from its as-shipped DEFAULT config (pointed at the mock) and
-  // the exact config it used is captured to results/config/<key>.txt (see lib/harness.sh
-  // harness_write_config + the perf suite's "ootb_config" pointer). Carry the raw text verbatim into
-  // the bundle as g.ootb_config so app.js can render a per-gateway "Config" drawer. Prefer the pointer
-  // the result JSON recorded (perf.ootb_config), else fall back to the conventional path; a gateway
-  // with no artifact (the not-yet-wired ones) stays absent and the board renders "not published".
-  const cfgPointer = (g.perf && typeof g.perf.ootb_config === "string") ? g.perf.ootb_config : `config/${key}.txt`;
-  const cfgPath = join(ROOT, "results", cfgPointer);
-  if (existsSync(cfgPath)) {
-    try { g.ootb_config = readFileSync(cfgPath, "utf8"); } catch { /* unreadable → absent */ }
+  // ---- snapshot artifact (task #65): the SINGLE self-describing per-gateway run ------------------
+  // Prefer the NEWEST snapshot (results/snapshots/result_<key>_<measured_at>.json) as the source of the
+  // matrix + config: config lives INSIDE the same file as the numbers it produced, killing the config-
+  // drift class. A gateway with no snapshot yet keeps the per-suite read path above (transition; null-
+  // safe). The snapshot's matrix carries the SAME sealed-envelope-producing cells, so projection is
+  // unchanged. Its inline config.files replace the config/<gw>.txt sidecar read.
+  const snap = newestSnapshot(key);
+  if (snap) {
+    if (snap.matrix) g.matrix = snap.matrix;                       // matrix from the snapshot (sole source)
+    const files = snap.config && snap.config.files;
+    if (files && typeof files === "object") {
+      const parts = Object.entries(files).map(([name, body]) =>
+        Object.keys(files).length > 1 ? `# ${name}\n${body}` : String(body));
+      if (parts.length) g.ootb_config = parts.join("\n\n");        // inline config render (no sidecar)
+    }
+  }
+  // ---- OOTB config artifact (sidecar fallback, no snapshot) ----------------------------------------
+  // Only when the snapshot did not supply config: the gateway ran from its as-shipped DEFAULT config and
+  // the exact config it used is captured to results/config/<key>.txt (lib/harness.sh harness_write_config).
+  // A gateway with no artifact stays absent and the board renders "not published".
+  if (g.ootb_config == null) {
+    const cfgPointer = (g.perf && typeof g.perf.ootb_config === "string") ? g.perf.ootb_config : `config/${key}.txt`;
+    const cfgPath = join(ROOT, "results", cfgPointer);
+    if (existsSync(cfgPath)) {
+      try { g.ootb_config = readFileSync(cfgPath, "utf8"); } catch { /* unreadable → absent */ }
+    }
   }
   if (g.matrix) {
     normalizeMatrix(g.matrix);
-    // CANONICAL RULE: the per-cell MATRIX sweep is the single source of truth for all
-    // passthrough + translation perf; the standalone perf/xlate suites are FALLBACK ONLY
-    // (a gateway with no matrix sweep). g.best_cell / g.translation_cell are the ONE
-    // canonical record every surface reads (table, drawer, compare, charts.py); the
-    // `source` tag ("matrix" | "perf-fallback" | "xlate-fallback") discloses provenance.
-    //
-    // Per-cell perf (matrix v2 + sweep): the gateway's BEST green cell by sustained RPS @20ms,
-    // with its ingress -> egress path. The Passthrough tab ranks each gateway on this cell; the
-    // matrix hover shows every other green cell's deviation from it.
+    // CANONICAL RULE: the per-cell MATRIX sweep is the single source of truth for all passthrough +
+    // translation perf; the standalone perf/xlate suites are a LIVE deferred FALLBACK (a gateway with
+    // no matrix sweep for that path). g.best_cell / g.translation_cell are the ONE canonical record
+    // every surface reads (table, drawer, compare, charts.py). Every metric is SEALED here into an
+    // envelope (seal.mjs): the raw scalar + its _mock_bound flag are CONSUMED, never re-emitted — a
+    // render site has no ungated field to leak. The cell's `source` stamp discloses provenance and
+    // drives every caption (no hard-coded source string can drift). See seal.mjs / Design E.
+    const build = g.matrix.build ?? null, at = g.matrix.measured_at ?? null;
+    // Per-cell perf (matrix v2 + sweep): the gateway's BEST green diagonal by sustained RPS @20ms.
     const bc = bestCell(g.matrix);
-    if (bc) g.best_cell = { ...bc, source: "matrix", build: g.matrix.build ?? null, measured_at: g.matrix.measured_at ?? null };
+    if (bc) g.best_cell = sealPerfCell(bc, { ingress: bc.dialect, egress: bc.dialect, dialect: bc.dialect },
+      makeSource("matrix", SWEEP.DIAGONAL, build, at));
+    // The gateway's TRANSLATION cell (openai in -> best non-openai egress).
     const tc = translationCell(g.matrix);
-    if (tc) g.translation_cell = { ...tc, source: "matrix", build: g.matrix.build ?? null, measured_at: g.matrix.measured_at ?? null };
-    // STREAMING projection (matrix is the single source): the streaming shown on the board is the
-    // BEST DIAGONAL cell's streaming — the same (ingress==egress) passthrough cell the headline perf
-    // is projected from, so the streaming numbers are read off the SAME cell as the RPS/latency
-    // headline (one source of truth; check-consistency asserts headline streaming == this cell's).
-    // g.streaming carries the diagonal cell's dialect + its full stream record.
+    if (tc) g.translation_cell = sealPerfCell(tc, { ingress: tc.ingress, egress: tc.egress },
+      makeSource("matrix", SWEEP.TRANSLATION, build, at));
+    // STREAMING projection (matrix single source): the BEST DIAGONAL cell's streaming — the SAME
+    // (ingress==egress) cell the headline perf is projected from (one source of truth). Only when the
+    // diagonal ACTUALLY STREAMED (stream_served===true); a non-streaming cell leaves g.streaming absent.
     if (bc) {
       const cell = g.matrix.upstreams?.[bc.dialect]?.cells?.[bc.dialect];
-      // MEDIUM-1(a): only project streaming when the diagonal cell ACTUALLY STREAMED. A non-streaming
-      // cell still carries a stream record ({stream_served:false, …}), so the old truthiness check
-      // (`cell.stream`) projected it — surfacing a did-not-stream cell as a served streamer. Mirror the
-      // memory guard (line 136, `.served === true`): require stream_served === true so g.streaming is
-      // ABSENT for a non-streaming cell and the board renders "did not stream".
       if (cell && cell.stream && cell.stream.stream_served === true) {
-        g.streaming = { dialect: bc.dialect, source: "matrix",
-          build: g.matrix.build ?? null, measured_at: g.matrix.measured_at ?? null, ...cell.stream };
+        g.streaming = sealStreaming(cell.stream, bc.dialect, makeSource("matrix", SWEEP.STREAM_DIAGONAL, build, at));
       }
     }
-    // MEMORY projection (matrix is the SOLE source): the matrix's dedicated post-6x6 memory window
-    // (matrix.memory) — a fixed identical load on THIS gateway's peak cell (load_cell), measured on a
-    // fresh cold-restarted process (idle → load → recovery). A gateway whose window did not serve (no
-    // served cell, or MATRIX_MEMORY=0) leaves g.memory_read absent and the board renders n/a; there is
-    // NO synthetic-suite fallback (the retired burst suite is gone). The spread carries EVERY measured
-    // field verbatim, incl. load_cell + load_recipe (the fair-load basis), the recovery signal
-    // recovered_rss_mib, and rss_series (the single-lifecycle idle→peak→recovery curve). NULL-SAFE by
-    // construction: any field the window could not measure is null/absent — never fabricated, never 0.
+    // MEMORY projection (matrix SOLE source): the post-6x6 memory window (matrix.memory) — a fixed
+    // identical load on THIS gateway's peak cell (load_cell), on a fresh cold-restarted process. RSS is
+    // UNGATED (no mock-bound flag), so its envelopes are certified-or-not-measured; load_cell/load_recipe
+    // /rss_series travel verbatim. A window that did not serve leaves g.memory_read absent (renders n/a).
     if (g.matrix.memory && g.matrix.memory.served === true) {
-      g.memory_read = { source: "matrix", build: g.matrix.build ?? null,
-        measured_at: g.matrix.measured_at ?? null, ...g.matrix.memory };
+      g.memory_read = sealMemory(g.matrix.memory, makeSource("matrix", SWEEP.MEMORY, build, at));
     }
+    // SEAL every matrix cell in-place (AFTER selection/projection, which read raw). The matrix popup +
+    // Protocol view read cell.perf / cell.stream directly, so those must be envelopes too — otherwise a
+    // raw ungated scalar (and its _mock_bound flag) survives in the bundle (invariant C1).
+    sealMatrixCellsInPlace(g.matrix);
   }
-  // LEGACY FALLBACK — old bundles only. Before the matrix folded streaming in, it came from the
-  // standalone stream/streamcpu suites. Keep those as a fallback so an OLD bundle (matrix with no
-  // per-cell stream) still renders. A fresh matrix bundle sets g.streaming above and this no-ops.
-  // NOTE: there is NO memory fallback — the retired synthetic memory suite (results/memory/<gw>.json,
-  // conc=1500/150KB/120s burst) mislabelled as 6x6 provenance, so it is neither scanned nor read;
-  // memory is SOLELY the matrix's post-6x6 peak-cell window. A gateway without matrix.memory reads n/a.
+  // LIVE DEFERRED FALLBACKS (stay until the field run folds them into the matrix; DO NOT break them).
+  // Each is sealed with its OWN honest `source` stamp (stream-suite / perf-suite / xlate-suite), so the
+  // envelope is correct NOW and captions tell the truth about provenance. There is NO memory fallback —
+  // the retired synthetic burst suite mislabelled as 6x6 provenance and is neither scanned nor read.
   if (!g.streaming && g.stream && g.stream.stream_served === true) {
-    // The old stream suite measured the gateway's default passthrough; label it with that dialect so
-    // the pill and numbers name the same path. streamcpu (if present) supplies the cpu-fps.
     const dia = passthroughDialect(g.matrix);
-    g.streaming = {
-      dialect: dia, source: "stream-fallback",
+    g.streaming = sealStreaming({
       added_ttft_p50_us: g.stream.stream_added_ttft_p50_us,
       added_ttft_p99_us: g.stream.stream_added_ttft_p99_us,
       added_gap_p50_us: g.stream.stream_added_gap_p50_us,
@@ -173,56 +196,37 @@ const gateways = gatewayKeys.map((key) => {
       cpu_fps: g.streamcpu ? g.streamcpu.streamcpu_frames_per_sec : null,
       cpu_fps_concurrency: g.streamcpu ? g.streamcpu.streamcpu_concurrency : null,
       cpu_fps_mock_bound: g.streamcpu ? g.streamcpu.streamcpu_mock_bound : null,
-      build: g.stream.build ?? null, measured_at: g.stream.measured_at ?? null,
-    };
+    }, dia, makeSource("stream-fallback", SWEEP.STREAM_SUITE, g.stream.build ?? null, g.stream.measured_at ?? null));
   }
   if (!g.best_cell && g.perf && g.perf.served === true && g.perf.added_latency_p99_us != null) {
-    // No swept diagonal (e.g. bifrost mid-re-run), but the perf suite ran the gateway's default
-    // passthrough. Synthesize best_cell from it, inferring the dialect from the served diagonal, so
-    // the Tested-on pill and the numbers below it always name the SAME dialect (never a metric with
-    // an n/a pill). The field re-run replaces this with a real swept cell. source:"perf-fallback"
-    // makes the provenance visible on every surface (pill tooltip, drawer, charts).
+    // No swept diagonal, but the perf suite ran the gateway's default passthrough. Seal it into the same
+    // canonical shape with source:"perf-fallback" so provenance is visible on every surface.
     const dia = passthroughDialect(g.matrix);
-    g.best_cell = {
-      ingress: dia, egress: dia, dialect: dia, source: "perf-fallback",
+    g.best_cell = sealPerfCell({
       added_latency_p50_us: g.perf.added_latency_p50_us,
       added_latency_p99_us: g.perf.added_latency_p99_us,
       rps_sustained_20ms: g.perf.rps_sustained_20ms,
       rps_sustained_20ms_concurrency: g.perf.rps_sustained_20ms_concurrency ?? null,
-      // Carry the honesty flags THROUGH the synthesis. Without them the downstream suppressor
-      // (perfRpsSuppressed: `_mock_bound !== false`) reads undefined !== false = true and hides a
-      // fully-certified perf-suite RPS. `?? null` keeps an old perf record (no flag) explicitly
-      // unverifiable rather than fabricating a certification.
       rps_sustained_20ms_mock_bound: g.perf.rps_sustained_20ms_mock_bound ?? null,
       rps_max_proxy: g.perf.rps_max_proxy,
       rps_max_proxy_concurrency: g.perf.rps_max_proxy_concurrency ?? null,
       rps_max_proxy_mock_bound: g.perf.rps_max_proxy_mock_bound ?? null,
-      // The charted sweep arrays travel WITH the headline so the drawer curve and the headline are
-      // read off the SAME record (best_cell): the marked peak on the curve IS rps_max_proxy /
-      // rps_sustained_20ms. The perf suite emits the same array shape run_sweep produced.
       sweep_max_proxy: g.perf.sweep_max_proxy ?? null,
       sweep_sustained_20ms: g.perf.sweep_sustained_20ms ?? null,
-      build: g.perf.build ?? null, measured_at: g.perf.measured_at ?? null,
-    };
+    }, { ingress: dia, egress: dia, dialect: dia },
+      makeSource("perf-fallback", SWEEP.PERF_SUITE, g.perf.build ?? null, g.perf.measured_at ?? null));
   }
   if (!g.translation_cell && g.xlate && g.xlate.xlate_served === true && g.xlate.xlate_added_latency_p99_us != null) {
-    // No measured openai-in matrix translation cell, but the legacy xlate suite ran. Its direction
-    // is the OPPOSITE of the matrix cell (anthropic in -> openai out), so it is normalized into the
-    // same canonical shape WITH its real direction and an explicit source tag; every surface labels
-    // the direction from these fields, so the two paths can never be confused.
-    g.translation_cell = {
-      ingress: "anthropic", egress: "openai", source: "xlate-fallback",
+    // Legacy xlate suite (anthropic in -> openai out — the OPPOSITE direction of the matrix cell).
+    // Sealed with its real direction + source:"xlate-fallback" so the two paths can never be confused.
+    g.translation_cell = sealPerfCell({
       added_latency_p50_us: g.xlate.xlate_added_latency_p50_us,
       added_latency_p99_us: g.xlate.xlate_added_latency_p99_us,
       rps_sustained_20ms: g.xlate.xlate_rps_sustained_20ms,
       rps_sustained_20ms_concurrency: g.xlate.xlate_rps_sustained_20ms_concurrency ?? null,
-      // Carry the honesty flag THROUGH the synthesis. Without it xlateRpsSuppressed
-      // (`_mock_bound !== false`) reads undefined !== false = true and hides a fully-certified
-      // xlate-suite RPS (apisix's certified 17,437 req/s was disappearing here). `?? null` keeps an
-      // old xlate record with no flag explicitly unverifiable rather than fabricating a certification.
       rps_sustained_20ms_mock_bound: g.xlate.xlate_rps_sustained_20ms_mock_bound ?? null,
-      build: g.xlate.build ?? null, measured_at: g.xlate.measured_at ?? null,
-    };
+    }, { ingress: "anthropic", egress: "openai" },
+      makeSource("xlate-fallback", SWEEP.XLATE_SUITE, g.xlate.build ?? null, g.xlate.measured_at ?? null));
   }
   // GOVERNANCE RETIRED: no `supports_governed` derivation. Under matrix-sole-source governance is not
   // a board metric (the governed suite was busbar-only and is retired), so the board neither emits a
@@ -258,6 +262,82 @@ const gateways = gatewayKeys.map((key) => {
 // fastest NATIVE diagonal by lowest added latency (e.g. litellm-rust -> anthropic). BEST-OF, not
 // strict-openai, so EVERY gateway appears on its best passthrough; filtering a competitor out reads
 // as hiding it. `dialect` (== ingress == egress) is the label the tab's "Tested on" pill shows.
+// ---- envelope sealers (Design E §2): raw cell -> sealed, envelope-carrying record ----------
+// The projected record carries `path` (ingress/egress/dialect), `source` (the provenance stamp), and one
+// SEALED envelope per metric under its own field name. The raw scalar + its _mock_bound flag are consumed
+// here and never re-emitted, so no ungated field survives for a render site to leak (invariant P1).
+// A throughput metric: its sealed envelope folds in the concurrency + charted sweep array + the NEW
+// conc_at_* rung so the headline, its operating concurrency, and its curve all travel as one datum.
+function sealThroughput(perf, key, concAtKey) {
+  return sealMetric(perf[key], {
+    gated: true, flag: perf[`${key}_mock_bound`],
+    extras: {
+      concurrency: perf[`${key}_concurrency`] ?? null,
+      conc_at: perf[concAtKey] ?? null,          // NEW (snapshot #65): the rung peak/sustained held at
+      sweep: perf[`sweep_${key === "rps_sustained_20ms" ? "sustained_20ms" : "max_proxy"}`] ?? null,
+    },
+  });
+}
+// sealPerfCellPerf: a raw perf object -> {<sealed metrics>} (no path/source; the caller stamps those).
+// Used BOTH for the canonical best_cell/translation_cell AND to seal every matrix cell in-place, so the
+// matrix popup reads envelopes, never raw scalars (invariant C1: no ungated field survives in the bundle).
+function sealPerfCellPerf(perf) {
+  const rec = {};
+  for (const k of UNGATED_LAT) if (perf[k] != null) rec[k] = sealMetric(perf[k], {});
+  rec.rps_sustained_20ms = sealThroughput(perf, "rps_sustained_20ms", "conc_at_sustained");
+  rec.rps_max_proxy = sealThroughput(perf, "rps_max_proxy", "conc_at_peak");
+  if (perf.egress_reverified != null) rec.egress_reverified = perf.egress_reverified;
+  return rec;
+}
+// sealPerfCell: a matrix/fallback perf object -> the canonical {path, source, <sealed metrics>} record.
+function sealPerfCell(perf, path, source) {
+  return { path: { ...path }, source, ...sealPerfCellPerf(perf) };
+}
+// sealStreamRecord: a raw stream record -> {<sealed metrics>} (no path/source). TTFT/gap are UNGATED;
+// streams_sustained + cpu_fps are GATED on their mock-bound flags. Used for the canonical g.streaming AND
+// for sealing every matrix cell's own .stream in-place (so the popup reads envelopes).
+function sealStreamRecord(s) {
+  const rec = {};
+  for (const k of ["added_ttft_p50_us", "added_ttft_p99_us", "added_gap_p50_us", "added_gap_p99_us", "streams_sustained_fps"])
+    if (s[k] != null) rec[k] = sealMetric(s[k], {});
+  // Streaming counts: a 0 is "not measured" (n/a), never an honest measured-zero (unlike an RPS ceiling).
+  rec.streams_sustained = sealMetric(s.streams_sustained, { gated: true, flag: s.streams_sustained_mock_bound, zeroMeasured: false });
+  rec.cpu_fps = sealMetric(s.cpu_fps, { gated: true, flag: s.cpu_fps_mock_bound, zeroMeasured: false,
+    extras: { concurrency: s.cpu_fps_concurrency ?? null } });
+  return rec;
+}
+function sealStreaming(s, dialect, source) {
+  return { path: { dialect }, source, stream_served: true, ...sealStreamRecord(s) };
+}
+// sealMemory: the post-6x6 memory window -> canonical record. RSS metrics are UNGATED (no mock-bound
+// flag); load_cell / load_recipe / rss_series travel verbatim (the fair-load basis + recovery curve).
+function sealMemory(mem, source) {
+  const rec = { source, served: true };
+  for (const k of ["idle_rss_mib", "peak_rss_mib", "recovered_rss_mib"])
+    rec[k] = sealMetric(mem[k], {});
+  for (const k of ["load_cell", "load_recipe", "rss_series", "protocol"])
+    if (mem[k] != null) rec[k] = mem[k];
+  return rec;
+}
+// sealMatrixCellsInPlace: replace every served cell's raw perf/stream with SEALED envelopes so the matrix
+// popup + Protocol view read envelopes, never raw scalars, and NO _mock_bound flag survives in the bundle
+// (invariant C1). Non-metric cell fields (served/status/path/verdict_note/body_snippet) are untouched.
+function sealMatrixCellsInPlace(m) {
+  const seen = new Set();   // v1 shares m.cells with upstreams[shape].cells (same refs) — seal once.
+  const cellGroups = [m.cells, ...Object.values(m.upstreams || {}).map((u) => u && u.cells)];
+  for (const cells of cellGroups) {
+    if (!cells || typeof cells !== "object") continue;
+    for (const cell of Object.values(cells)) {
+      if (!cell || typeof cell !== "object" || seen.has(cell)) continue;
+      seen.add(cell);
+      if (cell.perf) cell.perf = sealPerfCellPerf(cell.perf);
+      if (cell.stream && cell.stream.stream_served === true) {
+        cell.stream = { stream_served: true, ...sealStreamRecord(cell.stream) };
+      }
+    }
+  }
+}
+
 function bestCell(m) {
   if (!m.upstreams) return null;
   const diag = [];
@@ -449,7 +529,7 @@ for (const g of gateways) {
   // stamp-less served matrix row must never publish clean: flag it stale (drives the app.js badge) and
   // warn, consistent with treating a null matrix stamp as corruption rather than a legitimate reading.
   const matrixProjected = (g.best_cell || g.translation_cell || g.streaming || g.memory_read) &&
-    [g.best_cell, g.translation_cell, g.streaming, g.memory_read].some((r) => r && r.source === "matrix");
+    [g.best_cell, g.translation_cell, g.streaming, g.memory_read].some((r) => r && r.source && r.source.kind === "matrix");
   if (g.matrix && matrixProjected && matrixAt == null) {
     console.warn(`gen-data: WARNING: ${g.key} projects displayed numbers from a served matrix but its ` +
       `matrix.measured_at is missing/invalid (=${g.matrix.measured_at}) — run.sh always stamps a matrix, ` +
@@ -531,5 +611,14 @@ const data = {
   gateways,
   charts,
 };
+// C1: strip the raw legacy suite objects from the EMITTED bundle. They were projection INPUTS (their
+// values are now sealed into best_cell/translation_cell/streaming), and they carry raw scalars + their
+// _mock_bound flags — a reservoir no surface reads any more (charts.py projects from the canonical
+// records; app.js reads envelopes). Removing them from the artifact is what makes "no ungated metric
+// field exists in the bundle" true. g.matrix stays (its cells are sealed in-place; its top-level
+// build/measured_at/p99_ceiling_ms/sweep_dur drive freshness + the sweep-integrity oracle).
+for (const g of gateways) {
+  for (const suite of ["perf", "stream", "streamcpu", "xlate"]) delete g[suite];
+}
 writeFileSync(join(OUT, "data.json"), JSON.stringify(data, null, 1) + "\n");
 console.log(`gen-data: ${gateways.length} gateways, ${charts.length} charts -> ${join(OUT, "data.json")}`);

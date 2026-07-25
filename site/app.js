@@ -205,102 +205,60 @@ function lane(g, suite, flag, errKey, pick) {
   return pick(j);
 }
 
+/* ---- THE data-honesty reader (Design E §2.3) --------------------------------
+   Every metric in data.json is a SEALED ENVELOPE ({value, certified, suppressed, reason?, note?, …})
+   emitted by gen-data.mjs (see seal.mjs). The honesty gate lives UPSTREAM, at seal time; a suppressed
+   metric has value:null and the raw number is GONE from the bundle. So the reader has NO gate logic —
+   it cannot return an ungated value because there is none. This ONE accessor replaces the twelve
+   per-surface suppress/certify helpers that used to re-derive the gate at every read site.
+     metric(env)        -> { v, text, na, note, source, env } ; v is null (na:true) when not shown.
+   `fmt` formats the value; a suppressed/absent metric reads "n/a". */
+function isEnvelope(x) { return x != null && typeof x === "object" && typeof x.certified === "boolean"; }
+function metric(env, fmt = fmtInt) {
+  if (!isEnvelope(env) || env.value == null)
+    return { v: null, text: "n/a", na: true, note: env && env.reason, env: env || null };
+  return { v: env.value, text: fmt(env.value), na: false, note: env.note, env };
+}
+// mval: the bare displayable value of an envelope (null when suppressed/absent). For arithmetic
+// (deltas, best-of ranking) where only the number matters. Never returns a suppressed number.
+function mval(env) { return isEnvelope(env) && env.value != null ? env.value : null; }
+
+/* ---- provenance-driven captions (Design E §3.2) -----------------------------
+   EVERY caption/label that names where a datum came from is rendered FROM the cell's `source.sweep`
+   stamp through this ONE table — no caption string literal may hard-code a source token ("6x6",
+   "matrix", "sweep", "suite"); the lint in check-consistency (C3) enforces that. A label cannot claim
+   "6×6" unless the datum's stamp is a 6x6-* sweep. Keyed by source.sweep; receives the cell's path. */
+const SWEEP_CAPTION = {
+  "6x6-diagonal":        (p) => `${laneDialect(p && p.dialect)} passthrough — 6×6 diagonal cell`,
+  "6x6-translation":     (p) => `${laneDialect(p && p.ingress)} in → ${laneDialect(p && p.egress)} out — 6×6 translation cell`,
+  "6x6-memory-window":   ()  => `post-6×6 memory window (identical fixed load on the peak cell, fresh cold-restarted process)`,
+  "6x6-stream-diagonal": (p) => `${laneDialect(p && p.dialect)} SSE stream — 6×6 diagonal cell`,
+  "perf-suite":          (p) => `${laneDialect(p && p.dialect)} passthrough — perf suite (no 6×6 cell for this gateway yet)`,
+  "xlate-suite":         (p) => `${laneDialect(p && p.ingress)} in → ${laneDialect(p && p.egress)} out — translation suite (no 6×6 cell for this gateway yet)`,
+  "stream-suite":        (p) => `${laneDialect(p && p.dialect)} SSE stream — stream suite (legacy)`,
+};
+// caption(cell): the provenance label for a projected cell, rendered from its own source.sweep stamp.
+// Throws if the stamp is absent/unknown (C3 asserts every displayed cell's stamp is in the table).
+function caption(cell) {
+  const sweep = cell && cell.source && cell.source.sweep;
+  const render = SWEEP_CAPTION[sweep];
+  if (!render) throw new Error(`caption: no SWEEP_CAPTION for source.sweep=${JSON.stringify(sweep)}`);
+  return render(cell.path || {});
+}
+
 /* canonicalPerf: THE single passthrough perf record every surface reads (table, drawer,
    compare; charts.py reads the same best_cell from data.json). gen-data emits g.best_cell
    from the matrix per-cell sweep, or synthesizes it from the perf suite when no swept
    diagonal exists (source:"perf-fallback"). Only a legacy bundle with no best_cell at all
    falls back to the raw perf suite object (whose field names match). */
-// MED-3: a passthrough RPS is a valid gateway-vs-ceiling reading ONLY when the harness certified it —
-// present + positive AND explicitly NOT mock-bound (rps_*_mock_bound === false). A rig-limited
-// (mock_bound===true) or unverifiable (mock_bound===null, ceiling probe read 0) throughput must NOT
-// draw a full bar, rank top-N, or win the compare — exactly the gate the streaming lane already applies
-// via sustainedCertified / cpuFpsCertified. charts.py suppresses the bar via rps_*_valid; the site MUST
-// read n/a on every surface exactly when the chart draws no bar (check-consistency asserts they agree).
-function perfRpsCertified(bc, metric) {
-  return bc != null && bc[metric] != null && Number(bc[metric]) > 0 && bc[`${metric}_mock_bound`] === false;
-}
-// The DISPLAY suppression for a passthrough RPS: hide (read n/a) a POSITIVE value that is mock-bound
-// (rig-limited) or unverifiable (mock_bound !== false). A legitimate measured 0 (served but no tested
-// load held p99 < 1 s) is NOT suppressed — it renders "0" with the no-qualifying-ceiling note, honest
-// and distinct from a rig-ceiling number. Only a positive number the harness could not certify as
-// gateway-limited is hidden (the chart draws no bar for it either).
-function perfRpsSuppressed(bc, metric) {
-  return bc != null && bc[metric] != null && Number(bc[metric]) > 0 && bc[`${metric}_mock_bound`] !== false;
-}
-// MED-3 (mirrored onto the translation lane): the DISPLAY suppression for a translation-cell RPS. A
-// translation cell's perf object carries the same raw rps_*_mock_bound flags as a passthrough best_cell,
-// so the rule is identical: hide (read n/a) a POSITIVE value that is mock-bound (rig-limited) or
-// unverifiable (mock_bound !== false); a legitimate measured 0 is NOT suppressed. Keeps the Translation
-// tab's RPS columns honest exactly as the passthrough columns and the xlate_rps_sustained_20ms PNG.
-function xlateRpsSuppressed(perf, metric) {
-  return perf != null && perf[metric] != null && Number(perf[metric]) > 0 && perf[`${metric}_mock_bound`] !== false;
-}
-function canonicalPerf(g) {
-  if (g.best_cell) {
-    const rec = { served: true, ...g.best_cell };
-    // Null a mock-bound / unverifiable POSITIVE RPS so the table/drawer/compare read n/a — the raw value
-    // stays on g.best_cell for provenance/download, symmetric with canonicalStreaming's cpu_fps/sustained.
-    for (const m of ["rps_max_proxy", "rps_sustained_20ms"]) {
-      if (perfRpsSuppressed(g.best_cell, m)) rec[m] = null;
-    }
-    return rec;
-  }
-  return g.perf || null;
-}
-/* canonicalXlate: the ONE Translation record for the drawer/compare: the SAME matrix cell
-   the Translation surfaces use (openai in -> the gateway's measured egress), normalized by
-   gen-data into g.translation_cell (source:"matrix" | "xlate-fallback", direction in
-   ingress/egress). Metric keys are normalized onto the lane's xlate_* names. Legacy bundles
-   without translation_cell fall back to the raw xlate suite object. */
-function canonicalXlate(g) {
-  const t = g.translation_cell;
-  if (t) return {
-    xlate_served: true, source: t.source, ingress: t.ingress, egress: t.egress,
-    build: t.build, measured_at: t.measured_at,
-    xlate_added_latency_p50_us: t.added_latency_p50_us,
-    xlate_added_latency_p99_us: t.added_latency_p99_us,
-    // MED-3 (mirrored): null a mock-bound / unverifiable POSITIVE translation RPS so the drawer/compare
-    // read n/a — the raw value stays on g.translation_cell for provenance, symmetric with canonicalPerf.
-    xlate_rps_sustained_20ms: xlateRpsSuppressed(t, "rps_sustained_20ms") ? null : t.rps_sustained_20ms,
-  };
-  return g.xlate || null;
-}
-
-/* canonicalStreaming: THE single streaming record every surface reads. gen-data projects it from the
-   BEST DIAGONAL matrix cell's streaming (g.streaming, source:"matrix") — the SAME cell the passthrough
-   headline is projected from, so streaming and RPS/latency are read off one cell (one source of truth;
-   check-consistency asserts the headline streaming == this cell's). Returns a record with
-   stream_served + normalized keys, or the legacy stream-fallback g.streaming, or null. */
-// MEDIUM-6: the cpu-fps relay is a valid gateway-vs-ceiling comparison ONLY when the harness certified
-// it — cpu_fps present + positive AND explicitly NOT mock-bound (cpu_fps_mock_bound === false). A null
-// mock-bound flag means the ceiling probe read 0 and the number could NOT be certified (unverifiable),
-// and a true flag means an unpinned box floored it. In BOTH cases charts.py suppresses the bar
-// (streamcpu_valid=false); the drawer/compare "CPU-bound fps (peak)" metric MUST match that visibility
-// or the site shows a number the chart does not (check-consistency asserts this can't diverge). We drop
-// cpu_fps from the canonical record unless it is explicitly certified, so every site surface reads n/a
-// exactly when the chart draws no bar. The raw value stays on g.streaming for provenance/download.
-function cpuFpsCertified(s) {
-  return s != null && s.cpu_fps != null && Number(s.cpu_fps) > 0 && s.cpu_fps_mock_bound === false;
-}
-// MEDIUM-R2-2: streams_sustained is gated EXACTLY like cpu_fps. A rig-limited sustained count
-// (streams_sustained_mock_bound=true — the bisect saturated near the paced-mock ceiling) or an
-// unverifiable one (mock-bound=null — the reference ceiling read 0) is NOT a gateway limit; it must
-// not draw a full bar, rank in the top-N, or win the best:max compare. charts.py suppresses the bar
-// via stream_sustained_valid (present + >0 + NOT mock-bound); the site must read n/a on every surface
-// exactly when the chart draws no bar (check-consistency asserts they can never diverge). Only an
-// explicitly-certified (mock_bound === false) count survives — the raw value stays on g.streaming for
-// provenance/download, symmetric with cpuFpsCertified.
-function sustainedCertified(s) {
-  return s != null && s.streams_sustained != null && Number(s.streams_sustained) > 0 && s.streams_sustained_mock_bound === false;
-}
-function canonicalStreaming(g) {
-  const s = g.streaming;
-  if (!s) return null;
-  const rec = { stream_served: true, ...s };
-  if (!cpuFpsCertified(s)) rec.cpu_fps = null;   // uncertified/mock-bound → n/a on every site surface
-  if (!sustainedCertified(s)) rec.streams_sustained = null;  // rig-limited/unverifiable → n/a, no bar
-  return rec;
-}
+// canonicalPerf / canonicalXlate / canonicalStreaming: under the sealed envelope there is nothing left
+// to "canonicalize" — the projected cell (g.best_cell / g.translation_cell / g.streaming) already carries
+// one honest envelope per metric; a suppressed metric is {value:null,…} in the data itself. These thin
+// wrappers just return that cell (or null), so the LANES accessors + check-consistency read the ONE
+// canonical record. No gate logic here: the gate is upstream, at seal time (Design E §2).
+function canonicalPerf(g) { return g.best_cell || null; }
+function canonicalXlate(g) { return g.translation_cell || null; }
+function canonicalStreaming(g) { return g.streaming || null; }
 /* canonicalMemory: THE single memory record. gen-data projects it SOLELY from the matrix's dedicated
    post-6x6 memory window (g.memory_read, source:"matrix"): a fixed identical load on this gateway's
    peak cell (load_cell), measured on a fresh cold-restarted process. There is no synthetic-suite
@@ -330,53 +288,22 @@ function memLoadRecipeTip(m) {
    source (that is exactly the numeric divergence this rule exists to kill). Only a gateway with
    NO best_cell at all (legacy bundle) falls back to its perf suite. */
 function passCell(g, key, fmt) {
-  if (g.best_cell) {
-    // MED-3: the two passthrough RPS metrics are GATED on the mock-bound honesty flag (present + >0 +
-    // NOT mock-bound), exactly like the streaming lane's sustained/cpu-fps and the RPS PNGs' rps_*_valid.
-    // A rig-limited/unverifiable throughput reads n/a on the table just as it draws no bar on the chart
-    // (check-consistency asserts the two visibilities agree). Latency + all other fields read raw.
-    const gated = (key === "rps_max_proxy" || key === "rps_sustained_20ms");
-    const v = (gated && perfRpsSuppressed(g.best_cell, key)) ? null : g.best_cell[key];
-    return v != null
-      ? { v, text: fmt(v), na: false }
-      : { v: null, text: "n/a", na: true };
-  }
-  return lane(g, "perf", "served", "serve_error", (j) =>
-    j[key] != null ? { v: j[key], text: fmt(j[key]), na: false } : { v: null, text: "n/a", na: true });
+  // The chosen record's metric is a SEALED envelope; metric() reads it (n/a when suppressed/absent).
+  // There is no gate here — a suppressed value is {value:null,…} in the data, so it CANNOT leak.
+  return g.best_cell ? metric(g.best_cell[key], fmt) : { v: null, text: "n/a", na: true };
 }
 
-/* streamCell: the Streaming tab reads ONLY the canonical streaming record (g.streaming, projected by
-   gen-data from the best diagonal matrix cell's stream, or a legacy stream-fallback). A field it lacks
-   reads n/a; a gateway that did not stream (no g.streaming) shows the legacy stream suite's not-served
-   evidence when present, else a plain n/a. Same one-source discipline as passCell. */
+/* streamCell: the Streaming tab reads ONLY the canonical streaming record (g.streaming). Each metric is
+   a sealed envelope; metric() reads it. A gateway that did not stream (no g.streaming) reads n/a. */
 function streamCell(g, key, fmt) {
   const s = canonicalStreaming(g);
-  if (s)
-    return s[key] != null
-      ? { v: s[key], text: fmt(s[key]), na: false }
-      : { v: null, text: "n/a", na: true };
-  // Legacy fallback (a bundle whose gen-data did not project g.streaming): the raw stream suite uses
-  // stream_*-prefixed keys, so map the canonical key onto the suite key.
-  const legacyKey = {
-    added_ttft_p99_us: "stream_added_ttft_p99_us",
-    added_gap_p99_us: "stream_added_gap_p99_us",
-    streams_sustained: "stream_sustained_streams",
-    cpu_fps: null,   // cpu-fps lived in the separate streamcpu suite; not on the stream lane
-  }[key] ?? key;
-  if (legacyKey == null) return { v: null, text: "n/a", na: true };
-  return lane(g, "stream", "stream_served", "stream_error", (j) =>
-    j[legacyKey] != null ? { v: j[legacyKey], text: fmt(j[legacyKey]), na: false } : { v: null, text: "n/a", na: true });
+  return s ? metric(s[key], fmt) : { v: null, text: "n/a", na: true };
 }
-/* memCell: the memory columns read ONLY the canonical memory record (g.memory_read, the matrix's
-   post-6x6 peak-cell window). No suite fallback — a gateway without a matrix memory window reads n/a.
-   Same one-source discipline as passCell/streamCell. */
+/* memCell: the memory columns read ONLY the canonical memory record (g.memory_read). Each metric is a
+   sealed envelope; metric() reads it. No suite fallback — no matrix memory window reads n/a. */
 function memCell(g, key, fmt) {
   const m = canonicalMemory(g);
-  if (m)
-    return m[key] != null
-      ? { v: m[key], text: fmt(m[key]), na: false }
-      : { v: null, text: "n/a", na: true };
-  return { v: null, text: "n/a", na: true };
+  return m ? metric(m[key], fmt) : { v: null, text: "n/a", na: true };
 }
 
 /* A throughput cell of 0 is a real, honest measurement, not a broken benchmark: the gateway
@@ -409,14 +336,8 @@ function servesXlatePair(g, ingress, egress) {
    but unmeasured (perf sweep did not land). */
 function xlateCell(g, key, fmt) {
   const perf = xlateMatrixCell(g, state.xlateIn, state.xlateOut);
-  // MED-3 (mirrored): the two translation RPS columns are GATED on the mock-bound honesty flag exactly
-  // like the passthrough columns and the xlate_rps_sustained_20ms PNG — a rig-limited/unverifiable
-  // throughput reads n/a on the table just as it draws no bar on the chart (check-consistency asserts
-  // the sustained metric's two visibilities agree). Latency + all other columns read raw.
-  const gated = (key === "rps_max_proxy" || key === "rps_sustained_20ms");
-  const v = (perf && gated && xlateRpsSuppressed(perf, key)) ? null : (perf ? perf[key] : null);
-  if (v != null) return { v, text: fmt(v), na: false };
-  return { v: null, text: "n/a", na: true };
+  // The cell's metric is a sealed envelope; metric() reads it (n/a when suppressed/absent). No gate here.
+  return perf ? metric(perf[key], fmt) : { v: null, text: "n/a", na: true };
 }
 
 /* ---- unified cell chooser (Performance + Streaming) --------------------------
@@ -428,58 +349,51 @@ function xlateCell(g, key, fmt) {
    Every mode reads the SAME per-cell records the matrix carries, gated by the SAME mock-bound honesty
    rules, so a value shows identically on the table, the matrix popup, and the drawer. A cell a gateway
    lacks (unserved / unmeasured / a metric the record lacks) reads n/a — never 0, never fabricated. */
-// chooserCellPerf: the PERF object (added_latency_*, rps_*) for the currently-chosen cell of gateway g,
-// or null when that cell is unserved/unmeasured. Peak reads best_cell; Same/Custom read the matrix cell.
+// chooserCellPerf: the PERF object (metrics as sealed envelopes) for the currently-chosen cell of gateway
+// g, or null when that cell is unserved/unmeasured. Chooser mode = cell SELECTION only, never gating (the
+// gate is upstream at seal time). Peak reads best_cell (metrics + path/source at top); Same/Custom read
+// the matrix cell's sealed .perf (metrics at top, no path/source — the caller stamps dialects).
 function chooserCellPerf(g, st = state) {
-  if (st.mode === "peak") return g.best_cell || (g.perf && g.perf.served !== false ? g.perf : null);
+  if (st.mode === "peak") return g.best_cell || null;
   const [ingress, egress] = st.mode === "same" ? [st.sameDialect, st.sameDialect] : [st.xlateIn, st.xlateOut];
   return xlateMatrixCell(g, ingress, egress);
 }
 // The (ingress, egress) dialects the chosen cell is measured on — used for the pill/labels + the popup.
 function chooserDialects(g, st = state) {
-  if (st.mode === "peak") { const d = g.best_cell ? g.best_cell.dialect : null; return d ? [d, d] : [null, null]; }
+  if (st.mode === "peak") { const d = g.best_cell ? g.best_cell.path.dialect : null; return d ? [d, d] : [null, null]; }
   return st.mode === "same" ? [st.sameDialect, st.sameDialect] : [st.xlateIn, st.xlateOut];
 }
-// A perf-metric cell for the chosen cell. The two RPS metrics are GATED on the mock-bound honesty flag
-// (present + >0 + NOT mock-bound) exactly like passCell/xlateCell; latency reads raw. A missing cell or a
-// missing/suppressed value reads n/a.
+// A perf-metric cell for the chosen cell. Reads the sealed envelope through metric(); a suppressed/absent
+// value reads n/a. No gate here — the envelope carries the honesty decision (Design E §2.3).
 function chooserPerfCell(g, key, fmt, st = state) {
   const p = chooserCellPerf(g, st);
-  const gated = (key === "rps_max_proxy" || key === "rps_sustained_20ms");
-  const v = (p && gated && xlateRpsSuppressed(p, key)) ? null : (p ? p[key] : null);
-  return v != null ? { v, text: fmt(v), na: false } : { v: null, text: "n/a", na: true };
+  return p ? metric(p[key], fmt) : { v: null, text: "n/a", na: true };
 }
-// The chosen cell's STREAMING record. Per-cell streaming is only measured on the diagonal today (gen-data
-// projects it to g.streaming), so:
+// The chosen cell's STREAMING record (metrics as sealed envelopes). Per-cell streaming is only measured on
+// the diagonal today (gen-data projects it to g.streaming), so:
 //   peak     → g.streaming (the best diagonal's streaming).
 //   same D   → g.streaming ONLY when the diagonal it was projected from IS D (else n/a: not measured here).
-//   custom   → the cell's own .stream when the matrix carries one (future per-cell streaming), else n/a.
-// canonicalStreaming applies the cpu_fps / streams_sustained honesty gates identically to the headline.
+//   custom   → the cell's own sealed .stream when the matrix carries one (future per-cell streaming), else n/a.
 function chooserCellStream(g, st = state) {
   if (st.mode === "peak") return canonicalStreaming(g);
   const [ingress, egress] = chooserDialects(g, st);
   if (st.mode === "same") {
     const cs = canonicalStreaming(g);
-    return cs && cs.dialect === ingress ? cs : null;   // only the diagonal it was actually measured on
+    return cs && cs.path && cs.path.dialect === ingress ? cs : null;   // only the diagonal it was measured on
   }
-  // custom: a per-cell stream record if the matrix carries one for this exact pair (else n/a).
+  // custom: a per-cell stream record if the matrix carries one for this exact pair (else n/a). The cell's
+  // .stream is ALREADY sealed in-place by gen-data, so no re-gating is needed — envelopes carry the truth.
   const up = g.matrix && g.matrix.upstreams && g.matrix.upstreams[egress];
   const cell = up && up.cells && up.cells[ingress];
   const raw = cell && cell.served === true && cell.stream && cell.stream.stream_served === true ? cell.stream : null;
-  if (!raw) return null;
-  const rec = { stream_served: true, dialect: ingress, ...raw };
-  if (!cpuFpsCertified(raw)) rec.cpu_fps = null;
-  if (!sustainedCertified(raw)) rec.streams_sustained = null;
-  return rec;
+  return raw ? { path: { dialect: ingress }, stream_served: true, ...raw } : null;
 }
 // A streaming-metric cell for the chosen cell (n/a when the cell has no streaming here or lacks the field).
-// Peak mode delegates to streamCell so the legacy stream-suite fallback (a bundle whose gen-data did not
-// project g.streaming) still renders; Same/Custom read the per-cell stream record.
+// Peak delegates to streamCell; Same/Custom read the per-cell stream record's sealed envelope via metric().
 function chooserStreamCell(g, key, fmt, st = state) {
   if (st.mode === "peak") return streamCell(g, key, fmt);
   const s = chooserCellStream(g, st);
-  if (s && s[key] != null) return { v: s[key], text: fmt(s[key]), na: false };
-  return { v: null, text: "n/a", na: true };
+  return s ? metric(s[key], fmt) : { v: null, text: "n/a", na: true };
 }
 // Does gateway g have a chosen cell to show at all (a served, measured cell)? Drives whether a row
 // appears / how the pill renders. Peak: any best_cell. Same/Custom: the exact cell is served.
@@ -488,19 +402,27 @@ function chooserHasCell(g, st = state) {
   const [ingress, egress] = chooserDialects(g, st);
   return servesXlatePair(g, ingress, egress);
 }
+// cellPath(rec): the {ingress, egress} a perf record was measured on. best_cell carries it under .path;
+// a raw matrix .perf carries none (the caller pins ingress/egress onto the record before comparing).
+function cellPath(rec) {
+  if (!rec) return {};
+  return rec.path || { ingress: rec.ingress, egress: rec.egress };
+}
 // Δ-to-Peak for a chosen cell vs the gateway's OWN best diagonal (best_cell): "+18% latency, -9% RPS".
-// Returns "" for the peak cell itself, or when either reference number is missing. Honest: only the
-// metrics both cells actually measured contribute; a suppressed/absent value is skipped.
+// Returns "" for the peak cell itself, or when either reference number is missing. Honest by construction:
+// mval() returns null for a suppressed/absent envelope, so a rig-bound RPS never enters the delta — there
+// is no separate mock-bound flag to check, because the envelope already dropped the number.
 function deltaToPeak(cellPerf, best) {
   if (!cellPerf || !best) return "";
-  // Same cell as the reference (peak): nothing to compare.
-  if (best.ingress === cellPerf.ingress && best.egress === cellPerf.egress) return "";
+  const cp = cellPath(cellPerf), bp = cellPath(best);
+  if (bp.ingress === cp.ingress && bp.egress === cp.egress) return "";   // same cell as the reference
   const bits = [];
-  if (cellPerf.added_latency_p99_us != null && best.added_latency_p99_us != null && best.added_latency_p99_us > 0)
-    bits.push(`${fmtPct((cellPerf.added_latency_p99_us / best.added_latency_p99_us - 1) * 100)} latency`);
-  if (cellPerf.rps_sustained_20ms != null && best.rps_sustained_20ms != null && best.rps_sustained_20ms > 0
-      && best.rps_sustained_20ms_mock_bound === false && cellPerf.rps_sustained_20ms_mock_bound === false)
-    bits.push(`${fmtPct((cellPerf.rps_sustained_20ms / best.rps_sustained_20ms - 1) * 100)} RPS`);
+  const cLat = mval(cellPerf.added_latency_p99_us), bLat = mval(best.added_latency_p99_us);
+  if (cLat != null && bLat != null && bLat > 0)
+    bits.push(`${fmtPct((cLat / bLat - 1) * 100)} latency`);
+  const cRps = mval(cellPerf.rps_sustained_20ms), bRps = mval(best.rps_sustained_20ms);
+  if (cRps != null && bRps != null && bRps > 0)
+    bits.push(`${fmtPct((cRps / bRps - 1) * 100)} RPS`);
   return bits.join(", ");
 }
 
@@ -534,33 +456,56 @@ const COL_NAME = {
     return `<td class="name">${a}</td>`;
   },
 };
-// The "Tested on" pill column: shown ONLY in Peak mode (each gateway on its own best diagonal, so the
-// dialect varies per row and must be disclosed). In Same/Custom the dialect is fixed by the control, so
-// the pill is dropped (renderTable filters it out). Reads the CHOSEN cell's dialect, so it always names
-// the exact path the row's numbers were measured on.
+// The "Tested on" column: present in EVERY mode (identical column set across Peak/Same/Custom). It reads
+// the CHOSEN cell's path (chooserDialects) so it always names the exact cell the row's numbers were
+// measured on — Peak: each gateway's own peak dialect (varies per row); Same: the chosen dialect on every
+// row; Custom: the chosen ingress→egress. The provenance disclosure (tooltip / fallback star) renders FROM
+// the chosen cell's source stamp via caption() (Design E §3.2), never a hard-coded source string.
 const COL_TESTED = {
   id: "tested", label: "Tested on", desc: false,
-  title: "The same-dialect diagonal these numbers were measured on (openai when served, else the gateway's fastest native dialect) - pure forwarding, no translation",
-  get: (g) => { const [d] = chooserDialects(g); return { v: d || "", text: null, na: !d }; },
+  title: "The cell these numbers were measured on. Peak: each gateway's own peak same-dialect diagonal. Same: the chosen dialect. Custom: the chosen ingress→egress cell.",
+  get: (g) => { const [ing] = chooserDialects(g); return { v: ing || "", text: null, na: !ing }; },
   render: (g) => {
-    const [d] = chooserDialects(g);
-    if (!d || !chooserCellPerf(g)) return `<td class="tested"><span class="muted">n/a</span></td>`;
-    // Provenance disclosure: a perf-fallback row was NOT measured by the matrix per-cell sweep.
-    const fb = g.best_cell && g.best_cell.source === "perf-fallback";
-    const title = fb
-      ? `measured on the perf-suite default path (${esc(d)} passthrough; no matrix per-cell sweep for this gateway yet)`
-      : `measured on ${esc(d)}-in / ${esc(d)}-out passthrough (matrix per-cell sweep)`;
-    return `<td class="tested"><span class="tested-pill" title="${title}">${esc(MATRIX_LABELS[d] || d)}${fb ? " *" : ""}</span></td>`;
+    const [ing, eg] = chooserDialects(g);
+    const p = chooserCellPerf(g);
+    if (!ing || !p) return `<td class="tested"><span class="muted">n/a</span></td>`;
+    // The pill label: a passthrough (in==out) shows the single dialect; a translation cell shows in→out.
+    const label = ing === eg ? (MATRIX_LABELS[ing] || ing) : `${MATRIX_LABELS[ing] || ing}→${MATRIX_LABELS[eg] || eg}`;
+    // Provenance disclosure from the chosen cell's source stamp; a live-fallback row is starred + captioned.
+    const fb = p.source && p.source.kind !== "matrix";
+    const title = fb ? esc(caption(p))
+      : ing === eg ? `measured on ${esc(ing)}-in / ${esc(eg)}-out passthrough`
+      : `measured on ${esc(ing)}-in / ${esc(eg)}-out (translation)`;
+    return `<td class="tested"><span class="tested-pill" title="${title}">${esc(label)}${fb ? " *" : ""}</span></td>`;
   },
 };
+// concAt(env): the concurrency rung a throughput envelope held its ceiling at (conc_at_* from the snapshot,
+// falling back to the legacy *_concurrency). Null-safe — never fabricated (renders n/a when absent).
+function concAt(env) {
+  if (!isEnvelope(env)) return null;
+  return env.conc_at ?? env.concurrency ?? null;
+}
 // sustainedChooserCell: the sustained@20ms cell for the chosen cell, carrying the winning-concurrency
-// tooltip when the chosen cell records it (Peak's best_cell does; a translation cell may not).
+// tooltip when the chosen cell records it (the concurrency travels INSIDE the sealed envelope). The
+// concurrency is ALSO shown inline on the cell text ("N @ Y conc") — snapshot #65's Performance-tab ask.
 function sustainedChooserCell(g) {
   const cell = withZeroNote(chooserPerfCell(g, "rps_sustained_20ms", fmtInt));
   const p = chooserCellPerf(g);
-  const cc = p ? p.rps_sustained_20ms_concurrency : null;
+  const cc = p ? concAt(p.rps_sustained_20ms) : null;
   if (!cell.na && cell.v > 0 && cc != null)
-    return { ...cell, note: `Peaked at ${fmtInt(cell.v)} req/s with ${fmtInt(cc)} concurrent requests in flight - the load level that maximised sustained throughput under 20 ms LLM latency (higher concurrency added latency without more throughput).` };
+    return { ...cell, text: `${cell.text} @ ${fmtInt(cc)} conc`,
+      note: `Peaked at ${fmtInt(cell.v)} req/s with ${fmtInt(cc)} concurrent requests in flight - the load level that maximised sustained throughput under 20 ms LLM latency (higher concurrency added latency without more throughput).` };
+  return cell;
+}
+// maxProxyChooserCell: the max-proxy cell for the chosen cell, showing its own peak concurrency inline
+// ("N @ Y conc") next to the number — the sibling of sustainedChooserCell for the peak throughput.
+function maxProxyChooserCell(g) {
+  const cell = withZeroNote(chooserPerfCell(g, "rps_max_proxy", fmtInt));
+  const p = chooserCellPerf(g);
+  const cc = p ? concAt(p.rps_max_proxy) : null;
+  if (!cell.na && cell.v > 0 && cc != null)
+    return { ...cell, text: `${cell.text} @ ${fmtInt(cc)} conc`,
+      note: `Peaked at ${fmtInt(cell.v)} req/s with ${fmtInt(cc)} concurrent requests in flight - the throughput ceiling against an instant mock.` };
   return cell;
 }
 const COLUMN_SETS = {
@@ -575,8 +520,8 @@ const COLUMN_SETS = {
       get: (g) => chooserPerfCell(g, "added_latency_p99_us", fmtAdded) },
     { id: "rps20", label: "Sustained RPS @20ms", desc: true, title: "Sustained requests/sec with a 20 ms mock LLM latency (p99 < 1 s, <0.1% errors) on the chosen cell. Hover a cell for the concurrency it peaked at.",
       get: (g) => sustainedChooserCell(g) },
-    { id: "rpsmax", label: "Max proxy RPS", desc: true, title: "Throughput ceiling against an instant mock (p99 < 1 s, <0.1% errors) on the chosen cell",
-      get: (g) => withZeroNote(chooserPerfCell(g, "rps_max_proxy", fmtInt)) },
+    { id: "rpsmax", label: "Max proxy RPS", desc: true, title: "Throughput ceiling against an instant mock (p99 < 1 s, <0.1% errors) on the chosen cell. Shows the concurrency it peaked at.",
+      get: (g) => maxProxyChooserCell(g) },
   ],
   // STREAMING (Peak | Same | Custom): per-cell SSE columns from the SAME run. Per-cell streaming is
   // measured on the diagonal today, so Same reads it only on the gateway's own measured diagonal and
@@ -638,28 +583,30 @@ const ALL_COLUMN_IDS = new Set(Object.values(COLUMN_SETS).flat().map((c) => c.id
    `pathNote` (optional) returns a one-line disclosure of WHICH path the record measured. */
 const laneDialect = (d) => (MATRIX_LABELS[d] || d || "?");
 const LANES = [
+  // pathNote renders FROM the record's source.sweep stamp via caption() (Design E §3.2) — no hard-coded
+  // source string. The memory lane appends its cell attribution (load_cell) after the stamp caption.
   {
     key: "perf", label: "Latency & throughput", flag: "served", err: "serve_error",
     get: canonicalPerf,
-    pathNote: (j) => !j.source ? "measured on the perf-suite default path (legacy result)"
-      : j.source === "perf-fallback"
-        ? `measured on the perf-suite default path (${laneDialect(j.dialect)} passthrough; no matrix per-cell sweep for this gateway yet)`
-        : `measured on the ${laneDialect(j.dialect)} passthrough (matrix per-cell sweep, the same record the table ranks)`,
+    pathNote: (j) => j && j.source ? caption(j) : "",
     metrics: [
       { k: "added_latency_p50_us", label: "Added latency p50 (µs)", best: "min", fmt: fmtAdded },
       { k: "added_latency_p99_us", label: "Added latency p99 (µs)", best: "min", fmt: fmtAdded },
-      // The operating concurrency (concKey) is carried by the SAME record; the drawer shows it as
-      // "(@ c=Y)" so the headline surfaces the load level its marked sweep peak sat at.
-      { k: "rps_max_proxy", label: "Max proxy RPS", best: "max", fmt: fmtInt, concKey: "rps_max_proxy_concurrency" },
-      { k: "rps_sustained_20ms", label: "Sustained RPS @20ms", best: "max", fmt: fmtInt, concKey: "rps_sustained_20ms_concurrency" },
+      // The operating concurrency travels INSIDE the sealed envelope (env.concurrency); the drawer shows
+      // it as "(@ c=Y)" so the headline surfaces the load level its marked sweep peak sat at.
+      { k: "rps_max_proxy", label: "Max proxy RPS", best: "max", fmt: fmtInt },
+      { k: "rps_sustained_20ms", label: "Sustained RPS @20ms", best: "max", fmt: fmtInt },
     ],
   },
   {
     key: "memory", label: "Memory", flag: "served", err: "serve_error",
     get: canonicalMemory,
-    pathNote: (j) => j.load_cell
-      ? `the identical fixed load on ${memLoadCellLabel(j.load_cell)} (this gateway's peak cell), on a fresh cold-restarted process (60 s idle → load → 60 s recovery)`
-      : "the matrix's post-6x6 memory window (identical fixed load on this gateway's peak cell, fresh cold-restarted process)",
+    pathNote: (j) => {
+      const base = j && j.source ? caption(j) : "";
+      return j && j.load_cell
+        ? `${base} — identical fixed load on ${memLoadCellLabel(j.load_cell)} (this gateway's peak cell)`
+        : base;
+    },
     // The recovery curve (idle→load→recovery, one process lifecycle). Renders ONLY when rss_series
     // exists (≥2 points); a bundle without a series → extra() returns "" and the drawer shows just the numbers.
     extra: (j) => rssSparkline(j.rss_series),
@@ -674,9 +621,7 @@ const LANES = [
   {
     key: "stream", label: "Streaming", flag: "stream_served", err: "stream_error",
     get: canonicalStreaming,
-    pathNote: (j) => j.source === "matrix"
-      ? `measured on the ${laneDialect(j.dialect)} passthrough (the same best diagonal cell the headline is projected from)`
-      : "measured on the stream suite's default path (legacy result)",
+    pathNote: (j) => j && j.source ? caption(j) : "",
     metrics: [
       { k: "added_ttft_p99_us", label: "Added TTFT p99 (µs)", best: "min", fmt: fmtUsMs },
       { k: "added_gap_p99_us", label: "Added per-token p99 (µs)", best: "min", fmt: fmtUsMs },
@@ -687,14 +632,11 @@ const LANES = [
   {
     key: "xlate", label: "Translation", flag: "xlate_served", err: "xlate_error",
     get: canonicalXlate,
-    pathNote: (j) => !j.source ? "Anthropic in -> OpenAI out (legacy xlate suite)"
-      : j.source === "xlate-fallback"
-        ? `${laneDialect(j.ingress)} in -> ${laneDialect(j.egress)} out (xlate suite; no matrix translation cell for this gateway yet)`
-        : `${laneDialect(j.ingress)} in -> ${laneDialect(j.egress)} out (matrix per-cell sweep, the same cell the Translation tab reads)`,
+    pathNote: (j) => j && j.source ? caption(j) : "",
     metrics: [
-      { k: "xlate_added_latency_p50_us", label: "Added latency p50 (µs)", best: "min", fmt: fmtInt },
-      { k: "xlate_added_latency_p99_us", label: "Added latency p99 (µs)", best: "min", fmt: fmtInt },
-      { k: "xlate_rps_sustained_20ms", label: "Sustained RPS @20ms", best: "max", fmt: fmtInt },
+      { k: "added_latency_p50_us", label: "Added latency p50 (µs)", best: "min", fmt: fmtInt },
+      { k: "added_latency_p99_us", label: "Added latency p99 (µs)", best: "min", fmt: fmtInt },
+      { k: "rps_sustained_20ms", label: "Sustained RPS @20ms", best: "max", fmt: fmtInt },
     ],
   },
 ];
@@ -711,18 +653,17 @@ function laneRecord(l, g, st = state) {
   if (l.key === "perf") {
     const p = chooserCellPerf(g, st);
     if (!p) return null;
-    const [ingress, egress] = chooserDialects(g, st);
+    // The metrics are ALREADY sealed envelopes; nothing to gate here (the gate is upstream). In Peak,
+    // chooserCellPerf returns best_cell (carries path + source). In Same/Custom it is a raw matrix cell's
+    // sealed .perf with no path/source; stamp the chosen dialects + the matrix source so pathNote's
+    // caption() resolves the same in→out the table pill shows (a same-cell is a diagonal, else translation).
     const rec = { served: true, ...p };
-    // Same gate as canonicalPerf: a mock-bound / unverifiable POSITIVE RPS reads n/a on every surface.
-    for (const m of ["rps_max_proxy", "rps_sustained_20ms"]) {
-      if (xlateRpsSuppressed(p, m)) rec[m] = null;
+    if (!rec.path) {
+      const [ingress, egress] = chooserDialects(g, st);
+      rec.path = { ingress, egress, ...(ingress === egress ? { dialect: ingress } : {}) };
+      rec.source = { kind: "matrix", sweep: ingress === egress ? "6x6-diagonal" : "6x6-translation",
+        build: g.matrix && g.matrix.build || null, measured_at: g.matrix && g.matrix.measured_at || null };
     }
-    // In Peak, chooserCellPerf returns best_cell (already carries source/dialect/ingress/egress). In
-    // Same/Custom it is a raw matrix cell that may not carry the pill fields; stamp the chosen dialects so
-    // the pathNote resolves the same in→out the table pill shows. source stays from the cell when present.
-    if (ingress != null) rec.ingress = rec.ingress ?? ingress;
-    if (egress != null) rec.egress = rec.egress ?? egress;
-    if (rec.dialect == null && ingress === egress) rec.dialect = ingress;
     return rec;
   }
   if (l.key === "stream") return chooserCellStream(g, st);
@@ -737,22 +678,25 @@ function perfSweepSeries(g, colors, st = state) {
   const p = chooserCellPerf(g, st);
   if (!p) return [];
   const out = [];
-  const add = (metric, sweepKey, concKey, label, color) => {
-    if (xlateRpsSuppressed(p, metric)) return;   // suppressed headline → no curve (finding 22)
-    if (!(p[sweepKey] && p[sweepKey].length)) return;
-    out.push({ label, color, sweep: p[sweepKey], peak: { rps: p[metric], conc: p[concKey] } });
+  const add = (key, label, color) => {
+    const env = p[key];
+    // A suppressed headline is {value:null,…}: no number, so no curve (finding 22, now structural — the
+    // sweep array is INSIDE the envelope and a suppressed envelope carries neither value nor sweep).
+    if (!isEnvelope(env) || env.value == null || !(env.sweep && env.sweep.length)) return;
+    out.push({ label, color, sweep: env.sweep, peak: { rps: env.value, conc: env.concurrency ?? null } });
   };
-  add("rps_sustained_20ms", "sweep_sustained_20ms", "rps_sustained_20ms_concurrency", colors.sustainedLabel || "sustained @20ms", colors.sustained);
-  add("rps_max_proxy", "sweep_max_proxy", "rps_max_proxy_concurrency", colors.maxLabel || "max proxy", colors.max);
+  add("rps_sustained_20ms", colors.sustainedLabel || "sustained @20ms", colors.sustained);
+  add("rps_max_proxy", colors.maxLabel || "max proxy", colors.max);
   return out;
 }
 /* pathNote for a chooser-driven perf/stream lane in Same/Custom: name the exact chosen in→out cell (the
    table shows THIS cell, not the peak passthrough). Peak defers to the lane's own pathNote. */
 function lanePathNote(l, j, st = state) {
   if ((l.key === "perf" || l.key === "stream") && st.mode !== "peak" && j) {
-    // perf carries ingress/egress; streaming carries a single dialect (per-cell streaming is diagonal).
-    const ingress = j.ingress ?? j.dialect;
-    const egress = j.egress ?? j.dialect;
+    // The chosen cell's path travels under j.path (perf: ingress/egress; streaming: a single dialect).
+    const pth = j.path || {};
+    const ingress = pth.ingress ?? pth.dialect;
+    const egress = pth.egress ?? pth.dialect;
     if (ingress != null && egress != null)
       return ingress === egress
         ? `${laneDialect(ingress)} passthrough (the ${st.mode === "same" ? "Same-dialect" : "chosen"} cell the table shows)`
@@ -1142,10 +1086,10 @@ function initThemeToggle() {
 // streaming when the data is actually fallback (finding 12). Summarize the actual provenance across the
 // gateways so the lead line is honest: "the one 6x6 run" only when streaming really came from the matrix.
 function streamingProvenance(data) {
-  const srcs = (data && data.gateways || []).map((g) => g.streaming && g.streaming.source).filter(Boolean);
-  if (!srcs.length) return { all: null };
-  const allMatrix = srcs.every((s) => s === "matrix");
-  const allFallback = srcs.every((s) => s !== "matrix");
+  const kinds = (data && data.gateways || []).map((g) => g.streaming && g.streaming.source && g.streaming.source.kind).filter(Boolean);
+  if (!kinds.length) return { all: null };
+  const allMatrix = kinds.every((k) => k === "matrix");
+  const allFallback = kinds.every((k) => k !== "matrix");
   return { all: allMatrix ? "matrix" : allFallback ? "fallback" : "mixed" };
 }
 // The lead line for a chooser caption. For latency+throughput it is always the 6x6 matrix. For streaming
@@ -1223,10 +1167,11 @@ function renderTable() {
   // Which tab's columns to render. matrix/method have no table, so fall back to performance
   // (the section is hidden anyway) and never mutate the sort while off a table tab.
   const view = TABLE_VIEWS.has(state.view) ? state.view : "performance";
-  let cols = columnsFor(view);
-  // The Tested-on pill is a Peak-only column (in Same/Custom the dialect is fixed by the control, so a
-  // per-row pill would be redundant). Drop it off the Performance/Streaming column set outside Peak mode.
-  if (PERF_VIEWS.has(view) && state.mode !== "peak") cols = cols.filter((c) => c.id !== "tested");
+  const cols = columnsFor(view);
+  // The Tested-on column is IDENTICAL in every mode (Peak / Same / Custom): the column set never changes
+  // between modes, only WHICH cell each row reads. It renders from the chosen cell's own provenance stamp
+  // (chooserDialects + source), so Peak names each gateway's own peak dialect (varies per row), Same names
+  // the chosen dialect on every row, and Custom names the chosen ingress→egress — one column, one renderer.
   // Snap the sort onto this tab if the current column does not belong to it (e.g. after switching
   // tabs, or a cross-tab sort id arrived from a shared URL).
   if (TABLE_VIEWS.has(state.view) && !cols.some((c) => c.id === state.sortCol && c.sortable !== false)) {
@@ -1392,8 +1337,12 @@ const cellState = (cell) =>
 
 function laneStamp(j) {
   const bits = [];
-  if (j.build) bits.push(j.build);
-  if (j.measured_at) bits.push(j.measured_at);
+  // build/measured_at travel INSIDE the provenance stamp (j.source) on a projected cell; g.matrix still
+  // carries them at top level. Prefer the stamp, fall back to top-level.
+  const build = (j.source && j.source.build) ?? j.build;
+  const at = (j.source && j.source.measured_at) ?? j.measured_at;
+  if (build) bits.push(build);
+  if (at) bits.push(at);
   return bits.length ? `<div class="stamp muted">${esc(bits.join(" · "))}</div>` : "";
 }
 
@@ -1464,9 +1413,12 @@ function drawerHtml(g) {
     else {
       const pn = lanePathNote(l, j);
       if (pn) h += `<p class="lane-note muted">${esc(pn)}</p>`;
-      h += `<dl>` + l.metrics.filter((m) => j[m.k] != null).map((m) => {
-        const cc = m.concKey && j[m.concKey] != null && j[m.k] > 0 ? ` (@ c=${fmtInt(j[m.concKey])})` : "";
-        return `<div><dt>${esc(m.label)}</dt><dd>${esc(m.fmt(j[m.k]) + cc)}</dd></div>`;
+      // Each metric is a sealed envelope; metric() reads it (a suppressed metric is absent, reads nothing
+      // here since we filter na). The operating concurrency travels INSIDE the envelope (env.concurrency).
+      h += `<dl>` + l.metrics.map((m) => ({ m, c: metric(j[m.k], m.fmt) })).filter((x) => !x.c.na).map(({ m, c }) => {
+        const conc = c.env && c.env.concurrency;
+        const cc = conc != null && c.v > 0 ? ` (@ c=${fmtInt(conc)})` : "";
+        return `<div><dt>${esc(m.label)}</dt><dd>${esc(c.text + cc)}</dd></div>`;
       }).join("") + `</dl>` + (l.extra ? l.extra(j) : "") + `${laneStamp(j)}`;
     }
     h += `</section>`;
@@ -1649,8 +1601,8 @@ function renderCompare() {
           : `<td class="na"></td>`).join("") + `</tr>`;
     }
     for (const m of l.metrics) {
-      const vals = recs.map((j) =>
-        j && j[l.flag] !== false && j[m.k] != null ? j[m.k] : null);
+      // Each metric is a sealed envelope; mval() is its displayable value (null when suppressed/absent).
+      const vals = recs.map((j) => (j && j[l.flag] !== false ? mval(j[m.k]) : null));
       const bi = bestIndex(vals, m.best);
       h += `<tr><td class="metric">${esc(m.label)}</td>` + vals.map((v, i) => {
         if (v == null) {
@@ -1668,16 +1620,17 @@ function renderCompare() {
   document.getElementById("compare-body").innerHTML = h;
 
   const series = gws.map((g, i) => {
-    // CHOOSER-AWARE + GATED: the CHOSEN cell's sustained@20ms sweep (Peak/Same/Custom), the SAME cell the
-    // headline rows read, so the marked peak is the published sustained@20ms at its operating concurrency.
-    // A mock-bound-suppressed metric plots no sweep (finding 22): its headline reads n/a, so its curve
-    // must not surface the hidden number.
+    // CHOOSER-AWARE: the CHOSEN cell's sustained@20ms sweep (Peak/Same/Custom), the SAME cell the headline
+    // rows read, so the marked peak is the published sustained@20ms at its operating concurrency. A
+    // suppressed metric is {value:null,…} and its sweep array lives INSIDE that envelope — so a rig-bound
+    // curve cannot surface a number the headline hides (finding 22, now structural).
     const p = chooserCellPerf(g);
-    const gated = p && !xlateRpsSuppressed(p, "rps_sustained_20ms");
+    const env = p && p.rps_sustained_20ms;
+    const shown = isEnvelope(env) && env.value != null;
     return {
       label: g.display, color: CMP_COLORS[i],
-      sweep: gated ? p.sweep_sustained_20ms : null,
-      peak: gated ? { rps: p.rps_sustained_20ms, conc: p.rps_sustained_20ms_concurrency } : null,
+      sweep: shown ? (env.sweep ?? null) : null,
+      peak: shown ? { rps: env.value, conc: env.concurrency ?? null } : null,
     };
   });
   renderSweepCharts(document.getElementById("cmp-sweeps"), series, chartTheme());
@@ -1723,26 +1676,25 @@ function matrixCellTip(cell) {
    p99, and its RPS delta vs THIS gateway's REFERENCE cell (the one the Passthrough tab ranks; not
    necessarily the fastest, so it is named, never called "best"). Grey/red/unprobed cells carry no
    perf and return "".
-   FINDING 33: this helper is dead on the live UI (cellPopFull superseded it) but still EXPORTED, so a
-   future re-wire could leak an UN-gated rps_sustained_20ms — a mock-bound (rig-limited) throughput the
-   table/popup/charts all suppress. GATE it on the SAME mock-bound honesty rule (xlateRpsSuppressed): a
-   suppressed sustained RPS is not shown, and the delta (which divides by it) is skipped, so a re-wire
-   can never surface a number the honest surfaces hide. */
+   FINDING 33: this helper is dead on the live UI (cellPopFull superseded it) but still EXPORTED. Under
+   the sealed envelope it CANNOT leak a rig-bound number: it reads the metric through mval(), which
+   returns null for a suppressed envelope — there is no ungated field to surface. */
 function cellPerfTip(cell, ingress, egress, best) {
   const p = cell && cell.served === true ? cell.perf : null;
-  if (!p || p.rps_sustained_20ms == null) return "";
-  // A rig-limited / unverifiable sustained RPS is n/a on every honest surface; do not print it here.
-  if (xlateRpsSuppressed(p, "rps_sustained_20ms")) {
-    // The cell may still carry a certified added-latency; show that alone rather than a bare "".
-    return p.added_latency_p99_us != null ? `+${fmtInt(p.added_latency_p99_us)} µs p99 added (sustained RPS n/a: rig-limited)` : "";
+  const rps = p ? mval(p.rps_sustained_20ms) : null;
+  const lat = p ? mval(p.added_latency_p99_us) : null;
+  if (!p || !isEnvelope(p.rps_sustained_20ms)) return "";
+  // Suppressed sustained RPS: {value:null}. Show the certified added-latency alone rather than a bare "".
+  if (rps == null) {
+    return lat != null ? `+${fmtInt(lat)} µs p99 added (sustained RPS n/a: rig-limited)` : "";
   }
-  const bestGated = best && best.rps_sustained_20ms_mock_bound === false;
-  let s = `${fmtInt(p.rps_sustained_20ms)} req/s @20ms`;
-  if (p.added_latency_p99_us != null) s += `, +${fmtInt(p.added_latency_p99_us)} µs p99 added`;
-  if (bestGated && best.rps_sustained_20ms > 0) {
-    if (best.ingress === ingress && best.egress === egress) s += " - reference cell (ranks the table)";
+  const bp = cellPath(best), bRps = mval(best && best.rps_sustained_20ms);
+  let s = `${fmtInt(rps)} req/s @20ms`;
+  if (lat != null) s += `, +${fmtInt(lat)} µs p99 added`;
+  if (bRps != null && bRps > 0) {
+    if (bp.ingress === ingress && bp.egress === egress) s += " - reference cell (ranks the table)";
     // Human dialect labels (MATRIX_LABELS), never the raw dialect keys, in the hover popup.
-    else s += ` - ${fmtPct((p.rps_sustained_20ms / best.rps_sustained_20ms - 1) * 100)} req/s vs the ${MATRIX_LABELS[best.ingress] || best.ingress}→${MATRIX_LABELS[best.egress] || best.egress} cell`;
+    else s += ` - ${fmtPct((rps / bRps - 1) * 100)} req/s vs the ${MATRIX_LABELS[bp.ingress] || bp.ingress}→${MATRIX_LABELS[bp.egress] || bp.egress} cell`;
   }
   return s;
 }
@@ -1784,9 +1736,10 @@ function cellPopFull(g, ingress, egress) {
   const cellPerf = chooserCellPerf(g, st);
   const cellPerfLabeled = cellPerf ? { ingress, egress, ...cellPerf } : null;
   const delta = deltaToPeak(cellPerfLabeled, g.best_cell);
+  const bp = g.best_cell ? g.best_cell.path : null;
   const deltaBlock = delta
-    ? `<div class="pop-delta">vs peak (${esc(MATRIX_LABELS[g.best_cell.ingress] || g.best_cell.ingress)}→${esc(MATRIX_LABELS[g.best_cell.egress] || g.best_cell.egress)}): ${esc(delta)}</div>`
-    : (cellPerf && g.best_cell && g.best_cell.ingress === ingress && g.best_cell.egress === egress
+    ? `<div class="pop-delta">vs peak (${esc(MATRIX_LABELS[bp.ingress] || bp.ingress)}→${esc(MATRIX_LABELS[bp.egress] || bp.egress)}): ${esc(delta)}</div>`
+    : (cellPerf && bp && bp.ingress === ingress && bp.egress === egress
       ? `<div class="pop-delta muted">this IS the peak cell (ranks the Performance tab)</div>` : "");
   const verdict = cell.verdict_note ? `<div class="pop-note">${esc(cell.verdict_note)}</div>` : "";
   const cta = cell.served === true ? `<div class="pop-cta muted">click → Performance (Custom, this cell)</div>` : "";
@@ -2367,7 +2320,7 @@ if (NODE) {
     laneRecord, lanePathNote, perfSweepSeries,
     chooserCaption, chooserLead, streamingProvenance,
     MEMORY_CAPTION, memLoadCellLabel, memLoadRecipeTip,
-    canonicalPerf, canonicalXlate, canonicalStreaming, canonicalMemory, cpuFpsCertified, sustainedCertified, perfRpsCertified, perfRpsSuppressed, xlateRpsSuppressed, gatewayResultsJson, DEFAULT_VIEW, VIEW_LABELS, rosterRows, fmtStars,
+    canonicalPerf, canonicalXlate, canonicalStreaming, canonicalMemory, metric, mval, isEnvelope, caption, SWEEP_CAPTION, gatewayResultsJson, DEFAULT_VIEW, VIEW_LABELS, rosterRows, fmtStars,
     configCorrectionUrl, BENCH_REPO, fmtInt, fmtAdded,
     HOME_VIEW, homeCardsHtml,
   };
