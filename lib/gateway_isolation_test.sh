@@ -138,6 +138,7 @@ SCAN="$(scan_files)"
 
 echo "gateway_isolation_test: RULE 1 - no gateway identity in code outside its own directory"
 echo "gateway_isolation_test: RULE 2 - no line enumerates three or more gateways"
+echo "gateway_isolation_test: RULE 1B - no gateway is named in a COMMENT outside its own directory"
 
 # Emit "<file>\t<lineno>\t<raw>\t<code>" for every line of every scanned file, so awk needs no
 # per-file knowledge of comment syntax.
@@ -188,6 +189,19 @@ BEGIN{
     if (lraw ~ GR[i]) { n++; named=named " " G[i] }
   }
   if (n>=3) printf "enumeration\t%s\t%s\t%d\t%s\t%s\n", file, ln, n, named, raw;
+  # RULE 1B - identity in a COMMENT. Rule 1 strips comments before it looks, which was a deliberate
+  # provenance carve-out: a comment could cite which box an incident happened on. In practice that
+  # licence grew into evaluative comparative claims about named competitors sitting in a public repo,
+  # while this lint printed PASS and reported that every identity lived in its own directory. It was
+  # enforcing that for code and silently not for comments, a guarantee it did not actually have.
+  # A name in raw but not in code is, by construction, a name in a comment.
+  # (No apostrophes in here: this block lives inside a single-quoted awk program.)
+  for (i=1; i<=na; i++) {
+    if (AA[i]=="") continue;
+    if (index(file, "gateways/" AG[i] "/")==1) continue;
+    if (index(tolower(allow), tolower(AG[i])) > 0) continue;   # the operator names itself on purpose
+    if (lraw ~ AR[i] && lcode !~ AR[i]) { printf "comment-identity\t%s\t%s\t%s\t%s\t%s\n", file, ln, AG[i], AA[i], raw; break }
+  }
 }'; }
 
 # ── SELF-TEST: the scanner must be PROVEN to fire before a clean run means anything ───────────────
@@ -201,9 +215,13 @@ selftest() {
   # RULE 1: the first discovered gateway's name, in the CODE half of a harness-file line.
   out="$(printf 'lib/planted.sh\t1\tX=%s\tX=%s\n' "$first" "$first" | match_feed)"
   case "$out" in identity*) ;; *) echo "gateway_isolation_test: FAIL - self-test: rule 1 did not fire on a planted name"; exit 1 ;; esac
-  # RULE 1 must NOT fire when the same name appears only in the COMMENT half.
+  # A comment-only name is RULE 3's business, not rule 1's: rule 1 must stay silent, rule 3 must fire.
   out="$(printf 'lib/planted.sh\t1\t# %s did a thing\t\n' "$first" | match_feed)"
-  [ -z "$out" ] || { echo "gateway_isolation_test: FAIL - self-test: rule 1 fired on comment-only provenance"; exit 1; }
+  case "$out" in identity*) echo "gateway_isolation_test: FAIL - self-test: rule 1 fired on a comment"; exit 1 ;; esac
+  case "$out" in comment-identity*) ;; *) echo "gateway_isolation_test: FAIL - self-test: rule 3 did not fire on a name in a comment"; exit 1 ;; esac
+  # RULE 3 must NOT fire inside the gateway's own directory: a gateway may name itself in its own dir.
+  out="$(printf 'gateways/%s/gateway.sh\t1\t# %s did a thing\t\n' "$first" "$first" | match_feed)"
+  [ -z "$out" ] || { echo "gateway_isolation_test: FAIL - self-test: rule 3 fired inside the gateway's own dir"; exit 1; }
   # RULE 1 must NOT fire inside the gateway's own directory.
   out="$(printf 'gateways/%s/gateway.sh\t1\tX=%s\tX=%s\n' "$first" "$first" "$first" | match_feed)"
   [ -z "$out" ] || { echo "gateway_isolation_test: FAIL - self-test: rule 1 fired inside the gateway's own dir"; exit 1; }
@@ -224,6 +242,8 @@ if [ -n "$FINDINGS" ]; then
     [ -n "$rule" ] || continue
     if [ "$rule" = identity ]; then
       report "$file" "$ln" "identity" "names gateway '$a' (as '$b') outside gateways/$a/" "$txt"
+    elif [ "$rule" = comment-identity ]; then
+      report "$file" "$ln" "comment-identity" "names gateway '$a' (as '$b') in a COMMENT outside gateways/$a/ - anonymise it ('one gateway', 'another'), keeping every number and the reason" "$txt"
     else
       report "$file" "$ln" "enumeration" "hardcoded roster of $a gateways ($b ) - discover with lib/gateways.sh instead" "$txt"
     fi

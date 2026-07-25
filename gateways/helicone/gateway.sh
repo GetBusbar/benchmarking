@@ -7,7 +7,7 @@
 # docker.io/helicone/ai-gateway (latest, main, all sha-<commit> and versioned tags, including the
 # sha tag for the pinned commit below) is linux/amd64-only, and ghcr.io/helicone/ai-gateway serves
 # no public image. The bench boxes are Graviton arm64, so on them we build the `ai-gateway` crate
-# from source — exactly the pattern we use for LiteLLM-Rust — and run the release binary natively
+# from source, exactly the pattern one other entry uses, and run the release binary natively
 # (real process RSS, no container overhead). Convert to the official image if/when Helicone ships
 # arm64. The source refs are pinned in THIS file (below), where every other fact about this
 # gateway already lives.
