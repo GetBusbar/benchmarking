@@ -160,6 +160,14 @@ stream_sustained_bisect(){ # lo hi
   local lo="$1" hi="$2"
   SM_PROBE_STREAMS=(); SM_PROBE_FPS=(); SM_PROBE_OK=(); SM_JSON_ACC=""
   SM_SUST_STREAMS=0; SM_SUST_FPS=0
+  # MEASURED-vs-NOT-MEASURED (audit P1-12). SM_SUST_STREAMS=0 is ambiguous on its own: it is both the
+  # initial value AND the honest answer "not one concurrency sustained a stall-free stream". If the
+  # suite wall-clock ceiling fires before even the lo rung is probed, the search returns that same 0
+  # having measured NOTHING — and a measurement failure would then be published as a gateway failure.
+  # This flag is set the moment a real gate DECISION exists, so the caller can emit null (unmeasured)
+  # instead of 0 (measured failure). It is never cleared once set: every later abort still leaves a
+  # genuinely measured, if partial, answer behind.
+  SM_SUST_MEASURED=0
   # Mock-ceiling reference (paced streaming), capped like the perf lane so a very-high-conc reference
   # is not artificially low. Fair-ceiling re-probe at the winner mirrors lib/sweep.sh:_sw_ceil_ref_ok.
   local mock_conc=$hi; [ "$mock_conc" -gt "${SM_MOCKCEIL_CONC:-2048}" ] && mock_conc="${SM_MOCKCEIL_CONC:-2048}"
@@ -168,7 +176,8 @@ stream_sustained_bisect(){ # lo hi
   read -r _a _b _c _d _e SM_MOCK_FPS _rest < <(stream_probe "$DURL" "$mock_conc" "$SM_SWEEP_DUR")
   SM_MOCK_FPS=${SM_MOCK_FPS:-0}
   log "[$GATEWAY] sustained-streams bisect [$lo,$hi] (mock ceiling ${SM_MOCK_FPS} fps @ c=$mock_conc)"
-  _sm_probe_c "$lo" || { _sm_finish_bound; return 0; }
+  _sm_probe_c "$lo" || { _sm_finish_bound; return 0; }   # deadline fired: SM_SUST_MEASURED stays 0
+  SM_SUST_MEASURED=1                                      # a real gate decision at lo now exists
   if [ "${SM_PROBE_OK[$lo]}" != 1 ]; then
     log "[$GATEWAY] sustained-streams: even c=$lo did not pass the gate → 0"
     _sm_finish_bound; return 0
@@ -231,6 +240,9 @@ streamcpu_peak_fps(){ # lo hi
   local lo="$1" hi="$2"
   SM_PROBE_STREAMS=(); SM_PROBE_FPS=(); SM_PROBE_OK=(); SM_JSON_ACC=""
   SM_FPS_PEAK=0; SM_FPS_PEAK_CONC=0
+  # Same measured-vs-not-measured flag as the sustained lane (audit P1-12): a cpu_fps of 0 must mean
+  # "measured: no rung passed the gate", never "the deadline fired before anything was probed".
+  SM_FPS_MEASURED=0
   # cpu-fps gate parity with streamcpu/run.sh (audit NIT): require >=99% of streams COMPLETE (dynamic
   # scope — _sm_probe_c reads this global; `local` auto-restores it to the sustained lane's 0 on return).
   local SM_GATE_MIN_COMPLETE=0.99
@@ -248,7 +260,8 @@ streamcpu_peak_fps(){ # lo hi
   log "[$GATEWAY] cpu-fps peak-search [$lo,$hi] (direct ceiling ${SM_DIRECT_CEIL} fps @ c=$hi)"
   _sm_eff(){ if [ "${SM_PROBE_OK[$1]:-0}" = 1 ]; then printf '%s' "${SM_PROBE_FPS[$1]:-0}"; else printf 0; fi; }
   local a=$lo b=$lo pr=0 c cr
-  _sm_probe_c "$lo" || { _sm_fps_finish_bound; return 0; }
+  _sm_probe_c "$lo" || { _sm_fps_finish_bound; return 0; }   # deadline fired: SM_FPS_MEASURED stays 0
+  SM_FPS_MEASURED=1                                          # a real gate decision at lo now exists
   pr=$(_sm_eff "$lo"); b=$lo
   c=$lo
   while [ "$c" -lt "$hi" ]; do

@@ -24,8 +24,62 @@ KEEP = {
     "xlate": ["build", "xlate_served", "xlate_added_latency_p99_us", "xlate_rps_sustained_20ms"],
     "governed": ["build", "governed_served", "governed_rps_sustained_20ms",
                  "plain_rps_sustained_20ms", "governed_vs_plain_sustained_pct"],
-    "matrix": ["build"],
+    # MATRIX IS NOW THE SOLE PRODUCER. After the perf/memory/stream/streamcpu/xlate/governed suites were
+    # retired, this list was left at ["build"] alone — so the append-only history recorded NO
+    # MEASUREMENT AT ALL for any run, and the regression-vs-history check had nothing to compare
+    # against (audit P1-11). Restore the matrix-era metrics: the memory window's RSS lanes (top-level
+    # "memory" object) plus, per served DIAGONAL cell, its perf + streaming numbers — flattened by
+    # _matrix_extra below. Every value is copied VERBATIM, including a null: history must record
+    # "not measured" as not-measured, never as 0.
+    "matrix": ["build", "matrix_version", "served", "egress_configured", "sweep_ttft_ms",
+               "p99_ceiling_ms", "sweep_rung_selection"],
 }
+
+# The matrix result's measurements live in nested objects, not at the top level, so KEEP alone cannot
+# reach them. These are the fields worth a history row — the same ones the board ranks on.
+MEM_KEEP = ["served", "load_cell", "idle_rss_mib", "peak_rss_mib", "peak_rss_hwm_mib",
+            "recovered_rss_mib", "post_load_rss_mib", "idle_window_s", "recovery_window_s"]
+CELL_PERF_KEEP = ["rps_sustained_20ms", "rps_sustained_20ms_mock_bound", "rps_max_proxy",
+                  "rps_max_proxy_mock_bound", "added_latency_p50_us", "added_latency_p99_us",
+                  "egress_reverified"]
+CELL_STREAM_KEEP = ["stream_served", "added_ttft_p99_us", "added_gap_p99_us", "streams_sustained",
+                    "streams_sustained_mock_bound", "cpu_fps", "cpu_fps_mock_bound"]
+
+
+def _matrix_extra(data):
+    """The matrix run's actual MEASUREMENTS, flattened into a compact history record.
+
+    memory  -> the RSS window verbatim (nulls preserved: an unmeasured lane must stay unmeasured).
+    perf    -> per DIAGONAL cell (<dialect> ingress on the <dialect> egress: the like-for-like cell the
+               board headlines), that cell's perf block.
+    stream  -> the same diagonal cells' streaming block, when the run measured one.
+    """
+    out = {}
+    mem = data.get("memory")
+    if isinstance(mem, dict):
+        out["memory"] = {k: mem[k] for k in MEM_KEEP if k in mem}
+    perf, stream = {}, {}
+    ups = data.get("upstreams")
+    if isinstance(ups, dict):
+        for eg, up in ups.items():
+            cell = ((up or {}).get("cells") or {}).get(eg)
+            if not isinstance(cell, dict):
+                continue
+            p = cell.get("perf")
+            if isinstance(p, dict):
+                keep = {k: p[k] for k in CELL_PERF_KEEP if k in p}
+                if keep:
+                    perf[eg] = keep
+            st = cell.get("stream")
+            if isinstance(st, dict):
+                keep = {k: st[k] for k in CELL_STREAM_KEEP if k in st}
+                if keep:
+                    stream[eg] = keep
+    if perf:
+        out["diagonal_perf"] = perf
+    if stream:
+        out["diagonal_stream"] = stream
+    return out
 
 def main():
     os.makedirs(HIST, exist_ok=True)
@@ -60,8 +114,10 @@ def main():
             for k in KEEP[suite]:
                 if k in data:
                     rec[k] = data[k]
-            if suite == "matrix" and isinstance(data.get("cells"), dict):
-                rec["cells"] = {k: v.get("served") for k, v in data["cells"].items()}
+            if suite == "matrix":
+                if isinstance(data.get("cells"), dict):
+                    rec["cells"] = {k: v.get("served") for k, v in data["cells"].items()}
+                rec.update(_matrix_extra(data))
             hist_path = os.path.join(HIST, gw + ".jsonl")
             seen = set()
             if os.path.exists(hist_path):

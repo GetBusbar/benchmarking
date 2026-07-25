@@ -664,6 +664,15 @@ matrix_cell_stream(){
   local sust_lo sust_hi; read -r sust_lo sust_hi <<< "$MATRIX_STREAM_SUST_BOUNDS"
   stream_sustained_bisect "$sust_lo" "$sust_hi"
   local sust_streams=$SM_SUST_STREAMS sust_fps=$SM_SUST_FPS sust_bound=$SM_MOCK_BOUND sust_json="$SM_JSON_ACC"
+  # UNMEASURED != MEASURED FAILURE (audit P1-12). stream_sustained_bisect returns 0 both when nothing
+  # sustained a stall-free stream (a real, publishable gateway result) and when the suite wall-clock
+  # ceiling fired before a single rung was probed (a rig limit we must not attribute to the gateway).
+  # SM_SUST_MEASURED distinguishes them: unmeasured publishes null, so the board renders "not measured"
+  # rather than a certified zero.
+  if [ "${SM_SUST_MEASURED:-0}" != 1 ]; then
+    sust_streams=null; sust_fps=null; sust_bound=null
+    log "[$GATEWAY]   $cell : sustained-streams NOT MEASURED (search aborted before any rung was probed) - publishing null, not 0"
+  fi
   # ── UNPACED lane: cpu-fps peak ──
   stream_mock_start "$MATRIX_STREAMCPU_CHUNKS" 0 "$MATRIX_STREAMCPU_FRAME_BYTES"
   SM_EXPFRAMES="$MATRIX_STREAMCPU_CHUNKS"; SM_STALL_US=$(( MATRIX_STREAMCPU_STALL_MS * 1000 ))
@@ -682,6 +691,11 @@ matrix_cell_stream(){
   local fps_lo fps_hi; read -r fps_lo fps_hi <<< "$MATRIX_STREAMCPU_FPS_BOUNDS"
   streamcpu_peak_fps "$fps_lo" "$fps_hi"
   local fps_peak=$SM_FPS_PEAK fps_conc=$SM_FPS_PEAK_CONC fps_bound=$SM_FPS_MOCK_BOUND fps_json="$SM_JSON_ACC"
+  # Same measured-vs-not-measured distinction for the cpu-fps lane (audit P1-12).
+  if [ "${SM_FPS_MEASURED:-0}" != 1 ]; then
+    fps_peak=null; fps_conc=null; fps_bound=null
+    log "[$GATEWAY]   $cell : cpu-fps NOT MEASURED (peak search aborted before any rung was probed) - publishing null, not 0"
+  fi
   CELL_STREAM_JSON=", \"stream\": {\"stream_served\": true, \"added_ttft_p50_us\": $add_t50, \"added_ttft_p99_us\": $add_t99, \"added_gap_p50_us\": $add_g50, \"added_gap_p99_us\": $add_g99, \"streams_sustained\": $sust_streams, \"streams_sustained_fps\": $sust_fps, \"streams_sustained_mock_bound\": $sust_bound, \"cpu_fps\": $fps_peak, \"cpu_fps_concurrency\": $fps_conc, \"cpu_fps_mock_bound\": $fps_bound, \"sweep_streams\": [$sust_json], \"sweep_cpu_fps\": [$fps_json]$c1note}"
   log "[$GATEWAY]   $cell : stream added_ttft_p99=${add_t99}us streams_sustained=${sust_streams} cpu_fps=${fps_peak}"
 }
