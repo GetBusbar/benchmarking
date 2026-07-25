@@ -137,30 +137,49 @@ MATRIX_STREAMCPU_STALL_MS="${MATRIX_STREAMCPU_STALL_MS:-250}"
 MATRIX_STREAMCPU_DUR="${MATRIX_STREAMCPU_DUR:-16}"
 MATRIX_STREAMCPU_FPS_BOUNDS="${MATRIX_STREAMCPU_FPS_BOUNDS:-8 512}"  # [lo,hi] for the cpu-fps peak search
 
-# ── memory: ONE continuous per-gateway RSS track across the real 6x6 run ──────────────────────────
-# CLEAN PROTOCOL (matrix-sole-source): memory is NOT a separate synthetic suite. It is one continuous
-# RSS track over the SAME 6x6 run every other number comes from — no second measurement:
-#   idle       = the stable RSS over a 60 s window BEFORE the matrix run starts (gateway launched, no load),
-#   peak       = the MAX RSS observed continuously across the ENTIRE 6x6 sweep (all cells),
-#   recovered  = the RSS at the end of a 60 s window AFTER the last cell (does it release?),
-#   rss_series = the whole thing (idle-before -> 6x6 -> 60 s-after), downsampled to <=~120 points.
-# The measurement is the gateway's own gw_rss()/gw_hwm() manifest hooks (shared /proc tree helpers in
-# lib/harness.sh); a manifest with no gw_rss (the mock-gateway fixture) degrades to 0/null cleanly.
-# MATRIX_MEMORY=0 disables it. The synthetic 150 KB x 1500 load is GONE — the 6x6 sweep IS the load.
+# ── memory: a DEDICATED, ISOLATED window AFTER the 6x6, on each gateway's PEAK cell ────────────────
+# FINAL PROTOCOL (owner-decided). Memory is NOT a synthetic suite and NOT a track over the 6x6 — it is
+# its OWN window that runs AFTER the full 6x6 completes, in a FRESH cold-restarted process, on THIS
+# gateway's peak cell (the served cell with the highest rps_max_proxy; there is no universal cell, since
+# e.g. litellm-rust does not serve openai>openai). EVERY gateway gets the IDENTICAL load recipe, so the
+# site-wide "same load for every gateway" claim holds for memory too. Per gateway:
+#   1. after the 6x6, pick load_cell = the served cell with the max rps_max_proxy (tie-break by egress
+#      order); if NO served cell exists, memory is null (nulls emitted, window skipped).
+#   2. KILL + COLD-RESTART the gateway fresh, configured for the peak cell's egress dialect (the same
+#      launch path the loop used for that egress), then:
+#        idle       = median RSS over MEM_IDLE_S of COLD idle sampling BEFORE any traffic (the TRUE idle;
+#                     a warm post-6x6 process would measure 'recovered', not 'idle'),
+#        peak       = the MAX RSS sampled continuously while a FIXED load runs on the peak cell's
+#                     ingress->egress path (identical conc/payload/duration for every gateway),
+#        recovered  = the RSS at the end of MEM_SETTLE_S of recovery sampling after the load stops,
+#        rss_series = the continuous samples across idle->load->recovery (ONE process lifecycle, so the
+#                     curve is meaningful), downsampled to <=~120 points.
+# The load reuses the perf sweep's own generator (lib/sweep.sh sweep_probe -> ugen) against a PLAIN
+# high-throughput mock — memory does NOT need the recording mock, which sidesteps the mock-norecord
+# showstopper. The measurement is the gateway's own gw_rss()/gw_hwm() manifest hooks (shared /proc-tree
+# helpers in lib/harness.sh); a manifest with no gw_rss (the mock-gateway fixture) degrades to null
+# cleanly. NULL-SAFE: any RSS the sampler can't obtain -> null, NEVER a fabricated 0. MATRIX_MEMORY=0
+# disables the whole window (no "memory" block is written).
 MATRIX_MEMORY="${MATRIX_MEMORY:-1}"
-MEM_CAP_MIB="${MEM_CAP_MIB:-40000}"   # watchdog: log a runaway RSS (never kills the real sweep)
-# Idle window BEFORE the run: how long to sample RSS with the gateway launched but under no load.
+MEM_CAP_MIB="${MEM_CAP_MIB:-40000}"   # watchdog: log a runaway RSS (never kills the measurement)
+# Idle window: how long to sample COLD idle RSS (fresh process, no load) before the fixed load starts.
 # Field default 60 s; a local dev verifier shrinks it (MEM_IDLE_S=2) so a minutes-long local run isn't
-# dominated by fixed sleeps. idle_rss_mib is the LAST sample of this window (a settled idle).
+# dominated by fixed sleeps. idle_rss_mib is the MEDIAN of this window's samples (a settled idle).
 MEM_IDLE_S="${MEM_IDLE_S:-60}"
-# Recovery (drop-down) window AFTER the last cell: how long to wait before reading recovered RSS (does
+# Recovery (drop-down) window AFTER the load stops: how long to wait before reading recovered RSS (does
 # memory release?). Field default 60 s; the dev verifier shrinks it (MEM_SETTLE_S=2). recovered_rss_mib
 # is the RSS at the END of this window; post_load_rss_mib is kept as an alias for back-compat.
 MEM_SETTLE_S="${MEM_SETTLE_S:-60}"
-# Series sampling cadence across the WHOLE run (idle -> 6x6 -> recovery). Cheap: one gw_rss read every
-# MEM_SAMPLE_S seconds. rss_series_json downsamples to <=~120 points, so a long run stays bounded and
-# the sampler never perturbs the sweep.
+# Series sampling cadence across the window (idle -> load -> recovery). Cheap: one gw_rss read every
+# MEM_SAMPLE_S seconds. rss_series_json downsamples to <=~120 points so the series stays bounded.
 MEM_SAMPLE_S="${MEM_SAMPLE_S:-5}"
+# THE FIXED LOAD RECIPE — IDENTICAL for every gateway (that is what makes the memory comparison fair).
+# Applied on the peak cell's ingress->egress path via the perf sweep's own generator. MATRIX_MEM_* are
+# the canonical knobs; the older MEM_CONC/MEM_PSIZE/MEM_DUR names are honoured as aliases (verify-local
+# already threads those) so an existing dev profile keeps working unchanged.
+MATRIX_MEM_CONC="${MATRIX_MEM_CONC:-${MEM_CONC:-64}}"          # concurrency of the fixed memory load
+MATRIX_MEM_PAYLOAD="${MATRIX_MEM_PAYLOAD:-${MEM_PSIZE:-4096}}" # per-request payload bytes (ugen -psize)
+MATRIX_MEM_DUR="${MATRIX_MEM_DUR:-${MEM_DUR:-120}}"            # duration (s) of the fixed memory load
 # ADAPTIVE RUNG SELECTION + shared rig baselines (lib/sweep.sh knobs; see its header). A gateway
 # that serves the whole 6x6 sweeps up to 36 cells, and the naive per-cell cost (~4 min: 15 fixed
 # ladder rungs + a re-measured direct c1 baseline + 2 re-measured mock ceilings, per cell) put this
@@ -677,6 +696,7 @@ CELL_PERF_JSON=""
 matrix_cell_perf(){
   local egress="$1" cell="$2" path="$3" data="$4"; shift 4
   CELL_PERF_JSON=""
+  MEM_LAST_RPS=""   # reset: peak-cell selection reads this only after a sweep actually produced it
   [ "$MATRIX_SWEEP" = 1 ] || return 0
   if suite_deadline_expired; then
     log "[$GATEWAY]   $egress <- $cell : suite ceiling reached - skipping the perf sweep (capability verdict stands)"
@@ -708,6 +728,7 @@ matrix_cell_perf(){
   # of the single run_sweep call. Carry BOTH into the cell so the drawer's headline is, by
   # construction, one of the points on its own sweep curve - never a separate perf-suite measurement.
   local prps=$SW_CEIL_RPS pconc=$SW_CEIL_CONC pbound=$SW_BOUND pjson="$SW_JSON"
+  MEM_LAST_RPS="$prps"   # peak-cell selection (memory window): this served cell's rps_max_proxy
   run_sweep "$SWEEP_TTFT_MS" "$SWEEP_DELAYED" peak
   local lrps=$SW_CEIL_RPS lconc=$SW_CEIL_CONC lbound=$SW_BOUND ljson="$SW_JSON"
   SWEEP_BODY=""; SWEEP_CACHE_KEY=""
@@ -951,6 +972,10 @@ run_cell(){ # egress cell path body extra-header...
   # is already final and is not re-derived from the sweep in any way.
   if [ "$served" = true ]; then
     matrix_cell_perf "$egress" "$cell" "$path" "$data" "$@"
+    # Peak-cell selection for the post-6x6 memory window: record every SERVED cell with its
+    # rps_max_proxy (MEM_LAST_RPS, empty -> 0 when no sweep produced one). matrix_memory_window picks
+    # the highest-rps served cell as load_cell; ties break by egress order (first-written wins there).
+    mem_record_cell "$egress" "$cell" "${MEM_LAST_RPS:-0}"
   fi
   emit_cell "$cell" "$served" "$cap_status" "$path" "$note" "$snip" "$reason"
 }
@@ -1015,102 +1040,23 @@ warm_up(){ # egress
   return 1
 }
 
-# ── memory: ONE continuous per-gateway RSS track across the real 6x6 run ──────────────────────────
-# The synthetic 150 KB x 1500 load is GONE. Memory is now ONE continuous RSS track that spans the SAME
-# 6x6 run every other number comes from, in three phases:
-#   matrix_memory_start  — BEFORE the loop: launch the gateway (default config), warm it, sample RSS for
-#                          MEM_IDLE_S (60 s) with NO load -> idle_rss_mib (the settled idle, last sample),
-#                          then start ONE cheap background sampler (a gw_rss read every MEM_SAMPLE_S) that
-#                          appends `<t_s> <rss_mib>` to the series file and tracks the running peak.
-#   (the 6x6 loop runs) — the SAME sampler keeps running across the whole sweep (all cells, all
-#                          relaunches); peak_rss_mib = the max it observes over the entire run.
-#   matrix_memory_finish — AFTER the last cell: read VmHWM, sample RSS for MEM_SETTLE_S (60 s drop-down
-#                          window) -> recovered_rss_mib (the RSS at the END of that window), stop the
-#                          sampler, and build rss_series (idle-before -> 6x6 -> 60 s-after, <=~120 pts).
-# The sampler SKIPS empty/zero reads (a relaunch gap between egress columns momentarily has no process)
-# so the curve/peak is never a fabricated 0 — an absent gateway just contributes no sample. Sampling is
-# cheap (one gw_rss + one awk per MEM_SAMPLE_S) and runs off the critical path, so it never perturbs the
-# sweep. Sets MEMORY_JSON (a top-level `"memory": {...}` object) folded into the final result.
-# gw_rss()/gw_hwm() are the gateway's own manifest hooks; a manifest without gw_rss degrades to 0/null.
+# ── memory: a DEDICATED, ISOLATED window AFTER the 6x6, on the PEAK cell (final protocol) ──────────
+# The window runs AFTER the whole 6x6 loop (see matrix_memory_window at the bottom). During the loop we
+# only RECORD which cells served + their rps_max_proxy (mem_record_cell) so the window can pick the peak
+# cell. There is no before-loop launch and no cross-sweep sampler anymore: the before-loop launch used
+# to displace the recording mock (the #5 showstopper) and the cross-sweep peak was driven by each
+# gateway's own green-cell count (unfair). MATRIX_MEMORY=0 skips the whole window (no "memory" block).
 MEMORY_JSON=""
-# File-scope state shared between _start and _finish (the sampler outlives the whole 6x6 loop).
-MEM_OK=0 MEM_ERR="" MEM_IDLE=0 MEM_PEAKF="" MEM_SERIESF="" MEM_START_EPOCH=0 MEM_ACTIVE=0
-matrix_memory_start(){
-  MEM_ACTIVE=0
+MEM_LAST_RPS=""            # set by matrix_cell_perf for the current cell; read by run_cell
+MEM_CELLS_F=""             # file of "<egress> <ingress> <rps_max_proxy>" rows, one per served cell
+# mem_record_cell <egress> <ingress> <rps>: append a served cell for peak-cell selection. Off when
+# MATRIX_MEMORY=0. rps empty/non-numeric -> 0 (still eligible; ties break by egress/first-written order).
+mem_record_cell(){
   [ "$MATRIX_MEMORY" = 1 ] || return 0
-  log "[$GATEWAY] memory: launching (default config) for the 60 s idle-before window"
-  gw_stop 2>/dev/null; sleep 1
-  # Plain instant mock (no recording): a representative idle. The 6x6 loop relaunches per egress against
-  # the recording mock; the sampler follows the process by name (gw_rss) across every relaunch.
-  mock_start_plain
-  _mem_ready(){
-    rebuild_headers
-    local i st
-    for i in $(seq 1 60); do
-      st=$(curl -s -m3 -o /dev/null -w "%{http_code}" "http://127.0.0.1:$GW_PORT$GW_PATH" -X POST \
-          -H "content-type: application/json" -H "authorization: Bearer $GW_AUTH" ${CURL_H[@]+"${CURL_H[@]}"} \
-          -d "{\"model\":\"$GW_MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"warm\"}],\"max_tokens\":16}")
-      [ "$st" = 200 ] && return 0; sleep 1
-    done
-    return 1
-  }
-  if harness_launch_ready gw_launch _mem_ready; then MEM_OK=1; else MEM_OK=0; MEM_ERR="$HARNESS_SERVE_ERR"; fi
-  if [ "$MEM_OK" != 1 ]; then
-    log "[$GATEWAY] memory: gateway did not serve for the idle window (served=false) - memory will read not-served"
-    return 0
-  fi
-  MEM_PEAKF="${TMPDIR:-/tmp}/mtxmem.$$.peak"; MEM_SERIESF="${TMPDIR:-/tmp}/mtxmem.$$.series"
-  local STOP="${TMPDIR:-/tmp}/mtxmem.$$.stop"
-  rm -f "$STOP" "$MEM_PEAKF" "$MEM_SERIESF"; echo 0 >"$MEM_PEAKF"; : >"$MEM_SERIESF"
-  MEM_STOP="$STOP"   # LOW-6: file-scope so cleanup()'s trap can stop the sampler on an early exit
-  MEM_START_EPOCH=$(date +%s)
-  # ONE background sampler for the WHOLE run: appends `<t_s> <rss_mib>` every MEM_SAMPLE_S and advances
-  # the running peak. Skips empty/zero reads (relaunch gaps) so neither the curve nor the peak is a
-  # fabricated 0. A runaway RSS is LOGGED (watchdog) but the real sweep is never killed.
-  ( while [ ! -f "$STOP" ]; do
-      v=$(gw_rss); [ -z "$v" ] && v=0
-      if awk -v v="$v" 'BEGIN{exit !(v+0>0)}'; then
-        echo "$(( $(date +%s) - MEM_START_EPOCH )) $v" >>"$MEM_SERIESF"
-        awk -v v="$v" -v p="$(cat "$MEM_PEAKF" 2>/dev/null)" 'BEGIN{exit !(v+0>p+0)}' && echo "$v" >"$MEM_PEAKF"
-        awk -v v="$v" -v c="$MEM_CAP_MIB" 'BEGIN{exit !(v+0>c+0)}' && echo "[$GATEWAY][mem watchdog] RSS $v MiB > cap $MEM_CAP_MIB (logged; sweep not killed)"
-      fi
-      sleep "$MEM_SAMPLE_S"
-    done ) & MEM_SP=$!
-  MEM_ACTIVE=1
-  # idle_rss_mib: sample RSS across the 60 s idle-before window (gateway up, NO load) and take the LAST
-  # (settled) reading. The sampler is already logging these into the series, so this window IS the head
-  # of the curve.
-  local _end idle; _end=$(( $(date +%s) + MEM_IDLE_S )); idle=$(gw_rss)
-  while [ "$(date +%s)" -lt "$_end" ]; do sleep "$MEM_SAMPLE_S"; local r; r=$(gw_rss); [ -n "$r" ] && idle="$r"; done
-  MEM_IDLE=${idle:-0}
-  log "[$GATEWAY] memory: idle-before window done, idle_rss=${MEM_IDLE} MiB - starting the 6x6 sweep (sampler running)"
+  [ -n "$MEM_CELLS_F" ] || { MEM_CELLS_F="${TMPDIR:-/tmp}/mtxmemcells.$$"; : >"$MEM_CELLS_F"; }
+  local rps="$3"; case "$rps" in ''|*[!0-9.]*) rps=0;; esac
+  printf '%s %s %s\n' "$1" "$2" "$rps" >>"$MEM_CELLS_F"
 }
-# Called AFTER the 6x6 loop: recovery window + finalize. Reads peak from the running sampler, VmHWM
-# before teardown, the recovered RSS at the end of the 60 s drop-down window, then stops the sampler and
-# builds the rss_series. Emits MEMORY_JSON.
-matrix_memory_finish(){
-  [ "$MATRIX_MEMORY" = 1 ] || return 0
-  local peak=0 hwm post recovered="" series="[]"
-  if [ "$MEM_ACTIVE" = 1 ]; then
-    hwm=$(gw_hwm)   # VmHWM must be read BEFORE the gateway stops (the counter dies with the process)
-    log "[$GATEWAY] memory: 6x6 sweep done - waiting ${MEM_SETTLE_S}s recovery window (does it release?)"
-    local _end; _end=$(( $(date +%s) + MEM_SETTLE_S ))
-    while [ "$(date +%s)" -lt "$_end" ]; do local r; r=$(gw_rss); [ -n "$r" ] && recovered="$r"; sleep "$MEM_SAMPLE_S"; done
-    post=$(gw_rss); [ -n "$post" ] && recovered="$post"
-    [ -n "$MEM_STOP" ] && touch "$MEM_STOP"; [ -n "$MEM_SP" ] && kill "$MEM_SP" 2>/dev/null
-    MEM_STOP="" MEM_SP=""   # sampler stopped normally - clear the trap handles
-    peak=$(cat "$MEM_PEAKF" 2>/dev/null); peak=${peak:-0}
-    series=$(rss_series_json "$MEM_SERIESF")
-    rm -f "$MEM_PEAKF" "$MEM_SERIESF" "${TMPDIR:-/tmp}/mtxmem.$$.stop" 2>/dev/null
-    log "[$GATEWAY] memory: peak=${peak} hwm=${hwm:-n/a} recovered=${recovered:-n/a} MiB (continuous track)"
-  fi
-  MEMORY_JSON="
-  \"memory\": {\"served\": $([ "$MEM_OK" = 1 ] && echo true || echo false), \"serve_error\": \"$(json_escape "$MEM_ERR")\", \"idle_rss_mib\": ${MEM_IDLE:-0}, \"peak_rss_mib\": ${peak:-0}, \"peak_rss_hwm_mib\": ${hwm:-null}, \"post_load_rss_mib\": ${post:-${recovered:-0}}, \"recovered_rss_mib\": ${recovered:-null}, \"rss_series\": ${series:-[]}, \"idle_window_s\": $MEM_IDLE_S, \"recovery_window_s\": $MEM_SETTLE_S, \"track\": \"continuous-6x6\"},"
-}
-
-# MEMORY, phase 1: the 60 s idle-before window + start the continuous sampler, BEFORE the 6x6 loop. The
-# sampler keeps running across every cell and relaunch; matrix_memory_finish closes it after the sweep.
-matrix_memory_start
 
 UPSTREAMS_JSON=""
 COMPAT_CELLS=""; COMPAT_SHAPE=""; COMPAT_SERVED=false; COMPAT_ERR=""
@@ -1190,10 +1136,119 @@ for EGRESS in $EGRESS_ALL; do
   SERVE_ERR=""
 done
 
-# MEMORY, phase 2: the 60 s recovery (drop-down) window + finalize. The continuous sampler started in
-# matrix_memory_start tracked peak across the whole 6x6 above; this closes it and reads recovered. The
-# whole idle-before -> 6x6 -> 60 s-after track is folded into the result as top-level "memory".
-matrix_memory_finish
+# ── the memory window: AFTER the 6x6, on the peak cell, in a FRESH cold-restarted process ──────────
+# Picks load_cell = the served cell with the highest rps_max_proxy (ties break by egress/first-written
+# order). Kills + cold-restarts the gateway for that cell's egress dialect, samples COLD idle
+# (MEM_IDLE_S), applies the FIXED identical load recipe on the cell's ingress->egress path, samples RSS
+# throughout (peak = the max), then samples MEM_SETTLE_S of recovery. Emits a top-level "memory" object.
+# NULL-SAFE: any RSS gw_rss can't produce -> null (never a fabricated 0). No served cell -> all-null
+# window. Reuses the perf sweep's own generator (sweep_probe -> ugen) against a PLAIN mock (no recording
+# mock needed for memory), which is exactly why this sidesteps the mock-norecord showstopper.
+# mem_cell_headers <cell> -> sets MEM_H (the loadgen -H array) for this ingress dialect, matching the
+# capability probe + perf sweep (anthropic: version + x-api-key + optional GW_ANTHROPIC_AUTH_HEADER;
+# gemini: x-goog-api-key; everything else: none beyond the manifest's CURL_H).
+mem_cell_headers(){
+  MEM_H=()
+  case "$1" in
+    anthropic) MEM_H=(-H "anthropic-version: 2023-06-01" -H "x-api-key: $GW_AUTH" ${XH[@]+"${XH[@]}"});;
+    gemini)    MEM_H=(-H "x-goog-api-key: $GW_AUTH");;
+  esac
+}
+matrix_memory_window(){
+  [ "$MATRIX_MEMORY" = 1 ] || return 0
+  local idle=null peak=null recovered=null hwm=null series="null"
+  local served=false serr="" lcell="null"
+  local recipe="{\"concurrency\": $MATRIX_MEM_CONC, \"payload_bytes\": $MATRIX_MEM_PAYLOAD, \"duration_s\": $MATRIX_MEM_DUR}"
+  local protocol="post-6x6, fresh cold restart: ${MEM_IDLE_S}s idle -> fixed load on peak cell -> ${MEM_SETTLE_S}s recovery"
+  # Peak cell = the served cell with the highest rps_max_proxy; ties keep the first-written (egress order).
+  local m_eg="" m_in="" m_rps="" _pick=""
+  if [ -n "$MEM_CELLS_F" ] && [ -s "$MEM_CELLS_F" ]; then
+    # Highest rps_max_proxy wins; STRICT >, so a tie keeps the FIRST-written cell (egress order) -> a
+    # fully deterministic pick independent of sort-stability semantics.
+    _pick=$(awk 'NR==1||$3+0>best+0{best=$3;line=$0} END{print line}' "$MEM_CELLS_F" 2>/dev/null)
+    read -r m_eg m_in m_rps <<<"$_pick"
+  fi
+  if [ -z "$m_eg" ]; then
+    log "[$GATEWAY] memory: no served cell in the 6x6 - memory is null (window skipped)"
+    serr="no served cell in the 6x6 sweep"
+  else
+    lcell="\"$m_in>$m_eg\""
+    log "[$GATEWAY] memory: peak cell = $m_in>$m_eg (rps_max_proxy=$m_rps) - cold-restarting for the $m_eg egress"
+    # COLD RESTART for the peak cell's egress dialect (the same launch path the loop used for it), then
+    # warm it under that egress. launch_egress does gw_stop first, so this is a genuinely fresh process.
+    # The ready fn takes no args (harness_launch_ready contract), so wrap warm_up over the chosen egress.
+    _mem_ready(){ warm_up "$m_eg"; }
+    if harness_launch_ready launch_egress _mem_ready "$m_eg" && [ "$WARM_OK" = 1 ]; then
+      served=true
+      local base m_path m_body
+      m_path="$(ingress_path "$m_in")"; m_body="$(ingress_body "$m_in")"
+      mem_cell_headers "$m_in"
+      # PLAIN high-throughput mock for the load (no recording needed for memory).
+      mock_start_plain; _sw_mock_ready 30 || log "[$GATEWAY] memory: plain mock slow to bind before the load"
+      local SERIESF STOP PEAKF T0
+      SERIESF="${TMPDIR:-/tmp}/mtxmem.$$.series"; STOP="${TMPDIR:-/tmp}/mtxmem.$$.stop"; PEAKF="${TMPDIR:-/tmp}/mtxmem.$$.peak"
+      rm -f "$SERIESF" "$STOP" "$PEAKF"; : >"$SERIESF"; : >"$PEAKF"; T0=$(date +%s)
+      MEM_STOP="$STOP"   # file-scope so cleanup()'s trap can stop the sampler on an early exit
+      # ONE background sampler for the WHOLE window (idle -> load -> recovery): appends `<t_s> <rss>`
+      # every MEM_SAMPLE_S and advances a running peak. Skips empty/non-positive reads so neither the
+      # curve nor the peak is a fabricated 0. Watchdog LOGS a runaway; never kills the measurement.
+      ( while [ ! -f "$STOP" ]; do
+          v=$(gw_rss); [ -z "$v" ] && v=""
+          if [ -n "$v" ] && awk -v v="$v" 'BEGIN{exit !(v+0>0)}'; then
+            echo "$(( $(date +%s) - T0 )) $v" >>"$SERIESF"
+            awk -v v="$v" -v p="$(cat "$PEAKF" 2>/dev/null)" 'BEGIN{exit !(v+0>p+0)}' && echo "$v" >"$PEAKF"
+            awk -v v="$v" -v c="$MEM_CAP_MIB" 'BEGIN{exit !(v+0>c+0)}' && echo "[$GATEWAY][mem watchdog] RSS $v MiB > cap $MEM_CAP_MIB (logged)"
+          fi
+          sleep "$MEM_SAMPLE_S"
+        done ) & MEM_SP=$!
+      # 1) COLD IDLE (no traffic): sample RSS for MEM_IDLE_S; idle_rss_mib = the MEDIAN of the samples.
+      log "[$GATEWAY] memory: ${MEM_IDLE_S}s cold idle sampling (no load)"
+      local _end idlef; idlef="${TMPDIR:-/tmp}/mtxmem.$$.idle"; : >"$idlef"
+      _end=$(( $(date +%s) + MEM_IDLE_S ))
+      while [ "$(date +%s)" -lt "$_end" ]; do local r; r=$(gw_rss); [ -n "$r" ] && echo "$r" >>"$idlef"; sleep "$MEM_SAMPLE_S"; done
+      idle="$(_mem_median "$idlef")"; rm -f "$idlef"
+      # 2) FIXED LOAD on the peak cell's ingress->egress path (identical recipe for every gateway). The
+      # sampler above captures peak_rss_mib across it. Reuse the perf generator (sweep_probe -> ugen).
+      log "[$GATEWAY] memory: fixed load (c=$MATRIX_MEM_CONC psize=$MATRIX_MEM_PAYLOAD dur=${MATRIX_MEM_DUR}s) on $m_in>$m_eg"
+      local UGEN_H=( ${CURL_H[@]+"${CURL_H[@]}"} ${MEM_H[@]+"${MEM_H[@]}"} )
+      # sweep_probe (lib/sweep.sh) reads SWEEP_BODY/PSIZE/UGEN_H as globals: send the peak cell's exact
+      # ingress body at the fixed payload size, identical for every gateway.
+      SWEEP_BODY="$m_body"; PSIZE="$MATRIX_MEM_PAYLOAD"
+      sweep_probe "http://127.0.0.1:$GW_PORT$m_path" "$MATRIX_MEM_CONC" "$MATRIX_MEM_DUR" >/dev/null 2>&1
+      SWEEP_BODY=""
+      hwm=$(gw_hwm 2>/dev/null); case "$hwm" in ''|*[!0-9.]*) hwm=null;; esac
+      peak=$(cat "$PEAKF" 2>/dev/null); case "$peak" in ''|0|*[!0-9.]*) peak=null;; esac
+      # 3) RECOVERY: sample for MEM_SETTLE_S; recovered_rss_mib = the RSS at the END of the window.
+      log "[$GATEWAY] memory: ${MEM_SETTLE_S}s recovery sampling (does it release?)"
+      _end=$(( $(date +%s) + MEM_SETTLE_S ))
+      while [ "$(date +%s)" -lt "$_end" ]; do local r; r=$(gw_rss); [ -n "$r" ] && recovered="$r"; sleep "$MEM_SAMPLE_S"; done
+      local rpost; rpost=$(gw_rss); [ -n "$rpost" ] && recovered="$rpost"
+      case "$recovered" in ''|*[!0-9.]*) recovered=null;; esac
+      # Stop the sampler + build the single-lifecycle series (idle -> load -> recovery).
+      [ -n "$MEM_STOP" ] && touch "$MEM_STOP"; [ -n "$MEM_SP" ] && kill "$MEM_SP" 2>/dev/null; MEM_STOP="" MEM_SP=""
+      series=$(rss_series_json "$SERIESF")
+      rm -f "$SERIESF" "$STOP" "$PEAKF" 2>/dev/null
+      case "$idle" in ''|*[!0-9.]*) idle=null;; esac
+      log "[$GATEWAY] memory: idle=${idle} peak=${peak} recovered=${recovered} hwm=${hwm} MiB on $m_in>$m_eg"
+    else
+      serr="${HARNESS_SERVE_ERR:-$SERVE_ERR}"
+      log "[$GATEWAY] memory: peak cell $m_in>$m_eg did not cold-restart/serve - memory reads not-served"
+    fi
+  fi
+  MEMORY_JSON="
+  \"memory\": {\"protocol\": \"$(json_escape "$protocol")\", \"served\": $served, \"serve_error\": \"$(json_escape "$serr")\", \"load_cell\": $lcell, \"load_recipe\": $recipe, \"idle_rss_mib\": ${idle}, \"peak_rss_mib\": ${peak}, \"peak_rss_hwm_mib\": ${hwm}, \"post_load_rss_mib\": ${peak}, \"recovered_rss_mib\": ${recovered}, \"rss_series\": ${series}, \"idle_window_s\": $MEM_IDLE_S, \"recovery_window_s\": $MEM_SETTLE_S},"
+  rm -f "$MEM_CELLS_F" 2>/dev/null
+}
+# _mem_median <file-of-numbers> -> the median (empty file -> null). Idle is a MEDIAN, not the last
+# sample, so a single warm-up blip during the cold-idle window can't drag the reported idle up.
+_mem_median(){
+  [ -s "$1" ] || { echo null; return; }
+  sort -g "$1" | awk '{a[NR]=$1} END{ if(NR==0){print "null"} else if(NR%2){printf "%.1f", a[(NR+1)/2]} else {printf "%.1f", (a[NR/2]+a[NR/2+1])/2} }'
+}
+
+# THE MEMORY WINDOW: runs AFTER the whole 6x6 above. Picks the peak cell from the served cells recorded
+# during the loop, cold-restarts a fresh process for it, and runs idle -> fixed load -> recovery.
+matrix_memory_window
 
 cat > "$RESULTS/$GATEWAY.json" <<JSON
 {
