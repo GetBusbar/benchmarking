@@ -58,7 +58,7 @@ CH
 # GOMAXPROCS, NOT the --cpuset-cpus limit — so without it One-API runs a P per host core thrashing the
 # few pinned cores, a scheduler-contention HANDICAP the Rust gateways (tokio available_parallelism
 # respects cpuset) never pay. Pinning to the cpuset count emulates the 4-core box every gateway is
-# measured on — the same Go-field parity fix gomodel and bifrost carry. Defined once, read by both
+# measured on, the same field-parity fix two other Go entries carry. Defined once, read by both
 # gw_launch (docker -e flag) and gw_config (published artifact).
 _oa_ncore() { echo $(( ${CORES##*-} - ${CORES%%-*} + 1 )); }
 

@@ -2,11 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # Gateway manifest: AISIX (api7/aisix, Rust) — BUILT FROM SOURCE, run native.
 #
-# api7's Rust AI gateway, by the original creators of Apache APISIX. DISTINCT from Apache APISIX (the
-# `apisix` entry — their Lua/Nginx gateway): different repo, different language, different binary.
+# api7's Rust AI gateway, by the original creators of the Lua/Nginx gateway that is a SEPARATE entry
+# in this field. Distinct from it: different repo, different language, different binary.
 #
-# EXCEPTION to the everything-runs-its-official-image rule, kept deliberately (same as Helicone /
-# LiteLLM-Rust): the only published image (ghcr.io/api7/aisix, checked 2026-07-24) is linux/amd64-ONLY
+# EXCEPTION to the everything-runs-its-official-image rule, kept deliberately (same as two other
+# entries): the only published image (ghcr.io/api7/aisix, checked 2026-07-24) is linux/amd64-ONLY
 # — the docker-image.yml workflow's build-push step has no `platforms:` key, so buildx on the amd64 GH
 # runner emits a single-arch amd64 image, and the 0.5.0 image config self-reports
 # "architecture":"amd64". The bench boxes are Graviton arm64, so on them we build the `aisix` binary
@@ -50,7 +50,7 @@
 GW_KIND=native
 # Self-describing manifest metadata — charts.py + the run lists read these, so a gateway
 # is fully defined by its own dir (add/remove a dir → it appears/disappears everywhere).
-GW_DISPLAY="AISIX (api7)"                 # label in charts + report tables — disambiguates from Apache APISIX
+GW_DISPLAY="AISIX (api7)"                 # label in charts + report tables, disambiguating the similarly-named entry
 GW_LANG=Rust                             # implementation language → bar color bucket
 GW_CLASS="AI gateway"   # the project's OWN self-description (README: 'the open-source, Rust-native AI gateway for LLMs and AI agents'), not our editorial
 GW_REPO=https://github.com/api7/aisix    # linked from the gateway name in the report table
@@ -355,7 +355,7 @@ GW_MATRIX_EGRESS="openai anthropic"
 # ONE STATIC CONFIG: both upstreams are already wired in the single resources file, so a column is
 # selected by the CLIENT-facing model id alone — GW_MODEL picks the models[] entry, whose provider_key
 # picks the adapter + api_base. The relaunch below runs byte-identical config to every other column and
-# to gw_launch; nothing is rewritten. (Same shape as agentgateway/gomodel: flip the model, not the file.)
+# to gw_launch; nothing is rewritten. (Same shape as two other entries: flip the model, not the file.)
 gw_matrix_egress() {
   case "$1" in
     openai)    GW_MODEL="$GW_MODEL_OPENAI";;

@@ -8,7 +8,7 @@
 # below in this file; the resolved tag is recorded in the result.
 #
 # ── NOTE ON ITS NUMBERS: GoModel AUDIT-LOGS EVERY REQUEST BY DEFAULT ─────────────────────────────
-# Same disclosure One-API carries, for the same reason. GoModel ships audit logging ON: LOGGING_ENABLED
+# Same disclosure another entry carries, for the same reason. GoModel ships audit logging ON: LOGGING_ENABLED
 # defaults true, and so do LOGGING_LOG_BODIES and LOGGING_LOG_HEADERS (.env.template:275-281 — "When
 # enabled, all requests and responses are logged to the configured storage"; config/logging.go). With
 # the default STORAGE_TYPE=sqlite that means a per-request entry — full request AND response body, plus
@@ -126,7 +126,7 @@ gw_launch() {
 #     for GOMAXPROCS, NOT the --cpuset-cpus limit — so without it GoModel runs 16 Ps thrashing 4 pinned
 #     cores, a scheduler-contention HANDICAP the Rust gateways (tokio available_parallelism respects
 #     cpuset) never pay. Pinning to the cpuset count emulates the same 4-core box every gateway is
-#     measured on — the identical CPU-pinning run-mechanic bifrost also uses (Go-field parity).
+#     measured on, the identical CPU-pinning run-mechanic another Go entry also uses (field parity).
 #   OOTB posture: default features stay ON (no LOGGING_ENABLED/budget/ratelimit/admin/mcp strips); the
 #     only deviations are the permitted ones - provider base_urls → mock and dummy keys.
 #     STORAGE_TYPE=sqlite and MODELS_ENABLED_BY_DEFAULT=true were REMOVED: .env.template documents

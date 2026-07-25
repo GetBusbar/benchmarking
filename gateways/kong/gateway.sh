@@ -299,7 +299,7 @@ gw_matrix_egress() {
 }
 
 # _kong_env: the ONE definition of Kong's non-secret launch env — the single source of truth that
-# gw_launch turns into docker -e flags (like gomodel's _gomodel_env) and gw_config publishes verbatim,
+# gw_launch turns into docker -e flags (as another entry does for its own env) and gw_config publishes verbatim,
 # so the benchmarked env and the website-published env cannot drift.
 #   KONG_DATABASE=off        = DB-less declarative (no external Postgres - required to boot).
 #   KONG_NGINX_WORKER_PROCESSES = pinned to the cpuset core count (0-3 → 4), NOT Kong's default `auto`.
