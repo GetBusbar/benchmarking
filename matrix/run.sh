@@ -246,14 +246,15 @@ if [ -n "${MATRIX_INGRESS_ONLY:-}" ]; then INGRESS_ALL="$(_subset "$MATRIX_INGRE
 # wired is "this pairing is not configured/supported here", with the evidence to say why.
 #
 # GW_MATRIX_CAP survives as ADVISORY CITATION METADATA only (published as capability_note context +
-# per-cell hints). It no longer gates probing. It still informs two HARNESS-SIDE choices that never
-# touch a verdict:
+# per-cell hints). It no longer gates probing. It informs exactly ONE harness-side choice:
 #   - warm-up preference: each egress column warms on the first advisory-declared ingress (a cell
-#     expected to 200), falling back to openai;
-#   - transient patience: a declared cell that answers 000/5xx gets the full transient-retry budget
-#     (it is expected to work, so a dead socket is worth waiting out); an undeclared cell gets a
-#     short budget (a persistent 5xx there is overwhelmingly "not wired", and the worst case is a
-#     grey not_configured carrying that evidence, never a red).
+#     expected to 200), falling back to openai. This is "which cell do we spend a warm-up on", never
+#     "what did we see" - it cannot reach any published verdict.
+# It used to inform a second one, and that was a FAIRNESS DEFECT, now fixed: transient patience was
+# 3x120s on a declared cell and 2x10s on an undeclared one, and the persistent-transient verdict for
+# the SAME observation was not_verified when declared / not_configured when undeclared. A gateway's
+# own unverified claim therefore moved both the effort spent measuring it and the verdict published
+# about it. Both now come from lib/probe_verdict.sh, which cannot see the declaration at all.
 #
 # Format: 6 whitespace-separated rows (rows = ingress in EGRESS_ALL order), each row 6 chars of 1/0
 # (cols = egress in EGRESS_ALL order). Blank/unset => back-compat: derive a full column of 1s for
@@ -465,22 +466,12 @@ probe(){ # path body extra-header...
   LAST_STATUS="${out##*$'\n'}"; LAST_BODY="${out%$'\n'*}"
 }
 
-# A TRANSIENT failure is a transport/reachability problem, NOT an answer: the gateway never handed us
-# a real application response we could judge. In this controlled rig the upstream is always the local
-# mock, so a 5xx or a curl-level 000 is the gateway failing to REACH its upstream (a dead socket after
-# a mock restart, an upstream-pool hiccup, a connection reset), never the gateway "answering wrongly".
-# We must retry such a probe BEFORE recording anything - never publish a transient blip as a red, then
-# re-run the whole box. A 2xx/3xx/4xx is a real application response (right or wrong) and is NOT retried.
-probe_transient(){ case "$LAST_STATUS" in 000|5[0-9][0-9]) return 0 ;; *) return 1 ;; esac; }
-MATRIX_TRANSIENT_RETRIES="${MATRIX_TRANSIENT_RETRIES:-3}"   # total attempts on a declared cell
-MATRIX_TRANSIENT_PAUSE="${MATRIX_TRANSIENT_PAUSE:-120}"     # seconds between its retries
-# Probe-first patience budget for ADVISORY-UNDECLARED cells: all 36 cells are probed, and a cell
-# nobody wired often answers 5xx (an upstream config that can't work) rather than 404. Waiting the
-# declared budget (2 x 120s) on ~30 dead cells would add hours per gateway; a short budget keeps a
-# genuinely-transient blip retried while a truly-dead cell costs seconds. Verdicts are unaffected:
-# a persistent transient is still not_verified (upstream_unreachable), never a red.
-MATRIX_PROBE_TRANSIENT_RETRIES="${MATRIX_PROBE_TRANSIENT_RETRIES:-2}"
-MATRIX_PROBE_TRANSIENT_PAUSE="${MATRIX_PROBE_TRANSIENT_PAUSE:-10}"
+# TRANSIENT (000/5xx) classification, THE single retry budget, and the persistent-transient verdict:
+# one choke point in lib/probe_verdict.sh, so neither the effort spent on a cell nor the verdict
+# published for it can ever depend on the gateway's own advisory capability declaration again.
+# (It used to: a declared cell got 3x120s and `not_verified`, an undeclared one 2x10s and
+# `not_configured`, for the very same observation.) Guarded by lib/probe_verdict_test.sh.
+source "$ROOT/lib/probe_verdict.sh"
 
 # Envelope verdicts + passthrough guard, in one place (python: nested-field checks beat grep here).
 # Body rides in $MATRIX_BODY (python reads its program from stdin, so stdin is taken); argv = cell
@@ -925,13 +916,11 @@ run_cell(){ # egress cell path body extra-header...
     path="$P_COHERE_FB"
   fi
   # TRANSIENT dead-socket retry (BEFORE any verdict is recorded): a 5xx/000 is the gateway failing to
-  # reach the local mock, never a wrong answer. Patience is budgeted by the ADVISORY capability grid
-  # (see the cap section): a declared cell gets the full budget, an undeclared probe-first cell a
-  # short one - the verdict class is identical either way.
-  local _retries="$MATRIX_TRANSIENT_RETRIES" _pause="$MATRIX_TRANSIENT_PAUSE"
-  if [ "$(cap "$cell" "$egress")" != 1 ]; then
-    _retries="$MATRIX_PROBE_TRANSIENT_RETRIES"; _pause="$MATRIX_PROBE_TRANSIENT_PAUSE"
-  fi
+  # reach the local mock, never a wrong answer. ONE budget for every cell, from the choke point - the
+  # gateway's advisory capability declaration must never buy a cell more attempts than its neighbour
+  # (it used to: declared 3x120s, undeclared 2x10s, same observation).
+  local _retries _pause
+  read -r _retries _pause <<<"$(probe_transient_budget)"
   local attempt=1
   while probe_transient && [ "$attempt" -lt "$_retries" ]; do
     log "[$GATEWAY]   $egress <- $cell : transient status $LAST_STATUS (upstream unreachable) - retry $attempt/$((_retries-1)) in ${_pause}s"
@@ -946,27 +935,27 @@ run_cell(){ # egress cell path body extra-header...
     # Persistent 5xx/000 after all retries. Two very different things can look like this:
     #   - a RIG/transport failure (gateway or mock unreachable, dead sockets): not_verified, the
     #     harness could not get a fair reading - never graded either way;
-    #   - a DETERMINISTIC application rejection of a probe-first cell (e.g. a gateway 503ing
-    #     "failed to parse request" on an ingress shape it has no route type for): that IS the
-    #     probe's honest answer - the pairing is not configured - and labeling it "not verified"
-    #     would hide real probe evidence.
-    # Discriminate on observables: the gateway ANSWERED (a real 5xx, not 000) while the mock is
-    # verifiably healthy, on a cell the manifest never declared -> not_configured with the 5xx
-    # evidence. Anything else (000, sick mock, or a DECLARED cell, where a persistent 5xx is more
-    # plausibly a rig failure worth a human look than a capability verdict) stays not_verified.
+    #   - a DETERMINISTIC application rejection (e.g. a gateway 503ing "failed to parse request" on
+    #     an ingress shape it has no route type for): that IS the probe's honest answer - the pairing
+    #     is not configured - and labeling it "not verified" would hide real probe evidence.
+    # Discriminated ON OBSERVABLES ALONE, in lib/probe_verdict.sh: the gateway ANSWERED (a real 5xx,
+    # not 000) while the mock is verifiably healthy -> not_configured with the 5xx evidence; anything
+    # else (000, or a mock we could not confirm healthy) -> not_verified. The manifest's advisory
+    # declaration is deliberately NOT an input: the same observation must get the same verdict for
+    # every gateway, whether or not it claimed the cell.
     local _mock_ok=0
     curl -s -m3 "http://127.0.0.1:$MOCK_PORT/__mock/state" 2>/dev/null | grep -q '"recording":true' && _mock_ok=1
     snip="$(strip_ctrl "$(printf '%s' "$LAST_BODY" | head -c 200)")"
-    if [ "$_mock_ok" = 1 ] && [ "$LAST_STATUS" != 000 ] && [ "$(cap "$cell" "$egress")" != 1 ]; then
-      served='"not_configured"'; reason=probe_failed
+    local _served_word
+    read -r _served_word reason <<<"$(persistent_transient_verdict "$LAST_STATUS" "$_mock_ok")"
+    served="\"$_served_word\""
+    if [ "$_served_word" = not_configured ]; then
       note="HTTP $LAST_STATUS on POST $path, persistent across $_retries attempts with the mock verifiably healthy: a deterministic application-level rejection of this ingress/egress pairing, not a transport failure"
       CELL_PROBE_NOTE="probe failed: HTTP $LAST_STATUS on POST $path (persistent across $_retries attempts, mock healthy); first bytes: $(strip_ctrl "$(printf '%s' "$LAST_BODY" | head -c 160)")"
-      log "[$GATEWAY]   $egress <- $cell : served=not_configured ($note)"
     else
-      served='"not_verified"'; reason=upstream_unreachable
       note="HTTP $LAST_STATUS after $_retries attempts: the gateway did not complete a round trip to the upstream (transport failure, e.g. a dead upstream socket or unhealthy rig); recorded as not_verified rather than graded"
-      log "[$GATEWAY]   $egress <- $cell : served=not_verified ($note)"
     fi
+    log "[$GATEWAY]   $egress <- $cell : served=$_served_word ($note)"
     emit_cell "$cell" "$served" "$LAST_STATUS" "$path" "$note" "$snip" "$reason"
     return
   fi

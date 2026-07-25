@@ -251,9 +251,9 @@ export MATRIX_STREAMCPU_FPS_BOUNDS="${MATRIX_STREAMCPU_FPS_BOUNDS:-1 8}" MATRIX_
 # a local run isn't dominated by fixed sleeps.
 export MEM_DUR="${MEM_DUR:-2}" MEM_CONC="${MEM_CONC:-8}" MEM_PSIZE="${MEM_PSIZE:-1024}"
 export MEM_IDLE_S="${MEM_IDLE_S:-2}" MEM_SETTLE_S="${MEM_SETTLE_S:-2}" MEM_SAMPLE_S="${MEM_SAMPLE_S:-1}"
-# transient patience: a local dead cell shouldn't wait the field's 2x120s — keep it snappy.
+# transient patience: a local dead cell shouldn't wait the field's 2x30s — keep it snappy. ONE budget
+# for every cell (lib/probe_verdict.sh); there is deliberately no per-cell variant to shrink.
 export MATRIX_TRANSIENT_RETRIES="${MATRIX_TRANSIENT_RETRIES:-1}" MATRIX_TRANSIENT_PAUSE="${MATRIX_TRANSIENT_PAUSE:-2}"
-export MATRIX_PROBE_TRANSIENT_RETRIES="${MATRIX_PROBE_TRANSIENT_RETRIES:-1}" MATRIX_PROBE_TRANSIENT_PAUSE="${MATRIX_PROBE_TRANSIENT_PAUSE:-2}"
 # a generous-but-bounded suite ceiling so a wedge still exits (the whole run should finish well under this).
 export HARNESS_SUITE_CEIL_S="${HARNESS_SUITE_CEIL_S:-1800}"
 
