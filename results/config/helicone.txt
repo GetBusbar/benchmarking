@@ -1,0 +1,34 @@
+# ── config.gen.yaml (rendered; loaded via -c config.gen.yaml) ──
+server:
+  address: 0.0.0.0
+  port: 8787
+helicone:
+  features: none
+telemetry:
+  exporter: stdout
+providers:
+  openai:
+    base-url: "http://127.0.0.1:8000/"
+  anthropic:
+    base-url: "http://127.0.0.1:8000/"
+  bedrock:
+    base-url: "http://127.0.0.1:8000/"
+routers:
+  default:
+    load-balance:
+      chat:
+        strategy: latency
+        providers:
+          - openai
+          - anthropic
+          - bedrock
+
+# ── launch env (non-secret; provider/AWS keys are dummy on the isolated rig) ──
+OPENAI_API_KEY=sk-dummy
+ANTHROPIC_API_KEY=sk-dummy
+GEMINI_API_KEY=sk-dummy
+AWS_ACCESS_KEY=AKIAMOCKACCESSKEY
+AWS_SECRET_KEY=mock-secret-access-key
+AWS_ACCESS_KEY_ID=AKIAMOCKACCESSKEY
+AWS_SECRET_ACCESS_KEY=mock-secret-access-key
+AWS_REGION=us-east-1
