@@ -18,6 +18,9 @@ source "$B/lib/stream_measure.sh"
 eval "real_stream_probe() $(declare -f stream_probe | sed '1d')"
 # Override externals AFTER sourcing so the stubs win.
 pkill(){ :; }; setsid(){ :; }; taskset(){ :; }; sleep(){ :; }; env(){ :; }
+# audit #21: the mock-restart choke point lives in lib/harness.sh, which this unit test does not
+# source (it drives ONE lib in isolation). Stub it green — mock_stop_wait has its own test below.
+mock_stop_wait(){ return 0; }
 suite_deadline_expired(){ return 1; }
 log(){ :; }
 probe_budget(){ echo 1; }

@@ -56,7 +56,10 @@ declare -gA SM_PROBE_OK 2>/dev/null || true
 # chunks/interval_ms/chunk_bytes select the SSE shape: stream/ paces at ~20ms; streamcpu/ + the matrix
 # cpu-fps measurement UNPACE (interval 0) so per-frame relay cost dominates. Idempotent restart.
 stream_mock_start(){ # chunks interval_ms chunk_bytes
-  [ -n "$MOCK" ] && pkill -f "$MOCK" 2>/dev/null; sleep 1
+  # audit #21: WAIT for the old mock to actually exit and release the port. A blind `sleep 1`
+  # after an async pkill let the fresh mock panic on EADDRINUSE (48/75 cells lost their
+  # streaming to "stream_mock_unready" in the 2026-07-25 run). See lib/harness.sh.
+  mock_stop_wait || log "WARNING: :$MOCK_PORT still occupied after mock_stop_wait — the relaunch below may fail to bind"
   setsid taskset -c "$MOCKCORES" env \
     MOCK_STREAM_CHUNKS="$1" MOCK_STREAM_INTERVAL_MS="$2" MOCK_STREAM_CHUNK_BYTES="$3" \
     "$MOCK" -port "$MOCK_PORT" </dev/null >/dev/null 2>&1 &

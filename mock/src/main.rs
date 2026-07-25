@@ -382,7 +382,30 @@ async fn main() {
     // Envoy AI via the kind bridge IP) can reach the mock — the loopback path 127.0.0.1 that the
     // --network-host and native gateways use is unchanged.
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
-    let listener = TcpListener::bind(addr).await.expect("bind");
+    // BIND WITH RETRY (audit #21). This was `TcpListener::bind(addr).await.expect("bind")`, so a single
+    // transient EADDRINUSE was instantly FATAL. The harness restarts the mock between cells by pkill'ing
+    // the previous one and relaunching after a blind `sleep 1`; pkill returns before the old process has
+    // exited, so the fresh mock regularly landed on a port its predecessor still held, panicked, and left
+    // the harness probing a dead socket — 48 of 75 served cells in the 2026-07-25 field run recorded
+    // "untestable / stream_mock_unready", emptying the matrix streaming lane for every gateway.
+    //
+    // lib/harness.sh mock_stop_wait now waits for the port to be genuinely free, which is the real fix.
+    // This is the second layer: a brief retry means a lost race COSTS A FEW SECONDS instead of silently
+    // destroying a cell's measurement. The failure is still fatal if the port never frees — a mock that
+    // is not listening must never look like a mock that is.
+    let listener = {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            match TcpListener::bind(addr).await {
+                Ok(l) => break l,
+                Err(e) if std::time::Instant::now() < deadline => {
+                    eprintln!("mock: bind {addr} failed ({e}); the previous mock may still hold the port — retrying");
+                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                }
+                Err(e) => panic!("mock: could not bind {addr} within 20s: {e}"),
+            }
+        }
+    };
     eprintln!("mock listening on {addr} (ttft={ttft_ms}ms, proto=h1+h2c, stream={s_chunks}x{s_bytes}B@{s_interval}ms on stream:true) — OpenAI/Responses/Anthropic/Gemini/Bedrock/Cohere");
     loop {
         let (stream, _) = match listener.accept().await {
