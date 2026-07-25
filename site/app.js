@@ -856,7 +856,7 @@ const COLUMN_SETS = {
       get: (g) => chooserPerfCell(g, "added_latency_p50_us", fmtAdded) },
     { id: "lat", label: "Added latency p99 (µs)", desc: false, title: "Gateway p99 minus direct-to-mock p99 at concurrency 1 on the chosen cell",
       get: (g) => chooserPerfCell(g, "added_latency_p99_us", fmtAdded) },
-    { id: "rps20", label: "Sustained RPS @20ms", desc: true, title: "Sustained requests/sec with a 20 ms mock LLM latency (p99 < 1 s, <0.1% errors) on the chosen cell. Hover a cell for the concurrency it peaked at.",
+    { id: "rps20", label: "Sustained RPS (20 ms upstream)", desc: true, title: "Sustained requests/sec on the chosen cell while the mock upstream holds every response for 20 ms, standing in for a real model's time to first token. The 20 ms is the UPSTREAM's delay, not a latency target the gateway is held to: the qualifying bar is p99 under 1 s with fewer than 0.1% errors. Hover a cell for the concurrency it peaked at.",
       get: (g, st = state) => sustainedChooserCell(g, st) },
     { id: "rpsmax", label: "Max proxy RPS", desc: true, title: "Throughput ceiling against an instant mock (p99 < 1 s, <0.1% errors) on the chosen cell. Shows the concurrency it peaked at.",
       get: (g, st = state) => maxProxyChooserCell(g, st) },
@@ -972,7 +972,7 @@ const LANES = [
       // The operating concurrency travels INSIDE the sealed envelope (env.concurrency); the drawer shows
       // it as "(@ c=Y)" so the headline surfaces the load level its marked sweep peak sat at.
       { k: "rps_max_proxy", label: "Max proxy RPS", best: "max", fmt: fmtInt },
-      { k: "rps_sustained_20ms", label: "Sustained RPS @20ms", best: "max", fmt: fmtInt },
+      { k: "rps_sustained_20ms", label: "Sustained RPS (20 ms upstream)", best: "max", fmt: fmtInt },
     ],
   },
   {
@@ -1022,7 +1022,7 @@ const LANES = [
     metrics: [
       { k: "added_latency_p50_us", label: "Added latency p50 (µs)", best: "min", fmt: fmtInt },
       { k: "added_latency_p99_us", label: "Added latency p99 (µs)", best: "min", fmt: fmtInt },
-      { k: "rps_sustained_20ms", label: "Sustained RPS @20ms", best: "max", fmt: fmtInt },
+      { k: "rps_sustained_20ms", label: "Sustained RPS (20 ms upstream)", best: "max", fmt: fmtInt },
     ],
   },
 ];
@@ -1068,7 +1068,7 @@ function perfSweepSeries(g, colors, st = state) {
     if (v == null || !(env.sweep && env.sweep.length)) return;
     out.push({ label, color, sweep: env.sweep, peak: { rps: v, conc: concAt(env) } });
   };
-  add("rps_sustained_20ms", colors.sustainedLabel || "sustained @20ms", colors.sustained);
+  add("rps_sustained_20ms", colors.sustainedLabel || "sustained (20 ms upstream)", colors.sustained);
   add("rps_max_proxy", colors.maxLabel || "max proxy", colors.max);
   return out;
 }
@@ -2076,7 +2076,7 @@ function renderCompare() {
     }
   }
   h += `</tbody></table></div>`;
-  h += `<p class="fineprint">Best value per row is highlighted, decided by the measurement (lower latency and memory, higher throughput). Sweep overlays below use the sustained @20ms sweep read off the SAME canonical record as the headline rows; every point is a real probe and the marked dot is the published number at its operating concurrency.</p>`;
+  h += `<p class="fineprint">Best value per row is highlighted, decided by the measurement (lower latency and memory, higher throughput). Sweep overlays below use the sustained-throughput sweep (20 ms upstream delay) read off the SAME canonical record as the headline rows; every point is a real probe and the marked dot is the published number at its operating concurrency.</p>`;
   h += `<div id="cmp-sweeps" class="sweeps"></div>`;
   document.getElementById("compare-body").innerHTML = h;
 
@@ -2151,7 +2151,7 @@ function cellPerfTip(cell, ingress, egress, best) {
     return lat != null ? `+${fmtInt(lat)} µs p99 added (sustained RPS n/a: rig-limited)` : "";
   }
   const bp = cellPath(best), bRps = mval(best && best.rps_sustained_20ms);
-  let s = `${fmtInt(rps)} req/s @20ms`;
+  let s = `${fmtInt(rps)} req/s (20 ms upstream)`;
   if (lat != null) s += `, +${fmtInt(lat)} µs p99 added`;
   if (bRps != null && bRps > 0) {
     if (bp.ingress === ingress && bp.egress === egress) s += " - reference cell (ranks the table)";
