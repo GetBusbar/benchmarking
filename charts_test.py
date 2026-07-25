@@ -57,21 +57,52 @@ def chart_by_name(name):
     raise AssertionError(f"no chart named {name}")
 
 
+# ── seal helper: mirror seal.mjs / gen-data so fixtures express RAW intent (value + mock_bound) and get
+#    sealed into the SAME envelope shape the real bundle carries. A gated metric is certified only when
+#    present + (0 [measured-zero] OR (>0 AND flag is False)); else suppressed (value:null). ─────────────
+def _seal(value, gated=False, flag=None, extras=None, zero_measured=True):
+    if value is None:
+        return {"value": None, "certified": False, "suppressed": False, "reason": "not_measured"}
+    if gated:
+        if value == 0:
+            return ({"value": 0, "certified": True, "suppressed": False, "note": "no_qualifying_ceiling"}
+                    if zero_measured
+                    else {"value": None, "certified": False, "suppressed": False, "reason": "not_measured"})
+        if not (value > 0 and flag is False):
+            reason = "mock_bound" if flag is True else "unverifiable"
+            return {"value": None, "certified": False, "suppressed": True, "reason": reason}
+    env = {"value": value, "certified": True, "suppressed": False}
+    if extras:
+        for k, v in extras.items():
+            if v is not None:
+                env[k] = v
+    return env
+
+
+_SRC = {"kind": "matrix", "sweep": "6x6-stream-diagonal", "build": "x", "measured_at": "2026-01-01T00:00:00Z"}
+
+
 # ── fixtures: a canonical bundle keyed like CANON (key -> record with a `streaming` sub-record) ───────
 def _canon(streaming_by_key):
     charts.CANON = {k: {"streaming": s} for k, s in streaming_by_key.items()}
     charts.GATEWAYS = {k: k for k in streaming_by_key}
 
 
-BASE = dict(stream_served=True, added_ttft_p99_us=90, added_gap_p99_us=12,
-            streams_sustained=1300, streams_sustained_fps=40000, streams_sustained_mock_bound=False,
-            cpu_fps=48000, cpu_fps_mock_bound=False)
-
-
+# stream(**over): build a raw stream record from the base intent (value + mock_bound), then SEAL it into
+# the envelope-carrying record _proj_streaming reads. `over` names the raw values (e.g. cpu_fps_mock_bound=
+# True); the seal turns them into the correct envelope, exactly as gen-data does.
 def stream(**over):
-    d = dict(BASE)
-    d.update(over)
-    return d
+    raw = dict(added_ttft_p99_us=90, added_gap_p99_us=12,
+               streams_sustained=1300, streams_sustained_fps=40000, streams_sustained_mock_bound=False,
+               cpu_fps=48000, cpu_fps_mock_bound=False)
+    raw.update(over)
+    rec = {"stream_served": True, "path": {"dialect": "openai"}, "source": _SRC,
+           "added_ttft_p99_us": _seal(raw["added_ttft_p99_us"]),
+           "added_gap_p99_us": _seal(raw["added_gap_p99_us"]),
+           "streams_sustained_fps": _seal(raw["streams_sustained_fps"]),
+           "streams_sustained": _seal(raw["streams_sustained"], gated=True, flag=raw["streams_sustained_mock_bound"], zero_measured=False),
+           "cpu_fps": _seal(raw["cpu_fps"], gated=True, flag=raw["cpu_fps_mock_bound"], zero_measured=False)}
+    return rec
 
 
 # ── _proj_streaming: the streamcpu / sustained validity gates ────────────────────────────────────────
@@ -162,13 +193,36 @@ def _canon_perf(perf_by_key):
     charts.GATEWAYS = {k: k for k in perf_by_key}
 
 
-BC = dict(added_latency_p99_us=120, added_latency_p50_us=40,
-          rps_max_proxy=44000, rps_max_proxy_mock_bound=False,
-          rps_sustained_20ms=22000, rps_sustained_20ms_mock_bound=False,
-          dialect="openai", source="matrix", build="img:1", measured_at="2026-07-24T00:00:00Z")
+_BC_SRC = {"kind": "matrix", "sweep": "6x6-diagonal", "build": "img:1", "measured_at": "2026-07-24T00:00:00Z"}
+
+
+def bc(added_latency_p99_us=120, added_latency_p50_us=40,
+       rps_max_proxy=44000, rps_max_proxy_mock_bound=False,
+       rps_sustained_20ms=22000, rps_sustained_20ms_mock_bound=False, dialect="openai"):
+    """A SEALED best_cell fixture: raw intent (value + mock_bound) -> the envelope shape gen-data emits."""
+    return {
+        "path": {"ingress": dialect, "egress": dialect, "dialect": dialect}, "source": _BC_SRC,
+        "added_latency_p50_us": _seal(added_latency_p50_us),
+        "added_latency_p99_us": _seal(added_latency_p99_us),
+        "rps_max_proxy": _seal(rps_max_proxy, gated=True, flag=rps_max_proxy_mock_bound),
+        "rps_sustained_20ms": _seal(rps_sustained_20ms, gated=True, flag=rps_sustained_20ms_mock_bound),
+    }
+
+
+def tc(ingress="openai", egress="anthropic", added_latency_p99_us=200,
+       added_latency_p50_us=None, rps_sustained_20ms=15000, rps_sustained_20ms_mock_bound=False):
+    """A SEALED translation_cell fixture."""
+    rec = {"path": {"ingress": ingress, "egress": egress},
+           "source": {"kind": "matrix", "sweep": "6x6-translation", "build": "img:1", "measured_at": "2026-07-24T00:00:00Z"},
+           "added_latency_p99_us": _seal(added_latency_p99_us),
+           "rps_sustained_20ms": _seal(rps_sustained_20ms, gated=True, flag=rps_sustained_20ms_mock_bound)}
+    if added_latency_p50_us is not None:
+        rec["added_latency_p50_us"] = _seal(added_latency_p50_us)
+    return rec
+
 
 # A gateway with ONLY a best_cell (no results/perf/<key>.json on disk at all).
-_canon_perf({"matrixonly": {"best_cell": dict(BC)}})
+_canon_perf({"matrixonly": {"best_cell": bc()}})
 perf_rows = charts._load("perf")
 perf_keys = {r["_key"] for r in perf_rows}
 check("HIGH-1: a matrix-only gateway (best_cell, no results/perf file) appears as a perf chart row",
@@ -181,15 +235,15 @@ _canon_perf({"noserve": {}})
 check("HIGH-1: a gateway with no best_cell is absent from the perf charts", charts._load("perf"), [])
 
 # _merge (README leaderboard) enumerates CANON, so the matrix-only gateway appears in the report too.
-_canon_perf({"matrixonly": {"best_cell": dict(BC), "memory_read": {"peak_rss_mib": 90, "idle_rss_mib": 30}}})
+_canon_perf({"matrixonly": {"best_cell": bc(),
+                            "memory_read": {"peak_rss_mib": _seal(90), "idle_rss_mib": _seal(30)}}})
 merged = charts._merge()
 check("HIGH-1: _merge (report leaderboard) includes a matrix-only gateway (best_cell, no disk perf)",
       "matrixonly" in merged, True)
 check("HIGH-1: the merged report row carries the canonical sustained RPS", merged["matrixonly"]["rps_sustained_20ms"], 22000)
 
 # xlate charts project from translation_cell, not results/xlate/<key>.json.
-_canon_perf({"xl": {"translation_cell": dict(ingress="openai", egress="anthropic", source="matrix",
-                                             added_latency_p99_us=200, rps_sustained_20ms=15000)}})
+_canon_perf({"xl": {"translation_cell": tc()}})
 xrows = charts._load("xlate")
 check("HIGH-1: a matrix-only gateway with a translation_cell appears as an xlate chart row",
       {r["_key"] for r in xrows}, {"xl"})
@@ -201,14 +255,8 @@ check("HIGH-1: _suite_map('xlate') enumerates translation_cell (report translati
 # the raw value published a number the chart + site both hide — two surfaces diverging from one record.
 # Certified cell → the number prints; mock-bound cell → "not measured (rig-limited)", not the raw value.
 _canon_perf({
-    "xcert": {"best_cell": dict(BC),
-              "translation_cell": dict(ingress="openai", egress="anthropic", source="matrix",
-                                       added_latency_p99_us=200, rps_sustained_20ms=15000,
-                                       rps_sustained_20ms_mock_bound=False)},
-    "xbound": {"best_cell": dict(BC),
-               "translation_cell": dict(ingress="openai", egress="anthropic", source="matrix",
-                                        added_latency_p99_us=200, rps_sustained_20ms=99999,
-                                        rps_sustained_20ms_mock_bound=True)},
+    "xcert": {"best_cell": bc(), "translation_cell": tc(rps_sustained_20ms=15000, rps_sustained_20ms_mock_bound=False)},
+    "xbound": {"best_cell": bc(), "translation_cell": tc(rps_sustained_20ms=99999, rps_sustained_20ms_mock_bound=True)},
 })
 md = charts._report_md(list(charts._merge().items()), "t", [])
 check("FINDING 24: a CERTIFIED translation RPS prints its value in the README table", "15,000" in md, True)
@@ -220,7 +268,7 @@ check("FINDING 24: a mock-bound translation cell reads 'rig-limited' in the READ
 # HIGH-1 (consistency): EVERY gateway with a best_cell appears as a perf chart row, and vice-versa
 # (chart-row presence <=> best_cell presence). This is the assertion the audit asks for, enforced here
 # by construction of the projection.
-_canon_perf({"a": {"best_cell": dict(BC)}, "b": {"best_cell": dict(BC)}, "c": {}})
+_canon_perf({"a": {"best_cell": bc()}, "b": {"best_cell": bc()}, "c": {}})
 bc_keys = {k for k, g in charts.CANON.items() if g.get("best_cell")}
 row_keys = {r["_key"] for r in charts._load("perf")}
 check("HIGH-1: chart-row presence == best_cell presence (every best_cell is a row and vice-versa)",
@@ -230,9 +278,9 @@ check("HIGH-1: chart-row presence == best_cell presence (every best_cell is a ro
 # ── MED-3: the passthrough RPS charts gate the bar on the mock-bound honesty flag (rps_*_valid) ──────
 # A mock-bound (rig-limited) throughput must NOT draw a full bar or rank #1 — mirroring the streaming lane.
 _canon_perf({
-    "clean": {"best_cell": dict(BC, rps_sustained_20ms=20000, rps_sustained_20ms_mock_bound=False)},
-    "bound": {"best_cell": dict(BC, rps_sustained_20ms=99999, rps_sustained_20ms_mock_bound=True)},   # higher raw, rig-limited
-    "unver": {"best_cell": dict(BC, rps_sustained_20ms=88888, rps_sustained_20ms_mock_bound=None)},   # unverifiable
+    "clean": {"best_cell": bc(rps_sustained_20ms=20000, rps_sustained_20ms_mock_bound=False)},
+    "bound": {"best_cell": bc(rps_sustained_20ms=99999, rps_sustained_20ms_mock_bound=True)},   # higher raw, rig-limited
+    "unver": {"best_cell": bc(rps_sustained_20ms=88888, rps_sustained_20ms_mock_bound=None)},   # unverifiable
 })
 # the projected rows carry the validity flags
 prows = {r["_key"]: r for r in charts._load("perf")}
@@ -245,8 +293,8 @@ check("MED-3: an unverifiable sustained RPS is out of the top-N", "unver" in sus
 check("MED-3: the clean sustained RPS IS ranked", "clean" in sust_topn, True)
 # max-proxy chart carries the same gate
 _canon_perf({
-    "clean": {"best_cell": dict(BC, rps_max_proxy=40000, rps_max_proxy_mock_bound=False)},
-    "bound": {"best_cell": dict(BC, rps_max_proxy=99999, rps_max_proxy_mock_bound=True)},
+    "clean": {"best_cell": bc(rps_max_proxy=40000, rps_max_proxy_mock_bound=False)},
+    "bound": {"best_cell": bc(rps_max_proxy=99999, rps_max_proxy_mock_bound=True)},
 })
 proxy_topn = charts._topn_keys(chart_by_name("rps_max_proxy"), n=5)
 check("MED-3: a mock-bound max-proxy RPS is out of the top-N", "bound" in proxy_topn, False)

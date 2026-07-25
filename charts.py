@@ -77,6 +77,47 @@ CANON = _canonical()
 _PERF_FIELDS = ("added_latency_p50_us", "added_latency_p99_us", "rps_sustained_20ms", "rps_max_proxy")
 
 
+# ---- the sealed-envelope reader (Python mirror of app.js metric() / seal.mjs) ----------------------
+# Every metric in data.json is a SEALED ENVELOPE ({value, certified, suppressed, reason?, note?, …});
+# the honesty gate lives UPSTREAM at seal time, so a suppressed metric has value:null and the raw number
+# is GONE. mval() is the displayable value (None when suppressed/absent); the chart's `*_valid` gates are
+# now simply "value is not None" — there is no separate mock-bound flag to re-check, because the envelope
+# already dropped the number. This replaces the per-metric `_mock_bound is not False` re-derivation.
+def _is_env(x) -> bool:
+    return isinstance(x, dict) and isinstance(x.get("certified"), bool)
+
+
+def mval(env):
+    """The bare displayable value of a sealed envelope, or None when suppressed/absent."""
+    if _is_env(env):
+        return env.get("value")
+    return None if env is None else env  # tolerate a bare scalar (legacy/raw), never invent one
+
+
+def mvalid(env) -> bool:
+    """A metric draws a bar iff its envelope carries a value (certified, incl. a measured 0)."""
+    return _is_env(env) and env.get("value") is not None
+
+
+# ---- provenance-driven captions (Python mirror of app.js SWEEP_CAPTION) -----------------------------
+# The class test (check-consistency) asserts this dict's KEYS match the JS SWEEP_CAPTION so the two
+# caption vocabularies can never drift. Every source label a chart/README emits is keyed by source.sweep.
+SWEEP_CAPTION = {
+    "6x6-diagonal", "6x6-translation", "6x6-memory-window", "6x6-stream-diagonal",
+    "perf-suite", "xlate-suite", "stream-suite",
+}
+
+
+def _sweep_label(source: dict | None) -> str:
+    """A short provenance suffix for a datum, rendered FROM its source.sweep stamp (never hard-coded)."""
+    sweep = (source or {}).get("sweep")
+    return {
+        "perf-suite": " (perf suite)",
+        "xlate-suite": " (translation suite)",
+        "stream-suite": " (stream suite)",
+    }.get(sweep, "")
+
+
 def _read_result(p: Path) -> dict:
     """Load one results JSON, failing LOUDLY with the offending path.
 
@@ -243,8 +284,10 @@ def _dialect(d):
 # Per-bar provenance note on the canonical passthrough charts: name the dialect when it is not
 # the common openai diagonal, and disclose a perf-suite fallback (no matrix per-cell sweep yet).
 def _perf_annot(r):
-    if r.get("_perf_source") == "perf-fallback":
-        return "perf-suite default path"
+    # Provenance suffix rendered FROM the sweep stamp (never a hard-coded source string).
+    lbl = _sweep_label({"sweep": r.get("_perf_source")})
+    if lbl:
+        return lbl.strip(" ()")
     d = r.get("_dialect")
     return f"on {_dialect(d)}" if d and d != "openai" else None
 
@@ -448,7 +491,7 @@ CHARTS = [
         served_field="xlate_rps_sustained_20ms_valid",
         not_served_text="✕ not measured (rig-limited / needs field run)",
         annot=lambda r: (f"{_dialect(r.get('_xlate_ingress'))} → {_dialect(r.get('_xlate_egress'))}"
-                         + (" (xlate suite)" if r.get("_xlate_source") == "xlate-fallback" else ""))
+                         + _sweep_label({"sweep": r.get("_xlate_source")}))
                         if r.get("_xlate_ingress") else None,
     ),
     Chart(
@@ -465,7 +508,7 @@ CHARTS = [
         zero_ok=True,
         auto_ms=True,
         annot=lambda r: (f"{_dialect(r.get('_xlate_ingress'))} → {_dialect(r.get('_xlate_egress'))}"
-                         + (" (xlate suite)" if r.get("_xlate_source") == "xlate-fallback" else ""))
+                         + _sweep_label({"sweep": r.get("_xlate_source")}))
                         if r.get("_xlate_ingress") else None,
     ),
     # Governance is intentionally NOT charted on the neutral board: the governed suite is a
@@ -501,44 +544,24 @@ def _proj_streaming(key: str) -> dict | None:
     s = (CANON.get(key) or {}).get("streaming")
     if not s:
         return None
-    # streamcpu validity: the cpu-fps relay number is a valid gateway-vs-ceiling comparison only when
-    # it was actually measured (cpu_fps present + positive) AND was NOT mock-bound (an unpinned box is
-    # mock-bound → not proven). Mirrors the retired suite's streamcpu_valid = streamed && !mock_bound.
-    cpu = s.get("cpu_fps")
-    # MEDIUM-5: require the mock-bound flag to be EXPLICITLY False. `cpu_fps_mock_bound=null` means the
-    # harness could NOT certify the number (the ceiling probe read 0), so the number is UNVERIFIABLE —
-    # not proven. The old `not s.get(...)` treated null as "not mock-bound" (Python `not None` is True),
-    # leaking an unverifiable number through as a proven gateway-vs-ceiling comparison. Only a value the
-    # harness certified as NOT mock-bound (explicit False) is valid; null/True both suppress the bar
-    # (mirrors app.js cpuFpsCertified, which the site + check-consistency use for the identical rule).
-    cpu_valid = cpu is not None and float(cpu or 0) > 0 and s.get("cpu_fps_mock_bound") is False
-    # MEDIUM-R2-2: streams_sustained gets the SAME mock-bound gate as cpu-fps (above). A sustained count
-    # whose bisect saturated near the paced-mock ceiling (streams_sustained_mock_bound=true) is rig-
-    # limited, not gateway-limited; a null flag (reference ceiling unread) is unverifiable. Both must
-    # suppress the bar so a mock bottleneck never draws a full sustained bar / ranks top-N — exactly the
-    # asymmetry the cpu-fps lane already closes. Mirrors app.js sustainedCertified (site + check-
-    # consistency use the identical rule); only an explicit False survives.
-    sust = s.get("streams_sustained")
-    sust_valid = sust is not None and float(sust or 0) > 0 and s.get("streams_sustained_mock_bound") is False
+    # Every metric is a SEALED ENVELOPE: the mock-bound gate was applied at seal time, so a rig-limited /
+    # unverifiable value is already {value:null,…}. Validity is simply "the envelope carries a value" —
+    # there is no separate mock-bound flag to re-check (it was consumed). cpu_fps / streams_sustained are
+    # gated (their envelope is null when suppressed); TTFT / gap are ungated latency-shaped envelopes.
+    cpu = mval(s.get("cpu_fps"))
+    sust = mval(s.get("streams_sustained"))
     return {
-        # MEDIUM-1(b): carry the cell's ACTUAL stream_served through, never hardcode True. gen-data now
-        # only projects g.streaming for a cell that actually streamed (stream_served === true), but a
-        # legacy stream-fallback record could still carry stream_served=false; hardcoding True drew a
-        # did-not-stream cell as a served streamer. Default True only when the key is absent (a matrix
-        # projection with no explicit flag is, by construction, a streamed cell).
         "stream_served": s.get("stream_served", True),
-        "stream_added_ttft_p99_us": s.get("added_ttft_p99_us"),
-        "stream_added_gap_p99_us": s.get("added_gap_p99_us"),
-        "stream_sustained_streams": s.get("streams_sustained"),
-        "stream_sustained_fps": s.get("streams_sustained_fps"),
-        "stream_sustained_valid": sust_valid,
+        "stream_added_ttft_p99_us": mval(s.get("added_ttft_p99_us")),
+        "stream_added_gap_p99_us": mval(s.get("added_gap_p99_us")),
+        "stream_sustained_streams": sust,
+        "stream_sustained_fps": mval(s.get("streams_sustained_fps")),
+        "stream_sustained_valid": sust is not None,
         "streamcpu_frames_per_sec": cpu,
-        # NIT: the matrix never emits cpu_fps_per_core, so this is ALWAYS null today. Kept null-safe (the
-        # per-core chart tolerates a null via `float(r.get(...) or 0)`); emitting a real value is a
-        # matrix/run.sh change (out of scope here). Left in place so the column reappears automatically
-        # once the harness does emit it, rather than silently dropping the plumbing.
+        # cpu_fps_per_core is not emitted today (always null); kept null-safe so the column reappears
+        # automatically once the harness emits it. It is not an envelope (plumbing placeholder).
         "streamcpu_fps_per_core": s.get("cpu_fps_per_core"),
-        "streamcpu_valid": cpu_valid,
+        "streamcpu_valid": cpu is not None,
     }
 
 
@@ -548,13 +571,14 @@ def _proj_memory(key: str) -> dict | None:
     m = (CANON.get(key) or {}).get("memory_read")
     if not m:
         return None
+    # RSS metrics are UNGATED sealed envelopes (no mock-bound flag); mval() reads them (None when absent).
     return {
         "served": True,
-        "idle_rss_mib": m.get("idle_rss_mib"),
-        "peak_rss_mib": m.get("peak_rss_mib"),
+        "idle_rss_mib": mval(m.get("idle_rss_mib")),
+        "peak_rss_mib": mval(m.get("peak_rss_mib")),
         # recovered_rss_mib is absent on pre-recovery bundles → None. The recovery chart gates on it
         # (null_not_served), so such a gateway is shown "not measured", never a fabricated 0 bar.
-        "recovered_rss_mib": m.get("recovered_rss_mib"),
+        "recovered_rss_mib": mval(m.get("recovered_rss_mib")),
     }
 
 
@@ -590,39 +614,30 @@ def _proj_perf(key: str) -> dict | None:
     if not bc:
         return None
     obj: dict = {}
+    # Every metric is a SEALED ENVELOPE; mval() reads it (None when suppressed/absent). The gate lives
+    # upstream at seal time, so a rig-limited RPS is already null here — there is no _mock_bound flag to
+    # re-check (it was consumed). Validity (served_field) is simply "the envelope carries a value".
     for f in _PERF_FIELDS:
-        if bc.get(f) is not None:
-            obj[f] = bc[f]
+        v = mval(bc.get(f))
+        if v is not None:
+            obj[f] = v
     obj["served"] = True  # best_cell only exists for a served path
-    obj["_dialect"] = bc.get("dialect")
-    obj["_perf_source"] = bc.get("source")
-    # MED-3: carry the mock-bound honesty flags through so the report's rps_cell (⚠) AND the RPS
-    # charts' validity gate see them — a rig-limited (mock-bound) throughput must not draw a full bar
-    # or rank #1. Also carry build/measured_at (report row provenance) + hardware (from the memory
-    # read, since best_cell carries no hardware stamp) so the report header + rows keep their context.
-    obj["rps_max_proxy_mock_bound"] = bc.get("rps_max_proxy_mock_bound")
-    obj["rps_sustained_20ms_mock_bound"] = bc.get("rps_sustained_20ms_mock_bound")
-    # MED-3: per-metric VALIDITY (served_field) for the RPS charts. A POSITIVE throughput that is
-    # mock-bound (rig-limited) or unverifiable (mock_bound !== False) is NOT a valid gateway-vs-ceiling
-    # reading — it is suppressed (draws no bar, never ranks top-N, shows "not measured (rig-limited)"),
-    # mirroring app.js perfRpsSuppressed and the check-consistency RPS visibility assertion. A legitimate
-    # measured 0 (served but no tested load held p99 < 1 s) is NOT suppressed: it stays "served" so the
-    # chart shows its zero_text ("0 · no load held"), distinct from a rig-ceiling number. So a row is
-    # valid (served) unless it is a positive value the harness could not certify as gateway-limited.
+    src = bc.get("source") or {}
+    path = bc.get("path") or {}
+    obj["_dialect"] = path.get("dialect")
+    obj["_perf_source"] = src.get("sweep")   # the provenance stamp key (drives _sweep_label / _perf_annot)
     for _m in ("rps_max_proxy", "rps_sustained_20ms"):
-        _v = obj.get(_m)
-        _suppressed = (_v is not None and float(_v or 0) > 0
-                       and bc.get(f"{_m}_mock_bound") is not False)
-        obj[f"{_m}_valid"] = (_v is not None and not _suppressed)
-    obj["build"] = bc.get("build")
-    obj["measured_at"] = bc.get("measured_at")
-    mem = g.get("memory_read") or {}
-    if mem.get("hardware"):
-        obj["hardware"] = mem["hardware"]
-    if mem.get("concurrency") is not None:
-        obj["concurrency"] = mem["concurrency"]
-    if mem.get("payload_bytes") is not None:
-        obj["payload_bytes"] = mem["payload_bytes"]
+        env = bc.get(_m)
+        obj[f"{_m}_valid"] = obj.get(_m) is not None
+        # suppressed = the harness could not certify a positive value (rig-limited / unverifiable). The
+        # envelope carries this explicitly; the README renders "not measured (rig-limited)" for it, distinct
+        # from a measured 0 (value 0, honest) and from an unserved path (no best_cell at all).
+        obj[f"{_m}_suppressed"] = bool(_is_env(env) and env.get("suppressed"))
+    obj["build"] = src.get("build")
+    obj["measured_at"] = src.get("measured_at")
+    hw = (g.get("matrix") or {}).get("hardware")
+    if hw:
+        obj["hardware"] = hw
     _perf_derived(obj)
     return obj
 
@@ -635,25 +650,22 @@ def _proj_xlate(key: str) -> dict | None:
     if not tc:
         return None
     obj: dict = {"xlate_served": True, "xlate_passthrough": False}
-    if tc.get("added_latency_p50_us") is not None:
-        obj["xlate_added_latency_p50_us"] = tc["added_latency_p50_us"]
-    if tc.get("added_latency_p99_us") is not None:
-        obj["xlate_added_latency_p99_us"] = tc["added_latency_p99_us"]
-    if tc.get("rps_sustained_20ms") is not None:
-        obj["xlate_rps_sustained_20ms"] = tc["rps_sustained_20ms"]
-    # MED-3 (mirrored onto the translation lane): a rig-limited (mock-bound) translation RPS is NOT a
-    # valid gateway-vs-ceiling reading — it must not draw a full bar or rank #1 on the translation chart,
-    # exactly as a mock-bound passthrough RPS is suppressed via rps_sustained_20ms_valid. Carry the
-    # honesty flag through and emit xlate_rps_sustained_20ms_valid (present && >0 && mock_bound is False).
-    # A legitimate measured 0 stays served (chart shows its zero_text), distinct from a rig-ceiling number.
-    obj["rps_sustained_20ms_mock_bound"] = tc.get("rps_sustained_20ms_mock_bound")
-    _v = obj.get("xlate_rps_sustained_20ms")
-    _suppressed = (_v is not None and float(_v or 0) > 0
-                   and tc.get("rps_sustained_20ms_mock_bound") is not False)
-    obj["xlate_rps_sustained_20ms_valid"] = (_v is not None and not _suppressed)
-    obj["_xlate_ingress"] = tc.get("ingress")
-    obj["_xlate_egress"] = tc.get("egress")
-    obj["_xlate_source"] = tc.get("source")
+    # Sealed envelopes; mval() reads them. The rps_sustained_20ms envelope is null when suppressed, so
+    # the validity gate is simply "the envelope carries a value" (no _mock_bound flag to re-check).
+    lat50 = mval(tc.get("added_latency_p50_us"))
+    lat99 = mval(tc.get("added_latency_p99_us"))
+    rps = mval(tc.get("rps_sustained_20ms"))
+    if lat50 is not None:
+        obj["xlate_added_latency_p50_us"] = lat50
+    if lat99 is not None:
+        obj["xlate_added_latency_p99_us"] = lat99
+    if rps is not None:
+        obj["xlate_rps_sustained_20ms"] = rps
+    obj["xlate_rps_sustained_20ms_valid"] = rps is not None
+    path = tc.get("path") or {}
+    obj["_xlate_ingress"] = path.get("ingress")
+    obj["_xlate_egress"] = path.get("egress")
+    obj["_xlate_source"] = (tc.get("source") or {}).get("sweep")
     return obj
 
 
@@ -996,27 +1008,27 @@ def _report_md(rows: list, title: str, charts: list, pending: tuple = (), chart_
     dnf_seen = False
     fail_notes = []  # (gateway, serve_error) for every ❌ row — the receipt behind "did not serve"
 
-    def rps_cell(val, bound, served):
-        # ✕ = never served under load; 0 = served but no tested load held p99<1s + <0.1% errors.
+    def rps_cell(val, suppressed, served):
+        # ✕ = never served under load; ⚠ rig-limited = the sealed envelope suppressed a positive value the
+        # harness could not certify as gateway-limited; 0 = served but no tested load held p99<1s.
         if served is False:
             return "✕"
+        if suppressed:
+            return "⚠ rig-limited"
         if not val:
             return "0"
-        cell = f"{int(val):,}"
-        if bound:  # ceiling within 10% of the mock's own — a floor, not a limit
-            cell += " ⚠"
-        return cell
+        return f"{int(val):,}"
 
     for key, r in rows:
         lat = r.get("added_latency_p99_us")
         idle = r.get("idle_rss_mib")
         peak = r.get("peak_rss_mib")
         served = r.get("served", None)
-        proxy = rps_cell(r.get("rps_max_proxy"), r.get("rps_max_proxy_mock_bound"), served)
-        llm = rps_cell(r.get("rps_sustained_20ms"), r.get("rps_sustained_20ms_mock_bound"), served)
-        if r.get("rps_max_proxy_mock_bound") or r.get("rps_sustained_20ms_mock_bound"):
+        proxy = rps_cell(r.get("rps_max_proxy"), r.get("rps_max_proxy_suppressed"), served)
+        llm = rps_cell(r.get("rps_sustained_20ms"), r.get("rps_sustained_20ms_suppressed"), served)
+        if r.get("rps_max_proxy_suppressed") or r.get("rps_sustained_20ms_suppressed"):
             mock_bound_seen = True
-        if served is not False and (not r.get("rps_max_proxy") or not r.get("rps_sustained_20ms")):
+        if served is not False and r.get("rps_max_proxy") == 0:
             zero_load_seen = True
         # Latency cell: a did-not-serve gateway may still have a concurrency-1 number — flag it † so it
         # is never mistaken for a clean win.
@@ -1060,7 +1072,8 @@ def _report_md(rows: list, title: str, charts: list, pending: tuple = (), chart_
         legend.append("**†** = a concurrency-1 latency exists, but the gateway failed under load: "
                       "not a clean result.")
     if mock_bound_seen:
-        legend.append("**⚠** = ceiling within 10% of the mock's own: treat as a **floor**, not a limit.")
+        legend.append("**⚠ rig-limited** = a positive throughput the harness could not certify as "
+                      "gateway-limited (rig / mock-bound); suppressed, not shown as a number.")
     if pending:
         legend.append("**⏳** = a manifest exists but it hasn't been run on the rig yet.")
     if legend:

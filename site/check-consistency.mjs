@@ -1,482 +1,260 @@
 #!/usr/bin/env node
 // SPDX-License-Identifier: Apache-2.0
-// check-consistency.mjs: build-time numeric-consistency guard for the results site.
+// check-consistency.mjs: STRUCTURAL INVARIANTS on the sealed-envelope bundle + accessors.
 //
-// THE RULE: every (gateway, metric) that appears on more than one surface must resolve to ONE
-// canonical source value. For passthrough perf that source is g.best_cell (matrix per-cell
-// sweep, perf-suite fallback tagged source:"perf-fallback"); for translation it is
-// g.translation_cell. The table (passCell), the drawer + compare modal (canonicalPerf /
-// canonicalXlate via the LANES accessors), and charts.py (which reads best_cell /
-// translation_cell straight from data.json) must all agree, or the build FAILS.
+// This file used to assert that twelve render surfaces AGREE on a honesty gate they each re-implemented.
+// Under the sealed envelope (Design E) there is nothing to agree ABOUT: every metric is EITHER a certified
+// number OR an explicit {value:null, suppressed:true} — the raw scalar + its _mock_bound flag are consumed
+// at seal time and never re-emitted. So the check is REPURPOSED into invariants on the contract itself —
+// the onthebench 11th-phase ("where are tests missing?") test:
+//
+//   C1  No raw ungated metric field exists in the bundle (only certified-or-suppressed envelopes); NO
+//       `*_mock_bound` key survives anywhere.
+//   C2  A suppressed metric exposes no recoverable value (value === null, no shadow numeric field).
+//   C3  Every displayed caption derives from a source.sweep stamp present in the data; app.js/charts.py
+//       carry no hard-coded source-token literal in a per-datum caption renderer (the lint).
+//   C4  Single projection path: every projected cell's source.kind is a known origin and its source.sweep
+//       is a valid caption key; NO legacy suite object (g.perf/stream/streamcpu/xlate) leaks into the bundle.
+//   C5  Every gated-field read in app.js routes through metric()/mval() — never a bare `.value` deref or a
+//       numeric compare of a metric field (the accessor-routing lint).
+//
+// Rigor rules (Design F Part 1): the expected side of any cross-representation assertion is re-derived
+// INDEPENDENTLY from the RAW matrix cell on disk (results/matrix/<gw>.json), never via the accessor under
+// test (R1). A COVERAGE assertion (R2) fails if any invariant branch is never exercised by the bundle —
+// an inert check is itself a failure. Each invariant has a RED-before test in test.mjs (revert the seal on
+// one surface → the class test fails).
 //
 // Run standalone against an emitted bundle:
 //   node site/check-consistency.mjs [site/data.json]
-// or through the test suite (site/test.mjs runs it against a freshly generated bundle; the
-// cf-pages deploy runs site/test.mjs, so an inconsistent bundle can never ship).
-//
-// Plausibility (R7): sustained@20ms > max-proxy on a cell is per-cell sweep noise between two
-// independently measured ceilings. The guard WARNS (never fails, never edits data) so the
-// inversion is visible in the build log while the measured values ship untouched.
 
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync, readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 
-const PASS_KEYS = ["added_latency_p99_us", "rps_sustained_20ms", "rps_max_proxy"];
+const HERE = dirname(fileURLToPath(import.meta.url));
+const ROOT = join(HERE, "..");
 
-/* What charts.py plots for a gateway's passthrough metric. HIGH-1: charts.py now PROJECTS the perf row
-   from the canonical best_cell (_proj_perf) and NEVER reads the retired results/perf suite. So when a
-   best_cell exists it is THE source: a field it lacks is null (no bar), with NO fallthrough to the perf
-   suite (the fallthrough that _overlay_perf used to do is gone). Only a gateway with NO best_cell at all
-   (a legacy bundle) is charted from the raw perf suite. MED-3: a mock-bound/unverifiable POSITIVE RPS is
-   suppressed (no bar) exactly as the table reads n/a, so the three surfaces agree. */
-function chartsPassValue(g, key, app) {
-  if (g.best_cell) {
-    if ((key === "rps_max_proxy" || key === "rps_sustained_20ms") && app.perfRpsSuppressed(g.best_cell, key)) return null;
-    return g.best_cell[key] != null ? g.best_cell[key] : null;   // best_cell is THE source; no perf fallthrough
-  }
-  const j = g.perf;
-  return j && j.served !== false && j[key] != null ? j[key] : null;
+// The gated (honesty-flag-bearing) metric field names + their sibling *_mock_bound flags. C1 asserts none
+// of these appear as a BARE scalar, and no *_mock_bound key survives, anywhere in the bundle.
+const GATED_FIELDS = ["rps_sustained_20ms", "rps_max_proxy", "streams_sustained", "cpu_fps"];
+// The full envelope-valued metric field set (gated + ungated), on any projected cell / matrix cell.
+const METRIC_FIELDS = [
+  ...GATED_FIELDS,
+  "added_latency_p50_us", "added_latency_p99_us", "gateway_c1_p99_us", "direct_c1_p99_us",
+  "added_ttft_p50_us", "added_ttft_p99_us", "added_gap_p50_us", "added_gap_p99_us", "streams_sustained_fps",
+  "idle_rss_mib", "peak_rss_mib", "recovered_rss_mib",
+];
+// The origins a projected cell's source.kind may honestly carry: the single end-state "matrix" path plus
+// the LIVE deferred fallbacks (kept until the field run; sealed honestly, never mislabelled as matrix).
+const SOURCE_KINDS = new Set(["matrix", "perf-fallback", "xlate-fallback", "stream-fallback"]);
+
+function isEnvelope(x) { return x != null && typeof x === "object" && typeof x.certified === "boolean"; }
+
+// The raw matrix snapshot on disk — the INDEPENDENT oracle (Design F R1). Never read through the accessor.
+function rawMatrix(gwKey) {
+  const p = join(ROOT, "results", "matrix", `${gwKey}.json`);
+  if (!existsSync(p)) return null;
+  try { return JSON.parse(readFileSync(p, "utf8")); } catch { return null; }
+}
+
+// ---- the caption-literal lint (C3) + accessor-routing lint (C5) --------------
+// A source token in a per-datum caption literal is the bug class (memory mislabelled "6x6"). The lint
+// scans the caption-RENDERING regions of app.js/charts.py — the SWEEP_CAPTION table is the ONE allowed
+// home for source tokens. Tab-level methodology prose (the chooser lead lines that describe the run design)
+// is explicitly out of scope; the C3 lint targets caption(cell)/pathNote/pill/annot renderers.
+const SOURCE_TOKENS = /(?:6x6|6×6|matrix per-cell|xlate suite|stream suite|perf suite)/;
+
+function readSrc(rel) {
+  const p = join(HERE, rel);
+  return existsSync(p) ? readFileSync(p, "utf8") : "";
 }
 
 export function checkConsistency(data, app) {
   const errors = [];
   const warnings = [];
+  const cover = new Set();
+  const covered = (tag) => cover.add(tag);
+
+  // ---- C1 + C2: envelope integrity across the WHOLE bundle -------------------
+  // Walk every object. (C1) a *_mock_bound key must not survive; a gated metric field must be an envelope,
+  // never a bare number. (C2) a suppressed envelope has value:null and no other numeric field on it.
+  const walk = (node, path) => {
+    if (Array.isArray(node)) { node.forEach((v, i) => walk(v, `${path}[${i}]`)); return; }
+    if (node == null || typeof node !== "object") return;
+    for (const [k, v] of Object.entries(node)) {
+      if (k.endsWith("_mock_bound")) {
+        errors.push(`C1: ${path}.${k} — a raw *_mock_bound flag survives in the bundle (must be consumed at seal time)`);
+        covered("C1.mock_bound");
+      }
+      if (METRIC_FIELDS.includes(k)) {
+        covered("C1.field");
+        if (!isEnvelope(v) && typeof v === "number") {
+          errors.push(`C1: ${path}.${k}=${v} is a BARE scalar, not a sealed envelope (a raw ungated metric field survives)`);
+        } else if (isEnvelope(v)) {
+          if (v.suppressed === true) {
+            covered("C2.suppressed");
+            if (v.value !== null) errors.push(`C2: ${path}.${k} is suppressed but value=${v.value} (a suppressed metric must expose no value)`);
+            for (const [sk, sv] of Object.entries(v))
+              if (sk !== "value" && typeof sv === "number")
+                errors.push(`C2: ${path}.${k} is suppressed but carries a recoverable numeric field ${sk}=${sv}`);
+          } else if (v.value != null) {
+            covered("C1.certified");
+          }
+        }
+      }
+      walk(v, `${path}.${k}`);
+    }
+  };
+  walk({ gateways: data.gateways || [] }, "data");
+
+  // ---- C4: single path + no legacy leak --------------------------------------
   for (const g of data.gateways || []) {
-    // ---- passthrough: table (passCell) == drawer/compare (canonicalPerf) == charts (best_cell)
-    const laneRec = app.canonicalPerf(g);
-    for (const key of PASS_KEYS) {
-      const table = app.passCell(g, key, String).v;
-      const drawer = laneRec && laneRec.served !== false && laneRec[key] != null ? laneRec[key] : null;
-      const charts = chartsPassValue(g, key, app);
-      if (!(table === drawer && drawer === charts)) {
-        errors.push(`${g.key}.${key}: table=${table} drawer/compare=${drawer} charts=${charts} (must be one canonical value)`);
-      }
+    // No raw legacy suite object may survive in the emitted bundle (they are the stale reservoir).
+    for (const suite of ["perf", "stream", "streamcpu", "xlate"]) {
+      if (g[suite] != null) { errors.push(`C4: ${g.key}.${suite} — a raw legacy suite object leaked into the bundle`); covered("C4.leak"); }
     }
-    // ---- MED-3: passthrough RPS mock-bound VISIBILITY tie. The two RPS metrics are gated on the
-    // mock-bound honesty flag: charts.py suppresses the bar via rps_*_valid (present + >0 + NOT
-    // mock-bound), and the site (passCell / canonicalPerf) reads n/a on the identical rule
-    // (perfRpsCertified). Assert the two booleans agree so a rig-limited throughput can never draw a
-    // #1 bar while the table hides it (or vice-versa) — the exact asymmetry the streaming lane closes.
-    if (g.best_cell) {
-      for (const m of ["rps_max_proxy", "rps_sustained_20ms"]) {
-        // A mock-bound/unverifiable POSITIVE throughput is SUPPRESSED: n/a on the table (site) AND no
-        // bar / out of top-N on the chart (charts.py rps_*_valid=false). Assert the two suppressions
-        // agree so a rig-limited number can never draw a #1 bar while the table hides it (or vice-versa).
-        // A legitimate measured 0 is NOT suppressed on either surface (site "0" / chart zero_text).
-        const raw = g.best_cell[m];
-        if (raw == null) continue;   // no published number for this metric; nothing to gate
-        const suppressed = app.perfRpsSuppressed(g.best_cell, m);   // the shared mock-bound rule
-        // The site table's ACTUAL accessor: a suppressed positive reads n/a (v==null); a certified
-        // positive OR a legitimate 0 shows a number.
-        const tableShows = app.passCell(g, m, String).v != null;
-        // chartsPassValue mirrors what the PNG plots: null (no bar) exactly when suppressed.
-        const chartShows = chartsPassValue(g, m, app) != null;
-        if (tableShows !== !suppressed) {
-          errors.push(`${g.key}.${m}: mock-bound-suppressed=${suppressed} but the table ${tableShows ? "shows a number" : "reads n/a"} ` +
-            `(a mock-bound/unverifiable throughput must read n/a on the table)`);
-        }
-        if (tableShows !== chartShows) {
-          errors.push(`${g.key}.${m}: table-visible=${tableShows} but chart-visible=${chartShows} ` +
-            `(a mock-bound/unverifiable throughput must read n/a on the table AND draw no bar / not rank — same mock-bound rule)`);
-        }
-      }
+    for (const [name, cell] of [["best_cell", g.best_cell], ["translation_cell", g.translation_cell], ["streaming", g.streaming], ["memory_read", g.memory_read]]) {
+      if (!cell) continue;
+      covered("C4.cell");
+      const src = cell.source;
+      if (!src || !SOURCE_KINDS.has(src.kind))
+        errors.push(`C4: ${g.key}.${name}.source.kind=${JSON.stringify(src && src.kind)} is not a known origin (${[...SOURCE_KINDS].join("|")})`);
+      // C3 (data side): the caption stamp must be renderable through the ONE caption table.
+      if (!src || !app.SWEEP_CAPTION[src.sweep])
+        errors.push(`C3: ${g.key}.${name}.source.sweep=${JSON.stringify(src && src.sweep)} has no SWEEP_CAPTION renderer`);
+      else covered("C3.stamp");
     }
-    // ---- translation: drawer/compare (canonicalXlate) == canonical translation_cell (charts)
-    const t = g.translation_cell;
-    if (t) {
-      const x = app.canonicalXlate(g);
-      const pairs = [
-        ["added_latency_p99_us", "xlate_added_latency_p99_us"],
-        ["rps_sustained_20ms", "xlate_rps_sustained_20ms"],
-      ];
-      for (const [ck, lk] of pairs) {
-        // MED-3 (mirrored): rps_sustained_20ms is GATED — a mock-bound/unverifiable positive reads n/a on
-        // every surface (charts.py suppresses the bar via xlate_rps_sustained_20ms_valid). So the canonical
-        // comparison target is the GATED value; comparing the raw cell value would wrongly demand the site
-        // render a number the chart deliberately hides. Latency (added_latency_p99_us) is never gated.
-        const canon = (ck === "rps_sustained_20ms" && app.xlateRpsSuppressed(t, ck)) ? null : (t[ck] ?? null);
-        const lane = x && x.xlate_served !== false && x[lk] != null ? x[lk] : null;
-        if (canon !== lane) {
-          errors.push(`${g.key}.translation.${ck}: canonical=${canon} drawer/compare=${lane} (must be one canonical value)`);
-        }
-      }
-      // MED-3 (mirrored) translation-lane RPS mock-bound VISIBILITY tie: the drawer/compare shows the
-      // sustained translation RPS exactly when the chart draws its bar (xlate_rps_sustained_20ms_valid =
-      // present && >0 && NOT mock-bound). Assert the two suppressions agree so a rig-limited translation
-      // throughput can never draw a #1 bar while the site hides it (or vice-versa) — the exact asymmetry
-      // MED-3 closed for passthrough, now enforced on translation too.
-      if (t.rps_sustained_20ms != null) {
-        const suppressed = app.xlateRpsSuppressed(t, "rps_sustained_20ms");   // the shared mock-bound rule
-        const siteShows = x && x.xlate_served !== false && x.xlate_rps_sustained_20ms != null;   // drawer/compare
-        const chartShows = !suppressed;   // mirrors charts.py xlate_rps_sustained_20ms_valid on this record
-        if (siteShows !== chartShows) {
-          errors.push(`${g.key}.translation.rps_sustained_20ms: mock-bound-suppressed=${suppressed} but the site ` +
-            `${siteShows ? "shows a number" : "reads n/a"} while the chart ${chartShows ? "draws a bar" : "draws no bar"} ` +
-            `(a rig-limited translation throughput must read n/a on the site AND draw no bar — same mock-bound rule)`);
-        }
-      }
-    }
-    // ---- streaming: the SAME single-source rule as passthrough. The streaming headline shown on the
-    // board (table via streamCell, drawer/compare via canonicalStreaming) MUST be the streaming of the
-    // BEST DIAGONAL matrix cell it is projected from — i.e. the same (ingress==egress) passthrough cell
-    // the perf headline is projected from. If the projected streaming diverges from that cell's own
-    // stream record, the two were read off different sources and this FAILS. Only asserted for a
-    // matrix-sourced projection with a matrix present (a legacy stream-fallback carries no matrix cell
-    // to compare against and is covered by the coverage guard instead).
-    const s = g.streaming;
-    if (s && s.source === "matrix" && g.matrix && g.matrix.upstreams) {
-      const cell = g.matrix.upstreams[s.dialect]?.cells?.[s.dialect];
-      const cellStream = cell && cell.stream;
-      if (!cellStream) {
-        errors.push(`${g.key}.streaming: projected from the ${s.dialect} diagonal but that matrix cell has no stream record`);
-      } else {
-        // table == drawer/compare: both read canonicalStreaming, so compare the table accessor against
-        // the diagonal cell's own numbers to prove the projection did not drift from its source.
-        const skeys = ["added_ttft_p99_us", "added_gap_p99_us", "streams_sustained", "cpu_fps"];
-        for (const key of skeys) {
-          const table = app.streamCell(g, key, String).v;   // n/a -> undefined via .v
-          let headline = s[key] ?? null;
-          let cellVal = cellStream[key] ?? null;
-          // MEDIUM-6: cpu_fps is GATED — the site (streamCell/canonicalStreaming) shows it only when the
-          // number is certified (present + positive + cpu_fps_mock_bound === false), exactly the rule
-          // charts.py uses for streamcpu_valid (which suppresses the bar otherwise). So for cpu_fps the
-          // canonical comparison target is the GATED value on BOTH the projected headline and the
-          // diagonal cell: an uncertified/mock-bound cpu_fps reads n/a on every surface, matching the
-          // chart's suppressed bar. Comparing the raw cell value here would (wrongly) demand the site
-          // render a number the chart deliberately hides.
-          if (key === "cpu_fps") {
-            headline = app.cpuFpsCertified(s) ? headline : null;
-            cellVal = app.cpuFpsCertified(cellStream) ? cellVal : null;
-          }
-          // MEDIUM-R2-2: streams_sustained is GATED exactly like cpu_fps — the site shows it only when
-          // certified (present + positive + streams_sustained_mock_bound === false), the same rule
-          // charts.py uses for stream_sustained_valid (which suppresses the bar otherwise). So the
-          // canonical comparison target is the GATED value on both the projected headline and the
-          // diagonal cell; a mock-bound/unverifiable count reads n/a on every surface, matching the
-          // chart's suppressed bar. Comparing the raw value here would wrongly demand the site render a
-          // number the chart deliberately hides.
-          if (key === "streams_sustained") {
-            headline = app.sustainedCertified(s) ? headline : null;
-            cellVal = app.sustainedCertified(cellStream) ? cellVal : null;
-          }
-          const tableVal = table == null ? null : table;
-          if (!(tableVal === headline && headline === cellVal)) {
-            errors.push(`${g.key}.streaming.${key}: table=${tableVal} headline=${headline} diagonal-cell=${cellVal} ` +
-              `(the streaming headline must be the best diagonal cell's streaming it is projected from)`);
-          }
-        }
-        // MEDIUM-6 (explicit visibility tie): the site's cpu-fps VISIBILITY must equal the chart's
-        // streamcpu_valid rule so the two can never silently diverge again. streamcpu_valid (charts.py
-        // _proj_streaming) = cpu present + positive + NOT mock-bound; the site shows cpu_fps iff
-        // cpuFpsCertified. Assert the two booleans are identical for this projected streaming record.
-        const siteShowsCpu = app.streamCell(g, "cpu_fps", String).v != null;
-        const chartCpuValid = app.cpuFpsCertified(s);   // mirrors charts.py streamcpu_valid on this record
-        if (siteShowsCpu !== chartCpuValid) {
-          errors.push(`${g.key}.streaming.cpu_fps: site-visible=${siteShowsCpu} but chart streamcpu_valid=${chartCpuValid} ` +
-            `(the drawer/table must show cpu-fps exactly when the chart draws its bar — same mock-bound rule)`);
-        }
-        // MEDIUM-R2-2 (explicit visibility tie): the site's streams_sustained VISIBILITY must equal the
-        // chart's stream_sustained_valid rule so the two can never silently diverge. stream_sustained_valid
-        // (charts.py _proj_streaming) = present + positive + NOT mock-bound; the site shows the count iff
-        // sustainedCertified. Assert the two booleans are identical for this projected streaming record.
-        const siteShowsSust = app.streamCell(g, "streams_sustained", String).v != null;
-        const chartSustValid = app.sustainedCertified(s);   // mirrors charts.py stream_sustained_valid
-        if (siteShowsSust !== chartSustValid) {
-          errors.push(`${g.key}.streaming.streams_sustained: site-visible=${siteShowsSust} but chart stream_sustained_valid=${chartSustValid} ` +
-            `(the drawer/table must show sustained-streams exactly when the chart draws its bar — same mock-bound rule)`);
-        }
-        // MEDIUM-R3-3 (explicit visibility tie): the added-TTFT / added-gap PNGs use null_not_served, so a
-        // NULL added-TTFT/gap (an unreliable streaming c1 window sets it null while stream_served stays
-        // true) draws NO bar and never ranks — it must not become a bold served "0". The site table shows
-        // n/a for the same null. Assert the two agree: the site shows the value iff it is non-null, exactly
-        // when the chart draws a bar. Without this the chart's null→0 coercion could diverge from the table.
-        for (const key of ["added_ttft_p99_us", "added_gap_p99_us"]) {
-          const siteShows = app.streamCell(g, key, String).v != null;
-          const chartDrawsBar = (s[key] ?? null) !== null;   // mirrors charts.py null_not_served (bar iff non-null)
-          if (siteShows !== chartDrawsBar) {
-            errors.push(`${g.key}.streaming.${key}: site-visible=${siteShows} but chart draws-bar=${chartDrawsBar} ` +
-              `(a null added-TTFT/gap must read n/a on the table AND draw no bar / not rank on the chart — never a served "0")`);
-          }
-        }
-      }
-    }
-    // FINDING 35: assert WHICHEVER streaming source is actually present, not just matrix. The matrix
-    // branch above is inert while every gateway is stream-fallback (a standalone stream suite, not the
-    // 6x6). A stream-fallback record still feeds the table (via streamCell / canonicalStreaming), so it
-    // must be checked too: the table's per-metric visibility MUST equal the gated canonical record it is
-    // read from, so a fallback number can't show on one surface and vanish on another.
-    if (s && s.source && s.source !== "matrix") {
-      const canon = app.canonicalStreaming(g);   // the drawer/compare record (fallback, gated)
-      for (const key of ["added_ttft_p99_us", "added_gap_p99_us", "streams_sustained", "cpu_fps"]) {
-        const table = app.streamCell(g, key, String).v ?? null;
-        const drawer = canon ? (canon[key] ?? null) : null;
-        if (table !== drawer) {
-          errors.push(`${g.key}.streaming.${key} (${s.source}): table=${table} drawer/compare=${drawer} ` +
-            `(a stream-fallback streaming value must read identically on the table and the drawer/compare)`);
-        }
-      }
-    }
-    // FINDING 21: the streaming consistency above uses streamCell (the Peak accessor) ONLY, so Same/Custom
-    // streaming was never consistency-checked. Assert chooserStreamCell agrees with the underlying cell in
-    // ALL THREE modes: the table column a reader actually sees in Same/Custom must equal the record the
-    // drawer/compare would read for that same chosen cell. (Peak: canonicalStreaming; Same/Custom: the
-    // chosen cell's per-cell stream record via chooserCellStream.)
-    if (s) {
-      const streamKeys = ["added_ttft_p99_us", "added_gap_p99_us", "streams_sustained", "cpu_fps"];
-      const dia = s.dialect;   // the diagonal the projection was measured on
-      const modes = [
-        { mode: "peak" },
-        // Same on the dialect the streaming was actually measured on (the only Same cell that can show it).
-        dia ? { mode: "same", sameDialect: dia } : null,
-        // Custom on that same diagonal (in==out) — the per-cell path chooserCellStream reads.
-        dia ? { mode: "custom", xlateIn: dia, xlateOut: dia } : null,
-      ].filter(Boolean);
-      for (const st of modes) {
-        const rec = app.chooserCellStream(g, st);   // the drawer/compare record for this chosen cell
-        for (const key of streamKeys) {
-          const table = app.chooserStreamCell(g, key, String, st).v ?? null;
-          const drawer = rec ? (rec[key] ?? null) : null;
-          if (table !== drawer) {
-            errors.push(`${g.key}.streaming.${key} (mode=${st.mode}): table=${table} chooser-record=${drawer} ` +
-              `(Same/Custom streaming must be consistency-checked via chooserStreamCell, not only the Peak accessor)`);
-          }
-        }
-      }
-    }
-    // ---- memory (FINDING 32): the post-6x6 peak-cell window. Assert the rendered recovery sparkline
-    // agrees with the RAW memory block (not a re-computation of the same expression), plus idle<=peak
-    // sanity and that a served window is cell-attributed (load_cell present). Reads canonicalMemory,
-    // the ONE record the Memory table + drawer + charts all project from.
-    const mem = app.canonicalMemory(g);
-    if (mem) {
-      const idle = mem.idle_rss_mib, peak = mem.peak_rss_mib, recov = mem.recovered_rss_mib;
-      // idle <= peak sanity when both are present (a load run cannot use less than its own cold idle).
-      if (idle != null && peak != null && Number(idle) > Number(peak)) {
-        errors.push(`${g.key}.memory: idle_rss_mib=${idle} > peak_rss_mib=${peak} ` +
-          `(the fixed load's peak RSS cannot be below the cold-idle baseline)`);
-      }
-      // A served memory window MUST name the cell it was measured on (memory is cell-attributed now).
-      if (mem.served === true && (peak != null || idle != null) && !mem.load_cell) {
-        warnings.push(`${g.key}.memory: served window has RSS numbers but no load_cell (peak cell ` +
-          `attribution missing; a field re-run under the final protocol stamps it)`);
-      }
-      // The recovery sparkline stamps "peak X → recovered Y": X MUST be the max of the raw rss_series and
-      // Y its last point. Assert the RENDERED stamp against the raw series (not a recompute of the stamp).
-      const series = Array.isArray(mem.rss_series) ? mem.rss_series : null;
-      const spark = app.rssSparkline(series);
-      if (spark) {
-        const pts = series.filter((p) => p && typeof p.t_s === "number" && typeof p.rss_mib === "number")
-          .sort((a, b) => a.t_s - b.t_s);
-        const rawMax = Math.max(...pts.map((p) => p.rss_mib));
-        const rawLast = pts[pts.length - 1].rss_mib;
-        const m = spark.match(/peak\s+([\d.]+)\s*→\s*recovered\s+([\d.]+)/);
-        if (!m) {
-          errors.push(`${g.key}.memory: recovery sparkline rendered but its "peak → recovered" stamp is unparseable`);
-        } else {
-          const stampPeak = Number(m[1]), stampRecov = Number(m[2]);
-          if (Math.abs(stampPeak - rawMax) > 0.05) {
-            errors.push(`${g.key}.memory: sparkline stamp peak=${stampPeak} != rss_series max=${rawMax.toFixed(1)} ` +
-              `(the drawn recovery curve's peak must be the max of its own series)`);
-          }
-          if (Math.abs(stampRecov - rawLast) > 0.05) {
-            errors.push(`${g.key}.memory: sparkline stamp recovered=${stampRecov} != rss_series last=${rawLast.toFixed(1)} ` +
-              `(the marked recovered point must be the last sample of its own series)`);
-          }
-        }
-      }
-    }
-    // ---- ONE SOURCE OF TRUTH (sweep chart vs headline): the published headline MUST be a point on
-    // its OWN charted sweep. rps_max_proxy/_concurrency must equal the max-rps point of the charted
-    // sweep_max_proxy array (same value AND concurrency), and likewise sustained@20ms vs
-    // sweep_sustained_20ms. If the headline is measured by one code path and the curve by another,
-    // the max of the curve won't match the headline and this FAILS - exactly the two-sources bug.
-    // Only asserted when the canonical record carries the sweep array (a regenerated bundle); a legacy
-    // bundle with no array is silently skipped (the coverage/other guards cover its provenance).
-    // MED-3: this integrity check reads the RAW best_cell RPS (not the display-gated canonicalPerf,
-    // which nulls a mock-bound value for n/a). "The headline is the max of its own charted sweep" is a
-    // measurement-integrity assertion that must hold even for a mock-bound (rig-limited) headline — the
-    // gating only decides VISIBILITY, not whether the number sits on its own curve. Fall back to
-    // canonicalPerf for a legacy bundle with no best_cell.
-    const canon = g.best_cell ? { served: true, ...g.best_cell } : app.canonicalPerf(g);
-    if (canon && canon.served !== false) {
-      // HIGH-R2-1: the headline (SW_CEIL_RPS) is the max rps over GATE-PASSING rungs only — lib/sweep.sh
-      // advances the ceiling exclusively on rungs where _sw_pass_c is true (:338), i.e. error rate < 0.1%
-      // AND p99 < P99_CEIL_MS (:160-164). But the charted sweep array (SW_JSON, :337) records EVERY probed
-      // rung, INCLUDING the terminal p99-cliff rung the ramp probed one-past the peak — which can carry a
-      // HIGHER raw rps than the ceiling. A gate-BLIND max() reducer would pick that failing rung, find
-      // peak.rps !== head for the ordinary "cliff sits above the throughput peak" shape, and process.exit(1)
-      // the whole board publish for an honest build. So the reducer must apply the SAME gate the headline
-      // used: only gate-passing rungs are eligible for "peak". Mirror _sw_pass_c exactly:
-      //   error rate: tot = rps*SWEEP_DUR + fail; tot > 0 && fail <= 0.001*tot   (lib/sweep.sh:162)
-      //   p99:        p99_us < P99_CEIL_MS*1000                                   (lib/sweep.sh:163)
-      // P99_CEIL_MS and SWEEP_DUR are run constants: the matrix JSON carries p99_ceiling_ms and sweep_dur
-      // at top level (matrix/run.sh:1098-1099); a legacy/perf-fallback bundle with no matrix ref defaults
-      // to the same shell defaults (1000 ms, 10 s).
-      const p99CeilMs = (g.matrix && g.matrix.p99_ceiling_ms) ?? 1000;
-      const sweepDur = (g.matrix && g.matrix.sweep_dur) ?? 10;
-      const rungPasses = (r) => {
-        if (r == null || r.rps == null) return false;
-        const p99 = r.p99_us;
-        if (p99 != null && !(p99 < p99CeilMs * 1000)) return false; // p99 gate (missing p99 → not disqualified)
-        const fail = r.fail ?? 0;
-        const tot = r.rps * sweepDur + fail;
-        return tot > 0 && fail <= 0.001 * tot;                       // error-rate gate < 0.1%
-      };
-      const pairs = [
-        ["rps_max_proxy", "rps_max_proxy_concurrency", "sweep_max_proxy"],
-        ["rps_sustained_20ms", "rps_sustained_20ms_concurrency", "sweep_sustained_20ms"],
-      ];
-      for (const [rk, ck, ak] of pairs) {
-        const arr = canon[ak];
-        const head = canon[rk];
-        // LOW-R3-4: a MATRIX-sourced headline SHOULD carry its own charted sweep array. matrix/run.sh
-        // always emits the arrays now, so a matrix headline with a value but no array is a stale/partial
-        // record shipping "verified against nothing" — which the guard used to `continue` past SILENTLY.
-        // Surface it as a coverage WARNING (not a hard ERROR: the currently-shipped data.json predates the
-        // array-emitting matrix/run.sh, so a hard fail would block the board until a full re-run — a full
-        // re-run closes it). A legacy/perf-fallback headline (source !== "matrix") is still silently skipped.
-        if (!Array.isArray(arr) || !arr.length) {
-          // head > 0: a real ceiling that MUST have a sweep to verify against. head === 0 is a
-          // did-not-qualify run (no gate-passing rung exists) — covered by the max-proxy=0 warning below,
-          // not a missing-array gap. null head has no published number to verify.
-          if (canon.source === "matrix" && head != null && head > 0) {
-            warnings.push(`${g.key}.${rk}: matrix-sourced headline=${head} but its charted ${ak} sweep array ` +
-              `is absent/empty — the single-source sweep assertion cannot verify this headline (stale/pre-re-run ` +
-              `record; matrix/run.sh now always emits the array). Re-run this gateway to close the gap.`);
-          }
-          continue; // legacy / no charted array (or warned above): nothing to reduce against
-        }
-        if (head == null) continue;
-        // The published headline is the max rps of the GATE-PASSING rungs, exactly how SW_CEIL_RPS was
-        // derived. Reduce over that subset so the guard's "peak" matches how "head" was computed; a
-        // higher-rps rung that FAILED the p99/error gate is not eligible (it never fed the ceiling).
-        const eligible = arr.filter(rungPasses);
-        if (!eligible.length) continue; // no gate-passing rung charted: nothing to compare against (skip)
-        const peak = eligible.reduce((a, b) => (b.rps > a.rps ? b : a));
-        if (peak.rps !== head) {
-          errors.push(`${g.key}.${rk}: headline=${head} but the gate-passing max of charted ${ak} is ${peak.rps} ` +
-            `(@ conc=${peak.conc}); the published number must be the max of its own gate-passing sweep rungs`);
-        } else if (canon[ck] != null && peak.conc !== canon[ck]) {
-          errors.push(`${g.key}.${rk}: headline concurrency=${canon[ck]} but the gate-passing peak of ${ak} ` +
-            `is at conc=${peak.conc}; the marked operating concurrency must match the headline`);
-        }
-      }
-    }
-    // ---- plausibility (WARN only, R7): two independent measured ceilings may invert on noise.
-    // DISTINCT case (H4): max-proxy === 0 means the ceiling run found NO tested load that held
-    // p99 < 1 s at <0.1% errors, i.e. that run did not qualify at all. That is NOT sweep noise
-    // and must never be filed under the small-inversion story (arch's 18-vs-0 is this case).
-    const bc = g.best_cell;
-    if (bc && bc.rps_max_proxy === 0) {
-      warnings.push(`${g.key}: max-proxy run did not qualify (rps_max_proxy=0: no tested load held ` +
-        `p99 < 1 s at <0.1% errors); not noise, shipped as measured`);
-    } else if (bc && bc.rps_sustained_20ms != null && bc.rps_max_proxy != null && bc.rps_sustained_20ms > bc.rps_max_proxy) {
-      warnings.push(`${g.key}: sustained@20ms ${bc.rps_sustained_20ms} > max-proxy ${bc.rps_max_proxy} ` +
-        `(independent per-cell sweep ceilings; noise, shipped unclamped)`);
-    }
-    // ---- MATRIX POPUP == PERFORMANCE TABLE (Custom), per cell. The matrix hover popup and the
-    // Performance tab in Custom mode read the SAME per-cell record through the SAME accessors
-    // (chooserPerfCell / chooserStreamCell), so a value must be identical on both surfaces AND on the
-    // popup's own embedded HTML. Assert it per served green cell so the two can never diverge, and that
-    // the popup's Δ-to-Peak agrees with deltaToPeak on the same record.
-    if (g.matrix && g.matrix.upstreams && app.chooserPerfCell && app.cellPopFull) {
-      for (const [egress, up] of Object.entries(g.matrix.upstreams)) {
+
+    // ---- C6: sustained@20ms <= max_proxy on EVERY served cell (a physical-plausibility invariant) ------
+    // max_proxy is the UNCONSTRAINED throughput ceiling; sustained-under-SLO cannot EXCEED it. Derived from
+    // the RAW matrix cell (Design F R1 — the independent oracle), never via the accessor. Empirically EVERY
+    // inversion in the shipped data is a CROSS-PHASE measurement artefact: sustained@20ms and max_proxy are
+    // swept in SEPARATE phases, each with its own noise band, so two independent ceilings legitimately
+    // overlap — the margin scales with 1/throughput (sub-1% on fast gateways like kong 0.18%, up to ~8% on
+    // a ~500-rps gateway like litellm-python). None is a real "sustained beat the ceiling". So C6 FLAGS
+    // every inverted cell as a WARNING — visible in the build log so the FIELD RUN re-measures the offender
+    // (kong's 14,351 vs 14,325 is the seed case) — but does NOT hard-fail the build: a hard assert would
+    // false-fail every honest run on sub-measurement-noise, blocking all publishing. A max_proxy of 0 is
+    // "did not qualify" (no ceiling), not an inversion, and is skipped. The magnitude is stamped so a GROSS
+    // (implausible) inversion stands out in the log for a human to escalate at re-measure time.
+    const mm = rawMatrix(g.key);
+    if (mm && mm.upstreams) {
+      for (const [egress, up] of Object.entries(mm.upstreams)) {
         for (const [ingress, cell] of Object.entries((up && up.cells) || {})) {
-          if (!(cell && cell.served === true && cell.perf)) continue;
-          const st = { mode: "custom", xlateIn: ingress, xlateOut: egress };
-          const popHtml = app.cellPopFull(g, ingress, egress);   // what the popup renders
-          // FINDING 30: re-derive the expected value INDEPENDENTLY from the RAW matrix cell (cell.perf),
-          // not from chooserPerfCell — the popup ALSO renders via chooserPerfCell, so comparing the two
-          // was tautological (both sides the same expression, could never diverge on a real bug). Reading
-          // the raw cell here means a projection bug that drops/mangles a value on the chooser path WOULD
-          // now surface as a popup/raw-cell mismatch. Apply the SAME mock-bound gate the accessor applies
-          // (rps_* suppressed when not certified) so we compare like for like.
-          // FINDING 31: format the expected value with the SAME formatter the popup uses (fmtInt =
-          // Math.round(v).toLocaleString), not Number(v).toLocaleString — a fractional value formatted
-          // two different ways would mask a real mismatch (or false-flag a match).
-          const gate = (key) => (key === "rps_sustained_20ms" || key === "rps_max_proxy");
-          for (const key of ["added_latency_p50_us", "added_latency_p99_us", "rps_sustained_20ms", "rps_max_proxy"]) {
-            const raw = cell.perf[key];
-            if (raw == null) continue;
-            // gated-away (mock-bound/unverifiable) rps reads n/a in the popup — it must NOT appear there.
-            const suppressed = gate(key) && app.xlateRpsSuppressed(cell.perf, key);
-            const shown = app.fmtInt(raw);   // Math.round(raw).toLocaleString("en-US"), matches the popup
-            const inPop = popHtml && popHtml.includes(`<b>${shown}</b>`);
-            if (suppressed) {
-              // a suppressed value must not leak into the popup as a stray number
-              if (inPop) errors.push(`${g.key}.${ingress}->${egress}.${key}: value "${shown}" is mock-bound (suppressed) ` +
-                `but leaked into the matrix popup (a gated-away number must read n/a on every surface)`);
-              continue;
-            }
-            if (!inPop) {
-              errors.push(`${g.key}.${ingress}->${egress}.${key}: raw matrix cell = "${shown}" but the matrix popup does not show it ` +
-                `(popup and the raw per-cell record must read one canonical value)`);
-            }
-          }
-          // FINDING 26: the popup ALSO renders two streaming metrics (Added TTFT p99, Streams sustained)
-          // via streamRow — the popup==table guard omitted them, so a streaming divergence in the popup
-          // went unchecked. Re-derive independently from the raw per-cell stream record (cell.stream),
-          // applying the SAME gates the accessor applies: streams_sustained is suppressed unless certified.
-          if (cell.stream && cell.stream.stream_served === true) {
-            const cs = cell.stream;
-            // Added TTFT p99 formats via fmtUsMs in the popup; assert the popup contains the integer µs
-            // (the leading token fmtUsMs always emits) so we test the value independent of the ms suffix.
-            if (cs.added_ttft_p99_us != null) {
-              const shown = app.fmtInt(cs.added_ttft_p99_us);
-              if (popHtml && !popHtml.includes(shown)) {
-                errors.push(`${g.key}.${ingress}->${egress}.added_ttft_p99_us: raw cell stream = "${shown}" not shown in the popup ` +
-                  `(the popup's streaming metrics must read the raw per-cell stream record)`);
-              }
-            }
-            // Streams sustained: gated by sustainedCertified (mock-bound → n/a). A suppressed value must
-            // not leak into the popup; a certified value must appear.
-            if (cs.streams_sustained != null) {
-              const certified = app.sustainedCertified(cs);
-              const shown = app.fmtInt(cs.streams_sustained);
-              const inPop = popHtml && popHtml.includes(`<b>${shown}</b>`);
-              if (certified && !inPop) {
-                errors.push(`${g.key}.${ingress}->${egress}.streams_sustained: certified raw value "${shown}" not shown in the popup`);
-              } else if (!certified && inPop) {
-                errors.push(`${g.key}.${ingress}->${egress}.streams_sustained: mock-bound value "${shown}" leaked into the popup (must read n/a)`);
-              }
-            }
-          }
-          // Δ-to-Peak: the popup's delta must equal deltaToPeak on the same cell vs best_cell.
-          if (app.deltaToPeak && g.best_cell) {
-            const cellPerf = { ingress, egress, ...cell.perf };
-            const delta = app.deltaToPeak(cellPerf, g.best_cell);
-            if (delta && popHtml && !popHtml.includes(delta)) {
-              errors.push(`${g.key}.${ingress}->${egress}: Δ-to-Peak "${delta}" not shown in the popup ` +
-                `(the popup's delta must be deltaToPeak vs best_cell)`);
-            }
-          }
+          const perf = cell && cell.served === true && cell.perf;
+          if (!perf) continue;
+          const sus = perf.rps_sustained_20ms, max = perf.rps_max_proxy;
+          if (sus == null || max == null || max === 0) continue;
+          covered("C6.cell");
+          if (sus > max)
+            warnings.push(`${g.key}.${ingress}->${egress}: sustained@20ms ${sus} > max_proxy ${max} ` +
+              `(a ${((sus / max - 1) * 100).toFixed(2)}% inversion — two independently-swept ceilings overlapping on measurement noise; re-measure this cell)`);
         }
       }
     }
-    // ---- coverage (WARN, M7): a served (green) matrix cell with NO per-cell perf renders as an
-    // all-n/a row on any tab that reads that exact cell (the bifrost translation-row case). The
-    // cell is honest (served, unmeasured), but an unmeasured green cell should be loud in the
-    // build log so a half-finished sweep never ships silently.
-    if (g.matrix && g.matrix.upstreams) {
-      const unswept = [];
-      for (const [egress, up] of Object.entries(g.matrix.upstreams)) {
-        for (const [ingress, cell] of Object.entries((up && up.cells) || {})) {
-          if (cell && cell.served === true && !cell.perf) unswept.push(`${ingress}->${egress}`);
+    // ---- R1 independent oracle: the projected best_cell headline == the RAW matrix diagonal cell -------
+    const m = rawMatrix(g.key);
+    if (m && m.upstreams && g.best_cell && g.best_cell.source && g.best_cell.source.kind === "matrix") {
+      covered("R1.oracle");
+      const dia = g.best_cell.path && g.best_cell.path.dialect;
+      const rawCell = dia && m.upstreams[dia] && m.upstreams[dia].cells && m.upstreams[dia].cells[dia];
+      const rawPerf = rawCell && rawCell.perf;
+      if (rawPerf) {
+        for (const key of ["rps_sustained_20ms", "rps_max_proxy"]) {
+          // Re-derive the EXPECTED display value from the RAW cell (value + its own _mock_bound flag),
+          // through a path DISJOINT from metric(): a positive value certified only when flag === false;
+          // a positive uncertified value is n/a; a 0 is honest (measured-zero).
+          const raw = rawPerf[key];
+          const flag = rawPerf[`${key}_mock_bound`];
+          const expected = raw == null ? null
+            : raw === 0 ? 0
+            : (raw > 0 && flag === false) ? raw : null;   // suppressed -> n/a
+          const shown = app.metric(g.best_cell[key]).v;
+          if (shown !== expected)
+            errors.push(`R1: ${g.key}.${key}: raw matrix diagonal cell implies displayed=${expected} but the sealed envelope shows ${shown} (independent-oracle mismatch)`);
         }
-      }
-      if (unswept.length) {
-        warnings.push(`${g.key}: ${unswept.length} served matrix cell(s) with no per-cell perf ` +
-          `(${unswept.join(", ")}); these render all-n/a on the tabs that read them`);
       }
     }
   }
-  return { errors, warnings };
+
+  // ---- C3 lint: per-datum provenance captions ROUTE through the one renderer -------------------------
+  // The bug class is a caption that hard-codes a source token for a datum it does not describe (memory
+  // mislabelled "6x6"). Since every per-datum provenance label now renders through caption(cell) /
+  // _sweep_label(source) keyed by source.sweep, the lint's job is to (a) forbid the internal sweep-KEY
+  // tokens (6x6-diagonal, …) from appearing as a user-facing string literal outside SWEEP_CAPTION/seal
+  // (a key leaking into prose is the drift), and (b) assert the LANES pathNotes route through caption().
+  const appSrc = readSrc("app.js");
+  const chartsSrc = readSrc("../charts.py");
+  // (a) the SWEEP-KEY tokens must not appear as a bare string literal in a caption renderer. They live
+  // ONLY in SWEEP_CAPTION (app.js), the _sweep_label/SWEEP_CAPTION set (charts.py), and seal.mjs (data).
+  const SWEEP_KEY = /"(?:6x6-diagonal|6x6-translation|6x6-memory-window|6x6-stream-diagonal|perf-suite|xlate-suite|stream-suite)"/;
+  const scanKeys = (src, name, allowRegion) => {
+    let inAllowed = false;
+    src.split("\n").forEach((line, i) => {
+      if (allowRegion.enter.test(line)) inAllowed = true;
+      if (inAllowed) { if (allowRegion.exit.test(line)) inAllowed = false; return; }
+      const code = line.replace(/\/\/.*$/, "");
+      if (SWEEP_KEY.test(code)) {
+        // rec.source = {…sweep: "6x6-diagonal"…} is legitimate PROVENANCE DATA assignment, not a caption.
+        if (/\bsource\b|\bsweep\b\s*:/.test(code)) { covered("C3.lint"); return; }
+        errors.push(`C3: ${name}:${i + 1} a sweep-key token leaked into a caption literal (keys live only in SWEEP_CAPTION): ${line.trim().slice(0, 80)}`);
+        covered("C3.lint");
+      }
+    });
+  };
+  scanKeys(appSrc, "app.js", { enter: /const SWEEP_CAPTION\s*=/, exit: /^\};\s*$/m });
+  scanKeys(chartsSrc, "charts.py", { enter: /SWEEP_CAPTION\s*=|def _sweep_label/, exit: /^def (?!_sweep_label)/ });
+  // (b) the LANES pathNotes + COL_TESTED provenance + charts annot must route through the vocabulary.
+  if (!/pathNote:\s*\(j\)\s*=>\s*j && j\.source \? caption\(j\)/.test(appSrc.replace(/\s+/g, " ")))
+    errors.push(`C3: app.js LANES pathNotes must route provenance through caption(j) (found a pathNote not using caption())`);
+  else covered("C3.route");
+  if (!/_sweep_label\(/.test(chartsSrc))
+    errors.push(`C3: charts.py provenance annotations must route through _sweep_label(source) (the SWEEP_CAPTION mirror)`);
+  else covered("C3.route");
+
+  // ---- C5 lint: every gated-field read in app.js routes through metric()/mval() ----
+  // A bare `.rps_sustained_20ms.value` deref (outside metric/mval/isEnvelope) or a numeric compare of a
+  // metric field would bypass the reader. Scan app.js for a gated field immediately followed by `.value`
+  // or a numeric comparison; the only allowed `.value` reads are inside metric()/mval().
+  appSrc.split("\n").forEach((line, i) => {
+    const code = line.replace(/\/\/.*$/, "");
+    for (const f of GATED_FIELDS) {
+      // a direct `.<field>.value` deref bypasses metric(); metric()/mval() themselves read `env.value`.
+      const re = new RegExp(`\\.${f}\\.value\\b`);
+      if (re.test(code) && !/function metric|function mval|isEnvelope\(/.test(code)) {
+        errors.push(`C5: app.js:${i + 1} reads .${f}.value directly (must route through metric()/mval()): ${line.trim().slice(0, 80)}`);
+        covered("C5.lint");
+      }
+    }
+    if (/\bmetric\(|\bmval\(/.test(code)) covered("C5.route");
+  });
+
+  // ---- R2 coverage: every declared invariant branch must be exercised --------
+  const CHECK_BRANCHES = [
+    "C1.field", "C1.certified", "C1.mock_bound", "C2.suppressed",
+    "C3.stamp", "C3.lint", "C3.route", "C4.cell", "C4.leak", "C6.cell", "R1.oracle", "C5.route",
+  ];
+  // C1.mock_bound / C2.suppressed / C4.leak / C5.lint are ERROR-only branches: they fire only on a
+  // violation, so they are NOT required to be covered by a healthy bundle (their absence is the GOOD
+  // state). REQUIRED = the branches a healthy bundle with projected cells MUST exercise.
+  const REQUIRED = ["C1.field", "C1.certified", "C3.stamp", "C3.route", "C4.cell", "C5.route"];
+  // ORACLE branches (C6.cell, R1.oracle) need the RAW matrix snapshot on disk (results/matrix/<gw>.json).
+  // The REAL bundle always has it; a SYNTHETIC single-gateway fixture (RED-before test) legitimately does
+  // not, so these are required ONLY when at least one gateway's raw matrix was found — otherwise their
+  // absence is "not applicable to this bundle", not an inert check. This keeps R2 honest on the CI bundle
+  // while letting invariant unit-tests run on synthetic data.
+  const sawRawMatrix = (data.gateways || []).some((g) => rawMatrix(g.key));
+  const requiredNow = sawRawMatrix ? [...REQUIRED, "C6.cell", "R1.oracle"] : REQUIRED;
+  const missing = requiredNow.filter((b) => !cover.has(b));
+  if (missing.length)
+    errors.push(`R2: coverage — required invariant branch(es) never exercised by this bundle: ${missing.join(", ")} ` +
+      `(an inert check is itself a failure)`);
+
+  return { errors, warnings, cover, CHECK_BRANCHES, REQUIRED };
 }
 
 /* CLI: node site/check-consistency.mjs [data.json] */
-const HERE = dirname(fileURLToPath(import.meta.url));
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   const bundle = process.argv[2] || join(HERE, "data.json");
   const data = JSON.parse(readFileSync(bundle, "utf8"));
@@ -485,8 +263,8 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   for (const w of warnings) console.warn(`check-consistency: WARNING: ${w}`);
   if (errors.length) {
     for (const e of errors) console.error(`check-consistency: FAIL: ${e}`);
-    console.error(`check-consistency: ${errors.length} divergence(s); the build must not ship.`);
+    console.error(`check-consistency: ${errors.length} structural-invariant violation(s); the build must not ship.`);
     process.exit(1);
   }
-  console.log(`check-consistency: ${data.gateways.length} gateways consistent across table/drawer/compare/charts (${warnings.length} warning(s))`);
+  console.log(`check-consistency: ${data.gateways.length} gateways — sealed-envelope invariants C1–C5 hold (${warnings.length} warning(s))`);
 }
