@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Gateway manifest: Busbar (docker).
 #
-# Runs the RELEASED image users download (BUSBAR_IMAGE in versions.env, e.g. getbusbar/busbar:1.4.1,
+# Runs the RELEASED image users download (BUSBAR_IMAGE, pinned below in this file,
 # multi-arch amd64+arm64) as its own container — the same uniform launch shape as every other docker
 # gateway (host network, pinned cpuset, config mounted read-only). RSS/HWM are read from the
 # container's host-pid process tree (container_rss_mib), the same units as a native process.
@@ -46,6 +46,11 @@
 #     (omitting a breaker: block is the genuine default, not a strip); request-log webhook / OTLP
 #     default to None (omitting = default). Nothing here turns anything off.
 GW_KIND=docker
+# The docker container this manifest launches under. DECLARED here so that anything outside this
+# directory which needs the name (the local verifier's teardown, for one) READS it from the
+# manifest instead of hardcoding it. lib/gateway_isolation_test.sh checks it against the --name
+# below, so the two cannot drift.
+GW_CONTAINER=busbar-bench
 # Self-describing manifest metadata — charts.py + the run lists read these, so a gateway
 # is fully defined by its own dir (add/remove a dir → it appears/disappears everywhere).
 GW_DISPLAY="Busbar"                      # label in charts + report tables

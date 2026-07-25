@@ -6,7 +6,7 @@
 # image ships the code this benchmark measures. ghcr.io/berriai/litellm-rust (checked 2026-07-23)
 # publishes only v1.89.3/main-v1.89.3 — linux/amd64-only (no arm64 for the Graviton bench boxes)
 # AND built from a ref that predates the /v1/messages route, which exists ONLY on the
-# litellm_rust_gateway_v1_messages_route branch pinned in versions.env (never in any published
+# litellm_rust_gateway_v1_messages_route branch pinned below in this file (never in any published
 # image). Inventing our own image would defeat the official-artifact rule, so this stays a pinned
 # source build until BerriAI publishes an arm64 image containing the route.
 #
@@ -29,7 +29,21 @@ GW_PORT=8101
 GW_PATH=/v1/messages
 GW_MODEL=azure_ai/mock
 GW_AUTH=gwbench
-# Source refs come from gateways/versions.env (the runner sources it first) — override there, not here.
+# ── SOURCE PIN ────────────────────────────────────────────────────────────────────────────────────
+# EXACTLY what this gateway is built from, pinned HERE in its own directory so adding or re-pinning
+# a gateway touches nothing else in the tree. Override any of these in the environment; the runner
+# records the branch/commit ACTUALLY built into the run JSON (`build` field).
+#   The only PUBLIC branch whose /v1/messages route exists is litellm_rust_gateway_v1_messages_route.
+#   (This project's README references litellm_rust_messages_route, which does not exist.)
+#   PINNED to a commit like every other gateway: an empty commit floated to branch HEAD, which let
+#   these numbers move between field runs while everyone else was frozen. Bump the sha DELIBERATELY
+#   (with a commit message) when adopting a newer beta build.
+LITELLM_RUST_REPO="${LITELLM_RUST_REPO:-https://github.com/BerriAI/litellm}"
+LITELLM_RUST_BRANCH="${LITELLM_RUST_BRANCH:-litellm_rust_gateway_v1_messages_route}"
+LITELLM_RUST_COMMIT="${LITELLM_RUST_COMMIT:-698072308b}"
+# The Rust binary embeds CPython and imports the `litellm` package to read its config, so this
+# gateway also pins that pip spec. Same version the field was benchmarked at.
+LITELLM_PY_SPEC="${LITELLM_PY_SPEC:-litellm[proxy]==1.93.0}"
 LITELLM_SRC="${LITELLM_SRC:-$HOME/litellm-rust-src}"
 LR_VENV="${LR_VENV:-$GW_DIR/venv}"
 
@@ -54,7 +68,7 @@ gw_build() {
   for attempt in 1 2 3; do
     [ -x "$LR_VENV/bin/python" ] || python3 -m venv "$LR_VENV"
     "$LR_VENV/bin/pip" install -q --upgrade pip >/dev/null 2>&1
-    rc=0; "$LR_VENV/bin/pip" install -q "${LITELLM_PY_SPEC:-litellm[proxy]}" >/dev/null 2>&1 || rc=$?
+    rc=0; "$LR_VENV/bin/pip" install -q "$LITELLM_PY_SPEC" >/dev/null 2>&1 || rc=$?
     if [ "$rc" = 0 ] && "$LR_VENV/bin/python" -c 'import litellm' >/dev/null 2>&1; then break; fi
     echo "litellm-rust python-config: attempt $attempt pip rc=$rc, import ok=$("$LR_VENV/bin/python" -c 'import litellm' >/dev/null 2>&1 && echo yes || echo NO)" >&2
     [ "$attempt" = 3 ] && { echo "BUILD FAILED: litellm python-config package would not import after 3 attempts"; return 1; }

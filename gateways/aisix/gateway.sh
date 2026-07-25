@@ -12,7 +12,8 @@
 # "architecture":"amd64". The bench boxes are Graviton arm64, so on them we build the `aisix` binary
 # from source (rust-toolchain.toml pins rustc 1.93.1; protoc is a build dep for the vertex/bedrock
 # tonic crates) and run the release binary natively (real process RSS, no container overhead). Convert
-# to the official image if/when api7 ships an arm64 manifest. Refs pinned in gateways/versions.env.
+# to the official image if/when api7 ships an arm64 manifest. The source refs are pinned below, in
+# this file.
 #
 # OOTB posture (default features stay ON; only permitted run-mechanics deviate — reconciled from an
 # earlier "lean" draft that stripped admin + metrics):
@@ -50,7 +51,7 @@
 # request BEFORE the handler runs (extract_bearer requires Authorization: Bearer <k> or x-api-key:
 # <k>; the key is SHA-256-hashed and looked up in the snapshot; miss → 401, error.rs:246). So we
 # register ONE api_key (its plaintext supplied via key_env, hashed at load) and the bench sends it as
-# the bearer — identical static-token posture to busbar. The per-request cost is a single SHA-256 +
+# the bearer - the same static-token posture other keyed gateways here use. The per-request cost is a single SHA-256 +
 # O(1) map lookup on the hot path; no rate-limit/budget/governance runs. See the report note: this is
 # a keyed proxy, not a rate-limited one.
 GW_KIND=native
@@ -60,6 +61,13 @@ GW_DISPLAY="AISIX (api7)"                 # label in charts + report tables — 
 GW_LANG=Rust                             # implementation language → bar color bucket
 GW_CLASS="AI gateway"   # the project's OWN self-description (README: 'the open-source, Rust-native AI gateway for LLMs and AI agents'), not our editorial
 GW_REPO=https://github.com/api7/aisix    # linked from the gateway name in the report table
+# ── SOURCE PIN ────────────────────────────────────────────────────────────────────────────────────
+# EXACTLY what this gateway is built from, pinned HERE in its own directory so adding or re-pinning
+# a gateway touches nothing else in the tree. Override in the environment to build a different ref;
+# the runner records the commit ACTUALLY built into the run JSON (`build` field). Pinned to the
+# released tag v0.5.0; an empty commit floats to branch HEAD.
+AISIX_REPO="${AISIX_REPO:-https://github.com/api7/aisix}"
+AISIX_COMMIT="${AISIX_COMMIT:-0f90a98ec8c43864d43e740e3ab66fe1d639c143}"   # tag v0.5.0
 GW_PORT=3000
 GW_PATH=/v1/chat/completions
 GW_MODEL=gpt-4o-mini
@@ -97,7 +105,7 @@ gw_prereqs() {
 gw_build() {
   gw_prereqs || return 1
   if [ ! -d "$AISIX_SRC" ]; then
-    git clone "${AISIX_REPO:-https://github.com/api7/aisix}" "$AISIX_SRC" || return 1
+    git clone "$AISIX_REPO" "$AISIX_SRC" || return 1
   fi
   # Re-pin on EVERY build, not just on a fresh clone. This checkout used to live inside the clone
   # branch above, so a REUSED box (a re-run, or a box whose $AISIX_SRC survived) kept whatever ref the
@@ -130,7 +138,7 @@ gw_version() {
 #
 # It previously took <adapter> <api_base> and gw_matrix_egress re-rendered a DIFFERENT single-provider
 # resources file per column (openai -> api_base .../v1, anthropic -> api_base ...). Replaced by the
-# busbar/litellm-python/helicone pattern: ONE resources file declaring BOTH upstream provider_keys and
+# one-config pattern most of the field already uses: ONE resources file declaring BOTH upstream provider_keys and
 # BOTH client-facing models at once; gw_matrix_egress changes only GW_MODEL, the CLIENT-side selector.
 # aisix routes a request by its model display_name -> models[].provider_key -> that provider_key's
 # adapter + api_base, so which upstream dialect is exercised is chosen by the model name in the request
@@ -240,8 +248,8 @@ _aisix_launch() {
   # never sees it and only the api_key's key_env consumes it. Keep it that way.
   #
   # THE SAME TRAP IS WIDER THAN ONE VARIABLE, so the launch env SCRUBS the rig's own AISIX_* names.
-  # gateways/versions.env defines AISIX_REPO + AISIX_COMMIT and this manifest defines AISIX_SRC. Today
-  # matrix/run.sh plain-`source`s versions.env with no `set -a`, so they stay unexported and never
+  # This manifest defines AISIX_REPO, AISIX_COMMIT and AISIX_SRC. The runner `source`s this manifest
+  # with no `set -a`, so they stay unexported and never
   # reach the binary — but the DOCUMENTED override path (`AISIX_COMMIT=<sha> ./run.sh ...`) EXPORTS
   # them, and aisix would then reject `commit` / `repo` / `src` as unknown top-level config fields and
   # wipe out all 36 cells again, with the same misleading `launch_rc=0 / port not listening` surface.

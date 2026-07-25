@@ -9,8 +9,13 @@
 # shipped defaults (enable_admin on / enable_access_log on). worker_processes is PINNED to the cpuset
 # core count — nginx `auto` reads the HOST cpu count (blind to --cpuset-cpus) and over-spawns workers on
 # the pinned cores, so we pin it to emulate the real N-core box (same CPU-pinning run-mechanic the Go
-# gateways use with GOMAXPROCS), not left at "auto". APISIX_IMAGE pinned in gateways/versions.env.
+# gateways use with GOMAXPROCS), not left at "auto". APISIX_IMAGE is pinned below in this file.
 GW_KIND=docker
+# The docker container this manifest launches under. DECLARED here so that anything outside this
+# directory which needs the name (the local verifier's teardown, for one) READS it from the
+# manifest instead of hardcoding it. lib/gateway_isolation_test.sh checks it against the --name
+# below, so the two cannot drift.
+GW_CONTAINER=apisix-bench
 # Self-describing manifest metadata — charts.py + the run lists read these, so a gateway
 # is fully defined by its own dir (add/remove a dir → it appears/disappears everywhere).
 GW_DISPLAY="APISIX"                      # label in charts + report tables

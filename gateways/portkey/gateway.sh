@@ -2,12 +2,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # Gateway manifest: Portkey OSS gateway (official portkeyai/gateway image, docker).
 #
-# Runs the official image (PORTKEY_IMAGE in versions.env, multi-arch amd64+arm64, pinned to the
+# Runs the official image (PORTKEY_IMAGE, pinned below in this file; multi-arch amd64+arm64, at the
 # benchmarked 1.15.2) with the same uniform launch shape as the other docker gateways: host
 # network, --cpuset-cpus pin. The image needs no config — routing to the mock is per-request via
 # Portkey's own headers: x-portkey-provider + x-portkey-custom-host (the same way AIGatewayBench
 # drives it). Anthropic Messages path. The image listens on 8787, portkey's default (= GW_PORT).
 GW_KIND=docker
+# The docker container this manifest launches under. DECLARED here so that anything outside this
+# directory which needs the name (the local verifier's teardown, for one) READS it from the
+# manifest instead of hardcoding it. lib/gateway_isolation_test.sh checks it against the --name
+# below, so the two cannot drift.
+GW_CONTAINER=portkey-bench
 # Self-describing manifest metadata — charts.py + the run lists read these, so a gateway
 # is fully defined by its own dir (add/remove a dir → it appears/disappears everywhere).
 GW_DISPLAY="Portkey"                      # label in charts + report tables
@@ -18,7 +23,8 @@ GW_PORT=8787
 GW_PATH=/v1/messages
 GW_MODEL=anthropic/mock
 GW_AUTH=dummy
-# PORTKEY_IMAGE comes from gateways/versions.env.
+# The pinned image. Lives HERE, in this gateway's own directory: overriding it in the environment
+# still wins, so no shared file needs to know this gateway exists.
 PORTKEY_IMAGE="${PORTKEY_IMAGE:-portkeyai/gateway:1.15.2}"
 GW_HEADERS=(
   "x-portkey-provider: anthropic"

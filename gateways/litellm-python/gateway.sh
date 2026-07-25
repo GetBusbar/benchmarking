@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Gateway manifest: LiteLLM Python proxy (official ghcr.io/berriai/litellm image, docker).
 #
-# Runs the official proxy image (LITELLM_PY_IMAGE in versions.env, multi-arch amd64+arm64, pinned
+# Runs the official proxy image (LITELLM_PY_IMAGE, pinned below in this file; multi-arch amd64+arm64,
 # to the benchmarked litellm==1.93.0) with the same uniform launch shape as the other docker
 # gateways: host network, --cpuset-cpus pin, config mounted read-only. The image's entrypoint is
 # the litellm CLI, so the --config/--port args are identical to the old pip-venv launch.
@@ -28,8 +28,13 @@
 #     credential). Setting it ADDS an auth layer litellm does not ship on, which the standard forbids
 #     ("don't add auth it doesn't default to"). Dropped; the gateway runs unprotected as shipped and
 #     GW_AUTH is a dummy bearer the open endpoint ignores (same posture as the other unprotected
-#     gateways here — gomodel/tensorzero/helicone).
+#     gateways in this bench).
 GW_KIND=docker
+# The docker container this manifest launches under. DECLARED here so that anything outside this
+# directory which needs the name (the local verifier's teardown, for one) READS it from the
+# manifest instead of hardcoding it. lib/gateway_isolation_test.sh checks it against the --name
+# below, so the two cannot drift.
+GW_CONTAINER=litellm-python-bench
 # Self-describing manifest metadata — charts.py + the run lists read these, so a gateway
 # is fully defined by its own dir (add/remove a dir → it appears/disappears everywhere).
 GW_DISPLAY="LiteLLM · Python"                      # label in charts + report tables
@@ -40,7 +45,7 @@ GW_PORT=8102
 GW_PATH=/v1/chat/completions
 GW_MODEL=gpt-4o-mini
 # OOTB litellm serves unprotected (no master key). GW_AUTH is a dummy bearer the open endpoint
-# ignores — the same convention every unprotected gateway in this bench uses (gomodel/tensorzero).
+# ignores - the same convention every unprotected gateway in this bench uses.
 GW_AUTH=dummy
 LITELLM_PY_IMAGE="${LITELLM_PY_IMAGE:-ghcr.io/berriai/litellm:v1.93.0}"
 
