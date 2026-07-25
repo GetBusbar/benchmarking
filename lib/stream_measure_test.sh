@@ -87,6 +87,11 @@ stream_probe(){ # url conc dur
     fpspeak_low) # peak ~30000 at c=64, declining above. Exercises stop-at-first-non-rise.
       local d=$(( (c-64)/2 )); local f=$(( 30000 - $(sqr "$d") )); [ "$f" -lt 200 ] && f=200
       echo "$c $c 0 0 $((c*SM_EXPFRAMES)) $f 1.0 100 200 20 40" ;;
+    fpspeak_rising) # cpu-fps that NEVER turns over: fps rises monotonically all the way to the top of
+      # whatever range it is given. There is no peak inside the range, so the "winner" is nothing but
+      # the caller's own hi. The search must flag SM_FPS_AT_TOP so the producer publishes null instead
+      # of reporting the search bound as the gateway's cpu-fps.
+      echo "$c $c 0 0 $((c*SM_EXPFRAMES)) $((c*100)) 1.0 100 200 20 40" ;;
     fpspeak_mockbound_low) # peak ~44000 @ c=64. The rig ceiling at c=64 is 20000+64*400=45600, so the
       # gateway sits within 10% of the ceiling AT ITS WINNER concurrency -> genuinely mock-bound. But at
       # the grid top (c=8192) the ceiling caps at 400000, so comparing the peak against the GRID-TOP
@@ -164,9 +169,24 @@ CURVE=sust_grid_top; if MOCK_DEAD=1 stream_mock_ready 2; then echo "FAIL - strea
 CURVE=fpspeak_768; streamcpu_peak_fps 8 8192
 assert_range "cpu-fps peak between doublings (~768)" "$SM_FPS_PEAK_CONC" 640 900
 assert_range "cpu-fps peak value (~48000)" "$SM_FPS_PEAK" 46000 48000
+[ "${SM_FPS_AT_TOP:-x}" = 0 ] && echo "ok   - interior cpu-fps peak is NOT flagged as ladder-exhausted" || { echo "FAIL - a real interior peak was flagged SM_FPS_AT_TOP=${SM_FPS_AT_TOP:-unset}"; fail=1; }
 CURVE=fpspeak_low; streamcpu_peak_fps 8 8192
 assert_range "cpu-fps peak below start (~64)" "$SM_FPS_PEAK_CONC" 32 128
 assert_range "cpu-fps peak value low (~30000)" "$SM_FPS_PEAK" 28000 30000
+
+# ── LADDER EXHAUSTION IN THE CPU-FPS LANE (the twin of the sustained sust_grid_top case) ──────────
+# RED-BEFORE. The sustained lane has refused to publish a lower bound as a ceiling ever since the
+# retired fixed-ladder suite was found publishing an identical "512 streams" for five unrelated
+# gateways. The cpu-fps lane, sitting a few lines away and searching the same way, had no equivalent
+# guard: a curve still rising at the top of the range produced a "peak" that was really the caller's
+# own hi, and the producer published it as measured. Same defect, same file, one lane behind.
+CURVE=fpspeak_rising; streamcpu_peak_fps 8 512
+[ "${SM_FPS_AT_TOP:-0}" = 1 ] && echo "ok   - a still-rising cpu-fps curve is flagged ladder-exhausted (publishes null, not the bound)" || { echo "FAIL - still-rising cpu-fps curve reported ${SM_FPS_PEAK} fps @ c=${SM_FPS_PEAK_CONC} as a PEAK (SM_FPS_AT_TOP=${SM_FPS_AT_TOP:-unset}); that value is the search bound, not the gateway"; fail=1; }
+[ "$SM_FPS_PEAK_CONC" = 512 ] && echo "ok   - ...and the flagged winner does sit exactly at the range top (c=512)" || { echo "FAIL - expected the exhausted winner at the top rung 512, got $SM_FPS_PEAK_CONC"; fail=1; }
+# Raising the range on the SAME curve must keep flagging it: the curve has no peak at any bound, so no
+# choice of hi turns this into a measurement. Guards against a flag that keys off one hard-coded value.
+CURVE=fpspeak_rising; streamcpu_peak_fps 8 2048
+[ "${SM_FPS_AT_TOP:-0}" = 1 ] && [ "$SM_FPS_PEAK_CONC" = 2048 ] && echo "ok   - exhaustion tracks the range, not a fixed number (hi=2048 also flagged)" || { echo "FAIL - exhaustion flag did not follow a raised range (at_top=${SM_FPS_AT_TOP:-unset}, conc=$SM_FPS_PEAK_CONC)"; fail=1; }
 [ "$SM_FPS_MOCK_BOUND" = false ] && echo "ok   - cpu-fps mock_bound=false against a generous ceiling" || { echo "FAIL - cpu-fps mock_bound=$SM_FPS_MOCK_BOUND (want false)"; fail=1; }
 
 # ── DEAD reference (mock frames 0 fps) -> cpu-fps mock_bound=null, NEVER a trustworthy-looking false ──

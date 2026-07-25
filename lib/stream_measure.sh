@@ -274,6 +274,14 @@ streamcpu_peak_fps(){ # lo hi
   # Same measured-vs-not-measured flag as the sustained lane (audit P1-12): a cpu_fps of 0 must mean
   # "measured: no rung passed the gate", never "the deadline fired before anything was probed".
   SM_FPS_MEASURED=0
+  # LADDER EXHAUSTION, the cpu-fps twin of SM_SUST_AT_TOP. The doubling ramp below leaves its loop for
+  # one of two very different reasons: fps STOPPED rising (a true interior maximum was bracketed), or
+  # `c` simply reached `hi` while fps was still climbing. Only the first is a peak. The second is a
+  # LOWER BOUND set by the search range, and publishing it reports our own `hi` as the gateway's
+  # capability - the identical mistake the retired fixed-ladder stream suite made when it published the
+  # same "512 streams" for five unrelated gateways. The sustained lane already refuses that; this lane
+  # did not, so a still-rising cpu-fps curve was published as a measured peak.
+  SM_FPS_AT_TOP=0
   # cpu-fps gate parity with streamcpu/run.sh (audit NIT): require >=99% of streams COMPLETE (dynamic
   # scope — _sm_probe_c reads this global; `local` auto-restores it to the sustained lane's 0 on return).
   local SM_GATE_MIN_COMPLETE=0.99
@@ -295,12 +303,16 @@ streamcpu_peak_fps(){ # lo hi
   SM_FPS_MEASURED=1                                          # a real gate decision at lo now exists
   pr=$(_sm_eff "$lo"); b=$lo
   c=$lo
+  # ramp_topped_out: the ramp ran off the top of the range with fps STILL RISING at every rung. Any
+  # other exit (fps stopped improving, or a probe aborted) brackets a real maximum and clears it.
+  local ramp_topped_out=1
   while [ "$c" -lt "$hi" ]; do
     c=$(( c*2 > hi ? hi : c*2 ))
-    _sm_probe_c "$c" || break
+    _sm_probe_c "$c" || { ramp_topped_out=0; break; }
     cr=$(_sm_eff "$c")
-    if [ "$cr" -gt "$pr" ]; then a=$b; b=$c; pr=$cr; else break; fi
+    if [ "$cr" -gt "$pr" ]; then a=$b; b=$c; pr=$cr; else ramp_topped_out=0; break; fi
   done
+  [ "$lo" -ge "$hi" ] && ramp_topped_out=0   # a degenerate one-rung range never ramped at all
   local top=$c                                        # first rung that did not raise fps (or hi)
   # Refine the peak in [a, top] (unimodal max-search), stopping within SM_FPS_TOL.
   local TOL="${SM_FPS_TOL:-4}" x xr
@@ -321,7 +333,11 @@ streamcpu_peak_fps(){ # lo hi
       SM_FPS_PEAK=${SM_PROBE_FPS[$k]}; SM_FPS_PEAK_CONC=$k
     fi
   done
-  log "[$GATEWAY] cpu-fps peak → ${SM_FPS_PEAK} fps @ c=$SM_FPS_PEAK_CONC"
+  # Exhausted only if the ramp never turned over AND the winner actually sits at the top rung. Both
+  # conditions matter: the refine pass can still settle below hi, and a winner at hi that was reached
+  # after fps had already turned over is a legitimate peak that happens to live at the boundary.
+  if [ "$ramp_topped_out" = 1 ] && [ "$SM_FPS_PEAK_CONC" = "$hi" ]; then SM_FPS_AT_TOP=1; fi
+  log "[$GATEWAY] cpu-fps peak → ${SM_FPS_PEAK} fps @ c=$SM_FPS_PEAK_CONC (at_top=$SM_FPS_AT_TOP)"
   _sm_fps_finish_bound
 }
 
