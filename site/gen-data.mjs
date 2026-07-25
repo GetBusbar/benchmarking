@@ -68,6 +68,16 @@ const gatewayKeys = existsSync(gatewaysDir)
     }).sort()
   : [];
 
+// snapshotDegradedMode(m): the phases this run was told NOT to measure, as a human string, or "" when it
+// ran everything. Reads the producer's OWN mode flags (matrix/run.sh emits cell_perf_sweep / cell_stream /
+// cell_memory), so it describes how the run was CONFIGURED, never how it turned out. A flag that is absent
+// (an older result predating it) is treated as ON: only an explicit `false` is a switched-off phase.
+function snapshotDegradedMode(m) {
+  if (!m || typeof m !== "object") return "";
+  const off = ["cell_perf_sweep", "cell_stream", "cell_memory"].filter((k) => m[k] === false);
+  return off.length ? off.join("=false, ") + "=false" : "";
+}
+
 function readJson(path) {
   try { return JSON.parse(readFileSync(path, "utf8")); } catch { return null; }
 }
@@ -134,6 +144,29 @@ const gateways = gatewayKeys.map((key) => {
     const snapMs = Number.isFinite(snapAt) ? snapAt : -1;
     const diskMs = Number.isFinite(diskAt) ? diskAt : -1;
     if (snap.matrix && (!g.matrix || snapMs >= diskMs)) {
+      // A DEGRADED-MODE RUN MUST NOT BECOME THE BOARD'S SOURCE JUST BY BEING NEWER. The producer records
+      // which phases it was told to run (cell_perf_sweep / cell_stream / cell_memory). A field run has
+      // them all on; a local smoke run turns them off to finish in minutes, and its snapshot lands in the
+      // SAME results/snapshots/ directory. Recency then hands the whole row to it: this actually happened
+      // to helicone, whose board row became a probe-only laptop run (1 cell, no perf, no streaming, no
+      // memory, no best_cell) that shadowed a complete field run from the same morning, with nothing
+      // anywhere saying so. It is the trap-1 class one level up - not results/matrix/<gw>.json being
+      // overwritten, but an untracked snapshot silently outranking it.
+      // This is NOT the "fewer served cells" case, which is honest and must publish: a re-run that finds
+      // less IS the new truth. It is the case where the producer was TOLD NOT TO MEASURE. Refusing it is
+      // therefore a statement about the run's MODE, never about its numbers.
+      const degraded = snapshotDegradedMode(snap.matrix);
+      const diskFull = g.matrix && !snapshotDegradedMode(g.matrix);
+      if (degraded && diskFull) {
+        throw new Error(
+          `gen-data: REFUSING to publish ${key} from a DEGRADED-MODE snapshot. ${snap.__file} ` +
+          `(measured_at ${snap.measured_at}) ran with ${degraded} - the phases were switched OFF, so it is a ` +
+          `local smoke run, not a measurement - yet it is NEWER than results/matrix/${key}.json ` +
+          `(measured_at ${g.matrix.measured_at}), which ran them all. Publishing it would replace a complete ` +
+          `run with a probe-only one and the board would show it as this gateway's result.\n` +
+          `  Fix: delete or move that snapshot out of results/snapshots/ (a local verify-local run with ` +
+          `KEEP_ARTIFACTS=1 leaves it behind; without KEEP_ARTIFACTS the teardown's git clean removes it).`);
+      }
       g.matrix = snap.matrix;                                      // matrix from the snapshot (sole source)
       g.matrix_from_snapshot = true;
       g.snapshot_file = snap.__file ?? null;                       // which archived run the board renders
