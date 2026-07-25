@@ -1,189 +1,202 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 //
-// DIFFERENTIAL PARITY: run the shell implementation and the Rust implementation over the same
-// generated inputs and require the same answer.
+// DIFFERENTIAL PARITY: run the shell implementation and the Rust one over the SAME generated inputs
+// and require identical answers.
 //
-// A side-by-side reading of these modules missed six defects, four of them in the searches, two of
-// them reintroductions of bugs the shell had already found and fixed. Reading finds what a reader
-// thinks to look for. A diff over random inputs finds what nobody thought of, which is the whole
-// remaining risk once the code has been reviewed once.
+// A side-by-side reading of these functions is not enough. Two humans-plus-agents read the two
+// search implementations line by line and still missed four defects, including two that
+// reintroduced bugs the shell had already found and fixed. A diff over random inputs finds that
+// class immediately, because it does not depend on anyone noticing which line matters.
 //
-// Skipped rather than failed when bash is unavailable: this must never be the reason a build breaks
-// on a machine that simply has no shell to compare against.
+// This is migration scaffolding on purpose. It requires bash and the shell library to exist, so it
+// skips cleanly once they are deleted, which is the signal that the port is complete.
+
+// An integration test is its own crate, so the crate-level test allow in src/lib.rs does not reach
+// it. The same reasoning applies here: a failing assertion IS a panic, and denying that only pushes
+// a test into contortions that hide what it checks.
+#![allow(clippy::panic, clippy::unwrap_used, clippy::expect_used)]
 
 use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-fn repo_root() -> std::path::PathBuf {
-    // CARGO_MANIFEST_DIR is <root>/engine
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().map(|p| p.to_path_buf()).unwrap_or_default()
+fn repo_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).parent().map(Path::to_path_buf).unwrap_or_default()
 }
 
-fn otb_bin() -> Option<std::path::PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    // <root>/target/debug/deps/differential-<hash> -> <root>/target/debug/otb
-    let dir = exe.parent()?.parent()?;
-    let bin = dir.join("otb");
-    bin.exists().then_some(bin)
+fn shell_available() -> bool {
+    repo_root().join("lib/plateau.sh").exists()
 }
 
-/// Run a shell function from lib/plateau.sh over a samples file.
-///
-/// The series file name is UNIQUE PER CALL. The first version of this harness derived it from the
-/// process id alone, so the three test functions (which cargo runs on parallel threads) all wrote
-/// the same path and read each other's data: every comparison was then between one implementation's
-/// answer and the other's answer to a DIFFERENT series. It failed loudly and looked like a swarm of
-/// parity defects. A differential harness that races is worse than none, because its output is
-/// indistinguishable from the bugs it exists to find.
-fn shell(func_call: &str, samples: &str) -> Option<String> {
-    let root = repo_root();
-    let series = unique_series_path()?;
-    std::fs::write(&series, samples).ok()?;
-    let script = format!(
-        "set -u; . '{}/lib/plateau.sh'; {}",
-        root.display(),
-        func_call.replace("{F}", &series.display().to_string())
-    );
-    let out = Command::new("bash").arg("-c").arg(&script).output().ok()?;
-    let _ = std::fs::remove_file(&series);
-    Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
-}
-
-static SERIES_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-fn unique_series_path() -> Option<std::path::PathBuf> {
-    let mut base = std::env::temp_dir();
-    base.push(format!("otb-diff-{}", std::process::id()));
-    std::fs::create_dir_all(&base).ok()?;
-    let n = SERIES_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    Some(base.join(format!("series-{n}.txt")))
-}
-
-fn rust(args: &[&str], samples: &str) -> Option<String> {
-    let bin = otb_bin()?;
-    let mut child = Command::new(bin)
-        .args(args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .ok()?;
-    child.stdin.as_mut()?.write_all(samples.as_bytes()).ok()?;
-    let out = child.wait_with_output().ok()?;
-    Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
-}
-
-fn have_prereqs() -> bool {
-    Command::new("bash").arg("-c").arg("true").output().is_ok() && otb_bin().is_some()
-}
-
-/// A deterministic generator, so any failure reproduces exactly from its seed.
-struct Lcg(u64);
-impl Lcg {
-    fn next_u32(&mut self) -> u32 {
-        self.0 = self.0.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
-        (self.0 >> 33) as u32
+fn otb_bin() -> PathBuf {
+    // cargo puts integration-test binaries in target/<profile>/deps, so the binary is two up.
+    let mut p = std::env::current_exe().unwrap_or_default();
+    p.pop();
+    if p.ends_with("deps") {
+        p.pop();
     }
-    fn f64_in(&mut self, lo: f64, hi: f64) -> f64 {
-        lo + (self.next_u32() as f64 / u32::MAX as f64) * (hi - lo)
-    }
+    p.join("otb")
 }
 
-/// Series shapes that matter: flat, rising, falling, asymptoting, noisy, spiky, degenerate.
-fn generate(seed: u64, case: u32) -> String {
-    let mut r = Lcg(seed);
-    let n = 4 + (r.next_u32() % 25) as usize;
-    let base = r.f64_in(20.0, 400.0);
+/// Deterministic pseudo-random series, so a failure reproduces exactly from its seed.
+fn lcg(state: &mut u64) -> f64 {
+    *state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+    ((*state >> 11) as f64) / ((1u64 << 53) as f64)
+}
+
+/// A memory series with a controllable slope and noise: the shapes the plateau gate actually judges.
+fn series(seed: u64, n: usize, base: f64, slope_per_min: f64, noise: f64) -> String {
+    let mut st = seed.wrapping_mul(2_862_933_555_777_941_757).wrapping_add(3_037_000_493);
     let mut out = String::new();
-    // One cadence for the whole series, drawn once: real samples arrive on a fixed interval, and a
-    // non-monotonic time axis is not a case either implementation is specified to handle.
-    let dt = r.f64_in(1.0, 6.0).round().max(1.0);
     for i in 0..n {
-        let t = i as f64 * dt;
-        let v = match case % 6 {
-            0 => base + r.f64_in(-0.3, 0.3),                          // flat with noise
-            1 => base + i as f64 * r.f64_in(0.05, 4.0),               // rising
-            2 => base - i as f64 * r.f64_in(0.05, 2.0),               // falling
-            3 => base + (1.0 - (-(i as f64) / 4.0).exp()) * 40.0,     // asymptoting leak
-            4 => base + if i % 2 == 0 { 1.5 } else { -1.5 },          // oscillating
-            _ => base + if i == n / 2 { 50.0 } else { 0.0 },          // single spike
-        };
+        let t = i as f64 * 3.0;
+        let v = base + slope_per_min * (t / 60.0) + (lcg(&mut st) - 0.5) * 2.0 * noise;
         out.push_str(&format!("{t} {v:.4}\n"));
     }
     out
 }
 
-#[test]
-fn plateau_check_agrees_with_the_shell_over_generated_series() {
-    if !have_prereqs() {
-        eprintln!("skipping: bash or the otb binary is unavailable");
-        return;
-    }
-    let mut mismatches = Vec::new();
-    for seed in 0..240u64 {
-        let samples = generate(seed, seed as u32);
-        let sh = shell("plateau_check '{F}' 1 2", &samples);
-        let rs = rust(&["plateau-check", "1", "2"], &samples);
-        if let (Some(sh), Some(rs)) = (sh, rs) {
-            if sh != rs {
-                mismatches.push(format!("seed {seed}: shell={sh} rust={rs}\n{samples}"));
-            }
-        }
-    }
-    assert!(mismatches.is_empty(), "plateau verdicts diverged:\n{}", mismatches.join("\n---\n"));
+fn run_shell(func: &str, input: &str, args: &[&str]) -> String {
+    let root = repo_root();
+    let path = tempfile(input);
+    // Both paths are QUOTED. They were not, and the temp filename briefly contained spaces, so bash
+    // word-split it, handed plateau_check a path that did not exist, and it dutifully returned 0 for
+    // every single case. The harness reported total disagreement and the port was fine. Quote first,
+    // then trust a differential result.
+    let script = format!(
+        "set -u; . '{}/lib/plateau.sh'; {} '{}' {}",
+        root.display(),
+        func,
+        path.display(),
+        args.join(" ")
+    );
+    let out = Command::new("bash").arg("-c").arg(&script).output().expect("bash must run");
+    let _ = std::fs::remove_file(&path);
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// A temp file whose name contains nothing that a shell would split on.
+fn tempfile(contents: &str) -> PathBuf {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let pid = std::process::id();
+    let mut path = std::env::temp_dir();
+    path.push(format!("otb-diff-{pid}-{n}.series"));
+    let mut f = std::fs::File::create(&path).expect("temp file");
+    f.write_all(contents.as_bytes()).expect("write temp");
+    f.flush().expect("flush temp");
+    path
+}
+
+fn run_rust(sub: &str, input: &str, args: &[&str]) -> String {
+    let mut child = Command::new(otb_bin())
+        .arg(sub)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("otb binary must exist: run `cargo build --bin otb` first");
+    child.stdin.as_mut().expect("stdin").write_all(input.as_bytes()).expect("write stdin");
+    let out = child.wait_with_output().expect("otb must run");
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
 #[test]
-fn growth_rate_agrees_with_the_shell_over_generated_series() {
-    if !have_prereqs() {
-        eprintln!("skipping: bash or the otb binary is unavailable");
+fn plateau_check_agrees_with_the_shell_over_many_shapes() {
+    if !shell_available() {
+        eprintln!("shell engine gone: differential parity no longer applicable");
         return;
     }
-    let mut mismatches = Vec::new();
-    for seed in 500..680u64 {
-        let samples = generate(seed, seed as u32);
-        let sh = shell("plateau_growth_rate '{F}'", &samples);
-        let rs = rust(&["growth-rate"], &samples);
-        if let (Some(sh), Some(rs)) = (sh, rs) {
-            // Both print to 3dp. Compare numerically to tolerate a last-digit rounding difference
-            // between awk's printf and Rust's, which is formatting, not disagreement.
-            match (sh.parse::<f64>(), rs.parse::<f64>()) {
-                (Ok(a), Ok(b)) if (a - b).abs() <= 0.002 => {}
-                (Err(_), Err(_)) => {} // both unmeasurable, both printed nothing
-                _ => mismatches.push(format!("seed {seed}: shell='{sh}' rust='{rs}'\n{samples}")),
-            }
-        }
-    }
-    assert!(mismatches.is_empty(), "growth rates diverged:\n{}", mismatches.join("\n---\n"));
-}
-
-#[test]
-fn window_agrees_with_the_shell_over_generated_series() {
-    if !have_prereqs() {
-        eprintln!("skipping: bash or the otb binary is unavailable");
-        return;
-    }
-    let mut mismatches = Vec::new();
-    for seed in 900..1020u64 {
-        let samples = generate(seed, seed as u32);
-        for w in [10.0f64, 30.0, 60.0, 1e9] {
-            let sh = shell(&format!("plateau_window '{{F}}' {w}"), &samples);
-            let rs = rust(&["window", &w.to_string()], &samples);
-            if let (Some(sh), Some(rs)) = (sh, rs) {
-                // Compare the kept TIMESTAMPS: the shell echoes its input lines verbatim while the
-                // Rust reprints parsed floats, so the text differs even when the selection agrees.
-                let keys = |s: &str| -> Vec<String> {
-                    s.lines()
-                        .filter_map(|l| l.split_whitespace().next())
-                        .filter_map(|t| t.parse::<f64>().ok())
-                        .map(|t| format!("{t:.3}"))
-                        .collect()
-                };
-                if keys(&sh) != keys(&rs) {
-                    mismatches.push(format!("seed {seed} w={w}: shell={:?} rust={:?}", keys(&sh), keys(&rs)));
+    let mut disagreements = Vec::new();
+    let mut compared = 0;
+    for seed in 0..60u64 {
+        // Sweep the shapes the gate exists to separate: flat, slow leak, fast leak, falling, noisy.
+        for &(slope, noise) in &[
+            (0.0, 0.0),
+            (0.0, 0.4),
+            (0.5, 0.1),
+            (2.4, 0.1),   // near the documented 60s-window boundary
+            (5.0, 0.1),   // clearly leaking
+            (-3.0, 0.1),  // falling: the shell's drift test is ONE-SIDED, so this must still pass
+            (0.0, 3.0),   // range-gate territory
+        ] {
+            for &n in &[4usize, 7, 21] {
+                // THRESHOLDS ARE SWEPT, not left at the defaults. For a linear series
+                // spread% = 2 x drift%, so at the shipped (trend=1, range=2) the two gates bind
+                // identically and the range test MASKS the drift test completely. A perturbation
+                // that made the drift test two-sided passed this harness unnoticed until the
+                // thresholds were separated. A wide range isolates drift; a wide trend isolates
+                // spread.
+                for &(trend, range) in &[("1", "2"), ("1", "99"), ("99", "2"), ("0.5", "50")] {
+                    let input = series(seed, n, 120.0, slope, noise);
+                    let sh = run_shell("plateau_check", &input, &[trend, range]);
+                    let rs = run_rust("plateau-check", &input, &[trend, range]);
+                    compared += 1;
+                    if sh != rs {
+                        disagreements.push(format!(
+                            "seed={seed} n={n} slope={slope} noise={noise} trend={trend} range={range}: shell={sh:?} rust={rs:?}"
+                        ));
+                    }
                 }
             }
         }
     }
-    assert!(mismatches.is_empty(), "windows diverged:\n{}", mismatches.join("\n"));
+    assert!(compared > 0);
+    assert!(
+        disagreements.is_empty(),
+        "{} of {} cases disagree:\n{}",
+        disagreements.len(),
+        compared,
+        disagreements.join("\n")
+    );
+}
+
+#[test]
+fn growth_rate_agrees_with_the_shell_to_the_shell_s_own_precision() {
+    if !shell_available() {
+        return;
+    }
+    let mut disagreements = Vec::new();
+    for seed in 0..40u64 {
+        for &slope in &[0.0, 0.25, 2.4, 10.0, -5.0, 64.9] {
+            for &n in &[2usize, 5, 21] {
+                let input = series(seed, n, 120.0, slope, 0.05);
+                let sh = run_shell("plateau_growth_rate", &input, &[]);
+                let rs = run_rust("growth-rate", &input, &[]);
+                // Both print %.3f, so this is a string compare on purpose: it catches a formatting
+                // divergence as well as a numeric one, and archived output is compared as text.
+                if sh != rs {
+                    disagreements.push(format!("seed={seed} n={n} slope={slope}: shell={sh:?} rust={rs:?}"));
+                }
+            }
+        }
+    }
+    assert!(disagreements.is_empty(), "growth rate disagrees:\n{}", disagreements.join("\n"));
+}
+
+#[test]
+fn window_agrees_with_the_shell() {
+    if !shell_available() {
+        return;
+    }
+    let mut disagreements = Vec::new();
+    for seed in 0..20u64 {
+        for &w in &["30", "60", "9999"] {
+            let input = series(seed, 40, 120.0, 1.0, 0.2);
+            let sh = run_shell("plateau_window", &input, &[w]);
+            let rs = run_rust("window", &input, &[w]);
+            // Compare the timestamps kept, not the float text: the shell echoes its input lines
+            // verbatim while the Rust reprints parsed floats.
+            let keys = |s: &str| {
+                s.lines()
+                    .filter_map(|l| l.split_whitespace().next().map(str::to_string))
+                    .collect::<Vec<_>>()
+            };
+            if keys(&sh) != keys(&rs) {
+                disagreements.push(format!("seed={seed} w={w}: shell kept {:?}, rust kept {:?}", keys(&sh), keys(&rs)));
+            }
+        }
+    }
+    assert!(disagreements.is_empty(), "window disagrees:\n{}", disagreements.join("\n"));
 }

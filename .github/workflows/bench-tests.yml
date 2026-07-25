@@ -8,6 +8,10 @@ name: bench-tests
 on:
   push:
     paths:
+      - "engine/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".cargo/config.toml"
       - "lib/sweep.sh"
       - "lib/sweep_peak_test.sh"
       - "lib/stream_measure.sh"
@@ -41,6 +45,10 @@ on:
       - ".github/workflows/bench-tests.yml"
   pull_request:
     paths:
+      - "engine/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".cargo/config.toml"
       - "lib/sweep.sh"
       - "lib/sweep_peak_test.sh"
       - "lib/stream_measure.sh"
@@ -78,6 +86,33 @@ permissions:
   contents: read
 
 jobs:
+  engine:
+    # The Rust engine is replacing the shell measurement core. Its tests are the reason for the port
+    # as much as its types are, so CI runs them: an untested test suite is decoration.
+    #
+    # The differential job is the load-bearing one. It runs the SHELL and the RUST over the same
+    # generated series and requires the same answer, which is how a port is proven rather than
+    # asserted. It needs bash and the shell library present, so it runs on the same checkout.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - name: Build
+        run: cargo build --workspace --all-targets
+      - name: Clippy (denies unwrap/expect/panic outside tests)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Unit and property tests
+        run: cargo test --workspace
+      # Cross-compiling to the arm64 boxes is part of the contract: the engine ships as a prebuilt
+      # static binary rather than being built on a box, so a break here is a shipping break.
+      - name: Cross-compile the shipped arm64 binary
+        run: |
+          rustup target add aarch64-unknown-linux-musl
+          cargo build --release --target aarch64-unknown-linux-musl --bin otb
+          file target/aarch64-unknown-linux-musl/release/otb
+
   peak-search:
     runs-on: ubuntu-latest
     steps:
