@@ -196,6 +196,27 @@ check("HIGH-1: a matrix-only gateway with a translation_cell appears as an xlate
 check("HIGH-1: _suite_map('xlate') enumerates translation_cell (report translation table)",
       "xl" in charts._suite_map("xlate"), True)
 
+# FINDING 24: the README translation TABLE must suppress a mock-bound (rig-limited) translation RPS,
+# exactly as the translation PNG (served_field=xlate_rps_sustained_20ms_valid) and the site do. Printing
+# the raw value published a number the chart + site both hide — two surfaces diverging from one record.
+# Certified cell → the number prints; mock-bound cell → "not measured (rig-limited)", not the raw value.
+_canon_perf({
+    "xcert": {"best_cell": dict(BC),
+              "translation_cell": dict(ingress="openai", egress="anthropic", source="matrix",
+                                       added_latency_p99_us=200, rps_sustained_20ms=15000,
+                                       rps_sustained_20ms_mock_bound=False)},
+    "xbound": {"best_cell": dict(BC),
+               "translation_cell": dict(ingress="openai", egress="anthropic", source="matrix",
+                                        added_latency_p99_us=200, rps_sustained_20ms=99999,
+                                        rps_sustained_20ms_mock_bound=True)},
+})
+md = charts._report_md(list(charts._merge().items()), "t", [])
+check("FINDING 24: a CERTIFIED translation RPS prints its value in the README table", "15,000" in md, True)
+check("FINDING 24: a mock-bound translation RPS does NOT leak its raw value into the README table",
+      "99,999" in md, False)
+check("FINDING 24: a mock-bound translation cell reads 'rig-limited' in the README table",
+      "rig-limited" in md, True)
+
 # HIGH-1 (consistency): EVERY gateway with a best_cell appears as a perf chart row, and vice-versa
 # (chart-row presence <=> best_cell presence). This is the assertion the audit asks for, enforced here
 # by construction of the projection.

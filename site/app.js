@@ -1700,13 +1700,24 @@ function matrixCellTip(cell) {
 /* Per-cell perf line for a GREEN cell's tooltip/detail: this path's sustained RPS + added latency
    p99, and its RPS delta vs THIS gateway's REFERENCE cell (the one the Passthrough tab ranks; not
    necessarily the fastest, so it is named, never called "best"). Grey/red/unprobed cells carry no
-   perf and return "". */
+   perf and return "".
+   FINDING 33: this helper is dead on the live UI (cellPopFull superseded it) but still EXPORTED, so a
+   future re-wire could leak an UN-gated rps_sustained_20ms — a mock-bound (rig-limited) throughput the
+   table/popup/charts all suppress. GATE it on the SAME mock-bound honesty rule (xlateRpsSuppressed): a
+   suppressed sustained RPS is not shown, and the delta (which divides by it) is skipped, so a re-wire
+   can never surface a number the honest surfaces hide. */
 function cellPerfTip(cell, ingress, egress, best) {
   const p = cell && cell.served === true ? cell.perf : null;
   if (!p || p.rps_sustained_20ms == null) return "";
+  // A rig-limited / unverifiable sustained RPS is n/a on every honest surface; do not print it here.
+  if (xlateRpsSuppressed(p, "rps_sustained_20ms")) {
+    // The cell may still carry a certified added-latency; show that alone rather than a bare "".
+    return p.added_latency_p99_us != null ? `+${fmtInt(p.added_latency_p99_us)} µs p99 added (sustained RPS n/a: rig-limited)` : "";
+  }
+  const bestGated = best && best.rps_sustained_20ms_mock_bound === false;
   let s = `${fmtInt(p.rps_sustained_20ms)} req/s @20ms`;
   if (p.added_latency_p99_us != null) s += `, +${fmtInt(p.added_latency_p99_us)} µs p99 added`;
-  if (best && best.rps_sustained_20ms > 0) {
+  if (bestGated && best.rps_sustained_20ms > 0) {
     if (best.ingress === ingress && best.egress === egress) s += " - reference cell (ranks the table)";
     // Human dialect labels (MATRIX_LABELS), never the raw dialect keys, in the hover popup.
     else s += ` - ${fmtPct((p.rps_sustained_20ms / best.rps_sustained_20ms - 1) * 100)} req/s vs the ${MATRIX_LABELS[best.ingress] || best.ingress}→${MATRIX_LABELS[best.egress] || best.egress} cell`;
@@ -2029,9 +2040,15 @@ const fmtBuild = (full) => {
   return head.length > 24 ? head.slice(0, 21) + "..." : head;
 };
 
-/* The newest `measured_at` across ONE gateway's suites: WHEN that gateway was last benchmarked.
-   Null if it carries no stamp on any lane. */
+/* WHEN that gateway was last benchmarked, for the roster "last benchmarked" cell + sort.
+   FINDING 25: prefer g.measured_at — the matrix-preferring stamp gen-data emits (displayedMeasuredMs),
+   the SAME per-row freshness basis the "measured Nd ago" badge + the freshness guard use. Reading the
+   MAX across all lane suites let a newer standalone legacy suite (results/xlate|stream/<gw>.json,
+   reachable via an ad-hoc SUITES= re-run) drive a fresher "last benchmarked" date than the matrix
+   numbers the board actually SHOWS — the same overstatement LOW-R3-3 fixed for the badge. Fall back to
+   the newest-across-suites only when there is no matrix stamp (a legacy-only row aged by that stamp). */
 function gatewayLastRun(g) {
+  if (g && g.measured_at) { const ms = new Date(g.measured_at).getTime(); if (ms > 0) return new Date(ms); }
   let newest = 0;
   for (const l of LANES) {
     const t = g[l.key] && g[l.key].measured_at;
