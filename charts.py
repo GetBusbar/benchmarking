@@ -463,7 +463,7 @@ CHARTS = [
         name="rps_per_dollar",
         suite="perf",
         title="Throughput per dollar",
-        subtitle="sustained req/s @20ms per $/hr of the pinned 4-core (m7g.xlarge) slice (higher is better)",
+        subtitle="sustained req/s (20 ms upstream) per $/hr of the pinned 4-core (m7g.xlarge) slice (higher is better)",
         unit="sustained RPS per $/hr",
         series=[Series("rps_per_dollar", "RPS per $/hr", "rank")],
         higher_better=True,
@@ -1124,7 +1124,7 @@ def _report_md(rows: list, title: str, charts: list, pending: tuple = (), chart_
                  "language** (Rust / Go / Python / Node / Other). **Rows are sorted by added latency "
                  "(p99), lowest first.**")
     lines.append("")
-    lines.append("| Gateway | Added latency (p99) | Sustained RPS @20ms | Max proxy RPS | Idle RAM | Peak RAM | Built |")
+    lines.append("| Gateway | Added latency (p99) | Sustained RPS (20 ms upstream) | Max proxy RPS | Idle RAM | Peak RAM | Built |")
     lines.append("|---|--:|--:|--:|--:|--:|---|")
     mock_bound_seen = False
     zero_load_seen = False
@@ -1184,7 +1184,7 @@ def _report_md(rows: list, title: str, charts: list, pending: tuple = (), chart_
                      "These land here as their runs complete - nothing is hidden.")
         lines.append("")
     lines.append("Two throughput numbers: **max proxy RPS** (instant upstream - raw forwarding speed) "
-                 "and **sustained RPS @20ms** (AIGatewayBench's metric - concurrent in-flight capacity "
+                 "and **sustained RPS under a 20 ms upstream delay** (AIGatewayBench's metric - concurrent in-flight capacity "
                  "under realistic LLM latency).")
     legend = []
     zero_or_x = any(True for _, r in rows if r.get("served") is False) or zero_load_seen
@@ -1241,7 +1241,7 @@ def _report_md(rows: list, title: str, charts: list, pending: tuple = (), chart_
                      "matrix translation cell falls back to the legacy xlate suite (Anthropic in, "
                      "OpenAI out), marked as such. The conversion is the work being measured.")
         lines.append("")
-        lines.append("| Gateway | Added TTFT (p99) | Added per-token (p99) | SSE streams | Translated RPS @20ms |")
+        lines.append("| Gateway | Added TTFT (p99) | Added per-token (p99) | SSE streams | Translated RPS (20 ms upstream) |")
         lines.append("|---|--:|--:|--:|--:|")
 
         def us_cell(r, field):
