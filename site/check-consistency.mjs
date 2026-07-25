@@ -50,11 +50,91 @@ const SOURCE_KINDS = new Set(["matrix", "perf-fallback", "xlate-fallback", "stre
 
 function isEnvelope(x) { return x != null && typeof x === "object" && typeof x.certified === "boolean"; }
 
-// The raw matrix snapshot on disk — the INDEPENDENT oracle (Design F R1). Never read through the accessor.
-function rawMatrix(gwKey) {
-  const p = join(ROOT, "results", "matrix", `${gwKey}.json`);
+// ---- C6 as a pure function: sustained@20ms <= max_proxy on every served cell --------------------
+// max_proxy is the UNCONSTRAINED throughput ceiling; sustained-under-SLO cannot EXCEED it. Every
+// inversion observed in shipped data has been a CROSS-PHASE measurement artefact: sustained@20ms and
+// max_proxy are swept in SEPARATE phases with independent noise bands, so two ceilings legitimately
+// overlap — the margin scales with 1/throughput (sub-1% on a 14k-rps gateway, a few % on a ~200-rps
+// one). So C6 WARNS on every inverted cell (visible in the build log so the next field run re-measures
+// the offender) but never hard-fails: a hard assert would false-fail every honest run on sub-noise
+// overlap and block all publishing. A max_proxy of 0 is "did not qualify" (no ceiling), not an
+// inversion, and is skipped. The magnitude is stamped so a GROSS inversion stands out for escalation.
+//
+// Exported and pure (AUDIT #21) so its RED-before test can INJECT an inversion into a synthetic matrix
+// instead of depending on a real gateway staying broken.
+export function c6Inversions(gwKey, rawMatrix) {
+  const warnings = [];
+  let cellsChecked = 0;
+  if (!rawMatrix || !rawMatrix.upstreams) return { warnings, cellsChecked };
+  for (const [egress, up] of Object.entries(rawMatrix.upstreams)) {
+    for (const [ingress, cell] of Object.entries((up && up.cells) || {})) {
+      const perf = cell && cell.served === true && cell.perf;
+      if (!perf) continue;
+      const sus = perf.rps_sustained_20ms, max = perf.rps_max_proxy;
+      if (sus == null || max == null || max === 0) continue;
+      cellsChecked += 1;
+      if (sus > max)
+        warnings.push(`${gwKey}.${ingress}->${egress}: sustained@20ms ${sus} > max_proxy ${max} ` +
+          `(a ${((sus / max - 1) * 100).toFixed(2)}% inversion — two independently-swept ceilings overlapping on measurement noise; re-measure this cell)`);
+    }
+  }
+  return { warnings, cellsChecked };
+}
+
+// The raw matrix on disk — the INDEPENDENT oracle (Design F R1). Never read through the accessor.
+//
+// AUDIT #21 (THE ORACLE WENT INERT). rawMatrix() used to read ONLY results/matrix/<gw>.json, and the
+// oracle loop was additionally gated on `!g.matrix_from_snapshot` — because a snapshot-sourced matrix
+// legitimately differs from the trailing per-suite file, comparing the two would false-fail. That was
+// correct while snapshots were a transition path used by a minority of rows. It became a SILENT TOTAL
+// BYPASS the moment the field run made EVERY gateway snapshot-sourced: the oracle compared nothing for
+// 12 of 13 gateways, and R2's coverage gate was satisfied by the single legacy row that still had a
+// per-suite matrix — so an entirely unoracled board reported "R1.oracle covered" and shipped green.
+//
+// The fix is to give the oracle the RIGHT on-disk artifact instead of switching it off. A snapshot IS a
+// raw on-disk artifact — it is exactly as independent of seal.mjs/metric() as the per-suite file was.
+// rawMatrixFor() resolves the same artifact gen-data resolved, but by its OWN independent re-derivation
+// of the selection rule (newest snapshot by measured_at, taken over the per-suite file when at least as
+// new), never by importing gen-data. R3 below then asserts that this independent resolution AGREES with
+// the stamp the bundle shipped — so a selection bug is caught rather than silently mirrored.
+const SNAP_DIR = join(ROOT, "results", "snapshots");
+
+function readJsonOrNull(p) {
   if (!existsSync(p)) return null;
   try { return JSON.parse(readFileSync(p, "utf8")); } catch { return null; }
+}
+
+// The newest snapshot for a gateway, by its own measured_at. Returns {snap, file} or null.
+export function newestSnapshotOnDisk(gwKey, dir = SNAP_DIR) {
+  if (!existsSync(dir)) return null;
+  let best = null, bestFile = null, bestMs = -1;
+  for (const f of readdirSync(dir)) {
+    if (!f.startsWith(`result_${gwKey}_`) || !f.endsWith(".json")) continue;
+    const snap = readJsonOrNull(join(dir, f));
+    if (!snap) continue;
+    const ms = snap.measured_at ? Date.parse(snap.measured_at) : 0;
+    if (ms > bestMs) { bestMs = ms; best = snap; bestFile = f; }
+  }
+  return best ? { snap: best, file: bestFile } : null;
+}
+
+// rawMatrixFor(gwKey) -> { matrix, origin, file } | null. `origin` is "snapshot" | "suite".
+function rawMatrixFor(gwKey) {
+  const suite = readJsonOrNull(join(ROOT, "results", "matrix", `${gwKey}.json`));
+  const found = newestSnapshotOnDisk(gwKey);
+  const snapMs = found && found.snap.matrix && found.snap.measured_at ? Date.parse(found.snap.measured_at) : NaN;
+  const suiteMs = suite && suite.measured_at ? Date.parse(suite.measured_at) : NaN;
+  const s = Number.isFinite(snapMs) ? snapMs : -1;
+  const d = Number.isFinite(suiteMs) ? suiteMs : -1;
+  if (found && found.snap.matrix && (!suite || s >= d))
+    return { matrix: found.snap.matrix, origin: "snapshot", file: found.file };
+  if (suite) return { matrix: suite, origin: "suite", file: `results/matrix/${gwKey}.json` };
+  return null;
+}
+
+function rawMatrix(gwKey) {
+  const r = rawMatrixFor(gwKey);
+  return r ? r.matrix : null;
 }
 
 // ---- the caption-literal lint (C3) + accessor-routing lint (C5) --------------
@@ -205,6 +285,12 @@ export function checkConsistency(data, app, opts = {}) {
   // AUDIT #16: how many independent-oracle comparisons ACTUALLY ran. Coverage is claimed from this
   // counter, never from merely reaching the branch.
   let oracleCompared = 0;
+  // AUDIT #21: coverage is now PER-GATEWAY, not a single global counter. The old `oracleCompared > 0`
+  // gate was satisfied by ONE oracled row, so twelve completely unoracled gateways still reported the
+  // R1.oracle branch as covered. These two sets are reconciled at the end: every gateway that publishes
+  // a matrix-sourced number must appear in oracledKeys.
+  const matrixPublishers = new Set();
+  const oracledKeys = new Set();
 
   // ---- C1 + C2: envelope integrity across the WHOLE bundle -------------------
   // Walk every object. (C1) a *_mock_bound key must not survive; a gated metric field must be an envelope,
@@ -268,21 +354,13 @@ export function checkConsistency(data, app, opts = {}) {
     // false-fail every honest run on sub-measurement-noise, blocking all publishing. A max_proxy of 0 is
     // "did not qualify" (no ceiling), not an inversion, and is skipped. The magnitude is stamped so a GROSS
     // (implausible) inversion stands out in the log for a human to escalate at re-measure time.
-    const mm = rawMatrix(g.key);
-    if (mm && mm.upstreams) {
-      for (const [egress, up] of Object.entries(mm.upstreams)) {
-        for (const [ingress, cell] of Object.entries((up && up.cells) || {})) {
-          const perf = cell && cell.served === true && cell.perf;
-          if (!perf) continue;
-          const sus = perf.rps_sustained_20ms, max = perf.rps_max_proxy;
-          if (sus == null || max == null || max === 0) continue;
-          covered("C6.cell");
-          if (sus > max)
-            warnings.push(`${g.key}.${ingress}->${egress}: sustained@20ms ${sus} > max_proxy ${max} ` +
-              `(a ${((sus / max - 1) * 100).toFixed(2)}% inversion — two independently-swept ceilings overlapping on measurement noise; re-measure this cell)`);
-        }
-      }
-    }
+    // AUDIT #21: C6 is a PURE EXPORTED FUNCTION (c6Inversions, below) so it has a RED-before proof that
+    // does not depend on a particular gateway still being inverted in the shipped data. The old test
+    // asserted on kong's LIVE 14,351>14,325 cell; the fresh field run resolved it, and a check whose only
+    // proof is "the bug is still in the data" fails the day the data gets better.
+    const c6 = c6Inversions(g.key, rawMatrix(g.key));
+    if (c6.cellsChecked > 0) covered("C6.cell");
+    warnings.push(...c6.warnings);
     // ---- R1 independent oracle -------------------------------------------------------------------
     // AUDIT #16: coverage is claimed ONLY when a comparison ACTUALLY HAPPENED. The tag used to fire
     // before the rawPerf guard, so a bundle whose oracle compared NOTHING (raw cell missing/renamed)
@@ -290,19 +368,38 @@ export function checkConsistency(data, app, opts = {}) {
     // AUDIT #17: the oracle no longer re-derives ONLY best_cell's two RPS fields (2 of 36 cells' worth
     // of numbers). It now independently re-derives EVERY sealed matrix cell (all perf + stream metrics),
     // the translation cell, the streaming record and the memory block — the surfaces that were unoracled.
-    const m = rawMatrix(g.key);
+    // AUDIT #21: resolve the artifact the bundle ACTUALLY projected from (snapshot or per-suite file),
+    // re-derived here independently. The old `!g.matrix_from_snapshot` skip is GONE — it silently
+    // disabled the whole oracle once every row became snapshot-sourced.
+    const resolved = rawMatrixFor(g.key);
+    const m = resolved ? resolved.matrix : null;
     // AUDIT #18: the escape hatch is CLOSED. A gateway that publishes matrix-sourced numbers MUST be
-    // oracle-checkable: if its raw matrix is not on disk (and it did not come from a snapshot, which is
-    // its own self-describing artifact), the whole oracle layer would silently become "not required".
+    // oracle-checkable: with no raw artifact on disk at all, the oracle layer would silently become
+    // "not required" and an unverifiable publish would pass.
     const matrixSourced = [g.best_cell, g.translation_cell, g.streaming, g.memory_read]
       .some((r) => r && r.source && r.source.kind === "matrix");
-    if (matrixSourced && !m && !g.matrix_from_snapshot && !syntheticFixture)
-      errors.push(`R2: ${g.key} publishes matrix-sourced numbers but results/matrix/${g.key}.json is absent — the independent oracle cannot verify a single one of them (an unverifiable publish is a failure, not an exemption)`);
-    // A snapshot-sourced matrix legitimately differs from the per-suite file on disk; comparing the two
-    // would be a false failure, so the oracle skips that gateway and says so.
-    if (m && !g.matrix_from_snapshot) {
+    if (matrixSourced) matrixPublishers.add(g.key);
+    if (matrixSourced && !m && !syntheticFixture)
+      errors.push(`R2: ${g.key} publishes matrix-sourced numbers but no raw matrix artifact (snapshot or results/matrix/${g.key}.json) is on disk — the independent oracle cannot verify a single one of them (an unverifiable publish is a failure, not an exemption)`);
+    // ---- R3: the oracle must be reading the SAME run the bundle published --------------------------
+    // The oracle is only meaningful if its independently-resolved artifact is the one gen-data projected
+    // from. Compare the two measured_at stamps: a mismatch means the selection rules diverged (e.g. an
+    // older snapshot shadowing a newer run), which would otherwise make the oracle verify the wrong file
+    // and report green. Also asserts the bundle's own "from snapshot" claim matches what is on disk.
+    if (m && !syntheticFixture) {
+      const shownAt = g.matrix && g.matrix.measured_at ? Date.parse(g.matrix.measured_at) : NaN;
+      const rawAt = m.measured_at ? Date.parse(m.measured_at) : NaN;
+      covered("R3.selection");
+      if (Number.isFinite(shownAt) && Number.isFinite(rawAt) && shownAt !== rawAt)
+        errors.push(`R3: ${g.key}: the bundle published matrix measured_at=${g.matrix.measured_at} but the newest raw artifact on disk (${resolved.origin}: ${resolved.file}) is measured_at=${m.measured_at} — the board is rendering from a stale/mis-selected run`);
+      const claimsSnapshot = g.matrix_from_snapshot === true;
+      if (claimsSnapshot !== (resolved.origin === "snapshot"))
+        errors.push(`R3: ${g.key}: the bundle claims matrix_from_snapshot=${claimsSnapshot} but the independently-resolved newest artifact is a ${resolved.origin} (${resolved.file}) — provenance disagreement`);
+    }
+    if (m) {
       const cmp = (label, shown, expected) => {
         oracleCompared += 1;
+        oracledKeys.add(g.key);
         if (shown !== expected)
           errors.push(`R1: ${g.key}.${label}: the RAW matrix on disk implies displayed=${expected} but the sealed envelope shows ${shown} (independent-oracle mismatch)`);
       };
@@ -392,7 +489,7 @@ export function checkConsistency(data, app, opts = {}) {
   const CHECK_BRANCHES = [
     "C1.field", "C1.certified", "C1.mock_bound", "C2.suppressed",
     "C3.stamp", "C3.lint", "C3.route", "C3.parity", "C4.cell", "C4.leak", "C6.cell", "R1.oracle",
-    "C5.route", "C5.lint",
+    "R3.selection", "C5.route", "C5.lint",
   ];
   // C1.mock_bound / C2.suppressed / C4.leak are ERROR-only branches: they fire only on a violation, so
   // they are NOT required to be covered by a healthy bundle (their absence is the GOOD state). REQUIRED =
@@ -406,10 +503,18 @@ export function checkConsistency(data, app, opts = {}) {
   // publishes matrix numbers with no on-disk matrix is already an error above (its numbers are
   // unverifiable). A bundle with NO matrix-sourced cells at all (a pure-fallback or synthetic fixture)
   // legitimately has nothing to oracle — that, and only that, exempts these branches.
-  const publishesMatrix = (data.gateways || []).some((g) =>
-    [g.best_cell, g.translation_cell, g.streaming, g.memory_read]
-      .some((r) => r && r.source && r.source.kind === "matrix"));
-  const requiredNow = publishesMatrix && !syntheticFixture ? [...REQUIRED, "C6.cell", "R1.oracle"] : REQUIRED;
+  const publishesMatrix = matrixPublishers.size > 0;
+  // AUDIT #21: the PER-GATEWAY oracle reconciliation. "R1.oracle covered" used to mean "at least one
+  // comparison happened anywhere on the board" — which one legacy row could satisfy for all thirteen.
+  // Every gateway that publishes a matrix-sourced number must have been independently oracled, by name.
+  if (publishesMatrix && !syntheticFixture) {
+    const unoracled = [...matrixPublishers].filter((k) => !oracledKeys.has(k)).sort();
+    if (unoracled.length)
+      errors.push(`R2: coverage — ${unoracled.length} gateway(s) publish matrix-sourced numbers that the independent oracle never verified: ${unoracled.join(", ")} ` +
+        `(a per-gateway bypass is exactly the inert-check failure R2 exists to catch)`);
+  }
+  const requiredNow = publishesMatrix && !syntheticFixture
+    ? [...REQUIRED, "C6.cell", "R1.oracle", "R3.selection"] : REQUIRED;
   const missing = requiredNow.filter((b) => !cover.has(b));
   if (missing.length)
     errors.push(`R2: coverage — required invariant branch(es) never exercised by this bundle: ${missing.join(", ")} ` +
