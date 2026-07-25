@@ -4,8 +4,8 @@
 #
 # Kong's ai-proxy plugin fronts an OpenAI-shaped /v1/chat/completions and forwards to an upstream
 # LLM; `model.options.upstream_url` overrides that upstream, so we point it straight at the mock.
-# DB-less declarative config, generated against the runner's mock port. KONG_IMAGE is pinned in
-# gateways/versions.env.
+# DB-less declarative config, generated against the runner's mock port. KONG_IMAGE is pinned below
+# in this file.
 #
 # ── ONE STATIC CONFIG (the standard) ──────────────────────────────────────────────────────────────
 # ONE config, rendered IDENTICALLY for every lane and every egress column, published verbatim as the
@@ -54,6 +54,11 @@
 #     — Kong phones home usage/error data by default. Suppressing outbound telemetry is a permitted
 #     disclosed run-mechanic (not a functional strip).
 GW_KIND=docker
+# The docker container this manifest launches under. DECLARED here so that anything outside this
+# directory which needs the name (the local verifier's teardown, for one) READS it from the
+# manifest instead of hardcoding it. lib/gateway_isolation_test.sh checks it against the --name
+# below, so the two cannot drift.
+GW_CONTAINER=kong-bench
 # Self-describing manifest metadata — charts.py + the run lists read these, so a gateway
 # is fully defined by its own dir (add/remove a dir → it appears/disappears everywhere).
 GW_DISPLAY="Kong"                      # label in charts + report tables

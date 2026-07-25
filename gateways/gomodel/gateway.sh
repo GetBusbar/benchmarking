@@ -5,7 +5,7 @@
 # OpenAI + Anthropic-compatible Go gateway. We override the openai provider's base URL to the mock
 # via OPENAI_BASE_URL, so /v1/chat/completions forwards there. Left unprotected (GOMODEL_MASTER_KEY
 # unset) for a pure proxy-overhead measurement — the default posture. Image pinned in
-# gateways/versions.env; the resolved tag is recorded in the result.
+# below in this file; the resolved tag is recorded in the result.
 #
 # ── NOTE ON ITS NUMBERS: GoModel AUDIT-LOGS EVERY REQUEST BY DEFAULT ─────────────────────────────
 # Same disclosure One-API carries, for the same reason. GoModel ships audit logging ON: LOGGING_ENABLED
@@ -35,6 +35,11 @@
 # a second, distinct serialization we have not root-caused; treat that ONE cell's perf as suspect until
 # a targeted re-measure explains it.
 GW_KIND=docker
+# The docker container this manifest launches under. DECLARED here so that anything outside this
+# directory which needs the name (the local verifier's teardown, for one) READS it from the
+# manifest instead of hardcoding it. lib/gateway_isolation_test.sh checks it against the --name
+# below, so the two cannot drift.
+GW_CONTAINER=gomodel-bench
 # Self-describing manifest metadata — charts.py + the run lists read these, so a gateway
 # is fully defined by its own dir (add/remove a dir → it appears/disappears everywhere).
 GW_DISPLAY="GoModel"                      # label in charts + report tables

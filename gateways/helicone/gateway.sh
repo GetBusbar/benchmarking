@@ -9,7 +9,8 @@
 # no public image. The bench boxes are Graviton arm64, so on them we build the `ai-gateway` crate
 # from source — exactly the pattern we use for LiteLLM-Rust — and run the release binary natively
 # (real process RSS, no container overhead). Convert to the official image if/when Helicone ships
-# arm64. Refs are pinned in gateways/versions.env.
+# arm64. The source refs are pinned in THIS file (below), where every other fact about this
+# gateway already lives.
 #
 # ── OOTB posture (one-config standard) ────────────────────────────────────────────────────────────
 # This is the config a real user deploys, used unchanged for EVERY lane. Helicone runs at its as-
@@ -43,6 +44,14 @@ GW_PATH=/router/openai/chat/completions
 # the mock ignores the model and answers the OpenAI shape regardless.
 GW_MODEL=openai/gpt-4o-mini
 GW_AUTH=dummy
+
+# ── SOURCE PIN ────────────────────────────────────────────────────────────────────────────────────
+# EXACTLY what this gateway is built from. It lives HERE, in the gateway's own directory, so that
+# adding or re-pinning a gateway touches nothing else in the tree. Override either var in the
+# environment to build a different ref; the runner records the commit ACTUALLY built into the run
+# JSON (`build` field), so the output always discloses what was measured. Empty commit = branch HEAD.
+HELICONE_REPO="${HELICONE_REPO:-https://github.com/Helicone/ai-gateway}"
+HELICONE_COMMIT="${HELICONE_COMMIT:-9649b27bdc9fb0907d359e899894102a15f3a085}"
 HELICONE_SRC="${HELICONE_SRC:-$HOME/helicone-ai-gateway-src}"
 
 # This gateway builds from source, so ITS box (and only its box) installs the Rust toolchain + git +

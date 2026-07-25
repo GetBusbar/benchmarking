@@ -8,8 +8,13 @@
 # the default field (bootstrap verified on the rig). NOTE ON ITS NUMBERS: One-API writes a per-request
 # usage/quota row to its DB on EVERY call by design — that accounting is intrinsic to how it works and
 # is NOT a disableable "logging" knob, so its latency/throughput reflect a gateway that bills each
-# request, not a bare proxy. That's the honest measurement of One-API as it ships. Pin in versions.env.
+# request, not a bare proxy. That's the honest measurement of it as it ships. The image is pinned below.
 GW_KIND=docker
+# The docker container this manifest launches under. DECLARED here so that anything outside this
+# directory which needs the name (the local verifier's teardown, for one) READS it from the
+# manifest instead of hardcoding it. lib/gateway_isolation_test.sh checks it against the --name
+# below, so the two cannot drift.
+GW_CONTAINER=one-api-bench
 # Self-describing manifest metadata — charts.py + the run lists read these, so a gateway
 # is fully defined by its own dir (add/remove a dir → it appears/disappears everywhere).
 GW_DISPLAY="One-API"                      # label in charts + report tables

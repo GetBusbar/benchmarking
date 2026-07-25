@@ -13,8 +13,13 @@
 # is preserved. Each provider's baseUrl points at the mock (plaintext http://). No feature strips: no
 # RUST_LOG/admin/stats overrides (see gw_launch) — tracing stays off only because no OTLP endpoint is
 # set (its real default), metrics/admin/readiness bind as a fresh install does. AGENTGATEWAY_IMAGE is
-# pinned in gateways/versions.env.
+# pinned below in this file.
 GW_KIND=docker
+# The docker container this manifest launches under. DECLARED here so that anything outside this
+# directory which needs the name (the local verifier's teardown, for one) READS it from the
+# manifest instead of hardcoding it. lib/gateway_isolation_test.sh checks it against the --name
+# below, so the two cannot drift.
+GW_CONTAINER=agentgateway-bench
 # Self-describing manifest metadata — charts.py + the run lists read these, so a gateway
 # is fully defined by its own dir (add/remove a dir → it appears/disappears everywhere).
 GW_DISPLAY="agentgateway"                      # label in charts + report tables

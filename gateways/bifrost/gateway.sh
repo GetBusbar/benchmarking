@@ -2,6 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # Gateway manifest: Bifrost (maximhq/bifrost, docker), its documented pool config.
 GW_KIND=docker
+# The docker container this manifest launches under. DECLARED here so that anything outside this
+# directory which needs the name (the local verifier's teardown, for one) READS it from the
+# manifest instead of hardcoding it. lib/gateway_isolation_test.sh checks it against the --name
+# below, so the two cannot drift.
+GW_CONTAINER=bifrost
 # Self-describing manifest metadata — charts.py + the run lists read these, so a gateway
 # is fully defined by its own dir (add/remove a dir → it appears/disappears everywhere).
 GW_DISPLAY="Bifrost"                      # label in charts + report tables
@@ -18,7 +23,7 @@ GW_AUTH=sk-dummy
 # publish as a Bifrost translation failure; that was OUR wrong path, verified locally: the correct
 # path translates and returns an Anthropic-shaped envelope through the openai provider).
 GW_ANTHROPIC_PATH=/anthropic/v1/messages
-# BIFROST_IMAGE comes from gateways/versions.env — override there.
+# The pinned image. Lives HERE, in this gateway's own directory; an environment override still wins.
 BIFROST_IMAGE="${BIFROST_IMAGE:-maximhq/bifrost:v1.6.4}"
 
 gw_version() {

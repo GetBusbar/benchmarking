@@ -12,8 +12,8 @@
 // Reads each gateways/*/gateway.sh manifest's GW_REPO, hits the GitHub API
 // (unauthenticated is fine for this many public repos; set GITHUB_TOKEN if you are
 // rate-limited), and writes { "<gateway-key>": { "stars": N, "as_of": "YYYY-MM-DD" } }.
-// Two gateways sharing one repo (litellm-python / litellm-rust) each get the repo's
-// count under their own key, so gen-data stays a plain key lookup.
+// Two gateways may share one upstream repo; each still gets that repo's count under its
+// OWN key, so gen-data stays a plain key lookup.
 
 import { readdirSync, readFileSync, statSync, existsSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";

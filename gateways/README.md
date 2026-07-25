@@ -4,6 +4,30 @@ Every gateway the benchmark can measure is a directory here. **Adding a gateway 
 directory.** The runners (`memory/run.sh`, and friends) are gateway-agnostic: they `source`
 `gateways/<name>/gateway.sh` and call a fixed contract. No runner edits, no branching.
 
+## The one invariant, and what enforces it
+
+> **Adding a gateway is exactly: drop in `gateways/<name>/gateway.sh`, and it works.**
+
+That means a gateway's identity appears NOWHERE else in the repo. Not in a runner, not in the charts,
+not in the site, not in a test, not in a shared pins file, and not as a member of a hardcoded list.
+The engine DISCOVERS instead: `run-all.sh` and `run-on-ec2.sh` fan out over `gateways/*/gateway.sh`,
+`charts.py` builds its whole field from the same glob, `site/gen-data.mjs` projects whatever
+`results/matrix/*.json` it finds, `lib/box_qualify.sh` finds each box's own history in
+`results/snapshots/`, and `lib/gateways.sh` is the shell-side choke point (`gw_list`, `gw_default`,
+`gw_exists`, `gw_manifest_field`) that every runner uses instead of naming a default.
+
+`lib/gateway_isolation_test.sh` enforces this on every push. It enumerates `gateways/*/` at runtime
+(it carries no roster of its own) and fails if any gateway's name or declared alias appears in the
+CODE of a file outside its own directory, if any single line names three or more gateways (a frozen
+roster, whatever the syntax), or if a declared `GW_CONTAINER` disagrees with the container the
+manifest actually launches. It self-tests against planted violations first, so a scanner that
+silently matched nothing aborts rather than reporting a green tree.
+
+Provenance comments may still cite a real incident; they cannot make a new gateway fail to run. What
+is banned is executable code, user-visible strings, and rosters. The only allowlisted collision is the
+operator's own identity (its copyright line, GitHub org and domain), which shares a name with one
+entrant because the operator is also an entrant - disclosed on the site on purpose.
+
 ## The contract
 
 A gateway is defined **entirely by its own directory** — nothing about it is hard-coded in the
@@ -15,11 +39,20 @@ dir removes it everywhere.** No list to keep in sync.
 
 ```sh
 GW_KIND=native|docker      # informational
+GW_CONTAINER=mygw-bench    # docker manifests only: the container this manifest launches under, so
+                           # anything outside this directory that needs the name (verify-local.sh's
+                           # teardown) READS it here instead of hardcoding it. lib/gateway_isolation_test.sh
+                           # pins it to the `docker run --name` below, so the two cannot drift.
 
 # Self-describing metadata — charts.py + the report tables read these straight from the manifest.
-GW_DISPLAY="Busbar"        # label shown in charts and the report table
+GW_DISPLAY="My Gateway"    # label shown in charts and the report table
 GW_LANG=Rust               # implementation language → bar color bucket (Rust|Go|Python|Node|Other)
-GW_REPO=https://github.com/GetBusbar/busbar   # the gateway name in the table links here
+GW_REPO=https://github.com/example/mygw       # the gateway name in the table links here
+GW_CLASS="AI gateway"      # the project's OWN self-description, not our editorial
+
+# The SOURCE PIN lives here too - the image tag, or the repo + commit for a source build. Written as
+# MYGW_IMAGE="${MYGW_IMAGE:-example/mygw:1.2.3}" so an environment override still wins. There is no
+# shared file of pins: a gateway's ref is a fact about that gateway, so it lives with the gateway.
 
 GW_PORT=8080               # port the gateway listens on
 GW_PATH=/v1/chat/completions   # request path used to probe + load it
@@ -74,7 +107,7 @@ actual field is whatever dirs exist here; alphabetical, no gateway seated first.
 | `bifrost/` | maximhq/bifrost (docker) | openai provider base_url → mock; runs its stock config |
 | `busbar/` | Busbar single binary | pulls the RELEASED image, extracts the binary, runs native |
 | `gomodel/` | GoModel (ENTERPILOT/GOModel, Go, docker) | `OPENAI_BASE_URL` → mock; discovers routable models from the mock's `/v1/models` |
-| `helicone/` | Helicone AI Gateway (Rust) — **built from source, run native** | no arm64 image published, so we compile it (pinned commit in `versions.env`); `openai` base-url → mock |
+| `helicone/` | Helicone AI Gateway (Rust) - **built from source, run native** | no arm64 image published, so we compile it (pinned commit in its own manifest); `openai` base-url → mock |
 | `kong/` | Kong Gateway + `ai-proxy` (docker, DB-less) | `upstream_url` → mock |
 | `litellm-python/` | LiteLLM `[proxy]` CLI | pip-installed; multi-worker to its pinned cores |
 | `litellm-rust/` | BerriAI compiled AI-gateway beta | **only serves `/v1/messages` via `azure_ai` + the `python-config` reader** — see its `gateway.sh` header (verified against their source) |
