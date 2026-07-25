@@ -90,3 +90,52 @@ single-box drop-in, so it is intentionally not in this harness.
 Same box, same mock, same load profile, same cpu pin for every gateway. Each is launched the only
 way it actually serves the endpoint — no strawmen, no idle-only snapshots. If a gateway can't serve
 the endpoint, that's recorded (`served:false`) rather than hidden.
+
+### Memory is measured the same way for every gateway
+
+`gw_rss` and `gw_hwm` must always describe the **same process set**: the gateway's whole process tree,
+summed from `/proc` (`VmRSS` / `VmHWM`). Manifests never spell that walk out themselves — they call a
+matched pair from `lib/harness.sh`:
+
+| gateway kind | rss reader | hwm reader |
+|---|---|---|
+| docker (10 manifests) | `container_rss_mib <container>` | `container_hwm_mib <container>` |
+| native (aisix, helicone, litellm-rust) | `native_rss_mib '<pgrep -f pattern>'` | `native_hwm_mib '<same pattern>'` |
+
+The three native manifests used to hand-roll `gw_rss` as an `awk` over a **single** pid's
+`/proc/<pid>/status` while `gw_hwm` walked the whole tree, so `idle/peak/recovered_rss_mib` and
+`peak_rss_hwm_mib` described different populations of the same gateway and were then compared against
+ten tree-summed docker gateways. `lib/mem_rss_test.sh` now checks all 13 manifests for the matched
+pair on every push, so this cannot drift back.
+
+### Environment parity: `gw_prereqs` and the build/measure boundary
+
+Ten gateways run an official image; three (aisix, helicone, litellm-rust) have no usable arm64 image
+and are built from source, so their manifests declare `gw_prereqs`. Disposition:
+
+| gateway | `gw_prereqs` installs | why | resident during measurement? |
+|---|---|---|---|
+| aisix | `git build-essential pkg-config libssl-dev protobuf-compiler` + rustup | no arm64 image; `rust-toolchain.toml` pins rustc 1.93.1, `protoc` is a build dep of the vertex/bedrock tonic/prost crates | no — build phase only |
+| helicone | `git build-essential pkg-config libssl-dev` + rustup | no arm64 image; `cargo build --release -p ai-gateway` | no — build phase only |
+| litellm-rust | the above plus `python3-venv python3-pip` and a ~564 MB `litellm[proxy]` venv | Rust build, **plus** the gateway's `python-config` feature loads the `litellm` package at runtime to read its config | toolchain: no. The venv: **yes, deliberately** — `gw_launch` runs the gateway with `PYTHONPATH` into it, so that cost is the gateway's own and lands inside its measured process tree |
+| the other ten | nothing | official image | n/a |
+
+Why the extra toolchain on three boxes is not a parity break:
+
+1. **One gateway per box.** `run-on-ec2.sh` launches a dedicated `m7g`/`m7i.4xlarge` per gateway from
+   the same bare AMI (docker + curl + jq + psutil, no build toolchain). Nothing another gateway
+   installed is ever present while this one is measured.
+2. **Build phase only, and verified.** Every `gw_prereqs` is called from that manifest's `gw_build`,
+   which `matrix/run.sh` runs before the mock, the warm-up, the 36 probes, the sweeps and the memory
+   window. At the boundary the runner calls `harness_build_quiesce` — it waits for compilers/package
+   managers to exit and publishes the result as `build_env.quiesce` in the run JSON — and then
+   `harness_seal_prereqs`, which makes `gw_prereqs` inert so no later hook can install anything while
+   measurements are in flight. **Every** gateway crosses the same boundary and records the same
+   field; the ten with no prereqs simply record `quiesced`. That uniformity is the parity statement.
+3. **Not a resident cost.** Published memory is per-process `VmRSS`/`VmHWM` over the gateway's own
+   tree — never host free memory or cgroup usage — so an idle toolchain on disk, or a page cache the
+   build left warm, cannot enter it. Published latency/throughput come from a gateway pinned to
+   `$CORES` with loadgen and mock on disjoint cores; the build has exited before any of that starts,
+   and `m7g`/`m7i` are fixed-performance instances with no burst credits a long build could spend.
+
+A new source-built gateway may add `gw_prereqs` — it must call it from `gw_build` and nowhere else.

@@ -383,6 +383,23 @@ trap cleanup EXIT INT TERM
 _PHASE_T0=$(date +%s)
 log "[$GATEWAY] build"; gw_build || { echo "build failed"; exit 1; }
 BUILD_S=$(( $(date +%s) - _PHASE_T0 ))
+# ── THE BUILD/MEASURE BOUNDARY (environment parity) ──────────────────────────────────────────────
+# Three of the thirteen manifests build from source and pull their own toolchain in gw_prereqs (aisix
+# + helicone: rust/git/build deps; litellm-rust: those plus a ~564MB python venv), because no usable
+# arm64 image exists for them. That means three boxes carry software the other ten never see, on a
+# benchmark whose premise is "same box, same load, one gateway at a time". Each box runs exactly ONE
+# gateway and every gw_prereqs runs inside gw_build, so nothing installed is resident when we start
+# measuring — but that is a claim about this box RIGHT NOW, so verify it and publish the answer here
+# rather than asserting it in a comment. Uniform: every gateway crosses the same boundary and gets
+# the same evidence field, and the ten with no prereqs simply record "quiesced". See the gw_prereqs
+# contract in lib/harness.sh for the full per-gateway disposition.
+BUILD_QUIESCE="$(harness_build_quiesce)"
+case "$BUILD_QUIESCE" in
+  quiesced) log "[$GATEWAY] build/measure boundary: build tooling quiesced" ;;
+  *) log "[$GATEWAY] build/measure boundary: $BUILD_QUIESCE (recorded in the run JSON)" ;;
+esac
+# From here on the measurement environment is FROZEN: no manifest hook may install anything.
+harness_seal_prereqs
 BUILD="$(gw_version 2>/dev/null | tr -d '\n' | sed 's/"/\\"/g')"
 # OOTB config artifact — capture the gateway's as-shipped default config to results/config/<gw>.txt
 # and record the sidecar pointer. Previously the perf suite was the natural home (it always ran); now
@@ -1446,7 +1463,8 @@ cat > "$RESULTS/$GATEWAY.json" <<JSON
   "started_at": "$RUN_STARTED_AT",
   "finished_at": "$RUN_FINISHED_AT",
   "duration_s": $RUN_DURATION_S,
-  "phase_s": { "build": $BUILD_S, "matrix_6x6": $MATRIX_6X6_S, "memory_window": $MEMORY_WINDOW_S }
+  "phase_s": { "build": $BUILD_S, "matrix_6x6": $MATRIX_6X6_S, "memory_window": $MEMORY_WINDOW_S },
+  "build_env": { "prereqs": $(declare -F gw_prereqs >/dev/null 2>&1 && echo true || echo false), "quiesce": "$(json_escape "${BUILD_QUIESCE:-unknown}")" }
 }
 JSON
 echo "================================================================"
