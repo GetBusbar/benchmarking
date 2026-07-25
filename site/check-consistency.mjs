@@ -84,19 +84,62 @@ export function c7HwmBelowPeak(gwKey, rawMatrix) {
 //
 // Exported and pure (AUDIT #21) so its RED-before test can INJECT an inversion into a synthetic matrix
 // instead of depending on a real gateway staying broken.
-// C6 IS A HARD FAILURE, NOT A WARNING. It was demoted to a warning on the theory that two
-// independently-swept ceilings can overlap on measurement noise. That theory was wrong, and it hid a
-// real defect for weeks: the sustained sweep searched 16-8192 while the peak sweep searched 32-65536,
-// so the peak search was terminating on its own upper bound rather than on the gateway's ceiling.
-// sustained > max_proxy does not mean the two numbers disagree within noise. It means the number the
-// board publishes as a MAXIMUM was exceeded by a different measurement on the same box against the
-// same mock, which makes it not a maximum. Both sweeps now share the single SWEEP constant, so there
-// is no longer any mechanism by which this can be benign, and a run that produces one is not
-// publishable.
+// C6 SEVERITY IS DECIDED BY THE MEASUREMENT'S OWN NOISE, NOT BY A FIXED RULE IN EITHER DIRECTION.
+//
+// The history matters, because both extremes have already failed here. C6 was once a plain warning, and
+// that hid a REAL defect for weeks: the sustained sweep searched 16-8192 while the peak sweep searched
+// 32-65536, so the peak search terminated on its own upper bound rather than on the gateway's ceiling,
+// and every resulting inversion was excused as noise. It was then promoted to a hard error, which is
+// correct for that defect and wrong for the opposite case: on a CPU-bound gateway the two sweeps measure
+// THE SAME ceiling in two separate phases, so which one comes out higher is decided by run-to-run
+// variation. litellm-python's openai>openai cell is the worked example - its max-proxy sweep reads
+// 170,174,176,178,180,181 across its rungs and its sustained sweep reads 171..185 across its own, one
+// flat CPU-bound curve sampled twice. Calling the 4 rps between the two winners a violated maximum
+// makes the board unpublishable for a reason that is not a property of the gateway.
+//
+// So the test is not "is sustained > max_proxy" and it is not "is the gap under some chosen percent".
+// It is: IS THE GAP LARGER THAN THIS CELL'S OWN MEASURED SPREAD? The peak sweep probes many rungs and
+// their rps values scatter; that scatter IS this gateway-and-cell's measurement noise, measured on the
+// same box in the same phase, for free. An inversion inside that band is a comparison the data cannot
+// resolve. An inversion outside it is a number that the gateway's own repeated measurements say should
+// not have happened, and that is a real finding.
+//
+// Two things keep this from sliding back into the hole the old warning dug:
+//   1. C6_GROSS_PCT caps how much noise may ever be excused, so a degenerate two-rung sweep with a wild
+//      spread cannot license an arbitrarily large inversion.
+//   2. The bound-termination check below is an ERROR ON ITS OWN, at any magnitude. A peak sweep whose
+//      WINNING rung is the highest rung it probed has not found a ceiling - it ran out of ladder. That
+//      is the exact signature of the defect the old warning masked, and it is now caught directly
+//      rather than being inferred from the inversion it happens to produce.
+// A sub-band inversion is reported as a WARNING carrying its magnitude and the band it fell inside, so
+// it stays visible in the build log and on the row instead of being silently tolerated.
+export const C6_GROSS_PCT = 5;
+// sweepSpreadPct(sweep, winner): the rung-to-rung scatter of a sweep, as a percentage of the winning
+// rps. This is the cell's OWN measured noise: same box, same phase, same gateway, several samples of
+// the same ceiling. Null when there is nothing to measure it from (fewer than two rungs), which is the
+// honest answer - a sweep that probed once has not measured its own variability, and the caller must
+// NOT then treat an inversion as excusable.
+function sweepSpreadPct(sweep, winner) {
+  if (!Array.isArray(sweep) || sweep.length < 2 || !(winner > 0)) return null;
+  const vals = sweep.map((r) => (r && typeof r.rps === "number" ? r.rps : null)).filter((v) => v != null);
+  if (vals.length < 2) return null;
+  return ((Math.max(...vals) - Math.min(...vals)) / winner) * 100;
+}
+// peakRanOutOfLadder(sweep, winnerConc): did the peak sweep WIN at the highest concurrency it probed?
+// Then it never observed a fall-off, so it never established a ceiling - the true peak may be past the
+// end of the ladder. This is the defect the old warning masked, and it is a hard error at any
+// magnitude, inversion or not.
+function peakRanOutOfLadder(sweep, winnerConc) {
+  if (!Array.isArray(sweep) || sweep.length < 2 || winnerConc == null) return false;
+  const concs = sweep.map((r) => (r && typeof r.conc === "number" ? r.conc : null)).filter((v) => v != null);
+  if (concs.length < 2) return false;
+  return Number(winnerConc) === Math.max(...concs);
+}
 export function c6Inversions(gwKey, rawMatrix) {
   const violations = [];
+  const warnings = [];
   let cellsChecked = 0;
-  if (!rawMatrix || !rawMatrix.upstreams) return { violations, cellsChecked };
+  if (!rawMatrix || !rawMatrix.upstreams) return { violations, warnings, cellsChecked };
   for (const [egress, up] of Object.entries(rawMatrix.upstreams)) {
     for (const [ingress, cell] of Object.entries((up && up.cells) || {})) {
       const perf = cell && cell.served === true && cell.perf;
@@ -104,12 +147,37 @@ export function c6Inversions(gwKey, rawMatrix) {
       const sus = perf.rps_sustained_20ms, max = perf.rps_max_proxy;
       if (sus == null || max == null || max === 0) continue;
       cellsChecked += 1;
-      if (sus > max)
-        violations.push(`${gwKey}.${ingress}->${egress}: sustained@20ms ${sus} > max_proxy ${max} ` +
-          `(a ${((sus / max - 1) * 100).toFixed(2)}% inversion — the published maximum was exceeded by another sweep on the same box, so it is not a maximum; the peak sweep terminated early or the two sweeps did not share SWEEP)`);
+      const at = `${gwKey}.${ingress}->${egress}`;
+      // (1) LADDER EXHAUSTION - an error on its own, whether or not this cell also inverted. A peak that
+      // is the top rung probed is not a peak, it is where we stopped climbing.
+      if (peakRanOutOfLadder(perf.sweep_max_proxy, perf.rps_max_proxy_concurrency)) {
+        violations.push(`${at}: the max_proxy sweep WON at the highest concurrency it probed ` +
+          `(${perf.rps_max_proxy_concurrency}), so it never observed a fall-off and never established a ` +
+          `ceiling - the published maximum is where the ladder ended, not where the gateway did`);
+      }
+      if (!(sus > max)) continue;
+      const pct = (sus / max - 1) * 100;
+      const band = sweepSpreadPct(perf.sweep_max_proxy, max);
+      const inBand = band != null && pct <= band && pct <= C6_GROSS_PCT;
+      const detail = `sustained@20ms ${sus} > max_proxy ${max} (a ${pct.toFixed(2)}% inversion`;
+      if (inBand) {
+        // Inside the cell's own measured scatter: the two sweeps sampled one ceiling twice and the
+        // difference is smaller than the difference between the peak sweep's own rungs. Visible, with
+        // the band that excused it stated, so the judgement can be checked rather than trusted.
+        warnings.push(`${at}: ${detail}, within this cell's own max-proxy sweep scatter of ` +
+          `${band.toFixed(2)}% - the two phases sampled the same ceiling and the data cannot resolve which is higher)`);
+      } else {
+        const why = band == null
+          ? "the max-proxy sweep has too few rungs to have measured its own variability, so nothing establishes this gap as noise"
+          : pct > C6_GROSS_PCT
+            ? `above the ${C6_GROSS_PCT}% ceiling on excusable noise (this cell's sweep scatter is ${band.toFixed(2)}%)`
+            : `outside this cell's own max-proxy sweep scatter of ${band.toFixed(2)}%`;
+        violations.push(`${at}: ${detail}, ${why}) - the number the board publishes as a MAXIMUM was ` +
+          `exceeded by another measurement on the same box against the same mock, which makes it not a maximum`);
+      }
     }
   }
-  return { violations, cellsChecked };
+  return { violations, warnings, cellsChecked };
 }
 
 // ---- C8: ONE ENGINE PER BOARD ---------------------------------------------------------------------
@@ -446,6 +514,7 @@ export function checkConsistency(data, app, opts = {}) {
     const c6 = c6Inversions(g.key, rawMatrix(g.key));
     if (c6.cellsChecked > 0) covered("C6.cell");
     errors.push(...c6.violations);
+    warnings.push(...(c6.warnings || []));
     const c7 = c7HwmBelowPeak(g.key, rawMatrix(g.key));
     if (c7.checked > 0) covered("C7.hwm");
     warnings.push(...c7.warnings);

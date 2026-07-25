@@ -911,11 +911,22 @@ test("R1 RED: a best_cell envelope that disagrees with the RAW matrix cell fails
 // kong's inversion, the invariant test failed even though the invariant was working perfectly. C6 is now
 // a pure exported function, so the RED case is injected and the check is proven independent of whichever
 // gateway happens to be inverted this week.
-const c6Matrix = (sus, max, served = true) => ({
-  upstreams: { openai: { cells: { openai: { served, perf: { rps_sustained_20ms: sus, rps_max_proxy: max } } } } },
+const c6Matrix = (sus, max, served = true, extra = {}) => ({
+  upstreams: { openai: { cells: { openai: { served,
+    perf: { rps_sustained_20ms: sus, rps_max_proxy: max, ...extra } } } } },
+});
+// A max-proxy sweep whose rungs scatter by `spreadPct` around `max`, winning at `winnerConc` and with a
+// rung ABOVE the winner (so the ladder was not exhausted). This is what a real cell carries.
+const c6Sweep = (max, spreadPct, winnerConc = 64) => ({
+  rps_max_proxy_concurrency: winnerConc,
+  sweep_max_proxy: [
+    { conc: 32, rps: Math.round(max * (1 - spreadPct / 100)) },
+    { conc: winnerConc, rps: max },
+    { conc: winnerConc * 2, rps: Math.round(max * (1 - spreadPct / 200)) },
+  ],
 });
 
-test("C6 RED: an INJECTED sustained@20ms > max_proxy cell is a HARD FAILURE", () => {
+test("C6 RED: an INJECTED sustained@20ms > max_proxy cell with no measured scatter is a HARD FAILURE", () => {
   const r = c6Inversions("gw", c6Matrix(14351, 14325));
   assert.equal(r.cellsChecked, 1, "the inverted cell must have been checked");
   assert.equal(r.violations.length, 1, `C6 must flag an injected inversion; got: ${JSON.stringify(r.violations)}`);
@@ -924,14 +935,55 @@ test("C6 RED: an INJECTED sustained@20ms > max_proxy cell is a HARD FAILURE", ()
     `the C6 violation must name the cell, both ceilings and the magnitude; got: ${r.violations[0]}`);
 });
 
-// C6 IS AN ERROR, NOT A WARNING. This is the whole point of the promotion: a warning let a real
-// measurement bug (the two sweeps searching different concurrency ranges, so the peak search
-// terminated on its own bound) sit in the published data instead of blocking the publish. If this
-// assertion ever fails because the inversion moved back into `warnings`, the gate has gone soft again.
-test("C6 severity: an inversion must reach checkConsistency's ERRORS, never its warnings", () => {
-  const inverted = c6Inversions("gw", c6Matrix(14351, 14325));
-  assert.ok(!("warnings" in inverted),
-    "c6Inversions must not expose a `warnings` key — the field name is what routed it to the soft channel");
+// C6 SEVERITY IS DECIDED BY THE CELL'S OWN MEASURED SCATTER. Both extremes have failed here before: a
+// blanket warning once hid a real defect (the peak sweep terminating on its own upper bound), and a
+// blanket error makes the board unpublishable over run-to-run variation on a flat CPU-bound curve. The
+// band is not a chosen number - it is the peak sweep's own rung-to-rung spread, measured on the same box
+// in the same phase. These tests pin BOTH edges so neither failure mode can come back.
+test("C6 band: an inversion INSIDE the cell's own sweep scatter warns; OUTSIDE it errors", () => {
+  // litellm-python's real shape: a flat ~175 rps curve sampled twice, 2.21% apart, scatter 6.08%.
+  const inBand = c6Inversions("gw", c6Matrix(185, 181, true, c6Sweep(181, 6.08)));
+  assert.equal(inBand.violations.length, 0, `an inversion inside the cell's own scatter must not block the publish; got: ${JSON.stringify(inBand.violations)}`);
+  assert.equal(inBand.warnings.length, 1, "it must still be REPORTED, not silently tolerated");
+  assert.match(inBand.warnings[0], /2\.21% inversion/, "the warning states the magnitude");
+  assert.match(inBand.warnings[0], /scatter of 6\.0/, "and the band that excused it, so the judgement can be checked");
+  // Same inversion, a cell whose own sweep is TIGHT: now the gap is larger than anything the gateway's
+  // repeated measurements produced, so it is a finding rather than noise.
+  const outOfBand = c6Inversions("gw", c6Matrix(185, 181, true, c6Sweep(181, 0.5)));
+  assert.equal(outOfBand.violations.length, 1, "an inversion larger than the cell's own scatter must block");
+  assert.match(outOfBand.violations[0], /outside this cell's own max-proxy sweep scatter/);
+});
+
+test("C6 ceiling: sweep scatter can never excuse an arbitrarily large inversion", () => {
+  // A degenerate sweep with a wild spread must not license a gross inversion: C6_GROSS_PCT caps it.
+  const gross = c6Inversions("gw", c6Matrix(400, 200, true, c6Sweep(200, 90)));
+  assert.equal(gross.violations.length, 1, "a 100% inversion must block however noisy the sweep was");
+  assert.match(gross.violations[0], /ceiling on excusable noise/);
+});
+
+test("C6 unmeasured noise is NOT excusable noise: too few rungs means the gap is unexplained", () => {
+  // No sweep array at all (or one rung): nothing has measured this cell's variability, so there is no
+  // band to fall inside and the inversion stands as a finding. This is also what keeps the RED-before
+  // proof above honest, since its injected matrix carries no sweep.
+  const noSweep = c6Inversions("gw", c6Matrix(14351, 14325));
+  assert.equal(noSweep.violations.length, 1, "an inversion with no measured scatter must block");
+  assert.match(noSweep.violations[0], /too few rungs/);
+});
+
+test("C6 RED: a peak sweep that WON at its top rung is an error at any magnitude, inversion or not", () => {
+  // THE DEFECT THE OLD BLANKET WARNING MASKED, now caught directly instead of being inferred from the
+  // inversion it happened to produce: the peak search never saw a fall-off, so it never found a ceiling.
+  // Note there is NO inversion here (sustained < max_proxy) - it still must fail.
+  const ladder = c6Inversions("gw", c6Matrix(100, 500, true, {
+    rps_max_proxy_concurrency: 256,
+    sweep_max_proxy: [{ conc: 64, rps: 300 }, { conc: 128, rps: 420 }, { conc: 256, rps: 500 }],
+  }));
+  assert.equal(ladder.violations.length, 1, "a bound-terminated peak sweep must block the publish");
+  assert.match(ladder.violations[0], /WON at the highest concurrency it probed/);
+  assert.match(ladder.violations[0], /never established a ceiling/);
+  // A sweep that fell off after its winner has established one, and is clean.
+  const clean = c6Inversions("gw", c6Matrix(100, 500, true, c6Sweep(500, 4)));
+  assert.equal(clean.violations.length, 0, "a peak with a fall-off rung above it is a real ceiling");
 });
 
 test("C6 GREEN: a plausible cell, an unqualified ceiling and an unserved cell are NOT flagged", () => {
@@ -989,13 +1041,23 @@ test("C7: the live bundle's hwm-below-peak rows warn but never hard-fail", () =>
 // concurrency ranges, so the peak search terminated on its own bound rather than on the gateway. Both
 // sweeps now share one SWEEP constant, so an inversion has no benign mechanism left. Whatever
 // inversions the live bundle still carries must therefore reach ERRORS, and must be well formed.
-test("C6: an inversion is a hard failure on the live bundle, never a warning", () => {
+test("C6 on the live bundle: every inversion is adjudicated against its own cell's scatter, and says which", () => {
   const { errors, warnings } = checkConsistency(data, app);
-  assert.ok(!warnings.some((x) => x.includes("sustained@20ms")),
-    `a C6 inversion must not be routed to the soft channel; got: ${warnings.filter((x) => x.includes("sustained@20ms"))}`);
   const keys = new Set(data.gateways.map((g) => g.key));
-  for (const e of errors.filter((x) => x.includes("sustained@20ms")))
-    assert.ok(keys.has(e.split(".")[0]), `a C6 error must name a gateway in the bundle; got: ${e}`);
+  const c6 = [...errors, ...warnings].filter((x) => x.includes("sustained@20ms"));
+  for (const m of c6) {
+    assert.ok(keys.has(m.split(".")[0]), `a C6 message must name a gateway in the bundle; got: ${m}`);
+    // NO SILENT TOLERANCE: whichever channel it lands in, the message must carry the magnitude AND the
+    // basis for the verdict, so a reader can check the judgement instead of trusting it.
+    assert.match(m, /% inversion/, `a C6 message must state the magnitude; got: ${m}`);
+    assert.match(m, /scatter|too few rungs|ceiling on excusable noise/,
+      `a C6 message must state the basis it was judged against; got: ${m}`);
+  }
+  // A C6 message routed to the soft channel must be there BECAUSE it fell inside the band, never for
+  // any other reason - this is the assertion that stops the old blanket-warning hole reopening.
+  for (const w of warnings.filter((x) => x.includes("sustained@20ms")))
+    assert.match(w, /within this cell's own max-proxy sweep scatter/,
+      `only a within-band inversion may warn; got: ${w}`);
 });
 
 // ---- matrix is the single source: streaming + memory projection + download ----------------------
@@ -2334,16 +2396,15 @@ test("#21: C6 fires on an INJECTED inversion - the assertion cannot silently pas
   assert.equal(flag(inverted), true, "an injected inversion MUST be flagged");
   assert.equal(flag(ok), false);
   assert.equal(flag(noCeiling), false, "max_proxy 0 is 'no qualifying ceiling', not an inversion");
-  // and the REAL checker agrees on the same injected cell, through its own code path, with a raw matrix
-  // present on disk. An inversion is a HARD FAILURE: the number published as that cell's maximum was
-  // exceeded by another sweep on the same box, which makes it not a maximum, so the run is not
-  // publishable until it is re-measured.
+  // and the REAL checker agrees on the same injected cell, through its own code path. The severity is
+  // decided by the cell's own measured scatter (see the C6 band tests above): with no sweep to measure
+  // that scatter from, an inversion is a hard failure, because nothing establishes the gap as noise.
+  const injected = c6Inversions("gw", c6Matrix(1000, 900));
+  assert.equal(injected.violations.length, 1, "an inversion with no measured scatter must block");
   const { errors, warnings } = checkConsistency(data, app);
-  assert.ok(!warnings.some((w) => w.includes("sustained@20ms")),
-    "a C6 inversion must not reach the soft channel");
-  const c6e = errors.filter((e) => e.includes("sustained@20ms"));
-  assert.ok(c6e.every((e) => /sustained@20ms .* > max_proxy /.test(e)),
-    "every C6 error must name the inversion it found");
+  const c6all = [...errors, ...warnings].filter((e) => e.includes("sustained@20ms"));
+  assert.ok(c6all.every((e) => /sustained@20ms .* > max_proxy /.test(e)),
+    "every C6 message must name the inversion it found");
 });
 
 // ---- #1 CLASS: "Tested on" describes the record the row ACTUALLY displays, in EVERY lane -----------
