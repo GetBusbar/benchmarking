@@ -174,31 +174,57 @@ MATRIX_STREAMCPU_STALL_MS="${MATRIX_STREAMCPU_STALL_MS:-250}"
 MATRIX_STREAMCPU_DUR="${MATRIX_STREAMCPU_DUR:-16}"
 MATRIX_STREAMCPU_FPS_BOUNDS="${MATRIX_STREAMCPU_FPS_BOUNDS:-8 512}"  # [lo,hi] for the cpu-fps peak search
 
-# ── memory: a DEDICATED, ISOLATED window AFTER the 6x6, on each gateway's PEAK cell ────────────────
-# FINAL PROTOCOL (owner-decided). Memory is NOT a synthetic suite and NOT a track over the 6x6 — it is
-# its OWN window that runs AFTER the full 6x6 completes, in a FRESH cold-restarted process, on the ONE
-# FIXED CELL every gateway is measured on. EVERY gateway gets the IDENTICAL load recipe INCLUDING the
-# cell, so the site-wide "same load for every gateway" claim holds for memory too — it did not while
-# the cell was chosen per-gateway, because the cell IS the workload (a translation lane costs more than
-# an identity lane, so the column was comparing gateways on different work). Per gateway:
-#   1. after the 6x6, load_cell = the fixed MEM_CELL_INGRESS>MEM_CELL_EGRESS. If this gateway does not
-#      serve that cell, memory is null with a stated reason (nulls emitted, window skipped). There is
-#      deliberately NO fallback to another cell: that would reintroduce the per-gateway workload.
-#   2. KILL + COLD-RESTART the gateway fresh, configured for the fixed cell's egress dialect (the same
-#      launch path the loop used for that egress), then:
-#        idle       = median RSS over MEM_IDLE_S of COLD idle sampling BEFORE any traffic (the TRUE idle;
-#                     a warm post-6x6 process would measure 'recovered', not 'idle'),
-#        peak       = the MAX RSS sampled continuously while a FIXED load runs on the fixed cell's
-#                     ingress->egress path (identical conc/payload/duration for every gateway),
-#        recovered  = the RSS at the end of MEM_SETTLE_S of recovery sampling after the load stops,
-#        rss_series = the continuous samples across idle->load->recovery (ONE process lifecycle, so the
-#                     curve is meaningful), downsampled to <=~120 points.
-# The load reuses the perf sweep's own generator (lib/sweep.sh sweep_probe -> ugen) against a PLAIN
+# ── memory: ONE OWN-PROCESS WINDOW PER SERVED CELL, inside the 6x6 loop ────────────────────────────
+# FINAL PROTOCOL (DESIGN-per-cell-measurement.md, agreed 2026-07-25). Memory is measured for EVERY cell
+# the gateway serves, each in its OWN cold-started process, separate from that cell's perf window:
+#
+#     cold start -> MEM_IDLE_S idle sample -> fixed load until the RSS PLATEAUS (cap MEM_PLATEAU_CAP_S)
+#                -> MEM_SETTLE_S recovery sample
+#
+# WHY PER CELL, AND WHY NO CELL IS EVER CHOSEN. Memory used to be the only metric on the board reduced
+# to ONE scalar per gateway, which forced the harness to pick a cell to produce it. Every version of
+# that pick was indefensible: picking each gateway's highest-throughput cell selected on throughput and
+# reported memory (two unrelated axes, and the candidate set differed per gateway - 26 served cells for
+# a broad gateway, 1 for a narrow one); pinning ONE cell for the whole field fixed the workload but
+# reported nothing at all for the gateways that do not serve it, and still described a gateway by a
+# single point on a curve. The cell IS the workload - an identity lane does no translation, a cross-
+# dialect lane pays for one on every request - so a memory column built from different cells compared
+# different work. Measuring every served cell removes the selection entirely: there is no fallback
+# cell, no peak cell, no preferred basis. A cell the gateway does not serve simply has no memory block,
+# which reads as absent. WHAT to display (min / max / one shared dialect) is a display concern, made by
+# the reader with the choice disclosed, and never by this harness.
+#
+# WHY ITS OWN COLD PROCESS, NOT THE PERF ONE. The two measurements want opposite conditions. Perf is an
+# adaptive SEARCH over concurrency, so sampling RSS during it would let a faster gateway be driven to
+# higher concurrency, hold more per-connection state, and report more memory - throughput leaking into
+# the memory number. Memory needs a FIXED load and a genuinely cold process: idle sampled after any
+# traffic is "recovered", not "idle". A restart costs ~10s and buys complete independence.
+#
+# WHY THE LOAD TERMINATES ON A PLATEAU, NOT A CLOCK. A fixed-duration load decides the answer for any
+# gateway still climbing when it expires: the published number then describes when we stopped looking
+# rather than the gateway, and a longer load would have produced a larger one. The load therefore runs
+# until the trailing window is steady by lib/plateau.sh's two-part test (no upward trend AND not merely
+# oscillating), or until the cap. HITTING THE CAP IS A PUBLISHED RESULT, NOT AN ERROR: that cell
+# reports plateaued:false plus its growth rate, which is the most informative thing this metric can
+# say about a leaking gateway.
+#
+# Per served cell we publish idle / steady_state (null if it never plateaued) / recovered / peak /
+# peak-hwm / plateaued / time_to_plateau_s / growth_rate_mib_per_min / the whole rss_series. The growth
+# rate is emitted UNCONDITIONALLY, including when the gateway DID plateau, because any threshold admits
+# a leak slower than itself: "plateaued: true, growth 1.5 MiB/min" is how a slow leak that cleared the
+# bar stays visible to a reader (see lib/plateau.sh's header for the arithmetic).
+#
+# The load reuses the perf sweep's own generator (lib/sweep.sh sweep_probe_raw -> ugen) against a PLAIN
 # high-throughput mock — memory does NOT need the recording mock, which sidesteps the mock-norecord
 # showstopper. The measurement is the gateway's own gw_rss()/gw_hwm() manifest hooks (shared /proc-tree
 # helpers in lib/harness.sh); a manifest with no gw_rss (the mock-gateway fixture) degrades to null
 # cleanly. NULL-SAFE: any RSS the sampler can't obtain -> null, NEVER a fabricated 0. MATRIX_MEMORY=0
-# disables the whole window (no "memory" block is written).
+# disables the per-cell window (no "memory" object is written into any cell).
+#
+# COST, ACCEPTED DELIBERATELY. Worst case per cell is MEM_IDLE_S + MEM_PLATEAU_CAP_S + MEM_SETTLE_S =
+# 420s at the field defaults, so a gateway that serves all 36 cells and never plateaus pays ~4.2h of
+# memory phase. A fast-settling gateway plateaus in tens of seconds and lands near 2.7 min/cell. That
+# asymmetry is the right way round: the extra time is spent only where it buys real information.
 MATRIX_MEMORY="${MATRIX_MEMORY:-1}"
 MEM_CAP_MIB="${MEM_CAP_MIB:-40000}"   # watchdog: log a runaway RSS (never kills the measurement)
 # Idle window: how long to sample COLD idle RSS (fresh process, no load) before the fixed load starts.
@@ -212,20 +238,30 @@ MEM_IDLE_S="${MEM_IDLE_S:-60}"
 MEM_SETTLE_S="${MEM_SETTLE_S:-60}"
 # Series sampling cadence across the window (idle -> load -> recovery). Cheap: one gw_rss read every
 # MEM_SAMPLE_S seconds. rss_series_json downsamples to <=~120 points so the series stays bounded.
-MEM_SAMPLE_S="${MEM_SAMPLE_S:-5}"
-# THE FIXED LOAD RECIPE — IDENTICAL for every gateway (that is what makes the memory comparison fair).
-# Applied on the peak cell's ingress->egress path via the perf sweep's own generator. MATRIX_MEM_* are
-# the canonical knobs; the older MEM_CONC/MEM_PSIZE/MEM_DUR names are honoured as aliases (verify-local
+MEM_SAMPLE_S="${MEM_SAMPLE_S:-2}"
+# THE FIXED LOAD RECIPE - IDENTICAL for every gateway AND every cell. A constant that DEFINES THE
+# CONDITION is legitimate (the workload must be identical for a comparison to mean anything); a
+# constant that decides WHEN TO STOP LOOKING is not, which is why there is no duration here. MATRIX_MEM_*
+# are the canonical knobs; the older MEM_CONC/MEM_PSIZE names are honoured as aliases (verify-local
 # already threads those) so an existing dev profile keeps working unchanged.
 MATRIX_MEM_CONC="${MATRIX_MEM_CONC:-${MEM_CONC:-64}}"          # concurrency of the fixed memory load
-MATRIX_MEM_PAYLOAD="${MATRIX_MEM_PAYLOAD:-${MEM_PSIZE:-4096}}" # per-request payload bytes (ugen -psize)
+MATRIX_MEM_PAYLOAD="${MATRIX_MEM_PAYLOAD:-${MEM_PSIZE:-4096}}" # per-request payload bytes (injected into the body)
 # NO LOAD DURATION CONSTANT. The memory load runs until the RSS is STEADY, not for a fixed time. A
 # fixed duration decides the answer for any gateway still climbing when it expires: the number then
 # describes when we stopped looking rather than the gateway. See DESIGN-per-cell-measurement.md.
-MEM_PLATEAU_WINDOW_S="${MEM_PLATEAU_WINDOW_S:-60}"   # trailing window the steadiness test runs over
+MEM_PLATEAU_WINDOW_S="${MEM_PLATEAU_WINDOW_S:-30}"   # trailing window the steadiness test runs over
 MEM_PLATEAU_TREND_PCT="${MEM_PLATEAU_TREND_PCT:-1}"  # max upward drift, 2nd-half mean vs 1st-half mean
 MEM_PLATEAU_RANGE_PCT="${MEM_PLATEAU_RANGE_PCT:-2}"  # max (max-min) spread inside the window
 MEM_PLATEAU_CAP_S="${MEM_PLATEAU_CAP_S:-300}"        # hard cap; hitting it is a REPORTED result
+# LOAD LEG LENGTH - the granularity at which the plateau decision is taken, and it exists only because
+# of how the load generator reports. ugen prints its stats line (ok=, the proof that the load was
+# actually delivered) ONLY when it finishes: a generator killed the instant a plateau is detected exits
+# with no stats at all, and a load that delivered NOTHING produces a perfectly flat RSS curve, which is
+# exactly what the steadiness test would certify as a plateau. So the load is delivered as back-to-back
+# legs of this length, each one carrying its own delivery evidence, and the plateau is evaluated
+# between legs. The leg is clamped to MEM_PLATEAU_WINDOW_S below so the decision can never overshoot by
+# more than one steadiness window.
+MEM_LOAD_LEG_S="${MEM_LOAD_LEG_S:-10}"
 # ADAPTIVE RUNG SELECTION + shared rig baselines (lib/sweep.sh knobs; see its header). A gateway
 # that serves the whole 6x6 sweeps up to 36 cells, and the naive per-cell cost (~4 min: 15 fixed
 # ladder rungs + a re-measured direct c1 baseline + 2 re-measured mock ceilings, per cell) put this
@@ -252,6 +288,12 @@ source "$ROOT/lib/harness.sh"
 source "$ROOT/lib/sweep.sh"
 # shellcheck source=/dev/null
 source "$ROOT/lib/stream_measure.sh"
+# The steadiness test that terminates every per-cell memory load (plateau_check / plateau_growth_rate /
+# plateau_window). It is its own file with its own RED/GREEN suite (lib/plateau_test.sh) because the
+# decision "has this stopped moving?" is the whole meaning of steady_state_rss_mib and must be testable
+# without booting a gateway.
+# shellcheck source=/dev/null
+source "$ROOT/lib/plateau.sh"
 # shellcheck source=/dev/null
 source "$GW_DIR/gateway.sh"
 suite_deadline_start
@@ -784,7 +826,6 @@ CELL_PERF_JSON=""
 matrix_cell_perf(){
   local egress="$1" cell="$2" path="$3" data="$4"; shift 4
   CELL_PERF_JSON=""
-  MEM_LAST_RPS=""; MEM_LAST_BOUND=""   # reset: peak-cell selection reads these only after a sweep produced them
   [ "$MATRIX_SWEEP" = 1 ] || return 0
   if suite_deadline_expired; then
     log "[$GATEWAY]   $egress <- $cell : suite ceiling reached - skipping the perf sweep (capability verdict stands)"
@@ -816,8 +857,6 @@ matrix_cell_perf(){
   # of the single run_sweep call. Carry BOTH into the cell so the drawer's headline is, by
   # construction, one of the points on its own sweep curve - never a separate perf-suite measurement.
   local prps=$SW_CEIL_RPS pconc=$SW_CEIL_CONC pbound=$SW_BOUND pjson="$SW_JSON"
-  MEM_LAST_RPS="$prps"     # peak-cell selection (memory window): this served cell's rps_max_proxy
-  MEM_LAST_BOUND="$pbound" # ...and whether that rps was mock/rig-bound (true) or CERTIFIED (false)
   run_sweep "$SWEEP_TTFT_MS" "$SWEEP" peak
   local lrps=$SW_CEIL_RPS lconc=$SW_CEIL_CONC lbound=$SW_BOUND ljson="$SW_JSON"
   SWEEP_BODY=""; SWEEP_CACHE_KEY=""
@@ -938,8 +977,8 @@ emit_cell(){
   local probe_json=""
   [ -n "$CELL_PROBE_NOTE" ] && probe_json=", \"probe_note\": \"$(json_escape "$CELL_PROBE_NOTE")\""
   CELLS_JSON="${CELLS_JSON}${CELLS_JSON:+,}
-      \"$1\": {\"served\": $2, ${reason:+\"reason\": \"$reason\", }\"status\": \"$3\", \"path\": \"$4\", \"verdict_note\": \"$(json_escape "$5")\", \"body_snippet\": \"$(json_escape "$6")\"$probe_json$CELL_PERF_JSON$CELL_STREAM_JSON}"
-  CELL_PERF_JSON=""; CELL_STREAM_JSON=""; CELL_PROBE_NOTE=""
+      \"$1\": {\"served\": $2, ${reason:+\"reason\": \"$reason\", }\"status\": \"$3\", \"path\": \"$4\", \"verdict_note\": \"$(json_escape "$5")\", \"body_snippet\": \"$(json_escape "$6")\"$probe_json$CELL_PERF_JSON$CELL_STREAM_JSON$CELL_MEM_JSON}"
+  CELL_PERF_JSON=""; CELL_STREAM_JSON=""; CELL_MEM_JSON=""; CELL_PROBE_NOTE=""
 }
 
 WARM_OK=0; WARM_LAST=000; WARM_CELL=openai; SERVE_ERR=""
@@ -1063,10 +1102,10 @@ run_cell(){ # egress cell path body extra-header...
   # is already final and is not re-derived from the sweep in any way.
   if [ "$served" = true ]; then
     matrix_cell_perf "$egress" "$cell" "$path" "$data" "$@"
-    # Peak-cell selection for the post-6x6 memory window: record every SERVED cell with its
-    # rps_max_proxy (MEM_LAST_RPS, empty -> 0 when no sweep produced one). matrix_memory_window picks
-    # the highest-rps served cell as load_cell; ties break by egress order (first-written wins there).
-    mem_record_cell "$egress" "$cell" "${MEM_LAST_RPS:-0}" "${MEM_LAST_BOUND:-null}"
+    # THIS cell's own memory window, in its own cold-started process (matrix_cell_memory). It runs on
+    # every served cell and on no other: an unserved cell has no memory block at all, which reads as
+    # absent. Nothing is selected, nothing is aggregated, and nothing carries between cells.
+    matrix_cell_memory "$egress" "$cell" "$path" "$data" "$@"
   fi
   emit_cell "$cell" "$served" "$cap_status" "$path" "$note" "$snip" "$reason"
 }
@@ -1134,29 +1173,280 @@ warm_up(){ # egress
   return 1
 }
 
-# ── memory: a DEDICATED, ISOLATED window AFTER the 6x6, on the PEAK cell (final protocol) ──────────
-# The window runs AFTER the whole 6x6 loop (see matrix_memory_window at the bottom). During the loop we
-# only RECORD which cells served + their rps_max_proxy (mem_record_cell) so the window can pick the peak
-# cell. There is no before-loop launch and no cross-sweep sampler anymore: the before-loop launch used
-# to displace the recording mock (the #5 showstopper) and the cross-sweep peak was driven by each
-# gateway's own green-cell count (unfair). MATRIX_MEMORY=0 skips the whole window (no "memory" block).
-MEMORY_JSON=""
-MEM_LAST_RPS=""            # set by matrix_cell_perf for the current cell; read by run_cell
-MEM_LAST_BOUND=""          # ditto: that sweep's SW_BOUND (true=mock/rig-bound, false=CERTIFIED, null=unknown)
-MEM_CELLS_F=""             # file of "<egress> <ingress> <rps_max_proxy> <mock_bound>" rows, per served cell
-# mem_record_cell <egress> <ingress> <rps> <mock_bound>: append a served cell for peak-cell selection.
-# Off when MATRIX_MEMORY=0. rps empty/non-numeric -> 0 (still eligible; ties break by egress order).
-# mock_bound is carried so the window can prefer a CERTIFIED (non-rig-limited) basis for the peak cell.
-mem_record_cell(){
-  [ "$MATRIX_MEMORY" = 1 ] || return 0
-  [ -n "$MEM_CELLS_F" ] || { MEM_CELLS_F="${TMPDIR:-/tmp}/mtxmemcells.$$"; : >"$MEM_CELLS_F"; }
-  local rps="$3"; case "$rps" in ''|*[!0-9.]*) rps=0;; esac
-  local bound="${4:-}"; case "$bound" in true|false) ;; *) bound=null;; esac
-  printf '%s %s %s %s\n' "$1" "$2" "$rps" "$bound" >>"$MEM_CELLS_F"
-}
+# ── memory: ONE window per SERVED cell, in that cell's own cold-started process ─────────────────────
+# Called from run_cell for every green cell (see the protocol header at the top of this file). There is
+# no cell selection anywhere in here and no state that survives a cell: the previous design recorded
+# every served cell's rps during the loop so a post-6x6 window could pick the "peak" one, and that
+# machinery is gone rather than parked behind a flag - a selection nobody can switch on cannot come
+# back. MATRIX_MEMORY=0 writes no "memory" object into any cell.
+CELL_MEM_JSON=""
+MEMORY_WINDOW_S=0   # accumulated wall time across every per-cell window (phase_s reporting)
 
 # The RSS null-guard choke point (mem_num_or_null / mem_rss_read / mem_hwm_read) lives in
 # lib/harness.sh next to the /proc readers it guards, and is covered by lib/mem_rss_test.sh.
+
+# _mem_port_open: a NON-ALLOCATING readiness probe - a bare TCP connect to the gateway's listen port,
+# no HTTP request, no request-path allocation. This is what the cold-restarted process is gated on so
+# the COLD IDLE window below is measured BEFORE the process has served a single request (audit P0-4:
+# the old readiness fn was warm_up, i.e. real traffic, so "cold idle" was in fact a post-traffic
+# baseline - it measured `recovered`, not `idle`, while the published methodology claimed the latter).
+_mem_port_open(){
+  local i
+  for i in $(seq 1 60); do
+    (exec 3<>"/dev/tcp/127.0.0.1/$GW_PORT") 2>/dev/null && { exec 3<&- 3>&- 2>/dev/null; return 0; }
+    sleep 1
+  done
+  return 1
+}
+# _mem_pad_body <json-object-body> <pad_bytes> -> the body with exactly <pad_bytes> of payload injected
+# as ONE extra top-level JSON string field. Prints nothing when the body is not a JSON object (the pad
+# cannot be injected safely), which the caller treats as "the declared recipe was NOT delivered".
+# WHY shell-side (audit P0-3): ugen lets -body OVERRIDE -psize, so the memory window passed a declared
+# payload_bytes that was silently discarded - the "identical fixed load on every gateway" fairness
+# guarantee printed on the board was false. The pad is injected here, into THIS cell's own ingress-
+# dialect body, so the DECLARED recipe is byte-for-byte the DELIVERED recipe on every gateway and every
+# cell, and it needs no change to the pinned prebuilt rig binary.
+_mem_pad_body(){
+  local body="$1" n="$2" pad rest
+  case "$body" in '{'*) ;; *) return 1;; esac
+  pad="$(printf '%*s' "$n" '' | tr ' ' x)"
+  [ "${#pad}" -eq "$n" ] || return 1
+  rest="${body#\{}"
+  case "$(printf '%s' "$rest" | tr -d '[:space:]')" in
+    '}') printf '{"_bench_pad":"%s"}' "$pad";;
+    *)   printf '{"_bench_pad":"%s",%s' "$pad" "$rest";;
+  esac
+}
+# _mem_median <file-of-numbers> -> the median (empty file -> null). Idle and the plateau value are both
+# MEDIANS, not last samples, so a single blip inside either window cannot set the published number.
+_mem_median(){
+  [ -s "$1" ] || { echo null; return; }
+  sort -g "$1" | awk '{a[NR]=$1} END{ if(NR==0){print "null"} else if(NR%2){printf "%.1f", a[(NR+1)/2]} else {printf "%.1f", (a[NR/2]+a[NR/2+1])/2} }'
+}
+# _mem_rate_or_null <value> -> the value verbatim, or the literal null when it is not a number.
+# SEPARATE from mem_num_or_null on purpose: that guard rejects zero and negatives because an RSS of 0
+# is always an unmeasurable read, but a growth RATE of exactly 0.000 is the most meaningful reading
+# this metric produces (a gateway that is genuinely flat), and a negative rate means it is releasing.
+# Routing the rate through the RSS guard would have silently converted both into "not measured".
+_mem_rate_or_null(){
+  local v="${1:-}"
+  case "$v" in ''|*[!0-9.eE+-]*) echo null; return;; esac
+  printf '%s' "$v"
+}
+# matrix_cell_memory <egress> <cell> <path> <body> [extra -H header...]
+# THE per-cell memory window: cold start -> idle -> fixed load to plateau (or cap) -> recovery, sampled
+# continuously across ONE process lifecycle so rss_series is a single meaningful curve. Sets
+# CELL_MEM_JSON; emit_cell folds it into this cell's object.
+matrix_cell_memory(){
+  local egress="$1" cell="$2" path="$3" data="$4"; shift 4
+  CELL_MEM_JSON=""
+  [ "$MATRIX_MEMORY" = 1 ] || return 0
+  local idle=null steady=null recovered=null peak=null hwm=null series=null
+  local plateaued=null ttp=null growth=null load_s=null
+  local served=false serr="" disclose=""
+  local recipe="{\"concurrency\": $MATRIX_MEM_CONC, \"payload_bytes\": $MATRIX_MEM_PAYLOAD, \"plateau_window_s\": $MEM_PLATEAU_WINDOW_S, \"plateau_trend_pct\": $MEM_PLATEAU_TREND_PCT, \"plateau_range_pct\": $MEM_PLATEAU_RANGE_PCT, \"plateau_cap_s\": $MEM_PLATEAU_CAP_S, \"load_leg_s\": $MEM_LOAD_LEG_S}"
+  local _t0; _t0=$(date +%s)
+  if suite_deadline_expired; then
+    # Same rule the perf sweep follows: a wall-clock limit is a RIG limit, so the window is recorded as
+    # not measured rather than being attributed to the gateway as a memory result.
+    serr="suite wall-clock ceiling (${HARNESS_SUITE_CEIL_S}s) reached before this cell's memory window; not measured"
+    log "[$GATEWAY]   $egress <- $cell : suite ceiling reached - skipping the memory window (all memory fields null)"
+  else
+    # THE COLUMN VERDICT MUST SURVIVE THIS RELAUNCH, exactly as it does for the per-cell perf cold start
+    # above: launch_egress + the readiness probe here must not let this cell's boot become the column's
+    # published serve verdict.
+    local _wok="$WARM_OK" _wlast="$WARM_LAST" _wserr="$SERVE_ERR"
+    log "[$GATEWAY]   $egress <- $cell : memory window - cold restart, ${MEM_IDLE_S}s idle, load to plateau (cap ${MEM_PLATEAU_CAP_S}s), ${MEM_SETTLE_S}s recovery"
+    if harness_launch_ready launch_egress _mem_port_open "$egress"; then
+      # Per-cell temp files. The window now runs up to 36 times per gateway instead of once, so a fixed
+      # per-PID name would have every cell writing the same series file, and a missed cleanup would leak
+      # a file per cell. Name them by cell and remove them at the end of THIS window.
+      local tag pfx SERIESF STOP PEAKF HWMF IDLEF LOADF WINF MEDF T0
+      tag="$(printf '%s' "${cell}-${egress}" | tr -c 'A-Za-z0-9._-' '_')"
+      pfx="${TMPDIR:-/tmp}/mtxmem.$$.$tag"
+      SERIESF="$pfx.series"; STOP="$pfx.stop"; PEAKF="$pfx.peak"; HWMF="$pfx.hwm"
+      IDLEF="$pfx.idle"; LOADF="$pfx.load"; WINF="$pfx.win"; MEDF="$pfx.med"
+      rm -f "$SERIESF" "$STOP" "$PEAKF" "$HWMF" "$IDLEF" "$LOADF" "$WINF" "$MEDF"
+      : >"$SERIESF"; : >"$PEAKF"; : >"$HWMF"; T0=$(date +%s)
+      MEM_STOP="$STOP"   # file-scope so cleanup()'s trap can stop the sampler on an early exit
+      # ONE background sampler for the WHOLE window (idle -> load -> recovery): appends `<t_s> <rss>`
+      # every MEM_SAMPLE_S and advances a running peak. t_s is measured from THIS process's start, so
+      # the series stays a single continuous timeline the board can draw as one sparkline. mem_rss_read
+      # prints NOTHING for an unmeasurable read, so neither the curve nor the peak can carry a
+      # fabricated 0. The running peak is RESET at the start of the load phase (below) so peak_rss_mib
+      # is a load-phase max, never an idle max. Watchdog LOGS a runaway; never kills the measurement.
+      #
+      # HWM IS SAMPLED HERE TOO, AT THE SAME INSTANTS, and for a specific reason. VmHWM is a per-process
+      # kernel high-water mark, so summing it across a process TREE is only meaningful if the tree's
+      # membership is fixed. It is not: a worker alive during the load contributes to the sampled RSS
+      # peak and then vanishes from a later VmHWM sum when it exits. Reading the sum ONCE at the end
+      # therefore produced sampled peak > summed hwm, which is physically impossible for a fixed tree
+      # and which the board's own consistency check duly flagged on three gateways (0.14-0.67%).
+      # Taking the max of the sum over the SAME sample instants keeps both numbers describing the same
+      # process set at the same moments, so peak <= hwm holds by construction.
+      ( while [ ! -f "$STOP" ]; do
+          v=$(mem_rss_read); h=$(mem_hwm_read)
+          if [ -n "$v" ]; then
+            echo "$(( $(date +%s) - T0 )) $v" >>"$SERIESF"
+            awk -v v="$v" -v p="$(cat "$PEAKF" 2>/dev/null)" 'BEGIN{exit !(v+0>p+0)}' && echo "$v" >"$PEAKF"
+            awk -v v="$v" -v c="$MEM_CAP_MIB" 'BEGIN{exit !(v+0>c+0)}' && echo "[$GATEWAY][mem watchdog] RSS $v MiB > cap $MEM_CAP_MIB (logged)"
+          fi
+          [ -n "$h" ] && { awk -v v="$h" -v p="$(cat "$HWMF" 2>/dev/null)" 'BEGIN{exit !(v+0>p+0)}' && echo "$h" >"$HWMF"; }
+          sleep "$MEM_SAMPLE_S"
+        done ) & MEM_SP=$!
+      # 1) COLD IDLE - the process has served ZERO requests at this point (readiness was a bare TCP
+      # connect, and this window runs in its own process, not the one the perf sweep just hammered).
+      # idle_rss_mib = the MEDIAN of the samples over MEM_IDLE_S.
+      local _end r; : >"$IDLEF"
+      _end=$(( $(date +%s) + MEM_IDLE_S ))
+      while [ "$(date +%s)" -lt "$_end" ]; do r=$(mem_rss_read); [ -n "$r" ] && echo "$r" >>"$IDLEF"; sleep "$MEM_SAMPLE_S"; done
+      idle="$(mem_num_or_null "$(_mem_median "$IDLEF")")"
+      # 2) THE FIXED LOAD, on the PLAIN (non-recording) mock - the first traffic this process ever sees.
+      mock_start_plain; _sw_mock_ready 30 || log "[$GATEWAY]   $egress <- $cell : plain mock slow to bind before the memory load"
+      local body_load="" pad_delivered=0
+      if body_load="$(_mem_pad_body "$data" "$MATRIX_MEM_PAYLOAD")" && [ -n "$body_load" ]; then
+        pad_delivered=$MATRIX_MEM_PAYLOAD
+      else
+        body_load="$data"; pad_delivered=0
+      fi
+      local UGEN_H=( ${CURL_H[@]+"${CURL_H[@]}"} "$@" )
+      # PEAK IS SCOPED TO THE LOAD PHASE: truncate the running max the instant before the load starts
+      # so an idle-window sample can never be published as a "peak under load" (audit P0-5). HWM is
+      # truncated with it, so both maxima cover exactly the same window as well as the same instants.
+      : >"$PEAKF"; : >"$HWMF"
+      # sweep_probe_raw (lib/sweep.sh) reads SWEEP_BODY/PSIZE/UGEN_H as globals. PSIZE=0: the payload
+      # already lives IN the body, and ugen's -psize is inert whenever -body is set - passing it would
+      # re-declare a payload that is not sent.
+      local _psize_save="$PSIZE"
+      SWEEP_BODY="$body_load"; PSIZE=0
+      local L0 LSTART leg elapsed rem d out leg_ok ok_total=0 legs=0 broke=0
+      L0=$(date +%s); LSTART=$(( L0 - T0 ))
+      leg="$MEM_LOAD_LEG_S"; [ "$leg" -gt "$MEM_PLATEAU_WINDOW_S" ] && leg="$MEM_PLATEAU_WINDOW_S"
+      [ "$leg" -lt 1 ] && leg=1
+      while :; do
+        elapsed=$(( $(date +%s) - L0 ))
+        rem=$(( MEM_PLATEAU_CAP_S - elapsed ))
+        [ "$rem" -le 0 ] && break                      # THE CAP. Reaching it is a result, not an error.
+        d="$leg"; [ "$d" -gt "$rem" ] && d="$rem"
+        out="$(sweep_probe_raw "http://127.0.0.1:$GW_PORT$path" "$MATRIX_MEM_CONC" "$d" 2>/dev/null)"
+        leg_ok="$(_mem_kv "$out" ok)"; case "$leg_ok" in ''|*[!0-9]*) leg_ok=0;; esac
+        ok_total=$(( ok_total + leg_ok )); legs=$(( legs + 1 ))
+        if [ "$leg_ok" -le 0 ]; then
+          # A leg that delivered nothing means the load STOPPED being applied (the gateway stopped
+          # answering, the mock died). Carrying on would spend up to the whole cap sampling an idle
+          # process and then certify that flat curve as a plateau, so stop here and disclose it: the
+          # window is reported unmeasured rather than as a steady state we did not observe.
+          broke=1
+          log "[$GATEWAY]   $egress <- $cell : memory load leg $legs delivered ZERO successful requests (ugen: ${out:-no output}) - stopping the load"
+          break
+        fi
+        elapsed=$(( $(date +%s) - L0 ))
+        # A plateau can only be judged once a FULL steadiness window of LOAD-PHASE samples exists. The
+        # trailing window is taken from the load phase alone (t >= LSTART): including idle samples would
+        # mean every load starts by looking at a flat curve and would certify a plateau immediately.
+        [ "$elapsed" -ge "$MEM_PLATEAU_WINDOW_S" ] || continue
+        awk -v s="$LSTART" '$1+0>=s' "$SERIESF" >"$LOADF" 2>/dev/null
+        plateau_window "$LOADF" "$MEM_PLATEAU_WINDOW_S" >"$WINF" 2>/dev/null
+        if [ "$(plateau_check "$WINF" "$MEM_PLATEAU_TREND_PCT" "$MEM_PLATEAU_RANGE_PCT")" = 1 ]; then
+          plateaued=true; ttp="$elapsed"
+          log "[$GATEWAY]   $egress <- $cell : memory PLATEAUED after ${elapsed}s of load"
+          break
+        fi
+      done
+      load_s=$(( $(date +%s) - L0 ))
+      SWEEP_BODY=""; PSIZE="$_psize_save"
+      [ "$plateaued" = true ] || plateaued=false
+      [ "$plateaued" = false ] && [ "$broke" = 0 ] && log "[$GATEWAY]   $egress <- $cell : memory did NOT plateau within the ${MEM_PLATEAU_CAP_S}s cap (a published result: plateaued:false + growth rate)"
+      # THE FINAL TRAILING WINDOW - the basis for BOTH the plateau value and the growth rate.
+      awk -v s="$LSTART" '$1+0>=s' "$SERIESF" >"$LOADF" 2>/dev/null
+      plateau_window "$LOADF" "$MEM_PLATEAU_WINDOW_S" >"$WINF" 2>/dev/null
+      # growth_rate_mib_per_min is emitted WHETHER OR NOT the gateway plateaued, and that is the point.
+      # The steadiness gate has a threshold, and any threshold admits a leak slower than itself: at a 1%
+      # trend gate a gateway creeping ~1.5 MiB/min on a 120 MiB base passes as steady, which is ~90 MiB
+      # an hour. Publishing the rate only on the not-plateaued path would hide exactly the cases the
+      # gate is too loose to catch. A row reading "plateaued: true, growth 1.5 MiB/min" is self-evident.
+      growth="$(_mem_rate_or_null "$(plateau_growth_rate "$WINF")")"
+      # steady_state is the MEDIAN of that same window, and it exists ONLY when the window passed the
+      # steadiness test. A gateway that hit the cap has no steady state to report - substituting its
+      # last sample would publish a number the measurement explicitly says it never reached.
+      if [ "$plateaued" = true ]; then
+        awk '{print $2}' "$WINF" 2>/dev/null >"$MEDF"
+        steady="$(mem_num_or_null "$(_mem_median "$MEDF")")"
+      fi
+      # NO SAMPLES MEANS NO VERDICT, NOT A FAILED ONE. When the rig cannot read this gateway's RSS at all
+      # (no gw_rss hook, a container whose /proc is not visible, a non-Linux dev box) the load-phase
+      # window is empty, and the loop above will have run to the cap without ever being able to declare a
+      # plateau. Publishing plateaued:false there would assert we WATCHED this gateway fail to settle,
+      # which is a measurement we did not take. plateau_check's own rule is the same one: fewer than four
+      # samples is undecidable, and undecidable is not a plateau - nor is it evidence of the opposite.
+      if [ "$(awk 'END{print NR+0}' "$WINF" 2>/dev/null)" -lt 4 ]; then
+        plateaued=null; ttp=null; steady=null
+        disclose="$disclose; plateau verdict withheld: the trailing window holds fewer than the four RSS samples the steadiness test needs to decide (this rig could not measure this gateway's RSS), so the load ran to the cap without a verdict either way"
+      fi
+      # LOAD-SUCCESS + RECIPE GATE (audit P0-3/P0-5). Every load-phase number is published only when the
+      # fixed load was ACTUALLY delivered for the whole window AND the payload delivered equals the
+      # payload declared in load_recipe. A failed load otherwise yields a "peak" that is really the idle
+      # max and a "plateau" that is really an idle process, and a silently-dropped payload makes the
+      # cross-gateway comparison unfair. Either way the honest answer is null plus a disclosure.
+      local load_ok=1
+      if [ "$ok_total" -le 0 ] || [ "$broke" = 1 ]; then
+        load_ok=0
+        disclose="$disclose; load-phase results withheld: the fixed load stopped delivering successful requests after ${legs} leg(s) (${ok_total} delivered in total), so a sampled maximum would be an idle artifact and a flat curve would certify a plateau this gateway never reached"
+      fi
+      if [ "$pad_delivered" != "$MATRIX_MEM_PAYLOAD" ]; then
+        load_ok=0
+        disclose="$disclose; load-phase results withheld: declared load_recipe.payload_bytes=$MATRIX_MEM_PAYLOAD but only ${pad_delivered}B were actually delivered per request, so this cell did not receive the identical fixed load"
+        log "[$GATEWAY]   $egress <- $cell : memory PAYLOAD MISMATCH declared=$MATRIX_MEM_PAYLOAD delivered=$pad_delivered"
+      fi
+      if [ "$load_ok" = 1 ]; then
+        served=true
+        # BOTH maxima come from the sampler's running values over the SAME load-phase instants. Reading
+        # mem_hwm_read fresh here instead would sum VmHWM over whatever tree exists at THIS moment,
+        # which is a different process set than the one that produced the sampled peak.
+        hwm="$(mem_num_or_null "$(cat "$HWMF" 2>/dev/null)")"
+        peak="$(mem_num_or_null "$(cat "$PEAKF" 2>/dev/null)")"
+      else
+        # UNMEASURED IS NOT A RESULT. Without a delivered load there is no plateau verdict, no time to
+        # one and no leak rate to report, so all three go null rather than carrying the shape of an
+        # idle process. plateaued is null here on purpose: false would assert we watched this gateway
+        # fail to settle under load, and we did not.
+        plateaued=null; ttp=null; growth=null; steady=null
+        serr="the fixed memory load was not delivered on this cell"
+      fi
+      # 3) RECOVERY: sample for MEM_SETTLE_S; recovered_rss_mib = the RSS at the END of the window.
+      _end=$(( $(date +%s) + MEM_SETTLE_S ))
+      while [ "$(date +%s)" -lt "$_end" ]; do r=$(mem_rss_read); [ -n "$r" ] && recovered="$r"; sleep "$MEM_SAMPLE_S"; done
+      r=$(mem_rss_read); [ -n "$r" ] && recovered="$r"
+      recovered="$(mem_num_or_null "$recovered")"
+      # Stop the sampler + build the single-lifecycle series (idle -> load -> recovery).
+      [ -n "$MEM_STOP" ] && touch "$MEM_STOP"; [ -n "$MEM_SP" ] && kill "$MEM_SP" 2>/dev/null; MEM_STOP="" MEM_SP=""
+      series="$(rss_series_json "$SERIESF")"
+      rm -f "$SERIESF" "$STOP" "$PEAKF" "$HWMF" "$IDLEF" "$LOADF" "$WINF" "$MEDF" 2>/dev/null
+      log "[$GATEWAY]   $egress <- $cell : memory idle=${idle} steady=${steady} peak=${peak} hwm=${hwm} recovered=${recovered} MiB plateaued=${plateaued} in ${load_s}s growth=${growth} MiB/min"
+      # RESTORE THE RECORDING MOCK before the next cell's capability probe. The load above ran against
+      # the plain mock, and a cell probed against a non-recording mock reads norecord (leg-3 evidence
+      # unavailable) - a harness gap that would be recorded against the gateway. Same discipline, and
+      # the same fatal, as the perf sweep's restore: continuing with a wedged rig silently corrupts
+      # every following cell.
+      if ! mock_start_record; then
+        log "[$GATEWAY]   $egress <- $cell : recording mock did not rebind :$MOCK_PORT after the memory window - retrying"
+        if ! mock_start_record; then
+          echo "FATAL: recording mock could not be restored on :$MOCK_PORT after the $egress<-$cell memory window - every following cell would probe a dead port. Aborting rather than mislabeling them." >&2
+          exit 1
+        fi
+      fi
+    else
+      serr="${HARNESS_SERVE_ERR:-$SERVE_ERR}"
+      log "[$GATEWAY]   $egress <- $cell : memory window - the cold-restarted process never opened :$GW_PORT; memory reads not measured"
+    fi
+    WARM_OK="$_wok"; WARM_LAST="$_wlast"; SERVE_ERR="$_wserr"
+  fi
+  MEMORY_WINDOW_S=$(( MEMORY_WINDOW_S + $(date +%s) - _t0 ))
+  # The protocol string is assembled LAST so every disclosure this window accumulated travels with the
+  # numbers to the board instead of living only in the log.
+  local protocol="per-cell, own cold-started process (separate from this cell's perf window): ${MEM_IDLE_S}s COLD idle sampled before the process serves any request -> fixed load on $cell>$egress (c=$MATRIX_MEM_CONC, payload=${MATRIX_MEM_PAYLOAD}B, identical for every gateway and every cell) run until the RSS is steady over a trailing ${MEM_PLATEAU_WINDOW_S}s window (drift < ${MEM_PLATEAU_TREND_PCT}%, spread < ${MEM_PLATEAU_RANGE_PCT}%) or until the ${MEM_PLATEAU_CAP_S}s cap, whichever comes first - reaching the cap is a published result (plateaued:false plus the growth rate), not an error -> ${MEM_SETTLE_S}s recovery. No cell is selected: every served cell gets its own window and nothing is aggregated across them${disclose}"
+  CELL_MEM_JSON=", \"memory\": {\"protocol\": \"$(json_escape "$protocol")\", \"served\": $served, \"serve_error\": \"$(json_escape "$serr")\", \"load_recipe\": $recipe, \"idle_rss_mib\": ${idle}, \"steady_state_rss_mib\": ${steady}, \"recovered_rss_mib\": ${recovered}, \"peak_rss_mib\": ${peak}, \"peak_rss_hwm_mib\": ${hwm}, \"plateaued\": ${plateaued}, \"time_to_plateau_s\": ${ttp}, \"growth_rate_mib_per_min\": ${growth}, \"load_s\": ${load_s}, \"rss_series\": ${series}, \"idle_window_s\": $MEM_IDLE_S, \"recovery_window_s\": $MEM_SETTLE_S}"
+}
 
 UPSTREAMS_JSON=""
 COMPAT_CELLS=""; COMPAT_SHAPE=""; COMPAT_SERVED=false; COMPAT_ERR=""
@@ -1258,247 +1548,12 @@ for EGRESS in $EGRESS_ALL; do
   fi
   SERVE_ERR=""
 done
+# The 6x6 phase now CONTAINS the memory windows (one per served cell, inside the loop), so matrix_6x6
+# and memory_window OVERLAP rather than partitioning the run: memory_window is the accumulated wall time
+# those windows took, and it is a SUBSET of matrix_6x6. Reported that way on purpose - "where did a 5h
+# run go" is answered by the subset, and inventing a separate exclusive phase would misdescribe a loop
+# that interleaves the two.
 MATRIX_6X6_S=$(( $(date +%s) - _PHASE_T0 ))
-
-# ── the memory window: AFTER the 6x6, on the peak cell, in a FRESH cold-restarted process ──────────
-# Picks load_cell = the highest-rps_max_proxy served cell whose sweep was CERTIFIED (not mock/rig-
-# bound); if no cell is certified it falls back to the full set and DISCLOSES that in the published
-# protocol string. Ties break by egress/first-written order. Kills + cold-restarts the gateway for that
-# cell's egress dialect, gates readiness on a NON-ALLOCATING TCP connect, samples COLD idle (MEM_IDLE_S)
-# before the process has served a single request, then warms up, applies the FIXED identical load recipe
-# (concurrency + duration + payload_bytes injected into the cell's own ingress body, so DECLARED ==
-# DELIVERED) on the cell's ingress->egress path, takes the load-phase RSS max as peak, and samples
-# MEM_SETTLE_S of recovery. Emits a top-level "memory" object.
-# NULL-SAFE, ONE GUARD: every lane (idle/peak/recovered/hwm) goes through mem_num_or_null, so an RSS the
-# rig could not measure is null — NEVER a fabricated 0 (which the ascending memory ranking would have
-# scored as first place). peak/hwm additionally require the fixed load to have actually delivered
-# successful requests at the declared payload; otherwise they are null with the reason disclosed. No
-# served cell -> all-null window. Reuses the perf sweep's own generator (sweep_probe_raw -> ugen)
-# against a PLAIN mock (no recording mock needed for memory), which is exactly why this sidesteps the
-# mock-norecord showstopper.
-# mem_cell_headers <cell> -> sets MEM_H (the loadgen -H array) for this ingress dialect, matching the
-# capability probe + perf sweep (anthropic: version + x-api-key + optional GW_ANTHROPIC_AUTH_HEADER;
-# gemini: x-goog-api-key; everything else: none beyond the manifest's CURL_H).
-mem_cell_headers(){
-  MEM_H=()
-  case "$1" in
-    anthropic) MEM_H=(-H "anthropic-version: 2023-06-01" -H "x-api-key: $GW_AUTH" ${XH[@]+"${XH[@]}"});;
-    gemini)    MEM_H=(-H "x-goog-api-key: $GW_AUTH");;
-  esac
-}
-# _mem_port_open: a NON-ALLOCATING readiness probe — a bare TCP connect to the gateway's listen port,
-# no HTTP request, no request-path allocation. This is what the cold-restarted process is gated on so
-# the COLD IDLE window below is measured BEFORE the process has served a single request (audit P0-4:
-# the old readiness fn was warm_up, i.e. real traffic, so "cold idle" was in fact a post-traffic
-# baseline — it measured `recovered`, not `idle`, while the published methodology claimed the latter).
-_mem_port_open(){
-  local i
-  for i in $(seq 1 60); do
-    (exec 3<>"/dev/tcp/127.0.0.1/$GW_PORT") 2>/dev/null && { exec 3<&- 3>&- 2>/dev/null; return 0; }
-    sleep 1
-  done
-  return 1
-}
-# _mem_pad_body <json-object-body> <pad_bytes> -> the body with exactly <pad_bytes> of payload injected
-# as ONE extra top-level JSON string field. Prints nothing when the body is not a JSON object (the pad
-# cannot be injected safely), which the caller treats as "the declared recipe was NOT delivered".
-# WHY shell-side (audit P0-3): ugen lets -body OVERRIDE -psize, so the memory window passed a declared
-# payload_bytes that was silently discarded — the "identical fixed load on every gateway" fairness
-# guarantee printed on the board was false. The pad is injected here, into the peak cell's own
-# ingress-dialect body, so the DECLARED recipe is byte-for-byte the DELIVERED recipe on every gateway,
-# and it needs no change to the pinned prebuilt rig binary.
-_mem_pad_body(){
-  local body="$1" n="$2" pad rest
-  case "$body" in '{'*) ;; *) return 1;; esac
-  pad="$(printf '%*s' "$n" '' | tr ' ' x)"
-  [ "${#pad}" -eq "$n" ] || return 1
-  rest="${body#\{}"
-  case "$(printf '%s' "$rest" | tr -d '[:space:]')" in
-    '}') printf '{"_bench_pad":"%s"}' "$pad";;
-    *)   printf '{"_bench_pad":"%s",%s' "$pad" "$rest";;
-  esac
-}
-matrix_memory_window(){
-  [ "$MATRIX_MEMORY" = 1 ] || return 0
-  local idle=null peak=null recovered=null hwm=null series="null"
-  local served=false serr="" lcell="null" disclose=""
-  local recipe="{\"concurrency\": $MATRIX_MEM_CONC, \"payload_bytes\": $MATRIX_MEM_PAYLOAD, \"duration_s\": $MATRIX_MEM_DUR}"
-  # ── ONE FIXED MEMORY CELL FOR THE WHOLE FIELD ───────────────────────────────────────────────────
-  # This used to pick each gateway's OWN peak cell. Every other term of the recipe was identical
-  # (concurrency, payload, duration), so it read as a controlled comparison, but the cell is the
-  # workload — and picking it per-gateway meant the memory column compared eight different workloads
-  # and called the result a ranking. In the last field run busbar was measured on cohere>cohere, an
-  # identity lane with no translation at all, while gomodel was measured on openai>gemini, which pays
-  # for a full protocol translation on every request. Those two numbers cannot be put in the same
-  # column. The gateway that happened to peak on an identity lane was flattered, and the one that
-  # happened to peak on a translation was penalised, for a reason that has nothing to do with how much
-  # memory it uses.
-  #
-  # It was also not even self-comparable: "the peak cell" is re-chosen from measured rps every run, so
-  # a gateway whose peak moved between runs had its own memory history silently rebased.
-  #
-  # So the cell is now a CONSTANT, exactly like the concurrency and the payload. openai>openai is the
-  # choice because it is the identity lane of the most widely implemented dialect and the single cell
-  # the largest number of gateways serve, which makes it the one basis on which the most of the field
-  # is directly comparable.
-  #
-  # NOT SERVED MEANS N/A, AND NOTHING ELSE. There is deliberately no fallback to some other cell: a
-  # fallback would silently reintroduce the per-gateway workload this exists to remove, and it would
-  # do it precisely for the gateways whose numbers are already hardest to interpret. A gateway that
-  # cannot serve the fixed cell reports memory as unmeasured, with the reason — the one branch the
-  # harness is allowed: the gateway declared it does not do this cell, so it is reported as such.
-  local m_eg="$MEM_CELL_EGRESS" m_in="$MEM_CELL_INGRESS" m_served=0
-  if [ -n "$MEM_CELLS_F" ] && [ -s "$MEM_CELLS_F" ]; then
-    awk -v e="$m_eg" -v i="$m_in" '$1==e && $2==i {found=1} END{exit !found}' "$MEM_CELLS_F" 2>/dev/null && m_served=1
-  fi
-  if [ "$m_served" != 1 ]; then
-    log "[$GATEWAY] memory: fixed cell $m_in>$m_eg is NOT served by this gateway - memory is null (window skipped)"
-    serr="the fixed memory cell $m_in>$m_eg is not served by this gateway, so its memory is not measured on the same basis as the rest of the field and is reported as unmeasured rather than measured on a different workload"
-    m_eg=""
-  else
-    lcell="\"$m_in>$m_eg\""
-    log "[$GATEWAY] memory: fixed cell = $m_in>$m_eg (identical for every gateway) - cold-restarting for the $m_eg egress"
-    # COLD RESTART for the peak cell's egress dialect (the same launch path the loop used for it).
-    # launch_egress does gw_stop first, so this is a genuinely fresh process. Readiness is the
-    # NON-ALLOCATING port probe (see _mem_port_open) — the first traffic this process ever sees is the
-    # warm-up AFTER the cold-idle window closes.
-    if harness_launch_ready launch_egress _mem_port_open "$m_eg"; then
-      local base m_path m_body
-      m_path="$(ingress_path "$m_in")"; m_body="$(ingress_body "$m_in")"
-      mem_cell_headers "$m_in"
-      local SERIESF STOP PEAKF HWMF T0
-      SERIESF="${TMPDIR:-/tmp}/mtxmem.$$.series"; STOP="${TMPDIR:-/tmp}/mtxmem.$$.stop"; PEAKF="${TMPDIR:-/tmp}/mtxmem.$$.peak"
-      HWMF="${TMPDIR:-/tmp}/mtxmem.$$.hwm"
-      rm -f "$SERIESF" "$STOP" "$PEAKF" "$HWMF"; : >"$SERIESF"; : >"$PEAKF"; : >"$HWMF"; T0=$(date +%s)
-      MEM_STOP="$STOP"   # file-scope so cleanup()'s trap can stop the sampler on an early exit
-      # ONE background sampler for the WHOLE window (idle -> load -> recovery): appends `<t_s> <rss>`
-      # every MEM_SAMPLE_S and advances a running peak. mem_rss_read prints NOTHING for an unmeasurable
-      # read, so neither the curve nor the peak can carry a fabricated 0. The running peak is RESET at
-      # the start of the load phase (below) so peak_rss_mib is a load-phase max, never an idle max.
-      # Watchdog LOGS a runaway; never kills the measurement.
-      #
-      # HWM IS SAMPLED HERE TOO, AT THE SAME INSTANTS, and for a specific reason. VmHWM is a per-process
-      # kernel high-water mark, so summing it across a process TREE is only meaningful if the tree's
-      # membership is fixed. It is not: a worker alive during the load contributes to the sampled RSS
-      # peak and then vanishes from a later VmHWM sum when it exits. Reading the sum ONCE at the end
-      # therefore produced sampled peak > summed hwm, which is physically impossible for a fixed tree
-      # and which the board's own consistency check duly flagged on three gateways (0.14-0.67%).
-      # Taking the max of the sum over the SAME sample instants keeps both numbers describing the same
-      # process set at the same moments, so peak <= hwm holds by construction.
-      ( while [ ! -f "$STOP" ]; do
-          v=$(mem_rss_read); h=$(mem_hwm_read)
-          if [ -n "$v" ]; then
-            echo "$(( $(date +%s) - T0 )) $v" >>"$SERIESF"
-            awk -v v="$v" -v p="$(cat "$PEAKF" 2>/dev/null)" 'BEGIN{exit !(v+0>p+0)}' && echo "$v" >"$PEAKF"
-            awk -v v="$v" -v c="$MEM_CAP_MIB" 'BEGIN{exit !(v+0>c+0)}' && echo "[$GATEWAY][mem watchdog] RSS $v MiB > cap $MEM_CAP_MIB (logged)"
-          fi
-          [ -n "$h" ] && { awk -v v="$h" -v p="$(cat "$HWMF" 2>/dev/null)" 'BEGIN{exit !(v+0>p+0)}' && echo "$h" >"$HWMF"; }
-          sleep "$MEM_SAMPLE_S"
-        done ) & MEM_SP=$!
-      # 1) COLD IDLE — the process has served ZERO requests at this point (readiness was a bare TCP
-      # connect). idle_rss_mib = the MEDIAN of the samples over MEM_IDLE_S.
-      log "[$GATEWAY] memory: ${MEM_IDLE_S}s COLD idle sampling (fresh process, no traffic served yet)"
-      local _end idlef; idlef="${TMPDIR:-/tmp}/mtxmem.$$.idle"; : >"$idlef"
-      _end=$(( $(date +%s) + MEM_IDLE_S ))
-      while [ "$(date +%s)" -lt "$_end" ]; do local r; r=$(mem_rss_read); [ -n "$r" ] && echo "$r" >>"$idlef"; sleep "$MEM_SAMPLE_S"; done
-      idle="$(mem_num_or_null "$(_mem_median "$idlef")")"; rm -f "$idlef"
-      # 2) NOW the first traffic: the plain high-throughput mock + the warm-up that proves this cold
-      # process actually serves the peak cell's egress. Only then does the fixed load run.
-      mock_start_plain; _sw_mock_ready 30 || log "[$GATEWAY] memory: plain mock slow to bind before the load"
-      warm_up "$m_eg" || true
-      if [ "${WARM_OK:-0}" = 1 ]; then
-        served=true
-        # 3) FIXED LOAD on the peak cell's ingress->egress path — IDENTICAL recipe for every gateway:
-        # same concurrency, same duration, same payload bytes. The declared payload is injected into
-        # THIS cell's own ingress body so declared == delivered (asserted below).
-        local m_body_load="" pad_delivered=0
-        if m_body_load="$(_mem_pad_body "$m_body" "$MATRIX_MEM_PAYLOAD")" && [ -n "$m_body_load" ]; then
-          pad_delivered=$MATRIX_MEM_PAYLOAD
-        else
-          m_body_load="$m_body"; pad_delivered=0
-        fi
-        log "[$GATEWAY] memory: fixed load (c=$MATRIX_MEM_CONC payload=${pad_delivered}B dur=${MATRIX_MEM_DUR}s) on $m_in>$m_eg"
-        local UGEN_H=( ${CURL_H[@]+"${CURL_H[@]}"} ${MEM_H[@]+"${MEM_H[@]}"} )
-        # PEAK IS SCOPED TO THE LOAD PHASE: truncate the running max the instant before the load starts
-        # so an idle-window sample can never be published as a "peak under load" (audit P0-5). HWM is
-        # truncated with it, so both maxima cover exactly the same window as well as the same instants.
-        : >"$PEAKF"; : >"$HWMF"
-        # sweep_probe_raw (lib/sweep.sh) reads SWEEP_BODY/PSIZE/UGEN_H as globals. PSIZE=0: the payload
-        # already lives IN the body, and ugen's -psize is inert whenever -body is set — passing it would
-        # re-declare a payload that is not sent.
-        local _psize_save="$PSIZE"
-        SWEEP_BODY="$m_body_load"; PSIZE=0
-        local mem_out mem_ok mem_rps_out
-        mem_out="$(sweep_probe_raw "http://127.0.0.1:$GW_PORT$m_path" "$MATRIX_MEM_CONC" "$MATRIX_MEM_DUR" 2>/dev/null)"
-        SWEEP_BODY=""; PSIZE="$_psize_save"
-        mem_ok="$(_mem_kv "$mem_out" ok)"; mem_rps_out="$(_mem_kv "$mem_out" rps)"
-        case "$mem_ok" in ''|*[!0-9]*) mem_ok=0;; esac
-        # LOAD-SUCCESS + RECIPE GATE (audit P0-3/P0-5). peak/hwm are only published when the fixed load
-        # was ACTUALLY delivered (>0 successful requests) AND the payload delivered equals the payload
-        # declared in load_recipe. A fully failed load otherwise yields a "peak" that is really the idle
-        # max, and a silently-dropped payload makes the cross-gateway comparison unfair. Either way the
-        # honest answer is null + a disclosure, never a number.
-        local load_ok=1
-        if [ "$mem_ok" -le 0 ]; then
-          load_ok=0
-          disclose="$disclose; peak/hwm withheld: the fixed load delivered ZERO successful requests (ugen: ${mem_out:-no output}), so any sampled maximum would be an idle artifact, not a peak under load"
-          log "[$GATEWAY] memory: FIXED LOAD DELIVERED NOTHING (ok=$mem_ok) - peak + hwm are null"
-        fi
-        if [ "$pad_delivered" != "$MATRIX_MEM_PAYLOAD" ]; then
-          load_ok=0
-          disclose="$disclose; peak/hwm withheld: declared load_recipe.payload_bytes=$MATRIX_MEM_PAYLOAD but only ${pad_delivered}B were actually delivered per request, so this gateway did not receive the identical fixed load"
-          log "[$GATEWAY] memory: PAYLOAD MISMATCH declared=$MATRIX_MEM_PAYLOAD delivered=$pad_delivered - peak + hwm are null"
-        fi
-        if [ "$load_ok" = 1 ]; then
-          log "[$GATEWAY] memory: fixed load delivered ok=$mem_ok requests (rps=${mem_rps_out:-?}), payload ${pad_delivered}B == declared"
-          # BOTH come from the sampler's running maxima over the SAME load-phase instants. Reading
-          # mem_hwm_read fresh here instead would sum VmHWM over whatever tree exists at THIS moment,
-          # which is a different process set than the one that produced the sampled peak.
-          hwm="$(mem_num_or_null "$(cat "$HWMF" 2>/dev/null)")"
-          peak="$(mem_num_or_null "$(cat "$PEAKF" 2>/dev/null)")"
-        fi
-        # 4) RECOVERY: sample for MEM_SETTLE_S; recovered_rss_mib = the RSS at the END of the window.
-        log "[$GATEWAY] memory: ${MEM_SETTLE_S}s recovery sampling (does it release?)"
-        _end=$(( $(date +%s) + MEM_SETTLE_S ))
-        while [ "$(date +%s)" -lt "$_end" ]; do local r; r=$(mem_rss_read); [ -n "$r" ] && recovered="$r"; sleep "$MEM_SAMPLE_S"; done
-        local rpost; rpost=$(mem_rss_read); [ -n "$rpost" ] && recovered="$rpost"
-        recovered="$(mem_num_or_null "$recovered")"
-      else
-        serr="${SERVE_ERR:-cold-restarted process did not serve the $m_in>$m_eg warm-up}"
-        # The cold idle WAS measured (the process booted and its port opened), but nothing else in this
-        # window is meaningful without a served load. Publish nothing rather than a partial window.
-        idle=null
-        log "[$GATEWAY] memory: cold-restarted process opened :$GW_PORT but failed the $m_eg warm-up - memory reads not-served"
-      fi
-      # Stop the sampler + build the single-lifecycle series (idle -> load -> recovery).
-      [ -n "$MEM_STOP" ] && touch "$MEM_STOP"; [ -n "$MEM_SP" ] && kill "$MEM_SP" 2>/dev/null; MEM_STOP="" MEM_SP=""
-      series=$(rss_series_json "$SERIESF")
-      rm -f "$SERIESF" "$STOP" "$PEAKF" "$HWMF" 2>/dev/null
-      log "[$GATEWAY] memory: idle=${idle} peak=${peak} recovered=${recovered} hwm=${hwm} MiB on $m_in>$m_eg"
-    else
-      serr="${HARNESS_SERVE_ERR:-$SERVE_ERR}"
-      log "[$GATEWAY] memory: peak cell $m_in>$m_eg did not cold-restart/open :$GW_PORT - memory reads not-served"
-    fi
-  fi
-  # The protocol string is assembled LAST so every disclosure the window accumulated (an uncertified
-  # peak-cell basis, a withheld peak) travels with the numbers to the board instead of only the log.
-  local protocol="post-6x6, fresh cold restart: ${MEM_IDLE_S}s COLD idle (measured before the process serves any request) -> fixed load on the fixed cell ${MEM_CELL_INGRESS}>${MEM_CELL_EGRESS} (c=$MATRIX_MEM_CONC, payload=${MATRIX_MEM_PAYLOAD}B, ${MATRIX_MEM_DUR}s, identical on every gateway; a gateway that does not serve this cell reports memory as unmeasured rather than being measured on a different workload) -> ${MEM_SETTLE_S}s recovery${disclose}"
-  MEMORY_JSON="
-  \"memory\": {\"protocol\": \"$(json_escape "$protocol")\", \"served\": $served, \"serve_error\": \"$(json_escape "$serr")\", \"load_cell\": $lcell, \"load_recipe\": $recipe, \"idle_rss_mib\": ${idle}, \"peak_rss_mib\": ${peak}, \"peak_rss_hwm_mib\": ${hwm}, \"post_load_rss_mib\": ${recovered}, \"recovered_rss_mib\": ${recovered}, \"rss_series\": ${series}, \"idle_window_s\": $MEM_IDLE_S, \"recovery_window_s\": $MEM_SETTLE_S},"
-  rm -f "$MEM_CELLS_F" 2>/dev/null
-}
-# _mem_median <file-of-numbers> -> the median (empty file -> null). Idle is a MEDIAN, not the last
-# sample, so a single warm-up blip during the cold-idle window can't drag the reported idle up.
-_mem_median(){
-  [ -s "$1" ] || { echo null; return; }
-  sort -g "$1" | awk '{a[NR]=$1} END{ if(NR==0){print "null"} else if(NR%2){printf "%.1f", a[(NR+1)/2]} else {printf "%.1f", (a[NR/2]+a[NR/2+1])/2} }'
-}
-
-# THE MEMORY WINDOW: runs AFTER the whole 6x6 above. Picks the peak cell from the served cells recorded
-# during the loop, cold-restarts a fresh process for it, and runs idle -> fixed load -> recovery.
-_PHASE_T0=$(date +%s)
-matrix_memory_window
-MEMORY_WINDOW_S=$(( $(date +%s) - _PHASE_T0 ))
 
 # ONE canonical measured_at for both the per-suite matrix json AND the snapshot artifact (same instant).
 MEASURED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -1524,7 +1579,8 @@ cat > "$RESULTS/$GATEWAY.json" <<JSON
   "sweep_ttft_ms": $SWEEP_TTFT_MS,
   "p99_ceiling_ms": $P99_CEIL_MS,
   "sweep_dur": $SWEEP_DUR,
-  "cell_stream": $([ "$MATRIX_STREAM" = 1 ] && echo true || echo false),$MEMORY_JSON
+  "cell_stream": $([ "$MATRIX_STREAM" = 1 ] && echo true || echo false),
+  "cell_memory": $([ "$MATRIX_MEMORY" = 1 ] && echo true || echo false),
   "cells": {$COMPAT_CELLS
   },
   "upstreams": {$UPSTREAMS_JSON
@@ -1583,9 +1639,12 @@ m = json.load(open(matrix_path))
 files = {}
 if os.path.exists(config_path):
     files[os.path.basename(config_path)] = open(config_path, encoding="utf-8").read()
-# top-level memory + streaming blocks: memory is embedded in the matrix json (m["memory"]); streaming is
-# the best diagonal cell's own stream record. Both are null-safe (absent -> null) — never fabricated.
-memory = m.get("memory")
+# MEMORY IS PER CELL AND IS NOT SUMMARISED HERE. It lives in the matrix grid this snapshot already
+# carries verbatim (upstreams.<egress>.cells.<ingress>.memory), one window per served cell. This key
+# stays for readers that expect the field, and it stays null: producing a scalar here would mean the
+# harness picking a cell, which is precisely the defect the per-cell design removed. WHICH cell (or
+# which extremum across cells) to display is a reader's choice, made where the reader can see it.
+memory = m.get("memory")   # absent by construction -> null
 streaming = None
 ups = m.get("upstreams") or {}
 # best diagonal = the openai diagonal when served, else the first served diagonal that streamed.
