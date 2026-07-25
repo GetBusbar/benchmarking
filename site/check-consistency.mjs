@@ -78,14 +78,9 @@ export function c7HwmBelowPeak(gwKey, rawMatrix) {
 }
 
 // ---- C6 as a pure function: sustained@20ms <= max_proxy on every served cell --------------------
-// max_proxy is the UNCONSTRAINED throughput ceiling; sustained-under-SLO cannot EXCEED it. Every
-// inversion observed in shipped data has been a CROSS-PHASE measurement artefact: sustained@20ms and
-// max_proxy are swept in SEPARATE phases with independent noise bands, so two ceilings legitimately
-// overlap — the margin scales with 1/throughput (sub-1% on a 14k-rps gateway, a few % on a ~200-rps
-// one). So C6 WARNS on every inverted cell (visible in the build log so the next field run re-measures
-// the offender) but never hard-fails: a hard assert would false-fail every honest run on sub-noise
-// overlap and block all publishing. A max_proxy of 0 is "did not qualify" (no ceiling), not an
-// inversion, and is skipped. The magnitude is stamped so a GROSS inversion stands out for escalation.
+// max_proxy is the UNCONSTRAINED throughput ceiling; sustained-under-SLO cannot EXCEED it. A
+// max_proxy of 0 is "did not qualify" (no ceiling), not an inversion, and is skipped. The magnitude is
+// stamped so a gross inversion is legible at a glance.
 //
 // Exported and pure (AUDIT #21) so its RED-before test can INJECT an inversion into a synthetic matrix
 // instead of depending on a real gateway staying broken.
