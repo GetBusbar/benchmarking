@@ -25,7 +25,7 @@ import { readdirSync, readFileSync, statSync, existsSync, mkdirSync, copyFileSyn
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
-import { sealMetric, makeSource, SWEEP, UNGATED_LAT_FIELDS, UNGATED_STREAM_FIELDS, RSS_FIELD_RE, ZERO_MEASURED_FAIL } from "./seal.mjs";
+import { sealMetric, makeSource, SWEEP, UNGATED_LAT_FIELDS, UNGATED_STREAM_FIELDS, RSS_FIELD_RE, isMetricField, ZERO_MEASURED_FAIL } from "./seal.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = process.argv[2] || join(HERE, "..");
@@ -388,6 +388,14 @@ function sealMatrixCellsInPlace(m) {
       if (cell.perf) cell.perf = sealPerfCellPerf(cell.perf);
       if (cell.stream && cell.stream.stream_served === true) {
         cell.stream = { stream_served: true, ...sealStreamRecord(cell.stream) };
+      }
+      // PER-CELL MEMORY: its own cold-started, plateau-terminated window per cell. The memory tab reads
+      // these directly off the matrix cell (Min/Max/Same/Custom), so every published number on them must
+      // be an envelope like every other metric, sealed BY DISCOVERY (any RSS field) plus the non-RSS
+      // memory metrics the vocabulary names (growth rate, time to plateau).
+      if (cell.memory && typeof cell.memory === "object") {
+        for (const k of Object.keys(cell.memory))
+          if (isMetricField(k)) cell.memory[k] = sealMetric(cell.memory[k], {});
       }
     }
   }

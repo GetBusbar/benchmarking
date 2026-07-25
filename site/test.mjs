@@ -2303,4 +2303,286 @@ test("#1 CLASS: the MEMORY tab's Tested-on cell is the SAME pill, showing the me
   assert.match(perfTested.render(g, st), /OpenAI/, "the perf pill still names the perf cell");
 });
 
+// ---- PER-CELL MEMORY: the memory lane joins the cell chooser (Min | Max | Same | Custom) ----------
+// The defect these tests pin down: memory used to be ONE scalar per gateway, produced on whichever cell
+// had the highest THROUGHPUT. That selected on one axis and reported another, and the cell (i.e. the
+// workload) differed row to row. Per-cell measurement moves the choice to the reader, with two hard
+// rules: the memory lane must NEVER offer Peak, and nothing may be substituted across cells.
+
+// cellMem: a sealed per-cell memory window, exactly as gen-data seals cell.memory in place.
+function cellMem(o = {}) {
+  const { steady_state_rss_mib = 100, idle_rss_mib = 20, recovered_rss_mib = 30,
+    plateaued = true, time_to_plateau_s = 25, growth_rate_mib_per_min = 0.1, rss_series = null } = o;
+  const rec = {
+    steady_state_rss_mib: seal(steady_state_rss_mib), idle_rss_mib: seal(idle_rss_mib),
+    recovered_rss_mib: seal(recovered_rss_mib), time_to_plateau_s: seal(time_to_plateau_s),
+    growth_rate_mib_per_min: seal(growth_rate_mib_per_min), plateaued,
+  };
+  if (rss_series != null) rec.rss_series = rss_series;
+  return rec;
+}
+/* memGw: a gateway whose matrix carries a per-cell memory window on each listed cell.
+   cells: { "ingress>egress": <cellMem opts | null> } : null = served, no memory window. */
+function memGw(key, cells, extra = {}) {
+  const upstreams = {};
+  for (const [pair, mem] of Object.entries(cells)) {
+    const [ingress, egress] = pair.split(">");
+    upstreams[egress] = upstreams[egress] || { cells: {} };
+    upstreams[egress].cells[ingress] = { served: true, perf: cellPerf({ ingress, egress }),
+      ...(mem ? { memory: cellMem(mem) } : {}) };
+  }
+  return { key, display: key, lang: "Rust", matrix: { upstreams, measured_at: "2026-07-25T00:00:00Z" }, ...extra };
+}
+const memState = (gws, over = {}) => ({ ...app.newState(), view: "memory", data: { gateways: gws }, ...over });
+const memCol = (id) => app.COLUMN_SETS.memory.find((c) => c.id === id);
+
+test("memory chooser RED: Peak is not offered, not decodable, and cannot select a memory number", () => {
+  // (1) the mode set itself. Peak reads best_cell, which is chosen by THROUGHPUT.
+  assert.ok(!app.MEM_CHOOSER_MODES.has("peak"), "the memory lane must not offer Peak");
+  assert.ok(!app.modesFor("memory").has("peak"), "modesFor(memory) must not contain Peak");
+  assert.ok(app.modesFor("performance").has("peak"), "the perf lanes keep Peak (select on throughput, report throughput)");
+  assert.deepEqual([...app.MEM_CHOOSER_MODES], ["min", "max", "same", "custom"]);
+  // (2) a SHARED URL carrying ?mode=peak that lands on memory falls back to Same, not to a peak cell.
+  assert.equal(app.decodeUrl("/gateways/memory", "?mode=peak").mode, "same",
+    "a ?mode=peak link opened on the memory tab must fall back to Same");
+  assert.equal(app.decodeUrl("/gateways/performance", "?mode=peak").mode, "peak", "the perf tabs still decode Peak");
+  assert.equal(app.decodeUrl("/gateways/performance", "?mode=min").mode, "peak", "Min is not a perf mode");
+  assert.equal(app.resolveMode("peak", "memory"), "same");
+  assert.equal(app.memoryMode({ mode: "peak" }), "same", "the memory choke point can never return Peak");
+  // (3) BEHAVIOURAL: a gateway whose throughput-peak cell is memory-heavy and whose identity cell is
+  // light. Forcing mode:"peak" must NOT surface the heavy peak-cell number.
+  const g = memGw("g", { "openai>openai": { steady_state_rss_mib: 50 }, "openai>gemini": { steady_state_rss_mib: 900 } });
+  g.best_cell = bcCell({ dialect: "gemini" });   // the throughput-peak cell is the 900 MiB one
+  const st = memState([g], { mode: "peak", sameDialect: "openai" });
+  assert.equal(memCol("mempeak").get(g, st).text, "50.0",
+    "with mode forced to peak the memory column must read the SAME-dialect cell, never the throughput-peak cell");
+});
+
+test("memory Min/Max select on memory and report memory, and disclose the size of the search", () => {
+  const g = memGw("broad", {
+    "openai>openai": { steady_state_rss_mib: 120 },
+    "openai>gemini": { steady_state_rss_mib: 61.5 },
+    "anthropic>anthropic": { steady_state_rss_mib: 300 },
+  });
+  const min = memState([g], { mode: "min" }), max = memState([g], { mode: "max" });
+  assert.equal(memCol("mempeak").get(g, min).text, "61.5", "Min is the lowest steady-state cell");
+  assert.equal(memCol("mempeak").get(g, max).text, "300.0", "Max is the highest steady-state cell");
+  // The chosen record names the cell it came from: the extremum is attributable, not anonymous.
+  assert.deepEqual(app.chosenMemory(g, min).path, { ingress: "openai", egress: "gemini" });
+  assert.equal(app.chosenMemory(g, max).path.dialect, "anthropic");
+  // The candidate count rides next to the cell: min-of-3 and min-of-1 are different-sized searches.
+  const ofText = (html) => (html.match(/<span class="tested-of[^>]*>([^<]*)<\/span>/) || [])[1] || "";
+  const pill = memCol("tested").render(g, min);
+  assert.equal(ofText(pill), "of 3 served", "a Min/Max row must state how many cells the extremum was chosen from");
+  assert.match(pill, /OpenAI→Gemini/, "and which cell it landed on");
+  const narrow = memGw("narrow", { "anthropic>anthropic": { steady_state_rss_mib: 70 } });
+  assert.equal(ofText(memCol("tested").render(narrow, memState([narrow], { mode: "min" }))), "of 1 served");
+  // Same/Custom are like-for-like: one named cell on every row, so there is no candidate set to disclose.
+  assert.equal(ofText(memCol("tested").render(g, memState([g], { mode: "same", sameDialect: "openai" }))), "",
+    "Same names one cell for every row; there is no search size to state");
+});
+
+test("memory Min/Max: a cell that never went steady is not a candidate (no steady state to be an extremum of)", () => {
+  const g = memGw("g", {
+    "openai>openai": { steady_state_rss_mib: 200 },
+    "openai>gemini": { steady_state_rss_mib: null, plateaued: false, growth_rate_mib_per_min: 14.2 },
+  });
+  const min = memState([g], { mode: "min" });
+  assert.equal(memCol("mempeak").get(g, min).text, "200.0", "the non-plateauing cell cannot be the minimum");
+  assert.equal(app.chosenMemory(g, min).mem_candidates, 1, "only cells with a steady state are candidates");
+  assert.equal(app.chosenMemory(g, min).mem_cells, 2, "…out of every served cell that has a window");
+  // In Custom on that exact cell, the steady state reads n/a and the GROWTH carries the finding.
+  const cust = memState([g], { mode: "custom", xlateIn: "openai", xlateOut: "gemini" });
+  assert.equal(memCol("mempeak").get(g, cust).na, true, "no steady state was reached, so none is published");
+  const growth = memCol("memgrowth").get(g, cust);
+  assert.equal(growth.text, "14.2 (leak)", "the growth rate IS the reading when a gateway never settles");
+  assert.match(growth.note, /never went steady/);
+});
+
+test("memory: a gateway that never settles on ANY cell is flagged at GATEWAY level, in every mode", () => {
+  const leaky = memGw("leaky", {
+    "openai>openai": { steady_state_rss_mib: null, plateaued: false, growth_rate_mib_per_min: 7.5 },
+    "openai>gemini": { steady_state_rss_mib: null, plateaued: false, growth_rate_mib_per_min: 12.25 },
+  });
+  const fine = memGw("fine", { "openai>openai": { steady_state_rss_mib: 44 } });
+  assert.equal(app.neverPlateaued(leaky), true);
+  assert.equal(app.neverPlateaued(fine), false);
+  assert.equal(app.worstGrowth(leaky), 12.25, "the flag quantifies itself with the worst rate across cells");
+  // The flag is on the NAME cell, so no choice of cell can hide it.
+  for (const mode of ["min", "max", "same", "custom"]) {
+    const st = memState([leaky, fine], { mode });
+    assert.match(app.COLUMN_SETS.memory.find((c) => c.id === "name").render(leaky, st), /never settles/,
+      `the never-settles flag must show in ${mode} mode`);
+    assert.ok(!/never settles/.test(app.COLUMN_SETS.memory.find((c) => c.id === "name").render(fine, st)),
+      "a gateway that settled must not be flagged");
+  }
+  // …and only on the memory tab: it is a memory finding, not a general label.
+  assert.ok(!/never settles/.test(app.COLUMN_SETS.memory.find((c) => c.id === "name")
+    .render(leaky, memState([leaky], { view: "performance" }))));
+  // Absence of measurement is not a verdict.
+  assert.equal(app.neverPlateaued({ key: "x", display: "x" }), false, "no per-cell data means no verdict");
+});
+
+test("memory idle stays OUTSIDE the chooser: median of the cold samples, identical in every mode", () => {
+  const g = memGw("g", {
+    "openai>openai": { idle_rss_mib: 20, steady_state_rss_mib: 100 },
+    "openai>gemini": { idle_rss_mib: 24, steady_state_rss_mib: 200 },
+    "anthropic>anthropic": { idle_rss_mib: 22, steady_state_rss_mib: 300 },
+  });
+  const i = app.idleAcrossCells(g);
+  assert.deepEqual({ median: i.median, min: i.min, max: i.max, n: i.n }, { median: 22, min: 20, max: 24, n: 3 });
+  const seen = new Set();
+  for (const mode of ["min", "max", "same", "custom"]) {
+    const c = memCol("memidle").get(g, memState([g], { mode }));
+    seen.add(c.text);
+    assert.match(c.note, /median of 3 cold samples/, "the spread is disclosed, not hidden behind one sample");
+  }
+  assert.deepEqual([...seen], ["22.0"], "idle is sampled cold with no cell involved, so it cannot vary by mode");
+});
+
+test("memory Same defaults to the WIDEST-COVERAGE dialect, computed from the data (no protocol is named)", () => {
+  // A field where the identity cell most gateways serve is NOT the one the old code hard-coded.
+  const gws = [
+    memGw("a", { "cohere>cohere": {}, "openai>openai": {} }),
+    memGw("b", { "cohere>cohere": {} }),
+    memGw("c", { "cohere>cohere": {} }),
+  ];
+  assert.equal(app.widestDialect({ gateways: gws }), "cohere",
+    "the default is the identity cell the most gateways serve, derived from the run");
+  // Ties break deterministically, and an empty board yields no answer rather than a guess.
+  assert.equal(app.widestDialect({ gateways: [] }), null);
+  assert.equal(app.widestDialect(null), null);
+  // The app source must not name a dialect as the memory default (the gateway-isolation rule).
+  const src = readFileSync(join(HERE, "app.js"), "utf8");
+  assert.ok(!/widestDialect[\s\S]{0,400}return "openai"/.test(src), "no protocol may be hard-coded as the default");
+});
+
+test("memory URL codec: the new modes round-trip, and old memory links keep working", () => {
+  const rt = (path, qs) => app.encodeUrl({ ...app.decodeUrl(path, qs), data: null });
+  assert.equal(rt("/gateways/memory", "?mode=min"), "/gateways/memory?mode=min");
+  assert.equal(rt("/gateways/memory", "?mode=max"), "/gateways/memory?mode=max");
+  assert.equal(rt("/gateways/memory", "?mode=custom&in=openai&out=gemini"),
+    "/gateways/memory?mode=custom&in=openai&out=gemini");
+  // Same is memory's DEFAULT mode, so it is not spelled out; the dialect is, unless it is the data's own
+  // widest-coverage default (which a bundle-less state cannot claim to know).
+  assert.equal(rt("/gateways/memory", "?d=anthropic"), "/gateways/memory?d=anthropic");
+  const st = { ...app.decodeUrl("/gateways/memory", ""), data: { gateways: [memGw("a", { "openai>openai": {} })] } };
+  st.sameDialect = "openai";
+  assert.equal(app.encodeUrl(st), "/gateways/memory", "the pristine memory view keeps a clean URL");
+  // Old shared links: the sort id is a URL CONTRACT and survives the column's rename.
+  const old = app.decodeUrl("/gateways/memory", "?sort=mempeak&dir=asc");
+  assert.equal(old.sortCol, "mempeak");
+  assert.equal(old.mode, "same", "an old memory link with no mode lands on Same");
+  // The perf lanes' encoding is untouched.
+  assert.equal(rt("/gateways/performance", "?mode=same&d=openai"), "/gateways/performance?mode=same&d=openai");
+  assert.equal(rt("/gateways/performance", ""), "/gateways/performance");
+});
+
+test("memory degrades to the LEGACY single-window shape when the bundle has no per-cell data", () => {
+  assert.equal(app.hasPerCellMemory(data), app.hasPerCellMemory(data), "the live bundle answers deterministically");
+  const legacy = { key: "l", display: "L", lang: "Rust",
+    memory_read: memRec({ idle_rss_mib: 40, peak_rss_mib: 900, recovered_rss_mib: 55, load_cell: "anthropic>anthropic" }) };
+  const st = memState([legacy]);
+  assert.equal(app.hasPerCellMemory(st.data), false);
+  // The old columns still read the old record, in every mode (the chooser has nothing to choose from).
+  for (const mode of ["min", "max", "same", "custom"]) {
+    assert.equal(memCol("mempeak").get(legacy, { ...st, mode }).text, "900.0");
+    assert.equal(memCol("memidle").get(legacy, { ...st, mode }).text, "40.0");
+  }
+  // The per-cell-only columns are not rendered at all: a column of pure n/a is noise, not disclosure.
+  const cols = app.columnsFor("memory", st.data).map((c) => c.id);
+  assert.ok(!cols.includes("memgrowth"), "no growth column on a run that predates plateau termination");
+  assert.deepEqual(cols, ["sel", "name", "tested", "memidle", "mempeak", "memrecov", "memcurve"]);
+  // …and it IS rendered once the data can fill it.
+  const perCell = { gateways: [memGw("g", { "openai>openai": {} })] };
+  assert.ok(app.columnsFor("memory", perCell).map((c) => c.id).includes("memgrowth"));
+  // The legacy row keeps its own honest caption (it really was measured on a throughput-peak cell).
+  assert.match(memCol("tested").render(legacy, st), /peak cell/);
+  assert.match(app.memoryCaption(st.data, st).join(" "), /chosen by throughput/);
+});
+
+test("memory: an unserved chosen cell reads n/a and nothing is substituted from another cell", () => {
+  const g = memGw("g", { "anthropic>anthropic": { steady_state_rss_mib: 77 } });
+  const st = memState([g], { mode: "same", sameDialect: "openai" });
+  assert.equal(memCol("mempeak").get(g, st).na, true, "the gateway does not serve the chosen cell");
+  assert.equal(memCol("memrecov").get(g, st).na, true);
+  assert.equal(memCol("tested").render(g, st).includes("tested-pill"), false, "no record, no pill");
+  // The row still exists: filtering a competitor out reads as hiding it.
+  assert.deepEqual(app.applyFilters([g], st).map((x) => x.key), ["g"]);
+  // A gateway with per-cell data missing entirely in a per-cell bundle is n/a, never patched from the
+  // legacy peak-cell window it may still carry.
+  const mixed = { key: "m", display: "M", lang: "Rust", memory_read: memRec({ peak_rss_mib: 999 }) };
+  const st2 = memState([g, mixed], { mode: "same", sameDialect: "anthropic" });
+  assert.equal(memCol("mempeak").get(mixed, st2).na, true,
+    "a throughput-selected legacy number must never appear behind a memory-selected label");
+});
+
+test("memory drawer/compare read the SAME chosen cell as the table (no lane divergence)", () => {
+  const g = memGw("g", { "openai>openai": { steady_state_rss_mib: 120 }, "openai>gemini": { steady_state_rss_mib: 61.5 } });
+  const lane = app.LANES.find((l) => l.key === "memory");
+  for (const [mode, expect] of [["min", 61.5], ["max", 120], ["same", 120]]) {
+    const st = memState([g], { mode, sameDialect: "openai" });
+    const j = app.laneRecord(lane, g, st);
+    assert.equal(app.mval(j.steady_state_rss_mib), expect, `${mode}: the drawer reads the table's cell`);
+    assert.equal(app.metric(j.steady_state_rss_mib).v, memCol("mempeak").get(g, st).v);
+    // Provenance routes through the ONE caption table, and names the cell, not a hard-coded sentence.
+    assert.match(app.lanePathNote(lane, j, st), /memory window/);
+  }
+});
+
+test("gen-data SEALS the per-cell memory window: no published memory number ships as a bare scalar", () => {
+  // The producer's per-cell block, exactly as the design says it publishes it. Everything the board
+  // renders off it must come back as an envelope, including growth rate and time-to-plateau, which are
+  // NOT rss-shaped and so cannot be discovered by the RSS pattern (the bug that shipped peak_rss_hwm_mib
+  // unsealed). plateaued is a boolean verdict, not a metric, and stays a bare bool.
+  const root = buildStreamMemRepo();
+  const raw = JSON.parse(readFileSync(join(root, "results", "matrix", "sgw.json"), "utf8"));
+  const cellMemory = { steady_state_rss_mib: 119.7, idle_rss_mib: 7.1, recovered_rss_mib: 40.2,
+    plateaued: false, time_to_plateau_s: null, growth_rate_mib_per_min: 6.4,
+    rss_series: [{ t_s: 0, rss_mib: 7.1 }, { t_s: 60, rss_mib: 119.7 }] };
+  raw.upstreams.openai.cells.openai.memory = { ...cellMemory };
+  raw.cells.openai.memory = raw.upstreams.openai.cells.openai.memory;
+  writeFileSync(join(root, "results", "matrix", "sgw.json"), JSON.stringify(raw));
+  const bundle = genInto(root);
+  const g = bundle.gateways.find((x) => x.key === "sgw");
+  const mem = app.perCellMemory(g, "openai", "openai");
+  assert.ok(mem, "the per-cell window must survive into the bundle where the memory tab reads it");
+  for (const k of ["steady_state_rss_mib", "idle_rss_mib", "recovered_rss_mib", "growth_rate_mib_per_min", "time_to_plateau_s"])
+    assert.ok(app.isEnvelope(mem[k]), `${k} must be a sealed envelope, not a bare scalar`);
+  assert.equal(mem.plateaued, false, "the plateau verdict is a bool, not a metric");
+  assert.equal(app.mval(mem.growth_rate_mib_per_min), 6.4);
+  assert.equal(app.mval(mem.time_to_plateau_s), null, "never plateaued: no time-to-plateau exists");
+  // C1 (no bare metric field anywhere in the bundle) must hold with the new fields present.
+  const { errors } = checkConsistency(bundle, app, SYNTH);
+  assert.deepEqual(errors.filter((e) => e.startsWith("C1") || e.startsWith("C2")), []);
+  // And the board reads it: this gateway never settled, so it is flagged and its growth is the finding.
+  const st = { ...app.newState(), view: "memory", mode: "min", data: bundle };
+  assert.equal(app.neverPlateaued(g), true);
+  assert.equal(app.hasPerCellMemory(bundle), true);
+  assert.equal(app.COLUMN_SETS.memory.find((c) => c.id === "memgrowth").get(g, st).text, "6.4 (leak)");
+});
+
+// ---- the matrix grid shows EVERY gateway, including one that produced no matrix -----------------
+test("protocol grid: a matrix-less gateway renders an all-n/a row with its reason, never disappears", () => {
+  const tally = () => ({ pass: 0, fail: 0, notconf: 0, unprobed: 0, unverified: 0, untestable: 0 });
+  const withM = memGw("has-matrix", { "openai>openai": {} });
+  const withoutM = { key: "no-matrix", display: "no-matrix", lang: "Go", matrix: null,
+    serve_error: "container exited before the first probe\n  at /home/ec2-user/bench/lib/harness.sh:12" };
+  const roster = app.matrixRoster([withM, withoutM], tally);
+  assert.deepEqual(roster.map((g) => g.key), ["has-matrix", "no-matrix"],
+    "a gateway with no matrix must still be a row, sorted last, never filtered out");
+  assert.equal(app.hasMatrixGrid(withM), true);
+  assert.equal(app.hasMatrixGrid(withoutM), false);
+  assert.equal(app.hasMatrixGrid({}), false);
+  // The reason travels with the row: total failure must read as a row of n/a, not as absence.
+  const why = app.matrixFailureReason(withoutM);
+  assert.match(why, /^no matrix result: container exited before the first probe$/,
+    "the failure reason is surfaced, first line only, with rig paths scrubbed");
+  assert.match(app.matrixFailureReason({ key: "q", display: "q" }), /no matrix result: the run produced no protocol matrix/,
+    "with nothing recorded we state that, rather than inventing a cause");
+  // RED-before: the old filter dropped exactly this row.
+  const oldBehaviour = [withM, withoutM].filter((g) => g.matrix && (g.matrix.upstreams || g.matrix.cells));
+  assert.equal(oldBehaviour.length, 1, "…which is the disappearance this test exists to prevent");
+});
+
 console.log(`\n${passed} tests passed`);

@@ -46,12 +46,14 @@ const VIEWS = ["gateways", "memory", "performance", "streaming", "matrix", "meth
 const VIEW_LABELS = { gateways: "Gateways", memory: "Memory", performance: "Performance", streaming: "Streaming", matrix: "Protocol matrix", method: "Method" };
 // The default (bare /gateways) view: the roster overview.
 const DEFAULT_VIEW = "gateways";
-// The tabs that render the results table with the cell-chooser (Performance, Streaming). Memory has its
-// own per-gateway table (no chooser).
+// The tabs whose columns read a PERF/STREAM cell of the one 6x6 run (Peak | Same | Custom).
 const PERF_VIEWS = new Set(["performance", "streaming"]);
-// The views that render the shared results table (#view-table). Memory is a table view too (its own
-// per-gateway columns) but is NOT cell-chooser driven, so it is in TABLE_VIEWS but not PERF_VIEWS.
+// The views that render the shared results table (#view-table).
 const TABLE_VIEWS = new Set(["performance", "streaming", "memory"]);
+// The views the CELL CHOOSER drives. Memory was deliberately excluded while memory was ONE scalar per
+// gateway measured on a harness-picked cell; per-cell measurement removed the reason for the asymmetry,
+// so memory now chooses its cell like every other lane, with its OWN mode set (below).
+const CHOOSER_VIEWS = new Set(["performance", "streaming", "memory"]);
 // Old shared URLs pointed at results/charts and the old Peak/Matched/passthrough/translation tabs; map
 // them onto the new unified tabs so links keep resolving. The old translation (Matched) tab is now the
 // Performance tab in Custom mode, so it aliases to `performance` (its ?xin/?xout still decode into the
@@ -69,6 +71,35 @@ const VIEW_SORT = { performance: "rps20", streaming: "sttft", memory: "mempeak" 
 //   same   — ONE picked dialect's diagonal (X→X) for every gateway. No pill (the dialect is in the control).
 //   custom — any ingress→egress cell (incl. translation) for every gateway. No pill.
 const CHOOSER_MODES = new Set(["peak", "same", "custom"]);
+/* The MEMORY lane's own mode set: Min | Max | Same | Custom.
+   There is deliberately NO Peak. Peak reads best_cell, which the harness selects by THROUGHPUT; using it
+   for memory would select on one axis and report another - the exact defect per-cell measurement exists to
+   remove - and it would arrive dressed as a UI control, so a reader could not see it. Min/Max ARE offered
+   because they select on memory and report memory: real minima and maxima of the quantity in the column.
+   Their candidate sets still differ per gateway (min-of-26 vs min-of-1), which is why the row shows the
+   cell count, and why the two are offered together (Min flatters breadth, Max penalises it). */
+const MEM_CHOOSER_MODES = new Set(["min", "max", "same", "custom"]);
+// The modes a view offers, and the mode it lands on when none is pinned. Memory defaults to Same (the
+// widest-coverage dialect, computed from the data) because only Same/Custom are like-for-like.
+function modesFor(view) { return view === "memory" ? MEM_CHOOSER_MODES : CHOOSER_MODES; }
+function defaultMode(view) { return view === "memory" ? "same" : "peak"; }
+/* resolveMode: coerce a mode onto a view that offers it. This is what a SHARED URL hits: a link carrying
+   ?mode=peak that lands on the memory tab must NOT render a throughput-selected memory number, so it falls
+   back to Same; the reverse (?mode=min on Performance) falls back to Peak rather than reading nothing. */
+function resolveMode(mode, view) { return modesFor(view).has(mode) ? mode : defaultMode(view); }
+/* memoryMode: THE choke point for the memory lane's mode. Every memory reader routes through it, so even a
+   state hand-built with mode:"peak" (a stale in-memory state, a test, a future caller) cannot produce a
+   peak-selected memory number - it reads Same instead. */
+function memoryMode(st = state) { return MEM_CHOOSER_MODES.has(st.mode) ? st.mode : defaultMode("memory"); }
+// The segmented control's copy, one entry per mode across both mode sets.
+const MODE_LABELS = { peak: "Peak", min: "Min", max: "Max", same: "Same", custom: "Custom" };
+const MODE_TIPS = {
+  peak: "Each gateway on its own best same-dialect diagonal",
+  min: "Each gateway's LOWEST steady-state cell (selected on memory, reported as memory)",
+  max: "Each gateway's HIGHEST steady-state cell (selected on memory, reported as memory)",
+  same: "One chosen dialect's identity cell for every gateway",
+  custom: "Any ingress→egress cell for every gateway",
+};
 
 /* Language chip colours: kept in sync with LANG_COLORS in charts.py. */
 const LANG_COLORS = {
@@ -243,7 +274,14 @@ function mval(env) { return isEnvelope(env) && env.value != null ? env.value : n
 const SWEEP_CAPTION = {
   "6x6-diagonal":        (p) => `${laneDialect(p && p.dialect)} passthrough — 6×6 diagonal cell`,
   "6x6-translation":     (p) => `${laneDialect(p && p.ingress)} in → ${laneDialect(p && p.egress)} out — 6×6 translation cell`,
+  // The LEGACY single memory window: one fixed-duration load on the gateway's throughput-peak cell. It
+  // still renders (older bundles carry it) and its caption still says peak cell, because that IS what that
+  // record is - the honest label is how a reader tells it apart from the per-cell windows below.
   "6x6-memory-window":   ()  => `post-6×6 memory window (identical fixed load on the peak cell, fresh cold-restarted process)`,
+  // The PER-CELL memory windows: one cold-started process per cell, load run until RSS is steady (or the
+  // cap is hit). The cell is the workload, so the caption names it exactly like every other lane's does.
+  "6x6-memory-diagonal": (p) => `${laneDialect(p && p.dialect)} passthrough - 6×6 memory window (cold start, load run to plateau)`,
+  "6x6-memory-translation": (p) => `${laneDialect(p && p.ingress)} in → ${laneDialect(p && p.egress)} out - 6×6 memory window (cold start, load run to plateau)`,
   "6x6-stream-diagonal": (p) => `${laneDialect(p && p.dialect)} SSE stream — 6×6 diagonal cell`,
   "6x6-stream-translation": (p) => `${laneDialect(p && p.ingress)} in → ${laneDialect(p && p.egress)} out SSE stream — 6×6 translation cell`,
   "perf-suite":          (p) => `${laneDialect(p && p.dialect)} passthrough — perf suite (no 6×6 cell for this gateway yet)`,
@@ -339,6 +377,154 @@ function memoryTestedRecord(g) {
   return { ...m, path: { ingress, egress, ...(ingress === egress ? { dialect: ingress } : {}) } };
 }
 
+/* ---- per-cell memory --------------------------------------------------------
+   The memory metric used to be ONE scalar per gateway, so the harness had to pick a cell to produce it and
+   picked each gateway's highest-throughput served cell: it selected on throughput and reported memory, and
+   the cell (i.e. the workload) differed row to row. Per-cell measurement replaces that with a cold-started,
+   plateau-terminated window on EVERY served cell, and WHICH cell to show becomes a display choice the
+   reader makes and can see (Min | Max | Same | Custom) rather than one the harness makes and hides.
+
+   Everything below is null-safe by construction: the published bundles that predate per-cell measurement
+   carry none of these fields, and the board must degrade to that shape rather than blank the tab. */
+// perCellMemory: the memory window a served cell carries, or null. Same lookup shape as xlateMatrixCell.
+function perCellMemory(g, ingress, egress) {
+  const up = g.matrix && g.matrix.upstreams && g.matrix.upstreams[egress];
+  const cell = up && up.cells && up.cells[ingress];
+  return (cell && cell.served === true && cell.memory && typeof cell.memory === "object") ? cell.memory : null;
+}
+// memoryCells(g): every served cell this gateway has a memory window for, in a stable (egress, ingress)
+// order so Min/Max tie-breaks are deterministic rather than object-key-order dependent.
+function memoryCells(g) {
+  const out = [];
+  for (const egress of MATRIX_CELLS) for (const ingress of MATRIX_CELLS) {
+    const mem = perCellMemory(g, ingress, egress);
+    if (mem) out.push({ ingress, egress, mem });
+  }
+  return out;
+}
+/* hasPerCellMemory(data): does this BUNDLE carry per-cell memory at all? The board runs the memory lane in
+   one of two shapes and says which: per-cell (chooser + steady state + growth) or LEGACY (the single
+   post-6x6 window, no chooser). The switch is per BUNDLE, never per gateway: a gateway missing per-cell
+   data in a per-cell bundle reads n/a, because substituting its old peak-cell number into a named mode
+   would put a throughput-selected reading behind a memory-selected label. Memoised on the data object -
+   every row of every memory column asks this question. */
+const PER_CELL_MEM_CACHE = new WeakMap();
+function hasPerCellMemory(data = (typeof state !== "undefined" ? state.data : null)) {
+  if (!data || typeof data !== "object") return false;
+  if (PER_CELL_MEM_CACHE.has(data)) return PER_CELL_MEM_CACHE.get(data);
+  const yes = (data.gateways || []).some((g) => memoryCells(g).length > 0);
+  PER_CELL_MEM_CACHE.set(data, yes);
+  return yes;
+}
+// The data bundle a (possibly synthetic) state refers to; falls back to the live state's.
+function stateData(st) {
+  return (st && st.data) || (typeof state !== "undefined" ? state.data : null);
+}
+/* widestDialect(data): the identity cell the MOST gateways serve: the default for memory's Same mode.
+   Derived from the data, never named: no gateway or protocol may be special-cased, and "the dialect most
+   of the field can actually be compared on" is a property of the run, not an editorial choice. Ties break
+   alphabetically so the answer is deterministic. Null when nothing is served (no data yet). */
+function widestDialect(data = (typeof state !== "undefined" ? state.data : null)) {
+  const gws = (data && data.gateways) || [];
+  if (!gws.length) return null;
+  let best = null, bestN = 0;
+  for (const d of MATRIX_CELLS) {
+    const n = gws.filter((g) => servesXlatePair(g, d, d)).length;
+    if (n > bestN || (n === bestN && n > 0 && best && d.localeCompare(best) < 0)) { best = d; bestN = n; }
+  }
+  return best;
+}
+/* memSteady(mem): the steady-state RSS of one cell's window, or null when it never plateaued. This is the
+   value Min/Max SELECT on, so it is the same quantity the column REPORTS - the rule the old peak-cell
+   memory number broke. A cell that never plateaued has no steady state to be the min or max of, so it is
+   not a candidate (its growth rate is the finding, and it is reported as such). */
+function memSteady(mem) { return mval(mem && mem.steady_state_rss_mib); }
+/* chosenMemory(g, st): the per-cell memory record the memory lane shows, stamped through the SAME choke
+   point every other lane's chosen record goes through (stampChosen), so the pill, the drawer and the
+   tooltip all render its provenance from one caption table.
+     min / max  → this gateway's lowest / highest steady-state RSS across the cells it serves
+     same       → the chosen dialect's identity cell
+     custom     → the chosen ingress→egress cell
+   Never peak: memoryMode() cannot return it. Returns null when the gateway has no window for the chosen
+   cell (Same/Custom) or no plateaued cell at all (Min/Max) - n/a, never a substituted cell. */
+function chosenMemory(g, st = state) {
+  const cells = memoryCells(g);
+  if (!cells.length) return null;
+  const mode = memoryMode(st);
+  let pick = null;
+  if (mode === "same" || mode === "custom") {
+    const [ingress, egress] = mode === "same"
+      ? [st.sameDialect, st.sameDialect] : [st.xlateIn, st.xlateOut];
+    pick = cells.find((c) => c.ingress === ingress && c.egress === egress) || null;
+  } else {
+    const scored = cells.filter((c) => memSteady(c.mem) != null);
+    for (const c of scored) {
+      if (!pick) { pick = c; continue; }
+      const better = mode === "min" ? memSteady(c.mem) < memSteady(pick.mem) : memSteady(c.mem) > memSteady(pick.mem);
+      if (better) pick = c;
+    }
+  }
+  if (!pick) return null;
+  // The candidate count travels ON the record: min-of-26 and min-of-1 are different-sized searches and the
+  // row has to be able to say so (the bias Min/Max carry is disclosed, not designed away).
+  return { served: true, ...stampChosen(pick.mem, g, pick.ingress, pick.egress, "memory-"),
+    mem_candidates: cells.filter((c) => memSteady(c.mem) != null).length, mem_cells: cells.length };
+}
+/* memoryFor(g, st): THE memory record every memory column reads. Per-cell bundle → the chosen cell;
+   legacy bundle → the single post-6x6 window, unchanged (that is what keeps the published board working
+   until the field re-runs; the caption says which shape is on screen). */
+function memoryFor(g, st = state) {
+  return hasPerCellMemory(stateData(st)) ? chosenMemory(g, st) : canonicalMemory(g);
+}
+/* idleAcrossCells(g): idle is sampled COLD, before the first request, so no cell is involved in it and it
+   stays OUTSIDE the chooser - valid for every gateway in every mode. With one sample per cell we publish
+   the median plus the spread rather than picking a cell's sample to stand for the rest. */
+function idleAcrossCells(g) {
+  const vals = memoryCells(g).map((c) => mval(c.mem.idle_rss_mib)).filter((v) => v != null).sort((a, b) => a - b);
+  if (!vals.length) return null;
+  const mid = Math.floor(vals.length / 2);
+  return { median: vals.length % 2 ? vals[mid] : (vals[mid - 1] + vals[mid]) / 2,
+    min: vals[0], max: vals[vals.length - 1], n: vals.length };
+}
+/* neverPlateaued(g): this gateway's RSS never went steady on ANY cell it serves. That is the strongest
+   statement the memory metric makes - the published number for such a gateway would describe when we
+   stopped, not the gateway - so it is flagged at GATEWAY level (next to the name, in every mode) rather
+   than being something a reader has to find by selecting the right cell. False when there is no per-cell
+   data to judge: absence of measurement is not a verdict. */
+function neverPlateaued(g) {
+  const cells = memoryCells(g);
+  return cells.length > 0 && cells.every((c) => c.mem.plateaued !== true);
+}
+/* worstGrowth(g): the highest growth rate across this gateway's cells. When a cell hit the plateau cap
+   this IS its leak rate, so the gateway-level flag can quantify itself instead of just asserting. */
+function worstGrowth(g) {
+  const vals = memoryCells(g).map((c) => mval(c.mem.growth_rate_mib_per_min)).filter((v) => v != null);
+  return vals.length ? Math.max(...vals) : null;
+}
+/* memCellTip(rec): the "Tested on" tooltip for a PER-CELL record. The legacy record's tooltip
+   (memLoadRecipeTip) describes the peak-cell window and stays for legacy rows; this one describes what a
+   per-cell window actually did: did it settle, how long it took, and what it was still doing if not. */
+function memCellTip(rec) {
+  const bits = [];
+  const r = rec && rec.load_recipe;
+  bits.push(r ? `identical fixed load: ${fmtInt(r.concurrency)} concurrent, ${fmtInt(r.payload_bytes)} B payload, run until RSS is steady`
+    : "identical fixed load for every gateway, run until RSS is steady");
+  bits.push("cold-started for this cell (idle sampled before the first request)");
+  if (rec && rec.plateaued === true) {
+    const t = Number(mval(rec.time_to_plateau_s));
+    bits.push(Number.isFinite(t) ? `settled after ${fmtInt(t)} s` : "settled");
+  } else if (rec && rec.plateaued === false) {
+    const gr = mval(rec.growth_rate_mib_per_min);
+    bits.push(gr != null ? `NEVER SETTLED: still growing at ${fmt1(gr)} MiB/min when the cap was reached`
+      : "NEVER SETTLED: still growing when the cap was reached");
+  }
+  // Stated mode-neutrally: in Min/Max it is the size of the search, and in Same/Custom it is still the
+  // context a reader needs for the row above it.
+  if (rec && rec.mem_candidates != null)
+    bits.push(`${fmtInt(rec.mem_candidates)} of this gateway's ${fmtInt(rec.mem_cells)} measured cells reached a steady state`);
+  return `${bits.join("; ")}${memDisclosure(rec)}`;
+}
+
 /* passCell: the Passthrough tab reads ONLY the canonical record (g.best_cell). When best_cell
    exists it is THE record: a field it lacks reads n/a, never silently patched from a different
    source (that is exactly the numeric divergence this rule exists to kill). Only a gateway with
@@ -355,10 +541,11 @@ function streamCell(g, key, fmt) {
   const s = canonicalStreaming(g);
   return s ? metric(s[key], fmt) : { v: null, text: "n/a", na: true };
 }
-/* memCell: the memory columns read ONLY the canonical memory record (g.memory_read). Each metric is a
-   sealed envelope; metric() reads it. No suite fallback — no matrix memory window reads n/a. */
-function memCell(g, key, fmt) {
-  const m = canonicalMemory(g);
+/* memCell: the memory columns read the record memoryFor() chose: the per-cell window for the chosen mode,
+   or (legacy bundle) the single post-6x6 window. Each metric is a sealed envelope; metric() reads it. A
+   gateway with no record for the chosen cell reads n/a; nothing is ever substituted from another cell. */
+function memCell(g, key, fmt, st = state) {
+  const m = memoryFor(g, st);
   return m ? metric(m[key], fmt) : { v: null, text: "n/a", na: true };
 }
 
@@ -413,20 +600,21 @@ function chooserCellPerf(g, st = state) {
   if (st.mode === "peak") return g.best_cell || null;
   const [ingress, egress] = st.mode === "same" ? [st.sameDialect, st.sameDialect] : [st.xlateIn, st.xlateOut];
   const perf = xlateMatrixCell(g, ingress, egress);
-  return perf ? stampChosen(perf, g, ingress, egress, false) : null;
+  return perf ? stampChosen(perf, g, ingress, egress, "") : null;
 }
 /* stampChosen: THE choke point that makes EVERY chosen record self-describing. A raw matrix cell's sealed
    .perf/.stream carries no path/source (the CELL's coordinates are implicit in where it was looked up), so
    every consumer used to re-invent provenance locally — the "Tested on" pill hard-coded a passthrough
    sentence, lanePathNote hard-coded a dialect line, laneRecord stamped its own source. Stamp it ONCE here
    and every surface renders through caption() from the same stamp (audit #1/#6, Design E §3.2). */
-function stampChosen(rec, g, ingress, egress, isStream) {
+// `lane` is the sweep-key infix for the lane the record belongs to: "" (perf), "stream-", "memory-".
+function stampChosen(rec, g, ingress, egress, lane = "") {
   const same = ingress === egress;
   const path = { ingress, egress, ...(same ? { dialect: ingress } : {}) };
   // The sweep KEY is COMPOSED from the cell's own shape (matrix lane + diagonal/translation), never
   // written as a caption literal — SWEEP_CAPTION stays the single home of the key vocabulary (C3), and
   // caption() throws loudly if this composition ever names a key the table does not render.
-  const sweep = `6x6-${isStream ? "stream-" : ""}${same ? "diagonal" : "translation"}`;
+  const sweep = `6x6-${lane}${same ? "diagonal" : "translation"}`;
   return { path, source: { kind: "matrix", sweep,
     build: (g.matrix && g.matrix.build) || null,
     measured_at: (g.matrix && g.matrix.measured_at) || null }, ...rec };
@@ -461,7 +649,7 @@ function chooserCellStream(g, st = state) {
   const raw = cell && cell.served === true && cell.stream && cell.stream.stream_served === true ? cell.stream : null;
   // Stamped through the ONE choke point, so a per-cell TRANSLATION stream is captioned as a translation
   // stream, not relabelled a single-dialect passthrough (audit #1/#6).
-  return raw ? stampChosen({ stream_served: true, ...raw }, g, ingress, egress, true) : null;
+  return raw ? stampChosen({ stream_served: true, ...raw }, g, ingress, egress, "stream-") : null;
 }
 // A streaming-metric cell for the chosen cell (n/a when the cell has no streaming here or lacks the field).
 // Peak delegates to streamCell; Same/Custom read the per-cell stream record's sealed envelope via metric().
@@ -501,6 +689,17 @@ function deltaToPeak(cellPerf, best) {
   return bits.join(", ");
 }
 
+/* neverPlateauedPill(g): the gateway-level plateau verdict, rendered next to the name on the memory tab.
+   Quantified where it can be: the worst growth rate across the gateway's cells says HOW fast, so the flag
+   is a measurement rather than an accusation. Empty for every gateway that settled somewhere, and empty
+   when there is no per-cell data to judge. */
+function neverPlateauedPill(g) {
+  if (!neverPlateaued(g)) return "";
+  const gr = worstGrowth(g);
+  const rate = gr != null ? `, still growing at up to ${fmt1(gr)} MiB/min` : "";
+  return ` <span class="noplateau-pill" title="${esc(`RSS never went steady on any cell this gateway serves${rate}. Its memory under load is bounded by how long we ran the load, not by the gateway, so no steady-state number is published for it.`)}">never settles</span>`;
+}
+
 /* ---- column model ----------------------------------------------------------- */
 /* get(g) returns {v, text, na}: v is the sortable value (null = none), text the cell
    text, na marks a muted "not measured / not served" cell. sortable:false columns
@@ -521,14 +720,18 @@ const COL_SEL = {
 const COL_NAME = {
   id: "name", label: "Gateway", desc: false,
   get: (g) => ({ v: g.display.toLowerCase(), text: null, na: false }),
-  render: (g) => {
+  render: (g, st = state) => {
     const a = g.repo
       ? `<a href="${g.repo}" target="_blank" rel="noopener">${esc(g.display)}</a>`
       : esc(g.display);
     // No per-row date: the board is one atomic run (matrix-sole-source = one source of truth), so
     // every gateway shares a single timestamp — the board-wide "last benchmarked" (roster tab + home)
     // IS the freshness, and a per-row date is pure redundant bloat. Just the name.
-    return `<td class="name">${a}</td>`;
+    // The ONE exception is the memory tab's gateway-level plateau verdict: "RSS never went steady on ANY
+    // cell" is a property of the gateway, not of whichever cell the chooser is on, and it is the strongest
+    // statement this metric makes. Burying it in a cell would mean a reader has to select the right cell to
+    // discover it, so it rides next to the name and is visible in every mode.
+    return `<td class="name">${a}${st && st.view === "memory" ? neverPlateauedPill(g) : ""}</td>`;
   },
 };
 // The "Tested on" column: present in EVERY mode (identical column set across Peak/Same/Custom). It reads
@@ -543,27 +746,42 @@ const COL_NAME = {
 // "stream suite (legacy)" label was unreachable. It also painted a pill in Same/Custom when the streaming
 // record was null and every streaming column read n/a. colTested(lane) binds the column to its LANE's
 // record, renders provenance through the ONE caption() path, and paints NO pill without a record.
-// MEMORY joins the same choke point: it is NOT chooser-driven (one post-6x6 memory window per gateway),
-// so its lane record is the memory record itself with its own load_cell pinned as the path — the pill then
-// names the cell the MEMORY window actually ran on, rendered by the SAME code as every other tab.
+// MEMORY joins the same choke point. In a per-cell bundle its lane record is the CHOSEN cell's window
+// (Min/Max/Same/Custom), already stamped by stampChosen; in a legacy bundle it is the single post-6x6
+// window with its own load_cell pinned as the path. Either way the pill names the cell the MEMORY
+// measurement actually ran on, rendered by the SAME code as every other tab.
 const LANE_RECORD = {
   perf: (g, st) => chooserCellPerf(g, st),
   stream: (g, st) => chooserCellStream(g, st),
-  memory: (g) => memoryTestedRecord(g),
+  memory: (g, st = state) => (hasPerCellMemory(stateData(st)) ? chosenMemory(g, st) : memoryTestedRecord(g)),
 };
 // The header tooltip per lane (what the column means on THIS tab).
 const LANE_TESTED_TITLE = {
-  memory: "The peak cell this gateway's memory window actually ran on (its highest-throughput served cell). The fixed load recipe is identical for every gateway; only the cell differs.",
+  memory: () => (hasPerCellMemory()
+    ? "The cell this row's memory numbers were measured on. Min/Max: this gateway's own lowest/highest steady-state cell, with the size of the search beside it. Same/Custom: the chosen cell, identical on every row."
+    : "The peak cell this gateway's memory window actually ran on (its highest-throughput served cell). The fixed load recipe is identical for every gateway; only the cell differs."),
 };
 // A lane may append its OWN extra disclosure after the record's caption on the pill tooltip. Memory
-// carries the fixed-load basis + the producer's honesty disclosures (memory.protocol) — dropping them
-// when the memory column moved onto the shared pill would hide WHY a memory column reads n/a.
-const LANE_TESTED_NOTE = { memory: (rec) => memLoadRecipeTip(rec) };
+// carries the load basis, what the window did (settled or still climbing) and the producer's honesty
+// disclosures (memory.protocol). Dropping them when the memory column moved onto the shared pill would
+// hide WHY a memory column reads n/a.
+const LANE_TESTED_NOTE = { memory: (rec) => (rec && rec.load_cell ? memLoadRecipeTip(rec) : memCellTip(rec)) };
+/* A lane may also append a plain-text SUFFIX after the pill. Min/Max are per-gateway extrema, and an
+   extremum means nothing without the size of the set it came from: min-of-26 and min-of-1 are different
+   searches, and the reader has to be able to see that without opening anything. */
+const LANE_TESTED_SUFFIX = {
+  memory: (rec, st = state) => {
+    const mode = memoryMode(st);
+    if ((mode !== "min" && mode !== "max") || !rec || rec.mem_candidates == null) return "";
+    return `of ${fmtInt(rec.mem_candidates)} served`;
+  },
+};
 // Lanes that take no part in sorting (memory's cell is an attribution, not a ranking, as before).
 const LANE_TESTED_NOSORT = new Set(["memory"]);
 function colTested(lane) {
   const pick = LANE_RECORD[lane];
   const note = LANE_TESTED_NOTE[lane];
+  const suffix = LANE_TESTED_SUFFIX[lane];
   return {
     id: "tested", label: "Tested on", desc: false,
     ...(LANE_TESTED_NOSORT.has(lane) ? { sortable: false } : {}),
@@ -589,7 +807,9 @@ function colTested(lane) {
       const fb = !!(rec.source && rec.source.kind !== "matrix");
       const base = rec.source ? caption(rec) : `measured on the ${ing}-in / ${eg}-out cell`;
       const title = note ? `${base} — ${note(rec)}` : base;
-      return `<td class="tested"><span class="tested-pill" title="${esc(title)}">${esc(label)}${fb ? " *" : ""}</span></td>`;
+      const suf = suffix ? suffix(rec, st) : "";
+      return `<td class="tested"><span class="tested-pill" title="${esc(title)}">${esc(label)}${fb ? " *" : ""}</span>${
+        suf ? `<span class="tested-of muted" title="The size of the set this extremum was selected from. A minimum over 26 cells and a minimum over 1 are not the same search.">${esc(suf)}</span>` : ""}</td>`;
     },
   };
 }
@@ -659,29 +879,60 @@ const COLUMN_SETS = {
     { id: "cpufps", label: "CPU-bound fps", desc: true, title: "Streaming relay throughput under an unpaced firehose (CPU-bound): sustained content frames/sec on the chosen cell. Higher is better.",
       get: (g) => chooserStreamCell(g, "cpu_fps", fmtInt) },
   ],
-  // MEMORY (per-gateway, one row per gateway — NOT cell-chooser driven): idle / peak / recovered RSS
-  // (best = min), the peak cell each gateway was measured on (load_cell), plus a recovery-curve
-  // sparkline. Every gateway ran the IDENTICAL fixed load on a fresh cold-restarted process, so the
-  // numbers are apples-to-apples. Reads ONLY the canonical memory record; a gateway without a field
-  // reads n/a, and the sparkline renders only with a series (never a fabricated line).
+  // MEMORY (one row per gateway, cell-chooser driven with its OWN Min | Max | Same | Custom modes):
+  // idle / steady-state / growth / recovered RSS (best = min), the cell the chosen window ran on, plus the
+  // RSS curve. Reads the record memoryFor() chose; a gateway with no window for that cell reads n/a and
+  // nothing is substituted for it. Columns marked perCellOnly are dropped on a bundle that predates
+  // per-cell measurement (columnsFor), because a column of pure n/a is noise, not disclosure.
+  //
+  // The steady-state column keeps the id "mempeak" ON PURPOSE. The id is a URL contract (?sort=mempeak is
+  // in every shared memory permalink and in the charts' deep links); renaming it with the semantics would
+  // silently drop the sort out of every one of those links. The LABEL is what a reader sees, and it changed.
   memory: [
     COL_SEL, COL_NAME,
     // Tested on: the SAME pill renderer every other tab uses (colTested), bound to the MEMORY lane so it
-    // names this gateway's load_cell — the cell the memory window actually ran on — not the perf cell.
+    // names the cell this row's memory numbers came from, not the perf cell.
     COL_TESTED_MEMORY,
     { id: "memidle", label: "Idle RSS (MiB)", desc: false,
-      title: () => `Cold idle process RSS: median over a ${memWindowLabel(boardMemWindows().idle)} window on a fresh cold-restarted process, before any load. Lower is better.`,
-      get: (g) => memCell(g, "idle_rss_mib", fmt1) },
-    { id: "mempeak", label: "Peak RSS (MiB)", desc: false, title: "Max process RSS observed while the identical fixed load runs on this gateway's peak cell. Same load recipe for every gateway. Lower is better.",
-      get: (g) => memCell(g, "peak_rss_mib", fmt1) },
+      title: () => (hasPerCellMemory()
+        ? "Cold idle process RSS, before the first request is served. Sampled once per cell with no cell-specific work involved, so this is the median across those cold samples (hover for the spread) and it is valid in every mode. Lower is better."
+        : `Cold idle process RSS: median over a ${memWindowLabel(boardMemWindows().idle)} window on a fresh cold-restarted process, before any load. Lower is better.`),
+      get: (g, st = state) => {
+        if (!hasPerCellMemory(stateData(st))) return memCell(g, "idle_rss_mib", fmt1, st);
+        const i = idleAcrossCells(g);
+        if (!i) return { v: null, text: "n/a", na: true };
+        return { v: i.median, text: fmt1(i.median), na: false,
+          note: `median of ${fmtInt(i.n)} cold samples, one per served cell; spread ${fmt1(i.min)} to ${fmt1(i.max)} MiB` };
+      } },
+    { id: "mempeak", label: () => (hasPerCellMemory() ? "Steady-state RSS (MiB)" : "Peak RSS (MiB)"), desc: false,
+      title: () => (hasPerCellMemory()
+        ? "Resident memory once it stopped climbing, under a fixed load on the chosen cell that runs until RSS is steady rather than for a fixed time. A gateway that never went steady has no steady state and reads n/a: its growth rate is the reading. Lower is better."
+        : "Max process RSS observed while the identical fixed load runs on this gateway's peak cell. Same load recipe for every gateway. Lower is better."),
+      get: (g, st = state) => (hasPerCellMemory(stateData(st))
+        ? memCell(g, "steady_state_rss_mib", fmt1, st) : memCell(g, "peak_rss_mib", fmt1, st)) },
+    // GROWTH: ~0 once a gateway has settled, and the LEAK RATE when it never did. This is the most
+    // informative thing the metric produces - it turns "did not plateau" from a missing value into the
+    // headline finding - so it is a column of its own rather than a footnote on the steady-state n/a.
+    { id: "memgrowth", label: "Growth (MiB/min)", desc: false, perCellOnly: true,
+      title: "How fast RSS was still rising over the final window on the chosen cell. Around zero once the gateway has settled. If it never settled, this IS its leak rate under this load, and no steady-state number exists to report instead. Lower is better.",
+      get: (g, st = state) => {
+        const m = memoryFor(g, st);
+        const c = memCell(g, "growth_rate_mib_per_min", fmt1, st);
+        if (c.na || !m) return c;
+        if (m.plateaued === false)
+          return { ...c, text: `${c.text} (leak)`, note: "This cell never went steady: the load stopped at the cap with RSS still climbing at this rate, so there is no steady state to report and a longer load would have produced a larger number." };
+        return { ...c, note: c.note || "Settled: RSS had stopped climbing when the load was terminated." };
+      } },
     { id: "memrecov", label: () => `Recovered @${memWindowLabel(boardMemWindows().recovery)} (MiB)`, desc: false,
       title: () => `Process RSS at the end of the ${memWindowLabel(boardMemWindows().recovery)} recovery window after the fixed load stops — does the gateway release memory? Lower is better.`,
-      get: (g) => memCell(g, "recovered_rss_mib", fmt1) },
-    { id: "memcurve", label: "Recovery curve", desc: false, sortable: false,
-      title: () => `RSS across the memory window on one process lifecycle: ${memWindowLabel(boardMemWindows().idle)} cold idle → fixed load on the peak cell → ${memWindowLabel(boardMemWindows().recovery)} recovery`,
-      get: (g) => { const m = canonicalMemory(g); return { v: null, text: "", na: !(m && Array.isArray(m.rss_series) && m.rss_series.length >= 2) }; },
-      render: (g) => {
-        const m = canonicalMemory(g);
+      get: (g, st = state) => memCell(g, "recovered_rss_mib", fmt1, st) },
+    { id: "memcurve", label: "RSS curve", desc: false, sortable: false,
+      title: () => (hasPerCellMemory()
+        ? "RSS across one process lifecycle on the chosen cell: cold idle → load run to steady state → recovery."
+        : `RSS across the memory window on one process lifecycle: ${memWindowLabel(boardMemWindows().idle)} cold idle → fixed load on the peak cell → ${memWindowLabel(boardMemWindows().recovery)} recovery`),
+      get: (g, st = state) => { const m = memoryFor(g, st); return { v: null, text: "", na: !(m && Array.isArray(m.rss_series) && m.rss_series.length >= 2) }; },
+      render: (g, st = state) => {
+        const m = memoryFor(g, st);
         const spark = m ? rssSparkline(m.rss_series) : "";
         return spark ? `<td class="memcurve">${spark}</td>` : `<td class="memcurve na">n/a</td>`;
       } },
@@ -691,8 +942,13 @@ const COLUMN_SETS = {
 /* txt(x): a column/metric label or title, which may be a plain string OR a function rendering it from
    the live data (used where the wording depends on a tunable harness setting — audit #14). */
 function txt(x) { return typeof x === "function" ? String(x() ?? "") : String(x ?? ""); }
-/* The set of columns for a view; perf tabs use COLUMN_SETS, everything else has no table. */
-function columnsFor(view) { return COLUMN_SETS[view] || COLUMN_SETS.performance; }
+/* The set of columns for a view; perf tabs use COLUMN_SETS, everything else has no table. A column marked
+   perCellOnly exists only where the data can fill it: the published board still carries bundles measured
+   before per-cell memory, and a growth column that reads n/a on all thirteen rows would be noise. */
+function columnsFor(view, data = (typeof state !== "undefined" ? state.data : null)) {
+  const cols = COLUMN_SETS[view] || COLUMN_SETS.performance;
+  return hasPerCellMemory(data) ? cols : cols.filter((c) => !c.perCellOnly);
+}
 /* Every column id across all tabs - used to validate a sort id coming from a shared URL. */
 const ALL_COLUMN_IDS = new Set(Object.values(COLUMN_SETS).flat().map((c) => c.id));
 
@@ -724,17 +980,24 @@ const LANES = [
     get: canonicalMemory,
     pathNote: (j) => {
       const base = j && j.source ? caption(j) : "";
+      // A LEGACY record names its peak-cell basis; a per-cell record names what its window did (settled, or
+      // still climbing at the cap) and how big the Min/Max search was. Both end with the producer's own
+      // honesty disclosures (memory.protocol), which are surfaced, never carried silently.
       const note = j && j.load_cell
-        ? `${base} — identical fixed load on ${memLoadCellLabel(j.load_cell)} (this gateway's peak cell)`
-        : base;
-      // The producer's honesty disclosures ride in memory.protocol; surface them, never carry silently.
-      return `${note}${memDisclosure(j)}`;
+        ? `${base}, identical fixed load on ${memLoadCellLabel(j.load_cell)} (this gateway's peak cell)${memDisclosure(j)}`
+        : (j && j.plateaued != null ? `${base}, ${memCellTip(j)}` : `${base}${memDisclosure(j)}`);
+      return note;
     },
-    // The recovery curve (idle→load→recovery, one process lifecycle). Renders ONLY when rss_series
+    // The RSS curve (idle→load→recovery, one process lifecycle). Renders ONLY when rss_series
     // exists (≥2 points); a bundle without a series → extra() returns "" and the drawer shows just the numbers.
     extra: (j) => rssSparkline(j.rss_series),
     metrics: [
       { k: "idle_rss_mib", label: "Idle RSS (MiB)", best: "min", fmt: fmt1 },
+      // Both shapes are listed because both shapes are published: a per-cell record carries a steady state
+      // (or none, when it never settled) and a growth rate; a legacy record carries the peak of a
+      // fixed-duration load. The drawer drops whichever the record does not have, so no row is invented.
+      { k: "steady_state_rss_mib", label: "Steady-state RSS (MiB)", best: "min", fmt: fmt1 },
+      { k: "growth_rate_mib_per_min", label: "Growth (MiB/min)", best: "min", fmt: fmt1 },
       { k: "peak_rss_mib", label: "Peak RSS (MiB)", best: "min", fmt: fmt1 },
       // Recovery: RSS 60 s after the load ends. Lower = released more of the peak (best: min). Absent on
       // pre-recovery bundles → the drawer/compare read n/a, exactly like any other lane field it lacks.
@@ -782,6 +1045,9 @@ function laneRecord(l, g, st = state) {
     return { served: true, ...p };
   }
   if (l.key === "stream") return chooserCellStream(g, st);
+  // Memory is chooser-driven too now: reading canonicalMemory here would show the drawer one cell while the
+  // table showed another, which is the same divergence the perf lane was fixed for.
+  if (l.key === "memory") return memoryFor(g, st);
   return l.get ? l.get(g) : g[l.key];
 }
 /* perfSweepSeries(g, colors, st): the sweep-curve series for the CHOSEN cell (Peak/Same/Custom), used by
@@ -823,8 +1089,10 @@ function laneAgeNote(j, now = Date.now()) {
 function lanePathNote(l, j, st = state) {
   const base = l.pathNote ? l.pathNote(j) : "";
   if (!base) return "";
-  const hint = (l.key === "perf" || l.key === "stream") && st.mode !== "peak"
-    ? ` (the ${st.mode === "same" ? "Same-dialect" : "chosen"} cell the table shows)` : "";
+  const MODE_HINT = { same: "Same-dialect", custom: "chosen", min: "lowest steady-state", max: "highest steady-state" };
+  const mode = l.key === "memory" ? memoryMode(st) : st.mode;
+  const hint = (l.key === "perf" || l.key === "stream" || l.key === "memory") && MODE_HINT[mode]
+    ? ` (the ${MODE_HINT[mode]} cell the table shows)` : "";
   return `${base}${hint}${laneAgeNote(j)}`;
 }
 
@@ -843,8 +1111,12 @@ function newState() {
     //   mode "peak"   → each gateway's own best diagonal (best_cell); no dialect params.
     //   mode "same"   → sameDialect's diagonal (X→X) for every gateway.
     //   mode "custom" → xlateIn→xlateOut cell (any pair, incl. translation) for every gateway.
+    //   mode "min"/"max" → MEMORY ONLY: this gateway's lowest / highest steady-state cell.
     mode: "peak",
     sameDialect: "openai",
+    /* Was the Same dialect pinned by the URL? Memory's Same default is the WIDEST-COVERAGE dialect,
+       computed from the data at boot, and a pinned ?d= must survive that seeding. */
+    sameDialectPinned: false,
     // Custom mode: the pinned ingress->egress pair the whole table is projected on. Both ends are fixed
     // so every row is the identical cell (apples-to-apples); in==out is that dialect's passthrough, and a
     // gateway that does not serve this exact cell reads n/a (Performance) / is absent — kept honest.
@@ -884,12 +1156,19 @@ function encodeUrl(st) {
   if (st.cmp.length) p.set("cmp", st.cmp.join("|"));
   if (st.cmpOpen) p.set("cv", "1");
   if (st.drawer) p.set("gw", st.drawer);
-  // CELL CHOOSER encoding (Performance + Streaming). A clean URL omits the default (peak); Same carries
-  // the picked dialect (?mode=same&d=openai), Custom the pinned pair (?mode=custom&in=anthropic&out=openai),
-  // so a link reproduces exactly the cell(s) the view shows.
-  if (PERF_VIEWS.has(st.view)) {
-    if (st.mode === "same") { p.set("mode", "same"); p.set("d", st.sameDialect); }
-    else if (st.mode === "custom") { p.set("mode", "custom"); p.set("in", st.xlateIn); p.set("out", st.xlateOut); }
+  // CELL CHOOSER encoding (Performance, Streaming, Memory). A clean URL omits the view's DEFAULT mode
+  // (Peak on the perf lanes, Same on memory); Same carries the picked dialect (?mode=same&d=openai),
+  // Custom the pinned pair (?mode=custom&in=anthropic&out=openai), so a link reproduces exactly the
+  // cell(s) the view shows. Memory encodes its own modes (?mode=min / ?mode=max) and never Peak.
+  if (CHOOSER_VIEWS.has(st.view)) {
+    const mode = st.view === "memory" ? memoryMode(st) : st.mode;
+    if (mode !== defaultMode(st.view)) p.set("mode", mode);
+    if (mode === "same") {
+      // Memory's Same default is the widest-coverage dialect, derived from the run rather than named, so
+      // the pristine memory URL stays clean when the dialect IS that default.
+      const isDefault = st.view === "memory" && st.sameDialect === widestDialect(st.data);
+      if (!isDefault) p.set("d", st.sameDialect);
+    } else if (mode === "custom") { p.set("in", st.xlateIn); p.set("out", st.xlateOut); }
   }
   const cat = CATEGORIES[st.category] ? st.category : DEFAULT_CATEGORY;
   const path = st.view && st.view !== DEFAULT_VIEW ? `/${cat}/${st.view}` : `/${cat}`;
@@ -950,14 +1229,19 @@ function decodeUrl(pathname, search, hash) {
   // (xin/xout, from the retired Matched tab) — a legacy ?xin/?xout link lands in Custom mode on the
   // pinned pair, exactly the cell the old Matched tab showed.
   const mode = p.get("mode");
-  if (CHOOSER_MODES.has(mode)) st.mode = mode;
-  if (MATRIX_CELLS.includes(p.get("d"))) st.sameDialect = p.get("d");
+  if (CHOOSER_MODES.has(mode) || MEM_CHOOSER_MODES.has(mode)) st.mode = mode;
+  if (MATRIX_CELLS.includes(p.get("d"))) { st.sameDialect = p.get("d"); st.sameDialectPinned = true; }
   const cin = p.get("in") || p.get("xin");
   const cout = p.get("out") || p.get("xout");
   if (MATRIX_CELLS.includes(cin)) st.xlateIn = cin;
   if (MATRIX_CELLS.includes(cout)) st.xlateOut = cout;
   // A legacy Matched link (xin/xout with no explicit mode) means the pinned-pair Custom view.
   if (!CHOOSER_MODES.has(mode) && (p.get("xin") || p.get("xout"))) st.mode = "custom";
+  /* Coerce the mode onto the view that received it. This is the shared-link case that matters: a
+     ?mode=peak link opened on the memory tab must NOT render a throughput-selected memory number, because
+     selecting on throughput and reporting memory is the defect per-cell measurement exists to remove. It
+     lands on Same instead. (And ?mode=min on a perf tab lands on Peak rather than reading nothing.) */
+  st.mode = resolveMode(st.mode, st.view);
   return st;
 }
 
@@ -1263,19 +1547,42 @@ function chooserCaption(view, st, data) {
 }
 // AUDIT #14: the window durations render from the data (idle_window_s / recovery_window_s), never
 // hard-coded — the harness makes them tunable and the caption must describe the run that happened.
-function memoryCaption(data = state.data) {
+function memoryCaption(data = state.data, st = state) {
   const w = boardMemWindows(data);
   const I = memWindowLabel(w.idle), R = memWindowLabel(w.recovery);
+  if (!hasPerCellMemory(data)) {
+    return [
+      `An identical fixed load on each gateway's PEAK cell, measured on a fresh cold-restarted process (${I} idle → load → ${R} recovery). Same load recipe for every gateway, so it is apples-to-apples; only the cell differs (shown under Tested on).`,
+      `Idle: cold-start RSS (median, no load). Peak: max RSS under the fixed load. Recovered @${R}: RSS ${R} after the load stops: does it release?`,
+      "This run measured one cell per gateway, chosen by throughput, so there is no cell to choose between here. Lower is better on every column; a gateway with no served cell reads n/a.",
+    ];
+  }
+  const mode = memoryMode(st);
+  const d = MATRIX_LABELS[st.sameDialect] || st.sameDialect;
+  const inL = MATRIX_LABELS[st.xlateIn] || st.xlateIn, outL = MATRIX_LABELS[st.xlateOut] || st.xlateOut;
+  const pick = {
+    min: "Each gateway on its OWN lowest steady-state cell. Selected on memory and reported as memory, so it is a real minimum - but of a set whose size differs per gateway, which the row states next to the cell.",
+    max: "Each gateway on its OWN highest steady-state cell. A real maximum, over a candidate set whose size differs per gateway (stated next to the cell). Min flatters a broad gateway, Max penalises it; both are offered so neither reads as the answer.",
+    same: `Every gateway on the ${d}→${d} identity cell: the same work on every row, so this is the like-for-like comparison.`,
+    custom: st.xlateIn === st.xlateOut
+      ? `Every gateway on the ${inL}→${outL} cell: same dialect, so this is passthrough.`
+      : `Every gateway on the ${inL}→${outL} cell: client speaks ${inL}, upstream speaks ${outL}, the gateway translates both ways.`,
+  }[mode];
+  const flagged = ((data && data.gateways) || []).filter(neverPlateaued);
+  const never = flagged.length
+    ? ` ${fmtInt(flagged.length)} gateway${flagged.length === 1 ? "" : "s"} never settled on any cell (flagged by name): their memory under load is bounded by how long the load ran, not by the gateway.`
+    : "";
   return [
-    `An identical fixed load on each gateway's PEAK cell, measured on a fresh cold-restarted process (${I} idle → load → ${R} recovery). Same load recipe for every gateway, so it is apples-to-apples; only the cell differs (shown under Tested on).`,
-    `Idle: cold-start RSS (median, no load). Peak: max RSS under the fixed load. Recovered @${R}: RSS ${R} after the load stops — does it release?`,
-    "Lower is better on every column. A gateway with no served cell reads n/a; the curve draws only when a series was recorded.",
+    "Every cell gets its own cold-started process and its own load, run until RSS stops climbing rather than for a fixed time. Nothing is averaged across cells; the chooser picks which cell each row shows.",
+    pick,
+    `Idle is sampled cold, before the first request, so no cell is involved and it is valid in every mode. Growth is around zero once a gateway has settled and is its leak rate when it never did. Recovered @${R}: RSS after the load stops: does it release?${never}`,
+    "Lower is better on every column. A gateway that does not serve the chosen cell reads n/a and sinks to the bottom; nothing is substituted from another cell.",
   ];
 }
 function updateTableCaption(view) {
   const el = document.getElementById("table-caption");
   if (!el) return;
-  const lines = view === "memory" ? memoryCaption(state.data) : chooserCaption(view, state, state.data);
+  const lines = view === "memory" ? memoryCaption(state.data, state) : chooserCaption(view, state, state.data);
   el.innerHTML = lines.map((l) => esc(l)).join("<br>");
 }
 /* Memory tab: show the memory-recovery + memory-rss charts (charts.py PNGs) under the per-gateway table.
@@ -1414,11 +1721,15 @@ function initFilterControls() {
   if (same) same.innerHTML = opts;
   if (cin) cin.innerHTML = opts;
   if (cout) cout.innerHTML = opts;
-  document.querySelectorAll("#mode-seg .seg-btn").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      state.mode = btn.dataset.mode;
-      renderFilters(); renderTable(); syncUrl(true);
-    });
+  // The mode buttons are RENDERED PER VIEW (renderFilters), because the tabs offer different mode sets:
+  // the memory lane must never be able to paint a Peak button. One delegated listener therefore replaces
+  // the per-button ones, which would have been bound to buttons that no longer exist after a re-render.
+  const seg = document.getElementById("mode-seg");
+  if (seg) seg.addEventListener("click", (ev) => {
+    const btn = ev.target.closest(".seg-btn");
+    if (!btn || !modesFor(state.view).has(btn.dataset.mode)) return;
+    state.mode = btn.dataset.mode;
+    renderFilters(); renderTable(); syncUrl(true);
   });
   const onSame = () => { state.sameDialect = same.value; renderTable(); syncUrl(true); };
   const onCustom = () => { state.xlateIn = cin.value; state.xlateOut = cout.value; renderTable(); syncUrl(true); };
@@ -1430,13 +1741,17 @@ function initFilterControls() {
 function renderFilters() {
   document.getElementById("search").value = state.q;
   for (const [, name] of CAPS) { const el = document.getElementById(`f-${name}`); if (el) el.checked = state[CAPS.find(([, n]) => n === name)[0]]; }
-  // Cell chooser: reflect the active mode on the segmented control and show only the dropdown(s) that
-  // mode needs (Same → one dialect; Custom → in→out pair; Peak → none).
-  document.querySelectorAll("#mode-seg .seg-btn").forEach((b) => b.classList.toggle("active", b.dataset.mode === state.mode));
+  // Cell chooser: paint the buttons THIS view offers, mark the active one, and show only the dropdown(s)
+  // that mode needs (Same → one dialect; Custom → in→out pair; Peak/Min/Max → none). Peak is simply not
+  // rendered on the memory tab: the control cannot offer a selection the metric is not allowed to make.
+  const seg = document.getElementById("mode-seg");
+  const mode = state.view === "memory" ? memoryMode(state) : state.mode;
+  if (seg) seg.innerHTML = [...modesFor(state.view)].map((m) =>
+    `<button type="button" class="seg-btn${m === mode ? " active" : ""}" data-mode="${esc(m)}" role="tab" title="${esc(MODE_TIPS[m] || "")}">${esc(MODE_LABELS[m] || m)}</button>`).join("");
   const sameWrap = document.getElementById("chooser-same");
   const customWrap = document.getElementById("chooser-custom");
-  if (sameWrap) sameWrap.classList.toggle("hidden", state.mode !== "same");
-  if (customWrap) customWrap.classList.toggle("hidden", state.mode !== "custom");
+  if (sameWrap) sameWrap.classList.toggle("hidden", mode !== "same");
+  if (customWrap) customWrap.classList.toggle("hidden", mode !== "custom");
   const same = document.getElementById("same-dialect"); if (same) same.value = state.sameDialect;
   const cin = document.getElementById("cell-in"); if (cin) cin.value = state.xlateIn;
   const cout = document.getElementById("cell-out"); if (cout) cout.value = state.xlateOut;
@@ -1892,9 +2207,33 @@ function cellPopFull(g, ingress, egress) {
   const cta = cell.served === true ? `<div class="pop-cta muted">click → Performance (Custom, this cell)</div>` : "";
   return head + perfBlock + deltaBlock + verdict + cta;
 }
+/* hasMatrixGrid(g): did this gateway produce a protocol matrix at all? */
+function hasMatrixGrid(g) { return !!(g && g.matrix && (g.matrix.upstreams || g.matrix.cells)); }
+/* matrixFailureReason(g): WHY a gateway has no matrix, from whatever the producer recorded. Falls back to
+   a plain statement rather than inventing a cause. */
+function matrixFailureReason(g) {
+  const first = [g && g.matrix && g.matrix.error, g && g.matrix_error, g && g.serve_error]
+    .find((x) => typeof x === "string" && x.trim());
+  const why = first ? stripRigPaths(first).split("\n")[0] : "the run produced no protocol matrix for this gateway";
+  return `no matrix result: ${why}`;
+}
+/* matrixRoster(gateways): the rows the protocol grid renders: EVERY gateway, always, matrix or not.
+   This used to filter to gateways that HAVE a matrix. All of them did, so nothing was hidden in practice,
+   but the case it would have hidden is the worst one to hide: a gateway that failed hard enough to produce
+   no matrix would leave the grid entirely, so TOTAL failure would render as absence while partial failure
+   rendered as a row of grey. Absence provokes nothing; a row of n/a carrying the failure reason provokes
+   the question whose answer is the most important fact about that gateway. Sorted by pass count (a
+   matrix-less gateway has none, so it sorts last), then by name. Pure; covered by site/test.mjs. */
+function matrixRoster(gateways, tally) {
+  return (gateways || []).slice().sort((a, b) =>
+    (hasMatrixGrid(b) ? tally(b).pass : -1) - (hasMatrixGrid(a) ? tally(a).pass : -1) ||
+    a.display.localeCompare(b.display));
+}
 function renderMatrix() {
-  const withMatrix = state.data.gateways.filter((g) => g.matrix && (g.matrix.upstreams || g.matrix.cells));
-  if (!withMatrix.length) {
+  const gateways = state.data.gateways || [];
+  // The empty state is for a board with NO matrix data at all (no results committed yet); it is not a
+  // per-gateway filter. One gateway without a matrix renders as an all-n/a row, not as a disappearance.
+  if (!gateways.some(hasMatrixGrid)) {
     document.getElementById("matrix-empty").classList.remove("hidden");
     document.getElementById("matrix-grid").classList.add("hidden");
     return;
@@ -1914,12 +2253,15 @@ function renderMatrix() {
     }
     return t;
   };
-  withMatrix.sort((a, b) => tally(b).pass - tally(a).pass || a.display.localeCompare(b.display));
+  const rows = matrixRoster(gateways, tally);
 
   const grid = document.getElementById("matrix-grid");
-  grid.innerHTML = withMatrix.map((g) => {
+  grid.innerHTML = rows.map((g) => {
     const t = tally(g);
-    const bits = [`<b class="pass-count">${t.pass}</b>/36 pass`];
+    const missing = !hasMatrixGrid(g);
+    const bits = missing
+      ? [`<b class="pass-count">0</b>/36 pass`, `<span class="matrix-nores">${esc(matrixFailureReason(g))}</span>`]
+      : [`<b class="pass-count">${t.pass}</b>/36 pass`];
     if (t.fail) bits.push(`${t.fail} fail`);
     if (t.notconf) bits.push(`${t.notconf} not configured`);
     if (t.untestable) bits.push(`${t.untestable} untestable (mock limit)`);
@@ -1936,7 +2278,10 @@ function renderMatrix() {
         MATRIX_CELLS.map((c) => `<tr><td class="name">${esc(MATRIX_LABELS[c])}</td>${
           MATRIX_CELLS.map((e) => {
             const cell = matrixCell(g, e, c);
-            if (!cell) return `<td class="na" title="not measured (v1 result: this upstream dialect was not probed)">n/a</td>`;
+            // Two different absences, said differently: a gateway with no matrix AT ALL carries its
+            // failure reason on every cell, so the row reads as a failure rather than as an old result.
+            if (!cell) return `<td class="na" title="${esc(missing ? matrixFailureReason(g)
+              : "not measured (v1 result: this upstream dialect was not probed)")}">n/a</td>`;
             const [cls] = cellState(cell);
             const diag = e === c ? " diag" : "";
             // No native `title` here: the richer hover popup (cellPopHtml/showPop) carries the
@@ -2376,6 +2721,10 @@ function renderCatNav() {
 
 function showView(view) {
   state.view = view;
+  // The chooser mode travels with the reader across tabs, but the tabs do not offer the same modes: Peak
+  // is meaningless (and dishonest) on memory, Min/Max are meaningless on the perf lanes. Coerce on arrival
+  // so the segmented control and the numbers can never disagree about which mode is active.
+  state.mode = resolveMode(state.mode, view);
   // Home is the root above the category nav: the header's category row, tab bar
   // and category tagline belong to the category view only, so a body class hides
   // them (style.css) while the home hero carries the brand treatment instead.
@@ -2388,11 +2737,14 @@ function showView(view) {
     x.setAttribute("href", viewPath(state.category, x.dataset.view));
   });
   document.querySelectorAll(".view").forEach((v) => v.classList.toggle("hidden", v.id !== containerId));
-  // The cell chooser (Peak | Same | Custom + its dialect dropdowns) belongs to Performance + Streaming only.
+  // The cell chooser belongs to every chooser-driven tab. On MEMORY it appears only once the bundle
+  // carries per-cell windows: offering Min | Max | Same | Custom over a run that measured one cell per
+  // gateway would be four controls that all show the same number.
   const chooser = document.getElementById("cell-chooser");
-  if (chooser) chooser.classList.toggle("hidden", !PERF_VIEWS.has(view));
+  if (chooser) chooser.classList.toggle("hidden",
+    !CHOOSER_VIEWS.has(view) || (view === "memory" && !hasPerCellMemory(state.data)));
   // Switching between table tabs changes columns/caption/filtering, so re-render the table.
-  if (TABLE_VIEWS.has(view) && state.data) renderTable();
+  if (TABLE_VIEWS.has(view) && state.data) { renderFilters(); renderTable(); }
   updateTitle();
 }
 function initTabs() {
@@ -2408,7 +2760,8 @@ function applyState(st) {
   Object.assign(state, {
     category: st.category, view: st.view, q: st.q, sortCol: st.sortCol, sortDesc: st.sortDesc,
     needStream: st.needStream, needXlate: st.needXlate,
-    mode: st.mode, sameDialect: st.sameDialect, xlateIn: st.xlateIn, xlateOut: st.xlateOut,
+    mode: st.mode, sameDialect: st.sameDialect, sameDialectPinned: st.sameDialectPinned,
+    xlateIn: st.xlateIn, xlateOut: st.xlateOut,
     cmp: st.cmp, cmpOpen: st.cmpOpen, drawer: st.drawer,
   });
 }
@@ -2418,6 +2771,14 @@ function applyState(st) {
    panel open on a partial table. */
 function sanitizeState() {
   const gws = state.data.gateways;
+  /* Seed the Same dialect from the DATA: the identity cell the most gateways serve. Memory's Same mode
+     defaults to it (only Same/Custom are like-for-like, so the default has to be the cell the widest slice
+     of the field can actually be compared on), and it is computed, never named - no protocol is
+     special-cased anywhere in this engine. A ?d= in the URL wins. */
+  if (!state.sameDialectPinned) {
+    const w = widestDialect(state.data);
+    if (w) state.sameDialect = w;
+  }
   state.cmp = state.cmp.filter((k) => gws.some((g) => g.key === k));
   if (state.cmp.length < 2) state.cmpOpen = false;
   if (state.drawer && !gws.some((g) => g.key === state.drawer)) state.drawer = null;
@@ -2498,6 +2859,11 @@ if (NODE) {
     drawSweep, niceStep, fmtTick, COLUMN_SETS, columnsFor, PERF_VIEWS, TABLE_VIEWS, VIEW_SORT, LANES, naText, stripRigPaths,
     cellState, matrixCellTip, cellPerfTip, passCell, xlateCell, streamCell, memCell, rssSparkline, hasTranslation, CATEGORIES, DEFAULT_CATEGORY, VIEWS,
     CHOOSER_MODES, chooserCellPerf, chooserDialects, chooserPerfCell, chooserCellStream, chooserStreamCell, chooserHasCell, deltaToPeak, cellPopFull,
+    // memory cell chooser (Min | Max | Same | Custom, never Peak) + the matrix roster hole-closer.
+    MEM_CHOOSER_MODES, CHOOSER_VIEWS, modesFor, defaultMode, resolveMode, memoryMode,
+    perCellMemory, memoryCells, hasPerCellMemory, widestDialect, chosenMemory, memoryFor,
+    idleAcrossCells, neverPlateaued, worstGrowth, memCellTip, neverPlateauedPill,
+    hasMatrixGrid, matrixFailureReason, matrixRoster,
     laneRecord, lanePathNote, perfSweepSeries, concAt, sustainedChooserCell, maxProxyChooserCell,
     colTested, gatewayBuild, gatewayHardware, runMode, laneAgeSummary,
     chooserCaption, chooserLead, streamingProvenance,
