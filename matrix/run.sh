@@ -125,9 +125,28 @@ MATRIX_SWEEP="${MATRIX_SWEEP:-1}"
 [ "$MATRIX_SWEEP" = 1 ] && [ ! -x "$UGEN" ] && { echo "WARNING: no loadgen - per-cell perf sweep disabled (capability matrix still runs)"; MATRIX_SWEEP=0; }
 # Same knobs + defaults as perf/run.sh so the per-cell numbers are directly comparable.
 C1_DUR="${C1_DUR:-20}"; SWEEP_DUR="${SWEEP_DUR:-10}"; PSIZE="${PSIZE:-256}"
-SWEEP_INSTANT="${SWEEP_INSTANT:-16 8192}"   # [min,max] bounds for the peak search (see perf/run.sh)
-# PEAK search bounds (min max), not a fixed ladder - see lib/sweep.sh mode=peak + perf/run.sh.
-SWEEP_DELAYED="${SWEEP_DELAYED:-32 65536}"
+# CONCURRENCY SEARCH BOUNDS [min,max] - IDENTICAL for both sweeps, deliberately.
+#
+# These were 16-8192 for the instant sweep and 32-65536 for the delayed one. Nobody could say why,
+# and an arbitrary asymmetry between two numbers printed side by side in the same table is a bug:
+# rps_max_proxy is searched with EIGHT TIMES LESS headroom than rps_sustained_20ms, so the peak
+# search can terminate on its BOUND rather than on a throughput plateau. That is exactly what
+# happened. rps_max_proxy was published as a gateway's maximum while the delayed sweep, allowed to
+# climb further, repeatedly beat it: 21 cells across the field reported sustained > max, which was
+# written off as measurement noise for weeks. It was not noise. It was this file reporting that our
+# own max benchmark was under-searching, and the number labelled "max" was not a max.
+#
+# A 20ms upstream delay cannot make a CPU-bound gateway faster. With equal headroom the instant
+# sweep must therefore be >= the delayed one, which makes sustained <= max_proxy a physical property
+# rather than a hope, and any violation a real defect worth failing on (see check-consistency C6).
+#
+# ONE constant, not two that happen to match. Two knobs required to stay equal is exactly how the
+# original asymmetry appeared, so there is now nothing to drift: every sweep in this file searches
+# the same range by construction. A future metric needing different bounds must add its own knob
+# here WITH the reason, which makes the exception visible instead of accidental.
+# mode=peak is an adaptive search, not a fixed ladder, so a low floor costs a few extra probes,
+# not a linear scan (lib/sweep.sh).
+SWEEP="${SWEEP:-1 65536}"
 SWEEP_TTFT_MS="${SWEEP_TTFT_MS:-20}"
 P99_CEIL_MS="${P99_CEIL_MS:-1000}"
 
@@ -783,7 +802,7 @@ matrix_cell_perf(){
   # mock (re)start site. Non-fatal: sweep_c1's own gate still nulls a genuinely-unusable window.
   _sw_mock_ready 30 || log "[$GATEWAY]   $egress <- $cell : plain mock did not become ready before the c1 baseline (a lost MOCK_PORT race); sweep_c1's honesty gate will null the c1 latency if the port is dead"
   sweep_c1
-  run_sweep 0 "$SWEEP_INSTANT" peak
+  run_sweep 0 "$SWEEP" peak
   # ONE source of truth: the charted array (SW_JSON, every ramp AND bisect probe this sweep made)
   # and the headline (SW_CEIL_RPS/SW_CEIL_CONC = max gate-passing point in THAT SAME array) come out
   # of the single run_sweep call. Carry BOTH into the cell so the drawer's headline is, by
@@ -791,7 +810,7 @@ matrix_cell_perf(){
   local prps=$SW_CEIL_RPS pconc=$SW_CEIL_CONC pbound=$SW_BOUND pjson="$SW_JSON"
   MEM_LAST_RPS="$prps"     # peak-cell selection (memory window): this served cell's rps_max_proxy
   MEM_LAST_BOUND="$pbound" # ...and whether that rps was mock/rig-bound (true) or CERTIFIED (false)
-  run_sweep "$SWEEP_TTFT_MS" "$SWEEP_DELAYED" peak
+  run_sweep "$SWEEP_TTFT_MS" "$SWEEP" peak
   local lrps=$SW_CEIL_RPS lconc=$SW_CEIL_CONC lbound=$SW_BOUND ljson="$SW_JSON"
   SWEEP_BODY=""; SWEEP_CACHE_KEY=""
   # ── per-cell STREAMING (same ingress path + egress config, still on the plain mock) ─────────────
@@ -1311,22 +1330,33 @@ matrix_memory_window(){
       local base m_path m_body
       m_path="$(ingress_path "$m_in")"; m_body="$(ingress_body "$m_in")"
       mem_cell_headers "$m_in"
-      local SERIESF STOP PEAKF T0
+      local SERIESF STOP PEAKF HWMF T0
       SERIESF="${TMPDIR:-/tmp}/mtxmem.$$.series"; STOP="${TMPDIR:-/tmp}/mtxmem.$$.stop"; PEAKF="${TMPDIR:-/tmp}/mtxmem.$$.peak"
-      rm -f "$SERIESF" "$STOP" "$PEAKF"; : >"$SERIESF"; : >"$PEAKF"; T0=$(date +%s)
+      HWMF="${TMPDIR:-/tmp}/mtxmem.$$.hwm"
+      rm -f "$SERIESF" "$STOP" "$PEAKF" "$HWMF"; : >"$SERIESF"; : >"$PEAKF"; : >"$HWMF"; T0=$(date +%s)
       MEM_STOP="$STOP"   # file-scope so cleanup()'s trap can stop the sampler on an early exit
       # ONE background sampler for the WHOLE window (idle -> load -> recovery): appends `<t_s> <rss>`
       # every MEM_SAMPLE_S and advances a running peak. mem_rss_read prints NOTHING for an unmeasurable
       # read, so neither the curve nor the peak can carry a fabricated 0. The running peak is RESET at
       # the start of the load phase (below) so peak_rss_mib is a load-phase max, never an idle max.
       # Watchdog LOGS a runaway; never kills the measurement.
+      #
+      # HWM IS SAMPLED HERE TOO, AT THE SAME INSTANTS, and for a specific reason. VmHWM is a per-process
+      # kernel high-water mark, so summing it across a process TREE is only meaningful if the tree's
+      # membership is fixed. It is not: a worker alive during the load contributes to the sampled RSS
+      # peak and then vanishes from a later VmHWM sum when it exits. Reading the sum ONCE at the end
+      # therefore produced sampled peak > summed hwm, which is physically impossible for a fixed tree
+      # and which the board's own consistency check duly flagged on three gateways (0.14-0.67%).
+      # Taking the max of the sum over the SAME sample instants keeps both numbers describing the same
+      # process set at the same moments, so peak <= hwm holds by construction.
       ( while [ ! -f "$STOP" ]; do
-          v=$(mem_rss_read)
+          v=$(mem_rss_read); h=$(mem_hwm_read)
           if [ -n "$v" ]; then
             echo "$(( $(date +%s) - T0 )) $v" >>"$SERIESF"
             awk -v v="$v" -v p="$(cat "$PEAKF" 2>/dev/null)" 'BEGIN{exit !(v+0>p+0)}' && echo "$v" >"$PEAKF"
             awk -v v="$v" -v c="$MEM_CAP_MIB" 'BEGIN{exit !(v+0>c+0)}' && echo "[$GATEWAY][mem watchdog] RSS $v MiB > cap $MEM_CAP_MIB (logged)"
           fi
+          [ -n "$h" ] && { awk -v v="$h" -v p="$(cat "$HWMF" 2>/dev/null)" 'BEGIN{exit !(v+0>p+0)}' && echo "$h" >"$HWMF"; }
           sleep "$MEM_SAMPLE_S"
         done ) & MEM_SP=$!
       # 1) COLD IDLE — the process has served ZERO requests at this point (readiness was a bare TCP
@@ -1354,8 +1384,9 @@ matrix_memory_window(){
         log "[$GATEWAY] memory: fixed load (c=$MATRIX_MEM_CONC payload=${pad_delivered}B dur=${MATRIX_MEM_DUR}s) on $m_in>$m_eg"
         local UGEN_H=( ${CURL_H[@]+"${CURL_H[@]}"} ${MEM_H[@]+"${MEM_H[@]}"} )
         # PEAK IS SCOPED TO THE LOAD PHASE: truncate the running max the instant before the load starts
-        # so an idle-window sample can never be published as a "peak under load" (audit P0-5).
-        : >"$PEAKF"
+        # so an idle-window sample can never be published as a "peak under load" (audit P0-5). HWM is
+        # truncated with it, so both maxima cover exactly the same window as well as the same instants.
+        : >"$PEAKF"; : >"$HWMF"
         # sweep_probe_raw (lib/sweep.sh) reads SWEEP_BODY/PSIZE/UGEN_H as globals. PSIZE=0: the payload
         # already lives IN the body, and ugen's -psize is inert whenever -body is set — passing it would
         # re-declare a payload that is not sent.
@@ -1384,7 +1415,10 @@ matrix_memory_window(){
         fi
         if [ "$load_ok" = 1 ]; then
           log "[$GATEWAY] memory: fixed load delivered ok=$mem_ok requests (rps=${mem_rps_out:-?}), payload ${pad_delivered}B == declared"
-          hwm="$(mem_num_or_null "$(mem_hwm_read)")"
+          # BOTH come from the sampler's running maxima over the SAME load-phase instants. Reading
+          # mem_hwm_read fresh here instead would sum VmHWM over whatever tree exists at THIS moment,
+          # which is a different process set than the one that produced the sampled peak.
+          hwm="$(mem_num_or_null "$(cat "$HWMF" 2>/dev/null)")"
           peak="$(mem_num_or_null "$(cat "$PEAKF" 2>/dev/null)")"
         fi
         # 4) RECOVERY: sample for MEM_SETTLE_S; recovered_rss_mib = the RSS at the END of the window.
@@ -1403,7 +1437,7 @@ matrix_memory_window(){
       # Stop the sampler + build the single-lifecycle series (idle -> load -> recovery).
       [ -n "$MEM_STOP" ] && touch "$MEM_STOP"; [ -n "$MEM_SP" ] && kill "$MEM_SP" 2>/dev/null; MEM_STOP="" MEM_SP=""
       series=$(rss_series_json "$SERIESF")
-      rm -f "$SERIESF" "$STOP" "$PEAKF" 2>/dev/null
+      rm -f "$SERIESF" "$STOP" "$PEAKF" "$HWMF" 2>/dev/null
       log "[$GATEWAY] memory: idle=${idle} peak=${peak} recovered=${recovered} hwm=${hwm} MiB on $m_in>$m_eg"
     else
       serr="${HARNESS_SERVE_ERR:-$SERVE_ERR}"

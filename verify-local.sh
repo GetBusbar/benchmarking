@@ -249,7 +249,7 @@ export MATRIX_EGRESS_ONLY="${MATRIX_EGRESS_ONLY-openai}"
 export MATRIX_INGRESS_ONLY="${MATRIX_INGRESS_ONLY-openai}"
 # perf sweep windows (lib/sweep.sh): 1s probe windows, tight peak-search bounds.
 export SWEEP_DUR="${SWEEP_DUR:-1}" C1_DUR="${C1_DUR:-1}" WARMUP_DUR="${WARMUP_DUR:-1}" PSIZE="${PSIZE:-64}"
-export SWEEP_INSTANT="${SWEEP_INSTANT:-8 64}" SWEEP_DELAYED="${SWEEP_DELAYED:-8 64}"
+export SWEEP="${SWEEP:-8 64}"   # one constant, same as matrix/run.sh; tiny for a local smoke
 # per-cell streaming (lib/stream_measure.sh): tiny frame counts + 1s windows + small bisect/peak bounds.
 export MATRIX_STREAM_CHUNKS="${MATRIX_STREAM_CHUNKS:-8}" MATRIX_STREAM_INTERVAL_MS="${MATRIX_STREAM_INTERVAL_MS:-20}"
 export MATRIX_STREAM_C1_DUR="${MATRIX_STREAM_C1_DUR:-1}" MATRIX_STREAM_SWEEP_DUR="${MATRIX_STREAM_SWEEP_DUR:-1}"
