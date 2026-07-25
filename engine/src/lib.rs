@@ -15,6 +15,7 @@ pub mod measurement;
 pub mod probe;
 pub mod qualify;
 pub mod record;
+pub mod rigbound;
 pub mod rss;
 pub mod search;
 pub mod stats;
