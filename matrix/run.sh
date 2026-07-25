@@ -327,7 +327,10 @@ ingress_path(){ case "$1" in
 # preceded by mock_start_record, so a sweep can never leave a non-recording mock in front of a
 # leg-3 check (mock_hit would honestly report "norecord" even if one slipped through).
 mock_start_record(){
-  [ -n "$MOCK" ] && pkill -f "$MOCK" 2>/dev/null; sleep 1
+  # audit #21: WAIT for the old mock to actually exit and release the port. A blind `sleep 1`
+  # after an async pkill let the fresh mock panic on EADDRINUSE (48/75 cells lost their
+  # streaming to "stream_mock_unready" in the 2026-07-25 run). See lib/harness.sh.
+  mock_stop_wait || log "WARNING: :$MOCK_PORT still occupied after mock_stop_wait — the relaunch below may fail to bind"
   setsid taskset -c "$MOCKCORES" env MOCK_RECORD=1 "$MOCK" -port "$MOCK_PORT" </dev/null >/dev/null 2>&1 &
   local i
   for i in $(seq 1 15); do
@@ -338,7 +341,10 @@ mock_start_record(){
   return 1
 }
 mock_start_plain(){ # instant, NO recording: the identical mock perf/run.sh measures c1 against
-  [ -n "$MOCK" ] && pkill -f "$MOCK" 2>/dev/null; sleep 1
+  # audit #21: WAIT for the old mock to actually exit and release the port. A blind `sleep 1`
+  # after an async pkill let the fresh mock panic on EADDRINUSE (48/75 cells lost their
+  # streaming to "stream_mock_unready" in the 2026-07-25 run). See lib/harness.sh.
+  mock_stop_wait || log "WARNING: :$MOCK_PORT still occupied after mock_stop_wait — the relaunch below may fail to bind"
   setsid taskset -c "$MOCKCORES" "$MOCK" -port "$MOCK_PORT" </dev/null >/dev/null 2>&1 &
   sleep 1
 }
@@ -580,8 +586,8 @@ matrix_cell_stream(){
   # Does this cell actually stream? One curl -N probe for SSE frames (paced mock up). A cell that 200s
   # the non-stream sweep but buffers/rejects stream:true records stream_served:false — measured, honest.
   stream_mock_start "$MATRIX_STREAM_CHUNKS" "$MATRIX_STREAM_INTERVAL_MS" "$MATRIX_STREAM_CHUNK_BYTES"
-  # HIGH-6 / HIGH-2: after a mock restart (which pkilled the prior cell's mock and relaunched WITHOUT
-  # SO_REUSEADDR), the fresh mock can still be racing the dying one for MOCK_PORT — a single un-retried
+  # HIGH-6 / HIGH-2: after a mock restart (which pkilled the prior cell's mock and relaunched before it
+  # had necessarily exited), the fresh mock can still be racing the dying one for MOCK_PORT — a single un-retried
   # SSE probe below would then read no `data:` frames and fabricate stream_served:false BEFORE any
   # measurement. Gate on stream_mock_ready (a retried 1-stream liveness probe) first, exactly as the
   # sustained-bisect + cpu-fps lanes already do before their searches.
@@ -607,7 +613,7 @@ matrix_cell_stream(){
       return 0
     fi
     log "[$GATEWAY]   $cell : stream mock did not become ready (lost MOCK_PORT race) — marking streaming UNTESTABLE (rig readiness failure), NOT fabricating stream_served:false"
-    CELL_STREAM_JSON=", \"stream\": {\"stream_served\": \"untestable\", \"reason\": \"stream_mock_unready\", \"stream_error\": \"$(json_escape "the streaming mock did not rebind :$MOCK_PORT after a per-cell restart (a lost MOCK_PORT race, no SO_REUSEADDR); probing a dead port would fabricate a false stream_served:false, so this cell's streaming is left UNMEASURED (a rig-readiness limit, not a gateway fault)")\"}"
+    CELL_STREAM_JSON=", \"stream\": {\"stream_served\": \"untestable\", \"reason\": \"stream_mock_unready\", \"stream_error\": \"$(json_escape "the streaming mock did not rebind :$MOCK_PORT after a per-cell restart (a lost MOCK_PORT race: the previous cell's mock had not yet exited, so the fresh one could not bind); probing a dead port would fabricate a false stream_served:false, so this cell's streaming is left UNMEASURED (a rig-readiness limit, not a gateway fault)")\"}"
     return 0
   fi
   local stream_ok=0 stream_err="" sbody probe_to sdata
@@ -650,7 +656,7 @@ matrix_cell_stream(){
     c1note=", \"stream_c1_note\": \"$(json_escape "$SM_C1_ERR")\""
   fi
   # LOW-1: symmetrize with the initial served-gate at the top of this function. If the paced mock lost
-  # :MOCK_PORT between c1 and the sustained bisect (a lost MOCK_PORT race, no SO_REUSEADDR), the bisect
+  # :MOCK_PORT between c1 and the sustained bisect (a lost MOCK_PORT race: the previous cell's mock had not yet exited, so the fresh one could not bind), the bisect
   # would probe a DEAD port and fabricate streams_sustained:0 / streams_sustained_mock_bound:null under
   # stream_served:true — a self-contradictory raw record. stream_mock_ready ALREADY retries a bounded
   # loop; if it STILL cannot bind, do NOT run the fabricating search — record the cell's streaming as
@@ -658,7 +664,7 @@ matrix_cell_stream(){
   # dead-mock 0/null. Never publish a gateway stream_served:false or a dishonest 0 for a rig limit.
   if ! stream_mock_ready 30; then
     log "[$GATEWAY]   $cell : stream mock did not rebind before the sustained bisect (lost MOCK_PORT race) — marking streaming UNTESTABLE (rig readiness failure), NOT fabricating streams_sustained:0/mock_bound:null under stream_served:true"
-    CELL_STREAM_JSON=", \"stream\": {\"stream_served\": \"untestable\", \"reason\": \"stream_mock_unready\", \"stream_error\": \"$(json_escape "the streaming mock did not rebind :$MOCK_PORT before the sustained bisect (a lost MOCK_PORT race, no SO_REUSEADDR); searching against a dead port would fabricate streams_sustained:0 with a null mock_bound under stream_served:true, so this cell's streaming is left UNMEASURED (a rig-readiness limit, not a gateway fault)")\"}"
+    CELL_STREAM_JSON=", \"stream\": {\"stream_served\": \"untestable\", \"reason\": \"stream_mock_unready\", \"stream_error\": \"$(json_escape "the streaming mock did not rebind :$MOCK_PORT before the sustained bisect (a lost MOCK_PORT race: the previous cell's mock had not yet exited, so the fresh one could not bind); searching against a dead port would fabricate streams_sustained:0 with a null mock_bound under stream_served:true, so this cell's streaming is left UNMEASURED (a rig-readiness limit, not a gateway fault)")\"}"
     return 0
   fi
   local sust_lo sust_hi; read -r sust_lo sust_hi <<< "$MATRIX_STREAM_SUST_BOUNDS"
@@ -685,7 +691,7 @@ matrix_cell_stream(){
   # sustained numbers are recomputed by the field run; a rig-readiness gap is never a gateway number.)
   if ! stream_mock_ready 30; then
     log "[$GATEWAY]   $cell : unpaced mock did not rebind before the cpu-fps peak (lost MOCK_PORT race) — marking streaming UNTESTABLE (rig readiness failure), NOT fabricating cpu_fps:0/mock_bound:null under stream_served:true"
-    CELL_STREAM_JSON=", \"stream\": {\"stream_served\": \"untestable\", \"reason\": \"stream_mock_unready\", \"stream_error\": \"$(json_escape "the unpaced streaming mock did not rebind :$MOCK_PORT before the cpu-fps peak (a lost MOCK_PORT race, no SO_REUSEADDR); searching against a dead port would fabricate cpu_fps:0 with a null mock_bound under stream_served:true, so this cell's streaming is left UNMEASURED (a rig-readiness limit, not a gateway fault)")\"}"
+    CELL_STREAM_JSON=", \"stream\": {\"stream_served\": \"untestable\", \"reason\": \"stream_mock_unready\", \"stream_error\": \"$(json_escape "the unpaced streaming mock did not rebind :$MOCK_PORT before the cpu-fps peak (a lost MOCK_PORT race: the previous cell's mock had not yet exited, so the fresh one could not bind); searching against a dead port would fabricate cpu_fps:0 with a null mock_bound under stream_served:true, so this cell's streaming is left UNMEASURED (a rig-readiness limit, not a gateway fault)")\"}"
     return 0
   fi
   local fps_lo fps_hi; read -r fps_lo fps_hi <<< "$MATRIX_STREAMCPU_FPS_BOUNDS"

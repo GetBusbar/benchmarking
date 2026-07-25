@@ -229,7 +229,10 @@ _sw_mock_ready(){ # tries
 
 run_sweep() { # ttft_ms  conc_list_or_bounds  [mode: ladder|bisect]
   local ttft="$1" concs="$2" mode="${3:-ladder}"
-  [ -n "$MOCK" ] && pkill -f "$MOCK" 2>/dev/null; sleep 1
+  # audit #21: WAIT for the old mock to actually exit and release the port. A blind `sleep 1`
+  # after an async pkill let the fresh mock panic on EADDRINUSE (48/75 cells lost their
+  # streaming to "stream_mock_unready" in the 2026-07-25 run). See lib/harness.sh.
+  mock_stop_wait || log "WARNING: :$MOCK_PORT still occupied after mock_stop_wait — the relaunch below may fail to bind"
   setsid taskset -c "$MOCKCORES" env MOCK_TTFT_MS="$ttft" "$MOCK" -port "$MOCK_PORT" </dev/null >/dev/null 2>&1 &
   sleep 1
   # Do not proceed until the fresh mock is actually bound + answering; otherwise the ceiling probe

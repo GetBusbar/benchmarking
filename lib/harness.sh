@@ -227,6 +227,53 @@ _harness_port_state(){
   else echo "port $port not listening"; fi
 }
 
+# ── mock_stop_wait: THE mock-restart choke point (audit #21) ──────────────────────────────────────
+# THE BUG THIS FIXES. Four sites (lib/stream_measure.sh stream_mock_start, lib/sweep.sh run_sweep,
+# matrix/run.sh mock_start_record + mock_start_plain) each open with the SAME line:
+#
+#     [ -n "$MOCK" ] && pkill -f "$MOCK" 2>/dev/null; sleep 1
+#
+# and then immediately relaunch the mock. `pkill` only SENDS a signal — it returns instantly, long
+# before the target has exited — so `sleep 1` is a blind guess at how long the old process needs. When
+# the guess is wrong the fresh mock hits `TcpListener::bind(addr).expect("bind")`, PANICS on
+# EADDRINUSE, and dies. stream_mock_ready then polls a dead port 30 times and the cell is recorded
+# "untestable / stream_mock_unready".
+#
+# That is not a corner case in the shipped data: 48 of the 75 served cells in the 2026-07-25 field run
+# carry stream_mock_unready. The matrix streaming lane is therefore EMPTY for all 13 gateways, and the
+# board falls back to the weeks-old standalone stream suite for every streaming column on the site.
+#
+# NOTE ON THE OLD DIAGNOSIS. The call sites blame "no SO_REUSEADDR", and that is wrong — which matters,
+# because it points at a fix that cannot work. SO_REUSEADDR only permits binding over a socket in
+# TIME_WAIT; it does NOT permit binding over a live LISTEN socket still held by a running process.
+# Setting it on the mock would not have prevented a single one of these failures. The actual defect is
+# that nothing ever WAITS for the old mock to die.
+#
+# So: signal, then POLL until the process is really gone and the port really accepts no connection,
+# escalating to SIGKILL if the polite signal is ignored. Returns 0 when the port is free, 1 when it is
+# still occupied after the budget (the caller then logs honestly rather than launching into a panic).
+# Callers keep their own post-launch readiness probes; this only guarantees a clean port to launch ONTO.
+MOCK_STOP_WAIT_S="${MOCK_STOP_WAIT_S:-15}"    # total budget; SIGKILL escalation at the halfway mark
+mock_stop_wait(){
+  local port="${MOCK_PORT:-8081}" budget="${MOCK_STOP_WAIT_S}" i=0 killed=0
+  [ -n "${MOCK:-}" ] || return 0
+  pkill -f "$MOCK" 2>/dev/null
+  while [ "$i" -lt "$budget" ]; do
+    # Free means BOTH: no process matching the mock binary, and nothing accepting on the port. Either
+    # alone is insufficient — a zombie with the socket still open passes the pgrep test, and an
+    # unrelated listener would pass the pgrep test too.
+    if ! pgrep -f "$MOCK" >/dev/null 2>&1; then
+      if ! tmo 2 bash -c "exec 3<>/dev/tcp/127.0.0.1/$port" 2>/dev/null; then return 0; fi
+    fi
+    # Halfway through the budget the polite signal has demonstrably not worked: escalate ONCE.
+    if [ "$killed" = 0 ] && [ "$i" -ge $((budget / 2)) ]; then
+      pkill -9 -f "$MOCK" 2>/dev/null; killed=1
+    fi
+    i=$((i + 1)); sleep 1
+  done
+  return 1
+}
+
 # ── harness_launch_ready: THE robust boot-with-retry, shared by every suite ───────────────────────
 # Usage: harness_launch_ready <launch_fn> <ready_fn> [launch_arg...]
 #   <launch_fn>  a shell function that (re)launches the gateway. It is the gateway's OWN hook -

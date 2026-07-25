@@ -14,6 +14,7 @@ on:
       - "lib/stream_measure_test.sh"
       - "lib/harness.sh"
       - "lib/mem_rss_test.sh"
+      - "lib/mock_restart_test.sh"
       - "lib/promote_guard.py"
       - "lib/promote_guard_test.py"
       - "charts.py"
@@ -29,6 +30,7 @@ on:
       - "lib/stream_measure_test.sh"
       - "lib/harness.sh"
       - "lib/mem_rss_test.sh"
+      - "lib/mock_restart_test.sh"
       - "lib/promote_guard.py"
       - "lib/promote_guard_test.py"
       - "charts.py"
@@ -64,6 +66,13 @@ jobs:
       # comparison / false-over-a-dead-reference can never ship silently.
       - name: Stream-measure regression test (sustained/cpu-fps search + mock-bound + stream_c1 + dead-mock)
         run: bash lib/stream_measure_test.sh
+      # The mock-restart choke point (audit #21). Four sites pkill'd the mock and relaunched after a
+      # blind `sleep 1`; pkill returns before the target exits, so the fresh mock regularly panicked on
+      # EADDRINUSE and the harness recorded the cell "untestable / stream_mock_unready" — 48 of 75
+      # served cells in the 2026-07-25 field run, which emptied the matrix streaming lane for ALL 13
+      # gateways. Gate the wait-for-exit behaviour so the blind sleep can never come back.
+      - name: Mock-restart choke-point test (wait for exit + port release, SIGKILL escalation, budget)
+        run: bash -n lib/mock_restart_test.sh && bash lib/mock_restart_test.sh
       # lib/promote_guard.py decides whether an incoming result may overwrite the committed one; a bug
       # there republishes a regression as an honest failure (R4-M2). Covers MEDIUM-R2-3 (matrix all-dead
       # 000 detection) + the anchored-marker / status-000 / honest-not-served behaviours.

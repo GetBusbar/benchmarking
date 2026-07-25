@@ -13,6 +13,9 @@ declare -A SWEEP_PRIOR=(); declare -A SWEEP_MOCKCEIL_CACHE=()
 source "$B/lib/sweep.sh"
 # Override externals AFTER sourcing so the stubs win.
 pkill(){ :; }; setsid(){ :; }; taskset(){ :; }; sleep(){ :; }
+# audit #21: the mock-restart choke point lives in lib/harness.sh, which this unit test does not
+# source (it drives ONE lib in isolation). Stub it green — mock_stop_wait has its own test below.
+mock_stop_wait(){ return 0; }
 suite_deadline_expired(){ return 1; }
 log(){ :; }
 sqr(){ echo $(( $1 * $1 )); }
