@@ -502,9 +502,19 @@ function idleAcrossCells(g) {
    than being something a reader has to find by selecting the right cell. False when there is no per-cell
    data to judge: absence of measurement is not a verdict. */
 function neverPlateaued(g) {
-  const cells = memoryCells(g);
-  return cells.length > 0 && cells.every((c) => c.mem.plateaued !== true);
+  // TRI-STATE, because the producer is deliberately tri-state. `plateaued: null` is a WITHHELD verdict,
+  // not a negative one: the harness writes it when the cold-restarted process never opened its port, when
+  // the fixed load stopped delivering, and when the trailing window held fewer than the four RSS samples
+  // the steadiness test needs. `null !== true` quietly turned every one of those into "never settles" -
+  // a named, permanent accusation on the board about a gateway the rig never actually watched. On macOS,
+  // where no RSS is readable at all, that meant EVERY gateway on EVERY locally generated board. Only
+  // cells that were genuinely judged may vote, and at least one must have been.
+  const judged = memoryCells(g).filter((c) => c.mem.plateaued != null);
+  return judged.length > 0 && judged.every((c) => c.mem.plateaued === false);
 }
+// memoryUnjudged(g): how many of this gateway's measured cells had their verdict WITHHELD. The pill's
+// wording depends on it: "on any cell this gateway serves" overclaims when some cells were never judged.
+function memoryUnjudged(g) { return memoryCells(g).filter((c) => c.mem.plateaued == null).length; }
 /* worstGrowth(g): the highest growth rate across this gateway's cells. When a cell hit the plateau cap
    this IS its leak rate, so the gateway-level flag can quantify itself instead of just asserting. */
 function worstGrowth(g) {
@@ -707,7 +717,13 @@ function neverPlateauedPill(g) {
   if (!neverPlateaued(g)) return "";
   const gr = worstGrowth(g);
   const rate = gr != null ? `, still growing at up to ${fmt1(gr)} MiB/min` : "";
-  return ` <span class="noplateau-pill" title="${esc(`RSS never went steady on any cell this gateway serves${rate}. Its memory under load is bounded by how long we ran the load, not by the gateway, so no steady-state number is published for it.`)}">never settles</span>`;
+  // Say what was actually judged. A gateway can be flagged on the cells we could measure while others
+  // were withheld, and the claim has to be the narrower one in that case.
+  const un = memoryUnjudged(g);
+  const scope = un > 0
+    ? `on any cell we could measure it on (${fmtInt(un)} further cell${un === 1 ? "" : "s"} were not measured)`
+    : "on any cell this gateway serves";
+  return ` <span class="noplateau-pill" title="${esc(`RSS never went steady ${scope}${rate}. Its memory under load is bounded by how long we ran the load, not by the gateway, so no steady-state number is published for it.`)}">never settles</span>`;
 }
 
 /* ---- column model ----------------------------------------------------------- */

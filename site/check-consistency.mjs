@@ -64,16 +64,35 @@ function isEnvelope(x) { return x != null && typeof x === "object" && typeof x.c
 export function c7HwmBelowPeak(gwKey, rawMatrix) {
   const warnings = [];
   let checked = 0;
-  const mem = rawMatrix && rawMatrix.memory;
-  if (!mem || mem.served !== true) return { warnings, checked };
-  const peak = mem.peak_rss_mib, hwm = mem.peak_rss_hwm_mib;
-  if (typeof peak !== "number" || typeof hwm !== "number" || peak <= 0 || hwm <= 0) return { warnings, checked };
-  checked = 1;
-  if (peak > hwm)
-    warnings.push(`${gwKey}.memory: sampled peak_rss ${peak} MiB > kernel peak_rss_hwm ${hwm} MiB ` +
-      `(a ${((peak / hwm - 1) * 100).toFixed(2)}% overshoot — VmHWM cannot be below an observed RSS for a FIXED ` +
-      `process tree, so a child process counted in the sampled peak had exited before the VmHWM sum was taken; ` +
-      `a transient-worker artefact of summing the tree at two different instants, not a fabricated value)`);
+  if (!rawMatrix || typeof rawMatrix !== "object") return { warnings, checked };
+  const one = (label, mem) => {
+    if (!mem || mem.served !== true) return;
+    const peak = mem.peak_rss_mib, hwm = mem.peak_rss_hwm_mib;
+    if (typeof peak !== "number" || typeof hwm !== "number" || peak <= 0 || hwm <= 0) return;
+    checked += 1;
+    if (peak > hwm)
+      warnings.push(`${gwKey}.${label}: sampled peak_rss ${peak} MiB > kernel peak_rss_hwm ${hwm} MiB ` +
+        `(a ${((peak / hwm - 1) * 100).toFixed(2)}% overshoot - VmHWM cannot be below an observed RSS for a FIXED ` +
+        `process tree, so a child process counted in the sampled peak had exited before the VmHWM sum was taken; ` +
+        `a transient-worker artefact of summing the tree at two different instants, not a fabricated value)`);
+  };
+  // PER CELL, because that is where memory lives now. Reading only the top-level block made this check a
+  // NO-OP on every artifact the current producer writes - and worse than a no-op: "C7.hwm" is a REQUIRED
+  // coverage token whenever a bundle publishes matrix numbers, and a per-cell memory row is itself what
+  // makes a gateway a matrix publisher, so an all-new-shape field run would satisfy the requirement and
+  // starve the token at the same time, hard-failing the publish gate on 13 freshly measured gateways.
+  const ups = rawMatrix.upstreams && typeof rawMatrix.upstreams === "object" ? rawMatrix.upstreams : null;
+  if (ups) {
+    for (const [egress, up] of Object.entries(ups))
+      for (const [ingress, cell] of Object.entries((up && up.cells) || {}))
+        one(`${ingress}->${egress}.memory`, cell && cell.memory);
+  } else {
+    // v1-shape artifact: the top-level `cells` IS the one measured egress row. Only walked when there is
+    // no upstreams grid, because v2 shares those cell objects with upstreams and would double-count.
+    for (const [ingress, cell] of Object.entries(rawMatrix.cells || {}))
+      one(`${ingress}.memory`, cell && cell.memory);
+  }
+  one("memory", rawMatrix.memory);   // legacy pre-redesign top-level block, still checked where present
   return { warnings, checked };
 }
 

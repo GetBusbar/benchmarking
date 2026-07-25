@@ -1028,6 +1028,35 @@ test("C7 GREEN: a plausible pair, equality, an unserved window and nulls are NOT
     assert.equal(c7HwmBelowPeak("gw", bad).checked, 0, `C7 must be null-safe on ${JSON.stringify(bad)}`);
 });
 
+test("C7 RED: memory lives PER CELL now, and a new-shape matrix must still be checked", () => {
+  // THE SHAPE THE PRODUCER ACTUALLY WRITES. matrix/run.sh emits no top-level `memory` key at all: the
+  // window is folded into each served cell. C7 read only the top-level block, so on every artifact the
+  // current producer writes it checked NOTHING - and "C7.hwm" is a REQUIRED coverage token once a bundle
+  // publishes matrix numbers, which a per-cell memory row is itself enough to make true. An all-new-shape
+  // field run would therefore satisfy the requirement and starve the token in the same breath, turning 13
+  // freshly measured gateways into a hard publish failure. This fixture is that field run in miniature.
+  const perCell = (peak, hwm, served = true) => ({
+    upstreams: { openai: { cells: {
+      openai: { served: true, memory: { served, peak_rss_mib: peak, peak_rss_hwm_mib: hwm } },
+      anthropic: { served: true, memory: { served, peak_rss_mib: 100, peak_rss_hwm_mib: 120 } },
+    } } },
+  });
+  const r = c7HwmBelowPeak("gw", perCell(165.1, 164.7));
+  assert.equal(r.checked, 2, "EVERY served cell's window is checked, not just one");
+  assert.equal(r.warnings.length, 1, `C7 must flag the inverted cell; got ${JSON.stringify(r.warnings)}`);
+  assert.match(r.warnings[0], /gw\.openai->openai\.memory/, "the warning must name the CELL, not just the gateway");
+  assert.match(r.warnings[0], /0\.24%/);
+  // A new-shape matrix with NO top-level block must still produce coverage: that is the whole failure.
+  assert.ok(c7HwmBelowPeak("gw", perCell(100, 120)).checked > 0,
+    "a per-cell-only matrix must COVER C7, or the publish gate starves on fresh data");
+  // v2 shares its cell objects with the top-level compat `cells` row; they must not be counted twice.
+  const v2 = perCell(100, 120);
+  v2.cells = v2.upstreams.openai.cells;
+  assert.equal(c7HwmBelowPeak("gw", v2).checked, 2, "a v2 compat row must not double-count its cells");
+  // and a LEGACY top-level block is still checked, so pre-redesign artifacts do not go dark.
+  assert.equal(c7HwmBelowPeak("gw", { memory: { served: true, peak_rss_mib: 165.1, peak_rss_hwm_mib: 164.7 } }).checked,
+    1, "the legacy top-level block must keep being checked");
+});
 test("C7: the live bundle's hwm-below-peak rows warn but never hard-fail", () => {
   const { errors, warnings, cover } = checkConsistency(data, app);
   assert.ok(cover.has("C7.hwm"), "C7 must actually run on the live bundle");
@@ -2593,6 +2622,41 @@ test("memory: a gateway that never settles on ANY cell is flagged at GATEWAY lev
     .render(leaky, memState([leaky], { view: "performance" }))));
   // Absence of measurement is not a verdict.
   assert.equal(app.neverPlateaued({ key: "x", display: "x" }), false, "no per-cell data means no verdict");
+});
+
+test("memory: a WITHHELD plateau verdict is not a negative one - a rig failure is never a gateway defect", () => {
+  // The producer is deliberately TRI-STATE. plateaued:null is written when the cold-restarted process
+  // never opened its port, when the fixed load stopped delivering, and when the trailing window held
+  // fewer than the four samples the steadiness test needs. `null !== true` collapsed every one of those
+  // into "never settles": a permanent, named accusation on the public board about a gateway the rig never
+  // watched. On macOS, where no RSS is readable at all, that was EVERY gateway on EVERY local board.
+  const unmeasured = memGw("unmeasured", {
+    "openai>openai": { steady_state_rss_mib: null, plateaued: null, growth_rate_mib_per_min: null },
+    "openai>gemini": { steady_state_rss_mib: null, plateaued: null, growth_rate_mib_per_min: null },
+  });
+  assert.equal(app.neverPlateaued(unmeasured), false,
+    "a gateway whose every verdict was WITHHELD must not be labelled 'never settles'");
+  const st = memState([unmeasured], { mode: "same" });
+  assert.ok(!/never settles/.test(app.COLUMN_SETS.memory.find((c) => c.id === "name").render(unmeasured, st)),
+    "and it must not be painted with the pill either");
+  assert.ok(!app.memoryCaption({ gateways: [unmeasured] }, st).join(" ").match(/never settled on any cell/),
+    "nor counted in the caption's tally of gateways that never settled");
+  // MIXED: one cell judged and failing, one withheld. The gateway IS flagged - we watched it fail
+  // somewhere - but the claim narrows to what was actually measured.
+  const mixed = memGw("mixed", {
+    "openai>openai": { steady_state_rss_mib: null, plateaued: false, growth_rate_mib_per_min: 9 },
+    "openai>gemini": { steady_state_rss_mib: null, plateaued: null, growth_rate_mib_per_min: null },
+  });
+  assert.equal(app.neverPlateaued(mixed), true, "a cell we DID judge, and it never settled, is a finding");
+  const pill = app.neverPlateauedPill(mixed);
+  assert.match(pill, /never settles/);
+  assert.match(pill, /cell we could measure it on/, "the claim must narrow to the cells actually judged");
+  assert.match(pill, /1 further cell/, "and say how many were not measured");
+  // A gateway with every cell judged keeps the unqualified claim.
+  const leakyAll = memGw("leakyall", {
+    "openai>openai": { steady_state_rss_mib: null, plateaued: false, growth_rate_mib_per_min: 7.5 },
+  });
+  assert.match(app.neverPlateauedPill(leakyAll), /on any cell this gateway serves/);
 });
 
 test("memory idle stays OUTSIDE the chooser: median of the cold samples, identical in every mode", () => {
