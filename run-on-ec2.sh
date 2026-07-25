@@ -8,12 +8,12 @@
 # (N boxes for ~1/N the wall-clock), and much faster end to end.
 #
 #   run-on-ec2.sh                                   # all gateways, one box each, in parallel
-#   run-on-ec2.sh litellm-rust bifrost              # a subset, one box each
+#   run-on-ec2.sh <name> <name>                     # a subset, one box each
 #
 # Requires awscli v2 (configured), ssh, rsync. Each box is m7g.4xlarge (16 real Graviton3 cores): the
 # gateway-under-test is pinned to 4 cores (= an m7g.xlarge, the class AIGatewayBench uses); the mock +
 # load generator get 6 cores each, so the harness can never steal cycles from the gateway. EVERY
-# gateway build/pulls itself on its box from the ref pinned in gateways/versions.env.
+# gateway build/pulls itself on its box from the ref pinned in its own gateways/<name>/gateway.sh.
 set -uo pipefail
 export AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-us-east-1}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"   # this repo (benchmarking) root

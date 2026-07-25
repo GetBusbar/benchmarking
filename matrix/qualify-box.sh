@@ -30,7 +30,13 @@
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
-GATEWAY="${GATEWAY:-busbar}"
+# The gateway under test. Every field path (run-all.sh, run-on-ec2.sh) passes GATEWAY explicitly;
+# this default only ever serves a bare interactive invocation. It is DISCOVERED (the first
+# gateways/*/gateway.sh on disk, alphabetical), never a baked-in favourite -- naming one here
+# made this runner one of the places a dropped-in gateway was not enough on its own.
+# shellcheck source=../lib/gateways.sh
+. "$ROOT/lib/gateways.sh"
+GATEWAY="${GATEWAY:-$(gw_default "$ROOT")}"
 STAGE="${1:-stage1}"
 
 # ── knobs (short by construction: this runs on every box of every run) ───────────────────────────
