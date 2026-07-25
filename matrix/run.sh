@@ -819,7 +819,11 @@ matrix_cell_perf(){
     lat50=null; lat99=null; g99=null; d99=null
     c1note=", \"c1_note\": \"$(json_escape "$C1_ERR")\""
   fi
-  CELL_PERF_JSON=", \"perf\": {\"added_latency_p50_us\": $lat50, \"added_latency_p99_us\": $lat99, \"gateway_c1_p99_us\": $g99, \"direct_c1_p99_us\": $d99, \"rps_sustained_20ms\": $lrps, \"rps_sustained_20ms_concurrency\": $lconc, \"rps_sustained_20ms_mock_bound\": $lbound, \"rps_max_proxy\": $prps, \"rps_max_proxy_concurrency\": $pconc, \"rps_max_proxy_mock_bound\": $pbound, \"sweep_max_proxy\": [$pjson], \"sweep_sustained_20ms\": [$ljson], \"egress_reverified\": $reverified${reverify_note:+, \"reverify_note\": \"$(json_escape "$reverify_note")\"}$c1note}"
+  # conc_at_sustained / conc_at_peak (snapshot #65): the concurrency RUNG each ceiling held at — the
+  # adaptive sweep ramps concurrency then keeps only the winning rung's SW_CEIL_CONC. Same value as the
+  # existing *_concurrency fields (kept for back-compat); named explicitly so the snapshot + Performance
+  # tab can surface "X rps @ Y conc" next to each headline. Null-safe: 0 when the sweep recorded no rung.
+  CELL_PERF_JSON=", \"perf\": {\"added_latency_p50_us\": $lat50, \"added_latency_p99_us\": $lat99, \"gateway_c1_p99_us\": $g99, \"direct_c1_p99_us\": $d99, \"rps_sustained_20ms\": $lrps, \"rps_sustained_20ms_concurrency\": $lconc, \"conc_at_sustained\": $lconc, \"rps_sustained_20ms_mock_bound\": $lbound, \"rps_max_proxy\": $prps, \"rps_max_proxy_concurrency\": $pconc, \"conc_at_peak\": $pconc, \"rps_max_proxy_mock_bound\": $pbound, \"sweep_max_proxy\": [$pjson], \"sweep_sustained_20ms\": [$ljson], \"egress_reverified\": $reverified${reverify_note:+, \"reverify_note\": \"$(json_escape "$reverify_note")\"}$c1note}"
   log "[$GATEWAY]   $egress <- $cell : perf added_p99=${lat99}us sustained@${SWEEP_TTFT_MS}ms=${lrps}rps max_proxy=${prps}rps (leg-3 re-verified)"
 }
 
@@ -1250,6 +1254,9 @@ _mem_median(){
 # during the loop, cold-restarts a fresh process for it, and runs idle -> fixed load -> recovery.
 matrix_memory_window
 
+# ONE canonical measured_at for both the per-suite matrix json AND the snapshot artifact (same instant).
+MEASURED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
 cat > "$RESULTS/$GATEWAY.json" <<JSON
 {
   "gateway": "$GATEWAY",
@@ -1277,7 +1284,7 @@ cat > "$RESULTS/$GATEWAY.json" <<JSON
   "ootb_config": $([ -n "$OOTB_CONFIG" ] && printf '"%s"' "$OOTB_CONFIG" || echo null),
   "arch": "${BENCH_ARCH:-$(uname -m)}",
   "hardware": "${BENCH_HARDWARE:-$(uname -m) $(nproc 2>/dev/null || echo '?')vCPU}",
-  "measured_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  "measured_at": "$MEASURED_AT"
 }
 JSON
 echo "================================================================"
@@ -1296,4 +1303,56 @@ for cell in cells0:
     print("   %-17s" % cell + "".join(row))
 PY
 echo " -> $RESULTS/$GATEWAY.json"
+echo "================================================================"
+
+# ── snapshot artifact (task #65) ────────────────────────────────────────────────────────────────
+# END-OF-RUN ASSEMBLER: bundle the already-produced pieces (the matrix json + the captured config text)
+# into ONE atomic, timestamped, self-describing per-gateway snapshot. Config lives INSIDE the same file as
+# the numbers it produced (kills the config-drift class); every run is kept, never overwritten. The
+# consumer (gen-data) reads the NEWEST snapshot per gateway. Minimal risk: reuses existing producers.
+SNAP_DIR="$ROOT/results/snapshots"; mkdir -p "$SNAP_DIR"
+SNAP_TS_SAFE="$(printf '%s' "$MEASURED_AT" | tr ':' '-')"   # ISO8601 with ':' -> '-' for filename safety
+SNAP_FILE="$SNAP_DIR/result_${GATEWAY}_${SNAP_TS_SAFE}.json"
+python3 - "$RESULTS/$GATEWAY.json" "$ROOT/results/config/$GATEWAY.txt" "$SNAP_FILE" <<'PY'
+import json, os, sys
+matrix_path, config_path, snap_path = sys.argv[1], sys.argv[2], sys.argv[3]
+m = json.load(open(matrix_path))
+# config.files: inline the run's verbatim config render (busbar may have several; other gws one). Today
+# the harness writes a single results/config/<gw>.txt; inline it under its basename. Absent -> empty set.
+files = {}
+if os.path.exists(config_path):
+    files[os.path.basename(config_path)] = open(config_path, encoding="utf-8").read()
+# top-level memory + streaming blocks: memory is embedded in the matrix json (m["memory"]); streaming is
+# the best diagonal cell's own stream record. Both are null-safe (absent -> null) — never fabricated.
+memory = m.get("memory")
+streaming = None
+ups = m.get("upstreams") or {}
+# best diagonal = the openai diagonal when served, else the first served diagonal that streamed.
+for eg in (["openai"] + [k for k in ups if k != "openai"]):
+    cell = (ups.get(eg) or {}).get("cells", {}).get(eg)
+    if cell and cell.get("served") is True and (cell.get("stream") or {}).get("stream_served") is True:
+        st = cell["stream"]
+        streaming = {"dialect": eg, "ttft_ms": m.get("sweep_ttft_ms"),
+                     "added_ttft_p99_us": st.get("added_ttft_p99_us"), "added_gap_p99_us": st.get("added_gap_p99_us"),
+                     "streams_sustained": st.get("streams_sustained"), "cpu_fps": st.get("cpu_fps")}
+        break
+snap = {
+    "schema_version": 1,
+    "gateway": m.get("gateway"),
+    "build": m.get("build"),
+    "measured_at": m.get("measured_at"),
+    "arch": m.get("arch"),
+    "hardware": m.get("hardware"),
+    "config": {"files": files},
+    "matrix": m,          # the full 6x6 grid (the sole numeric source), verbatim
+    "memory": memory,     # the post-6x6 memory block (may be null until the field run)
+    "streaming": streaming,
+}
+tmp = snap_path + ".tmp"
+with open(tmp, "w", encoding="utf-8") as f:
+    json.dump(snap, f, indent=1)
+    f.write("\n")
+os.replace(tmp, snap_path)   # atomic publish
+print(f" -> {snap_path}")
+PY
 echo "================================================================"
