@@ -228,14 +228,31 @@ stage2(){
   rungs=("$lo" "$conc" "$hi")
   for r in "${rungs[@]}"; do
     read -r rps fail p99 p50 < <(sweep_probe "$GURL" "$r" "$BQ_REPLAY_DUR")
-    rps="${rps:-0}"; fail="${fail:-0}"; p99="${p99:-0}"
+    # UNMEASURED IS NOT ZERO. sweep_probe prints nothing at all when its window produced no stats
+    # line (the hard timeout fired on an unresponsive gateway), which leaves these empty. Coercing
+    # them with :-0 published a rung that was never probed as "0 rps with 0 failures", a record that
+    # contradicts itself and then feeds the box-qualification verdict. Stage 1 already refuses this
+    # ("p99=0 means no successful sample, never instant"); stage 2 now refuses it the same way.
+    if [ -z "${rps:-}" ]; then
+      log "  replay rung c=$r: NOT MEASURED (the probe produced no window) - publishing null, not 0"
+      json="${json}${json:+, }{\"conc\": $r, \"rps\": null, \"fail\": null, \"p99_us\": null}"
+      continue
+    fi
     log "  replay rung c=$r: rps=$rps fail=$fail p99=${p99}us"
     json="${json}${json:+, }{\"conc\": $r, \"rps\": $(json_num "$rps"), \"fail\": $(json_num "$fail"), \"p99_us\": $(json_num "$p99")}"
     if [ "$rps" -gt "$best" ] 2>/dev/null; then best="$rps"; bestc="$r"; fi
   done
   gw_stop 2>/dev/null
   pkill -f "$MOCK" 2>/dev/null
-  log "stage 2 replay peak: ${best} rps at c=${bestc} over rungs ${rungs[*]} in $((SECONDS-t0))s"
+  # NO RUNG MEASURED AT ALL. best stays 0 and bestc stays empty, which json_num renders as the pair
+  # "replay_rps": 0, "replay_conc": null - a rate with no concurrency it was measured at, which is
+  # not a thing that can happen. Publish both as null so the record says unmeasured rather than zero.
+  if [ -z "$bestc" ]; then
+    best=""
+    log "stage 2 replay: NO rung produced a window - replay peak is unmeasured (null), not 0"
+  else
+    log "stage 2 replay peak: ${best} rps at c=${bestc} over rungs ${rungs[*]} in $((SECONDS-t0))s"
+  fi
   printf '{"stage": 2, "arch": %s, "measured_at": "%s", "probe_s": %s, "cell": %s, "baseline_conc": %s, "rungs": [%s], "replay_rps": %s, "replay_conc": %s, "replay_dur_s": %s}\n' \
     "$(json_str "${BENCH_ARCH:-}")" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS-t0))" \
     "$(json_str "$ing>$eg")" "$(json_num "$conc")" "$json" "$(json_num "$best")" "$(json_num "$bestc")" "$BQ_REPLAY_DUR" \
