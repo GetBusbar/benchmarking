@@ -1,0 +1,28 @@
+# ── kong.gen.yml (rendered DB-less declarative; loaded via KONG_DECLARATIVE_CONFIG) ──
+_format_version: "3.0"
+services:
+  - name: llm
+    url: http://127.0.0.1:1
+    routes:
+      - name: chat
+        paths: ["/v1/chat/completions"]
+        strip_path: false
+    plugins:
+      - name: ai-proxy
+        config:
+          route_type: llm/v1/chat
+          auth:
+            header_name: Authorization
+            header_value: "Bearer dummy"
+          model:
+            provider: openai
+            name: gpt-4o-mini
+            options:
+              upstream_url: "http://127.0.0.1:8000/v1/chat/completions"
+
+# ── launch env (non-secret) ──
+KONG_DATABASE=off
+KONG_ANONYMOUS_REPORTS=off
+KONG_NGINX_WORKER_PROCESSES=4
+KONG_DECLARATIVE_CONFIG=/kong/kong.yml
+KONG_PROXY_LISTEN=0.0.0.0:8080
