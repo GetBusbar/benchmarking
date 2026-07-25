@@ -1,0 +1,10 @@
+# Workspace root, so there is ONE place the cross-compile linker is configured.
+#
+# Cargo discovers .cargo/config.toml from the CURRENT DIRECTORY, not from --manifest-path. With the
+# config living only under engine/, `cargo build --manifest-path engine/Cargo.toml` from here found
+# no linker and failed with Apple ld rejecting GNU flags, while the identical build from inside
+# engine/ succeeded. That is a trap for CI and for anyone scripting a release, so the workspace and
+# the config both live at the root and every invocation resolves the same way.
+[workspace]
+resolver = "2"
+members = ["engine", "mock"]

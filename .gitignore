@@ -30,3 +30,4 @@ bin/
 # orchestrator ships back onto the box. The DURABLE record is rig.box_qualify inside each snapshot
 # (results/snapshots/), which is committed — these are the working files that produced it.
 results/box-qualify/
+target/
