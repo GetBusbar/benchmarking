@@ -6,10 +6,10 @@
 # same load, same pin), one at a time, then regenerates the chart from results/. Nothing to debug.
 #
 #   bench/run-all.sh                                            # all gateways
-#   bench/run-all.sh busbar litellm-rust                        # a subset
+#   bench/run-all.sh <name> <name>                              # a subset, by directory name
 #
-# Each gateway is a drop-in dir under gateways/ (see gateways/README.md). Bifrost needs Docker;
-# LiteLLM (Rust/Python) build from source/pip on first run.
+# Each gateway is a drop-in dir under gateways/ (see gateways/README.md). Most need Docker; the
+# source-built ones compile on first run. Which is which is declared by the manifest, not known here.
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GATEWAYS=("$@")

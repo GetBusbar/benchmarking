@@ -63,7 +63,13 @@
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
-GATEWAY="${GATEWAY:-busbar}"
+# The gateway under test. Every field path (run-all.sh, run-on-ec2.sh) passes GATEWAY explicitly;
+# this default only ever serves a bare interactive invocation. It is DISCOVERED (the first
+# gateways/*/gateway.sh on disk, alphabetical), never a baked-in favourite -- naming one here
+# made this runner one of the places a dropped-in gateway was not enough on its own.
+# shellcheck source=../lib/gateways.sh
+. "$ROOT/lib/gateways.sh"
+GATEWAY="${GATEWAY:-$(gw_default "$ROOT")}"
 # ── RUN CLOCK ────────────────────────────────────────────────────────────────────────────────────
 # How long THIS gateway's suite took on THIS box on THIS day. matrix/run.sh is the sole producer, so
 # the script's own lifetime IS the gateway's run: stamp t0 here, at the very top, before any work.

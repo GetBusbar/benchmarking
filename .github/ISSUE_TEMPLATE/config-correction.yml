@@ -25,7 +25,7 @@ body:
     attributes:
       label: Gateway
       description: The gateway whose published config needs a correction (pre-filled from the board link).
-      placeholder: e.g. TensorZero
+      placeholder: the gateway's name as shown on the board
     validations:
       required: true
   - type: textarea

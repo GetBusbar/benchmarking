@@ -8,7 +8,9 @@ loadgen/ugen
 gateways/*/config.gen.yaml
 gateways/*/providers.gen.yaml
 gateways/*/*.gen.*
-gateways/*/kong.gen.yml
+# a manifest that renders a declarative config with a .yml suffix (the *.gen.* glob above
+# already covers *.gen.yml, so no per-gateway line is needed)
+gateways/*/*.gen.yml
 gateways/*/venv/
 gateways/*/bfdata/
 # transient EC2 driver logs (the results JSON + charts are the durable evidence)

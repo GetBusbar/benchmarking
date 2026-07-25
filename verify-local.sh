@@ -8,12 +8,12 @@
 # throughput + latency + streaming sweeps, a memory-once read, and OOTB config capture, streamed to the
 # board. That is far too slow to DEBUG the harness with. This script drives the IDENTICAL code path —
 # matrix/run.sh → site/gen-data.mjs → site/check-consistency.mjs + site/test.mjs → charts.py — against
-# the same mock and ONE real gateway (busbar) on localhost, with TINY dev params, so the full pipeline
+# the same mock and ONE real gateway on localhost, with TINY dev params, so the full pipeline
 # finishes in MINUTES. Same code, short probes: prove the harness is correct before spending the 5h run.
 #
 # WHAT IT RUNS (all local, no EC2/AWS, no push):
 #   1. the rig (mock + loadgen) locally — see the LOCAL RIG note below for the macOS topology;
-#   2. ONE gateway (busbar) on localhost via its own gateways/busbar/gateway.sh manifest, docker-launched;
+#   2. ONE gateway on localhost via its own gateways/$GATEWAY/gateway.sh manifest, docker-launched;
 #   3. matrix/run.sh for that gateway with tiny dev params (SWEEP_DUR=1, short ladders, minimal stream +
 #      memory windows, MATRIX_SWEEP_ADAPTIVE=1) — same producer, short windows;
 #   4. node site/gen-data.mjs → site/data.json; node site/check-consistency.mjs; node site/test.mjs;
@@ -24,9 +24,10 @@
 # will NOT exec natively on macOS. So on a non-Linux host this script supplies the rig via the harness's
 # RIG_MOCK_CMD/RIG_UGEN_CMD local-dev seam (lib/rig.sh):
 #   * MOCK  = the PINNED Linux mock-<arch> run inside a --network host container (a generated wrapper).
-#             A --network host container + the host + the busbar --network host container all share the
-#             one Docker Desktop loopback, so busbar reaches the mock at 127.0.0.1:$MOCK_PORT exactly as
-#             on Linux, and host-side ugen/curl reach it too. The mock binary itself is UNMODIFIED.
+#             A --network host container + the host + the gateway's own --network host container all
+#             share the one Docker Desktop loopback, so the gateway reaches the mock at
+#             127.0.0.1:$MOCK_PORT exactly as on Linux, and host-side ugen/curl reach it too. The mock
+#             binary itself is UNMODIFIED.
 #   * UGEN  = a natively-built (go) ugen for host-side use (drives the mock/gateway from 127.0.0.1).
 # On Linux the prebuilt rig execs natively; pass RIG_LOCAL_CONTAINER=0 to use the fetched binaries direct.
 #
@@ -38,18 +39,27 @@
 # IDEMPOTENT + SELF-CLEANING: every run tears down its containers, host mock, temp dir, and reverts any
 # results/ + site/data.json churn it wrote, so nothing leaks and the working tree is left clean.
 #
-#   bash verify-local.sh                 # fast local profile (default), busbar
-#   GATEWAY=busbar bash verify-local.sh  # explicit
+#   bash verify-local.sh                  # fast local profile, first gateway on disk (alphabetical)
+#   GATEWAY=<name> bash verify-local.sh   # verify a specific gateways/<name>/
 #   KEEP_ARTIFACTS=1 bash verify-local.sh   # leave results/ + data.json for inspection (still cleans procs)
 #
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-GATEWAY="${GATEWAY:-busbar}"
+# shellcheck source=lib/gateways.sh
+. "$ROOT/lib/gateways.sh"
+# WHICH GATEWAY. Discovered, never baked in: this verifier used to default to one name AND tear down a
+# hardcoded container name, so handing it any other GATEWAY left that gateway's container running and
+# still killed a container it was not testing. Both now come from the manifest.
+GATEWAY="${GATEWAY:-$(gw_default "$ROOT")}"
+gw_exists "$GATEWAY" "$ROOT" || { echo "verify-local: no gateways/$GATEWAY/gateway.sh" >&2; exit 1; }
 ARCH="${BENCH_ARCH:-arm64}"
 STAMP="$(date +%s)"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/verify-local.XXXXXX")"
 MOCK_CONTAINER="verify-mock-$STAMP"
-GW_CONTAINER="busbar-bench"   # the name the busbar manifest uses
+# The container name comes from the manifest's own GW_CONTAINER declaration (read WITHOUT sourcing it,
+# so no build/launch logic runs here). lib/gateway_isolation_test.sh pins that declaration to the
+# docker --name the manifest actually uses, so this can never tear down the wrong container.
+GW_CONTAINER="$(gw_manifest_field "$GATEWAY" GW_CONTAINER "$ROOT")"
 PORT_MOCK="${MOCK_PORT:-8000}"
 PORT_GW="${GW_PORT:-8080}"
 STEP=0
@@ -70,7 +80,7 @@ $BENCH_DOCKER version >/dev/null 2>&1 || die "docker not usable via '$BENCH_DOCK
 cleanup(){
   local rc=$?
   say "teardown"
-  $BENCH_DOCKER rm -f "$GW_CONTAINER" >/dev/null 2>&1
+  [ -n "$GW_CONTAINER" ] && $BENCH_DOCKER rm -f "$GW_CONTAINER" >/dev/null 2>&1
   $BENCH_DOCKER rm -f "$MOCK_CONTAINER" >/dev/null 2>&1
   # host-side mock (native/wrapper) + any stray wrapper
   [ -n "${RIG_MOCK_CMD:-}" ] && pkill -f "$RIG_MOCK_CMD" >/dev/null 2>&1
@@ -81,7 +91,7 @@ cleanup(){
     git -C "$ROOT" checkout -- site/data.json >/dev/null 2>&1 || true
     git -C "$ROOT" clean -fdq results >/dev/null 2>&1 || true
     git -C "$ROOT" checkout -- results >/dev/null 2>&1 || true
-    # runtime artifacts the busbar manifest writes next to itself (gitignored, but keep the tree tidy).
+    # runtime artifacts the manifest writes next to itself (gitignored, but keep the tree tidy).
     rm -f "$ROOT/gateways/$GATEWAY/launch.log" "$ROOT/gateways/$GATEWAY/config.gen.yaml" \
           "$ROOT/gateways/$GATEWAY/providers.gen.yaml" 2>/dev/null
   fi
@@ -93,7 +103,7 @@ trap cleanup EXIT INT TERM
 
 # ── stray-state guard: a previous crashed run can leave a container/port behind ──────────────────────
 say "pre-flight: clearing any stray verify state"
-$BENCH_DOCKER rm -f "$GW_CONTAINER" >/dev/null 2>&1
+[ -n "$GW_CONTAINER" ] && $BENCH_DOCKER rm -f "$GW_CONTAINER" >/dev/null 2>&1
 $BENCH_DOCKER ps -a --filter 'name=verify-mock-' -q 2>/dev/null | xargs -r $BENCH_DOCKER rm -f >/dev/null 2>&1
 ok "pre-flight clear"
 
