@@ -8,3 +8,12 @@
 [workspace]
 resolver = "2"
 members = ["engine", "mock"]
+
+# Release profile lives here because cargo ignores [profile] in a non-root workspace member and
+# warns about it. Carried over verbatim from mock/Cargo.toml, which set it before the workspace
+# existed: the mock is on the measurement path, so it is built for speed, not for build time.
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
