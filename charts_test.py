@@ -410,8 +410,17 @@ charts.CANON = {
 }
 charts.GATEWAYS = {k: k for k in charts.CANON}
 check("the memory comparison cell is the identity cell most of the field serves", charts._mem_cell(), "anthropic")
-check("a gateway that does not serve the comparison cell has NO row (renders not measured, never a substituted cell)",
-      {r["_key"] for r in charts._load("memory")}, {"a", "b"})
+# RULE: every MEASURED gateway appears; one that does not serve the comparison cell reads n/a. Dropping
+# its row would delete the most important fact about a narrow gateway from the chart where breadth shows.
+mrows = {r["_key"]: r for r in charts._load("memory")}
+check("a gateway that does not serve the comparison cell still gets a row", set(mrows), {"a", "b", "c"})
+check("that row carries NO numbers (n/a, never a substituted cell)", mrows["c"]["steady_state_rss_mib"], None)
+check("that row is not rankable", "c" in charts._topn_keys(chart_by_name("memory_rss"), n=5), False)
+check("that row says WHY it is empty", charts._mem_annot(mrows["c"]), "does not serve anthropic>anthropic")
+# A gateway with no matrix at all (never measured) has no row to draw and none to claim.
+charts.CANON = {"a": _mem(dialect="anthropic", idle_rss_mib=10, steady_state_rss_mib=100), "never": {}}
+charts.GATEWAYS = {k: k for k in charts.CANON}
+check("a gateway that was never measured has no memory row", {r["_key"] for r in charts._load("memory")}, {"a"})
 
 
 if _fail == 0:

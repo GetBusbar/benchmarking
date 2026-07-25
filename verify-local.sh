@@ -258,11 +258,22 @@ export MATRIX_STREAM_C1_DUR="${MATRIX_STREAM_C1_DUR:-1}" MATRIX_STREAM_SWEEP_DUR
 export MATRIX_STREAM_SUST_BOUNDS="${MATRIX_STREAM_SUST_BOUNDS:-1 8}"
 export MATRIX_STREAMCPU_CHUNKS="${MATRIX_STREAMCPU_CHUNKS:-16}" MATRIX_STREAMCPU_DUR="${MATRIX_STREAMCPU_DUR:-1}"
 export MATRIX_STREAMCPU_FPS_BOUNDS="${MATRIX_STREAMCPU_FPS_BOUNDS:-1 8}" MATRIX_STREAMCPU_STALL_MS="${MATRIX_STREAMCPU_STALL_MS:-250}"
-# memory window (post-6x6, peak cell): tiny cold-idle + fixed load + recovery instead of the field's
-# 60s windows. MEM_CONC/PSIZE/DUR alias the MATRIX_MEM_* recipe; MEM_IDLE_S/SETTLE_S shrink the waits so
-# a local run isn't dominated by fixed sleeps.
-export MEM_DUR="${MEM_DUR:-2}" MEM_CONC="${MEM_CONC:-8}" MEM_PSIZE="${MEM_PSIZE:-1024}"
+# memory window (PER CELL, cold-started, plateau-terminated): tiny cold-idle + load + recovery instead of
+# the field's 60s windows. MEM_CONC/MEM_PSIZE alias the MATRIX_MEM_* recipe; MEM_IDLE_S/SETTLE_S shrink
+# the fixed sleeps. (MEM_DUR is GONE: the load is terminated by the plateau test, not by a duration, so
+# exporting a duration here set a knob nothing reads and implied a window shape that no longer exists.)
+export MEM_CONC="${MEM_CONC:-8}" MEM_PSIZE="${MEM_PSIZE:-1024}"
 export MEM_IDLE_S="${MEM_IDLE_S:-2}" MEM_SETTLE_S="${MEM_SETTLE_S:-2}" MEM_SAMPLE_S="${MEM_SAMPLE_S:-1}"
+# THE PLATEAU CONSTANTS MUST SHRINK WITH THE REST OF THE PROFILE. They are what STOPS the load, and they
+# were left at their field values (30s window, 300s cap) while every other window shrank to seconds. On a
+# rig that cannot read RSS at all - which is EVERY macOS run, since container_rss_mib needs a host /proc
+# the Docker Desktop VM does not provide - no plateau can ever be declared, so each served cell runs the
+# FULL 300s cap: 5 minutes per cell on the one-cell default, and over 3 hours if someone clears
+# MATRIX_EGRESS_ONLY/MATRIX_INGRESS_ONLY to sweep the full 6x6 locally, in a script whose entire premise
+# is minutes-not-hours. The window still holds well over the four samples the steadiness test needs
+# (6 samples at MEM_SAMPLE_S=1), so the decision it makes locally is the same decision, just sooner.
+export MEM_PLATEAU_WINDOW_S="${MEM_PLATEAU_WINDOW_S:-6}" MEM_PLATEAU_CAP_S="${MEM_PLATEAU_CAP_S:-30}"
+export MEM_LOAD_LEG_S="${MEM_LOAD_LEG_S:-2}"
 # transient patience: a local dead cell shouldn't wait the field's 2x30s — keep it snappy. ONE budget
 # for every cell (lib/probe_verdict.sh); there is deliberately no per-cell variant to shrink.
 export MATRIX_TRANSIENT_RETRIES="${MATRIX_TRANSIENT_RETRIES:-1}" MATRIX_TRANSIENT_PAUSE="${MATRIX_TRANSIENT_PAUSE:-2}"
