@@ -336,7 +336,12 @@ const MEM_WINDOW_DEFAULT = 60;
 function memWindows(m) {
   const idle = m && Number.isFinite(Number(m.idle_window_s)) ? Number(m.idle_window_s) : MEM_WINDOW_DEFAULT;
   const rec = m && Number.isFinite(Number(m.recovery_window_s)) ? Number(m.recovery_window_s) : MEM_WINDOW_DEFAULT;
-  return { idle, recovery: rec };
+  // The STEADINESS window (how long the RSS had to hold still before the plateau was believed) rides in
+  // the load recipe, not beside the other two. Null when the record predates it: a caption then states
+  // the settling time without claiming a confirmation length it does not know.
+  const lr = m && m.load_recipe;
+  const steady = lr && Number.isFinite(Number(lr.plateau_window_s)) ? Number(lr.plateau_window_s) : null;
+  return { idle, recovery: rec, steady };
 }
 function boardMemWindows(data = (typeof state !== "undefined" ? state.data : null)) {
   // PER-CELL FIRST. The windows now ride on the per-cell records; reading only the legacy per-gateway
@@ -531,8 +536,15 @@ function memCellTip(rec) {
     : "identical fixed load for every gateway, run until RSS is steady");
   bits.push("cold-started for this cell (idle sampled before the first request)");
   if (rec && rec.plateaued === true) {
+    // time_to_plateau_s is WHEN THE RSS WENT FLAT, not when the steadiness test finished confirming it
+    // (the producer reports the trailing window's START for exactly that reason). 0 is a real answer:
+    // the working set was already steady when the load began, so say that rather than "settled after 0 s".
     const t = Number(mval(rec.time_to_plateau_s));
-    bits.push(Number.isFinite(t) ? `settled after ${fmtInt(t)} s` : "settled");
+    const w = memWindows(rec).steady;
+    const conf = w ? ` (steady for the ${memWindowLabel(w)} that followed)` : "";
+    bits.push(!Number.isFinite(t) ? "settled"
+      : t <= 0 ? `steady from the moment the load started${conf}`
+      : `settled after ${fmtInt(t)} s${conf}`);
   } else if (rec && rec.plateaued === false) {
     const gr = mval(rec.growth_rate_mib_per_min);
     bits.push(gr != null ? `NEVER SETTLED: still growing at ${fmt1(gr)} MiB/min when the cap was reached`

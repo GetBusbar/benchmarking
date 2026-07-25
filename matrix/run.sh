@@ -1373,7 +1373,16 @@ matrix_cell_memory(){
         awk -v s="$LSTART" '$1+0>=s' "$SERIESF" >"$LOADF" 2>/dev/null
         plateau_window "$LOADF" "$MEM_PLATEAU_WINDOW_S" >"$WINF" 2>/dev/null
         if [ "$(plateau_check "$WINF" "$MEM_PLATEAU_TREND_PCT" "$MEM_PLATEAU_RANGE_PCT")" = 1 ]; then
-          plateaued=true; ttp="$elapsed"
+          # TIME TO PLATEAU IS WHEN THE GATEWAY WENT FLAT, NOT WHEN WE FINISHED CONFIRMING IT. The window
+          # is TRAILING, so a pass at `elapsed` means the span [elapsed-window, elapsed] was steady: the
+          # RSS stopped moving at the START of that window and the remaining time is our instrument
+          # satisfying itself. Publishing `elapsed` overstated every settling time by exactly one window
+          # (kong went flat at ~120s and would have been published as "settled after 180 s"), and worse,
+          # it made a number ABOUT THE GATEWAY move whenever MEM_PLATEAU_WINDOW_S moved - the stopping
+          # point deciding the answer, which is the defect this whole design exists to remove. Reporting
+          # the window start makes it window-independent to within one sample. Zero is a real and
+          # meaningful answer: the RSS was already steady when the load began.
+          plateaued=true; ttp=$(( elapsed - MEM_PLATEAU_WINDOW_S )); [ "$ttp" -lt 0 ] && ttp=0
           log "[$GATEWAY]   $egress <- $cell : memory PLATEAUED after ${elapsed}s of load"
           break
         fi
