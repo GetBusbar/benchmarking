@@ -8,7 +8,9 @@
 # It records, on ONE box against ONE mock with ONE load profile:
 #   * idle RSS      — resident memory right after the gateway answers 200, before any load
 #   * peak RSS      — highest resident memory sampled during sustained load
-#   * post-load RSS — resident memory 60 s after load stops (does it release, or stay pinned?)
+#   * recovered RSS — resident memory 60 s after load stops (does it release, or stay pinned?)
+#   * rss_series    — a bounded RSS time-series across the whole run (idle→peak→recovery) for the curve
+# (post_load_rss_mib is kept as an alias of the recovered sample for back-compat.)
 # and writes results/memory/<gateway>.json for the chart generator.
 #
 #   GATEWAY=busbar        memory/run.sh
@@ -84,7 +86,7 @@ sleep 1
 # the loop still watches for it. Harmless on EC2 (the box self-terminates) but leaks a poller on local dev.
 cleanup(){ gw_stop 2>/dev/null; pkill -f "$MOCK_BIN" 2>/dev/null
   touch "${STOP:-}" 2>/dev/null || true; kill "${SP:-}" 2>/dev/null || true
-  rm -f "${STOP:-}" "${PEAKF:-}" "${LOADPIDF:-}" 2>/dev/null; }
+  rm -f "${STOP:-}" "${PEAKF:-}" "${LOADPIDF:-}" "${SERIESF:-}" 2>/dev/null; }
 trap cleanup EXIT
 
 log "[$GATEWAY] build"; gw_build || { echo "build failed"; exit 1; }
@@ -120,12 +122,23 @@ IDLE=$(gw_rss); log "[$GATEWAY] idle RSS: ${IDLE:-?} MiB (served=$([ "$ok" = 1 ]
 # Temp paths + the watchdog kill are scoped to THIS run's PID (not host-global /tmp/mem.{stop,peak}
 # and `pkill -x ugen`): two concurrent memory/run.sh on one host would otherwise reset each other's
 # peak file mid-sample and kill each other's loadgen by name, fabricating peak_rss_mib (audit R2-M3).
+# SERIESF is the recovery-curve sample log: the sampler appends a `<t_s> <rss_mib>` line every ~2s
+# (SERIES_EVERY 0.3s ticks) across the WHOLE run — idle baseline, ramp, load, and (below) the 60s settle
+# window — so gen-data/app.js can draw an idle→peak→recovery curve. START_EPOCH anchors t_s. The fast
+# 0.3s cadence stays for peak/watchdog fidelity; the series is subsampled off it so it stays ~90-120 pts
+# for a ~180s run and the extra work is one cheap `date` + one append every ~2s (never perturbs the load).
+SETTLE_S="${SETTLE_S:-60}"
 PEAK=0; STOP="${TMPDIR:-/tmp}/mem.$$.stop"; PEAKF="${TMPDIR:-/tmp}/mem.$$.peak"; LOADPIDF="${TMPDIR:-/tmp}/mem.$$.loadpid"
-rm -f "$STOP" "$PEAKF" "$LOADPIDF"; echo 0 >"$PEAKF"
-( while [ ! -f "$STOP" ]; do
+SERIESF="${TMPDIR:-/tmp}/mem.$$.series"
+rm -f "$STOP" "$PEAKF" "$LOADPIDF" "$SERIESF"; echo 0 >"$PEAKF"; : >"$SERIESF"
+START_EPOCH=$(date +%s)
+SERIES_EVERY=7  # 0.3s ticks between series samples (~2.1s)
+( tick=0; while [ ! -f "$STOP" ]; do
     v=$(gw_rss); [ -z "$v" ] && v=0
     awk -v v="$v" -v p="$PEAK" 'BEGIN{exit !(v+0>p+0)}' && { PEAK=$v; echo "$PEAK" >"$PEAKF"; }
     awk -v v="$v" -v c="$CAP_MIB" 'BEGIN{exit !(v+0>c+0)}' && { echo "[watchdog] $v MiB > cap $CAP_MIB — killing load"; lp=$(cat "$LOADPIDF" 2>/dev/null); [ -n "$lp" ] && kill "$lp" 2>/dev/null; touch "$STOP"; }
+    if [ "$((tick % SERIES_EVERY))" -eq 0 ]; then echo "$(( $(date +%s) - START_EPOCH )) $v" >>"$SERIESF"; fi
+    tick=$((tick + 1))
     sleep 0.3
   done ) & SP=$!
 
@@ -142,9 +155,21 @@ PEAK=$(cat "$PEAKF")
 HWM=$(gw_hwm)
 log "[$GATEWAY] kernel high-water mark: ${HWM:-n/a} MiB (VmHWM; sampled peak: ${PEAK:-0})"
 
-log "[$GATEWAY] load stopped — waiting 60s to see if memory releases"
-sleep 60
-POST=$(gw_rss)
+# Settle window: the fast sampler is stopped, so poll RSS here every ~2s to (a) extend the recovery
+# curve into rss_series and (b) capture RECOVERED RSS — the resident memory SETTLE_S (60s field) after
+# the load ends, the honest "did it give memory back?" signal. The last sample is both recovered_rss_mib
+# and post_load_rss_mib (kept for back-compat — same 60s-after-load moment, same RSS source/units).
+log "[$GATEWAY] load stopped — waiting ${SETTLE_S}s to see if memory releases (recovery)"
+RECOVERED=""; _s_end=$(( $(date +%s) + SETTLE_S ))
+while [ "$(date +%s)" -lt "$_s_end" ]; do
+  RECOVERED=$(gw_rss); [ -z "$RECOVERED" ] && RECOVERED=0
+  echo "$(( $(date +%s) - START_EPOCH )) $RECOVERED" >>"$SERIESF"
+  sleep 2
+done
+POST=$(gw_rss); [ -z "$POST" ] && POST="$RECOVERED"
+[ -z "$RECOVERED" ] && RECOVERED="$POST"
+echo "$(( $(date +%s) - START_EPOCH )) ${POST:-0}" >>"$SERIESF"
+RSS_SERIES=$(rss_series_json "$SERIESF")
 
 MEASURED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 HW="${BENCH_HARDWARE:-$(uname -m) $(nproc 2>/dev/null || echo '?')vCPU}"
@@ -161,6 +186,8 @@ cat > "$RESULTS/$GATEWAY.json" <<JSON
   "peak_rss_mib": ${PEAK:-0},
   "peak_rss_hwm_mib": ${HWM:-null},
   "post_load_rss_mib": ${POST:-0},
+  "recovered_rss_mib": ${RECOVERED:-null},
+  "rss_series": ${RSS_SERIES:-[]},
   "payload_bytes": $PSIZE,
   "concurrency": $CONC,
   "duration_s": $DUR,
@@ -176,6 +203,6 @@ echo "================================================================"
 echo " gateway=$GATEWAY  payload=${PSIZE}B  conc=$CONC  dur=${DUR}s"
 echo "   idle RSS:      ${IDLE:-?} MiB"
 echo "   PEAK RSS:      ${PEAK:-?} MiB   (under load)"
-echo "   post-load RSS: ${POST:-?} MiB   (60s after load stops)"
+echo "   recovered RSS: ${RECOVERED:-?} MiB   (${SETTLE_S}s after load stops)"
 echo " -> $RESULTS/$GATEWAY.json"
 echo "================================================================"

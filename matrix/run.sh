@@ -1021,18 +1021,26 @@ matrix_measure_memory(){
     return 1
   }
   if harness_launch_ready gw_launch _mem_ready; then mem_ok=1; else mem_err="$HARNESS_SERVE_ERR"; fi
-  local IDLE PEAK=0 HWM POST STOP PEAKF LOADPIDF SP
+  local IDLE PEAK=0 HWM POST RECOVERED="" RSS_SERIES="[]" STOP PEAKF LOADPIDF SERIESF SP START_EPOCH _s_end
   IDLE=$(gw_rss); log "[$GATEWAY] memory-once idle RSS: ${IDLE:-?} MiB (served=$([ "$mem_ok" = 1 ] && echo true || echo false))"
   if [ "$mem_ok" = 1 ]; then
     STOP="${TMPDIR:-/tmp}/mtxmem.$$.stop"; PEAKF="${TMPDIR:-/tmp}/mtxmem.$$.peak"; LOADPIDF="${TMPDIR:-/tmp}/mtxmem.$$.loadpid"
-    rm -f "$STOP" "$PEAKF" "$LOADPIDF"; echo 0 >"$PEAKF"
+    SERIESF="${TMPDIR:-/tmp}/mtxmem.$$.series"
+    rm -f "$STOP" "$PEAKF" "$LOADPIDF" "$SERIESF"; echo 0 >"$PEAKF"; : >"$SERIESF"
     # LOW-6: publish the STOP file to FILE SCOPE before the sampler launches so the EXIT/INT/TERM trap can
     # stop it on an early exit; MEM_SP is set to the poller PID immediately after launch.
     MEM_STOP="$STOP"
-    ( PEAK=0; while [ ! -f "$STOP" ]; do
+    # START_EPOCH anchors the rss_series t_s; the sampler appends a `<t_s> <rss_mib>` line every ~2s
+    # (SERIES_EVERY 0.3s ticks) across idle→ramp→load, and the settle loop below extends it into
+    # recovery — a bounded (~90-120 pt) idle→peak→recovery curve. The fast 0.3s peak/watchdog cadence
+    # is unchanged; the series is a cheap subsample off it and never perturbs the load.
+    START_EPOCH=$(date +%s)
+    ( PEAK=0; tick=0; while [ ! -f "$STOP" ]; do
         v=$(gw_rss); [ -z "$v" ] && v=0
         awk -v v="$v" -v p="$PEAK" 'BEGIN{exit !(v+0>p+0)}' && { PEAK=$v; echo "$PEAK" >"$PEAKF"; }
         awk -v v="$v" -v c="$MEM_CAP_MIB" 'BEGIN{exit !(v+0>c+0)}' && { echo "[watchdog] $v MiB > cap $MEM_CAP_MIB — killing load"; lp=$(cat "$LOADPIDF" 2>/dev/null); [ -n "$lp" ] && kill "$lp" 2>/dev/null; touch "$STOP"; }
+        if [ "$((tick % 7))" -eq 0 ]; then echo "$(( $(date +%s) - START_EPOCH )) $v" >>"$SERIESF"; fi
+        tick=$((tick + 1))
         sleep 0.3
       done ) & SP=$!; MEM_SP=$SP
     log "[$GATEWAY] memory-once load: ${MEM_PSIZE}B payloads, c=$MEM_CONC, ${MEM_DUR}s (watchdog cap ${MEM_CAP_MIB} MiB)"
@@ -1044,14 +1052,25 @@ matrix_measure_memory(){
     PEAK=$(cat "$PEAKF" 2>/dev/null); PEAK=${PEAK:-0}
     HWM=$(gw_hwm)   # VmHWM must be read BEFORE the gateway stops (the counter dies with the process)
     log "[$GATEWAY] memory-once high-water mark: ${HWM:-n/a} MiB (VmHWM; sampled peak ${PEAK} MiB)"
-    log "[$GATEWAY] memory-once load stopped — waiting ${MEM_SETTLE_S}s to see if memory releases"
-    sleep "$MEM_SETTLE_S"
-    POST=$(gw_rss)
-    rm -f "$STOP" "$PEAKF" "$LOADPIDF" 2>/dev/null
+    # Settle window: fast sampler stopped, so poll RSS here every ~2s to extend the recovery curve and
+    # capture RECOVERED — resident memory MEM_SETTLE_S (60s field) after load ends (does it give memory
+    # back?). post_load_rss_mib is kept as an alias of the same 60s-after-load sample for back-compat.
+    log "[$GATEWAY] memory-once load stopped — waiting ${MEM_SETTLE_S}s to see if memory releases (recovery)"
+    _s_end=$(( $(date +%s) + MEM_SETTLE_S ))
+    while [ "$(date +%s)" -lt "$_s_end" ]; do
+      RECOVERED=$(gw_rss); [ -z "$RECOVERED" ] && RECOVERED=0
+      echo "$(( $(date +%s) - START_EPOCH )) $RECOVERED" >>"$SERIESF"
+      sleep 2
+    done
+    POST=$(gw_rss); [ -z "$POST" ] && POST="$RECOVERED"
+    [ -z "$RECOVERED" ] && RECOVERED="$POST"
+    echo "$(( $(date +%s) - START_EPOCH )) ${POST:-0}" >>"$SERIESF"
+    RSS_SERIES=$(rss_series_json "$SERIESF")
+    rm -f "$STOP" "$PEAKF" "$LOADPIDF" "$SERIESF" 2>/dev/null
   fi
   MEMORY_JSON="
-  \"memory\": {\"served\": $([ "$mem_ok" = 1 ] && echo true || echo false), \"serve_error\": \"$(json_escape "$mem_err")\", \"idle_rss_mib\": ${IDLE:-0}, \"peak_rss_mib\": ${PEAK:-0}, \"peak_rss_hwm_mib\": ${HWM:-null}, \"post_load_rss_mib\": ${POST:-0}, \"payload_bytes\": $MEM_PSIZE, \"concurrency\": $MEM_CONC, \"duration_s\": $MEM_DUR},"
-  log "[$GATEWAY] memory-once: idle=${IDLE:-0} peak=${PEAK:-0} hwm=${HWM:-n/a} post=${POST:-0} MiB"
+  \"memory\": {\"served\": $([ "$mem_ok" = 1 ] && echo true || echo false), \"serve_error\": \"$(json_escape "$mem_err")\", \"idle_rss_mib\": ${IDLE:-0}, \"peak_rss_mib\": ${PEAK:-0}, \"peak_rss_hwm_mib\": ${HWM:-null}, \"post_load_rss_mib\": ${POST:-0}, \"recovered_rss_mib\": ${RECOVERED:-null}, \"rss_series\": ${RSS_SERIES:-[]}, \"payload_bytes\": $MEM_PSIZE, \"concurrency\": $MEM_CONC, \"duration_s\": $MEM_DUR},"
+  log "[$GATEWAY] memory-once: idle=${IDLE:-0} peak=${PEAK:-0} hwm=${HWM:-n/a} recovered=${RECOVERED:-n/a} MiB"
 }
 
 UPSTREAMS_JSON=""

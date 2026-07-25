@@ -121,6 +121,37 @@ container_hwm_mib() { # container_name → its process tree's VmHWM via the host
   _hwm_tree_mib "$pid"
 }
 
+# rss_series_json <series_file> → a compact JSON array [{"t_s":<int>,"rss_mib":<float>},…] for the
+# recovery curve, built from a whitespace-separated `<t_s> <rss_mib>` per-line sample file the memory
+# sampler appends to across the WHOLE run (idle → ramp → load → the settle window). Malformed/blank
+# lines are skipped, and the array is DOWNSAMPLED to at most ~120 points (keeping first+last) so a very
+# long run stays bounded. A missing/empty file yields [] (never a fabricated point) — the downstream
+# projection then treats an empty series as absent. Same MiB units/RSS source as idle/peak/recovered.
+rss_series_json() {
+  local f="$1"
+  [ -s "$f" ] 2>/dev/null || { echo "[]"; return; }
+  python3 - "$f" <<'PY'
+import json, sys
+pts=[]
+try:
+    with open(sys.argv[1]) as fh:
+        for ln in fh:
+            a=ln.split()
+            if len(a)<2: continue
+            try: pts.append((int(float(a[0])), round(float(a[1]),1)))
+            except ValueError: continue
+except OSError:
+    pts=[]
+CAP=120
+if len(pts)>CAP:
+    step=len(pts)/float(CAP-1)
+    keep={0,len(pts)-1}
+    keep.update(int(round(i*step)) for i in range(CAP))
+    pts=[pts[i] for i in sorted(x for x in keep if x<len(pts))]
+sys.stdout.write(json.dumps([{"t_s":t,"rss_mib":r} for t,r in pts]))
+PY
+}
+
 # ── tmo: hard timeout around one command ────────────────────────────────────────────────────────
 # Kills the command (and, via a fresh process group when possible, its children - a ugen probe forks
 # nothing but a docker/native gateway probe path might) if it runs longer than <seconds>. Returns the
