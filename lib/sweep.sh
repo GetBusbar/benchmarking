@@ -62,12 +62,20 @@ declare -gA SWEEP_PRIOR 2>/dev/null || true
 # tail request timeout across every hung worker. tmo caps the whole invocation at dur+grace; if it
 # fires, ugen printed nothing and the caller's `read`/awk see empty -> rps/fail default to 0/1
 # (not-served).
-sweep_probe(){ # url conc dur
+sweep_probe(){ # url conc dur -> "rps fail p99us p50us"
+  sweep_probe_raw "$@" \
+    | awk '{for(i=1;i<=NF;i++){split($i,a,"=");v[a[1]]=a[2]}; print v["rps"],v["fail"],v["p99us"],v["p50us"]}'
+}
+# sweep_probe_raw: the SAME loadgen invocation as sweep_probe (same pins, same budget, same flags) but
+# emitting ugen's verbatim `k=v k=v ...` stats line. Split out so a caller that needs a field the
+# 4-column projection drops — `ok=` (was the load actually delivered?) and `pad=` (how many payload
+# bytes were REALLY sent per request) — can read it without changing sweep_probe's output arity for
+# the ladder callers that `read -r rps fail p99 p50` it.
+sweep_probe_raw(){ # url conc dur -> ugen's raw stats line
   local _sb=()
   [ -n "${SWEEP_BODY:-}" ] && _sb=(-body "$SWEEP_BODY")
   tmo "$(probe_budget "$3")" taskset -c "$LOADCORES" "$UGEN" -url "$1" -model "$GW_MODEL" -auth "$GW_AUTH" -c "$2" -d "$3" -psize "$PSIZE" \
-      ${_sb[@]+"${_sb[@]}"} ${UGEN_H[@]+"${UGEN_H[@]}"} 2>/dev/null \
-    | awk '{for(i=1;i<=NF;i++){split($i,a,"=");v[a[1]]=a[2]}; print v["rps"],v["fail"],v["p99us"],v["p50us"]}'
+      ${_sb[@]+"${_sb[@]}"} ${UGEN_H[@]+"${UGEN_H[@]}"} 2>/dev/null
 }
 
 # c1 added latency: direct baseline (mock, same path/body) + gateway c1 -> overhead in microseconds.

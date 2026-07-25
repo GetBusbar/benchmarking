@@ -345,7 +345,7 @@ trap teardown EXIT INT TERM
 
 AMI=$(aws ssm get-parameter --name "$SSM" --query Parameter.Value --output text)
 
-mkdir -p "$HERE"/results/{perf,memory,stream,xlate,governed,matrix}
+mkdir -p "$HERE"/results/{perf,memory,stream,xlate,governed,matrix,snapshots}
 
 # ── commit + push ONE gateway's result (incremental publish) ──────────────────────────────────────
 # Called from bench_gateway the moment that box has cleanly finished (DONE). Commits ONLY this
@@ -376,6 +376,12 @@ publish_gateway() { # gw glog_echo_fn
     for f in "$HERE"/results/*/"$gw".json "$HERE"/results/history/"$gw".jsonl "$HERE"/results/config/"$gw".txt; do
       [ -e "$f" ] && paths+=("$f")
     done
+    # SAME BUG CLASS AS THE CONFIG SIDECAR (see pull_config's note below): the snapshot artifact is
+    # NOT named <gw>.json — matrix/run.sh writes results/snapshots/result_<gw>_<measured_at>.json —
+    # so the `results/*/<gw>.json` glob above never matched it and task #65's whole snapshot path was
+    # dead in the field: nothing was staged, nothing was committed, and gen-data's newestSnapshot()
+    # always returned null. Stage the per-gateway snapshots by their REAL filename shape.
+    for f in "$HERE"/results/snapshots/result_"$gw"_*.json; do [ -e "$f" ] && paths+=("$f"); done
     for f in "$HERE"/results/*"$gw"*.png; do [ -e "$f" ] && paths+=("$f"); done
     if [ "${#paths[@]}" -eq 0 ]; then echo "[$gw] publish: no result files to commit (nothing pulled?)"; exit 0; fi
     # Do NOT swallow a staging failure (audit R3-M2): a failed `git add` (index.lock held, disk full,
@@ -557,6 +563,32 @@ bench_gateway() {
     rm -f "$staged"; return 1
   }
 
+  # P0-1: the SNAPSHOT artifacts (task #65) have the SAME defect the config sidecar had. matrix/run.sh
+  # writes them on the BOX at ~/benchmarking/results/snapshots/result_<gw>_<measured_at>.json, but
+  # pull_suite only ever rsync'd results/<suite>/<gw>.json — a glob that can never match that filename —
+  # and the teardown trap then terminates the box. So results/snapshots/ stayed empty in the repo
+  # FOREVER and gen-data's newestSnapshot() always returned null. Pull them by their real filename
+  # (a remote-side glob, expanded by the remote shell; every run's snapshot is kept, never overwritten).
+  # rc=23 (no snapshot on the box — e.g. MATRIX_MEMORY=0 or an aborted run) is "nothing to pull", not an
+  # error, exactly like a missing suite JSON.
+  pull_snapshots() {
+    mkdir -p "$HERE/results/snapshots"
+    local attempt rc
+    for attempt in 1 2 3 4; do
+      rsync -az --timeout=60 -e "ssh $SSHOPT" \
+        "ubuntu@$ip:~/benchmarking/results/snapshots/result_${gw}_*.json" "$HERE/results/snapshots/" >>"$glog" 2>&1
+      rc=$?
+      if [[ $rc -eq 0 ]]; then
+        local n; n=$(ls -1 "$HERE"/results/snapshots/result_"$gw"_*.json 2>/dev/null | wc -l | tr -d ' ')
+        glog_echo "pulled snapshots/result_${gw}_*.json (${n} on disk)"; return 0
+      fi
+      if [[ $rc -eq 23 ]]; then glog_echo "no snapshot artifact on the box for $gw (nothing to pull)"; return 1; fi
+      glog_echo "rsync snapshots/result_${gw}_*.json attempt $attempt failed (rc=$rc) - retrying in 10s"
+      sleep 10
+    done
+    return 1
+  }
+
   # Matrix is the SOLE producer now — the standalone perf/memory/stream/streamcpu/xlate/governed suites
   # are RETIRED. Default to the same `matrix` run-all.sh uses (run-all.sh:75); an explicit SUITES override
   # still lets an operator re-run a legacy suite ad hoc. Defaulting to the old 7-suite list here would
@@ -651,6 +683,9 @@ bench_gateway() {
   # Pull the OOTB config sidecar too (best-effort). A gateway with no gw_config hook writes none — that
   # is "no config", not a pull failure, so it never contributes to pull_failed.
   if [ "$reachable" -eq 1 ]; then pull_config || true; fi
+  # Pull the run's snapshot artifact(s) BEFORE the teardown trap terminates the box — this is the only
+  # chance; the box and everything on it are gone straight after. Best-effort like the config sidecar.
+  if [ "$reachable" -eq 1 ]; then pull_snapshots || true; fi
   # DONE means a CLEAN, fully-pulled fresh run. If any suite's pull failed or the guard kept old data,
   # this gateway did NOT cleanly refresh - say so loudly so the freshness guard's later hard-fail is
   # never a surprise and the gateway can be re-run.
