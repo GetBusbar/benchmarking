@@ -672,7 +672,7 @@ test("Passthrough is BEST-OF: every gateway shows on its best diagonal, none fil
   // no best_cell at all (a gateway whose sweep did not land): reads n/a — there is no legacy perf reservoir.
   const unswept = { matrix: mkMatrix({ openai: { openai: { served: true } } }) };
   assert.equal(app.passCell(unswept, "rps_sustained_20ms", String).na, true);
-  // openai not served: BEST-OF shows the native diagonal (litellm-rust -> anthropic), NOT n/a and
+  // openai not served: BEST-OF shows the native diagonal (one gateway -> anthropic), NOT n/a and
   // NOT filtered. gen-data picks it; here best_cell carries the anthropic number.
   const native = { best_cell: bcCell({ dialect: "anthropic", rps_sustained_20ms: 32354 }) };
   assert.equal(app.passCell(native, "rps_sustained_20ms", String).na, false);
@@ -906,9 +906,9 @@ test("R1 RED: a best_cell envelope that disagrees with the RAW matrix cell fails
 });
 
 // ---- C6: the physical-plausibility invariant, proven on INJECTED data --------------------------
-// This test used to assert on kong's LIVE openai>openai cell (14,351 sustained > 14,325 max_proxy). That
+// Used to assert on one gateway's LIVE openai>openai cell (14,351 sustained > 14,325 max_proxy). That
 // made a check's only proof "the bug is still in the shipped data" — so when the fresh field run RESOLVED
-// kong's inversion, the invariant test failed even though the invariant was working perfectly. C6 is now
+// its inversion, the invariant test failed even though the invariant was working perfectly. C6 is now
 // a pure exported function, so the RED case is injected and the check is proven independent of whichever
 // gateway happens to be inverted this week.
 const c6Matrix = (sus, max, served = true, extra = {}) => ({
@@ -941,7 +941,7 @@ test("C6 RED: an INJECTED sustained@20ms > max_proxy cell with no measured scatt
 // band is not a chosen number - it is the peak sweep's own rung-to-rung spread, measured on the same box
 // in the same phase. These tests pin BOTH edges so neither failure mode can come back.
 test("C6 band: an inversion INSIDE the cell's own sweep scatter warns; OUTSIDE it errors", () => {
-  // litellm-python's real shape: a flat ~175 rps curve sampled twice, 2.21% apart, scatter 6.08%.
+  // one gateway's real shape: a flat ~175 rps curve sampled twice, 2.21% apart, scatter 6.08%.
   const inBand = c6Inversions("gw", c6Matrix(185, 181, true, c6Sweep(181, 6.08)));
   assert.equal(inBand.violations.length, 0, `an inversion inside the cell's own scatter must not block the publish; got: ${JSON.stringify(inBand.violations)}`);
   assert.equal(inBand.warnings.length, 1, "it must still be REPORTED, not silently tolerated");
@@ -1001,7 +1001,7 @@ test("C6 GREEN: a plausible cell, an unqualified ceiling and an unserved cell ar
 });
 
 // ---- C7: the sampled peak can never exceed the kernel's own high-water mark ----------------------
-// Found in this field run's shipped data: one-api 165.1 > 164.7 and agentgateway 45.0 > 44.7. VmHWM is
+// Found in this run's shipped data: one gateway at 165.1 > 164.7, another at 45.0 > 44.7. VmHWM is
 // maintained by the kernel on every charge, so for a FIXED process tree it cannot sit below any RSS the
 // sampler observed. Both readers sum over the tree ENUMERATED AT READ TIME, and the two reads happen at
 // different instants — so a worker that exits between the load and the VmHWM read is counted in the
@@ -1999,7 +1999,7 @@ test("the ootb_config pointer is UNTRUSTED: a path that escapes results/ is refu
 });
 
 test("a DEGRADED-MODE snapshot must never become the board's source just by being newer", () => {
-  // THE REAL INCIDENT: helicone's board row became a probe-only laptop run (1 cell, no perf, no
+  // THE REAL INCIDENT: one gateway's board row became a probe-only laptop run (1 cell, no perf, no
   // streaming, no memory, no best_cell) that shadowed a complete field run from the same morning,
   // because a local verify-local run with KEEP_ARTIFACTS=1 left its snapshot in results/snapshots/ and
   // recency handed it the whole row. Nothing anywhere said so.

@@ -46,14 +46,14 @@ HARNESS_PROBE_GRACE="${HARNESS_PROBE_GRACE:-45}"
 HARNESS_SUITE_CEIL_S="${HARNESS_SUITE_CEIL_S:-2700}"
 
 # ── gw_prereqs: the BUILD-PHASE-ONLY toolchain contract, and the boundary that enforces it ────────
-# THE PARITY QUESTION (audit): gw_prereqs is implemented on only 3 of the 13 manifests — aisix and
-# helicone install a Rust toolchain + build deps, litellm-rust additionally a ~564 MB python venv —
+# THE PARITY QUESTION (audit): gw_prereqs is implemented on only 3 of the 13 manifests. Two install
+# a Rust toolchain + build deps, a third additionally a ~564 MB python venv,
 # so three boxes end up with software the other ten never see. The premise of this benchmark is "same
 # box, same load, one gateway at a time", and a differently-provisioned box is prima facie a parity
 # break. It is NOT one, but the reason has to be enforced rather than asserted:
 #
 #   1. ONE GATEWAY PER BOX. run-on-ec2.sh launches a dedicated m7g/m7i.4xlarge per gateway from the
-#      same bare AMI, so a toolchain installed for aisix is never present while helicone is measured,
+#      same bare AMI, so a toolchain installed for one gateway is never present while another's is,
 #      and never present at all on the ten image-based boxes. There is no shared box to contaminate.
 #   2. BUILD PHASE ONLY. Every gw_prereqs is called from that manifest's gw_build and nowhere else,
 #      and matrix/run.sh runs gw_build BEFORE the mock, the warm-up, the 36 probes, the sweeps and
@@ -66,9 +66,9 @@ HARNESS_SUITE_CEIL_S="${HARNESS_SUITE_CEIL_S:-2700}"
 #      them. The published latency/throughput numbers come from a gateway pinned to $CORES with the
 #      loadgen and mock on disjoint cores; the build has exited before any of that is pinned, and
 #      m7g/m7i are fixed-performance instances with no burst credits for a long build to spend.
-#   4. THE ONE GENUINE RUNTIME DEPENDENCY IS CHARGED HONESTLY. litellm-rust's venv is not only build
-#      tooling: its gateway launches with PYTHONPATH pointing into that venv and LOADS the `litellm`
-#      package to read its config (gateways/litellm-rust/gateway.sh gw_launch). That resident cost is
+#   4. THE ONE GENUINE RUNTIME DEPENDENCY IS CHARGED HONESTLY. One manifest's venv is not only build
+#      tooling: that gateway launches with PYTHONPATH pointing into the venv and LOADS a python
+#      package to read its config (see its own gw_launch). That resident cost is
 #      the gateway's own, it lands inside its process tree, and it is measured as such — which is
 #      correct, not a contaminant.
 #

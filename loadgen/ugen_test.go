@@ -89,7 +89,7 @@ func TestIsContent(t *testing.T) {
 		{`{"type":"content_block_delta","delta":{"text":"tok"}}`, true},    // anthropic delta text
 		{`{"content":""}`, false},                                          // empty content placeholder
 		{`{"type":"content_block_start","content_block":{"text":""}}`, false}, // anthropic empty text
-		// unrelated empty-string field must NOT zero the frame (TensorZero system_fingerprint regression)
+		// unrelated empty-string field must NOT zero the frame (system_fingerprint regression)
 		{`{"choices":[{"delta":{"content":"x"}}],"system_fingerprint":""}`, true},
 		{`{"id":"chatcmpl","object":"chat.completion.chunk"}`, false}, // no content/text at all
 		{`data: [DONE]`, false},

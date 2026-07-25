@@ -35,7 +35,7 @@
 #                        for the perf lanes and may pin a different upstream provider.
 #   GW_XLATE_HEADERS   - an array of "Name: value" headers that REPLACES GW_HEADERS for this lane
 #                        only (warm-up + probes + loadgen), for manifests whose provider routing
-#                        rides in headers (the portkey pattern). Unset = GW_HEADERS as before.
+#                        rides in headers (a header-routing pattern). Unset = GW_HEADERS as before.
 #   GW_XLATE_CAP=0     - the gateway does NOT claim anthropic-in -> openai-out translation; the
 #                        runner records xlate_declared=false with the manifest's cited
 #                        GW_XLATE_CAP_NOTE instead of probing, so a never-claimed capability can

@@ -9,7 +9,7 @@
 #   * added inter-frame latency (µs)   = gateway content-frame gap − direct-to-mock gap (p50/p99)
 #   * streams sustained = max concurrent streams where >=99% of expected content frames deliver and
 #     the stream error rate stays under 0.1%. Pacing is NOT part of this gate: a gateway that
-#     re-chunks/coalesces the upstream SSE (Kong's documented parse-and-reframe pipeline, for
+#     re-chunks/coalesces the upstream SSE (one gateway's documented parse-and-reframe pipeline, for
 #     example) still DELIVERS everything, and streamcpu/run.sh already treats coalescing as
 #     legitimate relay behavior - so a ~100%-delivery run must never publish a zero here. Pacing
 #     fidelity is published separately: stream_stallfree_streams is the max concurrency with the

@@ -2561,7 +2561,7 @@ const runModeCell = (g) => {
 };
 /* The VERSION token alone for the table cell - the tag, package version, or short commit;
    the full build string (image path, digest, annotations) stays in the tooltip.
-   "ghcr.io/x/y:v1.3.1" -> "v1.3.1"; "litellm==1.93.0" -> "1.93.0"; "repo@9649b27..." -> "@9649b27";
+   "ghcr.io/x/y:v1.3.1" -> "v1.3.1"; "somepkg==1.93.0" -> "1.93.0"; "repo@9649b27..." -> "@9649b27";
    "somegateway 1.4.1" -> "1.4.1". Anything unparsable falls back to a truncated string. */
 const fmtBuild = (full) => {
   const head = String(full).split(" (")[0].trim();

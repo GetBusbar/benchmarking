@@ -1142,7 +1142,7 @@ def render(chart: Chart, only_keys=None, out_stem: str | None = None) -> None:
         # "best" drifted onto the title (the old streamcpu overlap); pinning it to "lower right" assumed
         # bars get SHORTER downward, which is only true for higher-is-better charts — the memory,
         # added-latency and cost charts rank LOWER-IS-BETTER, so their longest bar is the bottom one and
-        # the legend landed squarely on LiteLLM-Python's 1.1 GB peak bar in memory_rss.png. Choosing the
+        # the legend landed squarely on one gateway's 1.1 GB peak bar in memory_rss.png. Choosing the
         # corner from the data just moves the collision to the other end (a full-width 6-column legend
         # covers the short bars there instead).
         #

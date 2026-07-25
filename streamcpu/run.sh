@@ -200,7 +200,7 @@ if [ "$STREAM_OK" = 1 ]; then
   #   * no stream stalled past SC_STALL_MS (a starved, not-relaying stream), AND
   #   * a LENIENT delivered-frames floor (SC_MIN_DELIVERED, default 0.5). delivered = content frames
   #     seen / frames the mock sent. It is deliberately NOT required to be ~1.0: a gateway may
-  #     legitimately RE-CHUNK (coalesce) the upstream SSE into fewer, larger frames (LiteLLM does this
+  #     legitimately RE-CHUNK (coalesce) the SSE into fewer, larger frames (one gateway does this
   #     ~256->100), which is valid relay behavior, not a fault. The floor only catches gross content
   #     loss. A coalescing gateway is then judged on its real frames/sec, not zeroed for re-chunking.
   # The best qualifying fps is the headline.

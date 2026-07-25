@@ -58,7 +58,7 @@ const ANTHROPIC: &[u8] = br#"{"id":"msg_x","type":"message","role":"assistant","
 const GEMINI: &[u8] = br#"{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP","index":0}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":2,"totalTokenCount":12}}"#;
 const BEDROCK: &[u8] = br#"{"output":{"message":{"role":"assistant","content":[{"text":"ok"}]}},"stopReason":"end_turn","usage":{"inputTokens":10,"outputTokens":2,"totalTokens":12}}"#;
 const COHERE: &[u8] = br#"{"id":"x","finish_reason":"COMPLETE","message":{"role":"assistant","content":[{"type":"text","text":"ok"}]},"usage":{"tokens":{"input_tokens":10,"output_tokens":2}}}"#;
-// GET .../models - a model list, discovered at boot by gateways (e.g. GoModel) that register
+// GET .../models - a model list, discovered at boot by gateways (e.g. one gateway) that register
 // routable models by calling the upstream's /models. PROVIDER-SPECIFIC (keyed off the request path,
 // see models_for) so no bare model name is ambiguous across providers. A single shared catalog that
 // listed BOTH gpt-4o-mini AND claude-3-5-sonnet on every provider base made a gateway that routes by
@@ -213,7 +213,7 @@ fn state_json(rec: &Recorder, recording: bool) -> String {
 /// The deltas are prebuilt as a VECTOR of `chunks` distinct frames, one per index, with the frame
 /// index embedded in the padding text so no two consecutive content frames are byte-identical. This
 /// costs nothing on the hot path (still a refcount bump per send) but keeps every gateway fair: a
-/// gateway with a repetition/loop guard (e.g. LiteLLM aborts a stream on identical consecutive
+/// gateway with a repetition/loop guard (e.g. one gateway aborts a stream on identical consecutive
 /// chunks) is not tripped by synthetic identical tokens the way a single reused delta would trip it.
 struct StreamFrames {
     openai_head: Vec<Bytes>,

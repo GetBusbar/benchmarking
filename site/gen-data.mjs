@@ -47,7 +47,7 @@ const UNGATED_LAT = UNGATED_LAT_FIELDS;
 
 // ---- gateway manifests ------------------------------------------------------
 function parseManifest(text) {
-  // Values are either quoted ("LiteLLM · Python") or a bare word (Rust); a trailing
+  // Values are either quoted ("Some Gateway · Python") or a bare word (Rust); a trailing
   // shell comment may follow either form.
   const get = (name) => {
     const m = text.match(new RegExp(`^${name}=(?:"([^"]*)"|(\\S+))`, "m"));
@@ -148,7 +148,7 @@ const gateways = gatewayKeys.map((key) => {
       // which phases it was told to run (cell_perf_sweep / cell_stream / cell_memory). A field run has
       // them all on; a local smoke run turns them off to finish in minutes, and its snapshot lands in the
       // SAME results/snapshots/ directory. Recency then hands the whole row to it: this actually happened
-      // to helicone, whose board row became a probe-only laptop run (1 cell, no perf, no streaming, no
+      // to one gateway, whose board row became a probe-only laptop run (1 cell, no perf, no streaming, no
       // memory, no best_cell) that shadowed a complete field run from the same morning, with nothing
       // anywhere saying so. It is the trap-1 class one level up - not results/matrix/<gw>.json being
       // overwritten, but an untracked snapshot silently outranking it.
@@ -248,8 +248,8 @@ const gateways = gatewayKeys.map((key) => {
   // the retired synthetic burst suite mislabelled as 6x6 provenance and is neither scanned nor read.
   if (!g.streaming && g.stream && g.stream.stream_served === true) {
     // AUDIT #6: stamp the dialect the STREAM SUITE ACTUALLY USED (derived from the endpoint it probed),
-    // NOT the matrix's passthrough diagonal. Stamping the matrix diagonal relabelled litellm-rust /
-    // portkey (which the stream suite drove on /v1/messages = Anthropic) as an OpenAI stream — a
+    // NOT the matrix's passthrough diagonal. Stamping the matrix diagonal relabelled two gateways
+    // (which the stream suite drove on /v1/messages = Anthropic) as an OpenAI stream, a
     // provenance claim about a run that never happened. Unknown endpoint → null (the caption says "?").
     const dia = streamSuiteDialect(g.stream);
     g.streaming = sealStreaming({
@@ -301,7 +301,7 @@ const gateways = gatewayKeys.map((key) => {
   //
   // PER-GATEWAY freshness stamp: each gateway carries its OWN newest measurement so the board can show
   // an independent "measured Nd ago" per row and flag a row that has aged past MAX_GATEWAY_AGE_DAYS.
-  // Different gateways legitimately have different measured_at (busbar today, kong 3 weeks ago) — that
+  // measured_at legitimately differs per gateway (one today, another 3 weeks ago), and that
   // is honest on a living board where any one gateway can be re-run alone. The staleness flag drives a
   // per-row badge in app.js; it is NOT a build failure (see the freshness guard below).
   // LOW-R3-3: the badge stamp must reflect the age of the DISPLAYED numbers, which are projected from
@@ -351,7 +351,7 @@ const gateways = gatewayKeys.map((key) => {
 // The gateway's BEST passthrough cell for the Passthrough tab (BEST-OF): its same-dialect diagonal
 // (ingress === egress, pure forwarding, no translation), chosen deterministically as the canonical
 // `openai` diagonal when served (every gateway on the identical fair workload), else the gateway's
-// fastest NATIVE diagonal by lowest added latency (e.g. litellm-rust -> anthropic). BEST-OF, not
+// fastest NATIVE diagonal by lowest added latency (e.g. one gateway -> anthropic). BEST-OF, not
 // strict-openai, so EVERY gateway appears on its best passthrough; filtering a competitor out reads
 // as hiding it. `dialect` (== ingress == egress) is the label the tab's "Tested on" pill shows.
 // ---- envelope sealers (Design E §2): raw cell -> sealed, envelope-carrying record ----------
@@ -478,7 +478,7 @@ function bestCell(m) {
 // ...perf} or null when the gateway serves no openai-in translation path.
 // AUDIT #4: the MATRIX WINS whenever it measured ANY translation cell. The original selector accepted
 // ONLY an openai-INGRESS cell, so a gateway whose matrix measured translation in the other direction
-// (apisix: anthropic in -> openai out, 18,157 rps, measured) fell through to the LEGACY xlate suite and
+// (one gateway: anthropic in -> openai out, 18,157 rps, measured) fell through to LEGACY xlate and
 // published its stale 17,437 — a legacy number RANKED against matrix-sourced rows. Selection is now two
 // tiers: the FAIR tier first (openai ingress, identical input side across gateways), and only when the
 // matrix has none of those, ANY served cross-dialect cell it did measure. The legacy fallback fires only
@@ -588,7 +588,7 @@ if (latest && Date.parse(generatedAt) < Date.parse(latest)) {
 
 // WHAT CHANGED (matrix-sole-source). A gateway's ENTIRE benchmark is now ONE atomic matrix run that
 // legitimately takes HOURS (busbar ~5h), and gateways are published INDEPENDENTLY (busbar can be
-// re-run and pushed alone, kong's row stays from 3 weeks ago). The two RELATIVE guards the old model
+// re-run and pushed alone, another's row stays from 3 weeks ago). The two RELATIVE guards the old model
 // used are therefore both WRONG now and are REMOVED:
 //   - The intra-row SPAN hard-fail (MAX_SPAN_H ~3h) assumed a row mixed several short suites from
 //     different runs. Under one atomic matrix run there are no "mixed suites" to catch, and a single

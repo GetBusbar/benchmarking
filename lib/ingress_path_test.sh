@@ -14,7 +14,7 @@
 # config — so those two paths kept requesting the model from BEFORE the switch, which routes to the
 # openai provider. {gemini,bedrock} x {every non-openai egress} became impossible to pass: busbar
 # published exactly 10 such reds ("the mock received the request on the openai endpoint instead"),
-# litellm-python published HTTP 400 on /v1beta/models/gpt-4o-mini:generateContent and HTTP 404 on
+# one gateway published HTTP 400 on /v1beta/models/gpt-4o-mini:generateContent and HTTP 404 on
 # /model/gpt-4o-mini/converse. gemini->openai and bedrock->openai still passed — the frozen model
 # genuinely was the openai one — which is why the failure looked like a gateway limitation.
 #
@@ -75,7 +75,7 @@ GW_MODEL=gpt-4o-mini-bedrock
 check "bedrock follows the new model" "/model/gpt-4o-mini-bedrock/converse"               "$(ingress_path bedrock)"
 lacks "bedrock drops the stale model" "/model/gpt-4o-mini/converse"                       "$(ingress_path bedrock)"
 
-# Every one of the six columns in turn, on the shape litellm-python uses (suffix per column). A frozen
+# Every one of the six columns in turn, on the shape one gateway uses (suffix per column). A frozen
 # path passes column 1 (openai, model unchanged) and fails all five others — the exact published
 # signature: gemini->openai / bedrock->openai green, the other ten red.
 echo "ingress_path_test: all six egress columns, one after another (no cross-column bleed)"

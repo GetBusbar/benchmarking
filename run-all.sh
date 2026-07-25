@@ -72,7 +72,7 @@ manifest_gw_port(){ # gateway
 # (the retired perf / memory / governed suites have been removed entirely: the matrix folds passthrough
 # perf + the process-level memory read in, and governance was a non-default busbar-only lane.) gen-data
 # reads whatever is on disk and projects the board from the matrix, falling back to any legacy suite
-# results still present (streaming from the stream suite, apisix translation from the xlate suite).
+# results still present (streaming from the stream suite, translation from the xlate suite).
 SUITES="${SUITES:-matrix}"
 for gw in "${GATEWAYS[@]}"; do
   [ -f "$HERE/gateways/$gw/gateway.sh" ] || { log "skip unknown gateway '$gw'"; continue; }

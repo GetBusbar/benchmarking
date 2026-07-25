@@ -12,7 +12,7 @@ func pct(v []float64,q float64)float64{if len(v)==0{return 0};sort.Float64s(v);i
 // `"text":"…"` — and not an empty-string placeholder (content_block_start carries `"text":""`).
 // The emptiness check is scoped to the content/text KEYS themselves: the previous blanket `:""`
 // scan silently discarded every frame from gateways that reserialize chunks with unrelated
-// empty-string fields (e.g. TensorZero's `"system_fingerprint":""`), zeroing their delivered-frame
+// empty-string fields (e.g. a gateway's own `"system_fingerprint":""`), zeroing delivered-frame
 // counts - a harness bug that was published as a gateway streaming failure.
 func isContent(l string)bool{
  return (strings.Contains(l,`"content":"`)&&!strings.Contains(l,`"content":""`))||
