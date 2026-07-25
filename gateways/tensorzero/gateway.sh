@@ -51,6 +51,29 @@ GW_PATH=/openai/v1/chat/completions
 # egress columns swap ONLY this string (all four models live in the one config below).
 GW_MODEL=tensorzero::model_name::mock-openai
 GW_AUTH=dummy
+
+# ── CONFIG NECESSITY (lib/gateway_config_lint.sh) ─────────────────────────────────────────────────
+# Every setting this manifest writes, and the ONE reason it is here. The lint fails on a setting with
+# no claim AND on a claim with no setting, so this block cannot drift from the config in either
+# direction. Reasons: boot (it will not run without this) | upstream (points an upstream at the test
+# mock) | ingress (an ingress path the 6x6 matrix drives) | bind (the port or CPU pin the rig needs).
+GW_CONFIG_WHY="
+enabled  boot     # gateway.observability: TensorZero requires a ClickHouse URL when this is on, and
+                  # we run no ClickHouse on a single box, so it cannot boot with the default
+routing  boot     # a model block without a routing list is not a model
+type     boot     # the provider type is required
+api_base    upstream  # -> the mock
+endpoint_url upstream # bedrock's own base-URL override -> the mock
+api_type    upstream  # selects the Responses upstream shape on the openai provider
+model_name  upstream  # the model id sent upstream
+model_id    upstream  # bedrock spells the same thing this way
+api_key_location boot # \"none\" is the only way to declare an openai model with no key in the env
+region           boot # the bedrock signer fails without one
+ANTHROPIC_API_KEY     boot  # credentials are validated EAGERLY at boot for EVERY declared model
+AWS_ACCESS_KEY_ID     boot  # (model_table.rs load_credential), and the anthropic provider REJECTS
+AWS_SECRET_ACCESS_KEY boot  # api_key_location=\"none\", so a dummy value here is what lets the
+AWS_REGION            boot  # four-model config exist at all
+"
 TENSORZERO_IMAGE="${TENSORZERO_IMAGE:-tensorzero/gateway:2026.6.0}"
 
 gw_version() {
@@ -182,8 +205,15 @@ gw_launch() {
   #    with no resolvable credentials every request fails and surfaces as the generic 502
   #    AllVariantsFailed wrapper (tensorzero-error/src/lib.rs). Dummy keys sign fine; the mock
   #    ignores the signature. endpoint_url accepts plain http:// (no allow_http knob needed).
+  # TENSORZERO_DISABLE_PSEUDONYMOUS_USAGE_ANALYTICS is DELIBERATELY ABSENT. TensorZero ships
+  # pseudonymous usage analytics ON, and we measure defaults: turning a shipped-on feature off is a
+  # config change we do not make in either direction. The old justification (an isolated rig where
+  # the report would hang) was false - the bench boxes have full internet access, since cloud-init
+  # apt-gets and pulls images over it, so the report succeeds. Consequence, disclosed rather than
+  # designed around: with per-cell cold starts the gateway boots ~36 times a run, so a field run
+  # sends TensorZero a few hundred install reports. That is its shipped behaviour, which is the
+  # thing this benchmark measures.
   sudo docker run -d --name tensorzero-bench --network host --cpuset-cpus="$CORES" \
-    -e TENSORZERO_DISABLE_PSEUDONYMOUS_USAGE_ANALYTICS=1 \
     -e ANTHROPIC_API_KEY=dummy \
     -e AWS_ACCESS_KEY_ID=AKIAMOCKACCESSKEY -e AWS_SECRET_ACCESS_KEY=mock-secret-access-key \
     -e AWS_REGION=us-east-1 \
@@ -201,10 +231,10 @@ gw_launch() {
 # in every lane and every egress column, byte for byte. The toml is read from the file
 # gw_build/_tz_write_config rendered (re-rendered with the same no-argument function if the file isn't
 # present yet), so it can never drift from
-# what the gateway actually loaded. OOTB posture: the only non-default line is observability=false, which
-# is the required run-mechanic to avoid a ClickHouse/Postgres dependency (embedded/no external store);
-# TENSORZERO_DISABLE_PSEUDONYMOUS_USAGE_ANALYTICS=1 is the allowed telemetry-off run-mechanic. No feature
-# strips or perf tuning are present.
+# what the gateway actually loaded. OOTB posture: the only non-provider line is observability=false, and
+# the gateway will not boot with it on because observability requires a ClickHouse URL we do not run.
+# Usage analytics are left at their shipped default (on) - see the note in gw_launch. No feature strips
+# or perf tuning are present.
 gw_config() {
   local toml="$GW_DIR/config/tensorzero.toml"
   echo "# ── tensorzero.toml (rendered; loaded via --config-file config/tensorzero.toml) ──"
@@ -213,7 +243,6 @@ gw_config() {
   echo
   echo "# ── launch env (non-secret; credential values are dummy on the isolated rig) ──"
   cat <<ENV
-TENSORZERO_DISABLE_PSEUDONYMOUS_USAGE_ANALYTICS=1
 ANTHROPIC_API_KEY=dummy
 AWS_ACCESS_KEY_ID=AKIAMOCKACCESSKEY
 AWS_SECRET_ACCESS_KEY=mock-secret-access-key

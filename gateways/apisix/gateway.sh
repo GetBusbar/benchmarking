@@ -26,6 +26,36 @@ GW_PORT=9080
 GW_PATH=/v1/chat/completions
 GW_MODEL=gpt-4o-mini
 GW_AUTH=sk-fake-benchmark-key
+
+# ── CONFIG NECESSITY (lib/gateway_config_lint.sh) ─────────────────────────────────────────────────
+# Every setting this manifest writes, and the ONE reason it is here. The lint fails on a setting with
+# no claim AND on a claim with no setting, so this block cannot drift from the config in either
+# direction. Reasons: boot (it will not run without this) | upstream (points an upstream at the test
+# mock) | ingress (an ingress path the 6x6 matrix drives) | bind (the port or CPU pin the rig needs).
+GW_CONFIG_WHY="
+deployment       boot      # the DB-less standalone block; without it APISIX demands an etcd cluster
+role             boot
+role_data_plane  boot
+config_provider  boot      # routes from conf/apisix.yaml instead of etcd
+apisix           bind
+node_listen      bind      # the port the harness drives
+nginx_config     bind
+worker_processes bind      # nginx \`auto\` reads the HOST cpu count and is blind to --cpuset-cpus
+routes    ingress   # the ai-proxy route table
+id        ingress
+uri       ingress   # one native ingress URI per dialect the matrix drives
+methods   ingress
+plugins   ingress
+ai-proxy  ingress
+provider       upstream  # which provider dialect this route egresses in
+options        upstream  # the model id sent upstream in that dialect
+override       upstream  # -> the mock host, keeping the provider's native upstream path
+auth           boot      # ai-proxy's schema REQUIRES an auth block; a route without one is dropped
+provider_conf  boot      # bedrock: region, required by validate_provider_requirements
+aws            boot      # bedrock: SigV4 material, required by the schema (dummy; mock ignores it)
+access_key_id      boot
+secret_access_key  boot
+"
 APISIX_IMAGE="${APISIX_IMAGE:-apache/apisix:3.17.0-debian}"
 
 # ── the bedrock ingress URI: ONE definition, used by the route AND by the matrix probe ────────────

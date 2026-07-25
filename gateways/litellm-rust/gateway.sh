@@ -29,6 +29,23 @@ GW_PORT=8101
 GW_PATH=/v1/messages
 GW_MODEL=azure_ai/mock
 GW_AUTH=gwbench
+
+# ── CONFIG NECESSITY (lib/gateway_config_lint.sh) ─────────────────────────────────────────────────
+# Every setting this manifest writes, and the ONE reason it is here. The lint fails on a setting with
+# no claim AND on a claim with no setting, so this block cannot drift from the config in either
+# direction. Reasons: boot (it will not run without this) | upstream (points an upstream at the test
+# mock) | ingress (an ingress path the 6x6 matrix drives) | bind (the port or CPU pin the rig needs).
+GW_CONFIG_WHY="
+model_list     boot      # the python-config reader serves nothing without one
+model_name     ingress   # the client-facing name the probe asks for
+litellm_params boot
+model          upstream  # azure_ai is the only provider messages_provider_config serves
+api_base       upstream  # -> the mock; used verbatim by complete_azure_anthropic_url
+api_key        boot      # dummy; the mock ignores it
+LITELLM_MASTER_KEY  boot # the Rust beta requires it to boot; its own mandatory auth
+LITELLM_CONFIG_PATH boot # selects the python-config reader, the ONLY mode that serves /v1/messages
+PORT                bind # the port the harness drives
+"
 # ── SOURCE PIN ────────────────────────────────────────────────────────────────────────────────────
 # EXACTLY what this gateway is built from, pinned HERE in its own directory so adding or re-pinning
 # a gateway touches nothing else in the tree. Override any of these in the environment; the runner

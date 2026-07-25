@@ -39,10 +39,9 @@
 #   is tier: ai_gateway_enterprise) — this is plain bundled ai-proxy only, in the kong:3.8 OSS image.
 #
 # Permitted deviations only: provider upstream_url → mock, dummy auth/AWS signing (the mock ignores
-# it), the per-provider REQUIRED fields (anthropic_version, bedrock region+creds), and two disclosed
-# run-mechanics — KONG_DATABASE=off (DB-less: no external Postgres dependency) and KONG_ANONYMOUS_
-# REPORTS=off (telemetry/phone-home suppression). The client always hits the uniform /v1/chat/
-# completions route; no special passthrough route is added.
+# it), the per-provider REQUIRED fields (anthropic_version, bedrock region+creds), and KONG_DATABASE=
+# off, which Kong needs to boot without an external Postgres. The client always hits the uniform
+# /v1/chat/completions route; no special passthrough route is added.
 #
 # FAIRNESS AUDIT (Kong 3.8.0 source):
 #   * REMOVED KONG_ADMIN_LISTEN=off: that DISABLED a default-on feature. Kong's Admin API is ON by
@@ -50,9 +49,14 @@
 #     bound to localhost, and DB-less only makes it read-only — it does not turn it off. Turning it
 #     off was a feature-strip; restored to the default (the var is simply not set). Harmless on a
 #     dedicated single-box bench (localhost-only, no port clash, proxy traffic unaffected).
-#   * ADDED KONG_ANONYMOUS_REPORTS=off: anonymous_reports defaults to `on` (kong.conf.default @3.8.0)
-#     — Kong phones home usage/error data by default. Suppressing outbound telemetry is a permitted
-#     disclosed run-mechanic (not a functional strip).
+#   * REMOVED KONG_ANONYMOUS_REPORTS=off: anonymous_reports defaults to `on` (kong.conf.default
+#     @3.8.0), so Kong phones home usage/error data on a stock install. We measure defaults. Turning
+#     a shipped-on feature off is a config change we do not make, in either direction, and the old
+#     "isolated rig" justification for it was simply untrue - the bench boxes have full internet
+#     access (cloud-init apt-gets and pulls images over it), so the report succeeds rather than
+#     hanging. Consequence, disclosed rather than designed around: with per-cell cold starts Kong
+#     boots ~36 times a run, so a field run sends Kong a few hundred install reports. That is Kong's
+#     shipped behaviour, which is the thing this benchmark exists to measure.
 GW_KIND=docker
 # The docker container this manifest launches under. DECLARED here so that anything outside this
 # directory which needs the name (the local verifier's teardown, for one) READS it from the
@@ -74,6 +78,42 @@ GW_PATH=/v1/chat/completions
 KONG_MODEL=gpt-4o-mini
 GW_MODEL="$KONG_MODEL"
 GW_AUTH=dummy
+
+# ── CONFIG NECESSITY (lib/gateway_config_lint.sh) ─────────────────────────────────────────────────
+# Every setting this manifest writes, and the ONE reason it is here. The lint fails on a setting with
+# no claim AND on a claim with no setting, so this block cannot drift from the config in either
+# direction. Reasons: boot (it will not run without this) | upstream (points an upstream at the test
+# mock) | ingress (an ingress path the 6x6 matrix drives) | bind (the port or CPU pin the rig needs).
+GW_CONFIG_WHY="
+KONG_DATABASE               boot  # DB-less declarative; without it Kong demands an external Postgres
+KONG_DECLARATIVE_CONFIG     boot  # where that declarative config is
+KONG_PROXY_LISTEN           bind  # the port the harness drives
+KONG_NGINX_WORKER_PROCESSES bind  # nginx \`auto\` reads the HOST cpu count, blind to --cpuset-cpus
+_format_version boot     # the declarative schema will not load without it
+services        boot
+name            boot
+url             boot     # a service REQUIRES a url; ai-proxy overrides the target per plugin instance
+routes      ingress      # four routes on the one uniform OpenAI path
+paths       ingress
+strip_path  ingress
+plugins     ingress
+config      boot
+headers        upstream  # the route matcher that selects the egress column
+x-llm-provider upstream  # the one request header a column changes
+route_type   boot        # ai-proxy schema: required
+model        upstream    # ai-proxy 400s a body model that differs from a set model.name
+provider     upstream    # binds this plugin instance to one upstream dialect
+options      upstream
+upstream_url upstream    # -> the mock, replacing scheme/host/port AND path
+auth              boot   # ai-proxy schema: required
+header_name       boot
+header_value      boot
+anthropic_version boot   # entity-check REQUIRED for the anthropic provider; without it Kong will not boot
+bedrock           boot
+aws_region        boot   # the bedrock signer fails without a region -> HTTP 500
+aws_access_key_id     boot
+aws_secret_access_key boot
+"
 # The client-facing egress SELECTOR header. Unset by default: a header-less request falls through to
 # the openai route (see the priority note above), which is exactly the OOTB client experience.
 GW_HEADERS=()
@@ -261,8 +301,7 @@ gw_matrix_egress() {
 # _kong_env: the ONE definition of Kong's non-secret launch env — the single source of truth that
 # gw_launch turns into docker -e flags (like gomodel's _gomodel_env) and gw_config publishes verbatim,
 # so the benchmarked env and the website-published env cannot drift.
-#   KONG_DATABASE=off        = DB-less declarative (no external Postgres — a disclosed run-mechanic).
-#   KONG_ANONYMOUS_REPORTS=off suppresses Kong's default-on telemetry phone-home (run-mechanic).
+#   KONG_DATABASE=off        = DB-less declarative (no external Postgres - required to boot).
 #   KONG_NGINX_WORKER_PROCESSES = pinned to the cpuset core count (0-3 → 4), NOT Kong's default `auto`.
 #     Kong is nginx/OpenResty, and nginx's `worker_processes auto` reads the HOST cpu count via
 #     sysconf(_SC_NPROCESSORS_ONLN) — it is BLIND to --cpuset-cpus, so on a 4-core-pinned container it
@@ -276,7 +315,6 @@ _kong_env() {
   local ncore=$(( ${CORES##*-} - ${CORES%%-*} + 1 ))
   cat <<ENV
 KONG_DATABASE=off
-KONG_ANONYMOUS_REPORTS=off
 KONG_NGINX_WORKER_PROCESSES=$ncore
 KONG_DECLARATIVE_CONFIG=/kong/kong.yml
 KONG_PROXY_LISTEN=0.0.0.0:$GW_PORT
@@ -303,10 +341,10 @@ gw_launch() {
 # dummy on the isolated rig). Read from the file _kong_write_config rendered (re-rendering with the
 # same no-argument function if absent), so it can never drift from what Kong loaded. The launch env is printed from
 # the SAME _kong_env() gw_launch consumes, so the two cannot drift. OOTB posture: ai-proxy on the
-# uniform /v1/chat/completions route, admin API left at its default (not disabled); the run-mechanics
-# are KONG_DATABASE=off (DB-less), KONG_ANONYMOUS_REPORTS=off (telemetry), and KONG_NGINX_WORKER_
-# PROCESSES pinned to the cpuset core count (nginx `auto` misreads the host's cores under --cpuset-cpus;
-# same CPU-pinning run-mechanic as the Go gateways' GOMAXPROCS — a run-mechanic, not a perf tune).
+# uniform /v1/chat/completions route, admin API left at its default (not disabled), telemetry left at
+# its default (not suppressed); the only non-provider settings are KONG_DATABASE=off (Kong cannot boot
+# DB-less without it) and KONG_NGINX_WORKER_PROCESSES pinned to the cpuset core count (nginx `auto`
+# misreads the host's cores under --cpuset-cpus; the same CPU pin the Go gateways get from GOMAXPROCS).
 gw_config() {
   local cfg="$GW_DIR/kong.gen.yml"
   echo "# ── kong.gen.yml (rendered DB-less declarative; loaded via KONG_DECLARATIVE_CONFIG) ──"

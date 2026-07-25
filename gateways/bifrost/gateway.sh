@@ -17,6 +17,22 @@ GW_PORT=8080
 GW_PATH=/v1/chat/completions
 GW_MODEL=gpt-4o-mini
 GW_AUTH=sk-dummy
+
+# ── CONFIG NECESSITY (lib/gateway_config_lint.sh) ─────────────────────────────────────────────────
+# Every setting this manifest writes, and the ONE reason it is here. The lint fails on a setting with
+# no claim AND on a claim with no setting, so this block cannot drift from the config in either
+# direction. Reasons: boot (it will not run without this) | upstream (points an upstream at the test
+# mock) | ingress (an ingress path the 6x6 matrix drives) | bind (the port or CPU pin the rig needs).
+GW_CONFIG_WHY="
+providers      upstream  # the provider table
+openai         upstream  # one entry per mock-reachable dialect; Bifrost resolves the provider from
+anthropic      upstream  # the request model name, so this is what makes an egress column addressable
+gemini         upstream
+cohere         upstream
+keys           boot      # Bifrost will not register a provider with no key entry (dummy value)
+network_config upstream  # base_url -> the mock
+GOMAXPROCS     bind      # Go pre-1.25 reads the HOST cpu count, not the --cpuset-cpus limit
+"
 # Bifrost's Anthropic-format ingress is the DROP-IN integration prefix, not a bare /v1/messages:
 # transports/bifrost-http/integrations/anthropic.go@v1.6.4 mounts POST /anthropic/v1/messages
 # (a bare /v1/messages hits the dashboard's GET catch-all and 405s - which our xlate lane used to
