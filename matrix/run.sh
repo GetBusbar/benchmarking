@@ -164,21 +164,11 @@ MATRIX_STREAM_CHUNK_BYTES="${MATRIX_STREAM_CHUNK_BYTES:-16}"
 MATRIX_STREAM_STALL_X="${MATRIX_STREAM_STALL_X:-2}"
 MATRIX_STREAM_C1_DUR="${MATRIX_STREAM_C1_DUR:-20}"
 MATRIX_STREAM_SWEEP_DUR="${MATRIX_STREAM_SWEEP_DUR:-12}"
-# SEARCH RANGE, NOT A LADDER, AND NOT A CLAIM. [lo,hi] concurrency for the sustained-streams bisect.
-# This file's rule is one constant with the reason, and these bounds are the two that carried none.
-# lo=8: below this the window is too short to distinguish a real sustained ceiling from scheduler noise.
-# hi=2048: a rig-capacity bound, not a belief about any gateway. Above it the LOAD GENERATOR's own
-# per-stream cost starts competing with the gateway for the 6 pinned load cores, so a "failure" past
-# that point can no longer be attributed to the gateway with a straight face. The box's fd limit is not
-# the binding constraint (run-on-ec2.sh raises docker nofile to 1048576), so the honest limit here is
-# the load generator's, and it is set to where that limit actually bites.
-#
-# THE BOUND IS NEVER PUBLISHED AS AN ANSWER. If a gateway is still clean at hi, the bisect has found a
-# LOWER BOUND, not a ceiling, and :826 publishes null with an operator instruction to raise this range
-# and re-run - it does not publish hi. That guard is what makes a judgment call safe to encode as a
-# default: getting it too low costs a re-run and an honest null, never a wrong number on the board.
-# (This is the same failure the legacy fixed ladder had, where a shared rung published identical
-# sustained figures across unrelated gateways because the ladder, not any gateway, set the value.)
+# Search range for the sustained bisect, not a ladder. lo=8: below it scheduler noise swamps the
+# signal. hi=2048: a rig bound, not a belief about any gateway - past it the load generator's own
+# per-stream cost competes for the 6 pinned load cores, so a failure stops being the gateway's. (fds
+# are not the constraint; run-on-ec2.sh raises docker nofile to 1048576.) Still clean at hi means a
+# LOWER BOUND was found, and :826 publishes null and says to raise this range, never hi itself.
 MATRIX_STREAM_SUST_BOUNDS="${MATRIX_STREAM_SUST_BOUNDS:-8 2048}"   # [lo,hi] for the sustained bisect
 MATRIX_STREAM_DELIV="${MATRIX_STREAM_DELIV:-0.999}"               # sustained gate delivered-frames floor
 # Unpaced lane (streamcpu/run.sh parity): CPU-bound relay throughput (frames/sec) — long back-to-back
@@ -187,13 +177,9 @@ MATRIX_STREAMCPU_CHUNKS="${MATRIX_STREAMCPU_CHUNKS:-512}"
 MATRIX_STREAMCPU_FRAME_BYTES="${MATRIX_STREAMCPU_FRAME_BYTES:-16}"
 MATRIX_STREAMCPU_STALL_MS="${MATRIX_STREAMCPU_STALL_MS:-250}"
 MATRIX_STREAMCPU_DUR="${MATRIX_STREAMCPU_DUR:-16}"
-# [lo,hi] CONCURRENCY for the cpu-fps peak search (the second of the two bounds that carried no reason).
-# lo=8 matches the sustained lane. hi=512 is lower than that lane's 2048 on purpose: this is the UNPACED
-# firehose, where each stream costs the load generator far more per unit of concurrency, so the rig runs
-# out of headroom sooner and a bound set as high as 2048 would measure the load generator instead.
-# Same protection as the sustained bounds, and it did not exist until it was found missing: if the fps
-# curve is still rising at hi the search has produced a LOWER BOUND, SM_FPS_AT_TOP is set, and the
-# producer publishes null with an instruction to raise this range, never hi itself.
+# Search range for the cpu-fps peak. hi=512 is deliberately below the paced lane's 2048: this is the
+# UNPACED firehose, each stream costs the load generator more, so the rig runs out sooner and 2048
+# would measure the rig. Still rising at hi sets SM_FPS_AT_TOP and publishes null, never hi itself.
 MATRIX_STREAMCPU_FPS_BOUNDS="${MATRIX_STREAMCPU_FPS_BOUNDS:-8 512}"  # [lo,hi] for the cpu-fps peak search
 
 # ── memory: ONE OWN-PROCESS WINDOW PER SERVED CELL, inside the 6x6 loop ────────────────────────────
