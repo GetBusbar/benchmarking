@@ -85,28 +85,41 @@ harness_write_config(){
 # (directly for native, via container_*_mib for docker), so they must live in the shared layer both
 # the memory suite and the matrix suite source — not only in memory/run.sh (audit: matrix folds the
 # memory measurement in and calls gw_rss()/gw_hwm(), which reference these).
-_rss_tree_mib() { # root_pid  → summed VmRSS of pid + all descendants, in MiB
-  local root="$1"; [ -z "$root" ] || [ "$root" = 0 ] && { echo 0; return; }
-  local pids="$root" frontier="$root" next total=0 kb p c
-  while [ -n "$frontier" ]; do
-    next=""
-    for p in $frontier; do for c in $(pgrep -P "$p" 2>/dev/null); do pids="$pids $c"; next="$next $c"; done; done
-    frontier="$next"
-  done
-  for p in $pids; do kb=$(awk '/VmRSS/{print $2}' "/proc/$p/status" 2>/dev/null); total=$((total + ${kb:-0})); done
-  awk -v k="$total" 'BEGIN{printf "%.1f", k/1024}'
+#
+# UNMEASURABLE → EMPTY, NEVER 0 (audit P0-2). These helpers used to `echo 0` for a missing pid and to
+# print "0.0" whenever /proc could not be read (container not running, `docker inspect` failed, a PID
+# namespace we cannot see, macOS with no /proc at all). A literal 0 is indistinguishable from a real
+# reading downstream, and the board ranks RSS ASCENDING — so a rig-side measurement FAILURE published a
+# certified 0.0 MiB and won first place on memory. A live process cannot have 0 MiB resident, so 0 is
+# by definition "not measured": these helpers now print NOTHING in that case and the single caller-side
+# guard (mem_num_or_null, below) turns empty into JSON null.
+_rss_tree_mib() { # root_pid → summed VmRSS of pid + descendants, in MiB; EMPTY when unmeasurable
+  _proc_tree_field_mib VmRSS "$1"
 }
 # VmHWM = the kernel's own per-process high-water mark. A periodic VmRSS poll can miss a sub-interval
 # allocation spike; VmHWM cannot (the kernel updates it on every charge), so it is the honest PEAK.
-_hwm_tree_mib() { # root_pid → summed VmHWM of pid + descendants, in MiB
-  local root="$1"; [ -z "$root" ] || [ "$root" = 0 ] && { echo 0; return; }
-  local pids="$root" frontier="$root" next total=0 kb p c
+_hwm_tree_mib() { # root_pid → summed VmHWM of pid + descendants, in MiB; EMPTY when unmeasurable
+  _proc_tree_field_mib VmHWM "$1"
+}
+# ONE walk shared by both lanes so the empty-on-unmeasurable contract can never drift between them.
+# Prints the summed MiB only when at least one /proc/<pid>/status was actually READ and the sum is
+# positive; otherwise prints nothing at all (exit 0 either way — an empty read is not a script error).
+_proc_tree_field_mib() { # field root_pid
+  local field="$1" root="$2"
+  if [ -z "$root" ] || [ "$root" = 0 ]; then return 0; fi   # no pid (inspect failed / not running)
+  local pids="$root" frontier="$root" next total=0 kb p c read_any=0
   while [ -n "$frontier" ]; do
     next=""
     for p in $frontier; do for c in $(pgrep -P "$p" 2>/dev/null); do pids="$pids $c"; next="$next $c"; done; done
     frontier="$next"
   done
-  for p in $pids; do kb=$(awk '/VmHWM/{print $2}' "/proc/$p/status" 2>/dev/null); total=$((total + ${kb:-0})); done
+  for p in $pids; do
+    kb=$(awk -v f="$field" '$1==f":"{print $2}' "/proc/$p/status" 2>/dev/null)
+    case "$kb" in ''|*[!0-9]*) continue;; esac   # unreadable/absent: contributes NOTHING, not a 0
+    read_any=1; total=$((total + kb))
+  done
+  [ "$read_any" = 1 ] || return 0                 # nothing readable anywhere → UNMEASURED, print nothing
+  [ "$total" -gt 0 ] || return 0                  # a live tree cannot be 0 KiB resident → unmeasured
   awk -v k="$total" 'BEGIN{printf "%.1f", k/1024}'
 }
 # BENCH_DOCKER: the docker invocation (default "sudo docker" — the EC2 field default, unchanged). Local
@@ -120,6 +133,25 @@ container_hwm_mib() { # container_name → its process tree's VmHWM via the host
   local pid; pid=$($BENCH_DOCKER inspect -f '{{.State.Pid}}' "$1" 2>/dev/null)
   _hwm_tree_mib "$pid"
 }
+
+# ── THE single RSS null-guard (audit P0-2) ───────────────────────────────────────────────────────
+# EVERY memory lane (idle / peak / recovered / hwm) in matrix/run.sh goes through these helpers and
+# nothing else,
+# so there is exactly ONE definition of "unmeasured" instead of four subtly-different case guards.
+# The old guards (`case "$x" in ''|*[!0-9.]*)`) did NOT match "0" or "0.0", so a rig-side measurement
+# failure — unreadable /proc, a dead container, a gateway with no gw_rss hook — published a CERTIFIED
+# 0.0 MiB. Memory is ranked ASCENDING on the board, so the broken gateway won. A live process cannot
+# be 0 MiB resident, so 0 IS "not measured".
+mem_num_or_null(){ # value -> the value verbatim, or the literal `null`
+  case "${1:-}" in ''|*[!0-9.]*) echo null; return;; esac
+  awk -v v="$1" 'BEGIN{ if (v+0>0) printf "%s", v; else printf "null" }'
+}
+# mem_rss_read / mem_hwm_read: ONE measurement read. Print the reading only when it is a real positive
+# number; print NOTHING when the gateway's hook could not measure (so `[ -n "$r" ]` is a valid test).
+mem_rss_read(){ local v; v="$(mem_num_or_null "$(gw_rss 2>/dev/null)")"; [ "$v" = null ] || printf '%s' "$v"; }
+mem_hwm_read(){ local v; v="$(mem_num_or_null "$(gw_hwm 2>/dev/null)")"; [ "$v" = null ] || printf '%s' "$v"; }
+# _mem_kv <ugen-stats-line> <key> -> the value of `key=` in a `k=v k=v ...` line (empty when absent).
+_mem_kv(){ printf '%s' "$1" | awk -v k="$2" '{for(i=1;i<=NF;i++){split($i,a,"=");if(a[1]==k){print a[2];exit}}}'; }
 
 # rss_series_json <series_file> → a compact JSON array [{"t_s":<int>,"rss_mib":<float>},…] for the
 # recovery curve, built from a whitespace-separated `<t_s> <rss_mib>` per-line sample file the memory
