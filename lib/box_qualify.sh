@@ -111,6 +111,12 @@ BQ_PEAK_RATCHET_PCT="${BQ_PEAK_RATCHET_PCT:-40}"
 # single previous run. Comparing against only the immediately-previous run means one contaminated run
 # silently becomes the next run's reference and the gate normalizes the contamination.
 BQ_BASELINE_WINDOW="${BQ_BASELINE_WINDOW:-5}"
+# The FLOOR window is separate and wider, because the floor baseline is POOLED across every gateway
+# on the arch rather than kept per gateway (direct_c1_p99_us is measured with NO gateway in the path,
+# so it describes the rig, not the gateway). Pooling yields roughly one sample per gateway per run,
+# so a window of 15 spans about one full field run's box population and the median describes the
+# population rather than one lucky or unlucky draw.
+BQ_FLOOR_WINDOW="${BQ_FLOOR_WINDOW:-15}"
 # How far back the anti-ratchet reference reaches (records, not runs of this window).
 BQ_BASELINE_RETAIN="${BQ_BASELINE_RETAIN:-12}"
 # Seed the baseline from PRE-FEATURE snapshots (which carry no qualification block) by reading their
@@ -177,11 +183,11 @@ bq_json_str(){ if [ -z "${1:-}" ]; then printf 'null'; else printf '"%s"' "$(pri
 # block — see bq_stage1_verdict / bq_stage2_verdict).
 # ═════════════════════════════════════════════════════════════════════════════════════════════════
 bq_read_baselines(){ # gateway arch snapshots_dir
-  python3 - "$1" "$2" "$3" "$BQ_BASELINE_WINDOW" "$BQ_BASELINE_RETAIN" "$BQ_ALLOW_LEGACY_BASELINE" <<'PY'
+  python3 - "$1" "$2" "$3" "$BQ_BASELINE_WINDOW" "$BQ_BASELINE_RETAIN" "$BQ_ALLOW_LEGACY_BASELINE" "$BQ_FLOOR_WINDOW" <<'PY'
 import glob, json, os, statistics, sys
 
-gw, arch, snapdir, win, retain, allow_legacy = sys.argv[1:7]
-win, retain, allow_legacy = int(win), int(retain), allow_legacy == "1"
+gw, arch, snapdir, win, retain, allow_legacy, floor_win = sys.argv[1:8]
+win, retain, allow_legacy, floor_win = int(win), int(retain), allow_legacy == "1", int(floor_win)
 
 def med(vs):
     return statistics.median(vs) if vs else None
@@ -195,21 +201,24 @@ def num(x):
     return x if isinstance(x, (int, float)) and not isinstance(x, bool) else None
 
 recs = []
-for path in sorted(glob.glob(os.path.join(snapdir, "result_%s_*.json" % gw))):
+# EVERY gateway's snapshots are read, not just this one's. The FLOOR is pooled across the whole
+# field (see the lane() calls below); only the PEAK is filtered back down to this gateway.
+for path in sorted(glob.glob(os.path.join(snapdir, "result_*.json"))):
     try:
         with open(path) as fh:
             j = json.load(fh)
     except Exception:
         continue                      # a corrupt snapshot is not a baseline, and never fatal here
     if arch and j.get("arch") and j.get("arch") != arch:
-        continue                      # a baseline is per gateway AND per arch
+        continue                      # a baseline is always per arch
     m = j.get("matrix") or {}
     bq = ((j.get("rig") or {}).get("box_qualify")) or {}
     qualified = (bq.get("verdict") == "pass")
     legacy = not bq                   # predates the gate entirely
     if not qualified and not (legacy and allow_legacy):
         continue                      # a FAILED qualification must never seed the baseline
-    rec = {"measured_at": j.get("measured_at") or "", "legacy": legacy}
+    rec = {"measured_at": j.get("measured_at") or "", "legacy": legacy,
+           "gw": j.get("gateway") or ""}
     # ── floor: this run's own stage-1 median when it has one; else the published direct_c1_p99_us,
     # which is the SAME measurement (loadgen -> mock, c1, no gateway) taken by the 6x6 itself.
     f = num(((bq.get("stage1") or {}).get("floor_p99_us_median")))
@@ -248,18 +257,33 @@ for path in sorted(glob.glob(os.path.join(snapdir, "result_%s_*.json" % gw))):
 recs.sort(key=lambda r: r["measured_at"])
 out = {}
 
-def lane(key, cell_key=None, conc_key=None, src_key=None, prefix=""):
-    vals = [(r[key], r) for r in recs if r.get(key)]
-    keep = vals[-retain:]
-    window = [v for v, _ in keep[-win:]]
-    out[prefix + "N"] = str(len(window))
-    out[prefix + "VAL"] = fmt(med(window)) if window else ""
+def lane(key, cell_key=None, conc_key=None, src_key=None, prefix="", only_gw=False, window=None):
+    src = [r for r in recs if not only_gw or r.get("gw") == gw]
+    vals = [(r[key], r) for r in src if r.get(key)]
+    w = window or win
+    # Retain must never starve the window, or the median would silently be taken over fewer samples
+    # than asked for (the pooled floor window is wider than the default retain).
+    keep = vals[-max(retain, w):]
+    sample = [v for v, _ in keep[-w:]]
+    out[prefix + "N"] = str(len(sample))
+    out[prefix + "VAL"] = fmt(med(sample)) if sample else ""
     out[prefix + "OLDEST"] = fmt(keep[0][0]) if keep else ""
     out[prefix + "SRC"] = keep[-1][1].get(src_key, "") if keep else ""
     return keep
 
-lane("floor", src_key="floor_src", prefix="FLOOR_")
-peak_keep = lane("peak", src_key="peak_src", prefix="PEAK_")
+# FLOOR: POOLED ACROSS EVERY GATEWAY on this arch, deliberately.
+#   direct_c1_p99_us is the load generator hitting the mock with NO gateway in the path. It measures
+#   the RIG and the INSTANCE TYPE, not the gateway, so every gateway is sampling the same population
+#   and a per-gateway baseline is a category error. It is also actively harmful: with one or two
+#   historical samples each, a gateway's baseline is a random draw from that population, so a gateway
+#   that happened to draw a fast box rejects perfectly normal ones while a gateway that drew a slow
+#   one accepts almost anything. Observed live on 2026-07-25: apisix carried a 73us baseline and was
+#   rejected at 77us, a value squarely inside that same run's healthy spread of 70-80us, while a
+#   genuinely bad box at 89us was correctly caught. Pooling gives ~one sample per gateway per run, so
+#   the reference converges immediately and means the same thing for everyone.
+# PEAK: per gateway, because throughput genuinely IS a property of the gateway under test.
+lane("floor", src_key="floor_src", prefix="FLOOR_", window=floor_win)
+peak_keep = lane("peak", src_key="peak_src", prefix="PEAK_", only_gw=True)
 # The cell + concurrency to REPLAY come from the MOST RECENT qualified record, not the median: they
 # are identifiers, not measurements, and replaying the cell that produced the newest baseline is what
 # keeps the comparison like-for-like.

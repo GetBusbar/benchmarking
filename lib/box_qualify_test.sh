@@ -233,11 +233,21 @@ mksnap x 2026-07-25T02-00-00Z arm64 120 pass 1400 208
 bq_load_baselines gw arm64 "$TMPD"
 check "one wild PASSED run cannot own the floor baseline" "77" "$BQ_BL_FLOOR_US"
 check "one wild PASSED run cannot own the peak baseline" "9900" "$BQ_BL_PEAK_RPS"
-# A gateway with no snapshots at all: every field empty -> the caller seeds instead of blocking.
+# A GATEWAY WITH NO SNAPSHOTS AT ALL. The two lanes deliberately answer differently, and this is the
+# "drop a folder in and it works" property:
+#   FLOOR  is POOLED across every gateway on the arch, because direct_c1_p99_us is measured with NO
+#          gateway in the path: it describes the rig and the instance type, not the gateway. So a
+#          brand new gateway inherits the field's floor history and is protected from a bad box on
+#          its very FIRST run, with no per-gateway history of its own.
+#   PEAK   is per gateway, because throughput genuinely is a property of the gateway. A new gateway
+#          has none, so stage 2 seeds instead of blocking.
 bq_load_baselines nosuchgw arm64 "$TMPD"
-check "unknown gateway -> no floor baseline"  "" "$BQ_BL_FLOOR_US"
+check "unknown gateway -> INHERITS the pooled floor" "77" "$BQ_BL_FLOOR_US"
 check "unknown gateway -> no peak baseline"   "" "$BQ_BL_PEAK_RPS"
 check "unknown gateway -> no replay cell"     "" "$BQ_BL_PEAK_CELL"
+# ...and the pooled floor must still be arch-scoped: a different arch shares nothing.
+bq_load_baselines nosuchgw x86_64 "$TMPD"
+check "unknown gateway, other arch -> no floor" "" "$BQ_BL_FLOOR_US"
 
 echo "box_qualify_test: PROVENANCE — the run's raw evidence is always recorded, pass or fail"
 bq_stage1_verdict 81 79 83 36 20000 76.85 76
