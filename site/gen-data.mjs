@@ -36,16 +36,14 @@ const OUT = process.argv[3] || HERE;
 // no longer scanned into the bundle and no governed column/derivation is emitted. See app.js.
 // NOTE: "memory" is intentionally NOT scanned. The retired standalone memory suite wrote synthetic
 // burst numbers (conc=1500, 150KB payload, 120s) that mislabelled as 6x6 provenance; memory now comes
-// SOLELY from the matrix's post-6x6 peak-cell window (g.matrix.memory, projected below). No fallback.
+// SOLELY from the matrix's PER-CELL windows (matrix.upstreams[egress].cells[ingress].memory, sealed
+// below). No fallback, and NO per-gateway memory scalar: there is no cell to project one from that the
+// harness would not have had to SELECT, which is the defect per-cell measurement exists to remove.
 const SUITES = ["perf", "stream", "streamcpu", "xlate", "matrix"];
 // The ungated (non-honesty-gated) latency-shaped metrics on a perf cell: always certified when present.
 // Imported from seal.mjs — the ONE vocabulary check-consistency also imports, so the two can never lag
 // each other. RSS fields are sealed BY DISCOVERY (RSS_FIELD_RE), never from a whitelist (audit #11).
 const UNGATED_LAT = UNGATED_LAT_FIELDS;
-const MEM_CANONICAL_RSS = ["idle_rss_mib", "peak_rss_mib", "recovered_rss_mib"];
-// The non-metric memory fields that travel verbatim: the fair-load basis, the recovery curve, and the
-// WINDOW DURATIONS the harness was actually run with (audit #14 — every "60 s" label renders from these).
-const MEM_VERBATIM = ["load_cell", "load_recipe", "rss_series", "protocol", "idle_window_s", "recovery_window_s"];
 
 // ---- gateway manifests ------------------------------------------------------
 function parseManifest(text) {
@@ -187,13 +185,11 @@ const gateways = gatewayKeys.map((key) => {
         g.streaming = sealStreaming(cell.stream, bc.dialect, makeSource("matrix", SWEEP.STREAM_DIAGONAL, build, at));
       }
     }
-    // MEMORY projection (matrix SOLE source): the post-6x6 memory window (matrix.memory) — a fixed
-    // identical load on THIS gateway's peak cell (load_cell), on a fresh cold-restarted process. RSS is
-    // UNGATED (no mock-bound flag), so its envelopes are certified-or-not-measured; load_cell/load_recipe
-    // /rss_series travel verbatim. A window that did not serve leaves g.memory_read absent (renders n/a).
-    if (g.matrix.memory && g.matrix.memory.served === true) {
-      g.memory_read = sealMemory(g.matrix.memory, makeSource("matrix", SWEEP.MEMORY, build, at));
-    }
+    // MEMORY: NOT projected. Memory is measured per cell (its own cold-started, plateau-terminated
+    // window on EVERY served cell) and stays per cell all the way to the reader - the board's memory lane
+    // chooses a cell through the same chooser every other lane uses (Min | Max | Same | Custom) and says
+    // which. A per-gateway scalar cannot exist without the harness selecting a cell silently, which is
+    // exactly the defect the per-cell design removes. The windows are sealed in place below.
     // SEAL every matrix cell in-place (AFTER selection/projection, which read raw). The matrix popup +
     // Protocol view read cell.perf / cell.stream directly, so those must be envelopes too — otherwise a
     // raw ungated scalar (and its _mock_bound flag) survives in the bundle (invariant C1).
@@ -262,7 +258,7 @@ const gateways = gatewayKeys.map((key) => {
   // is honest on a living board where any one gateway can be re-run alone. The staleness flag drives a
   // per-row badge in app.js; it is NOT a build failure (see the freshness guard below).
   // LOW-R3-3: the badge stamp must reflect the age of the DISPLAYED numbers, which are projected from
-  // g.matrix ONLY (best_cell / streaming / memory_read). Deriving it from the MAX across all suites let a
+  // g.matrix ONLY (best_cell / streaming / the per-cell memory windows). Deriving it from the MAX across all suites let a
   // newer legacy results/perf/<gw>.json (reachable via an ad-hoc SUITES=perf re-run) drive a "measured 5d
   // ago" badge while the shown matrix numbers were 90d old — the badge overstating freshness. Prefer the
   // matrix stamp; fall back to the newest-across-suites only when there is no matrix (a legacy-only row
@@ -278,10 +274,15 @@ const gateways = gatewayKeys.map((key) => {
   // carries the measured_at of THE RECORD IT ACTUALLY SHOWS; app.js renders the age from this.
   g.lane_measured_at = {};
   for (const [lane, rec] of [["perf", g.best_cell], ["xlate", g.translation_cell],
-    ["stream", g.streaming], ["memory", g.memory_read]]) {
+    ["stream", g.streaming]]) {
     const at = rec && rec.source && rec.source.measured_at;
     if (at) g.lane_measured_at[lane] = at;
   }
+  // The memory lane projects no per-gateway record, so it has no `source` to age by. It reads the matrix
+  // cells directly, so it ages by the matrix that produced them - and only when a served cell actually
+  // carries a window, so a matrix with no memory data leaves the lane unstamped rather than claiming a
+  // freshness for numbers that are not there.
+  if (matrixHasCellMemory(g.matrix) && g.matrix.measured_at) g.lane_measured_at.memory = g.matrix.measured_at;
   // ---- RIG PROVENANCE (audit #21): WHICH measurement instrument produced this row ------------------
   // The mock + loadgen come from a MOVING GitHub release tag, so an identical harness can produce
   // DIFFERENT cell verdicts across runs purely because the instrument was rebuilt between them — which
@@ -360,18 +361,19 @@ function sealStreamRecord(s) {
 function sealStreaming(s, dialect, source) {
   return { path: { dialect }, source, stream_served: true, ...sealStreamRecord(s) };
 }
-// sealMemory: the post-6x6 memory window -> canonical record. RSS metrics are UNGATED (no mock-bound
-// flag); load_cell / load_recipe / rss_series travel verbatim (the fair-load basis + recovery curve).
-// AUDIT #11: seal BY DISCOVERY. Every `*_rss_mib` field the producer emits (idle/peak/recovered today,
-// peak_rss_hwm_mib / post_load_rss_mib since the snapshot work) is sealed — no whitelist to lag behind
-// the producer, so a NEW RSS field can never ship as a bare unsealed scalar. The three canonical fields
-// are always PRESENT (sealed to not_measured when the producer emits null) so the board's columns exist.
-function sealMemory(mem, source) {
-  const rec = { source, served: true };
-  const rssKeys = new Set([...MEM_CANONICAL_RSS, ...Object.keys(mem).filter((k) => RSS_FIELD_RE.test(k))]);
-  for (const k of rssKeys) rec[k] = sealMetric(mem[k], {});
-  for (const k of MEM_VERBATIM) if (mem[k] != null) rec[k] = mem[k];
-  return rec;
+// matrixHasCellMemory(m): does this matrix carry a per-cell memory window on any served cell? The memory
+// lane's freshness stamp ages by the matrix that produced those windows, so the lane must know whether it
+// has anything to age. Hoisted, so the per-gateway pass above can call it.
+function matrixHasCellMemory(m) {
+  if (!m || typeof m !== "object") return false;
+  const cellGroups = [m.cells, ...Object.values(m.upstreams || {}).map((u) => u && u.cells)];
+  for (const cells of cellGroups) {
+    if (!cells || typeof cells !== "object") continue;
+    for (const cell of Object.values(cells)) {
+      if (cell && cell.served === true && cell.memory && typeof cell.memory === "object") return true;
+    }
+  }
+  return false;
 }
 // sealMatrixCellsInPlace: replace every served cell's raw perf/stream AND the top-level memory block's raw
 // RSS with SEALED envelopes, so the matrix popup + Protocol view + the embedded/snapshot matrix carry
@@ -399,7 +401,7 @@ function sealMatrixCellsInPlace(m) {
       }
     }
   }
-  // The raw memory block (the source for the g.memory_read projection) also travels in the bundle (embedded
+  // A LEGACY top-level memory block (pre-per-cell results, no longer read by anything) still travels in the bundle (embedded
   // in g.matrix + the snapshot); seal its RSS scalars so no bare ungated field survives.
   // Sealed BY DISCOVERY (audit #11): every `*_rss_mib` key present, not a 3-key whitelist that the
   // producer already outgrew (peak_rss_hwm_mib / post_load_rss_mib were shipping as BARE scalars).
@@ -512,7 +514,7 @@ function newestMeasuredMs(g) {
 }
 
 // MED-1 / MED-2: the stamp that actually drives what the board DISPLAYS, in epoch ms (0 when none).
-// EVERY displayed number now projects from g.matrix ONLY (best_cell / streaming / memory_read), so the
+// EVERY displayed number now comes from g.matrix ONLY (best_cell / streaming / the per-cell memory windows), so the
 // board-level freshness footer AND the wholesale-stale hard-fail must age those displayed numbers — the
 // matrix stamp when present, falling back to the newest-across-suites only for a legacy-only row (whose
 // numbers legitimately age by that stamp). This is the SAME basis the per-gateway ageBasisMs (:415) uses.
@@ -613,7 +615,7 @@ for (const g of gateways) {
   // suspenders backstop for the per-row badge, NOT because a live path reaches it.
   if (sawFuture) g.measured_at = ats.length ? new Date(Math.max(...ats)).toISOString() : null;
   // LOW-2: a served matrix row whose DISPLAYED numbers project from g.matrix (best_cell / streaming /
-  // memory_read / translation_cell, source:"matrix") but that carries NO valid (non-future) matrix
+  // translation_cell, source:"matrix", or a per-cell memory window) but that carries NO valid (non-future) matrix
   // measured_at is CORRUPT: run.sh:1145 ALWAYS writes measured_at via `date -u`, so a null/absent matrix
   // stamp is only reachable via truncation / hand-edit / producer bug. Left unguarded such a row bypasses
   // EVERY freshness guard — best_cell still projects and ranks, `latest` (:306) skips it so the future-
@@ -621,8 +623,12 @@ for (const g of gateways) {
   // ats.length<1 hits the `continue` below BEFORE g.stale is set, so it publishes FRESH with no badge. A
   // stamp-less served matrix row must never publish clean: flag it stale (drives the app.js badge) and
   // warn, consistent with treating a null matrix stamp as corruption rather than a legitimate reading.
-  const matrixProjected = (g.best_cell || g.translation_cell || g.streaming || g.memory_read) &&
-    [g.best_cell, g.translation_cell, g.streaming, g.memory_read].some((r) => r && r.source && r.source.kind === "matrix");
+  // Memory joins this test through the matrix cells it is read from, not through a projected record:
+  // a matrix carrying per-cell windows displays numbers just as much as one carrying a best_cell, so a
+  // stamp-less matrix must be caught either way.
+  const matrixProjected = (g.best_cell || g.translation_cell || g.streaming || matrixHasCellMemory(g.matrix)) &&
+    ([g.best_cell, g.translation_cell, g.streaming].some((r) => r && r.source && r.source.kind === "matrix")
+      || matrixHasCellMemory(g.matrix));
   if (g.matrix && matrixProjected && matrixAt == null) {
     console.warn(`gen-data: WARNING: ${g.key} projects displayed numbers from a served matrix but its ` +
       `matrix.measured_at is missing/invalid (=${g.matrix.measured_at}) — run.sh always stamps a matrix, ` +

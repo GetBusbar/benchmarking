@@ -54,11 +54,11 @@ SITE_DATA = ROOT / "site" / "data.json"
 # tag) in site/data.json, the SAME bundle the site table reads. charts.py reads those canonical
 # records instead of re-deriving numbers from results/perf + results/xlate, so a chart can never
 # show a different value (or a different #1) than the table. Streaming (stream/streamcpu) and memory
-# are ALSO projected from the matrix now: the standalone stream/streamcpu/memory suites were RETIRED
-# (run-all.sh runs ONLY the matrix), so gen-data.mjs projects the matrix's best-diagonal streaming
-# into g.streaming and its one process RSS read into g.memory_read. charts.py reads those projected
-# fields (via _load_projected → canonicalStreaming/canonicalMemory mirrors) so the streaming/memory
-# PNGs match the site's in-browser streaming/memory charts.
+# ALSO come from the matrix now: the standalone stream/streamcpu/memory suites were RETIRED (run-all.sh
+# runs ONLY the matrix), so gen-data.mjs projects the matrix's best-diagonal streaming into g.streaming,
+# which charts.py reads via the _proj_streaming mirror. MEMORY has no projected record - it is per cell -
+# so charts.py reads the per-cell windows directly (_proj_memory) on the SAME cell the site's Same mode
+# defaults to, which is what keeps the memory PNGs and the in-browser memory table showing one number.
 # ORDERING: run `node site/gen-data.mjs` BEFORE charts.py (CI: gen-data → charts.py → gen-data,
 # the second pass copying the fresh PNGs into site/charts/).
 def _canonical() -> dict:
@@ -338,8 +338,8 @@ def _mem_window(rows, key) -> str:
 
 
 def _mem_protocol_line(rows) -> str:
-    """The real protocol, in one line, from the data: cold idle -> identical fixed load on the peak
-    cell -> recovery, on a fresh cold-restarted process."""
+    """The real protocol, in one line, from the data: cold idle -> identical fixed load on the SAME cell
+    for every gateway, run until the RSS is steady -> recovery, on a process cold-started for this cell."""
     recipe = next((r.get("_mem_load_recipe") for r in (rows or []) if r.get("_mem_load_recipe")), None)
     load = "an identical fixed load"
     if isinstance(recipe, dict):
@@ -350,20 +350,28 @@ def _mem_protocol_line(rows) -> str:
         inner = ", ".join(b for b in bits if b)
         if inner:
             load = f"an identical fixed load ({inner})"
-    return (f"fresh cold-restarted process: {_mem_window(rows, '_mem_idle_window_s')} cold idle -> "
-            f"{load} on each gateway's own peak cell -> {_mem_window(rows, '_mem_recovery_window_s')} recovery")
+    cell = next((r.get("_mem_load_cell") for r in (rows or []) if r.get("_mem_load_cell")), None)
+    where = f"on {cell} for every gateway" if cell else "on the same cell for every gateway"
+    return (f"process cold-started for this cell: {_mem_window(rows, '_mem_idle_window_s')} cold idle -> "
+            f"{load} {where}, run until the RSS is steady -> "
+            f"{_mem_window(rows, '_mem_recovery_window_s')} recovery")
 
 
 
 def _mem_annot(r):
-    """Per-bar memory attribution: WHICH cell this gateway was loaded on, plus any HONESTY DISCLOSURE
-    the producer rode in memory.protocol (uncertified peak-cell basis, payload mismatch, failed load —
-    each of which is why an RSS came back NULL). Carrying that string without rendering it would hide
-    the reason a bar reads "not measured"."""
+    """Per-bar memory attribution: WHICH cell this gateway was loaded on, whether the RSS ever went
+    steady there, plus any HONESTY DISCLOSURE the producer rode in memory.protocol (payload mismatch,
+    failed load - each of which is why an RSS came back NULL). Carrying those without rendering them
+    would hide the reason a bar reads "not measured", and hide that a bar has no steady state at all."""
     bits = []
     cell = r.get("_mem_load_cell")
     if cell:
         bits.append(f"on {cell}")
+    # A cell that never plateaued has NO steady state, so its bar is absent from the ranked series. Say
+    # why, and quantify it: at the cap the growth rate IS the leak rate.
+    if r.get("_mem_plateaued") is False:
+        gr = r.get("_mem_growth_rate_mib_per_min")
+        bits.append("never settled" + (f": +{gr:,.1f} MiB/min" if isinstance(gr, (int, float)) else ""))
     proto = r.get("_mem_protocol") or ""
     clauses = [c.strip() for c in proto.split(";")[1:] if c.strip()]
     if clauses:
@@ -419,40 +427,44 @@ CHARTS = [
         name="memory_rss",
         suite="memory",
         title="Gateway RAM under a fixed load",
-        subtitle=lambda rows: "cold idle vs peak RAM, " + _mem_protocol_line(rows),
+        subtitle=lambda rows: "cold idle vs steady-state RAM, " + _mem_protocol_line(rows),
         annot=_mem_annot,
         unit="MiB RAM",
         series=[
-            Series("peak_rss_mib", "peak RAM (under load)", "rank"),
+            Series("steady_state_rss_mib", "steady-state RAM (under load)", "rank"),
             Series("idle_rss_mib", "idle RAM (cold, before load)", MUTE),
         ],
         log=True,
-        # NULL-SAFE (audit #7/#23): a gateway with no served cell has peak_rss_mib None → drawn "not
-        # measured", never a fabricated served-0 bar. The secondary (idle) label is likewise suppressed
-        # for such a row (see render), so a not-measured gateway shows no idle number either.
+        # NULL-SAFE (audit #7/#23): a gateway whose RSS never went steady on this cell has
+        # steady_state_rss_mib None → drawn "not measured", never a fabricated served-0 bar and never a
+        # peak substituted for a steady state (a peak would describe when the load stopped). The bar says
+        # "never settled" plus its growth rate instead (_mem_annot). Same for a gateway that does not
+        # serve the cell at all. The secondary (idle) label is likewise suppressed for such a row (see
+        # render), so a not-measured gateway shows no idle number either.
         null_not_served=True,
-        not_measured_text="✕ not measured (no served cell)",
+        not_measured_text="✕ no steady state on this cell (or cell not served)",
     ),
     # ── supporting: memory RECOVERY (does it release?) ────────────────────────────────────────────
     # AUDIT #10: the SYNTHETIC BURST memory suite (150KB x 1500c x 120s) is DELETED; describing it here
-    # published a protocol that no longer runs. The real protocol is the post-6x6 memory window: a fresh
-    # COLD-RESTARTED process, a cold-idle sampling window, then the IDENTICAL fixed load on each
-    # gateway's OWN peak cell, then a recovery window (durations + recipe are harness-tunable and travel
-    # in the data — every label above renders from them). Raw peak is a weak signal; the honest
-    # differentiator is whether memory is RELEASED afterward. Rank by recovered_rss_mib (best = min),
-    # with peak shown muted as the reference. null_not_served gates on the recovery field: a gateway with
-    # no recovery reading is drawn "not measured", never a fabricated 0.
+    # published a protocol that no longer runs. The real protocol is the per-cell memory window: a process
+    # COLD-STARTED for this cell, a cold-idle sampling window, then the IDENTICAL fixed load on the SAME
+    # cell for every gateway run until the RSS is steady (or the cap), then a recovery window (durations +
+    # recipe are harness-tunable and travel in the data - every label above renders from them). The level
+    # under load is a weak signal on its own; the honest differentiator is whether memory is RELEASED
+    # afterward. Rank by recovered_rss_mib (best = min), with the steady state shown muted as the
+    # reference. null_not_served gates on the recovery field: a gateway with no recovery reading is drawn
+    # "not measured", never a fabricated 0.
     Chart(
         name="memory_recovery",
         suite="memory",
         title="Does the gateway release memory after the load?",
         subtitle=lambda rows: ("recovered RSS at the end of the "
-                               f"{_mem_window(rows, '_mem_recovery_window_s')} recovery window vs. its peak - lower recovery is better"),
+                               f"{_mem_window(rows, '_mem_recovery_window_s')} recovery window vs. its steady state - lower recovery is better"),
         annot=_mem_annot,
         unit="MiB RAM",
         series=[
             Series("recovered_rss_mib", "recovered RAM (60s after load)", "rank"),
-            Series("peak_rss_mib", "peak RAM (under load)", MUTE),
+            Series("steady_state_rss_mib", "steady-state RAM (under load)", MUTE),
         ],
         log=True,
         null_not_served=True,
@@ -617,10 +629,14 @@ GATEWAY_HOURLY_USD = 0.1632
 # ── projected lanes: streaming / memory now come from the matrix via site/data.json ───────────────
 # The harness was consolidated (run-all.sh runs ONLY the matrix; the standalone stream/streamcpu/
 # memory suites are RETIRED). gen-data.mjs projects the matrix's best-diagonal streaming into
-# g.streaming and its one process RSS read into g.memory_read — the SAME canonical records the site
-# reads via canonicalStreaming()/canonicalMemory(). These loaders mirror those two functions so the
-# PNGs and the in-browser charts show identical numbers. A gateway with no projected record is simply
-# absent from the chart (rendered "not measured"), exactly as the board renders it.
+# g.streaming - the SAME canonical record the site reads via canonicalStreaming(), so the PNG and the
+# in-browser chart show identical numbers. MEMORY has no projected record at all: it is measured PER
+# CELL (its own cold-started, plateau-terminated window on every served cell) and there is no
+# per-gateway scalar to project, because producing one would mean SELECTING a cell. A chart still has
+# to draw one bar per gateway, so it draws the SAME cell for every gateway (the site's Same mode: the
+# identity cell most of the field serves), names that cell on the bar, and reads n/a for any gateway
+# that does not serve it. Same rule as every other cross-gateway comparison on the board: rank within
+# a condition. A gateway with no record for that cell is drawn "not measured", as the board renders it.
 _PROJECTED_SUITES = ("stream", "streamcpu", "memory")
 
 
@@ -661,10 +677,56 @@ def _proj_streaming(key: str) -> dict | None:
     }
 
 
+def _cell_memory(key: str, ingress: str, egress: str) -> dict | None:
+    """The per-cell memory window a gateway's served cell carries, or None. Mirrors app.js
+    perCellMemory(): matrix.upstreams[egress].cells[ingress].memory on a cell that actually served."""
+    up = ((CANON.get(key) or {}).get("matrix") or {}).get("upstreams") or {}
+    cell = ((up.get(egress) or {}).get("cells") or {}).get(ingress)
+    if not isinstance(cell, dict) or cell.get("served") is not True:
+        return None
+    mem = cell.get("memory")
+    return mem if isinstance(mem, dict) else None
+
+
+def _dialects() -> list:
+    """Every egress dialect present in the bundle's matrices, sorted. Derived from the data, never a
+    hard-coded protocol list: the harness decides what it measured, not this reader."""
+    seen = set()
+    for g in CANON.values():
+        seen.update((((g or {}).get("matrix") or {}).get("upstreams") or {}).keys())
+    return sorted(seen)
+
+
+def _widest_dialect() -> str | None:
+    """The identity cell the MOST gateways serve - the site's Same-mode default (app.js widestDialect).
+    Derived from the data and tie-broken alphabetically, so no gateway or protocol is ever special-cased
+    and the answer is deterministic. None when nothing is served (no data yet)."""
+    best, best_n = None, 0
+    for d in _dialects():
+        n = sum(1 for key in CANON if _cell_memory(key, d, d) is not None)
+        if n > best_n or (n == best_n and n > 0 and best and d < best):
+            best, best_n = d, n
+    return best
+
+
+def _mem_cell() -> str | None:
+    """The comparison cell, derived from CANON on every call. NOT memoised: the answer is a property of
+    the bundle currently loaded, and a cached one would survive a CANON swap and quietly describe a
+    different run than the bars are drawn from."""
+    return _widest_dialect()
+
+
 def _proj_memory(key: str) -> dict | None:
-    """canonicalMemory(g) mirror → a row carrying peak_rss_mib / idle_rss_mib. g.memory_read
-    (source:"matrix" or a legacy memory-fallback) is the matrix run's one process-level RSS read."""
-    m = (CANON.get(key) or {}).get("memory_read")
+    """One chart row from THIS gateway's per-cell memory window on the shared comparison cell.
+
+    There is no per-gateway memory record to mirror any more: memory is measured per cell, and the cell
+    IS the workload, so a bar drawn from a different cell per gateway would compare different work. Every
+    row therefore comes from the SAME cell (the identity cell most of the field serves), and a gateway
+    that does not serve it has no row - it renders "not measured", never a substituted cell."""
+    d = _mem_cell()
+    if not d:
+        return None
+    m = _cell_memory(key, d, d)
     if not m:
         return None
     # RSS metrics are UNGATED sealed envelopes (no mock-bound flag); mval() reads them (None when absent).
@@ -677,9 +739,18 @@ def _proj_memory(key: str) -> dict | None:
         "_mem_idle_window_s": m.get("idle_window_s"),
         "_mem_recovery_window_s": m.get("recovery_window_s"),
         "_mem_load_recipe": m.get("load_recipe"),
-        "_mem_load_cell": m.get("load_cell"),
+        # The cell is not a per-gateway choice any more, so it is the same string on every row. It still
+        # travels per row, because the annotation that names it must come from the record it describes.
+        "_mem_load_cell": f"{d}>{d}",
+        # The plateau verdict rides with the row: a cell that never went steady has NO steady state, and
+        # the growth rate is what it has instead. Both are rendered on the bar (_mem_annot).
+        "_mem_plateaued": m.get("plateaued"),
+        "_mem_growth_rate_mib_per_min": mval(m.get("growth_rate_mib_per_min")),
         "idle_rss_mib": mval(m.get("idle_rss_mib")),
-        "peak_rss_mib": mval(m.get("peak_rss_mib")),
+        # The headline is the STEADY STATE, the same quantity the site's memory column ranks: the value
+        # the RSS settled at, null when it never settled. Peak-under-load is not it - a peak is bounded by
+        # how long the load ran, which is the dependence the plateau termination exists to remove.
+        "steady_state_rss_mib": mval(m.get("steady_state_rss_mib")),
         # recovered_rss_mib is absent on pre-recovery bundles → None. The recovery chart gates on it
         # (null_not_served), so such a gateway is shown "not measured", never a fabricated 0 bar.
         "recovered_rss_mib": mval(m.get("recovered_rss_mib")),
@@ -1124,7 +1195,7 @@ def _report_md(rows: list, title: str, charts: list, pending: tuple = (), chart_
                  "language** (Rust / Go / Python / Node / Other). **Rows are sorted by added latency "
                  "(p99), lowest first.**")
     lines.append("")
-    lines.append("| Gateway | Added latency (p99) | Sustained RPS (20 ms upstream) | Max proxy RPS | Idle RAM | Peak RAM | Built |")
+    lines.append("| Gateway | Added latency (p99) | Sustained RPS (20 ms upstream) | Max proxy RPS | Idle RAM | Steady-state RAM | Built |")
     lines.append("|---|--:|--:|--:|--:|--:|---|")
     mock_bound_seen = False
     zero_load_seen = False
@@ -1145,7 +1216,10 @@ def _report_md(rows: list, title: str, charts: list, pending: tuple = (), chart_
     for key, r in rows:
         lat = r.get("added_latency_p99_us")
         idle = r.get("idle_rss_mib")
-        peak = r.get("peak_rss_mib")
+        # The published RAM-under-load number is the STEADY STATE, the same quantity the site ranks. A
+        # gateway that never settled has none, and the table reads "-" for it rather than substituting a
+        # peak (which would report when the load stopped, not what the gateway holds).
+        peak = r.get("steady_state_rss_mib")
         served = r.get("served", None)
         proxy = rps_cell(r.get("rps_max_proxy"), r.get("rps_max_proxy_suppressed"), served)
         llm = rps_cell(r.get("rps_sustained_20ms"), r.get("rps_sustained_20ms_suppressed"), served)

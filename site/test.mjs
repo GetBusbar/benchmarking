@@ -31,11 +31,29 @@ const ROOT = join(HERE, "..");
 const app = createRequire(import.meta.url)(join(HERE, "app.js"));
 
 let passed = 0;
+// The runner CATCHES a failing test, records it, and keeps going, then exits non-zero at the end with
+// every failure listed. A throwing test used to abort the file at that line: the two tests that assert on
+// the LIVE bundle sit in the middle of it, so while the shipped data carried a known inversion, every one
+// of the ~200 tests after them silently never ran. That is the worst possible failure mode for a suite
+// whose job is to be the gate: it looked like a single known-red and was hiding real ones (the perf-label
+// test below was broken by an earlier relabel and nothing said so). Ordering must not decide coverage.
+const failures = [];
 function test(name, fn) {
-  fn();
-  passed += 1;
-  console.log(`ok - ${name}`);
+  try {
+    fn();
+    passed += 1;
+    console.log(`ok - ${name}`);
+  } catch (e) {
+    failures.push({ name, e });
+    console.error(`FAIL - ${name}\n      ${(e && e.message ? String(e.message) : String(e)).split("\n").join("\n      ")}`);
+  }
 }
+process.on("exit", () => {
+  if (!failures.length) return;
+  console.error(`\n${failures.length} FAILING test(s):`);
+  for (const f of failures) console.error(`  - ${f.name}`);
+  process.exitCode = 1;
+});
 
 // ---- sealed-envelope fixture helpers (mirror seal.mjs / gen-data) ------------
 // Every metric in the bundle is a SEALED ENVELOPE. These builders take RAW intent (value + mock_bound)
@@ -980,6 +998,15 @@ const STREAM_CELL = {
   added_gap_p50_us: 5, added_gap_p99_us: 12, streams_sustained: 1300, streams_sustained_fps: 39000,
   streams_sustained_mock_bound: false, cpu_fps: 48000, cpu_fps_concurrency: 768, cpu_fps_mock_bound: false,
 };
+// CELL_MEM: one served cell's own memory window, as matrix/run.sh emits it (RAW scalars - gen-data seals
+// them in place). This is the ONLY shape memory ships in now: per cell, cold-started, plateau-terminated.
+const CELL_MEM = { served: true, protocol: "per-cell, own cold-started process", serve_error: "",
+  load_recipe: { concurrency: 64, payload_bytes: 4096 },
+  idle_rss_mib: 120.5, steady_state_rss_mib: 890.2, recovered_rss_mib: 130.0,
+  peak_rss_mib: 892.0, peak_rss_hwm_mib: 910, plateaued: true, time_to_plateau_s: 95,
+  growth_rate_mib_per_min: 0.2, load_s: 155, idle_window_s: 60, recovery_window_s: 60,
+  rss_series: [ { t_s: 0, rss_mib: 120.5 }, { t_s: 60, rss_mib: 890.2 }, { t_s: 180, rss_mib: 130.0 } ] };
+
 function buildStreamMemRepo() {
   const root = mkdtempSync(join(tmpdir(), "site-strm-"));
   mkdirSync(join(root, "gateways", "sgw"), { recursive: true });
@@ -991,13 +1018,14 @@ function buildStreamMemRepo() {
     rps_sustained_20ms_concurrency: 512, rps_max_proxy: 50000, rps_max_proxy_concurrency: 256,
     sweep_max_proxy: [{ conc: 256, rps: 50000, p99_us: 100, fail: 0 }],
     sweep_sustained_20ms: [{ conc: 512, rps: 45000, p99_us: 200, fail: 0 }] };
+  const cellMem = { ...CELL_MEM };   // ONE object, shared by both views, so a mutator reaches the cell
   const matrix = {
     gateway: "sgw", build: "ok", matrix_version: 2, served: true, measured_at: iso,
     memory: { served: true, idle_rss_mib: 120.5, peak_rss_mib: 890.2, peak_rss_hwm_mib: 910, post_load_rss_mib: 300,
       recovered_rss_mib: 130.0, rss_series: [ { t_s: 0, rss_mib: 120.5 }, { t_s: 60, rss_mib: 890.2 }, { t_s: 180, rss_mib: 130.0 } ] },
     upstreams: { openai: { configurable: true, served: true, cells: {
-      openai: { served: true, perf, stream: { ...STREAM_CELL } } } } },
-    cells: { openai: { served: true, perf, stream: { ...STREAM_CELL } } },
+      openai: { served: true, perf, stream: { ...STREAM_CELL }, memory: cellMem } } } },
+    cells: { openai: { served: true, perf, stream: { ...STREAM_CELL }, memory: cellMem } },
   };
   writeFileSync(join(root, "results", "matrix", "sgw.json"), JSON.stringify(matrix));
   return root;
@@ -1126,18 +1154,32 @@ test("streaming: a null added-TTFT/gap reads n/a on the table (the envelope carr
   assert.deepEqual(checkConsistency({ gateways: [nullGw] }, app, SYNTH).errors, [], "a null-TTFT sealed streaming record is consistent");
 });
 
-test("gen-data projects memory from the matrix's one process-level read", () => {
+test("gen-data emits memory PER CELL and projects no per-gateway memory scalar", () => {
+  // The defect this asserts against: one memory number per gateway forced the harness to SELECT a cell to
+  // produce it, and it selected on throughput while reporting memory. There is now nothing to select - the
+  // window lives on the cell, and the reader chooses the cell (Min|Max|Same|Custom) and can see which.
   const bundle = genInto(buildStreamMemRepo());
   const g = bundle.gateways.find((x) => x.key === "sgw");
-  assert.ok(g.memory_read, "expected a projected g.memory_read");
-  assert.equal(g.memory_read.source.kind, "matrix");
-  assert.equal(app.mval(g.memory_read.idle_rss_mib), 120.5);
-  assert.equal(app.mval(g.memory_read.peak_rss_mib), 890.2);
-  assert.equal(app.memCell(g, "peak_rss_mib", String).text, "890.2");
-  // Recovery signals carry through the projection as sealed envelopes, null-safe.
-  assert.equal(app.mval(g.memory_read.recovered_rss_mib), 130.0, "recovered_rss_mib projects into g.memory_read");
-  assert.ok(Array.isArray(g.memory_read.rss_series) && g.memory_read.rss_series.length === 3,
-    "rss_series projects into g.memory_read");
+  assert.equal(g.memory_read, undefined, "NO per-gateway memory scalar may be projected");
+  const cell = g.matrix.upstreams.openai.cells.openai;
+  assert.ok(cell.memory, "the served cell carries its own memory window");
+  assert.equal(app.mval(cell.memory.idle_rss_mib), 120.5);
+  assert.equal(app.mval(cell.memory.steady_state_rss_mib), 890.2);
+  assert.equal(app.mval(cell.memory.recovered_rss_mib), 130.0);
+  // The growth rate is a SEALED metric, not a bare scalar: it is published whether or not the cell
+  // plateaued (any threshold admits a leak slower than itself), so it must be an envelope like the rest.
+  assert.ok(app.isEnvelope(cell.memory.growth_rate_mib_per_min), "growth_rate_mib_per_min is sealed");
+  assert.ok(app.isEnvelope(cell.memory.time_to_plateau_s), "time_to_plateau_s is sealed");
+  assert.equal(cell.memory.plateaued, true, "the plateau VERDICT is a raw bool, not a metric envelope");
+  assert.ok(Array.isArray(cell.memory.rss_series) && cell.memory.rss_series.length === 3,
+    "the rss_series travels verbatim on the cell");
+  // The board reads that cell: Same mode on the widest dialect lands on it and reports the steady state.
+  const st = { data: bundle, mode: "same", sameDialect: "openai", view: "memory" };
+  assert.equal(app.hasPerCellMemory(bundle), true, "the bundle is a per-cell memory bundle");
+  assert.equal(app.memCell(g, "steady_state_rss_mib", String, st).text, "890.2");
+  // The memory lane still ages: with no projected record to carry a source stamp, it ages by the matrix
+  // that produced the windows.
+  assert.equal(g.lane_measured_at.memory, g.matrix.measured_at, "the memory lane ages by its matrix");
 });
 
 test("memory recovery column: present shows the value, absent renders muted n/a (never a fabricated 0)", () => {
@@ -1312,7 +1354,7 @@ test("cellPerfTip shows a green cell's perf and its deviation from the gateway's
   const best = bcCell({ ingress: "openai", egress: "openai", rps_sustained_20ms: 30000, rps_sustained_20ms_mock_bound: false });
   const green = { served: true, perf: cellPerf({ rps_sustained_20ms: 25500, rps_sustained_20ms_mock_bound: false, added_latency_p99_us: 900 }) };
   const tip = app.cellPerfTip(green, "anthropic", "openai", best);
-  assert.ok(tip.includes("25,500 req/s @20ms"), tip);
+  assert.ok(tip.includes("25,500 req/s (20 ms upstream)"), tip);
   assert.ok(tip.includes("+900 µs p99 added"), tip);
   assert.ok(tip.includes("-15.0% req/s vs the OpenAI→OpenAI cell"), tip); // human labels, not raw dialect keys
   const bestTip = app.cellPerfTip({ served: true, perf: cellPerf({ rps_sustained_20ms: 30000, rps_sustained_20ms_mock_bound: false }) }, "openai", "openai", best);
@@ -1338,7 +1380,7 @@ test("FINDING 33: cellPerfTip cannot leak a suppressed sustained RPS (the number
   // A certified cell vs a SUPPRESSED reference: the number shows but no delta (the divisor is null).
   const uncertRef = bcCell({ ingress: "openai", egress: "openai", rps_sustained_20ms: 30000, rps_sustained_20ms_mock_bound: true });  // suppressed ref
   const t = app.cellPerfTip({ served: true, perf: cellPerf({ rps_sustained_20ms: 25500, rps_sustained_20ms_mock_bound: false, added_latency_p99_us: 900 }) }, "anthropic", "openai", uncertRef);
-  assert.ok(t.includes("25,500 req/s @20ms"), t);
+  assert.ok(t.includes("25,500 req/s (20 ms upstream)"), t);
   assert.ok(!t.includes("vs the"), `no delta against a suppressed reference; got: ${t}`);
 });
 
@@ -1982,40 +2024,54 @@ test("#26 CLASS: conc_at travels inside the sealed envelope and drives the '@ N 
 // ---- #27: the producer's fabricated-0 -> honest-NULL change; the site must be NULL-SAFE ------------
 test("#27 CLASS: every RSS field is NULL-SAFE — a null RSS renders 'not measured', never 0", () => {
   const root = certifyRepo(buildStreamMemRepo(), (m) => {
-  // The producer now emits NULL (never a fabricated 0) for an RSS it could not obtain: a failed fixed
-  // load or a payload mismatch nulls peak_rss_mib + peak_rss_hwm_mib, and the disclosure rides in
-  // memory.protocol as text.
-  m.memory.peak_rss_mib = null;
-  m.memory.peak_rss_hwm_mib = null;
-  m.memory.protocol = "post-6x6, fresh cold restart: 60s COLD idle -> fixed load -> 60s recovery; " +
-    "peak/hwm withheld: declared load_recipe.payload_bytes=4096 but only 512B were actually delivered";
-  m.memory.idle_window_s = 30;
-  m.memory.recovery_window_s = 45;
+  // The producer emits NULL (never a fabricated 0) for an RSS it could not obtain: a failed fixed load or
+  // a payload mismatch nulls the steady state + peak/hwm, and the disclosure rides in memory.protocol as
+  // text. On this path the plateau VERDICT is withheld as null too: `false` would assert that we watched
+  // this gateway fail to settle, when what happened is that we could not watch it at all.
+  const mem = m.upstreams.openai.cells.openai.memory;
+  mem.steady_state_rss_mib = null;
+  mem.peak_rss_mib = null;
+  mem.peak_rss_hwm_mib = null;
+  mem.plateaued = null;
+  mem.time_to_plateau_s = null;
+  mem.protocol = "per-cell, own cold-started process: 30s COLD idle -> fixed load run to plateau -> 45s recovery; " +
+    "steady state/peak/hwm withheld: declared load_recipe.payload_bytes=4096 but only 512B were actually delivered";
+  mem.idle_window_s = 30;
+  mem.recovery_window_s = 45;
   });
   const g = genInto(root).gateways.find((x) => x.key === "sgw");
+  const mem = g.matrix.upstreams.openai.cells.openai.memory;
   // (a) SEALED, not bare: a null RSS is an explicit not-measured envelope, and the NEW producer fields
-  //     (peak_rss_hwm_mib / post_load_rss_mib) are sealed BY DISCOVERY — no whitelist to lag (#11).
-  for (const k of ["idle_rss_mib", "peak_rss_mib", "recovered_rss_mib", "peak_rss_hwm_mib", "post_load_rss_mib"])
-    assert.ok(app.isEnvelope(g.memory_read[k]), `${k} must be a sealed envelope, not a bare scalar`);
-  assert.equal(app.mval(g.memory_read.peak_rss_mib), null);
-  assert.equal(g.memory_read.peak_rss_mib.reason, "not_measured");
-  assert.equal(app.mval(g.memory_read.idle_rss_mib), 120.5);
+  //     (peak_rss_hwm_mib / growth rate / time to plateau) are sealed BY DISCOVERY plus the named memory
+  //     vocabulary - no whitelist to lag the producer (#11).
+  for (const k of ["idle_rss_mib", "steady_state_rss_mib", "recovered_rss_mib", "peak_rss_mib",
+    "peak_rss_hwm_mib", "growth_rate_mib_per_min", "time_to_plateau_s"])
+    assert.ok(app.isEnvelope(mem[k]), `${k} must be a sealed envelope, not a bare scalar`);
+  assert.equal(app.mval(mem.steady_state_rss_mib), null);
+  assert.equal(mem.steady_state_rss_mib.reason, "not_measured");
+  assert.equal(app.mval(mem.idle_rss_mib), 120.5);
+  assert.equal(mem.plateaued, null, "an unmeasurable window WITHHOLDS the verdict, it does not assert false");
   // (b) the RENDER suppresses it: n/a, never a 0 bar or a 0 cell.
-  const cell = app.memCell(g, "peak_rss_mib", String);
+  const bundle = { gateways: [g] };
+  const st = { data: bundle, mode: "same", sameDialect: "openai", view: "memory" };
+  const cell = app.memCell(g, "steady_state_rss_mib", String, st);
   assert.equal(cell.na, true);
   assert.equal(cell.text, "n/a");
   assert.equal(cell.v, null);
-  // (c) #14: the window durations RENDER from the data, not from a hard-coded "60 s".
-  assert.deepEqual(app.memWindows(g.memory_read), { idle: 30, recovery: 45 });
-  const cap = app.memoryCaption({ gateways: [g] }).join(" ");
-  assert.ok(cap.includes("30 s") && cap.includes("45 s"), `memory caption must render the run's own windows; got: ${cap}`);
+  // (c) #14: the window durations RENDER from the data, not from a hard-coded "60 s" - and they now have
+  //     to be found on the CELL, which is where the producer writes them.
+  assert.deepEqual(app.memWindows(mem), { idle: 30, recovery: 45 });
+  assert.deepEqual(app.boardMemWindows(bundle), { idle: 30, recovery: 45 },
+    "the board's window labels must read the PER-CELL windows, not fall back to the 60 s default");
+  const cap = app.memoryCaption(bundle, st).join(" ");
+  assert.ok(cap.includes("45 s"), `memory caption must render the run's own windows; got: ${cap}`);
   assert.ok(!/60 s/.test(cap), "the caption must not hard-code the default window");
   // (d) the DISCLOSURE the producer rides in memory.protocol must reach the board, not be silently carried.
-  assert.match(g.memory_read.protocol, /peak\/hwm withheld/);
-  assert.match(app.memLoadRecipeTip(g.memory_read), /peak\/hwm withheld/,
+  assert.match(mem.protocol, /withheld/);
+  assert.match(app.memCellTip(app.chosenMemory(g, st)), /withheld/,
     "the memory protocol disclosure must be SURFACED in the Tested-on tooltip, not silently carried");
   // (e) the C1/C2 invariants still hold on a null-RSS bundle (no bare scalar, nothing recoverable).
-  assert.deepEqual(checkConsistency({ gateways: [g] }, app, SYNTH).errors, []);
+  assert.deepEqual(checkConsistency(bundle, app, SYNTH).errors, []);
 });
 
 test("#27: a fallback stream record with NULL counts seals to not-measured, never a fabricated 0", () => {

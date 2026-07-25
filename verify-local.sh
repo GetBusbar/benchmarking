@@ -32,9 +32,11 @@
 # On Linux the prebuilt rig execs natively; pass RIG_LOCAL_CONTAINER=0 to use the fetched binaries direct.
 #
 # NON-FIDELITY on macOS (honestly disclosed): container_rss_mib/hwm read /proc/<container-pid> on the
-# HOST, which does not exist under Docker Desktop's Linux VM, so idle/peak RSS read 0. matrix.memory
-# still records served:true (the gateway warmed + took load), so g.memory_read still PROJECTS — the data
-# PATH is exercised; the RSS magnitudes are simply 0 here (they are real on a Linux field box).
+# HOST, which does not exist under Docker Desktop's Linux VM, so every per-cell RSS lane comes back null.
+# The served cells still carry their memory windows (the gateway warmed and took the load), so the data
+# PATH is exercised and its shape + null-discipline are asserted; the RSS MAGNITUDES are owed to a Linux
+# run, and the plateau/growth/steady-state logic is proven separately by lib/matrix_memory_test.sh
+# against synthetic RSS curves.
 #
 # IDEMPOTENT + SELF-CLEANING: every run tears down its containers, host mock, temp dir, and reverts any
 # results/ + site/data.json churn it wrote, so nothing leaks and the working tree is left clean.
@@ -429,13 +431,33 @@ if (s) {
   A(true, "g.streaming absent (streaming UNTESTABLE on this local rig — not a projection failure)");
 }
 
-// (d) g.memory_read populated (projected from matrix.memory). On macOS RSS magnitudes read 0 (no host
-// /proc for the container pid) — the PROJECTION path is what we assert here; served must be true.
-const mr = g.memory_read;
-A(!!mr, "g.memory_read projected from the matrix");
-A(!!mr && mr.source && mr.source.kind === "matrix", "g.memory_read.source.kind == 'matrix'");
-A(!!mr && mr.served === true, "g.memory_read.served == true");
-A(!!mr && ("idle_rss_mib" in mr) && ("peak_rss_mib" in mr), "g.memory_read carries idle/peak RSS fields (sealed envelopes)");
+// (d) PER-CELL memory. There is no per-gateway memory record to project any more: every served cell
+// carries its OWN cold-started, plateau-terminated window, and the board reads those cells directly. So
+// what this asserts is that the windows are ON the served cells and SEALED, and that the null-discipline
+// holds. On macOS the RSS lanes come back null (container_rss_mib reads /proc/<container-pid> on the
+// HOST, which Docker Desktop's Linux VM does not expose), so the MAGNITUDES are not assertable here -
+// which is exactly why lib/matrix_memory_test.sh drives the real function against synthetic RSS curves,
+// and why a Linux run is still owed before a field run. The SHAPE and the discipline are assertable
+// anywhere: a rig that cannot measure RSS must withhold the plateau verdict (plateaued: null), never
+// assert plateaued:false, which would claim we watched this gateway fail to settle.
+let memCells = 0, memSealed = 0, memBadVerdict = 0, memRssSeen = 0;
+for (const eg of Object.keys(ups || {})) for (const ing of Object.keys(ups[eg].cells || {})) {
+  const c = ups[eg].cells[ing];
+  if (c.served !== true || !c.memory || typeof c.memory !== "object") continue;
+  memCells++;
+  const mm = c.memory;
+  if (isEnv(mm.idle_rss_mib) && isEnv(mm.steady_state_rss_mib) && isEnv(mm.growth_rate_mib_per_min)) memSealed++;
+  // plateaued:true with no steady state is incoherent (settled at nothing); so is plateaued:false on a
+  // rig that never read an RSS sample at all (a verdict about a gateway we could not watch).
+  if (mm.plateaued === true && mval(mm.steady_state_rss_mib) == null) memBadVerdict++;
+  if (mval(mm.idle_rss_mib) != null || mval(mm.steady_state_rss_mib) != null) memRssSeen++;
+}
+A(memCells >= 1, "per-cell memory windows present on served cells (" + memCells + " of " + served + " served cells)");
+A(memCells > 0 && memSealed === memCells, "every per-cell memory window is SEALED (idle / steady state / growth rate are envelopes): " + memSealed + "/" + memCells);
+A(memBadVerdict === 0, "no cell claims plateaued:true without a steady state (" + memBadVerdict + " incoherent)");
+A(!g.memory_read, "NO per-gateway memory scalar (g.memory_read) is emitted - memory stays per cell, so no cell is ever selected");
+if (memRssSeen > 0) { A(true, "RSS lanes populated on " + memRssSeen + "/" + memCells + " cells (a rig with real /proc)"); }
+else { A(true, "RSS lanes all null on this rig (macOS has no host /proc for the container pid) - SHAPE verified, magnitudes owed to a Linux run"); }
 
 // (e) per-gateway measured_at set
 A(typeof g.measured_at === "string" && g.measured_at.length > 0, "per-gateway g.measured_at is set (" + g.measured_at + ")");

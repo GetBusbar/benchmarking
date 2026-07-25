@@ -339,7 +339,17 @@ function memWindows(m) {
   return { idle, recovery: rec };
 }
 function boardMemWindows(data = (typeof state !== "undefined" ? state.data : null)) {
-  const recs = ((data && data.gateways) || []).map((g) => g.memory_read).filter(Boolean);
+  // PER-CELL FIRST. The windows now ride on the per-cell records; reading only the legacy per-gateway
+  // record here would silently fall back to the 60 s DEFAULT on every per-cell bundle, republishing a
+  // hard-coded duration as a fact about a run that may not have used it - the exact defect audit #14
+  // removed. Legacy bundles still answer through g.memory_read.
+  const gws = (data && data.gateways) || [];
+  for (const g of gws) {
+    for (const c of memoryCells(g)) {
+      if (c.mem.idle_window_s != null || c.mem.recovery_window_s != null) return memWindows(c.mem);
+    }
+  }
+  const recs = gws.map((g) => g.memory_read).filter(Boolean);
   const rec = recs.find((m) => m.idle_window_s != null || m.recovery_window_s != null) || null;
   return memWindows(rec);
 }
@@ -2342,8 +2352,8 @@ const CHART_CAPTIONS = {
   added_latency: "Added latency vs direct-to-mock, p99 in microseconds, concurrency 1, on each gateway's best same-dialect passthrough (the same canonical record the table ranks). Lower is better.",
   rps_sustained_20ms: "Sustained RPS with a 20 ms mock LLM latency (p99 under 1 s, error rate under 0.1 percent), best same-dialect passthrough. Higher is better.",
   rps_max_proxy: "Max proxy RPS against an instant mock, best same-dialect passthrough. Higher is better.",
-  memory_rss: "Process RSS in MiB: cold idle vs peak under an identical fixed load on each gateway's peak cell (fresh cold-restarted process). Same load for every gateway. Lower is better.",
-  memory_recovery: "RSS 60 s after the fixed load stops (recovered) vs the peak under load: does the gateway release the memory it took? Lower recovery is better.",
+  memory_rss: "Process RSS in MiB: cold idle vs the steady state reached under an identical fixed load, on the SAME cell for every gateway (a process cold-started for that cell, the load run until the RSS is steady). A gateway whose RSS never went steady has no steady state and is drawn not-measured, with its growth rate on the bar. Lower is better.",
+  memory_recovery: "RSS 60 s after the fixed load stops (recovered) vs the steady state under load: does the gateway release the memory it took? Lower recovery is better.",
   cost_per_million: "Instance cost per million requests at the canonical sustained rate. Lower is better.",
   rps_per_dollar: "Canonical sustained RPS per dollar of hourly instance cost. Higher is better.",
   stream_added_ttft: "Streaming: added time-to-first-token vs direct-to-mock, p99. Lower is better.",
