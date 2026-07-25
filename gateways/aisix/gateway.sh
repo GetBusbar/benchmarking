@@ -36,7 +36,10 @@
 #     (disclosed external-infra run-mechanic). ***FLAGGED FOR REVIEW: the metrics-off decision from the
 #     original lean entry is REVERSED here — metrics is default-on and needs no external infra, so under
 #     OOTB it must stay on (binds a second port :9090). See gw_config note + the reconciliation summary.***
-#   - ONE provider_key whose api_base is the mock, with a dummy api_key. openai adapter builds
+#   - TWO provider_keys, both with api_base -> the mock and a dummy api_key, declared together in the
+#     ONE static resources file (plus the two client-facing models that select them). This is the house
+#     one-static-config standard: the matrix picks an egress column by swapping the request's model
+#     name, never by re-rendering the config. openai adapter builds
 #     {api_base}/chat/completions (aisix-provider-openai/src/bridge.rs:400) — api_base ends in /v1 so
 #     the mock's /v1/chat/completions is hit; arbitrary http:// localhost is accepted (not
 #     googleapis-hardcoded). anthropic adapter builds {api_base}/v1/messages
@@ -61,6 +64,13 @@ GW_PORT=3000
 GW_PATH=/v1/chat/completions
 GW_MODEL=gpt-4o-mini
 GW_AUTH=bench-token
+# The two CLIENT-facing model ids declared in the ONE static resources file (see _aisix_write_config).
+# gw_matrix_egress selects an egress column by swapping GW_MODEL between these — it never rewrites the
+# config. NOTE THE `GW_` PREFIX: any shell var named `AISIX_*` that reaches the binary's environment is
+# swallowed by aisix's config scrape and kills boot (see the launch-env note in _aisix_launch), so
+# nothing rig-side may use that prefix.
+GW_MODEL_OPENAI=gpt-4o-mini
+GW_MODEL_ANTHROPIC=claude-3-5-sonnet-20241022
 # Translation lane (xlate suite): aisix serves Anthropic ingress natively on /v1/messages
 # (crates/aisix-proxy/src/lib.rs build_router) and translates to the OpenAI upstream configured below.
 # extract_bearer accepts the SAME token via either Authorization: Bearer or x-api-key, so no auth
@@ -88,29 +98,67 @@ gw_build() {
   gw_prereqs || return 1
   if [ ! -d "$AISIX_SRC" ]; then
     git clone "${AISIX_REPO:-https://github.com/api7/aisix}" "$AISIX_SRC" || return 1
-    [ -n "${AISIX_COMMIT:-}" ] && git -C "$AISIX_SRC" checkout -q "$AISIX_COMMIT"
   fi
+  # Re-pin on EVERY build, not just on a fresh clone. This checkout used to live inside the clone
+  # branch above, so a REUSED box (a re-run, or a box whose $AISIX_SRC survived) kept whatever ref the
+  # first build left behind and silently ignored a changed AISIX_COMMIT — the run would then record a
+  # `build` string that did not match the pin. Fresh EC2 boxes never hit it; reused ones drift.
+  [ -n "${AISIX_COMMIT:-}" ] && { git -C "$AISIX_SRC" fetch -q origin 2>/dev/null; git -C "$AISIX_SRC" checkout -q "$AISIX_COMMIT" || return 1; }
   # Release build (LTO etc.) — fine on the 8-core bench box. Only the `aisix` binary is needed.
   ( cd "$AISIX_SRC" && cargo build --release --bin aisix ) || return 1
   AISIX_BIN="$AISIX_SRC/target/release/aisix"
   [ -x "$AISIX_BIN" ] || { echo "aisix binary not found after build"; return 1; }
 }
 
+# NOT A PIN BUG — the "(v0.3.0)" this prints is upstream's own stale self-report. AISIX_COMMIT
+# 0f90a98ec8c43864d43e740e3ab66fe1d639c143 IS tag v0.5.0; api7 did not bump the workspace Cargo.toml
+# `version` at that tag, so `aisix --version` and every crate line in the build log still say 0.3.0.
+# The COMMIT is what pins the build and what this string leads with — the version suffix is cosmetic.
+# Don't "fix" the pin on the strength of the v0.3.0 text.
 gw_version() {
   local sha; sha="$(git -C "$AISIX_SRC" rev-parse --short HEAD 2>/dev/null)"
   local v; v="$("$AISIX_BIN" --version 2>/dev/null | awk '{print $2}')"
   echo "api7/aisix@${sha:-?}${v:+ (v$v)} (source build)"
 }
 
-# _aisix_launch <adapter> <api_base>: write the standalone bootstrap config + resources file wiring
-# exactly ONE provider_key (adapter + api_base → mock) and boot the binary. The client-facing model
-# id is always GW_MODEL (display_name); model_name is the upstream id sent on. api_base is the mock
-# host — openai appends /chat/completions to {base}/v1, anthropic appends /v1/messages to {base}.
-# _aisix_write_config <adapter> <api_base>: RENDER the bootstrap + resources files ONLY (no boot, no
-# pkill) — so gw_config can materialize the exact OOTB config without a side effect. _aisix_launch
-# calls this then boots the binary.
+# ── ONE STATIC CONFIG (house standard) ────────────────────────────────────────────────────────────
+# _aisix_write_config takes NO arguments and renders the SAME BYTES on every call, for every lane and
+# every matrix egress column. That is the standard the board depends on: a reader installs this gateway
+# version with THIS ONE published config on their own box and sees these numbers. A per-column config
+# rewrite would mean the published row was assembled from several configs, only one of which is
+# published — so it is banned here.
+#
+# It previously took <adapter> <api_base> and gw_matrix_egress re-rendered a DIFFERENT single-provider
+# resources file per column (openai -> api_base .../v1, anthropic -> api_base ...). Replaced by the
+# busbar/litellm-python/helicone pattern: ONE resources file declaring BOTH upstream provider_keys and
+# BOTH client-facing models at once; gw_matrix_egress changes only GW_MODEL, the CLIENT-side selector.
+# aisix routes a request by its model display_name -> models[].provider_key -> that provider_key's
+# adapter + api_base, so which upstream dialect is exercised is chosen by the model name in the request
+# body, with no reconfiguration. Multiple provider_keys/models in one resources_file is aisix's own
+# documented standalone shape (crates/aisix-core filesource), not a rig trick.
+#
+# LOCALLY PROVEN (aisix built from source at the pinned AISIX_COMMIT 0f90a98, run against the pinned
+# mock bin/mock-arm64 with MOCK_RECORD=1). ONE config, rendered by THIS function, no reconfiguration
+# between probes — "resources loaded from file resources=5", proxy bound, and all six declared cells
+# 200 with the mock recording the right upstream dialect and body_ok=true:
+#   openai    <- openai            /v1/chat/completions   openai
+#   anthropic <- openai            /v1/messages           anthropic
+#   openai    <- anthropic         /v1/chat/completions   openai
+#   anthropic <- anthropic         /v1/messages           anthropic
+#   openai    <- openai-responses  /v1/responses          openai-responses
+#   anthropic <- openai-responses  /v1/messages           anthropic
+# (The openai-responses ingress row egressed on /v1/responses for the openai column — the field's
+# probe-first leg-3 evidence records where each request actually landed; nothing is pre-judged here.)
+# The same binary + config REPRODUCED the field failure byte-for-byte when the env scrub was removed:
+#   AISIX_BENCH_KEY=... -> unknown field `bench_key`   (the exact 2026-07-25 error)
+#   AISIX_COMMIT=...    -> unknown field `commit`      (the latent override-path wipeout)
+#
+# Per-adapter api_base shapes (unchanged, just now coexisting):
+#   openai    — bridge builds {api_base}/chat/completions (aisix-provider-openai/src/bridge.rs:400), so
+#               api_base ends in /v1 and the mock's /v1/chat/completions is hit.
+#   anthropic — bridge builds {api_base}/v1/messages (aisix-provider-anthropic/src/bridge.rs:273) with
+#               x-api-key: <dummy>, so api_base is the bare mock origin.
 _aisix_write_config() {
-  local adapter="$1" api_base="$2"
   # OOTB reconciliation (see the "OOTB posture" note above gw_config for the full rationale + citations):
   #  - admin.enabled: true — aisix's DEFAULT (config.rs default_enabled()==true); the admin listener is
   #    a plain in-process HTTP CRUD surface that does NOT require etcd (etcd is a separate optional
@@ -142,40 +190,71 @@ YAML
   cat > "$GW_DIR/resources.gen.yaml" <<YAML
 _format_version: "1"
 provider_keys:
-  - display_name: mock
-    provider: $adapter
-    adapter: $adapter
-    api_base: "$api_base"
+  - display_name: mock-openai
+    provider: openai
+    adapter: openai
+    api_base: "http://127.0.0.1:$MOCK_PORT/v1"
+    api_key: "sk-mock"
+  - display_name: mock-anthropic
+    provider: anthropic
+    adapter: anthropic
+    api_base: "http://127.0.0.1:$MOCK_PORT"
     api_key: "sk-mock"
 models:
-  - display_name: $GW_MODEL
-    provider: $adapter
+  - display_name: $GW_MODEL_OPENAI
+    provider: openai
     model_name: gpt-4o-mini
-    provider_key: mock
+    provider_key: mock-openai
+  - display_name: $GW_MODEL_ANTHROPIC
+    provider: anthropic
+    model_name: claude-3-5-sonnet-20241022
+    provider_key: mock-anthropic
 api_keys:
   - display_name: bench
-    key_env: AISIX_BENCH_KEY
+    key_env: BENCH_AISIX_KEY
     allowed_models: ["*"]
 YAML
 }
 
-# _aisix_launch <adapter> <api_base>: render the config (above) then boot the binary.
+# _aisix_launch: render THE one config (above) then boot the binary. Takes no arguments — every caller
+# gets identical bytes; the egress column is selected client-side by GW_MODEL, never by a rewrite.
 _aisix_launch() {
-  _aisix_write_config "$1" "$2"
+  _aisix_write_config
   pkill -f 'target/release/aisix' 2>/dev/null; sleep 1
-  # AISIX_BENCH_KEY holds the plaintext bearer; aisix hashes it (SHA-256) into key_hash at load. The
-  # bench sends this same value as Authorization: Bearer / x-api-key (GW_AUTH). AISIX_* env vars are
-  # ALSO scraped by aisix's config loader as field overrides, but AISIX_BENCH_KEY is not a config
-  # field path (no __), so it is ignored by the deserializer and only consumed by the api_key key_env.
+  # BENCH_AISIX_KEY holds the plaintext bearer; aisix hashes it (SHA-256) into key_hash at load. The
+  # bench sends this same value as Authorization: Bearer / x-api-key (GW_AUTH).
+  #
+  # ***THE NAME MUST NOT START WITH `AISIX_`.*** This var was previously AISIX_BENCH_KEY, on the
+  # (WRONG) assumption that aisix's env-override scrape only claims names containing `__` and would
+  # ignore it. It does not: the loader strips the `AISIX_` prefix, lowercases the remainder and feeds
+  # it to the bootstrap-config deserializer as a TOP-LEVEL field, which is deny-unknown-fields. Every
+  # boot therefore died at config load, before binding :3000 — while the launch hook still returned 0,
+  # because the binary is backgrounded and the failure is a later non-zero exit. That is exactly the
+  # 2026-07-25 field signature: `launch_rc=0, not ready; port 3000 not listening` on all 3 attempts of
+  # all 6 egress columns, with the real cause only in gw_diag's launch.log tail
+  # (results/fanout-aisix.log:1467):
+  #   Error: config load failed: failed to load configuration: deserialize: unknown field `bench_key`,
+  #   expected one of `etcd`, `resources_file`, `proxy`, `admin`, `observability`, `cache`,
+  #   `ratelimit`, `upstream`, `managed`, `bedrock_endpoint_url`
+  # — 36/36 cells lost to a variable NAME. `BENCH_AISIX_KEY` carries no `AISIX_` prefix, so the scrape
+  # never sees it and only the api_key's key_env consumes it. Keep it that way.
+  #
+  # THE SAME TRAP IS WIDER THAN ONE VARIABLE, so the launch env SCRUBS the rig's own AISIX_* names.
+  # gateways/versions.env defines AISIX_REPO + AISIX_COMMIT and this manifest defines AISIX_SRC. Today
+  # matrix/run.sh plain-`source`s versions.env with no `set -a`, so they stay unexported and never
+  # reach the binary — but the DOCUMENTED override path (`AISIX_COMMIT=<sha> ./run.sh ...`) EXPORTS
+  # them, and aisix would then reject `commit` / `repo` / `src` as unknown top-level config fields and
+  # wipe out all 36 cells again, with the same misleading `launch_rc=0 / port not listening` surface.
+  # `env -u` removes them from the child environment only; gw_build/gw_version still see them.
   setsid taskset -c "$CORES" env \
-    AISIX_BENCH_KEY="$GW_AUTH" \
+    -u AISIX_REPO -u AISIX_COMMIT -u AISIX_SRC \
+    BENCH_AISIX_KEY="$GW_AUTH" \
     "$AISIX_BIN" --config "$GW_DIR/config.gen.yaml" </dev/null >"$GW_DIR/launch.log" 2>&1 &
 }
 
 gw_launch() {
-  # openai egress: api_base ends in /v1 so the bridge's {base}/chat/completions hits the mock's
-  # /v1/chat/completions (aisix-provider-openai/src/bridge.rs:400).
-  _aisix_launch openai "http://127.0.0.1:$MOCK_PORT/v1"
+  # The ONE static config (both provider_keys, both models). Nothing here varies by lane or column.
+  _aisix_launch
 }
 
 # ── OOTB config artifact (file-driven) ────────────────────────────────────────────────────────────
@@ -184,25 +263,28 @@ gw_launch() {
 # files (exactly what --config loads) plus the one non-secret key env. The suite runner captures this
 # once per run into results/config/aisix.txt and the board publishes it, so "fresh source build +
 # these files → these numbers" is reproducible. The files are read from what gw_launch just rendered
-# (falls back to rendering the openai-lane default), so they can never drift from what aisix loaded.
+# (falls back to rendering it if absent), so they can never drift from what aisix loaded. Because the
+# config is STATIC — one file, both provider_keys, both models, identical bytes for every lane and
+# every matrix egress column — this artifact IS the config every published aisix number was taken
+# under; there is no second, unpublished config anywhere in the run.
 # OOTB posture (reconciled from a lean draft): admin.enabled=true and metrics.prometheus.enabled=true
 # are aisix's DEFAULTS and need no external infra, so both are ON (re-enabled — off would be forbidden
 # strips). Held off as disclosed run-mechanics: standalone resources_file (no etcd) and tracing.otlp
 # (external push collector). Auth is mandatory (aisix has no anonymous mode) — one api_key, its
-# plaintext via AISIX_BENCH_KEY, shown as its dummy value; provider api_key + admin_keys are dummy on
+# plaintext via BENCH_AISIX_KEY, shown as its dummy value; provider api_key + admin_keys are dummy on
 # the isolated rig (no live secrets). ***The metrics-off REVERSAL is flagged for review — see header.***
 gw_config() {
   local cfg="$GW_DIR/config.gen.yaml" res="$GW_DIR/resources.gen.yaml"
-  [ -f "$cfg" ] || _aisix_write_config openai "http://127.0.0.1:$MOCK_PORT/v1"
+  [ -f "$cfg" ] || _aisix_write_config
   echo "# ── config.gen.yaml (rendered; loaded via --config) ──"
   cat "$cfg"
   echo
   echo "# ── resources.gen.yaml (rendered; standalone resources_file) ──"
   cat "$res"
   echo
-  echo "# ── launch env (non-secret; AISIX_BENCH_KEY is the mandatory api_key plaintext, dummy on the rig) ──"
+  echo "# ── launch env (non-secret; BENCH_AISIX_KEY is the mandatory api_key plaintext, dummy on the rig) ──"
   cat <<ENV
-AISIX_BENCH_KEY=$GW_AUTH
+BENCH_AISIX_KEY=$GW_AUTH
 ENV
 }
 
@@ -247,12 +329,17 @@ GW_MATRIX_CAP="
 GW_MATRIX_CAP_NOTE="AISIX v0.5.0 registers only openai (/v1/chat/completions), openai-responses (/v1/responses) and anthropic (/v1/messages) INGRESS routes — no gemini/cohere/bedrock ingress (lib.rs build_router) — and only its openai + anthropic EGRESS adapters take a plain overridable api_base with a dummy key; gemini (vertex, OAuth2), cohere (no adapter) and bedrock (SigV4 + JSON AWS creds) are grey by that capability/auth limit"
 GW_MATRIX_EGRESS="openai anthropic"
 
+# ONE STATIC CONFIG: both upstreams are already wired in the single resources file, so a column is
+# selected by the CLIENT-facing model id alone — GW_MODEL picks the models[] entry, whose provider_key
+# picks the adapter + api_base. The relaunch below runs byte-identical config to every other column and
+# to gw_launch; nothing is rewritten. (Same shape as agentgateway/gomodel: flip the model, not the file.)
 gw_matrix_egress() {
   case "$1" in
-    openai)    _aisix_launch openai    "http://127.0.0.1:$MOCK_PORT/v1";;
-    anthropic) _aisix_launch anthropic "http://127.0.0.1:$MOCK_PORT";;
+    openai)    GW_MODEL="$GW_MODEL_OPENAI";;
+    anthropic) GW_MODEL="$GW_MODEL_ANTHROPIC";;
     *) return 1;;
   esac
+  _aisix_launch
 }
 
 gw_rss() { awk '/VmRSS/{printf "%.1f", $2/1024}' "/proc/$(pgrep -f 'target/release/aisix' | head -1)/status" 2>/dev/null; }
