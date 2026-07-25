@@ -113,14 +113,14 @@
         <span id="row-count" class="muted count"></span>
       </div>
     </div>
-    <!-- Cell chooser (Performance + Streaming): which cell(s) of the one 6x6 run to show. A segmented
-         Peak | Same | Custom control, plus the dialect dropdown(s) each mode needs. Its own row. -->
+    <!-- Cell chooser (Performance, Streaming, Memory): which cell(s) of the one 6x6 run to show, plus the
+         dialect dropdown(s) each mode needs. Its own row. The MODE BUTTONS are rendered by app.js
+         (renderFilters), because the tabs offer different mode sets: Peak | Same | Custom on the perf
+         lanes, Min | Max | Same | Custom on memory, which must never be able to paint a Peak button
+         (Peak selects by throughput, and selecting on throughput to report memory is the defect
+         per-cell measurement exists to remove). -->
     <div class="control-group cell-chooser hidden" id="cell-chooser">
-      <div class="seg" id="mode-seg" role="tablist" aria-label="Which cell to show">
-        <button type="button" class="seg-btn" data-mode="peak" role="tab" title="Each gateway on its own best same-dialect diagonal">Peak</button>
-        <button type="button" class="seg-btn" data-mode="same" role="tab" title="One chosen dialect's diagonal for every gateway">Same</button>
-        <button type="button" class="seg-btn" data-mode="custom" role="tab" title="Any ingress→egress cell for every gateway">Custom</button>
-      </div>
+      <div class="seg" id="mode-seg" role="tablist" aria-label="Which cell to show"></div>
       <label class="chooser-same hidden" id="chooser-same">Dialect
         <select id="same-dialect" aria-label="Dialect diagonal to show for every gateway"></select></label>
       <label class="chooser-custom hidden" id="chooser-custom">Cell
@@ -192,17 +192,18 @@
           <li><b>Same</b> fixes one dialect's diagonal for every gateway at once, an identical-path apples-to-apples comparison. A gateway that does not serve that dialect reads n/a rather than being silently dropped from the row.</li>
           <li><b>Custom</b> lets you pick any ingress-to-egress cell for every gateway, including a real translation cell where the client speaks one dialect and the upstream speaks another. Two dropdowns pin the in and out; picking the same dialect on both is that dialect's strict passthrough.</li>
           <li><b>Streaming</b> reuses the same three picks for the SSE columns: added time-to-first-token at p50 and p99, added inter-token gap at p50 and p99, sustained concurrent streams, and CPU-bound frames per second.</li>
+          <li><b>Memory</b> picks a cell too, but from a different menu: Min, Max, Same and Custom. Same and Custom mean here exactly what they mean everywhere else. Min and Max show each gateway on its own lowest or highest steady-state cell, and the row states how many cells that extremum was chosen from, because a minimum over twenty-six cells and a minimum over one are not the same search. There is deliberately no Peak on this tab. Peak means the gateway's highest-throughput cell, so offering it here would select a cell by throughput and then report its memory, which is precisely the thing per-cell measurement was built to stop. Idle sits outside the chooser entirely, since it is sampled cold before any request and no cell is involved in it.</li>
           <li><b>One value, everywhere.</b> The table, the matrix hover popup, the drawer and the charts all read the same per-cell record through the same accessors, so a number shows identically on every surface (a build-time guard fails the deploy if any two of them ever disagree). The Protocol matrix tab is simply the visual face of Custom: hover a cell for its gated numbers and its delta against the gateway's own peak, click it to open that exact cell in Custom.</li>
         </ul>
       </article>
       <article class="method-card">
         <span class="card-kicker"><a id="lnk-memory" target="_blank" rel="noopener">matrix/run.sh (memory)</a></span>
-        <h3>Memory: a fixed load on each gateway's peak cell</h3>
+        <h3>Memory: measured on every cell, aggregated across none</h3>
         <ul>
-          <li>Memory is a dedicated window that runs after the full 6&times;6, per gateway. The harness first finds each gateway's <b>peak cell</b>, its served cell with the highest max-proxy throughput (there is no single universal cell, since some gateways do not serve OpenAI-to-OpenAI), and then runs an identical fixed load on it. Every gateway gets the same load recipe, concurrency times payload bytes times duration, so the memory comparison is apples-to-apples and only the cell itself differs, shown under Tested on.</li>
-          <li><b>Fresh cold restart.</b> The gateway is killed and cold-restarted specifically for the peak cell's egress dialect, on a brand-new process, so idle measures a true cold-start baseline rather than a warm process that just finished the 6&times;6, which would measure recovery, not idle.</li>
-          <li><b>Idle.</b> Resident memory is sampled for 60 seconds with no traffic at all on that fresh process, and reported as the median of that window.</li>
-          <li><b>Peak.</b> The maximum resident memory sampled continuously while the fixed load runs, the real working-set peak under a fair, identical load rather than a synthetic burst.</li>
+          <li><b>What this used to do, and why it was wrong.</b> Memory was once a single number per gateway, so the harness had to choose a cell to produce it, and it chose each gateway's highest-throughput served cell. That selected on throughput and reported memory: two quantities with nothing to do with each other. It also meant the column compared different work, since one gateway might be measured on an identity pairing that does no translation at all while another paid for a full protocol translation on every request. And the pool each gateway chose from ranged from twenty-six served cells down to one, so breadth of capability quietly became a wider selection of favourable lanes. Every gateway is now measured on every cell it serves, and nothing is ever aggregated across cells.</li>
+          <li><b>Cold restart on every cell.</b> Each cell gets its own freshly started process, for two separate windows: one for memory, one for throughput. They cannot share a process, because they want opposite conditions. Memory needs a cold start, since idle has to be sampled before the process has served a single request or it measures recovery rather than idle. Throughput needs a warm one, or the early sweep points measure a cold gateway. A restart costs about ten seconds, which is a small price for two measurements that cannot contaminate each other.</li>
+          <li><b>Idle.</b> Resident memory sampled with no traffic at all on that fresh process. Idle involves no cell and no protocol, so it is the one memory number directly comparable across every gateway on the board.</li>
+          <li><b>Steady state, not a stopwatch.</b> The load runs until memory stops moving, not for a fixed time. A fixed duration decides the answer for any gateway still climbing when it expires: the number then describes when we stopped watching rather than the gateway, and a longer run would have produced a larger one. Steadiness is a trend test rather than a spread test, because a leak that is levelling off has small sample-to-sample deltas near the tail and would pass a spread test while still genuinely rising. A gateway that never reaches steady state inside the cap is published as exactly that, with its growth rate in megabytes per minute, which is a far more useful thing to know than any peak.</li>
           <li><b>Recovered @60&nbsp;s.</b> Resident memory 60 seconds after the load stops, which is really asking whether the gateway gives back what it took or stays pinned near its peak. That question, more than the raw peak number, is the interesting part of the memory story: a gateway that peaks near a gigabyte and settles back to tens of megabytes behaves very differently from one that just holds onto it.</li>
           <li><b>Recovery curve.</b> Memory is sampled at a steady cadence across the whole window, cold idle, then fixed load, then recovery, on one continuous process lifecycle, and drawn as a single idle-peak-recovery sparkline on the Memory tab. A gateway with no served cell reads n/a there, never a fabricated line. When RSS genuinely cannot be measured for a gateway, we publish that as null rather than as a zero, since zero would read as "uses no memory," which is never what actually happened.</li>
         </ul>
@@ -214,6 +215,28 @@
           <li><b>Rig-limited numbers are suppressed.</b> A throughput or frames-per-second figure the harness could not certify as gateway-limited, because the sweep saturated near the mock's own ceiling instead, reads n/a and draws no bar. It never ranks and never wins a comparison.</li>
           <li><b>No gateway is graded red for a pairing it does not serve.</b> Grey cells carry their own probe evidence: a boot or build failure reads "did not run," a measured streaming refusal reads "did not stream." Measured and shown, not hidden.</li>
           <li><b>Every number regenerates from committed JSON</b>, and the per-gateway Download results link is the full 6&times;6 record the board is built from, not a summary of it.</li>
+        </ul>
+      </article>
+    </div>
+
+    <h3 class="method-section-head">Defaults, and why we do not tune them</h3>
+    <p class="method-section-sub">We benchmark what a default install actually does, including the parts that are inconvenient for us.</p>
+    <div class="method-grid">
+      <article class="method-card">
+        <h3>The config rule</h3>
+        <ul>
+          <li><b>Every config is the bare minimum required to run.</b> A setting appears only if it is needed to boot the gateway, to point upstreams at the test mock instead of a real provider, to expose the ingress paths the matrix exercises, or to bind the port and cores the rig requires. Everything else is absent, and the application decides its own defaults.</li>
+          <li><b>We do not turn features on. We do not turn them off.</b> Not to make gateways look alike, not to remove a cost we consider unrepresentative, and not because a feature is inconvenient to measure. A default install is the subject of the benchmark, so whatever a gateway enables out of the box is what runs.</li>
+          <li><b>We do not restate a default either.</b> Writing a setting whose value matches the application's own default looks harmless, but it is still a line we wrote, and it silently becomes an override the day upstream changes that default. A config lint enforces this: every setting must carry a machine-checked reason naming which of the four necessities it satisfies, and anything without one fails the build.</li>
+        </ul>
+      </article>
+      <article class="method-card">
+        <h3>What that costs us, specifically</h3>
+        <ul>
+          <li>This rule found a real bug in the gateway this benchmark's authors build, which is disclosed above as one of the entrants. That gateway's default install serves a metrics endpoint, and nothing in this benchmark ever scrapes it. Its resident memory turned out to grow linearly with requests served, about twenty-three bytes each, with no ceiling: measured across runs of two, four, nine and eighteen million requests, the growth never levelled off. The same binary under the same load, with a scrape every ten seconds, peaked at a fifth of the unscraped figure. Nobody had noticed, because the shape only appears when metrics are enabled and never drained, which is exactly what a default install does.</li>
+          <li><b>The obvious fixes were all refused.</b> Turning our own gateway's metrics off would have removed the cost by not measuring it. Scraping every gateway's metrics endpoint on a timer would have hidden it behind a condition no default install is in, and would have helped whichever gateway buffers most, which at that moment was ours. Both would have improved our own number by changing the instrument. The measurement stands and the bug gets fixed in the gateway, which is where it belongs.</li>
+          <li><b>Gateways phone home if that is what they do.</b> Four gateways ship outbound usage reporting enabled and we previously suppressed it, justified as a concession to an isolated rig. That justification was not true, since the boxes have ordinary internet access. The suppressions are gone. If a default install reports usage, the benchmark measures a default install that reports usage.</li>
+          <li>If this method surfaces something unflattering about another gateway, that is the same instrument doing the same job. It is not a finding we went looking for, and it is not one we would soften.</li>
         </ul>
       </article>
     </div>
@@ -254,7 +277,7 @@
     <p class="muted">Built and operated by the Busbar team; busbar is one of the entrants. Same harness for every gateway, every number from the committed JSON, open source, re-runnable by anyone.</p>
     <p class="muted">Reproduce this: <code>git clone https://github.com/GetBusbar/benchmarking && cd benchmarking && ./run-on-ec2.sh</code> (needs only a configured AWS CLI; the script launches a fresh Graviton box, runs the full suite, pulls the results back and terminates the box).</p>
     <p><a id="repo-link" target="_blank" rel="noopener">Benchmark repository on GitHub</a></p>
-    <p class="muted"><strong>Feedback &amp; corrections.</strong> The config shown for each gateway is our best-effort out-of-the-box attempt, published for transparency. Anyone — not just maintainers — can propose a fix: <a href="https://github.com/GetBusbar/benchmarking/issues/new?template=config-correction.yml" target="_blank" rel="noopener">open an issue</a> in the benchmarking repo.</p>
+    <p class="muted"><strong>Feedback &amp; corrections.</strong> The config shown for each gateway is our best-effort out-of-the-box attempt, published for transparency. Anyone, not just maintainers, can propose a fix: <a href="https://github.com/GetBusbar/benchmarking/issues/new?template=config-correction.yml" target="_blank" rel="noopener">open an issue</a> in the benchmarking repo.</p>
   </div>
 </footer>
 

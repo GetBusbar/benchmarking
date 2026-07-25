@@ -958,14 +958,18 @@ test("C7: the live bundle's hwm-below-peak rows warn but never hard-fail", () =>
     assert.match(w, /sampled peak_rss [\d.]+ MiB > kernel peak_rss_hwm [\d.]+ MiB/);
 });
 
-test("C6: an inversion is a WARNING on the live bundle, never a hard failure", () => {
+// C6 IS A HARD FAILURE. It was a warning on the theory that two independently-swept ceilings overlap
+// on noise. That theory was wrong and it hid a real defect: the two sweeps searched different
+// concurrency ranges, so the peak search terminated on its own bound rather than on the gateway. Both
+// sweeps now share one SWEEP constant, so an inversion has no benign mechanism left. Whatever
+// inversions the live bundle still carries must therefore reach ERRORS, and must be well formed.
+test("C6: an inversion is a hard failure on the live bundle, never a warning", () => {
   const { errors, warnings } = checkConsistency(data, app);
-  assert.ok(!errors.some((x) => x.startsWith("C6")),
-    `C6 must never hard-fail on a cross-phase inversion; got: ${errors.filter((x) => x.startsWith("C6"))}`);
-  // whatever inversions this run does carry must be well-formed and name a real gateway.
+  assert.ok(!warnings.some((x) => x.includes("sustained@20ms")),
+    `a C6 inversion must not be routed to the soft channel; got: ${warnings.filter((x) => x.includes("sustained@20ms"))}`);
   const keys = new Set(data.gateways.map((g) => g.key));
-  for (const w of warnings.filter((x) => x.includes("sustained@20ms")))
-    assert.ok(keys.has(w.split(".")[0]), `a C6 warning must name a gateway in the bundle; got: ${w}`);
+  for (const e of errors.filter((x) => x.includes("sustained@20ms")))
+    assert.ok(keys.has(e.split(".")[0]), `a C6 error must name a gateway in the bundle; got: ${e}`);
 });
 
 // ---- matrix is the single source: streaming + memory projection + download ----------------------
@@ -2224,15 +2228,15 @@ test("#21: C6 fires on an INJECTED inversion - the assertion cannot silently pas
   assert.equal(flag(ok), false);
   assert.equal(flag(noCeiling), false, "max_proxy 0 is 'no qualifying ceiling', not an inversion");
   // and the REAL checker agrees on the same injected cell, through its own code path, with a raw matrix
-  // present on disk — an inversion is a WARNING (never a hard fail, or every honest run stops publishing).
+  // present on disk. An inversion is a HARD FAILURE: the number published as that cell's maximum was
+  // exceeded by another sweep on the same box, which makes it not a maximum, so the run is not
+  // publishable until it is re-measured.
   const { errors, warnings } = checkConsistency(data, app);
-  assert.ok(!errors.some((x) => x.startsWith("C6")));
-  // NOTE: the warning channel is now SHARED (C6 inversions + C7 hwm-below-peak), so this asserts on the
-  // C6-shaped subset rather than on every warning — an unrelated invariant adding a warning must not
-  // false-fail C6's own assertion.
-  const c6w = warnings.filter((w) => w.includes("sustained@20ms"));
-  assert.ok(c6w.every((w) => /sustained@20ms .* > max_proxy /.test(w)),
-    "every C6 warning must name the inversion it found");
+  assert.ok(!warnings.some((w) => w.includes("sustained@20ms")),
+    "a C6 inversion must not reach the soft channel");
+  const c6e = errors.filter((e) => e.includes("sustained@20ms"));
+  assert.ok(c6e.every((e) => /sustained@20ms .* > max_proxy /.test(e)),
+    "every C6 error must name the inversion it found");
 });
 
 // ---- #1 CLASS: "Tested on" describes the record the row ACTUALLY displays, in EVERY lane -----------
