@@ -23,8 +23,24 @@ GW_MODEL=gpt-4o-mini
 GW_AUTH=sk-fake-benchmark-key
 APISIX_IMAGE="${APISIX_IMAGE:-apache/apisix:3.17.0-debian}"
 
+# ── the bedrock ingress URI: ONE definition, used by the route AND by the matrix probe ────────────
+# Bedrock is one of only two dialects that carry the model in the URL PATH (see lib/ingress.sh), and
+# ai-proxy's bedrock provider only accepts a BEDROCK model id — it can never be GW_MODEL (gpt-4o-mini,
+# the OpenAI-dialect body model). The harness default for the bedrock probe path is
+# /model/$GW_MODEL/converse, so with no override the matrix POSTed /model/gpt-4o-mini/converse while
+# the only wired route is /model/<bedrock-model>/converse: APISIX answered 404, the bedrock column's
+# warm-up never went green, and all six of its cells were published as harness_boot_failure
+# (results/fanout-apisix.log 07:50:26-07:52:23 — three boot attempts, each 404 on
+# "POST /model/gpt-4o-mini/converse"). That is unmeasured data, not a gateway "no".
+# APISIX_BEDROCK_MODEL is the single source: the route URI, the ai-proxy options.model and the matrix
+# probe path are all derived from it, so the route and the probe can never drift apart again. This is
+# a static manifest declaration (lib/ingress.sh honours GW_MATRIX_PATH_* at CALL time) — not a
+# per-column rewrite: the one config is unchanged and every egress column uses this same URI.
+APISIX_BEDROCK_MODEL="anthropic.claude-3-sonnet-20240229-v1:0"
+GW_MATRIX_PATH_BEDROCK="/model/$APISIX_BEDROCK_MODEL/converse"
+
 gw_version() {
-  local dg; dg=$(sudo docker inspect --format '{{index .RepoDigests 0}}' "$APISIX_IMAGE" 2>/dev/null)
+  local dg; dg=$(${BENCH_DOCKER:-sudo docker} inspect --format '{{index .RepoDigests 0}}' "$APISIX_IMAGE" 2>/dev/null)
   echo "${APISIX_IMAGE}${dg:+ (@${dg##*@})}"
 }
 
@@ -49,7 +65,7 @@ gw_build() {
   #     APISIX's default HTTP request/access logging; that logging is on by default and stays on.
   _apisix_write_config
   _apisix_write_routes
-  sudo docker pull "$APISIX_IMAGE" >/dev/null 2>&1 || true
+  ${BENCH_DOCKER:-sudo docker} pull "$APISIX_IMAGE" >/dev/null 2>&1 || true
 }
 
 # _apisix_write_config: emit APISIX's ONE canonical conf/config.yaml — the DB-less standalone
@@ -133,11 +149,11 @@ routes:
       ai-proxy:
         $(_apisix_plugcfg anthropic claude-3-5-sonnet-20241022)
   - id: ai-proxy-converse
-    uri: /model/anthropic.claude-3-sonnet-20240229-v1:0/converse
+    uri: $GW_MATRIX_PATH_BEDROCK
     methods: [POST]
     plugins:
       ai-proxy:
-        $(_apisix_plugcfg bedrock anthropic.claude-3-sonnet-20240229-v1:0)
+        $(_apisix_plugcfg bedrock "$APISIX_BEDROCK_MODEL")
 #END
 YAML
 }
@@ -157,15 +173,27 @@ YAML
 # OpenAI-chat -> anthropic/bedrock fan-out (no such converter), so those off-diagonal cells are 0.
 # Evidence: apisix/plugins/ai-providers/schema.lua (provider enum), ai-proxy/base.lua (3-way route),
 # ai-protocols/converters/init.lua (only anthropic->openai bridge), tag 3.17.0.
+#
+# anthropic-ingress -> openai-egress (the one converter APISIX ships) is NOT declared, and that is a
+# ONE-CONFIG limit, not an ai-proxy limit. ai-proxy binds exactly one provider per ROUTE, and a route
+# is keyed by its URI; the anthropic ingress has exactly one URI (/v1/messages). So that single URI
+# can be bound to the `anthropic` provider - which makes anthropic-in a native passthrough and turns
+# the anthropic>anthropic diagonal green - OR to `openai-compatible`, which fires the
+# anthropic-messages -> openai-chat converter and turns anthropic>openai green. It cannot be both at
+# once without rewriting the config between egress columns, which the one-static-config standard
+# forbids. We keep the anthropic binding (the diagonal), so anthropic>openai is honestly not offered.
+# Observed evidence for exactly this: the 2026-07-25 field run declared it 1 and the probe returned
+# "UNTRANSLATED passthrough byte-identical to the mock's canned anthropic body" - ai-proxy passed the
+# anthropic body straight to the anthropic provider, which is the correct behaviour for that route.
 GW_MATRIX_CAP="
 100000
 010000
-101000
+001000
 000000
 000000
 000001
 "
-GW_MATRIX_CAP_NOTE="APISIX 3.17.0 ai-proxy has no native Gemini generateContent or Cohere provider, and no OpenAI-to-Anthropic/Bedrock converter (only anthropic->openai); other cells are grey by that capability limit (ai-proxy/base.lua, ai-protocols/converters/init.lua)"
+GW_MATRIX_CAP_NOTE="APISIX 3.17.0 ai-proxy has no native Gemini generateContent or Cohere provider, and no OpenAI-to-Anthropic/Bedrock converter; its one anthropic->openai converter is not offered either, because ai-proxy binds one provider per route URI and the single /v1/messages URI is bound to the anthropic provider (the anthropic>anthropic diagonal) - serving both would need a per-column config rewrite, which the one-static-config standard forbids. Other cells are grey by that capability limit (ai-proxy/base.lua, ai-protocols/converters/init.lua)"
 GW_MATRIX_EGRESS="openai openai-responses anthropic bedrock"
 gw_matrix_egress() {
   # All four egress providers are already wired as simultaneous routes in the ONE config
@@ -179,8 +207,8 @@ gw_matrix_egress() {
 }
 
 gw_launch() {
-  sudo docker rm -f apisix-bench >/dev/null 2>&1; sleep 1
-  sudo docker run -d --name apisix-bench --network host --cpuset-cpus="$CORES" \
+  ${BENCH_DOCKER:-sudo docker} rm -f apisix-bench >/dev/null 2>&1; sleep 1
+  ${BENCH_DOCKER:-sudo docker} run -d --name apisix-bench --network host --cpuset-cpus="$CORES" \
     -v "$GW_DIR/config.gen.yaml:/usr/local/apisix/conf/config.yaml:ro" \
     -v "$GW_DIR/apisix.gen.yaml:/usr/local/apisix/conf/apisix.yaml:ro" \
     "$APISIX_IMAGE" >"$GW_DIR/launch.log" 2>&1 || true
@@ -214,12 +242,12 @@ gw_rss() { container_rss_mib apisix-bench; }  # summed process-tree VmRSS (same 
 gw_hwm() { container_hwm_mib apisix-bench; }  # summed process-tree VmHWM (kernel high-water mark)
 
 gw_diag() {
-  echo "container: $(sudo docker ps -a --filter name=apisix-bench --format '{{.Status}}' 2>/dev/null)"
+  echo "container: $(${BENCH_DOCKER:-sudo docker} ps -a --filter name=apisix-bench --format '{{.Status}}' 2>/dev/null)"
   echo "run.log: $(cat "$GW_DIR/launch.log" 2>/dev/null | tr '\n' ' ' | head -c 300)"
-  echo "logs:"; sudo docker logs --tail 25 apisix-bench 2>&1
+  echo "logs:"; ${BENCH_DOCKER:-sudo docker} logs --tail 25 apisix-bench 2>&1
 }
 
-gw_stop() { sudo docker rm -f apisix-bench >/dev/null 2>&1; }
+gw_stop() { ${BENCH_DOCKER:-sudo docker} rm -f apisix-bench >/dev/null 2>&1; }
 
 # gw_matrix_egress + the declared capability matrix are defined above (before gw_launch). The
 # non-openai egress columns are wired-pending-field-verification (dev-box docker host networking is
