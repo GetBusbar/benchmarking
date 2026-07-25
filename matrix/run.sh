@@ -307,19 +307,13 @@ cell_untestable(){ case " $GW_MATRIX_UNTESTABLE " in *" $1/$2 "*) return 0;; *) 
 # default gw_launch config when the writer rejects a dialect), else the default config for all six.
 GW_MATRIX_EGRESS="${GW_MATRIX_EGRESS:-openai}"
 
-# Per-cell ingress paths: manifest override wins, else the protocol's canonical default. The
-# anthropic cell reuses xlate's GW_ANTHROPIC_PATH so a manifest wired for xlate needs nothing new.
-P_OPENAI="${GW_MATRIX_PATH_OPENAI:-$GW_PATH}"
-P_RESPONSES="${GW_MATRIX_PATH_RESPONSES:-/v1/responses}"
-P_ANTHROPIC="${GW_MATRIX_PATH_ANTHROPIC:-${GW_ANTHROPIC_PATH:-/v1/messages}}"
-P_GEMINI="${GW_MATRIX_PATH_GEMINI:-/v1beta/models/$GW_MODEL:generateContent}"
-P_COHERE="${GW_MATRIX_PATH_COHERE:-/v2/chat}"
-P_COHERE_FB="/v1/chat"
-P_BEDROCK="${GW_MATRIX_PATH_BEDROCK:-/model/$GW_MODEL/converse}"
-ingress_path(){ case "$1" in
-  openai) echo "$P_OPENAI";; openai-responses) echo "$P_RESPONSES";;
-  anthropic) echo "$P_ANTHROPIC";; gemini) echo "$P_GEMINI";;
-  cohere) echo "$P_COHERE";; bedrock) echo "$P_BEDROCK";; esac; }
+# Per-cell ingress paths: ONE choke point, lib/ingress.sh (sourced AFTER the manifest so it sees the
+# manifest's GW_PATH / GW_MODEL / GW_MATRIX_PATH_* overrides). ingress_path() resolves its defaults at
+# CALL time on purpose: gemini and bedrock carry the model in the URL PATH, and gw_matrix_egress flips
+# GW_MODEL per egress column, so a path frozen at init made those cells impossible to pass. See the
+# header of lib/ingress.sh and the regression guard lib/ingress_path_test.sh.
+# shellcheck source=/dev/null
+source "$ROOT/lib/ingress.sh"
 
 # The capability probes need the RECORDING mock (instant, MOCK_RECORD=1: leg 3 evidence); the
 # per-cell perf sweep needs the exact serving conditions perf/run.sh measures under (no recording,
@@ -390,6 +384,24 @@ rebuild_headers(){
   local h
   for h in "${GW_HEADERS[@]:-}"; do [ -n "$h" ] && CURL_H+=(-H "$h"); done
   [ -n "${GW_ANTHROPIC_AUTH_HEADER:-}" ] && XH+=(-H "$GW_ANTHROPIC_AUTH_HEADER")
+}
+
+# ── manifest BASELINE: the values every egress column starts from ────────────────────────────────
+# Same bug class as the frozen ingress paths above, from the other end: gw_matrix_egress MUTATES the
+# manifest's own routing state in place (GW_MODEL for most, GW_HEADERS for portkey) and nothing ever
+# put it back, so column N+1 inherited column N's mutation. A manifest that derives its per-column
+# model from the current value — litellm-python's `GW_MODEL="${GW_MODEL}-anthropic"` — therefore
+# COMPOUNDED across the 6x6: the published run recorded model
+# "gpt-4o-mini-responses-anthropic-gemini-cohere-bedrock-responses", i.e. every column after the first
+# asked for a model that does not exist. Snapshot the baseline ONCE (after gw_build, before any
+# launch) and restore it in launch_egress — the one place a column begins — so each column sees
+# exactly what the manifest declared, and the published "model" is the manifest's, not the residue of
+# whichever column happened to run last.
+GW_MODEL_BASE="${GW_MODEL:-}"
+GW_HEADERS_BASE=(${GW_HEADERS[@]+"${GW_HEADERS[@]}"})
+restore_manifest_baseline(){
+  GW_MODEL="$GW_MODEL_BASE"
+  GW_HEADERS=(${GW_HEADERS_BASE[@]+"${GW_HEADERS_BASE[@]}"})
 }
 
 # ── mock record helpers: reset before each cell, read the egress-dialect record after the probe ──
@@ -1017,6 +1029,9 @@ run_cell(){ # egress cell path body extra-header...
 EGRESS_CONFIG=""   # "dedicated" | "default" - what this column actually ran under (recorded in JSON)
 launch_egress(){ # dialect -> 0 launched, 1 launch failed
   gw_stop 2>/dev/null; sleep 1
+  # Every column starts from the manifest's declared state, never from the previous column's
+  # mutation of it (see restore_manifest_baseline).
+  restore_manifest_baseline
   EGRESS_CONFIG=dedicated
   if declare -f gw_matrix_egress >/dev/null; then
     if ! gw_matrix_egress "$1"; then
@@ -1410,7 +1425,7 @@ cat > "$RESULTS/$GATEWAY.json" <<JSON
   },
   "upstreams": {$UPSTREAMS_JSON
   },
-  "model": "$GW_MODEL",
+  "model": "$GW_MODEL_BASE",
   "upstream_endpoint": "$GW_PATH",
   "ootb_config": $([ -n "$OOTB_CONFIG" ] && printf '"%s"' "$OOTB_CONFIG" || echo null),
   "arch": "${BENCH_ARCH:-$(uname -m)}",

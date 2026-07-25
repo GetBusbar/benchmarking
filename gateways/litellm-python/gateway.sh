@@ -150,17 +150,27 @@ GW_MATRIX_EGRESS="openai openai-responses anthropic gemini cohere bedrock"
 # The single OOTB config already wires every egress dialect (all → mock), so each matrix column just
 # selects the matching model_name; no per-lane relaunch or config rewrite is needed. Rendering the
 # same config keeps the artifact identical to what perf/memory ran.
+# ORDER MATTERS (same bug class as the frozen ingress paths): _lp_write_config derives ALL SIX
+# model_name entries from $GW_MODEL, so it must be rendered from the CANONICAL name — i.e. BEFORE this
+# column's selection mutates GW_MODEL. Rendering it afterwards (as this did) wrote a model_list whose
+# entries were derived from the already-suffixed value ("gpt-4o-mini-anthropic", "…-anthropic-responses",
+# …), so the client's per-column name only ever matched the FIRST (openai) entry and every non-openai
+# column silently egressed to openai. The runner restores GW_MODEL to the manifest baseline before each
+# column (matrix/run.sh:restore_manifest_baseline), so $GW_MODEL below is always the canonical name and
+# the suffix can never compound across the 6x6.
 gw_matrix_egress() {
+  local canon="$GW_MODEL" sel
   case "$1" in
-    openai)           GW_MODEL="$GW_MODEL";;  # canonical entry; client keeps sending $GW_MODEL
-    openai-responses) GW_MODEL="${GW_MODEL}-responses";;
-    anthropic)        GW_MODEL="${GW_MODEL}-anthropic";;
-    gemini)           GW_MODEL="${GW_MODEL}-gemini";;
-    cohere)           GW_MODEL="${GW_MODEL}-cohere";;
-    bedrock)          GW_MODEL="${GW_MODEL}-bedrock";;
+    openai)           sel="$canon";;            # canonical entry; client keeps sending $GW_MODEL
+    openai-responses) sel="${canon}-responses";;
+    anthropic)        sel="${canon}-anthropic";;
+    gemini)           sel="${canon}-gemini";;
+    cohere)           sel="${canon}-cohere";;
+    bedrock)          sel="${canon}-bedrock";;
     *) return 1;;
   esac
-  _lp_write_config
+  _lp_write_config          # rendered while GW_MODEL is still the canonical name
+  GW_MODEL="$sel"           # …then select this column's client-facing model name
   _lp_spawn
 }
 
