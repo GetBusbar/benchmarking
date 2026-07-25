@@ -245,6 +245,48 @@ export function checkConsistency(data, app) {
         }
       }
     }
+    // ---- memory (FINDING 32): the post-6x6 peak-cell window. Assert the rendered recovery sparkline
+    // agrees with the RAW memory block (not a re-computation of the same expression), plus idle<=peak
+    // sanity and that a served window is cell-attributed (load_cell present). Reads canonicalMemory,
+    // the ONE record the Memory table + drawer + charts all project from.
+    const mem = app.canonicalMemory(g);
+    if (mem) {
+      const idle = mem.idle_rss_mib, peak = mem.peak_rss_mib, recov = mem.recovered_rss_mib;
+      // idle <= peak sanity when both are present (a load run cannot use less than its own cold idle).
+      if (idle != null && peak != null && Number(idle) > Number(peak)) {
+        errors.push(`${g.key}.memory: idle_rss_mib=${idle} > peak_rss_mib=${peak} ` +
+          `(the fixed load's peak RSS cannot be below the cold-idle baseline)`);
+      }
+      // A served memory window MUST name the cell it was measured on (memory is cell-attributed now).
+      if (mem.served === true && (peak != null || idle != null) && !mem.load_cell) {
+        warnings.push(`${g.key}.memory: served window has RSS numbers but no load_cell (peak cell ` +
+          `attribution missing; a field re-run under the final protocol stamps it)`);
+      }
+      // The recovery sparkline stamps "peak X → recovered Y": X MUST be the max of the raw rss_series and
+      // Y its last point. Assert the RENDERED stamp against the raw series (not a recompute of the stamp).
+      const series = Array.isArray(mem.rss_series) ? mem.rss_series : null;
+      const spark = app.rssSparkline(series);
+      if (spark) {
+        const pts = series.filter((p) => p && typeof p.t_s === "number" && typeof p.rss_mib === "number")
+          .sort((a, b) => a.t_s - b.t_s);
+        const rawMax = Math.max(...pts.map((p) => p.rss_mib));
+        const rawLast = pts[pts.length - 1].rss_mib;
+        const m = spark.match(/peak\s+([\d.]+)\s*→\s*recovered\s+([\d.]+)/);
+        if (!m) {
+          errors.push(`${g.key}.memory: recovery sparkline rendered but its "peak → recovered" stamp is unparseable`);
+        } else {
+          const stampPeak = Number(m[1]), stampRecov = Number(m[2]);
+          if (Math.abs(stampPeak - rawMax) > 0.05) {
+            errors.push(`${g.key}.memory: sparkline stamp peak=${stampPeak} != rss_series max=${rawMax.toFixed(1)} ` +
+              `(the drawn recovery curve's peak must be the max of its own series)`);
+          }
+          if (Math.abs(stampRecov - rawLast) > 0.05) {
+            errors.push(`${g.key}.memory: sparkline stamp recovered=${stampRecov} != rss_series last=${rawLast.toFixed(1)} ` +
+              `(the marked recovered point must be the last sample of its own series)`);
+          }
+        }
+      }
+    }
     // ---- ONE SOURCE OF TRUTH (sweep chart vs headline): the published headline MUST be a point on
     // its OWN charted sweep. rps_max_proxy/_concurrency must equal the max-rps point of the charted
     // sweep_max_proxy array (same value AND concurrency), and likewise sustained@20ms vs
