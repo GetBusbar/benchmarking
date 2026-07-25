@@ -161,86 +161,63 @@
   <section id="view-method" class="view hidden">
     <h2>Method</h2>
     <p class="disclosure"><strong>Who runs this.</strong> Built and operated by the Busbar team; busbar is one of the entrants. Same shared harness for every gateway, no per-gateway special-casing, every number from committed JSON, fully open source. <a href="https://github.com/GetBusbar/benchmarking" target="_blank" rel="noopener">Read the code and re-run it yourself</a>. Gateway creators are welcome to PR and own their own <code>gateway.sh</code>.</p>
-    <p class="lede">Every gateway is measured the same way, on neutral hardware:</p>
+    <p class="lede">We run the 6&times;6 protocol matrix <b>once</b>. Every view is a <b>pick</b> of that one run.</p>
     <ul class="method-lede">
+      <li><b>One run, one source.</b> For each gateway the harness sweeps the full 6&times;6 protocol matrix — every ingress dialect the client can speak against every upstream dialect the mock can speak — a single time. Every number on the board (latency, throughput, streaming, memory) is read out of that one run. There is no second measurement and no separate suite to disagree with it.</li>
       <li><b>One rig.</b> One box, one instant Rust mock upstream, one Go load generator, fixed CPU pinning (gateway on one core set, mock and loadgen on the others).</li>
       <li><b>Added latency is gateway-minus-direct.</b> The same load runs straight against the mock and that baseline is subtracted, so the figure is what the gateway adds, not the network or the mock.</li>
-      <li><b>Throughput is each gateway's own qualifying ceiling</b>, not a subtraction. A guardrail flags any run approaching the mock's own ceiling, so the mock is never silently the bottleneck.</li>
-      <li><b>Every result is stamped</b> with hardware, architecture, build version and timestamp.</li>
-      <li><b>A gateway is its own directory.</b> A one-file manifest declares how to build, launch and probe it; add or remove a directory and it appears or disappears everywhere.</li>
+      <li><b>Throughput is each gateway's own qualifying ceiling</b>, not a subtraction. A guardrail flags any run approaching the mock's own ceiling, so the mock is never silently the bottleneck; a rig-limited number reads n/a rather than a fabricated bar.</li>
+      <li><b>Every result is stamped</b> with hardware, architecture, build version and timestamp. A gateway is its own directory: a one-file manifest declares how to build, launch and probe it; add or remove a directory and it appears or disappears everywhere.</li>
     </ul>
 
-    <h3 class="method-section-head">What each suite measures</h3>
-    <p class="method-section-sub">Four measurement suites, one per dimension. Each runs the same way for every gateway and writes its own committed JSON.</p>
+    <h3 class="method-section-head">The one run: the 6&times;6 protocol matrix</h3>
+    <p class="method-section-sub">A capability probe on every cell, then a per-cell latency/throughput/streaming sweep on every cell that passes. This is the single producer every tab reads.</p>
     <div class="method-grid" id="method-grid">
       <article class="method-card">
-        <span class="card-kicker"><a id="lnk-perf" target="_blank" rel="noopener">perf/run.sh</a></span>
-        <h3>Latency and throughput</h3>
+        <span class="card-kicker"><a id="lnk-matrix" target="_blank" rel="noopener">matrix/run.sh</a></span>
+        <h3>Probe, then sweep, every cell</h3>
         <ul>
-          <li><b>Added latency (p50/p99, microseconds).</b> At concurrency 1, gateway p99 minus direct-to-mock p99, on small payloads.</li>
-          <li><b>Max proxy RPS.</b> Highest requests per second against an instant mock, subject to p99 &lt; 1000 ms and error rate &lt; 0.1%.
-            <ul>
-              <li>Found by a <b>peak search</b>: concurrency ramps bidirectionally until RPS stops rising, then a unimodal refinement locates the true peak. A fixed concurrency grid could miss a peak sitting between rungs and understate the fastest gateways.</li>
-              <li>The winning concurrency is recorded alongside the RPS figure.</li>
-            </ul>
-          </li>
-          <li><b>Sustained RPS at 20 ms.</b> The same peak-search method and gates (p99 &lt; 1000 ms, &lt; 0.1% errors), but the mock sleeps 20 ms per request to model real LLM latency. The ceiling becomes concurrent-in-flight capacity — the real production bottleneck.
-            <ul>
-              <li>At a 20 ms delay, Little's law bounds throughput (RPS &le; concurrency &divide; 0.020 s), so the peak sits at much higher concurrency than the instant-mock sweep. The bidirectional ramp finds it either way. Winning concurrency shows in the cell tooltip.</li>
-            </ul>
-          </li>
-          <li><b>File-descriptor fairness.</b> Containerised gateways run with the Docker daemon's <code>nofile</code> limit raised to 1 048 576, matching what native gateways and the load generator already have. Without it, a fast containerised gateway would hit the kernel's default ~1024-socket limit mid-sweep and collapse, understating its throughput. Applied uniformly; no gateway is singled out.</li>
-          <li><b>Which path.</b> The <b>Peak</b> tab shows these metrics on each gateway's best same-dialect path (pure forwarding, no translation); the Tested-on pill names the dialect (OpenAI when served, else the gateway's fastest native one). Best-of, so every gateway appears on its strongest path — the ceiling it can post. For a strict identical-path comparison, use the <b>Matched</b> tab.</li>
+          <li><b>Probe first.</b> One correctness-checked round trip per (ingress, upstream) cell across the full 6&times;6 — OpenAI, OpenAI Responses, Anthropic, Gemini, Cohere, Bedrock Converse — relaunching the gateway per upstream dialect. The response is validated in the ingress protocol's shape and the upstream leg is verified against the recording mock (which records the endpoint the gateway actually called). A failed probe is <em>not configured</em> with its evidence, never a red.</li>
+          <li><b>Then sweep.</b> Every passing (green) cell gets the same perf sweep on that path: added latency p50/p99 at concurrency 1, sustained RPS at 20 ms, and max proxy RPS. Each ceiling is found by a bidirectional peak search then a unimodal refinement (a fixed grid would miss a peak between rungs); the winning concurrency is recorded with it. At 20 ms Little's law bounds throughput (RPS &le; concurrency &divide; 0.020 s), so that peak sits at much higher concurrency — the real in-flight capacity bottleneck.</li>
+          <li><b>Streaming on the same cell.</b> The paced-SSE measurement runs on the swept cell too, so the streaming figures come from the same run as the latency/throughput.</li>
+          <li><b>Fairness.</b> Containerised gateways run with <code>nofile</code> raised to 1 048 576, matching native gateways and the load generator, so a fast container can't collapse on the kernel's ~1024-socket default mid-sweep. Applied uniformly.</li>
         </ul>
       </article>
       <article class="method-card">
-        <span class="card-kicker"><a id="lnk-memory" target="_blank" rel="noopener">memory/run.sh</a></span>
-        <h3>Memory</h3>
+        <h3>Every view is a pick of that run</h3>
         <ul>
-          <li>One process-level RSS read per gateway under a fixed load: <b>150 KB payloads &times; 1500 concurrency &times; 120 s</b>, against the plain mock, on the gateway's default config.</li>
-          <li><b>Idle.</b> Process resident set (RSS) after launch, once it answers 200, before any load.</li>
-          <li><b>Peak.</b> Maximum RSS during the load — a transient spike from in-flight request/response buffers at that concurrency. Every gateway spikes here, so peak alone is a weak signal.</li>
-          <li><b>Recovered @60 s.</b> RSS sampled 60 s after the load ends — whether the gateway <em>releases</em> the memory it took, or stays pinned near its peak. This, not raw peak, is the memory story: a gateway that peaks near 1 GB and settles back to tens of MiB behaves very differently from one that holds the peak.</li>
-          <li><b>Recovery curve.</b> RSS is sampled at a steady cadence across the whole run — idle, ramp, load, and the 60 s settle window — and drawn as an idle&rarr;peak&rarr;recovery sparkline in each gateway's detail drawer.</li>
+          <li><b>Peak</b> — each gateway on its OWN best same-dialect diagonal (best-of, pure forwarding, no translation). The Tested-on pill names the dialect (OpenAI when served, else the gateway's fastest native one), so every gateway appears on its strongest path and the dialect is never hidden.</li>
+          <li><b>Same</b> — one chosen dialect's diagonal (X&rarr;X) for every gateway, an identical-path apples-to-apples comparison. A gateway that does not serve that dialect reads n/a.</li>
+          <li><b>Custom</b> — any ingress&rarr;egress cell for every gateway, including a translation cell (client speaks one dialect, upstream another, the gateway translates both ways). In&rarr;out is pinned by two dropdowns; picking the same on both sides is that dialect's strict passthrough.</li>
+          <li><b>Streaming</b> uses the SAME three picks for the SSE columns (added TTFT p50/p99, added gap p50/p99, streams sustained, CPU-bound fps).</li>
+          <li><b>One value, everywhere.</b> The table, the matrix hover popup, the drawer and the charts all read the same per-cell record through the same accessors, so a value shows identically on every surface (a build-time guard fails the deploy if they ever diverge). The <b>Protocol matrix</b> tab is the visual face of Custom: hover a cell for its gated numbers plus its &Delta; versus the gateway's own peak; click it to open that cell in Custom.</li>
         </ul>
       </article>
       <article class="method-card">
-        <span class="card-kicker"><a id="lnk-stream" target="_blank" rel="noopener">stream/run.sh</a></span>
-        <h3>Streaming</h3>
+        <span class="card-kicker"><a id="lnk-memory" target="_blank" rel="noopener">matrix/run.sh (memory)</a></span>
+        <h3>Memory: one continuous track</h3>
         <ul>
-          <li>The mock answers <code>stream:true</code> with a paced SSE stream; the suite measures what the gateway adds on top of that pace.</li>
-          <li><b>Added wait for the first token (p99)</b> — TTFT, time to first token: gateway first-content-frame time minus direct-to-mock, at concurrency 1.</li>
-          <li><b>Added gap between tokens (p99).</b> Gateway content-frame gap minus direct-to-mock gap.</li>
-          <li><b>Streams sustained.</b> Max concurrent streams where &ge; 99.9% of expected frames deliver, no stall exceeds twice the pacing interval, and the stream error rate stays under 0.1%.</li>
-          <li><b>First token is deliberately exposed.</b> The mock's first token is instant (it paces only later tokens), so the first-token figure includes the gateway's first-write network behaviour, not just its compute. Against a real model, whose own first token takes hundreds of milliseconds, that component is largely hidden; here it is surfaced on purpose. A benchmark whose mock waits before its first token — or that times the first SSE event of any kind rather than the first content token — reports a near-zero first-token overhead by construction.</li>
-          <li>A gateway that answers 200 but buffers the whole response is recorded <code>stream_served=false</code>: measured, not hidden.</li>
+          <li>Memory is not a separate load. It is one continuous process-RSS track across the SAME 6&times;6 run, per gateway:</li>
+          <li><b>Idle.</b> RSS sampled over the <b>60 s before</b> the run starts — the gateway launched, answering 200, under no load. Reported as the settled idle at the end of that window.</li>
+          <li><b>Peak.</b> The MAX RSS observed continuously <b>across the entire 6&times;6 sweep</b> (all cells) — the real working-set peak the run drives, not a synthetic spike.</li>
+          <li><b>Recovered @60 s.</b> RSS at the end of a <b>60 s window after</b> the last cell — whether the gateway <em>releases</em> what it took or stays pinned near its peak. This, not raw peak, is the memory story: a gateway that peaks near 1 GB and settles to tens of MiB behaves very differently from one that holds it.</li>
+          <li><b>Recovery curve.</b> RSS sampled at a steady cadence across the whole thing — idle-before &rarr; the 6&times;6 &rarr; the 60 s after — drawn as an idle&rarr;peak&rarr;recovery sparkline on the Memory tab. A gateway measured before this signal existed reads n/a, never a fabricated line.</li>
         </ul>
       </article>
       <article class="method-card">
-        <span class="card-kicker"><a id="lnk-xlate" target="_blank" rel="noopener">xlate/run.sh</a></span>
-        <h3>Translation</h3>
+        <h3>Honesty rules on every surface</h3>
         <ul>
-          <li>The client speaks Anthropic (<code>POST /v1/messages</code>) while the upstream mock speaks OpenAI, so the gateway must translate both directions. The mock is untouched; that is the point.</li>
-          <li><b>Added latency (p99)</b> and <b>sustained RPS at 20 ms</b> on the translation path, same gates as perf. The direct baseline is the OpenAI shape straight to the mock, so the added-latency figure deliberately includes the translation work.</li>
-          <li><b>The Matched tab pins both ends</b> with a pair of dropdowns (client dialect, upstream dialect), so every row is the identical path and the ranking is apples-to-apples; only gateways that serve the chosen pair appear. Pick the same dialect on both sides and it becomes that dialect's strict passthrough.</li>
-          <li><b>Headline numbers have one source.</b> The table, drawer, compare and charts all read one canonical record per gateway: the matrix per-cell sweep's OpenAI-in cell. This suite's Anthropic-to-OpenAI numbers are the fallback for a gateway with no measured matrix translation cell, and every surface labels the direction it shows.</li>
-          <li>A gateway that cannot serve Anthropic ingress against an OpenAI upstream records <code>xlate_served=false</code> with the probe status and body snippet as evidence.</li>
+          <li><b>Sole-source and null-safe.</b> A value a record lacks renders n/a, never 0 and never a fabricated number. A measured 0 (served, but no tested load held p99 &lt; 1 s at &lt; 0.1% errors) is shown as 0 with its note, distinct from a rig-ceiling.</li>
+          <li><b>Rig-limited numbers are suppressed.</b> A throughput or frames-per-second the harness could not certify as gateway-limited (the sweep saturated near the mock's own ceiling) reads n/a and draws no bar — it never ranks or wins a comparison.</li>
+          <li><b>No gateway is graded red for a pairing it does not serve.</b> Grey cells carry their own probe evidence; a boot/build failure reads &ldquo;did not run&rdquo;, a measured streaming refusal reads &ldquo;did not stream&rdquo; — measured, not hidden.</li>
+          <li><b>Every number regenerates from committed JSON</b>, and the per-gateway <em>Download results</em> is the full 6&times;6 record the board is built from.</li>
         </ul>
       </article>
     </div>
 
-    <h3 class="method-section-head">Capability grid</h3>
-    <p class="method-section-sub">One probe per protocol pairing, feeding the per-cell perf the other tabs read.</p>
+    <h3 class="method-section-head">Why we measure <code>/v1</code></h3>
+    <p class="method-section-sub">The unified OpenAI-compatible route every SDK points at, on the same terms for every gateway.</p>
     <div class="method-grid">
-      <article class="method-card">
-        <span class="card-kicker"><a id="lnk-matrix" target="_blank" rel="noopener">matrix/run.sh</a></span>
-        <h3>Protocol matrix</h3>
-        <ul>
-          <li><b>A capability suite first.</b> One probe per (ingress, upstream) cell across the full 6&times;6 — OpenAI, OpenAI Responses, Anthropic, Gemini, Cohere, Bedrock Converse — relaunching the gateway per upstream dialect.</li>
-          <li><b>Each cell is validated four ways:</b> envelope validation; a passthrough guard that rejects the mock's canned bodies as untranslated proxying; an upstream round-trip check (the mock records which endpoint the gateway actually called); and an <code>unprobed_auth</code> state for ingresses that demand signatures the harness does not forge.</li>
-          <li><b>Per-cell perf.</b> Every passing (green) cell also gets the perf suite's exact sweep on that path — added latency at concurrency 1, sustained RPS at 20 ms, max proxy RPS. The Peak and Matched tabs read specific cells from this sweep; hovering any green cell shows that path's numbers and its RPS delta versus the gateway's reference cell (named, never called "best").</li>
-        </ul>
-      </article>
       <article class="method-card">
         <h3>Why we measure <code>/v1</code>, not passthrough endpoints</h3>
         <ul>
