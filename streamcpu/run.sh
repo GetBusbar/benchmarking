@@ -211,8 +211,19 @@ if [ "$STREAM_OK" = 1 ]; then
   done
 
   # mock-bound guard (perf-style): best gateway fps within 10% of the direct ceiling -> flagged.
-  if [ "${DIRECT_CEIL:-0}" -gt 0 ] && awk -v c="$BEST_FPS" -v m="$DIRECT_CEIL" 'BEGIN{exit !(c>=0.9*m)}'; then MOCK_BOUND=true; fi
+  # Emit JSON null ("unknown") - NOT a clean false - when the reference is unusable (the direct-to-mock
+  # ceiling probe read 0: mock cold after the gateway's own load / timeout / EMFILE, the case called out
+  # at ~L181-184), so an fps that could NOT be verified against the rig ceiling is never silently
+  # published as a trustworthy-looking mock_bound=false. Downstream (app.js cpuFpsCertified, charts.py
+  # cpu_valid) requires an explicit false, so null suppresses the bar. This mirrors stream/run.sh's paced
+  # lane (MOCK_BOUND=null when the mock-ceiling reference is unusable) and streamcpu_valid's honesty.
+  if [ "${DIRECT_CEIL:-0}" -le 0 ]; then
+    MOCK_BOUND=null
+  else
+    awk -v c="$BEST_FPS" -v m="$DIRECT_CEIL" 'BEGIN{exit !(c>=0.9*m)}' && MOCK_BOUND=true
+  fi
   [ "$MOCK_BOUND" = true ] && log "[$GATEWAY] WARN best fps ($BEST_FPS) within 10% of direct ceiling ($DIRECT_CEIL) -- MOCK-BOUND, not a valid comparison"
+  [ "$MOCK_BOUND" = null ] && log "[$GATEWAY] streamcpu_mock_bound=null: direct-to-mock ceiling reference unusable (ceiling=${DIRECT_CEIL} fps) -- cpu-fps unverified, not certified"
 
   # fps per core (relay throughput per pinned gateway core).
   FPS_PER_CORE=$(awk -v f="$BEST_FPS" -v n="$NCORES" 'BEGIN{printf "%.0f", (n>0? f/n : f)}')
