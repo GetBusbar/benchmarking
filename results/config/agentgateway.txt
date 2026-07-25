@@ -1,0 +1,27 @@
+# ── /config.yaml (rendered; loaded via agentgateway -f /config.yaml) ──
+llm:
+  port: 8080
+  models:
+  - name: gpt-4o-mini
+    provider: openAI
+    params:
+      model: gpt-4o-mini
+      apiKey: "sk-dummy-openai"
+      baseUrl: "http://127.0.0.1:8000"
+  - name: claude-3-5-sonnet-20241022
+    provider: anthropic
+    params:
+      model: claude-3-5-sonnet-20241022
+      apiKey: "sk-ant-dummy"
+      baseUrl: "http://127.0.0.1:8000"
+  - name: anthropic.claude-3-sonnet-20240229-v1:0
+    provider: bedrock
+    params:
+      model: anthropic.claude-3-sonnet-20240229-v1:0
+      awsRegion: us-east-1
+      baseUrl: "http://127.0.0.1:8000"
+
+# ── launch env (non-secret; dummy AWS creds for the bedrock provider's SigV4) ──
+AWS_ACCESS_KEY_ID=AKIAMOCKACCESSKEY
+AWS_SECRET_ACCESS_KEY=mock-secret-access-key
+AWS_REGION=us-east-1
