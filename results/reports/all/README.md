@@ -16,7 +16,7 @@ Every number below is regenerated from the raw `results/*.json` - re-run `run-al
 | [Portkey](https://github.com/Portkey-AI/gateway) | 3,448 µs | 835 | 853 | 124 MiB | 267 MiB | `portkeyai/gateway:1.15.2 (@sha256:97f094d9c8a7` |
 | [LiteLLM · Python](https://github.com/BerriAI/litellm) | 7,024 µs | 185 | 181 | 1036 MiB | 1087 MiB | `ghcr.io/berriai/litellm:v1.93.0 (@sha256:a1745` |
 | [One-API](https://github.com/songquanpeng/one-api) | 34,347 µs | 0 | 0 | 88 MiB | 165 MiB | `justsong/one-api:v0.6.10 (@sha256:e667221a2e19` |
-| [TensorZero](https://github.com/tensorzero/tensorzero) | 40,948 µs | 13,227 | 13,987 | - | - | `tensorzero/gateway:2026.6.0 (@sha256:c939db4f2` |
+| [TensorZero](https://github.com/tensorzero/tensorzero) | 40,945 µs | 11,968 | 12,298 | 40 MiB | 74 MiB | `tensorzero/gateway:2026.6.0 (@sha256:c939db4f2` |
 | [AISIX (api7)](https://github.com/api7/aisix) | ⏳ *pending* | - | - | - | - | *pending measurement* |
 | [Helicone](https://github.com/Helicone/ai-gateway) | ⏳ *pending* | - | - | - | - | *pending measurement* |
 
@@ -41,37 +41,37 @@ Same box, same mock, one gateway at a time. Streaming figures are the overhead t
 | [Portkey](https://github.com/Portkey-AI/gateway) | 30.7 ms | 139 µs | 32 (1,531 fps) (stream suite) | 716 (openai → bedrock) |
 | [LiteLLM · Python](https://github.com/BerriAI/litellm) | 9.4 ms | 2.7 ms | 1 (47 fps) (stream suite) | 147 (anthropic → openai-responses) |
 | [One-API](https://github.com/songquanpeng/one-api) | 34.6 ms | 4 µs | 32 (1,316 fps) (stream suite) | 0 (openai → anthropic) |
-| [TensorZero](https://github.com/tensorzero/tensorzero) | 40.8 ms | 1 µs | 1 (48 fps) (stream suite) | 12,752 (openai → openai-responses) |
+| [TensorZero](https://github.com/tensorzero/tensorzero) | 40.8 ms | 1 µs | 1 (48 fps) (stream suite) | 11,681 (openai → openai-responses) |
 
 **✕** cells are measured refusals, not gaps: the gateway was offered the load and could not do the thing (buffered instead of streaming, rejected the Anthropic shape, or has no native key/limit governance). **n/a** = that suite hasn't been run for this gateway yet.
 
-![added_latency](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/added_latency.png?v=202607250901)
+![added_latency](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/added_latency.png?v=202607250923)
 
-![rps_max_proxy](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/rps_max_proxy.png?v=202607250901)
+![rps_max_proxy](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/rps_max_proxy.png?v=202607250923)
 
-![rps_sustained_20ms](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/rps_sustained_20ms.png?v=202607250901)
+![rps_sustained_20ms](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/rps_sustained_20ms.png?v=202607250923)
 
-![memory_rss](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/memory_rss.png?v=202607250901)
+![memory_rss](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/memory_rss.png?v=202607250923)
 
-![memory_recovery](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/memory_recovery.png?v=202607250901)
+![memory_recovery](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/memory_recovery.png?v=202607250923)
 
-![rps_per_dollar](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/rps_per_dollar.png?v=202607250901)
+![rps_per_dollar](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/rps_per_dollar.png?v=202607250923)
 
-![cost_per_million](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/cost_per_million.png?v=202607250901)
+![cost_per_million](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/cost_per_million.png?v=202607250923)
 
-![stream_added_ttft](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/stream_added_ttft.png?v=202607250901)
+![stream_added_ttft](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/stream_added_ttft.png?v=202607250923)
 
-![stream_added_gap](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/stream_added_gap.png?v=202607250901)
+![stream_added_gap](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/stream_added_gap.png?v=202607250923)
 
-![stream_sustained](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/stream_sustained.png?v=202607250901)
+![stream_sustained](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/stream_sustained.png?v=202607250923)
 
-![streamcpu_fps](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/streamcpu_fps.png?v=202607250901)
+![streamcpu_fps](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/streamcpu_fps.png?v=202607250923)
 
-![xlate_rps_sustained_20ms](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/xlate_rps_sustained_20ms.png?v=202607250901)
+![xlate_rps_sustained_20ms](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/xlate_rps_sustained_20ms.png?v=202607250923)
 
-![xlate_added_latency](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/xlate_added_latency.png?v=202607250901)
+![xlate_added_latency](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/xlate_added_latency.png?v=202607250923)
 
 ---
 Method: added latency = gateway p99 − direct-to-mock p99 at concurrency 1; RPS ceiling = highest sustained req/s with p99 < 1 s and <0.1% errors; RSS idle = after first 200, peak = under sustained load. Same box, same mock, same load, one gateway at a time. Source refs pinned in `gateways/versions.env`; the built commit is in each row.
 
-<sub>Page + charts regenerated **2026-07-25 09:01 UTC** from the raw `results/*.json`.</sub>
+<sub>Page + charts regenerated **2026-07-25 09:23 UTC** from the raw `results/*.json`.</sub>
