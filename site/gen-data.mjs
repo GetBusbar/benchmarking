@@ -25,7 +25,7 @@ import { readdirSync, readFileSync, statSync, existsSync, mkdirSync, copyFileSyn
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
-import { sealMetric, makeSource, SWEEP } from "./seal.mjs";
+import { sealMetric, makeSource, SWEEP, UNGATED_LAT_FIELDS, UNGATED_STREAM_FIELDS, RSS_FIELD_RE, ZERO_MEASURED_FAIL } from "./seal.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = process.argv[2] || join(HERE, "..");
@@ -39,9 +39,13 @@ const OUT = process.argv[3] || HERE;
 // SOLELY from the matrix's post-6x6 peak-cell window (g.matrix.memory, projected below). No fallback.
 const SUITES = ["perf", "stream", "streamcpu", "xlate", "matrix"];
 // The ungated (non-honesty-gated) latency-shaped metrics on a perf cell: always certified when present.
-const UNGATED_LAT = ["added_latency_p50_us", "added_latency_p99_us", "gateway_c1_p99_us", "direct_c1_p99_us"];
-// The RSS metric fields on a memory block (ungated — no mock-bound flag).
-const MEM_RSS = ["idle_rss_mib", "peak_rss_mib", "recovered_rss_mib"];
+// Imported from seal.mjs — the ONE vocabulary check-consistency also imports, so the two can never lag
+// each other. RSS fields are sealed BY DISCOVERY (RSS_FIELD_RE), never from a whitelist (audit #11).
+const UNGATED_LAT = UNGATED_LAT_FIELDS;
+const MEM_CANONICAL_RSS = ["idle_rss_mib", "peak_rss_mib", "recovered_rss_mib"];
+// The non-metric memory fields that travel verbatim: the fair-load basis, the recovery curve, and the
+// WINDOW DURATIONS the harness was actually run with (audit #14 — every "60 s" label renders from these).
+const MEM_VERBATIM = ["load_cell", "load_recipe", "rss_series", "protocol", "idle_window_s", "recovery_window_s"];
 
 // ---- gateway manifests ------------------------------------------------------
 function parseManifest(text) {
@@ -123,7 +127,18 @@ const gateways = gatewayKeys.map((key) => {
   // unchanged. Its inline config.files replace the config/<gw>.txt sidecar read.
   const snap = newestSnapshot(key);
   if (snap) {
-    if (snap.matrix) g.matrix = snap.matrix;                       // matrix from the snapshot (sole source)
+    // RECENCY, not existence (audit #5). An older snapshot must NEVER shadow a newer results/matrix/<gw>.json
+    // (a matrix-only re-run writes the per-suite file; the snapshot archive can trail it). Compare the two
+    // stamps and take the NEWER; a snapshot with no stamp loses to any stamped matrix, and wins only when
+    // there is no per-suite matrix at all.
+    const snapAt = snap.matrix && snap.measured_at ? Date.parse(snap.measured_at) : NaN;
+    const diskAt = g.matrix && g.matrix.measured_at ? Date.parse(g.matrix.measured_at) : NaN;
+    const snapMs = Number.isFinite(snapAt) ? snapAt : -1;
+    const diskMs = Number.isFinite(diskAt) ? diskAt : -1;
+    if (snap.matrix && (!g.matrix || snapMs >= diskMs)) {
+      g.matrix = snap.matrix;                                      // matrix from the snapshot (sole source)
+      g.matrix_from_snapshot = true;
+    }
     const files = snap.config && snap.config.files;
     if (files && typeof files === "object") {
       const parts = Object.entries(files).map(([name, body]) =>
@@ -136,7 +151,9 @@ const gateways = gatewayKeys.map((key) => {
   // the exact config it used is captured to results/config/<key>.txt (lib/harness.sh harness_write_config).
   // A gateway with no artifact stays absent and the board renders "not published".
   if (g.ootb_config == null) {
-    const cfgPointer = (g.perf && typeof g.perf.ootb_config === "string") ? g.perf.ootb_config : `config/${key}.txt`;
+    // The pointer comes from the MATRIX (the sole source) when it carries one; the retired perf suite is
+    // no longer consulted (audit #12 — g.perf is a fallback-only input that the emit step deletes).
+    const cfgPointer = (g.matrix && typeof g.matrix.ootb_config === "string") ? g.matrix.ootb_config : `config/${key}.txt`;
     const cfgPath = join(ROOT, "results", cfgPointer);
     if (existsSync(cfgPath)) {
       try { g.ootb_config = readFileSync(cfgPath, "utf8"); } catch { /* unreadable → absent */ }
@@ -186,7 +203,11 @@ const gateways = gatewayKeys.map((key) => {
   // envelope is correct NOW and captions tell the truth about provenance. There is NO memory fallback —
   // the retired synthetic burst suite mislabelled as 6x6 provenance and is neither scanned nor read.
   if (!g.streaming && g.stream && g.stream.stream_served === true) {
-    const dia = passthroughDialect(g.matrix);
+    // AUDIT #6: stamp the dialect the STREAM SUITE ACTUALLY USED (derived from the endpoint it probed),
+    // NOT the matrix's passthrough diagonal. Stamping the matrix diagonal relabelled litellm-rust /
+    // portkey (which the stream suite drove on /v1/messages = Anthropic) as an OpenAI stream — a
+    // provenance claim about a run that never happened. Unknown endpoint → null (the caption says "?").
+    const dia = streamSuiteDialect(g.stream);
     g.streaming = sealStreaming({
       added_ttft_p50_us: g.stream.stream_added_ttft_p50_us,
       added_ttft_p99_us: g.stream.stream_added_ttft_p99_us,
@@ -250,6 +271,16 @@ const gateways = gatewayKeys.map((key) => {
   // function declaration, so it is callable here even though it is defined below.
   const gAtMs = displayedMeasuredMs(g);
   g.measured_at = gAtMs > 0 ? new Date(gAtMs).toISOString() : null;
+  // AUDIT #8: a PER-LANE freshness stamp. The row badge ages the matrix, but a whole displayed TAB can
+  // project from a never-refreshed legacy suite (every streaming column today comes from the stream
+  // suite), so ageing it by the matrix stamp OVERSTATES that tab's freshness. Each lane therefore
+  // carries the measured_at of THE RECORD IT ACTUALLY SHOWS; app.js renders the age from this.
+  g.lane_measured_at = {};
+  for (const [lane, rec] of [["perf", g.best_cell], ["xlate", g.translation_cell],
+    ["stream", g.streaming], ["memory", g.memory_read]]) {
+    const at = rec && rec.source && rec.source.measured_at;
+    if (at) g.lane_measured_at[lane] = at;
+  }
   return g;
 });
 
@@ -300,11 +331,18 @@ function sealPerfCell(perf, path, source) {
 // for sealing every matrix cell's own .stream in-place (so the popup reads envelopes).
 function sealStreamRecord(s) {
   const rec = {};
-  for (const k of ["added_ttft_p50_us", "added_ttft_p99_us", "added_gap_p50_us", "added_gap_p99_us", "streams_sustained_fps"])
-    if (s[k] != null) rec[k] = sealMetric(s[k], {});
-  // Streaming counts: a 0 is "not measured" (n/a), never an honest measured-zero (unlike an RPS ceiling).
-  rec.streams_sustained = sealMetric(s.streams_sustained, { gated: true, flag: s.streams_sustained_mock_bound, zeroMeasured: false });
-  rec.cpu_fps = sealMetric(s.cpu_fps, { gated: true, flag: s.cpu_fps_mock_bound, zeroMeasured: false,
+  for (const k of UNGATED_STREAM_FIELDS) if (s[k] != null) rec[k] = sealMetric(s[k], {});
+  // AUDIT #11: streams_sustained_fps is the SAME bisect's rate — it inherits that bisect's mock-bound
+  // honesty flag. Sealing it UNGATED beside a GATED streams_sustained let the rig-bound rate publish
+  // while the count it came from was suppressed. Gate it on the same flag.
+  rec.streams_sustained_fps = sealMetric(s.streams_sustained_fps, {
+    gated: true, flag: s.streams_sustained_mock_bound, zeroNote: ZERO_MEASURED_FAIL });
+  // AUDIT #3: streaming counts — a 0 is a MEASURED FAILURE (offered stream load, sustained none), NOT
+  // "not measured". Only a null (absent field) is not-measured. The note names which, and every surface
+  // renders the two apart.
+  rec.streams_sustained = sealMetric(s.streams_sustained, {
+    gated: true, flag: s.streams_sustained_mock_bound, zeroNote: ZERO_MEASURED_FAIL });
+  rec.cpu_fps = sealMetric(s.cpu_fps, { gated: true, flag: s.cpu_fps_mock_bound, zeroNote: ZERO_MEASURED_FAIL,
     extras: { concurrency: s.cpu_fps_concurrency ?? null } });
   return rec;
 }
@@ -313,12 +351,15 @@ function sealStreaming(s, dialect, source) {
 }
 // sealMemory: the post-6x6 memory window -> canonical record. RSS metrics are UNGATED (no mock-bound
 // flag); load_cell / load_recipe / rss_series travel verbatim (the fair-load basis + recovery curve).
+// AUDIT #11: seal BY DISCOVERY. Every `*_rss_mib` field the producer emits (idle/peak/recovered today,
+// peak_rss_hwm_mib / post_load_rss_mib since the snapshot work) is sealed — no whitelist to lag behind
+// the producer, so a NEW RSS field can never ship as a bare unsealed scalar. The three canonical fields
+// are always PRESENT (sealed to not_measured when the producer emits null) so the board's columns exist.
 function sealMemory(mem, source) {
   const rec = { source, served: true };
-  for (const k of ["idle_rss_mib", "peak_rss_mib", "recovered_rss_mib"])
-    rec[k] = sealMetric(mem[k], {});
-  for (const k of ["load_cell", "load_recipe", "rss_series", "protocol"])
-    if (mem[k] != null) rec[k] = mem[k];
+  const rssKeys = new Set([...MEM_CANONICAL_RSS, ...Object.keys(mem).filter((k) => RSS_FIELD_RE.test(k))]);
+  for (const k of rssKeys) rec[k] = sealMetric(mem[k], {});
+  for (const k of MEM_VERBATIM) if (mem[k] != null) rec[k] = mem[k];
   return rec;
 }
 // sealMatrixCellsInPlace: replace every served cell's raw perf/stream AND the top-level memory block's raw
@@ -341,8 +382,10 @@ function sealMatrixCellsInPlace(m) {
   }
   // The raw memory block (the source for the g.memory_read projection) also travels in the bundle (embedded
   // in g.matrix + the snapshot); seal its RSS scalars so no bare ungated field survives.
+  // Sealed BY DISCOVERY (audit #11): every `*_rss_mib` key present, not a 3-key whitelist that the
+  // producer already outgrew (peak_rss_hwm_mib / post_load_rss_mib were shipping as BARE scalars).
   if (m.memory && typeof m.memory === "object") {
-    for (const k of MEM_RSS) if (k in m.memory) m.memory[k] = sealMetric(m.memory[k], {});
+    for (const k of Object.keys(m.memory)) if (RSS_FIELD_RE.test(k)) m.memory[k] = sealMetric(m.memory[k], {});
   }
 }
 
@@ -365,17 +408,40 @@ function bestCell(m) {
 // RPS is capacity-bound and noisier). Fixing ingress to openai keeps the input side identical across
 // gateways; the egress varies and is shown as the row's path pill. Returns {ingress:"openai", egress,
 // ...perf} or null when the gateway serves no openai-in translation path.
+// AUDIT #4: the MATRIX WINS whenever it measured ANY translation cell. The original selector accepted
+// ONLY an openai-INGRESS cell, so a gateway whose matrix measured translation in the other direction
+// (apisix: anthropic in -> openai out, 18,157 rps, measured) fell through to the LEGACY xlate suite and
+// published its stale 17,437 — a legacy number RANKED against matrix-sourced rows. Selection is now two
+// tiers: the FAIR tier first (openai ingress, identical input side across gateways), and only when the
+// matrix has none of those, ANY served cross-dialect cell it did measure. The legacy fallback fires only
+// when the matrix genuinely has NO translation cell at all.
 function translationCell(m) {
   if (!m.upstreams) return null;
-  const cands = [];
+  const fair = [], any = [];
   for (const [egress, up] of Object.entries(m.upstreams)) {
-    if (egress === "openai") continue;                      // openai->openai is passthrough, not translation
-    const cell = up && up.cells && up.cells.openai;         // openai ingress -> this egress
-    if (cell && cell.served === true && cell.perf && cell.perf.added_latency_p99_us != null)
-      cands.push({ ingress: "openai", egress, ...cell.perf });
+    for (const [ingress, cell] of Object.entries((up && up.cells) || {})) {
+      if (ingress === egress) continue;                     // same dialect is passthrough, not translation
+      if (!(cell && cell.served === true && cell.perf && cell.perf.added_latency_p99_us != null)) continue;
+      const rec = { ingress, egress, ...cell.perf };
+      if (ingress === "openai" && egress !== "openai") fair.push(rec);
+      any.push(rec);
+    }
   }
+  const cands = fair.length ? fair : any;
   if (!cands.length) return null;
   return cands.reduce((a, b) => (b.added_latency_p99_us < a.added_latency_p99_us ? b : a));
+}
+
+// streamSuiteDialect(s): the dialect the LEGACY stream suite actually drove, read off the endpoint it
+// probed (the suite records no dialect field). `/v1/messages` is the Anthropic shape; a
+// `chat/completions` path is the OpenAI shape. Anything else → null: unknown provenance is rendered as
+// unknown, never borrowed from a different run (audit #6).
+function streamSuiteDialect(s) {
+  const ep = s && typeof s.endpoint === "string" ? s.endpoint : "";
+  if (/\/messages\b/.test(ep)) return "anthropic";
+  if (/chat\/completions/.test(ep)) return "openai";
+  if (/\/responses\b/.test(ep)) return "openai-responses";
+  return null;
 }
 
 // The dialect a perf-suite fallback was measured on: the gateway's default passthrough. Prefer the
