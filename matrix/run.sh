@@ -164,6 +164,21 @@ MATRIX_STREAM_CHUNK_BYTES="${MATRIX_STREAM_CHUNK_BYTES:-16}"
 MATRIX_STREAM_STALL_X="${MATRIX_STREAM_STALL_X:-2}"
 MATRIX_STREAM_C1_DUR="${MATRIX_STREAM_C1_DUR:-20}"
 MATRIX_STREAM_SWEEP_DUR="${MATRIX_STREAM_SWEEP_DUR:-12}"
+# SEARCH RANGE, NOT A LADDER, AND NOT A CLAIM. [lo,hi] concurrency for the sustained-streams bisect.
+# This file's rule is one constant with the reason, and these bounds are the two that carried none.
+# lo=8: below this the window is too short to distinguish a real sustained ceiling from scheduler noise.
+# hi=2048: a rig-capacity bound, not a belief about any gateway. Above it the LOAD GENERATOR's own
+# per-stream cost starts competing with the gateway for the 6 pinned load cores, so a "failure" past
+# that point can no longer be attributed to the gateway with a straight face. The box's fd limit is not
+# the binding constraint (run-on-ec2.sh raises docker nofile to 1048576), so the honest limit here is
+# the load generator's, and it is set to where that limit actually bites.
+#
+# THE BOUND IS NEVER PUBLISHED AS AN ANSWER. If a gateway is still clean at hi, the bisect has found a
+# LOWER BOUND, not a ceiling, and :826 publishes null with an operator instruction to raise this range
+# and re-run - it does not publish hi. That guard is what makes a judgment call safe to encode as a
+# default: getting it too low costs a re-run and an honest null, never a wrong number on the board.
+# (This is the same failure the legacy fixed ladder had, where a shared rung published identical
+# sustained figures across unrelated gateways because the ladder, not any gateway, set the value.)
 MATRIX_STREAM_SUST_BOUNDS="${MATRIX_STREAM_SUST_BOUNDS:-8 2048}"   # [lo,hi] for the sustained bisect
 MATRIX_STREAM_DELIV="${MATRIX_STREAM_DELIV:-0.999}"               # sustained gate delivered-frames floor
 # Unpaced lane (streamcpu/run.sh parity): CPU-bound relay throughput (frames/sec) — long back-to-back
@@ -172,6 +187,13 @@ MATRIX_STREAMCPU_CHUNKS="${MATRIX_STREAMCPU_CHUNKS:-512}"
 MATRIX_STREAMCPU_FRAME_BYTES="${MATRIX_STREAMCPU_FRAME_BYTES:-16}"
 MATRIX_STREAMCPU_STALL_MS="${MATRIX_STREAMCPU_STALL_MS:-250}"
 MATRIX_STREAMCPU_DUR="${MATRIX_STREAMCPU_DUR:-16}"
+# [lo,hi] CONCURRENCY for the cpu-fps peak search (the second of the two bounds that carried no reason).
+# lo=8 matches the sustained lane. hi=512 is lower than that lane's 2048 on purpose: this is the UNPACED
+# firehose, where each stream costs the load generator far more per unit of concurrency, so the rig runs
+# out of headroom sooner and a bound set as high as 2048 would measure the load generator instead.
+# Same protection as the sustained bounds, and it did not exist until it was found missing: if the fps
+# curve is still rising at hi the search has produced a LOWER BOUND, SM_FPS_AT_TOP is set, and the
+# producer publishes null with an instruction to raise this range, never hi itself.
 MATRIX_STREAMCPU_FPS_BOUNDS="${MATRIX_STREAMCPU_FPS_BOUNDS:-8 512}"  # [lo,hi] for the cpu-fps peak search
 
 # ── memory: ONE OWN-PROCESS WINDOW PER SERVED CELL, inside the 6x6 loop ────────────────────────────
@@ -848,6 +870,14 @@ matrix_cell_stream(){
   if [ "${SM_FPS_MEASURED:-0}" != 1 ]; then
     fps_peak=null; fps_conc=null; fps_bound=null
     log "[$GATEWAY]   $cell : cpu-fps NOT MEASURED (peak search aborted before any rung was probed) - publishing null, not 0"
+  elif [ "${SM_FPS_AT_TOP:-0}" = 1 ]; then
+    # A LOWER BOUND IS NOT A PEAK, the exact twin of the sustained-streams case above. The fps curve was
+    # still climbing when the search range ran out, so this run did not find the maximum; the winner is
+    # our own fps_hi wearing the gateway's name. Publishing it would make every gateway whose curve
+    # outruns the range land on the identical concurrency, which is how a shared ladder rung comes to be
+    # read as a shared capability. Unmeasured is absent, never substituted.
+    log "[$GATEWAY]   $cell : cpu-fps still rising at the top of the search range (c=$fps_hi) - publishing null, not the bound; raise MATRIX_STREAMCPU_FPS_BOUNDS and re-run this gateway"
+    fps_peak=null; fps_conc=null; fps_bound=null
   fi
   CELL_STREAM_JSON=", \"stream\": {\"stream_served\": true, \"added_ttft_p50_us\": $add_t50, \"added_ttft_p99_us\": $add_t99, \"added_gap_p50_us\": $add_g50, \"added_gap_p99_us\": $add_g99, \"streams_sustained\": $sust_streams, \"streams_sustained_fps\": $sust_fps, \"streams_sustained_mock_bound\": $sust_bound, \"cpu_fps\": $fps_peak, \"cpu_fps_concurrency\": $fps_conc, \"cpu_fps_mock_bound\": $fps_bound, \"sweep_streams\": [$sust_json], \"sweep_cpu_fps\": [$fps_json]$c1note}"
   log "[$GATEWAY]   $cell : stream added_ttft_p99=${add_t99}us streams_sustained=${sust_streams} cpu_fps=${fps_peak}"
