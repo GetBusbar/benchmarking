@@ -1547,6 +1547,53 @@ test("cell chooser: Peak reads the best diagonal, Same reads a chosen diagonal, 
   assert.equal(app.chooserHasCell(g, missing), false);
 });
 
+test("Cluster-B: drawer/compare (laneRecord) read the SAME chosen cell as the table in every mode", () => {
+  const g = CHOOSER_GW;
+  const perfLane = app.LANES.find((l) => l.key === "perf");
+  // In each mode the drawer/compare perf lane record must match the table column value (chooserPerfCell).
+  for (const st of [
+    { mode: "peak" },
+    { mode: "same", sameDialect: "anthropic" },
+    { mode: "custom", xlateIn: "openai", xlateOut: "anthropic" },
+  ]) {
+    const rec = app.laneRecord(perfLane, g, st);
+    assert.ok(rec, `lane record present in ${st.mode}`);
+    for (const k of ["added_latency_p99_us", "rps_sustained_20ms", "rps_max_proxy"]) {
+      const tableV = app.chooserPerfCell(g, k, String, st).v;
+      assert.equal(rec[k] ?? null, tableV, `${st.mode}: drawer/compare ${k} == table`);
+    }
+  }
+  // The Peak record still equals the canonical (Peak) accessor — no regression on the default mode.
+  assert.equal(app.laneRecord(perfLane, g, { mode: "peak" }).rps_sustained_20ms,
+    app.canonicalPerf(g).rps_sustained_20ms, "Peak lane record == canonicalPerf");
+});
+
+test("Cluster-B/22: perfSweepSeries is chooser-aware and drops a mock-bound-suppressed metric's curve", () => {
+  const colors = { sustained: "#4cc38a", max: "#6cb6ff" };
+  // Peak: the openai diagonal's sweeps (both metrics certified) are plotted, marked at the published peak.
+  const withSweep = {
+    ...CHOOSER_GW,
+    best_cell: { ...CHOOSER_GW.best_cell,
+      sweep_sustained_20ms: [{ conc: 512, rps: 30000, p99_us: 200, fail: 0 }],
+      sweep_max_proxy: [{ conc: 256, rps: 32000, p99_us: 100, fail: 0 }] },
+  };
+  const peak = app.perfSweepSeries(withSweep, colors, { mode: "peak" });
+  assert.equal(peak.length, 2, "both certified metrics plotted");
+  assert.equal(peak[0].peak.rps, 30000, "sustained curve marks the published peak");
+  // A mock-bound metric: its headline reads n/a, so its curve MUST be dropped (finding 22).
+  const bound = {
+    ...CHOOSER_GW,
+    best_cell: { ...CHOOSER_GW.best_cell,
+      rps_sustained_20ms: 99999, rps_sustained_20ms_mock_bound: true,   // rig-bound → suppressed
+      sweep_sustained_20ms: [{ conc: 512, rps: 99999, p99_us: 200, fail: 0 }],
+      rps_max_proxy: 32000, rps_max_proxy_mock_bound: false,
+      sweep_max_proxy: [{ conc: 256, rps: 32000, p99_us: 100, fail: 0 }] },
+  };
+  const gated = app.perfSweepSeries(bound, colors, { mode: "peak" });
+  assert.equal(gated.length, 1, "the suppressed sustained curve is dropped; only certified max remains");
+  assert.equal(gated[0].peak.rps, 32000, "the surviving curve is the certified max-proxy");
+});
+
 test("Δ-to-Peak: a non-peak cell reports its deviation vs the gateway's own best diagonal", () => {
   const g = CHOOSER_GW;
   const cust = { mode: "custom", xlateIn: "openai", xlateOut: "anthropic" };

@@ -677,6 +677,68 @@ const LANES = [
   },
 ];
 
+/* laneRecord(l, g, st): the record a drawer/compare lane shows, CHOOSER-AWARE so it agrees with the
+   TABLE in every mode. The perf + streaming lanes are cell-chooser driven (PERF_VIEWS): Peak reads the
+   best diagonal, Same reads the D→D cell, Custom reads the in→out cell — exactly what the table columns
+   render. Reading l.get() (canonicalPerf/canonicalStreaming, Peak-only) here was the bug: in Same/Custom
+   the table showed one cell while the drawer/compare showed Peak. The memory + xlate lanes are NOT
+   chooser-driven (one matrix memory read; Translation is its own openai-in cell), so they read l.get.
+   The returned perf record is GATED identically to canonicalPerf (suppressed RPS → null) and carries the
+   chosen cell's source/dialect/ingress/egress so the pathNote names the SAME path the table pill does. */
+function laneRecord(l, g, st = state) {
+  if (l.key === "perf") {
+    const p = chooserCellPerf(g, st);
+    if (!p) return null;
+    const [ingress, egress] = chooserDialects(g, st);
+    const rec = { served: true, ...p };
+    // Same gate as canonicalPerf: a mock-bound / unverifiable POSITIVE RPS reads n/a on every surface.
+    for (const m of ["rps_max_proxy", "rps_sustained_20ms"]) {
+      if (xlateRpsSuppressed(p, m)) rec[m] = null;
+    }
+    // In Peak, chooserCellPerf returns best_cell (already carries source/dialect/ingress/egress). In
+    // Same/Custom it is a raw matrix cell that may not carry the pill fields; stamp the chosen dialects so
+    // the pathNote resolves the same in→out the table pill shows. source stays from the cell when present.
+    if (ingress != null) rec.ingress = rec.ingress ?? ingress;
+    if (egress != null) rec.egress = rec.egress ?? egress;
+    if (rec.dialect == null && ingress === egress) rec.dialect = ingress;
+    return rec;
+  }
+  if (l.key === "stream") return chooserCellStream(g, st);
+  return l.get ? l.get(g) : g[l.key];
+}
+/* perfSweepSeries(g, colors, st): the sweep-curve series for the CHOSEN cell (Peak/Same/Custom), used by
+   the drawer + compare so the plotted curve reads the SAME cell the table + headline do. MOCK-BOUND GATE
+   (finding 22): a metric whose headline is suppressed (rig-bound / unverifiable — mock_bound !== false)
+   reads n/a on every honest surface, so its curve is DROPPED here too — a rig-bound sweep must not reveal
+   on the curve a number the gate hides on the headline. Returns [] when the chosen cell is absent. */
+function perfSweepSeries(g, colors, st = state) {
+  const p = chooserCellPerf(g, st);
+  if (!p) return [];
+  const out = [];
+  const add = (metric, sweepKey, concKey, label, color) => {
+    if (xlateRpsSuppressed(p, metric)) return;   // suppressed headline → no curve (finding 22)
+    if (!(p[sweepKey] && p[sweepKey].length)) return;
+    out.push({ label, color, sweep: p[sweepKey], peak: { rps: p[metric], conc: p[concKey] } });
+  };
+  add("rps_sustained_20ms", "sweep_sustained_20ms", "rps_sustained_20ms_concurrency", colors.sustainedLabel || "sustained @20ms", colors.sustained);
+  add("rps_max_proxy", "sweep_max_proxy", "rps_max_proxy_concurrency", colors.maxLabel || "max proxy", colors.max);
+  return out;
+}
+/* pathNote for a chooser-driven perf/stream lane in Same/Custom: name the exact chosen in→out cell (the
+   table shows THIS cell, not the peak passthrough). Peak defers to the lane's own pathNote. */
+function lanePathNote(l, j, st = state) {
+  if ((l.key === "perf" || l.key === "stream") && st.mode !== "peak" && j) {
+    // perf carries ingress/egress; streaming carries a single dialect (per-cell streaming is diagonal).
+    const ingress = j.ingress ?? j.dialect;
+    const egress = j.egress ?? j.dialect;
+    if (ingress != null && egress != null)
+      return ingress === egress
+        ? `${laneDialect(ingress)} passthrough (the ${st.mode === "same" ? "Same-dialect" : "chosen"} cell the table shows)`
+        : `${laneDialect(ingress)} in -> ${laneDialect(egress)} out (the chosen cell the table shows)`;
+  }
+  return l.pathNote ? l.pathNote(j) : "";
+}
+
 /* ---- state + URL codec ------------------------------------------------------ */
 function newState() {
   return {
@@ -1336,9 +1398,11 @@ function drawerHtml(g) {
   if (hw) h += `<p class="stamp muted">${esc(hw.hardware)}${hw.arch ? ` (${esc(hw.arch)})` : ""}</p>`;
 
   for (const l of LANES) {
-    // Canonical lanes (perf, xlate) read the SAME record the table reads via l.get; the raw
-    // suite object is only the legacy fallback inside the accessor itself.
-    const j = l.get ? l.get(g) : g[l.key];
+    // CHOOSER-AWARE: the perf + streaming lanes read the SAME chosen cell the table shows in the
+    // current Peak/Same/Custom mode (laneRecord), so drawer/table/compare agree in every mode; the
+    // memory + xlate lanes are not chooser-driven and read their canonical accessor. The raw suite
+    // object is only the legacy fallback inside the accessor itself.
+    const j = laneRecord(l, g);
     h += `<section class="drawer-lane"><h4>${esc(l.label)}</h4>`;
     if (!j) h += `<p class="muted">not measured</p>`;
     else if (j[l.flag] === false) {
@@ -1354,7 +1418,8 @@ function drawerHtml(g) {
       h += laneStamp(j);
     }
     else {
-      if (l.pathNote) h += `<p class="lane-note muted">${esc(l.pathNote(j))}</p>`;
+      const pn = lanePathNote(l, j);
+      if (pn) h += `<p class="lane-note muted">${esc(pn)}</p>`;
       h += `<dl>` + l.metrics.filter((m) => j[m.k] != null).map((m) => {
         const cc = m.concKey && j[m.concKey] != null && j[m.k] > 0 ? ` (@ c=${fmtInt(j[m.concKey])})` : "";
         return `<div><dt>${esc(m.label)}</dt><dd>${esc(m.fmt(j[m.k]) + cc)}</dd></div>`;
@@ -1448,17 +1513,11 @@ function openDrawer(key, push = false) {
     });
   }
   const box = document.getElementById("drawer-sweeps");
-  // ONE source of truth: the drawer curve reads the SAME canonical record the headline rows read
-  // (best_cell via canonicalPerf), so the marked peak on the curve IS the published rps_max_proxy /
-  // rps_sustained_20ms at its operating concurrency - never a separate perf-suite run.
-  const perf = canonicalPerf(g);
-  const series = [];
-  if (perf && perf.served !== false) {
-    series.push({ label: "sustained @20ms", color: "#4cc38a", sweep: perf.sweep_sustained_20ms,
-      peak: { rps: perf.rps_sustained_20ms, conc: perf.rps_sustained_20ms_concurrency } });
-    series.push({ label: "max proxy", color: "#6cb6ff", sweep: perf.sweep_max_proxy,
-      peak: { rps: perf.rps_max_proxy, conc: perf.rps_max_proxy_concurrency } });
-  }
+  // CHOOSER-AWARE + GATED: the drawer curve reads the SAME chosen cell the headline rows + table read
+  // (perfSweepSeries honors the Peak/Same/Custom mode), so the marked peak on the curve IS the published
+  // rps_max_proxy / rps_sustained_20ms at its operating concurrency for THIS mode's cell — and a
+  // mock-bound-suppressed metric draws no curve (finding 22), never revealing a number the gate hides.
+  const series = perfSweepSeries(g, { sustained: "#4cc38a", max: "#6cb6ff" });
   renderSweepCharts(box, series, chartTheme());
   syncUrl(push);
 }
@@ -1531,17 +1590,18 @@ function renderCompare() {
   }).join("")}</tr>`;
 
   for (const l of LANES) {
-    /* Canonical lanes read the SAME record the table reads (l.get), so compare can never
-       disagree with the table. Skip the whole lane only when no gateway measured it at all;
-       an all not-served lane still renders rows so the header is never left bare */
-    const recs = gws.map((g) => (l.get ? l.get(g) : g[l.key]));
+    /* CHOOSER-AWARE: perf + streaming read the SAME chosen cell the table shows in the current
+       Peak/Same/Custom mode (laneRecord); memory + xlate read their canonical accessor. So compare
+       can never disagree with the table in any mode. Skip the whole lane only when no gateway measured
+       it at all; an all not-served lane still renders rows so the header is never left bare. */
+    const recs = gws.map((g) => laneRecord(l, g));
     if (recs.every((j) => !j)) continue;
     h += `<tr class="lane-row"><td colspan="${gws.length + 1}">${esc(l.label)}</td></tr>`;
     if (l.pathNote) {
       /* one disclosure row per canonical lane: WHICH path each gateway's numbers measured */
       h += `<tr><td class="metric">Measured path</td>` + recs.map((j) =>
         j && j[l.flag] !== false
-          ? `<td class="muted lane-note">${esc(l.pathNote(j))}</td>`
+          ? `<td class="muted lane-note">${esc(lanePathNote(l, j))}</td>`
           : `<td class="na"></td>`).join("") + `</tr>`;
     }
     for (const m of l.metrics) {
@@ -1564,14 +1624,16 @@ function renderCompare() {
   document.getElementById("compare-body").innerHTML = h;
 
   const series = gws.map((g, i) => {
-    // Same canonical record as the headline rows (best_cell via canonicalPerf), so the marked peak
-    // is the published sustained@20ms at its operating concurrency - not a separate perf-suite run.
-    const perf = canonicalPerf(g);
+    // CHOOSER-AWARE + GATED: the CHOSEN cell's sustained@20ms sweep (Peak/Same/Custom), the SAME cell the
+    // headline rows read, so the marked peak is the published sustained@20ms at its operating concurrency.
+    // A mock-bound-suppressed metric plots no sweep (finding 22): its headline reads n/a, so its curve
+    // must not surface the hidden number.
+    const p = chooserCellPerf(g);
+    const gated = p && !xlateRpsSuppressed(p, "rps_sustained_20ms");
     return {
       label: g.display, color: CMP_COLORS[i],
-      sweep: perf && perf.served !== false ? perf.sweep_sustained_20ms : null,
-      peak: perf && perf.served !== false
-        ? { rps: perf.rps_sustained_20ms, conc: perf.rps_sustained_20ms_concurrency } : null,
+      sweep: gated ? p.sweep_sustained_20ms : null,
+      peak: gated ? { rps: p.rps_sustained_20ms, conc: p.rps_sustained_20ms_concurrency } : null,
     };
   });
   renderSweepCharts(document.getElementById("cmp-sweeps"), series, chartTheme());
@@ -2241,6 +2303,7 @@ if (NODE) {
     drawSweep, niceStep, fmtTick, COLUMN_SETS, columnsFor, PERF_VIEWS, TABLE_VIEWS, VIEW_SORT, LANES, naText, stripRigPaths,
     cellState, matrixCellTip, cellPerfTip, passCell, xlateCell, streamCell, memCell, rssSparkline, hasTranslation, CATEGORIES, DEFAULT_CATEGORY, VIEWS,
     CHOOSER_MODES, chooserCellPerf, chooserDialects, chooserPerfCell, chooserCellStream, chooserStreamCell, chooserHasCell, deltaToPeak, cellPopFull,
+    laneRecord, lanePathNote, perfSweepSeries,
     canonicalPerf, canonicalXlate, canonicalStreaming, canonicalMemory, cpuFpsCertified, sustainedCertified, perfRpsCertified, perfRpsSuppressed, xlateRpsSuppressed, gatewayResultsJson, DEFAULT_VIEW, VIEW_LABELS, rosterRows, fmtStars,
     configCorrectionUrl, BENCH_REPO,
     HOME_VIEW, homeCardsHtml,
