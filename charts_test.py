@@ -106,20 +106,23 @@ def stream(**over):
     return rec
 
 
-# _mem(**over): a SEALED memory_read record — the shape gen-data actually emits (every *_rss_mib field
-# is an envelope, never a bare scalar). RSS is UNGATED, so a present value is certified and an absent one
-# seals to not_measured. Null-safe by construction: the producer emits NULL (not a fabricated 0) for an
-# RSS it could not obtain, and every consumer must render that as "not measured".
-def _mem(**over):
-    rec = {"source": {"kind": "matrix", "sweep": "6x6-memory-window", "build": "x",
-                      "measured_at": "2026-01-01T00:00:00Z"}, "served": True}
-    for k in ("idle_rss_mib", "peak_rss_mib", "recovered_rss_mib"):
-        if k in over:
-            rec[k] = _seal(over[k])
+# _mem(**over): a gateway record carrying ONE SEALED PER-CELL memory window, which is the only shape
+# memory ships in: there is no per-gateway memory record any more, because producing one would mean the
+# harness SELECTING a cell. Every *_rss_mib field is an envelope, never a bare scalar. RSS is UNGATED, so
+# a present value is certified and an absent one seals to not_measured. Null-safe by construction: the
+# producer emits NULL (not a fabricated 0) for an RSS it could not obtain, and every consumer must render
+# that as "not measured". `dialect` is the identity cell the window sits on (charts compare on ONE cell).
+_MEM_SEALED = ("idle_rss_mib", "steady_state_rss_mib", "recovered_rss_mib", "peak_rss_mib",
+               "peak_rss_hwm_mib", "growth_rate_mib_per_min", "time_to_plateau_s")
+
+
+def _mem(dialect="openai", served=True, **over):
+    mem = {"served": True, "protocol": "per-cell, own cold-started process",
+           "load_recipe": {"concurrency": 64, "payload_bytes": 4096},
+           "idle_window_s": 60, "recovery_window_s": 60, "plateaued": over.pop("plateaued", True)}
     for k, v in over.items():
-        if not k.endswith("_rss_mib"):
-            rec[k] = v
-    return rec
+        mem[k] = _seal(v) if k in _MEM_SEALED else v
+    return {"matrix": {"upstreams": {dialect: {"cells": {dialect: {"served": served, "memory": mem}}}}}}
 
 
 # ── _proj_streaming: the streamcpu / sustained validity gates ────────────────────────────────────────
@@ -281,7 +284,7 @@ check("HIGH-1: a gateway with no best_cell is absent from the perf charts", char
 
 # _merge (README leaderboard) enumerates CANON, so the matrix-only gateway appears in the report too.
 _canon_perf({"matrixonly": {"best_cell": bc(),
-                            "memory_read": {"peak_rss_mib": _seal(90), "idle_rss_mib": _seal(30)}}})
+                            **_mem(idle_rss_mib=30, steady_state_rss_mib=90)}})
 merged = charts._merge()
 check("HIGH-1: _merge (report leaderboard) includes a matrix-only gateway (best_cell, no disk perf)",
       "matrixonly" in merged, True)
@@ -349,7 +352,7 @@ check("MED-3: the clean max-proxy RPS IS ranked", "clean" in proxy_topn, True)
 # ── memory RECOVERY: recovered_rss_mib is null_not_served — a gateway measured BEFORE the recovery ────
 # signal existed (recovered_rss_mib absent → projected None) must NOT draw a fabricated 0 bar or rank,
 # while a gateway WITH a recovery number is ranked (best = min, lower recovery wins). _proj_memory reads
-# CANON[key]["memory_read"], so fixture that lane directly.
+# the PER-CELL window on the shared comparison cell, so fixture the matrix cell directly.
 rec_chart = chart_by_name("memory_recovery")
 check("memory_recovery chart is null_not_served (no fabricated 0 for a pre-recovery bundle)",
       rec_chart.null_not_served, True)
@@ -357,9 +360,9 @@ check("memory_recovery chart is null_not_served (no fabricated 0 for a pre-recov
 # used to tolerate, so the test asserted the tolerance instead of the contract. A bare scalar in the
 # bundle is now a hard error, and the fixtures state what the real bundle actually carries.
 charts.CANON = {
-    "recovers": {"memory_read": _mem(idle_rss_mib=40, peak_rss_mib=1000, recovered_rss_mib=45)},
-    "pinned":   {"memory_read": _mem(idle_rss_mib=60, peak_rss_mib=900,  recovered_rss_mib=880)},
-    "oldbundle":{"memory_read": _mem(idle_rss_mib=50, peak_rss_mib=800)},  # pre-recovery: no field
+    "recovers": _mem(idle_rss_mib=40, steady_state_rss_mib=1000, recovered_rss_mib=45),
+    "pinned":   _mem(idle_rss_mib=60, steady_state_rss_mib=900,  recovered_rss_mib=880),
+    "oldbundle":_mem(idle_rss_mib=50, steady_state_rss_mib=800),  # pre-recovery: no field
 }
 charts.GATEWAYS = {k: k for k in charts.CANON}
 mrows = {r["_key"]: r for r in charts._load("memory")}
@@ -373,20 +376,42 @@ check("memory_recovery: a gateway that RELEASES ranks over one that stays pinned
 check("memory_recovery: a pre-recovery bundle (null recovered) is NOT eligible (never a fabricated 0)",
       "oldbundle" in rec_topn, False)
 
-# ── memory RSS: peak_rss_mib is null_not_served — a gateway with NO served cell (peak None) must NOT ───
-# draw a fabricated served-0 peak bar or rank (audit #7/#23). A gateway with a real peak is ranked.
+# ── memory RSS: steady_state_rss_mib is null_not_served. Two DISTINCT ways to have no number, and ─────
+# neither may draw a fabricated served-0 bar (audit #7/#23): a gateway that does not serve the comparison
+# cell at all, and one that served it but whose RSS NEVER WENT STEADY - the second is the interesting one,
+# because the honest answer there is not a number at all. Its growth rate is the finding, and the bar says
+# "never settled" instead of substituting a peak (which would report when the load stopped).
 rss_chart = chart_by_name("memory_rss")
-check("memory_rss chart is null_not_served (no fabricated 0 peak for a no-served-cell gateway)",
+check("memory_rss chart is null_not_served (no fabricated 0 for a gateway with no steady state)",
       rss_chart.null_not_served, True)
 charts.CANON = {
-    "measured": {"memory_read": _mem(idle_rss_mib=40, peak_rss_mib=900)},
-    "nocell":   {"memory_read": _mem(idle_rss_mib=None, peak_rss_mib=None)},  # no served cell → nulls
+    "measured": _mem(idle_rss_mib=40, steady_state_rss_mib=900),
+    "nocell":   _mem(served=False, idle_rss_mib=None, steady_state_rss_mib=None),  # cell not served
+    "leaks":    _mem(idle_rss_mib=20, steady_state_rss_mib=None, plateaued=False,
+                     growth_rate_mib_per_min=42.5),                                # served, never settled
 }
 charts.GATEWAYS = {k: k for k in charts.CANON}
+mrows = {r["_key"]: r for r in charts._load("memory")}
 rss_topn = charts._topn_keys(rss_chart, n=5)
-check("memory_rss: a gateway with a real peak is ranked", "measured" in rss_topn, True)
-check("memory_rss: a no-served-cell gateway (null peak) is NOT eligible (never a fabricated 0 bar)",
-      "nocell" in rss_topn, False)
+check("memory_rss: a gateway with a real steady state is ranked", "measured" in rss_topn, True)
+check("memory_rss: an unserved cell is NOT eligible (never a fabricated 0 bar)", "nocell" in rss_topn, False)
+check("memory_rss: a gateway that never settled is NOT eligible (no steady state to rank)",
+      "leaks" in rss_topn, False)
+check("memory_rss: the never-settled bar says so, and quantifies it with the growth rate",
+      "never settled: +42.5 MiB/min" in (charts._mem_annot(mrows["leaks"]) or ""), True)
+check("memory_rss: every row names the ONE cell every gateway was compared on",
+      mrows["measured"]["_mem_load_cell"], "openai>openai")
+
+# The comparison cell is the identity cell the MOST gateways serve, derived from the data (never named).
+charts.CANON = {
+    "a": _mem(dialect="anthropic", idle_rss_mib=10, steady_state_rss_mib=100),
+    "b": _mem(dialect="anthropic", idle_rss_mib=10, steady_state_rss_mib=100),
+    "c": _mem(dialect="openai", idle_rss_mib=10, steady_state_rss_mib=100),
+}
+charts.GATEWAYS = {k: k for k in charts.CANON}
+check("the memory comparison cell is the identity cell most of the field serves", charts._mem_cell(), "anthropic")
+check("a gateway that does not serve the comparison cell has NO row (renders not measured, never a substituted cell)",
+      {r["_key"] for r in charts._load("memory")}, {"a", "b"})
 
 
 if _fail == 0:

@@ -206,6 +206,19 @@ function rawMatrix(gwKey) {
   return r ? r.matrix : null;
 }
 
+// hasCellMemory(m): does this matrix carry a per-cell memory window on any served cell? Memory projects
+// no per-gateway record, so "is this row publishing memory?" can only be asked of the cells themselves.
+function hasCellMemory(m) {
+  if (!m || typeof m !== "object") return false;
+  for (const cells of [m.cells, ...Object.values(m.upstreams || {}).map((u) => u && u.cells)]) {
+    if (!cells || typeof cells !== "object") continue;
+    for (const cell of Object.values(cells)) {
+      if (cell && cell.served === true && cell.memory && typeof cell.memory === "object") return true;
+    }
+  }
+  return false;
+}
+
 // ---- the caption-literal lint (C3) + accessor-routing lint (C5) --------------
 // A source token in a per-datum caption literal is the bug class (memory mislabelled "6x6"). The lints
 // scan the caption-RENDERING regions of app.js/charts.py — the SWEEP_CAPTION table is the ONE allowed
@@ -399,7 +412,10 @@ export function checkConsistency(data, app, opts = {}) {
     for (const suite of ["perf", "stream", "streamcpu", "xlate"]) {
       if (g[suite] != null) { errors.push(`C4: ${g.key}.${suite} — a raw legacy suite object leaked into the bundle`); covered("C4.leak"); }
     }
-    for (const [name, cell] of [["best_cell", g.best_cell], ["translation_cell", g.translation_cell], ["streaming", g.streaming], ["memory_read", g.memory_read]]) {
+    // Memory is NOT in this list: it projects no per-gateway record any more (it is measured per cell and
+    // read per cell), so it has no top-level source stamp to check. Its per-cell windows are stamped at
+    // render time by app.js stampChosen, and C3's caption vocabulary covers those keys.
+    for (const [name, cell] of [["best_cell", g.best_cell], ["translation_cell", g.translation_cell], ["streaming", g.streaming]]) {
       if (!cell) continue;
       covered("C4.cell");
       const src = cell.source;
@@ -448,8 +464,11 @@ export function checkConsistency(data, app, opts = {}) {
     // AUDIT #18: the escape hatch is CLOSED. A gateway that publishes matrix-sourced numbers MUST be
     // oracle-checkable: with no raw artifact on disk at all, the oracle layer would silently become
     // "not required" and an unverifiable publish would pass.
-    const matrixSourced = [g.best_cell, g.translation_cell, g.streaming, g.memory_read]
-      .some((r) => r && r.source && r.source.kind === "matrix");
+    // A row publishing ONLY per-cell memory off its matrix is just as matrix-sourced as one publishing a
+    // best_cell, and must be just as oracle-checkable: without this it could publish a whole memory lane
+    // with no raw artifact on disk and the oracle requirement would silently not apply.
+    const matrixSourced = [g.best_cell, g.translation_cell, g.streaming]
+      .some((r) => r && r.source && r.source.kind === "matrix") || hasCellMemory(g.matrix);
     if (matrixSourced) matrixPublishers.add(g.key);
     if (matrixSourced && !m && !syntheticFixture)
       errors.push(`R2: ${g.key} publishes matrix-sourced numbers but no raw matrix artifact (snapshot or results/matrix/${g.key}.json) is on disk — the independent oracle cannot verify a single one of them (an unverifiable publish is a failure, not an exemption)`);
@@ -484,7 +503,11 @@ export function checkConsistency(data, app, opts = {}) {
         for (const [ingress, cell] of Object.entries((up && up.cells) || {})) {
           const rawCell = rawCellAt(ingress, egress);
           if (!rawCell) continue;
-          for (const [sealedSub, rawSub] of [[cell && cell.perf, rawCell.perf], [cell && cell.stream, rawCell.stream]]) {
+          // cell.memory joins perf/stream here: since memory became a PER-CELL record it is displayed
+          // straight off these cells, so leaving it out would mean the board's whole memory lane
+          // published unoracled numbers. Its fields are ungated (RSS + growth rate + time to plateau).
+          for (const [sealedSub, rawSub] of [[cell && cell.perf, rawCell.perf], [cell && cell.stream, rawCell.stream],
+            [cell && cell.memory, rawCell.memory]]) {
             if (!sealedSub || !rawSub) continue;
             for (const k of Object.keys(sealedSub)) {
               if (!isMetricField(k)) continue;
@@ -494,12 +517,11 @@ export function checkConsistency(data, app, opts = {}) {
           }
         }
       }
-      // (b) the PROJECTED records: best_cell, translation_cell, streaming, memory_read.
+      // (b) the PROJECTED records: best_cell, translation_cell, streaming. (Memory projects none.)
       for (const [name, rec, raw] of [
         ["best_cell", g.best_cell, (() => { const p = g.best_cell && g.best_cell.path; const c = p && rawCellAt(p.dialect, p.dialect); return c && c.perf; })()],
         ["translation_cell", g.translation_cell, (() => { const p = g.translation_cell && g.translation_cell.path; const c = p && rawCellAt(p.ingress, p.egress); return c && c.perf; })()],
         ["streaming", g.streaming, (() => { const p = g.streaming && g.streaming.path; const c = p && p.dialect && rawCellAt(p.dialect, p.dialect); return c && c.stream; })()],
-        ["memory_read", g.memory_read, m.memory],
       ]) {
         if (!rec || !raw || !rec.source || rec.source.kind !== "matrix") continue;
         for (const k of Object.keys(rec)) {

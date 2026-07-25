@@ -180,8 +180,12 @@ translation cell, the guard has a hole.
 
 - **idle RSS** - the MEDIAN over the cold-idle window on a freshly restarted process, sampled *before*
   it serves any request (a warm post-sweep process would measure "recovered", not "idle").
-- **peak RSS** - the max RSS sampled continuously while the identical fixed load runs on that gateway's
-  peak cell.
+- **steady-state RSS** - the level the RSS settles at while the identical fixed load runs on that cell.
+  A cell whose RSS never goes steady within the cap has no steady state, and publishes its **growth
+  rate** (MiB/min over the final window) instead: at the cap that rate IS the leak rate.
+- **plateaued / time to plateau / growth rate** - whether the RSS went steady on that cell, how long it
+  took, and how fast it was still moving. The growth rate is published whether or not the cell
+  plateaued, because any threshold admits a leak slower than itself.
 - **recovered RSS** - the RSS at the END of the recovery window after the load stops: does it release,
   or stay pinned? A gateway that pools memory and never returns it looks bounded on a boot-time
   `docker stats` but stays pinned at peak under sustained load. (`post_load_rss_mib` is a back-compat
@@ -216,15 +220,20 @@ A **mock-ceiling guardrail** measures the mock's own throughput each sweep and f
 within 10% of it - so a number that's really the *harness's* limit is marked a floor, never sold as
 the gateway's ceiling.
 
-**Memory.** The **post-6x6 memory window**, not a synthetic burst (the old standalone 150 KB x 1500c
-suite is deleted - it mislabelled itself as 6x6 provenance). After the 6x6 sweep completes, the gateway
-is **cold-restarted**, its **cold idle RSS** is sampled before it serves a single request, then the
-**identical fixed load** (same concurrency, payload and duration for every gateway - `MATRIX_MEM_CONC`
-/ `MATRIX_MEM_PAYLOAD` / `MATRIX_MEM_DUR`) runs on **that gateway's own peak cell**, and RSS is sampled
-through a recovery window after the load stops. One process lifecycle, so the idle -> peak -> recovered
-arc is a real curve. Windows are tunable (`MEM_IDLE_S` / `MEM_SETTLE_S`) and travel in the result, so
-every published label renders the durations the run actually used. Any RSS the sampler cannot obtain is
-**null, never a fabricated 0**.
+**Memory.** A **per-cell memory window**, not a synthetic burst (the old standalone 150 KB x 1500c
+suite is deleted - it mislabelled itself as 6x6 provenance). **Every served cell gets its own window**
+and no cell is selected: the gateway is **cold-started for that cell**, its **cold idle RSS** is sampled
+before it serves a single request, then the **identical fixed load** (same concurrency and payload for
+every gateway and every cell - `MATRIX_MEM_CONC` / `MATRIX_MEM_PAYLOAD`) runs **until the RSS is
+steady** over a trailing window (`MEM_PLATEAU_WINDOW_S`, drift and spread both under their thresholds)
+or until the `MEM_PLATEAU_CAP_S` cap, and RSS is sampled through a recovery window after the load stops.
+Reaching the cap is a **published result** (`plateaued: false` plus the growth rate), not an error. A
+fixed duration would have let the stopping point decide the answer for any gateway still climbing when
+it expired; a plateau test holds every gateway to the same standard instead. One process lifecycle per
+cell, so the idle -> steady -> recovered arc is a real curve. Windows are tunable (`MEM_IDLE_S` /
+`MEM_SETTLE_S`) and travel in the result, so every published label renders the durations the run
+actually used. Any RSS the sampler cannot obtain is **null, never a fabricated 0**, and a rig that
+cannot read RSS at all withholds the plateau verdict as **null** rather than asserting `false`.
 
 ## Add a gateway
 
