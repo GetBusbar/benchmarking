@@ -59,8 +59,9 @@ git clone https://github.com/GetBusbar/benchmarking && cd benchmarking
 ```
 
 One run measures **latency, throughput, and memory** for every gateway on the same box, then
-regenerates the charts and the report pages. Out comes `results/perf/<gateway>.json`,
-`results/memory/<gateway>.json`, `results/reports/{all,top5}/README.md`, and the chart PNGs.
+regenerates the charts and the report pages. Out comes `results/matrix/<gateway>.json` (the
+passthrough/translation/streaming/memory measurements), `results/reports/{all,top5}/README.md`, and
+the chart PNGs.
 
 ### On a fresh cloud box (nothing to install)
 
@@ -102,14 +103,17 @@ faster.
 
 ## What it measures
 
-**`perf/`** - what the system can *do* (the metrics that matter most):
+**Passthrough perf** (folded into `matrix/`) - what the system can *do* (the metrics that matter most):
 
 - **added latency (µs)** - p99 the gateway adds over the upstream at concurrency 1
   (gateway p99 − direct-to-mock p99). Microseconds, because at this scale ms hides the story.
 - **RPS ceiling** - highest sustained requests/sec with p99 under 1 s and **a <0.1% error rate** -
   "how much can it carry before it falls over."
 
-**`stream/`** (opt-in: `SUITES="perf memory stream" ./run-all.sh`) - what the gateway adds to a
+The matrix's best same-dialect diagonal cell IS this passthrough measurement (the retired standalone
+`perf/` suite is gone; gen-data projects the board's headline perf from the matrix cell).
+
+**`stream/`** (opt-in: `SUITES="stream matrix" ./run-all.sh`) - what the gateway adds to a
 token stream. The mock answers `stream:true` with a valid SSE stream: a role chunk, then 64
 content deltas paced at 20 ms, then finish + `[DONE]` (Anthropic event shape on `/messages`).
 Against that fixed pace, per gateway:
@@ -130,24 +134,7 @@ A gateway that answers 200 but buffers the stream (never frames) is recorded
 `stream_*` fields are additive; existing result files stay valid. Knobs: `STREAM_CHUNKS`,
 `STREAM_INTERVAL_MS`, `STREAM_CHUNK_BYTES`, `STALL_X`, `SWEEP`, `SWEEP_DUR`.
 
-**`governed/`** (opt-in: `SUITES="perf memory governed" ./run-all.sh`) measures what governance
-costs. Every published gateway number in `perf/` is an ungoverned pass-through; production traffic
-usually runs behind per-caller keys, rate limits, and budgets. This lane repeats the c1
-added-latency measurement and the sustained-RPS-@20ms sweep with the gateway's native key/limit
-governance active, so every request pays virtual-key resolution, rate-limit accounting, and the
-budget check on the hot path. The same run then repeats the identical sweep against the plain
-launch, so `results/governed/<gateway>.json` self-contains the overhead
-(`governed_vs_plain_sustained_pct`, `governed_vs_plain_added_p99_delta_us`) from one box in one
-sitting, never a cross-day subtraction. The minted key carries no caps (unlimited RPM/TPM/budget,
-all pools): nothing can trip at benchmark rates, so the number is the cost of the check, not a
-limit. A gateway opts in through two optional manifest hooks (`gw_governed_launch`,
-`gw_governed_token`); a manifest without them gets a valid `governed_served: false` result, never a
-crash. Today busbar is wired (governance activates when `governance.admin_token` is set; the run
-mints a virtual key over `POST /api/v1/admin/keys` and uses the once-shown secret as the bench
-token). LiteLLM-Rust is recorded `governed_served: false` because its key mint path requires the
-Python proxy plus a Postgres database, which this single-box harness does not provision.
-
-**`xlate/`** (opt-in: `SUITES="perf memory xlate" ./run-all.sh`) measures protocol translation.
+**`xlate/`** (opt-in: `SUITES="xlate matrix" ./run-all.sh`) measures protocol translation.
 The client speaks Anthropic (POST `/v1/messages`, a Messages body, `anthropic-version` and
 `x-api-key` headers) while the upstream mock speaks OpenAI on the manifest's `GW_PATH`, so the
 gateway must translate the request out and the response back. The mock is untouched; that is the
@@ -189,7 +176,7 @@ discovery never fields it): a second mock posing as the gateway, expected to sco
 incidentally and every translation cell false as passthrough. If the fixture ever goes green on a
 translation cell, the guard has a hole.
 
-**`memory/`** - resident memory across a request's life (matters most at GB scale):
+**Memory** (folded into `matrix/`) - resident memory across a request's life (matters most at GB scale):
 
 - **idle RSS** - right after the gateway first answers `200`, before any load.
 - **peak RSS** - highest RSS under sustained large-payload load.

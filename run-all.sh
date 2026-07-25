@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (C) 2026 Busbar Inc and contributors
 #
-# One command → answers. Runs the memory benchmark for every listed gateway on THIS box (same mock,
+# One command → answers. Runs the matrix benchmark for every listed gateway on THIS box (same mock,
 # same load, same pin), one at a time, then regenerates the chart from results/. Nothing to debug.
 #
 #   bench/run-all.sh                                            # all gateways
@@ -66,12 +66,13 @@ manifest_gw_port(){ # gateway
 # streams-sustained, peak cpu-fps), and the run takes ONE process-level memory read. So run-all runs
 # ONLY the matrix by default.
 #
-# The standalone perf / stream / streamcpu / xlate / memory suite files are LEFT IN PLACE (not deleted)
-# but are no longer run here — they remain usable ad hoc via an explicit SUITES override, e.g.
-#   SUITES="perf memory stream streamcpu xlate governed matrix" bench/run-all.sh
-# governed is NOT in the default set (it is a non-default, busbar-only governance-enabled launch, off
-# the neutral out-of-the-box board); opt into it the same way. gen-data reads whatever is on disk and
-# projects the board from the matrix, falling back to any legacy suite results still present.
+# The standalone stream / streamcpu / xlate suite files are LEFT IN PLACE (not deleted) but are no
+# longer run here — they remain usable ad hoc via an explicit SUITES override, e.g.
+#   SUITES="stream streamcpu xlate matrix" bench/run-all.sh
+# (the retired perf / memory / governed suites have been removed entirely: the matrix folds passthrough
+# perf + the process-level memory read in, and governance was a non-default busbar-only lane.) gen-data
+# reads whatever is on disk and projects the board from the matrix, falling back to any legacy suite
+# results still present (streaming from the stream suite, apisix translation from the xlate suite).
 SUITES="${SUITES:-matrix}"
 for gw in "${GATEWAYS[@]}"; do
   [ -f "$HERE/gateways/$gw/gateway.sh" ] || { log "skip unknown gateway '$gw'"; continue; }
@@ -98,7 +99,7 @@ log "regenerating charts"
 if command -v python3 >/dev/null && python3 -c 'import matplotlib' 2>/dev/null; then
   python3 "$HERE/charts.py"
 else
-  log "matplotlib not present — results/memory/*.json written; run 'pip install matplotlib && python3 bench/charts.py' to draw"
+  log "matplotlib not present — results/matrix/*.json written; run 'pip install matplotlib && python3 bench/charts.py' to draw"
 fi
 log "done — results/ + results/memory_rss.png"
 # Propagate a crashed suite as a non-zero run-level status (audit R3-M4/M5): a run missing whole
