@@ -305,6 +305,26 @@ CHARTS = [
         ],
         log=True,
     ),
+    # ── supporting: memory RECOVERY (does it release?) ────────────────────────────────────────────
+    # Raw peak is a weak signal — every gateway spikes under the 150KB x 1500 x 120s load. The honest
+    # differentiator is whether memory is RELEASED afterward. Rank by recovered_rss_mib (RSS 60s after
+    # the load ends; best = min), with peak shown muted as the reference. null_not_served gates on the
+    # recovery field: a gateway measured BEFORE this signal existed (recovered_rss_mib is null) is drawn
+    # "not measured", never a fabricated 0 — mirroring the served_field/validity discipline above.
+    Chart(
+        name="memory_recovery",
+        suite="memory",
+        title="Does the gateway release memory after the load?",
+        subtitle="RSS 60s after the large-payload load ends (recovered) vs. its peak - lower recovery is better",
+        unit="MiB RAM",
+        series=[
+            Series("recovered_rss_mib", "recovered RAM (60s after load)", "rank"),
+            Series("peak_rss_mib", "peak RAM (under load)", MUTE),
+        ],
+        log=True,
+        null_not_served=True,
+        not_measured_text="✕ not measured (needs a recovery-enabled field run)",
+    ),
     # ── cost framing (AIGatewayBench's $/vCPU lens) ───────────────────────────────────────────────
     Chart(
         name="rps_per_dollar",
@@ -527,6 +547,9 @@ def _proj_memory(key: str) -> dict | None:
         "served": True,
         "idle_rss_mib": m.get("idle_rss_mib"),
         "peak_rss_mib": m.get("peak_rss_mib"),
+        # recovered_rss_mib is absent on pre-recovery bundles → None. The recovery chart gates on it
+        # (null_not_served), so such a gateway is shown "not measured", never a fabricated 0 bar.
+        "recovered_rss_mib": m.get("recovered_rss_mib"),
     }
 
 
