@@ -120,8 +120,18 @@ echo "matrix_memory_test: a settling gateway plateaus, and the plateau value is 
 CURVE=settle; RISE_S=4; FAKE_OK=1000; T_ORIGIN=$(date +%s)
 matrix_cell_memory openai openai /v1/chat/completions '{"model":"m"}'
 check "plateaued"                    "true" "$(field plateaued)"
-checkf "time_to_plateau_s is a number and at least one window" \
-  "$(awk -v v="$(field time_to_plateau_s)" 'BEGIN{print (v+0>=4)?1:0}')" "$(field time_to_plateau_s)"
+# time_to_plateau_s is WHEN THE RSS WENT FLAT, not when the steadiness test finished confirming it. The
+# window is trailing, so a pass at `elapsed` means [elapsed-window, elapsed] was steady and the gateway
+# stopped moving at the START of it. Reporting `elapsed` inflated every settling time by exactly one
+# window (a gateway flat at 120s published as 180s) and, worse, tied a number ABOUT THE GATEWAY to the
+# size of our instrument: change MEM_PLATEAU_WINDOW_S and every published settling time moves. This
+# fixture rises for RISE_S then holds, so the reported time must be BELOW the declaration time, and 0 is
+# a legitimate answer (already steady when the load began).
+checkf "time_to_plateau_s is a non-negative number" \
+  "$(awk -v v="$(field time_to_plateau_s)" 'BEGIN{print (v+0>=0)?1:0}')" "$(field time_to_plateau_s)"
+checkf "time_to_plateau_s EXCLUDES the confirmation window (settling point, not declaration point)" \
+  "$(awk -v v="$(field time_to_plateau_s)" -v w="$MEM_PLATEAU_WINDOW_S" 'BEGIN{print (v+0 <= 2*w)?1:0}')" \
+  "$(field time_to_plateau_s) (window ${MEM_PLATEAU_WINDOW_S}s)"
 checkf "steady_state_rss_mib is the settled value (120.0 by construction)" \
   "$(awk -v v="$(field steady_state_rss_mib)" 'BEGIN{print (v+0>=119 && v+0<=121)?1:0}')" "$(field steady_state_rss_mib)"
 # THE LOAD-BEARING ONE: the rate is emitted even though this gateway DID plateau. A threshold admits any

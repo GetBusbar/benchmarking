@@ -2234,8 +2234,11 @@ test("#27 CLASS: every RSS field is NULL-SAFE — a null RSS renders 'not measur
   assert.equal(cell.v, null);
   // (c) #14: the window durations RENDER from the data, not from a hard-coded "60 s" - and they now have
   //     to be found on the CELL, which is where the producer writes them.
-  assert.deepEqual(app.memWindows(mem), { idle: 30, recovery: 45 });
-  assert.deepEqual(app.boardMemWindows(bundle), { idle: 30, recovery: 45 },
+  // `steady` is the STEADINESS window (how long the RSS had to hold still before the plateau was
+  // believed). It rides in load_recipe.plateau_window_s; this fixture predates it, so it reads null and
+  // the caption states the settling time without claiming a confirmation length it does not know.
+  assert.deepEqual(app.memWindows(mem), { idle: 30, recovery: 45, steady: null });
+  assert.deepEqual(app.boardMemWindows(bundle), { idle: 30, recovery: 45, steady: null },
     "the board's window labels must read the PER-CELL windows, not fall back to the 60 s default");
   const cap = app.memoryCaption(bundle, st).join(" ");
   assert.ok(cap.includes("45 s"), `memory caption must render the run's own windows; got: ${cap}`);
