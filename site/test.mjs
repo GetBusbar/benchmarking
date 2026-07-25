@@ -1339,8 +1339,10 @@ test("stripRigPaths scrubs absolute bench-box paths from diagnostic notes", () =
 
 // ---- per-cell perf: best-path deviation on the matrix hover -----------------
 test("cellPerfTip shows a green cell's perf and its deviation from the gateway's best cell", () => {
-  const best = { ingress: "openai", egress: "openai", rps_sustained_20ms: 30000 };
-  const green = { served: true, perf: { rps_sustained_20ms: 25500, added_latency_p99_us: 900 } };
+  // FINDING 33: cellPerfTip is now mock-bound gated. A CERTIFIED (mock_bound:false) cell + reference show
+  // the number + delta as before; an unstamped/rig-bound value reads n/a (asserted in the next test).
+  const best = { ingress: "openai", egress: "openai", rps_sustained_20ms: 30000, rps_sustained_20ms_mock_bound: false };
+  const green = { served: true, perf: { rps_sustained_20ms: 25500, rps_sustained_20ms_mock_bound: false, added_latency_p99_us: 900 } };
   const tip = app.cellPerfTip(green, "anthropic", "openai", best);
   assert.ok(tip.includes("25,500 req/s @20ms"), tip);
   assert.ok(tip.includes("+900 µs p99 added"), tip);
@@ -1351,6 +1353,25 @@ test("cellPerfTip shows a green cell's perf and its deviation from the gateway's
   assert.equal(app.cellPerfTip({ served: false, perf: { rps_sustained_20ms: 1 } }, "a", "b", best), "");
   assert.equal(app.cellPerfTip({ served: "not_configurable" }, "a", "b", best), "");
   assert.equal(app.cellPerfTip({ served: true }, "a", "b", best), "");
+});
+
+test("FINDING 33: cellPerfTip gates a mock-bound sustained RPS (never leaks a rig-limited number)", () => {
+  const best = { ingress: "openai", egress: "openai", rps_sustained_20ms: 30000, rps_sustained_20ms_mock_bound: false };
+  // A rig-bound (mock_bound:true) cell must NOT print its raw RPS; the added-latency survives, labelled n/a.
+  const bound = { served: true, perf: { rps_sustained_20ms: 99999, rps_sustained_20ms_mock_bound: true, added_latency_p99_us: 900 } };
+  const boundTip = app.cellPerfTip(bound, "anthropic", "openai", best);
+  assert.ok(!boundTip.includes("99,999"), `a mock-bound RPS must not leak into the tip; got: ${boundTip}`);
+  assert.ok(boundTip.includes("sustained RPS n/a: rig-limited"), boundTip);
+  assert.ok(boundTip.includes("+900 µs p99 added"), boundTip);
+  // An UNSTAMPED value (no mock_bound flag) is also treated as unverifiable → suppressed, consistent
+  // with every other honest surface (undefined !== false → suppressed).
+  const unstamped = { served: true, perf: { rps_sustained_20ms: 25500, added_latency_p99_us: 900 } };
+  assert.ok(!app.cellPerfTip(unstamped, "anthropic", "openai", best).includes("25,500"), "unstamped RPS is suppressed");
+  // A certified cell vs an UN-certified reference: the number shows but no delta (the divisor is gated).
+  const uncertRef = { ingress: "openai", egress: "openai", rps_sustained_20ms: 30000 };  // no mock_bound flag
+  const t = app.cellPerfTip({ served: true, perf: { rps_sustained_20ms: 25500, rps_sustained_20ms_mock_bound: false, added_latency_p99_us: 900 } }, "anthropic", "openai", uncertRef);
+  assert.ok(t.includes("25,500 req/s @20ms"), t);
+  assert.ok(!t.includes("vs the"), `no delta against an un-certified reference; got: ${t}`);
 });
 
 // ---- sweep chart on a stub canvas with real committed data ------------------

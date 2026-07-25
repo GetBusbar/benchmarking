@@ -1138,6 +1138,15 @@ def _report_md(rows: list, title: str, charts: list, pending: tuple = (), chart_
                 xl = "✕ untranslated passthrough"
             elif not x.get("xlate_served"):
                 xl = "✕ cannot translate"
+            elif not x.get("xlate_rps_sustained_20ms_valid"):
+                # FINDING 24: gate the translation RPS on the mock-bound honesty flag
+                # (xlate_rps_sustained_20ms_valid), exactly as the SSE-streams column above gates on
+                # stream_sustained_valid and the translation PNG gates on served_field. Printing the raw
+                # value here published a rig-limited (mock-bound) number the chart + site both suppress —
+                # two surfaces diverging from one record. A legitimate measured 0 stays valid (shows "0").
+                xl = "✕ not measured (rig-limited)"
+                if x.get("_xlate_ingress"):
+                    xl += f" ({x['_xlate_ingress']} → {x['_xlate_egress']})"
             else:
                 xl = f"{int(x.get('xlate_rps_sustained_20ms') or 0):,}"
                 if x.get("_xlate_ingress"):  # canonical direction, named so no two surfaces mix paths
