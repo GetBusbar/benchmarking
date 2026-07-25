@@ -39,21 +39,36 @@ const HOME_VIEW = "home";
 // The board leads with a NEUTRAL ROSTER (the `gateways` overview: who is on the bench, in
 // alphabetical order, no perf numbers) and the rankings come second; matrix + method round it
 // out. `charts` folds into method; `results` was the old blended tab.
-const VIEWS = ["gateways", "passthrough", "translation", "streaming", "matrix", "method"];
-const VIEW_LABELS = { gateways: "Gateways", passthrough: "Peak", translation: "Matched", streaming: "Streaming", matrix: "Protocol matrix", method: "Method" };
-// The default (bare /gateways) view: the roster overview. The old default, passthrough, stays a
-// real tab at /gateways/passthrough.
+// UNIFIED TAB BAR (matrix-sole-source): Gateways · Memory · Performance · Streaming · Protocol matrix ·
+// Method. `performance` MERGES the old Peak + Matched tabs into ONE cell-chooser-driven tab (Peak | Same
+// | Custom picks which cell of the ONE 6x6 run to show); `memory` is a NEW per-gateway tab at position 2.
+const VIEWS = ["gateways", "memory", "performance", "streaming", "matrix", "method"];
+const VIEW_LABELS = { gateways: "Gateways", memory: "Memory", performance: "Performance", streaming: "Streaming", matrix: "Protocol matrix", method: "Method" };
+// The default (bare /gateways) view: the roster overview.
 const DEFAULT_VIEW = "gateways";
-const PERF_VIEWS = new Set(["passthrough", "translation", "streaming"]);
-// Old shared URLs pointed at results/charts; map them onto the new tabs so links keep resolving.
-const VIEW_ALIASES = { results: "passthrough", charts: "method", peak: "passthrough", matched: "translation" };
+// The tabs that render the results table with the cell-chooser (Performance, Streaming). Memory has its
+// own per-gateway table (no chooser).
+const PERF_VIEWS = new Set(["performance", "streaming"]);
+// The views that render the shared results table (#view-table). Memory is a table view too (its own
+// per-gateway columns) but is NOT cell-chooser driven, so it is in TABLE_VIEWS but not PERF_VIEWS.
+const TABLE_VIEWS = new Set(["performance", "streaming", "memory"]);
+// Old shared URLs pointed at results/charts and the old Peak/Matched/passthrough/translation tabs; map
+// them onto the new unified tabs so links keep resolving. The old translation (Matched) tab is now the
+// Performance tab in Custom mode, so it aliases to `performance` (its ?xin/?xout still decode into the
+// Custom in/out below).
+const VIEW_ALIASES = { results: "performance", charts: "method", peak: "performance", matched: "performance", passthrough: "performance", translation: "performance" };
 // Each perf tab's default (and honest headline) sort column; a clean URL omits the sort when it
 // equals this, and switching tabs snaps to it unless the URL pins another.
 // Streaming defaults to added TTFT (asc), NOT streams-sustained: the sustained count saturates at the
 // harness cap (1024 in the current field data) so it ties several gateways and breaks ties by name,
 // floating a slow-TTFT gateway above a fast one at the same count. Added TTFT is the streaming-overhead
 // discriminator that a user actually feels first and it does not saturate.
-const VIEW_SORT = { passthrough: "rps20", translation: "xlrps", streaming: "sttft" };
+const VIEW_SORT = { performance: "rps20", streaming: "sttft", memory: "mempeak" };
+// The cell-chooser modes shared by Performance + Streaming: which cell(s) of the ONE 6x6 run to show.
+//   peak   — each gateway on its OWN best same-dialect diagonal (best_cell). Default. Shows a per-row pill.
+//   same   — ONE picked dialect's diagonal (X→X) for every gateway. No pill (the dialect is in the control).
+//   custom — any ingress→egress cell (incl. translation) for every gateway. No pill.
+const CHOOSER_MODES = new Set(["peak", "same", "custom"]);
 
 /* Language chip colours: kept in sync with LANG_COLORS in charts.py. */
 const LANG_COLORS = {
@@ -402,6 +417,91 @@ function xlateCell(g, key, fmt) {
   return { v: null, text: "n/a", na: true };
 }
 
+/* ---- unified cell chooser (Performance + Streaming) --------------------------
+   The board runs the 6x6 matrix ONCE; Performance and Streaming are PICKS of that one run. The chooser
+   state (st.mode + sameDialect/xlateIn/xlateOut) selects WHICH cell each gateway's row reads:
+     peak   → the gateway's own best diagonal (best_cell); streaming = the projected diagonal g.streaming.
+     same D → the D→D diagonal cell (every gateway on the identical dialect).
+     custom → the xlateIn→xlateOut cell (any pair, incl. translation).
+   Every mode reads the SAME per-cell records the matrix carries, gated by the SAME mock-bound honesty
+   rules, so a value shows identically on the table, the matrix popup, and the drawer. A cell a gateway
+   lacks (unserved / unmeasured / a metric the record lacks) reads n/a — never 0, never fabricated. */
+// chooserCellPerf: the PERF object (added_latency_*, rps_*) for the currently-chosen cell of gateway g,
+// or null when that cell is unserved/unmeasured. Peak reads best_cell; Same/Custom read the matrix cell.
+function chooserCellPerf(g, st = state) {
+  if (st.mode === "peak") return g.best_cell || (g.perf && g.perf.served !== false ? g.perf : null);
+  const [ingress, egress] = st.mode === "same" ? [st.sameDialect, st.sameDialect] : [st.xlateIn, st.xlateOut];
+  return xlateMatrixCell(g, ingress, egress);
+}
+// The (ingress, egress) dialects the chosen cell is measured on — used for the pill/labels + the popup.
+function chooserDialects(g, st = state) {
+  if (st.mode === "peak") { const d = g.best_cell ? g.best_cell.dialect : null; return d ? [d, d] : [null, null]; }
+  return st.mode === "same" ? [st.sameDialect, st.sameDialect] : [st.xlateIn, st.xlateOut];
+}
+// A perf-metric cell for the chosen cell. The two RPS metrics are GATED on the mock-bound honesty flag
+// (present + >0 + NOT mock-bound) exactly like passCell/xlateCell; latency reads raw. A missing cell or a
+// missing/suppressed value reads n/a.
+function chooserPerfCell(g, key, fmt, st = state) {
+  const p = chooserCellPerf(g, st);
+  const gated = (key === "rps_max_proxy" || key === "rps_sustained_20ms");
+  const v = (p && gated && xlateRpsSuppressed(p, key)) ? null : (p ? p[key] : null);
+  return v != null ? { v, text: fmt(v), na: false } : { v: null, text: "n/a", na: true };
+}
+// The chosen cell's STREAMING record. Per-cell streaming is only measured on the diagonal today (gen-data
+// projects it to g.streaming), so:
+//   peak     → g.streaming (the best diagonal's streaming).
+//   same D   → g.streaming ONLY when the diagonal it was projected from IS D (else n/a: not measured here).
+//   custom   → the cell's own .stream when the matrix carries one (future per-cell streaming), else n/a.
+// canonicalStreaming applies the cpu_fps / streams_sustained honesty gates identically to the headline.
+function chooserCellStream(g, st = state) {
+  if (st.mode === "peak") return canonicalStreaming(g);
+  const [ingress, egress] = chooserDialects(g, st);
+  if (st.mode === "same") {
+    const cs = canonicalStreaming(g);
+    return cs && cs.dialect === ingress ? cs : null;   // only the diagonal it was actually measured on
+  }
+  // custom: a per-cell stream record if the matrix carries one for this exact pair (else n/a).
+  const up = g.matrix && g.matrix.upstreams && g.matrix.upstreams[egress];
+  const cell = up && up.cells && up.cells[ingress];
+  const raw = cell && cell.served === true && cell.stream && cell.stream.stream_served === true ? cell.stream : null;
+  if (!raw) return null;
+  const rec = { stream_served: true, dialect: ingress, ...raw };
+  if (!cpuFpsCertified(raw)) rec.cpu_fps = null;
+  if (!sustainedCertified(raw)) rec.streams_sustained = null;
+  return rec;
+}
+// A streaming-metric cell for the chosen cell (n/a when the cell has no streaming here or lacks the field).
+// Peak mode delegates to streamCell so the legacy stream-suite fallback (a bundle whose gen-data did not
+// project g.streaming) still renders; Same/Custom read the per-cell stream record.
+function chooserStreamCell(g, key, fmt, st = state) {
+  if (st.mode === "peak") return streamCell(g, key, fmt);
+  const s = chooserCellStream(g, st);
+  if (s && s[key] != null) return { v: s[key], text: fmt(s[key]), na: false };
+  return { v: null, text: "n/a", na: true };
+}
+// Does gateway g have a chosen cell to show at all (a served, measured cell)? Drives whether a row
+// appears / how the pill renders. Peak: any best_cell. Same/Custom: the exact cell is served.
+function chooserHasCell(g, st = state) {
+  if (st.mode === "peak") return !!chooserCellPerf(g, st);
+  const [ingress, egress] = chooserDialects(g, st);
+  return servesXlatePair(g, ingress, egress);
+}
+// Δ-to-Peak for a chosen cell vs the gateway's OWN best diagonal (best_cell): "+18% latency, -9% RPS".
+// Returns "" for the peak cell itself, or when either reference number is missing. Honest: only the
+// metrics both cells actually measured contribute; a suppressed/absent value is skipped.
+function deltaToPeak(cellPerf, best) {
+  if (!cellPerf || !best) return "";
+  // Same cell as the reference (peak): nothing to compare.
+  if (best.ingress === cellPerf.ingress && best.egress === cellPerf.egress) return "";
+  const bits = [];
+  if (cellPerf.added_latency_p99_us != null && best.added_latency_p99_us != null && best.added_latency_p99_us > 0)
+    bits.push(`${fmtPct((cellPerf.added_latency_p99_us / best.added_latency_p99_us - 1) * 100)} latency`);
+  if (cellPerf.rps_sustained_20ms != null && best.rps_sustained_20ms != null && best.rps_sustained_20ms > 0
+      && best.rps_sustained_20ms_mock_bound === false && cellPerf.rps_sustained_20ms_mock_bound === false)
+    bits.push(`${fmtPct((cellPerf.rps_sustained_20ms / best.rps_sustained_20ms - 1) * 100)} RPS`);
+  return bits.join(", ");
+}
+
 /* ---- column model ----------------------------------------------------------- */
 /* get(g) returns {v, text, na}: v is the sortable value (null = none), text the cell
    text, na marks a muted "not measured / not served" cell. sortable:false columns
@@ -432,72 +532,92 @@ const COL_NAME = {
     return `<td class="name">${a}</td>`;
   },
 };
+// The "Tested on" pill column: shown ONLY in Peak mode (each gateway on its own best diagonal, so the
+// dialect varies per row and must be disclosed). In Same/Custom the dialect is fixed by the control, so
+// the pill is dropped (renderTable filters it out). Reads the CHOSEN cell's dialect, so it always names
+// the exact path the row's numbers were measured on.
+const COL_TESTED = {
+  id: "tested", label: "Tested on", desc: false,
+  title: "The same-dialect diagonal these numbers were measured on (openai when served, else the gateway's fastest native dialect) - pure forwarding, no translation",
+  get: (g) => { const [d] = chooserDialects(g); return { v: d || "", text: null, na: !d }; },
+  render: (g) => {
+    const [d] = chooserDialects(g);
+    if (!d || !chooserCellPerf(g)) return `<td class="tested"><span class="muted">n/a</span></td>`;
+    // Provenance disclosure: a perf-fallback row was NOT measured by the matrix per-cell sweep.
+    const fb = g.best_cell && g.best_cell.source === "perf-fallback";
+    const title = fb
+      ? `measured on the perf-suite default path (${esc(d)} passthrough; no matrix per-cell sweep for this gateway yet)`
+      : `measured on ${esc(d)}-in / ${esc(d)}-out passthrough (matrix per-cell sweep)`;
+    return `<td class="tested"><span class="tested-pill" title="${title}">${esc(MATRIX_LABELS[d] || d)}${fb ? " *" : ""}</span></td>`;
+  },
+};
+// sustainedChooserCell: the sustained@20ms cell for the chosen cell, carrying the winning-concurrency
+// tooltip when the chosen cell records it (Peak's best_cell does; a translation cell may not).
+function sustainedChooserCell(g) {
+  const cell = withZeroNote(chooserPerfCell(g, "rps_sustained_20ms", fmtInt));
+  const p = chooserCellPerf(g);
+  const cc = p ? p.rps_sustained_20ms_concurrency : null;
+  if (!cell.na && cell.v > 0 && cc != null)
+    return { ...cell, note: `Peaked at ${fmtInt(cell.v)} req/s with ${fmtInt(cc)} concurrent requests in flight - the load level that maximised sustained throughput under 20 ms LLM latency (higher concurrency added latency without more throughput).` };
+  return cell;
+}
 const COLUMN_SETS = {
-  // Passthrough (BEST-OF): each gateway on its best same-dialect passthrough diagonal. The "Tested on"
-  // pill discloses which dialect that is (openai for most; a native dialect where openai is not served,
-  // e.g. litellm-rust -> anthropic), so every gateway appears and the dialect is never hidden.
-  passthrough: [
-    COL_SEL, COL_NAME,
-    { id: "tested", label: "Tested on", desc: false,
-      title: "The same-dialect passthrough these numbers were measured on (openai when served, else the gateway's fastest native dialect) - pure forwarding, no translation",
-      get: (g) => ({ v: g.best_cell ? g.best_cell.dialect : "", text: null, na: !g.best_cell }),
-      render: (g) => {
-        if (!g.best_cell) return `<td class="tested"><span class="muted">n/a</span></td>`;
-        const d = g.best_cell.dialect;
-        // Provenance disclosure (R4): a perf-fallback row was NOT measured by the matrix
-        // per-cell sweep like the rest of the field; the pill says so (asterisk + tooltip).
-        const fb = g.best_cell.source === "perf-fallback";
-        const title = fb
-          ? `measured on the perf-suite default path (${esc(d)} passthrough; no matrix per-cell sweep for this gateway yet)`
-          : `measured on ${esc(d)}-in / ${esc(d)}-out passthrough (matrix per-cell sweep)`;
-        return `<td class="tested"><span class="tested-pill" title="${title}">${esc(MATRIX_LABELS[d] || d)}${fb ? " *" : ""}</span></td>`;
-      } },
-    { id: "lat", label: "Added latency p99 (µs)", desc: false, title: "Gateway p99 minus direct-to-mock p99 at concurrency 1 on the gateway's best same-dialect passthrough (the Tested-on dialect) - pure forwarding, no translation",
-      get: (g) => passCell(g, "added_latency_p99_us", fmtAdded) },
-    { id: "rps20", label: "Sustained RPS @20ms", desc: true, title: "Sustained requests/sec with a 20 ms mock LLM latency (p99 < 1 s, <0.1% errors) on the Tested-on dialect (see the pill). Hover a cell for the concurrency it peaked at.",
-      get: (g) => sustainedCell(g) },
-    { id: "rpsmax", label: "Max proxy RPS", desc: true, title: "Throughput ceiling against an instant mock (p99 < 1 s, <0.1% errors) on the Tested-on dialect (see the pill)",
-      get: (g) => withZeroNote(passCell(g, "rps_max_proxy", fmtInt)) },
-    { id: "memidle", label: "Mem idle (MiB)", desc: false, title: "Process RSS after launch, before load (the matrix run's one memory read)",
-      get: (g) => memCell(g, "idle_rss_mib", fmt1) },
-    { id: "mempeak", label: "Mem peak (MiB)", desc: false, title: "Peak process RSS under large-payload load (the matrix run's one memory read)",
-      get: (g) => memCell(g, "peak_rss_mib", fmt1) },
-    { id: "memrecov", label: "Recovered (MiB)", desc: false, title: "Process RSS 60 s after the large-payload load ends — does the gateway release memory?",
-      get: (g) => memCell(g, "recovered_rss_mib", fmt1) },
+  // PERFORMANCE (Peak | Same | Custom): per-cell latency + throughput from the ONE 6x6 run. The columns
+  // are IDENTICAL in every mode; the chooser only changes WHICH cell each row reads. The Tested-on pill
+  // is present only in Peak (see renderTable, which drops it in Same/Custom).
+  performance: [
+    COL_SEL, COL_NAME, COL_TESTED,
+    { id: "lat50", label: "Added latency p50 (µs)", desc: false, title: "Gateway p50 minus direct-to-mock p50 at concurrency 1 on the chosen cell",
+      get: (g) => chooserPerfCell(g, "added_latency_p50_us", fmtAdded) },
+    { id: "lat", label: "Added latency p99 (µs)", desc: false, title: "Gateway p99 minus direct-to-mock p99 at concurrency 1 on the chosen cell",
+      get: (g) => chooserPerfCell(g, "added_latency_p99_us", fmtAdded) },
+    { id: "rps20", label: "Sustained RPS @20ms", desc: true, title: "Sustained requests/sec with a 20 ms mock LLM latency (p99 < 1 s, <0.1% errors) on the chosen cell. Hover a cell for the concurrency it peaked at.",
+      get: (g) => sustainedChooserCell(g) },
+    { id: "rpsmax", label: "Max proxy RPS", desc: true, title: "Throughput ceiling against an instant mock (p99 < 1 s, <0.1% errors) on the chosen cell",
+      get: (g) => withZeroNote(chooserPerfCell(g, "rps_max_proxy", fmtInt)) },
   ],
-  // Translation: the pinned ingress->egress pair (state.xlateIn/xlateOut) chosen by the two dropdowns.
-  // Every row is the identical path, so no per-row pill. When in == out the pair IS a passthrough
-  // (same dialect, no translation), so this tab doubles as the per-dialect passthrough explorer. Same
-  // metric depth as Passthrough (added latency p50/p99, sustained RPS, max proxy RPS).
-  translation: [
-    COL_SEL, COL_NAME,
-    { id: "xll50", label: "Added latency p50 (µs)", desc: false, title: "Gateway p50 minus direct-to-mock p50 at concurrency 1 on the selected path",
-      get: (g) => xlateCell(g, "added_latency_p50_us", fmtAdded) },
-    { id: "xllat", label: "Added latency p99 (µs)", desc: false, title: "Gateway p99 minus direct-to-mock p99 at concurrency 1 on the selected path",
-      get: (g) => xlateCell(g, "added_latency_p99_us", fmtAdded) },
-    { id: "xlrps", label: "Sustained RPS @20ms", desc: true, title: "Sustained RPS @20ms on the selected path (p99 < 1 s, <0.1% errors)",
-      get: (g) => withZeroNote(xlateCell(g, "rps_sustained_20ms", fmtInt)) },
-    { id: "xlmax", label: "Max proxy RPS", desc: true, title: "Throughput ceiling against an instant mock on the selected path (p99 < 1 s, <0.1% errors)",
-      get: (g) => withZeroNote(xlateCell(g, "rps_max_proxy", fmtInt)) },
-  ],
-  // Streaming: SSE passthrough, its own stall-gated ceiling.
+  // STREAMING (Peak | Same | Custom): per-cell SSE columns from the SAME run. Per-cell streaming is
+  // measured on the diagonal today, so Same reads it only on the gateway's own measured diagonal and
+  // Custom reads a cell's own stream when the matrix carries one — else n/a (honest, never fabricated).
   streaming: [
-    COL_SEL, COL_NAME,
-    { id: "sttft", label: "Added wait for 1st token p99 (µs)", desc: false, title: "Time to first token (TTFT): the extra wait before the stream's first token, gateway minus direct-to-mock, at concurrency 1, on the gateway's best same-dialect passthrough cell. Lower is better.",
-      get: (g) => streamCell(g, "added_ttft_p99_us", fmtUsMs) },
-    { id: "sgap", label: "Added gap between tokens p99 (µs)", desc: false, title: "The extra pause the gateway adds between streamed tokens, gateway minus direct-to-mock, on the best same-dialect passthrough cell. Lower is better.",
-      get: (g) => streamCell(g, "added_gap_p99_us", fmtUsMs) },
-    { id: "streams", label: "Streams sustained", desc: true, title: "Max concurrent SSE streams sustained (bisected true concurrency) with >=99.9% frame delivery, no stalls, <0.1% errors, on the best same-dialect passthrough cell",
-      get: (g) => streamCell(g, "streams_sustained", fmtInt) },
+    COL_SEL, COL_NAME, COL_TESTED,
+    { id: "sttft50", label: "Added TTFT p50 (µs)", desc: false, title: "Added time-to-first-token p50: the extra wait before the stream's first token, gateway minus direct-to-mock, at concurrency 1, on the chosen cell. Lower is better.",
+      get: (g) => chooserStreamCell(g, "added_ttft_p50_us", fmtUsMs) },
+    { id: "sttft", label: "Added TTFT p99 (µs)", desc: false, title: "Added time-to-first-token p99 on the chosen cell. Lower is better.",
+      get: (g) => chooserStreamCell(g, "added_ttft_p99_us", fmtUsMs) },
+    { id: "sgap50", label: "Added gap p50 (µs)", desc: false, title: "The extra pause the gateway adds between streamed tokens, p50, on the chosen cell. Lower is better.",
+      get: (g) => chooserStreamCell(g, "added_gap_p50_us", fmtUsMs) },
+    { id: "sgap", label: "Added gap p99 (µs)", desc: false, title: "The extra pause the gateway adds between streamed tokens, p99, on the chosen cell. Lower is better.",
+      get: (g) => chooserStreamCell(g, "added_gap_p99_us", fmtUsMs) },
+    { id: "streams", label: "Streams sustained", desc: true, title: "Max concurrent SSE streams sustained (bisected true concurrency) with >=99.9% frame delivery, no stalls, <0.1% errors, on the chosen cell",
+      get: (g) => chooserStreamCell(g, "streams_sustained", fmtInt) },
+    { id: "cpufps", label: "CPU-bound fps", desc: true, title: "Streaming relay throughput under an unpaced firehose (CPU-bound): sustained content frames/sec on the chosen cell. Higher is better.",
+      get: (g) => chooserStreamCell(g, "cpu_fps", fmtInt) },
   ],
-  // Governance is RETIRED under matrix-sole-source: it is no tab AND no column. onthebench measures
-  // every gateway at its default, out-of-the-box config; the governed suite was a non-default,
-  // busbar-only launch (only busbar's manifest wired it), so it is not a neutral-board metric and the
-  // board neither ranks it nor shows a governed column/drawer section. governed/run.sh stays on disk
-  // (unused); gen-data.mjs no longer scans it and emits no supports_governed flag.
+  // MEMORY (per-gateway, one row per gateway — NOT cell-chooser driven): idle / peak / recovered RSS
+  // (best = min), plus a recovery-curve sparkline. Reads ONLY the canonical memory record; a gateway
+  // without a field reads n/a, and the sparkline renders only with a series (never a fabricated line).
+  memory: [
+    COL_SEL, COL_NAME,
+    { id: "memidle", label: "Idle RSS (MiB)", desc: false, title: "Process RSS after launch, before load (60 s idle window before the 6x6 run). Lower is better.",
+      get: (g) => memCell(g, "idle_rss_mib", fmt1) },
+    { id: "mempeak", label: "Peak RSS (MiB)", desc: false, title: "Max process RSS observed across the entire 6x6 sweep. Lower is better.",
+      get: (g) => memCell(g, "peak_rss_mib", fmt1) },
+    { id: "memrecov", label: "Recovered @60s (MiB)", desc: false, title: "Process RSS at the end of the 60 s recovery window after the last cell — does the gateway release memory? Lower is better.",
+      get: (g) => memCell(g, "recovered_rss_mib", fmt1) },
+    { id: "memcurve", label: "Recovery curve", desc: false, sortable: false,
+      title: "RSS across the whole run: 60 s idle before → the 6x6 sweep → 60 s recovery after",
+      get: (g) => { const m = canonicalMemory(g); return { v: null, text: "", na: !(m && Array.isArray(m.rss_series) && m.rss_series.length >= 2) }; },
+      render: (g) => {
+        const m = canonicalMemory(g);
+        const spark = m ? rssSparkline(m.rss_series) : "";
+        return spark ? `<td class="memcurve">${spark}</td>` : `<td class="memcurve na">n/a</td>`;
+      } },
+  ],
+  // Governance is RETIRED under matrix-sole-source: no tab, no column (busbar-only, non-default suite).
 };
 /* The set of columns for a view; perf tabs use COLUMN_SETS, everything else has no table. */
-function columnsFor(view) { return COLUMN_SETS[view] || COLUMN_SETS.passthrough; }
+function columnsFor(view) { return COLUMN_SETS[view] || COLUMN_SETS.performance; }
 /* Every column id across all tabs - used to validate a sort id coming from a shared URL. */
 const ALL_COLUMN_IDS = new Set(Object.values(COLUMN_SETS).flat().map((c) => c.id));
 
@@ -581,9 +701,15 @@ function newState() {
     sortDesc: true,
     needStream: false,
     needXlate: false,
-    // Translation tab: the pinned ingress->egress pair the whole table is ranked on. Both ends are
-    // fixed so every row does the identical translation (apples-to-apples); a gateway that does not
-    // serve this exact pair is absent. Default is the fullest-served pair.
+    // CELL CHOOSER (Performance + Streaming): which cell(s) of the ONE 6x6 run to show.
+    //   mode "peak"   → each gateway's own best diagonal (best_cell); no dialect params.
+    //   mode "same"   → sameDialect's diagonal (X→X) for every gateway.
+    //   mode "custom" → xlateIn→xlateOut cell (any pair, incl. translation) for every gateway.
+    mode: "peak",
+    sameDialect: "openai",
+    // Custom mode: the pinned ingress->egress pair the whole table is projected on. Both ends are fixed
+    // so every row is the identical cell (apples-to-apples); in==out is that dialect's passthrough, and a
+    // gateway that does not serve this exact cell reads n/a (Performance) / is absent — kept honest.
     xlateIn: "openai",
     xlateOut: "anthropic",
     cmp: [],        /* gateway keys selected for compare, max 3 */
@@ -620,9 +746,13 @@ function encodeUrl(st) {
   if (st.cmp.length) p.set("cmp", st.cmp.join("|"));
   if (st.cmpOpen) p.set("cv", "1");
   if (st.drawer) p.set("gw", st.drawer);
-  // Carry a non-default translation pair so a shared link opens the same ranking.
-  if (st.xlateIn !== "openai") p.set("xin", st.xlateIn);
-  if (st.xlateOut !== "anthropic") p.set("xout", st.xlateOut);
+  // CELL CHOOSER encoding (Performance + Streaming). A clean URL omits the default (peak); Same carries
+  // the picked dialect (?mode=same&d=openai), Custom the pinned pair (?mode=custom&in=anthropic&out=openai),
+  // so a link reproduces exactly the cell(s) the view shows.
+  if (PERF_VIEWS.has(st.view)) {
+    if (st.mode === "same") { p.set("mode", "same"); p.set("d", st.sameDialect); }
+    else if (st.mode === "custom") { p.set("mode", "custom"); p.set("in", st.xlateIn); p.set("out", st.xlateOut); }
+  }
   const cat = CATEGORIES[st.category] ? st.category : DEFAULT_CATEGORY;
   const path = st.view && st.view !== DEFAULT_VIEW ? `/${cat}/${st.view}` : `/${cat}`;
   const qs = p.toString();
@@ -678,8 +808,18 @@ function decodeUrl(pathname, search, hash) {
   st.cmp = list("cmp").slice(0, 3);
   st.cmpOpen = p.get("cv") === "1" && st.cmp.length >= 2;
   st.drawer = p.get("gw") || null;
-  if (MATRIX_CELLS.includes(p.get("xin"))) st.xlateIn = p.get("xin");
-  if (MATRIX_CELLS.includes(p.get("xout"))) st.xlateOut = p.get("xout");
+  // CELL CHOOSER decoding. New clean params (mode/d/in/out) plus the legacy translation params
+  // (xin/xout, from the retired Matched tab) — a legacy ?xin/?xout link lands in Custom mode on the
+  // pinned pair, exactly the cell the old Matched tab showed.
+  const mode = p.get("mode");
+  if (CHOOSER_MODES.has(mode)) st.mode = mode;
+  if (MATRIX_CELLS.includes(p.get("d"))) st.sameDialect = p.get("d");
+  const cin = p.get("in") || p.get("xin");
+  const cout = p.get("out") || p.get("xout");
+  if (MATRIX_CELLS.includes(cin)) st.xlateIn = cin;
+  if (MATRIX_CELLS.includes(cout)) st.xlateOut = cout;
+  // A legacy Matched link (xin/xout with no explicit mode) means the pinned-pair Custom view.
+  if (!CHOOSER_MODES.has(mode) && (p.get("xin") || p.get("xout"))) st.mode = "custom";
   return st;
 }
 
@@ -714,14 +854,11 @@ function applyFilters(gateways, st) {
     if (q && !g.display.toLowerCase().includes(q) && !g.key.toLowerCase().includes(q)) return false;
     if (st.needStream && !canonicalStreaming(g)) return false;
     if (st.needXlate && !hasTranslation(g)) return false;
-    // View-implicit filter: Translation lists only gateways that serve the pinned pair (every row
-    // must be the identical path or the ranking lies). Passthrough is DELIBERATELY unfiltered:
-    // every gateway must appear on its best passthrough (fairness beats strict same-dialect -
-    // filtering a competitor out reads as hiding it). Streaming follows the same principle: a
-    // MEASURED streaming refusal (stream_served:false, e.g. Portkey's) is a result, not a gap, so
-    // those gateways stay in the table as muted "did not stream" rows sunk to the bottom (null
-    // metric values sort last), matching the stream charts' "no SSE streaming" bars.
-    if (st.view === "translation" && !servesXlatePair(g, st.xlateIn, st.xlateOut)) return false;
+    // Performance/Streaming are DELIBERATELY unfiltered across every chooser mode: every gateway appears
+    // (fairness beats strict same-path — filtering a competitor out reads as hiding it), and a gateway
+    // that does not serve the chosen Same/Custom cell simply reads n/a on that row (null metrics sort
+    // last), never disappearing. Same principle for a measured streaming refusal (stream_served:false):
+    // a muted "n/a" row sunk to the bottom, matching the stream charts' "no SSE streaming" bars.
     return true;
   });
 }
@@ -927,56 +1064,85 @@ function initThemeToggle() {
 /* Per-tab caption: states in one line exactly which path this tab's numbers are, so a reader never
    has to guess what the ranking compares. No em dashes (house style). */
 // Short, one-idea-per-line captions (rendered on their own lines). Keep each line terse and concrete.
-const TABLE_CAPTIONS = {
-  passthrough: [
-    "Pure forwarding, no translation.",
-    "Each gateway on its best same-dialect path; the pill shows which dialect.",
-    "Everyone appears. For one strict dialect, pin the same in and out in Translation.",
-    "Sustained @20ms and max proxy RPS are independently measured ceilings; a small inversion between them is sweep noise, not an error.",
-    "A 0 is not noise: the gateway served, but no tested load held p99 < 1 s at <0.1% errors, so that run found no qualifying ceiling.",
-  ],
-  streaming: [
-    "Streaming responses (server-sent events).",
-    "Added columns: extra time the gateway adds, before the first token and between tokens. Lower is better.",
-    "Streams sustained: concurrent streams held without stalling. Higher is better.",
-    "A gateway that answered but never framed SSE shows as \"did not stream\" (evidence in its tooltip): measured, not hidden.",
-  ],
-};
+// Per-mode caption for the cell-chooser tabs: says in one line exactly which cell(s) of the ONE 6x6 run
+// the table is showing, so a reader never has to guess what the numbers compare.
+function chooserCaption(view, st) {
+  const dim = view === "streaming" ? "streaming" : "latency + throughput";
+  if (st.mode === "peak")
+    return [`Per-cell ${dim} from the one 6x6 run.`,
+      "Each gateway on its OWN best same-dialect diagonal (best-of); the pill shows which dialect.",
+      "Everyone appears. Pick Same for one shared dialect, or Custom for any ingress→egress cell."];
+  if (st.mode === "same") {
+    const d = MATRIX_LABELS[st.sameDialect] || st.sameDialect;
+    return [`Per-cell ${dim} from the one 6x6 run.`,
+      `Every gateway on the ${d}→${d} diagonal (pure forwarding, no translation).`,
+      "A gateway that does not serve this dialect reads n/a and sinks to the bottom."];
+  }
+  const inL = MATRIX_LABELS[st.xlateIn] || st.xlateIn, outL = MATRIX_LABELS[st.xlateOut] || st.xlateOut;
+  return st.xlateIn === st.xlateOut
+    ? [`Per-cell ${dim} from the one 6x6 run.`,
+       `Every gateway on the ${inL}→${outL} cell: same dialect, so this is passthrough (no translation).`,
+       "A gateway that does not serve this cell reads n/a."]
+    : [`Per-cell ${dim} from the one 6x6 run.`,
+       `Every gateway on the ${inL}→${outL} cell: client speaks ${inL}, upstream speaks ${outL}, the gateway translates both ways.`,
+       "Every row is the identical cell, so it is apples-to-apples; a gateway that does not serve it reads n/a."];
+}
+const MEMORY_CAPTION = [
+  "One continuous per-gateway RSS track across the same 6x6 run.",
+  "Idle: RSS over the 60 s before the run (launched, no load). Peak: max RSS across the whole sweep. Recovered @60s: RSS after a 60 s settle — does it release?",
+  "Lower is better on every column. A gateway without a field reads n/a; the curve draws only when a series was recorded.",
+];
 function updateTableCaption(view) {
   const el = document.getElementById("table-caption");
   if (!el) return;
-  let lines;
-  if (view === "translation") {
-    const inL = (MATRIX_LABELS[state.xlateIn] || state.xlateIn);
-    const outL = (MATRIX_LABELS[state.xlateOut] || state.xlateOut);
-    lines = state.xlateIn === state.xlateOut
-      ? [`${inL} in, ${outL} out: same dialect, so this is passthrough (no translation).`,
-         "Only gateways that serve this dialect appear."]
-      : [`Client speaks ${inL}, upstream speaks ${outL}; the gateway translates both ways.`,
-         "Only gateways that serve this exact pair appear.",
-         "Every row is the identical path, so the ranking is apples-to-apples."];
-  } else {
-    lines = TABLE_CAPTIONS[view] || TABLE_CAPTIONS.passthrough;
-  }
+  const lines = view === "memory" ? MEMORY_CAPTION : chooserCaption(view, state);
   el.innerHTML = lines.map((l) => esc(l)).join("<br>");
+}
+/* Memory tab: show the memory-recovery + memory-rss charts (charts.py PNGs) under the per-gateway table.
+   Hidden on Performance/Streaming. Same lightbox behaviour as the main gallery. Absent PNGs → hidden. */
+function renderMemoryCharts(view) {
+  const box = document.getElementById("memory-charts");
+  if (!box) return;
+  const show = view === "memory";
+  box.classList.toggle("hidden", !show);
+  if (!show) return;
+  const gallery = document.getElementById("memory-chart-gallery");
+  const charts = (state.data.charts || []).filter((c) => /memory/i.test(c.file));
+  if (!charts.length) { box.classList.add("hidden"); return; }
+  const ordered = charts.slice().sort((a, b) =>
+    (a.file.includes("top5_") - b.file.includes("top5_")) || a.file.localeCompare(b.file));
+  gallery.innerHTML = ordered.map((c) =>
+    `<figure data-src="/${esc(c.file)}"><img src="/${esc(c.file)}" alt="${esc(chartCaption(c.file))}" loading="lazy"><figcaption>${esc(chartCaption(c.file))}</figcaption></figure>`
+  ).join("");
+  gallery.querySelectorAll("figure").forEach((f) => f.addEventListener("click", () => {
+    const lb = document.createElement("div");
+    lb.className = "lightbox";
+    lb.innerHTML = `<img src="${esc(f.dataset.src)}" alt="">`;
+    lb.addEventListener("click", () => lb.remove());
+    document.body.appendChild(lb);
+  }));
 }
 function renderTable() {
   const { data } = state;
   const thead = document.querySelector("#results-table thead");
   const tbody = document.querySelector("#results-table tbody");
 
-  // Which tab's columns to render. matrix/method have no table, so fall back to passthrough
-  // (the section is hidden anyway) and never mutate the sort while off a perf tab.
-  const view = PERF_VIEWS.has(state.view) ? state.view : "passthrough";
-  const cols = columnsFor(view);
+  // Which tab's columns to render. matrix/method have no table, so fall back to performance
+  // (the section is hidden anyway) and never mutate the sort while off a table tab.
+  const view = TABLE_VIEWS.has(state.view) ? state.view : "performance";
+  let cols = columnsFor(view);
+  // The Tested-on pill is a Peak-only column (in Same/Custom the dialect is fixed by the control, so a
+  // per-row pill would be redundant). Drop it off the Performance/Streaming column set outside Peak mode.
+  if (PERF_VIEWS.has(view) && state.mode !== "peak") cols = cols.filter((c) => c.id !== "tested");
   // Snap the sort onto this tab if the current column does not belong to it (e.g. after switching
   // tabs, or a cross-tab sort id arrived from a shared URL).
-  if (PERF_VIEWS.has(state.view) && !cols.some((c) => c.id === state.sortCol && c.sortable !== false)) {
-    state.sortCol = VIEW_SORT[view] || "rps20";
+  if (TABLE_VIEWS.has(state.view) && !cols.some((c) => c.id === state.sortCol && c.sortable !== false)) {
+    state.sortCol = VIEW_SORT[view] || cols[cols.length - 1].id;
     const dc = cols.find((c) => c.id === state.sortCol);
     state.sortDesc = dc ? dc.desc !== false : true;
   }
   updateTableCaption(view);
+  renderMemoryCharts(view);
 
   thead.innerHTML = "<tr>" + cols.map((c) => {
     const sorted = state.sortCol === c.id;
@@ -1056,23 +1222,41 @@ function initFilterControls() {
     const el = document.getElementById(`f-${name}`);
     if (el) el.addEventListener("change", () => { state[key] = el.checked; renderTable(); syncUrl(true); });
   }
-  // Translation ingress/egress pickers: populate the six dialects and re-rank on change.
-  const xin = document.getElementById("xlate-in");
-  const xout = document.getElementById("xlate-out");
-  if (xin && xout) {
-    const opts = MATRIX_CELLS.map((d) => `<option value="${esc(d)}">${esc(MATRIX_LABELS[d] || d)}</option>`).join("");
-    xin.innerHTML = opts; xout.innerHTML = opts;
-    const onPick = () => { state.xlateIn = xin.value; state.xlateOut = xout.value; renderTable(); syncUrl(true); };
-    xin.addEventListener("change", onPick);
-    xout.addEventListener("change", onPick);
-  }
+  // Cell chooser: the Peak | Same | Custom segmented control + its dialect dropdowns. Changing the mode
+  // or a dialect re-projects every row onto the newly-chosen cell and re-encodes the URL.
+  const opts = MATRIX_CELLS.map((d) => `<option value="${esc(d)}">${esc(MATRIX_LABELS[d] || d)}</option>`).join("");
+  const same = document.getElementById("same-dialect");
+  const cin = document.getElementById("cell-in");
+  const cout = document.getElementById("cell-out");
+  if (same) same.innerHTML = opts;
+  if (cin) cin.innerHTML = opts;
+  if (cout) cout.innerHTML = opts;
+  document.querySelectorAll("#mode-seg .seg-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      state.mode = btn.dataset.mode;
+      renderFilters(); renderTable(); syncUrl(true);
+    });
+  });
+  const onSame = () => { state.sameDialect = same.value; renderTable(); syncUrl(true); };
+  const onCustom = () => { state.xlateIn = cin.value; state.xlateOut = cout.value; renderTable(); syncUrl(true); };
+  if (same) same.addEventListener("change", onSame);
+  if (cin) cin.addEventListener("change", onCustom);
+  if (cout) cout.addEventListener("change", onCustom);
 }
 
 function renderFilters() {
   document.getElementById("search").value = state.q;
   for (const [, name] of CAPS) { const el = document.getElementById(`f-${name}`); if (el) el.checked = state[CAPS.find(([, n]) => n === name)[0]]; }
-  const xin = document.getElementById("xlate-in"); if (xin) xin.value = state.xlateIn;
-  const xout = document.getElementById("xlate-out"); if (xout) xout.value = state.xlateOut;
+  // Cell chooser: reflect the active mode on the segmented control and show only the dropdown(s) that
+  // mode needs (Same → one dialect; Custom → in→out pair; Peak → none).
+  document.querySelectorAll("#mode-seg .seg-btn").forEach((b) => b.classList.toggle("active", b.dataset.mode === state.mode));
+  const sameWrap = document.getElementById("chooser-same");
+  const customWrap = document.getElementById("chooser-custom");
+  if (sameWrap) sameWrap.classList.toggle("hidden", state.mode !== "same");
+  if (customWrap) customWrap.classList.toggle("hidden", state.mode !== "custom");
+  const same = document.getElementById("same-dialect"); if (same) same.value = state.sameDialect;
+  const cin = document.getElementById("cell-in"); if (cin) cin.value = state.xlateIn;
+  const cout = document.getElementById("cell-out"); if (cout) cout.value = state.xlateOut;
 }
 
 /* ---- per-gateway drawer ----------------------------------------------------- */
@@ -1458,6 +1642,52 @@ function cellPerfTip(cell, ingress, egress, best) {
   }
   return s;
 }
+
+/* cellPopFull: the RICH matrix-cell popup. THE visual face of Custom: hovering a cell shows the SAME
+   gated per-cell numbers the Performance/Streaming tables show for that exact ingress→egress cell (read
+   through the SAME chooserPerfCell/chooserStreamCell accessors, so the popup and the table can never
+   diverge), PLUS Δ-to-Peak (this cell vs the gateway's own best diagonal), PLUS the capability
+   verdict/evidence. A rig-limited/absent cell reads "not measured", never a number.
+   Returns an HTML string (or "" for an unmeasured egress column a v1 result never probed). */
+function cellPopFull(g, ingress, egress) {
+  const cell = matrixCell(g, egress, ingress);
+  if (!cell) return "";
+  const [, label] = cellState(cell);
+  const head = `<h4>${esc(g.display)}: ${esc(MATRIX_LABELS[ingress])} in / ${esc(MATRIX_LABELS[egress])} upstream — ${esc(label)}${
+    cell.status ? ` (HTTP ${esc(cell.status)})` : ""}</h4>`;
+  // Read the SAME gated values the tables read, by pinning a synthetic Custom-mode state on this cell.
+  const st = { mode: "custom", xlateIn: ingress, xlateOut: egress };
+  const rows = [];
+  const perfRow = (key, fmt, lbl) => {
+    const c = chooserPerfCell(g, key, fmt, st);
+    if (!c.na) rows.push(`<div><span>${lbl}</span><b>${esc(c.text)}</b></div>`);
+  };
+  perfRow("added_latency_p50_us", fmtAdded, "Added latency p50");
+  perfRow("added_latency_p99_us", fmtAdded, "Added latency p99");
+  perfRow("rps_sustained_20ms", fmtInt, "Sustained @20ms");
+  perfRow("rps_max_proxy", fmtInt, "Max proxy RPS");
+  const streamRow = (key, fmt, lbl) => {
+    const c = chooserStreamCell(g, key, fmt, st);
+    if (!c.na) rows.push(`<div><span>${lbl}</span><b>${esc(c.text)}</b></div>`);
+  };
+  streamRow("added_ttft_p99_us", fmtUsMs, "Added TTFT p99");
+  streamRow("streams_sustained", fmtInt, "Streams sustained");
+  const perfBlock = rows.length
+    ? `<div class="pop-metrics">${rows.join("")}</div>`
+    // A served cell with no per-cell perf (unswept), or a non-green cell: honest "not measured".
+    : (cell.served === true ? `<div class="pop-perf muted">served, not measured on this cell</div>` : "");
+  // Δ-to-Peak: this cell vs the gateway's own best diagonal (best_cell). "" for the peak cell itself.
+  const cellPerf = chooserCellPerf(g, st);
+  const cellPerfLabeled = cellPerf ? { ingress, egress, ...cellPerf } : null;
+  const delta = deltaToPeak(cellPerfLabeled, g.best_cell);
+  const deltaBlock = delta
+    ? `<div class="pop-delta">vs peak (${esc(MATRIX_LABELS[g.best_cell.ingress] || g.best_cell.ingress)}→${esc(MATRIX_LABELS[g.best_cell.egress] || g.best_cell.egress)}): ${esc(delta)}</div>`
+    : (cellPerf && g.best_cell && g.best_cell.ingress === ingress && g.best_cell.egress === egress
+      ? `<div class="pop-delta muted">this IS the peak cell (ranks the Performance tab)</div>` : "");
+  const verdict = cell.verdict_note ? `<div class="pop-note">${esc(cell.verdict_note)}</div>` : "";
+  const cta = cell.served === true ? `<div class="pop-cta muted">click → Performance (Custom, this cell)</div>` : "";
+  return head + perfBlock + deltaBlock + verdict + cta;
+}
 function renderMatrix() {
   const withMatrix = state.data.gateways.filter((g) => g.matrix && (g.matrix.upstreams || g.matrix.cells));
   if (!withMatrix.length) {
@@ -1523,20 +1753,10 @@ function renderMatrix() {
     pop.className = "matrix-pop hidden";
     document.body.appendChild(pop);
   }
-  const cellPopHtml = (g, ing, eg) => {
-    const cell = matrixCell(g, eg, ing);
-    if (!cell) return "";
-    const [, label] = cellState(cell);
-    const perf = cellPerfTip(cell, ing, eg, g.best_cell);
-    return `<h4>${esc(g.display)}: ${esc(MATRIX_LABELS[ing])} in / ${esc(MATRIX_LABELS[eg])} upstream - ${esc(label)}${
-      cell.status ? ` (HTTP ${esc(cell.status)})` : ""
-    }</h4>` +
-      (perf ? `<div class="pop-perf">${esc(perf)}</div>` : "") +
-      (cell.verdict_note ? `<div class="pop-note">${esc(cell.verdict_note)}</div>` : "");
-  };
   const showPop = (el) => {
     const g = state.data.gateways.find((x) => x.key === el.dataset.gw);
-    const html = g && cellPopHtml(g, el.dataset.cell, el.dataset.egress);
+    // el.dataset.cell is the INGRESS (row), el.dataset.egress the upstream (column).
+    const html = g && cellPopFull(g, el.dataset.cell, el.dataset.egress);
     if (!html) return;
     pop.innerHTML = html;
     pop.classList.remove("hidden");
@@ -1553,6 +1773,18 @@ function renderMatrix() {
   grid.querySelectorAll(".cell").forEach((el) => {
     el.addEventListener("mouseenter", () => showPop(el));
     el.addEventListener("mouseleave", () => pop.classList.add("hidden"));
+    // Click a SERVED cell → jump to the Performance tab in Custom mode with this in→out pinned. The matrix
+    // is the visual face of Custom: the popup shows the cell's numbers, the click opens the full row for it.
+    el.addEventListener("click", () => {
+      const g = state.data.gateways.find((x) => x.key === el.dataset.gw);
+      const cell = g && matrixCell(g, el.dataset.egress, el.dataset.cell);
+      if (!cell || cell.served !== true) return;
+      state.view = "performance"; state.mode = "custom";
+      state.xlateIn = el.dataset.cell; state.xlateOut = el.dataset.egress;
+      state.sortCol = VIEW_SORT.performance; state.sortDesc = true;
+      showView("performance"); renderFilters(); renderTable(); syncUrl(true);
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    });
   });
 }
 
@@ -1561,7 +1793,8 @@ const CHART_CAPTIONS = {
   added_latency: "Added latency vs direct-to-mock, p99 in microseconds, concurrency 1, on each gateway's best same-dialect passthrough (the same canonical record the table ranks). Lower is better.",
   rps_sustained_20ms: "Sustained RPS with a 20 ms mock LLM latency (p99 under 1 s, error rate under 0.1 percent), best same-dialect passthrough. Higher is better.",
   rps_max_proxy: "Max proxy RPS against an instant mock, best same-dialect passthrough. Higher is better.",
-  memory_rss: "Process RSS in MiB: idle after launch and peak under large-payload load. Lower is better.",
+  memory_rss: "Process RSS in MiB: idle before the run and peak across the 6x6 sweep. Lower is better.",
+  memory_recovery: "RSS 60 s after the last cell (recovered) vs the peak across the run: does the gateway release the memory it took? Lower recovery is better.",
   cost_per_million: "Instance cost per million requests at the canonical sustained rate. Lower is better.",
   rps_per_dollar: "Canonical sustained RPS per dollar of hourly instance cost. Higher is better.",
   stream_added_ttft: "Streaming: added time-to-first-token vs direct-to-mock, p99. Lower is better.",
@@ -1901,19 +2134,19 @@ function showView(view) {
   // and category tagline belong to the category view only, so a body class hides
   // them (style.css) while the home hero carries the brand treatment instead.
   document.body.classList.toggle("home", view === HOME_VIEW);
-  // The three perf tabs share one table container (#view-table); matrix/method
+  // Performance/Streaming/Memory share one table container (#view-table); matrix/method
   // have their own; home renders #view-home.
-  const containerId = PERF_VIEWS.has(view) ? "view-table" : `view-${view}`;
+  const containerId = TABLE_VIEWS.has(view) ? "view-table" : `view-${view}`;
   document.querySelectorAll(".tab").forEach((x) => {
     x.classList.toggle("active", x.dataset.view === view);
     x.setAttribute("href", viewPath(state.category, x.dataset.view));
   });
   document.querySelectorAll(".view").forEach((v) => v.classList.toggle("hidden", v.id !== containerId));
-  // The translation ingress/egress pickers only make sense on the Translation tab.
-  const picker = document.getElementById("xlate-picker");
-  if (picker) picker.classList.toggle("hidden", view !== "translation");
-  // Switching between perf tabs changes columns/caption/filtering, so re-render the table.
-  if (PERF_VIEWS.has(view) && state.data) renderTable();
+  // The cell chooser (Peak | Same | Custom + its dialect dropdowns) belongs to Performance + Streaming only.
+  const chooser = document.getElementById("cell-chooser");
+  if (chooser) chooser.classList.toggle("hidden", !PERF_VIEWS.has(view));
+  // Switching between table tabs changes columns/caption/filtering, so re-render the table.
+  if (TABLE_VIEWS.has(view) && state.data) renderTable();
   updateTitle();
 }
 function initTabs() {
@@ -1929,7 +2162,7 @@ function applyState(st) {
   Object.assign(state, {
     category: st.category, view: st.view, q: st.q, sortCol: st.sortCol, sortDesc: st.sortDesc,
     needStream: st.needStream, needXlate: st.needXlate,
-    xlateIn: st.xlateIn, xlateOut: st.xlateOut,
+    mode: st.mode, sameDialect: st.sameDialect, xlateIn: st.xlateIn, xlateOut: st.xlateOut,
     cmp: st.cmp, cmpOpen: st.cmpOpen, drawer: st.drawer,
   });
 }
@@ -2016,8 +2249,9 @@ if (NODE) {
   module.exports = {
     newState, encodeUrl, decodeUrl, viewPath, applyFilters,
     fmtStamp, fmtAge, stampWithAge, measuredBadge,
-    drawSweep, niceStep, fmtTick, COLUMN_SETS, columnsFor, PERF_VIEWS, VIEW_SORT, LANES, naText, stripRigPaths,
+    drawSweep, niceStep, fmtTick, COLUMN_SETS, columnsFor, PERF_VIEWS, TABLE_VIEWS, VIEW_SORT, LANES, naText, stripRigPaths,
     cellState, matrixCellTip, cellPerfTip, passCell, xlateCell, streamCell, memCell, rssSparkline, hasTranslation, CATEGORIES, DEFAULT_CATEGORY, VIEWS,
+    CHOOSER_MODES, chooserCellPerf, chooserDialects, chooserPerfCell, chooserCellStream, chooserStreamCell, chooserHasCell, deltaToPeak, cellPopFull,
     canonicalPerf, canonicalXlate, canonicalStreaming, canonicalMemory, cpuFpsCertified, sustainedCertified, perfRpsCertified, perfRpsSuppressed, xlateRpsSuppressed, gatewayResultsJson, DEFAULT_VIEW, VIEW_LABELS, rosterRows, fmtStars,
     configCorrectionUrl, BENCH_REPO,
     HOME_VIEW, homeCardsHtml,
