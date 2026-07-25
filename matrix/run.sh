@@ -1218,6 +1218,28 @@ for EGRESS in $EGRESS_ALL; do
       log "[$GATEWAY]   $EGRESS <- $CELL : untestable (no base-URL override, cited)"
       continue
     fi
+    # ── COLD START PER CELL ───────────────────────────────────────────────────────────────────────
+    # This loop used to share ONE process across all six ingress cells of an egress column: the
+    # gateway was launched once per column, then cells were swept in fixed order against it. For any
+    # gateway that accumulates state per request, cell 6 was therefore measured on a process that had
+    # already served five full sweeps, and because the order is fixed that is a systematic bias rather
+    # than noise. It is not hypothetical: busbar's RSS is linear in requests served with no plateau, so
+    # its later cells were measured on a materially more loaded process than its first.
+    #
+    # Restarting per cell costs about ten seconds and removes the whole class. Every cell now begins
+    # from an equally clean process, so a cell's number reflects the cell rather than its position in
+    # the sweep order.
+    #
+    # THE COLUMN VERDICT IS PRESERVED ACROSS THE RELAUNCH. _egress_ready runs warm_up, which writes
+    # WARM_OK/WARM_LAST/SERVE_ERR - the variables that decide whether the COLUMN is recorded as served.
+    # Letting a per-cell warm-up overwrite them would mean the last cell's warm-up silently became the
+    # column's verdict. Save and restore them; a per-cell boot failure is recorded by that cell's own
+    # run_cell result, which is where a per-cell failure belongs.
+    _CELL_WOK="$WARM_OK"; _CELL_WLAST="$WARM_LAST"; _CELL_SERR="$SERVE_ERR"
+    if ! harness_launch_ready launch_egress _egress_ready "$EGRESS"; then
+      log "[$GATEWAY]   $EGRESS <- $CELL : per-cell cold start did not come ready; the cell's own result records why"
+    fi
+    WARM_OK="$_CELL_WOK"; WARM_LAST="$_CELL_WLAST"; SERVE_ERR="$_CELL_SERR"
     BODY="$(ingress_body "$CELL")"
     case "$CELL" in
       anthropic) run_cell "$EGRESS" "$CELL" "$(ingress_path "$CELL")" "$BODY" \
