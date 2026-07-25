@@ -30,6 +30,10 @@ on:
       - "matrix/run.sh"
       - "lib/promote_guard.py"
       - "lib/promote_guard_test.py"
+      - "lib/plateau.sh"
+      - "lib/plateau_test.sh"
+      - "lib/matrix_memory_test.sh"
+      - "site/**"
       - "charts.py"
       - "charts_test.py"
       - "loadgen/**"
@@ -59,6 +63,10 @@ on:
       - "matrix/run.sh"
       - "lib/promote_guard.py"
       - "lib/promote_guard_test.py"
+      - "lib/plateau.sh"
+      - "lib/plateau_test.sh"
+      - "lib/matrix_memory_test.sh"
+      - "site/**"
       - "charts.py"
       - "charts_test.py"
       - "loadgen/**"
@@ -163,6 +171,25 @@ jobs:
         run: bash -n lib/gateway_config_lint.sh && bash lib/gateway_config_lint.sh
       - name: Promote-guard regression test (matrix all-dead 000/5xx-warm + anchored marker + honest not-served)
         run: python3 lib/promote_guard_test.py
+      # THE MEMORY ENGINE HAD NO ENFORCED GATE. The per-cell memory redesign added the whole plateau
+      # termination path (lib/plateau.sh: the trend + range steadiness tests, the growth rate, the
+      # fewer-than-four-samples undecidable rule) and the per-cell window that drives it, and BOTH of
+      # their test suites ran only when someone ran them by hand. matrix/run.sh was already a path
+      # trigger, so a change to the caller ran the OTHER suites while the two that actually prove the
+      # memory measurement stayed silent. plateau.sh was not even a trigger: it could be edited with no
+      # job running at all. matrix_memory_test.sh extracts the real function out of matrix/run.sh and
+      # drives it against synthetic RSS curves (settles / leaks / delivers nothing / unmeasurable rig),
+      # which is the ONLY automated proof that a gateway that never settles publishes a growth rate
+      # instead of a fabricated steady state.
+      - name: Plateau steadiness test (trend + range, growth rate, undecidable-is-not-a-plateau)
+        run: bash -n lib/plateau.sh && bash -n lib/plateau_test.sh && bash lib/plateau_test.sh
+      - name: Per-cell memory window test (settles / leaks / zero-delivery / unmeasurable rig)
+        run: bash -n lib/matrix_memory_test.sh && bash lib/matrix_memory_test.sh
+      # The board's own guard: site/test.mjs is what the cf-pages deploy gates on, but it only ran THERE,
+      # so a matrix/run.sh or charts.py change that broke the producer/board contract failed at DEPLOY
+      # time rather than here. Same suite, run at push, so the break is attributed to the commit.
+      - name: Board consistency + honesty suite (the same gate the deploy runs)
+        run: node site/test.mjs
       # charts.py's validity gate + top-N ranking (the matrix-sole-source rewrite artifact) had ZERO
       # Python tests (MEDIUM-R3-6): check-consistency asserts site==chart by calling JS re-implementations,
       # never the real Python rules, so a regression to _proj_streaming (cpu_valid/sust_valid), _topn_keys

@@ -151,6 +151,14 @@ try {
 } catch (e) {
   const msg = String(e.stderr || e.message || "");
   if (!msg.includes("FRESHNESS FAILURE")) throw e;
+  // site/data.json is GITIGNORED, so this fallback only exists on a machine that has generated one.
+  // In CI it does not exist, and a bare readFileSync would replace the real, explanatory gen-data
+  // failure with an ENOENT about a file nobody was looking for. Re-throw the original instead: the
+  // reason the bundle could not be built is the finding, not the missing fallback.
+  if (!existsSync(join(HERE, "data.json"))) {
+    console.error("gen-data failed AND there is no committed site/data.json to fall back to; the original failure follows.");
+    throw e;
+  }
   console.warn("warn - raw results are mid-refresh (freshness guard tripped); testing against the committed site/data.json");
   data = JSON.parse(readFileSync(join(HERE, "data.json"), "utf8"));
 } finally {
@@ -1867,6 +1875,49 @@ function writeSnapshot(root, key, { measuredAt, matrix, files }) {
   writeFileSync(join(root, "results", "snapshots", `result_${key}_${measuredAt.replace(/[:.]/g, "-")}.json`),
     JSON.stringify({ gateway: key, measured_at: measuredAt, matrix, config: files ? { files } : undefined }));
 }
+test("a DEGRADED-MODE snapshot must never become the board's source just by being newer", () => {
+  // THE REAL INCIDENT: helicone's board row became a probe-only laptop run (1 cell, no perf, no
+  // streaming, no memory, no best_cell) that shadowed a complete field run from the same morning,
+  // because a local verify-local run with KEEP_ARTIFACTS=1 left its snapshot in results/snapshots/ and
+  // recency handed it the whole row. Nothing anywhere said so.
+  const iso = (hAgo) => new Date(Date.now() - hAgo * 3600000).toISOString();
+  const probeOnly = (at) => ({ gateway: "sgw", build: "local", matrix_version: 2, served: true,
+    measured_at: at, cell_perf_sweep: false, cell_stream: false, cell_memory: false,
+    upstreams: { openai: { configurable: true, served: true, cells: { openai: { served: true } } } } });
+  // (a) RED: the degraded snapshot is NEWER than a full run on disk. Refuse, loudly, naming the file.
+  {
+    const root = buildStreamMemRepo();     // its results/matrix/sgw.json is a FULL run (all phases on)
+    writeSnapshot(root, "sgw", { measuredAt: iso(0.5), matrix: probeOnly(iso(0.5)) });
+    assert.throws(() => genInto(root), (e) => {
+      assert.match(e.message, /DEGRADED-MODE snapshot/);
+      assert.match(e.message, /cell_perf_sweep=false/, "the message must name WHICH phases were off");
+      assert.match(e.message, /results\/snapshots/, "the message must say where to remove it from");
+      return true;
+    }, "a probe-only snapshot must never silently replace a complete run");
+  }
+  // (b) GREEN: a newer FULL run supersedes normally, even when it found FEWER served cells. A re-run
+  //     that finds less IS the new truth; this guard is about the run's MODE, never about its numbers.
+  {
+    const root = buildStreamMemRepo();
+    const fullButEmptier = { gateway: "sgw", build: "field", matrix_version: 2, served: true,
+      measured_at: iso(0.5), cell_perf_sweep: true, cell_stream: true, cell_memory: true,
+      upstreams: { openai: { configurable: true, served: true, cells: { openai: { served: false } } } } };
+    writeSnapshot(root, "sgw", { measuredAt: iso(0.5), matrix: fullButEmptier });
+    const g = genInto(root).gateways.find((x) => x.key === "sgw");
+    assert.equal(g.matrix_from_snapshot, true, "a newer FULL run must still win");
+    assert.equal(g.best_cell, undefined, "and its honest zero-served result must publish as such");
+  }
+  // (c) GREEN: a degraded snapshot is fine when there is nothing fuller to shadow (a gateway whose only
+  //     data is that run). Absence of a better run is not a reason to publish nothing.
+  {
+    const root = buildStreamMemRepo();
+    rmSync(join(root, "results", "matrix", "sgw.json"), { force: true });
+    writeSnapshot(root, "sgw", { measuredAt: iso(0.5), matrix: probeOnly(iso(0.5)) });
+    const g = genInto(root).gateways.find((x) => x.key === "sgw");
+    assert.equal(g.matrix_from_snapshot, true, "the only run there is must publish");
+  }
+});
+
 test("#25 CLASS: the snapshot ingest path — newest wins, RECENCY beats existence, inline config, null-safe", () => {
   const iso = (hAgo) => new Date(Date.now() - hAgo * 3600000).toISOString();
   // (a) NEWEST snapshot wins over an older one, and its matrix supersedes the per-suite file.
