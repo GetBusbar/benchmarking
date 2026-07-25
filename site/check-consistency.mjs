@@ -15,8 +15,12 @@
 //       carry no hard-coded source-token literal in a per-datum caption renderer (the lint).
 //   C4  Single projection path: every projected cell's source.kind is a known origin and its source.sweep
 //       is a valid caption key; NO legacy suite object (g.perf/stream/streamcpu/xlate) leaks into the bundle.
-//   C5  Every gated-field read in app.js routes through metric()/mval() — never a bare `.value` deref or a
-//       numeric compare of a metric field (the accessor-routing lint).
+//   C5  Every sealed-metric read (app.js AND charts.py) routes through metric()/mval() — never a raw
+//       `.value` / `.get("value")` deref outside the accessors (the taint-based accessor-routing lint).
+//
+// Each lint is a PURE EXPORTED FUNCTION so it can be driven against synthetic source that CONTAINS the
+// violation: a lint with no RED-before proof is indistinguishable from a lint that cannot fire, which is
+// exactly what C5's predecessor was.
 //
 // Rigor rules (Design F Part 1): the expected side of any cross-representation assertion is re-derived
 // INDEPENDENTLY from the RAW matrix cell on disk (results/matrix/<gw>.json), never via the accessor under
@@ -54,11 +58,10 @@ function rawMatrix(gwKey) {
 }
 
 // ---- the caption-literal lint (C3) + accessor-routing lint (C5) --------------
-// A source token in a per-datum caption literal is the bug class (memory mislabelled "6x6"). The lint
-// scans the caption-RENDERING regions of app.js/charts.py — the SWEEP_CAPTION table is the ONE allowed
-// home for source tokens. Tab-level methodology prose (the chooser lead lines that describe the run design)
-// is explicitly out of scope; the C3 lint targets caption(cell)/pathNote/pill/annot renderers.
-const SOURCE_TOKENS = /(?:6x6|6×6|matrix per-cell|xlate suite|stream suite|perf suite)/;
+// A source token in a per-datum caption literal is the bug class (memory mislabelled "6x6"). The lints
+// scan the caption-RENDERING regions of app.js/charts.py — the SWEEP_CAPTION table is the ONE allowed
+// home for source tokens. Tab-level methodology prose (the chooser lead lines that describe the run
+// design) is explicitly out of scope; the C3 lint targets caption(cell)/pathNote/pill/annot renderers.
 
 function readSrc(rel) {
   const p = join(HERE, rel);

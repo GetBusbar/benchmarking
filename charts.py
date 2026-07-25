@@ -351,6 +351,23 @@ def _mem_protocol_line(rows) -> str:
             f"{load} on each gateway's own peak cell -> {_mem_window(rows, '_mem_recovery_window_s')} recovery")
 
 
+
+def _mem_annot(r):
+    """Per-bar memory attribution: WHICH cell this gateway was loaded on, plus any HONESTY DISCLOSURE
+    the producer rode in memory.protocol (uncertified peak-cell basis, payload mismatch, failed load —
+    each of which is why an RSS came back NULL). Carrying that string without rendering it would hide
+    the reason a bar reads "not measured"."""
+    bits = []
+    cell = r.get("_mem_load_cell")
+    if cell:
+        bits.append(f"on {cell}")
+    proto = r.get("_mem_protocol") or ""
+    clauses = [c.strip() for c in proto.split(";")[1:] if c.strip()]
+    if clauses:
+        bits.append("! " + clauses[0][:60])
+    return "  ·  ".join(bits) if bits else None
+
+
 CHARTS = [
     # ── the headline: what the system can DO ──────────────────────────────────────────────────────
     # The three passthrough charts read the CANONICAL best_cell numbers (matrix per-cell sweep,
@@ -400,6 +417,7 @@ CHARTS = [
         suite="memory",
         title="Gateway RAM under a fixed load",
         subtitle=lambda rows: "cold idle vs peak RAM, " + _mem_protocol_line(rows),
+        annot=_mem_annot,
         unit="MiB RAM",
         series=[
             Series("peak_rss_mib", "peak RAM (under load)", "rank"),
@@ -427,6 +445,7 @@ CHARTS = [
         title="Does the gateway release memory after the load?",
         subtitle=lambda rows: ("recovered RSS at the end of the "
                                f"{_mem_window(rows, '_mem_recovery_window_s')} recovery window vs. its peak - lower recovery is better"),
+        annot=_mem_annot,
         unit="MiB RAM",
         series=[
             Series("recovered_rss_mib", "recovered RAM (60s after load)", "rank"),
