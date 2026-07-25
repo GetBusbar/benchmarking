@@ -17,6 +17,10 @@ on:
       - "lib/mock_restart_test.sh"
       - "lib/ingress.sh"
       - "lib/ingress_path_test.sh"
+      - "lib/box_qualify.sh"
+      - "lib/box_qualify_test.sh"
+      - "lib/rig.sh"
+      - "matrix/qualify-box.sh"
       - "matrix/run.sh"
       - "lib/promote_guard.py"
       - "lib/promote_guard_test.py"
@@ -36,6 +40,10 @@ on:
       - "lib/mock_restart_test.sh"
       - "lib/ingress.sh"
       - "lib/ingress_path_test.sh"
+      - "lib/box_qualify.sh"
+      - "lib/box_qualify_test.sh"
+      - "lib/rig.sh"
+      - "matrix/qualify-box.sh"
       - "matrix/run.sh"
       - "lib/promote_guard.py"
       - "lib/promote_guard_test.py"
@@ -87,6 +95,16 @@ jobs:
       # contract (and that a manifest's GW_MATRIX_PATH_* override still wins) so it cannot re-freeze.
       - name: Ingress-path choke-point test (late-bound GW_MODEL in gemini/bedrock paths + override precedence)
         run: bash -n lib/ingress.sh && bash -n lib/ingress_path_test.sh && bash -n matrix/run.sh && bash lib/ingress_path_test.sh
+      # lib/box_qualify.sh decides whether a freshly launched bench box is sound ENOUGH to spend a
+      # multi-hour 6x6 on. It exists because on 2026-07-25 a contaminated box ran to completion and its
+      # numbers were published as a gateway regression: that box's no-gateway floor sat INSIDE the
+      # healthy population's absolute range (77-81us vs 73-82us), so no static threshold caught it —
+      # only the drift against its OWN prior runs (+5.4% vs a healthy -2.6%..+3.8%) and its 86% peak
+      # collapse did. Gate both bands against the REAL measured numbers so a change that re-loosens the
+      # drift check, drops the jitter signal, blocks a first run for lack of history, or lets a FAILED
+      # qualification seed the next run's baseline fails CI instead of shipping.
+      - name: Box-qualification test (floor drift + jitter + anti-ratchet + peak replay + baseline hygiene)
+        run: bash -n lib/box_qualify.sh && bash -n lib/box_qualify_test.sh && bash -n matrix/qualify-box.sh && bash -n lib/rig.sh && bash lib/box_qualify_test.sh
       # lib/promote_guard.py decides whether an incoming result may overwrite the committed one; a bug
       # there republishes a regression as an honest failure (R4-M2). Covers MEDIUM-R2-3 (matrix all-dead
       # 000 detection) + the anchored-marker / status-000 / honest-not-served behaviours.

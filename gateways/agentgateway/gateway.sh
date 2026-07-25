@@ -35,10 +35,45 @@ gw_version() {
 # _agentgw_write_config: emit agentgateway's ONE canonical multi-provider `llm:` config. Each
 # llm.models[] entry names the request model that selects it (ModelRouter, model_router.rs) and a
 # provider enum (bare string) plus a params block whose baseUrl points that provider's upstream at the
-# mock over plaintext http://. All mock-reachable declared providers are wired at once:
-#   - openAI     (model gpt-4o-mini) — the /v1 OpenAI-SDK default;
-#   - anthropic  (claude-3-5-sonnet-20241022);
-#   - bedrock    (a claude bedrock model id) — params.awsRegion is REQUIRED or boot fails
+# mock over plaintext http://.
+#
+# ***EVERY baseUrl MUST CARRY A NON-EMPTY PATH.*** This is not cosmetic — it is what makes agentgateway
+# apply its OWN per-provider upstream path at all, and getting it wrong silently turns the gateway into
+# a verbatim path proxy. The chain, in v1.3.1 source:
+#   types/local.rs apply_base_url(): the URL's host+port become `hostOverride`, and its PATH becomes
+#     `pathPrefix` — but ONLY `if !path.is_empty()`, and `url.path()` for a bare origin is "/", which
+#     `trim_end_matches('/')` reduces to "". So `http://host:port` (no path) sets hostOverride and
+#     leaves pathPrefix UNSET.
+#   llm/mod.rs set_default_path():
+#       if has_host_override && path_prefix.is_none() && !matches!(self, AIProvider::Custom(_)) {
+#           return Ok(());   // <- early return: the INBOUND path is forwarded verbatim
+#       }
+#     With a prefix set it instead builds {prefix}{provider path_suffix}: openai.rs "/chat/completions"
+#     | "/responses"; anthropic.rs "/messages"; bedrock.rs "/model/{model}/converse".
+# FIELD EVIDENCE (results/fanout-agentgateway.log, 2026-07-25): with bare-origin baseUrls the anthropic,
+# gemini, cohere and bedrock egress columns all failed their warm-up with the container UP and
+# "port 8080 LISTEN" — the gateway had routed to the anthropic provider, forwarded the INBOUND
+# /v1/chat/completions verbatim, got the mock's OpenAI body back, and could not parse it as an Anthropic
+# response: `failed to parse response ... missing field \`input_tokens\`` (bedrock: `inputTokens`) -> 503
+# -> "failed to boot after 3 attempts" for 24 unprobed cells. The same bug reds the openai<-anthropic
+# and openai-responses<-anthropic cells inside the openai column (503 on POST /v1/messages: /v1/messages
+# forwarded verbatim to the OPENAI upstream -> the mock's anthropic body -> OpenAI parse failure).
+# The gateway boots and serves fine; it was OUR baseUrls that stripped it of its path rewriting.
+#
+# All mock-reachable declared providers are wired at once:
+#   - openAI     (model gpt-4o-mini) — baseUrl .../v1, agentgateway's own openai DEFAULT_BASE_PATH, so
+#                the upstream is /v1/chat/completions (Completions) or /v1/responses (Responses), the
+#                mock's real openai + openai-responses routes;
+#   - anthropic  (claude-3-5-sonnet-20241022) — baseUrl .../v1, anthropic's own DEFAULT_BASE_PATH, so
+#                the upstream is /v1/messages (api.anthropic.com/v1/messages's real shape), the mock's
+#                anthropic route;
+#   - bedrock    (a claude bedrock model id) — baseUrl .../bedrock. Real Bedrock has NO base path
+#                (bedrock-runtime.<region>.amazonaws.com/model/<id>/converse), but a bare origin would
+#                leave pathPrefix unset and re-trip the verbatim-passthrough early return above, so the
+#                rig uses a one-segment marker: the upstream becomes /bedrock/model/<id>/converse, which
+#                the mock routes to its bedrock dialect on the "/converse" | "/model/" match
+#                (mock/src/main.rs body_for + dialect_for) and records as bedrock in its leg-3 evidence.
+#                params.awsRegion is REQUIRED or boot fails
 #     (local.rs "bedrock requires aws_region"); SigV4 creds come from the AWS env (dummy AWS_* in
 #     gw_launch), the mock ignores the signature.
 # INGRESS CLASSIFICATION is auto-populated by the llm: block: llm_route_types() hardcodes
@@ -59,19 +94,19 @@ llm:
     params:
       model: gpt-4o-mini
       apiKey: "sk-dummy-openai"
-      baseUrl: "http://127.0.0.1:$MOCK_PORT"
+      baseUrl: "http://127.0.0.1:$MOCK_PORT/v1"
   - name: claude-3-5-sonnet-20241022
     provider: anthropic
     params:
       model: claude-3-5-sonnet-20241022
       apiKey: "sk-ant-dummy"
-      baseUrl: "http://127.0.0.1:$MOCK_PORT"
+      baseUrl: "http://127.0.0.1:$MOCK_PORT/v1"
   - name: anthropic.claude-3-sonnet-20240229-v1:0
     provider: bedrock
     params:
       model: anthropic.claude-3-sonnet-20240229-v1:0
       awsRegion: us-east-1
-      baseUrl: "http://127.0.0.1:$MOCK_PORT"
+      baseUrl: "http://127.0.0.1:$MOCK_PORT/bedrock"
 YAML
 }
 
@@ -110,6 +145,22 @@ GW_MATRIX_CAP="
 "
 GW_MATRIX_CAP_NOTE="agentgateway v1.3.1 (llm: block auto-populates the same path→RouteType ingress classifier, local.rs llm_route_types): Completions/Messages/Responses ingress translate to the openAI/anthropic/bedrock providers' native wire; gemini egress exists only via Google's OpenAI-compat surface (not native generateContent), cohere is absent from the AIProvider enum, and gemini/cohere/bedrock request shapes have no ingress RouteType"
 GW_MATRIX_EGRESS="openai openai-responses anthropic bedrock"
+# ONE STATIC CONFIG (house standard): compliant by construction — _agentgw_write_config renders the
+# same bytes for every lane and every column, and only GW_MODEL (the client-facing selector) changes.
+# LOCALLY PROVEN against ghcr.io/agentgateway/agentgateway:v1.3.1 + the pinned mock (bin/mock-arm64,
+# MOCK_RECORD=1), one config, no reconfiguration between probes — all seven declared-1 cells returned
+# HTTP 200 with the mock recording the CORRECT upstream dialect and body_ok=true:
+#   openai    <- openai            /v1/chat/completions                          openai
+#   anthropic <- openai            /v1/messages                                  anthropic
+#   bedrock   <- openai            /bedrock/model/<id>/converse                  bedrock
+#   openai    <- anthropic         /v1/chat/completions                          openai
+#   anthropic <- anthropic         /v1/messages                                  anthropic
+#   bedrock   <- anthropic         /bedrock/model/<id>/converse                  bedrock
+#   openai-r  <- openai-responses  /v1/responses                                 openai-responses
+#   bedrock   <- openai-responses  /bedrock/model/<id>/converse                  bedrock
+# The same harness run against the PREVIOUS bare-origin baseUrls reproduced the field failure exactly
+# (503 on openai<-anthropic, openai<-bedrock and anthropic-ingress<-openai), so this is a verified
+# RED/GREEN, not a reasoned-about fix.
 gw_matrix_egress() {
   # All egress providers are already wired in the ONE llm: config (see _agentgw_write_config); the
   # ModelRouter picks the provider from the request model name, so the matrix only flips GW_MODEL — no

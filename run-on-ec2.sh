@@ -416,12 +416,188 @@ its result so the board updates just this row (matrix-sole-source)." \
   )
 }
 
-# ── one box, one gateway (runs in the background, self-terminates) ─────────────────────────────────
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+# BOX QUALIFICATION — "new box and test if that happens before it ever runs in full".
+#
+# THE INCIDENT. On 2026-07-25 one box (gomodel's) was contaminated. The 6x6 ran to completion on it,
+# for hours, and the result was published as a GATEWAY REGRESSION. It was not: the rig's own no-gateway
+# floor on that box (direct_c1_p99_us — the loadgen hitting the mock with no gateway in the path) had
+# moved +5.4% against its own prior run while the nine healthy boxes moved -2.6%..+3.8%, and its peak
+# throughput had collapsed 86%. Crucially its ABSOLUTE floor, 77-81us, sat INSIDE the healthy
+# population's 73-82us — so no static threshold could have caught it, and none did.
+#
+# THE FIX, HERE: measure the box BEFORE trusting it with a multi-hour run, and REPLACE it if it fails.
+#   stage 1  BEFORE the gateway is built or launched: the no-gateway floor probe (tens of seconds).
+#   stage 2  after the gateway boots, BEFORE the 6x6: replay this gateway's own recorded peak cell.
+# The measurement half runs on the box (matrix/qualify-box.sh); the VERDICT is decided here, because
+# this is where the per-gateway baseline history lives (results/snapshots/, the same store the ebd1c07
+# instrument provenance uses) and because a suspect box must never be the thing that clears itself.
+#
+# On failure the box is terminated and a REPLACEMENT is launched for that gateway alone, up to
+# BENCH_QUALIFY_ATTEMPTS times. Every box this run launches — replacements included — is tagged
+# run=$RUN_ID, so a replacement is torn down by the same RUN_ID filter and can never disturb a peer
+# box or a concurrent invocation's fleet (audit H4). If every attempt fails the gateway is NOT
+# published: the honest failure is recorded and reported, mirroring how the promote guard refuses to
+# overwrite good data with a boot failure.
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+# shellcheck source=/dev/null
+source "$HERE/lib/box_qualify.sh"
+BENCH_QUALIFY="${BENCH_QUALIFY:-1}"                       # 0 disables the whole gate (local/dry runs)
+BENCH_QUALIFY_ATTEMPTS="${BENCH_QUALIFY_ATTEMPTS:-3}"     # boxes to try per gateway before giving up
+BQ_RC_REPLACE=75                                          # bench_gateway_once: "this BOX is bad, retry"
+QUALIFY_DIR="$HERE/results/box-qualify"; mkdir -p "$QUALIFY_DIR"
+# Where a gateway that exhausted its box budget is recorded. bench_gateway runs in a background
+# subshell, so a file is the only way the final summary can see it.
+QUALIFY_SKIPPED="$QUALIFY_DIR/skipped-$RUN_ID.txt"; : > "$QUALIFY_SKIPPED"
+
+# _bq_json_field <file> <key> [subkey] -> the scalar, or EMPTY. Never fabricates: a missing key, a
+# null, a non-scalar and an unparseable file all read as empty, which every gate treats as unmeasured.
+_bq_json_field() {
+  python3 - "$1" "$2" "${3:-}" <<'PY' 2>/dev/null
+import json, sys
+path, key, sub = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    with open(path) as fh:
+        j = json.load(fh)
+except Exception:
+    sys.exit(0)
+v = j.get(key)
+if sub:
+    v = (v or {}).get(sub) if isinstance(v, dict) else None
+if isinstance(v, bool):
+    sys.stdout.write("true" if v else "false")
+elif isinstance(v, (int, float)):
+    sys.stdout.write(("%d" % v) if float(v).is_integer() else ("%.10g" % v))
+elif isinstance(v, str):
+    sys.stdout.write(v)
+PY
+}
+
+# qualify_box <gw> <ip> <glog> <log_fn> <attempt>
+#   0  the box is qualified (or the gate is disabled / the fault is the gateway's, not the box's)
+#   1  the BOX is bad — terminate it and launch a replacement
+# Writes the qualification provenance onto the box either way it proceeds, so the snapshot records the
+# instrument's state (lib/rig.sh _rig_box_qualify_json folds it in; matrix/run.sh needs no change).
+qualify_box() {
+  local gw="$1" ip="$2" glog="$3" _log="$4" attempt="$5"
+  local s1="$QUALIFY_DIR/$gw.stage1.json" s2="$QUALIFY_DIR/$gw.stage2.json"
+  rm -f "$s1" "$s2"
+  local remote_env="BENCH_ARCH='$ARCH' BENCH_HARDWARE='$HW_LABEL' CORES=0-3 LOADCORES=4-9 MOCKCORES=10-15 GATEWAY='$gw'"
+
+  # The ROLLING baseline: the median of the last N QUALIFIED runs for this gateway+arch, never just
+  # the previous run (one contaminated run would otherwise become the next run's reference and the
+  # gate would normalize the contamination).
+  bq_load_baselines "$gw" "$ARCH" "$HERE/results/snapshots"
+  "$_log" "qualify: baselines floor=${BQ_BL_FLOOR_US:-none}us (n=${BQ_BL_FLOOR_N:-0}, oldest=${BQ_BL_FLOOR_OLDEST_US:-none}, src=${BQ_BL_FLOOR_SRC:-none}) peak=${BQ_BL_PEAK_RPS:-none}rps (n=${BQ_BL_PEAK_N:-0}, cell=${BQ_BL_PEAK_CELL:-none} c=${BQ_BL_PEAK_CONC:-none})"
+
+  # ── STAGE 1: the no-gateway floor, BEFORE the gateway is built or launched ──────────────────────
+  ssh $SSHOPT ubuntu@"$ip" "cd ~/benchmarking && $remote_env bash matrix/qualify-box.sh stage1" >>"$glog" 2>&1
+  rsync -az --timeout=60 -e "ssh $SSHOPT" "ubuntu@$ip:~/benchmarking/results/box-qualify/stage1.json" "$s1" >>"$glog" 2>&1
+  local med lo hi p50 rps
+  med="$(_bq_json_field "$s1" floor_p99_us_median)"; lo="$(_bq_json_field "$s1" floor_p99_us_min)"
+  hi="$(_bq_json_field "$s1" floor_p99_us_max)";     p50="$(_bq_json_field "$s1" floor_p50_us_median)"
+  rps="$(_bq_json_field "$s1" c1_rps_median)"
+  bq_stage1_verdict "$med" "$lo" "$hi" "$p50" "$rps" "$BQ_BL_FLOOR_US" "$BQ_BL_FLOOR_OLDEST_US"
+  local v1="$BQ_VERDICT" r1="$BQ_REASON" d1="$BQ_DETAIL"
+  # LOG THE NUMBERS EVEN ON A PASS. The passing runs are the calibration evidence: the bands below are
+  # provisional and get re-derived from the distribution of these very lines.
+  "$_log" "qualify stage 1 [attempt $attempt]: $v1 — $d1"
+  if [ "$v1" = fail ]; then
+    "$_log" "qualify stage 1 REJECTED this box ($r1). Terminating it and launching a replacement rather than spending a multi-hour 6x6 on it."
+    return 1
+  fi
+
+  # ── STAGE 2: replay this gateway's own recorded peak cell, after boot, before the 6x6 ───────────
+  local v2=skip r2=no_baseline d2="no recorded peak for this gateway+arch: stage 2 skipped, this run seeds the baseline"
+  local obs=""
+  if [ -n "$BQ_BL_PEAK_CELL" ] && [ -n "$BQ_BL_PEAK_CONC" ]; then
+    ssh $SSHOPT ubuntu@"$ip" "cd ~/benchmarking && $remote_env bash matrix/qualify-box.sh stage2 '$BQ_BL_PEAK_CELL' '$BQ_BL_PEAK_CONC'" >>"$glog" 2>&1
+    rsync -az --timeout=60 -e "ssh $SSHOPT" "ubuntu@$ip:~/benchmarking/results/box-qualify/stage2.json" "$s2" >>"$glog" 2>&1
+    if [ "$(_bq_json_field "$s2" gateway_fault)" = true ]; then
+      # A gateway that will not boot fails on EVERY box. Replacing hardware would burn the budget and
+      # then publish nothing; let the 6x6 run and record the boot failure honestly, as it already does.
+      v2=skip; r2=gateway_fault
+      d2="the gateway did not become ready during the replay ($(_bq_json_field "$s2" error)) — a GATEWAY fault, not a box verdict; proceeding so the run records it honestly"
+      "$_log" "qualify stage 2 [attempt $attempt]: skipped — $d2"
+    else
+      obs="$(_bq_json_field "$s2" replay_rps)"
+      bq_stage2_verdict "$obs" "$BQ_BL_PEAK_RPS" "$BQ_BL_PEAK_OLDEST_RPS" "$BQ_BL_PEAK_CELL"
+      v2="$BQ_VERDICT"; r2="$BQ_REASON"; d2="$BQ_DETAIL"
+      "$_log" "qualify stage 2 [attempt $attempt]: $v2 — $d2"
+      if [ "$v2" = fail ]; then
+        "$_log" "qualify stage 2 REJECTED this box ($r2). Terminating it and launching a replacement."
+        return 1
+      fi
+    fi
+  else
+    "$_log" "qualify stage 2 [attempt $attempt]: $d2"
+  fi
+
+  # ── PROVENANCE: record the qualifying measurement inside the run's own output ───────────────────
+  # Extends the ebd1c07 rig/instrument block rather than inventing a second store: lib/rig.sh reads
+  # this file and matrix/run.sh's snapshot carries it unchanged. Written on EVERY accepted box, and
+  # carrying the raw samples + computed drifts, so the bands can be recalibrated from a data query
+  # over results/snapshots/ after the frozen-codebase repeat runs.
+  local overall="$v1"; [ "$v2" = fail ] && overall=fail
+  [ "$v1" = pass ] && [ "$v2" = seed ] && overall=pass
+  local s1_body='null' s2_body='null'
+  [ -s "$s1" ] && s1_body="$(cat "$s1")"
+  [ -s "$s2" ] && s2_body="$(cat "$s2")"
+  local prov="$QUALIFY_DIR/$gw.qualification.json"
+  bq_provenance_json "$overall" "$attempt" "$s1_body" "$s2_body" "$r1/$r2" "$d1 | $d2" > "$prov"
+  # Fold the baselines it was judged against in, so a future reader never has to reconstruct them.
+  python3 - "$prov" "$BQ_BL_FLOOR_US" "$BQ_BL_FLOOR_OLDEST_US" "$BQ_BL_FLOOR_N" \
+                    "$BQ_BL_PEAK_RPS" "$BQ_BL_PEAK_OLDEST_RPS" "$BQ_BL_PEAK_N" "$BQ_BL_PEAK_CELL" <<'PY' 2>>"$glog"
+import json, sys
+p = sys.argv[1]
+def n(x):
+    try:
+        return float(x)
+    except (TypeError, ValueError):
+        return None
+with open(p) as fh:
+    j = json.load(fh)
+j["baseline"] = {"floor_p99_us": n(sys.argv[2]), "floor_oldest_p99_us": n(sys.argv[3]),
+                 "floor_runs": n(sys.argv[4]), "peak_rps": n(sys.argv[5]),
+                 "peak_oldest_rps": n(sys.argv[6]), "peak_runs": n(sys.argv[7]),
+                 "peak_cell": sys.argv[8] or None}
+with open(p, "w") as fh:
+    json.dump(j, fh)
+PY
+  ssh $SSHOPT ubuntu@"$ip" 'mkdir -p ~/benchmarking/results/box-qualify' >>"$glog" 2>&1
+  rsync -az --timeout=60 -e "ssh $SSHOPT" "$prov" "ubuntu@$ip:~/benchmarking/results/box-qualify/qualification.json" >>"$glog" 2>&1 \
+    || "$_log" "qualify: WARNING could not write the qualification provenance onto the box — the snapshot will carry box_qualify:null for this run"
+  return 0
+}
+
+# ── one gateway, up to BENCH_QUALIFY_ATTEMPTS boxes ───────────────────────────────────────────────
+# The replacement loop. bench_gateway_once holds exactly one box for its whole lifetime and terminates
+# it on return (its RETURN trap), so "launch a replacement" is simply calling it again — the new box
+# gets a fresh instance id under the same run=$RUN_ID tag and no peer box is touched.
 bench_gateway() {
-  local gw="$1" iid="" ip=""
+  local gw="$1" attempt rc
+  local glog="$HERE/results/fanout-$gw.log"
+  for attempt in $(seq 1 "$BENCH_QUALIFY_ATTEMPTS"); do
+    bench_gateway_once "$gw" "$attempt"; rc=$?
+    [ "$rc" = "$BQ_RC_REPLACE" ] || return "$rc"
+    if [ "$attempt" -lt "$BENCH_QUALIFY_ATTEMPTS" ]; then
+      echo "[$(date +%H:%M:%S)] [$gw] box FAILED qualification on attempt $attempt/$BENCH_QUALIFY_ATTEMPTS — terminated it, launching a replacement box" | tee -a "$glog"
+    fi
+  done
+  # Budget exhausted. Publishing anything now would mean publishing a number measured on hardware we
+  # have positively identified as bad — the exact thing this gate exists to prevent. Record the honest
+  # failure; the committed result for this gateway stays whatever it was, untouched and unrefreshed.
+  echo "[$(date +%H:%M:%S)] [$gw] SKIPPED — $BENCH_QUALIFY_ATTEMPTS boxes in a row failed box qualification; NOT publishing $gw this run (its committed result is unchanged, not overwritten). See the qualify lines above for the measured drift." | tee -a "$glog"
+  echo "$gw: $BENCH_QUALIFY_ATTEMPTS/$BENCH_QUALIFY_ATTEMPTS boxes failed qualification — not published" >> "$QUALIFY_SKIPPED"
+  return 1
+}
+
+# ── one box, one gateway (runs in the background, self-terminates) ─────────────────────────────────
+bench_gateway_once() {
+  local gw="$1" attempt="${2:-1}" iid="" ip=""
   local tag="gateway-bench-$gw"
   local glog="$HERE/results/fanout-$gw.log"
-  : > "$glog"
+  [ "$attempt" = 1 ] && : > "$glog"
   glog_echo(){ echo "[$(date +%H:%M:%S)] [$gw] $*" | tee -a "$glog"; }
 
   # provision. COST SAFETY NET: the box self-terminates after BENCH_MAX_MIN minutes no matter what -
@@ -500,6 +676,16 @@ bench_gateway() {
     return 1
   fi
   glog_echo "rsync done (${_pl:-?} in $((SECONDS-_t0))s)"
+
+  # ── BOX QUALIFICATION, right here: the harness is on the box, nothing has been built or launched
+  # yet, and the 6x6 has not started. This is the last moment at which rejecting the box is cheap.
+  if [ "$BENCH_QUALIFY" = 1 ]; then
+    if ! qualify_box "$gw" "$ip" "$glog" glog_echo "$attempt"; then
+      return "$BQ_RC_REPLACE"          # RETURN trap terminates this box; the caller launches a replacement
+    fi
+  else
+    glog_echo "BENCH_QUALIFY=0 — box qualification SKIPPED; this run has no evidence that the hardware it measured on was sound"
+  fi
 
   # ── per-suite staged pull + promote guard, factored out so it can run INCREMENTALLY during the run
   # AND once more at the end (audit R5-#4b). Idempotent: pulls results/<suite>/<gw>.json to a staging
@@ -731,6 +917,16 @@ done
 fail=0
 for p in "${pids[@]}"; do wait "$p" || fail=$((fail+1)); done
 log "all boxes done ($fail job(s) reported an issue — check results/fanout-*.log)"
+
+# ── gateways that never got a sound box ───────────────────────────────────────────────────────────
+# Say it LOUDLY and by name. A gateway skipped for box qualification is not a silent gap: its committed
+# result is deliberately STALE (untouched, never overwritten by a number measured on bad hardware), and
+# whoever reads the board has to know that. Already counted in `fail` via bench_gateway's return.
+if [ -s "$QUALIFY_SKIPPED" ]; then
+  log "BOX QUALIFICATION: $(wc -l < "$QUALIFY_SKIPPED" | tr -d ' ') gateway(s) were NOT published this run —"
+  while IFS= read -r _line; do [ -n "$_line" ] && log "  $_line"; done < "$QUALIFY_SKIPPED"
+  log "  (re-run those gateways; their committed results are the PREVIOUS run's, not this one's)"
+fi
 
 # ── append this run to the append-only history (results/history/<gw>.jsonl) ─────────────────────
 # Do NOT swallow a failure with `|| true` (audit R3-LOW-4): a malformed result JSON or an unwritable
