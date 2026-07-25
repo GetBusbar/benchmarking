@@ -182,8 +182,11 @@
         <span class="card-kicker"><a id="lnk-memory" target="_blank" rel="noopener">memory/run.sh</a></span>
         <h3>Memory</h3>
         <ul>
-          <li><b>Idle RSS.</b> Process resident set after launch, before load.</li>
-          <li><b>Peak RSS.</b> Maximum resident set while sustaining large-payload load at high concurrency.</li>
+          <li>One process-level RSS read per gateway under a fixed load: <b>150 KB payloads &times; 1500 concurrency &times; 120 s</b>, against the plain mock, on the gateway's default config.</li>
+          <li><b>Idle.</b> Process resident set (RSS) after launch, once it answers 200, before any load.</li>
+          <li><b>Peak.</b> Maximum RSS during the load — a transient spike from in-flight request/response buffers at that concurrency. Every gateway spikes here, so peak alone is a weak signal.</li>
+          <li><b>Recovered @60 s.</b> RSS sampled 60 s after the load ends — whether the gateway <em>releases</em> the memory it took, or stays pinned near its peak. This, not raw peak, is the memory story: a gateway that peaks near 1 GB and settles back to tens of MiB behaves very differently from one that holds the peak.</li>
+          <li><b>Recovery curve.</b> RSS is sampled at a steady cadence across the whole run — idle, ramp, load, and the 60 s settle window — and drawn as an idle&rarr;peak&rarr;recovery sparkline in each gateway's detail drawer.</li>
         </ul>
       </article>
       <article class="method-card">
