@@ -291,6 +291,42 @@ export function checkConsistency(data, app) {
       warnings.push(`${g.key}: sustained@20ms ${bc.rps_sustained_20ms} > max-proxy ${bc.rps_max_proxy} ` +
         `(independent per-cell sweep ceilings; noise, shipped unclamped)`);
     }
+    // ---- MATRIX POPUP == PERFORMANCE TABLE (Custom), per cell. The matrix hover popup and the
+    // Performance tab in Custom mode read the SAME per-cell record through the SAME accessors
+    // (chooserPerfCell / chooserStreamCell), so a value must be identical on both surfaces AND on the
+    // popup's own embedded HTML. Assert it per served green cell so the two can never diverge, and that
+    // the popup's Δ-to-Peak agrees with deltaToPeak on the same record.
+    if (g.matrix && g.matrix.upstreams && app.chooserPerfCell && app.cellPopFull) {
+      for (const [egress, up] of Object.entries(g.matrix.upstreams)) {
+        for (const [ingress, cell] of Object.entries((up && up.cells) || {})) {
+          if (!(cell && cell.served === true && cell.perf)) continue;
+          const st = { mode: "custom", xlateIn: ingress, xlateOut: egress };
+          const popHtml = app.cellPopFull(g, ingress, egress);   // what the popup renders
+          // The popup formats every one of these four integer metrics with the en-US integer formatter
+          // (fmtInt / fmtAdded); the table accessor returns the raw value in .v. Compare the SAME
+          // formatting so we test the VALUE, not the format: a shown (non-n/a) number must appear
+          // verbatim in the popup, and a gated-away n/a value must not leak in as a stray number.
+          for (const key of ["added_latency_p50_us", "added_latency_p99_us", "rps_sustained_20ms", "rps_max_proxy"]) {
+            const table = app.chooserPerfCell(g, key, String, st);
+            if (table.na || table.v == null) continue;
+            const shown = Number(table.v).toLocaleString("en-US");
+            if (popHtml && !popHtml.includes(`<b>${shown}</b>`)) {
+              errors.push(`${g.key}.${ingress}->${egress}.${key}: table shows "${shown}" but the matrix popup does not ` +
+                `(popup and Performance/Custom must read one canonical value)`);
+            }
+          }
+          // Δ-to-Peak: the popup's delta must equal deltaToPeak on the same cell vs best_cell.
+          if (app.deltaToPeak && g.best_cell) {
+            const cellPerf = { ingress, egress, ...cell.perf };
+            const delta = app.deltaToPeak(cellPerf, g.best_cell);
+            if (delta && popHtml && !popHtml.includes(delta)) {
+              errors.push(`${g.key}.${ingress}->${egress}: Δ-to-Peak "${delta}" not shown in the popup ` +
+                `(the popup's delta must be deltaToPeak vs best_cell)`);
+            }
+          }
+        }
+      }
+    }
     // ---- coverage (WARN, M7): a served (green) matrix cell with NO per-cell perf renders as an
     // all-n/a row on any tab that reads that exact cell (the bifrost translation-row case). The
     // cell is honest (served, unmeasured), but an unmeasured green cell should be loud in the
