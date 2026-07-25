@@ -70,6 +70,9 @@ export MOCK_PORT="${MOCK_PORT:-8000}"
 RESULTS="$ROOT/results/streamcpu"; mkdir -p "$RESULTS"
 log(){ echo "[$(date +%H:%M:%S)] $*"; }
 command -v taskset >/dev/null || taskset(){ shift 2; "$@"; }
+# FINDING 29: setsid is optional (absent on macOS / minimal images); run directly if missing, matching
+# the fallback shim matrix/run.sh:86 + perf/run.sh:52 already use.
+command -v setsid  >/dev/null || setsid(){ "$@"; }
 
 # gateway core count -> fps-per-core. Parse the CORES pin ("0-3" -> 4, "0" -> 1, "0-3,8-11" -> 8).
 core_count() {
