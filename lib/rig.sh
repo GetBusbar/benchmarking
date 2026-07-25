@@ -62,7 +62,12 @@ _rig_json_str(){ if [ -z "${1:-}" ]; then printf 'null'; else printf '"%s"' "$1"
 # null-safe; a consumer that predates this block simply sees no "rig" key at all.
 rig_provenance_json(){
   local arch="${BENCH_ARCH:-arm64}"
-  local msha usha mat uat
+  # INITIALISED, not merely declared: `local mat` leaves the name UNSET, and matrix/run.sh runs under
+  # `set -u`, so the "$mat" expansion below aborted the command substitution and printed NOTHING —
+  # emitting `"asset_updated_at": }`, i.e. INVALID JSON, for every run whose rig did not come from the
+  # release (any local-override / local-build rig). The snapshot writer then failed to parse its own
+  # output and the whole run aborted. Empty string is what _rig_json_str turns into a literal null.
+  local msha usha mat="" uat=""
   msha="$(_rig_sha256 "${MOCK:-}")"; usha="$(_rig_sha256 "${UGEN:-}")"
   # Only ask the API about binaries that actually CAME from the release; a local build has no asset.
   case "${RIG_MOCK_ORIGIN:-}" in release|cached) mat="$(_rig_asset_updated_at "mock-$arch")";; esac

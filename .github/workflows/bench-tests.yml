@@ -15,6 +15,9 @@ on:
       - "lib/harness.sh"
       - "lib/mem_rss_test.sh"
       - "lib/mock_restart_test.sh"
+      - "lib/ingress.sh"
+      - "lib/ingress_path_test.sh"
+      - "matrix/run.sh"
       - "lib/promote_guard.py"
       - "lib/promote_guard_test.py"
       - "charts.py"
@@ -31,6 +34,9 @@ on:
       - "lib/harness.sh"
       - "lib/mem_rss_test.sh"
       - "lib/mock_restart_test.sh"
+      - "lib/ingress.sh"
+      - "lib/ingress_path_test.sh"
+      - "matrix/run.sh"
       - "lib/promote_guard.py"
       - "lib/promote_guard_test.py"
       - "charts.py"
@@ -73,6 +79,14 @@ jobs:
       # gateways. Gate the wait-for-exit behaviour so the blind sleep can never come back.
       - name: Mock-restart choke-point test (wait for exit + port release, SIGKILL escalation, budget)
         run: bash -n lib/mock_restart_test.sh && bash lib/mock_restart_test.sh
+      # lib/ingress.sh is the ONE choke point deciding which URL each ingress dialect is probed on.
+      # matrix/run.sh used to freeze those paths at script init, so the two dialects that carry the
+      # model in the URL PATH (gemini, bedrock) kept requesting the model from BEFORE gw_matrix_egress
+      # switched GW_MODEL for the column — making {gemini,bedrock} x {every non-openai egress}
+      # impossible to pass and publishing 10+ cells as red gateway failures. Gate the late-binding
+      # contract (and that a manifest's GW_MATRIX_PATH_* override still wins) so it cannot re-freeze.
+      - name: Ingress-path choke-point test (late-bound GW_MODEL in gemini/bedrock paths + override precedence)
+        run: bash -n lib/ingress.sh && bash -n lib/ingress_path_test.sh && bash -n matrix/run.sh && bash lib/ingress_path_test.sh
       # lib/promote_guard.py decides whether an incoming result may overwrite the committed one; a bug
       # there republishes a regression as an honest failure (R4-M2). Covers MEDIUM-R2-3 (matrix all-dead
       # 000 detection) + the anchored-marker / status-000 / honest-not-served behaviours.
