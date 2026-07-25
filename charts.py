@@ -1018,6 +1018,9 @@ def render(chart: Chart, only_keys=None, out_stem: str | None = None) -> None:
     ax.annotate(_subtitle, xy=(0, 1), xycoords="axes fraction", xytext=(0, 10),
                 textcoords="offset points", fontsize=10.5, color=GRAY, va="bottom", ha="left")
 
+    # The legend band, in inches from the figure bottom. Hoisted out of the `if handles:` block so
+    # the tight_layout reservation below is valid even on a chart with no legend at all.
+    legend_in = 0.42
     # Language legend (swatch per language present) + a note for the secondary series (e.g. idle RAM).
     from matplotlib.patches import Patch
     present = [l for l in LANG_ORDER if any(_served(r) and LANGS.get(r["_key"]) == l for r in rows)]
@@ -1027,13 +1030,24 @@ def render(chart: Chart, only_keys=None, out_stem: str | None = None) -> None:
     if ns > 1:  # a muted secondary series (idle RAM) — label it too
         handles.append(Patch(facecolor=MUTE, label=chart.series[1].legend))
     if handles:
-        # FIXED placement (audit LOW): "best" would drift onto the title/subtitle or the first bar
-        # (the streamcpu "colored by language" overlap). Pin to the lower-right corner with padding so
-        # the swatch box always lands in the right-edge headroom below the shortest (bottom) bars,
-        # clear of the title/subtitle up top and never on top of a bar.
-        ax.legend(handles=handles, loc="lower right", fontsize=8.5, frameon=False,
-                  ncols=min(len(handles), 6), title="colored by language",
-                  borderaxespad=0.8)
+        # PLACEMENT (audit #21): the legend gets its OWN BAND BELOW THE AXES, never an overlay.
+        #
+        # Every previous attempt put it inside the plot and then argued about which corner is empty.
+        # "best" drifted onto the title (the old streamcpu overlap); pinning it to "lower right" assumed
+        # bars get SHORTER downward, which is only true for higher-is-better charts — the memory,
+        # added-latency and cost charts rank LOWER-IS-BETTER, so their longest bar is the bottom one and
+        # the legend landed squarely on LiteLLM-Python's 1.1 GB peak bar in memory_rss.png. Choosing the
+        # corner from the data just moves the collision to the other end (a full-width 6-column legend
+        # covers the short bars there instead).
+        #
+        # There is no corner that is empty on every chart, so stop looking for one. Anchoring in FIGURE
+        # coordinates below the axes is correct for any sort direction, any bar count and any series
+        # count. The offset is computed from the figure height so the gap is a CONSTANT number of
+        # inches rather than shrinking as charts get taller.
+        fig_h = 0.92 * n + 1.9    # must match the figsize above
+        fig.legend(handles=handles, loc="lower center", bbox_to_anchor=(0.5, legend_in / fig_h),
+                   fontsize=8.5, frameon=False, ncols=min(len(handles), 6),
+                   title="colored by language")
 
     meta = rows[0]
     bits = []
@@ -1047,7 +1061,9 @@ def render(chart: Chart, only_keys=None, out_stem: str | None = None) -> None:
     fig.text(0.008, 0.012, "  ·  ".join(bits) + f"     github.com/GetBusbar/benchmarking - regenerated {RENDER_TS} from raw results",
              fontsize=7.3, color=GRAY)
 
-    fig.tight_layout(rect=(0, 0.05, 1, 0.93))
+    # Reserve the band the out-of-axes legend now occupies (audit #21), in the SAME constant-inches
+    # terms it is anchored in, so the axes never grow down into it on a tall chart.
+    fig.tight_layout(rect=(0, max(0.05, (legend_in + 0.55) / (0.92 * n + 1.9)), 1, 0.93))
     out = RESULTS / f"{out_stem or chart.name}.png"
     fig.savefig(out, dpi=300, bbox_inches="tight", facecolor="white")
     plt.close(fig)
