@@ -232,6 +232,31 @@ check("MED-3: a mock-bound max-proxy RPS is out of the top-N", "bound" in proxy_
 check("MED-3: the clean max-proxy RPS IS ranked", "clean" in proxy_topn, True)
 
 
+# ── memory RECOVERY: recovered_rss_mib is null_not_served — a gateway measured BEFORE the recovery ────
+# signal existed (recovered_rss_mib absent → projected None) must NOT draw a fabricated 0 bar or rank,
+# while a gateway WITH a recovery number is ranked (best = min, lower recovery wins). _proj_memory reads
+# CANON[key]["memory_read"], so fixture that lane directly.
+rec_chart = chart_by_name("memory_recovery")
+check("memory_recovery chart is null_not_served (no fabricated 0 for a pre-recovery bundle)",
+      rec_chart.null_not_served, True)
+charts.CANON = {
+    "recovers": {"memory_read": {"idle_rss_mib": 40, "peak_rss_mib": 1000, "recovered_rss_mib": 45}},
+    "pinned":   {"memory_read": {"idle_rss_mib": 60, "peak_rss_mib": 900,  "recovered_rss_mib": 880}},
+    "oldbundle":{"memory_read": {"idle_rss_mib": 50, "peak_rss_mib": 800}},  # pre-recovery: no field
+}
+charts.GATEWAYS = {k: k for k in charts.CANON}
+mrows = {r["_key"]: r for r in charts._load("memory")}
+check("_proj_memory carries recovered_rss_mib when present", mrows["recovers"]["recovered_rss_mib"], 45)
+check("_proj_memory carries None (not 0) when the recovery field is absent",
+      mrows["oldbundle"]["recovered_rss_mib"], None)
+rec_topn = charts._topn_keys(rec_chart, n=5)
+check("memory_recovery: a gateway WITH a recovery number is ranked", "recovers" in rec_topn, True)
+check("memory_recovery: a gateway that RELEASES ranks over one that stays pinned (best = min)",
+      list(charts._topn_keys(rec_chart, n=1))[0], "recovers")
+check("memory_recovery: a pre-recovery bundle (null recovered) is NOT eligible (never a fabricated 0)",
+      "oldbundle" in rec_topn, False)
+
+
 if _fail == 0:
     print("all charts.py validity-gate tests passed")
     sys.exit(0)

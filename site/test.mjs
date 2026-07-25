@@ -854,7 +854,8 @@ function buildStreamMemRepo() {
     sweep_sustained_20ms: [{ conc: 512, rps: 45000, p99_us: 200, fail: 0 }] };
   const matrix = {
     gateway: "sgw", build: "ok", matrix_version: 2, served: true, measured_at: iso,
-    memory: { served: true, idle_rss_mib: 120.5, peak_rss_mib: 890.2, peak_rss_hwm_mib: 910, post_load_rss_mib: 300 },
+    memory: { served: true, idle_rss_mib: 120.5, peak_rss_mib: 890.2, peak_rss_hwm_mib: 910, post_load_rss_mib: 300,
+      recovered_rss_mib: 130.0, rss_series: [ { t_s: 0, rss_mib: 120.5 }, { t_s: 60, rss_mib: 890.2 }, { t_s: 180, rss_mib: 130.0 } ] },
     upstreams: { openai: { configurable: true, served: true, cells: {
       openai: { served: true, perf, stream: { ...STREAM_CELL } } } } },
     cells: { openai: { served: true, perf, stream: { ...STREAM_CELL } } },
@@ -1093,6 +1094,43 @@ test("gen-data projects memory from the matrix's one process-level read", () => 
   assert.equal(g.memory_read.idle_rss_mib, 120.5);
   assert.equal(g.memory_read.peak_rss_mib, 890.2);
   assert.equal(app.memCell(g, "peak_rss_mib", String).text, "890.2");
+  // Recovery signals carry through the spread projection, null-safe.
+  assert.equal(g.memory_read.recovered_rss_mib, 130.0, "recovered_rss_mib projects into g.memory_read");
+  assert.ok(Array.isArray(g.memory_read.rss_series) && g.memory_read.rss_series.length === 3,
+    "rss_series projects into g.memory_read");
+});
+
+test("memory recovery column: present shows the value, absent renders muted n/a (never a fabricated 0)", () => {
+  // A gateway WITH the recovery field shows it.
+  const withRec = { key: "wr", display: "WR", lang: "Rust",
+    memory_read: { source: "matrix", idle_rss_mib: 40, peak_rss_mib: 1000, recovered_rss_mib: 45 } };
+  const cell = app.memCell(withRec, "recovered_rss_mib", String);
+  assert.equal(cell.na, false, "a measured recovered_rss_mib must not read n/a");
+  assert.equal(cell.text, "45");
+  // A gateway WITHOUT the field (pre-recovery bundle) reads n/a — never 0, never fabricated.
+  const noRec = { key: "nr", display: "NR", lang: "Rust",
+    memory_read: { source: "matrix", idle_rss_mib: 40, peak_rss_mib: 1000 } };
+  const naCell = app.memCell(noRec, "recovered_rss_mib", String);
+  assert.equal(naCell.na, true, "an absent recovered_rss_mib must render n/a");
+  assert.equal(naCell.text, "n/a");
+  assert.equal(naCell.v, null, "an absent recovered_rss_mib carries a null value, never 0");
+  // The board carries the Recovered column, gated best = min (lower recovery releases more).
+  const col = app.COLUMN_SETS.passthrough.find((c) => c.id === "memrecov");
+  assert.ok(col, "the Recovered (MiB) column exists on the board");
+  assert.ok(/release memory/.test(col.title), "the column tooltip explains the recovery signal");
+  const rec = app.LANES.find((l) => l.key === "memory").metrics.find((m) => m.k === "recovered_rss_mib");
+  assert.ok(rec && rec.best === "min", "the memory lane ranks recovered_rss_mib best = min");
+});
+
+test("recovery sparkline: renders only when rss_series exists (≥2 points), never fabricated", () => {
+  // With a series → an inline SVG recovery curve.
+  const svg = app.rssSparkline([ { t_s: 0, rss_mib: 40 }, { t_s: 60, rss_mib: 1000 }, { t_s: 180, rss_mib: 45 } ]);
+  assert.ok(/<svg/.test(svg) && /<path /.test(svg), "a series yields an inline-SVG path");
+  assert.ok(/recovered 45/.test(svg), "the sparkline caption reports the recovered figure");
+  // No series, one point, or a non-array → nothing drawn (never a fabricated flat line).
+  assert.equal(app.rssSparkline(undefined), "", "no series → no sparkline");
+  assert.equal(app.rssSparkline([]), "", "empty series → no sparkline");
+  assert.equal(app.rssSparkline([ { t_s: 0, rss_mib: 40 } ]), "", "a single point → no sparkline");
 });
 
 test("streaming guard: headline streaming MUST be the diagonal cell's streaming it's projected from", () => {
