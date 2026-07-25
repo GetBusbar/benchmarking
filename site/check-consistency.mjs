@@ -202,6 +202,49 @@ export function checkConsistency(data, app) {
         }
       }
     }
+    // FINDING 35: assert WHICHEVER streaming source is actually present, not just matrix. The matrix
+    // branch above is inert while every gateway is stream-fallback (a standalone stream suite, not the
+    // 6x6). A stream-fallback record still feeds the table (via streamCell / canonicalStreaming), so it
+    // must be checked too: the table's per-metric visibility MUST equal the gated canonical record it is
+    // read from, so a fallback number can't show on one surface and vanish on another.
+    if (s && s.source && s.source !== "matrix") {
+      const canon = app.canonicalStreaming(g);   // the drawer/compare record (fallback, gated)
+      for (const key of ["added_ttft_p99_us", "added_gap_p99_us", "streams_sustained", "cpu_fps"]) {
+        const table = app.streamCell(g, key, String).v ?? null;
+        const drawer = canon ? (canon[key] ?? null) : null;
+        if (table !== drawer) {
+          errors.push(`${g.key}.streaming.${key} (${s.source}): table=${table} drawer/compare=${drawer} ` +
+            `(a stream-fallback streaming value must read identically on the table and the drawer/compare)`);
+        }
+      }
+    }
+    // FINDING 21: the streaming consistency above uses streamCell (the Peak accessor) ONLY, so Same/Custom
+    // streaming was never consistency-checked. Assert chooserStreamCell agrees with the underlying cell in
+    // ALL THREE modes: the table column a reader actually sees in Same/Custom must equal the record the
+    // drawer/compare would read for that same chosen cell. (Peak: canonicalStreaming; Same/Custom: the
+    // chosen cell's per-cell stream record via chooserCellStream.)
+    if (s) {
+      const streamKeys = ["added_ttft_p99_us", "added_gap_p99_us", "streams_sustained", "cpu_fps"];
+      const dia = s.dialect;   // the diagonal the projection was measured on
+      const modes = [
+        { mode: "peak" },
+        // Same on the dialect the streaming was actually measured on (the only Same cell that can show it).
+        dia ? { mode: "same", sameDialect: dia } : null,
+        // Custom on that same diagonal (in==out) — the per-cell path chooserCellStream reads.
+        dia ? { mode: "custom", xlateIn: dia, xlateOut: dia } : null,
+      ].filter(Boolean);
+      for (const st of modes) {
+        const rec = app.chooserCellStream(g, st);   // the drawer/compare record for this chosen cell
+        for (const key of streamKeys) {
+          const table = app.chooserStreamCell(g, key, String, st).v ?? null;
+          const drawer = rec ? (rec[key] ?? null) : null;
+          if (table !== drawer) {
+            errors.push(`${g.key}.streaming.${key} (mode=${st.mode}): table=${table} chooser-record=${drawer} ` +
+              `(Same/Custom streaming must be consistency-checked via chooserStreamCell, not only the Peak accessor)`);
+          }
+        }
+      }
+    }
     // ---- ONE SOURCE OF TRUTH (sweep chart vs headline): the published headline MUST be a point on
     // its OWN charted sweep. rps_max_proxy/_concurrency must equal the max-rps point of the charted
     // sweep_max_proxy array (same value AND concurrency), and likewise sustained@20ms vs
@@ -302,17 +345,60 @@ export function checkConsistency(data, app) {
           if (!(cell && cell.served === true && cell.perf)) continue;
           const st = { mode: "custom", xlateIn: ingress, xlateOut: egress };
           const popHtml = app.cellPopFull(g, ingress, egress);   // what the popup renders
-          // The popup formats every one of these four integer metrics with the en-US integer formatter
-          // (fmtInt / fmtAdded); the table accessor returns the raw value in .v. Compare the SAME
-          // formatting so we test the VALUE, not the format: a shown (non-n/a) number must appear
-          // verbatim in the popup, and a gated-away n/a value must not leak in as a stray number.
+          // FINDING 30: re-derive the expected value INDEPENDENTLY from the RAW matrix cell (cell.perf),
+          // not from chooserPerfCell — the popup ALSO renders via chooserPerfCell, so comparing the two
+          // was tautological (both sides the same expression, could never diverge on a real bug). Reading
+          // the raw cell here means a projection bug that drops/mangles a value on the chooser path WOULD
+          // now surface as a popup/raw-cell mismatch. Apply the SAME mock-bound gate the accessor applies
+          // (rps_* suppressed when not certified) so we compare like for like.
+          // FINDING 31: format the expected value with the SAME formatter the popup uses (fmtInt =
+          // Math.round(v).toLocaleString), not Number(v).toLocaleString — a fractional value formatted
+          // two different ways would mask a real mismatch (or false-flag a match).
+          const gate = (key) => (key === "rps_sustained_20ms" || key === "rps_max_proxy");
           for (const key of ["added_latency_p50_us", "added_latency_p99_us", "rps_sustained_20ms", "rps_max_proxy"]) {
-            const table = app.chooserPerfCell(g, key, String, st);
-            if (table.na || table.v == null) continue;
-            const shown = Number(table.v).toLocaleString("en-US");
-            if (popHtml && !popHtml.includes(`<b>${shown}</b>`)) {
-              errors.push(`${g.key}.${ingress}->${egress}.${key}: table shows "${shown}" but the matrix popup does not ` +
-                `(popup and Performance/Custom must read one canonical value)`);
+            const raw = cell.perf[key];
+            if (raw == null) continue;
+            // gated-away (mock-bound/unverifiable) rps reads n/a in the popup — it must NOT appear there.
+            const suppressed = gate(key) && app.xlateRpsSuppressed(cell.perf, key);
+            const shown = app.fmtInt(raw);   // Math.round(raw).toLocaleString("en-US"), matches the popup
+            const inPop = popHtml && popHtml.includes(`<b>${shown}</b>`);
+            if (suppressed) {
+              // a suppressed value must not leak into the popup as a stray number
+              if (inPop) errors.push(`${g.key}.${ingress}->${egress}.${key}: value "${shown}" is mock-bound (suppressed) ` +
+                `but leaked into the matrix popup (a gated-away number must read n/a on every surface)`);
+              continue;
+            }
+            if (!inPop) {
+              errors.push(`${g.key}.${ingress}->${egress}.${key}: raw matrix cell = "${shown}" but the matrix popup does not show it ` +
+                `(popup and the raw per-cell record must read one canonical value)`);
+            }
+          }
+          // FINDING 26: the popup ALSO renders two streaming metrics (Added TTFT p99, Streams sustained)
+          // via streamRow — the popup==table guard omitted them, so a streaming divergence in the popup
+          // went unchecked. Re-derive independently from the raw per-cell stream record (cell.stream),
+          // applying the SAME gates the accessor applies: streams_sustained is suppressed unless certified.
+          if (cell.stream && cell.stream.stream_served === true) {
+            const cs = cell.stream;
+            // Added TTFT p99 formats via fmtUsMs in the popup; assert the popup contains the integer µs
+            // (the leading token fmtUsMs always emits) so we test the value independent of the ms suffix.
+            if (cs.added_ttft_p99_us != null) {
+              const shown = app.fmtInt(cs.added_ttft_p99_us);
+              if (popHtml && !popHtml.includes(shown)) {
+                errors.push(`${g.key}.${ingress}->${egress}.added_ttft_p99_us: raw cell stream = "${shown}" not shown in the popup ` +
+                  `(the popup's streaming metrics must read the raw per-cell stream record)`);
+              }
+            }
+            // Streams sustained: gated by sustainedCertified (mock-bound → n/a). A suppressed value must
+            // not leak into the popup; a certified value must appear.
+            if (cs.streams_sustained != null) {
+              const certified = app.sustainedCertified(cs);
+              const shown = app.fmtInt(cs.streams_sustained);
+              const inPop = popHtml && popHtml.includes(`<b>${shown}</b>`);
+              if (certified && !inPop) {
+                errors.push(`${g.key}.${ingress}->${egress}.streams_sustained: certified raw value "${shown}" not shown in the popup`);
+              } else if (!certified && inPop) {
+                errors.push(`${g.key}.${ingress}->${egress}.streams_sustained: mock-bound value "${shown}" leaked into the popup (must read n/a)`);
+              }
             }
           }
           // Δ-to-Peak: the popup's delta must equal deltaToPeak on the same cell vs best_cell.

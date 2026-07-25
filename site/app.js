@@ -1115,24 +1115,46 @@ function initThemeToggle() {
 // Short, one-idea-per-line captions (rendered on their own lines). Keep each line terse and concrete.
 // Per-mode caption for the cell-chooser tabs: says in one line exactly which cell(s) of the ONE 6x6 run
 // the table is showing, so a reader never has to guess what the numbers compare.
-function chooserCaption(view, st) {
-  const dim = view === "streaming" ? "streaming" : "latency + throughput";
+// The streaming numbers may be matrix-sourced (projected from the 6x6 diagonal cell) OR stream-fallback
+// (a standalone stream suite, not the matrix). The caption must NOT hard-claim "the one 6x6 run" for
+// streaming when the data is actually fallback (finding 12). Summarize the actual provenance across the
+// gateways so the lead line is honest: "the one 6x6 run" only when streaming really came from the matrix.
+function streamingProvenance(data) {
+  const srcs = (data && data.gateways || []).map((g) => g.streaming && g.streaming.source).filter(Boolean);
+  if (!srcs.length) return { all: null };
+  const allMatrix = srcs.every((s) => s === "matrix");
+  const allFallback = srcs.every((s) => s !== "matrix");
+  return { all: allMatrix ? "matrix" : allFallback ? "fallback" : "mixed" };
+}
+// The lead line for a chooser caption. For latency+throughput it is always the 6x6 matrix. For streaming
+// it depends on provenance: matrix → "the one 6x6 run"; fallback → the standalone stream suite (honest);
+// mixed → say so rather than over-claim.
+function chooserLead(view, data) {
+  if (view !== "streaming") return "Per-cell latency + throughput from the one 6x6 run.";
+  const prov = streamingProvenance(data).all;
+  if (prov === "matrix") return "Per-cell streaming from the one 6x6 run.";
+  if (prov === "mixed") return "Streaming: some gateways from the 6x6 run, some from the standalone stream suite (per-row provenance in the drawer).";
+  // fallback (or no data yet): the streaming figures come from the standalone stream suite, not the matrix.
+  return "Streaming from the standalone stream suite (not the 6x6 matrix); the diagonal passthrough it measured.";
+}
+function chooserCaption(view, st, data) {
+  const lead = chooserLead(view, data);
   if (st.mode === "peak")
-    return [`Per-cell ${dim} from the one 6x6 run.`,
+    return [lead,
       "Each gateway on its OWN best same-dialect diagonal (best-of); the pill shows which dialect.",
       "Everyone appears. Pick Same for one shared dialect, or Custom for any ingress→egress cell."];
   if (st.mode === "same") {
     const d = MATRIX_LABELS[st.sameDialect] || st.sameDialect;
-    return [`Per-cell ${dim} from the one 6x6 run.`,
+    return [lead,
       `Every gateway on the ${d}→${d} diagonal (pure forwarding, no translation).`,
       "A gateway that does not serve this dialect reads n/a and sinks to the bottom."];
   }
   const inL = MATRIX_LABELS[st.xlateIn] || st.xlateIn, outL = MATRIX_LABELS[st.xlateOut] || st.xlateOut;
   return st.xlateIn === st.xlateOut
-    ? [`Per-cell ${dim} from the one 6x6 run.`,
+    ? [lead,
        `Every gateway on the ${inL}→${outL} cell: same dialect, so this is passthrough (no translation).`,
        "A gateway that does not serve this cell reads n/a."]
-    : [`Per-cell ${dim} from the one 6x6 run.`,
+    : [lead,
        `Every gateway on the ${inL}→${outL} cell: client speaks ${inL}, upstream speaks ${outL}, the gateway translates both ways.`,
        "Every row is the identical cell, so it is apples-to-apples; a gateway that does not serve it reads n/a."];
 }
@@ -1144,7 +1166,7 @@ const MEMORY_CAPTION = [
 function updateTableCaption(view) {
   const el = document.getElementById("table-caption");
   if (!el) return;
-  const lines = view === "memory" ? MEMORY_CAPTION : chooserCaption(view, state);
+  const lines = view === "memory" ? MEMORY_CAPTION : chooserCaption(view, state, state.data);
   el.innerHTML = lines.map((l) => esc(l)).join("<br>");
 }
 /* Memory tab: show the memory-recovery + memory-rss charts (charts.py PNGs) under the per-gateway table.
@@ -2304,8 +2326,9 @@ if (NODE) {
     cellState, matrixCellTip, cellPerfTip, passCell, xlateCell, streamCell, memCell, rssSparkline, hasTranslation, CATEGORIES, DEFAULT_CATEGORY, VIEWS,
     CHOOSER_MODES, chooserCellPerf, chooserDialects, chooserPerfCell, chooserCellStream, chooserStreamCell, chooserHasCell, deltaToPeak, cellPopFull,
     laneRecord, lanePathNote, perfSweepSeries,
+    chooserCaption, chooserLead, streamingProvenance,
     canonicalPerf, canonicalXlate, canonicalStreaming, canonicalMemory, cpuFpsCertified, sustainedCertified, perfRpsCertified, perfRpsSuppressed, xlateRpsSuppressed, gatewayResultsJson, DEFAULT_VIEW, VIEW_LABELS, rosterRows, fmtStars,
-    configCorrectionUrl, BENCH_REPO,
+    configCorrectionUrl, BENCH_REPO, fmtInt, fmtAdded,
     HOME_VIEW, homeCardsHtml,
   };
 } else {

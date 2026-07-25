@@ -1594,6 +1594,57 @@ test("Cluster-B/22: perfSweepSeries is chooser-aware and drops a mock-bound-supp
   assert.equal(gated[0].peak.rps, 32000, "the surviving curve is the certified max-proxy");
 });
 
+test("Cluster-C/20: chooserStreamCell reads the right streaming cell across Peak/Same/Custom", () => {
+  // A gateway whose streaming was projected from the openai diagonal (matrix per-cell stream), plus an
+  // openai->anthropic cell that carries its own per-cell stream record.
+  const g = {
+    key: "sc", display: "SC", lang: "Rust",
+    streaming: { source: "matrix", dialect: "openai", stream_served: true,
+      added_ttft_p99_us: 90, streams_sustained: 1300, streams_sustained_mock_bound: false,
+      cpu_fps: 48000, cpu_fps_mock_bound: false },
+    matrix: { upstreams: {
+      openai: { cells: { openai: { served: true, perf: { added_latency_p99_us: 10 },
+        stream: { stream_served: true, added_ttft_p99_us: 90, streams_sustained: 1300, streams_sustained_mock_bound: false } } } },
+      anthropic: { cells: { openai: { served: true, perf: { added_latency_p99_us: 20 },
+        stream: { stream_served: true, added_ttft_p99_us: 140, streams_sustained: 900, streams_sustained_mock_bound: false } } } },
+    } },
+  };
+  // Peak → the projected diagonal streaming (90 TTFT, 1300 streams).
+  const peak = { mode: "peak" };
+  assert.equal(app.chooserStreamCell(g, "added_ttft_p99_us", String, peak).text, "90");
+  assert.equal(app.chooserStreamCell(g, "streams_sustained", String, peak).text, "1300");
+  // Same openai → the same diagonal it was measured on (still 90).
+  const sameOa = { mode: "same", sameDialect: "openai" };
+  assert.equal(app.chooserStreamCell(g, "added_ttft_p99_us", String, sameOa).text, "90");
+  // Same anthropic → the diagonal was measured on openai, NOT anthropic → n/a (never fabricated).
+  const sameAn = { mode: "same", sameDialect: "anthropic" };
+  assert.equal(app.chooserStreamCell(g, "added_ttft_p99_us", String, sameAn).na, true);
+  // Custom openai->anthropic → that cell's OWN per-cell stream record (140 TTFT, 900 streams).
+  const cust = { mode: "custom", xlateIn: "openai", xlateOut: "anthropic" };
+  assert.equal(app.chooserStreamCell(g, "added_ttft_p99_us", String, cust).text, "140");
+  assert.equal(app.chooserStreamCell(g, "streams_sustained", String, cust).text, "900");
+  // A cell with no per-cell stream reads n/a.
+  const missing = { mode: "custom", xlateIn: "gemini", xlateOut: "cohere" };
+  assert.equal(app.chooserStreamCell(g, "added_ttft_p99_us", String, missing).na, true);
+});
+
+test("Cluster-C/12: the streaming caption is CONDITIONAL on provenance (no hard 6x6 claim on fallback)", () => {
+  const st = { ...app.newState(), mode: "peak" };
+  // All-fallback streaming (today's real data): the caption must NOT claim the 6x6 run for streaming.
+  const fbData = { gateways: [{ key: "a", streaming: { source: "stream-fallback" } },
+    { key: "b", streaming: { source: "stream-fallback" } }] };
+  assert.equal(app.streamingProvenance(fbData).all, "fallback");
+  const fbCap = app.chooserCaption("streaming", st, fbData).join(" ");
+  assert.ok(!/from the one 6x6 run/.test(fbCap), `fallback streaming caption must not positively claim the 6x6 run; got: ${fbCap}`);
+  assert.ok(/stream suite/.test(fbCap), "fallback caption names the standalone stream suite");
+  // Matrix-sourced streaming: the 6x6 claim IS honest.
+  const mxData = { gateways: [{ key: "a", streaming: { source: "matrix" } }] };
+  assert.equal(app.streamingProvenance(mxData).all, "matrix");
+  assert.ok(/from the one 6x6 run/.test(app.chooserCaption("streaming", st, mxData).join(" ")), "matrix streaming may claim the 6x6 run");
+  // The Performance (perf) tab is always the 6x6 matrix — its caption is unaffected by streaming provenance.
+  assert.ok(/from the one 6x6 run/.test(app.chooserCaption("performance", st, fbData).join(" ")), "perf caption always names the 6x6 run");
+});
+
 test("Δ-to-Peak: a non-peak cell reports its deviation vs the gateway's own best diagonal", () => {
   const g = CHOOSER_GW;
   const cust = { mode: "custom", xlateIn: "openai", xlateOut: "anthropic" };
