@@ -138,6 +138,10 @@ const gateways = gatewayKeys.map((key) => {
     // MEMORY projection (matrix is the single source): the one process-level RSS read the matrix run
     // takes (matrix.memory). A gateway whose matrix run served no memory (or ran with MATRIX_MEMORY=0)
     // leaves g.memory_read absent and the board falls back to the legacy memory suite below.
+    // The spread carries EVERY measured memory field through verbatim, incl. the recovery signals
+    // recovered_rss_mib (RSS 60s after the load ends — does it release?) and rss_series (the bounded
+    // idle→peak→recovery curve). Both are NULL-SAFE by construction: an old matrix.memory that predates
+    // them simply lacks the keys, so g.memory_read lacks them too — never fabricated, never zero-filled.
     if (g.matrix.memory && g.matrix.memory.served === true) {
       g.memory_read = { source: "matrix", build: g.matrix.build ?? null,
         measured_at: g.matrix.measured_at ?? null, ...g.matrix.memory };

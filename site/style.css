@@ -297,6 +297,10 @@ tbody tr { cursor: pointer; }
 /* one-line disclosure of WHICH path a lane's canonical numbers were measured on */
 .lane-note { font-size: .78rem; margin: 0 0 .4rem; }
 .cmp-table td.lane-note { font-size: .74rem; font-weight: 400; }
+/* recovery sparkline: an inline idle→peak→recovery RSS curve under the memory lane's numbers */
+.rss-spark { margin: .5rem 0 .2rem; }
+.rss-spark svg { display: block; max-width: 100%; color: var(--accent, currentColor); }
+.rss-spark .stamp { margin-top: .15rem; }
 .drawer-lane dl { margin: 0; }
 .drawer-lane dl > div { display: flex; justify-content: space-between; gap: 1rem; padding: .16rem 0; }
 .drawer-lane dt { color: var(--fg-dim); }

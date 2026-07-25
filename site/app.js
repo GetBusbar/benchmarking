@@ -462,6 +462,8 @@ const COLUMN_SETS = {
       get: (g) => memCell(g, "idle_rss_mib", fmt1) },
     { id: "mempeak", label: "Mem peak (MiB)", desc: false, title: "Peak process RSS under large-payload load (the matrix run's one memory read)",
       get: (g) => memCell(g, "peak_rss_mib", fmt1) },
+    { id: "memrecov", label: "Recovered (MiB)", desc: false, title: "Process RSS 60 s after the large-payload load ends — does the gateway release memory?",
+      get: (g) => memCell(g, "recovered_rss_mib", fmt1) },
   ],
   // Translation: the pinned ingress->egress pair (state.xlateIn/xlateOut) chosen by the two dropdowns.
   // Every row is the identical path, so no per-row pill. When in == out the pair IS a passthrough
@@ -529,9 +531,15 @@ const LANES = [
     pathNote: (j) => j.source === "matrix"
       ? "the matrix run's one process-level RSS read (default config, sustained large-payload load)"
       : "the memory suite's RSS read (legacy result)",
+    // The recovery curve (idle→peak→recovery). Renders ONLY when rss_series exists (≥2 points); a
+    // pre-recovery bundle has no series → extra() returns "" and the drawer shows just the numbers.
+    extra: (j) => rssSparkline(j.rss_series),
     metrics: [
       { k: "idle_rss_mib", label: "Idle RSS (MiB)", best: "min", fmt: fmt1 },
       { k: "peak_rss_mib", label: "Peak RSS (MiB)", best: "min", fmt: fmt1 },
+      // Recovery: RSS 60 s after the load ends. Lower = released more of the peak (best: min). Absent on
+      // pre-recovery bundles → the drawer/compare read n/a, exactly like any other lane field it lacks.
+      { k: "recovered_rss_mib", label: "Recovered @60s (MiB)", best: "min", fmt: fmt1 },
     ],
   },
   {
@@ -1112,6 +1120,35 @@ function laneStamp(j) {
   return bits.length ? `<div class="stamp muted">${esc(bits.join(" · "))}</div>` : "";
 }
 
+/* rssSparkline: a compact inline-SVG recovery curve (idle → peak → recovery) built from a memory
+   record's rss_series [{t_s,rss_mib},…]. Returns "" when the series is absent or has < 2 points, so a
+   pre-recovery bundle (no series) draws NOTHING — never a fabricated flat line or a zero baseline. The
+   y-axis spans the series' own min→max (its own peak is the top); a dot marks the last (recovered)
+   sample. Same self-contained inline-SVG style as the matrix legend/cell swatches. */
+function rssSparkline(series) {
+  if (!Array.isArray(series) || series.length < 2) return "";
+  const pts = series
+    .filter((p) => p && typeof p.t_s === "number" && typeof p.rss_mib === "number")
+    .sort((a, b) => a.t_s - b.t_s);
+  if (pts.length < 2) return "";
+  const W = 260, H = 56, PAD = 3;
+  const ts = pts.map((p) => p.t_s), ys = pts.map((p) => p.rss_mib);
+  const t0 = ts[0], t1 = ts[ts.length - 1], tspan = (t1 - t0) || 1;
+  const ymin = Math.min(...ys), ymax = Math.max(...ys), yspan = (ymax - ymin) || 1;
+  const x = (t) => PAD + ((t - t0) / tspan) * (W - 2 * PAD);
+  const y = (v) => PAD + (1 - (v - ymin) / yspan) * (H - 2 * PAD);
+  const path = pts.map((p, i) => `${i ? "L" : "M"}${x(p.t_s).toFixed(1)},${y(p.rss_mib).toFixed(1)}`).join("");
+  const last = pts[pts.length - 1];
+  return `<div class="rss-spark"><svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" role="img" ` +
+    `aria-label="RSS recovery curve: idle to peak to recovered, ${fmt1(ymin)} to ${fmt1(ymax)} MiB over ${fmtInt(tspan)} s">` +
+    `<polyline points="${x(t0).toFixed(1)},${(H - PAD).toFixed(1)} ${x(t1).toFixed(1)},${(H - PAD).toFixed(1)}" ` +
+    `fill="none" stroke="currentColor" stroke-opacity="0.15" stroke-width="1"/>` +
+    `<path d="${path}" fill="none" stroke="currentColor" stroke-width="1.5"/>` +
+    `<circle cx="${x(last.t_s).toFixed(1)}" cy="${y(last.rss_mib).toFixed(1)}" r="2.5" fill="currentColor"/>` +
+    `</svg>` +
+    `<div class="stamp muted">peak ${fmt1(ymax)} → recovered ${fmt1(last.rss_mib)} MiB (${fmtInt(tspan)} s)</div></div>`;
+}
+
 function drawerHtml(g) {
   const langC = LANG_COLORS[g.lang] || LANG_COLORS.Other;
   // The gateway's OWN freshness stamp in the drawer head: measured_at + a stale badge when flagged,
@@ -1150,7 +1187,7 @@ function drawerHtml(g) {
       h += `<dl>` + l.metrics.filter((m) => j[m.k] != null).map((m) => {
         const cc = m.concKey && j[m.concKey] != null && j[m.k] > 0 ? ` (@ c=${fmtInt(j[m.concKey])})` : "";
         return `<div><dt>${esc(m.label)}</dt><dd>${esc(m.fmt(j[m.k]) + cc)}</dd></div>`;
-      }).join("") + `</dl>${laneStamp(j)}`;
+      }).join("") + `</dl>` + (l.extra ? l.extra(j) : "") + `${laneStamp(j)}`;
     }
     h += `</section>`;
   }
@@ -1980,7 +2017,7 @@ if (NODE) {
     newState, encodeUrl, decodeUrl, viewPath, applyFilters,
     fmtStamp, fmtAge, stampWithAge, measuredBadge,
     drawSweep, niceStep, fmtTick, COLUMN_SETS, columnsFor, PERF_VIEWS, VIEW_SORT, LANES, naText, stripRigPaths,
-    cellState, matrixCellTip, cellPerfTip, passCell, xlateCell, streamCell, memCell, hasTranslation, CATEGORIES, DEFAULT_CATEGORY, VIEWS,
+    cellState, matrixCellTip, cellPerfTip, passCell, xlateCell, streamCell, memCell, rssSparkline, hasTranslation, CATEGORIES, DEFAULT_CATEGORY, VIEWS,
     canonicalPerf, canonicalXlate, canonicalStreaming, canonicalMemory, cpuFpsCertified, sustainedCertified, perfRpsCertified, perfRpsSuppressed, xlateRpsSuppressed, gatewayResultsJson, DEFAULT_VIEW, VIEW_LABELS, rosterRows, fmtStars,
     configCorrectionUrl, BENCH_REPO,
     HOME_VIEW, homeCardsHtml,
