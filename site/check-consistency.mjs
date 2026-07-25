@@ -50,6 +50,33 @@ const SOURCE_KINDS = new Set(["matrix", "perf-fallback", "xlate-fallback", "stre
 
 function isEnvelope(x) { return x != null && typeof x === "object" && typeof x.certified === "boolean"; }
 
+// ---- C7: peak_rss_mib <= peak_rss_hwm_mib (a second physical-plausibility invariant) ------------
+// VmHWM is the KERNEL's own high-water mark, updated on every charge, so it cannot be lower than any
+// RSS the sampler ever observed for the same process tree. The shipped data violates it on two
+// gateways (one-api 165.1 > 164.7, agentgateway 45.0 > 44.7), which is physically impossible for a
+// FIXED process tree — and that is the tell. Both readers sum over the tree ENUMERATED AT READ TIME
+// (lib/harness.sh _proc_tree_field_mib): the sampled peak sums VmRSS over the tree alive DURING the
+// load, while VmHWM is summed AFTER it. A worker that exits in between is counted in the peak and
+// absent from the HWM sum, so sum(VmHWM) can legitimately come out BELOW the sampled peak on a
+// multi-process gateway. It is a real artefact of transient children, not a fabricated number — so it
+// WARNS (so the next run can attribute it) rather than hard-failing an otherwise honest publish. The
+// numbers are left exactly as measured; nothing here rewrites data.
+export function c7HwmBelowPeak(gwKey, rawMatrix) {
+  const warnings = [];
+  let checked = 0;
+  const mem = rawMatrix && rawMatrix.memory;
+  if (!mem || mem.served !== true) return { warnings, checked };
+  const peak = mem.peak_rss_mib, hwm = mem.peak_rss_hwm_mib;
+  if (typeof peak !== "number" || typeof hwm !== "number" || peak <= 0 || hwm <= 0) return { warnings, checked };
+  checked = 1;
+  if (peak > hwm)
+    warnings.push(`${gwKey}.memory: sampled peak_rss ${peak} MiB > kernel peak_rss_hwm ${hwm} MiB ` +
+      `(a ${((peak / hwm - 1) * 100).toFixed(2)}% overshoot — VmHWM cannot be below an observed RSS for a FIXED ` +
+      `process tree, so a child process counted in the sampled peak had exited before the VmHWM sum was taken; ` +
+      `a transient-worker artefact of summing the tree at two different instants, not a fabricated value)`);
+  return { warnings, checked };
+}
+
 // ---- C6 as a pure function: sustained@20ms <= max_proxy on every served cell --------------------
 // max_proxy is the UNCONSTRAINED throughput ceiling; sustained-under-SLO cannot EXCEED it. Every
 // inversion observed in shipped data has been a CROSS-PHASE measurement artefact: sustained@20ms and
@@ -361,6 +388,9 @@ export function checkConsistency(data, app, opts = {}) {
     const c6 = c6Inversions(g.key, rawMatrix(g.key));
     if (c6.cellsChecked > 0) covered("C6.cell");
     warnings.push(...c6.warnings);
+    const c7 = c7HwmBelowPeak(g.key, rawMatrix(g.key));
+    if (c7.checked > 0) covered("C7.hwm");
+    warnings.push(...c7.warnings);
     // ---- R1 independent oracle -------------------------------------------------------------------
     // AUDIT #16: coverage is claimed ONLY when a comparison ACTUALLY HAPPENED. The tag used to fire
     // before the rawPerf guard, so a bundle whose oracle compared NOTHING (raw cell missing/renamed)
@@ -489,7 +519,7 @@ export function checkConsistency(data, app, opts = {}) {
   const CHECK_BRANCHES = [
     "C1.field", "C1.certified", "C1.mock_bound", "C2.suppressed",
     "C3.stamp", "C3.lint", "C3.route", "C3.parity", "C4.cell", "C4.leak", "C6.cell", "R1.oracle",
-    "R3.selection", "C5.route", "C5.lint",
+    "R3.selection", "C7.hwm", "C5.route", "C5.lint",
   ];
   // C1.mock_bound / C2.suppressed / C4.leak are ERROR-only branches: they fire only on a violation, so
   // they are NOT required to be covered by a healthy bundle (their absence is the GOOD state). REQUIRED =
@@ -514,7 +544,7 @@ export function checkConsistency(data, app, opts = {}) {
         `(a per-gateway bypass is exactly the inert-check failure R2 exists to catch)`);
   }
   const requiredNow = publishesMatrix && !syntheticFixture
-    ? [...REQUIRED, "C6.cell", "R1.oracle", "R3.selection"] : REQUIRED;
+    ? [...REQUIRED, "C6.cell", "C7.hwm", "R1.oracle", "R3.selection"] : REQUIRED;
   const missing = requiredNow.filter((b) => !cover.has(b));
   if (missing.length)
     errors.push(`R2: coverage — required invariant branch(es) never exercised by this bundle: ${missing.join(", ")} ` +

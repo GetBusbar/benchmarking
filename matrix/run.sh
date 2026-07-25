@@ -1409,6 +1409,7 @@ cat > "$RESULTS/$GATEWAY.json" <<JSON
   "ootb_config": $([ -n "$OOTB_CONFIG" ] && printf '"%s"' "$OOTB_CONFIG" || echo null),
   "arch": "${BENCH_ARCH:-$(uname -m)}",
   "hardware": "${BENCH_HARDWARE:-$(uname -m) $(nproc 2>/dev/null || echo '?')vCPU}",
+  "rig": $(command -v rig_provenance_json >/dev/null 2>&1 && rig_provenance_json || echo null),
   "measured_at": "$MEASURED_AT"
 }
 JSON
@@ -1473,6 +1474,12 @@ snap = {
     "measured_at": m.get("measured_at"),
     "arch": m.get("arch"),
     "hardware": m.get("hardware"),
+    # RIG PROVENANCE (audit #21): WHICH measurement instrument produced these numbers. The rig binaries
+    # come from a MOVING release tag, so two runs under an identical harness can disagree purely because
+    # the mock was rebuilt between them (bcf9912 tightened request_shape_ok mid-week and changed cell
+    # verdicts board-wide). Recording the mock+ugen sha256 and the asset updated_at INSIDE the snapshot
+    # makes that detectable at a glance instead of requiring an investigation. null on older runs.
+    "rig": m.get("rig"),
     "config": {"files": files},
     "matrix": m,          # the full 6x6 grid (the sole numeric source), verbatim
     "memory": memory,     # the post-6x6 memory block (may be null until the field run)
