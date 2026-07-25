@@ -82,6 +82,22 @@ check "tensorzero    +3.8% -> pass (0.2pt headroom)" pass "$(s1 x  3.8 4 "$BASE"
 check "gomodel       +5.4% -> FAIL" fail "$(s1 x  5.4 4 "$BASE")"
 s1 x 5.4 4 "$BASE" >/dev/null; check "gomodel reason" "floor_drift" "$BQ_REASON"
 
+echo "box_qualify_test: STAGE 1 — the band is ONE-SIDED (a box cannot get faster from contention)"
+# THE INCIDENT THIS EXISTS FOR (2026-07-25, second run). The band shipped SYMMETRIC, so the gate
+# terminated boxes for BEATING their baseline: one-api read 75us against a 79us baseline (-5.06%) and
+# tensorzero 75us against 81us (-7.41%). Both were rejected and replaced, and with 7 of 13 baselines
+# sitting above that run's box population the gate was on course to burn every replacement and skip
+# gateways outright — including busbar.
+# WHY ONE-SIDED IS CORRECT, not a loosening: contention, throttling and noisy neighbours only ever ADD
+# latency. A box cannot randomly get FASTER. A floor that beats its baseline is the box showing its
+# true clean-hardware speed, and it implies the BASELINE was the noisy measurement. The absolute
+# envelope still bounds absurd values on both sides.
+check "one-api      -5.06% (faster) -> pass" pass "$(s1 x -5.06 4 "$BASE")"
+check "tensorzero   -7.41% (faster) -> pass" pass "$(s1 x -7.41 4 "$BASE")"
+check "far faster    -40%  (faster) -> pass" pass "$(s1 x -40   4 "$BASE")"
+# ...while the SLOW side keeps biting at exactly the shipped band.
+check "just over    +4.01% (slower) -> FAIL" fail "$(s1 x  4.01 4 "$BASE")"
+
 echo "box_qualify_test: STAGE 1 — why a static absolute threshold could NOT have caught it"
 # gomodel's absolute floor was 77-81us; the healthy population was 73-82us. Every one of those values
 # is INSIDE the shipped sanity envelope, so the envelope alone returns pass for the bad box too —
@@ -150,6 +166,11 @@ check "litellm-rust  +8% -> pass" pass "$(p2   8 10000)"
 check "kong         +13% -> pass" pass "$(p2  13 10000)"
 # THE ONE THE GATE EXISTS FOR — and note the margin: -86% against a -25% band.
 check "gomodel      -86% -> FAIL" fail "$(p2 -86 10000)"
+# ONE-SIDED here too, mirrored: throughput is inverted (higher is better), so only a SHORTFALL is a
+# regression. A gateway that beats its recorded peak must never cost a box relaunch.
+check "kong         +13% (faster) -> pass" pass "$(p2  13 10000)"
+check "far faster  +200% (faster) -> pass" pass "$(p2 200 10000)"
+check "just under   -25.1% -> FAIL"  fail "$(p2 -25.1 10000)"
 p2 -86 10000 >/dev/null; check "gomodel stage-2 reason" "peak_drift" "$BQ_REASON"
 check "gomodel stage-2 drift recorded" "-86.00" "$BQ_DRIFT_PCT"
 # The band is why stage 2 is NOT 4%: six of the eight healthy gateways above would be rejected.
