@@ -19,7 +19,7 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import assert from "node:assert/strict";
-import { checkConsistency } from "./check-consistency.mjs";
+import { checkConsistency, c6Inversions } from "./check-consistency.mjs";
 import * as checkMod from "./check-consistency.mjs";
 import { sealMetric, ZERO_NO_CEILING, ZERO_MEASURED_FAIL } from "./seal.mjs";
 // AUDIT #18: a HAND-BUILT fixture has no results/matrix/<key>.json oracle. The waiver is now an
@@ -848,24 +848,47 @@ test("R1 RED: a best_cell envelope that disagrees with the RAW matrix cell fails
     `R1 must flag a headline that disagrees with the raw matrix cell; got: ${JSON.stringify(e.filter((x) => x.startsWith("R1")))}`);
 });
 
-test("C6: sustained@20ms > max_proxy on a cell is FLAGGED (kong's live inversion is the seed case)", () => {
-  // The physical-plausibility invariant: sustained-under-SLO cannot exceed the unconstrained ceiling.
-  // Derived from the RAW matrix cell on disk (Design F R1 — the independent oracle), NOT the accessor.
-  // kong's shipped openai>openai cell is 14,351 sustained > 14,325 max_proxy — a cross-phase measurement
-  // inversion. C6 must FLAG it as a WARNING (visible so the field run re-measures) without hard-failing the
-  // build (sub-percent noise on two independently-swept ceilings must not block every honest publish).
-  const raw = existsSync(join(ROOT, "results", "matrix", "kong.json"))
-    ? JSON.parse(readFileSync(join(ROOT, "results", "matrix", "kong.json"), "utf8")) : null;
-  if (!raw) { console.warn("  warn - no results/matrix/kong.json on disk; skipping the C6 seed-case assertion"); return; }
+// ---- C6: the physical-plausibility invariant, proven on INJECTED data --------------------------
+// This test used to assert on kong's LIVE openai>openai cell (14,351 sustained > 14,325 max_proxy). That
+// made a check's only proof "the bug is still in the shipped data" — so when the fresh field run RESOLVED
+// kong's inversion, the invariant test failed even though the invariant was working perfectly. C6 is now
+// a pure exported function, so the RED case is injected and the check is proven independent of whichever
+// gateway happens to be inverted this week.
+const c6Matrix = (sus, max, served = true) => ({
+  upstreams: { openai: { cells: { openai: { served, perf: { rps_sustained_20ms: sus, rps_max_proxy: max } } } } },
+});
+
+test("C6 RED: an INJECTED sustained@20ms > max_proxy cell is flagged as a warning", () => {
+  const r = c6Inversions("gw", c6Matrix(14351, 14325));
+  assert.equal(r.cellsChecked, 1, "the inverted cell must have been checked");
+  assert.equal(r.warnings.length, 1, `C6 must flag an injected inversion; got: ${JSON.stringify(r.warnings)}`);
+  assert.ok(r.warnings[0].includes("gw.openai->openai") && r.warnings[0].includes("sustained@20ms")
+    && r.warnings[0].includes("max_proxy") && r.warnings[0].includes("0.18%"),
+    `the C6 warning must name the cell, both ceilings and the magnitude; got: ${r.warnings[0]}`);
+});
+
+test("C6 GREEN: a plausible cell, an unqualified ceiling and an unserved cell are NOT flagged", () => {
+  assert.equal(c6Inversions("gw", c6Matrix(14325, 14351)).warnings.length, 0, "sustained < max_proxy is plausible");
+  assert.equal(c6Inversions("gw", c6Matrix(100, 100)).warnings.length, 0, "equality is not an inversion");
+  // max_proxy 0 = "did not qualify" (no ceiling to invert), and must not be counted as a checked cell.
+  const zero = c6Inversions("gw", c6Matrix(100, 0));
+  assert.equal(zero.warnings.length, 0, "a 0 max_proxy is 'did not qualify', not an inversion");
+  assert.equal(zero.cellsChecked, 0, "a cell with no ceiling is not a checked cell");
+  // an UNSERVED cell carries no honest perf to compare.
+  assert.equal(c6Inversions("gw", c6Matrix(14351, 14325, false)).cellsChecked, 0, "unserved cells are skipped");
+  // null-safe on absent/edge inputs (older snapshots, a not-served matrix).
+  for (const bad of [null, undefined, {}, { upstreams: null }, { upstreams: {} }])
+    assert.equal(c6Inversions("gw", bad).cellsChecked, 0, `C6 must be null-safe on ${JSON.stringify(bad)}`);
+});
+
+test("C6: an inversion is a WARNING on the live bundle, never a hard failure", () => {
   const { errors, warnings } = checkConsistency(data, app);
-  // it never HARD-FAILS on an inversion (they are cross-phase noise, shipped as measured)
-  assert.ok(!errors.some((x) => x.startsWith("C6")), `C6 must not hard-fail on a cross-phase inversion; got: ${errors.filter((x) => x.startsWith("C6"))}`);
-  // and the known kong inversion surfaces as a warning for re-measurement
-  assert.ok(warnings.some((w) => w.includes("kong") && w.includes("sustained@20ms") && w.includes("max_proxy")),
-    `C6 must flag kong's sustained>max_proxy inversion as a warning; got: ${JSON.stringify(warnings.filter((w) => w.includes("kong")))}`);
-  // RED-before shape: an INJECTED cross-phase inversion on a synthetic raw cell is flagged the same way —
-  // proving the check is live, not merely observing kong. (A synthetic bundle with no on-disk raw matrix
-  // exercises C6 through the real kong.json above; the assertion is the observable warning.)
+  assert.ok(!errors.some((x) => x.startsWith("C6")),
+    `C6 must never hard-fail on a cross-phase inversion; got: ${errors.filter((x) => x.startsWith("C6"))}`);
+  // whatever inversions this run does carry must be well-formed and name a real gateway.
+  const keys = new Set(data.gateways.map((g) => g.key));
+  for (const w of warnings.filter((x) => x.includes("sustained@20ms")))
+    assert.ok(keys.has(w.split(".")[0]), `a C6 warning must name a gateway in the bundle; got: ${w}`);
 });
 
 // ---- matrix is the single source: streaming + memory projection + download ----------------------
@@ -1942,6 +1965,49 @@ test("#16/#19 RED: R2's own failure path fires, and R1 coverage is claimed only 
     `#18: an unverifiable matrix-sourced publish must be an ERROR, not an exemption; got ${JSON.stringify(res.errors)}`);
   // The REAL bundle does compare, and does claim the coverage.
   assert.ok(checkConsistency(data, app).cover.has("R1.oracle"));
+});
+
+// ---- #21 CLASS: the oracle cannot go inert for ANY gateway ---------------------------------------
+// THE BUG THIS PINS. The oracle loop was gated on `!g.matrix_from_snapshot` (a snapshot-sourced matrix
+// legitimately differs from the trailing per-suite file, so comparing them would false-fail). Once the
+// field run made EVERY row snapshot-sourced, that guard silently disabled the entire oracle for 12 of 13
+// gateways — and R2's coverage gate was satisfied by the ONE legacy row that still had a per-suite file,
+// so a wholly unoracled board reported "R1.oracle covered" and shipped green. Coverage is now
+// reconciled PER GATEWAY against the set that publishes matrix-sourced numbers.
+test("#21 CLASS: EVERY matrix-publishing gateway is independently oracled (no per-gateway bypass)", () => {
+  const res = checkConsistency(data, app);
+  assert.ok(!res.errors.some((e) => e.startsWith("R2: coverage")),
+    `no gateway may be left unoracled; got ${JSON.stringify(res.errors.filter((e) => e.startsWith("R2")))}`);
+  // The bypass was specific to snapshot-sourced rows, so prove a snapshot-sourced row is really compared:
+  // corrupt one and require R1 to catch it. (This is the exact case the old guard waved through.)
+  const d = clone();
+  const g = d.gateways.find((x) => x.matrix_from_snapshot === true
+    && x.best_cell && x.best_cell.source && x.best_cell.source.kind === "matrix");
+  assert.ok(g, "the bundle must contain a snapshot-sourced matrix gateway for this class test to mean anything");
+  g.best_cell.rps_max_proxy = { value: (app.mval(g.best_cell.rps_max_proxy) || 0) + 9999, certified: true, suppressed: false };
+  const e = checkConsistency(d, app).errors;
+  assert.ok(e.some((x) => x.startsWith("R1:") && x.includes(g.key) && x.includes("rps_max_proxy")),
+    `a corrupted SNAPSHOT-sourced envelope must be caught by the oracle; got: ${JSON.stringify(e.filter((x) => x.startsWith("R1")))}`);
+});
+
+// ---- #21 CLASS: R3 — the oracle must verify the SAME run the board published ----------------------
+// An oracle that reads a different artifact than gen-data projected from is worse than no oracle: it
+// reports green while verifying the wrong file. R3 reconciles the two selections by measured_at.
+test("#21 CLASS: R3 catches the board rendering a different run than the oracle resolved", () => {
+  assert.ok(checkConsistency(data, app).cover.has("R3.selection"),
+    "R3 must actually run on the live bundle");
+  const d = clone();
+  const g = d.gateways.find((x) => x.matrix && x.matrix.measured_at);
+  g.matrix.measured_at = "2020-01-01T00:00:00Z";   // the board claims a run the disk does not have
+  const e = checkConsistency(d, app).errors;
+  assert.ok(e.some((x) => x.startsWith("R3:") && x.includes(g.key) && x.includes("stale/mis-selected")),
+    `R3 must flag a published run that no on-disk artifact backs; got: ${JSON.stringify(e.filter((x) => x.startsWith("R3")))}`);
+  // ...and the provenance claim itself must match what is on disk.
+  const d2 = clone();
+  const g2 = d2.gateways.find((x) => x.matrix_from_snapshot === true);
+  delete g2.matrix_from_snapshot;
+  assert.ok(checkConsistency(d2, app).errors.some((x) => x.startsWith("R3:") && x.includes("provenance disagreement")),
+    "R3 must flag a bundle whose matrix_from_snapshot claim disagrees with the disk");
 });
 
 test("#17: the independent oracle covers EVERY matrix cell, translation, streaming and memory — not 2 fields", () => {
