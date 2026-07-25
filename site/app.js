@@ -2028,7 +2028,33 @@ function renderStatic() {
   if (state.data.hardware) bits.push(`Ran on: ${state.data.hardware}`);
   if (state.data.latest_measured_at) bits.push(`Latest measurement: ${stampWithAge(state.data.latest_measured_at)}`);
   bits.push(`Site data generated: ${state.data.generated_at ? stampWithAge(state.data.generated_at) : "unknown"}`);
+  const rig = rigStamp();
+  if (rig) bits.push(rig);
   hw.textContent = bits.join(" · ");
+}
+
+/* rigStamp(): WHICH measurement instrument produced the board's numbers (audit #21).
+   The mock + loadgen come from a MOVING GitHub release tag, so an identical harness can produce
+   different cell VERDICTS across runs purely because the instrument was rebuilt in between — which is
+   exactly what happened the week of this run (the mock's request_shape_ok was tightened, the assets were
+   rebuilt mid-week, and served-cell counts fell board-wide for reasons unrelated to any gateway). Since
+   nothing recorded it, establishing that took a long investigation. Each snapshot now carries the
+   mock/ugen sha256 that produced it; this surfaces the short digest so an instrument change is legible.
+   Returns "" when no gateway records one (every pre-#21 snapshot) — never a fabricated identity, and
+   never the word "unknown" dressed up as a version. When rows DISAGREE the count is shown, because a
+   board built from two different instruments is exactly the condition worth seeing. */
+function rigStamp() {
+  const digests = new Map();   // short digest -> how many gateways used it
+  for (const g of (state.data.gateways || [])) {
+    const sha = g.rig && g.rig.mock && g.rig.mock.sha256;
+    if (typeof sha !== "string" || sha.length < 12) continue;
+    const short = sha.slice(0, 12);
+    digests.set(short, (digests.get(short) || 0) + 1);
+  }
+  if (!digests.size) return "";
+  if (digests.size === 1) return `Rig (mock): ${[...digests.keys()][0]}`;
+  return `Rig (mock): ${digests.size} DIFFERENT builds across rows — ` +
+    [...digests.entries()].map(([d, n]) => `${d} (${n})`).join(", ");
 }
 
 /* ---- gateways overview: the neutral roster ----------------------------------
@@ -2446,6 +2472,8 @@ if (NODE) {
     canonicalPerf, canonicalXlate, canonicalStreaming, canonicalMemory, metric, mval, isEnvelope, caption, SWEEP_CAPTION, gatewayResultsJson, DEFAULT_VIEW, VIEW_LABELS, rosterRows, fmtStars,
     configCorrectionUrl, BENCH_REPO, fmtInt, fmtAdded,
     HOME_VIEW, homeCardsHtml,
+    // audit #21: the rig-provenance footer stamp + the live state it reads, so the class test can drive it.
+    rigStamp, state,
   };
 } else {
   boot();

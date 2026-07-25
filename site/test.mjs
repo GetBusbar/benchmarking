@@ -19,7 +19,7 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import assert from "node:assert/strict";
-import { checkConsistency, c6Inversions } from "./check-consistency.mjs";
+import { checkConsistency, c6Inversions, c7HwmBelowPeak } from "./check-consistency.mjs";
 import * as checkMod from "./check-consistency.mjs";
 import { sealMetric, ZERO_NO_CEILING, ZERO_MEASURED_FAIL } from "./seal.mjs";
 // AUDIT #18: a HAND-BUILT fixture has no results/matrix/<key>.json oracle. The waiver is now an
@@ -879,6 +879,42 @@ test("C6 GREEN: a plausible cell, an unqualified ceiling and an unserved cell ar
   // null-safe on absent/edge inputs (older snapshots, a not-served matrix).
   for (const bad of [null, undefined, {}, { upstreams: null }, { upstreams: {} }])
     assert.equal(c6Inversions("gw", bad).cellsChecked, 0, `C6 must be null-safe on ${JSON.stringify(bad)}`);
+});
+
+// ---- C7: the sampled peak can never exceed the kernel's own high-water mark ----------------------
+// Found in this field run's shipped data: one-api 165.1 > 164.7 and agentgateway 45.0 > 44.7. VmHWM is
+// maintained by the kernel on every charge, so for a FIXED process tree it cannot sit below any RSS the
+// sampler observed. Both readers sum over the tree ENUMERATED AT READ TIME, and the two reads happen at
+// different instants — so a worker that exits between the load and the VmHWM read is counted in the
+// sampled peak and missing from the HWM sum. A real transient-child artefact on multi-process gateways,
+// not a fabricated number: it WARNS so the next run can attribute it, and no measured value is rewritten.
+const c7Mem = (peak, hwm, served = true) => ({ memory: { served, peak_rss_mib: peak, peak_rss_hwm_mib: hwm } });
+
+test("C7 RED: a sampled peak above the kernel HWM is flagged as a warning", () => {
+  const r = c7HwmBelowPeak("gw", c7Mem(165.1, 164.7));
+  assert.equal(r.checked, 1);
+  assert.equal(r.warnings.length, 1, `C7 must flag peak > hwm; got ${JSON.stringify(r.warnings)}`);
+  assert.ok(r.warnings[0].includes("gw.memory") && r.warnings[0].includes("0.24%")
+    && r.warnings[0].includes("transient-worker artefact"),
+    `the C7 warning must name the gateway, the overshoot and the mechanism; got: ${r.warnings[0]}`);
+});
+
+test("C7 GREEN: a plausible pair, equality, an unserved window and nulls are NOT flagged", () => {
+  assert.equal(c7HwmBelowPeak("gw", c7Mem(208.3, 212.8)).warnings.length, 0, "hwm above peak is correct");
+  assert.equal(c7HwmBelowPeak("gw", c7Mem(263.0, 263.0)).warnings.length, 0, "equality is not an overshoot");
+  assert.equal(c7HwmBelowPeak("gw", c7Mem(45, 44.7, false)).checked, 0, "an unserved window is not checked");
+  // NULL-SAFE: an honest-null memory window (a gateway that served no cell) must never be flagged, and
+  // must never be counted as checked — the honest-null path is correct data, not a violation.
+  for (const bad of [null, undefined, {}, { memory: null }, c7Mem(null, null), c7Mem(45, null), c7Mem(null, 44.7)])
+    assert.equal(c7HwmBelowPeak("gw", bad).checked, 0, `C7 must be null-safe on ${JSON.stringify(bad)}`);
+});
+
+test("C7: the live bundle's hwm-below-peak rows warn but never hard-fail", () => {
+  const { errors, warnings, cover } = checkConsistency(data, app);
+  assert.ok(cover.has("C7.hwm"), "C7 must actually run on the live bundle");
+  assert.ok(!errors.some((x) => x.includes("peak_rss_hwm")), "C7 must never hard-fail an honest publish");
+  for (const w of warnings.filter((x) => x.includes("peak_rss_hwm")))
+    assert.match(w, /sampled peak_rss [\d.]+ MiB > kernel peak_rss_hwm [\d.]+ MiB/);
 });
 
 test("C6: an inversion is a WARNING on the live bundle, never a hard failure", () => {
@@ -1784,6 +1820,81 @@ test("#25 CLASS: the snapshot ingest path — newest wins, RECENCY beats existen
   }
 });
 
+// ---- #21 CLASS: RIG PROVENANCE — the measurement instrument must describe itself ------------------
+// The mock + loadgen are fetched from a MOVING GitHub release tag ("rig"), rebuilt by CI on every
+// mock/ or loadgen/ change. So two runs of a byte-identical harness can produce DIFFERENT cell verdicts
+// purely because the instrument changed underneath them — which is exactly what happened here: bcf9912
+// tightened the mock's request_shape_ok so bedrock/cohere began rejecting a raw OpenAI body forwarded
+// verbatim, the release assets were rebuilt 2026-07-24T19:03Z, and served-cell counts fell board-wide
+// for a reason that had nothing to do with any gateway. Nothing in either run's output recorded which
+// binaries produced it, so establishing that took a long investigation. The snapshot now carries a
+// mock+ugen sha256 (the authoritative identity) plus the release asset updated_at, and gen-data
+// projects it, so a future cross-run comparison can tell at a glance whether the instrument moved.
+test("#21 CLASS: rig provenance travels from the snapshot into the bundle, and is NULL-SAFE without it", () => {
+  const iso = (hAgo) => new Date(Date.now() - hAgo * 3600000).toISOString();
+  const RIG = {
+    arch: "arm64", release_url: "https://example.invalid/releases/download/rig",
+    mock: { origin: "release", sha256: "a".repeat(64), asset_updated_at: "2026-07-24T19:03:00Z" },
+    ugen: { origin: "cached", sha256: "b".repeat(64), asset_updated_at: "2026-07-24T19:03:00Z" },
+  };
+  const mkMatrix = (at, rig) => ({
+    gateway: "sgw", build: "snap", matrix_version: 2, served: true, measured_at: at, rig,
+    upstreams: { openai: { configurable: true, served: true, cells: { openai: { served: true, perf: {
+      added_latency_p50_us: 1, added_latency_p99_us: 2, rps_sustained_20ms: 100, rps_sustained_20ms_mock_bound: false,
+      rps_max_proxy: 101, rps_max_proxy_mock_bound: false } } } } },
+  });
+  // (a) present: the block reaches the bundle intact, so the instrument is recoverable from the board.
+  {
+    const root = buildStreamMemRepo();
+    writeSnapshot(root, "sgw", { measuredAt: iso(0.5), matrix: mkMatrix(iso(0.5), RIG) });
+    const g = genInto(root).gateways.find((x) => x.key === "sgw");
+    assert.deepEqual(g.rig, RIG, "the rig block must travel verbatim into the bundle");
+    assert.equal(g.rig.mock.sha256.length, 64, "the mock digest is the authoritative instrument identity");
+  }
+  // (b) ABSENT (every snapshot written before this existed): null, never a fabricated digest and never
+  //     a crash. This is the null-safety requirement for older snapshots.
+  {
+    const root = buildStreamMemRepo();
+    writeSnapshot(root, "sgw", { measuredAt: iso(0.5), matrix: mkMatrix(iso(0.5), undefined) });
+    const g = genInto(root).gateways.find((x) => x.key === "sgw");
+    assert.equal(g.rig, null, "a pre-rig snapshot must project null, not a placeholder");
+  }
+  // (c) a PARTIAL block (no network for the asset stamp, or a locally-built binary) still travels: an
+  //     unknown field is null, and the sha256 alone is enough to prove the instrument changed.
+  {
+    const root = buildStreamMemRepo();
+    const partial = { arch: "arm64", release_url: null,
+      mock: { origin: "source-build", sha256: "c".repeat(64), asset_updated_at: null },
+      ugen: { origin: "source-build", sha256: "d".repeat(64), asset_updated_at: null } };
+    writeSnapshot(root, "sgw", { measuredAt: iso(0.5), matrix: mkMatrix(iso(0.5), partial) });
+    const g = genInto(root).gateways.find((x) => x.key === "sgw");
+    assert.equal(g.rig.mock.asset_updated_at, null, "an unfetchable asset stamp is null, never invented");
+    assert.equal(g.rig.mock.origin, "source-build", "the ORIGIN must disclose a non-release binary");
+  }
+  // (d) the LIVE bundle: every gateway carries the key (null until the next field run writes one), so
+  //     the board never has to guess whether the field is missing or the value is.
+  for (const g of data.gateways)
+    assert.ok("rig" in g, `${g.key} must carry a rig key (null-safe) so provenance is explicit`);
+});
+
+test("#21 CLASS: the footer rig stamp shows one digest, flags DISAGREEING rows, and stays silent without one", () => {
+  const withRig = (shas) => ({ gateways: shas.map((sha, i) => ({ key: `g${i}`, rig: sha ? { mock: { sha256: sha } } : null })) });
+  const run = (d) => { const prev = app.state.data; app.state.data = d; try { return app.rigStamp(); } finally { app.state.data = prev; } };
+  // no gateway records an instrument -> NOTHING is claimed (never "unknown" dressed up as a version).
+  assert.equal(run(withRig([null, null])), "", "an unrecorded instrument must render nothing at all");
+  assert.equal(run({ gateways: [] }), "");
+  // a short/garbage digest is not an identity and must not be shown as one.
+  assert.equal(run(withRig(["abc"])), "", "a truncated digest is not an instrument identity");
+  // one instrument across the board -> the short digest.
+  assert.equal(run(withRig(["a".repeat(64), "a".repeat(64)])), `Rig (mock): ${"a".repeat(12)}`);
+  // THE CASE THAT MATTERS: rows measured by DIFFERENT instruments must say so loudly, because that is
+  // precisely the condition (a mid-week rig rebuild) that made this run's verdicts incomparable.
+  const mixed = run(withRig(["a".repeat(64), "b".repeat(64), "b".repeat(64)]));
+  assert.match(mixed, /2 DIFFERENT builds across rows/);
+  assert.ok(mixed.includes("aaaaaaaaaaaa (1)") && mixed.includes("bbbbbbbbbbbb (2)"),
+    `the mixed stamp must attribute each instrument to its row count; got: ${mixed}`);
+});
+
 // ---- #26: conc_at / concAt() — the Performance-tab payload of task #65 — was never exercised -------
 test("#26 CLASS: conc_at travels inside the sealed envelope and drives the '@ N conc' render", () => {
   // (a) the accessor: conc_at WINS over the legacy *_concurrency; either alone works; neither -> null.
@@ -2067,7 +2178,11 @@ test("#21: C6 fires on an INJECTED inversion — the assertion cannot silently p
   // present on disk — an inversion is a WARNING (never a hard fail, or every honest run stops publishing).
   const { errors, warnings } = checkConsistency(data, app);
   assert.ok(!errors.some((x) => x.startsWith("C6")));
-  assert.ok(warnings.length > 0 && warnings.every((w) => /sustained@20ms .* > max_proxy /.test(w)),
+  // NOTE: the warning channel is now SHARED (C6 inversions + C7 hwm-below-peak), so this asserts on the
+  // C6-shaped subset rather than on every warning — an unrelated invariant adding a warning must not
+  // false-fail C6's own assertion.
+  const c6w = warnings.filter((w) => w.includes("sustained@20ms"));
+  assert.ok(c6w.every((w) => /sustained@20ms .* > max_proxy /.test(w)),
     "every C6 warning must name the inversion it found");
 });
 

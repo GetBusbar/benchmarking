@@ -85,7 +85,7 @@ function newestSnapshot(key) {
     const snap = readJson(join(SNAP_DIR, f));
     if (!snap) continue;
     const ms = snap.measured_at ? Date.parse(snap.measured_at) : 0;
-    if (ms > bestMs) { bestMs = ms; best = snap; }
+    if (ms > bestMs) { bestMs = ms; best = snap; best.__file = f; }
   }
   return best;
 }
@@ -138,6 +138,7 @@ const gateways = gatewayKeys.map((key) => {
     if (snap.matrix && (!g.matrix || snapMs >= diskMs)) {
       g.matrix = snap.matrix;                                      // matrix from the snapshot (sole source)
       g.matrix_from_snapshot = true;
+      g.snapshot_file = snap.__file ?? null;                       // which archived run the board renders
     }
     const files = snap.config && snap.config.files;
     if (files && typeof files === "object") {
@@ -281,6 +282,16 @@ const gateways = gatewayKeys.map((key) => {
     const at = rec && rec.source && rec.source.measured_at;
     if (at) g.lane_measured_at[lane] = at;
   }
+  // ---- RIG PROVENANCE (audit #21): WHICH measurement instrument produced this row ------------------
+  // The mock + loadgen come from a MOVING GitHub release tag, so an identical harness can produce
+  // DIFFERENT cell verdicts across runs purely because the instrument was rebuilt between them — which
+  // is exactly what happened this week (bcf9912 tightened the mock's request_shape_ok; the assets were
+  // rebuilt mid-week; served-cell counts dropped board-wide for a reason that had nothing to do with the
+  // gateways). Nothing in either run's output recorded it, so establishing that took an investigation.
+  // Surfacing it here makes an instrument change legible at a glance on any future cross-run comparison.
+  // NULL-SAFE: every snapshot written before this existed simply has no rig block and renders "not
+  // recorded" — never a fabricated digest.
+  g.rig = (g.matrix && g.matrix.rig) || null;
   return g;
 });
 
