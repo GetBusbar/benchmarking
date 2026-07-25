@@ -183,7 +183,7 @@ MATRIX_STREAMCPU_DUR="${MATRIX_STREAMCPU_DUR:-16}"
 MATRIX_STREAMCPU_FPS_BOUNDS="${MATRIX_STREAMCPU_FPS_BOUNDS:-8 512}"  # [lo,hi] for the cpu-fps peak search
 
 # ── memory: ONE OWN-PROCESS WINDOW PER SERVED CELL, inside the 6x6 loop ────────────────────────────
-# FINAL PROTOCOL (DESIGN-per-cell-measurement.md, agreed 2026-07-25). Memory is measured for EVERY cell
+# FINAL PROTOCOL (agreed 2026-07-25). Memory is measured for EVERY cell
 # the gateway serves, each in its OWN cold-started process, separate from that cell's perf window:
 #
 #     cold start -> MEM_IDLE_S idle sample -> fixed load until the RSS PLATEAUS (cap MEM_PLATEAU_CAP_S)
@@ -256,10 +256,10 @@ MATRIX_MEM_CONC="${MATRIX_MEM_CONC:-${MEM_CONC:-64}}"          # concurrency of 
 MATRIX_MEM_PAYLOAD="${MATRIX_MEM_PAYLOAD:-${MEM_PSIZE:-4096}}" # per-request payload bytes (injected into the body)
 # NO LOAD DURATION CONSTANT. The memory load runs until the RSS is STEADY, not for a fixed time. A
 # fixed duration decides the answer for any gateway still climbing when it expires: the number then
-# describes when we stopped looking rather than the gateway. See DESIGN-per-cell-measurement.md.
+# describes when we stopped looking rather than the gateway.
 # 60, NOT 30. This shipped as 30 in 2eb3050 - a bare -60/+30 hunk inside an otherwise-unchanged comment
-# block, unmentioned in the commit body and recorded nowhere else - while DESIGN-per-cell-measurement.md
-# (agreed with Matthew) says 60 and "30 samples per window", and lib/plateau.sh's calibration argument
+# block, unmentioned in the commit body and recorded nowhere else - while the agreed protocol
+# says 60 and "30 samples per window", and lib/plateau.sh's calibration argument
 # quotes the slope a 60s window admits. The window sets the certification bar in BOTH gates: for a linear
 # slope s, drift% = s*(w/2)/mean*100 < 1 and spread% = s*w/mean*100 < 2 give the SAME bound, so halving
 # the window doubles the leak rate that passes as steady - on a 120 MiB base, 2.4 MiB/min at 60s against
