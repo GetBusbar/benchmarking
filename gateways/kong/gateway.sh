@@ -7,13 +7,37 @@
 # DB-less declarative config, generated against the runner's mock port. KONG_IMAGE is pinned in
 # gateways/versions.env.
 #
-# ── OOTB posture (one-config standard) ────────────────────────────────────────────────────────────
-# This is the config a real user deploys, used unchanged for EVERY lane. Kong's ai-proxy binds ONE
-# upstream provider per route (multi-provider fan-out is a DIFFERENT plugin, ai-proxy-advanced), so —
-# exactly like TensorZero, whose provider block is likewise single-upstream-per-config — the canonical
-# OpenAI provider is what perf/latency/throughput/memory run on, and the matrix re-renders the SAME
-# real-world config shape per egress column (only the permitted provider + base_url swap; all → mock).
-# Every provider ai-proxy 3.8 supports and this suite probes is covered by GW_MATRIX_EGRESS below.
+# ── ONE STATIC CONFIG (the standard) ──────────────────────────────────────────────────────────────
+# ONE config, rendered IDENTICALLY for every lane and every egress column, published verbatim as the
+# artifact: install this kong.yml on that box with that image and you reproduce the board. The config
+# declares ALL FOUR upstream providers at once; the matrix changes only WHAT THE CLIENT ASKS FOR (one
+# request header), never the config bytes.
+#
+# HOW ONE CONFIG SERVES FOUR PROVIDERS (Kong 3.8.0 source, verified locally — see the run log below):
+#   * ai-proxy binds ONE provider per PLUGIN INSTANCE (`local ai_driver = require("kong.llm.drivers."
+#     .. conf.model.provider)`, kong/llm/proxy/handler.lua:63/198/246/428; model.provider is required,
+#     kong/llm/schemas/init.lua:191-195) — but a declarative config may hold ARBITRARILY MANY ai-proxy
+#     instances: plugin uniqueness is the tuple (name, route, service, consumer)
+#     (kong/db/schema/entities/plugins.lua:8 `cache_key = { "name", "route", "service", "consumer" }`),
+#     so one instance per ROUTE is legal. There is no singleton constraint in ai-proxy/schema.lua.
+#   * Routes match on a CLIENT REQUEST HEADER: `headers` is a first-class route field
+#     (kong/db/schema/entities/routes.lua:190-199 -> typedefs.headers, typedefs.lua:619-629, a
+#     map<header-name, string[]>), compiled to `any(lower(http.headers.x_llm_provider)) == "..."`
+#     (kong/router/transform.lua:420-446) under the default traditional_compatible flavor
+#     (kong.conf.default:1710). Multiple values on one header OR; multiple headers AND; matching is
+#     case-insensitive.
+#   * PRIORITY makes the header-less route the natural fallback: get_priority()
+#     (kong/router/transform.lua:558-668) packs `match_weight` into the TOP 3 bits (`lshift_uint64(
+#     match_weight, 61)`) and increments it once per populated matcher category — so paths+headers
+#     (weight 2) STRICTLY outranks paths-only (weight 1). Docs: developer.konghq.com/gateway/
+#     entities/route/ ("a Route that specifies both hosts and headers will have a higher priority
+#     than one that only specifies hosts").
+#   So: four routes on the SAME uniform /v1/chat/completions path — three selected by
+#   `x-llm-provider: anthropic|gemini|bedrock`, one header-less fallback = openai. NOT ai-proxy-advanced:
+#   that plugin does not exist in OSS at tag 3.8.0 (kong/plugins/ai-proxy-advanced/ is 404 on the OSS
+#   repo and absent from constants.lua BUNDLED_PLUGINS; developer.konghq.com/plugins/ai-proxy-advanced/
+#   is tier: ai_gateway_enterprise) — this is plain bundled ai-proxy only, in the kong:3.8 OSS image.
+#
 # Permitted deviations only: provider upstream_url → mock, dummy auth/AWS signing (the mock ignores
 # it), the per-provider REQUIRED fields (anthropic_version, bedrock region+creds), and two disclosed
 # run-mechanics — KONG_DATABASE=off (DB-less: no external Postgres dependency) and KONG_ANONYMOUS_
@@ -38,8 +62,16 @@ GW_CLASS="API gateway"   # the project's OWN self-description (README: 'cloud-na
 GW_REPO=https://github.com/Kong/kong   # linked from the gateway name in the report table
 GW_PORT=8080
 GW_PATH=/v1/chat/completions
-GW_MODEL=gpt-4o-mini
+# KONG_MODEL is a MANIFEST CONSTANT, never a per-column value: it is the one model name every route in
+# the single config is bound to, and the one name the client sends in every lane. _kong_write_config
+# reads THIS (not GW_MODEL) so the rendered bytes cannot depend on whatever a column left in GW_MODEL —
+# the column-independence of the render is grep-provable: the render body contains no $GW_MODEL.
+KONG_MODEL=gpt-4o-mini
+GW_MODEL="$KONG_MODEL"
 GW_AUTH=dummy
+# The client-facing egress SELECTOR header. Unset by default: a header-less request falls through to
+# the openai route (see the priority note above), which is exactly the OOTB client experience.
+GW_HEADERS=()
 
 KONG_IMAGE="${KONG_IMAGE:-kong:3.8}"
 gw_version() {
@@ -52,14 +84,21 @@ gw_diag() {
 }
 
 gw_build() {
-  _kong_write_config openai "http://127.0.0.1:$MOCK_PORT/v1/chat/completions"
+  _kong_write_config
   sudo docker pull "${KONG_IMAGE:-kong:3.8}" >/dev/null 2>&1 || true
 }
 
-# _kong_write_config <provider> <upstream_url>: emit the DB-less declarative config. Kong 3.8
-# ai-proxy always accepts the OpenAI-canonical ingress on /v1/chat/completions (route_type
-# llm/v1/chat) and TRANSFORMS it into the provider's native upstream shape; model.options.upstream_url
-# overrides the full egress URL so we point it at the mock's per-dialect endpoint.
+# _kong_write_config: emit THE DB-less declarative config. NO ARGUMENTS — there is one config and the
+# render is column-independent by construction: its only inputs are $MOCK_PORT (the rig's mock port,
+# constant for a whole run) and the manifest constant $KONG_MODEL. Every egress column loads these
+# same bytes; the column changes only the client's `x-llm-provider` header (gw_matrix_egress).
+#
+# Kong 3.8 ai-proxy always accepts the OpenAI-canonical ingress on /v1/chat/completions (route_type
+# llm/v1/chat) and TRANSFORMS it into the configured provider's native upstream shape;
+# model.options.upstream_url REPLACES the whole egress URL — scheme, host, port AND path
+# (kong/llm/drivers/anthropic.lua:446-464: parse(upstream_url) -> set_path/set_scheme/set_target) —
+# so each route points at the mock's own per-dialect endpoint. The parent service `url` is a
+# placeholder for exactly that reason (the plugin calls kong.service.set_target()).
 #
 # Per-provider REQUIRED config (kong/llm/schemas/init.lua @3.8.0 - omitting these was OUR bug that
 # published boot failures as Kong reds):
@@ -70,52 +109,99 @@ gw_build() {
 #               auth.aws_access_key_id/aws_secret_access_key and no ambient AWS credentials the
 #               signer fails ("failed to sign AWS request") -> HTTP 500. Dummy keys +
 #               model.options.bedrock.aws_region satisfy the signer; the mock ignores the signature.
-#   cohere    - a first-class ai-proxy 3.8 provider (schema enum includes cohere). Kong 3.8 emits the
-#               Cohere v1 /v1/chat shape; upstream_url override points it at the mock. (The matrix's
-#               cohere egress probes the v2 dialect, so that cell stays grey — see GW_MATRIX_CAP —
-#               but the provider is genuinely supported and wired for completeness.)
-# All fixed configs verified locally against kong:3.8 + the recording mock.
+#   gemini    - the default gemini/bedrock path templates EMBED the model name
+#               (kong/llm/drivers/shared.lua:141 `/v1beta/models/%s:%s`, :153 `/model/%s/%s`), so the
+#               upstream_url override spells that model out; it is $KONG_MODEL on every route, the
+#               same name the client sends, so the URL and the request agree.
+# model.name is set on every route: with it set, ai-proxy 400s a request whose body model differs
+# ("cannot use own model - must be: ...", kong/llm/proxy/handler.lua:367-386). All four routes carry
+# the SAME $KONG_MODEL, so one unchanging client body works on every column.
+# cohere is NOT declared: Kong 3.8's cohere driver emits the Cohere *v1* /v1/chat shape, not the v2
+# dialect this suite probes, so that egress column is a cited grey (GW_MATRIX_CAP) rather than a route.
 _kong_write_config() {
-  local prov="$1" url="$2" auth extra
-  case "$prov" in
-    bedrock)
-      auth='auth:
-            aws_access_key_id: "AKIAMOCKACCESSKEY"
-            aws_secret_access_key: "mock-secret-access-key"'
-      extra='
-              bedrock:
-                aws_region: "us-east-1"';;
-    anthropic)
-      auth='auth:
-            header_name: Authorization
-            header_value: "Bearer dummy"'
-      extra='
-              anthropic_version: "2023-06-01"';;
-    *)
-      auth='auth:
-            header_name: Authorization
-            header_value: "Bearer dummy"'
-      extra='';;
-  esac
+  local url="http://127.0.0.1:$MOCK_PORT"
   cat > "$GW_DIR/kong.gen.yml" <<YAML
 _format_version: "3.0"
+# ONE static config, four upstream providers. The client picks the upstream with a request header on
+# the SAME uniform OpenAI path: \`x-llm-provider: anthropic|gemini|bedrock\`; no header = openai.
+# Route priority puts every header-matched route above the header-less openai fallback
+# (kong/router/transform.lua get_priority: match_weight occupies the top 3 bits).
 services:
   - name: llm
+    # Placeholder: ai-proxy overrides host/port/scheme/path per plugin instance via
+    # kong.service.set_target() + set_path() from model.options.upstream_url.
     url: http://127.0.0.1:1
     routes:
+      - name: chat-anthropic
+        paths: ["/v1/chat/completions"]
+        headers:
+          x-llm-provider: ["anthropic"]
+        strip_path: false
+        plugins:
+          - name: ai-proxy
+            config:
+              route_type: llm/v1/chat
+              auth:
+                header_name: Authorization
+                header_value: "Bearer dummy"
+              model:
+                provider: anthropic
+                name: $KONG_MODEL
+                options:
+                  anthropic_version: "2023-06-01"
+                  upstream_url: "$url/v1/messages"
+      - name: chat-gemini
+        paths: ["/v1/chat/completions"]
+        headers:
+          x-llm-provider: ["gemini"]
+        strip_path: false
+        plugins:
+          - name: ai-proxy
+            config:
+              route_type: llm/v1/chat
+              auth:
+                header_name: Authorization
+                header_value: "Bearer dummy"
+              model:
+                provider: gemini
+                name: $KONG_MODEL
+                options:
+                  upstream_url: "$url/v1beta/models/${KONG_MODEL}:generateContent"
+      - name: chat-bedrock
+        paths: ["/v1/chat/completions"]
+        headers:
+          x-llm-provider: ["bedrock"]
+        strip_path: false
+        plugins:
+          - name: ai-proxy
+            config:
+              route_type: llm/v1/chat
+              auth:
+                aws_access_key_id: "AKIAMOCKACCESSKEY"
+                aws_secret_access_key: "mock-secret-access-key"
+              model:
+                provider: bedrock
+                name: $KONG_MODEL
+                options:
+                  bedrock:
+                    aws_region: "us-east-1"
+                  upstream_url: "$url/model/$KONG_MODEL/converse"
+      # Header-less fallback: the OOTB OpenAI client experience (lowest route priority).
       - name: chat
         paths: ["/v1/chat/completions"]
         strip_path: false
-    plugins:
-      - name: ai-proxy
-        config:
-          route_type: llm/v1/chat
-          $auth
-          model:
-            provider: $prov
-            name: $GW_MODEL
-            options:$extra
-              upstream_url: "$url"
+        plugins:
+          - name: ai-proxy
+            config:
+              route_type: llm/v1/chat
+              auth:
+                header_name: Authorization
+                header_value: "Bearer dummy"
+              model:
+                provider: openai
+                name: $KONG_MODEL
+                options:
+                  upstream_url: "$url/v1/chat/completions"
 YAML
 }
 
@@ -151,16 +237,19 @@ GW_MATRIX_EGRESS="openai anthropic gemini bedrock"
 # matched" was Kong's correct answer, not a failed translation.
 GW_XLATE_CAP=0
 GW_XLATE_CAP_NOTE="Kong 3.8 ai-proxy accepts only OpenAI-canonical ingress (llm/init.lua identify_request has no Anthropic-Messages detector), so anthropic-in -> openai-out translation is not a claimed capability"
+# gw_matrix_egress <dialect>: change ONLY what the CLIENT asks for. All four upstream providers are
+# already wired in the ONE config (_kong_write_config, rendered identically for every column); the
+# column just sets the request header Kong routes on. The config is NOT re-rendered here — the same
+# bytes gw_build wrote (and gw_config publishes) serve every column. openai is the header-less
+# fallback route, so its column sends no selector header at all.
 gw_matrix_egress() {
-  local host="http://127.0.0.1:$MOCK_PORT" prov url
   case "$1" in
-    openai)    prov=openai;    url="$host/v1/chat/completions";;
-    anthropic) prov=anthropic; url="$host/v1/messages";;
-    gemini)    prov=gemini;    url="$host/v1beta/models/$GW_MODEL:generateContent";;
-    bedrock)   prov=bedrock;   url="$host/model/$GW_MODEL/converse";;
+    openai)    GW_HEADERS=();;
+    anthropic) GW_HEADERS=("x-llm-provider: anthropic");;
+    gemini)    GW_HEADERS=("x-llm-provider: gemini");;
+    bedrock)   GW_HEADERS=("x-llm-provider: bedrock");;
     *) return 1;;
   esac
-  _kong_write_config "$prov" "$url"
   gw_launch
 }
 
@@ -202,11 +291,12 @@ gw_launch() {
 }
 
 # ── OOTB config artifact (file-driven) ────────────────────────────────────────────────────────────
-# gw_config prints the canonical OOTB config Kong launches with. Kong is file-driven, so the artifact
-# is the rendered DB-less declarative config (exactly what KONG_DECLARATIVE_CONFIG loads) PLUS the
-# non-secret launch env (any auth/AWS values in the config are dummy on the isolated rig). Read from
-# the file _kong_write_config just rendered (falls back to the openai-lane default if absent — the
-# canonical perf config), so it can never drift from what Kong loaded. The launch env is printed from
+# gw_config prints the canonical OOTB config Kong launches with — and because there is now exactly ONE
+# config, what is published IS what ran in every lane and every egress column, byte for byte. Kong is
+# file-driven, so the artifact is the rendered DB-less declarative config (exactly what
+# KONG_DECLARATIVE_CONFIG loads) PLUS the non-secret launch env (any auth/AWS values in the config are
+# dummy on the isolated rig). Read from the file _kong_write_config rendered (re-rendering with the
+# same no-argument function if absent), so it can never drift from what Kong loaded. The launch env is printed from
 # the SAME _kong_env() gw_launch consumes, so the two cannot drift. OOTB posture: ai-proxy on the
 # uniform /v1/chat/completions route, admin API left at its default (not disabled); the run-mechanics
 # are KONG_DATABASE=off (DB-less), KONG_ANONYMOUS_REPORTS=off (telemetry), and KONG_NGINX_WORKER_
@@ -215,7 +305,7 @@ gw_launch() {
 gw_config() {
   local cfg="$GW_DIR/kong.gen.yml"
   echo "# ── kong.gen.yml (rendered DB-less declarative; loaded via KONG_DECLARATIVE_CONFIG) ──"
-  [ -f "$cfg" ] || _kong_write_config openai "http://127.0.0.1:$MOCK_PORT/v1/chat/completions"
+  [ -f "$cfg" ] || _kong_write_config
   cat "$cfg"
   echo
   echo "# ── launch env (non-secret) ──"
@@ -226,7 +316,19 @@ gw_rss() { container_rss_mib kong-bench; }  # summed process-tree VmRSS (same me
 gw_hwm() { container_hwm_mib kong-bench; }  # summed process-tree VmHWM (kernel high-water mark)
 
 gw_stop() { sudo docker rm -f kong-bench >/dev/null 2>&1; }
-# gw_matrix_egress + the declared capability matrix are defined above (before gw_launch). The
-# anthropic/gemini/bedrock egress columns are wired-pending-field-verification: the dev box cannot
-# reach docker host networking reliably, so the EC2 field run is what turns each declared-1 cell
-# green or red. No declared-1 cell is left grey; every grey cell is a cited capability limit.
+# gw_matrix_egress + the declared capability matrix are defined above (before gw_launch).
+#
+# LOCAL VERIFICATION of the one-config standard (kong:3.8 + the pinned recording mock, --network host,
+# THIS manifest's rendered kong.gen.yml, config bytes untouched between the four probes — same file
+# sha256 before and after): one OpenAI-shaped POST /v1/chat/completions per column, selector header
+# only, read back from the mock's /__mock/state recorder:
+#   no header               -> HTTP 200  X-Kong-LLM-Model: openai/gpt-4o-mini
+#                              upstream openai      body_ok=true  /v1/chat/completions
+#   x-llm-provider: anthropic -> HTTP 200  X-Kong-LLM-Model: anthropic/gpt-4o-mini
+#                              upstream anthropic   body_ok=true  /v1/messages
+#   x-llm-provider: gemini    -> HTTP 200  X-Kong-LLM-Model: gemini/gpt-4o-mini
+#                              upstream gemini      body_ok=true  /v1beta/models/gpt-4o-mini:generateContent
+#   x-llm-provider: bedrock   -> HTTP 200  X-Kong-LLM-Model: bedrock/gpt-4o-mini
+#                              upstream bedrock     body_ok=true  /model/gpt-4o-mini/converse
+# Four native upstream dialects, ONE config, zero reconfiguration. The EC2 field run still turns each
+# declared-1 CELL green or red under load; every grey cell is a cited capability limit.
