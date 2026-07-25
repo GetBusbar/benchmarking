@@ -88,10 +88,26 @@ def _is_env(x) -> bool:
 
 
 def mval(env):
-    """The bare displayable value of a sealed envelope, or None when suppressed/absent."""
-    if _is_env(env):
-        return env.get("value")
-    return None if env is None else env  # tolerate a bare scalar (legacy/raw), never invent one
+    """The bare displayable value of a sealed envelope, or None when suppressed/absent.
+
+    AUDIT #23: a BARE SCALAR is REJECTED, not tolerated. Tolerating one made charts.py the one surface
+    that would happily publish a raw ungated number if a producer field ever escaped the seal — the exact
+    class C1 exists to prevent — and it silently disagreed with app.js's metric(), which returns n/a for a
+    non-envelope. Absent (None) is fine and reads "not measured"; anything else is a bug, loudly."""
+    if env is None:
+        return None
+    if not _is_env(env):
+        raise SystemExit(
+            f"charts.py: refusing to chart an UNSEALED metric value {env!r} (type {type(env).__name__}).\n"
+            "  Every metric in site/data.json must be a sealed envelope ({value, certified, suppressed, …}).\n"
+            "  A bare scalar means gen-data.mjs did not seal a producer field — fix the seal, not the reader."
+        )
+    return env.get("value")
+
+
+def menote(env):
+    """The envelope's note token (e.g. measured_failure / no_qualifying_ceiling), or None."""
+    return env.get("note") if _is_env(env) else None
 
 
 def mvalid(env) -> bool:
@@ -243,7 +259,7 @@ class Chart:
     name: str             # output png stem
     suite: str            # results/<suite>/*.json
     title: str
-    subtitle: str
+    subtitle: object          # str, or a callable(rows) -> str (renders from the data)
     unit: str
     series: list          # list[Series]; the FIRST series decides the winner + sort order
     log: bool = False
@@ -290,6 +306,49 @@ def _perf_annot(r):
         return lbl.strip(" ()")
     d = r.get("_dialect")
     return f"on {_dialect(d)}" if d and d != "openai" else None
+
+
+# AUDIT #2: the STREAMING lane's provenance annotation — the same mechanism _perf_annot gives the
+# passthrough charts and the xlate annots give the translation charts, wired for the lane that had none.
+# Every streaming number on the board is currently a LEGACY stream-suite reading (source "stream-suite");
+# publishing four PNGs of it with no disclosure while the sibling charts disclose theirs is the bug.
+def _stream_annot(r, extra=None):
+    lbl = _sweep_label({"sweep": r.get("_stream_source")}).strip(" ()")
+    bits = [b for b in (extra, lbl) if b]
+    return "  ·  ".join(bits) if bits else None
+
+
+
+# AUDIT #10/#14: the memory prose renders FROM the run's own record — the harness makes the windows and
+# the fixed-load recipe tunable and emits them (idle_window_s / recovery_window_s / load_recipe /
+# protocol), so no chart label may hard-code a duration or a payload. Falls back to the documented field
+# default ONLY when nothing in the data states otherwise.
+_MEM_WINDOW_DEFAULT_S = 60
+
+
+def _mem_window(rows, key) -> str:
+    for r in rows or []:
+        v = r.get(key)
+        if v is not None:
+            return f"{float(v):g} s"
+    return f"{_MEM_WINDOW_DEFAULT_S} s"
+
+
+def _mem_protocol_line(rows) -> str:
+    """The real protocol, in one line, from the data: cold idle -> identical fixed load on the peak
+    cell -> recovery, on a fresh cold-restarted process."""
+    recipe = next((r.get("_mem_load_recipe") for r in (rows or []) if r.get("_mem_load_recipe")), None)
+    load = "an identical fixed load"
+    if isinstance(recipe, dict):
+        c, pb, d = recipe.get("concurrency"), recipe.get("payload_bytes"), recipe.get("duration_s")
+        bits = [f"c={c:g}" if isinstance(c, (int, float)) else None,
+                f"{pb:,.0f} B payload" if isinstance(pb, (int, float)) else None,
+                f"{d:g} s" if isinstance(d, (int, float)) else None]
+        inner = ", ".join(b for b in bits if b)
+        if inner:
+            load = f"an identical fixed load ({inner})"
+    return (f"fresh cold-restarted process: {_mem_window(rows, '_mem_idle_window_s')} cold idle -> "
+            f"{load} on each gateway's own peak cell -> {_mem_window(rows, '_mem_recovery_window_s')} recovery")
 
 
 CHARTS = [
@@ -340,7 +399,7 @@ CHARTS = [
         name="memory_rss",
         suite="memory",
         title="Gateway RAM under a fixed load",
-        subtitle="cold idle vs peak RAM under an identical fixed load on each gateway's peak cell",
+        subtitle=lambda rows: "cold idle vs peak RAM, " + _mem_protocol_line(rows),
         unit="MiB RAM",
         series=[
             Series("peak_rss_mib", "peak RAM (under load)", "rank"),
@@ -354,16 +413,20 @@ CHARTS = [
         not_measured_text="✕ not measured (no served cell)",
     ),
     # ── supporting: memory RECOVERY (does it release?) ────────────────────────────────────────────
-    # Raw peak is a weak signal — every gateway spikes under the 150KB x 1500 x 120s load. The honest
-    # differentiator is whether memory is RELEASED afterward. Rank by recovered_rss_mib (RSS 60s after
-    # the load ends; best = min), with peak shown muted as the reference. null_not_served gates on the
-    # recovery field: a gateway measured BEFORE this signal existed (recovered_rss_mib is null) is drawn
-    # "not measured", never a fabricated 0 — mirroring the served_field/validity discipline above.
+    # AUDIT #10: the SYNTHETIC BURST memory suite (150KB x 1500c x 120s) is DELETED; describing it here
+    # published a protocol that no longer runs. The real protocol is the post-6x6 memory window: a fresh
+    # COLD-RESTARTED process, a cold-idle sampling window, then the IDENTICAL fixed load on each
+    # gateway's OWN peak cell, then a recovery window (durations + recipe are harness-tunable and travel
+    # in the data — every label above renders from them). Raw peak is a weak signal; the honest
+    # differentiator is whether memory is RELEASED afterward. Rank by recovered_rss_mib (best = min),
+    # with peak shown muted as the reference. null_not_served gates on the recovery field: a gateway with
+    # no recovery reading is drawn "not measured", never a fabricated 0.
     Chart(
         name="memory_recovery",
         suite="memory",
         title="Does the gateway release memory after the load?",
-        subtitle="RSS 60s after the large-payload load ends (recovered) vs. its peak - lower recovery is better",
+        subtitle=lambda rows: ("recovered RSS at the end of the "
+                               f"{_mem_window(rows, '_mem_recovery_window_s')} recovery window vs. its peak - lower recovery is better"),
         unit="MiB RAM",
         series=[
             Series("recovered_rss_mib", "recovered RAM (60s after load)", "rank"),
@@ -415,6 +478,7 @@ CHARTS = [
         zero_ok=True,
         null_not_served=True,
         auto_ms=True,
+        annot=_stream_annot,   # AUDIT #2: disclose the streaming lane's provenance
     ),
     Chart(
         name="stream_added_gap",
@@ -431,6 +495,7 @@ CHARTS = [
         zero_ok=True,
         null_not_served=True,
         auto_ms=True,
+        annot=_stream_annot,   # AUDIT #2: disclose the streaming lane's provenance
     ),
     Chart(
         name="stream_sustained",
@@ -446,9 +511,11 @@ CHARTS = [
         # full bar or ranks in the top-N — the same discipline the cpu-fps lane already applies.
         served_field="stream_sustained_valid",
         not_served_text="✕ not measured (rig-limited / needs field run)",
-        zero_text="0  ·  no stream load qualified",
-        annot=lambda r: (lambda f: f"{f:,.0f} frames/s" if f > 0 else None)(
-            float(r.get("stream_sustained_fps") or 0)),
+        # AUDIT #3: a certified 0 is a MEASURED FAILURE (offered stream load, sustained none), and must
+        # never read like the unmeasured/rig-limited state above. Name it as the failure it is.
+        zero_text="0  ·  MEASURED: sustained no stall-free stream",
+        annot=lambda r: _stream_annot(
+            r, (lambda f: f"{f:,.0f} frames/s" if f > 0 else None)(float(r.get("stream_sustained_fps") or 0))),
     ),
     # ── streaming (CPU-bound): sustained relay throughput under an unpaced firehose ────────────────
     Chart(
@@ -465,9 +532,9 @@ CHARTS = [
         # yields streamcpu_valid=true, so unproven laptop numbers are never surfaced as a comparison.
         served_field="streamcpu_valid",
         not_served_text="✕ not measured (needs pinned field run)",
-        zero_text="0  ·  no stream load qualified",
-        annot=lambda r: (lambda f: f"{f:,.0f}/core" if f > 0 else None)(
-            float(r.get("streamcpu_fps_per_core") or 0)),
+        zero_text="0  ·  MEASURED: relayed no qualifying frames",
+        annot=lambda r: _stream_annot(
+            r, (lambda f: f"{f:,.0f}/core" if f > 0 else None)(float(r.get("streamcpu_fps_per_core") or 0))),
     ),
     # ── translation: the CANONICAL translation cell (matrix per-cell sweep) ───────────────────────
     # Same record the site's Translation surfaces read: OpenAI ingress translated to the gateway's
@@ -557,6 +624,13 @@ def _proj_streaming(key: str) -> dict | None:
         "stream_sustained_streams": sust,
         "stream_sustained_fps": mval(s.get("streams_sustained_fps")),
         "stream_sustained_valid": sust is not None,
+        # AUDIT #3: a measured 0 is a MEASURED FAILURE (the gateway sustained none of the offered stream
+        # load), NOT "not measured". The note token carries which; the chart + README render them apart.
+        "stream_sustained_note": menote(s.get("streams_sustained")),
+        # AUDIT #2: the streaming lane's PROVENANCE stamp. Without it the four streaming PNGs published
+        # 100% legacy stream-suite numbers with ZERO disclosure while the sibling perf/xlate charts
+        # disclosed theirs through _sweep_label. Same mechanism, same key name, per lane.
+        "_stream_source": (s.get("source") or {}).get("sweep"),
         "streamcpu_frames_per_sec": cpu,
         # cpu_fps_per_core is not emitted today (always null); kept null-safe so the column reappears
         # automatically once the harness emits it. It is not an envelope (plumbing placeholder).
@@ -574,6 +648,14 @@ def _proj_memory(key: str) -> dict | None:
     # RSS metrics are UNGATED sealed envelopes (no mock-bound flag); mval() reads them (None when absent).
     return {
         "served": True,
+        # AUDIT #10/#14: the run's OWN protocol string + window durations + fixed-load recipe travel with
+        # the row so every memory label describes the run that happened, never a hard-coded default (and
+        # never the DELETED synthetic burst suite the old prose still described).
+        "_mem_protocol": m.get("protocol"),
+        "_mem_idle_window_s": m.get("idle_window_s"),
+        "_mem_recovery_window_s": m.get("recovery_window_s"),
+        "_mem_load_recipe": m.get("load_recipe"),
+        "_mem_load_cell": m.get("load_cell"),
         "idle_rss_mib": mval(m.get("idle_rss_mib")),
         "peak_rss_mib": mval(m.get("peak_rss_mib")),
         # recovered_rss_mib is absent on pre-recovery bundles → None. The recovery chart gates on it
@@ -911,7 +993,10 @@ def render(chart: Chart, only_keys=None, out_stem: str | None = None) -> None:
     # of its height: subtitle 10 pt up, title 40 pt up → a fixed ~30 pt gap. (Axes-fraction spacing
     # collided once the taller Inter metrics replaced DejaVu — the reported title/subtitle cramping.)
     ax.set_title(chart.title, fontsize=15, fontweight="bold", color=INK, loc="left", pad=40)
-    ax.annotate(chart.subtitle, xy=(0, 1), xycoords="axes fraction", xytext=(0, 10),
+    # AUDIT #10/#14: subtitle may be a callable taking the chart's rows, so a chart whose wording depends
+    # on a TUNABLE harness setting (the memory windows) describes the run that happened, not a default.
+    _subtitle = chart.subtitle(rows) if callable(chart.subtitle) else chart.subtitle
+    ax.annotate(_subtitle, xy=(0, 1), xycoords="axes fraction", xytext=(0, 10),
                 textcoords="offset points", fontsize=10.5, color=GRAY, va="bottom", ha="left")
 
     # Language legend (swatch per language present) + a note for the secondary series (e.g. idle RAM).
@@ -1145,11 +1230,18 @@ def _report_md(rows: list, title: str, charts: list, pending: tuple = (), chart_
                 # surfaces diverging from the same record.
                 if not s.get("stream_sustained_valid"):
                     streams = "✕ not measured (rig-limited)"
+                elif int(s.get("stream_sustained_streams") or 0) == 0:
+                    # AUDIT #3: a MEASURED FAILURE. The gateway was offered stream load and sustained
+                    # none of it — publishing that as "not measured (rig-limited)" (the branch above)
+                    # would flatter it by hiding a real, measured failure behind a rig excuse.
+                    streams = "✕ 0 - MEASURED: sustained no stall-free stream"
                 else:
                     streams = f"{int(s.get('stream_sustained_streams') or 0):,}"
                     fps = float(s.get("stream_sustained_fps") or 0)
                     if fps > 0:
                         streams += f" ({fps:,.0f} fps)"
+                # AUDIT #2: disclose the streaming lane's provenance in the table, exactly as the PNGs do.
+                streams += _sweep_label({"sweep": s.get("_stream_source")})
             if x is None:
                 xl = "n/a"
             elif x.get("xlate_passthrough"):
@@ -1167,10 +1259,14 @@ def _report_md(rows: list, title: str, charts: list, pending: tuple = (), chart_
                 xl = "✕ not measured (rig-limited)"
                 if x.get("_xlate_ingress"):
                     xl += f" ({x['_xlate_ingress']} → {x['_xlate_egress']})"
+                # AUDIT #9: the prose above promises a legacy-xlate-suite fallback is "marked as such";
+                # the cells never applied the marker. Render it from the source stamp, like every PNG.
+                xl += _sweep_label({"sweep": x.get("_xlate_source")})
             else:
                 xl = f"{int(x.get('xlate_rps_sustained_20ms') or 0):,}"
                 if x.get("_xlate_ingress"):  # canonical direction, named so no two surfaces mix paths
                     xl += f" ({x['_xlate_ingress']} → {x['_xlate_egress']})"
+                xl += _sweep_label({"sweep": x.get("_xlate_source")})
             lines.append(f"| {_linked(key)} | {ttft} | {gap} | {streams} | {xl} |")
         lines.append("")
         lines.append("**✕** cells are measured refusals, not gaps: the gateway was offered the load "

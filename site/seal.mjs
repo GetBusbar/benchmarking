@@ -28,10 +28,31 @@ export const SWEEP = {
   TRANSLATION: "6x6-translation",
   MEMORY: "6x6-memory-window",
   STREAM_DIAGONAL: "6x6-stream-diagonal",
+  STREAM_TRANSLATION: "6x6-stream-translation",
   PERF_SUITE: "perf-suite",
   XLATE_SUITE: "xlate-suite",
   STREAM_SUITE: "stream-suite",
 };
+
+// ---- the ONE metric-field vocabulary ---------------------------------------
+// gen-data seals these, check-consistency asserts these. Both IMPORT from here, so a producer field
+// added on one side can never ship unsealed because the other side's whitelist lagged (audit #11).
+// GATED: the throughput-shaped metrics the mock-bound honesty rule applies to.
+export const GATED_FIELDS = ["rps_sustained_20ms", "rps_max_proxy", "streams_sustained", "cpu_fps"];
+// UNGATED, latency-shaped, on a perf cell.
+export const UNGATED_LAT_FIELDS = ["added_latency_p50_us", "added_latency_p99_us", "gateway_c1_p99_us", "direct_c1_p99_us"];
+// UNGATED, latency/rate-shaped, on a stream record.
+export const UNGATED_STREAM_FIELDS = ["added_ttft_p50_us", "added_ttft_p99_us", "added_gap_p50_us", "added_gap_p99_us"];
+// RSS metrics are sealed BY DISCOVERY, not by a whitelist: ANY `*_rss_mib` field the producer emits
+// (idle/peak/recovered today; peak_rss_hwm_mib / post_load_rss_mib added later) is a metric and must be
+// sealed. A new producer RSS field therefore cannot ship as a bare unsealed scalar (audit #11).
+export const RSS_FIELD_RE = /_rss_mib$/;
+// isMetricField(k): is this key a sealed-envelope metric field? The single predicate both gen-data
+// (what to seal) and check-consistency (what must BE an envelope) use.
+export function isMetricField(k) {
+  return GATED_FIELDS.includes(k) || UNGATED_LAT_FIELDS.includes(k) ||
+    UNGATED_STREAM_FIELDS.includes(k) || k === "streams_sustained_fps" || RSS_FIELD_RE.test(k);
+}
 
 // makeSource: the provenance stamp carried by every cell + every envelope. `kind` is the coarse
 // origin ("matrix" for the single end-state path, or a "*-fallback" for a live deferred suite);
@@ -51,23 +72,25 @@ export function makeSource(kind, sweep, build, measuredAt) {
 // The envelope is LEAN: it does NOT repeat the provenance stamp (the CELL carries `source`, which is
 // authoritative and drives every caption). Keeping the stamp off each envelope avoids ~10x bundle bloat
 // across the 36-cell matrix while preserving invariant P1 (no raw scalar / no _mock_bound survives).
-// opts.zeroMeasured: for a GATED metric, is a value of 0 an honest MEASURED-ZERO (shown) or a
-// no-measurement (suppressed to n/a)? RPS ceilings use true ("served but no qualifying ceiling" = honest
-// 0); streaming counts (cpu_fps, streams_sustained) use false (0 = never measured, reads n/a). Default true.
+// opts.zeroNote: for a GATED metric, WHAT a measured 0 MEANS. A 0 is ALWAYS an honest MEASURED value
+// (the harness ran and the answer was zero) and is ALWAYS certified — it is NEVER folded into
+// "not measured", which is exclusively `value == null` (audit #3). The note names the meaning so each
+// surface can render the two apart:
+//   ZERO_NO_CEILING  (RPS ceilings)      — served, but no tested load held the qualifying gates.
+//   ZERO_MEASURED_FAIL (streaming counts) — the gateway was offered stream load and sustained NONE.
+// Publishing a measured stream-sustain FAILURE as "not measured (rig-limited)" flattered the gateway;
+// null (absent field) is the ONLY not-measured state.
+export const ZERO_NO_CEILING = "no_qualifying_ceiling";
+export const ZERO_MEASURED_FAIL = "measured_failure";
 export function sealMetric(value, opts = {}) {
-  const { gated = false, flag, extras = null, zeroMeasured = true } = opts;
+  const { gated = false, flag, extras = null, zeroNote = ZERO_NO_CEILING } = opts;
   if (value == null) {
     return { value: null, certified: false, suppressed: false, reason: "not_measured" };
   }
   const num = Number(value);
   if (gated) {
-    // measured-zero: served but no tested load held the ceiling. Honest 0 (RPS), NOT suppressed. For a
-    // streaming count (zeroMeasured=false) a 0 is "not measured" and reads n/a.
-    if (num === 0) {
-      return zeroMeasured
-        ? { value: 0, certified: true, suppressed: false, note: "no_qualifying_ceiling" }
-        : { value: null, certified: false, suppressed: false, reason: "not_measured" };
-    }
+    // measured-zero: an honest, certified 0 whose NOTE names what the zero means (see zeroNote above).
+    if (num === 0) return { value: 0, certified: true, suppressed: false, note: zeroNote };
     // positive but not certified as gateway-vs-ceiling -> SUPPRESSED, raw number consumed (gone).
     if (!(num > 0 && flag === false)) {
       const reason = flag === true ? "mock_bound" : "unverifiable";

@@ -214,10 +214,22 @@ function lane(g, suite, flag, errKey, pick) {
      metric(env)        -> { v, text, na, note, source, env } ; v is null (na:true) when not shown.
    `fmt` formats the value; a suppressed/absent metric reads "n/a". */
 function isEnvelope(x) { return x != null && typeof x === "object" && typeof x.certified === "boolean"; }
+/* The envelope's machine token -> the sentence a reader sees. AUDIT #3: a MEASURED FAILURE (the gateway
+   was offered the load and sustained none: a certified 0) and NOT MEASURED (no reading at all: null) are
+   different states and must read differently — publishing the failure as "not measured (rig-limited)"
+   flattered the gateway. */
+const METRIC_NOTES = {
+  no_qualifying_ceiling: "served, but no tested load held p99 < 1 s at <0.1% errors (no qualifying throughput ceiling)",
+  measured_failure: "MEASURED FAILURE: the gateway was offered the load and sustained none of it (a real 0, not an unmeasured cell)",
+  mock_bound: "not shown: rig-limited — the harness's own ceiling bounded this number, so it is not a gateway reading",
+  unverifiable: "not shown: this number could not be certified against the harness's own ceiling",
+  not_measured: "not measured: no reading exists for this cell",
+};
+function noteText(tok) { return (tok && METRIC_NOTES[tok]) || tok || ""; }
 function metric(env, fmt = fmtInt) {
   if (!isEnvelope(env) || env.value == null)
-    return { v: null, text: "n/a", na: true, note: env && env.reason, env: env || null };
-  return { v: env.value, text: fmt(env.value), na: false, note: env.note, env };
+    return { v: null, text: "n/a", na: true, note: noteText(env && env.reason), env: env || null };
+  return { v: env.value, text: fmt(env.value), na: false, note: noteText(env.note), env };
 }
 // mval: the bare displayable value of an envelope (null when suppressed/absent). For arithmetic
 // (deltas, best-of ranking) where only the number matters. Never returns a suppressed number.
@@ -233,6 +245,7 @@ const SWEEP_CAPTION = {
   "6x6-translation":     (p) => `${laneDialect(p && p.ingress)} in → ${laneDialect(p && p.egress)} out — 6×6 translation cell`,
   "6x6-memory-window":   ()  => `post-6×6 memory window (identical fixed load on the peak cell, fresh cold-restarted process)`,
   "6x6-stream-diagonal": (p) => `${laneDialect(p && p.dialect)} SSE stream — 6×6 diagonal cell`,
+  "6x6-stream-translation": (p) => `${laneDialect(p && p.ingress)} in → ${laneDialect(p && p.egress)} out SSE stream — 6×6 translation cell`,
   "perf-suite":          (p) => `${laneDialect(p && p.dialect)} passthrough — perf suite (no 6×6 cell for this gateway yet)`,
   "xlate-suite":         (p) => `${laneDialect(p && p.ingress)} in → ${laneDialect(p && p.egress)} out — translation suite (no 6×6 cell for this gateway yet)`,
   "stream-suite":        (p) => `${laneDialect(p && p.dialect)} SSE stream — stream suite (legacy)`,
@@ -276,11 +289,30 @@ function memLoadCellLabel(lc) {
   const L = (d) => (MATRIX_LABELS[d] || d || "?");
   return `${L(ing)} → ${L(eg)}`;
 }
+/* AUDIT #14: the memory windows are TUNABLE in the harness (MEM_IDLE_S / MEM_SETTLE_S, emitted as
+   idle_window_s / recovery_window_s on the memory block). Every window label therefore RENDERS from the
+   data — hard-coding "60 s" published the default as a fact even when the run used another duration.
+   memWindows(m) reads one record; boardMemWindows() reads the board's records for the column headers /
+   captions (which are not per-row), falling back to the 60 s default only when nothing states otherwise. */
+const MEM_WINDOW_DEFAULT = 60;
+function memWindows(m) {
+  const idle = m && Number.isFinite(Number(m.idle_window_s)) ? Number(m.idle_window_s) : MEM_WINDOW_DEFAULT;
+  const rec = m && Number.isFinite(Number(m.recovery_window_s)) ? Number(m.recovery_window_s) : MEM_WINDOW_DEFAULT;
+  return { idle, recovery: rec };
+}
+function boardMemWindows(data = (typeof state !== "undefined" ? state.data : null)) {
+  const recs = ((data && data.gateways) || []).map((g) => g.memory_read).filter(Boolean);
+  const rec = recs.find((m) => m.idle_window_s != null || m.recovery_window_s != null) || null;
+  return memWindows(rec);
+}
+const memWindowLabel = (s) => `${fmtInt(s)} s`;
 /* memLoadRecipeTip: the fixed-load basis + peak cell, for the "Tested on" cell tooltip. */
 function memLoadRecipeTip(m) {
   const r = m && m.load_recipe;
+  const w = memWindows(m);
   const basis = r ? `identical fixed load: ${fmtInt(r.concurrency)} concurrent, ${fmtInt(r.payload_bytes)} B payload, ${fmtInt(r.duration_s)} s` : "identical fixed load for every gateway";
-  return `peak cell ${memLoadCellLabel(m && m.load_cell)} — ${basis}, on a fresh cold-restarted process (60 s idle → load → 60 s recovery)`;
+  return `peak cell ${memLoadCellLabel(m && m.load_cell)} — ${basis}, on a fresh cold-restarted process ` +
+    `(${memWindowLabel(w.idle)} idle → load → ${memWindowLabel(w.recovery)} recovery)`;
 }
 
 /* passCell: the Passthrough tab reads ONLY the canonical record (g.best_cell). When best_cell
@@ -311,9 +343,9 @@ function memCell(g, key, fmt) {
    that run has no qualifying throughput ceiling. Distinct from sweep noise (see the caption and
    the check-consistency guard, which flags max=0 separately from a small inversion). The cell
    still shows "0" and this note travels in its title tooltip. */
-const ZERO_RPS_NOTE = "served, but no tested load held p99 < 1 s at <0.1% errors (no qualifying throughput ceiling)";
+const ZERO_RPS_NOTE = METRIC_NOTES.no_qualifying_ceiling;
 function withZeroNote(cell) {
-  return !cell.na && cell.v === 0 ? { ...cell, note: ZERO_RPS_NOTE } : cell;
+  return !cell.na && cell.v === 0 ? { ...cell, note: cell.note || ZERO_RPS_NOTE } : cell;
 }
 
 /* xlateMatrixCell: the perf object for a gateway's ingress->egress translation cell, straight from the
@@ -356,7 +388,24 @@ function xlateCell(g, key, fmt) {
 function chooserCellPerf(g, st = state) {
   if (st.mode === "peak") return g.best_cell || null;
   const [ingress, egress] = st.mode === "same" ? [st.sameDialect, st.sameDialect] : [st.xlateIn, st.xlateOut];
-  return xlateMatrixCell(g, ingress, egress);
+  const perf = xlateMatrixCell(g, ingress, egress);
+  return perf ? stampChosen(perf, g, ingress, egress, false) : null;
+}
+/* stampChosen: THE choke point that makes EVERY chosen record self-describing. A raw matrix cell's sealed
+   .perf/.stream carries no path/source (the CELL's coordinates are implicit in where it was looked up), so
+   every consumer used to re-invent provenance locally — the "Tested on" pill hard-coded a passthrough
+   sentence, lanePathNote hard-coded a dialect line, laneRecord stamped its own source. Stamp it ONCE here
+   and every surface renders through caption() from the same stamp (audit #1/#6, Design E §3.2). */
+function stampChosen(rec, g, ingress, egress, isStream) {
+  const same = ingress === egress;
+  const path = { ingress, egress, ...(same ? { dialect: ingress } : {}) };
+  // The sweep KEY is COMPOSED from the cell's own shape (matrix lane + diagonal/translation), never
+  // written as a caption literal — SWEEP_CAPTION stays the single home of the key vocabulary (C3), and
+  // caption() throws loudly if this composition ever names a key the table does not render.
+  const sweep = `6x6-${isStream ? "stream-" : ""}${same ? "diagonal" : "translation"}`;
+  return { path, source: { kind: "matrix", sweep,
+    build: (g.matrix && g.matrix.build) || null,
+    measured_at: (g.matrix && g.matrix.measured_at) || null }, ...rec };
 }
 // The (ingress, egress) dialects the chosen cell is measured on — used for the pill/labels + the popup.
 function chooserDialects(g, st = state) {
@@ -386,7 +435,9 @@ function chooserCellStream(g, st = state) {
   const up = g.matrix && g.matrix.upstreams && g.matrix.upstreams[egress];
   const cell = up && up.cells && up.cells[ingress];
   const raw = cell && cell.served === true && cell.stream && cell.stream.stream_served === true ? cell.stream : null;
-  return raw ? { path: { dialect: ingress }, stream_served: true, ...raw } : null;
+  // Stamped through the ONE choke point, so a per-cell TRANSLATION stream is captioned as a translation
+  // stream, not relabelled a single-dialect passthrough (audit #1/#6).
+  return raw ? stampChosen({ stream_served: true, ...raw }, g, ingress, egress, true) : null;
 }
 // A streaming-metric cell for the chosen cell (n/a when the cell has no streaming here or lacks the field).
 // Peak delegates to streamCell; Same/Custom read the per-cell stream record's sealed envelope via metric().
@@ -461,24 +512,47 @@ const COL_NAME = {
 // measured on — Peak: each gateway's own peak dialect (varies per row); Same: the chosen dialect on every
 // row; Custom: the chosen ingress→egress. The provenance disclosure (tooltip / fallback star) renders FROM
 // the chosen cell's source stamp via caption() (Design E §3.2), never a hard-coded source string.
-const COL_TESTED = {
-  id: "tested", label: "Tested on", desc: false,
-  title: "The cell these numbers were measured on. Peak: each gateway's own peak same-dialect diagonal. Same: the chosen dialect. Custom: the chosen ingress→egress cell.",
-  get: (g) => { const [ing] = chooserDialects(g); return { v: ing || "", text: null, na: !ing }; },
-  render: (g) => {
-    const [ing, eg] = chooserDialects(g);
-    const p = chooserCellPerf(g);
-    if (!ing || !p) return `<td class="tested"><span class="muted">n/a</span></td>`;
-    // The pill label: a passthrough (in==out) shows the single dialect; a translation cell shows in→out.
-    const label = ing === eg ? (MATRIX_LABELS[ing] || ing) : `${MATRIX_LABELS[ing] || ing}→${MATRIX_LABELS[eg] || eg}`;
-    // Provenance disclosure from the chosen cell's source stamp; a live-fallback row is starred + captioned.
-    const fb = p.source && p.source.kind !== "matrix";
-    const title = fb ? esc(caption(p))
-      : ing === eg ? `measured on ${esc(ing)}-in / ${esc(eg)}-out passthrough`
-      : `measured on ${esc(ing)}-in / ${esc(eg)}-out (translation)`;
-    return `<td class="tested"><span class="tested-pill" title="${title}">${esc(label)}${fb ? " *" : ""}</span></td>`;
-  },
+// AUDIT #1 (the choke point). "Tested on" must describe THE RECORD THE ROW ACTUALLY DISPLAYS. One column
+// object was shared by BOTH column sets while always reading chooserCellPerf(g) — so every Streaming row,
+// whose numbers all come from the legacy stream suite (source.kind "stream-fallback"), advertised the PERF
+// cell's matrix provenance ("measured on openai-in / openai-out passthrough") and caption(p)'s honest
+// "stream suite (legacy)" label was unreachable. It also painted a pill in Same/Custom when the streaming
+// record was null and every streaming column read n/a. colTested(lane) binds the column to its LANE's
+// record, renders provenance through the ONE caption() path, and paints NO pill without a record.
+const LANE_RECORD = {
+  perf: (g, st) => chooserCellPerf(g, st),
+  stream: (g, st) => chooserCellStream(g, st),
 };
+function colTested(lane) {
+  const pick = LANE_RECORD[lane];
+  return {
+    id: "tested", label: "Tested on", desc: false,
+    title: `The cell these ${lane === "stream" ? "streaming " : ""}numbers were measured on, with the provenance of the record actually shown. Peak: each gateway's own peak cell. Same: the chosen dialect. Custom: the chosen ingress→egress cell.`,
+    get: (g, st = state) => {
+      const rec = pick(g, st);
+      const p = rec && cellPath(rec);
+      const ing = p && (p.ingress ?? p.dialect);
+      return { v: rec && ing ? ing : "", text: null, na: !(rec && ing) };
+    },
+    render: (g, st = state) => {
+      const rec = pick(g, st);
+      // NO record → NO pill. A row whose every column reads n/a must not advertise a measurement.
+      if (!rec) return `<td class="tested"><span class="muted">n/a</span></td>`;
+      const p = cellPath(rec);
+      const ing = p.ingress ?? p.dialect, eg = p.egress ?? p.dialect;
+      if (ing == null) return `<td class="tested"><span class="muted">n/a</span></td>`;
+      // The pill label: a passthrough (in==out) shows the single dialect; a translation cell shows in→out.
+      const label = ing === eg ? (MATRIX_LABELS[ing] || ing) : `${MATRIX_LABELS[ing] || ing}→${MATRIX_LABELS[eg] || eg}`;
+      // Provenance from THIS record's own stamp, through the ONE caption table. A live-fallback record
+      // (a legacy suite, not the matrix) is starred so the disclosure is visible without hovering.
+      const fb = !!(rec.source && rec.source.kind !== "matrix");
+      const title = rec.source ? caption(rec) : `measured on the ${ing}-in / ${eg}-out cell`;
+      return `<td class="tested"><span class="tested-pill" title="${esc(title)}">${esc(label)}${fb ? " *" : ""}</span></td>`;
+    },
+  };
+}
+const COL_TESTED = colTested("perf");
+const COL_TESTED_STREAM = colTested("stream");
 // concAt(env): the concurrency rung a throughput envelope held its ceiling at (conc_at_* from the snapshot,
 // falling back to the legacy *_concurrency). Null-safe — never fabricated (renders n/a when absent).
 function concAt(env) {
@@ -510,8 +584,9 @@ function maxProxyChooserCell(g) {
 }
 const COLUMN_SETS = {
   // PERFORMANCE (Peak | Same | Custom): per-cell latency + throughput from the ONE 6x6 run. The columns
-  // are IDENTICAL in every mode; the chooser only changes WHICH cell each row reads. The Tested-on pill
-  // is present only in Peak (see renderTable, which drops it in Same/Custom).
+  // are IDENTICAL in every mode; the chooser only changes WHICH cell each row reads. The Tested-on column
+  // is present in EVERY mode (renderTable does not drop it); it renders a pill only when the row's lane
+  // actually has a record, and names that record's own provenance (audit #1/#13).
   performance: [
     COL_SEL, COL_NAME, COL_TESTED,
     { id: "lat50", label: "Added latency p50 (µs)", desc: false, title: "Gateway p50 minus direct-to-mock p50 at concurrency 1 on the chosen cell",
@@ -527,7 +602,7 @@ const COLUMN_SETS = {
   // measured on the diagonal today, so Same reads it only on the gateway's own measured diagonal and
   // Custom reads a cell's own stream when the matrix carries one — else n/a (honest, never fabricated).
   streaming: [
-    COL_SEL, COL_NAME, COL_TESTED,
+    COL_SEL, COL_NAME, COL_TESTED_STREAM,
     { id: "sttft50", label: "Added TTFT p50 (µs)", desc: false, title: "Added time-to-first-token p50: the extra wait before the stream's first token, gateway minus direct-to-mock, at concurrency 1, on the chosen cell. Lower is better.",
       get: (g) => chooserStreamCell(g, "added_ttft_p50_us", fmtUsMs) },
     { id: "sttft", label: "Added TTFT p99 (µs)", desc: false, title: "Added time-to-first-token p99 on the chosen cell. Lower is better.",
@@ -553,14 +628,16 @@ const COLUMN_SETS = {
       get: (g) => { const m = canonicalMemory(g); const lc = m && m.load_cell; return lc ? { v: null, text: memLoadCellLabel(lc), na: false } : { v: null, text: "n/a", na: true }; },
       render: (g) => { const m = canonicalMemory(g); const lc = m && m.load_cell;
         return lc ? `<td class="memcell" title="${esc(memLoadRecipeTip(m))}">${esc(memLoadCellLabel(lc))}</td>` : `<td class="memcell na">n/a</td>`; } },
-    { id: "memidle", label: "Idle RSS (MiB)", desc: false, title: "Cold idle process RSS: median over a 60 s window on a fresh cold-restarted process, before any load. Lower is better.",
+    { id: "memidle", label: "Idle RSS (MiB)", desc: false,
+      title: () => `Cold idle process RSS: median over a ${memWindowLabel(boardMemWindows().idle)} window on a fresh cold-restarted process, before any load. Lower is better.`,
       get: (g) => memCell(g, "idle_rss_mib", fmt1) },
     { id: "mempeak", label: "Peak RSS (MiB)", desc: false, title: "Max process RSS observed while the identical fixed load runs on this gateway's peak cell. Same load recipe for every gateway. Lower is better.",
       get: (g) => memCell(g, "peak_rss_mib", fmt1) },
-    { id: "memrecov", label: "Recovered @60s (MiB)", desc: false, title: "Process RSS at the end of the 60 s recovery window after the fixed load stops — does the gateway release memory? Lower is better.",
+    { id: "memrecov", label: () => `Recovered @${memWindowLabel(boardMemWindows().recovery)} (MiB)`, desc: false,
+      title: () => `Process RSS at the end of the ${memWindowLabel(boardMemWindows().recovery)} recovery window after the fixed load stops — does the gateway release memory? Lower is better.`,
       get: (g) => memCell(g, "recovered_rss_mib", fmt1) },
     { id: "memcurve", label: "Recovery curve", desc: false, sortable: false,
-      title: "RSS across the memory window on one process lifecycle: 60 s cold idle → fixed load on the peak cell → 60 s recovery",
+      title: () => `RSS across the memory window on one process lifecycle: ${memWindowLabel(boardMemWindows().idle)} cold idle → fixed load on the peak cell → ${memWindowLabel(boardMemWindows().recovery)} recovery`,
       get: (g) => { const m = canonicalMemory(g); return { v: null, text: "", na: !(m && Array.isArray(m.rss_series) && m.rss_series.length >= 2) }; },
       render: (g) => {
         const m = canonicalMemory(g);
@@ -570,6 +647,9 @@ const COLUMN_SETS = {
   ],
   // Governance is RETIRED under matrix-sole-source: no tab, no column (busbar-only, non-default suite).
 };
+/* txt(x): a column/metric label or title, which may be a plain string OR a function rendering it from
+   the live data (used where the wording depends on a tunable harness setting — audit #14). */
+function txt(x) { return typeof x === "function" ? String(x() ?? "") : String(x ?? ""); }
 /* The set of columns for a view; perf tabs use COLUMN_SETS, everything else has no table. */
 function columnsFor(view) { return COLUMN_SETS[view] || COLUMN_SETS.performance; }
 /* Every column id across all tabs - used to validate a sort id coming from a shared URL. */
@@ -615,7 +695,7 @@ const LANES = [
       { k: "peak_rss_mib", label: "Peak RSS (MiB)", best: "min", fmt: fmt1 },
       // Recovery: RSS 60 s after the load ends. Lower = released more of the peak (best: min). Absent on
       // pre-recovery bundles → the drawer/compare read n/a, exactly like any other lane field it lacks.
-      { k: "recovered_rss_mib", label: "Recovered @60s (MiB)", best: "min", fmt: fmt1 },
+      { k: "recovered_rss_mib", label: () => `Recovered @${memWindowLabel(boardMemWindows().recovery)} (MiB)`, best: "min", fmt: fmt1 },
     ],
   },
   {
@@ -653,18 +733,10 @@ function laneRecord(l, g, st = state) {
   if (l.key === "perf") {
     const p = chooserCellPerf(g, st);
     if (!p) return null;
-    // The metrics are ALREADY sealed envelopes; nothing to gate here (the gate is upstream). In Peak,
-    // chooserCellPerf returns best_cell (carries path + source). In Same/Custom it is a raw matrix cell's
-    // sealed .perf with no path/source; stamp the chosen dialects + the matrix source so pathNote's
-    // caption() resolves the same in→out the table pill shows (a same-cell is a diagonal, else translation).
-    const rec = { served: true, ...p };
-    if (!rec.path) {
-      const [ingress, egress] = chooserDialects(g, st);
-      rec.path = { ingress, egress, ...(ingress === egress ? { dialect: ingress } : {}) };
-      rec.source = { kind: "matrix", sweep: ingress === egress ? "6x6-diagonal" : "6x6-translation",
-        build: g.matrix && g.matrix.build || null, measured_at: g.matrix && g.matrix.measured_at || null };
-    }
-    return rec;
+    // The metrics are ALREADY sealed envelopes; nothing to gate here (the gate is upstream). The chosen
+    // record is ALREADY self-describing (path + source) — chooserCellPerf stamps a raw matrix cell through
+    // stampChosen, the ONE choke point — so there is no local provenance re-invention here (audit #1/#6).
+    return { served: true, ...p };
   }
   if (l.key === "stream") return chooserCellStream(g, st);
   return l.get ? l.get(g) : g[l.key];
@@ -680,29 +752,37 @@ function perfSweepSeries(g, colors, st = state) {
   const out = [];
   const add = (key, label, color) => {
     const env = p[key];
+    // C5: the displayable number comes through the ONE accessor (mval), never a bare `.value` deref.
     // A suppressed headline is {value:null,…}: no number, so no curve (finding 22, now structural — the
     // sweep array is INSIDE the envelope and a suppressed envelope carries neither value nor sweep).
-    if (!isEnvelope(env) || env.value == null || !(env.sweep && env.sweep.length)) return;
-    out.push({ label, color, sweep: env.sweep, peak: { rps: env.value, conc: env.concurrency ?? null } });
+    const v = mval(env);
+    if (v == null || !(env.sweep && env.sweep.length)) return;
+    out.push({ label, color, sweep: env.sweep, peak: { rps: v, conc: concAt(env) } });
   };
   add("rps_sustained_20ms", colors.sustainedLabel || "sustained @20ms", colors.sustained);
   add("rps_max_proxy", colors.maxLabel || "max proxy", colors.max);
   return out;
 }
-/* pathNote for a chooser-driven perf/stream lane in Same/Custom: name the exact chosen in→out cell (the
-   table shows THIS cell, not the peak passthrough). Peak defers to the lane's own pathNote. */
+/* laneAgeNote(j): the age of the RECORD THIS LANE SHOWS, from its own source.measured_at (audit #8).
+   The row badge ages the matrix, but a lane can project from a never-refreshed legacy suite (every
+   streaming column today comes from the stream suite) — ageing that lane by the matrix stamp overstates
+   its freshness. Empty when the record carries no stamp. */
+function laneAgeNote(j, now = Date.now()) {
+  const at = j && j.source && j.source.measured_at;
+  const age = at ? fmtAge(at, now) : "";
+  return age ? ` · measured ${age}` : "";
+}
+/* pathNote for a chooser-driven lane: ALWAYS routed through the lane's own pathNote — i.e. through
+   caption(j), keyed by the record's source.sweep (audit #6). The Same/Custom branch used to BYPASS
+   caption() with a hard-coded dialect sentence, which relabelled a stream-fallback record as "the
+   Same/Custom matrix cell". Now the chosen record is stamped at the choke point (stampChosen) so
+   caption() names the exact cell; the mode is appended as a UI hint only, never as provenance. */
 function lanePathNote(l, j, st = state) {
-  if ((l.key === "perf" || l.key === "stream") && st.mode !== "peak" && j) {
-    // The chosen cell's path travels under j.path (perf: ingress/egress; streaming: a single dialect).
-    const pth = j.path || {};
-    const ingress = pth.ingress ?? pth.dialect;
-    const egress = pth.egress ?? pth.dialect;
-    if (ingress != null && egress != null)
-      return ingress === egress
-        ? `${laneDialect(ingress)} passthrough (the ${st.mode === "same" ? "Same-dialect" : "chosen"} cell the table shows)`
-        : `${laneDialect(ingress)} in -> ${laneDialect(egress)} out (the chosen cell the table shows)`;
-  }
-  return l.pathNote ? l.pathNote(j) : "";
+  const base = l.pathNote ? l.pathNote(j) : "";
+  if (!base) return "";
+  const hint = (l.key === "perf" || l.key === "stream") && st.mode !== "peak"
+    ? ` (the ${st.mode === "same" ? "Same-dialect" : "chosen"} cell the table shows)` : "";
+  return `${base}${hint}${laneAgeNote(j)}`;
 }
 
 /* ---- state + URL codec ------------------------------------------------------ */
@@ -1095,13 +1175,25 @@ function streamingProvenance(data) {
 // The lead line for a chooser caption. For latency+throughput it is always the 6x6 matrix. For streaming
 // it depends on provenance: matrix → "the one 6x6 run"; fallback → the standalone stream suite (honest);
 // mixed → say so rather than over-claim.
+/* laneAgeSummary(data, lane): the age of the NEWEST record this lane actually shows across the board,
+   from g.lane_measured_at (audit #8). "" when no gateway stamps that lane. */
+function laneAgeSummary(data, lane, now = Date.now()) {
+  const stamps = ((data && data.gateways) || [])
+    .map((g) => g.lane_measured_at && g.lane_measured_at[lane]).filter(Boolean)
+    .map((a) => Date.parse(a)).filter(Number.isFinite);
+  if (!stamps.length) return "";
+  const age = fmtAge(new Date(Math.max(...stamps)).toISOString(), now);
+  return age ? `, measured ${age}` : "";
+}
 function chooserLead(view, data) {
   if (view !== "streaming") return "Per-cell latency + throughput from the one 6x6 run.";
   const prov = streamingProvenance(data).all;
   if (prov === "matrix") return "Per-cell streaming from the one 6x6 run.";
   if (prov === "mixed") return "Streaming: some gateways from the 6x6 run, some from the standalone stream suite (per-row provenance in the drawer).";
   // fallback (or no data yet): the streaming figures come from the standalone stream suite, not the matrix.
-  return "Streaming from the standalone stream suite (not the 6x6 matrix); the diagonal passthrough it measured.";
+  // AUDIT #8: age this tab by the STREAM SUITE's own stamp — the row badge ages the matrix, which this
+  // tab does not show, so quoting the matrix age here would overstate the freshness of every number on it.
+  return `Streaming from the standalone stream suite (not the 6x6 matrix); the passthrough it measured${laneAgeSummary(data, "stream")}.`;
 }
 function chooserCaption(view, st, data) {
   const lead = chooserLead(view, data);
@@ -1124,15 +1216,21 @@ function chooserCaption(view, st, data) {
        `Every gateway on the ${inL}→${outL} cell: client speaks ${inL}, upstream speaks ${outL}, the gateway translates both ways.`,
        "Every row is the identical cell, so it is apples-to-apples; a gateway that does not serve it reads n/a."];
 }
-const MEMORY_CAPTION = [
-  "An identical fixed load on each gateway's PEAK cell, measured on a fresh cold-restarted process (60 s idle → load → 60 s recovery). Same load recipe for every gateway, so it is apples-to-apples; only the cell differs (shown under Tested on).",
-  "Idle: cold-start RSS (median, no load). Peak: max RSS under the fixed load. Recovered @60s: RSS 60 s after the load stops — does it release?",
-  "Lower is better on every column. A gateway with no served cell reads n/a; the curve draws only when a series was recorded.",
-];
+// AUDIT #14: the window durations render from the data (idle_window_s / recovery_window_s), never
+// hard-coded — the harness makes them tunable and the caption must describe the run that happened.
+function memoryCaption(data = state.data) {
+  const w = boardMemWindows(data);
+  const I = memWindowLabel(w.idle), R = memWindowLabel(w.recovery);
+  return [
+    `An identical fixed load on each gateway's PEAK cell, measured on a fresh cold-restarted process (${I} idle → load → ${R} recovery). Same load recipe for every gateway, so it is apples-to-apples; only the cell differs (shown under Tested on).`,
+    `Idle: cold-start RSS (median, no load). Peak: max RSS under the fixed load. Recovered @${R}: RSS ${R} after the load stops — does it release?`,
+    "Lower is better on every column. A gateway with no served cell reads n/a; the curve draws only when a series was recorded.",
+  ];
+}
 function updateTableCaption(view) {
   const el = document.getElementById("table-caption");
   if (!el) return;
-  const lines = view === "memory" ? MEMORY_CAPTION : chooserCaption(view, state, state.data);
+  const lines = view === "memory" ? memoryCaption(state.data) : chooserCaption(view, state, state.data);
   el.innerHTML = lines.map((l) => esc(l)).join("<br>");
 }
 /* Memory tab: show the memory-recovery + memory-rss charts (charts.py PNGs) under the per-gateway table.
@@ -1185,7 +1283,9 @@ function renderTable() {
   thead.innerHTML = "<tr>" + cols.map((c) => {
     const sorted = state.sortCol === c.id;
     const dir = sorted ? `<span class="dir">${state.sortDesc ? " ▾" : " ▴"}</span>` : "";
-    return `<th data-col="${c.id}" class="${sorted ? "sorted" : ""}${c.sortable === false ? " nosort" : ""}" title="${esc(c.title || "")}">${esc(c.label)}${dir}</th>`;
+    // AUDIT #14: label/title may be a FUNCTION so a column whose wording depends on a tunable harness
+    // window (the memory windows) renders from the data instead of hard-coding the default.
+    return `<th data-col="${c.id}" class="${sorted ? "sorted" : ""}${c.sortable === false ? " nosort" : ""}" title="${esc(txt(c.title))}">${esc(txt(c.label))}${dir}</th>`;
   }).join("") + "</tr>";
 
   let rows = applyFilters(data.gateways, state);
@@ -1387,8 +1487,9 @@ function drawerHtml(g) {
     ${badge ? `<div class="drawer-measured">${badge}</div>` : ""}
   </header>`;
 
-  const hw = LANES.map((l) => g[l.key]).find((j) => j && j.hardware);
-  if (hw) h += `<p class="stamp muted">${esc(hw.hardware)}${hw.arch ? ` (${esc(hw.arch)})` : ""}</p>`;
+  // AUDIT #7: the hardware stamp of the DISPLAYED basis (the matrix), not a deleted legacy suite object.
+  const hw = gatewayHardware(g), arch = gatewayArch(g);
+  if (hw) h += `<p class="stamp muted">${esc(hw)}${arch ? ` (${esc(arch)})` : ""}</p>`;
 
   for (const l of LANES) {
     // CHOOSER-AWARE: the perf + streaming lanes read the SAME chosen cell the table shows in the
@@ -1418,7 +1519,7 @@ function drawerHtml(g) {
       h += `<dl>` + l.metrics.map((m) => ({ m, c: metric(j[m.k], m.fmt) })).filter((x) => !x.c.na).map(({ m, c }) => {
         const conc = c.env && c.env.concurrency;
         const cc = conc != null && c.v > 0 ? ` (@ c=${fmtInt(conc)})` : "";
-        return `<div><dt>${esc(m.label)}</dt><dd>${esc(c.text + cc)}</dd></div>`;
+        return `<div><dt>${esc(txt(m.label))}</dt><dd>${esc(c.text + cc)}</dd></div>`;
       }).join("") + `</dl>` + (l.extra ? l.extra(j) : "") + `${laneStamp(j)}`;
     }
     h += `</section>`;
@@ -1577,8 +1678,8 @@ function renderCompare() {
   h += `<tr><td class="metric">Class</td>${gws.map((g) => `<td>${esc(g.cls || "Gateway")}</td>`).join("")}</tr>`;
   h += `<tr><td class="metric">Language</td>${gws.map((g) => `<td>${esc(g.lang)}</td>`).join("")}</tr>`;
   h += `<tr><td class="metric">Build</td>${gws.map((g) => {
-    const j = LANES.map((l) => g[l.key]).find((x) => x && x.build);
-    const full = j ? j.build : "?";
+    // AUDIT #7: the build of the DISPLAYED basis (matrix / projected record), not a deleted legacy suite.
+    const full = gatewayBuild(g) || "?";
     /* image digests and long refs stay in the tooltip; the cell stays compact */
     let short = full.replace(/\s*\(@sha256:[0-9a-f]+\)/, "");
     if (short.length > 40) short = short.slice(0, 37) + "...";
@@ -1604,7 +1705,7 @@ function renderCompare() {
       // Each metric is a sealed envelope; mval() is its displayable value (null when suppressed/absent).
       const vals = recs.map((j) => (j && j[l.flag] !== false ? mval(j[m.k]) : null));
       const bi = bestIndex(vals, m.best);
-      h += `<tr><td class="metric">${esc(m.label)}</td>` + vals.map((v, i) => {
+      h += `<tr><td class="metric">${esc(txt(m.label))}</td>` + vals.map((v, i) => {
         if (v == null) {
           const j = recs[i];
           const na = j && j[l.flag] !== false ? { text: "n/a", note: "" } : naText(j, l.flag, l.err);
@@ -1626,11 +1727,12 @@ function renderCompare() {
     // curve cannot surface a number the headline hides (finding 22, now structural).
     const p = chooserCellPerf(g);
     const env = p && p.rps_sustained_20ms;
-    const shown = isEnvelope(env) && env.value != null;
+    // C5: read the number through mval(), never a bare `.value` deref (audit #15).
+    const v = mval(env);
     return {
       label: g.display, color: CMP_COLORS[i],
-      sweep: shown ? (env.sweep ?? null) : null,
-      peak: shown ? { rps: env.value, conc: env.concurrency ?? null } : null,
+      sweep: v != null ? (env.sweep ?? null) : null,
+      peak: v != null ? { rps: v, conc: concAt(env) } : null,
     };
   });
   renderSweepCharts(document.getElementById("cmp-sweeps"), series, chartTheme());
@@ -1969,12 +2071,20 @@ const fmtProjectAge = (firstCommit) => {
   return `${Math.max(1, Math.floor(days))} days`;
 };
 
-/* The gateway's measured BUILD string (version/tag as run): the first suite record carrying one -
-   every suite of a gateway ran the same single-box build, so any lane's stamp is THE stamp. */
+/* AUDIT #7: the DISPLAYED basis, not the legacy suite files. `g[l.key]` read g.perf / g.stream / g.xlate —
+   raw suite objects the emit step DELETES from the bundle — so the roster "Version", the run-mode icon and
+   the compare "Build" row were reading a source the board no longer publishes (and, before the delete, the
+   stamp of a run whose numbers are not on screen). Read the stamp of what is SHOWN: the matrix (the sole
+   source of every projected number), falling back to a projected record's own source.build. */
+const displayedRecords = (g) => [g.best_cell, g.translation_cell, g.streaming, g.memory_read].filter(Boolean);
 const gatewayBuild = (g) => {
-  const j = LANES.map((l) => g[l.key]).find((x) => x && x.build);
-  return j ? j.build : null;
+  if (g && g.matrix && g.matrix.build) return g.matrix.build;
+  const rec = displayedRecords(g || {}).find((r) => r.source && r.source.build);
+  return rec ? rec.source.build : null;
 };
+/* The hardware the DISPLAYED numbers were measured on: the matrix stamp (sole source). */
+const gatewayHardware = (g) => (g && g.matrix && g.matrix.hardware) || null;
+const gatewayArch = (g) => (g && g.matrix && g.matrix.arch) || null;
 /* HOW the gateway was run for the benchmark: its official Docker image vs a native/source binary.
    Inferred from the build stamp - an image ref (registry/repo:tag or an @sha256 digest) is docker;
    a bare version/commit ("...@9649b27 (source build)") is a native binary. This is real context, not
@@ -2319,7 +2429,7 @@ if (NODE) {
     CHOOSER_MODES, chooserCellPerf, chooserDialects, chooserPerfCell, chooserCellStream, chooserStreamCell, chooserHasCell, deltaToPeak, cellPopFull,
     laneRecord, lanePathNote, perfSweepSeries,
     chooserCaption, chooserLead, streamingProvenance,
-    MEMORY_CAPTION, memLoadCellLabel, memLoadRecipeTip,
+    memoryCaption, memWindows, boardMemWindows, memLoadCellLabel, memLoadRecipeTip,
     canonicalPerf, canonicalXlate, canonicalStreaming, canonicalMemory, metric, mval, isEnvelope, caption, SWEEP_CAPTION, gatewayResultsJson, DEFAULT_VIEW, VIEW_LABELS, rosterRows, fmtStars,
     configCorrectionUrl, BENCH_REPO, fmtInt, fmtAdded,
     HOME_VIEW, homeCardsHtml,

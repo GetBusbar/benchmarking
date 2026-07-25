@@ -60,14 +60,15 @@ def chart_by_name(name):
 # ── seal helper: mirror seal.mjs / gen-data so fixtures express RAW intent (value + mock_bound) and get
 #    sealed into the SAME envelope shape the real bundle carries. A gated metric is certified only when
 #    present + (0 [measured-zero] OR (>0 AND flag is False)); else suppressed (value:null). ─────────────
-def _seal(value, gated=False, flag=None, extras=None, zero_measured=True):
+def _seal(value, gated=False, flag=None, extras=None, zero_note="no_qualifying_ceiling"):
     if value is None:
         return {"value": None, "certified": False, "suppressed": False, "reason": "not_measured"}
     if gated:
+        # AUDIT #3: a measured 0 is ALWAYS certified; its NOTE names what the zero means. Only null is
+        # "not measured". (This mirror used to fold a streaming 0 into not_measured, hiding a real
+        # measured failure behind an unmeasured cell.)
         if value == 0:
-            return ({"value": 0, "certified": True, "suppressed": False, "note": "no_qualifying_ceiling"}
-                    if zero_measured
-                    else {"value": None, "certified": False, "suppressed": False, "reason": "not_measured"})
+            return {"value": 0, "certified": True, "suppressed": False, "note": zero_note}
         if not (value > 0 and flag is False):
             reason = "mock_bound" if flag is True else "unverifiable"
             return {"value": None, "certified": False, "suppressed": True, "reason": reason}
@@ -99,9 +100,25 @@ def stream(**over):
     rec = {"stream_served": True, "path": {"dialect": "openai"}, "source": _SRC,
            "added_ttft_p99_us": _seal(raw["added_ttft_p99_us"]),
            "added_gap_p99_us": _seal(raw["added_gap_p99_us"]),
-           "streams_sustained_fps": _seal(raw["streams_sustained_fps"]),
-           "streams_sustained": _seal(raw["streams_sustained"], gated=True, flag=raw["streams_sustained_mock_bound"], zero_measured=False),
-           "cpu_fps": _seal(raw["cpu_fps"], gated=True, flag=raw["cpu_fps_mock_bound"], zero_measured=False)}
+           "streams_sustained_fps": _seal(raw["streams_sustained_fps"], gated=True, flag=raw["streams_sustained_mock_bound"], zero_note="measured_failure"),
+           "streams_sustained": _seal(raw["streams_sustained"], gated=True, flag=raw["streams_sustained_mock_bound"], zero_note="measured_failure"),
+           "cpu_fps": _seal(raw["cpu_fps"], gated=True, flag=raw["cpu_fps_mock_bound"], zero_note="measured_failure")}
+    return rec
+
+
+# _mem(**over): a SEALED memory_read record — the shape gen-data actually emits (every *_rss_mib field
+# is an envelope, never a bare scalar). RSS is UNGATED, so a present value is certified and an absent one
+# seals to not_measured. Null-safe by construction: the producer emits NULL (not a fabricated 0) for an
+# RSS it could not obtain, and every consumer must render that as "not measured".
+def _mem(**over):
+    rec = {"source": {"kind": "matrix", "sweep": "6x6-memory-window", "build": "x",
+                      "measured_at": "2026-01-01T00:00:00Z"}, "served": True}
+    for k in ("idle_rss_mib", "peak_rss_mib", "recovered_rss_mib"):
+        if k in over:
+            rec[k] = _seal(over[k])
+    for k, v in over.items():
+        if not k.endswith("_rss_mib"):
+            rec[k] = v
     return rec
 
 
@@ -120,9 +137,37 @@ check("_proj_streaming: cpu_fps mock_bound True -> streamcpu_valid False", chart
 _canon({"g": stream(cpu_fps_mock_bound=None)})
 check("_proj_streaming: cpu_fps mock_bound None (unverifiable) -> streamcpu_valid False", charts._proj_streaming("g")["streamcpu_valid"], False)
 
-# cpu_fps == 0 (no valid measurement) -> NOT valid even with mock_bound False.
+# AUDIT #3: cpu_fps == 0 with mock_bound False is a MEASURED FAILURE (the gateway relayed no qualifying
+# frames), NOT "not measured". It stays a REAL reading (valid) and is rendered as the failure it is; only
+# a NULL is unmeasured. Folding the measured zero into "not measured (rig-limited)" flattered the gateway.
 _canon({"g": stream(cpu_fps=0)})
-check("_proj_streaming: cpu_fps 0 -> streamcpu_valid False", charts._proj_streaming("g")["streamcpu_valid"], False)
+_r0 = charts._proj_streaming("g")
+check("AUDIT #3: cpu_fps measured 0 is a REAL reading, not 'not measured'", _r0["streamcpu_valid"], True)
+check("AUDIT #3: cpu_fps measured 0 keeps its value (0, not None)", _r0["streamcpu_frames_per_sec"], 0)
+_canon({"g": stream(streams_sustained=0, streams_sustained_fps=0)})
+_s0 = charts._proj_streaming("g")
+check("AUDIT #3: a measured stream-sustain FAILURE is 0, distinguishable from unmeasured",
+      (_s0["stream_sustained_streams"], _s0["stream_sustained_valid"], _s0["stream_sustained_note"]),
+      (0, True, "measured_failure"))
+_canon({"g": stream(streams_sustained=None)})
+_sn = charts._proj_streaming("g")
+check("AUDIT #3: an UNMEASURED stream-sustain is None and not valid (the other state)",
+      (_sn["stream_sustained_streams"], _sn["stream_sustained_valid"]), (None, False))
+# AUDIT #2: the streaming lane carries its PROVENANCE stamp so the PNGs can disclose it.
+_canon({"g": stream()})
+check("AUDIT #2: _proj_streaming carries the streaming lane's source sweep stamp",
+      charts._proj_streaming("g")["_stream_source"], "6x6-stream-diagonal")
+check("AUDIT #2: _stream_annot discloses a legacy stream-suite provenance",
+      charts._stream_annot({"_stream_source": "stream-suite"}), "stream suite")
+check("AUDIT #2: _stream_annot adds NO suffix for a matrix-sourced record",
+      charts._stream_annot({"_stream_source": "6x6-stream-diagonal"}), None)
+# AUDIT #23: a BARE unsealed scalar is REJECTED, never silently charted.
+try:
+    charts.mval(1234)
+    check("AUDIT #23: mval REJECTS a bare unsealed scalar", "no error", "SystemExit")
+except SystemExit:
+    check("AUDIT #23: mval REJECTS a bare unsealed scalar", "SystemExit", "SystemExit")
+check("AUDIT #23: mval still accepts absent (None) as not-measured", charts.mval(None), None)
 
 # sustained mock-bound True / None -> NOT valid (symmetric with cpu-fps, MEDIUM-R2-2 + M4 upstream).
 _canon({"g": stream(streams_sustained_mock_bound=True)})
@@ -308,10 +353,13 @@ check("MED-3: the clean max-proxy RPS IS ranked", "clean" in proxy_topn, True)
 rec_chart = chart_by_name("memory_recovery")
 check("memory_recovery chart is null_not_served (no fabricated 0 for a pre-recovery bundle)",
       rec_chart.null_not_served, True)
+# AUDIT #23: SEALED fixtures. These used to be BARE SCALARS — encoding the exact bug charts.py's mval()
+# used to tolerate, so the test asserted the tolerance instead of the contract. A bare scalar in the
+# bundle is now a hard error, and the fixtures state what the real bundle actually carries.
 charts.CANON = {
-    "recovers": {"memory_read": {"idle_rss_mib": 40, "peak_rss_mib": 1000, "recovered_rss_mib": 45}},
-    "pinned":   {"memory_read": {"idle_rss_mib": 60, "peak_rss_mib": 900,  "recovered_rss_mib": 880}},
-    "oldbundle":{"memory_read": {"idle_rss_mib": 50, "peak_rss_mib": 800}},  # pre-recovery: no field
+    "recovers": {"memory_read": _mem(idle_rss_mib=40, peak_rss_mib=1000, recovered_rss_mib=45)},
+    "pinned":   {"memory_read": _mem(idle_rss_mib=60, peak_rss_mib=900,  recovered_rss_mib=880)},
+    "oldbundle":{"memory_read": _mem(idle_rss_mib=50, peak_rss_mib=800)},  # pre-recovery: no field
 }
 charts.GATEWAYS = {k: k for k in charts.CANON}
 mrows = {r["_key"]: r for r in charts._load("memory")}
@@ -331,8 +379,8 @@ rss_chart = chart_by_name("memory_rss")
 check("memory_rss chart is null_not_served (no fabricated 0 peak for a no-served-cell gateway)",
       rss_chart.null_not_served, True)
 charts.CANON = {
-    "measured": {"memory_read": {"idle_rss_mib": 40, "peak_rss_mib": 900}},
-    "nocell":   {"memory_read": {"idle_rss_mib": None, "peak_rss_mib": None}},  # no served cell → nulls
+    "measured": {"memory_read": _mem(idle_rss_mib=40, peak_rss_mib=900)},
+    "nocell":   {"memory_read": _mem(idle_rss_mib=None, peak_rss_mib=None)},  # no served cell → nulls
 }
 charts.GATEWAYS = {k: k for k in charts.CANON}
 rss_topn = charts._topn_keys(rss_chart, n=5)

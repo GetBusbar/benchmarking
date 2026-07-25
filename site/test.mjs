@@ -1593,7 +1593,7 @@ test("Memory tab attributes each gateway's peak cell (load_cell) and states the 
   const bare = { key: "b", display: "B", lang: "Rust", memory_read: memRec({ idle_rss_mib: 40, peak_rss_mib: null, recovered_rss_mib: null }) };
   assert.equal(memcell.get(bare).na, true);
   // The caption states the fixed identical load + cold-restart, NOT a "6x6 drives memory" claim.
-  const cap = app.MEMORY_CAPTION.join(" ");
+  const cap = app.memoryCaption({ gateways: [] }).join(" ");
   assert.ok(/identical fixed load/i.test(cap) && /cold-?restart/i.test(cap), "caption states the fair fixed-load basis + cold restart");
   assert.ok(!/6x6 (sweep )?drives/i.test(cap), "caption drops any 6x6-drives-memory wording");
 });

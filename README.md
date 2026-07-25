@@ -178,11 +178,14 @@ translation cell, the guard has a hole.
 
 **Memory** (folded into `matrix/`) - resident memory across a request's life (matters most at GB scale):
 
-- **idle RSS** - right after the gateway first answers `200`, before any load.
-- **peak RSS** - highest RSS under sustained large-payload load.
-- **post-load RSS** - 60 s after load stops: does it release, or stay pinned? A gateway that pools
-  memory and never returns it looks bounded on a boot-time `docker stats` but stays pinned at peak
-  under sustained load.
+- **idle RSS** - the MEDIAN over the cold-idle window on a freshly restarted process, sampled *before*
+  it serves any request (a warm post-sweep process would measure "recovered", not "idle").
+- **peak RSS** - the max RSS sampled continuously while the identical fixed load runs on that gateway's
+  peak cell.
+- **recovered RSS** - the RSS at the END of the recovery window after the load stops: does it release,
+  or stay pinned? A gateway that pools memory and never returns it looks bounded on a boot-time
+  `docker stats` but stays pinned at peak under sustained load. (`post_load_rss_mib` is a back-compat
+  alias of this field.)
 
 ## Methodology - the choices, explained
 
@@ -213,8 +216,15 @@ A **mock-ceiling guardrail** measures the mock's own throughput each sweep and f
 within 10% of it - so a number that's really the *harness's* limit is marked a floor, never sold as
 the gateway's ceiling.
 
-**Memory.** Sustained 150 KB payloads at high concurrency, sampling idle / peak / post-load RSS - the
-arc that separates a bounded working set from an unbounded pool that eats the node.
+**Memory.** The **post-6x6 memory window**, not a synthetic burst (the old standalone 150 KB x 1500c
+suite is deleted - it mislabelled itself as 6x6 provenance). After the 6x6 sweep completes, the gateway
+is **cold-restarted**, its **cold idle RSS** is sampled before it serves a single request, then the
+**identical fixed load** (same concurrency, payload and duration for every gateway - `MATRIX_MEM_CONC`
+/ `MATRIX_MEM_PAYLOAD` / `MATRIX_MEM_DUR`) runs on **that gateway's own peak cell**, and RSS is sampled
+through a recovery window after the load stops. One process lifecycle, so the idle -> peak -> recovered
+arc is a real curve. Windows are tunable (`MEM_IDLE_S` / `MEM_SETTLE_S`) and travel in the result, so
+every published label renders the durations the run actually used. Any RSS the sampler cannot obtain is
+**null, never a fabricated 0**.
 
 ## Add a gateway
 
