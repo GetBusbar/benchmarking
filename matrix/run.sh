@@ -137,18 +137,30 @@ MATRIX_STREAMCPU_STALL_MS="${MATRIX_STREAMCPU_STALL_MS:-250}"
 MATRIX_STREAMCPU_DUR="${MATRIX_STREAMCPU_DUR:-16}"
 MATRIX_STREAMCPU_FPS_BOUNDS="${MATRIX_STREAMCPU_FPS_BOUNDS:-8 512}"  # [lo,hi] for the cpu-fps peak search
 
-# ── memory ONCE (folded in via memory/run.sh's logic, relocated here) ─────────────────────────────
-# Idle + peak RSS is a PROCESS-LEVEL number (not per-cell), measured ONE time during the matrix run
-# under a sustained load against the gateway's default config. MATRIX_MEMORY=0 disables it. Knobs
-# mirror memory/run.sh. The gateway's own gw_rss()/gw_hwm() manifest hooks are the measurement, so a
-# manifest with no gw_rss (the mock-gateway fixture) degrades to 0/null, exactly like memory/run.sh.
+# ── memory: ONE continuous per-gateway RSS track across the real 6x6 run ──────────────────────────
+# CLEAN PROTOCOL (matrix-sole-source): memory is NOT a separate synthetic suite. It is one continuous
+# RSS track over the SAME 6x6 run every other number comes from — no second measurement:
+#   idle       = the stable RSS over a 60 s window BEFORE the matrix run starts (gateway launched, no load),
+#   peak       = the MAX RSS observed continuously across the ENTIRE 6x6 sweep (all cells),
+#   recovered  = the RSS at the end of a 60 s window AFTER the last cell (does it release?),
+#   rss_series = the whole thing (idle-before -> 6x6 -> 60 s-after), downsampled to <=~120 points.
+# The measurement is the gateway's own gw_rss()/gw_hwm() manifest hooks (shared /proc tree helpers in
+# lib/harness.sh); a manifest with no gw_rss (the mock-gateway fixture) degrades to 0/null cleanly.
+# MATRIX_MEMORY=0 disables it. The synthetic 150 KB x 1500 load is GONE — the 6x6 sweep IS the load.
 MATRIX_MEMORY="${MATRIX_MEMORY:-1}"
-MEM_PSIZE="${MEM_PSIZE:-150000}"; MEM_CONC="${MEM_CONC:-1500}"; MEM_DUR="${MEM_DUR:-120}"
-MEM_CAP_MIB="${MEM_CAP_MIB:-40000}"
-# Post-load settle wait: after the sustained load stops, how long to wait before reading post-load RSS
-# (does memory release?). Field default 60s; a local dev verifier shrinks it (MEM_SETTLE_S=2) so the
-# minutes-long local run isn't dominated by a fixed 60s sleep. The measurement itself is unchanged.
+MEM_CAP_MIB="${MEM_CAP_MIB:-40000}"   # watchdog: log a runaway RSS (never kills the real sweep)
+# Idle window BEFORE the run: how long to sample RSS with the gateway launched but under no load.
+# Field default 60 s; a local dev verifier shrinks it (MEM_IDLE_S=2) so a minutes-long local run isn't
+# dominated by fixed sleeps. idle_rss_mib is the LAST sample of this window (a settled idle).
+MEM_IDLE_S="${MEM_IDLE_S:-60}"
+# Recovery (drop-down) window AFTER the last cell: how long to wait before reading recovered RSS (does
+# memory release?). Field default 60 s; the dev verifier shrinks it (MEM_SETTLE_S=2). recovered_rss_mib
+# is the RSS at the END of this window; post_load_rss_mib is kept as an alias for back-compat.
 MEM_SETTLE_S="${MEM_SETTLE_S:-60}"
+# Series sampling cadence across the WHOLE run (idle -> 6x6 -> recovery). Cheap: one gw_rss read every
+# MEM_SAMPLE_S seconds. rss_series_json downsamples to <=~120 points, so a long run stays bounded and
+# the sampler never perturbs the sweep.
+MEM_SAMPLE_S="${MEM_SAMPLE_S:-5}"
 # ADAPTIVE RUNG SELECTION + shared rig baselines (lib/sweep.sh knobs; see its header). A gateway
 # that serves the whole 6x6 sweeps up to 36 cells, and the naive per-cell cost (~4 min: 15 fixed
 # ladder rungs + a re-measured direct c1 baseline + 2 re-measured mock ceilings, per cell) put this
@@ -991,24 +1003,34 @@ warm_up(){ # egress
   return 1
 }
 
-# ── memory ONCE (relocated from memory/run.sh) ───────────────────────────────────────────────────
-# Idle + peak RSS is a PROCESS-LEVEL number, so it is measured ONE time per gateway (not per cell).
-# Relaunch the gateway under its DEFAULT config (gw_launch), point it at a plain mock, warm it, record
-# idle RSS, then drive a sustained large-payload load while a 0.3s sampler tracks peak VmRSS (and a
-# watchdog kills the load at MEM_CAP_MIB so an unbounded gateway can't OOM the box). VmHWM is read at
-# teardown (survives until process exit), and post-load RSS 60s after load stops (does it release?).
-# The measurement is the gateway's own gw_rss()/gw_hwm() manifest hooks (shared /proc tree helpers in
-# lib/harness.sh); a manifest without gw_rss (the mock-gateway fixture) degrades to 0/null cleanly.
-# Sets MEMORY_JSON (a top-level `"memory": {...}` object) folded into the final result.
+# ── memory: ONE continuous per-gateway RSS track across the real 6x6 run ──────────────────────────
+# The synthetic 150 KB x 1500 load is GONE. Memory is now ONE continuous RSS track that spans the SAME
+# 6x6 run every other number comes from, in three phases:
+#   matrix_memory_start  — BEFORE the loop: launch the gateway (default config), warm it, sample RSS for
+#                          MEM_IDLE_S (60 s) with NO load -> idle_rss_mib (the settled idle, last sample),
+#                          then start ONE cheap background sampler (a gw_rss read every MEM_SAMPLE_S) that
+#                          appends `<t_s> <rss_mib>` to the series file and tracks the running peak.
+#   (the 6x6 loop runs) — the SAME sampler keeps running across the whole sweep (all cells, all
+#                          relaunches); peak_rss_mib = the max it observes over the entire run.
+#   matrix_memory_finish — AFTER the last cell: read VmHWM, sample RSS for MEM_SETTLE_S (60 s drop-down
+#                          window) -> recovered_rss_mib (the RSS at the END of that window), stop the
+#                          sampler, and build rss_series (idle-before -> 6x6 -> 60 s-after, <=~120 pts).
+# The sampler SKIPS empty/zero reads (a relaunch gap between egress columns momentarily has no process)
+# so the curve/peak is never a fabricated 0 — an absent gateway just contributes no sample. Sampling is
+# cheap (one gw_rss + one awk per MEM_SAMPLE_S) and runs off the critical path, so it never perturbs the
+# sweep. Sets MEMORY_JSON (a top-level `"memory": {...}` object) folded into the final result.
+# gw_rss()/gw_hwm() are the gateway's own manifest hooks; a manifest without gw_rss degrades to 0/null.
 MEMORY_JSON=""
-matrix_measure_memory(){
+# File-scope state shared between _start and _finish (the sampler outlives the whole 6x6 loop).
+MEM_OK=0 MEM_ERR="" MEM_IDLE=0 MEM_PEAKF="" MEM_SERIESF="" MEM_START_EPOCH=0 MEM_ACTIVE=0
+matrix_memory_start(){
+  MEM_ACTIVE=0
   [ "$MATRIX_MEMORY" = 1 ] || return 0
-  if suite_deadline_expired; then log "[$GATEWAY] suite ceiling reached - skipping the memory-once measurement"; return 0; fi
-  log "[$GATEWAY] memory-once: relaunching under the default config for idle/peak RSS"
+  log "[$GATEWAY] memory: launching (default config) for the 60 s idle-before window"
   gw_stop 2>/dev/null; sleep 1
-  # Plain instant mock (no recording, no streaming): the same serving conditions memory/run.sh uses.
+  # Plain instant mock (no recording): a representative idle. The 6x6 loop relaunches per egress against
+  # the recording mock; the sampler follows the process by name (gw_rss) across every relaunch.
   mock_start_plain
-  local mem_ok=0 mem_err=""
   _mem_ready(){
     rebuild_headers
     local i st
@@ -1020,58 +1042,63 @@ matrix_measure_memory(){
     done
     return 1
   }
-  if harness_launch_ready gw_launch _mem_ready; then mem_ok=1; else mem_err="$HARNESS_SERVE_ERR"; fi
-  local IDLE PEAK=0 HWM POST RECOVERED="" RSS_SERIES="[]" STOP PEAKF LOADPIDF SERIESF SP START_EPOCH _s_end
-  IDLE=$(gw_rss); log "[$GATEWAY] memory-once idle RSS: ${IDLE:-?} MiB (served=$([ "$mem_ok" = 1 ] && echo true || echo false))"
-  if [ "$mem_ok" = 1 ]; then
-    STOP="${TMPDIR:-/tmp}/mtxmem.$$.stop"; PEAKF="${TMPDIR:-/tmp}/mtxmem.$$.peak"; LOADPIDF="${TMPDIR:-/tmp}/mtxmem.$$.loadpid"
-    SERIESF="${TMPDIR:-/tmp}/mtxmem.$$.series"
-    rm -f "$STOP" "$PEAKF" "$LOADPIDF" "$SERIESF"; echo 0 >"$PEAKF"; : >"$SERIESF"
-    # LOW-6: publish the STOP file to FILE SCOPE before the sampler launches so the EXIT/INT/TERM trap can
-    # stop it on an early exit; MEM_SP is set to the poller PID immediately after launch.
-    MEM_STOP="$STOP"
-    # START_EPOCH anchors the rss_series t_s; the sampler appends a `<t_s> <rss_mib>` line every ~2s
-    # (SERIES_EVERY 0.3s ticks) across idle→ramp→load, and the settle loop below extends it into
-    # recovery — a bounded (~90-120 pt) idle→peak→recovery curve. The fast 0.3s peak/watchdog cadence
-    # is unchanged; the series is a cheap subsample off it and never perturbs the load.
-    START_EPOCH=$(date +%s)
-    ( PEAK=0; tick=0; while [ ! -f "$STOP" ]; do
-        v=$(gw_rss); [ -z "$v" ] && v=0
-        awk -v v="$v" -v p="$PEAK" 'BEGIN{exit !(v+0>p+0)}' && { PEAK=$v; echo "$PEAK" >"$PEAKF"; }
-        awk -v v="$v" -v c="$MEM_CAP_MIB" 'BEGIN{exit !(v+0>c+0)}' && { echo "[watchdog] $v MiB > cap $MEM_CAP_MIB — killing load"; lp=$(cat "$LOADPIDF" 2>/dev/null); [ -n "$lp" ] && kill "$lp" 2>/dev/null; touch "$STOP"; }
-        if [ "$((tick % 7))" -eq 0 ]; then echo "$(( $(date +%s) - START_EPOCH )) $v" >>"$SERIESF"; fi
-        tick=$((tick + 1))
-        sleep 0.3
-      done ) & SP=$!; MEM_SP=$SP
-    log "[$GATEWAY] memory-once load: ${MEM_PSIZE}B payloads, c=$MEM_CONC, ${MEM_DUR}s (watchdog cap ${MEM_CAP_MIB} MiB)"
-    taskset -c "$LOADCORES" "$UGEN" -url "http://127.0.0.1:$GW_PORT$GW_PATH" \
-      -model "$GW_MODEL" -auth "$GW_AUTH" -c "$MEM_CONC" -d "$MEM_DUR" -psize "$MEM_PSIZE" ${CURL_H[@]+"${CURL_H[@]}"} &
-    local LOAD_PID=$!; echo "$LOAD_PID" >"$LOADPIDF"; wait "$LOAD_PID" 2>/dev/null || true
-    touch "$STOP"; kill "$SP" 2>/dev/null
-    MEM_STOP="" MEM_SP=""   # LOW-6: sampler stopped normally — clear the trap handles so cleanup is a no-op
-    PEAK=$(cat "$PEAKF" 2>/dev/null); PEAK=${PEAK:-0}
-    HWM=$(gw_hwm)   # VmHWM must be read BEFORE the gateway stops (the counter dies with the process)
-    log "[$GATEWAY] memory-once high-water mark: ${HWM:-n/a} MiB (VmHWM; sampled peak ${PEAK} MiB)"
-    # Settle window: fast sampler stopped, so poll RSS here every ~2s to extend the recovery curve and
-    # capture RECOVERED — resident memory MEM_SETTLE_S (60s field) after load ends (does it give memory
-    # back?). post_load_rss_mib is kept as an alias of the same 60s-after-load sample for back-compat.
-    log "[$GATEWAY] memory-once load stopped — waiting ${MEM_SETTLE_S}s to see if memory releases (recovery)"
-    _s_end=$(( $(date +%s) + MEM_SETTLE_S ))
-    while [ "$(date +%s)" -lt "$_s_end" ]; do
-      RECOVERED=$(gw_rss); [ -z "$RECOVERED" ] && RECOVERED=0
-      echo "$(( $(date +%s) - START_EPOCH )) $RECOVERED" >>"$SERIESF"
-      sleep 2
-    done
-    POST=$(gw_rss); [ -z "$POST" ] && POST="$RECOVERED"
-    [ -z "$RECOVERED" ] && RECOVERED="$POST"
-    echo "$(( $(date +%s) - START_EPOCH )) ${POST:-0}" >>"$SERIESF"
-    RSS_SERIES=$(rss_series_json "$SERIESF")
-    rm -f "$STOP" "$PEAKF" "$LOADPIDF" "$SERIESF" 2>/dev/null
+  if harness_launch_ready gw_launch _mem_ready; then MEM_OK=1; else MEM_OK=0; MEM_ERR="$HARNESS_SERVE_ERR"; fi
+  if [ "$MEM_OK" != 1 ]; then
+    log "[$GATEWAY] memory: gateway did not serve for the idle window (served=false) - memory will read not-served"
+    return 0
+  fi
+  MEM_PEAKF="${TMPDIR:-/tmp}/mtxmem.$$.peak"; MEM_SERIESF="${TMPDIR:-/tmp}/mtxmem.$$.series"
+  local STOP="${TMPDIR:-/tmp}/mtxmem.$$.stop"
+  rm -f "$STOP" "$MEM_PEAKF" "$MEM_SERIESF"; echo 0 >"$MEM_PEAKF"; : >"$MEM_SERIESF"
+  MEM_STOP="$STOP"   # LOW-6: file-scope so cleanup()'s trap can stop the sampler on an early exit
+  MEM_START_EPOCH=$(date +%s)
+  # ONE background sampler for the WHOLE run: appends `<t_s> <rss_mib>` every MEM_SAMPLE_S and advances
+  # the running peak. Skips empty/zero reads (relaunch gaps) so neither the curve nor the peak is a
+  # fabricated 0. A runaway RSS is LOGGED (watchdog) but the real sweep is never killed.
+  ( while [ ! -f "$STOP" ]; do
+      v=$(gw_rss); [ -z "$v" ] && v=0
+      if awk -v v="$v" 'BEGIN{exit !(v+0>0)}'; then
+        echo "$(( $(date +%s) - MEM_START_EPOCH )) $v" >>"$MEM_SERIESF"
+        awk -v v="$v" -v p="$(cat "$MEM_PEAKF" 2>/dev/null)" 'BEGIN{exit !(v+0>p+0)}' && echo "$v" >"$MEM_PEAKF"
+        awk -v v="$v" -v c="$MEM_CAP_MIB" 'BEGIN{exit !(v+0>c+0)}' && echo "[$GATEWAY][mem watchdog] RSS $v MiB > cap $MEM_CAP_MIB (logged; sweep not killed)"
+      fi
+      sleep "$MEM_SAMPLE_S"
+    done ) & MEM_SP=$!
+  MEM_ACTIVE=1
+  # idle_rss_mib: sample RSS across the 60 s idle-before window (gateway up, NO load) and take the LAST
+  # (settled) reading. The sampler is already logging these into the series, so this window IS the head
+  # of the curve.
+  local _end idle; _end=$(( $(date +%s) + MEM_IDLE_S )); idle=$(gw_rss)
+  while [ "$(date +%s)" -lt "$_end" ]; do sleep "$MEM_SAMPLE_S"; local r; r=$(gw_rss); [ -n "$r" ] && idle="$r"; done
+  MEM_IDLE=${idle:-0}
+  log "[$GATEWAY] memory: idle-before window done, idle_rss=${MEM_IDLE} MiB - starting the 6x6 sweep (sampler running)"
+}
+# Called AFTER the 6x6 loop: recovery window + finalize. Reads peak from the running sampler, VmHWM
+# before teardown, the recovered RSS at the end of the 60 s drop-down window, then stops the sampler and
+# builds the rss_series. Emits MEMORY_JSON.
+matrix_memory_finish(){
+  [ "$MATRIX_MEMORY" = 1 ] || return 0
+  local peak=0 hwm post recovered="" series="[]"
+  if [ "$MEM_ACTIVE" = 1 ]; then
+    hwm=$(gw_hwm)   # VmHWM must be read BEFORE the gateway stops (the counter dies with the process)
+    log "[$GATEWAY] memory: 6x6 sweep done - waiting ${MEM_SETTLE_S}s recovery window (does it release?)"
+    local _end; _end=$(( $(date +%s) + MEM_SETTLE_S ))
+    while [ "$(date +%s)" -lt "$_end" ]; do local r; r=$(gw_rss); [ -n "$r" ] && recovered="$r"; sleep "$MEM_SAMPLE_S"; done
+    post=$(gw_rss); [ -n "$post" ] && recovered="$post"
+    [ -n "$MEM_STOP" ] && touch "$MEM_STOP"; [ -n "$MEM_SP" ] && kill "$MEM_SP" 2>/dev/null
+    MEM_STOP="" MEM_SP=""   # sampler stopped normally - clear the trap handles
+    peak=$(cat "$MEM_PEAKF" 2>/dev/null); peak=${peak:-0}
+    series=$(rss_series_json "$MEM_SERIESF")
+    rm -f "$MEM_PEAKF" "$MEM_SERIESF" "${TMPDIR:-/tmp}/mtxmem.$$.stop" 2>/dev/null
+    log "[$GATEWAY] memory: peak=${peak} hwm=${hwm:-n/a} recovered=${recovered:-n/a} MiB (continuous track)"
   fi
   MEMORY_JSON="
-  \"memory\": {\"served\": $([ "$mem_ok" = 1 ] && echo true || echo false), \"serve_error\": \"$(json_escape "$mem_err")\", \"idle_rss_mib\": ${IDLE:-0}, \"peak_rss_mib\": ${PEAK:-0}, \"peak_rss_hwm_mib\": ${HWM:-null}, \"post_load_rss_mib\": ${POST:-0}, \"recovered_rss_mib\": ${RECOVERED:-null}, \"rss_series\": ${RSS_SERIES:-[]}, \"payload_bytes\": $MEM_PSIZE, \"concurrency\": $MEM_CONC, \"duration_s\": $MEM_DUR},"
-  log "[$GATEWAY] memory-once: idle=${IDLE:-0} peak=${PEAK:-0} hwm=${HWM:-n/a} recovered=${RECOVERED:-n/a} MiB"
+  \"memory\": {\"served\": $([ "$MEM_OK" = 1 ] && echo true || echo false), \"serve_error\": \"$(json_escape "$MEM_ERR")\", \"idle_rss_mib\": ${MEM_IDLE:-0}, \"peak_rss_mib\": ${peak:-0}, \"peak_rss_hwm_mib\": ${hwm:-null}, \"post_load_rss_mib\": ${post:-${recovered:-0}}, \"recovered_rss_mib\": ${recovered:-null}, \"rss_series\": ${series:-[]}, \"idle_window_s\": $MEM_IDLE_S, \"recovery_window_s\": $MEM_SETTLE_S, \"track\": \"continuous-6x6\"},"
 }
+
+# MEMORY, phase 1: the 60 s idle-before window + start the continuous sampler, BEFORE the 6x6 loop. The
+# sampler keeps running across every cell and relaunch; matrix_memory_finish closes it after the sweep.
+matrix_memory_start
 
 UPSTREAMS_JSON=""
 COMPAT_CELLS=""; COMPAT_SHAPE=""; COMPAT_SERVED=false; COMPAT_ERR=""
@@ -1151,9 +1178,10 @@ for EGRESS in $EGRESS_ALL; do
   SERVE_ERR=""
 done
 
-# Memory ONCE, after the 6x6 (it relaunches the gateway under the default config with a large-payload
-# sustained load — a process-level number, not per-cell). Folded into the result as top-level "memory".
-matrix_measure_memory
+# MEMORY, phase 2: the 60 s recovery (drop-down) window + finalize. The continuous sampler started in
+# matrix_memory_start tracked peak across the whole 6x6 above; this closes it and reads recovered. The
+# whole idle-before -> 6x6 -> 60 s-after track is folded into the result as top-level "memory".
+matrix_memory_finish
 
 cat > "$RESULTS/$GATEWAY.json" <<JSON
 {
