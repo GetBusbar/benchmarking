@@ -732,6 +732,15 @@ def _proj_memory(key: str) -> dict | None:
     if not g.get("matrix"):
         return None          # never measured at all: no row to draw, and none to claim
     m = _cell_memory(key, d, d)
+    # THE WINDOW'S OWN VERDICT, not just the cell's capability verdict. A cell can serve perfectly well
+    # while its MEMORY window is disclosed as not-served: the producer sets memory.served=false when the
+    # fixed load stopped delivering or the declared payload was not the delivered payload, and in that
+    # state the load-phase numbers are withheld but idle_rss_mib / recovered_rss_mib / rss_series are
+    # still emitted. Charting the idle bar from such a window would show a number the producer has
+    # already said not to trust as a cold-idle reading (a relaunch race can leave it sampling the
+    # PREVIOUS cell's post-load process). Treat the whole window as absent instead.
+    if m and m.get("served") is False:
+        m = None
     if not m:
         # MEASURED, but this gateway does not serve the comparison cell. It still gets a ROW, with every
         # number absent: dropping it would delete the single most important fact about a narrow gateway
@@ -937,6 +946,17 @@ def render(chart: Chart, only_keys=None, out_stem: str | None = None) -> None:
             return False
         return True
 
+    # _measured(r): did this row come up AT ALL, regardless of whether the PRIMARY metric resolved? A
+    # null primary is not a null row. On the memory chart the primary is the steady state, which is null
+    # for any gateway whose RSS never went steady - and that gateway's cold IDLE RSS was measured
+    # perfectly well, before it served a single request. Gating the secondary label on _served() deleted
+    # that measured number because a DIFFERENT field on the same record was null, which is
+    # "unmeasurable means absent" applied to something that was measured. Under the per-cell design this
+    # is not a corner case: on the last field run four of eleven gateways never settled within the load
+    # window, so four idle bars would silently vanish from the one chart that shows idle.
+    def _measured(r) -> bool:
+        return bool(r.get(chart.served_field, True))
+
     def _val(r, field=primary) -> float:
         return float(r.get(field, 0) or 0)
 
@@ -1057,9 +1077,11 @@ def render(chart: Chart, only_keys=None, out_stem: str | None = None) -> None:
                     txt, col, weight = chart.not_served_text, "#c2410c", "bold"
                 ax.text(tx, cy, txt, va="center", ha="left", fontsize=9.5,
                         fontweight=weight, color=col, zorder=4)
-            elif v > 0 and served:  # secondary series (e.g. idle RSS): readable label, skip empty bars.
-                # GATED on the row being served (audit #7/#23): a not-served / null-primary row (its
-                # primary bar reads "not measured") must NOT show a secondary idle number beside it.
+            elif v > 0 and _measured(r):  # secondary series (e.g. idle RSS): readable label, skip empty bars.
+                # GATED on the row having COME UP (audit #7/#23): a genuinely not-served row must not
+                # show a secondary idle number beside a "did not serve" primary. But a row whose PRIMARY
+                # is merely null still measured this series, and deleting a real measurement because a
+                # neighbouring field is null is the opposite of the honesty rule it was written for.
                 ax.text(tx, cy, _numlab(v), va="center", ha="left", fontsize=9,
                         fontweight="normal", color=MUTE_TXT, zorder=4)
 

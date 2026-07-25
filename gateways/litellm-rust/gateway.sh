@@ -216,7 +216,10 @@ gw_diag() {
   echo "run.log:"; tail -n 20 /tmp/litellm_rust.mem.log 2>/dev/null
 }
 
-gw_stop() { pkill -f litellm-ai-gateway 2>/dev/null; }
+# Declared for gw_stop_wait's SIGKILL escalation (see lib/harness.sh): a native manifest has no
+# synchronous `docker rm -f` to fall back on, so the wait needs something to escalate to.
+GW_PROC_MATCH='litellm-ai-gateway'
+gw_stop() { pkill -f "$GW_PROC_MATCH" 2>/dev/null; }
 
 # Governed lane: intentionally not wired. LiteLLM's virtual-key surface (/key/generate) lives in
 # the Python proxy and requires a Postgres database (DATABASE_URL) behind the master key; the Rust

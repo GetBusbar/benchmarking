@@ -185,7 +185,21 @@ const gateways = gatewayKeys.map((key) => {
   if (g.ootb_config == null) {
     // The pointer comes from the MATRIX (the sole source) when it carries one; the retired perf suite is
     // no longer consulted (audit #12 — g.perf is a fallback-only input that the emit step deletes).
-    const cfgPointer = (g.matrix && typeof g.matrix.ootb_config === "string") ? g.matrix.ootb_config : `config/${key}.txt`;
+    // THE POINTER IS PRODUCER-SUPPLIED, SO IT IS UNTRUSTED. It arrives inside a results JSON and its
+    // contents are published verbatim onto a public page, so a `..` in it reads an arbitrary local file
+    // straight onto the board - a gateway manifest, a harness script, or anything else readable by the
+    // process that runs gen-data. Nothing malicious is needed for this to bite: a producer bug that
+    // wrote an absolute or relative path would exfiltrate a file rather than fail. Allowlist the exact
+    // shape the harness writes (lib/harness.sh harness_write_config emits config/<key>.txt) and refuse
+    // anything else loudly, rather than silently falling back and hiding a producer that has gone wrong.
+    const CFG_POINTER_RE = /^config\/[A-Za-z0-9._-]+\.txt$/;
+    const rawPointer = (g.matrix && typeof g.matrix.ootb_config === "string") ? g.matrix.ootb_config : null;
+    if (rawPointer && !CFG_POINTER_RE.test(rawPointer)) {
+      throw new Error(`gen-data: ${key}.matrix.ootb_config = ${JSON.stringify(rawPointer)} is not a ` +
+        `results-relative config artifact (expected config/<name>.txt). A pointer that escapes results/ ` +
+        `would read an arbitrary local file onto the public board. Refusing to build the bundle.`);
+    }
+    const cfgPointer = rawPointer || `config/${key}.txt`;
     const cfgPath = join(ROOT, "results", cfgPointer);
     if (existsSync(cfgPath)) {
       try { g.ootb_config = readFileSync(cfgPath, "utf8"); } catch { /* unreadable → absent */ }

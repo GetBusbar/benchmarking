@@ -249,7 +249,19 @@ MATRIX_MEM_PAYLOAD="${MATRIX_MEM_PAYLOAD:-${MEM_PSIZE:-4096}}" # per-request pay
 # NO LOAD DURATION CONSTANT. The memory load runs until the RSS is STEADY, not for a fixed time. A
 # fixed duration decides the answer for any gateway still climbing when it expires: the number then
 # describes when we stopped looking rather than the gateway. See DESIGN-per-cell-measurement.md.
-MEM_PLATEAU_WINDOW_S="${MEM_PLATEAU_WINDOW_S:-30}"   # trailing window the steadiness test runs over
+# 60, NOT 30. This shipped as 30 in 2eb3050 - a bare -60/+30 hunk inside an otherwise-unchanged comment
+# block, unmentioned in the commit body and recorded nowhere else - while DESIGN-per-cell-measurement.md
+# (agreed with Matthew) says 60 and "30 samples per window", and lib/plateau.sh's calibration argument
+# quotes the slope a 60s window admits. The window sets the certification bar in BOTH gates: for a linear
+# slope s, drift% = s*(w/2)/mean*100 < 1 and spread% = s*w/mean*100 < 2 give the SAME bound, so halving
+# the window doubles the leak rate that passes as steady - on a 120 MiB base, 2.4 MiB/min at 60s against
+# 4.8 MiB/min (~288 MiB/hour) at 30s. Nothing published was false (every artifact self-describes its own
+# plateau_window_s and the growth rate is emitted either way), but a certification bar 2x looser than the
+# agreed one, with no record, is not a thing to launch a 7-hour run on. Cost of restoring it: a plateau
+# cannot be declared before 60s of load, so a fast-settling cell pays about +30s, roughly +18 min on a
+# fully-served gateway against a 6h ceiling. Replayed against the last field run's real series, the only
+# verdict this changes is portkey's, and portkey was still ramping when that 120s load stopped.
+MEM_PLATEAU_WINDOW_S="${MEM_PLATEAU_WINDOW_S:-60}"   # trailing window the steadiness test runs over
 MEM_PLATEAU_TREND_PCT="${MEM_PLATEAU_TREND_PCT:-1}"  # max upward drift, 2nd-half mean vs 1st-half mean
 MEM_PLATEAU_RANGE_PCT="${MEM_PLATEAU_RANGE_PCT:-2}"  # max (max-min) spread inside the window
 MEM_PLATEAU_CAP_S="${MEM_PLATEAU_CAP_S:-300}"        # hard cap; hitting it is a REPORTED result
@@ -1128,7 +1140,12 @@ run_cell(){ # egress cell path body extra-header...
 #      reused: the config is identical per column, so re-booting it 6x would measure nothing).
 EGRESS_CONFIG=""   # "dedicated" | "default" - what this column actually ran under (recorded in JSON)
 launch_egress(){ # dialect -> 0 launched, 1 launch failed
-  gw_stop 2>/dev/null; sleep 1
+  # WAIT for the old process to actually let go of the port, do not signal and hope. A blind `sleep 1`
+  # let a SIGTERM'd predecessor keep the listener, so the next cell's readiness probe (a bare TCP
+  # connect) succeeded against the OLD process and its "cold idle" window sampled a just-loaded one.
+  # See gw_stop_wait in lib/harness.sh for the full reasoning and for why the memory lane is where this
+  # does real damage. A port that never frees is logged honestly rather than launched into.
+  gw_stop_wait || log "[$GATEWAY] WARNING: :$GW_PORT still occupied after gw_stop_wait - the relaunch may bind late or fail, and any cold-idle sample taken now could belong to the previous process"
   # Every column starts from the manifest's declared state, never from the previous column's
   # mutation of it (see restore_manifest_baseline).
   restore_manifest_baseline

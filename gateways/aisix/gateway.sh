@@ -378,7 +378,10 @@ gw_diag() {
   echo "launch.log:"; tail -n 25 "$GW_DIR/launch.log" 2>/dev/null
 }
 
-gw_stop() { pkill -f 'target/release/aisix' 2>/dev/null; }
+# The pattern gw_stop signals, declared so harness.sh's gw_stop_wait can escalate to SIGKILL when the
+# polite signal is ignored and the port would otherwise still be held when the next cell cold-starts.
+GW_PROC_MATCH='target/release/aisix'
+gw_stop() { pkill -f "$GW_PROC_MATCH" 2>/dev/null; }
 
 # gw_matrix_egress + the declared capability matrix are defined above (before gw_launch). The
 # anthropic egress column + the openai-responses/anthropic ingress rows are wired-pending-field-

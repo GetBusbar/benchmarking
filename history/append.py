@@ -39,6 +39,12 @@ KEEP = {
 # reach them. These are the fields worth a history row — the same ones the board ranks on.
 MEM_KEEP = ["served", "load_cell", "idle_rss_mib", "peak_rss_mib", "peak_rss_hwm_mib",
             "recovered_rss_mib", "post_load_rss_mib", "idle_window_s", "recovery_window_s"]
+# PER-CELL memory: the shape the producer writes now. The lanes the plateau design added are the whole
+# point of keeping history for this metric - a leak rate and a time-to-plateau are only interpretable
+# against the same gateway's earlier runs, which is exactly what history is for.
+CELL_MEM_KEEP = ["served", "idle_rss_mib", "steady_state_rss_mib", "recovered_rss_mib", "peak_rss_mib",
+                 "peak_rss_hwm_mib", "plateaued", "time_to_plateau_s", "growth_rate_mib_per_min",
+                 "load_s", "idle_window_s", "recovery_window_s"]
 CELL_PERF_KEEP = ["rps_sustained_20ms", "rps_sustained_20ms_mock_bound", "rps_max_proxy",
                   "rps_max_proxy_mock_bound", "added_latency_p50_us", "added_latency_p99_us",
                   "egress_reverified"]
@@ -79,6 +85,24 @@ def _matrix_extra(data):
         out["diagonal_perf"] = perf
     if stream:
         out["diagonal_stream"] = stream
+    # PER-CELL MEMORY, harvested from the same grid. The top-level "memory" branch above reads a key the
+    # per-cell redesign deleted, so every history row written since then has silently carried NO memory
+    # data at all - and history is append-only, so each run that goes by is a row that can never be
+    # backfilled from anything but the snapshots. Same diagonal rule as perf and streaming: the
+    # like-for-like cell the board headlines.
+    mem_cells = {}
+    if isinstance(ups, dict):
+        for eg, up in ups.items():
+            cell = ((up or {}).get("cells") or {}).get(eg)
+            if not isinstance(cell, dict):
+                continue
+            cm = cell.get("memory")
+            if isinstance(cm, dict):
+                keep = {k: cm[k] for k in CELL_MEM_KEEP if k in cm}
+                if keep:
+                    mem_cells[eg] = keep
+    if mem_cells:
+        out["diagonal_memory"] = mem_cells
     return out
 
 def main():

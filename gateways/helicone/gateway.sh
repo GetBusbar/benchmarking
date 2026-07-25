@@ -327,4 +327,7 @@ gw_diag() {
   echo "run.log:"; tail -n 25 /tmp/helicone.bench.log 2>/dev/null
 }
 
-gw_stop() { pkill -f 'target/release/ai-gateway' 2>/dev/null; }
+# Declared for gw_stop_wait's SIGKILL escalation (see lib/harness.sh): a native manifest has no
+# synchronous `docker rm -f` to fall back on, so the wait needs something to escalate to.
+GW_PROC_MATCH='target/release/ai-gateway'
+gw_stop() { pkill -f "$GW_PROC_MATCH" 2>/dev/null; }

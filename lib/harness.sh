@@ -344,6 +344,43 @@ _harness_port_state(){
 # still occupied after the budget (the caller then logs honestly rather than launching into a panic).
 # Callers keep their own post-launch readiness probes; this only guarantees a clean port to launch ONTO.
 MOCK_STOP_WAIT_S="${MOCK_STOP_WAIT_S:-15}"    # total budget; SIGKILL escalation at the halfway mark
+
+# gw_stop_wait: THE SAME DISCIPLINE FOR THE GATEWAY. `gw_stop; sleep 1` is the exact pattern documented
+# above as the bug mock_stop_wait exists to fix, and it is still what every gateway relaunch used. For
+# the three NATIVE manifests gw_stop is a bare async `pkill -f` with no wait and no SIGKILL escalation
+# (the ten docker manifests stop with `docker rm -f`, which is synchronous, so they were never exposed).
+#
+# WHY IT MATTERS MORE FOR MEMORY THAN FOR PERF. The per-cell memory window relaunches the gateway and
+# then samples MEM_IDLE_S of "COLD idle" - deliberately before the process serves a single request,
+# because a warm process would measure recovery rather than idle. Readiness is a bare TCP connect, so if
+# the SIGTERM'd predecessor still holds the listener, that connect succeeds on the first attempt and the
+# cold-idle window samples the process that has just been under load. Worse, _native_root_pid takes
+# `pgrep -f | head -1`, the LOWEST matching pid, so while both are alive the RSS tree roots on the old
+# one whichever is actually bound. The published idle_rss_mib is then a post-load RSS wearing a cold-idle
+# label: precisely the P0-4 defect the per-cell redesign exists to have fixed.
+# This is not hypothetical on this rig. The same pkill-then-sleep race cost 48 of 75 served cells in the
+# 2026-07-25 field run, which is why mock_stop_wait was written in the first place.
+GW_STOP_WAIT_S="${GW_STOP_WAIT_S:-15}"        # total budget; SIGKILL escalation at the halfway mark
+gw_stop_wait(){
+  local port="${GW_PORT:-8080}" budget="${GW_STOP_WAIT_S}" i=0 killed=0
+  declare -f gw_stop >/dev/null || return 0
+  gw_stop 2>/dev/null
+  while [ "$i" -lt "$budget" ]; do
+    # Free means the PORT accepts nothing. Unlike the mock there is no single binary name to pgrep for
+    # (a manifest may run docker, a wrapper, or a native binary), so the port is the one signal every
+    # manifest shares - and it is the signal that actually matters, because it is what readiness probes.
+    if ! tmo 2 bash -c "exec 3<>/dev/tcp/127.0.0.1/$port" 2>/dev/null; then return 0; fi
+    # Halfway through the budget the polite signal has demonstrably not worked. Escalate ONCE, and only
+    # for a manifest that gave us something to escalate to: a docker manifest has already done rm -f.
+    if [ "$killed" = 0 ] && [ "$i" -ge $((budget / 2)) ]; then
+      declare -f gw_kill >/dev/null && gw_kill 2>/dev/null
+      [ -n "${GW_PROC_MATCH:-}" ] && pkill -9 -f "$GW_PROC_MATCH" 2>/dev/null
+      killed=1
+    fi
+    i=$((i + 1)); sleep 1
+  done
+  return 1
+}
 mock_stop_wait(){
   local port="${MOCK_PORT:-8081}" budget="${MOCK_STOP_WAIT_S}" i=0 killed=0
   [ -n "${MOCK:-}" ] || return 0
