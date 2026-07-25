@@ -286,8 +286,24 @@ node "$ROOT/site/gen-data.mjs" >"$WORK/gendata.log" 2>&1 || { cat "$WORK/gendata
 [ -f "$ROOT/site/data.json" ] || die "gen-data produced no site/data.json"
 ok "site/data.json generated"
 
-node "$ROOT/site/check-consistency.mjs" >"$WORK/consistency.log" 2>&1 || { cat "$WORK/consistency.log"; die "check-consistency.mjs FAILED (single-source guard etc.)"; }
-ok "check-consistency.mjs passed (headline == max of its own charted sweep array, value+concurrency)"
+# SURFACE WHAT WAS ACTUALLY CHECKED (audit P1-9). This gate used to swallow ALL of
+# check-consistency's output into a log file that is only ever `cat`ed on FAILURE, and then print an
+# "ok" claiming an invariant ("headline == max of its own charted sweep array") that is no longer even
+# what check-consistency verifies under the sealed envelope. So the C6 sustained>max_proxy INVERSION
+# warnings — the ones that exist precisely so the field run re-measures the offending cell — were
+# invisible on a green local run, and the operator was told an invariant held that the tool had not
+# tested. Echo the warnings, and report the branches the tool says it covered rather than a hardcoded
+# claim about them.
+node "$ROOT/site/check-consistency.mjs" >"$WORK/consistency.log" 2>&1 || { cat "$WORK/consistency.log"; die "check-consistency.mjs FAILED (structural sealed-envelope invariants)"; }
+CC_WARN=$(grep -c 'WARNING' "$WORK/consistency.log" 2>/dev/null || echo 0)
+if [ "${CC_WARN:-0}" -gt 0 ]; then
+  echo "  ---- check-consistency warnings (NOT failures, but the field run must re-measure these cells) ----"
+  grep 'WARNING' "$WORK/consistency.log" | sed 's/^/  /'
+  echo "  -------------------------------------------------------------------------------------------"
+fi
+# The summary line check-consistency itself prints names the invariants it really asserted; echo THAT
+# instead of a hand-written claim that can drift away from the code.
+ok "check-consistency.mjs passed — $(grep -m1 'check-consistency: [0-9]* gateways' "$WORK/consistency.log" | sed 's/^check-consistency: //' || echo 'structural invariants hold'); ${CC_WARN:-0} warning(s) shown above"
 
 node "$ROOT/site/test.mjs" >"$WORK/test.log" 2>&1 || { tail -n 30 "$WORK/test.log"; die "site/test.mjs FAILED"; }
 ok "site/test.mjs passed"
