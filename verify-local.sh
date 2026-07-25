@@ -246,8 +246,11 @@ export MATRIX_STREAM_C1_DUR="${MATRIX_STREAM_C1_DUR:-1}" MATRIX_STREAM_SWEEP_DUR
 export MATRIX_STREAM_SUST_BOUNDS="${MATRIX_STREAM_SUST_BOUNDS:-1 8}"
 export MATRIX_STREAMCPU_CHUNKS="${MATRIX_STREAMCPU_CHUNKS:-16}" MATRIX_STREAMCPU_DUR="${MATRIX_STREAMCPU_DUR:-1}"
 export MATRIX_STREAMCPU_FPS_BOUNDS="${MATRIX_STREAMCPU_FPS_BOUNDS:-1 8}" MATRIX_STREAMCPU_STALL_MS="${MATRIX_STREAMCPU_STALL_MS:-250}"
-# memory-once: tiny sustained load + a 2s settle (MEM_SETTLE_S) instead of the field's 60s release wait.
-export MEM_DUR="${MEM_DUR:-2}" MEM_CONC="${MEM_CONC:-8}" MEM_PSIZE="${MEM_PSIZE:-1024}" MEM_SETTLE_S="${MEM_SETTLE_S:-2}"
+# memory window (post-6x6, peak cell): tiny cold-idle + fixed load + recovery instead of the field's
+# 60s windows. MEM_CONC/PSIZE/DUR alias the MATRIX_MEM_* recipe; MEM_IDLE_S/SETTLE_S shrink the waits so
+# a local run isn't dominated by fixed sleeps.
+export MEM_DUR="${MEM_DUR:-2}" MEM_CONC="${MEM_CONC:-8}" MEM_PSIZE="${MEM_PSIZE:-1024}"
+export MEM_IDLE_S="${MEM_IDLE_S:-2}" MEM_SETTLE_S="${MEM_SETTLE_S:-2}" MEM_SAMPLE_S="${MEM_SAMPLE_S:-1}"
 # transient patience: a local dead cell shouldn't wait the field's 2x120s — keep it snappy.
 export MATRIX_TRANSIENT_RETRIES="${MATRIX_TRANSIENT_RETRIES:-1}" MATRIX_TRANSIENT_PAUSE="${MATRIX_TRANSIENT_PAUSE:-2}"
 export MATRIX_PROBE_TRANSIENT_RETRIES="${MATRIX_PROBE_TRANSIENT_RETRIES:-1}" MATRIX_PROBE_TRANSIENT_PAUSE="${MATRIX_PROBE_TRANSIENT_PAUSE:-2}"
