@@ -259,7 +259,7 @@ MATRIX_MEM_PAYLOAD="${MATRIX_MEM_PAYLOAD:-${MEM_PSIZE:-4096}}" # per-request pay
 # plateau_window_s and the growth rate is emitted either way), but a certification bar 2x looser than the
 # agreed one, with no record, is not a thing to launch a 7-hour run on. Cost of restoring it: a plateau
 # cannot be declared before 60s of load, so a fast-settling cell pays about +30s, roughly +18 min on a
-# fully-served gateway against a 6h ceiling. Replayed against the last field run's real series, the only
+# fully-served gateway against an 8h ceiling. Replayed against the last field run's real series, the only
 # verdict this changes is portkey's, and portkey was still ramping when that 120s load stopped.
 MEM_PLATEAU_WINDOW_S="${MEM_PLATEAU_WINDOW_S:-60}"   # trailing window the steadiness test runs over
 MEM_PLATEAU_TREND_PCT="${MEM_PLATEAU_TREND_PCT:-1}"  # max upward drift, 2nd-half mean vs 1st-half mean
@@ -291,9 +291,17 @@ SWEEP_ADAPTIVE="${MATRIX_SWEEP_ADAPTIVE:-1}"
 # Sweeping every green cell multiplies the suite's wall time (by design: that is the whole point of
 # per-cell perf), and folding a per-cell STREAMING measurement in on top of that lengthens it further
 # (a paced c1 window + a sustained-streams bisect + an unpaced cpu-fps peak search per cell). So the
-# default suite ceiling rises from harness.sh's 45 min to 6 h when the sweep+stream are on. An
+# default suite ceiling rises from harness.sh's 45 min to 8 h when the sweep+stream are on. An
 # explicit HARNESS_SUITE_CEIL_S still wins, and the ceiling still backstops a wedged gateway.
-[ "$MATRIX_SWEEP" = 1 ] && HARNESS_SUITE_CEIL_S="${HARNESS_SUITE_CEIL_S:-21600}"
+#
+# WHY 8 h AND NOT 6 h: the ceiling is a WEDGE BACKSTOP, not a budget. Its only job is to stop a hung
+# gateway from holding a box forever; it must never be the thing that ends a HEALTHY run, because a
+# ceiling-truncated suite silently drops the tail cells and publishes a partial grid as if it were a
+# whole one. The slowest gateway measured ~6.1 h against the old 6 h ceiling, i.e. the backstop had
+# crossed into the working range and was about to censor a gateway for being slow rather than wedged.
+# 8 h restores the separation. The cost of being generous is idle box-minutes on a genuinely wedged
+# run; the cost of being tight is a truncated grid we would not notice.
+[ "$MATRIX_SWEEP" = 1 ] && HARNESS_SUITE_CEIL_S="${HARNESS_SUITE_CEIL_S:-28800}"
 # shellcheck source=/dev/null
 source "$ROOT/lib/harness.sh"
 # shellcheck source=/dev/null
@@ -707,6 +715,16 @@ matrix_cell_stream(){
   # Does this cell actually stream? One curl -N probe for SSE frames (paced mock up). A cell that 200s
   # the non-stream sweep but buffers/rejects stream:true records stream_served:false — measured, honest.
   stream_mock_start "$MATRIX_STREAM_CHUNKS" "$MATRIX_STREAM_INTERVAL_MS" "$MATRIX_STREAM_CHUNK_BYTES"
+  # THE PROBE PARAMETERS BELONG WITH THE MOCK SHAPE, NOT WITH THE LANE THAT CONSUMES THEM. These two
+  # used to be set further down, at the head of the paced lane - but stream_mock_ready (immediately
+  # below) probes through stream_probe, which reads SM_EXPFRAMES/SM_STALL_US. Under `set -u` the probe
+  # therefore died on an unbound variable BEFORE it ever contacted the mock, printed nothing, and the
+  # readiness loop read an empty fps as "not ready" for all 30 tries. Every cell the mock CAN stream was
+  # then published as untestable/stream_mock_unready - a RIG excuse standing in for a bug in this file,
+  # which is the worst possible failure shape: the streaming lane vanished from the whole board while
+  # the artifacts explained the absence as somebody else's fault. They are set here, adjacent to the
+  # stream_mock_start whose shape they describe, so a probe can never precede its own parameters.
+  SM_EXPFRAMES="$MATRIX_STREAM_CHUNKS"; SM_STALL_US=$(( MATRIX_STREAM_INTERVAL_MS * MATRIX_STREAM_STALL_X * 1000 ))
   # HIGH-6 / HIGH-2: after a mock restart (which pkilled the prior cell's mock and relaunched before it
   # had necessarily exited), the fresh mock can still be racing the dying one for MOCK_PORT — a single un-retried
   # SSE probe below would then read no `data:` frames and fabricate stream_served:false BEFORE any
@@ -767,7 +785,7 @@ matrix_cell_stream(){
     return 0
   fi
   # ── PACED lane: c1 added TTFT/gap + streams-sustained bisect ──
-  SM_EXPFRAMES="$MATRIX_STREAM_CHUNKS"; SM_STALL_US=$(( MATRIX_STREAM_INTERVAL_MS * MATRIX_STREAM_STALL_X * 1000 ))
+  # SM_EXPFRAMES/SM_STALL_US are already set, up beside stream_mock_start - see the note there.
   SM_C1_DUR="$MATRIX_STREAM_C1_DUR"; SM_SWEEP_DUR="$MATRIX_STREAM_SWEEP_DUR"; SM_DELIV="$MATRIX_STREAM_DELIV"
   stream_c1
   local lat_c1_ok="$SM_C1_OK"
