@@ -118,8 +118,8 @@ function stampWithAge(iso, now = Date.now()) {
 }
 
 /* Per-gateway freshness badge. Under matrix-sole-source each gateway is measured + published
-   INDEPENDENTLY, so the board legitimately carries mixed per-gateway ages (busbar today, kong 3
-   weeks ago) — that is honest, not a bug. We surface each row's OWN measured_at ("measured 3d ago",
+   INDEPENDENTLY, so the board legitimately carries mixed per-gateway ages (one row measured today,
+   another 3 weeks ago) - that is honest, not a bug. We surface each row's OWN measured_at ("measured 3d ago",
    full stamp in the tooltip) and, when gen-data set g.stale (its data aged past MAX_GATEWAY_AGE_DAYS),
    a greyed "stale" pill. Returns "" when the gateway has no measurement at all (renders nothing).
    Pure; covered by site/test.mjs. */
@@ -858,7 +858,7 @@ function newState() {
 const state = newState();
 
 /* Capability filter toggles. Governance is RETIRED (matrix-sole-source): it is neither a filter,
-   a column, nor a drawer section — the governed suite was busbar-only and is not a board metric. */
+   a column, nor a drawer section - the governed suite ran for a single entrant and is not a board metric. */
 const CAPS = [["needStream", "stream"], ["needXlate", "xlate"]];
 
 /* Serialize the shareable parts of state into a clean path URL:
@@ -2094,8 +2094,8 @@ function rigStamp() {
    The landing view is a ROSTER, not a ranking: every gateway in alphabetical
    order (display name, case-insensitive), with its language, a committed star
    snapshot, and its OWN self-description (g.cls). No perf numbers, no winner
-   highlighting; the other tabs measure how they perform. busbar gets the exact
-   same row treatment as everyone else. */
+   highlighting; the other tabs measure how they perform. Every entry gets the
+   exact same row treatment, the operator's own included. */
 /* Roster sort state: the overview is sortable by any column, DEFAULTING to name A→Z (the neutral
    ordering — no metric, no ranking). Clicking a header sorts by it; clicking the active header
    flips direction. `name` is the tiebreaker for every column so ties are stable and alphabetical. */
@@ -2179,7 +2179,7 @@ const runModeCell = (g) => {
 /* The VERSION token alone for the table cell - the tag, package version, or short commit;
    the full build string (image path, digest, annotations) stays in the tooltip.
    "ghcr.io/x/y:v1.3.1" -> "v1.3.1"; "litellm==1.93.0" -> "1.93.0"; "repo@9649b27..." -> "@9649b27";
-   "busbar 1.4.1" -> "1.4.1". Anything unparsable falls back to a truncated string. */
+   "somegateway 1.4.1" -> "1.4.1". Anything unparsable falls back to a truncated string. */
 const fmtBuild = (full) => {
   const head = String(full).split(" (")[0].trim();
   const first = head.split(/\s+/)[0];

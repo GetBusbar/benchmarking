@@ -12,12 +12,12 @@
 # gemini and bedrock are the ONLY two dialects whose model rides in the URL PATH; every other dialect
 # carries "model" in the request BODY, and ingress_body() re-expands the body per call. Since commit
 # 02345b4 ("one-config OOTB standard") several manifests switch GW_MODEL PER EGRESS COLUMN inside
-# gw_matrix_egress (busbar, helicone, litellm-python, bifrost, gomodel, agentgateway, one-api, ...)
+# gw_matrix_egress (most of the field does this now)
 # instead of rewriting the gateway config. Those later GW_MODEL changes could never reach a path that
 # had already been frozen at init — so every gemini/bedrock probe, in every column, kept asking for the
 # INITIAL model, which routes to the openai provider. Result: {gemini,bedrock} x {every non-openai
-# egress} was IMPOSSIBLE to pass — 10 unreachable cells for busbar alone, published as red with
-# "the mock received the request on the openai endpoint instead", plus 400/404s for litellm-python.
+# egress} was IMPOSSIBLE to pass - 10 unreachable cells on a single gateway, published as red with
+# "the mock received the request on the openai endpoint instead", plus 400/404s elsewhere.
 # gemini->openai and bedrock->openai still passed, because there the frozen model was genuinely right.
 #
 # THE CONTRACT: ingress_path resolves its defaults at CALL time, so it always reflects the CURRENT

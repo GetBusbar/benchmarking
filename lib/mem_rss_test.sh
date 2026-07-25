@@ -80,12 +80,12 @@ check "_native_root_pid (no match)      -> empty" "" "$(_native_root_pid 'no-suc
 
 # ── CLASS-LEVEL: every manifest's gw_rss and gw_hwm must cover the SAME process set ───────────────
 # THE DEFECT THIS SECTION EXISTS FOR (audit; it corrupted the 2026-07-25 memory numbers): three
-# native manifests (aisix, helicone, litellm-rust) hand-rolled their readers so that
+# source-built native manifests hand-rolled their readers so that
 #   gw_rss -> awk /VmRSS/ on ONE pid's /proc/<pid>/status      (single process)
 #   gw_hwm -> _hwm_tree_mib <that pid>                          (that process AND its descendants)
 # Two different populations for the same gateway, both published: idle/peak/recovered_rss_mib came
 # from the single-pid reader, peak_rss_hwm_mib from the tree reader — and both were then compared
-# against ten docker gateways whose readers were tree-summed on both sides.
+# against the docker gateways whose readers were tree-summed on both sides.
 #
 # THE CONTRACT: for EVERY gateway, gw_rss and gw_hwm resolve the same process set. Enforced
 # STRUCTURALLY rather than numerically (a real reading needs a running gateway): each manifest must
