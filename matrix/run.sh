@@ -787,6 +787,14 @@ matrix_cell_stream(){
   if [ "${SM_SUST_MEASURED:-0}" != 1 ]; then
     sust_streams=null; sust_fps=null; sust_bound=null
     log "[$GATEWAY]   $cell : sustained-streams NOT MEASURED (search aborted before any rung was probed) - publishing null, not 0"
+  elif [ "${SM_SUST_AT_TOP:-0}" = 1 ]; then
+    # A LOWER BOUND IS NOT A CEILING. The gateway was still clean at the top of the search range, so this
+    # run did not find its limit. Publishing the bound would report the SEARCH RANGE as the gateway's
+    # capability, and every gateway above the bound would land on the identical number - which is exactly
+    # how the retired fixed-ladder stream suite published an identical "512 streams" for five gateways of
+    # different languages. Unmeasured is absent, never substituted, so it publishes null with the reason.
+    log "[$GATEWAY]   $cell : sustained-streams exceeded the top of the search range (c=$sust_hi still clean) - publishing null, not the bound; raise MATRIX_STREAM_SUST_BOUNDS and re-run this gateway"
+    sust_streams=null; sust_fps=null; sust_bound=null
   fi
   # ── UNPACED lane: cpu-fps peak ──
   stream_mock_start "$MATRIX_STREAMCPU_CHUNKS" 0 "$MATRIX_STREAMCPU_FRAME_BYTES"

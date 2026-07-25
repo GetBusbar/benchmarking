@@ -105,7 +105,14 @@ assert_range(){ # name got lo hi
 # ── sustained-streams BISECT ──────────────────────────────────────────────────────────────────────
 CURVE=sust_1300;     stream_sustained_bisect 8 4096; assert_range "sustained bisect finds true ceiling 1300 between rungs" "$SM_SUST_STREAMS" 1280 1320
 [ "$SM_SUST_FPS" -gt 0 ] && echo "ok   - sustained carries fps at the winning concurrency ($SM_SUST_FPS)" || { echo "FAIL - sustained fps not set"; fail=1; }
-CURVE=sust_grid_top; stream_sustained_bisect 8 2048; assert_range "sustained ceiling at/above grid top -> reports top" "$SM_SUST_STREAMS" 2048 2048
+CURVE=sust_grid_top; stream_sustained_bisect 8 2048; assert_range "sustained ceiling at/above grid top -> reports top as a LOWER BOUND" "$SM_SUST_STREAMS" 2048 2048
+# ...and MARKS it, because a lower bound is not a ceiling. Without this flag the producer publishes the
+# search range as the gateway's capability, and every gateway above the bound lands on the identical
+# number - which is exactly how the retired fixed-ladder suite published "512 streams sustained" for
+# five gateways of different languages, a rung of the ladder reported as a measurement.
+[ "${SM_SUST_AT_TOP:-0}" = 1 ] && echo "ok   - a top-of-range pass is FLAGGED as no-ceiling-found" || { echo "FAIL - SM_SUST_AT_TOP not set when the gateway passed at the top of the range"; fail=1; }
+CURVE=sust_1300; stream_sustained_bisect 8 4096
+[ "${SM_SUST_AT_TOP:-0}" = 0 ] && echo "ok   - a real ceiling found inside the range is NOT flagged" || { echo "FAIL - SM_SUST_AT_TOP set on a genuine interior ceiling"; fail=1; }
 CURVE=sust_none;     stream_sustained_bisect 8 2048; assert_range "no sustainable concurrency -> 0" "$SM_SUST_STREAMS" 0 0
 
 # ── MEDIUM-R2-2: the SUSTAINED lane's mock-bound decision (SM_MOCK_BOUND) is set and correct ─────────

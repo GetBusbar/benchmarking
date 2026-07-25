@@ -171,6 +171,8 @@ stream_sustained_bisect(){ # lo hi
   # instead of 0 (measured failure). It is never cleared once set: every later abort still leaves a
   # genuinely measured, if partial, answer behind.
   SM_SUST_MEASURED=0
+  # Set when the search never found a ceiling because the gateway passed at the top of the range.
+  SM_SUST_AT_TOP=0
   # Mock-ceiling reference (paced streaming), capped like the perf lane so a very-high-conc reference
   # is not artificially low. Fair-ceiling re-probe at the winner mirrors lib/sweep.sh:_sw_ceil_ref_ok.
   local mock_conc=$hi; [ "$mock_conc" -gt "${SM_MOCKCEIL_CONC:-2048}" ] && mock_conc="${SM_MOCKCEIL_CONC:-2048}"
@@ -188,8 +190,17 @@ stream_sustained_bisect(){ # lo hi
   SM_SUST_STREAMS=$lo; SM_SUST_FPS=${SM_PROBE_FPS[$lo]}
   _sm_probe_c "$hi" || { _sm_finish_bound; return 0; }
   if [ "${SM_PROBE_OK[$hi]}" = 1 ]; then
-    SM_SUST_STREAMS=$hi; SM_SUST_FPS=${SM_PROBE_FPS[$hi]}   # ceiling at/above the grid top
-    log "[$GATEWAY] sustained-streams: c=$hi passes (ceiling at/above grid top) → $hi"
+    # LADDER EXHAUSTION. The gateway passed at the TOP of the search range, so the search never observed
+    # a failure and never found a ceiling: the honest reading of this run is "more than $hi", and $hi
+    # itself is where we stopped looking, not where the gateway stopped. Publishing $hi as the answer is
+    # the same defect C6 catches when a peak sweep wins at its highest rung, and it is how five gateways
+    # came to share an identical published "512 streams sustained" under the retired fixed-ladder suite:
+    # a rung, reported as a measurement. The number still travels (it is a true lower bound and the
+    # caller may want it), but SM_SUST_AT_TOP marks it so the producer can refuse to publish it as a
+    # ceiling rather than silently flattening every gateway above the bound onto the same value.
+    SM_SUST_STREAMS=$hi; SM_SUST_FPS=${SM_PROBE_FPS[$hi]}
+    SM_SUST_AT_TOP=1
+    log "[$GATEWAY] sustained-streams: c=$hi PASSES at the top of the search range - no ceiling was found, only a lower bound (raise MATRIX_STREAM_SUST_BOUNDS)"
     _sm_finish_bound; return 0
   fi
   # Invariant: lo passes, hi fails. Bisect to +-1.

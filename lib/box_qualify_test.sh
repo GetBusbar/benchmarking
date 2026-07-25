@@ -233,6 +233,27 @@ mksnap x 2026-07-25T02-00-00Z arm64 120 pass 1400 208
 bq_load_baselines gw arm64 "$TMPD"
 check "one wild PASSED run cannot own the floor baseline" "77" "$BQ_BL_FLOOR_US"
 check "one wild PASSED run cannot own the peak baseline" "9900" "$BQ_BL_PEAK_RPS"
+
+# -- THE PRODUCER'S CURRENT SHAPE: no top-level matrix.memory at all ------------------------------
+# RED-BEFORE. Every fixture above carries matrix.memory.load_cell, which is the shape the per-cell
+# memory redesign DELETED - so this suite stayed green while the real producer emitted nothing this
+# code could read, and the peak-replay lane (the strong half of box qualification, separating a
+# healthy box from a contaminated one by 13% vs 86% where stage 1 manages 3.8% vs 5.4%) silently
+# froze on pre-redesign baselines. A fixture in the shape the harness actually writes is the only
+# thing that would have caught it. The cell must be DERIVED from the grid, and a mock-bound sweep
+# must never become the replay reference, because that number measures the rig and not the gateway.
+TMPD2="$(mktemp -d)"; trap 'rm -rf "$TMPD" "$TMPD2"' EXIT
+mksnap2(){ # measured_at arch floor verdict best_rps best_conc best_cell [mock_bound_rps]
+  python3 "$B/lib/mk_newshape_snap.py" "$TMPD2/result_gw_$1.json" "$1" "$2" "$3" "$4" "$5" "$6" "$7" "${8:-}"
+}
+mksnap2 2026-07-24T00-00-00Z arm64 76 pass 9000 128 "openai>openai"
+mksnap2 2026-07-25T00-00-00Z arm64 77 pass 9500 192 "openai>gemini" 99999
+bq_load_baselines gw arm64 "$TMPD2"
+# The peak BASELINE is the rolling median of the good runs (9000, 9500 -> 9250); the replay CELL and
+# CONCURRENCY come from the newest good run. Both are asserted, because it is the cell that regressed.
+check "new-shape snapshot still yields a peak baseline"        "9250" "$BQ_BL_PEAK_RPS"
+check "new-shape replay cell is DERIVED from the grid"  "openai>gemini" "$BQ_BL_PEAK_CELL"
+check "new-shape replay concurrency comes from that cell"       "192" "$BQ_BL_PEAK_CONC"
 # A GATEWAY WITH NO SNAPSHOTS AT ALL. The two lanes deliberately answer differently, and this is the
 # "drop a folder in and it works" property:
 #   FLOOR  is POOLED across every gateway on the arch, because direct_c1_p99_us is measured with NO

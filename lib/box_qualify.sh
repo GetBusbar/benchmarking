@@ -239,19 +239,47 @@ for path in sorted(glob.glob(os.path.join(snapdir, "result_*.json"))):
     elif f is not None:
         rec["floor_src"] = "stage1"
     rec["floor"] = f
-    # ── peak: the run's OWN peak cell (the memory window's load_cell = highest certified
-    # rps_max_proxy) and that cell's throughput + winning concurrency. Replaying THE SAME CELL is
-    # what makes stage 2 a comparison of like with like.
-    cell = ((m.get("memory") or {}).get("load_cell")) or ""
-    eg = ing = ""
-    if isinstance(cell, str) and ">" in cell:
-        ing, eg = [p.strip() for p in cell.split(">", 1)]
-    perf = (((m.get("upstreams") or {}).get(eg) or {}).get("cells") or {}).get(ing) or {}
-    perf = perf.get("perf") or {}
-    rec["peak"] = num(perf.get("rps_max_proxy"))
-    rec["peak_conc"] = num(perf.get("rps_max_proxy_concurrency"))
-    rec["peak_cell"] = cell if (rec["peak"] and ing and eg) else ""
-    rec["peak_src"] = "legacy-matrix" if legacy else "matrix"
+    # ── peak: the run's OWN peak cell and that cell's throughput + winning concurrency. Replaying THE
+    # SAME CELL is what makes stage 2 a comparison of like with like.
+    #
+    # DERIVED FROM THE GRID, not from the memory window. This used to read
+    # matrix.memory.load_cell, and the per-cell memory redesign DELETED that key: memory no longer
+    # picks a cell at all, because picking one was the defect it removed. Every snapshot the current
+    # producer writes therefore yielded an empty cell here, and the strong half of box qualification
+    # (the peak replay, which separates a healthy box from a contaminated one by 13% vs 86%, against
+    # stage 1's 3.8% vs 5.4%) silently froze on pre-redesign baselines - degrading with no log line,
+    # on the one gate that exists because a contaminated box once published a false regression.
+    # The rule the old load_cell encoded is reproduced directly: the highest certified rps_max_proxy
+    # among served cells. A MOCK-BOUND sweep is excluded, because that number measures the rig.
+    best = None                       # (rps, conc, "ing>eg")
+    for _eg, _up in (m.get("upstreams") or {}).items():
+        for _ing, _c in ((_up or {}).get("cells") or {}).items():
+            if (_c or {}).get("served") is not True:
+                continue
+            _p = (_c or {}).get("perf") or {}
+            _r = num(_p.get("rps_max_proxy"))
+            if not _r or _p.get("rps_max_proxy_mock_bound") is True:
+                continue
+            if best is None or _r > best[0]:
+                best = (_r, num(_p.get("rps_max_proxy_concurrency")), "%s>%s" % (_ing, _eg))
+    if best is not None:
+        rec["peak"], rec["peak_conc"] = best[0], best[1]
+        rec["peak_cell"] = best[2] if best[1] else ""
+        rec["peak_src"] = "legacy-matrix-grid" if legacy else "matrix-grid"
+    else:
+        # LEGACY FALLBACK, kept deliberately: without it the pre-redesign snapshots that are the only
+        # baselines this board has stop seeding, and stage 2 drops to "seed" on the very next run for
+        # every gateway. peak_src records which rule produced the record so a reader can tell them apart.
+        cell = ((m.get("memory") or {}).get("load_cell")) or ""
+        eg = ing = ""
+        if isinstance(cell, str) and ">" in cell:
+            ing, eg = [p.strip() for p in cell.split(">", 1)]
+        perf = (((m.get("upstreams") or {}).get(eg) or {}).get("cells") or {}).get(ing) or {}
+        perf = perf.get("perf") or {}
+        rec["peak"] = num(perf.get("rps_max_proxy"))
+        rec["peak_conc"] = num(perf.get("rps_max_proxy_concurrency"))
+        rec["peak_cell"] = cell if (rec["peak"] and ing and eg) else ""
+        rec["peak_src"] = "legacy-matrix-memory" if legacy else "matrix-memory"
     recs.append(rec)
 
 recs.sort(key=lambda r: r["measured_at"])
