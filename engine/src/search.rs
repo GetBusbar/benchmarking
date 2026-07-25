@@ -98,8 +98,11 @@ pub fn bisect_ceiling<P: Probe>(probe: &mut P, lo: u32, hi: u32) -> BisectResult
     let hi_sample = match s.sample(hi) {
         Some(v) => v,
         None => {
-            let detail = format!("probe interrupted after c={lo} passed; no failing point found yet");
-            return BisectResult { ceiling: Measurement::absent_because(Absent::NotMeasured, detail), points: s.points };
+            // Interrupted with a confirmed pass already in hand. The highest rung KNOWN to sustain
+            // the gate is a real, if partial, measurement, and the shell publishes it rather than
+            // discarding the run. Nulling here would report "we never measured this" about a cell
+            // we demonstrably did.
+            return BisectResult { ceiling: highest_confirmed_pass(&s.points), points: s.points };
         }
     };
     if hi_sample.passed {
@@ -147,8 +150,44 @@ pub struct PeakResult {
     pub exhausted: bool,
 }
 
+/// An interruption (a deadline, or a window that produced nothing) after real probes have already
+/// landed must NOT throw away what was measured. The shell latches this deliberately: once a rung
+/// has been judged, "every later abort still leaves a genuinely measured, if partial, answer
+/// behind". Discarding it publishes null for a cell we did in fact measure, which is the same class
+/// of loss as publishing a zero for one we did not.
+///
+/// Only a search that was cut off before ANY gate-passing point is genuinely unmeasured.
 fn interrupted<P: Probe>(s: Search<P>) -> PeakResult {
-    PeakResult { peak: Measurement::absent(Absent::NotMeasured), points: s.points, exhausted: false }
+    let mut ordered: Vec<&ProbedPoint> = s.points.iter().collect();
+    ordered.sort_by_key(|p| p.concurrency);
+    let mut winner: Option<PeakPoint> = None;
+    for p in ordered {
+        if p.passed && winner.as_ref().is_none_or(|w| p.value > w.value) {
+            winner = Some(PeakPoint { concurrency: p.concurrency, value: p.value });
+        }
+    }
+    let peak = match winner {
+        Some(w) => Measurement::Measured(w),
+        None => Measurement::absent_because(
+            Absent::NotMeasured,
+            "the search was interrupted before any concurrency passed the gate",
+        ),
+    };
+    PeakResult { peak, points: s.points, exhausted: false }
+}
+
+
+/// The highest concurrency confirmed to PASS among everything actually probed. Used when a search is
+/// cut short: a confirmed pass is a real lower bound on the ceiling, and throwing it away would
+/// publish null for a cell that was measured.
+fn highest_confirmed_pass(points: &[ProbedPoint]) -> Measurement<u32> {
+    match points.iter().filter(|p| p.passed).map(|p| p.concurrency).max() {
+        Some(c) => Measurement::Measured(c),
+        None => Measurement::absent_because(
+            Absent::NotMeasured,
+            "the search was interrupted before any concurrency passed the gate",
+        ),
+    }
 }
 
 fn eff(sample: &Sample) -> f64 {
@@ -200,7 +239,9 @@ impl<'p, P: Probe> Search<'p, P> {
 /// starting at `start` (clamped into range) and learning direction before ramping, so a peak either
 /// above or below `start` is found by the same search. `tol` bounds the final refine bracket's
 /// width (an absolute concurrency count, not scaled to the bracket like the shell original's `a/4`
-/// heuristic -- see the module-level report for why). `lo`/`hi` are normalised if given reversed.
+/// heuristic). NOTE: the RPS lane's relative tolerance existed to stop a LOW-concurrency peak
+/// being left unresolved, so a caller searching a low-concurrency peak must pass a small `tol`
+/// rather than inherit a large default. `lo`/`hi` are normalised if given reversed.
 pub fn peak_max<P: Probe>(probe: &mut P, lo: u32, hi: u32, start: u32, tol: u32) -> PeakResult {
     let (lo, hi) = if lo <= hi { (lo, hi) } else { (hi, lo) };
     let mut s = Search::new(probe);
@@ -241,6 +282,37 @@ pub fn peak_max<P: Probe>(probe: &mut P, lo: u32, hi: u32, start: u32, tol: u32)
             match ramp(&mut s, lo, start, dn_c, dv, false) {
                 Some(t) => t,
                 None => return interrupted(s),
+            }
+        } else if start_v == 0.0 {
+            // START FAILED THE GATE, so keep halving until SOMETHING passes, and then open the
+            // whole range below it to the refine. Stepping down only once (the bug this replaces)
+            // strands the search above a p99 cliff whenever `start` sits several halvings past it,
+            // for instance when a stale adaptive prior seeded it high: every later probe stays in
+            // the failing region and the true peak below is never sampled at all. The shell fixed
+            // exactly this once already (its audit R2-H1) and its comment is explicit that the low
+            // bound must reopen to `lo`, not to c/2, or the refine bracket clips the real peak out.
+            let mut c = dn_c;
+            let mut found = None;
+            while c > lo {
+                let v = match s.eff(c) {
+                    Some(v) => v,
+                    None => return interrupted(s),
+                };
+                if v > 0.0 {
+                    found = Some((c, v));
+                    break;
+                }
+                let next = (c / 2).max(lo);
+                if next == c {
+                    break;
+                }
+                c = next;
+            }
+            match found {
+                // Reopen the bracket all the way down to `lo`: the true peak can sit anywhere below
+                // the first rung that passed.
+                Some((c, v)) => (lo, c, v, start, false),
+                None => (lo, start, start_v, up_c, false),
             }
         } else {
             // Neither neighbour beats `start`: it is a local (possibly flat) max candidate already.
@@ -290,8 +362,13 @@ pub fn peak_max<P: Probe>(probe: &mut P, lo: u32, hi: u32, start: u32, tol: u32)
     // back from the trace rather than trusted from the ramp/refine bookkeeping above (which tracks
     // `eff`, not `passed`): this is the same safety net the shell original used, and it is what
     // keeps a peak search from ever answering with a point whose gate failed.
+    // Scanned in ASCENDING concurrency, not probe order, so an exact tie resolves to the LOWEST
+    // concurrency and the answer does not depend on the path the search happened to walk. Integer
+    // frame and request counts tie genuinely often on a saturated plateau.
+    let mut ordered: Vec<&ProbedPoint> = s.points.iter().collect();
+    ordered.sort_by_key(|p| p.concurrency);
     let mut winner: Option<PeakPoint> = None;
-    for p in &s.points {
+    for p in ordered {
         if p.passed && winner.as_ref().is_none_or(|w| p.value > w.value) {
             winner = Some(PeakPoint { concurrency: p.concurrency, value: p.value });
         }
@@ -360,12 +437,35 @@ mod tests {
         }
     }
 
+    // Interrupted BEFORE anything passed: genuinely unmeasured, so absent.
     #[test]
-    fn bisect_probe_none_never_fabricates_a_number() {
-        let mut probe = Interrupter { fires_after: 1, calls: 0 };
+    fn bisect_interrupted_before_any_pass_is_unmeasured() {
+        // fires_after: 0 means even the floor probe returns nothing.
+        let mut probe = Interrupter { fires_after: 0, calls: 0 };
         let r = bisect_ceiling(&mut probe, 1, 1000);
         assert_eq!(r.ceiling.copied(), None);
         assert_eq!(r.ceiling.reason(), Some(&Absent::NotMeasured));
+    }
+
+    // Interrupted AFTER a confirmed pass: the shell keeps that partial answer on purpose, because
+    // "every later abort still leaves a genuinely measured, if partial, answer behind". Reporting a
+    // rung we watched sustain the gate is not fabrication; nulling it would claim we never measured
+    // a cell we demonstrably did. This test previously asserted the opposite and was wrong.
+    #[test]
+    fn bisect_interrupted_after_a_pass_keeps_the_confirmed_rung() {
+        let mut probe = Interrupter { fires_after: 1, calls: 0 };
+        let r = bisect_ceiling(&mut probe, 1, 1000);
+        assert_eq!(r.ceiling.copied(), Some(1), "c=1 was watched to pass before the interruption");
+        assert!(r.points.iter().any(|p| p.concurrency == 1 && p.passed));
+    }
+
+    // The partial answer is still a LOWER BOUND, never the search range: an interrupted run must
+    // not report the top of the range it never confirmed.
+    #[test]
+    fn an_interrupted_bisect_never_reports_the_unconfirmed_top() {
+        let mut probe = Interrupter { fires_after: 1, calls: 0 };
+        let r = bisect_ceiling(&mut probe, 1, 1000);
+        assert_ne!(r.ceiling.copied(), Some(1000));
     }
 
     // ── peak_max ────────────────────────────────────────────────────────────────────────────────
