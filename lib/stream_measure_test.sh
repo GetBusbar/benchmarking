@@ -159,6 +159,15 @@ assert_range "cpu-fps peak below start (~64)" "$SM_FPS_PEAK_CONC" 32 128
 assert_range "cpu-fps peak value low (~30000)" "$SM_FPS_PEAK" 28000 30000
 [ "$SM_FPS_MOCK_BOUND" = false ] && echo "ok   - cpu-fps mock_bound=false against a generous ceiling" || { echo "FAIL - cpu-fps mock_bound=$SM_FPS_MOCK_BOUND (want false)"; fail=1; }
 
+# ── DEAD reference (mock frames 0 fps) -> cpu-fps mock_bound=null, NEVER a trustworthy-looking false ──
+# The cpu-fps lane's H6/R3-H1 analog, symmetric with the sustained lane's dead-reference case above. A
+# direct-to-mock ceiling that reads 0 (mock cold after load / timeout / EMFILE) leaves the number
+# UNVERIFIED against the rig; the flag must be null (not false), so downstream cpuFpsCertified/cpu_valid
+# (which require an EXPLICIT false) suppress the bar rather than certify an unproven cpu-fps. This guards
+# the same defect the standalone streamcpu/run.sh null branch fixes (matched wording), on the shared lib.
+CURVE=fpspeak_768; MOCK_DEAD=1 streamcpu_peak_fps 8 8192
+[ "$SM_FPS_MOCK_BOUND" = null ] && echo "ok   - cpu-fps mock_bound=null over a dead reference (never a false over an unusable ceiling)" || { echo "FAIL - cpu-fps mock_bound=$SM_FPS_MOCK_BOUND (want null over a 0-fps reference)"; fail=1; }
+
 # ── MEDIUM-4: mock-bound decision re-probes the ceiling at the WINNER concurrency, not the grid top ──
 # A gateway peaking at a LOW concurrency where it is genuinely rig-limited must read mock_bound=true.
 # The pre-fix code compared the low-conc peak against the grid-top (c=8192) ceiling — vastly higher —
