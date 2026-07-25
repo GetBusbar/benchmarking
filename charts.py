@@ -365,6 +365,8 @@ def _mem_annot(r):
     would hide the reason a bar reads "not measured", and hide that a bar has no steady state at all."""
     bits = []
     cell = r.get("_mem_load_cell")
+    if r.get("_mem_unserved"):
+        return f"does not serve {cell}" if cell else None
     if cell:
         bits.append(f"on {cell}")
     # A cell that never plateaued has NO steady state, so its bar is absent from the ranked series. Say
@@ -726,9 +728,17 @@ def _proj_memory(key: str) -> dict | None:
     d = _mem_cell()
     if not d:
         return None
+    g = CANON.get(key) or {}
+    if not g.get("matrix"):
+        return None          # never measured at all: no row to draw, and none to claim
     m = _cell_memory(key, d, d)
     if not m:
-        return None
+        # MEASURED, but this gateway does not serve the comparison cell. It still gets a ROW, with every
+        # number absent: dropping it would delete the single most important fact about a narrow gateway
+        # (that it serves 1 of 36 cells) from the one chart where breadth shows. Same rule the board's
+        # tables follow - every gateway always appears, unserved reads n/a, never a substituted cell.
+        return {"_mem_load_cell": f"{d}>{d}", "_mem_unserved": True,
+                "idle_rss_mib": None, "steady_state_rss_mib": None, "recovered_rss_mib": None}
     # RSS metrics are UNGATED sealed envelopes (no mock-bound flag); mval() reads them (None when absent).
     return {
         "served": True,
@@ -1169,13 +1179,22 @@ def _merge() -> dict:
     for key in GATEWAYS:
         perf = _proj_perf(key)
         mem = _proj_memory(key)
+        # The all-null placeholder row (measured, but does not serve the comparison cell) exists so the
+        # memory CHART can show an n/a bar. It carries no numbers, so it must not by itself conjure a
+        # leaderboard row for a gateway with nothing else to report.
+        if mem is not None and mem.get("_mem_unserved"):
+            mem = None
         if perf is None and mem is None:
             continue
         obj: dict = {}
         if perf is not None:
             obj.update(perf)
         if mem is not None:
-            obj.update(mem)
+            # `served` is the PERF verdict in this row's vocabulary (it drives the RPS cells' ✕). The
+            # memory lane must not overwrite it in either direction: a gateway that served its
+            # passthrough but has no window on the comparison cell would otherwise be reported as not
+            # having served at all, and the reverse would claim a serve the perf sweep never saw.
+            obj.update({k: v for k, v in mem.items() if k != "served"})
         gws[key] = obj
     return gws
 
