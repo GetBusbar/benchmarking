@@ -325,6 +325,20 @@ function memDisclosure(m) {
   return parts.length ? ` — DISCLOSED: ${parts.join("; ")}` : "";
 }
 
+/* memoryTestedRecord(g): the canonical memory record, made SELF-DESCRIBING for the ONE "Tested on"
+   renderer (colTested). The memory window's cell rides on the record as load_cell ("ingress>egress")
+   rather than as a matrix cell's .path, so this pins THAT SAME cell onto .path — no second source of
+   truth, no bespoke memory pill. The record keeps its own source stamp (6x6-memory-window), so the pill's
+   provenance is the MEMORY window's, never the perf chooser's cell (audit #1: describe the record shown).
+   Null when the gateway has no memory record or no load_cell → the shared renderer paints NO pill. */
+function memoryTestedRecord(g) {
+  const m = canonicalMemory(g);
+  const lc = m && m.load_cell;
+  if (!m || typeof lc !== "string" || !lc.includes(">")) return null;
+  const [ingress, egress] = lc.split(">");
+  return { ...m, path: { ingress, egress, ...(ingress === egress ? { dialect: ingress } : {}) } };
+}
+
 /* passCell: the Passthrough tab reads ONLY the canonical record (g.best_cell). When best_cell
    exists it is THE record: a field it lacks reads n/a, never silently patched from a different
    source (that is exactly the numeric divergence this rule exists to kill). Only a gateway with
@@ -529,15 +543,32 @@ const COL_NAME = {
 // "stream suite (legacy)" label was unreachable. It also painted a pill in Same/Custom when the streaming
 // record was null and every streaming column read n/a. colTested(lane) binds the column to its LANE's
 // record, renders provenance through the ONE caption() path, and paints NO pill without a record.
+// MEMORY joins the same choke point: it is NOT chooser-driven (one post-6x6 memory window per gateway),
+// so its lane record is the memory record itself with its own load_cell pinned as the path — the pill then
+// names the cell the MEMORY window actually ran on, rendered by the SAME code as every other tab.
 const LANE_RECORD = {
   perf: (g, st) => chooserCellPerf(g, st),
   stream: (g, st) => chooserCellStream(g, st),
+  memory: (g) => memoryTestedRecord(g),
 };
+// The header tooltip per lane (what the column means on THIS tab).
+const LANE_TESTED_TITLE = {
+  memory: "The peak cell this gateway's memory window actually ran on (its highest-throughput served cell). The fixed load recipe is identical for every gateway; only the cell differs.",
+};
+// A lane may append its OWN extra disclosure after the record's caption on the pill tooltip. Memory
+// carries the fixed-load basis + the producer's honesty disclosures (memory.protocol) — dropping them
+// when the memory column moved onto the shared pill would hide WHY a memory column reads n/a.
+const LANE_TESTED_NOTE = { memory: (rec) => memLoadRecipeTip(rec) };
+// Lanes that take no part in sorting (memory's cell is an attribution, not a ranking, as before).
+const LANE_TESTED_NOSORT = new Set(["memory"]);
 function colTested(lane) {
   const pick = LANE_RECORD[lane];
+  const note = LANE_TESTED_NOTE[lane];
   return {
     id: "tested", label: "Tested on", desc: false,
-    title: `The cell these ${lane === "stream" ? "streaming " : ""}numbers were measured on, with the provenance of the record actually shown. Peak: each gateway's own peak cell. Same: the chosen dialect. Custom: the chosen ingress→egress cell.`,
+    ...(LANE_TESTED_NOSORT.has(lane) ? { sortable: false } : {}),
+    title: LANE_TESTED_TITLE[lane] ||
+      `The cell these ${lane === "stream" ? "streaming " : ""}numbers were measured on, with the provenance of the record actually shown. Peak: each gateway's own peak cell. Same: the chosen dialect. Custom: the chosen ingress→egress cell.`,
     get: (g, st = state) => {
       const rec = pick(g, st);
       const p = rec && cellPath(rec);
@@ -556,13 +587,15 @@ function colTested(lane) {
       // Provenance from THIS record's own stamp, through the ONE caption table. A live-fallback record
       // (a legacy suite, not the matrix) is starred so the disclosure is visible without hovering.
       const fb = !!(rec.source && rec.source.kind !== "matrix");
-      const title = rec.source ? caption(rec) : `measured on the ${ing}-in / ${eg}-out cell`;
+      const base = rec.source ? caption(rec) : `measured on the ${ing}-in / ${eg}-out cell`;
+      const title = note ? `${base} — ${note(rec)}` : base;
       return `<td class="tested"><span class="tested-pill" title="${esc(title)}">${esc(label)}${fb ? " *" : ""}</span></td>`;
     },
   };
 }
 const COL_TESTED = colTested("perf");
 const COL_TESTED_STREAM = colTested("stream");
+const COL_TESTED_MEMORY = colTested("memory");
 // concAt(env): the concurrency rung a throughput envelope held its ceiling at (conc_at_* from the snapshot,
 // falling back to the legacy *_concurrency). Null-safe — never fabricated (renders n/a when absent).
 function concAt(env) {
@@ -633,11 +666,9 @@ const COLUMN_SETS = {
   // reads n/a, and the sparkline renders only with a series (never a fabricated line).
   memory: [
     COL_SEL, COL_NAME,
-    { id: "memcell", label: "Tested on", desc: false, sortable: false,
-      title: "The peak cell this gateway was measured on (its highest-throughput served cell). The fixed load recipe is identical for every gateway; only the cell differs.",
-      get: (g) => { const m = canonicalMemory(g); const lc = m && m.load_cell; return lc ? { v: null, text: memLoadCellLabel(lc), na: false } : { v: null, text: "n/a", na: true }; },
-      render: (g) => { const m = canonicalMemory(g); const lc = m && m.load_cell;
-        return lc ? `<td class="memcell" title="${esc(memLoadRecipeTip(m))}">${esc(memLoadCellLabel(lc))}</td>` : `<td class="memcell na">n/a</td>`; } },
+    // Tested on: the SAME pill renderer every other tab uses (colTested), bound to the MEMORY lane so it
+    // names this gateway's load_cell — the cell the memory window actually ran on — not the perf cell.
+    COL_TESTED_MEMORY,
     { id: "memidle", label: "Idle RSS (MiB)", desc: false,
       title: () => `Cold idle process RSS: median over a ${memWindowLabel(boardMemWindows().idle)} window on a fresh cold-restarted process, before any load. Lower is better.`,
       get: (g) => memCell(g, "idle_rss_mib", fmt1) },
