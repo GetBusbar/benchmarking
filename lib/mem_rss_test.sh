@@ -73,6 +73,59 @@ check "lane value (hook silent)     -> null"   "null" "$(mem_num_or_null "$(mem_
 gw_rss(){ echo 187.4; }  # a real reading still travels through untouched
 check "lane value (real reading)    -> 187.4" "187.4" "$(mem_num_or_null "$(mem_rss_read)")"
 
+echo "mem_rss_test: native readers — the same matched pair the docker lane gets"
+check "native_rss_mib (no such process) -> empty" "" "$(native_rss_mib 'no-such-gateway-process-xyzzy')"
+check "native_hwm_mib (no such process) -> empty" "" "$(native_hwm_mib 'no-such-gateway-process-xyzzy')"
+check "_native_root_pid (no match)      -> empty" "" "$(_native_root_pid 'no-such-gateway-process-xyzzy')"
+
+# ── CLASS-LEVEL: every manifest's gw_rss and gw_hwm must cover the SAME process set ───────────────
+# THE DEFECT THIS SECTION EXISTS FOR (audit; it corrupted the 2026-07-25 memory numbers): three
+# native manifests (aisix, helicone, litellm-rust) hand-rolled their readers so that
+#   gw_rss -> awk /VmRSS/ on ONE pid's /proc/<pid>/status      (single process)
+#   gw_hwm -> _hwm_tree_mib <that pid>                          (that process AND its descendants)
+# Two different populations for the same gateway, both published: idle/peak/recovered_rss_mib came
+# from the single-pid reader, peak_rss_hwm_mib from the tree reader — and both were then compared
+# against ten docker gateways whose readers were tree-summed on both sides.
+#
+# THE CONTRACT: for EVERY gateway, gw_rss and gw_hwm resolve the same process set. Enforced
+# STRUCTURALLY rather than numerically (a real reading needs a running gateway): each manifest must
+# use a MATCHED helper pair from lib/harness.sh — container_rss_mib/container_hwm_mib over the same
+# container name, or native_rss_mib/native_hwm_mib over the same pgrep pattern — and never spell the
+# walk out itself. A hand-rolled reader is exactly how the two drifted, so hand-rolling is the thing
+# under test. This is find-1-solve-N: it covers all 13 manifests, not the 3 that were wrong.
+echo "mem_rss_test: manifest parity — gw_rss and gw_hwm read the same process set (all manifests)"
+_arg_of(){ # <line> -> the helper's single quoted/bare argument
+  printf '%s' "$1" | sed -e 's/.*_mib[[:space:]]*//' -e "s/;.*//" -e 's/}.*//' -e "s/^'//" -e "s/'[[:space:]]*$//" -e 's/[[:space:]]*$//'
+}
+for _mf in "$B"/gateways/*/gateway.sh; do
+  _gw="$(basename "$(dirname "$_mf")")"
+  _r="$(grep -m1 '^gw_rss()' "$_mf")"
+  _h="$(grep -m1 '^gw_hwm()' "$_mf")"
+  if [ -z "$_r" ] || [ -z "$_h" ]; then
+    printf '  FAIL %-15s manifest is missing gw_rss and/or gw_hwm\n' "$_gw"; FAILED=1; continue
+  fi
+  # 1. both sides must come from the shared layer — no per-manifest /proc walk or awk of its own.
+  case "$_r$_h" in
+    *awk*|*/proc/*|*pgrep*|*_tree_mib*)
+      printf '  FAIL %-15s hand-rolls its memory reader (%s / %s) instead of using the shared pair\n' \
+        "$_gw" "$_r" "$_h"; FAILED=1; continue;;
+  esac
+  # 2. the pair must be the MATCHING pair (container_* with container_*, native_* with native_*)...
+  case "$_r" in *container_rss_mib*) _rk=container;; *native_rss_mib*) _rk=native;; *) _rk=unknown;; esac
+  case "$_h" in *container_hwm_mib*) _hk=container;; *native_hwm_mib*) _hk=native;; *) _hk=unknown;; esac
+  if [ "$_rk" != "$_hk" ] || [ "$_rk" = unknown ]; then
+    printf '  FAIL %-15s rss/hwm use different (or unrecognised) helpers: %s vs %s\n' "$_gw" "$_r" "$_h"
+    FAILED=1; continue
+  fi
+  # 3. ...over the SAME target (same container name / same pgrep pattern). Both sides must actually
+  #    NAME a target — two empty extractions would otherwise "match" and pass vacuously.
+  _rt="$(_arg_of "$_r")"; _ht="$(_arg_of "$_h")"
+  if [ -z "$_rt" ] || [ -z "$_ht" ]; then
+    printf '  FAIL %-15s could not read a target out of %s / %s\n' "$_gw" "$_r" "$_h"; FAILED=1; continue
+  fi
+  check "$(printf '%-15s %s pair over one target' "$_gw" "$_rk")" "$_rt" "$_ht"
+done
+
 echo "mem_rss_test: _mem_kv — the load-success/payload gate reads ugen's stats line"
 LINE="rps=1234 fail=0 p50=1.20 p99=9.90 p50us=1200 p99us=9900 ok=45678"
 check "_mem_kv ok"      "45678" "$(_mem_kv "$LINE" ok)"

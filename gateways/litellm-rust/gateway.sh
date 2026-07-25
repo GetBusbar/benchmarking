@@ -172,8 +172,13 @@ gw_matrix_egress() {
 GW_XLATE_CAP=0
 GW_XLATE_CAP_NOTE="LiteLLM-Rust beta's only working route is anthropic-in -> anthropic-shaped azure_ai upstream (/v1/messages passthrough; messages_provider_config serves only azure_ai, commit 698072308) - no openai upstream dialect exists, so anthropic-to-openai translation is not a claimed capability"
 
-gw_rss() { awk '/VmRSS/{printf "%.1f", $2/1024}' "/proc/$(pgrep -f litellm-ai-gateway | head -1)/status" 2>/dev/null; }
-gw_hwm() { _hwm_tree_mib "$(pgrep -f litellm-ai-gateway 2>/dev/null | head -1)"; }  # kernel VmHWM of the gateway tree
+# Memory: BOTH readers cover the SAME process set (the litellm-ai-gateway process tree), via the shared
+# lib/harness.sh pair — the identical method + units the docker manifests get from
+# container_rss_mib/container_hwm_mib. They used to disagree: gw_rss read a SINGLE pid's
+# /proc/<pid>/status while gw_hwm walked the whole tree, so idle/peak/recovered and
+# peak_rss_hwm_mib described different populations of the same gateway.
+gw_rss() { native_rss_mib 'litellm-ai-gateway'; }  # summed process-tree VmRSS
+gw_hwm() { native_hwm_mib 'litellm-ai-gateway'; }  # summed process-tree VmHWM (kernel high-water mark)
 
 gw_diag() {
   echo "proc: $(pgrep -af litellm-ai-gateway | head -c 200)"

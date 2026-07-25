@@ -133,6 +133,34 @@ container_hwm_mib() { # container_name → its process tree's VmHWM via the host
   local pid; pid=$($BENCH_DOCKER inspect -f '{{.State.Pid}}' "$1" 2>/dev/null)
   _hwm_tree_mib "$pid"
 }
+# ── native (non-docker) gateways: the SAME pair, so rss and hwm cannot describe different things ──
+# THE DEFECT THESE EXIST FOR (audit; it corrupted the published memory numbers): the three
+# source-built native manifests (aisix, helicone, litellm-rust) hand-rolled their readers as
+#
+#   gw_rss() { awk '/VmRSS/{printf "%.1f", $2/1024}' "/proc/$(pgrep -f X | head -1)/status"; }  # ONE pid
+#   gw_hwm() { _hwm_tree_mib "$(pgrep -f X | head -1)"; }                                       # WHOLE tree
+#
+# so for the SAME gateway idle/peak/recovered_rss_mib measured one process while peak_rss_hwm_mib
+# measured that process AND every descendant — two different populations, both published side by
+# side, and both compared against the ten docker gateways whose readers were tree-summed. A gateway
+# that forks workers therefore had its peak inflated relative to its idle by however much its
+# children weighed. The ten docker manifests were already correct (container_rss_mib /
+# container_hwm_mib are a matched pair over the same host-PID tree); these give the native lane the
+# identical matched pair, so a manifest never spells the walk out itself and the two can never drift.
+# NOTE the readers are matched BY CONSTRUCTION, not by convention: both resolve the root pid through
+# the same _native_root_pid and both walk with _proc_tree_field_mib. A gateway that genuinely runs as
+# a single childless process is unaffected — a tree of one is that one process — so this is the right
+# default whether or not the gateway forks.
+# Guarded by lib/mem_rss_test.sh's manifest-parity section (CI: .github/workflows/bench-tests.yml).
+_native_root_pid() { # pgrep -f pattern → the lowest matching pid (the tree root), or empty
+  pgrep -f "$1" 2>/dev/null | head -1
+}
+native_rss_mib() { # pgrep -f pattern → its process tree's VmRSS (same method + units as container_rss_mib)
+  _rss_tree_mib "$(_native_root_pid "$1")"
+}
+native_hwm_mib() { # pgrep -f pattern → its process tree's VmHWM (same method + units as container_hwm_mib)
+  _hwm_tree_mib "$(_native_root_pid "$1")"
+}
 
 # ── THE single RSS null-guard (audit P0-2) ───────────────────────────────────────────────────────
 # EVERY memory lane (idle / peak / recovered / hwm) in matrix/run.sh goes through these helpers and

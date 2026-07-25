@@ -276,8 +276,13 @@ AWS_SECRET_ACCESS_KEY=mock-secret-access-key
 ENV
 }
 
-gw_rss() { awk '/VmRSS/{printf "%.1f", $2/1024}' "/proc/$(pgrep -f 'target/release/ai-gateway' | head -1)/status" 2>/dev/null; }
-gw_hwm() { _hwm_tree_mib "$(pgrep -f 'target/release/ai-gateway' 2>/dev/null | head -1)"; }  # kernel VmHWM of the ai-gateway tree
+# Memory: BOTH readers cover the SAME process set (the target/release/ai-gateway process tree), via the shared
+# lib/harness.sh pair — the identical method + units the docker manifests get from
+# container_rss_mib/container_hwm_mib. They used to disagree: gw_rss read a SINGLE pid's
+# /proc/<pid>/status while gw_hwm walked the whole tree, so idle/peak/recovered and
+# peak_rss_hwm_mib described different populations of the same gateway.
+gw_rss() { native_rss_mib 'target/release/ai-gateway'; }  # summed process-tree VmRSS
+gw_hwm() { native_hwm_mib 'target/release/ai-gateway'; }  # summed process-tree VmHWM (kernel high-water mark)
 
 gw_diag() {
   echo "proc: $(pgrep -af 'target/release/ai-gateway' | head -c 200)"
