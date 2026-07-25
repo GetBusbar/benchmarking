@@ -219,24 +219,16 @@
       </article>
     </div>
 
-    <h3 class="method-section-head">Defaults, and why we do not tune them</h3>
-    <p class="method-section-sub">We benchmark what a default install actually does, including the parts that are inconvenient for us.</p>
+    <h3 class="method-section-head">Config: the bare minimum required to run</h3>
+    <p class="method-section-sub">What each gateway is configured with, and what it is not.</p>
     <div class="method-grid">
       <article class="method-card">
         <h3>The config rule</h3>
         <ul>
           <li><b>Every config is the bare minimum required to run.</b> A setting appears only if it is needed to boot the gateway, to point upstreams at the test mock instead of a real provider, to expose the ingress paths the matrix exercises, or to bind the port and cores the rig requires. Everything else is absent, and the application decides its own defaults.</li>
-          <li><b>We do not turn features on. We do not turn them off.</b> Not to make gateways look alike, not to remove a cost we consider unrepresentative, and not because a feature is inconvenient to measure. A default install is the subject of the benchmark, so whatever a gateway enables out of the box is what runs.</li>
+          <li><b>We do not turn features on. We do not turn them off.</b> A default install is the subject of the benchmark, so whatever a gateway enables out of the box is what runs.</li>
           <li><b>We do not restate a default either.</b> Writing a setting whose value matches the application's own default looks harmless, but it is still a line we wrote, and it silently becomes an override the day upstream changes that default. A config lint enforces this: every setting must carry a machine-checked reason naming which of the four necessities it satisfies, and anything without one fails the build.</li>
-        </ul>
-      </article>
-      <article class="method-card">
-        <h3>What the rule costs</h3>
-        <ul>
-          <li><b>A default that is expensive stays expensive.</b> If a gateway enables something by default that costs memory, CPU or throughput, that cost is measured, because a default install is the subject of this benchmark. Tuning it away would produce a number no user of that gateway would ever see.</li>
-          <li><b>The rule is applied without exception, including to the entrant built by this benchmark's operators.</b> It has already produced a result unflattering to that entrant, and the result was published rather than adjusted. Two changes that would have improved it were considered and refused: disabling the feature responsible, and adding a harness behaviour no default install performs. Either would have improved a number by changing the instrument.</li>
-          <li><b>Gateways phone home if that is what they do.</b> Four of our gateway manifests carried outbound-telemetry suppressions, justified as a concession to an isolated rig. That justification was not true, since the boxes have ordinary internet access. The suppressions are gone. One of the four turned out to be pinning the gateway's own default rather than overriding it, so removing it changed nothing; the other three were real overrides. If a default install reports usage, the benchmark measures a default install that reports usage.</li>
-          <li>When this method surfaces something unflattering about any gateway, that is the instrument doing its job. It is not a finding we went looking for, and it is not one we would soften for anyone.</li>
+          <li>Four of our gateway manifests carried outbound-telemetry suppressions. They are gone. A gateway that reports usage by default is measured reporting usage by default.</li>
         </ul>
       </article>
     </div>
