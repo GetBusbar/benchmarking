@@ -4,21 +4,28 @@
 #
 # Regression guard for the BOX QUALIFICATION verdict engine (lib/box_qualify.sh).
 #
-# THE INCIDENT THIS EXISTS FOR. On 2026-07-25 one box (gomodel's) was contaminated. Its no-gateway
-# floor — direct_c1_p99_us, the loadgen hitting the mock with NO gateway in the path — read 77-81us,
-# INSIDE the healthy population's 73-82us, so no static absolute threshold could have caught it. What
-# WAS anomalous was the movement against its OWN prior run (+5.4% while the healthiest 9 boxes moved
-# -2.6%..+3.8%) and, far more starkly, its peak throughput (-86% while healthy gateways moved
+# THE INCIDENT THIS EXISTS FOR. On 2026-07-25 one box was contaminated. Its no-gateway floor -
+# direct_c1_p99_us, the loadgen hitting the mock with NO gateway in the path - read 77-81us, INSIDE
+# the healthy population's 73-82us, so no static absolute threshold could have caught it. What WAS
+# anomalous was the movement against its OWN prior run (+5.4% while the healthiest 9 boxes moved
+# -2.6%..+3.8%) and, far more starkly, its peak throughput (-86% while healthy boxes moved
 # -13%..+13%). The run published that as a gateway regression. This test pins the two gates that turn
 # those facts into an up-front verdict, using the REAL measured numbers as the fixtures.
 #
-# WHAT IT ASSERTS
-#   stage 1  every healthy box PASSES at the shipped +/-4% band; gomodel's +5.4% FAILS
-#   stage 1  a naive static-absolute check would NOT have caught gomodel (the calibration fact itself)
+# WHAT IT ASSERTS, AND HOW IT IS WRITTEN. Every case is described by THE VALUE UNDER TEST, never by
+# which entrant happened to sit on the box that produced it. The gate does not know a gateway's name
+# and must not: it takes a drift percentage and returns a verdict. Naming the boxes here also made
+# this file one of the places a gateway's identity had leaked outside its own directory, and it made
+# the assertions read as claims about products ("gateway X fails") when the finding was about a box.
+# The measured numbers ARE the evidence and every one of them is kept, verbatim; only the labels
+# changed, and the provenance survives in these comments.
+#
+#   stage 1  every healthy drift PASSES at the shipped +/-4% band; the suspect box's +5.4% FAILS
+#   stage 1  a naive static-absolute check would NOT have caught it (the calibration fact itself)
 #   stage 1  jitter: an elevated tail spread fails even when the median is perfectly normal
 #   stage 1  no history -> "seed" (a first run is never blocked for lack of a baseline)
 #   stage 1  anti-ratchet: creep that passes every per-run step still fails the long-horizon bound
-#   stage 2  every healthy gateway PASSES at the shipped +/-25% band; gomodel's -86% FAILS
+#   stage 2  every healthy replay delta PASSES at the shipped +/-25% band; the suspect -86% FAILS
 #   stage 2  no recorded peak -> "seed"
 #   baseline the rolling baseline is a MEDIAN of the last N, so ONE contaminated run cannot become
 #            the next run's reference; and a FAILED qualification never seeds the baseline at all
@@ -64,42 +71,39 @@ check "bq_drift_pct no obs -> empty"  "" "$(bq_drift_pct '' 77)"
 
 # ═════════════════════════════════════════════════════════════════════════════════════════════════
 echo "box_qualify_test: STAGE 1 — the real 2026-07-25 per-box floor drift, at the shipped +/-4% band"
-# The measured per-box median drift of direct_c1_p99_us, this run vs the prior run. Nine healthy
-# boxes and the one suspect box. A healthy floor of ~77us is used as the baseline for all of them.
+# The measured per-box median drift of direct_c1_p99_us, this run vs the prior run: the nine healthy
+# boxes, then the one suspect box. A healthy floor of ~77us is the baseline for all of them. Each case
+# is named by its drift, which is the ONLY input the gate has.
 BASE=77
-check "agentgateway  -2.6% -> pass" pass "$(s1 x -2.6 4 "$BASE")"
-check "apisix        -2.6% -> pass" pass "$(s1 x -2.6 4 "$BASE")"
-check "litellm-rust  -2.5% -> pass" pass "$(s1 x -2.5 4 "$BASE")"
-check "one-api       -1.2% -> pass" pass "$(s1 x -1.2 4 "$BASE")"
-check "litellm-py    +0.6% -> pass" pass "$(s1 x  0.6 4 "$BASE")"
-check "busbar        +1.3% -> pass" pass "$(s1 x  1.3 4 "$BASE")"
-check "portkey       +1.3% -> pass" pass "$(s1 x  1.3 4 "$BASE")"
-check "bifrost       +2.7% -> pass" pass "$(s1 x  2.7 4 "$BASE")"
+# HEALTHY POPULATION - every measured drift, driven through the same band, asserted the same way.
+for d in -2.6 -2.5 -1.2 0.6 1.3 2.7; do
+  check "healthy floor drift ${d}% -> pass" pass "$(s1 x "$d" 4 "$BASE")"
+done
 # The THINNEST healthy margin in the whole calibration set: 3.8% against a 4.0% band = 0.2 points of
 # headroom. If this case ever flips to fail, the band was tightened past the evidence.
-check "tensorzero    +3.8% -> pass (0.2pt headroom)" pass "$(s1 x  3.8 4 "$BASE")"
-# THE ONE THE GATE EXISTS FOR.
-check "gomodel       +5.4% -> FAIL" fail "$(s1 x  5.4 4 "$BASE")"
-s1 x 5.4 4 "$BASE" >/dev/null; check "gomodel reason" "floor_drift" "$BQ_REASON"
+check "worst healthy floor drift +3.8% -> pass (0.2pt headroom)" pass "$(s1 x  3.8 4 "$BASE")"
+# THE ONE THE GATE EXISTS FOR: the contaminated box's +5.4%, 1.6 points past the worst healthy value.
+check "suspect floor drift +5.4% -> FAIL" fail "$(s1 x  5.4 4 "$BASE")"
+s1 x 5.4 4 "$BASE" >/dev/null; check "suspect floor drift reason" "floor_drift" "$BQ_REASON"
 
 echo "box_qualify_test: STAGE 1 — the band is ONE-SIDED (a box cannot get faster from contention)"
 # THE INCIDENT THIS EXISTS FOR (2026-07-25, second run). The band shipped SYMMETRIC, so the gate
-# terminated boxes for BEATING their baseline: one-api read 75us against a 79us baseline (-5.06%) and
-# tensorzero 75us against 81us (-7.41%). Both were rejected and replaced, and with 7 of 13 baselines
+# terminated boxes for BEATING their baseline: one box read 75us against a 79us baseline (-5.06%) and
+# another 75us against 81us (-7.41%). Both were rejected and replaced, and with 7 of 13 baselines
 # sitting above that run's box population the gate was on course to burn every replacement and skip
-# gateways outright — including busbar.
+# gateways outright.
 # WHY ONE-SIDED IS CORRECT, not a loosening: contention, throttling and noisy neighbours only ever ADD
 # latency. A box cannot randomly get FASTER. A floor that beats its baseline is the box showing its
 # true clean-hardware speed, and it implies the BASELINE was the noisy measurement. The absolute
 # envelope still bounds absurd values on both sides.
-check "one-api      -5.06% (faster) -> pass" pass "$(s1 x -5.06 4 "$BASE")"
-check "tensorzero   -7.41% (faster) -> pass" pass "$(s1 x -7.41 4 "$BASE")"
+check "beat baseline -5.06% (faster) -> pass" pass "$(s1 x -5.06 4 "$BASE")"
+check "beat baseline -7.41% (faster) -> pass" pass "$(s1 x -7.41 4 "$BASE")"
 check "far faster    -40%  (faster) -> pass" pass "$(s1 x -40   4 "$BASE")"
 # ...while the SLOW side keeps biting at exactly the shipped band.
 check "just over    +4.01% (slower) -> FAIL" fail "$(s1 x  4.01 4 "$BASE")"
 
 echo "box_qualify_test: STAGE 1 — why a static absolute threshold could NOT have caught it"
-# gomodel's absolute floor was 77-81us; the healthy population was 73-82us. Every one of those values
+# The suspect box's absolute floor was 77-81us; the healthy population was 73-82us. Every one of those values
 # is INSIDE the shipped sanity envelope, so the envelope alone returns pass for the bad box too —
 # which is precisely why the PRIMARY gate is per-box drift and not a constant.
 for v in 73 74 77 78 81 82; do
@@ -148,32 +152,28 @@ check "close to rolling AND oldest -> pass" pass "$BQ_VERDICT"
 # ═════════════════════════════════════════════════════════════════════════════════════════════════
 echo "box_qualify_test: STAGE 2 — the real 2026-07-25 peak replay deltas, at the shipped +/-25% band"
 # rps_max_proxy, this run vs the prior run. Baseline 10000 rps for readability; the deltas are the
-# measured ones. Stage 2 separates healthy-from-bad by 13% vs 86% — an enormous margin next to
-# stage 1's 3.8% vs 5.4%, which is exactly why it is the strong gate.
+# measured ones, one per box. Stage 2 separates healthy-from-bad by 13% vs 86% - an enormous margin
+# next to stage 1's 3.8% vs 5.4%, which is exactly why it is the strong gate.
 p2(){ # delta_pct baseline [oldest]
   local base="$2" obs
   obs="$(awk -v b="$base" -v d="$1" 'BEGIN{printf "%d", b*(1+d/100)}')"
   bq_stage2_verdict "$obs" "$base" "${3:-}" "openai>openai"
   printf '%s' "$BQ_VERDICT"
 }
-check "agentgateway -13% -> pass" pass "$(p2 -13 10000)"
-check "tensorzero   -12% -> pass" pass "$(p2 -12 10000)"
-check "apisix        -8% -> pass" pass "$(p2  -8 10000)"
-check "bifrost       -4% -> pass" pass "$(p2  -4 10000)"
-check "busbar        -0% -> pass" pass "$(p2   0 10000)"
-check "portkey       -3% -> pass" pass "$(p2  -3 10000)"
-check "litellm-rust  +8% -> pass" pass "$(p2   8 10000)"
-check "kong         +13% -> pass" pass "$(p2  13 10000)"
+# HEALTHY POPULATION - every measured replay delta, driven through the same band.
+for d in -13 -12 -8 -4 -3 0 8 13; do
+  check "healthy peak delta ${d}% -> pass" pass "$(p2 "$d" 10000)"
+done
 # THE ONE THE GATE EXISTS FOR — and note the margin: -86% against a -25% band.
-check "gomodel      -86% -> FAIL" fail "$(p2 -86 10000)"
+check "suspect peak delta -86% -> FAIL" fail "$(p2 -86 10000)"
 # ONE-SIDED here too, mirrored: throughput is inverted (higher is better), so only a SHORTFALL is a
-# regression. A gateway that beats its recorded peak must never cost a box relaunch.
-check "kong         +13% (faster) -> pass" pass "$(p2  13 10000)"
+# regression. A box that beats its recorded peak must never cost a relaunch.
+check "beat recorded peak +13% (faster) -> pass" pass "$(p2  13 10000)"
 check "far faster  +200% (faster) -> pass" pass "$(p2 200 10000)"
 check "just under   -25.1% -> FAIL"  fail "$(p2 -25.1 10000)"
-p2 -86 10000 >/dev/null; check "gomodel stage-2 reason" "peak_drift" "$BQ_REASON"
-check "gomodel stage-2 drift recorded" "-86.00" "$BQ_DRIFT_PCT"
-# The band is why stage 2 is NOT 4%: six of the eight healthy gateways above would be rejected.
+p2 -86 10000 >/dev/null; check "suspect peak delta reason" "peak_drift" "$BQ_REASON"
+check "suspect peak drift recorded" "-86.00" "$BQ_DRIFT_PCT"
+# The band is why stage 2 is NOT 4%: six of the eight healthy deltas above would be rejected.
 BQ_PEAK_DRIFT_PCT=4 check "at a 4% band a healthy -13% would FAIL (why the bands differ)" fail \
   "$(BQ_PEAK_DRIFT_PCT=4 p2 -13 10000)"
 

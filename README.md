@@ -41,14 +41,14 @@ exact build/commit measured, plus the charts below.
 - **Go** - builds the load generator (`loadgen/`).
 - **Docker** - for the container-based gateways (Bifrost, Kong, GoModel, One-API, …).
 - **Python 3 + matplotlib** - draws the charts (`pip install matplotlib`). Optional; JSON results are written either way.
-- Docker. Every gateway pulls its own pinned official image on first run (see `gateways/versions.env`); helicone and litellm-rust build from pinned source (no arm64 image exists — see their manifests).
+- Docker. Every gateway pulls its own pinned official image on first run; the pin lives in that gateway's own `gateways/<name>/gateway.sh`. A few build from pinned source because no arm64 image exists - each says so in its own manifest header.
 
 **To run the one-click cloud version** (`run-on-ec2.sh`) the *only* extra dependency is **AWS CLI v2**, configured (`aws configure` - creds + a default region). The script launches a fresh Graviton box, installs everything on it, runs the full suite, pulls the results back, and **terminates the box** - nothing to set up, nothing to clean up.
 
 ## Run it - one command, every metric
 
 Clone, then run one script. Everything is at the repo root, and **every gateway provisions itself**
-from the ref pinned in [`gateways/versions.env`](gateways/versions.env) - Docker images, pip, source,
+from the ref pinned in its own [`gateways/<name>/gateway.sh`](gateways/) - Docker images, pip, source,
 or (for a native gateway) its released image's binary. Nothing to fetch by hand for any of them.
 
 ```sh
@@ -83,8 +83,8 @@ One-API to its arm64 tag), so nothing is quietly arm64-only or x86-only.
 
 A gateway that can't be stood up (unreachable, or needs infra a single container can't provide) is
 recorded `served: false` and shown as such - never silently dropped. To pin a different build of any
-gateway, edit its line in `gateways/versions.env` (or override the env var); the exact ref is stamped
-into every result.
+gateway, edit the pin in its own `gateways/<name>/gateway.sh` (or override the env var); the exact ref
+is stamped into every result.
 
 ### How long it takes
 
@@ -234,10 +234,11 @@ functions. The runners are gateway-agnostic; there is nothing else to edit. See
 
 ## Honesty notes (the receipts)
 
-- **Source refs are config, not defaults buried in a script.** Everything is pinned in
-  [`gateways/versions.env`](gateways/versions.env) and overridable; the *actual* version/commit
-  built is written into each result's `build` field. "You used an old branch" is answerable by
-  pointing at the file and the recorded commit.
+- **Source refs are config, not defaults buried in a script.** Each gateway's ref is pinned in its
+  own `gateways/<name>/gateway.sh`, next to that manifest's disclosure of what it deviates from and
+  why, and every pin is overridable from the environment; the *actual* version/commit built is
+  written into each result's `build` field. "You used an old branch" is answerable by pointing at the
+  manifest and the recorded commit.
 - **Each gateway is launched the only way it actually serves the endpoint.** For example,
   LiteLLM-Rust's `/v1/messages` route only serves the `azure_ai` provider *and* only serves at all
   under its `python-config` reader (the lean env config returns `400`) - verified against its own

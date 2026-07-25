@@ -11,13 +11,14 @@
 # gateway anywhere in the path. It measures the BOX, not the gateway. In the 2026-07-25 field run vs
 # the run before it, the per-box median drift of that floor was:
 #
-#     agentgateway -2.6%   apisix -2.6%   bifrost +2.7%   busbar +1.3%   gomodel +5.4%
-#     kong -2.6%   litellm-python +0.6%   litellm-rust -2.5%   one-api -1.2%   portkey +1.3%
-#     tensorzero +3.8%
+#     -2.6%  -2.6%  -2.5%  -1.2%  +0.6%  +1.3%  +1.3%  +2.7%  +3.8%   (ten healthy boxes)
+#     +5.4%                                                             (one suspect box)
 #
-# gomodel's box was contaminated — and gomodel's ABSOLUTE floor was 77-81us, INSIDE the healthy
-# population's 73-82us. A static absolute threshold could not have caught it, and did not: the run
-# published gomodel as a gateway regression when the honest finding was "we measured it on a bad box".
+# One box per gateway, one gateway per box; which entrant happened to sit on the bad box is not what
+# the gate keys on and is deliberately not recorded here. The suspect box was contaminated - and its
+# ABSOLUTE floor was 77-81us, INSIDE the healthy population's 73-82us. A static absolute threshold
+# could not have caught it, and did not: the run published a BOX fault as a gateway regression when
+# the honest finding was "we measured it on a bad box".
 # That is the single fact that shapes this whole file: the gate must be RELATIVE TO THAT BOX'S OWN
 # HISTORY, not to a global constant. The absolute envelope below is retained only as a coarse
 # catch-all for grossly bad hardware.
@@ -38,9 +39,8 @@
 #   throughput to the recorded value. It exercises the real measured path (gateway + mock + loadgen)
 #   and is FAR more discriminating than the floor. Same run pair, rps_max_proxy:
 #
-#     healthy: agentgateway -13%  tensorzero -12%  apisix -8%  bifrost -4%  busbar -0%
-#              litellm-rust +8%   portkey -3%      kong +13%              -> max |delta| 13%
-#     suspect: gomodel -86%
+#     healthy: -13%  -12%  -8%  -4%  -3%  -0%  +8%  +13%      -> max |delta| 13%
+#     suspect: -86%
 #
 #   Floor separates healthy-from-bad by 3.8% vs 5.4% (thin). Peak replay separates 13% vs 86%
 #   (enormous). Stage 2 is therefore the strong gate; stage 1 is the cheap early one.
@@ -61,10 +61,10 @@
 #   the rig happens to do is a rubber stamp, not a measurement-quality gate.
 #
 # Why the two bands differ by so much: they measure different things with different natural variance.
-# A 4% band on stage 2 would false-reject 6 of the 8 HEALTHY gateways above and put the rig into
-# permanent relaunch churn; 25% still catches the gomodel class (-86%) with an enormous margin.
+# A 4% band on stage 2 would false-reject 6 of the 8 HEALTHY boxes above and put the rig into
+# permanent relaunch churn; 25% still catches the -86% class with an enormous margin.
 #
-# Stage 1 at 4% is DELIBERATELY TIGHT and the margin is THIN: the worst healthy box (tensorzero) drifted
+# Stage 1 at 4% is DELIBERATELY TIGHT and the margin is THIN: the worst healthy box drifted
 # +3.8% against a 4.0% band — 0.2 percentage points of headroom. That is accepted on purpose. A
 # deviation larger than 4% must never be shrugged off as normal box variance; a false reject is cheap
 # (bounded box relaunch, self-healing) while a false accept publishes bad data. Err tight.
@@ -85,7 +85,7 @@ BQ_FLOOR_RATCHET_PCT="${BQ_FLOOR_RATCHET_PCT:-8.0}"
 # ABSOLUTE sanity envelope (us). Coarse catch-all for grossly bad hardware and the ONLY floor gate
 # available on a first run with no history. The healthy population sat at 73-82us on arm64
 # m7g.4xlarge; this envelope is deliberately much wider so it never false-rejects — it exists to catch
-# a box that is 2x slow, not to catch the gomodel class (which it demonstrably cannot).
+# a box that is 2x slow, not to catch the inside-the-envelope class above (which it demonstrably cannot).
 BQ_FLOOR_ABS_MIN_US="${BQ_FLOOR_ABS_MIN_US:-45}"
 BQ_FLOOR_ABS_MAX_US="${BQ_FLOOR_ABS_MAX_US:-115}"
 # JITTER / stability. UNCALIBRATED — we have no published per-sample spread from the historical runs,
@@ -277,7 +277,7 @@ def lane(key, cell_key=None, conc_key=None, src_key=None, prefix="", only_gw=Fal
 #   and a per-gateway baseline is a category error. It is also actively harmful: with one or two
 #   historical samples each, a gateway's baseline is a random draw from that population, so a gateway
 #   that happened to draw a fast box rejects perfectly normal ones while a gateway that drew a slow
-#   one accepts almost anything. Observed live on 2026-07-25: apisix carried a 73us baseline and was
+#   one accepts almost anything. Observed live on 2026-07-25: one box carried a 73us baseline and was
 #   rejected at 77us, a value squarely inside that same run's healthy spread of 70-80us, while a
 #   genuinely bad box at 89us was correctly caught. Pooling gives ~one sample per gateway per run, so
 #   the reference converges immediately and means the same thing for everyone.

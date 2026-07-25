@@ -197,16 +197,16 @@ container_hwm_mib() { # container_name → its process tree's VmHWM via the host
 }
 # ── native (non-docker) gateways: the SAME pair, so rss and hwm cannot describe different things ──
 # THE DEFECT THESE EXIST FOR (audit; it corrupted the published memory numbers): the three
-# source-built native manifests (aisix, helicone, litellm-rust) hand-rolled their readers as
+# source-built native manifests hand-rolled their readers as
 #
 #   gw_rss() { awk '/VmRSS/{printf "%.1f", $2/1024}' "/proc/$(pgrep -f X | head -1)/status"; }  # ONE pid
 #   gw_hwm() { _hwm_tree_mib "$(pgrep -f X | head -1)"; }                                       # WHOLE tree
 #
 # so for the SAME gateway idle/peak/recovered_rss_mib measured one process while peak_rss_hwm_mib
 # measured that process AND every descendant — two different populations, both published side by
-# side, and both compared against the ten docker gateways whose readers were tree-summed. A gateway
+# side, and both compared against the docker gateways whose readers were tree-summed. A gateway
 # that forks workers therefore had its peak inflated relative to its idle by however much its
-# children weighed. The ten docker manifests were already correct (container_rss_mib /
+# children weighed. The docker manifests were already correct (container_rss_mib /
 # container_hwm_mib are a matched pair over the same host-PID tree); these give the native lane the
 # identical matched pair, so a manifest never spells the walk out itself and the two can never drift.
 # NOTE the readers are matched BY CONSTRUCTION, not by convention: both resolve the root pid through

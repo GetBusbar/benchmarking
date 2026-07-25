@@ -209,28 +209,29 @@ test("freshness guard HARD-FAILS a wholesale-stale board (absolute age floor kep
 });
 
 test("freshness guard PASSES a board with MIXED per-gateway ages (independent cadences are honest)", () => {
-  // The core relaxation: busbar measured today, kong measured 3 weeks ago. Under the OLD lag guard the
+  // The core relaxation: one gateway measured today, another 3 weeks ago. Under the OLD lag guard the
   // 3-week-old row would hard-fail (it "lags the board-newest"); now that is honest and expected on a
-  // living board where any one gateway is re-run alone. Board must PASS.
+  // living board where any one gateway is re-run alone. Board must PASS. The fixture keys are
+  // synthetic on purpose: the guard is a function of AGE, not of which gateway is which.
   const { err, data } = genData(buildSyntheticRepo({
-    busbar: { matrix: isoAgo(1) },        // today
-    kong: { matrix: isoDaysAgo(21) },     // 3 weeks ago — would have hard-failed the old lag guard
+    alpha: { matrix: isoAgo(1) },         // today
+    bravo: { matrix: isoDaysAgo(21) },    // 3 weeks ago - would have hard-failed the old lag guard
   }));
   assert.equal(err, undefined, `expected a mixed-age board to PASS gen-data, but it threw: ${err}`);
   // Neither is stale (both < 60d), and each carries its OWN measured_at.
   const byKey = Object.fromEntries(data.gateways.map((g) => [g.key, g]));
-  assert.equal(byKey.busbar.stale, false, "busbar (today) must not be flagged stale");
-  assert.equal(byKey.kong.stale, false, "kong (3 weeks) must not be flagged stale (< 60d)");
-  assert.ok(byKey.busbar.measured_at && byKey.kong.measured_at, "each gateway carries its OWN measured_at");
-  assert.notEqual(byKey.busbar.measured_at, byKey.kong.measured_at, "per-gateway measured_at survives independently");
+  assert.equal(byKey.alpha.stale, false, "the fresh row (today) must not be flagged stale");
+  assert.equal(byKey.bravo.stale, false, "the 3-week-old row must not be flagged stale (< 60d)");
+  assert.ok(byKey.alpha.measured_at && byKey.bravo.measured_at, "each gateway carries its OWN measured_at");
+  assert.notEqual(byKey.alpha.measured_at, byKey.bravo.measured_at, "per-gateway measured_at survives independently");
 });
 
 test("freshness guard does NOT hard-fail a legitimate hours-long single matrix run (span check relaxed)", () => {
-  // One atomic matrix run legitimately spans HOURS (busbar ~5h): timestamps 5h apart within a row are
-  // a real run, not a franken-mix. The old MAX_SPAN_H=3 hard-failed exactly this; now only a >12h
-  // sanity cap can trip. Board must PASS.
+  // One atomic matrix run legitimately spans HOURS (a full 6x6 takes ~5h): timestamps 5h apart within
+  // a row are a real run, not a franken-mix. The old MAX_SPAN_H=3 hard-failed exactly this; now only a
+  // >12h sanity cap can trip. Board must PASS.
   const msg = genThrows(buildSyntheticRepo({
-    busbar: { perf: isoAgo(6), matrix: isoAgo(1) }, // 5h span — a real long matrix run
+    alpha: { perf: isoAgo(6), matrix: isoAgo(1) }, // 5h span - a real long matrix run
   }));
   assert.equal(msg, null, `expected an hours-long single run to PASS, but it threw: ${msg}`);
 });
@@ -354,12 +355,12 @@ test("OOTB config artifact round-trips into data.json (results/config/<gw>.txt �
 });
 
 test("config-correction deep link is a per-gateway, template-referencing, fully-encoded GitHub URL", () => {
-  const url = app.configCorrectionUrl({ key: "tensorzero", display: "TensorZero" });
+  const url = app.configCorrectionUrl({ key: "synthgw", display: "SynthGW" });
   assert.ok(url.startsWith(app.BENCH_REPO + "/issues/new?"), `must target the benchmarking repo new-issue endpoint, got ${url}`);
   const u = new URL(url);
   assert.equal(u.searchParams.get("template"), "config-correction.yml", "must reference the issue-form template");
-  assert.equal(u.searchParams.get("title"), "Config correction: TensorZero", "title must be pre-set per gateway (decoded)");
-  assert.equal(u.searchParams.get("gateway"), "TensorZero", "gateway field must be injected per gateway");
+  assert.equal(u.searchParams.get("title"), "Config correction: SynthGW", "title must be pre-set per gateway (decoded)");
+  assert.equal(u.searchParams.get("gateway"), "SynthGW", "gateway field must be injected per gateway");
   // A display name with spaces/specials must be encoded, never break the URL.
   const tricky = app.configCorrectionUrl({ key: "x", display: 'A & B "gw"' });
   assert.doesNotThrow(() => new URL(tricky), "special chars in the display name must stay URL-safe");
@@ -375,26 +376,51 @@ test("gen-data emits gateways with a class for every entry", () => {
   for (const g of data.gateways) {
     assert.ok(typeof g.cls === "string" && g.cls.length > 0, `${g.key} has no cls`);
   }
-  const busbar = data.gateways.find((g) => g.key === "busbar");
-  assert.equal(busbar.cls, "Control plane");
+  // And the class is not invented by the board: it is each project's OWN self-description, read
+  // straight out of that gateway's manifest. Assert that for EVERY gateway rather than spot-checking
+  // one by name, so the assertion holds for a gateway dropped in tomorrow.
+  for (const g of data.gateways) {
+    const man = readFileSync(join(ROOT, "gateways", g.key, "gateway.sh"), "utf8");
+    const m = /^GW_CLASS=(.*)$/m.exec(man);
+    if (!m) continue;                       // a manifest may omit it; gen-data then defaults it
+    const declared = m[1].replace(/\s+#.*$/, "").trim().replace(/^["']|["']$/g, "");
+    assert.equal(g.cls, declared, `${g.key}: published cls must be the manifest's own GW_CLASS`);
+  }
 });
 
-test("star snapshot covers the field and gen-data attaches it", () => {
-  // The committed snapshot (gateways/stars.json, refreshed by gateways/fetch-stars.mjs)
-  // must cover every gateway with an integer count and an ISO date.
+test("star snapshot is well formed, carries no stale key, and gen-data attaches it", () => {
+  // The committed snapshot (gateways/stars.json, refreshed by `node gateways/fetch-stars.mjs`).
+  //
+  // THIS USED TO HARD-FAIL on any gateway missing from the snapshot, which quietly made adding a
+  // gateway a TWO-step operation: drop in gateways/<name>/gateway.sh and the whole site build went
+  // red until someone also ran fetch-stars and committed the result. That breaks the one structural
+  // invariant this repo has. A star count is decoration, gen-data already degrades a missing entry to
+  // `stars: null`, and the board renders that as no star data - so a gateway added since the last
+  // refresh is HONEST, not a build break.
+  //
+  // What IS asserted, and is stricter than before: every entry present must be well formed, and the
+  // snapshot must carry NO key without a gateway directory. A stale key is real drift (a renamed or
+  // deleted gateway leaving a phantom count behind); a missing key is just a pending refresh.
   const snap = JSON.parse(readFileSync(join(ROOT, "gateways", "stars.json"), "utf8"));
-  for (const g of data.gateways) {
-    const s = snap[g.key];
-    assert.ok(s, `${g.key} missing from gateways/stars.json`);
-    assert.ok(Number.isInteger(s.stars) && s.stars >= 0, `${g.key} stars not an integer`);
-    assert.ok(/^\d{4}-\d{2}-\d{2}$/.test(s.as_of), `${g.key} as_of not YYYY-MM-DD`);
+  const live = new Set(readdirSync(join(ROOT, "gateways")).filter(
+    (d) => existsSync(join(ROOT, "gateways", d, "gateway.sh"))));
+  for (const [key, s] of Object.entries(snap)) {
+    assert.ok(live.has(key), `gateways/stars.json has a stale key '${key}' with no gateways/${key}/gateway.sh`);
+    assert.ok(Number.isInteger(s.stars) && s.stars >= 0, `${key} stars not an integer`);
+    assert.ok(/^\d{4}-\d{2}-\d{2}$/.test(s.as_of), `${key} as_of not YYYY-MM-DD`);
   }
+  const pending = data.gateways.filter((g) => !snap[g.key]).map((g) => g.key);
+  if (pending.length) console.log(`  (note: no star snapshot yet for ${pending.join(", ")} - run: node gateways/fetch-stars.mjs)`);
   // A bundle emitted by the CURRENT gen-data carries the attached fields. The committed
   // fallback bundle (mid-refresh) may predate them; assert only when present.
   for (const g of data.gateways) {
-    if ("stars" in g) {
+    if ("stars" in g && snap[g.key]) {
       assert.equal(g.stars, snap[g.key].stars, `${g.key} bundle stars != snapshot`);
       assert.equal(g.stars_as_of, snap[g.key].as_of, `${g.key} bundle as_of != snapshot`);
+    }
+    // No snapshot entry -> the bundle must say so honestly, never fabricate a count.
+    if ("stars" in g && !snap[g.key]) {
+      assert.equal(g.stars, null, `${g.key} has no snapshot entry, so its published star count must be null`);
     }
   }
 });
@@ -451,9 +477,9 @@ test("url state round-trips through /<category>/<view>?<params>", () => {
   st.needXlate = true;
   st.sortCol = "lat";
   st.sortDesc = false;
-  st.cmp = ["busbar", "bifrost"];
+  st.cmp = ["alpha", "bravo"];
   st.cmpOpen = true;
-  st.drawer = "busbar";
+  st.drawer = "alpha";
   const url = app.encodeUrl(st);
   assert.ok(url.startsWith("/gateways/matrix?"), `path carries category+view: ${url}`);
   const back = app.decodeUrl(...parts(url));
@@ -565,12 +591,15 @@ test("a direct URL load defaults each tab to its column's natural direction", ()
 });
 
 // ---- gateways overview: the neutral roster ----------------------------------
-test("gateways overview lists every gateway alphabetically, busbar treated like the rest", () => {
+test("gateways overview lists EVERY gateway alphabetically, none seated first or held back", () => {
   const rows = app.rosterRows(data.gateways);
   assert.equal(rows.length, data.gateways.length, "no gateway filtered out of the roster");
   const names = rows.map((g) => g.display.toLowerCase());
   assert.deepEqual(names, names.slice().sort(), "roster is alphabetical, case-insensitive");
-  assert.ok(rows.some((g) => g.key === "busbar"), "busbar is a plain roster row like the others");
+  // SET EQUALITY, not a spot-check on one name: every key in the data appears exactly once in the
+  // roster, so no entry (the operator's own included) can ever be special-cased in or out of it.
+  assert.deepEqual(rows.map((g) => g.key).slice().sort(), data.gateways.map((g) => g.key).slice().sort(),
+    "the roster is exactly the field, with no entry added, dropped or duplicated");
   // the roster is a VIEW of the data, never a mutation of it
   assert.notEqual(rows, data.gateways);
 });
@@ -696,10 +725,12 @@ test("sealed envelope: every surface reads best_cell through metric(); a suppres
   assert.deepEqual(checkConsistency({ gateways: [bound] }, app, SYNTH).errors, []);
 });
 
-// The apisix HIGH class: a certified fallback value must NOT be suppressed. Run gen-data for real over a
+// The HIGH class: a certified fallback value must NOT be suppressed. Run gen-data for real over a
 // matrix with no swept diagonal (so the perf/xlate fallbacks fire) + certified legacy suites, then assert
-// the SEALED envelope surfaces the certified 17,437 (never dropped by a lost mock_bound flag).
-test("HIGH class (apisix): a certified xlate-fallback value survives the seal and reaches the table", () => {
+// the SEALED envelope surfaces the certified 17,437 (never dropped by a lost mock_bound flag). The
+// 17,437 is a real measured anthropic-in/openai-out throughput from the field; the fixture gateway is
+// synthetic because the class is about the SEAL, not about who produced the number.
+test("HIGH class: a certified xlate-fallback value survives the seal and reaches the table", () => {
   const root = mkdtempSync(join(tmpdir(), "site-fb-"));
   mkdirSync(join(root, "gateways", "fbgw"), { recursive: true });
   writeFileSync(join(root, "gateways", "fbgw", "gateway.sh"),
@@ -1329,10 +1360,15 @@ function committedSweep() {
       }
     }
   }
-  const legacy = join(ROOT, "results", "perf", "busbar.json");
-  if (existsSync(legacy)) {
-    const p = JSON.parse(readFileSync(legacy, "utf8"));
-    if (Array.isArray(p.sweep_sustained_20ms) && p.sweep_sustained_20ms.length > 3) return p;
+  // Legacy fallback: whatever results/perf/*.json happens to be on disk. DISCOVERED, never a named
+  // file - naming one made this helper silently return null the day that gateway was renamed or removed.
+  const pdir = join(ROOT, "results", "perf");
+  if (existsSync(pdir)) {
+    for (const f of readdirSync(pdir).filter((x) => x.endsWith(".json")).sort()) {
+      let p; try { p = JSON.parse(readFileSync(join(pdir, f), "utf8")); } catch { continue; }
+      if (Array.isArray(p.sweep_sustained_20ms) && p.sweep_sustained_20ms.length > 3
+          && Array.isArray(p.sweep_max_proxy)) return p;
+    }
   }
   return null;
 }
@@ -1402,7 +1438,8 @@ test("machine-readable served states map to distinct honest cell states", () => 
 });
 
 test("a grey (not_configurable) cell tooltip shows the gateway's cited reason", () => {
-  const reason = "Kong 3.8 ai-proxy accepts only OpenAI-canonical ingress and emits no OpenAI-Responses route_type";
+  // Shape of a real cited capability limit (they are written by each manifest, about its own project).
+  const reason = "this gateway accepts only OpenAI-canonical ingress and emits no OpenAI-Responses route_type";
   const tip = app.matrixCellTip({ served: "not_configurable", verdict_note: reason });
   // HONEST wording: grey = not in the grid WE drafted, not a claim the maintainer declined it.
   assert.ok(tip.includes("not in the capability grid we drafted"), "reads as our omission, not the gateway's declared incapability");
@@ -2161,9 +2198,10 @@ test("#17: the independent oracle covers EVERY matrix cell, translation, streami
   assert.ok(checked >= 2, `expected the real bundle to exercise several oracled surfaces, got ${checked}`);
 });
 
-test("#21: C6 fires on an INJECTED inversion — the assertion cannot silently pass when kong is absent", () => {
-  // The old test asserted only on live kong data and SILENTLY RETURNED when results/matrix/kong.json was
-  // missing, so deleting the file (or re-measuring the inversion away) would make it vacuously green.
+test("#21: C6 fires on an INJECTED inversion - the assertion cannot silently pass when a row is absent", () => {
+  // The old test asserted only on ONE named gateway's live data and SILENTLY RETURNED when that
+  // results/matrix/<gw>.json was missing, so deleting the file (or re-measuring the inversion away)
+  // would make it vacuously green - and renaming that gateway would have done it silently too.
   // Drive the invariant DIRECTLY on an injected cell so it can never skip.
   const inverted = { rps_sustained_20ms: 1000, rps_max_proxy: 900 };
   const ok = { rps_sustained_20ms: 900, rps_max_proxy: 1000 };

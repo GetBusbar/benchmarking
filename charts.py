@@ -5,8 +5,8 @@
 
 Nothing is hard-coded: every number is read from results/<suite>/<gateway>.json (written by the
 runners). Bars are colored by MEASUREMENT — a neutral highlight goes to whichever gateway measured
-best on the metric, so if busbar loses, busbar isn't highlighted. The highlight is deliberately not a
-brand color.
+best on the metric, so the operator's own entry is highlighted only when it actually wins. The
+highlight is deliberately not a brand color.
 
 Add a chart = append one `Chart(...)` to CHARTS below. Add a gateway = it shows up automatically
 once it has a result file (label/order from GATEWAYS). Run after the benchmark:
@@ -198,7 +198,7 @@ def _mpl():
 # Each gateway is fully defined by its own dir: gateways/<key>/gateway.sh declares GW_DISPLAY (label),
 # GW_LANG (color bucket), and GW_REPO (linked from the name in the report table). Add a dir → it shows
 # up in the charts/tables/run-lists; delete it → it's gone everywhere. A gateway only appears in a
-# chart once it also has a result file this run. Alphabetical by key — deliberately NOT busbar-first;
+# chart once it also has a result file this run. Alphabetical by key, so no entrant is seated first;
 # order here is only load order, every chart + table sorts by the MEASURED value.
 def _manifest_meta():
     out = {}
@@ -598,8 +598,8 @@ CHARTS = [
                         if r.get("_xlate_ingress") else None,
     ),
     # Governance is intentionally NOT charted on the neutral board: the governed suite is a
-    # non-default, busbar-only launch (only busbar's manifest wires it), so a comparison would
-    # spotlight busbar and read "not tested" for the rest. Governance overhead belongs on the
+    # non-default launch wired by a single manifest, so a comparison would spotlight that one
+    # entrant and read "not tested" for the rest. Governance overhead belongs on the
     # advocacy site. The governed suite still runs and its data is kept for that use.
 ]
 
@@ -1323,7 +1323,8 @@ def _report_md(rows: list, title: str, charts: list, pending: tuple = (), chart_
     lines.append("Method: added latency = gateway p99 − direct-to-mock p99 at concurrency 1; RPS "
                  "ceiling = highest sustained req/s with p99 < 1 s and <0.1% errors; RSS idle = after "
                  "first 200, peak = under sustained load. Same box, same mock, same load, one gateway "
-                 "at a time. Source refs pinned in `gateways/versions.env`; the built commit is in each row.")
+                 "at a time. Each gateway's source ref is pinned in its own `gateways/<name>/gateway.sh`; "
+                 "the built commit is in each row.")
     lines.append("")
     lines.append(f"<sub>Page + charts regenerated **{RENDER_TS}** from the raw `results/*.json`.</sub>")
     return "\n".join(lines) + "\n"
