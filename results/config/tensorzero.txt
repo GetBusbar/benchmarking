@@ -1,0 +1,19 @@
+# ── tensorzero.toml (rendered; loaded via --config-file config/tensorzero.toml) ──
+[gateway.observability]
+enabled = false
+
+[models.mock]
+routing = ["mock"]
+
+[models.mock.providers.mock]
+type = "openai"
+api_base = "http://127.0.0.1:8000/v1"
+model_name = "gpt-4o-mini"
+api_key_location = "none"
+
+# ── launch env (non-secret; credential values are dummy on the isolated rig) ──
+TENSORZERO_DISABLE_PSEUDONYMOUS_USAGE_ANALYTICS=1
+ANTHROPIC_API_KEY=dummy
+AWS_ACCESS_KEY_ID=AKIAMOCKACCESSKEY
+AWS_SECRET_ACCESS_KEY=mock-secret-access-key
+AWS_REGION=us-east-1
