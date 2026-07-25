@@ -14,6 +14,9 @@ on:
       - "lib/stream_measure_test.sh"
       - "lib/harness.sh"
       - "lib/mem_rss_test.sh"
+      - "lib/probe_verdict.sh"
+      - "lib/probe_verdict_test.sh"
+      - "gateways/*/gateway.sh"
       - "lib/mock_restart_test.sh"
       - "lib/ingress.sh"
       - "lib/ingress_path_test.sh"
@@ -37,6 +40,9 @@ on:
       - "lib/stream_measure_test.sh"
       - "lib/harness.sh"
       - "lib/mem_rss_test.sh"
+      - "lib/probe_verdict.sh"
+      - "lib/probe_verdict_test.sh"
+      - "gateways/*/gateway.sh"
       - "lib/mock_restart_test.sh"
       - "lib/ingress.sh"
       - "lib/ingress_path_test.sh"
@@ -71,8 +77,20 @@ jobs:
       # did not treat 0 as unmeasured — so a rig-side MEASUREMENT FAILURE was published as a certified
       # 0.0 MiB and won first place on the ascending memory ranking (audit P0-2). Gate the
       # unmeasurable-prints-nothing contract and the single mem_num_or_null guard directly.
-      - name: RSS measurement-failure test (unreadable /proc + dead container -> null, never 0)
-        run: bash -n lib/harness.sh && bash -n lib/mem_rss_test.sh && bash lib/mem_rss_test.sh
+      # Same file also gates MANIFEST PARITY: gw_rss and gw_hwm must read the SAME process set for
+      # every one of the 13 gateways (three native manifests read a single pid for rss and the whole
+      # tree for hwm, publishing two different populations of the same gateway side by side).
+      - name: RSS measurement-failure + manifest-parity test (null-never-0; gw_rss/gw_hwm same process set)
+        run: bash -n lib/harness.sh && bash -n lib/mem_rss_test.sh && bash lib/mem_rss_test.sh && for m in gateways/*/gateway.sh; do bash -n "$m" || exit 1; done
+      # lib/probe_verdict.sh is the ONE choke point deciding how long a persistently-000/5xx cell is
+      # retried and what verdict is published for it. run_cell used to branch BOTH on the gateway's own
+      # advisory capability declaration: the same observation (persistent 5xx, mock verifiably healthy)
+      # was published not_configured when undeclared and not_verified when declared, and the declared
+      # cell also got 3x120s of retries against the undeclared cell's 2x10s. A gateway's unverified
+      # claim therefore moved both the published verdict and the effort spent measuring it. Gate the
+      # observation-only contract and the single uniform budget so the branch cannot come back.
+      - name: Probe-verdict choke-point test (verdict + retry budget from observables only, one budget for all cells)
+        run: bash -n lib/probe_verdict.sh && bash -n lib/probe_verdict_test.sh && bash lib/probe_verdict_test.sh
       # lib/stream_measure.sh produces EVERY published streams_sustained / cpu_fps / added-TTFT number but
       # had ZERO CI coverage (MEDIUM-R2-4): the sustained/cpu-fps bisect+peak searches, the sustained
       # SM_MOCK_BOUND decision (the MEDIUM-R2-2 gate's source signal), stream_c1's added-latency honesty
