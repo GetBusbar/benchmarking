@@ -24,3 +24,7 @@ __pycache__/
 *.pyc
 # prebuilt bench rig binaries live in the `rig` GitHub release, not git
 bin/
+# box-qualification scratch: the per-box stage1/stage2 probe output and the assembled verdict the
+# orchestrator ships back onto the box. The DURABLE record is rig.box_qualify inside each snapshot
+# (results/snapshots/), which is committed — these are the working files that produced it.
+results/box-qualify/

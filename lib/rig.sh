@@ -58,6 +58,36 @@ _rig_asset_updated_at(){
 # so an unmeasurable field can never be emitted as "" (which downstream would read as a real value).
 _rig_json_str(){ if [ -z "${1:-}" ]; then printf 'null'; else printf '"%s"' "$1"; fi; }
 
+# BOX QUALIFICATION PROVENANCE (the same idea, one step further out). The rig binaries are one half of
+# the instrument; the BOX they run on is the other. A contaminated box publishes a fake gateway
+# regression exactly as a silently-rebuilt mock does — that is what happened to gomodel on 2026-07-25,
+# whose no-gateway floor (77-81us) sat INSIDE the healthy population's absolute range (73-82us) yet was
+# 5.4% off its own prior run, and whose peak throughput collapsed 86%. So the box's qualifying
+# measurement — the no-gateway floor median + jitter stats, and the gateway's own peak replay, with the
+# computed drift percentages and the bands they were judged against — is recorded INSIDE this same
+# provenance block rather than in a second store: one place to look when two runs disagree, and one
+# place to query when the (deliberately provisional) bands get recalibrated from repeat runs.
+#
+# The orchestrator (run-on-ec2.sh) writes the qualification verdict to $BOX_QUALIFY_FILE on the box
+# BEFORE the 6x6 starts; matrix/run.sh's snapshot then carries it with no change of its own. Wholly
+# best-effort: no file (a local run, an older harness) -> the key is simply absent, never fabricated.
+# The content is emitted only after python confirms it PARSES as a JSON object, so a truncated or
+# garbage file can never corrupt the snapshot it is folded into.
+_rig_box_qualify_json(){
+  local f="${BOX_QUALIFY_FILE:-${RIG_ROOT:-.}/results/box-qualify/qualification.json}"
+  [ -r "$f" ] || return 0
+  python3 - "$f" <<'PY' 2>/dev/null
+import json, sys
+try:
+    with open(sys.argv[1]) as fh:
+        j = json.load(fh)
+except Exception:
+    sys.exit(0)
+if isinstance(j, dict):
+    sys.stdout.write(json.dumps(j))
+PY
+}
+
 # rig_provenance_json -> the "rig" object describing THE INSTRUMENT THIS RUN USED. Every field is
 # null-safe; a consumer that predates this block simply sees no "rig" key at all.
 rig_provenance_json(){
@@ -72,13 +102,20 @@ rig_provenance_json(){
   # Only ask the API about binaries that actually CAME from the release; a local build has no asset.
   case "${RIG_MOCK_ORIGIN:-}" in release|cached) mat="$(_rig_asset_updated_at "mock-$arch")";; esac
   case "${RIG_UGEN_ORIGIN:-}" in release|cached) uat="$(_rig_asset_updated_at "ugen-$arch")";; esac
-  printf '{"arch": %s, "release_url": %s, "mock": {"origin": %s, "sha256": %s, "asset_updated_at": %s}, "ugen": {"origin": %s, "sha256": %s, "asset_updated_at": %s}}' \
+  # Empty (no qualification file / unparseable) -> the literal null, exactly like every other field
+  # here: a consumer must be able to tell "this run was not qualified" from "it qualified at 0".
+  local bq; bq="$(_rig_box_qualify_json)"
+  printf '{"arch": %s, "release_url": %s, "mock": {"origin": %s, "sha256": %s, "asset_updated_at": %s}, "ugen": {"origin": %s, "sha256": %s, "asset_updated_at": %s}, "box_qualify": %s}' \
     "$(_rig_json_str "$arch")" "$(_rig_json_str "$RIG_URL")" \
     "$(_rig_json_str "${RIG_MOCK_ORIGIN:-}")" "$(_rig_json_str "$msha")" "$(_rig_json_str "$mat")" \
-    "$(_rig_json_str "${RIG_UGEN_ORIGIN:-}")" "$(_rig_json_str "$usha")" "$(_rig_json_str "$uat")"
+    "$(_rig_json_str "${RIG_UGEN_ORIGIN:-}")" "$(_rig_json_str "$usha")" "$(_rig_json_str "$uat")" \
+    "${bq:-null}"
 }
 fetch_rig() { # <repo-root>
   local root="$1" arch="${BENCH_ARCH:-arm64}" err
+  # Remember the tree we were pointed at so rig_provenance_json can find the box-qualification file
+  # relative to it without every caller having to thread a path through.
+  RIG_ROOT="$root"
   mkdir -p "$root/bin"
   # LOCAL-DEV OVERRIDE (audit: opt-in, never on a field/CI box). The prebuilt rig is a Linux ELF; on a
   # non-Linux dev host (macOS) it cannot exec natively. RIG_MOCK_CMD / RIG_UGEN_CMD let a local verifier
