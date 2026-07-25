@@ -1436,4 +1436,141 @@ test("gen-data preserves the per-cell verdict_note reason for grey cells", () =>
   }
 });
 
+// ---- unified cell chooser: the three modes pick the right cell -----------------
+// A gateway serving three cells with distinct numbers: its openai diagonal (best_cell), a slower
+// anthropic diagonal, and an openai->anthropic translation cell.
+const CHOOSER_GW = {
+  key: "cg", display: "CG", lang: "Rust",
+  best_cell: { ingress: "openai", egress: "openai", dialect: "openai", source: "matrix",
+    added_latency_p50_us: 100, added_latency_p99_us: 110,
+    rps_sustained_20ms: 30000, rps_sustained_20ms_mock_bound: false,
+    rps_max_proxy: 32000, rps_max_proxy_mock_bound: false },
+  matrix: { upstreams: {
+    openai: { cells: { openai: { served: true, perf: {
+      added_latency_p50_us: 100, added_latency_p99_us: 110,
+      rps_sustained_20ms: 30000, rps_sustained_20ms_mock_bound: false,
+      rps_max_proxy: 32000, rps_max_proxy_mock_bound: false } } } },
+    anthropic: { cells: {
+      anthropic: { served: true, perf: {
+        added_latency_p50_us: 200, added_latency_p99_us: 220,
+        rps_sustained_20ms: 25000, rps_sustained_20ms_mock_bound: false,
+        rps_max_proxy: 27000, rps_max_proxy_mock_bound: false } },
+      openai: { served: true, perf: {
+        added_latency_p50_us: 130, added_latency_p99_us: 145,
+        rps_sustained_20ms: 26000, rps_sustained_20ms_mock_bound: false,
+        rps_max_proxy: 28000, rps_max_proxy_mock_bound: false } } } },
+  } },
+};
+
+test("cell chooser: Peak reads the best diagonal, Same reads a chosen diagonal, Custom any cell", () => {
+  const g = CHOOSER_GW;
+  // Peak → the openai best diagonal (110 p99, 30000 sustained), with the Tested-on dialect openai.
+  const peak = { mode: "peak" };
+  assert.equal(app.chooserPerfCell(g, "added_latency_p99_us", String, peak).text, "110");
+  assert.equal(app.chooserPerfCell(g, "rps_sustained_20ms", String, peak).text, "30000");
+  assert.deepEqual(app.chooserDialects(g, peak), ["openai", "openai"]);
+  // Same anthropic → the anthropic→anthropic diagonal (220 p99, 25000).
+  const same = { mode: "same", sameDialect: "anthropic" };
+  assert.equal(app.chooserPerfCell(g, "added_latency_p99_us", String, same).text, "220");
+  assert.equal(app.chooserPerfCell(g, "rps_sustained_20ms", String, same).text, "25000");
+  assert.deepEqual(app.chooserDialects(g, same), ["anthropic", "anthropic"]);
+  // Custom openai→anthropic → the translation cell (145 p99, 26000).
+  const cust = { mode: "custom", xlateIn: "openai", xlateOut: "anthropic" };
+  assert.equal(app.chooserPerfCell(g, "added_latency_p99_us", String, cust).text, "145");
+  assert.equal(app.chooserPerfCell(g, "rps_sustained_20ms", String, cust).text, "26000");
+  // A cell the gateway does NOT serve reads n/a (never fabricated), and the row is not dropped.
+  const missing = { mode: "custom", xlateIn: "gemini", xlateOut: "cohere" };
+  assert.equal(app.chooserPerfCell(g, "rps_sustained_20ms", String, missing).na, true);
+  assert.equal(app.chooserHasCell(g, missing), false);
+});
+
+test("Δ-to-Peak: a non-peak cell reports its deviation vs the gateway's own best diagonal", () => {
+  const g = CHOOSER_GW;
+  const cust = { mode: "custom", xlateIn: "openai", xlateOut: "anthropic" };
+  const cp = { ingress: "openai", egress: "anthropic", ...app.chooserCellPerf(g, cust) };
+  const d = app.deltaToPeak(cp, g.best_cell);
+  // p99 145 vs 110 = +31.8% latency; sustained 26000 vs 30000 = -13.3% RPS.
+  assert.ok(/\+31\.8% latency/.test(d), d);
+  assert.ok(/-13\.3% RPS/.test(d), d);
+  // The peak cell itself has no delta.
+  assert.equal(app.deltaToPeak({ ingress: "openai", egress: "openai", ...g.best_cell }, g.best_cell), "");
+});
+
+test("matrix popup shows the SAME gated value the Performance/Custom table shows, plus Δ-to-peak", () => {
+  const g = CHOOSER_GW;
+  const html = app.cellPopFull(g, "openai", "anthropic");
+  // The popup carries the cell's own gated numbers (formatted en-US) …
+  assert.ok(html.includes("<b>145</b>"), "popup shows the cell's added latency p99");
+  assert.ok(html.includes("<b>26,000</b>"), "popup shows the cell's sustained RPS");
+  // … the SAME numbers the Custom table reads through chooserPerfCell …
+  const cust = { mode: "custom", xlateIn: "openai", xlateOut: "anthropic" };
+  const enUS = (v) => Number(v).toLocaleString("en-US");
+  assert.equal(app.chooserPerfCell(g, "rps_sustained_20ms", enUS, cust).text, "26,000");
+  // … and the Δ-to-Peak vs the gateway's own best diagonal.
+  assert.ok(/vs peak \(OpenAI→OpenAI\)/.test(html), "popup names the peak reference cell");
+  assert.ok(/\+31\.8% latency/.test(html), "popup shows Δ latency");
+  // The consistency guard proves popup == table per cell on the whole bundle (no divergence ships).
+  const { errors } = checkConsistency(data, app);
+  assert.deepEqual(errors, [], `popup/table divergence: ${JSON.stringify(errors)}`);
+});
+
+test("Memory tab renders idle/peak/recovered/sparkline, n/a when a field is absent", () => {
+  const cols = app.COLUMN_SETS.memory;
+  const ids = cols.map((c) => c.id);
+  for (const id of ["memidle", "mempeak", "memrecov", "memcurve"]) assert.ok(ids.includes(id), `memory tab has ${id}`);
+  // A full record: every column shows its value, the curve renders an SVG.
+  const full = { key: "m", display: "M", lang: "Rust", memory_read: { source: "matrix",
+    idle_rss_mib: 40, peak_rss_mib: 900, recovered_rss_mib: 55,
+    rss_series: [{ t_s: 0, rss_mib: 40 }, { t_s: 60, rss_mib: 900 }, { t_s: 180, rss_mib: 55 }] } };
+  assert.equal(cols.find((c) => c.id === "memidle").get(full).text, "40.0");
+  assert.equal(cols.find((c) => c.id === "mempeak").get(full).text, "900.0");
+  assert.equal(cols.find((c) => c.id === "memrecov").get(full).text, "55.0");
+  const curve = cols.find((c) => c.id === "memcurve");
+  assert.equal(curve.get(full).na, false, "a series enables the curve column");
+  assert.ok(/<svg/.test(curve.render(full)), "the curve column renders an inline SVG sparkline");
+  // An absent-field gateway: n/a everywhere, no fabricated 0, the curve cell reads n/a (no line).
+  const bare = { key: "b", display: "B", lang: "Rust", memory_read: { source: "matrix", idle_rss_mib: 40 } };
+  assert.equal(cols.find((c) => c.id === "memrecov").get(bare).na, true);
+  assert.equal(cols.find((c) => c.id === "memrecov").get(bare).text, "n/a");
+  assert.equal(curve.get(bare).na, true, "no series → the curve column reads n/a");
+  assert.ok(/n\/a/.test(curve.render(bare)) && !/<svg/.test(curve.render(bare)), "no series → n/a, never a fabricated line");
+  // A gateway with no memory record at all → n/a, never a crash.
+  const none = { key: "n", display: "N", lang: "Rust" };
+  assert.equal(cols.find((c) => c.id === "memidle").get(none).na, true);
+});
+
+test("URL round-trips the chooser mode + selection (peak / same / custom)", () => {
+  const rt = (path, search) => {
+    const st = app.decodeUrl(path, search);
+    const url = app.encodeUrl(st);
+    const u = new URL(url, "https://onthebench.ai");
+    return { st, back: app.decodeUrl(u.pathname, u.search), url };
+  };
+  // Peak is the clean default: no mode param.
+  const peak = rt("/gateways/performance", "");
+  assert.equal(peak.st.mode, "peak");
+  assert.ok(!peak.url.includes("mode="), `peak is clean: ${peak.url}`);
+  // Same carries the dialect.
+  const same = rt("/gateways/performance", "?mode=same&d=anthropic");
+  assert.equal(same.st.mode, "same");
+  assert.equal(same.st.sameDialect, "anthropic");
+  assert.ok(same.url.includes("mode=same") && same.url.includes("d=anthropic"), same.url);
+  assert.equal(same.back.mode, "same");
+  assert.equal(same.back.sameDialect, "anthropic");
+  // Custom carries the in→out pair.
+  const cust = rt("/gateways/performance", "?mode=custom&in=anthropic&out=openai");
+  assert.equal(cust.st.mode, "custom");
+  assert.equal(cust.st.xlateIn, "anthropic");
+  assert.equal(cust.st.xlateOut, "openai");
+  assert.ok(cust.url.includes("mode=custom") && cust.url.includes("in=anthropic") && cust.url.includes("out=openai"), cust.url);
+  assert.equal(cust.back.xlateIn, "anthropic");
+  assert.equal(cust.back.xlateOut, "openai");
+  // A legacy Matched link (xin/xout, no mode) lands in Custom on that pinned pair.
+  const legacy = app.decodeUrl("/gateways/translation", "?xin=anthropic&xout=openai");
+  assert.equal(legacy.view, "performance");
+  assert.equal(legacy.mode, "custom");
+  assert.equal(legacy.xlateIn, "anthropic");
+  assert.equal(legacy.xlateOut, "openai");
+});
+
 console.log(`\n${passed} tests passed`);
