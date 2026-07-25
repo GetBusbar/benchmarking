@@ -56,6 +56,28 @@ GW_PATH=/v1/chat/completions
 GW_MODEL=openai/gpt-4o-mini
 GW_AUTH=dummy
 
+# ── CONFIG NECESSITY (lib/gateway_config_lint.sh) ─────────────────────────────────────────────────
+# Every setting this manifest writes, and the ONE reason it is here. The lint fails on a setting with
+# no claim AND on a claim with no setting, so this block cannot drift from the config in either
+# direction. Reasons: boot (it will not run without this) | upstream (points an upstream at the test
+# mock) | ingress (an ingress path the 6x6 matrix drives) | bind (the port or CPU pin the rig needs).
+GW_CONFIG_WHY="
+PORT       bind      # the port the harness drives
+GOMAXPROCS bind      # Go pre-1.25 reads the HOST cpu count, not the --cpuset-cpus limit
+OPENAI_BASE_URL    upstream  # each provider adapter has its own base-URL override; all -> the mock
+ANTHROPIC_BASE_URL upstream  # the path segment is the mock's provider marker, so boot-time model
+GEMINI_BASE_URL    upstream  # discovery gets that provider's OWN catalog (see gw_launch)
+BEDROCK_BASE_URL   upstream
+BEDROCK_MODELS     upstream  # bedrock discovery is a SigV4 control-plane call the mock does not
+                             # implement; this allowlist is GoModel's own documented escape hatch
+OPENAI_API_KEY    boot   # a provider with no key is not configured (dummy; the mock ignores it)
+ANTHROPIC_API_KEY boot
+GEMINI_API_KEY    boot
+AWS_ACCESS_KEY_ID     boot
+AWS_SECRET_ACCESS_KEY boot
+AWS_REGION            boot
+"
+
 GOMODEL_IMAGE="${GOMODEL_IMAGE:-enterpilot/gomodel:0.1.55}"
 
 gw_version() {
@@ -106,8 +128,11 @@ gw_launch() {
 #     cpuset) never pay. Pinning to the cpuset count emulates the same 4-core box every gateway is
 #     measured on — the identical CPU-pinning run-mechanic bifrost also uses (Go-field parity).
 #   OOTB posture: default features stay ON (no LOGGING_ENABLED/budget/ratelimit/admin/mcp strips); the
-#     only deviations are the permitted ones — provider base_urls → mock, dummy keys, OpenAI-lane
-#     provider scope, and the STORAGE_TYPE=sqlite / MODELS_ENABLED_BY_DEFAULT run-mechanics.
+#     only deviations are the permitted ones - provider base_urls → mock and dummy keys.
+#     STORAGE_TYPE=sqlite and MODELS_ENABLED_BY_DEFAULT=true were REMOVED: .env.template documents
+#     both values as GoModel's own defaults ("Storage type: sqlite (default)"; "default: true"), so
+#     each line configured nothing and would have become a silent override the day upstream moved
+#     its default. Storage and model-enablement now come from the application, not from us.
 #     LOGGING_ENABLED is DELIBERATELY ABSENT so GoModel's default audit logging (bodies + headers →
 #     sqlite, on the request path) stays on. Re-adding LOGGING_ENABLED=false here would restore the
 #     pre-2026-07-24 feature strip and silently re-inflate its throughput ~6x — see the "NOTE ON ITS
@@ -128,8 +153,6 @@ BEDROCK_MODELS=anthropic.claude-3-sonnet-20240229-v1:0
 AWS_ACCESS_KEY_ID=AKIAMOCKACCESSKEY
 AWS_SECRET_ACCESS_KEY=mock-secret-access-key
 AWS_REGION=us-east-1
-MODELS_ENABLED_BY_DEFAULT=true
-STORAGE_TYPE=sqlite
 ENV
 }
 

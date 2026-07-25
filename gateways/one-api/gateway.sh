@@ -25,6 +25,18 @@ GW_PORT=3000
 GW_PATH=/v1/chat/completions
 GW_MODEL=gpt-4o-mini
 GW_AUTH=""   # filled with a minted token in gw_launch
+
+# ── CONFIG NECESSITY (lib/gateway_config_lint.sh) ─────────────────────────────────────────────────
+# Every setting this manifest writes, and the ONE reason it is here. The lint fails on a setting with
+# no claim AND on a claim with no setting, so this block cannot drift from the config in either
+# direction. Reasons: boot (it will not run without this) | upstream (points an upstream at the test
+# mock) | ingress (an ingress path the 6x6 matrix drives) | bind (the port or CPU pin the rig needs).
+# One-API has no declarative config file: its upstreams are runtime admin-API state, created by the
+# bootstrap in gw_launch (channels with base_url -> the mock, then a minted token, which is One-API's
+# own mandatory per-request auth). The container itself takes exactly one setting.
+GW_CONFIG_WHY="
+GOMAXPROCS bind   # Go pre-1.25 reads the HOST cpu count, not the --cpuset-cpus limit
+"
 ONE_API_IMAGE="${ONE_API_IMAGE:-justsong/one-api:v0.6.10}"
 OA_JAR="$GW_DIR/cookies.txt"; OA_LOG="$GW_DIR/bootstrap.log"
 
@@ -70,8 +82,11 @@ print(d if isinstance(d,(str,int)) else "")' "$@" 2>/dev/null; }
 gw_launch() {
   : > "$OA_LOG"; rm -f "$OA_JAR"
   sudo docker rm -f one-api-bench >/dev/null 2>&1; sleep 1
+  # SQL_DSN is DELIBERATELY ABSENT. One-API's default with no SQL_DSN is embedded SQLite, which is
+  # exactly what we want, so setting it to the empty string configured nothing and only created a
+  # line that would silently become an override the day upstream changes that default.
   sudo docker run -d --name one-api-bench --network host --cpuset-cpus="$CORES" \
-    -e GOMAXPROCS="$(_oa_ncore)" -e SQL_DSN="" "$ONE_API_IMAGE" >>"$OA_LOG" 2>&1
+    -e GOMAXPROCS="$(_oa_ncore)" "$ONE_API_IMAGE" >>"$OA_LOG" 2>&1
   local base="http://127.0.0.1:$GW_PORT"
   # 1) wait for the admin UI/API to answer
   local up=0 i; for i in $(seq 1 40); do
@@ -195,15 +210,16 @@ gw_matrix_egress() {
 # structural (preConsumeQuota/postConsumeQuota run unconditionally — NOT a disableable knob), and
 # consume-logging is default-ON (LogConsumeEnabled=true); both stay on, exactly as it ships. The only
 # deviations are the permitted ones: provider base_urls → mock, dummy channel key (sk-mock), the
-# minted bench token (its own mandatory auth — every relay request needs a token), and SQL_DSN=""
-# (the embedded-SQLite run-mechanic: no external DB). Auth values are dummy on the isolated rig.
+# minted bench token (its own mandatory auth - every relay request needs a token), and the GOMAXPROCS
+# core pin. The storage backend is left at One-API's own default (embedded SQLite, no SQL_DSN set).
+# Auth values are dummy on the isolated rig.
 gw_config() {
-  # DERIVED from the SAME single-source values gw_launch runs: the run flags (image + GOMAXPROCS core-pin
-  # + SQL_DSN run-mechanic) and the channel lines (from _oa_channels). Nothing here is hand-restated, so
-  # the published artifact is exactly what gw_launch provisioned.
+  # DERIVED from the SAME single-source values gw_launch runs: the run flags (image + GOMAXPROCS core
+  # pin) and the channel lines (from _oa_channels). Nothing here is hand-restated, so the published
+  # artifact is exactly what gw_launch provisioned.
   cat <<ENV
-# container (embedded SQLite — SQL_DSN="" is the no-external-DB run-mechanic; GOMAXPROCS = pinned core count)
-docker run --network host --cpuset-cpus=$CORES -e GOMAXPROCS=$(_oa_ncore) -e SQL_DSN="" $ONE_API_IMAGE
+# container (storage left at One-API's default, embedded SQLite; GOMAXPROCS = pinned core count)
+docker run --network host --cpuset-cpus=$CORES -e GOMAXPROCS=$(_oa_ncore) $ONE_API_IMAGE
 # admin bootstrap (default root/123456; token auth is One-API's own mandatory per-request auth)
 POST /api/user/login              {"username":"root","password":"123456"}
 # all supported providers wired as channels (base_url = mock; model lists disjoint for 1:1 routing)

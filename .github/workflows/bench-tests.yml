@@ -24,6 +24,7 @@ on:
       - "lib/box_qualify_test.sh"
       - "lib/gateways.sh"
       - "lib/gateway_isolation_test.sh"
+      - "lib/gateway_config_lint.sh"
       - "lib/rig.sh"
       - "matrix/qualify-box.sh"
       - "matrix/run.sh"
@@ -52,6 +53,7 @@ on:
       - "lib/box_qualify_test.sh"
       - "lib/gateways.sh"
       - "lib/gateway_isolation_test.sh"
+      - "lib/gateway_config_lint.sh"
       - "lib/rig.sh"
       - "matrix/qualify-box.sh"
       - "matrix/run.sh"
@@ -144,6 +146,21 @@ jobs:
       # lib/promote_guard.py decides whether an incoming result may overwrite the committed one; a bug
       # there republishes a regression as an honest failure (R4-M2). Covers MEDIUM-R2-3 (matrix all-dead
       # 000 detection) + the anchored-marker / status-000 / honest-not-served behaviours.
+      # THE CONFIG RULE: every gateway config is the bare minimum required to run. A setting appears
+      # only if it is needed to boot the gateway, to point an upstream at the test mock, to expose an
+      # ingress path the matrix drives, or to bind the port/cores the rig requires. We do not turn
+      # features on, we do not turn them off, and we do not restate a default either - a line whose
+      # value equals the application's own default is still a line we wrote, and it becomes a silent
+      # override the day upstream moves that default. That rule is what found a memory bug in one
+      # entrant's DEFAULT install, so it cannot be enforced by review alone: the manifests had already
+      # re-accumulated four outbound-telemetry suppressions, a response header switched on against its
+      # own default, an auth chain added to a gateway that ships open, and a scatter of default
+      # restatements. This lint enumerates gateways/*/ AT RUNTIME and fails on any setting with no
+      # necessity claim AND on any claim with no setting, so the block cannot rot in either direction.
+      # It self-tests the extractor and then plants a whole fixture gateway directory, requiring the
+      # lint to discover it, fail it unjustified and pass it justified, before any green result counts.
+      - name: Gateway-config necessity lint (every setting claims one of the four necessities; no defaults restated)
+        run: bash -n lib/gateway_config_lint.sh && bash lib/gateway_config_lint.sh
       - name: Promote-guard regression test (matrix all-dead 000/5xx-warm + anchored marker + honest not-served)
         run: python3 lib/promote_guard_test.py
       # charts.py's validity gate + top-N ranking (the matrix-sole-source rewrite artifact) had ZERO

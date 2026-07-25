@@ -23,6 +23,21 @@ GW_PORT=8787
 GW_PATH=/v1/messages
 GW_MODEL=anthropic/mock
 GW_AUTH=dummy
+
+# ── CONFIG NECESSITY (lib/gateway_config_lint.sh) ─────────────────────────────────────────────────
+# Every setting this manifest writes, and the ONE reason it is here. The lint fails on a setting with
+# no claim AND on a claim with no setting, so this block cannot drift from the config in either
+# direction. Reasons: boot (it will not run without this) | upstream (points an upstream at the test
+# mock) | ingress (an ingress path the 6x6 matrix drives) | bind (the port or CPU pin the rig needs).
+# The image needs no config file at all: Portkey selects the upstream PER REQUEST from headers, so
+# these five headers ARE this gateway's entire configuration.
+GW_CONFIG_WHY="
+x-portkey-provider    upstream  # which upstream dialect this column egresses in
+x-portkey-custom-host upstream  # -> the mock, instead of the real provider host
+x-portkey-aws-access-key-id     boot  # bedrock SigV4 material; without it the request is refused
+x-portkey-aws-secret-access-key boot  # before any egress (dummy; the mock ignores the signature)
+x-portkey-aws-region            boot
+"
 # The pinned image. Lives HERE, in this gateway's own directory: overriding it in the environment
 # still wins, so no shared file needs to know this gateway exists.
 PORTKEY_IMAGE="${PORTKEY_IMAGE:-portkeyai/gateway:1.15.2}"

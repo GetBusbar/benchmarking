@@ -17,34 +17,37 @@
 #   * each provider's base_url → the mock;
 #   * dummy signing material where a protocol's signer needs it (bedrock SigV4 → ACCESS:SECRET pair;
 #     the mock ignores the signature);
-#   * client-token auth KEPT (see below) — busbar's own posture, not added-for-the-bench.
-# Run-mechanic: BUSBAR_STATE_FILE= (empty) disables the health/audit state snapshot so every run is
-# deterministic and stateless (a tripped breaker never carries over) — the equivalent of an in-memory
-# store; state persistence carries no request-path behavior. Disclosed.
+#   * signing/credential env the protocols require before they will serve.
 #
-# FAIRNESS AUDIT (v1.4.1 released tag; each line checked against that tag's source):
-#   * REMOVED BUSBAR_WORKER_THREADS=<core-count>: that was worker-scaling PERF TUNING, forbidden by
-#     the standard. v1.4.1's default (main.rs, worker_threads_from_env → available_parallelism) is
-#     already one worker per available core, and available_parallelism respects the --cpuset-cpus
-#     pin, so removing the override yields the SAME thread count via the default — no behavior change,
-#     just no favoritism. This was the one clear special-deal knob; it is gone.
-#   * emit_server_timing: true — KEPT. busbar's default is FALSE (config/mod.rs DEFAULT_EMIT_SERVER_
-#     TIMING=false, an indistinguishability choice). Turning it ON only ADDS a Server-Timing response
-#     header — it discloses busbar to the client and costs it nothing/slightly-hurts; it can never be
-#     favoritism. Left on for transparency.
-#   * max_concurrent: 8000 — KEPT. In v1.4.1 ModelCfg.max_concurrent is `usize` with NO serde default
-#     (config/mod.rs) — a REQUIRED field; omitting it fails config load. 8000 is a neutral high
-#     ceiling (well above the sweep's winning band), i.e. not the limiter — the forced-name equivalent
-#     of every other gateway's unbounded default, not a tuned throttle. (Later busbar makes this
-#     Option/unbounded; on 1.4.1 a value must be named.)
-#   * auth.chain:[tokens] + client_tokens — KEPT. busbar's DATA-PLANE auth default is OPEN (empty
-#     chain = open relay, config/mod.rs). Keeping client-token auth is therefore ADDING auth in the
-#     SAFE direction (busbar carries the per-request auth cost its competitors don't), never a
-#     favorable strip. The task specifies busbar keeps its client token; done.
-#   * No default feature is disabled: /metrics, /stats, /healthz and the admin plane are mounted
-#     unconditionally in 1.4.1 (no config flag gates them); the circuit breaker is opt-in per pool
-#     (omitting a breaker: block is the genuine default, not a strip); request-log webhook / OTLP
-#     default to None (omitting = default). Nothing here turns anything off.
+# NOTHING ELSE. busbar is the harness author's gateway and is held to the SAME bar as every entrant,
+# which under the bare-minimum rule means the config is SHORTER than it used to be, not longer. Each
+# line below was removed against v1.4.1's own source:
+#   * BUSBAR_WORKER_THREADS=<core-count>: worker-scaling perf tuning. v1.4.1's default (main.rs,
+#     worker_threads_from_env → available_parallelism) is already one worker per available core and
+#     respects the --cpuset-cpus pin, so the override bought nothing but a special deal.
+#   * BUSBAR_STATE_FILE= : this turned OFF the health/audit state snapshot, and we do not turn
+#     features off. It was justified as making runs deterministic, but the matrix now cold-starts a
+#     fresh container per cell, so nothing persists between cells anyway. Verified locally: busbar
+#     1.4.1 boots and serves with no BUSBAR_STATE_FILE in the environment.
+#   * emit_server_timing: true : this turned a feature ON. busbar's default is FALSE (config/mod.rs
+#     default_emit_server_timing). It was kept as an anti-favoritism disclosure, which is a good
+#     motive and still a config change; the rule is symmetric, so it goes.
+#   * auth.chain:[tokens] + client_tokens : this ALSO turned a feature on. busbar's data-plane auth
+#     default is OPEN (config/mod.rs), so a default install serves unauthenticated, and that is what
+#     gets measured. Keeping the chain was defended as adding cost in the safe direction, but a
+#     benchmark of default installs cannot make an exception for the operator's own entrant in either
+#     direction. GW_AUTH is now a dummy bearer the open data plane ignores, the same convention every
+#     other unprotected gateway here uses.
+#   * max_requests: -1 (x6) and the unused `pools:` block : both restated a default. ModelCfg
+#     .max_requests is #[serde(default = "neg1")] and DeployCfg.pools is #[serde(default)] with the
+#     doc comment "Pools are optional"; the bench addresses models directly and never named the pool.
+# KEPT, with the evidence: max_concurrent. In v1.4.1 ModelCfg.max_concurrent is a bare `usize` with NO
+# serde default, so config load FAILS without it. 8000 sits well above the sweep's winning band, so it
+# is a ceiling rather than the limiter - the forced-to-name-a-number equivalent of the unbounded
+# default every other gateway gets for free.
+# No default feature is disabled: /metrics, /stats, /healthz and the admin plane are mounted
+# unconditionally in 1.4.1 (no config flag gates them), the circuit breaker is opt-in per pool, and
+# the request-log webhook / OTLP default to None. Nothing here turns anything off.
 GW_KIND=docker
 # The docker container this manifest launches under. DECLARED here so that anything outside this
 # directory which needs the name (the local verifier's teardown, for one) READS it from the
@@ -61,6 +64,34 @@ GW_PORT=8080
 GW_PATH=/v1/chat/completions
 GW_MODEL=gpt-4o-mini
 GW_AUTH=bench-token
+
+# ── CONFIG NECESSITY (lib/gateway_config_lint.sh) ─────────────────────────────────────────────────
+# Every setting this manifest writes, and the ONE reason it is here. The lint fails on a setting with
+# no claim AND on a claim with no setting, so this block cannot drift from the config in either
+# direction. Reasons: boot (it will not run without this) | upstream (points an upstream at the test
+# mock) | ingress (an ingress path the 6x6 matrix drives) | bind (the port or CPU pin the rig needs).
+GW_CONFIG_WHY="
+listen         bind      # the port the harness drives
+providers      upstream  # the provider table
+mock-*         upstream  # one provider per protocol, each base_url -> the mock
+protocol       upstream  # which upstream dialect that provider speaks
+base_url       upstream  # -> the mock
+api_key_env    boot      # names the env var holding the credential; a provider without one fails load
+error_map      boot      # REQUIRED per provider in v1.4.1 - no serde default, fails loud if missing
+models         ingress   # the client-facing model table
+gpt-4o-mini*   ingress   # the model name each matrix column asks for; selects that column's provider
+provider       upstream  # which provider backs this model
+max_concurrent boot      # bare \`usize\`, NO serde default in v1.4.1: config load fails without it
+BENCH_MOCK_KEY    boot   # the credential api_key_env names (dummy; the mock ignores it)
+BENCH_BEDROCK_KEY boot   # bedrock SigV4 ACCESS:SECRET pair, same
+# ── governed lane only (gw_governed_launch). That suite exists to measure the cost of governance, so
+# these are what make its subject exist; the default lanes above never see them.
+governance    boot
+enabled       boot      # without it admin_token is inert and the key mint 401s
+db_path       boot      # the default file cannot be opened on the bench's read-only working dir
+admin_token   boot      # activates the admin plane the lane mints its virtual key over
+admin_listen  bind      # the admin plane has its own listener; the mint has to know the port
+"
 # Translation lane (xlate suite): busbar serves Anthropic ingress natively on /v1/messages and
 # translates to the OpenAI upstream configured below. Same client token — busbar accepts it via
 # either carrier (Authorization: Bearer or x-api-key), so no auth override is needed.
@@ -103,11 +134,10 @@ GW_MATRIX_EGRESS="openai openai-responses anthropic gemini cohere bedrock"
 # BENCH_MOCK_KEY carries a bearer for the body-model protocols; BENCH_BEDROCK_KEY carries the bedrock
 # SigV4 ACCESS:SECRET pair (the mock ignores both). Worker threads are NOT pinned — busbar defaults to
 # one-per-core via available_parallelism, which already honors --cpuset-cpus (fairness: no scaling
-# knob). BUSBAR_STATE_FILE= disables state persistence for a stateless deterministic run.
+# knob). State persistence is left at its default; the matrix cold-starts a fresh container per cell.
 _busbar_run() {
   ${BENCH_DOCKER:-sudo docker} rm -f busbar-bench >/dev/null 2>&1; sleep 1
   ${BENCH_DOCKER:-sudo docker} run -d --name busbar-bench --network host --cpuset-cpus="$CORES" \
-    -e BUSBAR_STATE_FILE= \
     -e BENCH_MOCK_KEY=dummy \
     -e BENCH_BEDROCK_KEY="AKIAMOCKACCESSKEY:mock-secret-access-key" \
     -v "$GW_DIR/config.gen.yaml:/etc/busbar/config.yaml:ro" \
@@ -153,13 +183,6 @@ mock-bedrock:
 YAML
   cat > "$GW_DIR/config.gen.yaml" <<YAML
 listen: "127.0.0.1:$GW_PORT"
-observability:
-  emit_server_timing: true
-auth:
-  chain: [tokens]
-  upstream_credentials: own
-  client_tokens:
-    - "bench-token"
 providers:
   mock-openai:
     api_key_env: BENCH_MOCK_KEY
@@ -181,31 +204,21 @@ models:
     # max_requests: -1 = unmetered.
     provider: mock-openai
     max_concurrent: 8000
-    max_requests: -1
   gpt-4o-mini-responses:
     provider: mock-responses
     max_concurrent: 8000
-    max_requests: -1
   gpt-4o-mini-anthropic:
     provider: mock-anthropic
     max_concurrent: 8000
-    max_requests: -1
   gpt-4o-mini-gemini:
     provider: mock-gemini
     max_concurrent: 8000
-    max_requests: -1
   gpt-4o-mini-cohere:
     provider: mock-cohere
     max_concurrent: 8000
-    max_requests: -1
   gpt-4o-mini-bedrock:
     provider: mock-bedrock
     max_concurrent: 8000
-    max_requests: -1
-pools:
-  bench-pool:
-    members:
-      - target: gpt-4o-mini
 YAML
 }
 
@@ -237,9 +250,9 @@ gw_launch() {
 # config}.yaml load) PLUS the non-secret launch env (signing values are dummy on the isolated rig —
 # never a live key). Read from the files _busbar_write_config just rendered (falls back to rendering
 # them if absent), so it can never drift from what busbar loaded. OOTB posture: all six protocols
-# wired to the mock, client-token auth kept (busbar's added-in-the-safe-direction posture),
-# emit_server_timing on (anti-favoritism disclosure), no worker-thread pin (default one-per-core), no
-# feature disabled; the only run-mechanic is BUSBAR_STATE_FILE= (stateless).
+# wired to the mock and nothing else. Auth is left OPEN (busbar's own default), Server-Timing is left
+# OFF (its own default), state persistence is left ON (its own default), worker threads are left at
+# one-per-core (its own default). Nothing is turned on and nothing is turned off.
 gw_config() {
   [ -f "$GW_DIR/providers.gen.yaml" ] && [ -f "$GW_DIR/config.gen.yaml" ] || _busbar_write_config
   echo "# ── providers.yaml (rendered; mounted at /etc/busbar/providers.yaml) ──"
@@ -250,7 +263,6 @@ gw_config() {
   echo
   echo "# ── launch env (non-secret; signing values are dummy on the isolated rig) ──"
   cat <<ENV
-BUSBAR_STATE_FILE=
 BENCH_MOCK_KEY=dummy
 BENCH_BEDROCK_KEY=AKIAMOCKACCESSKEY:mock-secret-access-key
 ENV

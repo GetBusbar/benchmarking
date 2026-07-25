@@ -18,16 +18,19 @@
 #   * each provider's base-url → the mock (all mock-reachable dialects wired below; the matrix
 #     exercises them and memory/throughput are measured on this same all-providers config, NOT scoped
 #     per-lane);
-#   * dummy provider keys / AWS signing material (the mock ignores them);
-#   * telemetry.exporter: stdout — the disclosed telemetry-off run-mechanic (it is ALSO the default,
-#     so this only pins that no OTLP egress can happen on the isolated rig).
-# NOT a strip — kept because it IS the default: `helicone.features: none`. Verified against the config
-# structs at the pinned commit (config/helicone.rs): HeliconeFeatures defaults to None whether the key
-# is present or omitted. None = no auth checks and NO control-plane/websocket calls to api.helicone.ai,
-# so the gateway boots UNPROTECTED and makes no outbound connection except to the upstream provider —
-# exactly the OOTB default. It is written explicitly here only for transparency; deleting it would be
-# behavior-identical. Helicone ships unprotected, so we keep it unprotected (GW_AUTH is a dummy bearer
-# the open router ignores). No feature is disabled to save RAM/latency; no perf knob is set.
+#   * dummy provider keys / AWS signing material (the mock ignores them).
+# REMOVED, because a line that only restates a default is still a line we wrote and it becomes wrong
+# the day upstream changes that default:
+#   * `telemetry.exporter: stdout` - this was carried as a "telemetry-off run-mechanic", which was
+#     both unnecessary (it is Helicone's own default at the pinned commit, so pinning it changed
+#     nothing) and wrong in principle: we do not turn features on and we do not turn them off. The
+#     rig is not network-isolated either - the bench boxes apt-get and pull images over the internet
+#     - so there was never a hang to avoid. Whatever Helicone's shipped exporter default is, that is
+#     what gets measured.
+#   * `helicone.features: none` - HeliconeFeatures defaults to None whether the key is present or
+#     omitted (config/helicone.rs at the pinned commit), so this was a no-op restating a default.
+#     Helicone ships unprotected and stays unprotected; GW_AUTH is a dummy bearer the open router
+#     ignores. No feature is disabled to save RAM/latency; no perf knob is set.
 GW_KIND=native
 # Self-describing manifest metadata — charts.py + the run lists read these, so a gateway
 # is fully defined by its own dir (add/remove a dir → it appears/disappears everywhere).
@@ -44,6 +47,33 @@ GW_PATH=/router/openai/chat/completions
 # the mock ignores the model and answers the OpenAI shape regardless.
 GW_MODEL=openai/gpt-4o-mini
 GW_AUTH=dummy
+
+# ── CONFIG NECESSITY (lib/gateway_config_lint.sh) ─────────────────────────────────────────────────
+# Every setting this manifest writes, and the ONE reason it is here. The lint fails on a setting with
+# no claim AND on a claim with no setting, so this block cannot drift from the config in either
+# direction. Reasons: boot (it will not run without this) | upstream (points an upstream at the test
+# mock) | ingress (an ingress path the 6x6 matrix drives) | bind (the port or CPU pin the rig needs).
+GW_CONFIG_WHY="
+server       bind
+port         bind      # the port the harness drives. The server ADDRESS is deliberately absent:
+                       # the harness drives 127.0.0.1 on the box itself, so whatever Helicone binds
+                       # by default is reachable and we have no reason to name it
+providers    upstream  # the provider table
+openai       upstream  # one entry per mock-reachable dialect
+anthropic    upstream
+bedrock      upstream
+base-url     upstream  # -> the mock; Helicone appends each provider its own native path
+routers      ingress   # /router/{id}/chat/completions IS the ingress surface, so a router per
+load-balance ingress   # provider is what makes each egress column addressable by URL rather than
+chat         ingress   # chosen at random by a latency balancer
+strategy     boot      # BalanceConfigInner is a serde-tagged enum: the tag is not optional
+OPENAI_API_KEY        boot   # dummy provider credentials; the mock ignores them
+ANTHROPIC_API_KEY     boot
+AWS_ACCESS_KEY        boot   # bedrock SigV4 reads these two names (types/provider.rs), not the
+AWS_SECRET_KEY        boot   # SDK spellings; absent = InvalidCredentials -> 401 before any egress
+AWS_ACCESS_KEY_ID     boot   # both spellings exported so any code path resolves
+AWS_SECRET_ACCESS_KEY boot
+"
 
 # ── SOURCE PIN ────────────────────────────────────────────────────────────────────────────────────
 # EXACTLY what this gateway is built from. It lives HERE, in the gateway's own directory, so that
@@ -90,8 +120,8 @@ gw_version() {
 # InferenceProvider). Gemini is deliberately NOT wired: Helicone's Gemini egress targets Google's
 # OpenAI-COMPAT surface (v1beta/openai/chat/completions), not native generateContent, so it is a
 # capability limit the matrix records grey — wiring it would manufacture an 'untranslated' red for
-# behavior Helicone never claims. Cohere has no dialect at this commit. features omitted-equivalent
-# (=none, unprotected default); telemetry pinned to stdout (its own default → no OTLP egress).
+# behavior Helicone never claims. Cohere has no dialect at this commit. Nothing else is declared: no
+# helicone.features block, no telemetry block, no server address - those are Helicone's to default.
 #
 # WHY ONE ROUTER PER PROVIDER, NOT ONE FAN-OUT ROUTER (the 2026-07-25 field-run regression):
 # this config used to declare a single `default` router load-balancing chat across
@@ -110,12 +140,7 @@ gw_version() {
 _helicone_write_config() {
   cat > "$GW_DIR/config.gen.yaml" <<YAML
 server:
-  address: 0.0.0.0
   port: $GW_PORT
-helicone:
-  features: none
-telemetry:
-  exporter: stdout
 providers:
   openai:
     base-url: "http://127.0.0.1:$MOCK_PORT/"
@@ -170,12 +195,17 @@ _helicone_spawn() {
   # converse, valid Converse body, HTTP 200 translated back to an OpenAI envelope, 3/3 runs.
   # AWS_REGION is not otherwise consulted: the SigV4 signer derives its signing region from the request
   # HOST (dispatcher/bedrock_client.rs), not from the environment, so nothing else regresses.
+  #
+  # GEMINI_API_KEY and the AI_GATEWAY__SERVER__* pair are GONE. Gemini is not a wired provider here
+  # (see the capability note), so its key configured nothing. The two AI_GATEWAY__SERVER__ vars
+  # duplicated server.port from the config file and pinned server.address to a value the harness
+  # never needed - the harness drives 127.0.0.1 on the box itself, so whatever address Helicone binds
+  # by default is reachable. A duplicated setting is a setting that can disagree with itself; the
+  # config file is the published artifact, so the port lives only there.
   setsid taskset -c "$CORES" env \
-    OPENAI_API_KEY=sk-dummy ANTHROPIC_API_KEY=sk-dummy GEMINI_API_KEY=sk-dummy \
+    OPENAI_API_KEY=sk-dummy ANTHROPIC_API_KEY=sk-dummy \
     AWS_ACCESS_KEY=AKIAMOCKACCESSKEY AWS_SECRET_KEY=mock-secret-access-key \
     AWS_ACCESS_KEY_ID=AKIAMOCKACCESSKEY AWS_SECRET_ACCESS_KEY=mock-secret-access-key \
-    AI_GATEWAY__SERVER__PORT="$GW_PORT" \
-    AI_GATEWAY__SERVER__ADDRESS=0.0.0.0 \
     "$HELICONE_BIN" -c "$GW_DIR/config.gen.yaml" </dev/null >/tmp/helicone.bench.log 2>&1 &
 }
 
@@ -261,8 +291,8 @@ gw_matrix_egress() {
 # is the rendered router config (exactly what -c loads) PLUS the non-secret launch env (all provider /
 # AWS keys are dummy on the isolated rig — never a live secret). Read from the file _helicone_write_
 # config just rendered (falls back to rendering it if absent), so it can never drift from what the
-# gateway loaded. OOTB posture: features=none (unprotected default), telemetry=stdout (no egress),
-# openai+anthropic+bedrock all wired to the mock behind one named router each; no feature strip or
+# gateway loaded. OOTB posture: no features block and no telemetry block (both left to Helicone's own
+# defaults), openai+anthropic+bedrock all wired to the mock behind one named router each; no feature strip or
 # perf knob. The file is identical for every lane and every egress column — nothing here is rewritten
 # per column, so this artifact IS the config every published number was produced on.
 gw_config() {
@@ -275,7 +305,6 @@ gw_config() {
   cat <<ENV
 OPENAI_API_KEY=sk-dummy
 ANTHROPIC_API_KEY=sk-dummy
-GEMINI_API_KEY=sk-dummy
 AWS_ACCESS_KEY=AKIAMOCKACCESSKEY
 AWS_SECRET_KEY=mock-secret-access-key
 AWS_ACCESS_KEY_ID=AKIAMOCKACCESSKEY

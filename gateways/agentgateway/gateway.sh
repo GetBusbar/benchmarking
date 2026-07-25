@@ -30,6 +30,28 @@ GW_PORT=8080
 GW_PATH=/v1/chat/completions
 GW_MODEL=gpt-4o-mini
 GW_AUTH=dummy
+
+# ── CONFIG NECESSITY (lib/gateway_config_lint.sh) ─────────────────────────────────────────────────
+# Every setting this manifest writes, and the ONE reason it is here. The lint fails on a setting with
+# no claim AND on a claim with no setting, so this block cannot drift from the config in either
+# direction. Reasons: boot (it will not run without this) | upstream (points an upstream at the test
+# mock) | ingress (an ingress path the 6x6 matrix drives) | bind (the port or CPU pin the rig needs).
+GW_CONFIG_WHY="
+llm        boot      # the top-level block; without it no LLM surface is mounted at all
+port       bind      # the port the harness drives
+models     boot      # ModelRouter needs at least one entry to resolve a request model
+name       upstream  # the request model name that selects this upstream
+provider   upstream  # which provider dialect this entry egresses in
+params     boot      # required wrapper for the per-provider settings below
+model      upstream  # the model id sent to the mock in that provider's own shape
+baseUrl    upstream  # -> the mock. MUST carry a path (see _agentgw_write_config): a bare origin
+                     # leaves pathPrefix unset and the gateway forwards the inbound path verbatim
+apiKey     boot      # a provider entry with no key is not registered (dummy; the mock ignores it)
+awsRegion  boot      # local.rs: \"bedrock requires aws_region\" - boot fails without it
+AWS_ACCESS_KEY_ID     boot   # the bedrock provider signs SigV4 from the AWS env; absent = no egress
+AWS_SECRET_ACCESS_KEY boot
+AWS_REGION            boot
+"
 AGENTGATEWAY_IMAGE="${AGENTGATEWAY_IMAGE:-ghcr.io/agentgateway/agentgateway:v1.3.1}"
 
 gw_version() {

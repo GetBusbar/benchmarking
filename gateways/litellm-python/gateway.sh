@@ -14,11 +14,17 @@
 # stream/matrix). Only the permitted deviations are applied:
 #   * provider base_urls → the mock (all six egress dialects wired below — the matrix exercises them
 #     and memory/throughput are measured on this same all-providers config; NOT scoped per-lane);
-#   * dummy api keys where a provider signer needs *some* credential (the mock ignores them);
-#   * `--telemetry False` — the ONLY run-mechanic flag: litellm's proxy CLI defaults `--telemetry
-#     True` (proxy_cli.py) and pings home; disabling outbound telemetry on the isolated rig is a
-#     disclosed run-mechanic (same class as tensorzero's analytics-off env).
+#   * dummy api keys where a provider signer needs *some* credential (the mock ignores them).
+# There are no other flags. The launch is `litellm --config <file> --port <port>`: the config points
+# the upstreams at the mock and the port is the one the harness drives.
 # REMOVED as forbidden deviations from a prior config:
+#   * `--telemetry False`: litellm's proxy CLI defaults `--telemetry True` (proxy_cli.py), so a stock
+#     install pings home. We measure defaults, and turning a shipped-on feature off is a config
+#     change we do not make in either direction. The old justification (an isolated rig where the
+#     ping would hang) was false: the bench boxes have full internet access - cloud-init apt-gets and
+#     pulls images over it - so the ping succeeds. Consequence, disclosed rather than designed
+#     around: with per-cell cold starts the proxy boots ~36 times a run, so a field run sends BerriAI
+#     a few hundred install pings. That is litellm's shipped behaviour, which is what we measure.
 #   * `--num_workers <core-count>`: worker-scaling is perf tuning. LiteLLM's documented default is
 #     ONE uvicorn worker (constants.py DEFAULT_NUM_WORKERS_LITELLM_PROXY=1; proxy_cli.py --num_workers
 #     default=1; prod-best-practices "Run one Uvicorn worker per pod ... this is the default"). OOTB =
@@ -47,6 +53,24 @@ GW_MODEL=gpt-4o-mini
 # OOTB litellm serves unprotected (no master key). GW_AUTH is a dummy bearer the open endpoint
 # ignores - the same convention every unprotected gateway in this bench uses.
 GW_AUTH=dummy
+
+# ── CONFIG NECESSITY (lib/gateway_config_lint.sh) ─────────────────────────────────────────────────
+# Every setting this manifest writes, and the ONE reason it is here. The lint fails on a setting with
+# no claim AND on a claim with no setting, so this block cannot drift from the config in either
+# direction. Reasons: boot (it will not run without this) | upstream (points an upstream at the test
+# mock) | ingress (an ingress path the 6x6 matrix drives) | bind (the port or CPU pin the rig needs).
+GW_CONFIG_WHY="
+model_list     boot      # the proxy serves nothing without one
+model_name     ingress   # the client-facing name each matrix column asks for
+litellm_params boot
+model          upstream  # the provider prefix selects the upstream dialect
+api_base       upstream  # -> the mock
+api_key        boot      # a provider entry with no key is rejected (dummy; the mock ignores it)
+aws_bedrock_runtime_endpoint upstream  # bedrock's own base-URL override -> the mock
+aws_access_key_id     boot   # the SigV4 signer needs some credential; the mock ignores the signature
+aws_secret_access_key boot
+aws_region_name       boot
+"
 LITELLM_PY_IMAGE="${LITELLM_PY_IMAGE:-ghcr.io/berriai/litellm:v1.93.0}"
 
 gw_build() {
@@ -118,11 +142,12 @@ YAML
 
 _lp_spawn() {
   sudo docker rm -f litellm-python-bench >/dev/null 2>&1; sleep 1
-  # OOTB single-worker default (no --num_workers). --telemetry False is the disclosed telemetry-off
-  # run-mechanic (proxy_cli.py defaults it True). container_rss_mib sums the whole host-pid tree.
+  # OOTB single-worker default (no --num_workers), OOTB telemetry (no --telemetry flag at all - see
+  # the header). The argv is exactly the config and the port. container_rss_mib sums the whole
+  # host-pid tree.
   sudo docker run -d --name litellm-python-bench --network host --cpuset-cpus="$CORES" \
     -v "$GW_DIR/config.gen.yaml:/config.gen.yaml:ro" \
-    "$LITELLM_PY_IMAGE" --config /config.gen.yaml --port "$GW_PORT" --telemetry False \
+    "$LITELLM_PY_IMAGE" --config /config.gen.yaml --port "$GW_PORT" \
     >"$GW_DIR/launch.log" 2>&1 || true
 }
 
@@ -186,7 +211,7 @@ gw_matrix_egress() {
 # board publishes it, so "fresh install + this config → these numbers" is reproducible. The config is
 # read from the file _lp_write_config just rendered (falls back to rendering it if absent), so it can
 # never drift from what the proxy loaded. OOTB posture: no master key (unprotected as shipped), single
-# worker (default), all six providers wired to the mock; the only run-mechanic is --telemetry False.
+# worker (default), telemetry at its default (on), all six providers wired to the mock. Nothing else.
 gw_config() {
   local cfg="$GW_DIR/config.gen.yaml"
   echo "# ── config.gen.yaml (rendered; loaded via --config /config.gen.yaml) ──"
@@ -194,7 +219,7 @@ gw_config() {
   cat "$cfg"
   echo
   echo "# ── launch argv (non-secret; provider api keys above are dummy on the isolated rig) ──"
-  echo "litellm --config /config.gen.yaml --port $GW_PORT --telemetry False"
+  echo "litellm --config /config.gen.yaml --port $GW_PORT"
 }
 
 # container_rss_mib sums the container's whole host-pid process tree (same _rss_tree_mib method as

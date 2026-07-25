@@ -15,28 +15,21 @@
 # to the official image if/when api7 ships an arm64 manifest. The source refs are pinned below, in
 # this file.
 #
-# OOTB posture (default features stay ON; only permitted run-mechanics deviate — reconciled from an
-# earlier "lean" draft that stripped admin + metrics):
+# OOTB posture. The bootstrap config is three settings and nothing else (see _aisix_write_config for
+# the local evidence behind each):
 #   - STANDALONE resources_file source (crates/aisix-core/src/config.rs:47 + filesource/mod.rs) — no
-#     etcd, no managed control plane: a required run-mechanic (we do not run etcd). The bootstrap
-#     config points at one resources.yaml that declares provider_keys + models + api_keys.
+#     etcd, no managed control plane, because we do not run etcd. The bootstrap config points at one
+#     resources.yaml that declares provider_keys + models + api_keys.
+#   - proxy.addr, the port the harness drives.
+#   - admin.admin_keys, one dummy key. Not a choice: with no admin block the binary refuses to load
+#     its config ("admin.admin_keys must contain at least one key"). Admin is on by default and that
+#     field has no serde default, so this is the cost of booting.
+#   - NOTHING about observability. The block is gone and metrics are still served on :9090, because
+#     that is aisix's default. We neither enabled nor disabled them.
 #   - cache/guardrails/ratelimit are OPT-IN per policy resource (guardrails need a guardrail_attachment,
 #     not even one of the nine file-source kinds; cache needs a cache_policy; ratelimit needs a
 #     rate_limit_policy or a per-key rate_limit). They are OFF BY DEFAULT — not stripped — so a stock
 #     resources file has none, and the request path is a plain proxy. No feature was disabled to get here.
-#   - admin.enabled=true (aisix's DEFAULT, config.rs default_enabled()==true) — RE-ENABLED from the lean
-#     draft. The admin listener is a plain in-process HTTP CRUD surface that does NOT require etcd
-#     (etcd is a separate optional config-provider crate; standalone runs without it), so admin-off is
-#     NOT a forced run-mechanic and would be a forbidden strip. admin_keys is required when admin is on
-#     (no serde default); one dummy key satisfies it with no external infra; addr defaults to loopback
-#     ephemeral (127.0.0.1:0).
-#   - observability.metrics.prometheus.enabled=true (aisix's DEFAULT, PrometheusConfig::default()==true)
-#     — RE-ENABLED from the lean draft. It serves a pure in-process /metrics scrape endpoint on its own
-#     listener (default 0.0.0.0:9090), no push/no external infra, so metrics-off would be a forbidden
-#     strip. tracing.otlp stays off — OTLP is a PUSH exporter to an external collector we do not run
-#     (disclosed external-infra run-mechanic). ***FLAGGED FOR REVIEW: the metrics-off decision from the
-#     original lean entry is REVERSED here — metrics is default-on and needs no external infra, so under
-#     OOTB it must stay on (binds a second port :9090). See gw_config note + the reconciliation summary.***
 #   - TWO provider_keys, both with api_base -> the mock and a dummy api_key, declared together in the
 #     ONE static resources file (plus the two client-facing models that select them). This is the house
 #     one-static-config standard: the matrix picks an egress column by swapping the request's model
@@ -72,6 +65,33 @@ GW_PORT=3000
 GW_PATH=/v1/chat/completions
 GW_MODEL=gpt-4o-mini
 GW_AUTH=bench-token
+
+# ── CONFIG NECESSITY (lib/gateway_config_lint.sh) ─────────────────────────────────────────────────
+# Every setting this manifest writes, and the ONE reason it is here. The lint fails on a setting with
+# no claim AND on a claim with no setting, so this block cannot drift from the config in either
+# direction. Reasons: boot (it will not run without this) | upstream (points an upstream at the test
+# mock) | ingress (an ingress path the 6x6 matrix drives) | bind (the port or CPU pin the rig needs).
+GW_CONFIG_WHY="
+resources_file boot   # standalone source; without it aisix demands an etcd cluster
+proxy          bind
+addr           bind   # the port the harness drives
+admin          boot   # with no admin block the binary refuses to load its config:
+admin_keys     boot   #   \"admin.admin_keys must contain at least one key\" (tested, see below)
+_format_version boot  # the resources file will not load without it
+provider_keys  boot
+display_name   boot   # a resource without a name cannot be referenced
+provider       upstream  # which upstream dialect this key speaks
+adapter        upstream  # and which adapter builds its URL
+api_base       upstream  # -> the mock
+api_key        boot      # dummy; the mock ignores it
+models         ingress   # the client-facing model table
+model_name     upstream  # the model id sent upstream
+provider_key   upstream  # which provider_key (and so which egress) this model resolves to
+api_keys       boot      # aisix has NO anonymous mode: every proxy handler 401s without a known key
+key_env        boot      # where the plaintext comes from
+allowed_models boot      # an api_key with no allowance can reach nothing
+BENCH_AISIX_KEY boot     # that plaintext. The name must NOT start with AISIX_ - see _aisix_launch
+"
 # The two CLIENT-facing model ids declared in the ONE static resources file (see _aisix_write_config).
 # gw_matrix_egress selects an egress column by swapping GW_MODEL between these — it never rewrites the
 # config. NOTE THE `GW_` PREFIX: any shell var named `AISIX_*` that reaches the binary's environment is
@@ -167,33 +187,30 @@ gw_version() {
 #   anthropic — bridge builds {api_base}/v1/messages (aisix-provider-anthropic/src/bridge.rs:273) with
 #               x-api-key: <dummy>, so api_base is the bare mock origin.
 _aisix_write_config() {
-  # OOTB reconciliation (see the "OOTB posture" note above gw_config for the full rationale + citations):
-  #  - admin.enabled: true — aisix's DEFAULT (config.rs default_enabled()==true); the admin listener is
-  #    a plain in-process HTTP CRUD surface that does NOT require etcd (etcd is a separate optional
-  #    config-provider crate; standalone mode runs without it), so admin-off would be a forbidden strip.
-  #    admin_keys is a REQUIRED field when admin is enabled (no serde default) — one dummy key satisfies
-  #    it with no external infra. addr defaults to loopback 127.0.0.1:0 (ephemeral), so no fixed extra port.
-  #  - metrics.prometheus.enabled: true — aisix's DEFAULT (PrometheusConfig::default()==true); serving
-  #    /metrics is a pure in-process scrape endpoint on its own listener (default 0.0.0.0:9090), no push,
-  #    no external infra — so metrics-off would be a forbidden strip. Left ON, as it ships.
-  #  - tracing.otlp.enabled: false — OTLP is a PUSH exporter to an external collector we do not run; this
-  #    is a disclosed run-mechanic (external-infra dependency), the only observability line held off.
+  # THE WHOLE BOOTSTRAP CONFIG IS THREE SETTINGS. Everything the earlier draft argued about - admin
+  # on/off, metrics on/off, otlp off, a service_name - turned out to be settings we did not need to
+  # write at all, which is a better answer than either side of that argument. Tested locally against
+  # the binary built at the pinned AISIX_COMMIT:
+  #   * admin.enabled REMOVED: it restated aisix's own default (config.rs default_enabled()==true).
+  #   * admin_keys KEPT, and it is genuinely load-bearing. With the admin block absent entirely the
+  #     binary refuses to start:
+  #       Error: config load failed: admin.admin_keys must contain at least one key
+  #              (required when managed.enabled is false)
+  #     Admin is on by default and admin_keys has no serde default, so ONE dummy key is the price of
+  #     booting at all. It needs no external infra and addr defaults to loopback 127.0.0.1:0.
+  #   * the entire observability block REMOVED. Deleting it does NOT turn metrics off: with no
+  #     observability config at all the binary still logs `aisix listening (http) addr=0.0.0.0:9090
+  #     label="metrics"` and /metrics answers 200. So `prometheus.enabled: true` was restating a
+  #     default, `tracing.otlp.enabled: false` was us turning a feature off, and `service_name` was a
+  #     label for our own convenience. Metrics stay on because that is what aisix ships, not because
+  #     we asked for them - which is the whole point.
   cat > "$GW_DIR/config.gen.yaml" <<YAML
 resources_file: "$GW_DIR/resources.gen.yaml"
 proxy:
   addr: "0.0.0.0:$GW_PORT"
 admin:
-  enabled: true
   admin_keys:
     - "aisix-admin-dummy"
-observability:
-  service_name: "aisix-bench"
-  metrics:
-    prometheus:
-      enabled: true
-  tracing:
-    otlp:
-      enabled: false
 YAML
   cat > "$GW_DIR/resources.gen.yaml" <<YAML
 _format_version: "1"
@@ -275,12 +292,10 @@ gw_launch() {
 # config is STATIC — one file, both provider_keys, both models, identical bytes for every lane and
 # every matrix egress column — this artifact IS the config every published aisix number was taken
 # under; there is no second, unpublished config anywhere in the run.
-# OOTB posture (reconciled from a lean draft): admin.enabled=true and metrics.prometheus.enabled=true
-# are aisix's DEFAULTS and need no external infra, so both are ON (re-enabled — off would be forbidden
-# strips). Held off as disclosed run-mechanics: standalone resources_file (no etcd) and tracing.otlp
-# (external push collector). Auth is mandatory (aisix has no anonymous mode) — one api_key, its
-# plaintext via BENCH_AISIX_KEY, shown as its dummy value; provider api_key + admin_keys are dummy on
-# the isolated rig (no live secrets). ***The metrics-off REVERSAL is flagged for review — see header.***
+# OOTB posture: three bootstrap settings (resources_file, proxy.addr, admin.admin_keys), and no
+# observability block at all - metrics still bind :9090 because that is aisix's own default. Auth is
+# mandatory (aisix has no anonymous mode) - one api_key, its plaintext via BENCH_AISIX_KEY, shown as
+# its dummy value; provider api_key + admin_keys are dummy on the rig (no live secrets).
 gw_config() {
   local cfg="$GW_DIR/config.gen.yaml" res="$GW_DIR/resources.gen.yaml"
   [ -f "$cfg" ] || _aisix_write_config
