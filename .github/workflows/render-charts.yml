@@ -43,7 +43,19 @@ jobs:
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add results/*.png results/reports
+          # An empty board is a real state (see the "results wiped" commit), not an error: no PNGs
+          # and no results/reports/ exist until the first gateway publishes. `git add results/*.png`
+          # on a literal, unmatched glob is a SHELL failure (`fatal: pathspec ... did not match any
+          # files`, exit 128) before git ever runs, which is what failed this job on every push since
+          # the board was cleared. Build the path list from what is actually there instead.
+          paths=()
+          for f in results/*.png; do [ -e "$f" ] && paths+=("$f"); done
+          [ -d results/reports ] && paths+=(results/reports)
+          if [ "${#paths[@]}" -eq 0 ]; then
+            echo "no charts or reports exist yet (empty board) — nothing to commit"
+            exit 0
+          fi
+          git add -- "${paths[@]}"
           if git diff --cached --quiet; then
             echo "charts already up to date — nothing to commit"
           else
