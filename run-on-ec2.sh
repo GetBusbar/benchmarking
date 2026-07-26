@@ -477,6 +477,10 @@ QUALIFY_DIR="$HERE/results/box-qualify"; mkdir -p "$QUALIFY_DIR"
 # Where a gateway that exhausted its box budget is recorded. bench_gateway runs in a background
 # subshell, so a file is the only way the final summary can see it.
 QUALIFY_SKIPPED="$QUALIFY_DIR/skipped-$RUN_ID.txt"; : > "$QUALIFY_SKIPPED"
+# One line per gateway that produced a NEW snapshot in THIS run. Written by the boxes (which are
+# subshells, so a variable could not carry it back) and read by the field-wide publish at the end.
+# Empty means this run measured nothing anywhere, and nothing it derived may be pushed.
+FRESH_SNAPSHOTS="$QUALIFY_DIR/measured-$RUN_ID.txt"; : > "$FRESH_SNAPSHOTS"
 
 # _bq_json_field <file> <key> [subkey] -> the scalar, or EMPTY. Never fabricates: a missing key, a
 # null, a non-scalar and an unparseable file all read as empty, which every gate treats as unmeasured.
@@ -639,13 +643,29 @@ bench_gateway_once() {
   # SAME code. Resolving it per box would let a push mid-run split the field across two revisions and
   # publish them side by side as though they were comparable.
   glog_echo "cloning $BENCH_REPO @ ${BENCH_COMMIT:0:12} ..."; local _t0=$SECONDS
+  # SPARSE: the box gets the gateway definitions and lib/, and nothing else.
+  #
+  # It used to clone the whole repository, which shipped results/ to every box - including the PREVIOUS
+  # run's committed results/matrix/<gw>.json. The orchestrator then rsynced that file back off the box
+  # and accepted it as this run's output, so a box that measured nothing still looked like it had. The
+  # engine and the mock arrive as prebuilt binaries and the box builds nothing, so no other path is
+  # needed: whatever is not checked out cannot be read, mistaken for fresh, or run stale.
+  #
+  # Same commit, so provenance is unchanged - a sparse checkout narrows WHICH paths are materialised,
+  # not which revision they come from, and `git rev-parse HEAD` still has to match exactly.
   ssh $SSHOPT ubuntu@"$ip" "set -e
     rm -rf ~/benchmarking
-    git clone -q '$BENCH_REPO' ~/benchmarking
+    git clone -q --filter=blob:none --no-checkout '$BENCH_REPO' ~/benchmarking
     cd ~/benchmarking
+    git sparse-checkout set --no-cone gateways lib
     git checkout -q '$BENCH_COMMIT'
     # Refuse to measure a tree that is not exactly the requested commit.
     test \"\$(git rev-parse HEAD)\" = '$BENCH_COMMIT'
+    # Refuse to measure if the sparse checkout did not actually materialise what the run needs. A
+    # silently empty gateways/ would surface much later as a validate failure with a confusing message.
+    test -d gateways && test -r lib/rig.sh
+    # And prove the exclusion held: results/ on a box is how the previous run's numbers got recycled.
+    test ! -e results
   " >>"$glog" 2>&1
   local _up_rc=$?
   if [ "$_up_rc" -ne 0 ]; then
@@ -761,11 +781,18 @@ bench_gateway_once() {
     return 1
   }
 
-  # Matrix is the SOLE producer now — the standalone perf/memory/stream/streamcpu/xlate/governed suites
-  # are RETIRED. Default to the same `matrix` run-all.sh uses (run-all.sh:75); an explicit SUITES override
-  # still lets an operator re-run a legacy suite ad hoc. Defaulting to the old 7-suite list here would
-  # override run-all.sh's matrix default on the box and re-run all six dormant suites (audit HIGH-2).
-  local ALL_SUITES="${SUITES:-matrix}"
+  # THE SNAPSHOT IS THE ARTIFACT, and there are no per-suite JSONs any more.
+  #
+  # This defaulted to `matrix` and then required results/matrix/<gw>.json to exist before calling a run
+  # DONE. The engine writes no such file - it writes results/snapshots/<gw>.json and the timestamped
+  # result_<gw>_<measured_at>.json, and nothing else. The check passed anyway because the box cloned the
+  # repository with the PREVIOUS run's results/matrix/<gw>.json committed inside it, so the orchestrator
+  # rsynced git's own copy back off the box and accepted it as this run's output. That is how a run which
+  # measured nothing could report DONE: the file it was asked to find was one it had shipped there itself.
+  #
+  # So: no legacy suite is pulled by default, and freshness is judged on the snapshot alone (below). An
+  # explicit SUITES=... still drives the old per-suite pull for an ad-hoc re-run of a retired suite.
+  local ALL_SUITES="${SUITES:-}"
   declare -A _pull_state=() _pull_rc=(); local suite
   for suite in $ALL_SUITES; do _pull_state[$suite]=unset; _pull_rc[$suite]=0; done
 
@@ -806,6 +833,9 @@ bench_gateway_once() {
 # Every relative path below is relative to the repo, so anchor it rather than inheriting a cwd from
 # the login shell that starts this script.
 cd ~/benchmarking || exit 1
+# The checkout is sparse (gateways + lib only), so results/ does not exist here and the snapshot
+# writer does not create its own output directory - it reports an error and writes nothing.
+mkdir -p results/snapshots
 source ~/.cargo/env 2>/dev/null || true
 export CORES=0-3 LOADCORES=4-9 MOCKCORES=10-15
 export CAP_MIB=24000
@@ -931,14 +961,28 @@ REMOTE
   # is "no config", not a pull failure, so it never contributes to pull_failed.
   if [ "$reachable" -eq 1 ]; then pull_config || true; fi
   # Pull the run's snapshot artifact(s) BEFORE the teardown trap terminates the box — this is the only
-  # chance; the box and everything on it are gone straight after. Best-effort like the config sidecar.
-  if [ "$reachable" -eq 1 ]; then pull_snapshots || true; fi
-  # DONE means a CLEAN, fully-pulled fresh run. If any suite's pull failed or the guard kept old data,
-  # this gateway did NOT cleanly refresh - say so loudly so the freshness guard's later hard-fail is
-  # never a surprise and the gateway can be re-run.
+  # chance; the box and everything on it are gone straight after.
+  #
+  # THIS IS THE RUN'S SUCCESS CRITERION, not a best-effort extra. pull_snapshots returns 0 only when the
+  # count of result_<gw>_*.json on disk actually GREW, so it answers the one question that matters -
+  # "did THIS run produce a measurement?" - and it cannot be satisfied by an artifact that was already
+  # here. Its result used to be discarded with `|| true`, which is how a box that aborted before
+  # measuring anything still reached the DONE branch and published.
+  local snap_fresh=0
+  if [ "$reachable" -eq 1 ] && pull_snapshots; then snap_fresh=1; fi
+  if [ "$snap_fresh" -eq 0 ]; then
+    glog_echo "NO FRESH SNAPSHOT for $gw — this run measured nothing, so it publishes nothing and the board keeps whatever it already had"
+  fi
+  # DONE means a CLEAN run that MEASURED something and was fully pulled. Anything less is INCOMPLETE, so
+  # the freshness guard's later hard-fail is never a surprise and the gateway can be re-run.
   local publish_failed=0
-  if [[ "$pull_failed" -eq 0 && "$run_failed" -eq 0 && -f "$HERE/results/matrix/$gw.json" ]]; then
+  if [[ "$pull_failed" -eq 0 && "$run_failed" -eq 0 && "$snap_fresh" -eq 1 ]]; then
     glog_echo "DONE"
+    # Record that at least one gateway measured something this run. The field-wide history + charts
+    # publish at the very end reads this: charts.py regenerates from whatever is in results/, so a run
+    # where every box died would otherwise rebuild the PREVIOUS run's numbers and push them, which is
+    # indistinguishable from a successful run to anyone reading the board.
+    echo "$gw" >> "$FRESH_SNAPSHOTS"
     # INCREMENTAL PUBLISH: this box finished cleanly and the promote guard passed for every suite, so
     # commit + push ONLY this gateway's result now (gated on PUBLISH, serialized across boxes). The
     # board fills in gateway-by-gateway; a single-gateway invocation pushes just that one row. The
@@ -951,11 +995,11 @@ REMOTE
       publish_failed=1
       glog_echo "publish reported an issue for $gw (result IS committed/on disk; push may need a manual retry) — counting it as a run issue"
     fi
-  else glog_echo "INCOMPLETE (a suite crashed, failed to pull, or was guard-held; this gateway did NOT fully refresh - re-run it)"; fi
+  else glog_echo "INCOMPLETE (the run crashed, measured nothing, or failed to pull; this gateway did NOT refresh - re-run it)"; fi
   # Propagate the issue to the caller's `wait "$p" || fail=…` so the summary's issue count is accurate
-  # and a run missing whole suites — OR a gateway whose publish never reached the remote — is never
+  # and a run that measured nothing — OR a gateway whose publish never reached the remote — is never
   # reported as "0 issues" (audit R3-M4/M5 + R3-L1).
-  if [[ "$pull_failed" -ne 0 || "$run_failed" -ne 0 || "$publish_failed" -ne 0 || ! -f "$HERE/results/matrix/$gw.json" ]]; then return 1; fi
+  if [[ "$pull_failed" -ne 0 || "$run_failed" -ne 0 || "$publish_failed" -ne 0 || "$snap_fresh" -eq 0 ]]; then return 1; fi
   return 0
 }
 
@@ -979,6 +1023,26 @@ if [ -s "$QUALIFY_SKIPPED" ]; then
   while IFS= read -r _line; do [ -n "$_line" ] && log "  $_line"; done < "$QUALIFY_SKIPPED"
   log "  (re-run those gateways; their committed results are the PREVIOUS run's, not this one's)"
 fi
+
+# ── A RUN THAT MEASURED NOTHING CHANGES NOTHING ───────────────────────────────────────────────────
+# Everything below this line - the append-only history, charts.py, and the push - DERIVES from
+# whatever happens to be sitting in results/. None of it re-reads the boxes. So when every box failed,
+# history/append.py re-appends the old numbers, charts.py rebuilds the PREVIOUS run's charts, and the
+# final sweep pushes them: from outside, a total failure is indistinguishable from a successful run.
+#
+# That is not hypothetical. It was demonstrated live: a box aborted before measuring, the orchestrator
+# logged "all boxes done (1 job(s) reported an issue)", regenerated 24 charts from the previous run's
+# data, and pushed them to origin/main.
+#
+# A failed run must leave the board exactly as it found it, so stop here and leave the working tree
+# alone. `fail` is already non-zero from the boxes themselves, so the exit code still reports it.
+if [ ! -s "$FRESH_SNAPSHOTS" ]; then
+  log "NO GATEWAY MEASURED ANYTHING THIS RUN — not appending history, not regenerating charts, not pushing."
+  log "  The board keeps exactly what it had. Re-run the gateways above; their fanout logs say why each failed."
+  rm -f "$PUBLISH_LOCK" 2>/dev/null || true; rmdir "${PUBLISH_LOCK}.d" 2>/dev/null || true
+  exit "$fail"
+fi
+log "$(wc -l < "$FRESH_SNAPSHOTS" | tr -d ' ') gateway(s) produced a fresh snapshot this run — regenerating and publishing from them"
 
 # ── append this run to the append-only history (results/history/<gw>.jsonl) ─────────────────────
 # Do NOT swallow a failure with `|| true` (audit R3-LOW-4): a malformed result JSON or an unwritable
