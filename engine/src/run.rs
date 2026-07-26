@@ -28,6 +28,8 @@ pub struct RunConfig {
     pub dialects: Vec<Dialect>,
     pub sweep_duration_s: u64,
     pub probe_timeout: Duration,
+    /// CPU list the load generator is pinned to, e.g. "4-9". None only in tests.
+    pub load_cores: Option<String>,
 }
 
 fn headers(auth: &str) -> Vec<(String, String)> {
@@ -74,29 +76,61 @@ struct SweepProbe<'a> {
 
 impl Probe for SweepProbe<'_> {
     fn probe(&mut self, concurrency: u32) -> Option<Sample> {
-        let stats = gen::run(&GenConfig {
-            addr: self.cfg.gateway_addr,
-            path: self.path.clone(),
-            body: self.body.clone(),
-            headers: headers(&self.cfg.auth),
-            concurrency,
-            duration: Duration::from_secs(self.cfg.sweep_duration_s),
-            ttft_ms: 0,
-        });
-        // The OS refusing a thread means this window never ran at the requested concurrency. It is
-        // a RIG limit, not a gateway result, and treating it as a failed gate would tell the search
-        // the gateway turned over at a concurrency it was never actually driven at.
+        // THE GENERATOR RUNS AS ITS OWN PINNED PROCESS, exactly as the Go one did.
+        //
+        // Running it in-process would put load generation on the orchestrator's cores, competing
+        // with the gateway under test and with our own bookkeeping. The core split (gateway 0-3,
+        // load 4-9, mock 10-15) IS the comparability basis of every published number: an unpinned
+        // generator measures a different machine than a pinned one, and the difference is invisible
+        // in the artifact. Same binary, separate process, same pinning the load generator has always
+        // had.
+        let stats = match self.spawn_pinned(concurrency) {
+            Some(s) => s,
+            None => return None,
+        };
+        // The OS refusing a thread means the window never ran at the requested concurrency: a RIG
+        // limit, not a gateway result, so the search must stop rather than read a turnover.
         if stats.spawn_failed {
             eprintln!("loadgen: could not reach c={concurrency}; the rig refused a thread");
             return None;
         }
-        // A window that produced nothing is UNMEASURED, not a zero, so the search stops rather than
-        // treating silence as a failed gate.
+        // A window that produced nothing is UNMEASURED, not a zero.
         if stats.ok == 0 && stats.fail == 0 {
             return None;
         }
-        // The gate: no failures. A gateway erroring under load has not sustained the load.
         Some(Sample { value: stats.rps() as f64, passed: stats.fail == 0 && stats.ok > 0 })
+    }
+}
+
+impl SweepProbe<'_> {
+    /// Run one window in a pinned child and read its stats line back.
+    fn spawn_pinned(&self, concurrency: u32) -> Option<crate::gen::GenStats> {
+        let exe = std::env::current_exe().ok()?;
+        let dur = self.cfg.sweep_duration_s.to_string();
+        let conc = concurrency.to_string();
+        let addr = self.cfg.gateway_addr.to_string();
+        let mut cmd = match &self.cfg.load_cores {
+            // taskset is how the rest of the harness pins, so the generator is pinned the same way.
+            Some(cores) => {
+                let mut c = std::process::Command::new("taskset");
+                c.args(["-c", cores, exe.to_string_lossy().as_ref()]);
+                c
+            }
+            None => std::process::Command::new(exe),
+        };
+        let out = cmd
+            .args(["loadgen", &addr, &self.path, &conc, &dur, &self.body])
+            .stderr(std::process::Stdio::inherit())
+            .output()
+            .ok()?;
+        let line = String::from_utf8_lossy(&out.stdout);
+        crate::loadgen::parse_ugen_line(line.trim()).into_value().map(|u| crate::gen::GenStats {
+            ok: u.ok.max(0) as u64,
+            fail: u.fail.max(0) as u64,
+            elapsed_s: if u.rps > 0 { u.ok as f64 / u.rps as f64 } else { 0.0 },
+            latencies_us: Vec::new(),
+            spawn_failed: false,
+        })
     }
 }
 
@@ -198,6 +232,7 @@ mod tests {
             dialects: vec![Dialect::Openai],
             sweep_duration_s: 1,
             probe_timeout: Duration::from_secs(2),
+            load_cores: None,
         }
     }
 
