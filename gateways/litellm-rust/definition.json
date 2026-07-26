@@ -8,7 +8,7 @@
       "template": "config.gen.yaml.tmpl"
     }
   ],
-  "display": "LiteLLM \u00b7 Rust",
+  "display": "LiteLLM · Rust",
   "egress": [
     "anthropic"
   ],
@@ -23,6 +23,15 @@
     "build": "build.sh",
     "kind": "native"
   },
+  "matrix": [
+    "000000",
+    "000000",
+    "001000",
+    "000000",
+    "000000",
+    "000000"
+  ],
+  "matrix_note": "LiteLLM-Rust beta serves only the Anthropic /v1/messages route (azure_ai upstream); no other ingress or upstream dialect exists, so those cells are grey by that capability limit",
   "model": "azure_ai/mock",
   "name": "litellm-rust",
   "path": "/v1/messages",

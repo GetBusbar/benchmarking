@@ -159,30 +159,10 @@ pub fn lint(manifest: &Manifest, defaults: &Defaults) -> Vec<Finding> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::manifest::{ConfigSetting, Runtime};
+    use crate::manifest::ConfigSetting;
 
     fn base() -> Manifest {
-        Manifest {
-            name: "gw".into(),
-            display: "GW".into(),
-            lang: "Rust".into(),
-            class: "AI gateway".into(),
-            repo: "https://example.invalid/gw".into(),
-            port: 8080,
-            path: "/v1/chat/completions".into(),
-            model: "m".into(),
-            auth: "dummy".into(),
-            headers: vec![],
-            runtime: Runtime::Docker { container: "gw-bench".into() },
-            egress: vec!["openai".into()],
-            commands: vec![],
-            cell_paths: Default::default(),
-            config: vec![],
-            launch: None,
-            config_files: vec![],
-            constants: Default::default(),
-            egress_headers: Default::default(),
-        }
+        crate::manifest::test_fixture()
     }
 
     fn setting(key: &str, value: &str, reason: ConfigReason) -> ConfigSetting {

@@ -26,6 +26,15 @@
     "build": "build.sh",
     "kind": "native"
   },
+  "matrix": [
+    "101001",
+    "000000",
+    "000000",
+    "000000",
+    "000000",
+    "000000"
+  ],
+  "matrix_note": "Helicone AI Gateway has no OpenAI-Responses converter (endpoints/openai only ChatCompletions), no native Cohere dialect, and its Gemini egress targets Google's OpenAI-compat surface v1beta/openai/chat/completions rather than native generateContent (endpoints/google/generate_contents.rs); those cells are grey by that capability limit",
   "model": "openai/gpt-4o-mini",
   "name": "helicone",
   "path": "/router/openai/chat/completions",

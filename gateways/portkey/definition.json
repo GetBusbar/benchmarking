@@ -18,6 +18,15 @@
     "kind": "docker",
     "mounts": []
   },
+  "matrix": [
+    "101111",
+    "010000",
+    "001001",
+    "000000",
+    "000000",
+    "000000"
+  ],
+  "matrix_note": "Portkey's /v1/messages route serves only providers that implement a messages config (anthropic, bedrock, vertex-anthropic, azure-ai-inference at v1.15.2; openai/google/cohere throw 'messages is not supported by <provider>', transformToProviderRequest.ts:158), and it has no chat-to-Responses bridge; other cells are grey by that capability limit",
   "model": "anthropic/mock",
   "name": "portkey",
   "path": "/v1/messages",

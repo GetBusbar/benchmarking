@@ -39,6 +39,15 @@
       }
     ]
   },
+  "matrix": [
+    "111111",
+    "111111",
+    "111111",
+    "111111",
+    "111111",
+    "111111"
+  ],
+  "matrix_note": "busbar declares full 6x6 translation support",
   "model": "gpt-4o-mini",
   "name": "busbar",
   "path": "/v1/chat/completions",

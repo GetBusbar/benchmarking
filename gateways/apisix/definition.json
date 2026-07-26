@@ -42,6 +42,15 @@
       }
     ]
   },
+  "matrix": [
+    "100000",
+    "010000",
+    "001000",
+    "000000",
+    "000000",
+    "000001"
+  ],
+  "matrix_note": "APISIX 3.17.0 ai-proxy has no native Gemini generateContent or Cohere provider, and no OpenAI-to-Anthropic/Bedrock converter; its one anthropic->openai converter is not offered either, because ai-proxy binds one provider per route URI and the single /v1/messages URI is bound to the anthropic provider (the anthropic>anthropic diagonal) - serving both would need a per-column config rewrite, which the one-static-config standard forbids. Other cells are grey by that capability limit (ai-proxy/base.lua, ai-protocols/converters/init.lua)",
   "model": "gpt-4o-mini",
   "name": "apisix",
   "path": "/v1/chat/completions",

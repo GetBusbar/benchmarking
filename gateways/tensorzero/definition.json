@@ -31,6 +31,15 @@
       }
     ]
   },
+  "matrix": [
+    "111001",
+    "000000",
+    "000000",
+    "000000",
+    "000000",
+    "000000"
+  ],
+  "matrix_note": "TensorZero 2026.6.0 has no Cohere provider type; that cell is grey by that capability limit (model.rs)",
   "model": "tensorzero::model_name::mock-openai",
   "name": "tensorzero",
   "path": "/openai/v1/chat/completions",
@@ -39,5 +48,9 @@
   "runtime": {
     "container": "tensorzero-bench",
     "kind": "docker"
-  }
+  },
+  "untestable": [
+    "openai/gemini"
+  ],
+  "untestable_note": "TensorZero's google_ai_studio_gemini / gcp_vertex_gemini providers hardcode googleapis.com with no api_base override (google_ai_studio_gemini.rs @2026.6.0), so the harness mock cannot stand in for the upstream; TensorZero does serve Gemini in production"
 }

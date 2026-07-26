@@ -116,6 +116,12 @@ fn rig_ceiling(cfg: &SuiteConfig, dialect: Dialect, at_conc: u32) -> Measurement
         declared_path: String::new(),
         // The reference drives the MOCK at its standard paths; a gateway's override must not follow.
         cell_paths: Default::default(),
+        // The reference is a single diagonal cell against the mock, never gated by any gateway's
+        // declared capability - undeclared means always probed, which is what this needs.
+        matrix: Vec::new(),
+        matrix_note: String::new(),
+        untestable_cells: Vec::new(),
+        untestable_note: String::new(),
     };
     let id = crate::cell::CellId::new(dialect.as_str(), dialect.as_str());
     // A single point AT THE WINNER's concurrency, not a search: the reference must be taken where
@@ -389,6 +395,10 @@ fn qualify_box(cfg: &SuiteConfig, history: &[f64]) -> serde_json::Value {
         declared_path: String::new(),
         // The reference drives the MOCK at its standard paths; a gateway's override must not follow.
         cell_paths: Default::default(),
+        matrix: Vec::new(),
+        matrix_note: String::new(),
+        untestable_cells: Vec::new(),
+        untestable_note: String::new(),
     };
     let id = crate::cell::CellId::new(Dialect::Openai.as_str(), Dialect::Openai.as_str());
     let observed = run::measure_at(&direct, &id, QUALIFY_CONCURRENCY);
@@ -461,6 +471,10 @@ pub fn run_suite_with(
         // no launch: the harness does not own that gateway's lifetime and must not bounce it.
         declared_path: cfg.manifest.path.clone(),
         cell_paths: cfg.manifest.cell_paths.clone(),
+        matrix: cfg.manifest.matrix.clone(),
+        matrix_note: cfg.manifest.matrix_note.clone(),
+        untestable_cells: cfg.manifest.untestable.clone(),
+        untestable_note: cfg.manifest.untestable_note.clone(),
         relaunch: cfg
             .manifest
             .launch_spec(
@@ -536,6 +550,11 @@ pub fn run_suite_with(
             // A rig limit is NOT the gateway refusing. It keeps its own label all the way out.
             Served::Untestable(r) => {
                 (RecServed::Status("untestable".into()), Some(r.clone()), String::new(), String::new())
+            }
+            // Outside the manifest's own declared capability grid: never probed, so there is no
+            // status/body evidence to carry - the note IS the evidence here.
+            Served::NotConfigurable(r) => {
+                (RecServed::Status("not_configurable".into()), Some(r.clone()), String::new(), String::new())
             }
         };
         if matches!(served, RecServed::Bool(true)) {
@@ -696,25 +715,9 @@ mod tests {
             gw_dir: std::path::PathBuf::from("."),
             gw_cores: "0-3".into(),
             manifest: Manifest {
-                name: "gw".into(),
-                display: "GW".into(),
-                lang: "Rust".into(),
-                class: "gateway".into(),
-                repo: "https://example.invalid/gw".into(),
                 port: 1,
-                path: "/v1/chat/completions".into(),
-                model: "m".into(),
-                auth: "dummy".into(),
-                headers: vec![],
-                runtime: crate::manifest::Runtime::Docker { container: "gw-bench".into() },
                 egress: vec![],
-                commands: vec![],
-                cell_paths: Default::default(),
-                config: vec![],
-                launch: None,
-                config_files: vec![],
-                constants: Default::default(),
-                egress_headers: Default::default(),
+                ..crate::manifest::test_fixture()
             },
             mock_addr: mock,
             results_dir: dir.to_path_buf(),

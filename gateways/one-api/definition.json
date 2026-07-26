@@ -15,6 +15,15 @@
     "kind": "docker",
     "mounts": []
   },
+  "matrix": [
+    "101100",
+    "000000",
+    "000000",
+    "000000",
+    "000000",
+    "000000"
+  ],
+  "matrix_note": "One-API v0.6.10 has no OpenAI-Responses relay mode and its Cohere channel emits the Cohere v1 /v1/chat shape, not the v2 dialect this suite probes (relay/channeltype/define.go, relay/adaptor/cohere/adaptor.go GetRequestURL); those cells are grey by that capability limit",
   "model": "gpt-4o-mini",
   "name": "one-api",
   "path": "/v1/chat/completions",
@@ -23,5 +32,9 @@
   "runtime": {
     "container": "one-api-bench",
     "kind": "docker"
-  }
+  },
+  "untestable": [
+    "openai/bedrock"
+  ],
+  "untestable_note": "One-API v0.6.10's AWS/Bedrock channel constructs the aws-sdk bedrockruntime client with no endpoint override and skips the base_url relay path (relay/adaptor/aws/adaptor.go), so the harness mock cannot stand in for the upstream; One-API does relay Bedrock in production"
 }

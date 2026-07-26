@@ -673,20 +673,11 @@ mod tests {
 
     fn a_config() -> RunConfig {
         RunConfig {
-            gateway_addr: "127.0.0.1:1".parse().expect("a literal loopback address parses"),
-            mock_addr: "127.0.0.1:2".parse().expect("a literal loopback address parses"),
-            model: "m".into(),
-            auth: "dummy".into(),
-            dialects: vec![Dialect::Openai],
-            sweep_duration_s: 1,
             probe_timeout: std::time::Duration::from_millis(1),
-            load_cores: None,
-            static_headers: Vec::new(),
-            egress_headers: Default::default(),
-            runtime: crate::manifest::Runtime::Native { proc_match: "test-fixture".into() },
-            declared_path: String::new(),
-            cell_paths: Default::default(),
-            relaunch: None,
+            ..crate::run::test_fixture(
+                "127.0.0.1:1".parse().expect("a literal loopback address parses"),
+                "127.0.0.1:2".parse().expect("a literal loopback address parses"),
+            )
         }
     }
 
