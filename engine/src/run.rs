@@ -31,6 +31,10 @@ pub struct RunConfig {
     pub probe_timeout: Duration,
     /// CPU list the load generator is pinned to, e.g. "4-9". None only in tests.
     pub load_cores: Option<String>,
+    /// The gateway's declared identity, so the memory readers can find its process tree. The SAME
+    /// value the launcher's --name and the stop path take: there is no second name for a reader to
+    /// disagree with.
+    pub runtime: crate::manifest::Runtime,
 }
 
 fn headers(auth: &str) -> Vec<(String, String)> {
@@ -103,11 +107,22 @@ impl Probe for SweepProbe<'_> {
 impl SweepProbe<'_> {
     /// Run one window in a pinned child and read its stats line back.
     fn spawn_pinned(&self, concurrency: u32) -> Option<GenStats> {
+        load_window(self.cfg, &self.path, &self.body, concurrency)
+    }
+}
+
+/// Drive one pinned load window against the gateway and read the generator's stats line back.
+///
+/// Shared by the throughput search and the memory window so both put load on the box the same way:
+/// same binary, same pinning, its own process. A memory number taken under a differently-generated
+/// load is not comparable with a throughput number taken under this one.
+pub fn load_window(cfg: &RunConfig, path: &str, body: &str, concurrency: u32) -> Option<GenStats> {
+    {
         let exe = std::env::current_exe().ok()?;
-        let dur = self.cfg.sweep_duration_s.to_string();
+        let dur = cfg.sweep_duration_s.to_string();
         let conc = concurrency.to_string();
-        let addr = self.cfg.gateway_addr.to_string();
-        let mut cmd = match &self.cfg.load_cores {
+        let addr = cfg.gateway_addr.to_string();
+        let mut cmd = match &cfg.load_cores {
             // taskset is how the rest of the harness pins, so the generator is pinned the same way.
             Some(cores) => {
                 let mut c = std::process::Command::new("taskset");
@@ -117,7 +132,7 @@ impl SweepProbe<'_> {
             None => std::process::Command::new(exe),
         };
         let out = cmd
-            .args(["loadgen", &addr, &self.path, &conc, &dur, &self.body])
+            .args(["loadgen", &addr, path, &conc, &dur, body])
             .stderr(std::process::Stdio::inherit())
             .output()
             .ok()?;
@@ -243,6 +258,7 @@ mod tests {
             sweep_duration_s: 1,
             probe_timeout: Duration::from_secs(2),
             load_cores: None,
+            runtime: crate::manifest::Runtime::Native { proc_match: "test-fixture".into() },
         }
     }
 

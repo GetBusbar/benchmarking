@@ -72,6 +72,10 @@ fn rig_ceiling(cfg: &SuiteConfig, dialect: Dialect, at_conc: u32) -> Measurement
         sweep_duration_s: cfg.sweep_duration_s,
         probe_timeout: Duration::from_secs(10),
         load_cores: cfg.load_cores.clone(),
+        // The reference drives the MOCK directly: there is no gateway process behind it, so the
+        // identity here must not be the gateway's. Naming the gateway would let a memory reader
+        // attribute the gateway's tree to a run that never touched it.
+        runtime: crate::manifest::Runtime::Native { proc_match: String::new() },
     };
     let id = crate::cell::CellId::new(dialect.as_str(), dialect.as_str());
     // A single point AT THE WINNER's concurrency, not a search: the reference must be taken where
@@ -141,6 +145,33 @@ fn judge_cell(
     Judged { perf: out }
 }
 
+/// The published per-cell memory window, from the numbers the memory group took.
+///
+/// This is the field `site/gen-data.mjs` reads memory from, and it reads it from NOWHERE ELSE: its
+/// own comment says memory comes solely from the per-cell window, "No fallback, and NO per-gateway
+/// memory scalar". While nothing filled this, every board built from this engine published no memory
+/// for any gateway, which is a headline metric missing entirely rather than a number being wrong.
+///
+/// Absences travel intact. A window that could not find the gateway's process tree publishes null
+/// with the reason naming the identity it looked for, never a zero: a benchmark that ranks memory
+/// ascending would otherwise certify the gateway it failed to measure as the winner.
+fn cell_memory(metrics: &std::collections::BTreeMap<&'static str, Measurement<f64>>) -> crate::record::CellMemory {
+    let take = |k: &str| {
+        metrics
+            .get(k)
+            .cloned()
+            .unwrap_or_else(|| Measurement::absent_because(Absent::NotMeasured, "no metric group fills this field"))
+    };
+    crate::record::CellMemory {
+        // `served` here means the cell was served, which is the only reason a window ran at all.
+        served: true,
+        idle_rss_mib: take("memory_idle_mib"),
+        peak_rss_mib: take("memory_peak_mib"),
+        peak_rss_hwm_mib: take("memory_hwm_mib"),
+        ..Default::default()
+    }
+}
+
 /// Run the whole suite for one gateway and write its snapshot.
 pub fn run_suite(cfg: &SuiteConfig, gateway_addr: SocketAddr) -> Result<Paths, SnapshotError> {
     let rc = RunConfig {
@@ -152,6 +183,7 @@ pub fn run_suite(cfg: &SuiteConfig, gateway_addr: SocketAddr) -> Result<Paths, S
         sweep_duration_s: cfg.sweep_duration_s,
         probe_timeout: Duration::from_secs(10),
         load_cores: cfg.load_cores.clone(),
+        runtime: cfg.manifest.runtime.clone(),
     };
 
     let mut upstreams: HashMap<String, Upstream> = HashMap::new();
@@ -200,6 +232,7 @@ pub fn run_suite(cfg: &SuiteConfig, gateway_addr: SocketAddr) -> Result<Paths, S
             reason,
             path: ing.parse::<Dialect>().map(|d| d.path(&cfg.manifest.model)).unwrap_or_default(),
             perf,
+            memory: result.metrics.as_ref().map(cell_memory),
             ..Default::default()
         };
 

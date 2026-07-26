@@ -250,13 +250,27 @@ fn every_module_the_artifact_needs_is_reachable_from_a_real_run() {
     // When you wire a module, flip its assertion to the positive form on the right and delete it
     // from this block. If you wire it and forget, the negative assertion fails and tells you.
 
-    // rss.rs (397 lines, 18 tests): per-cell memory. site/gen-data.mjs takes memory SOLELY from
-    // here - "No fallback, and NO per-gateway memory scalar" - so while this is null the board
-    // publishes no memory for any gateway at all.
-    assert!(
-        cell["memory"].is_null(),
-        "rss is now wired: replace this with assert!(!cell[\"memory\"].is_null()) and delete this block entry"
-    );
+    // --- rss.rs: WIRED -----------------------------------------------------------------------------
+    //
+    // site/gen-data.mjs takes memory SOLELY from this per-cell window - "No fallback, and NO
+    // per-gateway memory scalar" - so while this was absent the board published no memory for any
+    // gateway at all. The window is now taken on every served cell.
+    //
+    // The three numbers are asserted as KEYS, not as values, and that is deliberate. This fixture is
+    // a thread inside the test process, not a separate process the manifest's declared identity can
+    // find, and on a non-Linux host there is no /proc to read anyway. So on this machine the honest
+    // result is three nulls, and asserting a number here would only pass on a Linux box with a real
+    // gateway - i.e. it would be a test that cannot run where it is written. What this DOES prove,
+    // which is the thing that was missing, is that the memory group ran and filled its declared
+    // fields rather than being skipped.
+    let memory = &cell["memory"];
+    assert!(!memory.is_null(), "the memory window must be taken on a served cell: {cell:#}");
+    for field in ["idle_rss_mib", "peak_rss_mib", "peak_rss_hwm_mib"] {
+        assert!(
+            memory.get(field).is_some(),
+            "the memory group declares {field} and must publish it, measured or absent: {memory:#}"
+        );
+    }
 
     // record.rs config artifact: suite::flush builds the snapshot with ..Default::default(), so the
     // config every gw_config() exists to publish never lands. record.rs calls this "the whole point

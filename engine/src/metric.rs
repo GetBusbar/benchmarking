@@ -76,7 +76,7 @@ pub trait Metric: Sync {
 ///
 /// Adding a number to the board is: implement a group, add it here. Removing one is deleting it from
 /// this list, which is a visible act rather than a call that quietly stopped happening.
-pub const METRICS: &[&dyn Metric] = &[&Throughput];
+pub const METRICS: &[&dyn Metric] = &[&Throughput, &Memory];
 
 /// Run every metric against one served cell.
 ///
@@ -140,6 +140,109 @@ impl Metric for Throughput {
     }
 }
 
+/// The concurrency the memory window runs at.
+///
+/// A CONSTANT, not the cell's peak, and that is the whole point. Memory is compared ACROSS gateways,
+/// so every gateway's window must be the same load; taking each one at its own peak concurrency
+/// would measure thirteen different workloads and rank them as if they were one. It is deliberately
+/// not derived from core count either: the search maxima are, because a search explores the box, but
+/// a comparison recipe that moves with the hardware makes two boxes' numbers incomparable.
+pub const MEMORY_WINDOW_CONCURRENCY: u32 = 32;
+
+/// How often the resident-memory sampler reads the tree during the window.
+const MEMORY_SAMPLE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Memory: what the gateway's process tree costs at rest and under load.
+///
+/// FOUR READINGS OF ONE WINDOW, which is why this is a group. Taking idle from one window and peak
+/// from another would publish two populations side by side, the exact defect `manifest.rs` records as
+/// having already corrupted this board's numbers.
+///
+/// `peak` is sampled, so it can miss a spike between polls; `hwm` is the kernel's own high-water
+/// mark, updated on every charge, so it cannot. Both are published because they answer different
+/// questions and disagreeing is informative.
+pub struct Memory;
+
+impl Metric for Memory {
+    fn name(&self) -> &'static str {
+        "memory"
+    }
+
+    fn fields(&self) -> &'static [&'static str] {
+        &["memory_idle_mib", "memory_peak_mib", "memory_hwm_mib"]
+    }
+
+    fn measure(&self, ctx: &CellCtx<'_>) -> Filled {
+        // The tree to measure comes from the ONE declared identity, the same one the launcher's
+        // --name and the stop path use.
+        let pid = match crate::rss::root_pid(&ctx.cfg.runtime).copied() {
+            Some(p) => p,
+            None => {
+                // No process to measure. Every field carries the SAME reason: one cause, one
+                // explanation, rather than three independently-worded absences for one fact.
+                let why = crate::rss::root_pid(&ctx.cfg.runtime);
+                let reason = why.reason().cloned().unwrap_or(Absent::NotMeasured);
+                let detail = why.detail().unwrap_or("the gateway's process tree could not be found").to_string();
+                return self
+                    .fields()
+                    .iter()
+                    .map(|f| (*f, Measurement::absent_because(reason.clone(), detail.clone())))
+                    .collect();
+            }
+        };
+
+        let idle = crate::rss::rss_tree_mib(pid);
+
+        // Sample the tree while a window of load runs against it. The sampler is a plain thread
+        // rather than a timer: it stops when the window's child exits, so a slow window is sampled
+        // for as long as it actually ran instead of for as long as it was expected to.
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let peak_seen = std::sync::Arc::new(std::sync::Mutex::new(f64::NEG_INFINITY));
+        let sampler = {
+            let stop = std::sync::Arc::clone(&stop);
+            let peak_seen = std::sync::Arc::clone(&peak_seen);
+            std::thread::spawn(move || {
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    if let Some(v) = crate::rss::rss_tree_mib(pid).copied() {
+                        if let Ok(mut p) = peak_seen.lock() {
+                            *p = p.max(v);
+                        }
+                    }
+                    std::thread::sleep(MEMORY_SAMPLE_INTERVAL);
+                }
+            })
+        };
+
+        let path = ctx.dialect.path(&ctx.cfg.model);
+        let body = ctx.dialect.body(&ctx.cfg.model);
+        let ran = crate::run::load_window(ctx.cfg, &path, &body, MEMORY_WINDOW_CONCURRENCY);
+
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        let _ = sampler.join();
+
+        // The kernel's high-water mark is read AFTER the window: it survives the load ending, which
+        // is exactly why it is trustworthy where a poll is not.
+        let hwm = crate::rss::hwm_tree_mib(pid);
+
+        let peak = match (ran, peak_seen.lock().ok().map(|p| *p)) {
+            // A window that never ran means the peak was never put under load. Publishing the idle
+            // reading as a peak would be a number taken under a different condition than the one it
+            // claims, so it is an absence.
+            (None, _) => Measurement::absent_because(
+                Absent::NotMeasured,
+                "the load window did not run, so no memory reading was taken under load".to_string(),
+            ),
+            (Some(_), Some(v)) if v.is_finite() => Measurement::Measured(v),
+            (Some(_), _) => Measurement::absent_because(
+                Absent::NotMeasured,
+                format!("the load window ran but no /proc reading of the tree rooted at pid {pid} succeeded"),
+            ),
+        };
+
+        vec![("memory_idle_mib", idle), ("memory_peak_mib", peak), ("memory_hwm_mib", hwm)]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -174,6 +277,7 @@ mod tests {
             sweep_duration_s: 1,
             probe_timeout: std::time::Duration::from_millis(1),
             load_cores: None,
+            runtime: crate::manifest::Runtime::Native { proc_match: "test-fixture".into() },
         }
     }
 
