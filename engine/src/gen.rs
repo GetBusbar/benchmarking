@@ -110,8 +110,15 @@ fn worker(cfg: &GenConfig, stop: &AtomicBool, out: &Mutex<GenStats>) {
     let req = build_request(cfg);
     let mut conn: Option<TcpStream> = None;
 
+    // Whether the connection about to be used was opened THIS iteration. A peer vanishing on a
+    // brand-new connection is a real failure; the same thing on a connection we chose to reuse is
+    // our reuse being stale, and counting it against the target would publish our bookkeeping as
+    // its failure rate.
+    let mut fresh;
     while !stop.load(Ordering::Relaxed) {
+        fresh = false;
         if conn.is_none() {
+            fresh = true;
             conn = TcpStream::connect_timeout(&cfg.addr, Duration::from_secs(5)).ok().inspect(|s| {
                 let _ = s.set_nodelay(true);
                 let _ = s.set_read_timeout(Some(Duration::from_secs(30)));
@@ -129,13 +136,39 @@ fn worker(cfg: &GenConfig, stop: &AtomicBool, out: &Mutex<GenStats>) {
         let Some(s) = conn.as_mut() else { continue };
         let t0 = Instant::now();
         let response_deadline = t0 + RESPONSE_BUDGET;
-        if s.write_all(req.as_bytes()).is_err() || read_response(s, response_deadline).is_err() {
-            fail += 1;
-            conn = None; // a broken connection is not reused: the next request would inherit its state
-            continue;
+
+        let outcome = if s.write_all(req.as_bytes()).is_err() {
+            // A write that fails on a REUSED connection is the same stale-connection case as a read
+            // that sees nothing: the peer closed it while it sat idle.
+            if fresh { Exchange::Failed } else { Exchange::ClosedBeforeAnyBytes }
+        } else {
+            read_response(s, response_deadline)
+        };
+
+        match outcome {
+            Exchange::Reusable => {
+                lat.push(t0.elapsed().as_micros() as u64);
+                ok += 1;
+            }
+            // ANSWERED, and the peer said that was the last one on this connection. A success: the
+            // target did exactly what it advertised. Only the connection is discarded.
+            Exchange::LastOnConnection => {
+                lat.push(t0.elapsed().as_micros() as u64);
+                ok += 1;
+                conn = None;
+            }
+            // A stale connection we chose to reuse. The request never reached a listening peer, so
+            // it is neither a success nor the target's failure: reconnect and send it again. Not
+            // counted, and no latency recorded, because nothing was measured.
+            Exchange::ClosedBeforeAnyBytes if !fresh => {
+                conn = None;
+            }
+            // The same thing on a connection opened moments ago is the target refusing to answer.
+            Exchange::ClosedBeforeAnyBytes | Exchange::Failed => {
+                fail += 1;
+                conn = None; // a broken connection is not reused: the next request would inherit its state
+            }
         }
-        lat.push(t0.elapsed().as_micros() as u64);
-        ok += 1;
     }
 
     // A POISONED LOCK MEANS A WORKER PANICKED, which is a harness fault. Skipping the merge
@@ -171,7 +204,43 @@ fn build_request(cfg: &GenConfig) -> String {
 
 /// Read one response and discard it. Only success or failure matters here; the body is the mock's
 /// canned reply and parsing it would charge the gateway for our own JSON cost.
-fn read_response(s: &mut TcpStream, deadline: Instant) -> std::io::Result<()> {
+/// What one request/response exchange did to the connection.
+///
+/// The generator reuses a connection, and it used to treat ANY failure on a reused one as a failed
+/// request. That is wrong in two distinct ways, and both were observed live: against a peer that
+/// answers HTTP/1.0 and closes, `fail` came back almost exactly equal to `ok` - every second request
+/// counted as a failure, when the peer had answered the first one correctly and simply did what it
+/// said it would do. Halved throughput, and a window that then fails the clean-window gate, so the
+/// target is published as failing on OUR reuse of a connection it closed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Exchange {
+    /// A complete response, and the connection may carry another request.
+    Reusable,
+    /// A complete response, and the peer said this is the last one on this connection. A SUCCESS:
+    /// the request was answered. The connection is simply not reused.
+    LastOnConnection,
+    /// The peer went away before a single byte of response arrived. On a REUSED connection that is a
+    /// stale connection - the peer closed an idle one - not a failed request, because the request
+    /// never reached a server that was listening. On a FRESH connection it is a real failure.
+    ClosedBeforeAnyBytes,
+    /// A genuine failure: a non-2xx, a malformed head, a truncated body, a timeout.
+    Failed,
+}
+
+/// Whether the peer announced it will close after this response.
+///
+/// HTTP/1.0 defaults to close and must opt IN to keep-alive; HTTP/1.1 defaults to keep-alive and
+/// opts out with `connection: close`. Getting that default backwards is what makes a well-behaved
+/// HTTP/1.0 peer look like it is failing half its requests.
+fn peer_will_close(head_lower: &str) -> bool {
+    let says = |name: &str| head_lower.lines().any(|l| l.starts_with("connection:") && l.contains(name));
+    if says("close") {
+        return true;
+    }
+    head_lower.starts_with("http/1.0") && !says("keep-alive")
+}
+
+fn read_response(s: &mut TcpStream, deadline: Instant) -> Exchange {
     // A PER-READ TIMEOUT IS NOT A BOUND. The socket timeout refreshes on every byte, so a peer that
     // trickles one byte every 29s keeps a worker inside this function effectively forever. run()
     // sets the stop flag and then blocks joining every worker, so one wedged worker hangs the whole
@@ -186,13 +255,16 @@ fn read_response(s: &mut TcpStream, deadline: Instant) -> std::io::Result<()> {
     // gateway that streams, so this was the worst case rather than the rare one.
     let mut framing_kind: Option<Framing> = None;
     let mut scanned: usize = 0;
+    let mut closing = false;
+    let complete = |closing: bool| if closing { Exchange::LastOnConnection } else { Exchange::Reusable };
     loop {
         if hdr_end.is_none() {
             if let Some(he) = find_headers_end(&acc) {
                 let head = String::from_utf8_lossy(&acc[..he]).to_lowercase();
                 if !head.starts_with("http/1.1 2") && !head.starts_with("http/1.0 2") {
-                    return Err(std::io::Error::other("non-2xx"));
+                    return Exchange::Failed;
                 }
+                closing = peer_will_close(&head);
                 framing_kind = Some(framing(&head));
                 hdr_end = Some(he);
                 scanned = he;
@@ -201,20 +273,23 @@ fn read_response(s: &mut TcpStream, deadline: Instant) -> std::io::Result<()> {
         if let (Some(he), Some(kind)) = (hdr_end, framing_kind.as_ref()) {
             match kind {
                 Framing::Length(n) => match he.checked_add(*n) {
-                    Some(end) if acc.len() >= end => return Ok(()),
+                    Some(end) if acc.len() >= end => return complete(closing),
                     Some(_) => {}
-                    None => return Err(std::io::Error::other("declared content-length overflows")),
+                    None => return Exchange::Failed,
                 },
                 Framing::Chunked => {
                     // Only the newly-arrived bytes, overlapping by the terminator length so a
                     // terminator split across two reads is still found.
                     let from = scanned.saturating_sub(4).max(he);
                     if acc[from..].windows(5).any(|w| w == b"0\r\n\r\n") {
-                        return Ok(());
+                        return complete(closing);
                     }
                     scanned = acc.len();
                 }
-                Framing::UntilClose => return Ok(()),
+                // An until-close body is only complete once the peer actually closes, which the
+                // n == 0 arm below handles. Returning here would call a body complete the moment the
+                // headers landed and charge the gateway nothing for sending it.
+                Framing::UntilClose => {}
             }
         }
         // Narrow the socket timeout to what is LEFT of the budget, the way http.rs already does.
@@ -223,23 +298,33 @@ fn read_response(s: &mut TcpStream, deadline: Instant) -> std::io::Result<()> {
         // own full timeout. That extra time is also drain time the scope waits through.
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "response deadline"));
+            return Exchange::Failed;
         }
         let _ = s.set_read_timeout(Some(remaining));
-        let n = s.read(&mut buf)?;
+        let n = match s.read(&mut buf) {
+            Ok(n) => n,
+            // Nothing arrived at all. The caller decides what that means: on a reused connection it
+            // is a stale one, on a fresh connection it is a failure.
+            Err(_) if acc.is_empty() => return Exchange::ClosedBeforeAnyBytes,
+            Err(_) => return Exchange::Failed,
+        };
         if n == 0 {
+            if acc.is_empty() {
+                return Exchange::ClosedBeforeAnyBytes;
+            }
             // A closed connection completes an until-close body and truncates any other framing.
             return match hdr_end.and_then(|he| {
                 let head = String::from_utf8_lossy(&acc[..he]).to_lowercase();
                 matches!(framing(&head), Framing::UntilClose).then_some(())
             }) {
-                Some(()) => Ok(()),
-                None => Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "closed mid-body")),
+                // The peer closed, so there is no connection left to reuse either way.
+                Some(()) => Exchange::LastOnConnection,
+                None => Exchange::Failed,
             };
         }
         acc.extend_from_slice(&buf[..n]);
         if acc.len() > 1 << 20 {
-            return Err(std::io::Error::other("response too large"));
+            return Exchange::Failed;
         }
     }
 }
@@ -492,6 +577,83 @@ mod tests {
 
     // A chunked body delivered across MANY small reads. The terminator search must look only at
     // newly-arrived bytes: rescanning the whole body per read is O(N^2), and every microsecond of it
+    // A PEER THAT CLOSES IS NOT A PEER THAT FAILED, and this was measured wrong in the field.
+    //
+    // HTTP/1.0 defaults to closing after each response and must opt IN to keep-alive. The generator
+    // reuses connections, and it used to count any failure on a reused one as a failed request, so
+    // against such a peer `fail` came back almost exactly equal to `ok` - alternating success and
+    // "failure" as each reused connection turned out to be closed. Observed live at ok=56539,
+    // fail=56531. Two consequences, both bad: throughput reads as roughly half, and the window fails
+    // the clean-window gate (`Sample.passed` requires fail == 0), so the target is published as
+    // failing on OUR reuse of a connection it told us it was closing.
+    #[test]
+    fn a_peer_that_answers_and_closes_is_all_successes_and_no_failures() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        std::thread::spawn(move || {
+            for conn in listener.incoming() {
+                let Ok(mut conn) = conn else { continue };
+                std::thread::spawn(move || {
+                    // Read one request, answer it in HTTP/1.0 with no keep-alive, then close. Legal,
+                    // and exactly what a plain HTTP/1.0 server does.
+                    let mut b = [0u8; 4096];
+                    if conn.read(&mut b).unwrap_or(0) == 0 {
+                        return;
+                    }
+                    let _ = conn.write_all(
+                        b"HTTP/1.0 200 OK\r\ncontent-type: application/json\r\ncontent-length: 11\r\n\r\n{\"ok\":true}",
+                    );
+                });
+            }
+        });
+
+        let stats = run(&GenConfig {
+            addr,
+            path: "/v1/chat/completions".into(),
+            body: "{}".into(),
+            headers: vec![],
+            concurrency: 4,
+            duration: Duration::from_millis(400),
+            ttft_ms: 0,
+        });
+
+        assert!(stats.ok > 0, "the peer answers every request, so there must be successes");
+        assert_eq!(
+            stats.fail, 0,
+            "a peer closing a connection it said it would close is not a failed request: ok={} fail={}",
+            stats.ok, stats.fail
+        );
+    }
+
+    // The other half of the same rule: a peer that closes WITHOUT answering is a real failure, and
+    // must still be counted. Otherwise the fix above would silently swallow a gateway that accepts
+    // connections and refuses to serve, which is a live failure mode (a container that binds its
+    // port and then dies at config load looks exactly like this).
+    #[test]
+    fn a_peer_that_accepts_and_closes_without_answering_is_a_failure() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        std::thread::spawn(move || {
+            for conn in listener.incoming() {
+                let Ok(conn) = conn else { continue };
+                drop(conn); // accept, then close immediately, saying nothing
+            }
+        });
+
+        let stats = run(&GenConfig {
+            addr,
+            path: "/v1/chat/completions".into(),
+            body: "{}".into(),
+            headers: vec![],
+            concurrency: 2,
+            duration: Duration::from_millis(300),
+            ttft_ms: 0,
+        });
+
+        assert_eq!(stats.ok, 0, "nothing was ever answered");
+        assert!(stats.fail > 0, "a peer that never answers must be recorded as failing");
+    }
+
     // lands inside the timed window and is charged to the gateway. This also pins that a terminator
     // split across a read boundary is still found, which is what the overlap is for.
     #[test]
