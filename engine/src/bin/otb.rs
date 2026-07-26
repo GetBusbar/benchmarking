@@ -5,6 +5,10 @@
 // stdin and printing the same thing on stdout, so a differential harness can run both
 // implementations over generated inputs and diff them: parity that is executed catches more than
 // parity that is only reviewed by eye.
+//
+// This is a separate crate target from the library (its own root, not lib.rs), so it needs its own
+// copy of the same test-only unwrap/expect/panic exemption lib.rs documents.
+#![cfg_attr(test, allow(clippy::panic, clippy::unwrap_used, clippy::expect_used))]
 
 use std::io::Read;
 use std::process::ExitCode;
