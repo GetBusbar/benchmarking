@@ -254,8 +254,8 @@ mod tests {
     }
 
     /// A cell that was probed and answered with a status string rather than `true`. The grid always
-    /// enumerates every cell (`cell::walk_grid`), so this — not a missing row — is what a lost
-    /// capability actually looks like in a snapshot.
+    /// enumerates every cell (`run::run_grid`, the live walker), so this — not a missing row — is
+    /// what a lost capability actually looks like in a snapshot.
     fn unserved_cell(status: &str) -> Cell {
         Cell { served: Served::Status(status.to_string()), ..served_cell() }
     }
@@ -461,8 +461,11 @@ mod tests {
 
     // THE CASE THE GRID ACTUALLY PRODUCES, and the one the two tests around this one cannot see.
     //
-    // `cell::walk_grid` enumerates EVERY cell every time, so a real re-run never changes the number
-    // of cells - it changes how many of them answered `true`. Both neighbouring guard tests vary the
+    // `run::run_grid` - the LIVE walker, called from suite.rs and bin/otb.rs - enumerates every cell
+    // every time, so a real re-run never changes the number of cells: it changes how many of them
+    // answered `true`. (`cell::walk_grid` has the same property and is what this comment used to
+    // cite, but it has no caller outside its own tests, so citing it proved nothing about what the
+    // engine does.) Both neighbouring guard tests vary the
     // cell COUNT (4 vs 1) with every cell served, which a real snapshot pair cannot do. That left
     // `served_cell_count`'s `Served::Bool(true)` filter unheld: deleting the filter so it counts
     // every cell regardless of served status kept the entire suite green, and with it gone the guard
