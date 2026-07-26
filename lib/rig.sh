@@ -1,4 +1,4 @@
-# lib/rig.sh — fetch the prebuilt bench "rig" (mock + loadgen) so a bench box needs NO build
+# lib/rig.sh — fetch the prebuilt bench "rig" (engine + mock + loadgen) so a bench box needs NO build
 # toolchain: bare OS + docker is enough. Downloads mock-<arch> / ugen-<arch> from the benchmarking
 # `rig` GitHub release (rebuilt by .github/workflows/bench-rig.yml on every mock/ or loadgen/ change,
 # for both arm64 and x86). Sets $MOCK and $UGEN. Idempotent — cached under bin/.
