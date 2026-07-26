@@ -571,6 +571,13 @@ pub enum SseEnd {
     /// The response head itself did not parse (wrong status line, broken headers): there is no
     /// stream to read frames from at all.
     Malformed(String),
+    /// The peer answered, and answered with something that is not an event stream.
+    ///
+    /// An immediate, informative answer rather than a wait. Without this the probe sits until its
+    /// deadline on every target that replies with plain JSON - which is most cells, since a gateway
+    /// only streams where it is configured to - so a twenty second timeout was being burned twice per
+    /// cell to learn something the content-type stated up front. Carries the type it did send.
+    NotAnEventStream(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -674,7 +681,23 @@ pub fn post_json_sse(
     }
 
     let status = match read_head(&mut stream, deadline) {
-        Ok((status, _headers, _raw)) => status,
+        Ok((status, headers, _raw)) => {
+            // A content-type that is present and is not an event stream is a definitive answer: this
+            // peer is not streaming. Waiting out the deadline would learn nothing more. A MISSING
+            // content-type is not treated as a refusal - the frames are what settle it - so a peer
+            // that streams without announcing it is still read.
+            if let Some(ct) = header_value(&headers, "content-type") {
+                if !ct.to_ascii_lowercase().contains("text/event-stream") {
+                    return SseOutcome {
+                        status: Some(status),
+                        frames: Vec::new(),
+                        frame_offsets_us: Vec::new(),
+                        end: SseEnd::NotAnEventStream(ct.to_string()),
+                    };
+                }
+            }
+            status
+        }
         Err(Outcome::TimedOut) => {
             return SseOutcome {
                 status: None,

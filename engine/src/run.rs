@@ -152,6 +152,40 @@ pub struct CellPerf {
     pub max_proxy_concurrency: Measurement<u32>,
 }
 
+/// One load window at ONE concurrency. A point measurement, not a search.
+///
+/// This exists because asking a PEAK SEARCH for a maximum over a range of one is a category error,
+/// and it was being done: the rig-ceiling reference and the box-qualification observation both want
+/// "what does this do at exactly c", and both called `sweep_cell(cfg, id, c, c)`. That happened to
+/// work only while `peak_max` was willing to call a point with nothing probed either side of it a
+/// proven maximum - which is precisely the defect that got fixed, so the moment it stopped doing that
+/// both callers started reporting an absence and every throughput number on the board would have
+/// published as null against an unusable rig reference.
+///
+/// A point measurement makes no turnover claim, so there is nothing for a flanking check to refuse.
+pub fn measure_at(cfg: &RunConfig, id: &CellId, concurrency: u32) -> Measurement<f64> {
+    let Ok(ing) = id.ingress.parse::<Dialect>() else {
+        return Measurement::absent_because(
+            Absent::Untestable,
+            format!("unknown ingress dialect {}", id.ingress),
+        );
+    };
+    let mut p = SweepProbe { cfg, path: ing.path(&cfg.model), body: ing.body(&cfg.model) };
+    match p.probe(concurrency) {
+        // The gate still applies: a window with failures is not a throughput reading, it is a window
+        // the target could not serve cleanly.
+        Some(s) if s.passed => Measurement::Measured(s.value),
+        Some(_) => Measurement::absent_because(
+            Absent::NotMeasured,
+            format!("the window at c={concurrency} did not complete cleanly, so its rate is not a throughput reading"),
+        ),
+        None => Measurement::absent_because(
+            Absent::NotMeasured,
+            format!("no load window completed at c={concurrency}"),
+        ),
+    }
+}
+
 /// Find the gateway's throughput peak on one served cell.
 pub fn sweep_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> CellPerf {
     let Ok(ing) = id.ingress.parse::<Dialect>() else {
