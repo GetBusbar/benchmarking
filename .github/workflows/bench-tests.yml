@@ -12,32 +12,6 @@ on:
       - "Cargo.toml"
       - "Cargo.lock"
       - ".cargo/config.toml"
-      - "lib/sweep.sh"
-      - "lib/sweep_peak_test.sh"
-      - "lib/stream_measure.sh"
-      - "lib/stream_measure_test.sh"
-      - "lib/harness.sh"
-      - "lib/mem_rss_test.sh"
-      - "lib/probe_verdict.sh"
-      - "lib/probe_verdict_test.sh"
-      - "gateways/*/gateway.sh"
-      - "lib/mock_restart_test.sh"
-      - "lib/ingress.sh"
-      - "lib/ingress_path_test.sh"
-      - "lib/box_qualify.sh"
-      - "lib/box_qualify_test.sh"
-      - "lib/gateways.sh"
-      - "lib/gateway_isolation_test.sh"
-      - "lib/gateway_config_lint.sh"
-      - "lib/rig.sh"
-      - "matrix/qualify-box.sh"
-      - "matrix/run.sh"
-      - "lib/promote_guard.py"
-      - "lib/promote_guard_test.py"
-      - "lib/plateau.sh"
-      - "lib/plateau_test.sh"
-      - "lib/matrix_memory_test.sh"
-      - "site/**"
       - "charts.py"
       - "charts_test.py"
       - "loadgen/**"
@@ -49,32 +23,6 @@ on:
       - "Cargo.toml"
       - "Cargo.lock"
       - ".cargo/config.toml"
-      - "lib/sweep.sh"
-      - "lib/sweep_peak_test.sh"
-      - "lib/stream_measure.sh"
-      - "lib/stream_measure_test.sh"
-      - "lib/harness.sh"
-      - "lib/mem_rss_test.sh"
-      - "lib/probe_verdict.sh"
-      - "lib/probe_verdict_test.sh"
-      - "gateways/*/gateway.sh"
-      - "lib/mock_restart_test.sh"
-      - "lib/ingress.sh"
-      - "lib/ingress_path_test.sh"
-      - "lib/box_qualify.sh"
-      - "lib/box_qualify_test.sh"
-      - "lib/gateways.sh"
-      - "lib/gateway_isolation_test.sh"
-      - "lib/gateway_config_lint.sh"
-      - "lib/rig.sh"
-      - "matrix/qualify-box.sh"
-      - "matrix/run.sh"
-      - "lib/promote_guard.py"
-      - "lib/promote_guard_test.py"
-      - "lib/plateau.sh"
-      - "lib/plateau_test.sh"
-      - "lib/matrix_memory_test.sh"
-      - "site/**"
       - "charts.py"
       - "charts_test.py"
       - "loadgen/**"
@@ -113,118 +61,18 @@ jobs:
           cargo build --release --target aarch64-unknown-linux-musl --bin otb
           file target/aarch64-unknown-linux-musl/release/otb
 
-  peak-search:
+  charts-and-loadgen:
+    # Was "peak-search": nineteen steps gating lib/sweep.sh, stream_measure.sh, harness.sh,
+    # probe_verdict.sh, mock_restart_test.sh, ingress.sh, box_qualify.sh, gateways.sh, matrix/run.sh,
+    # qualify-box.sh, plateau.sh and gateway.sh's own contract - every one of those files was deleted
+    # in the shell-to-Rust cutover. The job's FIRST step parse-checked lib/sweep.sh, so it failed at
+    # "No such file or directory" before any later step ever ran, on every push, since the cutover.
+    #
+    # Two of the later steps were not dead: node site/test.mjs (already run live in cf-pages.yml, so
+    # dropped here as a duplicate) and the two below, which are real code with no other CI coverage.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Parse-check the sweep + stream-measure shell files
-        run: bash -n lib/sweep.sh && bash -n lib/sweep_peak_test.sh && bash -n lib/stream_measure.sh && bash -n lib/stream_measure_test.sh
-      - name: Peak-search regression test (H5) + adaptive/prior (M5) + sweep_c1 (M6)
-        run: bash lib/sweep_peak_test.sh
-      # lib/harness.sh's RSS readers feed EVERY published idle/peak/recovered/hwm number. They used to
-      # return a literal 0 when /proc or `docker inspect` was unreadable, and the memory lanes' guards
-      # did not treat 0 as unmeasured — so a rig-side MEASUREMENT FAILURE was published as a certified
-      # 0.0 MiB and won first place on the ascending memory ranking (audit P0-2). Gate the
-      # unmeasurable-prints-nothing contract and the single mem_num_or_null guard directly.
-      # Same file also gates MANIFEST PARITY: gw_rss and gw_hwm must read the SAME process set for
-      # every one of the 13 gateways (three native manifests read a single pid for rss and the whole
-      # tree for hwm, publishing two different populations of the same gateway side by side).
-      - name: RSS measurement-failure + manifest-parity test (null-never-0; gw_rss/gw_hwm same process set)
-        run: bash -n lib/harness.sh && bash -n lib/mem_rss_test.sh && bash lib/mem_rss_test.sh && for m in gateways/*/gateway.sh; do bash -n "$m" || exit 1; done
-      # lib/probe_verdict.sh is the ONE choke point deciding how long a persistently-000/5xx cell is
-      # retried and what verdict is published for it. run_cell used to branch BOTH on the gateway's own
-      # advisory capability declaration: the same observation (persistent 5xx, mock verifiably healthy)
-      # was published not_configured when undeclared and not_verified when declared, and the declared
-      # cell also got 3x120s of retries against the undeclared cell's 2x10s. A gateway's unverified
-      # claim therefore moved both the published verdict and the effort spent measuring it. Gate the
-      # observation-only contract and the single uniform budget so the branch cannot come back.
-      - name: Probe-verdict choke-point test (verdict + retry budget from observables only, one budget for all cells)
-        run: bash -n lib/probe_verdict.sh && bash -n lib/probe_verdict_test.sh && bash lib/probe_verdict_test.sh
-      # lib/stream_measure.sh produces EVERY published streams_sustained / cpu_fps / added-TTFT number but
-      # had ZERO CI coverage (MEDIUM-R2-4): the sustained/cpu-fps bisect+peak searches, the sustained
-      # SM_MOCK_BOUND decision (the MEDIUM-R2-2 gate's source signal), stream_c1's added-latency honesty
-      # gate, and the dead-mock stream_mock_ready path. Gate it so a sign inversion / inverted mock-bound
-      # comparison / false-over-a-dead-reference can never ship silently.
-      - name: Stream-measure regression test (sustained/cpu-fps search + mock-bound + stream_c1 + dead-mock)
-        run: bash lib/stream_measure_test.sh
-      # The mock-restart choke point (audit #21). Four sites pkill'd the mock and relaunched after a
-      # blind `sleep 1`; pkill returns before the target exits, so the fresh mock regularly panicked on
-      # EADDRINUSE and the harness recorded the cell "untestable / stream_mock_unready" — 48 of 75
-      # served cells in the 2026-07-25 field run, which emptied the matrix streaming lane for ALL 13
-      # gateways. Gate the wait-for-exit behaviour so the blind sleep can never come back.
-      - name: Mock-restart choke-point test (wait for exit + port release, SIGKILL escalation, budget)
-        run: bash -n lib/mock_restart_test.sh && bash lib/mock_restart_test.sh
-      # lib/ingress.sh is the ONE choke point deciding which URL each ingress dialect is probed on.
-      # matrix/run.sh used to freeze those paths at script init, so the two dialects that carry the
-      # model in the URL PATH (gemini, bedrock) kept requesting the model from BEFORE gw_matrix_egress
-      # switched GW_MODEL for the column — making {gemini,bedrock} x {every non-openai egress}
-      # impossible to pass and publishing 10+ cells as red gateway failures. Gate the late-binding
-      # contract (and that a manifest's GW_MATRIX_PATH_* override still wins) so it cannot re-freeze.
-      - name: Ingress-path choke-point test (late-bound GW_MODEL in gemini/bedrock paths + override precedence)
-        run: bash -n lib/ingress.sh && bash -n lib/ingress_path_test.sh && bash -n matrix/run.sh && bash lib/ingress_path_test.sh
-      # lib/box_qualify.sh decides whether a freshly launched bench box is sound ENOUGH to spend a
-      # multi-hour 6x6 on. It exists because on 2026-07-25 a contaminated box ran to completion and its
-      # numbers were published as a gateway regression: that box's no-gateway floor sat INSIDE the
-      # healthy population's absolute range (77-81us vs 73-82us), so no static threshold caught it —
-      # only the drift against its OWN prior runs (+5.4% vs a healthy -2.6%..+3.8%) and its 86% peak
-      # collapse did. Gate both bands against the REAL measured numbers so a change that re-loosens the
-      # drift check, drops the jitter signal, blocks a first run for lack of history, or lets a FAILED
-      # qualification seed the next run's baseline fails CI instead of shipping.
-      - name: Box-qualification test (floor drift + jitter + anti-ratchet + peak replay + baseline hygiene)
-        run: bash -n lib/box_qualify.sh && bash -n lib/box_qualify_test.sh && bash -n matrix/qualify-box.sh && bash -n lib/rig.sh && bash lib/box_qualify_test.sh
-      # THE STRUCTURAL INVARIANT: "adding a gateway is exactly, drop in gateways/<name>/gateway.sh".
-      # It was not true. bench-status.sh iterated a frozen 13-name string; five runners defaulted
-      # GATEWAY to one specific name; verify-local.sh tore down a hardcoded container name, so it
-      # killed the wrong container whenever it was handed any other gateway; gateways/versions.env
-      # held every gateway's pinned ref, so a source-built entrant needed a block in a file it did
-      # not own; and lib/box_qualify_test.sh asserted "one gateway fails" about what is really a
-      # hardware gate. lib/gateways.sh is now the one shell-side discovery choke point and this lint
-      # enforces the invariant as a class: it enumerates gateways/*/ AT RUNTIME (never a hardcoded
-      # roster of its own) and fails if any gateway's name or declared alias appears in the CODE of
-      # a file outside its own directory, or if any single line enumerates three or more of them.
-      # It self-tests first, so a scanner that silently matched nothing aborts instead of reporting
-      # a green tree.
-      - name: Gateway-isolation lint (a gateway is named only inside its own directory; no frozen rosters)
-        run: bash -n lib/gateways.sh && bash -n lib/gateway_isolation_test.sh && bash -n bench-status.sh && bash -n verify-local.sh && bash lib/gateway_isolation_test.sh
-      # lib/promote_guard.py decides whether an incoming result may overwrite the committed one; a bug
-      # there republishes a regression as an honest failure (R4-M2). Covers MEDIUM-R2-3 (matrix all-dead
-      # 000 detection) + the anchored-marker / status-000 / honest-not-served behaviours.
-      # THE CONFIG RULE: every gateway config is the bare minimum required to run. A setting appears
-      # only if it is needed to boot the gateway, to point an upstream at the test mock, to expose an
-      # ingress path the matrix drives, or to bind the port/cores the rig requires. We do not turn
-      # features on, we do not turn them off, and we do not restate a default either - a line whose
-      # value equals the application's own default is still a line we wrote, and it becomes a silent
-      # override the day upstream moves that default. That rule is what found a memory bug in one
-      # entrant's DEFAULT install, so it cannot be enforced by review alone: the manifests had already
-      # re-accumulated four outbound-telemetry suppressions, a response header switched on against its
-      # own default, an auth chain added to a gateway that ships open, and a scatter of default
-      # restatements. This lint enumerates gateways/*/ AT RUNTIME and fails on any setting with no
-      # necessity claim AND on any claim with no setting, so the block cannot rot in either direction.
-      # It self-tests the extractor and then plants a whole fixture gateway directory, requiring the
-      # lint to discover it, fail it unjustified and pass it justified, before any green result counts.
-      - name: Gateway-config necessity lint (every setting claims one of the four necessities; no defaults restated)
-        run: bash -n lib/gateway_config_lint.sh && bash lib/gateway_config_lint.sh
-      - name: Promote-guard regression test (matrix all-dead 000/5xx-warm + anchored marker + honest not-served)
-        run: python3 lib/promote_guard_test.py
-      # THE MEMORY ENGINE HAD NO ENFORCED GATE. The per-cell memory redesign added the whole plateau
-      # termination path (lib/plateau.sh: the trend + range steadiness tests, the growth rate, the
-      # fewer-than-four-samples undecidable rule) and the per-cell window that drives it, and BOTH of
-      # their test suites ran only when someone ran them by hand. matrix/run.sh was already a path
-      # trigger, so a change to the caller ran the OTHER suites while the two that actually prove the
-      # memory measurement stayed silent. plateau.sh was not even a trigger: it could be edited with no
-      # job running at all. matrix_memory_test.sh extracts the real function out of matrix/run.sh and
-      # drives it against synthetic RSS curves (settles / leaks / delivers nothing / unmeasurable rig),
-      # which is the ONLY automated proof that a gateway that never settles publishes a growth rate
-      # instead of a fabricated steady state.
-      - name: Plateau steadiness test (trend + range, growth rate, undecidable-is-not-a-plateau)
-        run: bash -n lib/plateau.sh && bash -n lib/plateau_test.sh && bash lib/plateau_test.sh
-      - name: Per-cell memory window test (settles / leaks / zero-delivery / unmeasurable rig)
-        run: bash -n lib/matrix_memory_test.sh && bash lib/matrix_memory_test.sh
-      # The board's own guard: site/test.mjs is what the cf-pages deploy gates on, but it only ran THERE,
-      # so a matrix/run.sh or charts.py change that broke the producer/board contract failed at DEPLOY
-      # time rather than here. Same suite, run at push, so the break is attributed to the commit.
-      - name: Board consistency + honesty suite (the same gate the deploy runs)
-        run: node site/test.mjs
       # charts.py's validity gate + top-N ranking (the matrix-sole-source rewrite artifact) had ZERO
       # Python tests (MEDIUM-R3-6): check-consistency asserts site==chart by calling JS re-implementations,
       # never the real Python rules, so a regression to _proj_streaming (cpu_valid/sust_valid), _topn_keys
