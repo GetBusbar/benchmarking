@@ -1818,8 +1818,12 @@ const cellState = (cell) =>
         // legacy results (pre-probe-first): grey by the drafted capability grid, not by a probe
         : cell.served === "not_configurable" ? ["notconf", "not declared"]
           : cell.served === "untestable" ? ["untestable", "untestable (mock limit)"]
-            : isHarnessGap(cell) ? ["unverified", "not verified"]
-            : ["failed", "not served"];
+            // The pairing is real (not a 404/501-shaped absence) but the gateway declined this
+            // attempt - a genuine defect to disclose, not a capability boundary, so it is RED, not
+            // grey, unlike every case above it.
+            : cell.served === "failed" ? ["failed", "not served"]
+              : isHarnessGap(cell) ? ["unverified", "not verified"]
+              : ["failed", "not served"];
 
 function laneStamp(j) {
   const bits = [];
@@ -2156,6 +2160,10 @@ function matrixCellTip(cell) {
     return `not tested (this cell is not in the capability grid we drafted from the project's docs; the maintainers have not confirmed their own grid yet)${cell.verdict_note ? ": " + cell.verdict_note : ""}`;
   if (cell.served === "untestable")
     return `untestable on this rig: the gateway supports this pair in production but pins the real cloud host (no upstream base-URL override), so the test mock is unreachable - a harness limit, not gateway incapability${cell.verdict_note ? ": " + cell.verdict_note : ""}`;
+  if (cell.served === "failed")
+    // The pairing is real (the status was not a 404/501-shaped absence); the gateway reached and
+    // declined this specific attempt. Surface the actual evidence, not just the verdict label.
+    return `failed: the gateway answered HTTP ${cell.status || "?"}${cell.body_snippet ? " - " + cell.body_snippet : ""}`;
   if (cell.served !== true && cell.served !== "unprobed_auth" && isHarnessGap(cell))
     return `not verified: the harness could not get this gateway serving under this upstream config${cell.verdict_note ? " (" + cell.verdict_note + ")" : ""}`;
   return `${label}. ${cell.verdict_note || ""}`;
