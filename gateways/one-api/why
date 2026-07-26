@@ -1,0 +1,16 @@
+# Why every setting, env var, header and command this gateway uses is here.
+#
+# The rule, from the published methodology: a setting may appear only if it is needed to boot the
+# process at all, to point an upstream at the test mock instead of a real provider, to expose an
+# ingress path the matrix exercises, or to bind the port and cores the rig requires. One claim per
+# line: <pattern> <boot|upstream|ingress|bind>. Anything unclaimed is a lint failure, and a claim
+# that matches nothing is a stale claim and also a failure.
+#
+# Migrated from GW_CONFIG_WHY in gateway.sh, which is dead code the lint was still reading.
+GOMAXPROCS bind   # Go pre-1.25 reads the HOST cpu count, not the --cpuset-cpus limit
+# This gateway has no config file. It keeps its configuration in a database and is configured
+# through its own admin API after boot, so the deployment its operators run is these calls: log in,
+# raise the quota so a throughput run cannot exhaust it, wire each upstream as a channel pointing at
+# the mock, and create the API key the harness authenticates with. Every one of those is either
+# booting the process into a usable state or pointing an upstream at the mock.
+curl upstream  # the admin-API calls that wire this gateway's upstreams to the test mock

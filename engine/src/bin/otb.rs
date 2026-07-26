@@ -321,6 +321,30 @@ fn main() -> ExitCode {
                     match otb_engine::launch::launch_default(&mut launcher, &spec) {
                         Ok(l) => {
                             println!("launched {} in {} attempt(s)", spec.runtime.identity(), l.attempts);
+                            // COMMANDS, in order, now that it is up and before anything is measured.
+                            //
+                            // A gateway with no config file is configured through its own admin API
+                            // after it boots, so this is the only point at which that can happen: it
+                            // needs the process answering, and it must be finished before a probe
+                            // decides what the gateway does or does not serve.
+                            //
+                            // A failure here stops the run. A half-configured gateway is worse than
+                            // one that never started: it answers probes, and publishes a verdict for
+                            // an upstream that was never wired up.
+                            for line in &cfg.manifest.commands {
+                                match otb_engine::launch::run_line(line, Duration::from_secs(120)) {
+                                    Ok(()) => println!("setup: {line}"),
+                                    Err(why) => {
+                                        eprintln!("setup command failed: {line}: {why}");
+                                        let _ = otb_engine::supervise::stop_and_wait(
+                                            &spec.runtime,
+                                            spec.port,
+                                            Duration::from_secs(15),
+                                        );
+                                        return ExitCode::FAILURE;
+                                    }
+                                }
+                            }
                             Some(spec)
                         }
                         Err(e) => {

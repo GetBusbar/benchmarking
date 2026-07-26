@@ -1,0 +1,22 @@
+# Why every setting, env var, header and command this gateway uses is here.
+#
+# The rule, from the published methodology: a setting may appear only if it is needed to boot the
+# process at all, to point an upstream at the test mock instead of a real provider, to expose an
+# ingress path the matrix exercises, or to bind the port and cores the rig requires. One claim per
+# line: <pattern> <boot|upstream|ingress|bind>. Anything unclaimed is a lint failure, and a claim
+# that matches nothing is a stale claim and also a failure.
+#
+# Migrated from GW_CONFIG_WHY in gateway.sh, which is dead code the lint was still reading.
+PORT       bind      # the port the harness drives
+GOMAXPROCS bind      # Go pre-1.25 reads the HOST cpu count, not the --cpuset-cpus limit
+OPENAI_BASE_URL    upstream  # each provider adapter has its own base-URL override; all -> the mock
+ANTHROPIC_BASE_URL upstream  # the path segment is the mock's provider marker, so boot-time model
+GEMINI_BASE_URL    upstream  # discovery gets that provider's OWN catalog (see gw_launch)
+BEDROCK_BASE_URL   upstream
+BEDROCK_MODELS     upstream  # bedrock discovery is a SigV4 control-plane call the mock does not
+OPENAI_API_KEY    boot   # a provider with no key is not configured (dummy; the mock ignores it)
+ANTHROPIC_API_KEY boot
+GEMINI_API_KEY    boot
+AWS_ACCESS_KEY_ID     boot
+AWS_SECRET_ACCESS_KEY boot
+AWS_REGION            boot

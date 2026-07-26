@@ -1,0 +1,10 @@
+# Kong runs DB-less with a declarative config. That is one of Kong's two documented deployment
+# modes and not its default, which is Postgres-backed; the default is not usable here because it
+# would put a database on the box we are measuring, sharing the cores and the disk with the gateway
+# under test. Every setting below is needed to boot the process or to bind the port the rig drives.
+KONG_DATABASE=off
+KONG_DECLARATIVE_CONFIG=/kong/kong.yml
+KONG_PROXY_LISTEN=0.0.0.0:{GW_PORT}
+# nginx's `auto` reads the HOST's online CPU count and is blind to the cpuset, so without this the
+# gateway would run sixteen workers on the four cores it was pinned to.
+KONG_NGINX_WORKER_PROCESSES={NCORE}

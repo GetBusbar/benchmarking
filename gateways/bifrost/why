@@ -1,0 +1,17 @@
+# Why every setting, env var, header and command this gateway uses is here.
+#
+# The rule, from the published methodology: a setting may appear only if it is needed to boot the
+# process at all, to point an upstream at the test mock instead of a real provider, to expose an
+# ingress path the matrix exercises, or to bind the port and cores the rig requires. One claim per
+# line: <pattern> <boot|upstream|ingress|bind>. Anything unclaimed is a lint failure, and a claim
+# that matches nothing is a stale claim and also a failure.
+#
+# Migrated from GW_CONFIG_WHY in gateway.sh, which is dead code the lint was still reading.
+providers      upstream  # the provider table
+openai         upstream  # one entry per mock-reachable dialect; Bifrost resolves the provider from
+anthropic      upstream  # the request model name, so this is what makes an egress column addressable
+gemini         upstream
+cohere         upstream
+keys           boot      # Bifrost will not register a provider with no key entry (dummy value)
+network_config upstream  # base_url -> the mock
+GOMAXPROCS     bind      # Go pre-1.25 reads the HOST cpu count, not the --cpuset-cpus limit

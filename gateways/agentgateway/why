@@ -1,0 +1,22 @@
+# Why every setting, env var, header and command this gateway uses is here.
+#
+# The rule, from the published methodology: a setting may appear only if it is needed to boot the
+# process at all, to point an upstream at the test mock instead of a real provider, to expose an
+# ingress path the matrix exercises, or to bind the port and cores the rig requires. One claim per
+# line: <pattern> <boot|upstream|ingress|bind>. Anything unclaimed is a lint failure, and a claim
+# that matches nothing is a stale claim and also a failure.
+#
+# Migrated from GW_CONFIG_WHY in gateway.sh, which is dead code the lint was still reading.
+llm        boot      # the top-level block; without it no LLM surface is mounted at all
+port       bind      # the port the harness drives
+models     boot      # ModelRouter needs at least one entry to resolve a request model
+name       upstream  # the request model name that selects this upstream
+provider   upstream  # which provider dialect this entry egresses in
+params     boot      # required wrapper for the per-provider settings below
+model      upstream  # the model id sent to the mock in that provider's own shape
+baseUrl    upstream  # -> the mock. MUST carry a path (see _agentgw_write_config): a bare origin
+apiKey     boot      # a provider entry with no key is not registered (dummy; the mock ignores it)
+awsRegion  boot      # local.rs: \"bedrock requires aws_region\" - boot fails without it
+AWS_ACCESS_KEY_ID     boot   # the bedrock provider signs SigV4 from the AWS env; absent = no egress
+AWS_SECRET_ACCESS_KEY boot
+AWS_REGION            boot

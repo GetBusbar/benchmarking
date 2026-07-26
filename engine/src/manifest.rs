@@ -95,6 +95,23 @@ pub struct Manifest {
     /// regardless and publishes what it observes. This only says which upstreams are wired.
     #[serde(default)]
     pub egress: Vec<String>,
+    /// COMMANDS RUN AFTER THE GATEWAY IS UP, one per line, from a file named `commands`.
+    ///
+    /// Discovered by filename like `env` and `headers.json`, never declared, so every gateway is
+    /// described the same way and a reader can see the whole deployment by listing the directory.
+    ///
+    /// This exists for one shape of gateway: the kind with no config file at all, which stores its
+    /// configuration in a database and is configured through its own admin API after it boots. There
+    /// is no file to drop for those, so the only honest way to deploy one the way its operators do
+    /// is to make the same calls its documentation tells you to make. Almost every gateway has no
+    /// `commands` file and needs none.
+    ///
+    /// Lines are run in order, each through a shell, after the gateway answers as ready and before
+    /// anything is measured. A line that fails fails the run: a gateway configured halfway is worse
+    /// than one that never started, because it will answer probes and publish numbers for an
+    /// upstream that was never wired up.
+    #[serde(default, skip)]
+    pub commands: Vec<String>,
     #[serde(default)]
     pub config: Vec<ConfigSetting>,
     /// Headers that select the EGRESS, keyed by dialect.
@@ -360,6 +377,42 @@ impl std::fmt::Display for ManifestError {
     }
 }
 
+/// PARALLELISM, SET BY THE HARNESS FOR EVERY GATEWAY, FROM THE CORES IT PINNED.
+///
+/// The harness decides how many cores a gateway gets. It follows that the harness, not the gateway,
+/// must tell the gateway's runtime how many it got, and must tell every gateway the same way.
+///
+/// Pinning alone is not enough, and the gap is silent. A cpuset restricts which cores a process may
+/// run on; it does not change what a runtime THINKS is available. Some runtimes ask the kernel for
+/// their affinity and get the right answer; others read the machine's online CPU count and size
+/// their thread pools for a sixteen core box while confined to four. That gateway then runs with
+/// four times the threads it should have, contends with itself, and publishes a number that
+/// describes a configuration no operator would deploy.
+///
+/// This was previously left to each gateway to remember in its own env block, and it drifted exactly
+/// as that arrangement always does: the two manifests that set it lost the setting entirely when
+/// they were ported, and nothing noticed because the gateway still booted.
+///
+/// The list is deliberately runtime-standard names only. A gateway whose runtime has its own knob
+/// declares it in its own env with `{NCORE}`, because naming one entrant's variable in shared code
+/// would be per-gateway logic in the one place that must not have any.
+fn pinned_parallelism(ncore: u32) -> Vec<(String, String)> {
+    let n = ncore.to_string();
+    [
+        // Go: honours affinity already, set anyway so the value is explicit and identical everywhere.
+        "GOMAXPROCS",
+        // Node/libuv worker pool.
+        "UV_THREADPOOL_SIZE",
+        // Rust rayon.
+        "RAYON_NUM_THREADS",
+        // OpenMP, which numeric python stacks size their pools from.
+        "OMP_NUM_THREADS",
+    ]
+    .iter()
+    .map(|k| ((*k).to_string(), n.clone()))
+    .collect()
+}
+
 impl Manifest {
     pub fn validate(&self) -> Result<(), ManifestError> {
         for (v, field) in [
@@ -577,7 +630,10 @@ impl Manifest {
                 };
                 crate::launch::LaunchKind::Docker {
                     image: image.clone(),
-                    env,
+                    // THE HARNESS WINS. The gateway's own env goes first and the pinning values
+                    // last, because a later assignment overrides an earlier one and no entrant may
+                    // opt out of the core limit it is being measured under.
+                    env: env.into_iter().chain(pinned_parallelism(core_count(cores))).collect(),
                     // Every entrant uses host networking: the gateway binds the port it declares and
                     // the harness drives that port. A published mapping would put a NAT hop inside
                     // every measured request.
@@ -634,7 +690,8 @@ impl Manifest {
                 crate::launch::LaunchKind::Native {
                     binary: bin.to_string_lossy().into_owned(),
                     args,
-                    env,
+                    // Same precedence as the container path: the harness states the core limit last.
+                    env: env.into_iter().chain(pinned_parallelism(core_count(cores))).collect(),
                     env_unset: env_unset.clone(),
                 }
             }
@@ -698,9 +755,26 @@ impl Manifest {
                 ));
                 continue;
             }
+            // A CONFIG TEMPLATE IS DATA, AND MUST NOT ASK FOR A COMMAND TO BE RUN.
+            //
+            // A gateway is a directory of data: static config files, an env block, headers. Nothing
+            // executes to produce a config. Templates carried over from the retired shell manifests
+            // still contained `$(...)`, which that shell expanded by calling a function; the engine
+            // substitutes `{PLACEHOLDER}` and nothing else, so it wrote the text out verbatim and
+            // the gateway got a config file with a shell fragment where a provider block belonged.
+            //
+            // It failed silently in the worst possible way. The gateway booted, bound its port,
+            // answered every probe 404, and published as an entrant that serves nothing at all.
             // A placeholder the harness cannot supply. Caught here rather than at launch, where it
             // becomes a gateway booting with a literal `{MOCK_PORT}` in an upstream URL.
             if let Ok(raw) = std::fs::read_to_string(&t) {
+                if let Some(bad) = raw.lines().find(|l| l.contains("$(")) {
+                    out.push(format!(
+                        "{}: contains a shell command substitution, which nothing will expand: {:?}. A config template is data; write the literal value or use a {{PLACEHOLDER}}",
+                        f.template,
+                        bad.trim()
+                    ));
+                }
                 if let Err(e) = self.substitute(&raw, "0-3", 8000, gw_dir) {
                     out.push(format!("{}: {e}", f.template));
                 }
@@ -770,6 +844,22 @@ impl Manifest {
                 .map_err(|e| ManifestLoadError::Unreadable { path: env_path.clone(), why: e.to_string() })?;
             let (env, unset) = parse_env(&raw);
             m.apply_env(env, unset);
+        }
+
+        // One command per line. Blank lines and `#` comments are skipped so the file can explain
+        // itself, which matters more here than anywhere else: these are the only place the harness
+        // does something to a gateway rather than handing it a file.
+        let commands_path = dir.join("commands");
+        if commands_path.is_file() {
+            let raw = std::fs::read_to_string(&commands_path).map_err(|e| {
+                ManifestLoadError::Unreadable { path: commands_path.clone(), why: e.to_string() }
+            })?;
+            m.commands = raw
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty() && !l.starts_with('#'))
+                .map(str::to_string)
+                .collect();
         }
 
         let headers_path = dir.join("headers.json");
@@ -863,6 +953,7 @@ impl Manifest {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     fn docker_manifest() -> Manifest {
         Manifest {
@@ -878,6 +969,7 @@ mod tests {
             headers: vec![],
             runtime: Runtime::Docker { container: "gw-bench".into() },
             egress: vec!["openai".into()],
+            commands: vec![],
             config: vec![],
             launch: None,
             config_files: vec![],
@@ -995,6 +1087,59 @@ mod tests {
     fn the_url_is_built_from_the_declared_port_and_path() {
         assert_eq!(docker_manifest().url(), "http://127.0.0.1:8080/v1/chat/completions");
     }
+
+    // EVERY GATEWAY IS TOLD ITS CORE COUNT, BY THE HARNESS, THE SAME WAY.
+    //
+    // A cpuset restricts which cores a process may use; it does not change what a runtime believes
+    // is available. A runtime that reads the machine's online CPU count sizes its thread pools for a
+    // sixteen core box while confined to four, contends with itself, and publishes a number that
+    // describes a configuration nobody would deploy.
+    //
+    // This used to be each gateway's job to remember in its own env, and it drifted exactly as that
+    // always does: both manifests that set it lost the setting when they were ported and nothing
+    // noticed, because the gateway still booted. It is the harness that decides the core count, so
+    // it is the harness that states it, identically, everywhere.
+    #[test]
+    fn every_launched_gateway_is_told_how_many_cores_it_was_pinned_to() {
+        // Both launch kinds, because a native entrant is pinned with taskset rather than a cpuset
+        // and needs telling just as much.
+        let mut container = docker_manifest();
+        container.launch = Some(LaunchDecl::Docker {
+            image: "gw:1".into(),
+            env: vec![("GOMAXPROCS".into(), "64".into())],
+            args: vec![],
+            mounts: vec![],
+        });
+        let mut native = docker_manifest();
+        native.runtime = Runtime::Native { proc_match: "gw".into() };
+        native.launch = Some(LaunchDecl::Native {
+            build: None,
+            binary: vec!["gw".into()],
+            args: vec![],
+            env: vec![],
+            env_unset: vec![],
+        });
+        for (label, m) in [("container", container), ("native", native)] {
+            let dir = std::path::Path::new(".");
+            let spec = m
+                .launch_spec("0-3", 8000, dir, Duration::from_secs(1), Duration::from_secs(1))
+                .expect("this manifest declares a launch")
+                .expect("and it resolves");
+            let env = match &spec.kind {
+                crate::launch::LaunchKind::Docker { env, .. } => env,
+                crate::launch::LaunchKind::Native { env, .. } => env,
+            };
+            let got = |k: &str| env.iter().rev().find(|(n, _)| n == k).map(|(_, v)| v.as_str());
+            // "0-3" is four cores, and that is what the runtime must be told, not the host's count.
+            // Read the LAST assignment for each name: the harness appends its values after the
+            // gateway's, so a gateway that sets its own GOMAXPROCS cannot escape the pinning.
+            assert_eq!(got("GOMAXPROCS"), Some("4"), "{label}: GOMAXPROCS");
+            assert_eq!(got("UV_THREADPOOL_SIZE"), Some("4"), "{label}: node pool");
+            assert_eq!(got("RAYON_NUM_THREADS"), Some("4"), "{label}: rayon");
+            assert_eq!(got("OMP_NUM_THREADS"), Some("4"), "{label}: openmp");
+        }
+    }
+
 }
 
 #[cfg(test)]
@@ -1320,4 +1465,5 @@ mod real_field_tests {
             assert!(u.contains(&m.port.to_string()));
         }
     }
+
 }

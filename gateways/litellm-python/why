@@ -1,0 +1,19 @@
+# Why every setting, env var, header and command this gateway uses is here.
+#
+# The rule, from the published methodology: a setting may appear only if it is needed to boot the
+# process at all, to point an upstream at the test mock instead of a real provider, to expose an
+# ingress path the matrix exercises, or to bind the port and cores the rig requires. One claim per
+# line: <pattern> <boot|upstream|ingress|bind>. Anything unclaimed is a lint failure, and a claim
+# that matches nothing is a stale claim and also a failure.
+#
+# Migrated from GW_CONFIG_WHY in gateway.sh, which is dead code the lint was still reading.
+model_list     boot      # the proxy serves nothing without one
+model_name     ingress   # the client-facing name each matrix column asks for
+litellm_params boot
+model          upstream  # the provider prefix selects the upstream dialect
+api_base       upstream  # -> the mock
+api_key        boot      # a provider entry with no key is rejected (dummy; the mock ignores it)
+aws_bedrock_runtime_endpoint upstream  # bedrock's own base-URL override -> the mock
+aws_access_key_id     boot   # the SigV4 signer needs some credential; the mock ignores the signature
+aws_secret_access_key boot
+aws_region_name       boot
