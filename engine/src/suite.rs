@@ -80,8 +80,9 @@ fn rig_ceiling(cfg: &SuiteConfig, dialect: Dialect, at_conc: u32) -> Measurement
     let id = crate::cell::CellId::new(dialect.as_str(), dialect.as_str());
     // A single point AT THE WINNER's concurrency, not a search: the reference must be taken where
     // the gateway's number was taken, or the comparison is between two different operating points.
-    let perf = run::sweep_cell(&direct, &id, at_conc, at_conc);
-    perf.max_proxy
+    // `measure_at`, not a one-wide peak search - a point makes no turnover claim, and a search over a
+    // range of one cannot honestly answer "what is the maximum".
+    run::measure_at(&direct, &id, at_conc)
 }
 
 /// Judge one cell's throughput and suppress it if the rig, not the gateway, set it.
@@ -220,6 +221,85 @@ fn cell_stream(
     }
 }
 
+/// The concurrency the box-qualification observation is taken at, and the band it must hold.
+///
+/// Both constants, for the same reason the memory window is: this number is compared against the
+/// SAME box's previous runs, so anything that moves between runs makes the comparison meaningless.
+const QUALIFY_CONCURRENCY: u32 = 32;
+const QUALIFY_BAND_PCT: f64 = 20.0;
+
+/// Qualify the BOX, before believing anything it measured about a gateway.
+///
+/// The observation is the rig's own throughput straight to the mock, with no gateway in the path, so
+/// it is a property of the machine rather than of whatever is being benchmarked on it. Judged against
+/// the median of the same observation from this box's previous runs.
+///
+/// `Sense::HigherIsBetter` and the one-sided band are `qualify`'s own decision, and its comment
+/// explains why it must stay one-sided: a box cannot randomly get faster, so an improvement means the
+/// BASELINE was the noisy run, and failing on it would terminate healthy boxes and burn the
+/// replacement budget. Only degradation counts.
+///
+/// This RECORDS the verdict; it does not yet stop a failing run. `qualify`'s own header says the
+/// incident it exists to prevent is running a full matrix on a bad box, so gating the run on a Fail
+/// is the natural next step - but that changes what a run DOES, and it is a decision to take
+/// deliberately rather than as a side effect of wiring the module in.
+fn qualify_box(cfg: &SuiteConfig, history: &[f64]) -> serde_json::Value {
+    let direct = RunConfig {
+        gateway_addr: cfg.mock_addr,
+        mock_addr: cfg.mock_addr,
+        model: cfg.manifest.model.clone(),
+        auth: cfg.manifest.auth.clone(),
+        dialects: vec![Dialect::Openai],
+        sweep_duration_s: cfg.sweep_duration_s,
+        probe_timeout: Duration::from_secs(10),
+        load_cores: cfg.load_cores.clone(),
+        // No gateway is in this path at all, so there is no gateway process to attribute anything to.
+        runtime: crate::manifest::Runtime::Native { proc_match: String::new() },
+    };
+    let id = crate::cell::CellId::new(Dialect::Openai.as_str(), Dialect::Openai.as_str());
+    let observed = run::measure_at(&direct, &id, QUALIFY_CONCURRENCY);
+
+    let baseline = crate::qualify::rolling_baseline(history.to_vec());
+    let (outcome, drift) =
+        crate::qualify::judge(observed.clone(), baseline.clone(), QUALIFY_BAND_PCT, crate::qualify::Sense::HigherIsBetter);
+
+    serde_json::json!({
+        "outcome": outcome.token(),
+        "band_pct": QUALIFY_BAND_PCT,
+        "concurrency": QUALIFY_CONCURRENCY,
+        "observed_rps": observed.value().copied(),
+        "observed_absent_reason": observed.reason().map(|r| format!("{r:?}")),
+        "baseline_rps": baseline.value().copied(),
+        "drift_pct": drift.value().copied(),
+        "baseline_samples": history.len(),
+    })
+}
+
+/// Every previous box-qualification observation this results directory holds.
+///
+/// Read from the historical snapshots rather than a side file, so the baseline cannot drift from the
+/// runs that produced it: a snapshot IS the record. An unreadable or old-shaped file contributes
+/// nothing rather than a zero, which would drag the median toward a value no run ever observed.
+fn qualify_history(results_dir: &Path) -> Vec<f64> {
+    let Ok(entries) = std::fs::read_dir(results_dir) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if !name.starts_with("result_") || !name.ends_with(".json") {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(entry.path()) else { continue };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else { continue };
+        if let Some(rps) = value.pointer("/rig/box_qualify/observed_rps").and_then(serde_json::Value::as_f64) {
+            out.push(rps);
+        }
+    }
+    out
+}
+
 /// Run the whole suite for one gateway and write its snapshot.
 pub fn run_suite(cfg: &SuiteConfig, gateway_addr: SocketAddr) -> Result<Paths, SnapshotError> {
     run_suite_with(cfg, gateway_addr, crate::metric::METRICS)
@@ -244,6 +324,11 @@ pub fn run_suite_with(
         runtime: cfg.manifest.runtime.clone(),
     };
 
+    // THE BOX IS QUALIFIED BEFORE THE GRID, not after. The verdict is about the machine every
+    // number below is measured on, so taking it afterwards would judge a box using a reading taken
+    // once the run had already finished loading it.
+    let box_qualify = qualify_box(cfg, &qualify_history(Path::new(&cfg.results_dir)));
+
     let mut upstreams: HashMap<String, Upstream> = HashMap::new();
     let mut any_served = false;
     let mut last_egress: Option<String> = None;
@@ -265,7 +350,7 @@ pub fn run_suite_with(
 
         if last_egress.as_deref() != Some(eg.as_str()) {
             if last_egress.is_some() {
-                written = Some(flush(cfg, &upstreams, any_served)?);
+                written = Some(flush(cfg, &upstreams, any_served, Some(box_qualify.clone()))?);
             }
             last_egress = Some(eg.clone());
         }
@@ -304,7 +389,7 @@ pub fn run_suite_with(
 
     // The final write always happens, so a grid with a single egress column is not lost.
     let _ = written;
-    flush(cfg, &upstreams, any_served)
+    flush(cfg, &upstreams, any_served, Some(box_qualify))
 }
 
 /// Build the record from what has been measured so far and write it.
@@ -312,18 +397,29 @@ fn flush(
     cfg: &SuiteConfig,
     upstreams: &HashMap<String, Upstream>,
     any_served: bool,
+    box_qualify: Option<serde_json::Value>,
 ) -> Result<Paths, SnapshotError> {
+    let rig = box_qualify.map(|v| crate::record::RigProvenance {
+        arch: Some(cfg.arch.clone()),
+        box_qualify: Some(v),
+        ..Default::default()
+    });
     let snap = ResultSnapshot {
         schema_version: 1,
         gateway: cfg.manifest.name.clone(),
         build: format!("otb-engine {}", env!("CARGO_PKG_VERSION")),
         measured_at: cfg.measured_at.clone(),
         arch: Some(cfg.arch.clone()),
+        rig: rig.clone(),
         matrix: Matrix {
             gateway: cfg.manifest.name.clone(),
             served: any_served,
             cell_perf_sweep: true,
             upstreams: upstreams.clone(),
+            // Mirrored onto the matrix as well as the snapshot root: record.rs carries the field in
+            // both places, and a reader that finds it in one and not the other cannot tell which is
+            // authoritative.
+            rig,
             ..Default::default()
         },
         ..Default::default()

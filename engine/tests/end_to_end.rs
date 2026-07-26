@@ -41,20 +41,20 @@ use std::sync::Arc;
 fn serve(stop: Arc<AtomicBool>) -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind a loopback port");
     let addr = listener.local_addr().expect("read back the bound port");
-    listener.set_nonblocking(true).expect("poll for shutdown between accepts");
 
+    // A BLOCKING accept loop. This was a polling loop that slept between accepts to check a stop
+    // flag, and under the box-qualification window - thirty-two connections arriving at once - the
+    // sleep queued them long enough that some requests failed. A window with failures is not a clean
+    // reading, so the engine correctly reported an absence, and the fixture rather than the engine
+    // was the thing that could not keep up. A benchmark fixture that cannot serve the load being
+    // measured makes every number taken against it a measurement of the fixture.
+    //
+    // Nothing needs to poll for shutdown: the accept thread is detached, and the process exits when
+    // the tests finish regardless of it.
     std::thread::spawn(move || {
-        while !stop.load(Ordering::Relaxed) {
-            match listener.accept() {
-                Ok((stream, _)) => {
-                    let stop = Arc::clone(&stop);
-                    std::thread::spawn(move || handle(stream, stop));
-                }
-                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    std::thread::sleep(std::time::Duration::from_millis(5));
-                }
-                Err(_) => break,
-            }
+        for stream in listener.incoming().flatten() {
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || handle(stream, stop));
         }
     });
     addr
@@ -263,6 +263,33 @@ fn every_module_the_artifact_needs_is_reachable_from_a_real_run() {
         serde_json::Value::Bool(false),
         "an absent streaming measurement must carry a status naming the reason, never a false that reads as 'this gateway does not stream': {stream:#}"
     );
+
+    // --- qualify.rs: WIRED ------------------------------------------------------------------------
+    //
+    // The box is judged before the grid runs on it, and the verdict is published. No committed
+    // snapshot has ever carried a non-null value here.
+    //
+    // On a first run there is no history, so the honest outcome is "seed" - this run IS the baseline.
+    // Asserting "pass" would only hold on a machine with prior runs, i.e. never in a fresh checkout.
+    let bq = &snap["rig"]["box_qualify"];
+    assert!(!bq.is_null(), "the box-qualification verdict must be published: {snap:#}");
+    assert_eq!(
+        bq["outcome"], "seed",
+        "with no history the run seeds the baseline rather than passing against nothing: {bq:#}"
+    );
+    assert_eq!(bq["baseline_samples"], 0, "a fresh results dir has no prior observations: {bq:#}");
+
+    // THE ONE PLACE THIS TEST ASSERTS A REAL NUMBER, and it is the load path end to end: a pinned
+    // `otb loadgen` child ran a window against the fixture and its rate came back through the
+    // generator, the stats line, the point measurement and the record. Everything else here checks
+    // that a field is PUBLISHED; this checks that the engine can actually measure something.
+    assert!(
+        bq["observed_rps"].as_f64().is_some_and(|v| v > 0.0),
+        "the box observation must be a real rate, which is what proves the load path works: {bq:#}"
+    );
+    for field in ["outcome", "band_pct", "concurrency", "observed_rps", "baseline_rps", "drift_pct"] {
+        assert!(bq.get(field).is_some(), "the verdict must publish {field}: {bq:#}");
+    }
 
     // --- NOT YET WIRED: these are the holes this test exists to make visible ----------------------
     //
