@@ -603,7 +603,7 @@ bench_gateway_once() {
     # + psutil (the memory suite reads RSS). NO build-essential/rust/go/node here — the mock+loadgen
     # are prebuilt binaries pulled from the rig release, and the 2 source-built gateways pull their
     # own toolchain via gw_prereqs() on their box ALONE. Docker-image gateways are up in ~2 min.
-    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q docker.io curl ca-certificates jq python3-pip git build-essential
+    sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y -q docker.io curl ca-certificates jq python3-pip git build-essential
     # A box that came up without docker cannot measure ten of the thirteen entrants, and every launch
     # on it fails with \"failed to run docker: No such file or directory\", which reads as a broken
     # gateway rather than a box that never finished provisioning. One box in a field run did exactly
