@@ -11,16 +11,16 @@ Every number below is regenerated from the raw `results/*.json` - re-run `run-al
 | [Bifrost](https://github.com/maximhq/bifrost) | - | 0 | 0 | 154 MiB | 805 MiB | `` |
 | [Helicone](https://github.com/Helicone/ai-gateway) | - | 0 | 0 | 43 MiB | 56 MiB | `` |
 | [Kong](https://github.com/Kong/kong) | - | 0 | 0 | 421 MiB | 618 MiB | `` |
+| [LiteLLM · Python](https://github.com/BerriAI/litellm) | - | 0 | 0 | 1035 MiB | 1083 MiB | `` |
 | [One-API](https://github.com/songquanpeng/one-api) | - | 0 | 0 | 88 MiB | 137 MiB | `` |
 | [TensorZero](https://github.com/tensorzero/tensorzero) | - | 0 | 0 | 49 MiB | 72 MiB | `` |
 | [agentgateway](https://github.com/agentgateway/agentgateway) | ⏳ *pending* | - | - | - | - | *pending measurement* |
 | [Busbar](https://github.com/GetBusbar/busbar) | ⏳ *pending* | - | - | - | - | *pending measurement* |
 | [GoModel](https://github.com/ENTERPILOT/GOModel) | ⏳ *pending* | - | - | - | - | *pending measurement* |
-| [LiteLLM · Python](https://github.com/BerriAI/litellm) | ⏳ *pending* | - | - | - | - | *pending measurement* |
 | [LiteLLM · Rust](https://github.com/BerriAI/litellm) | ⏳ *pending* | - | - | - | - | *pending measurement* |
 | [Portkey](https://github.com/Portkey-AI/gateway) | ⏳ *pending* | - | - | - | - | *pending measurement* |
 
-⏳ **Pending measurement** (a manifest exists; not yet run on the rig): agentgateway, Busbar, GoModel, LiteLLM · Python, LiteLLM · Rust, Portkey. These land here as their runs complete - nothing is hidden.
+⏳ **Pending measurement** (a manifest exists; not yet run on the rig): agentgateway, Busbar, GoModel, LiteLLM · Rust, Portkey. These land here as their runs complete - nothing is hidden.
 
 Two throughput numbers: **max proxy RPS** (instant upstream - raw forwarding speed) and **sustained RPS under a 20 ms upstream delay** (AIGatewayBench's metric - concurrent in-flight capacity under realistic LLM latency).
 **⏳** = a manifest exists but it hasn't been run on the rig yet.
