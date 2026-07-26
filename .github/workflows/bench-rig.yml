@@ -46,10 +46,8 @@ jobs:
 
       - name: Build the engine (Rust, native ${{ matrix.arch }})
         run: |
-          # NATIVE, on a runner of the target arch, for the same reason the mock is: the workspace
-          # .cargo/config.toml pins rust-lld so the engine can be CROSS-compiled from a mac, and that
-          # pin cannot find libgcc_s when the build is native. Building it here means a bench box
-          # never needs a toolchain - bare OS plus docker, which is what keeps every box identical.
+          # Native, on a runner of the target arch, for the same reason the mock is: a bench box
+          # then needs no toolchain, which is what keeps every box identical.
           cargo build --release --bin otb
           cp target/release/otb "otb-${{ matrix.arch }}"
 
