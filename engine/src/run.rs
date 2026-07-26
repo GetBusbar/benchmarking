@@ -115,9 +115,14 @@ pub fn sweep_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> CellPerf {
             max_proxy_concurrency: Measurement::Measured(pt.concurrency),
         },
         None => CellPerf {
-            // The search's own reason travels: a curve still rising at the range top is a LOWER
-            // BOUND, and publishing it would report our search range as the gateway's throughput.
-            max_proxy: Measurement::absent(r.peak.reason().cloned().unwrap_or(Absent::NotMeasured)),
+            // The search's own reason AND its evidence travel. Dropping the detail here was the one
+            // place the "we discard the measurement" worry was actually true: the engine attaches
+            // the lower bound as prose and the consumer boundary threw it away, leaving a bare null.
+            max_proxy: match (r.peak.reason().cloned(), r.peak.detail()) {
+                (Some(reason), Some(detail)) => Measurement::absent_because(reason, detail),
+                (Some(reason), None) => Measurement::absent(reason),
+                (None, _) => Measurement::absent(Absent::NotMeasured),
+            },
             max_proxy_concurrency: Measurement::absent(Absent::NotMeasured),
         },
     }

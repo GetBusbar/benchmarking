@@ -133,6 +133,14 @@ fn read_line(stream: &mut TcpStream, deadline: Instant) -> ReadOutcome {
     }
 }
 
+/// Hard ceiling on any response body we will accumulate from the gateway under test.
+///
+/// The gateway is arbitrary third-party software and its response length is ITS claim, not ours. An
+/// allocation failure calls abort() unconditionally: not a panic, nothing catches it, and an
+/// eight-hour run dies with no operator watching. A probe response has no legitimate reason to
+/// approach this, so exceeding it is Malformed rather than a measurement.
+const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
+
 /// Reads exactly `n` bytes (a known Content-Length or chunk body), honouring `deadline`.
 fn read_exact_deadline(stream: &mut TcpStream, deadline: Instant, n: usize) -> ReadOutcome {
     // NEVER RESERVE WHAT THE PEER ASKED FOR. `n` arrives from the gateway under test, as a
@@ -143,6 +151,11 @@ fn read_exact_deadline(stream: &mut TcpStream, deadline: Instant, n: usize) -> R
     // the one we must not trust with our address space. Grow as bytes actually arrive instead, and
     // let the existing body cap reject an over-long response as malformed.
     let mut buf: Vec<u8> = Vec::with_capacity(n.min(64 * 1024));
+    if n > MAX_BODY_BYTES {
+        return ReadOutcome::Err(io::Error::other(format!(
+            "declared body of {n} bytes exceeds the {MAX_BODY_BYTES} byte cap"
+        )));
+    }
     while buf.len() < n {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {

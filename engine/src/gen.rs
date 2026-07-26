@@ -162,8 +162,14 @@ fn read_response(s: &mut TcpStream) -> std::io::Result<()> {
             // silent, in the instrument every published number comes from.
             match framing(&head) {
                 Framing::Length(n) => {
-                    if acc.len() >= he + n {
-                        return Ok(());
+                    // CHECKED. `n` is the peer's claim. In release, overflow-checks are off, so
+                    // `he + n` with n = usize::MAX wraps to he - 1, the comparison is instantly
+                    // true, and read_response returns before the body arrives: exactly the desync
+                    // this function was rewritten to eliminate, reintroduced through arithmetic.
+                    match he.checked_add(n) {
+                        Some(end) if acc.len() >= end => return Ok(()),
+                        Some(_) => {}
+                        None => return Err(std::io::Error::other("declared content-length overflows")),
                     }
                 }
                 Framing::Chunked => {
