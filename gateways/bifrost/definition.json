@@ -1,0 +1,41 @@
+{
+  "auth": "sk-dummy",
+  "class": "LLM gateway",
+  "config": [],
+  "config_files": [
+    {
+      "output": "bfdata/config.json",
+      "template": "bfdata/config.json.tmpl"
+    }
+  ],
+  "display": "Bifrost",
+  "egress": [
+    "openai",
+    "openai-responses",
+    "anthropic",
+    "gemini",
+    "cohere"
+  ],
+  "lang": "Go",
+  "launch": {
+    "args": [],
+    "image": "maximhq/bifrost:v1.6.4",
+    "kind": "docker",
+    "mounts": [
+      {
+        "container_path": "/app/data",
+        "host_path": "bfdata",
+        "read_only": false
+      }
+    ]
+  },
+  "model": "gpt-4o-mini",
+  "name": "bifrost",
+  "path": "/v1/chat/completions",
+  "port": 8080,
+  "repo": "https://github.com/maximhq/bifrost",
+  "runtime": {
+    "container": "bifrost",
+    "kind": "docker"
+  }
+}

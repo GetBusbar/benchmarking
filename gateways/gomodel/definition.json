@@ -1,0 +1,29 @@
+{
+  "auth": "dummy",
+  "class": "Gateway",
+  "config": [],
+  "display": "GoModel",
+  "egress": [
+    "openai",
+    "openai-responses",
+    "anthropic",
+    "gemini",
+    "bedrock"
+  ],
+  "lang": "Go",
+  "launch": {
+    "args": [],
+    "image": "enterpilot/gomodel:0.1.55",
+    "kind": "docker",
+    "mounts": []
+  },
+  "model": "openai/gpt-4o-mini",
+  "name": "gomodel",
+  "path": "/v1/chat/completions",
+  "port": 8080,
+  "repo": "https://github.com/ENTERPILOT/GOModel",
+  "runtime": {
+    "container": "gomodel-bench",
+    "kind": "docker"
+  }
+}

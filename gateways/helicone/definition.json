@@ -1,0 +1,38 @@
+{
+  "auth": "dummy",
+  "class": "AI gateway",
+  "config": [],
+  "config_files": [
+    {
+      "output": "config.gen.yaml",
+      "template": "config.gen.yaml.tmpl"
+    }
+  ],
+  "display": "Helicone",
+  "egress": [
+    "openai",
+    "anthropic",
+    "bedrock"
+  ],
+  "lang": "Rust",
+  "launch": {
+    "args": [
+      "-c",
+      "{GW_DIR}/config.gen.yaml"
+    ],
+    "binary": [
+      "src/target/release/ai-gateway"
+    ],
+    "build": "build.sh",
+    "kind": "native"
+  },
+  "model": "openai/gpt-4o-mini",
+  "name": "helicone",
+  "path": "/router/openai/chat/completions",
+  "port": 8787,
+  "repo": "https://github.com/Helicone/ai-gateway",
+  "runtime": {
+    "kind": "native",
+    "proc_match": "target/release/ai-gateway"
+  }
+}

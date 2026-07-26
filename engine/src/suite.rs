@@ -473,6 +473,7 @@ mod tests {
                 launch: None,
                 config_files: vec![],
                 constants: Default::default(),
+                egress_headers: Default::default(),
             },
             mock_addr: mock,
             results_dir: dir.to_path_buf(),

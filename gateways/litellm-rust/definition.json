@@ -1,0 +1,35 @@
+{
+  "auth": "gwbench",
+  "class": "LLM gateway",
+  "config": [],
+  "config_files": [
+    {
+      "output": "config.gen.yaml",
+      "template": "config.gen.yaml.tmpl"
+    }
+  ],
+  "display": "LiteLLM \u00b7 Rust",
+  "egress": [
+    "anthropic"
+  ],
+  "lang": "Rust",
+  "launch": {
+    "args": [],
+    "binary": [
+      "src/litellm-rust/target/release/litellm-ai-gateway",
+      "src/litellm-rust/target/release/litellm_ai_gateway",
+      "src/litellm-rust/target/release/server"
+    ],
+    "build": "build.sh",
+    "kind": "native"
+  },
+  "model": "azure_ai/mock",
+  "name": "litellm-rust",
+  "path": "/v1/messages",
+  "port": 8101,
+  "repo": "https://github.com/BerriAI/litellm",
+  "runtime": {
+    "kind": "native",
+    "proc_match": "litellm-ai-gateway"
+  }
+}

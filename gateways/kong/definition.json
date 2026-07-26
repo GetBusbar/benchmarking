@@ -1,0 +1,44 @@
+{
+  "auth": "dummy",
+  "class": "API gateway",
+  "config": [],
+  "config_files": [
+    {
+      "output": "kong.gen.yml",
+      "template": "kong.gen.yml.tmpl"
+    }
+  ],
+  "constants": {
+    "KONG_MODEL": "gpt-4o-mini",
+    "url": "http://127.0.0.1:{MOCK_PORT}"
+  },
+  "display": "Kong",
+  "egress": [
+    "openai",
+    "anthropic",
+    "gemini",
+    "bedrock"
+  ],
+  "lang": "Other",
+  "launch": {
+    "args": [],
+    "image": "kong:3.8",
+    "kind": "docker",
+    "mounts": [
+      {
+        "container_path": "/kong/kong.yml",
+        "host_path": "kong.gen.yml",
+        "read_only": true
+      }
+    ]
+  },
+  "model": "gpt-4o-mini",
+  "name": "kong",
+  "path": "/v1/chat/completions",
+  "port": 8080,
+  "repo": "https://github.com/Kong/kong",
+  "runtime": {
+    "container": "kong-bench",
+    "kind": "docker"
+  }
+}

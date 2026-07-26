@@ -1,0 +1,45 @@
+{
+  "auth": "bench-token",
+  "class": "AI gateway",
+  "config": [],
+  "config_files": [
+    {
+      "output": "config.gen.yaml",
+      "template": "config.gen.yaml.tmpl"
+    },
+    {
+      "output": "resources.gen.yaml",
+      "template": "resources.gen.yaml.tmpl"
+    }
+  ],
+  "constants": {
+    "GW_MODEL_ANTHROPIC": "claude-3-5-sonnet-20241022",
+    "GW_MODEL_OPENAI": "gpt-4o-mini"
+  },
+  "display": "AISIX (api7)",
+  "egress": [
+    "openai",
+    "anthropic"
+  ],
+  "lang": "Rust",
+  "launch": {
+    "args": [
+      "--config",
+      "{GW_DIR}/config.gen.yaml"
+    ],
+    "binary": [
+      "src/target/release/aisix"
+    ],
+    "build": "build.sh",
+    "kind": "native"
+  },
+  "model": "gpt-4o-mini",
+  "name": "aisix",
+  "path": "/v1/chat/completions",
+  "port": 3000,
+  "repo": "https://github.com/api7/aisix",
+  "runtime": {
+    "kind": "native",
+    "proc_match": "target/release/aisix"
+  }
+}

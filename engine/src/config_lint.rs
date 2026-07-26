@@ -179,6 +179,7 @@ mod tests {
             launch: None,
             config_files: vec![],
             constants: Default::default(),
+            egress_headers: Default::default(),
         }
     }
 
@@ -303,9 +304,22 @@ mod real_field_tests {
     use super::*;
     use std::collections::BTreeMap as Map;
 
+    /// Discovered from the gateways' own directories, not listed in one file. Same reason as
+    /// `manifest::real_field_tests::field`: a single file naming every entrant is the roster the
+    /// isolation lint exists to prevent.
     fn field() -> Map<String, Manifest> {
-        let txt = include_str!("../tests/manifests.json");
-        serde_json::from_str(txt).unwrap()
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../gateways");
+        let mut out = Map::new();
+        for entry in std::fs::read_dir(&root).expect("gateways dir").flatten() {
+            let def = entry.path().join("definition.json");
+            if !def.is_file() {
+                continue;
+            }
+            if let Ok(m) = Manifest::load(&entry.path()) {
+                out.insert(m.name.clone(), m);
+            }
+        }
+        out
     }
 
     // No defaults table is claimed for the real field here: this test proves the lint runs over

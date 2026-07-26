@@ -1,0 +1,47 @@
+{
+  "auth": "dummy",
+  "class": "LLM gateway",
+  "config": [],
+  "config_files": [
+    {
+      "output": "config.gen.yaml",
+      "template": "config.gen.yaml.tmpl"
+    }
+  ],
+  "display": "LiteLLM \u00b7 Python",
+  "egress": [
+    "openai",
+    "openai-responses",
+    "anthropic",
+    "gemini",
+    "cohere",
+    "bedrock"
+  ],
+  "lang": "Python",
+  "launch": {
+    "args": [
+      "--config",
+      "/config.gen.yaml",
+      "--port",
+      "{GW_PORT}"
+    ],
+    "image": "ghcr.io/berriai/litellm:v1.93.0",
+    "kind": "docker",
+    "mounts": [
+      {
+        "container_path": "/config.gen.yaml",
+        "host_path": "config.gen.yaml",
+        "read_only": true
+      }
+    ]
+  },
+  "model": "gpt-4o-mini",
+  "name": "litellm-python",
+  "path": "/v1/chat/completions",
+  "port": 8102,
+  "repo": "https://github.com/BerriAI/litellm",
+  "runtime": {
+    "container": "litellm-python-bench",
+    "kind": "docker"
+  }
+}
