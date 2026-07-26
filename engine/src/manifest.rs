@@ -97,6 +97,61 @@ pub struct Manifest {
     pub egress: Vec<String>,
     #[serde(default)]
     pub config: Vec<ConfigSetting>,
+    /// How to START this gateway. `None` for a manifest that only describes a gateway someone else
+    /// is running - which is every manifest today, because nothing in the tree could launch one.
+    #[serde(default)]
+    pub launch: Option<LaunchDecl>,
+}
+
+/// A file the gateway reads, rendered by the harness and handed to it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MountDecl {
+    /// Path on the box, relative to the gateway's own directory.
+    pub host_path: String,
+    /// Where the gateway expects to find it.
+    pub container_path: String,
+    #[serde(default = "default_true")]
+    pub read_only: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// How many cores a cpuset string covers, e.g. "0-3" is four.
+///
+/// This is the same arithmetic the shell manifests do inline, and it is the value the Go runtime is
+/// pinned to. A single core ("2") is one; anything unparseable is one, because claiming more
+/// parallelism than the pin allows is the direction that corrupts a measurement.
+fn core_count(cores: &str) -> u32 {
+    let t = cores.trim();
+    match t.split_once('-') {
+        Some((lo, hi)) => match (lo.trim().parse::<u32>(), hi.trim().parse::<u32>()) {
+            (Ok(lo), Ok(hi)) if hi >= lo => hi - lo + 1,
+            _ => 1,
+        },
+        None => 1,
+    }
+}
+
+/// Everything needed to start one gateway, as DATA.
+///
+/// Deliberately the docker case only, for now, and deliberately named so: ten of the thirteen
+/// manifests are an image, an env block, some mounts and a port, and modelling exactly that is what
+/// lets a gateway actually be launched today. The three that build from source need a step that runs
+/// before this, and inventing a schema for them before anything could launch at all is what kept the
+/// launcher orphaned.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LaunchDecl {
+    pub image: String,
+    /// Environment handed to the container, in declaration order.
+    #[serde(default)]
+    pub env: Vec<(String, String)>,
+    /// Arguments after the image, for an entrypoint that takes them.
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub mounts: Vec<MountDecl>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,6 +165,10 @@ pub enum ManifestError {
     UnexpandedVariable { field: &'static str, raw: String },
     /// A config setting with no stated necessity cannot be lint-checked, so it cannot ship.
     ConfigWithoutReason(String),
+    /// A launch declaration refers to something the harness does not supply. Loud rather than passed
+    /// through: a `{TYPO}` reaching a container as a literal is a misconfiguration that boots and
+    /// measures fine, and publishes a number taken under the wrong settings.
+    UnknownPlaceholder { name: String, raw: String },
 }
 
 impl std::fmt::Display for ManifestError {
@@ -120,6 +179,10 @@ impl std::fmt::Display for ManifestError {
             ManifestError::ConfigWithoutReason(k) => {
                 write!(f, "config setting {k:?} has no key to attach a reason to")
             }
+            ManifestError::UnknownPlaceholder { name, raw } => write!(
+                f,
+                "launch declaration refers to {{{name}}}, which the harness does not supply, in {raw:?}"
+            ),
             ManifestError::UnexpandedVariable { field, raw } => write!(
                 f,
                 "{field} still holds an unexpanded shell variable ({raw:?}): the extraction took the reference, not the value"
@@ -188,6 +251,109 @@ impl Manifest {
         Ok(())
     }
 
+    /// Values a launch declaration may refer to, resolved at launch time.
+    ///
+    /// A CLOSED SET, and small. `GOMAXPROCS={NCORE}` is why this exists at all: two manifests set the
+    /// Go runtime's thread count from the size of the pinned core range, and a literal there would
+    /// mean the gateway runs at the host's core count inside a four-core cpuset - which is the
+    /// comparability basis of every number on the board, not a detail. An unknown placeholder is an
+    /// error rather than being passed through, because a `{TYPO}` reaching a container as a literal
+    /// is a misconfiguration that boots and measures fine.
+    fn substitute(&self, template: &str, cores: &str, mock_port: u16) -> Result<String, ManifestError> {
+        let ncore = core_count(cores);
+        let mut out = String::with_capacity(template.len());
+        let mut rest = template;
+        while let Some(open) = rest.find('{') {
+            out.push_str(&rest[..open]);
+            let Some(close) = rest[open..].find('}') else {
+                // An unmatched brace is a literal, not a placeholder: a JSON value is allowed to
+                // contain one.
+                out.push_str(&rest[open..]);
+                return Ok(out);
+            };
+            let name = &rest[open + 1..open + close];
+            let value = match name {
+                "NCORE" => ncore.to_string(),
+                "CORES" => cores.to_string(),
+                "GW_PORT" => self.port.to_string(),
+                "MOCK_PORT" => mock_port.to_string(),
+                other => {
+                    return Err(ManifestError::UnknownPlaceholder {
+                        name: other.to_string(),
+                        raw: template.to_string(),
+                    })
+                }
+            };
+            out.push_str(&value);
+            rest = &rest[open + close + 1..];
+        }
+        out.push_str(rest);
+        Ok(out)
+    }
+
+    /// The launch this manifest describes, ready to hand to `launch::launch`.
+    ///
+    /// `None` when the manifest declares no launch: the harness is then driving a gateway someone
+    /// else started, which is what every run did until now.
+    ///
+    /// The container's `--name` is NOT taken from here. It comes from `runtime.identity()`, the same
+    /// string the memory readers and the stop path use, so the thing that gets started, the thing
+    /// that gets measured and the thing that gets stopped cannot be three different containers. That
+    /// is the defect this module's header describes as having already corrupted published numbers.
+    ///
+    /// `gw_dir` resolves the mounts: a manifest declares its config files relative to its own
+    /// directory, because an absolute path in a manifest is a path that only works on one machine.
+    pub fn launch_spec(
+        &self,
+        cores: &str,
+        mock_port: u16,
+        gw_dir: &std::path::Path,
+        ready_budget: std::time::Duration,
+        boot_backoff: std::time::Duration,
+    ) -> Option<Result<crate::launch::LaunchSpec, ManifestError>> {
+        let decl = self.launch.as_ref()?;
+        let mut env = Vec::with_capacity(decl.env.len());
+        for (k, v) in &decl.env {
+            match self.substitute(v, cores, mock_port) {
+                Ok(v) => env.push((k.clone(), v)),
+                Err(e) => return Some(Err(e)),
+            }
+        }
+        let mut args = Vec::with_capacity(decl.args.len());
+        for a in &decl.args {
+            match self.substitute(a, cores, mock_port) {
+                Ok(a) => args.push(a),
+                Err(e) => return Some(Err(e)),
+            }
+        }
+        Some(Ok(crate::launch::LaunchSpec {
+            runtime: self.runtime.clone(),
+            kind: crate::launch::LaunchKind::Docker {
+                image: decl.image.clone(),
+                env,
+                // Every manifest in this field uses host networking: the gateway binds the port it
+                // declares, directly, and the harness drives that port. A published mapping would put
+                // a NAT hop inside every measured request.
+                port: crate::launch::PortMapping::Host,
+                mounts: decl
+                    .mounts
+                    .iter()
+                    .map(|m| crate::launch::Mount {
+                        host_path: gw_dir.join(&m.host_path).to_string_lossy().into_owned(),
+                        container_path: m.container_path.clone(),
+                        read_only: m.read_only,
+                    })
+                    .collect(),
+                command: args,
+            },
+            cores: cores.to_string(),
+            port: self.port,
+            ready_budget,
+            boot_backoff,
+            pre_launch: None,
+        }))
+    }
+
     /// The URL the harness drives this gateway on.
     pub fn url(&self) -> String {
         format!("http://127.0.0.1:{}{}", self.port, self.path)
@@ -213,6 +379,7 @@ mod tests {
             runtime: Runtime::Docker { container: "gw-bench".into() },
             egress: vec!["openai".into()],
             config: vec![],
+            launch: None,
         }
     }
 
@@ -364,6 +531,101 @@ mod real_field_tests {
             // a test can get to asserting that a second spelling does not exist.
             assert_eq!(m.runtime.identity(), id);
         }
+    }
+
+    /// THE THING THAT WAS MISSING: every container manifest can now produce a real invocation.
+    ///
+    /// `launch.rs` was complete and tested and had zero callers, because a `Manifest` carried no
+    /// launch data and nothing bridged the two. This walks the real corpus and builds the actual
+    /// docker command line for each one.
+    #[test]
+    fn every_container_manifest_produces_a_launchable_invocation() {
+        use std::time::Duration;
+        let mut launchable = 0;
+        for (name, m) in &field() {
+            let Some(spec) = m.launch_spec("0-3", 8000, std::path::Path::new("/gw"), Duration::from_secs(1), Duration::from_secs(1))
+            else {
+                // The three source-built entrants declare no launch yet; they need a build step first.
+                assert!(!m.runtime.is_docker(), "{name} runs in a container but declares no launch");
+                continue;
+            };
+            let spec = spec.unwrap_or_else(|e| panic!("{name} must produce a launchable spec: {e}"));
+            assert!(spec.validate().is_ok(), "{name}: {:?}", spec.validate());
+
+            let inv = crate::launch::build_invocation(&spec);
+            assert_eq!(inv.program, "docker");
+            // The container name comes from runtime.identity(), NOT from the launch block, so the
+            // thing started, the thing measured and the thing stopped cannot be three containers.
+            assert!(
+                inv.args.windows(2).any(|w| w == ["--name".to_string(), m.runtime.identity().to_string()]),
+                "{name} must launch under its declared identity: {:?}",
+                inv.args
+            );
+            assert!(
+                inv.args.windows(2).any(|w| w == ["--cpuset-cpus".to_string(), "0-3".to_string()]),
+                "{name} must be pinned: {:?}",
+                inv.args
+            );
+            // A mount is resolved against the gateway's own directory: an absolute path in a manifest
+            // only works on the machine it was written on.
+            for a in &inv.args {
+                assert!(!a.contains("$GW_DIR"), "{name} left an unexpanded shell path: {a}");
+                assert!(!a.contains('{') || !a.contains('}'), "{name} left an unresolved placeholder: {a}");
+            }
+            launchable += 1;
+        }
+        assert!(launchable >= 10, "the ten container entrants must be launchable, got {launchable}");
+    }
+
+    /// The Go runtime's thread count is set from the size of the pinned core range. A literal there
+    /// would run the gateway at the host's core count inside a four-core cpuset, which is not a
+    /// detail: the core split IS the comparability basis of every number on the board.
+    #[test]
+    fn the_core_count_placeholder_resolves_to_the_pinned_range_not_the_host() {
+        use std::time::Duration;
+        let f = field();
+        let with_ncore: Vec<_> = f
+            .iter()
+            .filter(|(_, m)| {
+                m.launch.as_ref().is_some_and(|l| l.env.iter().any(|(_, v)| v.contains("{NCORE}")))
+            })
+            .collect();
+        assert!(!with_ncore.is_empty(), "some entrants set their thread count from the core pin");
+
+        for (name, m) in with_ncore {
+            for (cores, expected) in [("0-3", "4"), ("4-9", "6"), ("2", "1")] {
+                let spec = m
+                    .launch_spec(cores, 8000, std::path::Path::new("/gw"), Duration::from_secs(1), Duration::from_secs(1))
+                    .and_then(Result::ok)
+                    .unwrap_or_else(|| panic!("{name} must build a spec"));
+                let crate::launch::LaunchKind::Docker { env, .. } = &spec.kind else {
+                    panic!("{name} is a container entrant")
+                };
+                let v = env.iter().find(|(k, _)| k == "GOMAXPROCS").map(|(_, v)| v.as_str());
+                assert_eq!(v, Some(expected), "{name} on cores {cores} must run {expected} threads");
+            }
+        }
+    }
+
+    #[test]
+    fn a_launch_referring_to_something_the_harness_does_not_supply_is_refused() {
+        use std::time::Duration;
+        // Built here rather than borrowed from the other test module: this one walks the real
+        // corpus, and a fixture that drifts from the real shape would prove nothing about it.
+        let mut m = field().values().find(|m| m.runtime.is_docker()).cloned().expect("a container entrant");
+        m.launch = Some(LaunchDecl {
+            image: "gw:1".into(),
+            env: vec![("X".into(), "{NOT_A_THING}".into())],
+            args: vec![],
+            mounts: vec![],
+        });
+        let err = m
+            .launch_spec("0-3", 8000, std::path::Path::new("/gw"), Duration::from_secs(1), Duration::from_secs(1))
+            .and_then(Result::err);
+        assert!(
+            matches!(err, Some(ManifestError::UnknownPlaceholder { ref name, .. }) if name == "NOT_A_THING"),
+            "an unknown placeholder must be refused, not passed through as a literal: {err:?}"
+        );
     }
 
     #[test]

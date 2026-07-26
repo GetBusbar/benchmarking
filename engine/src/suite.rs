@@ -470,6 +470,7 @@ mod tests {
                 runtime: crate::manifest::Runtime::Docker { container: "gw-bench".into() },
                 egress: vec![],
                 config: vec![],
+                launch: None,
             },
             mock_addr: mock,
             results_dir: dir.to_path_buf(),
