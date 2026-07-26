@@ -123,6 +123,23 @@ fn default_true() -> bool {
 /// This is the same arithmetic the shell manifests do inline, and it is the value the Go runtime is
 /// pinned to. A single core ("2") is one; anything unparseable is one, because claiming more
 /// parallelism than the pin allows is the direction that corrupts a measurement.
+/// Whether a path is a file this box can execute.
+///
+/// Used to pick among declared binary candidates. On a non-unix host the mode bits are unavailable,
+/// so existence is the best available answer; the field runs on Linux and the distinction only
+/// matters there.
+fn is_executable(p: &std::path::Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+    }
+    #[cfg(not(unix))]
+    {
+        p.is_file()
+    }
+}
+
 fn core_count(cores: &str) -> u32 {
     let t = cores.trim();
     match t.split_once('-') {
@@ -135,23 +152,52 @@ fn core_count(cores: &str) -> u32 {
 }
 
 /// Everything needed to start one gateway, as DATA.
-///
-/// Deliberately the docker case only, for now, and deliberately named so: ten of the thirteen
-/// manifests are an image, an env block, some mounts and a port, and modelling exactly that is what
-/// lets a gateway actually be launched today. The three that build from source need a step that runs
-/// before this, and inventing a schema for them before anything could launch at all is what kept the
-/// launcher orphaned.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LaunchDecl {
-    pub image: String,
-    /// Environment handed to the container, in declaration order.
-    #[serde(default)]
-    pub env: Vec<(String, String)>,
-    /// Arguments after the image, for an entrypoint that takes them.
-    #[serde(default)]
-    pub args: Vec<String>,
-    #[serde(default)]
-    pub mounts: Vec<MountDecl>,
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LaunchDecl {
+    /// An image, an env block, some mounts and a port. Ten of the thirteen entrants.
+    Docker {
+        image: String,
+        /// Environment handed to the container, in declaration order.
+        #[serde(default)]
+        env: Vec<(String, String)>,
+        /// Arguments after the image, for an entrypoint that takes them.
+        #[serde(default)]
+        args: Vec<String>,
+        #[serde(default)]
+        mounts: Vec<MountDecl>,
+    },
+    /// Built from source and run directly on the box. Three entrants.
+    Native {
+        /// A script in the gateway's own directory that produces the binary, run once before the
+        /// first launch and never between egress columns. It installs a toolchain, so it must not be
+        /// running during the measurement window: the shell ordered the build before the memory
+        /// baseline for exactly that reason.
+        #[serde(default)]
+        build: Option<String>,
+        /// Candidate paths to the built binary, first one that exists and is executable wins.
+        ///
+        /// A LIST because one entrant's crate does not emit a stable output name and the shell had to
+        /// `find` across three of them. Declaring the candidates keeps that as data a reader can see,
+        /// rather than a search whose result nothing records.
+        binary: Vec<String>,
+        #[serde(default)]
+        args: Vec<String>,
+        #[serde(default)]
+        env: Vec<(String, String)>,
+        /// Names REMOVED from the child environment before it starts.
+        ///
+        /// NOT hygiene. One entrant's config loader claims every variable sharing its prefix and
+        /// feeds it to a deny-unknown-fields deserializer, so the harness's own documented override
+        /// variables kill config load before the port binds. The binary is backgrounded, so the
+        /// launch still returns success and the only symptom is "port not listening" on every
+        /// attempt of every column: thirty-six cells lost to a variable NAME, once already.
+        ///
+        /// `std::process::Command` inherits the parent environment, and an env block can only ADD, so
+        /// without this the class is unrepresentable.
+        #[serde(default)]
+        env_unset: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -259,7 +305,13 @@ impl Manifest {
     /// comparability basis of every number on the board, not a detail. An unknown placeholder is an
     /// error rather than being passed through, because a `{TYPO}` reaching a container as a literal
     /// is a misconfiguration that boots and measures fine.
-    fn substitute(&self, template: &str, cores: &str, mock_port: u16) -> Result<String, ManifestError> {
+    fn substitute(
+        &self,
+        template: &str,
+        cores: &str,
+        mock_port: u16,
+        gw_dir: &std::path::Path,
+    ) -> Result<String, ManifestError> {
         let ncore = core_count(cores);
         let mut out = String::with_capacity(template.len());
         let mut rest = template;
@@ -277,6 +329,8 @@ impl Manifest {
                 "CORES" => cores.to_string(),
                 "GW_PORT" => self.port.to_string(),
                 "MOCK_PORT" => mock_port.to_string(),
+                "GW_AUTH" => self.auth.clone(),
+                "GW_DIR" => gw_dir.to_string_lossy().into_owned(),
                 other => {
                     return Err(ManifestError::UnknownPlaceholder {
                         name: other.to_string(),
@@ -312,40 +366,78 @@ impl Manifest {
         boot_backoff: std::time::Duration,
     ) -> Option<Result<crate::launch::LaunchSpec, ManifestError>> {
         let decl = self.launch.as_ref()?;
-        let mut env = Vec::with_capacity(decl.env.len());
-        for (k, v) in &decl.env {
-            match self.substitute(v, cores, mock_port) {
-                Ok(v) => env.push((k.clone(), v)),
-                Err(e) => return Some(Err(e)),
+        let subst = |v: &str| self.substitute(v, cores, mock_port, gw_dir);
+        let subst_all = |xs: &[String]| -> Result<Vec<String>, ManifestError> {
+            xs.iter().map(|x| subst(x)).collect()
+        };
+        let subst_env = |xs: &[(String, String)]| -> Result<Vec<(String, String)>, ManifestError> {
+            xs.iter().map(|(k, v)| Ok((k.clone(), subst(v)?))).collect()
+        };
+
+        let kind = match decl {
+            LaunchDecl::Docker { image, env, args, mounts } => {
+                let env = match subst_env(env) {
+                    Ok(e) => e,
+                    Err(e) => return Some(Err(e)),
+                };
+                let args = match subst_all(args) {
+                    Ok(a) => a,
+                    Err(e) => return Some(Err(e)),
+                };
+                crate::launch::LaunchKind::Docker {
+                    image: image.clone(),
+                    env,
+                    // Every entrant uses host networking: the gateway binds the port it declares and
+                    // the harness drives that port. A published mapping would put a NAT hop inside
+                    // every measured request.
+                    port: crate::launch::PortMapping::Host,
+                    mounts: mounts
+                        .iter()
+                        .map(|m| crate::launch::Mount {
+                            host_path: gw_dir.join(&m.host_path).to_string_lossy().into_owned(),
+                            container_path: m.container_path.clone(),
+                            read_only: m.read_only,
+                        })
+                        .collect(),
+                    command: args,
+                }
             }
-        }
-        let mut args = Vec::with_capacity(decl.args.len());
-        for a in &decl.args {
-            match self.substitute(a, cores, mock_port) {
-                Ok(a) => args.push(a),
-                Err(e) => return Some(Err(e)),
+            LaunchDecl::Native { build, binary, args, env, env_unset } => {
+                // The FIRST declared candidate that exists and is executable. One entrant's crate has
+                // no stable output name, so the shell searched three; declaring them keeps the search
+                // as data. Falling back to the first candidate when none exists yet is deliberate:
+                // before the build has run there is nothing on disk, and `launch` must then fail with
+                // its own evidence rather than this returning None and looking like "no launch
+                // declared".
+                let resolved = binary
+                    .iter()
+                    .map(|b| gw_dir.join(b))
+                    .find(|p| is_executable(p))
+                    .or_else(|| binary.first().map(|b| gw_dir.join(b)));
+                let Some(bin) = resolved else {
+                    return Some(Err(ManifestError::Empty("launch binary")));
+                };
+                let env = match subst_env(env) {
+                    Ok(e) => e,
+                    Err(e) => return Some(Err(e)),
+                };
+                let args = match subst_all(args) {
+                    Ok(a) => a,
+                    Err(e) => return Some(Err(e)),
+                };
+                let _ = build; // consumed by the pre-launch step, wired separately
+                crate::launch::LaunchKind::Native {
+                    binary: bin.to_string_lossy().into_owned(),
+                    args,
+                    env,
+                    env_unset: env_unset.clone(),
+                }
             }
-        }
+        };
+
         Some(Ok(crate::launch::LaunchSpec {
             runtime: self.runtime.clone(),
-            kind: crate::launch::LaunchKind::Docker {
-                image: decl.image.clone(),
-                env,
-                // Every manifest in this field uses host networking: the gateway binds the port it
-                // declares, directly, and the harness drives that port. A published mapping would put
-                // a NAT hop inside every measured request.
-                port: crate::launch::PortMapping::Host,
-                mounts: decl
-                    .mounts
-                    .iter()
-                    .map(|m| crate::launch::Mount {
-                        host_path: gw_dir.join(&m.host_path).to_string_lossy().into_owned(),
-                        container_path: m.container_path.clone(),
-                        read_only: m.read_only,
-                    })
-                    .collect(),
-                command: args,
-            },
+            kind,
             cores: cores.to_string(),
             port: self.port,
             ready_budget,
@@ -543,17 +635,21 @@ mod real_field_tests {
         use std::time::Duration;
         let mut launchable = 0;
         for (name, m) in &field() {
-            let Some(spec) = m.launch_spec("0-3", 8000, std::path::Path::new("/gw"), Duration::from_secs(1), Duration::from_secs(1))
-            else {
-                // The three source-built entrants declare no launch yet; they need a build step first.
-                assert!(!m.runtime.is_docker(), "{name} runs in a container but declares no launch");
-                continue;
-            };
-            let spec = spec.unwrap_or_else(|e| panic!("{name} must produce a launchable spec: {e}"));
+            let spec = m
+                .launch_spec("0-3", 8000, std::path::Path::new("/gw"), Duration::from_secs(1), Duration::from_secs(1))
+                .unwrap_or_else(|| panic!("{name} must declare how it is launched"))
+                .unwrap_or_else(|e| panic!("{name} must produce a launchable spec: {e}"));
             assert!(spec.validate().is_ok(), "{name}: {:?}", spec.validate());
 
             let inv = crate::launch::build_invocation(&spec);
-            assert_eq!(inv.program, "docker");
+            // A container is started by the container runtime; a source-built entrant is started
+            // pinned, directly. Both are launchable, which is the thing that was missing.
+            let expected = if m.runtime.is_docker() { "docker" } else { "taskset" };
+            assert_eq!(inv.program, expected, "{name}");
+            if !m.runtime.is_docker() {
+                launchable += 1;
+                continue;
+            }
             // The container name comes from runtime.identity(), NOT from the launch block, so the
             // thing started, the thing measured and the thing stopped cannot be three containers.
             assert!(
@@ -574,7 +670,7 @@ mod real_field_tests {
             }
             launchable += 1;
         }
-        assert!(launchable >= 10, "the ten container entrants must be launchable, got {launchable}");
+        assert_eq!(launchable, 13, "every entrant must be launchable, got {launchable}");
     }
 
     /// The Go runtime's thread count is set from the size of the pinned core range. A literal there
@@ -587,7 +683,11 @@ mod real_field_tests {
         let with_ncore: Vec<_> = f
             .iter()
             .filter(|(_, m)| {
-                m.launch.as_ref().is_some_and(|l| l.env.iter().any(|(_, v)| v.contains("{NCORE}")))
+                m.launch.as_ref().is_some_and(|l| match l {
+                    LaunchDecl::Docker { env, .. } | LaunchDecl::Native { env, .. } => {
+                        env.iter().any(|(_, v)| v.contains("{NCORE}"))
+                    }
+                })
             })
             .collect();
         assert!(!with_ncore.is_empty(), "some entrants set their thread count from the core pin");
@@ -607,13 +707,58 @@ mod real_field_tests {
         }
     }
 
+    /// THE THIRTY-SIX CELL DEFECT, as a test.
+    ///
+    /// One entrant's config loader claims every environment variable sharing its prefix and feeds it
+    /// to a deny-unknown-fields deserializer, so the harness's OWN documented override variables kill
+    /// config load before the port binds. The binary is backgrounded, so the launch still reports
+    /// success and the only symptom is "port not listening" on every attempt of every column.
+    ///
+    /// An env block can only ADD, and a spawned process inherits its parent's environment, so this
+    /// has to be expressible as a removal or the class cannot be prevented at all.
+    #[test]
+    fn a_native_entrant_can_require_that_a_variable_is_absent_not_merely_unset_by_us() {
+        use std::time::Duration;
+        let f = field();
+        let scrubbing: Vec<_> = f
+            .iter()
+            .filter(|(_, m)| {
+                m.launch.as_ref().is_some_and(|l| matches!(l, LaunchDecl::Native { env_unset, .. } if !env_unset.is_empty()))
+            })
+            .collect();
+        assert!(
+            !scrubbing.is_empty(),
+            "at least one entrant must scrub the environment it is launched with; that requirement is why this field exists"
+        );
+
+        for (name, m) in scrubbing {
+            let spec = m
+                .launch_spec("0-3", 8000, std::path::Path::new("/gw"), Duration::from_secs(1), Duration::from_secs(1))
+                .and_then(Result::ok)
+                .unwrap_or_else(|| panic!("{name} must build a spec"));
+            let inv = crate::launch::build_invocation(&spec);
+            assert!(
+                !inv.env_unset.is_empty(),
+                "{name} declares variables that must not reach it, and the invocation must carry that removal: {inv:?}"
+            );
+            // The removals must not merely be set to empty: an empty value is still a present
+            // variable, and a loader that rejects unknown KEYS does not care what the value is.
+            for removed in &inv.env_unset {
+                assert!(
+                    !inv.env.iter().any(|(k, _)| k == removed),
+                    "{name} both sets and removes {removed}; setting it to anything still leaves it present"
+                );
+            }
+        }
+    }
+
     #[test]
     fn a_launch_referring_to_something_the_harness_does_not_supply_is_refused() {
         use std::time::Duration;
         // Built here rather than borrowed from the other test module: this one walks the real
         // corpus, and a fixture that drifts from the real shape would prove nothing about it.
         let mut m = field().values().find(|m| m.runtime.is_docker()).cloned().expect("a container entrant");
-        m.launch = Some(LaunchDecl {
+        m.launch = Some(LaunchDecl::Docker {
             image: "gw:1".into(),
             env: vec![("X".into(), "{NOT_A_THING}".into())],
             args: vec![],

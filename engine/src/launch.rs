@@ -92,6 +92,15 @@ pub enum LaunchKind {
         binary: String,
         args: Vec<String>,
         env: Vec<(String, String)>,
+        /// Names REMOVED from the inherited environment before the process starts.
+        ///
+        /// An env block can only ADD, and `std::process::Command` inherits the parent environment, so
+        /// without this there is no way to express "this must not be set". One entrant needs it: its
+        /// config loader claims every variable sharing its prefix and rejects unknown fields, so the
+        /// harness's own override variables kill config load before the port binds - and because the
+        /// binary is backgrounded, the launch reports success and the only symptom is a port that
+        /// never listens. That cost thirty-six cells once already.
+        env_unset: Vec<String>,
     },
 }
 
@@ -191,6 +200,9 @@ pub struct Invocation {
     /// its env travels as `-e KEY=VALUE` arguments instead, exactly like the env a container image
     /// actually receives.
     pub env: Vec<(String, String)>,
+    /// Variables removed from the inherited environment before the process starts. Empty for docker,
+    /// which inherits nothing from this process in the first place.
+    pub env_unset: Vec<String>,
 }
 
 /// Build the command a `LaunchSpec` runs, with no side effects. `spec.runtime.identity()` is the
@@ -224,12 +236,17 @@ pub fn build_invocation(spec: &LaunchSpec) -> Invocation {
             }
             args.push(image.clone());
             args.extend(command.iter().cloned());
-            Invocation { program: "docker".to_string(), args, env: Vec::new() }
+            Invocation { program: "docker".to_string(), args, env: Vec::new(), env_unset: Vec::new() }
         }
-        LaunchKind::Native { binary, args: bin_args, env } => {
+        LaunchKind::Native { binary, args: bin_args, env, env_unset } => {
             let mut args = vec!["-c".to_string(), spec.cores.clone(), binary.clone()];
             args.extend(bin_args.iter().cloned());
-            Invocation { program: "taskset".to_string(), args, env: env.clone() }
+            Invocation {
+                program: "taskset".to_string(),
+                args,
+                env: env.clone(),
+                env_unset: env_unset.clone(),
+            }
         }
     }
 }
@@ -347,9 +364,14 @@ impl Launcher for RealLauncher {
 
     fn spawn(&mut self, spec: &LaunchSpec) -> Result<(), String> {
         let inv = build_invocation(spec);
-        Command::new(&inv.program)
-            .args(&inv.args)
-            .envs(inv.env.iter().cloned())
+        let mut cmd = Command::new(&inv.program);
+        cmd.args(&inv.args).envs(inv.env.iter().cloned());
+        // REMOVED BEFORE ADDED, and before the process exists: an inherited variable the target
+        // rejects has to be gone, not overwritten.
+        for name in &inv.env_unset {
+            cmd.env_remove(name);
+        }
+        cmd
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -449,6 +471,7 @@ mod tests {
                 binary: "/opt/gw/bin/gw-native".into(),
                 args: vec!["--port".into(), "8080".into()],
                 env: vec![("GW_AUTH".into(), "dummy".into())],
+                env_unset: vec![],
             },
             cores: "0-3".into(),
             port: 8080,
@@ -667,7 +690,7 @@ mod tests {
         assert_eq!(d.validate(), Err(SpecError::Empty("image")));
 
         let mut n = native_spec();
-        n.kind = LaunchKind::Native { binary: " ".into(), args: vec![], env: vec![] };
+        n.kind = LaunchKind::Native { binary: " ".into(), args: vec![], env: vec![], env_unset: vec![] };
         assert_eq!(n.validate(), Err(SpecError::Empty("binary")));
     }
 
