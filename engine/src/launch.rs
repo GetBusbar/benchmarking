@@ -282,6 +282,12 @@ pub enum LaunchError {
         /// from a gateway that started and never bound its port. An absent measurement is supposed to
         /// publish a reason; "never became ready" with nothing behind it is barely one.
         last_spawn_error: Option<String>,
+        /// WHAT THE GATEWAY ITSELF SAID before it died. A container that starts, rejects its config
+        /// and exits has already explained the failure in its own log, and that log was destroyed a
+        /// line later by the `stop()` between attempts, which for docker is `rm -f`. The failure then
+        /// reads as "never became ready; port state: Free" for a config typo, a bad mount and an
+        /// unsupported flag alike. Captured BEFORE the teardown that removes it.
+        last_output: Option<String>,
     },
 }
 
@@ -292,12 +298,18 @@ impl fmt::Display for LaunchError {
             LaunchError::PreLaunchFailed { command, reason } => {
                 write!(f, "pre-launch step {command:?} failed: {reason}")
             }
-            LaunchError::NeverReady { attempts, last_port_state, last_spawn_error } => match last_spawn_error {
+            LaunchError::NeverReady { attempts, last_port_state, last_spawn_error, last_output } => {
+                let said = match last_output {
+                    Some(o) if !o.trim().is_empty() => format!("; it said: {}", o.trim()),
+                    _ => String::new(),
+                };
+                match last_spawn_error {
                 Some(why) => write!(
                     f,
-                    "never became ready after {attempts} attempt(s); last port state: {last_port_state:?}; the runtime refused the launch: {why}"
+                    "never became ready after {attempts} attempt(s); last port state: {last_port_state:?}; the runtime refused the launch: {why}{said}"
                 ),
-                None => write!(f, "never became ready after {attempts} attempt(s); last port state: {last_port_state:?}"),
+                None => write!(f, "never became ready after {attempts} attempt(s); last port state: {last_port_state:?}{said}"),
+            }
             },
         }
     }
@@ -330,6 +342,13 @@ pub trait Launcher {
 
     /// A snapshot of the port's state, used only as failure evidence on the final `NeverReady`.
     fn port_snapshot(&mut self, spec: &LaunchSpec) -> PortState;
+
+    /// The gateway's OWN output from the attempt that just failed, read before it is torn down.
+    /// Defaulted to nothing so a test launcher need not implement it; the real one reads the
+    /// container log.
+    fn diagnostics(&mut self, _spec: &LaunchSpec) -> Option<String> {
+        None
+    }
 }
 
 /// Run a pre-launch command with its own hard timeout, using only `std::process`: poll
@@ -430,6 +449,24 @@ impl Launcher for RealLauncher {
     fn port_snapshot(&mut self, spec: &LaunchSpec) -> PortState {
         supervise::port_state(spec.port)
     }
+
+    /// Read back what the container printed. Only the tail: a gateway that fails at config load says
+    /// so in its last few lines, and a whole log would bury the reason it is being read for.
+    fn diagnostics(&mut self, spec: &LaunchSpec) -> Option<String> {
+        let Runtime::Docker { container } = &spec.runtime else {
+            return None;
+        };
+        let out = Command::new("docker")
+            .args(["logs", "--tail", "20", container])
+            .stdin(Stdio::null())
+            .output()
+            .ok()?;
+        // A container that died at startup usually says why on stderr, so both streams are kept.
+        let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
+        text.push_str(&String::from_utf8_lossy(&out.stderr));
+        let text = text.trim().to_string();
+        (!text.is_empty()).then_some(text)
+    }
 }
 
 /// Launch `spec`, retrying up to `attempts` times (a zero is treated as one: this is not a way to
@@ -464,6 +501,7 @@ pub fn launch_with(
 
     let bounded = attempts.max(1);
     let mut last_spawn_error = None;
+    let mut last_output = None;
     for attempt in 1..=bounded {
         let spawned = match launcher.spawn(spec) {
             Ok(()) => true,
@@ -475,6 +513,14 @@ pub fn launch_with(
         if spawned && launcher.is_ready(spec) {
             return Ok(Launched { runtime: spec.runtime.clone(), attempts: attempt });
         }
+        // READ ITS LOG BEFORE KILLING IT. For docker, `stop` is `rm -f`, which takes the container
+        // and its log with it, so every failure below this line used to arrive with no evidence.
+        // Keep the last explanation we actually got. A later attempt whose log cannot be read (the
+        // runtime refused the invocation outright, so there is no container to ask) must not erase
+        // the reason an earlier attempt already gave.
+        if let Some(said) = launcher.diagnostics(spec) {
+            last_output = Some(said);
+        }
         // Kill whatever this attempt left behind before trying again, matching
         // harness_launch_ready's `gw_stop` between attempts: a half-bound listener must not be
         // allowed to wedge the retry.
@@ -485,7 +531,7 @@ pub fn launch_with(
     }
 
     let last_port_state = launcher.port_snapshot(spec);
-    Err(LaunchError::NeverReady { attempts: bounded, last_port_state, last_spawn_error })
+    Err(LaunchError::NeverReady { attempts: bounded, last_port_state, last_spawn_error, last_output })
 }
 
 #[cfg(test)]
@@ -661,7 +707,7 @@ mod tests {
         let err = launch_with(&mut fake, &spec, 3, no_sleep).unwrap_err();
         assert_eq!(
             err,
-            LaunchError::NeverReady { attempts: 3, last_port_state: PortState::Free, last_spawn_error: None }
+            LaunchError::NeverReady { attempts: 3, last_port_state: PortState::Free, last_spawn_error: None, last_output: None }
         );
         assert_eq!(fake.spawn_calls, 3, "the bound must be respected exactly, not exceeded");
     }
@@ -756,5 +802,61 @@ mod tests {
         let launched = launch_with(&mut fake, &docker_spec(), 0, no_sleep).unwrap();
         assert_eq!(launched.attempts, 1);
         assert_eq!(fake.spawn_calls, 1);
+    }
+
+    // THE EVIDENCE MUST OUTLIVE THE TEARDOWN.
+    //
+    // A failed attempt is torn down before the next one, and for docker that teardown is `rm -f`,
+    // which takes the container's log with it. Two gateways failed a field run with nothing but
+    // "never became ready; last port state: Free", which is the same message a config typo, a
+    // rejected mount and an unsupported flag all produce. The launcher now reads the log BEFORE the
+    // stop that destroys it, and the reason travels in the error.
+    #[test]
+    fn a_gateway_that_never_came_up_carries_what_it_said_before_it_died() {
+        struct Dying {
+            said: &'static str,
+            stopped: bool,
+        }
+        impl Launcher for Dying {
+            fn run_pre_launch(&mut self, _s: &PreLaunchStep) -> Result<(), String> {
+                Ok(())
+            }
+            fn spawn(&mut self, _s: &LaunchSpec) -> Result<(), String> {
+                // A fresh container, so a fresh log: this is what makes reading it after the
+                // teardown look like it works on a retry and fail on the last attempt.
+                self.stopped = false;
+                Ok(())
+            }
+            fn is_ready(&mut self, _s: &LaunchSpec) -> bool {
+                false
+            }
+            fn stop(&mut self, _s: &LaunchSpec) {
+                // Once stopped, the log is gone. Reading it after this point is the defect.
+                self.stopped = true;
+            }
+            fn port_snapshot(&mut self, _s: &LaunchSpec) -> PortState {
+                PortState::Free
+            }
+            fn diagnostics(&mut self, _s: &LaunchSpec) -> Option<String> {
+                if self.stopped {
+                    return None;
+                }
+                Some(self.said.to_string())
+            }
+        }
+        let mut l = Dying { said: "config: unknown field `nope`", stopped: false };
+        let err = launch(&mut l, &docker_spec(), 2).expect_err("it never becomes ready");
+        let LaunchError::NeverReady { last_output, .. } = &err else {
+            panic!("expected NeverReady, got {err:?}");
+        };
+        assert_eq!(
+            last_output.as_deref(),
+            Some("config: unknown field `nope`"),
+            "the gateway's own explanation must survive the teardown"
+        );
+        assert!(
+            format!("{err}").contains("unknown field"),
+            "and it must reach the operator in the rendered message"
+        );
     }
 }
