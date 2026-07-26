@@ -516,12 +516,6 @@ pub struct StreamingProjection {
 mod tests {
     use super::*;
     use crate::measurement::Absent;
-    use std::fs;
-    use std::path::PathBuf;
-
-    fn snapshots_dir() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../results/snapshots")
-    }
 
     // ── the published names of the memory fields are a CONTRACT, not an implementation detail ─────
     //
@@ -820,75 +814,55 @@ mod tests {
         assert_eq!(reparsed["verdict_note"], serde_json::json!("line one\nline two\u{0001}"));
     }
 
-    // ── parity with real committed snapshots ────────────────────────────────────────────────────
+    // ── the shapes the published artifact must hold ─────────────────────────────────────────────
 
-    // Fixtures are DISCOVERED, never named. Naming one would put a gateway identity in a shared
-    // source file, which the isolation lint forbids and which would also pin this test to whichever
-    // entrant happened to be in the corpus the day it was written.
-    fn any_snapshot_with(pred: impl Fn(&ResultSnapshot) -> bool) -> Option<ResultSnapshot> {
-        let mut paths: Vec<_> = fs::read_dir(snapshots_dir())
-            .ok()?
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("json"))
-            .collect();
-        paths.sort(); // deterministic pick, so a failure reproduces
-        paths.into_iter().find_map(|p| {
-            let text = fs::read_to_string(&p).ok()?;
-            let snap: ResultSnapshot = serde_json::from_str(&text).ok()?;
-            pred(&snap).then_some(snap)
-        })
-    }
+    // These used to SCAN results/snapshots/ and assert on whatever was committed there. That made
+    // the test suite a function of the board's contents: clearing the results to start the engine
+    // era with a clean board turned two of them red, not because the types regressed but because
+    // their fixtures had been deleted. A test that a `git rm` can fail is measuring the wrong thing.
+    //
+    // The invariants they were really guarding are properties of the TYPES, so they are asserted
+    // against a snapshot built right here. Whether real artifacts parse is a stronger claim and is
+    // covered where it belongs: engine/tests/end_to_end.rs drives the real binary and reads back the
+    // snapshot it actually wrote.
 
+    // A served cell carries its perf block through a serialise/deserialise round trip. The wire is
+    // the boundary this file exists to defend: every consumer sees the JSON, not the struct.
     #[test]
-    fn deserialises_a_real_committed_snapshot() {
-        let snap = any_snapshot_with(|s| {
-            s.matrix.served && s.matrix.upstreams.contains_key("openai")
-        })
-        .expect("the corpus should contain at least one served snapshot with an openai egress");
-        assert!(!snap.gateway.is_empty());
-        assert_eq!(snap.schema_version, 1);
-        assert!(snap.matrix.served);
-        let openai_egress = snap.matrix.upstreams.get("openai").expect("openai egress present");
-        assert!(openai_egress.served);
-        let cell = openai_egress.cells.get("openai").expect("openai>openai cell present");
+    fn a_served_cell_keeps_its_measured_throughput_across_the_wire() {
+        let snap = sample_record();
+        let js = serde_json::to_string(&snap).expect("a snapshot must serialise");
+        let back: ResultSnapshot = serde_json::from_str(&js).expect("its own output must parse");
+        assert_eq!(back.schema_version, 1);
+        assert!(back.matrix.served);
+        let egress = back.matrix.upstreams.values().next().expect("an egress row");
+        assert!(egress.served);
+        let cell = egress.cells.values().next().expect("a cell");
         assert!(matches!(cell.served, Served::Bool(true)));
-        let perf = cell.perf.as_ref().expect("served cell carries perf");
-        assert!(perf.rps_max_proxy.is_measured());
+        let perf = cell.perf.as_ref().expect("a served cell carries perf");
+        assert!(perf.rps_max_proxy.is_measured(), "a measured peak must survive the round trip");
     }
 
+    // The other half: a cell that was not served must not arrive carrying numbers. Fabricating a
+    // perf block for an unserved cell would publish a capability the gateway never demonstrated.
     #[test]
-    fn deserialises_every_real_committed_snapshot() {
-        let dir = snapshots_dir();
-        let entries = fs::read_dir(&dir)
-            .unwrap_or_else(|e| panic!("snapshots dir {} should be readable: {e}", dir.display()));
-        let mut checked = 0;
-        for entry in entries {
-            let entry = entry.unwrap();
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("json") {
-                continue;
+    fn an_unserved_cell_carries_no_perf_across_the_wire() {
+        let mut snap = sample_record();
+        for up in snap.matrix.upstreams.values_mut() {
+            up.served = false;
+            for cell in up.cells.values_mut() {
+                cell.served = Served::Bool(false);
+                cell.perf = None;
+                cell.stream = None;
             }
-            let text = fs::read_to_string(&path).unwrap();
-            let snap: ResultSnapshot = serde_json::from_str(&text).unwrap_or_else(|e| {
-                panic!("{} must parse under these types: {e}", path.display())
-            });
-            assert!(!snap.gateway.is_empty());
-            assert!(!snap.matrix.upstreams.is_empty());
-            checked += 1;
         }
-        assert!(checked > 0, "expected at least one committed snapshot fixture to exist");
-    }
-
-    #[test]
-    fn deserialising_a_not_served_cell_carries_no_perf_or_stream() {
-        // Again discovered, not named: any snapshot in the corpus with an unserved egress will do.
-        let snap = any_snapshot_with(|s| s.matrix.upstreams.values().any(|u| !u.served))
-            .expect("the corpus should contain at least one snapshot with an unserved egress");
-        let unserved = snap.matrix.upstreams.values().find(|u| !u.served).expect("checked above");
-        // A not-served egress cell must not fabricate a perf/stream block from thin air.
-        for cell in unserved.cells.values() {
-            if !matches!(cell.served, Served::Bool(true)) {
-                assert!(cell.perf.is_none());
+        let js = serde_json::to_string(&snap).expect("a snapshot must serialise");
+        let back: ResultSnapshot = serde_json::from_str(&js).expect("its own output must parse");
+        for up in back.matrix.upstreams.values() {
+            assert!(!up.served);
+            for cell in up.cells.values() {
+                assert!(cell.perf.is_none(), "an unserved cell must not carry perf");
+                assert!(cell.stream.is_none(), "an unserved cell must not carry stream");
             }
         }
     }
