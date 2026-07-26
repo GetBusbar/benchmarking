@@ -253,10 +253,23 @@ mod tests {
         }
     }
 
-    fn matrix_with_served_cells(gateway: &str, measured_at: &str, n: usize) -> Matrix {
+    /// A cell that was probed and answered with a status string rather than `true`. The grid always
+    /// enumerates every cell (`cell::walk_grid`), so this — not a missing row — is what a lost
+    /// capability actually looks like in a snapshot.
+    fn unserved_cell(status: &str) -> Cell {
+        Cell { served: Served::Status(status.to_string()), ..served_cell() }
+    }
+
+    /// `served` cells that answered true, plus `unserved` cells that were probed and did not. Total
+    /// cell count is `served + unserved`, so a caller can hold the GRID SIZE fixed and vary only how
+    /// many of those cells were actually served.
+    fn matrix_of(gateway: &str, measured_at: &str, served: usize, unserved: usize) -> Matrix {
         let mut cells = HashMap::new();
-        for i in 0..n {
+        for i in 0..served {
             cells.insert(format!("ingress{i}"), served_cell());
+        }
+        for i in 0..unserved {
+            cells.insert(format!("unserved{i}"), unserved_cell("not_configured"));
         }
         let mut upstreams = HashMap::new();
         upstreams.insert(
@@ -300,6 +313,10 @@ mod tests {
     }
 
     fn snapshot_with_served_cells(gateway: &str, measured_at: &str, n: usize) -> ResultSnapshot {
+        snapshot_of(gateway, measured_at, n, 0)
+    }
+
+    fn snapshot_of(gateway: &str, measured_at: &str, served: usize, unserved: usize) -> ResultSnapshot {
         ResultSnapshot {
             schema_version: 1,
             gateway: gateway.to_string(),
@@ -313,7 +330,7 @@ mod tests {
             hardware: None,
             rig: None,
             config: ConfigFiles { files: HashMap::new() },
-            matrix: matrix_with_served_cells(gateway, measured_at, n),
+            matrix: matrix_of(gateway, measured_at, served, unserved),
             memory: None,
             streaming: None,
         }
@@ -440,6 +457,61 @@ mod tests {
         assert!(!dir.join("result_gw_2026-07-25T09-00-00Z.json").exists());
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    // THE CASE THE GRID ACTUALLY PRODUCES, and the one the two tests around this one cannot see.
+    //
+    // `cell::walk_grid` enumerates EVERY cell every time, so a real re-run never changes the number
+    // of cells - it changes how many of them answered `true`. Both neighbouring guard tests vary the
+    // cell COUNT (4 vs 1) with every cell served, which a real snapshot pair cannot do. That left
+    // `served_cell_count`'s `Served::Bool(true)` filter unheld: deleting the filter so it counts
+    // every cell regardless of served status kept the entire suite green, and with it gone the guard
+    // compares 4 against 4 and PROMOTES a run that lost three quarters of its capability.
+    #[test]
+    fn promote_guard_fires_when_the_grid_is_the_same_size_but_fewer_cells_served() {
+        let dir = unique_dir("guard-same-size");
+        let good = snapshot_of("gw", "2026-07-25T08:00:00Z", 4, 0);
+        // Same four cells, still all present and still all probed: three now answer not_configured.
+        let degraded = snapshot_of("gw", "2026-07-25T09:00:00Z", 1, 3);
+
+        assert_eq!(served_cell_count(&good.matrix), 4, "fixture check: the baseline serves four cells");
+        assert_eq!(
+            good.matrix.upstreams.values().map(|u| u.cells.len()).sum::<usize>(),
+            degraded.matrix.upstreams.values().map(|u| u.cells.len()).sum::<usize>(),
+            "the two snapshots must describe the SAME grid size, or this test degenerates into the count-based one above"
+        );
+
+        write_snapshot(&dir, &good).unwrap();
+        let err = write_snapshot(&dir, &degraded).unwrap_err();
+
+        match err {
+            SnapshotError::PromoteGuard { existing_served, incoming_served } => {
+                assert_eq!(existing_served, 4);
+                assert_eq!(incoming_served, 1, "only cells answering true count as served");
+            }
+            other => panic!("expected PromoteGuard, got {other:?}"),
+        }
+
+        let current: ResultSnapshot =
+            serde_json::from_str(&fs::read_to_string(dir.join("gw.json")).unwrap()).unwrap();
+        assert_eq!(current, good, "the degraded run must not have replaced the good one");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // The v1-compat branch of `served_cell_count` (the top-level `cells` map, used only by a matrix
+    // that never carried the full grid) has the same filter and needs the same hold: every fixture
+    // reaching it was all-Bool(true), so replacing its filter with a bare `.count()` was invisible.
+    #[test]
+    fn the_v1_compat_row_also_counts_only_cells_that_answered_true() {
+        let mut m = matrix_of("gw", "2026-07-25T08:00:00Z", 0, 0);
+        m.upstreams.clear(); // force the compat branch
+        m.cells.insert("openai".into(), served_cell());
+        m.cells.insert("anthropic".into(), unserved_cell("not_configured"));
+        m.cells.insert("gemini".into(), unserved_cell("not_verified"));
+
+        assert_eq!(m.cells.len(), 3, "fixture check: three cells are present");
+        assert_eq!(served_cell_count(&m), 1, "only the cell that answered true is served");
     }
 
     #[test]

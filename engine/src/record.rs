@@ -523,6 +523,43 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../results/snapshots")
     }
 
+    // ── the published names of the memory fields are a CONTRACT, not an implementation detail ─────
+    //
+    // These structs are the producer; `site/gen-data.mjs`, `site/seal.mjs` and
+    // `site/check-consistency.mjs` are the consumer, and they read these keys by literal name out of
+    // the JSON. Nothing in either test suite crossed that boundary: renaming `peak_rss_hwm_mib` here
+    // left all 257 Rust tests green, and on the site side the rename does not raise - it reads
+    // `undefined`, so C7's `peak_rss_mib <= peak_rss_hwm_mib` invariant silently stops checking and
+    // every real peak-RSS number publishes as a null. An absent measurement is supposed to mean the
+    // rig could not measure it; here it would mean a field got renamed.
+    //
+    // Listed literally rather than derived from the struct, on purpose: a test that asked the struct
+    // for its own field names would agree with any rename and hold nothing.
+    #[test]
+    fn the_memory_field_names_the_site_reads_are_pinned_to_the_wire() {
+        // Every field either carries a serde default or is filled here, so this deserialize also
+        // proves the defaults still cover the shape.
+        let matrix_memory: MatrixMemory = serde_json::from_str(r#"{"served":true}"#).unwrap();
+        let v = serde_json::to_value(&matrix_memory).unwrap();
+        for key in ["idle_rss_mib", "peak_rss_mib", "peak_rss_hwm_mib", "post_load_rss_mib", "recovered_rss_mib"] {
+            assert!(v.get(key).is_some(), "matrix memory must publish {key}: site/ reads it by this exact name");
+        }
+
+        let cell_memory = CellMemory::default();
+        let v = serde_json::to_value(&cell_memory).unwrap();
+        for key in [
+            "idle_rss_mib",
+            "peak_rss_mib",
+            "peak_rss_hwm_mib",
+            "steady_state_rss_mib",
+            "recovered_rss_mib",
+            "time_to_plateau_s",
+            "growth_rate_mib_per_min",
+        ] {
+            assert!(v.get(key).is_some(), "cell memory must publish {key}: site/ reads it by this exact name");
+        }
+    }
+
 
     fn sample_perf() -> CellPerf {
         CellPerf {
