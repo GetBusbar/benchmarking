@@ -126,6 +126,12 @@ fn main() -> ExitCode {
                 // `smoke` drives a target at whatever path the dialect defines; it takes no manifest.
                 declared_path: String::new(),
                 cell_paths: Default::default(),
+                // `smoke` takes no manifest, so there is no declared capability grid to consult:
+                // every cell is probed, exactly as before this field existed.
+                matrix: Vec::new(),
+                matrix_note: String::new(),
+                untestable_cells: Vec::new(),
+                untestable_note: String::new(),
                 relaunch: None,
             };
             println!("mock healthy: {}", otb_engine::run::mock_healthy(&cfg));

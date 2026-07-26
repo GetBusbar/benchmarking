@@ -55,6 +55,13 @@ pub struct RunConfig {
     pub declared_path: String,
     /// Per-cell overrides, keyed `"<ingress>>egress"`. See `Manifest::cell_paths`.
     pub cell_paths: std::collections::BTreeMap<String, String>,
+    /// The gateway's declared capability grid and the cells the rig cannot pose. See
+    /// `Manifest::matrix` / `Manifest::untestable`. Empty `matrix` means undeclared: every cell is
+    /// probed, unchanged from before this field existed.
+    pub matrix: Vec<String>,
+    pub matrix_note: String,
+    pub untestable_cells: Vec<String>,
+    pub untestable_note: String,
     /// HOW TO PUT THE GATEWAY BACK AT REST. The memory group needs a process that has not served
     /// load to read an idle RSS from, and the only way to get one is to restart it, so the spec that
     /// launched it has to be reachable from a metric.
@@ -352,6 +359,26 @@ pub fn run_grid_with(cfg: &RunConfig, lo: u32, hi: u32, metrics: &[&dyn metric::
     for eg in &cfg.dialects {
         for ing in &cfg.dialects {
             let id = CellId::new(ing.as_str(), eg.as_str());
+            // A CELL THE MANIFEST DECLARES OUT OF SCOPE, OR THE RIG CANNOT POSE, IS NEVER PROBED.
+            // Checked before `probe_cell` runs at all: sending the request and then discarding its
+            // status is not the same as never sending it, because a global auth gate or rate limiter
+            // still answers with a real status that has nothing to do with this specific pairing -
+            // see `RunConfig::matrix`'s own doc for why that status must never be graded.
+            if crate::manifest::is_untestable_cell(&cfg.untestable_cells, ing.as_str(), eg.as_str()) {
+                let note =
+                    if cfg.untestable_note.is_empty() { "the rig cannot pose this pairing".to_string() } else { cfg.untestable_note.clone() };
+                out.push(CellResult { outcome: CellOutcome::untestable(id, note), metrics: None, series: None });
+                continue;
+            }
+            if crate::manifest::matrix_declared_capable(&cfg.matrix, ing.as_str(), eg.as_str()) == Some(false) {
+                let note = if cfg.matrix_note.is_empty() {
+                    format!("{} is not one of this gateway's declared capable pairings", id)
+                } else {
+                    cfg.matrix_note.clone()
+                };
+                out.push(CellResult { outcome: CellOutcome::not_configurable(id, note), metrics: None, series: None });
+                continue;
+            }
             let served = probe_cell(cfg, &id, healthy);
             // THE ENGINE, IN TWO LINES: if the cell is served, run every metric on it. The list of
             // metrics lives in one place (`metric::METRICS`) rather than being reached for here, so
@@ -370,11 +397,39 @@ pub fn run_grid_with(cfg: &RunConfig, lo: u32, hi: u32, metrics: &[&dyn metric::
                     CellOutcome::not_served(id, v, ev, n)
                 }
                 Served::Untestable(r) => CellOutcome::untestable(id, r),
+                Served::NotConfigurable(r) => CellOutcome::not_configurable(id, r),
             };
             out.push(CellResult { outcome, metrics, series });
         }
     }
     out
+}
+
+/// A minimal `RunConfig` for tests across this crate, mirroring `manifest::test_fixture` (one place
+/// to add a field, not one per call site). `matrix`/`untestable_cells` empty: undeclared, so every
+/// cell is probed unless a test overrides them via struct-update syntax.
+#[cfg(test)]
+pub(crate) fn test_fixture(gw: SocketAddr, mock: SocketAddr) -> RunConfig {
+    RunConfig {
+        gateway_addr: gw,
+        mock_addr: mock,
+        model: "m".into(),
+        auth: "dummy".into(),
+        dialects: vec![Dialect::Openai],
+        sweep_duration_s: 1,
+        probe_timeout: Duration::from_secs(2),
+        load_cores: None,
+        static_headers: Vec::new(),
+        egress_headers: Default::default(),
+        runtime: crate::manifest::Runtime::Native { proc_match: "test-fixture".into() },
+        declared_path: String::new(),
+        cell_paths: Default::default(),
+        matrix: Vec::new(),
+        matrix_note: String::new(),
+        untestable_cells: Vec::new(),
+        untestable_note: String::new(),
+        relaunch: None,
+    }
 }
 
 #[cfg(test)]
@@ -384,22 +439,7 @@ mod tests {
     use std::net::TcpListener;
 
     fn cfg_for(gw: SocketAddr, mock: SocketAddr) -> RunConfig {
-        RunConfig {
-            gateway_addr: gw,
-            mock_addr: mock,
-            model: "m".into(),
-            auth: "dummy".into(),
-            dialects: vec![Dialect::Openai],
-            sweep_duration_s: 1,
-            probe_timeout: Duration::from_secs(2),
-            load_cores: None,
-            static_headers: Vec::new(),
-            egress_headers: Default::default(),
-            runtime: crate::manifest::Runtime::Native { proc_match: "test-fixture".into() },
-            declared_path: String::new(),
-            cell_paths: Default::default(),
-            relaunch: None,
-        }
+        test_fixture(gw, mock)
     }
 
     /// A server that answers every request with a fixed status.
@@ -508,6 +548,34 @@ mod tests {
         // pay for every real measurement to assert that every pairing appears.
         let rows = run_grid_with(&cfg, 1, 2, &[]);
         assert_eq!(rows.len(), 4);
+    }
+
+    // A cell the manifest declares OUT of its capability grid must never be probed at all, even when
+    // the server sitting behind it would happily answer 200: the declaration wins, unconditionally,
+    // because probing it anyway and grading whatever came back is exactly the defect this field
+    // exists to prevent (a global gate answering for a pairing that was never really asked).
+    #[test]
+    fn a_declared_incapable_cell_is_never_probed_even_when_the_server_would_serve_it() {
+        let gw = serve(200);
+        let mut cfg = cfg_for(gw, gw);
+        cfg.dialects = vec![Dialect::Openai, Dialect::Anthropic];
+        // Rows = ingress, cols = egress, axis order [openai, openai-responses, anthropic, gemini,
+        // cohere, bedrock]: openai->openai capable, openai->anthropic not; anthropic row all not.
+        cfg.matrix = vec!["100000".into(), "000000".into(), "000000".into(), "000000".into(), "000000".into(), "000000".into()];
+        cfg.matrix_note = "test: declared capability".into();
+        let rows = run_grid_with(&cfg, 1, 2, &[]);
+        assert_eq!(rows.len(), 4, "every pairing still appears, declared or not");
+
+        let openai_openai = rows.iter().find(|r| r.outcome.id.ingress == "openai" && r.outcome.id.egress == "openai").unwrap();
+        assert_eq!(openai_openai.outcome.served, Served::Yes, "the declared-capable cell was actually probed");
+
+        for r in rows.iter().filter(|r| !(r.outcome.id.ingress == "openai" && r.outcome.id.egress == "openai")) {
+            assert!(
+                matches!(r.outcome.served, Served::NotConfigurable(_)),
+                "{} is outside the declared grid and must read not_configurable without ever being probed, got {:?}",
+                r.outcome.id, r.outcome.served
+            );
+        }
     }
 
     // An unserved cell carries NO metrics. A number attached to a pairing the gateway does not serve

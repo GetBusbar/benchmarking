@@ -8,7 +8,7 @@
       "template": "config.gen.yaml.tmpl"
     }
   ],
-  "display": "LiteLLM \u00b7 Python",
+  "display": "LiteLLM · Python",
   "egress": [
     "openai",
     "openai-responses",
@@ -35,6 +35,15 @@
       }
     ]
   },
+  "matrix": [
+    "111111",
+    "010000",
+    "001000",
+    "000000",
+    "000000",
+    "000000"
+  ],
+  "matrix_note": "LiteLLM accepts OpenAI ingress into any provider plus native Anthropic/Responses ingress diagonals; other ingress rows are grey by declaration",
   "model": "gpt-4o-mini",
   "name": "litellm-python",
   "path": "/v1/chat/completions",

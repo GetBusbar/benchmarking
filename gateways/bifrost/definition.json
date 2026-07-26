@@ -29,6 +29,15 @@
       }
     ]
   },
+  "matrix": [
+    "101110",
+    "010000",
+    "010000",
+    "000000",
+    "000000",
+    "000000"
+  ],
+  "matrix_note": "Bifrost v1.6.4 has no openai-chat -> responses bridge and no gemini/cohere/bedrock-format ingress; undeclared cells are grey by that capability limit",
   "model": "gpt-4o-mini",
   "name": "bifrost",
   "path": "/v1/chat/completions",
@@ -37,5 +46,9 @@
   "runtime": {
     "container": "bifrost",
     "kind": "docker"
-  }
+  },
+  "untestable": [
+    "openai/bedrock"
+  ],
+  "untestable_note": "Bifrost v1.6.4 hardcodes the Bedrock host (bedrock-runtime.<region>.amazonaws.com, core/providers/bedrock/bedrock.go; network_config.base_url never overrides it), so the harness mock cannot stand in for the upstream; Bifrost does serve Bedrock Converse in production"
 }

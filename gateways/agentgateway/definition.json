@@ -31,6 +31,15 @@
       }
     ]
   },
+  "matrix": [
+    "101001",
+    "010001",
+    "101001",
+    "000000",
+    "000000",
+    "000000"
+  ],
+  "matrix_note": "agentgateway v1.3.1 (llm: block auto-populates the same path->RouteType ingress classifier, local.rs llm_route_types): Completions/Messages/Responses ingress translate to the openAI/anthropic/bedrock providers' native wire; gemini egress exists only via Google's OpenAI-compat surface (not native generateContent), cohere is absent from the AIProvider enum, and gemini/cohere/bedrock request shapes have no ingress RouteType",
   "model": "gpt-4o-mini",
   "name": "agentgateway",
   "path": "/v1/chat/completions",

@@ -85,6 +85,37 @@ pub struct Manifest {
     /// regardless and publishes what it observes. This only says which upstreams are wired.
     #[serde(default)]
     pub egress: Vec<String>,
+    /// THE DECLARED 6x6 CAPABILITY GRID: which (ingress, egress) pairings this gateway is expected
+    /// to serve at all, researched against its own source/docs rather than guessed. Six rows
+    /// (ingress) of six characters (egress), axis order `["openai", "openai-responses",
+    /// "anthropic", "gemini", "cohere", "bedrock"]` both ways - the same order `Dialect::all()`
+    /// walks. `'1'` = declared capable, `'0'` = declared not. Empty (the default) means undeclared:
+    /// every cell is probed with no cell skipped on this basis.
+    ///
+    /// A `'0'` cell is NEVER PROBED AT ALL, published `not_configurable` directly. Probing it anyway
+    /// and trusting the returned status would be the exact defect this field exists to prevent: a
+    /// gateway's own global auth gate or rate limiter can answer a request for a pairing it never
+    /// claims to support with a real HTTP status (401, 429, ...) that has nothing to do with that
+    /// specific pairing, because it fires before routing ever gets a chance to say "no such route".
+    /// Grading that status as a probed failure would publish the gateway's own front-door behaviour
+    /// as a genuine capability defect on a translation it never offered. A `'1'` cell, or any cell
+    /// when this field is empty, is measured exactly as before: the observed status alone decides
+    /// `NotConfigured` vs `Failed` (see `probe::persistent_transient_verdict`).
+    #[serde(default)]
+    pub matrix: Vec<String>,
+    /// The cited, source-referenced reasoning behind `matrix`'s `'0'` cells, shown to a reader
+    /// instead of a bare grey square.
+    #[serde(default)]
+    pub matrix_note: String,
+    /// Cells the RIG cannot pose at all, distinct from a declared incapability: the gateway serves
+    /// this pairing in production, but the harness's own mock cannot stand in for the real upstream
+    /// (e.g. a channel that signs requests straight to a fixed real hostname with no override).
+    /// `"<ingress>/<egress>"` per entry. Also never probed; published `untestable`, not graded either
+    /// way.
+    #[serde(default)]
+    pub untestable: Vec<String>,
+    #[serde(default)]
+    pub untestable_note: String,
     /// A PER-CELL INGRESS PATH, for the cells that have one. Keyed `"<ingress>>egress"`.
     ///
     /// Some gateways expose a route that skips translation when the client's dialect already matches
@@ -415,7 +446,31 @@ fn pinned_parallelism(ncore: u32) -> Vec<(String, String)> {
     .collect()
 }
 
+/// This cell's declared capability, from a manifest's `matrix` (six rows of six `'0'`/`'1'` chars,
+/// axis order `Dialect::ALL` both ways). `None` means undeclared (probe normally - backward
+/// compatible with a manifest that sets no `matrix` at all); `Some(bool)` is the declared answer,
+/// and a `Some(false)` cell must never be probed - see `Manifest::matrix`'s own doc for why.
+pub fn matrix_declared_capable(matrix: &[String], ingress: &str, egress: &str) -> Option<bool> {
+    let ing_i = crate::ingress::Dialect::ALL.iter().position(|d| d.as_str() == ingress)?;
+    let eg_i = crate::ingress::Dialect::ALL.iter().position(|d| d.as_str() == egress)?;
+    let row = matrix.get(ing_i)?;
+    row.as_bytes().get(eg_i).map(|b| *b == b'1')
+}
+
+/// Whether this cell is one the RIG cannot pose at all (distinct from a declared incapability).
+pub fn is_untestable_cell(untestable: &[String], ingress: &str, egress: &str) -> bool {
+    untestable.iter().any(|pair| pair.as_str() == format!("{ingress}/{egress}"))
+}
+
 impl Manifest {
+    pub fn declared_capable(&self, ingress: &str, egress: &str) -> Option<bool> {
+        matrix_declared_capable(&self.matrix, ingress, egress)
+    }
+
+    pub fn is_untestable_cell(&self, ingress: &str, egress: &str) -> bool {
+        is_untestable_cell(&self.untestable, ingress, egress)
+    }
+
     pub fn validate(&self) -> Result<(), ManifestError> {
         for (v, field) in [
             (&self.name, "name"),
@@ -945,33 +1000,86 @@ impl Manifest {
     }
 }
 
+/// A minimal, valid `Manifest` for tests across this crate (config_lint.rs, suite.rs, and this
+/// module's own tests all built their own copy of this same field list; one adding a field meant
+/// three edits agreeing by hand). Callers override only the fields their test cares about with
+/// struct-update syntax (`Manifest { egress: vec![...], ..test_fixture() }`), so a new field is one
+/// edit here, not one per call site.
+#[cfg(test)]
+pub(crate) fn test_fixture() -> Manifest {
+    Manifest {
+        name: "gw".into(),
+        display: "GW".into(),
+        lang: "Rust".into(),
+        class: "AI gateway".into(),
+        repo: "https://example.invalid/gw".into(),
+        port: 8080,
+        path: "/v1/chat/completions".into(),
+        model: "m".into(),
+        auth: "dummy".into(),
+        headers: vec![],
+        runtime: Runtime::Docker { container: "gw-bench".into() },
+        egress: vec!["openai".into()],
+        matrix: vec![],
+        matrix_note: String::new(),
+        untestable: vec![],
+        untestable_note: String::new(),
+        commands: vec![],
+        cell_paths: Default::default(),
+        config: vec![],
+        launch: None,
+        config_files: vec![],
+        constants: Default::default(),
+        egress_headers: Default::default(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::time::Duration;
 
     fn docker_manifest() -> Manifest {
-        Manifest {
-            name: "gw".into(),
-            display: "GW".into(),
-            lang: "Rust".into(),
-            class: "AI gateway".into(),
-            repo: "https://example.invalid/gw".into(),
-            port: 8080,
-            path: "/v1/chat/completions".into(),
-            model: "m".into(),
-            auth: "dummy".into(),
-            headers: vec![],
-            runtime: Runtime::Docker { container: "gw-bench".into() },
-            egress: vec!["openai".into()],
-            commands: vec![],
-            cell_paths: Default::default(),
-            config: vec![],
-            launch: None,
-            config_files: vec![],
-            constants: Default::default(),
-            egress_headers: Default::default(),
-        }
+        test_fixture()
+    }
+
+    // Axis order is `Dialect::ALL` both ways: row 0 = openai ingress, col 0 = openai egress.
+    #[test]
+    fn matrix_reads_row_ingress_col_egress_in_dialect_order() {
+        let matrix = vec![
+            "100000".to_string(), // openai ingress: only openai egress capable
+            "000000".to_string(),
+            "001000".to_string(), // anthropic ingress: only anthropic egress capable
+            "000000".to_string(),
+            "000000".to_string(),
+            "000000".to_string(),
+        ];
+        assert_eq!(matrix_declared_capable(&matrix, "openai", "openai"), Some(true));
+        assert_eq!(matrix_declared_capable(&matrix, "openai", "anthropic"), Some(false));
+        assert_eq!(matrix_declared_capable(&matrix, "anthropic", "anthropic"), Some(true));
+        assert_eq!(matrix_declared_capable(&matrix, "gemini", "openai"), Some(false));
+    }
+
+    // Empty matrix means undeclared: every cell probes normally, unchanged from before this field
+    // existed - a gateway that has not been researched yet must not be silently treated as
+    // incapable of everything.
+    #[test]
+    fn an_empty_matrix_means_undeclared_not_incapable() {
+        assert_eq!(matrix_declared_capable(&[], "openai", "openai"), None);
+    }
+
+    #[test]
+    fn a_dialect_name_the_matrix_does_not_recognise_is_also_undeclared() {
+        let matrix = vec!["1".repeat(6); 6];
+        assert_eq!(matrix_declared_capable(&matrix, "not-a-real-dialect", "openai"), None);
+    }
+
+    #[test]
+    fn untestable_cells_match_the_exact_ingress_egress_pair_only() {
+        let untestable = vec!["openai/bedrock".to_string()];
+        assert!(is_untestable_cell(&untestable, "openai", "bedrock"));
+        assert!(!is_untestable_cell(&untestable, "bedrock", "openai"), "direction matters");
+        assert!(!is_untestable_cell(&untestable, "openai", "anthropic"));
     }
 
     // THE WHOLE POINT. RSS, HWM and stop all read ONE declaration, so they cannot name different

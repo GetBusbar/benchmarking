@@ -17,6 +17,15 @@
     "kind": "docker",
     "mounts": []
   },
+  "matrix": [
+    "101101",
+    "011000",
+    "101000",
+    "000000",
+    "000000",
+    "000000"
+  ],
+  "matrix_note": "GoModel 0.1.55 has no Cohere adapter (no COHERE_BASE_URL in the repo) and no chat-to-Responses bridge (responses_adapter.go implements ResponsesViaChat only); those cells are grey by that capability limit",
   "model": "openai/gpt-4o-mini",
   "name": "gomodel",
   "path": "/v1/chat/completions",

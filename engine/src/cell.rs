@@ -54,6 +54,12 @@ pub enum Served {
     No(Verdict, Evidence),
     /// The rig could not pose the question, so nothing about the gateway was learned.
     Untestable(String),
+    /// The pairing is outside the gateway's OWN declared capability matrix, so it was never probed
+    /// at all. Distinct from `No`: this is not the gateway's answer about THIS pairing (no request
+    /// was ever sent for it), it is the manifest's prior, cited declaration that this pairing does
+    /// not exist for it - a status returned for an undeclared pairing would be a global gate (auth,
+    /// rate limit) firing before routing, not evidence about the pairing. See `Manifest::matrix`.
+    NotConfigurable(String),
 }
 
 /// What the gateway actually said when it declined. Small on purpose: a status and the first of the
@@ -117,6 +123,12 @@ impl CellOutcome {
 
     pub fn not_served(id: CellId, verdict: Verdict, evidence: Evidence, note: impl Into<String>) -> Self {
         Self { id, served: Served::No(verdict, evidence), skipped: Some(Skipped::NotServed), note: Some(note.into()) }
+    }
+
+    /// This pairing is outside the gateway's own declared capability matrix, so it was never probed.
+    pub fn not_configurable(id: CellId, reason: impl Into<String>) -> Self {
+        let r = reason.into();
+        Self { id, served: Served::NotConfigurable(r.clone()), skipped: Some(Skipped::NotServed), note: Some(r) }
     }
 
     pub fn untestable(id: CellId, reason: impl Into<String>) -> Self {

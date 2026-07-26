@@ -32,6 +32,15 @@
       }
     ]
   },
+  "matrix": [
+    "101101",
+    "000000",
+    "000000",
+    "000000",
+    "000000",
+    "000000"
+  ],
+  "matrix_note": "Kong 3.8 ai-proxy accepts only OpenAI-canonical ingress; it emits no OpenAI-Responses route_type (enum: llm/v1/chat|completions|preserve) and its Cohere driver emits the Cohere v1 /v1/chat shape, not the v2 dialect this suite probes (kong/llm/init.lua, drivers/shared.lua, schemas/init.lua @3.8.0)",
   "model": "gpt-4o-mini",
   "name": "kong",
   "path": "/v1/chat/completions",
