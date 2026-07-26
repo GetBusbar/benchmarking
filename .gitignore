@@ -24,8 +24,10 @@ mock/target-x86/
 # python bytecode cache
 __pycache__/
 *.pyc
-# prebuilt bench rig binaries live in the `rig` GitHub release, not git
-bin/
+# prebuilt bench rig binaries live in the `rig` GitHub release, not git.
+# ANCHORED to the repo root on purpose: unanchored, `bin/` also matches engine/src/bin/, which is
+# where the otb entry point lives, and it silently kept the engine's whole CLI out of the repository.
+/bin/
 # box-qualification scratch: the per-box stage1/stage2 probe output and the assembled verdict the
 # orchestrator ships back onto the box. The DURABLE record is rig.box_qualify inside each snapshot
 # (results/snapshots/), which is committed — these are the working files that produced it.
