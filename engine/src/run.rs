@@ -356,9 +356,12 @@ pub fn run_grid(cfg: &RunConfig, lo: u32, hi: u32) -> Vec<CellResult> {
 pub fn run_grid_with(cfg: &RunConfig, lo: u32, hi: u32, metrics: &[&dyn metric::Metric]) -> Vec<CellResult> {
     let healthy = mock_healthy(cfg);
     let mut out = Vec::new();
+    let total = cfg.dialects.len() * cfg.dialects.len();
+    let mut done = 0usize;
     for eg in &cfg.dialects {
         for ing in &cfg.dialects {
             let id = CellId::new(ing.as_str(), eg.as_str());
+            done += 1;
             // A CELL THE MANIFEST DECLARES OUT OF SCOPE, OR THE RIG CANNOT POSE, IS NEVER PROBED.
             // Checked before `probe_cell` runs at all: sending the request and then discarding its
             // status is not the same as never sending it, because a global auth gate or rate limiter
@@ -367,6 +370,11 @@ pub fn run_grid_with(cfg: &RunConfig, lo: u32, hi: u32, metrics: &[&dyn metric::
             if crate::manifest::is_untestable_cell(&cfg.untestable_cells, ing.as_str(), eg.as_str()) {
                 let note =
                     if cfg.untestable_note.is_empty() { "the rig cannot pose this pairing".to_string() } else { cfg.untestable_note.clone() };
+                // ONE LINE PER CELL, TO STDERR, AS IT IS DECIDED - not buffered until the grid
+                // finishes. A box that dies mid-run leaves this trail in .run.log for whatever it
+                // reached, and a live run can be tailed for real progress instead of going dark
+                // until the sentinel lands.
+                eprintln!("[cell {done}/{total}] {id}: untestable");
                 out.push(CellResult { outcome: CellOutcome::untestable(id, note), metrics: None, series: None });
                 continue;
             }
@@ -376,6 +384,7 @@ pub fn run_grid_with(cfg: &RunConfig, lo: u32, hi: u32, metrics: &[&dyn metric::
                 } else {
                     cfg.matrix_note.clone()
                 };
+                eprintln!("[cell {done}/{total}] {id}: not_configurable");
                 out.push(CellResult { outcome: CellOutcome::not_configurable(id, note), metrics: None, series: None });
                 continue;
             }
@@ -399,6 +408,13 @@ pub fn run_grid_with(cfg: &RunConfig, lo: u32, hi: u32, metrics: &[&dyn metric::
                 Served::Untestable(r) => CellOutcome::untestable(id, r),
                 Served::NotConfigurable(r) => CellOutcome::not_configurable(id, r),
             };
+            let label = match &outcome.served {
+                Served::Yes => "served".to_string(),
+                Served::No(v, ev) => format!("{} (HTTP {})", v.token(), ev.status),
+                Served::Untestable(_) => "untestable".to_string(),
+                Served::NotConfigurable(_) => "not_configurable".to_string(),
+            };
+            eprintln!("[cell {done}/{total}] {}: {label}", outcome.id);
             out.push(CellResult { outcome, metrics, series });
         }
     }

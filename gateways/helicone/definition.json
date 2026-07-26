@@ -1,5 +1,10 @@
 {
   "auth": "dummy",
+  "cell_paths": {
+    "openai>anthropic": "/router/anthropic/chat/completions",
+    "openai>bedrock": "/router/bedrock/chat/completions",
+    "openai>openai": "/router/openai/chat/completions"
+  },
   "class": "AI gateway",
   "config": [],
   "config_files": [
