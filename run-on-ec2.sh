@@ -791,9 +791,12 @@ bench_gateway_once() {
       source lib/rig.sh
       fetch_rig "$PWD" || { echo rig fetch FAILED; echo 126 > .run-done; exit 0; }
       # rig.sh puts what it fetches in bin/; the run invokes ./otb.
-      curl -fsSL -o ./otb "https://github.com/GetBusbar/benchmarking/releases/download/rig/otb-$ARCH" 2>/dev/null && chmod +x ./otb
+      # BENCH_ARCH, not ARCH: ARCH is the ORCHESTRATOR's variable and is not exported to the box.
+      # Unset here it made the URL end in "otb-", which 404s, so the run died on its own sentinel
+      # with no clue which of the two things it fetches had failed.
+      curl -fsSL -o ./otb \"https://github.com/GetBusbar/benchmarking/releases/download/rig/otb-\$BENCH_ARCH\" && chmod +x ./otb
       if [ ! -x ./otb ]; then
-        echo engine binary not in the rig release - CI must publish otb for this arch
+        echo engine binary not fetched: otb-\$BENCH_ARCH missing from the rig release
         echo 126 > .run-done
         exit 0
       fi
@@ -801,7 +804,7 @@ bench_gateway_once() {
       # 0-3, load generator 4-9, mock 10-15 - IS the comparability basis of every published number,
       # so a mock sharing cores with either of the others measures a different machine.
       pkill -f bin/mock-arm64 2>/dev/null; sleep 1
-      setsid taskset -c \$MOCKCORES ./bin/mock-\$ARCH --port 8000 </dev/null >mock.log 2>&1 &
+      setsid taskset -c \$MOCKCORES ./bin/mock-\$BENCH_ARCH --port 8000 </dev/null >mock.log 2>&1 &
       # Give it a moment to bind, then refuse to measure anything if it did not: every not-served
       # verdict is conditioned on the mock being up, so a run against a dead mock publishes rig
       # failures as gateway capability denials.
