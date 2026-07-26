@@ -1,86 +1,121 @@
 {
   "agentgateway": {
-    "name": "agentgateway",
-    "display": "agentgateway",
-    "lang": "Rust",
-    "class": "Data plane",
-    "repo": "https://github.com/agentgateway/agentgateway",
-    "port": 8080,
-    "path": "/v1/chat/completions",
-    "model": "gpt-4o-mini",
     "auth": "dummy",
-    "headers": [],
-    "runtime": {
-      "kind": "docker",
-      "container": "agentgateway-bench"
-    },
+    "class": "Data plane",
+    "config": [],
+    "display": "agentgateway",
     "egress": [
       "openai",
       "openai-responses",
       "anthropic",
       "bedrock"
     ],
-    "config": []
+    "headers": [],
+    "lang": "Rust",
+    "launch": {
+      "args": [
+        "-f",
+        "/config.yaml"
+      ],
+      "env": [
+        [
+          "AWS_ACCESS_KEY_ID",
+          "AKIAMOCKACCESSKEY"
+        ],
+        [
+          "AWS_SECRET_ACCESS_KEY",
+          "mock-secret-access-key"
+        ],
+        [
+          "AWS_REGION",
+          "us-east-1"
+        ]
+      ],
+      "image": "ghcr.io/agentgateway/agentgateway:v1.3.1",
+      "mounts": [
+        {
+          "container_path": "/config.yaml",
+          "host_path": "config.gen.yaml",
+          "read_only": true
+        }
+      ]
+    },
+    "model": "gpt-4o-mini",
+    "name": "agentgateway",
+    "path": "/v1/chat/completions",
+    "port": 8080,
+    "repo": "https://github.com/agentgateway/agentgateway",
+    "runtime": {
+      "container": "agentgateway-bench",
+      "kind": "docker"
+    }
   },
   "aisix": {
-    "name": "aisix",
-    "display": "AISIX (api7)",
-    "lang": "Rust",
-    "class": "AI gateway",
-    "repo": "https://github.com/api7/aisix",
-    "port": 3000,
-    "path": "/v1/chat/completions",
-    "model": "gpt-4o-mini",
     "auth": "bench-token",
-    "headers": [],
-    "runtime": {
-      "kind": "native",
-      "proc_match": "target/release/aisix"
-    },
+    "class": "AI gateway",
+    "config": [],
+    "display": "AISIX (api7)",
     "egress": [
       "openai",
       "anthropic"
     ],
-    "config": []
+    "headers": [],
+    "lang": "Rust",
+    "model": "gpt-4o-mini",
+    "name": "aisix",
+    "path": "/v1/chat/completions",
+    "port": 3000,
+    "repo": "https://github.com/api7/aisix",
+    "runtime": {
+      "kind": "native",
+      "proc_match": "target/release/aisix"
+    }
   },
   "apisix": {
-    "name": "apisix",
-    "display": "APISIX",
-    "lang": "Other",
-    "class": "API gateway",
-    "repo": "https://github.com/apache/apisix",
-    "port": 9080,
-    "path": "/v1/chat/completions",
-    "model": "gpt-4o-mini",
     "auth": "sk-fake-benchmark-key",
-    "headers": [],
-    "runtime": {
-      "kind": "docker",
-      "container": "apisix-bench"
-    },
+    "class": "API gateway",
+    "config": [],
+    "display": "APISIX",
     "egress": [
       "openai",
       "openai-responses",
       "anthropic",
       "bedrock"
     ],
-    "config": []
+    "headers": [],
+    "lang": "Other",
+    "launch": {
+      "args": [],
+      "env": [],
+      "image": "apache/apisix:3.17.0-debian",
+      "mounts": [
+        {
+          "container_path": "/usr/local/apisix/conf/config.yaml",
+          "host_path": "config.gen.yaml",
+          "read_only": true
+        },
+        {
+          "container_path": "/usr/local/apisix/conf/apisix.yaml",
+          "host_path": "apisix.gen.yaml",
+          "read_only": true
+        }
+      ]
+    },
+    "model": "gpt-4o-mini",
+    "name": "apisix",
+    "path": "/v1/chat/completions",
+    "port": 9080,
+    "repo": "https://github.com/apache/apisix",
+    "runtime": {
+      "container": "apisix-bench",
+      "kind": "docker"
+    }
   },
   "bifrost": {
-    "name": "bifrost",
-    "display": "Bifrost",
-    "lang": "Go",
-    "class": "LLM gateway",
-    "repo": "https://github.com/maximhq/bifrost",
-    "port": 8080,
-    "path": "/v1/chat/completions",
-    "model": "gpt-4o-mini",
     "auth": "sk-dummy",
-    "headers": [],
-    "runtime": {
-      "kind": "docker",
-      "container": "bifrost"
-    },
+    "class": "LLM gateway",
+    "config": [],
+    "display": "Bifrost",
     "egress": [
       "openai",
       "openai-responses",
@@ -88,23 +123,40 @@
       "gemini",
       "cohere"
     ],
-    "config": []
+    "headers": [],
+    "lang": "Go",
+    "launch": {
+      "args": [],
+      "env": [
+        [
+          "GOMAXPROCS",
+          "{NCORE}"
+        ]
+      ],
+      "image": "maximhq/bifrost:v1.6.4",
+      "mounts": [
+        {
+          "container_path": "/app/data",
+          "host_path": "bfdata",
+          "read_only": false
+        }
+      ]
+    },
+    "model": "gpt-4o-mini",
+    "name": "bifrost",
+    "path": "/v1/chat/completions",
+    "port": 8080,
+    "repo": "https://github.com/maximhq/bifrost",
+    "runtime": {
+      "container": "bifrost",
+      "kind": "docker"
+    }
   },
   "busbar": {
-    "name": "busbar",
-    "display": "Busbar",
-    "lang": "Rust",
-    "class": "Control plane",
-    "repo": "https://github.com/GetBusbar/busbar",
-    "port": 8080,
-    "path": "/v1/chat/completions",
-    "model": "gpt-4o-mini",
     "auth": "bench-token",
-    "headers": [],
-    "runtime": {
-      "kind": "docker",
-      "container": "busbar-bench"
-    },
+    "class": "Control plane",
+    "config": [],
+    "display": "Busbar",
     "egress": [
       "openai",
       "openai-responses",
@@ -113,23 +165,49 @@
       "cohere",
       "bedrock"
     ],
-    "config": []
+    "headers": [],
+    "lang": "Rust",
+    "launch": {
+      "args": [],
+      "env": [
+        [
+          "BENCH_MOCK_KEY",
+          "dummy"
+        ],
+        [
+          "BENCH_BEDROCK_KEY",
+          "AKIAMOCKACCESSKEY:mock-secret-access-key"
+        ]
+      ],
+      "image": "getbusbar/busbar:1.4.1",
+      "mounts": [
+        {
+          "container_path": "/etc/busbar/config.yaml",
+          "host_path": "config.gen.yaml",
+          "read_only": true
+        },
+        {
+          "container_path": "/etc/busbar/providers.yaml",
+          "host_path": "providers.gen.yaml",
+          "read_only": true
+        }
+      ]
+    },
+    "model": "gpt-4o-mini",
+    "name": "busbar",
+    "path": "/v1/chat/completions",
+    "port": 8080,
+    "repo": "https://github.com/GetBusbar/busbar",
+    "runtime": {
+      "container": "busbar-bench",
+      "kind": "docker"
+    }
   },
   "gomodel": {
-    "name": "gomodel",
-    "display": "GoModel",
-    "lang": "Go",
-    "class": "Gateway",
-    "repo": "https://github.com/ENTERPILOT/GOModel",
-    "port": 8080,
-    "path": "/v1/chat/completions",
-    "model": "openai/gpt-4o-mini",
     "auth": "dummy",
-    "headers": [],
-    "runtime": {
-      "kind": "docker",
-      "container": "gomodel-bench"
-    },
+    "class": "Gateway",
+    "config": [],
+    "display": "GoModel",
     "egress": [
       "openai",
       "openai-responses",
@@ -137,68 +215,86 @@
       "gemini",
       "bedrock"
     ],
-    "config": []
+    "headers": [],
+    "lang": "Go",
+    "launch": {
+      "args": [],
+      "env": [],
+      "image": "enterpilot/gomodel:0.1.55",
+      "mounts": []
+    },
+    "model": "openai/gpt-4o-mini",
+    "name": "gomodel",
+    "path": "/v1/chat/completions",
+    "port": 8080,
+    "repo": "https://github.com/ENTERPILOT/GOModel",
+    "runtime": {
+      "container": "gomodel-bench",
+      "kind": "docker"
+    }
   },
   "helicone": {
-    "name": "helicone",
-    "display": "Helicone",
-    "lang": "Rust",
-    "class": "AI gateway",
-    "repo": "https://github.com/Helicone/ai-gateway",
-    "port": 8787,
-    "path": "/router/openai/chat/completions",
-    "model": "openai/gpt-4o-mini",
     "auth": "dummy",
+    "class": "AI gateway",
+    "config": [],
+    "display": "Helicone",
+    "egress": [
+      "openai",
+      "anthropic",
+      "bedrock"
+    ],
     "headers": [],
+    "lang": "Rust",
+    "model": "openai/gpt-4o-mini",
+    "name": "helicone",
+    "path": "/router/openai/chat/completions",
+    "port": 8787,
+    "repo": "https://github.com/Helicone/ai-gateway",
     "runtime": {
       "kind": "native",
       "proc_match": "target/release/ai-gateway"
-    },
-    "egress": [
-      "openai",
-      "anthropic",
-      "bedrock"
-    ],
-    "config": []
+    }
   },
   "kong": {
-    "name": "kong",
-    "display": "Kong",
-    "lang": "Other",
-    "class": "API gateway",
-    "repo": "https://github.com/Kong/kong",
-    "port": 8080,
-    "path": "/v1/chat/completions",
-    "model": "gpt-4o-mini",
     "auth": "dummy",
-    "headers": [],
-    "runtime": {
-      "kind": "docker",
-      "container": "kong-bench"
-    },
+    "class": "API gateway",
+    "config": [],
+    "display": "Kong",
     "egress": [
       "openai",
       "anthropic",
       "gemini",
       "bedrock"
     ],
-    "config": []
+    "headers": [],
+    "lang": "Other",
+    "launch": {
+      "args": [],
+      "env": [],
+      "image": "kong:3.8",
+      "mounts": [
+        {
+          "container_path": "/kong/kong.yml",
+          "host_path": "kong.gen.yml",
+          "read_only": true
+        }
+      ]
+    },
+    "model": "gpt-4o-mini",
+    "name": "kong",
+    "path": "/v1/chat/completions",
+    "port": 8080,
+    "repo": "https://github.com/Kong/kong",
+    "runtime": {
+      "container": "kong-bench",
+      "kind": "docker"
+    }
   },
   "litellm-python": {
-    "name": "litellm-python",
-    "display": "LiteLLM \u00b7 Python",
-    "lang": "Python",
-    "class": "LLM gateway",
-    "repo": "https://github.com/BerriAI/litellm",
-    "port": 8102,
-    "path": "/v1/chat/completions",
-    "model": "gpt-4o-mini",
     "auth": "dummy",
-    "headers": [],
-    "runtime": {
-      "kind": "docker",
-      "container": "litellm-python-bench"
-    },
+    "class": "LLM gateway",
+    "config": [],
+    "display": "LiteLLM \u00b7 Python",
     "egress": [
       "openai",
       "openai-responses",
@@ -207,65 +303,93 @@
       "cohere",
       "bedrock"
     ],
-    "config": []
+    "headers": [],
+    "lang": "Python",
+    "launch": {
+      "args": [
+        "--config",
+        "/config.gen.yaml",
+        "--port",
+        "{GW_PORT}"
+      ],
+      "env": [],
+      "image": "ghcr.io/berriai/litellm:v1.93.0",
+      "mounts": [
+        {
+          "container_path": "/config.gen.yaml",
+          "host_path": "config.gen.yaml",
+          "read_only": true
+        }
+      ]
+    },
+    "model": "gpt-4o-mini",
+    "name": "litellm-python",
+    "path": "/v1/chat/completions",
+    "port": 8102,
+    "repo": "https://github.com/BerriAI/litellm",
+    "runtime": {
+      "container": "litellm-python-bench",
+      "kind": "docker"
+    }
   },
   "litellm-rust": {
-    "name": "litellm-rust",
-    "display": "LiteLLM \u00b7 Rust",
-    "lang": "Rust",
-    "class": "LLM gateway",
-    "repo": "https://github.com/BerriAI/litellm",
-    "port": 8101,
-    "path": "/v1/messages",
-    "model": "azure_ai/mock",
     "auth": "gwbench",
-    "headers": [],
-    "runtime": {
-      "kind": "native",
-      "proc_match": "litellm-ai-gateway"
-    },
+    "class": "LLM gateway",
+    "config": [],
+    "display": "LiteLLM \u00b7 Rust",
     "egress": [
       "anthropic"
     ],
-    "config": []
+    "headers": [],
+    "lang": "Rust",
+    "model": "azure_ai/mock",
+    "name": "litellm-rust",
+    "path": "/v1/messages",
+    "port": 8101,
+    "repo": "https://github.com/BerriAI/litellm",
+    "runtime": {
+      "kind": "native",
+      "proc_match": "litellm-ai-gateway"
+    }
   },
   "one-api": {
-    "name": "one-api",
-    "display": "One-API",
-    "lang": "Go",
-    "class": "API distribution system",
-    "repo": "https://github.com/songquanpeng/one-api",
-    "port": 3000,
-    "path": "/v1/chat/completions",
-    "model": "gpt-4o-mini",
     "auth": "dummy",
-    "headers": [],
-    "runtime": {
-      "kind": "docker",
-      "container": "one-api-bench"
-    },
+    "class": "API distribution system",
+    "config": [],
+    "display": "One-API",
     "egress": [
       "openai",
       "anthropic",
       "gemini"
     ],
-    "config": []
+    "headers": [],
+    "lang": "Go",
+    "launch": {
+      "args": [],
+      "env": [
+        [
+          "GOMAXPROCS",
+          "{NCORE}"
+        ]
+      ],
+      "image": "justsong/one-api:v0.6.10",
+      "mounts": []
+    },
+    "model": "gpt-4o-mini",
+    "name": "one-api",
+    "path": "/v1/chat/completions",
+    "port": 3000,
+    "repo": "https://github.com/songquanpeng/one-api",
+    "runtime": {
+      "container": "one-api-bench",
+      "kind": "docker"
+    }
   },
   "portkey": {
-    "name": "portkey",
-    "display": "Portkey",
-    "lang": "Node",
-    "class": "AI gateway",
-    "repo": "https://github.com/Portkey-AI/gateway",
-    "port": 8787,
-    "path": "/v1/messages",
-    "model": "anthropic/mock",
     "auth": "dummy",
-    "headers": [],
-    "runtime": {
-      "kind": "docker",
-      "container": "portkey-bench"
-    },
+    "class": "AI gateway",
+    "config": [],
+    "display": "Portkey",
     "egress": [
       "openai",
       "openai-responses",
@@ -274,29 +398,77 @@
       "cohere",
       "bedrock"
     ],
-    "config": []
+    "headers": [],
+    "lang": "Node",
+    "launch": {
+      "args": [],
+      "env": [],
+      "image": "portkeyai/gateway:1.15.2",
+      "mounts": []
+    },
+    "model": "anthropic/mock",
+    "name": "portkey",
+    "path": "/v1/messages",
+    "port": 8787,
+    "repo": "https://github.com/Portkey-AI/gateway",
+    "runtime": {
+      "container": "portkey-bench",
+      "kind": "docker"
+    }
   },
   "tensorzero": {
-    "name": "tensorzero",
-    "display": "TensorZero",
-    "lang": "Rust",
-    "class": "Model gateway",
-    "repo": "https://github.com/tensorzero/tensorzero",
-    "port": 3000,
-    "path": "/openai/v1/chat/completions",
-    "model": "tensorzero::model_name::mock-openai",
     "auth": "dummy",
-    "headers": [],
-    "runtime": {
-      "kind": "docker",
-      "container": "tensorzero-bench"
-    },
+    "class": "Model gateway",
+    "config": [],
+    "display": "TensorZero",
     "egress": [
       "openai",
       "openai-responses",
       "anthropic",
       "bedrock"
     ],
-    "config": []
+    "headers": [],
+    "lang": "Rust",
+    "launch": {
+      "args": [
+        "--config-file",
+        "config/tensorzero.toml"
+      ],
+      "env": [
+        [
+          "ANTHROPIC_API_KEY",
+          "dummy"
+        ],
+        [
+          "AWS_ACCESS_KEY_ID",
+          "AKIAMOCKACCESSKEY"
+        ],
+        [
+          "AWS_SECRET_ACCESS_KEY",
+          "mock-secret-access-key"
+        ],
+        [
+          "AWS_REGION",
+          "us-east-1"
+        ]
+      ],
+      "image": "tensorzero/gateway:2026.6.0",
+      "mounts": [
+        {
+          "container_path": "/app/config",
+          "host_path": "config",
+          "read_only": true
+        }
+      ]
+    },
+    "model": "tensorzero::model_name::mock-openai",
+    "name": "tensorzero",
+    "path": "/openai/v1/chat/completions",
+    "port": 3000,
+    "repo": "https://github.com/tensorzero/tensorzero",
+    "runtime": {
+      "container": "tensorzero-bench",
+      "kind": "docker"
+    }
   }
 }

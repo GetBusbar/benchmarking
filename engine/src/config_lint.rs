@@ -176,6 +176,7 @@ mod tests {
             runtime: Runtime::Docker { container: "gw-bench".into() },
             egress: vec!["openai".into()],
             config: vec![],
+            launch: None,
         }
     }
 
