@@ -188,14 +188,32 @@ fn main() -> ExitCode {
                 eprintln!("manifest {manifest_path} does not meet the config-necessity standard; refusing to measure it");
                 return ExitCode::FAILURE;
             }
-            let (Some(gw), Some(mk)) = (
-                args.get(2).and_then(|a| a.parse::<std::net::SocketAddr>().ok()),
-                args.get(3).and_then(|a| a.parse::<std::net::SocketAddr>().ok()),
-            ) else {
-                eprintln!("usage: otb run <manifest.json> <gateway ip:port> <mock ip:port> [results_dir]");
+            // The gateway's port is DECLARED in its definition, so the caller does not repeat it.
+            // A caller-supplied port is a second spelling of one fact, and the run would drive
+            // whatever answered on it - which is how a measurement ends up attributed to the wrong
+            // gateway. An explicit address is still accepted for driving something already running.
+            let Some(mk) = args.get(2).and_then(|a| a.parse::<std::net::SocketAddr>().ok()) else {
+                eprintln!("usage: otb run <gateway dir> <mock ip:port> [results_dir] [sweep_s]");
+                eprintln!("  the gateway's own address comes from its definition; OTB_GATEWAY_ADDR overrides it");
                 return ExitCode::from(2);
             };
-            let results_dir = args.get(4).cloned().unwrap_or_else(|| "results/snapshots".into());
+            let gw: std::net::SocketAddr = match std::env::var("OTB_GATEWAY_ADDR") {
+                Ok(a) => match a.parse() {
+                    Ok(a) => a,
+                    Err(e) => {
+                        eprintln!("OTB_GATEWAY_ADDR={a:?} is not an address: {e}");
+                        return ExitCode::FAILURE;
+                    }
+                },
+                Err(_) => match format!("127.0.0.1:{}", manifest.port).parse() {
+                    Ok(a) => a,
+                    Err(e) => {
+                        eprintln!("{} declares port {} which is not usable: {e}", manifest.name, manifest.port);
+                        return ExitCode::FAILURE;
+                    }
+                },
+            };
+            let results_dir = args.get(3).cloned().unwrap_or_else(|| "results/snapshots".into());
             if let Err(e) = std::fs::create_dir_all(&results_dir) {
                 eprintln!("cannot create {results_dir}: {e}");
                 return ExitCode::FAILURE;
@@ -242,7 +260,7 @@ fn main() -> ExitCode {
                 mock_addr: mk,
                 results_dir: results_dir.into(),
                 dialects,
-                sweep_duration_s: arg_f64(&args, 5, 6.0) as u64,
+                sweep_duration_s: arg_f64(&args, 4, 6.0) as u64,
                 load_cores: std::env::var("LOADCORES").ok(),
                 min_conc: env_u32("OTB_MIN_CONC", 4),
                 max_conc: env_u32("OTB_MAX_CONC", 512),

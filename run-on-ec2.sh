@@ -831,12 +831,30 @@ bench_gateway_once() {
       export CAP_MIB=24000
       export SUITES=\"$ALL_SUITES\"
       sudo -n true 2>/dev/null && sudo chmod 666 /var/run/docker.sock || true
-      bash run-all.sh $gw; echo \$? > .run-done
+      # THE MOCK RUNS PINNED, IN ITS OWN PROCESS, on its own cores. The three-way split - gateway
+      # 0-3, load generator 4-9, mock 10-15 - IS the comparability basis of every published number,
+      # so a mock sharing cores with either of the others measures a different machine.
+      pkill -f bin/mock-arm64 2>/dev/null; sleep 1
+      setsid taskset -c \$MOCKCORES ./bin/mock-arm64 --port 8000 </dev/null >mock.log 2>&1 &
+      # Give it a moment to bind, then refuse to measure anything if it did not: every not-served
+      # verdict is conditioned on the mock being up, so a run against a dead mock publishes rig
+      # failures as gateway capability denials.
+      for i in \$(seq 1 30); do
+        curl -s -m2 -o /dev/null -X POST 127.0.0.1:8000/v1/chat/completions \
+          -H "content-type: application/json" -d "{}" && break
+        sleep 1
+      done
+      # Refuse the run outright if the setup is wrong, rather than discovering it as a gateway that
+      # will not boot after the box-hours are already spent.
+      ./otb validate gateways/\$gw || { echo 127 > .run-done; exit 0; }
+      OTB_GW_CORES=\$CORES LOADCORES=\$LOADCORES \
+        ./otb run gateways/\$gw 127.0.0.1:8000 results/snapshots
+      echo \$? > .run-done
     ' > .run.log 2>&1 < /dev/null &" >>"$glog" 2>&1
   local launch_rc=$?
   local run_failed=0
   if [ "$launch_rc" -ne 0 ]; then
-    glog_echo "detached run-all.sh launch FAILED (ssh rc=$launch_rc) - could not start the remote run"
+    glog_echo "detached otb launch FAILED (ssh rc=$launch_rc) - could not start the remote run"
     run_failed=1
   fi
 
