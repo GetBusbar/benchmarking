@@ -83,6 +83,12 @@ impl Probe for SweepProbe<'_> {
             duration: Duration::from_secs(self.cfg.sweep_duration_s),
             ttft_ms: 0,
         });
+        // A panicked worker means OUR code broke. Reporting the window as empty would let the
+        // search publish it as a rig limitation, which is a harness bug wearing the rig's clothes.
+        if stats.worker_panicked {
+            eprintln!("loadgen: a worker panicked at c={concurrency}; this window is a harness fault");
+            return None;
+        }
         // A window that produced nothing is UNMEASURED, not a zero, so the search stops rather than
         // treating silence as a failed gate.
         if stats.ok == 0 && stats.fail == 0 {
@@ -123,7 +129,11 @@ pub fn sweep_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> CellPerf {
                 (Some(reason), None) => Measurement::absent(reason),
                 (None, _) => Measurement::absent(Absent::NotMeasured),
             },
-            max_proxy_concurrency: Measurement::absent(Absent::NotMeasured),
+            // Mirrors max_proxy's reason. Two different explanations for one absence, in the same
+            // cell, is a smaller version of the reason-swapping this type exists to prevent.
+            max_proxy_concurrency: Measurement::absent(
+                r.peak.reason().cloned().unwrap_or(Absent::NotMeasured),
+            ),
         },
     }
 }

@@ -20,6 +20,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+/// Hard ceiling on one request/response exchange, independent of the socket's per-read timeout.
+const RESPONSE_BUDGET: Duration = Duration::from_secs(30);
+
 pub struct GenConfig {
     pub addr: SocketAddr,
     pub path: String,
@@ -36,6 +39,9 @@ pub struct GenStats {
     pub ok: u64,
     pub fail: u64,
     pub elapsed_s: f64,
+    /// Set when a worker thread panicked. The window is then not a measurement of the gateway at
+    /// all, and a caller must publish it as a harness fault rather than as an empty result.
+    pub worker_panicked: bool,
     /// Every successful request's latency, microseconds. Percentiles are computed from this rather
     /// than from a running estimate: an approximate p99 is the one number nobody can check later.
     pub latencies_us: Vec<u64>,
@@ -53,11 +59,21 @@ impl GenStats {
     /// rather than inferred, because a percentile convention that differs by one index is a silent
     /// disagreement between two instruments that both look right.
     pub fn pct_us(&self, q: f64) -> u64 {
-        if self.latencies_us.is_empty() {
-            return 0;
-        }
+        Self::pct_of(&self.sorted_latencies(), q)
+    }
+
+    /// Sort once. `stats_line` needs two percentiles, and cloning the whole vector per call held
+    /// several copies of millions of samples for a run long enough to matter.
+    fn sorted_latencies(&self) -> Vec<u64> {
         let mut v = self.latencies_us.clone();
         v.sort_unstable();
+        v
+    }
+
+    fn pct_of(v: &[u64], q: f64) -> u64 {
+        if v.is_empty() {
+            return 0;
+        }
         let mut i = (v.len() as f64 * q) as usize;
         if i >= v.len() {
             i = v.len() - 1;
@@ -67,8 +83,9 @@ impl GenStats {
 
     /// The exact line the Go generator prints, so every existing parser reads this unchanged.
     pub fn stats_line(&self) -> String {
-        let p50 = self.pct_us(0.50);
-        let p99 = self.pct_us(0.99);
+        let sorted = self.sorted_latencies();
+        let p50 = Self::pct_of(&sorted, 0.50);
+        let p99 = Self::pct_of(&sorted, 0.99);
         format!(
             "rps={} fail={} p50={:.2} p99={:.2} p50us={} p99us={} ok={}",
             self.rps(),
@@ -98,13 +115,18 @@ fn worker(cfg: &GenConfig, stop: &AtomicBool, out: &Mutex<GenStats>) {
                 let _ = s.set_write_timeout(Some(Duration::from_secs(30)));
             });
             if conn.is_none() {
+                // BACK OFF. Without this the loop spins at connect-refusal speed (microseconds on
+                // loopback) once a gateway stops accepting, burning a core and inflating `fail`
+                // into a measure of how fast connect can fail rather than a request count.
                 fail += 1;
+                std::thread::sleep(Duration::from_millis(5));
                 continue;
             }
         }
         let Some(s) = conn.as_mut() else { continue };
         let t0 = Instant::now();
-        if s.write_all(req.as_bytes()).is_err() || read_response(s).is_err() {
+        let response_deadline = t0 + RESPONSE_BUDGET;
+        if s.write_all(req.as_bytes()).is_err() || read_response(s, response_deadline).is_err() {
             fail += 1;
             conn = None; // a broken connection is not reused: the next request would inherit its state
             continue;
@@ -113,11 +135,21 @@ fn worker(cfg: &GenConfig, stop: &AtomicBool, out: &Mutex<GenStats>) {
         ok += 1;
     }
 
-    if let Ok(mut g) = out.lock() {
-        g.ok += ok;
-        g.fail += fail;
-        g.latencies_us.extend_from_slice(&lat);
-    }
+    // A POISONED LOCK MEANS A WORKER PANICKED, which is a harness fault. Skipping the merge
+    // silently would drop this worker's real requests and, if every worker skipped, hand the search
+    // an empty window that reads as "the rig produced nothing" rather than "our code broke".
+    // Recover the guard so the data still lands, and record that it happened.
+    let mut g = match out.lock() {
+        Ok(g) => g,
+        Err(poisoned) => {
+            let mut g = poisoned.into_inner();
+            g.worker_panicked = true;
+            g
+        }
+    };
+    g.ok += ok;
+    g.fail += fail;
+    g.latencies_us.extend_from_slice(&lat);
 }
 
 fn build_request(cfg: &GenConfig) -> String {
@@ -137,7 +169,11 @@ fn build_request(cfg: &GenConfig) -> String {
 
 /// Read one response and discard it. Only success or failure matters here; the body is the mock's
 /// canned reply and parsing it would charge the gateway for our own JSON cost.
-fn read_response(s: &mut TcpStream) -> std::io::Result<()> {
+fn read_response(s: &mut TcpStream, deadline: Instant) -> std::io::Result<()> {
+    // A PER-READ TIMEOUT IS NOT A BOUND. The socket timeout refreshes on every byte, so a peer that
+    // trickles one byte every 29s keeps a worker inside this function effectively forever. run()
+    // sets the stop flag and then blocks joining every worker, so one wedged worker hangs the whole
+    // sweep until the box self-terminates and the entire run is lost. This deadline is the bound.
     let mut buf = [0u8; 8192];
     let mut acc: Vec<u8> = Vec::with_capacity(8192);
     let mut hdr_end: Option<usize> = None;
@@ -183,6 +219,9 @@ fn read_response(s: &mut TcpStream) -> std::io::Result<()> {
                 // nothing to wait for and nothing left to desync the next request.
                 Framing::UntilClose => return Ok(()),
             }
+        }
+        if Instant::now() >= deadline {
+            return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "response deadline"));
         }
         let n = s.read(&mut buf)?;
         if n == 0 {
@@ -245,7 +284,14 @@ pub fn run(cfg: &GenConfig) -> GenStats {
         stop.store(true, Ordering::Relaxed);
     });
 
-    let mut g = out.lock().map(|g| g.clone()).unwrap_or_default();
+    let mut g = match out.lock() {
+        Ok(g) => g.clone(),
+        Err(poisoned) => {
+            let mut g = poisoned.into_inner().clone();
+            g.worker_panicked = true;
+            g
+        }
+    };
     g.elapsed_s = started.elapsed().as_secs_f64();
     g
 }
@@ -256,7 +302,7 @@ mod tests {
     use std::net::TcpListener;
 
     fn stats(lat: &[u64], ok: u64, fail: u64, elapsed: f64) -> GenStats {
-        GenStats { ok, fail, elapsed_s: elapsed, latencies_us: lat.to_vec() }
+        GenStats { ok, fail, elapsed_s: elapsed, latencies_us: lat.to_vec(), worker_panicked: false }
     }
 
     // The percentile convention must match the Go generator EXACTLY. A one-index difference is a
