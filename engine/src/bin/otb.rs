@@ -266,6 +266,23 @@ fn main() -> ExitCode {
                 max_conc: env_u32("OTB_MAX_CONC", 512),
                 measured_at: utc_stamp(),
                 arch: std::env::var("BENCH_ARCH").unwrap_or_else(|_| "unknown".into()),
+                // WHICH COMMIT PRODUCED THIS RUN. run-on-ec2.sh resolves it before the box exists
+                // and exports it, because the box cannot work it out for itself: its clone is a
+                // detached checkout and this binary arrived as a release download, so neither the
+                // tree nor the executable knows the revision it came from.
+                //
+                // An unset or empty variable is None, not the empty string: a snapshot must be able
+                // to say "this run cannot be traced" rather than claim a commit named "".
+                engine_stamp: std::env::var("BENCH_ENGINE_COMMIT")
+                    .ok()
+                    .filter(|c| !c.is_empty())
+                    .map(|commit| otb_engine::record::EngineStamp {
+                        commit,
+                        // Anything that is not exactly "0" is treated as dirty. A run from a
+                        // modified tree is not identified by its commit, and the safe default for
+                        // an unreadable flag is to mark it unreproducible rather than to claim it.
+                        dirty: std::env::var("BENCH_ENGINE_DIRTY").as_deref() != Ok("0"),
+                    }),
             };
             // LAUNCH IT, if the manifest says how.
             //
