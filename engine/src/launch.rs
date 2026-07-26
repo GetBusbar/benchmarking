@@ -273,7 +273,16 @@ pub enum LaunchError {
     /// Every attempt was spawned and none became ready. `attempts` is how many were made (bounded,
     /// never unbounded); `last_port_state` is the evidence from the final attempt, so a caller can
     /// tell "nothing ever listened" from "something was listening but never answered readiness".
-    NeverReady { attempts: u32, last_port_state: PortState },
+    NeverReady {
+        attempts: u32,
+        last_port_state: PortState,
+        /// What the last attempt's spawn said, when it said anything. A container runtime that
+        /// REFUSES the invocation - a rejected mount, a name in use, a cpuset it will not honour -
+        /// reports it here and nowhere else, and without it every such refusal is indistinguishable
+        /// from a gateway that started and never bound its port. An absent measurement is supposed to
+        /// publish a reason; "never became ready" with nothing behind it is barely one.
+        last_spawn_error: Option<String>,
+    },
 }
 
 impl fmt::Display for LaunchError {
@@ -283,9 +292,13 @@ impl fmt::Display for LaunchError {
             LaunchError::PreLaunchFailed { command, reason } => {
                 write!(f, "pre-launch step {command:?} failed: {reason}")
             }
-            LaunchError::NeverReady { attempts, last_port_state } => {
-                write!(f, "never became ready after {attempts} attempt(s); last port state: {last_port_state:?}")
-            }
+            LaunchError::NeverReady { attempts, last_port_state, last_spawn_error } => match last_spawn_error {
+                Some(why) => write!(
+                    f,
+                    "never became ready after {attempts} attempt(s); last port state: {last_port_state:?}; the runtime refused the launch: {why}"
+                ),
+                None => write!(f, "never became ready after {attempts} attempt(s); last port state: {last_port_state:?}"),
+            },
         }
     }
 }
@@ -364,6 +377,32 @@ impl Launcher for RealLauncher {
 
     fn spawn(&mut self, spec: &LaunchSpec) -> Result<(), String> {
         let inv = build_invocation(spec);
+        // A CONTAINER START IS WAITED ON; A NATIVE GATEWAY IS NOT.
+        //
+        // `docker run -d` returns as soon as the container is created, so its exit status and stderr
+        // are available immediately and are the ONLY place a refusal appears - a rejected mount, a
+        // cpuset the daemon will not honour, a name already in use. Dropping the child made every one
+        // of those look identical to a gateway that started and never bound its port, and the
+        // published absence could name the attempts but not the cause.
+        //
+        // A native gateway IS the child and runs for the whole measurement, so waiting on it would
+        // hang the run forever.
+        if matches!(spec.kind, LaunchKind::Docker { .. }) {
+            let out = Command::new(&inv.program)
+                .args(&inv.args)
+                .output()
+                .map_err(|e| format!("failed to run {}: {e}", inv.program))?;
+            if !out.status.success() {
+                let why = String::from_utf8_lossy(&out.stderr);
+                let why = why.trim();
+                return Err(if why.is_empty() {
+                    format!("{} exited with {}", inv.program, out.status)
+                } else {
+                    why.to_string()
+                });
+            }
+            return Ok(());
+        }
         let mut cmd = Command::new(&inv.program);
         cmd.args(&inv.args).envs(inv.env.iter().cloned());
         // REMOVED BEFORE ADDED, and before the process exists: an inherited variable the target
@@ -424,8 +463,15 @@ pub fn launch_with(
     }
 
     let bounded = attempts.max(1);
+    let mut last_spawn_error = None;
     for attempt in 1..=bounded {
-        let spawned = launcher.spawn(spec).is_ok();
+        let spawned = match launcher.spawn(spec) {
+            Ok(()) => true,
+            Err(why) => {
+                last_spawn_error = Some(why);
+                false
+            }
+        };
         if spawned && launcher.is_ready(spec) {
             return Ok(Launched { runtime: spec.runtime.clone(), attempts: attempt });
         }
@@ -439,7 +485,7 @@ pub fn launch_with(
     }
 
     let last_port_state = launcher.port_snapshot(spec);
-    Err(LaunchError::NeverReady { attempts: bounded, last_port_state })
+    Err(LaunchError::NeverReady { attempts: bounded, last_port_state, last_spawn_error })
 }
 
 #[cfg(test)]
@@ -613,7 +659,10 @@ mod tests {
         fake.port_state = PortState::Free;
         let spec = docker_spec();
         let err = launch_with(&mut fake, &spec, 3, no_sleep).unwrap_err();
-        assert_eq!(err, LaunchError::NeverReady { attempts: 3, last_port_state: PortState::Free });
+        assert_eq!(
+            err,
+            LaunchError::NeverReady { attempts: 3, last_port_state: PortState::Free, last_spawn_error: None }
+        );
         assert_eq!(fake.spawn_calls, 3, "the bound must be respected exactly, not exceeded");
     }
 

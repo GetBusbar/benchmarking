@@ -443,23 +443,37 @@ impl Manifest {
         let ncore = core_count(cores);
         let mut out = String::with_capacity(template.len());
         let mut rest = template;
-        while let Some(open) = rest.find('{') {
-            out.push_str(&rest[..open]);
-            // `{{` is a literal brace. Config formats use braces of their own, and at least one
-            // template documents a URL shape as `{api_base}` in a comment; without an escape the
-            // choice would be between rejecting valid config and silently passing typos through.
-            if rest[open + 1..].starts_with('{') {
+        while let Some(at) = rest.find(['{', '}']) {
+            out.push_str(&rest[..at]);
+            let tail = &rest[at..];
+
+            // A DOUBLED BRACE IS A LITERAL ONE, either way round. Config formats use braces of their
+            // own - one template is JSON and is nothing but braces, another documents a URL shape as
+            // `{api_base}` in a comment - so both halves have to be escapable. Handling only `{{`
+            // rendered `error_map: {}` as `{}}` and the gateway refused to boot on invalid YAML.
+            if let Some(after) = tail.strip_prefix("{{") {
                 out.push('{');
-                rest = &rest[open + 2..];
+                rest = after;
                 continue;
             }
-            let Some(close) = rest[open..].find('}') else {
-                // An unmatched brace is a literal, not a placeholder: a JSON value is allowed to
-                // contain one.
-                out.push_str(&rest[open..]);
+            if let Some(after) = tail.strip_prefix("}}") {
+                out.push('}');
+                rest = after;
+                continue;
+            }
+            // A lone closing brace is content: nothing opened it.
+            if let Some(after) = tail.strip_prefix('}') {
+                out.push('}');
+                rest = after;
+                continue;
+            }
+
+            let Some(close) = tail.find('}') else {
+                // An unmatched opening brace is content too, not a truncated placeholder.
+                out.push_str(tail);
                 return Ok(out);
             };
-            let name = &rest[open + 1..open + close];
+            let name = &tail[1..close];
             let value = match name {
                 "NCORE" => ncore.to_string(),
                 "CORES" => cores.to_string(),
@@ -487,7 +501,7 @@ impl Manifest {
                 }
             };
             out.push_str(&value);
-            rest = &rest[open + close + 1..];
+            rest = &tail[close + 1..];
         }
         out.push_str(rest);
         Ok(out)
@@ -542,7 +556,21 @@ impl Manifest {
                     mounts: mounts
                         .iter()
                         .map(|m| crate::launch::Mount {
-                            host_path: gw_dir.join(&m.host_path).to_string_lossy().into_owned(),
+                            // ABSOLUTE. A container runtime reads a relative source as a named
+                            // VOLUME, not a path, and refuses it: "includes invalid characters for a
+                            // local volume name". Canonicalize where possible so the path is also
+                            // free of `..` and symlinks; fall back to joining if the file is not
+                            // there yet, so the failure is the launch reporting a missing config
+                            // rather than this silently producing a relative path again.
+                            host_path: {
+                                let p = gw_dir.join(&m.host_path);
+                                std::fs::canonicalize(&p)
+                                    .unwrap_or_else(|_| {
+                                        std::env::current_dir().map(|c| c.join(&p)).unwrap_or(p)
+                                    })
+                                    .to_string_lossy()
+                                    .into_owned()
+                            },
                             container_path: m.container_path.clone(),
                             read_only: m.read_only,
                         })
@@ -1023,6 +1051,23 @@ mod real_field_tests {
                 );
             }
         }
+    }
+
+    /// A doubled brace is a literal one, BOTH ways round. Handling only the opening half rendered a
+    /// YAML `error_map: {}` as `{}}`, and the gateway refused to boot on invalid YAML - found by
+    /// running it, not by reading it.
+    #[test]
+    fn a_literal_brace_survives_the_render_intact() {
+        let m = field().values().next().cloned().expect("an entrant");
+        let dir = std::path::Path::new("/gw");
+        let go = |t: &str| m.substitute(t, "0-3", 8000, dir).expect("renders");
+
+        assert_eq!(go("error_map: {{}}"), "error_map: {}");
+        assert_eq!(go("{{\"a\": 1}}"), "{\"a\": 1}");
+        // A placeholder still resolves when it sits beside literal braces.
+        assert_eq!(go("{{port: {MOCK_PORT}}}"), "{port: 8000}");
+        // A lone closing brace is content; nothing opened it.
+        assert_eq!(go("a} b"), "a} b");
     }
 
     #[test]

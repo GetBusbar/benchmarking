@@ -408,6 +408,8 @@ mod tests {
             sweep_duration_s: 1,
             probe_timeout: std::time::Duration::from_millis(1),
             load_cores: None,
+            static_headers: Vec::new(),
+            egress_headers: Default::default(),
             runtime: crate::manifest::Runtime::Native { proc_match: "test-fixture".into() },
         }
     }

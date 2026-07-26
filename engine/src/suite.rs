@@ -33,6 +33,11 @@ pub struct SuiteConfig {
     /// Stamped into the artifact so a number can always be traced to the engine that produced it.
     pub measured_at: String,
     pub arch: String,
+    /// The gateway's own directory, for resolving its config templates and mounts.
+    pub gw_dir: std::path::PathBuf,
+    /// The CPU list the GATEWAY is pinned to. Distinct from the generator's: the split is the
+    /// comparability basis.
+    pub gw_cores: String,
     /// The CPU list the load generator is pinned to. The gateway, the generator and the mock each
     /// get their own cores, and that split is what makes two gateways comparable at all.
     pub load_cores: Option<String>,
@@ -75,6 +80,8 @@ fn rig_ceiling(cfg: &SuiteConfig, dialect: Dialect, at_conc: u32) -> Measurement
         // The reference drives the MOCK directly: there is no gateway process behind it, so the
         // identity here must not be the gateway's. Naming the gateway would let a memory reader
         // attribute the gateway's tree to a run that never touched it.
+        static_headers: Vec::new(),
+        egress_headers: Default::default(),
         runtime: crate::manifest::Runtime::Native { proc_match: String::new() },
     };
     let id = crate::cell::CellId::new(dialect.as_str(), dialect.as_str());
@@ -254,6 +261,8 @@ fn qualify_box(cfg: &SuiteConfig, history: &[f64]) -> serde_json::Value {
         probe_timeout: Duration::from_secs(10),
         load_cores: cfg.load_cores.clone(),
         // No gateway is in this path at all, so there is no gateway process to attribute anything to.
+        static_headers: Vec::new(),
+        egress_headers: Default::default(),
         runtime: crate::manifest::Runtime::Native { proc_match: String::new() },
     };
     let id = crate::cell::CellId::new(Dialect::Openai.as_str(), Dialect::Openai.as_str());
@@ -321,6 +330,25 @@ pub fn run_suite_with(
         sweep_duration_s: cfg.sweep_duration_s,
         probe_timeout: Duration::from_secs(10),
         load_cores: cfg.load_cores.clone(),
+        // The gateway's own headers, resolved once for the run. A column whose headers cannot be
+        // resolved gets NONE rather than a partial set: sending half a routing header selects the
+        // wrong upstream and publishes a number for a pairing that was never driven.
+        static_headers: cfg
+            .manifest
+            .headers_for("", &cfg.gw_cores, cfg.mock_addr.port(), &cfg.gw_dir)
+            .unwrap_or_default(),
+        egress_headers: cfg
+            .dialects
+            .iter()
+            .filter_map(|d| {
+                let mut h = cfg.manifest.headers_for(d.as_str(), &cfg.gw_cores, cfg.mock_addr.port(), &cfg.gw_dir).ok()?;
+                // headers_for prepends the always-on set; the run config carries those separately, so
+                // strip them here rather than sending each one twice.
+                let statics = cfg.manifest.headers_for("", &cfg.gw_cores, cfg.mock_addr.port(), &cfg.gw_dir).ok()?;
+                h.retain(|x| !statics.contains(x));
+                Some((d.as_str().to_string(), h))
+            })
+            .collect(),
         runtime: cfg.manifest.runtime.clone(),
     };
 
@@ -456,6 +484,8 @@ mod tests {
 
     fn cfg_for(dir: &Path, mock: SocketAddr) -> SuiteConfig {
         SuiteConfig {
+            gw_dir: std::path::PathBuf::from("."),
+            gw_cores: "0-3".into(),
             manifest: Manifest {
                 name: "gw".into(),
                 display: "GW".into(),
