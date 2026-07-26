@@ -579,17 +579,16 @@ mod tests {
 
     // Only the openai and anthropic paths synthesise a stream; the others answer their normal JSON
     // even when asked to stream, and the harness records that as untestable rather than measuring
-    // it. This pairing (a streamable body plus a stream request) is what the handler keys off, so it
-    // is pinned here where it can be checked without standing up a server.
+    // it. The handler decides by asking whether the body it picked is the openai or the anthropic
+    // one, so which paths select those two bodies is the whole of the streaming routing, and it is
+    // pinned here where it can be checked without standing up a server.
     #[test]
-    fn only_the_openai_and_anthropic_paths_have_a_streamable_body() {
-        assert!(std::ptr::eq(body_for("/v1/chat/completions"), OPENAI));
-        assert!(std::ptr::eq(body_for("/v1/messages"), ANTHROPIC));
+    fn exactly_the_openai_and_anthropic_paths_select_a_streamable_body() {
+        assert_eq!(body_for("/v1/chat/completions"), OPENAI);
+        assert_eq!(body_for("/v1/messages"), ANTHROPIC);
         for path in ["/v1beta/models/m:generateContent", "/model/m/converse", "/v2/chat", "/v1/responses"] {
-            assert!(
-                !std::ptr::eq(body_for(path), OPENAI) && !std::ptr::eq(body_for(path), ANTHROPIC),
-                "{path} must not be answered with a streamable body"
-            );
+            assert_ne!(body_for(path), OPENAI, "{path} must not be answered with a streamable body");
+            assert_ne!(body_for(path), ANTHROPIC, "{path} must not be answered with a streamable body");
         }
     }
 
