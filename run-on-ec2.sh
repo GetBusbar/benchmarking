@@ -775,27 +775,29 @@ bench_gateway_once() {
       export CAP_MIB=24000
       export SUITES=\"$ALL_SUITES\"
       sudo -n true 2>/dev/null && sudo chmod 666 /var/run/docker.sock || true
-      # Build the engine from the cloned commit. Release, because a debug build measures the harness.
+      # PULL THE RIG. Nothing is built here.
       #
-      # The workspace .cargo/config.toml pins rust-lld for aarch64-unknown-linux-gnu so the engine can
-      # be CROSS-COMPILED from a mac, where Apple ld rejects GNU linker flags. Here the build is
-      # NATIVE and rust-lld cannot find libgcc_s, so the setting written to make this target buildable
-      # is what stops it building ON that target. An env var beats the config file.
-      export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=cc
-      # NOT truncated. Piping this to tail -3 discarded the linker error and left only
-      # \"could not compile\", which is the discard-the-evidence mistake this harness keeps finding.
-      cargo build --release --bin otb 2>&1 | tail -40
-      if [ ! -x target/release/otb ]; then
-        echo engine build FAILED - refusing to measure
+      # The engine, the mock and the load generator are all prebuilt by CI for this arch and
+      # published to the rolling `rig` release, so a bench box is a bare OS plus docker. That is what
+      # makes every box identical, and it is why the box installs no toolchain: a build on the box is
+      # a difference between boxes, and every difference between boxes is a difference in the numbers.
+      #
+      # The only thing that ever builds here is a gateway with no official artifact for this arch,
+      # and that is the gateway's own business, done before the memory baseline is taken.
+      source lib/rig.sh
+      fetch_rig "$PWD" || { echo rig fetch FAILED; echo 126 > .run-done; exit 0; }
+      # rig.sh puts what it fetches in bin/; the run invokes ./otb.
+      curl -fsSL -o ./otb "https://github.com/GetBusbar/benchmarking/releases/download/rig/otb-$ARCH" 2>/dev/null && chmod +x ./otb
+      if [ ! -x ./otb ]; then
+        echo engine binary not in the rig release - CI must publish otb for this arch
         echo 126 > .run-done
         exit 0
       fi
-      cp target/release/otb ./otb
       # THE MOCK RUNS PINNED, IN ITS OWN PROCESS, on its own cores. The three-way split - gateway
       # 0-3, load generator 4-9, mock 10-15 - IS the comparability basis of every published number,
       # so a mock sharing cores with either of the others measures a different machine.
       pkill -f bin/mock-arm64 2>/dev/null; sleep 1
-      setsid taskset -c \$MOCKCORES ./bin/mock-arm64 --port 8000 </dev/null >mock.log 2>&1 &
+      setsid taskset -c \$MOCKCORES ./bin/mock-\$ARCH --port 8000 </dev/null >mock.log 2>&1 &
       # Give it a moment to bind, then refuse to measure anything if it did not: every not-served
       # verdict is conditioned on the mock being up, so a run against a dead mock publishes rig
       # failures as gateway capability denials.

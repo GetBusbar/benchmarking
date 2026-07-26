@@ -1,13 +1,14 @@
 name: bench-rig
 
-# Build the bench "rig" — the mock (Rust) + load generator (Go) — for BOTH arches natively, and
+# Build the bench "rig" — the engine (Rust), the mock (Rust) and the load generator (Go) — for BOTH
+# arches natively, and
 # publish them to the rolling `rig` release. The bench boxes then just `curl` the right binary
 # (lib/rig.sh), so they need no build toolchain: bare OS + docker is enough. Runs on any change to
 # the mock or loadgen sources, and on demand.
 on:
   push:
     branches: [main]
-    paths: ["mock/**", "loadgen/**", ".github/workflows/bench-rig.yml"]
+    paths: ["mock/**", "loadgen/**", "engine/**", ".github/workflows/bench-rig.yml"]
   workflow_dispatch:
 
 permissions:
@@ -43,6 +44,15 @@ jobs:
           cargo build --release --manifest-path mock/Cargo.toml
           cp mock/target/release/mock "mock-${{ matrix.arch }}"
 
+      - name: Build the engine (Rust, native ${{ matrix.arch }})
+        run: |
+          # NATIVE, on a runner of the target arch, for the same reason the mock is: the workspace
+          # .cargo/config.toml pins rust-lld so the engine can be CROSS-compiled from a mac, and that
+          # pin cannot find libgcc_s when the build is native. Building it here means a bench box
+          # never needs a toolchain - bare OS plus docker, which is what keeps every box identical.
+          cargo build --release --bin otb
+          cp target/release/otb "otb-${{ matrix.arch }}"
+
       - name: Build loadgen (Go, ${{ matrix.arch }})
         run: |
           GOOS=linux GOARCH=${{ matrix.goarch }} CGO_ENABLED=0 go build -ldflags="-s -w" \
@@ -55,4 +65,4 @@ jobs:
           gh release view rig >/dev/null 2>&1 || \
             gh release create rig --title "bench-rig binaries (rolling latest)" \
               --notes "Prebuilt mock (Rust) + loadgen (Go) for the bench boxes. Rebuilt by bench-rig.yml."
-          gh release upload rig --clobber "mock-${{ matrix.arch }}" "ugen-${{ matrix.arch }}"
+          gh release upload rig --clobber "mock-${{ matrix.arch }}" "ugen-${{ matrix.arch }}" "otb-${{ matrix.arch }}"
