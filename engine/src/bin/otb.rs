@@ -307,6 +307,55 @@ fn main() -> ExitCode {
                 }
             }
         }
+        // Check a gateway's setup without running anything, and say everything that is wrong.
+        Some("validate") => {
+            use otb_engine::manifest::Manifest;
+            let targets: Vec<std::path::PathBuf> = if args.len() > 1 {
+                args[1..].iter().map(std::path::PathBuf::from).collect()
+            } else {
+                // No argument: check the whole field, which is what CI wants.
+                let mut all: Vec<_> = std::fs::read_dir("gateways")
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                    .map(|e| e.path())
+                    .filter(|p| p.join("definition.json").is_file())
+                    .collect();
+                all.sort();
+                all
+            };
+            if targets.is_empty() {
+                eprintln!("no gateways found. usage: otb validate [gateways/<name> ...]");
+                return ExitCode::from(2);
+            }
+
+            let mut bad = 0usize;
+            for dir in &targets {
+                let name = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                match Manifest::load(dir) {
+                    Err(e) => {
+                        println!("{name}: FAIL");
+                        println!("  {e}");
+                        bad += 1;
+                    }
+                    Ok(m) => {
+                        let problems = m.problems(dir);
+                        if problems.is_empty() {
+                            println!("{name}: ok");
+                        } else {
+                            println!("{name}: {} problem(s)", problems.len());
+                            for p in &problems {
+                                println!("  {p}");
+                            }
+                            bad += 1;
+                        }
+                    }
+                }
+            }
+            println!();
+            println!("{} of {} gateways are ready to run", targets.len() - bad, targets.len());
+            if bad == 0 { ExitCode::SUCCESS } else { ExitCode::FAILURE }
+        }
         Some("version") => {
             println!("{}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
