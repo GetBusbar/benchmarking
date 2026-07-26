@@ -33,6 +33,16 @@ pub struct SuiteConfig {
     /// Stamped into the artifact so a number can always be traced to the engine that produced it.
     pub measured_at: String,
     pub arch: String,
+    /// WHICH COMMIT PRODUCED THIS RUN. Resolved orchestrator-side (the box's clone is checked out at
+    /// a detached commit and the engine binary is a download, so neither can work it out on the box)
+    /// and handed in like `arch` is, rather than read from the environment down here: the snapshot
+    /// writer stays a pure function of its config, which is what lets the tests assert on it.
+    ///
+    /// `None` when the harness could not identify itself, and that is published as a literal null.
+    /// The alternative - omitting the key - would make "this run is not reproducible" look exactly
+    /// like "this artifact predates provenance", and the whole point of the stamp is telling those
+    /// two apart when two runs disagree.
+    pub engine_stamp: Option<crate::record::EngineStamp>,
     /// The gateway's own directory, for resolving its config templates and mounts.
     pub gw_dir: std::path::PathBuf,
     /// The CPU list the GATEWAY is pinned to. Distinct from the generator's: the split is the
@@ -427,10 +437,16 @@ fn flush(
     any_served: bool,
     box_qualify: Option<serde_json::Value>,
 ) -> Result<Paths, SnapshotError> {
-    let rig = box_qualify.map(|v| crate::record::RigProvenance {
-        arch: Some(cfg.arch.clone()),
-        box_qualify: Some(v),
-        ..Default::default()
+    // The rig block exists if ANY part of it does. Keying it solely off box_qualify, as it used to,
+    // meant a run with no qualification file dropped the engine commit on the floor with it: the two
+    // are independent facts about the instrument and one must not be able to suppress the other.
+    let rig = (box_qualify.is_some() || cfg.engine_stamp.is_some()).then(|| {
+        crate::record::RigProvenance {
+            arch: Some(cfg.arch.clone()),
+            engine: cfg.engine_stamp.clone(),
+            box_qualify,
+            ..Default::default()
+        }
     });
     let snap = ResultSnapshot {
         schema_version: 1,
@@ -513,6 +529,7 @@ mod tests {
             max_conc: 2,
             measured_at: "2026-07-26T00-00-00Z".into(),
             arch: "arm64".into(),
+            engine_stamp: None,
             load_cores: None,
         }
     }
@@ -536,6 +553,31 @@ mod tests {
         assert_eq!(back.gateway, "gw");
         assert!(back.matrix.served, "a 2xx gateway serves its diagonal");
         assert!(paths.historical.exists(), "the timestamped copy must land too");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // A number that cannot be traced to the code that produced it is not evidence. The engine used
+    // to build the rig block solely from the box-qualification file, so the commit never reached the
+    // artifact at all: the first real EC2 run wrote a snapshot whose rig.engine was null even though
+    // the orchestrator had exported BENCH_ENGINE_COMMIT to the box.
+    //
+    // Note the box_qualify: None here. That is the half that was actually broken - the stamp has to
+    // survive on a run that carries no qualification, because the two are independent facts about
+    // the instrument and neither may suppress the other.
+    #[test]
+    fn the_commit_that_produced_a_run_reaches_the_artifact_without_a_box_qualification() {
+        let dir = tmpdir("stamp");
+        let gw = serve(200);
+        let mut cfg = cfg_for(&dir, gw);
+        cfg.engine_stamp = Some(crate::record::EngineStamp { commit: "deadbeef".into(), dirty: true });
+        let up = HashMap::new();
+        let paths = flush(&cfg, &up, false, None).expect("the snapshot should write");
+        let text = std::fs::read_to_string(&paths.current).expect("current file");
+        let back: ResultSnapshot = serde_json::from_str(&text).expect("its own output must parse");
+        let rig = back.rig.expect("a run with a commit must carry a rig block");
+        let eng = rig.engine.expect("rig.engine must survive with no box qualification beside it");
+        assert_eq!(eng.commit, "deadbeef");
+        assert!(eng.dirty, "a dirty tree must be published as dirty, not quietly cleaned");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
