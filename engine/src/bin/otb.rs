@@ -149,7 +149,6 @@ fn main() -> ExitCode {
         // The whole suite for one gateway: probe the grid, sweep what is served, judge each peak
         // against the rig at the same operating point, and write the snapshot.
         Some("run") => {
-            use otb_engine::ingress::Dialect;
             use otb_engine::manifest::Manifest;
             use otb_engine::suite::{run_suite, SuiteConfig};
             let Some(manifest_path) = args.get(1) else {
@@ -226,16 +225,13 @@ fn main() -> ExitCode {
             // one. That is not only a convenience: an end-to-end run that cannot be shrunk cannot be
             // tested, and this entry point had no test at all. A field run passes nothing here and
             // gets the same defaults as before.
-            let dialects = match std::env::var("OTB_DIALECTS") {
-                Ok(list) => {
-                    let parsed: Vec<Dialect> = list.split(',').filter_map(|d| d.trim().parse().ok()).collect();
-                    if parsed.is_empty() {
-                        eprintln!("OTB_DIALECTS={list:?} named no dialect this build knows");
-                        return ExitCode::from(2);
-                    }
-                    parsed
+            let raw_dialects = std::env::var("OTB_DIALECTS").ok();
+            let dialects = match otb_engine::ingress::dialects_from(raw_dialects.as_deref()) {
+                Ok(d) => d,
+                Err(e) => {
+                    eprintln!("{e}");
+                    return ExitCode::from(2);
                 }
-                Err(_) => Dialect::ALL.to_vec(),
             };
             let env_u32 = |k: &str, d: u32| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
             let gw_dir = dir.clone();
