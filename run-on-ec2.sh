@@ -776,62 +776,93 @@ bench_gateway_once() {
   # self-terminated mid-run (a heavy matrix sweep outliving the box timer), the ssh died and ALL SEVEN
   # already-written suite JSONs were forfeited, not just the in-flight one. Detaching lets us stream each
   # suite's result OFF-box as run-all.sh writes it, so a late box death loses at most the running suite.
-  ssh $SSHOPT ubuntu@"$ip" "cd ~/benchmarking && rm -f .run-done .run.log && \
-    setsid nohup bash -lc '
-      source ~/.cargo/env 2>/dev/null || true
-      export BENCH_HARDWARE=\"$HW_LABEL\"
-      export BENCH_ARCH=\"$ARCH\"
-      export BENCH_ENGINE_COMMIT=\"$BENCH_ENGINE_COMMIT\" BENCH_ENGINE_DIRTY=\"$BENCH_ENGINE_DIRTY\"
-      export CORES=0-3 LOADCORES=4-9 MOCKCORES=10-15
-      export CAP_MIB=24000
-      export SUITES=\"$ALL_SUITES\"
-      # Narrow the grid for HARNESS iteration. The grid is dialects x dialects, so one dialect is one
-      # cell and a debugging run costs seconds instead of the full 6x6. Unset for a real run, which is
-      # what a field measurement always uses.
-      export OTB_DIALECTS=\"${OTB_DIALECTS:-}\" OTB_MIN_CONC=\"${OTB_MIN_CONC:-}\" OTB_MAX_CONC=\"${OTB_MAX_CONC:-}\"
-      sudo -n true 2>/dev/null && sudo chmod 666 /var/run/docker.sock || true
-      # PULL THE RIG. Nothing is built here.
-      #
-      # The engine, the mock and the load generator are all prebuilt by CI for this arch and
-      # published to the rolling `rig` release, so a bench box is a bare OS plus docker. That is what
-      # makes every box identical, and it is why the box installs no toolchain: a build on the box is
-      # a difference between boxes, and every difference between boxes is a difference in the numbers.
-      #
-      # The only thing that ever builds here is a gateway with no official artifact for this arch,
-      # and that is a matter for the gateway itself, done before the memory baseline is taken.
-      source lib/rig.sh
-      fetch_rig "$PWD" || { echo rig fetch FAILED; echo 126 > .run-done; exit 0; }
-      # rig.sh puts what it fetches in bin/; the run invokes ./otb.
-      # BENCH_ARCH, not ARCH. ARCH belongs to the orchestrator and is not exported to the box.
-      # Unset here it made the URL end in "otb-", which 404s, so the run died on its own sentinel
-      # with no clue which of the two things it fetches had failed.
-      curl -fsSL -o ./otb \"https://github.com/GetBusbar/benchmarking/releases/download/rig/otb-\$BENCH_ARCH\" && chmod +x ./otb
-      if [ ! -x ./otb ]; then
-        echo engine binary not fetched: otb-\$BENCH_ARCH missing from the rig release
-        echo 126 > .run-done
-        exit 0
-      fi
-      # THE MOCK RUNS PINNED, IN ITS OWN PROCESS, on its own cores. The three-way split - gateway
-      # 0-3, load generator 4-9, mock 10-15 - IS the comparability basis of every published number,
-      # so a mock sharing cores with either of the others measures a different machine.
-      pkill -f bin/mock-arm64 2>/dev/null; sleep 1
-      setsid taskset -c \$MOCKCORES ./bin/mock-\$BENCH_ARCH --port 8000 </dev/null >mock.log 2>&1 &
-      # Give it a moment to bind, then refuse to measure anything if it did not: every not-served
-      # verdict is conditioned on the mock being up, so a run against a dead mock publishes rig
-      # failures as gateway capability denials.
-      for i in \$(seq 1 30); do
-        curl -s -m2 -o /dev/null -X POST 127.0.0.1:8000/v1/chat/completions \
-          -H "content-type: application/json" -d "{}" && break
-        sleep 1
-      done
-      # Refuse the run outright if the setup is wrong, rather than discovering it as a gateway that
-      # will not boot after the box-hours are already spent.
-      ./otb validate gateways/\$gw || { echo 127 > .run-done; exit 0; }
-      OTB_GW_CORES=\$CORES LOADCORES=\$LOADCORES \
-        ./otb run gateways/\$gw 127.0.0.1:8000 results/snapshots
-      echo \$? > .run-done
-    ' > .run.log 2>&1 < /dev/null &" >>"$glog" 2>&1
+  # THE REMOTE SCRIPT IS UPLOADED, NOT INTERPOLATED.
+  #
+  # It used to be a double-quoted ssh argument wrapping a single-quoted `bash -lc '...'`, so the
+  # ORCHESTRATOR expanded the body before the box ever saw it. That cost three separate EC2 runs, and
+  # every one of them was PROSE IN A COMMENT doing it:
+  #   - an apostrophe closed the single quote, and the rest of the comment ran on the orchestrator;
+  #   - a backtick pair around a word ran that word as a local command ("rig: command not found");
+  #   - `$PWD` resolved to the ORCHESTRATOR's path, so the box ran `mkdir -p /Users/matthew/...`,
+  #     which it has no permission to do, and every rig download then failed with curl(23) "failure
+  #     writing output to destination" - a fetch error that was really a write error two layers down.
+  # A comment must not be able to break the program it documents. So the body below is a QUOTED
+  # heredoc - nothing in it expands, ever - the orchestrator's values are prepended as a printf %q
+  # export preamble, and the finished script is written to the box and then launched detached.
+  local _run_sh
+  _run_sh="$(
+    printf 'export BENCH_HARDWARE=%q BENCH_ARCH=%q\n' "$HW_LABEL" "$ARCH"
+    printf 'export BENCH_ENGINE_COMMIT=%q BENCH_ENGINE_DIRTY=%q\n' "$BENCH_ENGINE_COMMIT" "$BENCH_ENGINE_DIRTY"
+    printf 'export SUITES=%q\n' "$ALL_SUITES"
+    # Narrow the grid for HARNESS iteration. The grid is dialects x dialects, so one dialect is one
+    # cell and a debugging run costs seconds instead of the full 6x6. Unset for a real run, which is
+    # what a field measurement always uses.
+    printf 'export OTB_DIALECTS=%q OTB_MIN_CONC=%q OTB_MAX_CONC=%q\n' \
+      "${OTB_DIALECTS:-}" "${OTB_MIN_CONC:-}" "${OTB_MAX_CONC:-}"
+    # gw is the orchestrator's loop variable and is NOT otherwise exported to the box; it used to be
+    # written `\$gw`, which reached the box as an unset name, so the run validated `gateways/`.
+    printf 'gw=%q\n' "$gw"
+    cat <<'REMOTE'
+# Every relative path below is relative to the repo, so anchor it rather than inheriting a cwd from
+# the login shell that starts this script.
+cd ~/benchmarking || exit 1
+source ~/.cargo/env 2>/dev/null || true
+export CORES=0-3 LOADCORES=4-9 MOCKCORES=10-15
+export CAP_MIB=24000
+sudo -n true 2>/dev/null && sudo chmod 666 /var/run/docker.sock || true
+# PULL THE RIG. Nothing is built here.
+#
+# The engine, the mock and the load generator are all prebuilt by CI for this arch and published to
+# the rolling rig release, so a bench box is a bare OS plus docker. That is what makes every box
+# identical, and it is why the box installs no toolchain: a build on the box is a difference between
+# boxes, and every difference between boxes is a difference in the numbers.
+#
+# The only thing that ever builds here is a gateway with no official artifact for this arch, and
+# that is a matter for the gateway itself, done before the memory baseline is taken.
+source lib/rig.sh
+fetch_rig "$PWD" || { echo rig fetch FAILED; echo 126 > .run-done; exit 0; }
+# rig.sh puts what it fetches in bin/; the run invokes ./otb. RIG_URL comes from rig.sh, so the
+# engine is fetched from the same release the rest of the rig came from, named once.
+#
+# BENCH_ARCH, not ARCH. ARCH belongs to the orchestrator and is not exported to the box. Unset here
+# it made the URL end in "otb-", which 404s, so the run died on its own sentinel with no clue which
+# of the two things it fetches had failed.
+curl -fsSL -o ./otb "$RIG_URL/otb-$BENCH_ARCH" && chmod +x ./otb
+if [ ! -x ./otb ]; then
+  echo "engine binary not fetched: otb-$BENCH_ARCH missing from the rig release"
+  echo 126 > .run-done
+  exit 0
+fi
+# THE MOCK RUNS PINNED, IN ITS OWN PROCESS, on its own cores. The three-way split - gateway 0-3,
+# load generator 4-9, mock 10-15 - IS the comparability basis of every published number, so a mock
+# sharing cores with either of the others measures a different machine.
+pkill -f "bin/mock-$BENCH_ARCH" 2>/dev/null; sleep 1
+setsid taskset -c $MOCKCORES ./bin/mock-$BENCH_ARCH --port 8000 </dev/null >mock.log 2>&1 &
+# Give it a moment to bind, then refuse to measure anything if it did not: every not-served verdict
+# is conditioned on the mock being up, so a run against a dead mock publishes rig failures as
+# gateway capability denials.
+for i in $(seq 1 30); do
+  curl -s -m2 -o /dev/null -X POST 127.0.0.1:8000/v1/chat/completions \
+    -H "content-type: application/json" -d "{}" && break
+  sleep 1
+done
+# Refuse the run outright if the setup is wrong, rather than discovering it as a gateway that will
+# not boot after the box-hours are already spent.
+./otb validate "gateways/$gw" || { echo 127 > .run-done; exit 0; }
+OTB_GW_CORES=$CORES LOADCORES=$LOADCORES \
+  ./otb run "gateways/$gw" 127.0.0.1:8000 results/snapshots
+echo $? > .run-done
+REMOTE
+  )"
+  printf '%s\n' "$_run_sh" | ssh $SSHOPT ubuntu@"$ip" "cat > ~/benchmarking/.run.sh" >>"$glog" 2>&1
   local launch_rc=$?
+  if [ "$launch_rc" -eq 0 ]; then
+    ssh $SSHOPT ubuntu@"$ip" "cd ~/benchmarking && rm -f .run-done .run.log && \
+      setsid nohup bash -l .run.sh > .run.log 2>&1 < /dev/null &" >>"$glog" 2>&1
+    launch_rc=$?
+  else
+    glog_echo "could not upload the remote run script to the box"
+  fi
   local run_failed=0
   if [ "$launch_rc" -ne 0 ]; then
     glog_echo "detached otb launch FAILED (ssh rc=$launch_rc) - could not start the remote run"
