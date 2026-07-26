@@ -2432,11 +2432,14 @@ function renderCharts() {
 /* ---- method links + footer -------------------------------------------------- */
 function renderStatic() {
   const repo = state.data.repo || "https://github.com/GetBusbar/benchmarking";
-  // The matrix is the SOLE producer now: latency/throughput/streaming/memory all come from matrix/run.sh.
-  // Both method links (the matrix card + the memory card) point at it; a missing id is skipped.
-  for (const id of ["matrix", "memory"]) {
+  // Both method links used to point at matrix/run.sh. That file was deleted when the shell suites were
+  // retired and the engine took over every measurement, so both links 404'd: the methodology page was
+  // inviting a sceptical reader to check the work and handing them a dead link. They now point at what
+  // actually produces the numbers - the orchestrator that drives a run, and the engine that measures.
+  const PRODUCERS = { matrix: "run-on-ec2.sh", memory: "engine/src/metric.rs" };
+  for (const [id, path] of Object.entries(PRODUCERS)) {
     const a = document.getElementById(`lnk-${id}`);
-    if (a) a.href = `${repo}/blob/main/matrix/run.sh`;
+    if (a) a.href = `${repo}/blob/main/${path}`;
   }
   document.getElementById("repo-link").href = repo;
   const hw = document.getElementById("hw-stamp");

@@ -228,6 +228,40 @@ pub const MEMORY_WINDOW_CONCURRENCY: u32 = 32;
 /// How often the resident-memory sampler reads the tree during the window.
 const MEMORY_SAMPLE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
 
+/// LOAD RUNS UNTIL MEMORY STOPS MOVING, NOT FOR A FIXED TIME.
+///
+/// A fixed window reports where memory happened to be when we stopped watching. If a gateway is
+/// still climbing when the window ends, its "peak" is a property of our stopwatch rather than of the
+/// gateway, and two gateways that settle at different speeds are compared at different points on
+/// their own curves. Running until the trailing window is flat measures the same THING on every
+/// entrant: where it actually levels off.
+///
+/// The three-way verdict is why this is worth doing at all. `Steady` is a settled number.
+/// `NotSteady` carries the growth rate, so a gateway that never levels off is published as exactly
+/// that, with how fast it climbed, which is a more useful finding than any peak. `Undecidable` means
+/// too few samples to judge, which is deliberately NOT the same claim as "it moved".
+///
+/// The cap is not a fallback, it is the whole reason a leak terminates: a gateway that never settles
+/// would otherwise run forever. Hitting it is a result (`NotSteady`), never an error.
+pub const MEMORY_PLATEAU_WINDOW_S: f64 = 60.0;
+pub const MEMORY_MAX_LOAD_S: u64 = 300;
+
+/// AND THEN WATCH IT FOR A MINUTE WITH THE LOAD GONE.
+///
+/// Peak answers what a gateway costs while working. It does not answer whether it gives any of that
+/// back, and those are different questions about a service that will run for months. A gateway that
+/// climbs to 120 MiB and returns to 8 is a different proposition from one that climbs to 120 and
+/// stays there, and a peak alone cannot tell them apart.
+///
+/// So load stops, sampling continues for this long, and the trailing reading is published as
+/// recovered. The same 60 seconds as the settle window, so the two halves of the curve are directly
+/// comparable to a reader.
+pub const MEMORY_RECOVERY_S: u64 = 60;
+/// Percent the trailing window's two halves may differ by, and percent spread within it, before the
+/// window counts as still moving. The values the shell suite used, kept so the two agree.
+const MEMORY_TREND_PCT: f64 = 1.0;
+const MEMORY_RANGE_PCT: f64 = 2.0;
+
 /// Memory: what the gateway's process tree costs at rest and under load.
 ///
 /// FOUR READINGS OF ONE WINDOW, which is why this is a group. Taking idle from one window and peak
@@ -245,7 +279,16 @@ impl Metric for Memory {
     }
 
     fn fields(&self) -> &'static [&'static str] {
-        &["memory_idle_mib", "memory_peak_mib", "memory_hwm_mib"]
+        &[
+            "memory_idle_mib",
+            "memory_peak_mib",
+            "memory_hwm_mib",
+            "memory_recovered_mib",
+            "memory_growth_rate_mib_per_min",
+            "memory_load_s",
+            "memory_plateaued",
+            "memory_time_to_plateau_s",
+        ]
     }
 
     fn measure(&self, ctx: &CellCtx<'_>) -> Measured {
@@ -326,7 +369,7 @@ impl Metric for Memory {
         // reading away, so `rss_series` published empty on every cell and the peak was a number with
         // no curve behind it. Whether memory climbed and plateaued or spiked once is the difference
         // between a leak and a burst, and neither is visible from a single scalar.
-        let series = std::sync::Arc::new(std::sync::Mutex::new(Vec::<crate::record::RssSample>::new()));
+        let series = std::sync::Arc::new(std::sync::Mutex::new(Vec::<crate::stats::Sample>::new()));
         let sampler = {
             let stop = std::sync::Arc::clone(&stop);
             let peak_seen = std::sync::Arc::clone(&peak_seen);
@@ -339,10 +382,11 @@ impl Metric for Memory {
                             *p = p.max(v);
                         }
                         if let Ok(mut s) = series.lock() {
-                            s.push(crate::record::RssSample {
-                                t_s: started.elapsed().as_secs() as i64,
-                                rss_mib: Measurement::Measured(v),
-                            });
+                            // Sub-second precision internally. The published series carries whole
+                            // seconds, but the plateau test compares the two halves of a trailing
+                            // window, and at ten readings a second a truncated stamp would put them
+                            // all in the same bucket and make the trend meaningless.
+                            s.push(crate::stats::Sample::new(started.elapsed().as_secs_f64(), v));
                         }
                     }
                     std::thread::sleep(MEMORY_SAMPLE_INTERVAL);
@@ -352,14 +396,56 @@ impl Metric for Memory {
 
         let path = ctx.dialect.path(&ctx.cfg.model);
         let body = ctx.dialect.body(&ctx.cfg.model);
-        let ran = crate::run::load_window(ctx.cfg, &path, &body, MEMORY_WINDOW_CONCURRENCY);
+
+        // ── LOAD UNTIL IT STOPS MOVING ───────────────────────────────────────────────────────────
+        //
+        // Repeated windows rather than one long one, because the plateau test needs to be asked
+        // between windows: a single fixed window can only ever report where memory was when the
+        // clock ran out. The loop ends when the trailing minute is flat, or at the cap, and the cap
+        // being reached is a RESULT (the gateway never settled) rather than a failure.
+        let load_started = std::time::Instant::now();
+        let mut ran = None;
+        let mut verdict = crate::stats::Verdict::Undecidable;
+        let mut settled_at = None;
+        loop {
+            let w = crate::run::load_window(ctx.cfg, &path, &body, MEMORY_WINDOW_CONCURRENCY);
+            // A window that produced nothing means the load never ran. Stop rather than spinning on
+            // a gateway that is not answering; the peak below is then an honest absence.
+            if w.is_none() {
+                break;
+            }
+            ran = w;
+            let taken: Vec<crate::stats::Sample> =
+                series.lock().map(|s| s.clone()).unwrap_or_default();
+            verdict = crate::stats::plateau_check(
+                &taken,
+                MEMORY_PLATEAU_WINDOW_S,
+                MEMORY_TREND_PCT,
+                MEMORY_RANGE_PCT,
+            );
+            if matches!(verdict, crate::stats::Verdict::Steady) {
+                settled_at = Some(load_started.elapsed().as_secs() as i64);
+                break;
+            }
+            if load_started.elapsed().as_secs() >= MEMORY_MAX_LOAD_S {
+                break;
+            }
+        }
+        let load_s = load_started.elapsed().as_secs() as i64;
+
+        // The kernel's high-water mark is read BEFORE the recovery window, while it still describes
+        // the loaded process. It survives the load ending, but reading it here keeps it beside the
+        // peak it belongs to.
+        let hwm = crate::rss::hwm_tree_mib(pid);
+
+        // ── THEN WATCH IT WITH THE LOAD GONE ─────────────────────────────────────────────────────
+        //
+        // The sampler is still running, so this is simply a minute of quiet appended to the same
+        // series. What it shows is whether the gateway hands memory back, which a peak cannot say.
+        std::thread::sleep(std::time::Duration::from_secs(MEMORY_RECOVERY_S));
 
         stop.store(true, std::sync::atomic::Ordering::Relaxed);
         let _ = sampler.join();
-
-        // The kernel's high-water mark is read AFTER the window: it survives the load ending, which
-        // is exactly why it is trustworthy where a poll is not.
-        let hwm = crate::rss::hwm_tree_mib(pid);
 
         let peak = match (ran, peak_seen.lock().ok().map(|p| *p)) {
             // A window that never ran means the peak was never put under load. Publishing the idle
@@ -378,9 +464,69 @@ impl Metric for Memory {
 
         // Take the readings back off the sampler. A poisoned lock means the sampler thread panicked,
         // which is a lost series and not a reason to lose the scalars beside it.
-        let rss = series.lock().map(|s| s.clone()).unwrap_or_default();
+        let taken: Vec<crate::stats::Sample> = series.lock().map(|s| s.clone()).unwrap_or_default();
+
+        // RECOVERED: where the curve ends, after the load has been gone for a minute. Taken from the
+        // trailing recovery window rather than the single last reading, so one sample cannot set it.
+        let recovered = {
+            let cut = taken.last().map(|s| s.t_s).unwrap_or(0.0) - MEMORY_RECOVERY_S as f64 / 2.0;
+            let tail: Vec<f64> = taken.iter().filter(|s| s.t_s >= cut).map(|s| s.mib).collect();
+            crate::stats::median(&tail)
+        };
+        // The plateau verdict, published rather than kept. "Never settled" is a real finding about a
+        // gateway and it must arrive WITH the rate it was climbing at, which is what NotSteady
+        // carries; "we could not tell" stays a third, distinct answer.
+        let (plateaued, growth) = match &verdict {
+            crate::stats::Verdict::Steady => (Some(true), Measurement::Measured(0.0)),
+            crate::stats::Verdict::NotSteady { growth_rate_mib_per_min } => {
+                (Some(false), growth_rate_mib_per_min.clone())
+            }
+            crate::stats::Verdict::Undecidable => (
+                None,
+                Measurement::absent_because(
+                    Absent::NotMeasured,
+                    "too few readings fell inside the settle window to judge whether memory moved"
+                        .to_string(),
+                ),
+            ),
+        };
+        let rss: Vec<crate::record::RssSample> = taken
+            .iter()
+            .map(|s| crate::record::RssSample {
+                t_s: s.t_s as i64,
+                rss_mib: Measurement::Measured(s.mib),
+            })
+            .collect();
         Measured {
-            fields: vec![("memory_idle_mib", idle), ("memory_peak_mib", peak), ("memory_hwm_mib", hwm)],
+            fields: vec![
+                ("memory_idle_mib", idle),
+                ("memory_peak_mib", peak),
+                ("memory_hwm_mib", hwm),
+                ("memory_recovered_mib", recovered),
+                ("memory_growth_rate_mib_per_min", growth),
+                (
+                    "memory_load_s",
+                    Measurement::Measured(load_s as f64),
+                ),
+                (
+                    "memory_plateaued",
+                    match plateaued {
+                        Some(v) => Measurement::Measured(if v { 1.0 } else { 0.0 }),
+                        None => Measurement::absent(Absent::NotMeasured),
+                    },
+                ),
+                (
+                    "memory_time_to_plateau_s",
+                    match settled_at {
+                        Some(t) => Measurement::Measured(t as f64),
+                        None => Measurement::absent_because(
+                            Absent::NotMeasured,
+                            "memory never settled inside the load cap, so there is no time-to-plateau"
+                                .to_string(),
+                        ),
+                    },
+                ),
+            ],
             series: Series { sweep: Vec::new(), rss },
         }
     }
