@@ -169,6 +169,23 @@ fn main() -> ExitCode {
                 eprintln!("manifest {manifest_path} is incomplete: {e}");
                 return ExitCode::FAILURE;
             }
+            // THE CONFIG-NECESSITY GATE, at the only point where refusing still costs nothing.
+            //
+            // The board's fairness rule is that every gateway config is the bare minimum required to
+            // run. A manifest that fails that has not earned a number, and finding out after the run
+            // means the box-hours are already spent and the tempting fix is to publish anyway.
+            //
+            // Defaults are empty for now: there is no per-gateway source of "what this ships with out
+            // of the box" in the tree yet, so the restated-default rule cannot fire. The structural
+            // rules - an unusable key, a duplicate claim - do fire, and this is where they belong.
+            let findings = otb_engine::config_lint::lint(&manifest, &otb_engine::config_lint::Defaults::new());
+            for f in &findings {
+                eprintln!("config lint: {}", f.message);
+            }
+            if otb_engine::config_lint::blocks(&findings) {
+                eprintln!("manifest {manifest_path} does not meet the config-necessity standard; refusing to measure it");
+                return ExitCode::FAILURE;
+            }
             let (Some(gw), Some(mk)) = (
                 args.get(2).and_then(|a| a.parse().ok()),
                 args.get(3).and_then(|a| a.parse().ok()),

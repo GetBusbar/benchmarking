@@ -343,6 +343,66 @@ fn every_module_the_artifact_needs_is_reachable_from_a_real_run() {
     let _ = std::fs::remove_dir_all(&results);
 }
 
+/// THE CONFIG-NECESSITY GATE CAN ACTUALLY FAIL.
+///
+/// `config_lint` was the fourth orphaned module: complete, eleven tests, no callers. Wiring it in is
+/// only worth anything if it can refuse something, and over the real corpus it currently cannot -
+/// every one of the thirteen extracted manifests declares `config: []`, which the lint treats as the
+/// ideal case rather than a violation, so it has nothing to judge. A gate that cannot fire is not a
+/// gate, so this drives a manifest that DOES violate the standard and asserts the run is refused.
+///
+/// Refusing at the entry point is the point: after the run, the box-hours are spent and the tempting
+/// fix is to publish anyway.
+#[test]
+fn a_manifest_that_fails_the_config_standard_is_refused_before_anything_is_measured() {
+    let results = unique_dir("configlint");
+    let manifest = results.join("bad.json");
+    // Two settings claiming the same key: the manifest cannot say which one justifies the config the
+    // gateway actually boots with.
+    std::fs::write(
+        &manifest,
+        r#"{
+          "name": "e2e-bad", "display": "Bad", "lang": "Rust", "class": "t",
+          "repo": "https://example.invalid/e", "port": 1,
+          "path": "/v1/chat/completions", "model": "gpt-4o-mini", "auth": "dummy", "headers": [],
+          "runtime": { "kind": "native", "proc_match": "e2e-fixture" }, "egress": ["openai"],
+          "config": [
+            { "key": "listen.port", "reason": "rig_binding", "note": "8080" },
+            { "key": "listen.port", "reason": "required_to_boot", "note": "9090" }
+          ]
+        }"#,
+    )
+    .expect("write the manifest");
+
+    // A port nothing is listening on: if the gate works, the run is refused before any connection is
+    // attempted, so the address never matters.
+    let output = Command::new(otb())
+        .args([
+            "run",
+            manifest.to_string_lossy().as_ref(),
+            "127.0.0.1:9",
+            "127.0.0.1:9",
+            results.to_string_lossy().as_ref(),
+            "1",
+        ])
+        .env("OTB_DIALECTS", "openai")
+        .output()
+        .expect("the otb binary must run");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "a manifest that fails the standard must not be measured\n{stderr}");
+    assert!(
+        stderr.contains("config lint"),
+        "the refusal must say which rule refused it, not just fail: {stderr}"
+    );
+    assert!(
+        !results.join("e2e-bad.json").exists(),
+        "nothing may be published for a manifest that was refused"
+    );
+
+    let _ = std::fs::remove_dir_all(&results);
+}
+
 /// The upstream flags are asserted, not measured. `suite.rs` hardcodes `configurable: true,
 /// served: true` on every egress row, and `record.rs` names defaulting-to-true as claiming a
 /// capability by omission. Held here so that wiring the launcher's typed failure into the record
