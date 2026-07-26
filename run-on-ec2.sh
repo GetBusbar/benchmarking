@@ -533,6 +533,17 @@ qualify_box() {
 bench_gateway() {
   local gw="$1" attempt rc
   local glog="$HERE/results/fanout-$gw.log"
+  # ONE LOG PER GATEWAY RUN, and it has to hold EVERYTHING.
+  #
+  # glog_echo writes the orchestrator narration here and the box’s own .run.log is appended before
+  # teardown, so the two halves already meet. What escaped was bash’s OWN errors, which go to
+  # stderr rather than through the logger: a quoting mistake in the remote block printed
+  # "line 768: rig: command not found" to the orchestrator terminal, the fanout log looked healthy,
+  # and every run failed identically for an hour before anyone saw it.
+  #
+  # This subshell runs with stderr teed into the same file, so a syntax error, an unbound variable or
+  # a failed command lands beside the narration it belongs to. Losing the box then loses nothing.
+  exec 2> >(tee -a "$glog" >&2)
   for attempt in $(seq 1 "$BENCH_QUALIFY_ATTEMPTS"); do
     bench_gateway_once "$gw" "$attempt"; rc=$?
     [ "$rc" = "$BQ_RC_REPLACE" ] || return "$rc"
