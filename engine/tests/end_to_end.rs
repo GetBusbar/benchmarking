@@ -155,11 +155,13 @@ fn run_engine(results: &Path, manifest: &Path, addr: SocketAddr) -> serde_json::
         .args([
             "run",
             manifest.to_string_lossy().as_ref(),
-            &addr.to_string(),
-            &addr.to_string(),
+            &addr.to_string(), // the mock
             results.to_string_lossy().as_ref(),
             "1", // sweep_duration_s
         ])
+        // The gateway's address normally comes from its declared port. The fixture binds an
+        // ephemeral one, so it is overridden here - which is what the override exists for.
+        .env("OTB_GATEWAY_ADDR", addr.to_string())
         // Keep the run small enough to be a test: one dialect, and a search range of a couple of
         // rungs. Without these the default is 36 cells x a peak search over [4, 512].
         .env("OTB_DIALECTS", "openai")
@@ -380,7 +382,6 @@ fn a_manifest_that_fails_the_config_standard_is_refused_before_anything_is_measu
         .args([
             "run",
             manifest.to_string_lossy().as_ref(),
-            "127.0.0.1:9",
             "127.0.0.1:9",
             results.to_string_lossy().as_ref(),
             "1",
