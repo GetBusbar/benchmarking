@@ -104,9 +104,9 @@ pub enum ManifestError {
     Empty(&'static str),
     BadPort,
     /// A field still carrying a shell variable that was never expanded. These manifests were
-    /// EXTRACTED from shell, where `GW_MODEL="$KONG_MODEL"` is one indirection away from the literal
-    /// it resolves to; extract the wrong side of that and the field holds `$KONG_MODEL` instead of a
-    /// model name. Non-empty, so every existing check passes it.
+    /// EXTRACTED from shell, where one gateway writes `GW_MODEL="$SOME_MODEL"` - one indirection away
+    /// from the literal it resolves to. Extract the wrong side of that and the field holds the
+    /// reference instead of a model name. Non-empty, so every existing check passes it.
     UnexpandedVariable { field: &'static str, raw: String },
     /// A config setting with no stated necessity cannot be lint-checked, so it cannot ship.
     ConfigWithoutReason(String),
@@ -143,8 +143,8 @@ impl Manifest {
         }
 
         // An extraction artefact, not a typo, and the reason it needs its own check: a field holding
-        // `$KONG_MODEL` is non-empty, so every check above passes it, and it survives all the way to
-        // the wire. A model name that is really a shell reference is sent as the request body's model,
+        // an unexpanded reference is non-empty, so every check above passes it, and it survives all
+        // the way to the wire. A model name that is really a shell reference is sent as the request body's model,
         // the gateway rejects it against the model its own route declares, and `probe.rs` classifies
         // any status from a healthy rig as `NotConfigured` - "the gateway answered, deterministically,
         // that this pairing does not light up". The board then publishes OUR extraction bug as that
@@ -278,16 +278,16 @@ mod tests {
         assert_eq!(m.config[0].reason, ConfigReason::RigBinding);
     }
 
-    // The shell manifests are one indirection deep: `KONG_MODEL=gpt-4o-mini` then
-    // `GW_MODEL="$KONG_MODEL"`. Extracting the reference instead of the value yields a field that is
-    // non-empty, parses, and validates under every other rule, then goes out on the wire as a model
-    // name. The corpus shipped exactly this.
+    // The shell manifests are one indirection deep: one gateway sets `SOME_MODEL=gpt-4o-mini` and
+    // then `GW_MODEL="$SOME_MODEL"`. Extracting the reference instead of the value yields a field
+    // that is non-empty, parses, and validates under every other rule, then goes out on the wire as a
+    // model name. The corpus shipped exactly this.
     #[test]
     fn a_field_holding_an_unexpanded_shell_variable_is_rejected() {
-        let m = Manifest { model: "$KONG_MODEL".into(), ..docker_manifest() };
+        let m = Manifest { model: "$SOME_MODEL".into(), ..docker_manifest() };
         assert_eq!(
             m.validate(),
-            Err(ManifestError::UnexpandedVariable { field: "model", raw: "$KONG_MODEL".into() })
+            Err(ManifestError::UnexpandedVariable { field: "model", raw: "$SOME_MODEL".into() })
         );
         assert!(!m.model.trim().is_empty(), "the point: it is non-empty, so the emptiness checks pass it");
 
