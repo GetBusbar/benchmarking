@@ -43,6 +43,15 @@ CREATED_KEY=0; CREATED_SG=0   # only delete the shared key/SG on exit if THIS in
 # above the matrix ceiling, if a gateway ever legitimately needs more than 8 h.
 BENCH_MAX_MIN="${BENCH_MAX_MIN:-480}"
 
+# WHAT THE BOXES MEASURE, resolved ONCE for the whole run.
+#
+# Every box clones this repo at this exact commit. Resolving per box would let a push mid-run split
+# the field across two revisions and publish them beside each other as though they were comparable.
+# The default is the orchestrator's own HEAD, which must be pushed: a commit that exists only here
+# cannot be cloned, and that failure is loud rather than silently measuring something else.
+BENCH_REPO="${BENCH_REPO:-https://github.com/GetBusbar/benchmarking.git}"
+BENCH_COMMIT="${BENCH_COMMIT:-$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse HEAD 2>/dev/null)}"
+
 # ── INCREMENTAL PER-GATEWAY PUBLISH (matrix-sole-source) ──────────────────────────────────────────
 # Each gateway's ENTIRE benchmark is now ONE atomic matrix run, and gateways publish INDEPENDENTLY (the
 # relaxed freshness guard in site/gen-data.mjs no longer hard-fails a board with mixed per-gateway
@@ -653,7 +662,13 @@ bench_gateway_once() {
     # + psutil (the memory suite reads RSS). NO build-essential/rust/go/node here — the mock+loadgen
     # are prebuilt binaries pulled from the rig release, and the 2 source-built gateways pull their
     # own toolchain via gw_prereqs() on their box ALONE. Docker-image gateways are up in ~2 min.
-    sudo apt-get install -y -q docker.io curl ca-certificates jq python3-pip
+    sudo apt-get install -y -q docker.io curl ca-certificates jq python3-pip git build-essential
+    # The engine is BUILT ON THE BOX from the cloned commit, once, before any measurement starts.
+    # It is not shipped from the orchestrator: a binary from a laptop has no provenance, and the
+    # whole point of cloning a revision is that the thing doing the measuring came from it too.
+    # Installed here, at provision time, so no toolchain work happens inside a measurement window -
+    # the same reason the source-built gateways build before the memory baseline is taken.
+    command -v cargo >/dev/null || (curl -sSf https://sh.rustup.rs | sh -s -- -y -q >/dev/null 2>&1)
     sudo usermod -aG docker ubuntu || true
     # FAIRNESS: a container inherits the docker DAEMON fd limit, NOT the host-shell ulimit that
     # perf/run.sh raises for native gateways + the loadgen/mock. Left at the ~1024 default, a
@@ -675,23 +690,26 @@ bench_gateway_once() {
   # Dedicated per-gateway sizecheck dst under a mktemp -d, removed right after we read --stats: the old
   # fixed path (${TMPDIR:-/tmp}/bench-rsync-sizecheck-dst/) was NEVER cleaned, so on macOS /tmp (not
   # cleared on reboot) it accreted the harness skeleton for every gateway x every run (audit R4-LOW-7).
-  local _szdst; _szdst=$(mktemp -d "${TMPDIR:-/tmp}/bench-rsync-sizecheck-XXXXXX")
-  local _pl; _pl=$(rsync -an --stats \
-    --exclude .git --exclude '*/target' --exclude target --exclude results --exclude node_modules \
-    --exclude '*/venv' --exclude venv --exclude __pycache__ --exclude bin --exclude '*.pem' --exclude '*.log' --exclude '.incoming-*' \
-    "$HERE/" "$_szdst/" 2>/dev/null \
-    | awk -F: '/Total file size/{gsub(/[^0-9]/,"",$2); b=$2+0; if(b>=1073741824)printf "%.1fG",b/1073741824; else if(b>=1048576)printf "%.1fM",b/1048576; else if(b>=1024)printf "%.1fK",b/1024; else printf "%dB",b}')
-  rm -rf "$_szdst"
-  glog_echo "rsync harness up (${_pl:-?}) ..."; local _t0=$SECONDS
-  rsync -az --delete -e "ssh $SSHOPT" \
-    --exclude .git --exclude '*/target' --exclude target --exclude results --exclude node_modules \
-    --exclude '*/venv' --exclude venv --exclude __pycache__ --exclude bin --exclude '*.pem' --exclude '*.log' --exclude '.incoming-*' \
-    "$HERE/" ubuntu@"$ip":~/benchmarking/ >>"$glog" 2>&1
-  # bench_gateway runs under `set -uo pipefail` (no errexit), so a transient SSH drop that makes the
-  # UPWARD rsync exit non-zero would otherwise be ignored and "rsync done" logged regardless - leaving
-  # the box running whatever partial/stale harness tree survived from a prior run. Measuring the wrong
-  # code is indistinguishable from a correct run and passes the promote guard. Abort this box instead:
-  # a stale/partial tree must never be measured (audit R4-LOW-4). RETURN trap terminates the box.
+  # THE BOX PULLS FROM GIT, NOT FROM THIS LAPTOP.
+  #
+  # An rsync of the working tree measures whatever happens to be on the orchestrator's disk, which
+  # cannot be traced to anything afterwards: a published number has to name the revision that
+  # produced it, and "my laptop at 4am" is not a revision. A clone at an explicit commit is the whole
+  # provenance story - the same SHA goes into the artifact, so a number can always be taken back to
+  # the code that measured it.
+  #
+  # BENCH_COMMIT is resolved ONCE by the orchestrator (below) so every box in a fan-out measures the
+  # SAME code. Resolving it per box would let a push mid-run split the field across two revisions and
+  # publish them side by side as though they were comparable.
+  glog_echo "cloning $BENCH_REPO @ ${BENCH_COMMIT:0:12} ..."; local _t0=$SECONDS
+  ssh $SSHOPT ubuntu@"$ip" "set -e
+    rm -rf ~/benchmarking
+    git clone -q '$BENCH_REPO' ~/benchmarking
+    cd ~/benchmarking
+    git checkout -q '$BENCH_COMMIT'
+    # Refuse to measure a tree that is not exactly the requested commit.
+    test \"\$(git rev-parse HEAD)\" = '$BENCH_COMMIT'
+  " >>"$glog" 2>&1
   local _up_rc=$?
   if [ "$_up_rc" -ne 0 ]; then
     glog_echo "rsync UP FAILED (rc=$_up_rc) - harness upload incomplete; refusing to measure a partial/stale tree, tearing down this box"
@@ -831,6 +849,9 @@ bench_gateway_once() {
       export CAP_MIB=24000
       export SUITES=\"$ALL_SUITES\"
       sudo -n true 2>/dev/null && sudo chmod 666 /var/run/docker.sock || true
+      # Build the engine from the cloned commit. Release, because a debug build measures the harness.
+      cargo build --release --bin otb 2>&1 | tail -3
+      cp target/release/otb ./otb
       # THE MOCK RUNS PINNED, IN ITS OWN PROCESS, on its own cores. The three-way split - gateway
       # 0-3, load generator 4-9, mock 10-15 - IS the comparability basis of every published number,
       # so a mock sharing cores with either of the others measures a different machine.
