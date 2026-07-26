@@ -124,6 +124,9 @@ fn main() -> ExitCode {
                 runtime: otb_engine::manifest::Runtime::Native { proc_match: String::new() },
                 // `smoke` runs against a target someone else started, so the harness does not own
                 // its lifetime and must never restart it.
+                // `smoke` drives a target at whatever path the dialect defines; it takes no manifest.
+                declared_path: String::new(),
+                cell_paths: Default::default(),
                 relaunch: None,
             };
             println!("mock healthy: {}", otb_engine::run::mock_healthy(&cfg));

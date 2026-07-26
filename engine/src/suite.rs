@@ -112,6 +112,12 @@ fn rig_ceiling(cfg: &SuiteConfig, dialect: Dialect, at_conc: u32) -> Measurement
         // The reference drives the MOCK directly. There is no gateway process behind it, so there is
         // nothing to restart, and a spec here would let a reference measurement bounce the gateway.
         relaunch: None,
+        // The reference drives the MOCK, which serves every dialect at its standard path. A
+        // gateway's prefix must not follow it here or the reference would probe a path the mock
+        // does not have and the ceiling would read as unmeasurable.
+        declared_path: String::new(),
+        // The reference drives the MOCK at its standard paths; a gateway's override must not follow.
+        cell_paths: Default::default(),
     };
     let id = crate::cell::CellId::new(dialect.as_str(), dialect.as_str());
     // A single point AT THE WINNER's concurrency, not a search: the reference must be taken where
@@ -379,6 +385,12 @@ fn qualify_box(cfg: &SuiteConfig, history: &[f64]) -> serde_json::Value {
         // The reference drives the MOCK directly. There is no gateway process behind it, so there is
         // nothing to restart, and a spec here would let a reference measurement bounce the gateway.
         relaunch: None,
+        // The reference drives the MOCK, which serves every dialect at its standard path. A
+        // gateway's prefix must not follow it here or the reference would probe a path the mock
+        // does not have and the ceiling would read as unmeasurable.
+        declared_path: String::new(),
+        // The reference drives the MOCK at its standard paths; a gateway's override must not follow.
+        cell_paths: Default::default(),
     };
     let id = crate::cell::CellId::new(Dialect::Openai.as_str(), Dialect::Openai.as_str());
     let observed = run::measure_at(&direct, &id, QUALIFY_CONCURRENCY);
@@ -449,6 +461,8 @@ pub fn run_suite_with(
         // actually idle. Built from the SAME manifest declaration the initial launch used, so a
         // restart cannot differ from the launch it is repeating. `None` for a manifest that declares
         // no launch: the harness does not own that gateway's lifetime and must not bounce it.
+        declared_path: cfg.manifest.path.clone(),
+        cell_paths: cfg.manifest.cell_paths.clone(),
         relaunch: cfg
             .manifest
             .launch_spec(
@@ -551,7 +565,14 @@ pub fn run_suite_with(
         let cell = Cell {
             served,
             reason,
-            path: ing.parse::<Dialect>().map(|d| d.path(&cfg.manifest.model)).unwrap_or_default(),
+            // THE PATH THIS CELL WAS ACTUALLY DRIVEN AT, not the dialect's standard one recomputed
+            // after the fact. A cell measured on a provider-pinned route and a cell measured on the
+            // unified route are different measurements, and the artifact has to say which it was or
+            // the board presents them as the same number.
+            path: ing
+                .parse::<Dialect>()
+                .map(|d| run::path_for(&rc, d, &eg))
+                .unwrap_or_default(),
             status,
             body_snippet: snippet,
             verdict_note: result.outcome.note.clone().unwrap_or_default(),
@@ -692,6 +713,7 @@ mod tests {
                 runtime: crate::manifest::Runtime::Docker { container: "gw-bench".into() },
                 egress: vec![],
                 commands: vec![],
+                cell_paths: Default::default(),
                 config: vec![],
                 launch: None,
                 config_files: vec![],
