@@ -116,6 +116,10 @@ fn main() -> ExitCode {
                 sweep_duration_s: 2,
                 probe_timeout: Duration::from_secs(10),
                 load_cores: std::env::var("LOADCORES").ok(),
+                // `smoke` drives an already-running gateway and takes no manifest, so it has no
+                // declared identity to measure memory against. An empty match resolves to nothing
+                // and the memory group reports an absence naming it, which is the honest answer.
+                runtime: otb_engine::manifest::Runtime::Native { proc_match: String::new() },
             };
             println!("mock healthy: {}", otb_engine::run::mock_healthy(&cfg));
             for r in run_grid(&cfg, 4, 64) {
