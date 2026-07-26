@@ -27,3 +27,12 @@ curl -sf -b /tmp/oa.jar -X POST http://127.0.0.1:3000/api/channel/ -H 'content-t
 # by writing it to .minted-auth next to this file - the one place `otb run` looks after every command
 # has finished, replacing the manifest's declared (placeholder) `auth` for every probe that follows.
 curl -sf -b /tmp/oa.jar -X POST http://127.0.0.1:3000/api/token/ -H 'content-type: application/json' -d '{"name":"bench","expired_time":-1,"remain_quota":0,"unlimited_quota":true}' | python3 -c 'import json,sys; d=json.load(sys.stdin); k=d.get("data",{}).get("key",""); print(f"sk-{k}") if k else sys.exit("one-api token mint: no key in response")' > gateways/one-api/.minted-auth
+# ValidateUserToken (model/token.go) resolves the bearer key through CacheGetTokenByKey, a
+# cache-aside lookup in front of the DB row the line above just inserted - probing the instant the
+# mint response returns can race that cache's first population and get "无效的令牌"
+# (gorm.ErrRecordNotFound) on an otherwise-valid, just-minted key. Poll the actual relay path with
+# the real token until it stops answering with that exact 401, so nothing downstream ever sees a
+# key that isn't live yet. One `commands` file line is one independent `/bin/sh -c` (manifest.rs's
+# loader), so this whole retry loop has to be a single line - `;` joined, not real newlines. No -f
+# on the curl: a 401's body is exactly what this loop inspects, and -f discards it on any non-2xx.
+key=$(cat gateways/one-api/.minted-auth); ok=0; for i in 1 2 3 4 5 6 7 8 9 10; do body=$(curl -s -X POST http://127.0.0.1:3000/v1/chat/completions -H 'content-type: application/json' -H "Authorization: Bearer $key" -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}],"max_tokens":1}'); case "$body" in *"无效的令牌"*) sleep 0.5 ;; *) ok=1; break ;; esac; done; [ "$ok" = 1 ] || { echo "one-api: minted token never became valid after 10 checks: $body" >&2; exit 1; }
