@@ -134,7 +134,14 @@ declared. That is the point.
 ## Checking it
 
 ```
-cargo test --lib manifest::            # it parses, launches, and its templates render
-bash lib/gateway_isolation_test.sh     # its name is not leaking outside this directory
+otb validate gateways/<name>           # everything wrong with your setup, in one pass
+otb validate                           # the whole field
+bash lib/gateway_isolation_test.sh     # your name is not leaking outside this directory
 otb run gateways/<name> <gw> <mock>    # launch it, measure it, stop it
 ```
+
+`validate` reports ALL problems at once rather than the first, and every message says what to do
+about it. It catches the mistakes that otherwise show up as a container which starts and immediately
+exits — a declared template that is not there, a placeholder the harness cannot supply, a mount
+pointing at a file nothing renders, a header keyed by a dialect this benchmark does not speak. Run
+it before you run anything else.

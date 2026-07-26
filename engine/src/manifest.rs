@@ -342,10 +342,16 @@ impl std::fmt::Display for ManifestError {
             ManifestError::ConstantCycle { name } => {
                 write!(f, "constant {name:?} refers to itself, directly or through a ring of others")
             }
-            ManifestError::UnknownPlaceholder { name, raw } => write!(
-                f,
-                "launch declaration refers to {{{name}}}, which the harness does not supply, in {raw:?}"
-            ),
+            // Deliberately does NOT say where: this same error is raised for a launch declaration,
+            // a config template and a header value, and the caller knows which of those it was
+            // reading. Naming the wrong one is worse than naming none.
+            ManifestError::UnknownPlaceholder { name, raw } => {
+                let shown: String = raw.chars().take(60).collect();
+                write!(
+                    f,
+                    "refers to {{{name}}}, which the harness does not supply. Use one of MOCK_PORT, GW_PORT, GW_MODEL, GW_AUTH, GW_DIR, CORES, NCORE, or declare it in `constants`. For a literal brace write {{{{ }}}}. In: {shown:?}"
+                )
+            }
             ManifestError::UnexpandedVariable { field, raw } => write!(
                 f,
                 "{field} still holds an unexpanded shell variable ({raw:?}): the extraction took the reference, not the value"
@@ -620,6 +626,81 @@ impl Manifest {
             boot_backoff,
             pre_launch: None,
         }))
+    }
+
+    /// Everything wrong with this gateway's setup, in one pass.
+    ///
+    /// ALL of it, not the first thing found. Someone adding a gateway wants the list, not a game of
+    /// fix-one-rerun. Every finding names the file and says what to do.
+    ///
+    /// These are the mistakes that otherwise surface as a container that starts and immediately dies,
+    /// which reads as the gateway being broken rather than as the setup being wrong.
+    pub fn problems(&self, gw_dir: &std::path::Path) -> Vec<String> {
+        let mut out = Vec::new();
+
+        if let Err(e) = self.validate() {
+            out.push(format!("definition.json: {e}"));
+        }
+
+        // A template that is declared but not there.
+        for f in &self.config_files {
+            let t = gw_dir.join(&f.template);
+            if !t.is_file() {
+                out.push(format!(
+                    "definition.json declares config template {:?}, but {} does not exist",
+                    f.template,
+                    t.display()
+                ));
+                continue;
+            }
+            // A placeholder the harness cannot supply. Caught here rather than at launch, where it
+            // becomes a gateway booting with a literal `{MOCK_PORT}` in an upstream URL.
+            if let Ok(raw) = std::fs::read_to_string(&t) {
+                if let Err(e) = self.substitute(&raw, "0-3", 8000, gw_dir) {
+                    out.push(format!("{}: {e}", f.template));
+                }
+            }
+        }
+
+        // A mount pointing at a file nothing renders. This is the one that costs the most to
+        // diagnose in the wild: the container starts, finds no config, and exits, and the only
+        // symptom is a port that never listens.
+        if let Some(LaunchDecl::Docker { mounts, .. }) = &self.launch {
+            for m in mounts {
+                let rendered = self.config_files.iter().any(|f| f.output == m.host_path);
+                let on_disk = gw_dir.join(&m.host_path).exists();
+                if !rendered && !on_disk {
+                    out.push(format!(
+                        "launch mounts {:?}, but no config_files entry renders it and no such file exists. Either add a config_files entry whose output is {:?}, or check the path",
+                        m.host_path, m.host_path
+                    ));
+                }
+            }
+        }
+
+        // A native entrant with no binary to run.
+        if let Some(LaunchDecl::Native { binary, .. }) = &self.launch {
+            if binary.is_empty() {
+                out.push("launch declares no binary candidates, so there is nothing to start".to_string());
+            }
+        }
+
+        // An egress column declaring headers that the run will never walk.
+        for column in self.egress_headers.keys() {
+            if column.parse::<crate::ingress::Dialect>().is_err() {
+                out.push(format!(
+                    "headers.json has an entry for {column:?}, which is not a dialect this benchmark speaks"
+                ));
+            }
+        }
+
+        // The config-necessity standard, reported the same way as everything else rather than as a
+        // separate tool a maintainer has to know to run.
+        for f in crate::config_lint::lint(self, &Default::default()) {
+            out.push(format!("definition.json: {}", f.message));
+        }
+
+        out
     }
 
     /// Read a gateway from its own directory: the definition, plus whatever sidecars it has.
@@ -1056,6 +1137,56 @@ mod real_field_tests {
     /// A doubled brace is a literal one, BOTH ways round. Handling only the opening half rendered a
     /// YAML `error_map: {}` as `{}}`, and the gateway refused to boot on invalid YAML - found by
     /// running it, not by reading it.
+    /// A VALIDATOR THAT ONLY EVER SAYS OK HAS NOT BEEN SHOWN TO WORK.
+    ///
+    /// All thirteen real entrants pass, which is the outcome that proves nothing on its own. Each
+    /// mistake below is one that otherwise surfaces as a container which starts and immediately
+    /// dies - indistinguishable, from the outside, from the gateway being broken.
+    #[test]
+    fn every_setup_mistake_the_validator_exists_for_is_actually_reported() {
+        let dir = std::env::temp_dir().join(format!("otb-validate-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        std::fs::write(dir.join("typo.tmpl"), "port: {NOT_A_REAL_THING}\n").expect("write template");
+
+        let mut m = field().values().find(|m| m.runtime.is_docker()).cloned().expect("an entrant");
+        m.config_files = vec![
+            ConfigFile { template: "missing.tmpl".into(), output: "a.yaml".into() },
+            ConfigFile { template: "typo.tmpl".into(), output: "b.yaml".into() },
+        ];
+        m.launch = Some(LaunchDecl::Docker {
+            image: "x:1".into(),
+            env: vec![],
+            args: vec![],
+            mounts: vec![MountDecl {
+                host_path: "never-rendered.yaml".into(),
+                container_path: "/c.yaml".into(),
+                read_only: true,
+            }],
+        });
+        m.egress_headers = [("notadialect".to_string(), vec!["x-a: b".to_string()])].into_iter().collect();
+
+        let problems = m.problems(&dir);
+        let joined = problems.join("\n");
+
+        assert!(joined.contains("missing.tmpl"), "a declared template that is absent must be reported: {joined}");
+        assert!(joined.contains("NOT_A_REAL_THING"), "a placeholder the harness cannot supply must be reported: {joined}");
+        assert!(
+            joined.contains("never-rendered.yaml"),
+            "a mount nothing renders must be reported - this is the one that costs the most to diagnose, because the container just exits: {joined}"
+        );
+        assert!(joined.contains("notadialect"), "a header keyed by a dialect we do not speak must be reported: {joined}");
+
+        // The message has to tell a maintainer what to DO, not just that something is wrong.
+        assert!(joined.contains("MOCK_PORT"), "the placeholder error must list what IS available: {joined}");
+
+        // A correct gateway stays quiet, or the validator is noise and gets ignored.
+        for (name, real) in &field() {
+            let gw_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../gateways").join(name);
+            assert!(real.problems(&gw_dir).is_empty(), "{name} is a real entrant and must validate clean: {:?}", real.problems(&gw_dir));
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn a_literal_brace_survives_the_render_intact() {
         let m = field().values().next().cloned().expect("an entrant");
