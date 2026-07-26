@@ -1,0 +1,26 @@
+routes:
+  - id: ai-proxy-chat
+    uri: /v1/chat/completions
+    methods: [POST]
+    plugins:
+      ai-proxy:
+        $(_apisix_plugcfg openai-compatible gpt-4o-mini)
+  - id: ai-proxy-responses
+    uri: /v1/responses
+    methods: [POST]
+    plugins:
+      ai-proxy:
+        $(_apisix_plugcfg openai-compatible gpt-4o-mini)
+  - id: ai-proxy-messages
+    uri: /v1/messages
+    methods: [POST]
+    plugins:
+      ai-proxy:
+        $(_apisix_plugcfg anthropic claude-3-5-sonnet-20241022)
+  - id: ai-proxy-converse
+    uri: {GW_MATRIX_PATH_BEDROCK}
+    methods: [POST]
+    plugins:
+      ai-proxy:
+        $(_apisix_plugcfg bedrock "{APISIX_BEDROCK_MODEL}")
+#END

@@ -4,15 +4,20 @@ memory/ugen
 perf/mock
 perf/ugen
 loadgen/ugen
-# per-run generated configs + gateway build/venv artifacts
-gateways/*/config.gen.yaml
-gateways/*/providers.gen.yaml
-gateways/*/*.gen.*
-# a manifest that renders a declarative config with a .yml suffix (the *.gen.* glob above
-# already covers *.gen.yml, so no per-gateway line is needed)
+# per-run generated configs + gateway build/venv artifacts.
+#
+# NOT `gateways/*/*.gen.*`. That glob ends in `.*`, so it matched the rendered `config.gen.yaml` AND
+# the `config.gen.yaml.tmpl` it is rendered FROM - and the template is source. It kept the config
+# templates of 12 of the 13 gateways out of the repository, which nobody noticed while the box was
+# rsynced a working tree that had them on disk. The moment boxes started cloning a pinned commit,
+# every one of those gateways failed validation on the box with "definition.json declares config
+# template X, but X does not exist" - the same shape of defect as the unanchored `bin/` below, and
+# found the same way, by a box getting only what git actually tracks.
+#
+# The rules below name the RENDERED suffix exactly, so a `.tmpl` can never be swept up again.
+gateways/*/*.gen.yaml
 gateways/*/*.gen.yml
 gateways/*/venv/
-gateways/*/bfdata/
 # transient EC2 driver logs (the results JSON + charts are the durable evidence)
 results/*.log
 # per-run gateway launch log (each docker manifest writes gateways/<gw>/launch.log at gw_launch)
@@ -39,6 +44,10 @@ target/
 # could read as authoritative when the template beside it says something else.
 gateways/*/*.gen.yaml
 gateways/*/*.gen.yml
-gateways/*/bfdata/
+# Ignore the CONTENTS of the runtime data dir, not the dir itself: a template that lives inside it is
+# still source. Excluding the directory outright would make the negation below unreachable, because
+# git never descends into an excluded directory to reconsider a file in it.
+gateways/*/bfdata/*
+!gateways/*/bfdata/*.tmpl
 gateways/*/config/*.toml
 gateways/*/launch.log

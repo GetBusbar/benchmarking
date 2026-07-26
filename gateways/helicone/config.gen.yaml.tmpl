@@ -1,0 +1,28 @@
+server:
+  port: {GW_PORT}
+providers:
+  openai:
+    base-url: "http://127.0.0.1:{MOCK_PORT}/"
+  anthropic:
+    base-url: "http://127.0.0.1:{MOCK_PORT}/"
+  bedrock:
+    base-url: "http://127.0.0.1:{MOCK_PORT}/"
+routers:
+  openai:
+    load-balance:
+      chat:
+        strategy: latency
+        providers:
+          - openai
+  anthropic:
+    load-balance:
+      chat:
+        strategy: latency
+        providers:
+          - anthropic
+  bedrock:
+    load-balance:
+      chat:
+        strategy: latency
+        providers:
+          - bedrock
