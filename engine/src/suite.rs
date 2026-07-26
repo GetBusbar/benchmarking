@@ -676,6 +676,7 @@ fn flush(
             // both places, and a reader that finds it in one and not the other cannot tell which is
             // authoritative.
             rig,
+            measured_at: cfg.measured_at.clone(),
             ..Default::default()
         },
         ..Default::default()
@@ -725,7 +726,7 @@ mod tests {
             sweep_duration_s: 1,
             min_conc: 1,
             max_conc: 2,
-            measured_at: "2026-07-26T00-00-00Z".into(),
+            measured_at: "2026-07-26T00:00:00Z".into(),
             arch: "arm64".into(),
             engine_stamp: None,
             rig_mock: None,
@@ -753,6 +754,14 @@ mod tests {
         assert_eq!(back.gateway, "gw");
         assert!(back.matrix.served, "a 2xx gateway serves its diagonal");
         assert!(paths.historical.exists(), "the timestamped copy must land too");
+        // THE CASE THAT WAS BROKEN: site/gen-data.mjs reads matrix.measured_at, not the snapshot
+        // root's - a snapshot whose matrix carries no stamp of its own renders as "never measured"
+        // on the board no matter how fresh the run actually was.
+        assert_eq!(
+            back.matrix.measured_at, back.measured_at,
+            "matrix.measured_at must mirror the snapshot root's, or the board reads this run as unmeasured"
+        );
+        assert!(!back.matrix.measured_at.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

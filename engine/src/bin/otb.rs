@@ -57,7 +57,11 @@ fn read_samples() -> Vec<Sample> {
         .collect()
 }
 
-/// UTC stamp in the shape the existing snapshot corpus already uses.
+/// Real ISO-8601, colons and all - `measured_at`'s own contract (snapshot.rs's `write_snapshot`
+/// derives the filesystem-safe historical filename by replacing ':' with '-' on exactly this
+/// shape; its test fixtures were always written this way). A colon-less stamp here is not a
+/// cosmetic difference: `Date.parse` in the site generator returns NaN on it, so every
+/// `measured_at` this produced silently failed to parse and rendered as null on the board.
 fn utc_stamp() -> String {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -76,7 +80,7 @@ fn utc_stamp() -> String {
     let d = doy - (153 * mp + 2) / 5 + 1;
     let mth = if mp < 10 { mp + 3 } else { mp - 9 };
     let year = if mth <= 2 { y + 1 } else { y };
-    format!("{year:04}-{mth:02}-{d:02}T{h:02}-{m:02}-{sec:02}Z")
+    format!("{year:04}-{mth:02}-{d:02}T{h:02}:{m:02}:{sec:02}Z")
 }
 
 fn arg_f64(args: &[String], i: usize, default: f64) -> f64 {
@@ -493,6 +497,39 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         _ => usage(),
+    }
+}
+
+#[cfg(test)]
+mod utc_stamp_tests {
+    use super::utc_stamp;
+
+    // THE CASE THAT WAS BROKEN: a stamp with dashes where the time portion's colons belong parses
+    // as NaN in the site generator's Date.parse, so every gateway silently rendered measured_at as
+    // null. A real ISO-8601 shape is the whole contract this function exists to uphold.
+    #[test]
+    fn the_stamp_is_real_iso_8601_with_colons_in_the_time_portion() {
+        let s = utc_stamp();
+        assert!(
+            regex_free_iso_shape(&s),
+            "utc_stamp() produced {s:?}, which is not YYYY-MM-DDTHH:MM:SSZ"
+        );
+    }
+
+    // No regex crate in this binary's dependencies - a tiny hand check is clearer than pulling one
+    // in for a single call site.
+    fn regex_free_iso_shape(s: &str) -> bool {
+        let bytes = s.as_bytes();
+        bytes.len() == 20
+            && bytes[4] == b'-'
+            && bytes[7] == b'-'
+            && bytes[10] == b'T'
+            && bytes[13] == b':'
+            && bytes[16] == b':'
+            && bytes[19] == b'Z'
+            && bytes.iter().enumerate().all(|(i, b)| {
+                matches!(i, 4 | 7 | 10 | 13 | 16 | 19) || b.is_ascii_digit()
+            })
     }
 }
 
