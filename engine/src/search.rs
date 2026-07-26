@@ -110,11 +110,16 @@ pub fn bisect_ceiling<P: Probe>(probe: &mut P, min_conc: u32, max_conc: u32) -> 
     let hi_sample = match s.sample(max_conc) {
         Some(v) => v,
         None => {
-            // Interrupted with a confirmed pass already in hand. The highest rung KNOWN to sustain
-            // the gate is a real, if partial, measurement, and the shell publishes it rather than
-            // discarding the run. Nulling here would report "we never measured this" about a cell
-            // we demonstrably did.
-            return BisectResult { ceiling: highest_confirmed_pass(&s.points), points: s.points };
+            // A LOWER BOUND IS NOT A CEILING, and at this point the only successful probe is the
+            // floor itself, so returning it would publish the harness's own search floor as the
+            // gateway's ceiling. Nothing is lost by refusing: `points` carries every probed rung on
+            // this path exactly as it does on the measured ones, and the detail states the bound in
+            // prose. `Measured` is not a neutral container, it is a publication claim: the board
+            // renders it as a bare rankable number with no "at least" form.
+            let detail = format!(
+                "probe interrupted after c={min_conc} passed and before any failure was measured; the ceiling is at least {min_conc}, and nothing above it was tested"
+            );
+            return BisectResult { ceiling: Measurement::absent_because(Absent::NotMeasured, detail), points: s.points };
         }
     };
     if hi_sample.passed {
@@ -178,29 +183,20 @@ fn interrupted<P: Probe>(s: Search<P>) -> PeakResult {
             winner = Some(PeakPoint { concurrency: p.concurrency, value: p.value });
         }
     }
-    let peak = match winner {
-        Some(w) => Measurement::Measured(w),
-        None => Measurement::absent_because(
-            Absent::NotMeasured,
-            "the search was interrupted before any concurrency passed the gate",
+    // An interruption before a turnover was observed leaves a LOWER BOUND, not a peak, and
+    // `exhausted: false` would additionally assert that a proven interior maximum was found. The
+    // best passing point travels as evidence in the detail rather than as the value.
+    let detail = match winner {
+        Some(w) => format!(
+            "probe interrupted; the best passing point seen was c={} at value={}, but the curve was never observed to turn over, so this is a lower bound rather than a peak",
+            w.concurrency, w.value
         ),
+        None => "the search was interrupted before any concurrency passed the gate".to_string(),
     };
-    PeakResult { peak, points: s.points, exhausted: false }
+    PeakResult { peak: Measurement::absent_because(Absent::NotMeasured, detail), points: s.points, exhausted: false }
 }
 
 
-/// The highest concurrency confirmed to PASS among everything actually probed. Used when a search is
-/// cut short: a confirmed pass is a real lower bound on the ceiling, and throwing it away would
-/// publish null for a cell that was measured.
-fn highest_confirmed_pass(points: &[ProbedPoint]) -> Measurement<u32> {
-    match points.iter().filter(|p| p.passed).map(|p| p.concurrency).max() {
-        Some(c) => Measurement::Measured(c),
-        None => Measurement::absent_because(
-            Absent::NotMeasured,
-            "the search was interrupted before any concurrency passed the gate",
-        ),
-    }
-}
 
 fn eff(sample: &Sample) -> f64 {
     if sample.passed { sample.value } else { 0.0 }
@@ -453,6 +449,41 @@ mod tests {
         }
     }
 
+    // THE TIE-BREAK EXPERIMENT, kept as a test because it is the cheapest possible statement of the
+    // rule. The gate is FIXED; only the harness's own search floor moves. If an interrupted search
+    // published a confirmed rung, the answer would track the FLOOR (1, 8, 16, 64) and carry zero
+    // bits about the gateway, which is precisely how unrelated gateways come to share a number.
+    #[test]
+    fn an_interrupted_search_never_publishes_the_harness_own_floor() {
+        for floor in [1u32, 8, 16, 64] {
+            let mut probe = Interrupter { fires_after: 1, calls: 0 };
+            let r = bisect_ceiling(&mut probe, floor, 4096);
+            assert_eq!(
+                r.ceiling.copied(),
+                None,
+                "floor={floor} leaked into the published ceiling, which is a readout of our config"
+            );
+            // The measurement is NOT lost: every probed rung still travels.
+            assert!(!r.points.is_empty(), "the probed trace must survive an absent verdict");
+            assert!(
+                r.ceiling.detail().unwrap_or_default().contains(&floor.to_string()),
+                "the lower bound belongs in the evidence, not in the value"
+            );
+        }
+    }
+
+    // Two different gateways, same harness floor. If an interrupted search published a rung, both
+    // would report the identical number despite behaving completely differently.
+    #[test]
+    fn two_unlike_gateways_do_not_collapse_to_the_same_interrupted_answer() {
+        let mut slow = Interrupter { fires_after: 1, calls: 0 };
+        let mut fast = Interrupter { fires_after: 1, calls: 0 };
+        let a = bisect_ceiling(&mut slow, 8, 4096);
+        let b = bisect_ceiling(&mut fast, 8, 4096);
+        assert_eq!(a.ceiling.copied(), None);
+        assert_eq!(b.ceiling.copied(), None);
+    }
+
     // Interrupted BEFORE anything passed: genuinely unmeasured, so absent.
     #[test]
     fn bisect_interrupted_before_any_pass_is_unmeasured() {
@@ -463,16 +494,19 @@ mod tests {
         assert_eq!(r.ceiling.reason(), Some(&Absent::NotMeasured));
     }
 
-    // Interrupted AFTER a confirmed pass: the shell keeps that partial answer on purpose, because
-    // "every later abort still leaves a genuinely measured, if partial, answer behind". Reporting a
-    // rung we watched sustain the gate is not fabrication; nulling it would claim we never measured
-    // a cell we demonstrably did. This test previously asserted the opposite and was wrong.
+    // Interrupted AFTER a confirmed pass. I first made this return the confirmed rung, arguing that
+    // discarding a real measurement was itself a defect. A three-way design review refuted it: the
+    // probed trace survives on every path including this one, so nothing is discarded, and at this
+    // point the only successful probe IS the floor, so returning it publishes our own search
+    // configuration as the gateway's ceiling. The lower bound belongs in the evidence.
     #[test]
-    fn bisect_interrupted_after_a_pass_keeps_the_confirmed_rung() {
+    fn bisect_interrupted_after_a_pass_is_absent_with_the_bound_as_evidence() {
         let mut probe = Interrupter { fires_after: 1, calls: 0 };
         let r = bisect_ceiling(&mut probe, 1, 1000);
-        assert_eq!(r.ceiling.copied(), Some(1), "c=1 was watched to pass before the interruption");
-        assert!(r.points.iter().any(|p| p.concurrency == 1 && p.passed));
+        assert_eq!(r.ceiling.copied(), None, "no failure was measured, so no ceiling was proven");
+        assert_eq!(r.ceiling.reason(), Some(&Absent::NotMeasured));
+        assert!(r.points.iter().any(|p| p.concurrency == 1 && p.passed), "the pass still travels");
+        assert!(r.ceiling.detail().unwrap_or_default().contains("at least 1"));
     }
 
     // The partial answer is still a LOWER BOUND, never the search range: an interrupted run must
