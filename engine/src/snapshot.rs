@@ -463,13 +463,11 @@ mod tests {
     //
     // `run::run_grid` - the LIVE walker, called from suite.rs and bin/otb.rs - enumerates every cell
     // every time, so a real re-run never changes the number of cells: it changes how many of them
-    // answered `true`. (`cell::walk_grid` has the same property and is what this comment used to
-    // cite, but it has no caller outside its own tests, so citing it proved nothing about what the
-    // engine does.) Both neighbouring guard tests vary the
-    // cell COUNT (4 vs 1) with every cell served, which a real snapshot pair cannot do. That left
-    // `served_cell_count`'s `Served::Bool(true)` filter unheld: deleting the filter so it counts
-    // every cell regardless of served status kept the entire suite green, and with it gone the guard
-    // compares 4 against 4 and PROMOTES a run that lost three quarters of its capability.
+    // answered `true`. The neighbouring guard tests vary the cell COUNT (4 vs 1) with every cell
+    // served, which a real snapshot pair cannot do, so they cannot exercise `served_cell_count`'s
+    // `Served::Bool(true)` filter: this test holds the grid size fixed at 4 and varies only how many
+    // of those cells answered true, so a filter dropped in favor of a bare `.count()` would compare
+    // 4 against 4 and PROMOTE a run that lost three quarters of its capability.
     #[test]
     fn promote_guard_fires_when_the_grid_is_the_same_size_but_fewer_cells_served() {
         let dir = unique_dir("guard-same-size");

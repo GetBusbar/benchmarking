@@ -3,11 +3,10 @@
 //
 // Box qualification: deciding whether a cloud box is fit to measure on before it measures anything.
 //
-// A contaminated box once ran a full 6x6 to completion and its result was published as a gateway
-// regression. It was not one: the rig's own no-gateway floor on that box had drifted while the
-// healthy boxes had not, and its peak throughput had collapsed. Two stages catch that. Stage 1
-// compares the box's own gateway-free latency floor against a rolling baseline; stage 2 replays a
-// known cell and compares throughput, which is the stronger signal of the two.
+// A contaminated box (its own no-gateway latency floor drifted, or its peak throughput collapsed)
+// must not run a full 6x6 and have the result published as a gateway regression. Two stages catch
+// that. Stage 1 compares the box's own gateway-free latency floor against a rolling baseline; stage
+// 2 replays a known cell and compares throughput, which is the stronger signal of the two.
 
 use crate::measurement::{Absent, Measurement};
 use serde::{Deserialize, Serialize};
@@ -40,15 +39,10 @@ impl Outcome {
 
     /// Whether a run carrying this outcome may contribute to the rolling baseline.
     ///
-    /// THE BUG THIS FIXES. The shell reader accepted a snapshot only when `verdict == "pass"`,
-    /// while the writer documented that a `seed` verdict means "accepted, and this run becomes the
-    /// baseline". So a seed run was recorded and then permanently ignored by the very code meant to
-    /// read it. For a NEW gateway that is unrecoverable: peak baselines are per gateway, so its
-    /// first run seeds, is discarded, and every later run seeds again. Stage 2, the strong half of
-    /// qualification, could never switch on for it, silently and with nothing logged.
-    ///
-    /// A `seed` is a measurement taken on a box nothing was wrong with. It qualifies. A `fail`
-    /// never does, and a `skip` measured nothing to contribute.
+    /// A `seed` is a measurement taken on a box nothing was wrong with, so it qualifies same as a
+    /// `pass`: peak baselines are per gateway, so a new gateway's first run must seed the baseline
+    /// or stage 2 (the strong half of qualification) can never switch on for it. A `fail` never
+    /// qualifies, and a `skip` measured nothing to contribute.
     pub fn qualifies_as_baseline(&self) -> bool {
         matches!(self, Outcome::Pass | Outcome::Seed)
     }
@@ -145,9 +139,8 @@ pub fn rolling_baseline(mut candidates: Vec<f64>) -> Measurement<f64> {
 mod tests {
     use super::*;
 
-    // THE OPEN BUG, as a test. A seed run is a measurement taken on a box nothing was wrong with,
-    // and the writer always said it becomes the baseline. The reader disagreed, so stage 2 could
-    // never switch on for a new gateway: seed, discard, seed again, forever.
+    // A seed run is a measurement taken on a box nothing was wrong with, so it must become the
+    // baseline, same as a pass; otherwise stage 2 could never switch on for a new gateway.
     #[test]
     fn a_seed_run_qualifies_as_baseline_data() {
         assert!(Outcome::Seed.qualifies_as_baseline(), "a seed run must become the baseline it was recorded to be");
@@ -171,10 +164,8 @@ mod tests {
         assert_eq!(drift.copied(), None, "there is no drift against a baseline that does not exist");
     }
 
-    // THE SHELL IS EXPLICIT: we cannot qualify a box we failed to measure, and running a full
-    // matrix on one is exactly the incident this gate exists to prevent. An unmeasured stage is a
-    // hard fail, never a neutral shrug. My first version returned Skipped here, which would have let
-    // an unmeasurable box slip past the gate entirely.
+    // An unmeasured stage is a hard fail, never a neutral shrug: a box we failed to measure must
+    // not slip past the gate and run a full matrix.
     #[test]
     fn nothing_observed_is_a_fail_not_a_shrug() {
         let (outcome, drift) = judge(
@@ -187,10 +178,10 @@ mod tests {
         assert_eq!(drift.copied(), None);
     }
 
-    // THE BANDS ARE ONE-SIDED, and this test exists because I got it wrong first. A box cannot
-    // randomly get faster: contention only ever adds latency and removes throughput. A floor that
-    // beats its baseline means the BASELINE was the noisy measurement, and failing it would
-    // terminate healthy boxes and burn the replacement budget.
+    // The bands are one-sided: a box cannot randomly get faster, since contention only ever adds
+    // latency and removes throughput. A floor that beats its baseline means the BASELINE was the
+    // noisy measurement, and failing it would terminate healthy boxes and burn the replacement
+    // budget.
     #[test]
     fn an_improvement_never_fails_the_gate() {
         // Latency: 10% FASTER than baseline, far outside a 4% band, and still a pass.

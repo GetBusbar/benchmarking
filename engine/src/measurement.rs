@@ -5,12 +5,9 @@
 //
 // The board's central discipline is that an absent measurement publishes null WITH A REASON, and is
 // never substituted by 0, by a default, by a previous run's value, or by the edge of a search range.
-// In the shell engine that discipline was a convention, and it broke repeatedly and silently, always
-// the same way: `rps="${rps:-0}"` turned an unprobed rung into a measured zero; an unbound variable
-// killed a subshell whose empty output was then read as a rig failure; a search that ran out of
-// range published the bound as if it were the gateway's ceiling. Shell has no type for absence, so
-// unset, empty, and "0" are the same three bytes of nothing and the difference lived only in whoever
-// was reading the code that day.
+// Shell has no type for absence, so unset, empty, and "0" are the same three bytes of nothing: a
+// convention enforced by discipline alone is one `rps="${rps:-0}"` away from silently turning an
+// unprobed rung into a measured zero.
 //
 // `Measurement<T>` makes the mistake unrepresentable rather than discouraged. There is no way to
 // reach a number without matching on the absent case, and there is no constructor that produces a
@@ -23,8 +20,8 @@ use std::fmt;
 
 /// Why a measurement is absent. Every variant is a thing the harness can *prove*, not a guess: the
 /// board renders these to a reader, so a wrong reason is as bad as a wrong number. In particular
-/// `RigLimited` and `HarnessError` must never be swapped, which is exactly the confusion that once
-/// published a lost-port race as the explanation for a variable-ordering bug in our own file.
+/// `RigLimited` and `HarnessError` must never be swapped: doing so would publish a bug of our own as
+/// a rig race, or a rig race as a bug of our own.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Absent {
@@ -71,6 +68,30 @@ impl Absent {
 impl fmt::Display for Absent {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.token())
+    }
+}
+
+/// A published reason, standing in for one absent metric on the wire. `Measurement<T>` itself still
+/// serialises to the bare value or `null` (see below) so nothing that already reads a plain number
+/// changes shape; this is the sibling record a container publishes ALONGSIDE its fields precisely so
+/// the reason is not thrown away the moment the value is.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AbsentEntry {
+    pub reason: Absent,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+impl<T> Measurement<T> {
+    /// If absent, inserts `key` -> this measurement's reason and detail into `out`. A no-op for a
+    /// measured value: there is nothing to explain.
+    pub fn record_absence(&self, key: &str, out: &mut std::collections::BTreeMap<String, AbsentEntry>) {
+        if let Measurement::Absent { reason, detail } = self {
+            out.insert(
+                key.to_string(),
+                AbsentEntry { reason: reason.clone(), detail: detail.clone() },
+            );
+        }
     }
 }
 
@@ -217,8 +238,8 @@ mod tests {
     }
 
     // A measured zero is a REAL result (served, but nothing held the gate) and must stay distinct
-    // from an absence. In the shell engine these two collapsed into the same bytes, which is how an
-    // unprobed rung was published as "0 rps with 0 failures".
+    // from an absence, or an unprobed rung would be indistinguishable from one that genuinely served
+    // "0 rps with 0 failures".
     #[test]
     fn measured_zero_is_not_absence() {
         let zero: Measurement<f64> = Measurement::Measured(0.0);
@@ -288,8 +309,7 @@ mod tests {
         assert_eq!(mapped.detail(), Some("no SSE for this dialect"));
     }
 
-    // A reason about the RIG or about US must never read as a statement about the gateway. This is
-    // the distinction that got inverted in the field, publishing a harness bug as a rig race.
+    // A reason about the RIG or about US must never read as a statement about the gateway.
     #[test]
     fn only_not_served_is_a_statement_about_the_gateway() {
         assert!(Absent::NotServed.is_about_gateway());

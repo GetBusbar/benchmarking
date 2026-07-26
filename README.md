@@ -37,8 +37,7 @@ exact build/commit measured, plus the charts below.
 ## Prerequisites
 
 **To run locally on your own box:**
-- **Rust** (`cargo`) - builds the mock (`mock/`, a hyper server that answers all six wire protocols and sustains 100s of k RPS, so it's never the bottleneck), plus the gateways compiled from source (LiteLLM-Rust, Helicone). Source builds also need `cmake`, `clang`, and `protobuf-compiler`.
-- **Go** - builds the load generator (`loadgen/`).
+- **Rust** (`cargo`) - builds the mock (`mock/`, a hyper server that answers all six wire protocols and sustains 100s of k RPS, so it's never the bottleneck), the engine (including its own `otb loadgen` load generator), plus the gateways compiled from source (LiteLLM-Rust, Helicone). Source builds also need `cmake`, `clang`, and `protobuf-compiler`.
 - **Docker** - for the container-based gateways (Bifrost, Kong, GoModel, One-API, …).
 - **Python 3 + matplotlib** - draws the charts (`pip install matplotlib`). Optional; JSON results are written either way.
 - Docker. Every gateway pulls its own pinned official image on first run; the pin lives in that gateway's own `gateways/<name>/gateway.sh`. A few build from pinned source because no arm64 image exists - each says so in its own manifest header.
@@ -171,10 +170,9 @@ and Anthropic shapes today) and fixes the upstream to the OpenAI dialect; the fu
 with every upstream dialect is future work. Manifests may override `GW_MATRIX_PATH_OPENAI`,
 `GW_MATRIX_PATH_RESPONSES`, `GW_MATRIX_PATH_ANTHROPIC` (defaults to the shared
 `GW_ANTHROPIC_PATH`), `GW_MATRIX_PATH_GEMINI`, `GW_MATRIX_PATH_COHERE`, `GW_MATRIX_PATH_BEDROCK`;
-most need nothing. A self-test fixture lives at `matrix/mock-gateway/` (outside `gateways/` so
-discovery never fields it): a second mock posing as the gateway, expected to score OpenAI true
-incidentally and every translation cell false as passthrough. If the fixture ever goes green on a
-translation cell, the guard has a hole.
+most need nothing. The same guard (rejecting an untranslated passthrough body as a false positive) is
+covered directly against the mock's own `request_shape_ok` in `mock/src/main.rs`'s test suite, gated
+in CI by the `mock-shape` job.
 
 **Memory** (folded into `matrix/`) - resident memory across a request's life (matters most at GB scale):
 

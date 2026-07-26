@@ -1,17 +1,14 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
-# Regression guard for charts.py's VALIDITY-GATE + TOP-N RANKING — the core matrix-sole-source rewrite
-# artifact that decides which gateways draw a bar and rank on the public PNGs (audit MEDIUM-R3-6).
+# Regression guard for charts.py's VALIDITY-GATE + TOP-N RANKING, the artifact that decides which
+# gateways draw a bar and rank on the public PNGs.
 #
-# Before this test, bench-tests.yml exercised sweep_peak / stream_measure / promote_guard / test.mjs but
-# NOTHING ran the real Python rules. check-consistency asserts site==chart by calling the JS
-# re-implementations (app.cpuFpsCertified / app.sustainedCertified), NOT charts.py itself — so a
-# regression on the Python side (cpu_valid -> `>= 0`, _served treating "untestable" as valid, inverting
-# the top-N sort, or the M3 null->0 coercion) would keep every test green while the PNGs drew a bar for
-# an invalid/mock-bound/null row the table hides — the exact single-source divergence the guard prevents.
-#
-# This drives the ACTUAL charts.py functions: _proj_streaming (cpu_valid / sust_valid), _topn_keys
-# (eligibility + ranking direction), _served (via the eligibility it gates), and the MEDIUM-R3-3
+# check-consistency asserts site==chart by calling the JS re-implementations (app.cpuFpsCertified /
+# app.sustainedCertified), NOT charts.py itself, so a regression on the Python side (cpu_valid -> `>= 0`,
+# _served treating "untestable" as valid, an inverted top-N sort, or a null->0 coercion) could otherwise
+# keep every other test green while the PNGs drew a bar for an invalid/mock-bound/null row the table
+# hides. This test drives the ACTUAL charts.py functions: _proj_streaming (cpu_valid / sust_valid),
+# _topn_keys (eligibility + ranking direction), _served (via the eligibility it gates), and the MEDIUM-R3-3
 # null_not_served rule. matplotlib is NOT required (render() is not exercised). charts.py reads its
 # canonical numbers from site/data.json at import, so we write a minimal one, import, then monkeypatch
 # charts.CANON / charts.GATEWAYS with fixtures for the assertions.
@@ -64,9 +61,9 @@ def _seal(value, gated=False, flag=None, extras=None, zero_note="no_qualifying_c
     if value is None:
         return {"value": None, "certified": False, "suppressed": False, "reason": "not_measured"}
     if gated:
-        # AUDIT #3: a measured 0 is ALWAYS certified; its NOTE names what the zero means. Only null is
-        # "not measured". (This mirror used to fold a streaming 0 into not_measured, hiding a real
-        # measured failure behind an unmeasured cell.)
+        # A measured 0 is ALWAYS certified; its NOTE names what the zero means. Only null is
+        # "not measured": folding a measured streaming 0 into not_measured would hide a real
+        # measured failure behind an unmeasured cell.
         if value == 0:
             return {"value": 0, "certified": True, "suppressed": False, "note": zero_note}
         if not (value > 0 and flag is False):
@@ -207,7 +204,7 @@ check("_topn_keys: a mock-bound sustained count is out of the top-N despite the 
 # ── MEDIUM-R3-3: a NULL added-TTFT/gap is UNMEASURED, never a served 0 that ranks first ──────────────
 # The stream_added_ttft chart is zero_ok + null_not_served, ascending (lower-is-better). A gateway with a
 # real measured 5 µs must rank; a gateway with a NULL TTFT must NOT be eligible (it would coerce to a
-# served 0 and rank #1 on the ascending sort — the M3 bug).
+# served 0 and rank #1 on the ascending sort - the M3 bug).
 _canon({
     "measured": stream(added_ttft_p99_us=5),      # a real, low, WINNING value
     "nullttft": stream(added_ttft_p99_us=None),   # unreliable c1 window: unmeasured
@@ -218,7 +215,7 @@ topn = charts._topn_keys(ttft_chart)
 check("_topn_keys: a null added-TTFT is NOT eligible (never a served 0 at the winning end)", "nullttft" in topn, False)
 check("_topn_keys: a measured added-TTFT IS eligible", "measured" in topn, True)
 
-# A genuine MEASURED 0 (sub-noise) on a zero_ok chart IS still eligible — the fix must not reject real 0s.
+# A genuine MEASURED 0 (sub-noise) on a zero_ok chart IS still eligible - the fix must not reject real 0s.
 _canon({"z": stream(added_ttft_p99_us=0)})
 check("_topn_keys: a MEASURED 0 added-TTFT is still eligible on a zero_ok chart (only null is suppressed)",
       "z" in charts._topn_keys(ttft_chart), True)
@@ -278,7 +275,7 @@ check("HIGH-1: a matrix-only gateway (best_cell, no results/perf file) appears a
 check("HIGH-1: the projected perf row carries the canonical sustained RPS (from best_cell, not disk)",
       next(r["rps_sustained_20ms"] for r in perf_rows if r["_key"] == "matrixonly"), 22000)
 
-# A gateway with NO best_cell is absent from the perf charts (never served) — no retired-file read.
+# A gateway with NO best_cell is absent from the perf charts (never served) - no retired-file read.
 _canon_perf({"noserve": {}})
 check("HIGH-1: a gateway with no best_cell is absent from the perf charts", charts._load("perf"), [])
 
@@ -298,10 +295,10 @@ check("HIGH-1: a matrix-only gateway with a translation_cell appears as an xlate
 check("HIGH-1: _suite_map('xlate') enumerates translation_cell (report translation table)",
       "xl" in charts._suite_map("xlate"), True)
 
-# FINDING 24: the README translation TABLE must suppress a mock-bound (rig-limited) translation RPS,
-# exactly as the translation PNG (served_field=xlate_rps_sustained_20ms_valid) and the site do. Printing
-# the raw value published a number the chart + site both hide — two surfaces diverging from one record.
-# Certified cell → the number prints; mock-bound cell → "not measured (rig-limited)", not the raw value.
+# The README translation TABLE must suppress a mock-bound (rig-limited) translation RPS, exactly as the
+# translation PNG (served_field=xlate_rps_sustained_20ms_valid) and the site do: printing the raw value
+# would publish a number the chart + site both hide.
+# Certified cell -> the number prints; mock-bound cell -> "not measured (rig-limited)", not the raw value.
 _canon_perf({
     "xcert": {"best_cell": bc(), "translation_cell": tc(rps_sustained_20ms=15000, rps_sustained_20ms_mock_bound=False)},
     "xbound": {"best_cell": bc(), "translation_cell": tc(rps_sustained_20ms=99999, rps_sustained_20ms_mock_bound=True)},
@@ -324,7 +321,7 @@ check("HIGH-1: chart-row presence == best_cell presence (every best_cell is a ro
 
 
 # ── MED-3: the passthrough RPS charts gate the bar on the mock-bound honesty flag (rps_*_valid) ──────
-# A mock-bound (rig-limited) throughput must NOT draw a full bar or rank #1 — mirroring the streaming lane.
+# A mock-bound (rig-limited) throughput must NOT draw a full bar or rank #1 - mirroring the streaming lane.
 _canon_perf({
     "clean": {"best_cell": bc(rps_sustained_20ms=20000, rps_sustained_20ms_mock_bound=False)},
     "bound": {"best_cell": bc(rps_sustained_20ms=99999, rps_sustained_20ms_mock_bound=True)},   # higher raw, rig-limited
@@ -349,16 +346,15 @@ check("MED-3: a mock-bound max-proxy RPS is out of the top-N", "bound" in proxy_
 check("MED-3: the clean max-proxy RPS IS ranked", "clean" in proxy_topn, True)
 
 
-# ── memory RECOVERY: recovered_rss_mib is null_not_served — a gateway measured BEFORE the recovery ────
+# ── memory RECOVERY: recovered_rss_mib is null_not_served - a gateway measured BEFORE the recovery ────
 # signal existed (recovered_rss_mib absent → projected None) must NOT draw a fabricated 0 bar or rank,
 # while a gateway WITH a recovery number is ranked (best = min, lower recovery wins). _proj_memory reads
 # the PER-CELL window on the shared comparison cell, so fixture the matrix cell directly.
 rec_chart = chart_by_name("memory_recovery")
 check("memory_recovery chart is null_not_served (no fabricated 0 for a pre-recovery bundle)",
       rec_chart.null_not_served, True)
-# AUDIT #23: SEALED fixtures. These used to be BARE SCALARS — encoding the exact bug charts.py's mval()
-# used to tolerate, so the test asserted the tolerance instead of the contract. A bare scalar in the
-# bundle is now a hard error, and the fixtures state what the real bundle actually carries.
+# SEALED fixtures: a bare scalar in the bundle is a hard error (see mval()), so these fixtures state
+# what the real bundle actually carries rather than a raw number.
 charts.CANON = {
     "recovers": _mem(idle_rss_mib=40, steady_state_rss_mib=1000, recovered_rss_mib=45),
     "pinned":   _mem(idle_rss_mib=60, steady_state_rss_mib=900,  recovered_rss_mib=880),

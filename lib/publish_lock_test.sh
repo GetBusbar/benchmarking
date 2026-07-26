@@ -1,16 +1,15 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
-# Regression guard for run-on-ec2.sh's publish-lock TOKEN OWNERSHIP (audit R4-M1 / LOW-2).
+# Regression guard for run-on-ec2.sh's publish-lock token ownership.
 #
-# Round-3's M1 fix shipped the ownership check with `$$` as the owner token — but `$$` is IDENTICAL
-# across every `&` background subshell of one orchestrator (only $BASHPID differs), so "release only if
-# WE own the lock" never distinguished holders and provided ZERO cross-box protection. The fix writes a
-# UNIQUE per-publish token (RUN_ID:tag:BASHPID:random) and only rmdir's when it still matches. This test
-# proves (a) the token is unique per publish even across subshells that share $$, and (b) a NON-owner
-# release (a peer that re-acquired after we timed out) does NOT delete the real holder's lockdir.
+# Each lock acquisition must write a unique per-publish token (RUN_ID:tag:BASHPID:random), not `$$`
+# (which is identical across every `&` background subshell of one orchestrator), and release must only
+# rmdir the lockdir when its token still matches. This test proves (a) the token is unique per publish
+# even across subshells that share $$, and (b) a non-owner release (a peer that re-acquired after we
+# timed out) does not delete the real holder's lockdir.
 #
 # It sources ONLY the two lock functions out of run-on-ec2.sh (they are self-contained: they use
-# PUBLISH_LOCK / RUN_ID / BASHPID), on a temp lock path — no AWS, no EC2, no publish.
+# PUBLISH_LOCK / RUN_ID / BASHPID), on a temp lock path - no AWS, no EC2, no publish.
 #
 # Run: bash lib/publish_lock_test.sh
 set -uo pipefail
@@ -42,7 +41,7 @@ publish_lock_acquire "[gwB]" echo >/dev/null; tokB="$PUBLISH_LOCK_TOKEN"; publis
 if [ -n "$tokA" ] && [ -n "$tokB" ] && [ "$tokA" != "$tokB" ]; then echo "ok   - the per-publish token is UNIQUE across publishes (not a shared \$\$)"; else echo "FAIL - tokens collided: A=[$tokA] B=[$tokB]"; fail=1; fi
 
 # (b) a NON-owner release must NOT delete a real holder's lockdir. Simulate: holder acquires (writes its
-# token); an impostor with PUBLISH_LOCK_OWNED=1 but a DIFFERENT token calls release — the dir must survive.
+# token); an impostor with PUBLISH_LOCK_OWNED=1 but a DIFFERENT token calls release - the dir must survive.
 publish_lock_acquire "[holder]" echo >/dev/null
 holder_tok="$PUBLISH_LOCK_TOKEN"
 check "holder created the lockdir" "$([ -d "${PUBLISH_LOCK}.d" ] && echo yes || echo no)" "yes"

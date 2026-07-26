@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (C) 2026 Busbar Inc and contributors
-"""Render benchmark charts from results/ — pretty, and pluggable.
+"""Render benchmark charts from results/ - pretty, and pluggable.
 
 Nothing is hard-coded: every number is read from results/<suite>/<gateway>.json (written by the
-runners). Bars are colored by MEASUREMENT — a neutral highlight goes to whichever gateway measured
+runners). Bars are colored by MEASUREMENT - a neutral highlight goes to whichever gateway measured
 best on the metric, so the operator's own entry is highlighted only when it actually wins. The
 highlight is deliberately not a brand color.
 
@@ -27,7 +27,7 @@ from pathlib import Path
 _NOW = datetime.now(timezone.utc)
 RENDER_TS = _NOW.strftime("%Y-%m-%d %H:%M UTC")
 # Cache-buster appended to every chart <img> URL in the report. GitHub proxies README images through
-# its camo cache keyed on the full URL — a stable path serves a STALE png long after the table (plain
+# its camo cache keyed on the full URL - a stable path serves a STALE png long after the table (plain
 # markdown) has updated. A per-render query string changes the URL each time, so the image refreshes
 # in lockstep with the numbers. (Costs nothing; the file on disk is unchanged.)
 CACHE_BUSTER = _NOW.strftime("%Y%m%d%H%M")
@@ -81,7 +81,7 @@ _PERF_FIELDS = ("added_latency_p50_us", "added_latency_p99_us", "rps_sustained_2
 # Every metric in data.json is a SEALED ENVELOPE ({value, certified, suppressed, reason?, note?, …});
 # the honesty gate lives UPSTREAM at seal time, so a suppressed metric has value:null and the raw number
 # is GONE. mval() is the displayable value (None when suppressed/absent); the chart's `*_valid` gates are
-# now simply "value is not None" — there is no separate mock-bound flag to re-check, because the envelope
+# now simply "value is not None" - there is no separate mock-bound flag to re-check, because the envelope
 # already dropped the number. This replaces the per-metric `_mock_bound is not False` re-derivation.
 def _is_env(x) -> bool:
     return isinstance(x, dict) and isinstance(x.get("certified"), bool)
@@ -90,17 +90,17 @@ def _is_env(x) -> bool:
 def mval(env):
     """The bare displayable value of a sealed envelope, or None when suppressed/absent.
 
-    AUDIT #23: a BARE SCALAR is REJECTED, not tolerated. Tolerating one made charts.py the one surface
-    that would happily publish a raw ungated number if a producer field ever escaped the seal — the exact
-    class C1 exists to prevent — and it silently disagreed with app.js's metric(), which returns n/a for a
-    non-envelope. Absent (None) is fine and reads "not measured"; anything else is a bug, loudly."""
+    A BARE SCALAR is REJECTED, not tolerated: tolerating one would let charts.py publish a raw ungated
+    number if a producer field ever escaped the seal (the exact class C1 exists to prevent), and would
+    silently disagree with app.js's metric(), which returns n/a for a non-envelope. Absent (None) is fine
+    and reads "not measured"; anything else is a bug, loudly."""
     if env is None:
         return None
     if not _is_env(env):
         raise SystemExit(
             f"charts.py: refusing to chart an UNSEALED metric value {env!r} (type {type(env).__name__}).\n"
             "  Every metric in site/data.json must be a sealed envelope ({value, certified, suppressed, …}).\n"
-            "  A bare scalar means gen-data.mjs did not seal a producer field — fix the seal, not the reader."
+            "  A bare scalar means gen-data.mjs did not seal a producer field - fix the seal, not the reader."
         )
     return env.get("value")
 
@@ -116,7 +116,7 @@ def mvalid(env) -> bool:
 
 
 # ---- provenance-driven captions (Python mirror of app.js SWEEP_CAPTION) -----------------------------
-# AUDIT #22: check-consistency NOW ACTUALLY asserts this set's keys match the JS SWEEP_CAPTION (lintCaptionParity) so the two
+# check-consistency asserts this set's keys match the JS SWEEP_CAPTION (lintCaptionParity) so the two
 # caption vocabularies can never drift. Every source label a chart/README emits is keyed by source.sweep.
 SWEEP_CAPTION = {
     "6x6-diagonal", "6x6-translation", "6x6-memory-window", "6x6-stream-diagonal",
@@ -140,9 +140,8 @@ def _sweep_label(source: dict | None) -> str:
 def _read_result(p: Path) -> dict:
     """Load one results JSON, failing LOUDLY with the offending path.
 
-    A single malformed result file used to crash the whole chart/report pipeline with a
-    cryptic json.decoder.JSONDecodeError that named no file. Name the file, and the byte/line
-    of the parse error, so the bad result is obvious instead of blocking every gateway's render.
+    Names the file, and the byte/line of the parse error, so a malformed result is obvious instead of a
+    cryptic json.decoder.JSONDecodeError blocking every gateway's render.
     """
     try:
         return json.loads(p.read_text(encoding="utf-8"))
@@ -153,11 +152,11 @@ def _read_result(p: Path) -> dict:
         )
 
 # ── house style ──────────────────────────────────────────────────────────────────────────────────
-BRAND = "#2f6fed"   # winner highlight — a NEUTRAL blue, deliberately not a brand color, so a
+BRAND = "#2f6fed"   # winner highlight - a NEUTRAL blue, deliberately not a brand color, so a
                     # highlighted bar can never be misread as "the sponsor won."
 BRAND_DK = "#1e5bd8"
 SLATE = "#3a3f4b"   # everyone else's primary bar
-MUTE = "#9aa2b2"    # secondary/idle bars — mid grey so idle RSS stays readable, not near-invisible
+MUTE = "#9aa2b2"    # secondary/idle bars - mid grey so idle RSS stays readable, not near-invisible
 MUTE_TXT = "#2b3140"  # idle-bar value labels: near-ink for clear contrast on white (kept smaller/lighter
                       # weight than the peak label so the hierarchy still reads)
 INK = "#1c2430"     # titles
@@ -178,7 +177,7 @@ def _mpl():
     except ImportError:
         return None
     # Inter is BUNDLED in the repo (assets/fonts/) and registered here, so the charts render
-    # identically on any machine — a dev laptop, CI, whatever — regardless of what fonts the OS has.
+    # identically on any machine - a dev laptop, CI, whatever - regardless of what fonts the OS has.
     # (CI runners have neither Inter nor a "medium" weight, so relying on system fonts silently fell
     # back to DejaVu and dropped the medium weight. Registering our own TTFs removes that dependency.)
     fonts_dir = ROOT / "assets" / "fonts"
@@ -188,7 +187,7 @@ def _mpl():
         have_inter = True
     if have_inter:
         _plt.rcParams["font.family"] = "Inter"
-    else:  # no bundled fonts (shouldn't happen in-repo) — fall back to something always present
+    else:  # no bundled fonts (shouldn't happen in-repo) - fall back to something always present
         for _f in ("Helvetica Neue", "Arial", "DejaVu Sans"):
             if any(_f.lower() in f.name.lower() for f in fm.fontManager.ttflist):
                 _plt.rcParams["font.family"] = _f
@@ -235,7 +234,7 @@ def _linked(key: str) -> str:
     repo = REPOS.get(key)
     return f"[{name}]({repo})" if repo else name
 
-# Bars are colored by the gateway's IMPLEMENTATION LANGUAGE — informative (you can see the Rust/Go/
+# Bars are colored by the gateway's IMPLEMENTATION LANGUAGE - informative (you can see the Rust/Go/
 # Python clustering) and neutral (no "winner" highlight for the sponsor; the best is already the top
 # bar since rows are sorted). A gateway that didn't serve is drawn grey regardless.
 # Five buckets: Rust / Go / Python / Node / Other (Lua/OpenResty, Envoy/C++, … fold into Other).
@@ -273,12 +272,12 @@ class Chart:
     not_served_text: str = "✕ did not serve"   # label + legend entry when served_field is false
     not_measured_text: str = ""                 # label for a null (unmeasured) primary metric when null_not_served (falls back to not_served_text)
     zero_text: str = "0  ·  no load held p99 < 1 s"  # served, but the metric came out 0
-    clamp_negatives: bool = False  # clamp sub-noise negatives to 0 (footnoted) — never a negative bar
+    clamp_negatives: bool = False  # clamp sub-noise negatives to 0 (footnoted) - never a negative bar
     zero_ok: bool = False          # a clamped/true 0 is a GOOD result (sorts to the winning end)
     # MEDIUM-R3-3: on a zero_ok chart a MEASURED sub-noise <=0 is the winning end, but a NULL primary
     # metric is UNMEASURED (e.g. an unreliable streaming c1 window sets added_ttft/gap to null while
     # stream_served stays true). float(null or 0) would coerce it to a served 0 that ranks #1 as a bold
-    # "0 perfect streamer" while the table shows n/a — a single-source divergence. When set, a null
+    # "0 perfect streamer" while the table shows n/a - a single-source divergence. When set, a null
     # primary value is treated as NOT-served on this chart (no bar, out of top-N, "not measured" label),
     # matching how the site table renders the null.
     null_not_served: bool = False
@@ -286,7 +285,7 @@ class Chart:
     annot: object = None           # optional fn(row) -> str appended after the primary bar label
 
 
-# Dialect display labels — the SAME branded casing the site uses (MATRIX_LABELS in site/app.js), so a
+# Dialect display labels - the SAME branded casing the site uses (MATRIX_LABELS in site/app.js), so a
 # PNG bar reads "OpenAI → Anthropic" exactly like the in-browser Translation surfaces, never the raw
 # lowercase key ("openai → anthropic"). Unknown dialects fall through to their raw key (audit LOW:
 # "anthropic" capitalization consistency).
@@ -311,10 +310,9 @@ def _perf_annot(r):
     return f"on {_dialect(d)}" if d and d != "openai" else None
 
 
-# AUDIT #2: the STREAMING lane's provenance annotation — the same mechanism _perf_annot gives the
-# passthrough charts and the xlate annots give the translation charts, wired for the lane that had none.
-# Every streaming number on the board is currently a LEGACY stream-suite reading (source "stream-suite");
-# publishing four PNGs of it with no disclosure while the sibling charts disclose theirs is the bug.
+# The STREAMING lane's provenance annotation: the same mechanism _perf_annot gives the passthrough
+# charts and the xlate annots give the translation charts. Every streaming number is currently a LEGACY
+# stream-suite reading (source "stream-suite"), so it must disclose that just like its sibling charts do.
 def _stream_annot(r, extra=None):
     lbl = _sweep_label({"sweep": r.get("_stream_source")}).strip(" ()")
     bits = [b for b in (extra, lbl) if b]
@@ -322,7 +320,7 @@ def _stream_annot(r, extra=None):
 
 
 
-# AUDIT #10/#14: the memory prose renders FROM the run's own record — the harness makes the windows and
+# AUDIT #10/#14: the memory prose renders FROM the run's own record - the harness makes the windows and
 # the fixed-load recipe tunable and emits them (idle_window_s / recovery_window_s / load_recipe /
 # protocol), so no chart label may hard-code a duration or a payload. Falls back to the documented field
 # default ONLY when nothing in the data states otherwise.
@@ -405,7 +403,7 @@ CHARTS = [
         higher_better=True,
         # MED-3: gate the bar on the mock-bound honesty flag (rps_max_proxy_valid = >0 AND NOT
         # mock-bound), mirroring the streaming lane (stream_sustained_valid / streamcpu_valid). A
-        # rig-limited (mock-bound) throughput must not draw a full bar or rank #1 — it renders "not
+        # rig-limited (mock-bound) throughput must not draw a full bar or rank #1 - it renders "not
         # proven" instead. The site (canonicalPerf) + check-consistency assert the identical rule.
         served_field="rps_max_proxy_valid",
         not_served_text="✕ not measured (rig-limited / needs field run)",
@@ -447,9 +445,8 @@ CHARTS = [
         not_measured_text="✕ no steady state on this cell (or cell not served)",
     ),
     # ── supporting: memory RECOVERY (does it release?) ────────────────────────────────────────────
-    # AUDIT #10: the SYNTHETIC BURST memory suite (150KB x 1500c x 120s) is DELETED; describing it here
-    # published a protocol that no longer runs. The real protocol is the per-cell memory window: a process
-    # COLD-STARTED for this cell, a cold-idle sampling window, then the IDENTICAL fixed load on the SAME
+    # The protocol is the per-cell memory window: a process COLD-STARTED for this cell, a cold-idle
+    # sampling window, then the IDENTICAL fixed load on the SAME
     # cell for every gateway run until the RSS is steady (or the cap), then a recovery window (durations +
     # recipe are harness-tunable and travel in the data - every label above renders from them). The level
     # under load is a weak signal on its own; the honest differentiator is whether memory is RELEASED
@@ -482,7 +479,7 @@ CHARTS = [
         series=[Series("rps_per_dollar", "RPS per $/hr", "rank")],
         higher_better=True,
         # MED-3: the cost lanes derive from the sustained@20ms ceiling, so a rig-limited (mock-bound)
-        # sustained number must not draw a cost bar or rank #1 either — gate on the same validity flag.
+        # sustained number must not draw a cost bar or rank #1 either - gate on the same validity flag.
         served_field="rps_sustained_20ms_valid",
         not_served_text="✕ not measured (rig-limited / needs field run)",
     ),
@@ -494,7 +491,7 @@ CHARTS = [
         unit="$ / 1M requests",
         series=[Series("cost_per_million_usd", "cost / 1M", "rank")],
         money=True,
-        # MED-3: derived from the sustained@20ms ceiling — gate on the same mock-bound validity flag.
+        # MED-3: derived from the sustained@20ms ceiling - gate on the same mock-bound validity flag.
         served_field="rps_sustained_20ms_valid",
         not_served_text="✕ not measured (rig-limited / needs field run)",
     ),
@@ -514,7 +511,7 @@ CHARTS = [
         zero_ok=True,
         null_not_served=True,
         auto_ms=True,
-        annot=_stream_annot,   # AUDIT #2: disclose the streaming lane's provenance
+        annot=_stream_annot,   # disclose the streaming lane's provenance
     ),
     Chart(
         name="stream_added_gap",
@@ -531,7 +528,7 @@ CHARTS = [
         zero_ok=True,
         null_not_served=True,
         auto_ms=True,
-        annot=_stream_annot,   # AUDIT #2: disclose the streaming lane's provenance
+        annot=_stream_annot,   # disclose the streaming lane's provenance
     ),
     Chart(
         name="stream_sustained",
@@ -544,7 +541,7 @@ CHARTS = [
         # served_field is stream_sustained_valid (streamed AND not mock-bound), mirroring streamcpu_fps
         # below (MEDIUM-R2-2): a rig-limited sustained count is not a valid gateway-vs-ceiling reading, so
         # it renders "not proven" rather than a clean bar. A mock-bound / unverifiable count never draws a
-        # full bar or ranks in the top-N — the same discipline the cpu-fps lane already applies.
+        # full bar or ranks in the top-N - the same discipline the cpu-fps lane already applies.
         served_field="stream_sustained_valid",
         not_served_text="✕ not measured (rig-limited / needs field run)",
         # AUDIT #3: a certified 0 is a MEASURED FAILURE (offered stream load, sustained none), and must
@@ -588,7 +585,7 @@ CHARTS = [
         # MED-3 (mirrored onto translation): gate on the mock-bound honesty flag
         # (xlate_rps_sustained_20ms_valid = present && >0 && NOT mock-bound), exactly like the
         # passthrough RPS charts (rps_sustained_20ms_valid). A rig-limited translation throughput must
-        # not draw a full bar or rank #1 — it renders "not measured (rig-limited)" instead. The site
+        # not draw a full bar or rank #1 - it renders "not measured (rig-limited)" instead. The site
         # (canonicalXlate / xlateCell) + check-consistency assert the identical rule. A gateway that
         # cannot translate at all has no xlate row (xlate_served absent) and is off the chart entirely.
         served_field="xlate_rps_sustained_20ms_valid",
@@ -652,7 +649,7 @@ def _proj_streaming(key: str) -> dict | None:
     if not s:
         return None
     # Every metric is a SEALED ENVELOPE: the mock-bound gate was applied at seal time, so a rig-limited /
-    # unverifiable value is already {value:null,…}. Validity is simply "the envelope carries a value" —
+    # unverifiable value is already {value:null,…}. Validity is simply "the envelope carries a value" -
     # there is no separate mock-bound flag to re-check (it was consumed). cpu_fps / streams_sustained are
     # gated (their envelope is null when suppressed); TTFT / gap are ungated latency-shaped envelopes.
     cpu = mval(s.get("cpu_fps"))
@@ -664,12 +661,11 @@ def _proj_streaming(key: str) -> dict | None:
         "stream_sustained_streams": sust,
         "stream_sustained_fps": mval(s.get("streams_sustained_fps")),
         "stream_sustained_valid": sust is not None,
-        # AUDIT #3: a measured 0 is a MEASURED FAILURE (the gateway sustained none of the offered stream
-        # load), NOT "not measured". The note token carries which; the chart + README render them apart.
+        # A measured 0 is a MEASURED FAILURE (the gateway sustained none of the offered stream load),
+        # NOT "not measured". The note token carries which; the chart + README render them apart.
         "stream_sustained_note": menote(s.get("streams_sustained")),
-        # AUDIT #2: the streaming lane's PROVENANCE stamp. Without it the four streaming PNGs published
-        # 100% legacy stream-suite numbers with ZERO disclosure while the sibling perf/xlate charts
-        # disclosed theirs through _sweep_label. Same mechanism, same key name, per lane.
+        # The streaming lane's PROVENANCE stamp, so the four streaming PNGs disclose their legacy
+        # stream-suite source the same way the sibling perf/xlate charts disclose theirs via _sweep_label.
         "_stream_source": (s.get("source") or {}).get("sweep"),
         "streamcpu_frames_per_sec": cpu,
         # cpu_fps_per_core is not emitted today (always null); kept null-safe so the column reappears
@@ -751,9 +747,8 @@ def _proj_memory(key: str) -> dict | None:
     # RSS metrics are UNGATED sealed envelopes (no mock-bound flag); mval() reads them (None when absent).
     return {
         "served": True,
-        # AUDIT #10/#14: the run's OWN protocol string + window durations + fixed-load recipe travel with
-        # the row so every memory label describes the run that happened, never a hard-coded default (and
-        # never the DELETED synthetic burst suite the old prose still described).
+        # The run's OWN protocol string + window durations + fixed-load recipe travel with the row so
+        # every memory label describes the run that happened, never a hard-coded default.
         "_mem_protocol": m.get("protocol"),
         "_mem_idle_window_s": m.get("idle_window_s"),
         "_mem_recovery_window_s": m.get("recovery_window_s"),
@@ -798,18 +793,18 @@ def _perf_derived(obj: dict) -> None:
 
 def _proj_perf(key: str) -> dict | None:
     """HIGH-1: the passthrough perf chart row, projected from the CANONICAL best_cell (matrix per-cell
-    sweep / perf-fallback via site/data.json) — NOT the RETIRED results/perf/<key>.json. Mirrors the
+    sweep / perf-fallback via site/data.json) - NOT the RETIRED results/perf/<key>.json. Mirrors the
     site's canonicalPerf: a gateway with a best_cell is a served passthrough row; without one it is
     absent from the chart, exactly as the site table ranks it. Reading the retired disk file made the
     first matrix-only gateway (no results/perf file) silently vanish from every passthrough PNG while
-    the site table still showed its best_cell — the single-source violation this closes."""
+    the site table still showed its best_cell - the single-source violation this closes."""
     g = CANON.get(key) or {}
     bc = g.get("best_cell")
     if not bc:
         return None
     obj: dict = {}
     # Every metric is a SEALED ENVELOPE; mval() reads it (None when suppressed/absent). The gate lives
-    # upstream at seal time, so a rig-limited RPS is already null here — there is no _mock_bound flag to
+    # upstream at seal time, so a rig-limited RPS is already null here - there is no _mock_bound flag to
     # re-check (it was consumed). Validity (served_field) is simply "the envelope carries a value".
     for f in _PERF_FIELDS:
         v = mval(bc.get(f))
@@ -838,7 +833,7 @@ def _proj_perf(key: str) -> dict | None:
 
 def _proj_xlate(key: str) -> dict | None:
     """HIGH-1: the translation chart row, projected from the CANONICAL translation_cell (matrix per-cell
-    sweep / xlate-fallback via site/data.json) — NOT the RETIRED results/xlate/<key>.json. Mirrors the
+    sweep / xlate-fallback via site/data.json) - NOT the RETIRED results/xlate/<key>.json. Mirrors the
     site's canonicalXlate; a gateway with no translation_cell is absent from the translation charts."""
     tc = (CANON.get(key) or {}).get("translation_cell")
     if not tc:
@@ -869,7 +864,7 @@ def _load(suite: str) -> list[dict]:
     # HIGH-1: perf + xlate are projected from CANON (best_cell / translation_cell), NOT read from the
     # RETIRED results/perf|xlate/<key>.json by disk-presence. Enumerate every gateway with a canonical
     # record so a matrix-only gateway (no legacy suite file) appears on the PNG + report exactly as it
-    # appears on the site table — one source of truth. A gateway with no canonical record is absent.
+    # appears on the site table - one source of truth. A gateway with no canonical record is absent.
     rows = []
     for key, label in GATEWAYS.items():
         obj = _proj_perf(key) if suite == "perf" else _proj_xlate(key) if suite == "xlate" else None
@@ -897,7 +892,7 @@ def _fmt(v: float) -> str:
 def _topn_keys(chart: Chart, n: int = 5) -> set:
     """The top-N gateway keys for THIS chart, ranked by ITS OWN primary metric, among ONLY the rows
     that have a VALID value for that metric (audit HIGH). A gateway that did not serve the chart's
-    metric — did-not-stream, cannot-translate, streamcpu-not-proven — is never eligible for the
+    metric - did-not-stream, cannot-translate, streamcpu-not-proven - is never eligible for the
     ranking, so it can never appear in a top-N chart it has no valid number for. Each chart therefore
     ranks its own top-N (a latency top-5 no longer leaks a 'cannot translate' gateway into the
     translation top-5)."""
@@ -924,7 +919,7 @@ def _topn_keys(chart: Chart, n: int = 5) -> set:
 
 def render(chart: Chart, only_keys=None, out_stem: str | None = None) -> None:
     if _mpl() is None:
-        return  # no matplotlib — reports still generate from JSON
+        return  # no matplotlib - reports still generate from JSON
     rows = _load(chart.suite)
     if only_keys is not None:  # subset (e.g. top-5): draw just these gateways, to its own PNG
         rows = [r for r in rows if r["_key"] in only_keys]
@@ -961,7 +956,7 @@ def render(chart: Chart, only_keys=None, out_stem: str | None = None) -> None:
         return float(r.get(field, 0) or 0)
 
     # Suite-specific preprocessing on a working COPY of the rows (never mutate the loaded dicts):
-    # clamp sub-noise negatives to 0 (footnoted — never a negative bar), and relabel a µs chart in ms
+    # clamp sub-noise negatives to 0 (footnoted - never a negative bar), and relabel a µs chart in ms
     # once the biggest value crosses 1 ms so the numbers stay readable.
     unit = chart.unit
     clamped = False
@@ -981,13 +976,13 @@ def render(chart: Chart, only_keys=None, out_stem: str | None = None) -> None:
                     for f in fields:
                         r[f] = float(r.get(f, 0) or 0) / 1000.0
 
-    # Winner is decided ONLY among gateways that actually served — a gateway that failed under
+    # Winner is decided ONLY among gateways that actually served - a gateway that failed under
     # load (or never came up) never colors green, even if a concurrency-1 number looks good.
     served_vals = [_val(r) for r in rows if _served(r) and _val(r) > 0]
     best = (max(served_vals) if chart.higher_better else min(served_vals)) if served_vals else None
 
     # Sort winners to the top. Broken gateways (did-not-serve, or a non-positive/zero metric) sink
-    # to the bottom regardless of metric direction, so a failure never lands at the "best" end —
+    # to the bottom regardless of metric direction, so a failure never lands at the "best" end -
     # except on a zero_ok chart, where a served 0 is sub-noise overhead, i.e. the winning end.
     def _sortkey(r):
         ok = _served(r) and (_val(r) > 0 or chart.zero_ok)
@@ -1013,15 +1008,15 @@ def render(chart: Chart, only_keys=None, out_stem: str | None = None) -> None:
     y0 = list(range(n))
 
     def _numlab(v: float) -> str:
-        # Money → "$0.0015". Time (µs) → the FULL number with commas ("7,807"), never "7.8k" — for
+        # Money → "$0.0015". Time (µs) → the FULL number with commas ("7,807"), never "7.8k" - for
         # latency the exact microseconds read clearest. Everything else → compact ("44k").
         if chart.money:
             return "$0" if v <= 0 else f"${v:,.4g}"
         if unit == "µs":
             return f"{int(round(v)):,}"
-        if unit == "ms":  # auto-relabeled µs chart — one decimal keeps 1.2 ms vs 12.0 ms readable
+        if unit == "ms":  # auto-relabeled µs chart - one decimal keeps 1.2 ms vs 12.0 ms readable
             return f"{v:,.1f}"
-        if unit == "concurrent streams":  # a discrete count — "1,024", never "1.0k"
+        if unit == "concurrent streams":  # a discrete count - "1,024", never "1.0k"
             return f"{int(round(v)):,}"
         return _fmt(v)
 
@@ -1031,13 +1026,13 @@ def render(chart: Chart, only_keys=None, out_stem: str | None = None) -> None:
         rank = s.kind == "rank"
         if rank:
             # colored by implementation language (served); did-not-serve is drawn grey. No winner
-            # highlight — the best is already the top bar (rows are sorted).
+            # highlight - the best is already the top bar (rows are sorted).
             colors = [LANG_COLORS.get(LANGS.get(r["_key"], ""), LANG_DEFAULT) if _served(r) else MUTE
                       for r in rows]
         else:
             colors = [s.kind] * n
         # VALIDITY GATE (audit HIGH): a bar is drawn ONLY for a row that is a valid served
-        # measurement on THIS chart's metric — the served_field (streamcpu → streamcpu_valid,
+        # measurement on THIS chart's metric - the served_field (streamcpu → streamcpu_valid,
         # xlate → xlate_served, streaming → stream_served, …). An invalid/unmeasured row draws
         # ZERO (no visual bar) so the bar matches its "not measured"/"cannot translate" label
         # instead of a full bar off a raw value. On a log axis a bar also can't start at 0, and
@@ -1049,7 +1044,7 @@ def render(chart: Chart, only_keys=None, out_stem: str | None = None) -> None:
         for r, bar, v in zip(rows, bars, vals):
             served = _served(r)
             # Anchor at the bar's end; when the bar is absent (≤0), pin to the axis floor on a log
-            # scale, else to the left edge — so every "0"/"did not serve" note lines up on the left.
+            # scale, else to the left edge - so every "0"/"did not serve" note lines up on the left.
             anchor = bar.get_width() if bar.get_width() > 0 else (floor_x if chart.log else 0.0)
             tx = anchor * 1.06 if chart.log else anchor + xmax * 0.012
             cy = bar.get_y() + bar.get_height() / 2
@@ -1060,7 +1055,7 @@ def render(chart: Chart, only_keys=None, out_stem: str | None = None) -> None:
                         extra = chart.annot(r)
                         if extra:
                             txt = f"{txt}  ·  {extra}"
-                elif served and chart.zero_ok:  # sub-noise overhead — a 0 here is the winning end
+                elif served and chart.zero_ok:  # sub-noise overhead - a 0 here is the winning end
                     txt, col, weight = "0", INK, "bold"
                 elif served:  # came up, but the metric came out 0 (see chart.zero_text for why)
                     txt, col, weight = chart.zero_text, "#c2410c", "bold"
@@ -1070,7 +1065,7 @@ def render(chart: Chart, only_keys=None, out_stem: str | None = None) -> None:
                         nst += " under load"
                     txt, col, weight = f"{_numlab(v)}   {nst}", "#c2410c", "bold"
                 elif chart.null_not_served and r.get("_primary_null"):
-                    # MEDIUM-R3-3: streamed, but the primary metric is null (unmeasured) — say so, do
+                    # MEDIUM-R3-3: streamed, but the primary metric is null (unmeasured) - say so, do
                     # NOT draw it as a served 0. Matches the site table's n/a for the same null.
                     txt, col, weight = (chart.not_measured_text or chart.not_served_text), "#c2410c", "bold"
                 else:
@@ -1096,7 +1091,7 @@ def render(chart: Chart, only_keys=None, out_stem: str | None = None) -> None:
         ax.set_xscale("log")
     ax.xaxis.grid(True, color=GRID, zorder=0)
     ax.set_axisbelow(True)
-    # Human tick labels: comma-separated integers on BOTH axes — "1,000 / 10,000" on the log µs/MiB
+    # Human tick labels: comma-separated integers on BOTH axes - "1,000 / 10,000" on the log µs/MiB
     # axes (not 10³/10⁴), "10,000 / 20,000" on the linear RPS axis (not 10000). Minor log ticks stay
     # unlabeled so the decade labels don't get crowded.
     from matplotlib.ticker import FuncFormatter, NullFormatter
@@ -1116,7 +1111,7 @@ def render(chart: Chart, only_keys=None, out_stem: str | None = None) -> None:
     # Title + subtitle stacked above the axes with real vertical separation (no overlap). Both anchored
     # in POINTS above the axes top (not axes-fraction) so the gap is identical on every chart regardless
     # of its height: subtitle 10 pt up, title 40 pt up → a fixed ~30 pt gap. (Axes-fraction spacing
-    # collided once the taller Inter metrics replaced DejaVu — the reported title/subtitle cramping.)
+    # collided once the taller Inter metrics replaced DejaVu - the reported title/subtitle cramping.)
     ax.set_title(chart.title, fontsize=15, fontweight="bold", color=INK, loc="left", pad=40)
     # AUDIT #10/#14: subtitle may be a callable taking the chart's rows, so a chart whose wording depends
     # on a TUNABLE harness setting (the memory windows) describes the run that happened, not a default.
@@ -1133,20 +1128,12 @@ def render(chart: Chart, only_keys=None, out_stem: str | None = None) -> None:
     handles = [Patch(facecolor=LANG_COLORS[l], label=l) for l in present]
     if any(not _served(r) for r in rows):
         handles.append(Patch(facecolor=MUTE, label=chart.not_served_text.lstrip("✕ ").strip()))
-    if ns > 1:  # a muted secondary series (idle RAM) — label it too
+    if ns > 1:  # a muted secondary series (idle RAM) - label it too
         handles.append(Patch(facecolor=MUTE, label=chart.series[1].legend))
     if handles:
-        # PLACEMENT (audit #21): the legend gets its OWN BAND BELOW THE AXES, never an overlay.
-        #
-        # Every previous attempt put it inside the plot and then argued about which corner is empty.
-        # "best" drifted onto the title (the old streamcpu overlap); pinning it to "lower right" assumed
-        # bars get SHORTER downward, which is only true for higher-is-better charts — the memory,
-        # added-latency and cost charts rank LOWER-IS-BETTER, so their longest bar is the bottom one and
-        # the legend landed squarely on one gateway's 1.1 GB peak bar in memory_rss.png. Choosing the
-        # corner from the data just moves the collision to the other end (a full-width 6-column legend
-        # covers the short bars there instead).
-        #
-        # There is no corner that is empty on every chart, so stop looking for one. Anchoring in FIGURE
+        # The legend gets its OWN BAND BELOW THE AXES, never an overlay: no single corner is empty on
+        # every chart (a higher-is-better chart's longest bar sits opposite a lower-is-better chart's),
+        # so placing it inside the plot always collides with some chart's bars. Anchoring in FIGURE
         # coordinates below the axes is correct for any sort direction, any bar count and any series
         # count. The offset is computed from the figure height so the gap is a CONSTANT number of
         # inches rather than shrinking as charts get taller.
@@ -1178,7 +1165,7 @@ def render(chart: Chart, only_keys=None, out_stem: str | None = None) -> None:
 
 def _suite_map(suite: str) -> dict:
     """key → the lane row for every gateway that HAS one. For xlate the row is the CANONICAL
-    translation_cell projection (HIGH-1 / NIT-1) — NOT the RETIRED results/xlate/<key>.json — so the
+    translation_cell projection (HIGH-1 / NIT-1) - NOT the RETIRED results/xlate/<key>.json - so the
     README translation table enumerates the same matrix-projected gateways the PNGs do. Any other
     suite still reads its own results/<suite>/<key>.json by disk-presence."""
     if suite == "xlate":
@@ -1194,7 +1181,7 @@ def _suite_map(suite: str) -> dict:
 
 def _merge() -> dict:
     """One dict per gateway for the README leaderboard: the CANONICAL passthrough perf (best_cell,
-    HIGH-1 / NIT-1) merged with the matrix-projected memory read — enumerated from CANON, NOT from
+    HIGH-1 / NIT-1) merged with the matrix-projected memory read - enumerated from CANON, NOT from
     the RETIRED results/perf/<key>.json by disk-presence. A matrix-only gateway (no legacy perf file)
     therefore appears in the report leaderboard exactly as it appears on the site table."""
     gws: dict = {}
@@ -1241,7 +1228,7 @@ def _report_md(rows: list, title: str, charts: list, pending: tuple = (), chart_
     mock_bound_seen = False
     zero_load_seen = False
     dnf_seen = False
-    fail_notes = []  # (gateway, serve_error) for every ❌ row — the receipt behind "did not serve"
+    fail_notes = []  # (gateway, serve_error) for every ❌ row - the receipt behind "did not serve"
 
     def rps_cell(val, suppressed, served):
         # ✕ = never served under load; ⚠ rig-limited = the sealed envelope suppressed a positive value the
@@ -1268,7 +1255,7 @@ def _report_md(rows: list, title: str, charts: list, pending: tuple = (), chart_
             mock_bound_seen = True
         if served is not False and r.get("rps_max_proxy") == 0:
             zero_load_seen = True
-        # Latency cell: a did-not-serve gateway may still have a concurrency-1 number — flag it † so it
+        # Latency cell: a did-not-serve gateway may still have a concurrency-1 number - flag it † so it
         # is never mistaken for a clean win.
         lat_cell = "-"
         if lat is not None:
@@ -1287,7 +1274,7 @@ def _report_md(rows: list, title: str, charts: list, pending: tuple = (), chart_
             f"| {rss(peak)} "
             f"| `{(r.get('build') or '').strip()[:46]}` |"
         )
-    # Gateways we intend to measure but haven't yet — shown so the field is transparent, never hidden.
+    # Gateways we intend to measure but haven't yet - shown so the field is transparent, never hidden.
     for key in pending:
         lines.append(
             f"| {_linked(key)} | ⏳ *pending* | - | - | - | - | *pending measurement* |"
@@ -1317,7 +1304,7 @@ def _report_md(rows: list, title: str, charts: list, pending: tuple = (), chart_
     if legend:
         lines.append(" &nbsp; ".join(legend))
         lines.append("")
-    # The receipt: WHY each gateway that didn't serve failed — captured status + its own logs, so the
+    # The receipt: WHY each gateway that didn't serve failed - captured status + its own logs, so the
     # claim is evidence, not an assertion.
     if fail_notes:
         lines.append("**Why the ✕ gateways did not serve** (captured live, verbatim from the run):")
@@ -1333,16 +1320,12 @@ def _report_md(rows: list, title: str, charts: list, pending: tuple = (), chart_
     # hasn't been run yet simply contributes empty cells; the whole section disappears when none
     # of the three has any result. "cannot" cells ARE the story: a gateway that answers 200 but
     # never frames, or cannot take an Anthropic request, is recorded, not hidden.
-    # NIT (charts.py:916): the streaming column must read the SAME source the streaming PNGs use — the
-    # matrix projection (g.streaming via _proj_streaming), NOT the RETIRED results/stream/*.json suite.
-    # Reading the legacy suite here put weeks-old stale numbers (or ✕ rows for a gateway that no longer
-    # has a legacy file) in the README table while the PNGs showed the fresh matrix projection. Build the
-    # stream map from _proj_streaming so the table and the charts agree. xlate/governed unchanged
-    # (translation is already the canonical matrix cell via _overlay_xlate; governed is retired/absent).
+    # The streaming column must read the SAME source the streaming PNGs use, the matrix projection
+    # (g.streaming via _proj_streaming), never the RETIRED results/stream/*.json suite, so the table and
+    # the charts agree. xlate is already the canonical matrix cell via _overlay_xlate; `governed` is
+    # retired and deliberately not read here at all (a stale results/governed/*.json on disk must not
+    # inject a governance-only gateway as an all-n/a stream row).
     stream_m = {k: r for k in GATEWAYS if (r := _proj_streaming(k)) is not None}
-    # NIT-R3-N2: drop the retired `governed` read. The matrix never produces results/governed/*.json, so
-    # governed_m was normally empty; but a stale results/governed/<gw>.json left on a box tree could inject
-    # a governance-only gateway as an all-n/a stream row (governance columns aren't rendered here anyway).
     xlate_m = _suite_map("xlate")
     row_keys = [k for k, _ in rows]
     lane_keys = [k for k in row_keys if k in stream_m or k in xlate_m]
@@ -1378,14 +1361,14 @@ def _report_md(rows: list, title: str, charts: list, pending: tuple = (), chart_
                 # MEDIUM-R3-5: gate the sustained count on stream_sustained_valid (streamed AND not
                 # mock-bound), matching the stream_sustained PNG (served_field=stream_sustained_valid)
                 # and the site drawer. Reading stream_sustained_streams raw would print a concrete count
-                # (e.g. "256") for a gateway whose bisect saturated near the paced-mock ceiling — a
-                # rig-limited number the chart renders "not measured (rig-limited)" — two published
+                # (e.g. "256") for a gateway whose bisect saturated near the paced-mock ceiling - a
+                # rig-limited number the chart renders "not measured (rig-limited)" - two published
                 # surfaces diverging from the same record.
                 if not s.get("stream_sustained_valid"):
                     streams = "✕ not measured (rig-limited)"
                 elif int(s.get("stream_sustained_streams") or 0) == 0:
                     # AUDIT #3: a MEASURED FAILURE. The gateway was offered stream load and sustained
-                    # none of it — publishing that as "not measured (rig-limited)" (the branch above)
+                    # none of it - publishing that as "not measured (rig-limited)" (the branch above)
                     # would flatter it by hiding a real, measured failure behind a rig excuse.
                     streams = "✕ 0 - MEASURED: sustained no stall-free stream"
                 else:
@@ -1404,16 +1387,14 @@ def _report_md(rows: list, title: str, charts: list, pending: tuple = (), chart_
             elif not x.get("xlate_served"):
                 xl = "✕ cannot translate"
             elif not x.get("xlate_rps_sustained_20ms_valid"):
-                # FINDING 24: gate the translation RPS on the mock-bound honesty flag
-                # (xlate_rps_sustained_20ms_valid), exactly as the SSE-streams column above gates on
-                # stream_sustained_valid and the translation PNG gates on served_field. Printing the raw
-                # value here published a rig-limited (mock-bound) number the chart + site both suppress —
-                # two surfaces diverging from one record. A legitimate measured 0 stays valid (shows "0").
+                # Gate the translation RPS on the mock-bound honesty flag (xlate_rps_sustained_20ms_valid),
+                # exactly as the SSE-streams column above gates on stream_sustained_valid and the
+                # translation PNG gates on served_field, so a rig-limited (mock-bound) number is never
+                # printed as if it were a real reading. A legitimate measured 0 stays valid (shows "0").
                 xl = "✕ not measured (rig-limited)"
                 if x.get("_xlate_ingress"):
                     xl += f" ({x['_xlate_ingress']} → {x['_xlate_egress']})"
-                # AUDIT #9: the prose above promises a legacy-xlate-suite fallback is "marked as such";
-                # the cells never applied the marker. Render it from the source stamp, like every PNG.
+                # Render the legacy-xlate-suite fallback marker from the source stamp, like every PNG.
                 xl += _sweep_label({"sweep": x.get("_xlate_source")})
             else:
                 xl = f"{int(x.get('xlate_rps_sustained_20ms') or 0):,}"
@@ -1449,7 +1430,7 @@ def _report_md(rows: list, title: str, charts: list, pending: tuple = (), chart_
 
 
 def _ranked() -> list:
-    """Ranked by ADDED LATENCY p99, ascending — the table's first column, the headline overhead, and
+    """Ranked by ADDED LATENCY p99, ascending - the table's first column, the headline overhead, and
     lower-is-better, so the table reads intuitively top-down. Served gateways with a real latency sort
     first; a gateway that didn't serve (no clean latency) sinks to the bottom."""
     gws = _merge()
@@ -1473,10 +1454,10 @@ def write_reports() -> None:
     (RESULTS / "reports" / "all").mkdir(parents=True, exist_ok=True)
     (RESULTS / "reports" / "top5").mkdir(parents=True, exist_ok=True)
     (RESULTS / "reports" / "all" / "README.md").write_text(
-        _report_md(ranked, "All gateways — full field", charts, pending=pending))
+        _report_md(ranked, "All gateways - full field", charts, pending=pending))
     # top5 report points at its own top5_*.png charts (rendered in main). The TABLE below is the 5
     # lowest-added-latency gateways; each CHART shows the top 5 by ITS OWN metric among gateways with a
-    # valid value for that metric (audit HIGH) — a gateway that cannot do a thing is never ranked into
+    # valid value for that metric (audit HIGH) - a gateway that cannot do a thing is never ranked into
     # that thing's chart, so a "cannot translate" gateway never appears on the translation top-5.
     (RESULTS / "reports" / "top5" / "README.md").write_text(
         _report_md(ranked[:5], "Top 5 gateways (table: lowest added latency; each chart: top 5 by its own metric)",
@@ -1497,7 +1478,7 @@ def main() -> None:
         any_done = any_done or (RESULTS / f"{c.name}.png").exists()
     write_reports()
     if not any_done:
-        print("no charts drawn — run the benchmark first (run-all.sh)")
+        print("no charts drawn - run the benchmark first (run-all.sh)")
 
 
 if __name__ == "__main__":

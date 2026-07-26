@@ -6,7 +6,7 @@
 # ("channels") are added at runtime via its admin API after login, and requests need a generated
 # per-user token. gw_launch scripts the login → channel (base_url = mock) → token bootstrap. It's in
 # the default field (bootstrap verified on the rig). NOTE ON ITS NUMBERS: One-API writes a per-request
-# usage/quota row to its DB on EVERY call by design — that accounting is intrinsic to how it works and
+# usage/quota row to its DB on EVERY call by design - that accounting is intrinsic to how it works and
 # is NOT a disableable "logging" knob, so its latency/throughput reflect a gateway that bills each
 # request, not a bare proxy. That's the honest measurement of it as it ships. The image is pinned below.
 GW_KIND=docker
@@ -15,7 +15,7 @@ GW_KIND=docker
 # manifest instead of hardcoding it. lib/gateway_isolation_test.sh checks it against the --name
 # below, so the two cannot drift.
 GW_CONTAINER=one-api-bench
-# Self-describing manifest metadata — charts.py + the run lists read these, so a gateway
+# Self-describing manifest metadata - charts.py + the run lists read these, so a gateway
 # is fully defined by its own dir (add/remove a dir → it appears/disappears everywhere).
 GW_DISPLAY="One-API"                      # label in charts + report tables
 GW_LANG=Go                            # implementation language → bar color bucket
@@ -55,7 +55,7 @@ _oa_channels() {
 CH
 }
 # ncore = pinned core count (0-3 → 4). One-API is Go, and Go (pre-1.25) reads the HOST cpu count for
-# GOMAXPROCS, NOT the --cpuset-cpus limit — so without it One-API runs a P per host core thrashing the
+# GOMAXPROCS, NOT the --cpuset-cpus limit - so without it One-API runs a P per host core thrashing the
 # few pinned cores, a scheduler-contention HANDICAP the Rust gateways (tokio available_parallelism
 # respects cpuset) never pay. Pinning to the cpuset count emulates the 4-core box every gateway is
 # measured on, the same field-parity fix two other Go entries carry. Defined once, read by both
@@ -93,7 +93,7 @@ gw_launch() {
     [ "$(curl -s -m3 -o /dev/null -w '%{http_code}' "$base/api/status")" = 200 ] && { up=1; break; }; sleep 1
   done
   [ "$up" = 1 ] || { echo "one-api /api/status never came up" >>"$OA_LOG"; return 0; }
-  # Endpoints below use TRAILING SLASHES and singular "group" — that's what One-API v0.6.10 binds
+  # Endpoints below use TRAILING SLASHES and singular "group" - that's what One-API v0.6.10 binds
   # (verified against model/channel.go, model/token.go, router/api.go).
   # 2) admin login (default root/123456) → session cookie
   curl -s -c "$OA_JAR" -X POST "$base/api/user/login" \
@@ -103,10 +103,10 @@ gw_launch() {
     -d '{"id":1,"username":"root","display_name":"Root User","role":100,"status":1,"quota":1000000000000,"group":"default"}' >>"$OA_LOG" 2>&1
   # 4) wire ALL supported upstream providers as channels, base_url = mock (One-API appends each
   #    provider's native path). This is the OOTB deployment a real user runs: every provider they
-  #    support is a live channel, all present simultaneously — so memory/throughput/latency measure
+  #    support is a live channel, all present simultaneously - so memory/throughput/latency measure
   #    the full multi-provider gateway, not a single-channel slice. The channel TYPE selects the
   #    native egress dialect (1=OpenAI, 14=Anthropic, 24=Gemini). Routing keys on (group=default,
-  #    model) via the abilities table — channel TYPE is NOT part of selection
+  #    model) via the abilities table - channel TYPE is NOT part of selection
   #    (model/ability.go GetRandomSatisfiedChannel: WHERE group=? AND model=? … ORDER BY RANDOM()).
   #    So the three model lists are kept STRICTLY DISJOINT (gpt-* | claude-* | gemini-*): each model
   #    resolves 1:1 to its channel with no equal-priority random tiebreak. gw_matrix_egress sets
@@ -121,7 +121,7 @@ gw_launch() {
   while read -r ctype cmodels; do
     [ -n "$ctype" ] && _oa_channel "$ctype" "$cmodels"
   done < <(_oa_channels)
-  # 5) mint an unlimited token — AddToken generates the key itself and returns it in .data.key
+  # 5) mint an unlimited token - AddToken generates the key itself and returns it in .data.key
   local key; key=$(curl -s -b "$OA_JAR" -X POST "$base/api/token/" -H 'content-type: application/json' \
     -d '{"name":"bench","expired_time":-1,"remain_quota":0,"unlimited_quota":true}' | _oa_get data key)
   # fall back to listing tokens if the create response didn't echo the key
@@ -200,14 +200,14 @@ gw_matrix_egress() {
 
 # ── OOTB config artifact (runtime admin-API state, not a file) ────────────────────────────────────
 # gw_config prints the canonical OOTB config this gateway launches with. One-API has NO declarative
-# config file — its upstream providers are runtime admin-API state (channels + a token), scripted in
+# config file - its upstream providers are runtime admin-API state (channels + a token), scripted in
 # gw_launch. So the artifact is that provisioned state, rendered as the exact admin-API calls the
 # bootstrap makes: the container run flags, then the three channels (all providers wired, base_url =
 # mock, disjoint model lists) and the minted token. The suite runner captures this once per run into
 # results/config/one-api.txt and the board publishes it, so "fresh container + these admin calls →
 # these numbers" is reproducible. Kept in lockstep with gw_launch by construction (same values).
 # OOTB posture: nothing is stripped or tuned. One-API's per-request usage/quota accounting is
-# structural (preConsumeQuota/postConsumeQuota run unconditionally — NOT a disableable knob), and
+# structural (preConsumeQuota/postConsumeQuota run unconditionally - NOT a disableable knob), and
 # consume-logging is default-ON (LogConsumeEnabled=true); both stay on, exactly as it ships. The only
 # deviations are the permitted ones: provider base_urls → mock, dummy channel key (sk-mock), the
 # minted bench token (its own mandatory auth - every relay request needs a token), and the GOMAXPROCS

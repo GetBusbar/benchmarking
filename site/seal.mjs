@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// seal.mjs: the data-honesty ENVELOPE — the single point where "is this number honest to show?"
+// seal.mjs: the data-honesty ENVELOPE - the single point where "is this number honest to show?"
 // is decided, at PROJECTION time (gen-data.mjs), never at read time. Every metric the board
 // consumes is sealed here into EITHER a certified envelope OR an explicit suppressed envelope; the
 // raw scalar AND its `_mock_bound` flag are CONSUMED at seal time and are NEVER re-emitted into the
@@ -20,7 +20,7 @@
 
 // ---- provenance stamp + caption vocabulary ---------------------------------
 // The `sweep` token names WHICH projection of the run the datum is; every caption renders FROM it via
-// SWEEP_CAPTION (Design E §3.2). No caption string literal may hard-code a source token — the lint in
+// SWEEP_CAPTION (Design E §3.2). No caption string literal may hard-code a source token - the lint in
 // check-consistency enforces that (invariant C3). The live deferred fallbacks (perf/xlate/stream suite)
 // are sealed honestly with their OWN sweep token until the field run folds them into the matrix.
 export const SWEEP = {
@@ -44,10 +44,10 @@ export const UNGATED_LAT_FIELDS = ["added_latency_p50_us", "added_latency_p99_us
 // UNGATED, latency/rate-shaped, on a stream record.
 export const UNGATED_STREAM_FIELDS = ["added_ttft_p50_us", "added_ttft_p99_us", "added_gap_p50_us", "added_gap_p99_us"];
 // RSS metrics are sealed BY DISCOVERY, not by a whitelist: ANY RSS-in-MiB field the producer emits is a
-// metric and must be sealed — idle/peak/recovered today, plus the qualified variants the producer has
+// metric and must be sealed, idle/peak/recovered today, plus the qualified variants the producer has
 // already added (peak_rss_HWM_mib, post_load_rss_mib). The pattern deliberately allows a qualifier
-// between `rss` and `mib`, because a whitelist (and an over-narrow `_rss_mib$`) is exactly how
-// peak_rss_hwm_mib came to ship as a BARE unsealed scalar (audit #11).
+// between `rss` and `mib` (e.g. peak_rss_hwm_mib) so a narrower regex or a fixed whitelist can't again
+// let a differently-named RSS field ship as a bare unsealed scalar.
 export const RSS_FIELD_RE = /_rss_(?:[a-z0-9]+_)*mib$/;
 // UNGATED, memory-shaped, on a per-cell memory window. These are NOT RSS values (so RSS_FIELD_RE cannot
 // discover them) but they ARE published numbers: the growth rate is the leak rate when a gateway never
@@ -76,18 +76,18 @@ export function makeSource(kind, sweep, build, measuredAt) {
 //   opts.gated : true for a throughput metric (apply the mock-bound honesty rule)
 //   opts.flag  : the raw *_mock_bound sibling (false = certified, true = rig-bound, null/undefined = unverifiable)
 //   opts.source: the provenance stamp (makeSource)
-//   opts.extras: extra CERTIFIED-only fields to carry (concurrency, sweep array) — dropped when suppressed
+//   opts.extras: extra CERTIFIED-only fields to carry (concurrency, sweep array) - dropped when suppressed
 // The envelope is LEAN: it does NOT repeat the provenance stamp (the CELL carries `source`, which is
 // authoritative and drives every caption). Keeping the stamp off each envelope avoids ~10x bundle bloat
 // across the 36-cell matrix while preserving invariant P1 (no raw scalar / no _mock_bound survives).
 // opts.zeroNote: for a GATED metric, WHAT a measured 0 MEANS. A 0 is ALWAYS an honest MEASURED value
-// (the harness ran and the answer was zero) and is ALWAYS certified — it is NEVER folded into
+// (the harness ran and the answer was zero) and is ALWAYS certified - it is NEVER folded into
 // "not measured", which is exclusively `value == null` (audit #3). The note names the meaning so each
 // surface can render the two apart:
-//   ZERO_NO_CEILING  (RPS ceilings)      — served, but no tested load held the qualifying gates.
-//   ZERO_MEASURED_FAIL (streaming counts) — the gateway was offered stream load and sustained NONE.
-// Publishing a measured stream-sustain FAILURE as "not measured (rig-limited)" flattered the gateway;
-// null (absent field) is the ONLY not-measured state.
+//   ZERO_NO_CEILING  (RPS ceilings) - served, but no tested load held the qualifying gates.
+//   ZERO_MEASURED_FAIL (streaming counts) - the gateway was offered stream load and sustained NONE.
+// Publishing a measured stream-sustain FAILURE as "not measured (rig-limited)" would flatter the
+// gateway; null (absent field) is the ONLY not-measured state.
 export const ZERO_NO_CEILING = "no_qualifying_ceiling";
 export const ZERO_MEASURED_FAIL = "measured_failure";
 export function sealMetric(value, opts = {}) {

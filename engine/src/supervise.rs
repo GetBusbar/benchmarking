@@ -4,15 +4,11 @@
 // Process lifecycle for the things the harness starts and stops: the gateway under test and the
 // mock upstream. Ported from lib/harness.sh's `mock_stop_wait` and `gw_stop_wait`.
 //
-// THE RULE THAT CARRIES THE MOST WEIGHT. The shell call sites this replaces all opened with the
-// same shape: send a kill signal, then `sleep 1`, then relaunch. A signal only asks a process to
-// exit; it returns before the process is gone. The blind sleep was a guess at how long that takes,
-// and when the guess was wrong the fresh process bound onto a port the old one still held, panicked
-// on EADDRINUSE, and died. In the 2026-07-25 field run that raced 48 of the 75 served cells, which
-// emptied the matrix streaming lane for every gateway on the board. `mock_stop_wait` was written to
-// fix exactly this, and `gw_stop_wait` exists because the gateway relaunch path (used for the memory
-// window, where a warm process masquerading as cold idle is its own, quieter corruption) had the
-// identical bug with no wait and no escalation at all.
+// THE RULE THAT CARRIES THE MOST WEIGHT. A signal only asks a process to exit; it returns before
+// the process is gone, so a fixed sleep-then-relaunch can bind the fresh process onto a port the
+// old one still holds, panicking on EADDRINUSE. `gw_stop_wait` matters just as much as
+// `mock_stop_wait` here: the gateway relaunch path is also used for the memory window, where a warm
+// process masquerading as cold idle is its own, quieter corruption.
 //
 // So: signal, then POLL for actual release, escalating to SIGKILL at the halfway mark of the
 // budget. A stop that cannot confirm release is a hard error, never a silent success, because a

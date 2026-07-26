@@ -12,7 +12,7 @@
 # ── OOTB posture (one-config standard) ────────────────────────────────────────────────────────────
 # This is the config a real user deploys, used unchanged for EVERY lane (latency/throughput/memory/
 # stream/matrix). Only the permitted deviations are applied:
-#   * provider base_urls → the mock (all six egress dialects wired below — the matrix exercises them
+#   * provider base_urls → the mock (all six egress dialects wired below - the matrix exercises them
 #     and memory/throughput are measured on this same all-providers config; NOT scoped per-lane);
 #   * dummy api keys where a provider signer needs *some* credential (the mock ignores them).
 # There are no other flags. The launch is `litellm --config <file> --port <port>`: the config points
@@ -29,7 +29,7 @@
 #     ONE uvicorn worker (constants.py DEFAULT_NUM_WORKERS_LITELLM_PROXY=1; proxy_cli.py --num_workers
 #     default=1; prod-best-practices "Run one Uvicorn worker per pod ... this is the default"). OOTB =
 #     the single-worker default, so the flag is dropped.
-#   * LITELLM_MASTER_KEY: LiteLLM auth is OFF by default — with no master key the proxy serves
+#   * LITELLM_MASTER_KEY: LiteLLM auth is OFF by default - with no master key the proxy serves
 #     /v1/chat/completions UNPROTECTED (it accepts all requests; the master key is an opt-in admin
 #     credential). Setting it ADDS an auth layer litellm does not ship on, which the standard forbids
 #     ("don't add auth it doesn't default to"). Dropped; the gateway runs unprotected as shipped and
@@ -41,7 +41,7 @@ GW_KIND=docker
 # manifest instead of hardcoding it. lib/gateway_isolation_test.sh checks it against the --name
 # below, so the two cannot drift.
 GW_CONTAINER=litellm-python-bench
-# Self-describing manifest metadata — charts.py + the run lists read these, so a gateway
+# Self-describing manifest metadata - charts.py + the run lists read these, so a gateway
 # is fully defined by its own dir (add/remove a dir → it appears/disappears everywhere).
 GW_DISPLAY="LiteLLM · Python"                      # label in charts + report tables
 GW_LANG=Python                            # implementation language → bar color bucket
@@ -89,7 +89,7 @@ gw_diag() {
 }
 
 # _lp_write_config: render the ONE OOTB model_list. Every egress dialect the matrix probes is wired
-# here (all → mock), so the SAME config serves perf/memory/throughput AND every matrix column — the
+# here (all → mock), so the SAME config serves perf/memory/throughput AND every matrix column - the
 # config is never scoped per-lane. Each entry keeps the client-facing model name $GW_MODEL so the six
 # ingress probes never change; the litellm_params `model:` prefix selects the upstream dialect and its
 # api_base override points at the mock. Provider prefixes verified against litellm 1.93.0:
@@ -100,8 +100,8 @@ gw_diag() {
 #   cohere            cohere_chat/<model>, api_base <mock>/v2/chat (v2 chat) -> /v2/chat
 #   bedrock           bedrock/converse/<model> + aws_bedrock_runtime_endpoint (dummy static creds;
 #                     the mock ignores the SigV4 signature)                  -> /model/<m>/converse
-# The perf lane sends $GW_MODEL, which resolves to the first matching model_name entry (openai) — the
-# canonical OpenAI path, the real deployment's default — while the other five sit ready for the matrix.
+# The perf lane sends $GW_MODEL, which resolves to the first matching model_name entry (openai) - the
+# canonical OpenAI path, the real deployment's default - while the other five sit ready for the matrix.
 _lp_write_config() {
   cat > "$GW_DIR/config.gen.yaml" <<YAML
 model_list:
@@ -181,7 +181,7 @@ GW_MATRIX_EGRESS="openai openai-responses anthropic gemini cohere bedrock"
 # selects the matching model_name; no per-lane relaunch or config rewrite is needed. Rendering the
 # same config keeps the artifact identical to what perf/memory ran.
 # ORDER MATTERS (same bug class as the frozen ingress paths): _lp_write_config derives ALL SIX
-# model_name entries from $GW_MODEL, so it must be rendered from the CANONICAL name — i.e. BEFORE this
+# model_name entries from $GW_MODEL, so it must be rendered from the CANONICAL name - i.e. BEFORE this
 # column's selection mutates GW_MODEL. Rendering it afterwards (as this did) wrote a model_list whose
 # entries were derived from the already-suffixed value ("gpt-4o-mini-anthropic", "…-anthropic-responses",
 # …), so the client's per-column name only ever matched the FIRST (openai) entry and every non-openai
@@ -223,7 +223,7 @@ gw_config() {
 }
 
 # container_rss_mib sums the container's whole host-pid process tree (same _rss_tree_mib method as
-# native gateways), so any uvicorn workers are counted — preserving the m11 fix.
+# native gateways), so any uvicorn workers are counted - preserving the m11 fix.
 gw_rss() { container_rss_mib litellm-python-bench; }  # summed process-tree VmRSS (same method as native)
 gw_hwm() { container_hwm_mib litellm-python-bench; }  # summed process-tree VmHWM (kernel high-water mark)
 

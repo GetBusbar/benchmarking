@@ -28,11 +28,11 @@
 #                        This rule applies to comments and prose too, because a comment that lists
 #                        the field goes stale the moment a directory is added or removed.
 #
-# WHAT "CODE" MEANS (rule 1). Comments are stripped before rule 1 runs, deliberately and narrowly:
-# a comment recording that a real 2026-07-25 incident happened on one particular box is PROVENANCE,
-# it is evidence for a threshold, and it cannot make a newly dropped-in gateway fail to run. What CAN
-# break a drop-in is executable code and user-visible strings, and those are scanned in full. Rule 2
-# still applies to comments, so provenance may cite an incident but may never re-grow into a roster.
+# WHAT "CODE" MEANS (rule 1). Comments are stripped before rule 1 runs, deliberately and narrowly: a
+# comment recording provenance for a threshold (e.g. which box produced a measurement) cannot make a
+# newly dropped-in gateway fail to run, so it is exempt. What CAN break a drop-in is executable code and
+# user-visible strings, and those are scanned in full. Rule 2 still applies to comments, so provenance
+# may cite a specific case but may never re-grow into a roster.
 #
 # ALLOWLIST (see GW_ISO_ALLOW below) - narrow, and each entry carries its reason. It covers exactly
 # the operator's OWN identity (copyright line, GitHub org, domain, the site's neutrality disclosure),
@@ -189,11 +189,9 @@ BEGIN{
     if (lraw ~ GR[i]) { n++; named=named " " G[i] }
   }
   if (n>=3) printf "enumeration\t%s\t%s\t%d\t%s\t%s\n", file, ln, n, named, raw;
-  # RULE 1B - identity in a COMMENT. Rule 1 strips comments before it looks, which was a deliberate
-  # provenance carve-out: a comment could cite which box an incident happened on. In practice that
-  # licence grew into evaluative comparative claims about named competitors sitting in a public repo,
-  # while this lint printed PASS and reported that every identity lived in its own directory. It was
-  # enforcing that for code and silently not for comments, a guarantee it did not actually have.
+  # RULE 1B - identity in a COMMENT. Rule 1 strips comments before it looks (a deliberate provenance
+  # carve-out), so a gateway name can still leak into a comment without rule 1 ever seeing it; rule 1B
+  # closes that gap by checking the raw, unstripped line separately.
   # A name in raw but not in code is, by construction, a name in a comment.
   # (No apostrophes in here: this block lives inside a single-quoted awk program.)
   for (i=1; i<=na; i++) {
@@ -205,11 +203,11 @@ BEGIN{
 }'; }
 
 # ── SELF-TEST: the scanner must be PROVEN to fire before a clean run means anything ───────────────
-# A lint that silently scans nothing reports PASS, which is worse than no lint. This exact failure
-# happened while writing this file: `awk -v` cannot carry a newline, so the alias table collapsed to
-# one row and the whole tree came back clean. So: plant a known violation of each rule, in a file path
-# outside every gateway directory, and require the matcher to report it. If these do not fire, the
-# scanner is broken and the run aborts INSTEAD of printing a green result.
+# A lint that silently scans nothing reports PASS, which is worse than no lint (e.g. `awk -v` cannot
+# carry a newline, so passing the alias table that way would collapse it to one row and the whole tree
+# would come back clean). So: plant a known violation of each rule, in a file path outside every
+# gateway directory, and require the matcher to report it. If these do not fire, the scanner is broken
+# and the run aborts instead of printing a green result.
 selftest() {
   local first="${GWS[0]}" out n
   # RULE 1: the first discovered gateway's name, in the CODE half of a harness-file line.

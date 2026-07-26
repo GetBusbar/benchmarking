@@ -5,15 +5,9 @@
 // speak, what URL path carries it, what a probe body looks like, and whether the mock upstream can
 // answer that dialect with a real SSE stream.
 //
-// THE DEFECT THIS EXISTS TO NOT REPEAT (published, real, shell's own postmortem in
-// lib/ingress.sh / lib/ingress_path_test.sh): gemini and bedrock carry the model in the URL PATH,
-// not the body. The shell engine once expanded that path ONCE at script init, into a global that
-// every later call echoed back verbatim. When a later step switched models per column, the frozen
-// path kept asking for the ORIGINAL model, so ten cells asked a live gateway for a model it was no
-// longer configured to serve and the run published them red with a wrong-endpoint error. The fix
-// there was "resolve at call time"; the fix here is stronger: there is no global to freeze, because
-// `path` takes the model as a parameter and returns a fresh `String` on every call. There is no
-// storage for a stale value to hide in.
+// Gemini and bedrock carry the model in the URL PATH, not the body: `path` takes the model as a
+// parameter and returns a fresh `String` on every call, so there is no global and no stored value
+// that a later step switching models per column could leave stale.
 //
 // Every dialect is a variant of `Dialect`, and every function below matches on it exhaustively (no
 // wildcard arm), so a seventh dialect is a compile error here, not a silent fallthrough to whatever
@@ -39,10 +33,8 @@ pub enum Dialect {
 ///
 /// UNSET AND EMPTY BOTH MEAN "ALL", and that distinction is the whole point. `std::env::var` returns
 /// `Ok("")` for a variable that is SET BUT EMPTY, and the orchestrator always exports the variable,
-/// writing an empty value for a full-grid run. Matching on `Ok`/`Err` therefore sent `""` down the
-/// parsing path, where it split into one empty name that no dialect knows, and the engine exited 2
-/// before measuring anything. Every full-field run failed that way, on all thirteen boxes at once,
-/// while a narrowed debugging run passed: the bug was invisible to exactly the runs used to test it.
+/// writing an empty value for a full-grid run, so an empty string must resolve to every dialect, not
+/// to zero.
 ///
 /// A value that names something we do not know is still an ERROR, not a silent fallback to all: an
 /// operator who asked for one dialect and got six would be publishing a grid they did not request.
@@ -125,11 +117,11 @@ impl Dialect {
     /// sends `x-api-key` and `anthropic-version` whoever it is talking to. It lives here, once, for
     /// the same reason `path` does - thirteen copies of one table is thirteen chances to drift.
     ///
-    /// The engine used to send `authorization: Bearer` for every dialect. That is right for three of
-    /// six and wrong for two, and the two wrong ones are whole ROWS of the grid: the gateway answers
-    /// 401, `probe.rs` maps any status from a healthy rig to `NotConfigured` - "the gateway answered,
-    /// deterministically, that this pairing does not light up" - and twelve of thirty-six cells per
-    /// gateway publish as its own capability denial, grey on the board, caused by our request.
+    /// Only three of six dialects use a bearer token; sending one to the other two draws a 401,
+    /// which `probe.rs` maps to `NotConfigured` for any status from a healthy rig - "the gateway
+    /// answered, deterministically, that this pairing does not light up" - so a wrong auth shape
+    /// would mislabel whole ROWS of the grid as the gateway's own capability denial, grey on the
+    /// board, when the cause is our request.
     pub fn auth_headers(&self, auth: &str) -> Vec<(String, String)> {
         match self {
             // Anthropic's own wire: the key is x-api-key, and the version header is mandatory.
@@ -232,9 +224,9 @@ mod tests {
         assert_eq!(Dialect::Bedrock.path("gpt-4o-mini"), "/model/gpt-4o-mini/converse");
     }
 
-    // THE REGRESSION TEST for the frozen-model defect: the model is a parameter, so a different
-    // model must produce a different path for the two dialects that embed it, on every call, with
-    // no stored state anywhere to disagree with a later call.
+    // The model is a parameter, so a different model must produce a different path for the two
+    // dialects that embed it, on every call, with no stored state anywhere to disagree with a later
+    // call.
     #[test]
     fn a_different_model_produces_a_different_path_for_gemini_and_bedrock() {
         let a = Dialect::Gemini.path("gpt-4o-mini");
@@ -407,13 +399,9 @@ mod tests {
         assert_eq!(names, vec!["openai", "openai-responses", "anthropic", "gemini", "cohere", "bedrock"]);
     }
 
-    // THE DEFECT THAT FAILED THIRTEEN BOXES AT ONCE.
-    //
     // std::env::var returns Ok("") for a variable that is set but empty, and the orchestrator always
-    // exports OTB_DIALECTS, writing an empty value when the run is not narrowed. The old code matched
-    // on Ok/Err, so a full-grid run parsed "" into one nameless dialect, found nothing, and exited 2
-    // before measuring anything. A narrowed run set a real value and passed, so every debugging run
-    // was green and every real run was dead.
+    // exports OTB_DIALECTS, writing an empty value when the run is not narrowed: an empty string
+    // must mean every dialect, not zero.
     #[test]
     fn an_empty_dialect_list_means_every_dialect_not_none() {
         assert_eq!(dialects_from(None), Ok(Dialect::ALL.to_vec()), "unset means the whole grid");

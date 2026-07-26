@@ -2,7 +2,7 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 //
 // Deterministic, blazing-fast mock upstream for the gateway benchmark. Answers a 200 with a valid,
-// minimal response body for EVERY wire protocol a gateway might forward in — chosen by request path —
+// minimal response body for EVERY wire protocol a gateway might forward in - chosen by request path -
 // so any gateway works against it regardless of which provider API it speaks upstream:
 //
 //   /chat/completions      -> OpenAI chat.completion
@@ -15,7 +15,7 @@
 //
 // It is deliberately dumb and deliberately fast: hyper on a multi-threaded tokio runtime, static
 // response bytes, the request body drained but never processed. A throughput benchmark must find the
-// GATEWAY's ceiling, so the mock must never be the ceiling — this sustains 100s of k RPS, and the
+// GATEWAY's ceiling, so the mock must never be the ceiling - this sustains 100s of k RPS, and the
 // harness records the mock's own ceiling each run so mock-boundedness can't hide.
 //
 //   mock -port 8000                    # instant responses
@@ -30,7 +30,7 @@
 // is untouched.
 //
 // STREAMING: when (and only when) the request body says "stream":true, the OpenAI and Anthropic
-// paths answer a valid SSE stream instead — role/message_start, then N content deltas paced at a
+// paths answer a valid SSE stream instead - role/message_start, then N content deltas paced at a
 // fixed interval, then finish + [DONE] (message_stop for Anthropic). The pacing is the "model
 // generating tokens"; the stream suite measures what a gateway ADDS on top of it. Knobs:
 //   MOCK_STREAM_CHUNKS=64        content-delta frames per stream
@@ -43,7 +43,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use http_body_util::{BodyExt, Full, StreamBody};
+use http_body_util::{BodyExt, Full, Limited, StreamBody};
 use hyper::body::{Bytes, Frame, Incoming};
 use hyper::service::service_fn;
 use hyper::{Request, Response};
@@ -58,12 +58,10 @@ const ANTHROPIC: &[u8] = br#"{"id":"msg_x","type":"message","role":"assistant","
 const GEMINI: &[u8] = br#"{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP","index":0}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":2,"totalTokenCount":12}}"#;
 const BEDROCK: &[u8] = br#"{"output":{"message":{"role":"assistant","content":[{"text":"ok"}]}},"stopReason":"end_turn","usage":{"inputTokens":10,"outputTokens":2,"totalTokens":12}}"#;
 const COHERE: &[u8] = br#"{"id":"x","finish_reason":"COMPLETE","message":{"role":"assistant","content":[{"type":"text","text":"ok"}]},"usage":{"tokens":{"input_tokens":10,"output_tokens":2}}}"#;
-// GET .../models - a model list, discovered at boot by gateways (e.g. one gateway) that register
-// routable models by calling the upstream's /models. PROVIDER-SPECIFIC (keyed off the request path,
-// see models_for) so no bare model name is ambiguous across providers. A single shared catalog that
-// listed BOTH gpt-4o-mini AND claude-3-5-sonnet on every provider base made a gateway that routes by
-// bare model name misroute: it registered the same name under multiple providers and then picked one
-// arbitrarily. Each base now advertises only its own models.
+// GET .../models - a model list, discovered at boot by gateways that register routable models by
+// calling the upstream's /models. PROVIDER-SPECIFIC (keyed off the request path, see models_for): a
+// catalog shared across providers would let a gateway that routes by bare model name register the
+// same name under multiple providers and pick one arbitrarily, so each base advertises only its own.
 const MODELS_OPENAI: &[u8] = br#"{"object":"list","data":[{"id":"gpt-4o-mini","object":"model","created":1,"owned_by":"openai"},{"id":"gpt-4o","object":"model","created":1,"owned_by":"openai"},{"id":"gpt-3.5-turbo","object":"model","created":1,"owned_by":"openai"}]}"#;
 const MODELS_ANTHROPIC: &[u8] = br#"{"data":[{"id":"claude-3-5-sonnet","type":"model","display_name":"Claude 3.5 Sonnet"},{"id":"claude-3-5-haiku","type":"model","display_name":"Claude 3.5 Haiku"}],"has_more":false}"#;
 const MODELS_GEMINI: &[u8] = br#"{"models":[{"name":"models/gemini-1.5-pro","displayName":"Gemini 1.5 Pro"},{"name":"models/gemini-1.5-flash","displayName":"Gemini 1.5 Flash"}]}"#;
@@ -85,7 +83,7 @@ fn models_for(path: &str) -> &'static [u8] {
     }
 }
 
-/// Pick the response body from the request path — protocol detection, ordered so specific paths win.
+/// Pick the response body from the request path - protocol detection, ordered so specific paths win.
 fn body_for(path: &str) -> &'static [u8] {
     if path.ends_with("/models") || path.contains("/models?") {
         models_for(path)
@@ -106,7 +104,7 @@ fn body_for(path: &str) -> &'static [u8] {
     }
 }
 
-/// The dialect NAME a request path lands on — same routing as body_for, but only for paths that
+/// The dialect NAME a request path lands on - same routing as body_for, but only for paths that
 /// unambiguously belong to a dialect. The fallback default ("anything else answers OPENAI") is
 /// deliberately NOT reported as openai here: the matrix runner needs "the gateway posted to the
 /// openai chat endpoint" to mean exactly that, so unrecognized paths record under "other".
@@ -129,17 +127,16 @@ fn dialect_for(path: &str) -> &'static str {
 }
 
 /// Loose request-shape marker check per dialect: does the body carry the fields a client of that
-/// dialect must send? Deliberately shallow (substring, no JSON parse) — the matrix runner only
+/// dialect must send? Deliberately shallow (substring, no JSON parse) - the matrix runner only
 /// needs "the gateway sent something recognizably shaped like that dialect's request".
 fn request_shape_ok(dialect: &str, body: &[u8]) -> bool {
     let has = |needle: &str| body.windows(needle.len()).any(|w| w == needle.as_bytes());
     match dialect {
         "openai" => has("\"messages\""),
-        // Bedrock Converse (audit R3-M6): the body carries `messages` whose content is an ARRAY of
-        // content BLOCKS ({"text":…}) — NOT OpenAI's `"content":"<string>"`. Requiring the block marker
-        // (a `{"text":` content block, or an `inferenceConfig`) rejects a raw OpenAI chat body that a
-        // gateway forwarded to /converse WITHOUT building the Converse shape, which the old blanket
-        // `"messages"` check accepted as a false body_ok=true.
+        // Bedrock Converse: the body carries `messages` whose content is an ARRAY of content BLOCKS
+        // ({"text":…}), not OpenAI's `"content":"<string>"`. Requiring the block marker (or an
+        // `inferenceConfig`) rejects a raw OpenAI chat body forwarded to /converse without being
+        // translated into the Converse shape.
         "bedrock" => {
             let block_content = has("\"content\":[") && has("\"text\":");
             has("\"messages\"") && (block_content || has("\"inferenceConfig\""))
@@ -273,12 +270,35 @@ impl StreamFrames {
     }
 }
 
-/// Does the request body ask for streaming? Cheap substring scan — no JSON parse on the hot path.
+/// Does the request body ask for streaming? Cheap substring scan - no JSON parse on the hot path.
 fn wants_stream(body: &[u8]) -> bool {
     body.windows(13).any(|w| w == b"\"stream\":true") || body.windows(14).any(|w| w == b"\"stream\": true")
 }
 
+// Same cap engine/src/http.rs enforces on the client side (MAX_BODY_BYTES there). A gateway (or a
+// bug in one) sending an enormous body must not exhaust this process's memory across an 8-hour run.
+const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
+
 type OutBody = http_body_util::combinators::BoxBody<Bytes, Infallible>;
+
+// How long the spawned SSE writer waits on a single tx.send before giving up on a stalled peer.
+// A peer whose TCP connection stalls without closing never drains the channel, so an unbounded
+// .send().await would leak this task for the rest of the 8-hour run. Overridable in test builds so
+// the timeout test doesn't need to burn the production duration.
+#[cfg(not(test))]
+const SSE_SEND_TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(test)]
+const SSE_SEND_TIMEOUT: Duration = Duration::from_millis(50);
+
+/// Send one SSE frame, giving up after SSE_SEND_TIMEOUT. Returns false on either a closed receiver
+/// (peer gone, the pre-existing case) or a timed-out send (peer stalled without closing, the new
+/// case) - both mean the caller must stop writing rather than block this task forever.
+async fn send_frame(
+    tx: &tokio::sync::mpsc::Sender<Result<Frame<Bytes>, Infallible>>,
+    frame: Bytes,
+) -> bool {
+    matches!(tokio::time::timeout(SSE_SEND_TIMEOUT, tx.send(Ok(Frame::data(frame)))).await, Ok(Ok(())))
+}
 
 fn sse_response(frames: Arc<StreamFrames>, anthropic: bool, ttft_ms: u64) -> Response<OutBody> {
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Frame<Bytes>, Infallible>>(8);
@@ -292,7 +312,7 @@ fn sse_response(frames: Arc<StreamFrames>, anthropic: bool, ttft_ms: u64) -> Res
             (&frames.openai_head, &frames.openai_deltas, &frames.openai_tail)
         };
         for f in head {
-            if tx.send(Ok(Frame::data(f.clone()))).await.is_err() { return; }
+            if !send_frame(&tx, f.clone()).await { return; }
         }
         for i in 0..frames.chunks {
             if i > 0 {
@@ -300,10 +320,10 @@ fn sse_response(frames: Arc<StreamFrames>, anthropic: bool, ttft_ms: u64) -> Res
             }
             // distinct frame per index (index embedded in the pad) so a gateway repeat-guard is fair
             let delta = &deltas[(i as usize) % deltas.len()];
-            if tx.send(Ok(Frame::data(delta.clone()))).await.is_err() { return; }
+            if !send_frame(&tx, delta.clone()).await { return; }
         }
         for f in tail {
-            if tx.send(Ok(Frame::data(f.clone()))).await.is_err() { return; }
+            if !send_frame(&tx, f.clone()).await { return; }
         }
     });
     Response::builder()
@@ -321,7 +341,7 @@ async fn handle(
     recording: bool,
 ) -> Result<Response<OutBody>, Infallible> {
     let path = req.uri().path().to_string();
-    // Matrix-runner control endpoints — served regardless of MOCK_RECORD so the runner can tell
+    // Matrix-runner control endpoints - served regardless of MOCK_RECORD so the runner can tell
     // recording apart from "no requests arrived" (state carries a `recording` flag).
     if path == "/__mock/state" {
         return Ok(Response::builder()
@@ -338,7 +358,18 @@ async fn handle(
     }
     let body = body_for(&path);
     // Drain the request body so the connection stays keep-alive; only the stream flag is looked at.
-    let reqbody = req.into_body().collect().await.map(|c| c.to_bytes()).unwrap_or_default();
+    // Capped at MAX_BODY_BYTES: an unbounded read here lets one oversized (or buggy) gateway request
+    // exhaust this process's memory over an 8-hour run.
+    let reqbody = match Limited::new(req.into_body(), MAX_BODY_BYTES).collect().await {
+        Ok(c) => c.to_bytes(),
+        Err(_) => {
+            return Ok(Response::builder()
+                .status(hyper::StatusCode::PAYLOAD_TOO_LARGE)
+                .header("content-type", "application/json")
+                .body(Full::new(Bytes::from_static(b"{\"error\":\"payload too large\"}")).boxed())
+                .unwrap());
+        }
+    };
     if recording {
         let d = dialect_for(&path);
         let mut map = recorder.lock().unwrap();
@@ -379,37 +410,45 @@ async fn main() {
     let recorder: Arc<Recorder> = Arc::new(Recorder::default());
 
     // Bind 0.0.0.0 (not just loopback) so container-networked gateways (Arch via host.docker.internal,
-    // Envoy AI via the kind bridge IP) can reach the mock — the loopback path 127.0.0.1 that the
+    // Envoy AI via the kind bridge IP) can reach the mock; the loopback path 127.0.0.1 that the
     // --network-host and native gateways use is unchanged.
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
-    // BIND WITH RETRY (audit #21). This was `TcpListener::bind(addr).await.expect("bind")`, so a single
-    // transient EADDRINUSE was instantly FATAL. The harness restarts the mock between cells by pkill'ing
-    // the previous one and relaunching after a blind `sleep 1`; pkill returns before the old process has
-    // exited, so the fresh mock regularly landed on a port its predecessor still held, panicked, and left
-    // the harness probing a dead socket — 48 of 75 served cells in the 2026-07-25 field run recorded
-    // "untestable / stream_mock_unready", emptying the matrix streaming lane for every gateway.
-    //
-    // lib/harness.sh mock_stop_wait now waits for the port to be genuinely free, which is the real fix.
-    // This is the second layer: a brief retry means a lost race COSTS A FEW SECONDS instead of silently
-    // destroying a cell's measurement. The failure is still fatal if the port never frees — a mock that
-    // is not listening must never look like a mock that is.
+    // Retry the bind for up to 20s on failure: the harness may relaunch the mock (after pkill'ing the
+    // previous one) before the old process has released the port, so a transient EADDRINUSE here must
+    // not be fatal on the first try. lib/harness.sh's mock_stop_wait is the primary defense (it waits
+    // for the port to actually free); this retry only covers the race it occasionally still loses.
+    // Still fatal if the port never frees within the deadline.
     let listener = {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
         loop {
             match TcpListener::bind(addr).await {
                 Ok(l) => break l,
                 Err(e) if std::time::Instant::now() < deadline => {
-                    eprintln!("mock: bind {addr} failed ({e}); the previous mock may still hold the port — retrying");
+                    eprintln!("mock: bind {addr} failed ({e}); the previous mock may still hold the port - retrying");
                     tokio::time::sleep(std::time::Duration::from_millis(250)).await;
                 }
                 Err(e) => panic!("mock: could not bind {addr} within 20s: {e}"),
             }
         }
     };
-    eprintln!("mock listening on {addr} (ttft={ttft_ms}ms, proto=h1+h2c, stream={s_chunks}x{s_bytes}B@{s_interval}ms on stream:true) — OpenAI/Responses/Anthropic/Gemini/Bedrock/Cohere");
+    eprintln!("mock listening on {addr} (ttft={ttft_ms}ms, proto=h1+h2c, stream={s_chunks}x{s_bytes}B@{s_interval}ms on stream:true) - OpenAI/Responses/Anthropic/Gemini/Bedrock/Cohere");
+    // Backstop against unbounded in-flight connections over an 8-hour run (a leak or a runaway
+    // client), not a tight operational limit - OTB_MAX_CONC's own ceiling elsewhere in this repo
+    // defaults to 512, so this is set far above anything the benchmark's own concurrency produces.
+    let conn_permits = Arc::new(tokio::sync::Semaphore::new(20_000));
     loop {
         let (stream, _) = match listener.accept().await {
             Ok(s) => s,
+            Err(e) => {
+                eprintln!("mock: accept failed: {e}");
+                continue;
+            }
+        };
+        // Wait for a permit before accepting further work: caps concurrent in-flight connections so
+        // a leak or a runaway client can't accumulate unboundedly over an 8-hour run. acquire_owned
+        // only fails if the semaphore is closed, which never happens here.
+        let permit = match conn_permits.clone().acquire_owned().await {
+            Ok(p) => p,
             Err(_) => continue,
         };
         let _ = stream.set_nodelay(true);
@@ -417,8 +456,10 @@ async fn main() {
         let frames = frames.clone();
         let recorder = recorder.clone();
         tokio::spawn(async move {
+            // Held for the life of the connection; dropped (releasing the permit) when this task ends.
+            let _permit = permit;
             // auto::Builder sniffs the HTTP/2 preface and serves h2c to clients that speak it, h1 to
-            // those that don't — so gateways that multiplex to the upstream (like a real HTTP/2
+            // those that don't - so gateways that multiplex to the upstream (like a real HTTP/2
             // provider) exercise that path, while h1-only gateways are served exactly as before. No
             // TLS: keeps the mock cheap so it stays off the critical path. (An opt-in TLS+ALPN variant
             // can be added later for a separate full-realism column.)
@@ -437,14 +478,19 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        body_for, dialect_for, json_escape, models_for, request_shape_ok, state_json, wants_stream,
-        Bytes, Recorder, StreamFrames, DIALECTS, ANTHROPIC, OPENAI,
+        body_for, dialect_for, handle, json_escape, models_for, request_shape_ok, send_frame,
+        state_json, wants_stream, Arc, BodyExt, Bytes, Frame, Full, Limited, Recorder, StreamFrames,
+        DIALECTS, ANTHROPIC, MAX_BODY_BYTES, OPENAI, SSE_SEND_TIMEOUT,
     };
+    use hyper::service::service_fn;
+    use hyper_util::rt::TokioIo;
+    use std::convert::Infallible;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
 
     // The mock must serve every dialect identically and the matrix's leg-3 body_ok must PROVE the
     // gateway spoke that dialect's request shape. These tests pin request_shape_ok per dialect,
-    // including the R3-M6 tightening that rejects an unconverted OpenAI body on the bedrock/cohere
-    // legs (previously any {"messages":[…]} satisfied all three).
+    // including rejecting an unconverted OpenAI body on the bedrock/cohere legs.
 
     #[test]
     fn openai_accepts_messages() {
@@ -466,7 +512,7 @@ mod tests {
             br#"{"messages":[{"role":"user","content":[{"text":"x"}]}],"inferenceConfig":{"maxTokens":16}}"#
         ));
         // a RAW OpenAI chat body forwarded to /converse without building the Converse shape:
-        // messages present but content is a plain string -> must be REJECTED (the M6 fix)
+        // messages present but content is a plain string -> must be REJECTED
         assert!(!request_shape_ok(
             "bedrock",
             br#"{"model":"m","messages":[{"role":"user","content":"hello"}]}"#
@@ -533,10 +579,9 @@ mod tests {
         assert_eq!(dialect_for("/totally/unknown"), "other");
     }
 
-    // A .../models request must be answered BEFORE the chat routing, and per provider. A single
-    // shared catalog that listed every provider's models on every base made a gateway that routes by
-    // bare model name register the same name under several providers and then pick one arbitrarily,
-    // which silently measured a different pairing than the one the cell claims.
+    // A .../models request must be answered BEFORE the chat routing, and per provider: a shared
+    // catalog listing every provider's models under one base would let a gateway that routes by bare
+    // model name register the same name under several providers and silently measure the wrong pairing.
     #[test]
     fn a_model_list_is_provider_specific_and_never_advertises_another_provider() {
         for (path, mine, theirs) in [
@@ -728,5 +773,114 @@ mod tests {
         assert_eq!(dialect_for("/v2/chat"), "cohere");
         assert_eq!(dialect_for("/v1beta/models/m:generateContent"), "gemini");
         assert_eq!(dialect_for("/something/else"), "other");
+    }
+
+    // ── request body cap ────────────────────────────────────────────────────────────────────────
+
+    // A gateway (or a bug in one) sending a body past MAX_BODY_BYTES must get a real 413, not have
+    // this process read the whole thing into memory unbounded. Drives handle() over a real loopback
+    // connection - the cap lives in how handle() wraps the incoming body, so a test against Limited
+    // in isolation would not prove the wrapping actually happened.
+    #[tokio::test]
+    async fn a_request_body_over_the_cap_gets_413_instead_of_being_read_unbounded() {
+        let listener = match TcpListener::bind("127.0.0.1:0").await {
+            Ok(l) => l,
+            Err(e) => panic!("loopback bind must succeed in a test sandbox: {e}"),
+        };
+        let addr = match listener.local_addr() {
+            Ok(a) => a,
+            Err(e) => panic!("bound listener must report its local addr: {e}"),
+        };
+        let frames = Arc::new(StreamFrames::build(1, 0, 1));
+        let recorder: Arc<Recorder> = Arc::new(Recorder::default());
+        tokio::spawn(async move {
+            let (stream, _) = match listener.accept().await {
+                Ok(s) => s,
+                Err(e) => panic!("test server accept must succeed: {e}"),
+            };
+            let io = TokioIo::new(stream);
+            let _ = hyper::server::conn::http1::Builder::new()
+                .serve_connection(
+                    io,
+                    service_fn(move |r| handle(r, 0, frames.clone(), recorder.clone(), false)),
+                )
+                .await;
+        });
+
+        let mut client = match TcpStream::connect(addr).await {
+            Ok(c) => c,
+            Err(e) => panic!("test client connect must succeed: {e}"),
+        };
+        let oversized = vec![b'a'; MAX_BODY_BYTES + 1024];
+        let req_head = format!(
+            "POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            oversized.len()
+        );
+        if let Err(e) = client.write_all(req_head.as_bytes()).await {
+            panic!("writing the request head must succeed: {e}");
+        }
+        if let Err(e) = client.write_all(&oversized).await {
+            panic!("writing the oversized body must succeed: {e}");
+        }
+
+        let mut resp = Vec::new();
+        if let Err(e) = client.read_to_end(&mut resp).await {
+            panic!("reading the response must succeed: {e}");
+        }
+        let status_line = String::from_utf8_lossy(&resp[..resp.len().min(32)]).into_owned();
+        assert!(status_line.contains("413"), "a body over the cap must get 413, got: {status_line}");
+    }
+
+    // The library primitive the fix relies on: a body at exactly the cap is unaffected, so the cap
+    // does not falsely reject a request the benchmark itself sends (the largest real payloads in
+    // this repo's suites are nowhere near MAX_BODY_BYTES, but the boundary must not be off-by-one).
+    #[tokio::test]
+    async fn a_body_at_exactly_the_cap_is_still_accepted() {
+        let ok = Full::new(Bytes::from(vec![0u8; MAX_BODY_BYTES]));
+        let res = Limited::new(ok, MAX_BODY_BYTES).collect().await;
+        assert!(res.is_ok(), "a body at exactly the cap must not be rejected");
+    }
+
+    // ── accept loop connection cap ──────────────────────────────────────────────────────────────
+
+    // main()'s accept loop backpressures on this semaphore rather than accumulating unbounded
+    // in-flight connections. This pins the mechanism itself: once every permit is held, no further
+    // permit is available until one is released.
+    #[test]
+    fn the_connection_semaphore_backpressures_once_at_capacity() {
+        let sem = tokio::sync::Semaphore::new(2);
+        let p1 = match sem.try_acquire() {
+            Ok(p) => p,
+            Err(e) => panic!("first permit must be available: {e}"),
+        };
+        let _p2 = match sem.try_acquire() {
+            Ok(p) => p,
+            Err(e) => panic!("second permit must be available: {e}"),
+        };
+        assert!(sem.try_acquire().is_err(), "a third permit must not be available once the cap is reached");
+        drop(p1);
+        assert!(sem.try_acquire().is_ok(), "releasing a permit must free capacity for the next connection");
+    }
+
+    // ── SSE writer send timeout ─────────────────────────────────────────────────────────────────
+
+    // A peer that stalls the TCP connection without closing it never drains the mpsc receiver, so
+    // an unbounded tx.send().await would leak the writer task for the rest of the run. Fills the
+    // one-slot channel and never drains it - the receiver is kept alive (not dropped) so this proves
+    // the timeout branch, not the pre-existing closed-channel branch.
+    #[tokio::test]
+    async fn send_frame_gives_up_on_a_stalled_but_open_receiver_instead_of_blocking_forever() {
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<Frame<Bytes>, Infallible>>(1);
+        if let Err(e) = tx.try_send(Ok(Frame::data(Bytes::from_static(b"first")))) {
+            panic!("filling the one-slot buffer must succeed: {e}");
+        }
+        let start = tokio::time::Instant::now();
+        // Bounded well above SSE_SEND_TIMEOUT so a regression back to an unbounded .send().await
+        // fails this test on the assertion below rather than hanging the whole suite.
+        let sent = tokio::time::timeout(SSE_SEND_TIMEOUT * 20, send_frame(&tx, Bytes::from_static(b"second"))).await;
+        let elapsed = start.elapsed();
+        assert_eq!(sent, Ok(false), "a send into a full channel with a stalled receiver must give up, not hang");
+        assert!(elapsed >= SSE_SEND_TIMEOUT, "must wait out SSE_SEND_TIMEOUT before giving up, elapsed {elapsed:?}");
+        drop(rx);
     }
 }

@@ -3,9 +3,8 @@
 //
 // The engine binary. Subcommands mirror the shell functions one for one, taking the same input on
 // stdin and printing the same thing on stdout, so a differential harness can run both
-// implementations over generated inputs and diff them. Parity that is executed beats parity that is
-// reviewed: a side-by-side reading of these two searches missed four defects that a diff would have
-// caught on the first random case.
+// implementations over generated inputs and diff them: parity that is executed catches more than
+// parity that is only reviewed by eye.
 
 use std::io::Read;
 use std::process::ExitCode;
@@ -223,11 +222,10 @@ fn main() -> ExitCode {
                 eprintln!("cannot create {results_dir}: {e}");
                 return ExitCode::FAILURE;
             }
-            // The grid and the search range are overridable because the full default run is 36 cells
-            // x a peak search x a pinned child per rung, and there was no way to ask for a smaller
-            // one. That is not only a convenience: an end-to-end run that cannot be shrunk cannot be
-            // tested, and this entry point had no test at all. A field run passes nothing here and
-            // gets the same defaults as before.
+            // The grid and the search range are overridable, not only for convenience: the full
+            // default run is 36 cells x a peak search x a pinned child per rung, and an end-to-end
+            // run that cannot be shrunk cannot be tested. Passing nothing here gets the same
+            // defaults a field run uses.
             let raw_dialects = std::env::var("OTB_DIALECTS").ok();
             let dialects = match otb_engine::ingress::dialects_from(raw_dialects.as_deref()) {
                 Ok(d) => d,
@@ -320,7 +318,7 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
                 Some(Ok(spec)) => {
-                    let mut launcher = otb_engine::launch::RealLauncher;
+                    let mut launcher = otb_engine::launch::RealLauncher::default();
                     match otb_engine::launch::launch_default(&mut launcher, &spec) {
                         Ok(l) => {
                             println!("launched {} in {} attempt(s)", spec.runtime.identity(), l.attempts);

@@ -42,12 +42,11 @@ fn serve(stop: Arc<AtomicBool>) -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind a loopback port");
     let addr = listener.local_addr().expect("read back the bound port");
 
-    // A BLOCKING accept loop. This was a polling loop that slept between accepts to check a stop
-    // flag, and under the box-qualification window - thirty-two connections arriving at once - the
-    // sleep queued them long enough that some requests failed. A window with failures is not a clean
-    // reading, so the engine correctly reported an absence, and the fixture rather than the engine
-    // was the thing that could not keep up. A benchmark fixture that cannot serve the load being
-    // measured makes every number taken against it a measurement of the fixture.
+    // A BLOCKING accept loop, not a polling one that sleeps between accepts to check a stop flag: a
+    // burst of connections arriving at once (as the box-qualification window does) would queue
+    // behind that sleep long enough for some requests to fail, and a benchmark fixture that cannot
+    // serve the load being measured makes every number taken against it a measurement of the
+    // fixture, not the engine.
     //
     // Nothing needs to poll for shutdown: the accept thread is detached, and the process exits when
     // the tests finish regardless of it.
@@ -66,7 +65,7 @@ fn handle(stream: TcpStream, stop: Arc<AtomicBool>) {
     let mut out = stream;
 
     // One connection may carry many requests: the generator reuses them, and a reused connection is
-    // exactly where a framing defect shows up (round 1's worst bug desynchronised one).
+    // exactly where a framing defect shows up.
     while !stop.load(Ordering::Relaxed) {
         let mut content_length = 0usize;
         let mut saw_request_line = false;
@@ -305,16 +304,15 @@ fn every_module_the_artifact_needs_is_reachable_from_a_real_run() {
     // --- rss.rs: WIRED -----------------------------------------------------------------------------
     //
     // site/gen-data.mjs takes memory SOLELY from this per-cell window - "No fallback, and NO
-    // per-gateway memory scalar" - so while this was absent the board published no memory for any
-    // gateway at all. The window is now taken on every served cell.
+    // per-gateway memory scalar" - so the window must be taken on every served cell or the board
+    // publishes no memory for that gateway at all.
     //
     // The three numbers are asserted as KEYS, not as values, and that is deliberate. This fixture is
     // a thread inside the test process, not a separate process the manifest's declared identity can
     // find, and on a non-Linux host there is no /proc to read anyway. So on this machine the honest
     // result is three nulls, and asserting a number here would only pass on a Linux box with a real
-    // gateway - i.e. it would be a test that cannot run where it is written. What this DOES prove,
-    // which is the thing that was missing, is that the memory group ran and filled its declared
-    // fields rather than being skipped.
+    // gateway - i.e. it would be a test that cannot run where it is written. What this DOES prove is
+    // that the memory group ran and filled its declared fields rather than being skipped.
     let memory = &cell["memory"];
     assert!(!memory.is_null(), "the memory window must be taken on a served cell: {cell:#}");
     for field in ["idle_rss_mib", "peak_rss_mib", "peak_rss_hwm_mib"] {

@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
-# Gateway manifest: LiteLLM-Rust (BerriAI's compiled AI-gateway beta) — BUILT FROM SOURCE, run native.
+# Gateway manifest: LiteLLM-Rust (BerriAI's compiled AI-gateway beta) - BUILT FROM SOURCE, run native.
 #
 # EXCEPTION to the everything-runs-its-official-docker-image rule, kept deliberately: no official
 # image ships the code this benchmark measures. ghcr.io/berriai/litellm-rust (checked 2026-07-23)
-# publishes only v1.89.3/main-v1.89.3 — linux/amd64-only (no arm64 for the Graviton bench boxes)
+# publishes only v1.89.3/main-v1.89.3 - linux/amd64-only (no arm64 for the Graviton bench boxes)
 # AND built from a ref that predates the /v1/messages route, which exists ONLY on the
 # litellm_rust_gateway_v1_messages_route branch pinned below in this file (never in any published
 # image). Inventing our own image would defeat the official-artifact rule, so this stays a pinned
@@ -12,14 +12,14 @@
 #
 # IMPORTANT (verified against their source at commit 698072308, the public
 # `litellm_rust_gateway_v1_messages_route` branch): the /v1/messages route serves ONLY the
-# `azure_ai` provider — messages_provider_config() returns None for `anthropic`/`openai`, and
+# `azure_ai` provider - messages_provider_config() returns None for `anthropic`/`openai`, and
 # their own unit test asserts it. AND it only actually serves when launched with the
 # `python-config` reader (LITELLM_CONFIG_PATH + an importable `litellm`); the lean env config
-# returns HTTP 400. So the ONLY configuration that serves this endpoint is the one below — which
+# returns HTTP 400. So the ONLY configuration that serves this endpoint is the one below - which
 # embeds CPython and loads the full `litellm` package (~275 MB RSS). That is the honest,
 # only-working launch, not a strawman.
 GW_KIND=native
-# Self-describing manifest metadata — charts.py + the run lists read these, so a gateway
+# Self-describing manifest metadata - charts.py + the run lists read these, so a gateway
 # is fully defined by its own dir (add/remove a dir → it appears/disappears everywhere).
 GW_DISPLAY="LiteLLM · Rust"                      # label in charts + report tables
 GW_LANG=Rust                            # implementation language → bar color bucket
@@ -115,7 +115,7 @@ gw_version() {
 # azure_ai model pointing at the mock; api_base ending in /v1/messages is used verbatim by
 # complete_azure_anthropic_url, so it hits the mock's Messages endpoint directly. gw_launch renders it
 # and loads it via LITELLM_CONFIG_PATH; gw_config cats the SAME file (rendering via this helper only if
-# absent) — so the benchmarked config and the published artifact cannot drift.
+# absent) - so the benchmarked config and the published artifact cannot drift.
 _lr_write_config() {
   mkdir -p "$GW_DIR"
   cat > "$GW_DIR/config.gen.yaml" <<YAML
@@ -148,9 +148,9 @@ gw_launch() {
 # publishes it, so "fresh source build + this config → these numbers" is reproducible. The YAML is
 # read from the file gw_launch just rendered (falls back to rendering it if not present yet), so it
 # can never drift from what the gateway actually loaded.
-# OOTB posture: there are NO feature strips or perf tuning here — this is the ONLY configuration that
+# OOTB posture: there are NO feature strips or perf tuning here - this is the ONLY configuration that
 # serves the /v1/messages route at all (azure_ai via the python-config reader; the lean env config
-# returns HTTP 400 — see the header). LITELLM_MASTER_KEY is the gateway's own mandatory auth (the Rust
+# returns HTTP 400 - see the header). LITELLM_MASTER_KEY is the gateway's own mandatory auth (the Rust
 # beta requires it to boot), shown as its dummy value; api_key is dummy (no live secret on the rig).
 gw_config() {
   local cfg="$GW_DIR/config.gen.yaml"
@@ -204,7 +204,7 @@ GW_XLATE_CAP=0
 GW_XLATE_CAP_NOTE="LiteLLM-Rust beta's only working route is anthropic-in -> anthropic-shaped azure_ai upstream (/v1/messages passthrough; messages_provider_config serves only azure_ai, commit 698072308) - no openai upstream dialect exists, so anthropic-to-openai translation is not a claimed capability"
 
 # Memory: BOTH readers cover the SAME process set (the litellm-ai-gateway process tree), via the shared
-# lib/harness.sh pair — the identical method + units the docker manifests get from
+# lib/harness.sh pair - the identical method + units the docker manifests get from
 # container_rss_mib/container_hwm_mib. They used to disagree: gw_rss read a SINGLE pid's
 # /proc/<pid>/status while gw_hwm walked the whole tree, so idle/peak/recovered and
 # peak_rss_hwm_mib described different populations of the same gateway.

@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 //
-// THE STEADINESS GATE. Ported from lib/plateau.sh, which replaced a fixed-duration memory load: a
-// timer says when WE stopped looking, not when the series stopped moving, and a gateway still
-// climbing at the deadline had its mid-climb value published as if it were a settled one.
+// THE STEADINESS GATE: a timer says when WE stopped looking, not when the series stopped moving, so
+// a fixed-duration load would publish a gateway's mid-climb value as if it were a settled one.
 //
 // A pure spread test ("max minus min in the window is small") is not enough: a leak that is
 // asymptoting has tiny sample-to-sample deltas near its tail, so it passes a spread test while still
@@ -135,10 +134,9 @@ pub fn plateau_check(samples: &[Sample], window_s: f64, trend_pct: f64, range_pc
 
     // MAGNITUDE, NOT SIGN. `drift` is signed - positive when the window is still climbing, negative
     // when it is declining - but `Verdict::Steady`'s own contract is "not moving in any direction
-    // that matters". Comparing the signed value against a positive threshold bounded growth only:
-    // any decline, however steep, satisfied `drift < trend_pct` because a negative number is always
-    // less than a positive one. A window whose second half ran measurably BELOW its first half -
-    // a real, non-noise decline bigger than the configured trend gate - was published as settled.
+    // that matters", so the comparison uses `drift.abs()`: comparing the signed value against a
+    // positive threshold would bound growth only, since any decline, however steep, is always less
+    // than a positive threshold and would read as settled.
     if drift.abs() < trend_pct && spread < range_pct {
         Verdict::Steady
     } else {
@@ -177,10 +175,8 @@ pub fn max(values: &[f64]) -> Measurement<f64> {
 }
 
 /// The `p`-th percentile of `values`, for `p` in `0.0..=1.0`, by NEAREST RANK: sort ascending and take
-/// the element at `floor(n * p)`, clamped to the last index. This is not an interpolation convention
-/// pulled from nowhere: it matches `pct()` in loadgen/ugen.go, the one percentile calculation already
-/// live in this harness. There is no shell equivalent to match, since plateau.sh never needed one.
-/// Absent on an empty slice.
+/// the element at `floor(n * p)`, clamped to the last index, matching the same convention `gen.rs`'s
+/// load generator uses. Absent on an empty slice.
 pub fn percentile(values: &[f64], p: f64) -> Measurement<f64> {
     if values.is_empty() {
         return Measurement::absent(Absent::NotMeasured);

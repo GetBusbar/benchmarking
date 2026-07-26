@@ -1,14 +1,13 @@
 name: bench-rig
 
-# Build the bench "rig" — the engine (Rust), the mock (Rust) and the load generator (Go) — for BOTH
-# arches natively, and
+# Build the bench "rig" - the engine (Rust) and the mock (Rust) - for BOTH arches natively, and
 # publish them to the rolling `rig` release. The bench boxes then just `curl` the right binary
 # (lib/rig.sh), so they need no build toolchain: bare OS + docker is enough. Runs on any change to
-# the mock or loadgen sources, and on demand.
+# the mock sources, and on demand.
 on:
   push:
     branches: [main]
-    paths: ["mock/**", "loadgen/**", "engine/**", ".github/workflows/bench-rig.yml"]
+    paths: ["mock/**", "engine/**", ".github/workflows/bench-rig.yml"]
   workflow_dispatch:
 
 permissions:
@@ -22,10 +21,8 @@ jobs:
         include:
           - arch: arm64
             runner: ubuntu-24.04-arm
-            goarch: arm64
           - arch: x86
             runner: ubuntu-24.04
-            goarch: amd64
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
@@ -34,10 +31,6 @@ jobs:
         run: |
           curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version: "stable"
 
       - name: Build mock (Rust, native ${{ matrix.arch }})
         run: |
@@ -54,16 +47,11 @@ jobs:
           cargo build --release --bin otb
           cp target/release/otb "otb-${{ matrix.arch }}"
 
-      - name: Build loadgen (Go, ${{ matrix.arch }})
-        run: |
-          GOOS=linux GOARCH=${{ matrix.goarch }} CGO_ENABLED=0 go build -ldflags="-s -w" \
-            -o "ugen-${{ matrix.arch }}" loadgen/ugen.go
-
       - name: Publish to the rolling `rig` release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release view rig >/dev/null 2>&1 || \
             gh release create rig --title "bench-rig binaries (rolling latest)" \
-              --notes "Prebuilt mock (Rust) + loadgen (Go) for the bench boxes. Rebuilt by bench-rig.yml."
-          gh release upload rig --clobber "mock-${{ matrix.arch }}" "ugen-${{ matrix.arch }}" "otb-${{ matrix.arch }}"
+              --notes "Prebuilt mock + engine for the bench boxes. Rebuilt by bench-rig.yml."
+          gh release upload rig --clobber "mock-${{ matrix.arch }}" "otb-${{ matrix.arch }}"

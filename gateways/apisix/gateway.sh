@@ -7,7 +7,7 @@
 # config.yaml carries the DB-less standalone run-mechanic (data_plane role + yaml config_provider)
 # + the port binding + the cpuset worker-process pin; admin API and access logging are left at APISIX's
 # shipped defaults (enable_admin on / enable_access_log on). worker_processes is PINNED to the cpuset
-# core count — nginx `auto` reads the HOST cpu count (blind to --cpuset-cpus) and over-spawns workers on
+# core count - nginx `auto` reads the HOST cpu count (blind to --cpuset-cpus) and over-spawns workers on
 # the pinned cores, so we pin it to emulate the real N-core box (same CPU-pinning run-mechanic the Go
 # gateways use with GOMAXPROCS), not left at "auto". APISIX_IMAGE is pinned below in this file.
 GW_KIND=docker
@@ -16,7 +16,7 @@ GW_KIND=docker
 # manifest instead of hardcoding it. lib/gateway_isolation_test.sh checks it against the --name
 # below, so the two cannot drift.
 GW_CONTAINER=apisix-bench
-# Self-describing manifest metadata — charts.py + the run lists read these, so a gateway
+# Self-describing manifest metadata - charts.py + the run lists read these, so a gateway
 # is fully defined by its own dir (add/remove a dir → it appears/disappears everywhere).
 GW_DISPLAY="APISIX"                      # label in charts + report tables
 GW_LANG=Other                            # implementation language → bar color bucket
@@ -60,16 +60,16 @@ APISIX_IMAGE="${APISIX_IMAGE:-apache/apisix:3.17.0-debian}"
 
 # ── the bedrock ingress URI: ONE definition, used by the route AND by the matrix probe ────────────
 # Bedrock is one of only two dialects that carry the model in the URL PATH (see lib/ingress.sh), and
-# ai-proxy's bedrock provider only accepts a BEDROCK model id — it can never be GW_MODEL (gpt-4o-mini,
+# ai-proxy's bedrock provider only accepts a BEDROCK model id - it can never be GW_MODEL (gpt-4o-mini,
 # the OpenAI-dialect body model). The harness default for the bedrock probe path is
 # /model/$GW_MODEL/converse, so with no override the matrix POSTed /model/gpt-4o-mini/converse while
 # the only wired route is /model/<bedrock-model>/converse: APISIX answered 404, the bedrock column's
 # warm-up never went green, and all six of its cells were published as harness_boot_failure
-# (results/fanout-apisix.log 07:50:26-07:52:23 — three boot attempts, each 404 on
+# (results/fanout-apisix.log 07:50:26-07:52:23 - three boot attempts, each 404 on
 # "POST /model/gpt-4o-mini/converse"). That is unmeasured data, not a gateway "no".
 # APISIX_BEDROCK_MODEL is the single source: the route URI, the ai-proxy options.model and the matrix
 # probe path are all derived from it, so the route and the probe can never drift apart again. This is
-# a static manifest declaration (lib/ingress.sh honours GW_MATRIX_PATH_* at CALL time) — not a
+# a static manifest declaration (lib/ingress.sh honours GW_MATRIX_PATH_* at CALL time) - not a
 # per-column rewrite: the one config is unchanged and every egress column uses this same URI.
 APISIX_BEDROCK_MODEL="anthropic.claude-3-sonnet-20240229-v1:0"
 GW_MATRIX_PATH_BEDROCK="/model/$APISIX_BEDROCK_MODEL/converse"
@@ -80,30 +80,30 @@ gw_version() {
 }
 
 gw_build() {
-  # OOTB config.yaml: the run-mechanic that lets APISIX run without an external etcd — the DB-less
-  # standalone data_plane role with the yaml config_provider (routes from conf/apisix.yaml) — plus the
+  # OOTB config.yaml: the run-mechanic that lets APISIX run without an external etcd - the DB-less
+  # standalone data_plane role with the yaml config_provider (routes from conf/apisix.yaml) - plus the
   # port binding and the cpuset worker-process pin. Everything else is left at APISIX's shipped
   # defaults, honestly:
-  #   * enable_admin: DEFAULT true (kept) — the Admin API boots fine in DB-less yaml mode with no etcd
+  #   * enable_admin: DEFAULT true (kept) - the Admin API boots fine in DB-less yaml mode with no etcd
   #     (ops.lua skips init_etcd for the data_plane role; admin/init.lua runs its standalone branch and
   #     returns before any etcd sync). The shipped default admin_key satisfies the token check, so no
-  #     extra config is needed. Previously we set it false — a gratuitous feature-strip, removed.
+  #     extra config is needed. Previously we set it false - a gratuitous feature-strip, removed.
   #   * nginx_config.worker_processes: PINNED to the cpuset core count (0-3 → 4), NOT left at "auto".
   #     APISIX is nginx/OpenResty, and nginx's `worker_processes auto` reads the HOST cpu count via
-  #     sysconf(_SC_NPROCESSORS_ONLN) — it is BLIND to --cpuset-cpus, so on a 4-core-pinned container
+  #     sysconf(_SC_NPROCESSORS_ONLN) - it is BLIND to --cpuset-cpus, so on a 4-core-pinned container
   #     it spawns 16 workers thrashing 4 cores, a scheduler-contention HANDICAP the Rust gateways
   #     (tokio available_parallelism respects cpuset) never pay. Pinning to the cpuset count emulates
-  #     the same N-core box every gateway is measured on — the identical CPU-pinning run-mechanic the
+  #     the same N-core box every gateway is measured on - the identical CPU-pinning run-mechanic the
   #     Go gateways use with GOMAXPROCS (and exactly what nginx `auto` WOULD read on a real 4-core
   #     box). This corrects nginx's cpuset-blindness; it is a run-mechanic, not a perf/concurrency tune.
-  #   * nginx_config.http.enable_access_log: DEFAULT true (kept) — previously false, which suppressed
+  #   * nginx_config.http.enable_access_log: DEFAULT true (kept) - previously false, which suppressed
   #     APISIX's default HTTP request/access logging; that logging is on by default and stays on.
   _apisix_write_config
   _apisix_write_routes
   ${BENCH_DOCKER:-sudo docker} pull "$APISIX_IMAGE" >/dev/null 2>&1 || true
 }
 
-# _apisix_write_config: emit APISIX's ONE canonical conf/config.yaml — the DB-less standalone
+# _apisix_write_config: emit APISIX's ONE canonical conf/config.yaml - the DB-less standalone
 # run-mechanic (data_plane role + yaml config_provider), the port binding, and the cpuset
 # worker-process pin. SINGLE SOURCE: rendered here once and called from BOTH gw_build and the
 # gw_config fallback (mirroring _apisix_write_routes), so the two can never drift. worker_processes
@@ -132,7 +132,7 @@ YAML
 # secret_access_key) and provider_conf.region for SigV4 (ai-proxy/schema.lua + validate_provider_
 # requirements @3.17.0); a schema-invalid route is silently DROPPED by the yaml config provider
 # (core/config_yaml.lua logs and skips it, APISIX still boots). Dummy AWS keys sign fine; the mock
-# ignores the signature. Non-bedrock providers take a mandatory Bearer header (dummy key) — ai-proxy's
+# ignores the signature. Non-bedrock providers take a mandatory Bearer header (dummy key) - ai-proxy's
 # schema requires an auth block, so this is the gateway's own required-auth posture, kept (not added).
 _apisix_plugcfg() {
   local prov="$1" model="$2" host="http://127.0.0.1:$MOCK_PORT"
@@ -160,8 +160,8 @@ _apisix_plugcfg() {
 # the perf/memory/throughput/stream lanes and the matrix run the SAME config; the matrix does not swap
 # providers per lane, it just drives a different ingress URI. APISIX auto-detects the client protocol
 # from body+URI (ai-protocols/init.lua) and passes it native to the provider. The trailing #END marker
-# is REQUIRED by the yaml config provider. (Cohere/Gemini native wire aren't emittable at 3.17.0 — see
-# GW_MATRIX_CAP — so they are honestly absent, not silently dropped.)
+# is REQUIRED by the yaml config provider. (Cohere/Gemini native wire aren't emittable at 3.17.0 - see
+# GW_MATRIX_CAP - so they are honestly absent, not silently dropped.)
 _apisix_write_routes() {
   cat > "$GW_DIR/apisix.gen.yaml" <<YAML
 routes:
@@ -232,7 +232,7 @@ GW_MATRIX_CAP_NOTE="APISIX 3.17.0 ai-proxy has no native Gemini generateContent 
 GW_MATRIX_EGRESS="openai openai-responses anthropic bedrock"
 gw_matrix_egress() {
   # All four egress providers are already wired as simultaneous routes in the ONE config
-  # (_apisix_write_routes), each on its native ingress URI — so no per-lane route rewrite is needed. The
+  # (_apisix_write_routes), each on its native ingress URI - so no per-lane route rewrite is needed. The
   # matrix runner drives the URI for the requested ingress/egress; we just validate the egress is one we
   # wired and (re)launch the identical all-providers config.
   case "$1" in
@@ -250,18 +250,18 @@ gw_launch() {
 }
 
 # ── OOTB config artifact (file-driven) ────────────────────────────────────────────────────────────
-# gw_config prints the canonical OOTB config this gateway launches with — both files APISIX loads,
+# gw_config prints the canonical OOTB config this gateway launches with - both files APISIX loads,
 # rendered exactly as mounted: config.yaml (the DB-less standalone run-mechanic + port) and apisix.yaml
 # (the ai-proxy routes wiring every mock-reachable declared provider). Read from the files gw_build just
 # produced so they can never drift; falls back to rendering them if not present yet. Secrets are dummy:
 # the openai/anthropic routes carry the dummy Bearer key ai-proxy's schema requires, bedrock the dummy
-# AWS SigV4 keys its schema requires — never a live key. OOTB posture: config.yaml carries the
+# AWS SigV4 keys its schema requires - never a live key. OOTB posture: config.yaml carries the
 # etcd-avoidance run-mechanic (data_plane + yaml config_provider) + port + the cpuset worker-process
 # pin; enable_admin and access_log are left at their shipped defaults (on/on). worker_processes is
-# PINNED to the cpuset core count — NOT left at "auto", which under --cpuset-cpus misreads the host's
+# PINNED to the cpuset core count - NOT left at "auto", which under --cpuset-cpus misreads the host's
 # cores (nginx `auto` = sysconf(_SC_NPROCESSORS_ONLN) = host 16, blind to the cpuset) and over-spawns
 # workers on the pinned cores. That pin is the CPU-pinning run-mechanic emulating the real N-core box
-# every gateway is measured on — the same justification as the Go gateways' GOMAXPROCS. No perf tuning.
+# every gateway is measured on - the same justification as the Go gateways' GOMAXPROCS. No perf tuning.
 gw_config() {
   local cfg="$GW_DIR/config.gen.yaml" routes="$GW_DIR/apisix.gen.yaml"
   [ -f "$cfg" ]    || _apisix_write_config

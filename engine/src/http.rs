@@ -185,13 +185,13 @@ fn read_to_close(stream: &mut TcpStream, deadline: Instant) -> ReadOutcome {
     let mut buf = Vec::new();
     loop {
         // THE CAP APPLIES HERE TOO. This framing has no declared length to check up front - the
-        // peer just streams until it closes the connection, or doesn't - so MAX_BODY_BYTES has to
-        // be enforced against what has actually accumulated instead. It used to only be checked on
-        // the declared-Content-Length path, which left this loop and the chunked one below able to
-        // grow without limit for as long as the deadline allowed: on loopback, tens of seconds is
-        // enough to reach gigabytes. The allocator's failure handler calls abort() unconditionally,
-        // so that is not a panic this harness can catch - it is the eight-hour run dying outright,
-        // and it is exactly what MAX_BODY_BYTES exists to prevent.
+        // peer just streams until it closes the connection, or doesn't - so MAX_BODY_BYTES must be
+        // enforced against what has actually accumulated instead, checking only the declared
+        // Content-Length path would let this loop and the chunked one below grow without limit for
+        // as long as the deadline allowed: on loopback, tens of seconds is enough to reach
+        // gigabytes. The allocator's failure handler calls abort() unconditionally, so that is not a
+        // panic this harness can catch - it is the eight-hour run dying outright, and it is exactly
+        // what MAX_BODY_BYTES exists to prevent.
         if buf.len() > MAX_BODY_BYTES {
             return ReadOutcome::Err(io::Error::other(format!(
                 "close-delimited body exceeded the {MAX_BODY_BYTES} byte cap before the peer closed the connection"
@@ -322,10 +322,42 @@ fn read_head(
         if stripped.is_empty() {
             break;
         }
-        if let Some(kv) = parse_header_line(&line) {
-            headers.push(kv);
+        // obs-fold (RFC 7230 3.2.4): a line starting with SP/HTAB continues the PREVIOUS header's
+        // value rather than starting a new one. Obsolete, but legal, and real front ends (some
+        // proxies wrapping a long Location or a multi-line Warning) still emit it; a continuation
+        // line does not fit parse_header_line's "name: value" shape, so it must be folded here
+        // rather than dropped, or that header's value would be silently truncated.
+        if stripped.first().is_some_and(|b| *b == b' ' || *b == b'\t') {
+            if let Some(last) = headers.last_mut() {
+                let cont = String::from_utf8_lossy(stripped).trim().to_string();
+                if !cont.is_empty() {
+                    last.1.push(' ');
+                    last.1.push_str(&cont);
+                }
+            }
+            // A continuation with no prior header (a malformed lead line) has nothing to fold onto;
+            // tolerated the same as any other unparseable head line.
+            continue;
         }
-        // An unparseable header line is tolerated (skipped): a stray informational line here
+        if let Some((name, value)) = parse_header_line(&line) {
+            if name.eq_ignore_ascii_case("content-length") {
+                if let Some(existing) = header_value(&headers, "content-length") {
+                    if existing != value {
+                        return Err(malformed(
+                            &raw,
+                            format!(
+                                "conflicting Content-Length headers: {existing:?} and {value:?}"
+                            ),
+                        ));
+                    }
+                    // Identical duplicates are tolerated (some servers double-send the same value);
+                    // only a genuine mismatch is a smuggling-relevant error.
+                    continue;
+                }
+            }
+            headers.push((name, value));
+        }
+        // Any other unparseable header line is tolerated (skipped): a stray informational line here
         // should not sink a response that otherwise has a perfectly good status and body.
     }
     Ok((status, headers, raw))
@@ -458,11 +490,11 @@ pub fn post_json(
     request.extend_from_slice(format!("POST {path} HTTP/1.1\r\n").as_bytes());
     request.extend_from_slice(format!("Host: {addr}\r\n").as_bytes());
     request.extend_from_slice(format!("Content-Length: {}\r\n", body.len()).as_bytes());
-    // THE PROBE AND THE LOAD MUST SEND THE SAME REQUEST. The load generator sets this
-    // (gen.rs build_request) and this client did not, so a gateway that requires it on a JSON body
-    // answered 415 to the probe and was published as NOT SERVING a pairing it would have loaded
-    // fine. That is a gateway property asserted from a malformed request of ours, which is the
-    // worst direction for this error to run. A caller may still override it below.
+    // THE PROBE AND THE LOAD MUST SEND THE SAME REQUEST, matching what gen.rs's build_request sets:
+    // a gateway that requires content-type on a JSON body would otherwise answer 415 to the probe
+    // and be published as NOT SERVING a pairing it would have loaded fine, a gateway property
+    // asserted from a malformed request of ours, the worst direction for this error to run. A
+    // caller may still override it below.
     if !headers.iter().any(|(n, _)| n.eq_ignore_ascii_case("content-type")) {
         request.extend_from_slice(b"content-type: application/json\r\n");
     }
@@ -614,9 +646,8 @@ pub struct SseOutcome {
     /// `frames`, in order.
     ///
     /// Frames alone cannot answer a single question the board asks about streaming: every published
-    /// streaming field is a TIMING (time to first token, and the gaps between tokens after it). The
-    /// reader used to collect the frames and drop the clock, so the numbers were unobtainable no
-    /// matter how the caller was wired.
+    /// streaming field is a TIMING (time to first token, and the gaps between tokens after it), so
+    /// the reader must carry a timestamp alongside each frame, not just the frame.
     ///
     /// Measured from the write, not from the connect, so a slow DNS or TCP handshake is not charged
     /// to the gateway's first token.
@@ -624,17 +655,145 @@ pub struct SseOutcome {
     pub end: SseEnd,
 }
 
+/// Decodes `Transfer-Encoding: chunked` framing off a live stream, one logical line at a time, so
+/// `post_json_sse`'s frame loop can read lines the same way whether or not the peer chunked the
+/// response.
+///
+/// THIS IS NOT HYPOTHETICAL. hyper (the mock's own server, and any real gateway's) chunk-encodes
+/// any HTTP/1.1 response body of unknown length, which an SSE stream always is (there is no
+/// Content-Length on an open-ended event stream). The client here always speaks HTTP/1.1
+/// (`post_json_sse` sends `HTTP/1.1` on the request line, same as `post_json`), so chunking is the
+/// NORMAL case, not an edge case, and a chunk boundary landing inside a `data: ...\n` line is a
+/// question of TCP segmentation and hyper's internal buffering, not something this harness
+/// controls. Reading chunk-size lines as if they were frame noise (the prior approach) only
+/// "worked" when a chunk boundary happened to fall on a frame boundary; splitting one `data:` line
+/// across two chunks silently truncated or corrupted a frame with no error raised.
+struct ChunkedLineSource<'a> {
+    stream: &'a mut TcpStream,
+    buf: Vec<u8>,
+    pos: usize,
+    ended: bool,
+}
+
+impl<'a> ChunkedLineSource<'a> {
+    fn new(stream: &'a mut TcpStream) -> Self {
+        Self {
+            stream,
+            buf: Vec::new(),
+            pos: 0,
+            ended: false,
+        }
+    }
+
+    /// Decodes one more chunk into `buf`. `Ok(false)` at the terminal zero-length chunk (trailers,
+    /// if any, are drained and discarded: a probe never needs them). `Err` carries through whatever
+    /// `read_line`/`read_exact_deadline` reported, so the caller reports the same TimedOut/Eof/Err
+    /// distinction it always did.
+    fn refill(&mut self, deadline: Instant) -> Result<bool, ReadOutcome> {
+        if self.ended {
+            return Ok(false);
+        }
+        let size_line = match read_line(self.stream, deadline) {
+            ReadOutcome::Full(l) => l,
+            other => return Err(other),
+        };
+        let size_text = std::str::from_utf8(strip_crlf(&size_line)).unwrap_or("");
+        // Chunk extensions ("1a;foo=bar") are legal; only the hex size before ';' matters here.
+        let size_hex = size_text.split(';').next().unwrap_or("").trim();
+        let size = match usize::from_str_radix(size_hex, 16) {
+            Ok(n) => n,
+            Err(_) => {
+                return Err(ReadOutcome::Err(io::Error::other(format!(
+                    "unparseable chunk size {size_hex:?}"
+                ))))
+            }
+        };
+        if size == 0 {
+            loop {
+                match read_line(self.stream, deadline) {
+                    ReadOutcome::Full(line) => {
+                        if strip_crlf(&line).is_empty() {
+                            break;
+                        }
+                    }
+                    other => return Err(other),
+                }
+            }
+            self.ended = true;
+            return Ok(false);
+        }
+        // Same cap as every other framing this client reads: an arbitrary peer's declared chunk
+        // size, or the running total, must never be trusted with an unbounded allocation.
+        if size > MAX_BODY_BYTES || self.buf.len().saturating_add(size) > MAX_BODY_BYTES {
+            return Err(ReadOutcome::Err(io::Error::other(format!(
+                "chunked SSE body exceeded the {MAX_BODY_BYTES} byte cap"
+            ))));
+        }
+        let chunk = match read_exact_deadline(self.stream, deadline, size) {
+            ReadOutcome::Full(bytes) => bytes,
+            other => return Err(other),
+        };
+        self.buf.extend_from_slice(&chunk);
+        // Bare CRLF after each chunk's data, before the next chunk-size line.
+        match read_line(self.stream, deadline) {
+            ReadOutcome::Full(_) => {}
+            other => return Err(other),
+        }
+        Ok(true)
+    }
+
+    /// The next `\n`-terminated line (CRLF included, same shape `read_line` returns), decoded
+    /// transparently across as many chunks as it takes to complete one. `Ok(None)` once the body
+    /// has ended with nothing left buffered.
+    fn next_line(&mut self, deadline: Instant) -> Result<Option<Vec<u8>>, ReadOutcome> {
+        loop {
+            if let Some(nl) = self.buf[self.pos..].iter().position(|&b| b == b'\n') {
+                let end = self.pos + nl + 1;
+                let line = self.buf[self.pos..end].to_vec();
+                self.pos = end;
+                return Ok(Some(line));
+            }
+            if self.pos > 0 {
+                self.buf.drain(..self.pos);
+                self.pos = 0;
+            }
+            if !self.refill(deadline)? {
+                if self.buf.is_empty() {
+                    return Ok(None);
+                }
+                return Ok(Some(std::mem::take(&mut self.buf)));
+            }
+        }
+    }
+}
+
+/// Either framing, read one line at a time: the raw stream directly (identity/close-delimited
+/// framing, the only case a chunk-unaware reader was ever actually correct for), or dechunked
+/// through `ChunkedLineSource`.
+enum SseSource<'a> {
+    Identity(&'a mut TcpStream),
+    Chunked(ChunkedLineSource<'a>),
+}
+
+impl<'a> SseSource<'a> {
+    fn next_line(&mut self, deadline: Instant) -> ReadOutcome {
+        match self {
+            SseSource::Identity(stream) => read_line(stream, deadline),
+            SseSource::Chunked(src) => match src.next_line(deadline) {
+                Ok(Some(line)) => ReadOutcome::Full(line),
+                Ok(None) => ReadOutcome::Eof(Vec::new()),
+                Err(other) => other,
+            },
+        }
+    }
+}
+
 /// POSTs like `post_json`, then reads Server-Sent-Event `data:` frames off the response body
 /// until `frame_budget` frames have been seen or `timeout` elapses, whichever comes first.
 ///
-/// DELIBERATELY NOT SUPPORTED: a chunked (`Transfer-Encoding: chunked`) event stream. Every SSE
-/// probe this harness drives writes `data: ...\n\n` frames straight onto the connection as they
-/// are produced, which is how both the recording mock and every dialect under test behave; chunk
-/// framing on top of that would need chunk boundaries decoded live against the same deadline this
-/// function already tracks per byte, for a case nothing in this harness produces. Should a target
-/// ever chunk-encode its stream, this reads the chunk-size lines as if they were frame noise
-/// (they will not start with "data:") and skips them, so the probe degrades to under-counting
-/// frames rather than hanging or crashing.
+/// Decodes `Transfer-Encoding: chunked` framing (see `ChunkedLineSource`) before splitting SSE
+/// lines out of the body, since that is the framing hyper (and thus the mock, and thus this
+/// harness's own recorded fixtures) actually uses for an open-ended stream.
 pub fn post_json_sse(
     addr: SocketAddr,
     path: &str,
@@ -661,11 +820,11 @@ pub fn post_json_sse(
     request.extend_from_slice(format!("POST {path} HTTP/1.1\r\n").as_bytes());
     request.extend_from_slice(format!("Host: {addr}\r\n").as_bytes());
     request.extend_from_slice(format!("Content-Length: {}\r\n", body.len()).as_bytes());
-    // THE PROBE AND THE LOAD MUST SEND THE SAME REQUEST. The load generator sets this
-    // (gen.rs build_request) and this client did not, so a gateway that requires it on a JSON body
-    // answered 415 to the probe and was published as NOT SERVING a pairing it would have loaded
-    // fine. That is a gateway property asserted from a malformed request of ours, which is the
-    // worst direction for this error to run. A caller may still override it below.
+    // THE PROBE AND THE LOAD MUST SEND THE SAME REQUEST, matching what gen.rs's build_request sets:
+    // a gateway that requires content-type on a JSON body would otherwise answer 415 to the probe
+    // and be published as NOT SERVING a pairing it would have loaded fine, a gateway property
+    // asserted from a malformed request of ours, the worst direction for this error to run. A
+    // caller may still override it below.
     if !headers.iter().any(|(n, _)| n.eq_ignore_ascii_case("content-type")) {
         request.extend_from_slice(b"content-type: application/json\r\n");
     }
@@ -706,6 +865,7 @@ pub fn post_json_sse(
         };
     }
 
+    let chunked;
     let status = match read_head(&mut stream, deadline) {
         Ok((status, headers, _raw)) => {
             // A content-type that is present and is not an event stream is a definitive answer: this
@@ -722,6 +882,9 @@ pub fn post_json_sse(
                     };
                 }
             }
+            chunked = header_value(&headers, "transfer-encoding")
+                .map(|v| v.to_ascii_lowercase().contains("chunked"))
+                .unwrap_or(false);
             status
         }
         Err(Outcome::TimedOut) => {
@@ -753,8 +916,28 @@ pub fn post_json_sse(
         }
     };
 
+    let mut source = if chunked {
+        SseSource::Chunked(ChunkedLineSource::new(&mut stream))
+    } else {
+        SseSource::Identity(&mut stream)
+    };
+
     let mut frames = Vec::new();
     let mut frame_offsets_us: Vec<u64> = Vec::new();
+    // WHATWG SSE: consecutive `data:` lines with no blank line between them belong to ONE event, and
+    // their values are joined with "\n" before the event fires. A blank line is what dispatches the
+    // pending event (if any) and starts a fresh one; without this, a payload the gateway wrote as
+    // several `data:` lines (a multi-line JSON delta, a formatted message) would arrive as several
+    // separate frames instead of the one logical event it actually is.
+    let mut pending: Option<String> = None;
+    macro_rules! flush_pending {
+        () => {
+            if let Some(data) = pending.take() {
+                frame_offsets_us.push(sent_at.elapsed().as_micros() as u64);
+                frames.push(data);
+            }
+        };
+    }
     loop {
         if frames.len() >= frame_budget {
             return SseOutcome {
@@ -764,19 +947,28 @@ pub fn post_json_sse(
                 end: SseEnd::FrameBudgetReached,
             };
         }
-        match read_line(&mut stream, deadline) {
+        match source.next_line(deadline) {
             ReadOutcome::Full(line) => {
-                let text = String::from_utf8_lossy(strip_crlf(&line));
+                let stripped = strip_crlf(&line);
+                let text = String::from_utf8_lossy(stripped);
                 if let Some(data) = text.strip_prefix("data:") {
-                    // Stamped as the frame is accepted, so the offset is when the frame was READ,
-                    // not when the loop got round to bookkeeping it.
-                    frame_offsets_us.push(sent_at.elapsed().as_micros() as u64);
-                    frames.push(data.trim_start().to_string());
+                    let data = data.trim_start().to_string();
+                    match &mut pending {
+                        Some(acc) => {
+                            acc.push('\n');
+                            acc.push_str(&data);
+                        }
+                        None => pending = Some(data),
+                    }
+                } else if stripped.is_empty() {
+                    // The blank line separating events: dispatch whatever data lines accumulated.
+                    flush_pending!();
                 }
-                // Any other line (event:, id:, a blank separator, chunk-size noise) is not a data
-                // frame and is silently skipped; the probe only ever needs the data frames.
+                // Any other line (event:, id:, chunk-size noise) is not a data frame and is silently
+                // skipped; the probe only ever needs the data frames.
             }
             ReadOutcome::TimedOut(_) => {
+                flush_pending!();
                 return SseOutcome {
                     status: Some(status),
                     frames,
@@ -785,6 +977,7 @@ pub fn post_json_sse(
                 }
             }
             ReadOutcome::Eof(_) => {
+                flush_pending!();
                 return SseOutcome {
                     status: Some(status),
                     frames,
@@ -793,6 +986,7 @@ pub fn post_json_sse(
                 }
             }
             ReadOutcome::Err(_) => {
+                flush_pending!();
                 return SseOutcome {
                     status: Some(status),
                     frames,
@@ -929,9 +1123,9 @@ mod tests {
         (addr, seen)
     }
 
-    // The probe and the load must send the SAME request. A gateway requiring content-type on a JSON
-    // body answered 415 to the probe and was published as not serving a pairing it would have
-    // loaded fine: a gateway property asserted from a malformed request of ours.
+    // The probe and the load must send the SAME request: a gateway requiring content-type on a JSON
+    // body would otherwise answer 415 to the probe and be published as not serving a pairing it
+    // would have loaded fine, a gateway property asserted from a malformed request of ours.
     #[test]
     fn the_probe_sends_a_json_content_type_like_the_load_generator_does() {
         let (addr, seen) = echo_request_server();
@@ -1049,8 +1243,8 @@ mod tests {
     }
 
     // EVERY PUBLISHED STREAMING NUMBER IS A TIMING. Time to first token, and the gaps between
-    // tokens after it - the frames themselves are never published. This reader collected frames and
-    // dropped the clock, which made those numbers unobtainable no matter how the caller was wired.
+    // tokens after it - the frames themselves are never published, so the reader must carry a
+    // timestamp alongside each frame, not just the frame.
     //
     // A server that holds a known pause before the first frame and a different known pause between
     // the rest is what makes the two quantities separable: if the offsets were fabricated, or all
@@ -1638,6 +1832,75 @@ mod tests {
         }
     }
 
+    // obs-fold (RFC 7230 3.2.4): a continuation line starting with a space or tab extends the value
+    // of the header immediately before it, rather than being a header of its own. A reader that
+    // just fails to parse it as "name: value" and drops it silently truncates whatever value was
+    // folded, which for something like a folded Warning or Location is exactly the part an operator
+    // needed to see.
+    #[test]
+    fn an_obs_folded_header_line_is_unfolded_onto_the_previous_header() {
+        let addr = spawn_server(|mut conn| {
+            let _ = read_request_head(&conn);
+            let _ = conn.write_all(
+                b"HTTP/1.1 200 OK\r\nX-Warn: primary reason\r\n \tfolded continuation\r\nContent-Length: 2\r\n\r\nok",
+            );
+        });
+
+        let outcome = post_json(addr, "/x", b"{}", &[], Duration::from_secs(5));
+        match outcome {
+            Outcome::Response(r) => assert_eq!(
+                r.header("x-warn"),
+                Some("primary reason folded continuation"),
+                "the folded line must be appended to the previous header's value, not dropped"
+            ),
+            other => panic!("an obs-folded header must not sink the response, got {other:?}"),
+        }
+    }
+
+    // RFC 7230 3.3.2: multiple Content-Length headers with DIFFERING values is a request-smuggling
+    // shaped ambiguity and must be rejected outright, not silently resolved by taking the first one
+    // and ignoring the rest.
+    #[test]
+    fn conflicting_content_length_headers_are_malformed() {
+        let addr = spawn_server(|mut conn| {
+            let _ = read_request_head(&conn);
+            let _ = conn.write_all(
+                head("HTTP/1.1 200 OK", &["Content-Length: 2", "Content-Length: 4"]).as_bytes(),
+            );
+            let _ = conn.write_all(b"ok");
+        });
+
+        let outcome = post_json(addr, "/x", b"{}", &[], Duration::from_secs(5));
+        match outcome {
+            Outcome::Malformed { message, .. } => {
+                assert!(
+                    message.contains('2') && message.contains('4'),
+                    "the message must name both conflicting values, got {message:?}"
+                );
+            }
+            other => panic!("conflicting Content-Length headers must be Malformed, got {other:?}"),
+        }
+    }
+
+    // Two IDENTICAL Content-Length headers are not a conflict (some servers double-send the same
+    // value) and must not be rejected: only a genuine mismatch is a smuggling-relevant error.
+    #[test]
+    fn identical_duplicate_content_length_headers_are_not_rejected() {
+        let addr = spawn_server(|mut conn| {
+            let _ = read_request_head(&conn);
+            let _ = conn.write_all(
+                head("HTTP/1.1 200 OK", &["Content-Length: 2", "Content-Length: 2"]).as_bytes(),
+            );
+            let _ = conn.write_all(b"ok");
+        });
+
+        let outcome = post_json(addr, "/x", b"{}", &[], Duration::from_secs(5));
+        match outcome {
+            Outcome::Response(r) => assert_eq!(r.body(), b"ok"),
+            other => panic!("identical duplicate Content-Length must not be rejected, got {other:?}"),
+        }
+    }
+
     // ── SSE framing ─────────────────────────────────────────────────────────────────────────────
 
     // A content-type that is present and is not an event stream is a DEFINITIVE answer: this peer is
@@ -1707,6 +1970,44 @@ mod tests {
         );
     }
 
+    // hyper (the mock's own server) chunk-encodes any SSE response, since a live event stream has
+    // no Content-Length. A chunk-unaware reader only "worked" by coincidence of a chunk boundary
+    // landing on a frame boundary; this deliberately splits a chunk MID-FRAME (inside the `data:`
+    // line itself, and again inside its payload) so a reader that treats chunk-size lines as frame
+    // noise instead of decoding them would read a truncated/corrupted frame or miscount entirely.
+    #[test]
+    fn a_chunk_boundary_landing_mid_frame_does_not_truncate_or_corrupt_it() {
+        let addr = spawn_server(|mut conn| {
+            let _ = read_request_head(&conn);
+            let _ = conn.write_all(
+                head(
+                    "HTTP/1.1 200 OK",
+                    &["Content-Type: text/event-stream", "Transfer-Encoding: chunked"],
+                )
+                .as_bytes(),
+            );
+            // "data: hello world\n\n" split across three chunks, the second split lands inside the
+            // payload ("hello wo" | "rld\n\n"), and a fourth frame is split right after the "data:"
+            // prefix itself so the prefix and payload arrive in separate chunks too.
+            let _ = conn.write_all(b"6\r\ndata: \r\n");
+            let _ = conn.write_all(b"8\r\nhello wo\r\n");
+            let _ = conn.write_all(b"5\r\nrld\n\n\r\n");
+            let _ = conn.write_all(b"5\r\ndata:\r\n");
+            let _ = conn.write_all(b"7\r\nsecond\n\r\n");
+            let _ = conn.write_all(b"1\r\n\n\r\n");
+            let _ = conn.write_all(b"0\r\n\r\n");
+        });
+
+        let outcome = post_json_sse(addr, "/x", b"{}", &[], Duration::from_secs(5), 10);
+        assert_eq!(
+            outcome.frames,
+            vec!["hello world", "second"],
+            "a frame split across chunk boundaries must be reassembled whole, got {:?}",
+            outcome.frames
+        );
+        assert_eq!(outcome.end, SseEnd::StreamClosed);
+    }
+
     // An SSE stream carries more line kinds than `data:`. Counting `event:`, `id:`, comments or the
     // blank separators as frames would inflate the frame count, and since every published streaming
     // number is a per-frame timing, an inflated count fabricates inter-token gaps that never
@@ -1745,6 +2046,27 @@ mod tests {
         );
         assert_eq!(outcome.status, None, "a status here would claim the peer answered");
         assert!(outcome.frames.is_empty());
+    }
+
+    // WHATWG SSE: consecutive `data:` lines with no blank line between them are ONE logical event,
+    // joined with "\n". Treating each line as its own frame would split a multi-line payload (a
+    // formatted message, a multi-line JSON delta) into several frames that were never separate
+    // events, and would fabricate inter-token gaps between lines that arrived in the same event.
+    #[test]
+    fn consecutive_data_lines_before_a_blank_line_join_into_one_frame() {
+        let addr = spawn_server(|mut conn| {
+            let _ = read_request_head(&conn);
+            let _ = conn.write_all(head("HTTP/1.1 200 OK", &["Content-Type: text/event-stream"]).as_bytes());
+            let _ = conn.write_all(b"data: line one\ndata: line two\n\ndata: second event\n\n");
+        });
+
+        let outcome = post_json_sse(addr, "/x", b"{}", &[], Duration::from_secs(5), 10);
+        assert_eq!(
+            outcome.frames,
+            vec!["line one\nline two", "second event"],
+            "consecutive data lines before a blank must join into one frame; the blank line starts the next event"
+        );
+        assert_eq!(outcome.frame_offsets_us.len(), 2, "one arrival time per EVENT, not per line");
     }
 
     #[test]

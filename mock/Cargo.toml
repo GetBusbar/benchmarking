@@ -22,3 +22,10 @@ tokio-stream = { version = "0.1", default-features = false }
 [dev-dependencies]
 serde_json = "1"
 
+# TESTS ONLY (feature merge into the tokio dep above). The body-cap test drives handle() over a real
+# loopback connection and needs the raw read/write helpers to write the request and read the
+# response; the shipped binary never calls them.
+[dev-dependencies.tokio]
+version = "1"
+features = ["io-util"]
+

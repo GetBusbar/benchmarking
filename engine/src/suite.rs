@@ -45,17 +45,15 @@ pub struct SuiteConfig {
     pub engine_stamp: Option<crate::record::EngineStamp>,
     /// WHICH INSTRUMENT TOOK THE READINGS. The mock and the load generator are half the measuring
     /// apparatus, and `rig` is a MOVING release tag: two runs weeks apart can use different binaries
-    /// behind the same URL. That is not hypothetical - a mock rebuild once changed cell verdicts
-    /// across the whole field and it took a long investigation to establish that the instrument had
-    /// moved rather than the gateways, because nothing in either run's output recorded which mock
-    /// produced it.
+    /// behind the same URL, so a verdict change between them could be the instrument moving rather
+    /// than the gateway, unless the run itself records which mock produced it.
     ///
     /// Resolved orchestrator-side and handed in, exactly like `engine_stamp`: the box's own rig.sh
     /// is what fetched this binary and hashed it, and the engine cannot re-derive that.
     ///
-    /// The MOCK only. The load generator used to be a separate Go binary (`ugen`) that was half the
-    /// instrument and needed its own stamp; it is now `otb loadgen`, a subcommand of this engine, so
-    /// `rig.engine.commit` already identifies it and a second record would be the same fact twice.
+    /// The MOCK only: the load generator is `otb loadgen`, a subcommand of this engine, so
+    /// `rig.engine.commit` already identifies it and a second record here would be the same fact
+    /// twice.
     pub rig_mock: Option<crate::record::BinaryProvenance>,
     /// The release the rig came from, recorded beside the digests it produced.
     pub rig_release_url: Option<String>,
@@ -505,12 +503,9 @@ pub fn run_suite_with(
     let mut last_egress: Option<String> = None;
     let mut written: Option<Paths> = None;
 
-    // WRITTEN INCREMENTALLY, after every egress column.
-    //
-    // The first version built the whole grid in memory and wrote once at the end. A run that was
-    // interrupted, and these run for hours on a box with a hard self-termination timer, therefore
-    // lost every cell it had successfully measured. The smoke run proved it: it hit its deadline and
-    // produced no artifact at all despite having measured real cells. Partial progress that survives
+    // WRITTEN INCREMENTALLY, after every egress column, not held in memory and written once at the
+    // end: these runs take hours on a box with a hard self-termination timer, so a run interrupted
+    // partway through must not lose every cell it already measured. Partial progress that survives
     // is worth more than a complete result that might not arrive, and the promote guard already
     // refuses to let a thinner snapshot overwrite a fuller one, so re-writing is safe by
     // construction rather than by care here.
@@ -526,10 +521,10 @@ pub fn run_suite_with(
             last_egress = Some(eg.clone());
         }
 
-        // THE EVIDENCE FOR THE VERDICT, not just the verdict. `status` and `body_snippet` were left
-        // at their defaults on every cell, so an artifact could say "does not serve" 36 times over
-        // and not say what the gateway answered. A whole field declining for one rig-side reason
-        // then looks exactly like a field of gateways that support nothing.
+        // THE EVIDENCE FOR THE VERDICT, not just the verdict: `status` and `body_snippet` are
+        // recorded on every cell, so an artifact can say what the gateway actually answered instead
+        // of just "does not serve" 36 times over. Otherwise a whole field declining for one
+        // rig-side reason looks exactly like a field of gateways that support nothing.
         let (served, reason, status, snippet) = match &result.outcome.served {
             Served::Yes => (RecServed::Bool(true), None, String::new(), String::new()),
             Served::No(v, ev) => (
@@ -625,9 +620,9 @@ fn flush(
     any_served: bool,
     box_qualify: Option<serde_json::Value>,
 ) -> Result<Paths, SnapshotError> {
-    // The rig block exists if ANY part of it does. Keying it solely off box_qualify, as it used to,
-    // meant a run with no qualification file dropped the engine commit on the floor with it: the two
-    // are independent facts about the instrument and one must not be able to suppress the other.
+    // The rig block exists if ANY part of it does: box_qualify, the engine stamp and the mock
+    // provenance are independent facts about the instrument, so keying the whole block off just one
+    // of them (box_qualify) would let a run with no qualification file drop the engine commit too.
     let rig = (box_qualify.is_some() || cfg.engine_stamp.is_some() || cfg.rig_mock.is_some()).then(
         || crate::record::RigProvenance {
             arch: Some(cfg.arch.clone()),
@@ -642,11 +637,12 @@ fn flush(
     let snap = ResultSnapshot {
         schema_version: 1,
         gateway: cfg.manifest.name.clone(),
-        // WHAT WAS MEASURED, not what measured it. This carried the ENGINE's version, so every
-        // gateway's artifact claimed the same build string and a reader could not tell which image
-        // of a gateway produced a number. The engine identifies itself in rig.engine, where it
-        // belongs. Falls back to the engine string only when the manifest declares no launch, i.e.
-        // when the harness did not start the thing it measured and genuinely does not know its build.
+        // WHAT WAS MEASURED, not what measured it: the engine identifies itself in rig.engine,
+        // where it belongs, so this field must be the gateway's own build string, not the engine's,
+        // or every gateway's artifact would claim the same build and a reader could not tell which
+        // image produced a number. Falls back to the engine string only when the manifest declares
+        // no launch, i.e. when the harness did not start the thing it measured and genuinely does
+        // not know its build.
         build: gateway_build(cfg)
             .unwrap_or_else(|| format!("otb-engine {}", env!("CARGO_PKG_VERSION"))),
         measured_at: cfg.measured_at.clone(),
@@ -836,40 +832,28 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_number_at_the_rig_ceiling_is_suppressed_not_published() {
-        let dir = tmpdir("rigbound");
-        let gw = serve(200);
-        // gateway and mock are the SAME server, so the reference equals the observation.
-        let cfg = cfg_for(&dir, gw);
-        let paths = run_suite_with(&cfg, gw, &[]).expect("write");
-        let text = std::fs::read_to_string(&paths.current).expect("read");
-        let back: ResultSnapshot = serde_json::from_str(&text).expect("parse");
-        if let Some(perf) = back
-            .matrix
-            .upstreams
-            .get("openai")
-            .and_then(|u| u.cells.get("openai"))
-            .and_then(|c| c.perf.as_ref())
-        {
-            if perf.rps_max_proxy_mock_bound == Some(true) {
-                assert_eq!(
-                    perf.rps_max_proxy.copied(),
-                    None,
-                    "a rig-bound number must not be published as the gateway's"
-                );
-            }
-        }
-        let _ = std::fs::remove_dir_all(&dir);
-    }
+    // NOT COVERED HERE BY DESIGN: an end-to-end suite test driving the whole pipeline with the
+    // gateway and mock pointed at the same server, asserting suppression IF
+    // `rps_max_proxy_mock_bound == Some(true)`, would be vacuous in practice - `cfg_for`'s fixture
+    // (sweep_duration_s: 1, max_conc: 2) is too tight for `search::peak_max` to complete even one
+    // probe before its own search deadline interrupts it, so the search always returns zero sweep
+    // points and `mock_bound` is always `None`, never `Some(true)`, and the guarded assertion body
+    // would never run. The behavior ("a value at the rig ceiling must not be published, and its
+    // concurrency must be suppressed with it") is already covered directly and
+    // deterministically by `a_suppressed_peak_leaves_no_concurrency_behind` above, which drives
+    // `apply_peak_verdict` with a reference equal to the observation, and by rigbound.rs's
+    // `at_or_above_nine_tenths_of_the_ceiling_is_rig_bound` / `exactly_at_the_fraction_counts_as_bound`,
+    // which cover the 90% threshold itself. Making the end-to-end version actually reach `Some(true)`
+    // would mean growing the fixture's sweep duration until a real search completes, which trades a
+    // fast, deterministic unit test for a slow one whose pass/fail would still depend on two live
+    // measurement passes against the same loopback server landing within 10% of each other - a real
+    // flakiness risk for no additional coverage over what the two pure-function suites above already
+    // give.
 
-    // A DECLINED CELL MUST SAY WHAT IT WAS TOLD.
-    //
-    // The published cell left status, body_snippet and verdict_note at their defaults, so a
-    // not_configured verdict arrived with no evidence at all. A field run then published three
-    // gateways with thirty-six declined cells each and nothing to explain any of them, and once the
-    // boxes were terminated the reason was gone for good. A rig-side failure that makes every probe
-    // return 4xx is indistinguishable, in that artifact, from a gateway that genuinely supports
+    // A DECLINED CELL MUST SAY WHAT IT WAS TOLD: status, body_snippet and verdict_note must be
+    // populated, not left at their defaults, or a not_configured verdict carries no evidence once
+    // the box that produced it is gone. Otherwise a rig-side failure that makes every probe return
+    // 4xx is indistinguishable, in the published artifact, from a gateway that genuinely supports
     // nothing, which is the single most damaging thing this board can get wrong.
     #[test]
     fn a_declined_cell_publishes_the_status_and_body_it_was_declined_with() {

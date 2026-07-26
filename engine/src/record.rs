@@ -3,17 +3,13 @@
 //
 // THE SHAPE OF THE ARTIFACT THIS ENGINE PUBLISHES.
 //
-// The shell engine built the per-gateway snapshot by string concatenation: a hand-rolled
-// `json_escape`, printf format strings threading dozens of positional arguments, and an `emit_cell`
-// that folded three optional fragments (perf / stream / memory) into one object by literal string
-// splicing. That gets a public website's data from a shell script with no compiler checking that the
-// braces balance or that a value got escaped before it landed between two quotes.
-//
-// These types are the replacement: the same shape, described once, serialised by serde instead of by
-// hand. Every published metric is a `Measurement<T>` (see measurement.rs), so an unmeasured cell
-// reads as `null` on the wire and never as a 0 that a chart would draw. Structural fields (`served`,
-// `status`, dialect names) are not measurements and stay as plain strings/bools/enums: the discipline
-// applies to numbers a reader could mistake for a result, not to labels.
+// The shape, described once and serialised by serde rather than by hand-rolled string
+// concatenation, so the compiler checks that braces balance and that a value is escaped before it
+// lands between two quotes. Every published metric is a `Measurement<T>` (see measurement.rs), so an
+// unmeasured cell reads as `null` on the wire and never as a 0 that a chart would draw. Structural
+// fields (`served`, `status`, dialect names) are not measurements and stay as plain
+// strings/bools/enums: the discipline applies to numbers a reader could mistake for a result, not to
+// labels.
 //
 // SHAPE SOURCE. This module was built by reading matrix/run.sh's `emit_cell` and its two heredocs
 // (the per-gateway `$RESULTS/$GATEWAY.json` and the snapshot-writer's embedded Python), and by
@@ -26,9 +22,10 @@
 // predate several fields (rig provenance, run timing, cell_memory), which is why almost everything
 // outside the core measurement grid is `Option` with `#[serde(default)]`.
 
-use crate::measurement::{Absent, Measurement};
+use crate::measurement::{Absent, AbsentEntry, Measurement};
+use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 /// `#[serde(default)]` needs a concrete `Default` impl, and `Measurement<T>` deliberately has none
 /// (a type that silently defaults would be one step from the `value_or_zero` this whole module
@@ -71,9 +68,8 @@ pub struct ResultSnapshot {
     pub arch: Option<String>,
     #[serde(default)]
     pub hardware: Option<String>,
-    /// The measurement instrument's own provenance (rig binaries + box qualification). Absent on
-    /// every snapshot taken before audit #21 added it, and best-effort even after: a consumer must
-    /// read "no rig block" as "not recorded", never as "not qualified".
+    /// The measurement instrument's own provenance (rig binaries + box qualification). Best-effort:
+    /// a consumer must read "no rig block" as "not recorded", never as "not qualified".
     #[serde(default)]
     pub rig: Option<RigProvenance>,
     #[serde(default)]
@@ -267,7 +263,13 @@ impl Default for Served {
 }
 
 /// One probed (ingress, egress) pairing.
-#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
+///
+/// Serialised by hand (see the `Serialize` impl below `CellMemory`), not derived: the wire form adds
+/// a computed `absences` map (metric name -> why it is absent) alongside the normal fields, gathered
+/// from `perf`/`stream`/`memory` at serialisation time so every one of the dozens of `Measurement`
+/// fields on this cell is covered from one place rather than needing a matching edit at each of the
+/// several call sites across the engine that build a `Cell`.
+#[derive(Default, Debug, Clone, PartialEq, Deserialize)]
 pub struct Cell {
     pub served: Served,
     /// Present when `served` is a non-`true` status string; the machine-readable reason behind it.
@@ -352,6 +354,36 @@ pub struct CellPerf {
     pub c1_note: Option<String>,
 }
 
+/// Populates an absences map from a fixed list of `Measurement` fields on `$self`, keyed by
+/// `stringify!`ing each field so the published key can never drift from the field it names (a hand-
+/// typed string literal per field would be a second source of truth for the same name).
+macro_rules! absences_of {
+    ($self:expr, $($field:ident),+ $(,)?) => {{
+        let mut out = BTreeMap::new();
+        $( $self.$field.record_absence(stringify!($field), &mut out); )+
+        out
+    }};
+}
+
+impl CellPerf {
+    /// Every absent metric on this block, keyed by its own field name. Empty when nothing is absent.
+    pub fn absences(&self) -> BTreeMap<String, AbsentEntry> {
+        absences_of!(
+            self,
+            added_latency_p50_us,
+            added_latency_p99_us,
+            gateway_c1_p99_us,
+            direct_c1_p99_us,
+            rps_sustained_20ms,
+            rps_sustained_20ms_concurrency,
+            conc_at_sustained,
+            rps_max_proxy,
+            rps_max_proxy_concurrency,
+            conc_at_peak,
+        )
+    }
+}
+
 /// Whether/how a cell's streaming path was exercised. Like `Served`, this is a verdict label rather
 /// than a number: `true`, `false`, or `"untestable"` (the mock/rig cannot pose this question at all
 /// for this pairing).
@@ -405,6 +437,22 @@ pub struct CellStream {
     pub sweep_cpu_fps: Vec<serde_json::Value>,
     #[serde(default)]
     pub stream_c1_note: Option<String>,
+}
+
+impl CellStream {
+    pub fn absences(&self) -> BTreeMap<String, AbsentEntry> {
+        absences_of!(
+            self,
+            added_ttft_p50_us,
+            added_ttft_p99_us,
+            added_gap_p50_us,
+            added_gap_p99_us,
+            streams_sustained,
+            streams_sustained_fps,
+            cpu_fps,
+            cpu_fps_concurrency,
+        )
+    }
 }
 
 /// One (t_s, rss_mib) sample in a memory window's time series.
@@ -492,6 +540,54 @@ pub struct CellMemory {
     pub idle_window_s: Option<i64>,
     #[serde(default)]
     pub recovery_window_s: Option<i64>,
+}
+
+impl CellMemory {
+    pub fn absences(&self) -> BTreeMap<String, AbsentEntry> {
+        absences_of!(
+            self,
+            idle_rss_mib,
+            steady_state_rss_mib,
+            recovered_rss_mib,
+            peak_rss_mib,
+            peak_rss_hwm_mib,
+            time_to_plateau_s,
+            growth_rate_mib_per_min,
+        )
+    }
+}
+
+/// The wire form of `Cell`: the normal fields verbatim, plus a computed `absences` map merging
+/// `perf`/`stream`/`memory`'s own absences under a `"perf."`/`"stream."`/`"memory."` prefix so a
+/// reader sees exactly which metric was absent and why, without guessing which sub-block it lives in.
+impl Serialize for Cell {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let mut absences: BTreeMap<String, AbsentEntry> = BTreeMap::new();
+        if let Some(perf) = &self.perf {
+            absences.extend(perf.absences().into_iter().map(|(k, v)| (format!("perf.{k}"), v)));
+        }
+        if let Some(stream) = &self.stream {
+            absences.extend(stream.absences().into_iter().map(|(k, v)| (format!("stream.{k}"), v)));
+        }
+        if let Some(memory) = &self.memory {
+            absences.extend(memory.absences().into_iter().map(|(k, v)| (format!("memory.{k}"), v)));
+        }
+
+        let mut st = s.serialize_struct("Cell", 12)?;
+        st.serialize_field("served", &self.served)?;
+        st.serialize_field("reason", &self.reason)?;
+        st.serialize_field("status", &self.status)?;
+        st.serialize_field("path", &self.path)?;
+        st.serialize_field("verdict_note", &self.verdict_note)?;
+        st.serialize_field("body_snippet", &self.body_snippet)?;
+        st.serialize_field("probe_note", &self.probe_note)?;
+        st.serialize_field("perf_dropped", &self.perf_dropped)?;
+        st.serialize_field("perf", &self.perf)?;
+        st.serialize_field("stream", &self.stream)?;
+        st.serialize_field("memory", &self.memory)?;
+        st.serialize_field("absences", &absences)?;
+        st.end()
+    }
 }
 
 /// The snapshot writer's best-diagonal streaming projection: whichever served diagonal cell actually
@@ -816,15 +912,11 @@ mod tests {
 
     // ── the shapes the published artifact must hold ─────────────────────────────────────────────
 
-    // These used to SCAN results/snapshots/ and assert on whatever was committed there. That made
-    // the test suite a function of the board's contents: clearing the results to start the engine
-    // era with a clean board turned two of them red, not because the types regressed but because
-    // their fixtures had been deleted. A test that a `git rm` can fail is measuring the wrong thing.
-    //
-    // The invariants they were really guarding are properties of the TYPES, so they are asserted
-    // against a snapshot built right here. Whether real artifacts parse is a stronger claim and is
-    // covered where it belongs: engine/tests/end_to_end.rs drives the real binary and reads back the
-    // snapshot it actually wrote.
+    // The invariants below are properties of the TYPES, so they are asserted against a snapshot
+    // built right here, not by scanning results/snapshots/ and asserting on whatever is committed
+    // there: a test that a `git rm` can fail is measuring the wrong thing. Whether real artifacts
+    // parse is a stronger claim and is covered where it belongs: engine/tests/end_to_end.rs drives
+    // the real binary and reads back the snapshot it actually wrote.
 
     // A served cell carries its perf block through a serialise/deserialise round trip. The wire is
     // the boundary this file exists to defend: every consumer sees the JSON, not the struct.
@@ -865,5 +957,60 @@ mod tests {
                 assert!(cell.stream.is_none(), "an unserved cell must not carry stream");
             }
         }
+    }
+
+    // A bare `null` on the wire cannot be the whole story: the reason WHY a metric is absent
+    // (rig-limited vs. search-exhausted vs. a harness bug) must survive serialisation, or a reader
+    // of a published snapshot has no way to tell "the gateway does not do this" from "our own
+    // search ran out of range" from "the harness broke" - three completely different claims that
+    // would otherwise render as the identical bare `null`.
+    #[test]
+    fn a_cell_publishes_why_each_absent_metric_is_absent_not_just_that_it_is() {
+        let mut cell = Cell {
+            served: Served::Bool(true),
+            perf: Some(CellPerf {
+                rps_max_proxy: Measurement::absent_because(
+                    Absent::SearchExhausted,
+                    "still rising at the top of the search range, c=512",
+                ),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        cell.stream = Some(CellStream {
+            cpu_fps: Measurement::absent(Absent::RigLimited),
+            ..Default::default()
+        });
+
+        let js = serde_json::to_string(&cell).expect("a cell must serialise");
+        let value: serde_json::Value = serde_json::from_str(&js).expect("must be valid JSON");
+
+        assert_eq!(
+            value["perf"]["rps_max_proxy"],
+            serde_json::Value::Null,
+            "the value slot itself must still be a bare null, unchanged for existing consumers"
+        );
+        assert_eq!(
+            value["absences"]["perf.rps_max_proxy"]["reason"],
+            "search_exhausted",
+            "the real reason must be published, not thrown away: got {value}"
+        );
+        assert!(
+            value["absences"]["perf.rps_max_proxy"]["detail"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("c=512"),
+            "the operator-facing detail must survive too: got {value}"
+        );
+        assert_eq!(
+            value["absences"]["stream.cpu_fps"]["reason"],
+            "rig_limited",
+            "every absent metric must appear, not just the first one: got {value}"
+        );
+        assert!(
+            value["absences"].get("stream.cpu_fps").unwrap().get("detail").is_none()
+                || value["absences"]["stream.cpu_fps"]["detail"].is_null(),
+            "a reason with no detail must not fabricate one"
+        );
     }
 }
