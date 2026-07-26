@@ -41,8 +41,11 @@ jobs:
 
       - name: Build mock (Rust, native ${{ matrix.arch }})
         run: |
+          # The mock is a WORKSPACE MEMBER, so its binary lands in the workspace target dir, not in
+          # mock/target. It moved there when the engine joined the workspace, and the copy kept
+          # looking where it used to be - the build succeeded and the step failed on the copy.
           cargo build --release --manifest-path mock/Cargo.toml
-          cp mock/target/release/mock "mock-${{ matrix.arch }}"
+          cp target/release/mock "mock-${{ matrix.arch }}"
 
       - name: Build the engine (Rust, native ${{ matrix.arch }})
         run: |
