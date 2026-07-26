@@ -81,18 +81,34 @@ fn rig_ceiling(cfg: &SuiteConfig, dialect: Dialect, at_conc: u32) -> Measurement
 }
 
 /// Judge one cell's throughput and suppress it if the rig, not the gateway, set it.
-fn judge_cell(cfg: &SuiteConfig, dialect: Dialect, perf: run::CellPerf) -> Judged {
+/// Turn the metrics the engine took on one cell into the published perf block.
+///
+/// Reads the map by the SAME field names `metric::Metric::fields()` declares, so a group that stops
+/// filling a field surfaces here as an absence with the group's own reason rather than as a silently
+/// missing number. `metric::process_cell` guarantees every declared field is present, so a lookup
+/// that misses means the field was never declared by any group at all.
+fn judge_cell(
+    cfg: &SuiteConfig,
+    dialect: Dialect,
+    metrics: &std::collections::BTreeMap<&'static str, Measurement<f64>>,
+) -> Judged {
     let mut out = empty_perf();
-    let (Some(&value), Some(&conc)) = (perf.max_proxy.value(), perf.max_proxy_concurrency.value())
-    else {
+    let missing = || Measurement::absent_because(Absent::NotMeasured, "no metric group fills this field");
+    let rps = metrics.get("rps_max_proxy").cloned().unwrap_or_else(missing);
+    let conc_m = metrics.get("conc_at_peak").cloned().unwrap_or_else(missing);
+
+    let (Some(&value), Some(&conc_f)) = (rps.value(), conc_m.value()) else {
         // Carry the search's own reason and evidence rather than flattening it.
-        out.rps_max_proxy = match (perf.max_proxy.reason().cloned(), perf.max_proxy.detail()) {
+        out.rps_max_proxy = match (rps.reason().cloned(), rps.detail()) {
             (Some(r), Some(d)) => Measurement::absent_because(r, d),
             (Some(r), None) => Measurement::absent(r),
             (None, _) => Measurement::absent(Absent::NotMeasured),
         };
         return Judged { perf: out };
     };
+    // Concurrency travels as f64 so every metric has one type; it is only ever a whole rung of the
+    // search, so this narrowing cannot lose anything a search could have produced.
+    let conc = conc_f as u32;
 
     let reference = rig_ceiling(cfg, dialect, conc);
     match rigbound::is_rig_bound(value, reference.clone()).copied() {
@@ -174,8 +190,8 @@ pub fn run_suite(cfg: &SuiteConfig, gateway_addr: SocketAddr) -> Result<Paths, S
             any_served = true;
         }
 
-        let perf = match (result.perf, ing.parse::<Dialect>()) {
-            (Some(p), Ok(d)) => Some(judge_cell(cfg, d, p).perf),
+        let perf = match (&result.metrics, ing.parse::<Dialect>()) {
+            (Some(m), Ok(d)) => Some(judge_cell(cfg, d, m).perf),
             _ => None,
         };
 

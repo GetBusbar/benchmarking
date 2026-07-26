@@ -20,6 +20,7 @@ pub mod launch;
 pub mod loadgen;
 pub mod manifest;
 pub mod measurement;
+pub mod metric;
 pub mod probe;
 pub mod qualify;
 pub mod record;
