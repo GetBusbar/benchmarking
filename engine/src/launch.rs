@@ -351,6 +351,15 @@ pub trait Launcher {
     }
 }
 
+/// Run ONE line from a gateway's `commands` file, through a shell, with a hard timeout.
+///
+/// A shell because these lines are what a gateway's own documentation tells an operator to type,
+/// and those instructions use pipes, quoting and redirection. The alternative is a bespoke argv
+/// encoding that every author would have to learn in order to transcribe a documented curl.
+pub fn run_line(line: &str, timeout: Duration) -> Result<(), String> {
+    run_with_timeout("/bin/sh", &["-c".to_string(), line.to_string()], timeout)
+}
+
 /// Run a pre-launch command with its own hard timeout, using only `std::process`: poll
 /// `Child::try_wait` rather than blocking on `wait`, so a hung command is killed instead of hanging
 /// this call forever.

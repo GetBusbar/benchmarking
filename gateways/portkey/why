@@ -1,0 +1,14 @@
+# Why every setting, env var, header and command this gateway uses is here.
+#
+# The rule, from the published methodology: a setting may appear only if it is needed to boot the
+# process at all, to point an upstream at the test mock instead of a real provider, to expose an
+# ingress path the matrix exercises, or to bind the port and cores the rig requires. One claim per
+# line: <pattern> <boot|upstream|ingress|bind>. Anything unclaimed is a lint failure, and a claim
+# that matches nothing is a stale claim and also a failure.
+#
+# Migrated from GW_CONFIG_WHY in gateway.sh, which is dead code the lint was still reading.
+x-portkey-provider    upstream  # which upstream dialect this column egresses in
+x-portkey-custom-host upstream  # -> the mock, instead of the real provider host
+x-portkey-aws-access-key-id     boot  # bedrock SigV4 material; without it the request is refused
+x-portkey-aws-secret-access-key boot  # before any egress (dummy; the mock ignores the signature)
+x-portkey-aws-region            boot

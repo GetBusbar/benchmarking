@@ -1,0 +1,37 @@
+# Why every setting, env var, header and command this gateway uses is here.
+#
+# The rule, from the published methodology: a setting may appear only if it is needed to boot the
+# process at all, to point an upstream at the test mock instead of a real provider, to expose an
+# ingress path the matrix exercises, or to bind the port and cores the rig requires. One claim per
+# line: <pattern> <boot|upstream|ingress|bind>. Anything unclaimed is a lint failure, and a claim
+# that matches nothing is a stale claim and also a failure.
+#
+# Migrated from GW_CONFIG_WHY in gateway.sh, which is dead code the lint was still reading.
+KONG_DATABASE               boot  # DB-less declarative; without it Kong demands an external Postgres
+KONG_DECLARATIVE_CONFIG     boot  # where that declarative config is
+KONG_PROXY_LISTEN           bind  # the port the harness drives
+KONG_NGINX_WORKER_PROCESSES bind  # nginx `auto` reads the HOST cpu count, blind to --cpuset-cpus
+_format_version boot     # the declarative schema will not load without it
+services        boot
+name            boot
+url             boot     # a service REQUIRES a url; ai-proxy overrides the target per plugin instance
+routes      ingress      # four routes on the one uniform OpenAI path
+paths       ingress
+strip_path  ingress
+plugins     ingress
+config      boot
+headers        upstream  # the route matcher that selects the egress column
+x-llm-provider upstream  # the one request header a column changes
+route_type   boot        # ai-proxy schema: required
+model        upstream    # ai-proxy 400s a body model that differs from a set model.name
+provider     upstream    # binds this plugin instance to one upstream dialect
+options      upstream
+upstream_url upstream    # -> the mock, replacing scheme/host/port AND path
+auth              boot   # ai-proxy schema: required
+header_name       boot
+header_value      boot
+anthropic_version boot   # entity-check REQUIRED for the anthropic provider; without it Kong will not boot
+bedrock           boot
+aws_region        boot   # the bedrock signer fails without a region -> HTTP 500
+aws_access_key_id     boot
+aws_secret_access_key boot

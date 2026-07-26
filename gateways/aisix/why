@@ -1,0 +1,34 @@
+# Why every setting, env var, header and command this gateway uses is here.
+#
+# The rule, from the published methodology: a setting may appear only if it is needed to boot the
+# process at all, to point an upstream at the test mock instead of a real provider, to expose an
+# ingress path the matrix exercises, or to bind the port and cores the rig requires. One claim per
+# line: <pattern> <boot|upstream|ingress|bind>. Anything unclaimed is a lint failure, and a claim
+# that matches nothing is a stale claim and also a failure.
+#
+# Migrated from GW_CONFIG_WHY in gateway.sh, which is dead code the lint was still reading.
+resources_file boot   # standalone source; without it aisix demands an etcd cluster
+proxy          bind
+addr           bind   # the port the harness drives
+admin          boot   # with no admin block the binary refuses to load its config:
+admin_keys     boot   #   \"admin.admin_keys must contain at least one key\" (tested, see below)
+_format_version boot  # the resources file will not load without it
+provider_keys  boot
+display_name   boot   # a resource without a name cannot be referenced
+provider       upstream  # which upstream dialect this key speaks
+adapter        upstream  # and which adapter builds its URL
+api_base       upstream  # -> the mock
+api_key        boot      # dummy; the mock ignores it
+models         ingress   # the client-facing model table
+model_name     upstream  # the model id sent upstream
+provider_key   upstream  # which provider_key (and so which egress) this model resolves to
+api_keys       boot      # aisix has NO anonymous mode: every proxy handler 401s without a known key
+key_env        boot      # where the plaintext comes from
+allowed_models boot      # an api_key with no allowance can reach nothing
+BENCH_AISIX_KEY boot     # that plaintext. The name must NOT start with AISIX_ - see _aisix_launch
+# The build-time variables are UNSET before launch (a leading `-` in `env` removes one), so the
+# measured process does not inherit the repo and revision its build used. They are claimed here
+# because the env file names them, and anything the deployment names must be justified.
+AISIX_REPO   boot  # unset at launch: build input, must not leak into the measured process
+AISIX_COMMIT boot  # unset at launch: same
+AISIX_SRC    boot  # unset at launch: same

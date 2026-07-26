@@ -1,0 +1,18 @@
+# Why every setting, env var, header and command this gateway uses is here.
+#
+# The rule, from the published methodology: a setting may appear only if it is needed to boot the
+# process at all, to point an upstream at the test mock instead of a real provider, to expose an
+# ingress path the matrix exercises, or to bind the port and cores the rig requires. One claim per
+# line: <pattern> <boot|upstream|ingress|bind>. Anything unclaimed is a lint failure, and a claim
+# that matches nothing is a stale claim and also a failure.
+#
+# Migrated from GW_CONFIG_WHY in gateway.sh, which is dead code the lint was still reading.
+model_list     boot      # the python-config reader serves nothing without one
+model_name     ingress   # the client-facing name the probe asks for
+litellm_params boot
+model          upstream  # azure_ai is the only provider messages_provider_config serves
+api_base       upstream  # -> the mock; used verbatim by complete_azure_anthropic_url
+api_key        boot      # dummy; the mock ignores it
+LITELLM_MASTER_KEY  boot # the Rust beta requires it to boot; its own mandatory auth
+LITELLM_CONFIG_PATH boot # selects the python-config reader, the ONLY mode that serves /v1/messages
+PORT                bind # the port the harness drives

@@ -1,0 +1,26 @@
+# Why every setting, env var, header and command this gateway uses is here.
+#
+# The rule, from the published methodology: a setting may appear only if it is needed to boot the
+# process at all, to point an upstream at the test mock instead of a real provider, to expose an
+# ingress path the matrix exercises, or to bind the port and cores the rig requires. One claim per
+# line: <pattern> <boot|upstream|ingress|bind>. Anything unclaimed is a lint failure, and a claim
+# that matches nothing is a stale claim and also a failure.
+#
+# Migrated from GW_CONFIG_WHY in gateway.sh, which is dead code the lint was still reading.
+server       bind
+port         bind      # the port the harness drives. The server ADDRESS is deliberately absent:
+providers    upstream  # the provider table
+openai       upstream  # one entry per mock-reachable dialect
+anthropic    upstream
+bedrock      upstream
+base-url     upstream  # -> the mock; Helicone appends each provider its own native path
+routers      ingress   # /router/{id}/chat/completions IS the ingress surface, so a router per
+load-balance ingress   # provider is what makes each egress column addressable by URL rather than
+chat         ingress   # chosen at random by a latency balancer
+strategy     boot      # BalanceConfigInner is a serde-tagged enum: the tag is not optional
+OPENAI_API_KEY        boot   # dummy provider credentials; the mock ignores them
+ANTHROPIC_API_KEY     boot
+AWS_ACCESS_KEY        boot   # bedrock SigV4 reads these two names (types/provider.rs), not the
+AWS_SECRET_KEY        boot   # SDK spellings; absent = InvalidCredentials -> 401 before any egress
+AWS_ACCESS_KEY_ID     boot   # both spellings exported so any code path resolves
+AWS_SECRET_ACCESS_KEY boot

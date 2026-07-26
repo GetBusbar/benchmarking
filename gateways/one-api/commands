@@ -1,0 +1,22 @@
+# Commands run after this gateway is up and before anything is measured. One per line.
+#
+# WHY THIS GATEWAY HAS THEM AND ALMOST NONE DO. It has no config file. It keeps its configuration in
+# a database and is configured through its own admin API after it boots, so there is nothing to drop
+# next to the binary. These lines are the deployment its own documentation describes: log in, raise
+# the quota so a throughput run cannot exhaust it, wire each upstream as a channel pointing at the
+# mock, then mint the API key the harness will authenticate with.
+#
+# The channel type selects the native egress dialect: 1 is OpenAI, 14 is Anthropic, 24 is Gemini.
+# The model lists are strictly disjoint on purpose. Routing selects on (group, model) and not on
+# channel type, so overlapping lists would let one model resolve to either channel at random and a
+# column would silently measure an upstream it did not ask for.
+curl -sf -c /tmp/oa.jar -X POST http://127.0.0.1:3000/api/user/login -H 'content-type: application/json' -d '{"username":"root","password":"123456"}' -o /dev/null
+curl -sf -b /tmp/oa.jar -X PUT http://127.0.0.1:3000/api/user/ -H 'content-type: application/json' -d '{"id":1,"username":"root","display_name":"Root User","role":100,"status":1,"quota":1000000000000,"group":"default"}' -o /dev/null
+curl -sf -b /tmp/oa.jar -X POST http://127.0.0.1:3000/api/channel/ -H 'content-type: application/json' -d '{"name":"mock-1","type":1,"key":"sk-mock","base_url":"http://127.0.0.1:8000","models":"gpt-4o-mini","group":"default","status":1}' -o /dev/null
+curl -sf -b /tmp/oa.jar -X POST http://127.0.0.1:3000/api/channel/ -H 'content-type: application/json' -d '{"name":"mock-14","type":14,"key":"sk-mock","base_url":"http://127.0.0.1:8000","models":"claude-3-5-sonnet-20240620","group":"default","status":1}' -o /dev/null
+curl -sf -b /tmp/oa.jar -X POST http://127.0.0.1:3000/api/channel/ -H 'content-type: application/json' -d '{"name":"mock-24","type":24,"key":"sk-mock","base_url":"http://127.0.0.1:8000","models":"gemini-1.5-pro","group":"default","status":1}' -o /dev/null
+# Create the API key the harness will authenticate with, with the key SET rather than generated, so
+# it matches the `auth` this gateway already declares in definition.json. The engine learns nothing
+# from these commands and reads nothing they write: it sets env, sets headers, runs these lines, and
+# then measures with the credential it already had.
+curl -sf -b /tmp/oa.jar -X POST http://127.0.0.1:3000/api/token/ -H 'content-type: application/json' -d '{"name":"bench","key":"dummy","expired_time":-1,"remain_quota":0,"unlimited_quota":true}' -o /dev/null

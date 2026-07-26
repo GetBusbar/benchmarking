@@ -4,23 +4,39 @@ routes:
     methods: [POST]
     plugins:
       ai-proxy:
-        $(_apisix_plugcfg openai-compatible gpt-4o-mini)
+        provider: openai-compatible
+        auth: {{ header: {{ Authorization: "Bearer {GW_AUTH}" }} }}
+        options: {{ model: gpt-4o-mini }}
+        override: {{ endpoint: "http://127.0.0.1:{MOCK_PORT}" }}
   - id: ai-proxy-responses
     uri: /v1/responses
     methods: [POST]
     plugins:
       ai-proxy:
-        $(_apisix_plugcfg openai-compatible gpt-4o-mini)
+        provider: openai-compatible
+        auth: {{ header: {{ Authorization: "Bearer {GW_AUTH}" }} }}
+        options: {{ model: gpt-4o-mini }}
+        override: {{ endpoint: "http://127.0.0.1:{MOCK_PORT}" }}
   - id: ai-proxy-messages
     uri: /v1/messages
     methods: [POST]
     plugins:
       ai-proxy:
-        $(_apisix_plugcfg anthropic claude-3-5-sonnet-20241022)
+        provider: anthropic
+        auth: {{ header: {{ Authorization: "Bearer {GW_AUTH}" }} }}
+        options: {{ model: claude-3-5-sonnet-20241022 }}
+        override: {{ endpoint: "http://127.0.0.1:{MOCK_PORT}" }}
   - id: ai-proxy-converse
     uri: {GW_MATRIX_PATH_BEDROCK}
     methods: [POST]
     plugins:
       ai-proxy:
-        $(_apisix_plugcfg bedrock "{APISIX_BEDROCK_MODEL}")
+        provider: bedrock
+        provider_conf: {{ region: "us-east-1" }}
+        auth:
+          aws:
+            access_key_id: "AKIAMOCKACCESSKEY"
+            secret_access_key: "mock-secret-access-key"
+        options: {{ model: {APISIX_BEDROCK_MODEL} }}
+        override: {{ endpoint: "http://127.0.0.1:{MOCK_PORT}" }}
 #END

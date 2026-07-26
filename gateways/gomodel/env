@@ -1,0 +1,16 @@
+# Every setting points an upstream at the test mock or binds the port the rig drives. There is no
+# config file: this gateway is configured entirely by environment, which is how its own docs deploy
+# it. GOMAXPROCS is deliberately absent; the harness sets it for every gateway from the cores it
+# pinned, so no entrant can state its own.
+PORT={GW_PORT}
+OPENAI_BASE_URL=http://127.0.0.1:{MOCK_PORT}/v1
+OPENAI_API_KEY=dummy
+ANTHROPIC_BASE_URL=http://127.0.0.1:{MOCK_PORT}/anthropic
+ANTHROPIC_API_KEY=dummy
+GEMINI_BASE_URL=http://127.0.0.1:{MOCK_PORT}/v1beta
+GEMINI_API_KEY=dummy
+BEDROCK_BASE_URL=http://127.0.0.1:{MOCK_PORT}
+BEDROCK_MODELS=anthropic.claude-3-sonnet-20240229-v1:0
+AWS_ACCESS_KEY_ID=AKIAMOCKACCESSKEY
+AWS_SECRET_ACCESS_KEY=mock-secret-access-key
+AWS_REGION=us-east-1

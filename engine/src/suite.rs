@@ -691,6 +691,7 @@ mod tests {
                 headers: vec![],
                 runtime: crate::manifest::Runtime::Docker { container: "gw-bench".into() },
                 egress: vec![],
+                commands: vec![],
                 config: vec![],
                 launch: None,
                 config_files: vec![],
