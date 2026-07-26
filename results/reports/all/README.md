@@ -10,6 +10,7 @@ Every number below is regenerated from the raw `results/*.json` - re-run `run-al
 | [AISIX (api7)](https://github.com/api7/aisix) | - | 0 | 0 | 67 MiB | 72 MiB | `` |
 | [APISIX](https://github.com/apache/apisix) | - | 0 | 0 | 178 MiB | 208 MiB | `` |
 | [Bifrost](https://github.com/maximhq/bifrost) | - | 0 | 0 | 154 MiB | 805 MiB | `` |
+| [GoModel](https://github.com/ENTERPILOT/GOModel) | - | 0 | 0 | 57 MiB | 89 MiB | `` |
 | [Helicone](https://github.com/Helicone/ai-gateway) | - | 0 | 0 | 43 MiB | 56 MiB | `` |
 | [Kong](https://github.com/Kong/kong) | - | 0 | 0 | 421 MiB | 618 MiB | `` |
 | [LiteLLM · Python](https://github.com/BerriAI/litellm) | - | 0 | 0 | 1035 MiB | 1083 MiB | `` |
@@ -17,19 +18,18 @@ Every number below is regenerated from the raw `results/*.json` - re-run `run-al
 | [Portkey](https://github.com/Portkey-AI/gateway) | - | 0 | 0 | 153 MiB | 128 MiB | `` |
 | [TensorZero](https://github.com/tensorzero/tensorzero) | - | 0 | 0 | 49 MiB | 72 MiB | `` |
 | [Busbar](https://github.com/GetBusbar/busbar) | ⏳ *pending* | - | - | - | - | *pending measurement* |
-| [GoModel](https://github.com/ENTERPILOT/GOModel) | ⏳ *pending* | - | - | - | - | *pending measurement* |
 | [LiteLLM · Rust](https://github.com/BerriAI/litellm) | ⏳ *pending* | - | - | - | - | *pending measurement* |
 
-⏳ **Pending measurement** (a manifest exists; not yet run on the rig): Busbar, GoModel, LiteLLM · Rust. These land here as their runs complete - nothing is hidden.
+⏳ **Pending measurement** (a manifest exists; not yet run on the rig): Busbar, LiteLLM · Rust. These land here as their runs complete - nothing is hidden.
 
 Two throughput numbers: **max proxy RPS** (instant upstream - raw forwarding speed) and **sustained RPS under a 20 ms upstream delay** (AIGatewayBench's metric - concurrent in-flight capacity under realistic LLM latency).
 **⏳** = a manifest exists but it hasn't been run on the rig yet.
 
-![memory_rss](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/memory_rss.png?v=202607262141)
+![memory_rss](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/memory_rss.png?v=202607262154)
 
-![memory_recovery](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/memory_recovery.png?v=202607262141)
+![memory_recovery](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/memory_recovery.png?v=202607262154)
 
 ---
 Method: added latency = gateway p99 − direct-to-mock p99 at concurrency 1; RPS ceiling = highest sustained req/s with p99 < 1 s and <0.1% errors; RSS idle = after first 200, peak = under sustained load. Same box, same mock, same load, one gateway at a time. Each gateway's source ref is pinned in its own `gateways/<name>/gateway.sh`; the built commit is in each row.
 
-<sub>Page + charts regenerated **2026-07-26 21:41 UTC** from the raw `results/*.json`.</sub>
+<sub>Page + charts regenerated **2026-07-26 21:54 UTC** from the raw `results/*.json`.</sub>
