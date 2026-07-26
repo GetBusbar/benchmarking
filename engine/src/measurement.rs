@@ -168,6 +168,18 @@ impl<T: Copy> Measurement<T> {
     }
 }
 
+/// The default is ABSENT, never a zero.
+///
+/// A `Default` on a measurement is only safe because this is the one it can be: a struct built with
+/// `..Default::default()` then starts every metric as "not measured" and has to be explicitly given
+/// a value to publish one. A `Default` of `Measured(0)` would be the cardinal defect handed out for
+/// free by the derive macro.
+impl<T> Default for Measurement<T> {
+    fn default() -> Self {
+        Measurement::Absent { reason: Absent::NotMeasured, detail: None }
+    }
+}
+
 /// Serialises to the value or to `null`. Never to 0, and never to a string carrying the reason.
 impl<T: Serialize> Serialize for Measurement<T> {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {

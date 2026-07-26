@@ -52,7 +52,7 @@ where
 }
 
 /// The top-level artifact written to `results/snapshots/result_<gateway>_<ts>.json`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ResultSnapshot {
     pub schema_version: u32,
     pub gateway: String,
@@ -153,7 +153,7 @@ pub struct BinaryProvenance {
 // ────────────────────────────────────────── the matrix ─────────────────────────────────────────────
 
 /// The per-gateway matrix result (`$RESULTS/$GATEWAY.json`), embedded verbatim under `matrix`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Matrix {
     pub gateway: String,
     #[serde(default)]
@@ -233,7 +233,7 @@ pub struct BuildEnv {
 
 /// One egress dialect's block: whether this gateway can be pointed at it, and the full ingress row
 /// probed against that egress.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Upstream {
     pub configurable: bool,
     /// `served` here is whether the EGRESS configuration itself came up, not a per-cell verdict.
@@ -258,8 +258,16 @@ pub enum Served {
     Status(String),
 }
 
+/// The conservative default: a cell nobody has probed has not been shown to be served. Defaulting to
+/// `true` would let a struct built with `..Default::default()` claim a capability by omission.
+impl Default for Served {
+    fn default() -> Self {
+        Served::Status("not_probed".into())
+    }
+}
+
 /// One probed (ingress, egress) pairing.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Cell {
     pub served: Served,
     /// Present when `served` is a non-`true` status string; the machine-readable reason behind it.
@@ -304,7 +312,7 @@ pub struct SweepPoint {
     pub fail: Measurement<i64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CellPerf {
     #[serde(default = "measurement_default")]
     pub added_latency_p50_us: Measurement<i64>,
@@ -354,7 +362,14 @@ pub enum StreamServed {
     Status(String),
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// Same conservative default as `Served`: nothing has been shown to stream until it was probed.
+impl Default for StreamServed {
+    fn default() -> Self {
+        StreamServed::Status("not_probed".into())
+    }
+}
+
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CellStream {
     pub stream_served: StreamServed,
     #[serde(default)]
@@ -444,7 +459,7 @@ pub struct LoadRecipe {
 /// a single post-load recipe) because it answers a different question: not "what did the peak cell do
 /// after everything else ran" but "what does THIS cell do on its own, run cold". No committed snapshot
 /// has populated this yet: typed from the shell source, kept permissive by being `Option` throughout.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CellMemory {
     #[serde(default)]
     pub protocol: String,
