@@ -122,6 +122,9 @@ fn main() -> ExitCode {
                 static_headers: Vec::new(),
                 egress_headers: Default::default(),
                 runtime: otb_engine::manifest::Runtime::Native { proc_match: String::new() },
+                // `smoke` runs against a target someone else started, so the harness does not own
+                // its lifetime and must never restart it.
+                relaunch: None,
             };
             println!("mock healthy: {}", otb_engine::run::mock_healthy(&cfg));
             for r in run_grid(&cfg, 4, 64) {
@@ -273,6 +276,20 @@ fn main() -> ExitCode {
                 //
                 // An unset or empty variable is None, not the empty string: a snapshot must be able
                 // to say "this run cannot be traced" rather than claim a commit named "".
+                // WHICH MOCK TOOK THE READINGS. rig.sh on the box fetched and hashed it; these are
+                // passed through rather than re-derived, because the engine never sees the fetch.
+                // Absent env means an absent block, never a fabricated one.
+                rig_mock: std::env::var("OTB_RIG_MOCK_SHA256")
+                    .ok()
+                    .filter(|v| !v.is_empty())
+                    .map(|sha| otb_engine::record::BinaryProvenance {
+                        origin: std::env::var("OTB_RIG_MOCK_ORIGIN").ok().filter(|v| !v.is_empty()),
+                        sha256: Some(sha),
+                        asset_updated_at: std::env::var("OTB_RIG_MOCK_UPDATED_AT")
+                            .ok()
+                            .filter(|v| !v.is_empty()),
+                    }),
+                rig_release_url: std::env::var("OTB_RIG_URL").ok().filter(|v| !v.is_empty()),
                 engine_stamp: std::env::var("BENCH_ENGINE_COMMIT")
                     .ok()
                     .filter(|c| !c.is_empty())

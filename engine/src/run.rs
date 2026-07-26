@@ -40,6 +40,14 @@ pub struct RunConfig {
     /// value the launcher's --name and the stop path take: there is no second name for a reader to
     /// disagree with.
     pub runtime: crate::manifest::Runtime,
+    /// HOW TO PUT THE GATEWAY BACK AT REST. The memory group needs a process that has not served
+    /// load to read an idle RSS from, and the only way to get one is to restart it, so the spec that
+    /// launched it has to be reachable from a metric.
+    ///
+    /// `None` when the harness does not own the gateway's lifetime (no `launch` in the manifest, or
+    /// a run against an already-up target). The memory group then publishes idle as ABSENT rather
+    /// than as a reading it knows was taken under load - see `Memory::measure`.
+    pub relaunch: Option<crate::launch::LaunchSpec>,
 }
 
 /// Every header one request carries: how this INGRESS dialect authenticates, then whatever the
@@ -134,6 +142,25 @@ impl SweepProbe<'_> {
 /// Shared by the throughput search and the memory window so both put load on the box the same way:
 /// same binary, same pinning, its own process. A memory number taken under a differently-generated
 /// load is not comparable with a throughput number taken under this one.
+/// Stop the gateway and start it again, returning only once it is ready to serve.
+///
+/// This exists for ONE reason: an idle memory reading has to come from a process that has not served
+/// load, and after the throughput sweep no such process exists. Restarting is the only way to get one
+/// back. The alternative that was in place - reading RSS where the process happened to be - published
+/// post-load memory as idle and made every cell depend on the load the cell before it had run.
+///
+/// Errors carry the stage that failed, because "could not restart" and "restarted but never came
+/// back" are different findings: the first leaves the gateway up, the second leaves it down and every
+/// later cell in the grid will fail too.
+pub fn restart_to_rest(spec: &crate::launch::LaunchSpec) -> Result<(), String> {
+    crate::supervise::stop_and_wait(&spec.runtime, spec.port, Duration::from_secs(30))
+        .map_err(|e| format!("stopping it failed: {e:?}"))?;
+    let mut launcher = crate::launch::RealLauncher;
+    crate::launch::launch_default(&mut launcher, spec)
+        .map(|_| ())
+        .map_err(|e| format!("it did not come back up: {e:?}"))
+}
+
 pub fn load_window(cfg: &RunConfig, path: &str, body: &str, concurrency: u32) -> Option<GenStats> {
     {
         let exe = std::env::current_exe().ok()?;
@@ -168,6 +195,10 @@ pub fn load_window(cfg: &RunConfig, path: &str, body: &str, concurrency: u32) ->
 pub struct CellPerf {
     pub max_proxy: Measurement<f64>,
     pub max_proxy_concurrency: Measurement<u32>,
+    /// EVERY concurrency the search actually probed, in probe order. The peak is one point out of
+    /// this; without it the published number cannot be re-derived or charted, and a reader has no
+    /// way to see whether the search found a real turnover or simply ran out of range.
+    pub points: Vec<crate::search::ProbedPoint>,
 }
 
 /// One load window at ONE concurrency. A point measurement, not a search.
@@ -210,6 +241,8 @@ pub fn sweep_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> CellPerf {
         return CellPerf {
             max_proxy: Measurement::absent(Absent::Untestable),
             max_proxy_concurrency: Measurement::absent(Absent::Untestable),
+            // Nothing was probed, so there is no evidence to carry.
+            points: Vec::new(),
         };
     };
     let mut p = SweepProbe { cfg, path: ing.path(&cfg.model), body: ing.body(&cfg.model) };
@@ -219,6 +252,7 @@ pub fn sweep_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> CellPerf {
         Some(pt) => CellPerf {
             max_proxy: Measurement::Measured(pt.value),
             max_proxy_concurrency: Measurement::Measured(pt.concurrency),
+            points: r.points.clone(),
         },
         None => CellPerf {
             // The search's own reason AND its evidence travel. Dropping the detail here was the one
@@ -234,6 +268,10 @@ pub fn sweep_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> CellPerf {
             max_proxy_concurrency: Measurement::absent(
                 r.peak.reason().cloned().unwrap_or(Absent::NotMeasured),
             ),
+            // A search that found no publishable peak still probed real rungs, and those rungs are
+            // exactly what explains why it found nothing. Dropping them here would leave a null with
+            // no evidence beside it.
+            points: r.points.clone(),
         },
     }
 }
@@ -262,6 +300,10 @@ pub struct CellResult {
     /// cell that was not served: there is nothing to measure, and an empty map would read as
     /// "measured nothing" rather than "never asked".
     pub metrics: Option<std::collections::BTreeMap<&'static str, Measurement<f64>>>,
+    /// The evidence behind those scalars: the rungs the throughput search probed and the resident
+    /// memory readings taken across the load window. `None` alongside `metrics` for a cell that was
+    /// never measured, and empty for one that was measured but produced no series.
+    pub series: Option<crate::metric::Series>,
 }
 
 /// Walk the grid: probe every pairing, sweep the ones that are served.
@@ -282,11 +324,12 @@ pub fn run_grid_with(cfg: &RunConfig, lo: u32, hi: u32, metrics: &[&dyn metric::
             // metrics lives in one place (`metric::METRICS`) rather than being reached for here, so
             // a measurement cannot be implemented, tested, and then silently never taken - which is
             // how memory, box qualification and the launcher all ended up with zero callers.
-            let metrics = if served.is_measurable() {
+            let (metrics, series) = if served.is_measurable() {
                 let ctx = metric::CellCtx { cfg, id: &id, dialect: *ing, min_conc: lo, max_conc: hi };
-                Some(metric::process_cell_with(&ctx, metrics))
+                let (m, s) = metric::process_cell_with(&ctx, metrics);
+                (Some(m), Some(s))
             } else {
-                None
+                (None, None)
             };
             let outcome = match served {
                 Served::Yes => CellOutcome::served(id),
@@ -296,7 +339,7 @@ pub fn run_grid_with(cfg: &RunConfig, lo: u32, hi: u32, metrics: &[&dyn metric::
                 }
                 Served::Untestable(r) => CellOutcome::untestable(id, r),
             };
-            out.push(CellResult { outcome, metrics });
+            out.push(CellResult { outcome, metrics, series });
         }
     }
     out
@@ -321,6 +364,7 @@ mod tests {
             static_headers: Vec::new(),
             egress_headers: Default::default(),
             runtime: crate::manifest::Runtime::Native { proc_match: "test-fixture".into() },
+            relaunch: None,
         }
     }
 

@@ -556,6 +556,67 @@ mod tests {
         assert_ne!(r.ceiling.copied(), Some(1000));
     }
 
+    // A FAILING FLOOR ABOVE ONE PROVES ONLY THAT THE CEILING IS BELOW THE FLOOR, and not one value
+    // in [0, floor-1] was probed. Returning 0 there publishes a specific number the search never
+    // established, which is the same fabrication as publishing the range bound at the top end, just
+    // at the other end of the range. The `Measured(0)` answer is reserved for a floor of one, where
+    // there is genuinely nowhere left to look.
+    #[test]
+    fn a_failing_floor_above_one_is_absent_never_the_measured_zero_reserved_for_c_equals_one() {
+        let mut probe = MonotoneGate { ceiling: 0 };
+        let r = bisect_ceiling(&mut probe, 8, 4096);
+        assert_eq!(r.ceiling.copied(), None, "no concurrency in [0, 7] was probed, so 0 was never measured");
+        assert_eq!(r.ceiling.reason(), Some(&Absent::SearchExhausted));
+        assert!(
+            r.ceiling.detail().unwrap_or_default().contains("c=8"),
+            "the reason must name the floor that failed, got {:?}",
+            r.ceiling.detail()
+        );
+        // The refusal is about the FLOOR, not about the gate: with a floor of one the identical gate
+        // yields a real measured zero, and the two answers must not be interchangeable.
+        let mut same_gate = MonotoneGate { ceiling: 0 };
+        assert_eq!(bisect_ceiling(&mut same_gate, 1, 4096).ceiling, Measurement::Measured(0));
+    }
+
+    // The range bounds are normalised, so a caller that passes them reversed gets the same answer
+    // rather than a search over an empty or inverted interval. A silently inverted range would make
+    // the floor probe the top rung and the top probe the floor, which inverts the pass/fail
+    // invariant the bisection is built on and can only produce nonsense.
+    #[test]
+    fn a_bisect_range_given_backwards_searches_the_same_interval() {
+        let mut forwards = MonotoneGate { ceiling: 1300 };
+        let mut backwards = MonotoneGate { ceiling: 1300 };
+        let a = bisect_ceiling(&mut forwards, 8, 4096);
+        let b = bisect_ceiling(&mut backwards, 4096, 8);
+        assert_eq!(a.ceiling.copied(), Some(1300));
+        assert_eq!(b.ceiling.copied(), a.ceiling.copied(), "an inverted range must be normalised, not searched inverted");
+    }
+
+    // A RANGE OF ONE PROVES NOTHING ABOUT A CEILING. The single rung passed, and nothing above it
+    // was ever probed, so the answer is a lower bound: publishing it would report the caller's own
+    // one-point range as the gateway's ceiling.
+    #[test]
+    fn a_single_point_range_that_passes_is_exhausted_not_a_ceiling() {
+        let mut probe = MonotoneGate { ceiling: 1000 };
+        let r = bisect_ceiling(&mut probe, 64, 64);
+        assert_eq!(r.ceiling.copied(), None, "one passing rung is a lower bound, not a proven ceiling");
+        assert_eq!(r.ceiling.reason(), Some(&Absent::SearchExhausted));
+    }
+
+    // The narrowest range that can actually prove a ceiling: two adjacent rungs, the lower passing
+    // and the upper failing. The bisection loop never runs (b - a is already 1), so this is the one
+    // path where the answer comes straight from the two bracket probes.
+    #[test]
+    fn two_adjacent_rungs_with_a_pass_and_a_fail_prove_the_ceiling_without_bisecting() {
+        let mut probe = MonotoneGate { ceiling: 4 };
+        let r = bisect_ceiling(&mut probe, 4, 5);
+        assert_eq!(r.ceiling, Measurement::Measured(4));
+        assert!(
+            r.points.iter().any(|p| p.concurrency == 5 && !p.passed),
+            "the measured failure at 5 is the proof, and it must be in the trace"
+        );
+    }
+
     // ── peak_max ────────────────────────────────────────────────────────────────────────────────
 
     struct Unimodal {
@@ -722,6 +783,71 @@ mod tests {
         let r = peak_max(&mut probe, 1, 1000, 100, 4);
         assert_eq!(r.peak.copied(), None);
         assert_eq!(r.peak.reason(), Some(&Absent::NotMeasured));
+    }
+
+    // The same normalisation the bisection gets. An inverted range here would clamp `start` into an
+    // interval whose ends are swapped, so the ramp would walk away from the peak by construction.
+    #[test]
+    fn a_peak_range_given_backwards_searches_the_same_interval() {
+        let mut forwards = Unimodal { peak_c: 768, peak_v: 48_000.0, width: 8.0 };
+        let mut backwards = Unimodal { peak_c: 768, peak_v: 48_000.0, width: 8.0 };
+        let a = peak_max(&mut forwards, 8, 8192, 256, 4);
+        let b = peak_max(&mut backwards, 8192, 8, 256, 4);
+        assert_eq!(
+            a.peak.value().map(|p| p.concurrency),
+            b.peak.value().map(|p| p.concurrency),
+            "an inverted range must be normalised, not searched inverted"
+        );
+        assert!(b.peak.is_measured());
+    }
+
+    // A range of one point cannot show a turnover: there is nothing above and nothing below the
+    // single rung, so whatever value it produced is a lower bound. This is the degenerate case of
+    // invariant 3, and it must reach the same verdict as the non-degenerate edge cases rather than
+    // publishing the caller's own one-point range as a proven maximum.
+    #[test]
+    fn a_single_point_peak_range_is_a_lower_bound_not_a_maximum() {
+        let mut probe = Unimodal { peak_c: 64, peak_v: 30_000.0, width: 2.0 };
+        let r = peak_max(&mut probe, 64, 64, 64, 4);
+        assert!(!r.peak.is_measured(), "one probed point cannot prove a turnover: {:?}", r.peak);
+        assert_eq!(r.peak.reason(), Some(&Absent::SearchExhausted));
+    }
+
+    // Interrupted before ANY probe landed: genuinely unmeasured, and there is no best passing point
+    // to describe. `exhausted` must stay false, because an interruption is not the search running
+    // off the end of its range, and conflating the two would tell a reader the gateway outran the
+    // harness's range when in fact the clock simply stopped.
+    #[test]
+    fn a_peak_interrupted_before_any_probe_is_unmeasured_and_never_flagged_exhausted() {
+        let mut probe = Interrupter { fires_after: 0, calls: 0 };
+        let r = peak_max(&mut probe, 1, 1000, 100, 4);
+        assert_eq!(r.peak.copied(), None);
+        assert_eq!(r.peak.reason(), Some(&Absent::NotMeasured));
+        assert!(!r.exhausted, "an interruption is not an exhausted search range");
+        assert!(r.points.is_empty(), "nothing was probed, so nothing may appear in the trace");
+        assert!(
+            r.peak.detail().unwrap_or_default().contains("interrupted"),
+            "the detail must say the search was cut off, got {:?}",
+            r.peak.detail()
+        );
+    }
+
+    // Interrupted AFTER real probes landed. The probed trace must survive: discarding it publishes
+    // null for a cell we did in fact measure, which is the same class of loss as publishing a zero
+    // for one we did not. The best passing point travels as EVIDENCE in the detail, never as the
+    // value, because the curve was never observed to turn over.
+    #[test]
+    fn an_interrupted_peak_keeps_its_trace_and_states_the_lower_bound_as_evidence() {
+        let mut probe = Interrupter { fires_after: 2, calls: 0 };
+        let r = peak_max(&mut probe, 1, 1000, 8, 4);
+        assert_eq!(r.peak.copied(), None, "no turnover was observed, so no maximum was proven");
+        assert_eq!(r.peak.reason(), Some(&Absent::NotMeasured));
+        assert!(!r.points.is_empty(), "the probed trace must survive an absent verdict");
+        let detail = r.peak.detail().unwrap_or_default().to_string();
+        assert!(
+            detail.contains("lower bound"),
+            "the detail must say the best point is a lower bound, got {detail:?}"
+        );
     }
 
     #[test]

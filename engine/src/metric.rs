@@ -57,6 +57,39 @@ pub struct CellCtx<'a> {
 /// The names a group fills, paired with what it measured.
 pub type Filled = Vec<(&'static str, Measurement<f64>)>;
 
+/// THE EVIDENCE BEHIND THE SCALARS.
+///
+/// A group's headline numbers are summaries: a peak is one point out of a sweep, an idle and a peak
+/// RSS are two readings out of a series. Until this existed there was nowhere for the underlying
+/// points to go - `measure()` returned scalars and nothing else - so the searches collected their
+/// probed points and the memory sampler collected its readings, and both were dropped on the floor
+/// at the trait boundary. The published artifact carried `sweep_max_proxy: []` and `rss_series: []`
+/// on every cell, which means no number on the board could be re-derived, charted, or checked
+/// against the measurement it came from.
+///
+/// Empty is honest and common: a group that took no series simply returns none.
+#[derive(Default)]
+pub struct Series {
+    /// One entry per concurrency the throughput search actually probed, in probe order.
+    pub sweep: Vec<crate::record::SweepPoint>,
+    /// One entry per resident-memory reading taken across the load window.
+    pub rss: Vec<crate::record::RssSample>,
+}
+
+/// What a group produced: the fields it promised, and the evidence behind them.
+#[derive(Default)]
+pub struct Measured {
+    pub fields: Filled,
+    pub series: Series,
+}
+
+impl From<Filled> for Measured {
+    /// A group that takes no series says so by returning its fields alone.
+    fn from(fields: Filled) -> Self {
+        Measured { fields, series: Series::default() }
+    }
+}
+
 /// One measurement procedure, producing one or more published numbers.
 ///
 /// `Sync` because `METRICS` is a static slice of trait objects.
@@ -69,7 +102,7 @@ pub trait Metric: Sync {
     fn fields(&self) -> &'static [&'static str];
 
     /// Take the measurement. Runs against a cell already known to be served.
-    fn measure(&self, ctx: &CellCtx<'_>) -> Filled;
+    fn measure(&self, ctx: &CellCtx<'_>) -> Measured;
 }
 
 /// THE ENGINE'S ENTIRE MEASUREMENT SURFACE.
@@ -83,7 +116,7 @@ pub const METRICS: &[&dyn Metric] = &[&Throughput, &Memory, &Streaming];
 /// A group that returns nothing for a field it declared gets an explicit absence rather than a
 /// missing key, so the artifact's shape does not depend on which code path a metric took. A missing
 /// key and a null mean different things to `site/gen-data.mjs`, and only one of them is honest.
-pub fn process_cell(ctx: &CellCtx<'_>) -> BTreeMap<&'static str, Measurement<f64>> {
+pub fn process_cell(ctx: &CellCtx<'_>) -> (BTreeMap<&'static str, Measurement<f64>>, Series) {
     process_cell_with(ctx, METRICS)
 }
 
@@ -97,10 +130,21 @@ pub fn process_cell(ctx: &CellCtx<'_>) -> BTreeMap<&'static str, Measurement<f64
 pub fn process_cell_with(
     ctx: &CellCtx<'_>,
     metrics: &[&dyn Metric],
-) -> BTreeMap<&'static str, Measurement<f64>> {
+) -> (BTreeMap<&'static str, Measurement<f64>>, Series) {
     let mut out = BTreeMap::new();
+    let mut series = Series::default();
     for m in metrics {
-        let filled: BTreeMap<&'static str, Measurement<f64>> = m.measure(ctx).into_iter().collect();
+        let produced = m.measure(ctx);
+        // Series ACCUMULATE across groups rather than overwrite: the sweep comes from throughput and
+        // the readings come from memory, and a later group returning none must not erase an earlier
+        // group's evidence.
+        if !produced.series.sweep.is_empty() {
+            series.sweep = produced.series.sweep;
+        }
+        if !produced.series.rss.is_empty() {
+            series.rss = produced.series.rss;
+        }
+        let filled: BTreeMap<&'static str, Measurement<f64>> = produced.fields.into_iter().collect();
         for field in m.fields() {
             let value = filled.get(field).cloned().unwrap_or_else(|| {
                 Measurement::absent_because(
@@ -111,7 +155,7 @@ pub fn process_cell_with(
             out.insert(*field, value);
         }
     }
-    out
+    (out, series)
 }
 
 // ── the groups ────────────────────────────────────────────────────────────────────────────────────
@@ -129,7 +173,7 @@ impl Metric for Throughput {
         &["rps_max_proxy", "conc_at_peak"]
     }
 
-    fn measure(&self, ctx: &CellCtx<'_>) -> Filled {
+    fn measure(&self, ctx: &CellCtx<'_>) -> Measured {
         let perf = crate::run::sweep_cell(ctx.cfg, ctx.id, ctx.min_conc, ctx.max_conc);
         // The search's reason AND its evidence travel with the absence. A peak search that ran out
         // of range publishes a lower bound as prose; flattening that to a bare null is the one place
@@ -150,7 +194,25 @@ impl Metric for Throughput {
             Some(c) => Measurement::Measured(f64::from(*c)),
             None => Measurement::absent(perf.max_proxy.reason().cloned().unwrap_or(Absent::NotMeasured)),
         };
-        vec![("rps_max_proxy", rps), ("conc_at_peak", conc)]
+        // THE SWEEP TRAVELS WITH THE PEAK. Each probed rung becomes a published point, so a reader
+        // can see the shape the search walked and re-derive the maximum rather than trusting it.
+        // `p99_us` and `fail` are absent rather than zero: the search's gate records whether a rung
+        // PASSED, not the latency or the failure count behind that verdict, and a zero here would
+        // read as "measured no failures" when nothing was measured at all.
+        let sweep = perf
+            .points
+            .iter()
+            .map(|pt| crate::record::SweepPoint {
+                conc: i64::from(pt.concurrency),
+                rps: Measurement::Measured(pt.value as i64),
+                p99_us: Measurement::absent(Absent::NotMeasured),
+                fail: Measurement::absent(Absent::NotMeasured),
+            })
+            .collect();
+        Measured {
+            fields: vec![("rps_max_proxy", rps), ("conc_at_peak", conc)],
+            series: Series { sweep, rss: Vec::new() },
+        }
     }
 }
 
@@ -186,10 +248,10 @@ impl Metric for Memory {
         &["memory_idle_mib", "memory_peak_mib", "memory_hwm_mib"]
     }
 
-    fn measure(&self, ctx: &CellCtx<'_>) -> Filled {
+    fn measure(&self, ctx: &CellCtx<'_>) -> Measured {
         // The tree to measure comes from the ONE declared identity, the same one the launcher's
         // --name and the stop path use.
-        let pid = match crate::rss::root_pid(&ctx.cfg.runtime).copied() {
+        let mut pid = match crate::rss::root_pid(&ctx.cfg.runtime).copied() {
             Some(p) => p,
             None => {
                 // No process to measure. Every field carries the SAME reason: one cause, one
@@ -197,29 +259,90 @@ impl Metric for Memory {
                 let why = crate::rss::root_pid(&ctx.cfg.runtime);
                 let reason = why.reason().cloned().unwrap_or(Absent::NotMeasured);
                 let detail = why.detail().unwrap_or("the gateway's process tree could not be found").to_string();
-                return self
+                let fields: Filled = self
                     .fields()
                     .iter()
                     .map(|f| (*f, Measurement::absent_because(reason.clone(), detail.clone())))
                     .collect();
+                // No process, so no window ran and there is no series to carry.
+                return fields.into();
             }
         };
 
-        let idle = crate::rss::rss_tree_mib(pid);
+        // ── PUT IT BACK AT REST FIRST ────────────────────────────────────────────────────────────
+        //
+        // `idle` used to be read right here, as this group's first act. But METRICS runs Throughput
+        // BEFORE Memory on the same process with nothing in between, so by the time this line ran
+        // the gateway had just been driven all the way through a peak-finding sweep. The reading was
+        // post-load RSS wearing the name "idle", and allocators do not return memory to the OS
+        // promptly, so it stayed high: one gateway published 111 MiB idle where a cold process
+        // measures 7.1, a factor of fifteen on the board's headline metric.
+        //
+        // It was also ORDER-DEPENDENT. Each cell inherited whatever the previous cell's load left
+        // resident, so the same gateway measured differently at cell 1 and cell 20, and two gateways
+        // were no longer comparable at all - which is the one thing this board exists to do.
+        //
+        // So the process is restarted and only then read. All four readings still come from ONE
+        // window on ONE process, which is what this group is for; the window now simply starts where
+        // it claims to. If the harness does not own the gateway's lifetime there is no way to return
+        // it to rest, and idle is published ABSENT with that reason rather than as a number we know
+        // was taken under load.
+        let idle = match &ctx.cfg.relaunch {
+            None => Measurement::absent_because(
+                Absent::NotMeasured,
+                "the harness does not own this gateway's lifetime, so it could not be returned to \
+                 rest before the reading; an idle taken after the throughput sweep would be \
+                 post-load RSS under another name"
+                    .to_string(),
+            ),
+            Some(spec) => match crate::run::restart_to_rest(spec) {
+                Err(e) => Measurement::absent_because(
+                    Absent::NotMeasured,
+                    format!("the gateway could not be restarted to rest before the idle reading: {e}"),
+                ),
+                // Re-resolve the pid: a restart gives the tree a NEW root, and reading the old one
+                // would measure a process that no longer exists.
+                Ok(()) => match crate::rss::root_pid(&ctx.cfg.runtime).copied() {
+                    Some(fresh) => {
+                        pid = fresh;
+                        crate::rss::rss_tree_mib(fresh)
+                    }
+                    None => Measurement::absent_because(
+                        Absent::NotMeasured,
+                        "the gateway restarted but its process tree could not be found afterwards"
+                            .to_string(),
+                    ),
+                },
+            },
+        };
 
         // Sample the tree while a window of load runs against it. The sampler is a plain thread
         // rather than a timer: it stops when the window's child exits, so a slow window is sampled
         // for as long as it actually ran instead of for as long as it was expected to.
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let peak_seen = std::sync::Arc::new(std::sync::Mutex::new(f64::NEG_INFINITY));
+        // KEEP THE READINGS, not just their maximum. The sampler already visits the tree every
+        // MEMORY_SAMPLE_INTERVAL; it used to fold each reading into a running max and throw the
+        // reading away, so `rss_series` published empty on every cell and the peak was a number with
+        // no curve behind it. Whether memory climbed and plateaued or spiked once is the difference
+        // between a leak and a burst, and neither is visible from a single scalar.
+        let series = std::sync::Arc::new(std::sync::Mutex::new(Vec::<crate::record::RssSample>::new()));
         let sampler = {
             let stop = std::sync::Arc::clone(&stop);
             let peak_seen = std::sync::Arc::clone(&peak_seen);
+            let series = std::sync::Arc::clone(&series);
+            let started = std::time::Instant::now();
             std::thread::spawn(move || {
                 while !stop.load(std::sync::atomic::Ordering::Relaxed) {
                     if let Some(v) = crate::rss::rss_tree_mib(pid).copied() {
                         if let Ok(mut p) = peak_seen.lock() {
                             *p = p.max(v);
+                        }
+                        if let Ok(mut s) = series.lock() {
+                            s.push(crate::record::RssSample {
+                                t_s: started.elapsed().as_secs() as i64,
+                                rss_mib: Measurement::Measured(v),
+                            });
                         }
                     }
                     std::thread::sleep(MEMORY_SAMPLE_INTERVAL);
@@ -253,7 +376,13 @@ impl Metric for Memory {
             ),
         };
 
-        vec![("memory_idle_mib", idle), ("memory_peak_mib", peak), ("memory_hwm_mib", hwm)]
+        // Take the readings back off the sampler. A poisoned lock means the sampler thread panicked,
+        // which is a lost series and not a reason to lose the scalars beside it.
+        let rss = series.lock().map(|s| s.clone()).unwrap_or_default();
+        Measured {
+            fields: vec![("memory_idle_mib", idle), ("memory_peak_mib", peak), ("memory_hwm_mib", hwm)],
+            series: Series { sweep: Vec::new(), rss },
+        }
     }
 }
 
@@ -284,8 +413,12 @@ impl Metric for Streaming {
         &["added_ttft_p50_us", "added_ttft_p99_us", "added_gap_p50_us", "added_gap_p99_us"]
     }
 
-    fn measure(&self, ctx: &CellCtx<'_>) -> Filled {
-        let all = |m: Measurement<f64>| -> Filled { self.fields().iter().map(|f| (*f, m.clone())).collect() };
+    fn measure(&self, ctx: &CellCtx<'_>) -> Measured {
+        // Streaming takes no series of its own; `into()` wraps its fields with an empty one.
+        let all = |m: Measurement<f64>| -> Measured {
+            let f: Filled = self.fields().iter().map(|x| (*x, m.clone())).collect();
+            f.into()
+        };
 
         // The rig, not the gateway, decides whether this question can be asked at all.
         if !ctx.dialect.streams_natively() {
@@ -365,12 +498,13 @@ impl Metric for Streaming {
             )
         };
 
-        vec![
+        let fields: Filled = vec![
             ("added_ttft_p50_us", Measurement::Measured(added_ttft)),
             ("added_ttft_p99_us", no_distribution()),
             ("added_gap_p50_us", added_gap),
             ("added_gap_p99_us", no_distribution()),
-        ]
+        ];
+        fields.into()
     }
 }
 
@@ -389,8 +523,9 @@ mod tests {
         fn fields(&self) -> &'static [&'static str] {
             &["present", "forgotten"]
         }
-        fn measure(&self, _ctx: &CellCtx<'_>) -> Filled {
-            vec![("present", Measurement::Measured(1.0))]
+        fn measure(&self, _ctx: &CellCtx<'_>) -> Measured {
+            let f: Filled = vec![("present", Measurement::Measured(1.0))];
+            f.into()
         }
     }
 
@@ -411,6 +546,7 @@ mod tests {
             static_headers: Vec::new(),
             egress_headers: Default::default(),
             runtime: crate::manifest::Runtime::Native { proc_match: "test-fixture".into() },
+            relaunch: None,
         }
     }
 
@@ -420,7 +556,8 @@ mod tests {
         let id = CellId::new("openai", "openai");
         let ctx = ctx_for(&cfg, &id);
 
-        let filled: BTreeMap<&'static str, Measurement<f64>> = Forgetful.measure(&ctx).into_iter().collect();
+        let filled: BTreeMap<&'static str, Measurement<f64>> =
+            Forgetful.measure(&ctx).fields.into_iter().collect();
         let mut out = BTreeMap::new();
         for field in Forgetful.fields() {
             let value = filled.get(field).cloned().unwrap_or_else(|| {
@@ -464,5 +601,29 @@ mod tests {
             assert!(!m.fields().is_empty(), "{} declares no fields", m.name());
             assert!(!m.name().is_empty());
         }
+    }
+
+    // IDLE MUST COME FROM A PROCESS AT REST.
+    //
+    // METRICS runs Throughput before Memory on the same process, so by the time Memory reads RSS the
+    // gateway has just been driven through a full peak-finding sweep. The reading was published as
+    // "idle" anyway: one gateway shipped 111 MiB where a cold process measures 7.1.
+    //
+    // When the harness does not own the gateway's lifetime (relaunch: None) it cannot put it back at
+    // rest, and the only honest answer is an absence carrying that reason - never the post-load
+    // number. This pins the absence so the polluted reading cannot come back as a silent default.
+    #[test]
+    fn idle_memory_is_absent_when_the_gateway_cannot_be_returned_to_rest() {
+        let cfg = a_config();
+        assert!(cfg.relaunch.is_none(), "this fixture owns no gateway lifetime");
+        let id = CellId::new("openai", "openai");
+        let ctx = CellCtx { cfg: &cfg, id: &id, dialect: Dialect::Openai, min_conc: 1, max_conc: 2 };
+        let filled: BTreeMap<_, _> = Memory.measure(&ctx).fields.into_iter().collect();
+        let idle = filled.get("memory_idle_mib").expect("the memory group declares memory_idle_mib");
+        assert_eq!(idle.copied(), None, "idle must not be published from a process that served load");
+        assert!(
+            idle.reason().is_some(),
+            "an absent idle must carry the reason it could not be taken, not a bare null"
+        );
     }
 }
