@@ -212,6 +212,12 @@ pub struct CellResult {
 
 /// Walk the grid: probe every pairing, sweep the ones that are served.
 pub fn run_grid(cfg: &RunConfig, lo: u32, hi: u32) -> Vec<CellResult> {
+    run_grid_with(cfg, lo, hi, metric::METRICS)
+}
+
+/// The same walk, over an explicit metric list, so a test can drive the grid without performing
+/// every real measurement.
+pub fn run_grid_with(cfg: &RunConfig, lo: u32, hi: u32, metrics: &[&dyn metric::Metric]) -> Vec<CellResult> {
     let healthy = mock_healthy(cfg);
     let mut out = Vec::new();
     for eg in &cfg.dialects {
@@ -224,7 +230,7 @@ pub fn run_grid(cfg: &RunConfig, lo: u32, hi: u32) -> Vec<CellResult> {
             // how memory, box qualification and the launcher all ended up with zero callers.
             let metrics = if served.is_measurable() {
                 let ctx = metric::CellCtx { cfg, id: &id, dialect: *ing, min_conc: lo, max_conc: hi };
-                Some(metric::process_cell(&ctx))
+                Some(metric::process_cell_with(&ctx, metrics))
             } else {
                 None
             };
@@ -340,7 +346,9 @@ mod tests {
         let gw = serve(200);
         let mut cfg = cfg_for(gw, gw);
         cfg.dialects = vec![Dialect::Openai, Dialect::Anthropic];
-        let rows = run_grid(&cfg, 1, 2);
+        // An explicit, empty metric list: this test is about the SHAPE of the grid, so it must not
+        // pay for every real measurement to assert that every pairing appears.
+        let rows = run_grid_with(&cfg, 1, 2, &[]);
         assert_eq!(rows.len(), 4);
     }
 
@@ -350,7 +358,7 @@ mod tests {
     fn an_unserved_cell_carries_no_metrics() {
         let gw = serve(404);
         let cfg = cfg_for(gw, gw);
-        let rows = run_grid(&cfg, 1, 2);
+        let rows = run_grid_with(&cfg, 1, 2, &[]);
         for r in &rows {
             assert!(r.metrics.is_none(), "{} must not carry metrics", r.outcome.id);
         }

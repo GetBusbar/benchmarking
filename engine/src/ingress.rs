@@ -97,6 +97,27 @@ impl Dialect {
         self.path(model)
     }
 
+    /// The same probe body, asking for a stream.
+    ///
+    /// The mock decides whether to stream by looking for `"stream": true` in the request body (its
+    /// own `wants_stream` dispatch), and so does every gateway under test, so the streaming probe
+    /// must be the ORDINARY body plus that one flag. Building a separate hand-written streaming body
+    /// per dialect would let the streaming and non-streaming legs drift into asking two different
+    /// questions, and the difference between them is exactly what the added-latency numbers publish.
+    ///
+    /// The flag is inserted at the front of the object rather than appended, so no trailing-comma
+    /// handling is needed for bodies that end in a nested structure.
+    pub fn stream_body(&self, model: &str) -> String {
+        let body = self.body(model);
+        match body.strip_prefix('{') {
+            Some(rest) => format!("{{\"stream\":true,{rest}"),
+            // `body` is a JSON object for every dialect; this arm cannot be reached today and exists
+            // so a future dialect whose body is not an object fails loudly rather than silently
+            // sending an unstreamed request that would be published as "does not stream".
+            None => body,
+        }
+    }
+
     /// Whether the mock upstream can answer this dialect's `"stream":true` request with a real SSE
     /// stream, rather than plain JSON. Read off mock/src/main.rs's own dispatch (`wants_stream(...)
     /// && (body is OPENAI or ANTHROPIC)`), not off a comment: only those two dialects get native SSE
@@ -251,6 +272,25 @@ mod tests {
     }
 
     // ── streams_natively(): matches mock/src/main.rs's real dispatch, not a comment ────────────────
+
+    // The streaming probe must be the ORDINARY body plus the flag, or the streaming and
+    // non-streaming legs are asking different questions and their difference means nothing.
+    #[test]
+    fn a_stream_body_is_the_probe_body_plus_the_flag_and_nothing_else() {
+        for d in Dialect::ALL {
+            let plain: serde_json::Value =
+                serde_json::from_str(&d.body("m")).expect("every probe body must be valid JSON");
+            let streamed: serde_json::Value =
+                serde_json::from_str(&d.stream_body("m")).expect("every stream body must be valid JSON");
+
+            assert_eq!(streamed.get("stream"), Some(&serde_json::Value::Bool(true)), "{d} must ask for a stream");
+
+            // Every other key is untouched, and no key is lost: same question, streamed.
+            let mut without_flag = streamed.clone();
+            without_flag.as_object_mut().expect("a JSON object").remove("stream");
+            assert_eq!(without_flag, plain, "{d}: the stream body must differ from the probe body ONLY by the flag");
+        }
+    }
 
     #[test]
     fn only_openai_and_anthropic_stream_natively_in_the_mock() {

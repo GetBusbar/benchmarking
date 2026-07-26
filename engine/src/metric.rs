@@ -76,7 +76,7 @@ pub trait Metric: Sync {
 ///
 /// Adding a number to the board is: implement a group, add it here. Removing one is deleting it from
 /// this list, which is a visible act rather than a call that quietly stopped happening.
-pub const METRICS: &[&dyn Metric] = &[&Throughput, &Memory];
+pub const METRICS: &[&dyn Metric] = &[&Throughput, &Memory, &Streaming];
 
 /// Run every metric against one served cell.
 ///
@@ -84,8 +84,22 @@ pub const METRICS: &[&dyn Metric] = &[&Throughput, &Memory];
 /// missing key, so the artifact's shape does not depend on which code path a metric took. A missing
 /// key and a null mean different things to `site/gen-data.mjs`, and only one of them is honest.
 pub fn process_cell(ctx: &CellCtx<'_>) -> BTreeMap<&'static str, Measurement<f64>> {
+    process_cell_with(ctx, METRICS)
+}
+
+/// The same loop over an EXPLICIT list.
+///
+/// `METRICS` is the engine's real surface, but a caller that reads it from a global cannot be tested
+/// without performing every measurement for real - which is how adding the streaming group turned a
+/// 0.4 second unit suite into a 160 second one, two twenty-second network timeouts per cell against a
+/// fixture that holds its connection open. A test that slow stops being run, and a gate that stops
+/// being run is not a gate.
+pub fn process_cell_with(
+    ctx: &CellCtx<'_>,
+    metrics: &[&dyn Metric],
+) -> BTreeMap<&'static str, Measurement<f64>> {
     let mut out = BTreeMap::new();
-    for m in METRICS {
+    for m in metrics {
         let filled: BTreeMap<&'static str, Measurement<f64>> = m.measure(ctx).into_iter().collect();
         for field in m.fields() {
             let value = filled.get(field).cloned().unwrap_or_else(|| {
@@ -240,6 +254,123 @@ impl Metric for Memory {
         };
 
         vec![("memory_idle_mib", idle), ("memory_peak_mib", peak), ("memory_hwm_mib", hwm)]
+    }
+}
+
+/// How long a streaming probe waits, and how many frames it reads.
+const STREAM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+const STREAM_FRAME_BUDGET: usize = 64;
+
+/// Streaming: what the gateway ADDS to a stream, rather than what the stream costs.
+///
+/// Every number here is a difference. The same stream is taken through the gateway and again
+/// straight to the mock, and what is published is the gap between them, because the mock's own time
+/// to first token is a property of the rig and would otherwise be charged to whichever gateway
+/// happened to be measured on a slow box.
+///
+/// A dialect the MOCK cannot stream is a rig limit, not a gateway failure. `Dialect::streams_natively`
+/// already records which two dialects the mock answers with real SSE frames, and its comment is
+/// explicit that a dialect it returns false for must be reported as the rig being unable to pose the
+/// question. Publishing a gateway as "does not stream" because our mock cannot ask is the exact
+/// harness-bug-as-gateway-property inversion the project forbids.
+pub struct Streaming;
+
+impl Metric for Streaming {
+    fn name(&self) -> &'static str {
+        "streaming"
+    }
+
+    fn fields(&self) -> &'static [&'static str] {
+        &["added_ttft_p50_us", "added_ttft_p99_us", "added_gap_p50_us", "added_gap_p99_us"]
+    }
+
+    fn measure(&self, ctx: &CellCtx<'_>) -> Filled {
+        let all = |m: Measurement<f64>| -> Filled { self.fields().iter().map(|f| (*f, m.clone())).collect() };
+
+        // The rig, not the gateway, decides whether this question can be asked at all.
+        if !ctx.dialect.streams_natively() {
+            return all(Measurement::absent_because(
+                Absent::Untestable,
+                format!(
+                    "the mock does not answer {} with a native event stream, so the rig cannot pose the streaming question here",
+                    ctx.dialect.as_str()
+                ),
+            ));
+        }
+
+        let headers = vec![("authorization".to_string(), format!("Bearer {}", ctx.cfg.auth))];
+        let body = ctx.dialect.stream_body(&ctx.cfg.model);
+
+        let through_gateway = crate::http::post_json_sse(
+            ctx.cfg.gateway_addr,
+            &ctx.dialect.path(&ctx.cfg.model),
+            body.as_bytes(),
+            &headers,
+            STREAM_TIMEOUT,
+            STREAM_FRAME_BUDGET,
+        );
+        let direct = crate::http::post_json_sse(
+            ctx.cfg.mock_addr,
+            &ctx.dialect.mock_direct_path(&ctx.cfg.model),
+            body.as_bytes(),
+            &headers,
+            STREAM_TIMEOUT,
+            STREAM_FRAME_BUDGET,
+        );
+
+        // A leg that produced no frame has no time to first token. Subtracting against a missing
+        // reference would publish the gateway's own latency as its ADDED latency, which reads as the
+        // gateway being slower than it is.
+        let (Some(&gw_ttft), Some(&direct_ttft)) = (
+            through_gateway.frame_offsets_us.first(),
+            direct.frame_offsets_us.first(),
+        ) else {
+            let which = if through_gateway.frame_offsets_us.is_empty() { "the gateway" } else { "the mock directly" };
+            return all(Measurement::absent_because(
+                Absent::NotMeasured,
+                format!("no stream frame arrived from {which}, so there is nothing to difference"),
+            ));
+        };
+
+        // Saturating, because a gateway CANNOT be faster than the upstream it proxies: a negative
+        // difference is rig noise, and publishing it as a negative added latency would say the
+        // gateway returned the token before the mock produced it.
+        let added_ttft = f64::from(gw_ttft.saturating_sub(direct_ttft) as u32);
+
+        let gap_p50 = |o: &crate::http::SseOutcome| -> Option<f64> {
+            let mut gaps: Vec<u64> =
+                o.frame_offsets_us.windows(2).map(|w| w[1].saturating_sub(w[0])).collect();
+            if gaps.is_empty() {
+                return None;
+            }
+            gaps.sort_unstable();
+            Some(gaps[gaps.len() / 2] as f64)
+        };
+
+        let added_gap = match (gap_p50(&through_gateway), gap_p50(&direct)) {
+            (Some(g), Some(d)) => Measurement::Measured((g - d).max(0.0)),
+            _ => Measurement::absent_because(
+                Absent::NotMeasured,
+                "a single frame on one of the two legs leaves no inter-frame gap to difference".to_string(),
+            ),
+        };
+
+        // ONE STREAM CANNOT SUPPORT A p99. The board's p99 fields are a distribution over many
+        // streams; this group takes one. Publishing the single observation under a p99 name would be
+        // a number that claims a confidence it does not have, so the p99s are absent and say why.
+        let no_distribution = || {
+            Measurement::absent_because(
+                Absent::NotMeasured,
+                "one stream was taken, which cannot support a 99th percentile".to_string(),
+            )
+        };
+
+        vec![
+            ("added_ttft_p50_us", Measurement::Measured(added_ttft)),
+            ("added_ttft_p99_us", no_distribution()),
+            ("added_gap_p50_us", added_gap),
+            ("added_gap_p99_us", no_distribution()),
+        ]
     }
 }
 

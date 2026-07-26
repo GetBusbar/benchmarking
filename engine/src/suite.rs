@@ -174,6 +174,16 @@ fn cell_memory(metrics: &std::collections::BTreeMap<&'static str, Measurement<f6
 
 /// Run the whole suite for one gateway and write its snapshot.
 pub fn run_suite(cfg: &SuiteConfig, gateway_addr: SocketAddr) -> Result<Paths, SnapshotError> {
+    run_suite_with(cfg, gateway_addr, crate::metric::METRICS)
+}
+
+/// The same suite over an explicit metric list, so a test can drive it end to end without paying for
+/// every real measurement. `run_suite` passes the engine's real surface.
+pub fn run_suite_with(
+    cfg: &SuiteConfig,
+    gateway_addr: SocketAddr,
+    metrics: &[&dyn crate::metric::Metric],
+) -> Result<Paths, SnapshotError> {
     let rc = RunConfig {
         gateway_addr,
         mock_addr: cfg.mock_addr,
@@ -200,7 +210,7 @@ pub fn run_suite(cfg: &SuiteConfig, gateway_addr: SocketAddr) -> Result<Paths, S
     // is worth more than a complete result that might not arrive, and the promote guard already
     // refuses to let a thinner snapshot overwrite a fuller one, so re-writing is safe by
     // construction rather than by care here.
-    for result in run::run_grid(&rc, cfg.min_conc, cfg.max_conc) {
+    for result in run::run_grid_with(&rc, cfg.min_conc, cfg.max_conc, metrics) {
         let id = &result.outcome.id;
         let ing = id.ingress.clone();
         let eg = id.egress.clone();
@@ -341,7 +351,7 @@ mod tests {
         let dir = tmpdir("ok");
         let gw = serve(200);
         let cfg = cfg_for(&dir, gw);
-        let paths = run_suite(&cfg, gw).expect("the suite should write a snapshot");
+        let paths = run_suite_with(&cfg, gw, &[]).expect("the suite should write a snapshot");
         let text = std::fs::read_to_string(&paths.current).expect("current file");
         let back: ResultSnapshot = serde_json::from_str(&text).expect("its own output must parse");
         assert_eq!(back.gateway, "gw");
@@ -357,7 +367,7 @@ mod tests {
         let dir = tmpdir("unserved");
         let gw = serve(404);
         let cfg = cfg_for(&dir, gw);
-        let paths = run_suite(&cfg, gw).expect("a refusing gateway is still a result");
+        let paths = run_suite_with(&cfg, gw, &[]).expect("a refusing gateway is still a result");
         let text = std::fs::read_to_string(&paths.current).expect("current file");
         let back: ResultSnapshot = serde_json::from_str(&text).expect("parse");
         let up = back.matrix.upstreams.get("openai").expect("the egress row exists");
@@ -375,7 +385,7 @@ mod tests {
         let gw = serve(200);
         // gateway and mock are the SAME server, so the reference equals the observation.
         let cfg = cfg_for(&dir, gw);
-        let paths = run_suite(&cfg, gw).expect("write");
+        let paths = run_suite_with(&cfg, gw, &[]).expect("write");
         let text = std::fs::read_to_string(&paths.current).expect("read");
         let back: ResultSnapshot = serde_json::from_str(&text).expect("parse");
         if let Some(perf) = back
