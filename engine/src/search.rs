@@ -293,7 +293,12 @@ pub fn peak_max<P: Probe>(probe: &mut P, lo: u32, hi: u32, start: u32, tol: u32)
             // bound must reopen to `lo`, not to c/2, or the refine bracket clips the real peak out.
             let mut c = dn_c;
             let mut found = None;
-            while c > lo {
+            loop {
+                // PROBE FIRST, THEN STEP. The guard used to be `while c > lo`, which exits the moment
+                // c reaches lo and so never probes lo itself: the one point this branch exists to
+                // reopen. A gate that passes only at the very bottom of the range was then never
+                // sampled at all, and the search returned "no concurrency passed" about a region it
+                // had not looked at.
                 let v = match s.eff(c) {
                     Some(v) => v,
                     None => return interrupted(s),
@@ -302,11 +307,10 @@ pub fn peak_max<P: Probe>(probe: &mut P, lo: u32, hi: u32, start: u32, tol: u32)
                     found = Some((c, v));
                     break;
                 }
-                let next = (c / 2).max(lo);
-                if next == c {
+                if c <= lo {
                     break;
                 }
-                c = next;
+                c = (c / 2).max(lo);
             }
             match found {
                 // Reopen the bracket all the way down to `lo`: the true peak can sit anywhere below
@@ -504,6 +508,35 @@ mod tests {
         fn probe(&mut self, c: u32) -> Option<Sample> {
             Some(Sample { value: c as f64, passed: true })
         }
+    }
+
+    /// A gate that passes ONLY at the very bottom of the range, with a start well above it that
+    /// fails. This is the case the `while c > lo` guard could never reach: it stepped down to `lo`
+    /// and then exited before probing it.
+    struct PassesOnlyAtFloor {
+        floor: u32,
+    }
+    impl Probe for PassesOnlyAtFloor {
+        fn probe(&mut self, c: u32) -> Option<Sample> {
+            let passed = c <= self.floor;
+            Some(Sample { value: if passed { 100.0 - c as f64 } else { 0.0 }, passed })
+        }
+    }
+
+    // RED-BEFORE. The down-ramp is entered when the start fails the gate, and its whole purpose is
+    // to reopen the bracket all the way to `lo`. With the old guard it never probed `lo`, so a
+    // gateway whose only passing region sat at the floor was reported as passing nowhere: a claim
+    // about a region the search had not looked at.
+    #[test]
+    fn the_down_ramp_probes_the_floor_it_exists_to_reopen() {
+        let mut p = PassesOnlyAtFloor { floor: 8 };
+        let r = peak_max(&mut p, 8, 1000, 512, 4);
+        assert!(
+            r.points.iter().any(|pt| pt.concurrency == 8),
+            "the floor must actually be probed, probed set: {:?}",
+            r.points.iter().map(|pt| pt.concurrency).collect::<Vec<_>>()
+        );
+        assert!(r.peak.is_measured(), "a real passing region must not be reported as passing nowhere");
     }
 
     #[test]

@@ -12,14 +12,23 @@
 #![cfg_attr(test, allow(clippy::panic, clippy::unwrap_used, clippy::expect_used))]
 
 pub mod cell;
+pub mod config_lint;
+pub mod gen;
+pub mod http;
+pub mod ingress;
+pub mod launch;
+pub mod loadgen;
 pub mod manifest;
 pub mod measurement;
 pub mod probe;
 pub mod qualify;
 pub mod record;
 pub mod rigbound;
+pub mod run;
 pub mod rss;
 pub mod search;
+pub mod snapshot;
 pub mod stats;
+pub mod supervise;
 
 pub use measurement::{Absent, Measurement};
