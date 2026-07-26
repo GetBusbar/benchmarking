@@ -2,8 +2,14 @@
 # which ships with the toolchain: no brew, no docker, no per-machine cross-toolchain.
 # musl over gnu deliberately: the binary is statically linked and so cannot acquire a glibc version
 # coupling between whatever built it and whatever the box happens to boot.
+#
+# ONLY the musl target is pinned, and that is load bearing. An identical pin on
+# aarch64-unknown-linux-gnu also applied to NATIVE arm64 Linux builds - the CI runners that build the
+# rig, and any box building for itself - where rust-lld cannot find libgcc_s, libc or libm and every
+# link fails. So the setting that exists to make the arm64 target buildable was the one thing
+# stopping it being built on arm64. bench-rig had been failing that way before anyone noticed,
+# which is why the rolling `rig` release could not be rebuilt.
+#
+# Native builds get the platform's own linker, which is what they should have had all along.
 [target.aarch64-unknown-linux-musl]
-linker = "rust-lld"
-
-[target.aarch64-unknown-linux-gnu]
 linker = "rust-lld"
