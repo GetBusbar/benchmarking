@@ -241,6 +241,29 @@ fn every_module_the_artifact_needs_is_reachable_from_a_real_run() {
     // measurement + record + snapshot: it round-tripped to disk as valid JSON with our shape.
     assert_eq!(snap["gateway"], "e2e");
 
+    // --- streaming: WIRED --------------------------------------------------------------------------
+    //
+    // Every streaming number the board publishes is a difference between the stream through the
+    // gateway and the same stream taken straight to the mock. Asserted as keys for the same reason as
+    // memory: what this proves is that the group RAN and published what it declared. The fixture
+    // answers with plain JSON rather than SSE frames, so the honest result here is an absence, and
+    // the block must still say so rather than being missing.
+    let stream = &cell["stream"];
+    assert!(!stream.is_null(), "the streaming block must be published on a served cell: {cell:#}");
+    for field in ["added_ttft_p50_us", "added_ttft_p99_us", "added_gap_p50_us", "added_gap_p99_us"] {
+        assert!(
+            stream.get(field).is_some(),
+            "the streaming group declares {field} and must publish it, measured or absent: {stream:#}"
+        );
+    }
+    // stream_served must never be a bare `false` derived from an absence: `false` is a claim about
+    // the GATEWAY, and the reason we have here is a claim about the rig.
+    assert_ne!(
+        stream["stream_served"],
+        serde_json::Value::Bool(false),
+        "an absent streaming measurement must carry a status naming the reason, never a false that reads as 'this gateway does not stream': {stream:#}"
+    );
+
     // --- NOT YET WIRED: these are the holes this test exists to make visible ----------------------
     //
     // Each of these modules is complete and unit-tested and has ZERO callers. The assertions are

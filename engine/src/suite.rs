@@ -172,6 +172,54 @@ fn cell_memory(metrics: &std::collections::BTreeMap<&'static str, Measurement<f6
     }
 }
 
+/// The published per-cell streaming block, from the numbers the streaming group took.
+///
+/// `stream_served` is derived from whether a difference was actually obtained, never asserted. A
+/// dialect the mock cannot stream natively, or a leg that produced no frame, carries the group's own
+/// reason as a STATUS rather than a `false`: `false` would say the gateway does not stream, which is
+/// a claim about the gateway, and the reason we have is usually a claim about the rig.
+fn cell_stream(
+    metrics: &std::collections::BTreeMap<&'static str, Measurement<f64>>,
+) -> crate::record::CellStream {
+    // The record carries these as integer microseconds; the metric surface is f64 so every group has
+    // one type. Truncation here loses at most a microsecond off a latency difference.
+    let us = |k: &str| -> Measurement<i64> {
+        match metrics.get(k) {
+            Some(m) => match m.value() {
+                Some(v) => Measurement::Measured(*v as i64),
+                None => match (m.reason().cloned(), m.detail()) {
+                    (Some(r), Some(d)) => Measurement::absent_because(r, d),
+                    (Some(r), None) => Measurement::absent(r),
+                    (None, _) => Measurement::absent(Absent::NotMeasured),
+                },
+            },
+            None => Measurement::absent_because(Absent::NotMeasured, "no metric group fills this field"),
+        }
+    };
+
+    let ttft = metrics.get("added_ttft_p50_us");
+    let (stream_served, reason) = match ttft.map(|m| (m.is_measured(), m.reason().cloned(), m.detail())) {
+        Some((true, _, _)) => (crate::record::StreamServed::Bool(true), None),
+        // Probed, and the answer was not a number. The reason travels as the status so a reader is
+        // never left to infer a gateway property from a rig limit.
+        Some((false, Some(r), detail)) => (
+            crate::record::StreamServed::Status(r.token().to_string()),
+            detail.map(str::to_string),
+        ),
+        _ => (crate::record::StreamServed::default(), None),
+    };
+
+    crate::record::CellStream {
+        stream_served,
+        reason,
+        added_ttft_p50_us: us("added_ttft_p50_us"),
+        added_ttft_p99_us: us("added_ttft_p99_us"),
+        added_gap_p50_us: us("added_gap_p50_us"),
+        added_gap_p99_us: us("added_gap_p99_us"),
+        ..Default::default()
+    }
+}
+
 /// Run the whole suite for one gateway and write its snapshot.
 pub fn run_suite(cfg: &SuiteConfig, gateway_addr: SocketAddr) -> Result<Paths, SnapshotError> {
     run_suite_with(cfg, gateway_addr, crate::metric::METRICS)
@@ -243,6 +291,7 @@ pub fn run_suite_with(
             path: ing.parse::<Dialect>().map(|d| d.path(&cfg.manifest.model)).unwrap_or_default(),
             perf,
             memory: result.metrics.as_ref().map(cell_memory),
+            stream: result.metrics.as_ref().map(cell_stream),
             ..Default::default()
         };
 
