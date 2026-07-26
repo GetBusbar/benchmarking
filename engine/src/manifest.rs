@@ -97,10 +97,39 @@ pub struct Manifest {
     pub egress: Vec<String>,
     #[serde(default)]
     pub config: Vec<ConfigSetting>,
+    /// Values this gateway's own templates refer to, beyond the closed set the harness supplies.
+    ///
+    /// A manifest declares its model name, its upstream URL, its bedrock path ONCE here, and every
+    /// template that needs it refers to it by name. That is the point: the shell had these as
+    /// variables read by several places each, and one of them - a model spelled in a route URI and
+    /// again in a probe path - is documented as having cost thirty-six cells when the two drifted.
+    ///
+    /// Values may themselves refer to the closed set, so `"url": "http://127.0.0.1:{MOCK_PORT}"`
+    /// resolves at render time rather than being frozen at whatever port a previous run used.
+    #[serde(default)]
+    pub constants: std::collections::BTreeMap<String, String>,
+    /// Config files the harness renders and the gateway reads.
+    ///
+    /// A TEMPLATE FILE in the gateway's own directory, not a string in this manifest and not Rust.
+    /// `lib/gateway_isolation_test.sh` exempts files under `gateways/<name>/` from Rule 1 but scans
+    /// `.rs` everywhere, so a Rust function rendering a config that must contain the gateway's own
+    /// name as a top-level key - which at least one does - could not exist. As a file beside the
+    /// gateway it is legal, readable, and diffable against what the gateway actually booted with.
+    #[serde(default)]
+    pub config_files: Vec<ConfigFile>,
     /// How to START this gateway. `None` for a manifest that only describes a gateway someone else
     /// is running - which is every manifest today, because nothing in the tree could launch one.
     #[serde(default)]
     pub launch: Option<LaunchDecl>,
+}
+
+/// One config file: a template beside the gateway, and where the rendered result goes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfigFile {
+    /// Template path, relative to the gateway's own directory.
+    pub template: String,
+    /// Rendered output, relative to the same directory. This is what a mount points at.
+    pub output: String,
 }
 
 /// A file the gateway reads, rendered by the harness and handed to it.
@@ -200,6 +229,27 @@ pub enum LaunchDecl {
     },
 }
 
+/// Why a config could not be rendered. Every variant names the file, because "config render failed"
+/// with no path is the same as no message at all when a gateway has more than one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfigRenderError {
+    Unreadable { path: std::path::PathBuf, why: String },
+    Unwritable { path: std::path::PathBuf, why: String },
+    Placeholder { path: std::path::PathBuf, why: String },
+}
+
+impl std::fmt::Display for ConfigRenderError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ConfigRenderError::Unreadable { path, why } => write!(f, "cannot read config template {}: {why}", path.display()),
+            ConfigRenderError::Unwritable { path, why } => write!(f, "cannot write rendered config {}: {why}", path.display()),
+            ConfigRenderError::Placeholder { path, why } => write!(f, "config template {}: {why}", path.display()),
+        }
+    }
+}
+
+impl std::error::Error for ConfigRenderError {}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ManifestError {
     Empty(&'static str),
@@ -215,7 +265,13 @@ pub enum ManifestError {
     /// through: a `{TYPO}` reaching a container as a literal is a misconfiguration that boots and
     /// measures fine, and publishes a number taken under the wrong settings.
     UnknownPlaceholder { name: String, raw: String },
+    /// A declared constant refers to itself, directly or through a ring of others.
+    ConstantCycle { name: String },
 }
+
+/// How deep a constant may refer to other constants before it is treated as a cycle. One real chain
+/// exists (a path built from a model name); anything much deeper is a mistake, not a design.
+const MAX_CONSTANT_DEPTH: usize = 8;
 
 impl std::fmt::Display for ManifestError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -224,6 +280,9 @@ impl std::fmt::Display for ManifestError {
             ManifestError::BadPort => write!(f, "port must be non-zero"),
             ManifestError::ConfigWithoutReason(k) => {
                 write!(f, "config setting {k:?} has no key to attach a reason to")
+            }
+            ManifestError::ConstantCycle { name } => {
+                write!(f, "constant {name:?} refers to itself, directly or through a ring of others")
             }
             ManifestError::UnknownPlaceholder { name, raw } => write!(
                 f,
@@ -312,11 +371,30 @@ impl Manifest {
         mock_port: u16,
         gw_dir: &std::path::Path,
     ) -> Result<String, ManifestError> {
+        self.substitute_at(template, cores, mock_port, gw_dir, 0)
+    }
+
+    fn substitute_at(
+        &self,
+        template: &str,
+        cores: &str,
+        mock_port: u16,
+        gw_dir: &std::path::Path,
+        depth: usize,
+    ) -> Result<String, ManifestError> {
         let ncore = core_count(cores);
         let mut out = String::with_capacity(template.len());
         let mut rest = template;
         while let Some(open) = rest.find('{') {
             out.push_str(&rest[..open]);
+            // `{{` is a literal brace. Config formats use braces of their own, and at least one
+            // template documents a URL shape as `{api_base}` in a comment; without an escape the
+            // choice would be between rejecting valid config and silently passing typos through.
+            if rest[open + 1..].starts_with('{') {
+                out.push('{');
+                rest = &rest[open + 2..];
+                continue;
+            }
             let Some(close) = rest[open..].find('}') else {
                 // An unmatched brace is a literal, not a placeholder: a JSON value is allowed to
                 // contain one.
@@ -331,6 +409,18 @@ impl Manifest {
                 "MOCK_PORT" => mock_port.to_string(),
                 "GW_AUTH" => self.auth.clone(),
                 "GW_DIR" => gw_dir.to_string_lossy().into_owned(),
+                "GW_MODEL" => self.model.clone(),
+                // A manifest's own declared constant, resolved recursively because one of them is
+                // genuinely written in terms of another: a bedrock path built from a bedrock model
+                // name. The depth bound is what makes that safe - a constant that refers to itself,
+                // directly or in a ring, stops with a named error instead of a stack overflow.
+                name if self.constants.contains_key(name) => {
+                    if depth >= MAX_CONSTANT_DEPTH {
+                        return Err(ManifestError::ConstantCycle { name: name.to_string() });
+                    }
+                    let raw = self.constants.get(name).cloned().unwrap_or_default();
+                    self.substitute_at(&raw, cores, mock_port, gw_dir, depth + 1)?
+                }
                 other => {
                     return Err(ManifestError::UnknownPlaceholder {
                         name: other.to_string(),
@@ -446,6 +536,41 @@ impl Manifest {
         }))
     }
 
+    /// Render every declared config file into the gateway's directory.
+    ///
+    /// Returns the paths written, so a caller can publish them as the artifact's config record: the
+    /// bytes a gateway booted with belong in the same artifact as the numbers they produced, which is
+    /// what stops a chart being read against a config that was overwritten later.
+    ///
+    /// A template that refers to something the harness does not supply is an ERROR, not a passthrough.
+    /// A gateway booting with a literal `{MOCK_PORT}` in its upstream URL fails in a way that looks
+    /// like the gateway being broken.
+    pub fn render_configs(
+        &self,
+        cores: &str,
+        mock_port: u16,
+        gw_dir: &std::path::Path,
+    ) -> Result<Vec<(std::path::PathBuf, String)>, ConfigRenderError> {
+        let mut written = Vec::new();
+        for file in &self.config_files {
+            let template_path = gw_dir.join(&file.template);
+            let raw = std::fs::read_to_string(&template_path)
+                .map_err(|e| ConfigRenderError::Unreadable { path: template_path.clone(), why: e.to_string() })?;
+            let body = self
+                .substitute(&raw, cores, mock_port, gw_dir)
+                .map_err(|e| ConfigRenderError::Placeholder { path: template_path.clone(), why: e.to_string() })?;
+            let out_path = gw_dir.join(&file.output);
+            if let Some(parent) = out_path.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| ConfigRenderError::Unwritable { path: out_path.clone(), why: e.to_string() })?;
+            }
+            std::fs::write(&out_path, &body)
+                .map_err(|e| ConfigRenderError::Unwritable { path: out_path.clone(), why: e.to_string() })?;
+            written.push((out_path, body));
+        }
+        Ok(written)
+    }
+
     /// The URL the harness drives this gateway on.
     pub fn url(&self) -> String {
         format!("http://127.0.0.1:{}{}", self.port, self.path)
@@ -472,6 +597,8 @@ mod tests {
             egress: vec!["openai".into()],
             config: vec![],
             launch: None,
+            config_files: vec![],
+            constants: Default::default(),
         }
     }
 
@@ -771,6 +898,44 @@ mod real_field_tests {
             matches!(err, Some(ManifestError::UnknownPlaceholder { ref name, .. }) if name == "NOT_A_THING"),
             "an unknown placeholder must be refused, not passed through as a literal: {err:?}"
         );
+    }
+
+    /// EVERY DECLARED CONFIG TEMPLATE ACTUALLY RENDERS.
+    ///
+    /// Ten entrants boot from a file the harness writes. A template that refers to something the
+    /// harness does not supply produces a gateway that starts and immediately dies, which reads as
+    /// the gateway being broken - so this fails here, at the manifest, rather than there.
+    #[test]
+    fn every_declared_config_template_renders_with_nothing_left_unresolved() {
+        let mut rendered = 0;
+        for (name, m) in &field() {
+            if m.config_files.is_empty() {
+                continue;
+            }
+            let gw_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../gateways").join(name);
+            let out = std::env::temp_dir().join(format!("otb-render-{}-{}", name, std::process::id()));
+            std::fs::create_dir_all(&out).expect("scratch dir");
+
+            for file in &m.config_files {
+                let template_path = gw_dir.join(&file.template);
+                let raw = std::fs::read_to_string(&template_path)
+                    .unwrap_or_else(|e| panic!("{name} declares {} which cannot be read: {e}", file.template));
+                let body = m
+                    .substitute(&raw, "0-3", 8000, &gw_dir)
+                    .unwrap_or_else(|e| panic!("{name} template {}: {e}", file.template));
+
+                // The output is deliberately NOT scanned for leftover braces. A rendered literal -
+                // a config format's own syntax, or a comment documenting a URL shape as
+                // `{api_base}` - is written `{{...}}` in the template and comes out as `{...}`,
+                // which is indistinguishable from an unresolved placeholder by looking at the
+                // result. The guarantee lives in `substitute`, which refuses an unknown name
+                // outright, so reaching this line means every placeholder was supplied.
+                assert!(!body.trim().is_empty(), "{name} rendered {} to nothing", file.output);
+                rendered += 1;
+            }
+            let _ = std::fs::remove_dir_all(&out);
+        }
+        assert!(rendered >= 13, "every declared template must render, got {rendered}");
     }
 
     #[test]

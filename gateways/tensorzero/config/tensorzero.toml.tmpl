@@ -1,0 +1,45 @@
+# ONE static config, four upstream models. The client selects the upstream per request with the
+# OpenAI-compatible \`model\` field: tensorzero::model_name::mock-openai | mock-openai-responses |
+# mock-anthropic | mock-bedrock. Nothing here changes between egress columns.
+[gateway.observability]
+enabled = false
+
+# openai -> POST {{api_base}}/chat/completions
+[models.mock-openai]
+routing = ["mock"]
+[models.mock-openai.providers.mock]
+type = "openai"
+api_base = "http://127.0.0.1:{MOCK_PORT}/v1"
+model_name = "gpt-4o-mini"
+api_key_location = "none"
+
+# openai + api_type="responses" -> POST {{api_base}}/responses
+[models.mock-openai-responses]
+routing = ["mock"]
+[models.mock-openai-responses.providers.mock]
+type = "openai"
+api_type = "responses"
+api_base = "http://127.0.0.1:{MOCK_PORT}/v1"
+model_name = "gpt-4o-mini"
+api_key_location = "none"
+
+# anthropic -> POST {{api_base}}messages  (api_base is the API ROOT; the gateway appends \`messages\`).
+# api_key_location is left at its default env::ANTHROPIC_API_KEY: the anthropic provider REJECTS
+# "none" (providers/anthropic.rs:189-208 has no Credential::None arm), and credentials are validated
+# at boot, so the dummy ANTHROPIC_API_KEY in gw_launch is what lets this model exist in the config.
+[models.mock-anthropic]
+routing = ["mock"]
+[models.mock-anthropic.providers.mock]
+type = "anthropic"
+api_base = "http://127.0.0.1:{MOCK_PORT}/v1/"
+model_name = "claude-3-5-sonnet-20241022"
+
+# aws_bedrock -> POST {{endpoint_url}}/model/{{urlencoded model_id}}/converse (SigV4-signed with the
+# dummy AWS keys in gw_launch; the mock ignores the signature).
+[models.mock-bedrock]
+routing = ["mock"]
+[models.mock-bedrock.providers.mock]
+type = "aws_bedrock"
+endpoint_url = "http://127.0.0.1:{MOCK_PORT}"
+model_id = "anthropic.claude-3-sonnet-20240229-v1:0"
+region = "us-east-1"

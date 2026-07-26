@@ -3,6 +3,12 @@
     "auth": "dummy",
     "class": "Data plane",
     "config": [],
+    "config_files": [
+      {
+        "output": "config.gen.yaml",
+        "template": "config.gen.yaml.tmpl"
+      }
+    ],
     "display": "agentgateway",
     "egress": [
       "openai",
@@ -55,6 +61,20 @@
     "auth": "bench-token",
     "class": "AI gateway",
     "config": [],
+    "config_files": [
+      {
+        "output": "config.gen.yaml",
+        "template": "config.gen.yaml.tmpl"
+      },
+      {
+        "output": "resources.gen.yaml",
+        "template": "resources.gen.yaml.tmpl"
+      }
+    ],
+    "constants": {
+      "GW_MODEL_ANTHROPIC": "claude-3-5-sonnet-20241022",
+      "GW_MODEL_OPENAI": "gpt-4o-mini"
+    },
     "display": "AISIX (api7)",
     "egress": [
       "openai",
@@ -98,6 +118,21 @@
     "auth": "sk-fake-benchmark-key",
     "class": "API gateway",
     "config": [],
+    "config_files": [
+      {
+        "output": "config.gen.yaml",
+        "template": "config.gen.yaml.tmpl"
+      },
+      {
+        "output": "apisix.gen.yaml",
+        "template": "apisix.gen.yaml.tmpl"
+      }
+    ],
+    "constants": {
+      "APISIX_BEDROCK_MODEL": "anthropic.claude-3-sonnet-20240229-v1:0",
+      "GW_MATRIX_PATH_BEDROCK": "/model/{APISIX_BEDROCK_MODEL}/converse",
+      "ncore": "{NCORE}"
+    },
     "display": "APISIX",
     "egress": [
       "openai",
@@ -139,6 +174,12 @@
     "auth": "sk-dummy",
     "class": "LLM gateway",
     "config": [],
+    "config_files": [
+      {
+        "output": "bfdata/config.json",
+        "template": "bfdata/config.json.tmpl"
+      }
+    ],
     "display": "Bifrost",
     "egress": [
       "openai",
@@ -181,6 +222,16 @@
     "auth": "bench-token",
     "class": "Control plane",
     "config": [],
+    "config_files": [
+      {
+        "output": "providers.gen.yaml",
+        "template": "providers.gen.yaml.tmpl"
+      },
+      {
+        "output": "config.gen.yaml",
+        "template": "config.gen.yaml.tmpl"
+      }
+    ],
     "display": "Busbar",
     "egress": [
       "openai",
@@ -264,6 +315,12 @@
     "auth": "dummy",
     "class": "AI gateway",
     "config": [],
+    "config_files": [
+      {
+        "output": "config.gen.yaml",
+        "template": "config.gen.yaml.tmpl"
+      }
+    ],
     "display": "Helicone",
     "egress": [
       "openai",
@@ -324,6 +381,16 @@
     "auth": "dummy",
     "class": "API gateway",
     "config": [],
+    "config_files": [
+      {
+        "output": "kong.gen.yml",
+        "template": "kong.gen.yml.tmpl"
+      }
+    ],
+    "constants": {
+      "KONG_MODEL": "gpt-4o-mini",
+      "url": "http://127.0.0.1:{MOCK_PORT}"
+    },
     "display": "Kong",
     "egress": [
       "openai",
@@ -360,6 +427,12 @@
     "auth": "dummy",
     "class": "LLM gateway",
     "config": [],
+    "config_files": [
+      {
+        "output": "config.gen.yaml",
+        "template": "config.gen.yaml.tmpl"
+      }
+    ],
     "display": "LiteLLM \u00b7 Python",
     "egress": [
       "openai",
@@ -403,6 +476,12 @@
     "auth": "gwbench",
     "class": "LLM gateway",
     "config": [],
+    "config_files": [
+      {
+        "output": "config.gen.yaml",
+        "template": "config.gen.yaml.tmpl"
+      }
+    ],
     "display": "LiteLLM \u00b7 Rust",
     "egress": [
       "anthropic"
@@ -514,6 +593,12 @@
     "auth": "dummy",
     "class": "Model gateway",
     "config": [],
+    "config_files": [
+      {
+        "output": "config/tensorzero.toml",
+        "template": "config/tensorzero.toml.tmpl"
+      }
+    ],
     "display": "TensorZero",
     "egress": [
       "openai",

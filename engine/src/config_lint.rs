@@ -177,6 +177,8 @@ mod tests {
             egress: vec!["openai".into()],
             config: vec![],
             launch: None,
+            config_files: vec![],
+            constants: Default::default(),
         }
     }
 
