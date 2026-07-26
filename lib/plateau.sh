@@ -44,31 +44,16 @@
 #   because treating "not enough evidence" as "steady" is how a short measurement gets published as a
 #   settled one.
 plateau_check(){
+  # DELEGATED TO THE ENGINE. The awk this replaces and the Rust that replaces it were diffed over
+  # 5,040 generated series (engine/tests/differential.rs) sweeping slope, noise, sample count and
+  # BOTH gate thresholds, and agree on every one. The thresholds are swept because for a linear
+  # series spread% = 2 x drift%, so at the shipped pair the range test masks the drift test entirely
+  # and a one-sided/two-sided difference hides.
   local f="${1:-}" trend="${2:-1}" range="${3:-2}"
   [ -n "$f" ] && [ -s "$f" ] || { printf '0'; return; }
-  awk -v trend="$trend" -v range="$range" '
-    { n++; v[n]=$2+0 }
-    END{
-      if (n < 4) { print 0; exit }
-      # Split into halves. An odd count gives the extra sample to the SECOND half, so a late upward
-      # sample is never the one dropped - the test must not be able to miss a rise by rounding.
-      h = int(n/2)
-      s1=0; for (i=1;   i<=h; i++) s1+=v[i]
-      s2=0; for (i=h+1; i<=n; i++) s2+=v[i]
-      m1 = s1/h; m2 = s2/(n-h)
-      mean = (s1+s2)/n
-      if (mean <= 0) { print 0; exit }
-      # Drift is ONE-SIDED: only an upward trend disqualifies. Memory falling during the window means
-      # the gateway is releasing, which is not a steady state either, but it is also not the failure
-      # mode this gate exists to catch, and a gateway settling DOWN toward its plateau would otherwise
-      # be held at the cap forever. The range test still bounds how far it may be moving.
-      drift = (m2 - m1) / mean * 100
-      lo=v[1]; hi=v[1]
-      for (i=2;i<=n;i++){ if(v[i]<lo) lo=v[i]; if(v[i]>hi) hi=v[i] }
-      spread = (hi - lo) / mean * 100
-      print (drift < trend && spread < range) ? 1 : 0
-    }' "$f"
+  "$OTB" plateau-check "$trend" "$range" < "$f"
 }
+
 
 # plateau_growth_rate <window_file>
 #   MiB per minute across the window, from a least-squares fit rather than endpoint-minus-endpoint: a
@@ -76,18 +61,13 @@ plateau_check(){
 #   there is nothing to fit, which the caller renders as the literal null - "we did not measure a rate"
 #   must stay distinguishable from "the rate was zero".
 plateau_growth_rate(){
+  # DELEGATED TO THE ENGINE. Same differential coverage; the engine prints %.3f to match this
+  # function's own printf, so archived output compares as text.
   local f="${1:-}"
   [ -n "$f" ] && [ -s "$f" ] || return 0
-  awk '
-    { n++; x[n]=$1+0; y[n]=$2+0; sx+=x[n]; sy+=y[n] }
-    END{
-      if (n < 2) exit
-      mx=sx/n; my=sy/n
-      for (i=1;i<=n;i++){ dx=x[i]-mx; num+=dx*(y[i]-my); den+=dx*dx }
-      if (den <= 0) exit          # every sample at the same instant: no slope is defined
-      printf "%.3f", (num/den)*60 # MiB/s -> MiB/min
-    }' "$f"
+  "$OTB" growth-rate < "$f"
 }
+
 
 # plateau_window <series_file> <window_s>
 #   Emits the trailing <window_s> seconds of a "<t_s> <rss_mib>" series. The steadiness test only ever
