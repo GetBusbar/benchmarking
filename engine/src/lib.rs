@@ -11,6 +11,7 @@
 // denying it there would only push tests into contortions that obscure what they check.
 #![cfg_attr(test, allow(clippy::panic, clippy::unwrap_used, clippy::expect_used))]
 
+pub mod manifest;
 pub mod measurement;
 pub mod probe;
 pub mod qualify;
