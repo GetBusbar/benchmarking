@@ -1,0 +1,9 @@
+deployment:
+  role: data_plane
+  role_data_plane:
+    config_provider: yaml
+apisix:
+  node_listen:
+    - {GW_PORT}
+nginx_config:
+  worker_processes: {ncore}

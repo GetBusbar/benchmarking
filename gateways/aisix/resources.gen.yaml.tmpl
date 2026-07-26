@@ -1,0 +1,25 @@
+_format_version: "1"
+provider_keys:
+  - display_name: mock-openai
+    provider: openai
+    adapter: openai
+    api_base: "http://127.0.0.1:{MOCK_PORT}/v1"
+    api_key: "sk-mock"
+  - display_name: mock-anthropic
+    provider: anthropic
+    adapter: anthropic
+    api_base: "http://127.0.0.1:{MOCK_PORT}"
+    api_key: "sk-mock"
+models:
+  - display_name: {GW_MODEL_OPENAI}
+    provider: openai
+    model_name: gpt-4o-mini
+    provider_key: mock-openai
+  - display_name: {GW_MODEL_ANTHROPIC}
+    provider: anthropic
+    model_name: claude-3-5-sonnet-20241022
+    provider_key: mock-anthropic
+api_keys:
+  - display_name: bench
+    key_env: BENCH_AISIX_KEY
+    allowed_models: ["*"]

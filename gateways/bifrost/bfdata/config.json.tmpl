@@ -1,0 +1,20 @@
+{{
+  "providers": {{
+    "openai": {{
+      "keys": [{{ "value": "sk-dummy", "models": ["gpt-4o-mini"], "weight": 1 }}],
+      "network_config": {{ "base_url": "http://127.0.0.1:{MOCK_PORT}" }}
+    }},
+    "anthropic": {{
+      "keys": [{{ "value": "sk-dummy", "models": ["claude-3-5-sonnet-20241022"], "weight": 1 }}],
+      "network_config": {{ "base_url": "http://127.0.0.1:{MOCK_PORT}" }}
+    }},
+    "gemini": {{
+      "keys": [{{ "value": "sk-dummy", "models": ["gemini-1.5-pro"], "weight": 1 }}],
+      "network_config": {{ "base_url": "http://127.0.0.1:{MOCK_PORT}" }}
+    }},
+    "cohere": {{
+      "keys": [{{ "value": "sk-dummy", "models": ["command-r-plus"], "weight": 1 }}],
+      "network_config": {{ "base_url": "http://127.0.0.1:{MOCK_PORT}" }}
+    }}
+  }}
+}}
