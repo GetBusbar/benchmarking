@@ -11,7 +11,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use crate::cell::{CellId, CellOutcome, Served};
-use crate::gen::{self, GenConfig};
+use crate::gen::GenStats;
 use crate::http::{self, Outcome};
 use crate::ingress::Dialect;
 use crate::measurement::{Absent, Measurement};
@@ -84,10 +84,7 @@ impl Probe for SweepProbe<'_> {
         // generator measures a different machine than a pinned one, and the difference is invisible
         // in the artifact. Same binary, separate process, same pinning the load generator has always
         // had.
-        let stats = match self.spawn_pinned(concurrency) {
-            Some(s) => s,
-            None => return None,
-        };
+        let stats = self.spawn_pinned(concurrency)?;
         // The OS refusing a thread means the window never ran at the requested concurrency: a RIG
         // limit, not a gateway result, so the search must stop rather than read a turnover.
         if stats.spawn_failed {
@@ -104,7 +101,7 @@ impl Probe for SweepProbe<'_> {
 
 impl SweepProbe<'_> {
     /// Run one window in a pinned child and read its stats line back.
-    fn spawn_pinned(&self, concurrency: u32) -> Option<crate::gen::GenStats> {
+    fn spawn_pinned(&self, concurrency: u32) -> Option<GenStats> {
         let exe = std::env::current_exe().ok()?;
         let dur = self.cfg.sweep_duration_s.to_string();
         let conc = concurrency.to_string();
@@ -124,7 +121,7 @@ impl SweepProbe<'_> {
             .output()
             .ok()?;
         let line = String::from_utf8_lossy(&out.stdout);
-        crate::loadgen::parse_ugen_line(line.trim()).into_value().map(|u| crate::gen::GenStats {
+        crate::loadgen::parse_ugen_line(line.trim()).into_value().map(|u| GenStats {
             ok: u.ok.max(0) as u64,
             fail: u.fail.max(0) as u64,
             elapsed_s: if u.rps > 0 { u.ok as f64 / u.rps as f64 } else { 0.0 },
