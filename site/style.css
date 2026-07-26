@@ -81,16 +81,6 @@ code { background: var(--bg-raise); border: 1px solid var(--border); border-radi
 .fineprint { color: var(--fg-mute); font-size: .82rem; margin-top: 1rem; }
 .lede { color: var(--fg-dim); max-width: 70ch; }
 #table-caption { line-height: 1.55; margin: .3rem 0 .9rem; }
-.method-lede { color: var(--fg-dim); max-width: 74ch; margin: .6rem 0 0; padding-left: 1.1rem; }
-.method-lede li { margin: .45rem 0; line-height: 1.5; }
-.method-lede li b { color: var(--fg); font-weight: 600; }
-/* Conflict-of-interest disclosure: prominent, not buried. Left accent bar, own card. */
-.disclosure {
-  max-width: 70ch; margin: 0 0 1rem; padding: .7rem .9rem; font-size: .9rem;
-  border: 1px solid var(--border); border-left: 3px solid var(--fg-dim);
-  border-radius: 6px; background: var(--bg-raise); color: var(--fg);
-}
-.disclosure strong { color: var(--fg); }
 
 /* header: brand mark + wordmark, an accent hairline up top, a designed hierarchy.
    Subtle on purpose: it should read intentional, not redecorated. */
@@ -142,7 +132,7 @@ body.home .site-footer { display: none; }
 .hero-tag { margin: 0; font-size: 1.08rem; color: var(--fg-dim); max-width: 46ch; }
 .home-pitch { margin-top: 1.3rem; max-width: 62ch; color: var(--fg-dim); }
 .home-pitch p { margin: .35rem 0; }
-/* Neutrality disclosure: same accent-bar treatment as the Method tab's card. */
+/* Neutrality disclosure: same accent-bar treatment as the Method essay's standfirst. */
 .home-neutrality {
   max-width: 62ch; margin: 1.3rem 0 0; padding: .7rem .9rem; font-size: .9rem;
   border: 1px solid var(--border); border-left: 3px solid var(--accent);
@@ -509,36 +499,34 @@ td.memcurve.na { color: var(--fg-mute); }
 .gallery img { width: 100%; height: auto; display: block; border-radius: 4px; background: var(--img-bg); }
 .gallery figcaption { color: var(--fg-dim); font-size: .8rem; padding: .55rem .2rem 0; }
 
-/* method */
-/* A quiet section heading above each band of cards, so the page reads as grouped
-   suites rather than one long scroll. Matches the .charts-heading rule below. */
-.method-section-head { margin: 2.2rem 0 .1rem; font-size: 1.05rem; }
-.method-section-sub { margin: .1rem 0 0; color: var(--fg-dim); font-size: .88rem; max-width: 74ch; }
-.method-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 1.1rem; margin-top: 1.1rem; align-items: start; }
-.method-card { background: var(--bg-raise); border: 1px solid var(--border); border-radius: 8px; padding: 1rem 1.2rem 1.1rem; }
-/* Card header: a monospace "kicker" (the script that produces the numbers) sits
-   ABOVE the human title, so the title reads as a heading instead of running on
-   from a filename. Cards with no script just carry the title. */
-.method-card .card-kicker {
-  display: block; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: .74rem; font-weight: 600; letter-spacing: .01em; color: var(--fg-mute);
-  margin-bottom: .15rem;
+/* ---- method: a long-form essay, not a spec sheet ----------------------------
+   The methodology page is prose. Its hierarchy comes from type (size, weight,
+   spacing) rather than from borders, so there are deliberately no cards, no
+   panels and no grid here. One column, held near 68ch so a line lands in the
+   65-75 character range that stays comfortable to read, with the line height
+   opened up from the site's 1.55 to 1.75 for sustained reading. Everything
+   inherits the shared palette variables, so light and dark come for free. */
+.essay { max-width: 68ch; }
+.essay-title { font-size: 1.6rem; line-height: 1.25; letter-spacing: -.015em; margin: .2rem 0 1.1rem; max-width: 22ch; }
+/* Standfirst: the conflict-of-interest disclosure. An accent rule on the left
+   rather than a box, so it reads as an editorial note above the piece. */
+.essay-standfirst {
+  margin: 0 0 1.6rem; padding: .1rem 0 .1rem 1.1rem;
+  border-left: 3px solid var(--accent); color: var(--fg-dim); font-size: .94rem; line-height: 1.65;
 }
-.method-card .card-kicker a { color: var(--fg-mute); }
-.method-card .card-kicker a:hover { color: var(--accent); }
-.method-card h3 { margin: 0 0 .55rem; font-size: 1rem; line-height: 1.3; padding-bottom: .5rem; border-bottom: 1px solid var(--border); }
-.method-card ul { margin: 0; padding-left: 1.05rem; color: var(--fg-dim); font-size: .86rem; line-height: 1.5; }
-.method-card li { margin-bottom: .5rem; }
-.method-card li:last-child { margin-bottom: 0; }
-/* Nested sub-points: quieter marker, tighter, so a bullet can carry a lead claim
-   with its supporting detail folded beneath it instead of one long sentence. */
-.method-card li > ul { margin: .35rem 0 .1rem; padding-left: 1rem; font-size: .82rem; }
-.method-card li > ul > li { margin-bottom: .3rem; }
-.method-card li > ul ::marker { content: "\2013  "; }
-/* Lead-in term at the start of a bullet: give it the full-strength foreground so
-   each point announces its subject and the list scans top-to-bottom. */
-.method-card li > b:first-child { color: var(--fg); font-weight: 600; }
-.method-card li ::marker { color: var(--fg-mute); }
+.essay-standfirst strong { color: var(--fg); }
+.essay-lede { font-size: 1.14rem; line-height: 1.7; color: var(--fg); margin: 0 0 2rem; }
+.essay h3 {
+  font-size: 1.22rem; font-weight: 600; line-height: 1.3; letter-spacing: -.01em;
+  color: var(--fg); margin: 2.6rem 0 .8rem; max-width: 30ch;
+}
+.essay h3:first-of-type { margin-top: 2.2rem; }
+.essay p { margin: 0 0 1.15rem; font-size: 1.02rem; line-height: 1.75; color: var(--fg-dim); }
+.essay p strong, .essay p b { color: var(--fg); font-weight: 600; }
+/* Inline code inside prose sits at the text's own weight and never forces a
+   horizontal scroll on a narrow screen. */
+.essay code { font-size: .9em; word-break: break-word; }
+.essay a { text-decoration: underline; text-underline-offset: .16em; }
 
 /* footer */
 .site-footer { border-top: 1px solid var(--border); background: var(--bg-raise); padding: 1.4rem 0 2rem; font-size: .84rem; }
@@ -603,7 +591,14 @@ td.memcurve.na { color: var(--fg-mute); }
   .compare-bar { flex-wrap: wrap; gap: .5rem; padding: .6rem .8rem; }
   .compare-inner { padding: 1rem 1rem 1.4rem; }
   .compare-panel { padding: 2vh .5rem; }
-  .gallery, .method-grid { grid-template-columns: 1fr; }
+  .gallery { grid-template-columns: 1fr; }
+  /* The essay column is already narrower than a phone viewport at this size, so
+     it just fills the wrap; only the type scale needs easing back. */
+  .essay { max-width: 100%; }
+  .essay-title { font-size: 1.4rem; max-width: none; }
+  .essay-lede { font-size: 1.06rem; }
+  .essay h3 { font-size: 1.14rem; margin-top: 2.1rem; max-width: none; }
+  .essay p { font-size: 1rem; line-height: 1.72; }
   .matrix-table th, .matrix-table td { padding: .35rem .4rem; }
   .cell { width: 1.2rem; height: 1.2rem; }
 }
