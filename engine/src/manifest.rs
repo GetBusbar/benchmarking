@@ -542,6 +542,29 @@ impl Manifest {
             xs.iter().map(|(k, v)| Ok((k.clone(), subst(v)?))).collect()
         };
 
+        // THE BUILD STEP, wired to the pre-launch seam that already exists.
+        //
+        // `build` was parsed, documented, and thrown away at `pre_launch: None`, and `PreLaunchStep`
+        // plus `run_pre_launch` were implemented, tested and reachable from nothing. Three entrants
+        // are built from source and declare `"build": "build.sh"`, so all three failed every field
+        // run with `never became ready`: the binary the launcher was told to run had never been
+        // produced, because nothing ever ran the thing that produces it.
+        //
+        // Run ONCE, before the first attempt, which is where the shell put it and for the same
+        // reason: it installs a toolchain and compiles, and that must not happen inside a
+        // measurement window.
+        let pre_launch = match decl {
+            LaunchDecl::Native { build: Some(script), .. } => Some(crate::launch::PreLaunchStep {
+                command: gw_dir.join(script).to_string_lossy().into_owned(),
+                args: Vec::new(),
+                // A release build of a gateway from source, on a cold box that may also be
+                // installing a toolchain. Generous on purpose: the failure this bound exists to
+                // catch is a hang, and a build that is merely slow is not a hang.
+                timeout: std::time::Duration::from_secs(30 * 60),
+            }),
+            _ => None,
+        };
+
         let kind = match decl {
             LaunchDecl::Docker { image, env, args, mounts } => {
                 let env = match subst_env(env) {
@@ -607,7 +630,7 @@ impl Manifest {
                     Ok(a) => a,
                     Err(e) => return Some(Err(e)),
                 };
-                let _ = build; // consumed by the pre-launch step, wired separately
+                let _ = build; // consumed by the pre-launch step above
                 crate::launch::LaunchKind::Native {
                     binary: bin.to_string_lossy().into_owned(),
                     args,
@@ -624,7 +647,7 @@ impl Manifest {
             port: self.port,
             ready_budget,
             boot_backoff,
-            pre_launch: None,
+            pre_launch,
         }))
     }
 
@@ -640,6 +663,28 @@ impl Manifest {
 
         if let Err(e) = self.validate() {
             out.push(format!("definition.json: {e}"));
+        }
+
+        // A BUILD SCRIPT THAT IS DECLARED BUT NOT THERE.
+        //
+        // Three entrants declared "build": "build.sh" and no such file existed in any of their
+        // directories. validate reported 13 of 13 ready anyway, because it checked config templates
+        // and not this, so the gap surfaced on a bench box as `never became ready`: the launcher was
+        // pointed at a binary that nothing had built. Same class as the template check, one field
+        // over, and it costs a whole field run to learn on a box what this says in a second.
+        if let Some(crate::manifest::LaunchDecl::Native { build: Some(script), .. }) = &self.launch {
+            let path = gw_dir.join(script);
+            if !path.is_file() {
+                out.push(format!(
+                    "definition.json declares build script {script:?}, but {} does not exist, so the binary it is supposed to produce never will either",
+                    path.display()
+                ));
+            } else if !is_executable(&path) {
+                out.push(format!(
+                    "build script {} is not executable, so the launcher cannot run it",
+                    path.display()
+                ));
+            }
         }
 
         // A template that is declared but not there.
