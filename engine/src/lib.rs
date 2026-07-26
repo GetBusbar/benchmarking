@@ -29,6 +29,7 @@ pub mod rss;
 pub mod search;
 pub mod snapshot;
 pub mod stats;
+pub mod suite;
 pub mod supervise;
 
 pub use measurement::{Absent, Measurement};
