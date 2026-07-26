@@ -169,7 +169,7 @@
     "repo": "https://github.com/Kong/kong",
     "port": 8080,
     "path": "/v1/chat/completions",
-    "model": "$KONG_MODEL",
+    "model": "gpt-4o-mini",
     "auth": "dummy",
     "headers": [],
     "runtime": {

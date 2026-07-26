@@ -103,6 +103,11 @@ pub struct Manifest {
 pub enum ManifestError {
     Empty(&'static str),
     BadPort,
+    /// A field still carrying a shell variable that was never expanded. These manifests were
+    /// EXTRACTED from shell, where `GW_MODEL="$KONG_MODEL"` is one indirection away from the literal
+    /// it resolves to; extract the wrong side of that and the field holds `$KONG_MODEL` instead of a
+    /// model name. Non-empty, so every existing check passes it.
+    UnexpandedVariable { field: &'static str, raw: String },
     /// A config setting with no stated necessity cannot be lint-checked, so it cannot ship.
     ConfigWithoutReason(String),
 }
@@ -115,6 +120,10 @@ impl std::fmt::Display for ManifestError {
             ManifestError::ConfigWithoutReason(k) => {
                 write!(f, "config setting {k:?} has no key to attach a reason to")
             }
+            ManifestError::UnexpandedVariable { field, raw } => write!(
+                f,
+                "{field} still holds an unexpanded shell variable ({raw:?}): the extraction took the reference, not the value"
+            ),
         }
     }
 }
@@ -131,6 +140,39 @@ impl Manifest {
             if v.trim().is_empty() {
                 return Err(ManifestError::Empty(field));
             }
+        }
+
+        // An extraction artefact, not a typo, and the reason it needs its own check: a field holding
+        // `$KONG_MODEL` is non-empty, so every check above passes it, and it survives all the way to
+        // the wire. A model name that is really a shell reference is sent as the request body's model,
+        // the gateway rejects it against the model its own route declares, and `probe.rs` classifies
+        // any status from a healthy rig as `NotConfigured` - "the gateway answered, deterministically,
+        // that this pairing does not light up". The board then publishes OUR extraction bug as that
+        // gateway's own capability denial. No legitimate value of any of these fields contains `$`.
+        for (v, field) in [
+            (&self.name, "name"),
+            (&self.display, "display"),
+            (&self.repo, "repo"),
+            (&self.path, "path"),
+            (&self.model, "model"),
+            (&self.auth, "auth"),
+            (&self.lang, "lang"),
+            (&self.class, "class"),
+        ] {
+            if v.contains('$') {
+                return Err(ManifestError::UnexpandedVariable { field, raw: v.clone() });
+            }
+        }
+        for h in &self.headers {
+            if h.contains('$') {
+                return Err(ManifestError::UnexpandedVariable { field: "headers", raw: h.clone() });
+            }
+        }
+        if self.runtime.identity().contains('$') {
+            return Err(ManifestError::UnexpandedVariable {
+                field: "runtime identity",
+                raw: self.runtime.identity().to_string(),
+            });
         }
         if self.runtime.identity().trim().is_empty() {
             return Err(ManifestError::Empty("runtime identity"));
@@ -234,6 +276,31 @@ mod tests {
         };
         assert!(m.validate().is_ok());
         assert_eq!(m.config[0].reason, ConfigReason::RigBinding);
+    }
+
+    // The shell manifests are one indirection deep: `KONG_MODEL=gpt-4o-mini` then
+    // `GW_MODEL="$KONG_MODEL"`. Extracting the reference instead of the value yields a field that is
+    // non-empty, parses, and validates under every other rule, then goes out on the wire as a model
+    // name. The corpus shipped exactly this.
+    #[test]
+    fn a_field_holding_an_unexpanded_shell_variable_is_rejected() {
+        let m = Manifest { model: "$KONG_MODEL".into(), ..docker_manifest() };
+        assert_eq!(
+            m.validate(),
+            Err(ManifestError::UnexpandedVariable { field: "model", raw: "$KONG_MODEL".into() })
+        );
+        assert!(!m.model.trim().is_empty(), "the point: it is non-empty, so the emptiness checks pass it");
+
+        // Every field a request or a launch is built from, not just the model.
+        let m = Manifest { auth: "${GW_KEY}".into(), ..docker_manifest() };
+        assert!(matches!(m.validate(), Err(ManifestError::UnexpandedVariable { field: "auth", .. })));
+        let m = Manifest { headers: vec!["x-api-key: $GW_AUTH".into()], ..docker_manifest() };
+        assert!(matches!(m.validate(), Err(ManifestError::UnexpandedVariable { field: "headers", .. })));
+        let m = Manifest { runtime: Runtime::Docker { container: "$NAME-bench".into() }, ..docker_manifest() };
+        assert!(matches!(m.validate(), Err(ManifestError::UnexpandedVariable { field: "runtime identity", .. })));
+
+        // A clean manifest is untouched by the new rule.
+        assert!(docker_manifest().validate().is_ok());
     }
 
     #[test]
