@@ -177,46 +177,41 @@ fn read_response(s: &mut TcpStream, deadline: Instant) -> std::io::Result<()> {
     let mut buf = [0u8; 8192];
     let mut acc: Vec<u8> = Vec::with_capacity(8192);
     let mut hdr_end: Option<usize> = None;
+    // Parsed ONCE when the headers complete, then reused. Re-decoding and re-lowercasing the head
+    // on every read put an allocation per read inside the timed window, which is charged to the
+    // gateway. `scanned` is how far the terminator search has already looked: rescanning the whole
+    // body on each read is O(N^2) in the number of reads, and chunked is the normal framing for a
+    // gateway that streams, so this was the worst case rather than the rare one.
+    let mut framing_kind: Option<Framing> = None;
+    let mut scanned: usize = 0;
     loop {
         if hdr_end.is_none() {
-            hdr_end = find_headers_end(&acc);
-        }
-        if let Some(he) = hdr_end {
-            let head = String::from_utf8_lossy(&acc[..he]).to_lowercase();
-            if !head.starts_with("http/1.1 2") && !head.starts_with("http/1.0 2") {
-                return Err(std::io::Error::other("non-2xx"));
-            }
-            // THE BODY MUST BE DRAINED, and an absent Content-Length is NOT zero.
-            //
-            // This read `content_length(..).unwrap_or(0)` and returned the moment the headers
-            // arrived. On a chunked response (what a gateway sends whenever it does not buffer to
-            // compute a length up front) that stopped the latency clock before the body existed,
-            // AND left the body on the socket. The connection is deliberately reused, so the next
-            // request then read those leftover bytes as its status line, failed to match "http/1.1
-            // 2", and counted a successful request as a failure. The desync persists for the rest
-            // of the run. Under-reported latency, under-reported rps, over-reported failures, all
-            // silent, in the instrument every published number comes from.
-            match framing(&head) {
-                Framing::Length(n) => {
-                    // CHECKED. `n` is the peer's claim. In release, overflow-checks are off, so
-                    // `he + n` with n = usize::MAX wraps to he - 1, the comparison is instantly
-                    // true, and read_response returns before the body arrives: exactly the desync
-                    // this function was rewritten to eliminate, reintroduced through arithmetic.
-                    match he.checked_add(n) {
-                        Some(end) if acc.len() >= end => return Ok(()),
-                        Some(_) => {}
-                        None => return Err(std::io::Error::other("declared content-length overflows")),
-                    }
+            if let Some(he) = find_headers_end(&acc) {
+                let head = String::from_utf8_lossy(&acc[..he]).to_lowercase();
+                if !head.starts_with("http/1.1 2") && !head.starts_with("http/1.0 2") {
+                    return Err(std::io::Error::other("non-2xx"));
                 }
+                framing_kind = Some(framing(&head));
+                hdr_end = Some(he);
+                scanned = he;
+            }
+        }
+        if let (Some(he), Some(kind)) = (hdr_end, framing_kind.as_ref()) {
+            match kind {
+                Framing::Length(n) => match he.checked_add(*n) {
+                    Some(end) if acc.len() >= end => return Ok(()),
+                    Some(_) => {}
+                    None => return Err(std::io::Error::other("declared content-length overflows")),
+                },
                 Framing::Chunked => {
-                    // The terminal chunk. Cheap and sufficient: we only need to know the body
-                    // finished, never what it said.
-                    if acc[he..].windows(5).any(|w| w == b"0\r\n\r\n") {
+                    // Only the newly-arrived bytes, overlapping by the terminator length so a
+                    // terminator split across two reads is still found.
+                    let from = scanned.saturating_sub(4).max(he);
+                    if acc[from..].windows(5).any(|w| w == b"0\r\n\r\n") {
                         return Ok(());
                     }
+                    scanned = acc.len();
                 }
-                // Neither header: HTTP/1.1 says the body then runs to connection close, so there is
-                // nothing to wait for and nothing left to desync the next request.
                 Framing::UntilClose => return Ok(()),
             }
         }
@@ -450,6 +445,54 @@ mod tests {
         // The real tell: with an undrained body the connection desyncs and every request after the
         // first is misread as a non-2xx, so failures would dominate.
         assert_eq!(g.fail, 0, "a drained connection must not manufacture failures, got {}", g.fail);
+    }
+
+    // A chunked body delivered across MANY small reads. The terminator search must look only at
+    // newly-arrived bytes: rescanning the whole body per read is O(N^2), and every microsecond of it
+    // lands inside the timed window and is charged to the gateway. This also pins that a terminator
+    // split across a read boundary is still found, which is what the overlap is for.
+    #[test]
+    fn a_chunked_body_split_across_many_reads_still_terminates() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        std::thread::spawn(move || {
+            for conn in listener.incoming().take(4) {
+                let Ok(mut conn) = conn else { continue };
+                std::thread::spawn(move || {
+                    let mut b = [0u8; 4096];
+                    while conn.read(&mut b).unwrap_or(0) > 0 {
+                        if conn.write_all(b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n").is_err() {
+                            return;
+                        }
+                        // Many small chunks, then the terminator written one byte at a time so it
+                        // straddles read boundaries.
+                        for _ in 0..64 {
+                            if conn.write_all(b"4\r\nabcd\r\n").is_err() {
+                                return;
+                            }
+                        }
+                        for byte in b"0\r\n\r\n" {
+                            if conn.write_all(&[*byte]).is_err() {
+                                return;
+                            }
+                            std::thread::sleep(Duration::from_micros(200));
+                        }
+                    }
+                });
+            }
+        });
+        let cfg = GenConfig {
+            addr,
+            path: "/x".into(),
+            body: "{}".into(),
+            headers: vec![],
+            concurrency: 1,
+            duration: Duration::from_millis(400),
+            ttft_ms: 0,
+        };
+        let stats = run(&cfg);
+        assert!(stats.ok > 0, "a fragmented chunked body must complete, ok={} fail={}", stats.ok, stats.fail);
+        assert_eq!(stats.fail, 0, "a terminator split across reads must not read as a failure");
     }
 
     // A body with no length header and no chunking runs to connection close. That is a legitimate
