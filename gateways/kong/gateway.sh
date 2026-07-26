@@ -13,10 +13,10 @@
 # declares ALL FOUR upstream providers at once; the matrix changes only WHAT THE CLIENT ASKS FOR (one
 # request header), never the config bytes.
 #
-# HOW ONE CONFIG SERVES FOUR PROVIDERS (Kong 3.8.0 source, verified locally — see the run log below):
+# HOW ONE CONFIG SERVES FOUR PROVIDERS (Kong 3.8.0 source, verified locally - see the run log below):
 #   * ai-proxy binds ONE provider per PLUGIN INSTANCE (`local ai_driver = require("kong.llm.drivers."
 #     .. conf.model.provider)`, kong/llm/proxy/handler.lua:63/198/246/428; model.provider is required,
-#     kong/llm/schemas/init.lua:191-195) — but a declarative config may hold ARBITRARILY MANY ai-proxy
+#     kong/llm/schemas/init.lua:191-195) - but a declarative config may hold ARBITRARILY MANY ai-proxy
 #     instances: plugin uniqueness is the tuple (name, route, service, consumer)
 #     (kong/db/schema/entities/plugins.lua:8 `cache_key = { "name", "route", "service", "consumer" }`),
 #     so one instance per ROUTE is legal. There is no singleton constraint in ai-proxy/schema.lua.
@@ -28,15 +28,15 @@
 #     case-insensitive.
 #   * PRIORITY makes the header-less route the natural fallback: get_priority()
 #     (kong/router/transform.lua:558-668) packs `match_weight` into the TOP 3 bits (`lshift_uint64(
-#     match_weight, 61)`) and increments it once per populated matcher category — so paths+headers
+#     match_weight, 61)`) and increments it once per populated matcher category - so paths+headers
 #     (weight 2) STRICTLY outranks paths-only (weight 1). Docs: developer.konghq.com/gateway/
 #     entities/route/ ("a Route that specifies both hosts and headers will have a higher priority
 #     than one that only specifies hosts").
-#   So: four routes on the SAME uniform /v1/chat/completions path — three selected by
+#   So: four routes on the SAME uniform /v1/chat/completions path - three selected by
 #   `x-llm-provider: anthropic|gemini|bedrock`, one header-less fallback = openai. NOT ai-proxy-advanced:
 #   that plugin does not exist in OSS at tag 3.8.0 (kong/plugins/ai-proxy-advanced/ is 404 on the OSS
 #   repo and absent from constants.lua BUNDLED_PLUGINS; developer.konghq.com/plugins/ai-proxy-advanced/
-#   is tier: ai_gateway_enterprise) — this is plain bundled ai-proxy only, in the kong:3.8 OSS image.
+#   is tier: ai_gateway_enterprise) - this is plain bundled ai-proxy only, in the kong:3.8 OSS image.
 #
 # Permitted deviations only: provider upstream_url → mock, dummy auth/AWS signing (the mock ignores
 # it), the per-provider REQUIRED fields (anthropic_version, bedrock region+creds), and KONG_DATABASE=
@@ -46,7 +46,7 @@
 # FAIRNESS AUDIT (Kong 3.8.0 source):
 #   * REMOVED KONG_ADMIN_LISTEN=off: that DISABLED a default-on feature. Kong's Admin API is ON by
 #     default (kong.conf.default @3.8.0: admin_listen = 127.0.0.1:8001 ... + 127.0.0.1:8444 ssl),
-#     bound to localhost, and DB-less only makes it read-only — it does not turn it off. Turning it
+#     bound to localhost, and DB-less only makes it read-only - it does not turn it off. Turning it
 #     off was a feature-strip; restored to the default (the var is simply not set). Harmless on a
 #     dedicated single-box bench (localhost-only, no port clash, proxy traffic unaffected).
 #   * REMOVED KONG_ANONYMOUS_REPORTS=off: anonymous_reports defaults to `on` (kong.conf.default
@@ -63,7 +63,7 @@ GW_KIND=docker
 # manifest instead of hardcoding it. lib/gateway_isolation_test.sh checks it against the --name
 # below, so the two cannot drift.
 GW_CONTAINER=kong-bench
-# Self-describing manifest metadata — charts.py + the run lists read these, so a gateway
+# Self-describing manifest metadata - charts.py + the run lists read these, so a gateway
 # is fully defined by its own dir (add/remove a dir → it appears/disappears everywhere).
 GW_DISPLAY="Kong"                      # label in charts + report tables
 GW_LANG=Other                            # implementation language → bar color bucket
@@ -73,7 +73,7 @@ GW_PORT=8080
 GW_PATH=/v1/chat/completions
 # KONG_MODEL is a MANIFEST CONSTANT, never a per-column value: it is the one model name every route in
 # the single config is bound to, and the one name the client sends in every lane. _kong_write_config
-# reads THIS (not GW_MODEL) so the rendered bytes cannot depend on whatever a column left in GW_MODEL —
+# reads THIS (not GW_MODEL) so the rendered bytes cannot depend on whatever a column left in GW_MODEL -
 # the column-independence of the render is grep-provable: the render body contains no $GW_MODEL.
 KONG_MODEL=gpt-4o-mini
 GW_MODEL="$KONG_MODEL"
@@ -133,15 +133,15 @@ gw_build() {
   sudo docker pull "${KONG_IMAGE:-kong:3.8}" >/dev/null 2>&1 || true
 }
 
-# _kong_write_config: emit THE DB-less declarative config. NO ARGUMENTS — there is one config and the
+# _kong_write_config: emit THE DB-less declarative config. NO ARGUMENTS - there is one config and the
 # render is column-independent by construction: its only inputs are $MOCK_PORT (the rig's mock port,
 # constant for a whole run) and the manifest constant $KONG_MODEL. Every egress column loads these
 # same bytes; the column changes only the client's `x-llm-provider` header (gw_matrix_egress).
 #
 # Kong 3.8 ai-proxy always accepts the OpenAI-canonical ingress on /v1/chat/completions (route_type
 # llm/v1/chat) and TRANSFORMS it into the configured provider's native upstream shape;
-# model.options.upstream_url REPLACES the whole egress URL — scheme, host, port AND path
-# (kong/llm/drivers/anthropic.lua:446-464: parse(upstream_url) -> set_path/set_scheme/set_target) —
+# model.options.upstream_url REPLACES the whole egress URL - scheme, host, port AND path
+# (kong/llm/drivers/anthropic.lua:446-464: parse(upstream_url) -> set_path/set_scheme/set_target) -
 # so each route points at the mock's own per-dialect endpoint. The parent service `url` is a
 # placeholder for exactly that reason (the plugin calls kong.service.set_target()).
 #
@@ -258,7 +258,7 @@ YAML
 # via driver.to_format. So the only capable row is openai-ingress, into the egress providers whose
 # native Converse/Messages/generateContent shape Kong 3.8 emits with an upstream_url override
 # (kong/llm/drivers/shared.lua): anthropic (/v1/messages), gemini (:generateContent), bedrock
-# (converse). NOT declared: openai-responses (no llm/v1/responses route_type in 3.8 — the enum is
+# (converse). NOT declared: openai-responses (no llm/v1/responses route_type in 3.8 - the enum is
 # {llm/v1/chat, llm/v1/completions, preserve}) and cohere-v2 (Kong 3.8's cohere driver emits the
 # Cohere *v1* /v1/chat shape, CHATBOT/chat_history, not the v2 dialect this suite probes) - both grey
 # with the cited reason. cohere IS a supported 3.8 provider (schema enum), just at the v1 dialect.
@@ -284,7 +284,7 @@ GW_XLATE_CAP=0
 GW_XLATE_CAP_NOTE="Kong 3.8 ai-proxy accepts only OpenAI-canonical ingress (llm/init.lua identify_request has no Anthropic-Messages detector), so anthropic-in -> openai-out translation is not a claimed capability"
 # gw_matrix_egress <dialect>: change ONLY what the CLIENT asks for. All four upstream providers are
 # already wired in the ONE config (_kong_write_config, rendered identically for every column); the
-# column just sets the request header Kong routes on. The config is NOT re-rendered here — the same
+# column just sets the request header Kong routes on. The config is NOT re-rendered here - the same
 # bytes gw_build wrote (and gw_config publishes) serve every column. openai is the header-less
 # fallback route, so its column sends no selector header at all.
 gw_matrix_egress() {
@@ -298,19 +298,19 @@ gw_matrix_egress() {
   gw_launch
 }
 
-# _kong_env: the ONE definition of Kong's non-secret launch env — the single source of truth that
+# _kong_env: the ONE definition of Kong's non-secret launch env - the single source of truth that
 # gw_launch turns into docker -e flags (as another entry does for its own env) and gw_config publishes verbatim,
 # so the benchmarked env and the website-published env cannot drift.
 #   KONG_DATABASE=off        = DB-less declarative (no external Postgres - required to boot).
 #   KONG_NGINX_WORKER_PROCESSES = pinned to the cpuset core count (0-3 → 4), NOT Kong's default `auto`.
 #     Kong is nginx/OpenResty, and nginx's `worker_processes auto` reads the HOST cpu count via
-#     sysconf(_SC_NPROCESSORS_ONLN) — it is BLIND to --cpuset-cpus, so on a 4-core-pinned container it
+#     sysconf(_SC_NPROCESSORS_ONLN) - it is BLIND to --cpuset-cpus, so on a 4-core-pinned container it
 #     spawns 16 workers thrashing 4 cores, a scheduler-contention HANDICAP the Rust gateways (tokio
 #     available_parallelism respects cpuset) never pay. Pinning to the cpuset count emulates the same
-#     N-core box every gateway is measured on — the identical CPU-pinning run-mechanic the Go gateways
+#     N-core box every gateway is measured on - the identical CPU-pinning run-mechanic the Go gateways
 #     use with GOMAXPROCS (and exactly what nginx `auto` WOULD read on a real 4-core box). Run-mechanic
 #     correcting nginx's cpuset-blindness, not a perf/concurrency tune.
-#   The Admin API listener is left at its default (ON, localhost:8001/8444) — not disabled.
+#   The Admin API listener is left at its default (ON, localhost:8001/8444) - not disabled.
 _kong_env() {
   local ncore=$(( ${CORES##*-} - ${CORES%%-*} + 1 ))
   cat <<ENV
@@ -334,7 +334,7 @@ gw_launch() {
 }
 
 # ── OOTB config artifact (file-driven) ────────────────────────────────────────────────────────────
-# gw_config prints the canonical OOTB config Kong launches with — and because there is now exactly ONE
+# gw_config prints the canonical OOTB config Kong launches with - and because there is now exactly ONE
 # config, what is published IS what ran in every lane and every egress column, byte for byte. Kong is
 # file-driven, so the artifact is the rendered DB-less declarative config (exactly what
 # KONG_DECLARATIVE_CONFIG loads) PLUS the non-secret launch env (any auth/AWS values in the config are
@@ -362,7 +362,7 @@ gw_stop() { sudo docker rm -f kong-bench >/dev/null 2>&1; }
 # gw_matrix_egress + the declared capability matrix are defined above (before gw_launch).
 #
 # LOCAL VERIFICATION of the one-config standard (kong:3.8 + the pinned recording mock, --network host,
-# THIS manifest's rendered kong.gen.yml, config bytes untouched between the four probes — same file
+# THIS manifest's rendered kong.gen.yml, config bytes untouched between the four probes - same file
 # sha256 before and after): one OpenAI-shaped POST /v1/chat/completions per column, selector header
 # only, read back from the mock's /__mock/state recorder:
 #   no header               -> HTTP 200  X-Kong-LLM-Model: openai/gpt-4o-mini

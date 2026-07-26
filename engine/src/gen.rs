@@ -1,13 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 //
-// The load generator, in Rust.
+// The load generator, in Rust. `otb loadgen` (this module) is run as a subprocess by `run.rs`'s
+// `load_window`.
 //
-// It emits the SAME stats line the Go generator emits, so it is drop-in for every existing parser
-// and, more importantly, so the two can be run against the same gateway and diffed. This one does
-// not become the instrument until that diff agrees on rps and p99: every published number on the
-// board was taken with the Go generator, so swapping instruments without proof would make a real
-// throughput change indistinguishable from a measurement change.
+// It prints a stats line (`rps=%d fail=%d ... p50us=%d ...`) that `engine/src/loadgen.rs::
+// parse_ugen_line` parses on the other end; the two must stay in the same shape.
 //
 // std only, and threads rather than async on purpose. This process is pinned to its own cores and
 // its job is to saturate a loopback socket; an async runtime would add a scheduler between the
@@ -58,9 +56,8 @@ impl GenStats {
         (self.ok as f64 / self.elapsed_s) as u64
     }
 
-    /// Nearest-rank, matching the Go generator's `pct()` exactly. Verified against loadgen/ugen.go
-    /// rather than inferred, because a percentile convention that differs by one index is a silent
-    /// disagreement between two instruments that both look right.
+    /// Nearest-rank percentile: a convention that differs by one index from what a reader of the
+    /// published numbers assumes is a silent disagreement, not a rounding difference.
     pub fn pct_us(&self, q: f64) -> u64 {
         Self::pct_of(&self.sorted_latencies(), q)
     }
@@ -109,6 +106,10 @@ fn worker(cfg: &GenConfig, stop: &AtomicBool, out: &Mutex<GenStats>) {
     let (mut ok, mut fail) = (0u64, 0u64);
     let req = build_request(cfg);
     let mut conn: Option<TcpStream> = None;
+    // ALLOCATED ONCE, reused across every request this worker sends: a fresh Vec per response would
+    // put an allocator call in the timed hot path of every exchange, for a worker that runs for
+    // hours at whatever RPS the sweep is driving. `read_response` clears it, never replaces it.
+    let mut acc: Vec<u8> = Vec::with_capacity(8192);
 
     // Whether the connection about to be used was opened THIS iteration. A peer vanishing on a
     // brand-new connection is a real failure; the same thing on a connection we chose to reuse is
@@ -142,7 +143,7 @@ fn worker(cfg: &GenConfig, stop: &AtomicBool, out: &Mutex<GenStats>) {
             // that sees nothing: the peer closed it while it sat idle.
             if fresh { Exchange::Failed } else { Exchange::ClosedBeforeAnyBytes }
         } else {
-            read_response(s, response_deadline)
+            read_response(s, response_deadline, &mut acc)
         };
 
         match outcome {
@@ -171,13 +172,11 @@ fn worker(cfg: &GenConfig, stop: &AtomicBool, out: &Mutex<GenStats>) {
         }
     }
 
-    // A POISONED LOCK MEANS A WORKER PANICKED, which is a harness fault. Skipping the merge
-    // silently would drop this worker's real requests and, if every worker skipped, hand the search
-    // an empty window that reads as "the rig produced nothing" rather than "our code broke".
-    // Recover the guard so the data still lands, and record that it happened.
-    // A poisoned lock means a peer worker panicked. Recover the guard so THIS worker's real
-    // requests still land: dropping them would shrink a window that did happen. The panic itself is
-    // re-raised by thread::scope and terminates the process, so there is nothing to flag here.
+    // A POISONED LOCK MEANS A PEER WORKER PANICKED, which is a harness fault. Recover the guard so
+    // THIS worker's real requests still land: skipping the merge would drop them and, if every
+    // worker skipped, hand the search an empty window that reads as "the rig produced nothing"
+    // rather than "our code broke". The panic itself is re-raised by thread::scope and terminates
+    // the process, so there is nothing to flag here.
     let mut g = match out.lock() {
         Ok(g) => g,
         Err(poisoned) => poisoned.into_inner(),
@@ -202,16 +201,12 @@ fn build_request(cfg: &GenConfig) -> String {
     )
 }
 
-/// Read one response and discard it. Only success or failure matters here; the body is the mock's
-/// canned reply and parsing it would charge the gateway for our own JSON cost.
 /// What one request/response exchange did to the connection.
 ///
-/// The generator reuses a connection, and it used to treat ANY failure on a reused one as a failed
-/// request. That is wrong in two distinct ways, and both were observed live: against a peer that
-/// answers HTTP/1.0 and closes, `fail` came back almost exactly equal to `ok` - every second request
-/// counted as a failure, when the peer had answered the first one correctly and simply did what it
-/// said it would do. Halved throughput, and a window that then fails the clean-window gate, so the
-/// target is published as failing on OUR reuse of a connection it closed.
+/// The generator reuses connections, so a failure on a REUSED one must be told apart from a failure
+/// on a fresh one: attributing a stale-connection close to the target would count a peer that
+/// answered correctly and simply closed as advertised as a failed request, halving throughput and
+/// failing the clean-window gate for a peer that did nothing wrong.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Exchange {
     /// A complete response, and the connection may carry another request.
@@ -240,13 +235,19 @@ fn peer_will_close(head_lower: &str) -> bool {
     head_lower.starts_with("http/1.0") && !says("keep-alive")
 }
 
-fn read_response(s: &mut TcpStream, deadline: Instant) -> Exchange {
+/// Read one response and discard it. Only success or failure matters here; the body is the mock's
+/// canned reply and parsing it would charge the gateway for our own JSON cost.
+///
+/// `acc` is the caller's scratch buffer, reused across every request on this worker rather than
+/// allocated fresh per call: cleared here, not replaced, so its capacity survives from one exchange
+/// to the next instead of paying an allocator call inside the timed hot path of every request.
+fn read_response(s: &mut TcpStream, deadline: Instant, acc: &mut Vec<u8>) -> Exchange {
     // A PER-READ TIMEOUT IS NOT A BOUND. The socket timeout refreshes on every byte, so a peer that
     // trickles one byte every 29s keeps a worker inside this function effectively forever. run()
     // sets the stop flag and then blocks joining every worker, so one wedged worker hangs the whole
     // sweep until the box self-terminates and the entire run is lost. This deadline is the bound.
     let mut buf = [0u8; 8192];
-    let mut acc: Vec<u8> = Vec::with_capacity(8192);
+    acc.clear();
     let mut hdr_end: Option<usize> = None;
     // Parsed ONCE when the headers complete, then reused. Re-decoding and re-lowercasing the head
     // on every read put an allocation per read inside the timed window, which is charged to the
@@ -259,7 +260,7 @@ fn read_response(s: &mut TcpStream, deadline: Instant) -> Exchange {
     let complete = |closing: bool| if closing { Exchange::LastOnConnection } else { Exchange::Reusable };
     loop {
         if hdr_end.is_none() {
-            if let Some(he) = find_headers_end(&acc) {
+            if let Some(he) = find_headers_end(acc) {
                 let head = String::from_utf8_lossy(&acc[..he]).to_lowercase();
                 if !head.starts_with("http/1.1 2") && !head.starts_with("http/1.0 2") {
                     return Exchange::Failed;
@@ -532,12 +533,10 @@ mod tests {
         assert!(g.rps() > 0, "a run that completed requests has a rate");
     }
 
-    // RED-BEFORE. Every fixture in this file hardcoded content-length, so nothing here could see
-    // that an absent one was being read as a zero-length body. A chunked response is what a real
-    // gateway sends whenever it does not buffer to compute a length, and the old code returned the
-    // instant it saw the header terminator: clock stopped before the body, body left on the socket,
-    // and the NEXT request on the reused connection read those bytes as its status line and counted
-    // a success as a failure.
+    // A chunked response is what a real gateway sends whenever it does not buffer to compute a
+    // length. A reader that stops at the header terminator instead of draining the body would leave
+    // the body on the socket, so the NEXT request on the reused connection would read those bytes as
+    // its status line and count a success as a failure.
     #[test]
     fn a_chunked_response_is_drained_so_the_next_request_is_not_corrupted() {
         let l = TcpListener::bind("127.0.0.1:0").expect("bind");
@@ -575,17 +574,13 @@ mod tests {
         assert_eq!(g.fail, 0, "a drained connection must not manufacture failures, got {}", g.fail);
     }
 
-    // A chunked body delivered across MANY small reads. The terminator search must look only at
-    // newly-arrived bytes: rescanning the whole body per read is O(N^2), and every microsecond of it
-    // A PEER THAT CLOSES IS NOT A PEER THAT FAILED, and this was measured wrong in the field.
+    // A PEER THAT CLOSES IS NOT A PEER THAT FAILED.
     //
     // HTTP/1.0 defaults to closing after each response and must opt IN to keep-alive. The generator
-    // reuses connections, and it used to count any failure on a reused one as a failed request, so
-    // against such a peer `fail` came back almost exactly equal to `ok` - alternating success and
-    // "failure" as each reused connection turned out to be closed. Observed live at ok=56539,
-    // fail=56531. Two consequences, both bad: throughput reads as roughly half, and the window fails
-    // the clean-window gate (`Sample.passed` requires fail == 0), so the target is published as
-    // failing on OUR reuse of a connection it told us it was closing.
+    // reuses connections, so a failure on a reused connection must be attributed to OUR reuse of a
+    // connection the peer told us it was closing, never to the target: counting it as a request
+    // failure would read throughput as roughly half and fail the clean-window gate
+    // (`Sample.passed` requires fail == 0) for a peer that answered every request correctly.
     #[test]
     fn a_peer_that_answers_and_closes_is_all_successes_and_no_failures() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
@@ -654,8 +649,10 @@ mod tests {
         assert!(stats.fail > 0, "a peer that never answers must be recorded as failing");
     }
 
-    // lands inside the timed window and is charged to the gateway. This also pins that a terminator
-    // split across a read boundary is still found, which is what the overlap is for.
+    // A chunked body delivered across MANY small reads. The terminator search must look only at
+    // newly-arrived bytes, so a terminator split across a read boundary is still found: rescanning
+    // the whole body from the start on every read is O(N^2), and every microsecond of it lands
+    // inside the timed window and is charged to the gateway.
     #[test]
     fn a_chunked_body_split_across_many_reads_still_terminates() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");

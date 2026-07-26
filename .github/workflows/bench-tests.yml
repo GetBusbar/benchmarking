@@ -14,7 +14,6 @@ on:
       - ".cargo/config.toml"
       - "charts.py"
       - "charts_test.py"
-      - "loadgen/**"
       - "mock/**"
       - ".github/workflows/bench-tests.yml"
   pull_request:
@@ -25,7 +24,6 @@ on:
       - ".cargo/config.toml"
       - "charts.py"
       - "charts_test.py"
-      - "loadgen/**"
       - "mock/**"
       - ".github/workflows/bench-tests.yml"
   workflow_dispatch:
@@ -35,12 +33,9 @@ permissions:
 
 jobs:
   engine:
-    # The Rust engine is replacing the shell measurement core. Its tests are the reason for the port
-    # as much as its types are, so CI runs them: an untested test suite is decoration.
-    #
-    # The differential job is the load-bearing one. It runs the SHELL and the RUST over the same
-    # generated series and requires the same answer, which is how a port is proven rather than
-    # asserted. It needs bash and the shell library present, so it runs on the same checkout.
+    # The Rust engine replaced the shell measurement core entirely (no shell measurement path is left
+    # to run a differential test against); its own tests are the reason for the port as much as its
+    # types are, so CI runs them here - an untested test suite is decoration.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -61,15 +56,9 @@ jobs:
           cargo build --release --target aarch64-unknown-linux-musl --bin otb
           file target/aarch64-unknown-linux-musl/release/otb
 
-  charts-and-loadgen:
-    # Was "peak-search": nineteen steps gating lib/sweep.sh, stream_measure.sh, harness.sh,
-    # probe_verdict.sh, mock_restart_test.sh, ingress.sh, box_qualify.sh, gateways.sh, matrix/run.sh,
-    # qualify-box.sh, plateau.sh and gateway.sh's own contract - every one of those files was deleted
-    # in the shell-to-Rust cutover. The job's FIRST step parse-checked lib/sweep.sh, so it failed at
-    # "No such file or directory" before any later step ever ran, on every push, since the cutover.
-    #
-    # Two of the later steps were not dead: node site/test.mjs (already run live in cf-pages.yml, so
-    # dropped here as a duplicate) and the two below, which are real code with no other CI coverage.
+  charts:
+    # Gates charts.py's validity/ranking rules directly (node site/test.mjs runs live in
+    # cf-pages.yml, so it is not duplicated here).
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -81,17 +70,6 @@ jobs:
       # matplotlib needed (render() is not exercised).
       - name: Charts validity-gate test (streamcpu/sustained/TTFT gates + top-N ranking)
         run: python3 charts_test.py
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: loadgen/go.mod
-      # ugen's rps/p99/delivered ARE every published board number, but had zero unit tests and CI only
-      # parse-checked the sweep's CONSUMPTION of the number, never ugen's COMPUTATION (audit R3-H2).
-      # Gate the numeric core: rps-over-elapsed (R2-M1), pct() + its clamp (N2), the NewRequest-error
-      # path (L1), isContent's empty-placeholder handling. loadgen is a self-contained stdlib module.
-      - name: loadgen vet
-        run: go vet -C loadgen ./...
-      - name: loadgen unit tests (rps/pct/isContent/buildRequest)
-        run: go test -C loadgen ./...
 
   mock-shape:
     # The mock must never bottleneck and must serve every dialect identically; its per-dialect

@@ -10,27 +10,27 @@
 # ONE tensorzero.toml, rendered IDENTICALLY for every lane and every egress column, published verbatim
 # as the artifact: install this toml with that image on that box and you reproduce the board. The
 # config declares ALL FOUR upstream models at once (openai, openai-responses, anthropic, aws_bedrock);
-# the matrix changes only WHAT THE CLIENT ASKS FOR — the `model` field in the request body.
+# the matrix changes only WHAT THE CLIENT ASKS FOR - the `model` field in the request body.
 #
 # Upstream evidence that one config is enough (tensorzero @2026.6.0):
-#   * multiple models, provider-agnostic: docs/gateway/configuration-reference.mdx:362-367 — "You can
+#   * multiple models, provider-agnostic: docs/gateway/configuration-reference.mdx:362-367 - "You can
 #     define multiple models by including multiple [models.model_name] sections. A model is provider
 #     agnostic." No limit of one provider type per config exists in the source.
 #   * client-side selection with NO config change: docs/gateway/api-reference/
-#     inference-openai-compatible.mdx:575-616 — a model declared as [models.my_model] is addressed
+#     inference-openai-compatible.mdx:575-616 - a model declared as [models.my_model] is addressed
 #     from the OpenAI-compatible endpoint as `tensorzero::model_name::my_model`. That is exactly what
 #     GW_MODEL carries, and the only thing gw_matrix_egress touches.
 #   * provider blocks + their native upstream paths: openai `api_type` enum {chat_completions,
 #     responses} (crates/tensorzero-core/src/providers/openai/mod.rs:94-103; get_chat_url joins
 #     `chat/completions` @mod.rs:1263, get_responses_url joins `responses` @responses.rs:298);
 #     anthropic api_base is the API ROOT and the gateway appends `messages`
-#     (providers/anthropic.rs:57-61 + get_messages_url:116-126 — note the configuration-reference
+#     (providers/anthropic.rs:57-61 + get_messages_url:116-126 - note the configuration-reference
 #     docs are STALE here and say to include /messages; the source strips it with a deprecation
 #     warning, so we pass the root); aws_bedrock builds `{endpoint_url}/model/{urlencoded model_id}/
 #     converse` (aws_bedrock.rs:234-238).
 #   * credentials are validated EAGERLY at boot for EVERY declared model (model_table.rs:568-590
 #     load_credential -> ApiKeyMissing; skip_credential_validation is test/relay-only), so a
-#     four-model config only boots if every model's credential resolves — the launch env below
+#     four-model config only boots if every model's credential resolves - the launch env below
 #     supplies exactly those dummies, and the local verification at the bottom of this file is the
 #     proof that it does boot and serve all four.
 GW_KIND=docker
@@ -39,7 +39,7 @@ GW_KIND=docker
 # manifest instead of hardcoding it. lib/gateway_isolation_test.sh checks it against the --name
 # below, so the two cannot drift.
 GW_CONTAINER=tensorzero-bench
-# Self-describing manifest metadata — charts.py + the run lists read these, so a gateway
+# Self-describing manifest metadata - charts.py + the run lists read these, so a gateway
 # is fully defined by its own dir (add/remove a dir → it appears/disappears everywhere).
 GW_DISPLAY="TensorZero"                      # label in charts + report tables
 GW_LANG=Rust                            # implementation language → bar color bucket
@@ -81,7 +81,7 @@ gw_version() {
   echo "${TENSORZERO_IMAGE}${dg:+ (@${dg##*@})}"
 }
 
-# _tz_write_config: emit THE tensorzero.toml. NO ARGUMENTS — there is one config and the render is
+# _tz_write_config: emit THE tensorzero.toml. NO ARGUMENTS - there is one config and the render is
 # column-independent by construction: its only input is $MOCK_PORT (the rig's mock port, constant for
 # a whole run). All four models the matrix probes are declared here at once; the client picks one per
 # request with `tensorzero::model_name::<name>`, so no egress column ever rewrites these bytes.
@@ -180,7 +180,7 @@ GW_XLATE_CAP=0
 GW_XLATE_CAP_NOTE="TensorZero exposes no Anthropic-Messages-format ingress (external.rs + openai_compatible/mod.rs @2026.6.0 register only /inference, /batch_inference, /feedback and the OpenAI-compatible chat/embeddings routes), so anthropic-in translation is not a claimed capability"
 # gw_matrix_egress <dialect>: change ONLY what the CLIENT asks for. All four upstream models are
 # already wired in the ONE config (_tz_write_config, rendered identically for every column); the column
-# just names one of them in the request body. The config is NOT re-rendered here — the same bytes
+# just names one of them in the request body. The config is NOT re-rendered here - the same bytes
 # gw_build wrote (and gw_config publishes) serve every column.
 gw_matrix_egress() {
   case "$1" in
@@ -225,9 +225,9 @@ gw_launch() {
 # gw_config prints the canonical OOTB config this gateway launches with. TensorZero is file-driven, so
 # the artifact is the RENDERED tensorzero.toml (exactly what --config-file loads) PLUS the non-secret
 # launch env (the credential env is dummy-only and required per provider type; shown for reproducibility,
-# never a live secret — there are none on the isolated rig). The suite runner captures this once per run
+# never a live secret - there are none on the isolated rig). The suite runner captures this once per run
 # into results/config/tensorzero.txt and the board publishes it, so "fresh install + this config → these
-# numbers" is reproducible — and because there is now exactly ONE config, what is published IS what ran
+# numbers" is reproducible - and because there is now exactly ONE config, what is published IS what ran
 # in every lane and every egress column, byte for byte. The toml is read from the file
 # gw_build/_tz_write_config rendered (re-rendered with the same no-argument function if the file isn't
 # present yet), so it can never drift from
@@ -265,7 +265,7 @@ gw_stop() { sudo docker rm -f tensorzero-bench >/dev/null 2>&1; }
 #
 # LOCAL VERIFICATION of the one-config standard (tensorzero/gateway:2026.6.0 + the pinned recording
 # mock, --network host, THIS manifest's rendered tensorzero.toml, config bytes untouched between the
-# four probes — same file sha256 before and after): one POST /openai/v1/chat/completions per column,
+# four probes - same file sha256 before and after): one POST /openai/v1/chat/completions per column,
 # differing ONLY in the body's `model` string, read back from the mock's /__mock/state recorder:
 #   tensorzero::model_name::mock-openai           -> HTTP 200  upstream openai
 #                                                    body_ok=true  /v1/chat/completions

@@ -3,7 +3,6 @@ memory/mock
 memory/ugen
 perf/mock
 perf/ugen
-loadgen/ugen
 # per-run generated configs + gateway build/venv artifacts.
 #
 # NOT `gateways/*/*.gen.*`. That glob ends in `.*`, so it matched the rendered `config.gen.yaml` AND

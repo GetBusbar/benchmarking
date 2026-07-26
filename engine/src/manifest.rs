@@ -3,22 +3,12 @@
 //
 // A gateway manifest, as DATA.
 //
-// The shell manifests express identity as code: each one hand-writes `gw_rss`, `gw_hwm` and
-// `gw_stop`, thirteen times over, and every trio has to name the same container or the same process
-// pattern. The harness comment says the readers are "matched BY CONSTRUCTION, not by convention",
-// and at the library level that is true, but the manifest still spells the name out once per hook,
-// so the matching is a convention again at exactly the layer a human edits.
-//
-// That drift has already corrupted published numbers. Three source-built manifests wrote a
-// single-pid reader for RSS beside a whole-tree reader for HWM, so for the same gateway idle, peak
-// and recovered measured ONE process while the high-water mark measured that process and every
-// descendant. Two different populations, published side by side, and compared against gateways whose
-// readers were tree-summed. A gateway that forks workers had its peak inflated relative to its idle
-// by whatever its children weighed.
-//
-// Here identity is declared ONCE. Every reader derives from it, so RSS and HWM cannot describe
-// different populations, and a stop cannot target something the readers never measured. The class of
-// bug is removed rather than guarded.
+// Identity is declared ONCE, not spelled out separately per reader: a manifest that named its
+// container or process pattern once per hook (once for RSS, once for HWM, once for stop) could drift
+// so RSS reads one process while HWM reads that process and every descendant, publishing two
+// different populations side by side for the same gateway - a gateway that forks workers would have
+// its peak inflated relative to its idle by whatever its children weighed. Every reader deriving
+// from one declaration removes that class of bug rather than merely guarding against it.
 
 use serde::{Deserialize, Serialize};
 
@@ -263,7 +253,7 @@ pub enum LaunchDecl {
         /// feeds it to a deny-unknown-fields deserializer, so the harness's own documented override
         /// variables kill config load before the port binds. The binary is backgrounded, so the
         /// launch still returns success and the only symptom is "port not listening" on every
-        /// attempt of every column: thirty-six cells lost to a variable NAME, once already.
+        /// attempt of every column.
         ///
         /// `std::process::Command` inherits the parent environment, and an env block can only ADD, so
         /// without this the class is unrepresentable.
@@ -296,11 +286,10 @@ impl std::error::Error for ManifestLoadError {}
 /// Removal is not a convenience. One entrant's config loader claims every variable sharing its
 /// prefix and feeds it to a deny-unknown-fields deserializer, so the harness's own override
 /// variables kill config load before the port binds - and the process is backgrounded, so the launch
-/// reports success and the only symptom is a port that never listens. That cost thirty-six cells
-/// once. An env block that can only ADD cannot express it.
+/// reports success and the only symptom is a port that never listens. An env block that can only ADD
+/// cannot express it.
 ///
-/// Deliberately parsed, never executed: this file used to be shell, and the whole point of the
-/// rewrite is that nothing in the measurement path is.
+/// Deliberately parsed, never executed: nothing in the measurement path runs untrusted config.
 fn parse_env(raw: &str) -> (Vec<(String, String)>, Vec<String>) {
     let mut set = Vec::new();
     let mut unset = Vec::new();
@@ -403,9 +392,8 @@ impl std::fmt::Display for ManifestError {
 /// four times the threads it should have, contends with itself, and publishes a number that
 /// describes a configuration no operator would deploy.
 ///
-/// This was previously left to each gateway to remember in its own env block, and it drifted exactly
-/// as that arrangement always does: the two manifests that set it lost the setting entirely when
-/// they were ported, and nothing noticed because the gateway still booted.
+/// Set centrally rather than left to each gateway's own env block: a per-gateway setting is easy to
+/// drop silently, since a missing one still lets the gateway boot with nothing to signal the mistake.
 ///
 /// The list is deliberately runtime-standard names only. A gateway whose runtime has its own knob
 /// declares it in its own env with `{NCORE}`, because naming one entrant's variable in shared code
@@ -522,8 +510,8 @@ impl Manifest {
 
             // A DOUBLED BRACE IS A LITERAL ONE, either way round. Config formats use braces of their
             // own - one template is JSON and is nothing but braces, another documents a URL shape as
-            // `{api_base}` in a comment - so both halves have to be escapable. Handling only `{{`
-            // rendered `error_map: {}` as `{}}` and the gateway refused to boot on invalid YAML.
+            // `{api_base}` in a comment - so both halves have to be escapable: handling only `{{`
+            // would render a YAML `error_map: {}` as `{}}`, invalid YAML the gateway refuses to boot.
             if let Some(after) = tail.strip_prefix("{{") {
                 out.push('{');
                 rest = after;
@@ -587,8 +575,7 @@ impl Manifest {
     ///
     /// The container's `--name` is NOT taken from here. It comes from `runtime.identity()`, the same
     /// string the memory readers and the stop path use, so the thing that gets started, the thing
-    /// that gets measured and the thing that gets stopped cannot be three different containers. That
-    /// is the defect this module's header describes as having already corrupted published numbers.
+    /// that gets measured and the thing that gets stopped cannot be three different containers.
     ///
     /// `gw_dir` resolves the mounts: a manifest declares its config files relative to its own
     /// directory, because an absolute path in a manifest is a path that only works on one machine.
@@ -609,13 +596,9 @@ impl Manifest {
             xs.iter().map(|(k, v)| Ok((k.clone(), subst(v)?))).collect()
         };
 
-        // THE BUILD STEP, wired to the pre-launch seam that already exists.
-        //
-        // `build` was parsed, documented, and thrown away at `pre_launch: None`, and `PreLaunchStep`
-        // plus `run_pre_launch` were implemented, tested and reachable from nothing. Three entrants
-        // are built from source and declare `"build": "build.sh"`, so all three failed every field
-        // run with `never became ready`: the binary the launcher was told to run had never been
-        // produced, because nothing ever ran the thing that produces it.
+        // THE BUILD STEP, wired to the pre-launch seam that already exists: a declared `build`
+        // script must actually run before launch, or a source-built entrant's launcher is told to
+        // run a binary nothing ever produced, and it never becomes ready.
         //
         // Run ONCE, before the first attempt, which is where the shell put it and for the same
         // reason: it installs a toolchain and compiles, and that must not happen inside a
@@ -738,11 +721,9 @@ impl Manifest {
 
         // A BUILD SCRIPT THAT IS DECLARED BUT NOT THERE.
         //
-        // Three entrants declared "build": "build.sh" and no such file existed in any of their
-        // directories. validate reported 13 of 13 ready anyway, because it checked config templates
-        // and not this, so the gap surfaced on a bench box as `never became ready`: the launcher was
-        // pointed at a binary that nothing had built. Same class as the template check, one field
-        // over, and it costs a whole field run to learn on a box what this says in a second.
+        // `validate` checks config templates, not this: a declared build script that does not exist
+        // would point the launcher at a binary nothing had built, surfacing on a bench box as
+        // `never became ready` instead of here, in a second.
         if let Some(crate::manifest::LaunchDecl::Native { build: Some(script), .. }) = &self.launch {
             let path = gw_dir.join(script);
             if !path.is_file() {
@@ -994,9 +975,8 @@ mod tests {
     }
 
     // THE WHOLE POINT. RSS, HWM and stop all read ONE declaration, so they cannot name different
-    // things. In shell each was a separate hand-written hook, and three manifests did in fact drift:
-    // a single-pid reader for RSS beside a whole-tree reader for HWM, publishing two different
-    // populations for the same gateway.
+    // things: a reader spelled out separately per hook could drift, reading a single pid for RSS
+    // beside a whole tree for HWM and publishing two different populations for the same gateway.
     #[test]
     fn every_reader_derives_from_one_identity() {
         let m = docker_manifest();
@@ -1110,10 +1090,9 @@ mod tests {
     // sixteen core box while confined to four, contends with itself, and publishes a number that
     // describes a configuration nobody would deploy.
     //
-    // This used to be each gateway's job to remember in its own env, and it drifted exactly as that
-    // always does: both manifests that set it lost the setting when they were ported and nothing
-    // noticed, because the gateway still booted. It is the harness that decides the core count, so
-    // it is the harness that states it, identically, everywhere.
+    // It is the harness that decides the core count, so it is the harness that states it,
+    // identically, everywhere, rather than leaving it to each gateway's own env, where a dropped
+    // setting still lets the gateway boot with nothing to signal the mistake.
     #[test]
     fn every_launched_gateway_is_told_how_many_cores_it_was_pinned_to() {
         // Both launch kinds, because a native entrant is pinned with taskset rather than a cpuset
@@ -1164,12 +1143,12 @@ mod real_field_tests {
 
     /// Every manifest in the real field, read from the gateways' own directories.
     ///
-    /// DISCOVERED, not listed. A single file naming all thirteen is the hand-maintained roster
-    /// `lib/gateway_isolation_test.sh` exists to prevent, and it was invisible to that lint only
-    /// because the scan skips `.json`. Reading the directory means adding a gateway is dropping in a
+    /// DISCOVERED, not listed. A single file naming all thirteen would be the hand-maintained roster
+    /// `lib/gateway_isolation_test.sh` exists to prevent (that lint's scan skips `.json`, so such a
+    /// file would slip past it). Reading the directory means adding a gateway is dropping in a
     /// directory, and nothing else in the tree learns its name.
     ///
-    /// A schema that only represents an example I invented proves nothing: if the types cannot
+    /// A schema that only represents an invented example proves nothing: if the types cannot
     /// describe all thirteen entrants as they actually are, the schema is wrong and no amount of
     /// internal consistency would say so.
     fn field() -> BTreeMap<String, Manifest> {
@@ -1198,9 +1177,8 @@ mod real_field_tests {
         }
     }
 
-    /// The regression this schema exists to make impossible. Today all thirteen agree, because the
-    /// shell defect was found and fixed by hand; the point is that after this there is no second
-    /// place to spell the identity, so they cannot drift apart again.
+    /// A manifest's `runtime.identity()` is the ONE place its measured identity is spelled; no
+    /// second spelling exists to drift out of sync with it.
     #[test]
     fn no_manifest_can_name_two_different_things_to_measure() {
         for (name, m) in &field() {
@@ -1212,11 +1190,8 @@ mod real_field_tests {
         }
     }
 
-    /// THE THING THAT WAS MISSING: every container manifest can now produce a real invocation.
-    ///
-    /// `launch.rs` was complete and tested and had zero callers, because a `Manifest` carried no
-    /// launch data and nothing bridged the two. This walks the real corpus and builds the actual
-    /// docker command line for each one.
+    /// Every container manifest can produce a real invocation: this walks the real corpus and
+    /// builds the actual docker command line for each one.
     #[test]
     fn every_container_manifest_produces_a_launchable_invocation() {
         use std::time::Duration;
@@ -1230,7 +1205,7 @@ mod real_field_tests {
 
             let inv = crate::launch::build_invocation(&spec);
             // A container is started by the container runtime; a source-built entrant is started
-            // pinned, directly. Both are launchable, which is the thing that was missing.
+            // pinned, directly. Both must be launchable.
             let expected = if m.runtime.is_docker() { "docker" } else { "taskset" };
             assert_eq!(inv.program, expected, "{name}");
             if !m.runtime.is_docker() {
@@ -1339,9 +1314,8 @@ mod real_field_tests {
         }
     }
 
-    /// A doubled brace is a literal one, BOTH ways round. Handling only the opening half rendered a
-    /// YAML `error_map: {}` as `{}}`, and the gateway refused to boot on invalid YAML - found by
-    /// running it, not by reading it.
+    /// A doubled brace is a literal one, BOTH ways round: handling only the opening half breaks a
+    /// YAML `error_map: {}`, rendering it as `{}}`, which the gateway refuses to boot on.
     /// A VALIDATOR THAT ONLY EVER SAYS OK HAS NOT BEEN SHOWN TO WORK.
     ///
     /// All thirteen real entrants pass, which is the outcome that proves nothing on its own. Each

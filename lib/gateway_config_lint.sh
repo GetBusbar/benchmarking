@@ -8,14 +8,11 @@
 #      not go in the config. We do not turn features on and we do not turn them off. Whatever the
 #      gateway ships as its default is what gets measured."
 #
-# WHY THIS FILE EXISTS. The manifests had quietly re-accumulated settings nobody could still justify:
-# four outbound-telemetry suppressions carried as "run-mechanics for an isolated rig" (the rig is not
-# isolated - the boxes apt-get and pull images over the internet, so the phone-home succeeded and
-# there was never a hang to avoid), a Server-Timing header switched ON against its own default, an
-# auth chain added to a gateway that ships open, and a scatter of lines that only restated a default.
-# A line that restates a default is still a line we wrote, and it becomes silently WRONG the day
-# upstream changes that default. Every one of those was defensible in the commit that added it, which
-# is exactly why prose review does not hold the line and a lint has to.
+# WHY THIS FILE EXISTS. A manifest can silently accumulate settings nobody can still justify, including
+# lines that only restate a default. A line that restates a default is still a line we wrote, and it
+# becomes silently wrong the day upstream changes that default. Each such line is typically defensible
+# in the commit that added it, which is exactly why prose review does not hold this line and a lint has
+# to.
 #
 # The standard this enforces found a real memory bug: one gateway's default install has metrics on
 # with nothing draining them, so RSS grows with every request served. That measurement only exists
@@ -34,9 +31,9 @@
 #   ingress   3. expose an ingress path the 6x6 matrix exercises.
 #   bind      4. bind the port or the CPU pinning the harness requires.
 #
-# Every setting a manifest writes must be claimed by one of those four words, in that manifest's own
-# GW_CONFIG_WHY block. A setting with no claim is a lint failure. A claim that matches no setting is
-# ALSO a failure, so the block cannot rot into a list of things we used to set.
+# Every setting a manifest writes must be claimed by one of those four words, in that gateway's own
+# `why` file (gateways/<name>/why - shared with lib/gateway_deploy_lint.sh, which claims env vars,
+# headers and commands from the same file). A setting with no claim is a lint failure.
 #
 # THE FIELD IS DISCOVERED HERE TOO. This lint enumerates gateways/*/ at runtime and never carries a
 # gateway name - a lint with a hardcoded roster would be the defect lib/gateway_isolation_test.sh
@@ -64,22 +61,21 @@
 #   * shell builtins and keywords appearing as the first token of a line.
 #
 # The extractor errs toward FLAGGING: a shape it is unsure about is reported, and the fix is one line
-# in the manifest's own GW_CONFIG_WHY. It is not a parser for six config languages and does not need
+# in that gateway's own `why` file. It is not a parser for six config languages and does not need
 # to be - it needs to make an unjustified setting impossible to add quietly.
 #
 # ─────────────────────────────────────────────────────────────────────────────────────────────────
-# HOW A MANIFEST DECLARES ITS JUSTIFICATIONS
+# HOW A GATEWAY DECLARES ITS JUSTIFICATIONS - gateways/<name>/why:
 #
-#     GW_CONFIG_WHY="
 #     listen        bind      # the harness drives this port
 #     error_map     boot      # REQUIRED per provider, no serde default
 #     base_url      upstream
 #     mock-*        upstream  # trailing * is a prefix match
-#     "
 #
 # One `<key-or-prefix> <reason>` per line; `#` starts a comment. A trailing `*` is a prefix match and
 # needs at least three literal characters before it, so `*` alone cannot be used to wave the lint
-# through. Reasons are exactly the four words above.
+# through. Reasons are exactly the four words above. `why` is shared with gateway_deploy_lint.sh, so
+# it may also carry env/header/command claims that are not config-file keys - this lint ignores those.
 #
 # Run: bash lib/gateway_config_lint.sh   (no network, no docker; seconds)
 #      RED demo: add an untagged setting to any manifest heredoc and re-run; it must fail.
@@ -124,9 +120,8 @@ extract_settings() { # manifest-path
   }
   # heredoc bookkeeping, shared by both passes. The BODY of a heredoc is config bytes; the shell
   # around it is not. Both passes need this: a heredoc body is written at column 0, so without it the
-  # metadata pass mistakes every launch-env line for a top-level shell assignment and then excludes
-  # the whole env from the scan. That is exactly how one manifest came back reporting a single
-  # setting when it declares fourteen.
+  # metadata pass would mistake every launch-env line for a top-level shell assignment and exclude the
+  # whole env from the scan.
   function hd(state, l, tt,   mk) {
     if (state) { if (tt == HDMARK[0]) return 0; return 1 }
     if (match(l, /<<-?[ \t]*['"'"'"]?[A-Za-z_][A-Za-z0-9_]*['"'"'"]?/)) {
@@ -190,21 +185,14 @@ extract_settings() { # manifest-path
   }' "$1" "$1"
 }
 
-# ── read_why <manifest> -> one "<pattern>\t<reason>" per declared justification ───────────────────
-# Read TEXTUALLY, never by sourcing: sourcing a manifest runs its launch logic and disturbs the
-# environment, which is the same reason lib/gateways.sh reads its fields with grep.
-read_why() { # manifest-path
-  awk '
-  /^GW_CONFIG_WHY="/ { inw = 1; next }
-  inw && /^"/        { inw = 0; next }
-  inw {
-    line = $0
-    sub(/#.*$/, "", line)
-    n = split(line, F, /[ \t]+/)
-    pat = ""; why = ""
-    for (i = 1; i <= n; i++) if (F[i] != "") { if (pat == "") pat = F[i]; else if (why == "") why = F[i] }
-    if (pat != "") printf "%s\t%s\n", pat, why
-  }' "$1"
+# ── read_why <gateway-dir> -> one "<pattern>\t<reason>" per declared justification ─────────────────
+# Reads gateways/<name>/why, the same claims file lib/gateway_deploy_lint.sh's claims_of() reads.
+# `why` is a SUPERSET: it also carries env/header/command claims that are not this lint's domain.
+# That is fine here - this lint only ever asks "does some pattern in `why` cover this config key",
+# never "does every line in `why` belong to me".
+read_why() { # gateway-dir
+  [ -f "$1/why" ] || return 0
+  grep -vE '^[ \t]*(#|$)' "$1/why" | awk '{print $1"\t"$2}'
 }
 
 # ── matches <key> <pattern> ──────────────────────────────────────────────────────────────────────
@@ -218,19 +206,19 @@ matches() { # key pattern
 # ── check_manifest <gateway> <manifest-path> ─────────────────────────────────────────────────────
 # The whole rule for one manifest, so the self-test can run it against a fixture directory.
 check_manifest() { # gateway manifest-path
-  local g="$1" m="$2" keys why pat reason k line n claimed used bad
+  local g="$1" m="$2" dir keys why pat reason k line n claimed
+  dir="$(dirname "$m")"
   keys="$(extract_settings "$m" | cut -f1 | sort -u)"
-  why="$(read_why "$m")"
+  why="$(read_why "$dir")"
 
   if [ -z "$keys" ]; then
     # A manifest that writes no config at all (per-request header routing, an image that needs none)
-    # has nothing to justify - but it must not carry a stale block either.
-    [ -z "$why" ] || report "gateways/$g/gateway.sh" "declares GW_CONFIG_WHY but writes no settings" ""
+    # has nothing to justify here.
     return 0
   fi
 
   if [ -z "$why" ]; then
-    report "gateways/$g/gateway.sh" "writes $(printf '%s\n' "$keys" | grep -c .) settings but declares no GW_CONFIG_WHY block" ""
+    report "gateways/$g/why" "writes $(printf '%s\n' "$keys" | grep -c .) settings but gateways/$g/why does not exist or is empty" ""
     return 0
   fi
 
@@ -239,10 +227,10 @@ check_manifest() { # gateway manifest-path
     [ -n "$pat" ] || continue
     case " $REASONS " in
       *" $reason "*) ;;
-      *) report "gateways/$g/gateway.sh" "GW_CONFIG_WHY '$pat' claims reason '$reason', which is not one of: $REASONS" "$pat $reason" ;;
+      *) report "gateways/$g/why" "'$pat' claims reason '$reason', which is not one of: $REASONS" "$pat $reason" ;;
     esac
     case "$pat" in
-      *'*') [ "${#pat}" -ge 4 ] || report "gateways/$g/gateway.sh" "GW_CONFIG_WHY pattern '$pat' is too broad (a prefix needs at least three literal characters)" "$pat" ;;
+      *'*') [ "${#pat}" -ge 4 ] || report "gateways/$g/why" "pattern '$pat' is too broad (a prefix needs at least three literal characters)" "$pat" ;;
     esac
   done <<< "$why"
 
@@ -256,20 +244,14 @@ check_manifest() { # gateway manifest-path
     done <<< "$why"
     if [ "$claimed" = 0 ]; then
       line="$(extract_settings "$m" | awk -F'\t' -v K="$k" '$1==K {print $2": "$3; exit}')"
-      report "gateways/$g/gateway.sh" "setting '$k' has no necessity claim - add '$k <${REASONS// /|}>' to GW_CONFIG_WHY, or delete the setting" "$line"
+      report "gateways/$g/why" "setting '$k' has no necessity claim - add '$k <${REASONS// /|}>' to gateways/$g/why, or delete the setting" "$line"
     fi
   done <<< "$keys"
 
-  # every claim must match a setting (a block that outlives its settings is the rot this prevents)
-  while IFS=$'\t' read -r pat reason; do
-    [ -n "$pat" ] || continue
-    used=0
-    while IFS= read -r k; do
-      [ -n "$k" ] || continue
-      if matches "$k" "$pat"; then used=1; break; fi
-    done <<< "$keys"
-    [ "$used" = 1 ] || report "gateways/$g/gateway.sh" "GW_CONFIG_WHY claims '$pat' but the manifest sets no such thing (stale claim)" "$pat $reason"
-  done <<< "$why"
+  # NOTE: unlike this lint's previous behavior, a `why` entry matching no CONFIG-FILE setting is NOT
+  # flagged stale here. `why` is a SHARED claims file also read by lib/gateway_deploy_lint.sh for
+  # env/header/command claims (a domain this lint never scans) - a claim this lint can't match might
+  # legitimately belong there instead. Mirrors gateway_deploy_lint.sh's own NOTE on the same tradeoff.
 }
 
 # ═════════════════════════════════════════════════════════════════════════════════════════════════
@@ -335,15 +317,15 @@ selftest_acceptance() {
 #!/usr/bin/env bash
 GW_KIND=docker
 GW_PORT=9999
-GW_CONFIG_WHY="
-listen   bind
-"
 _fx_write() {
   cat > "$GW_DIR/config.gen.yaml" <<YAML
 listen: "0.0.0.0:$GW_PORT"
 emit_vanity_header: true
 YAML
 }
+FIXTURE
+  cat > "$FIXTURE_DIR/why" <<'FIXTURE'
+listen   bind
 FIXTURE
   # discovery must see the fixture at all
   gw_list "$B" | grep -qx "$name" || { echo "gateway_config_lint: FAIL - self-test: gw_list did not discover the planted fixture"; exit 1; }
@@ -352,19 +334,27 @@ FIXTURE
   after="$VIOLATIONS"
   [ "$after" -gt "$before" ] || { echo "gateway_config_lint: FAIL - self-test: the lint did NOT fail on an unjustified setting"; exit 1; }
   # GREEN: claim it, and the same manifest must come back clean.
-  sed -i.bak 's/^listen   bind$/listen             bind\nemit_vanity_header boot/' "$FIXTURE_DIR/gateway.sh"
+  cat > "$FIXTURE_DIR/why" <<'FIXTURE'
+listen             bind
+emit_vanity_header boot
+FIXTURE
   before="$VIOLATIONS"
   check_manifest "$name" "$FIXTURE_DIR/gateway.sh" >/dev/null
   [ "$VIOLATIONS" = "$before" ] || { echo "gateway_config_lint: FAIL - self-test: a fully claimed fixture still failed"; exit 1; }
-  # and a claim for a setting that is not there must fail as stale
-  sed -i.bak 's/^emit_vanity_header boot$/emit_vanity_header boot\nlong_gone_setting  boot/' "$FIXTURE_DIR/gateway.sh"
+  # `why` is shared with gateway_deploy_lint.sh's domain (env/headers/commands): a claim here that
+  # matches no config-file setting must NOT be flagged, since it may legitimately belong there instead.
+  cat > "$FIXTURE_DIR/why" <<'FIXTURE'
+listen             bind
+emit_vanity_header boot
+GW_SOME_ENV_VAR     boot
+FIXTURE
   before="$VIOLATIONS"
   check_manifest "$name" "$FIXTURE_DIR/gateway.sh" >/dev/null
-  [ "$VIOLATIONS" -gt "$before" ] || { echo "gateway_config_lint: FAIL - self-test: a stale GW_CONFIG_WHY claim was not caught"; exit 1; }
+  [ "$VIOLATIONS" = "$before" ] || { echo "gateway_config_lint: FAIL - self-test: a why claim outside this lint's domain (config-file settings) must not be flagged"; exit 1; }
   cleanup_fixture
   # the counter must not carry the self-test's deliberate violations into the real run
   FAILED=0; VIOLATIONS=0
-  echo "gateway_config_lint: acceptance ok - a planted gateway directory is discovered, fails unjustified, passes justified, and cannot carry a stale claim"
+  echo "gateway_config_lint: acceptance ok - a planted gateway directory is discovered, fails unjustified, passes justified, and does not false-flag an out-of-domain claim"
 }
 
 # ═════════════════════════════════════════════════════════════════════════════════════════════════
@@ -407,7 +397,7 @@ gateway_config_lint: FAIL
                     line whose value equals the application's own default: we did not need to write
                     it, and it becomes wrong the day upstream changes that default.
     2. CLAIM it.    If the gateway genuinely will not run without it, add
-                    `<key> <boot|upstream|ingress|bind>` to that manifest's GW_CONFIG_WHY, and put the
+                    `<key> <boot|upstream|ingress|bind>` to gateways/<name>/why, and put the
                     evidence in a comment next to the setting - the failure it prevents, not a
                     rationale for keeping it.
 

@@ -3,7 +3,7 @@
 # Copyright (C) 2026 Busbar Inc and contributors
 #
 # One-click, FAIR-BY-ISOLATION: launch ONE fresh Graviton box PER GATEWAY, all in parallel, each from
-# a fresh copy of THIS repo. Every gateway is measured on a pristine machine — no chance one gateway's
+# a fresh copy of THIS repo. Every gateway is measured on a pristine machine - no chance one gateway's
 # leftover page cache, disk, or docker state skews the next. Same total cost as a single sequential box
 # (N boxes for ~1/N the wall-clock), and much faster end to end.
 #
@@ -19,28 +19,21 @@ export AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-us-east-1}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"   # this repo (benchmarking) root
 
 # Per-invocation run id: every box THIS run launches is tagged run=$RUN_ID, and teardown filters on
-# it so a second (or concurrent) invocation NEVER terminates the first run's boxes / pulls the rug on
-# its results (audit H4). The global `kill` subcommand stays the cross-run cleanup.
+# it so a second (or concurrent) invocation never terminates the first run's boxes or pulls the rug on
+# its results. The global `kill` subcommand stays the cross-run cleanup.
 RUN_ID="${RUN_ID:-$(date +%Y%m%d-%H%M%S)-$$}"
 CREATED_KEY=0; CREATED_SG=0   # only delete the shared key/SG on exit if THIS invocation created them
 
-# Box self-terminate safety net (audit R5-#4). This `shutdown -h +N` is the LEAKED-BOX backstop - it
-# must fire only when the orchestrator has lost the box, NEVER during a legitimate run. Matrix is the
-# SOLE producer and raises its OWN wall-clock ceiling to 28800s = 480 min (matrix/run.sh:
-# HARNESS_SUITE_CEIL_S default 28800 when MATRIX_SWEEP=1). CRITICAL TIMING: `shutdown -h +N` is armed at
-# CLOUD-INIT, minutes BEFORE the matrix clock even starts (apt + docker + rsync + gateway build take
-# ~5-10 min first), so the box clock LEADS the matrix clock by that startup lead.
-#
-# THE TWO LIMITS ARE NOW EQUAL AT 480 MIN, AND THAT IS DELIBERATE. 8 h is the hard per-box budget; the
-# matrix ceiling is set to the same 8 h so it acts purely as a wedge backstop and never truncates a
-# healthy run (the slowest gateway measured ~6.1 h, leaving ~2 h of slack). Because the box clock leads,
-# the ORDER OF FIRING on a genuinely wedged gateway is: AWS terminates at 480 min box-time, a few
-# minutes BEFORE the matrix ceiling would have tripped at 480 min matrix-time. The consequence is
-# explicit and accepted: a wedged box forfeits its partial results to AWS termination rather than
-# exiting cleanly with a capped, partial grid. That trade is correct here, because a partial grid from a
-# wedged gateway is not a result we would want to publish anyway: the ceiling exists to reclaim the
-# box, not to salvage the run. Both are overridable; raise BOTH together, keeping the box net at or
-# above the matrix ceiling, if a gateway ever legitimately needs more than 8 h.
+# Box self-terminate safety net: `shutdown -h +N` is the leaked-box backstop, armed at cloud-init
+# (minutes before the matrix clock starts, since apt + docker + rsync + gateway build take ~5-10 min
+# first) so the box clock leads the matrix clock by that same startup lead. Matrix raises its own
+# wall-clock ceiling to the same 480 min (matrix/run.sh: HARNESS_SUITE_CEIL_S default 28800 when
+# MATRIX_SWEEP=1), deliberately equal to this box net: on a genuinely wedged gateway, AWS terminates the
+# box a few minutes before the matrix ceiling would have tripped, so a wedged box forfeits its partial
+# results to AWS termination rather than exiting cleanly with a capped grid, which is intended, since a
+# partial grid from a wedged run is not something worth publishing anyway. Both are overridable; raise
+# BOTH together, keeping the box net at or above the matrix ceiling, if a gateway legitimately needs
+# more than 8 h.
 BENCH_MAX_MIN="${BENCH_MAX_MIN:-480}"
 
 # WHAT THE BOXES MEASURE, resolved ONCE for the whole run.
@@ -56,19 +49,15 @@ BENCH_COMMIT="${BENCH_COMMIT:-$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-pars
 _REPO_NAME="$(basename "${BENCH_REPO%.git}")"
 
 # ── INCREMENTAL PER-GATEWAY PUBLISH (matrix-sole-source) ──────────────────────────────────────────
-# Each gateway's ENTIRE benchmark is now ONE atomic matrix run, and gateways publish INDEPENDENTLY (the
-# relaxed freshness guard in site/gen-data.mjs no longer hard-fails a board with mixed per-gateway
-# ages). So instead of the operator publishing everything by hand at the very end, we commit + push
-# EACH gateway's result the moment its box finishes cleanly (DONE, all suites pulled, promote guard
-# passed). The board then fills in gateway-by-gateway; the Pages deploy regenerates data.json from all
-# committed results/ on every push, so pushing one fresh gateway updates just its row.
-#
-# The SINGLE-GATEWAY path falls straight out of this: `run-on-ec2.sh busbar` re-runs only busbar, and
-# only busbar's result is committed + pushed (the "new busbar version → update just busbar" flow).
+# Each gateway's entire benchmark is one atomic matrix run, and gateways publish independently: we
+# commit + push each gateway's result the moment its box finishes cleanly (DONE, all suites pulled,
+# promote guard passed), rather than the operator publishing everything by hand at the end. The board
+# fills in gateway-by-gateway; the Pages deploy regenerates data.json from all committed results/ on
+# every push. `run-on-ec2.sh busbar` re-runs and publishes only busbar, following the same path.
 #
 # PUBLISH gates the auto-push. Default ON for the field run; set PUBLISH=0 for a local/dry run so a
-# development run never pushes. When off, results are still pulled + committed-nothing (left in the
-# working tree) exactly as before — the operator can inspect and publish by hand.
+# development run never pushes. When off, results are still pulled and left uncommitted in the working
+# tree for the operator to inspect and publish by hand.
 PUBLISH="${PUBLISH:-1}"
 # Branch to push results to (the Pages deploy watches this). Overridable for a test branch.
 PUBLISH_BRANCH="${PUBLISH_BRANCH:-$(git -C "$HERE" rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)}"
@@ -76,24 +65,27 @@ PUBLISH_REMOTE="${PUBLISH_REMOTE:-origin}"
 # Serialize all git operations across the parallel per-gateway boxes: commit + push touch the shared
 # index/refs, so two boxes finishing at once would race (one's `git add` sees the other's half-staged
 # tree, or two concurrent pushes collide). A single lock dir makes publish strictly one-at-a-time.
-PUBLISH_LOCK="${TMPDIR:-/tmp}/gateway-bench-publish-${RUN_ID}.lock"
+#
+# Keyed on the checkout path ($HERE), not on RUN_ID: two invocations against the same working tree
+# (e.g. a field run still finishing while an operator re-runs one gateway) must contend for the SAME
+# lock, since they would otherwise `git add`/`git commit`/`git rebase`/`git push` against the same
+# index and HEAD concurrently.
+PUBLISH_LOCK="${TMPDIR:-/tmp}/gateway-bench-publish-$(printf '%s' "$HERE" | tr -c 'A-Za-z0-9' '_').lock"
 
-# push_with_rebase <tag> <log_fn> — fetch/rebase-then-push, retried in a bounded loop (audit HIGH-5).
-# The old publish path pushed the box's stale local HEAD with NO fetch/rebase, so with 13 boxes plus the
-# render-charts.yml bot pushing to the same branch, the remote ref moves constantly and every push after
-# the first is rejected non-fast-forward — that gateway then strands as an unpushed local commit. Here we
-# fetch the remote tip and rebase our local commit(s) onto it before each push, retrying up to 5 times
-# (re-fetch + re-rebase each pass) to survive a ref that moves again between our fetch and our push.
-# MUST be called while holding the publish lock (callers already do). Prints via $2, returns 0 on a
-# successful push, 1 if all attempts failed (commit stays local — logged loudly, never stranded silently).
+# push_with_rebase <tag> <log_fn>: fetch/rebase-then-push, retried in a bounded loop. With many boxes
+# plus the render-charts.yml bot pushing to the same branch, the remote ref moves constantly, so we fetch
+# the remote tip and rebase our local commit(s) onto it before each push, retrying up to 5 times (re-fetch
+# and re-rebase each pass) to survive a ref that moves again between our fetch and our push. MUST be
+# called while holding the publish lock (callers already do). Prints via $2, returns 0 on a successful
+# push, 1 if all attempts failed (commit stays local, logged loudly, never stranded silently).
 # Conflict safety: each gateway commits only its OWN result paths, so a rebase rarely conflicts; the one
 # realistic overlap is a bot chart commit touching results/*.png. We rebase with -X theirs so the rebase
-# can NEVER halt mid-way leaving a detached, conflicted, un-pushable state; a genuine conflict is logged
-# loudly rather than stranding the publish. NIT-R2-1: note the direction — during a rebase "ours" is the
-# upstream being replayed ONTO and "theirs" is the local commit being replayed, so `-X theirs` keeps OUR
-# freshly-committed side on overlap. That is the desired outcome for per-gateway result JSON (this run's
-# fresh result wins). The one cost: an overlapping bot-regenerated results/*.png keeps our stale local PNG
-# rather than the bot's newer one — harmless because charts are regenerated field-wide in the final sweep.
+# can never halt mid-way leaving a detached, conflicted, un-pushable state; a genuine conflict is logged
+# loudly rather than stranding the publish. During a rebase, "ours" is the upstream being replayed onto
+# and "theirs" is the local commit being replayed, so `-X theirs` keeps our freshly-committed side on
+# overlap, the desired outcome for per-gateway result JSON (this run's fresh result wins). The one cost:
+# an overlapping bot-regenerated results/*.png keeps our stale local PNG rather than the bot's newer one,
+# harmless because charts are regenerated field-wide in the final sweep.
 push_with_rebase() {
   local _tag="$1" _log="$2" _attempt=0 _max=5
   while [ "$_attempt" -lt "$_max" ]; do
@@ -101,58 +93,49 @@ push_with_rebase() {
     # Pull the remote tip in and replay our local commit(s) on top. Non-interactive; -X theirs so an
     # overlapping bot chart commit never aborts the rebase.
     if ! git -C "$HERE" fetch "$PUBLISH_REMOTE" "$PUBLISH_BRANCH" >/dev/null 2>&1; then
-      "$_log" "$_tag publish: fetch $PUBLISH_REMOTE/$PUBLISH_BRANCH FAILED (attempt $_attempt/$_max) — retrying"
+      "$_log" "$_tag publish: fetch $PUBLISH_REMOTE/$PUBLISH_BRANCH FAILED (attempt $_attempt/$_max) - retrying"
       sleep 3; continue
     fi
-    # HIGH-3 / MED-4: `git rebase` REFUSES to start with a dirty tracked file ("cannot rebase: You have
-    # unstaged changes."). All bench_gateway jobs share ONE repo at $HERE, and the incremental pull loops
-    # `mv -f` a fresh results/matrix/<other>.json over a previously-committed TRACKED file OUTSIDE the
-    # publish lock — so while THIS box holds the lock and rebases, a PEER box can leave an unstaged tracked
-    # change and abort our rebase. The old code caught that non-zero, MISCLASSIFIED it as a merge CONFLICT,
-    # `rebase --abort`ed and retried 5× — but a peer keeps a file dirty throughout, so all 5 fail and the
-    # commit strands (then MED-4's final sweep can't recover it either). Fix: `-c rebase.autostash=true`
-    # stashes the peer's unstaged change before the rebase and pops it after, so an unstaged tracked file
-    # no longer aborts the rebase. (rebase.autostash is unset globally + locally on the rig; set it per
-    # invocation so we do not depend on repo config.) The stash/pop restores the peer's incremental pull.
+    # `git rebase` refuses to start with a dirty tracked file ("cannot rebase: You have unstaged
+    # changes."). All bench_gateway jobs share ONE repo at $HERE, and the incremental pull loops
+    # `mv -f` a fresh results/matrix/<other>.json over a previously-committed tracked file outside the
+    # publish lock, so while this box holds the lock and rebases, a peer box can leave an unstaged
+    # tracked change that would otherwise abort our rebase. `-c rebase.autostash=true` stashes the
+    # peer's unstaged change before the rebase and pops it after (autostash is unset globally/locally on
+    # the rig, so set it per invocation rather than depend on repo config).
     if ! _rebase_err="$(git -C "$HERE" -c rebase.autostash=true rebase -X theirs "$PUBLISH_REMOTE/$PUBLISH_BRANCH" 2>&1)"; then
-      # Distinguish a GENUINE merge conflict (a rebase is left in progress — .git/rebase-merge exists)
+      # Distinguish a GENUINE merge conflict (a rebase is left in progress - .git/rebase-merge exists)
       # from a start-time refusal. With autostash on, the "unstaged changes" refusal no longer happens,
-      # but if a stash POP fails after a clean rebase the tree can carry a conflicted stash — either way,
+      # but if a stash POP fails after a clean rebase the tree can carry a conflicted stash - either way,
       # if a rebase is mid-flight abort it to a clean pushable HEAD; else it never started, so nothing to
       # abort. Both retry (a transient peer-dirty state clears on the next pass).
       local _gitdir; _gitdir="$(git -C "$HERE" rev-parse --git-dir 2>/dev/null)"
       if [ -d "$HERE/$_gitdir/rebase-merge" ] || [ -d "$HERE/$_gitdir/rebase-apply" ] || [ -d "$_gitdir/rebase-merge" ] || [ -d "$_gitdir/rebase-apply" ]; then
         git -C "$HERE" rebase --abort >/dev/null 2>&1 || true
-        "$_log" "$_tag publish: rebase onto $PUBLISH_REMOTE/$PUBLISH_BRANCH CONFLICTED (attempt $_attempt/$_max) — aborted rebase, retrying"
+        "$_log" "$_tag publish: rebase onto $PUBLISH_REMOTE/$PUBLISH_BRANCH CONFLICTED (attempt $_attempt/$_max) - aborted rebase, retrying"
       else
-        "$_log" "$_tag publish: rebase could not start (attempt $_attempt/$_max; likely a peer's unstaged results write — autostash should absorb it): ${_rebase_err%%$'\n'*} — retrying"
+        "$_log" "$_tag publish: rebase could not start (attempt $_attempt/$_max; likely a peer's unstaged results write - autostash should absorb it): ${_rebase_err%%$'\n'*} - retrying"
       fi
       sleep 3; continue
     fi
     if git -C "$HERE" push "$PUBLISH_REMOTE" "HEAD:$PUBLISH_BRANCH" >/dev/null 2>&1; then
       return 0
     fi
-    # Push rejected — the ref moved again between our fetch and our push. Loop to re-fetch + re-rebase.
-    "$_log" "$_tag publish: push rejected (ref moved; attempt $_attempt/$_max) — re-fetch + rebase + retry"
+    # Push rejected - the ref moved again between our fetch and our push. Loop to re-fetch + re-rebase.
+    "$_log" "$_tag publish: push rejected (ref moved; attempt $_attempt/$_max) - re-fetch + rebase + retry"
     sleep 3
   done
   "$_log" "$_tag publish: push to $PUBLISH_REMOTE/$PUBLISH_BRANCH FAILED after $_max attempts (commit is local; retry by hand or re-run)"
   return 1
 }
 
-# ── serialize the publish critical section (audit R3-M1) ──────────────────────────────────────────
-# The Darwin orchestrator has NO util-linux `flock`, so the mkdir spin-lock is the LIVE publish path.
-# The old spin-lock had two data-integrity bugs (6 finders): (a) on the 600s timeout it `break`d and
-# fell THROUGH into the critical section with NO lock held — parallel boxes then committed/pushed the
-# shared index simultaneously; and (b) a timed-out waiter's UNCONDITIONAL EXIT-trap `rmdir` deleted the
-# lock dir the REAL holder still owned, so a third box could grab it and race the holder.
-#
-# Fixes: capture whether WE created the dir; on timeout ABORT (return non-zero — the caller counts it as
-# a publish issue) rather than proceeding unlocked; and only arm the cleanup rmdir when THIS publish owns
-# the lock, verified by a UNIQUE per-publish TOKEN we wrote into the lockdir (M1/R4-LOW-2: the old `$$`
-# token collided across all `&` bench_gateway subshells of one orchestrator, so the ownership check was a
-# no-op — the token is now RUN_ID:tag:BASHPID:random, distinct per publish) — never blindly rmdir another
-# holder's lock. flock stays the fast path where available (Linux boxes / any host with util-linux).
+# ── serialize the publish critical section ──────────────────────────────────────────────────────
+# The Darwin orchestrator has no util-linux `flock`, so the mkdir spin-lock is the live publish path on
+# it. On a timeout, abort (return non-zero, counted as a publish issue) rather than proceeding unlocked.
+# The cleanup rmdir only fires when this publish owns the lock, verified by a unique per-publish token
+# written into the lockdir (RUN_ID:tag:BASHPID:random, distinct per publish subshell), so one holder can
+# never rmdir a peer's lock out from under it. flock stays the fast path where available (Linux boxes /
+# any host with util-linux).
 #
 # Usage:  publish_lock_acquire "<tag>" <log_fn>  || return 1   # (subshell: `exit 1`)
 #         ... critical section ...
@@ -162,16 +145,15 @@ publish_lock_acquire() {
   local _tag="$1" _log="$2"
   PUBLISH_LOCK_FD=""; PUBLISH_LOCK_OWNED=0; PUBLISH_LOCK_TOKEN=""
   if command -v flock >/dev/null 2>&1; then
-    # LOW-4: bound the flock wait too (matching the mkdir path's 600s ceiling). Without -w a hung lock
-    # holder on a Linux orchestrator blocks every peer INDEFINITELY, unlike the Darwin mkdir spin-lock
-    # which aborts at 600s. On timeout, ABORT this publish (return 1 — counted as an issue) rather than
-    # blocking forever; close the fd so no half-open lock leaks.
+    # Bound the flock wait (matching the mkdir path's 600s ceiling): without -w a hung lock holder would
+    # block every peer indefinitely. On timeout, abort this publish (return 1, counted as an issue)
+    # rather than blocking forever; close the fd so no half-open lock leaks.
     exec 9>"$PUBLISH_LOCK"
     if flock -w 600 9; then
       PUBLISH_LOCK_FD=9
       return 0
     fi
-    "$_log" "$_tag publish: could NOT acquire the publish flock after 600s (a peer box is holding it) — ABORTING this publish rather than blocking forever (retry by hand or re-run)"
+    "$_log" "$_tag publish: could NOT acquire the publish flock after 600s (a peer box is holding it), ABORTING this publish rather than blocking forever (retry by hand or re-run)"
     eval "exec 9>&-" 2>/dev/null || true
     return 1
   fi
@@ -180,16 +162,15 @@ publish_lock_acquire() {
   until mkdir "${PUBLISH_LOCK}.d" 2>/dev/null; do
     sleep 2; _spun=$((_spun+2))
     if [ "$_spun" -ge 600 ]; then
-      "$_log" "$_tag publish: could NOT acquire the publish lock after ${_spun}s (a peer box is holding it) — ABORTING this publish rather than pushing UNLOCKED (retry by hand or re-run)"
+      "$_log" "$_tag publish: could NOT acquire the publish lock after ${_spun}s (a peer box is holding it), ABORTING this publish rather than pushing UNLOCKED (retry by hand or re-run)"
       return 1
     fi
   done
-  # M1 / R4-LOW-2 (round-3 M1 shipped NON-FUNCTIONAL): the old owner token was `$$`, which is IDENTICAL
-  # across every `&` background subshell of one orchestrator (only $BASHPID differs) — so "release only
-  # if WE own the lock" never distinguished holders and provided zero cross-box protection. Write a
-  # UNIQUE per-publish token instead: RUN_ID + gateway tag + $BASHPID + a random id, distinct for every
-  # bench_gateway subshell of the same parent. release only rmdir's when the token in the lockdir still
-  # matches ours, so a stale/handed-off dir is never deleted out from under a real holder.
+  # The owner token must be unique per publish, not just per process: `$$` is identical across every `&`
+  # background subshell of one orchestrator (only $BASHPID differs), so it cannot distinguish holders on
+  # its own. Token is RUN_ID + gateway tag + $BASHPID + a random id, distinct for every bench_gateway
+  # subshell of the same parent. Release only rmdir's when the token in the lockdir still matches ours,
+  # so a stale/handed-off dir is never deleted out from under a real holder.
   local _rand=""
   _rand="$(od -An -N8 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"
   [ -n "$_rand" ] || _rand="${RANDOM}${RANDOM}"
@@ -199,9 +180,9 @@ publish_lock_acquire() {
   return 0
 }
 
-# Release ONLY a lock this process owns. For the mkdir path, re-verify the UNIQUE token inside the lockdir
-# still matches the one THIS publish wrote before rmdir'ing — so a stale/handed-off dir (a peer that
-# re-acquired after we timed out and lost ownership) is never deleted out from under its real holder.
+# Release only a lock this process owns. For the mkdir path, re-verify the unique token inside the
+# lockdir still matches the one this publish wrote before rmdir'ing, so a stale/handed-off dir (a peer
+# that re-acquired after we timed out and lost ownership) is never deleted out from under its real holder.
 publish_lock_release() {
   if [ -n "${PUBLISH_LOCK_FD:-}" ]; then
     flock -u "$PUBLISH_LOCK_FD" 2>/dev/null || true
@@ -219,10 +200,10 @@ publish_lock_release() {
   fi
 }
 
-# `run-on-ec2.sh kill` — terminate EVERY gateway-bench box right now, reliably. Uses xargs so the
-# instance IDs are split into separate args (piping `--output text` straight into `--instance-ids`
-# passes one tab-joined blob → InvalidInstanceID.Malformed → a silent no-op, which is exactly how 48
-# boxes leaked on 2026-07-24). Run this if a run is ever interrupted and you want a guaranteed cleanup.
+# `run-on-ec2.sh kill` - terminate every gateway-bench box right now, reliably. Uses xargs so the
+# instance IDs are split into separate args: piping `--output text` straight into `--instance-ids`
+# passes one tab-joined blob, which AWS rejects as InvalidInstanceID.Malformed and silently no-ops. Run
+# this if a run is ever interrupted and you want a guaranteed cleanup.
 if [[ "${1:-}" == "kill" || "${1:-}" == "--kill" ]]; then
   echo "terminating all gateway-bench instances in $AWS_DEFAULT_REGION ..."
   aws ec2 describe-instances --filters "Name=tag:purpose,Values=gateway-bench" \
@@ -232,7 +213,7 @@ if [[ "${1:-}" == "kill" || "${1:-}" == "--kill" ]]; then
     | xargs -r -n 25 aws ec2 terminate-instances --output text --instance-ids >/dev/null 2>&1
   left=$(aws ec2 describe-instances --filters "Name=tag:purpose,Values=gateway-bench" \
     "Name=instance-state-name,Values=running,pending" --query 'length(Reservations[].Instances[])' --output text 2>/dev/null)
-  echo "done — running/pending remaining: ${left:-?}"
+  echo "done - running/pending remaining: ${left:-?}"
   exit 0
 fi
 
@@ -283,7 +264,7 @@ SSHOPT="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTi
 log(){ echo "[$(date +%H:%M:%S)] $*"; }
 
 # Default field: every gateway with a manifest under gateways/ (discovered from disk, alphabetical;
-# same source as run-all.sh — add/remove a dir and both follow). Envoy AI Gateway is absent (k8s-native).
+# same source as run-all.sh - add/remove a dir and both follow). Envoy AI Gateway is absent (k8s-native).
 DEFAULT_GATEWAYS=()
 for d in "$HERE"/gateways/*/gateway.sh; do DEFAULT_GATEWAYS+=("$(basename "$(dirname "$d")")"); done
 if [[ $# -gt 0 ]]; then GATEWAYS=("$@"); else GATEWAYS=("${DEFAULT_GATEWAYS[@]}"); fi
@@ -303,7 +284,7 @@ if [[ ! -s "$KEYFILE" ]] || ! aws ec2 describe-key-pairs --key-names "$KEYNAME" 
   aws ec2 delete-key-pair --key-name "$KEYNAME" >/dev/null 2>&1 || true
   rm -f "$KEYFILE"
   # Create the private key under a 077 umask so it is 600 from birth - no sub-millisecond window at the
-  # default umask between create and chmod (audit R5-NIT). The chmod stays as a belt-and-braces backstop.
+  # default umask between create and chmod. The chmod stays as a belt-and-braces backstop.
   ( umask 077; aws ec2 create-key-pair --key-name "$KEYNAME" --query KeyMaterial --output text > "$KEYFILE" ); chmod 600 "$KEYFILE"
   CREATED_KEY=1
 fi
@@ -315,7 +296,7 @@ fi
 # Fetch our public IP for the SSH ingress rule. A transient checkip hiccup that returns an empty/
 # malformed MYIP would make `--cidr "/32"` get rejected by AWS and swallowed by `|| true`; on a
 # freshly-created SG that leaves NO port-22 rule, so ssh to every box times out and the whole run
-# records a field-wide false "did not serve" while burning N boxes (audit R2-M2). Retry, then fail
+# records a field-wide false "did not serve" while burning N boxes. Retry, then fail
 # loudly if we still don't have a valid IPv4 - do NOT authorize a malformed CIDR.
 MYIP=""
 for _try in 1 2 3; do
@@ -327,7 +308,7 @@ done
 # Add the port-22 ingress for THIS IP idempotently. On a REUSED SG (CREATED_SG=0, the norm after any
 # SIGKILL'd run) each run from a new IP would otherwise accrete a /32 rule that is never revoked; at
 # the AWS default 60-rule cap `authorize` starts failing and, if that failure is swallowed, the
-# current IP ends up with NO SSH ingress and every ssh/rsync times out (audit R4-LOW-6). So: treat the
+# current IP ends up with NO SSH ingress and every ssh/rsync times out. So: treat the
 # EXPECTED "rule already present" (InvalidPermission.Duplicate) as success, but a GENUINE failure
 # (anything else - malformed CIDR, RulesPerSecurityGroupLimitExceeded at the cap) as FATAL rather than
 # a soft note, since a box fleet launched into an SG with no reachable SSH just burns cost.
@@ -341,10 +322,10 @@ _sg_err=$(aws ec2 authorize-security-group-ingress --group-id "$SG" --protocol t
        esac; }
 
 # TIDINESS + COST: on ANY exit (normal, error, Ctrl-C, SIGTERM) terminate ONLY the boxes THIS run
-# launched — filtered by tag:run=$RUN_ID, NOT the shared purpose=gateway-bench tag — so a second or
+# launched - filtered by tag:run=$RUN_ID, NOT the shared purpose=gateway-bench tag - so a second or
 # concurrent invocation never terminates another run's still-live boxes before their results are
-# pulled (audit H4). (SIGKILL can't be trapped; the boxes' own `shutdown -h` timer is the backstop.)
-# IDs are split via xargs — piping --output text straight into --instance-ids passes a tab-joined
+# pulled. (SIGKILL can't be trapped; the boxes' own `shutdown -h` timer is the backstop.)
+# IDs are split via xargs - piping --output text straight into --instance-ids passes a tab-joined
 # blob that no-ops. The shared keypair/SG are deleted only if THIS invocation created them (otherwise
 # a concurrent run's ssh/rsync would break with "Permission denied (publickey)"); `run-on-ec2.sh kill`
 # stays the global cleanup for the shared key/SG.
@@ -354,8 +335,8 @@ teardown() {
     | tr '\t' '\n' | grep -E '^i-' | xargs -r -n25 aws ec2 terminate-instances --output text --instance-ids >/dev/null 2>&1
   if [[ "$CREATED_KEY" == 1 ]]; then aws ec2 delete-key-pair --key-name "$KEYNAME" >/dev/null 2>&1 || true; rm -f "$KEYFILE"; fi
   if [[ "$CREATED_SG" == 1 ]]; then
-    # LOW-5: the just-terminated instances are `shutting-down`, not `running/pending`, but they STILL hold
-    # ENI associations to this SG for a short window — so an IMMEDIATE delete-security-group fails with
+    # The just-terminated instances are `shutting-down`, not `running/pending`, but they STILL hold
+    # ENI associations to this SG for a short window - so an IMMEDIATE delete-security-group fails with
     # DependencyViolation (swallowed by `|| true`) and the SG persists (a first-run-only cost leak). Wait
     # for the instances THIS run launched to reach `terminated` (ENIs detached) before deleting the SG.
     # Best-effort + time-bounded so teardown never hangs; the SG is shared/reused so a leaked one is minor.
@@ -364,7 +345,7 @@ teardown() {
       --query 'Reservations[].Instances[].InstanceId' --output text 2>/dev/null | tr '\t' '\n' | grep -E '^i-' | tr '\n' ' ')
     if [[ -n "${_tids// }" ]]; then
       # aws ec2 wait has its own ~600s ceiling; wrap in a timeout where available (Linux) so a wedged wait
-      # can't hang teardown. macOS has no `timeout` — fall back to the bare wait (its own ceiling applies).
+      # can't hang teardown. macOS has no `timeout` - fall back to the bare wait (its own ceiling applies).
       if command -v timeout >/dev/null 2>&1; then
         timeout 300 aws ec2 wait instance-terminated --instance-ids $_tids >/dev/null 2>&1 || true
       else
@@ -389,12 +370,12 @@ mkdir -p "$HERE"/results/{perf,memory,stream,xlate,governed,matrix,snapshots}
 # failure is logged loudly and returns non-zero (counted as a run issue) but never aborts other boxes.
 publish_gateway() { # gw glog_echo_fn
   local gw="$1"
-  [[ "$PUBLISH" == "1" ]] || { echo "[$gw] PUBLISH=0 — not committing/pushing (result left in the working tree)"; return 0; }
+  [[ "$PUBLISH" == "1" ]] || { echo "[$gw] PUBLISH=0 - not committing/pushing (result left in the working tree)"; return 0; }
   # Serialize: only one box commits/pushes at a time. flock on a lock fd; fall back to a mkdir spin-lock
   # on hosts without util-linux flock (macOS orchestrator). The subshell holds the lock for its body.
   (
     # Acquire the publish lock (flock fast-path, else PID-owned mkdir spin-lock). On timeout ABORT this
-    # publish (exit 1 — counted as an issue) rather than pushing UNLOCKED (audit R3-M1). The release trap
+    # publish (exit 1 - counted as an issue) rather than pushing UNLOCKED. The release trap
     # only removes a lock THIS subshell owns.
     trap 'publish_lock_release' EXIT
     publish_lock_acquire "[$gw]" echo || exit 1
@@ -402,34 +383,32 @@ publish_gateway() { # gw glog_echo_fn
     #   - its per-suite result JSONs (results/<suite>/<gw>.json)
     #   - its append-only history line (results/history/<gw>.jsonl)
     #   - its OOTB config sidecar (results/config/<gw>.txt)
-    #   - any per-gateway chart the local regen produced for it (results/*<gw>*.png) — usually charts
+    #   - any per-gateway chart the local regen produced for it (results/*<gw>*.png) - usually charts
     #     are regenerated field-wide at the very end, but staging a per-gw one here is harmless.
     local -a paths=()
     local f
     for f in "$HERE"/results/*/"$gw".json "$HERE"/results/history/"$gw".jsonl "$HERE"/results/config/"$gw".txt; do
       [ -e "$f" ] && paths+=("$f")
     done
-    # SAME BUG CLASS AS THE CONFIG SIDECAR (see pull_config's note below): the snapshot artifact is
-    # NOT named <gw>.json — matrix/run.sh writes results/snapshots/result_<gw>_<measured_at>.json —
-    # so the `results/*/<gw>.json` glob above never matched it and task #65's whole snapshot path was
-    # dead in the field: nothing was staged, nothing was committed, and gen-data's newestSnapshot()
-    # always returned null. Stage the per-gateway snapshots by their REAL filename shape.
+    # The snapshot artifact is not named <gw>.json (matrix/run.sh writes
+    # results/snapshots/result_<gw>_<measured_at>.json), so the `results/*/<gw>.json` glob above never
+    # matches it; stage the per-gateway snapshots separately by their real filename shape.
     for f in "$HERE"/results/snapshots/result_"$gw"_*.json; do [ -e "$f" ] && paths+=("$f"); done
     for f in "$HERE"/results/*"$gw"*.png; do [ -e "$f" ] && paths+=("$f"); done
     if [ "${#paths[@]}" -eq 0 ]; then echo "[$gw] publish: no result files to commit (nothing pulled?)"; exit 0; fi
-    # Do NOT swallow a staging failure (audit R3-M2): a failed `git add` (index.lock held, disk full,
+    # Do NOT swallow a staging failure: a failed `git add` (index.lock held, disk full,
     # perms) would otherwise leave an EMPTY stage, `diff --cached --quiet` would "skip commit", the
     # unchanged HEAD would push (trivially succeeds), and the gateway's row would silently NOT update
     # while the publish reported success. On a stage failure, log loudly and exit non-zero so the box's
     # return code counts it as a real publish issue.
     if ! git -C "$HERE" add -- "${paths[@]}"; then
-      echo "[$gw] publish: git add FAILED (result staged nothing; NOT pushing an empty change) — aborting this publish"
+      echo "[$gw] publish: git add FAILED (result staged nothing; NOT pushing an empty change) - aborting this publish"
       exit 1
     fi
     # Nothing actually changed vs HEAD (identical re-run) → skip the empty commit, still try a push in
     # case a prior push failed and left commits unpushed.
     if git -C "$HERE" diff --cached --quiet; then
-      echo "[$gw] publish: no content change vs HEAD — skipping commit"
+      echo "[$gw] publish: no content change vs HEAD - skipping commit"
     else
       git -C "$HERE" commit -q -m "bench($gw): publish matrix run result
 
@@ -438,45 +417,35 @@ its result so the board updates just this row (matrix-sole-source)." \
         || { echo "[$gw] publish: git commit FAILED"; exit 1; }
       echo "[$gw] committed $gw's result"
     fi
-    # Fetch/rebase-then-push in a bounded retry loop (audit HIGH-5) — 13 boxes + the render-charts bot
-    # move the remote ref constantly, so a bare push of our stale HEAD is rejected non-fast-forward and
-    # strands the gateway. Still inside the flock so the whole fetch→rebase→push is serialized across boxes.
-    # COMMITTED, NOT PUSHED. Nothing reaches the board until the whole run has shut down cleanly.
+    # Multiple boxes plus the render-charts bot move the remote ref constantly, so a bare push of our
+    # stale HEAD is rejected non-fast-forward; fetch/rebase-then-push in a bounded retry loop (still
+    # inside the flock so the whole fetch-rebase-push is serialized across boxes).
     #
-    # This used to push as each box finished, so a run killed halfway left the gateways that happened
-    # to finish first live on the public board while the rest were missing. That happened twice in
-    # one day, and both times the rows that went live were the ones a harness defect had produced:
-    # thirty-six declined cells apiece, published as a capability claim about somebody's product.
-    #
-    # The commit still happens here, per gateway, so a later crash cannot lose a measurement that was
-    # already pulled. Only the push waits, and the final sweep at the end of the run does it once.
+    # Committed here, but NOT pushed: the commit happens per gateway so a later crash cannot lose a
+    # measurement that was already pulled, but nothing reaches the board until the whole run has shut
+    # down cleanly, so a run killed halfway never leaves a partial set of gateways live while the rest
+    # are missing. The final sweep at the end of the run does the push once.
     echo "[$gw] committed locally; nothing is published until the run finishes cleanly"
   )
 }
 
 # ═════════════════════════════════════════════════════════════════════════════════════════════════
-# BOX QUALIFICATION — "new box and test if that happens before it ever runs in full".
+# BOX QUALIFICATION: measure a new box before trusting it with a multi-hour run, and replace it if it
+# fails. A bad box's absolute floor can sit inside the healthy population's range even while its own
+# drift and peak throughput are badly off, so no static threshold on the absolute numbers alone can
+# catch it; qualification instead compares the box against its own prior-run baseline.
+#   stage 1  before the gateway is built or launched: the no-gateway floor probe (tens of seconds).
+#   stage 2  after the gateway boots, before the 6x6: replay this gateway's own recorded peak cell.
+# The measurement half runs on the box (matrix/qualify-box.sh); the verdict is decided here, because
+# this is where the per-gateway baseline history lives (results/snapshots/) and because a suspect box
+# must never be the thing that clears itself.
 #
-# THE INCIDENT. On 2026-07-25 one box was contaminated. The 6x6 ran to completion on it,
-# for hours, and the result was published as a GATEWAY REGRESSION. It was not: the rig's own no-gateway
-# floor on that box (direct_c1_p99_us — the loadgen hitting the mock with no gateway in the path) had
-# moved +5.4% against its own prior run while the nine healthy boxes moved -2.6%..+3.8%, and its peak
-# throughput had collapsed 86%. Crucially its ABSOLUTE floor, 77-81us, sat INSIDE the healthy
-# population's 73-82us — so no static threshold could have caught it, and none did.
-#
-# THE FIX, HERE: measure the box BEFORE trusting it with a multi-hour run, and REPLACE it if it fails.
-#   stage 1  BEFORE the gateway is built or launched: the no-gateway floor probe (tens of seconds).
-#   stage 2  after the gateway boots, BEFORE the 6x6: replay this gateway's own recorded peak cell.
-# The measurement half runs on the box (matrix/qualify-box.sh); the VERDICT is decided here, because
-# this is where the per-gateway baseline history lives (results/snapshots/, the same store the ebd1c07
-# instrument provenance uses) and because a suspect box must never be the thing that clears itself.
-#
-# On failure the box is terminated and a REPLACEMENT is launched for that gateway alone, up to
-# BENCH_QUALIFY_ATTEMPTS times. Every box this run launches — replacements included — is tagged
+# On failure the box is terminated and a replacement is launched for that gateway alone, up to
+# BENCH_QUALIFY_ATTEMPTS times. Every box this run launches, replacements included, is tagged
 # run=$RUN_ID, so a replacement is torn down by the same RUN_ID filter and can never disturb a peer
-# box or a concurrent invocation's fleet (audit H4). If every attempt fails the gateway is NOT
-# published: the honest failure is recorded and reported, mirroring how the promote guard refuses to
-# overwrite good data with a boot failure.
+# box or a concurrent invocation's fleet. If every attempt fails the gateway is not published: the
+# honest failure is recorded and reported, mirroring how the promote guard refuses to overwrite good
+# data with a boot failure.
 # ═════════════════════════════════════════════════════════════════════════════════════════════════
 BENCH_QUALIFY="${BENCH_QUALIFY:-1}"                       # 0 disables the whole gate (local/dry runs)
 BENCH_QUALIFY_ATTEMPTS="${BENCH_QUALIFY_ATTEMPTS:-3}"     # boxes to try per gateway before giving up
@@ -515,24 +484,14 @@ PY
 
 # qualify_box <gw> <ip> <glog> <log_fn> <attempt>
 #   0  the box is qualified (or the gate is disabled / the fault is the gateway's, not the box's)
-#   1  the BOX is bad — terminate it and launch a replacement
+#   1  the BOX is bad - terminate it and launch a replacement
 # Writes the qualification provenance onto the box either way it proceeds, so the snapshot records the
 # instrument's state (lib/rig.sh _rig_box_qualify_json folds it in; matrix/run.sh needs no change).
 qualify_box() {
-  # BOX QUALIFICATION MOVED INTO THE ENGINE.
-  #
-  # This used to drive matrix/qualify-box.sh through lib/box_qualify.sh, both deleted in the cutover.
-  # Sourcing a file that is not there left `bq_load_baselines` undefined and `BQ_BL_FLOOR_US` unbound,
-  # and under `set -u` that aborted the box function BEFORE it measured anything - so a run finished
-  # in ninety seconds, reported "all boxes done", and regenerated charts from the previous run's data.
-  # A run that measures nothing and publishes anyway is the worst failure this harness can have.
-  #
-  # `otb run` now qualifies the box itself, before the grid, against the median of the same
-  # observation from this box's previous runs, and publishes the verdict as rig.box_qualify inside the
-  # snapshot - which is the durable record the shell version was only ever a wrapper around.
-  #
-  # It stays a function so the retry/replace-the-box machinery around it keeps its shape for when a
-  # rejecting gate is wired back to the engine's verdict.
+  # Box qualification is performed by the engine: `otb run` qualifies the box itself, before the grid,
+  # against the median of the same observation from this box's previous runs, and publishes the
+  # verdict as rig.box_qualify inside the snapshot. This stays a function so the retry/replace-the-box
+  # machinery around it keeps its shape for when a rejecting gate is wired back to the engine's verdict.
   local gw="$1" ip="$2" glog="$3" _log="$4" attempt="$5"
   "$_log" "qualify: performed by the engine (published as rig.box_qualify in the snapshot)"
   return 0
@@ -540,34 +499,28 @@ qualify_box() {
 
 # ── one gateway, up to BENCH_QUALIFY_ATTEMPTS boxes ───────────────────────────────────────────────
 # The replacement loop. bench_gateway_once holds exactly one box for its whole lifetime and terminates
-# it on return (its RETURN trap), so "launch a replacement" is simply calling it again — the new box
+# it on return (its RETURN trap), so "launch a replacement" is simply calling it again - the new box
 # gets a fresh instance id under the same run=$RUN_ID tag and no peer box is touched.
 bench_gateway() {
   local gw="$1" attempt rc
   local glog="$HERE/results/fanout-$gw.log"
-  # ONE LOG PER GATEWAY RUN, and it has to hold EVERYTHING.
-  #
-  # glog_echo writes the orchestrator narration here and the box’s own .run.log is appended before
-  # teardown, so the two halves already meet. What escaped was bash’s OWN errors, which go to
-  # stderr rather than through the logger: a quoting mistake in the remote block printed
-  # "line 768: rig: command not found" to the orchestrator terminal, the fanout log looked healthy,
-  # and every run failed identically for an hour before anyone saw it.
-  #
-  # This subshell runs with stderr teed into the same file, so a syntax error, an unbound variable or
-  # a failed command lands beside the narration it belongs to. Losing the box then loses nothing.
+  # One log per gateway run holds everything: glog_echo writes the orchestrator narration here and the
+  # box's own .run.log is appended before teardown. This subshell also runs with stderr teed into the
+  # same file, so bash's own errors (a quoting mistake, an unbound variable, a failed command) land
+  # beside the narration instead of going only to the orchestrator's terminal.
   exec 2> >(tee -a "$glog" >&2)
   for attempt in $(seq 1 "$BENCH_QUALIFY_ATTEMPTS"); do
     bench_gateway_once "$gw" "$attempt"; rc=$?
     [ "$rc" = "$BQ_RC_REPLACE" ] || return "$rc"
     if [ "$attempt" -lt "$BENCH_QUALIFY_ATTEMPTS" ]; then
-      echo "[$(date +%H:%M:%S)] [$gw] box FAILED qualification on attempt $attempt/$BENCH_QUALIFY_ATTEMPTS — terminated it, launching a replacement box" | tee -a "$glog"
+      echo "[$(date +%H:%M:%S)] [$gw] box FAILED qualification on attempt $attempt/$BENCH_QUALIFY_ATTEMPTS - terminated it, launching a replacement box" | tee -a "$glog"
     fi
   done
   # Budget exhausted. Publishing anything now would mean publishing a number measured on hardware we
-  # have positively identified as bad — the exact thing this gate exists to prevent. Record the honest
+  # have positively identified as bad - the exact thing this gate exists to prevent. Record the honest
   # failure; the committed result for this gateway stays whatever it was, untouched and unrefreshed.
-  echo "[$(date +%H:%M:%S)] [$gw] SKIPPED — $BENCH_QUALIFY_ATTEMPTS boxes in a row failed box qualification; NOT publishing $gw this run (its committed result is unchanged, not overwritten). See the qualify lines above for the measured drift." | tee -a "$glog"
-  echo "$gw: $BENCH_QUALIFY_ATTEMPTS/$BENCH_QUALIFY_ATTEMPTS boxes failed qualification — not published" >> "$QUALIFY_SKIPPED"
+  echo "[$(date +%H:%M:%S)] [$gw] SKIPPED - $BENCH_QUALIFY_ATTEMPTS boxes in a row failed box qualification; NOT publishing $gw this run (its committed result is unchanged, not overwritten). See the qualify lines above for the measured drift." | tee -a "$glog"
+  echo "$gw: $BENCH_QUALIFY_ATTEMPTS/$BENCH_QUALIFY_ATTEMPTS boxes failed qualification - not published" >> "$QUALIFY_SKIPPED"
   return 1
 }
 
@@ -579,13 +532,12 @@ bench_gateway_once() {
   [ "$attempt" = 1 ] && : > "$glog"
   glog_echo(){ echo "[$(date +%H:%M:%S)] [$gw] $*" | tee -a "$glog"; }
 
-  # provision. COST SAFETY NET: the box self-terminates after BENCH_MAX_MIN minutes no matter what -
-  # even if this orchestrator is killed (so its RETURN-trap never fires) the box shuts itself down and
-  # `instance-initiated-shutdown-behavior=terminate` makes that a TERMINATE, not a stop. A leaked box
-  # can therefore bleed cost for at most BENCH_MAX_MIN, never indefinitely (2026-07-24: 48 leaked boxes
-  # ran for hours because the trap missed SIGTERM and the manual cleanups silently no-op'd). BENCH_MAX_MIN
-  # is set EQUAL to the matrix suite's own 480-min ceiling (see the BENCH_MAX_MIN block at the top of this
-  # file for why they are deliberately equal, and which of the two fires first on a wedged box).
+  # provision. COST SAFETY NET: the box self-terminates after BENCH_MAX_MIN minutes no matter what, so
+  # even if this orchestrator is killed (its RETURN-trap never fires), the box shuts itself down and
+  # `instance-initiated-shutdown-behavior=terminate` makes that a terminate, not a stop. A leaked box can
+  # therefore bleed cost for at most BENCH_MAX_MIN, never indefinitely. BENCH_MAX_MIN is set equal to the
+  # matrix suite's own 480-min ceiling (see the BENCH_MAX_MIN block at the top of this file for why they
+  # are deliberately equal, and which of the two fires first on a wedged box).
   iid=$(aws ec2 run-instances --image-id "$AMI" --instance-type "$ITYPE" --key-name "$KEYNAME" \
     --security-group-ids "$SG" \
     --instance-initiated-shutdown-behavior terminate \
@@ -599,23 +551,23 @@ bench_gateway_once() {
 
   aws ec2 wait instance-running --instance-ids "$iid" 2>>"$glog" || { glog_echo "wait running FAILED"; return 1; }
   ip=$(aws ec2 describe-instances --instance-ids "$iid" --query 'Reservations[0].Instances[0].PublicIpAddress' --output text)
-  glog_echo "ip=$ip — waiting for ssh"
+  glog_echo "ip=$ip - waiting for ssh"
   local ok=0; for _ in $(seq 1 40); do ssh $SSHOPT ubuntu@"$ip" true 2>/dev/null && { ok=1; break; } || sleep 8; done
   [[ $ok == 1 ]] || { glog_echo "ssh never came up"; return 1; }
 
   glog_echo "installing deps (bare base: docker + psutil; the rig is a prebuilt download, and each"
-  glog_echo "gateway installs its OWN prereqs via gw_prereqs — no blanket build toolchain on every box)"
+  glog_echo "gateway installs its OWN prereqs via gw_prereqs - no blanket build toolchain on every box)"
   ssh $SSHOPT ubuntu@"$ip" 'set -e
     sudo apt-get update -q
     # BARE base only: docker (for the image gateways), curl (fetch the prebuilt rig), jq, and python3
-    # + psutil (the memory suite reads RSS). NO build-essential/rust/go/node here — the mock+loadgen
+    # + psutil (the memory suite reads RSS). NO build-essential/rust/go/node here - the mock+loadgen
     # are prebuilt binaries pulled from the rig release, and the 2 source-built gateways pull their
     # own toolchain via gw_prereqs() on their box ALONE. Docker-image gateways are up in ~2 min.
     sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y -q docker.io curl ca-certificates jq python3-pip git build-essential
-    # A box that came up without docker cannot measure ten of the thirteen entrants, and every launch
-    # on it fails with \"failed to run docker: No such file or directory\", which reads as a broken
-    # gateway rather than a box that never finished provisioning. One box in a field run did exactly
-    # that. Better to lose the box here than to publish its verdicts.
+    # A box that came up without docker cannot measure most entrants, and every launch on it fails
+    # with \"failed to run docker: No such file or directory\", which reads as a broken gateway rather
+    # than a box that never finished provisioning. Better to lose the box here than to publish its
+    # verdicts.
     command -v docker >/dev/null || { echo 'PROVISION FAILED: docker did not install on this box'; exit 1; }
     # The engine is BUILT ON THE BOX from the cloned commit, once, before any measurement starts.
     # It is not shipped from the orchestrator: a binary from a laptop has no provenance, and the
@@ -627,48 +579,35 @@ bench_gateway_once() {
     # FAIRNESS: a container inherits the docker DAEMON fd limit, NOT the host-shell ulimit that
     # perf/run.sh raises for native gateways + the loadgen/mock. Left at the ~1024 default, a
     # containerised gateway fast enough to hold >1024 concurrent connections hits EMFILE and
-    # COLLAPSES at exactly c=1024 (busbar did: ~850k conn failures, sustained@20ms fell to 1/3).
+    # collapses at exactly c=1024.
     echo "{ \"default-ulimits\": { \"nofile\": { \"Name\": \"nofile\", \"Hard\": 1048576, \"Soft\": 1048576 } } }" | sudo tee /etc/docker/daemon.json >/dev/null
     sudo systemctl restart docker || sudo service docker restart || true
     python3 -m pip install --user -q --break-system-packages psutil 2>/dev/null || pip3 install -q psutil || true' >>"$glog" 2>&1
 
   # Ship ONLY the harness (scripts + configs, a few MB). Exclude every build/runtime artifact: the box
-  # fetches the 2 rig binaries from the release (lib/rig.sh) and builds its own gateway (docker pull, or
-  # gw_build for the 2 source gateways). A stray local venv (one gateway's, 564MB) or bin/ must never be
-  # uploaded to 13 boxes. Log the payload size + transfer time so a slow rsync is never a silent hang.
-  # Payload size for the tripwire (added after the 564MB-venv incident so a slow rsync is never a
-  # silent hang). GNU `du --exclude` is rejected by the BSD `du` on the darwin orchestrator (always
-  # logged "?"), defeating the check on the real host. Derive the size from a LOCAL rsync DRY RUN with
-  # the SAME excludes the real transfer uses (below): portable, no network, and exactly the bytes about
-  # to ship. `--stats` prints "Total file size: N bytes"; humanise it (a number beats "?").
-  # Dedicated per-gateway sizecheck dst under a mktemp -d, removed right after we read --stats: the old
-  # fixed path (${TMPDIR:-/tmp}/bench-rsync-sizecheck-dst/) was NEVER cleaned, so on macOS /tmp (not
-  # cleared on reboot) it accreted the harness skeleton for every gateway x every run (audit R4-LOW-7).
-  # THE BOX PULLS FROM GIT, NOT FROM THIS LAPTOP.
+  # fetches the rig binaries from the release (lib/rig.sh) and builds its own gateway (docker pull, or
+  # gw_build for source-built gateways). A stray local venv or bin/ must never be uploaded to every box.
+  # Log the payload size + transfer time so a slow rsync is never a silent hang. GNU `du --exclude` is
+  # rejected by the BSD `du` on the darwin orchestrator (always logs "?"), so the size is derived from a
+  # local rsync dry run with the same excludes the real transfer uses (below): portable, no network, and
+  # exactly the bytes about to ship. `--stats` prints "Total file size: N bytes"; humanise it. Dedicated
+  # per-gateway sizecheck dst under a mktemp -d, removed right after we read --stats.
   #
-  # An rsync of the working tree measures whatever happens to be on the orchestrator's disk, which
-  # cannot be traced to anything afterwards: a published number has to name the revision that
-  # produced it, and "my laptop at 4am" is not a revision. A clone at an explicit commit is the whole
-  # provenance story - the same SHA goes into the artifact, so a number can always be taken back to
-  # the code that measured it.
+  # The box measures from a tarball of this exact pinned commit, not from an rsync of this laptop's
+  # working tree: an rsync measures whatever happens to be on the orchestrator's disk, which cannot be
+  # traced to any revision afterwards, while a tarball of an explicit commit SHA is provenance a
+  # published number can always be traced back to.
   #
   # BENCH_COMMIT is resolved ONCE by the orchestrator (below) so every box in a fan-out measures the
   # SAME code. Resolving it per box would let a push mid-run split the field across two revisions and
   # publish them side by side as though they were comparable.
   glog_echo "cloning $BENCH_REPO @ ${BENCH_COMMIT:0:12} ..."; local _t0=$SECONDS
-  # THE BOX DOWNLOADS THE FEW FILES IT NEEDS. It does not clone, and it has no git.
-  #
-  # It needs `gateways/<name>/` and `lib/rig.sh`. That is it: the engine and the mock arrive as
-  # prebuilt binaries and the box compiles nothing except a source-built gateway, which fetches its
-  # own source. A clone of the whole repository to get a handful of small files was never justified,
-  # and it actively caused harm: it shipped results/ to every box, and the orchestrator then rsynced
-  # the PREVIOUS run's committed result back off the box and accepted it as this run's output, so a
-  # box that measured nothing still looked like it had.
-  #
-  # A tarball of the pinned commit is one request, needs no git on the box, and carries the same
-  # provenance a clone did: the URL names the exact SHA, so what lands cannot be a different revision.
-  # Extracting only the two paths means whatever is not asked for cannot be read, mistaken for fresh,
-  # or run stale.
+  # The box downloads only the few files it needs and has no git: `gateways/<name>/` and `lib/rig.sh`.
+  # The engine and mock arrive as prebuilt binaries, and the box compiles nothing except a source-built
+  # gateway, which fetches its own source. The tarball is one request, needs no git on the box, and
+  # carries the same provenance a clone would: the URL names the exact SHA. Extracting only the two
+  # paths (not results/) means a stale or previous-run result can never land on the box and be mistaken
+  # for something this run produced.
   ssh $SSHOPT ubuntu@"$ip" "set -e
     rm -rf ~/benchmarking
     mkdir -p ~/benchmarking
@@ -699,11 +638,11 @@ bench_gateway_once() {
       return "$BQ_RC_REPLACE"          # RETURN trap terminates this box; the caller launches a replacement
     fi
   else
-    glog_echo "BENCH_QUALIFY=0 — box qualification SKIPPED; this run has no evidence that the hardware it measured on was sound"
+    glog_echo "BENCH_QUALIFY=0 - box qualification SKIPPED; this run has no evidence that the hardware it measured on was sound"
   fi
 
   # ── per-suite staged pull + promote guard, factored out so it can run INCREMENTALLY during the run
-  # AND once more at the end (audit R5-#4b). Idempotent: pulls results/<suite>/<gw>.json to a staging
+  # AND once more at the end. Idempotent: pulls results/<suite>/<gw>.json to a staging
   # file and lets the promote guard decide. Sets three caller-scope maps by suite: _pull_state (unset |
   # ok | stale | missing) and _pull_rc. Returns 0 when a fresh result was promoted (so the incremental
   # loop can stop re-pulling a suite it already captured); 1 when there is nothing (new) to promote.
@@ -742,13 +681,11 @@ bench_gateway_once() {
     fi
   }
 
-  # MEDIUM-R2-1: the OOTB config sidecar is written on the box by harness_write_config to
-  # ~/benchmarking/results/config/<gw>.txt (lib/harness.sh:74-77) and publish_gateway STAGES it
-  # (run-on-ec2.sh:259), but pull_suite only ever rsync'd the per-suite result JSONs — the sidecar was
-  # NEVER pulled off the box, so [ -e "$f" ] was always false, nothing was committed, and gen-data.mjs
-  # (:101-104) rendered "not published" for EVERY gateway's config. Pull the sidecar alongside the suite
-  # JSONs. rc=23 (remote absent: a gateway with no gw_config hook writes no sidecar) is treated as "no
-  # config", exactly like a missing suite JSON — not an error, not retried forever.
+  # The OOTB config sidecar is written on the box by harness_write_config to
+  # ~/benchmarking/results/config/<gw>.txt (lib/harness.sh:74-77); pull it alongside the suite JSONs,
+  # since publish_gateway stages it separately from them. rc=23 (remote absent: a gateway with no
+  # gw_config hook writes no sidecar) is treated as "no config", exactly like a missing suite JSON, not
+  # an error, not retried forever.
   pull_config() {
     mkdir -p "$HERE/results/config"
     local dest="$HERE/results/config/$gw.txt" staged="$HERE/results/config/.incoming-$gw.txt"
@@ -764,13 +701,10 @@ bench_gateway_once() {
     rm -f "$staged"; return 1
   }
 
-  # P0-1: the SNAPSHOT artifacts (task #65) have the SAME defect the config sidecar had. matrix/run.sh
-  # writes them on the BOX at ~/benchmarking/results/snapshots/result_<gw>_<measured_at>.json, but
-  # pull_suite only ever rsync'd results/<suite>/<gw>.json — a glob that can never match that filename —
-  # and the teardown trap then terminates the box. So results/snapshots/ stayed empty in the repo
-  # FOREVER and gen-data's newestSnapshot() always returned null. Pull them by their real filename
-  # (a remote-side glob, expanded by the remote shell; every run's snapshot is kept, never overwritten).
-  # rc=23 (no snapshot on the box — e.g. MATRIX_MEMORY=0 or an aborted run) is "nothing to pull", not an
+  # The snapshot artifacts are written on the box at
+  # ~/benchmarking/results/snapshots/result_<gw>_<measured_at>.json, a different path/filename shape than
+  # the per-suite results, so they need their own pull. Every run's snapshot is kept, never overwritten.
+  # rc=23 (no snapshot on the box, e.g. MATRIX_MEMORY=0 or an aborted run) is "nothing to pull", not an
   # error, exactly like a missing suite JSON.
   pull_snapshots() {
     mkdir -p "$HERE/results/snapshots"
@@ -780,7 +714,7 @@ bench_gateway_once() {
       # Filter with rsync's OWN --include/--exclude rather than a wildcard in the remote path: a remote
       # glob only works if the remote shell expands it, which rsync's --protect-args (default-on in some
       # builds) suppresses. The filter is evaluated by rsync itself, so it behaves identically either
-      # way — and it can never pull a SIBLING gateway's snapshot into this box's publish.
+      # way, and it can never pull a sibling gateway's snapshot into this box's publish.
       rsync -az --timeout=60 -e "ssh $SSHOPT" \
         --include="result_${gw}_*.json" --exclude='*' \
         "ubuntu@$ip:~/benchmarking/results/snapshots/" "$HERE/results/snapshots/" >>"$glog" 2>&1
@@ -799,41 +733,26 @@ bench_gateway_once() {
     return 1
   }
 
-  # THE SNAPSHOT IS THE ARTIFACT, and there are no per-suite JSONs any more.
-  #
-  # This defaulted to `matrix` and then required results/matrix/<gw>.json to exist before calling a run
-  # DONE. The engine writes no such file - it writes results/snapshots/<gw>.json and the timestamped
-  # result_<gw>_<measured_at>.json, and nothing else. The check passed anyway because the box cloned the
-  # repository with the PREVIOUS run's results/matrix/<gw>.json committed inside it, so the orchestrator
-  # rsynced git's own copy back off the box and accepted it as this run's output. That is how a run which
-  # measured nothing could report DONE: the file it was asked to find was one it had shipped there itself.
-  #
-  # So: no legacy suite is pulled by default, and freshness is judged on the snapshot alone (below). An
-  # explicit SUITES=... still drives the old per-suite pull for an ad-hoc re-run of a retired suite.
+  # The snapshot is the artifact; there are no per-suite JSONs any more. The engine writes only
+  # results/snapshots/<gw>.json and the timestamped result_<gw>_<measured_at>.json. No legacy suite is
+  # pulled by default, and freshness is judged on the snapshot alone (below). An explicit SUITES=... still
+  # drives the old per-suite pull for an ad-hoc re-run of a retired suite.
   local ALL_SUITES="${SUITES:-}"
   declare -A _pull_state=() _pull_rc=(); local suite
   for suite in $ALL_SUITES; do _pull_state[$suite]=unset; _pull_rc[$suite]=0; done
 
-  glog_echo "running $gw (latency + RPS + memory) — detached on box; pulling each suite as it completes"
-  # Launch run-all.sh DETACHED on the box (setsid + nohup) writing a sentinel with its real exit code on
-  # completion, instead of a single BLOCKING ssh. Why (audit R5-#4b): the old blocking ssh returned only
-  # when run-all.sh finished, and EVERY per-suite pull happened AFTER it returned - so if the box
-  # self-terminated mid-run (a heavy matrix sweep outliving the box timer), the ssh died and ALL SEVEN
-  # already-written suite JSONs were forfeited, not just the in-flight one. Detaching lets us stream each
-  # suite's result OFF-box as run-all.sh writes it, so a late box death loses at most the running suite.
-  # THE REMOTE SCRIPT IS UPLOADED, NOT INTERPOLATED.
+  glog_echo "running $gw (latency + RPS + memory) - detached on box; pulling each suite as it completes"
+  # Launch run-all.sh detached on the box (setsid + nohup) writing a sentinel with its real exit code on
+  # completion, instead of a single blocking ssh: a blocking ssh only returns when run-all.sh finishes,
+  # so a box that self-terminates mid-run would forfeit every already-written suite JSON, not just the
+  # in-flight one. Detaching lets us stream each suite's result off-box as run-all.sh writes it, so a
+  # late box death loses at most the running suite.
   #
-  # It used to be a double-quoted ssh argument wrapping a single-quoted `bash -lc '...'`, so the
-  # ORCHESTRATOR expanded the body before the box ever saw it. That cost three separate EC2 runs, and
-  # every one of them was PROSE IN A COMMENT doing it:
-  #   - an apostrophe closed the single quote, and the rest of the comment ran on the orchestrator;
-  #   - a backtick pair around a word ran that word as a local command ("rig: command not found");
-  #   - `$PWD` resolved to the ORCHESTRATOR's path, so the box ran `mkdir -p /Users/matthew/...`,
-  #     which it has no permission to do, and every rig download then failed with curl(23) "failure
-  #     writing output to destination" - a fetch error that was really a write error two layers down.
-  # A comment must not be able to break the program it documents. So the body below is a QUOTED
-  # heredoc - nothing in it expands, ever - the orchestrator's values are prepended as a printf %q
-  # export preamble, and the finished script is written to the box and then launched detached.
+  # The remote script is uploaded as a quoted heredoc, not interpolated into the ssh command line:
+  # nothing in it expands locally, ever. The orchestrator's values are prepended as a printf %q export
+  # preamble, and the finished script is written to the box and then launched detached. This matters
+  # because an unquoted body would let the ORCHESTRATOR's own shell expand quotes, backticks, and
+  # variables like $PWD inside the remote script before the box ever saw it.
   local _run_sh
   _run_sh="$(
     printf 'export BENCH_HARDWARE=%q BENCH_ARCH=%q\n' "$HW_LABEL" "$ARCH"
@@ -844,8 +763,8 @@ bench_gateway_once() {
     # what a field measurement always uses.
     printf 'export OTB_DIALECTS=%q OTB_MIN_CONC=%q OTB_MAX_CONC=%q\n' \
       "${OTB_DIALECTS:-}" "${OTB_MIN_CONC:-}" "${OTB_MAX_CONC:-}"
-    # gw is the orchestrator's loop variable and is NOT otherwise exported to the box; it used to be
-    # written `\$gw`, which reached the box as an unset name, so the run validated `gateways/`.
+    # gw is the orchestrator's loop variable and is not otherwise exported to the box, so it must be
+    # written literally here (not `\$gw`, which would reach the box as an unset name).
     printf 'gw=%q\n' "$gw"
     cat <<'REMOTE'
 # Every relative path below is relative to the repo, so anchor it rather than inheriting a cwd from
@@ -869,11 +788,10 @@ sudo -n true 2>/dev/null && sudo chmod 666 /var/run/docker.sock || true
 # that is a matter for the gateway itself, done before the memory baseline is taken.
 source lib/rig.sh
 fetch_rig "$PWD" || { echo rig fetch FAILED; echo 126 > .run-done; exit 0; }
-# WHICH MOCK THIS RUN USED. rig is a MOVING tag: the same URL served different binaries weeks apart,
-# and a mock rebuild once changed cell verdicts across the whole field with nothing in either run's
-# output recording that the instrument had moved. rig.sh has just fetched and can hash it, and the
-# engine cannot work any of this out for itself, so hand it over the same way the commit is handed
-# over. Empty stays empty: the engine publishes an absent block rather than inventing one.
+# Record which mock this run used. rig is a moving tag, so the same URL can serve different binaries
+# over time; rig.sh has just fetched it and can hash it, and the engine cannot work that out for itself,
+# so hand it over the same way the commit is handed over. Empty stays empty: the engine publishes an
+# absent block rather than inventing one.
 export OTB_RIG_MOCK_ORIGIN="$RIG_MOCK_ORIGIN"
 export OTB_RIG_MOCK_SHA256="$(_rig_sha256 "$MOCK")"
 export OTB_RIG_MOCK_UPDATED_AT="$(_rig_asset_updated_at "mock-$BENCH_ARCH")"
@@ -881,9 +799,8 @@ export OTB_RIG_URL="$RIG_URL"
 # rig.sh puts what it fetches in bin/; the run invokes ./otb. RIG_URL comes from rig.sh, so the
 # engine is fetched from the same release the rest of the rig came from, named once.
 #
-# BENCH_ARCH, not ARCH. ARCH belongs to the orchestrator and is not exported to the box. Unset here
-# it made the URL end in "otb-", which 404s, so the run died on its own sentinel with no clue which
-# of the two things it fetches had failed.
+# Use BENCH_ARCH, not ARCH: ARCH belongs to the orchestrator and is not exported to the box, so it
+# would be unset here and the URL would end in "otb-" (404).
 curl -fsSL -o ./otb "$RIG_URL/otb-$BENCH_ARCH" && chmod +x ./otb
 if [ ! -x ./otb ]; then
   echo "engine binary not fetched: otb-$BENCH_ARCH missing from the rig release"
@@ -952,7 +869,7 @@ REMOTE
   fi
 
   # Interpret the run outcome. A present sentinel = run-all.sh finished; its value is the exit code
-  # (non-zero = a suite crashed, audit R3-M4/M5). No sentinel = the box died before finishing.
+  # (non-zero = a suite crashed). No sentinel = the box died before finishing.
   if [ "$run_failed" -eq 0 ]; then
     if [ -n "$sentinel" ]; then
       if [ "$sentinel" != 0 ]; then
@@ -984,21 +901,21 @@ REMOTE
       *)       glog_echo "PULL FAILED for $suite/$gw.json (rc=${_pull_rc[$suite]}) - fresh result NOT retrieved; committed data for this suite is STALE"; pull_failed=1 ;;
     esac
   done
-  # Pull the OOTB config sidecar too (best-effort). A gateway with no gw_config hook writes none — that
+  # Pull the OOTB config sidecar too (best-effort). A gateway with no gw_config hook writes none - that
   # is "no config", not a pull failure, so it never contributes to pull_failed.
   if [ "$reachable" -eq 1 ]; then pull_config || true; fi
-  # Pull the run's snapshot artifact(s) BEFORE the teardown trap terminates the box — this is the only
-  # chance; the box and everything on it are gone straight after.
+  # Pull the run's snapshot artifact(s) before the teardown trap terminates the box; this is the only
+  # chance, since the box and everything on it are gone right after.
   #
-  # THIS IS THE RUN'S SUCCESS CRITERION, not a best-effort extra. pull_snapshots returns 0 only when the
-  # count of result_<gw>_*.json on disk actually GREW, so it answers the one question that matters -
-  # "did THIS run produce a measurement?" - and it cannot be satisfied by an artifact that was already
-  # here. Its result used to be discarded with `|| true`, which is how a box that aborted before
-  # measuring anything still reached the DONE branch and published.
+  # This is the run's success criterion, not a best-effort extra: pull_snapshots returns 0 only when the
+  # count of result_<gw>_*.json on disk actually grew, so it answers "did THIS run produce a
+  # measurement?" and cannot be satisfied by an artifact that was already here. Its return value must
+  # gate `snap_fresh` below, not be discarded, or a box that aborted before measuring anything could
+  # still reach the DONE branch and publish.
   local snap_fresh=0
   if [ "$reachable" -eq 1 ] && pull_snapshots; then snap_fresh=1; fi
   if [ "$snap_fresh" -eq 0 ]; then
-    glog_echo "NO FRESH SNAPSHOT for $gw — this run measured nothing, so it publishes nothing and the board keeps whatever it already had"
+    glog_echo "NO FRESH SNAPSHOT for $gw - this run measured nothing, so it publishes nothing and the board keeps whatever it already had"
   fi
   # DONE means a CLEAN run that MEASURED something and was fully pulled. Anything less is INCOMPLETE, so
   # the freshness guard's later hard-fail is never a surprise and the gateway can be re-run.
@@ -1013,19 +930,38 @@ REMOTE
     # INCREMENTAL PUBLISH: this box finished cleanly and the promote guard passed for every suite, so
     # commit + push ONLY this gateway's result now (gated on PUBLISH, serialized across boxes). The
     # board fills in gateway-by-gateway; a single-gateway invocation pushes just that one row. The
-    # result is safely on disk (operator can push by hand), but a publish failure — a stranded/unpushed
-    # commit — MUST be counted in the run's issue tally (audit R3-L1) so the summary never reads
+    # result is safely on disk (operator can push by hand), but a publish failure - a stranded/unpushed
+    # commit - MUST be counted in the run's issue tally so the summary never reads
     # "0 issues" while a row is missing from the pushed board.
     #   NB: `publish_gateway | tee` makes `$?` reflect `tee` (always 0), so key on PIPESTATUS[0].
     publish_gateway "$gw" 2>&1 | tee -a "$glog"
     if [[ "${PIPESTATUS[0]}" -ne 0 ]]; then
       publish_failed=1
-      glog_echo "publish reported an issue for $gw (result IS committed/on disk; push may need a manual retry) — counting it as a run issue"
+      glog_echo "publish reported an issue for $gw (result IS committed/on disk; push may need a manual retry) - counting it as a run issue"
     fi
-  else glog_echo "INCOMPLETE (the run crashed, measured nothing, or failed to pull; this gateway did NOT refresh - re-run it)"; fi
+  else
+    glog_echo "INCOMPLETE (the run crashed, measured nothing, or failed to pull; this gateway did NOT refresh - re-run it)"
+    # DO NOT LEAVE A DIRTY TRACKED FILE BEHIND. An INCOMPLETE gateway never calls publish_gateway, but
+    # pull_suite() may still have `mv -f`'d a fresh results/<suite>/$gw.json over a PREVIOUSLY-COMMITTED
+    # tracked file for whichever suites DID succeed before a later suite failed - that file is now
+    # modified-but-uncommitted in $HERE and nobody is ever going to commit it this run. Left in place, it
+    # sits there until the final publish sweep's `git rebase --autostash` runs, which stashes it, and if
+    # anything else (a peer box, the render-charts bot) touched that same path upstream in the meantime,
+    # the stash POP conflicts - a rebase that already finished reporting failure, misread by
+    # push_with_rebase as "could not start" and retried uselessly since the same conflict recurs every
+    # attempt, eventually failing the WHOLE run's push, stranding every OTHER gateway's already-committed
+    # result too. Revert it back to its last-committed state (exactly "did not refresh"): this path is
+    # this gateway's own, so no peer box ever writes it and no lock is needed, same as pull_suite's own
+    # unlocked mv -f above.
+    for suite in $ALL_SUITES; do
+      if [ "${_pull_state[$suite]:-}" = ok ]; then
+        git -C "$HERE" checkout -- "results/$suite/$gw.json" 2>/dev/null || true
+      fi
+    done
+  fi
   # Propagate the issue to the caller's `wait "$p" || fail=…` so the summary's issue count is accurate
-  # and a run that measured nothing — OR a gateway whose publish never reached the remote — is never
-  # reported as "0 issues" (audit R3-M4/M5 + R3-L1).
+  # and a run that measured nothing - OR a gateway whose publish never reached the remote - is never
+  # reported as "0 issues".
   if [[ "$pull_failed" -ne 0 || "$run_failed" -ne 0 || "$publish_failed" -ne 0 || "$snap_fresh" -eq 0 ]]; then return 1; fi
   return 0
 }
@@ -1039,40 +975,35 @@ for gw in "${GATEWAYS[@]}"; do
 done
 fail=0
 for p in "${pids[@]}"; do wait "$p" || fail=$((fail+1)); done
-log "all boxes done ($fail job(s) reported an issue — check results/fanout-*.log)"
+log "all boxes done ($fail job(s) reported an issue - check results/fanout-*.log)"
 
 # ── gateways that never got a sound box ───────────────────────────────────────────────────────────
 # Say it LOUDLY and by name. A gateway skipped for box qualification is not a silent gap: its committed
 # result is deliberately STALE (untouched, never overwritten by a number measured on bad hardware), and
 # whoever reads the board has to know that. Already counted in `fail` via bench_gateway's return.
 if [ -s "$QUALIFY_SKIPPED" ]; then
-  log "BOX QUALIFICATION: $(wc -l < "$QUALIFY_SKIPPED" | tr -d ' ') gateway(s) were NOT published this run —"
+  log "BOX QUALIFICATION: $(wc -l < "$QUALIFY_SKIPPED" | tr -d ' ') gateway(s) were NOT published this run -"
   while IFS= read -r _line; do [ -n "$_line" ] && log "  $_line"; done < "$QUALIFY_SKIPPED"
   log "  (re-run those gateways; their committed results are the PREVIOUS run's, not this one's)"
 fi
 
 # ── A RUN THAT MEASURED NOTHING CHANGES NOTHING ───────────────────────────────────────────────────
-# Everything below this line - the append-only history, charts.py, and the push - DERIVES from
-# whatever happens to be sitting in results/. None of it re-reads the boxes. So when every box failed,
-# history/append.py re-appends the old numbers, charts.py rebuilds the PREVIOUS run's charts, and the
-# final sweep pushes them: from outside, a total failure is indistinguishable from a successful run.
-#
-# That is not hypothetical. It was demonstrated live: a box aborted before measuring, the orchestrator
-# logged "all boxes done (1 job(s) reported an issue)", regenerated 24 charts from the previous run's
-# data, and pushed them to origin/main.
-#
-# A failed run must leave the board exactly as it found it, so stop here and leave the working tree
-# alone. `fail` is already non-zero from the boxes themselves, so the exit code still reports it.
+# Everything below this line (the append-only history, charts.py, and the push) derives from whatever
+# happens to be sitting in results/; none of it re-reads the boxes. So if every box failed,
+# history/append.py would re-append the old numbers and charts.py would rebuild the previous run's
+# charts and push them, making a total failure indistinguishable from a successful run from the
+# outside. A failed run must leave the board exactly as it found it, so stop here and leave the working
+# tree alone. `fail` is already non-zero from the boxes themselves, so the exit code still reports it.
 if [ ! -s "$FRESH_SNAPSHOTS" ]; then
-  log "NO GATEWAY MEASURED ANYTHING THIS RUN — not appending history, not regenerating charts, not pushing."
+  log "NO GATEWAY MEASURED ANYTHING THIS RUN - not appending history, not regenerating charts, not pushing."
   log "  The board keeps exactly what it had. Re-run the gateways above; their fanout logs say why each failed."
   rm -f "$PUBLISH_LOCK" 2>/dev/null || true; rmdir "${PUBLISH_LOCK}.d" 2>/dev/null || true
   exit "$fail"
 fi
-log "$(wc -l < "$FRESH_SNAPSHOTS" | tr -d ' ') gateway(s) produced a fresh snapshot this run — regenerating and publishing from them"
+log "$(wc -l < "$FRESH_SNAPSHOTS" | tr -d ' ') gateway(s) produced a fresh snapshot this run - regenerating and publishing from them"
 
 # ── append this run to the append-only history (results/history/<gw>.jsonl) ─────────────────────
-# Do NOT swallow a failure with `|| true` (audit R3-LOW-4): a malformed result JSON or an unwritable
+# Do NOT swallow a failure with `|| true`: a malformed result JSON or an unwritable
 # results/history/ would otherwise complete the run "successfully" with the append-only history
 # silently missing the whole run. Log loudly and count it as a run-level issue instead.
 if ! python3 "$HERE/history/append.py"; then
@@ -1086,49 +1017,48 @@ VENV="${TMPDIR:-/tmp}/bench-charts-venv"
 if [[ ! -d "$VENV" ]]; then python3 -m venv "$VENV" >/dev/null 2>&1 || log "WARNING python3 -m venv failed - charts may not render (is python3-venv installed?)"; fi
 "$VENV/bin/pip" install -q matplotlib >/dev/null 2>&1 || log "WARNING pip install matplotlib failed in the charts venv - charts.py will likely fail below"
 # Warn loudly if matplotlib is genuinely absent BEFORE invoking charts.py, so a broken toolchain is a
-# visible warning rather than a soft-logged no-op that leaves a "completed" run with no charts (R3-LOW-4).
+# visible warning rather than a soft-logged no-op that leaves a "completed" run with no charts.
 "$VENV/bin/python" -c 'import matplotlib' 2>/dev/null || log "WARNING matplotlib not importable in the charts venv - charts will NOT be regenerated this run"
 if "$VENV/bin/python" "$HERE/charts.py"; then
   log "charts + reports regenerated"
 else
-  log "local chart regen failed (matplotlib?) — JSON results are still in results/; run charts.py yourself"
+  log "local chart regen failed (matplotlib?) - JSON results are still in results/; run charts.py yourself"
 fi
-log "done — results/reports/{all,top5}/README.md + results/*.png"
+log "done - results/reports/{all,top5}/README.md + results/*.png"
 
 # ── final publish sweep: history + regenerated charts/reports ─────────────────────────────────────
 # The per-gateway incremental publishes above push each gateway's result as its box finishes, but the
 # APPEND-ONLY HISTORY (history/append.py) and the FIELD-WIDE CHARTS/REPORTS (charts.py) are produced
-# HERE, after all boxes are done — so they are not yet committed. Push them now (gated on PUBLISH) so
+# HERE, after all boxes are done - so they are not yet committed. Push them now (gated on PUBLISH) so
 # the board's charts + reports are fresh too. Uses the same serialized commit/push discipline; by now
 # the boxes are joined so there is no contention. A single-gateway invocation still lands here and
 # pushes only the artifacts that changed (typically that gateway's history line + the charts it moved).
 if [[ "$PUBLISH" == "1" ]]; then
-  # Same serialized commit + fetch/rebase/push discipline as publish_gateway (audit HIGH-5): the boxes
-  # are joined by now so there is no box-vs-box contention, but the render-charts bot can still move the
-  # remote ref, so a bare push of our local HEAD is rejected non-fast-forward. Hold the same flock and
-  # push via push_with_rebase (bounded fetch→rebase→push retry) so history + charts never strand locally.
+  # Same serialized commit + fetch/rebase/push discipline as publish_gateway: the boxes are joined by
+  # now so there is no box-vs-box contention, but the render-charts bot can still move the remote ref,
+  # so a bare push of our local HEAD is rejected non-fast-forward. Hold the same flock and push via
+  # push_with_rebase (bounded fetch-rebase-push retry) so history + charts never strand locally.
   (
-    # Same PID-owned lock + abort-on-timeout discipline as publish_gateway (audit R3-M1). ABORT rather
-    # than pushing unlocked; release only a lock we own.
+    # Same PID-owned lock + abort-on-timeout discipline as publish_gateway. Abort rather than pushing
+    # unlocked; release only a lock we own.
     trap 'publish_lock_release' EXIT
     publish_lock_acquire "final publish:" log || exit 1
-    # Do NOT swallow a staging failure (audit R3-M2): a failed add here would push an empty/unchanged
-    # HEAD and silently drop the run's history + regenerated charts while reporting success. Build the
-    # path list explicitly so an EMPTY png glob (no charts this run — a benign case) is not mistaken for
-    # a staging failure; a genuine `git add` error still aborts.
+    # Do not swallow a staging failure: a failed add here would push an empty/unchanged HEAD and
+    # silently drop the run's history + regenerated charts while reporting success. Build the path list
+    # explicitly so an empty png glob (no charts this run, a benign case) is not mistaken for a staging
+    # failure; a genuine `git add` error still aborts.
     _final_paths=( "$HERE/results/history" "$HERE/results/reports" )
     for _f in "$HERE"/results/*.png; do [ -e "$_f" ] && _final_paths+=("$_f"); done
     if ! git -C "$HERE" add -- "${_final_paths[@]}"; then
-      log "WARNING final publish: git add FAILED for history + charts — NOT pushing an empty change"; exit 2
+      log "WARNING final publish: git add FAILED for history + charts - NOT pushing an empty change"; exit 2
     fi
     if git -C "$HERE" diff --cached --quiet; then
-      # MED-4: an EMPTY staged diff does NOT mean there is nothing to push. If every per-gateway push
-      # failed (e.g. HIGH-3 stranded them all) each gateway's commit is local-only, and a same-measured_at
-      # re-run adds no new history line / unchanged charts, so the final stage is empty. The old code
-      # logged "nothing to push" and exited WITHOUT push_with_rebase — stranding all those local commits
-      # permanently. Mirror the per-gateway path (which pushes even on an empty staged diff): still call
-      # push_with_rebase so any locally-stranded HEAD gets pushed and the board recovers.
-      log "final publish: no history/chart changes to stage — checking for locally-stranded commits to push"
+      # An empty staged diff does not mean there is nothing to push: if every per-gateway push failed,
+      # each gateway's commit is local-only, and a same-measured_at re-run adds no new history line or
+      # changed charts, so the final stage is empty too. Mirror the per-gateway path (which pushes even
+      # on an empty staged diff): still call push_with_rebase so any locally-stranded HEAD gets pushed
+      # and the board recovers.
+      log "final publish: no history/chart changes to stage - checking for locally-stranded commits to push"
       if push_with_rebase "final publish (recover-stranded):" log; then
         log "final publish: pushed (recovered any stranded local commits) to $PUBLISH_REMOTE/$PUBLISH_BRANCH"
       else
@@ -1151,7 +1081,7 @@ Field-wide artifacts produced after all boxes finished (append-only history + ch
     *) fail=$((fail+1)) ;;
   esac
 else
-  log "PUBLISH=0 — not pushing history/charts (left in the working tree)"
+  log "PUBLISH=0 - not pushing history/charts (left in the working tree)"
 fi
 # Clean up the publish lock artifacts this run created.
 rm -f "$PUBLISH_LOCK" 2>/dev/null || true; rmdir "${PUBLISH_LOCK}.d" 2>/dev/null || true

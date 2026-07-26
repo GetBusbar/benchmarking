@@ -190,7 +190,7 @@ impl SweepProbe<'_> {
 pub fn restart_to_rest(spec: &crate::launch::LaunchSpec) -> Result<(), String> {
     crate::supervise::stop_and_wait(&spec.runtime, spec.port, Duration::from_secs(30))
         .map_err(|e| format!("stopping it failed: {e:?}"))?;
-    let mut launcher = crate::launch::RealLauncher;
+    let mut launcher = crate::launch::RealLauncher::default();
     crate::launch::launch_default(&mut launcher, spec)
         .map(|_| ())
         .map_err(|e| format!("it did not come back up: {e:?}"))
@@ -238,13 +238,9 @@ pub struct CellPerf {
 
 /// One load window at ONE concurrency. A point measurement, not a search.
 ///
-/// This exists because asking a PEAK SEARCH for a maximum over a range of one is a category error,
-/// and it was being done: the rig-ceiling reference and the box-qualification observation both want
-/// "what does this do at exactly c", and both called `sweep_cell(cfg, id, c, c)`. That happened to
-/// work only while `peak_max` was willing to call a point with nothing probed either side of it a
-/// proven maximum - which is precisely the defect that got fixed, so the moment it stopped doing that
-/// both callers started reporting an absence and every throughput number on the board would have
-/// published as null against an unusable rig reference.
+/// This exists because asking a PEAK SEARCH for a maximum over a range of one is a category error:
+/// the rig-ceiling reference and the box-qualification observation both want "what does this do at
+/// exactly c", not a search with room to find a turnover on either side.
 ///
 /// A point measurement makes no turnover claim, so there is nothing for a flanking check to refuse.
 pub fn measure_at(cfg: &RunConfig, id: &CellId, concurrency: u32) -> Measurement<f64> {
@@ -357,8 +353,7 @@ pub fn run_grid_with(cfg: &RunConfig, lo: u32, hi: u32, metrics: &[&dyn metric::
             let served = probe_cell(cfg, &id, healthy);
             // THE ENGINE, IN TWO LINES: if the cell is served, run every metric on it. The list of
             // metrics lives in one place (`metric::METRICS`) rather than being reached for here, so
-            // a measurement cannot be implemented, tested, and then silently never taken - which is
-            // how memory, box qualification and the launcher all ended up with zero callers.
+            // a measurement cannot be implemented, tested, and then silently never taken.
             let (metrics, series) = if served.is_measurable() {
                 let ctx = metric::CellCtx { cfg, id: &id, dialect: *ing, min_conc: lo, max_conc: hi };
                 let (m, s) = metric::process_cell_with(&ctx, metrics);

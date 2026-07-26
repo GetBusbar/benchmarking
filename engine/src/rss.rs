@@ -42,6 +42,19 @@ pub trait ProcSource {
 pub struct RealProc;
 
 impl ProcSource for RealProc {
+    // A FULL SCAN, EVERY CALL, ON PURPOSE. The memory sampler in metric.rs calls this roughly every
+    // 100ms for the whole length of a load window, so the cost is real, but caching this map across
+    // calls (or across-refreshing only pids already known) would be a correctness bug, not just a
+    // perf win: a gateway is free to spawn new worker processes under load, at any point during the
+    // window, as children of any pid already in its tree, and the only way to notice a newly spawned
+    // pid is to look at the set of pids that exist RIGHT NOW. A cached map answers "was" a question,
+    // not "is". Nor can the scan be narrowed to some subset of /proc: whether a given live pid
+    // belongs under `root_pid` is only knowable by reading that pid's own ppid, so every pid in
+    // /proc has to be read to answer "does the tree have a new member" - there is no cheaper index.
+    // A pid that gets reparented AWAY from the tree (its process's original parent died) drops out of
+    // `tree_pids`'s walk on the very next scan regardless of caching, since the walk is a fresh BFS
+    // from `root_pid` over whatever `ppid_map` currently says; that is an accepted, unrelated
+    // limitation of the walk, not something this scan's freshness could fix either way.
     fn ppid_map(&self) -> BTreeMap<u32, u32> {
         let mut map = BTreeMap::new();
         let Ok(entries) = std::fs::read_dir("/proc") else {
@@ -151,16 +164,11 @@ pub fn hwm_tree_mib(root_pid: u32) -> Measurement<f64> {
 
 // ── the bridge from a declared identity to a process tree ────────────────────────────────────────
 //
-// THE MISSING LINK. Everything above sums a tree from a root pid, and the manifest declares an
-// identity (`Runtime`), and until now nothing connected the two - which is why this whole module had
-// zero callers while memory is the board's headline metric. The deleted shell had this as
-// `container_rss_mib` / `native_rss_mib`, and those functions are precisely what every
-// `gateways/*/gateway.sh` still calls into thin air.
-//
-// It resolves through the SAME `Runtime::identity()` the launcher's `--name` and the stop path take,
-// so the tree measured here cannot describe a different process than the one that was started or the
-// one that gets stopped. That is the defect `manifest.rs` documents as having corrupted published
-// numbers: three manifests read a single pid for RSS beside a whole tree for HWM.
+// THE LINK FROM A DECLARED IDENTITY TO A PROCESS TREE. Everything above sums a tree from a root
+// pid, and the manifest declares an identity (`Runtime`); this resolves through the SAME
+// `Runtime::identity()` the launcher's `--name` and the stop path take, so the tree measured here
+// cannot describe a different process than the one that was started or the one that gets stopped
+// (see `manifest.rs`'s module header for why that matters).
 //
 // A resolution failure is an ABSENCE WITH A REASON, never a zero and never a default pid. Reading
 // memory off the wrong process is worse than reading none.

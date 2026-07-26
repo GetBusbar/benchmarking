@@ -3,16 +3,16 @@
 # Gateway manifest: Busbar (docker).
 #
 # Runs the RELEASED image users download (BUSBAR_IMAGE, pinned below in this file,
-# multi-arch amd64+arm64) as its own container — the same uniform launch shape as every other docker
+# multi-arch amd64+arm64) as its own container - the same uniform launch shape as every other docker
 # gateway (host network, pinned cpuset, config mounted read-only). RSS/HWM are read from the
 # container's host-pid process tree (container_rss_mib), the same units as a native process.
 # Override BUSBAR_IMAGE to benchmark a locally-built image.
 #
-# ── OOTB posture (one-config standard — busbar is the harness author's gateway; held to the SAME bar,
+# ── OOTB posture (one-config standard - busbar is the harness author's gateway; held to the SAME bar,
 #    NO favoritism) ─────────────────────────────────────────────────────────────────────────────────
 # This is the config a real user deploys, used unchanged for EVERY lane (latency/throughput/memory/
 # stream/matrix). All SIX upstream protocols busbar supports are wired here (→ mock), because the
-# matrix exercises all of them and memory/throughput are measured on this same all-providers config —
+# matrix exercises all of them and memory/throughput are measured on this same all-providers config -
 # NOT scoped per-lane. Permitted deviations only:
 #   * each provider's base_url → the mock;
 #   * dummy signing material where a protocol's signer needs it (bedrock SigV4 → ACCESS:SECRET pair;
@@ -54,7 +54,7 @@ GW_KIND=docker
 # manifest instead of hardcoding it. lib/gateway_isolation_test.sh checks it against the --name
 # below, so the two cannot drift.
 GW_CONTAINER=busbar-bench
-# Self-describing manifest metadata — charts.py + the run lists read these, so a gateway
+# Self-describing manifest metadata - charts.py + the run lists read these, so a gateway
 # is fully defined by its own dir (add/remove a dir → it appears/disappears everywhere).
 GW_DISPLAY="Busbar"                      # label in charts + report tables
 GW_LANG=Rust                            # implementation language → bar color bucket
@@ -93,7 +93,7 @@ admin_token   boot      # activates the admin plane the lane mints its virtual k
 admin_listen  bind      # the admin plane has its own listener; the mint has to know the port
 "
 # Translation lane (xlate suite): busbar serves Anthropic ingress natively on /v1/messages and
-# translates to the OpenAI upstream configured below. Same client token — busbar accepts it via
+# translates to the OpenAI upstream configured below. Same client token - busbar accepts it via
 # either carrier (Authorization: Bearer or x-api-key), so no auth override is needed.
 GW_ANTHROPIC_PATH=/v1/messages
 
@@ -129,10 +129,10 @@ GW_MATRIX_EGRESS="openai openai-responses anthropic gemini cohere bedrock"
 
 # _busbar_run: the single docker launch every lane shares. The image's entrypoint is /busbar and its
 # baked-in defaults already point BUSBAR_CONFIG/BUSBAR_PROVIDERS at /etc/busbar/{config,providers}.yaml
-# — the generated configs are mounted read-only onto exactly those paths. Host network keeps
+# - the generated configs are mounted read-only onto exactly those paths. Host network keeps
 # 127.0.0.1:$MOCK_PORT/$GW_PORT semantics identical to a native launch; --cpuset-cpus is the core pin.
 # BENCH_MOCK_KEY carries a bearer for the body-model protocols; BENCH_BEDROCK_KEY carries the bedrock
-# SigV4 ACCESS:SECRET pair (the mock ignores both). Worker threads are NOT pinned — busbar defaults to
+# SigV4 ACCESS:SECRET pair (the mock ignores both). Worker threads are NOT pinned - busbar defaults to
 # one-per-core via available_parallelism, which already honors --cpuset-cpus (fairness: no scaling
 # knob). State persistence is left at its default; the matrix cold-starts a fresh container per cell.
 _busbar_run() {
@@ -198,9 +198,9 @@ providers:
     api_key_env: BENCH_BEDROCK_KEY
 models:
   gpt-4o-mini:
-    # OOTB canonical (OpenAI) lane — the perf/memory/throughput default. max_concurrent is a REQUIRED
+    # OOTB canonical (OpenAI) lane - the perf/memory/throughput default. max_concurrent is a REQUIRED
     # field in v1.4.1 (no serde default); 8000 sits above the sweep's winning band so it is a ceiling,
-    # not the limiter — the forced-name equivalent of an unbounded default, not a tuned advantage.
+    # not the limiter - the forced-name equivalent of an unbounded default, not a tuned advantage.
     # max_requests: -1 = unmetered.
     provider: mock-openai
     max_concurrent: 8000
@@ -247,7 +247,7 @@ gw_launch() {
 # ── OOTB config artifact (file-driven) ────────────────────────────────────────────────────────────
 # gw_config prints the canonical OOTB config busbar launches with. busbar is file-driven, so the
 # artifact is the rendered providers.yaml + config.yaml pair (exactly what /etc/busbar/{providers,
-# config}.yaml load) PLUS the non-secret launch env (signing values are dummy on the isolated rig —
+# config}.yaml load) PLUS the non-secret launch env (signing values are dummy on the isolated rig -
 # never a live key). Read from the files _busbar_write_config just rendered (falls back to rendering
 # them if absent), so it can never drift from what busbar loaded. OOTB posture: all six protocols
 # wired to the mock and nothing else. Auth is left OPEN (busbar's own default), Server-Timing is left
@@ -294,7 +294,7 @@ BUSBAR_VKEY=""
 
 gw_governed_launch() {
   # The admin plane always runs on its OWN listener (admin_listen, default loopback :8081), never
-  # on the data listener — pin it explicitly so the mint below can't drift from a default change.
+  # on the data listener - pin it explicitly so the mint below can't drift from a default change.
   BUSBAR_ADMIN_PORT=$(( GW_PORT + 1 ))
   # Start from the same OOTB provider set + config, then append the governance block. Re-render first
   # so the governed lane uses the identical all-providers OOTB config as every other lane.

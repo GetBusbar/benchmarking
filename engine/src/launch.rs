@@ -19,9 +19,7 @@
 // gives the memory readers and `supervise::stop_and_wait`. A docker launch's `--name` and a native
 // launch's process match are read from this one field, never restated as a second string on the
 // spec, so there is no way for the thing this file starts to differ from the thing the readers
-// measure and the stop path targets. This is the same discipline `manifest.rs` already documents:
-// the shell defect it replaces was three manifests writing a single-pid reader for RSS beside a
-// whole-tree reader for HWM, because the name was spelled out once per hook instead of once.
+// measure and the stop path targets (see `manifest.rs`'s module header for why that matters).
 //
 // PINNING IS NOT OPTIONAL. The comparability basis of the whole benchmark is "same box, same load,
 // one gateway at a time, same cores"; an unpinned gateway is measured on different hardware than a
@@ -99,7 +97,7 @@ pub enum LaunchKind {
         /// config loader claims every variable sharing its prefix and rejects unknown fields, so the
         /// harness's own override variables kill config load before the port binds - and because the
         /// binary is backgrounded, the launch reports success and the only symptom is a port that
-        /// never listens. That cost thirty-six cells once already.
+        /// never listens.
         env_unset: Vec<String>,
     },
 }
@@ -393,10 +391,37 @@ fn run_with_timeout(command: &str, args: &[String], timeout: Duration) -> Result
     }
 }
 
+/// Collects a native gateway's `Child`, if there is one, so the OS releases its process table entry
+/// instead of leaving a zombie behind. `blocking`: `stop()` calls this only once the process is
+/// already confirmed dead (or the kill budget gave up), so a `wait` there reaps instantly rather than
+/// hanging; `spawn()`'s own backstop cleanup uses `try_wait` instead, since a stale child there might
+/// genuinely still be alive and must never block a fresh spawn.
+fn reap_native_child(slot: &mut Option<std::process::Child>, blocking: bool) {
+    if let Some(mut child) = slot.take() {
+        if blocking {
+            let _ = child.wait();
+        } else {
+            let _ = child.try_wait();
+        }
+    }
+}
+
 /// The real syscall layer: shells out via `std::process` exactly as the docker/taskset invocations
 /// `build_invocation` describes, and delegates readiness/stop to `supervise`. Kept thin on purpose;
 /// the logic worth testing lives in `launch_with`, not here.
-pub struct RealLauncher;
+///
+/// `native_child` holds the `Child` handle for a native (non-docker) spawn. A docker launch has
+/// nothing to hold here (`docker run -d` is already waited on synchronously in `spawn`, and `stop`
+/// goes through `docker rm -f`); a native gateway IS the child, spawned once and left running for the
+/// whole measurement, and only THIS PROCESS (its real parent) can ever reap it. `stop`'s `pkill -f`
+/// kills it, but a `pkill` from another process cannot collect the exit status: the kernel leaves a
+/// zombie entry until the actual parent calls `wait`. Discarding the `Child` instead of holding it
+/// would leave `stop()`'s `pkill` killing the process without ever reaping it, an unbounded number of
+/// zombies over an eight-hour run with retries on every flaky boot.
+#[derive(Default)]
+pub struct RealLauncher {
+    native_child: Option<std::process::Child>,
+}
 
 impl Launcher for RealLauncher {
     fn run_pre_launch(&mut self, step: &PreLaunchStep) -> Result<(), String> {
@@ -438,13 +463,18 @@ impl Launcher for RealLauncher {
         for name in &inv.env_unset {
             cmd.env_remove(name);
         }
-        cmd
+        // Reap whatever this launcher's own last native attempt left behind before replacing it. In
+        // the normal retry loop `stop()` already did this, so this is normally a no-op; it exists as
+        // a backstop for any caller that spawns again without an intervening `stop()`.
+        reap_native_child(&mut self.native_child, false);
+        let child = cmd
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
-            .map(|_child| ())
-            .map_err(|e| format!("failed to spawn {}: {e}", inv.program))
+            .map_err(|e| format!("failed to spawn {}: {e}", inv.program))?;
+        self.native_child = Some(child);
+        Ok(())
     }
 
     fn is_ready(&mut self, spec: &LaunchSpec) -> bool {
@@ -453,6 +483,9 @@ impl Launcher for RealLauncher {
 
     fn stop(&mut self, spec: &LaunchSpec) {
         let _ = supervise::stop_and_wait(&spec.runtime, spec.port, Duration::from_secs(5));
+        // `stop_and_wait` above already confirmed the process is no longer alive (or gave up trying),
+        // so a blocking `wait` here reaps a zombie rather than hanging on a live one.
+        reap_native_child(&mut self.native_child, true);
     }
 
     fn port_snapshot(&mut self, spec: &LaunchSpec) -> PortState {
@@ -525,7 +558,7 @@ pub fn launch_with(
             return Ok(Launched { runtime: spec.runtime.clone(), attempts: attempt });
         }
         // READ ITS LOG BEFORE KILLING IT. For docker, `stop` is `rm -f`, which takes the container
-        // and its log with it, so every failure below this line used to arrive with no evidence.
+        // and its log with it, so reading it after that stop would arrive with no evidence.
         // Keep the last explanation we actually got. A later attempt whose log cannot be read (the
         // runtime refused the invocation outright, so there is no container to ask) must not erase
         // the reason an earlier attempt already gave.
@@ -582,6 +615,51 @@ mod tests {
             boot_backoff: Duration::from_secs(1),
             pre_launch: None,
         }
+    }
+
+    // ---- native child reaping -----------------------------------------------------------------------
+
+    /// `ps -o state=` reports a zombie as `Z` on both Linux and macOS (unlike `taskset`, which this
+    /// test deliberately avoids depending on, so it runs on a contributor's Mac as well as CI). Empty
+    /// output (or a nonzero exit) means the OS has no process table entry for that pid at all.
+    fn ps_state(pid: u32) -> String {
+        Command::new("ps")
+            .args(["-o", "state=", "-p", &pid.to_string()])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default()
+    }
+
+    // A `Child` a launcher never waits on becomes exactly the zombie this whole mechanism exists to
+    // prevent: the process finishes, the OS keeps its exit status pending collection, and nothing
+    // ever asks for it. This spawns a real, instantly-exiting process, confirms (as a sanity check on
+    // the test itself, not the fix) that it really does sit as a zombie before anyone reaps it, then
+    // proves `reap_native_child` collects it.
+    #[test]
+    fn reap_native_child_collects_a_finished_process_not_just_the_handle() {
+        let child = Command::new("/bin/sh").args(["-c", "exit 0"]).spawn().expect("spawn a real process");
+        let pid = child.id();
+        let mut slot = Some(child);
+
+        // Give it time to actually exit before anyone has reaped it.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !ps_state(pid).contains('Z') && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            ps_state(pid).contains('Z'),
+            "test precondition: the process must sit as a zombie before it is reaped, ps state was {:?}",
+            ps_state(pid)
+        );
+
+        reap_native_child(&mut slot, true);
+
+        assert!(slot.is_none(), "the slot must be cleared once reaped");
+        assert!(
+            ps_state(pid).is_empty(),
+            "the zombie must be gone from the process table after reaping, ps state was {:?}",
+            ps_state(pid)
+        );
     }
 
     // ---- required: container argument construction ------------------------------------------------
@@ -818,10 +896,10 @@ mod tests {
     // THE EVIDENCE MUST OUTLIVE THE TEARDOWN.
     //
     // A failed attempt is torn down before the next one, and for docker that teardown is `rm -f`,
-    // which takes the container's log with it. Two gateways failed a field run with nothing but
-    // "never became ready; last port state: Free", which is the same message a config typo, a
-    // rejected mount and an unsupported flag all produce. The launcher now reads the log BEFORE the
-    // stop that destroys it, and the reason travels in the error.
+    // which takes the container's log with it. Without reading the log BEFORE that stop, a config
+    // typo, a rejected mount and an unsupported flag would all surface identically as "never became
+    // ready; last port state: Free", so the launcher reads the log first and the reason travels in
+    // the error.
     #[test]
     fn a_gateway_that_never_came_up_carries_what_it_said_before_it_died() {
         struct Dying {

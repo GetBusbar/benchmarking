@@ -3,17 +3,13 @@
 //
 // THE ENGINE, STATED ONCE: for every configured cell, run every metric.
 //
-// WHY THIS EXISTS. The engine used to reach for its measurements one call site at a time, and the
-// throughput sweep was the only one anything reached for. `rss` (per-cell memory), `qualify` (box
-// health) and `launch` were finished, unit-tested, and had ZERO callers - 17% of the engine, 57
-// passing tests, wired to nothing - while the suite reported green, because every test drove one
-// module against fakes and none asserted that a module is reachable from a real run. Memory is the
-// board's headline metric and `site/gen-data.mjs` takes it SOLELY from the per-cell window, with no
-// fallback, so a board built from that engine would have published no memory at all.
-//
-// A list fixes that class outright. A metric is in `METRICS` or it does not exist, and `METRICS` is
-// one thing a human can read in full. There is no third state where a measurement is implemented,
-// tested, and silently never taken.
+// WHY THIS EXISTS. A metric is in `METRICS` or it does not exist, and `METRICS` is one thing a
+// human can read in full: a module can be finished and unit-tested against fakes with nothing in
+// the real run ever calling it, and a per-module test suite reporting green cannot catch that a
+// module is unreachable. `site/gen-data.mjs` takes memory SOLELY from the per-cell window, with no
+// fallback, so an unreachable `rss` module would mean a board that publishes no memory at all. This
+// list is the one place a measurement being "implemented, tested, and silently never taken" cannot
+// happen.
 //
 // WHY A GROUP AND NOT A FUNCTION PER NUMBER. The obvious shape is one metric per published field.
 // It is wrong on the physics: idle, peak, high-water and recovered RSS are four readings of ONE load
@@ -265,8 +261,8 @@ const MEMORY_RANGE_PCT: f64 = 2.0;
 /// Memory: what the gateway's process tree costs at rest and under load.
 ///
 /// FOUR READINGS OF ONE WINDOW, which is why this is a group. Taking idle from one window and peak
-/// from another would publish two populations side by side, the exact defect `manifest.rs` records as
-/// having already corrupted this board's numbers.
+/// from another would publish two populations side by side for the same gateway, the same class of
+/// defect `manifest.rs` describes for a reader whose identity is not declared once.
 ///
 /// `peak` is sampled, so it can miss a spike between polls; `hwm` is the kernel's own high-water
 /// mark, updated on every charge, so it cannot. Both are published because they answer different
@@ -314,16 +310,12 @@ impl Metric for Memory {
 
         // ── PUT IT BACK AT REST FIRST ────────────────────────────────────────────────────────────
         //
-        // `idle` used to be read right here, as this group's first act. But METRICS runs Throughput
-        // BEFORE Memory on the same process with nothing in between, so by the time this line ran
-        // the gateway had just been driven all the way through a peak-finding sweep. The reading was
-        // post-load RSS wearing the name "idle", and allocators do not return memory to the OS
-        // promptly, so it stayed high: one gateway published 111 MiB idle where a cold process
-        // measures 7.1, a factor of fifteen on the board's headline metric.
-        //
-        // It was also ORDER-DEPENDENT. Each cell inherited whatever the previous cell's load left
-        // resident, so the same gateway measured differently at cell 1 and cell 20, and two gateways
-        // were no longer comparable at all - which is the one thing this board exists to do.
+        // METRICS runs Throughput BEFORE Memory on the same process with nothing in between, so
+        // reading `idle` here without first restarting the process would read post-load RSS under
+        // the name "idle": allocators do not return memory to the OS promptly, so the reading would
+        // stay high and, worse, ORDER-DEPENDENT, since each cell would inherit whatever the previous
+        // cell's load left resident, making the same gateway measure differently at cell 1 and cell
+        // 20 and two gateways no longer comparable at all - the one thing this board exists to do.
         //
         // So the process is restarted and only then read. All four readings still come from ONE
         // window on ONE process, which is what this group is for; the window now simply starts where
@@ -365,10 +357,10 @@ impl Metric for Memory {
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let peak_seen = std::sync::Arc::new(std::sync::Mutex::new(f64::NEG_INFINITY));
         // KEEP THE READINGS, not just their maximum. The sampler already visits the tree every
-        // MEMORY_SAMPLE_INTERVAL; it used to fold each reading into a running max and throw the
-        // reading away, so `rss_series` published empty on every cell and the peak was a number with
-        // no curve behind it. Whether memory climbed and plateaued or spiked once is the difference
-        // between a leak and a burst, and neither is visible from a single scalar.
+        // MEMORY_SAMPLE_INTERVAL, so folding each reading into a running max and discarding it would
+        // leave `rss_series` empty and the peak a number with no curve behind it. Whether memory
+        // climbed and plateaued or spiked once is the difference between a leak and a burst, and
+        // neither is visible from a single scalar.
         let series = std::sync::Arc::new(std::sync::Mutex::new(Vec::<crate::stats::Sample>::new()));
         let sampler = {
             let stop = std::sync::Arc::clone(&stop);
@@ -754,8 +746,8 @@ mod tests {
     // IDLE MUST COME FROM A PROCESS AT REST.
     //
     // METRICS runs Throughput before Memory on the same process, so by the time Memory reads RSS the
-    // gateway has just been driven through a full peak-finding sweep. The reading was published as
-    // "idle" anyway: one gateway shipped 111 MiB where a cold process measures 7.1.
+    // gateway has just been driven through a full peak-finding sweep, and a post-load reading
+    // published as "idle" would badly overstate a cold process's footprint.
     //
     // When the harness does not own the gateway's lifetime (relaunch: None) it cannot put it back at
     // rest, and the only honest answer is an absence carrying that reason - never the post-load

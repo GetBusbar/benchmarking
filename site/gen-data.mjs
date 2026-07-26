@@ -31,7 +31,7 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = process.argv[2] || join(HERE, "..");
 const OUT = process.argv[3] || HERE;
 
-// GOVERNANCE RETIRED (matrix-sole-source): governance is not measured on the board — the governed
+// GOVERNANCE RETIRED (matrix-sole-source): governance is not measured on the board - the governed
 // suite was busbar-only and is retired. `governed/run.sh` stays on disk (unused) but the suite is
 // no longer scanned into the bundle and no governed column/derivation is emitted. See app.js.
 // NOTE: "memory" is intentionally NOT scanned. The retired standalone memory suite wrote synthetic
@@ -41,7 +41,7 @@ const OUT = process.argv[3] || HERE;
 // harness would not have had to SELECT, which is the defect per-cell measurement exists to remove.
 const SUITES = ["perf", "stream", "streamcpu", "xlate", "matrix"];
 // The ungated (non-honesty-gated) latency-shaped metrics on a perf cell: always certified when present.
-// Imported from seal.mjs — the ONE vocabulary check-consistency also imports, so the two can never lag
+// Imported from seal.mjs - the ONE vocabulary check-consistency also imports, so the two can never lag
 // each other. RSS fields are sealed BY DISCOVERY (RSS_FIELD_RE), never from a whitelist (audit #11).
 const UNGATED_LAT = UNGATED_LAT_FIELDS;
 
@@ -119,7 +119,7 @@ const gateways = gatewayKeys.map((key) => {
     stars: starsSnap[key]?.stars ?? null,
     stars_as_of: starsSnap[key]?.as_of ?? null,
     // Project age context: the repo's FIRST-commit date (not created_at, which resets on
-    // renames). Rendered as a simple relative age — 43k stars over 10 years and 100 over 3
+    // renames). Rendered as a simple relative age - 43k stars over 10 years and 100 over 3
     // weeks are different statements.
     first_commit: starsSnap[key]?.first_commit ?? null,
   };
@@ -145,16 +145,12 @@ const gateways = gatewayKeys.map((key) => {
     const diskMs = Number.isFinite(diskAt) ? diskAt : -1;
     if (snap.matrix && (!g.matrix || snapMs >= diskMs)) {
       // A DEGRADED-MODE RUN MUST NOT BECOME THE BOARD'S SOURCE JUST BY BEING NEWER. The producer records
-      // which phases it was told to run (cell_perf_sweep / cell_stream / cell_memory). A field run has
-      // them all on; a local smoke run turns them off to finish in minutes, and its snapshot lands in the
-      // SAME results/snapshots/ directory. Recency then hands the whole row to it: this actually happened
-      // to one gateway, whose board row became a probe-only laptop run (1 cell, no perf, no streaming, no
-      // memory, no best_cell) that shadowed a complete field run from the same morning, with nothing
-      // anywhere saying so. It is the trap-1 class one level up - not results/matrix/<gw>.json being
-      // overwritten, but an untracked snapshot silently outranking it.
-      // This is NOT the "fewer served cells" case, which is honest and must publish: a re-run that finds
-      // less IS the new truth. It is the case where the producer was TOLD NOT TO MEASURE. Refusing it is
-      // therefore a statement about the run's MODE, never about its numbers.
+      // which phases it was told to run (cell_perf_sweep / cell_stream / cell_memory); a local smoke run
+      // turns them off to finish in minutes and its snapshot lands in the SAME results/snapshots/
+      // directory as a field run, so recency alone would let a probe-only run silently outrank and
+      // shadow a complete one. This is NOT the "fewer served cells" case (a re-run that finds less IS
+      // the new truth); it is the case where the producer was TOLD NOT TO MEASURE, so refusing it is a
+      // statement about the run's MODE, never about its numbers.
       const degraded = snapshotDegradedMode(snap.matrix);
       const diskFull = g.matrix && !snapshotDegradedMode(g.matrix);
       if (degraded && diskFull) {
@@ -184,7 +180,7 @@ const gateways = gatewayKeys.map((key) => {
   // A gateway with no artifact stays absent and the board renders "not published".
   if (g.ootb_config == null) {
     // The pointer comes from the MATRIX (the sole source) when it carries one; the retired perf suite is
-    // no longer consulted (audit #12 — g.perf is a fallback-only input that the emit step deletes).
+    // no longer consulted (audit #12 - g.perf is a fallback-only input that the emit step deletes).
     // THE POINTER IS PRODUCER-SUPPLIED, SO IT IS UNTRUSTED. It arrives inside a results JSON and its
     // contents are published verbatim onto a public page, so a `..` in it reads an arbitrary local file
     // straight onto the board - a gateway manifest, a harness script, or anything else readable by the
@@ -211,7 +207,7 @@ const gateways = gatewayKeys.map((key) => {
     // translation perf; the standalone perf/xlate suites are a LIVE deferred FALLBACK (a gateway with
     // no matrix sweep for that path). g.best_cell / g.translation_cell are the ONE canonical record
     // every surface reads (table, drawer, compare, charts.py). Every metric is SEALED here into an
-    // envelope (seal.mjs): the raw scalar + its _mock_bound flag are CONSUMED, never re-emitted — a
+    // envelope (seal.mjs): the raw scalar + its _mock_bound flag are CONSUMED, never re-emitted - a
     // render site has no ungated field to leak. The cell's `source` stamp discloses provenance and
     // drives every caption (no hard-coded source string can drift). See seal.mjs / Design E.
     const build = g.matrix.build ?? null, at = g.matrix.measured_at ?? null;
@@ -223,7 +219,7 @@ const gateways = gatewayKeys.map((key) => {
     const tc = translationCell(g.matrix);
     if (tc) g.translation_cell = sealPerfCell(tc, { ingress: tc.ingress, egress: tc.egress },
       makeSource("matrix", SWEEP.TRANSLATION, build, at));
-    // STREAMING projection (matrix single source): the BEST DIAGONAL cell's streaming — the SAME
+    // STREAMING projection (matrix single source): the BEST DIAGONAL cell's streaming - the SAME
     // (ingress==egress) cell the headline perf is projected from (one source of truth). Only when the
     // diagonal ACTUALLY STREAMED (stream_served===true); a non-streaming cell leaves g.streaming absent.
     if (bc) {
@@ -238,19 +234,18 @@ const gateways = gatewayKeys.map((key) => {
     // which. A per-gateway scalar cannot exist without the harness selecting a cell silently, which is
     // exactly the defect the per-cell design removes. The windows are sealed in place below.
     // SEAL every matrix cell in-place (AFTER selection/projection, which read raw). The matrix popup +
-    // Protocol view read cell.perf / cell.stream directly, so those must be envelopes too — otherwise a
+    // Protocol view read cell.perf / cell.stream directly, so those must be envelopes too - otherwise a
     // raw ungated scalar (and its _mock_bound flag) survives in the bundle (invariant C1).
     sealMatrixCellsInPlace(g.matrix);
   }
   // LIVE DEFERRED FALLBACKS (stay until the field run folds them into the matrix; DO NOT break them).
   // Each is sealed with its OWN honest `source` stamp (stream-suite / perf-suite / xlate-suite), so the
-  // envelope is correct NOW and captions tell the truth about provenance. There is NO memory fallback —
+  // envelope is correct NOW and captions tell the truth about provenance. There is NO memory fallback -
   // the retired synthetic burst suite mislabelled as 6x6 provenance and is neither scanned nor read.
   if (!g.streaming && g.stream && g.stream.stream_served === true) {
-    // AUDIT #6: stamp the dialect the STREAM SUITE ACTUALLY USED (derived from the endpoint it probed),
-    // NOT the matrix's passthrough diagonal. Stamping the matrix diagonal relabelled two gateways
-    // (which the stream suite drove on /v1/messages = Anthropic) as an OpenAI stream, a
-    // provenance claim about a run that never happened. Unknown endpoint → null (the caption says "?").
+    // Stamp the dialect the STREAM SUITE ACTUALLY USED (derived from the endpoint it probed), not the
+    // matrix's passthrough diagonal: the two can differ, and stamping the diagonal would claim
+    // provenance for a run that never happened. Unknown endpoint -> null (the caption says "?").
     const dia = streamSuiteDialect(g.stream);
     g.streaming = sealStreaming({
       added_ttft_p50_us: g.stream.stream_added_ttft_p50_us,
@@ -284,7 +279,7 @@ const gateways = gatewayKeys.map((key) => {
       makeSource("perf-fallback", SWEEP.PERF_SUITE, g.perf.build ?? null, g.perf.measured_at ?? null));
   }
   if (!g.translation_cell && g.xlate && g.xlate.xlate_served === true && g.xlate.xlate_added_latency_p99_us != null) {
-    // Legacy xlate suite (anthropic in -> openai out — the OPPOSITE direction of the matrix cell).
+    // Legacy xlate suite (anthropic in -> openai out - the OPPOSITE direction of the matrix cell).
     // Sealed with its real direction + source:"xlate-fallback" so the two paths can never be confused.
     g.translation_cell = sealPerfCell({
       added_latency_p50_us: g.xlate.xlate_added_latency_p50_us,
@@ -307,10 +302,10 @@ const gateways = gatewayKeys.map((key) => {
   // LOW-R3-3: the badge stamp must reflect the age of the DISPLAYED numbers, which are projected from
   // g.matrix ONLY (best_cell / streaming / the per-cell memory windows). Deriving it from the MAX across all suites let a
   // newer legacy results/perf/<gw>.json (reachable via an ad-hoc SUITES=perf re-run) drive a "measured 5d
-  // ago" badge while the shown matrix numbers were 90d old — the badge overstating freshness. Prefer the
+  // ago" badge while the shown matrix numbers were 90d old - the badge overstating freshness. Prefer the
   // matrix stamp; fall back to the newest-across-suites only when there is no matrix (a legacy-only row
   // whose numbers age by that stamp anyway). The staleness flag below is re-derived on the same basis.
-  // LOW-R3-3 / MED-1: the per-row badge stamp ages the DISPLAYED (matrix-preferring) numbers — the SAME
+  // LOW-R3-3 / MED-1: the per-row badge stamp ages the DISPLAYED (matrix-preferring) numbers - the SAME
   // shared basis the board-level footer + wholesale-stale floor now use (displayedMeasuredMs). Hoisted
   // function declaration, so it is callable here even though it is defined below.
   const gAtMs = displayedMeasuredMs(g);
@@ -330,15 +325,11 @@ const gateways = gatewayKeys.map((key) => {
   // carries a window, so a matrix with no memory data leaves the lane unstamped rather than claiming a
   // freshness for numbers that are not there.
   if (matrixHasCellMemory(g.matrix) && g.matrix.measured_at) g.lane_measured_at.memory = g.matrix.measured_at;
-  // ---- RIG PROVENANCE (audit #21): WHICH measurement instrument produced this row ------------------
+  // ---- RIG PROVENANCE: WHICH measurement instrument produced this row -------------------------------
   // The mock + loadgen come from a MOVING GitHub release tag, so an identical harness can produce
-  // DIFFERENT cell verdicts across runs purely because the instrument was rebuilt between them — which
-  // is exactly what happened this week (bcf9912 tightened the mock's request_shape_ok; the assets were
-  // rebuilt mid-week; served-cell counts dropped board-wide for a reason that had nothing to do with the
-  // gateways). Nothing in either run's output recorded it, so establishing that took an investigation.
-  // Surfacing it here makes an instrument change legible at a glance on any future cross-run comparison.
-  // NULL-SAFE: every snapshot written before this existed simply has no rig block and renders "not
-  // recorded" — never a fabricated digest.
+  // DIFFERENT cell verdicts across runs purely because the instrument was rebuilt between them.
+  // Surfacing it here makes an instrument change legible at a glance on any cross-run comparison.
+  // NULL-SAFE: a snapshot with no rig block renders "not recorded", never a fabricated digest.
   g.rig = (g.matrix && g.matrix.rig) || null;
   return g;
 });
@@ -391,12 +382,12 @@ function sealPerfCell(perf, path, source) {
 function sealStreamRecord(s) {
   const rec = {};
   for (const k of UNGATED_STREAM_FIELDS) if (s[k] != null) rec[k] = sealMetric(s[k], {});
-  // AUDIT #11: streams_sustained_fps is the SAME bisect's rate — it inherits that bisect's mock-bound
+  // AUDIT #11: streams_sustained_fps is the SAME bisect's rate - it inherits that bisect's mock-bound
   // honesty flag. Sealing it UNGATED beside a GATED streams_sustained let the rig-bound rate publish
   // while the count it came from was suppressed. Gate it on the same flag.
   rec.streams_sustained_fps = sealMetric(s.streams_sustained_fps, {
     gated: true, flag: s.streams_sustained_mock_bound, zeroNote: ZERO_MEASURED_FAIL });
-  // AUDIT #3: streaming counts — a 0 is a MEASURED FAILURE (offered stream load, sustained none), NOT
+  // AUDIT #3: streaming counts - a 0 is a MEASURED FAILURE (offered stream load, sustained none), NOT
   // "not measured". Only a null (absent field) is not-measured. The note names which, and every surface
   // renders the two apart.
   rec.streams_sustained = sealMetric(s.streams_sustained, {
@@ -424,10 +415,10 @@ function matrixHasCellMemory(m) {
 }
 // sealMatrixCellsInPlace: replace every served cell's raw perf/stream AND the top-level memory block's raw
 // RSS with SEALED envelopes, so the matrix popup + Protocol view + the embedded/snapshot matrix carry
-// envelopes, never raw scalars — NO ungated metric field survives anywhere in the bundle (invariant C1).
+// envelopes, never raw scalars - NO ungated metric field survives anywhere in the bundle (invariant C1).
 // Non-metric fields (served/status/path/verdict_note/load_cell/rss_series/…) are untouched.
 function sealMatrixCellsInPlace(m) {
-  const seen = new Set();   // v1 shares m.cells with upstreams[shape].cells (same refs) — seal once.
+  const seen = new Set();   // v1 shares m.cells with upstreams[shape].cells (same refs) - seal once.
   const cellGroups = [m.cells, ...Object.values(m.upstreams || {}).map((u) => u && u.cells)];
   for (const cells of cellGroups) {
     if (!cells || typeof cells !== "object") continue;
@@ -476,13 +467,12 @@ function bestCell(m) {
 // RPS is capacity-bound and noisier). Fixing ingress to openai keeps the input side identical across
 // gateways; the egress varies and is shown as the row's path pill. Returns {ingress:"openai", egress,
 // ...perf} or null when the gateway serves no openai-in translation path.
-// AUDIT #4: the MATRIX WINS whenever it measured ANY translation cell. The original selector accepted
-// ONLY an openai-INGRESS cell, so a gateway whose matrix measured translation in the other direction
-// (one gateway: anthropic in -> openai out, 18,157 rps, measured) fell through to LEGACY xlate and
-// published its stale 17,437 — a legacy number RANKED against matrix-sourced rows. Selection is now two
-// tiers: the FAIR tier first (openai ingress, identical input side across gateways), and only when the
-// matrix has none of those, ANY served cross-dialect cell it did measure. The legacy fallback fires only
-// when the matrix genuinely has NO translation cell at all.
+// The MATRIX WINS whenever it measured ANY translation cell, not only an openai-ingress one: a gateway
+// whose matrix measured translation in the other direction (anthropic in -> openai out) must not fall
+// through to the legacy xlate suite's stale number just because it lacks the fair-tier direction.
+// Selection is two tiers: the FAIR tier first (openai ingress, identical input side across gateways),
+// and only when the matrix has none of those, ANY served cross-dialect cell it did measure. The legacy
+// fallback fires only when the matrix genuinely has NO translation cell at all.
 function translationCell(m) {
   if (!m.upstreams) return null;
   const fair = [], any = [];
@@ -550,8 +540,8 @@ for (const g of gateways) {
 const hardware = [...hwCounts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] || null;
 // MED-1: the board footer "Latest measurement: Nd ago" must reflect the DISPLAYED numbers (matrix-
 // preferring), NOT the max across all suites (which folds a never-displayed legacy re-run and overstates
-// freshness). `latest` above still folds all suites for the future-date corruption hard-fail (:324) —
-// a future-dated legacy stamp is still corruption — but the PUBLISHED footer uses the displayed basis.
+// freshness). `latest` above still folds all suites for the future-date corruption hard-fail (:324) -
+// a future-dated legacy stamp is still corruption - but the PUBLISHED footer uses the displayed basis.
 const latestDisplayedMs = Math.max(...gateways.map(displayedMeasuredMs), 0);
 const latestDisplayed = latestDisplayedMs > 0 ? new Date(latestDisplayedMs).toISOString() : null;
 
@@ -562,7 +552,7 @@ function newestMeasuredMs(g) {
 
 // MED-1 / MED-2: the stamp that actually drives what the board DISPLAYS, in epoch ms (0 when none).
 // EVERY displayed number now comes from g.matrix ONLY (best_cell / streaming / the per-cell memory windows), so the
-// board-level freshness footer AND the wholesale-stale hard-fail must age those displayed numbers — the
+// board-level freshness footer AND the wholesale-stale hard-fail must age those displayed numbers - the
 // matrix stamp when present, falling back to the newest-across-suites only for a legacy-only row (whose
 // numbers legitimately age by that stamp). This is the SAME basis the per-gateway ageBasisMs (:415) uses.
 // Folding retired legacy suite timestamps in (newestMeasuredMs) let a never-displayed ad-hoc SUITES=perf
@@ -577,40 +567,31 @@ function displayedMeasuredMs(g) {
 // precede the newest embedded measurement: if it does, a raw result is future-dated (clock skew
 // on the rig) and a "fresh" bundle would look older than its data. Hard fail; never ship it.
 const generatedAt = new Date().toISOString();
-// NIT: compare as parsed epoch ms, not raw ISO strings. A lexicographic `generatedAt < latest`
-// is only correct when both are the SAME ISO precision/zone; a fractional-second vs whole-second
-// mismatch can mis-order two instants that are microseconds apart (this is what forced
-// verify-local.sh's `sleep 2` workaround — Date.parse comparison lets it drop that; not touched here).
+// Compare as parsed epoch ms, not raw ISO strings: a lexicographic `generatedAt < latest` is only
+// correct when both are the SAME ISO precision/zone, and a fractional-second vs whole-second mismatch
+// can mis-order two instants that are microseconds apart.
 if (latest && Date.parse(generatedAt) < Date.parse(latest)) {
   throw new Error(`gen-data: generated_at ${generatedAt} predates the newest embedded measured_at ${latest}; ` +
     `a raw result is future-dated (rig clock skew?). Refusing to emit a bundle that would read stale.`);
 }
 
-// WHAT CHANGED (matrix-sole-source). A gateway's ENTIRE benchmark is now ONE atomic matrix run that
-// legitimately takes HOURS (busbar ~5h), and gateways are published INDEPENDENTLY (busbar can be
-// re-run and pushed alone, another's row stays from 3 weeks ago). The two RELATIVE guards the old model
-// used are therefore both WRONG now and are REMOVED:
-//   - The intra-row SPAN hard-fail (MAX_SPAN_H ~3h) assumed a row mixed several short suites from
-//     different runs. Under one atomic matrix run there are no "mixed suites" to catch, and a single
-//     legitimate run's timestamps span hours — so the span check false-fails every real run. Replaced
-//     by a GENEROUS sanity cap (MAX_ROW_SPAN_SANITY_H) far above any real run, purely to catch a
-//     clearly-corrupt/future-dated timestamp within a row; a real run never approaches it.
-//   - The cross-gateway LAG hard-fail (MAX_LAG_H) assumed one field run updated every box together, so
-//     a lagging row meant a failed refresh. On a living board with per-gateway cadences, different
-//     measured_at is HONEST and EXPECTED — updating just busbar must not make every other gateway a
-//     hard-fail. REMOVED entirely.
-// KEPT: the wholesale-stale ABSOLUTE floor (soft anchor) — if the newest measurement ANYWHERE on the
-// board is older than MAX_BOARD_AGE_DAYS, the WHOLE board is stale (nothing refreshed at all) and the
-// bundle must not publish generated_at=now over it.
-// NEW: a PER-GATEWAY absolute age SIGNAL. A gateway whose own newest measurement is older than
-// MAX_GATEWAY_AGE_DAYS gets a per-row `stale` flag (drives the app.js badge) — NOT a build failure.
-// This makes independent update cadences visible without blocking per-gateway updates.
+// FRESHNESS MODEL: a gateway's ENTIRE benchmark is ONE atomic matrix run that legitimately takes HOURS
+// (busbar ~5h), and gateways publish INDEPENDENTLY (one gateway's row can be hours old while another's
+// is weeks old). There is no intra-row span hard-fail beyond a generous sanity cap
+// (MAX_ROW_SPAN_SANITY_H, far above any real run) that exists only to catch a corrupt/future-dated
+// timestamp, and no cross-gateway lag check: on a living board with per-gateway cadences, differing
+// measured_at values across gateways are honest and expected.
+// The wholesale-stale ABSOLUTE floor (soft anchor): if the newest measurement ANYWHERE on the board is
+// older than MAX_BOARD_AGE_DAYS, the WHOLE board is stale and the bundle must not publish
+// generated_at=now over it.
+// A PER-GATEWAY absolute age SIGNAL: a gateway whose own newest measurement is older than
+// MAX_GATEWAY_AGE_DAYS gets a per-row `stale` flag (drives the app.js badge), not a build failure.
 const MAX_ROW_SPAN_SANITY_H = 12;  // sanity-only: one atomic matrix run is hours; >12h means a corrupt/skewed stamp
 const MAX_GATEWAY_AGE_DAYS = 60;   // per-gateway staleness SIGNAL (badge), never a build failure
 const MAX_BOARD_AGE_DAYS = 180;    // wholesale-stale floor (soft anchor): the whole board older than this = hard fail
 // MED-2: base the wholesale-stale floor on the DISPLAYED (matrix-preferring) stamps, not the max across
 // all suites. Otherwise a single untouched results/perf/<gw>.json re-run yesterday makes boardNewest =
-// yesterday while every DISPLAYED matrix number is 179d old — the 180-day hard-fail (the one absolute
+// yesterday while every DISPLAYED matrix number is 179d old - the 180-day hard-fail (the one absolute
 // guard the rewrite KEPT) never fires and a wholesale-stale matrix board publishes generated_at=now.
 // The floor now ages exactly what the board shows (same basis as MED-1's footer + the per-row badge).
 const boardNewest = Math.max(...gateways.map(displayedMeasuredMs), 0);
@@ -619,7 +600,7 @@ if (boardNewest > 0) {
   if (boardAgeDays > MAX_BOARD_AGE_DAYS) {
     throw new Error(
       `gen-data: FRESHNESS FAILURE (stale board): the newest DISPLAYED measurement anywhere on the board is ${boardAgeDays.toFixed(1)}d old ` +
-      `(> ${MAX_BOARD_AGE_DAYS}d) — the WHOLE board is wholesale-stale (nothing displayed has refreshed at all). ` +
+      `(> ${MAX_BOARD_AGE_DAYS}d) - the WHOLE board is wholesale-stale (nothing displayed has refreshed at all). ` +
       `Refusing to publish generated_at=${generatedAt} over stale data. Re-run the field.`);
   }
 }
@@ -644,7 +625,7 @@ for (const g of gateways) {
   // computation to the MATRIX suite's measured_at ONLY. The retired legacy suites (perf/stream/streamcpu/
   // memory) are fallback-only and are NEVER refreshed by a matrix-only re-run, so they carry weeks-old
   // stamps; folding them into the span made an honest matrix-only re-run (matrix=today, legacy=weeks ago)
-  // trip the >12h cap and abort the deploy — defeating incremental publish. The matrix is the single
+  // trip the >12h cap and abort the deploy - defeating incremental publish. The matrix is the single
   // source; only its own timestamps define the run this cap sanity-checks.
   const matrixAt = g.matrix && g.matrix.measured_at && Date.parse(g.matrix.measured_at) <= nowMs
     ? Date.parse(g.matrix.measured_at) : null;
@@ -655,7 +636,7 @@ for (const g of gateways) {
   // NIT-R2-4 / NIT-R5-4 (comment accuracy): actually PERFORM the skip the warn loop promises. g.measured_at
   // was assigned from the future-INCLUSIVE newestMeasuredMs (:227), so a lone skewed-future stamp would
   // otherwise drive a NEGATIVE "measured Nd ago" badge; re-derive the badge stamp from the non-future ats
-  // only. HONEST SCOPE: this is DEFENSE-IN-DEPTH, not a live guard. ANY future stamp (matrix OR legacy —
+  // only. HONEST SCOPE: this is DEFENSE-IN-DEPTH, not a live guard. ANY future stamp (matrix OR legacy -
   // the loop at :306 folds every suite into `latest`) already trips the board-wide future-date hard-fail
   // at :343, which THROWS before this line is reached, so no bad badge can ship today. This re-derivation
   // only becomes reachable if that :343 hard-fail is ever weakened/removed; it is retained as a belt-and-
@@ -665,7 +646,7 @@ for (const g of gateways) {
   // translation_cell, source:"matrix", or a per-cell memory window) but that carries NO valid (non-future) matrix
   // measured_at is CORRUPT: run.sh:1145 ALWAYS writes measured_at via `date -u`, so a null/absent matrix
   // stamp is only reachable via truncation / hand-edit / producer bug. Left unguarded such a row bypasses
-  // EVERY freshness guard — best_cell still projects and ranks, `latest` (:306) skips it so the future-
+  // EVERY freshness guard - best_cell still projects and ranks, `latest` (:306) skips it so the future-
   // date hard-fail never sees it, displayedMeasuredMs returns 0 so it is exempt from the 180d floor, and
   // ats.length<1 hits the `continue` below BEFORE g.stale is set, so it publishes FRESH with no badge. A
   // stamp-less served matrix row must never publish clean: flag it stale (drives the app.js badge) and
@@ -678,15 +659,15 @@ for (const g of gateways) {
       || matrixHasCellMemory(g.matrix));
   if (g.matrix && matrixProjected && matrixAt == null) {
     console.warn(`gen-data: WARNING: ${g.key} projects displayed numbers from a served matrix but its ` +
-      `matrix.measured_at is missing/invalid (=${g.matrix.measured_at}) — run.sh always stamps a matrix, ` +
+      `matrix.measured_at is missing/invalid (=${g.matrix.measured_at}) - run.sh always stamps a matrix, ` +
       `so this is corruption/hand-edit. Flagging the row STALE so it never publishes fresh without a badge.`);
     g.stale = true;
   }
   if (ats.length < 1) continue;
-  // NIT-R2-2 / NIT-R5-2: INERT PLACEHOLDER — dead code today, NOT a live safeguard. A matrix row carries
+  // NIT-R2-2 / NIT-R5-2: INERT PLACEHOLDER - dead code today, NOT a live safeguard. A matrix row carries
   // at most ONE matrix stamp, so matrixSpanAts is length 0 or 1 and the `>= 2` gate below NEVER fires;
   // it performs no cross-timestamp check on any current data. The live corruption/freshness guards are
-  // the board-wide future-date hard-fail (:343) and the 180-day wholesale-stale floor (:376) — NOT this
+  // the board-wide future-date hard-fail (:343) and the 180-day wholesale-stale floor (:376) - NOT this
   // block. It is retained (null-safe, matrix-scoped) purely so the span check reactivates automatically
   // should a future matrix result ever embed multiple internal timestamps; until then it is a no-op.
   const matrixSpanAts = matrixAt != null ? [matrixAt] : [];
@@ -694,13 +675,13 @@ for (const g of gateways) {
     const spanH = (Math.max(...matrixSpanAts) - Math.min(...matrixSpanAts)) / 3600000;
     if (spanH > MAX_ROW_SPAN_SANITY_H) {
       throw new Error(
-        `gen-data: FRESHNESS FAILURE (corrupt row): ${g.key}'s MATRIX timestamps span ${spanH.toFixed(1)}h (> ${MAX_ROW_SPAN_SANITY_H}h sanity cap) — ` +
+        `gen-data: FRESHNESS FAILURE (corrupt row): ${g.key}'s MATRIX timestamps span ${spanH.toFixed(1)}h (> ${MAX_ROW_SPAN_SANITY_H}h sanity cap) - ` +
         `a corrupt or future-dated timestamp (one atomic matrix run is hours, never this). matrix.measured_at=${g.matrix.measured_at}`);
     }
   }
   // PER-GATEWAY staleness SIGNAL (not a failure): flag a row whose own data has aged past the
   // threshold so app.js can show a "stale" badge. A living board with mixed cadences is fine.
-  // LOW-R3-3: age the DISPLAYED numbers — matrix.measured_at when present (best_cell/streaming/memory
+  // LOW-R3-3: age the DISPLAYED numbers - matrix.measured_at when present (best_cell/streaming/memory
   // all project from it), so a stale matrix is flagged even if a newer legacy suite stamp is around;
   // fall back to the newest non-future suite stamp only for a legacy-only row (no matrix).
   const ageBasisMs = matrixAt != null ? matrixAt : Math.max(...ats);
@@ -759,7 +740,7 @@ const data = {
 };
 // C1: strip the raw legacy suite objects from the EMITTED bundle. They were projection INPUTS (their
 // values are now sealed into best_cell/translation_cell/streaming), and they carry raw scalars + their
-// _mock_bound flags — a reservoir no surface reads any more (charts.py projects from the canonical
+// _mock_bound flags - a reservoir no surface reads any more (charts.py projects from the canonical
 // records; app.js reads envelopes). Removing them from the artifact is what makes "no ungated metric
 // field exists in the bundle" true. g.matrix stays (its cells are sealed in-place; its top-level
 // build/measured_at/p99_ceiling_ms/sweep_dur drive freshness + the sweep-integrity oracle).

@@ -4,7 +4,7 @@
 #
 # Runs the official image (PORTKEY_IMAGE, pinned below in this file; multi-arch amd64+arm64, at the
 # benchmarked 1.15.2) with the same uniform launch shape as the other docker gateways: host
-# network, --cpuset-cpus pin. The image needs no config — routing to the mock is per-request via
+# network, --cpuset-cpus pin. The image needs no config - routing to the mock is per-request via
 # Portkey's own headers: x-portkey-provider + x-portkey-custom-host (the same way AIGatewayBench
 # drives it). Anthropic Messages path. The image listens on 8787, portkey's default (= GW_PORT).
 GW_KIND=docker
@@ -13,7 +13,7 @@ GW_KIND=docker
 # manifest instead of hardcoding it. lib/gateway_isolation_test.sh checks it against the --name
 # below, so the two cannot drift.
 GW_CONTAINER=portkey-bench
-# Self-describing manifest metadata — charts.py + the run lists read these, so a gateway
+# Self-describing manifest metadata - charts.py + the run lists read these, so a gateway
 # is fully defined by its own dir (add/remove a dir → it appears/disappears everywhere).
 GW_DISPLAY="Portkey"                      # label in charts + report tables
 GW_LANG=Node                            # implementation language → bar color bucket
@@ -140,20 +140,20 @@ gw_launch() {
 
 # ── OOTB config artifact (image needs no config; per-request header routing) ──────────────────────
 # gw_config prints the canonical OOTB config this gateway launches with. Portkey's OSS image needs NO
-# config file — it boots with ALL its providers available and the upstream is selected PER REQUEST via
+# config file - it boots with ALL its providers available and the upstream is selected PER REQUEST via
 # x-portkey-provider + x-portkey-custom-host headers (the same way Portkey itself documents driving the
 # self-hosted gateway). So the artifact is the launch invariants: the pinned image, the run-mechanics
 # (host network + CPU pin), and the default request headers this manifest sends (the anthropic lane's
 # GW_HEADERS; the matrix swaps the provider per column). The suite runner captures this once per run
 # into results/config/portkey.txt and the board publishes it.
-# OOTB posture: the image runs UNMODIFIED — no config, no feature strips, no perf tuning, nothing
+# OOTB posture: the image runs UNMODIFIED - no config, no feature strips, no perf tuning, nothing
 # disabled. The gateway ships UNPROTECTED by default (no gateway-level auth key), so we keep it
 # unprotected (GW_AUTH=dummy is a placeholder; the OSS gateway enforces no key). Provider selection is
 # a runtime header, not a config change. The only deviation from a stock invocation is x-portkey-
-# custom-host pointing the upstream at the mock — the permitted base_url override.
+# custom-host pointing the upstream at the mock - the permitted base_url override.
 gw_config() {
   cat <<ENV
-# image (run unmodified; no config file — the OSS gateway needs none)
+# image (run unmodified; no config file - the OSS gateway needs none)
 PORTKEY_IMAGE=$PORTKEY_IMAGE
 # run-mechanics
 docker run --network host --cpuset-cpus=$CORES

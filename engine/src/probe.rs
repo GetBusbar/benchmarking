@@ -3,17 +3,11 @@
 //
 // Classifying what a cell probe OBSERVED, and deciding how hard to try.
 //
-// THE FAIRNESS DEFECT THIS EXISTS FOR. Both of these once depended on the gateway's own advisory
-// capability declaration, so the identical observation (a real persistent 5xx with the recording
-// mock verifiably healthy) was published as `not_configured` on an undeclared cell and as
-// `not_verified` on a declared one, and the declared cell was also tried harder: 3 attempts at 120s
-// against 2 at 10s. An unverified claim moved both the verdict and the measurement effort spent
-// earning it. That is the harness failing to treat equals equally, and it is invisible in the
-// published JSON because both verdicts are legitimate classes.
-//
-// The type system now enforces what the shell enforced by discipline: `Observation` carries only
-// what the rig saw, and `transient_budget()` takes no arguments at all, so neither the declaration
-// nor the cell's identity can reach either decision even by accident.
+// FAIRNESS. `Observation` carries only what the rig saw, no cell identity and no capability claim,
+// and `transient_budget()` takes no arguments at all, so neither a gateway's declaration nor a
+// cell's identity can reach the verdict or the measurement effort spent earning it, even by
+// accident: two cells that differ only in what the gateway claims about them must classify
+// identically and get the same number of attempts.
 
 use serde::{Deserialize, Serialize};
 
@@ -82,10 +76,9 @@ mod tests {
         Observation { status, mock_healthy }
     }
 
-    // THE DEFECT, as a test. The verdict must depend only on what was observed, so two cells that
-    // differ ONLY in what the gateway claimed about them must classify identically. There is no
-    // capability argument to pass, which is the point: this test documents that the API makes the
-    // old bug unrepresentable rather than merely unlikely.
+    // The verdict must depend only on what was observed, so two cells that differ ONLY in what the
+    // gateway claimed about them must classify identically. There is no capability argument to
+    // pass: the API makes that unrepresentable, not merely unlikely.
     #[test]
     fn the_same_observation_always_gets_the_same_verdict() {
         let a = persistent_transient_verdict(obs(Some(503), true));
@@ -94,8 +87,8 @@ mod tests {
         assert_eq!(a, Verdict::NotConfigured);
     }
 
-    // Every cell gets the same effort. A budget that varied by cell is how a gateway's own claim
-    // once bought itself 3 attempts at 120s where an undeclared cell got 2 at 10s.
+    // Every cell gets the same effort: a budget that varied by cell would let a gateway's own claim
+    // buy it more attempts at a longer pause than an undeclared cell gets.
     #[test]
     fn the_budget_is_the_same_for_every_cell() {
         let (r1, p1) = transient_budget();

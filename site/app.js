@@ -38,10 +38,10 @@ const HOME_VIEW = "home";
 //   streaming   = SSE passthrough (its own stall-gated ceiling)
 // The board leads with a NEUTRAL ROSTER (the `gateways` overview: who is on the bench, in
 // alphabetical order, no perf numbers) and the rankings come second; matrix + method round it
-// out. `charts` folds into method; `results` was the old blended tab.
-// UNIFIED TAB BAR (matrix-sole-source): Gateways · Memory · Performance · Streaming · Protocol matrix ·
-// Method. `performance` MERGES the old Peak + Matched tabs into ONE cell-chooser-driven tab (Peak | Same
-// | Custom picks which cell of the ONE 6x6 run to show); `memory` is a NEW per-gateway tab at position 2.
+// out. `charts` folds into method.
+// TAB BAR (matrix-sole-source): Gateways · Memory · Performance · Streaming · Protocol matrix · Method.
+// `performance` is ONE cell-chooser-driven tab (Peak | Same | Custom picks which cell of the ONE 6x6
+// run to show).
 const VIEWS = ["gateways", "memory", "performance", "streaming", "matrix", "method"];
 const VIEW_LABELS = { gateways: "Gateways", memory: "Memory", performance: "Performance", streaming: "Streaming", matrix: "Protocol matrix", method: "Method" };
 // The default (bare /gateways) view: the roster overview.
@@ -50,14 +50,11 @@ const DEFAULT_VIEW = "gateways";
 const PERF_VIEWS = new Set(["performance", "streaming"]);
 // The views that render the shared results table (#view-table).
 const TABLE_VIEWS = new Set(["performance", "streaming", "memory"]);
-// The views the CELL CHOOSER drives. Memory was deliberately excluded while memory was ONE scalar per
-// gateway measured on a harness-picked cell; per-cell measurement removed the reason for the asymmetry,
-// so memory now chooses its cell like every other lane, with its OWN mode set (below).
+// The views the CELL CHOOSER drives. Memory chooses its cell like every other lane, with its OWN
+// mode set (below).
 const CHOOSER_VIEWS = new Set(["performance", "streaming", "memory"]);
-// Old shared URLs pointed at results/charts and the old Peak/Matched/passthrough/translation tabs; map
-// them onto the new unified tabs so links keep resolving. The old translation (Matched) tab is now the
-// Performance tab in Custom mode, so it aliases to `performance` (its ?xin/?xout still decode into the
-// Custom in/out below).
+// Maps retired view names onto the current tabs so old shared links keep resolving. `translation`
+// aliases to `performance` (its ?xin/?xout still decode into the Custom in/out below).
 const VIEW_ALIASES = { results: "performance", charts: "method", peak: "performance", matched: "performance", passthrough: "performance", translation: "performance" };
 // Each perf tab's default (and honest headline) sort column; a clean URL omits the sort when it
 // equals this, and switching tabs snaps to it unless the URL pins another.
@@ -239,16 +236,15 @@ function lane(g, suite, flag, errKey, pick) {
 /* ---- THE data-honesty reader (Design E §2.3) --------------------------------
    Every metric in data.json is a SEALED ENVELOPE ({value, certified, suppressed, reason?, note?, …})
    emitted by gen-data.mjs (see seal.mjs). The honesty gate lives UPSTREAM, at seal time; a suppressed
-   metric has value:null and the raw number is GONE from the bundle. So the reader has NO gate logic —
-   it cannot return an ungated value because there is none. This ONE accessor replaces the twelve
-   per-surface suppress/certify helpers that used to re-derive the gate at every read site.
+   metric has value:null and the raw number is GONE from the bundle. So the reader has NO gate logic:
+   it cannot return an ungated value because there is none. This is the ONE accessor every surface reads
+   a metric through.
      metric(env)        -> { v, text, na, note, source, env } ; v is null (na:true) when not shown.
    `fmt` formats the value; a suppressed/absent metric reads "n/a". */
 function isEnvelope(x) { return x != null && typeof x === "object" && typeof x.certified === "boolean"; }
-/* The envelope's machine token -> the sentence a reader sees. AUDIT #3: a MEASURED FAILURE (the gateway
-   was offered the load and sustained none: a certified 0) and NOT MEASURED (no reading at all: null) are
-   different states and must read differently — publishing the failure as "not measured (rig-limited)"
-   flattered the gateway. */
+/* The envelope's machine token -> the sentence a reader sees. A MEASURED FAILURE (the gateway was
+   offered the load and sustained none: a certified 0) and NOT MEASURED (no reading at all: null) are
+   different states and must read differently. */
 const METRIC_NOTES = {
   no_qualifying_ceiling: "served, but no tested load held p99 < 1 s at <0.1% errors (no qualifying throughput ceiling)",
   measured_failure: "MEASURED FAILURE: the gateway was offered the load and sustained none of it (a real 0, not an unmeasured cell)",
@@ -344,10 +340,10 @@ function memWindows(m) {
   return { idle, recovery: rec, steady };
 }
 function boardMemWindows(data = (typeof state !== "undefined" ? state.data : null)) {
-  // PER-CELL FIRST. The windows now ride on the per-cell records; reading only the legacy per-gateway
-  // record here would silently fall back to the 60 s DEFAULT on every per-cell bundle, republishing a
-  // hard-coded duration as a fact about a run that may not have used it - the exact defect audit #14
-  // removed. Legacy bundles still answer through g.memory_read.
+  // PER-CELL FIRST. The windows ride on the per-cell records; reading only the legacy per-gateway record
+  // here would silently fall back to the 60 s DEFAULT on every per-cell bundle, republishing a hard-coded
+  // duration as a fact about a run that may not have used it. Legacy bundles still answer through
+  // g.memory_read.
   const gws = (data && data.gateways) || [];
   for (const g of gws) {
     for (const c of memoryCells(g)) {
@@ -393,11 +389,9 @@ function memoryTestedRecord(g) {
 }
 
 /* ---- per-cell memory --------------------------------------------------------
-   The memory metric used to be ONE scalar per gateway, so the harness had to pick a cell to produce it and
-   picked each gateway's highest-throughput served cell: it selected on throughput and reported memory, and
-   the cell (i.e. the workload) differed row to row. Per-cell measurement replaces that with a cold-started,
-   plateau-terminated window on EVERY served cell, and WHICH cell to show becomes a display choice the
-   reader makes and can see (Min | Max | Same | Custom) rather than one the harness makes and hides.
+   Memory is measured as a cold-started, plateau-terminated window on EVERY served cell. WHICH cell to
+   show is a display choice the reader makes and can see (Min | Max | Same | Custom), never one the
+   harness picks by throughput and hides.
 
    Everything below is null-safe by construction: the published bundles that predate per-cell measurement
    carry none of these fields, and the board must degrade to that shape rather than blank the tab. */
@@ -636,9 +630,8 @@ function chooserCellPerf(g, st = state) {
 }
 /* stampChosen: THE choke point that makes EVERY chosen record self-describing. A raw matrix cell's sealed
    .perf/.stream carries no path/source (the CELL's coordinates are implicit in where it was looked up), so
-   every consumer used to re-invent provenance locally — the "Tested on" pill hard-coded a passthrough
-   sentence, lanePathNote hard-coded a dialect line, laneRecord stamped its own source. Stamp it ONCE here
-   and every surface renders through caption() from the same stamp (audit #1/#6, Design E §3.2). */
+   this stamps it ONCE, and every surface renders provenance through caption() from the same stamp
+   (Design E §3.2). */
 // `lane` is the sweep-key infix for the lane the record belongs to: "" (perf), "stream-", "memory-".
 function stampChosen(rec, g, ingress, egress, lane = "") {
   const same = ingress === egress;
@@ -777,13 +770,10 @@ const COL_NAME = {
 // measured on — Peak: each gateway's own peak dialect (varies per row); Same: the chosen dialect on every
 // row; Custom: the chosen ingress→egress. The provenance disclosure (tooltip / fallback star) renders FROM
 // the chosen cell's source stamp via caption() (Design E §3.2), never a hard-coded source string.
-// AUDIT #1 (the choke point). "Tested on" must describe THE RECORD THE ROW ACTUALLY DISPLAYS. One column
-// object was shared by BOTH column sets while always reading chooserCellPerf(g) — so every Streaming row,
-// whose numbers all come from the legacy stream suite (source.kind "stream-fallback"), advertised the PERF
-// cell's matrix provenance ("measured on openai-in / openai-out passthrough") and caption(p)'s honest
-// "stream suite (legacy)" label was unreachable. It also painted a pill in Same/Custom when the streaming
-// record was null and every streaming column read n/a. colTested(lane) binds the column to its LANE's
-// record, renders provenance through the ONE caption() path, and paints NO pill without a record.
+// "Tested on" must describe THE RECORD THE ROW ACTUALLY DISPLAYS. colTested(lane) binds the column to
+// its own LANE's record, renders provenance through the ONE caption() path, and paints NO pill without
+// a record, so a Streaming row can never advertise the Perf cell's provenance and a null record can
+// never paint a pill.
 // MEMORY joins the same choke point. In a per-cell bundle its lane record is the CHOSEN cell's window
 // (Min/Max/Same/Custom), already stamped by stampChosen; in a legacy bundle it is the single post-6x6
 // window with its own load_cell pinned as the path. Either way the pill names the cell the MEMORY
@@ -1067,12 +1057,11 @@ const LANES = [
 
 /* laneRecord(l, g, st): the record a drawer/compare lane shows, CHOOSER-AWARE so it agrees with the
    TABLE in every mode. The perf + streaming lanes are cell-chooser driven (PERF_VIEWS): Peak reads the
-   best diagonal, Same reads the D→D cell, Custom reads the in→out cell — exactly what the table columns
-   render. Reading l.get() (canonicalPerf/canonicalStreaming, Peak-only) here was the bug: in Same/Custom
-   the table showed one cell while the drawer/compare showed Peak. The memory + xlate lanes are NOT
-   chooser-driven (one matrix memory read; Translation is its own openai-in cell), so they read l.get.
-   The returned perf record is GATED identically to canonicalPerf (suppressed RPS → null) and carries the
-   chosen cell's source/dialect/ingress/egress so the pathNote names the SAME path the table pill does. */
+   best diagonal, Same reads the D→D cell, Custom reads the in→out cell, exactly what the table columns
+   render. The memory + xlate lanes are NOT chooser-driven (one matrix memory read; Translation is its
+   own openai-in cell), so they read l.get. The returned perf record is GATED identically to canonicalPerf
+   (suppressed RPS → null) and carries the chosen cell's source/dialect/ingress/egress so the pathNote
+   names the SAME path the table pill does. */
 function laneRecord(l, g, st = state) {
   if (l.key === "perf") {
     const p = chooserCellPerf(g, st);
@@ -1083,8 +1072,8 @@ function laneRecord(l, g, st = state) {
     return { served: true, ...p };
   }
   if (l.key === "stream") return chooserCellStream(g, st);
-  // Memory is chooser-driven too now: reading canonicalMemory here would show the drawer one cell while the
-  // table showed another, which is the same divergence the perf lane was fixed for.
+  // Memory is chooser-driven too: canonicalMemory would show the drawer one cell while the table shows
+  // another, so this reads the same chosen cell the table does.
   if (l.key === "memory") return memoryFor(g, st);
   return l.get ? l.get(g) : g[l.key];
 }
@@ -1119,11 +1108,10 @@ function laneAgeNote(j, now = Date.now()) {
   const age = at ? fmtAge(at, now) : "";
   return age ? ` · measured ${age}` : "";
 }
-/* pathNote for a chooser-driven lane: ALWAYS routed through the lane's own pathNote — i.e. through
-   caption(j), keyed by the record's source.sweep (audit #6). The Same/Custom branch used to BYPASS
-   caption() with a hard-coded dialect sentence, which relabelled a stream-fallback record as "the
-   Same/Custom matrix cell". Now the chosen record is stamped at the choke point (stampChosen) so
-   caption() names the exact cell; the mode is appended as a UI hint only, never as provenance. */
+/* pathNote for a chooser-driven lane: ALWAYS routed through the lane's own pathNote, i.e. through
+   caption(j), keyed by the record's source.sweep. The chosen record is stamped at the choke point
+   (stampChosen) so caption() names the exact cell; the mode is appended as a UI hint only, never as
+   provenance. */
 function lanePathNote(l, j, st = state) {
   const base = l.pathNote ? l.pathNote(j) : "";
   if (!base) return "";
@@ -1556,10 +1544,10 @@ function chooserLead(view, data) {
   if (prov === "matrix") return "Per-cell streaming from the one 6x6 run.";
   if (prov === "mixed") return "Streaming: some gateways from the 6x6 run, some from the standalone stream suite (per-row provenance in the drawer).";
   // fallback (or no data yet): the streaming figures come from the standalone stream suite, not the matrix.
-  // AUDIT #8: age this tab by the STREAM SUITE's own stamp — the row badge ages the matrix, which this
-  // tab does not show, so quoting the matrix age here would overstate the freshness of every number on it.
+  // Age this tab by the STREAM SUITE's own stamp: the row badge ages the matrix, which this tab does not
+  // show, so quoting the matrix age here would overstate the freshness of every number on it.
   // laneAgeSummary contributes ", measured 23 hours ago", so the clause it attaches to must not already
-  // end in "measured" — the old wording rendered "the passthrough it measured, measured 23 hours ago".
+  // end in "measured", or the two collide into "measured, measured 23 hours ago".
   return `Streaming from the standalone stream suite, not the 6x6 matrix${laneAgeSummary(data, "stream")}; each row's pill names the passthrough it ran on.`;
 }
 function chooserCaption(view, st, data) {
@@ -2176,9 +2164,9 @@ function matrixCellTip(cell) {
    p99, and its RPS delta vs THIS gateway's REFERENCE cell (the one the Passthrough tab ranks; not
    necessarily the fastest, so it is named, never called "best"). Grey/red/unprobed cells carry no
    perf and return "".
-   FINDING 33: this helper is dead on the live UI (cellPopFull superseded it) but still EXPORTED. Under
-   the sealed envelope it CANNOT leak a rig-bound number: it reads the metric through mval(), which
-   returns null for a suppressed envelope — there is no ungated field to surface. */
+   Dead on the live UI (cellPopFull is used instead) but still EXPORTED. Under the sealed envelope it
+   CANNOT leak a rig-bound number: it reads the metric through mval(), which returns null for a
+   suppressed envelope, so there is no ungated field to surface. */
 function cellPerfTip(cell, ingress, egress, best) {
   const p = cell && cell.served === true ? cell.perf : null;
   const rps = p ? mval(p.rps_sustained_20ms) : null;
@@ -2255,12 +2243,9 @@ function matrixFailureReason(g) {
   const why = first ? stripRigPaths(first).split("\n")[0] : "the run produced no protocol matrix for this gateway";
   return `no matrix result: ${why}`;
 }
-/* matrixRoster(gateways): the rows the protocol grid renders: EVERY gateway, always, matrix or not.
-   This used to filter to gateways that HAVE a matrix. All of them did, so nothing was hidden in practice,
-   but the case it would have hidden is the worst one to hide: a gateway that failed hard enough to produce
-   no matrix would leave the grid entirely, so TOTAL failure would render as absence while partial failure
-   rendered as a row of grey. Absence provokes nothing; a row of n/a carrying the failure reason provokes
-   the question whose answer is the most important fact about that gateway. Sorted by pass count (a
+/* matrixRoster(gateways): the rows the protocol grid renders: EVERY gateway, always, matrix or not. A
+   gateway with no matrix renders as an all-n/a row carrying its failure reason, never as a silent
+   absence: total failure has to provoke the same question a row of grey does. Sorted by pass count (a
    matrix-less gateway has none, so it sorts last), then by name. Pure; covered by site/test.mjs. */
 function matrixRoster(gateways, tally) {
   return (gateways || []).slice().sort((a, b) =>
@@ -2432,10 +2417,8 @@ function renderCharts() {
 /* ---- method links + footer -------------------------------------------------- */
 function renderStatic() {
   const repo = state.data.repo || "https://github.com/GetBusbar/benchmarking";
-  // Both method links used to point at matrix/run.sh. That file was deleted when the shell suites were
-  // retired and the engine took over every measurement, so both links 404'd: the methodology page was
-  // inviting a sceptical reader to check the work and handing them a dead link. They now point at what
-  // actually produces the numbers - the orchestrator that drives a run, and the engine that measures.
+  // Method links point at what actually produces the numbers: the orchestrator that drives a run, and
+  // the engine that measures.
   const PRODUCERS = { matrix: "run-on-ec2.sh", memory: "engine/src/metric.rs" };
   for (const [id, path] of Object.entries(PRODUCERS)) {
     const a = document.getElementById(`lnk-${id}`);
@@ -2452,15 +2435,12 @@ function renderStatic() {
   hw.textContent = bits.join(" · ");
 }
 
-/* rigStamp(): WHICH measurement instrument produced the board's numbers (audit #21).
+/* rigStamp(): WHICH measurement instrument produced the board's numbers.
    The mock + loadgen come from a MOVING GitHub release tag, so an identical harness can produce
-   different cell VERDICTS across runs purely because the instrument was rebuilt in between — which is
-   exactly what happened the week of this run (the mock's request_shape_ok was tightened, the assets were
-   rebuilt mid-week, and served-cell counts fell board-wide for reasons unrelated to any gateway). Since
-   nothing recorded it, establishing that took a long investigation. Each snapshot now carries the
-   mock/ugen sha256 that produced it; this surfaces the short digest so an instrument change is legible.
-   Returns "" when no gateway records one (every pre-#21 snapshot) — never a fabricated identity, and
-   never the word "unknown" dressed up as a version. When rows DISAGREE the count is shown, because a
+   different cell VERDICTS across runs purely because the instrument was rebuilt in between. Each
+   snapshot carries the mock/ugen sha256 that produced it; this surfaces the short digest so an
+   instrument change is legible. Returns "" when no gateway records one: never a fabricated identity,
+   and never the word "unknown" dressed up as a version. When rows DISAGREE the count is shown, because a
    board built from two different instruments is exactly the condition worth seeing. */
 function rigStamp() {
   const digests = new Map();   // short digest -> how many gateways used it
@@ -2528,11 +2508,9 @@ const fmtProjectAge = (firstCommit) => {
   return `${Math.max(1, Math.floor(days))} days`;
 };
 
-/* AUDIT #7: the DISPLAYED basis, not the legacy suite files. `g[l.key]` read g.perf / g.stream / g.xlate —
-   raw suite objects the emit step DELETES from the bundle — so the roster "Version", the run-mode icon and
-   the compare "Build" row were reading a source the board no longer publishes (and, before the delete, the
-   stamp of a run whose numbers are not on screen). Read the stamp of what is SHOWN: the matrix (the sole
-   source of every projected number), falling back to a projected record's own source.build. */
+/* gatewayBuild reads the stamp of what is SHOWN: the matrix (the sole source of every projected number),
+   falling back to a projected record's own source.build. `g[l.key]` (g.perf / g.stream / g.xlate) is a
+   raw suite object the emit step DELETES from the bundle, not a valid source here. */
 const displayedRecords = (g) => [g.best_cell, g.translation_cell, g.streaming, g.memory_read].filter(Boolean);
 const gatewayBuild = (g) => {
   if (g && g.matrix && g.matrix.build) return g.matrix.build;
@@ -2582,13 +2560,12 @@ const fmtBuild = (full) => {
   return head.length > 24 ? head.slice(0, 21) + "..." : head;
 };
 
-/* WHEN that gateway was last benchmarked, for the roster "last benchmarked" cell + sort.
-   FINDING 25: prefer g.measured_at — the matrix-preferring stamp gen-data emits (displayedMeasuredMs),
-   the SAME per-row freshness basis the "measured Nd ago" badge + the freshness guard use. Reading the
-   MAX across all lane suites let a newer standalone legacy suite (results/xlate|stream/<gw>.json,
-   reachable via an ad-hoc SUITES= re-run) drive a fresher "last benchmarked" date than the matrix
-   numbers the board actually SHOWS — the same overstatement LOW-R3-3 fixed for the badge. Fall back to
-   the newest-across-suites only when there is no matrix stamp (a legacy-only row aged by that stamp). */
+/* WHEN that gateway was last benchmarked, for the roster "last benchmarked" cell + sort. Prefers
+   g.measured_at, the matrix-preferring stamp gen-data emits (displayedMeasuredMs) and the SAME per-row
+   freshness basis the "measured Nd ago" badge + the freshness guard use, so a standalone legacy suite
+   re-run cannot date the row fresher than the matrix numbers the board actually shows. Falls back to the
+   newest timestamp across lane suites only when there is no matrix stamp (a legacy-only row aged by
+   that stamp). */
 function gatewayLastRun(g) {
   if (g && g.measured_at) { const ms = new Date(g.measured_at).getTime(); if (ms > 0) return new Date(ms); }
   let newest = 0;

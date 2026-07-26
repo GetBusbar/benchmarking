@@ -7,7 +7,7 @@ GW_KIND=docker
 # manifest instead of hardcoding it. lib/gateway_isolation_test.sh checks it against the --name
 # below, so the two cannot drift.
 GW_CONTAINER=bifrost
-# Self-describing manifest metadata — charts.py + the run lists read these, so a gateway
+# Self-describing manifest metadata - charts.py + the run lists read these, so a gateway
 # is fully defined by its own dir (add/remove a dir → it appears/disappears everywhere).
 GW_DISPLAY="Bifrost"                      # label in charts + report tables
 GW_LANG=Go                            # implementation language → bar color bucket
@@ -50,11 +50,11 @@ gw_version() {
 gw_build() {
   # Generate Bifrost's ONE canonical config against the runner's actual mock port. Bifrost auto-resolves
   # the provider from the request's model name, so ALL mock-reachable declared-egress providers are
-  # wired simultaneously (openai, anthropic, gemini, cohere) with their base_url pointed at the mock —
+  # wired simultaneously (openai, anthropic, gemini, cohere) with their base_url pointed at the mock -
   # the perf/memory/throughput/stream lanes and the matrix all run this SAME multi-provider config, the
   # matrix just names a different model. (bedrock is declared UNTESTABLE, not wired: v1.6.4 hardcodes
-  # the bedrock-runtime host, network_config.base_url can't redirect it — see GW_MATRIX_UNTESTABLE.)
-  # Run Bifrost on its DEFAULT pool sizing — we don't inject a throughput-tuned pool (its own bench
+  # the bedrock-runtime host, network_config.base_url can't redirect it - see GW_MATRIX_UNTESTABLE.)
+  # Run Bifrost on its DEFAULT pool sizing - we don't inject a throughput-tuned pool (its own bench
   # config uses initial_pool_size 15000, which is what inflates memory under sustained load; scoring a
   # competitor's throughput-tuned config on memory isn't fair). Just the providers + mock base_url.
   _bifrost_write_config
@@ -65,7 +65,7 @@ gw_build() {
 # base_url is the mock. Bifrost auto-resolves the provider from the request's model name (the model
 # lists below register which names map to which provider), and each provider's translation emits that
 # dialect's native upstream shape to the mock (network_config.base_url is honoured at runtime for
-# openai/anthropic/cohere/gemini — provider.go BaseURL-overridable set). sk-dummy is the required
+# openai/anthropic/cohere/gemini - provider.go BaseURL-overridable set). sk-dummy is the required
 # provider key (Bifrost needs a key entry to register a provider); never a live secret.
 # SINGLE SOURCE: ncore = number of pinned cores (e.g. 0-3 → 4), not the last core index. Defined once
 # here and read by both gw_launch (GOMAXPROCS docker -e flag) and gw_config (published artifact), so the
@@ -134,7 +134,7 @@ GW_MATRIX_UNTESTABLE_NOTE="Bifrost v1.6.4 hardcodes the Bedrock host (bedrock-ru
 GW_MATRIX_EGRESS="openai openai-responses anthropic gemini cohere"
 gw_matrix_egress() {
   # All egress providers are already wired in the ONE config (see _bifrost_write_config); Bifrost picks
-  # the provider from the request model name, so the matrix only flips GW_MODEL — no config rewrite. The
+  # the provider from the request model name, so the matrix only flips GW_MODEL - no config rewrite. The
   # relaunch runs the identical all-providers config.
   case "$1" in
     openai|openai-responses) GW_MODEL=gpt-4o-mini;;
@@ -159,12 +159,12 @@ gw_diag() {
 }
 
 # ── OOTB config artifact (file-driven) ────────────────────────────────────────────────────────────
-# gw_config prints the canonical OOTB config this gateway launches with — the rendered config.json
+# gw_config prints the canonical OOTB config this gateway launches with - the rendered config.json
 # exactly as mounted at /app/data (read from the file gw_build produced so it can never drift; falls
 # back to rendering it if not present yet). The provider keys are the dummy sk-dummy Bifrost requires to
-# register a provider — never a live secret. OOTB posture: DEFAULT pool sizing (no throughput-tuned
+# register a provider - never a live secret. OOTB posture: DEFAULT pool sizing (no throughput-tuned
 # initial_pool_size injected), all four mock-reachable providers wired; the only deviations are the
-# permitted ones — provider base_urls → mock and dummy keys. GOMAXPROCS in the launch env is the CPU-
+# permitted ones - provider base_urls → mock and dummy keys. GOMAXPROCS in the launch env is the CPU-
 # pinning run-mechanic (= pinned core count). No feature strips, no perf/pool tuning.
 gw_config() {
   local cfg="$GW_DIR/bfdata/config.json"

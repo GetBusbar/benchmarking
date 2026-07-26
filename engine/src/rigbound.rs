@@ -7,34 +7,20 @@
 // publishing it as if it did would rank the rig. Worse, several fast gateways all pinned near the
 // same rig ceiling would land on near-identical numbers and read as a tie they did not earn.
 //
-// THE COMPARISON MUST BE FAIR, which is the part that is easy to get wrong. The rig's reference
-// ceiling is first measured at the top of the search range, but the gateway's winner usually sits
-// far below that, and the rig is not equally fast at every concurrency. Comparing a winner measured
-// at c=740 against a reference measured at c=2048 compares two different operating points and
-// systematically understates how close the gateway came. So the reference is RE-PROBED at the
-// winner's own concurrency before the two are compared.
+// THE COMPARISON MUST BE FAIR, which is the part that is easy to get wrong. Comparing a winner
+// measured at c=740 against a rig reference measured at c=2048 compares two different operating
+// points and systematically understates how close the gateway came - the rig is not equally fast at
+// every concurrency. So `suite.rs::rig_ceiling` takes the rig reference as a SINGLE POINT measurement
+// AT THE WINNER'S OWN CONCURRENCY (`run::measure_at`, not a search over a range), every time, from
+// scratch: the one measurement `is_rig_bound` judges against is already taken at the winner's own
+// operating point, so there is no separate top-of-range reference to re-probe or drag into a regime
+// it was never characterised in.
 
 use crate::measurement::{Absent, Measurement};
 
 /// Fraction of the rig ceiling at or above which a measurement is considered rig-bound rather than
 /// gateway-bound. Matches the shell's `c >= 0.9 * m`.
 pub const BOUND_FRACTION: f64 = 0.9;
-
-/// Cap on how far the reference re-probe may be pushed, as a multiple of the concurrency the
-/// original reference was taken at. Without it a winner far above the reference point would drag
-/// the rig into a regime it was never characterised in, and the "ceiling" would stop meaning
-/// anything. Matches the shell's `SM_MOCK_FPS_CONC * 4`.
-pub const REPROBE_CAP_MULTIPLE: u32 = 4;
-
-/// The concurrency the rig reference should be re-measured at before judging, or `None` when the
-/// existing reference is already at the right operating point (or there is nothing to compare).
-pub fn reprobe_concurrency(winner_c: u32, reference_c: u32, reference_value: f64) -> Option<u32> {
-    if winner_c == 0 || reference_value <= 0.0 || winner_c == reference_c {
-        return None;
-    }
-    let cap = if reference_c > 0 { reference_c.saturating_mul(REPROBE_CAP_MULTIPLE) } else { winner_c };
-    Some(winner_c.min(cap))
-}
 
 /// Judge a measured value against the rig's reference ceiling AT THE SAME OPERATING POINT.
 ///
@@ -90,29 +76,4 @@ mod tests {
         }
     }
 
-    // THE FAIRNESS FIX. The reference is first taken at the top of the search range, but the winner
-    // usually sits far below it, and the rig is not equally fast at every concurrency. Comparing
-    // across two operating points systematically understates how close the gateway came.
-    #[test]
-    fn the_reference_is_reprobed_at_the_winner_s_own_concurrency() {
-        assert_eq!(reprobe_concurrency(740, 2048, 96_458.0), Some(740));
-    }
-
-    #[test]
-    fn no_reprobe_when_the_reference_is_already_at_that_point() {
-        assert_eq!(reprobe_concurrency(512, 512, 351_088.0), None);
-    }
-
-    // A winner far above the reference point must not drag the rig into a regime it was never
-    // characterised in: past the cap, the "ceiling" stops describing anything.
-    #[test]
-    fn the_reprobe_is_capped_at_a_multiple_of_the_reference_point() {
-        assert_eq!(reprobe_concurrency(10_000, 100, 5.0), Some(400));
-    }
-
-    #[test]
-    fn nothing_to_reprobe_without_a_winner_or_a_usable_reference() {
-        assert_eq!(reprobe_concurrency(0, 2048, 96_458.0), None);
-        assert_eq!(reprobe_concurrency(740, 2048, 0.0), None);
-    }
 }

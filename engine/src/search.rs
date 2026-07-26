@@ -168,10 +168,10 @@ pub struct PeakResult {
 }
 
 /// An interruption (a deadline, or a window that produced nothing) after real probes have already
-/// landed must NOT throw away what was measured. The shell latches this deliberately: once a rung
-/// has been judged, "every later abort still leaves a genuinely measured, if partial, answer
-/// behind". Discarding it publishes null for a cell we did in fact measure, which is the same class
-/// of loss as publishing a zero for one we did not.
+/// landed must NOT throw away what was measured: once a rung has been judged, every later abort
+/// still leaves a genuinely measured, if partial, answer behind. Discarding it publishes null for a
+/// cell we did in fact measure, which is the same class of loss as publishing a zero for one we did
+/// not.
 ///
 /// Only a search that was cut off before ANY gate-passing point is genuinely unmeasured.
 fn interrupted<P: Probe>(s: Search<P>) -> PeakResult {
@@ -293,20 +293,19 @@ pub fn peak_max<P: Probe>(probe: &mut P, min_conc: u32, max_conc: u32, start: u3
             }
         } else if start_value == 0.0 {
             // START FAILED THE GATE, so keep halving until SOMETHING passes, and then open the
-            // whole range below it to the refine. Stepping down only once (the bug this replaces)
-            // strands the search above a p99 cliff whenever `start` sits several halvings past it,
-            // for instance when a stale adaptive prior seeded it high: every later probe stays in
-            // the failing region and the true peak below is never sampled at all. The shell fixed
-            // exactly this once already (its audit R2-H1) and its comment is explicit that the low
-            // bound must reopen to `min_conc`, not to c/2, or the refine bracket clips the real peak out.
+            // whole range below it to the refine. Stepping down only once would strand the search
+            // above a p99 cliff whenever `start` sits several halvings past it, for instance when a
+            // stale adaptive prior seeded it high: every later probe would stay in the failing
+            // region and the true peak below would never be sampled at all. The low bound must
+            // reopen to `min_conc`, not to c/2, or the refine bracket clips the real peak out.
             let mut c = below_start;
             let mut found = None;
             loop {
-                // PROBE FIRST, THEN STEP. The guard used to be `while c > min_conc`, which exits the moment
-                // c reaches min_conc and so never probes min_conc itself: the one point this branch exists to
-                // reopen. A gate that passes only at the very bottom of the range was then never
-                // sampled at all, and the search returned "no concurrency passed" about a region it
-                // had not looked at.
+                // PROBE FIRST, THEN STEP: a `while c > min_conc` guard would exit the moment c
+                // reaches min_conc and so never probe min_conc itself, the one point this branch
+                // exists to reopen. A gate that passes only at the very bottom of the range would
+                // then never be sampled at all, and the search would report "no concurrency passed"
+                // about a region it had not looked at.
                 let v = match s.eff(c) {
                     Some(v) => v,
                     None => return interrupted(s),
@@ -532,11 +531,10 @@ mod tests {
         assert_eq!(r.ceiling.reason(), Some(&Absent::NotMeasured));
     }
 
-    // Interrupted AFTER a confirmed pass. I first made this return the confirmed rung, arguing that
-    // discarding a real measurement was itself a defect. A three-way design review refuted it: the
+    // Interrupted AFTER a confirmed pass must still report no ceiling, not the confirmed rung: the
     // probed trace survives on every path including this one, so nothing is discarded, and at this
-    // point the only successful probe IS the floor, so returning it publishes our own search
-    // configuration as the gateway's ceiling. The lower bound belongs in the evidence.
+    // point the only successful probe IS the floor, so returning it would publish our own search
+    // configuration as the gateway's ceiling. The lower bound belongs in the evidence, not the value.
     #[test]
     fn bisect_interrupted_after_a_pass_is_absent_with_the_bound_as_evidence() {
         let mut probe = Interrupter { fires_after: 1, calls: 0 };
@@ -668,10 +666,10 @@ mod tests {
         }
     }
 
-    // RED-BEFORE. The down-ramp is entered when the start fails the gate, and its whole purpose is
-    // to reopen the bracket all the way to `min_conc`. With the old guard it never probed `min_conc`, so a
-    // gateway whose only passing region sat at the floor was reported as passing nowhere: a claim
-    // about a region the search had not looked at.
+    // The down-ramp is entered when the start fails the gate, and its whole purpose is to reopen the
+    // bracket all the way to `min_conc`: `min_conc` itself must actually be probed, or a gateway
+    // whose only passing region sits at the floor would be reported as passing nowhere, a claim
+    // about a region the search never looked at.
     #[test]
     fn the_down_ramp_probes_the_floor_it_exists_to_reopen() {
         let mut p = PassesOnlyAtFloor { floor: 8 };
@@ -681,13 +679,11 @@ mod tests {
             "the floor must actually be probed, probed set: {:?}",
             r.points.iter().map(|pt| pt.concurrency).collect::<Vec<_>>()
         );
-        // The regression this test exists for is the assertion ABOVE: the floor must actually be
-        // probed. This second assertion used to be `r.peak.is_measured()`, which encoded the low-end
-        // half of the range-bound bug: it asserted a PROVEN peak sitting exactly on `min_conc = 8`,
-        // for a curve whose true maximum is at c=1, outside the range and never probed. The original
-        // intent - "a real passing region must not be reported as passing nowhere" - is preserved,
-        // because SearchExhausted with the bound in its detail is precisely not "passing nowhere":
-        // it says a passing region was found and its extent was not established.
+        // The main assertion is the one ABOVE: the floor must actually be probed. This one checks
+        // that "a real passing region must not be reported as passing nowhere" without overclaiming
+        // a PROVEN peak at `min_conc = 8`, for a curve whose true maximum is at c=1, outside the
+        // range and never probed: SearchExhausted with the bound in its detail is precisely not
+        // "passing nowhere", it says a passing region was found and its extent was not established.
         assert_eq!(
             r.peak.reason(),
             Some(&Absent::SearchExhausted),

@@ -4,31 +4,31 @@
 #
 # OpenAI + Anthropic-compatible Go gateway. We override the openai provider's base URL to the mock
 # via OPENAI_BASE_URL, so /v1/chat/completions forwards there. Left unprotected (GOMODEL_MASTER_KEY
-# unset) for a pure proxy-overhead measurement — the default posture. Image pinned in
+# unset) for a pure proxy-overhead measurement - the default posture. Image pinned in
 # below in this file; the resolved tag is recorded in the result.
 #
 # ── NOTE ON ITS NUMBERS: GoModel AUDIT-LOGS EVERY REQUEST BY DEFAULT ─────────────────────────────
 # Same disclosure another entry carries, for the same reason. GoModel ships audit logging ON: LOGGING_ENABLED
-# defaults true, and so do LOGGING_LOG_BODIES and LOGGING_LOG_HEADERS (.env.template:275-281 — "When
+# defaults true, and so do LOGGING_LOG_BODIES and LOGGING_LOG_HEADERS (.env.template:275-281 - "When
 # enabled, all requests and responses are logged to the configured storage"; config/logging.go). With
-# the default STORAGE_TYPE=sqlite that means a per-request entry — full request AND response body, plus
-# headers — captured on the request path (internal/auditlog/middleware.go captureLoggedRequestBody /
+# the default STORAGE_TYPE=sqlite that means a per-request entry - full request AND response body, plus
+# headers - captured on the request path (internal/auditlog/middleware.go captureLoggedRequestBody /
 # captureLoggedResponseBody) and batch-written by the flush loop (internal/auditlog/logger.go). Its
 # latency/throughput therefore reflect A GATEWAY THAT AUDIT-LOGS EVERY CALL WITH BODIES, not a bare
-# proxy — the honest measurement of GoModel as it ships. There is no external infra involved (sqlite in
+# proxy - the honest measurement of GoModel as it ships. There is no external infra involved (sqlite in
 # the image's own /app/data, which the upstream Dockerfile creates and does not mount as a volume), so
 # turning it off would be a forbidden feature strip, not a permitted run-mechanic.
 #
-# ***RUN-OVER-RUN COMPARISONS ACROSS 2026-07-24 ARE INVALID FOR GOMODEL — DO NOT PUBLISH THE DELTA AS A
+# ***RUN-OVER-RUN COMPARISONS ACROSS 2026-07-24 ARE INVALID FOR GOMODEL - DO NOT PUBLISH THE DELTA AS A
 # GOMODEL REGRESSION.*** Every run up to and including 2026-07-24T01:20Z was measured with an
 # `-e LOGGING_ENABLED=false` FEATURE STRIP that no other gateway in the field received; commit 2951b97
 # ("bench(ootb): config-transparency mechanism") removed that strip later the same day, correctly. The
-# image never changed — results/history/gomodel.jsonl records the identical
-# enterpilot/gomodel:0.1.55 @sha256:606151f9…b562ac digest on BOTH sides of the boundary — and the
+# image never changed - results/history/gomodel.jsonl records the identical
+# enterpilot/gomodel:0.1.55 @sha256:606151f9…b562ac digest on BOTH sides of the boundary - and the
 # 2026-07-25 rig floor was healthy (direct_c1_p99_us 74→81us, +7..9%). So the observed
 # rps_max_proxy 16000→2576 and added p99 306→2552us is NOT a GoModel regression and NOT box noise: it
 # is the cost of the audit-log feature the strip used to hide. The pre-07-24 numbers were the
-# flattering ones. The load-sweep signature agrees — throughput pins at ~2500rps flat from c=32 to
+# flattering ones. The load-sweep signature agrees - throughput pins at ~2500rps flat from c=32 to
 # c=512 (results/fanout-gomodel.log), a saturation ceiling, not a scheduling artifact.
 # STILL UNEXPLAINED (flagged, not fixed): the openai-responses→openai-responses cell measured ~100rps
 # with p50 added ≈10.09ms, ~25x worse than the other served cells and flat across concurrency. That is
@@ -40,7 +40,7 @@ GW_KIND=docker
 # manifest instead of hardcoding it. lib/gateway_isolation_test.sh checks it against the --name
 # below, so the two cannot drift.
 GW_CONTAINER=gomodel-bench
-# Self-describing manifest metadata — charts.py + the run lists read these, so a gateway
+# Self-describing manifest metadata - charts.py + the run lists read these, so a gateway
 # is fully defined by its own dir (add/remove a dir → it appears/disappears everywhere).
 GW_DISPLAY="GoModel"                      # label in charts + report tables
 GW_LANG=Go                            # implementation language → bar color bucket
@@ -119,11 +119,11 @@ gw_launch() {
 
 # ── OOTB config (SINGLE SOURCE: the benchmark run and the published website artifact both read this) ─
 # _gomodel_env is the ONE canonical OOTB env manifest. gw_launch consumes it as docker -e flags;
-# gw_config prints it verbatim into results/config/gomodel.txt, which the board publishes — so
+# gw_config prints it verbatim into results/config/gomodel.txt, which the board publishes - so
 # "fresh install + this env → these numbers" is reproducible and the run can never differ from the
 # published config. Everything is env-driven, so this function IS the whole config.
 #   GOMAXPROCS = pinned core count (0-3 → 4): GoModel is Go, and Go (pre-1.25) reads the HOST cpu count
-#     for GOMAXPROCS, NOT the --cpuset-cpus limit — so without it GoModel runs 16 Ps thrashing 4 pinned
+#     for GOMAXPROCS, NOT the --cpuset-cpus limit - so without it GoModel runs 16 Ps thrashing 4 pinned
 #     cores, a scheduler-contention HANDICAP the Rust gateways (tokio available_parallelism respects
 #     cpuset) never pay. Pinning to the cpuset count emulates the same 4-core box every gateway is
 #     measured on, the identical CPU-pinning run-mechanic another Go entry also uses (field parity).
@@ -135,7 +135,7 @@ gw_launch() {
 #     its default. Storage and model-enablement now come from the application, not from us.
 #     LOGGING_ENABLED is DELIBERATELY ABSENT so GoModel's default audit logging (bodies + headers →
 #     sqlite, on the request path) stays on. Re-adding LOGGING_ENABLED=false here would restore the
-#     pre-2026-07-24 feature strip and silently re-inflate its throughput ~6x — see the "NOTE ON ITS
+#     pre-2026-07-24 feature strip and silently re-inflate its throughput ~6x - see the "NOTE ON ITS
 #     NUMBERS" block at the top of this file before touching this list.
 _gomodel_env() {
   local ncore=$(( ${CORES##*-} - ${CORES%%-*} + 1 ))
