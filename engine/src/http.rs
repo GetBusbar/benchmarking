@@ -184,6 +184,19 @@ fn read_exact_deadline(stream: &mut TcpStream, deadline: Instant, n: usize) -> R
 fn read_to_close(stream: &mut TcpStream, deadline: Instant) -> ReadOutcome {
     let mut buf = Vec::new();
     loop {
+        // THE CAP APPLIES HERE TOO. This framing has no declared length to check up front - the
+        // peer just streams until it closes the connection, or doesn't - so MAX_BODY_BYTES has to
+        // be enforced against what has actually accumulated instead. It used to only be checked on
+        // the declared-Content-Length path, which left this loop and the chunked one below able to
+        // grow without limit for as long as the deadline allowed: on loopback, tens of seconds is
+        // enough to reach gigabytes. The allocator's failure handler calls abort() unconditionally,
+        // so that is not a panic this harness can catch - it is the eight-hour run dying outright,
+        // and it is exactly what MAX_BODY_BYTES exists to prevent.
+        if buf.len() > MAX_BODY_BYTES {
+            return ReadOutcome::Err(io::Error::other(format!(
+                "close-delimited body exceeded the {MAX_BODY_BYTES} byte cap before the peer closed the connection"
+            )));
+        }
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             return ReadOutcome::TimedOut(buf);
@@ -322,6 +335,7 @@ fn read_head(
 fn read_chunked_body(stream: &mut TcpStream, deadline: Instant, raw: &[u8]) -> Outcome {
     let mut body = Vec::new();
     let mut seen = raw.to_vec();
+    let mut chunk_count: u64 = 0;
     loop {
         let size_line = match read_line(stream, deadline) {
             ReadOutcome::Full(line) => line,
@@ -392,6 +406,18 @@ fn read_chunked_body(stream: &mut TcpStream, deadline: Instant, raw: &[u8]) -> O
         };
         seen.extend_from_slice(&chunk);
         body.extend_from_slice(&chunk);
+        chunk_count += 1;
+        // THE AGGREGATE, not just each chunk. read_exact_deadline above already rejects any SINGLE
+        // chunk declared larger than MAX_BODY_BYTES, but nothing stopped an unbounded NUMBER of
+        // legally-sized chunks: a peer sending chunks just under the cap, back to back, for as long
+        // as the deadline allows, grew `body` without limit. Checked after appending so the final
+        // over-cap chunk is still visible in the Malformed evidence.
+        if body.len() > MAX_BODY_BYTES {
+            return malformed(
+                &seen,
+                format!("chunked body exceeded the {MAX_BODY_BYTES} byte cap across {chunk_count} chunk(s)"),
+            );
+        }
         // Each chunk body is followed by a bare CRLF before the next chunk size line.
         match read_line(stream, deadline) {
             ReadOutcome::Full(_) => {}
@@ -1277,6 +1303,82 @@ mod tests {
         assert!(
             start.elapsed() < Duration::from_secs(3),
             "the declaration must be refused without waiting on the read, took {:?}",
+            start.elapsed()
+        );
+    }
+
+    // A CLOSE-DELIMITED BODY HAS NO DECLARATION TO CAP - the peer just streams until it closes the
+    // connection, so the only place left to enforce MAX_BODY_BYTES is against what has actually
+    // accumulated. This cap was only ever checked against a declared Content-Length, so a peer that
+    // omits any framing header (legal: RFC 7230 permits close-delimited responses) and streams past
+    // MAX_BODY_BYTES before the deadline grew the buffer without limit until the wall-clock timeout,
+    // tens of seconds away - long enough on loopback to reach gigabytes and risk the allocator's
+    // unconditional abort() this whole cap exists to avoid.
+    #[test]
+    fn a_close_delimited_body_past_the_cap_is_rejected_without_waiting_for_the_deadline() {
+        let addr = spawn_server(|mut conn| {
+            let _ = read_request_head(&conn);
+            let _ = conn.write_all(b"HTTP/1.1 200 OK\r\n\r\n");
+            // Stream comfortably past MAX_BODY_BYTES (8 MiB) in 64 KiB writes, then stop without
+            // closing: if the cap is not enforced against the accumulator, this blocks until the
+            // read deadline instead of failing immediately on the byte that crosses the cap.
+            let chunk = vec![b'x'; 64 * 1024];
+            for _ in 0..170 {
+                if conn.write_all(&chunk).is_err() {
+                    return;
+                }
+            }
+        });
+
+        let start = Instant::now();
+        let outcome = post_json(addr, "/x", b"{}", &[], Duration::from_secs(20));
+        match outcome {
+            Outcome::Malformed { message, .. } => {
+                assert!(message.contains("cap"), "must name the cap it exceeded, got {message:?}")
+            }
+            other => panic!("a close-delimited body past the cap must be Malformed, got {other:?}"),
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "must be refused as soon as the accumulator crosses the cap, not at the read deadline, took {:?}",
+            start.elapsed()
+        );
+    }
+
+    // The chunked sibling of the same defect: no single chunk here exceeds MAX_BODY_BYTES (each is
+    // legally sized), so the per-chunk check in read_exact_deadline never fires. Only a check on the
+    // running total across chunks catches an unbounded NUMBER of legally-sized chunks.
+    #[test]
+    fn a_chunked_body_past_the_cap_is_rejected_without_waiting_for_the_deadline() {
+        let addr = spawn_server(|mut conn| {
+            let _ = read_request_head(&conn);
+            let _ = conn.write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n");
+            let chunk = vec![b'x'; 64 * 1024];
+            for _ in 0..170 {
+                let head = format!("{:x}\r\n", chunk.len());
+                if conn.write_all(head.as_bytes()).is_err() {
+                    return;
+                }
+                if conn.write_all(&chunk).is_err() {
+                    return;
+                }
+                if conn.write_all(b"\r\n").is_err() {
+                    return;
+                }
+            }
+        });
+
+        let start = Instant::now();
+        let outcome = post_json(addr, "/x", b"{}", &[], Duration::from_secs(20));
+        match outcome {
+            Outcome::Malformed { message, .. } => {
+                assert!(message.contains("cap"), "must name the cap it exceeded, got {message:?}")
+            }
+            other => panic!("a chunked body past the cap must be Malformed, got {other:?}"),
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "must be refused as soon as the running total crosses the cap, not at the read deadline, took {:?}",
             start.elapsed()
         );
     }

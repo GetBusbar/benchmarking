@@ -133,7 +133,13 @@ pub fn plateau_check(samples: &[Sample], window_s: f64, trend_pct: f64, range_pc
     let hi = win.iter().map(|s| s.mib).fold(f64::NEG_INFINITY, f64::max);
     let spread = (hi - lo) / mean * 100.0;
 
-    if drift < trend_pct && spread < range_pct {
+    // MAGNITUDE, NOT SIGN. `drift` is signed - positive when the window is still climbing, negative
+    // when it is declining - but `Verdict::Steady`'s own contract is "not moving in any direction
+    // that matters". Comparing the signed value against a positive threshold bounded growth only:
+    // any decline, however steep, satisfied `drift < trend_pct` because a negative number is always
+    // less than a positive one. A window whose second half ran measurably BELOW its first half -
+    // a real, non-noise decline bigger than the configured trend gate - was published as settled.
+    if drift.abs() < trend_pct && spread < range_pct {
         Verdict::Steady
     } else {
         Verdict::NotSteady { growth_rate_mib_per_min }
@@ -365,6 +371,30 @@ mod tests {
     fn linear_series(base: f64, rate_mib_per_min: f64, dt_s: f64, n: usize) -> Vec<Sample> {
         let per_sample = rate_mib_per_min / 60.0 * dt_s;
         (0..n).map(|i| Sample::new(i as f64 * dt_s, base + per_sample * i as f64)).collect()
+    }
+
+    // A DECLINE MUST FAIL THE TREND TEST EXACTLY AS A CLIMB DOES. `drift` is signed; a window whose
+    // second half runs measurably below its first half is not "steady", it is declining, and
+    // Verdict::Steady's own doc says "not moving in any direction that matters". A comparison that
+    // only bounds positive drift would call every decline steady regardless of how fast it fell.
+    #[test]
+    fn a_declining_window_fails_the_trend_test_at_the_same_magnitude_as_a_climbing_one() {
+        // Gentle on purpose: the mean must stay well clear of zero, or the window trips the earlier
+        // `mean &lt;= 0.0` short-circuit and returns NotSteady for an unrelated reason, masking whether
+        // the trend comparison itself is symmetric. A ~1.5% decline on a 100 MiB base, against a 1%
+        // trend gate and a wide range gate (so only the trend test is in play).
+        let declining = linear_series(100.0, -18.0, 6.0, 12); // ~100.0 -> ~98.1 MiB over the window
+        let verdict = plateau_check(&declining, 60.0, 1.0, 1.0e9);
+        assert!(
+            matches!(verdict, Verdict::NotSteady { .. }),
+            "a real decline bigger than the trend gate must not be published as settled, got {verdict:?}"
+        );
+
+        // The mirror image at the identical magnitude climbs instead, and must fail the same way -
+        // proving the test is symmetric rather than just asserting decline is special-cased.
+        let climbing = linear_series(100.0, 18.0, 6.0, 12);
+        let climbing_verdict = plateau_check(&climbing, 60.0, 1.0, 1.0e9);
+        assert!(matches!(climbing_verdict, Verdict::NotSteady { .. }));
     }
 
     // Largest rate (MiB/min) that still certifies Steady at this window, found by bisection with the
