@@ -35,6 +35,28 @@ pub enum Dialect {
     Bedrock,
 }
 
+/// Which dialects a run should walk, from the value of `OTB_DIALECTS`.
+///
+/// UNSET AND EMPTY BOTH MEAN "ALL", and that distinction is the whole point. `std::env::var` returns
+/// `Ok("")` for a variable that is SET BUT EMPTY, and the orchestrator always exports the variable,
+/// writing an empty value for a full-grid run. Matching on `Ok`/`Err` therefore sent `""` down the
+/// parsing path, where it split into one empty name that no dialect knows, and the engine exited 2
+/// before measuring anything. Every full-field run failed that way, on all thirteen boxes at once,
+/// while a narrowed debugging run passed: the bug was invisible to exactly the runs used to test it.
+///
+/// A value that names something we do not know is still an ERROR, not a silent fallback to all: an
+/// operator who asked for one dialect and got six would be publishing a grid they did not request.
+pub fn dialects_from(value: Option<&str>) -> Result<Vec<Dialect>, String> {
+    let Some(list) = value.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(Dialect::ALL.to_vec());
+    };
+    let parsed: Vec<Dialect> = list.split(',').filter_map(|d| d.trim().parse().ok()).collect();
+    if parsed.is_empty() {
+        return Err(format!("OTB_DIALECTS={list:?} named no dialect this build knows"));
+    }
+    Ok(parsed)
+}
+
 impl Dialect {
     /// Every dialect, in the canonical order used across the harness (lib/ingress.sh, matrix/run.sh).
     pub const ALL: [Dialect; 6] =
@@ -383,5 +405,28 @@ mod tests {
     fn all_lists_exactly_the_six_canonical_dialects_in_order() {
         let names: Vec<&str> = Dialect::ALL.iter().map(Dialect::as_str).collect();
         assert_eq!(names, vec!["openai", "openai-responses", "anthropic", "gemini", "cohere", "bedrock"]);
+    }
+
+    // THE DEFECT THAT FAILED THIRTEEN BOXES AT ONCE.
+    //
+    // std::env::var returns Ok("") for a variable that is set but empty, and the orchestrator always
+    // exports OTB_DIALECTS, writing an empty value when the run is not narrowed. The old code matched
+    // on Ok/Err, so a full-grid run parsed "" into one nameless dialect, found nothing, and exited 2
+    // before measuring anything. A narrowed run set a real value and passed, so every debugging run
+    // was green and every real run was dead.
+    #[test]
+    fn an_empty_dialect_list_means_every_dialect_not_none() {
+        assert_eq!(dialects_from(None), Ok(Dialect::ALL.to_vec()), "unset means the whole grid");
+        assert_eq!(dialects_from(Some("")), Ok(Dialect::ALL.to_vec()), "SET BUT EMPTY means the whole grid too");
+        assert_eq!(dialects_from(Some("   ")), Ok(Dialect::ALL.to_vec()), "whitespace is empty");
+    }
+
+    // A value that names something unknown must still fail. Falling back to the whole grid there
+    // would publish six columns to an operator who asked for one, which is a different run than the
+    // one they requested.
+    #[test]
+    fn a_dialect_list_naming_nothing_we_know_is_an_error_not_a_fallback() {
+        assert!(dialects_from(Some("nonsense")).is_err());
+        assert_eq!(dialects_from(Some("openai")), Ok(vec![Dialect::Openai]));
     }
 }
