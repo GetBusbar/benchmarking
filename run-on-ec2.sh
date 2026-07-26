@@ -787,11 +787,11 @@ bench_gateway_once() {
       # a difference between boxes, and every difference between boxes is a difference in the numbers.
       #
       # The only thing that ever builds here is a gateway with no official artifact for this arch,
-      # and that is the gateway's own business, done before the memory baseline is taken.
+      # and that is a matter for the gateway itself, done before the memory baseline is taken.
       source lib/rig.sh
       fetch_rig "$PWD" || { echo rig fetch FAILED; echo 126 > .run-done; exit 0; }
       # rig.sh puts what it fetches in bin/; the run invokes ./otb.
-      # BENCH_ARCH, not ARCH: ARCH is the ORCHESTRATOR's variable and is not exported to the box.
+      # BENCH_ARCH, not ARCH. ARCH belongs to the orchestrator and is not exported to the box.
       # Unset here it made the URL end in "otb-", which 404s, so the run died on its own sentinel
       # with no clue which of the two things it fetches had failed.
       curl -fsSL -o ./otb \"https://github.com/GetBusbar/benchmarking/releases/download/rig/otb-\$BENCH_ARCH\" && chmod +x ./otb
