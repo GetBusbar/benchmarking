@@ -321,6 +321,8 @@ source "$ROOT/lib/stream_measure.sh"
 # decision "has this stopped moving?" is the whole meaning of steady_state_rss_mib and must be testable
 # without booting a gateway.
 # shellcheck source=/dev/null
+source "$ROOT/lib/otb.sh"
+otb_resolve "$ROOT" || { echo "FATAL: the measurement engine is unavailable"; exit 1; }
 source "$ROOT/lib/plateau.sh"
 # shellcheck source=/dev/null
 source "$GW_DIR/gateway.sh"

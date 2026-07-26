@@ -3,6 +3,8 @@
 # leak case FAILS against a spread-only implementation, which is why the trend test exists.
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$HERE/otb.sh"
+otb_resolve "$(cd "$HERE/.." && pwd)" || exit 1
 . "$HERE/plateau.sh"
 
 PASS=0; FAIL=0

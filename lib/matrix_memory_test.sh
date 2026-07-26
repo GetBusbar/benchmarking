@@ -32,6 +32,8 @@
 set -u
 B="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$B/lib/harness.sh"
+source "$B/lib/otb.sh"
+otb_resolve "$B" || exit 1
 source "$B/lib/plateau.sh"
 
 FAILED=0
