@@ -385,8 +385,46 @@ pub fn peak_max<P: Probe>(probe: &mut P, min_conc: u32, max_conc: u32, start: u3
             winner = Some(PeakPoint { concurrency: p.concurrency, value: p.value });
         }
     }
+    // A WINNER IS ONLY A MAXIMUM IF SOMETHING WAS PROBED ON BOTH SIDES OF IT.
+    //
+    // Invariant 3: a maximum is proven by the curve turning over. A winner with nothing probed above
+    // it is a point the search never saw past, so it is a LOWER BOUND, and publishing it publishes
+    // the search's own range instead of the gateway's behaviour. `bisect_ceiling` already refuses
+    // exactly this at its own floor (see its `min_conc <= 1` branch), and its comment names the two
+    // ends as the same fabrication.
+    //
+    // Three separate places above could produce such a winner: the final `else` at the end of the
+    // bracket selection (which sincerely believes it found a turnover), the halving path's `Some`
+    // arm (which publishes the FIRST rung that passed), and the rescan itself, which reads `passed`
+    // over every point ever probed and so can elect an edge point the bracket logic had discarded.
+    // The check therefore lives HERE, on the winner the function actually returns, rather than being
+    // repeated at each construction site where it is easy to get right three times and wrong once.
+    //
+    // It is stated ENTIRELY IN PROBED POINTS. Neither `min_conc` nor `max_conc` appears, so no bound
+    // literal can reach the published value by any path, including paths added later. The single
+    // carve-out is c <= 1: one is the floor of the domain itself, not a configured bound, and there
+    // is no concurrency below it for a peak to hide at.
+    let flanked = |w: &PeakPoint| {
+        let below = w.concurrency <= 1 || s.points.iter().any(|p| p.concurrency < w.concurrency);
+        let above = s.points.iter().any(|p| p.concurrency > w.concurrency);
+        below && above
+    };
+
     match winner {
-        Some(w) => PeakResult { peak: Measurement::Measured(w), points: s.points, exhausted: false },
+        Some(w) if flanked(&w) => PeakResult { peak: Measurement::Measured(w), points: s.points, exhausted: false },
+        Some(w) => {
+            let detail = format!(
+                "the best passing concurrency was c={} (value={}), but nothing was probed {} it, so the curve never turned over: this is a lower bound, not a maximum",
+                w.concurrency,
+                w.value,
+                if s.points.iter().any(|p| p.concurrency > w.concurrency) { "below" } else { "above" }
+            );
+            PeakResult {
+                peak: Measurement::absent_because(Absent::SearchExhausted, detail),
+                points: s.points,
+                exhausted: true,
+            }
+        }
         None => PeakResult {
             peak: Measurement::absent_because(Absent::NotMeasured, "no probed concurrency passed the gate"),
             points: s.points,
@@ -582,7 +620,19 @@ mod tests {
             "the floor must actually be probed, probed set: {:?}",
             r.points.iter().map(|pt| pt.concurrency).collect::<Vec<_>>()
         );
-        assert!(r.peak.is_measured(), "a real passing region must not be reported as passing nowhere");
+        // The regression this test exists for is the assertion ABOVE: the floor must actually be
+        // probed. This second assertion used to be `r.peak.is_measured()`, which encoded the low-end
+        // half of the range-bound bug: it asserted a PROVEN peak sitting exactly on `min_conc = 8`,
+        // for a curve whose true maximum is at c=1, outside the range and never probed. The original
+        // intent - "a real passing region must not be reported as passing nowhere" - is preserved,
+        // because SearchExhausted with the bound in its detail is precisely not "passing nowhere":
+        // it says a passing region was found and its extent was not established.
+        assert_eq!(
+            r.peak.reason(),
+            Some(&Absent::SearchExhausted),
+            "the floor passed, but nothing below it was probed, so its value is a lower bound"
+        );
+        assert!(r.peak.detail().is_some_and(|d| d.contains("c=8")), "the reason must name the bound it stopped at");
     }
 
     #[test]
@@ -593,6 +643,60 @@ mod tests {
         assert!(r.exhausted);
         assert_eq!(r.peak.copied(), None);
         assert_eq!(r.peak.reason(), Some(&Absent::SearchExhausted));
+    }
+
+    // ── a winner sitting on a range edge is a LOWER BOUND, at EITHER end ──────────────────────────
+    //
+    // Invariant 3: a maximum is proven by the curve turning over; still rising at either end is a
+    // lower bound, and the bound is never the answer. `bisect_ceiling` already obeys this at its own
+    // floor (see the `min_conc <= 1` branch and its comment, which names publishing the floor "the
+    // same fabrication as publishing the range bound at the top end, just at the other end of the
+    // range"). `peak_max` did not, in three separate places, each reachable purely by choosing
+    // different arguments to the SAME probes the tests below already use.
+    //
+    // The guard is stated entirely in points that were actually probed, never in `min_conc` or
+    // `max_conc`, so no bound literal can reach the published value by any path. The only carve-out
+    // is c <= 1, the true floor of the domain: there is no concurrency below one to lose a peak to.
+
+    // Instance 1: `start` clamped to `max_conc`, so nothing above it is ever sampled (the
+    // `above_start` collapse) and the final else claims a proven turnover anyway.
+    #[test]
+    fn a_peak_at_the_top_of_the_range_is_a_lower_bound_not_a_maximum() {
+        let mut probe = MonotoneRising;
+        let r = peak_max(&mut probe, 8, 512, 512, 4);
+        assert!(!r.peak.is_measured(), "the range bound must never be published as the peak: {:?}", r.peak);
+        assert_eq!(r.peak.reason(), Some(&Absent::SearchExhausted));
+        assert!(r.exhausted);
+    }
+
+    // Instance 2: the same curve, mirrored. `start` clamped to `min_conc` with a configured floor of
+    // 4 (what bin/otb.rs actually runs), so nothing below is sampled. c=4 is not the domain floor.
+    #[test]
+    fn a_peak_at_a_configured_floor_is_also_a_lower_bound() {
+        let mut probe = MonotoneFalling { top: 100_000 };
+        let r = peak_max(&mut probe, 4, 512, 4, 4);
+        assert!(!r.peak.is_measured(), "the search floor must never be published as the peak: {:?}", r.peak);
+        assert_eq!(r.peak.reason(), Some(&Absent::SearchExhausted));
+    }
+
+    // Instance 3: the halving path's `Some` arm, which publishes the FIRST rung that passed as a
+    // proven peak. Not even a turnover claim. The true peak of this curve is at c=1, outside the range.
+    #[test]
+    fn the_first_rung_that_passed_while_halving_is_not_a_proven_peak() {
+        let mut probe = PassesOnlyAtFloor { floor: 8 };
+        let r = peak_max(&mut probe, 8, 1000, 512, 4);
+        assert!(!r.peak.is_measured(), "the first passing rung is not a proven maximum: {:?}", r.peak);
+        assert_eq!(r.peak.reason(), Some(&Absent::SearchExhausted));
+    }
+
+    // The carve-out, and the proof the guard does not simply null everything at an edge: when the
+    // winner is at c=1 there is no concurrency below it, so the low side needs no witness.
+    #[test]
+    fn a_peak_at_the_true_domain_floor_is_proven_because_nothing_lies_below_it() {
+        let mut probe = PassesOnlyAtFloor { floor: 1 };
+        let r = peak_max(&mut probe, 1, 64, 32, 1);
+        assert!(r.peak.is_measured(), "c=1 is the floor of the domain, not a configured bound: {:?}", r.peak);
+        assert_eq!(r.peak.value().map(|p| p.concurrency), Some(1));
     }
 
     struct MonotoneFalling {
