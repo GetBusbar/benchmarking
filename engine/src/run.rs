@@ -40,6 +40,21 @@ pub struct RunConfig {
     /// value the launcher's --name and the stop path take: there is no second name for a reader to
     /// disagree with.
     pub runtime: crate::manifest::Runtime,
+    /// THE INGRESS PATH THIS GATEWAY DECLARES, when it is not the dialect's standard one.
+    ///
+    /// Most gateways serve the OpenAI API at `/v1/chat/completions`. Some mount their compatible
+    /// API under a prefix, and one entrant declares `/openai/v1/chat/completions` in its manifest.
+    /// The probe ignored that field and used the standard path, so every cell answered a truthful
+    /// 404 and the artifact published the gateway as serving nothing at all. That is a false claim
+    /// about somebody's product, produced entirely by us, and it is the worst class of error this
+    /// board can make.
+    ///
+    /// Applies to the ONE dialect whose standard path it ends with; every other dialect keeps its
+    /// own. A gateway that serves a dialect somewhere unusual says so, and one that does not serve
+    /// it at all still answers 404, which is the honest verdict rather than an artefact of ours.
+    pub declared_path: String,
+    /// Per-cell overrides, keyed `"<ingress>>egress"`. See `Manifest::cell_paths`.
+    pub cell_paths: std::collections::BTreeMap<String, String>,
     /// HOW TO PUT THE GATEWAY BACK AT REST. The memory group needs a process that has not served
     /// load to read an idle RSS from, and the only way to get one is to restart it, so the spec that
     /// launched it has to be reachable from a metric.
@@ -58,6 +73,23 @@ pub struct RunConfig {
 /// header belongs to the gateway and is how some of them decide which upstream to call, so it comes
 /// from the manifest, keyed by column. Collapsing them into one hardcoded shape is what sent
 /// `authorization: Bearer` to dialects that do not use one.
+/// Where to send this dialect's probe: the gateway's declared path when it is a longer form of this
+/// dialect's standard one, otherwise the standard.
+pub fn path_for(cfg: &RunConfig, ingress: Dialect, egress: &str) -> String {
+    let standard = ingress.path(&cfg.model);
+    // Most specific first: a cell's own path, then the gateway's declared one, then the standard.
+    if let Some(p) = cfg.cell_paths.get(&format!("{}>{}", ingress.as_str(), egress)) {
+        return p.clone();
+    }
+    if !cfg.declared_path.is_empty()
+        && cfg.declared_path != standard
+        && cfg.declared_path.ends_with(&standard)
+    {
+        return cfg.declared_path.clone();
+    }
+    standard
+}
+
 fn headers_for(cfg: &RunConfig, ingress: Dialect, egress: &str) -> Vec<(String, String)> {
     let mut out = ingress.auth_headers(&cfg.auth);
     out.extend(cfg.static_headers.iter().cloned());
@@ -73,7 +105,7 @@ pub fn probe_cell(cfg: &RunConfig, id: &CellId, mock_healthy: bool) -> Served {
     let Ok(ing) = id.ingress.parse::<Dialect>() else {
         return Served::Untestable(format!("unknown ingress dialect {}", id.ingress));
     };
-    let path = ing.path(&cfg.model);
+    let path = path_for(cfg, ing, &id.egress);
     let body = ing.body(&cfg.model);
     match http::post_json(cfg.gateway_addr, &path, body.as_bytes(), &headers_for(cfg, ing, &id.egress), cfg.probe_timeout) {
         Outcome::Response(r) if (200..300).contains(&r.status) => Served::Yes,
@@ -222,7 +254,7 @@ pub fn measure_at(cfg: &RunConfig, id: &CellId, concurrency: u32) -> Measurement
             format!("unknown ingress dialect {}", id.ingress),
         );
     };
-    let mut p = SweepProbe { cfg, path: ing.path(&cfg.model), body: ing.body(&cfg.model) };
+    let mut p = SweepProbe { cfg, path: path_for(cfg, ing, &id.egress), body: ing.body(&cfg.model) };
     match p.probe(concurrency) {
         // The gate still applies: a window with failures is not a throughput reading, it is a window
         // the target could not serve cleanly.
@@ -248,7 +280,7 @@ pub fn sweep_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> CellPerf {
             points: Vec::new(),
         };
     };
-    let mut p = SweepProbe { cfg, path: ing.path(&cfg.model), body: ing.body(&cfg.model) };
+    let mut p = SweepProbe { cfg, path: path_for(cfg, ing, &id.egress), body: ing.body(&cfg.model) };
     let start = ((lo + hi) / 2).max(lo);
     let r = search::peak_max(&mut p, lo, hi, start, 4);
     match r.peak.value() {
@@ -367,6 +399,8 @@ mod tests {
             static_headers: Vec::new(),
             egress_headers: Default::default(),
             runtime: crate::manifest::Runtime::Native { proc_match: "test-fixture".into() },
+            declared_path: String::new(),
+            cell_paths: Default::default(),
             relaunch: None,
         }
     }
@@ -466,4 +500,36 @@ mod tests {
             assert!(r.metrics.is_none(), "{} must not carry metrics", r.outcome.id);
         }
     }
+    // WHICH URL A CELL IS DRIVEN AT, in precedence order.
+    //
+    // Two real gateways mount their compatible API somewhere other than the dialect's standard path,
+    // and the probe ignored the manifest and used the standard one. Both answered a truthful 404 on
+    // every cell and the artifact published them as serving nothing at all: a false claim about
+    // somebody's product, produced entirely by us.
+    //
+    // A per-cell entry exists for the gateways that route a same-dialect request differently from a
+    // translating one. It is keyed by the full cell, so choosing it is a deliberate, visible act in
+    // that gateway's data rather than something the engine infers.
+    #[test]
+    fn a_cell_is_driven_at_its_own_path_then_the_declared_one_then_the_standard() {
+        let mut cfg = cfg_for("127.0.0.1:1".parse().unwrap(), "127.0.0.1:2".parse().unwrap());
+
+        // Nothing declared: the dialect's standard path.
+        assert_eq!(path_for(&cfg, Dialect::Openai, "openai"), "/v1/chat/completions");
+
+        // A declared path that is a longer form of the standard one applies to that dialect, and to
+        // that dialect only: a gateway mounting its OpenAI API under a prefix has not moved anyone
+        // else's API.
+        cfg.declared_path = "/openai/v1/chat/completions".to_string();
+        assert_eq!(path_for(&cfg, Dialect::Openai, "anthropic"), "/openai/v1/chat/completions");
+        assert_eq!(path_for(&cfg, Dialect::Anthropic, "anthropic"), "/v1/messages");
+
+        // A cell's own path wins over both, and ONLY for that cell. The neighbouring cell in the
+        // same row keeps the declared path, which is what stops one entrant being measured on a
+        // provider-pinned route while the rest of its row is measured on the unified one.
+        cfg.cell_paths.insert("openai>openai".to_string(), "/passthrough".to_string());
+        assert_eq!(path_for(&cfg, Dialect::Openai, "openai"), "/passthrough");
+        assert_eq!(path_for(&cfg, Dialect::Openai, "anthropic"), "/openai/v1/chat/completions");
+    }
+
 }

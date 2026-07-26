@@ -394,7 +394,7 @@ impl Metric for Memory {
             })
         };
 
-        let path = ctx.dialect.path(&ctx.cfg.model);
+        let path = crate::run::path_for(ctx.cfg, ctx.dialect, &ctx.id.egress);
         let body = ctx.dialect.body(&ctx.cfg.model);
 
         // ── LOAD UNTIL IT STOPS MOVING ───────────────────────────────────────────────────────────
@@ -582,7 +582,7 @@ impl Metric for Streaming {
 
         let through_gateway = crate::http::post_json_sse(
             ctx.cfg.gateway_addr,
-            &ctx.dialect.path(&ctx.cfg.model),
+            &crate::run::path_for(ctx.cfg, ctx.dialect, &ctx.id.egress),
             body.as_bytes(),
             &headers,
             STREAM_TIMEOUT,
@@ -692,6 +692,8 @@ mod tests {
             static_headers: Vec::new(),
             egress_headers: Default::default(),
             runtime: crate::manifest::Runtime::Native { proc_match: "test-fixture".into() },
+            declared_path: String::new(),
+            cell_paths: Default::default(),
             relaunch: None,
         }
     }

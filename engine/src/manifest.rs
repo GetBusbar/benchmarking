@@ -95,6 +95,20 @@ pub struct Manifest {
     /// regardless and publishes what it observes. This only says which upstreams are wired.
     #[serde(default)]
     pub egress: Vec<String>,
+    /// A PER-CELL INGRESS PATH, for the cells that have one. Keyed `"<ingress>>egress"`.
+    ///
+    /// Some gateways expose a route that skips translation when the client's dialect already matches
+    /// the upstream's, and route it differently otherwise. Where that is what an operator would
+    /// actually call, measuring the other route measures work the gateway would not have done.
+    ///
+    /// Absent for a cell means the gateway's declared `path`, which means the dialect's standard
+    /// path. Twelve of the thirteen entrants set none of these.
+    ///
+    /// Whatever is used is RECORDED in the cell it produced, because a number taken on a
+    /// provider-pinned route and a number taken on the unified route are different measurements and
+    /// the board must not present them as the same one.
+    #[serde(default)]
+    pub cell_paths: std::collections::BTreeMap<String, String>,
     /// COMMANDS RUN AFTER THE GATEWAY IS UP, one per line, from a file named `commands`.
     ///
     /// Discovered by filename like `env` and `headers.json`, never declared, so every gateway is
@@ -970,6 +984,7 @@ mod tests {
             runtime: Runtime::Docker { container: "gw-bench".into() },
             egress: vec!["openai".into()],
             commands: vec![],
+            cell_paths: Default::default(),
             config: vec![],
             launch: None,
             config_files: vec![],

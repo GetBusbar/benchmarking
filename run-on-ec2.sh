@@ -51,6 +51,9 @@ BENCH_MAX_MIN="${BENCH_MAX_MIN:-480}"
 # cannot be cloned, and that failure is loud rather than silently measuring something else.
 BENCH_REPO="${BENCH_REPO:-https://github.com/GetBusbar/benchmarking.git}"
 BENCH_COMMIT="${BENCH_COMMIT:-$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse HEAD 2>/dev/null)}"
+# The archive GitHub serves wraps everything in <repo>-<sha>/, so the box needs the repo's own name
+# to name the members it wants. Derived from the clone URL rather than hardcoded.
+_REPO_NAME="$(basename "${BENCH_REPO%.git}")"
 
 # ── INCREMENTAL PER-GATEWAY PUBLISH (matrix-sole-source) ──────────────────────────────────────────
 # Each gateway's ENTIRE benchmark is now ONE atomic matrix run, and gateways publish INDEPENDENTLY (the
@@ -438,11 +441,16 @@ its result so the board updates just this row (matrix-sole-source)." \
     # Fetch/rebase-then-push in a bounded retry loop (audit HIGH-5) — 13 boxes + the render-charts bot
     # move the remote ref constantly, so a bare push of our stale HEAD is rejected non-fast-forward and
     # strands the gateway. Still inside the flock so the whole fetch→rebase→push is serialized across boxes.
-    if push_with_rebase "[$gw]" echo; then
-      echo "[$gw] pushed to $PUBLISH_REMOTE/$PUBLISH_BRANCH — the board will regenerate data.json and update $gw's row"
-    else
-      exit 1
-    fi
+    # COMMITTED, NOT PUSHED. Nothing reaches the board until the whole run has shut down cleanly.
+    #
+    # This used to push as each box finished, so a run killed halfway left the gateways that happened
+    # to finish first live on the public board while the rest were missing. That happened twice in
+    # one day, and both times the rows that went live were the ones a harness defect had produced:
+    # thirty-six declined cells apiece, published as a capability claim about somebody's product.
+    #
+    # The commit still happens here, per gateway, so a later crash cannot lose a measurement that was
+    # already pulled. Only the push waits, and the final sweep at the end of the run does it once.
+    echo "[$gw] committed locally; nothing is published until the run finishes cleanly"
   )
 }
 
@@ -648,28 +656,33 @@ bench_gateway_once() {
   # SAME code. Resolving it per box would let a push mid-run split the field across two revisions and
   # publish them side by side as though they were comparable.
   glog_echo "cloning $BENCH_REPO @ ${BENCH_COMMIT:0:12} ..."; local _t0=$SECONDS
-  # SPARSE: the box gets the gateway definitions and lib/, and nothing else.
+  # THE BOX DOWNLOADS THE FEW FILES IT NEEDS. It does not clone, and it has no git.
   #
-  # It used to clone the whole repository, which shipped results/ to every box - including the PREVIOUS
-  # run's committed results/matrix/<gw>.json. The orchestrator then rsynced that file back off the box
-  # and accepted it as this run's output, so a box that measured nothing still looked like it had. The
-  # engine and the mock arrive as prebuilt binaries and the box builds nothing, so no other path is
-  # needed: whatever is not checked out cannot be read, mistaken for fresh, or run stale.
+  # It needs `gateways/<name>/` and `lib/rig.sh`. That is it: the engine and the mock arrive as
+  # prebuilt binaries and the box compiles nothing except a source-built gateway, which fetches its
+  # own source. A clone of the whole repository to get a handful of small files was never justified,
+  # and it actively caused harm: it shipped results/ to every box, and the orchestrator then rsynced
+  # the PREVIOUS run's committed result back off the box and accepted it as this run's output, so a
+  # box that measured nothing still looked like it had.
   #
-  # Same commit, so provenance is unchanged - a sparse checkout narrows WHICH paths are materialised,
-  # not which revision they come from, and `git rev-parse HEAD` still has to match exactly.
+  # A tarball of the pinned commit is one request, needs no git on the box, and carries the same
+  # provenance a clone did: the URL names the exact SHA, so what lands cannot be a different revision.
+  # Extracting only the two paths means whatever is not asked for cannot be read, mistaken for fresh,
+  # or run stale.
   ssh $SSHOPT ubuntu@"$ip" "set -e
     rm -rf ~/benchmarking
-    git clone -q --filter=blob:none --no-checkout '$BENCH_REPO' ~/benchmarking
+    mkdir -p ~/benchmarking
     cd ~/benchmarking
-    git sparse-checkout set --no-cone gateways lib
-    git checkout -q '$BENCH_COMMIT'
-    # Refuse to measure a tree that is not exactly the requested commit.
-    test \"\$(git rev-parse HEAD)\" = '$BENCH_COMMIT'
-    # Refuse to measure if the sparse checkout did not actually materialise what the run needs. A
-    # silently empty gateways/ would surface much later as a validate failure with a confusing message.
+    # --strip-components=1 removes the <repo>-<sha>/ wrapper GitHub puts around an archive.
+    # The member paths are named exactly rather than globbed: GitHub's archive root is always
+    # <repo>-<sha>/, so there is nothing to guess, and --wildcards is a GNU extension the harness
+    # should not depend on.
+    curl -fsSL '${BENCH_REPO%.git}/archive/$BENCH_COMMIT.tar.gz' \
+      | tar -xz --strip-components=1 '$_REPO_NAME-$BENCH_COMMIT/gateways' '$_REPO_NAME-$BENCH_COMMIT/lib'
+    # Refuse to measure if the download did not actually produce what the run needs. A silently empty
+    # gateways/ would surface much later as a validate failure with a confusing message.
     test -d gateways && test -r lib/rig.sh
-    # And prove the exclusion held: results/ on a box is how the previous run's numbers got recycled.
+    # And prove the exclusion held: results/ on a box is how a previous run's numbers got recycled.
     test ! -e results
   " >>"$glog" 2>&1
   local _up_rc=$?
