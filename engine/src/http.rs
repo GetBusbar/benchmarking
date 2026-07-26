@@ -419,6 +419,14 @@ pub fn post_json(
     request.extend_from_slice(format!("POST {path} HTTP/1.1\r\n").as_bytes());
     request.extend_from_slice(format!("Host: {addr}\r\n").as_bytes());
     request.extend_from_slice(format!("Content-Length: {}\r\n", body.len()).as_bytes());
+    // THE PROBE AND THE LOAD MUST SEND THE SAME REQUEST. The load generator sets this
+    // (gen.rs build_request) and this client did not, so a gateway that requires it on a JSON body
+    // answered 415 to the probe and was published as NOT SERVING a pairing it would have loaded
+    // fine. That is a gateway property asserted from a malformed request of ours, which is the
+    // worst direction for this error to run. A caller may still override it below.
+    if !headers.iter().any(|(n, _)| n.eq_ignore_ascii_case("content-type")) {
+        request.extend_from_slice(b"content-type: application/json\r\n");
+    }
     // Always close: this client never pools connections, so there is nothing to keep alive for.
     request.extend_from_slice(b"Connection: close\r\n");
     for (name, value) in headers {
@@ -595,6 +603,14 @@ pub fn post_json_sse(
     request.extend_from_slice(format!("POST {path} HTTP/1.1\r\n").as_bytes());
     request.extend_from_slice(format!("Host: {addr}\r\n").as_bytes());
     request.extend_from_slice(format!("Content-Length: {}\r\n", body.len()).as_bytes());
+    // THE PROBE AND THE LOAD MUST SEND THE SAME REQUEST. The load generator sets this
+    // (gen.rs build_request) and this client did not, so a gateway that requires it on a JSON body
+    // answered 415 to the probe and was published as NOT SERVING a pairing it would have loaded
+    // fine. That is a gateway property asserted from a malformed request of ours, which is the
+    // worst direction for this error to run. A caller may still override it below.
+    if !headers.iter().any(|(n, _)| n.eq_ignore_ascii_case("content-type")) {
+        request.extend_from_slice(b"content-type: application/json\r\n");
+    }
     request.extend_from_slice(b"Connection: close\r\n");
     for (name, value) in headers {
         request.extend_from_slice(format!("{name}: {value}\r\n").as_bytes());
@@ -803,6 +819,50 @@ mod tests {
                 other => panic!("status {code} must be a Response, got {other:?}"),
             }
         }
+    }
+
+    /// Captures the raw request bytes the client sent, so a test can assert on what went out.
+    fn echo_request_server() -> (SocketAddr, std::sync::Arc<std::sync::Mutex<String>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let sink = std::sync::Arc::clone(&seen);
+        std::thread::spawn(move || {
+            if let Some(Ok(mut conn)) = listener.incoming().next() {
+                let mut buf = [0u8; 8192];
+                let n = conn.read(&mut buf).unwrap_or(0);
+                if let Ok(mut g) = sink.lock() {
+                    g.push_str(&String::from_utf8_lossy(&buf[..n]));
+                }
+                let _ = conn.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok");
+            }
+        });
+        (addr, seen)
+    }
+
+    // The probe and the load must send the SAME request. A gateway requiring content-type on a JSON
+    // body answered 415 to the probe and was published as not serving a pairing it would have
+    // loaded fine: a gateway property asserted from a malformed request of ours.
+    #[test]
+    fn the_probe_sends_a_json_content_type_like_the_load_generator_does() {
+        let (addr, seen) = echo_request_server();
+        let _ = post_json(addr, "/v1/chat/completions", b"{}", &[], Duration::from_secs(2));
+        let req = seen.lock().map(|g| g.clone()).unwrap_or_default();
+        assert!(
+            req.to_lowercase().contains("content-type: application/json"),
+            "probe request must carry a json content-type, got:\n{req}"
+        );
+    }
+
+    // A caller that supplies its own content-type must win: some dialects are not application/json.
+    #[test]
+    fn an_explicit_content_type_from_the_caller_is_not_duplicated() {
+        let (addr, seen) = echo_request_server();
+        let hdrs = vec![("content-type".to_string(), "application/x-ndjson".to_string())];
+        let _ = post_json(addr, "/x", b"{}", &hdrs, Duration::from_secs(2));
+        let req = seen.lock().map(|g| g.clone()).unwrap_or_default().to_lowercase();
+        assert_eq!(req.matches("content-type:").count(), 1, "exactly one content-type:\n{req}");
+        assert!(req.contains("application/x-ndjson"));
     }
 
     #[test]
