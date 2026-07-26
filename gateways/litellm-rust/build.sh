@@ -21,13 +21,13 @@ PY_SPEC="${LITELLM_PY_SPEC:-litellm[proxy]==1.93.0}"
 SRC="$GW_DIR/src"
 VENV="$GW_DIR/venv"
 
-if ! command -v cargo >/dev/null || ! python3 -m venv --help >/dev/null 2>&1; then
-  sudo apt-get install -y -q git build-essential pkg-config libssl-dev python3-venv python3-pip >/dev/null 2>&1 || true
-  command -v cargo >/dev/null || (curl -sSf https://sh.rustup.rs | sh -s -- -y >/dev/null 2>&1)
-  # shellcheck disable=SC1091
-  . "$HOME/.cargo/env" 2>/dev/null || true
-fi
-command -v cargo >/dev/null || { echo "build: rust toolchain unavailable"; exit 1; }
+# Prerequisites. Unconditionally, because apt-get install is already idempotent and already
+# resolves dependencies: there is nothing here for us to be clever about. It used to be wrapped in
+# `if ! command -v cargo`, which is the bug: the box provisions rust for every gateway, so cargo was
+# always present, the block never ran, and the packages that are not rust were never installed. The
+# failure then surfaced one layer down as "failed to run custom build command for openssl-sys", which
+# names a crate rather than the missing package.
+sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q git build-essential pkg-config libssl-dev python3-venv python3-pip
 
 # THE PYTHON PACKAGE IS NOT OPTIONAL AND ITS FAILURE IS SILENT.
 #
