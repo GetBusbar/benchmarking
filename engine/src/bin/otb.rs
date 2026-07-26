@@ -227,7 +227,55 @@ fn main() -> ExitCode {
                 measured_at: utc_stamp(),
                 arch: std::env::var("BENCH_ARCH").unwrap_or_else(|_| "unknown".into()),
             };
-            match run_suite(&cfg, gw) {
+            // LAUNCH IT, if the manifest says how.
+            //
+            // A manifest that declares no launch describes a gateway someone else is running, which
+            // is what every run did until now and is what the smoke against an already-up target
+            // still does. Declaring a launch means the harness owns the gateway's lifetime: it starts
+            // it, measures it, and stops it, so a run cannot silently measure a container left over
+            // from a previous one.
+            let gw_dir = std::path::Path::new("gateways").join(&cfg.manifest.name);
+            let cores = std::env::var("OTB_GW_CORES").unwrap_or_else(|_| "0-3".into());
+            let launched = match cfg.manifest.launch_spec(
+                &cores,
+                cfg.mock_addr.port(),
+                &gw_dir,
+                Duration::from_secs(60),
+                Duration::from_secs(2),
+            ) {
+                None => None,
+                Some(Err(e)) => {
+                    eprintln!("manifest {manifest_path} cannot be launched: {e}");
+                    return ExitCode::FAILURE;
+                }
+                Some(Ok(spec)) => {
+                    let mut launcher = otb_engine::launch::RealLauncher;
+                    match otb_engine::launch::launch_default(&mut launcher, &spec) {
+                        Ok(l) => {
+                            println!("launched {} in {} attempt(s)", spec.runtime.identity(), l.attempts);
+                            Some(spec)
+                        }
+                        Err(e) => {
+                            // The gateway never came up. Publishing a grid of absences against a
+                            // gateway that was never running would read as the gateway failing, so
+                            // this stops rather than measuring nothing and calling it a result.
+                            eprintln!("{} never became ready: {e}", spec.runtime.identity());
+                            return ExitCode::FAILURE;
+                        }
+                    }
+                }
+            };
+
+            let outcome = run_suite(&cfg, gw);
+
+            // Stop what we started, whatever happened. A gateway left running holds the port and the
+            // cores the NEXT gateway needs, and the failure that causes looks like the next gateway
+            // refusing to boot.
+            if let Some(spec) = &launched {
+                let _ = otb_engine::supervise::stop_and_wait(&spec.runtime, spec.port, Duration::from_secs(15));
+            }
+
+            match outcome {
                 Ok(paths) => {
                     println!("wrote {}", paths.current.display());
                     println!("wrote {}", paths.historical.display());
