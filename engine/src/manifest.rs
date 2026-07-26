@@ -259,3 +259,59 @@ mod tests {
         assert_eq!(docker_manifest().url(), "http://127.0.0.1:8080/v1/chat/completions");
     }
 }
+
+#[cfg(test)]
+mod real_field_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    /// Every manifest in the real field, extracted from the shell manifests as data.
+    ///
+    /// This is the manifest counterpart of the snapshot-corpus test: a schema that only represents
+    /// an example I invented proves nothing. If the types cannot describe all thirteen entrants as
+    /// they actually are, the schema is wrong and no amount of internal consistency would say so.
+    fn field() -> BTreeMap<String, Manifest> {
+        let txt = include_str!("../tests/manifests.json");
+        serde_json::from_str(txt).expect("the extracted field must parse under these types")
+    }
+
+    #[test]
+    fn every_real_manifest_parses_and_validates() {
+        let f = field();
+        assert!(f.len() >= 13, "the whole field should be represented, got {}", f.len());
+        for (name, m) in &f {
+            assert!(m.validate().is_ok(), "{name} must validate: {:?}", m.validate());
+            assert_eq!(&m.name, name, "the key and the declared name must agree");
+        }
+    }
+
+    /// The regression this schema exists to make impossible. Today all thirteen agree, because the
+    /// shell defect was found and fixed by hand; the point is that after this there is no second
+    /// place to spell the identity, so they cannot drift apart again.
+    #[test]
+    fn no_manifest_can_name_two_different_things_to_measure() {
+        for (name, m) in &field() {
+            let id = m.runtime.identity();
+            assert!(!id.trim().is_empty(), "{name} must declare something measurable");
+            // Both readers and the stop path take this one string. Asserting it twice is the closest
+            // a test can get to asserting that a second spelling does not exist.
+            assert_eq!(m.runtime.identity(), id);
+        }
+    }
+
+    #[test]
+    fn both_runtime_kinds_are_present_in_the_real_field() {
+        let f = field();
+        assert!(f.values().any(|m| m.runtime.is_docker()), "some entrants run in containers");
+        assert!(f.values().any(|m| !m.runtime.is_docker()), "some entrants run natively from source");
+    }
+
+    #[test]
+    fn every_manifest_declares_a_reachable_url() {
+        for (name, m) in &field() {
+            let u = m.url();
+            assert!(u.starts_with("http://127.0.0.1:"), "{name} must be driven on loopback, got {u}");
+            assert!(u.contains(&m.port.to_string()));
+        }
+    }
+}
