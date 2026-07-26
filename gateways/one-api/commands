@@ -15,8 +15,15 @@ curl -sf -b /tmp/oa.jar -X PUT http://127.0.0.1:3000/api/user/ -H 'content-type:
 curl -sf -b /tmp/oa.jar -X POST http://127.0.0.1:3000/api/channel/ -H 'content-type: application/json' -d '{"name":"mock-1","type":1,"key":"sk-mock","base_url":"http://127.0.0.1:8000","models":"gpt-4o-mini","group":"default","status":1}' -o /dev/null
 curl -sf -b /tmp/oa.jar -X POST http://127.0.0.1:3000/api/channel/ -H 'content-type: application/json' -d '{"name":"mock-14","type":14,"key":"sk-mock","base_url":"http://127.0.0.1:8000","models":"claude-3-5-sonnet-20240620","group":"default","status":1}' -o /dev/null
 curl -sf -b /tmp/oa.jar -X POST http://127.0.0.1:3000/api/channel/ -H 'content-type: application/json' -d '{"name":"mock-24","type":24,"key":"sk-mock","base_url":"http://127.0.0.1:8000","models":"gemini-1.5-pro","group":"default","status":1}' -o /dev/null
-# Create the API key the harness will authenticate with, with the key SET rather than generated, so
-# it matches the `auth` this gateway already declares in definition.json. The engine learns nothing
-# from these commands and reads nothing they write: it sets env, sets headers, runs these lines, and
-# then measures with the credential it already had.
-curl -sf -b /tmp/oa.jar -X POST http://127.0.0.1:3000/api/token/ -H 'content-type: application/json' -d '{"name":"bench","key":"dummy","expired_time":-1,"remain_quota":0,"unlimited_quota":true}' -o /dev/null
+# Mint the token the harness will authenticate with. One-API's AddToken handler (controller/token.go)
+# ignores any client-supplied "key" and always writes a random one of its own - a request that tries
+# to SET it (as this line once did) mints a token whose real key is never "dummy", so every probe
+# authenticates with a credential one-api never issued and gets a uniform 401 across every declared
+# cell. There is no admin-API workaround: UpdateToken (the PUT path) discards "key" too, and the
+# INITIAL_ROOT_ACCESS_TOKEN bootstrap env var only authorizes the admin API, not relay routes like
+# /v1/chat/completions (middleware/auth.go's TokenAuth validates exclusively via a DB lookup).
+#
+# So: mint normally, read the real generated key back out of the response, and hand it to the engine
+# by writing it to .minted-auth next to this file - the one place `otb run` looks after every command
+# has finished, replacing the manifest's declared (placeholder) `auth` for every probe that follows.
+curl -sf -b /tmp/oa.jar -X POST http://127.0.0.1:3000/api/token/ -H 'content-type: application/json' -d '{"name":"bench","expired_time":-1,"remain_quota":0,"unlimited_quota":true}' | python3 -c 'import json,sys; d=json.load(sys.stdin); k=d.get("data",{}).get("key",""); print(f"sk-{k}") if k else sys.exit("one-api token mint: no key in response")' > gateways/one-api/.minted-auth

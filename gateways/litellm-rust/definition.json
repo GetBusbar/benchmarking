@@ -8,9 +8,12 @@
       "template": "config.gen.yaml.tmpl"
     }
   ],
-  "display": "LiteLLM · Rust",
+  "display": "LiteLLM \u00b7 Rust",
   "egress": [
     "anthropic"
+  ],
+  "headers": [
+    "Authorization: Bearer {GW_AUTH}"
   ],
   "lang": "Rust",
   "launch": {

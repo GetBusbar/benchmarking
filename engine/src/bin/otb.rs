@@ -13,6 +13,19 @@ use otb_engine::gen::{self, GenConfig};
 use otb_engine::stats::{self, Sample, Verdict};
 use std::time::Duration;
 
+/// If `commands` left a minted credential at `<gw_dir>/.minted-auth`, its trimmed contents are what
+/// every probe should authenticate with instead of the manifest's declared (placeholder) `auth`.
+/// `None` for the absent, unreadable, or whitespace-only cases - every one of those means "nothing
+/// was minted", so the declared `auth` stands.
+fn resolve_minted_auth(gw_dir: &std::path::Path) -> Option<String> {
+    let raw = std::fs::read_to_string(gw_dir.join(".minted-auth")).ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(trimmed.to_string())
+}
+
 fn usage() -> ExitCode {
     eprintln!(
         "otb {}\n\nSamples arrive on stdin as \"<t_s> <mib>\" per line, matching the shell's series files.\n\n\
@@ -259,7 +272,7 @@ fn main() -> ExitCode {
                 }
             }
 
-            let cfg = SuiteConfig {
+            let mut cfg = SuiteConfig {
                 manifest,
                 gw_dir: gw_dir.clone(),
                 gw_cores: gw_cores.clone(),
@@ -351,6 +364,18 @@ fn main() -> ExitCode {
                                         return ExitCode::FAILURE;
                                     }
                                 }
+                            }
+                            // A GATEWAY WITH NO CONFIG FILE MAY MINT ITS OWN CREDENTIAL RATHER THAN
+                            // LET ONE BE DECLARED. one-api's admin API generates a random token
+                            // server-side and discards any client-supplied one, so no `commands`
+                            // line can make the manifest's static `auth` valid by asking for it by
+                            // name. `run_line` spawns a fresh `/bin/sh -c` per line (launch.rs), so
+                            // an `export` in one command is invisible to the next and to this
+                            // process - the only thing that survives across those separate
+                            // invocations is a file. See `resolve_minted_auth`.
+                            if let Some(minted) = resolve_minted_auth(&gw_dir) {
+                                println!("setup: using minted auth from {}", gw_dir.join(".minted-auth").display());
+                                cfg.manifest.auth = minted;
                             }
                             Some(spec)
                         }
@@ -464,5 +489,51 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         _ => usage(),
+    }
+}
+
+#[cfg(test)]
+mod minted_auth_tests {
+    use super::resolve_minted_auth;
+
+    // A tiny throwaway directory per test, so tests can run concurrently without treading on each
+    // other's `.minted-auth`. Not `tempfile`: this crate takes no dev-dependency for one file.
+    fn scratch_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("otb-minted-auth-test-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    // THE CASE THIS EXISTS FOR: a gateway whose real credential can only be known after it boots
+    // gets that credential into the probe, not the manifest's placeholder.
+    #[test]
+    fn a_minted_file_overrides_the_declared_auth() {
+        let dir = scratch_dir("present");
+        std::fs::write(dir.join(".minted-auth"), "sk-real-key-123\n").unwrap();
+        assert_eq!(resolve_minted_auth(&dir), Some("sk-real-key-123".to_string()));
+    }
+
+    // TWELVE OF THIRTEEN ENTRANTS: no file, so the declared `auth` stands untouched.
+    #[test]
+    fn no_file_means_no_override() {
+        let dir = scratch_dir("absent");
+        assert_eq!(resolve_minted_auth(&dir), None);
+    }
+
+    // A command that ran but wrote nothing useful (a failed mint that still touched the file, an
+    // empty redirect) must not silently authenticate with an empty bearer token - that is a
+    // different, worse failure mode than "kept the placeholder".
+    #[test]
+    fn a_whitespace_only_file_means_no_override() {
+        let dir = scratch_dir("blank");
+        std::fs::write(dir.join(".minted-auth"), "   \n\t\n").unwrap();
+        assert_eq!(resolve_minted_auth(&dir), None);
+    }
+
+    #[test]
+    fn surrounding_whitespace_is_trimmed() {
+        let dir = scratch_dir("padded");
+        std::fs::write(dir.join(".minted-auth"), "  sk-abc  \n").unwrap();
+        assert_eq!(resolve_minted_auth(&dir), Some("sk-abc".to_string()));
     }
 }
