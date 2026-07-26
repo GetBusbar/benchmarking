@@ -577,6 +577,17 @@ pub enum SseEnd {
 pub struct SseOutcome {
     pub status: Option<u16>,
     pub frames: Vec<String>,
+    /// Microseconds from the request being written to each frame arriving, one entry per frame in
+    /// `frames`, in order.
+    ///
+    /// Frames alone cannot answer a single question the board asks about streaming: every published
+    /// streaming field is a TIMING (time to first token, and the gaps between tokens after it). The
+    /// reader used to collect the frames and drop the clock, so the numbers were unobtainable no
+    /// matter how the caller was wired.
+    ///
+    /// Measured from the write, not from the connect, so a slow DNS or TCP handshake is not charged
+    /// to the gateway's first token.
+    pub frame_offsets_us: Vec<u64>,
     pub end: SseEnd,
 }
 
@@ -607,6 +618,7 @@ pub fn post_json_sse(
             return SseOutcome {
                 status: None,
                 frames: Vec::new(),
+                frame_offsets_us: Vec::new(),
                 end: SseEnd::ConnectionFailed(e.to_string()),
             }
         }
@@ -636,20 +648,24 @@ pub fn post_json_sse(
         return SseOutcome {
             status: None,
             frames: Vec::new(),
+            frame_offsets_us: Vec::new(),
             end: SseEnd::Timeout,
         };
     }
+    let sent_at = Instant::now();
     if let Err(e) = stream.write_all(&request) {
         return if is_timeout(&e) {
             SseOutcome {
                 status: None,
                 frames: Vec::new(),
+                frame_offsets_us: Vec::new(),
                 end: SseEnd::Timeout,
             }
         } else {
             SseOutcome {
                 status: None,
                 frames: Vec::new(),
+                frame_offsets_us: Vec::new(),
                 end: SseEnd::ConnectionFailed(format!(
                     "connection dropped while sending the request: {e}"
                 )),
@@ -663,6 +679,7 @@ pub fn post_json_sse(
             return SseOutcome {
                 status: None,
                 frames: Vec::new(),
+                frame_offsets_us: Vec::new(),
                 end: SseEnd::Timeout,
             }
         }
@@ -670,6 +687,7 @@ pub fn post_json_sse(
             return SseOutcome {
                 status: None,
                 frames: Vec::new(),
+                frame_offsets_us: Vec::new(),
                 end: SseEnd::ConnectionFailed(msg),
             }
         }
@@ -677,6 +695,7 @@ pub fn post_json_sse(
             return SseOutcome {
                 status: None,
                 frames: Vec::new(),
+                frame_offsets_us: Vec::new(),
                 end: SseEnd::Malformed(message),
             }
         }
@@ -686,11 +705,13 @@ pub fn post_json_sse(
     };
 
     let mut frames = Vec::new();
+    let mut frame_offsets_us: Vec<u64> = Vec::new();
     loop {
         if frames.len() >= frame_budget {
             return SseOutcome {
                 status: Some(status),
                 frames,
+                frame_offsets_us,
                 end: SseEnd::FrameBudgetReached,
             };
         }
@@ -698,6 +719,9 @@ pub fn post_json_sse(
             ReadOutcome::Full(line) => {
                 let text = String::from_utf8_lossy(strip_crlf(&line));
                 if let Some(data) = text.strip_prefix("data:") {
+                    // Stamped as the frame is accepted, so the offset is when the frame was READ,
+                    // not when the loop got round to bookkeeping it.
+                    frame_offsets_us.push(sent_at.elapsed().as_micros() as u64);
                     frames.push(data.trim_start().to_string());
                 }
                 // Any other line (event:, id:, a blank separator, chunk-size noise) is not a data
@@ -707,6 +731,7 @@ pub fn post_json_sse(
                 return SseOutcome {
                     status: Some(status),
                     frames,
+                    frame_offsets_us,
                     end: SseEnd::Timeout,
                 }
             }
@@ -714,6 +739,7 @@ pub fn post_json_sse(
                 return SseOutcome {
                     status: Some(status),
                     frames,
+                    frame_offsets_us,
                     end: SseEnd::StreamClosed,
                 }
             }
@@ -721,6 +747,7 @@ pub fn post_json_sse(
                 return SseOutcome {
                     status: Some(status),
                     frames,
+                    frame_offsets_us,
                     end: SseEnd::StreamClosed,
                 }
             }
@@ -970,6 +997,72 @@ mod tests {
         assert_eq!(outcome.status, Some(200));
         assert_eq!(outcome.frames, vec!["chunk-0", "chunk-1", "chunk-2"]);
         assert_eq!(outcome.end, SseEnd::StreamClosed);
+    }
+
+    // EVERY PUBLISHED STREAMING NUMBER IS A TIMING. Time to first token, and the gaps between
+    // tokens after it - the frames themselves are never published. This reader collected frames and
+    // dropped the clock, which made those numbers unobtainable no matter how the caller was wired.
+    //
+    // A server that holds a known pause before the first frame and a different known pause between
+    // the rest is what makes the two quantities separable: if the offsets were fabricated, or all
+    // stamped at once at the end, the first gap and the later gaps would not differ.
+    #[test]
+    fn sse_records_when_each_frame_arrived_not_just_that_it_did() {
+        let addr = spawn_server(|mut conn| {
+            let _ = read_request_head(&conn);
+            let _ = conn.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n");
+            // A deliberately long wait for the FIRST token, then quick ones after it.
+            thread::sleep(Duration::from_millis(150));
+            let _ = conn.write_all(b"data: first\n\n");
+            for i in 0..2 {
+                thread::sleep(Duration::from_millis(30));
+                let _ = conn.write_all(format!("data: next-{i}\n\n").as_bytes());
+            }
+        });
+
+        let outcome = post_json_sse(addr, "/x", b"{}", &[], Duration::from_secs(5), 10);
+        assert_eq!(outcome.frames.len(), 3);
+        assert_eq!(
+            outcome.frame_offsets_us.len(),
+            outcome.frames.len(),
+            "one arrival time per frame, or the two lists cannot be zipped by a caller"
+        );
+
+        // Time to first token reflects the server's pause. Bounds are wide on purpose: this asserts
+        // the clock is real, not that the machine is fast.
+        let ttft_us = outcome.frame_offsets_us[0];
+        assert!(
+            (100_000..2_000_000).contains(&ttft_us),
+            "first frame should land near the server's 150ms pause, got {ttft_us}us"
+        );
+
+        // Offsets are cumulative from the request, so they only ever increase.
+        for w in outcome.frame_offsets_us.windows(2) {
+            assert!(w[1] >= w[0], "frame arrival times must not go backwards: {:?}", outcome.frame_offsets_us);
+        }
+
+        // THE DISCRIMINATING CHECK. The gap after the first token is much smaller than the wait for
+        // it. A single timestamp reused for every frame, or offsets stamped once at the end, would
+        // make these equal - so this is what distinguishes a real per-frame clock from a plausible
+        // looking one.
+        let first_gap = outcome.frame_offsets_us[1] - outcome.frame_offsets_us[0];
+        assert!(
+            first_gap < ttft_us,
+            "the 30ms inter-frame gap ({first_gap}us) must be clearly smaller than the 150ms time to first token ({ttft_us}us)"
+        );
+    }
+
+    #[test]
+    fn a_stream_that_never_yields_a_frame_records_no_arrival_times() {
+        let addr = spawn_server(|mut conn| {
+            let _ = read_request_head(&conn);
+            let _ = conn.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n");
+            // Head, then nothing. There is no first token, so there is no time to first token: an
+            // empty list, never a zero, which would read as an instant response.
+        });
+        let outcome = post_json_sse(addr, "/x", b"{}", &[], Duration::from_millis(300), 10);
+        assert!(outcome.frames.is_empty());
+        assert!(outcome.frame_offsets_us.is_empty(), "no frames means no arrival times, not a zero");
     }
 
     #[test]
