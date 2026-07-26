@@ -119,11 +119,18 @@ fn main() -> ExitCode {
             };
             println!("mock healthy: {}", otb_engine::run::mock_healthy(&cfg));
             for r in run_grid(&cfg, 4, 64) {
-                let perf = match &r.perf {
-                    Some(p) => match (p.max_proxy.copied(), p.max_proxy_concurrency.copied()) {
-                        (Some(v), Some(c)) => format!("max_proxy={v:.0} rps @ c={c}"),
-                        _ => format!("max_proxy=n/a ({:?})", p.max_proxy.reason()),
-                    },
+                // Print every metric the engine took, not a hand-picked one: the smoke's job is to
+                // show what the engine actually produced, and a curated line would hide a group that
+                // silently returned nothing.
+                let perf = match &r.metrics {
+                    Some(m) => m
+                        .iter()
+                        .map(|(name, value)| match value.copied() {
+                            Some(v) => format!("{name}={v:.0}"),
+                            None => format!("{name}=n/a({:?})", value.reason()),
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" "),
                     None => "not measured".into(),
                 };
                 println!("{:<28} {:<12} {}", r.outcome.id.to_string(), format!("{:?}", r.outcome.served).chars().take(11).collect::<String>(), perf);

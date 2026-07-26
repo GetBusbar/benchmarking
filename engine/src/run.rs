@@ -16,6 +16,7 @@ use crate::http::{self, Outcome};
 use crate::ingress::Dialect;
 use crate::measurement::{Absent, Measurement};
 use crate::probe::{persistent_transient_verdict, Observation, Verdict};
+use crate::metric;
 use crate::search::{self, Probe, Sample};
 
 pub struct RunConfig {
@@ -188,7 +189,10 @@ pub fn mock_healthy(cfg: &RunConfig) -> bool {
 
 pub struct CellResult {
     pub outcome: CellOutcome,
-    pub perf: Option<CellPerf>,
+    /// Every metric the engine took on this cell, keyed by the artifact field it fills. `None` for a
+    /// cell that was not served: there is nothing to measure, and an empty map would read as
+    /// "measured nothing" rather than "never asked".
+    pub metrics: Option<std::collections::BTreeMap<&'static str, Measurement<f64>>>,
 }
 
 /// Walk the grid: probe every pairing, sweep the ones that are served.
@@ -199,7 +203,16 @@ pub fn run_grid(cfg: &RunConfig, lo: u32, hi: u32) -> Vec<CellResult> {
         for ing in &cfg.dialects {
             let id = CellId::new(ing.as_str(), eg.as_str());
             let served = probe_cell(cfg, &id, healthy);
-            let perf = if served.is_measurable() { Some(sweep_cell(cfg, &id, lo, hi)) } else { None };
+            // THE ENGINE, IN TWO LINES: if the cell is served, run every metric on it. The list of
+            // metrics lives in one place (`metric::METRICS`) rather than being reached for here, so
+            // a measurement cannot be implemented, tested, and then silently never taken - which is
+            // how memory, box qualification and the launcher all ended up with zero callers.
+            let metrics = if served.is_measurable() {
+                let ctx = metric::CellCtx { cfg, id: &id, dialect: *ing, min_conc: lo, max_conc: hi };
+                Some(metric::process_cell(&ctx))
+            } else {
+                None
+            };
             let outcome = match served {
                 Served::Yes => CellOutcome::served(id),
                 Served::No(v) => {
@@ -208,7 +221,7 @@ pub fn run_grid(cfg: &RunConfig, lo: u32, hi: u32) -> Vec<CellResult> {
                 }
                 Served::Untestable(r) => CellOutcome::untestable(id, r),
             };
-            out.push(CellResult { outcome, perf });
+            out.push(CellResult { outcome, metrics });
         }
     }
     out
@@ -315,15 +328,15 @@ mod tests {
         assert_eq!(rows.len(), 4);
     }
 
-    // An unserved cell carries NO perf. A number attached to a pairing the gateway does not serve
+    // An unserved cell carries NO metrics. A number attached to a pairing the gateway does not serve
     // is a number about nothing.
     #[test]
-    fn an_unserved_cell_carries_no_perf() {
+    fn an_unserved_cell_carries_no_metrics() {
         let gw = serve(404);
         let cfg = cfg_for(gw, gw);
         let rows = run_grid(&cfg, 1, 2);
         for r in &rows {
-            assert!(r.perf.is_none(), "{} must not carry perf", r.outcome.id);
+            assert!(r.metrics.is_none(), "{} must not carry metrics", r.outcome.id);
         }
     }
 }
