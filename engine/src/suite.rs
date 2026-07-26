@@ -235,12 +235,30 @@ fn cell_memory(
     // are too few readings to have a trailing part at all, because a "steady state" computed from
     // one sample would be the sample.
     let steady = steady_state(&rss_series);
+    // The plateau verdict travels as a number across the metric surface (every group speaks f64), so
+    // it is turned back into the tri-state it really is here: settled, did not settle, or could not
+    // be judged. An absent verdict must stay absent rather than collapsing to false, because "it did
+    // not settle" is a claim about the gateway and "we could not tell" is a claim about the window.
+    let plateaued = take("memory_plateaued").copied().map(|v| v != 0.0);
     crate::record::CellMemory {
         // `served` here means the cell was served, which is the only reason a window ran at all.
         served: true,
+        protocol: format!(
+            "cold restart, idle read at rest, then load at c={} in repeated windows until the              trailing {}s is flat (cap {}s), then {}s with the load removed",
+            crate::metric::MEMORY_WINDOW_CONCURRENCY,
+            crate::metric::MEMORY_PLATEAU_WINDOW_S,
+            crate::metric::MEMORY_MAX_LOAD_S,
+            crate::metric::MEMORY_RECOVERY_S,
+        ),
         idle_rss_mib: take("memory_idle_mib"),
         peak_rss_mib: take("memory_peak_mib"),
         peak_rss_hwm_mib: take("memory_hwm_mib"),
+        recovered_rss_mib: take("memory_recovered_mib"),
+        growth_rate_mib_per_min: take("memory_growth_rate_mib_per_min"),
+        time_to_plateau_s: take("memory_time_to_plateau_s"),
+        load_s: take("memory_load_s").copied().map(|v| v as i64),
+        plateaued,
+        recovery_window_s: Some(crate::metric::MEMORY_RECOVERY_S as i64),
         steady_state_rss_mib: steady,
         rss_series,
         ..Default::default()
