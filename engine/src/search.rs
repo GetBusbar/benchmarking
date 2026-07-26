@@ -90,9 +90,21 @@ pub fn bisect_ceiling<P: Probe>(probe: &mut P, min_conc: u32, max_conc: u32) -> 
         None => return BisectResult { ceiling: Measurement::absent(Absent::NotMeasured), points: s.points },
     };
     if !lo_sample.passed {
-        // The floor already fails: a measured "nothing sustains this gate" (0), a real result, not
-        // an absence -- distinct from never having probed at all.
-        return BisectResult { ceiling: Measurement::Measured(0), points: s.points };
+        // A FAILING FLOOR ONLY PROVES THE CEILING IS BELOW THE FLOOR.
+        //
+        // When the floor is 1 there is nowhere left to look, so nothing sustains the gate and 0 is a
+        // real measured result. For any higher floor it proves only that the ceiling lies somewhere
+        // in [0, min_conc-1], and not one of those values was probed. Returning 0 there would
+        // publish a specific number the search never established, which is the same fabrication as
+        // publishing the range bound at the top end, just at the other end of the range.
+        return if min_conc <= 1 {
+            BisectResult { ceiling: Measurement::Measured(0), points: s.points }
+        } else {
+            let detail = format!(
+                "the search floor c={min_conc} already failed the gate, so the ceiling is below it and was never probed"
+            );
+            BisectResult { ceiling: Measurement::absent_because(Absent::SearchExhausted, detail), points: s.points }
+        };
     }
 
     let hi_sample = match s.sample(max_conc) {
