@@ -1,0 +1,12 @@
+{
+  "anthropic": [
+    "x-llm-provider: anthropic"
+  ],
+  "bedrock": [
+    "x-llm-provider: bedrock"
+  ],
+  "gemini": [
+    "x-llm-provider: gemini"
+  ],
+  "openai": []
+}

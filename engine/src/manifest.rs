@@ -97,6 +97,18 @@ pub struct Manifest {
     pub egress: Vec<String>,
     #[serde(default)]
     pub config: Vec<ConfigSetting>,
+    /// Headers that select the EGRESS, keyed by dialect.
+    ///
+    /// Some gateways route by config; others route only by a request header, and for those the
+    /// header IS the egress column. Without a per-column home every column would be driven
+    /// identically, every one would answer 200, and the board would publish four to six identical
+    /// columns as though they were different upstream dialects - a wrong number rather than a
+    /// missing one, and the kind that looks entirely plausible.
+    ///
+    /// Values admit the same closed set as everything else, because one gateway's routing header
+    /// carries the rig-assigned mock port.
+    #[serde(default)]
+    pub egress_headers: std::collections::BTreeMap<String, Vec<String>>,
     /// Values this gateway's own templates refer to, beyond the closed set the harness supplies.
     ///
     /// A manifest declares its model name, its upstream URL, its bedrock path ONCE here, and every
@@ -227,6 +239,52 @@ pub enum LaunchDecl {
         #[serde(default)]
         env_unset: Vec<String>,
     },
+}
+
+/// Why a gateway could not be read from its directory. Every variant names the file: "manifest load
+/// failed" with no path is the same as no message when a gateway has four of them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ManifestLoadError {
+    Unreadable { path: std::path::PathBuf, why: String },
+    Malformed { path: std::path::PathBuf, why: String },
+}
+
+impl std::fmt::Display for ManifestLoadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ManifestLoadError::Unreadable { path, why } => write!(f, "cannot read {}: {why}", path.display()),
+            ManifestLoadError::Malformed { path, why } => write!(f, "{} is not valid: {why}", path.display()),
+        }
+    }
+}
+
+impl std::error::Error for ManifestLoadError {}
+
+/// Parse a sidecar env file: `KEY=value` sets, a leading `-` REMOVES.
+///
+/// Removal is not a convenience. One entrant's config loader claims every variable sharing its
+/// prefix and feeds it to a deny-unknown-fields deserializer, so the harness's own override
+/// variables kill config load before the port binds - and the process is backgrounded, so the launch
+/// reports success and the only symptom is a port that never listens. That cost thirty-six cells
+/// once. An env block that can only ADD cannot express it.
+///
+/// Deliberately parsed, never executed: this file used to be shell, and the whole point of the
+/// rewrite is that nothing in the measurement path is.
+fn parse_env(raw: &str) -> (Vec<(String, String)>, Vec<String>) {
+    let mut set = Vec::new();
+    let mut unset = Vec::new();
+    for line in raw.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some(name) = line.strip_prefix('-') {
+            unset.push(name.trim().to_string());
+        } else if let Some((k, v)) = line.split_once('=') {
+            set.push((k.trim().to_string(), v.trim().to_string()));
+        }
+    }
+    (set, unset)
 }
 
 /// Why a config could not be rendered. Every variant names the file, because "config render failed"
@@ -536,6 +594,77 @@ impl Manifest {
         }))
     }
 
+    /// Read a gateway from its own directory: the definition, plus whatever sidecars it has.
+    ///
+    /// ONE FILE IS UNIFORM AND THE REST ARE THE GATEWAY'S OWN. `definition.json` has the same shape
+    /// for every entrant, so a reader comparing two gateways is comparing like with like. Everything
+    /// that differs - the env its process needs, the headers that select its upstreams, the config it
+    /// boots on - sits beside it in the form that thing naturally takes.
+    ///
+    /// Every sidecar is optional. Three entrants are configured entirely by env or headers and have
+    /// no config file at all; one has neither and is just a definition.
+    pub fn load(dir: &std::path::Path) -> Result<Manifest, ManifestLoadError> {
+        let def_path = dir.join("definition.json");
+        let text = std::fs::read_to_string(&def_path)
+            .map_err(|e| ManifestLoadError::Unreadable { path: def_path.clone(), why: e.to_string() })?;
+        let mut m: Manifest = serde_json::from_str(&text)
+            .map_err(|e| ManifestLoadError::Malformed { path: def_path.clone(), why: e.to_string() })?;
+
+        let env_path = dir.join("env");
+        if env_path.is_file() {
+            let raw = std::fs::read_to_string(&env_path)
+                .map_err(|e| ManifestLoadError::Unreadable { path: env_path.clone(), why: e.to_string() })?;
+            let (env, unset) = parse_env(&raw);
+            m.apply_env(env, unset);
+        }
+
+        let headers_path = dir.join("headers.json");
+        if headers_path.is_file() {
+            let raw = std::fs::read_to_string(&headers_path)
+                .map_err(|e| ManifestLoadError::Unreadable { path: headers_path.clone(), why: e.to_string() })?;
+            m.egress_headers = serde_json::from_str(&raw)
+                .map_err(|e| ManifestLoadError::Malformed { path: headers_path.clone(), why: e.to_string() })?;
+        }
+        Ok(m)
+    }
+
+    /// Put a sidecar's env onto whichever launch kind this manifest declares.
+    fn apply_env(&mut self, env: Vec<(String, String)>, unset: Vec<String>) {
+        match self.launch.as_mut() {
+            Some(LaunchDecl::Docker { env: e, .. }) => *e = env,
+            Some(LaunchDecl::Native { env: e, env_unset: u, .. }) => {
+                *e = env;
+                *u = unset;
+            }
+            None => {}
+        }
+    }
+
+    /// The headers to send for one egress column: the manifest's always-on headers, then the ones
+    /// that select this column.
+    ///
+    /// `authorization` is added by the caller, not here, because it is the same for every column and
+    /// one gateway mints it at launch rather than declaring it.
+    pub fn headers_for(
+        &self,
+        egress: &str,
+        cores: &str,
+        mock_port: u16,
+        gw_dir: &std::path::Path,
+    ) -> Result<Vec<(String, String)>, ManifestError> {
+        let mut out = Vec::new();
+        let lines = self.headers.iter().chain(self.egress_headers.get(egress).into_iter().flatten());
+        for line in lines {
+            let resolved = self.substitute(line, cores, mock_port, gw_dir)?;
+            // A manifest writes headers the way they appear on the wire, "Name: value", because that
+            // is how they are read in the gateway's own docs and how they were declared in shell.
+            if let Some((name, value)) = resolved.split_once(':') {
+                out.push((name.trim().to_string(), value.trim().to_string()));
+            }
+        }
+        Ok(out)
+    }
+
     /// Render every declared config file into the gateway's directory.
     ///
     /// Returns the paths written, so a caller can publish them as the artifact's config record: the
@@ -599,6 +728,7 @@ mod tests {
             launch: None,
             config_files: vec![],
             constants: Default::default(),
+            egress_headers: Default::default(),
         }
     }
 
@@ -718,14 +848,30 @@ mod real_field_tests {
     use super::*;
     use std::collections::BTreeMap;
 
-    /// Every manifest in the real field, extracted from the shell manifests as data.
+    /// Every manifest in the real field, read from the gateways' own directories.
     ///
-    /// This is the manifest counterpart of the snapshot-corpus test: a schema that only represents
-    /// an example I invented proves nothing. If the types cannot describe all thirteen entrants as
-    /// they actually are, the schema is wrong and no amount of internal consistency would say so.
+    /// DISCOVERED, not listed. A single file naming all thirteen is the hand-maintained roster
+    /// `lib/gateway_isolation_test.sh` exists to prevent, and it was invisible to that lint only
+    /// because the scan skips `.json`. Reading the directory means adding a gateway is dropping in a
+    /// directory, and nothing else in the tree learns its name.
+    ///
+    /// A schema that only represents an example I invented proves nothing: if the types cannot
+    /// describe all thirteen entrants as they actually are, the schema is wrong and no amount of
+    /// internal consistency would say so.
     fn field() -> BTreeMap<String, Manifest> {
-        let txt = include_str!("../tests/manifests.json");
-        serde_json::from_str(txt).expect("the extracted field must parse under these types")
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../gateways");
+        let mut out = BTreeMap::new();
+        for entry in std::fs::read_dir(&root).expect("the gateways directory must exist").flatten() {
+            let def = entry.path().join("definition.json");
+            if !def.is_file() {
+                continue;
+            }
+            let m = Manifest::load(&entry.path())
+                .unwrap_or_else(|e| panic!("{e}"));
+            out.insert(m.name.clone(), m);
+        }
+        assert!(!out.is_empty(), "no gateways/*/definition.json found");
+        out
     }
 
     #[test]

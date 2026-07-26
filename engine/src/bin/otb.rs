@@ -151,17 +151,17 @@ fn main() -> ExitCode {
                 eprintln!("usage: otb run <manifest.json> <gateway ip:port> <mock ip:port> [results_dir]");
                 return ExitCode::from(2);
             };
-            let text = match std::fs::read_to_string(manifest_path) {
-                Ok(t) => t,
-                Err(e) => {
-                    eprintln!("cannot read manifest {manifest_path}: {e}");
-                    return ExitCode::FAILURE;
-                }
+            // A gateway is a DIRECTORY, not a file: definition.json plus whatever sidecars it has.
+            // Passing the definition itself still works, so an operator can point at the file they
+            // were reading a moment ago and get the same thing.
+            let dir = {
+                let p = std::path::Path::new(manifest_path);
+                if p.is_dir() { p.to_path_buf() } else { p.parent().unwrap_or(p).to_path_buf() }
             };
-            let manifest: Manifest = match serde_json::from_str(&text) {
+            let manifest: Manifest = match Manifest::load(&dir) {
                 Ok(m) => m,
                 Err(e) => {
-                    eprintln!("manifest {manifest_path} is not valid: {e}");
+                    eprintln!("{e}");
                     return ExitCode::FAILURE;
                 }
             };

@@ -1,0 +1,54 @@
+{
+  "auth": "sk-fake-benchmark-key",
+  "class": "API gateway",
+  "config": [],
+  "config_files": [
+    {
+      "output": "config.gen.yaml",
+      "template": "config.gen.yaml.tmpl"
+    },
+    {
+      "output": "apisix.gen.yaml",
+      "template": "apisix.gen.yaml.tmpl"
+    }
+  ],
+  "constants": {
+    "APISIX_BEDROCK_MODEL": "anthropic.claude-3-sonnet-20240229-v1:0",
+    "GW_MATRIX_PATH_BEDROCK": "/model/{APISIX_BEDROCK_MODEL}/converse",
+    "ncore": "{NCORE}"
+  },
+  "display": "APISIX",
+  "egress": [
+    "openai",
+    "openai-responses",
+    "anthropic",
+    "bedrock"
+  ],
+  "lang": "Other",
+  "launch": {
+    "args": [],
+    "image": "apache/apisix:3.17.0-debian",
+    "kind": "docker",
+    "mounts": [
+      {
+        "container_path": "/usr/local/apisix/conf/config.yaml",
+        "host_path": "config.gen.yaml",
+        "read_only": true
+      },
+      {
+        "container_path": "/usr/local/apisix/conf/apisix.yaml",
+        "host_path": "apisix.gen.yaml",
+        "read_only": true
+      }
+    ]
+  },
+  "model": "gpt-4o-mini",
+  "name": "apisix",
+  "path": "/v1/chat/completions",
+  "port": 9080,
+  "repo": "https://github.com/apache/apisix",
+  "runtime": {
+    "container": "apisix-bench",
+    "kind": "docker"
+  }
+}

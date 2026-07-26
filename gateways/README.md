@@ -1,174 +1,140 @@
 # Gateways — drop-in benchmark targets
 
-Every gateway the benchmark can measure is a directory here. **Adding a gateway = adding a
-directory.** The runners (`memory/run.sh`, and friends) are gateway-agnostic: they `source`
-`gateways/<name>/gateway.sh` and call a fixed contract. No runner edits, no branching.
+A gateway is a directory. Drop it in and it appears everywhere; delete it and it disappears. Nothing
+else in the tree learns its name, and a lint enforces that on every push.
 
-## The one invariant, and what enforces it
-
-> **Adding a gateway is exactly: drop in `gateways/<name>/gateway.sh`, and it works.**
-
-That means a gateway's identity appears NOWHERE else in the repo. Not in a runner, not in the charts,
-not in the site, not in a test, not in a shared pins file, and not as a member of a hardcoded list.
-The engine DISCOVERS instead: `run-all.sh` and `run-on-ec2.sh` fan out over `gateways/*/gateway.sh`,
-`charts.py` builds its whole field from the same glob, `site/gen-data.mjs` projects whatever
-`results/matrix/*.json` it finds, `lib/box_qualify.sh` finds each box's own history in
-`results/snapshots/`, and `lib/gateways.sh` is the shell-side choke point (`gw_list`, `gw_default`,
-`gw_exists`, `gw_manifest_field`) that every runner uses instead of naming a default.
-
-`lib/gateway_isolation_test.sh` enforces this on every push. It enumerates `gateways/*/` at runtime
-(it carries no roster of its own) and fails if any gateway's name or declared alias appears in the
-CODE of a file outside its own directory, if any single line names three or more gateways (a frozen
-roster, whatever the syntax), or if a declared `GW_CONTAINER` disagrees with the container the
-manifest actually launches. It self-tests against planted violations first, so a scanner that
-silently matched nothing aborts rather than reporting a green tree.
-
-Provenance comments may still cite a real incident; they cannot make a new gateway fail to run. What
-is banned is executable code, user-visible strings, and rosters. The only allowlisted collision is the
-operator's own identity (its copyright line, GitHub org and domain), which shares a name with one
-entrant because the operator is also an entrant - disclosed on the site on purpose.
-
-## The contract
-
-A gateway is defined **entirely by its own directory** — nothing about it is hard-coded in the
-runners, the charts, or the run lists. `run-all.sh`, `run-on-ec2.sh`, and `charts.py` all discover the
-field by scanning `gateways/*/gateway.sh`, so **adding a dir adds the gateway everywhere and deleting a
-dir removes it everywhere.** No list to keep in sync.
-
-`gateways/<name>/gateway.sh` sets these variables and defines four functions:
-
-```sh
-GW_KIND=native|docker      # informational
-GW_CONTAINER=mygw-bench    # docker manifests only: the container this manifest launches under, so
-                           # anything outside this directory that needs the name (verify-local.sh's
-                           # teardown) READS it here instead of hardcoding it. lib/gateway_isolation_test.sh
-                           # pins it to the `docker run --name` below, so the two cannot drift.
-
-# Self-describing metadata — charts.py + the report tables read these straight from the manifest.
-GW_DISPLAY="My Gateway"    # label shown in charts and the report table
-GW_LANG=Rust               # implementation language → bar color bucket (Rust|Go|Python|Node|Other)
-GW_REPO=https://github.com/example/mygw       # the gateway name in the table links here
-GW_CLASS="AI gateway"      # the project's OWN self-description, not our editorial
-
-# The SOURCE PIN lives here too - the image tag, or the repo + commit for a source build. Written as
-# MYGW_IMAGE="${MYGW_IMAGE:-example/mygw:1.2.3}" so an environment override still wins. There is no
-# shared file of pins: a gateway's ref is a fact about that gateway, so it lives with the gateway.
-
-GW_PORT=8080               # port the gateway listens on
-GW_PATH=/v1/chat/completions   # request path used to probe + load it
-GW_MODEL=gpt-4o-mini       # model string put in the request body
-GW_AUTH=bench-token        # bearer token the gateway accepts
-
-gw_build()  { :; }         # build/pull/install — idempotent; may be empty
-gw_launch() { :; }         # start it, pinned to $CORES, upstream = mock at 127.0.0.1:$MOCK_PORT
-gw_rss()    { :; }         # echo current resident memory in MiB
-gw_stop()   { :; }         # stop + clean up
+```
+gateways/<name>/
+  definition.json     what the harness needs to know           REQUIRED
+  env                 environment the gateway process gets      if it needs one
+  headers.json        headers that select its upstreams         if it routes by header
+  <its own config>    whatever file the gateway itself reads    if it reads one
 ```
 
-`GW_LANG` colors the bars by language (Rust / Go / Python / Node / Other — anything else, e.g.
-OpenResty/Lua or an Envoy/C++ data plane, folds into Other). There is **no winner highlight**: charts
-sort by the measured value, so the best is already the top bar. A gateway that didn't serve is drawn
-grey regardless of language.
+Only `definition.json` is required. One entrant is configured entirely through its image and has
+nothing else; another needs four files. The count is decided by the gateway, not by us.
 
-The runner exports for you: `$MOCK_PORT` (deterministic mock upstream), `$CORES` (cpu pin),
-`$GW_DIR` (this gateway's directory, for config files).
+## definition.json
 
-**Optional per-lane hooks** (all generic — the shared runners branch on a hook's presence, never on
-a gateway's name; per-gateway values live only in the manifest):
+The same shape for every entrant, so two gateways can be compared by reading them side by side.
 
-```sh
-GW_MATRIX_CAP="…"           # 6x6 declared capability grid (matrix/run.sh header documents it)
-GW_MATRIX_CAP_NOTE="…"      # cited reason shown on declared-0 (grey) cells
-GW_MATRIX_UNTESTABLE="ing/eg …"   # pairs the gateway serves in production but whose real cloud
-GW_MATRIX_UNTESTABLE_NOTE="…"     # host is hardcoded (no base-URL override): served:"untestable",
-                                  # a mock-reachability limit, distinct from declared-incapable
-gw_xlate_env() { :; }       # adjust manifest knobs for the translation lane (runs before launch)
-GW_XLATE_HEADERS=(…)        # header set replacing GW_HEADERS for the xlate lane only
-GW_XLATE_CAP=0              # gateway does not claim anthropic-in -> openai-out translation;
-GW_XLATE_CAP_NOTE="…"       # recorded as xlate_declared=false with this citation, never probed
-GW_STREAM_NOTE="…"          # cited note attached to stream/streamcpu results (e.g. a link to the
-                            # project's own open issue when a stream failure is a known upstream bug)
+```json
+{
+  "name": "example",
+  "display": "Example",
+  "lang": "Rust",
+  "class": "AI gateway",
+  "repo": "https://github.com/example/example",
+  "port": 8080,
+  "path": "/v1/chat/completions",
+  "model": "gpt-4o-mini",
+  "auth": "dummy",
+  "egress": ["openai", "anthropic"],
+  "runtime": { "kind": "docker", "container": "example-bench" },
+  "launch": { "kind": "docker", "image": "example/example:1.2.3", "args": [], "mounts": [] },
+  "config_files": [],
+  "constants": {},
+  "config": []
+}
 ```
 
-The load body is `{"model","messages":[…],"max_tokens":16}` — valid for both OpenAI
-`/v1/chat/completions` and Anthropic `/v1/messages`, so a gateway picks its `GW_PATH`/`GW_MODEL`
-and it just works. The mock answers both shapes (OpenAI by default, Anthropic for `/messages`).
+`runtime` is the gateway's identity, declared **once**. Every memory reader, the readiness check and
+the stop path derive from it, so the thing that gets started, the thing that gets measured and the
+thing that gets stopped cannot be three different processes. Three manifests once drifted here and
+published a gateway's idle memory from one process tree beside its peak from another.
 
-## Shipped gateways
+`launch` is `docker` (an image) or `native` (a binary built from source). Prefer, in order: the
+project's **official image**, then a **binary the project publishes**, then a **build from a pinned
+commit**. The first two are the project's own artifact; the third makes our build flags part of their
+number, so it is the fallback and only three entrants need it.
 
-**In the default run** (serve the mock as a single-box drop-in). This table is illustrative — the
-actual field is whatever dirs exist here; alphabetical, no gateway seated first.
+`egress` lists the upstream dialects this gateway is configured for. It is **not** a capability
+claim: every cell in the grid is probed regardless, and the board publishes what was observed.
 
-| dir | what | notes |
-|---|---|---|
-| `agentgateway/` | agentgateway (Rust data plane, docker) | `ai` backend `hostOverride`/`pathOverride` → mock; no backendAuth/backendTLS; observability off |
-| `apisix/` | Apache APISIX + `ai-proxy` (docker, DB-less standalone) | `override.endpoint` → mock; no etcd; access log off, workers = pinned cores |
-| `arch/` | Arch (Katanemo, `archgw` CLI) | Envoy + Arch services in one arm64 container; egress-only config → mock; containers pinned to the gateway cores |
-| `bifrost/` | maximhq/bifrost (docker) | openai provider base_url → mock; runs its stock config |
-| `busbar/` | Busbar single binary | pulls the RELEASED image, extracts the binary, runs native |
-| `gomodel/` | GoModel (ENTERPILOT/GOModel, Go, docker) | `OPENAI_BASE_URL` → mock; discovers routable models from the mock's `/v1/models` |
-| `helicone/` | Helicone AI Gateway (Rust) - **built from source, run native** | no arm64 image published, so we compile it (pinned commit in its own manifest); `openai` base-url → mock |
-| `kong/` | Kong Gateway + `ai-proxy` (docker, DB-less) | `upstream_url` → mock |
-| `litellm-python/` | LiteLLM `[proxy]` CLI | pip-installed; multi-worker to its pinned cores |
-| `litellm-rust/` | BerriAI compiled AI-gateway beta | **only serves `/v1/messages` via `azure_ai` + the `python-config` reader** — see its `gateway.sh` header (verified against their source) |
-| `one-api/` | One-API (songquanpeng/one-api, docker) | pinned to `v0.6.10` (arm64 tag); channel + token bootstrapped over the admin API in `gw_launch` |
-| `portkey/` | Portkey OSS gateway (npx) | routes via `x-portkey-*` headers |
-| `tensorzero/` | TensorZero (Rust, docker) | arm64 multiarch image; observability off; provider base_url → mock |
+## env
 
-**Out of scope:** Envoy AI Gateway is Kubernetes-native (Envoy Gateway + CRDs, a full cluster), not a
-single-box drop-in, so it is intentionally not in this harness.
+`KEY=value`, one per line. Parsed, never executed.
 
-## Fairness
+```
+BENCH_MOCK_KEY=dummy
+GOMAXPROCS={NCORE}
+-EXAMPLE_REPO
+```
 
-Same box, same mock, same load profile, same cpu pin for every gateway. Each is launched the only
-way it actually serves the endpoint — no strawmen, no idle-only snapshots. If a gateway can't serve
-the endpoint, that's recorded (`served:false`) rather than hidden.
+A leading `-` **removes** a variable from the environment the gateway inherits. That is not tidiness:
+one entrant's config loader claims every variable sharing its prefix and rejects unknown fields, so
+the harness's own override variables killed config load before the port bound. The process is
+backgrounded, so the launch still reported success and the only symptom was a port that never
+listened — thirty six cells lost to a variable name.
 
-### Memory is measured the same way for every gateway
+## headers.json
 
-`gw_rss` and `gw_hwm` must always describe the **same process set**: the gateway's whole process tree,
-summed from `/proc` (`VmRSS` / `VmHWM`). Manifests never spell that walk out themselves — they call a
-matched pair from `lib/harness.sh`:
+Only if the gateway selects its upstream from a request header. Keyed by **egress column**:
 
-| gateway kind | rss reader | hwm reader |
-|---|---|---|
-| docker (10 manifests) | `container_rss_mib <container>` | `container_hwm_mib <container>` |
-| native (aisix, helicone, litellm-rust) | `native_rss_mib '<pgrep -f pattern>'` | `native_hwm_mib '<same pattern>'` |
+```json
+{
+  "anthropic": ["x-llm-provider: anthropic"],
+  "gemini":    ["x-llm-provider: gemini"]
+}
+```
 
-The three native manifests used to hand-roll `gw_rss` as an `awk` over a **single** pid's
-`/proc/<pid>/status` while `gw_hwm` walked the whole tree, so `idle/peak/recovered_rss_mib` and
-`peak_rss_hwm_mib` described different populations of the same gateway and were then compared against
-ten tree-summed docker gateways. `lib/mem_rss_test.sh` now checks all 13 manifests for the matched
-pair on every push, so this cannot drift back.
+Authentication headers do **not** go here. What the client sends to authenticate is decided by the
+**ingress dialect** and is identical for every gateway — anthropic ingress uses `x-api-key` and
+`anthropic-version`, gemini uses `x-goog-api-key`, the rest use `authorization: Bearer`. That lives
+in the engine, once, so thirteen copies of one table cannot drift.
 
-### Environment parity: `gw_prereqs` and the build/measure boundary
+## The gateway's own config
 
-Ten gateways run an official image; three (aisix, helicone, litellm-rust) have no usable arm64 image
-and are built from source, so their manifests declare `gw_prereqs`. Disposition:
+If the gateway reads a config file, write a **template** beside it, named after the file it produces
+with `.tmpl` appended: `config.gen.yaml.tmpl` produces `config.gen.yaml`. Keep it in the gateway's
+own format. It is the artifact the gateway actually boots on, and the fairness rule is about its
+contents, so it has to stay readable and diffable.
 
-| gateway | `gw_prereqs` installs | why | resident during measurement? |
-|---|---|---|---|
-| aisix | `git build-essential pkg-config libssl-dev protobuf-compiler` + rustup | no arm64 image; `rust-toolchain.toml` pins rustc 1.93.1, `protoc` is a build dep of the vertex/bedrock tonic/prost crates | no — build phase only |
-| helicone | `git build-essential pkg-config libssl-dev` + rustup | no arm64 image; `cargo build --release -p ai-gateway` | no — build phase only |
-| litellm-rust | the above plus `python3-venv python3-pip` and a ~564 MB `litellm[proxy]` venv | Rust build, **plus** the gateway's `python-config` feature loads the `litellm` package at runtime to read its config | toolchain: no. The venv: **yes, deliberately** — `gw_launch` runs the gateway with `PYTHONPATH` into it, so that cost is the gateway's own and lands inside its measured process tree |
-| the other ten | nothing | official image | n/a |
+Declare it in `definition.json`:
 
-Why the extra toolchain on three boxes is not a parity break:
+```json
+"config_files": [{ "template": "config.gen.yaml.tmpl", "output": "config.gen.yaml" }]
+```
 
-1. **One gateway per box.** `run-on-ec2.sh` launches a dedicated `m7g`/`m7i.4xlarge` per gateway from
-   the same bare AMI (docker + curl + jq + psutil, no build toolchain). Nothing another gateway
-   installed is ever present while this one is measured.
-2. **Build phase only, and verified.** Every `gw_prereqs` is called from that manifest's `gw_build`,
-   which `matrix/run.sh` runs before the mock, the warm-up, the 36 probes, the sweeps and the memory
-   window. At the boundary the runner calls `harness_build_quiesce` — it waits for compilers/package
-   managers to exit and publishes the result as `build_env.quiesce` in the run JSON — and then
-   `harness_seal_prereqs`, which makes `gw_prereqs` inert so no later hook can install anything while
-   measurements are in flight. **Every** gateway crosses the same boundary and records the same
-   field; the ten with no prereqs simply record `quiesced`. That uniformity is the parity statement.
-3. **Not a resident cost.** Published memory is per-process `VmRSS`/`VmHWM` over the gateway's own
-   tree — never host free memory or cgroup usage — so an idle toolchain on disk, or a page cache the
-   build left warm, cannot enter it. Published latency/throughput come from a gateway pinned to
-   `$CORES` with loadgen and mock on disjoint cores; the build has exited before any of that starts,
-   and `m7g`/`m7i` are fixed-performance instances with no burst credits a long build could spend.
+and mount, or point at, the **output** in `launch`.
 
-A new source-built gateway may add `gw_prereqs` — it must call it from `gw_build` and nowhere else.
+### Placeholders
+
+The harness supplies these, resolved when the gateway starts:
+
+| | |
+|---|---|
+| `{MOCK_PORT}` | the mock upstream's port |
+| `{GW_PORT}` | the port this gateway is driven on |
+| `{GW_MODEL}` | the model name the client sends |
+| `{GW_AUTH}` | the credential the client sends |
+| `{GW_DIR}` | this directory, absolute |
+| `{CORES}` | the CPU list the gateway is pinned to |
+| `{NCORE}` | how many cores that is |
+
+Anything else goes in `constants` and is referred to by the same syntax. Declare a value **once**
+there and refer to it from every template that needs it — a model name spelled in a route and again
+in a probe path is how a previous version lost a whole egress column when the two drifted.
+
+A `{NAME}` the harness cannot supply is a **hard error**, not passed through. A gateway booting with
+a literal `{MOCK_PORT}` in an upstream URL fails in a way that looks like the gateway being broken.
+For a literal brace — some config formats use them, and a comment may document a URL shape — write
+`{{` and `}}`.
+
+## Rules
+
+Your gateway's name must not appear anywhere outside its own directory, **including in comments**.
+`lib/gateway_isolation_test.sh` enforces this and self-tests that it can actually fail. Anything
+outside that needs to know about your gateway discovers it by reading this directory.
+
+Its config must be the **bare minimum required to run**. Every setting declared in `config` names
+which of four necessities justifies it, and a setting that merely turns a feature on has no way to be
+declared. That is the point.
+
+## Checking it
+
+```
+cargo test --lib manifest::            # it parses, launches, and its templates render
+bash lib/gateway_isolation_test.sh     # its name is not leaking outside this directory
+otb run gateways/<name> <gw> <mock>    # launch it, measure it, stop it
+```

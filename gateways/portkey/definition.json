@@ -1,0 +1,30 @@
+{
+  "auth": "dummy",
+  "class": "AI gateway",
+  "config": [],
+  "display": "Portkey",
+  "egress": [
+    "openai",
+    "openai-responses",
+    "anthropic",
+    "gemini",
+    "cohere",
+    "bedrock"
+  ],
+  "lang": "Node",
+  "launch": {
+    "args": [],
+    "image": "portkeyai/gateway:1.15.2",
+    "kind": "docker",
+    "mounts": []
+  },
+  "model": "anthropic/mock",
+  "name": "portkey",
+  "path": "/v1/messages",
+  "port": 8787,
+  "repo": "https://github.com/Portkey-AI/gateway",
+  "runtime": {
+    "container": "portkey-bench",
+    "kind": "docker"
+  }
+}

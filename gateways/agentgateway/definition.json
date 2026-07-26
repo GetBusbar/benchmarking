@@ -1,0 +1,43 @@
+{
+  "auth": "dummy",
+  "class": "Data plane",
+  "config": [],
+  "config_files": [
+    {
+      "output": "config.gen.yaml",
+      "template": "config.gen.yaml.tmpl"
+    }
+  ],
+  "display": "agentgateway",
+  "egress": [
+    "openai",
+    "openai-responses",
+    "anthropic",
+    "bedrock"
+  ],
+  "lang": "Rust",
+  "launch": {
+    "args": [
+      "-f",
+      "/config.yaml"
+    ],
+    "image": "ghcr.io/agentgateway/agentgateway:v1.3.1",
+    "kind": "docker",
+    "mounts": [
+      {
+        "container_path": "/config.yaml",
+        "host_path": "config.gen.yaml",
+        "read_only": true
+      }
+    ]
+  },
+  "model": "gpt-4o-mini",
+  "name": "agentgateway",
+  "path": "/v1/chat/completions",
+  "port": 8080,
+  "repo": "https://github.com/agentgateway/agentgateway",
+  "runtime": {
+    "container": "agentgateway-bench",
+    "kind": "docker"
+  }
+}

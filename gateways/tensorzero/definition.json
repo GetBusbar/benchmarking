@@ -1,0 +1,43 @@
+{
+  "auth": "dummy",
+  "class": "Model gateway",
+  "config": [],
+  "config_files": [
+    {
+      "output": "config/tensorzero.toml",
+      "template": "config/tensorzero.toml.tmpl"
+    }
+  ],
+  "display": "TensorZero",
+  "egress": [
+    "openai",
+    "openai-responses",
+    "anthropic",
+    "bedrock"
+  ],
+  "lang": "Rust",
+  "launch": {
+    "args": [
+      "--config-file",
+      "config/tensorzero.toml"
+    ],
+    "image": "tensorzero/gateway:2026.6.0",
+    "kind": "docker",
+    "mounts": [
+      {
+        "container_path": "/app/config",
+        "host_path": "config",
+        "read_only": true
+      }
+    ]
+  },
+  "model": "tensorzero::model_name::mock-openai",
+  "name": "tensorzero",
+  "path": "/openai/v1/chat/completions",
+  "port": 3000,
+  "repo": "https://github.com/tensorzero/tensorzero",
+  "runtime": {
+    "container": "tensorzero-bench",
+    "kind": "docker"
+  }
+}

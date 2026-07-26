@@ -129,7 +129,7 @@ fn unique_dir(name: &str) -> PathBuf {
 /// The smallest manifest `otb run` will accept, written as the real thing: this is also a check that
 /// the on-disk manifest shape the binary parses has not drifted from what the engine expects.
 fn write_manifest(dir: &Path) -> PathBuf {
-    let path = dir.join("manifest.json");
+    let path = dir.join("definition.json");
     let body = r#"{
       "name": "e2e",
       "display": "End To End",
@@ -356,7 +356,7 @@ fn every_module_the_artifact_needs_is_reachable_from_a_real_run() {
 #[test]
 fn a_manifest_that_fails_the_config_standard_is_refused_before_anything_is_measured() {
     let results = unique_dir("configlint");
-    let manifest = results.join("bad.json");
+    let manifest = results.join("definition.json");
     // Two settings claiming the same key: the manifest cannot say which one justifies the config the
     // gateway actually boots with.
     std::fs::write(

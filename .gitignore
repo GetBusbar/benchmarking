@@ -33,3 +33,12 @@ __pycache__/
 # (results/snapshots/), which is committed — these are the working files that produced it.
 results/box-qualify/
 target/
+
+# Rendered gateway config. The TEMPLATE (*.tmpl) is the source and is tracked; what the harness
+# renders from it at launch is output, and a stale rendered file in the tree is a config someone
+# could read as authoritative when the template beside it says something else.
+gateways/*/*.gen.yaml
+gateways/*/*.gen.yml
+gateways/*/bfdata/
+gateways/*/config/*.toml
+gateways/*/launch.log
