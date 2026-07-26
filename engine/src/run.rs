@@ -31,14 +31,32 @@ pub struct RunConfig {
     pub probe_timeout: Duration,
     /// CPU list the load generator is pinned to, e.g. "4-9". None only in tests.
     pub load_cores: Option<String>,
+    /// Headers this gateway needs on every request, whatever the cell.
+    pub static_headers: Vec<(String, String)>,
+    /// Headers that select an egress column, keyed by dialect. Empty for a gateway that routes by
+    /// config rather than by header.
+    pub egress_headers: std::collections::BTreeMap<String, Vec<(String, String)>>,
     /// The gateway's declared identity, so the memory readers can find its process tree. The SAME
     /// value the launcher's --name and the stop path take: there is no second name for a reader to
     /// disagree with.
     pub runtime: crate::manifest::Runtime,
 }
 
-fn headers(auth: &str) -> Vec<(String, String)> {
-    vec![("authorization".into(), format!("Bearer {auth}"))]
+/// Every header one request carries: how this INGRESS dialect authenticates, then whatever the
+/// gateway needs to select this EGRESS column.
+///
+/// Two axes, and they are genuinely different things. The auth header belongs to the protocol the
+/// client is speaking and is identical across gateways, so it comes from `Dialect`. The routing
+/// header belongs to the gateway and is how some of them decide which upstream to call, so it comes
+/// from the manifest, keyed by column. Collapsing them into one hardcoded shape is what sent
+/// `authorization: Bearer` to dialects that do not use one.
+fn headers_for(cfg: &RunConfig, ingress: Dialect, egress: &str) -> Vec<(String, String)> {
+    let mut out = ingress.auth_headers(&cfg.auth);
+    out.extend(cfg.static_headers.iter().cloned());
+    if let Some(extra) = cfg.egress_headers.get(egress) {
+        out.extend(extra.iter().cloned());
+    }
+    out
 }
 
 /// Ask the gateway whether it serves this pairing. The answer comes only from what was OBSERVED:
@@ -49,7 +67,7 @@ pub fn probe_cell(cfg: &RunConfig, id: &CellId, mock_healthy: bool) -> Served {
     };
     let path = ing.path(&cfg.model);
     let body = ing.body(&cfg.model);
-    match http::post_json(cfg.gateway_addr, &path, body.as_bytes(), &headers(&cfg.auth), cfg.probe_timeout) {
+    match http::post_json(cfg.gateway_addr, &path, body.as_bytes(), &headers_for(cfg, ing, &id.egress), cfg.probe_timeout) {
         Outcome::Response(r) if (200..300).contains(&r.status) => Served::Yes,
         Outcome::Response(r) => {
             // The verdict decides which of the two this is, and they are NOT interchangeable.
@@ -229,7 +247,9 @@ pub fn mock_healthy(cfg: &RunConfig) -> bool {
             cfg.mock_addr,
             &d.mock_direct_path(&cfg.model),
             d.body(&cfg.model).as_bytes(),
-            &headers(&cfg.auth),
+            // The mock is spoken to in the dialect being checked, with no gateway routing headers:
+            // those select an upstream INSIDE a gateway and mean nothing to the mock itself.
+            &d.auth_headers(&cfg.auth),
             Duration::from_secs(5),
         ),
         Outcome::Response(r) if (200..300).contains(&r.status)
@@ -298,6 +318,8 @@ mod tests {
             sweep_duration_s: 1,
             probe_timeout: Duration::from_secs(2),
             load_cores: None,
+            static_headers: Vec::new(),
+            egress_headers: Default::default(),
             runtime: crate::manifest::Runtime::Native { proc_match: "test-fixture".into() },
         }
     }

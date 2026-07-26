@@ -97,6 +97,35 @@ impl Dialect {
         self.path(model)
     }
 
+    /// How a client of THIS dialect authenticates, and any version header the wire requires.
+    ///
+    /// The auth header is a property of the PROTOCOL, not of the gateway: a client speaking Anthropic
+    /// sends `x-api-key` and `anthropic-version` whoever it is talking to. It lives here, once, for
+    /// the same reason `path` does - thirteen copies of one table is thirteen chances to drift.
+    ///
+    /// The engine used to send `authorization: Bearer` for every dialect. That is right for three of
+    /// six and wrong for two, and the two wrong ones are whole ROWS of the grid: the gateway answers
+    /// 401, `probe.rs` maps any status from a healthy rig to `NotConfigured` - "the gateway answered,
+    /// deterministically, that this pairing does not light up" - and twelve of thirty-six cells per
+    /// gateway publish as its own capability denial, grey on the board, caused by our request.
+    pub fn auth_headers(&self, auth: &str) -> Vec<(String, String)> {
+        match self {
+            // Anthropic's own wire: the key is x-api-key, and the version header is mandatory.
+            Dialect::Anthropic => vec![
+                ("x-api-key".to_string(), auth.to_string()),
+                ("anthropic-version".to_string(), "2023-06-01".to_string()),
+            ],
+            // Gemini carries the key in its own header.
+            Dialect::Gemini => vec![("x-goog-api-key".to_string(), auth.to_string())],
+            // Everything else is a bearer token. Bedrock is signed in the real world, but the mock
+            // ignores the signature and the shell sent a bearer here too, so this matches what the
+            // field has always driven.
+            Dialect::Openai | Dialect::OpenaiResponses | Dialect::Cohere | Dialect::Bedrock => {
+                vec![("authorization".to_string(), format!("Bearer {auth}"))]
+            }
+        }
+    }
+
     /// The same probe body, asking for a stream.
     ///
     /// The mock decides whether to stream by looking for `"stream": true` in the request body (its
@@ -272,6 +301,32 @@ mod tests {
     }
 
     // ── streams_natively(): matches mock/src/main.rs's real dispatch, not a comment ────────────────
+
+    // Sending the wrong auth header to a dialect makes the gateway answer 401, which probe.rs reads
+    // as the gateway's own deterministic refusal of the pairing. Two of the six dialects do not use
+    // a bearer token at all, so hardcoding one shape mislabels two whole rows of every gateway's grid
+    // as capability denials.
+    #[test]
+    fn each_dialect_authenticates_the_way_its_own_protocol_does() {
+        let anthropic = Dialect::Anthropic.auth_headers("K");
+        assert!(anthropic.iter().any(|(n, v)| n == "x-api-key" && v == "K"), "{anthropic:?}");
+        assert!(anthropic.iter().any(|(n, _)| n == "anthropic-version"), "the version header is mandatory: {anthropic:?}");
+        assert!(!anthropic.iter().any(|(n, _)| n == "authorization"), "anthropic does not take a bearer token");
+
+        let gemini = Dialect::Gemini.auth_headers("K");
+        assert_eq!(gemini, vec![("x-goog-api-key".to_string(), "K".to_string())]);
+
+        for d in [Dialect::Openai, Dialect::OpenaiResponses, Dialect::Cohere, Dialect::Bedrock] {
+            let h = d.auth_headers("K");
+            assert!(h.iter().any(|(n, v)| n == "authorization" && v == "Bearer K"), "{d}: {h:?}");
+        }
+
+        // Every dialect must authenticate somehow: a dialect with no credential at all would be
+        // driven anonymously and read as the gateway refusing it.
+        for d in Dialect::ALL {
+            assert!(!d.auth_headers("K").is_empty(), "{d} sends no credential");
+        }
+    }
 
     // The streaming probe must be the ORDINARY body plus the flag, or the streaming and
     // non-streaming legs are asking different questions and their difference means nothing.

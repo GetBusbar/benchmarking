@@ -119,6 +119,8 @@ fn main() -> ExitCode {
                 // `smoke` drives an already-running gateway and takes no manifest, so it has no
                 // declared identity to measure memory against. An empty match resolves to nothing
                 // and the memory group reports an absence naming it, which is the honest answer.
+                static_headers: Vec::new(),
+                egress_headers: Default::default(),
                 runtime: otb_engine::manifest::Runtime::Native { proc_match: String::new() },
             };
             println!("mock healthy: {}", otb_engine::run::mock_healthy(&cfg));
@@ -187,8 +189,8 @@ fn main() -> ExitCode {
                 return ExitCode::FAILURE;
             }
             let (Some(gw), Some(mk)) = (
-                args.get(2).and_then(|a| a.parse().ok()),
-                args.get(3).and_then(|a| a.parse().ok()),
+                args.get(2).and_then(|a| a.parse::<std::net::SocketAddr>().ok()),
+                args.get(3).and_then(|a| a.parse::<std::net::SocketAddr>().ok()),
             ) else {
                 eprintln!("usage: otb run <manifest.json> <gateway ip:port> <mock ip:port> [results_dir]");
                 return ExitCode::from(2);
@@ -215,8 +217,28 @@ fn main() -> ExitCode {
                 Err(_) => Dialect::ALL.to_vec(),
             };
             let env_u32 = |k: &str, d: u32| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
+            let gw_dir = dir.clone();
+            let gw_cores = std::env::var("OTB_GW_CORES").unwrap_or_else(|_| "0-3".into());
+
+            // RENDER THE CONFIG BEFORE LAUNCHING. Seven of the containers mount a file the harness
+            // writes and every source build points at one; launching before it exists produces a
+            // gateway that starts and dies, which reads as the gateway being broken.
+            match manifest.render_configs(&gw_cores, mk.port(), &gw_dir) {
+                Ok(written) => {
+                    for (path, _) in &written {
+                        println!("rendered {}", path.display());
+                    }
+                }
+                Err(e) => {
+                    eprintln!("{e}");
+                    return ExitCode::FAILURE;
+                }
+            }
+
             let cfg = SuiteConfig {
                 manifest,
+                gw_dir: gw_dir.clone(),
+                gw_cores: gw_cores.clone(),
                 mock_addr: mk,
                 results_dir: results_dir.into(),
                 dialects,
@@ -234,10 +256,8 @@ fn main() -> ExitCode {
             // still does. Declaring a launch means the harness owns the gateway's lifetime: it starts
             // it, measures it, and stops it, so a run cannot silently measure a container left over
             // from a previous one.
-            let gw_dir = std::path::Path::new("gateways").join(&cfg.manifest.name);
-            let cores = std::env::var("OTB_GW_CORES").unwrap_or_else(|_| "0-3".into());
             let launched = match cfg.manifest.launch_spec(
-                &cores,
+                &gw_cores,
                 cfg.mock_addr.port(),
                 &gw_dir,
                 Duration::from_secs(60),
