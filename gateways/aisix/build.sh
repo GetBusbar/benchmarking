@@ -21,16 +21,14 @@ REPO="${AISIX_REPO:-https://github.com/api7/aisix}"
 COMMIT="${AISIX_COMMIT:-0f90a98ec8c43864d43e740e3ab66fe1d639c143}"   # tag v0.5.0
 SRC="$GW_DIR/src"
 
-# protoc is not optional here: the build graph pulls tonic/prost, whose build scripts invoke it, and
-# without it the failure is a compile error deep in a dependency rather than a missing tool.
-if ! command -v cargo >/dev/null || ! command -v protoc >/dev/null; then
-  sudo apt-get install -y -q git build-essential pkg-config libssl-dev protobuf-compiler >/dev/null 2>&1 || true
-  command -v cargo >/dev/null || (curl -sSf https://sh.rustup.rs | sh -s -- -y >/dev/null 2>&1)
-  # shellcheck disable=SC1091
-  . "$HOME/.cargo/env" 2>/dev/null || true
-fi
-command -v cargo >/dev/null || { echo "build: rust toolchain unavailable"; exit 1; }
-command -v protoc >/dev/null || { echo "build: protoc unavailable, and the build deps require it"; exit 1; }
+# Prerequisites. Unconditionally, because apt-get install is already idempotent and already
+# resolves dependencies: there is nothing here for us to be clever about. It used to be wrapped in
+# `if ! command -v cargo`, which is the bug: the box provisions rust for every gateway, so cargo was
+# always present, the block never ran, and the packages that are not rust were never installed. The
+# failure then surfaced one layer down as "failed to run custom build command for openssl-sys", which
+# names a crate rather than the missing package.
+sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q git build-essential pkg-config libssl-dev protobuf-compiler
+command -v protoc >/dev/null || { echo "build: protoc is required by this gateway's build dependencies and is not installed"; exit 1; }
 
 [ -d "$SRC" ] || git clone -q "$REPO" "$SRC"
 # RE-PIN ON EVERY BUILD, not only on a fresh clone. A box whose source tree survived a previous run

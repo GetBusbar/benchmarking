@@ -19,13 +19,13 @@ REPO="${HELICONE_REPO:-https://github.com/Helicone/ai-gateway}"
 COMMIT="${HELICONE_COMMIT:-9649b27bdc9fb0907d359e899894102a15f3a085}"
 SRC="$GW_DIR/src"
 
-if ! command -v cargo >/dev/null; then
-  sudo apt-get install -y -q git build-essential pkg-config libssl-dev >/dev/null 2>&1 || true
-  (curl -sSf https://sh.rustup.rs | sh -s -- -y >/dev/null 2>&1) || true
-  # shellcheck disable=SC1091
-  . "$HOME/.cargo/env" 2>/dev/null || true
-fi
-command -v cargo >/dev/null || { echo "build: rust toolchain unavailable"; exit 1; }
+# Prerequisites. Unconditionally, because apt-get install is already idempotent and already
+# resolves dependencies: there is nothing here for us to be clever about. It used to be wrapped in
+# `if ! command -v cargo`, which is the bug: the box provisions rust for every gateway, so cargo was
+# always present, the block never ran, and the packages that are not rust were never installed. The
+# failure then surfaced one layer down as "failed to run custom build command for openssl-sys", which
+# names a crate rather than the missing package.
+sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q git build-essential pkg-config libssl-dev
 
 [ -d "$SRC" ] || git clone -q "$REPO" "$SRC"
 # Re-pin every time, not only on a fresh clone: a surviving source tree would otherwise keep an old

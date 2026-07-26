@@ -450,14 +450,16 @@ impl Launcher for RealLauncher {
         supervise::port_state(spec.port)
     }
 
-    /// Read back what the container printed. Only the tail: a gateway that fails at config load says
-    /// so in its last few lines, and a whole log would bury the reason it is being read for.
+    /// Read back what the container printed. The tail only: a whole log would bury the reason it is
+    /// being read for. Sixty lines rather than twenty because a gateway that boots, prints a banner
+    /// and a page of startup warnings, and only then fails, pushed the actual error out of a shorter
+    /// window: one entrant's capture was twenty lines of nginx warnings and no error at all.
     fn diagnostics(&mut self, spec: &LaunchSpec) -> Option<String> {
         let Runtime::Docker { container } = &spec.runtime else {
             return None;
         };
         let out = Command::new("docker")
-            .args(["logs", "--tail", "20", container])
+            .args(["logs", "--tail", "60", container])
             .stdin(Stdio::null())
             .output()
             .ok()?;
