@@ -83,10 +83,11 @@ impl Probe for SweepProbe<'_> {
             duration: Duration::from_secs(self.cfg.sweep_duration_s),
             ttft_ms: 0,
         });
-        // A panicked worker means OUR code broke. Reporting the window as empty would let the
-        // search publish it as a rig limitation, which is a harness bug wearing the rig's clothes.
-        if stats.worker_panicked {
-            eprintln!("loadgen: a worker panicked at c={concurrency}; this window is a harness fault");
+        // The OS refusing a thread means this window never ran at the requested concurrency. It is
+        // a RIG limit, not a gateway result, and treating it as a failed gate would tell the search
+        // the gateway turned over at a concurrency it was never actually driven at.
+        if stats.spawn_failed {
+            eprintln!("loadgen: could not reach c={concurrency}; the rig refused a thread");
             return None;
         }
         // A window that produced nothing is UNMEASURED, not a zero, so the search stops rather than

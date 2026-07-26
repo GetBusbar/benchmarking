@@ -39,9 +39,12 @@ pub struct GenStats {
     pub ok: u64,
     pub fail: u64,
     pub elapsed_s: f64,
-    /// Set when a worker thread panicked. The window is then not a measurement of the gateway at
-    /// all, and a caller must publish it as a harness fault rather than as an empty result.
-    pub worker_panicked: bool,
+    /// Set when the OS refused a thread, so the window never ran at the requested concurrency and
+    /// is not a measurement of the gateway at any concurrency we could name. A worker PANIC is not
+    /// represented here on purpose: thread::scope re-raises it, so it terminates the process rather
+    /// than reaching any caller, and a field claiming otherwise would be dead code pretending to be
+    /// a safety net.
+    pub spawn_failed: bool,
     /// Every successful request's latency, microseconds. Percentiles are computed from this rather
     /// than from a running estimate: an approximate p99 is the one number nobody can check later.
     pub latencies_us: Vec<u64>,
@@ -139,13 +142,12 @@ fn worker(cfg: &GenConfig, stop: &AtomicBool, out: &Mutex<GenStats>) {
     // silently would drop this worker's real requests and, if every worker skipped, hand the search
     // an empty window that reads as "the rig produced nothing" rather than "our code broke".
     // Recover the guard so the data still lands, and record that it happened.
+    // A poisoned lock means a peer worker panicked. Recover the guard so THIS worker's real
+    // requests still land: dropping them would shrink a window that did happen. The panic itself is
+    // re-raised by thread::scope and terminates the process, so there is nothing to flag here.
     let mut g = match out.lock() {
         Ok(g) => g,
-        Err(poisoned) => {
-            let mut g = poisoned.into_inner();
-            g.worker_panicked = true;
-            g
-        }
+        Err(poisoned) => poisoned.into_inner(),
     };
     g.ok += ok;
     g.fail += fail;
@@ -215,9 +217,15 @@ fn read_response(s: &mut TcpStream, deadline: Instant) -> std::io::Result<()> {
                 Framing::UntilClose => return Ok(()),
             }
         }
-        if Instant::now() >= deadline {
+        // Narrow the socket timeout to what is LEFT of the budget, the way http.rs already does.
+        // A fixed per-read timeout on top of a deadline check makes the real ceiling twice the
+        // advertised one: the check passes at deadline-minus-a-moment, then the read blocks for its
+        // own full timeout. That extra time is also drain time the scope waits through.
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
             return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "response deadline"));
         }
+        let _ = s.set_read_timeout(Some(remaining));
         let n = s.read(&mut buf)?;
         if n == 0 {
             // A closed connection completes an until-close body and truncates any other framing.
@@ -268,26 +276,61 @@ fn content_length(head_lower: &str) -> Option<usize> {
 pub fn run(cfg: &GenConfig) -> GenStats {
     let stop = Arc::new(AtomicBool::new(false));
     let out = Arc::new(Mutex::new(GenStats::default()));
-    let started = Instant::now();
 
-    std::thread::scope(|sc| {
-        for _ in 0..cfg.concurrency.max(1) {
-            let (stop, out) = (Arc::clone(&stop), Arc::clone(&out));
-            sc.spawn(move || worker(cfg, &stop, &out));
+    // STOP IS SET FROM A DROP GUARD, not from the end of the scope body.
+    //
+    // Scope::spawn PANICS if the OS refuses a thread, which is reachable at the concurrencies this
+    // harness sweeps. That panic unwinds the scope closure, so a `stop.store` written at the end of
+    // the body never runs, and `thread::scope` then blocks joining workers that were never told to
+    // stop: the sweep hangs until the box self-terminates and the whole run is lost. A guard runs on
+    // unwind as well as on the normal path, so any panic between here and the end still stops them.
+    struct StopOnDrop<'a>(&'a AtomicBool);
+    impl Drop for StopOnDrop<'_> {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Relaxed);
         }
-        std::thread::sleep(cfg.duration);
-        stop.store(true, Ordering::Relaxed);
-    });
+    }
+
+    let mut spawn_failed = false;
+    // Measured around the LOAD WINDOW only. Charging the spawn ramp and the post-stop drain to the
+    // denominator deflates rps in one direction, and it deflates it most at exactly the rungs where
+    // the gateway is slowest, which is where the ceiling is being located.
+    let load_started;
+    let load_elapsed;
+    {
+        let stop_guard = StopOnDrop(&stop);
+        load_started = Instant::now();
+        std::thread::scope(|sc| {
+            for i in 0..cfg.concurrency.max(1) {
+                let (stop_ref, out_ref) = (Arc::clone(&stop), Arc::clone(&out));
+                // Fallible spawn: the OS refusing a thread is a RIG limit, not a gateway result, and
+                // it must not panic out of the scope.
+                if std::thread::Builder::new()
+                    .spawn_scoped(sc, move || worker(cfg, &stop_ref, &out_ref))
+                    .is_err()
+                {
+                    eprintln!("loadgen: the OS refused a thread at worker {i} of {}", cfg.concurrency);
+                    spawn_failed = true;
+                    break;
+                }
+            }
+            if !spawn_failed {
+                std::thread::sleep(cfg.duration);
+            }
+            stop.store(true, Ordering::Relaxed);
+        });
+        load_elapsed = load_started.elapsed();
+        drop(stop_guard);
+    }
 
     let mut g = match out.lock() {
         Ok(g) => g.clone(),
-        Err(poisoned) => {
-            let mut g = poisoned.into_inner().clone();
-            g.worker_panicked = true;
-            g
-        }
+        Err(poisoned) => poisoned.into_inner().clone(),
     };
-    g.elapsed_s = started.elapsed().as_secs_f64();
+    // The OS refusing a thread means this window never ran at the requested concurrency, so it is
+    // not a measurement of the gateway at any concurrency we can name.
+    g.spawn_failed = spawn_failed;
+    g.elapsed_s = load_elapsed.as_secs_f64();
     g
 }
 
@@ -297,7 +340,7 @@ mod tests {
     use std::net::TcpListener;
 
     fn stats(lat: &[u64], ok: u64, fail: u64, elapsed: f64) -> GenStats {
-        GenStats { ok, fail, elapsed_s: elapsed, latencies_us: lat.to_vec(), worker_panicked: false }
+        GenStats { ok, fail, elapsed_s: elapsed, latencies_us: lat.to_vec(), spawn_failed: false }
     }
 
     // The percentile convention must match the Go generator EXACTLY. A one-index difference is a
