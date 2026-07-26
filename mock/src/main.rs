@@ -436,7 +436,10 @@ async fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{dialect_for, request_shape_ok};
+    use super::{
+        body_for, dialect_for, json_escape, models_for, request_shape_ok, state_json, wants_stream,
+        Bytes, Recorder, StreamFrames, DIALECTS, ANTHROPIC, OPENAI,
+    };
 
     // The mock must serve every dialect identically and the matrix's leg-3 body_ok must PROVE the
     // gateway spoke that dialect's request shape. These tests pin request_shape_ok per dialect,
@@ -494,6 +497,227 @@ mod tests {
     #[test]
     fn unknown_dialect_never_ok() {
         assert!(!request_shape_ok("other", br#"{"messages":[]}"#));
+    }
+
+    // ── response-body routing ───────────────────────────────────────────────────────────────────
+    //
+    // Every provider base URL points at this one mock, so the PATH is the only thing that says which
+    // dialect a gateway forwarded in. Answering the wrong dialect's JSON is not a visible failure:
+    // the gateway gets a 200 and either forwards a body its client cannot parse, or errors on the
+    // parse and the cell is published as a gateway defect that is really ours.
+
+    #[test]
+    fn every_dialect_endpoint_is_answered_in_its_own_shape() {
+        // Markers unique to each dialect's response body, so this checks the ROUTING and not just
+        // that some JSON came back.
+        for (path, marker) in [
+            ("/v1/chat/completions", "chat.completion"),
+            ("/v1/responses", "\"output\":["),
+            ("/v1/messages", "\"stop_reason\":\"end_turn\""),
+            ("/v1beta/models/m:generateContent", "candidates"),
+            ("/model/m/converse", "stopReason"),
+            ("/v2/chat", "\"finish_reason\":\"COMPLETE\""),
+        ] {
+            let body = String::from_utf8_lossy(body_for(path)).into_owned();
+            assert!(body.contains(marker), "{path} must answer its own dialect, got {body}");
+        }
+    }
+
+    // An UNRECOGNIZED path still gets a valid answer rather than a broken one, because a gateway
+    // whose egress path we did not anticipate must not be published as failing against the mock.
+    // The safe default is the openai body, which is why dialect_for reports "other" instead: the
+    // matrix runner must not read this fallback as proof the gateway posted openai.
+    #[test]
+    fn an_unrecognized_path_falls_back_to_a_valid_body_that_is_not_recorded_as_openai() {
+        assert!(String::from_utf8_lossy(body_for("/totally/unknown")).contains("chat.completion"));
+        assert_eq!(dialect_for("/totally/unknown"), "other");
+    }
+
+    // A .../models request must be answered BEFORE the chat routing, and per provider. A single
+    // shared catalog that listed every provider's models on every base made a gateway that routes by
+    // bare model name register the same name under several providers and then pick one arbitrarily,
+    // which silently measured a different pairing than the one the cell claims.
+    #[test]
+    fn a_model_list_is_provider_specific_and_never_advertises_another_provider() {
+        for (path, mine, theirs) in [
+            ("/v1/models", "gpt-4o-mini", "claude"),
+            ("/anthropic/v1/models", "claude-3-5-sonnet", "gpt-4o"),
+            ("/v1beta/models", "gemini-1.5-pro", "gpt-4o"),
+            ("/v2/models", "command-r", "claude"),
+        ] {
+            let body = String::from_utf8_lossy(models_for(path)).into_owned();
+            assert!(body.contains(mine), "{path} must advertise its own models, got {body}");
+            assert!(!body.contains(theirs), "{path} must not advertise another provider's models, got {body}");
+            // And the chat router must hand a models path to the model list, not to a chat body.
+            assert_eq!(body_for(path), models_for(path), "{path} must route to the model list");
+        }
+        // The query-string form, which is how some clients ask.
+        assert!(String::from_utf8_lossy(body_for("/v1/models?limit=100")).contains("gpt-4o-mini"));
+    }
+
+    // ── stream detection ────────────────────────────────────────────────────────────────────────
+
+    // The whole streaming suite hangs off this one substring scan. A false negative answers plain
+    // JSON to a request that asked for a stream, and the gateway's streaming lane then measures a
+    // non-stream; a false positive opens an SSE stream to a client waiting for a JSON document,
+    // which reads as a gateway timeout. Both directions publish a wrong number rather than an error.
+    #[test]
+    fn a_stream_request_is_detected_with_or_without_the_space_after_the_colon() {
+        assert!(wants_stream(br#"{"model":"m","stream":true,"messages":[]}"#));
+        assert!(wants_stream(br#"{"model":"m","stream": true,"messages":[]}"#));
+    }
+
+    #[test]
+    fn a_non_stream_request_is_never_mistaken_for_a_stream() {
+        assert!(!wants_stream(br#"{"model":"m","stream":false,"messages":[]}"#));
+        assert!(!wants_stream(br#"{"model":"m","messages":[]}"#));
+        assert!(!wants_stream(br#"{"stream_options":{"include_usage":true}}"#));
+        // Shorter than the marker itself: the windowed scan must not panic on a tiny body.
+        assert!(!wants_stream(b""));
+        assert!(!wants_stream(b"{}"));
+    }
+
+    // Only the openai and anthropic paths synthesise a stream; the others answer their normal JSON
+    // even when asked to stream, and the harness records that as untestable rather than measuring
+    // it. This pairing (a streamable body plus a stream request) is what the handler keys off, so it
+    // is pinned here where it can be checked without standing up a server.
+    #[test]
+    fn only_the_openai_and_anthropic_paths_have_a_streamable_body() {
+        assert!(std::ptr::eq(body_for("/v1/chat/completions"), OPENAI));
+        assert!(std::ptr::eq(body_for("/v1/messages"), ANTHROPIC));
+        for path in ["/v1beta/models/m:generateContent", "/model/m/converse", "/v2/chat", "/v1/responses"] {
+            assert!(
+                !std::ptr::eq(body_for(path), OPENAI) && !std::ptr::eq(body_for(path), ANTHROPIC),
+                "{path} must not be answered with a streamable body"
+            );
+        }
+    }
+
+    // ── stream frames ───────────────────────────────────────────────────────────────────────────
+
+    // NO TWO CONSECUTIVE CONTENT FRAMES MAY BE BYTE-IDENTICAL. A gateway with a repetition or loop
+    // guard aborts a stream whose chunks repeat, so a single reused delta would fail that gateway on
+    // a property of our synthetic tokens rather than of its behaviour, and every frame must still be
+    // the same SIZE or the per-frame timings stop being comparable between gateways.
+    #[test]
+    fn consecutive_stream_deltas_differ_in_content_but_not_in_size() {
+        let f = StreamFrames::build(8, 0, 16);
+        for deltas in [&f.openai_deltas, &f.anthropic_deltas] {
+            assert_eq!(deltas.len(), 8, "one prebuilt frame per chunk index");
+            for w in deltas.windows(2) {
+                assert_ne!(w[0], w[1], "consecutive deltas must differ or a repeat-guard trips");
+                assert_eq!(w[0].len(), w[1].len(), "every delta must be the same size");
+            }
+        }
+    }
+
+    // A caller can ask for a payload narrower than the frame index's own decimal width. Truncating
+    // rather than overflowing keeps every frame the requested size; a subtraction on the untruncated
+    // path would underflow instead.
+    #[test]
+    fn a_chunk_payload_narrower_than_the_frame_index_is_truncated_not_overflowed() {
+        let f = StreamFrames::build(200, 0, 1);
+        let sizes: std::collections::BTreeSet<usize> = f.openai_deltas.iter().map(|d| d.len()).collect();
+        assert_eq!(sizes.len(), 1, "a one byte payload must give every frame the same size, got {sizes:?}");
+    }
+
+    // A zero-chunk stream must still build: `chunks.max(1)` keeps the delta vector non-empty, and
+    // the handler indexes it modulo its length, so an empty vector would divide by zero and panic
+    // the whole mock mid-run.
+    #[test]
+    fn a_zero_chunk_stream_still_builds_a_non_empty_delta_vector() {
+        let f = StreamFrames::build(0, 0, 16);
+        assert!(!f.openai_deltas.is_empty());
+        assert!(!f.anthropic_deltas.is_empty());
+    }
+
+    // The frames the harness's SSE reader keys off: the openai stream terminates with [DONE] and the
+    // anthropic one with message_stop. A stream that never terminates leaves the reader waiting out
+    // its deadline on every streaming cell.
+    #[test]
+    fn each_stream_dialect_ends_with_the_terminator_its_clients_wait_for() {
+        let f = StreamFrames::build(4, 0, 16);
+        let tail = |v: &Vec<Bytes>| v.iter().map(|b| String::from_utf8_lossy(b).into_owned()).collect::<String>();
+        assert!(tail(&f.openai_tail).contains("data: [DONE]"));
+        assert!(tail(&f.anthropic_tail).contains("message_stop"));
+        assert!(tail(&f.openai_head).contains("\"role\":\"assistant\""));
+        assert!(tail(&f.anthropic_head).contains("message_start"));
+    }
+
+    // ── the recorded state document ─────────────────────────────────────────────────────────────
+
+    // The state document is hand-assembled with format!, so a body snippet carrying a quote, a
+    // backslash or a newline (every request body has quotes) would produce INVALID JSON and the
+    // matrix runner would read a parse error as "the request never arrived" rather than as a bug in
+    // this escaper. That inverts a proof of a working round trip into evidence of a broken one.
+    #[test]
+    fn a_body_snippet_full_of_json_metacharacters_still_escapes_to_valid_json() {
+        let nasty = "{\"a\":\"b\\c\"}\n\r\t\u{1}";
+        let escaped = json_escape(nasty);
+        let doc = format!("{{\"s\":\"{escaped}\"}}");
+        let parsed: serde_json::Value = match serde_json::from_str(&doc) {
+            Ok(v) => v,
+            Err(e) => panic!("the escaped snippet must be valid JSON: {e} in {doc}"),
+        };
+        assert_eq!(parsed["s"], serde_json::Value::String(nasty.to_string()), "escaping must round trip exactly");
+    }
+
+    // Every dialect is present in the document whether or not it was hit, so a runner can tell "no
+    // request arrived on this dialect" (count 0) apart from "this dialect is not a thing the mock
+    // knows about" (key missing). And `body_ok` on an untouched dialect must be false, never a
+    // default that reads as a passed shape check.
+    #[test]
+    fn the_state_document_lists_every_dialect_even_untouched_ones() {
+        let rec: Recorder = Recorder::default();
+        let doc = state_json(&rec, true);
+        let parsed: serde_json::Value = match serde_json::from_str(&doc) {
+            Ok(v) => v,
+            Err(e) => panic!("the state document must be valid JSON: {e} in {doc}"),
+        };
+        assert_eq!(parsed["recording"], serde_json::Value::Bool(true));
+        for d in DIALECTS {
+            assert_eq!(parsed["dialects"][d]["count"], 0, "{d} must be present with a zero count");
+            assert_eq!(parsed["dialects"][d]["body_ok"], false, "{d} must not claim a passed shape check");
+        }
+    }
+
+    // The `recording` flag is what lets a runner tell a mock that was never asked to record apart
+    // from one that recorded nothing. Collapsing the two turns a misconfigured run into what looks
+    // like a gateway that never forwarded a request.
+    #[test]
+    fn the_state_document_reports_whether_it_was_recording_at_all() {
+        let rec: Recorder = Recorder::default();
+        assert!(state_json(&rec, false).contains("\"recording\":false"));
+        assert!(state_json(&rec, true).contains("\"recording\":true"));
+    }
+
+    // A recorded dialect must carry its count, its shape verdict and the evidence for both. The
+    // snippet and path are what let an operator see WHY body_ok came out false, and without them a
+    // failed leg-3 check is an assertion with nothing behind it.
+    #[test]
+    fn a_recorded_dialect_carries_its_count_and_the_evidence_for_its_verdict() {
+        let rec: Recorder = Recorder::default();
+        {
+            let mut map = match rec.lock() {
+                Ok(m) => m,
+                Err(e) => panic!("fresh mutex must lock: {e}"),
+            };
+            let r = map.entry("anthropic").or_default();
+            r.count = 3;
+            r.body_ok = request_shape_ok("anthropic", br#"{"max_tokens":16,"messages":[]}"#);
+            r.last_path = "/v1/messages".to_string();
+            r.last_snippet = "{\"messages\":[]}".to_string();
+        }
+        let parsed: serde_json::Value = match serde_json::from_str(&state_json(&rec, true)) {
+            Ok(v) => v,
+            Err(e) => panic!("the state document must be valid JSON: {e}"),
+        };
+        assert_eq!(parsed["dialects"]["anthropic"]["count"], 3);
+        assert_eq!(parsed["dialects"]["anthropic"]["body_ok"], true);
+        assert_eq!(parsed["dialects"]["anthropic"]["last_path"], "/v1/messages");
+        assert_eq!(parsed["dialects"]["anthropic"]["last_snippet"], "{\"messages\":[]}");
+        // An untouched dialect in the same document is unaffected.
+        assert_eq!(parsed["dialects"]["openai"]["count"], 0);
     }
 
     #[test]

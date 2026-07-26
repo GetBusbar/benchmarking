@@ -851,6 +851,15 @@ sudo -n true 2>/dev/null && sudo chmod 666 /var/run/docker.sock || true
 # that is a matter for the gateway itself, done before the memory baseline is taken.
 source lib/rig.sh
 fetch_rig "$PWD" || { echo rig fetch FAILED; echo 126 > .run-done; exit 0; }
+# WHICH MOCK THIS RUN USED. rig is a MOVING tag: the same URL served different binaries weeks apart,
+# and a mock rebuild once changed cell verdicts across the whole field with nothing in either run's
+# output recording that the instrument had moved. rig.sh has just fetched and can hash it, and the
+# engine cannot work any of this out for itself, so hand it over the same way the commit is handed
+# over. Empty stays empty: the engine publishes an absent block rather than inventing one.
+export OTB_RIG_MOCK_ORIGIN="$RIG_MOCK_ORIGIN"
+export OTB_RIG_MOCK_SHA256="$(_rig_sha256 "$MOCK")"
+export OTB_RIG_MOCK_UPDATED_AT="$(_rig_asset_updated_at "mock-$BENCH_ARCH")"
+export OTB_RIG_URL="$RIG_URL"
 # rig.sh puts what it fetches in bin/; the run invokes ./otb. RIG_URL comes from rig.sh, so the
 # engine is fetched from the same release the rest of the rig came from, named once.
 #

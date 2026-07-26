@@ -43,6 +43,22 @@ pub struct SuiteConfig {
     /// like "this artifact predates provenance", and the whole point of the stamp is telling those
     /// two apart when two runs disagree.
     pub engine_stamp: Option<crate::record::EngineStamp>,
+    /// WHICH INSTRUMENT TOOK THE READINGS. The mock and the load generator are half the measuring
+    /// apparatus, and `rig` is a MOVING release tag: two runs weeks apart can use different binaries
+    /// behind the same URL. That is not hypothetical - a mock rebuild once changed cell verdicts
+    /// across the whole field and it took a long investigation to establish that the instrument had
+    /// moved rather than the gateways, because nothing in either run's output recorded which mock
+    /// produced it.
+    ///
+    /// Resolved orchestrator-side and handed in, exactly like `engine_stamp`: the box's own rig.sh
+    /// is what fetched this binary and hashed it, and the engine cannot re-derive that.
+    ///
+    /// The MOCK only. The load generator used to be a separate Go binary (`ugen`) that was half the
+    /// instrument and needed its own stamp; it is now `otb loadgen`, a subcommand of this engine, so
+    /// `rig.engine.commit` already identifies it and a second record would be the same fact twice.
+    pub rig_mock: Option<crate::record::BinaryProvenance>,
+    /// The release the rig came from, recorded beside the digests it produced.
+    pub rig_release_url: Option<String>,
     /// The gateway's own directory, for resolving its config templates and mounts.
     pub gw_dir: std::path::PathBuf,
     /// The CPU list the GATEWAY is pinned to. Distinct from the generator's: the split is the
@@ -93,6 +109,9 @@ fn rig_ceiling(cfg: &SuiteConfig, dialect: Dialect, at_conc: u32) -> Measurement
         static_headers: Vec::new(),
         egress_headers: Default::default(),
         runtime: crate::manifest::Runtime::Native { proc_match: String::new() },
+        // The reference drives the MOCK directly. There is no gateway process behind it, so there is
+        // nothing to restart, and a spec here would let a reference measurement bounce the gateway.
+        relaunch: None,
     };
     let id = crate::cell::CellId::new(dialect.as_str(), dialect.as_str());
     // A single point AT THE WINNER's concurrency, not a search: the reference must be taken where
@@ -121,11 +140,18 @@ fn judge_cell(
 
     let (Some(&value), Some(&conc_f)) = (rps.value(), conc_m.value()) else {
         // Carry the search's own reason and evidence rather than flattening it.
-        out.rps_max_proxy = match (rps.reason().cloned(), rps.detail()) {
+        let absent = match (rps.reason().cloned(), rps.detail()) {
             (Some(r), Some(d)) => Measurement::absent_because(r, d),
             (Some(r), None) => Measurement::absent(r),
             (None, _) => Measurement::absent(Absent::NotMeasured),
         };
+        // The concurrency travels WITH the peak, present or absent. Leaving it at empty_perf()'s
+        // default published a different reason for the two halves of one fact.
+        out.rps_max_proxy_concurrency = match absent.reason().cloned() {
+            Some(r) => Measurement::absent(r),
+            None => Measurement::absent(Absent::NotMeasured),
+        };
+        out.rps_max_proxy = absent;
         return Judged { perf: out };
     };
     // Concurrency travels as f64 so every metric has one type; it is only ever a whole rung of the
@@ -133,6 +159,17 @@ fn judge_cell(
     let conc = conc_f as u32;
 
     let reference = rig_ceiling(cfg, dialect, conc);
+    apply_peak_verdict(&mut out, value, conc, reference);
+    Judged { perf: out }
+}
+
+/// Fill the peak fields from the rig verdict. PURE, and separate from `judge_cell`, for one reason:
+/// the peak and the concurrency it happened at must agree about whether they exist, and that could
+/// not be tested while the decision was welded to a live rig measurement. The fixture the suite
+/// tests use points the gateway and the mock at the SAME server, so every cell comes back rig-bound
+/// and the measured branch was unreachable - a test written against `judge_cell` passed identically
+/// with the fix reverted, which is a test that is not testing anything.
+fn apply_peak_verdict(out: &mut CellPerf, value: f64, conc: u32, reference: Measurement<f64>) {
     match rigbound::is_rig_bound(value, reference.clone()).copied() {
         // Bounded by our own rig: this says nothing about the gateway, so it must not rank, win a
         // comparison, or draw a bar. Two fast gateways both pinned here would otherwise read as a
@@ -144,11 +181,18 @@ fn judge_cell(
             };
             out.rps_max_proxy = Measurement::absent_because(Absent::RigLimited, detail);
             out.rps_max_proxy_mock_bound = Some(true);
+            // Suppressed WITH its peak: a concurrency left behind would be the operating point of a
+            // number the board is refusing to publish.
+            out.rps_max_proxy_concurrency = Measurement::absent(Absent::RigLimited);
         }
         Some(false) => {
             out.rps_max_proxy = Measurement::Measured(value as i64);
             out.rps_max_proxy_mock_bound = Some(false);
             out.conc_at_peak = Measurement::Measured(i64::from(conc));
+            // THE PUBLISHED FIELD. conc_at_peak alone was set here, so every measured peak shipped
+            // with rps_max_proxy_concurrency still null - a peak with no operating point beside it,
+            // while the value sat in the very next field. This is what consumers read.
+            out.rps_max_proxy_concurrency = Measurement::Measured(i64::from(conc));
         }
         // The reference itself was unusable, so whether the rig bounded this is UNKNOWN. Publishing
         // the number would assert it was gateway-bound, which was never established.
@@ -158,9 +202,9 @@ fn judge_cell(
                 format!("reached {value:.0} at c={conc}, but the rig reference could not be measured, so it is unknown whether the gateway or the rig set this"),
             );
             out.rps_max_proxy_mock_bound = None;
+            out.rps_max_proxy_concurrency = Measurement::absent(Absent::RigLimited);
         }
     }
-    Judged { perf: out }
 }
 
 /// The published per-cell memory window, from the numbers the memory group took.
@@ -173,21 +217,61 @@ fn judge_cell(
 /// Absences travel intact. A window that could not find the gateway's process tree publishes null
 /// with the reason naming the identity it looked for, never a zero: a benchmark that ranks memory
 /// ascending would otherwise certify the gateway it failed to measure as the winner.
-fn cell_memory(metrics: &std::collections::BTreeMap<&'static str, Measurement<f64>>) -> crate::record::CellMemory {
+fn cell_memory(
+    metrics: &std::collections::BTreeMap<&'static str, Measurement<f64>>,
+    series: Option<&crate::metric::Series>,
+) -> crate::record::CellMemory {
     let take = |k: &str| {
         metrics
             .get(k)
             .cloned()
             .unwrap_or_else(|| Measurement::absent_because(Absent::NotMeasured, "no metric group fills this field"))
     };
+    let rss_series: Vec<crate::record::RssSample> =
+        series.map(|s| s.rss.clone()).unwrap_or_default();
+    // STEADY STATE, derived from the readings rather than left null. The trailing part of the window
+    // is where the process has stopped growing, so its median is what the gateway actually costs
+    // under sustained load, as distinct from the peak, which one spike can set. Absent when there
+    // are too few readings to have a trailing part at all, because a "steady state" computed from
+    // one sample would be the sample.
+    let steady = steady_state(&rss_series);
     crate::record::CellMemory {
         // `served` here means the cell was served, which is the only reason a window ran at all.
         served: true,
         idle_rss_mib: take("memory_idle_mib"),
         peak_rss_mib: take("memory_peak_mib"),
         peak_rss_hwm_mib: take("memory_hwm_mib"),
+        steady_state_rss_mib: steady,
+        rss_series,
         ..Default::default()
     }
+}
+
+/// The median of the trailing half of the window's readings.
+///
+/// Median, not mean: one allocator spike at the end of a window would drag a mean and misreport the
+/// level the process settled at. Trailing half, because the start of the window is the ramp, and
+/// including the ramp measures how fast it grew rather than where it stopped.
+fn steady_state(series: &[crate::record::RssSample]) -> Measurement<f64> {
+    let mut tail: Vec<f64> = series
+        .iter()
+        .skip(series.len() / 2)
+        .filter_map(|s| s.rss_mib.copied())
+        .collect();
+    if tail.len() < 2 {
+        return Measurement::absent_because(
+            Absent::NotMeasured,
+            format!(
+                "the window produced {} usable reading(s), too few to say where memory settled",
+                tail.len()
+            ),
+        );
+    }
+    tail.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let mid = tail.len() / 2;
+    let median =
+        if tail.len().is_multiple_of(2) { (tail[mid - 1] + tail[mid]) / 2.0 } else { tail[mid] };
+    Measurement::Measured(median)
 }
 
 /// The published per-cell streaming block, from the numbers the streaming group took.
@@ -274,6 +358,9 @@ fn qualify_box(cfg: &SuiteConfig, history: &[f64]) -> serde_json::Value {
         static_headers: Vec::new(),
         egress_headers: Default::default(),
         runtime: crate::manifest::Runtime::Native { proc_match: String::new() },
+        // The reference drives the MOCK directly. There is no gateway process behind it, so there is
+        // nothing to restart, and a spec here would let a reference measurement bounce the gateway.
+        relaunch: None,
     };
     let id = crate::cell::CellId::new(Dialect::Openai.as_str(), Dialect::Openai.as_str());
     let observed = run::measure_at(&direct, &id, QUALIFY_CONCURRENCY);
@@ -340,6 +427,20 @@ pub fn run_suite_with(
         sweep_duration_s: cfg.sweep_duration_s,
         probe_timeout: Duration::from_secs(10),
         load_cores: cfg.load_cores.clone(),
+        // How to put this gateway back at rest, so the memory group can read an idle that is
+        // actually idle. Built from the SAME manifest declaration the initial launch used, so a
+        // restart cannot differ from the launch it is repeating. `None` for a manifest that declares
+        // no launch: the harness does not own that gateway's lifetime and must not bounce it.
+        relaunch: cfg
+            .manifest
+            .launch_spec(
+                &cfg.gw_cores,
+                cfg.mock_addr.port(),
+                &cfg.gw_dir,
+                Duration::from_secs(60),
+                Duration::from_secs(2),
+            )
+            .and_then(|r| r.ok()),
         // The gateway's own headers, resolved once for the run. A column whose headers cannot be
         // resolved gets NONE rather than a partial set: sending half a routing header selects the
         // wrong upstream and publishes a number for a pairing that was never driven.
@@ -404,7 +505,17 @@ pub fn run_suite_with(
         }
 
         let perf = match (&result.metrics, ing.parse::<Dialect>()) {
-            (Some(m), Ok(d)) => Some(judge_cell(cfg, d, m).perf),
+            (Some(m), Ok(d)) => {
+                let mut p = judge_cell(cfg, d, m).perf;
+                // THE RUNGS THE SEARCH WALKED. Published whatever the verdict: when the peak is
+                // suppressed as rig-bound, or absent because the search never found a turnover, the
+                // sweep is the only thing that explains WHY, and a bare null with no points beside
+                // it is unreviewable.
+                if let Some(series) = result.series.as_ref() {
+                    p.sweep_max_proxy = series.sweep.clone();
+                }
+                Some(p)
+            }
             _ => None,
         };
 
@@ -413,7 +524,7 @@ pub fn run_suite_with(
             reason,
             path: ing.parse::<Dialect>().map(|d| d.path(&cfg.manifest.model)).unwrap_or_default(),
             perf,
-            memory: result.metrics.as_ref().map(cell_memory),
+            memory: result.metrics.as_ref().map(|m| cell_memory(m, result.series.as_ref())),
             stream: result.metrics.as_ref().map(cell_stream),
             ..Default::default()
         };
@@ -430,6 +541,30 @@ pub fn run_suite_with(
     flush(cfg, &upstreams, any_served, Some(box_qualify))
 }
 
+/// What the harness actually launched, as the artifact's `build` string.
+///
+/// Read back off the resolved LaunchSpec rather than off the manifest text, so it names the image
+/// that was really started after placeholder substitution, not the template that described it.
+fn gateway_build(cfg: &SuiteConfig) -> Option<String> {
+    let spec = cfg
+        .manifest
+        .launch_spec(
+            &cfg.gw_cores,
+            cfg.mock_addr.port(),
+            &cfg.gw_dir,
+            Duration::from_secs(60),
+            Duration::from_secs(2),
+        )?
+        .ok()?;
+    match &spec.kind {
+        crate::launch::LaunchKind::Docker { image, .. } => Some(image.clone()),
+        // A gateway built from source on the box has no image to name. Its identity is the runtime
+        // the manifest declares, which is at least the thing the memory reader and the stop path
+        // agree on, rather than a version string invented here.
+        _ => Some(spec.runtime.identity().to_string()),
+    }
+}
+
 /// Build the record from what has been measured so far and write it.
 fn flush(
     cfg: &SuiteConfig,
@@ -440,18 +575,27 @@ fn flush(
     // The rig block exists if ANY part of it does. Keying it solely off box_qualify, as it used to,
     // meant a run with no qualification file dropped the engine commit on the floor with it: the two
     // are independent facts about the instrument and one must not be able to suppress the other.
-    let rig = (box_qualify.is_some() || cfg.engine_stamp.is_some()).then(|| {
-        crate::record::RigProvenance {
+    let rig = (box_qualify.is_some() || cfg.engine_stamp.is_some() || cfg.rig_mock.is_some()).then(
+        || crate::record::RigProvenance {
             arch: Some(cfg.arch.clone()),
             engine: cfg.engine_stamp.clone(),
+            release_url: cfg.rig_release_url.clone(),
+            mock: cfg.rig_mock.clone(),
+            // The load generator is this engine's own `loadgen` subcommand, so rig.engine names it.
+            ugen: None,
             box_qualify,
-            ..Default::default()
-        }
-    });
+        },
+    );
     let snap = ResultSnapshot {
         schema_version: 1,
         gateway: cfg.manifest.name.clone(),
-        build: format!("otb-engine {}", env!("CARGO_PKG_VERSION")),
+        // WHAT WAS MEASURED, not what measured it. This carried the ENGINE's version, so every
+        // gateway's artifact claimed the same build string and a reader could not tell which image
+        // of a gateway produced a number. The engine identifies itself in rig.engine, where it
+        // belongs. Falls back to the engine string only when the manifest declares no launch, i.e.
+        // when the harness did not start the thing it measured and genuinely does not know its build.
+        build: gateway_build(cfg)
+            .unwrap_or_else(|| format!("otb-engine {}", env!("CARGO_PKG_VERSION"))),
         measured_at: cfg.measured_at.clone(),
         arch: Some(cfg.arch.clone()),
         rig: rig.clone(),
@@ -530,6 +674,8 @@ mod tests {
             measured_at: "2026-07-26T00-00-00Z".into(),
             arch: "arm64".into(),
             engine_stamp: None,
+            rig_mock: None,
+            rig_release_url: None,
             load_cores: None,
         }
     }
@@ -600,6 +746,41 @@ mod tests {
 
     // The rig judgement is WIRED. A gateway measured against itself as the reference is by
     // definition at 100% of the reference, so it must be suppressed rather than published.
+    // A peak with no operating point beside it is not a measurement anyone can reproduce. The first
+    // real EC2 run published rps_max_proxy=46863 with rps_max_proxy_concurrency=null while the very
+    // next field, conc_at_peak, held 116: the measured branch set conc_at_peak and left the PUBLISHED
+    // field at empty_perf()'s default. The two halves of one fact must move together.
+    #[test]
+    fn a_measured_peak_publishes_the_concurrency_it_happened_at() {
+        let mut out = empty_perf();
+        // A reference far ABOVE the observation, so the rig plainly did not set this number and the
+        // verdict is the measured branch. Driving this through judge_cell instead is what made the
+        // first version of this test vacuous: its fixture is always rig-bound.
+        apply_peak_verdict(&mut out, 46_863.0, 116, Measurement::Measured(400_000.0));
+        assert_eq!(out.rps_max_proxy.copied(), Some(46_863), "a gateway-bound peak is published");
+        assert_eq!(
+            out.rps_max_proxy_concurrency.copied(),
+            Some(116),
+            "the published peak must carry the concurrency it happened at"
+        );
+        assert_eq!(out.conc_at_peak.copied(), Some(116));
+    }
+
+    // The other direction: a suppressed peak must not leave its operating point behind, or the board
+    // shows the concurrency of a number it is deliberately refusing to publish.
+    #[test]
+    fn a_suppressed_peak_leaves_no_concurrency_behind() {
+        let mut out = empty_perf();
+        // Reference equal to the observation: the rig, not the gateway, set this.
+        apply_peak_verdict(&mut out, 46_863.0, 116, Measurement::Measured(46_863.0));
+        assert_eq!(out.rps_max_proxy.copied(), None, "a rig-bound peak is suppressed");
+        assert_eq!(
+            out.rps_max_proxy_concurrency.copied(),
+            None,
+            "its operating point must be suppressed with it"
+        );
+    }
+
     #[test]
     fn a_number_at_the_rig_ceiling_is_suppressed_not_published() {
         let dir = tmpdir("rigbound");

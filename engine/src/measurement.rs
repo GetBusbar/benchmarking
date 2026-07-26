@@ -304,6 +304,110 @@ mod tests {
         }
     }
 
+    /// Every reason, so a variant added later cannot quietly escape the invariants below.
+    const ALL: [Absent; 6] = [
+        Absent::NotServed,
+        Absent::NotMeasured,
+        Absent::RigLimited,
+        Absent::SearchExhausted,
+        Absent::Untestable,
+        Absent::HarnessError,
+    ];
+
+    // THE TOKEN AND THE WIRE FORM ARE THE SAME STRING, OR THE BOARD LIES ABOUT ITSELF. `token()` is
+    // hand-written and the serialised form comes from the derive, so nothing but a test holds the
+    // two together: a variant renamed on one side and not the other would publish a reason under one
+    // name in the snapshot and render it under another, and a reader has no way to tell that the
+    // "rig_limited" they are looking at and the "rig_limited" in the file are the same claim.
+    #[test]
+    fn every_reason_serialises_as_exactly_its_published_token_and_reads_back_unchanged() {
+        for reason in ALL {
+            let json = serde_json::to_string(&reason).unwrap_or_default();
+            assert_eq!(
+                json,
+                format!("\"{}\"", reason.token()),
+                "the wire form and the published token must be the same string"
+            );
+            let back: Absent =
+                serde_json::from_str(&json).unwrap_or(Absent::HarnessError);
+            assert_eq!(back, reason, "a reason must survive a snapshot round trip unchanged");
+        }
+    }
+
+    // A snapshot is a struct of measurements, not a bare number, so the field-level behaviour is
+    // what actually ships: an absence must appear as an explicit `null` KEY rather than a missing
+    // one. A dropped key is indistinguishable from a metric the harness does not know about, and a
+    // consumer that fills missing keys with a default is exactly how a zero gets invented for a
+    // measurement that was never taken.
+    #[test]
+    fn an_absent_field_is_an_explicit_null_key_never_an_omitted_one() {
+        #[derive(Serialize, Deserialize, PartialEq, Debug)]
+        struct Row {
+            rps: Measurement<f64>,
+            ceiling: Measurement<u32>,
+        }
+
+        let row = Row {
+            rps: Measurement::Measured(1234.5),
+            ceiling: Measurement::absent_because(Absent::SearchExhausted, "still passing at the top"),
+        };
+        let json = serde_json::to_string(&row).unwrap_or_default();
+        assert_eq!(json, r#"{"rps":1234.5,"ceiling":null}"#);
+
+        // Reading it back keeps the number and refuses to invent one for the null. The REASON does
+        // not survive: it travels beside the value in the sealed envelope rather than inside it, so
+        // a consumer reading only the value can never read a reason as data.
+        let back: Row = match serde_json::from_str(&json) {
+            Ok(r) => r,
+            Err(e) => panic!("a row we just wrote must read back: {e}"),
+        };
+        assert_eq!(back.rps.copied(), Some(1234.5));
+        assert_eq!(back.ceiling.copied(), None, "a null must never read back as a number");
+        assert_eq!(
+            back.ceiling.reason(),
+            Some(&Absent::NotMeasured),
+            "a bare null carries no reason of its own, so it reads back as the weakest one"
+        );
+    }
+
+    // The default is what `..Default::default()` hands out for free to every metric a struct does
+    // not explicitly set. A derive-supplied `Measured(0)` would be the cardinal defect of this whole
+    // engine, granted silently to every field anyone forgets.
+    #[test]
+    fn the_default_measurement_is_absent_and_unmeasured_never_a_zero() {
+        let m: Measurement<f64> = Measurement::default();
+        assert!(!m.is_measured());
+        assert_eq!(m.copied(), None);
+        assert_eq!(m.reason(), Some(&Absent::NotMeasured));
+        assert_eq!(serde_json::to_string(&m).ok(), Some("null".to_string()));
+    }
+
+    // `map` on a measured value must carry the value through the conversion. The absent case is
+    // already pinned above; this is the other half, and without it a `map` that dropped the value
+    // (returning the default absence) would turn every converted metric into a null and look like a
+    // conservative, correct refusal rather than the data loss it is.
+    #[test]
+    fn map_carries_a_measured_value_through_the_conversion() {
+        let m: Measurement<u32> = Measurement::Measured(1300);
+        let mapped = m.map(|v| v as f64 * 2.0);
+        assert_eq!(mapped.copied(), Some(2600.0));
+        assert!(mapped.is_measured());
+    }
+
+    // Suppression without a detail still discards the value and still records why. The value-less
+    // form exists for the cases where the reason alone is the whole story, and it must not become a
+    // quiet no-op that leaves a rig-limited number publishable.
+    #[test]
+    fn suppress_without_a_detail_still_discards_the_value() {
+        for reason in ALL {
+            let m = Measurement::Measured(48_000.0_f64).suppress(reason.clone());
+            assert_eq!(m.copied(), None, "{reason} must discard the value it suppresses");
+            assert_eq!(m.reason(), Some(&reason));
+            assert_eq!(m.detail(), None);
+            assert_eq!(serde_json::to_string(&m).ok(), Some("null".to_string()));
+        }
+    }
+
     #[test]
     fn tokens_are_stable_and_distinct() {
         let all = [

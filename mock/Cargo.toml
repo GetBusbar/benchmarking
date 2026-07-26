@@ -15,3 +15,10 @@ hyper-util = { version = "0.1", features = ["tokio", "server-auto"] }
 http-body-util = "0.1"
 tokio-stream = { version = "0.1", default-features = false }
 
+# TESTS ONLY. The state document this mock serves to the matrix runner is hand-assembled with
+# format!, so the tests that prove it is valid JSON have to actually parse it: a substring assertion
+# would pass on a document a real client cannot read. Not a runtime dependency, so the hot path and
+# the shipped binary are untouched.
+[dev-dependencies]
+serde_json = "1"
+
