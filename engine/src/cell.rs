@@ -47,9 +47,39 @@ pub enum Served {
     /// The gateway served the pairing and it is eligible for measurement.
     Yes,
     /// The gateway answered, deterministically, that it does not serve this pairing.
-    No(Verdict),
+    ///
+    /// CARRIES THE EVIDENCE. A bare verdict said "this gateway does not serve this cell" and
+    /// nothing else, so a field run in which every gateway answered 4xx for a rig-side reason was
+    /// indistinguishable, in the artifact, from thirteen gateways that genuinely support nothing.
+    /// That happened: three gateways published 36 not_configured cells each with no status, no body
+    /// and no note, and the reason was unrecoverable once the boxes were gone.
+    No(Verdict, Evidence),
     /// The rig could not pose the question, so nothing about the gateway was learned.
     Untestable(String),
+}
+
+/// What the gateway actually said when it declined. Small on purpose: a status and the first of the
+/// body, which together separate "it rejected the model", "it rejected the auth" and "it could not
+/// reach the upstream" without carrying a whole response into every cell of a 36 cell grid.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct Evidence {
+    pub status: u16,
+    pub body_snippet: String,
+}
+
+impl Evidence {
+    /// The first `MAX` bytes of a body, on a char boundary so the snippet is always printable.
+    pub fn snippet(body: &str) -> String {
+        const MAX: usize = 200;
+        if body.len() <= MAX {
+            return body.trim().to_string();
+        }
+        let mut end = MAX;
+        while end > 0 && !body.is_char_boundary(end) {
+            end -= 1;
+        }
+        body[..end].trim().to_string()
+    }
 }
 
 impl Served {
@@ -87,8 +117,8 @@ impl CellOutcome {
         Self { id, served: Served::Yes, skipped: None, note: None }
     }
 
-    pub fn not_served(id: CellId, verdict: Verdict, note: impl Into<String>) -> Self {
-        Self { id, served: Served::No(verdict), skipped: Some(Skipped::NotServed), note: Some(note.into()) }
+    pub fn not_served(id: CellId, verdict: Verdict, evidence: Evidence, note: impl Into<String>) -> Self {
+        Self { id, served: Served::No(verdict, evidence), skipped: Some(Skipped::NotServed), note: Some(note.into()) }
     }
 
     pub fn untestable(id: CellId, reason: impl Into<String>) -> Self {
@@ -164,9 +194,9 @@ pub fn walk_grid<P: CellProbe>(
             let served = probe.probe(&id);
             out.push(match served {
                 Served::Yes => CellOutcome::served(id),
-                Served::No(v) => {
+                Served::No(v, _) => {
                     let note = format!("probed and answered {}", v.token());
-                    CellOutcome::not_served(id, v, note)
+                    CellOutcome::not_served(id, v, Evidence::default(), note)
                 }
                 Served::Untestable(r) => CellOutcome::untestable(id, r),
             });
@@ -204,7 +234,7 @@ mod tests {
             } else if id.ingress == "gemini" {
                 Served::Untestable("the rig cannot pose this pairing".into())
             } else {
-                Served::No(Verdict::NotConfigured)
+                Served::No(Verdict::NotConfigured, Evidence::default())
             }
         }
     }
@@ -260,7 +290,7 @@ mod tests {
         let d = dialects();
         let cells = walk_grid(&d, &d, &mut PerCell, Deadline::unlimited());
         let untestable = cells.iter().find(|c| matches!(c.served, Served::Untestable(_))).expect("fixture has one");
-        assert!(!matches!(untestable.served, Served::No(_)));
+        assert!(!matches!(untestable.served, Served::No(..)));
         assert!(untestable.note.is_some(), "an untestable cell must say why");
     }
 
@@ -268,8 +298,8 @@ mod tests {
     fn a_not_served_cell_carries_the_verdict_that_produced_it() {
         let d = dialects();
         let cells = walk_grid(&d, &d, &mut PerCell, Deadline::unlimited());
-        let ns = cells.iter().find(|c| matches!(c.served, Served::No(_))).expect("fixture has one");
-        assert_eq!(ns.served, Served::No(Verdict::NotConfigured));
+        let ns = cells.iter().find(|c| matches!(c.served, Served::No(..))).expect("fixture has one");
+        assert_eq!(ns.served, Served::No(Verdict::NotConfigured, Evidence::default()));
         assert!(ns.note.as_deref().unwrap_or_default().contains("not_configured"));
     }
 

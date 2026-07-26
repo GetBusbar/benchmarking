@@ -78,12 +78,15 @@ pub fn probe_cell(cfg: &RunConfig, id: &CellId, mock_healthy: bool) -> Served {
     match http::post_json(cfg.gateway_addr, &path, body.as_bytes(), &headers_for(cfg, ing, &id.egress), cfg.probe_timeout) {
         Outcome::Response(r) if (200..300).contains(&r.status) => Served::Yes,
         Outcome::Response(r) => {
+            // WHAT IT ACTUALLY SAID. Without this a declined cell is a bare verdict, and a whole
+            // field answering 4xx for one rig-side reason reads as every gateway supporting nothing.
+            let evidence = crate::cell::Evidence { status: r.status, body_snippet: crate::cell::Evidence::snippet(&String::from_utf8_lossy(r.body())) };
             // The verdict decides which of the two this is, and they are NOT interchangeable.
             // NotConfigured is the gateway's own answer about the pairing. NotVerified means the rig
             // could not get a fair reading, so nothing was learned about the gateway, and recording
             // it as "does not serve" would convict on the rig's failure.
             match persistent_transient_verdict(Observation { status: Some(r.status), mock_healthy }) {
-                Verdict::NotConfigured => Served::No(Verdict::NotConfigured),
+                Verdict::NotConfigured => Served::No(Verdict::NotConfigured, evidence),
                 Verdict::NotVerified => Served::Untestable(format!(
                     "status {} observed, but the rig could not confirm itself, so this says nothing about the gateway",
                     r.status
@@ -333,9 +336,9 @@ pub fn run_grid_with(cfg: &RunConfig, lo: u32, hi: u32, metrics: &[&dyn metric::
             };
             let outcome = match served {
                 Served::Yes => CellOutcome::served(id),
-                Served::No(v) => {
-                    let n = format!("probed and answered {}", v.token());
-                    CellOutcome::not_served(id, v, n)
+                Served::No(v, ev) => {
+                    let n = format!("probed and answered {} (HTTP {})", v.token(), ev.status);
+                    CellOutcome::not_served(id, v, ev, n)
                 }
                 Served::Untestable(r) => CellOutcome::untestable(id, r),
             };
@@ -402,7 +405,7 @@ mod tests {
         let gw = serve(404);
         let cfg = cfg_for(gw, gw);
         let s = probe_cell(&cfg, &CellId::new("openai", "openai"), true);
-        assert!(matches!(s, Served::No(_)), "got {s:?}");
+        assert!(matches!(s, Served::No(..)), "got {s:?}");
     }
 
     // The SAME status with an unhealthy rig says nothing about the gateway, so it must not be
@@ -412,7 +415,7 @@ mod tests {
         let gw = serve(404);
         let cfg = cfg_for(gw, gw);
         let s = probe_cell(&cfg, &CellId::new("openai", "openai"), false);
-        assert!(!matches!(s, Served::No(_)), "an unconfirmed rig cannot convict the gateway: {s:?}");
+        assert!(!matches!(s, Served::No(..)), "an unconfirmed rig cannot convict the gateway: {s:?}");
     }
 
     // Nothing listening is never the gateway's fault: it may never have been reached.

@@ -512,11 +512,22 @@ pub fn run_suite_with(
             last_egress = Some(eg.clone());
         }
 
-        let (served, reason) = match &result.outcome.served {
-            Served::Yes => (RecServed::Bool(true), None),
-            Served::No(v) => (RecServed::Status(v.token().to_string()), Some(v.token().to_string())),
+        // THE EVIDENCE FOR THE VERDICT, not just the verdict. `status` and `body_snippet` were left
+        // at their defaults on every cell, so an artifact could say "does not serve" 36 times over
+        // and not say what the gateway answered. A whole field declining for one rig-side reason
+        // then looks exactly like a field of gateways that support nothing.
+        let (served, reason, status, snippet) = match &result.outcome.served {
+            Served::Yes => (RecServed::Bool(true), None, String::new(), String::new()),
+            Served::No(v, ev) => (
+                RecServed::Status(v.token().to_string()),
+                Some(v.token().to_string()),
+                ev.status.to_string(),
+                ev.body_snippet.clone(),
+            ),
             // A rig limit is NOT the gateway refusing. It keeps its own label all the way out.
-            Served::Untestable(r) => (RecServed::Status("untestable".into()), Some(r.clone())),
+            Served::Untestable(r) => {
+                (RecServed::Status("untestable".into()), Some(r.clone()), String::new(), String::new())
+            }
         };
         if matches!(served, RecServed::Bool(true)) {
             any_served = true;
@@ -541,6 +552,9 @@ pub fn run_suite_with(
             served,
             reason,
             path: ing.parse::<Dialect>().map(|d| d.path(&cfg.manifest.model)).unwrap_or_default(),
+            status,
+            body_snippet: snippet,
+            verdict_note: result.outcome.note.clone().unwrap_or_default(),
             perf,
             memory: result.metrics.as_ref().map(|m| cell_memory(m, result.series.as_ref())),
             stream: result.metrics.as_ref().map(cell_stream),
@@ -823,6 +837,43 @@ mod tests {
                 );
             }
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // A DECLINED CELL MUST SAY WHAT IT WAS TOLD.
+    //
+    // The published cell left status, body_snippet and verdict_note at their defaults, so a
+    // not_configured verdict arrived with no evidence at all. A field run then published three
+    // gateways with thirty-six declined cells each and nothing to explain any of them, and once the
+    // boxes were terminated the reason was gone for good. A rig-side failure that makes every probe
+    // return 4xx is indistinguishable, in that artifact, from a gateway that genuinely supports
+    // nothing, which is the single most damaging thing this board can get wrong.
+    #[test]
+    fn a_declined_cell_publishes_the_status_and_body_it_was_declined_with() {
+        let dir = tmpdir("declined");
+        // The gateway declines every probe while the MOCK is healthy. Both matter: a 404 from the
+        // gateway with a dead mock is Untestable, because nothing about the gateway was learned, and
+        // only a healthy rig turns a refusal into the gateway's own answer.
+        let gw = serve(404);
+        let mock = serve(200);
+        let mut cfg = cfg_for(&dir, gw);
+        cfg.mock_addr = mock;
+        let paths = run_suite_with(&cfg, gw, &[]).expect("a declining gateway still writes a row");
+        let text = std::fs::read_to_string(&paths.current).expect("current file");
+        let back: ResultSnapshot = serde_json::from_str(&text).expect("its own output must parse");
+        let cell = back
+            .matrix
+            .upstreams
+            .values()
+            .flat_map(|u| u.cells.values())
+            .find(|c| matches!(&c.served, RecServed::Status(v) if v == "not_configured"))
+            .expect("a healthy rig plus a refusing gateway is the gateway's own answer");
+        assert_eq!(cell.status, "404", "the observed status must reach the artifact");
+        assert!(
+            cell.verdict_note.contains("404"),
+            "the note must name what was observed, got {:?}",
+            cell.verdict_note
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
