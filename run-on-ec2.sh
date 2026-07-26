@@ -774,6 +774,10 @@ bench_gateway_once() {
       export CORES=0-3 LOADCORES=4-9 MOCKCORES=10-15
       export CAP_MIB=24000
       export SUITES=\"$ALL_SUITES\"
+      # Narrow the grid for HARNESS iteration. The grid is dialects x dialects, so one dialect is one
+      # cell and a debugging run costs seconds instead of the full 6x6. Unset for a real run, which is
+      # what a field measurement always uses.
+      export OTB_DIALECTS=\"${OTB_DIALECTS:-}\" OTB_MIN_CONC=\"${OTB_MIN_CONC:-}\" OTB_MAX_CONC=\"${OTB_MAX_CONC:-}\"
       sudo -n true 2>/dev/null && sudo chmod 666 /var/run/docker.sock || true
       # PULL THE RIG. Nothing is built here.
       #
