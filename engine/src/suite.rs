@@ -140,11 +140,29 @@ pub fn run_suite(cfg: &SuiteConfig, gateway_addr: SocketAddr) -> Result<Paths, S
 
     let mut upstreams: HashMap<String, Upstream> = HashMap::new();
     let mut any_served = false;
+    let mut last_egress: Option<String> = None;
+    let mut written: Option<Paths> = None;
 
+    // WRITTEN INCREMENTALLY, after every egress column.
+    //
+    // The first version built the whole grid in memory and wrote once at the end. A run that was
+    // interrupted, and these run for hours on a box with a hard self-termination timer, therefore
+    // lost every cell it had successfully measured. The smoke run proved it: it hit its deadline and
+    // produced no artifact at all despite having measured real cells. Partial progress that survives
+    // is worth more than a complete result that might not arrive, and the promote guard already
+    // refuses to let a thinner snapshot overwrite a fuller one, so re-writing is safe by
+    // construction rather than by care here.
     for result in run::run_grid(&rc, cfg.min_conc, cfg.max_conc) {
         let id = &result.outcome.id;
         let ing = id.ingress.clone();
         let eg = id.egress.clone();
+
+        if last_egress.as_deref() != Some(eg.as_str()) {
+            if last_egress.is_some() {
+                written = Some(flush(cfg, &upstreams, any_served)?);
+            }
+            last_egress = Some(eg.clone());
+        }
 
         let (served, reason) = match &result.outcome.served {
             Served::Yes => (RecServed::Bool(true), None),
@@ -176,6 +194,17 @@ pub fn run_suite(cfg: &SuiteConfig, gateway_addr: SocketAddr) -> Result<Paths, S
             .insert(ing, cell);
     }
 
+    // The final write always happens, so a grid with a single egress column is not lost.
+    let _ = written;
+    flush(cfg, &upstreams, any_served)
+}
+
+/// Build the record from what has been measured so far and write it.
+fn flush(
+    cfg: &SuiteConfig,
+    upstreams: &HashMap<String, Upstream>,
+    any_served: bool,
+) -> Result<Paths, SnapshotError> {
     let snap = ResultSnapshot {
         schema_version: 1,
         gateway: cfg.manifest.name.clone(),
@@ -186,7 +215,7 @@ pub fn run_suite(cfg: &SuiteConfig, gateway_addr: SocketAddr) -> Result<Paths, S
             gateway: cfg.manifest.name.clone(),
             served: any_served,
             cell_perf_sweep: true,
-            upstreams,
+            upstreams: upstreams.clone(),
             ..Default::default()
         },
         ..Default::default()
