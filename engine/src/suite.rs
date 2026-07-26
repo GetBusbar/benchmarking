@@ -33,6 +33,9 @@ pub struct SuiteConfig {
     /// Stamped into the artifact so a number can always be traced to the engine that produced it.
     pub measured_at: String,
     pub arch: String,
+    /// The CPU list the load generator is pinned to. The gateway, the generator and the mock each
+    /// get their own cores, and that split is what makes two gateways comparable at all.
+    pub load_cores: Option<String>,
 }
 
 /// A cell's throughput, already judged against the rig.
@@ -68,6 +71,7 @@ fn rig_ceiling(cfg: &SuiteConfig, dialect: Dialect, at_conc: u32) -> Measurement
         dialects: vec![dialect],
         sweep_duration_s: cfg.sweep_duration_s,
         probe_timeout: Duration::from_secs(10),
+        load_cores: cfg.load_cores.clone(),
     };
     let id = crate::cell::CellId::new(dialect.as_str(), dialect.as_str());
     // A single point AT THE WINNER's concurrency, not a search: the reference must be taken where
@@ -131,6 +135,7 @@ pub fn run_suite(cfg: &SuiteConfig, gateway_addr: SocketAddr) -> Result<Paths, S
         dialects: cfg.dialects.clone(),
         sweep_duration_s: cfg.sweep_duration_s,
         probe_timeout: Duration::from_secs(10),
+        load_cores: cfg.load_cores.clone(),
     };
 
     let mut upstreams: HashMap<String, Upstream> = HashMap::new();
@@ -241,6 +246,7 @@ mod tests {
             max_conc: 2,
             measured_at: "2026-07-26T00-00-00Z".into(),
             arch: "arm64".into(),
+            load_cores: None,
         }
     }
 
