@@ -70,7 +70,7 @@ impl<'p, P: Probe> Search<'p, P> {
 
 /// The result of a gate-ceiling bisection: `Measured(n)` iff `n` passes and `n+1` was measured and
 /// failed (or `n == 0`, the measured "nothing sustains this gate" answer). `Absent(SearchExhausted)`
-/// iff the top of the range still passed -- the true ceiling is at least `hi`, but that is a lower
+/// iff the top of the range still passed -- the true ceiling is at least `max_conc`, but that is a lower
 /// bound the search chose, not a ceiling the gate proved, so it is never published as one.
 #[derive(Debug, Clone, Serialize)]
 pub struct BisectResult {
@@ -78,14 +78,14 @@ pub struct BisectResult {
     pub points: Vec<ProbedPoint>,
 }
 
-/// Bisect `[lo, hi]` to the true integer ceiling of a pass/fail gate assumed monotone in
-/// concurrency (everything at or below the ceiling passes, everything above fails). `lo` and `hi`
+/// Bisect `[min_conc, max_conc]` to the true integer ceiling of a pass/fail gate assumed monotone in
+/// concurrency (everything at or below the ceiling passes, everything above fails). `min_conc` and `max_conc`
 /// are normalised (swapped) if given reversed.
-pub fn bisect_ceiling<P: Probe>(probe: &mut P, lo: u32, hi: u32) -> BisectResult {
-    let (lo, hi) = if lo <= hi { (lo, hi) } else { (hi, lo) };
+pub fn bisect_ceiling<P: Probe>(probe: &mut P, min_conc: u32, max_conc: u32) -> BisectResult {
+    let (min_conc, max_conc) = if min_conc <= max_conc { (min_conc, max_conc) } else { (max_conc, min_conc) };
     let mut s = Search::new(probe);
 
-    let lo_sample = match s.sample(lo) {
+    let lo_sample = match s.sample(min_conc) {
         Some(v) => v,
         None => return BisectResult { ceiling: Measurement::absent(Absent::NotMeasured), points: s.points },
     };
@@ -95,7 +95,7 @@ pub fn bisect_ceiling<P: Probe>(probe: &mut P, lo: u32, hi: u32) -> BisectResult
         return BisectResult { ceiling: Measurement::Measured(0), points: s.points };
     }
 
-    let hi_sample = match s.sample(hi) {
+    let hi_sample = match s.sample(max_conc) {
         Some(v) => v,
         None => {
             // Interrupted with a confirmed pass already in hand. The highest rung KNOWN to sustain
@@ -106,15 +106,15 @@ pub fn bisect_ceiling<P: Probe>(probe: &mut P, lo: u32, hi: u32) -> BisectResult
         }
     };
     if hi_sample.passed {
-        // No failure was ever observed inside the range: publishing hi would report our own search
+        // No failure was ever observed inside the range: publishing max_conc would report our own search
         // bound as the gate's ceiling.
-        let detail = format!("c={hi} still passes at the top of the search range; the true ceiling is at least {hi}");
+        let detail = format!("c={max_conc} still passes at the top of the search range; the true ceiling is at least {max_conc}");
         return BisectResult { ceiling: Measurement::absent_because(Absent::SearchExhausted, detail), points: s.points };
     }
 
     // Invariant from here: a passes, b fails. Bisect to +-1; b stays the recorded proof of failure.
-    let mut a = lo;
-    let mut b = hi;
+    let mut a = min_conc;
+    let mut b = max_conc;
     while b - a > 1 {
         let mid = a + (b - a) / 2;
         match s.sample(mid) {
@@ -195,7 +195,7 @@ fn eff(sample: &Sample) -> f64 {
 }
 
 /// Doubles (or halves) away from `from_c` (already known to beat `base_v`) while the curve keeps
-/// rising, guarding `bound`. Returns `(bracket_lo, best_c, best_v, bracket_hi, exhausted)`, or
+/// rising, guarding `bound`. Returns `(bracket_low, best_c, best_v, bracket_high, exhausted)`, or
 /// `None` if the probe was interrupted. `exhausted = true` means the ramp reached `bound` while
 /// still rising: only a lower bound, no interior turnover.
 #[allow(clippy::too_many_arguments)]
@@ -223,8 +223,8 @@ fn ramp<P: Probe>(
         } else {
             // Turned over: bracket [edge, next] contains the peak, in numeric order regardless of
             // which way the ramp walked.
-            let (lo, hi) = if upward { (edge, next) } else { (next, edge) };
-            return Some((lo, best_c, best_v, hi, false));
+            let (min_conc, max_conc) = if upward { (edge, next) } else { (next, edge) };
+            return Some((min_conc, best_c, best_v, max_conc, false));
         }
     }
 }
@@ -235,28 +235,28 @@ impl<'p, P: Probe> Search<'p, P> {
     }
 }
 
-/// Search `[lo, hi]` for the peak of a curve assumed unimodal in concurrency (rises then falls),
+/// Search `[min_conc, max_conc]` for the peak of a curve assumed unimodal in concurrency (rises then falls),
 /// starting at `start` (clamped into range) and learning direction before ramping, so a peak either
 /// above or below `start` is found by the same search. `tol` bounds the final refine bracket's
 /// width (an absolute concurrency count, not scaled to the bracket like the shell original's `a/4`
 /// heuristic). NOTE: the RPS lane's relative tolerance existed to stop a LOW-concurrency peak
 /// being left unresolved, so a caller searching a low-concurrency peak must pass a small `tol`
-/// rather than inherit a large default. `lo`/`hi` are normalised if given reversed.
-pub fn peak_max<P: Probe>(probe: &mut P, lo: u32, hi: u32, start: u32, tol: u32) -> PeakResult {
-    let (lo, hi) = if lo <= hi { (lo, hi) } else { (hi, lo) };
+/// rather than inherit a large default. `min_conc`/`max_conc` are normalised if given reversed.
+pub fn peak_max<P: Probe>(probe: &mut P, min_conc: u32, max_conc: u32, start: u32, tol: u32) -> PeakResult {
+    let (min_conc, max_conc) = if min_conc <= max_conc { (min_conc, max_conc) } else { (max_conc, min_conc) };
     let mut s = Search::new(probe);
-    let start = start.clamp(lo, hi);
+    let start = start.clamp(min_conc, max_conc);
 
-    let start_v = match s.eff(start) {
+    let start_value = match s.eff(start) {
         Some(v) => v,
         None => return interrupted(s),
     };
 
-    let up_c = if start < hi { start.saturating_mul(2).min(hi) } else { start };
-    let dn_c = if start > lo { (start / 2).max(lo) } else { start };
+    let above_start = if start < max_conc { start.saturating_mul(2).min(max_conc) } else { start };
+    let below_start = if start > min_conc { (start / 2).max(min_conc) } else { start };
 
-    let up_v = if up_c != start {
-        match s.eff(up_c) {
+    let above_value = if above_start != start {
+        match s.eff(above_start) {
             Some(v) => Some(v),
             None => return interrupted(s),
         }
@@ -264,38 +264,38 @@ pub fn peak_max<P: Probe>(probe: &mut P, lo: u32, hi: u32, start: u32, tol: u32)
         None
     };
 
-    let (bracket_lo, best_c, best_v, bracket_hi, exhausted) = if let Some(uv) = up_v.filter(|v| *v > start_v) {
-        match ramp(&mut s, hi, start, up_c, uv, true) {
+    let (bracket_low, best_c, best_v, bracket_high, exhausted) = if let Some(uv) = above_value.filter(|v| *v > start_value) {
+        match ramp(&mut s, max_conc, start, above_start, uv, true) {
             Some(t) => t,
             None => return interrupted(s),
         }
     } else {
-        let dn_v = if dn_c != start {
-            match s.eff(dn_c) {
+        let below_value = if below_start != start {
+            match s.eff(below_start) {
                 Some(v) => Some(v),
                 None => return interrupted(s),
             }
         } else {
             None
         };
-        if let Some(dv) = dn_v.filter(|v| *v > start_v) {
-            match ramp(&mut s, lo, start, dn_c, dv, false) {
+        if let Some(dv) = below_value.filter(|v| *v > start_value) {
+            match ramp(&mut s, min_conc, start, below_start, dv, false) {
                 Some(t) => t,
                 None => return interrupted(s),
             }
-        } else if start_v == 0.0 {
+        } else if start_value == 0.0 {
             // START FAILED THE GATE, so keep halving until SOMETHING passes, and then open the
             // whole range below it to the refine. Stepping down only once (the bug this replaces)
             // strands the search above a p99 cliff whenever `start` sits several halvings past it,
             // for instance when a stale adaptive prior seeded it high: every later probe stays in
             // the failing region and the true peak below is never sampled at all. The shell fixed
             // exactly this once already (its audit R2-H1) and its comment is explicit that the low
-            // bound must reopen to `lo`, not to c/2, or the refine bracket clips the real peak out.
-            let mut c = dn_c;
+            // bound must reopen to `min_conc`, not to c/2, or the refine bracket clips the real peak out.
+            let mut c = below_start;
             let mut found = None;
             loop {
-                // PROBE FIRST, THEN STEP. The guard used to be `while c > lo`, which exits the moment
-                // c reaches lo and so never probes lo itself: the one point this branch exists to
+                // PROBE FIRST, THEN STEP. The guard used to be `while c > min_conc`, which exits the moment
+                // c reaches min_conc and so never probes min_conc itself: the one point this branch exists to
                 // reopen. A gate that passes only at the very bottom of the range was then never
                 // sampled at all, and the search returned "no concurrency passed" about a region it
                 // had not looked at.
@@ -307,20 +307,20 @@ pub fn peak_max<P: Probe>(probe: &mut P, lo: u32, hi: u32, start: u32, tol: u32)
                     found = Some((c, v));
                     break;
                 }
-                if c <= lo {
+                if c <= min_conc {
                     break;
                 }
-                c = (c / 2).max(lo);
+                c = (c / 2).max(min_conc);
             }
             match found {
-                // Reopen the bracket all the way down to `lo`: the true peak can sit anywhere below
+                // Reopen the bracket all the way down to `min_conc`: the true peak can sit anywhere below
                 // the first rung that passed.
-                Some((c, v)) => (lo, c, v, start, false),
-                None => (lo, start, start_v, up_c, false),
+                Some((c, v)) => (min_conc, c, v, start, false),
+                None => (min_conc, start, start_value, above_start, false),
             }
         } else {
             // Neither neighbour beats `start`: it is a local (possibly flat) max candidate already.
-            (dn_c, start, start_v, up_c, false)
+            (below_start, start, start_value, above_start, false)
         }
     };
 
@@ -332,31 +332,31 @@ pub fn peak_max<P: Probe>(probe: &mut P, lo: u32, hi: u32, start: u32, tol: u32)
     }
 
     // Refine the bracketed interior maximum (ternary-style unimodal search) to within `tol`.
-    let mut a = bracket_lo;
+    let mut a = bracket_low;
     let mut b = best_c;
-    let mut top = bracket_hi;
-    let mut pr = best_v;
+    let mut top = bracket_high;
+    let mut best_value = best_v;
     while top.saturating_sub(a) > tol {
         let x = if b - a >= top - b { a + (b - a) / 2 } else { b + (top - b) / 2 };
         if x == a || x == b || x == top {
             break;
         }
-        let xr = match s.eff(x) {
+        let midpoint_value = match s.eff(x) {
             Some(v) => v,
             None => return interrupted(s),
         };
         if x < b {
-            if xr > pr {
+            if midpoint_value > best_value {
                 top = b;
                 b = x;
-                pr = xr;
+                best_value = midpoint_value;
             } else {
                 a = x;
             }
-        } else if xr > pr {
+        } else if midpoint_value > best_value {
             a = b;
             b = x;
-            pr = xr;
+            best_value = midpoint_value;
         } else {
             top = x;
         }
@@ -511,7 +511,7 @@ mod tests {
     }
 
     /// A gate that passes ONLY at the very bottom of the range, with a start well above it that
-    /// fails. This is the case the `while c > lo` guard could never reach: it stepped down to `lo`
+    /// fails. This is the case the `while c > min_conc` guard could never reach: it stepped down to `min_conc`
     /// and then exited before probing it.
     struct PassesOnlyAtFloor {
         floor: u32,
@@ -524,7 +524,7 @@ mod tests {
     }
 
     // RED-BEFORE. The down-ramp is entered when the start fails the gate, and its whole purpose is
-    // to reopen the bracket all the way to `lo`. With the old guard it never probed `lo`, so a
+    // to reopen the bracket all the way to `min_conc`. With the old guard it never probed `min_conc`, so a
     // gateway whose only passing region sat at the floor was reported as passing nowhere: a claim
     // about a region the search had not looked at.
     #[test]
@@ -625,31 +625,31 @@ mod proptests {
     }
 
     proptest! {
-        // Any monotone pass/fail curve with a true ceiling inside [lo, hi) lands on exactly that
+        // Any monotone pass/fail curve with a true ceiling inside [min_conc, max_conc) lands on exactly that
         // ceiling, and the recorded proof is ceiling+1, measured and failing.
         #[test]
         fn bisect_lands_on_any_true_ceiling(ceiling in 1u32..999u32) {
-            let lo = 1u32;
-            let hi = 1000u32;
+            let min_conc = 1u32;
+            let max_conc = 1000u32;
             let mut probe = MonotoneGate { ceiling };
-            let r = bisect_ceiling(&mut probe, lo, hi);
+            let r = bisect_ceiling(&mut probe, min_conc, max_conc);
             prop_assert_eq!(r.ceiling.copied(), Some(ceiling));
             prop_assert!(r.points.iter().any(|p| p.concurrency == ceiling + 1 && !p.passed));
         }
 
         // A curve that still passes at the top of the range never yields a number.
         #[test]
-        fn bisect_top_passing_is_always_exhausted(lo in 1u32..100u32, hi in 100u32..10_000u32) {
+        fn bisect_top_passing_is_always_exhausted(min_conc in 1u32..100u32, max_conc in 100u32..10_000u32) {
             let mut probe = AlwaysPasses;
-            let r = bisect_ceiling(&mut probe, lo, hi);
+            let r = bisect_ceiling(&mut probe, min_conc, max_conc);
             prop_assert_eq!(r.ceiling.copied(), None);
             prop_assert_eq!(r.ceiling.reason(), Some(&Absent::SearchExhausted));
         }
 
-        // A unimodal curve with its maximum strictly inside [lo, hi] is found within a documented
+        // A unimodal curve with its maximum strictly inside [min_conc, max_conc] is found within a documented
         // tolerance, regardless of which side of `start` it sits on, and is never flagged exhausted.
         //
-        // `peak_c` is capped well short of `hi`: a doubling ramp only ever samples two points per
+        // `peak_c` is capped well short of `max_conc`: a doubling ramp only ever samples two points per
         // step, so with the peak too close to the range edge the endpoint sample can still read
         // higher than the previous rung even though the true peak (unsampled, between the two) has
         // already passed. That is a real property of doubling search, ported faithfully from the
@@ -692,9 +692,9 @@ mod proptests {
             }
 
             let mut p2 = Interrupter { fires_after, calls: 0 };
-            let pr = peak_max(&mut p2, 1, 1000, 100, 4);
-            if pr.peak.reason() == Some(&Absent::NotMeasured) {
-                prop_assert_eq!(pr.peak.copied(), None);
+            let best_value = peak_max(&mut p2, 1, 1000, 100, 4);
+            if best_value.peak.reason() == Some(&Absent::NotMeasured) {
+                prop_assert_eq!(best_value.peak.copied(), None);
             }
         }
     }

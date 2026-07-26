@@ -135,8 +135,14 @@ fn read_line(stream: &mut TcpStream, deadline: Instant) -> ReadOutcome {
 
 /// Reads exactly `n` bytes (a known Content-Length or chunk body), honouring `deadline`.
 fn read_exact_deadline(stream: &mut TcpStream, deadline: Instant, n: usize) -> ReadOutcome {
-    let mut buf = vec![0u8; 0];
-    buf.reserve(n);
+    // NEVER RESERVE WHAT THE PEER ASKED FOR. `n` arrives from the gateway under test, as a
+    // Content-Length header or a chunk-size line. A declared length of usize::MAX makes
+    // Vec::reserve panic on capacity overflow, and a merely enormous one reaches the allocator,
+    // whose failure handler calls abort() unconditionally: not a panic, so nothing can catch it,
+    // and the eight-hour run dies with no operator watching. The one component we are measuring is
+    // the one we must not trust with our address space. Grow as bytes actually arrive instead, and
+    // let the existing body cap reject an over-long response as malformed.
+    let mut buf: Vec<u8> = Vec::with_capacity(n.min(64 * 1024));
     while buf.len() < n {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {

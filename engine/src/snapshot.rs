@@ -38,6 +38,9 @@ pub enum SnapshotError {
     /// path. Refusing here is the whole point: a boot failure that served nothing must never overwrite
     /// a prior run that served most of the grid just because it happened to run later.
     PromoteGuard { existing_served: usize, incoming_served: usize },
+    /// A value that becomes part of a path is not a safe filename component. Refused rather than
+    /// sanitised: silently rewriting a name would publish one gateway's result under another's.
+    UnsafeName { what: &'static str, raw: String },
 }
 
 impl std::fmt::Display for SnapshotError {
@@ -51,6 +54,10 @@ impl std::fmt::Display for SnapshotError {
                 f,
                 "refusing to overwrite a snapshot that served {existing_served} cells with one that served only {incoming_served}"
             ),
+            SnapshotError::UnsafeName { what, raw } => write!(
+                f,
+                "{what} {raw:?} is not a safe filename component, refusing to build a path from it"
+            ),
         }
     }
 }
@@ -60,7 +67,7 @@ impl std::error::Error for SnapshotError {
         match self {
             SnapshotError::Io { source, .. } => Some(source),
             SnapshotError::Json(source) => Some(source),
-            SnapshotError::PromoteGuard { .. } => None,
+            SnapshotError::PromoteGuard { .. } | SnapshotError::UnsafeName { .. } => None,
         }
     }
 }
@@ -145,9 +152,31 @@ fn read_existing(path: &Path) -> Result<Option<ResultSnapshot>, SnapshotError> {
 /// `SnapshotError::PromoteGuard` and writes NEITHER file: a rewrite of the promote guard's own
 /// rejection into a historical copy would still be publishing the worse result, just under a
 /// different name.
+/// A filename component the caller supplied, made safe to join onto a directory.
+///
+/// `PathBuf::join` has a sharp edge: an ABSOLUTE argument replaces the base entirely, and `..`
+/// traverses out of it. Both the gateway name and the timestamp reach the path from data, so an
+/// unvalidated one could write outside the results tree while the call still reports success and
+/// looks like a normal publish in the log. Anything that is not a plain, safe component is rejected
+/// rather than sanitised: silently rewriting a name would publish one gateway's result under
+/// another's, which is worse than refusing.
+fn safe_component(raw: &str, what: &'static str) -> Result<String, SnapshotError> {
+    let ok = !raw.is_empty()
+        && raw.len() <= 128
+        && raw != "."
+        && raw != ".."
+        && raw.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        && !raw.starts_with('.');
+    if ok {
+        Ok(raw.to_string())
+    } else {
+        Err(SnapshotError::UnsafeName { what, raw: raw.to_string() })
+    }
+}
+
 pub fn write_snapshot(dir: &Path, snapshot: &ResultSnapshot) -> Result<Paths, SnapshotError> {
     let incoming_served = served_cell_count(&snapshot.matrix);
-    let current_path = dir.join(format!("{}.json", snapshot.gateway));
+    let current_path = dir.join(format!("{}.json", safe_component(&snapshot.gateway, "gateway")?));
 
     if let Some(existing) = read_existing(&current_path)? {
         let existing_served = served_cell_count(&existing.matrix);
@@ -160,7 +189,7 @@ pub fn write_snapshot(dir: &Path, snapshot: &ResultSnapshot) -> Result<Paths, Sn
     // write time: re-writing the same measurement later (a retry, a re-publish) must not invent a new
     // measurement instant just because the write happened again.
     let ts_safe = snapshot.measured_at.replace(':', "-");
-    let historical_path = dir.join(format!("result_{}_{ts_safe}.json", snapshot.gateway));
+    let historical_path = dir.join(format!("result_{}_{}.json", safe_component(&snapshot.gateway, "gateway")?, safe_component(&ts_safe, "measured_at")?));
 
     let mut body =
         serde_json::to_string_pretty(snapshot).map_err(SnapshotError::Json)?;
@@ -176,6 +205,27 @@ pub fn write_snapshot(dir: &Path, snapshot: &ResultSnapshot) -> Result<Paths, Sn
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // A name that is not a safe path component is REFUSED, not sanitised. PathBuf::join replaces the
+    // base entirely when handed an absolute path, and traverses out of it on "..", so an unvalidated
+    // gateway name or timestamp could write outside the results tree while the call reported success.
+    #[test]
+    fn a_name_that_would_escape_the_directory_is_refused() {
+        for bad in ["/etc/cron.d/evil", "../../../etc/passwd", "..", ".", "", ".hidden", "a/b", "a\\b"] {
+            assert!(
+                safe_component(bad, "gateway").is_err(),
+                "{bad:?} must not be accepted as a filename component"
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_names_and_timestamps_are_accepted() {
+        for good in ["gw", "gw-two", "gw_two", "2026-07-26T00-00-00Z", "a.b"] {
+            assert!(safe_component(good, "gateway").is_ok(), "{good:?} should be accepted");
+        }
+    }
+
     use crate::record::{Cell, ConfigFiles, Upstream};
     use std::collections::HashMap;
 
