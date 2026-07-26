@@ -16,6 +16,7 @@
 // The walk is separated from the syscalls by the `ProcSource` trait so the summing logic (this
 // file's actual content) is tested against fixture text, never against a real process tree.
 
+use crate::manifest::Runtime;
 use crate::measurement::{Absent, Measurement};
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -146,6 +147,155 @@ pub fn rss_tree_mib(root_pid: u32) -> Measurement<f64> {
 /// so it cannot miss a sub-interval spike between polls.
 pub fn hwm_tree_mib(root_pid: u32) -> Measurement<f64> {
     sum_field_mib(&RealProc, root_pid, "VmHWM")
+}
+
+// ── the bridge from a declared identity to a process tree ────────────────────────────────────────
+//
+// THE MISSING LINK. Everything above sums a tree from a root pid, and the manifest declares an
+// identity (`Runtime`), and until now nothing connected the two - which is why this whole module had
+// zero callers while memory is the board's headline metric. The deleted shell had this as
+// `container_rss_mib` / `native_rss_mib`, and those functions are precisely what every
+// `gateways/*/gateway.sh` still calls into thin air.
+//
+// It resolves through the SAME `Runtime::identity()` the launcher's `--name` and the stop path take,
+// so the tree measured here cannot describe a different process than the one that was started or the
+// one that gets stopped. That is the defect `manifest.rs` documents as having corrupted published
+// numbers: three manifests read a single pid for RSS beside a whole tree for HWM.
+//
+// A resolution failure is an ABSENCE WITH A REASON, never a zero and never a default pid. Reading
+// memory off the wrong process is worse than reading none.
+
+/// How the root pid is discovered, abstracted so the resolution logic is testable without docker or
+/// a live process.
+pub trait PidSource {
+    /// The container runtime's reported root pid for a container name.
+    fn docker_pid(&self, container: &str) -> Option<u32>;
+    /// The oldest pid whose command line matches, which is the parent of any workers it forked.
+    fn matching_pid(&self, pattern: &str) -> Option<u32>;
+}
+
+/// The real lookups: the container runtime for a container, a command-line match for a native
+/// process. Kept thin; the logic worth testing is in `root_pid_from`.
+pub struct RealPids;
+
+impl PidSource for RealPids {
+    fn docker_pid(&self, container: &str) -> Option<u32> {
+        let out = std::process::Command::new("docker")
+            .args(["inspect", "-f", "{{.State.Pid}}", container])
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        // A stopped container reports pid 0. That is not a process, and summing a tree from it would
+        // read whatever pid 0 resolves to rather than nothing.
+        match String::from_utf8_lossy(&out.stdout).trim().parse::<u32>() {
+            Ok(0) | Err(_) => None,
+            Ok(pid) => Some(pid),
+        }
+    }
+
+    fn matching_pid(&self, pattern: &str) -> Option<u32> {
+        let out = std::process::Command::new("pgrep").args(["-f", pattern]).output().ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        // `pgrep -f` lists newest-first on some systems and oldest-first on others, so take the
+        // NUMERICALLY smallest rather than the first line: the parent is started before the workers
+        // it forks, and summing from a worker would silently exclude its siblings and the parent.
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter_map(|l| l.trim().parse::<u32>().ok())
+            .filter(|p| *p != 0)
+            .min()
+    }
+}
+
+/// The root of the gateway's process tree, from the one identity the manifest declares.
+pub fn root_pid(runtime: &Runtime) -> Measurement<u32> {
+    root_pid_from(&RealPids, runtime)
+}
+
+/// The testable core.
+pub fn root_pid_from<S: PidSource>(source: &S, runtime: &Runtime) -> Measurement<u32> {
+    let found = match runtime {
+        Runtime::Docker { container } => source.docker_pid(container),
+        Runtime::Native { proc_match } => source.matching_pid(proc_match),
+    };
+    match found {
+        Some(pid) => Measurement::Measured(pid),
+        // NotMeasured, not Untestable: the rig worked, we asked, and the process was not there. The
+        // detail names the identity so a reader can tell "the gateway died" from "we looked for the
+        // wrong thing", which are the two causes and they have different fixes.
+        None => Measurement::absent_because(
+            Absent::NotMeasured,
+            format!(
+                "no running process found for the declared {} identity {:?}",
+                if runtime.is_docker() { "container" } else { "process-match" },
+                runtime.identity()
+            ),
+        ),
+    }
+}
+
+#[cfg(test)]
+mod pid_tests {
+    use super::*;
+
+    #[derive(Default)]
+    struct FakePids {
+        docker: Option<u32>,
+        native: Option<u32>,
+        seen_docker: std::cell::RefCell<Vec<String>>,
+        seen_native: std::cell::RefCell<Vec<String>>,
+    }
+
+    impl PidSource for FakePids {
+        fn docker_pid(&self, container: &str) -> Option<u32> {
+            self.seen_docker.borrow_mut().push(container.to_string());
+            self.docker
+        }
+        fn matching_pid(&self, pattern: &str) -> Option<u32> {
+            self.seen_native.borrow_mut().push(pattern.to_string());
+            self.native
+        }
+    }
+
+    // THE POINT OF THE BRIDGE: whichever kind the manifest declares, the lookup is driven by
+    // `Runtime::identity()` and nothing else, so the tree measured here is the tree that was
+    // launched and the tree that gets stopped.
+    #[test]
+    fn the_lookup_is_driven_by_the_one_declared_identity() {
+        let f = FakePids { docker: Some(42), ..Default::default() };
+        let rt = Runtime::Docker { container: "gw-bench".into() };
+        assert_eq!(root_pid_from(&f, &rt).copied(), Some(42));
+        assert_eq!(f.seen_docker.borrow().as_slice(), ["gw-bench"], "the container name came from identity()");
+        assert!(f.seen_native.borrow().is_empty(), "a container must not be looked up as a process match");
+
+        let f = FakePids { native: Some(7), ..Default::default() };
+        let rt = Runtime::Native { proc_match: "target/release/gw".into() };
+        assert_eq!(root_pid_from(&f, &rt).copied(), Some(7));
+        assert_eq!(f.seen_native.borrow().as_slice(), ["target/release/gw"]);
+        assert!(f.seen_docker.borrow().is_empty());
+    }
+
+    // A process that is not there is an ABSENCE WITH A REASON. Never a zero, never a default pid:
+    // summing a tree from the wrong root publishes another process's memory as the gateway's.
+    #[test]
+    fn a_missing_process_is_an_absence_that_names_what_was_looked_for() {
+        let f = FakePids::default();
+        let rt = Runtime::Docker { container: "gw-bench".into() };
+        let m = root_pid_from(&f, &rt);
+        assert!(!m.is_measured());
+        assert_eq!(m.reason(), Some(&Absent::NotMeasured));
+        let detail = m.detail().unwrap_or_default();
+        assert!(detail.contains("gw-bench"), "the reason must name the identity: {detail}");
+        assert!(detail.contains("container"), "and which kind it was: {detail}");
+
+        let rt = Runtime::Native { proc_match: "no-such-binary".into() };
+        let m = root_pid_from(&f, &rt);
+        assert!(m.detail().is_some_and(|d| d.contains("process-match") && d.contains("no-such-binary")));
+    }
 }
 
 #[cfg(test)]
