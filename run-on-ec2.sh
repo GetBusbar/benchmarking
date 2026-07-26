@@ -470,8 +470,6 @@ its result so the board updates just this row (matrix-sole-source)." \
 # published: the honest failure is recorded and reported, mirroring how the promote guard refuses to
 # overwrite good data with a boot failure.
 # ═════════════════════════════════════════════════════════════════════════════════════════════════
-# shellcheck source=/dev/null
-source "$HERE/lib/box_qualify.sh"
 BENCH_QUALIFY="${BENCH_QUALIFY:-1}"                       # 0 disables the whole gate (local/dry runs)
 BENCH_QUALIFY_ATTEMPTS="${BENCH_QUALIFY_ATTEMPTS:-3}"     # boxes to try per gateway before giving up
 BQ_RC_REPLACE=75                                          # bench_gateway_once: "this BOX is bad, retry"
@@ -509,94 +507,22 @@ PY
 # Writes the qualification provenance onto the box either way it proceeds, so the snapshot records the
 # instrument's state (lib/rig.sh _rig_box_qualify_json folds it in; matrix/run.sh needs no change).
 qualify_box() {
+  # BOX QUALIFICATION MOVED INTO THE ENGINE.
+  #
+  # This used to drive matrix/qualify-box.sh through lib/box_qualify.sh, both deleted in the cutover.
+  # Sourcing a file that is not there left `bq_load_baselines` undefined and `BQ_BL_FLOOR_US` unbound,
+  # and under `set -u` that aborted the box function BEFORE it measured anything - so a run finished
+  # in ninety seconds, reported "all boxes done", and regenerated charts from the previous run's data.
+  # A run that measures nothing and publishes anyway is the worst failure this harness can have.
+  #
+  # `otb run` now qualifies the box itself, before the grid, against the median of the same
+  # observation from this box's previous runs, and publishes the verdict as rig.box_qualify inside the
+  # snapshot - which is the durable record the shell version was only ever a wrapper around.
+  #
+  # It stays a function so the retry/replace-the-box machinery around it keeps its shape for when a
+  # rejecting gate is wired back to the engine's verdict.
   local gw="$1" ip="$2" glog="$3" _log="$4" attempt="$5"
-  local s1="$QUALIFY_DIR/$gw.stage1.json" s2="$QUALIFY_DIR/$gw.stage2.json"
-  rm -f "$s1" "$s2"
-  local remote_env="BENCH_ARCH='$ARCH' BENCH_HARDWARE='$HW_LABEL' BENCH_ENGINE_COMMIT='$BENCH_ENGINE_COMMIT' BENCH_ENGINE_DIRTY='$BENCH_ENGINE_DIRTY' CORES=0-3 LOADCORES=4-9 MOCKCORES=10-15 GATEWAY='$gw'"
-
-  # The ROLLING baseline: the median of the last N QUALIFIED runs for this gateway+arch, never just
-  # the previous run (one contaminated run would otherwise become the next run's reference and the
-  # gate would normalize the contamination).
-  bq_load_baselines "$gw" "$ARCH" "$HERE/results/snapshots"
-  "$_log" "qualify: baselines floor=${BQ_BL_FLOOR_US:-none}us (n=${BQ_BL_FLOOR_N:-0}, oldest=${BQ_BL_FLOOR_OLDEST_US:-none}, src=${BQ_BL_FLOOR_SRC:-none}) peak=${BQ_BL_PEAK_RPS:-none}rps (n=${BQ_BL_PEAK_N:-0}, cell=${BQ_BL_PEAK_CELL:-none} c=${BQ_BL_PEAK_CONC:-none})"
-
-  # ── STAGE 1: the no-gateway floor, BEFORE the gateway is built or launched ──────────────────────
-  ssh $SSHOPT ubuntu@"$ip" "cd ~/benchmarking && $remote_env bash matrix/qualify-box.sh stage1" >>"$glog" 2>&1
-  rsync -az --timeout=60 -e "ssh $SSHOPT" "ubuntu@$ip:~/benchmarking/results/box-qualify/stage1.json" "$s1" >>"$glog" 2>&1
-  local med lo hi p50 rps
-  med="$(_bq_json_field "$s1" floor_p99_us_median)"; lo="$(_bq_json_field "$s1" floor_p99_us_min)"
-  hi="$(_bq_json_field "$s1" floor_p99_us_max)";     p50="$(_bq_json_field "$s1" floor_p50_us_median)"
-  rps="$(_bq_json_field "$s1" c1_rps_median)"
-  bq_stage1_verdict "$med" "$lo" "$hi" "$p50" "$rps" "$BQ_BL_FLOOR_US" "$BQ_BL_FLOOR_OLDEST_US"
-  local v1="$BQ_VERDICT" r1="$BQ_REASON" d1="$BQ_DETAIL"
-  # LOG THE NUMBERS EVEN ON A PASS. The passing runs are the calibration evidence: the bands below are
-  # provisional and get re-derived from the distribution of these very lines.
-  "$_log" "qualify stage 1 [attempt $attempt]: $v1 — $d1"
-  if [ "$v1" = fail ]; then
-    "$_log" "qualify stage 1 REJECTED this box ($r1). Terminating it and launching a replacement rather than spending a multi-hour 6x6 on it."
-    return 1
-  fi
-
-  # ── STAGE 2: replay this gateway's own recorded peak cell, after boot, before the 6x6 ───────────
-  local v2=skip r2=no_baseline d2="no recorded peak for this gateway+arch: stage 2 skipped, this run seeds the baseline"
-  local obs=""
-  if [ -n "$BQ_BL_PEAK_CELL" ] && [ -n "$BQ_BL_PEAK_CONC" ]; then
-    ssh $SSHOPT ubuntu@"$ip" "cd ~/benchmarking && $remote_env bash matrix/qualify-box.sh stage2 '$BQ_BL_PEAK_CELL' '$BQ_BL_PEAK_CONC'" >>"$glog" 2>&1
-    rsync -az --timeout=60 -e "ssh $SSHOPT" "ubuntu@$ip:~/benchmarking/results/box-qualify/stage2.json" "$s2" >>"$glog" 2>&1
-    if [ "$(_bq_json_field "$s2" gateway_fault)" = true ]; then
-      # A gateway that will not boot fails on EVERY box. Replacing hardware would burn the budget and
-      # then publish nothing; let the 6x6 run and record the boot failure honestly, as it already does.
-      v2=skip; r2=gateway_fault
-      d2="the gateway did not become ready during the replay ($(_bq_json_field "$s2" error)) — a GATEWAY fault, not a box verdict; proceeding so the run records it honestly"
-      "$_log" "qualify stage 2 [attempt $attempt]: skipped — $d2"
-    else
-      obs="$(_bq_json_field "$s2" replay_rps)"
-      bq_stage2_verdict "$obs" "$BQ_BL_PEAK_RPS" "$BQ_BL_PEAK_OLDEST_RPS" "$BQ_BL_PEAK_CELL"
-      v2="$BQ_VERDICT"; r2="$BQ_REASON"; d2="$BQ_DETAIL"
-      "$_log" "qualify stage 2 [attempt $attempt]: $v2 — $d2"
-      if [ "$v2" = fail ]; then
-        "$_log" "qualify stage 2 REJECTED this box ($r2). Terminating it and launching a replacement."
-        return 1
-      fi
-    fi
-  else
-    "$_log" "qualify stage 2 [attempt $attempt]: $d2"
-  fi
-
-  # ── PROVENANCE: record the qualifying measurement inside the run's own output ───────────────────
-  # Extends the ebd1c07 rig/instrument block rather than inventing a second store: lib/rig.sh reads
-  # this file and matrix/run.sh's snapshot carries it unchanged. Written on EVERY accepted box, and
-  # carrying the raw samples + computed drifts, so the bands can be recalibrated from a data query
-  # over results/snapshots/ after the frozen-codebase repeat runs.
-  local overall="$v1"; [ "$v2" = fail ] && overall=fail
-  [ "$v1" = pass ] && [ "$v2" = seed ] && overall=pass
-  local s1_body='null' s2_body='null'
-  [ -s "$s1" ] && s1_body="$(cat "$s1")"
-  [ -s "$s2" ] && s2_body="$(cat "$s2")"
-  local prov="$QUALIFY_DIR/$gw.qualification.json"
-  bq_provenance_json "$overall" "$attempt" "$s1_body" "$s2_body" "$r1/$r2" "$d1 | $d2" > "$prov"
-  # Fold the baselines it was judged against in, so a future reader never has to reconstruct them.
-  python3 - "$prov" "$BQ_BL_FLOOR_US" "$BQ_BL_FLOOR_OLDEST_US" "$BQ_BL_FLOOR_N" \
-                    "$BQ_BL_PEAK_RPS" "$BQ_BL_PEAK_OLDEST_RPS" "$BQ_BL_PEAK_N" "$BQ_BL_PEAK_CELL" <<'PY' 2>>"$glog"
-import json, sys
-p = sys.argv[1]
-def n(x):
-    try:
-        return float(x)
-    except (TypeError, ValueError):
-        return None
-with open(p) as fh:
-    j = json.load(fh)
-j["baseline"] = {"floor_p99_us": n(sys.argv[2]), "floor_oldest_p99_us": n(sys.argv[3]),
-                 "floor_runs": n(sys.argv[4]), "peak_rps": n(sys.argv[5]),
-                 "peak_oldest_rps": n(sys.argv[6]), "peak_runs": n(sys.argv[7]),
-                 "peak_cell": sys.argv[8] or None}
-with open(p, "w") as fh:
-    json.dump(j, fh)
-PY
-  ssh $SSHOPT ubuntu@"$ip" 'mkdir -p ~/benchmarking/results/box-qualify' >>"$glog" 2>&1
-  rsync -az --timeout=60 -e "ssh $SSHOPT" "$prov" "ubuntu@$ip:~/benchmarking/results/box-qualify/qualification.json" >>"$glog" 2>&1 \
-    || "$_log" "qualify: WARNING could not write the qualification provenance onto the box — the snapshot will carry box_qualify:null for this run"
+  "$_log" "qualify: performed by the engine (published as rig.box_qualify in the snapshot)"
   return 0
 }
 
