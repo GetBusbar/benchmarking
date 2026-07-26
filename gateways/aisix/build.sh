@@ -27,7 +27,11 @@ SRC="$GW_DIR/src"
 # always present, the block never ran, and the packages that are not rust were never installed. The
 # failure then surfaced one layer down as "failed to run custom build command for openssl-sys", which
 # names a crate rather than the missing package.
-sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q git build-essential pkg-config libssl-dev protobuf-compiler
+# -n so this fails immediately rather than blocking on a password prompt. The bench box gives the
+# ubuntu user passwordless sudo, which the harness already relies on elsewhere; if that ever stops
+# being true this must fail loudly at the missing package rather than hang the run waiting on a tty
+# that is not there.
+sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y -q git build-essential pkg-config libssl-dev protobuf-compiler
 command -v protoc >/dev/null || { echo "build: protoc is required by this gateway's build dependencies and is not installed"; exit 1; }
 
 [ -d "$SRC" ] || git clone -q "$REPO" "$SRC"
