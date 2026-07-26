@@ -214,6 +214,14 @@ if [[ "${1:-}" == "kill" || "${1:-}" == "--kill" ]]; then
   left=$(aws ec2 describe-instances --filters "Name=tag:purpose,Values=gateway-bench" \
     "Name=instance-state-name,Values=running,pending" --query 'length(Reservations[].Instances[])' --output text 2>/dev/null)
   echo "done - running/pending remaining: ${left:-?}"
+  # Local side of an interrupted run: stray per-gateway fanout logs, cached rig binaries (in case the
+  # next run needs a different arch or a fresh rig), and any left-behind pull-staging files. None of
+  # this is committed data - real results only ever land via a promote-guarded mv - so it is always
+  # safe to clear.
+  rm -f "$HERE"/results/fanout-*.log
+  rm -f "$HERE"/results/*/.incoming-*.json "$HERE"/results/config/.incoming-*.txt
+  rm -rf "$HERE"/bin
+  echo "local cleanup: fanout logs, cached rig binaries, and pull-staging files cleared"
   exit 0
 fi
 

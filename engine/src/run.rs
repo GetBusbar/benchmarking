@@ -113,12 +113,14 @@ pub fn probe_cell(cfg: &RunConfig, id: &CellId, mock_healthy: bool) -> Served {
             // WHAT IT ACTUALLY SAID. Without this a declined cell is a bare verdict, and a whole
             // field answering 4xx for one rig-side reason reads as every gateway supporting nothing.
             let evidence = crate::cell::Evidence { status: r.status, body_snippet: crate::cell::Evidence::snippet(&String::from_utf8_lossy(r.body())) };
-            // The verdict decides which of the two this is, and they are NOT interchangeable.
-            // NotConfigured is the gateway's own answer about the pairing. NotVerified means the rig
-            // could not get a fair reading, so nothing was learned about the gateway, and recording
-            // it as "does not serve" would convict on the rig's failure.
+            // The verdict decides which of the three this is, and they are NOT interchangeable.
+            // NotConfigured is the gateway's own answer that the pairing does not exist. Failed is
+            // the gateway's own answer that it reached and declined this attempt at a pairing that
+            // is otherwise real. NotVerified means the rig could not get a fair reading, so nothing
+            // was learned about the gateway, and recording it as "does not serve" would convict on
+            // the rig's failure.
             match persistent_transient_verdict(Observation { status: Some(r.status), mock_healthy }) {
-                Verdict::NotConfigured => Served::No(Verdict::NotConfigured, evidence),
+                v @ (Verdict::NotConfigured | Verdict::Failed) => Served::No(v, evidence),
                 Verdict::NotVerified => Served::Untestable(format!(
                     "status {} observed, but the rig could not confirm itself, so this says nothing about the gateway",
                     r.status
@@ -435,6 +437,30 @@ mod tests {
         let cfg = cfg_for(gw, gw);
         let s = probe_cell(&cfg, &CellId::new("openai", "openai"), true);
         assert!(matches!(s, Served::No(..)), "got {s:?}");
+    }
+
+    // 404 and a genuine rejection (e.g. 401) must NOT carry the same verdict end to end through
+    // probe_cell: a 404 means the pairing does not exist; a 401 means the gateway reached this
+    // pairing and declined the specific request. Collapsing them would publish a gateway that
+    // supports a pairing but rejects the probe's auth as indistinguishable from one that never
+    // built the route at all.
+    #[test]
+    fn a_not_found_and_a_rejection_carry_different_verdicts_through_probe_cell() {
+        let not_found = serve(404);
+        let cfg = cfg_for(not_found, not_found);
+        let s = probe_cell(&cfg, &CellId::new("openai", "openai"), true);
+        assert!(
+            matches!(s, Served::No(ref v, _) if *v == crate::probe::Verdict::NotConfigured),
+            "404 must be NotConfigured, got {s:?}"
+        );
+
+        let rejected = serve(401);
+        let cfg = cfg_for(rejected, rejected);
+        let s = probe_cell(&cfg, &CellId::new("openai", "openai"), true);
+        assert!(
+            matches!(s, Served::No(ref v, ref ev) if *v == crate::probe::Verdict::Failed && ev.status == 401),
+            "401 must be Failed with the real status carried as evidence, got {s:?}"
+        );
     }
 
     // The SAME status with an unhealthy rig says nothing about the gateway, so it must not be
