@@ -96,6 +96,10 @@ fn rig_ceiling(cfg: &SuiteConfig, dialect: Dialect, at_conc: u32) -> Measurement
         gateway_addr: cfg.mock_addr,
         mock_addr: cfg.mock_addr,
         model: cfg.manifest.model.clone(),
+        // EMPTY ON PURPOSE: this reference drives the MOCK directly on one dialect, so there is no
+        // egress column to select and no gateway to route. A per-egress model here would ask the
+        // mock for a name only the gateway's own router understands.
+        egress_models: Default::default(),
         auth: cfg.manifest.auth.clone(),
         dialects: vec![dialect],
         sweep_duration_s: cfg.sweep_duration_s,
@@ -707,6 +711,8 @@ fn qualify_box(cfg: &SuiteConfig, history: &[f64]) -> serde_json::Value {
         gateway_addr: cfg.mock_addr,
         mock_addr: cfg.mock_addr,
         model: cfg.manifest.model.clone(),
+        // Empty for the same reason as the rig reference: this drives the MOCK, not the gateway.
+        egress_models: Default::default(),
         auth: cfg.manifest.auth.clone(),
         dialects: vec![Dialect::Openai],
         sweep_duration_s: cfg.sweep_duration_s,
@@ -790,6 +796,7 @@ pub fn run_suite_with(
         gateway_addr,
         mock_addr: cfg.mock_addr,
         model: cfg.manifest.model.clone(),
+        egress_models: cfg.manifest.egress_models.clone(),
         auth: cfg.manifest.auth.clone(),
         dialects: cfg.dialects.clone(),
         sweep_duration_s: cfg.sweep_duration_s,

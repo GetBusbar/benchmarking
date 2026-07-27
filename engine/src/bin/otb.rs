@@ -153,6 +153,8 @@ fn main() -> ExitCode {
             let cfg = RunConfig {
                 gateway_addr,
                 mock_addr,
+                // `smoke` takes no manifest, so there is nothing to vary the egress column by.
+                egress_models: Default::default(),
                 model: args.get(3).cloned().unwrap_or_else(|| "gpt-4o-mini".into()),
                 auth: "dummy".into(),
                 dialects: vec![Dialect::Openai, Dialect::Anthropic, Dialect::Gemini],

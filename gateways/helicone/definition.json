@@ -19,6 +19,11 @@
     "anthropic",
     "bedrock"
   ],
+  "egress_models": {
+    "anthropic": "anthropic/claude-3-5-sonnet",
+    "bedrock": "bedrock/anthropic.claude-3-5-sonnet-v1:0",
+    "openai": "openai/gpt-4o-mini"
+  },
   "lang": "Rust",
   "launch": {
     "args": [

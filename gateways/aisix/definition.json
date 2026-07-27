@@ -21,6 +21,10 @@
     "openai",
     "anthropic"
   ],
+  "egress_models": {
+    "anthropic": "claude-3-5-sonnet-20241022",
+    "openai": "gpt-4o-mini"
+  },
   "lang": "Rust",
   "launch": {
     "args": [
