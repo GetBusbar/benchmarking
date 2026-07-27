@@ -320,10 +320,25 @@ fn main() -> ExitCode {
                 // a fast gateway's ceiling. [512] was too narrow to find one entrant's true peak on
                 // the box that measured the field with it unset - the search reported "still rising
                 // at the top of the range" rather than a number, for a gateway fast enough to have a
-                // real answer. OTB_MIN_CONC/OTB_MAX_CONC stay as the escape hatch for narrowing a
-                // debug run (matches OTB_DIALECTS's own "unset means real run" convention below).
+                // real answer.
+                //
+                // 65536 went the other way and is WRONG: `gen.rs::run` spawns one real OS thread per
+                // unit of concurrency (`std::thread::Builder::spawn_scoped`, one per worker), pinned
+                // by `taskset` to LOADCORES' handful of cores. A search ramping toward 65536 asks
+                // that process to hold tens of thousands of native threads on ~6 cores, which is not
+                // a measurement of the gateway - a live field run hit exactly this and sat at a
+                // 1-minute load average over 24,000 for 45+ minutes, never converging, because the
+                // rig's own scheduler thrashing was drowning out any real signal from the target. The
+                // search's doubling ramp has no way to tell "the gateway is still faster" apart from
+                // "the harness's own instrument just collapsed", so it kept climbing.
+                // 4096 stays 8x wider than the too-narrow 512 (real headroom above any ceiling this
+                // field has shown so far) while staying an order of magnitude below where thread
+                // count alone becomes the bottleneck. OTB_MIN_CONC/OTB_MAX_CONC stay as the escape
+                // hatch for narrowing a debug run (matches OTB_DIALECTS's own "unset means real run"
+                // convention below), and for widening it again once the generator is no longer
+                // thread-per-connection.
                 min_conc: env_u32("OTB_MIN_CONC", 1),
-                max_conc: env_u32("OTB_MAX_CONC", 65536),
+                max_conc: env_u32("OTB_MAX_CONC", 4096),
                 measured_at: utc_stamp(),
                 arch: std::env::var("BENCH_ARCH").unwrap_or_else(|_| "unknown".into()),
                 // WHICH COMMIT PRODUCED THIS RUN. run-on-ec2.sh resolves it before the box exists
