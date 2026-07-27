@@ -584,10 +584,11 @@ bench_gateway_once() {
     # the same reason the source-built gateways build before the memory baseline is taken.
     command -v cargo >/dev/null || (curl -sSf https://sh.rustup.rs | sh -s -- -y -q >/dev/null 2>&1)
     sudo usermod -aG docker ubuntu || true
-    # FAIRNESS: a container inherits the docker DAEMON fd limit, NOT the host-shell ulimit that
-    # perf/run.sh raises for native gateways + the loadgen/mock. Left at the ~1024 default, a
-    # containerised gateway fast enough to hold >1024 concurrent connections hits EMFILE and
-    # collapses at exactly c=1024.
+    # FAIRNESS: a container inherits the docker DAEMON fd limit, NOT the host-shell ulimit. Left at
+    # the ~1024 default, a containerised gateway fast enough to hold >1024 concurrent connections
+    # hits EMFILE and collapses at exactly c=1024. The native side (loadgen, mock, native gateways)
+    # is raised to match in the remote run script below - it used to be perf/run.sh's job, and when
+    # that was retired the raise went with it while this comment kept citing it.
     echo "{ \"default-ulimits\": { \"nofile\": { \"Name\": \"nofile\", \"Hard\": 1048576, \"Soft\": 1048576 } } }" | sudo tee /etc/docker/daemon.json >/dev/null
     sudo systemctl restart docker || sudo service docker restart || true
     python3 -m pip install --user -q --break-system-packages psutil 2>/dev/null || pip3 install -q psutil || true' >>"$glog" 2>&1
@@ -778,6 +779,25 @@ bench_gateway_once() {
 # Every relative path below is relative to the repo, so anchor it rather than inheriting a cwd from
 # the login shell that starts this script.
 cd ~/benchmarking || exit 1
+# THE MEASURING INSTRUMENT NEEDS AS MANY SOCKETS AS THE THING IT MEASURES.
+#
+# The load generator opens ONE connection per unit of concurrency, so a sweep to c=4096 needs 4096
+# file descriptors in THIS process. Ubuntu's default soft limit is 1024, and the hard limit is
+# 1048576 - so the cap is ours to lift and costs nothing.
+#
+# Left unlifted this is not a slow measurement, it is a WRONG one: every connection past ~1020 fails
+# instantly with EMFILE, the generator counts those as failed requests, and the failure is
+# attributed to the gateway. A whole field run showed all ten gateways clean at c=512 and failing at
+# exactly c=1024 - ten unrelated projects in Go, Rust, Python and Lua do not share a ceiling, and
+# that number is the default this line raises. Every sustained@20ms figure in that run was our own
+# fd limit wearing the gateway's name.
+#
+# The unfairness was the sharpest part: the docker daemon config above already grants CONTAINERS
+# 1048576, so the gateways under test had a thousand times the sockets of the harness measuring them.
+# This restores what perf/run.sh used to do for the native side before it was retired in the Rust
+# rewrite (commit d7fc1f4), which removed the raise and left the comment describing it.
+ulimit -n 1048576 2>/dev/null || ulimit -n "$(ulimit -Hn)" 2>/dev/null || true
+echo "[rig] loadgen/mock fd limit: $(ulimit -Sn) (hard $(ulimit -Hn))"
 # The checkout is sparse (gateways + lib only), so results/ does not exist here and the snapshot
 # writer does not create its own output directory - it reports an error and writes nothing.
 mkdir -p results/snapshots
