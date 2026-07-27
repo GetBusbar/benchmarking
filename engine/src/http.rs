@@ -477,6 +477,37 @@ pub fn post_json(
     headers: &[(String, String)],
     timeout: Duration,
 ) -> Outcome {
+    send("POST", addr, path, body, headers, timeout, true)
+}
+
+/// The same client, issuing a GET with no body.
+///
+/// EXISTS FOR THE MOCK'S OWN CONTROL PLANE, not for the gateways: `/__mock/state` is the only thing
+/// this harness reads with a GET, and it is the evidence behind the egress re-verification verdict
+/// (see `reverify.rs`). It goes through the same `Outcome` discipline as every POST rather than a
+/// second, looser reader, because "the mock could not be reached" and "the mock answered, and its
+/// recorder is empty" are the two answers that verdict turns on, and a client that collapsed them
+/// would publish a rig failure as proof a gateway did not translate.
+///
+/// No `content-type` is sent: a GET with no body has no type to declare, and `post_json`'s default
+/// exists for the opposite reason (a gateway that 415s a typeless JSON body).
+pub fn get(addr: SocketAddr, path: &str, headers: &[(String, String)], timeout: Duration) -> Outcome {
+    send("GET", addr, path, &[], headers, timeout, false)
+}
+
+/// One request/response exchange. Shared by `post_json` and `get` so the two cannot drift in their
+/// framing, deadline handling, or `Outcome` classification - the distinctions this module's header
+/// describes are the whole point of it, and a second hand-rolled request builder is a second place
+/// they can be lost.
+fn send(
+    method: &str,
+    addr: SocketAddr,
+    path: &str,
+    body: &[u8],
+    headers: &[(String, String)],
+    timeout: Duration,
+    json_body: bool,
+) -> Outcome {
     let deadline = Instant::now() + timeout;
 
     let mut stream = match TcpStream::connect_timeout(&addr, timeout) {
@@ -487,7 +518,7 @@ pub fn post_json(
     };
 
     let mut request = Vec::new();
-    request.extend_from_slice(format!("POST {path} HTTP/1.1\r\n").as_bytes());
+    request.extend_from_slice(format!("{method} {path} HTTP/1.1\r\n").as_bytes());
     request.extend_from_slice(format!("Host: {addr}\r\n").as_bytes());
     request.extend_from_slice(format!("Content-Length: {}\r\n", body.len()).as_bytes());
     // THE PROBE AND THE LOAD MUST SEND THE SAME REQUEST, matching what gen.rs's build_request sets:
@@ -495,7 +526,7 @@ pub fn post_json(
     // and be published as NOT SERVING a pairing it would have loaded fine, a gateway property
     // asserted from a malformed request of ours, the worst direction for this error to run. A
     // caller may still override it below.
-    if !headers.iter().any(|(n, _)| n.eq_ignore_ascii_case("content-type")) {
+    if json_body && !headers.iter().any(|(n, _)| n.eq_ignore_ascii_case("content-type")) {
         request.extend_from_slice(b"content-type: application/json\r\n");
     }
     // Always close: this client never pools connections, so there is nothing to keep alive for.

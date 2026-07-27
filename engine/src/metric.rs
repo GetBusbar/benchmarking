@@ -75,6 +75,17 @@ pub struct Series {
     pub sweep_sustained: Vec<crate::record::SweepPoint>,
     /// One entry per resident-memory reading taken across the load window.
     pub rss: Vec<crate::record::RssSample>,
+    /// One entry per concurrency the STREAMS-SUSTAINED gate search probed, and one per concurrency
+    /// the CPU-frames/sec peak search probed. Kept apart from each other and from the two request
+    /// sweeps above for the same reason those two are kept apart: four searches over one concurrency
+    /// axis, and merging any pair of them would make it impossible to say which search a rung came
+    /// from or which gate it was judged against.
+    ///
+    /// `serde_json::Value` rather than `SweepPoint`, because `record.rs` types these two as opaque
+    /// JSON: no committed snapshot has ever carried one, so there was no real artifact to pin a shape
+    /// against. `run::StreamPoint::to_json` is where the shape is decided.
+    pub sweep_streams: Vec<serde_json::Value>,
+    pub sweep_cpu_fps: Vec<serde_json::Value>,
 }
 
 /// What a group produced: the fields it promised, and the evidence behind them.
@@ -110,7 +121,8 @@ pub trait Metric: Sync {
 ///
 /// Adding a number to the board is: implement a group, add it here. Removing one is deleting it from
 /// this list, which is a visible act rather than a call that quietly stopped happening.
-pub const METRICS: &[&dyn Metric] = &[&Throughput, &Memory, &Streaming, &AddedLatency, &SustainedThroughput];
+pub const METRICS: &[&dyn Metric] =
+    &[&Throughput, &Memory, &Streaming, &AddedLatency, &SustainedThroughput, &StreamsSustained, &CpuFps];
 
 /// Run every metric against one served cell.
 ///
@@ -147,6 +159,12 @@ pub fn process_cell_with(
         }
         if !produced.series.rss.is_empty() {
             series.rss = produced.series.rss;
+        }
+        if !produced.series.sweep_streams.is_empty() {
+            series.sweep_streams = produced.series.sweep_streams;
+        }
+        if !produced.series.sweep_cpu_fps.is_empty() {
+            series.sweep_cpu_fps = produced.series.sweep_cpu_fps;
         }
         let filled: BTreeMap<&'static str, Measurement<f64>> = produced.fields.into_iter().collect();
         for field in m.fields() {
@@ -215,7 +233,7 @@ impl Metric for Throughput {
             .collect();
         Measured {
             fields: vec![("rps_max_proxy", rps), ("conc_at_peak", conc)],
-            series: Series { sweep, sweep_sustained: Vec::new(), rss: Vec::new() },
+            series: Series { sweep, ..Series::default() },
         }
     }
 }
@@ -396,6 +414,10 @@ impl Metric for Memory {
 
         let path = crate::run::path_for(ctx.cfg, ctx.dialect, &ctx.id.egress);
         let body = ctx.dialect.body(&ctx.cfg.model);
+        // The SAME headers the probe authenticated this cell with. A memory window driven with the
+        // wrong credential measures a process serving 401s, which is a different workload from the
+        // one every other gateway's window is compared against.
+        let headers = crate::run::headers_for(ctx.cfg, ctx.dialect, &ctx.id.egress);
 
         // ── LOAD UNTIL IT STOPS MOVING ───────────────────────────────────────────────────────────
         //
@@ -408,7 +430,7 @@ impl Metric for Memory {
         let mut verdict = crate::stats::Verdict::Undecidable;
         let mut settled_at = None;
         loop {
-            let w = crate::run::load_window(ctx.cfg, &path, &body, MEMORY_WINDOW_CONCURRENCY);
+            let w = crate::run::load_window(ctx.cfg, &path, &body, &headers, MEMORY_WINDOW_CONCURRENCY);
             // A window that produced nothing means the load never ran. Stop rather than spinning on
             // a gateway that is not answering; the peak below is then an honest absence.
             if w.is_none() {
@@ -527,14 +549,19 @@ impl Metric for Memory {
                     },
                 ),
             ],
-            series: Series { sweep: Vec::new(), sweep_sustained: Vec::new(), rss },
+            series: Series { rss, ..Series::default() },
         }
     }
 }
 
 /// How long a streaming probe waits, and how many frames it reads.
-const STREAM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
-const STREAM_FRAME_BUDGET: usize = 64;
+///
+/// Public because the CONCURRENT stream windows (`run::stream_window`, behind the two groups at the
+/// bottom of this file) must read a stream exactly the way the c=1 probe here does. Two readers with
+/// two budgets would measure two different stream lengths and publish the difference as a property of
+/// the gateway.
+pub const STREAM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+pub const STREAM_FRAME_BUDGET: usize = 64;
 
 /// Streaming: what the gateway ADDS to a stream, rather than what the stream costs.
 ///
@@ -555,8 +582,20 @@ impl Metric for Streaming {
         "streaming"
     }
 
+    /// The last two are surface-only, feeding `CellStream.stream_c1_note` rather than a published
+    /// number of their own, for the same reason `AddedLatency` carries its sample counts: this group
+    /// takes ONE stream per leg, and how many frames each leg actually produced is the difference
+    /// between a gap p50 over sixty-odd intervals and one over two. Nothing else in the artifact
+    /// records it, and it comes from the same two streams the differences do.
     fn fields(&self) -> &'static [&'static str] {
-        &["added_ttft_p50_us", "added_ttft_p99_us", "added_gap_p50_us", "added_gap_p99_us"]
+        &[
+            "added_ttft_p50_us",
+            "added_ttft_p99_us",
+            "added_gap_p50_us",
+            "added_gap_p99_us",
+            "gateway_c1_frames",
+            "direct_c1_frames",
+        ]
     }
 
     fn measure(&self, ctx: &CellCtx<'_>) -> Measured {
@@ -577,14 +616,23 @@ impl Metric for Streaming {
             ));
         }
 
-        let headers = vec![("authorization".to_string(), format!("Bearer {}", ctx.cfg.auth))];
+        // THE HEADER SHAPE IS THE DIALECT'S, NOT A HARDCODED BEARER. This was
+        // `authorization: Bearer <auth>` for every dialect, which is the wrong header NAME for two of
+        // the six (anthropic sends `x-api-key` plus a mandatory version header, gemini sends
+        // `x-goog-api-key`), so those two rows' streaming legs were driven unauthenticated and their
+        // 401s read as the gateway not streaming. The gateway leg additionally carries whatever
+        // routing headers the manifest needs to select this egress column, exactly as the probe does;
+        // the direct leg carries the dialect's own auth and nothing else, because routing headers
+        // select an upstream INSIDE a gateway and mean nothing to the mock.
+        let gw_headers = crate::run::headers_for(ctx.cfg, ctx.dialect, &ctx.id.egress);
+        let direct_headers = ctx.dialect.auth_headers(&ctx.cfg.auth);
         let body = ctx.dialect.stream_body(&ctx.cfg.model);
 
         let through_gateway = crate::http::post_json_sse(
             ctx.cfg.gateway_addr,
             &crate::run::path_for(ctx.cfg, ctx.dialect, &ctx.id.egress),
             body.as_bytes(),
-            &headers,
+            &gw_headers,
             STREAM_TIMEOUT,
             STREAM_FRAME_BUDGET,
         );
@@ -592,7 +640,7 @@ impl Metric for Streaming {
             ctx.cfg.mock_addr,
             &ctx.dialect.mock_direct_path(&ctx.cfg.model),
             body.as_bytes(),
-            &headers,
+            &direct_headers,
             STREAM_TIMEOUT,
             STREAM_FRAME_BUDGET,
         );
@@ -649,6 +697,8 @@ impl Metric for Streaming {
             ("added_ttft_p99_us", no_distribution()),
             ("added_gap_p50_us", added_gap),
             ("added_gap_p99_us", no_distribution()),
+            ("gateway_c1_frames", Measurement::Measured(through_gateway.frame_offsets_us.len() as f64)),
+            ("direct_c1_frames", Measurement::Measured(direct.frame_offsets_us.len() as f64)),
         ];
         fields.into()
     }
@@ -694,8 +744,23 @@ impl Metric for AddedLatency {
         "added_latency"
     }
 
+    /// The last two are NOT published as their own artifact numbers. They exist because
+    /// `CellPerf.c1_note` is an advisory string about these very legs, and the only thing worth
+    /// saying there is HOW MANY round trips each p99 was computed over: a p99 taken across four
+    /// thousand samples and one taken across eleven are the same field with wildly different weight,
+    /// and nothing else in the artifact says which this is. They ride the metric surface rather than
+    /// being recomputed in `suite.rs`, because the counts belong to the SAME two windows the
+    /// percentiles came from, and a second pair of windows to count them would be the two-populations
+    /// defect this file's module doc names.
     fn fields(&self) -> &'static [&'static str] {
-        &["added_latency_p50_us", "added_latency_p99_us", "gateway_c1_p99_us", "direct_c1_p99_us"]
+        &[
+            "added_latency_p50_us",
+            "added_latency_p99_us",
+            "gateway_c1_p99_us",
+            "direct_c1_p99_us",
+            "gateway_c1_samples",
+            "direct_c1_samples",
+        ]
     }
 
     fn measure(&self, ctx: &CellCtx<'_>) -> Measured {
@@ -719,8 +784,16 @@ impl Metric for AddedLatency {
         // this rig drives - is hundreds to low thousands of samples, comfortably enough for a stable
         // p99. Reusing the constant that already governs every other window keeps one knob for "how
         // long is a load window" rather than two that can silently drift apart.
-        let gw = crate::run::load_window(ctx.cfg, &gw_path, &body, 1);
-        let direct = crate::run::load_window_at(ctx.cfg, ctx.cfg.mock_addr, &direct_path, &body, 1);
+        // THE TWO LEGS AUTHENTICATE DIFFERENTLY, ON PURPOSE. The gateway leg carries everything the
+        // probe carried, including whatever routing headers the manifest needs to select this egress
+        // column. The direct leg carries the DIALECT's own auth shape and nothing else: routing
+        // headers select an upstream INSIDE a gateway and mean nothing to the mock, exactly as
+        // `mock_healthy` already reasons about its own request.
+        let gw_headers = crate::run::headers_for(ctx.cfg, ctx.dialect, &ctx.id.egress);
+        let direct_headers = ctx.dialect.auth_headers(&ctx.cfg.auth);
+        let gw = crate::run::load_window(ctx.cfg, &gw_path, &body, &gw_headers, 1);
+        let direct =
+            crate::run::load_window_at(ctx.cfg, ctx.cfg.mock_addr, &direct_path, &body, &direct_headers, 1);
 
         let (Some(gw), Some(direct)) = (gw, direct) else {
             return all_absent(
@@ -750,6 +823,10 @@ impl Metric for AddedLatency {
             ("added_latency_p99_us", Measurement::Measured(added_p99 as f64)),
             ("gateway_c1_p99_us", Measurement::Measured(gw_p99 as f64)),
             ("direct_c1_p99_us", Measurement::Measured(direct_p99 as f64)),
+            // The successful round trips behind each percentile. Both legs are already known clean
+            // here (`clean_c1_leg` above returned true for each), so `ok` IS the sample count.
+            ("gateway_c1_samples", Measurement::Measured(gw.ok as f64)),
+            ("direct_c1_samples", Measurement::Measured(direct.ok as f64)),
         ];
         fields.into()
     }
@@ -822,7 +899,129 @@ impl Metric for SustainedThroughput {
                 ("rps_sustained_20ms_concurrency", conc.clone()),
                 ("conc_at_sustained", conc),
             ],
-            series: Series { sweep: Vec::new(), sweep_sustained: sweep, rss: Vec::new() },
+            series: Series { sweep_sustained: sweep, ..Series::default() },
+        }
+    }
+}
+
+// ── the two concurrent-stream groups ──────────────────────────────────────────────────────────────
+//
+// WHY TWO GROUPS AND NOT ONE, decided by this file's own rule: numbers from ONE search share a group,
+// numbers from SEPARATE searches do not.
+//
+// `streams_sustained` and `streams_sustained_fps` come from one `bisect_ceiling` over a monotone
+// pass/fail gate (the README's "99.9% of expected frames, no stall past 2x the pace, under 0.1%
+// stream errors"), and the frames/sec is read straight off the winning rung of that same bisection -
+// so they are one group for exactly the reason `SustainedThroughput`'s ceiling and rate are.
+//
+// `cpu_fps` and `cpu_fps_concurrency` come from a `peak_max` over a unimodal curve. That is a
+// DIFFERENT ALGORITHM over a DIFFERENT verdict, and folding it in beside the gate would mean either
+// running the wrong search for one of the four numbers or running two searches inside one group and
+// calling it one - the two failure modes the module doc names. Same reasoning that already split
+// `Throughput` from `SustainedThroughput`, applied to the same axis one lane over.
+//
+// The two groups DO share their window driver (`run::stream_window`), and that is not the same thing
+// as sharing a search: sharing the instrument is what makes their numbers comparable, sharing a
+// search would be what makes them one population.
+
+/// A dialect the mock cannot stream is a rig limit, not a gateway failure - the same fact
+/// `Streaming::measure` opens with, and it must be stated identically here or the same rig limit
+/// would be published two different ways in one cell.
+fn stream_untestable(dialect: Dialect) -> Measurement<f64> {
+    Measurement::absent_because(
+        Absent::Untestable,
+        format!(
+            "the mock does not answer {} with a native event stream, so the rig cannot pose the streaming question here",
+            dialect.as_str()
+        ),
+    )
+}
+
+/// Streams sustained: the highest number of concurrent streams the gateway carries while nearly every
+/// expected frame still arrives, nothing stalls past twice the mock's pace, and almost no stream
+/// fails - plus the frames/sec it carries THERE.
+pub struct StreamsSustained;
+
+impl Metric for StreamsSustained {
+    fn name(&self) -> &'static str {
+        "streams_sustained"
+    }
+
+    fn fields(&self) -> &'static [&'static str] {
+        &["streams_sustained", "streams_sustained_fps"]
+    }
+
+    fn measure(&self, ctx: &CellCtx<'_>) -> Measured {
+        if !ctx.dialect.streams_natively() {
+            let m = stream_untestable(ctx.dialect);
+            let f: Filled = self.fields().iter().map(|x| (*x, m.clone())).collect();
+            return f.into();
+        }
+        let found = crate::run::sweep_streams_cell(ctx.cfg, ctx.id, ctx.min_conc, ctx.max_conc);
+        let carry = |m: &Measurement<f64>| match (m.reason().cloned(), m.detail()) {
+            (Some(r), Some(d)) => Measurement::absent_because(r, d),
+            (Some(r), None) => Measurement::absent(r),
+            (None, _) => Measurement::absent(Absent::NotMeasured),
+        };
+        let fps = match found.fps.value() {
+            Some(v) => Measurement::Measured(*v),
+            None => carry(&found.fps),
+        };
+        // Mirrors the rate's reason rather than inventing a second one, exactly as `Throughput` and
+        // `SustainedThroughput` do for their own concurrency fields.
+        let conc = match found.concurrency.value() {
+            Some(c) => Measurement::Measured(f64::from(*c)),
+            None => Measurement::absent(found.fps.reason().cloned().unwrap_or(Absent::NotMeasured)),
+        };
+        Measured {
+            fields: vec![("streams_sustained", conc), ("streams_sustained_fps", fps)],
+            series: Series {
+                sweep_streams: found.points.iter().map(crate::run::StreamPoint::to_json).collect(),
+                ..Series::default()
+            },
+        }
+    }
+}
+
+/// CPU frames/sec: the most frames a second this box carries through the gateway, and the stream
+/// concurrency it peaked at.
+pub struct CpuFps;
+
+impl Metric for CpuFps {
+    fn name(&self) -> &'static str {
+        "cpu_fps"
+    }
+
+    fn fields(&self) -> &'static [&'static str] {
+        &["cpu_fps", "cpu_fps_concurrency"]
+    }
+
+    fn measure(&self, ctx: &CellCtx<'_>) -> Measured {
+        if !ctx.dialect.streams_natively() {
+            let m = stream_untestable(ctx.dialect);
+            let f: Filled = self.fields().iter().map(|x| (*x, m.clone())).collect();
+            return f.into();
+        }
+        let found = crate::run::sweep_cpu_fps_cell(ctx.cfg, ctx.id, ctx.min_conc, ctx.max_conc);
+        let carry = |m: &Measurement<f64>| match (m.reason().cloned(), m.detail()) {
+            (Some(r), Some(d)) => Measurement::absent_because(r, d),
+            (Some(r), None) => Measurement::absent(r),
+            (None, _) => Measurement::absent(Absent::NotMeasured),
+        };
+        let fps = match found.fps.value() {
+            Some(v) => Measurement::Measured(*v),
+            None => carry(&found.fps),
+        };
+        let conc = match found.concurrency.value() {
+            Some(c) => Measurement::Measured(f64::from(*c)),
+            None => Measurement::absent(found.fps.reason().cloned().unwrap_or(Absent::NotMeasured)),
+        };
+        Measured {
+            fields: vec![("cpu_fps", fps), ("cpu_fps_concurrency", conc)],
+            series: Series {
+                sweep_cpu_fps: found.points.iter().map(crate::run::StreamPoint::to_json).collect(),
+                ..Series::default()
+            },
         }
     }
 }
@@ -967,6 +1166,58 @@ mod tests {
     // what makes them reachable per this file's own module doc ("a metric is in `METRICS` or it does
     // not exist"). This test names the two fields those tests would silently miss if a future edit
     // dropped either struct back out of the list without anything else failing.
+    // ── the two concurrent-stream groups ────────────────────────────────────────────────────────
+
+    // A DIALECT THE MOCK CANNOT STREAM IS A RIG LIMIT, and it must be stated the same way in all
+    // three streaming groups. `Untestable`, not `NotMeasured`: the first says the rig cannot pose the
+    // question, the second says we asked and got nothing, and only one of those is true here.
+    // Publishing "this gateway sustains no streams" because our own mock does not synthesise gemini
+    // frames is the harness-bug-as-gateway-property inversion this project forbids.
+    #[test]
+    fn a_dialect_the_mock_cannot_stream_is_untestable_in_every_stream_group() {
+        let cfg = a_config();
+        let id = CellId::new("gemini", "gemini");
+        let ctx = CellCtx { cfg: &cfg, id: &id, dialect: Dialect::Gemini, min_conc: 1, max_conc: 2 };
+        assert!(!Dialect::Gemini.streams_natively(), "this test is about a dialect the mock cannot stream");
+        for (name, produced) in
+            [("streams_sustained", StreamsSustained.measure(&ctx)), ("cpu_fps", CpuFps.measure(&ctx))]
+        {
+            let filled: BTreeMap<_, _> = produced.fields.into_iter().collect();
+            assert!(!filled.is_empty(), "{name} must still fill the fields it declares");
+            for (field, m) in &filled {
+                assert_eq!(m.copied(), None, "{name}/{field} cannot have measured anything");
+                assert_eq!(
+                    m.reason(),
+                    Some(&Absent::Untestable),
+                    "{name}/{field} must name the RIG's limit, not ours"
+                );
+                assert!(
+                    m.detail().unwrap_or_default().contains("gemini"),
+                    "{name}/{field} must say which dialect the mock cannot stream: {:?}",
+                    m.detail()
+                );
+            }
+            // And no rung was probed at all, because the search never ran: a sweep trace here would
+            // be evidence for a measurement that was never taken.
+            assert!(filled.len() >= 2);
+        }
+    }
+
+    // A group that declines to measure must still fill EVERY field it declared, which is what stops a
+    // silently missing key from being indistinguishable from an unmeasured one.
+    #[test]
+    fn both_stream_groups_fill_every_declared_field_even_when_untestable() {
+        let cfg = a_config();
+        let id = CellId::new("cohere", "cohere");
+        let ctx = CellCtx { cfg: &cfg, id: &id, dialect: Dialect::Cohere, min_conc: 1, max_conc: 2 };
+        for m in [&StreamsSustained as &dyn Metric, &CpuFps] {
+            let filled: BTreeMap<_, _> = m.measure(&ctx).fields.into_iter().collect();
+            for f in m.fields() {
+                assert!(filled.contains_key(f), "{} declares {f} and did not fill it", m.name());
+            }
+        }
+    }
+
     #[test]
     fn added_latency_and_sustained_throughput_are_reachable_from_metrics() {
         let names: Vec<&str> = METRICS.iter().map(|m| m.name()).collect();
@@ -982,6 +1233,27 @@ mod tests {
             "rps_sustained_20ms_concurrency",
             "conc_at_sustained",
         ] {
+            assert!(all_fields.contains(&f), "{f} is not declared by any group in METRICS: {all_fields:?}");
+        }
+    }
+
+    // The same gate for the two concurrent-stream groups. `CellStream` declared these four fields and
+    // NOTHING in the engine ever filled them: the artifact carried the keys, always null, on every
+    // cell of every gateway ever published. A group that falls back out of `METRICS` returns the
+    // board to exactly that state with nothing else failing, which is what this holds.
+    #[test]
+    fn the_two_stream_groups_are_reachable_from_metrics() {
+        let names: Vec<&str> = METRICS.iter().map(|m| m.name()).collect();
+        assert!(names.contains(&"streams_sustained"), "METRICS = {names:?}");
+        assert!(names.contains(&"cpu_fps"), "METRICS = {names:?}");
+        let all_fields: Vec<&str> = METRICS.iter().flat_map(|m| m.fields().iter().copied()).collect();
+        for f in ["streams_sustained", "streams_sustained_fps", "cpu_fps", "cpu_fps_concurrency"] {
+            assert!(all_fields.contains(&f), "{f} is not declared by any group in METRICS: {all_fields:?}");
+        }
+        // The two advisory-note inputs are on the surface too: `c1_note`/`stream_c1_note` are built
+        // from them in `suite.rs`, and a group that stopped filling them would silently drop the note
+        // rather than fail, since a note is a plain `Option<String>` with no absence to carry.
+        for f in ["gateway_c1_samples", "direct_c1_samples", "gateway_c1_frames", "direct_c1_frames"] {
             assert!(all_fields.contains(&f), "{f} is not declared by any group in METRICS: {all_fields:?}");
         }
     }
