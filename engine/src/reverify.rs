@@ -422,8 +422,13 @@ mod tests {
     #[test]
     fn a_mock_that_was_never_recording_is_unchecked_never_false() {
         let v = verdict(&state(false, &[]), Dialect::Openai, Dialect::Anthropic);
-        assert_eq!(v.verified, None, "a mock started without MOCK_RECORD says nothing about the gateway");
-        assert!(v.note.unwrap_or_default().contains("MOCK_RECORD"), "the note must name the missing configuration");
+        assert_eq!(v.verified, None, "a mock that was not recording says nothing about the gateway");
+        // The note must say the RECORDER was off, not that the gateway did anything wrong. The field
+        // boots the mock quiet on purpose and the engine toggles recording around this one request,
+        // so reaching here means the toggle did not take - a rig fault, and the note has to read as
+        // one or a reader will take it for a gateway defect.
+        let note = v.note.unwrap_or_default();
+        assert!(note.contains("recording"), "the note must name the recorder as the reason: {note}");
     }
 
     // NOTHING ARRIVED is an absence of evidence, not evidence of absence. Publishing `false` here
