@@ -13,11 +13,17 @@
 //
 // CEILING metrics (peak throughput, cpu-bound frames/sec) rise and then PLATEAU: past saturation
 // more concurrency buys queueing rather than throughput (Little's Law), so the curve wobbles around
-// a level instead of falling away from a summit. `saturation_plateau` climbs from the floor until a
-// doubling stops buying more than the MEASURED wobble, then reports the plateau. It replaced a
-// unimodal peak search that demanded a turnover a healthy gateway never produces, and that on the
-// flat part let noise decide which way to walk - which published a search-range bound as one
-// gateway's maximum.
+// a level instead of falling away from a summit. `saturation_plateau` measures every rung the same
+// way - the same windows, the same median, the same spread - and stops when two consecutive rungs
+// stop buying more than that rung's own measured wobble.
+//
+// It replaced a unimodal peak search that demanded a turnover a healthy gateway never produces, and
+// then a cleverer version of itself: one with a single-window fast path, a separate calibration
+// step, an escalation to medians and a confirm step, each updating the running best differently.
+// That version was cheaper and it was wrong on real gateways four times running, in ways that could
+// not be traced by reading it - it published a search-range bound as one gateway's maximum, and a
+// third of the curve as another's. Uniform measurement is the property that makes this predictable
+// from the curve alone.
 //
 // Both searches are generic over `Probe` so they run against a synthetic curve in tests with no
 // process, mock, or network involved. A `None` from the probe is a stopped clock (a deadline, or a
@@ -86,14 +92,6 @@ impl<'p, P: Probe> Search<'p, P> {
         self.points.push(ProbedPoint { concurrency: c, passed: sample.passed, value: sample.value });
         self.cache.insert(c, sample.clone());
         Some(sample)
-    }
-
-    /// The gate-effective value at a concurrency: the measured value if the rung passed, 0.0 if it
-    /// did not. A rung that failed its gate produced no throughput to compare against, so scoring it
-    /// zero is what stops a broken window from winning a comparison on the strength of the requests
-    /// it managed before it broke.
-    fn eff(&mut self, c: u32) -> Option<f64> {
-        self.sample(c).map(|s| eff(&s))
     }
 }
 
@@ -227,47 +225,26 @@ fn interrupted<P: Probe>(s: Search<P>) -> PeakResult {
     PeakResult { peak: Measurement::absent_because(Absent::NotMeasured, detail), points: s.points, exhausted: false }
 }
 
+/// Windows taken at every rung. Three is the smallest sample with a middle value, and the median of
+/// three is what makes a rung's number resistant to one unlucky window.
+const WINDOWS_PER_RUNG: usize = 3;
 
-
-fn eff(sample: &Sample) -> f64 {
-    if sample.passed { sample.value } else { 0.0 }
-}
-
-/// Doubles (or halves) away from `from_c` (already known to beat `base_v`) while the curve keeps
-/// rising, guarding `bound`. Returns `(bracket_low, best_c, best_v, bracket_high, exhausted)`, or
-/// `None` if the probe was interrupted. `exhausted = true` means the ramp reached `bound` while
-/// still rising: only a lower bound, no interior turnover.
-#[allow(clippy::too_many_arguments)]
-/// How many windows the wobble calibration takes at one concurrency. Three is the smallest sample
-/// that can show a spread at all, and each one costs a full load window, so this is deliberately the
-/// minimum rather than a comfortable number.
-const WOBBLE_WINDOWS: usize = 3;
-
-/// THE LOWEST RUNG AT WHICH "MORE CONCURRENCY DOES NOT HELP" IS A CREDIBLE CONCLUSION.
-///
-/// Saturation is a claim that the gateway cannot use more concurrency. Concluding that from c=1 or
-/// c=2 means concluding it from the noisiest windows the harness takes - a single connection's
-/// serial rate, with nothing averaging its variance - and from the fewest rungs. A live box drew 35
-/// then 30, 30 at c=1: the high first window made every later rung look flat, and the spread set the
-/// bar at 14%, wider than the ~10% per doubling that gateway actually gained. It published one
-/// connection's rate as the plateau.
-///
-/// A fast gateway escapes this because its early doublings are steep enough to clear any bar - luck,
-/// not correctness. Climbing to at least this rung before saturation may be declared costs four
-/// probes and removes the whole class. Above it the measured wobble decides, as it should.
-const MIN_SATURATION_CONC: u32 = 16;
-
-/// A floor under the MEASURED wobble.
-///
-/// Three windows can agree closely by luck. A calibration that happened to come out quiet would set
-/// a threshold near zero, and then every later upward wobble would read as a genuine rise - which is
-/// precisely the failure this search exists to remove, reintroduced through the back door. This
-/// floor is the smallest spread we are willing to believe of a real machine.
+/// A floor under the measured wobble. Three windows can agree closely by luck, and a threshold near
+/// zero would let any flutter read as a real gain.
 const WOBBLE_FLOOR: f64 = 0.02;
 
-/// The relative spread across repeated windows: how far this rig's own answer moves when nothing
+/// How many consecutive rungs must fail to improve before the curve is called saturated. One flat
+/// rung can be a downward draw; two in a row is the curve.
+const FLAT_RUNGS_TO_STOP: usize = 2;
+
+/// The lowest rung at which "more concurrency does not help" is a credible thing to conclude.
+/// Saturation at c=1 or c=2 would be decided by the noisiest windows the harness takes - one
+/// connection's serial rate, nothing averaging its variance.
+const MIN_SATURATION_CONC: u32 = 16;
+
+/// The relative spread across repeated windows at one rung: how far the answer moves when nothing
 /// about the question changed. `(max - min) / max`, so it is a fraction of the value being compared
-/// against rather than an absolute rate that would mean different things at 5k and at 50k.
+/// against rather than an absolute rate meaning different things at 40 and at 40,000.
 fn relative_spread(v: &[f64]) -> f64 {
     let max = v.iter().copied().fold(f64::MIN, f64::max);
     let min = v.iter().copied().fold(f64::MAX, f64::min);
@@ -277,13 +254,9 @@ fn relative_spread(v: &[f64]) -> f64 {
     (max - min) / max
 }
 
-/// Nearest-rank p50 over a sorted slice.
-///
-/// The SAME convention `gen::GenStats::pct_of` uses for the published latency percentiles: two
-/// percentile conventions in one artifact is a silent disagreement between numbers that both look
-/// correct. Nearest rank also has the property that the median is always a value some window
-/// actually produced, never the average of two that no window did - so a plateau figure remains a
-/// throughput this gateway was really observed to sustain.
+/// Nearest-rank p50 over a sorted slice: the SAME convention `gen::GenStats::pct_of` uses for the
+/// published latency percentiles, and it returns a value some window actually produced rather than
+/// the average of two that none did.
 fn nearest_rank_median(sorted: &[f64]) -> Option<f64> {
     if sorted.is_empty() {
         return None;
@@ -295,242 +268,135 @@ fn nearest_rank_median(sorted: &[f64]) -> Option<f64> {
     Some(sorted[i])
 }
 
-/// The median of `windows` windows at one concurrency: a rung's representative value rather than
-/// whatever one window happened to draw.
+/// One rung, measured: its median throughput and the spread of the windows behind it.
+struct Rung {
+    concurrency: u32,
+    median: f64,
+    spread: f64,
+}
+
+/// Measure one rung properly: `WINDOWS_PER_RUNG` windows, median of the ones that passed their gate.
 ///
-/// Used ONLY at the decision boundary. While the climb is still clearing the bar comfortably a single
-/// window is enough and three would be three times the cost for an answer that was never in doubt;
-/// once a rung looks like it might be the plateau, one draw is not enough to say so.
-fn median_probe<P: Probe>(s: &mut Search<P>, c: u32, windows: usize) -> Option<f64> {
-    let mut v = vec![s.eff(c)?];
-    for _ in 1..windows {
-        v.push(eff(&s.sample_repeat(c)?));
+/// A window that FAILED its gate measured no throughput, so it is excluded from both the median and
+/// the spread - it is still recorded in `points` as evidence about the rung. Letting one in made the
+/// spread ~100% and froze an earlier version of this search near the floor.
+fn measure_rung<P: Probe>(s: &mut Search<P>, c: u32) -> Option<Rung> {
+    let mut vals = Vec::with_capacity(WINDOWS_PER_RUNG);
+    for i in 0..WINDOWS_PER_RUNG {
+        // The first window may come from the memo; the repeats must not, since the whole point is
+        // that identical conditions produce different numbers.
+        let sample = if i == 0 { s.sample(c)? } else { s.sample_repeat(c)? };
+        if sample.passed {
+            vals.push(sample.value);
+        }
     }
-    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    nearest_rank_median(&v)
+    if vals.is_empty() {
+        return Some(Rung { concurrency: c, median: 0.0, spread: 0.0 });
+    }
+    vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    Some(Rung {
+        concurrency: c,
+        median: nearest_rank_median(&vals).unwrap_or(0.0),
+        spread: if vals.len() >= 2 { relative_spread(&vals) } else { 0.0 },
+    })
 }
 
 /// Find where throughput SATURATES, and report the plateau it settles on.
 ///
 /// THROUGHPUT AGAINST CONCURRENCY IS A PLATEAU, NOT A BELL CURVE. A proxy climbs while it is
 /// latency-bound, reaches a knee when it saturates, and then holds flat: past saturation more
-/// concurrency buys queueing, not throughput (Little's Law), so the curve wobbles around a level
-/// instead of falling away from a summit. A healthy gateway never produces a turnover at all, and
-/// demanding one before believing a number means never believing a well-behaved gateway.
+/// concurrency buys queueing, not throughput (Little's Law). A healthy gateway never turns over, so
+/// a search demanding a fall-off before it will believe a number will never believe a good gateway.
 ///
-/// THE SEARCH THIS REPLACES hunted a unimodal maximum. It required a fall-off most gateways will
-/// never produce, and on the flat part "is the next rung higher?" is decided by noise rather than by
-/// the gateway. A live field run showed one entrant's rungs spanning 0.8% across three doublings;
-/// the ramp coin-flipped upward, ran off the top of the range, and published the range bound as that
-/// gateway's maximum. Its start concurrency was also the midpoint of the search range, so widening
-/// the range moved the FIRST probe higher - which is how a 1..65536 run opened by asking for 32768
-/// concurrent connections and buried the box before any search logic ran.
+/// THE SHAPE OF THIS SEARCH IS DELIBERATELY BORING. Every rung is measured the same way - the same
+/// number of windows, the same median, the same spread - and the stopping rule reads off those
+/// numbers and nothing else. An earlier version had a cheap single-window fast path, a separate
+/// calibration step, an escalation to medians, and a confirm step, each updating the running best
+/// differently. It was faster on paper and it was wrong on real gateways four times in a row, in
+/// ways its author could not trace by reading it. Uniform measurement costs a few more windows and
+/// buys a search whose behaviour can be predicted from the curve alone.
 ///
-/// So instead: start at the floor and climb by doubling while each rung beats the best by MORE THAN
-/// THE MEASURED WOBBLE; confirm with one further doubling before believing saturation, so a single
-/// downward wobble cannot end the search early; then report the plateau. Still climbing materially
-/// at `max_conc` is `SearchExhausted` - a real "we never saturated", not a noise artefact.
+/// The reported value is the plateau's MEDIAN rung, not its best: on a plateau the rungs differ only
+/// by luck, so publishing the best hands the win to whichever gateway drew the kindest window. The
+/// reported concurrency is the KNEE - the lowest rung that reached the plateau - which is the answer
+/// to "how much concurrency do I need before more stops helping".
 ///
-/// The reported value is the MEDIAN of the plateau rungs, not the best of them. Taking the best
-/// would hand the win to whichever gateway got the luckiest window, since the plateau's whole
-/// character is that its rungs differ only by noise. `min_conc`/`max_conc` are normalised if given
-/// reversed.
+/// `min_conc`/`max_conc` are normalised if given reversed.
 pub fn saturation_plateau<P: Probe>(probe: &mut P, min_conc: u32, max_conc: u32) -> PeakResult {
     let (min_conc, max_conc) = if min_conc <= max_conc { (min_conc, max_conc) } else { (max_conc, min_conc) };
     let mut s = Search::new(probe);
 
     // CLIMB FROM THE FLOOR, ALWAYS. The start is not derived from the range: a start that moves with
-    // the bound makes the ladder arbitrary, makes every gateway's evidence start at a different
-    // place, and (as above) turns a wider range into a more dangerous first probe. Starting at the
-    // floor also means the published sweep shows the whole curve - the rise AND the plateau - so a
-    // reader can see the knee rather than being handed it.
-    let mut base = min_conc;
-    let base_value = loop {
-        let v = match s.eff(base) {
-            Some(v) => v,
-            None => return interrupted(s),
-        };
-        if v > 0.0 {
-            break v;
-        }
-        if base >= max_conc {
-            let detail = format!(
-                "no concurrency from {min_conc} to {max_conc} passed the gate, so no throughput was established at any rung"
-            );
-            return PeakResult {
-                peak: Measurement::absent_because(Absent::NotMeasured, detail),
-                points: s.points,
-                exhausted: false,
-            };
-        }
-        base = base.saturating_mul(2).min(max_conc);
-    };
-
-    let mut best_v = base_value;
-    let mut best_c = base;
-    let mut c = base;
-    let mut exhausted = false;
-    // Provisional until it is MEASURED, and measured where the decision is actually made rather than
-    // down here. Repeated windows on the rising part of the curve agree far more closely than they do
-    // at saturation, because below the knee the gateway is not contending for anything; calibrating
-    // here would set a threshold far too tight and let the first upward flutter read as a real climb.
-    let mut wobble = WOBBLE_FLOOR;
-    let mut calibrated = false;
+    // the bound makes the ladder arbitrary and turns a wider range into a more dangerous first probe
+    // - which is how a 1..65536 run once opened by asking for 32768 concurrent connections. Starting
+    // at the floor also means the published sweep shows the whole curve, rise and plateau both, so a
+    // reader can see the knee rather than being told it.
+    let mut rungs: Vec<Rung> = Vec::new();
+    let mut c = min_conc;
+    let mut flat_run = 0usize;
+    let mut hit_bound = false;
 
     loop {
+        let rung = match measure_rung(&mut s, c) {
+            Some(r) => r,
+            None => return interrupted(s),
+        };
+        let best_so_far = rungs.iter().map(|r| r.median).fold(0.0_f64, f64::max);
+        // The bar is this rung's own measured wobble, floored. Judging a rung against the noise of a
+        // DIFFERENT rung is what let a noisy floor set an impossible bar for the whole ladder.
+        let wobble = rung.spread.max(WOBBLE_FLOOR);
+        let improved = rung.median > best_so_far * (1.0 + wobble);
+        rungs.push(rung);
+
+        if improved {
+            flat_run = 0;
+        } else {
+            flat_run += 1;
+        }
+
         if c >= max_conc {
-            // Every doubling up to the bound was still buying real throughput. The gateway never
-            // saturated inside the range we looked at, so there is no plateau to report.
-            exhausted = true;
+            hit_bound = true;
             break;
         }
-        let next = c.saturating_mul(2).min(max_conc);
-        let v = match s.eff(next) {
-            Some(v) => v,
-            None => return interrupted(s),
-        };
-        // THE CHEAP FAST PATH, and it demands TWICE the wobble. `best_v` is a median - a rung's
-        // centre - so a single window drawing high sits about one wobble above it by definition and
-        // would clear a one-wobble bar on noise alone. Below the knee a doubling roughly doubles
-        // throughput, so a real step clears two wobbles without noticing; near the plateau nothing
-        // clears it, and the search escalates to medians below, which is exactly where the extra
-        // windows are worth paying for.
-        if v > best_v * (1.0 + 2.0 * wobble) {
-            best_v = v;
-            best_c = next;
-            c = next;
-            continue;
-        }
-
-        // THE FIRST RUNG THAT DID NOT CLEARLY IMPROVE. This is where the whole verdict turns, so
-        // this is where the noise gets measured: repeat the best rung and take the spread as this
-        // rig's own window-to-window wobble, then re-judge this rung against the real number.
-        if !calibrated {
-            calibrated = true;
-            // ONLY WINDOWS THAT PASSED THEIR GATE. A failed window measured no throughput at all -
-            // `eff` scores it 0.0 - so letting one into the sample makes the spread ~100%, which
-            // makes "materially better" mean "twice as fast", which nothing ever is. The search then
-            // freezes on the rung it happened to be standing on and publishes a number from the
-            // bottom of the climb as though it were the plateau. A live run did exactly that: one
-            // entrant, whose box really does produce failing windows at c=1, was published at 41 rps
-            // while its own recorded sweep was still climbing through 47 and rising.
-            //
-            // A spread is a statement about a population of measurements, and a window that
-            // measured nothing is not a member of it.
-            let mut calibration = Vec::with_capacity(WOBBLE_WINDOWS);
-            if best_v > 0.0 {
-                calibration.push(best_v);
-            }
-            for _ in 1..WOBBLE_WINDOWS {
-                match s.sample_repeat(best_c) {
-                    Some(x) if x.passed => calibration.push(eff(&x)),
-                    // A failing repeat is real evidence about the rung, and it is already recorded in
-                    // `points`; it just cannot contribute to a spread of throughputs.
-                    Some(_) => {}
-                    None => return interrupted(s),
-                }
-            }
-            // Fewer than two surviving windows cannot show a spread at all, so there is nothing
-            // measured to prefer over the floor.
-            wobble = if calibration.len() >= 2 { relative_spread(&calibration).max(WOBBLE_FLOOR) } else { WOBBLE_FLOOR };
-            // THE REPRESENTATIVE VALUE OF A RUNG IS ITS MEDIAN WINDOW, NOT ITS BEST ONE. Taking the
-            // best sets the bar for "materially better" using this rung's luckiest draw, and a rung
-            // that drew high can then hold off the real plateau above it - the search stops just
-            // short of the knee and publishes a level the gateway beats. A property test found
-            // exactly that at knee=274. Comparing a maximum against later windows is also the same
-            // max-versus-median inconsistency this search exists to remove, one level down.
-            let mut sorted = calibration.clone();
-            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-            // `unwrap_or(best_v)` matters here: if every repeat failed, the rung keeps the value it
-            // was climbing on rather than being rewritten by an empty sample.
-            best_v = nearest_rank_median(&sorted).unwrap_or(best_v);
-        }
-
-        // JUDGE THE CANDIDATE ON A MEDIAN TOO. The rung we are comparing against now has
-        // WOBBLE_WINDOWS windows behind it, and judging it against a single draw here is the same
-        // max-versus-median asymmetry one level down: a candidate that drew low is dismissed, the
-        // search stops a rung short of the knee, and the gateway is published below the level it
-        // actually holds. A property test found exactly that at knee=274, where a +2.8% draw below
-        // the knee and a -2.8% draw above it masked a real 7% step.
-        let vm = match median_probe(&mut s, next, WOBBLE_WINDOWS) {
-            Some(v) => v,
-            None => return interrupted(s),
-        };
-        if vm > best_v * (1.0 + wobble) {
-            best_v = vm;
-            best_c = next;
-            c = next;
-            continue;
-        }
-
-        // Still no material gain. CONFIRM BEFORE BELIEVING IT: one flat rung can be a downward
-        // wobble, and stopping there would publish a plateau the gateway had not actually reached.
-        if next >= max_conc {
-            // The bound itself bought nothing, so this IS saturation, and there is nothing above it
-            // left to confirm with.
+        // Saturation needs consecutive flat rungs AND a rung high enough for "more does not help" to
+        // mean anything.
+        if flat_run >= FLAT_RUNGS_TO_STOP && c >= MIN_SATURATION_CONC {
             break;
         }
-        let after = next.saturating_mul(2).min(max_conc);
-        let v2 = match median_probe(&mut s, after, WOBBLE_WINDOWS) {
-            Some(v) => v,
-            None => return interrupted(s),
-        };
-        if v2 > best_v * (1.0 + wobble) {
-            best_v = v2;
-            best_c = after;
-            c = after;
-            continue;
-        }
-        // Two consecutive doublings bought nothing beyond the wobble. Above the credibility floor
-        // that is saturation; at or below it, it is the floor's own scatter talking, so keep going
-        // and let a quieter rung decide.
-        if best_c < MIN_SATURATION_CONC && next < max_conc {
-            best_v = best_v.max(vm).max(v2);
-            best_c = after;
-            c = after;
-            continue;
-        }
-        break;
+        c = c.saturating_mul(2).min(max_conc);
     }
 
-    if exhausted {
+    let best = rungs.iter().map(|r| r.median).fold(0.0_f64, f64::max);
+    if best <= 0.0 {
         let detail = format!(
-            "throughput was still climbing by more than the measured {:.1}% window-to-window wobble at c={best_c} ({best_v:.0}) when the search range ran out at {max_conc}, so saturation was never observed and no plateau was established",
-            wobble * 100.0
+            "no concurrency from {min_conc} to {max_conc} passed the gate, so no throughput was established at any rung"
         );
-        return PeakResult {
-            peak: Measurement::absent_because(Absent::SearchExhausted, detail),
-            points: s.points,
-            exhausted: true,
-        };
+        return PeakResult { peak: Measurement::absent_because(Absent::NotMeasured, detail), points: s.points, exhausted: false };
     }
 
-    // THE PLATEAU IS EVERY RUNG AT OR ABOVE `best_c`, and membership is decided by the SEARCH, not
-    // by a value band.
-    //
-    // A band looked right and was wrong: it admitted any rung whose value happened to land inside it,
-    // including one just BELOW the knee that an upward wobble had lifted into range. That rung is on
-    // the rising part of the curve - it belongs to the climb, not the flat - and averaging it in drags
-    // the published figure below the plateau the gateway actually holds. A property test found it at
-    // knee=274, where c=256 sat 6.6% under the plateau and a +2.8% window brought it inside a 5.7%
-    // band.
-    //
-    // `best_c` is by construction the last rung that was MATERIALLY better than everything under it,
-    // so it is the lowest concurrency observed to reach the plateau, and every rung above it is flat
-    // by the same test that ended the climb. That is the region, stated by the search itself.
-    let knee = best_c;
-    let mut values: Vec<f64> = s
-        .points
-        .iter()
-        .filter(|p| p.passed && p.concurrency >= knee)
-        .map(|p| p.value)
-        .collect();
-    values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let plateau = nearest_rank_median(&values).unwrap_or(best_v);
+    // STILL CLIMBING AT THE BOUND is a lower bound, not a plateau. The range is our choice; reporting
+    // it as the gateway's ceiling would be publishing our own search bound as its answer.
+    if hit_bound && flat_run < FLAT_RUNGS_TO_STOP {
+        let top_wobble = rungs.last().map(|r| r.spread.max(WOBBLE_FLOOR)).unwrap_or(WOBBLE_FLOOR);
+        let detail = format!(
+            "throughput was still climbing by more than the measured {:.1}% window-to-window wobble at c={max_conc} ({best:.0}) when the search range ran out, so saturation was never observed and no plateau was established",
+            top_wobble * 100.0
+        );
+        return PeakResult { peak: Measurement::absent_because(Absent::SearchExhausted, detail), points: s.points, exhausted: true };
+    }
 
-    // KNEE, NOT SUMMIT. With a median value there is no single winning rung for "where the peak
-    // happened" to point at, and the lowest concurrency that reached the plateau is the more useful
-    // fact anyway: it is the answer to "how much concurrency do I need before more stops helping".
+    // THE PLATEAU is every rung within its own wobble of the best one. The knee is the lowest of
+    // them: rungs from the climb sit well below and are excluded by the same comparison that decided
+    // saturation.
+    let band = rungs
+        .iter()
+        .filter(|r| r.median > 0.0 && r.median >= best * (1.0 - r.spread.max(WOBBLE_FLOOR)))
+        .collect::<Vec<_>>();
+    let knee = band.iter().map(|r| r.concurrency).min().unwrap_or(min_conc);
+    let mut vals: Vec<f64> = band.iter().map(|r| r.median).collect();
+    vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let plateau = nearest_rank_median(&vals).unwrap_or(best);
+
     PeakResult {
         peak: Measurement::Measured(PeakPoint { concurrency: knee, value: plateau }),
         points: s.points,
@@ -771,6 +637,49 @@ mod tests {
         );
     }
 
+    // THE WHOLE CLIMB, FROM A REAL RUN THAT GOT IT WRONG.
+    //
+    // These are one entrant's actual recorded windows. The search that produced them published
+    // 38 rps at c=16 while its own sweep, in the same run, measured 55-59 at c=64 - it stopped a
+    // third of the way up its own curve. The rungs above are where that gateway actually settles.
+    //
+    // This is the case that retired the previous search. That one had a cheap single-window fast
+    // path, a separate calibration step, an escalation to medians and a confirm step, each updating
+    // the running best differently; it was mis-traced by its own author four times and shipped two
+    // understated field runs. Uniform measurement at every rung costs more windows and is
+    // predictable from the curve alone, which is the property that matters here.
+    #[test]
+    fn the_published_plateau_is_the_one_the_curve_actually_reaches() {
+        let mut seq = std::collections::BTreeMap::new();
+        seq.insert(1u32, vec![34.0, 29.0, 28.0]);
+        seq.insert(2, vec![30.0, 29.0, 30.0]);
+        seq.insert(4, vec![31.0, 31.0, 31.0]);
+        seq.insert(8, vec![34.0, 34.0, 35.0]);
+        seq.insert(16, vec![38.0, 39.0, 38.0]);
+        seq.insert(32, vec![45.0, 47.0, 44.0]);
+        seq.insert(64, vec![55.0, 56.0, 59.0]);
+        // where it flattens
+        seq.insert(128, vec![60.0, 61.0, 60.0]);
+        seq.insert(256, vec![61.0, 60.0, 61.0]);
+        seq.insert(512, vec![60.0, 61.0, 60.0]);
+        seq.insert(1024, vec![61.0, 60.0, 61.0]);
+
+        let mut p = ReplayWindows { seq, seen: Default::default() };
+        let r = saturation_plateau(&mut p, 1, 4096);
+        let w = r.peak.value().expect("a curve that flattens has a plateau");
+        assert!(
+            w.value >= 58.0,
+            "published {} rps - the curve reaches 60 and this stopped short of it, which is what \
+             the live run did at 38",
+            w.value
+        );
+        assert!(
+            w.concurrency >= 64,
+            "knee reported at c={} - the curve is still climbing hard there",
+            w.concurrency
+        );
+    }
+
     // SATURATION MUST NOT BE DECLARED FROM THE FLOOR.
     //
     // These are one entrant's EXACT recorded windows from a live run, replayed in the order its box
@@ -812,6 +721,10 @@ mod tests {
         seq.insert(64, vec![48.0, 49.0, 48.0]);
         seq.insert(128, vec![49.0, 48.0, 49.0]);
         seq.insert(256, vec![49.0, 48.0, 49.0]);
+        seq.insert(512, vec![48.0, 49.0, 48.0]);
+        seq.insert(1024, vec![49.0, 48.0, 49.0]);
+        seq.insert(2048, vec![48.0, 49.0, 48.0]);
+        seq.insert(4096, vec![49.0, 48.0, 49.0]);
 
         let mut p = ReplayWindows { seq, seen: Default::default() };
         let r = saturation_plateau(&mut p, 1, 4096);
@@ -999,8 +912,8 @@ mod tests {
             *seen.entry(p.concurrency).or_insert(0) += 1;
         }
         assert!(
-            seen.values().any(|n| *n >= WOBBLE_WINDOWS),
-            "no concurrency was probed {WOBBLE_WINDOWS} times, so the wobble was never measured: {seen:?}"
+            seen.values().any(|n| *n >= WINDOWS_PER_RUNG),
+            "no concurrency was probed {WINDOWS_PER_RUNG} times, so the wobble was never measured: {seen:?}"
         );
     }
 
@@ -1198,5 +1111,6 @@ mod proptests {
         }
     }
 }
+
 
 
