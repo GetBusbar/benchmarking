@@ -1,0 +1,17 @@
+# Commands run after this gateway is up and before anything is measured. One per line, each its own
+# /bin/sh -c, so nothing an `export` sets survives to the next line.
+#
+# WHY THIS GATEWAY HAS ONE. Its config reader is a soft dependency that fails SILENTLY. The binary
+# embeds CPython; when LITELLM_CONFIG_PATH is set it imports the litellm package to read the
+# model_list, and if that import fails it prints one line to stderr and falls back to a built-in
+# stand-in router carrying a single unrelated deployment. The process still boots, still binds the
+# port, still answers /v1/messages - with HTTP 400 "no deployment registered" on every request. That
+# is indistinguishable from a gateway that cannot serve the route at all, so a broken venv would be
+# published as a capability denial rather than as the rig failure it is. Exactly that happened.
+#
+# So: ask it, once, for the model the matrix will ask for, and refuse the run unless it routes. A
+# 400 here means the config reader did not load config.gen.yaml, not that the gateway lacks the
+# capability. The port, key and model are literal because `commands` gets no placeholder
+# substitution (manifest.rs's loader reads the file verbatim); they are the same values definition.json
+# and env declare.
+curl -s -m 10 -X POST http://127.0.0.1:8101/v1/messages -H 'content-type: application/json' -H 'Authorization: Bearer gwbench' -d '{"model":"azure_ai/mock","max_tokens":1,"messages":[{"role":"user","content":"hi"}]}' > /tmp/lr-config-check 2>&1; grep -q 'no deployment registered' /tmp/lr-config-check && { echo "booted into the env fallback router - the python config reader never loaded config.gen.yaml, so PYTHONPATH is not reaching the build venv: $(cat /tmp/lr-config-check)" >&2; exit 1; }; exit 0

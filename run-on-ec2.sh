@@ -819,6 +819,14 @@ fi
 # load generator 4-9, mock 10-15 - IS the comparability basis of every published number, so a mock
 # sharing cores with either of the others measures a different machine.
 pkill -f "bin/mock-$BENCH_ARCH" 2>/dev/null; sleep 1
+# The mock answers all six dialects by path, so a gateway that forwards the client's ingress request
+# VERBATIM still gets a plausible 200 back and would be scored as having a translation it does not
+# have. Recording is what makes that detectable: the mock keeps, per dialect, whether the body it
+# actually received matched that dialect's request shape, and the runner reads it off /__mock/state.
+# Without this the reverification is dead code and every capability verdict is a status-code guess.
+# It is exported (not prefixed onto the command) so it survives the setsid/taskset re-exec chain the
+# same way MOCKCORES does, and so the pinning below is left exactly as it was.
+export MOCK_RECORD=1
 setsid taskset -c $MOCKCORES ./bin/mock-$BENCH_ARCH --port 8000 </dev/null >mock.log 2>&1 &
 # Give it a moment to bind, then refuse to measure anything if it did not: every not-served verdict
 # is conditioned on the mock being up, so a run against a dead mock publishes rig failures as
