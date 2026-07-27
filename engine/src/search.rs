@@ -243,6 +243,20 @@ fn eff(sample: &Sample) -> f64 {
 /// minimum rather than a comfortable number.
 const WOBBLE_WINDOWS: usize = 3;
 
+/// THE LOWEST RUNG AT WHICH "MORE CONCURRENCY DOES NOT HELP" IS A CREDIBLE CONCLUSION.
+///
+/// Saturation is a claim that the gateway cannot use more concurrency. Concluding that from c=1 or
+/// c=2 means concluding it from the noisiest windows the harness takes - a single connection's
+/// serial rate, with nothing averaging its variance - and from the fewest rungs. A live box drew 35
+/// then 30, 30 at c=1: the high first window made every later rung look flat, and the spread set the
+/// bar at 14%, wider than the ~10% per doubling that gateway actually gained. It published one
+/// connection's rate as the plateau.
+///
+/// A fast gateway escapes this because its early doublings are steep enough to clear any bar - luck,
+/// not correctness. Climbing to at least this rung before saturation may be declared costs four
+/// probes and removes the whole class. Above it the measured wobble decides, as it should.
+const MIN_SATURATION_CONC: u32 = 16;
+
 /// A floor under the MEASURED wobble.
 ///
 /// Three windows can agree closely by luck. A calibration that happened to come out quiet would set
@@ -467,8 +481,15 @@ pub fn saturation_plateau<P: Probe>(probe: &mut P, min_conc: u32, max_conc: u32)
             c = after;
             continue;
         }
-        // Two consecutive doublings bought nothing beyond the wobble: more concurrency is not
-        // buying throughput any more.
+        // Two consecutive doublings bought nothing beyond the wobble. Above the credibility floor
+        // that is saturation; at or below it, it is the floor's own scatter talking, so keep going
+        // and let a quieter rung decide.
+        if best_c < MIN_SATURATION_CONC && next < max_conc {
+            best_v = best_v.max(vm).max(v2);
+            best_c = after;
+            c = after;
+            continue;
+        }
         break;
     }
 
@@ -747,6 +768,64 @@ mod tests {
         assert!(
             !r.points.iter().any(|p| p.concurrency == 4096),
             "the search reached the top of the range on a curve that stopped improving at c=64"
+        );
+    }
+
+    // SATURATION MUST NOT BE DECLARED FROM THE FLOOR.
+    //
+    // These are one entrant's EXACT recorded windows from a live run, replayed in the order its box
+    // produced them. Rung one drew high (35) and its repeats came back low (30, 30), which does two
+    // things at once: the high first window makes every later rung look like no improvement, and the
+    // spread makes the bar 14% - wider than the ~10%-per-doubling this gateway actually gains. The
+    // search concluded "more concurrency does not help" from the two noisiest rungs it will ever
+    // measure and published a single connection's rate as the plateau: 33 rps at c=1.
+    //
+    // The same search runs on all thirteen entrants. A fast gateway escapes this because its early
+    // doublings are steep enough to clear any bar; that is luck, not correctness, and it is why this
+    // is pinned with the real numbers rather than a model of them.
+    struct ReplayWindows {
+        seq: std::collections::BTreeMap<u32, Vec<f64>>,
+        seen: std::collections::BTreeMap<u32, usize>,
+    }
+    impl Probe for ReplayWindows {
+        fn probe(&mut self, c: u32) -> Option<Sample> {
+            let i = self.seen.entry(c).or_insert(0);
+            let n = *i;
+            *i += 1;
+            let xs = self.seq.get(&c)?;
+            Some(Sample { value: xs[n.min(xs.len() - 1)], passed: true })
+        }
+    }
+
+    #[test]
+    fn saturation_is_never_concluded_from_the_floors_own_noise() {
+        let mut seq = std::collections::BTreeMap::new();
+        // The live windows, verbatim.
+        seq.insert(1u32, vec![35.0, 30.0, 30.0]);
+        seq.insert(2, vec![30.0, 33.0, 31.0]);
+        seq.insert(4, vec![33.0, 34.0, 33.0]);
+        // Where that same gateway went on an earlier run, when the search did keep climbing: it is
+        // still gaining at every doubling out to c=32.
+        seq.insert(8, vec![37.0, 37.0, 38.0]);
+        seq.insert(16, vec![39.0, 40.0, 41.0]);
+        seq.insert(32, vec![45.0, 46.0, 47.0]);
+        seq.insert(64, vec![48.0, 49.0, 48.0]);
+        seq.insert(128, vec![49.0, 48.0, 49.0]);
+        seq.insert(256, vec![49.0, 48.0, 49.0]);
+
+        let mut p = ReplayWindows { seq, seen: Default::default() };
+        let r = saturation_plateau(&mut p, 1, 4096);
+        let w = r.peak.value().expect("a climbing curve has a plateau");
+        assert!(
+            w.concurrency > 1,
+            "the search stopped on rung one and published {} rps - a single connection's rate, \
+             decided by that rung's own scatter",
+            w.value
+        );
+        assert!(
+            w.value > 40.0,
+            "published {} rps, but this gateway is measured going on to 47+ at higher rungs",
+            w.value
         );
     }
 
@@ -1119,4 +1198,5 @@ mod proptests {
         }
     }
 }
+
 
