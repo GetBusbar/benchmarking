@@ -21,13 +21,34 @@
 //   mock -port 8000                    # instant responses
 //   MOCK_TTFT_MS=20 mock -port 8000    # add a fixed delay (latency-isolation runs)
 //
-// RECORDING (matrix suite): with MOCK_RECORD=1 the mock additionally records, per protocol
-// dialect, how many requests arrived on that dialect's endpoint and whether the LAST request body
-// looked like that dialect's request shape (loose marker check). GET /__mock/state returns the
-// record as JSON; POST /__mock/reset zeroes it. This lets the matrix runner prove a request
-// actually round-tripped through the gateway to the intended egress dialect. The recording is
-// entirely skipped (one branch on a bool) when MOCK_RECORD is unset, so the perf suites' hot path
-// is untouched.
+// RECORDING (matrix suite): the mock can record, per protocol dialect, how many requests arrived on
+// that dialect's endpoint and whether the LAST request body looked like that dialect's request shape
+// (loose marker check). GET /__mock/state returns the record as JSON; POST /__mock/reset zeroes it.
+// This lets the matrix runner prove a request actually round-tripped through the gateway to the
+// intended egress dialect.
+//
+// RECORDING IS RUNTIME-TOGGLABLE, AND THAT IS A MEASUREMENT-INTEGRITY DECISION, not a convenience.
+// MOCK_RECORD=1 sets the STARTING state; POST /__mock/record with `{"on":true|false}` changes it
+// while the mock runs, and GET /__mock/state reports it.
+//
+// The reason is what recording costs and what that cost would do to the published board. This mock's
+// own throughput is the reference every gateway's number is judged against (the harness's
+// rig_ceiling + is_rig_bound): a result within 10% of the mock's ceiling is suppressed as
+// mock-bound rather than published. So anything that slows the mock down converts real gateway
+// measurements into suppressed ones - honestly suppressed, and therefore invisible as a regression,
+// which is what makes it dangerous. A recorded request takes a process-wide lock, and the harness
+// needs the record for exactly ONE request per cell while it drives millions through the same
+// process for the throughput and memory windows.
+//
+// With the toggle the harness turns recording on around its one re-verification request and off for
+// every load window, so every published number is taken against the same mock behaviour the perf
+// suites have always run against - INCLUDING the mock's own reference ceiling, which is measured
+// with this same process and would otherwise be a different instrument from the one the gateway was
+// measured against.
+//
+// The unrecorded path is still one branch on an atomic load, and the recorded path now does its
+// shape check and its allocations OUTSIDE the critical section, so the lock is held for a handful of
+// moves rather than for a substring scan over the body plus two heap allocations.
 //
 // STREAMING: when (and only when) the request body says "stream":true, the OpenAI and Anthropic
 // paths answer a valid SSE stream instead - role/message_start, then N content deltas paced at a
@@ -154,8 +175,8 @@ fn request_shape_ok(dialect: &str, body: &[u8]) -> bool {
 const DIALECTS: [&str; 7] =
     ["openai", "openai-responses", "anthropic", "gemini", "cohere", "bedrock", "other"];
 
-/// Per-dialect request record (matrix suite, MOCK_RECORD=1 only): request count, whether the last
-/// body passed the dialect's shape check, and the last path + a body snippet as evidence.
+/// Per-dialect request record (recording only): request count, whether the last body passed the
+/// dialect's shape check, and the last path + a body snippet as evidence.
 #[derive(Default, Clone)]
 struct DialectRecord {
     count: u64,
@@ -165,6 +186,25 @@ struct DialectRecord {
 }
 
 type Recorder = std::sync::Mutex<std::collections::HashMap<&'static str, DialectRecord>>;
+
+/// Whether recording is on RIGHT NOW. An atomic rather than the plain `bool` this used to be, because
+/// the state is no longer fixed at boot: `/__mock/record` flips it while requests are in flight, and
+/// the unrecorded hot path must still pay nothing more than a relaxed load to find that out.
+type RecordFlag = std::sync::atomic::AtomicBool;
+
+/// Does the control body ask for recording on or off? `None` for a body that says neither, which is
+/// a request the caller got wrong and must be refused rather than defaulted: silently reading an
+/// unparseable body as "off" would leave a harness believing it had enabled the recorder it is about
+/// to draw a conclusion from, and the conclusion it draws from an empty recorder is about somebody's
+/// product.
+fn wants_recording(body: &[u8]) -> Option<bool> {
+    let has = |needle: &str| body.windows(needle.len()).any(|w| w == needle.as_bytes());
+    match (has("\"on\":true"), has("\"on\": true"), has("\"on\":false"), has("\"on\": false")) {
+        (true, _, false, false) | (_, true, false, false) => Some(true),
+        (false, false, true, _) | (false, false, _, true) => Some(false),
+        _ => None,
+    }
+}
 
 fn json_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 8);
@@ -338,15 +378,16 @@ async fn handle(
     ttft_ms: u64,
     frames: Arc<StreamFrames>,
     recorder: Arc<Recorder>,
-    recording: bool,
+    recording: Arc<RecordFlag>,
 ) -> Result<Response<OutBody>, Infallible> {
     let path = req.uri().path().to_string();
-    // Matrix-runner control endpoints - served regardless of MOCK_RECORD so the runner can tell
+    // Matrix-runner control endpoints - served whether or not recording is on, so the runner can tell
     // recording apart from "no requests arrived" (state carries a `recording` flag).
     if path == "/__mock/state" {
+        let on = recording.load(std::sync::atomic::Ordering::Relaxed);
         return Ok(Response::builder()
             .header("content-type", "application/json")
-            .body(Full::new(Bytes::from(state_json(&recorder, recording))).boxed())
+            .body(Full::new(Bytes::from(state_json(&recorder, on))).boxed())
             .unwrap());
     }
     if path == "/__mock/reset" {
@@ -355,6 +396,38 @@ async fn handle(
             .header("content-type", "application/json")
             .body(Full::new(Bytes::from_static(b"{\"ok\":true}")).boxed())
             .unwrap());
+    }
+    // TURN RECORDING ON AND OFF WHILE THE MOCK RUNS. The harness needs the recorder for one request
+    // per cell and drives millions more through this process for its load windows; leaving recording
+    // on for those would slow the mock, and the mock's own throughput is the reference every
+    // gateway's number is judged against, so it would suppress real gateway measurements as
+    // mock-bound. A body that says neither on nor off is REFUSED rather than defaulted: a caller who
+    // believes it enabled the recorder and did not would read an empty record as a gateway failing to
+    // translate.
+    if path == "/__mock/record" {
+        let body = match Limited::new(req.into_body(), MAX_BODY_BYTES).collect().await {
+            Ok(c) => c.to_bytes(),
+            Err(_) => Bytes::new(),
+        };
+        return Ok(match wants_recording(&body) {
+            Some(on) => {
+                recording.store(on, std::sync::atomic::Ordering::Relaxed);
+                Response::builder()
+                    .header("content-type", "application/json")
+                    .body(Full::new(Bytes::from(format!("{{\"ok\":true,\"recording\":{on}}}"))).boxed())
+                    .unwrap()
+            }
+            None => Response::builder()
+                .status(hyper::StatusCode::BAD_REQUEST)
+                .header("content-type", "application/json")
+                .body(
+                    Full::new(Bytes::from_static(
+                        b"{\"ok\":false,\"error\":\"body must say {\\\"on\\\":true} or {\\\"on\\\":false}\"}",
+                    ))
+                    .boxed(),
+                )
+                .unwrap(),
+        });
     }
     let body = body_for(&path);
     // Drain the request body so the connection stays keep-alive; only the stream flag is looked at.
@@ -370,14 +443,22 @@ async fn handle(
                 .unwrap());
         }
     };
-    if recording {
+    if recording.load(std::sync::atomic::Ordering::Relaxed) {
+        // THE SHAPE CHECK AND THE ALLOCATIONS HAPPEN OUTSIDE THE LOCK. They used to happen inside it,
+        // which held a process-wide mutex across a substring scan of the body plus two heap
+        // allocations on every request - a serialization point in the one process whose throughput is
+        // the reference every gateway's number is judged against. The critical section is now three
+        // moves.
         let d = dialect_for(&path);
+        let body_ok = request_shape_ok(d, &reqbody);
+        let last_path = path.clone();
+        let last_snippet = String::from_utf8_lossy(&reqbody[..reqbody.len().min(200)]).into_owned();
         let mut map = recorder.lock().unwrap();
         let r = map.entry(d).or_default();
         r.count += 1;
-        r.body_ok = request_shape_ok(d, &reqbody);
-        r.last_path = path.clone();
-        r.last_snippet = String::from_utf8_lossy(&reqbody[..reqbody.len().min(200)]).into_owned();
+        r.body_ok = body_ok;
+        r.last_path = last_path;
+        r.last_snippet = last_snippet;
     }
     if wants_stream(&reqbody) && (std::ptr::eq(body, OPENAI) || std::ptr::eq(body, ANTHROPIC)) {
         return Ok(sse_response(frames, std::ptr::eq(body, ANTHROPIC), ttft_ms));
@@ -406,7 +487,11 @@ async fn main() {
     let s_interval = envn("MOCK_STREAM_INTERVAL_MS", 20);
     let s_bytes = envn("MOCK_STREAM_CHUNK_BYTES", 16) as usize;
     let frames = Arc::new(StreamFrames::build(s_chunks, s_interval, s_bytes));
-    let recording = std::env::var("MOCK_RECORD").map(|v| v == "1").unwrap_or(false);
+    // The STARTING state only. `/__mock/record` changes it at runtime, which is how the harness keeps
+    // its load windows running against exactly the mock behaviour every previously published number
+    // was taken against.
+    let recording: Arc<RecordFlag> =
+        Arc::new(RecordFlag::new(std::env::var("MOCK_RECORD").map(|v| v == "1").unwrap_or(false)));
     let recorder: Arc<Recorder> = Arc::new(Recorder::default());
 
     // Bind 0.0.0.0 (not just loopback) so container-networked gateways (Arch via host.docker.internal,
@@ -455,6 +540,7 @@ async fn main() {
         let io = TokioIo::new(stream);
         let frames = frames.clone();
         let recorder = recorder.clone();
+        let recording = recording.clone();
         tokio::spawn(async move {
             // Held for the life of the connection; dropped (releasing the permit) when this task ends.
             let _permit = permit;
@@ -467,7 +553,7 @@ async fn main() {
                 .serve_connection(
                     io,
                     service_fn(move |r| {
-                        handle(r, ttft_ms, frames.clone(), recorder.clone(), recording)
+                        handle(r, ttft_ms, frames.clone(), recorder.clone(), recording.clone())
                     }),
                 )
                 .await;
@@ -479,8 +565,9 @@ async fn main() {
 mod tests {
     use super::{
         body_for, dialect_for, handle, json_escape, models_for, request_shape_ok, send_frame,
-        state_json, wants_stream, Arc, BodyExt, Bytes, Frame, Full, Limited, Recorder, StreamFrames,
-        DIALECTS, ANTHROPIC, MAX_BODY_BYTES, OPENAI, SSE_SEND_TIMEOUT,
+        state_json, wants_recording, wants_stream, Arc, BodyExt, Bytes, Frame, Full, Limited,
+        RecordFlag, Recorder, StreamFrames, DIALECTS, ANTHROPIC, MAX_BODY_BYTES, OPENAI,
+        SSE_SEND_TIMEOUT,
     };
     use hyper::service::service_fn;
     use hyper_util::rt::TokioIo;
@@ -764,6 +851,125 @@ mod tests {
         assert_eq!(parsed["dialects"]["openai"]["count"], 0);
     }
 
+    // ── the recording toggle ────────────────────────────────────────────────────────────────────
+
+    // The toggle exists so the harness's LOAD WINDOWS never pay for recording. This mock's own
+    // throughput is the reference every gateway's number is judged against, so a slower mock
+    // suppresses real gateway measurements as mock-bound - honestly, and therefore invisibly.
+    #[test]
+    fn the_record_control_reads_on_and_off_in_both_json_spacings() {
+        assert_eq!(wants_recording(br#"{"on":true}"#), Some(true));
+        assert_eq!(wants_recording(br#"{"on": true}"#), Some(true));
+        assert_eq!(wants_recording(br#"{"on":false}"#), Some(false));
+        assert_eq!(wants_recording(br#"{"on": false}"#), Some(false));
+    }
+
+    // A BODY THAT SAYS NEITHER IS REFUSED, never defaulted. A caller that believes it enabled the
+    // recorder and did not would read the resulting empty record as a gateway failing to translate,
+    // which is a false accusation produced entirely by a defaulted control message.
+    #[test]
+    fn a_record_control_body_that_says_neither_is_refused_rather_than_defaulted() {
+        for body in [&b""[..], b"{}", b"true", b"not json", br#"{"recording":true}"#, br#"{"on":"yes"}"#] {
+            assert_eq!(wants_recording(body), None, "{:?} must be refused", String::from_utf8_lossy(body));
+        }
+        // Contradictory is also refused: there is no way to know which the caller meant.
+        assert_eq!(wants_recording(br#"{"on":true,"off":true,"on":false}"#), None);
+    }
+
+    // The whole point of the toggle, over a real connection: recording starts off, `/__mock/record`
+    // turns it on, `/__mock/state` reports it, and a request that arrives while recording is OFF is
+    // not recorded at all. That last clause is what guarantees a load window costs nothing - it is
+    // the difference between "the guard is implemented" and "the guard did not cost us the
+    // measurements it was meant to protect".
+    #[tokio::test]
+    async fn a_request_that_arrives_while_recording_is_off_is_never_recorded() {
+        let listener = match TcpListener::bind("127.0.0.1:0").await {
+            Ok(l) => l,
+            Err(e) => panic!("loopback bind must succeed in a test sandbox: {e}"),
+        };
+        let addr = match listener.local_addr() {
+            Ok(a) => a,
+            Err(e) => panic!("bound listener must report its local addr: {e}"),
+        };
+        let frames = Arc::new(StreamFrames::build(1, 0, 1));
+        let recorder: Arc<Recorder> = Arc::new(Recorder::default());
+        // Starts OFF, which is what a box that never exported MOCK_RECORD looks like.
+        let recording: Arc<RecordFlag> = Arc::new(RecordFlag::new(false));
+        tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else { return };
+                let io = TokioIo::new(stream);
+                let frames = frames.clone();
+                let recorder = recorder.clone();
+                let recording = recording.clone();
+                tokio::spawn(async move {
+                    let _ = hyper::server::conn::http1::Builder::new()
+                        .serve_connection(
+                            io,
+                            service_fn(move |r| {
+                                handle(r, 0, frames.clone(), recorder.clone(), recording.clone())
+                            }),
+                        )
+                        .await;
+                });
+            }
+        });
+
+        async fn call(addr: std::net::SocketAddr, method: &str, path: &str, body: &str) -> String {
+            let mut c = match TcpStream::connect(addr).await {
+                Ok(c) => c,
+                Err(e) => panic!("test client connect must succeed: {e}"),
+            };
+            let req = format!(
+                "{method} {path} HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            if let Err(e) = c.write_all(req.as_bytes()).await {
+                panic!("writing the request must succeed: {e}");
+            }
+            let mut resp = Vec::new();
+            if let Err(e) = c.read_to_end(&mut resp).await {
+                panic!("reading the response must succeed: {e}");
+            }
+            String::from_utf8_lossy(&resp).into_owned()
+        }
+
+        // A load window's worth of traffic while recording is off leaves the recorder untouched.
+        let chat = r#"{"model":"m","messages":[{"role":"user","content":"hi"}]}"#;
+        for _ in 0..3 {
+            let r = call(addr, "POST", "/v1/chat/completions", chat).await;
+            assert!(r.contains("chat.completion"), "the mock must still answer normally: {r}");
+        }
+        let state = call(addr, "GET", "/__mock/state", "").await;
+        assert!(state.contains("\"recording\":false"), "{state}");
+        assert!(
+            state.contains("\"openai\":{\"count\":0"),
+            "a request that arrived while recording was off must not be recorded: {state}"
+        );
+
+        // Turn it on, drive ONE request, and the record appears with its evidence.
+        let on = call(addr, "POST", "/__mock/record", r#"{"on":true}"#).await;
+        assert!(on.contains("\"recording\":true"), "{on}");
+        let _ = call(addr, "POST", "/v1/chat/completions", chat).await;
+        let state = call(addr, "GET", "/__mock/state", "").await;
+        assert!(state.contains("\"recording\":true"), "{state}");
+        assert!(state.contains("\"openai\":{\"count\":1,\"body_ok\":true"), "{state}");
+        assert!(state.contains("/v1/chat/completions"), "the evidence must travel: {state}");
+
+        // And off again: the count stops moving, so the windows that follow pay nothing.
+        let off = call(addr, "POST", "/__mock/record", r#"{"on":false}"#).await;
+        assert!(off.contains("\"recording\":false"), "{off}");
+        let _ = call(addr, "POST", "/v1/chat/completions", chat).await;
+        let state = call(addr, "GET", "/__mock/state", "").await;
+        assert!(state.contains("\"openai\":{\"count\":1,"), "the count must not have moved: {state}");
+
+        // A control body that says neither is refused, and leaves the flag where it was.
+        let bad = call(addr, "POST", "/__mock/record", "{}").await;
+        assert!(bad.contains("400"), "an unparseable control body must be refused: {bad}");
+        let state = call(addr, "GET", "/__mock/state", "").await;
+        assert!(state.contains("\"recording\":false"), "a refused control must not flip the flag: {state}");
+    }
+
     #[test]
     fn dialect_routing_is_unambiguous() {
         assert_eq!(dialect_for("/v1/chat/completions"), "openai");
@@ -793,6 +999,7 @@ mod tests {
         };
         let frames = Arc::new(StreamFrames::build(1, 0, 1));
         let recorder: Arc<Recorder> = Arc::new(Recorder::default());
+        let recording: Arc<RecordFlag> = Arc::new(RecordFlag::new(false));
         tokio::spawn(async move {
             let (stream, _) = match listener.accept().await {
                 Ok(s) => s,
@@ -802,7 +1009,7 @@ mod tests {
             let _ = hyper::server::conn::http1::Builder::new()
                 .serve_connection(
                     io,
-                    service_fn(move |r| handle(r, 0, frames.clone(), recorder.clone(), false)),
+                    service_fn(move |r| handle(r, 0, frames.clone(), recorder.clone(), recording.clone())),
                 )
                 .await;
         });

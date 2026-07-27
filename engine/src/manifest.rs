@@ -934,6 +934,33 @@ impl Manifest {
         }
     }
 
+    /// `cell_paths` with its placeholders resolved, the same way `headers_for` resolves theirs.
+    ///
+    /// A per-cell path is exactly where a placeholder earns its keep. Bedrock's standard path embeds
+    /// the model, and a gateway's Bedrock model id is never its OpenAI one, so the cell's real route
+    /// is built from a constant the manifest already declares for its config template. Cloning these
+    /// raw would send a literal `{NAME}` to the gateway, which answers 404, and a 404 on a declared
+    /// pairing is published as the gateway not serving it - a red it did not earn, caused by us.
+    ///
+    /// Resolving here rather than pinning the expanded string in `cell_paths` keeps ONE source for
+    /// the value: pinning it would go stale silently the day the constant changes, reintroducing the
+    /// same unearned red with nothing to signal it.
+    ///
+    /// A key that cannot be resolved is dropped rather than sent half-substituted, so `path_for`
+    /// falls back to the dialect's standard path - a wrong-but-honest probe of a real endpoint,
+    /// never a request for a path built out of our own template syntax.
+    pub fn cell_paths_for(
+        &self,
+        cores: &str,
+        mock_port: u16,
+        gw_dir: &std::path::Path,
+    ) -> std::collections::BTreeMap<String, String> {
+        self.cell_paths
+            .iter()
+            .filter_map(|(k, v)| Some((k.clone(), self.substitute(v, cores, mock_port, gw_dir).ok()?)))
+            .collect()
+    }
+
     /// The headers to send for one egress column: the manifest's always-on headers, then the ones
     /// that select this column.
     ///
@@ -1041,6 +1068,35 @@ mod tests {
 
     fn docker_manifest() -> Manifest {
         test_fixture()
+    }
+
+    // THE UNEARNED RED THIS PREVENTS. A cell path built from a declared constant reached the probe
+    // as the literal `{NAME}` while the gateway's config template rendered the real route, so the
+    // probe asked for a path made of our own template syntax, got a truthful 404, and the board
+    // published a declared-capable pairing as one the gateway does not serve. Nesting is exercised
+    // because the real case is a path constant that refers to a model constant.
+    #[test]
+    fn a_cell_path_resolves_its_placeholders_before_it_ever_reaches_a_probe() {
+        let mut m = docker_manifest();
+        m.constants.insert("BEDROCK_MODEL".into(), "vendor.model-v1:0".into());
+        m.constants.insert("MATRIX_PATH_BEDROCK".into(), "/model/{BEDROCK_MODEL}/converse".into());
+        m.cell_paths.insert("bedrock>bedrock".into(), "{MATRIX_PATH_BEDROCK}".into());
+
+        let got = m.cell_paths_for("0-3", 8000, std::path::Path::new("."));
+        assert_eq!(
+            got.get("bedrock>bedrock").map(String::as_str),
+            Some("/model/vendor.model-v1:0/converse"),
+            "a nested constant must be fully resolved, never passed through as template syntax"
+        );
+    }
+
+    // An unresolvable key is DROPPED, so `path_for` falls back to the dialect's standard path: a
+    // wrong-but-honest probe of a real endpoint beats asking a gateway for `{TYPO}`.
+    #[test]
+    fn an_unresolvable_cell_path_is_dropped_rather_than_sent_half_substituted() {
+        let mut m = docker_manifest();
+        m.cell_paths.insert("bedrock>bedrock".into(), "/model/{NO_SUCH_CONSTANT}/converse".into());
+        assert!(m.cell_paths_for("0-3", 8000, std::path::Path::new(".")).is_empty());
     }
 
     // Axis order is `Dialect::ALL` both ways: row 0 = openai ingress, col 0 = openai egress.

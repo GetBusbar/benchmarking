@@ -1,5 +1,8 @@
 {
   "auth": "sk-fake-benchmark-key",
+  "cell_paths": {
+    "bedrock>bedrock": "{GW_MATRIX_PATH_BEDROCK}"
+  },
   "class": "API gateway",
   "config": [],
   "config_files": [

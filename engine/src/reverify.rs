@@ -19,6 +19,20 @@
 // module is: clear the recorder, drive exactly one request through the gateway, and read back which
 // dialect the mock saw and whether the body was that dialect's shape.
 //
+// RECORDING IS TURNED ON FOR THIS ONE REQUEST AND OFF AGAIN AFTERWARDS, and that is a
+// measurement-integrity requirement rather than tidiness. A recorded request takes a process-wide
+// lock in the mock, and the mock's own throughput is the reference every gateway's number is judged
+// against (`suite::rig_ceiling` + `rigbound::is_rig_bound`): a slower mock means MORE cells land
+// within 10% of its ceiling and have their real, honest throughput suppressed as mock-bound. That is
+// a regression that hides inside a correct-looking suppression, which is the worst way for one to
+// hide.
+//
+// So the invariant is: recording is off for every load window, on for exactly one request per cell.
+// It applies to the gateway's windows AND to the mock's own reference window, which is what keeps
+// both sides of the mock-bound comparison on identical mock behaviour - if the reference were taken
+// against a recording mock and the gateway's number against a quiet one, the two would be different
+// instruments and the verdict between them would mean nothing.
+//
 // THREE ANSWERS, NOT TWO. `Some(true)` is proof of translation. `Some(false)` is proof of ITS ABSENCE
 // - the mock saw the request and it was not the egress dialect's shape. `None` is "not checked", and
 // it is a first-class answer rather than a failure: a diagonal cell has no translation to prove, a
@@ -133,8 +147,8 @@ pub fn parse_state(body: &[u8]) -> Result<MockState, String> {
 pub fn verdict(state: &MockState, ingress: Dialect, egress: Dialect) -> Reverified {
     if !state.recording {
         return Reverified::unchecked(
-            "the mock was not started with MOCK_RECORD=1, so it recorded nothing and cannot say which \
-             dialect the gateway spoke upstream",
+            "the mock reports it was not recording for this request, so it recorded nothing and cannot \
+             say which dialect the gateway spoke upstream",
         );
     }
     let row = state.dialects.get(egress.as_str()).cloned().unwrap_or_default();
@@ -229,6 +243,15 @@ pub fn reverify_cell(cfg: &RunConfig, id: &CellId, ingress: Dialect) -> Reverifi
     )) {
         return Reverified::unchecked(format!("the mock's recorder could not be cleared, so anything it holds may predate this cell: {why}"));
     }
+    // FAIL CLOSED. A toggle that could not be set means the recorder's state is unknown, and the only
+    // two ways to be wrong here are both unacceptable: assuming it is ON yields a refutation drawn
+    // from an empty record, and assuming it is OFF leaves recording enabled for every load window
+    // that follows. Reporting unchecked, with the reason, is the answer that asserts neither.
+    if let Some(why) = set_recording(cfg, true) {
+        return Reverified::unchecked(format!(
+            "the mock's recorder could not be enabled for this cell, so what the gateway emitted upstream was never observed: {why}"
+        ));
+    }
 
     // The SAME request the probe sent, at the SAME path with the SAME headers: a re-verification that
     // drove a different request would prove something about a wire this cell never measured.
@@ -242,7 +265,12 @@ pub fn reverify_cell(cfg: &RunConfig, id: &CellId, ingress: Dialect) -> Reverifi
         ));
     }
 
-    let state = match http::get(cfg.mock_addr, "/__mock/state", &[], REVERIFY_TIMEOUT) {
+    let read = http::get(cfg.mock_addr, "/__mock/state", &[], REVERIFY_TIMEOUT);
+    // OFF AGAIN BEFORE ANYTHING ELSE RUNS, including before this function's own return path decides
+    // anything: every load window on this cell happens after this point, and the guarantee they rely
+    // on is that the mock is quiet by the time they start.
+    let disabled = set_recording(cfg, false);
+    let state = match read {
         Outcome::Response(r) => match parse_state(r.body()) {
             Ok(s) => s,
             Err(e) => return Reverified::unchecked(format!("the mock's recorder could not be read: {e}")),
@@ -254,7 +282,38 @@ pub fn reverify_cell(cfg: &RunConfig, id: &CellId, ingress: Dialect) -> Reverifi
             ))
         }
     };
+    // A recorder that could not be turned back off has left every window that follows measuring a
+    // slower mock, which is a claim about the RIG's state and belongs beside this cell's verdict even
+    // though the verdict itself is sound.
+    if let Some(why) = disabled {
+        eprintln!("reverify: the mock's recorder could not be disabled after {}>{}, so the windows that follow are taken against a recording mock: {why}", ingress.as_str(), egress.as_str());
+    }
     verdict(&state, ingress, egress)
+}
+
+/// Turn the mock's recorder on or off, returning why it could not be done.
+///
+/// Its own function because BOTH directions have to be checked and neither may be assumed: the
+/// enable is what the verdict rests on, and the disable is what every load window after this cell
+/// rests on.
+fn set_recording(cfg: &RunConfig, on: bool) -> Option<String> {
+    let body = format!("{{\"on\":{on}}}");
+    control_failed(http::post_json(cfg.mock_addr, "/__mock/record", body.as_bytes(), &[], REVERIFY_TIMEOUT))
+}
+
+/// Leave the mock's recorder OFF before a run's measurements begin.
+///
+/// The field boots the mock quiet, so this is normally a no-op that costs one request. It is kept
+/// because the mock also honours MOCK_RECORD=1 as a starting state for local debugging, and because
+/// a mock left recording by a previous run's crash would otherwise taint this one: the
+/// box-qualification window runs before the first cell is ever re-verified, so the run's very first
+/// load window - the one whose rate becomes the baseline every later run on this box is judged
+/// against - would be taken against a recording mock while every window after it is not.
+///
+/// Best effort by design: a mock that will not answer this is a rig fault the suite reports through
+/// its own per-cell verdicts, not a reason to refuse a run that may still produce honest numbers.
+pub fn quiesce_recorder(cfg: &RunConfig) -> Option<String> {
+    set_recording(cfg, false)
 }
 
 /// Why a control-plane call is unusable, or `None` if it answered. A non-2xx from the MOCK's own

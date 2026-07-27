@@ -315,7 +315,7 @@ fn main() -> ExitCode {
                 // THE ENGINE'S OWN DEFAULT, not an orchestrator setting: a real field run must
                 // search wide enough to find ANY gateway's true peak, and a caller forgetting to
                 // export an override should get the wide range, not a narrow one silently clipping
-                // a fast gateway's ceiling. [512] was too narrow to find tensorzero's true peak on
+                // a fast gateway's ceiling. [512] was too narrow to find one entrant's true peak on
                 // the box that measured the field with it unset - the search reported "still rising
                 // at the top of the range" rather than a number, for a gateway fast enough to have a
                 // real answer. OTB_MIN_CONC/OTB_MAX_CONC stay as the escape hatch for narrowing a
@@ -405,7 +405,7 @@ fn main() -> ExitCode {
                                 }
                             }
                             // A GATEWAY WITH NO CONFIG FILE MAY MINT ITS OWN CREDENTIAL RATHER THAN
-                            // LET ONE BE DECLARED. one-api's admin API generates a random token
+                            // LET ONE BE DECLARED. One entrant's admin API generates a random token
                             // server-side and discards any client-supplied one, so no `commands`
                             // line can make the manifest's static `auth` valid by asking for it by
                             // name. `run_line` spawns a fresh `/bin/sh -c` per line (launch.rs), so
