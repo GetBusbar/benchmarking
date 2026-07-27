@@ -171,6 +171,21 @@ impl Dialect {
     pub fn streams_natively(&self) -> bool {
         matches!(self, Dialect::Openai | Dialect::Anthropic)
     }
+
+    /// Whether a real client of this dialect authenticates by a scheme THE HARNESS CANNOT PRODUCE.
+    ///
+    /// Bedrock is signed with AWS SigV4 over the request. `auth_headers` sends a bearer token
+    /// instead, which is what the field has always driven and is fine against the mock (it ignores
+    /// the signature), but a GATEWAY that verifies credentials properly will reject it - correctly.
+    /// Grading that rejection as the gateway failing publishes a red it did not earn, so a 401/403
+    /// on this dialect is recorded as unprobed rather than as a refusal. Forging signatures is the
+    /// alternative and is worse: it would make the harness assert an identity it does not hold.
+    ///
+    /// Deliberately about the DIALECT, never about a gateway: this is a limit of our instrument, and
+    /// it applies identically to every entrant.
+    pub fn auth_is_unforgeable_by_the_rig(&self) -> bool {
+        matches!(self, Dialect::Bedrock)
+    }
 }
 
 impl fmt::Display for Dialect {

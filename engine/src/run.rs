@@ -136,6 +136,16 @@ pub fn probe_cell(cfg: &RunConfig, id: &CellId, mock_healthy: bool) -> Served {
             // WHAT IT ACTUALLY SAID. Without this a declined cell is a bare verdict, and a whole
             // field answering 4xx for one rig-side reason reads as every gateway supporting nothing.
             let evidence = crate::cell::Evidence { status: r.status, body_snippet: crate::cell::Evidence::snippet(&String::from_utf8_lossy(r.body())) };
+            // A REFUSAL WE PROVOKED IS NOT A CAPABILITY VERDICT. A real client of some dialects signs
+            // its requests and the harness cannot: it sends a bearer token and will not forge a
+            // signature. A gateway that checks credentials properly answers 401/403 to that, which is
+            // CORRECT behaviour, so grading it as a refusal would publish a red the gateway did not
+            // earn. Decided here rather than in `persistent_transient_verdict` because that function
+            // is a pure function of the observed status and must stay one - this needs the dialect,
+            // which is a property of our own instrument, not of the gateway.
+            if ing.auth_is_unforgeable_by_the_rig() && matches!(r.status, 401 | 403) {
+                return Served::UnprobedAuth(evidence);
+            }
             // The verdict decides which of the three this is, and they are NOT interchangeable.
             // NotConfigured is the gateway's own answer that the pairing does not exist. Failed is
             // the gateway's own answer that it reached and declined this attempt at a pairing that
@@ -1131,12 +1141,14 @@ pub fn run_grid_with(cfg: &RunConfig, lo: u32, hi: u32, metrics: &[&dyn metric::
                 }
                 Served::Untestable(r) => CellOutcome::untestable(id, r),
                 Served::NotConfigurable(r) => CellOutcome::not_configurable(id, r),
+                Served::UnprobedAuth(ev) => CellOutcome::unprobed_auth(id, ev),
             };
             let label = match &outcome.served {
                 Served::Yes => "served".to_string(),
                 Served::No(v, ev) => format!("{} (HTTP {})", v.token(), ev.status),
                 Served::Untestable(_) => "untestable".to_string(),
                 Served::NotConfigurable(_) => "not_configurable".to_string(),
+                Served::UnprobedAuth(ev) => format!("unprobed_auth (HTTP {})", ev.status),
             };
             eprintln!("[cell {done}/{total}] {}: {label}", outcome.id);
             out.push(CellResult { outcome, metrics, series, reverify });
@@ -1274,6 +1286,32 @@ mod tests {
             matches!(s, Served::No(ref v, ref ev) if *v == crate::probe::Verdict::Failed && ev.status == 401),
             "401 must be Failed with the real status carried as evidence, got {s:?}"
         );
+    }
+
+    // THE RED WE WOULD NOT HAVE EARNED. On a dialect whose real clients sign their requests, the
+    // harness sends a bearer token and refuses to forge a signature, so a gateway that checks
+    // credentials properly answers 401/403 - correctly. Publishing that as a refusal would state
+    // that somebody's product does not support a pairing, on evidence that is entirely about our own
+    // instrument. The SAME status on a dialect we CAN authenticate stays a real refusal, because
+    // there the gateway is answering about the request rather than about our credential.
+    #[test]
+    fn a_refusal_of_a_credential_the_rig_cannot_sign_is_unprobed_never_a_failure() {
+        for status in [401, 403] {
+            let gw = serve(status);
+            let cfg = cfg_for(gw, gw);
+
+            let s = probe_cell(&cfg, &CellId::new("bedrock", "bedrock"), true);
+            assert!(
+                matches!(s, Served::UnprobedAuth(ref ev) if ev.status == status),
+                "a signed dialect's {status} must be unprobed with its evidence, got {s:?}"
+            );
+
+            let s = probe_cell(&cfg, &CellId::new("openai", "openai"), true);
+            assert!(
+                matches!(s, Served::No(ref v, _) if *v == crate::probe::Verdict::Failed),
+                "a dialect the rig CAN authenticate keeps {status} as a real refusal, got {s:?}"
+            );
+        }
     }
 
     // The SAME status with an unhealthy rig says nothing about the gateway, so it must not be
