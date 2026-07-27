@@ -992,6 +992,24 @@ test("C6 band: an inversion INSIDE the cell's own sweep scatter warns; OUTSIDE i
   assert.match(outOfBand.violations[0], /outside this cell's own max-proxy sweep scatter/);
 });
 
+// A MEDIAN max_proxy SITS AT THE CENTRE OF ITS PLATEAU, so a sustained window drawn from the upper
+// half of the SAME distribution legitimately exceeds it. This is new: the engine used to publish the
+// best rung (the top of the scatter), which no sustained window could beat by construction; it now
+// publishes the plateau median, because on a plateau the rungs differ only by luck and the best rung
+// rewards the kindest window. The inversion that creates is bounded by half the scatter, and C6's
+// band is the FULL scatter - so this must warn, never block. Numbers are one entrant's real cell:
+// rungs spanning 5631..6062 (7.1% scatter) with a median of 5884.
+test("C6: a sustained window above a MEDIAN plateau is inside the scatter and must not block", () => {
+  const r = c6Inversions("gw", c6Matrix(6014, 5884, true, c6Sweep(5884, 7.11)));
+  assert.equal(r.violations.length, 0,
+    `a sustained draw above the plateau median is ordinary scatter, not a physical impossibility; got: ${JSON.stringify(r.violations)}`);
+  assert.equal(r.warnings.length, 1, "it must still be reported so the judgement can be checked");
+  // And the guard has NOT gone blind: an inversion far larger than the plateau's own scatter, which
+  // no median could explain, still blocks.
+  const real = c6Inversions("gw", c6Matrix(7500, 5884, true, c6Sweep(5884, 7.11)));
+  assert.equal(real.violations.length, 1, "an inversion beyond the scatter must still block");
+});
+
 test("C6 ceiling: sweep scatter can never excuse an arbitrarily large inversion", () => {
   // A degenerate sweep with a wild spread must not license a gross inversion: C6_GROSS_PCT caps it.
   const gross = c6Inversions("gw", c6Matrix(400, 200, true, c6Sweep(200, 90)));

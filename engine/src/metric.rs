@@ -147,6 +147,11 @@ pub fn process_cell_with(
     let mut out = BTreeMap::new();
     let mut series = Series::default();
     for m in metrics {
+        // ONE LINE PER GROUP, BEFORE IT RUNS, to stderr. A cell's wall clock is dominated by these
+        // groups, not by the probe, so a run that only speaks when a cell FINISHES goes dark for
+        // minutes at a time and an operator cannot tell a slow sweep from a wedged box. Printed
+        // before rather than after: the interesting case is the group that never returns.
+        eprintln!("[phase] {} {}", ctx.id, m.name());
         let produced = m.measure(ctx);
         // Series ACCUMULATE across groups rather than overwrite: the sweep comes from throughput and
         // the readings come from memory, and a later group returning none must not erase an earlier
