@@ -1,12 +1,12 @@
 # Top 5 gateways (table: lowest added latency; each chart: top 5 by its own metric)
 
-**Ran on:** unknown  ·  2026-07-27T03:50:03Z
+**Ran on:** unknown  ·  2026-07-27T21:13:20Z
 
 Every number below is regenerated from the raw `results/*.json` - re-run `run-all.sh` and this page updates. Passthrough and translation figures are the canonical per-gateway records (matrix per-cell sweep, perf/xlate-suite fallback) from `site/data.json`, the same values the site table ranks. Chart bars are **colored by implementation language** (Rust / Go / Python / Node / Other). **Rows are sorted by added latency (p99), lowest first.**
 
 | Gateway | Added latency (p99) | Sustained RPS (20 ms upstream) | Max proxy RPS | Idle RAM | Steady-state RAM | Built |
 |---|--:|--:|--:|--:|--:|---|
-| [LiteLLM · Rust](https://github.com/BerriAI/litellm) | 113 µs | 42,280 | 42,737 | - | - | `` |
+| [LiteLLM · Rust](https://github.com/BerriAI/litellm) | 108 µs | 39,354 | 46,765 | - | - | `` |
 | [Busbar](https://github.com/GetBusbar/busbar) | 123 µs | 38,345 | 46,821 | 7 MiB | 280 MiB | `` |
 | [agentgateway](https://github.com/agentgateway/agentgateway) | 214 µs | 24,732 | 24,974 | 23 MiB | 39 MiB | `` |
 | [AISIX (api7)](https://github.com/api7/aisix) | 282 µs | 16,061 | 18,377 | 67 MiB | 413 MiB | `` |
@@ -19,7 +19,7 @@ Same box, same mock, one gateway at a time. Streaming figures are the overhead t
 
 | Gateway | Added TTFT (p99) | Added per-token (p99) | SSE streams | Translated RPS (20 ms upstream) |
 |---|--:|--:|--:|--:|
-| [LiteLLM · Rust](https://github.com/BerriAI/litellm) | n/a | n/a | ✕ not measured (rig-limited) | n/a |
+| [LiteLLM · Rust](https://github.com/BerriAI/litellm) | n/a | n/a | 1,157 (31,142 fps) | n/a |
 | [Busbar](https://github.com/GetBusbar/busbar) | n/a | n/a | 785 (21,376 fps) | 34,179 (openai → openai-responses) |
 | [agentgateway](https://github.com/agentgateway/agentgateway) | n/a | n/a | ✕ not measured (rig-limited) | 22,472 (openai → anthropic) |
 | [AISIX (api7)](https://github.com/api7/aisix) | n/a | n/a | 494 (13,445 fps) | 17,023 (openai → anthropic) |
