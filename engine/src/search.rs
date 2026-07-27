@@ -321,9 +321,14 @@ fn measure_rung<P: Probe>(s: &mut Search<P>, c: u32) -> Option<Rung> {
 /// reported concurrency is the KNEE - the lowest rung that reached the plateau - which is the answer
 /// to "how much concurrency do I need before more stops helping".
 ///
-/// `min_conc`/`max_conc` are normalised if given reversed.
+/// `min_conc`/`max_conc` are normalised if given reversed, and `min_conc` is floored at 1 (there
+/// is no such thing as zero concurrency).
 pub fn saturation_plateau<P: Probe>(probe: &mut P, min_conc: u32, max_conc: u32) -> PeakResult {
     let (min_conc, max_conc) = if min_conc <= max_conc { (min_conc, max_conc) } else { (max_conc, min_conc) };
+    // ZERO CONCURRENCY DOES NOT EXIST. The climb step is `c.saturating_mul(2)`, and doubling zero is
+    // still zero, so a caller-supplied floor of 0 (e.g. `OTB_MIN_CONC=0`) pinned the ladder at c=0
+    // forever instead of climbing.
+    let min_conc = min_conc.max(1);
     let mut s = Search::new(probe);
 
     // CLIMB FROM THE FLOOR, ALWAYS. The start is not derived from the range: a start that moves with
@@ -635,6 +640,44 @@ mod tests {
             !r.points.iter().any(|p| p.concurrency == 4096),
             "the search reached the top of the range on a curve that stopped improving at c=64"
         );
+    }
+
+    // A ZERO FLOOR MUST NOT PIN THE LADDER AT ZERO. The climb step is `c.saturating_mul(2)`, and
+    // doubling zero is still zero, so `min_conc: 0` (e.g. `OTB_MIN_CONC=0`) never advanced past c=0
+    // and the search never reached `max_conc`, let alone a plateau. A probe budget stands in for a
+    // wall clock here: it fails fast and deterministically instead of hanging the test suite the way
+    // the real bug hangs `otb run`.
+    struct CountBudgetedSaturating {
+        knee: u32,
+        plateau: f64,
+        calls: u32,
+        max_calls: u32,
+    }
+    impl Probe for CountBudgetedSaturating {
+        fn probe(&mut self, c: u32) -> Option<Sample> {
+            self.calls += 1;
+            assert!(
+                self.calls <= self.max_calls,
+                "saturation_plateau did not terminate: exceeded {} probes, still stuck at concurrency {}",
+                self.max_calls,
+                c
+            );
+            let level = if c >= self.knee {
+                self.plateau
+            } else {
+                self.plateau * (c as f64 / self.knee as f64)
+            };
+            Some(Sample { value: level, passed: true })
+        }
+    }
+
+    #[test]
+    fn a_zero_floor_still_climbs_and_terminates() {
+        let mut probe = CountBudgetedSaturating { knee: 64, plateau: 6000.0, calls: 0, max_calls: 200 };
+        let r = saturation_plateau(&mut probe, 0, 4096);
+        assert!(!r.exhausted, "a curve that plateaued must not report the range as exhausted");
+        let w = r.peak.value().expect("a saturated curve has a plateau to publish");
+        assert!(w.concurrency >= 1, "knee reported at c={}, which is not a real concurrency", w.concurrency);
     }
 
     // THE WHOLE CLIMB, FROM A REAL RUN THAT GOT IT WRONG.
