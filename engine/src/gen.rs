@@ -7,16 +7,34 @@
 // It prints a stats line (`rps=%d fail=%d ... p50us=%d ...`) that `engine/src/loadgen.rs::
 // parse_ugen_line` parses on the other end; the two must stay in the same shape.
 //
-// std only, and threads rather than async on purpose. This process is pinned to its own cores and
-// its job is to saturate a loopback socket; an async runtime would add a scheduler between the
-// measurement and the clock for no benefit at this concurrency, and every dependency here is
-// something that has to be audited before anyone trusts the numbers.
+// ONE ASYNC TASK PER UNIT OF CONCURRENCY, NOT ONE OS THREAD.
+//
+// This module used to say "std only, and threads rather than async on purpose ... an async runtime
+// would add a scheduler between the measurement and the clock for no benefit AT THIS CONCURRENCY".
+// That last clause was the load-bearing one, and the concurrency search outgrew it. A thread per
+// connection means the instrument cannot honour the number it is asked for: a field run sweeping
+// toward 32k held tens of thousands of native threads on the six cores `taskset` pins this process
+// to, sat at a 1-minute load average over 24,000 for 45 minutes, and never converged. Every probe
+// past that point measured the rig's own scheduler thrashing rather than the gateway, and the
+// search had no way to tell the two apart - it just kept climbing. A task costs a few KB against a
+// thread's full stack, so the ramp reaches a real ceiling instead of collapsing into one.
+//
+// The dependency bar the old comment set ("every dependency here has to be audited before anyone
+// trusts the numbers") is MET, not waived: the mock - the reference instrument every published
+// number is judged against, and the thing whose throughput decides whether a result is suppressed
+// as mock-bound - has always run on tokio. This adds no crate the measurement path did not already
+// rest on.
+//
+// What did NOT change: the wire handling. Connection reuse, the fresh-vs-reused failure
+// attribution, HTTP framing, the response budget and the non-2xx rule are the same logic, because
+// those are what the published numbers mean.
 
-use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpStream};
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
 
 /// Hard ceiling on one request/response exchange, independent of the socket's per-read timeout.
 const RESPONSE_BUDGET: Duration = Duration::from_secs(30);
@@ -37,11 +55,10 @@ pub struct GenStats {
     pub ok: u64,
     pub fail: u64,
     pub elapsed_s: f64,
-    /// Set when the OS refused a thread, so the window never ran at the requested concurrency and
-    /// is not a measurement of the gateway at any concurrency we could name. A worker PANIC is not
-    /// represented here on purpose: thread::scope re-raises it, so it terminates the process rather
-    /// than reaching any caller, and a field claiming otherwise would be dead code pretending to be
-    /// a safety net.
+    /// Set when the window never ran at the requested concurrency, so it is not a measurement of the
+    /// gateway at any concurrency we could name. Under threads that meant the OS refusing a thread;
+    /// under tasks it means the runtime itself could not be built, which is the same class of fact:
+    /// the rig failed to pose the question, and that is never a gateway result.
     pub spawn_failed: bool,
     /// Every successful request's latency, microseconds. Percentiles are computed from this rather
     /// than from a running estimate: an approximate p99 is the one number nobody can check later.
@@ -108,16 +125,24 @@ impl GenStats {
     }
 }
 
-/// One worker's request loop. Opens a connection and reuses it, reconnecting on failure, because a
-/// fresh TCP handshake per request would measure the kernel rather than the gateway.
-fn worker(cfg: &GenConfig, stop: &AtomicBool, out: &Mutex<GenStats>) {
-    let mut lat: Vec<u64> = Vec::with_capacity(1024);
-    let (mut ok, mut fail) = (0u64, 0u64);
-    let req = build_request(cfg);
+/// What one connection-holder measured. Owned per task and merged once at the end, so the hot path
+/// never touches a shared lock: under a thread per connection a single `Mutex<GenStats>` was only
+/// contended at join time, but with tasks the same pattern would serialise thousands of wakeups.
+#[derive(Default)]
+struct WorkerStats {
+    ok: u64,
+    fail: u64,
+    lat: Vec<u64>,
+}
+
+/// One connection-holder's request loop. Opens a connection and reuses it, reconnecting on failure,
+/// because a fresh TCP handshake per request would measure the kernel rather than the gateway.
+async fn worker(addr: SocketAddr, req: Arc<String>, stop: Arc<AtomicBool>) -> WorkerStats {
+    let mut w = WorkerStats { ok: 0, fail: 0, lat: Vec::with_capacity(1024) };
     let mut conn: Option<TcpStream> = None;
-    // ALLOCATED ONCE, reused across every request this worker sends: a fresh Vec per response would
-    // put an allocator call in the timed hot path of every exchange, for a worker that runs for
-    // hours at whatever RPS the sweep is driving. `read_response` clears it, never replaces it.
+    // ALLOCATED ONCE, reused across every request this task sends: a fresh Vec per response would
+    // put an allocator call in the timed hot path of every exchange, for a task that runs for the
+    // whole window at whatever RPS the sweep is driving. `read_response` clears it, never replaces it.
     let mut acc: Vec<u8> = Vec::with_capacity(8192);
 
     // Whether the connection about to be used was opened THIS iteration. A peer vanishing on a
@@ -129,17 +154,21 @@ fn worker(cfg: &GenConfig, stop: &AtomicBool, out: &Mutex<GenStats>) {
         fresh = false;
         if conn.is_none() {
             fresh = true;
-            conn = TcpStream::connect_timeout(&cfg.addr, Duration::from_secs(5)).ok().inspect(|s| {
-                let _ = s.set_nodelay(true);
-                let _ = s.set_read_timeout(Some(Duration::from_secs(30)));
-                let _ = s.set_write_timeout(Some(Duration::from_secs(30)));
-            });
+            conn = match tokio::time::timeout(Duration::from_secs(5), TcpStream::connect(addr)).await {
+                Ok(Ok(s)) => {
+                    let _ = s.set_nodelay(true);
+                    Some(s)
+                }
+                // Both a connect error and a connect timeout mean no connection, and neither is a
+                // request the target answered.
+                Ok(Err(_)) | Err(_) => None,
+            };
             if conn.is_none() {
                 // BACK OFF. Without this the loop spins at connect-refusal speed (microseconds on
                 // loopback) once a gateway stops accepting, burning a core and inflating `fail`
                 // into a measure of how fast connect can fail rather than a request count.
-                fail += 1;
-                std::thread::sleep(Duration::from_millis(5));
+                w.fail += 1;
+                tokio::time::sleep(Duration::from_millis(5)).await;
                 continue;
             }
         }
@@ -147,24 +176,24 @@ fn worker(cfg: &GenConfig, stop: &AtomicBool, out: &Mutex<GenStats>) {
         let t0 = Instant::now();
         let response_deadline = t0 + RESPONSE_BUDGET;
 
-        let outcome = if s.write_all(req.as_bytes()).is_err() {
+        let outcome = if s.write_all(req.as_bytes()).await.is_err() {
             // A write that fails on a REUSED connection is the same stale-connection case as a read
             // that sees nothing: the peer closed it while it sat idle.
             if fresh { Exchange::Failed } else { Exchange::ClosedBeforeAnyBytes }
         } else {
-            read_response(s, response_deadline, &mut acc)
+            read_response(s, response_deadline, &mut acc).await
         };
 
         match outcome {
             Exchange::Reusable => {
-                lat.push(t0.elapsed().as_micros() as u64);
-                ok += 1;
+                w.lat.push(t0.elapsed().as_micros() as u64);
+                w.ok += 1;
             }
             // ANSWERED, and the peer said that was the last one on this connection. A success: the
             // target did exactly what it advertised. Only the connection is discarded.
             Exchange::LastOnConnection => {
-                lat.push(t0.elapsed().as_micros() as u64);
-                ok += 1;
+                w.lat.push(t0.elapsed().as_micros() as u64);
+                w.ok += 1;
                 conn = None;
             }
             // A stale connection we chose to reuse. The request never reached a listening peer, so
@@ -175,24 +204,13 @@ fn worker(cfg: &GenConfig, stop: &AtomicBool, out: &Mutex<GenStats>) {
             }
             // The same thing on a connection opened moments ago is the target refusing to answer.
             Exchange::ClosedBeforeAnyBytes | Exchange::Failed => {
-                fail += 1;
+                w.fail += 1;
                 conn = None; // a broken connection is not reused: the next request would inherit its state
             }
         }
     }
 
-    // A POISONED LOCK MEANS A PEER WORKER PANICKED, which is a harness fault. Recover the guard so
-    // THIS worker's real requests still land: skipping the merge would drop them and, if every
-    // worker skipped, hand the search an empty window that reads as "the rig produced nothing"
-    // rather than "our code broke". The panic itself is re-raised by thread::scope and terminates
-    // the process, so there is nothing to flag here.
-    let mut g = match out.lock() {
-        Ok(g) => g,
-        Err(poisoned) => poisoned.into_inner(),
-    };
-    g.ok += ok;
-    g.fail += fail;
-    g.latencies_us.extend_from_slice(&lat);
+    w
 }
 
 fn build_request(cfg: &GenConfig) -> String {
@@ -247,14 +265,13 @@ fn peer_will_close(head_lower: &str) -> bool {
 /// Read one response and discard it. Only success or failure matters here; the body is the mock's
 /// canned reply and parsing it would charge the gateway for our own JSON cost.
 ///
-/// `acc` is the caller's scratch buffer, reused across every request on this worker rather than
+/// `acc` is the caller's scratch buffer, reused across every request on this task rather than
 /// allocated fresh per call: cleared here, not replaced, so its capacity survives from one exchange
 /// to the next instead of paying an allocator call inside the timed hot path of every request.
-fn read_response(s: &mut TcpStream, deadline: Instant, acc: &mut Vec<u8>) -> Exchange {
-    // A PER-READ TIMEOUT IS NOT A BOUND. The socket timeout refreshes on every byte, so a peer that
-    // trickles one byte every 29s keeps a worker inside this function effectively forever. run()
-    // sets the stop flag and then blocks joining every worker, so one wedged worker hangs the whole
-    // sweep until the box self-terminates and the entire run is lost. This deadline is the bound.
+async fn read_response(s: &mut TcpStream, deadline: Instant, acc: &mut Vec<u8>) -> Exchange {
+    // A PER-READ TIMEOUT IS NOT A BOUND. A peer that trickles one byte at a time keeps a task
+    // inside this function effectively forever, and `run()` waits on every task before it can
+    // report, so one wedged task delays the whole window. This deadline is the bound.
     let mut buf = [0u8; 8192];
     acc.clear();
     let mut hdr_end: Option<usize> = None;
@@ -302,21 +319,20 @@ fn read_response(s: &mut TcpStream, deadline: Instant, acc: &mut Vec<u8>) -> Exc
                 Framing::UntilClose => {}
             }
         }
-        // Narrow the socket timeout to what is LEFT of the budget, the way http.rs already does.
-        // A fixed per-read timeout on top of a deadline check makes the real ceiling twice the
-        // advertised one: the check passes at deadline-minus-a-moment, then the read blocks for its
-        // own full timeout. That extra time is also drain time the scope waits through.
+        // Bound the read by what is LEFT of the budget. A fixed per-read timeout on top of a
+        // deadline check makes the real ceiling twice the advertised one: the check passes at
+        // deadline-minus-a-moment, then the read blocks for its own full timeout.
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             return Exchange::Failed;
         }
-        let _ = s.set_read_timeout(Some(remaining));
-        let n = match s.read(&mut buf) {
-            Ok(n) => n,
+        let n = match tokio::time::timeout(remaining, s.read(&mut buf)).await {
             // Nothing arrived at all. The caller decides what that means: on a reused connection it
-            // is a stale one, on a fresh connection it is a failure.
-            Err(_) if acc.is_empty() => return Exchange::ClosedBeforeAnyBytes,
-            Err(_) => return Exchange::Failed,
+            // is a stale one, on a fresh connection it is a failure. A timeout with nothing received
+            // is the same observation as a read error with nothing received.
+            Err(_) | Ok(Err(_)) if acc.is_empty() => return Exchange::ClosedBeforeAnyBytes,
+            Err(_) | Ok(Err(_)) => return Exchange::Failed,
+            Ok(Ok(n)) => n,
         };
         if n == 0 {
             if acc.is_empty() {
@@ -368,70 +384,76 @@ fn content_length(head_lower: &str) -> Option<usize> {
 }
 
 /// Run the load and return the aggregate.
+///
+/// Stays a BLOCKING function: `otb loadgen`'s contract with `run.rs::load_window_at` is a
+/// subprocess that prints one stats line, and nothing above this call is async. The runtime is
+/// built here, used, and dropped, so async is an implementation detail of the generator rather than
+/// something the engine has to adopt.
 pub fn run(cfg: &GenConfig) -> GenStats {
-    let stop = Arc::new(AtomicBool::new(false));
-    let out = Arc::new(Mutex::new(GenStats::default()));
-
-    // STOP IS SET FROM A DROP GUARD, not from the end of the scope body.
-    //
-    // Scope::spawn PANICS if the OS refuses a thread, which is reachable at the concurrencies this
-    // harness sweeps. That panic unwinds the scope closure, so a `stop.store` written at the end of
-    // the body never runs, and `thread::scope` then blocks joining workers that were never told to
-    // stop: the sweep hangs until the box self-terminates and the whole run is lost. A guard runs on
-    // unwind as well as on the normal path, so any panic between here and the end still stops them.
-    struct StopOnDrop<'a>(&'a AtomicBool);
-    impl Drop for StopOnDrop<'_> {
-        fn drop(&mut self) {
-            self.0.store(true, Ordering::Relaxed);
+    // Worker threads default to `available_parallelism`, which honours the CPU affinity mask
+    // `taskset -c $LOADCORES` sets, so the generator still runs on exactly the cores it is pinned
+    // to. That pinning is the comparability basis of every published number.
+    let rt = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
+        Ok(rt) => rt,
+        Err(e) => {
+            // The rig could not pose the question at all. Reported the same way a refused thread
+            // was: a window that never ran is not a measurement of the gateway at any concurrency.
+            eprintln!("loadgen: could not build the async runtime: {e}");
+            return GenStats { spawn_failed: true, ..Default::default() };
         }
-    }
-
-    let mut spawn_failed = false;
-    // Measured around the LOAD WINDOW only. Charging the spawn ramp and the post-stop drain to the
-    // denominator deflates rps in one direction, and it deflates it most at exactly the rungs where
-    // the gateway is slowest, which is where the ceiling is being located.
-    let load_started;
-    let load_elapsed;
-    {
-        let stop_guard = StopOnDrop(&stop);
-        load_started = Instant::now();
-        std::thread::scope(|sc| {
-            for i in 0..cfg.concurrency.max(1) {
-                let (stop_ref, out_ref) = (Arc::clone(&stop), Arc::clone(&out));
-                // Fallible spawn: the OS refusing a thread is a RIG limit, not a gateway result, and
-                // it must not panic out of the scope.
-                if std::thread::Builder::new()
-                    .spawn_scoped(sc, move || worker(cfg, &stop_ref, &out_ref))
-                    .is_err()
-                {
-                    eprintln!("loadgen: the OS refused a thread at worker {i} of {}", cfg.concurrency);
-                    spawn_failed = true;
-                    break;
-                }
-            }
-            if !spawn_failed {
-                std::thread::sleep(cfg.duration);
-            }
-            stop.store(true, Ordering::Relaxed);
-        });
-        load_elapsed = load_started.elapsed();
-        drop(stop_guard);
-    }
-
-    let mut g = match out.lock() {
-        Ok(g) => g.clone(),
-        Err(poisoned) => poisoned.into_inner().clone(),
     };
-    // The OS refusing a thread means this window never ran at the requested concurrency, so it is
-    // not a measurement of the gateway at any concurrency we can name.
-    g.spawn_failed = spawn_failed;
-    g.elapsed_s = load_elapsed.as_secs_f64();
-    g
+
+    let req = Arc::new(build_request(cfg));
+    let addr = cfg.addr;
+    let duration = cfg.duration;
+    let concurrency = cfg.concurrency.max(1);
+
+    rt.block_on(async move {
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut handles = Vec::with_capacity(concurrency as usize);
+        for _ in 0..concurrency {
+            handles.push(tokio::spawn(worker(addr, Arc::clone(&req), Arc::clone(&stop))));
+        }
+
+        // THE WINDOW IS THE SLEEP, and it starts once every task exists.
+        //
+        // The thread version started this clock BEFORE spawning and stopped it AFTER joining, so
+        // the spawn ramp and the post-stop drain both landed in the denominator - which deflated
+        // rps hardest at exactly the high rungs where spawning was slowest, biasing the search
+        // against the concurrencies it was climbing toward. Spawning tasks is cheap enough that the
+        // ramp is no longer a meaningful share of the window, and timing the sleep alone is what
+        // the original comment always said this measured.
+        let started = Instant::now();
+        tokio::time::sleep(duration).await;
+        stop.store(true, Ordering::Relaxed);
+        let load_elapsed = started.elapsed();
+
+        let mut g = GenStats { elapsed_s: load_elapsed.as_secs_f64(), ..Default::default() };
+        for h in handles {
+            match h.await {
+                Ok(w) => {
+                    g.ok += w.ok;
+                    g.fail += w.fail;
+                    g.latencies_us.extend_from_slice(&w.lat);
+                }
+                // A task that panicked is a HARNESS fault, and its requests are gone. Say so on
+                // stderr rather than folding a silent hole into a published rate: the release
+                // profile aborts on panic, so this is reachable only in a debug build, and a
+                // quietly smaller `ok` would read as the gateway being slower.
+                Err(e) => eprintln!("loadgen: a connection task did not finish cleanly: {e}"),
+            }
+        }
+        g
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The test peers below are plain blocking servers on their own threads: they stand in for a
+    // gateway, and holding them to the generator's own async shape would test the harness twice
+    // instead of testing it against something independent.
+    use std::io::{Read, Write};
     use std::net::TcpListener;
 
     fn stats(lat: &[u64], ok: u64, fail: u64, elapsed: f64) -> GenStats {
@@ -749,5 +771,48 @@ mod tests {
         let g = run(&cfg);
         assert_eq!(g.ok, 0, "a 503 is never a success");
         assert!(g.fail > 0, "and it must be counted as a failure");
+    }
+
+    // THE POINT OF THE REWRITE, pinned as a test: a concurrency that a thread-per-connection
+    // generator could not honour on a small box must now cost tasks, not OS threads. 2048 native
+    // threads on a CI runner is where the old design started losing to its own scheduler; 2048
+    // tasks is unremarkable. The assertion is deliberately about COMPLETION, not about a rate: this
+    // proves the instrument can hold the connections it claims, which is exactly what the failed
+    // field run disproved for threads.
+    #[test]
+    fn a_high_concurrency_window_is_held_by_tasks_rather_than_os_threads() {
+        let l = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = l.local_addr().expect("addr");
+        std::thread::spawn(move || {
+            for c in l.incoming() {
+                let Ok(mut c) = c else { continue };
+                std::thread::spawn(move || {
+                    let mut b = [0u8; 4096];
+                    while c.read(&mut b).unwrap_or(0) > 0 {
+                        if c.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok").is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+
+        let started = Instant::now();
+        let g = run(&GenConfig {
+            addr,
+            path: "/x".into(),
+            body: "{}".into(),
+            headers: vec![],
+            concurrency: 2048,
+            duration: Duration::from_millis(500),
+            ttft_ms: 0,
+        });
+        let wall = started.elapsed();
+
+        assert!(g.ok > 0, "2048 concurrent holders must still complete requests, ok={} fail={}", g.ok, g.fail);
+        // The old failure mode was wall clock exploding far past the requested window because
+        // spawning and joining the holders dwarfed the window itself. A generous bound: this is a
+        // regression guard against collapse, not a performance assertion.
+        assert!(wall < Duration::from_secs(20), "a 500ms window at c=2048 took {wall:?}; the holders are not cheap");
     }
 }
