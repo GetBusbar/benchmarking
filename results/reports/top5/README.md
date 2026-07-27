@@ -1,11 +1,12 @@
 # Top 5 gateways (table: lowest added latency; each chart: top 5 by its own metric)
 
-**Ran on:** unknown  ·  2026-07-27T00:56:11Z
+**Ran on:** unknown  ·  2026-07-27T00:56:20Z
 
 Every number below is regenerated from the raw `results/*.json` - re-run `run-all.sh` and this page updates. Passthrough and translation figures are the canonical per-gateway records (matrix per-cell sweep, perf/xlate-suite fallback) from `site/data.json`, the same values the site table ranks. Chart bars are **colored by implementation language** (Rust / Go / Python / Node / Other). **Rows are sorted by added latency (p99), lowest first.**
 
 | Gateway | Added latency (p99) | Sustained RPS (20 ms upstream) | Max proxy RPS | Idle RAM | Steady-state RAM | Built |
 |---|--:|--:|--:|--:|--:|---|
+| [Kong](https://github.com/Kong/kong) | 363 µs | 25,607 | 26,795 | 412 MiB | 619 MiB | `` |
 | [APISIX](https://github.com/apache/apisix) | 456 µs | 18,496 | 18,754 | 178 MiB | 209 MiB | `` |
 | [TensorZero](https://github.com/tensorzero/tensorzero) | 40,991 µs | 0 | 0 | 49 MiB | 70 MiB | `` |
 | [One-API](https://github.com/songquanpeng/one-api) | - | 0 | 0 | 87 MiB | 139 MiB | `` |
@@ -17,28 +18,31 @@ Same box, same mock, one gateway at a time. Streaming figures are the overhead t
 
 | Gateway | Added TTFT (p99) | Added per-token (p99) | SSE streams | Translated RPS (20 ms upstream) |
 |---|--:|--:|--:|--:|
+| [Kong](https://github.com/Kong/kong) | n/a | n/a | ✕ not measured (rig-limited) | 26,631 (openai → gemini) |
 | [APISIX](https://github.com/apache/apisix) | n/a | n/a | ✕ not measured (rig-limited) | n/a |
 | [TensorZero](https://github.com/tensorzero/tensorzero) | n/a | n/a | ✕ not measured (rig-limited) | ✕ not measured (rig-limited) (openai → bedrock) |
 
 **✕** cells are measured refusals, not gaps: the gateway was offered the load and could not do the thing (buffered instead of streaming, rejected the Anthropic shape, or has no native key/limit governance). **n/a** = that suite hasn't been run for this gateway yet.
 
-![added_latency](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/top5_added_latency.png?v=202607270115)
+![added_latency](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/top5_added_latency.png?v=202607270116)
 
-![rps_max_proxy](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/top5_rps_max_proxy.png?v=202607270115)
+![rps_max_proxy](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/top5_rps_max_proxy.png?v=202607270116)
 
-![rps_sustained_20ms](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/top5_rps_sustained_20ms.png?v=202607270115)
+![rps_sustained_20ms](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/top5_rps_sustained_20ms.png?v=202607270116)
 
-![memory_rss](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/top5_memory_rss.png?v=202607270115)
+![memory_rss](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/top5_memory_rss.png?v=202607270116)
 
-![memory_recovery](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/top5_memory_recovery.png?v=202607270115)
+![memory_recovery](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/top5_memory_recovery.png?v=202607270116)
 
-![rps_per_dollar](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/top5_rps_per_dollar.png?v=202607270115)
+![rps_per_dollar](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/top5_rps_per_dollar.png?v=202607270116)
 
-![cost_per_million](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/top5_cost_per_million.png?v=202607270115)
+![cost_per_million](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/top5_cost_per_million.png?v=202607270116)
 
-![xlate_added_latency](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/top5_xlate_added_latency.png?v=202607270115)
+![xlate_rps_sustained_20ms](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/top5_xlate_rps_sustained_20ms.png?v=202607270116)
+
+![xlate_added_latency](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/top5_xlate_added_latency.png?v=202607270116)
 
 ---
 Method: added latency = gateway p99 − direct-to-mock p99 at concurrency 1; RPS ceiling = highest sustained req/s with p99 < 1 s and <0.1% errors; RSS idle = after first 200, peak = under sustained load. Same box, same mock, same load, one gateway at a time. Each gateway's source ref is pinned in its own `gateways/<name>/gateway.sh`; the built commit is in each row.
 
-<sub>Page + charts regenerated **2026-07-27 01:15 UTC** from the raw `results/*.json`.</sub>
+<sub>Page + charts regenerated **2026-07-27 01:16 UTC** from the raw `results/*.json`.</sub>
