@@ -8,6 +8,7 @@
 #
 # Migrated from GW_CONFIG_WHY in gateway.sh, which is dead code the lint was still reading.
 GOMAXPROCS bind   # Go pre-1.25 reads the HOST cpu count, not the --cpuset-cpus limit
+INITIAL_ROOT_TOKEN boot  # its relay routes serve nothing without a token it issued, and every token its admin API mints is server-chosen; this is the only way the declared auth is a real one
 # This gateway has no config file. It keeps its configuration in a database and is configured
 # through its own admin API after boot, so the deployment its operators run is these calls: log in,
 # raise the quota so a throughput run cannot exhaust it, wire each upstream as a channel pointing at

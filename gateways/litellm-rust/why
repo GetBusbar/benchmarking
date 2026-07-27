@@ -15,4 +15,6 @@ api_base       upstream  # -> the mock; used verbatim by complete_azure_anthropi
 api_key        boot      # dummy; the mock ignores it
 LITELLM_MASTER_KEY  boot # the Rust beta requires it to boot; its own mandatory auth
 LITELLM_CONFIG_PATH boot # selects the python-config reader, the ONLY mode that serves /v1/messages
+PYTHONPATH          boot # the embedded CPython imports litellm from the build's venv; without it the reader registers no deployments and every request is HTTP 400
 PORT                bind # the port the harness drives
+curl                boot  # the one post-boot check that the python config reader actually loaded, rather than silently falling back

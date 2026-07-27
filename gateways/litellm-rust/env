@@ -1,3 +1,4 @@
 LITELLM_MASTER_KEY={GW_AUTH}
 LITELLM_CONFIG_PATH={GW_DIR}/config.gen.yaml
+PYTHONPATH={GW_DIR}/venv/site-packages
 PORT={GW_PORT}

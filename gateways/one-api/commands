@@ -4,7 +4,7 @@
 # a database and is configured through its own admin API after it boots, so there is nothing to drop
 # next to the binary. These lines are the deployment its own documentation describes: log in, raise
 # the quota so a throughput run cannot exhaust it, wire each upstream as a channel pointing at the
-# mock, then mint the API key the harness will authenticate with.
+# mock, then check that the credential the harness will authenticate with actually works.
 #
 # The channel type selects the native egress dialect: 1 is OpenAI, 14 is Anthropic, 24 is Gemini.
 # The model lists are strictly disjoint on purpose. Routing selects on (group, model) and not on
@@ -15,24 +15,24 @@ curl -sf -b /tmp/oa.jar -X PUT http://127.0.0.1:3000/api/user/ -H 'content-type:
 curl -sf -b /tmp/oa.jar -X POST http://127.0.0.1:3000/api/channel/ -H 'content-type: application/json' -d '{"name":"mock-1","type":1,"key":"sk-mock","base_url":"http://127.0.0.1:8000","models":"gpt-4o-mini","group":"default","status":1}' -o /dev/null
 curl -sf -b /tmp/oa.jar -X POST http://127.0.0.1:3000/api/channel/ -H 'content-type: application/json' -d '{"name":"mock-14","type":14,"key":"sk-mock","base_url":"http://127.0.0.1:8000","models":"claude-3-5-sonnet-20240620","group":"default","status":1}' -o /dev/null
 curl -sf -b /tmp/oa.jar -X POST http://127.0.0.1:3000/api/channel/ -H 'content-type: application/json' -d '{"name":"mock-24","type":24,"key":"sk-mock","base_url":"http://127.0.0.1:8000","models":"gemini-1.5-pro","group":"default","status":1}' -o /dev/null
-# Mint the token the harness will authenticate with. One-API's AddToken handler (controller/token.go)
-# ignores any client-supplied "key" and always writes a random one of its own - a request that tries
-# to SET it (as this line once did) mints a token whose real key is never "dummy", so every probe
-# authenticates with a credential one-api never issued and gets a uniform 401 across every declared
-# cell. There is no admin-API workaround: UpdateToken (the PUT path) discards "key" too, and the
-# INITIAL_ROOT_ACCESS_TOKEN bootstrap env var only authorizes the admin API, not relay routes like
-# /v1/chat/completions (middleware/auth.go's TokenAuth validates exclusively via a DB lookup).
+# THE RELAY CREDENTIAL IS A BOOT-TIME ONE, NOT A MINTED ONE. One-API's AddToken handler
+# (controller/token.go) ignores any client-supplied "key" and always writes a random one of its own,
+# and UpdateToken discards "key" too - so no admin-API call can make the manifest's declared auth
+# valid by asking for it by name. Minting one and handing the real key back to the engine works for
+# the in-process probes and ONLY for those: the load generator is a child process and carries its own
+# credential, so a server-chosen key that only the parent knows leaves every load window
+# authenticating as something one-api never issued and failing 100% while the probe beside it passes.
 #
-# So: mint normally, read the real generated key back out of the response, and hand it to the engine
-# by writing it to .minted-auth next to this file - the one place `otb run` looks after every command
-# has finished, replacing the manifest's declared (placeholder) `auth` for every probe that follows.
-curl -sf -b /tmp/oa.jar -X POST http://127.0.0.1:3000/api/token/ -H 'content-type: application/json' -d '{"name":"bench","expired_time":-1,"remain_quota":0,"unlimited_quota":true}' | python3 -c 'import json,sys; d=json.load(sys.stdin); k=d.get("data",{}).get("key",""); print(f"sk-{k}") if k else sys.exit("one-api token mint: no key in response")' > gateways/one-api/.minted-auth
-# ValidateUserToken (model/token.go) resolves the bearer key through CacheGetTokenByKey, a
-# cache-aside lookup in front of the DB row the line above just inserted - probing the instant the
-# mint response returns can race that cache's first population and get "无效的令牌"
-# (gorm.ErrRecordNotFound) on an otherwise-valid, just-minted key. Poll the actual relay path with
-# the real token until it stops answering with that exact 401, so nothing downstream ever sees a
-# key that isn't live yet. One `commands` file line is one independent `/bin/sh -c` (manifest.rs's
-# loader), so this whole retry loop has to be a single line - `;` joined, not real newlines. No -f
-# on the curl: a 401's body is exactly what this loop inspects, and -f discards it on any non-2xx.
-key=$(cat gateways/one-api/.minted-auth); ok=0; for i in 1 2 3 4 5 6 7 8 9 10; do body=$(curl -s -X POST http://127.0.0.1:3000/v1/chat/completions -H 'content-type: application/json' -H "Authorization: Bearer $key" -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}],"max_tokens":1}'); case "$body" in *"无效的令牌"*) sleep 0.5 ;; *) ok=1; break ;; esac; done; [ "$ok" = 1 ] || { echo "one-api: minted token never became valid after 10 checks: $body" >&2; exit 1; }
+# INITIAL_ROOT_TOKEN (env, see this gateway's `env` file) is the one path that fixes that, because it
+# makes the credential the manifest DECLARES the real one: on a fresh database model/main.go creates
+# the root user's token with that literal string as its key, unlimited quota, no expiry and no model
+# restriction. Everything downstream then authenticates with the same declared value every other
+# gateway here uses, with nothing to carry between processes. Not to be confused with
+# INITIAL_ROOT_ACCESS_TOKEN, which is the admin-API system token and does NOT authorize relay routes.
+#
+# Verify it rather than assume it: an image that stopped honouring the variable would otherwise be
+# published as a gateway that serves nothing. One `commands` line is one independent `/bin/sh -c`
+# (manifest.rs's loader), so the retry has to be a single line - `;` joined, not real newlines. The
+# retry covers the channel rows this file just inserted not yet being visible to the router. No -f on
+# the curl: the 401 body is exactly what this loop inspects, and -f discards it on any non-2xx.
+curl -s -m 10 -X POST http://127.0.0.1:3000/v1/chat/completions -H 'content-type: application/json' -H 'Authorization: Bearer dummy' -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}],"max_tokens":1}' -o /tmp/oa-auth-check; i=1; while [ $i -le 10 ] && ! grep -q chat.completion /tmp/oa-auth-check; do sleep 0.5; i=$((i+1)); curl -s -m 10 -X POST http://127.0.0.1:3000/v1/chat/completions -H 'content-type: application/json' -H 'Authorization: Bearer dummy' -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}],"max_tokens":1}' -o /tmp/oa-auth-check; done; grep -q chat.completion /tmp/oa-auth-check || { echo "one-api: the declared auth never relayed after 10 checks - INITIAL_ROOT_TOKEN may no longer be honoured by this image: $(cat /tmp/oa-auth-check)" >&2; exit 1; }

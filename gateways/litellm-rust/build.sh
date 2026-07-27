@@ -54,6 +54,21 @@ for attempt in 1 2 3; do
   sleep $((attempt * 5))
 done
 
+# HAND THE VENV TO THE EMBEDDED INTERPRETER, UNDER A STABLE NAME.
+#
+# The binary embeds CPython and imports `litellm` to read LITELLM_CONFIG_PATH. It is launched as a
+# bare process with no venv activated, so nothing puts this venv on the embedded interpreter's
+# import path unless PYTHONPATH does - and without the import the config reader loads no model_list,
+# which the gateway answers as HTTP 400 "no deployment registered" on every request. The old shell
+# manifest set PYTHONPATH at launch by asking the venv where its site-packages was; `env` is a
+# static file with no shell in it and cannot, and the real path embeds the venv's python MINOR
+# version, so it cannot be written literally either. Pin it to a version-independent name here and
+# let `env` name that. The link lives inside the venv so it is covered by the venv's existing
+# ignore rule rather than needing a new one for a build artifact.
+SITE="$("$VENV/bin/python" -c 'import site;print(site.getsitepackages()[0])')"
+[ -d "$SITE" ] || { echo "build: the venv has no site-packages directory ($SITE)"; exit 1; }
+ln -sfn "$SITE" "$VENV/site-packages"
+
 if [ ! -d "$SRC" ]; then
   git clone -q -b "$BRANCH" "$REPO" "$SRC"
 fi
