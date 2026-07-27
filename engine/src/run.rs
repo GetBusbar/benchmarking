@@ -367,8 +367,10 @@ pub fn sweep_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> CellPerf {
         body: ing.body(&model_for(cfg, &id.egress)),
         headers: headers_for(cfg, ing, &id.egress),
     };
-    let start = ((lo + hi) / 2).max(lo);
-    let r = search::peak_max(&mut p, lo, hi, start, 4);
+    // No start argument: `saturation_plateau` always climbs from the floor. A start derived from the
+    // range made the ladder arbitrary and made a WIDER range open with a HIGHER first probe, which is
+    // how a 1..65536 run began by asking for 32768 concurrent connections.
+    let r = search::saturation_plateau(&mut p, lo, hi);
     match r.peak.value() {
         Some(pt) => CellPerf {
             max_proxy: Measurement::Measured(pt.value),
@@ -487,7 +489,7 @@ pub struct CellSustained {
 
 /// Find the gateway's sustained-throughput ceiling on one served cell: the highest concurrency where
 /// p99 stays under the sustained ceiling and the error rate stays under the README's bar, via
-/// `bisect_ceiling` (the gate-search shape, not `peak_max` - this metric is monotone pass/fail in
+/// `bisect_ceiling` (the gate-search shape, not `saturation_plateau` - this metric is monotone pass/fail in
 /// concurrency, not unimodal).
 pub fn sweep_sustained_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> CellSustained {
     let Ok(ing) = id.ingress.parse::<Dialect>() else {
@@ -528,7 +530,7 @@ pub fn sweep_sustained_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> C
         },
         None => CellSustained {
             // The search's own reason AND its evidence travel, exactly as `sweep_cell` carries
-            // `peak_max`'s.
+            // `saturation_plateau`'s.
             rps: match (r.ceiling.reason().cloned(), r.ceiling.detail()) {
                 (Some(reason), Some(detail)) => Measurement::absent_because(reason, detail),
                 (Some(reason), None) => Measurement::absent(reason),
@@ -884,7 +886,7 @@ fn stream_target(cfg: &RunConfig, id: &CellId) -> Option<StreamTarget> {
 
 /// Find the highest concurrency at which the gateway still carries clean streams.
 ///
-/// `bisect_ceiling`, not `peak_max`: this is a monotone pass/fail gate in concurrency, exactly like
+/// `bisect_ceiling`, not `saturation_plateau`: this is a monotone pass/fail gate in concurrency, exactly like
 /// `sweep_sustained_cell`. Once enough concurrent streams are in flight that frames start arriving
 /// late or short, adding more does not bring them back.
 pub fn sweep_streams_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> CellStreams {
@@ -944,9 +946,11 @@ pub fn sweep_streams_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> Cel
 
 /// Find the frames/sec ceiling: how many frames a second the box can carry through this gateway.
 ///
-/// `peak_max`, not `bisect_ceiling`, because this is a MAX metric - frames/sec climbs with added
-/// streams while there is CPU left to schedule them and falls once there is not, which is the
-/// unimodal shape `peak_max` proves a turnover in. The mock's 20 ms pace means a single stream is
+/// `saturation_plateau`, not `bisect_ceiling`, because this is a CEILING metric - frames/sec climbs
+/// with added streams while there is CPU left to schedule them, and then flattens once there is not.
+/// It flattens rather than falling: the same plateau shape throughput has, and the same reason
+/// (past saturation the extra streams queue instead of being served), which is why it takes the same
+/// search rather than one of its own. The mock's 20 ms pace means a single stream is
 /// nowhere near the box's limit, so the number this finds is bounded by the machine rather than by
 /// the protocol, which is what "cpu-bound" names. The engine cannot unpace the mock (its interval is
 /// a boot-time knob), so the ceiling is reached by adding streams, not by asking for faster ones.
@@ -960,8 +964,10 @@ pub fn sweep_cpu_fps_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> Cel
     };
     let mut p =
         StreamFpsProbe { addr: cfg.gateway_addr, path: t.path, body: t.body, headers: t.headers, points: Vec::new() };
-    let start = ((lo + hi) / 2).max(lo);
-    let r = search::peak_max(&mut p, lo, hi, start, 4);
+    // No start argument: `saturation_plateau` always climbs from the floor. A start derived from the
+    // range made the ladder arbitrary and made a WIDER range open with a HIGHER first probe, which is
+    // how a 1..65536 run began by asking for 32768 concurrent connections.
+    let r = search::saturation_plateau(&mut p, lo, hi);
     match r.peak.value() {
         Some(pt) => CellStreams {
             concurrency: Measurement::Measured(pt.concurrency),

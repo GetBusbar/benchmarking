@@ -843,7 +843,7 @@ impl Metric for AddedLatency {
 ///
 /// A DIFFERENT SEARCH SHAPE THAN `Throughput`, which is why this is a separate group rather than a
 /// third and fourth field bolted onto it. Peak throughput is unimodal (rises then falls) and is found
-/// by `search::peak_max`; sustained throughput is a monotone pass/fail gate in concurrency (once p99
+/// by `search::saturation_plateau`; sustained throughput is a monotone pass/fail gate in concurrency (once p99
 /// blows past the ceiling it does not come back under it as concurrency keeps climbing) and is found
 /// by `search::bisect_ceiling`. Conflating the two searches into one group would either run the wrong
 /// algorithm for one of the two numbers or run two searches and call it one group, both of which this
@@ -914,7 +914,7 @@ impl Metric for SustainedThroughput {
 // stream errors"), and the frames/sec is read straight off the winning rung of that same bisection -
 // so they are one group for exactly the reason `SustainedThroughput`'s ceiling and rate are.
 //
-// `cpu_fps` and `cpu_fps_concurrency` come from a `peak_max` over a unimodal curve. That is a
+// `cpu_fps` and `cpu_fps_concurrency` come from a `saturation_plateau` over a saturating curve. That is a
 // DIFFERENT ALGORITHM over a DIFFERENT verdict, and folding it in beside the gate would mean either
 // running the wrong search for one of the four numbers or running two searches inside one group and
 // calling it one - the two failure modes the module doc names. Same reasoning that already split
