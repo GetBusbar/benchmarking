@@ -22,7 +22,7 @@ while read -r g; do
   total=$((total+1))
   f="results/fanout-$g.log"
   # last line that is a stage marker, a suite header, a probe, or a DONE/INCOMPLETE verdict
-  s=$(grep -hE "\[$g\] (launched|installing|rsync|running|pulling|DONE|INCOMPLETE)|══ $g ·|ttft=|max proxy throughput =|sustained RPS @20ms =|building|fetching prebuilt rig" "$f" 2>/dev/null \
+  s=$(grep -hE "\[$g\] (launched|installing|rsync|running|pulling|DONE|INCOMPLETE)|\[cell [0-9]+/[0-9]+\]|══ $g ·|ttft=|max proxy throughput =|sustained RPS @20ms =|building|fetching prebuilt rig" "$f" 2>/dev/null \
       | tail -1 | sed -E "s/.*══ $g · /suite: /; s/.*\] \[$g\] //; s/^\[[0-9:]+\] //" | cut -c1-58)
   echo "$s" | grep -qi "DONE" && done=$((done+1))
   printf '%-16s  %s\n' "$g" "${s:-pending}"
