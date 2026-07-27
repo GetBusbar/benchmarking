@@ -206,11 +206,23 @@ pub fn restart_to_rest(spec: &crate::launch::LaunchSpec) -> Result<(), String> {
 }
 
 pub fn load_window(cfg: &RunConfig, path: &str, body: &str, concurrency: u32) -> Option<GenStats> {
+    load_window_at(cfg, cfg.gateway_addr, path, body, concurrency)
+}
+
+/// The same load window, driven at an EXPLICIT address rather than the gateway's.
+///
+/// The added-latency group's baseline leg has to put load on the mock directly, using the exact same
+/// generator, pinning and windowing as every gateway-facing window - otherwise the two legs of a
+/// difference would be two different measuring instruments and the gap between them would be partly
+/// rig noise rather than purely what the gateway adds. `load_window` stays the common case (there is
+/// no second address to thread through every existing call site), and is now a one-line call into
+/// this.
+pub fn load_window_at(cfg: &RunConfig, addr: SocketAddr, path: &str, body: &str, concurrency: u32) -> Option<GenStats> {
     {
         let exe = std::env::current_exe().ok()?;
         let dur = cfg.sweep_duration_s.to_string();
         let conc = concurrency.to_string();
-        let addr = cfg.gateway_addr.to_string();
+        let addr = addr.to_string();
         let mut cmd = match &cfg.load_cores {
             // taskset is how the rest of the harness pins, so the generator is pinned the same way.
             Some(cores) => {
@@ -232,6 +244,11 @@ pub fn load_window(cfg: &RunConfig, path: &str, body: &str, concurrency: u32) ->
             elapsed_s: if u.rps > 0 { u.ok as f64 / u.rps as f64 } else { 0.0 },
             latencies_us: Vec::new(),
             spawn_failed: false,
+            // The subprocess never sends its raw samples back, only the percentiles it already
+            // computed over them, so these are filled straight from the stats line rather than left
+            // for a caller to (wrongly) derive from the now-empty `latencies_us` above.
+            p50_us: Some(u.p50_us.max(0) as u64),
+            p99_us: Some(u.p99_us.max(0) as u64),
         })
     }
 }
@@ -312,6 +329,143 @@ pub fn sweep_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> CellPerf {
             // exactly what explains why it found nothing. Dropping them here would leave a null with
             // no evidence beside it.
             points: r.points.clone(),
+        },
+    }
+}
+
+/// Ceiling for the sustained-throughput gate. README's own definition: "highest sustained
+/// requests/sec with p99 under [a latency ceiling]". Named for the artifact field it feeds
+/// (`rps_sustained_20ms`) so the constant and the number it produces cannot drift apart in a later
+/// edit that changes one without the other.
+pub const SUSTAINED_P99_CEILING_US: u64 = 20_000;
+
+/// The error-rate half of the same gate. README: "...and a <0.1% error rate". Not the throughput
+/// sweep's own all-or-nothing clean-window bar (`fail == 0`, see `SweepProbe`): the sustained search
+/// exists specifically to find where a gateway starts to strain, and demanding zero failures would
+/// make a single dropped connection at an otherwise-healthy concurrency fail the WHOLE rung the same
+/// way it fails a peak rung, collapsing "occasionally drops one connection in ten thousand" and
+/// "cannot serve this concurrency at all" into the same verdict. The README's own number is the bar.
+pub const SUSTAINED_MAX_FAIL_RATIO: f64 = 0.001;
+
+/// One rung the sustained-throughput search actually probed, carrying the p99 and fail count behind
+/// its pass/fail verdict. `search::ProbedPoint` (the type `bisect_ceiling` itself returns) does not
+/// carry these: it is shared by every search in the engine and adding fields two of its four callers
+/// never fill would make its own shape a lie about what a generic gate search can observe. This type
+/// stays local to the one probe that has real latency and failure data to attach.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SustainedPoint {
+    pub concurrency: u32,
+    pub passed: bool,
+    pub rps: f64,
+    pub p99_us: Option<u64>,
+    pub fail: i64,
+}
+
+/// Drives the load generator at one concurrency for the sustained-throughput gate: passes iff p99
+/// stayed under the ceiling AND the error rate stayed under the README's bar, mirroring
+/// `SweepProbe`'s shape (same generator call, same spawn-refusal and empty-window handling) but
+/// gated on latency and error rate instead of a bare "did anything answer".
+struct SustainedProbe<'a> {
+    cfg: &'a RunConfig,
+    path: String,
+    body: String,
+    /// Every rung actually probed, in probe order - `bisect_ceiling` memoises so each concurrency
+    /// lands here at most once, which is what lets `sweep_sustained_cell` read the winning rung's
+    /// rps straight back out of this rather than re-probing it.
+    points: Vec<SustainedPoint>,
+}
+
+/// Whether one rung's window satisfies the sustained-throughput gate: p99 under the latency ceiling
+/// AND the error rate under the README's bar. A free function rather than logic inlined into
+/// `SustainedProbe::probe`, so the gate's pass/fail boundary - the one piece of judgement this whole
+/// search turns on - can be unit-tested directly against fixed numbers, the same reason
+/// `rigbound::is_rig_bound` is a free function rather than logic buried inside `apply_peak_verdict`.
+/// A probe's own `probe()` drives a real subprocess load window and cannot be exercised that way in
+/// this crate's unit tests (see `tests/end_to_end.rs`'s own note on why: under `cargo test` the
+/// current exe is the test binary, not `otb`).
+pub fn sustained_gate_passes(p99_us: Option<u64>, ok: u64, fail: u64) -> bool {
+    let total = ok + fail;
+    let fail_ratio = if total == 0 { 1.0 } else { fail as f64 / total as f64 };
+    // No p99 reading counts as failing the latency half of the gate: the ceiling is a claim about
+    // latency, and a rung with no latency reading has not earned it.
+    let p99_ok = p99_us.is_some_and(|p| p < SUSTAINED_P99_CEILING_US);
+    p99_ok && fail_ratio < SUSTAINED_MAX_FAIL_RATIO
+}
+
+impl Probe for SustainedProbe<'_> {
+    fn probe(&mut self, concurrency: u32) -> Option<Sample> {
+        let stats = load_window(self.cfg, &self.path, &self.body, concurrency)?;
+        // The OS refusing a thread is a RIG limit, exactly as it is for the peak search: the window
+        // never ran at the requested concurrency, so nothing about the gateway was learned.
+        if stats.spawn_failed {
+            eprintln!("loadgen: could not reach c={concurrency}; the rig refused a thread");
+            return None;
+        }
+        // A window that produced nothing is UNMEASURED, not a failing rung.
+        if stats.ok == 0 && stats.fail == 0 {
+            return None;
+        }
+        let passed = sustained_gate_passes(stats.p99_us, stats.ok, stats.fail);
+        let rps = stats.rps() as f64;
+        self.points.push(SustainedPoint { concurrency, passed, rps, p99_us: stats.p99_us, fail: stats.fail as i64 });
+        Some(Sample { value: rps, passed })
+    }
+}
+
+/// What the sustained-throughput search found on one cell: the highest concurrency that held the
+/// gate, the rps it sustained there, and every rung it actually probed.
+pub struct CellSustained {
+    pub rps: Measurement<f64>,
+    pub concurrency: Measurement<u32>,
+    pub points: Vec<SustainedPoint>,
+}
+
+/// Find the gateway's sustained-throughput ceiling on one served cell: the highest concurrency where
+/// p99 stays under the sustained ceiling and the error rate stays under the README's bar, via
+/// `bisect_ceiling` (the gate-search shape, not `peak_max` - this metric is monotone pass/fail in
+/// concurrency, not unimodal).
+pub fn sweep_sustained_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> CellSustained {
+    let Ok(ing) = id.ingress.parse::<Dialect>() else {
+        return CellSustained {
+            rps: Measurement::absent(Absent::Untestable),
+            concurrency: Measurement::absent(Absent::Untestable),
+            points: Vec::new(),
+        };
+    };
+    let mut p =
+        SustainedProbe { cfg, path: path_for(cfg, ing, &id.egress), body: ing.body(&cfg.model), points: Vec::new() };
+    let r = search::bisect_ceiling(&mut p, lo, hi);
+    match r.ceiling.copied() {
+        // c == 0 is bisect_ceiling's own MEASURED "nothing sustains this gate" answer (see its
+        // `min_conc <= 1` branch): there is no rung to read an rps back from, so 0 is published
+        // directly rather than looked up in `points`.
+        Some(0) => {
+            CellSustained { rps: Measurement::Measured(0.0), concurrency: Measurement::Measured(0), points: p.points }
+        }
+        Some(c) => match p.points.iter().find(|pt| pt.concurrency == c).map(|pt| pt.rps) {
+            Some(v) => CellSustained { rps: Measurement::Measured(v), concurrency: Measurement::Measured(c), points: p.points },
+            // The bisection proved the ceiling without this engine losing the rung's own reading -
+            // it never should, since `sample` memoises every probe - but if it somehow did, publish
+            // the ceiling as unmeasured rather than inventing an rps for it.
+            None => CellSustained {
+                rps: Measurement::absent_because(
+                    Absent::NotMeasured,
+                    format!("the ceiling c={c} was proven, but its rps reading was not retained"),
+                ),
+                concurrency: Measurement::Measured(c),
+                points: p.points,
+            },
+        },
+        None => CellSustained {
+            // The search's own reason AND its evidence travel, exactly as `sweep_cell` carries
+            // `peak_max`'s.
+            rps: match (r.ceiling.reason().cloned(), r.ceiling.detail()) {
+                (Some(reason), Some(detail)) => Measurement::absent_because(reason, detail),
+                (Some(reason), None) => Measurement::absent(reason),
+                (None, _) => Measurement::absent(Absent::NotMeasured),
+            },
+            concurrency: Measurement::absent(r.ceiling.reason().cloned().unwrap_or(Absent::NotMeasured)),
+            points: p.points,
         },
     }
 }
@@ -637,4 +791,43 @@ mod tests {
         assert_eq!(path_for(&cfg, Dialect::Openai, "anthropic"), "/openai/v1/chat/completions");
     }
 
+    // ── sustained_gate_passes: the README's own "p99 under the ceiling AND <0.1% error rate" ──────
+
+    #[test]
+    fn a_clean_window_comfortably_under_the_ceiling_passes() {
+        assert!(sustained_gate_passes(Some(5_000), 10_000, 0));
+    }
+
+    #[test]
+    fn a_window_at_or_over_the_p99_ceiling_fails_even_with_zero_errors() {
+        assert!(!sustained_gate_passes(Some(SUSTAINED_P99_CEILING_US), 10_000, 0), "the ceiling itself must not pass");
+        assert!(!sustained_gate_passes(Some(SUSTAINED_P99_CEILING_US + 1), 10_000, 0));
+        assert!(sustained_gate_passes(Some(SUSTAINED_P99_CEILING_US - 1), 10_000, 0), "just under the ceiling passes");
+    }
+
+    #[test]
+    fn no_p99_reading_never_passes_regardless_of_the_error_rate() {
+        assert!(!sustained_gate_passes(None, 10_000, 0), "an unmeasured latency has not earned the latency half of the gate");
+    }
+
+    #[test]
+    fn the_error_rate_boundary_is_exclusive_of_the_one_in_a_thousand_bar() {
+        // Exactly the README's bar (0.1% = 1/1000) must NOT pass: "under" is strict.
+        assert!(!sustained_gate_passes(Some(1_000), 999, 1), "exactly 1/1000 failing is the boundary itself");
+        // One request short of the boundary sample (1 failure in 1001) is comfortably under 0.1% and
+        // must pass.
+        assert!(sustained_gate_passes(Some(1_000), 1_000, 1));
+        // A single failure against a tiny sample is a large fraction and must fail.
+        assert!(!sustained_gate_passes(Some(1_000), 9, 1));
+    }
+
+    #[test]
+    fn a_window_with_ok_and_fail_both_zero_reads_as_all_failed_never_a_pass() {
+        // `sustained_gate_passes` is only ever called after `SustainedProbe::probe` has already
+        // filtered out the all-zero window as unmeasured (see its own `stats.ok == 0 && stats.fail
+        // == 0` guard). This pins the function's own behaviour on that input regardless: a fail
+        // ratio computed as 0/0 must never read as a CLEAN window by accident of floating-point
+        // division.
+        assert!(!sustained_gate_passes(Some(1), 0, 0));
+    }
 }

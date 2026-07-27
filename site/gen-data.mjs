@@ -426,8 +426,20 @@ function sealMatrixCellsInPlace(m) {
       if (!cell || typeof cell !== "object" || seen.has(cell)) continue;
       seen.add(cell);
       if (cell.perf) cell.perf = sealPerfCellPerf(cell.perf);
-      if (cell.stream && cell.stream.stream_served === true) {
-        cell.stream = { stream_served: true, ...sealStreamRecord(cell.stream) };
+      // THE CASE THIS GUARD MISSED: stream_served is `true`/`false`/a status string ("not_measured",
+      // "untestable", "not_probed" - StreamServed's real shape, record.rs), and in real field data it
+      // is almost NEVER the literal boolean true - a non-streaming or untestable cell still carries a
+      // raw stream object with its own *_mock_bound siblings. Gating the seal on `=== true` left every
+      // other case's raw engine object (and its unconsumed _mock_bound flags) in the bundle untouched
+      // (invariant C1). Seal whenever a stream object exists at all; sealStreamRecord/sealMetric are
+      // already null-safe, and downstream readers (app.js) still gate display on stream_served === true
+      // themselves, so preserving the real value here changes nothing they show.
+      if (cell.stream && typeof cell.stream === "object") {
+        cell.stream = {
+          stream_served: cell.stream.stream_served,
+          stream_error: cell.stream.stream_error ?? null,
+          ...sealStreamRecord(cell.stream),
+        };
       }
       // PER-CELL MEMORY: its own cold-started, plateau-terminated window per cell. The memory tab reads
       // these directly off the matrix cell (Min/Max/Same/Custom), so every published number on them must

@@ -46,6 +46,15 @@ pub struct GenStats {
     /// Every successful request's latency, microseconds. Percentiles are computed from this rather
     /// than from a running estimate: an approximate p99 is the one number nobody can check later.
     pub latencies_us: Vec<u64>,
+    /// The p50/p99, already computed. `run()` leaves these `None`: its caller has `latencies_us` and
+    /// can call `pct_us` itself. `run.rs::load_window_at` sets them instead, because raw per-request
+    /// latencies never cross the subprocess boundary - `otb loadgen`'s stdout is the one `k=v` stats
+    /// line (`loadgen.rs::parse_ugen_line`), which already carries the percentiles the child computed
+    /// over samples that do not exist in this process. `pct_us(0.99)` on an empty `latencies_us` would
+    /// silently read as p99=0 instead of "not measured here", so the subprocess path fills these
+    /// explicitly rather than leaving a caller to rediscover that distinction.
+    pub p50_us: Option<u64>,
+    pub p99_us: Option<u64>,
 }
 
 impl GenStats {
@@ -426,7 +435,15 @@ mod tests {
     use std::net::TcpListener;
 
     fn stats(lat: &[u64], ok: u64, fail: u64, elapsed: f64) -> GenStats {
-        GenStats { ok, fail, elapsed_s: elapsed, latencies_us: lat.to_vec(), spawn_failed: false }
+        GenStats {
+            ok,
+            fail,
+            elapsed_s: elapsed,
+            latencies_us: lat.to_vec(),
+            spawn_failed: false,
+            p50_us: None,
+            p99_us: None,
+        }
     }
 
     // The percentile convention must match the Go generator EXACTLY. A one-index difference is a

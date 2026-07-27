@@ -242,6 +242,37 @@ fn every_module_the_artifact_needs_is_reachable_from_a_real_run() {
     // measurement + record + snapshot: it round-tripped to disk as valid JSON with our shape.
     assert_eq!(snap["gateway"], "e2e");
 
+    // --- added_latency: WIRED ------------------------------------------------------------------------
+    //
+    // The fixture answers the gateway leg and the direct-to-mock leg on the SAME server (this rig has
+    // no separate gateway process), so the two c=1 windows should both complete cleanly and the
+    // difference should be a real, small number - asserted as a genuine measurement rather than just a
+    // key, the same way box_qualify's observed_rps is: it is the one place this block proves the
+    // concurrency-1 load path actually ran on both legs rather than merely being declared.
+    let perf = &cell["perf"];
+    assert!(
+        perf["added_latency_p99_us"].as_f64().is_some(),
+        "the added-latency group must publish a real added_latency_p99_us against a fixture that answers both legs: {perf:#}"
+    );
+    for field in ["added_latency_p50_us", "added_latency_p99_us", "gateway_c1_p99_us", "direct_c1_p99_us"] {
+        assert!(perf.get(field).is_some(), "the added-latency group declares {field} and must publish it: {perf:#}");
+    }
+
+    // --- sustained_throughput: WIRED ------------------------------------------------------------------
+    //
+    // The grid here is narrowed to [1, 2] (see `run_engine`'s OTB_MIN_CONC/OTB_MAX_CONC), so this is
+    // asserted as KEYS, not real numbers: `bisect_ceiling` over a two-rung range needs a real failure
+    // to prove a ceiling, and this fixture never fails a request, so `SearchExhausted` is the honest
+    // result. What this proves is that the group ran and filled its declared fields rather than being
+    // skipped, exactly the standard the memory block above already holds itself to on this fixture.
+    for field in ["rps_sustained_20ms", "rps_sustained_20ms_concurrency", "conc_at_sustained"] {
+        assert!(perf.get(field).is_some(), "the sustained-throughput group declares {field} and must publish it: {perf:#}");
+    }
+    assert!(
+        perf.get("sweep_sustained_20ms").is_some_and(|v| v.is_array()),
+        "the sustained-throughput search's own probed rungs must travel as evidence: {perf:#}"
+    );
+
     // --- streaming: WIRED --------------------------------------------------------------------------
     //
     // Every streaming number the board publishes is a difference between the stream through the
