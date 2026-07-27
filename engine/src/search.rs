@@ -3,12 +3,21 @@
 //
 // THE TWO SEARCH SHAPES, PORTED FROM SHELL AND MADE PURE.
 //
+// THERE ARE EXACTLY TWO, AND EVERY METRIC GOES THROUGH ONE OF THEM. A third shape living in one
+// metric's own module is how two measurements that should agree stop agreeing, so the rule is one
+// function per shape, used everywhere that shape occurs.
+//
 // GATE metrics (sustained rps, sustained concurrent streams) are pass/fail and monotone in
 // concurrency: `bisect_ceiling` finds the true integer ceiling, proven by the ceiling passing and
-// ceiling+1 having been measured and failing. MAX metrics (peak throughput, cpu-bound frames/sec)
-// rise then fall: `peak_max` proves a maximum by watching the curve turn over inside the search
-// range, never by pinning a single unit (adjacent concurrencies near a real peak differ by less
-// than run-to-run noise).
+// ceiling+1 having been measured and failing.
+//
+// CEILING metrics (peak throughput, cpu-bound frames/sec) rise and then PLATEAU: past saturation
+// more concurrency buys queueing rather than throughput (Little's Law), so the curve wobbles around
+// a level instead of falling away from a summit. `saturation_plateau` climbs from the floor until a
+// doubling stops buying more than the MEASURED wobble, then reports the plateau. It replaced a
+// unimodal peak search that demanded a turnover a healthy gateway never produces, and that on the
+// flat part let noise decide which way to walk - which published a search-range bound as one
+// gateway's maximum.
 //
 // Both searches are generic over `Probe` so they run against a synthetic curve in tests with no
 // process, mock, or network involved. A `None` from the probe is a stopped clock (a deadline, or a
@@ -63,6 +72,28 @@ impl<'p, P: Probe> Search<'p, P> {
         self.points.push(ProbedPoint { concurrency: c, passed: sample.passed, value: sample.value });
         self.cache.insert(c, sample.clone());
         Some(sample)
+    }
+
+    /// A DELIBERATE re-probe of a concurrency, bypassing the memo.
+    ///
+    /// Used only to calibrate this rig's own measurement noise, where the whole point is that
+    /// identical conditions do NOT produce identical numbers - something the cache hides by
+    /// construction, since it would hand back the first window's answer and report a spread of zero.
+    /// Each repeat is recorded as its own point, so the published sweep carries the evidence the
+    /// noise floor was derived from rather than asking a reader to take it on trust.
+    fn sample_repeat(&mut self, c: u32) -> Option<Sample> {
+        let sample = self.probe.probe(c)?;
+        self.points.push(ProbedPoint { concurrency: c, passed: sample.passed, value: sample.value });
+        self.cache.insert(c, sample.clone());
+        Some(sample)
+    }
+
+    /// The gate-effective value at a concurrency: the measured value if the rung passed, 0.0 if it
+    /// did not. A rung that failed its gate produced no throughput to compare against, so scoring it
+    /// zero is what stops a broken window from winning a comparison on the strength of the requests
+    /// it managed before it broke.
+    fn eff(&mut self, c: u32) -> Option<f64> {
+        self.sample(c).map(|s| eff(&s))
     }
 }
 
@@ -207,230 +238,265 @@ fn eff(sample: &Sample) -> f64 {
 /// `None` if the probe was interrupted. `exhausted = true` means the ramp reached `bound` while
 /// still rising: only a lower bound, no interior turnover.
 #[allow(clippy::too_many_arguments)]
-fn ramp<P: Probe>(
-    s: &mut Search<P>,
-    bound: u32,
-    base_c: u32,
-    from_c: u32,
-    from_v: f64,
-    upward: bool,
-) -> Option<(u32, u32, f64, u32, bool)> {
-    let mut edge = base_c; // the point just inside `best_c`, toward where the ramp started
-    let mut best_c = from_c;
-    let mut best_v = from_v;
-    loop {
-        if best_c == bound {
-            return Some((0, best_c, best_v, 0, true));
-        }
-        let next = if upward { best_c.saturating_mul(2).min(bound) } else { (best_c / 2).max(bound) };
-        let nv = s.eff(next)?;
-        if nv > best_v {
-            edge = best_c;
-            best_c = next;
-            best_v = nv;
-        } else {
-            // Turned over: bracket [edge, next] contains the peak, in numeric order regardless of
-            // which way the ramp walked.
-            let (min_conc, max_conc) = if upward { (edge, next) } else { (next, edge) };
-            return Some((min_conc, best_c, best_v, max_conc, false));
-        }
+/// How many windows the wobble calibration takes at one concurrency. Three is the smallest sample
+/// that can show a spread at all, and each one costs a full load window, so this is deliberately the
+/// minimum rather than a comfortable number.
+const WOBBLE_WINDOWS: usize = 3;
+
+/// A floor under the MEASURED wobble.
+///
+/// Three windows can agree closely by luck. A calibration that happened to come out quiet would set
+/// a threshold near zero, and then every later upward wobble would read as a genuine rise - which is
+/// precisely the failure this search exists to remove, reintroduced through the back door. This
+/// floor is the smallest spread we are willing to believe of a real machine.
+const WOBBLE_FLOOR: f64 = 0.02;
+
+/// The relative spread across repeated windows: how far this rig's own answer moves when nothing
+/// about the question changed. `(max - min) / max`, so it is a fraction of the value being compared
+/// against rather than an absolute rate that would mean different things at 5k and at 50k.
+fn relative_spread(v: &[f64]) -> f64 {
+    let max = v.iter().copied().fold(f64::MIN, f64::max);
+    let min = v.iter().copied().fold(f64::MAX, f64::min);
+    if max <= 0.0 {
+        return 0.0;
     }
+    (max - min) / max
 }
 
-impl<'p, P: Probe> Search<'p, P> {
-    fn eff(&mut self, c: u32) -> Option<f64> {
-        self.sample(c).map(|s| eff(&s))
+/// Nearest-rank p50 over a sorted slice.
+///
+/// The SAME convention `gen::GenStats::pct_of` uses for the published latency percentiles: two
+/// percentile conventions in one artifact is a silent disagreement between numbers that both look
+/// correct. Nearest rank also has the property that the median is always a value some window
+/// actually produced, never the average of two that no window did - so a plateau figure remains a
+/// throughput this gateway was really observed to sustain.
+fn nearest_rank_median(sorted: &[f64]) -> Option<f64> {
+    if sorted.is_empty() {
+        return None;
     }
+    let mut i = (sorted.len() as f64 * 0.5) as usize;
+    if i >= sorted.len() {
+        i = sorted.len() - 1;
+    }
+    Some(sorted[i])
 }
 
-/// Search `[min_conc, max_conc]` for the peak of a curve assumed unimodal in concurrency (rises then falls),
-/// starting at `start` (clamped into range) and learning direction before ramping, so a peak either
-/// above or below `start` is found by the same search. `tol` bounds the final refine bracket's
-/// width (an absolute concurrency count, not scaled to the bracket like the shell original's `a/4`
-/// heuristic). NOTE: the RPS lane's relative tolerance existed to stop a LOW-concurrency peak
-/// being left unresolved, so a caller searching a low-concurrency peak must pass a small `tol`
-/// rather than inherit a large default. `min_conc`/`max_conc` are normalised if given reversed.
-pub fn peak_max<P: Probe>(probe: &mut P, min_conc: u32, max_conc: u32, start: u32, tol: u32) -> PeakResult {
+/// The median of `windows` windows at one concurrency: a rung's representative value rather than
+/// whatever one window happened to draw.
+///
+/// Used ONLY at the decision boundary. While the climb is still clearing the bar comfortably a single
+/// window is enough and three would be three times the cost for an answer that was never in doubt;
+/// once a rung looks like it might be the plateau, one draw is not enough to say so.
+fn median_probe<P: Probe>(s: &mut Search<P>, c: u32, windows: usize) -> Option<f64> {
+    let mut v = vec![s.eff(c)?];
+    for _ in 1..windows {
+        v.push(eff(&s.sample_repeat(c)?));
+    }
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    nearest_rank_median(&v)
+}
+
+/// Find where throughput SATURATES, and report the plateau it settles on.
+///
+/// THROUGHPUT AGAINST CONCURRENCY IS A PLATEAU, NOT A BELL CURVE. A proxy climbs while it is
+/// latency-bound, reaches a knee when it saturates, and then holds flat: past saturation more
+/// concurrency buys queueing, not throughput (Little's Law), so the curve wobbles around a level
+/// instead of falling away from a summit. A healthy gateway never produces a turnover at all, and
+/// demanding one before believing a number means never believing a well-behaved gateway.
+///
+/// THE SEARCH THIS REPLACES hunted a unimodal maximum. It required a fall-off most gateways will
+/// never produce, and on the flat part "is the next rung higher?" is decided by noise rather than by
+/// the gateway. A live field run showed one entrant's rungs spanning 0.8% across three doublings;
+/// the ramp coin-flipped upward, ran off the top of the range, and published the range bound as that
+/// gateway's maximum. Its start concurrency was also the midpoint of the search range, so widening
+/// the range moved the FIRST probe higher - which is how a 1..65536 run opened by asking for 32768
+/// concurrent connections and buried the box before any search logic ran.
+///
+/// So instead: start at the floor and climb by doubling while each rung beats the best by MORE THAN
+/// THE MEASURED WOBBLE; confirm with one further doubling before believing saturation, so a single
+/// downward wobble cannot end the search early; then report the plateau. Still climbing materially
+/// at `max_conc` is `SearchExhausted` - a real "we never saturated", not a noise artefact.
+///
+/// The reported value is the MEDIAN of the plateau rungs, not the best of them. Taking the best
+/// would hand the win to whichever gateway got the luckiest window, since the plateau's whole
+/// character is that its rungs differ only by noise. `min_conc`/`max_conc` are normalised if given
+/// reversed.
+pub fn saturation_plateau<P: Probe>(probe: &mut P, min_conc: u32, max_conc: u32) -> PeakResult {
     let (min_conc, max_conc) = if min_conc <= max_conc { (min_conc, max_conc) } else { (max_conc, min_conc) };
     let mut s = Search::new(probe);
-    let start = start.clamp(min_conc, max_conc);
 
-    let start_value = match s.eff(start) {
-        Some(v) => v,
-        None => return interrupted(s),
-    };
-
-    let above_start = if start < max_conc { start.saturating_mul(2).min(max_conc) } else { start };
-    let below_start = if start > min_conc { (start / 2).max(min_conc) } else { start };
-
-    let above_value = if above_start != start {
-        match s.eff(above_start) {
-            Some(v) => Some(v),
-            None => return interrupted(s),
-        }
-    } else {
-        None
-    };
-
-    let (bracket_low, best_c, best_v, bracket_high, exhausted) = if let Some(uv) = above_value.filter(|v| *v > start_value) {
-        match ramp(&mut s, max_conc, start, above_start, uv, true) {
-            Some(t) => t,
-            None => return interrupted(s),
-        }
-    } else {
-        let below_value = if below_start != start {
-            match s.eff(below_start) {
-                Some(v) => Some(v),
-                None => return interrupted(s),
-            }
-        } else {
-            None
-        };
-        if let Some(dv) = below_value.filter(|v| *v > start_value) {
-            match ramp(&mut s, min_conc, start, below_start, dv, false) {
-                Some(t) => t,
-                None => return interrupted(s),
-            }
-        } else if start_value == 0.0 {
-            // START FAILED THE GATE, so keep halving until SOMETHING passes, and then open the
-            // whole range below it to the refine. Stepping down only once would strand the search
-            // above a p99 cliff whenever `start` sits several halvings past it, for instance when a
-            // stale adaptive prior seeded it high: every later probe would stay in the failing
-            // region and the true peak below would never be sampled at all. The low bound must
-            // reopen to `min_conc`, not to c/2, or the refine bracket clips the real peak out.
-            let mut c = below_start;
-            let mut found = None;
-            loop {
-                // PROBE FIRST, THEN STEP: a `while c > min_conc` guard would exit the moment c
-                // reaches min_conc and so never probe min_conc itself, the one point this branch
-                // exists to reopen. A gate that passes only at the very bottom of the range would
-                // then never be sampled at all, and the search would report "no concurrency passed"
-                // about a region it had not looked at.
-                let v = match s.eff(c) {
-                    Some(v) => v,
-                    None => return interrupted(s),
-                };
-                if v > 0.0 {
-                    found = Some((c, v));
-                    break;
-                }
-                if c <= min_conc {
-                    break;
-                }
-                c = (c / 2).max(min_conc);
-            }
-            match found {
-                // Reopen the bracket all the way down to `min_conc`: the true peak can sit anywhere below
-                // the first rung that passed.
-                Some((c, v)) => (min_conc, c, v, start, false),
-                None => (min_conc, start, start_value, above_start, false),
-            }
-        } else {
-            // Neither neighbour beats `start`: it is a local (possibly flat) max candidate already.
-            (below_start, start, start_value, above_start, false)
-        }
-    };
-
-    if exhausted {
-        let detail = format!(
-            "curve was still rising at c={best_c} (value={best_v}) when the search range ran out; no interior turnover found"
-        );
-        return PeakResult { peak: Measurement::absent_because(Absent::SearchExhausted, detail), points: s.points, exhausted: true };
-    }
-
-    // Refine the bracketed interior maximum (ternary-style unimodal search) to within `tol`.
-    let mut a = bracket_low;
-    let mut b = best_c;
-    let mut top = bracket_high;
-    let mut best_value = best_v;
-    while top.saturating_sub(a) > tol {
-        let x = if b - a >= top - b { a + (b - a) / 2 } else { b + (top - b) / 2 };
-        if x == a || x == b || x == top {
-            break;
-        }
-        let midpoint_value = match s.eff(x) {
+    // CLIMB FROM THE FLOOR, ALWAYS. The start is not derived from the range: a start that moves with
+    // the bound makes the ladder arbitrary, makes every gateway's evidence start at a different
+    // place, and (as above) turns a wider range into a more dangerous first probe. Starting at the
+    // floor also means the published sweep shows the whole curve - the rise AND the plateau - so a
+    // reader can see the knee rather than being handed it.
+    let mut base = min_conc;
+    let base_value = loop {
+        let v = match s.eff(base) {
             Some(v) => v,
             None => return interrupted(s),
         };
-        if x < b {
-            if midpoint_value > best_value {
-                top = b;
-                b = x;
-                best_value = midpoint_value;
-            } else {
-                a = x;
-            }
-        } else if midpoint_value > best_value {
-            a = b;
-            b = x;
-            best_value = midpoint_value;
-        } else {
-            top = x;
+        if v > 0.0 {
+            break v;
         }
-    }
-
-    // The winner is the highest-value GATE-PASSING point across everything actually probed, read
-    // back from the trace rather than trusted from the ramp/refine bookkeeping above (which tracks
-    // `eff`, not `passed`): this is the same safety net the shell original used, and it is what
-    // keeps a peak search from ever answering with a point whose gate failed.
-    // Scanned in ASCENDING concurrency, not probe order, so an exact tie resolves to the LOWEST
-    // concurrency and the answer does not depend on the path the search happened to walk. Integer
-    // frame and request counts tie genuinely often on a saturated plateau.
-    let mut ordered: Vec<&ProbedPoint> = s.points.iter().collect();
-    ordered.sort_by_key(|p| p.concurrency);
-    let mut winner: Option<PeakPoint> = None;
-    for p in ordered {
-        if p.passed && winner.as_ref().is_none_or(|w| p.value > w.value) {
-            winner = Some(PeakPoint { concurrency: p.concurrency, value: p.value });
+        if base >= max_conc {
+            let detail = format!(
+                "no concurrency from {min_conc} to {max_conc} passed the gate, so no throughput was established at any rung"
+            );
+            return PeakResult {
+                peak: Measurement::absent_because(Absent::NotMeasured, detail),
+                points: s.points,
+                exhausted: false,
+            };
         }
-    }
-    // A WINNER IS ONLY A MAXIMUM IF SOMETHING WAS PROBED ON BOTH SIDES OF IT.
-    //
-    // Invariant 3: a maximum is proven by the curve turning over. A winner with nothing probed above
-    // it is a point the search never saw past, so it is a LOWER BOUND, and publishing it publishes
-    // the search's own range instead of the gateway's behaviour. `bisect_ceiling` already refuses
-    // exactly this at its own floor (see its `min_conc <= 1` branch), and its comment names the two
-    // ends as the same fabrication.
-    //
-    // Three separate places above could produce such a winner: the final `else` at the end of the
-    // bracket selection (which sincerely believes it found a turnover), the halving path's `Some`
-    // arm (which publishes the FIRST rung that passed), and the rescan itself, which reads `passed`
-    // over every point ever probed and so can elect an edge point the bracket logic had discarded.
-    // The check therefore lives HERE, on the winner the function actually returns, rather than being
-    // repeated at each construction site where it is easy to get right three times and wrong once.
-    //
-    // It is stated ENTIRELY IN PROBED POINTS. Neither `min_conc` nor `max_conc` appears, so no bound
-    // literal can reach the published value by any path, including paths added later. The single
-    // carve-out is c <= 1: one is the floor of the domain itself, not a configured bound, and there
-    // is no concurrency below it for a peak to hide at.
-    let flanked = |w: &PeakPoint| {
-        let below = w.concurrency <= 1 || s.points.iter().any(|p| p.concurrency < w.concurrency);
-        let above = s.points.iter().any(|p| p.concurrency > w.concurrency);
-        below && above
+        base = base.saturating_mul(2).min(max_conc);
     };
 
-    match winner {
-        Some(w) if flanked(&w) => PeakResult { peak: Measurement::Measured(w), points: s.points, exhausted: false },
-        Some(w) => {
-            let detail = format!(
-                "the best passing concurrency was c={} (value={}), but nothing was probed {} it, so the curve never turned over: this is a lower bound, not a maximum",
-                w.concurrency,
-                w.value,
-                if s.points.iter().any(|p| p.concurrency > w.concurrency) { "below" } else { "above" }
-            );
-            PeakResult {
-                peak: Measurement::absent_because(Absent::SearchExhausted, detail),
-                points: s.points,
-                exhausted: true,
-            }
+    let mut best_v = base_value;
+    let mut best_c = base;
+    let mut c = base;
+    let mut exhausted = false;
+    // Provisional until it is MEASURED, and measured where the decision is actually made rather than
+    // down here. Repeated windows on the rising part of the curve agree far more closely than they do
+    // at saturation, because below the knee the gateway is not contending for anything; calibrating
+    // here would set a threshold far too tight and let the first upward flutter read as a real climb.
+    let mut wobble = WOBBLE_FLOOR;
+    let mut calibrated = false;
+
+    loop {
+        if c >= max_conc {
+            // Every doubling up to the bound was still buying real throughput. The gateway never
+            // saturated inside the range we looked at, so there is no plateau to report.
+            exhausted = true;
+            break;
         }
-        None => PeakResult {
-            peak: Measurement::absent_because(Absent::NotMeasured, "no probed concurrency passed the gate"),
+        let next = c.saturating_mul(2).min(max_conc);
+        let v = match s.eff(next) {
+            Some(v) => v,
+            None => return interrupted(s),
+        };
+        // THE CHEAP FAST PATH, and it demands TWICE the wobble. `best_v` is a median - a rung's
+        // centre - so a single window drawing high sits about one wobble above it by definition and
+        // would clear a one-wobble bar on noise alone. Below the knee a doubling roughly doubles
+        // throughput, so a real step clears two wobbles without noticing; near the plateau nothing
+        // clears it, and the search escalates to medians below, which is exactly where the extra
+        // windows are worth paying for.
+        if v > best_v * (1.0 + 2.0 * wobble) {
+            best_v = v;
+            best_c = next;
+            c = next;
+            continue;
+        }
+
+        // THE FIRST RUNG THAT DID NOT CLEARLY IMPROVE. This is where the whole verdict turns, so
+        // this is where the noise gets measured: repeat the best rung and take the spread as this
+        // rig's own window-to-window wobble, then re-judge this rung against the real number.
+        if !calibrated {
+            calibrated = true;
+            let mut calibration = vec![best_v];
+            for _ in 1..WOBBLE_WINDOWS {
+                match s.sample_repeat(best_c) {
+                    Some(x) => calibration.push(eff(&x)),
+                    None => return interrupted(s),
+                }
+            }
+            wobble = relative_spread(&calibration).max(WOBBLE_FLOOR);
+            // THE REPRESENTATIVE VALUE OF A RUNG IS ITS MEDIAN WINDOW, NOT ITS BEST ONE. Taking the
+            // best sets the bar for "materially better" using this rung's luckiest draw, and a rung
+            // that drew high can then hold off the real plateau above it - the search stops just
+            // short of the knee and publishes a level the gateway beats. A property test found
+            // exactly that at knee=274. Comparing a maximum against later windows is also the same
+            // max-versus-median inconsistency this search exists to remove, one level down.
+            let mut sorted = calibration.clone();
+            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            best_v = nearest_rank_median(&sorted).unwrap_or(best_v);
+        }
+
+        // JUDGE THE CANDIDATE ON A MEDIAN TOO. The rung we are comparing against now has
+        // WOBBLE_WINDOWS windows behind it, and judging it against a single draw here is the same
+        // max-versus-median asymmetry one level down: a candidate that drew low is dismissed, the
+        // search stops a rung short of the knee, and the gateway is published below the level it
+        // actually holds. A property test found exactly that at knee=274, where a +2.8% draw below
+        // the knee and a -2.8% draw above it masked a real 7% step.
+        let vm = match median_probe(&mut s, next, WOBBLE_WINDOWS) {
+            Some(v) => v,
+            None => return interrupted(s),
+        };
+        if vm > best_v * (1.0 + wobble) {
+            best_v = vm;
+            best_c = next;
+            c = next;
+            continue;
+        }
+
+        // Still no material gain. CONFIRM BEFORE BELIEVING IT: one flat rung can be a downward
+        // wobble, and stopping there would publish a plateau the gateway had not actually reached.
+        if next >= max_conc {
+            // The bound itself bought nothing, so this IS saturation, and there is nothing above it
+            // left to confirm with.
+            break;
+        }
+        let after = next.saturating_mul(2).min(max_conc);
+        let v2 = match median_probe(&mut s, after, WOBBLE_WINDOWS) {
+            Some(v) => v,
+            None => return interrupted(s),
+        };
+        if v2 > best_v * (1.0 + wobble) {
+            best_v = v2;
+            best_c = after;
+            c = after;
+            continue;
+        }
+        // Two consecutive doublings bought nothing beyond the wobble: more concurrency is not
+        // buying throughput any more.
+        break;
+    }
+
+    if exhausted {
+        let detail = format!(
+            "throughput was still climbing by more than the measured {:.1}% window-to-window wobble at c={best_c} ({best_v:.0}) when the search range ran out at {max_conc}, so saturation was never observed and no plateau was established",
+            wobble * 100.0
+        );
+        return PeakResult {
+            peak: Measurement::absent_because(Absent::SearchExhausted, detail),
             points: s.points,
-            exhausted: false,
-        },
+            exhausted: true,
+        };
+    }
+
+    // THE PLATEAU IS EVERY RUNG AT OR ABOVE `best_c`, and membership is decided by the SEARCH, not
+    // by a value band.
+    //
+    // A band looked right and was wrong: it admitted any rung whose value happened to land inside it,
+    // including one just BELOW the knee that an upward wobble had lifted into range. That rung is on
+    // the rising part of the curve - it belongs to the climb, not the flat - and averaging it in drags
+    // the published figure below the plateau the gateway actually holds. A property test found it at
+    // knee=274, where c=256 sat 6.6% under the plateau and a +2.8% window brought it inside a 5.7%
+    // band.
+    //
+    // `best_c` is by construction the last rung that was MATERIALLY better than everything under it,
+    // so it is the lowest concurrency observed to reach the plateau, and every rung above it is flat
+    // by the same test that ended the climb. That is the region, stated by the search itself.
+    let knee = best_c;
+    let mut values: Vec<f64> = s
+        .points
+        .iter()
+        .filter(|p| p.passed && p.concurrency >= knee)
+        .map(|p| p.value)
+        .collect();
+    values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let plateau = nearest_rank_median(&values).unwrap_or(best_v);
+
+    // KNEE, NOT SUMMIT. With a median value there is no single winning rung for "where the peak
+    // happened" to point at, and the lowest concurrency that reached the plateau is the more useful
+    // fact anyway: it is the answer to "how much concurrency do I need before more stops helping".
+    PeakResult {
+        peak: Measurement::Measured(PeakPoint { concurrency: knee, value: plateau }),
+        points: s.points,
+        exhausted: false,
     }
 }
+
 
 #[cfg(test)]
 mod tests {
@@ -615,249 +681,255 @@ mod tests {
         );
     }
 
-    // ── peak_max ────────────────────────────────────────────────────────────────────────────────
+    // ── saturation_plateau ──────────────────────────────────────────────────────────────────────
 
-    struct Unimodal {
-        peak_c: u32,
-        peak_v: f64,
-        width: f64,
+    /// A gateway: throughput climbs in proportion to concurrency until it saturates, then holds flat
+    /// with a deterministic wobble. The wobble alternates sign per probe so a repeated rung really
+    /// does return different numbers, which is what the calibration exists to discover.
+    struct Saturating {
+        knee: u32,
+        plateau: f64,
+        wobble: f64,
+        calls: u32,
     }
-    impl Probe for Unimodal {
+    impl Probe for Saturating {
         fn probe(&mut self, c: u32) -> Option<Sample> {
-            let d = (c as f64 - self.peak_c as f64) / self.width;
-            let v = (self.peak_v - d * d).max(0.0);
-            Some(Sample { value: v, passed: true })
+            self.calls += 1;
+            // THREE levels, not two: with a two-valued wobble the plateau has an even number of
+            // equal halves and a nearest-rank median always returns the upper one, so a median would
+            // be indistinguishable from a maximum and the test could not tell them apart.
+            let sign = match self.calls % 3 {
+                0 => 1.0,
+                1 => -1.0,
+                _ => 0.0,
+            };
+            let level =
+                if c >= self.knee { self.plateau } else { self.plateau * (c as f64 / self.knee as f64) };
+            Some(Sample { value: level * (1.0 + sign * self.wobble), passed: true })
         }
     }
 
+    // THE FIELD BUG, PINNED. A gateway that saturates early and then holds flat for many doublings
+    // must be reported at its plateau, NOT walked to the top of the search range. The search this
+    // replaced did exactly that: on the flat part it asked "is the next rung higher?", noise
+    // answered yes, and it published the range bound as the gateway's maximum.
     #[test]
-    fn peak_finds_true_maximum_between_doublings() {
-        // The concrete shell fixture: cpu-fps peak sits at 768, strictly between the doublings 512
-        // and 1024, over [8, 8192].
-        let mut probe = Unimodal { peak_c: 768, peak_v: 48_000.0, width: 8.0 };
-        let r = peak_max(&mut probe, 8, 8192, 256, 4);
-        assert!(!r.exhausted);
-        assert!(r.peak.is_measured(), "expected a measured peak");
-        let w = match r.peak.value().cloned() {
-            Some(w) => w,
-            None => return,
-        };
-        assert!((640..=900).contains(&w.concurrency), "got c={}", w.concurrency);
-        assert!(w.value >= 46_000.0, "got value={}", w.value);
-    }
-
-    struct MonotoneRising;
-    impl Probe for MonotoneRising {
-        fn probe(&mut self, c: u32) -> Option<Sample> {
-            Some(Sample { value: c as f64, passed: true })
-        }
-    }
-
-    /// A gate that passes ONLY at the very bottom of the range, with a start well above it that
-    /// fails. This is the case the `while c > min_conc` guard could never reach: it stepped down to `min_conc`
-    /// and then exited before probing it.
-    struct PassesOnlyAtFloor {
-        floor: u32,
-    }
-    impl Probe for PassesOnlyAtFloor {
-        fn probe(&mut self, c: u32) -> Option<Sample> {
-            let passed = c <= self.floor;
-            Some(Sample { value: if passed { 100.0 - c as f64 } else { 0.0 }, passed })
-        }
-    }
-
-    // The down-ramp is entered when the start fails the gate, and its whole purpose is to reopen the
-    // bracket all the way to `min_conc`: `min_conc` itself must actually be probed, or a gateway
-    // whose only passing region sits at the floor would be reported as passing nowhere, a claim
-    // about a region the search never looked at.
-    #[test]
-    fn the_down_ramp_probes_the_floor_it_exists_to_reopen() {
-        let mut p = PassesOnlyAtFloor { floor: 8 };
-        let r = peak_max(&mut p, 8, 1000, 512, 4);
+    fn a_flat_curve_saturates_and_never_walks_to_the_top_of_the_range() {
+        let mut probe = Saturating { knee: 64, plateau: 6000.0, wobble: 0.01, calls: 0 };
+        let r = saturation_plateau(&mut probe, 1, 4096);
+        assert!(!r.exhausted, "a curve that plateaued must not report the range as exhausted");
+        let w = r.peak.value().expect("a saturated curve has a plateau to publish");
         assert!(
-            r.points.iter().any(|pt| pt.concurrency == 8),
-            "the floor must actually be probed, probed set: {:?}",
-            r.points.iter().map(|pt| pt.concurrency).collect::<Vec<_>>()
+            w.concurrency <= 256,
+            "saturation is at c=64; reporting c={} means the search kept climbing on noise",
+            w.concurrency
         );
-        // The main assertion is the one ABOVE: the floor must actually be probed. This one checks
-        // that "a real passing region must not be reported as passing nowhere" without overclaiming
-        // a PROVEN peak at `min_conc = 8`, for a curve whose true maximum is at c=1, outside the
-        // range and never probed: SearchExhausted with the bound in its detail is precisely not
-        // "passing nowhere", it says a passing region was found and its extent was not established.
-        assert_eq!(
-            r.peak.reason(),
-            Some(&Absent::SearchExhausted),
-            "the floor passed, but nothing below it was probed, so its value is a lower bound"
+        assert!(
+            !r.points.iter().any(|p| p.concurrency == 4096),
+            "the search reached the top of the range on a curve that stopped improving at c=64"
         );
-        assert!(r.peak.detail().is_some_and(|d| d.contains("c=8")), "the reason must name the bound it stopped at");
     }
 
-    #[test]
-    fn peak_monotone_rising_is_exhausted_never_publishes_the_bound() {
-        // The real field case: 8 -> 7442, doubling to 512 -> 334838, never turning over.
-        let mut probe = MonotoneRising;
-        let r = peak_max(&mut probe, 8, 512, 8, 4);
-        assert!(r.exhausted);
-        assert_eq!(r.peak.copied(), None);
-        assert_eq!(r.peak.reason(), Some(&Absent::SearchExhausted));
+    // THE FIELD FAILURE, REPRODUCED EXACTLY. A saturated gateway whose rungs DRIFT UPWARD inside the
+    // noise band - each doubling reading a whisker higher than the last, none of it real - is what
+    // walks a noise-blind search to the top of the range one honest-looking step at a time. This is
+    // the adversarial case: it is flat in every way that matters and rising in the only way a
+    // threshold of zero can see.
+    struct DriftingPlateau {
+        knee: u32,
+        plateau: f64,
+        /// Fraction added per doubling above the knee. Far below any real saturation step, so a
+        /// search that follows it is following noise by construction.
+        drift: f64,
     }
-
-    // ── a winner sitting on a range edge is a LOWER BOUND, at EITHER end ──────────────────────────
-    //
-    // Invariant 3: a maximum is proven by the curve turning over; still rising at either end is a
-    // lower bound, and the bound is never the answer. `bisect_ceiling` already obeys this at its own
-    // floor (see the `min_conc <= 1` branch and its comment, which names publishing the floor "the
-    // same fabrication as publishing the range bound at the top end, just at the other end of the
-    // range"). `peak_max` did not, in three separate places, each reachable purely by choosing
-    // different arguments to the SAME probes the tests below already use.
-    //
-    // The guard is stated entirely in points that were actually probed, never in `min_conc` or
-    // `max_conc`, so no bound literal can reach the published value by any path. The only carve-out
-    // is c <= 1, the true floor of the domain: there is no concurrency below one to lose a peak to.
-
-    // Instance 1: `start` clamped to `max_conc`, so nothing above it is ever sampled (the
-    // `above_start` collapse) and the final else claims a proven turnover anyway.
-    #[test]
-    fn a_peak_at_the_top_of_the_range_is_a_lower_bound_not_a_maximum() {
-        let mut probe = MonotoneRising;
-        let r = peak_max(&mut probe, 8, 512, 512, 4);
-        assert!(!r.peak.is_measured(), "the range bound must never be published as the peak: {:?}", r.peak);
-        assert_eq!(r.peak.reason(), Some(&Absent::SearchExhausted));
-        assert!(r.exhausted);
-    }
-
-    // Instance 2: the same curve, mirrored. `start` clamped to `min_conc` with a configured floor of
-    // 4 (what bin/otb.rs actually runs), so nothing below is sampled. c=4 is not the domain floor.
-    #[test]
-    fn a_peak_at_a_configured_floor_is_also_a_lower_bound() {
-        let mut probe = MonotoneFalling { top: 100_000 };
-        let r = peak_max(&mut probe, 4, 512, 4, 4);
-        assert!(!r.peak.is_measured(), "the search floor must never be published as the peak: {:?}", r.peak);
-        assert_eq!(r.peak.reason(), Some(&Absent::SearchExhausted));
-    }
-
-    // Instance 3: the halving path's `Some` arm, which publishes the FIRST rung that passed as a
-    // proven peak. Not even a turnover claim. The true peak of this curve is at c=1, outside the range.
-    #[test]
-    fn the_first_rung_that_passed_while_halving_is_not_a_proven_peak() {
-        let mut probe = PassesOnlyAtFloor { floor: 8 };
-        let r = peak_max(&mut probe, 8, 1000, 512, 4);
-        assert!(!r.peak.is_measured(), "the first passing rung is not a proven maximum: {:?}", r.peak);
-        assert_eq!(r.peak.reason(), Some(&Absent::SearchExhausted));
-    }
-
-    // The carve-out, and the proof the guard does not simply null everything at an edge: when the
-    // winner is at c=1 there is no concurrency below it, so the low side needs no witness.
-    #[test]
-    fn a_peak_at_the_true_domain_floor_is_proven_because_nothing_lies_below_it() {
-        let mut probe = PassesOnlyAtFloor { floor: 1 };
-        let r = peak_max(&mut probe, 1, 64, 32, 1);
-        assert!(r.peak.is_measured(), "c=1 is the floor of the domain, not a configured bound: {:?}", r.peak);
-        assert_eq!(r.peak.value().map(|p| p.concurrency), Some(1));
-    }
-
-    struct MonotoneFalling {
-        top: u32,
-    }
-    impl Probe for MonotoneFalling {
+    impl Probe for DriftingPlateau {
         fn probe(&mut self, c: u32) -> Option<Sample> {
-            Some(Sample { value: (self.top - c) as f64, passed: true })
+            if c < self.knee {
+                return Some(Sample { value: self.plateau * (c as f64 / self.knee as f64), passed: true });
+            }
+            let doublings = (c as f64 / self.knee as f64).log2().max(0.0);
+            Some(Sample { value: self.plateau * (1.0 + self.drift * doublings), passed: true })
         }
     }
 
     #[test]
-    fn peak_monotone_falling_is_exhausted_the_mirrored_case() {
-        let mut probe = MonotoneFalling { top: 100_000 };
-        let r = peak_max(&mut probe, 8, 512, 512, 4);
-        assert!(r.exhausted);
-        assert_eq!(r.peak.copied(), None);
-    }
-
-    #[test]
-    fn peak_probe_none_never_fabricates_a_number() {
-        let mut probe = Interrupter { fires_after: 1, calls: 0 };
-        let r = peak_max(&mut probe, 1, 1000, 100, 4);
-        assert_eq!(r.peak.copied(), None);
-        assert_eq!(r.peak.reason(), Some(&Absent::NotMeasured));
-    }
-
-    // The same normalisation the bisection gets. An inverted range here would clamp `start` into an
-    // interval whose ends are swapped, so the ramp would walk away from the peak by construction.
-    #[test]
-    fn a_peak_range_given_backwards_searches_the_same_interval() {
-        let mut forwards = Unimodal { peak_c: 768, peak_v: 48_000.0, width: 8.0 };
-        let mut backwards = Unimodal { peak_c: 768, peak_v: 48_000.0, width: 8.0 };
-        let a = peak_max(&mut forwards, 8, 8192, 256, 4);
-        let b = peak_max(&mut backwards, 8192, 8, 256, 4);
-        assert_eq!(
-            a.peak.value().map(|p| p.concurrency),
-            b.peak.value().map(|p| p.concurrency),
-            "an inverted range must be normalised, not searched inverted"
-        );
-        assert!(b.peak.is_measured());
-    }
-
-    // A range of one point cannot show a turnover: there is nothing above and nothing below the
-    // single rung, so whatever value it produced is a lower bound. This is the degenerate case of
-    // invariant 3, and it must reach the same verdict as the non-degenerate edge cases rather than
-    // publishing the caller's own one-point range as a proven maximum.
-    #[test]
-    fn a_single_point_peak_range_is_a_lower_bound_not_a_maximum() {
-        let mut probe = Unimodal { peak_c: 64, peak_v: 30_000.0, width: 2.0 };
-        let r = peak_max(&mut probe, 64, 64, 64, 4);
-        assert!(!r.peak.is_measured(), "one probed point cannot prove a turnover: {:?}", r.peak);
-        assert_eq!(r.peak.reason(), Some(&Absent::SearchExhausted));
-    }
-
-    // Interrupted before ANY probe landed: genuinely unmeasured, and there is no best passing point
-    // to describe. `exhausted` must stay false, because an interruption is not the search running
-    // off the end of its range, and conflating the two would tell a reader the gateway outran the
-    // harness's range when in fact the clock simply stopped.
-    #[test]
-    fn a_peak_interrupted_before_any_probe_is_unmeasured_and_never_flagged_exhausted() {
-        let mut probe = Interrupter { fires_after: 0, calls: 0 };
-        let r = peak_max(&mut probe, 1, 1000, 100, 4);
-        assert_eq!(r.peak.copied(), None);
-        assert_eq!(r.peak.reason(), Some(&Absent::NotMeasured));
-        assert!(!r.exhausted, "an interruption is not an exhausted search range");
-        assert!(r.points.is_empty(), "nothing was probed, so nothing may appear in the trace");
+    fn a_plateau_that_drifts_upward_inside_the_noise_is_still_saturated() {
+        // 0.4% per doubling: eleven doublings of it is under 5%, and no gateway "gains throughput"
+        // that way. A search comparing against zero climbs every one of them.
+        let mut probe = DriftingPlateau { knee: 32, plateau: 6000.0, drift: 0.004 };
+        let r = saturation_plateau(&mut probe, 1, 65_536);
+        assert!(!r.exhausted, "drift inside the noise band must not read as failing to saturate");
+        let w = r.peak.value().expect("a drifting plateau is still a plateau");
         assert!(
-            r.peak.detail().unwrap_or_default().contains("interrupted"),
-            "the detail must say the search was cut off, got {:?}",
+            w.concurrency <= 512,
+            "the search followed {:.1}%-per-doubling drift up to c={}; that is noise, not throughput",
+            0.4,
+            w.concurrency
+        );
+        assert!(
+            !r.points.iter().any(|p| p.concurrency >= 32_768),
+            "the search walked into the top of the range on a curve that stopped improving at c=32"
+        );
+    }
+
+    // The published figure is the MEDIAN of the plateau, not the best rung on it. Taking the best
+    // hands the win to whichever gateway drew the luckiest window, and on a plateau the rungs differ
+    // only by noise, so "best" is a measure of luck rather than of the gateway.
+    #[test]
+    fn the_published_value_is_the_plateau_median_not_its_luckiest_rung() {
+        let mut probe = Saturating { knee: 32, plateau: 1000.0, wobble: 0.05, calls: 0 };
+        let r = saturation_plateau(&mut probe, 1, 2048);
+        let w = r.peak.value().expect("saturated");
+        let best_seen = r.points.iter().filter(|p| p.passed).map(|p| p.value).fold(f64::MIN, f64::max);
+        assert!(
+            w.value < best_seen,
+            "published {} is the best rung seen ({}), so the luckiest window won",
+            w.value,
+            best_seen
+        );
+        // ... and it is still a real plateau figure, not something dragged down by the rising part.
+        assert!(w.value > 1000.0 * 0.9, "published {} is far below the plateau level", w.value);
+    }
+
+    // The reported concurrency is the KNEE - the lowest rung that reached the plateau - because that
+    // is the answer to "how much concurrency do I need before more stops helping". With a median
+    // value there is no single winning rung for a summit to point at anyway.
+    #[test]
+    fn the_reported_concurrency_is_the_knee_not_the_highest_rung_probed() {
+        let mut probe = Saturating { knee: 64, plateau: 5000.0, wobble: 0.01, calls: 0 };
+        let r = saturation_plateau(&mut probe, 1, 4096);
+        let w = r.peak.value().expect("saturated");
+        let highest_probed = r.points.iter().map(|p| p.concurrency).max().unwrap_or(0);
+        assert!(
+            w.concurrency < highest_probed,
+            "reported c={} equals the highest rung probed ({}), which is a summit, not a knee",
+            w.concurrency,
+            highest_probed
+        );
+    }
+
+    // A curve that never stops climbing has no plateau, and the range bound is OUR choice, not the
+    // gateway's ceiling. Publishing it would be the same fabrication at the other end of the search.
+    #[test]
+    fn a_curve_still_climbing_at_the_bound_is_exhausted_never_the_bound_itself() {
+        struct Rising;
+        impl Probe for Rising {
+            fn probe(&mut self, c: u32) -> Option<Sample> {
+                Some(Sample { value: c as f64 * 100.0, passed: true })
+            }
+        }
+        let r = saturation_plateau(&mut Rising, 1, 512);
+        assert!(r.exhausted);
+        assert_eq!(r.peak.value(), None, "a lower bound must never be published as a plateau");
+        assert_eq!(r.peak.reason(), Some(&Absent::SearchExhausted));
+        assert!(
+            r.peak.detail().unwrap_or_default().contains("wobble"),
+            "the refusal must state the threshold it was judged against: {:?}",
             r.peak.detail()
         );
     }
 
-    // Interrupted AFTER real probes landed. The probed trace must survive: discarding it publishes
-    // null for a cell we did in fact measure, which is the same class of loss as publishing a zero
-    // for one we did not. The best passing point travels as EVIDENCE in the detail, never as the
-    // value, because the curve was never observed to turn over.
+    // THE WOBBLE IS MEASURED, NOT ASSUMED. A rig whose repeated windows disagree by 10% must not
+    // read a 10% flutter as a real climb; a search with a hardcoded tighter threshold would.
     #[test]
-    fn an_interrupted_peak_keeps_its_trace_and_states_the_lower_bound_as_evidence() {
-        let mut probe = Interrupter { fires_after: 2, calls: 0 };
-        let r = peak_max(&mut probe, 1, 1000, 8, 4);
-        assert_eq!(r.peak.copied(), None, "no turnover was observed, so no maximum was proven");
-        assert_eq!(r.peak.reason(), Some(&Absent::NotMeasured));
-        assert!(!r.points.is_empty(), "the probed trace must survive an absent verdict");
-        let detail = r.peak.detail().unwrap_or_default().to_string();
+    fn a_noisy_rig_does_not_read_its_own_wobble_as_a_climb() {
+        let mut probe = Saturating { knee: 16, plateau: 2000.0, wobble: 0.10, calls: 0 };
+        let r = saturation_plateau(&mut probe, 1, 8192);
+        assert!(!r.exhausted, "a flat-but-noisy curve must still saturate");
+        let w = r.peak.value().expect("saturated");
+        assert!(w.concurrency <= 512, "noise carried the search to c={}", w.concurrency);
+    }
+
+    // The calibration must actually re-probe: a memoised repeat would hand back the first window's
+    // answer, report a spread of zero, and quietly restore the guessed-threshold bug.
+    #[test]
+    fn the_calibration_really_reprobes_rather_than_reading_the_memo() {
+        let mut probe = Saturating { knee: 8, plateau: 900.0, wobble: 0.03, calls: 0 };
+        let r = saturation_plateau(&mut probe, 1, 1024);
+        assert!(r.peak.value().is_some());
+        let mut seen = std::collections::BTreeMap::new();
+        for p in &r.points {
+            *seen.entry(p.concurrency).or_insert(0) += 1;
+        }
         assert!(
-            detail.contains("lower bound"),
-            "the detail must say the best point is a lower bound, got {detail:?}"
+            seen.values().any(|n| *n >= WOBBLE_WINDOWS),
+            "no concurrency was probed {WOBBLE_WINDOWS} times, so the wobble was never measured: {seen:?}"
         );
     }
 
+    // Nothing anywhere in the range passed its gate. That is a real, measured "this gateway served
+    // nothing", and it must carry its reason rather than arriving as a bare null.
     #[test]
-    fn peak_below_start_is_found_by_ramping_down() {
-        let mut probe = Unimodal { peak_c: 64, peak_v: 30_000.0, width: 2.0 };
-        let r = peak_max(&mut probe, 8, 8192, 256, 4);
-        assert!(r.peak.is_measured(), "expected a measured peak");
-        let w = match r.peak.value().cloned() {
-            Some(w) => w,
-            None => return,
-        };
-        assert!((32..=128).contains(&w.concurrency), "got c={}", w.concurrency);
+    fn a_gate_that_never_passes_is_unmeasured_with_its_reason() {
+        struct NeverPasses;
+        impl Probe for NeverPasses {
+            fn probe(&mut self, _c: u32) -> Option<Sample> {
+                Some(Sample { value: 0.0, passed: false })
+            }
+        }
+        let r = saturation_plateau(&mut NeverPasses, 1, 64);
+        assert_eq!(r.peak.value(), None);
+        assert_eq!(r.peak.reason(), Some(&Absent::NotMeasured));
+        assert!(r.peak.detail().unwrap_or_default().contains("passed the gate"));
+    }
+
+    // A stopped clock is not a measurement. Whatever was proved before it stopped may travel as
+    // prose, but never as a number.
+    #[test]
+    fn an_interrupted_plateau_search_never_fabricates_a_number() {
+        struct Interrupter {
+            calls: u32,
+        }
+        impl Probe for Interrupter {
+            fn probe(&mut self, c: u32) -> Option<Sample> {
+                self.calls += 1;
+                if self.calls > 3 {
+                    return None;
+                }
+                Some(Sample { value: c as f64 * 10.0, passed: true })
+            }
+        }
+        let r = saturation_plateau(&mut Interrupter { calls: 0 }, 1, 4096);
+        assert_eq!(r.peak.value(), None);
+        assert!(!r.exhausted, "an interruption is not the same fact as running out of range");
+        assert!(!r.points.is_empty(), "the probes that did land are still evidence");
+    }
+
+    // The range given backwards is the same interval, so it must produce the same answer rather than
+    // silently searching nothing.
+    #[test]
+    fn a_plateau_range_given_backwards_searches_the_same_interval() {
+        let mut a = Saturating { knee: 32, plateau: 4000.0, wobble: 0.01, calls: 0 };
+        let mut b = Saturating { knee: 32, plateau: 4000.0, wobble: 0.01, calls: 0 };
+        let fwd = saturation_plateau(&mut a, 1, 2048);
+        let rev = saturation_plateau(&mut b, 2048, 1);
+        assert_eq!(fwd.peak.value().map(|w| w.concurrency), rev.peak.value().map(|w| w.concurrency));
+    }
+
+    // THE START IS THE FLOOR, ALWAYS, AND DOES NOT MOVE WITH THE RANGE. A start derived from the
+    // range is what made a 1..65536 run open by asking for 32768 concurrent connections, and it also
+    // made every gateway's published evidence begin at a different, arbitrary place.
+    #[test]
+    fn the_search_always_opens_at_the_floor_however_wide_the_range() {
+        for hi in [64u32, 4096, 65536] {
+            let mut probe = Saturating { knee: 16, plateau: 700.0, wobble: 0.01, calls: 0 };
+            let r = saturation_plateau(&mut probe, 1, hi);
+            let first = r.points.first().map(|p| p.concurrency);
+            assert_eq!(first, Some(1), "with hi={hi} the search opened at {first:?} instead of the floor");
+        }
+    }
+
+    // Every probed rung travels, in probe order, whichever way the search went: the published sweep
+    // is what lets a reader re-derive the plateau instead of trusting it.
+    #[test]
+    fn the_probe_trace_travels_with_the_result() {
+        let mut probe = Saturating { knee: 64, plateau: 3000.0, wobble: 0.02, calls: 0 };
+        let r = saturation_plateau(&mut probe, 1, 4096);
+        assert!(r.points.len() > 4, "too few points to re-derive anything: {:?}", r.points.len());
+        assert!(r.points.iter().all(|p| p.concurrency >= 1));
     }
 }
+
 
 #[cfg(test)]
 mod proptests {
@@ -880,19 +952,28 @@ mod proptests {
         }
     }
 
-    struct Unimodal {
-        peak_c: u32,
-        peak_v: f64,
-        width: f64,
+    /// A saturating curve: proportional to concurrency below the knee, flat above it, with a
+    /// deterministic wobble that alternates sign so repeated windows really do disagree.
+    struct Saturating {
+        knee: u32,
+        plateau: f64,
+        wobble: f64,
+        calls: u32,
     }
-    impl Probe for Unimodal {
+    impl Probe for Saturating {
         fn probe(&mut self, c: u32) -> Option<Sample> {
-            // Deliberately UNCLAMPED: a curve that flattens to 0 far from the peak has no gradient
-            // for a local hill-climb to follow, which is a property of that curve, not a defect in
-            // the search. A genuine single-humped parabola keeps a gradient everywhere.
-            let d = (c as f64 - self.peak_c as f64) / self.width;
-            let v = self.peak_v - d * d;
-            Some(Sample { value: v, passed: true })
+            self.calls += 1;
+            // THREE levels, not two: with a two-valued wobble the plateau has an even number of
+            // equal halves and a nearest-rank median always returns the upper one, so a median would
+            // be indistinguishable from a maximum and the test could not tell them apart.
+            let sign = match self.calls % 3 {
+                0 => 1.0,
+                1 => -1.0,
+                _ => 0.0,
+            };
+            let level =
+                if c >= self.knee { self.plateau } else { self.plateau * (c as f64 / self.knee as f64) };
+            Some(Sample { value: level * (1.0 + sign * self.wobble), passed: true })
         }
     }
 
@@ -918,31 +999,30 @@ mod proptests {
             prop_assert_eq!(r.ceiling.reason(), Some(&Absent::SearchExhausted));
         }
 
-        // A unimodal curve with its maximum strictly inside [min_conc, max_conc] is found within a documented
-        // tolerance, regardless of which side of `start` it sits on, and is never flagged exhausted.
-        //
-        // `peak_c` is capped well short of `max_conc`: a doubling ramp only ever samples two points per
-        // step, so with the peak too close to the range edge the endpoint sample can still read
-        // higher than the previous rung even though the true peak (unsampled, between the two) has
-        // already passed. That is a real property of doubling search, ported faithfully from the
-        // shell original, not a defect the port introduces; the shell's own tests give the same
-        // headroom (peaks at ~3000 against ranges up to 65536).
+        // ANY saturating curve whose knee sits inside the range is reported at its plateau, never
+        // walked to the top of the range, and never flagged exhausted. The wobble is varied too:
+        // the threshold is measured per run, so a noisier rig must not change the verdict, only the
+        // precision of where it lands.
         #[test]
-        fn peak_finds_any_interior_maximum(
-            peak_c in 200u32..6_000u32,
-            start in 200u32..9_800u32,
+        fn a_saturating_curve_is_always_reported_at_its_plateau(
+            knee in 8u32..2_000u32,
+            wobble in 0.0f64..0.08f64,
         ) {
-            let mut probe = Unimodal { peak_c, peak_v: 100_000.0, width: 16.0 };
-            let r = peak_max(&mut probe, 1, 10_000, start, 8);
-            prop_assert!(!r.exhausted);
+            let plateau = 50_000.0;
+            let mut probe = Saturating { knee, plateau, wobble, calls: 0 };
+            let r = saturation_plateau(&mut probe, 1, 65_536);
+            prop_assert!(!r.exhausted, "a curve that flattens must never read as still climbing");
             let w = r.peak.value();
             prop_assert!(w.is_some());
             if let Some(w) = w {
-                // Tolerance: the refine bracket is narrowed to `tol` concurrency units either side
-                // of the true peak, plus the quadratic curve's own flatness near the top; 32 units
-                // comfortably covers both for this width.
-                let dist = w.concurrency.abs_diff(peak_c);
-                prop_assert!(dist <= 32, "peak_c={} winner={} dist={}", peak_c, w.concurrency, dist);
+                // The published figure is a plateau rung, so it sits within the wobble of the real
+                // plateau level rather than anywhere on the rising part below it.
+                let off = (w.value - plateau).abs() / plateau;
+                prop_assert!(off <= wobble + 0.01, "value {} is {:.3} off the plateau {}", w.value, off, plateau);
+                // The knee is reported, so the concurrency is at or above the true knee but nowhere
+                // near the top of a range 30+ doublings wide.
+                prop_assert!(w.concurrency <= knee.saturating_mul(8).max(64),
+                    "knee={} reported c={}", knee, w.concurrency);
             }
         }
 
@@ -964,10 +1044,11 @@ mod proptests {
             }
 
             let mut p2 = Interrupter { fires_after, calls: 0 };
-            let best_value = peak_max(&mut p2, 1, 1000, 100, 4);
+            let best_value = saturation_plateau(&mut p2, 1, 1000);
             if best_value.peak.reason() == Some(&Absent::NotMeasured) {
                 prop_assert_eq!(best_value.peak.copied(), None);
             }
         }
     }
 }
+

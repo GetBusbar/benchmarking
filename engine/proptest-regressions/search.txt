@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc b9a2e131e428a72873988347bb778cfe12eaed4de24befe1f35b0f295b10564f # shrinks to knee = 274, wobble = 0.028420518862593915

@@ -160,40 +160,6 @@ fn as_i64(m: Option<&Measurement<f64>>) -> Measurement<i64> {
 /// filling a field surfaces here as an absence with the group's own reason rather than as a silently
 /// missing number. `metric::process_cell` guarantees every declared field is present, so a lookup
 /// that misses means the field was never declared by any group at all.
-/// A PUBLISHED MAXIMUM MAY NOT BE LOWER THAN A RATE WE ACTUALLY OBSERVED.
-///
-/// Two searches drive the same cell on the same box against the same mock: the peak search, which
-/// looks for a turnover, and the sustained bisect, which walks concurrencies looking for the highest
-/// one that holds p99 under the gate. They probe DIFFERENT rungs, so the bisect can land on a
-/// concurrency the peak search never sampled and record a higher rate there. When that happens
-/// `rps_max_proxy` is not the maximum - it is the maximum of one search - and publishing it under a
-/// name that claims otherwise is a false statement about a number sitting in the same cell.
-///
-/// It also fails the board's own physical-plausibility check: a sustained rate above the peak is
-/// impossible for one instrument, so the site refuses to deploy a bundle containing it. That check
-/// is right, and satisfying it by weakening the check would be publishing the inversion anyway.
-///
-/// So the peak is raised to the best rung EITHER search saw, and its concurrency moves with it: the
-/// number and the operating point it was taken at are one fact and must not come from two rungs. A
-/// suppressed or absent peak is left exactly as it is - a rig-bound verdict is a statement about the
-/// instrument, not a smaller number to be improved on.
-fn raise_peak_to_every_rung_observed(p: &mut CellPerf) {
-    let Some(&published) = p.rps_max_proxy.value() else { return };
-    let best = p
-        .sweep_max_proxy
-        .iter()
-        .chain(p.sweep_sustained_20ms.iter())
-        .filter_map(|pt| pt.rps.value().map(|r| (*r, pt.conc)))
-        .max_by_key(|(r, _)| *r);
-    if let Some((rps, conc)) = best {
-        if rps > published {
-            p.rps_max_proxy = Measurement::Measured(rps);
-            p.rps_max_proxy_concurrency = Measurement::Measured(conc);
-            p.conc_at_peak = Measurement::Measured(conc);
-        }
-    }
-}
-
 fn judge_cell(
     cfg: &SuiteConfig,
     dialect: Dialect,
@@ -969,7 +935,6 @@ pub fn run_suite_with(
                 if let Some(series) = result.series.as_ref() {
                     p.sweep_max_proxy = series.sweep.clone();
                     p.sweep_sustained_20ms = series.sweep_sustained.clone();
-                    raise_peak_to_every_rung_observed(&mut p);
                 }
                 // THE ANTI-FALSE-POSITIVE GUARD, published beside the numbers it qualifies. A cell
                 // whose egress dialect was NOT proven still carries its measurements - they are real
@@ -1132,15 +1097,6 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
 
-    fn rung(conc: i64, rps: i64) -> crate::record::SweepPoint {
-        crate::record::SweepPoint {
-            conc,
-            rps: Measurement::Measured(rps),
-            p99_us: Measurement::absent(Absent::NotMeasured),
-            fail: Measurement::absent(Absent::NotMeasured),
-        }
-    }
-
     // A RUN MUST NOT DECLARE ITSELF DEGRADED WHILE CARRYING THE DATA IT SAYS IT SKIPPED. The
     // consumer reads these three flags to spot a probe-only run and refuses to publish one over a
     // complete one, so they are a claim about the run. `..Default::default()` left cell_stream
@@ -1159,56 +1115,6 @@ mod tests {
         assert!(back.matrix.cell_stream, "the streaming group is in METRICS and ran");
         assert_eq!(back.matrix.cell_memory, Some(true), "the memory group is in METRICS and ran");
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    // THE INVERSION THIS PREVENTS, seen in real field data: a cell published max_proxy 25722 while
-    // its own sustained sweep had recorded 26631 at a rung the peak search never sampled. One
-    // instrument cannot sustain more than its maximum, so the board's plausibility check refuses to
-    // deploy a bundle containing it - correctly. The peak has to answer for every rate the cell
-    // actually observed, and its concurrency has to move with it, because a rate and the operating
-    // point it was taken at are one fact.
-    #[test]
-    fn a_published_peak_answers_for_the_best_rung_either_search_saw() {
-        let mut p = empty_perf();
-        p.rps_max_proxy = Measurement::Measured(25722);
-        p.rps_max_proxy_concurrency = Measurement::Measured(160);
-        p.conc_at_peak = Measurement::Measured(160);
-        p.sweep_max_proxy = vec![rung(160, 25722), rung(320, 24000)];
-        p.sweep_sustained_20ms = vec![rung(178, 26631)];
-
-        raise_peak_to_every_rung_observed(&mut p);
-
-        assert_eq!(p.rps_max_proxy.value().copied(), Some(26631), "the peak must not be under a rate we measured");
-        assert_eq!(p.conc_at_peak.value().copied(), Some(178), "and it must carry that rung's concurrency");
-    }
-
-    // A peak that already answers for every rung is left ALONE, so this cannot quietly inflate a
-    // number by picking noise out of a sweep that never exceeded it.
-    #[test]
-    fn a_peak_that_already_leads_every_rung_is_untouched() {
-        let mut p = empty_perf();
-        p.rps_max_proxy = Measurement::Measured(30000);
-        p.conc_at_peak = Measurement::Measured(100);
-        p.sweep_sustained_20ms = vec![rung(178, 26631)];
-
-        raise_peak_to_every_rung_observed(&mut p);
-
-        assert_eq!(p.rps_max_proxy.value().copied(), Some(30000));
-        assert_eq!(p.conc_at_peak.value().copied(), Some(100));
-    }
-
-    // A SUPPRESSED PEAK IS A VERDICT ABOUT THE INSTRUMENT, not a smaller number to improve on.
-    // Raising it from a rung would republish, as the gateway's, a rate the rig-bound check had just
-    // ruled unattributable.
-    #[test]
-    fn a_suppressed_peak_is_never_resurrected_from_a_rung() {
-        let mut p = empty_perf();
-        p.rps_max_proxy = Measurement::absent(Absent::RigLimited);
-        p.sweep_sustained_20ms = vec![rung(178, 99999)];
-
-        raise_peak_to_every_rung_observed(&mut p);
-
-        assert!(p.rps_max_proxy.value().is_none(), "a rig-bound peak must stay suppressed");
     }
 
     fn serve(status: u16) -> SocketAddr {
@@ -1465,7 +1371,7 @@ mod tests {
     // NOT COVERED HERE BY DESIGN: an end-to-end suite test driving the whole pipeline with the
     // gateway and mock pointed at the same server, asserting suppression IF
     // `rps_max_proxy_mock_bound == Some(true)`, would be vacuous in practice - `cfg_for`'s fixture
-    // (sweep_duration_s: 1, max_conc: 2) is too tight for `search::peak_max` to complete even one
+    // (sweep_duration_s: 1, max_conc: 2) is too tight for `search::saturation_plateau` to complete even one
     // probe before its own search deadline interrupts it, so the search always returns zero sweep
     // points and `mock_bound` is always `None`, never `Some(true)`, and the guarded assertion body
     // would never run. The behavior ("a value at the rig ceiling must not be published, and its
