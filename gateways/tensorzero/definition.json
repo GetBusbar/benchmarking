@@ -15,6 +15,12 @@
     "anthropic",
     "bedrock"
   ],
+  "egress_models": {
+    "anthropic": "tensorzero::model_name::mock-anthropic",
+    "bedrock": "tensorzero::model_name::mock-bedrock",
+    "openai": "tensorzero::model_name::mock-openai",
+    "openai-responses": "tensorzero::model_name::mock-openai-responses"
+  },
   "lang": "Rust",
   "launch": {
     "args": [

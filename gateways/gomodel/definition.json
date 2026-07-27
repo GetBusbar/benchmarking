@@ -10,6 +10,13 @@
     "gemini",
     "bedrock"
   ],
+  "egress_models": {
+    "anthropic": "anthropic/claude-3-5-sonnet",
+    "bedrock": "anthropic.claude-3-sonnet-20240229-v1:0",
+    "gemini": "gemini-1.5-pro",
+    "openai": "openai/gpt-4o-mini",
+    "openai-responses": "openai/gpt-4o-mini"
+  },
   "lang": "Go",
   "launch": {
     "args": [],

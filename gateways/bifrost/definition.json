@@ -19,6 +19,13 @@
     "gemini",
     "cohere"
   ],
+  "egress_models": {
+    "anthropic": "claude-3-5-sonnet-20241022",
+    "cohere": "command-r-plus",
+    "gemini": "gemini-1.5-pro",
+    "openai": "gpt-4o-mini",
+    "openai-responses": "gpt-4o-mini"
+  },
   "lang": "Go",
   "launch": {
     "args": [],

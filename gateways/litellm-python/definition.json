@@ -8,7 +8,7 @@
       "template": "config.gen.yaml.tmpl"
     }
   ],
-  "display": "LiteLLM · Python",
+  "display": "LiteLLM \u00b7 Python",
   "egress": [
     "openai",
     "openai-responses",
@@ -17,6 +17,14 @@
     "cohere",
     "bedrock"
   ],
+  "egress_models": {
+    "anthropic": "gpt-4o-mini-anthropic",
+    "bedrock": "gpt-4o-mini-bedrock",
+    "cohere": "gpt-4o-mini-cohere",
+    "gemini": "gpt-4o-mini-gemini",
+    "openai": "gpt-4o-mini",
+    "openai-responses": "gpt-4o-mini-responses"
+  },
   "lang": "Python",
   "launch": {
     "args": [

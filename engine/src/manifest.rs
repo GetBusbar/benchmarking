@@ -77,6 +77,23 @@ pub struct Manifest {
     pub port: u16,
     pub path: String,
     pub model: String,
+    /// THE MODEL NAME THAT SELECTS EACH EGRESS COLUMN, keyed by egress dialect.
+    ///
+    /// The grid's two axes are driven by two different things. Ingress is the WIRE SHAPE, and the
+    /// engine owns that entirely: the path and the body come from `Dialect`. Egress is the UPSTREAM,
+    /// and most gateways choose it from the model name in the request, so a cell that does not vary
+    /// the model does not vary the egress at all - it sends a byte-identical request to the diagonal
+    /// and gets the same upstream, while the artifact labels it a translation. Six columns collapse
+    /// into one measurement published six times.
+    ///
+    /// The engine always asks for the egress's model (`model_for`); this map is only how each
+    /// gateway spells it, because the spelling is not ours to choose. Some gateways route on a name
+    /// we configure and can be given any label; others infer the provider FROM the name by their own
+    /// convention, so the value has to be that convention's spelling or the gateway routes somewhere
+    /// else. Absent for an egress means `model` - correct for a gateway with one upstream, and for
+    /// the openai column whose canonical name usually IS `model`.
+    #[serde(default)]
+    pub egress_models: std::collections::BTreeMap<String, String>,
     pub auth: String,
     #[serde(default)]
     pub headers: Vec<String>,
@@ -1043,6 +1060,7 @@ pub(crate) fn test_fixture() -> Manifest {
         port: 8080,
         path: "/v1/chat/completions".into(),
         model: "m".into(),
+        egress_models: Default::default(),
         auth: "dummy".into(),
         headers: vec![],
         runtime: Runtime::Docker { container: "gw-bench".into() },

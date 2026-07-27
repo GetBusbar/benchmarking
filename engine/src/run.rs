@@ -23,6 +23,9 @@ pub struct RunConfig {
     pub gateway_addr: SocketAddr,
     pub mock_addr: SocketAddr,
     pub model: String,
+    /// Per-egress model names. See `Manifest::egress_models`; read through `model_for`, never
+    /// directly, so no call site can accidentally send the diagonal's model to a translation cell.
+    pub egress_models: std::collections::BTreeMap<String, String>,
     pub auth: String,
     /// Dialects to walk. Both axes use the same set: ingress is what the client speaks, egress is
     /// what the upstream speaks.
@@ -82,8 +85,21 @@ pub struct RunConfig {
 /// `authorization: Bearer` to dialects that do not use one.
 /// Where to send this dialect's probe: the gateway's declared path when it is a longer form of this
 /// dialect's standard one, otherwise the standard.
+/// The model name this cell must send to reach ITS egress column.
+///
+/// Every request the grid makes goes through here rather than reading `cfg.model`, because reading
+/// the bare field is exactly the defect this exists to prevent: most gateways pick the upstream from
+/// the model name, so a fixed model sends the same request for all six egress columns, reaches one
+/// upstream, and publishes six cells for one measurement - a translation claim the gateway was never
+/// asked to perform. Falls back to the declared `model` when the manifest names nothing for this
+/// column, which is right for a single-upstream gateway and for the column whose canonical name is
+/// already the declared one.
+pub fn model_for(cfg: &RunConfig, egress: &str) -> String {
+    cfg.egress_models.get(egress).cloned().unwrap_or_else(|| cfg.model.clone())
+}
+
 pub fn path_for(cfg: &RunConfig, ingress: Dialect, egress: &str) -> String {
-    let standard = ingress.path(&cfg.model);
+    let standard = ingress.path(&model_for(cfg, egress));
     // Most specific first: a cell's own path, then the gateway's declared one, then the standard.
     if let Some(p) = cfg.cell_paths.get(&format!("{}>{}", ingress.as_str(), egress)) {
         return p.clone();
@@ -113,7 +129,7 @@ pub fn probe_cell(cfg: &RunConfig, id: &CellId, mock_healthy: bool) -> Served {
         return Served::Untestable(format!("unknown ingress dialect {}", id.ingress));
     };
     let path = path_for(cfg, ing, &id.egress);
-    let body = ing.body(&cfg.model);
+    let body = ing.body(&model_for(cfg, &id.egress));
     match http::post_json(cfg.gateway_addr, &path, body.as_bytes(), &headers_for(cfg, ing, &id.egress), cfg.probe_timeout) {
         Outcome::Response(r) if (200..300).contains(&r.status) => Served::Yes,
         Outcome::Response(r) => {
@@ -307,7 +323,7 @@ pub fn measure_at(cfg: &RunConfig, id: &CellId, concurrency: u32) -> Measurement
     let mut p = SweepProbe {
         cfg,
         path: path_for(cfg, ing, &id.egress),
-        body: ing.body(&cfg.model),
+        body: ing.body(&model_for(cfg, &id.egress)),
         headers: headers_for(cfg, ing, &id.egress),
     };
     match p.probe(concurrency) {
@@ -338,7 +354,7 @@ pub fn sweep_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> CellPerf {
     let mut p = SweepProbe {
         cfg,
         path: path_for(cfg, ing, &id.egress),
-        body: ing.body(&cfg.model),
+        body: ing.body(&model_for(cfg, &id.egress)),
         headers: headers_for(cfg, ing, &id.egress),
     };
     let start = ((lo + hi) / 2).max(lo);
@@ -474,7 +490,7 @@ pub fn sweep_sustained_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> C
     let mut p = SustainedProbe {
         cfg,
         path: path_for(cfg, ing, &id.egress),
-        body: ing.body(&cfg.model),
+        body: ing.body(&model_for(cfg, &id.egress)),
         headers: headers_for(cfg, ing, &id.egress),
         points: Vec::new(),
     };
@@ -851,7 +867,7 @@ fn stream_target(cfg: &RunConfig, id: &CellId) -> Option<StreamTarget> {
     let ing = id.ingress.parse::<Dialect>().ok()?;
     Some(StreamTarget {
         path: path_for(cfg, ing, &id.egress),
-        body: ing.stream_body(&cfg.model),
+        body: ing.stream_body(&model_for(cfg, &id.egress)),
         headers: headers_for(cfg, ing, &id.egress),
     })
 }
@@ -1138,6 +1154,7 @@ pub(crate) fn test_fixture(gw: SocketAddr, mock: SocketAddr) -> RunConfig {
         gateway_addr: gw,
         mock_addr: mock,
         model: "m".into(),
+        egress_models: Default::default(),
         auth: "dummy".into(),
         dialects: vec![Dialect::Openai],
         sweep_duration_s: 1,
@@ -1164,6 +1181,38 @@ mod tests {
 
     fn cfg_for(gw: SocketAddr, mock: SocketAddr) -> RunConfig {
         test_fixture(gw, mock)
+    }
+
+    // THE COLLAPSED EGRESS AXIS THIS PREVENTS. Most gateways choose the upstream from the model name
+    // in the request, so a grid that sends one fixed model sends a byte-identical request for all six
+    // egress columns of a row. Every column reaches the SAME upstream, and the artifact publishes six
+    // translation cells for one measurement the gateway was never asked to perform. The axis reads as
+    // measured and is not.
+    #[test]
+    fn every_egress_column_asks_for_its_own_model() {
+        let a = "127.0.0.1:1".parse().expect("addr");
+        let mut cfg = test_fixture(a, a);
+        cfg.model = "canonical".into();
+        cfg.egress_models = [("anthropic".to_string(), "claude-x".to_string())].into_iter().collect();
+
+        assert_eq!(model_for(&cfg, "anthropic"), "claude-x", "the column's own name must be sent");
+        // An egress the manifest names nothing for falls back to the declared model: right for a
+        // single-upstream gateway, and for the column whose canonical name already IS that model.
+        assert_eq!(model_for(&cfg, "openai"), "canonical");
+    }
+
+    // The model rides in the PATH for two of the six dialects, so a per-egress model that never
+    // reached `path_for` would still collapse those columns even with the body correct.
+    #[test]
+    fn a_path_that_embeds_the_model_embeds_the_egress_columns_model() {
+        let a = "127.0.0.1:1".parse().expect("addr");
+        let mut cfg = test_fixture(a, a);
+        cfg.model = "canonical".into();
+        cfg.egress_models = [("bedrock".to_string(), "vendor.model-v1:0".to_string())].into_iter().collect();
+
+        let p = path_for(&cfg, Dialect::Bedrock, "bedrock");
+        assert!(p.contains("vendor.model-v1:0"), "bedrock's path must carry its own column's model: {p}");
+        assert!(!p.contains("canonical"), "the declared model must not leak into another column: {p}");
     }
 
     /// A server that answers every request with a fixed status.
