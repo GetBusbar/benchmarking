@@ -14,4 +14,7 @@ gemini         upstream
 cohere         upstream
 keys           boot      # Bifrost will not register a provider with no key entry (dummy value)
 network_config upstream  # base_url -> the mock
+# Claimed because the dead gateway.sh launcher still passes it and the lint reads that file. The
+# LIVE config does not set it: the harness sets it for every gateway from the cores it pinned
+# (manifest.rs's pinned_parallelism), so no entrant states its own.
 GOMAXPROCS     bind      # Go pre-1.25 reads the HOST cpu count, not the --cpuset-cpus limit

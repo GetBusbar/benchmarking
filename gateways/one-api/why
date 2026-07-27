@@ -7,6 +7,9 @@
 # that matches nothing is a stale claim and also a failure.
 #
 # Migrated from GW_CONFIG_WHY in gateway.sh, which is dead code the lint was still reading.
+# Claimed because the dead gateway.sh launcher still passes it and the lint reads that file. The
+# LIVE config does not set it: the harness sets it for every gateway from the cores it pinned
+# (manifest.rs's pinned_parallelism), so no entrant states its own.
 GOMAXPROCS bind   # Go pre-1.25 reads the HOST cpu count, not the --cpuset-cpus limit
 INITIAL_ROOT_TOKEN boot  # its relay routes serve nothing without a token it issued, and every token its admin API mints is server-chosen; this is the only way the declared auth is a real one
 # This gateway has no config file. It keeps its configuration in a database and is configured
