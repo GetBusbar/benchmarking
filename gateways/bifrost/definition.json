@@ -1,5 +1,8 @@
 {
   "auth": "sk-dummy",
+  "cell_paths": {
+    "anthropic>openai-responses": "/anthropic/v1/messages"
+  },
   "class": "LLM gateway",
   "config": [],
   "config_files": [

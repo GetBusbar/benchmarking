@@ -131,6 +131,24 @@ fn rig_ceiling(cfg: &SuiteConfig, dialect: Dialect, at_conc: u32) -> Measurement
     run::measure_at(&direct, &id, at_conc)
 }
 
+/// Narrow a metric-surface `f64` into the artifact's published `i64`, carrying the reason and detail
+/// intact when absent. Every group's numbers here are microseconds or whole counts; the metric
+/// surface is f64 only because ALL groups share one type (`metric.rs`'s module doc explains why), so
+/// this is the one narrowing point shared by every place a metric field becomes a record field.
+fn as_i64(m: Option<&Measurement<f64>>) -> Measurement<i64> {
+    match m {
+        Some(m) => match m.value() {
+            Some(v) => Measurement::Measured(*v as i64),
+            None => match (m.reason().cloned(), m.detail()) {
+                (Some(r), Some(d)) => Measurement::absent_because(r, d),
+                (Some(r), None) => Measurement::absent(r),
+                (None, _) => Measurement::absent(Absent::NotMeasured),
+            },
+        },
+        None => Measurement::absent_because(Absent::NotMeasured, "no metric group fills this field"),
+    }
+}
+
 /// Judge one cell's throughput and suppress it if the rig, not the gateway, set it.
 /// Turn the metrics the engine took on one cell into the published perf block.
 ///
@@ -148,29 +166,132 @@ fn judge_cell(
     let rps = metrics.get("rps_max_proxy").cloned().unwrap_or_else(missing);
     let conc_m = metrics.get("conc_at_peak").cloned().unwrap_or_else(missing);
 
+    match (rps.value(), conc_m.value()) {
+        (Some(&value), Some(&conc_f)) => {
+            // Concurrency travels as f64 so every metric has one type; it is only ever a whole rung
+            // of the search, so this narrowing cannot lose anything a search could have produced.
+            let conc = conc_f as u32;
+            let reference = rig_ceiling(cfg, dialect, conc);
+            apply_peak_verdict(&mut out, value, conc, reference);
+        }
+        _ => {
+            // Carry the search's own reason and evidence rather than flattening it.
+            let absent = match (rps.reason().cloned(), rps.detail()) {
+                (Some(r), Some(d)) => Measurement::absent_because(r, d),
+                (Some(r), None) => Measurement::absent(r),
+                (None, _) => Measurement::absent(Absent::NotMeasured),
+            };
+            // The concurrency travels WITH the peak, present or absent. Leaving it at empty_perf()'s
+            // default published a different reason for the two halves of one fact.
+            out.rps_max_proxy_concurrency = match absent.reason().cloned() {
+                Some(r) => Measurement::absent(r),
+                None => Measurement::absent(Absent::NotMeasured),
+            };
+            out.rps_max_proxy = absent;
+        }
+    }
+
+    judge_added_latency(&mut out, metrics);
+    judge_sustained(cfg, dialect, &mut out, metrics);
+
+    Judged { perf: out }
+}
+
+/// Fill the added-latency fields straight from the metric surface.
+///
+/// Unlike the peak's `rps_max_proxy`, there is no separate rig-bound verdict to compute here: the
+/// group's own two-leg comparison (gateway leg minus a direct-to-mock leg, both taken at c=1) already
+/// IS the rig correction, the same way `Streaming::measure`'s `added_ttft`/`added_gap` need no second
+/// rig judgement layered on top. So this is a plain "take", exactly the pattern `cell_memory` and
+/// `cell_stream` already use for fields with no rig-bound question to ask.
+fn judge_added_latency(out: &mut CellPerf, metrics: &std::collections::BTreeMap<&'static str, Measurement<f64>>) {
+    out.added_latency_p50_us = as_i64(metrics.get("added_latency_p50_us"));
+    out.added_latency_p99_us = as_i64(metrics.get("added_latency_p99_us"));
+    out.gateway_c1_p99_us = as_i64(metrics.get("gateway_c1_p99_us"));
+    out.direct_c1_p99_us = as_i64(metrics.get("direct_c1_p99_us"));
+}
+
+/// Judge the sustained-throughput ceiling exactly as `judge_cell` judges the peak: the SAME rig
+/// reference (`rig_ceiling`, the mock's own throughput at the winning concurrency) and the SAME
+/// fraction (`rigbound::is_rig_bound`), so the two "was this the rig or the gateway" verdicts in one
+/// cell are computed one way rather than one gate reusing the peak's machinery and the other
+/// inventing its own threshold.
+fn judge_sustained(
+    cfg: &SuiteConfig,
+    dialect: Dialect,
+    out: &mut CellPerf,
+    metrics: &std::collections::BTreeMap<&'static str, Measurement<f64>>,
+) {
+    let missing = || Measurement::absent_because(Absent::NotMeasured, "no metric group fills this field");
+    let rps = metrics.get("rps_sustained_20ms").cloned().unwrap_or_else(missing);
+    let conc_m = metrics.get("rps_sustained_20ms_concurrency").cloned().unwrap_or_else(missing);
+
     let (Some(&value), Some(&conc_f)) = (rps.value(), conc_m.value()) else {
-        // Carry the search's own reason and evidence rather than flattening it.
         let absent = match (rps.reason().cloned(), rps.detail()) {
             (Some(r), Some(d)) => Measurement::absent_because(r, d),
             (Some(r), None) => Measurement::absent(r),
             (None, _) => Measurement::absent(Absent::NotMeasured),
         };
-        // The concurrency travels WITH the peak, present or absent. Leaving it at empty_perf()'s
-        // default published a different reason for the two halves of one fact.
-        out.rps_max_proxy_concurrency = match absent.reason().cloned() {
+        out.rps_sustained_20ms_concurrency = match absent.reason().cloned() {
             Some(r) => Measurement::absent(r),
             None => Measurement::absent(Absent::NotMeasured),
         };
-        out.rps_max_proxy = absent;
-        return Judged { perf: out };
+        out.rps_sustained_20ms = absent;
+        return;
     };
-    // Concurrency travels as f64 so every metric has one type; it is only ever a whole rung of the
-    // search, so this narrowing cannot lose anything a search could have produced.
     let conc = conc_f as u32;
 
+    // c == 0 is `bisect_ceiling`'s own MEASURED "nothing sustains this gate" answer - there is no
+    // concurrency to take a rig reference AT, and a gateway that cannot sustain the gate even at the
+    // floor cannot be rig-bound by construction (the rig was never asked to do anything), so this
+    // publishes directly rather than through the rig-bound judgement below.
+    if conc == 0 {
+        out.rps_sustained_20ms = Measurement::Measured(0);
+        out.rps_sustained_20ms_concurrency = Measurement::Measured(0);
+        out.conc_at_sustained = Measurement::Measured(0);
+        out.rps_sustained_20ms_mock_bound = Some(false);
+        return;
+    }
+
     let reference = rig_ceiling(cfg, dialect, conc);
-    apply_peak_verdict(&mut out, value, conc, reference);
-    Judged { perf: out }
+    apply_sustained_verdict(out, value, conc, reference);
+}
+
+/// Fill the sustained fields from the rig verdict. PURE, and separate from `judge_sustained`, for the
+/// identical reason `apply_peak_verdict` is separate from `judge_cell`: a live rig measurement cannot
+/// be driven to the rig-bound and gateway-bound branches on demand from a fixture where the gateway
+/// and the mock are the same server, so the verdict logic has to be testable independent of
+/// `rig_ceiling` actually running one.
+fn apply_sustained_verdict(out: &mut CellPerf, value: f64, conc: u32, reference: Measurement<f64>) {
+    match rigbound::is_rig_bound(value, reference.clone()).copied() {
+        Some(true) => {
+            let detail = match reference.copied() {
+                Some(r) => format!("sustained {value:.0} against a rig ceiling of {r:.0} at c={conc}"),
+                None => format!("sustained {value:.0} at c={conc} with an unusable rig reference"),
+            };
+            out.rps_sustained_20ms = Measurement::absent_because(Absent::RigLimited, detail);
+            out.rps_sustained_20ms_mock_bound = Some(true);
+            out.rps_sustained_20ms_concurrency = Measurement::absent(Absent::RigLimited);
+            out.conc_at_sustained = Measurement::absent(Absent::RigLimited);
+        }
+        Some(false) => {
+            out.rps_sustained_20ms = Measurement::Measured(value as i64);
+            out.rps_sustained_20ms_mock_bound = Some(false);
+            out.rps_sustained_20ms_concurrency = Measurement::Measured(i64::from(conc));
+            out.conc_at_sustained = Measurement::Measured(i64::from(conc));
+        }
+        None => {
+            out.rps_sustained_20ms = Measurement::absent_because(
+                Absent::RigLimited,
+                format!(
+                    "sustained {value:.0} at c={conc}, but the rig reference could not be measured, so it is unknown whether the gateway or the rig set this"
+                ),
+            );
+            out.rps_sustained_20ms_mock_bound = None;
+            out.rps_sustained_20ms_concurrency = Measurement::absent(Absent::RigLimited);
+            out.conc_at_sustained = Measurement::absent(Absent::RigLimited);
+        }
+    }
 }
 
 /// Fill the peak fields from the rig verdict. PURE, and separate from `judge_cell`, for one reason:
@@ -313,19 +434,7 @@ fn cell_stream(
 ) -> crate::record::CellStream {
     // The record carries these as integer microseconds; the metric surface is f64 so every group has
     // one type. Truncation here loses at most a microsecond off a latency difference.
-    let us = |k: &str| -> Measurement<i64> {
-        match metrics.get(k) {
-            Some(m) => match m.value() {
-                Some(v) => Measurement::Measured(*v as i64),
-                None => match (m.reason().cloned(), m.detail()) {
-                    (Some(r), Some(d)) => Measurement::absent_because(r, d),
-                    (Some(r), None) => Measurement::absent(r),
-                    (None, _) => Measurement::absent(Absent::NotMeasured),
-                },
-            },
-            None => Measurement::absent_because(Absent::NotMeasured, "no metric group fills this field"),
-        }
-    };
+    let us = |k: &str| -> Measurement<i64> { as_i64(metrics.get(k)) };
 
     let ttft = metrics.get("added_ttft_p50_us");
     let (stream_served, reason) = match ttft.map(|m| (m.is_measured(), m.reason().cloned(), m.detail())) {
@@ -570,6 +679,7 @@ pub fn run_suite_with(
                 // it is unreviewable.
                 if let Some(series) = result.series.as_ref() {
                     p.sweep_max_proxy = series.sweep.clone();
+                    p.sweep_sustained_20ms = series.sweep_sustained.clone();
                 }
                 Some(p)
             }
@@ -842,6 +952,104 @@ mod tests {
             None,
             "its operating point must be suppressed with it"
         );
+    }
+
+    // ── apply_sustained_verdict: the same rig-bound machinery as the peak, applied to the gate ──────
+
+    #[test]
+    fn a_measured_sustained_ceiling_publishes_the_concurrency_it_held_at() {
+        let mut out = empty_perf();
+        // Comfortably below the reference: the gateway's own gate, not the rig's.
+        apply_sustained_verdict(&mut out, 11_968.0, 1024, Measurement::Measured(400_000.0));
+        assert_eq!(out.rps_sustained_20ms.copied(), Some(11_968));
+        assert_eq!(
+            out.rps_sustained_20ms_concurrency.copied(),
+            Some(1024),
+            "the published rate must carry the concurrency it was sustained at"
+        );
+        assert_eq!(out.conc_at_sustained.copied(), Some(1024));
+        assert_eq!(out.rps_sustained_20ms_mock_bound, Some(false));
+    }
+
+    #[test]
+    fn a_rig_bound_sustained_ceiling_is_suppressed_with_its_concurrency() {
+        let mut out = empty_perf();
+        // Reference equal to the observation: the rig, not the gateway, set this ceiling.
+        apply_sustained_verdict(&mut out, 11_968.0, 1024, Measurement::Measured(11_968.0));
+        assert_eq!(out.rps_sustained_20ms.copied(), None, "a rig-bound sustained rate is suppressed");
+        assert_eq!(
+            out.rps_sustained_20ms_concurrency.copied(),
+            None,
+            "its operating point must be suppressed with it"
+        );
+        assert_eq!(out.conc_at_sustained.copied(), None);
+        assert_eq!(out.rps_sustained_20ms_mock_bound, Some(true));
+    }
+
+    #[test]
+    fn an_unusable_sustained_reference_is_unknown_never_a_guessed_false() {
+        let mut out = empty_perf();
+        apply_sustained_verdict(&mut out, 11_968.0, 1024, Measurement::absent(Absent::NotMeasured));
+        assert_eq!(out.rps_sustained_20ms.copied(), None);
+        assert_eq!(
+            out.rps_sustained_20ms_mock_bound, None,
+            "an unmeasurable rig reference must not be guessed as gateway-bound"
+        );
+    }
+
+    // c == 0 is bisect_ceiling's own MEASURED "nothing sustains this gate" answer, and it is handled
+    // in `judge_sustained` itself (there is no concurrency to take a rig reference at), so this drives
+    // the whole function rather than `apply_sustained_verdict`.
+    #[test]
+    fn nothing_sustaining_the_gate_publishes_a_real_measured_zero_never_rig_bound() {
+        let dir = tmpdir("sustained-zero");
+        let gw = serve(200);
+        let cfg = cfg_for(&dir, gw);
+        let mut out = empty_perf();
+        let mut metrics: std::collections::BTreeMap<&'static str, Measurement<f64>> = std::collections::BTreeMap::new();
+        metrics.insert("rps_sustained_20ms", Measurement::Measured(0.0));
+        metrics.insert("rps_sustained_20ms_concurrency", Measurement::Measured(0.0));
+        judge_sustained(&cfg, Dialect::Openai, &mut out, &metrics);
+        assert_eq!(out.rps_sustained_20ms.copied(), Some(0));
+        assert_eq!(out.rps_sustained_20ms_concurrency.copied(), Some(0));
+        assert_eq!(out.conc_at_sustained.copied(), Some(0));
+        assert_eq!(out.rps_sustained_20ms_mock_bound, Some(false), "0 cannot be rig-bound: the rig was never asked to do anything");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── judge_added_latency: a plain take, straight off the metric surface ─────────────────────────
+
+    #[test]
+    fn added_latency_fields_are_taken_straight_from_the_metric_surface() {
+        let mut out = empty_perf();
+        let mut metrics: std::collections::BTreeMap<&'static str, Measurement<f64>> = std::collections::BTreeMap::new();
+        metrics.insert("added_latency_p50_us", Measurement::Measured(40_939.0));
+        metrics.insert("added_latency_p99_us", Measurement::Measured(40_945.0));
+        metrics.insert("gateway_c1_p99_us", Measurement::Measured(41_026.0));
+        metrics.insert("direct_c1_p99_us", Measurement::Measured(81.0));
+        judge_added_latency(&mut out, &metrics);
+        assert_eq!(out.added_latency_p50_us.copied(), Some(40_939));
+        assert_eq!(out.added_latency_p99_us.copied(), Some(40_945));
+        assert_eq!(out.gateway_c1_p99_us.copied(), Some(41_026));
+        assert_eq!(out.direct_c1_p99_us.copied(), Some(81));
+    }
+
+    // A field the group declined to fill must publish an absence with the group's own reason, never
+    // a silently-missing key nor a zero - the identical discipline `cell_stream`/`cell_memory` hold
+    // their "take" closures to.
+    #[test]
+    fn a_missing_added_latency_field_carries_the_groups_own_absence_reason() {
+        let mut out = empty_perf();
+        let mut metrics: std::collections::BTreeMap<&'static str, Measurement<f64>> = std::collections::BTreeMap::new();
+        metrics.insert(
+            "added_latency_p99_us",
+            Measurement::absent_because(Absent::NotMeasured, "the gateway leg at c=1 was not clean: 0 ok, 4 fail"),
+        );
+        judge_added_latency(&mut out, &metrics);
+        assert_eq!(out.added_latency_p99_us.copied(), None);
+        assert!(out.added_latency_p99_us.detail().unwrap_or_default().contains("not clean"));
+        // gateway_c1_p99_us was never inserted into the map at all: still a key, still an absence.
+        assert_eq!(out.gateway_c1_p99_us.copied(), None);
     }
 
     // NOT COVERED HERE BY DESIGN: an end-to-end suite test driving the whole pipeline with the

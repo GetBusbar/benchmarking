@@ -68,6 +68,11 @@ pub type Filled = Vec<(&'static str, Measurement<f64>)>;
 pub struct Series {
     /// One entry per concurrency the throughput search actually probed, in probe order.
     pub sweep: Vec<crate::record::SweepPoint>,
+    /// One entry per concurrency the SUSTAINED-throughput search actually probed, in probe order.
+    /// Kept apart from `sweep` above rather than merged into it: the two are two different searches
+    /// (a unimodal max search and a monotone gate bisection) over the same concurrency axis, and
+    /// merging their rungs would make it impossible to tell which point came from which search.
+    pub sweep_sustained: Vec<crate::record::SweepPoint>,
     /// One entry per resident-memory reading taken across the load window.
     pub rss: Vec<crate::record::RssSample>,
 }
@@ -105,7 +110,7 @@ pub trait Metric: Sync {
 ///
 /// Adding a number to the board is: implement a group, add it here. Removing one is deleting it from
 /// this list, which is a visible act rather than a call that quietly stopped happening.
-pub const METRICS: &[&dyn Metric] = &[&Throughput, &Memory, &Streaming];
+pub const METRICS: &[&dyn Metric] = &[&Throughput, &Memory, &Streaming, &AddedLatency, &SustainedThroughput];
 
 /// Run every metric against one served cell.
 ///
@@ -136,6 +141,9 @@ pub fn process_cell_with(
         // group's evidence.
         if !produced.series.sweep.is_empty() {
             series.sweep = produced.series.sweep;
+        }
+        if !produced.series.sweep_sustained.is_empty() {
+            series.sweep_sustained = produced.series.sweep_sustained;
         }
         if !produced.series.rss.is_empty() {
             series.rss = produced.series.rss;
@@ -207,7 +215,7 @@ impl Metric for Throughput {
             .collect();
         Measured {
             fields: vec![("rps_max_proxy", rps), ("conc_at_peak", conc)],
-            series: Series { sweep, rss: Vec::new() },
+            series: Series { sweep, sweep_sustained: Vec::new(), rss: Vec::new() },
         }
     }
 }
@@ -519,7 +527,7 @@ impl Metric for Memory {
                     },
                 ),
             ],
-            series: Series { sweep: Vec::new(), rss },
+            series: Series { sweep: Vec::new(), sweep_sustained: Vec::new(), rss },
         }
     }
 }
@@ -646,6 +654,179 @@ impl Metric for Streaming {
     }
 }
 
+/// Added latency: what the gateway adds to a single request's round trip at concurrency 1, over the
+/// same request taken straight to the mock.
+///
+/// ONE PAIRED COMPARISON, TWO NUMBERS PLUS THEIR OWN RAW READINGS - which is why this is a group
+/// rather than two: `added_latency_p99_us` and `gateway_c1_p99_us`/`direct_c1_p99_us` come from the
+/// SAME two windows, and re-running either leg to fill a field the other group forgot would put the
+/// difference and its own operands on two different populations, exactly the defect this file's
+/// module doc names for peak-and-concurrency.
+///
+/// Concurrency 1 on purpose: throughput is what a gateway does under load, but added latency is
+/// asking a narrower question - what does ONE request cost, with nothing else contending for the
+/// gateway's attention - and any concurrency above 1 reintroduces queueing delay into a number that
+/// is supposed to isolate the gateway's own per-request overhead.
+pub struct AddedLatency;
+
+/// Whether a c=1 window's own reading may be trusted as a leg of the added-latency comparison: it
+/// produced at least one success, and did so with no failure. A window that mixed successes and
+/// failures is not "what this leg costs", it is a window neither leg completed cleanly - the same
+/// clean-window bar `SweepProbe` uses for a throughput rung (`fail == 0 && ok > 0`). A free function,
+/// like `run::sustained_gate_passes`, so the boundary can be pinned directly without a subprocess
+/// load window behind it.
+fn clean_c1_leg(ok: u64, fail: u64) -> bool {
+    ok > 0 && fail == 0
+}
+
+/// The added-latency difference itself: the gateway leg's reading minus the direct-to-mock leg's, at
+/// microsecond resolution. Saturating, because a gateway cannot legitimately answer faster than the
+/// upstream it proxies - a negative raw difference is rig noise (two separate processes, two separate
+/// windows, run one after the other on a real box), and publishing it as a negative added latency
+/// would claim the gateway returned a response before the mock itself had produced one, which a
+/// proxy cannot do. Mirrors `Streaming::measure`'s identical reasoning for `added_ttft`.
+fn added_latency_diff(gateway_us: u64, direct_us: u64) -> u64 {
+    gateway_us.saturating_sub(direct_us)
+}
+
+impl Metric for AddedLatency {
+    fn name(&self) -> &'static str {
+        "added_latency"
+    }
+
+    fn fields(&self) -> &'static [&'static str] {
+        &["added_latency_p50_us", "added_latency_p99_us", "gateway_c1_p99_us", "direct_c1_p99_us"]
+    }
+
+    fn measure(&self, ctx: &CellCtx<'_>) -> Measured {
+        let all_absent = |detail: String| -> Measured {
+            let f: Filled =
+                self.fields().iter().map(|x| (*x, Measurement::absent_because(Absent::NotMeasured, detail.clone()))).collect();
+            f.into()
+        };
+
+        let body = ctx.dialect.body(&ctx.cfg.model);
+        let gw_path = crate::run::path_for(ctx.cfg, ctx.dialect, &ctx.id.egress);
+        let direct_path = ctx.dialect.mock_direct_path(&ctx.cfg.model);
+
+        // THE SAME DURATION EVERY OTHER WINDOW IN THIS ENGINE USES, not a second magic number.
+        //
+        // At concurrency 1 a window's sample count is duration / round-trip-time rather than
+        // duration * concurrency, so it is naturally smaller than a saturating sweep window's - but
+        // `cfg.sweep_duration_s` is already sized to run a 36-cell grid across 13 gateways in a
+        // reasonable box-time (6s in production, per `bin/otb.rs`'s default), and 6 seconds of
+        // serial round trips against anything answering in single-digit milliseconds - every dialect
+        // this rig drives - is hundreds to low thousands of samples, comfortably enough for a stable
+        // p99. Reusing the constant that already governs every other window keeps one knob for "how
+        // long is a load window" rather than two that can silently drift apart.
+        let gw = crate::run::load_window(ctx.cfg, &gw_path, &body, 1);
+        let direct = crate::run::load_window_at(ctx.cfg, ctx.cfg.mock_addr, &direct_path, &body, 1);
+
+        let (Some(gw), Some(direct)) = (gw, direct) else {
+            return all_absent(
+                "no concurrency-1 load window completed on one of the two legs, so there is nothing to difference"
+                    .to_string(),
+            );
+        };
+        // A LEG WITH ANY FAILURE IS NOT A LATENCY READING OF THAT LEG.
+        if !clean_c1_leg(gw.ok, gw.fail) {
+            return all_absent(format!("the gateway leg at c=1 was not clean: {} ok, {} fail", gw.ok, gw.fail));
+        }
+        if !clean_c1_leg(direct.ok, direct.fail) {
+            return all_absent(format!("the direct-to-mock leg at c=1 was not clean: {} ok, {} fail", direct.ok, direct.fail));
+        }
+        let (Some(gw_p99), Some(direct_p99)) = (gw.p99_us, direct.p99_us) else {
+            return all_absent("one leg's c=1 window produced no p99 reading".to_string());
+        };
+
+        let added_p99 = added_latency_diff(gw_p99, direct_p99);
+        let added_p50 = match (gw.p50_us, direct.p50_us) {
+            (Some(g), Some(d)) => Measurement::Measured(added_latency_diff(g, d) as f64),
+            _ => Measurement::absent_because(Absent::NotMeasured, "one leg's c=1 window produced no p50 reading"),
+        };
+
+        let fields: Filled = vec![
+            ("added_latency_p50_us", added_p50),
+            ("added_latency_p99_us", Measurement::Measured(added_p99 as f64)),
+            ("gateway_c1_p99_us", Measurement::Measured(gw_p99 as f64)),
+            ("direct_c1_p99_us", Measurement::Measured(direct_p99 as f64)),
+        ];
+        fields.into()
+    }
+}
+
+/// Sustained throughput: the highest concurrency at which the gateway holds p99 under
+/// `run::SUSTAINED_P99_CEILING_US` with an error rate under `run::SUSTAINED_MAX_FAIL_RATIO` (the
+/// README's own gate), and the requests/sec it sustains there.
+///
+/// ONE BISECTION, TWO NUMBERS - the ceiling and the rate it sustains there come from the SAME search
+/// for the same reason `Throughput`'s peak and its concurrency do: re-deriving the rate from a second
+/// window at the winning concurrency would measure a different population than the one that proved
+/// the ceiling.
+///
+/// A DIFFERENT SEARCH SHAPE THAN `Throughput`, which is why this is a separate group rather than a
+/// third and fourth field bolted onto it. Peak throughput is unimodal (rises then falls) and is found
+/// by `search::peak_max`; sustained throughput is a monotone pass/fail gate in concurrency (once p99
+/// blows past the ceiling it does not come back under it as concurrency keeps climbing) and is found
+/// by `search::bisect_ceiling`. Conflating the two searches into one group would either run the wrong
+/// algorithm for one of the two numbers or run two searches and call it one group, both of which this
+/// file's module doc names as the defect a group exists to prevent.
+pub struct SustainedThroughput;
+
+impl Metric for SustainedThroughput {
+    fn name(&self) -> &'static str {
+        "sustained_throughput"
+    }
+
+    fn fields(&self) -> &'static [&'static str] {
+        &["rps_sustained_20ms", "rps_sustained_20ms_concurrency", "conc_at_sustained"]
+    }
+
+    fn measure(&self, ctx: &CellCtx<'_>) -> Measured {
+        let perf = crate::run::sweep_sustained_cell(ctx.cfg, ctx.id, ctx.min_conc, ctx.max_conc);
+        let carry = |m: &Measurement<f64>| match (m.reason().cloned(), m.detail()) {
+            (Some(r), Some(d)) => Measurement::absent_because(r, d),
+            (Some(r), None) => Measurement::absent(r),
+            (None, _) => Measurement::absent(Absent::NotMeasured),
+        };
+        let rps = match perf.rps.value() {
+            Some(v) => Measurement::Measured(*v),
+            None => carry(&perf.rps),
+        };
+        // Mirrors the rps reason rather than inventing a second one, exactly as `Throughput` does for
+        // its own concurrency field.
+        let conc = match perf.concurrency.value() {
+            Some(c) => Measurement::Measured(f64::from(*c)),
+            None => Measurement::absent(perf.rps.reason().cloned().unwrap_or(Absent::NotMeasured)),
+        };
+        // THE SWEEP TRAVELS WITH THE CEILING, and unlike `Throughput`'s sweep, `p99_us` and `fail`
+        // are REAL here rather than absent: this search's own gate check needs the p99 and the fail
+        // count to judge each rung, so they are already in hand rather than something a separate
+        // measurement would have to take.
+        let sweep = perf
+            .points
+            .iter()
+            .map(|pt| crate::record::SweepPoint {
+                conc: i64::from(pt.concurrency),
+                rps: Measurement::Measured(pt.rps as i64),
+                p99_us: match pt.p99_us {
+                    Some(v) => Measurement::Measured(v as i64),
+                    None => Measurement::absent(Absent::NotMeasured),
+                },
+                fail: Measurement::Measured(pt.fail),
+            })
+            .collect();
+        Measured {
+            fields: vec![
+                ("rps_sustained_20ms", rps),
+                ("rps_sustained_20ms_concurrency", conc.clone()),
+                ("conc_at_sustained", conc),
+            ],
+            series: Series { sweep: Vec::new(), sweep_sustained: sweep, rss: Vec::new() },
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -756,5 +937,52 @@ mod tests {
             idle.reason().is_some(),
             "an absent idle must carry the reason it could not be taken, not a bare null"
         );
+    }
+
+    // ── AddedLatency's pure helpers ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn a_clean_leg_needs_at_least_one_success_and_zero_failures() {
+        assert!(clean_c1_leg(1, 0));
+        assert!(clean_c1_leg(500, 0));
+        assert!(!clean_c1_leg(0, 0), "no requests completed at all is not a clean reading");
+        assert!(!clean_c1_leg(0, 3), "all failures is not a clean reading");
+        assert!(!clean_c1_leg(497, 3), "even one failure disqualifies the leg");
+    }
+
+    #[test]
+    fn added_latency_diff_is_saturating_never_negative() {
+        assert_eq!(added_latency_diff(1_200, 80), 1_120, "the ordinary case is a plain subtraction");
+        assert_eq!(added_latency_diff(0, 0), 0);
+        // The gateway leg reading BELOW the direct leg is rig noise (two separate windows on a real
+        // box), not the gateway outrunning the upstream it proxies - saturating_sub must clamp this
+        // to zero rather than wrapping or going negative.
+        assert_eq!(added_latency_diff(50, 200), 0, "a gateway reading faster than the direct leg must clamp to zero");
+    }
+
+    // ── the reachability list itself carries the two new groups ────────────────────────────────
+    //
+    // `no_two_groups_claim_the_same_artifact_field` and `every_group_declares_what_it_fills` above
+    // already run over `METRICS`, so adding `AddedLatency`/`SustainedThroughput` to that list is
+    // what makes them reachable per this file's own module doc ("a metric is in `METRICS` or it does
+    // not exist"). This test names the two fields those tests would silently miss if a future edit
+    // dropped either struct back out of the list without anything else failing.
+    #[test]
+    fn added_latency_and_sustained_throughput_are_reachable_from_metrics() {
+        let names: Vec<&str> = METRICS.iter().map(|m| m.name()).collect();
+        assert!(names.contains(&"added_latency"), "METRICS = {names:?}");
+        assert!(names.contains(&"sustained_throughput"), "METRICS = {names:?}");
+        let all_fields: Vec<&str> = METRICS.iter().flat_map(|m| m.fields().iter().copied()).collect();
+        for f in [
+            "added_latency_p50_us",
+            "added_latency_p99_us",
+            "gateway_c1_p99_us",
+            "direct_c1_p99_us",
+            "rps_sustained_20ms",
+            "rps_sustained_20ms_concurrency",
+            "conc_at_sustained",
+        ] {
+            assert!(all_fields.contains(&f), "{f} is not declared by any group in METRICS: {all_fields:?}");
+        }
     }
 }
