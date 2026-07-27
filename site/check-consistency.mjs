@@ -277,7 +277,10 @@ function rawMatrix(gwKey) {
 
 // hasCellMemory(m): does this matrix carry a per-cell memory window on any served cell? Memory projects
 // no per-gateway record, so "is this row publishing memory?" can only be asked of the cells themselves.
-function hasCellMemory(m) {
+// Exported so test.mjs's BOARD_HAS_DATA can reuse this predicate verbatim instead of re-implementing it:
+// the guard and its harness must agree on what "this row publishes something" means, or the harness can
+// declare a board populated that the guard considers empty (and vice versa).
+export function hasCellMemory(m) {
   if (!m || typeof m !== "object") return false;
   for (const cells of [m.cells, ...Object.values(m.upstreams || {}).map((u) => u && u.cells)]) {
     if (!cells || typeof cells !== "object") continue;
@@ -639,8 +642,15 @@ export function checkConsistency(data, app, opts = {}) {
   const CHECK_BRANCHES = [
     "C1.field", "C1.certified", "C1.mock_bound", "C2.suppressed",
     "C3.stamp", "C3.lint", "C3.route", "C3.parity", "C4.cell", "C4.leak", "C6.cell", "R1.oracle",
-    "R3.selection", "C7.hwm", "C5.route", "C5.lint",
+    "R3.selection", "C7.hwm", "C5.route", "C5.lint", "C8.engine",
   ];
+  // C8.engine was tagged by the branch below but never DECLARED here, so R2's own
+  // "every covered branch is a declared branch" assertion (test.mjs) hard-failed on any bundle whose
+  // gateways carry engine stamps - i.e. on every post-stamp real board, while passing on the synthetic
+  // fixtures that skip C8 entirely. Declaring it is not a relaxation: the branch already runs and its
+  // errors already fire. It stays OUT of REQUIRED because eng.checked is 0 on a legitimately
+  // all-unstamped (pre-stamp) board, and C8 already errors on the dishonest case - a MIX of stamped
+  // and unstamped rows - so requiring coverage here would fail the one board C8 deliberately permits.
   // C1.mock_bound / C2.suppressed / C4.leak are ERROR-only branches: they fire only on a violation, so
   // they are NOT required to be covered by a healthy bundle (their absence is the GOOD state). REQUIRED =
   // the branches a healthy bundle with projected cells MUST exercise. C3.lint and C5.lint are tagged when

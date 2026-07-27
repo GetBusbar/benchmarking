@@ -391,6 +391,13 @@ CHARTS = [
         unit="µs",
         series=[Series("added_latency_p99_us", "p99 added latency", "rank")],
         log=True,
+        # Same MEDIUM-R3-3 guard as the translation lane. _proj_perf always reports served=True, so an
+        # absent added-latency envelope fell through to the DEFAULT zero_text ("0 · no load held p99 < 1 s")
+        # - a THROUGHPUT-failure sentence captioning an unmeasured LATENCY, which states a reason the
+        # harness never established. It sank to the bottom rather than the top, so the ranking was not
+        # corrupted, but the label was a fabricated explanation.
+        not_measured_text="✕ added latency not measured",
+        null_not_served=True,
         annot=_perf_annot,
     ),
     Chart(
@@ -604,8 +611,16 @@ CHARTS = [
         log=True,
         served_field="xlate_served",
         not_served_text="✕ cannot translate",
+        not_measured_text="✕ translated added latency not measured",
         clamp_negatives=True,
         zero_ok=True,
+        # MEDIUM-R3-3, applied to the translation lane: without null_not_served, `float(r.get(f, 0) or 0)`
+        # turns an ABSENT added-latency envelope into a measured 0.0. On a served row with zero_ok that
+        # renders a bold "0" and, because lower-is-better, SORTS IT TO THE WINNING END - an unmeasured
+        # gateway ranking #1 for adding no latency. The streaming latency lanes above already carry this
+        # guard; this lane was missed. Nullness is snapshotted before the coercion, so absent now reads
+        # not_measured_text and drops out of the ranking instead of winning it.
+        null_not_served=True,
         auto_ms=True,
         annot=lambda r: (f"{_dialect(r.get('_xlate_ingress'))} → {_dialect(r.get('_xlate_egress'))}"
                          + _sweep_label({"sweep": r.get("_xlate_source")}))

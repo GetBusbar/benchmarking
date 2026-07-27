@@ -19,7 +19,7 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import assert from "node:assert/strict";
-import { checkConsistency, c6Inversions, c7HwmBelowPeak } from "./check-consistency.mjs";
+import { checkConsistency, c6Inversions, c7HwmBelowPeak, hasCellMemory } from "./check-consistency.mjs";
 import * as checkMod from "./check-consistency.mjs";
 import { sealMetric, ZERO_NO_CEILING, ZERO_MEASURED_FAIL } from "./seal.mjs";
 // A HAND-BUILT fixture has no results/matrix/<key>.json oracle, so it needs an EXPLICIT opt-in
@@ -174,7 +174,18 @@ try {
 // family below is vacuous here and says so out loud, while staying exactly as strict the moment a single
 // gateway carries data. The n/a rendering itself is asserted unconditionally, so "empty" cannot become a
 // hole that hides a broken board.
-const BOARD_HAS_DATA = (data.gateways || []).some((g) => g && (g.best_cell || g.matrix));
+// "Carries data" must mean PUBLISHES A NUMBER, which is exactly check-consistency's own `matrixSourced`
+// predicate (a projected best_cell / translation_cell / streaming record, or per-cell memory). The old
+// `g.best_cell || g.matrix` also accepted a bare `g.matrix` OBJECT, which a gateway that failed to serve
+// still carries (matrix.served=false, zero cells, no projected record). That mismatch is what made a board
+// of only-failed-to-serve rows report BOARD_HAS_DATA=true and then fail 14 ways: R2 demanded the REQUIRED
+// branches (C1.field, C1.certified, C4.cell) that only a published cell can exercise, and every RED
+// self-test below TypeError'd on an undefined donor row. A gateway that served nothing published nothing
+// and has nothing to be inconsistent about - the same reasoning the comment above already states ("gen-data
+// already produces it (13 gateways, no best_cell)"). This narrows the predicate to match that stated intent;
+// it does not weaken any assertion, because every branch it now skips is one the bundle cannot exercise.
+const BOARD_HAS_DATA = (data.gateways || []).some((g) => g &&
+  ([g.best_cell, g.translation_cell, g.streaming].some((r) => r && r.source) || hasCellMemory(g.matrix)));
 if (!BOARD_HAS_DATA) {
   console.warn(`warn - the board carries no measurements (${(data.gateways || []).length} gateways, all n/a):`);
   console.warn("       the real-bundle consistency checks are vacuous and are reported as skipped.");
@@ -843,7 +854,18 @@ test("a zero RPS cell renders 0 with the no-qualifying-ceiling tooltip", () => {
 // The onthebench 11th-phase test. Each invariant has a RED-before test that reintroduces the dishonesty
 // on a clone of the real bundle and asserts the SPECIFIC invariant fails (revert-the-seal → class fails).
 const clone = () => structuredClone(data);
-const matrixGw = (d) => d.gateways.find((g) => g.best_cell && g.best_cell.source && g.best_cell.source.kind === "matrix");
+// The RED self-tests below revert one seal on a clone of the REAL bundle, so they need a donor row that
+// actually publishes a matrix-sourced best_cell. When none exists they used to hand back `undefined` and
+// die on `g.best_cell` with a bare TypeError - which reads as "the guard is broken" when the truth is
+// "this board published nothing to revert". Fail with the precondition named instead, so a genuine
+// regression stays loud and a dataless board is diagnosable at a glance. (BOARD_HAS_DATA gates these
+// tests off entirely in that case; this is the belt-and-braces message if the two ever disagree.)
+const matrixGw = (d) => {
+  const g = d.gateways.find((x) => x.best_cell && x.best_cell.source && x.best_cell.source.kind === "matrix");
+  assert.ok(g, "RED self-test precondition: no gateway in the bundle publishes a matrix-sourced best_cell, " +
+    "so there is no seal to revert (board is dataless, not dishonest)");
+  return g;
+};
 
 testWithData("consistency guard: the real bundle satisfies the sealed-envelope invariants C1–C5", () => {
   const { errors, warnings } = checkConsistency(data, app);
