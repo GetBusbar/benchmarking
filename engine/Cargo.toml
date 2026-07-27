@@ -10,6 +10,19 @@ description = "Measurement engine for the onthebench gateway benchmark."
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+# THE LOAD GENERATOR ONLY (`gen.rs`). One OS thread per unit of concurrency put a hard, low ceiling
+# on the honest range of the concurrency search: a field run sweeping toward 32k held tens of
+# thousands of native threads on the six cores `taskset` pins the generator to, sat at a 1-minute
+# load average over 24,000 for 45+ minutes, and never converged - the rig's own scheduler thrashing
+# drowned out any signal from the gateway. Tasks cost a few KB instead of a full thread stack, so
+# concurrency stops being a claim the instrument cannot honour.
+#
+# `gen.rs` used to say "std only, threads not async, because every dependency here has to be audited
+# before anyone trusts the numbers". That bar is met rather than waived: the MOCK - the reference
+# instrument every published number is judged against - has always run on tokio + hyper, so this
+# adds no crate the measurement path did not already depend on.
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "io-util"] }
+
 [dev-dependencies]
 proptest = "1"
 
