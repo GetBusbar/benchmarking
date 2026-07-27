@@ -370,6 +370,14 @@ function sealPerfCellPerf(perf) {
   rec.rps_sustained_20ms = sealThroughput(perf, "rps_sustained_20ms", "conc_at_sustained");
   rec.rps_max_proxy = sealThroughput(perf, "rps_max_proxy", "conc_at_peak");
   if (perf.egress_reverified != null) rec.egress_reverified = perf.egress_reverified;
+  // The verdict without its evidence is an assertion. egress_reverified is the fairness guard's boolean
+  // (did this gateway actually TRANSLATE to the egress dialect, or just proxy the ingress request
+  // verbatim - which the mock, answering all six dialects by path, would otherwise score as a
+  // translation capability it does not have). reverify_note is the reason string behind that boolean, and
+  // it was dying here while the flag travelled on. A FALSE reverify is an accusation against a gateway;
+  // publishing it with no stated basis is exactly what this codebase refuses to do elsewhere.
+  // Neither is a sealed metric - they are provenance about a metric, so they ride as plain fields.
+  if (perf.reverify_note != null) rec.reverify_note = perf.reverify_note;
   return rec;
 }
 // sealPerfCell: a matrix/fallback perf object -> the canonical {path, source, <sealed metrics>} record.

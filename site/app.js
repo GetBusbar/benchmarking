@@ -997,6 +997,15 @@ const LANES = [
     metrics: [
       { k: "added_latency_p50_us", label: "Added latency p50 (µs)", best: "min", fmt: fmtAdded },
       { k: "added_latency_p99_us", label: "Added latency p99 (µs)", best: "min", fmt: fmtAdded },
+      // The two LEGS the added-latency figure above is the difference of. Added latency is a SUBTRACTION
+      // (gateway leg minus direct-to-mock leg at concurrency 1), and until now the board published the
+      // result while hiding both operands - a reader could not check the arithmetic, or see that a tiny
+      // "added" number came from two large legs that nearly cancelled. Both are sealed into best_cell by
+      // seal.mjs's UNGATED_LAT_FIELDS and were reaching the bundle unrendered.
+      // direct_c1_p99_us carries best:null deliberately: it is the harness's own leg against the mock, the
+      // same baseline for every row, so it is evidence rather than a contest (see bestIndex).
+      { k: "gateway_c1_p99_us", label: "Gateway p99 @ c=1 (µs)", best: "min", fmt: fmtUsMs },
+      { k: "direct_c1_p99_us", label: "Direct-to-mock p99 @ c=1 (µs)", best: null, fmt: fmtUsMs },
       // The operating concurrency travels INSIDE the sealed envelope (env.concurrency); the drawer shows
       // it as "(@ c=Y)" so the headline surfaces the load level its marked sweep peak sat at.
       { k: "rps_max_proxy", label: "Max proxy RPS", best: "max", fmt: fmtInt },
@@ -1027,6 +1036,11 @@ const LANES = [
       { k: "steady_state_rss_mib", label: "Steady-state RSS (MiB)", best: "min", fmt: fmt1 },
       { k: "growth_rate_mib_per_min", label: "Growth (MiB/min)", best: "min", fmt: fmt1 },
       { k: "peak_rss_mib", label: "Peak RSS (MiB)", best: "min", fmt: fmt1 },
+      // The kernel's own high-water mark, sealed and carried but unrendered. It is the independent check on
+      // the sampled peak above: C7 already WARNS when hwm sits below peak (a sampler that outran the
+      // kernel's accounting), and a reader could not see the pair the guard was comparing. Showing both
+      // makes that disclosure legible instead of build-log-only.
+      { k: "peak_rss_hwm_mib", label: "Peak RSS high-water (MiB)", best: "min", fmt: fmt1 },
       // Recovery: RSS 60 s after the load ends. Lower = released more of the peak (best: min). Absent on
       // pre-recovery bundles → the drawer/compare read n/a, exactly like any other lane field it lacks.
       { k: "recovered_rss_mib", label: () => `Recovered @${memWindowLabel(boardMemWindows().recovery)} (MiB)`, best: "min", fmt: fmt1 },
@@ -1040,6 +1054,11 @@ const LANES = [
       { k: "added_ttft_p99_us", label: "Added TTFT p99 (µs)", best: "min", fmt: fmtUsMs },
       { k: "added_gap_p99_us", label: "Added per-token p99 (µs)", best: "min", fmt: fmtUsMs },
       { k: "streams_sustained", label: "Streams sustained", best: "max", fmt: fmtInt },
+      // The RATE the sustained-streams bisect held, sealed under the SAME mock-bound flag as the count
+      // above (audit #11) and carried into the bundle by sealStreamRecord - but never rendered, so the
+      // board published a stream COUNT with no throughput behind it. Two gateways holding the same number
+      // of streams at very different frame rates read as identical without this row.
+      { k: "streams_sustained_fps", label: "Streams sustained (frames/s)", best: "max", fmt: fmtInt },
       { k: "cpu_fps", label: "CPU-bound fps (peak)", best: "max", fmt: fmtInt },
     ],
   },
@@ -2047,6 +2066,11 @@ function renderCompareBar() {
 }
 
 function bestIndex(vals, best) {
+  // best == null means the row is EVIDENCE, not a contest: direct_c1_p99_us is the harness's own
+  // direct-to-mock leg, a property of the rig rather than of any gateway, so crowning a "winner" on it
+  // would invent a ranking out of measurement noise on a baseline every row shares. Without this the
+  // `best === "min" ? ... : ...` ternary would silently fall through to max and highlight one anyway.
+  if (best == null) return -1;
   let bi = -1;
   vals.forEach((v, i) => {
     if (v == null) return;
@@ -2238,8 +2262,22 @@ function cellPopFull(g, ingress, egress) {
     : (cellPerf && bp && bp.ingress === ingress && bp.egress === egress
       ? `<div class="pop-delta muted">this IS the peak cell (ranks the Performance tab)</div>` : "");
   const verdict = cell.verdict_note ? `<div class="pop-note">${esc(cell.verdict_note)}</div>` : "";
+  // The egress fairness guard, surfaced where the translation claim is actually inspected. The mock answers
+  // all six dialects by path, so a gateway that forwarded the ingress request VERBATIM would still get a
+  // 200 and score as a translation it never performed. egress_reverified is the check that it really
+  // re-shaped the request into the egress dialect. This is a CAPABILITY verdict, not a perf metric, so it
+  // renders as prose next to verdict_note rather than as a lane row - and it is only stated for OFF-DIAGONAL
+  // cells, since a same-dialect passthrough has nothing to translate and "verbatim" is the correct behaviour
+  // there. reverify_note carries the basis, and an unverified cell says so rather than staying silent.
+  const rv = cellPerf && cellPerf.egress_reverified;
+  const reverify = (ingress !== egress && cellPerf && cellPerf.egress_reverified != null)
+    ? `<div class="pop-note ${rv ? "" : "warn"}">${rv
+      ? "egress re-verified: the request reaching the mock was in the egress dialect, not the ingress one"
+      : "egress NOT re-verified: the mock saw the ingress shape, so this cell may be a verbatim proxy rather than a translation"}${
+      cellPerf.reverify_note ? ` - ${esc(cellPerf.reverify_note)}` : ""}</div>`
+    : "";
   const cta = cell.served === true ? `<div class="pop-cta muted">click → Performance (Custom, this cell)</div>` : "";
-  return head + perfBlock + deltaBlock + verdict + cta;
+  return head + perfBlock + deltaBlock + verdict + reverify + cta;
 }
 /* hasMatrixGrid(g): did this gateway produce a protocol matrix at all? */
 function hasMatrixGrid(g) { return !!(g && g.matrix && (g.matrix.upstreams || g.matrix.cells)); }
