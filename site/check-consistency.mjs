@@ -414,6 +414,17 @@ export function lintCaptionParity(chartsSrc, jsCaptionKeys) {
 // oracleExpected(raw, flag, gated): re-derive what a metric MUST display, from the RAW value + its own
 // _mock_bound flag, through a path DISJOINT from metric()/seal.mjs. A gated metric is shown only when it
 // is null-free and either a measured 0 (honest) or a positive value the harness certified (flag===false).
+// WHICH FLAG GATES A FIELD. Almost always its own `<field>_mock_bound`, with one deliberate
+// exception: `streams_sustained_fps` is the rate produced by the SAME bisect that produced
+// `streams_sustained`, so it carries no flag of its own and inherits the count's (gen-data.mjs seals
+// it that way for exactly this reason, see AUDIT #11 there). Looking for a flag that is never written
+// yields `undefined`, which reads as "not proven unbound" and makes the oracle demand null for a rate
+// the bundle correctly publishes - four gateways' streaming rates blocked the deploy on a name.
+export function mockBoundFlagFor(raw, field) {
+  const name = field === "streams_sustained_fps" ? "streams_sustained_mock_bound" : `${field}_mock_bound`;
+  return raw[name];
+}
+
 export function oracleExpected(raw, flag, gated) {
   if (raw == null) return null;
   if (!gated) return raw;
@@ -572,7 +583,7 @@ export function checkConsistency(data, app, opts = {}) {
             for (const k of Object.keys(sealedSub)) {
               if (!isMetricField(k)) continue;
               cmp(`matrix[${ingress}->${egress}].${k}`, app.metric(sealedSub[k]).v,
-                oracleExpected(rawSub[k], rawSub[`${k}_mock_bound`], GATED_FIELDS.includes(k) || k === "streams_sustained_fps"));
+                oracleExpected(rawSub[k], mockBoundFlagFor(rawSub, k), GATED_FIELDS.includes(k) || k === "streams_sustained_fps"));
             }
           }
         }
@@ -587,7 +598,7 @@ export function checkConsistency(data, app, opts = {}) {
         for (const k of Object.keys(rec)) {
           if (!isMetricField(k)) continue;
           cmp(`${name}.${k}`, app.metric(rec[k]).v,
-            oracleExpected(raw[k], raw[`${k}_mock_bound`], GATED_FIELDS.includes(k) || k === "streams_sustained_fps"));
+            oracleExpected(raw[k], mockBoundFlagFor(raw, k), GATED_FIELDS.includes(k) || k === "streams_sustained_fps"));
         }
       }
       if (oracleCompared > 0) covered("R1.oracle");
