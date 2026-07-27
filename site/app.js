@@ -2164,7 +2164,7 @@ function closeCompare(sync = true) {
    measured. The diagonal needs no translation; a faithful passthrough passes there by design and
    its verdict note says so. gen-data normalizes v1 results into the same upstreams shape. */
 function matrixCell(g, egress, ingress) {
-  const up = g.matrix.upstreams && g.matrix.upstreams[egress];
+  const up = g.matrix && g.matrix.upstreams && g.matrix.upstreams[egress];
   return up && up.cells ? up.cells[ingress] : null;
 }
 /* Tooltip text for a cell. A grey (not_configurable) cell is the gateway's OWN declared
