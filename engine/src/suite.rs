@@ -800,7 +800,7 @@ pub fn run_suite_with(
         // restart cannot differ from the launch it is repeating. `None` for a manifest that declares
         // no launch: the harness does not own that gateway's lifetime and must not bounce it.
         declared_path: cfg.manifest.path.clone(),
-        cell_paths: cfg.manifest.cell_paths.clone(),
+        cell_paths: cfg.manifest.cell_paths_for(&cfg.gw_cores, cfg.mock_addr.port(), &cfg.gw_dir),
         matrix: cfg.manifest.matrix.clone(),
         matrix_note: cfg.manifest.matrix_note.clone(),
         untestable_cells: cfg.manifest.untestable.clone(),
@@ -836,6 +836,19 @@ pub fn run_suite_with(
             .collect(),
         runtime: cfg.manifest.runtime.clone(),
     };
+
+    // THE MOCK IS PUT BACK IN ITS MEASURING STATE BEFORE ANYTHING IS MEASURED.
+    //
+    // The mock's recorder is a per-request lock in the one process whose throughput is the reference
+    // every gateway's number is judged against, so it must be off for every load window and on only
+    // for the single re-verification request per cell. `reverify_cell` already holds that invariant
+    // per cell, but the box-qualification window below runs BEFORE the first cell - and a box that
+    // boots the mock with MOCK_RECORD=1 would take that one window, the one whose rate becomes this
+    // box's rolling baseline, against a recording mock while every window after it runs against a
+    // quiet one.
+    if let Some(why) = crate::reverify::quiesce_recorder(&rc) {
+        eprintln!("suite: the mock's recorder could not be quiesced before the run: {why}");
+    }
 
     // THE BOX IS QUALIFIED BEFORE THE GRID, not after. The verdict is about the machine every
     // number below is measured on, so taking it afterwards would judge a box using a reading taken

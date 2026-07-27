@@ -824,9 +824,15 @@ pkill -f "bin/mock-$BENCH_ARCH" 2>/dev/null; sleep 1
 # have. Recording is what makes that detectable: the mock keeps, per dialect, whether the body it
 # actually received matched that dialect's request shape, and the runner reads it off /__mock/state.
 # Without this the reverification is dead code and every capability verdict is a status-code guess.
-# It is exported (not prefixed onto the command) so it survives the setsid/taskset re-exec chain the
-# same way MOCKCORES does, and so the pinning below is left exactly as it was.
-export MOCK_RECORD=1
+#
+# RECORDING IS NOT TURNED ON HERE. The mock boots quiet and the engine turns recording on around its
+# one re-verification request per cell, then off again (POST /__mock/record). That is deliberate:
+# this mock's own throughput is the reference every gateway's number is judged against, and a result
+# within 10% of it is SUPPRESSED as mock-bound. A recorded request takes a process-wide lock, so
+# leaving recording on for the millions of requests in the throughput and memory windows would slow
+# the reference instrument and quietly convert real gateway measurements into suppressed ones. The
+# mock is also the least-touched, most-trusted code in the harness; it stays in exactly the state
+# every previously published number was taken against, and pays the recording cost once per cell.
 setsid taskset -c $MOCKCORES ./bin/mock-$BENCH_ARCH --port 8000 </dev/null >mock.log 2>&1 &
 # Give it a moment to bind, then refuse to measure anything if it did not: every not-served verdict
 # is conditioned on the mock being up, so a run against a dead mock publishes rig failures as

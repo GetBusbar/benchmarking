@@ -528,7 +528,7 @@ fn every_module_the_artifact_needs_is_reachable_from_a_real_run() {
 /// 100% of every request of every load window - and the absence that reached the artifact blamed the
 /// SEARCH ("no probed concurrency passed the gate"), so the published board attributed our own
 /// credential fault to the gateway's capacity. It was reproduced byte-identically against a live
-/// one-api container returning HTTP 401 to `Bearer dummy` on a cell whose probe had just succeeded.
+/// entrant's container returning HTTP 401 to `Bearer dummy` on a cell whose probe had just succeeded.
 ///
 /// Nothing caught it because the probe path and the load path were tested apart, and only the probe
 /// path was ever checked for auth. So this asserts on the LOAD path specifically: rates that can only
