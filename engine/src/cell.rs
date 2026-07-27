@@ -60,6 +60,18 @@ pub enum Served {
     /// not exist for it - a status returned for an undeclared pairing would be a global gate (auth,
     /// rate limit) firing before routing, not evidence about the pairing. See `Manifest::matrix`.
     NotConfigurable(String),
+    /// THE RIG COULD NOT AUTHENTICATE, so the gateway's refusal says nothing about the pairing.
+    ///
+    /// A real client of this dialect signs its requests (AWS SigV4 for Bedrock); the harness sends a
+    /// bearer token and does not forge signatures. A gateway that answers 401/403 to that is behaving
+    /// CORRECTLY, and recording it as a failure publishes a red it did not earn - a false claim about
+    /// somebody's product, produced entirely by us, which is the worst error this board can make.
+    ///
+    /// Distinct from `Untestable`, which says the rig could not pose the question at all: here the
+    /// question was posed and the answer is real, it just answers "you are not authenticated" rather
+    /// than anything about whether the pairing works. It carries the evidence for the same reason
+    /// `No` does - a reader must be able to see the status and body it was decided from.
+    UnprobedAuth(Evidence),
 }
 
 /// What the gateway actually said when it declined. Small on purpose: a status and the first of the
@@ -134,6 +146,18 @@ impl CellOutcome {
     pub fn untestable(id: CellId, reason: impl Into<String>) -> Self {
         let r = reason.into();
         Self { id, served: Served::Untestable(r.clone()), skipped: Some(Skipped::NotServed), note: Some(r) }
+    }
+
+    /// The gateway refused a credential the rig cannot legitimately produce. Not measurable, and
+    /// deliberately NOT `not_served`: the note has to read as our limit, because a reader who takes
+    /// it for the gateway's answer has been told something false about somebody's product.
+    pub fn unprobed_auth(id: CellId, evidence: Evidence) -> Self {
+        let n = format!(
+            "answered HTTP {} to a credential this dialect's real clients would have signed; the \
+             harness does not forge signatures, so nothing was learned about this pairing",
+            evidence.status
+        );
+        Self { id, served: Served::UnprobedAuth(evidence), skipped: Some(Skipped::NotServed), note: Some(n) }
     }
 
     /// Reached after the suite clock expired. The cell is recorded as PRESENT and unmeasured, never
