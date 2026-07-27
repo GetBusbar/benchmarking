@@ -57,9 +57,19 @@ claim: every cell in the grid is probed regardless, and the board publishes what
 
 ```
 BENCH_MOCK_KEY=dummy
-GOMAXPROCS={NCORE}
 -EXAMPLE_REPO
 ```
+
+**Do not set a runtime's thread-count variable here.** `GOMAXPROCS`, `UV_THREADPOOL_SIZE`,
+`RAYON_NUM_THREADS` and `OMP_NUM_THREADS` are set centrally by the harness for every gateway, from
+the size of the core range it pinned, and its values are appended after this file's so a gateway
+cannot override them (`manifest.rs`'s `pinned_parallelism`). The harness decides how many cores a
+gateway gets, so the harness states it, identically, everywhere. A per-gateway copy is at best
+redundant and at worst an invitation to tune one entrant's scheduler against the others.
+
+A gateway whose runtime has its OWN differently-named knob does declare it here with `{NCORE}` (a
+vendor-prefixed nginx worker count, say), because naming one entrant's variable in shared code would
+put per-gateway logic in the one place that must not have any. That is the only case.
 
 A leading `-` **removes** a variable from the environment the gateway inherits. That is not tidiness:
 one entrant's config loader claims every variable sharing its prefix and rejects unknown fields, so
