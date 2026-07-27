@@ -393,14 +393,32 @@ pub fn saturation_plateau<P: Probe>(probe: &mut P, min_conc: u32, max_conc: u32)
         // rig's own window-to-window wobble, then re-judge this rung against the real number.
         if !calibrated {
             calibrated = true;
-            let mut calibration = vec![best_v];
+            // ONLY WINDOWS THAT PASSED THEIR GATE. A failed window measured no throughput at all -
+            // `eff` scores it 0.0 - so letting one into the sample makes the spread ~100%, which
+            // makes "materially better" mean "twice as fast", which nothing ever is. The search then
+            // freezes on the rung it happened to be standing on and publishes a number from the
+            // bottom of the climb as though it were the plateau. A live run did exactly that: one
+            // entrant, whose box really does produce failing windows at c=1, was published at 41 rps
+            // while its own recorded sweep was still climbing through 47 and rising.
+            //
+            // A spread is a statement about a population of measurements, and a window that
+            // measured nothing is not a member of it.
+            let mut calibration = Vec::with_capacity(WOBBLE_WINDOWS);
+            if best_v > 0.0 {
+                calibration.push(best_v);
+            }
             for _ in 1..WOBBLE_WINDOWS {
                 match s.sample_repeat(best_c) {
-                    Some(x) => calibration.push(eff(&x)),
+                    Some(x) if x.passed => calibration.push(eff(&x)),
+                    // A failing repeat is real evidence about the rung, and it is already recorded in
+                    // `points`; it just cannot contribute to a spread of throughputs.
+                    Some(_) => {}
                     None => return interrupted(s),
                 }
             }
-            wobble = relative_spread(&calibration).max(WOBBLE_FLOOR);
+            // Fewer than two surviving windows cannot show a spread at all, so there is nothing
+            // measured to prefer over the floor.
+            wobble = if calibration.len() >= 2 { relative_spread(&calibration).max(WOBBLE_FLOOR) } else { WOBBLE_FLOOR };
             // THE REPRESENTATIVE VALUE OF A RUNG IS ITS MEDIAN WINDOW, NOT ITS BEST ONE. Taking the
             // best sets the bar for "materially better" using this rung's luckiest draw, and a rung
             // that drew high can then hold off the real plateau above it - the search stops just
@@ -409,6 +427,8 @@ pub fn saturation_plateau<P: Probe>(probe: &mut P, min_conc: u32, max_conc: u32)
             // max-versus-median inconsistency this search exists to remove, one level down.
             let mut sorted = calibration.clone();
             sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            // `unwrap_or(best_v)` matters here: if every repeat failed, the rung keeps the value it
+            // was climbing on rather than being rewritten by an empty sample.
             best_v = nearest_rank_median(&sorted).unwrap_or(best_v);
         }
 
@@ -728,6 +748,54 @@ mod tests {
             !r.points.iter().any(|p| p.concurrency == 4096),
             "the search reached the top of the range on a curve that stopped improving at c=64"
         );
+    }
+
+    // A FAILING WINDOW DURING CALIBRATION MUST NOT FREEZE THE SEARCH.
+    //
+    // `eff` scores a failed window 0.0, so one of them inside the calibration sample makes the
+    // spread ~100%, makes "materially better" mean "twice as fast", and nothing is ever twice as
+    // fast as the rung below it. The search then stops on whatever rung it was standing on and
+    // publishes a number from the bottom of the climb as the plateau.
+    //
+    // This is one entrant's REAL recorded windows: it does produce failing windows at c=1, and the
+    // live run published it at 41 rps while its own sweep was still climbing through 47.
+    struct FlakyFloor {
+        seq: std::collections::BTreeMap<u32, Vec<f64>>,
+        seen: std::collections::BTreeMap<u32, usize>,
+    }
+    impl Probe for FlakyFloor {
+        fn probe(&mut self, c: u32) -> Option<Sample> {
+            let i = self.seen.entry(c).or_insert(0);
+            let n = *i;
+            *i += 1;
+            let vals = self.seq.get(&c).cloned().unwrap_or_else(|| vec![60.0]);
+            let v = vals[n.min(vals.len() - 1)];
+            // The floor's SECOND window fails its gate, exactly as the field box produced.
+            Some(Sample { value: v, passed: !(c == 1 && n == 1) })
+        }
+    }
+
+    #[test]
+    fn a_failing_window_during_calibration_does_not_freeze_the_climb() {
+        let mut seq = std::collections::BTreeMap::new();
+        seq.insert(1u32, vec![30.0, 29.0, 29.0]);
+        seq.insert(2, vec![31.0, 31.0, 33.0]);
+        seq.insert(4, vec![35.0, 34.0, 34.0]);
+        seq.insert(8, vec![37.0, 37.0, 38.0]);
+        seq.insert(16, vec![39.0, 40.0, 41.0]);
+        seq.insert(32, vec![45.0, 46.0, 47.0]);
+        seq.insert(64, vec![52.0, 52.0, 53.0]);
+        seq.insert(128, vec![58.0, 58.0, 59.0]);
+        let mut p = FlakyFloor { seq, seen: Default::default() };
+        let r = saturation_plateau(&mut p, 1, 4096);
+        let w = r.peak.value().expect("a climbing curve with one bad floor window still has a plateau");
+        assert!(
+            w.value > 50.0,
+            "published {} - the search froze near the floor because a failed window poisoned the \
+             wobble; this curve climbs to 60",
+            w.value
+        );
+        assert!(w.concurrency >= 64, "reported c={} is still on the rising part", w.concurrency);
     }
 
     // THE FIELD FAILURE, REPRODUCED EXACTLY. A saturated gateway whose rungs DRIFT UPWARD inside the
