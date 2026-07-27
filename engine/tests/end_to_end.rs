@@ -32,7 +32,23 @@ use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-/// A stand-in that answers every dialect on the grid with a 200 and a small JSON body.
+/// THE CREDENTIAL THIS FIXTURE REQUIRES, and it is deliberately not "dummy".
+///
+/// `otb loadgen` used to hardcode `authorization: Bearer dummy` for every load window while the
+/// in-process probe beside it authenticated with the manifest's real, correctly-resolved credential.
+/// Any gateway whose declared auth was anything else therefore PASSED its probe and then failed 100%
+/// of every request of every window, and the absence that reached the artifact blamed the search
+/// ("no probed concurrency passed the gate") rather than naming a credential fault of ours. Two
+/// separately-green test suites missed it because the probe path and the load path were only ever
+/// exercised apart.
+///
+/// So this fixture demands a token no accidental default can supply, and the load-path assertions
+/// below (a real box-qualification rate, a real added latency, real sweep rungs) all fail if the
+/// credential stops crossing the process boundary.
+const FIXTURE_AUTH: &str = "e2e-not-the-placeholder";
+
+/// A stand-in that answers every dialect on the grid with a 200 and a small JSON body - to a request
+/// that authenticates. Anything else gets a 401, exactly as a real gateway does.
 ///
 /// It is not the recording mock: it verifies nothing about which upstream dialect was spoken. It
 /// exists so the ENGINE can be driven end to end without docker, and its only contract is to be a
@@ -69,6 +85,7 @@ fn handle(stream: TcpStream, stop: Arc<AtomicBool>) {
     while !stop.load(Ordering::Relaxed) {
         let mut content_length = 0usize;
         let mut saw_request_line = false;
+        let mut authenticated = false;
 
         loop {
             let mut line = String::new();
@@ -87,15 +104,70 @@ fn handle(stream: TcpStream, stop: Arc<AtomicBool>) {
             if let Some(v) = trimmed.strip_prefix("Content-Length: ").or_else(|| trimmed.strip_prefix("content-length: ")) {
                 content_length = v.trim().parse().unwrap_or(0);
             }
+            // The openai dialect's own shape, which is the only one this narrowed grid drives. Case
+            // insensitive on the NAME (HTTP header names are), exact on the value: a fixture that
+            // accepted a near-miss would let the defect this guards against back in.
+            if let Some((name, value)) = trimmed.split_once(':') {
+                if name.eq_ignore_ascii_case("authorization")
+                    && value.trim() == format!("Bearer {FIXTURE_AUTH}")
+                {
+                    authenticated = true;
+                }
+            }
         }
         if !saw_request_line {
             return;
         }
+        let mut request_body = Vec::new();
         if content_length > 0 {
-            let mut body = vec![0u8; content_length];
-            if reader.read_exact(&mut body).is_err() {
+            request_body = vec![0u8; content_length];
+            if reader.read_exact(&mut request_body).is_err() {
                 return;
             }
+        }
+
+        // AN UNAUTHENTICATED REQUEST IS REFUSED, whatever it asked for. This is what makes every
+        // load-path assertion below a real guard rather than a shape check.
+        if !authenticated {
+            let body = br#"{"error":{"message":"invalid credential"}}"#;
+            let head = format!(
+                "HTTP/1.1 401 Unauthorized\r\ncontent-type: application/json\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n",
+                body.len()
+            );
+            if out.write_all(head.as_bytes()).is_err() || out.write_all(body).is_err() || out.flush().is_err() {
+                return;
+            }
+            continue;
+        }
+
+        // A REQUEST THAT ASKED FOR A STREAM GETS FRAMES, because otherwise the four streaming numbers
+        // (added TTFT/gap, streams sustained, cpu frames/sec) have no path through this test at all:
+        // a fixture that only ever answers JSON exercises the streaming groups' refusal branch and
+        // nothing else, and "the group correctly declined" is not evidence that its window, its
+        // concurrency search or its mock reference ever ran.
+        //
+        // Unpaced, unlike the real mock's 20 ms deltas: the pacing exists so the mock can stand in
+        // for a model generating tokens, and reproducing it here would multiply this test's runtime
+        // by the frame budget for no assertion it would let us make. What the engine reads off this
+        // is the same thing either way - how many frames arrived, and when.
+        if String::from_utf8_lossy(&request_body).contains("\"stream\":true") {
+            let head = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\nConnection: keep-alive\r\nTransfer-Encoding: chunked\r\n\r\n";
+            if out.write_all(head.as_bytes()).is_err() {
+                return;
+            }
+            let mut ok = true;
+            for i in 0..96 {
+                let frame = format!("data: {{\"choices\":[{{\"delta\":{{\"content\":\"{i}\"}}}}]}}\n\n");
+                let chunk = format!("{:x}\r\n{frame}\r\n", frame.len());
+                if out.write_all(chunk.as_bytes()).is_err() || out.flush().is_err() {
+                    ok = false;
+                    break;
+                }
+            }
+            if !ok || out.write_all(b"0\r\n\r\n").is_err() || out.flush().is_err() {
+                return;
+            }
+            continue;
         }
 
         // A body shaped enough to be plausible, with an explicit Content-Length so framing is
@@ -138,7 +210,7 @@ fn write_manifest(dir: &Path) -> PathBuf {
       "port": 1,
       "path": "/v1/chat/completions",
       "model": "gpt-4o-mini",
-      "auth": "dummy",
+      "auth": "e2e-not-the-placeholder",
       "headers": [],
       "runtime": { "kind": "native", "proc_match": "e2e-fixture" },
       "egress": ["openai"],
@@ -295,6 +367,78 @@ fn every_module_the_artifact_needs_is_reachable_from_a_real_run() {
         serde_json::Value::Bool(false),
         "an absent streaming measurement must carry a status naming the reason, never a false that reads as 'this gateway does not stream': {stream:#}"
     );
+    // THE FIXTURE STREAMS, so the c=1 streaming legs really ran: a real added-TTFT difference, and a
+    // note saying what the medians beside it were taken over. This is the streaming lane's equivalent
+    // of the added-latency assertion above - the one place this block proves frames actually arrived
+    // rather than that a field was published.
+    assert!(
+        stream["added_ttft_p50_us"].as_f64().is_some(),
+        "the fixture answers stream:true with frames, so a real added TTFT must be published: {stream:#}"
+    );
+    let stream_note = stream["stream_c1_note"].as_str().unwrap_or_default();
+    assert!(
+        stream_note.contains("through the gateway"),
+        "the c=1 streaming legs must say how many frames each produced: {stream:#}"
+    );
+
+    // --- streams_sustained + cpu_fps: WIRED --------------------------------------------------------
+    //
+    // `CellStream` declared these four fields and nothing in the engine ever filled them, so every
+    // published board carried them as permanent nulls. The SCALARS are asserted as keys rather than
+    // numbers, for the same two reasons the sustained-throughput block above is: the grid is narrowed
+    // to [1, 2], so `bisect_ceiling` has no failing rung to prove a ceiling with and `SearchExhausted`
+    // is the honest answer; and this fixture is its own mock, so any peak it did prove would be
+    // measured against a reference equal to itself and suppressed as mock-bound.
+    //
+    // The SWEEP TRACES are asserted as real, because they are what proves the searches actually ran:
+    // a rung only lands there once a window of concurrent stream lanes has opened, read frames off a
+    // live socket, and been judged.
+    for field in ["streams_sustained", "streams_sustained_fps", "cpu_fps", "cpu_fps_concurrency"] {
+        assert!(
+            stream.get(field).is_some(),
+            "the concurrent-stream groups declare {field} and must publish it, measured or absent: {stream:#}"
+        );
+    }
+    for (field, group) in [("sweep_streams", "streams-sustained gate"), ("sweep_cpu_fps", "cpu frames/sec peak")] {
+        let rungs = stream[field].as_array().unwrap_or_else(|| panic!("{field} must be an array: {stream:#}"));
+        assert!(!rungs.is_empty(), "the {group} search must publish the rungs it probed: {stream:#}");
+        let first = &rungs[0];
+        assert!(
+            first["fps"].as_f64().is_some_and(|v| v > 0.0),
+            "a probed rung must carry the real frames/sec it measured, which is what proves the stream window ran: {first:#}"
+        );
+        assert!(first["conc"].as_u64().is_some(), "a rung must name the concurrency it was taken at: {first:#}");
+        assert!(first["passed"].is_boolean(), "a rung must carry the verdict it was judged with: {first:#}");
+        assert!(first["frames"].as_u64().is_some_and(|v| v > 0), "a rung must carry its own frame count: {first:#}");
+    }
+
+    // --- reverify.rs: WIRED -----------------------------------------------------------------------
+    //
+    // The anti-false-positive guard. This grid is one dialect, so the only cell is the DIAGONAL, where
+    // there is nothing to prove: forwarding and translating openai to openai put the same bytes
+    // upstream. `null` with a reason is the honest verdict, and `false` there would mark every
+    // passthrough cell on the board as a failed translation it was never asked to perform.
+    assert!(
+        perf.get("egress_reverified").is_some(),
+        "the re-verification verdict must be published on a served cell: {perf:#}"
+    );
+    assert_eq!(
+        perf["egress_reverified"],
+        serde_json::Value::Null,
+        "a same-dialect cell has no translation to prove: {perf:#}"
+    );
+    assert!(
+        perf["reverify_note"].as_str().is_some_and(|n| n.contains("same-dialect")),
+        "an unchecked cell must say WHY it was not checked: {perf:#}"
+    );
+
+    // The c=1 advisory note, and it carries real counts: both legs completed clean windows above, so
+    // this says how many round trips each percentile beside it was taken over.
+    let c1 = perf["c1_note"].as_str().unwrap_or_default();
+    assert!(
+        c1.contains("successful gateway round trip"),
+        "the added-latency percentiles must say what they were taken over: {perf:#}"
+    );
 
     // --- qualify.rs: WIRED ------------------------------------------------------------------------
     //
@@ -368,6 +512,64 @@ fn every_module_the_artifact_needs_is_reachable_from_a_real_run() {
         snap["build"].as_str().is_some_and(|b| b.starts_with("otb-engine")),
         "build still names the engine rather than the gateway under test: {:?}",
         snap["build"]
+    );
+
+    stop.store(true, Ordering::Relaxed);
+    let _ = std::fs::remove_dir_all(&results);
+}
+
+/// THE LOAD GENERATOR AUTHENTICATES AS THE MANIFEST SAYS, NOT AS A PLACEHOLDER.
+///
+/// The regression this exists for is the worst shape a defect takes here: silent, data-invalidating,
+/// and invisible to every green test in the repo. `otb loadgen` runs as a separate pinned child
+/// process and hardcoded `authorization: Bearer dummy` for every window it ever ran, while the
+/// in-process probe used the manifest's real credential in the right per-dialect header shape. A
+/// gateway declaring any other token was therefore scored `served: true` by the probe and then failed
+/// 100% of every request of every load window - and the absence that reached the artifact blamed the
+/// SEARCH ("no probed concurrency passed the gate"), so the published board attributed our own
+/// credential fault to the gateway's capacity. It was reproduced byte-identically against a live
+/// one-api container returning HTTP 401 to `Bearer dummy` on a cell whose probe had just succeeded.
+///
+/// Nothing caught it because the probe path and the load path were tested apart, and only the probe
+/// path was ever checked for auth. So this asserts on the LOAD path specifically: rates that can only
+/// be non-zero if the manifest's credential crossed the process boundary into the child.
+#[test]
+fn every_load_window_authenticates_with_the_manifests_own_credential() {
+    let stop = Arc::new(AtomicBool::new(false));
+    let addr = serve(Arc::clone(&stop));
+    let results = unique_dir("loadauth");
+    let manifest = write_manifest(&results);
+
+    let snap = run_engine(&results, &manifest, addr);
+    let cell = &snap["matrix"]["upstreams"]["openai"]["cells"]["openai"];
+    assert_eq!(cell["served"], true, "the probe authenticates, and always did: {cell:#}");
+
+    // The pinned `otb loadgen` child, straight through: every rung it probed carries the rate it
+    // measured, and a window whose every request was refused reports rps=0.
+    let rungs = cell["perf"]["sweep_max_proxy"]
+        .as_array()
+        .unwrap_or_else(|| panic!("the throughput search must publish its rungs: {cell:#}"));
+    assert!(!rungs.is_empty(), "the throughput search must have probed something: {cell:#}");
+    assert!(
+        rungs.iter().any(|r| r["rps"].as_f64().is_some_and(|v| v > 0.0)),
+        "every load window authenticated as something the gateway refused: {rungs:#?}"
+    );
+
+    // The c=1 legs, which are their own separate windows through the same child. A leg with any
+    // failure is refused outright by the added-latency group, so a real number here is proof both
+    // windows completed clean against a gateway that demands a credential.
+    assert!(
+        cell["perf"]["gateway_c1_p99_us"].as_f64().is_some(),
+        "the concurrency-1 gateway leg must complete cleanly, which it cannot without the credential: {cell:#}"
+    );
+
+    // And the box-qualification observation, which drives the same child at the MOCK. It shares the
+    // manifest's auth, so it fails the same way and this is what proves the whole load path, not just
+    // the gateway-facing half of it.
+    assert!(
+        snap["rig"]["box_qualify"]["observed_rps"].as_f64().is_some_and(|v| v > 0.0),
+        "the box observation is a load window too: {:#}",
+        snap["rig"]["box_qualify"]
     );
 
     stop.store(true, Ordering::Relaxed);

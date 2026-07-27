@@ -24,6 +24,7 @@ pub mod metric;
 pub mod probe;
 pub mod qualify;
 pub mod record;
+pub mod reverify;
 pub mod rigbound;
 pub mod run;
 pub mod rss;

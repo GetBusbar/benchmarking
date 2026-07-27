@@ -63,6 +63,44 @@ pub fn parse_ugen_line(raw: &str) -> Measurement<UgenStats> {
     }
 }
 
+/// THE OTHER HALF OF THE SAME WIRE CONTRACT: how the engine tells the loadgen child what headers to
+/// send.
+///
+/// It has to cross a process boundary because the generator runs as its own pinned child (see
+/// `run::load_window_at` for why), and until this existed it did not cross at all: the child
+/// hardcoded `authorization: Bearer dummy`. The probe authenticated with the manifest's real
+/// credential and in the right per-dialect header shape, the LOAD authenticated as the literal string
+/// "dummy" with a header name two of the six dialects do not even use, and the two paths were tested
+/// separately so nothing noticed. Every gateway whose declared auth is not literally "dummy" passed
+/// its probe and then failed every request of every load window, and the absence that reached the
+/// artifact blamed the SEARCH ("no probed concurrency passed the gate") for a credential fault.
+///
+/// AN ENVIRONMENT VARIABLE, NOT AN ARGUMENT. A credential passed on the command line is visible in
+/// `ps` to every user on the box for the whole life of the window; a child's environment is readable
+/// only by its owner. This is the same reason the minted credential is read from a file rather than
+/// exported into a command line.
+pub const HEADERS_ENV: &str = "OTB_LOADGEN_HEADERS";
+
+/// Encode a header list for `HEADERS_ENV`.
+///
+/// JSON rather than a `k: v` per line, because header VALUES are arbitrary bytes chosen by the
+/// gateway's manifest - a bearer token with a newline or a colon in it would silently split into two
+/// headers under a hand-rolled format, and sending half a routing header selects the wrong upstream
+/// and publishes a number for a pairing that was never driven.
+pub fn encode_headers(headers: &[(String, String)]) -> String {
+    serde_json::to_string(headers).unwrap_or_else(|_| "[]".to_string())
+}
+
+/// Decode what `encode_headers` wrote.
+///
+/// An unset or unparseable variable yields NO headers, never a default credential. A wrong credential
+/// is worse than none: no credential is a 401 the operator can read off the stats line as a total
+/// failure, whereas the placeholder that used to be hardcoded here was a wrong credential that looked
+/// exactly like a gateway falling over under load.
+pub fn decode_headers(raw: Option<&str>) -> Vec<(String, String)> {
+    raw.and_then(|s| serde_json::from_str::<Vec<(String, String)>>(s).ok()).unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -120,5 +158,50 @@ mod tests {
         let line = format!("{UGEN_LINE} pad=64 futurefield=x");
         let m = parse_ugen_line(&line);
         assert!(m.is_measured());
+    }
+
+    // ── the header wire, the half that used to not exist ────────────────────────────────────────
+
+    // Every dialect's real header SHAPE has to survive the crossing, not just a token: two of the six
+    // do not use `authorization` at all, and anthropic sends a second, mandatory header beside its
+    // key. The hardcoded line this replaces got the name wrong as well as the value.
+    #[test]
+    fn every_dialects_own_header_shape_survives_the_process_boundary() {
+        for d in crate::ingress::Dialect::ALL {
+            let sent = d.auth_headers("a-real-token");
+            let back = decode_headers(Some(&encode_headers(&sent)));
+            assert_eq!(back, sent, "{d}'s header shape must cross unchanged");
+        }
+    }
+
+    // A value carrying the characters a hand-rolled `k: v` encoding would split on. A routing header
+    // that arrives halved selects the wrong upstream, which publishes a number for a pairing that was
+    // never driven.
+    #[test]
+    fn a_hostile_header_value_crosses_intact_rather_than_splitting() {
+        let hostile = vec![
+            ("authorization".to_string(), "Bearer a:b\nx-injected: yes\r\n".to_string()),
+            ("x-route".to_string(), "  spaces and \"quotes\"  ".to_string()),
+        ];
+        assert_eq!(decode_headers(Some(&encode_headers(&hostile))), hostile);
+    }
+
+    // Duplicates survive as duplicates: `http::Headers`' own doc says a map would collapse repeated
+    // header names that some dialects distinguish from a single comma-joined one.
+    #[test]
+    fn repeated_header_names_are_not_collapsed_in_transit() {
+        let dupes =
+            vec![("x-h".to_string(), "one".to_string()), ("x-h".to_string(), "two".to_string())];
+        assert_eq!(decode_headers(Some(&encode_headers(&dupes))), dupes);
+    }
+
+    // NO HEADERS, never a default credential. The placeholder that used to be hardcoded here is
+    // precisely what made a credential fault indistinguishable from a gateway collapsing under load.
+    #[test]
+    fn an_unset_or_broken_header_variable_sends_nothing_rather_than_a_placeholder() {
+        assert!(decode_headers(None).is_empty());
+        assert!(decode_headers(Some("")).is_empty());
+        assert!(decode_headers(Some("not json")).is_empty());
+        assert!(decode_headers(Some("{\"authorization\":\"Bearer dummy\"}")).is_empty());
     }
 }

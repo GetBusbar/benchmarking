@@ -197,6 +197,21 @@ fn judge_cell(
     Judged { perf: out }
 }
 
+/// Measure the RIG's own STREAM ceiling on the same cell: the mock's frames/sec at the concurrency
+/// the gateway's own stream number was taken at.
+///
+/// The streaming analogue of `rig_ceiling`, and it takes its reference the same way and for the same
+/// reason (`rigbound.rs`'s header): the rig is not equally fast at every concurrency, so a reference
+/// taken at the top of the range would systematically understate how close the gateway came to it.
+///
+/// It does NOT build a mock-facing `RunConfig` the way `rig_ceiling` has to. That dance exists so the
+/// request generator's search plumbing can be pointed at the mock; the stream window takes its
+/// address, path and headers as arguments, so the direct leg is expressed directly instead of as a
+/// gateway config with the gateway parts blanked out one field at a time.
+fn stream_rig_ceiling(cfg: &SuiteConfig, dialect: Dialect, at_conc: u32) -> Measurement<f64> {
+    run::stream_fps_at(cfg.mock_addr, &cfg.manifest.model, &cfg.manifest.auth, dialect, at_conc)
+}
+
 /// Fill the added-latency fields straight from the metric surface.
 ///
 /// Unlike the peak's `rps_max_proxy`, there is no separate rig-bound verdict to compute here: the
@@ -209,6 +224,27 @@ fn judge_added_latency(out: &mut CellPerf, metrics: &std::collections::BTreeMap<
     out.added_latency_p99_us = as_i64(metrics.get("added_latency_p99_us"));
     out.gateway_c1_p99_us = as_i64(metrics.get("gateway_c1_p99_us"));
     out.direct_c1_p99_us = as_i64(metrics.get("direct_c1_p99_us"));
+    out.c1_note = c1_note(metrics);
+}
+
+/// HOW MUCH IS BEHIND THE c=1 PERCENTILES.
+///
+/// `c1_note` was declared and never set. The one thing worth saying there, and the one thing nothing
+/// else in the artifact says, is the SAMPLE COUNT behind each leg: a p99 over four thousand round
+/// trips and a p99 over eleven are the same published field carrying completely different weight, and
+/// a reader deciding whether to trust an added-latency figure has no other way to tell them apart.
+///
+/// `None`, not a note about zeroes, when either leg produced no count: the added-latency fields are
+/// then already absent WITH the group's own reason for it, and a second sentence restating that would
+/// be the same fact published twice in two wordings, which is precisely what `Measurement`'s reason
+/// exists to prevent.
+fn c1_note(metrics: &std::collections::BTreeMap<&'static str, Measurement<f64>>) -> Option<String> {
+    let gw = metrics.get("gateway_c1_samples")?.copied()?;
+    let direct = metrics.get("direct_c1_samples")?.copied()?;
+    Some(format!(
+        "the c=1 percentiles are taken over {gw:.0} successful gateway round trip(s) and {direct:.0} \
+         direct-to-mock round trip(s), each leg a single clean window with no failures"
+    ))
 }
 
 /// Judge the sustained-throughput ceiling exactly as `judge_cell` judges the peak: the SAME rig
@@ -430,7 +466,10 @@ fn steady_state(series: &[crate::record::RssSample]) -> Measurement<f64> {
 /// reason as a STATUS rather than a `false`: `false` would say the gateway does not stream, which is
 /// a claim about the gateway, and the reason we have is usually a claim about the rig.
 fn cell_stream(
+    cfg: &SuiteConfig,
+    dialect: Dialect,
     metrics: &std::collections::BTreeMap<&'static str, Measurement<f64>>,
+    series: Option<&crate::metric::Series>,
 ) -> crate::record::CellStream {
     // The record carries these as integer microseconds; the metric surface is f64 so every group has
     // one type. Truncation here loses at most a microsecond off a latency difference.
@@ -448,14 +487,196 @@ fn cell_stream(
         _ => (crate::record::StreamServed::default(), None),
     };
 
-    crate::record::CellStream {
+    let mut out = crate::record::CellStream {
         stream_served,
         reason,
         added_ttft_p50_us: us("added_ttft_p50_us"),
         added_ttft_p99_us: us("added_ttft_p99_us"),
         added_gap_p50_us: us("added_gap_p50_us"),
         added_gap_p99_us: us("added_gap_p99_us"),
+        stream_c1_note: stream_c1_note(metrics),
+        // THE RUNGS THE TWO STREAM SEARCHES WALKED, published whatever the verdict, for the same
+        // reason `sweep_max_proxy` is: when a ceiling is suppressed as mock-bound or absent because
+        // the search ran out of range, the rungs are the only thing that explains why.
+        sweep_streams: series.map(|s| s.sweep_streams.clone()).unwrap_or_default(),
+        sweep_cpu_fps: series.map(|s| s.sweep_cpu_fps.clone()).unwrap_or_default(),
         ..Default::default()
+    };
+    judge_streams_sustained(cfg, dialect, &mut out, metrics);
+    judge_cpu_fps(cfg, dialect, &mut out, metrics);
+    out
+}
+
+/// What the concurrency-1 streaming legs were actually taken over.
+///
+/// `stream_c1_note` was declared and never set. What is worth saying there, and is said NOWHERE else
+/// in the artifact, is how many frames each of the two single streams produced: the gap p50 this
+/// block publishes is a median over the intervals BETWEEN those frames, so a leg that yielded three
+/// frames and one that yielded sixty-four give the same field wildly different weight, and a reader
+/// looking at a suspicious gap has no other way to tell which they are holding. `None` when the group
+/// took no stream at all - there is nothing to describe, and a note saying "0 frames" beside an
+/// absence that already carries its own reason would be the same fact twice.
+fn stream_c1_note(
+    metrics: &std::collections::BTreeMap<&'static str, Measurement<f64>>,
+) -> Option<String> {
+    let gw = metrics.get("gateway_c1_frames")?.copied()?;
+    let direct = metrics.get("direct_c1_frames")?.copied()?;
+    if gw <= 0.0 && direct <= 0.0 {
+        return None;
+    }
+    Some(format!(
+        "the c=1 streaming legs read {gw:.0} frame(s) through the gateway and {direct:.0} direct to \
+         the mock, out of a {} frame budget; the added-gap figures are medians over the intervals \
+         between those frames, and the p99 fields are absent because one stream cannot support a \
+         99th percentile",
+        crate::metric::STREAM_FRAME_BUDGET
+    ))
+}
+
+/// Judge the streams-sustained ceiling against the MOCK's own frames/sec at the same concurrency.
+///
+/// The same shape as `judge_sustained`, and deliberately so: one cell must not contain two different
+/// answers to "was this the rig or the gateway", one of them computed with `rigbound::is_rig_bound`
+/// against a reference at the operating point and the other with a threshold invented here.
+fn judge_streams_sustained(
+    cfg: &SuiteConfig,
+    dialect: Dialect,
+    out: &mut crate::record::CellStream,
+    metrics: &std::collections::BTreeMap<&'static str, Measurement<f64>>,
+) {
+    let missing = || Measurement::absent_because(Absent::NotMeasured, "no metric group fills this field");
+    let fps = metrics.get("streams_sustained_fps").cloned().unwrap_or_else(missing);
+    let conc_m = metrics.get("streams_sustained").cloned().unwrap_or_else(missing);
+
+    let (Some(&value), Some(&conc_f)) = (fps.value(), conc_m.value()) else {
+        let absent = carry_absence(&fps);
+        out.streams_sustained = match absent.reason().cloned() {
+            Some(r) => Measurement::absent(r),
+            None => Measurement::absent(Absent::NotMeasured),
+        };
+        out.streams_sustained_fps = absent;
+        return;
+    };
+    let conc = conc_f as u32;
+    // c == 0 is `bisect_ceiling`'s own MEASURED "nothing sustains this gate": there is no concurrency
+    // to take a reference AT, and a gateway that cannot carry a single clean stream cannot have been
+    // bounded by the mock, because the mock was never asked to do anything.
+    if conc == 0 {
+        out.streams_sustained = Measurement::Measured(0);
+        out.streams_sustained_fps = Measurement::Measured(0.0);
+        out.streams_sustained_mock_bound = Some(false);
+        return;
+    }
+    apply_streams_sustained_verdict(out, value, conc, stream_rig_ceiling(cfg, dialect, conc));
+}
+
+/// Judge the cpu-frames/sec peak against the same reference at the concurrency it peaked at.
+fn judge_cpu_fps(
+    cfg: &SuiteConfig,
+    dialect: Dialect,
+    out: &mut crate::record::CellStream,
+    metrics: &std::collections::BTreeMap<&'static str, Measurement<f64>>,
+) {
+    let missing = || Measurement::absent_because(Absent::NotMeasured, "no metric group fills this field");
+    let fps = metrics.get("cpu_fps").cloned().unwrap_or_else(missing);
+    let conc_m = metrics.get("cpu_fps_concurrency").cloned().unwrap_or_else(missing);
+
+    let (Some(&value), Some(&conc_f)) = (fps.value(), conc_m.value()) else {
+        let absent = carry_absence(&fps);
+        out.cpu_fps_concurrency = match absent.reason().cloned() {
+            Some(r) => Measurement::absent(r),
+            None => Measurement::absent(Absent::NotMeasured),
+        };
+        out.cpu_fps = absent;
+        return;
+    };
+    let conc = conc_f as u32;
+    apply_cpu_fps_verdict(out, value, conc, stream_rig_ceiling(cfg, dialect, conc));
+}
+
+/// Re-wrap an absence so its reason AND its detail survive a narrowing. The searches attach their
+/// lower bound as prose, and flattening that to a bare null is the one place "the engine discards the
+/// measurement" was literally true.
+fn carry_absence<T>(m: &Measurement<f64>) -> Measurement<T> {
+    match (m.reason().cloned(), m.detail()) {
+        (Some(r), Some(d)) => Measurement::absent_because(r, d),
+        (Some(r), None) => Measurement::absent(r),
+        (None, _) => Measurement::absent(Absent::NotMeasured),
+    }
+}
+
+/// Fill the streams-sustained fields from the mock verdict. PURE, and separate from its judge, for
+/// the identical reason `apply_peak_verdict` is separate from `judge_cell`: the suite's own fixture
+/// points the gateway and the mock at one server, so every cell comes back bound and the measured
+/// branch would be unreachable from an end-to-end test.
+fn apply_streams_sustained_verdict(
+    out: &mut crate::record::CellStream,
+    value: f64,
+    conc: u32,
+    reference: Measurement<f64>,
+) {
+    match rigbound::is_rig_bound(value, reference.clone()).copied() {
+        Some(true) => {
+            let detail = match reference.copied() {
+                Some(r) => format!("carried {value:.0} frames/sec against a mock ceiling of {r:.0} at c={conc}"),
+                None => format!("carried {value:.0} frames/sec at c={conc} with an unusable mock reference"),
+            };
+            out.streams_sustained_fps = Measurement::absent_because(Absent::RigLimited, detail);
+            out.streams_sustained_mock_bound = Some(true);
+            // Suppressed WITH its rate: a stream count left behind would be the operating point of a
+            // number the board is refusing to publish.
+            out.streams_sustained = Measurement::absent(Absent::RigLimited);
+        }
+        Some(false) => {
+            out.streams_sustained_fps = Measurement::Measured(value);
+            out.streams_sustained_mock_bound = Some(false);
+            out.streams_sustained = Measurement::Measured(i64::from(conc));
+        }
+        None => {
+            out.streams_sustained_fps = Measurement::absent_because(
+                Absent::RigLimited,
+                format!(
+                    "carried {value:.0} frames/sec at c={conc}, but the mock reference could not be measured, so it is unknown whether the gateway or the rig set this"
+                ),
+            );
+            out.streams_sustained_mock_bound = None;
+            out.streams_sustained = Measurement::absent(Absent::RigLimited);
+        }
+    }
+}
+
+/// The same verdict for the cpu-frames/sec peak.
+fn apply_cpu_fps_verdict(
+    out: &mut crate::record::CellStream,
+    value: f64,
+    conc: u32,
+    reference: Measurement<f64>,
+) {
+    match rigbound::is_rig_bound(value, reference.clone()).copied() {
+        Some(true) => {
+            let detail = match reference.copied() {
+                Some(r) => format!("peaked at {value:.0} frames/sec against a mock ceiling of {r:.0} at c={conc}"),
+                None => format!("peaked at {value:.0} frames/sec at c={conc} with an unusable mock reference"),
+            };
+            out.cpu_fps = Measurement::absent_because(Absent::RigLimited, detail);
+            out.cpu_fps_mock_bound = Some(true);
+            out.cpu_fps_concurrency = Measurement::absent(Absent::RigLimited);
+        }
+        Some(false) => {
+            out.cpu_fps = Measurement::Measured(value);
+            out.cpu_fps_mock_bound = Some(false);
+            out.cpu_fps_concurrency = Measurement::Measured(i64::from(conc));
+        }
+        None => {
+            out.cpu_fps = Measurement::absent_because(
+                Absent::RigLimited,
+                format!(
+                    "peaked at {value:.0} frames/sec at c={conc}, but the mock reference could not be measured, so it is unknown whether the gateway or the rig set this"
+                ),
+            );
+            out.cpu_fps_mock_bound = None;
+            out.cpu_fps_concurrency = Measurement::absent(Absent::RigLimited);
+        }
     }
 }
 
@@ -681,6 +902,15 @@ pub fn run_suite_with(
                     p.sweep_max_proxy = series.sweep.clone();
                     p.sweep_sustained_20ms = series.sweep_sustained.clone();
                 }
+                // THE ANTI-FALSE-POSITIVE GUARD, published beside the numbers it qualifies. A cell
+                // whose egress dialect was NOT proven still carries its measurements - they are real
+                // observations of what the gateway did - but it can no longer be read as an
+                // unqualified translation claim, because the flag beside them says so and the note
+                // names what the mock actually received instead. See `reverify.rs` for why `None`
+                // (diagonal cell, recording off, mock unreachable) is a first-class third answer
+                // rather than a failure.
+                p.egress_reverified = result.reverify.verified;
+                p.reverify_note = result.reverify.note.clone();
                 Some(p)
             }
             _ => None,
@@ -699,10 +929,20 @@ pub fn run_suite_with(
                 .unwrap_or_default(),
             status,
             body_snippet: snippet,
-            verdict_note: result.outcome.note.clone().unwrap_or_default(),
+            // A FAILED RE-VERIFICATION MUST BE VISIBLE WITHOUT OPENING THE PERF BLOCK. `verdict_note`
+            // is the per-cell evidence string every consumer already reads, so a cell that answered
+            // 200 without translating says so where "does this gateway serve this pairing" is
+            // answered, not only in a field a reader has to know to look for.
+            verdict_note: match (result.reverify.verified, &result.reverify.note) {
+                (Some(false), Some(note)) => format!("egress not re-verified: {note}"),
+                _ => result.outcome.note.clone().unwrap_or_default(),
+            },
             perf,
             memory: result.metrics.as_ref().map(|m| cell_memory(m, result.series.as_ref())),
-            stream: result.metrics.as_ref().map(cell_stream),
+            stream: match (&result.metrics, ing.parse::<Dialect>()) {
+                (Some(m), Ok(d)) => Some(cell_stream(cfg, d, m, result.series.as_ref())),
+                _ => None,
+            },
             ..Default::default()
         };
 
@@ -1069,6 +1309,200 @@ mod tests {
     // measurement passes against the same loopback server landing within 10% of each other - a real
     // flakiness risk for no additional coverage over what the two pure-function suites above already
     // give.
+
+    // ── the two stream verdicts: the same mock-bound machinery, one lane over ────────────────────
+
+    #[test]
+    fn a_measured_stream_ceiling_publishes_the_stream_count_it_held_at() {
+        let mut out = crate::record::CellStream::default();
+        // Comfortably below the mock's own frames/sec: the gateway's own ceiling, not the rig's.
+        apply_streams_sustained_verdict(&mut out, 12_400.0, 256, Measurement::Measured(400_000.0));
+        assert_eq!(out.streams_sustained_fps.copied(), Some(12_400.0));
+        assert_eq!(
+            out.streams_sustained.copied(),
+            Some(256),
+            "the published rate must carry the stream count it was carried at"
+        );
+        assert_eq!(out.streams_sustained_mock_bound, Some(false));
+    }
+
+    #[test]
+    fn a_mock_bound_stream_ceiling_is_suppressed_with_its_stream_count() {
+        let mut out = crate::record::CellStream::default();
+        // Reference equal to the observation: the mock, not the gateway, set this.
+        apply_streams_sustained_verdict(&mut out, 12_400.0, 256, Measurement::Measured(12_400.0));
+        assert_eq!(out.streams_sustained_fps.copied(), None, "a mock-bound rate is suppressed");
+        assert_eq!(out.streams_sustained.copied(), None, "its operating point must be suppressed with it");
+        assert_eq!(out.streams_sustained_mock_bound, Some(true));
+        assert_eq!(out.streams_sustained_fps.reason(), Some(&Absent::RigLimited));
+    }
+
+    #[test]
+    fn an_unusable_stream_reference_is_unknown_never_a_guessed_false() {
+        let mut out = crate::record::CellStream::default();
+        apply_streams_sustained_verdict(&mut out, 12_400.0, 256, Measurement::absent(Absent::NotMeasured));
+        assert_eq!(out.streams_sustained_fps.copied(), None);
+        assert_eq!(
+            out.streams_sustained_mock_bound, None,
+            "an unmeasurable mock reference must not be guessed as gateway-bound"
+        );
+    }
+
+    #[test]
+    fn a_measured_cpu_fps_peak_publishes_the_concurrency_it_peaked_at() {
+        let mut out = crate::record::CellStream::default();
+        apply_cpu_fps_verdict(&mut out, 169_125.0, 1024, Measurement::Measured(351_088.0));
+        assert_eq!(out.cpu_fps.copied(), Some(169_125.0));
+        assert_eq!(out.cpu_fps_concurrency.copied(), Some(1024));
+        assert_eq!(out.cpu_fps_mock_bound, Some(false));
+    }
+
+    // The field case from rigbound.rs's own tests, in the lane it came from: 334838 fps against a
+    // 351088 fps mock ceiling is 95.4% and says nothing about the gateway.
+    #[test]
+    fn a_mock_bound_cpu_fps_peak_is_suppressed_with_its_concurrency() {
+        let mut out = crate::record::CellStream::default();
+        apply_cpu_fps_verdict(&mut out, 334_838.0, 1024, Measurement::Measured(351_088.0));
+        assert_eq!(out.cpu_fps.copied(), None);
+        assert_eq!(out.cpu_fps_concurrency.copied(), None);
+        assert_eq!(out.cpu_fps_mock_bound, Some(true));
+    }
+
+    // A gate that nothing sustains is a real measured zero, not a mock-bound suppression: the mock
+    // was never asked to carry anything, so it cannot have been the thing that set the ceiling.
+    // Handled inside `judge_streams_sustained` (there is no concurrency to take a reference at), so
+    // this drives the whole function.
+    #[test]
+    fn nothing_sustaining_a_single_clean_stream_publishes_a_measured_zero() {
+        let dir = tmpdir("streams-zero");
+        let gw = serve(200);
+        let cfg = cfg_for(&dir, gw);
+        let mut out = crate::record::CellStream::default();
+        let mut metrics: std::collections::BTreeMap<&'static str, Measurement<f64>> = std::collections::BTreeMap::new();
+        metrics.insert("streams_sustained", Measurement::Measured(0.0));
+        metrics.insert("streams_sustained_fps", Measurement::Measured(0.0));
+        judge_streams_sustained(&cfg, Dialect::Openai, &mut out, &metrics);
+        assert_eq!(out.streams_sustained.copied(), Some(0));
+        assert_eq!(out.streams_sustained_fps.copied(), Some(0.0));
+        assert_eq!(
+            out.streams_sustained_mock_bound,
+            Some(false),
+            "0 cannot be mock-bound: the mock was never asked to carry anything"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // An absent stream measurement must carry the SEARCH's own reason and its prose bound through to
+    // the record, not arrive as a bare null. This is the "we discard the measurement" defect the peak
+    // lane already had, checked in the lane that was just added.
+    #[test]
+    fn an_absent_stream_ceiling_carries_the_searchs_own_reason_and_evidence() {
+        let dir = tmpdir("streams-absent");
+        let gw = serve(200);
+        let cfg = cfg_for(&dir, gw);
+        let mut out = crate::record::CellStream::default();
+        let mut metrics: std::collections::BTreeMap<&'static str, Measurement<f64>> = std::collections::BTreeMap::new();
+        metrics.insert(
+            "streams_sustained_fps",
+            Measurement::absent_because(Absent::SearchExhausted, "c=65536 still passes at the top of the search range"),
+        );
+        metrics.insert("streams_sustained", Measurement::absent(Absent::SearchExhausted));
+        judge_streams_sustained(&cfg, Dialect::Openai, &mut out, &metrics);
+        assert_eq!(out.streams_sustained_fps.reason(), Some(&Absent::SearchExhausted));
+        assert!(out.streams_sustained_fps.detail().unwrap_or_default().contains("65536"));
+        assert_eq!(out.streams_sustained.reason(), Some(&Absent::SearchExhausted));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── the two advisory notes ───────────────────────────────────────────────────────────────────
+
+    // A p99 over four thousand round trips and a p99 over eleven are the same field carrying utterly
+    // different weight, and nothing else in the artifact says which one a reader is holding.
+    #[test]
+    fn the_c1_note_says_how_many_round_trips_each_percentile_was_taken_over() {
+        let mut out = empty_perf();
+        let mut metrics: std::collections::BTreeMap<&'static str, Measurement<f64>> = std::collections::BTreeMap::new();
+        metrics.insert("gateway_c1_samples", Measurement::Measured(4_812.0));
+        metrics.insert("direct_c1_samples", Measurement::Measured(5_003.0));
+        judge_added_latency(&mut out, &metrics);
+        let note = out.c1_note.unwrap_or_default();
+        assert!(note.contains("4812"), "the gateway leg's own count must appear: {note}");
+        assert!(note.contains("5003"), "the direct leg's own count must appear: {note}");
+    }
+
+    // No counts means the group never completed a c=1 window, and the added-latency fields are
+    // already absent WITH the group's reason. A note restating that would publish one fact twice, in
+    // two wordings, which is what a `Measurement`'s reason exists to prevent.
+    #[test]
+    fn the_c1_note_is_absent_rather_than_prose_about_nothing() {
+        let mut out = empty_perf();
+        let metrics: std::collections::BTreeMap<&'static str, Measurement<f64>> = std::collections::BTreeMap::new();
+        judge_added_latency(&mut out, &metrics);
+        assert_eq!(out.c1_note, None);
+    }
+
+    #[test]
+    fn the_stream_c1_note_says_how_many_frames_each_single_stream_produced() {
+        let mut metrics: std::collections::BTreeMap<&'static str, Measurement<f64>> = std::collections::BTreeMap::new();
+        metrics.insert("gateway_c1_frames", Measurement::Measured(64.0));
+        metrics.insert("direct_c1_frames", Measurement::Measured(64.0));
+        let note = stream_c1_note(&metrics).unwrap_or_default();
+        assert!(note.contains("64 frame(s) through the gateway"), "{note}");
+        assert!(note.contains("99th percentile"), "the note must say why the p99 fields are absent: {note}");
+
+        // A dialect the mock cannot stream took no stream at all: no note, because the absent fields
+        // already carry the reason.
+        let empty: std::collections::BTreeMap<&'static str, Measurement<f64>> = std::collections::BTreeMap::new();
+        assert_eq!(stream_c1_note(&empty), None);
+    }
+
+    // ── the egress re-verification verdict reaches the artifact ──────────────────────────────────
+
+    // The guard is only worth anything if a reader of the published JSON can see it fired. A cell
+    // that answered 200 without translating must not read as an unqualified capability claim: the
+    // flag, the evidence, and the cell's own verdict_note all have to say so.
+    #[test]
+    fn a_cell_that_was_not_re_verified_publishes_the_flag_and_the_evidence() {
+        let dir = tmpdir("reverify");
+        let gw = serve(200);
+        let mut cfg = cfg_for(&dir, gw);
+        // Two dialects, so the grid contains a translation cell rather than only the diagonal.
+        cfg.dialects = vec![Dialect::Openai, Dialect::Anthropic];
+        let paths = run_suite_with(&cfg, gw, &[]).expect("the suite writes a snapshot");
+        let text = std::fs::read_to_string(&paths.current).expect("current file");
+        let back: ResultSnapshot = serde_json::from_str(&text).expect("its own output must parse");
+
+        // The fixture is a bare 200 server with no mock recorder behind it, so every cell is
+        // UNCHECKED with a reason - never `false`, which would convict a gateway on our own rig.
+        for (eg, up) in &back.matrix.upstreams {
+            for (ing, cell) in &up.cells {
+                let Some(perf) = cell.perf.as_ref() else { continue };
+                assert_ne!(
+                    perf.egress_reverified,
+                    Some(false),
+                    "a rig that cannot record must never publish a refutation: {ing}>{eg}"
+                );
+                assert!(
+                    perf.reverify_note.is_some(),
+                    "an unchecked cell must say why it was not checked: {ing}>{eg} {perf:?}"
+                );
+            }
+        }
+        // And the diagonal's reason is its own: there is no translation to prove there.
+        let diagonal = back
+            .matrix
+            .upstreams
+            .get("openai")
+            .and_then(|u| u.cells.get("openai"))
+            .and_then(|c| c.perf.as_ref())
+            .expect("the openai diagonal is served and carries perf");
+        assert!(
+            diagonal.reverify_note.clone().unwrap_or_default().contains("same-dialect"),
+            "{:?}",
+            diagonal.reverify_note
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     // A DECLINED CELL MUST SAY WHAT IT WAS TOLD: status, body_snippet and verdict_note must be
     // populated, not left at their defaults, or a not_configured verdict carries no evidence once

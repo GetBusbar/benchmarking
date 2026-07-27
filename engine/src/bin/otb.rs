@@ -105,11 +105,34 @@ fn main() -> ExitCode {
             let conc: u32 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(1);
             let dur: u64 = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(5);
             let body = args.get(5).cloned().unwrap_or_else(|| "{}".into());
+            // THE HEADERS COME FROM THE ENGINE THAT SPAWNED THIS, via the environment.
+            //
+            // They used to be hardcoded here as `authorization: Bearer dummy`, and that is a
+            // data-invalidating defect rather than a placeholder: the in-process probe authenticated
+            // with the manifest's real credential in the right per-dialect shape, every LOAD WINDOW
+            // authenticated as the literal string "dummy" with a header name two of the six dialects
+            // do not use, and any gateway whose declared auth was anything else passed its probe and
+            // then failed 100% of every window. The absence that reached the artifact blamed the
+            // SEARCH ("no probed concurrency passed the gate") for a credential fault of ours.
+            //
+            // Unset means NO headers, never a placeholder: see `loadgen::decode_headers` for why a
+            // wrong credential is worse than none. The warning is because a hand-run `otb loadgen`
+            // against an authenticating gateway would otherwise read as the gateway falling over.
+            let headers = otb_engine::loadgen::decode_headers(
+                std::env::var(otb_engine::loadgen::HEADERS_ENV).ok().as_deref(),
+            );
+            if headers.is_empty() {
+                eprintln!(
+                    "loadgen: {} is unset or empty, so this window sends no credential; every request \
+                     will fail against a gateway that requires one",
+                    otb_engine::loadgen::HEADERS_ENV
+                );
+            }
             let stats = gen::run(&GenConfig {
                 addr,
                 path,
                 body,
-                headers: vec![("authorization".into(), "Bearer dummy".into())],
+                headers,
                 concurrency: conc,
                 duration: Duration::from_secs(dur),
                 ttft_ms: 0,
