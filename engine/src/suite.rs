@@ -1015,9 +1015,22 @@ pub fn run_suite_with(
             ..Default::default()
         };
 
+        // Read before `entry` takes ownership of the key.
+        let configurable = cfg.manifest.egress.iter().any(|e| e == &eg);
         upstreams
             .entry(eg)
-            .or_insert_with(|| Upstream { configurable: true, served: true, ..Default::default() })
+            // `configurable` is whether this gateway can be POINTED at this upstream at all, which
+            // is exactly what the manifest's `egress` list declares, so it is read from there rather
+            // than hardcoded. It was `true` unconditionally, which made the field a constant: every
+            // egress column claimed to be configured, including ones the manifest never wired, and a
+            // constant that is published as an observation is the shape of a false claim even when
+            // it happens to be right. `served` stays true here because this entry is only created
+            // when a cell for this egress produced a row at all.
+            .or_insert_with(|| Upstream {
+                configurable,
+                served: true,
+                ..Default::default()
+            })
             .cells
             .insert(ing, cell);
     }
@@ -1089,7 +1102,16 @@ fn flush(
         matrix: Matrix {
             gateway: cfg.manifest.name.clone(),
             served: any_served,
+            // WHICH PHASES THIS RUN WAS TOLD TO MEASURE. The consumer reads these to detect a
+            // degraded run and refuses to publish one over a complete one, so an inaccurate flag
+            // here is a claim about the run itself. All three phases are in `metric::METRICS` and
+            // every served cell goes through all of them, so all three are on. Leaving them to
+            // `..Default::default()` published `cell_stream: false` on every snapshot the engine has
+            // ever written - the run declaring it had not measured streaming while carrying a full
+            // streaming block on every cell.
             cell_perf_sweep: true,
+            cell_stream: true,
+            cell_memory: Some(true),
             upstreams: upstreams.clone(),
             // Mirrored onto the matrix as well as the snapshot root: record.rs carries the field in
             // both places, and a reader that finds it in one and not the other cannot tell which is
@@ -1117,6 +1139,26 @@ mod tests {
             p99_us: Measurement::absent(Absent::NotMeasured),
             fail: Measurement::absent(Absent::NotMeasured),
         }
+    }
+
+    // A RUN MUST NOT DECLARE ITSELF DEGRADED WHILE CARRYING THE DATA IT SAYS IT SKIPPED. The
+    // consumer reads these three flags to spot a probe-only run and refuses to publish one over a
+    // complete one, so they are a claim about the run. `..Default::default()` left cell_stream
+    // false on every snapshot the engine has ever written: the run stating it did not measure
+    // streaming while every served cell carried a full streaming block.
+    #[test]
+    fn a_full_run_declares_every_phase_it_actually_measured() {
+        let dir = tmpdir("phases");
+        let gw = serve(200);
+        let cfg = cfg_for(&dir, gw);
+        let paths = run_suite_with(&cfg, gw, crate::metric::METRICS).expect("the suite should write");
+        let text = std::fs::read_to_string(&paths.current).expect("current file");
+        let back: ResultSnapshot = serde_json::from_str(&text).expect("its own output must parse");
+
+        assert!(back.matrix.cell_perf_sweep, "the perf sweep ran");
+        assert!(back.matrix.cell_stream, "the streaming group is in METRICS and ran");
+        assert_eq!(back.matrix.cell_memory, Some(true), "the memory group is in METRICS and ran");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // THE INVERSION THIS PREVENTS, seen in real field data: a cell published max_proxy 25722 while
