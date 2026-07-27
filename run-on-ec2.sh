@@ -872,6 +872,12 @@ REMOTE
   # the orchestrator forever; the box timer (BENCH_MAX_MIN) is the ultimate cost backstop underneath.
   local sentinel="" reachable=1 waited=0
   local max_wait_s=$(( (BENCH_MAX_MIN + 30) * 60 ))
+  # The engine already prints "[cell N/M] ingress>egress: verdict" to its own stdout as it works the
+  # grid (see run.rs's grid walk); that stream lands in .run.log on the box but, until now, nothing
+  # ever read it back here. Without it the fanout log goes silent from "running" to "DONE"/"INCOMPLETE"
+  # with no way to tell a box that is 30/36 cells in from one that is wedged. Surface only the latest
+  # line, and only when it changes, so a 30s poll doesn't spam a duplicate cell every tick.
+  local _last_cell=""
   if [ "$run_failed" -eq 0 ]; then
     while :; do
       # sentinel present? read the remote exit code and stop.
@@ -885,6 +891,9 @@ REMOTE
         [ "${_pull_state[$suite]}" = ok ] && continue
         pull_suite "$suite" || true
       done
+      local _cell
+      _cell="$(ssh $SSHOPT ubuntu@"$ip" "grep -o '\[cell [0-9]*/[0-9]*\][^\$]*' ~/benchmarking/.run.log 2>/dev/null | tail -1" 2>/dev/null)"
+      if [ -n "$_cell" ] && [ "$_cell" != "$_last_cell" ]; then glog_echo "$_cell"; _last_cell="$_cell"; fi
       [ "$waited" -ge "$max_wait_s" ] && { glog_echo "incremental pull loop hit max wait (${max_wait_s}s) - giving up on the run"; reachable=0; break; }
       sleep 30; waited=$((waited+30))
     done
