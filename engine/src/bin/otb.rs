@@ -289,8 +289,16 @@ fn main() -> ExitCode {
                 dialects,
                 sweep_duration_s: arg_f64(&args, 4, 6.0) as u64,
                 load_cores: std::env::var("LOADCORES").ok(),
-                min_conc: env_u32("OTB_MIN_CONC", 4),
-                max_conc: env_u32("OTB_MAX_CONC", 512),
+                // THE ENGINE'S OWN DEFAULT, not an orchestrator setting: a real field run must
+                // search wide enough to find ANY gateway's true peak, and a caller forgetting to
+                // export an override should get the wide range, not a narrow one silently clipping
+                // a fast gateway's ceiling. [512] was too narrow to find tensorzero's true peak on
+                // the box that measured the field with it unset - the search reported "still rising
+                // at the top of the range" rather than a number, for a gateway fast enough to have a
+                // real answer. OTB_MIN_CONC/OTB_MAX_CONC stay as the escape hatch for narrowing a
+                // debug run (matches OTB_DIALECTS's own "unset means real run" convention below).
+                min_conc: env_u32("OTB_MIN_CONC", 1),
+                max_conc: env_u32("OTB_MAX_CONC", 65536),
                 measured_at: utc_stamp(),
                 arch: std::env::var("BENCH_ARCH").unwrap_or_else(|_| "unknown".into()),
                 // WHICH COMMIT PRODUCED THIS RUN. run-on-ec2.sh resolves it before the box exists
