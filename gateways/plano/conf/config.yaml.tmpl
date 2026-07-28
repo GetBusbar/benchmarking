@@ -1,0 +1,39 @@
+# Plano, configured as an LLM gateway pointed at the harness mock.
+#
+# `type: model` is the LLM listener (config/plano_config_schema.yaml); `type: agent` is the
+# orchestration listener the project's README leads with, and it is NOT what this benchmark
+# measures - an agent listener would put Plano's router and its agent hop inside a number the rest
+# of the field takes without one.
+#
+# base_url is what makes Plano testable at all: several entrants pin the vendor host and their
+# upstream cells can only be recorded untestable. Plano's model_providers take base_url, so the mock
+# stands in for every provider and the measured number is Plano's own cost.
+#
+# provider_interface selects the EGRESS dialect - the wire shape Plano speaks to the upstream. Its
+# enum has no cohere or bedrock member, which is why those columns are undeclared rather than probed.
+version: v0.3.0
+
+listeners:
+  - name: llm
+    type: model
+    port: {GW_PORT}
+
+model_providers:
+  - model: openai/gpt-4o-mini
+    provider_interface: openai
+    base_url: 'http://127.0.0.1:{MOCK_PORT}'
+    access_key: {GW_AUTH}
+    default: true
+
+  - model: anthropic/claude-3-5-sonnet
+    provider_interface: claude
+    base_url: 'http://127.0.0.1:{MOCK_PORT}'
+    access_key: {GW_AUTH}
+
+  - model: gemini/gemini-1.5-pro
+    provider_interface: gemini
+    base_url: 'http://127.0.0.1:{MOCK_PORT}'
+    access_key: {GW_AUTH}
+
+tracing:
+  random_sampling: 0

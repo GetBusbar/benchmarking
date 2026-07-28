@@ -1414,7 +1414,16 @@ mod real_field_tests {
             }
             launchable += 1;
         }
-        assert_eq!(launchable, 13, "every entrant must be launchable, got {launchable}");
+        // EVERY discovered entrant, not a literal count. A frozen number here fails the moment the
+        // field changes size, which is the same defect `gateways/README.md` records against the old
+        // "n/13" footer: the field is DISCOVERED from gateways/*/, so what this asserts is that the
+        // walk above reached all of them, not that there are some particular number of them.
+        assert_eq!(
+            launchable,
+            field().len(),
+            "every entrant must be launchable, got {launchable} of {}",
+            field().len()
+        );
     }
 
     /// The Go runtime's thread count is set from the size of the pinned core range. A literal there

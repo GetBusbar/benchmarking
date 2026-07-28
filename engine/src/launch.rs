@@ -423,6 +423,25 @@ pub struct RealLauncher {
     native_child: Option<std::process::Child>,
 }
 
+impl RealLauncher {
+    /// Collect whatever native child this launcher already holds. Exists for `restart_to_rest`,
+    /// which stops and restarts a gateway through the SAME `RealLauncher` for every cell rather than
+    /// a fresh one per call, so the `Child` a previous restart spawned is still here to be waited on
+    /// before the next one replaces it. Callers must confirm the process is actually gone first (a
+    /// `supervise::stop_and_wait` that returned `Ok`) - as `stop()` does above - so the blocking
+    /// `wait()` here always reaps instantly rather than risking a hang on a live process.
+    pub(crate) fn reap_previous_native_child(&mut self) {
+        reap_native_child(&mut self.native_child, true);
+    }
+}
+
+#[cfg(test)]
+impl RealLauncher {
+    pub(crate) fn native_pid(&self) -> Option<u32> {
+        self.native_child.as_ref().map(std::process::Child::id)
+    }
+}
+
 impl Launcher for RealLauncher {
     fn run_pre_launch(&mut self, step: &PreLaunchStep) -> Result<(), String> {
         run_with_timeout(&step.command, &step.args, step.timeout)

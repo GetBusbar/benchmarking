@@ -73,6 +73,16 @@ pub struct RunConfig {
     /// a run against an already-up target). The memory group then publishes idle as ABSENT rather
     /// than as a reading it knows was taken under load - see `Memory::measure`.
     pub relaunch: Option<crate::launch::LaunchSpec>,
+    /// THE ONE LAUNCHER THAT OWNS THIS GATEWAY'S NATIVE CHILD, for every restart across every cell.
+    ///
+    /// `restart_to_rest` used to build a throwaway `RealLauncher` per call: the `Child` it held was
+    /// dropped when the function returned, so the NEXT restart's `pkill` killed a process nothing
+    /// could `wait()` on, leaking a zombie process-table entry once per served cell over an
+    /// eight-hour run. Holding the same launcher here, across every cell, means the launcher that
+    /// spawned a native child is still the one asked to stop it next time, so it can actually reap
+    /// it (see `RealLauncher::reap_previous_native_child`). Present even when `relaunch` is `None`;
+    /// it is simply never used in that case.
+    pub relaunch_launcher: std::sync::Mutex<crate::launch::RealLauncher>,
 }
 
 /// Every header one request carries: how this INGRESS dialect authenticates, then whatever the
@@ -226,11 +236,18 @@ impl SweepProbe<'_> {
 /// Errors carry the stage that failed, because "could not restart" and "restarted but never came
 /// back" are different findings: the first leaves the gateway up, the second leaves it down and every
 /// later cell in the grid will fail too.
-pub fn restart_to_rest(spec: &crate::launch::LaunchSpec) -> Result<(), String> {
+pub fn restart_to_rest(
+    spec: &crate::launch::LaunchSpec,
+    launcher: &std::sync::Mutex<crate::launch::RealLauncher>,
+) -> Result<(), String> {
+    let mut launcher = launcher.lock().map_err(|_| "the launcher lock was poisoned".to_string())?;
     crate::supervise::stop_and_wait(&spec.runtime, spec.port, Duration::from_secs(30))
         .map_err(|e| format!("stopping it failed: {e:?}"))?;
-    let mut launcher = crate::launch::RealLauncher::default();
-    crate::launch::launch_default(&mut launcher, spec)
+    // The stop above already confirmed the previous native child (if any) is dead, so reaping it
+    // here through the SAME launcher that spawned it is a wait, never a hang - and it is the only
+    // safe way this process can collect a pid the next `pkill` is about to kill.
+    launcher.reap_previous_native_child();
+    crate::launch::launch_default(&mut *launcher, spec)
         .map(|_| ())
         .map_err(|e| format!("it did not come back up: {e:?}"))
 }
@@ -1188,6 +1205,7 @@ pub(crate) fn test_fixture(gw: SocketAddr, mock: SocketAddr) -> RunConfig {
         untestable_cells: Vec::new(),
         untestable_note: String::new(),
         relaunch: None,
+        relaunch_launcher: Default::default(),
     }
 }
 
@@ -1199,6 +1217,85 @@ mod tests {
 
     fn cfg_for(gw: SocketAddr, mock: SocketAddr) -> RunConfig {
         test_fixture(gw, mock)
+    }
+
+    // ---- restart_to_rest must not leak the process it replaces --------------------------------
+
+    /// `ps -o state=` reports a zombie as `Z` on both Linux and macOS. Empty output (or a nonzero
+    /// exit) means the OS has no process table entry for that pid at all.
+    fn ps_state(pid: u32) -> String {
+        std::process::Command::new("ps")
+            .args(["-o", "state=", "-p", &pid.to_string()])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default()
+    }
+
+    /// A native "gateway" that actually listens, so `wait_until_ready` (real TCP, inside
+    /// `restart_to_rest`) has something honest to observe - a marker unique to this test process so
+    /// `pkill -f`/`pgrep -f` can never match an unrelated process on a shared runner.
+    fn listening_native_spec(port: u16, marker: &str) -> crate::launch::LaunchSpec {
+        let script = "import socket,sys
+s=socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(('127.0.0.1', int(sys.argv[1])))
+s.listen(1)
+while True:
+    conn, _ = s.accept()
+    conn.close()
+";
+        crate::launch::LaunchSpec {
+            runtime: crate::manifest::Runtime::Native { proc_match: marker.to_string() },
+            kind: crate::launch::LaunchKind::Native {
+                binary: "python3".into(),
+                args: vec!["-c".into(), script.into(), port.to_string(), marker.to_string()],
+                env: vec![],
+                env_unset: vec![],
+            },
+            cores: "0".into(),
+            port,
+            ready_budget: Duration::from_secs(5),
+            boot_backoff: Duration::from_millis(100),
+            pre_launch: None,
+        }
+    }
+
+    // THE DEFECT THIS GUARDS AGAINST. `restart_to_rest` used to build a throwaway `RealLauncher` on
+    // every call, so the `Child` it spawned was dropped the moment the function returned. The NEXT
+    // restart's `pkill` then killed a process nothing could `wait()` on: a zombie, once per served
+    // cell, for the whole run. Two restarts against the SAME persistent launcher must not leave the
+    // FIRST process a zombie once the second has replaced it.
+    #[test]
+    fn restart_to_rest_reaps_the_process_it_replaces() {
+        // `build_invocation` pins a native gateway with `taskset`, which is Linux-only. The field
+        // runs on Linux and so does CI, so this exercises the real launch path there; on a
+        // developer's macOS box there is nothing to pin with and the launch would fail for a reason
+        // that has nothing to do with reaping. Say so out loud rather than failing on it: a test
+        // that reports red for the wrong reason gets ignored, and an ignored test is not a gate.
+        if std::process::Command::new("sh").args(["-c", "command -v taskset"]).output().map(|o| !o.status.success()).unwrap_or(true) {
+            eprintln!("skipping restart_to_rest_reaps_the_process_it_replaces: no taskset on this platform (the field and CI are Linux, where this runs for real)");
+            return;
+        }
+        let marker = format!("otb-test-restart-to-rest-{}", std::process::id());
+        let port = {
+            let l = TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral port to pick one");
+            l.local_addr().expect("addr").port()
+        };
+        let spec = listening_native_spec(port, &marker);
+        let launcher: std::sync::Mutex<crate::launch::RealLauncher> = Default::default();
+
+        restart_to_rest(&spec, &launcher).expect("the first restart must come up");
+        let pid1 = launcher.lock().expect("lock").native_pid().expect("a native child must be tracked");
+
+        restart_to_rest(&spec, &launcher).expect("the second restart must come up");
+
+        assert!(
+            !ps_state(pid1).contains('Z'),
+            "the process the second restart replaced must be reaped, not left as a zombie; ps state was {:?}",
+            ps_state(pid1)
+        );
+
+        let _ = crate::supervise::stop_and_wait(&spec.runtime, spec.port, Duration::from_secs(5));
     }
 
     // THE COLLAPSED EGRESS AXIS THIS PREVENTS. Most gateways choose the upstream from the model name

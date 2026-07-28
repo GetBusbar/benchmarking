@@ -361,7 +361,7 @@ impl Metric for Memory {
                  post-load RSS under another name"
                     .to_string(),
             ),
-            Some(spec) => match crate::run::restart_to_rest(spec) {
+            Some(spec) => match crate::run::restart_to_rest(spec, &ctx.cfg.relaunch_launcher) {
                 Err(e) => Measurement::absent_because(
                     Absent::NotMeasured,
                     format!("the gateway could not be restarted to rest before the idle reading: {e}"),
