@@ -1,3 +1,4 @@
 {"suite":"matrix","measured_at":"2026-07-27T04:02:17Z","arch":"arm64","hardware":null,"build":"portkeyai/gateway:1.15.2"}
 {"suite":"matrix","measured_at":"2026-07-28T05:09:58Z","arch":"arm64","hardware":null,"build":"portkeyai/gateway:1.15.2"}
 {"suite":"matrix","measured_at":"2026-07-28T07:08:14Z","arch":"arm64","hardware":null,"build":"portkeyai/gateway:1.15.2"}
+{"suite":"matrix","measured_at":"2026-07-28T20:13:16Z","arch":"arm64","hardware":"AWS m7g.4xlarge (Graviton3, 16 cores / 64 GB). Gateway-under-test pinned to 4 cores (the comparable basis); mock and load generator on 6 cores each so the mock never bottlenecks the streaming sweep. Ubuntu 24.04. One dedicated box per gateway.","build":"portkeyai/gateway:1.15.2"}
