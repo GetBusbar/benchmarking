@@ -338,19 +338,23 @@ fn main() -> ExitCode {
                 // hatch for narrowing a debug run (matches OTB_DIALECTS's own "unset means real run"
                 // convention below), and for widening it again once the generator is no longer
                 // thread-per-connection.
-                // 65536: HIGH ENOUGH THAT THE GATEWAY STOPS FIRST, WHICH IS THE ONLY HONEST
-                // CEILING. 4096 was chosen when the load generator was thread-per-connection and
-                // 65536 collapsed the rig into scheduler thrashing. That generator is tokio tasks
-                // now, so the reason expired - and the 2026-07-28 field run shows the cost of
-                // keeping it: 4 cells reported "still climbing at c=4096, so saturation was never
-                // observed" and published no maximum at all. That is the harness's own search bound
-                // written down as the absence of a gateway answer.
+                // THE CEILING IS READ FROM THE HOST, not chosen as a constant.
                 //
-                // A wide ceiling costs nothing on a gateway that saturates: the ladder stops after
-                // two flat rungs wherever that happens. It is only paid on cells that genuinely keep
-                // climbing, which are exactly the cells whose ceiling we do not yet know.
+                // 4096 was picked when the load generator was thread-per-connection, and raising it
+                // to a bigger constant only moved the arbitrary number. The real bound is physical: a
+                // TCP connection needs a unique (src ip, src port, dst ip, dst port), and every
+                // window here drives ONE destination, so simultaneous connections cannot exceed this
+                // host's ephemeral source ports. On a default Linux that is about 28,000 - already
+                // below the 65536 a wider constant would ask for - and asking past it raises
+                // EADDRNOTAVAIL, which is the rig running out and used to be counted as the gateway
+                // refusing.
+                //
+                // So the engine reads `/proc/sys/net/ipv4/ip_local_port_range` and caps itself at
+                // what the host can actually do. The orchestrator widens that range before a run
+                // (run-on-ec2.sh), and because the ceiling is derived rather than declared, widening
+                // it is the only thing anyone has to change - there is no second number to move.
                 min_conc: env_u32("OTB_MIN_CONC", 1),
-                max_conc: env_u32("OTB_MAX_CONC", 65536),
+                max_conc: env_u32("OTB_MAX_CONC", otb_engine::run::host_connection_ceiling()),
                 measured_at: utc_stamp(),
                 arch: std::env::var("BENCH_ARCH").unwrap_or_else(|_| "unknown".into()),
                 // Same path as arch: the orchestrator knows the box shape, the box does not.

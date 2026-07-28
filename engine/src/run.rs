@@ -133,6 +133,50 @@ pub(crate) fn headers_for(cfg: &RunConfig, ingress: Dialect, egress: &str) -> Ve
 }
 
 /// Ask the gateway whether it serves this pairing. The answer comes only from what was OBSERVED:
+/// THE MOST SIMULTANEOUS CONNECTIONS THIS HOST CAN ACTUALLY MAKE TO ONE DESTINATION.
+///
+/// A TCP connection is identified by (src ip, src port, dst ip, dst port). Every load window drives
+/// ONE destination, so simultaneous connections are bounded by this host's ephemeral source ports:
+/// `net.ipv4.ip_local_port_range`. Asking past it does not measure a bigger gateway - `connect`
+/// starts returning EADDRNOTAVAIL, and before `GenStats::rig_refused` existed those landed in the
+/// failure count where nothing could tell them apart from the gateway refusing, so the search would
+/// publish the rig's port range as the gateway's ceiling.
+///
+/// EVERY NUMBER HERE IS READ OR DERIVED, none chosen. The ceiling is the largest power of two that
+/// fits the host's own range - powers of two because the ladder doubles, so a ceiling between rungs
+/// would be reachable only by the clamp and would make the top rung a different shape from every
+/// rung below it.
+///
+/// The fallback, when /proc cannot be read (macOS, a restricted container), is the same computation
+/// over Linux's own documented default range rather than a constant somebody picked: if we cannot
+/// ask the host, we assume the host is stock.
+///
+/// TIME_WAIT is not handled by shaving a fraction off - that would be an invented number doing a
+/// real job badly. A closed connection holds its port until TIME_WAIT expires, so the orchestrator
+/// enables `net.ipv4.tcp_tw_reuse` before a run and the kernel recycles them for new outbound
+/// connections. Widening the range or changing that policy needs no change here: this reads whatever
+/// the host is actually configured to do.
+pub fn host_connection_ceiling() -> u32 {
+    // Linux's compiled-in default, used only when the real one cannot be read.
+    const STOCK_LINUX_RANGE: (u32, u32) = (32_768, 60_999);
+    let (lo, hi) = std::fs::read_to_string("/proc/sys/net/ipv4/ip_local_port_range")
+        .ok()
+        .and_then(|t| {
+            let mut p = t.split_whitespace().filter_map(|v| v.parse::<u32>().ok());
+            match (p.next(), p.next()) {
+                (Some(lo), Some(hi)) if hi > lo => Some((lo, hi)),
+                _ => None,
+            }
+        })
+        .unwrap_or(STOCK_LINUX_RANGE);
+    let usable = hi - lo + 1;
+    let mut ceiling = 1u32;
+    while ceiling * 2 <= usable {
+        ceiling *= 2;
+    }
+    ceiling
+}
+
 /// a real status with a healthy rig is the gateway's own answer, no HTTP answer at all is not.
 pub fn probe_cell(cfg: &RunConfig, id: &CellId, mock_healthy: bool) -> Served {
     let (attempts, pause_s) = crate::probe::transient_budget();
@@ -403,6 +447,7 @@ pub fn load_window_at(
             elapsed_s: if u.rps > 0 { u.ok as f64 / u.rps as f64 } else { 0.0 },
             latencies_us: Vec::new(),
             spawn_failed: false,
+            rig_refused: u.rig_refused.max(0) as u64,
             // The subprocess never sends its raw samples back, only the percentiles it already
             // computed over them, so these are filled straight from the stats line rather than left
             // for a caller to (wrongly) derive from the now-empty `latencies_us` above.
@@ -2270,5 +2315,45 @@ while True:
         std::env::set_var("MOCK_STREAM_INTERVAL_MS", "not-a-number");
         assert_eq!(stream_pacing_interval_ms(), 20);
         std::env::remove_var("MOCK_STREAM_INTERVAL_MS");
+    }
+
+    // THE CEILING IS THE HOST'S, AND EVERY NUMBER IN IT IS READ OR DERIVED.
+    //
+    // 4096 was picked when the generator was thread-per-connection, and replacing it with a bigger
+    // constant only moved the arbitrary number: raising it to 65536 asked for more connections than
+    // a single host can make to a single destination, because a TCP connection needs a unique
+    // 4-tuple and the source ports run out first. Stock Linux allows about 28,000 of them.
+    #[test]
+    fn the_connection_ceiling_comes_from_the_hosts_port_range_not_a_chosen_constant() {
+        // The derivation, over the ranges that matter: stock Linux, the range the orchestrator sets,
+        // and the widest a host can offer. Powers of two because the ladder doubles - a ceiling
+        // between rungs is reachable only by the clamp and makes the top rung a different shape.
+        let ceiling_for = |lo: u32, hi: u32| {
+            let usable = hi - lo + 1;
+            let mut c = 1u32;
+            while c * 2 <= usable {
+                c *= 2;
+            }
+            c
+        };
+        assert_eq!(ceiling_for(32_768, 60_999), 16_384, "stock Linux: ~28k ports");
+        assert_eq!(ceiling_for(16_384, 65_535), 32_768, "what run-on-ec2.sh sets");
+        assert_eq!(ceiling_for(1_024, 65_535), 32_768, "the widest a host can give");
+
+        // The real function agrees with that derivation on whatever host runs the test, and never
+        // returns something the ladder cannot climb to.
+        let c = host_connection_ceiling();
+        assert!(c.is_power_of_two(), "the ceiling must be a rung the ladder actually lands on, got {c}");
+        assert!(c >= 1024, "a ceiling below the concurrencies this field routinely reaches is not usable, got {c}");
+        // On Linux it must match the host's real range; off Linux it falls back to the stock range's
+        // own derivation rather than to a number someone chose.
+        if let Ok(t) = std::fs::read_to_string("/proc/sys/net/ipv4/ip_local_port_range") {
+            let mut p = t.split_whitespace().filter_map(|v| v.parse::<u32>().ok());
+            if let (Some(lo), Some(hi)) = (p.next(), p.next()) {
+                assert_eq!(c, ceiling_for(lo, hi), "the ceiling must be this host's own range");
+            }
+        } else {
+            assert_eq!(c, ceiling_for(32_768, 60_999), "off Linux, assume a stock host");
+        }
     }
 }
