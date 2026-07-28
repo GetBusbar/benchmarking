@@ -3170,3 +3170,23 @@ test("C8: the repo's own instrument-equivalence.json meets the evidence rule it 
     }
   }
 });
+// ---- a board whose age cannot be established is not a fresh board -------------------------------
+// The 180-day floor ran only `if (boardNewest > 0)`, so the one case it could not judge was the one
+// it waved through. That is the shape of every guard that turned out to be inert today: the retry
+// budget nothing called, the box qualification that always seeded, the history appender scanning
+// directories nothing writes. Silent, not wrong, which is why none were noticed.
+test("freshness guard REFUSES a board it cannot date, rather than passing it", () => {
+  // Gateways present, but no resolvable displayed stamp anywhere.
+  const root = mkdtempSync(join(tmpdir(), "site-undatable-"));
+  mkdirSync(join(root, "gateways", "alpha"), { recursive: true });
+  writeFileSync(join(root, "gateways", "alpha", "definition.json"), JSON.stringify({
+    name: "alpha", display: "alpha", lang: "Rust", class: "Gateway", model: "m", port: 1,
+    path: "/v1/chat/completions", auth: "dummy", egress: ["openai"],
+    matrix: ["100000", "000000", "000000", "000000", "000000", "000000"],
+  }));
+  mkdirSync(join(root, "results", "snapshots"), { recursive: true });
+  const msg = genThrows(root);
+  assert.ok(msg, "expected gen-data to THROW on a board with no datable measurement, but it succeeded");
+  assert.match(msg, /FRESHNESS FAILURE \(undatable board\)/, `expected the undatable-board failure, got: ${msg}`);
+});
+

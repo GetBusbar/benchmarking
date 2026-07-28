@@ -616,6 +616,22 @@ const MAX_BOARD_AGE_DAYS = 180;    // wholesale-stale floor (soft anchor): the w
 // guard the rewrite KEPT) never fires and a wholesale-stale matrix board publishes generated_at=now.
 // The floor now ages exactly what the board shows (same basis as MED-1's footer + the per-row badge).
 const boardNewest = Math.max(...gateways.map(displayedMeasuredMs), 0);
+// A BOARD WHOSE AGE CANNOT BE ESTABLISHED IS NOT A FRESH BOARD.
+//
+// This guard only ran `if (boardNewest > 0)`, so the one situation it could not judge - no gateway
+// carrying a resolvable displayed stamp - was the one it let straight through. That is the same
+// shape as every other guard that turned out to be doing nothing today: the retry budget nothing
+// called, the box qualification that always seeded, the history appender scanning directories the
+// engine stopped writing. Each was silent rather than wrong, which is why none of them were noticed.
+//
+// Publishing generated_at=now over a board we cannot date is exactly what the 180-day floor exists
+// to refuse, so an unresolvable board is a hard failure with its own reason rather than a pass.
+if (boardNewest <= 0 && gateways.length > 0) {
+  throw new Error(
+    `gen-data: FRESHNESS FAILURE (undatable board): ${gateways.length} gateway(s) but not one carries a resolvable ` +
+    `displayed measured_at, so the board's age cannot be established at all. Refusing to publish ` +
+    `generated_at=${generatedAt} over data that cannot be dated.`);
+}
 if (boardNewest > 0) {
   const boardAgeDays = (Date.parse(generatedAt) - boardNewest) / 86400000;
   if (boardAgeDays > MAX_BOARD_AGE_DAYS) {
