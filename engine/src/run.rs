@@ -1389,7 +1389,6 @@ pub fn run_grid(cfg: &RunConfig, lo: u32, hi: u32) -> Vec<CellResult> {
 /// The same walk, over an explicit metric list, so a test can drive the grid without performing
 /// every real measurement.
 pub fn run_grid_with(cfg: &RunConfig, lo: u32, hi: u32, metrics: &[&dyn metric::Metric]) -> Vec<CellResult> {
-    let healthy = mock_healthy(cfg);
     let mut out = Vec::new();
     let total = cfg.dialects.len() * cfg.dialects.len();
     let mut done = 0usize;
@@ -1432,6 +1431,22 @@ pub fn run_grid_with(cfg: &RunConfig, lo: u32, hi: u32, metrics: &[&dyn metric::
                     reverify: Default::default(),
                 });
                 continue;
+            }
+            // THE RIG IS RE-CONFIRMED FOR EVERY CELL, not once for the whole grid.
+            //
+            // `mock_healthy` is what lets `persistent_transient_verdict` answer NotVerified: when the
+            // rig cannot vouch for itself, nothing observed is attributable to the gateway. Reading
+            // it once before a grid that runs for hours defeated exactly that. busbar's 36 cells take
+            // about ninety minutes; a mock that degraded at cell five left every cell after it graded
+            // as though the rig were confirmed fine, so its failures became the gateway's verdict -
+            // the same inversion as counting our own port exhaustion as a refusal, just with a
+            // longer fuse.
+            //
+            // One request per cell against a mock that is answering hundreds of thousands. The cost
+            // is not worth thinking about; the wrong verdict is.
+            let healthy = mock_healthy(cfg);
+            if !healthy {
+                eprintln!("[cell {done}/{total}] {id}: the mock did not answer its own health check - nothing observed here is attributable to the gateway");
             }
             let mut served = probe_cell(cfg, &id, healthy);
             // A GATEWAY THAT DIED TAKES THE REST OF THE GRID WITH IT, UNLESS SOMETHING RESTARTS IT.
@@ -2445,5 +2460,41 @@ while True:
             end: crate::http::SseEnd::NotAnEventStream("application/json".into()),
         };
         assert!(stream_errored(&not_sse));
+    }
+
+    // THE RIG MUST BE RE-CONFIRMED AS THE GRID RUNS, not once at the start.
+    //
+    // `mock_healthy` is the input that lets a verdict come back NotVerified: when the rig cannot
+    // vouch for itself, nothing observed is attributable to the gateway. Reading it once before a
+    // grid that runs for ninety minutes defeated that - a mock that degraded partway left every
+    // later cell graded as though the rig were fine, turning our failure into the gateway's verdict.
+    //
+    // Asserted on the verdict rule rather than by driving a whole grid, because the rule is where
+    // the consequence lives and a grid test cannot make a mock die halfway on demand.
+    #[test]
+    fn an_unconfirmed_rig_makes_the_same_observation_unattributable() {
+        use crate::probe::{persistent_transient_verdict, Observation, Verdict};
+
+        // The identical status, seen with the rig confirmed and unconfirmed, must not produce the
+        // same verdict - that is the whole reason the flag is threaded down here.
+        for status in [500u16, 503, 400, 404] {
+            let confirmed = persistent_transient_verdict(Observation { status: Some(status), mock_healthy: true });
+            let unconfirmed = persistent_transient_verdict(Observation { status: Some(status), mock_healthy: false });
+            assert_ne!(
+                confirmed, unconfirmed,
+                "HTTP {status} must not read the same when the rig could not confirm itself"
+            );
+            assert_eq!(unconfirmed, Verdict::NotVerified, "an unconfirmed rig makes HTTP {status} unattributable");
+        }
+
+        // And with the rig confirmed, the gateway's own answers still classify normally.
+        assert_eq!(
+            persistent_transient_verdict(Observation { status: Some(404), mock_healthy: true }),
+            Verdict::NotConfigured
+        );
+        assert_eq!(
+            persistent_transient_verdict(Observation { status: Some(503), mock_healthy: true }),
+            Verdict::Failed
+        );
     }
 }
