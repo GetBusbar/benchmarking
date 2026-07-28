@@ -395,13 +395,13 @@ function sealStreamRecord(s) {
   // honesty flag. Sealing it UNGATED beside a GATED streams_sustained let the rig-bound rate publish
   // while the count it came from was suppressed. Gate it on the same flag.
   rec.streams_sustained_fps = sealMetric(s.streams_sustained_fps, {
-    gated: true, flag: s.streams_sustained_mock_bound, zeroNote: ZERO_MEASURED_FAIL });
+    gated: true, paced: true, flag: s.streams_sustained_mock_bound, zeroNote: ZERO_MEASURED_FAIL });
   // AUDIT #3: streaming counts - a 0 is a MEASURED FAILURE (offered stream load, sustained none), NOT
   // "not measured". Only a null (absent field) is not-measured. The note names which, and every surface
   // renders the two apart.
   rec.streams_sustained = sealMetric(s.streams_sustained, {
-    gated: true, flag: s.streams_sustained_mock_bound, zeroNote: ZERO_MEASURED_FAIL });
-  rec.cpu_fps = sealMetric(s.cpu_fps, { gated: true, flag: s.cpu_fps_mock_bound, zeroNote: ZERO_MEASURED_FAIL,
+    gated: true, paced: true, flag: s.streams_sustained_mock_bound, zeroNote: ZERO_MEASURED_FAIL });
+  rec.cpu_fps = sealMetric(s.cpu_fps, { gated: true, paced: true, flag: s.cpu_fps_mock_bound, zeroNote: ZERO_MEASURED_FAIL,
     extras: { concurrency: s.cpu_fps_concurrency ?? null } });
   return rec;
 }
