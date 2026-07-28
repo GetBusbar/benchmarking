@@ -1251,6 +1251,9 @@ def _report_md(rows: list, title: str, charts: list, pending: tuple = (), chart_
             return "0"
         return f"{int(val):,}"
 
+    def rss_cell(v):
+        return f"{v:.0f} MiB" if v is not None else "-"
+
     for key, r in rows:
         lat = r.get("added_latency_p99_us")
         idle = r.get("idle_rss_mib")
@@ -1272,7 +1275,6 @@ def _report_md(rows: list, title: str, charts: list, pending: tuple = (), chart_
             lat_cell = f"{lat:,} µs" + (" †" if served is False else "")
             if served is False:
                 dnf_seen = True
-        rss = lambda v: f"{v:.0f} MiB" if v is not None else "-"
         if served is False and r.get("serve_error"):
             fail_notes.append((GATEWAYS[key], str(r.get("serve_error"))))
         lines.append(
@@ -1280,8 +1282,8 @@ def _report_md(rows: list, title: str, charts: list, pending: tuple = (), chart_
             f"| {lat_cell} "
             f"| {llm} "
             f"| {proxy} "
-            f"| {rss(idle)} "
-            f"| {rss(peak)} "
+            f"| {rss_cell(idle)} "
+            f"| {rss_cell(peak)} "
             f"| `{(r.get('build') or '').strip()[:46]}` |"
         )
     # Gateways we intend to measure but haven't yet - shown so the field is transparent, never hidden.
