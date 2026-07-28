@@ -105,6 +105,36 @@ def _matrix_extra(data):
         out["diagonal_memory"] = mem_cells
     return out
 
+def _write_record(suite, gw, data):
+    """Build one history row from a result JSON and append it if new. Returns True if written."""
+    measured = data.get("measured_at")
+    if not measured:
+        return False
+    rec = {"suite": suite, "measured_at": measured,
+           "arch": data.get("arch"), "hardware": data.get("hardware")}
+    for k in KEEP[suite]:
+        if k in data:
+            rec[k] = data[k]
+    if suite == "matrix":
+        if isinstance(data.get("cells"), dict):
+            rec["cells"] = {k: v.get("served") for k, v in data["cells"].items()}
+        rec.update(_matrix_extra(data))
+    hist_path = os.path.join(HIST, gw + ".jsonl")
+    seen = set()
+    if os.path.exists(hist_path):
+        for line in open(hist_path):
+            try:
+                j = json.loads(line)
+                seen.add((j.get("suite"), j.get("measured_at")))
+            except Exception:
+                pass
+    if (suite, measured) in seen:
+        return False
+    with open(hist_path, "a") as f:
+        f.write(json.dumps(rec, separators=(",", ":")) + "\n")
+    return True
+
+
 def main():
     os.makedirs(HIST, exist_ok=True)
     added = 0
@@ -130,32 +160,30 @@ def main():
                 print(f"history: SKIPPED corrupt {suite}/{fn}: {e}", file=sys.stderr)
                 skipped.append(f"{suite}/{fn}")
                 continue
-            measured = data.get("measured_at")
-            if not measured:
+            if _write_record(suite, gw, data):
+                added += 1
+    # THE ENGINE NO LONGER WRITES THE PER-SUITE DIRECTORIES ABOVE: it writes only
+    # results/snapshots/<gw>.json (current) and results/snapshots/result_<gw>_<measured_at>.json
+    # (timestamped). Both hold the matrix-shaped result, so ingest them the same way, keyed by the
+    # JSON's own "gateway" field rather than the filename (the timestamped copies don't end in <gw>.json).
+    snap_d = os.path.join(RES, "snapshots")
+    if os.path.isdir(snap_d):
+        for fn in sorted(os.listdir(snap_d)):
+            if not fn.endswith(".json"):
                 continue
-            rec = {"suite": suite, "measured_at": measured,
-                   "arch": data.get("arch"), "hardware": data.get("hardware")}
-            for k in KEEP[suite]:
-                if k in data:
-                    rec[k] = data[k]
-            if suite == "matrix":
-                if isinstance(data.get("cells"), dict):
-                    rec["cells"] = {k: v.get("served") for k, v in data["cells"].items()}
-                rec.update(_matrix_extra(data))
-            hist_path = os.path.join(HIST, gw + ".jsonl")
-            seen = set()
-            if os.path.exists(hist_path):
-                for line in open(hist_path):
-                    try:
-                        j = json.loads(line)
-                        seen.add((j.get("suite"), j.get("measured_at")))
-                    except Exception:
-                        pass
-            if (suite, measured) in seen:
+            src = os.path.join(snap_d, fn)
+            try:
+                with open(src) as f:
+                    data = json.load(f)
+            except Exception as e:
+                print(f"history: SKIPPED corrupt snapshots/{fn}: {e}", file=sys.stderr)
+                skipped.append(f"snapshots/{fn}")
                 continue
-            with open(hist_path, "a") as f:
-                f.write(json.dumps(rec, separators=(",", ":")) + "\n")
-            added += 1
+            gw = data.get("gateway")
+            if not gw:
+                continue
+            if _write_record("matrix", gw, data):
+                added += 1
     print(f"history: appended {added} record(s)")
     if skipped:
         print(f"history: WARNING {len(skipped)} corrupt result file(s) skipped - "
