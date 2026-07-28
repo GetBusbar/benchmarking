@@ -41,5 +41,9 @@
   "untestable": [
     "openai/bedrock"
   ],
-  "untestable_note": "One-API v0.6.10's AWS/Bedrock channel constructs the aws-sdk bedrockruntime client with no endpoint override and skips the base_url relay path (relay/adaptor/aws/adaptor.go), so the harness mock cannot stand in for the upstream; One-API does relay Bedrock in production"
+  "untestable_cells": [
+    "openai/anthropic",
+    "openai/gemini"
+  ],
+  "untestable_note": "This harness has not established that One-API routes its anthropic or gemini channels, so those cells are recorded untestable rather than failed. The channels are created by gateways/one-api/commands (types 14 and 24, models claude-3-5-sonnet-20240620 and gemini-1.5-pro, base_url on the mock) and the POSTs succeed, but a relay request for either model answers HTTP 503 with One-API's own message that there is no available channel for it under group 'default'. That was true in all eight runs of 2026-07-27/28, including the oldest engine, so it is not a regression in either One-API or this harness - it is a configuration we have not got right. Grading it as a gateway failure would publish a red One-API may not have earned; the openai lane is unaffected and is measured normally. Asked upstream at katanemo/plano#1000's sibling thread and will be re-declared the moment the correct channel setup is known."
 }
