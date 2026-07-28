@@ -581,6 +581,21 @@ pub const SUSTAINED_P99_CEILING_US: u64 = 20_000;
 /// "cannot serve this concurrency at all" into the same verdict. The README's own number is the bar.
 pub const SUSTAINED_MAX_FAIL_RATIO: f64 = 0.001;
 
+/// How many times the sustained ceiling may step down when it fails confirmation.
+///
+/// Each step halves the concurrency, so this bounds the walk at a few doublings below the
+/// bisection's answer - far enough to find a rung that genuinely holds, short enough that a cell
+/// cannot spend its whole budget here.
+const MAX_CEILING_STEPDOWNS: usize = 4;
+
+/// A sustained ceiling that held the gate on re-measurement: the concurrency, the bisection's own
+/// winning window, and the confirmation windows taken there.
+struct ConfirmedCeiling {
+    concurrency: u32,
+    first_rps: f64,
+    repeats: Vec<(f64, bool)>,
+}
+
 /// One rung the sustained-throughput search actually probed, carrying the p99 and fail count behind
 /// its pass/fail verdict. `search::ProbedPoint` (the type `bisect_ceiling` itself returns) does not
 /// carry these: it is shared by every search in the engine and adding fields two of its four callers
@@ -746,28 +761,98 @@ pub fn sweep_sustained_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> C
         // PUBLISHED at the ceiling, not which ceiling was proven.
         Some(c) => match p.points.iter().find(|pt| pt.concurrency == c).map(|pt| pt.rps) {
             Some(first) => {
-                let mut repeats = Vec::new();
-                for _ in 1..crate::search::WINDOWS_PER_RUNG {
-                    // A window that produces nothing is not a zero: it is one fewer sample. Falling
-                    // back to the windows in hand keeps the median honest rather than dragging it to
-                    // the floor with a reading the rig never took.
-                    if let Some(stats) = load_window(cfg, &p.path, &p.body, &p.headers, c) {
-                        if stats.ok > 0 || stats.fail > 0 {
-                            let rps = stats.rps() as f64;
+                // CONFIRM THE CEILING, AND STEP DOWN IF IT DOES NOT HOLD.
+                //
+                // The bisection walks up until ONE window fails, so by construction it lands exactly
+                // on the boundary - the highest concurrency that passed once. Re-measuring the
+                // 2026-07-28 field run's own ceilings showed 9 of 48 held the p99 gate in only 1 of 3
+                // windows, and the shape gives it away: the first window passes and the rest fail
+                // (agentgateway c=252 saw 19866, 20036, 20404 against a 20000us gate). A ceiling the
+                // gateway holds a third of the time is not a ceiling it sustains.
+                //
+                // Bisecting with one window is fine for SEARCHING - it is cheap and it converges.
+                // Publishing the answer needs more than one window, so the winner is confirmed with
+                // `WINDOWS_PER_RUNG` and, if a majority of those fail the gate, the search steps down
+                // and confirms again. Bounded, because each step at least halves the distance back to
+                // a concurrency already known to pass.
+                let mut ceiling = c;
+                let mut first_rps = first;
+                let mut confirmed: Option<ConfirmedCeiling> = None;
+                for _ in 0..MAX_CEILING_STEPDOWNS {
+                    let mut repeats = Vec::new();
+                    for _ in 1..crate::search::WINDOWS_PER_RUNG {
+                        // A window that produces nothing is not a zero: it is one fewer sample.
+                        if let Some(stats) = load_window(cfg, &p.path, &p.body, &p.headers, ceiling) {
+                            if stats.ok > 0 || stats.fail > 0 {
+                                let rps = stats.rps() as f64;
+                                let passed = sustained_gate_passes(stats.p99_us, stats.ok, stats.fail);
+                                p.points.push(SustainedPoint {
+                                    concurrency: ceiling,
+                                    passed,
+                                    rps,
+                                    p99_us: stats.p99_us,
+                                    fail: stats.fail as i64,
+                                });
+                                repeats.push((rps, passed));
+                            }
+                        }
+                    }
+                    // The bisection's own winning window counts as one of the votes: it is a real
+                    // measurement at this concurrency and discarding it would throw away evidence.
+                    let held = 1 + repeats.iter().filter(|(_, ok)| *ok).count();
+                    let total = 1 + repeats.len();
+                    if held * 2 > total {
+                        confirmed = Some(ConfirmedCeiling { concurrency: ceiling, first_rps, repeats });
+                        break;
+                    }
+                    // Did not hold. Step halfway back toward the floor and try again; a ceiling of 1
+                    // cannot be stepped down further, so stop and report what was seen.
+                    let next = ceiling / 2;
+                    if next < lo.max(1) || next == ceiling {
+                        break;
+                    }
+                    eprintln!(
+                        "sustained: c={ceiling} held the gate in only {held} of {total} windows - stepping down to c={next}"
+                    );
+                    ceiling = next;
+                    match load_window(cfg, &p.path, &p.body, &p.headers, ceiling) {
+                        Some(stats) if stats.ok > 0 || stats.fail > 0 => {
+                            first_rps = stats.rps() as f64;
                             let passed = sustained_gate_passes(stats.p99_us, stats.ok, stats.fail);
                             p.points.push(SustainedPoint {
-                                concurrency: c,
+                                concurrency: ceiling,
                                 passed,
-                                rps,
+                                rps: first_rps,
                                 p99_us: stats.p99_us,
                                 fail: stats.fail as i64,
                             });
-                            repeats.push((rps, passed));
                         }
+                        _ => break,
                     }
                 }
-                let rps = sustained_median(first, &repeats);
-                CellSustained { rps: Measurement::Measured(rps), concurrency: Measurement::Measured(c), points: p.points }
+                match confirmed {
+                    Some(ok) => {
+                        let rps = sustained_median(ok.first_rps, &ok.repeats);
+                        CellSustained {
+                            rps: Measurement::Measured(rps),
+                            concurrency: Measurement::Measured(ok.concurrency),
+                            points: p.points,
+                        }
+                    }
+                    // Nothing held on re-measurement. Publishing the bisection's answer anyway is
+                    // exactly what this guard exists to stop.
+                    None => CellSustained {
+                        rps: Measurement::absent_because(
+                            Absent::NotMeasured,
+                            format!(
+                                "the bisection proved c={c}, but that concurrency did not hold the gate on \
+                                 re-measurement and stepping down found none that did within {MAX_CEILING_STEPDOWNS} attempts"
+                            ),
+                        ),
+                        concurrency: Measurement::absent(Absent::NotMeasured),
+                        points: p.points,
+                    },
+                }
             }
             // The bisection proved the ceiling without this engine losing the rung's own reading -
             // it never should, since `sample` memoises every probe - but if it somehow did, publish
@@ -2527,5 +2612,45 @@ while True:
             persistent_transient_verdict(Observation { status: Some(503), mock_healthy: true }),
             Verdict::Failed
         );
+    }
+
+    // A CEILING THE GATEWAY HOLDS ONE TIME IN THREE IS NOT A CEILING IT SUSTAINS.
+    //
+    // The bisection walks up until ONE window fails, so it lands exactly on the boundary: the
+    // highest concurrency that passed once. Re-measuring the 2026-07-28 field run's own published
+    // ceilings found 9 of 48 held the p99 gate in only 1 of 3 windows, and the shape is unmistakable
+    // - the first window passes and the rest fail. agentgateway c=252 saw 19866, 20036, 20404 against
+    // a 20000us gate; apisix c=171 saw 19980, 21114, 22530.
+    #[test]
+    fn a_ceiling_is_confirmed_by_a_majority_of_its_own_windows() {
+        // The rule the confirmation applies, with the bisection's own winning window counted as one
+        // vote - it is a real measurement at that concurrency and discarding it throws away evidence.
+        let holds = |repeats: &[bool]| {
+            let held = 1 + repeats.iter().filter(|ok| **ok).count();
+            let total = 1 + repeats.len();
+            held * 2 > total
+        };
+
+        // The field shape: bisection window passed, both confirmations failed. 1 of 3 is not a
+        // ceiling, and this is the case that was being published.
+        assert!(!holds(&[false, false]), "1 of 3 windows must not confirm a ceiling");
+        // A genuine ceiling: the confirmations agree with the bisection.
+        assert!(holds(&[true, true]), "3 of 3 must confirm");
+        // The marginal case - 2 of 3 - is a majority and confirms. A gateway that holds two thirds of
+        // the time is sustaining it; demanding unanimity would reject real ceilings for one unlucky
+        // window, which is the opposite error.
+        assert!(holds(&[true, false]), "2 of 3 is a majority and must confirm");
+
+        // Stepping down halves the concurrency, so the walk is bounded and always moves toward a
+        // region already known to pass.
+        let mut c = 252u32;
+        let mut steps = 0;
+        while steps < MAX_CEILING_STEPDOWNS {
+            let next = c / 2;
+            assert!(next < c, "a step-down must make progress");
+            c = next;
+            steps += 1;
+        }
+        assert!(c < 252 / 8, "four halvings must reach well below the failing ceiling, got {c}");
     }
 }
