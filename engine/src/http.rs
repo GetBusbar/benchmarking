@@ -655,8 +655,17 @@ pub enum SseEnd {
     Timeout,
     /// The peer closed the connection (a normal, deliberate end of stream).
     StreamClosed,
-    /// The connection could not be made at all.
+    /// The connection could not be made at all - by the PEER's doing (refused, unreachable, reset).
     ConnectionFailed(String),
+    /// The connection could not be made because THIS HOST ran out: ephemeral source ports
+    /// (EADDRNOTAVAIL) or file descriptors (EMFILE/ENFILE).
+    ///
+    /// Split from `ConnectionFailed` because they are opposite claims. A refused connection is the
+    /// gateway declining; a host with no source ports left never asked it anything. Both used to
+    /// count as an errored stream, so a stream search at high concurrency could exhaust the rig and
+    /// publish the exhaustion as the gateway's stream ceiling - the same defect the load generator
+    /// had, in the path that reaches high concurrency soonest.
+    RigExhausted(String),
     /// The response head itself did not parse (wrong status line, broken headers): there is no
     /// stream to read frames from at all.
     Malformed(String),
@@ -999,7 +1008,7 @@ pub fn post_json_sse(
                 status: None,
                 frames: Vec::new(),
                 frame_offsets_us: Vec::new(),
-                end: SseEnd::ConnectionFailed(e.to_string()),
+                end: connect_end(&e),
             }
         }
     };
@@ -1090,7 +1099,14 @@ pub async fn post_json_sse_async(
     let connect = tokio::time::timeout(timeout, tokio::net::TcpStream::connect(addr));
     let mut stream = match connect.await {
         Ok(Ok(s)) => s,
-        Ok(Err(e)) => return failed(e.to_string()),
+        Ok(Err(e)) => {
+            return SseOutcome {
+                status: None,
+                frames: Vec::new(),
+                frame_offsets_us: Vec::new(),
+                end: connect_end(&e),
+            }
+        }
         Err(_) => {
             return SseOutcome {
                 status: None,
@@ -1135,6 +1151,21 @@ pub async fn post_json_sse_async(
             Ok(Err(_)) => return reader.finish(SseEnd::StreamClosed, at),
             Err(_) => return reader.finish(SseEnd::Timeout, at),
         }
+    }
+}
+
+/// WHICH SIDE FAILED TO CONNECT.
+///
+/// EADDRNOTAVAIL means this host has no ephemeral source port left; EMFILE/ENFILE mean it has no
+/// descriptor left. Neither is the gateway declining anything - it was never asked. Everything else
+/// (refused, unreachable, reset) is the peer's, and stays a connection failure.
+fn connect_end(e: &std::io::Error) -> SseEnd {
+    let ours = matches!(e.kind(), std::io::ErrorKind::AddrNotAvailable | std::io::ErrorKind::AddrInUse)
+        || matches!(e.raw_os_error(), Some(23) | Some(24));
+    if ours {
+        SseEnd::RigExhausted(e.to_string())
+    } else {
+        SseEnd::ConnectionFailed(e.to_string())
     }
 }
 
