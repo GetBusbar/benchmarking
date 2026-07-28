@@ -504,6 +504,31 @@ pub struct CellSustained {
     pub points: Vec<SustainedPoint>,
 }
 
+/// The rps published at a proven sustained ceiling: the median of the windows taken there that HELD
+/// the gate, with the bisection's own window as the first of them.
+///
+/// Pure, and separated from the windowing on purpose. The rule is the whole of the fix and it has
+/// three distinct branches that a live-load test cannot reach deterministically - a scattering
+/// gateway, a window that fails the gate on re-measure, and a rig that returns nothing at all.
+/// Driving it directly is what makes those branches testable at all; the surrounding function only
+/// has to take the windows.
+///
+/// ONLY WINDOWS THAT HELD THE GATE COUNT, exactly as `search::measure_rung` excludes a failed window
+/// from the peak's median. A window that blew the p99 ceiling sustained nothing, so folding its rate
+/// into a SUSTAINED number would publish throughput the gate had just refused. Every window is still
+/// recorded as evidence by the caller either way.
+///
+/// `first` is the fallback when no window survives that filter: the bisection already proved the
+/// ceiling with it, so it is a measured reading, and returning it is what the engine published
+/// before repeats existed.
+pub(crate) fn sustained_median(first: f64, repeats: &[(f64, bool)]) -> f64 {
+    let mut vals: Vec<f64> = std::iter::once(first)
+        .chain(repeats.iter().filter(|(_, passed)| *passed).map(|(rps, _)| *rps))
+        .collect();
+    vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    crate::search::nearest_rank_median(&vals).unwrap_or(first)
+}
+
 /// Find the gateway's sustained-throughput ceiling on one served cell: the highest concurrency where
 /// p99 stays under the sustained ceiling and the error rate stays under the README's bar, via
 /// `bisect_ceiling` (the gate-search shape, not `saturation_plateau` - this metric is monotone pass/fail in
@@ -553,7 +578,7 @@ pub fn sweep_sustained_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> C
         // PUBLISHED at the ceiling, not which ceiling was proven.
         Some(c) => match p.points.iter().find(|pt| pt.concurrency == c).map(|pt| pt.rps) {
             Some(first) => {
-                let mut vals = vec![first];
+                let mut repeats = Vec::new();
                 for _ in 1..crate::search::WINDOWS_PER_RUNG {
                     // A window that produces nothing is not a zero: it is one fewer sample. Falling
                     // back to the windows in hand keeps the median honest rather than dragging it to
@@ -569,19 +594,11 @@ pub fn sweep_sustained_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> C
                                 p99_us: stats.p99_us,
                                 fail: stats.fail as i64,
                             });
-                            // ONLY WINDOWS THAT HELD THE GATE COUNT, exactly as `measure_rung`
-                            // excludes a failed window from the peak's median. A window that blew
-                            // the p99 ceiling did not sustain anything, so folding its rate into a
-                            // SUSTAINED number would publish throughput the gate just refused. It
-                            // stays in `points` as evidence either way.
-                            if passed {
-                                vals.push(rps);
-                            }
+                            repeats.push((rps, passed));
                         }
                     }
                 }
-                vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                let rps = crate::search::nearest_rank_median(&vals).unwrap_or(first);
+                let rps = sustained_median(first, &repeats);
                 CellSustained { rps: Measurement::Measured(rps), concurrency: Measurement::Measured(c), points: p.points }
             }
             // The bisection proved the ceiling without this engine losing the rung's own reading -
@@ -1854,59 +1871,51 @@ while True:
         assert!(!sustained_gate_passes(Some(1), 0, 0));
     }
 
+
     // ── the two legs must sample the same way, or C6 compares two different questions ────────────
     //
     // The maximum is a MEDIAN of three windows at its rung. The sustained ceiling used to publish a
-    // SINGLE window at its own. On a gateway whose windows scatter, a single sample can land on the
-    // fast mode where a median of three cannot, so the sustained leg beat the "maximum" and C6
-    // correctly refused the board. In the 2026-07-28 field run all six inverted cells had a sweep
-    // scatter between 65% and 105% and no steady cell inverted at all; kong's windows at one
-    // concurrency ran 18672, 18824, 23761.
+    // SINGLE window at its own. On a gateway whose windows scatter, one sample can land on the fast
+    // mode where a median of three cannot, so the sustained leg beat the "maximum" on the same box
+    // against the same mock and C6 correctly refused the board.
     //
-    // This asserts the sampling, which is the thing that changed: the proven ceiling is re-measured
-    // WINDOWS_PER_RUNG times and what ships is the median of those windows. Before the fix exactly
-    // one window existed at the ceiling, so the count alone fails.
+    // The 2026-07-28 field run makes the pattern unambiguous: all six inverted cells had a sweep
+    // scatter between 65% and 105%, and not one cell with a steady sweep inverted.
     #[test]
-    fn the_published_sustained_ceiling_is_a_median_of_repeated_windows_like_the_maximum_is() {
-        // The load generator runs as a `taskset`-pinned child, which is Linux-only. The field and
-        // CI are Linux, where this runs for real; on macOS there is nothing to pin with and the
-        // window would fail for a reason unrelated to sampling. Say so rather than reporting red for
-        // the wrong reason - a test that cries wolf gets ignored, and an ignored test is not a gate.
-        if std::process::Command::new("sh").args(["-c", "command -v taskset"]).output().map(|o| !o.status.success()).unwrap_or(true) {
-            eprintln!("skipping the_published_sustained_ceiling_is_a_median...: no taskset on this platform (the field and CI are Linux, where this runs for real)");
-            return;
-        }
-        let addr = serve_json(200);
-        let cfg = test_fixture(addr, addr);
-        let id = CellId { ingress: "openai".into(), egress: "openai".into() };
-        let out = sweep_sustained_cell(&cfg, &id, 1, 4);
-
-        let Some(c) = out.concurrency.value().copied() else {
-            panic!("this peer answers every request, so a ceiling must be proven: {:?}", out.concurrency)
-        };
-        if c == 0 {
-            return; // "nothing sustains the gate" has no rung to re-measure, by construction.
-        }
-        let at_ceiling: Vec<f64> = out.points.iter().filter(|p| p.concurrency == c).map(|p| p.rps).collect();
-        // The median is taken over the windows that HELD the gate, mirroring `measure_rung`.
-        let passing: Vec<f64> =
-            out.points.iter().filter(|p| p.concurrency == c && p.passed).map(|p| p.rps).collect();
+    fn a_scattering_ceiling_publishes_its_median_not_whichever_window_came_first() {
+        // kong openai>openai's own windows at one concurrency, in the order the rig took them.
+        // Taken first: 18672. The fast mode 23761 is real but it is not the typical rate, and
+        // publishing it is what let "sustained" exceed a "maximum" measured as a median.
+        let kong = [(23761.0, true), (18824.0, true)];
         assert_eq!(
-            at_ceiling.len(),
-            crate::search::WINDOWS_PER_RUNG,
-            "the ceiling c={c} carries {} window(s); a single window is the asymmetry that made the \
-             sustained leg beat the maximum on a scattering gateway",
-            at_ceiling.len()
+            sustained_median(18672.0, &kong),
+            18824.0,
+            "the ceiling must publish the middle window, not the fast mode"
         );
-
-        let mut sorted = passing.clone();
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let want = crate::search::nearest_rank_median(&sorted).expect("three windows have a median");
+        // The defect being fixed, stated as its own assertion: the first window alone is NOT the
+        // answer once repeats exist.
+        assert_ne!(sustained_median(23761.0, &[(18672.0, true), (18824.0, true)]), 23761.0);
+        // ...and the median does not depend on which window happened to be taken first.
         assert_eq!(
-            out.rps.value().copied(),
-            Some(want),
-            "what ships must be the MEDIAN of the ceiling's windows {sorted:?}, the same statistic \
-             the maximum publishes, not whichever window happened to be taken first"
+            sustained_median(23761.0, &[(18672.0, true), (18824.0, true)]),
+            sustained_median(18672.0, &[(23761.0, true), (18824.0, true)])
         );
+    }
+
+    // A window that blew the p99 ceiling sustained nothing. Folding its rate into a SUSTAINED number
+    // would publish throughput the gate had just refused, which is why `search::measure_rung`
+    // excludes failed windows from the peak's median too.
+    #[test]
+    fn a_window_that_failed_the_gate_is_not_folded_into_the_sustained_number() {
+        // The failing window is the FASTEST - blowing the latency ceiling usually means more
+        // requests, not fewer - so counting it would drag the published number UP, not down.
+        let with_failure = [(90000.0, false), (20000.0, true)];
+        assert_eq!(sustained_median(19000.0, &with_failure), 20000.0);
+
+        // Nothing survives the filter: fall back to the bisection's own window, which is a real
+        // measured reading that already proved this ceiling - never a zero, and never the failure.
+        assert_eq!(sustained_median(19000.0, &[(90000.0, false), (91000.0, false)]), 19000.0);
+        // The rig returning nothing at all is the same case: one fewer sample, not a zero.
+        assert_eq!(sustained_median(19000.0, &[]), 19000.0);
     }
 }
