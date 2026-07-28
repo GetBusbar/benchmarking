@@ -1,0 +1,39 @@
+# Why each declared setting exists. One claim per setting; the config lint fails on any setting that
+# is declared and not claimed here.
+
+port 10000
+  Plano's own example LLM listener port (config/test_passthrough.yaml). Nothing in this harness
+  depends on the number; it is Plano's default rather than one we chose.
+
+path /v1/chat/completions
+  The OpenAI ingress route the crate serves (70 references in crates/, against 14 for /v1/messages).
+
+auth dummy
+  Plano requires access_key on a model_provider that is not passthrough_auth. The mock accepts any
+  credential, so this is a placeholder that satisfies Plano's own validation, not a secret.
+
+launch.args: up /etc/plano/config.yaml
+  Plano's documented start command is `planoai up <config>`; the image's entrypoint takes the same
+  subcommand.
+
+mount conf -> /etc/plano (read-only)
+  Plano reads one config file. Read-only because the gateway has no reason to write to it, and a
+  writable mount would let a run mutate the input the next run reads.
+
+listeners[].type: model
+  Selects the LLM gateway listener rather than the agent-orchestration listener. Measuring the agent
+  listener would put Plano's router and an agent hop inside a number every other entrant reports
+  without one.
+
+model_providers[].base_url
+  Points every upstream at the harness mock. This is the setting that makes Plano measurable here at
+  all; without it the cells would be untestable, as they are for the entrants that pin the vendor host.
+
+model_providers[].provider_interface
+  Selects the egress dialect per upstream (openai / claude / gemini). This is what the egress axis of
+  the matrix is measuring, so it has to be stated per provider rather than inferred from the model
+  name.
+
+tracing.random_sampling: 0
+  Tracing off. It is observability work the other entrants are not doing in their measured path, and
+  Plano's default of 100 would sample every request on the hot path.

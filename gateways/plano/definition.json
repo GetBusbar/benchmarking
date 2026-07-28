@@ -1,0 +1,57 @@
+{
+  "auth": "dummy",
+  "class": "AI proxy / data plane",
+  "config": [],
+  "config_files": [
+    {
+      "output": "conf/config.yaml",
+      "template": "conf/config.yaml.tmpl"
+    }
+  ],
+  "constants": {},
+  "display": "Plano",
+  "egress": [
+    "openai",
+    "anthropic",
+    "gemini"
+  ],
+  "egress_models": {
+    "anthropic": "anthropic/claude-3-5-sonnet",
+    "gemini": "gemini/gemini-1.5-pro",
+    "openai": "openai/gpt-4o-mini"
+  },
+  "lang": "Rust",
+  "launch": {
+    "args": [
+      "up",
+      "/etc/plano/config.yaml"
+    ],
+    "image": "katanemo/plano:0.4.29",
+    "kind": "docker",
+    "mounts": [
+      {
+        "container_path": "/etc/plano",
+        "host_path": "conf",
+        "read_only": true
+      }
+    ]
+  },
+  "matrix": [
+    "101100",
+    "000000",
+    "101100",
+    "000000",
+    "000000",
+    "000000"
+  ],
+  "matrix_note": "Plano 0.4.29 serves /v1/chat/completions and /v1/messages, and routes upstream through provider_interface, whose enum covers openai, claude and gemini but has no cohere or bedrock member (config/plano_config_schema.yaml). Its /v1/responses ingress is declared undeclared here rather than probed: the route exists in the crate but this harness has not established that a Responses request survives the model_providers hop, and a cell claimed on a route we have not shown to work would publish a red the project has not earned.",
+  "model": "gpt-4o-mini",
+  "name": "plano",
+  "path": "/v1/chat/completions",
+  "port": 10000,
+  "repo": "https://github.com/katanemo/plano",
+  "runtime": {
+    "container": "plano-bench",
+    "kind": "docker"
+  }
+}

@@ -114,6 +114,7 @@ fn rig_ceiling(cfg: &SuiteConfig, dialect: Dialect, at_conc: u32) -> Measurement
         // The reference drives the MOCK directly. There is no gateway process behind it, so there is
         // nothing to restart, and a spec here would let a reference measurement bounce the gateway.
         relaunch: None,
+        relaunch_launcher: Default::default(),
         // The reference drives the MOCK, which serves every dialect at its standard path. A
         // gateway's prefix must not follow it here or the reference would probe a path the mock
         // does not have and the ceiling would read as unmeasurable.
@@ -725,6 +726,7 @@ fn qualify_box(cfg: &SuiteConfig, history: &[f64]) -> serde_json::Value {
         // The reference drives the MOCK directly. There is no gateway process behind it, so there is
         // nothing to restart, and a spec here would let a reference measurement bounce the gateway.
         relaunch: None,
+        relaunch_launcher: Default::default(),
         // The reference drives the MOCK, which serves every dialect at its standard path. A
         // gateway's prefix must not follow it here or the reference would probe a path the mock
         // does not have and the ceiling would read as unmeasurable.
@@ -822,6 +824,10 @@ pub fn run_suite_with(
                 Duration::from_secs(2),
             )
             .and_then(|r| r.ok()),
+        // The launcher `restart_to_rest` reuses across every cell this run measures, so a native
+        // child it spawns is still reachable - and reapable - the next time this same gateway is
+        // put back at rest.
+        relaunch_launcher: Default::default(),
         // The gateway's own headers, resolved once for the run. A column whose headers cannot be
         // resolved gets NONE rather than a partial set: sending half a routing header selects the
         // wrong upstream and publishes a number for a pairing that was never driven.

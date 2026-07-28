@@ -179,6 +179,7 @@ fn main() -> ExitCode {
                 untestable_cells: Vec::new(),
                 untestable_note: String::new(),
                 relaunch: None,
+                relaunch_launcher: Default::default(),
             };
             println!("mock healthy: {}", otb_engine::run::mock_healthy(&cfg));
             for r in run_grid(&cfg, 4, 64) {
