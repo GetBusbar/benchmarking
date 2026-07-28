@@ -25,7 +25,15 @@ on:
       - "charts.py"
       - "charts_test.py"
       - "mock/**"
+      - "gateways/**"
+      - "lib/**"
+      - "run-on-ec2.sh"
       - ".github/workflows/bench-tests.yml"
+  pull_request:
+    paths:
+      - "gateways/**"
+      - "lib/**"
+      - "run-on-ec2.sh"
   workflow_dispatch:
 
 permissions:
@@ -70,6 +78,19 @@ jobs:
       # matplotlib needed (render() is not exercised).
       - name: Charts validity-gate test (streamcpu/sustained/TTFT gates + top-N ranking)
         run: python3 charts_test.py
+
+  rig-delivery:
+    # The launcher's file fetch had no gate, and its one defect cost a full 14-box run: a raw download
+    # writes whatever the umask says, so build.sh arrived non-executable and all three source-built
+    # entrants died at their build step while the eleven container entrants ran fine. The test that
+    # reproduces it was written the same day and then never ran anywhere - this workflow's paths
+    # covered engine/ and mock/ but not lib/ or run-on-ec2.sh, so the guard sat in the tree as
+    # decoration. A test nothing executes is worse than no test: it reads as covered.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: The fetch lands files with the mode the commit recorded
+        run: bash lib/fetch_modes_test.sh
 
   mock-shape:
     # The mock must never bottleneck and must serve every dialect identically; its per-dialect

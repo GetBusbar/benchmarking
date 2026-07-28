@@ -12,13 +12,15 @@
   "display": "Plano",
   "egress": [
     "openai",
+    "openai-responses",
     "anthropic",
     "gemini"
   ],
   "egress_models": {
     "anthropic": "anthropic/claude-3-5-sonnet",
     "gemini": "gemini/gemini-1.5-pro",
-    "openai": "openai/gpt-4o-mini"
+    "openai": "openai/gpt-4o-mini",
+    "openai-responses": "openai/gpt-4o-mini"
   },
   "lang": "Rust",
   "launch": {
@@ -34,18 +36,18 @@
     ]
   },
   "matrix": [
-    "101100",
-    "000000",
-    "101100",
+    "100000",
+    "010000",
+    "001000",
     "000000",
     "000000",
     "000000"
   ],
-  "matrix_note": "Plano 0.4.29 serves /v1/chat/completions and /v1/messages, and routes upstream through provider_interface, whose enum covers openai, claude and gemini but has no cohere or bedrock member (config/plano_config_schema.yaml). Its /v1/responses ingress is declared undeclared here rather than probed: the route exists in the crate but this harness has not established that a Responses request survives the model_providers hop, and a cell claimed on a route we have not shown to work would publish a red the project has not earned.",
+  "matrix_note": "Plano 0.4.29 ROUTES by model prefix but does not TRANSLATE between dialects, so only the pass-through diagonal is claimed. Measured against a recording upstream on 2026-07-28: an openai-shaped request naming an anthropic/ model leaves Plano as POST /v1/chat/completions, not Anthropic's POST /v1/messages - it reaches the anthropic cluster (access log: anthropic_127.0.0.1) still in the OpenAI shape. /v1/messages in leaves as /v1/messages, and /v1/responses in leaves as /v1/responses. The cross-dialect cells are therefore recorded undeclared: this harness infers the upstream dialect from the request path, so an openai>anthropic cell would have been scored served on a request Plano never translated, publishing a green Plano did not earn. Gemini is undeclared for the same reason in reverse: Plano rewrites it to /v1beta/openai/chat/completions, Gemini's OpenAI-compatible surface, rather than the native generateContent API. Note that config/plano_config_schema.yaml lists 'claude' as a provider_interface value while the data plane rejects it and accepts 'anthropic' - the shipped schema is stale, so this matrix follows the probe, not the schema.",
   "model": "gpt-4o-mini",
   "name": "plano",
   "path": "/v1/chat/completions",
-  "port": 10000,
+  "port": 12000,
   "repo": "https://github.com/katanemo/plano",
   "runtime": {
     "container": "plano-bench",
