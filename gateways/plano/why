@@ -49,3 +49,35 @@ PLANO_CONFIG_FILE=/etc/plano/config.yaml
   "positional arguments are not supported: ['up', '/etc/plano/config.yaml']". Its config generator
   reads this variable (cli/planoai/config_generator.py:205) and defaults to /app/plano_config.yaml,
   a path our read-only mount deliberately does not occupy.
+
+KNOWN, UNRESOLVED: Plano dies after the first cell, and this harness cannot yet say why.
+  In both field runs of 2026-07-28 (engines dd26a54 and 8f2af5d) Plano served openai>openai
+  completely - every metric, including the memory phase's cold restart, 66s of load at c=32 and the
+  60s idle after it - and then the next two cells recorded "no connection to the gateway: Connection
+  refused (os error 111)". The same shape twice, so it reproduces; the process is simply gone by the
+  time the second cell is probed.
+
+  What has been ruled out, each by measurement rather than by argument:
+    - load, on its own: 1280 requests at c=32 locally left the container up and serving.
+    - a slow restart: a cold start to first 200 is 6 seconds, well inside the readiness budget.
+    - a container-name collision on relaunch: the harness's stop path is `docker rm -f`, so the
+      name is free before the next launch.
+    - a container memory cap: none is set; the box has 64 GB and Plano's steady state is ~1 GB.
+
+  The likely mechanism, unproven: Plano's supervisord tears the whole container down when any
+  managed child exits - observed directly when config generation failed earlier, where a single
+  child's exit took envoy and brightstaff with it. If envoy or brightstaff dies under the streaming
+  phases, the container exits and nothing inside it restarts. That is consistent with everything
+  above but has not been caught in the act.
+
+  What the harness does about it now, which is a floor and not a fix: a probe that finds the
+  connection refused is retried across the transient budget, and if it is still refused the grid
+  restarts the gateway once before writing off the remaining cells (run.rs). So one death costs the
+  cells it actually broke rather than every pairing measured after it. If Plano still lands
+  partial, the published cells are honest and the absent ones carry the refusal as their reason -
+  a gateway that stopped answering is recorded as exactly that, not as a gateway that cannot serve
+  the pairing.
+
+  This is deliberately NOT worked around by narrowing Plano's declared matrix. Declaring fewer cells
+  to avoid a crash would publish "Plano does not do this" when what happened is "Plano stopped
+  running", and those are different claims about someone else's software.
