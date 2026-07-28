@@ -242,9 +242,19 @@ ARCH="${ARCH:-arm64}"
 # scripts/check-engine.sh refuses a board whose snapshots disagree.
 #
 # A DIRTY TREE IS RECORDED AS DIRTY. Uncommitted edits mean the commit does not identify what ran, so
-# the run is marked non-reproducible rather than being filed under a commit it does not match.
+# the run is marked non-reproducible rather than being filed under a commit it does not match. The
+# site's C8 check refuses to publish a dirty run, which is right: nobody can reproduce it.
+#
+# results/ IS EXCLUDED, because it holds this run's own OUTPUT. A whole field run was stamped dirty -
+# and correctly refused by C8 - because the operator had created results/runlog-<stamp>/ to record
+# the run's provenance before launching it. The directory that existed to make the run reproducible
+# was the thing that marked it irreproducible. Run artefacts cannot change what the engine does, so
+# they cannot make a commit stop identifying it.
+#
+# Everything else still counts, including UNTRACKED files: a new gateways/<name>/ directory is
+# untracked and absolutely does change what runs.
 BENCH_ENGINE_COMMIT="$(git -C "$HERE" rev-parse HEAD 2>/dev/null || echo '')"
-if [ -n "$(git -C "$HERE" status --porcelain 2>/dev/null)" ]; then BENCH_ENGINE_DIRTY=1; else BENCH_ENGINE_DIRTY=0; fi
+if [ -n "$(git -C "$HERE" status --porcelain -- . ':(exclude)results' 2>/dev/null)" ]; then BENCH_ENGINE_DIRTY=1; else BENCH_ENGINE_DIRTY=0; fi
 export BENCH_ENGINE_COMMIT BENCH_ENGINE_DIRTY
 
 case "$ARCH" in

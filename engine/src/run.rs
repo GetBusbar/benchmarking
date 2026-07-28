@@ -720,7 +720,6 @@ pub fn stream_window(
     concurrency: u32,
 ) -> Option<StreamWindow> {
     let budget = crate::metric::STREAM_FRAME_BUDGET;
-    let started = std::time::Instant::now();
     let mut lanes = Vec::with_capacity(concurrency as usize);
     for _ in 0..concurrency {
         let path = path.to_string();
@@ -751,6 +750,11 @@ pub fn stream_window(
         }
     }
 
+    // Timer starts once every lane exists, exactly as `gen.rs::run` starts its own clock only after
+    // every task is spawned: the ramp of serially creating `concurrency` OS threads must not land in
+    // the denominator, or fps() is depressed hardest at exactly the high rungs the search is climbing
+    // toward.
+    let started = std::time::Instant::now();
     let mut w = StreamWindow {
         concurrency,
         streams: 0,
@@ -1759,6 +1763,23 @@ while True:
         assert_eq!(w.frames, 2 * short as u64);
         assert!(w.delivery_ratio() < STREAM_MIN_DELIVERY_RATIO);
         assert!(!streams_gate_passes(&w));
+    }
+
+    // The window's clock must not charge the caller for serially spawning lanes: a peer that answers
+    // instantly (no pacing gap at all) should report an elapsed_s close to zero, not one inflated by
+    // the cost of creating hundreds of OS threads one at a time before the first byte is even asked
+    // for.
+    #[test]
+    fn spawning_many_lanes_does_not_inflate_the_reported_elapsed_time() {
+        let concurrency = 200;
+        let sse = serve_sse(crate::metric::STREAM_FRAME_BUDGET, 0);
+        let w = stream_window(sse, "/v1/chat/completions", "{}", &[], concurrency)
+            .expect("a fleet of instant-answering lanes must produce a window");
+        assert_eq!(w.streams, concurrency as u64);
+        assert!(
+            w.elapsed_s < 0.25,
+            "an instant peer must not leave the spawn ramp for {concurrency} lanes in the window: {w:?}"
+        );
     }
 
     // The gateway leg's own frames/sec is meaningless without a reference, and the reference must be
