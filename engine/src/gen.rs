@@ -72,6 +72,10 @@ pub struct GenStats {
     /// Counted separately so a window that ran out of rig can be recognised as one. EMFILE/ENFILE
     /// (out of file descriptors) are the same class and counted here too.
     pub rig_refused: u64,
+    /// Requests that exhausted `RESPONSE_BUDGET`, a bound of OURS. Also counted in `fail`, because a
+    /// caller waiting thirty seconds got nothing - but separable, so a window failing for our reason
+    /// cannot look identical to one failing for the gateway's.
+    pub budget_exceeded: u64,
     /// Every successful request's latency, microseconds. Percentiles are computed from this rather
     /// than from a running estimate: an approximate p99 is the one number nobody can check later.
     pub latencies_us: Vec<u64>,
@@ -125,7 +129,7 @@ impl GenStats {
         let p50 = Self::pct_of(&sorted, 0.50);
         let p99 = Self::pct_of(&sorted, 0.99);
         format!(
-            "rps={} fail={} p50={:.2} p99={:.2} p50us={} p99us={} ok={} rigrefused={}",
+            "rps={} fail={} p50={:.2} p99={:.2} p50us={} p99us={} ok={} rigrefused={} budgetexceeded={}",
             self.rps(),
             self.fail,
             p50 as f64 / 1000.0,
@@ -137,7 +141,8 @@ impl GenStats {
             // line is everything the parent learns from it, so a count that stops here would leave
             // the parent unable to tell its own port exhaustion from the gateway refusing - which is
             // the whole reason the count exists.
-            self.rig_refused
+            self.rig_refused,
+            self.budget_exceeded
         )
     }
 }
@@ -152,13 +157,16 @@ struct WorkerStats {
     /// Connections this HOST could not make (ephemeral ports or descriptors exhausted), as opposed
     /// to requests the gateway refused. See `GenStats::rig_refused`.
     rig_refused: u64,
+    /// Requests that ran out of `RESPONSE_BUDGET`. Counted as failures AND counted here, so a
+    /// window whose failures are really our timeout can be recognised as one.
+    budget_exceeded: u64,
     lat: Vec<u64>,
 }
 
 /// One connection-holder's request loop. Opens a connection and reuses it, reconnecting on failure,
 /// because a fresh TCP handshake per request would measure the kernel rather than the gateway.
 async fn worker(addr: SocketAddr, req: Arc<String>, stop: Arc<AtomicBool>) -> WorkerStats {
-    let mut w = WorkerStats { ok: 0, fail: 0, rig_refused: 0, lat: Vec::with_capacity(1024) };
+    let mut w = WorkerStats { ok: 0, fail: 0, rig_refused: 0, budget_exceeded: 0, lat: Vec::with_capacity(1024) };
     let mut conn: Option<TcpStream> = None;
     // ALLOCATED ONCE, reused across every request this task sends: a fresh Vec per response would
     // put an allocator call in the timed hot path of every exchange, for a task that runs for the
@@ -235,6 +243,13 @@ async fn worker(addr: SocketAddr, req: Arc<String>, stop: Arc<AtomicBool>) -> Wo
             Exchange::ClosedBeforeAnyBytes if !fresh => {
                 conn = None;
             }
+            // Out of budget is a failure the caller would have felt, and also a bound of ours, so it
+            // is counted in both places rather than hidden in one.
+            Exchange::BudgetExceeded => {
+                w.fail += 1;
+                w.budget_exceeded += 1;
+                conn = None;
+            }
             // The same thing on a connection opened moments ago is the target refusing to answer.
             Exchange::ClosedBeforeAnyBytes | Exchange::Failed => {
                 w.fail += 1;
@@ -278,8 +293,18 @@ enum Exchange {
     /// stale connection - the peer closed an idle one - not a failed request, because the request
     /// never reached a server that was listening. On a FRESH connection it is a real failure.
     ClosedBeforeAnyBytes,
-    /// A genuine failure: a non-2xx, a malformed head, a truncated body, a timeout.
+    /// A genuine failure: a non-2xx, a malformed head, a truncated body.
     Failed,
+    /// The request did not complete inside `RESPONSE_BUDGET`.
+    ///
+    /// STILL A FAILURE - a gateway that cannot answer one request in thirty seconds has failed any
+    /// caller that was waiting - but a failure whose bound is OURS, and the artifact has to be able
+    /// to say so. Every other rig limit that ever bound was invisible for exactly this reason: it
+    /// landed in the same counter as a genuine refusal and nothing downstream could separate them.
+    /// The budget is roughly a thousand times the slowest gateway this field has measured, so this
+    /// should never fire; "should never fire" is what was true of the ephemeral port range until it
+    /// did.
+    BudgetExceeded,
 }
 
 /// Whether the peer announced it will close after this response.
@@ -357,7 +382,7 @@ async fn read_response(s: &mut TcpStream, deadline: Instant, acc: &mut Vec<u8>) 
         // deadline-minus-a-moment, then the read blocks for its own full timeout.
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            return Exchange::Failed;
+            return Exchange::BudgetExceeded;
         }
         let n = match tokio::time::timeout(remaining, s.read(&mut buf)).await {
             // Nothing arrived at all. The caller decides what that means: on a reused connection it
@@ -468,6 +493,7 @@ pub fn run(cfg: &GenConfig) -> GenStats {
                     g.ok += w.ok;
                     g.fail += w.fail;
                     g.rig_refused += w.rig_refused;
+                    g.budget_exceeded += w.budget_exceeded;
                     g.latencies_us.extend_from_slice(&w.lat);
                 }
                 // A task that panicked is a HARNESS fault, and its requests are gone. Say so on
@@ -498,6 +524,7 @@ mod tests {
             latencies_us: lat.to_vec(),
             spawn_failed: false,
             rig_refused: 0,
+            budget_exceeded: 0,
             p50_us: None,
             p99_us: None,
         }
@@ -849,5 +876,45 @@ mod tests {
         // spawning and joining the holders dwarfed the window itself. A generous bound: this is a
         // regression guard against collapse, not a performance assertion.
         assert!(wall < Duration::from_secs(20), "a 500ms window at c=2048 took {wall:?}; the holders are not cheap");
+    }
+
+    // A RIG LIMIT MUST NEVER BE INDISTINGUISHABLE FROM A GATEWAY FAILURE.
+    //
+    // Both of these used to land in `fail` beside a genuine refusal, where nothing downstream could
+    // separate them - which is how the search came to publish this host's ephemeral port range as a
+    // gateway's ceiling. They are counted apart now, and the stats line carries them across the
+    // subprocess boundary because that line is everything the parent learns from the child.
+    #[test]
+    fn the_stats_line_carries_our_own_limits_apart_from_the_gateways_failures() {
+        let g = GenStats {
+            ok: 100,
+            fail: 7,
+            elapsed_s: 1.0,
+            spawn_failed: false,
+            rig_refused: 3,
+            budget_exceeded: 2,
+            latencies_us: vec![1000, 2000, 3000],
+            p50_us: None,
+            p99_us: None,
+        };
+        let line = g.stats_line();
+        assert!(line.contains("rigrefused=3"), "our port/descriptor exhaustion must cross the wire: {line}");
+        assert!(line.contains("budgetexceeded=2"), "our response budget must cross the wire: {line}");
+        assert!(line.contains("fail=7"), "and the gateway's own failure count is unchanged: {line}");
+
+        // The parent reads them back.
+        let parsed = crate::loadgen::parse_ugen_line(&line).into_value().expect("a line this generator wrote must parse");
+        assert_eq!(parsed.rig_refused, 3);
+        assert_eq!(parsed.budget_exceeded, 2);
+        assert_eq!(parsed.fail, 7);
+
+        // A line from an older generator has neither field and must still parse: absent means "not
+        // reported", which is not the same as "did not happen", and refusing an otherwise complete
+        // line would turn a cosmetic version skew into a lost measurement.
+        let old = "rps=1000 fail=1 p50=1.00 p99=2.00 p50us=1000 p99us=2000 ok=999";
+        let legacy = crate::loadgen::parse_ugen_line(old).into_value().expect("an older line must still parse");
+        assert_eq!(legacy.rig_refused, 0);
+        assert_eq!(legacy.budget_exceeded, 0);
+        assert_eq!(legacy.ok, 999);
     }
 }

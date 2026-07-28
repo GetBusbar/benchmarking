@@ -338,6 +338,23 @@ impl Probe for SweepProbe<'_> {
             eprintln!("loadgen: could not reach c={concurrency}; the rig refused a thread");
             return None;
         }
+        // THE RIG RUNNING OUT IS NOT A GATEWAY RESULT, and it is the same class of fact
+        // `spawn_failed` already models: the window never ran at the concurrency it claims, so
+        // nothing about the gateway was learned at any concurrency we could name.
+        //
+        // These are connections THIS HOST could not make - ephemeral ports or descriptors exhausted
+        // (EADDRNOTAVAIL/EMFILE). They used to land in `fail` beside a genuine refusal, so the gate
+        // failed and the search recorded our own port range as the gateway's ceiling. Counting them
+        // separately was only half the fix: a window containing any of them still failed, and still
+        // failed for our reason. It is unmeasured instead.
+        if stats.rig_refused > 0 {
+            eprintln!(
+                "loadgen: could not reach c={concurrency}; this host refused {} of its own connections \
+                 (ephemeral ports or descriptors exhausted) - the window never ran at that concurrency",
+                stats.rig_refused
+            );
+            return None;
+        }
         // A window that produced nothing is UNMEASURED, not a zero.
         if stats.ok == 0 && stats.fail == 0 {
             return None;
@@ -448,6 +465,7 @@ pub fn load_window_at(
             latencies_us: Vec::new(),
             spawn_failed: false,
             rig_refused: u.rig_refused.max(0) as u64,
+            budget_exceeded: u.budget_exceeded.max(0) as u64,
             // The subprocess never sends its raw samples back, only the percentiles it already
             // computed over them, so these are filled straight from the stats line rather than left
             // for a caller to (wrongly) derive from the now-empty `latencies_us` above.
@@ -616,6 +634,23 @@ impl Probe for SustainedProbe<'_> {
         // never ran at the requested concurrency, so nothing about the gateway was learned.
         if stats.spawn_failed {
             eprintln!("loadgen: could not reach c={concurrency}; the rig refused a thread");
+            return None;
+        }
+        // THE RIG RUNNING OUT IS NOT A GATEWAY RESULT, and it is the same class of fact
+        // `spawn_failed` already models: the window never ran at the concurrency it claims, so
+        // nothing about the gateway was learned at any concurrency we could name.
+        //
+        // These are connections THIS HOST could not make - ephemeral ports or descriptors exhausted
+        // (EADDRNOTAVAIL/EMFILE). They used to land in `fail` beside a genuine refusal, so the gate
+        // failed and the search recorded our own port range as the gateway's ceiling. Counting them
+        // separately was only half the fix: a window containing any of them still failed, and still
+        // failed for our reason. It is unmeasured instead.
+        if stats.rig_refused > 0 {
+            eprintln!(
+                "loadgen: could not reach c={concurrency}; this host refused {} of its own connections \
+                 (ephemeral ports or descriptors exhausted) - the window never ran at that concurrency",
+                stats.rig_refused
+            );
             return None;
         }
         // A window that produced nothing is UNMEASURED, not a failing rung.

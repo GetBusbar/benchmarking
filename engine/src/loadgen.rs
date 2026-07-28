@@ -39,6 +39,9 @@ pub struct UgenStats {
     /// simply has no such count, and defaulting to 0 is right - it means "none reported", not "none
     /// happened", and the alternative is refusing to parse a line that is otherwise complete.
     pub rig_refused: i64,
+    /// Requests that exhausted the generator's response budget. Optional on the wire for the same
+    /// reason as `rig_refused`.
+    pub budget_exceeded: i64,
 }
 
 fn parse_ugen_fields(line: &str) -> Result<UgenStats, String> {
@@ -50,6 +53,7 @@ fn parse_ugen_fields(line: &str) -> Result<UgenStats, String> {
         p99_us: require_i64(&fields, "p99us", line)?,
         ok: require_i64(&fields, "ok", line)?,
         rig_refused: fields.get("rigrefused").and_then(|v| v.parse::<i64>().ok()).unwrap_or(0),
+        budget_exceeded: fields.get("budgetexceeded").and_then(|v| v.parse::<i64>().ok()).unwrap_or(0),
     })
 }
 
@@ -119,7 +123,7 @@ mod tests {
         let m = parse_ugen_line(UGEN_LINE);
         assert_eq!(
             m,
-            Measurement::Measured(UgenStats { rps: 1234, fail: 3, p50_us: 12_500, p99_us: 45_000, ok: 14_808, rig_refused: 0 })
+            Measurement::Measured(UgenStats { rps: 1234, fail: 3, p50_us: 12_500, p99_us: 45_000, ok: 14_808, rig_refused: 0, budget_exceeded: 0 })
         );
     }
 
