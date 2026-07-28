@@ -12,13 +12,18 @@ auth dummy
   Plano requires access_key on a model_provider that is not passthrough_auth. The mock accepts any
   credential, so this is a placeholder that satisfies Plano's own validation, not a secret.
 
-launch.args: up /etc/plano/config.yaml
-  Plano's documented start command is `planoai up <config>`; the image's entrypoint takes the same
-  subcommand.
+launch.args: none
+  The image's ENTRYPOINT is supervisord (Dockerfile), which accepts no positional arguments.
+  `planoai up <config>` is the CLI's interface, not the container's - passing it made the container
+  refuse to start with "positional arguments are not supported". Nothing needs to be passed: the
+  config is mounted where the image already looks for it.
 
-mount conf -> /etc/plano (read-only)
-  Plano reads one config file. Read-only because the gateway has no reason to write to it, and a
-  writable mount would let a run mutate the input the next run reads.
+mount conf/config.yaml -> /app/plano_config.yaml (read-only)
+  The path the image's config generator reads by default (cli/planoai/config_generator.py:205), so
+  Plano is launched the same way as the other file-configured entrants - kong mounts one file to
+  /kong/kong.yml, apisix two into its conf dir - rather than through an environment variable only
+  this gateway would use. Read-only because the gateway has no reason to write to it, and a writable
+  mount would let a run mutate the input the next run reads.
 
 listeners[].type: model
   Selects the LLM gateway listener rather than the agent-orchestration listener. Measuring the agent
@@ -37,3 +42,10 @@ model_providers[].provider_interface
 tracing.random_sampling: 0
   Tracing off. It is observability work the other entrants are not doing in their measured path, and
   Plano's default of 100 would sample every request on the hot path.
+
+PLANO_CONFIG_FILE=/etc/plano/config.yaml
+  boot. The image's entrypoint is supervisord, which accepts no arguments, so the config path cannot
+  be passed on the command line - the first attempt did and the container refused to start with
+  "positional arguments are not supported: ['up', '/etc/plano/config.yaml']". Its config generator
+  reads this variable (cli/planoai/config_generator.py:205) and defaults to /app/plano_config.yaml,
+  a path our read-only mount deliberately does not occupy.

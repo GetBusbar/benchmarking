@@ -22,16 +22,13 @@
   },
   "lang": "Rust",
   "launch": {
-    "args": [
-      "up",
-      "/etc/plano/config.yaml"
-    ],
+    "args": [],
     "image": "katanemo/plano:0.4.29",
     "kind": "docker",
     "mounts": [
       {
-        "container_path": "/etc/plano",
-        "host_path": "conf",
+        "container_path": "/app/plano_config.yaml",
+        "host_path": "conf/config.yaml",
         "read_only": true
       }
     ]
