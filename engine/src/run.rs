@@ -136,7 +136,7 @@ pub(crate) fn headers_for(cfg: &RunConfig, ingress: Dialect, egress: &str) -> Ve
 /// a real status with a healthy rig is the gateway's own answer, no HTTP answer at all is not.
 pub fn probe_cell(cfg: &RunConfig, id: &CellId, mock_healthy: bool) -> Served {
     let (attempts, pause_s) = crate::probe::transient_budget();
-    let mut last = probe_cell_once(cfg, id, mock_healthy);
+    let (mut last, mut retryable) = probe_cell_once(cfg, id, mock_healthy);
     // SPEND THE BUDGET THE VERDICT CLAIMS TO HAVE SPENT.
     //
     // `Verdict::Failed` is documented as "the failure persisted across the whole budget", and
@@ -154,31 +154,45 @@ pub fn probe_cell(cfg: &RunConfig, id: &CellId, mock_healthy: bool) -> Served {
     // Every cell gets the same attempts and the same pause - the budget takes no arguments for that
     // reason - so no cell can be tried harder than another.
     for attempt in 1..attempts {
-        let Served::No(crate::probe::Verdict::Failed, ref ev) = last else { break };
-        if !crate::probe::status_is_transient(ev.status) {
-            break;
-        }
+        let Some(why) = retryable.clone() else { break };
         eprintln!(
-            "[probe] {id}: HTTP {} is transient - retry {attempt}/{} after {pause_s}s rather than \
-             recording a moment as a capability",
-            ev.status,
+            "[probe] {id}: {why} - retry {attempt}/{} after {pause_s}s rather than recording a \
+             moment as a capability",
             attempts - 1
         );
         std::thread::sleep(Duration::from_secs(u64::from(pause_s)));
-        last = probe_cell_once(cfg, id, mock_healthy);
+        let (next, next_retryable) = probe_cell_once(cfg, id, mock_healthy);
+        last = next;
+        retryable = next_retryable;
     }
     last
 }
 
-/// One probe attempt. The verdict rules live here; `probe_cell` decides how many times to ask.
-fn probe_cell_once(cfg: &RunConfig, id: &CellId, mock_healthy: bool) -> Served {
+/// One probe attempt: the verdict, and WHY it is worth asking again, if it is.
+///
+/// The second half is what `probe_cell` spends the budget on. Two kinds of answer deserve another
+/// ask, and they arrive through different doors:
+///
+///   - a transient STATUS (503 and friends), which is the gateway saying "not right now"
+///   - a transient TRANSPORT failure (no answer at all, or a refused connection), which is the
+///     gateway not saying anything right now
+///
+/// Both are moments. The harness manufactures both: cells run back to back with no settle and the
+/// metric before each probe is a heavy load, so the next cell asks its question of a gateway still
+/// shedding. busbar lost 26 cells to the first door in the 2026-07-28 field run and litellm-python
+/// lost three to the second, its served count sliding 8 -> 7 -> 5 across the day's runs while the
+/// cells it lost were recorded "the gateway accepted the connection and never answered".
+///
+/// A malformed response and an unknown dialect are NOT retryable: the first is a real answer the
+/// gateway keeps giving, the second is our own manifest and no amount of asking changes it.
+fn probe_cell_once(cfg: &RunConfig, id: &CellId, mock_healthy: bool) -> (Served, Option<String>) {
     let Ok(ing) = id.ingress.parse::<Dialect>() else {
-        return Served::Untestable(format!("unknown ingress dialect {}", id.ingress));
+        return (Served::Untestable(format!("unknown ingress dialect {}", id.ingress)), None);
     };
     let path = path_for(cfg, ing, &id.egress);
     let body = ing.body(&model_for(cfg, &id.egress));
     match http::post_json(cfg.gateway_addr, &path, body.as_bytes(), &headers_for(cfg, ing, &id.egress), cfg.probe_timeout) {
-        Outcome::Response(r) if (200..300).contains(&r.status) => Served::Yes,
+        Outcome::Response(r) if (200..300).contains(&r.status) => (Served::Yes, None),
         Outcome::Response(r) => {
             // WHAT IT ACTUALLY SAID. Without this a declined cell is a bare verdict, and a whole
             // field answering 4xx for one rig-side reason reads as every gateway supporting nothing.
@@ -191,7 +205,7 @@ fn probe_cell_once(cfg: &RunConfig, id: &CellId, mock_healthy: bool) -> Served {
             // is a pure function of the observed status and must stay one - this needs the dialect,
             // which is a property of our own instrument, not of the gateway.
             if ing.auth_is_unforgeable_by_the_rig() && matches!(r.status, 401 | 403) {
-                return Served::UnprobedAuth(evidence);
+                return (Served::UnprobedAuth(evidence), None);
             }
             // The verdict decides which of the three this is, and they are NOT interchangeable.
             // NotConfigured is the gateway's own answer that the pairing does not exist. Failed is
@@ -199,19 +213,37 @@ fn probe_cell_once(cfg: &RunConfig, id: &CellId, mock_healthy: bool) -> Served {
             // is otherwise real. NotVerified means the rig could not get a fair reading, so nothing
             // was learned about the gateway, and recording it as "does not serve" would convict on
             // the rig's failure.
+            let retry = crate::probe::status_is_transient(r.status)
+                .then(|| format!("HTTP {} is transient", r.status));
             match persistent_transient_verdict(Observation { status: Some(r.status), mock_healthy }) {
-                v @ (Verdict::NotConfigured | Verdict::Failed) => Served::No(v, evidence),
-                Verdict::NotVerified => Served::Untestable(format!(
-                    "status {} observed, but the rig could not confirm itself, so this says nothing about the gateway",
-                    r.status
-                )),
+                v @ (Verdict::NotConfigured | Verdict::Failed) => {
+                    // Only a Failed verdict is worth another ask: NotConfigured is the gateway
+                    // stating the route does not exist, which asking again cannot change.
+                    let retry = if v == Verdict::Failed { retry } else { None };
+                    (Served::No(v, evidence), retry)
+                }
+                Verdict::NotVerified => (
+                    Served::Untestable(format!(
+                        "status {} observed, but the rig could not confirm itself, so this says nothing about the gateway",
+                        r.status
+                    )),
+                    retry,
+                ),
             }
         }
         // No HTTP answer at all: the gateway may never have been reached, so this says nothing
         // about it. Never a gateway fault.
-        Outcome::ConnectionFailed(e) => Served::Untestable(format!("no connection to the gateway: {e}")),
-        Outcome::TimedOut => Served::Untestable("the gateway accepted the connection and never answered".into()),
-        Outcome::Malformed { message, .. } => Served::Untestable(format!("unparseable response: {message}")),
+        Outcome::ConnectionFailed(e) => (
+            Served::Untestable(format!("no connection to the gateway: {e}")),
+            Some("the connection was refused".to_string()),
+        ),
+        Outcome::TimedOut => (
+            Served::Untestable("the gateway accepted the connection and never answered".into()),
+            Some("the gateway did not answer in time".to_string()),
+        ),
+        // A response we cannot parse is a real answer the gateway keeps giving; asking again spends
+        // the budget to be handed the same bytes.
+        Outcome::Malformed { message, .. } => (Served::Untestable(format!("unparseable response: {message}")), None),
     }
 }
 
@@ -2023,6 +2055,69 @@ while True:
         match probe_cell(&cfg, &CellId::new("openai", "openai"), true) {
             Served::No(crate::probe::Verdict::Failed, ev) => assert_eq!(ev.status, 503),
             other => panic!("a persistently-503 gateway must still fail, got {other:?}"),
+        }
+    }
+
+    // A GATEWAY THAT DOES NOT ANSWER IN TIME IS A MOMENT, NOT A CAPABILITY.
+    //
+    // The status door and the transport door lead to the same place. busbar lost 26 cells to a
+    // transient 503; litellm-python lost three to a timeout, its served count sliding 8 -> 7 -> 5
+    // across the 2026-07-28 runs while the lost cells recorded "the gateway accepted the connection
+    // and never answered". Both are the harness asking a question of a gateway still shedding the
+    // load the harness itself just applied.
+    fn serve_silent_then_ok(silent_times: usize) -> SocketAddr {
+        let l = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = l.local_addr().expect("addr");
+        let seen = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        std::thread::spawn(move || {
+            for c in l.incoming() {
+                let Ok(mut c) = c else { continue };
+                let seen = seen.clone();
+                std::thread::spawn(move || {
+                    let mut b = [0u8; 4096];
+                    while c.read(&mut b).unwrap_or(0) > 0 {
+                        let n = seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        if n < silent_times {
+                            // Accept, then say nothing: exactly the shape that reads as
+                            // "accepted the connection and never answered".
+                            std::thread::sleep(std::time::Duration::from_secs(30));
+                            return;
+                        }
+                        let body = "{\"ok\":true}";
+                        let r = format!(
+                            "HTTP/1.1 200 X\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{body}",
+                            body.len()
+                        );
+                        if c.write_all(r.as_bytes()).is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        addr
+    }
+
+    #[test]
+    fn a_gateway_that_does_not_answer_once_is_retried_not_written_off() {
+        let addr = serve_silent_then_ok(1);
+        let cfg = test_fixture(addr, addr);
+        assert_eq!(
+            probe_cell(&cfg, &CellId::new("openai", "openai"), true),
+            Served::Yes,
+            "one timeout cost this cell entirely; these are litellm-python's three lost cells"
+        );
+    }
+
+    // The budget is bounded on this door too: a gateway that never answers still ends up untestable
+    // rather than being retried forever or, worse, optimistically passed.
+    #[test]
+    fn a_gateway_that_never_answers_is_still_untestable_after_the_budget() {
+        let addr = serve_silent_then_ok(usize::MAX);
+        let cfg = test_fixture(addr, addr);
+        match probe_cell(&cfg, &CellId::new("openai", "openai"), true) {
+            Served::Untestable(why) => assert!(why.contains("never answered"), "got {why}"),
+            other => panic!("a silent gateway must stay untestable, got {other:?}"),
         }
     }
 }
