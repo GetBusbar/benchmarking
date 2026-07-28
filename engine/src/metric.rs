@@ -956,39 +956,13 @@ fn gap_percentile_us(frame_offsets_us: &[u64], pct: f64) -> Option<f64> {
     Some(gaps[rank - 1] as f64)
 }
 
-/// THE MOST CONCURRENT STREAMS THE RIG CAN ACTUALLY CARRY, which is not the same number as the most
-/// concurrent REQUESTS it can carry.
-///
-/// The throughput searches drive the load generator, which is tokio tasks and scales to the engine's
-/// full ceiling. The stream searches drive `run::stream_window`, which still spawns one OS thread per
-/// lane: 65536 of those is the scheduler thrashing that made a field run sit at a 1-minute load
-/// average over 24,000 and never converge. Handing the stream searches the same ceiling would not
-/// measure a bigger gateway, it would measure the rig falling over.
-///
-/// So the stream searches are clamped here, and - this is the part that matters for what gets
-/// published - a search that exhausts at THIS bound is recorded as the RIG's limit, not as the
-/// gateway still climbing. The 2026-07-28 run reported 15 cpu_fps cells as "throughput was still
-/// climbing at c=4096, so saturation was never observed", which reads as a fact about the gateway
-/// and was a fact about us.
-///
-/// This is a stopgap with a known end: porting `stream_window` to tokio the way `gen.rs` already is
-/// removes the distinction entirely and this constant with it.
-pub const STREAM_LANE_CEILING: u32 = 4096;
-
-/// Relabel a stream search that ran out of OUR range, so the artifact says whose limit it was.
-fn name_the_rigs_lane_ceiling(m: Measurement<f64>, searched_to: u32, asked_for: u32) -> Measurement<f64> {
-    if searched_to >= asked_for || m.reason() != Some(&Absent::SearchExhausted) {
-        return m;
-    }
-    Measurement::absent_because(
-        Absent::RigLimited,
-        format!(
-            "still climbing at c={searched_to}, which is the rig's own concurrent-stream ceiling and \
-             not the gateway's: each lane is an OS thread, so the harness stops here rather than \
-             measuring its own scheduler. The gateway was never shown to saturate."
-        ),
-    )
-}
+// THE STREAM SEARCHES TAKE THE ENGINE'S FULL CEILING, like the throughput searches always did.
+//
+// They used to be clamped to their own lower bound and a helper relabelled anything that hit it as
+// the rig's limit rather than the gateway's. Both are gone: `run::stream_window` drives one tokio
+// task per lane now instead of one OS thread, so the reason for the clamp - 65536 threads being
+// scheduler thrashing rather than a bigger gateway - no longer exists. Honest labelling of our own
+// ceiling was the right thing while the ceiling was real; removing the ceiling is better.
 
 /// WHICH SIDE OF THE CELL CANNOT BE STREAMED, if either.
 ///
@@ -1049,8 +1023,7 @@ impl Metric for StreamsSustained {
             let f: Filled = self.fields().iter().map(|x| (*x, m.clone())).collect();
             return f.into();
         }
-        let lane_max = ctx.max_conc.min(STREAM_LANE_CEILING);
-        let found = crate::run::sweep_streams_cell(ctx.cfg, ctx.id, ctx.min_conc, lane_max);
+        let found = crate::run::sweep_streams_cell(ctx.cfg, ctx.id, ctx.min_conc, ctx.max_conc);
         let carry = |m: &Measurement<f64>| match (m.reason().cloned(), m.detail()) {
             (Some(r), Some(d)) => Measurement::absent_because(r, d),
             (Some(r), None) => Measurement::absent(r),
@@ -1095,8 +1068,7 @@ impl Metric for CpuFps {
             let f: Filled = self.fields().iter().map(|x| (*x, m.clone())).collect();
             return f.into();
         }
-        let lane_max = ctx.max_conc.min(STREAM_LANE_CEILING);
-        let found = crate::run::sweep_cpu_fps_cell(ctx.cfg, ctx.id, ctx.min_conc, lane_max);
+        let found = crate::run::sweep_cpu_fps_cell(ctx.cfg, ctx.id, ctx.min_conc, ctx.max_conc);
         let carry = |m: &Measurement<f64>| match (m.reason().cloned(), m.detail()) {
             (Some(r), Some(d)) => Measurement::absent_because(r, d),
             (Some(r), None) => Measurement::absent(r),
@@ -1104,7 +1076,7 @@ impl Metric for CpuFps {
         };
         let fps = match found.fps.value() {
             Some(v) => Measurement::Measured(*v),
-            None => name_the_rigs_lane_ceiling(carry(&found.fps), lane_max, ctx.max_conc),
+            None => carry(&found.fps),
         };
         let conc = match found.concurrency.value() {
             Some(c) => Measurement::Measured(f64::from(*c)),
@@ -1413,41 +1385,4 @@ mod tests {
         assert_eq!(gap_percentile_us(&[], 0.5), None);
     }
 
-    // WHOSE CEILING WAS IT.
-    //
-    // A stream search that runs out of the RIG's lane range must not be published as the gateway
-    // still climbing. The 2026-07-28 run reported 15 cpu_fps cells as "throughput was still climbing
-    // at c=4096, so saturation was never observed" - a sentence about the gateway describing a fact
-    // about us, because each lane is an OS thread and the harness stops before its own scheduler does.
-    #[test]
-    fn a_stream_search_that_runs_out_of_our_lanes_says_so() {
-        let exhausted = Measurement::<f64>::absent_because(
-            Absent::SearchExhausted,
-            "throughput was still climbing ... at c=4096".to_string(),
-        );
-
-        // Clamped below what the engine was asked for: ours, and it says so.
-        let ours = name_the_rigs_lane_ceiling(exhausted.clone(), 4096, 65536);
-        assert_eq!(ours.reason(), Some(&Absent::RigLimited));
-        assert!(ours.detail().is_some_and(|d| d.contains("rig's own concurrent-stream ceiling")));
-        assert!(ours.detail().is_some_and(|d| d.contains("never shown to saturate")));
-
-        // Not clamped - the search really did reach everything it was asked for, so the exhaustion
-        // is the honest "we looked this far and it kept climbing" and must be left alone.
-        let theirs = name_the_rigs_lane_ceiling(exhausted.clone(), 65536, 65536);
-        assert_eq!(theirs.reason(), Some(&Absent::SearchExhausted));
-
-        // A measured value is never relabelled, whatever the ceilings were.
-        let measured = Measurement::Measured(1234.0);
-        assert_eq!(name_the_rigs_lane_ceiling(measured, 4096, 65536).value().copied(), Some(1234.0));
-
-        // Nor is an absence with a different cause: a cell the mock cannot stream is untestable, and
-        // calling that a rig lane ceiling would swap one true reason for another.
-        let untestable = Measurement::<f64>::absent(Absent::Untestable);
-        assert_eq!(name_the_rigs_lane_ceiling(untestable, 4096, 65536).reason(), Some(&Absent::Untestable));
-
-        // And the clamp itself: streams stop at the lane ceiling however wide the engine's range is.
-        assert_eq!(65536u32.min(STREAM_LANE_CEILING), STREAM_LANE_CEILING);
-        assert_eq!(512u32.min(STREAM_LANE_CEILING), 512, "a narrower debug range still wins");
-    }
 }

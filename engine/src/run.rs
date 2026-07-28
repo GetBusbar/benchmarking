@@ -743,13 +743,6 @@ pub const STREAM_STALL_MULTIPLIER: u64 = 2;
 pub const STREAM_MIN_DELIVERY_RATIO: f64 = 0.999;
 pub const STREAM_MAX_ERROR_RATIO: f64 = 0.001;
 
-/// Stack size for one stream lane's thread.
-///
-/// The concurrency search runs to `ctx.max_conc`, which the engine defaults honestly wide, and a
-/// default 8 MiB stack per lane would exhaust address space long before the box's real stream
-/// ceiling, turning a rig allocation choice into the gateway's published ceiling. A lane does one
-/// `post_json_sse` and holds a few kilobytes of frames, so this is generous for what it runs.
-const STREAM_LANE_STACK: usize = 256 * 1024;
 
 /// What one window of `concurrency` concurrent streams did.
 ///
@@ -876,41 +869,62 @@ pub fn stream_window(
     concurrency: u32,
 ) -> Option<StreamWindow> {
     let budget = crate::metric::STREAM_FRAME_BUDGET;
-    let mut lanes = Vec::with_capacity(concurrency as usize);
-    for _ in 0..concurrency {
-        let path = path.to_string();
-        let body = body.to_string();
-        let headers = headers.to_vec();
-        let spawned = std::thread::Builder::new().stack_size(STREAM_LANE_STACK).spawn(move || {
-            crate::http::post_json_sse(
-                addr,
-                &path,
-                body.as_bytes(),
-                &headers,
-                crate::metric::STREAM_TIMEOUT,
-                budget,
-            )
-        });
-        match spawned {
-            Ok(h) => lanes.push(h),
-            Err(e) => {
-                // JOIN WHAT WAS ALREADY STARTED before giving up. Detaching them would leave live
-                // lanes hammering the gateway while the NEXT rung of the search is being measured,
-                // and that rung's numbers would then include a window that was supposed to be over.
-                eprintln!("stream window: could not reach c={concurrency}; the rig refused a lane: {e}");
-                for h in lanes {
-                    let _ = h.join();
-                }
-                return None;
+
+    // ONE TOKIO TASK PER LANE, NOT ONE OS THREAD.
+    //
+    // A thread per lane is what capped the concurrent-stream searches far below the throughput
+    // searches: 65536 threads is scheduler thrashing, not a bigger gateway, and a field run that
+    // tried it sat at a 1-minute load average over 24,000 and never converged. That cap was OUR
+    // limit arriving on the board as the gateway's - 15 cells of the 2026-07-28 run published no
+    // cpu_fps at all because the search "was still climbing" at the point the harness gave up.
+    //
+    // The lane body is `post_json_sse_async`, which feeds the SAME `SseReader` and sends the same
+    // bytes as the blocking lane; a differential test drives both against one peer and asserts they
+    // decode identically. So this changes who owns the waiting and nothing about what is measured.
+    let rt = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("stream window: could not build a runtime for c={concurrency}: {e}");
+            return None;
+        }
+    };
+    let path = path.to_string();
+    let body = body.to_string();
+    let headers = headers.to_vec();
+
+    let (outcomes, elapsed_s): (Vec<crate::http::SseOutcome>, f64) = rt.block_on(async move {
+        let mut lanes = Vec::with_capacity(concurrency as usize);
+        for _ in 0..concurrency {
+            let path = path.clone();
+            let body = body.clone();
+            let headers = headers.clone();
+            lanes.push(tokio::spawn(async move {
+                crate::http::post_json_sse_async(
+                    addr,
+                    &path,
+                    body.as_bytes(),
+                    &headers,
+                    crate::metric::STREAM_TIMEOUT,
+                    budget,
+                )
+                .await
+            }));
+        }
+        // The clock starts once every lane exists, exactly as `gen.rs::run` does: the ramp of
+        // creating them must not land in the denominator, or fps() is depressed hardest at exactly
+        // the high rungs the search is climbing toward.
+        let started = std::time::Instant::now();
+        let mut out = Vec::with_capacity(lanes.len());
+        for l in lanes {
+            // A PANICKED LANE IS A HARNESS FAULT, not a gateway failure, and it is also not a
+            // stream: it is counted in neither column, because attributing our own defect to the
+            // gateway's error rate is the exact inversion this engine refuses everywhere else.
+            if let Ok(o) = l.await {
+                out.push(o);
             }
         }
-    }
-
-    // Timer starts once every lane exists, exactly as `gen.rs::run` starts its own clock only after
-    // every task is spawned: the ramp of serially creating `concurrency` OS threads must not land in
-    // the denominator, or fps() is depressed hardest at exactly the high rungs the search is climbing
-    // toward.
-    let started = std::time::Instant::now();
+        (out, started.elapsed().as_secs_f64())
+    });
     let mut w = StreamWindow {
         concurrency,
         streams: 0,
@@ -918,13 +932,9 @@ pub fn stream_window(
         frames: 0,
         expected_frames: 0,
         stalls: 0,
-        elapsed_s: 0.0,
+        elapsed_s,
     };
-    for h in lanes {
-        // A PANICKED LANE IS A HARNESS FAULT, not a gateway failure, and it is also not a stream: it
-        // is counted in neither column, because attributing our own defect to the gateway's error
-        // rate is the exact inversion this engine refuses everywhere else.
-        let Ok(o) = h.join() else { continue };
+    for o in outcomes {
         w.streams += 1;
         w.expected_frames += budget as u64;
         if stream_errored(&o) {
@@ -933,7 +943,6 @@ pub fn stream_window(
         w.frames += o.frame_offsets_us.len() as u64;
         w.stalls += stalls_in(&o.frame_offsets_us);
     }
-    w.elapsed_s = started.elapsed().as_secs_f64();
     // Every lane panicked, so nothing was observed. Unmeasured, not a failing window.
     if w.streams == 0 {
         return None;
@@ -2187,4 +2196,5 @@ while True:
             other => panic!("a silent gateway must stay untestable, got {other:?}"),
         }
     }
+
 }
