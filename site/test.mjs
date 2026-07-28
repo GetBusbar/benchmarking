@@ -209,18 +209,81 @@ const testWithData = (name, fn) =>
 // - a badge, NOT a build failure. These tests positively exercise all of that against a synthetic repo,
 // since the main data load above falls back to the committed bundle when the guard trips.
 function buildSyntheticRepo(measuredAtByGw) {
-  // measuredAtByGw: { key: { perf: isoString, matrix?: isoString, ... }, ... }
+  // measuredAtByGw: { key: { matrix: isoString, ... }, ... }
+  //
+  // THE FIXTURE HAS TO BE THE SHAPE THE ENGINE ACTUALLY WRITES. This built
+  // `gateways/<key>/gateway.sh` and `results/<suite>/<key>.json` - a manifest format that no longer
+  // exists and a per-suite results layout the engine stopped writing when it moved to
+  // `results/snapshots/`. gen-data discovers neither, so every test built on this fixture was
+  // asserting against an empty board and failing for that reason rather than for the guard it names.
+  // Same migration debt the history appender carried: code left pointing at directories nothing
+  // produces any more, going quietly red instead of guarding anything.
   const root = mkdtempSync(join(tmpdir(), "site-fresh-"));
   for (const [key, suites] of Object.entries(measuredAtByGw)) {
     mkdirSync(join(root, "gateways", key), { recursive: true });
-    writeFileSync(join(root, "gateways", key, "gateway.sh"),
-      `#!/usr/bin/env bash\nGW_DISPLAY="${key}"\nGW_LANG=Rust\nGW_CLASS="Gateway"\n`);
+    writeFileSync(
+      join(root, "gateways", key, "definition.json"),
+      JSON.stringify({
+        name: key,
+        display: key,
+        lang: "Rust",
+        class: "Gateway",
+        model: "m",
+        port: 1,
+        path: "/v1/chat/completions",
+        auth: "dummy",
+        egress: ["openai"],
+        matrix: ["100000", "000000", "000000", "000000", "000000", "000000"],
+      }),
+    );
+    mkdirSync(join(root, "results", "snapshots"), { recursive: true });
     for (const [suite, iso] of Object.entries(suites)) {
-      mkdirSync(join(root, "results", suite), { recursive: true });
-      const doc = { gateway: key, build: "ok", served: true, measured_at: iso,
-        added_latency_p50_us: 100, added_latency_p99_us: 200,
-        rps_sustained_20ms: 10000, rps_max_proxy: 12000 };
-      writeFileSync(join(root, "results", suite, `${key}.json`), JSON.stringify(doc));
+      const doc = {
+        gateway: key,
+        build: "ok",
+        served: true,
+        measured_at: iso,
+        arch: "arm64",
+        added_latency_p50_us: 100,
+        added_latency_p99_us: 200,
+        rps_sustained_20ms: 10000,
+        rps_max_proxy: 12000,
+      };
+      // The matrix suite is what the board displays, so it lands as a snapshot exactly as the engine
+      // writes one. Any other suite key stays in its legacy per-suite file, which is the point of the
+      // tests that assert a never-displayed legacy stamp cannot mask a stale board.
+      if (suite === "matrix") {
+        doc.matrix = {
+          gateway: key,
+          served: true,
+          // The board ages what it DISPLAYS, and displayedMeasuredMs() reads the stamp off the
+          // matrix rather than the envelope, so a fixture without it makes every freshness guard
+          // silently inapplicable.
+          measured_at: iso,
+          upstreams: {
+            openai: {
+              configurable: true,
+              served: true,
+              cells: {
+                openai: {
+                  served: true,
+                  perf: {
+                    added_latency_p50_us: 100,
+                    added_latency_p99_us: 200,
+                    rps_sustained_20ms: 10000,
+                    rps_max_proxy: 12000,
+                  },
+                },
+              },
+            },
+          },
+        };
+        const stamp = String(iso).replace(/[:.]/g, "-");
+        writeFileSync(join(root, "results", "snapshots", `result_${key}_${stamp}.json`), JSON.stringify(doc));
+      } else {
+        mkdirSync(join(root, "results", suite), { recursive: true });
+        writeFileSync(join(root, "results", suite, `${key}.json`), JSON.stringify(doc));
+      }
     }
   }
   return root;
@@ -439,11 +502,12 @@ test("gen-data emits gateways with a class for every entry", () => {
   // straight out of that gateway's manifest. Assert that for EVERY gateway rather than spot-checking
   // one by name, so the assertion holds for a gateway dropped in tomorrow.
   for (const g of data.gateways) {
-    const man = readFileSync(join(ROOT, "gateways", g.key, "gateway.sh"), "utf8");
-    const m = /^GW_CLASS=(.*)$/m.exec(man);
-    if (!m) continue;                       // a manifest may omit it; gen-data then defaults it
-    const declared = m[1].replace(/\s+#.*$/, "").trim().replace(/^["']|["']$/g, "");
-    assert.equal(g.cls, declared, `${g.key}: published cls must be the manifest's own GW_CLASS`);
+    // definition.json is the manifest the engine runs from; gateway.sh has not existed since the
+    // field moved off shell manifests, so reading it made this assertion throw ENOENT rather than
+    // check anything.
+    const man = JSON.parse(readFileSync(join(ROOT, "gateways", g.key, "definition.json"), "utf8"));
+    if (!man.class) continue;               // a manifest may omit it; gen-data then defaults it
+    assert.equal(g.cls, man.class, `${g.key}: published cls must be the manifest's own class`);
   }
 });
 
@@ -459,9 +523,9 @@ test("star snapshot is well formed, carries no stale key, and gen-data attaches 
   // phantom count behind); a missing key is just a pending refresh.
   const snap = JSON.parse(readFileSync(join(ROOT, "gateways", "stars.json"), "utf8"));
   const live = new Set(readdirSync(join(ROOT, "gateways")).filter(
-    (d) => existsSync(join(ROOT, "gateways", d, "gateway.sh"))));
+    (d) => existsSync(join(ROOT, "gateways", d, "definition.json"))));
   for (const [key, s] of Object.entries(snap)) {
-    assert.ok(live.has(key), `gateways/stars.json has a stale key '${key}' with no gateways/${key}/gateway.sh`);
+    assert.ok(live.has(key), `gateways/stars.json has a stale key '${key}' with no gateways/${key}/definition.json`);
     assert.ok(Number.isInteger(s.stars) && s.stars >= 0, `${key} stars not an integer`);
     assert.ok(/^\d{4}-\d{2}-\d{2}$/.test(s.as_of), `${key} as_of not YYYY-MM-DD`);
   }
@@ -789,8 +853,10 @@ test("sealed envelope: every surface reads best_cell through metric(); a suppres
 test("HIGH class: a certified xlate-fallback value survives the seal and reaches the table", () => {
   const root = mkdtempSync(join(tmpdir(), "site-fb-"));
   mkdirSync(join(root, "gateways", "fbgw"), { recursive: true });
-  writeFileSync(join(root, "gateways", "fbgw", "gateway.sh"),
-    `#!/usr/bin/env bash\nGW_DISPLAY="fbgw"\nGW_LANG=Rust\nGW_CLASS="Gateway"\n`);
+  writeFileSync(join(root, "gateways", "fbgw", "definition.json"),
+    JSON.stringify({ name: "fbgw", display: "fbgw", lang: "Rust", class: "Gateway", model: "m", port: 1,
+      path: "/v1/chat/completions", auth: "dummy", egress: ["openai"],
+      matrix: ["100000", "000000", "000000", "000000", "000000", "000000"] }));
   const iso = new Date(Date.now() - 3600000).toISOString();
   mkdirSync(join(root, "results", "matrix"), { recursive: true });
   // matrix served but its diagonal has no perf → bestCell()/translationCell() null → the fallbacks fire.
@@ -1165,8 +1231,10 @@ const CELL_MEM = { served: true, protocol: "per-cell, own cold-started process",
 function buildStreamMemRepo() {
   const root = mkdtempSync(join(tmpdir(), "site-strm-"));
   mkdirSync(join(root, "gateways", "sgw"), { recursive: true });
-  writeFileSync(join(root, "gateways", "sgw", "gateway.sh"),
-    `#!/usr/bin/env bash\nGW_DISPLAY="sgw"\nGW_LANG=Rust\nGW_CLASS="Gateway"\n`);
+  writeFileSync(join(root, "gateways", "sgw", "definition.json"),
+    JSON.stringify({ name: "sgw", display: "sgw", lang: "Rust", class: "Gateway", model: "m", port: 1,
+      path: "/v1/chat/completions", auth: "dummy", egress: ["openai"],
+      matrix: ["100000", "000000", "000000", "000000", "000000", "000000"] }));
   mkdirSync(join(root, "results", "matrix"), { recursive: true });
   const iso = new Date(Date.now() - 3600000).toISOString();
   const perf = { added_latency_p50_us: 10, added_latency_p99_us: 20, rps_sustained_20ms: 45000,
@@ -1265,8 +1333,10 @@ test("MEDIUM-1: a NON-streaming diagonal cell does NOT project g.streaming (stre
   const root = buildStreamMemRepo();  // sgw streams (STREAM_CELL.stream_served === true)
   // Add a second gateway whose diagonal cell served perf but DID NOT stream.
   mkdirSync(join(root, "gateways", "nostream"), { recursive: true });
-  writeFileSync(join(root, "gateways", "nostream", "gateway.sh"),
-    `#!/usr/bin/env bash\nGW_DISPLAY="nostream"\nGW_LANG=Go\nGW_CLASS="Gateway"\n`);
+  writeFileSync(join(root, "gateways", "nostream", "definition.json"),
+    JSON.stringify({ name: "nostream", display: "nostream", lang: "Go", class: "Gateway", model: "m", port: 1,
+      path: "/v1/chat/completions", auth: "dummy", egress: ["openai"],
+      matrix: ["100000", "000000", "000000", "000000", "000000", "000000"] }));
   const iso = new Date(Date.now() - 3600000).toISOString();
   const perf = { added_latency_p50_us: 10, added_latency_p99_us: 20, rps_sustained_20ms: 40000,
     rps_sustained_20ms_concurrency: 512, rps_max_proxy: 44000, rps_max_proxy_concurrency: 256,
