@@ -273,6 +273,31 @@ struct Rung {
     concurrency: u32,
     median: f64,
     spread: f64,
+    /// How many windows actually passed and went into the median. The bar below divides by its root,
+    /// so a rung that lost windows to failures is judged on the evidence it really has.
+    windows: usize,
+}
+
+/// THE BAR A RUNG MUST CLEAR TO COUNT AS AN IMPROVEMENT, and the half-width of the plateau band.
+///
+/// `spread` is the range of INDIVIDUAL windows, and the thing being compared is the MEDIAN of them.
+/// Those are not the same quantity: the median of several windows is far steadier than the gap
+/// between the luckiest and unluckiest of them, so charging the median the full window range asks a
+/// climbing curve to beat noise it does not have. A cell whose windows scatter reads as saturated
+/// while it is still climbing, and the ladder stops early with the gateway's real ceiling above it.
+///
+/// kong openai>openai measured exactly that: at c=16 the windows ran 19837..24740 (a 19.8% range)
+/// while the median rose 18819 -> 21065, a real 11.9% gain that the raw range refused. The ladder
+/// stopped at c=32 and published 20,871 as a MAXIMUM, and the sustained-throughput leg then found
+/// 26,098 at c=131 - a rung this search never sampled. A maximum another measurement beats on the
+/// same box against the same mock is not a maximum, which is what C6 refuses to publish.
+///
+/// Dividing by the root of the window count is the standard shape for the uncertainty of an estimate
+/// against the scatter of its samples. It stays conservative: still floored, and a rung must still
+/// beat it outright.
+fn improvement_bar(spread: f64, windows: usize) -> f64 {
+    let n = windows.max(1) as f64;
+    (spread / n.sqrt()).max(WOBBLE_FLOOR)
 }
 
 /// Measure one rung properly: `WINDOWS_PER_RUNG` windows, median of the ones that passed their gate.
@@ -291,13 +316,14 @@ fn measure_rung<P: Probe>(s: &mut Search<P>, c: u32) -> Option<Rung> {
         }
     }
     if vals.is_empty() {
-        return Some(Rung { concurrency: c, median: 0.0, spread: 0.0 });
+        return Some(Rung { concurrency: c, median: 0.0, spread: 0.0, windows: 0 });
     }
     vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     Some(Rung {
         concurrency: c,
         median: nearest_rank_median(&vals).unwrap_or(0.0),
         spread: if vals.len() >= 2 { relative_spread(&vals) } else { 0.0 },
+        windows: vals.len(),
     })
 }
 
@@ -349,7 +375,7 @@ pub fn saturation_plateau<P: Probe>(probe: &mut P, min_conc: u32, max_conc: u32)
         let best_so_far = rungs.iter().map(|r| r.median).fold(0.0_f64, f64::max);
         // The bar is this rung's own measured wobble, floored. Judging a rung against the noise of a
         // DIFFERENT rung is what let a noisy floor set an impossible bar for the whole ladder.
-        let wobble = rung.spread.max(WOBBLE_FLOOR);
+        let wobble = improvement_bar(rung.spread, rung.windows);
         let improved = rung.median > best_so_far * (1.0 + wobble);
         rungs.push(rung);
 
@@ -382,7 +408,7 @@ pub fn saturation_plateau<P: Probe>(probe: &mut P, min_conc: u32, max_conc: u32)
     // STILL CLIMBING AT THE BOUND is a lower bound, not a plateau. The range is our choice; reporting
     // it as the gateway's ceiling would be publishing our own search bound as its answer.
     if hit_bound && flat_run < FLAT_RUNGS_TO_STOP {
-        let top_wobble = rungs.last().map(|r| r.spread.max(WOBBLE_FLOOR)).unwrap_or(WOBBLE_FLOOR);
+        let top_wobble = rungs.last().map(|r| improvement_bar(r.spread, r.windows)).unwrap_or(WOBBLE_FLOOR);
         let detail = format!(
             "throughput was still climbing by more than the measured {:.1}% window-to-window wobble at c={max_conc} ({best:.0}) when the search range ran out, so saturation was never observed and no plateau was established",
             top_wobble * 100.0
@@ -395,7 +421,7 @@ pub fn saturation_plateau<P: Probe>(probe: &mut P, min_conc: u32, max_conc: u32)
     // saturation.
     let band = rungs
         .iter()
-        .filter(|r| r.median > 0.0 && r.median >= best * (1.0 - r.spread.max(WOBBLE_FLOOR)))
+        .filter(|r| r.median > 0.0 && r.median >= best * (1.0 - improvement_bar(r.spread, r.windows)))
         .collect::<Vec<_>>();
     let knee = band.iter().map(|r| r.concurrency).min().unwrap_or(min_conc);
     let mut vals: Vec<f64> = band.iter().map(|r| r.median).collect();
@@ -1153,7 +1179,83 @@ mod proptests {
             }
         }
     }
+
+    // ── the improvement bar: a climbing curve must not read as saturated ────────────────────────
+    //
+    // REPLAY OF A REAL FIELD FAILURE. These are kong openai>openai's own recorded windows from the
+    // 2026-07-28 field run, in the order the rig took them. The published result was a MAXIMUM of
+    // 20,871 rps, and the sustained-throughput leg on the same box against the same mock then
+    // measured 26,098 rps at c=131. A maximum that another measurement beats is not a maximum, which
+    // is what C6 refuses to publish.
+    //
+    // The cause is entirely in the stopping rule. Judging the MEDIAN against the range of individual
+    // WINDOWS charges a real gain against noise the median does not carry: at c=16 the windows ran
+    // 19837..24740 (19.8%) while the median rose 18819 -> 21065 (+11.9%), so a genuine climb read as
+    // flat, a second flat rung followed, and the ladder stopped at c=32 with the ceiling above it.
+    struct RecordedWindows {
+        by_conc: std::collections::BTreeMap<u32, Vec<f64>>,
+        taken: std::collections::BTreeMap<u32, usize>,
+        /// Rungs above what the field actually sampled. The real curve kept climbing to c=131, where
+        /// the sustained leg found 26,098; this continues it so the test can assert the search now
+        /// REACHES that ground rather than merely taking one more step toward it.
+        beyond: f64,
+    }
+    impl Probe for RecordedWindows {
+        fn probe(&mut self, c: u32) -> Option<Sample> {
+            let i = self.taken.entry(c).or_insert(0);
+            let v = match self.by_conc.get(&c) {
+                Some(vals) => vals[(*i).min(vals.len() - 1)],
+                None => self.beyond,
+            };
+            *i += 1;
+            Some(Sample { value: v, passed: true })
+        }
+    }
+
+    fn kong_openai_openai() -> RecordedWindows {
+        let mut by_conc = std::collections::BTreeMap::new();
+        by_conc.insert(1u32, vec![5007.0, 5099.0, 5103.0]);
+        by_conc.insert(2, vec![7392.0, 7676.0, 9927.0]);
+        by_conc.insert(4, vec![12343.0, 15541.0, 16648.0]);
+        by_conc.insert(8, vec![22466.0, 18819.0, 17755.0]);
+        by_conc.insert(16, vec![24740.0, 21065.0, 19837.0]);
+        by_conc.insert(32, vec![20871.0, 20732.0, 26506.0]);
+        RecordedWindows { by_conc, taken: Default::default(), beyond: 26098.0 }
+    }
+
+    #[test]
+    fn a_climbing_curve_with_scattered_windows_is_not_called_saturated() {
+        let mut probe = kong_openai_openai();
+        let r = saturation_plateau(&mut probe, 1, 4096);
+        let peak = match r.peak {
+            Measurement::Measured(p) => p.value,
+            ref other => panic!("kong's curve must produce a peak, got {other:?}"),
+        };
+        // The published number was 20,871 while a window on the same rung reached 26,506 and the
+        // sustained leg reached 26,098. Anything at or below the old answer means the ladder stopped
+        // in the same place for the same reason.
+        assert!(
+            peak > 20871.0,
+            "the search published {peak:.0}, which is no better than the 20,871 that C6 rejected as a \
+             maximum another measurement beat"
+        );
+        // It must actually climb past where the field stopped, not just wobble one rung further.
+        let top = r.points.iter().map(|p| p.concurrency).max().unwrap_or(0);
+        assert!(top > 32, "the ladder stopped at c={top}, the same rung the field run stopped at");
+    }
+
+    // The bar is the uncertainty of the rung's MEDIAN, so more windows behind a median make it
+    // stricter, not looser. Without the divisor a rung's bar is its raw window range, which is what
+    // let scatter masquerade as a plateau.
+    #[test]
+    fn the_improvement_bar_tightens_as_a_rung_gathers_more_windows() {
+        let spread = 0.20;
+        assert!(improvement_bar(spread, 9) < improvement_bar(spread, 3));
+        assert!(improvement_bar(spread, 3) < spread, "the median is steadier than its windows' range");
+        // Never below the floor, however tidy the windows look: three can agree by luck.
+        assert_eq!(improvement_bar(0.0, 3), WOBBLE_FLOOR);
+        assert_eq!(improvement_bar(0.001, 100), WOBBLE_FLOOR);
+        // A rung with no passing windows cannot divide by zero.
+        assert_eq!(improvement_bar(0.0, 0), WOBBLE_FLOOR);
+    }
 }
-
-
-
