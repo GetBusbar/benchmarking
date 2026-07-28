@@ -532,6 +532,20 @@ bench_gateway() {
   return 1
 }
 
+# Liveness probe with retry: a single dropped/timed-out ssh (packet loss, momentarily overloaded
+# sshd) on a healthy box must not be read as proof the box is gone - it must be as resilient as
+# every other network op in this file. Mirrors the box-ready wait's retry shape (line ~563:
+# `ssh $SSHOPT ubuntu@"$ip" true`, retried), not a new mechanism. Self-contained: only SSHOPT (global)
+# and its ip argument, so it can be sourced and tested in isolation like publish_lock_acquire/_release.
+box_reachable() { # ip
+  local ip="$1" try
+  for try in 1 2 3; do
+    ssh $SSHOPT ubuntu@"$ip" true 2>/dev/null && return 0
+    sleep 5
+  done
+  return 1
+}
+
 # ── one box, one gateway (runs in the background, self-terminates) ─────────────────────────────────
 bench_gateway_once() {
   local gw="$1" attempt="${2:-1}" iid="" ip=""
@@ -903,9 +917,10 @@ REMOTE
       # sentinel present? read the remote exit code and stop.
       sentinel="$(ssh $SSHOPT ubuntu@"$ip" 'cat ~/benchmarking/.run-done 2>/dev/null' 2>/dev/null)"
       if [ -n "$sentinel" ]; then break; fi
-      # box gone? one cheap liveness ssh; a failure here means the box is unreachable (terminated/spot
-      # reclaim) - stop polling and salvage whatever was already pulled.
-      if ! ssh $SSHOPT ubuntu@"$ip" true 2>/dev/null; then reachable=0; break; fi
+      # box gone? retried liveness probe; only 3-for-3 failures means the box is unreachable
+      # (terminated/spot reclaim) - stop polling and salvage whatever was already pulled. A lone
+      # transient failure on a healthy box must not abandon a run that may still finish.
+      if ! box_reachable "$ip"; then reachable=0; break; fi
       # opportunistic incremental pull of any suite not yet captured.
       for suite in $ALL_SUITES; do
         [ "${_pull_state[$suite]}" = ok ] && continue
