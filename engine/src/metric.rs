@@ -610,13 +610,13 @@ impl Metric for Streaming {
             f.into()
         };
 
-        // The rig, not the gateway, decides whether this question can be asked at all.
-        if !ctx.dialect.streams_natively() {
+        // The rig, not the gateway, decides whether this question can be asked at all - and it is
+        // asked of BOTH ends, since the frames come from the egress upstream.
+        if let Some(side) = stream_blocked_by(ctx) {
             return all(Measurement::absent_because(
                 Absent::Untestable,
                 format!(
-                    "the mock does not answer {} with a native event stream, so the rig cannot pose the streaming question here",
-                    ctx.dialect.as_str()
+                    "the mock does not answer {side} with a native event stream, so the rig cannot pose the streaming question here"
                 ),
             ));
         }
@@ -929,15 +929,41 @@ impl Metric for SustainedThroughput {
 // as sharing a search: sharing the instrument is what makes their numbers comparable, sharing a
 // search would be what makes them one population.
 
+/// WHICH SIDE OF THE CELL CANNOT BE STREAMED, if either.
+///
+/// The frames come from the MOCK, standing in for the upstream, so a cell can only be streamed when
+/// BOTH ends can carry one: the ingress dialect has to be posable as a stream, and the egress
+/// upstream has to answer with real SSE frames. Only openai and anthropic do
+/// (`Dialect::streams_natively`, which mirrors the mock's own dispatch).
+///
+/// Guarding on the ingress alone - which all three stream groups did - checks the wrong end. In the
+/// 2026-07-28 field run 20 served cells were ingress openai or anthropic (so the guard let them
+/// through) with egress bedrock, cohere or gemini (so the mock produced no frames at all). Every
+/// window came back `stream_errors == streams, frames: 0` at every concurrency from 1 to 4096, and
+/// the cells published "no concurrency from 1 to 4096 passed the gate": our own rig limit, written
+/// down as the gateway failing to stream. That is the harness-bug-as-gateway-property inversion this
+/// module's own doc forbids, and the untestable branch to state it correctly already existed.
+fn stream_blocked_by(ctx: &CellCtx<'_>) -> Option<String> {
+    if !ctx.dialect.streams_natively() {
+        return Some(ctx.dialect.as_str().to_string());
+    }
+    // An egress the mock cannot stream blocks the cell just as completely, and it is the end the
+    // frames actually come from. An egress that does not parse as a dialect is left alone: the
+    // measurement below will say what it found rather than this guessing on its behalf.
+    match ctx.id.egress.parse::<crate::ingress::Dialect>() {
+        Ok(eg) if !eg.streams_natively() => Some(eg.as_str().to_string()),
+        _ => None,
+    }
+}
+
 /// A dialect the mock cannot stream is a rig limit, not a gateway failure - the same fact
 /// `Streaming::measure` opens with, and it must be stated identically here or the same rig limit
 /// would be published two different ways in one cell.
-fn stream_untestable(dialect: Dialect) -> Measurement<f64> {
+fn stream_untestable_named(side: &str) -> Measurement<f64> {
     Measurement::absent_because(
         Absent::Untestable,
         format!(
-            "the mock does not answer {} with a native event stream, so the rig cannot pose the streaming question here",
-            dialect.as_str()
+            "the mock does not answer {side} with a native event stream, so the rig cannot pose the streaming question here"
         ),
     )
 }
@@ -957,8 +983,8 @@ impl Metric for StreamsSustained {
     }
 
     fn measure(&self, ctx: &CellCtx<'_>) -> Measured {
-        if !ctx.dialect.streams_natively() {
-            let m = stream_untestable(ctx.dialect);
+        if let Some(side) = stream_blocked_by(ctx) {
+            let m = stream_untestable_named(&side);
             let f: Filled = self.fields().iter().map(|x| (*x, m.clone())).collect();
             return f.into();
         }
@@ -1002,8 +1028,8 @@ impl Metric for CpuFps {
     }
 
     fn measure(&self, ctx: &CellCtx<'_>) -> Measured {
-        if !ctx.dialect.streams_natively() {
-            let m = stream_untestable(ctx.dialect);
+        if let Some(side) = stream_blocked_by(ctx) {
+            let m = stream_untestable_named(&side);
             let f: Filled = self.fields().iter().map(|x| (*x, m.clone())).collect();
             return f.into();
         }
@@ -1261,5 +1287,40 @@ mod tests {
         for f in ["gateway_c1_samples", "direct_c1_samples", "gateway_c1_frames", "direct_c1_frames"] {
             assert!(all_fields.contains(&f), "{f} is not declared by any group in METRICS: {all_fields:?}");
         }
+    }
+
+    // THE FRAMES COME FROM THE EGRESS, SO THE EGRESS DECIDES WHETHER THERE ARE ANY.
+    //
+    // All three stream groups guarded on the INGRESS dialect alone. In the 2026-07-28 field run that
+    // let 20 served cells through with an ingress that streams (openai, anthropic) and an egress the
+    // mock cannot stream (bedrock, cohere, gemini). Every window came back with
+    // `stream_errors == streams` and `frames: 0` at every concurrency from 1 to 4096, and the cells
+    // published "no concurrency from 1 to 4096 passed the gate" - the rig's own limit, recorded as
+    // the gateway failing to stream.
+    #[test]
+    fn a_cell_whose_egress_cannot_stream_is_the_rigs_limit_not_the_gateways() {
+        let cfg = crate::run::test_fixture("127.0.0.1:1".parse().expect("addr"), "127.0.0.1:1".parse().expect("addr"));
+        let ctx = |ing: Dialect, eg: &str| CellCtx {
+            cfg: &cfg,
+            id: Box::leak(Box::new(crate::cell::CellId::new(ing.as_str(), eg))),
+            dialect: ing,
+            min_conc: 1,
+            max_conc: 4,
+        };
+
+        // The exact field pairings, and the end that blocks each one.
+        assert_eq!(stream_blocked_by(&ctx(Dialect::Openai, "bedrock")).as_deref(), Some("bedrock"));
+        assert_eq!(stream_blocked_by(&ctx(Dialect::Anthropic, "bedrock")).as_deref(), Some("bedrock"));
+        assert_eq!(stream_blocked_by(&ctx(Dialect::Openai, "cohere")).as_deref(), Some("cohere"));
+        assert_eq!(stream_blocked_by(&ctx(Dialect::Openai, "gemini")).as_deref(), Some("gemini"));
+
+        // The ingress end still blocks, and is named when it is the one at fault.
+        assert_eq!(stream_blocked_by(&ctx(Dialect::Gemini, "openai")).as_deref(), Some("gemini"));
+        assert_eq!(stream_blocked_by(&ctx(Dialect::Bedrock, "openai")).as_deref(), Some("bedrock"));
+
+        // Both ends streamable: the question is real and must actually be asked.
+        assert_eq!(stream_blocked_by(&ctx(Dialect::Openai, "openai")), None);
+        assert_eq!(stream_blocked_by(&ctx(Dialect::Anthropic, "anthropic")), None);
+        assert_eq!(stream_blocked_by(&ctx(Dialect::Openai, "anthropic")), None);
     }
 }
