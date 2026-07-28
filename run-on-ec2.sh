@@ -468,11 +468,27 @@ its result so the board updates just this row (matrix-sole-source)." \
     # stale HEAD is rejected non-fast-forward; fetch/rebase-then-push in a bounded retry loop (still
     # inside the flock so the whole fetch-rebase-push is serialized across boxes).
     #
-    # Committed here, but NOT pushed: the commit happens per gateway so a later crash cannot lose a
-    # measurement that was already pulled, but nothing reaches the board until the whole run has shut
-    # down cleanly, so a run killed halfway never leaves a partial set of gateways live while the rest
-    # are missing. The final sweep at the end of the run does the push once.
-    echo "[$gw] committed locally; nothing is published until the run finishes cleanly"
+    # PUSHED AS IT LANDS, not held to the end of the run.
+    #
+    # This used to commit here and push only in the final sweep, so nothing appeared until every box
+    # had finished - a fourteen-gateway run went dark for its whole duration, and a run that died at
+    # box twelve published nothing at all despite eleven gateways having been measured cleanly.
+    #
+    # The reason given for holding it was that a half-finished run would leave some rows fresh and
+    # others stale. That is true and it is also what the board is built to show: every row carries its
+    # own measured_at, gen-data ages each row against it, and app.js badges a stale one. A partial
+    # board that says which rows are new is honest; a board that shows nothing for an hour is just
+    # less useful.
+    #
+    # What actually made this unsafe was C8 - a board must not mix harness engines, and a run
+    # spanning an engine change would have published a mixed board one row at a time. That guard is
+    # in the publish path now (site/check-consistency.mjs) and it fails the BUILD rather than the
+    # push, so a mixed board never reaches the site regardless of when rows are pushed.
+    if push_with_rebase "[$gw]" echo; then
+      echo "[$gw] published"
+    else
+      echo "[$gw] publish: push failed; the commit is local and the final sweep will retry it"
+    fi
   )
 }
 
