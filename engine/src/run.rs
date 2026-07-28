@@ -734,7 +734,19 @@ pub fn sweep_sustained_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> C
 /// A rig that boots the mock with a different interval makes this wrong in the strict direction (a
 /// slower mock would read as stalls); the mock's interval is a boot-time environment knob the engine
 /// cannot observe over the wire, so this is a documented coupling rather than a derived value.
-pub const STREAM_PACING_INTERVAL_MS: u64 = 20;
+/// The mock's own delta interval, READ FROM THE VARIABLE THE MOCK READS.
+///
+/// This was a `20` hardcoded here to match `MOCK_STREAM_INTERVAL_MS`'s default over in the mock, with
+/// a comment calling it a documented coupling. It is the same two-places-one-truth shape as the two
+/// hand-rolled ladders: set the mock to a different pace and the engine keeps measuring stalls
+/// against a cadence nothing is producing, silently, with every streaming rung judged by the wrong
+/// bound. A "documented" coupling is one that is right until someone uses the knob.
+///
+/// So both sides now read the same variable and the default matches the mock's own. Nothing in the
+/// field sets it today, which is exactly why the divergence would not have been noticed.
+pub fn stream_pacing_interval_ms() -> u64 {
+    std::env::var("MOCK_STREAM_INTERVAL_MS").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(20)
+}
 pub const STREAM_STALL_MULTIPLIER: u64 = 2;
 
 /// Fraction of expected frames that must arrive, and the share of streams that may fail, for a
@@ -821,7 +833,7 @@ pub fn streams_gate_passes(w: &StreamWindow) -> bool {
 
 /// The stall bound in microseconds: twice the mock's own delta pacing.
 fn stall_bound_us() -> u64 {
-    STREAM_PACING_INTERVAL_MS * STREAM_STALL_MULTIPLIER * 1_000
+    stream_pacing_interval_ms() * STREAM_STALL_MULTIPLIER * 1_000
 }
 
 /// How many gaps in one lane's frame arrivals exceeded the stall bound.
@@ -1871,14 +1883,14 @@ while True:
     // group already publishes as a difference.
     #[test]
     fn a_late_first_frame_is_not_a_stall_but_a_late_second_one_is() {
-        let bound = STREAM_PACING_INTERVAL_MS * STREAM_STALL_MULTIPLIER * 1_000;
+        let bound = stream_pacing_interval_ms() * STREAM_STALL_MULTIPLIER * 1_000;
         // One enormous offset, no gaps at all: nothing to stall on.
         assert_eq!(stalls_in(&[10 * bound]), 0);
         // Exactly the bound is not "past" it; one microsecond more is.
         assert_eq!(stalls_in(&[0, bound]), 0, "the bound itself is not a stall");
         assert_eq!(stalls_in(&[0, bound + 1]), 1);
         // The mock's own pace (20 ms between deltas) must never register.
-        let paced: Vec<u64> = (0..64).map(|i| i * STREAM_PACING_INTERVAL_MS * 1_000).collect();
+        let paced: Vec<u64> = (0..64).map(|i| i * stream_pacing_interval_ms() * 1_000).collect();
         assert_eq!(stalls_in(&paced), 0, "the mock's own pacing is not a stall");
     }
 
@@ -2225,4 +2237,38 @@ while True:
         }
     }
 
+
+    // THE STALL BOUND FOLLOWS THE MOCK'S ACTUAL PACE, not a copy of its default.
+    //
+    // A stall is a frame gap wider than twice the upstream's delta interval, so the bound is only
+    // meaningful if it tracks the interval the mock is really using. It was a 20 hardcoded in the
+    // engine to match MOCK_STREAM_INTERVAL_MS's default, described as a documented coupling - which
+    // is the same two-places-one-truth shape as the two hand-rolled ladders, and right up until
+    // someone uses the knob. Turn the mock's pacing down and every streaming rung is judged against
+    // a cadence nothing is producing, with no error anywhere.
+    #[test]
+    fn the_stall_bound_tracks_the_pace_the_mock_was_actually_told_to_use() {
+        // Default: the mock's own default, so the field behaviour is unchanged.
+        std::env::remove_var("MOCK_STREAM_INTERVAL_MS");
+        assert_eq!(stream_pacing_interval_ms(), 20);
+        assert_eq!(stall_bound_us(), 20 * STREAM_STALL_MULTIPLIER * 1_000);
+
+        // A slower model: gaps that were stalls at 20ms are ordinary at 100ms, and a bound that
+        // stayed at 20 would call a healthy stream stalled on every frame.
+        std::env::set_var("MOCK_STREAM_INTERVAL_MS", "100");
+        assert_eq!(stall_bound_us(), 100 * STREAM_STALL_MULTIPLIER * 1_000);
+        let gaps_at_100ms: Vec<u64> = (0..8).map(|i| i * 100_000).collect();
+        assert_eq!(stalls_in(&gaps_at_100ms), 0, "a stream keeping the mock's own pace never stalls");
+
+        // A faster model: the bound tightens with it, so a gateway that lags is still caught.
+        std::env::set_var("MOCK_STREAM_INTERVAL_MS", "5");
+        assert_eq!(stall_bound_us(), 5 * STREAM_STALL_MULTIPLIER * 1_000);
+        assert!(stalls_in(&gaps_at_100ms) > 0, "at a 5ms pace those same 100ms gaps are stalls");
+
+        // Garbage is not a pace: fall back to the mock's default rather than to zero, which would
+        // make every gap a stall.
+        std::env::set_var("MOCK_STREAM_INTERVAL_MS", "not-a-number");
+        assert_eq!(stream_pacing_interval_ms(), 20);
+        std::env::remove_var("MOCK_STREAM_INTERVAL_MS");
+    }
 }
