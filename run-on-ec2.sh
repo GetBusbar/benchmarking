@@ -257,6 +257,35 @@ BENCH_ENGINE_COMMIT="$(git -C "$HERE" rev-parse HEAD 2>/dev/null || echo '')"
 if [ -n "$(git -C "$HERE" status --porcelain -- . ':(exclude)results' 2>/dev/null)" ]; then BENCH_ENGINE_DIRTY=1; else BENCH_ENGINE_DIRTY=0; fi
 export BENCH_ENGINE_COMMIT BENCH_ENGINE_DIRTY
 
+# THE BOX HAS NO HISTORY, SO THE ORCHESTRATOR HANDS IT ONE.
+#
+# The engine qualifies its box by driving the mock directly and comparing against a rolling baseline
+# of previous observations, which it reads from the results directory. That is right where the engine
+# runs beside the record; in the field it does not. Every gateway gets a fresh instance that fetches
+# its manifest and the rig and nothing else, so that directory is empty, the baseline is absent, and
+# the qualification SEEDS instead of judging - which is what every snapshot in results/ shows, on
+# every box, for every gateway, since the check was written. An inert guard: a box running well under
+# the field's rate would have seeded a fresh baseline, passed, and had a whole gateway column
+# measured on it.
+#
+# The observation is the RIG's own loopback throughput at a fixed concurrency, not the gateway's, so
+# the baseline pools across ALL gateways rather than being per gateway: it is the box being
+# qualified, and the boxes are identical by construction. Median, so one anomalous past box cannot
+# move it. Empty (and skipped) when there is no history yet, which is exactly the first run.
+OTB_QUALIFY_BASELINE="$(
+  find "$HERE/results/snapshots" -name 'result_*.json' -type f 2>/dev/null \
+    | xargs -r grep -ho '"observed_rps"[[:space:]]*:[[:space:]]*[0-9.]*' 2>/dev/null \
+    | sed 's/.*:[[:space:]]*//' \
+    | sort -n \
+    | awk '{ v[NR] = $1 } END { if (NR) printf "%.0f", (NR % 2) ? v[(NR + 1) / 2] : (v[NR / 2] + v[NR / 2 + 1]) / 2 }'
+)"
+if [ -n "$OTB_QUALIFY_BASELINE" ]; then
+  export OTB_QUALIFY_BASELINE
+  echo "box qualification baseline: ${OTB_QUALIFY_BASELINE} rps (median of prior observations)"
+else
+  echo "box qualification: no prior observations, this run seeds the baseline"
+fi
+
 case "$ARCH" in
   arm64|aarch64|graviton)
     ARCH=arm64

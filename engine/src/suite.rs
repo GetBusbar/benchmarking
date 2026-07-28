@@ -757,12 +757,38 @@ fn qualify_box(cfg: &SuiteConfig, history: &[f64]) -> serde_json::Value {
     })
 }
 
-/// Every previous box-qualification observation this results directory holds.
+/// Every previous box-qualification observation available to this run.
 ///
-/// Read from the historical snapshots rather than a side file, so the baseline cannot drift from the
-/// runs that produced it: a snapshot IS the record. An unreadable or old-shaped file contributes
-/// nothing rather than a zero, which would drag the median toward a value no run ever observed.
+/// TWO SOURCES, BECAUSE THE BOX HAS NO HISTORY OF ITS OWN.
+///
+/// Reading the results directory is right when the engine runs where the record lives. In the field
+/// it does not: every gateway gets a FRESH EC2 instance that fetches its own manifest and the rig,
+/// and nothing else. That directory is empty there, so the baseline was absent, so the qualification
+/// seeded instead of judging - every box, every gateway, every run since the check was written. A
+/// box running 30% slow would have seeded a fresh baseline and passed, and its gateway's whole
+/// column would have been measured on a rig nothing compared against anything.
+///
+/// `OTB_QUALIFY_BASELINE` is how the orchestrator hands over what it knows: it holds the history and
+/// the box does not. A single observation is enough to judge against - `rolling_baseline` takes the
+/// median of what it is given - and the env value is appended to whatever the directory yields
+/// rather than replacing it, so running where the record does live still uses the record.
+///
+/// The observation is the RIG's own loopback throughput at a fixed concurrency, not the gateway's,
+/// which is why one pooled baseline across gateways is the right comparison and not a per-gateway
+/// one: it is the box being qualified.
 fn qualify_history(results_dir: &Path) -> Vec<f64> {
+    let mut out = qualify_history_on_disk(results_dir);
+    if let Some(v) = std::env::var("OTB_QUALIFY_BASELINE").ok().and_then(|v| v.trim().parse::<f64>().ok()) {
+        if v > 0.0 {
+            out.push(v);
+        }
+    }
+    out
+}
+
+/// The part that reads the directory, separated so the env contribution above is testable without a
+/// filesystem and this stays a pure function of what is on disk.
+fn qualify_history_on_disk(results_dir: &Path) -> Vec<f64> {
     let Ok(entries) = std::fs::read_dir(results_dir) else {
         return Vec::new();
     };
@@ -1684,5 +1710,55 @@ mod tests {
             cell.verdict_note
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // THE BOX HAS NO HISTORY, SO THE BASELINE HAS TO BE HANDED TO IT.
+    //
+    // `qualify_history` read the results directory, which is right where the engine runs beside the
+    // record and empty where it actually runs: every gateway gets a fresh EC2 instance carrying its
+    // manifest and the rig and nothing else. So the baseline was absent, the qualification seeded
+    // instead of judging, and every snapshot in results/ says outcome "seed", baseline_samples 0,
+    // drift null - on every box, for every gateway, since the check was written. A guard that always
+    // seeds cannot catch the box it exists to catch.
+    #[test]
+    fn a_handed_baseline_lets_the_box_qualification_actually_judge() {
+        let empty = std::path::Path::new("/nonexistent-results-dir-for-this-test");
+        // What the field had: nothing on disk, and nothing handed over.
+        std::env::remove_var("OTB_QUALIFY_BASELINE");
+        assert!(
+            qualify_history(empty).is_empty(),
+            "with no history the baseline is absent and the qualification can only seed"
+        );
+        let (outcome, drift) = crate::qualify::judge(
+            Measurement::Measured(500_000.0),
+            crate::qualify::rolling_baseline(qualify_history(empty)),
+            QUALIFY_BAND_PCT,
+            crate::qualify::Sense::HigherIsBetter,
+        );
+        assert_eq!(outcome.token(), "seed");
+        assert_eq!(drift.value().copied(), None, "seeding has nothing to drift against");
+
+        // What the orchestrator can hand over, since it holds the record the box does not.
+        std::env::set_var("OTB_QUALIFY_BASELINE", "497862");
+        assert_eq!(qualify_history(empty), vec![497_862.0]);
+
+        // A healthy box - the widest real deviation across the 2026-07-28 field was 4.4% - passes.
+        let judge_at = |rps: f64| {
+            crate::qualify::judge(
+                Measurement::Measured(rps),
+                crate::qualify::rolling_baseline(qualify_history(empty)),
+                QUALIFY_BAND_PCT,
+                crate::qualify::Sense::HigherIsBetter,
+            )
+            .0
+            .token()
+        };
+        assert_eq!(judge_at(475_906.0), "pass", "the slowest real box of the field must still pass");
+        assert_eq!(judge_at(509_142.0), "pass", "and so must the fastest");
+        // The box this guard exists for: far enough under that its gateway's whole column would
+        // have been measured on a rig nothing compared against anything.
+        assert_eq!(judge_at(300_000.0), "fail");
+
+        std::env::remove_var("OTB_QUALIFY_BASELINE");
     }
 }
