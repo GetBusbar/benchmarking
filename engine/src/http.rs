@@ -686,137 +686,295 @@ pub struct SseOutcome {
     pub end: SseEnd,
 }
 
-/// Decodes `Transfer-Encoding: chunked` framing off a live stream, one logical line at a time, so
-/// `post_json_sse`'s frame loop can read lines the same way whether or not the peer chunked the
-/// response.
-///
-/// THIS IS NOT HYPOTHETICAL. hyper (the mock's own server, and any real gateway's) chunk-encodes
-/// any HTTP/1.1 response body of unknown length, which an SSE stream always is (there is no
-/// Content-Length on an open-ended event stream). The client here always speaks HTTP/1.1
-/// (`post_json_sse` sends `HTTP/1.1` on the request line, same as `post_json`), so chunking is the
-/// NORMAL case, not an edge case, and a chunk boundary landing inside a `data: ...\n` line is a
-/// question of TCP segmentation and hyper's internal buffering, not something this harness
-/// controls. Reading chunk-size lines as if they were frame noise (the prior approach) only
-/// "worked" when a chunk boundary happened to fall on a frame boundary; splitting one `data:` line
-/// across two chunks silently truncated or corrupted a frame with no error raised.
-struct ChunkedLineSource<'a> {
-    stream: &'a mut TcpStream,
-    buf: Vec<u8>,
-    pos: usize,
-    ended: bool,
+
+// ─────────────────────────────────── the transport-agnostic SSE reader ───────────────────────────
+//
+// ONE DECODER, FED BY BOTH TRANSPORTS.
+//
+// The framing this has to get right is not small: HTTP head parsing, `Transfer-Encoding: chunked`
+// (sizes in hex, extensions after `;`, the CRLF after each chunk's data, the terminal zero chunk and
+// its trailers), and WHATWG SSE event assembly on top of that, where consecutive `data:` lines join
+// with "\n" and a blank line dispatches the event. Writing that twice - once against a blocking
+// socket and once against an async one - is two copies of the same intricate rules, and the copy
+// that drifts produces a plausible frame count with corrupted timings rather than an error. Nothing
+// would fail loudly.
+//
+// So it is written ONCE here, over bytes, with no socket in it at all. It cannot block, so the async
+// lane can drive it; it cannot await, so the blocking lane can drive it; and it is a pure state
+// machine, so it can be tested directly with hand-written byte sequences including the boundaries a
+// live socket almost never produces on demand - a chunk header split across two reads, a `data:`
+// line split across two chunks, a frame completed by the very last byte before EOF.
+//
+// The arrival timestamp is passed IN rather than read from a clock, for the same reason: the
+// published streaming numbers are timings, so the moment a frame is credited has to be controllable
+// by a test rather than whatever the machine did.
+
+/// What the decoder wants next.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Step {
+    /// Nothing conclusive yet; feed more bytes.
+    NeedMore,
+    /// Finished, for the carried reason. Further feeding is ignored.
+    Done(SseEnd),
 }
 
-impl<'a> ChunkedLineSource<'a> {
-    fn new(stream: &'a mut TcpStream) -> Self {
+/// Where the decoder is in the response.
+#[derive(Debug, PartialEq, Eq)]
+enum Phase {
+    /// Still accumulating the response head.
+    Head,
+    /// Reading an identity-framed (close-delimited) body.
+    Identity,
+    /// Reading a chunked body; `Some(n)` = n bytes of the current chunk still to come, `None` =
+    /// expecting a chunk-size line.
+    Chunked { remaining: Option<usize> },
+    /// The body ended (terminal chunk seen) or the decoder finished.
+    Ended,
+}
+
+/// Reads an SSE response from bytes, with no transport of its own.
+pub struct SseReader {
+    phase: Phase,
+    /// Bytes received but not yet consumed by the current phase.
+    raw: Vec<u8>,
+    /// Decoded body bytes not yet split into lines.
+    body: Vec<u8>,
+    status: Option<u16>,
+    /// Data lines accumulated for the event that has not been dispatched yet.
+    pending: Option<String>,
+    frames: Vec<String>,
+    offsets_us: Vec<u64>,
+    budget: usize,
+    finished: Option<SseEnd>,
+}
+
+impl SseReader {
+    pub fn new(frame_budget: usize) -> Self {
         Self {
-            stream,
-            buf: Vec::new(),
-            pos: 0,
-            ended: false,
+            phase: Phase::Head,
+            raw: Vec::new(),
+            body: Vec::new(),
+            status: None,
+            pending: None,
+            frames: Vec::new(),
+            offsets_us: Vec::new(),
+            budget: frame_budget,
+            finished: None,
         }
     }
 
-    /// Decodes one more chunk into `buf`. `Ok(false)` at the terminal zero-length chunk (trailers,
-    /// if any, are drained and discarded: a probe never needs them). `Err` carries through whatever
-    /// `read_line`/`read_exact_deadline` reported, so the caller reports the same TimedOut/Eof/Err
-    /// distinction it always did.
-    fn refill(&mut self, deadline: Instant) -> Result<bool, ReadOutcome> {
-        if self.ended {
-            return Ok(false);
-        }
-        let size_line = match read_line(self.stream, deadline) {
-            ReadOutcome::Full(l) => l,
-            other => return Err(other),
-        };
-        let size_text = std::str::from_utf8(strip_crlf(&size_line)).unwrap_or("");
-        // Chunk extensions ("1a;foo=bar") are legal; only the hex size before ';' matters here.
-        let size_hex = size_text.split(';').next().unwrap_or("").trim();
-        let size = match usize::from_str_radix(size_hex, 16) {
-            Ok(n) => n,
-            Err(_) => {
-                return Err(ReadOutcome::Err(io::Error::other(format!(
-                    "unparseable chunk size {size_hex:?}"
-                ))))
-            }
-        };
-        if size == 0 {
-            loop {
-                match read_line(self.stream, deadline) {
-                    ReadOutcome::Full(line) => {
-                        if strip_crlf(&line).is_empty() {
-                            break;
-                        }
-                    }
-                    other => return Err(other),
-                }
-            }
-            self.ended = true;
-            return Ok(false);
-        }
-        // Same cap as every other framing this client reads: an arbitrary peer's declared chunk
-        // size, or the running total, must never be trusted with an unbounded allocation.
-        if size > MAX_BODY_BYTES || self.buf.len().saturating_add(size) > MAX_BODY_BYTES {
-            return Err(ReadOutcome::Err(io::Error::other(format!(
-                "chunked SSE body exceeded the {MAX_BODY_BYTES} byte cap"
-            ))));
-        }
-        let chunk = match read_exact_deadline(self.stream, deadline, size) {
-            ReadOutcome::Full(bytes) => bytes,
-            other => return Err(other),
-        };
-        self.buf.extend_from_slice(&chunk);
-        // Bare CRLF after each chunk's data, before the next chunk-size line.
-        match read_line(self.stream, deadline) {
-            ReadOutcome::Full(_) => {}
-            other => return Err(other),
-        }
-        Ok(true)
+    pub fn status(&self) -> Option<u16> {
+        self.status
     }
 
-    /// The next `\n`-terminated line (CRLF included, same shape `read_line` returns), decoded
-    /// transparently across as many chunks as it takes to complete one. `Ok(None)` once the body
-    /// has ended with nothing left buffered.
-    fn next_line(&mut self, deadline: Instant) -> Result<Option<Vec<u8>>, ReadOutcome> {
+    /// Feed bytes that arrived `elapsed_us` after the request was written. Frames completed by these
+    /// bytes are credited that arrival time.
+    pub fn feed(&mut self, bytes: &[u8], elapsed_us: u64) -> Step {
+        if let Some(end) = &self.finished {
+            return Step::Done(end.clone());
+        }
+        self.raw.extend_from_slice(bytes);
+        // The cap every other framing in this client honours: an arbitrary peer must never be
+        // trusted with an unbounded allocation, and a stream is the easiest place to forget it.
+        if self.raw.len() > MAX_BODY_BYTES || self.body.len() > MAX_BODY_BYTES {
+            return self.finish_with(SseEnd::Malformed(format!(
+                "SSE body exceeded the {MAX_BODY_BYTES} byte cap"
+            )));
+        }
         loop {
-            if let Some(nl) = self.buf[self.pos..].iter().position(|&b| b == b'\n') {
-                let end = self.pos + nl + 1;
-                let line = self.buf[self.pos..end].to_vec();
-                self.pos = end;
-                return Ok(Some(line));
-            }
-            if self.pos > 0 {
-                self.buf.drain(..self.pos);
-                self.pos = 0;
-            }
-            if !self.refill(deadline)? {
-                if self.buf.is_empty() {
-                    return Ok(None);
+            match self.phase {
+                Phase::Head => match self.try_head() {
+                    Some(Step::NeedMore) => return Step::NeedMore,
+                    Some(other) => return other,
+                    None => continue,
+                },
+                Phase::Identity => {
+                    let taken = std::mem::take(&mut self.raw);
+                    self.body.extend_from_slice(&taken);
+                    if let Some(step) = self.drain_body(elapsed_us) {
+                        return step;
+                    }
+                    return Step::NeedMore;
                 }
-                return Ok(Some(std::mem::take(&mut self.buf)));
+                Phase::Chunked { .. } => match self.pump_chunked() {
+                    ChunkPump::Progress => {
+                        if let Some(step) = self.drain_body(elapsed_us) {
+                            return step;
+                        }
+                        continue;
+                    }
+                    ChunkPump::NeedMore => {
+                        if let Some(step) = self.drain_body(elapsed_us) {
+                            return step;
+                        }
+                        return Step::NeedMore;
+                    }
+                    ChunkPump::BodyEnded => {
+                        if let Some(step) = self.drain_body(elapsed_us) {
+                            return step;
+                        }
+                        self.flush_pending(elapsed_us);
+                        return self.finish_with(SseEnd::StreamClosed);
+                    }
+                    ChunkPump::Bad(msg) => return self.finish_with(SseEnd::Malformed(msg)),
+                },
+                Phase::Ended => return Step::Done(self.finished.clone().unwrap_or(SseEnd::StreamClosed)),
             }
         }
     }
-}
 
-/// Either framing, read one line at a time: the raw stream directly (identity/close-delimited
-/// framing, the only case a chunk-unaware reader was ever actually correct for), or dechunked
-/// through `ChunkedLineSource`.
-enum SseSource<'a> {
-    Identity(&'a mut TcpStream),
-    Chunked(ChunkedLineSource<'a>),
-}
+    /// The peer stopped sending, or the deadline passed. Whatever arrived still counts: a stream
+    /// that goes quiet is not an error, and discarding its frames would publish nothing for a
+    /// gateway that streamed perfectly well up to that point.
+    pub fn finish(mut self, end: SseEnd, elapsed_us: u64) -> SseOutcome {
+        if self.finished.is_none() {
+            self.flush_pending(elapsed_us);
+        }
+        let end = self.finished.clone().unwrap_or(end);
+        SseOutcome { status: self.status, frames: self.frames, frame_offsets_us: self.offsets_us, end }
+    }
 
-impl<'a> SseSource<'a> {
-    fn next_line(&mut self, deadline: Instant) -> ReadOutcome {
-        match self {
-            SseSource::Identity(stream) => read_line(stream, deadline),
-            SseSource::Chunked(src) => match src.next_line(deadline) {
-                Ok(Some(line)) => ReadOutcome::Full(line),
-                Ok(None) => ReadOutcome::Eof(Vec::new()),
-                Err(other) => other,
-            },
+    fn finish_with(&mut self, end: SseEnd) -> Step {
+        self.phase = Phase::Ended;
+        self.finished = Some(end.clone());
+        Step::Done(end)
+    }
+
+    /// `None` = the head completed and the phase moved on, so the caller should loop again.
+    fn try_head(&mut self) -> Option<Step> {
+        let Some(cut) = find_head_end(&self.raw) else { return Some(Step::NeedMore) };
+        let head: Vec<u8> = self.raw.drain(..cut).collect();
+        let mut lines = head.split_inclusive(|b| *b == b'\n');
+        let Some(status_line) = lines.next() else {
+            return Some(self.finish_with(SseEnd::Malformed("empty response head".into())));
+        };
+        let Some(status) = parse_status_line(status_line) else {
+            return Some(self.finish_with(SseEnd::Malformed(
+                "status line did not parse as HTTP/x.y CODE ...".into(),
+            )));
+        };
+        self.status = Some(status);
+        let mut headers = Headers::new();
+        for line in lines {
+            let text = strip_crlf(line);
+            if text.is_empty() {
+                break;
+            }
+            if let Some((name, value)) = std::str::from_utf8(text).ok().and_then(|t| t.split_once(':')) {
+                headers.push((name.trim().to_string(), value.trim().to_string()));
+            }
+        }
+        // A content-type that is present and is not an event stream settles it immediately: waiting
+        // out the deadline would learn nothing. A MISSING content-type is not a refusal - the frames
+        // decide - so a peer that streams without announcing it is still read.
+        if let Some(ct) = header_value(&headers, "content-type") {
+            if !ct.to_ascii_lowercase().contains("text/event-stream") {
+                return Some(self.finish_with(SseEnd::NotAnEventStream(ct.to_string())));
+            }
+        }
+        let chunked = header_value(&headers, "transfer-encoding")
+            .map(|v| v.to_ascii_lowercase().contains("chunked"))
+            .unwrap_or(false);
+        self.phase = if chunked { Phase::Chunked { remaining: None } } else { Phase::Identity };
+        None
+    }
+
+    fn pump_chunked(&mut self) -> ChunkPump {
+        loop {
+            let Phase::Chunked { remaining } = self.phase else { return ChunkPump::BodyEnded };
+            match remaining {
+                None => {
+                    let Some(nl) = self.raw.iter().position(|b| *b == b'\n') else {
+                        return ChunkPump::NeedMore;
+                    };
+                    let line: Vec<u8> = self.raw.drain(..=nl).collect();
+                    let text = String::from_utf8_lossy(strip_crlf(&line)).to_string();
+                    if text.trim().is_empty() {
+                        // The bare CRLF that follows a chunk's data, before the next size line.
+                        continue;
+                    }
+                    // Chunk extensions ("1a;foo=bar") are legal; only the hex size matters.
+                    let hex = text.split(';').next().unwrap_or("").trim();
+                    let Ok(size) = usize::from_str_radix(hex, 16) else {
+                        return ChunkPump::Bad(format!("unparseable chunk size {hex:?}"));
+                    };
+                    if size == 0 {
+                        return ChunkPump::BodyEnded;
+                    }
+                    if size > MAX_BODY_BYTES {
+                        return ChunkPump::Bad(format!(
+                            "chunked SSE body exceeded the {MAX_BODY_BYTES} byte cap"
+                        ));
+                    }
+                    self.phase = Phase::Chunked { remaining: Some(size) };
+                }
+                Some(want) => {
+                    if self.raw.is_empty() {
+                        return ChunkPump::NeedMore;
+                    }
+                    let take = want.min(self.raw.len());
+                    let data: Vec<u8> = self.raw.drain(..take).collect();
+                    self.body.extend_from_slice(&data);
+                    let left = want - take;
+                    self.phase = Phase::Chunked { remaining: if left == 0 { None } else { Some(left) } };
+                    if left == 0 {
+                        return ChunkPump::Progress;
+                    }
+                    return ChunkPump::NeedMore;
+                }
+            }
         }
     }
+
+    /// Split whole lines out of the decoded body and assemble events. `Some` when the frame budget
+    /// was reached, which is a completed read rather than an interruption.
+    fn drain_body(&mut self, elapsed_us: u64) -> Option<Step> {
+        while let Some(nl) = self.body.iter().position(|b| *b == b'\n') {
+            let line: Vec<u8> = self.body.drain(..=nl).collect();
+            let stripped = strip_crlf(&line);
+            let text = String::from_utf8_lossy(stripped);
+            if let Some(data) = text.strip_prefix("data:") {
+                let data = data.trim_start().to_string();
+                match &mut self.pending {
+                    Some(acc) => {
+                        acc.push('\n');
+                        acc.push_str(&data);
+                    }
+                    None => self.pending = Some(data),
+                }
+            } else if stripped.is_empty() {
+                self.flush_pending(elapsed_us);
+                if self.frames.len() >= self.budget {
+                    return Some(self.finish_with(SseEnd::FrameBudgetReached));
+                }
+            }
+            // event:, id:, retry: and anything else is not a data frame and is skipped; the probe
+            // only ever needs the data.
+        }
+        None
+    }
+
+    fn flush_pending(&mut self, elapsed_us: u64) {
+        if let Some(data) = self.pending.take() {
+            self.offsets_us.push(elapsed_us);
+            self.frames.push(data);
+        }
+    }
+}
+
+enum ChunkPump {
+    Progress,
+    NeedMore,
+    BodyEnded,
+    Bad(String),
+}
+
+/// Byte offset just past the blank line that ends the response head, if it has all arrived.
+fn find_head_end(buf: &[u8]) -> Option<usize> {
+    buf.windows(4).position(|w| w == b"\r\n\r\n").map(|i| i + 4).or_else(|| {
+        // Tolerate bare-LF heads, which some minimal peers (and this repo's own test servers) emit.
+        buf.windows(2).position(|w| w == b"\n\n").map(|i| i + 2)
+    })
 }
 
 /// POSTs like `post_json`, then reads Server-Sent-Event `data:` frames off the response body
@@ -834,7 +992,6 @@ pub fn post_json_sse(
     frame_budget: usize,
 ) -> SseOutcome {
     let deadline = Instant::now() + timeout;
-
     let mut stream = match TcpStream::connect_timeout(&addr, timeout) {
         Ok(s) => s,
         Err(e) => {
@@ -847,15 +1004,151 @@ pub fn post_json_sse(
         }
     };
 
+    let request = build_sse_request(addr, path, body, headers);
+    let write_deadline = deadline.saturating_duration_since(Instant::now());
+    if stream.set_write_timeout(Some(write_deadline)).is_err() {
+        return SseOutcome {
+            status: None,
+            frames: Vec::new(),
+            frame_offsets_us: Vec::new(),
+            end: SseEnd::ConnectionFailed("could not set a write deadline".to_string()),
+        };
+    }
+    if let Err(e) = stream.write_all(&request) {
+        return if is_timeout(&e) {
+            SseOutcome { status: None, frames: Vec::new(), frame_offsets_us: Vec::new(), end: SseEnd::Timeout }
+        } else {
+            SseOutcome {
+                status: None,
+                frames: Vec::new(),
+                frame_offsets_us: Vec::new(),
+                end: SseEnd::ConnectionFailed(format!("connection dropped while sending the request: {e}")),
+            }
+        };
+    }
+
+    // The clock starts at the WRITE, not the connect, so a slow handshake is not charged to the
+    // gateway's first token.
+    let sent_at = Instant::now();
+    let mut reader = SseReader::new(frame_budget);
+    let mut buf = [0u8; 16 * 1024];
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return reader.finish(SseEnd::Timeout, sent_at.elapsed().as_micros() as u64);
+        }
+        if stream.set_read_timeout(Some(left)).is_err() {
+            return reader.finish(SseEnd::Timeout, sent_at.elapsed().as_micros() as u64);
+        }
+        match stream.read(&mut buf) {
+            Ok(0) => return reader.finish(SseEnd::StreamClosed, sent_at.elapsed().as_micros() as u64),
+            Ok(n) => {
+                let at = sent_at.elapsed().as_micros() as u64;
+                if let Step::Done(end) = reader.feed(&buf[..n], at) {
+                    return reader.finish(end, at);
+                }
+            }
+            Err(e) if is_timeout(&e) => {
+                return reader.finish(SseEnd::Timeout, sent_at.elapsed().as_micros() as u64)
+            }
+            // A peer that resets mid-stream still delivered what it delivered.
+            Err(_) => return reader.finish(SseEnd::StreamClosed, sent_at.elapsed().as_micros() as u64),
+        }
+    }
+}
+
+
+/// The same SSE read, driven by tokio instead of a blocked thread.
+///
+/// ONE LANE PER TASK, NOT PER OS THREAD. `run::stream_window` used to spawn a thread per lane, which
+/// is why the concurrent-stream searches were capped far below the throughput searches: 65536
+/// threads is scheduler thrashing, not a bigger gateway, and a field run that tried it sat at a
+/// 1-minute load average over 24,000 and never converged. That cap was OUR limit reaching the board
+/// as the gateway's - 15 cells of the 2026-07-28 run published no cpu_fps because the search "was
+/// still climbing" when the harness stopped.
+///
+/// The decoding is NOT duplicated here: this feeds the same `SseReader` the blocking lane feeds, and
+/// sends the same bytes via the same `build_sse_request`. The only thing that differs between the
+/// two lanes is who owns the waiting, which is the only thing that should.
+pub async fn post_json_sse_async(
+    addr: SocketAddr,
+    path: &str,
+    body: &[u8],
+    headers: &[(String, String)],
+    timeout: Duration,
+    frame_budget: usize,
+) -> SseOutcome {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let failed = |e: String| SseOutcome {
+        status: None,
+        frames: Vec::new(),
+        frame_offsets_us: Vec::new(),
+        end: SseEnd::ConnectionFailed(e),
+    };
+
+    let connect = tokio::time::timeout(timeout, tokio::net::TcpStream::connect(addr));
+    let mut stream = match connect.await {
+        Ok(Ok(s)) => s,
+        Ok(Err(e)) => return failed(e.to_string()),
+        Err(_) => {
+            return SseOutcome {
+                status: None,
+                frames: Vec::new(),
+                frame_offsets_us: Vec::new(),
+                end: SseEnd::Timeout,
+            }
+        }
+    };
+
+    let request = build_sse_request(addr, path, body, headers);
+    match tokio::time::timeout(timeout, stream.write_all(&request)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => return failed(format!("connection dropped while sending the request: {e}")),
+        Err(_) => {
+            return SseOutcome {
+                status: None,
+                frames: Vec::new(),
+                frame_offsets_us: Vec::new(),
+                end: SseEnd::Timeout,
+            }
+        }
+    }
+
+    // Clock from the WRITE, exactly as the blocking lane does, so a slow handshake is not charged to
+    // the gateway's first token and the two lanes' numbers mean the same thing.
+    let sent_at = std::time::Instant::now();
+    let deadline = tokio::time::Instant::now() + timeout;
+    let mut reader = SseReader::new(frame_budget);
+    let mut buf = vec![0u8; 16 * 1024];
+    loop {
+        let read = tokio::time::timeout_at(deadline, stream.read(&mut buf)).await;
+        let at = sent_at.elapsed().as_micros() as u64;
+        match read {
+            Ok(Ok(0)) => return reader.finish(SseEnd::StreamClosed, at),
+            Ok(Ok(n)) => {
+                if let Step::Done(end) = reader.feed(&buf[..n], at) {
+                    return reader.finish(end, at);
+                }
+            }
+            // A peer that resets mid-stream still delivered what it delivered.
+            Ok(Err(_)) => return reader.finish(SseEnd::StreamClosed, at),
+            Err(_) => return reader.finish(SseEnd::Timeout, at),
+        }
+    }
+}
+
+/// The request both SSE transports send. Written once so the blocking lane and the async lane cannot
+/// authenticate or frame differently: two lanes sending different bytes would make their numbers
+/// incomparable in a way nothing downstream could see.
+fn build_sse_request(addr: SocketAddr, path: &str, body: &[u8], headers: &[(String, String)]) -> Vec<u8> {
     let mut request = Vec::new();
     request.extend_from_slice(format!("POST {path} HTTP/1.1\r\n").as_bytes());
     request.extend_from_slice(format!("Host: {addr}\r\n").as_bytes());
     request.extend_from_slice(format!("Content-Length: {}\r\n", body.len()).as_bytes());
-    // THE PROBE AND THE LOAD MUST SEND THE SAME REQUEST, matching what gen.rs's build_request sets:
-    // a gateway that requires content-type on a JSON body would otherwise answer 415 to the probe
-    // and be published as NOT SERVING a pairing it would have loaded fine, a gateway property
-    // asserted from a malformed request of ours, the worst direction for this error to run. A
-    // caller may still override it below.
+    // THE PROBE AND THE LOAD MUST SEND THE SAME REQUEST, matching gen.rs's build_request: a gateway
+    // that requires content-type on a JSON body would otherwise answer 415 to the probe and be
+    // published as NOT SERVING a pairing it would have loaded fine.
     if !headers.iter().any(|(n, _)| n.eq_ignore_ascii_case("content-type")) {
         request.extend_from_slice(b"content-type: application/json\r\n");
     }
@@ -865,168 +1158,7 @@ pub fn post_json_sse(
     }
     request.extend_from_slice(b"\r\n");
     request.extend_from_slice(body);
-
-    let write_deadline = deadline.saturating_duration_since(Instant::now());
-    if stream.set_write_timeout(Some(write_deadline)).is_err() {
-        return SseOutcome {
-            status: None,
-            frames: Vec::new(),
-            frame_offsets_us: Vec::new(),
-            end: SseEnd::Timeout,
-        };
-    }
-    let sent_at = Instant::now();
-    if let Err(e) = stream.write_all(&request) {
-        return if is_timeout(&e) {
-            SseOutcome {
-                status: None,
-                frames: Vec::new(),
-                frame_offsets_us: Vec::new(),
-                end: SseEnd::Timeout,
-            }
-        } else {
-            SseOutcome {
-                status: None,
-                frames: Vec::new(),
-                frame_offsets_us: Vec::new(),
-                end: SseEnd::ConnectionFailed(format!(
-                    "connection dropped while sending the request: {e}"
-                )),
-            }
-        };
-    }
-
-    let chunked;
-    let status = match read_head(&mut stream, deadline) {
-        Ok((status, headers, _raw)) => {
-            // A content-type that is present and is not an event stream is a definitive answer: this
-            // peer is not streaming. Waiting out the deadline would learn nothing more. A MISSING
-            // content-type is not treated as a refusal - the frames are what settle it - so a peer
-            // that streams without announcing it is still read.
-            if let Some(ct) = header_value(&headers, "content-type") {
-                if !ct.to_ascii_lowercase().contains("text/event-stream") {
-                    return SseOutcome {
-                        status: Some(status),
-                        frames: Vec::new(),
-                        frame_offsets_us: Vec::new(),
-                        end: SseEnd::NotAnEventStream(ct.to_string()),
-                    };
-                }
-            }
-            chunked = header_value(&headers, "transfer-encoding")
-                .map(|v| v.to_ascii_lowercase().contains("chunked"))
-                .unwrap_or(false);
-            status
-        }
-        Err(Outcome::TimedOut) => {
-            return SseOutcome {
-                status: None,
-                frames: Vec::new(),
-                frame_offsets_us: Vec::new(),
-                end: SseEnd::Timeout,
-            }
-        }
-        Err(Outcome::ConnectionFailed(msg)) => {
-            return SseOutcome {
-                status: None,
-                frames: Vec::new(),
-                frame_offsets_us: Vec::new(),
-                end: SseEnd::ConnectionFailed(msg),
-            }
-        }
-        Err(Outcome::Malformed { message, .. }) => {
-            return SseOutcome {
-                status: None,
-                frames: Vec::new(),
-                frame_offsets_us: Vec::new(),
-                end: SseEnd::Malformed(message),
-            }
-        }
-        Err(Outcome::Response(_)) => {
-            unreachable!("read_head never returns Ok wrapped as Err(Response)")
-        }
-    };
-
-    let mut source = if chunked {
-        SseSource::Chunked(ChunkedLineSource::new(&mut stream))
-    } else {
-        SseSource::Identity(&mut stream)
-    };
-
-    let mut frames = Vec::new();
-    let mut frame_offsets_us: Vec<u64> = Vec::new();
-    // WHATWG SSE: consecutive `data:` lines with no blank line between them belong to ONE event, and
-    // their values are joined with "\n" before the event fires. A blank line is what dispatches the
-    // pending event (if any) and starts a fresh one; without this, a payload the gateway wrote as
-    // several `data:` lines (a multi-line JSON delta, a formatted message) would arrive as several
-    // separate frames instead of the one logical event it actually is.
-    let mut pending: Option<String> = None;
-    macro_rules! flush_pending {
-        () => {
-            if let Some(data) = pending.take() {
-                frame_offsets_us.push(sent_at.elapsed().as_micros() as u64);
-                frames.push(data);
-            }
-        };
-    }
-    loop {
-        if frames.len() >= frame_budget {
-            return SseOutcome {
-                status: Some(status),
-                frames,
-                frame_offsets_us,
-                end: SseEnd::FrameBudgetReached,
-            };
-        }
-        match source.next_line(deadline) {
-            ReadOutcome::Full(line) => {
-                let stripped = strip_crlf(&line);
-                let text = String::from_utf8_lossy(stripped);
-                if let Some(data) = text.strip_prefix("data:") {
-                    let data = data.trim_start().to_string();
-                    match &mut pending {
-                        Some(acc) => {
-                            acc.push('\n');
-                            acc.push_str(&data);
-                        }
-                        None => pending = Some(data),
-                    }
-                } else if stripped.is_empty() {
-                    // The blank line separating events: dispatch whatever data lines accumulated.
-                    flush_pending!();
-                }
-                // Any other line (event:, id:, chunk-size noise) is not a data frame and is silently
-                // skipped; the probe only ever needs the data frames.
-            }
-            ReadOutcome::TimedOut(_) => {
-                flush_pending!();
-                return SseOutcome {
-                    status: Some(status),
-                    frames,
-                    frame_offsets_us,
-                    end: SseEnd::Timeout,
-                }
-            }
-            ReadOutcome::Eof(_) => {
-                flush_pending!();
-                return SseOutcome {
-                    status: Some(status),
-                    frames,
-                    frame_offsets_us,
-                    end: SseEnd::StreamClosed,
-                }
-            }
-            ReadOutcome::Err(_) => {
-                flush_pending!();
-                return SseOutcome {
-                    status: Some(status),
-                    frames,
-                    frame_offsets_us,
-                    end: SseEnd::StreamClosed,
-                }
-            }
-        }
-    }
+    request
 }
 
 #[cfg_attr(test, allow(clippy::panic, clippy::unwrap_used, clippy::expect_used))]
@@ -2121,5 +2253,215 @@ mod tests {
             "an SSE probe on a quiet stream must not hang, took {:?}",
             start.elapsed()
         );
+    }
+
+    // ── the transport-agnostic SSE reader ───────────────────────────────────────────────────────
+    //
+    // These are the boundaries a live socket produces rarely and unpredictably, which is exactly why
+    // the decoder takes bytes instead of a socket: they can be produced on demand here.
+
+    fn chunked(parts: &[&str]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for p in parts {
+            out.extend_from_slice(format!("{:x}\r\n", p.len()).as_bytes());
+            out.extend_from_slice(p.as_bytes());
+            out.extend_from_slice(b"\r\n");
+        }
+        out.extend_from_slice(b"0\r\n\r\n");
+        out
+    }
+
+    const SSE_HEAD: &str =
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n";
+
+    fn read_all(bytes: &[u8], budget: usize, split: usize) -> SseOutcome {
+        let mut r = SseReader::new(budget);
+        let mut t = 0u64;
+        for piece in bytes.chunks(split.max(1)) {
+            t += 1;
+            if let Step::Done(end) = r.feed(piece, t) {
+                return r.finish(end, t);
+            }
+        }
+        r.finish(SseEnd::StreamClosed, t)
+    }
+
+    #[test]
+    fn the_reader_assembles_frames_from_chunked_framing() {
+        let body = chunked(&["data: a\n\n", "data: b\n\n"]);
+        let mut bytes = SSE_HEAD.as_bytes().to_vec();
+        bytes.extend_from_slice(&body);
+        let out = read_all(&bytes, 64, bytes.len());
+        assert_eq!(out.status, Some(200));
+        assert_eq!(out.frames, vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(out.frame_offsets_us.len(), 2);
+        assert_eq!(out.end, SseEnd::StreamClosed);
+    }
+
+    // THE PROPERTY THAT MATTERS MOST: how the bytes were split across reads must not change what was
+    // read. A chunk header landing across two TCP segments, or a `data:` line split down the middle,
+    // is ordinary on a real socket and used to be the difference between a correct frame and a
+    // silently corrupted one.
+    #[test]
+    fn how_the_bytes_arrive_cannot_change_what_was_decoded() {
+        let body = chunked(&["data: hel", "lo\n\ndata: wor", "ld\n\n", "data: third\n\n"]);
+        let mut bytes = SSE_HEAD.as_bytes().to_vec();
+        bytes.extend_from_slice(&body);
+        let whole = read_all(&bytes, 64, bytes.len());
+        assert_eq!(whole.frames, vec!["hello".to_string(), "world".to_string(), "third".to_string()]);
+        // Every fragmentation, down to one byte at a time, must agree with it.
+        for split in [1, 2, 3, 5, 7, 13, 64, 500] {
+            let got = read_all(&bytes, 64, split);
+            assert_eq!(got.frames, whole.frames, "fragmenting every {split} bytes changed the frames");
+            assert_eq!(got.status, whole.status);
+            assert_eq!(got.end, whole.end);
+        }
+    }
+
+    #[test]
+    fn identity_framing_is_read_the_same_way() {
+        let bytes = b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\ndata: x\n\ndata: y\n\n".to_vec();
+        for split in [1, 4, 999] {
+            let out = read_all(&bytes, 64, split);
+            assert_eq!(out.frames, vec!["x".to_string(), "y".to_string()], "split {split}");
+        }
+    }
+
+    // WHATWG: consecutive data lines are ONE event joined with a newline, dispatched by the blank
+    // line. A gateway writing a multi-line JSON delta must not read as several frames.
+    #[test]
+    fn consecutive_data_lines_are_one_event() {
+        let body = chunked(&["data: one\ndata: two\n\n"]);
+        let mut bytes = SSE_HEAD.as_bytes().to_vec();
+        bytes.extend_from_slice(&body);
+        let out = read_all(&bytes, 64, 3);
+        assert_eq!(out.frames, vec!["one\ntwo".to_string()]);
+    }
+
+    #[test]
+    fn non_data_lines_are_skipped_and_the_budget_stops_the_read() {
+        let body = chunked(&["event: ping\nid: 7\ndata: a\n\n", "data: b\n\n", "data: c\n\n"]);
+        let mut bytes = SSE_HEAD.as_bytes().to_vec();
+        bytes.extend_from_slice(&body);
+        let out = read_all(&bytes, 2, 5);
+        assert_eq!(out.frames, vec!["a".to_string(), "b".to_string()], "the budget stops at two");
+        assert_eq!(out.end, SseEnd::FrameBudgetReached);
+    }
+
+    #[test]
+    fn a_peer_that_is_not_streaming_is_answered_immediately() {
+        let bytes = b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\r\n{}".to_vec();
+        let out = read_all(&bytes, 64, 7);
+        assert!(matches!(out.end, SseEnd::NotAnEventStream(ref ct) if ct.contains("application/json")));
+        assert_eq!(out.status, Some(200), "the status is still what the peer said");
+        assert!(out.frames.is_empty());
+    }
+
+    #[test]
+    fn a_broken_head_is_malformed_not_a_silent_empty_stream() {
+        let out = read_all(b"NOT-HTTP\r\n\r\n", 64, 3);
+        assert!(matches!(out.end, SseEnd::Malformed(_)), "got {:?}", out.end);
+        assert_eq!(out.status, None);
+    }
+
+    // A stream that goes quiet mid-event keeps what arrived: the frames are real, and discarding
+    // them would publish nothing for a gateway that streamed fine until the deadline.
+    #[test]
+    fn a_deadline_keeps_the_frames_that_already_arrived() {
+        let body = chunked(&["data: a\n\ndata: b\n\n"]);
+        let mut bytes = SSE_HEAD.as_bytes().to_vec();
+        bytes.extend_from_slice(&body[..body.len() - 5]); // truncated: no terminal chunk
+        let mut r = SseReader::new(64);
+        assert_eq!(r.feed(&bytes, 10), Step::NeedMore);
+        let out = r.finish(SseEnd::Timeout, 10);
+        assert_eq!(out.frames, vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(out.end, SseEnd::Timeout);
+    }
+
+    // Each frame is credited the moment its own bytes landed, because every published streaming
+    // number is a timing and a shared timestamp would flatten the gaps to zero.
+    #[test]
+    fn each_frame_is_credited_the_arrival_of_its_own_bytes() {
+        let mut r = SseReader::new(64);
+        assert_eq!(r.feed(SSE_HEAD.as_bytes(), 0), Step::NeedMore);
+        assert_eq!(r.feed(&chunked_open("data: a\n\n"), 100), Step::NeedMore);
+        assert_eq!(r.feed(&chunked_open("data: b\n\n"), 250), Step::NeedMore);
+        let out = r.finish(SseEnd::Timeout, 250);
+        assert_eq!(out.frames, vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(out.frame_offsets_us, vec![100, 250], "the gap between frames is the measurement");
+    }
+
+    fn chunked_open(payload: &str) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(format!("{:x}\r\n", payload.len()).as_bytes());
+        out.extend_from_slice(payload.as_bytes());
+        out.extend_from_slice(b"\r\n");
+        out
+    }
+
+    // THE TWO LANES MUST AGREE, AGAINST THE SAME PEER.
+    //
+    // The blocking lane and the tokio lane share the decoder and the request builder, so this is
+    // asserting that the only thing that differs - who owns the waiting - does not change what was
+    // read. Without it, "we ported the generator" is a claim resting on the two implementations
+    // looking similar.
+    #[test]
+    fn the_async_lane_reads_exactly_what_the_blocking_lane_reads() {
+        let addr = sse_server_for_diff();
+        let path = "/v1/chat/completions";
+        let headers: Vec<(String, String)> = vec![("authorization".into(), "Bearer dummy".into())];
+
+        let blocking = post_json_sse(addr, path, b"{}", &headers, Duration::from_secs(5), 8);
+
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("a runtime for the async lane");
+        let asynced = rt.block_on(post_json_sse_async(addr, path, b"{}", &headers, Duration::from_secs(5), 8));
+
+        assert_eq!(asynced.status, blocking.status, "the two lanes disagree on the status");
+        assert_eq!(asynced.frames, blocking.frames, "the two lanes decoded different frames");
+        assert_eq!(asynced.end, blocking.end, "the two lanes ended for different reasons");
+        assert_eq!(
+            asynced.frame_offsets_us.len(),
+            blocking.frame_offsets_us.len(),
+            "the two lanes credited a different number of frames"
+        );
+        assert!(!blocking.frames.is_empty(), "the fixture must actually stream, or this proves nothing");
+    }
+
+    /// A peer that streams in awkward pieces: chunk boundaries that fall inside `data:` lines, a
+    /// multi-line event, and non-data lines between frames.
+    fn sse_server_for_diff() -> SocketAddr {
+        let l = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = l.local_addr().expect("addr");
+        std::thread::spawn(move || {
+            for c in l.incoming() {
+                let Ok(mut c) = c else { continue };
+                std::thread::spawn(move || {
+                    let mut b = [0u8; 4096];
+                    let _ = c.read(&mut b);
+                    let head = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n";
+                    if c.write_all(head.as_bytes()).is_err() {
+                        return;
+                    }
+                    // Deliberately ugly splits, written as separate chunks AND separate writes.
+                    for piece in [
+                        "event: open\ndata: he",
+                        "llo\n\ndata: multi\ndata: line\n\n",
+                        "id: 3\ndata: last\n\n",
+                    ] {
+                        let framed = format!("{:x}\r\n{piece}\r\n", piece.len());
+                        if c.write_all(framed.as_bytes()).is_err() {
+                            return;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                    let _ = c.write_all(b"0\r\n\r\n");
+                });
+            }
+        });
+        addr
     }
 }
