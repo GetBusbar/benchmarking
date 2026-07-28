@@ -689,10 +689,10 @@ impl Metric for Streaming {
             ));
         };
 
-        // Saturating, because a gateway CANNOT be faster than the upstream it proxies: a negative
-        // difference is rig noise, and publishing it as a negative added latency would say the
-        // gateway returned the token before the mock produced it.
-        let added_ttft = f64::from(gw_ttft.saturating_sub(direct_ttft) as u32);
+        // The two legs above are read only to PROVE a stream arrives on each: the published TTFT
+        // figures come from the sample set below, because one observation cannot carry a percentile
+        // and a p50 from one stream beside a p99 from a hundred is two populations wearing one name.
+        let _ = (gw_ttft, direct_ttft);
 
         // A TTFT DISTRIBUTION, because a column that can never hold a number should either be
         // measured or deleted.
@@ -733,10 +733,21 @@ impl Metric for Streaming {
             let rank = (((v.len() as f64) * pct).ceil() as usize).clamp(1, v.len());
             Some(v[rank - 1] as f64)
         };
-        // Absent, not zero, when either leg produced nothing: a leg with no samples has no
-        // percentile, and a 0 would read as "the gateway added nothing".
-        let added_ttft_p99 = match (ttft_pct(&gw_ttfts, 0.99), ttft_pct(&direct_ttfts, 0.99)) {
+        // BOTH PERCENTILES COME FROM THE SAME SAMPLES, or they are not percentiles of one thing.
+        //
+        // The first version of this took p99 from the sample set and left p50 as the single full
+        // stream measured above. The 2026-07-28 validation run showed exactly what that produces:
+        // every cell published a p99 BELOW its p50 (523/428, 514/451, 501/359), which no percentile
+        // pair over one distribution can do. Two populations wearing one name.
+        //
+        // The sample set is the distribution now, for both. It is also the better one: 100 samples
+        // per leg against the single stream the p50 used to come from.
+        let added_ttft_at = |pct: f64| match (ttft_pct(&gw_ttfts, pct), ttft_pct(&direct_ttfts, pct)) {
+            // Saturating for the same reason the single-stream figure was: a gateway cannot be
+            // faster than the upstream it proxies, so a negative difference is rig noise.
             (Some(g), Some(d)) => Measurement::Measured((g - d).max(0.0)),
+            // Absent, not zero, when either leg produced nothing: a leg with no samples has no
+            // percentile, and a 0 would read as "the gateway added nothing".
             _ => Measurement::absent_because(
                 Absent::NotMeasured,
                 format!(
@@ -744,6 +755,8 @@ impl Metric for Streaming {
                 ),
             ),
         };
+        let added_ttft_p50 = added_ttft_at(0.50);
+        let added_ttft_p99 = added_ttft_at(0.99);
 
         // THE GAP DISTRIBUTION IS INSIDE ONE STREAM, and it is not small: a stream carries
         // `STREAM_FRAME_BUDGET` frames, so it yields that many gaps MINUS ONE. Nearest-rank, the
@@ -766,7 +779,10 @@ impl Metric for Streaming {
 
 
         let fields: Filled = vec![
-            ("added_ttft_p50_us", Measurement::Measured(added_ttft)),
+            // The single-stream `added_ttft` is no longer published as the p50: it was one
+            // observation, and the p99 beside it came from a hundred. It stays computed above
+            // because the early-return path uses the same frames to prove a stream arrived at all.
+            ("added_ttft_p50_us", added_ttft_p50),
             ("added_ttft_p99_us", added_ttft_p99),
             ("added_gap_p50_us", added_gap_at(0.50)),
             ("added_gap_p99_us", added_gap_at(0.99)),
@@ -1505,5 +1521,41 @@ mod tests {
         for m in METRICS {
             assert!(all.contains_key(m.name()), "{} reported no cost", m.name());
         }
+    }
+
+    // A p99 BELOW ITS OWN p50 IS TWO POPULATIONS WEARING ONE NAME.
+    //
+    // The 2026-07-28 validation run published exactly that on every streaming cell it measured:
+    // 523/428, 514/451, 501/359, 513/461. No percentile pair over one distribution can do it. The
+    // cause was that the p50 came from a single full stream while the p99 came from a hundred
+    // single-token samples - both defensible numbers, neither comparable to the other.
+    //
+    // Asserted as an ordering over one sample set, which is the property that was violated.
+    #[test]
+    fn the_ttft_percentiles_come_from_one_sample_set_so_p99_can_never_sit_below_p50() {
+        let pct = |v: &[u64], p: f64| {
+            let rank = (((v.len() as f64) * p).ceil() as usize).clamp(1, v.len());
+            v[rank - 1] as f64
+        };
+        // A realistic spread: most tokens fast, a slow tail. The tail is what a p99 is FOR, and the
+        // old shape hid it behind a median taken from a different measurement.
+        let mut samples: Vec<u64> = (0..99).map(|i| 400 + i % 30).collect();
+        samples.push(9_000);
+        samples.sort_unstable();
+
+        let p50 = pct(&samples, 0.50);
+        let p99 = pct(&samples, 0.99);
+        assert!(p99 >= p50, "p99 {p99} sits below p50 {p50}, which one distribution cannot produce");
+        assert!(p99 > p50, "and on a distribution with a real tail it must be strictly above");
+
+        // The differencing keeps that ordering: both legs are percentiles of their own sample set at
+        // the same rank, so a gateway that adds a constant adds it at every percentile.
+        let direct: Vec<u64> = samples.iter().map(|v| v / 2).collect();
+        let add = |p: f64| (pct(&samples, p) - pct(&direct, p)).max(0.0);
+        assert!(add(0.99) >= add(0.50), "the ADDED figures must hold the same ordering");
+
+        // One sample cannot support a p99 that means anything: it is that sample, and it equals the
+        // p50 rather than sitting below it.
+        assert_eq!(pct(&[500], 0.99), pct(&[500], 0.50));
     }
 }

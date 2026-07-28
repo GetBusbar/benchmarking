@@ -888,6 +888,16 @@ FILELIST
   _run_sh="$(
     printf 'export BENCH_HARDWARE=%q BENCH_ARCH=%q\n' "$HW_LABEL" "$ARCH"
     printf 'export BENCH_ENGINE_COMMIT=%q BENCH_ENGINE_DIRTY=%q\n' "$BENCH_ENGINE_COMMIT" "$BENCH_ENGINE_DIRTY"
+    # THE BOX GETS WHAT IS WRITTEN HERE, and nothing else. `export` in this orchestrator sets a
+    # variable in THIS shell; the box runs a different shell on a different machine, so a value that
+    # is not printed into this script simply does not exist there.
+    #
+    # That is how the box qualification stayed inert after being "fixed": the baseline was computed,
+    # exported locally, logged locally, and never shipped - so the engine read no baseline, seeded,
+    # and reported outcome=seed with samples=0 exactly as it always had. The orchestrator's own log
+    # line said 497862 while the snapshot said null, which is the kind of disagreement that makes a
+    # guard look alive when it is not.
+    printf 'export OTB_QUALIFY_BASELINE=%q\n' "${OTB_QUALIFY_BASELINE:-}"
     printf 'export SUITES=%q\n' "$ALL_SUITES"
     # Narrow the grid for HARNESS iteration. The grid is dialects x dialects, so one dialect is one
     # cell and a debugging run costs seconds instead of the full 6x6. Unset for a real run, which is
