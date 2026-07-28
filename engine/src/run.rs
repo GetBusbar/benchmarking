@@ -135,6 +135,43 @@ pub(crate) fn headers_for(cfg: &RunConfig, ingress: Dialect, egress: &str) -> Ve
 /// Ask the gateway whether it serves this pairing. The answer comes only from what was OBSERVED:
 /// a real status with a healthy rig is the gateway's own answer, no HTTP answer at all is not.
 pub fn probe_cell(cfg: &RunConfig, id: &CellId, mock_healthy: bool) -> Served {
+    let (attempts, pause_s) = crate::probe::transient_budget();
+    let mut last = probe_cell_once(cfg, id, mock_healthy);
+    // SPEND THE BUDGET THE VERDICT CLAIMS TO HAVE SPENT.
+    //
+    // `Verdict::Failed` is documented as "the failure persisted across the whole budget", and
+    // `transient_budget()` exists to fund that, but nothing outside its own tests ever called it: a
+    // single 503 was recorded as "this gateway does not serve this pairing", permanently, on the
+    // board. A status that says TEMPORARILY unavailable in words is not a capability.
+    //
+    // The harness makes this condition itself. Cells run back to back with no settle and the metric
+    // before each probe is a heavy load, so a gateway with admission control can still be shedding
+    // when the next cell asks whether it exists. busbar answered 503 on 26 of 36 cells in the
+    // 2026-07-28 field run and every one was published as a red; the day before, on a lighter
+    // engine, it served all 36. Its egress lanes all still answered under openai ingress in the
+    // same run, which is what shows the lanes were healthy and the moment was not.
+    //
+    // Every cell gets the same attempts and the same pause - the budget takes no arguments for that
+    // reason - so no cell can be tried harder than another.
+    for attempt in 1..attempts {
+        let Served::No(crate::probe::Verdict::Failed, ref ev) = last else { break };
+        if !crate::probe::status_is_transient(ev.status) {
+            break;
+        }
+        eprintln!(
+            "[probe] {id}: HTTP {} is transient - retry {attempt}/{} after {pause_s}s rather than \
+             recording a moment as a capability",
+            ev.status,
+            attempts - 1
+        );
+        std::thread::sleep(Duration::from_secs(u64::from(pause_s)));
+        last = probe_cell_once(cfg, id, mock_healthy);
+    }
+    last
+}
+
+/// One probe attempt. The verdict rules live here; `probe_cell` decides how many times to ask.
+fn probe_cell_once(cfg: &RunConfig, id: &CellId, mock_healthy: bool) -> Served {
     let Ok(ing) = id.ingress.parse::<Dialect>() else {
         return Served::Untestable(format!("unknown ingress dialect {}", id.ingress));
     };
@@ -1917,5 +1954,75 @@ while True:
         assert_eq!(sustained_median(19000.0, &[(90000.0, false), (91000.0, false)]), 19000.0);
         // The rig returning nothing at all is the same case: one fewer sample, not a zero.
         assert_eq!(sustained_median(19000.0, &[]), 19000.0);
+    }
+
+    // A SERVER THAT IS BUSY NOW AND FINE IN A MOMENT MUST NOT BE RECORDED AS INCAPABLE.
+    //
+    // This is the defect that cost a board. `transient_budget()` - 3 attempts, 30s apart - existed,
+    // was documented as the budget `Verdict::Failed` had spent, was unit-tested, and was called by
+    // nothing. So one 503 became "this gateway does not serve this pairing", permanently, in public.
+    //
+    // The harness provokes exactly this: cells run back to back with no settle and the metric before
+    // each probe is a heavy load, so a gateway with admission control is still shedding when the next
+    // cell asks whether it exists. In the 2026-07-28 field run busbar answered 503 on 26 of 36 cells
+    // and every one published as a red, while every egress lane answered fine under openai ingress
+    // in the same run - the lanes were healthy, the moment was not.
+    //
+    // The pause is shortened here through the same budget the field uses, so the test exercises the
+    // real loop rather than a copy of it.
+    fn serve_busy_then_ok(busy_times: usize) -> SocketAddr {
+        let l = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = l.local_addr().expect("addr");
+        let seen = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        std::thread::spawn(move || {
+            for c in l.incoming() {
+                let Ok(mut c) = c else { continue };
+                let seen = seen.clone();
+                std::thread::spawn(move || {
+                    let mut b = [0u8; 4096];
+                    while c.read(&mut b).unwrap_or(0) > 0 {
+                        let n = seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        let (status, body) = if n < busy_times {
+                            (503, "{\"error\":{\"message\":\"The service is temporarily overloaded.\"}}")
+                        } else {
+                            (200, "{\"ok\":true}")
+                        };
+                        let r = format!(
+                            "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{body}",
+                            body.len()
+                        );
+                        if c.write_all(r.as_bytes()).is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        addr
+    }
+
+    #[test]
+    fn a_gateway_that_answers_503_once_is_retried_not_recorded_as_not_serving() {
+        let addr = serve_busy_then_ok(1);
+        let cfg = test_fixture(addr, addr);
+        let served = probe_cell(&cfg, &CellId::new("openai", "openai"), true);
+        assert_eq!(
+            served,
+            Served::Yes,
+            "one 503 became a permanent capability verdict; this is the 26 busbar cells that \
+             published as red while every one of its lanes was healthy"
+        );
+    }
+
+    // The budget is bounded, and a gateway that is genuinely down stays down. Exhausting it must
+    // still produce the real verdict rather than an optimistic one.
+    #[test]
+    fn a_gateway_that_stays_503_across_the_whole_budget_is_still_recorded_as_failed() {
+        let addr = serve_busy_then_ok(usize::MAX);
+        let cfg = test_fixture(addr, addr);
+        match probe_cell(&cfg, &CellId::new("openai", "openai"), true) {
+            Served::No(crate::probe::Verdict::Failed, ev) => assert_eq!(ev.status, 503),
+            other => panic!("a persistently-503 gateway must still fail, got {other:?}"),
+        }
     }
 }
