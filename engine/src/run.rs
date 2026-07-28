@@ -1373,6 +1373,16 @@ pub struct CellResult {
     /// memory readings taken across the load window. `None` alongside `metrics` for a cell that was
     /// never measured, and empty for one that was measured but produced no series.
     pub series: Option<crate::metric::Series>,
+    /// SECONDS PER METRIC GROUP, so a slow run can be diagnosed offline instead of re-run with a
+    /// stopwatch. Keyed by the group's own name (`throughput`, `streaming`, `memory`, ...).
+    ///
+    /// A total is not an answer: "this cell took thirteen minutes" cannot distinguish the TTFT
+    /// sample set from a stream ladder that climbed to a higher rung from a gateway that simply got
+    /// slower, and those have completely different responses. Published per cell so the question
+    /// "what would we save by halving the TTFT samples" is arithmetic on the artifact.
+    ///
+    /// `None` for a cell that was never measured, matching `metrics` and `series`.
+    pub timings_s: Option<std::collections::BTreeMap<&'static str, f64>>,
     /// Whether the gateway was PROVEN to have emitted this cell's egress dialect upstream, and the
     /// evidence behind that verdict. See `reverify.rs`: this is an anti-false-positive guard rather
     /// than a measurement, which is why it is a plain tri-state beside the metrics rather than one of
@@ -1390,7 +1400,8 @@ pub fn run_grid(cfg: &RunConfig, lo: u32, hi: u32) -> Vec<CellResult> {
 /// every real measurement.
 pub fn run_grid_with(cfg: &RunConfig, lo: u32, hi: u32, metrics: &[&dyn metric::Metric]) -> Vec<CellResult> {
     let mut out = Vec::new();
-    let total = cfg.dialects.len() * cfg.dialects.len();
+    let total_cells = cfg.dialects.len() * cfg.dialects.len();
+    let total = total_cells;
     let mut done = 0usize;
     for eg in &cfg.dialects {
         for ing in &cfg.dialects {
@@ -1413,6 +1424,7 @@ pub fn run_grid_with(cfg: &RunConfig, lo: u32, hi: u32, metrics: &[&dyn metric::
                     outcome: CellOutcome::untestable(id, note),
                     metrics: None,
                     series: None,
+                    timings_s: None,
                     reverify: Default::default(),
                 });
                 continue;
@@ -1428,6 +1440,7 @@ pub fn run_grid_with(cfg: &RunConfig, lo: u32, hi: u32, metrics: &[&dyn metric::
                     outcome: CellOutcome::not_configurable(id, note),
                     metrics: None,
                     series: None,
+                    timings_s: None,
                     reverify: Default::default(),
                 });
                 continue;
@@ -1486,12 +1499,25 @@ pub fn run_grid_with(cfg: &RunConfig, lo: u32, hi: u32, metrics: &[&dyn metric::
             } else {
                 Default::default()
             };
-            let (metrics, series) = if served.is_measurable() {
+            let (metrics, series, timings) = if served.is_measurable() {
                 let ctx = metric::CellCtx { cfg, id: &id, dialect: *ing, min_conc: lo, max_conc: hi };
-                let (m, s) = metric::process_cell_with(&ctx, metrics);
-                (Some(m), Some(s))
+                let (m, s, t) = metric::process_cell_with(&ctx, metrics);
+                // WHERE THE CELL'S TIME WENT, on one greppable line. A run that is slower than the
+                // last one is otherwise unanswerable from the artifact: the total says a cell took
+                // thirteen minutes and nothing says whether that was the TTFT samples, a stream
+                // ladder reaching a higher rung, or the gateway itself.
+                let mut by_cost: Vec<_> = t.iter().collect();
+                by_cost.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap_or(std::cmp::Ordering::Equal));
+                let total: f64 = t.values().sum();
+                let breakdown = by_cost
+                    .iter()
+                    .map(|(name, secs)| format!("{name}={secs:.1}s"))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                eprintln!("[cell {done}/{total_cells}] {id}: {total:.1}s total | {breakdown}");
+                (Some(m), Some(s), Some(t))
             } else {
-                (None, None)
+                (None, None, None)
             };
             let outcome = match served {
                 Served::Yes => CellOutcome::served(id),
@@ -1511,7 +1537,7 @@ pub fn run_grid_with(cfg: &RunConfig, lo: u32, hi: u32, metrics: &[&dyn metric::
                 Served::UnprobedAuth(ev) => format!("unprobed_auth (HTTP {})", ev.status),
             };
             eprintln!("[cell {done}/{total}] {}: {label}", outcome.id);
-            out.push(CellResult { outcome, metrics, series, reverify });
+            out.push(CellResult { outcome, metrics, series, timings_s: timings, reverify });
         }
     }
     out

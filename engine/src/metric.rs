@@ -129,7 +129,9 @@ pub const METRICS: &[&dyn Metric] =
 /// A group that returns nothing for a field it declared gets an explicit absence rather than a
 /// missing key, so the artifact's shape does not depend on which code path a metric took. A missing
 /// key and a null mean different things to `site/gen-data.mjs`, and only one of them is honest.
-pub fn process_cell(ctx: &CellCtx<'_>) -> (BTreeMap<&'static str, Measurement<f64>>, Series) {
+pub fn process_cell(
+    ctx: &CellCtx<'_>,
+) -> (BTreeMap<&'static str, Measurement<f64>>, Series, BTreeMap<&'static str, f64>) {
     process_cell_with(ctx, METRICS)
 }
 
@@ -143,16 +145,30 @@ pub fn process_cell(ctx: &CellCtx<'_>) -> (BTreeMap<&'static str, Measurement<f6
 pub fn process_cell_with(
     ctx: &CellCtx<'_>,
     metrics: &[&dyn Metric],
-) -> (BTreeMap<&'static str, Measurement<f64>>, Series) {
+) -> (BTreeMap<&'static str, Measurement<f64>>, Series, BTreeMap<&'static str, f64>) {
     let mut out = BTreeMap::new();
     let mut series = Series::default();
+    let mut timings: BTreeMap<&'static str, f64> = BTreeMap::new();
     for m in metrics {
         // ONE LINE PER GROUP, BEFORE IT RUNS, to stderr. A cell's wall clock is dominated by these
         // groups, not by the probe, so a run that only speaks when a cell FINISHES goes dark for
         // minutes at a time and an operator cannot tell a slow sweep from a wedged box. Printed
         // before rather than after: the interesting case is the group that never returns.
+        // TIMED, AND THE TIME IS PUBLISHED. A run that is slower than the last one is a question
+        // nobody can answer from a wall-clock total: "agentgateway took 13 minutes a cell" does not
+        // say whether that was the TTFT distribution, a stream ladder climbing to a higher rung, or a
+        // gateway that got slower. Each group's own seconds are recorded per cell, so the answer is
+        // arithmetic on the artifact rather than a rerun with a stopwatch.
+        //
+        // Printed before AND after: before, because the interesting case is the group that never
+        // returns and an operator watching a live box needs to see which one it was; after, because
+        // that line is what makes the cost greppable out of a finished run's log.
         eprintln!("[phase] {} {}", ctx.id, m.name());
+        let started = std::time::Instant::now();
         let produced = m.measure(ctx);
+        let took = started.elapsed();
+        eprintln!("[phase] {} {} took {:.1}s", ctx.id, m.name(), took.as_secs_f64());
+        timings.insert(m.name(), took.as_secs_f64());
         // Series ACCUMULATE across groups rather than overwrite: the sweep comes from throughput and
         // the readings come from memory, and a later group returning none must not erase an earlier
         // group's evidence.
@@ -182,7 +198,7 @@ pub fn process_cell_with(
             out.insert(*field, value);
         }
     }
-    (out, series)
+    (out, series, timings)
 }
 
 // ── the groups ────────────────────────────────────────────────────────────────────────────────────
@@ -1460,5 +1476,34 @@ mod tests {
         let v: Vec<u64> = (1..=100).collect();
         assert_eq!(v[rank_of(v.len(), 0.99) - 1], 99);
         assert_eq!(v[rank_of(v.len(), 0.50) - 1], 50);
+    }
+
+    // WHAT A CELL COST, PER GROUP, IN THE ARTIFACT.
+    //
+    // A wall-clock total cannot answer the only question worth asking about a slow run. "Thirteen
+    // minutes a cell" might be the TTFT sample set, a stream ladder reaching a higher rung, or a
+    // gateway that got slower, and those have nothing in common as responses. Without per-group
+    // seconds the answer is another run with a stopwatch; with them it is arithmetic on committed
+    // JSON.
+    #[test]
+    fn every_group_that_runs_reports_what_it_cost() {
+        let cfg = crate::run::test_fixture("127.0.0.1:1".parse().expect("addr"), "127.0.0.1:1".parse().expect("addr"));
+        let id = crate::cell::CellId::new("openai", "openai");
+        let ctx = CellCtx { cfg: &cfg, id: &id, dialect: Dialect::Openai, min_conc: 1, max_conc: 2 };
+
+        // A group that measures nothing still took time and still reports it: a zero-cost group and
+        // an unreported one are different facts, and only one of them is true.
+        let (_, _, timings) = process_cell_with(&ctx, &[&Streaming]);
+        assert_eq!(timings.len(), 1, "one group ran, so one cost is reported: {timings:?}");
+        assert!(timings.contains_key("streaming"), "keyed by the group's own name: {timings:?}");
+        assert!(timings["streaming"] >= 0.0 && timings["streaming"].is_finite());
+
+        // Every group in the list is accounted for, so a breakdown always sums to the whole - a
+        // missing group would silently make the expensive one look cheaper than it was.
+        let (_, _, all) = process_cell_with(&ctx, METRICS);
+        assert_eq!(all.len(), METRICS.len(), "every group must report: {all:?}");
+        for m in METRICS {
+            assert!(all.contains_key(m.name()), "{} reported no cost", m.name());
+        }
     }
 }

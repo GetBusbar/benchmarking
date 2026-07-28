@@ -298,6 +298,15 @@ pub struct Cell {
     /// the field exists so a future run that does carries it through unchanged.
     #[serde(default)]
     pub memory: Option<CellMemory>,
+    /// SECONDS PER METRIC GROUP for this cell, keyed by the group's own name.
+    ///
+    /// Cost belongs in the artifact for the same reason every verdict's reason does: a run that got
+    /// slower is a question, and a wall-clock total cannot answer it. Thirteen minutes a cell might
+    /// be the TTFT sample set, a stream ladder reaching a higher rung, or a gateway that slowed down,
+    /// and those have nothing in common as responses. With this, "what would halving the TTFT samples
+    /// save" is arithmetic over committed JSON rather than another run with a stopwatch.
+    #[serde(default)]
+    pub timings_s: Option<std::collections::BTreeMap<String, f64>>,
 }
 
 /// One rung of a concurrency sweep. `rps` / `p99_us` / `fail` are `Measurement` on principle (a rung
@@ -713,6 +722,7 @@ mod tests {
                 stream_c1_note: None,
             }),
             memory: None,
+            timings_s: None,
         }
     }
 
