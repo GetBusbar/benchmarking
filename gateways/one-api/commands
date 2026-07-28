@@ -36,11 +36,18 @@ curl -sf -b /tmp/oa.jar -X POST http://127.0.0.1:3000/api/channel/ -H 'content-t
 # retry covers the channel rows this file just inserted not yet being visible to the router. No -f on
 # the curl: the 401 body is exactly what this loop inspects, and -f discards it on any non-2xx.
 #
-# EVERY MODEL, NOT JUST THE FIRST. This checked gpt-4o-mini alone while creating three channels, so a
-# channel that inserted but never became routable was invisible here and surfaced later as the
-# GATEWAY failing: one-api published "no available channel for model gemini-1.5-pro" as two red cells
-# in all eight runs of 2026-07-27/28, including the oldest engine. A setup this harness got wrong must
-# stop the run and say so, not become a verdict about the gateway. The channel POSTs above already
-# abort on a non-zero exit (bin/otb.rs runs each line and stops the run on failure); this closes the
-# gap where the POST succeeds and the routing still does not work.
-for m in gpt-4o-mini claude-3-5-sonnet-20240620 gemini-1.5-pro; do i=1; ok=0; while [ $i -le 20 ]; do curl -s -m 10 -X POST http://127.0.0.1:3000/v1/chat/completions -H 'content-type: application/json' -H 'Authorization: Bearer dummy' -d "{\"model\":\"$m\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"max_tokens\":1}" -o /tmp/oa-auth-check; if grep -q chat.completion /tmp/oa-auth-check; then ok=1; break; fi; sleep 0.5; i=$((i+1)); done; [ "$ok" = 1 ] || { echo "one-api: model $m never relayed after 20 checks - its channel is registered but not routable, so every cell for that egress would publish a red this harness caused: $(cat /tmp/oa-auth-check)" >&2; exit 1; }; done
+# EVERY MODEL, NOT JUST THE FIRST - but only the FIRST is fatal.
+#
+# This checked gpt-4o-mini alone while creating three channels, so a channel that inserted and never
+# became routable was invisible here and surfaced later as the GATEWAY failing.
+#
+# Aborting the whole run on any of the three was the first attempt at fixing that, and it was worse:
+# the anthropic and gemini channels have failed to route in all eight runs of 2026-07-27/28, so it
+# would have turned two red cells into no one-api row at all. Losing a gateway entirely is not a more
+# honest outcome than publishing what it does serve.
+#
+# So: gpt-4o-mini failing is fatal, because nothing this gateway publishes would mean anything
+# without its primary lane. A secondary egress model failing is a loud warning, and those cells are
+# declared UNTESTABLE in definition.json - the harness has not established that it can route them,
+# which is a statement about our setup and not a verdict about one-api.
+for m in gpt-4o-mini claude-3-5-sonnet-20240620 gemini-1.5-pro; do i=1; ok=0; while [ $i -le 20 ]; do curl -s -m 10 -X POST http://127.0.0.1:3000/v1/chat/completions -H 'content-type: application/json' -H 'Authorization: Bearer dummy' -d "{\"model\":\"$m\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"max_tokens\":1}" -o /tmp/oa-auth-check; if grep -q chat.completion /tmp/oa-auth-check; then ok=1; break; fi; sleep 0.5; i=$((i+1)); done; if [ "$ok" != 1 ]; then if [ "$m" = gpt-4o-mini ]; then echo "one-api: the declared auth never relayed for $m after 20 checks - INITIAL_ROOT_TOKEN may no longer be honoured by this image, and nothing this gateway publishes would mean anything: $(cat /tmp/oa-auth-check)" >&2; exit 1; else echo "one-api: model $m did not relay - its channel is registered but not routable. Its cells are DECLARED UNTESTABLE in definition.json for exactly this, so this is a warning and not a failure: the openai lane still measures and the row still publishes. $(cat /tmp/oa-auth-check)" >&2; fi; fi; done
