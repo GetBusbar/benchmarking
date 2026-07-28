@@ -41,6 +41,12 @@ TS_RE = re.compile(r"^\[(\d\d):(\d\d):(\d\d)\]")
 # A cell whose verdict is one of these was skipped or refused, and cost almost nothing. Anything else
 # was measured, and is what the remaining time is actually made of.
 CHEAP = ("not_configurable", "untestable", "unprobed_auth")
+# A CELL IS SERVED ONLY IF THE ENGINE SAID SO. This used to count anything whose verdict was not one
+# of CHEAP, which is fail-open: a new line shaped like `[cell N/M] <id>: <anything>` silently became a
+# served cell. That happened the day a per-cell cost breakdown was added under the same prefix - every
+# measured cell counted twice, gateways showed "10/8 served", and the ETA hit zero while they were
+# still running. Listing what DOES count means an unrecognised line is ignored rather than believed.
+MEASURED = ("served", "failed")
 
 
 def declared_served(gw):
@@ -129,7 +135,7 @@ def parse_progress(text):
         if m:
             done, tot, cid, verdict = int(m.group(1)), int(m.group(2)), m.group(3), m.group(4)
             cells, total = done, tot
-            if not verdict.startswith(CHEAP):
+            if verdict.startswith(MEASURED):
                 served_done += 1
             continue
         m = PHASE_RE.search(ln)
