@@ -18,7 +18,7 @@ Every number below is regenerated from the raw `results/*.json` - re-run `run-al
 | [Portkey](https://github.com/Portkey-AI/gateway) | 3,390 µs | 899 | 910 | 154 MiB | 141 MiB | `` |
 | [LiteLLM · Python](https://github.com/BerriAI/litellm) | 7,980 µs | 145 | 0 | 1036 MiB | 1083 MiB | `` |
 | [TensorZero](https://github.com/tensorzero/tensorzero) | 41,362 µs | 0 | 10,989 | 49 MiB | 66 MiB | `` |
-| [Plano](https://github.com/katanemo/plano) | 218,981 µs | 0 | 21 | 599 MiB | 952 MiB | `` |
+| [Plano](https://github.com/katanemo/plano) | 218,982 µs | 0 | 21 | 611 MiB | 991 MiB | `` |
 | [One-API](https://github.com/songquanpeng/one-api) | - | 0 | 0 | 80 MiB | 142 MiB | `` |
 
 Two throughput numbers: **max proxy RPS** (instant upstream - raw forwarding speed) and **sustained RPS under a 20 ms upstream delay** (AIGatewayBench's metric - concurrent in-flight capacity under realistic LLM latency).
@@ -40,37 +40,37 @@ Same box, same mock, one gateway at a time. Streaming figures are the overhead t
 | [Portkey](https://github.com/Portkey-AI/gateway) | n/a | n/a | 127 (5,105 fps) | 884 (openai → anthropic) |
 | [LiteLLM · Python](https://github.com/BerriAI/litellm) | n/a | n/a | 27 (1,080 fps) | 125 (openai → openai-responses) |
 | [TensorZero](https://github.com/tensorzero/tensorzero) | n/a | n/a | 1,151 (8,195 fps) | 0 (openai → bedrock) |
-| [Plano](https://github.com/katanemo/plano) | n/a | n/a | 1 (43 fps) | n/a |
+| [Plano](https://github.com/katanemo/plano) | 183.1 ms | 0 µs | 47 (771 fps) | n/a |
 
 **✕** cells are measured refusals, not gaps: the gateway was offered the load and could not do the thing (buffered instead of streaming, rejected the Anthropic shape, or has no native key/limit governance). **n/a** = that suite hasn't been run for this gateway yet.
 
-![added_latency](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/added_latency.png?v=202607282025)
+![added_latency](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/added_latency.png?v=202607282037)
 
-![rps_max_proxy](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/rps_max_proxy.png?v=202607282025)
+![rps_max_proxy](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/rps_max_proxy.png?v=202607282037)
 
-![rps_sustained_20ms](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/rps_sustained_20ms.png?v=202607282025)
+![rps_sustained_20ms](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/rps_sustained_20ms.png?v=202607282037)
 
-![memory_rss](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/memory_rss.png?v=202607282025)
+![memory_rss](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/memory_rss.png?v=202607282037)
 
-![memory_recovery](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/memory_recovery.png?v=202607282025)
+![memory_recovery](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/memory_recovery.png?v=202607282037)
 
-![rps_per_dollar](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/rps_per_dollar.png?v=202607282025)
+![rps_per_dollar](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/rps_per_dollar.png?v=202607282037)
 
-![cost_per_million](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/cost_per_million.png?v=202607282025)
+![cost_per_million](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/cost_per_million.png?v=202607282037)
 
-![stream_added_ttft](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/stream_added_ttft.png?v=202607282025)
+![stream_added_ttft](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/stream_added_ttft.png?v=202607282037)
 
-![stream_added_gap](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/stream_added_gap.png?v=202607282025)
+![stream_added_gap](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/stream_added_gap.png?v=202607282037)
 
-![stream_sustained](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/stream_sustained.png?v=202607282025)
+![stream_sustained](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/stream_sustained.png?v=202607282037)
 
-![streamcpu_fps](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/streamcpu_fps.png?v=202607282025)
+![streamcpu_fps](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/streamcpu_fps.png?v=202607282037)
 
-![xlate_rps_sustained_20ms](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/xlate_rps_sustained_20ms.png?v=202607282025)
+![xlate_rps_sustained_20ms](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/xlate_rps_sustained_20ms.png?v=202607282037)
 
-![xlate_added_latency](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/xlate_added_latency.png?v=202607282025)
+![xlate_added_latency](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/xlate_added_latency.png?v=202607282037)
 
 ---
 Method: added latency = gateway p99 − direct-to-mock p99 at concurrency 1; RPS ceiling = highest sustained req/s with p99 < 1 s and <0.1% errors; RSS idle = after first 200, peak = under sustained load. Same box, same mock, same load, one gateway at a time. Each gateway's source ref is pinned in its own `gateways/<name>/definition.json`; the built commit is in each row.
 
-<sub>Page + charts regenerated **2026-07-28 20:25 UTC** from the raw `results/*.json`.</sub>
+<sub>Page + charts regenerated **2026-07-28 20:37 UTC** from the raw `results/*.json`.</sub>
