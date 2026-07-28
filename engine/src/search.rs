@@ -227,7 +227,7 @@ fn interrupted<P: Probe>(s: Search<P>) -> PeakResult {
 
 /// Windows taken at every rung. Three is the smallest sample with a middle value, and the median of
 /// three is what makes a rung's number resistant to one unlucky window.
-const WINDOWS_PER_RUNG: usize = 3;
+pub const WINDOWS_PER_RUNG: usize = 3;
 
 /// A floor under the measured wobble. Three windows can agree closely by luck, and a threshold near
 /// zero would let any flutter read as a real gain.
@@ -257,7 +257,7 @@ fn relative_spread(v: &[f64]) -> f64 {
 /// Nearest-rank p50 over a sorted slice: the SAME convention `gen::GenStats::pct_of` uses for the
 /// published latency percentiles, and it returns a value some window actually produced rather than
 /// the average of two that none did.
-fn nearest_rank_median(sorted: &[f64]) -> Option<f64> {
+pub fn nearest_rank_median(sorted: &[f64]) -> Option<f64> {
     if sorted.is_empty() {
         return None;
     }
