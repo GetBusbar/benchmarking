@@ -9,7 +9,7 @@
 //
 //   node gateways/fetch-stars.mjs && git add gateways/stars.json
 //
-// Reads each gateways/*/gateway.sh manifest's GW_REPO, hits the GitHub API
+// Reads each gateways/*/definition.json manifest's repo, hits the GitHub API
 // (unauthenticated is fine for this many public repos; set GITHUB_TOKEN if you are
 // rate-limited), and writes { "<gateway-key>": { "stars": N, "as_of": "YYYY-MM-DD" } }.
 // Two gateways may share one upstream repo; each still gets that repo's count under its
@@ -24,7 +24,7 @@ const OUT = join(HERE, "stars.json");
 
 const keys = readdirSync(HERE).filter((d) => {
   try {
-    return statSync(join(HERE, d)).isDirectory() && existsSync(join(HERE, d, "gateway.sh"));
+    return statSync(join(HERE, d)).isDirectory() && existsSync(join(HERE, d, "definition.json"));
   } catch { return false; }
 }).sort();
 
@@ -34,7 +34,8 @@ if (process.env.GITHUB_TOKEN) headers.authorization = `Bearer ${process.env.GITH
 const asOf = new Date().toISOString().slice(0, 10);
 
 // The date of a repo's FIRST commit (project age) — deliberately NOT `created_at`, which resets
-// on renames/re-imports (archgw -> plano would look newborn). GitHub's commits list is
+// on renames/re-imports (one entrant in this field was renamed, and `created_at` would show it
+// as newborn while its real history runs years earlier). GitHub's commits list is
 // newest-first with no reverse order, so: page the list at per_page=1, read the `last` page
 // number from the Link header, fetch that page — its single commit is the root.
 async function firstCommitDate(slug) {
@@ -53,12 +54,18 @@ async function firstCommitDate(slug) {
 const out = {};
 const cache = new Map(); // owner/repo -> {stars, first_commit} (shared repos fetched once)
 for (const key of keys) {
-  const text = readFileSync(join(HERE, key, "gateway.sh"), "utf8");
-  const m = text.match(/^GW_REPO=(?:"([^"]*)"|(\S+))/m);
-  const repo = m ? (m[1] ?? m[2]) : null;
+  // The manifest is JSON, and it is the same one the engine runs from. Regex-scraping a shell
+  // variable out of it would match nothing and silently drop every gateway's star count.
+  let repo = null;
+  try {
+    repo = JSON.parse(readFileSync(join(HERE, key, "definition.json"), "utf8")).repo ?? null;
+  } catch {
+    console.warn(`skip ${key}: definition.json is unreadable or not JSON`);
+    continue;
+  }
   const slug = repo && repo.match(/github\.com\/([^/]+\/[^/\s#?]+)/)?.[1];
   if (!slug) {
-    console.warn(`skip ${key}: no parsable github GW_REPO (${repo})`);
+    console.warn(`skip ${key}: no parsable github repo (${repo})`);
     continue;
   }
   if (!cache.has(slug)) {

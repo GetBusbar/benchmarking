@@ -8,7 +8,7 @@
 // site/data/<category>.json (a per-category generator or a section here), and register it
 // in CATEGORIES in app.js; the emitted `category` field names which bundle this is.
 //
-// Scans gateways/*/gateway.sh (the self-describing manifests: GW_DISPLAY, GW_LANG, GW_REPO)
+// Scans gateways/*/definition.json (the manifest the engine runs from: display, lang, class, repo)
 // plus results/{perf,memory,stream,streamcpu,xlate,matrix}/<gateway>.json, and emits
 // site/data.json. Also copies the generated chart PNGs (results/*.png) into site/charts/
 // and the bundled Inter fonts (assets/fonts) into site/fonts/ so the site/ directory is a
@@ -47,23 +47,24 @@ const UNGATED_LAT = UNGATED_LAT_FIELDS;
 
 // ---- gateway manifests ------------------------------------------------------
 function parseManifest(text) {
-  // Values are either quoted ("Some Gateway · Python") or a bare word (Rust); a trailing
-  // shell comment may follow either form.
-  const get = (name) => {
-    const m = text.match(new RegExp(`^${name}=(?:"([^"]*)"|(\\S+))`, "m"));
-    return m ? (m[1] ?? m[2]) : null;
-  };
-  // GW_CLASS is each project's OWN self-description (its README/site tagline: "control
-  // plane", "LLM gateway", "API gateway", ...), never our editorial classification.
-  // Missing/unknown falls back to the neutral "Gateway".
-  return { display: get("GW_DISPLAY"), lang: get("GW_LANG"), repo: get("GW_REPO"), cls: get("GW_CLASS") };
+  // ONE manifest per gateway, and it is the one the engine runs from. This used to scrape
+  // GW_DISPLAY/GW_LANG/GW_CLASS/GW_REPO out of a shell file that the Rust engine had already
+  // stopped reading, so the board's labels came from a different file than the measurements - and
+  // a gateway carrying only a definition.json was invisible to every shell-side caller.
+  //
+  // `cls` is each project's OWN self-description (its README/site tagline: "control plane", "LLM
+  // gateway", "API gateway", ...), never our editorial classification. Missing/unknown falls back
+  // to the neutral "Gateway".
+  let d = {};
+  try { d = JSON.parse(text); } catch { return { display: null, lang: null, repo: null, cls: null }; }
+  return { display: d.display ?? null, lang: d.lang ?? null, repo: d.repo ?? null, cls: d.class ?? null };
 }
 
 const gatewaysDir = join(ROOT, "gateways");
 const gatewayKeys = existsSync(gatewaysDir)
   ? readdirSync(gatewaysDir).filter((d) => {
       try {
-        return statSync(join(gatewaysDir, d)).isDirectory() && existsSync(join(gatewaysDir, d, "gateway.sh"));
+        return statSync(join(gatewaysDir, d)).isDirectory() && existsSync(join(gatewaysDir, d, "definition.json"));
       } catch { return false; }
     }).sort()
   : [];
@@ -105,7 +106,7 @@ function newestSnapshot(key) {
 const starsSnap = readJson(join(gatewaysDir, "stars.json")) || {};
 
 const gateways = gatewayKeys.map((key) => {
-  const meta = parseManifest(readFileSync(join(gatewaysDir, key, "gateway.sh"), "utf8"));
+  const meta = parseManifest(readFileSync(join(gatewaysDir, key, "definition.json"), "utf8"));
   const g = {
     key,
     display: meta.display || key,

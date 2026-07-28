@@ -13,7 +13,7 @@
 # Requires awscli v2 (configured), ssh, rsync. Each box is m7g.4xlarge (16 real Graviton3 cores): the
 # gateway-under-test is pinned to 4 cores (= an m7g.xlarge, the class AIGatewayBench uses); the mock +
 # load generator get 6 cores each, so the harness can never steal cycles from the gateway. EVERY
-# gateway build/pulls itself on its box from the ref pinned in its own gateways/<name>/gateway.sh.
+# gateway build/pulls itself on its box from the ref pinned in its own gateways/<name>/definition.json.
 set -uo pipefail
 export AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-us-east-1}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"   # this repo (benchmarking) root
@@ -274,7 +274,7 @@ log(){ echo "[$(date +%H:%M:%S)] $*"; }
 # Default field: every gateway with a manifest under gateways/ (discovered from disk, alphabetical;
 # same source as run-all.sh - add/remove a dir and both follow). Envoy AI Gateway is absent (k8s-native).
 DEFAULT_GATEWAYS=()
-for d in "$HERE"/gateways/*/gateway.sh; do DEFAULT_GATEWAYS+=("$(basename "$(dirname "$d")")"); done
+for d in "$HERE"/gateways/*/definition.json; do DEFAULT_GATEWAYS+=("$(basename "$(dirname "$d")")"); done
 if [[ $# -gt 0 ]]; then GATEWAYS=("$@"); else GATEWAYS=("${DEFAULT_GATEWAYS[@]}"); fi
 
 # ── shared AWS setup (key + SG), done once ────────────────────────────────────────────────────────
