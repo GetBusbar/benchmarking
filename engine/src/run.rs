@@ -531,8 +531,59 @@ pub fn sweep_sustained_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> C
         Some(0) => {
             CellSustained { rps: Measurement::Measured(0.0), concurrency: Measurement::Measured(0), points: p.points }
         }
+        // THE PUBLISHED RPS IS A MEDIAN OF REPEATED WINDOWS, THE SAME WAY THE MAXIMUM IS.
+        //
+        // The bisection needs one window per rung to decide pass/fail, and that is the right shape
+        // for a gate. But the rps it leaves behind at the ceiling is then a SINGLE sample, while
+        // `saturation_plateau` publishes the MEDIAN of three at its own rung. Comparing those two is
+        // comparing different statistics, and on a gateway whose windows scatter it is not close:
+        // a single window can land on the fast mode, a median of three cannot.
+        //
+        // That is the whole of C6's complaint. In the 2026-07-28 field run every inverted cell -
+        // kong openai>openai, openai>gemini and openai>anthropic, aisix openai-responses>openai,
+        // apisix bedrock>bedrock, bifrost openai>cohere - had a sweep scatter between 65% and 105%,
+        // and no cell with a steady sweep inverted at all. kong's windows at one concurrency ran
+        // 18672, 18824, 23761. The sustained leg caught the 23761 mode and the maximum's median took
+        // the 18800 one, so the board published a "maximum" that another leg had already beaten.
+        // Neither number was wrong; they were answers to two different questions.
+        //
+        // Re-measuring the proven ceiling the same way the peak rung is measured costs two extra
+        // windows on one concurrency per cell, and makes the two legs comparable by construction
+        // rather than by luck. The gate decisions above are untouched: this changes what is
+        // PUBLISHED at the ceiling, not which ceiling was proven.
         Some(c) => match p.points.iter().find(|pt| pt.concurrency == c).map(|pt| pt.rps) {
-            Some(v) => CellSustained { rps: Measurement::Measured(v), concurrency: Measurement::Measured(c), points: p.points },
+            Some(first) => {
+                let mut vals = vec![first];
+                for _ in 1..crate::search::WINDOWS_PER_RUNG {
+                    // A window that produces nothing is not a zero: it is one fewer sample. Falling
+                    // back to the windows in hand keeps the median honest rather than dragging it to
+                    // the floor with a reading the rig never took.
+                    if let Some(stats) = load_window(cfg, &p.path, &p.body, &p.headers, c) {
+                        if stats.ok > 0 || stats.fail > 0 {
+                            let rps = stats.rps() as f64;
+                            let passed = sustained_gate_passes(stats.p99_us, stats.ok, stats.fail);
+                            p.points.push(SustainedPoint {
+                                concurrency: c,
+                                passed,
+                                rps,
+                                p99_us: stats.p99_us,
+                                fail: stats.fail as i64,
+                            });
+                            // ONLY WINDOWS THAT HELD THE GATE COUNT, exactly as `measure_rung`
+                            // excludes a failed window from the peak's median. A window that blew
+                            // the p99 ceiling did not sustain anything, so folding its rate into a
+                            // SUSTAINED number would publish throughput the gate just refused. It
+                            // stays in `points` as evidence either way.
+                            if passed {
+                                vals.push(rps);
+                            }
+                        }
+                    }
+                }
+                vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                let rps = crate::search::nearest_rank_median(&vals).unwrap_or(first);
+                CellSustained { rps: Measurement::Measured(rps), concurrency: Measurement::Measured(c), points: p.points }
+            }
             // The bisection proved the ceiling without this engine losing the rung's own reading -
             // it never should, since `sample` memoises every probe - but if it somehow did, publish
             // the ceiling as unmeasured rather than inventing an rps for it.
@@ -1801,5 +1852,61 @@ while True:
         // ratio computed as 0/0 must never read as a CLEAN window by accident of floating-point
         // division.
         assert!(!sustained_gate_passes(Some(1), 0, 0));
+    }
+
+    // ── the two legs must sample the same way, or C6 compares two different questions ────────────
+    //
+    // The maximum is a MEDIAN of three windows at its rung. The sustained ceiling used to publish a
+    // SINGLE window at its own. On a gateway whose windows scatter, a single sample can land on the
+    // fast mode where a median of three cannot, so the sustained leg beat the "maximum" and C6
+    // correctly refused the board. In the 2026-07-28 field run all six inverted cells had a sweep
+    // scatter between 65% and 105% and no steady cell inverted at all; kong's windows at one
+    // concurrency ran 18672, 18824, 23761.
+    //
+    // This asserts the sampling, which is the thing that changed: the proven ceiling is re-measured
+    // WINDOWS_PER_RUNG times and what ships is the median of those windows. Before the fix exactly
+    // one window existed at the ceiling, so the count alone fails.
+    #[test]
+    fn the_published_sustained_ceiling_is_a_median_of_repeated_windows_like_the_maximum_is() {
+        // The load generator runs as a `taskset`-pinned child, which is Linux-only. The field and
+        // CI are Linux, where this runs for real; on macOS there is nothing to pin with and the
+        // window would fail for a reason unrelated to sampling. Say so rather than reporting red for
+        // the wrong reason - a test that cries wolf gets ignored, and an ignored test is not a gate.
+        if std::process::Command::new("sh").args(["-c", "command -v taskset"]).output().map(|o| !o.status.success()).unwrap_or(true) {
+            eprintln!("skipping the_published_sustained_ceiling_is_a_median...: no taskset on this platform (the field and CI are Linux, where this runs for real)");
+            return;
+        }
+        let addr = serve_json(200);
+        let cfg = test_fixture(addr, addr);
+        let id = CellId { ingress: "openai".into(), egress: "openai".into() };
+        let out = sweep_sustained_cell(&cfg, &id, 1, 4);
+
+        let Some(c) = out.concurrency.value().copied() else {
+            panic!("this peer answers every request, so a ceiling must be proven: {:?}", out.concurrency)
+        };
+        if c == 0 {
+            return; // "nothing sustains the gate" has no rung to re-measure, by construction.
+        }
+        let at_ceiling: Vec<f64> = out.points.iter().filter(|p| p.concurrency == c).map(|p| p.rps).collect();
+        // The median is taken over the windows that HELD the gate, mirroring `measure_rung`.
+        let passing: Vec<f64> =
+            out.points.iter().filter(|p| p.concurrency == c && p.passed).map(|p| p.rps).collect();
+        assert_eq!(
+            at_ceiling.len(),
+            crate::search::WINDOWS_PER_RUNG,
+            "the ceiling c={c} carries {} window(s); a single window is the asymmetry that made the \
+             sustained leg beat the maximum on a scattering gateway",
+            at_ceiling.len()
+        );
+
+        let mut sorted = passing.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let want = crate::search::nearest_rank_median(&sorted).expect("three windows have a median");
+        assert_eq!(
+            out.rps.value().copied(),
+            Some(want),
+            "what ships must be the MEDIAN of the ceiling's windows {sorted:?}, the same statistic \
+             the maximum publishes, not whichever window happened to be taken first"
+        );
     }
 }
