@@ -293,9 +293,27 @@ pub const WINDOWS_PER_RUNG: usize = 3;
 /// zero would let any flutter read as a real gain.
 const WOBBLE_FLOOR: f64 = 0.02;
 
-/// How many consecutive rungs must fail to improve before the curve is called saturated. One flat
-/// rung can be a downward draw; two in a row is the curve.
-const FLAT_RUNGS_TO_STOP: usize = 2;
+/// How many consecutive rungs must fail to improve before the curve is called saturated.
+///
+/// THREE, BECAUSE TWO IS NOT ENOUGH EVIDENCE ON A NOISY GATEWAY. The old value was two, reasoned as
+/// "one flat rung can be a downward draw; two in a row is the curve". kong disproved that on real
+/// hardware: its throughput climbs all the way to c~94, but each DOUBLING only buys 2-5% while its
+/// window spread is 19-26%, so the noise bar (spread over root-n) is larger than the real per-step
+/// gain. Two consecutive rungs read as flat while the curve was still rising, the search stopped at
+/// c=32, and the published "maximum" of 15909 was beaten by the sustained search - which does not
+/// stop on flatness - at 17898 on the same box.
+///
+/// That is the whole C6 inversion class. Replayed against kong's own recorded windows:
+///
+///   openai>bedrock     FLAT=2 stops c=32, publishes 15909 (sustained 17898, 1.13x INVERTED)
+///                      FLAT=3 stops c=256, publishes 17829 (1.00x)
+///   openai>anthropic   FLAT=2 stops c=32, publishes 20619 (sustained 24486, 1.19x INVERTED)
+///                      FLAT=3 stops c=256, publishes 24496 (1.00x)
+///
+/// The cost is one extra rung on a gateway that really has saturated - three windows, a few seconds
+/// against a cell that takes minutes. The cost of stopping early is publishing a maximum that
+/// another measurement on the same box beats, which is not a maximum.
+const FLAT_RUNGS_TO_STOP: usize = 3;
 
 /// The lowest rung at which "more concurrency does not help" is a credible thing to conclude.
 /// Saturation at c=1 or c=2 would be decided by the noisiest windows the harness takes - one
@@ -1407,6 +1425,85 @@ mod proptests {
                     &format!("saturation_plateau({min_conc}..{max_conc}, gateway ceiling {ceiling})"),
                 );
             }
+        }
+    }
+
+    // A SLOW CLIMB UNDER NOISE IS STILL A CLIMB.
+    //
+    // REPLAY OF kong openai>bedrock, 2026-07-28 field run, its own recorded windows. Throughput
+    // rises all the way to c~94, but each doubling buys only 2-5% while the window spread is 19-26%,
+    // so the noise bar is LARGER than the real per-step gain and every rung reads as flat. With two
+    // flat rungs as the stopping rule the search quit at c=32 and published 15909 as a maximum; the
+    // sustained search, which does not stop on flatness, measured 17898 on the same box. A maximum
+    // another measurement beats is not a maximum, and this is the whole C6 inversion class.
+    struct KongCurve {
+        rungs: std::collections::BTreeMap<u32, Vec<f64>>,
+        taken: std::collections::BTreeMap<u32, usize>,
+    }
+    impl Probe for KongCurve {
+        fn probe(&mut self, c: u32) -> Option<Sample> {
+            let i = self.taken.entry(c).or_insert(0);
+            // Above what the max search actually probed, the sustained search's own readings at the
+            // same concurrencies stand in: same box, same mock, same cell, minutes apart.
+            let v = self.rungs.get(&c).map(|w| w[(*i).min(w.len() - 1)]).unwrap_or(17_800.0);
+            *i += 1;
+            Some(Sample { value: v, passed: true })
+        }
+    }
+
+    #[test]
+    fn a_curve_that_climbs_slower_than_its_own_noise_is_not_saturated() {
+        let mut rungs = std::collections::BTreeMap::new();
+        rungs.insert(1u32, vec![3347.0, 3348.0, 3351.0]);
+        rungs.insert(2, vec![5198.0, 5208.0, 6554.0]);
+        rungs.insert(4, vec![7253.0, 8368.0, 10886.0]);
+        rungs.insert(8, vec![12154.0, 14834.0, 15052.0]);
+        rungs.insert(16, vec![12434.0, 15556.0, 16160.0]);
+        rungs.insert(32, vec![12262.0, 15909.0, 16548.0]);
+        // What the sustained search measured above where the max search gave up.
+        rungs.insert(64, vec![17466.0; 3]);
+        rungs.insert(128, vec![17829.0; 3]);
+
+        let mut p = KongCurve { rungs, taken: Default::default() };
+        let r = saturation_plateau(&mut p, 1, 4096);
+        let peak = match r.peak {
+            Measurement::Measured(pt) => pt.value,
+            ref other => panic!("kong's curve must produce a peak, got {other:?}"),
+        };
+
+        // The sustained search measured 17898 on this cell. A published maximum below that is one
+        // another measurement already beat.
+        assert!(
+            peak > 17_898.0 * 0.95,
+            "published {peak:.0} as the maximum, but the sustained search measured 17898 on the same \
+             box - the search stopped while the curve was still climbing"
+        );
+        // Concretely: it must get past the rung where two-flat-rungs used to quit.
+        let top = r.points.iter().map(|x| x.concurrency).max().unwrap_or(0);
+        assert!(top >= 128, "the ladder stopped at c={top}; kong keeps climbing to c~94");
+    }
+
+    // The other half of the same rule: a curve that really HAS levelled off must still stop, and
+    // promptly. Requiring more evidence to call saturation must not mean never calling it.
+    #[test]
+    fn a_genuinely_flat_curve_still_stops_quickly() {
+        struct Flat;
+        impl Probe for Flat {
+            fn probe(&mut self, c: u32) -> Option<Sample> {
+                // Rises to c=16 then dead flat, with clean windows.
+                Some(Sample { value: f64::from(c.min(16)) * 1000.0, passed: true })
+            }
+        }
+        let r = saturation_plateau(&mut Flat, 1, 65536);
+        let top = r.points.iter().map(|x| x.concurrency).max().unwrap_or(0);
+        assert!(
+            top <= 256,
+            "a flat curve ran to c={top} - three flat rungs must still be a prompt stop, not a licence \
+             to climb the whole range"
+        );
+        match r.peak {
+            Measurement::Measured(pt) => assert_eq!(pt.value, 16_000.0),
+            ref other => panic!("a flat curve has a plateau, got {other:?}"),
         }
     }
 }
