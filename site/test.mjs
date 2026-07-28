@@ -3004,3 +3004,99 @@ test("protocol grid: a matrix-less gateway renders an all-n/a row with its reaso
 });
 
 console.log(`\n${passed} tests passed`);
+
+// ---- C8: THE BOARD IS GROUPED BY INSTRUMENT, NOT BY COMMIT SHA -----------------------------------
+//
+// C8's claim is that one instrument measured every column. The commit sha is a PROXY for that, and it
+// is loose in exactly one direction: a commit can change while the instrument does not. A gateway's
+// own config file, a test, a workflow - none of them can alter how a DIFFERENT gateway was measured,
+// yet each moves the sha and each used to cost a full field re-run to satisfy a check that would have
+// learned nothing. The proxy is never loose the other way, so attesting equivalence can only ever
+// excuse a difference the built binaries prove is not there.
+test("C8: commits the repo attests are one instrument, with artifact evidence, do not read as a mixed board", () => {
+  const snapOf = (commit) => ({ snap: { rig: { engine: { commit, dirty: false } } } });
+  const A = "a".repeat(40), B = "b".repeat(40);
+  const resolve = (k) => snapOf(k === "plano" ? B : A);
+  const keys = ["bifrost", "one-api", "plano"];
+
+  // RED-before: with no attestation, two commits are two instruments and the board is refused. This
+  // is the behaviour being preserved for every case that is NOT attested, so it is asserted first.
+  const bare = checkMod.engineAgreement(keys, resolve, { equivalence: new Map() });
+  assert.equal(bare.errors.length, 1, "an unattested mix must still fail");
+  assert.match(bare.errors[0], /mixes 2 harness engines/);
+
+  // GREEN-after: the same board, with the two commits attested as one instrument, publishes.
+  const attested = checkMod.instrumentOf(JSON.stringify({
+    instruments: [{ id: "otb-1fc78d7c", commits: [A, B],
+      evidence: { otb_release_sha256: { [A]: "1fc78d7c", [B]: "1fc78d7c" } } }],
+  }));
+  const ok = checkMod.engineAgreement(keys, resolve, { equivalence: attested });
+  assert.deepEqual(ok.errors, [], "commits proven to build the same binary are one instrument");
+  assert.equal(ok.checked, 3);
+
+  // An attestation whose evidence does NOT show identical binaries is inert. The file's rule is that
+  // identical bytes admit an entry; a rule nothing enforces is a comment, and this is the case where
+  // a real instrument change would otherwise be waved through by a hand-written claim.
+  const unproven = checkMod.instrumentOf(JSON.stringify({
+    instruments: [{ id: "wishful", commits: [A, B],
+      evidence: { otb_release_sha256: { [A]: "1111", [B]: "2222" } } }],
+  }));
+  assert.equal(unproven.size, 0, "differing binaries are differing instruments, whatever the file claims");
+  assert.equal(checkMod.engineAgreement(keys, resolve, { equivalence: unproven }).errors.length, 1);
+
+  // No evidence block at all is equally inert.
+  assert.equal(checkMod.instrumentOf(JSON.stringify({
+    instruments: [{ id: "bare", commits: [A, B] }] })).size, 0);
+  // Unparseable or absent file degrades to commit-equality, never to "everything agrees".
+  assert.equal(checkMod.instrumentOf("{ not json").size, 0);
+});
+
+// ---- C8: the override is loud, reasoned, and published ------------------------------------------
+//
+// A publish guard sometimes has to be overridden. The failure mode of an override is that it is
+// silent: a boolean env var flips, the board ships, and six months later nobody can say which numbers
+// were published over an objection. So the override takes the REASON as its value and hands it back to
+// the caller to publish. An override nobody can see after the fact is a disabled check.
+test("C8: the mixed-board override demands a reason and returns it for publication", () => {
+  const snapOf = (commit) => ({ snap: { rig: { engine: { commit, dirty: false } } } });
+  const resolve = (k) => snapOf(k === "plano" ? "b".repeat(40) : "a".repeat(40));
+  const keys = ["bifrost", "plano"];
+  const run = (override) => checkMod.engineAgreement(keys, resolve, { equivalence: new Map(), override });
+
+  assert.equal(run(undefined).errors.length, 1, "no override: the mix is refused");
+
+  // A truthy-but-meaningless value is NOT an override. This is the "1"/"true" habit the check exists
+  // to refuse, and it fails with a message saying what the field is for.
+  const bogus = run("1");
+  assert.equal(bogus.overridden, undefined, "a flag is not a justification");
+  assert.match(bogus.errors.join("\n"), /not a reason/);
+  assert.match(bogus.errors.join("\n"), /mixes 2 harness engines/, "and the original objection still stands");
+
+  // A real reason publishes, and the objection travels WITH the result rather than vanishing.
+  const forced = run("plano re-ran on a gateway-config-only commit; binaries verified identical");
+  assert.deepEqual(forced.errors, []);
+  assert.equal(forced.overridden.check, "C8.mix");
+  assert.match(forced.overridden.reason, /binaries verified identical/);
+  assert.match(forced.overridden.detail, /mixes 2 harness engines/,
+    "what was overridden is recorded, not just that something was");
+});
+
+// ---- the shipped attestation is itself valid ----------------------------------------------------
+// The file in the repo is data the publish path trusts, so it is tested like code: it must parse, and
+// every entry in it must meet the evidence rule it states for itself.
+test("C8: the repo's own instrument-equivalence.json meets the evidence rule it declares", () => {
+  const raw = readFileSync(join(ROOT, "site", "instrument-equivalence.json"), "utf8");
+  const doc = JSON.parse(raw);
+  const admitted = checkMod.instrumentOf(raw);
+  for (const inst of doc.instruments) {
+    const hashes = Object.values((inst.evidence || {}).otb_release_sha256 || {});
+    assert.equal(hashes.length, inst.commits.length,
+      `${inst.id}: every attested commit needs a built-artifact hash, not a subset`);
+    assert.equal(new Set(hashes).size, 1, `${inst.id}: the hashes must actually be identical`);
+    assert.ok(inst.reason && inst.reason.length > 20, `${inst.id}: an entry states why it exists`);
+    for (const c of inst.commits) {
+      assert.match(c, /^[0-9a-f]{40}$/, `${inst.id}: commits are full shas, so they cannot be ambiguous`);
+      assert.equal(admitted.get(c), inst.id, `${inst.id}: ${c.slice(0, 12)} must be admitted`);
+    }
+  }
+});

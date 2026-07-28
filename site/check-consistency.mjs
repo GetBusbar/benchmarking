@@ -202,11 +202,36 @@ export function c6Inversions(gwKey, rawMatrix) {
 //   - a gateway carries no engine stamp at all, while another does (silently pre-stamp data mixed in)
 // A board where NO gateway is stamped is left alone: that is entirely pre-stamp data, and failing it
 // would only punish history it cannot fix. The moment one stamped run lands, all of them must be.
-export function engineAgreement(gwKeys, resolve = (k) => newestSnapshotOnDisk(k)) {
+// Commits the repo ATTESTS are the same instrument, with built-artifact evidence. See
+// site/instrument-equivalence.json for the rule an entry has to meet. Returns commit -> instrument
+// id; a commit nobody attested maps to itself, so an unreadable or absent file degrades to the
+// original commit-equality behaviour rather than to a board that publishes anything.
+export function instrumentOf(fileText) {
+  const map = new Map();
+  let doc;
+  try { doc = JSON.parse(fileText); } catch { return map; }
+  for (const inst of (doc && doc.instruments) || []) {
+    if (!inst || !inst.id || !Array.isArray(inst.commits)) continue;
+    // An entry with no artifact evidence is INERT, not trusted: the file's own rule is that identical
+    // binaries are what admits an entry, and a rule nothing enforces is a comment.
+    const ev = inst.evidence && inst.evidence.otb_release_sha256;
+    const hashes = ev ? Object.values(ev) : [];
+    const proven = hashes.length >= inst.commits.length && new Set(hashes).size === 1;
+    if (!proven) continue;
+    for (const c of inst.commits) map.set(c, inst.id);
+  }
+  return map;
+}
+
+export function engineAgreement(gwKeys, resolve = (k) => newestSnapshotOnDisk(k), opts = {}) {
   const errors = [];
-  const seen = new Map();   // commit -> [gwKey]
+  const seen = new Map();   // instrument id -> [gwKey]
+  const commitsOf = new Map();  // instrument id -> Set(commit)
   const unstamped = [];
   let checked = 0;
+  const equiv = opts.equivalence !== undefined
+    ? opts.equivalence
+    : instrumentOf(readFileSync(join(ROOT, "site", "instrument-equivalence.json"), "utf8"));
   for (const k of gwKeys) {
     const found = resolve(k);
     const eng = found && found.snap && found.snap.rig && found.snap.rig.engine;
@@ -214,14 +239,30 @@ export function engineAgreement(gwKeys, resolve = (k) => newestSnapshotOnDisk(k)
     checked += 1;
     if (eng.dirty === true)
       errors.push(`C8: ${k} was measured by a DIRTY harness tree (engine.commit=${eng.commit.slice(0, 12)} with uncommitted edits) - the commit does not identify what ran, so this run is not reproducible and must be re-measured on a clean tree`);
-    if (!seen.has(eng.commit)) seen.set(eng.commit, []);
-    seen.get(eng.commit).push(k);
+    // The instrument, not the commit. Two commits that build the same binaries measured the same way,
+    // and failing that costs a whole field re-run to change nothing.
+    const inst = equiv.get(eng.commit) || eng.commit;
+    if (!seen.has(inst)) { seen.set(inst, []); commitsOf.set(inst, new Set()); }
+    seen.get(inst).push(k);
+    commitsOf.get(inst).add(eng.commit);
   }
   if (checked > 0 && unstamped.length > 0)
     errors.push(`C8: ${unstamped.length} gateway(s) carry no engine stamp (${unstamped.join(", ")}) while ${checked} do - the board would be mixing pre-stamp data with stamped data and cannot show they came from the same harness; re-measure the unstamped gateways`);
   if (seen.size > 1) {
     const groups = [...seen.entries()].map(([c, ks]) => `${c.slice(0, 12)}: ${ks.join(", ")}`).join(" | ");
-    errors.push(`C8: the board mixes ${seen.size} harness engines (${groups}) - columns measured by different instruments are not comparable, so a defect fixed between those commits applies to only part of the field; re-run the lagging gateways on the newest engine`);
+    const msg = `C8: the board mixes ${seen.size} harness engines (${groups}) - columns measured by different instruments are not comparable, so a defect fixed between those commits applies to only part of the field; re-run the lagging gateways on the newest engine`;
+    // THE OVERRIDE, for the rare case where the board must ship over C8's objection. It is deliberately
+    // awkward: it takes the reason as its value, it cannot be set by accident, and it does not silence
+    // anything. The mix is still reported, still counted, and rides along in the returned result so the
+    // caller publishes the fact that a human overrode a publish guard. An override nobody can see after
+    // the fact is just a disabled check.
+    const why = (opts.override !== undefined ? opts.override : process.env.OTB_ALLOW_MIXED_ENGINES) || "";
+    if (why.trim().length >= 12) {
+      return { errors, checked, commits: [...seen.keys()], overridden: { check: "C8.mix", reason: why.trim(), detail: msg } };
+    }
+    if (why.trim().length > 0)
+      errors.push(`C8: OTB_ALLOW_MIXED_ENGINES was set to ${JSON.stringify(why)}, which is not a reason - the override takes the justification as its value (12 characters or more) so that what gets published records WHY a publish guard was overridden`);
+    errors.push(msg);
   }
   return { errors, checked, commits: [...seen.keys()] };
 }
