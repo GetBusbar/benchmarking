@@ -580,7 +580,25 @@ bench_gateway_once() {
   glog_echo "installing deps (bare base: docker + psutil; the rig is a prebuilt download, and each"
   glog_echo "gateway installs its OWN prereqs via gw_prereqs - no blanket build toolchain on every box)"
   ssh $SSHOPT ubuntu@"$ip" 'set -e
-    sudo apt-get update -q
+    # WAIT FOR THE BOX TO FINISH BOOTING BEFORE ASKING IT FOR ROOT.
+    #
+    # sshd accepts connections before cloud-init has finished writing the sudoers drop-in that gives
+    # `ubuntu` passwordless sudo. `sudo -n` does not wait - it fails immediately - so a box that is
+    # still provisioning loses every apt step, ends up with no docker, and then reports each gateway
+    # as "failed to run docker: No such file or directory", which reads as a broken ENTRANT rather
+    # than a box that never finished coming up. It is a race, so it takes a random subset of the
+    # field each run: one of fourteen lost it on 2026-07-27.
+    #
+    # Same class as the un-retried ssh liveness probe (58293c3): a one-shot operation against a
+    # machine that is still settling, treated as though its first answer were final.
+    cloud-init status --wait >/dev/null 2>&1 || true
+    # Belt and braces: cloud-init may be absent or already done, so confirm sudo actually works
+    # before relying on it, rather than discovering it three commands later.
+    for _ in 1 2 3 4 5 6 7 8 9 10; do sudo -n true 2>/dev/null && break; sleep 3; done
+    sudo -n true 2>/dev/null || { echo "PROVISION FAILED: passwordless sudo never became available"; exit 1; }
+    # apt itself is contended at boot (unattended-upgrades holds the dpkg lock), so retry rather
+    # than fail the whole box on a lock we only had to wait for.
+    for _ in 1 2 3; do sudo -n apt-get update -q && break; sleep 10; done
     # BARE base only: docker (for the image gateways), curl (fetch the prebuilt rig), jq, and python3
     # + psutil (the memory suite reads RSS). NO build-essential/rust/go/node here - the mock+loadgen
     # are prebuilt binaries pulled from the rig release, and the 2 source-built gateways pull their
@@ -606,6 +624,20 @@ bench_gateway_once() {
     echo "{ \"default-ulimits\": { \"nofile\": { \"Name\": \"nofile\", \"Hard\": 1048576, \"Soft\": 1048576 } } }" | sudo tee /etc/docker/daemon.json >/dev/null
     sudo systemctl restart docker || sudo service docker restart || true
     python3 -m pip install --user -q --break-system-packages psutil 2>/dev/null || pip3 install -q psutil || true' >>"$glog" 2>&1
+  local prov_rc=$?
+  # A FAILED PROVISION MUST END THE BOX, not be discovered as a broken gateway later.
+  #
+  # This exit code was previously ignored. The remote block runs under `set -e`, so a failed apt
+  # aborts it before the `command -v docker` guard above can fire - and the run then continued onto a
+  # box with no docker, spent minutes on it, and published INCOMPLETE with "never became ready",
+  # which points at the entrant instead of at the box. Losing the box here is the honest outcome:
+  # nothing was measured, so nothing about the gateway was learned.
+  #
+  # Captured on the line immediately after the ssh: anything between them could overwrite $?.
+  if [ "$prov_rc" -ne 0 ]; then
+    glog_echo "PROVISION FAILED (deps did not install; see above) - tearing down this box rather than measuring on it"
+    return 1
+  fi
 
   # Ship ONLY the harness (scripts + configs, a few MB). Exclude every build/runtime artifact: the box
   # fetches the rig binaries from the release (lib/rig.sh) and builds its own gateway (docker pull, or
