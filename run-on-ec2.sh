@@ -677,7 +677,12 @@ bench_gateway_once() {
   # some other revision.
   glog_echo "fetching $gw + rig.sh @ ${BENCH_COMMIT:0:12} ..."; local _t0=$SECONDS
   local _files
-  _files="$(git -C "$HERE" ls-tree -r --name-only "$BENCH_COMMIT" -- "gateways/$gw" lib/rig.sh 2>/dev/null)"
+  # MODE AND PATH, not path alone. A raw fetch writes whatever the umask says, and the executable
+  # bit is part of what the commit records: the three source-built entrants ship a build.sh the
+  # launcher runs directly, and fetching it 0644 kills the run with "build script ... is not
+  # executable". The tarball this replaced preserved modes for free, so dropping to a mode-blind
+  # copy lost them silently - it took out exactly the three native gateways and nothing else.
+  _files="$(git -C "$HERE" ls-tree -r "$BENCH_COMMIT" -- "gateways/$gw" lib/rig.sh 2>/dev/null | awk '{print $1"\t"$4}')"
   if [ -z "$_files" ]; then
     glog_echo "FETCH FAILED: commit ${BENCH_COMMIT:0:12} contains no gateways/$gw - refusing to measure"
     return 1
@@ -688,12 +693,14 @@ bench_gateway_once() {
     rm -rf ~/benchmarking
     mkdir -p ~/benchmarking
     cd ~/benchmarking
-    while IFS= read -r f; do
+    while IFS=\$'\t' read -r mode f; do
       [ -n \"\$f\" ] || continue
       mkdir -p \"\$(dirname \"\$f\")\"
       # -f so a path missing from this commit is an error, never a silently empty file the run would
       # then try to measure with.
       curl -fsSL -o \"\$f\" '$_raw/'\"\$f\"
+      # Restore the mode the commit recorded. 100755 is the only executable mode git stores.
+      [ \"\$mode\" = 100755 ] && chmod +x \"\$f\"
     done <<'FILELIST'
 $_files
 FILELIST
