@@ -658,43 +658,57 @@ bench_gateway_once() {
   # exactly the bytes about to ship. `--stats` prints "Total file size: N bytes"; humanise it. Dedicated
   # per-gateway sizecheck dst under a mktemp -d, removed right after we read --stats.
   #
-  # The box measures from a tarball of this exact pinned commit, not from an rsync of this laptop's
-  # working tree: an rsync measures whatever happens to be on the orchestrator's disk, which cannot be
-  # traced to any revision afterwards, while a tarball of an explicit commit SHA is provenance a
-  # published number can always be traced back to.
+  # THE BOX FETCHES THE FILES IT NEEDS, AT AN EXACT COMMIT - not a copy of this laptop's tree, and
+  # not the whole repository.
   #
-  # BENCH_COMMIT is resolved ONCE by the orchestrator (below) so every box in a fan-out measures the
-  # SAME code. Resolving it per box would let a push mid-run split the field across two revisions and
-  # publish them side by side as though they were comparable.
-  glog_echo "cloning $BENCH_REPO @ ${BENCH_COMMIT:0:12} ..."; local _t0=$SECONDS
-  # The box downloads only the few files it needs and has no git: `gateways/<name>/` and `lib/rig.sh`.
-  # The engine and mock arrive as prebuilt binaries, and the box compiles nothing except a source-built
-  # gateway, which fetches its own source. The tarball is one request, needs no git on the box, and
-  # carries the same provenance a clone would: the URL names the exact SHA. Extracting only the two
-  # paths (not results/) means a stale or previous-run result can never land on the box and be mistaken
-  # for something this run produced.
+  # Provenance first: every URL below names the pinned SHA, so a published number can always be
+  # traced to the revision that produced it. An rsync of the orchestrator's working tree could not
+  # be, which is why that was abandoned.
+  #
+  # But the tarball that replaced it downloads the ENTIRE repository to keep two directories. This
+  # tree carries ~46 MB of results/ - charts, reports, snapshots - and a box needs about 44 KB: its
+  # OWN gateway directory and lib/rig.sh. Every box paid for all of it, fourteen times a run, to
+  # extract a thousandth of it. It also downloaded the other thirteen gateways' manifests, which a
+  # box has no business holding.
+  #
+  # The file list comes from `git ls-tree` against BENCH_COMMIT - the commit itself, not the working
+  # tree - so a file staged locally but not committed cannot reach a box, and each raw URL is pinned
+  # to the same SHA, so a path that is not in that commit 404s rather than silently arriving from
+  # some other revision.
+  glog_echo "fetching $gw + rig.sh @ ${BENCH_COMMIT:0:12} ..."; local _t0=$SECONDS
+  local _files
+  _files="$(git -C "$HERE" ls-tree -r --name-only "$BENCH_COMMIT" -- "gateways/$gw" lib/rig.sh 2>/dev/null)"
+  if [ -z "$_files" ]; then
+    glog_echo "FETCH FAILED: commit ${BENCH_COMMIT:0:12} contains no gateways/$gw - refusing to measure"
+    return 1
+  fi
+  local _raw="https://raw.githubusercontent.com/${BENCH_REPO#https://github.com/}"
+  _raw="${_raw%.git}/$BENCH_COMMIT"
   ssh $SSHOPT ubuntu@"$ip" "set -e
     rm -rf ~/benchmarking
     mkdir -p ~/benchmarking
     cd ~/benchmarking
-    # --strip-components=1 removes the <repo>-<sha>/ wrapper GitHub puts around an archive.
-    # The member paths are named exactly rather than globbed: GitHub's archive root is always
-    # <repo>-<sha>/, so there is nothing to guess, and --wildcards is a GNU extension the harness
-    # should not depend on.
-    curl -fsSL '${BENCH_REPO%.git}/archive/$BENCH_COMMIT.tar.gz' \
-      | tar -xz --strip-components=1 '$_REPO_NAME-$BENCH_COMMIT/gateways' '$_REPO_NAME-$BENCH_COMMIT/lib'
-    # Refuse to measure if the download did not actually produce what the run needs. A silently empty
-    # gateways/ would surface much later as a validate failure with a confusing message.
-    test -d gateways && test -r lib/rig.sh
-    # And prove the exclusion held: results/ on a box is how a previous run's numbers got recycled.
+    while IFS= read -r f; do
+      [ -n \"\$f\" ] || continue
+      mkdir -p \"\$(dirname \"\$f\")\"
+      # -f so a path missing from this commit is an error, never a silently empty file the run would
+      # then try to measure with.
+      curl -fsSL -o \"\$f\" '$_raw/'\"\$f\"
+    done <<'FILELIST'
+$_files
+FILELIST
+    # Refuse to measure if the fetch did not produce what the run needs.
+    test -d 'gateways/$gw' && test -r lib/rig.sh
+    # results/ on a box is how a previous run's numbers got recycled; nothing above can create it.
     test ! -e results
   " >>"$glog" 2>&1
   local _up_rc=$?
   if [ "$_up_rc" -ne 0 ]; then
-    glog_echo "rsync UP FAILED (rc=$_up_rc) - harness upload incomplete; refusing to measure a partial/stale tree, tearing down this box"
+    glog_echo "FETCH FAILED (rc=$_up_rc) - harness incomplete; refusing to measure a partial tree, tearing down this box"
     return 1
   fi
-  glog_echo "rsync done (${_pl:-?} in $((SECONDS-_t0))s)"
+  local _n; _n="$(printf '%s\n' "$_files" | grep -c .)"
+  glog_echo "fetched $_n file(s) in $((SECONDS-_t0))s"
 
   # ── BOX QUALIFICATION, right here: the harness is on the box, nothing has been built or launched
   # yet, and the 6x6 has not started. This is the last moment at which rejecting the box is cheap.
