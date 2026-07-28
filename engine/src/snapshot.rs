@@ -250,6 +250,7 @@ mod tests {
             perf: None,
             stream: None,
             memory: None,
+            timings_s: None,
         }
     }
 

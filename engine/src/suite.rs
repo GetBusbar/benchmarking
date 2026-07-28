@@ -1054,6 +1054,12 @@ pub fn run_suite_with(
                 (Some(m), Ok(d)) => Some(cell_stream(cfg, d, m, result.series.as_ref())),
                 _ => None,
             },
+            // What this cell COST, per metric group. Owned strings because the record is
+            // deserialisable and a &'static str key cannot come back off disk.
+            timings_s: result
+                .timings_s
+                .as_ref()
+                .map(|t| t.iter().map(|(k, v)| ((*k).to_string(), *v)).collect()),
             ..Default::default()
         };
 
