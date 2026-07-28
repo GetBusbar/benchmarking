@@ -1514,7 +1514,12 @@ pub fn run_grid_with(cfg: &RunConfig, lo: u32, hi: u32, metrics: &[&dyn metric::
                     .map(|(name, secs)| format!("{name}={secs:.1}s"))
                     .collect::<Vec<_>>()
                     .join(" ");
-                eprintln!("[cell {done}/{total_cells}] {id}: {total:.1}s total | {breakdown}");
+                // `[cost]`, NOT `[cell]`. The status board parses `[cell N/M] <id>: <verdict>` and
+                // counts anything whose verdict is not a cheap outcome as a served cell, so emitting
+                // the breakdown under that prefix made every measured cell count twice - "10/8
+                // served" and an ETA of zero on a gateway still running. A diagnostic line that
+                // corrupts the progress display is worse than no diagnostic line.
+                eprintln!("[cost {done}/{total_cells}] {id}: {total:.1}s total | {breakdown}");
                 (Some(m), Some(s), Some(t))
             } else {
                 (None, None, None)
