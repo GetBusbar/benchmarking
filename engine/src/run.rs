@@ -136,6 +136,24 @@ pub(crate) fn headers_for(cfg: &RunConfig, ingress: Dialect, egress: &str) -> Ve
 /// a real status with a healthy rig is the gateway's own answer, no HTTP answer at all is not.
 pub fn probe_cell(cfg: &RunConfig, id: &CellId, mock_healthy: bool) -> Served {
     let (attempts, pause_s) = crate::probe::transient_budget();
+    probe_cell_within(cfg, id, mock_healthy, attempts, Duration::from_secs(u64::from(pause_s)))
+}
+
+/// The same probe over an EXPLICIT budget, so a test can exercise the retry loop without sleeping
+/// through the field's real pause.
+///
+/// The pause is a minute of wall clock across the budget. Tests that sat through it did not just run
+/// slowly, they held sockets while they waited and starved the rest of the suite, which is how a
+/// neighbouring stream test started failing under parallel load - a test made flaky by another test
+/// is worse than a slow one, because the red it produces points at innocent code. `supervise.rs`
+/// already injects its own sleep for exactly this reason; this follows it.
+pub fn probe_cell_within(
+    cfg: &RunConfig,
+    id: &CellId,
+    mock_healthy: bool,
+    attempts: u32,
+    pause: Duration,
+) -> Served {
     let (mut last, mut retryable) = probe_cell_once(cfg, id, mock_healthy);
     // SPEND THE BUDGET THE VERDICT CLAIMS TO HAVE SPENT.
     //
@@ -156,11 +174,12 @@ pub fn probe_cell(cfg: &RunConfig, id: &CellId, mock_healthy: bool) -> Served {
     for attempt in 1..attempts {
         let Some(why) = retryable.clone() else { break };
         eprintln!(
-            "[probe] {id}: {why} - retry {attempt}/{} after {pause_s}s rather than recording a \
-             moment as a capability",
-            attempts - 1
+            "[probe] {id}: {why} - retry {attempt}/{} after {}s rather than recording a moment as \
+             a capability",
+            attempts - 1,
+            pause.as_secs()
         );
-        std::thread::sleep(Duration::from_secs(u64::from(pause_s)));
+        std::thread::sleep(pause);
         let (next, next_retryable) = probe_cell_once(cfg, id, mock_healthy);
         last = next;
         retryable = next_retryable;
@@ -1277,7 +1296,32 @@ pub fn run_grid_with(cfg: &RunConfig, lo: u32, hi: u32, metrics: &[&dyn metric::
                 });
                 continue;
             }
-            let served = probe_cell(cfg, &id, healthy);
+            let mut served = probe_cell(cfg, &id, healthy);
+            // A GATEWAY THAT DIED TAKES THE REST OF THE GRID WITH IT, UNLESS SOMETHING RESTARTS IT.
+            //
+            // The retry budget inside `probe_cell` outlasts a gateway that is merely busy. It cannot
+            // outlast one that is gone: nothing between cells restarts the process, so the first
+            // death forfeits every remaining cell as untestable. plano published one measured cell
+            // and two "no connection to the gateway: Connection refused" in both the dd26a54 and
+            // 8f2af5d field runs - the same shape twice, the whole grid after the first cell lost to
+            // a process that was not there any more.
+            //
+            // The harness owns this gateway's lifetime (that is what `relaunch` IS - the memory
+            // group already stops and starts it every cell), so when the connection is refused after
+            // the budget, bring it back and ask once more. Cheap when it works, and when it does not
+            // the cell records exactly what it recorded before.
+            if let (Served::Untestable(ref why), Some(spec)) = (&served, cfg.relaunch.as_ref()) {
+                if why.contains("no connection") {
+                    eprintln!("[cell {done}/{total}] {id}: {why} - restarting the gateway before writing off the rest of the grid");
+                    match restart_to_rest(spec, &cfg.relaunch_launcher) {
+                        Ok(()) => {
+                            served = probe_cell(cfg, &id, healthy);
+                            eprintln!("[cell {done}/{total}] {id}: after restart, {}", if served.is_measurable() { "it answers" } else { "still not answering" });
+                        }
+                        Err(e) => eprintln!("[cell {done}/{total}] {id}: the gateway could not be restarted: {e}"),
+                    }
+                }
+            }
             // THE ENGINE, IN TWO LINES: if the cell is served, run every metric on it. The list of
             // metrics lives in one place (`metric::METRICS`) rather than being reached for here, so
             // a measurement cannot be implemented, tested, and then silently never taken.
@@ -2037,7 +2081,7 @@ while True:
     fn a_gateway_that_answers_503_once_is_retried_not_recorded_as_not_serving() {
         let addr = serve_busy_then_ok(1);
         let cfg = test_fixture(addr, addr);
-        let served = probe_cell(&cfg, &CellId::new("openai", "openai"), true);
+        let served = probe_cell_within(&cfg, &CellId::new("openai", "openai"), true, 3, Duration::from_millis(10));
         assert_eq!(
             served,
             Served::Yes,
@@ -2052,7 +2096,7 @@ while True:
     fn a_gateway_that_stays_503_across_the_whole_budget_is_still_recorded_as_failed() {
         let addr = serve_busy_then_ok(usize::MAX);
         let cfg = test_fixture(addr, addr);
-        match probe_cell(&cfg, &CellId::new("openai", "openai"), true) {
+        match probe_cell_within(&cfg, &CellId::new("openai", "openai"), true, 3, Duration::from_millis(10)) {
             Served::No(crate::probe::Verdict::Failed, ev) => assert_eq!(ev.status, 503),
             other => panic!("a persistently-503 gateway must still fail, got {other:?}"),
         }
@@ -2103,7 +2147,7 @@ while True:
         let addr = serve_silent_then_ok(1);
         let cfg = test_fixture(addr, addr);
         assert_eq!(
-            probe_cell(&cfg, &CellId::new("openai", "openai"), true),
+            probe_cell_within(&cfg, &CellId::new("openai", "openai"), true, 3, Duration::from_millis(10)),
             Served::Yes,
             "one timeout cost this cell entirely; these are litellm-python's three lost cells"
         );
@@ -2115,7 +2159,7 @@ while True:
     fn a_gateway_that_never_answers_is_still_untestable_after_the_budget() {
         let addr = serve_silent_then_ok(usize::MAX);
         let cfg = test_fixture(addr, addr);
-        match probe_cell(&cfg, &CellId::new("openai", "openai"), true) {
+        match probe_cell_within(&cfg, &CellId::new("openai", "openai"), true, 3, Duration::from_millis(10)) {
             Served::Untestable(why) => assert!(why.contains("never answered"), "got {why}"),
             other => panic!("a silent gateway must stay untestable, got {other:?}"),
         }
