@@ -188,53 +188,27 @@ export function c6Inversions(gwKey, rawMatrix) {
   return { violations, warnings, cellsChecked };
 }
 
-// ---- C9: A p99 MAY NEVER SIT BELOW ITS OWN p50 -----------------------------------------------------
-// Two percentiles of one distribution are ordered. A pair that is not ordered did not come from one
-// distribution, whatever the field names say - and that is invisible in isolation: each number looks
-// perfectly reasonable, and only the pair gives it away.
+// ---- C9 WAS HERE, AND IT WAS WRONG ----------------------------------------------------------------
+// It failed the build on any published p99 below its own p50. That rule is true of two percentiles OF
+// ONE DISTRIBUTION and false of every pair this board actually publishes, because all of them are
+// DIFFERENCES:
 //
-// The 2026-07-28 validation run published added_ttft p50/p99 of 523/428, 514/451, 501/359 and
-// 513/461 on every streaming cell it measured. Both halves were real measurements; the p50 came from
-// a single full stream and the p99 from a hundred single-token samples, so they were percentiles of
-// different populations sharing a name. Caught by reading the numbers, which is not a guard.
-export function percentilePairsOrdered(gwKeys, resolve = (k) => newestSnapshotOnDisk(k)) {
-  const errors = [];
-  let checked = 0;
-  for (const k of gwKeys) {
-    const found = resolve(k);
-    const m = found && found.snap && found.snap.matrix;
-    if (!m) continue;
-    for (const [eg, blk] of Object.entries(m.upstreams || {})) {
-      for (const [ing, cell] of Object.entries((blk && blk.cells) || {})) {
-        for (const group of ["perf", "stream"]) {
-          const g = cell && cell[group];
-          if (!g || typeof g !== "object") continue;
-          for (const key of Object.keys(g)) {
-            if (!key.endsWith("_p99_us")) continue;
-            const p50key = key.replace(/_p99_us$/, "_p50_us");
-            const p99 = num(g[key]);
-            const p50 = num(g[p50key]);
-            if (p99 == null || p50 == null) continue;
-            checked += 1;
-            if (p99 < p50) {
-              errors.push(
-                `C9: ${k}.${ing}->${eg}.${group}.${key}=${p99} is BELOW its own ${p50key}=${p50} - ` +
-                `two percentiles of one distribution are ordered, so these came from different ` +
-                `populations and only one of them can describe this cell`);
-            }
-          }
-        }
-      }
-    }
-  }
-  return { errors, checked };
-}
-
-function num(v) {
-  if (typeof v === "number") return v;
-  if (v && typeof v === "object" && typeof v.value === "number") return v.value;
-  return null;
-}
+//   added_gap_p50 = P50(gateway gaps) - P50(mock gaps)
+//   added_gap_p99 = P99(gateway gaps) - P99(mock gaps)
+//
+// Two independent differences. If the mock's own jitter grows faster into the tail than the
+// gateway's, the difference shrinks, and p99 < p50 is the honest result. plano published
+// p50=15us p99=11us against a 20ms pacing interval and this guard called it broken.
+//
+// The defect C9 was written for was real but different: added_ttft_p50 came from a SINGLE stream
+// while added_ttft_p99 came from a hundred samples - two populations wearing one name. No data-level
+// check can tell that apart from legitimate shrinkage, because both look identical in the artifact.
+// The guard for it is structural and lives where it can work: both percentiles are computed from the
+// same sample set in metric.rs, asserted by
+// `the_ttft_percentiles_come_from_one_sample_set_so_p99_can_never_sit_below_p50`.
+//
+// Left as a comment rather than deleted silently: a guard removed without its reasoning is
+// indistinguishable from one lost in a refactor.
 
 // ---- C8: ONE ENGINE PER BOARD ---------------------------------------------------------------------
 // The board's whole claim is that every gateway was measured by the same instrument, so the only thing
@@ -742,7 +716,7 @@ export function checkConsistency(data, app, opts = {}) {
   const CHECK_BRANCHES = [
     "C1.field", "C1.certified", "C1.mock_bound", "C2.suppressed",
     "C3.stamp", "C3.lint", "C3.route", "C3.parity", "C4.cell", "C4.leak", "C6.cell", "R1.oracle",
-    "R3.selection", "C7.hwm", "C5.route", "C5.lint", "C8.engine", "C9.percentile",
+    "R3.selection", "C7.hwm", "C5.route", "C5.lint", "C8.engine",
   ];
   // C8.engine was tagged by the branch below but never DECLARED here, so R2's own
   // "every covered branch is a declared branch" assertion (test.mjs) hard-failed on any bundle whose
@@ -777,9 +751,6 @@ export function checkConsistency(data, app, opts = {}) {
     const eng = engineAgreement([...matrixPublishers].sort());
     if (eng.checked > 0) covered("C8.engine");
     errors.push(...eng.errors);
-    const pct = percentilePairsOrdered([...matrixPublishers].sort());
-    if (pct.checked > 0) covered("C9.percentile");
-    errors.push(...pct.errors);
   }
   const requiredNow = publishesMatrix && !syntheticFixture
     ? [...REQUIRED, "C6.cell", "C7.hwm", "R1.oracle", "R3.selection"] : REQUIRED;
