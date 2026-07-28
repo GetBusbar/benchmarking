@@ -1444,7 +1444,9 @@ mod tests {
     fn a_ttft_percentile_needs_samples_and_the_sample_count_makes_one_real() {
         // 100 is the smallest count where a 99th percentile is a real order statistic rather than a
         // restatement of the maximum: nearest-rank puts it at index 99 of 100, not at the top.
-        assert!(STREAM_TTFT_SAMPLES >= 100, "a p99 over fewer than 100 samples IS the maximum");
+        // (No `assert!(SAMPLES >= 100)` here: an assertion over a constant cannot fail, which is the
+        // exact species of dead guard this audit spent the day removing. The rank checks below use
+        // the constant and would break if it were lowered, which is the real protection.)
         let rank_of = |n: usize, pct: f64| (((n as f64) * pct).ceil() as usize).clamp(1, n);
         assert_eq!(rank_of(STREAM_TTFT_SAMPLES, 0.99), 99);
         assert!(rank_of(STREAM_TTFT_SAMPLES, 0.99) < STREAM_TTFT_SAMPLES,

@@ -935,6 +935,12 @@ fn stalls_in(offsets: &[u64]) -> u64 {
 /// gateway that streams NOTHING be averaged away against lanes that did, and at high concurrency a
 /// handful of buffering lanes would vanish entirely.
 fn stream_errored(o: &crate::http::SseOutcome) -> bool {
+    // THE RIG RUNNING OUT IS NOT AN ERRORED STREAM. A lane that could not get a source port never
+    // asked the gateway anything, and counting it here published our own exhaustion as the gateway's
+    // stream ceiling. `stream_window` discards the whole window instead - see `rig_exhausted_in`.
+    if matches!(o.end, crate::http::SseEnd::RigExhausted(_)) {
+        return false;
+    }
     if !o.status.is_some_and(|s| (200..300).contains(&s)) {
         return true;
     }
@@ -1036,6 +1042,20 @@ pub fn stream_window(
         stalls: 0,
         elapsed_s,
     };
+    // A WINDOW THAT RAN OUT OF RIG NEVER RAN AT THE CONCURRENCY IT CLAIMS, exactly as a loadgen
+    // window with `rig_refused` did not. Unmeasured, not a failing rung: the alternative is
+    // publishing this host's ephemeral port range as the gateway's concurrent-stream ceiling.
+    let rig_exhausted = outcomes
+        .iter()
+        .filter(|o| matches!(o.end, crate::http::SseEnd::RigExhausted(_)))
+        .count();
+    if rig_exhausted > 0 {
+        eprintln!(
+            "stream window: could not reach c={concurrency}; this host refused {rig_exhausted} of its \
+             own connections (ephemeral ports or descriptors exhausted) - the window never ran at that concurrency"
+        );
+        return None;
+    }
     for o in outcomes {
         w.streams += 1;
         w.expected_frames += budget as u64;
@@ -2390,5 +2410,40 @@ while True:
         } else {
             assert_eq!(c, ceiling_for(32_768, 60_999), "off Linux, assume a stock host");
         }
+    }
+
+    // THE RIG RUNNING OUT IS NOT AN ERRORED STREAM.
+    //
+    // The load generator got this treatment first; the stream path is where it bites soonest,
+    // because the stream searches reach high concurrency before anything else does. A lane that
+    // could not get an ephemeral source port never asked the gateway anything, and counting it as an
+    // errored stream published our own exhaustion as the gateway's concurrent-stream ceiling.
+    #[test]
+    fn a_lane_this_host_could_not_open_is_not_the_gateway_erroring() {
+        let ours = crate::http::SseOutcome {
+            status: None,
+            frames: Vec::new(),
+            frame_offsets_us: Vec::new(),
+            end: crate::http::SseEnd::RigExhausted("Cannot assign requested address (os error 99)".into()),
+        };
+        assert!(!stream_errored(&ours), "our own port exhaustion must not be charged to the gateway");
+
+        // The peer refusing IS the gateway's, and must still count.
+        let theirs = crate::http::SseOutcome {
+            status: None,
+            frames: Vec::new(),
+            frame_offsets_us: Vec::new(),
+            end: crate::http::SseEnd::ConnectionFailed("Connection refused (os error 111)".into()),
+        };
+        assert!(stream_errored(&theirs), "a refused connection is still the gateway declining");
+
+        // So is a peer that answers something that is not a stream.
+        let not_sse = crate::http::SseOutcome {
+            status: Some(200),
+            frames: Vec::new(),
+            frame_offsets_us: Vec::new(),
+            end: crate::http::SseEnd::NotAnEventStream("application/json".into()),
+        };
+        assert!(stream_errored(&not_sse));
     }
 }
