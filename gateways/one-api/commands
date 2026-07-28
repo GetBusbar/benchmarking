@@ -35,4 +35,12 @@ curl -sf -b /tmp/oa.jar -X POST http://127.0.0.1:3000/api/channel/ -H 'content-t
 # (manifest.rs's loader), so the retry has to be a single line - `;` joined, not real newlines. The
 # retry covers the channel rows this file just inserted not yet being visible to the router. No -f on
 # the curl: the 401 body is exactly what this loop inspects, and -f discards it on any non-2xx.
-curl -s -m 10 -X POST http://127.0.0.1:3000/v1/chat/completions -H 'content-type: application/json' -H 'Authorization: Bearer dummy' -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}],"max_tokens":1}' -o /tmp/oa-auth-check; i=1; while [ $i -le 10 ] && ! grep -q chat.completion /tmp/oa-auth-check; do sleep 0.5; i=$((i+1)); curl -s -m 10 -X POST http://127.0.0.1:3000/v1/chat/completions -H 'content-type: application/json' -H 'Authorization: Bearer dummy' -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}],"max_tokens":1}' -o /tmp/oa-auth-check; done; grep -q chat.completion /tmp/oa-auth-check || { echo "one-api: the declared auth never relayed after 10 checks - INITIAL_ROOT_TOKEN may no longer be honoured by this image: $(cat /tmp/oa-auth-check)" >&2; exit 1; }
+#
+# EVERY MODEL, NOT JUST THE FIRST. This checked gpt-4o-mini alone while creating three channels, so a
+# channel that inserted but never became routable was invisible here and surfaced later as the
+# GATEWAY failing: one-api published "no available channel for model gemini-1.5-pro" as two red cells
+# in all eight runs of 2026-07-27/28, including the oldest engine. A setup this harness got wrong must
+# stop the run and say so, not become a verdict about the gateway. The channel POSTs above already
+# abort on a non-zero exit (bin/otb.rs runs each line and stops the run on failure); this closes the
+# gap where the POST succeeds and the routing still does not work.
+for m in gpt-4o-mini claude-3-5-sonnet-20240620 gemini-1.5-pro; do i=1; ok=0; while [ $i -le 20 ]; do curl -s -m 10 -X POST http://127.0.0.1:3000/v1/chat/completions -H 'content-type: application/json' -H 'Authorization: Bearer dummy' -d "{\"model\":\"$m\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"max_tokens\":1}" -o /tmp/oa-auth-check; if grep -q chat.completion /tmp/oa-auth-check; then ok=1; break; fi; sleep 0.5; i=$((i+1)); done; [ "$ok" = 1 ] || { echo "one-api: model $m never relayed after 20 checks - its channel is registered but not routable, so every cell for that egress would publish a red this harness caused: $(cat /tmp/oa-auth-check)" >&2; exit 1; }; done
