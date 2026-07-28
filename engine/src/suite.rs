@@ -33,6 +33,18 @@ pub struct SuiteConfig {
     /// Stamped into the artifact so a number can always be traced to the engine that produced it.
     pub measured_at: String,
     pub arch: String,
+    /// WHAT THIS RAN ON, in the orchestrator's own words: instance type, core count, memory, and how
+    /// the cores were split between gateway, mock and load generator.
+    ///
+    /// Handed in exactly like `arch`, and for the same reason: the box cannot describe the shape it
+    /// was launched with. `run-on-ec2.sh` has exported it as BENCH_HARDWARE all along and
+    /// `record.rs` has always had the field, but nothing connected the two - so every published
+    /// snapshot carried `"hardware": null` while the harness knew the answer. A board whose whole
+    /// claim is that only the gateway differs between columns should be able to say what the
+    /// hardware was without asking someone to remember.
+    ///
+    /// `None` when it was never supplied, published as a literal null rather than a guess.
+    pub hardware: Option<String>,
     /// WHICH COMMIT PRODUCED THIS RUN. Resolved orchestrator-side (the box's clone is checked out at
     /// a detached commit and the engine binary is a download, so neither can work it out on the box)
     /// and handed in like `arch` is, rather than read from the environment down here: the snapshot
@@ -1112,6 +1124,7 @@ fn flush(
             .unwrap_or_else(|| format!("otb-engine {}", env!("CARGO_PKG_VERSION"))),
         measured_at: cfg.measured_at.clone(),
         arch: Some(cfg.arch.clone()),
+        hardware: cfg.hardware.clone(),
         rig: rig.clone(),
         matrix: Matrix {
             gateway: cfg.manifest.name.clone(),
@@ -1203,6 +1216,7 @@ mod tests {
             max_conc: 2,
             measured_at: "2026-07-26T00:00:00Z".into(),
             arch: "arm64".into(),
+            hardware: Some("test box".into()),
             engine_stamp: None,
             rig_mock: None,
             rig_release_url: None,
@@ -1760,5 +1774,37 @@ mod tests {
         assert_eq!(judge_at(300_000.0), "fail");
 
         std::env::remove_var("OTB_QUALIFY_BASELINE");
+    }
+
+    // WHAT IT RAN ON MUST REACH THE ARTIFACT.
+    //
+    // `run-on-ec2.sh` has exported BENCH_HARDWARE since the field moved to dedicated boxes, and
+    // `record.rs` has always had the field, but nothing joined them: every snapshot of the
+    // 2026-07-28 run published "hardware": null. A board whose entire claim is that only the gateway
+    // differs between columns cannot state the hardware it differed on.
+    #[test]
+    fn the_snapshot_carries_the_hardware_it_was_handed() {
+        let dir = tmpdir("hardware-provenance");
+        let gw = serve(200);
+        let mut cfg = cfg_for(&dir, gw);
+        let label = "AWS m7g.4xlarge (16 cores / 64 GB), gateway pinned to 4";
+        cfg.hardware = Some(label.into());
+        let paths = run_suite_with(&cfg, gw, &[]).expect("the suite writes a snapshot");
+        let snap: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&paths.current).expect("read")).expect("parse");
+        assert_eq!(
+            snap.get("hardware").and_then(serde_json::Value::as_str),
+            Some(label),
+            "the box shape the orchestrator handed in must be published, not dropped"
+        );
+
+        // Never invented: a run that was not told stays null rather than guessing an instance type.
+        let dir2 = tmpdir("hardware-absent");
+        let mut cfg2 = cfg_for(&dir2, gw);
+        cfg2.hardware = None;
+        let paths2 = run_suite_with(&cfg2, gw, &[]).expect("the suite writes a snapshot");
+        let snap2: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&paths2.current).expect("read")).expect("parse");
+        assert!(snap2.get("hardware").is_some_and(serde_json::Value::is_null), "absent must publish as a literal null");
     }
 }

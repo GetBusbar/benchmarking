@@ -342,6 +342,8 @@ fn main() -> ExitCode {
                 max_conc: env_u32("OTB_MAX_CONC", 4096),
                 measured_at: utc_stamp(),
                 arch: std::env::var("BENCH_ARCH").unwrap_or_else(|_| "unknown".into()),
+                // Same path as arch: the orchestrator knows the box shape, the box does not.
+                hardware: std::env::var("BENCH_HARDWARE").ok().filter(|v| !v.trim().is_empty()),
                 // WHICH COMMIT PRODUCED THIS RUN. run-on-ec2.sh resolves it before the box exists
                 // and exports it, because the box cannot work it out for itself: its clone is a
                 // detached checkout and this binary arrived as a release download, so neither the
