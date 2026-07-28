@@ -3219,4 +3219,37 @@ test("seal: matching a PACED upstream publishes the value; matching a CAPACITY s
   assert.equal(sealMetric(500, { gated: true, paced: true, flag: false }).value, 500);
   assert.equal(sealMetric(500, { gated: true, flag: false }).value, 500);
 });
+// ---- the benchmark version is visible, and an older one is loud -------------------------------
+// The engine commit travelled into every row from the start and nothing rendered it, so "which
+// version of the benchmark produced this number" was answerable only by opening the JSON. A row
+// measured by an older harness is not necessarily wrong, but it is not comparable to the rest, and
+// that has to be visible rather than known only to the build guard that refuses mixed boards.
+test("benchmark version: current rows are quiet, older rows are marked red with what they should be", () => {
+  const board = "8f2af5ddc8980fce326ef140e4f75de36e8cfc72";
+  const current = { key: "a", measured_at: new Date().toISOString(),
+    engine: { sha: board, short: "8f2af5d", current: true } };
+  const behind = { key: "b", measured_at: new Date().toISOString(),
+    engine: { sha: "dd26a545026be44a0c38589242859138df05b2eb", short: "dd26a54", current: false } };
+
+  const cur = app.engineBadge(current, board);
+  assert.match(cur, /8f2af5d/, "a current row still shows which harness measured it");
+  assert.ok(!/engine-pill old/.test(cur), "and is not flagged");
+
+  const old = app.engineBadge(behind, board);
+  assert.match(old, /engine-pill old/, "a row measured by an older harness must be marked");
+  assert.match(old, /dd26a54/, "showing the version it WAS measured on");
+  assert.match(old, /8f2af5d/, "and the version the board is on, so the reader can see the gap");
+  assert.match(old, /not directly comparable/, "and why that matters");
+
+  // A row with no stamp at all predates the engine stamp entirely. Saying so beats implying it
+  // matches, and beats omitting the badge so the reader assumes it does.
+  const unstamped = app.engineBadge({ key: "c", engine: { sha: null, short: null, current: false } }, board);
+  assert.match(unstamped, /engine unknown/);
+  assert.match(unstamped, /engine-pill old/);
+
+  // Nothing to compare against: no board version and no row version renders nothing rather than an
+  // empty pill.
+  assert.equal(app.engineBadge({ key: "d", engine: { sha: null, short: null, current: false } }, null), "");
+  assert.equal(app.engineBadge({ key: "e" }, board), "", "a row with no engine field at all renders nothing");
+});
 

@@ -765,12 +765,41 @@ const redirects = join(HERE, "_redirects");
 if (existsSync(redirects) && OUT !== HERE) copyFileSync(redirects, join(OUT, "_redirects"));
 
 // ---- emit -------------------------------------------------------------------
+// THE BOARD'S OWN ENGINE, and each row's, surfaced for the reader.
+//
+// The engine commit already travelled into every row inside `rig.engine.commit`; nothing rendered
+// it, so "which harness measured this" was knowable only by opening the JSON. A row measured by an
+// older engine is not necessarily wrong, but it is not comparable to the rest, and a reader deciding
+// whether to trust a comparison needs to see that without being told.
+//
+// The board's version is the engine of the most recently measured row, which is the one a re-run
+// moves forward. A row whose engine differs from it is marked, and the site renders that in red.
+const engineOf = (g) => (g && g.rig && g.rig.engine && g.rig.engine.commit) || null;
+const newestRow = gateways
+  .filter((g) => displayedMeasuredMs(g) > 0)
+  .sort((a, b) => displayedMeasuredMs(b) - displayedMeasuredMs(a))[0];
+const boardEngine = engineOf(newestRow);
+for (const g of gateways) {
+  const sha = engineOf(g);
+  g.engine = sha
+    ? { sha, short: sha.slice(0, 7), current: boardEngine == null || sha === boardEngine }
+    // A row with no engine stamp predates the stamp entirely; saying so is better than implying it
+    // matches, and better than omitting the field so the render site has to guess.
+    : { sha: null, short: null, current: false };
+}
+
 const data = {
   category: "gateways", // which category bundle this is (see CATEGORIES in app.js)
   generated_at: generatedAt,
   hardware,
   // MED-1: the DISPLAYED-number freshness stamp (matrix-preferring), not the max across all suites.
   latest_measured_at: latestDisplayed,
+  // WHICH HARNESS MEASURED THE BOARD, as a thing a reader can see rather than a thing a build guard
+  // knows privately. C8 refuses to publish a board whose columns were measured by different engines,
+  // which is the right call for a ranking - but it made the engine invisible when it passed, so a
+  // reader had no way to tell WHICH harness produced the numbers or whether a row was measured by an
+  // older one. The board states its own engine, and every row states the engine that measured it.
+  benchmark_version: boardEngine,
   repo: "https://github.com/GetBusbar/benchmarking",
   gateways,
   charts,
