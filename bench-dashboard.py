@@ -157,7 +157,7 @@ def row_for(gw, path, now_s):
         cells=f"{cells}/{total}" if cells else "-",
         served=f"{served_done}/{expect}" if expect is not None else str(served_done),
         elapsed=hms(elapsed),
-        eta=hms(eta) if eta else ("~" if served_done == 0 else "-"),
+        eta=hms(eta) if eta is not None else ("~" if served_done == 0 else "-"),
         done=False, bad=False,
     )
 
