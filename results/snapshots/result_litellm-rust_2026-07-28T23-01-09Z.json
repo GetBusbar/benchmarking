@@ -1,0 +1,4249 @@
+{
+  "schema_version": 1,
+  "gateway": "litellm-rust",
+  "build": "litellm-ai-gateway",
+  "measured_at": "2026-07-28T23:01:09Z",
+  "started_at": null,
+  "finished_at": null,
+  "duration_s": null,
+  "phase_s": null,
+  "arch": "arm64",
+  "hardware": "AWS m7g.4xlarge (Graviton3, 16 cores / 64 GB). Gateway-under-test pinned to 4 cores (the comparable basis); mock and load generator on 6 cores each so the mock never bottlenecks the streaming sweep. Ubuntu 24.04. One dedicated box per gateway.",
+  "rig": {
+    "arch": "arm64",
+    "release_url": "https://github.com/GetBusbar/benchmarking/releases/download/rig",
+    "engine": {
+      "commit": "dc7a53ca897cade1e1454317dd0e3e4bb7b723ec",
+      "dirty": false
+    },
+    "mock": {
+      "origin": "release",
+      "sha256": "9a1c7b0e10f846602cf0e19a96f2d1e4a0e3f50b3b2634aa6786053a13cf9ab5",
+      "asset_updated_at": "2026-07-28T22:42:50Z"
+    },
+    "ugen": null,
+    "box_qualify": {
+      "band_pct": 20.0,
+      "baseline_rps": 497607.0,
+      "baseline_samples": 1,
+      "concurrency": 32,
+      "drift_pct": 0.1087203355258266,
+      "observed_absent_reason": null,
+      "observed_rps": 498148.0,
+      "outcome": "pass"
+    }
+  },
+  "config": {
+    "files": {}
+  },
+  "matrix": {
+    "gateway": "litellm-rust",
+    "build": "",
+    "matrix_version": null,
+    "served": true,
+    "serve_error": "",
+    "upstream_shape": "",
+    "upstream_note": "",
+    "egress_configured": "",
+    "probe_first": false,
+    "capability_note": "",
+    "cell_perf_sweep": true,
+    "sweep_rung_selection": null,
+    "sweep_ttft_ms": null,
+    "p99_ceiling_ms": null,
+    "sweep_dur": null,
+    "cell_stream": true,
+    "cell_memory": true,
+    "memory": null,
+    "cells": {},
+    "upstreams": {
+      "openai": {
+        "configurable": false,
+        "served": true,
+        "egress_config": null,
+        "serve_error": "",
+        "cells": {
+          "anthropic": {
+            "served": "not_configurable",
+            "reason": "LiteLLM-Rust beta serves only the Anthropic /v1/messages route (azure_ai upstream); no other ingress or upstream dialect exists, so those cells are grey by that capability limit",
+            "status": "",
+            "path": "/v1/messages",
+            "verdict_note": "LiteLLM-Rust beta serves only the Anthropic /v1/messages route (azure_ai upstream); no other ingress or upstream dialect exists, so those cells are grey by that capability limit",
+            "body_snippet": "",
+            "probe_note": null,
+            "perf_dropped": null,
+            "perf": null,
+            "stream": null,
+            "memory": null,
+            "absences": {}
+          },
+          "openai": {
+            "served": "not_configurable",
+            "reason": "LiteLLM-Rust beta serves only the Anthropic /v1/messages route (azure_ai upstream); no other ingress or upstream dialect exists, so those cells are grey by that capability limit",
+            "status": "",
+            "path": "/v1/chat/completions",
+            "verdict_note": "LiteLLM-Rust beta serves only the Anthropic /v1/messages route (azure_ai upstream); no other ingress or upstream dialect exists, so those cells are grey by that capability limit",
+            "body_snippet": "",
+            "probe_note": null,
+            "perf_dropped": null,
+            "perf": null,
+            "stream": null,
+            "memory": null,
+            "absences": {}
+          },
+          "openai-responses": {
+            "served": "not_configurable",
+            "reason": "LiteLLM-Rust beta serves only the Anthropic /v1/messages route (azure_ai upstream); no other ingress or upstream dialect exists, so those cells are grey by that capability limit",
+            "status": "",
+            "path": "/v1/responses",
+            "verdict_note": "LiteLLM-Rust beta serves only the Anthropic /v1/messages route (azure_ai upstream); no other ingress or upstream dialect exists, so those cells are grey by that capability limit",
+            "body_snippet": "",
+            "probe_note": null,
+            "perf_dropped": null,
+            "perf": null,
+            "stream": null,
+            "memory": null,
+            "absences": {}
+          },
+          "gemini": {
+            "served": "not_configurable",
+            "reason": "LiteLLM-Rust beta serves only the Anthropic /v1/messages route (azure_ai upstream); no other ingress or upstream dialect exists, so those cells are grey by that capability limit",
+            "status": "",
+            "path": "/v1beta/models/azure_ai/mock:generateContent",
+            "verdict_note": "LiteLLM-Rust beta serves only the Anthropic /v1/messages route (azure_ai upstream); no other ingress or upstream dialect exists, so those cells are grey by that capability limit",
+            "body_snippet": "",
+            "probe_note": null,
+            "perf_dropped": null,
+            "perf": null,
+            "stream": null,
+            "memory": null,
+            "absences": {}
+          },
+          "bedrock": {
+            "served": "not_configurable",
+            "reason": "LiteLLM-Rust beta serves only the Anthropic /v1/messages route (azure_ai upstream); no other ingress or upstream dialect exists, so those cells are grey by that capability limit",
+            "status": "",
+            "path": "/model/azure_ai/mock/converse",
+            "verdict_note": "LiteLLM-Rust beta serves only the Anthropic /v1/messages route (azure_ai upstream); no other ingress or upstream dialect exists, so those cells are grey by that capability limit",
+            "body_snippet": "",
+            "probe_note": null,
+            "perf_dropped": null,
+            "perf": null,
+            "stream": null,
+            "memory": null,
+            "absences": {}
+          },
+          "cohere": {
+            "served": "not_configurable",
+            "reason": "LiteLLM-Rust beta serves only the Anthropic /v1/messages route (azure_ai upstream); no other ingress or upstream dialect exists, so those cells are grey by that capability limit",
+            "status": "",
+            "path": "/v2/chat",
+            "verdict_note": "LiteLLM-Rust beta serves only the Anthropic /v1/messages route (azure_ai upstream); no other ingress or upstream dialect exists, so those cells are grey by that capability limit",
+            "body_snippet": "",
+            "probe_note": null,
+            "perf_dropped": null,
+            "perf": null,
+            "stream": null,
+            "memory": null,
+            "absences": {}
+          }
+        }
+      },
+      "gemini": {
+        "configurable": false,
+        "served": true,
+        "egress_config": null,
+        "serve_error": "",
+        "cells": {
+          "openai": {
+            "served": "not_configurable",
+            "reason": "LiteLLM-Rust beta serves only the Anthropic /v1/messages route (azure_ai upstream); no other ingress or upstream dialect exists, so those cells are grey by that capability limit",
+            "status": "",
+            "path": "/v1/chat/completions",
+            "verdict_note": "LiteLLM-Rust beta serves only the Anthropic /v1/messages route (azure_ai upstream); no other ingress or upstream dialect exists, so those cells are grey by that capability limit",
+            "body_snippet": "",
+            "probe_note": null,
+            "perf_dropped": null,
+            "perf": null,
+            "stream": null,
+            "memory": null,
+            "absences": {}
+          },
+          "gemini": {
+            "served": "not_configurable",
+            "reason": "LiteLLM-Rust beta serves only the Anthropic /v1/messages route (azure_ai upstream); no other ingress or upstream dialect exists, so those cells are grey by that capability limit",
+            "status": "",
+            "path": "/v1beta/models/azure_ai/mock:generateContent",
+            "verdict_note": "LiteLLM-Rust beta serves only the Anthropic /v1/messages route (azure_ai upstream); no other ingress or upstream dialect exists, so those cells are grey by that capability limit",
+            "body_snippet": "",
+            "probe_note": null,
+            "perf_dropped": null,
+            "perf": null,
+            "stream": null,
+            "memory": null,
+            "absences": {}
+          },
+          "cohere": {
+            "served": "not_configurable",
+            "reason": "LiteLLM-Rust beta serves only the Anthropic /v1/messages route (azure_ai upstream); no other ingress or upstream dialect exists, so those cells are grey by that capability limit",
+            "status": "",
+            "path": "/v2/chat",
+            "verdict_note": "LiteLLM-Rust beta serves only the Anthropic /v1/messages route (azure_ai upstream); no other ingress or upstream dialect exists, so those cells are grey by that capability limit",
+            "body_snippet": "",
+            "probe_note": null,
+            "perf_dropped": null,
+            "perf": null,
+            "stream": null,
+            "memory": null,
+            "absences": {}
+          },
+          "openai-responses": {
+            "served": "not_configurable",
+            "reason": "LiteLLM-Rust beta serves only the Anthropic /v1/messages route (azure_ai upstream); no other ingress or upstream dialect exists, so those cells are grey by that capability limit",
+            "status": "",
+            "path": "/v1/responses",
+            "verdict_note": "LiteLLM-Rust beta serves only the Anthropic /v1/messages route (azure_ai upstream); no other ingress or upstream dialect exists, so those cells are grey by that capability limit",
+            "body_snippet": "",
+            "probe_note": null,
+            "perf_dropped": null,
+            "perf": null,
+            "stream": null,
+            "memory": null,
+            "absences": {}
+          },
+          "anthropic": {
+            "served": "not_configurable",
+            "reason": "LiteLLM-Rust beta serves only the Anthropic /v1/messages route (azure_ai upstream); no other ingress or upstream dialect exists, so those cells are grey by that capability limit",
+            "status": "",
+            "path": "/v1/messages",
+            "verdict_note": "LiteLLM-Rust beta serves only the Anthropic /v1/messages route (azure_ai upstream); no other ingress or upstream dialect exists, so those cells are grey by that capability limit",
+            "body_snippet": "",
+            "probe_note": null,
+            "perf_dropped": null,
+            "perf": null,
+            "stream": null,
+            "memory": null,
+            "absences": {}
+          },
+          "bedrock": {
+            "served": "not_configurable",
+            "reason": "LiteLLM-Rust beta serves only the Anthropic /v1/messages route (azure_ai upstream); no other ingress or upstream dialect exists, so those cells are grey by that capability limit",
+            "status": "",
+            "path": "/model/azure_ai/mock/converse",
+            "verdict_note": "LiteLLM-Rust beta serves only the Anthropic /v1/messages route (azure_ai upstream); no other ingress or upstream dialect exists, so those cells are grey by that capability limit",
+            "body_snippet": "",
+            "probe_note": null,
+            "perf_dropped": null,
+            "perf": null,
+            "stream": null,
+            "memory": null,
+            "absences": {}
+          }
+        }
+      },
+      "openai-responses": {
+        "configurable": false,
+        "served": true,
+        "egress_config": null,
+        "serve_error": "",
+        "cells": {
+          "anthropic": {
+            "served": "not_configurable",
+            "reason": "LiteLLM-Rust beta serves only the Anthropic /v1/messages route (azure_ai upstream); no other ingress or upstream dialect exists, so those cells are grey by that capability limit",
+            "status": "",
+            "path": "/v1/messages",
+            "verdict_note": "LiteLLM-Rust beta serves only the Anthropic /v1/messages route (azure_ai upstream); no other ingress or upstream dialect exists, so those cells are grey by that capability limit",
+            "body_snippet": "",
+            "probe_note": null,
+            "perf_dropped": null,
+            "perf": null,
+            "stream": null,
+            "memory": null,
+            "absences": {}
+          },
+          "openai": {
+            "served": "not_configurable",
+            "reason": "LiteLLM-Rust beta serves only the Anthropic /v1/messages route (azure_ai upstream); no other ingress or upstream dialect exists, so those cells are grey by that capability limit",
+            "status": "",
+            "path": "/v1/chat/completions",
+            "verdict_note": "LiteLLM-Rust beta serves only the Anthropic /v1/messages route (azure_ai upstream); no other ingress or upstream dialect exists, so those cells are grey by that capability limit",
+            "body_snippet": "",
+            "probe_note": null,
+            "perf_dropped": null,
+            "perf": null,
+            "stream": null,
+            "memory": null,
+            "absences": {}
+          },
+          "openai-responses": {
+            "served": "not_configurable",
+            "reason": "LiteLLM-Rust beta serves only the Anthropic /v1/messages route (azure_ai upstream); no other ingress or upstream dialect exists, so those cells are grey by that capability limit",
+            "status": "",
+            "path": "/v1/responses",
+            "verdict_note": "LiteLLM-Rust beta serves only the Anthropic /v1/messages route (azure_ai upstream); no other ingress or upstream dialect exists, so those cells are grey by that capability limit",
+            "body_snippet": "",
+            "probe_note": null,
+            "perf_dropped": null,
+            "perf": null,
+            "stream": null,
+            "memory": null,
+            "absences": {}
+          },
+          "gemini": {
+            "served": "not_configurable",
+            "reason": "LiteLLM-Rust beta serves only the Anthropic /v1/messages route (azure_ai upstream); no other ingress or upstream dialect exists, so those cells are grey by that capability limit",
+            "status": "",
+            "path": "/v1beta/models/azure_ai/mock:generateContent",
+            "verdict_note": "LiteLLM-Rust beta serves only the Anthropic /v1/messages route (azure_ai upstream); no other ingress or upstream dialect exists, so those cells are grey by that capability limit",
+            "body_snippet": "",
+            "probe_note": null,
+            "perf_dropped": null,
+            "perf": null,
+            "stream": null,
+            "memory": null,
+            "absences": {}
+          },
+          "cohere": {
+            "served": "not_configurable",
+            "reason": "LiteLLM-Rust beta serves only the Anthropic /v1/messages route (azure_ai upstream); no other ingress or upstream dialect exists, so those cells are grey by that capability limit",
+            "status": "",
+            "path": "/v2/chat",
+            "verdict_note": "LiteLLM-Rust beta serves only the Anthropic /v1/messages route (azure_ai upstream); no other ingress or upstream dialect exists, so those cells are grey by that capability limit",
+            "body_snippet": "",
+            "probe_note": null,
+            "perf_dropped": null,
+            "perf": null,
+            "stream": null,
+            "memory": null,
+            "absences": {}
+          },
+          "bedrock": {
+            "served": "not_configurable",
+            "reason": "LiteLLM-Rust beta serves only the Anthropic /v1/messages route (azure_ai upstream); no other ingress or upstream dialect exists, so those cells are grey by that capability limit",
+            "status": "",
+            "path": "/model/azure_ai/mock/converse",
+            "verdict_note": "LiteLLM-Rust beta serves only the Anthropic /v1/messages route (azure_ai upstream); no other ingress or upstream dialect exists, so those cells are grey by that capability limit",
+            "body_snippet": "",
+            "probe_note": null,
+            "perf_dropped": null,
+            "perf": null,
+            "stream": null,
+            "memory": null,
+            "absences": {}
+          }
+        }
+      },
+      "anthropic": {
+        "configurable": true,
+        "served": true,
+        "egress_config": null,
+        "serve_error": "",
+        "cells": {
+          "openai": {
+            "served": "not_configurable",
+            "reason": "LiteLLM-Rust beta serves only the Anthropic /v1/messages route (azure_ai upstream); no other ingress or upstream dialect exists, so those cells are grey by that capability limit",
+            "status": "",
+            "path": "/v1/chat/completions",
+            "verdict_note": "LiteLLM-Rust beta serves only the Anthropic /v1/messages route (azure_ai upstream); no other ingress or upstream dialect exists, so those cells are grey by that capability limit",
+            "body_snippet": "",
+            "probe_note": null,
+            "perf_dropped": null,
+            "perf": null,
+            "stream": null,
+            "memory": null,
+            "absences": {}
+          },
+          "anthropic": {
+            "served": true,
+            "reason": null,
+            "status": "",
+            "path": "/v1/messages",
+            "verdict_note": "",
+            "body_snippet": "",
+            "probe_note": null,
+            "perf_dropped": null,
+            "perf": {
+              "added_latency_p50_us": 91,
+              "added_latency_p99_us": 105,
+              "gateway_c1_p99_us": 136,
+              "direct_c1_p99_us": 31,
+              "rps_sustained_20ms": 42634,
+              "rps_sustained_20ms_concurrency": 514,
+              "conc_at_sustained": 514,
+              "rps_sustained_20ms_mock_bound": false,
+              "rps_max_proxy": 46959,
+              "rps_max_proxy_concurrency": 32,
+              "conc_at_peak": 32,
+              "rps_max_proxy_mock_bound": false,
+              "sweep_max_proxy": [
+                {
+                  "conc": 1,
+                  "rps": 8382,
+                  "p99_us": null,
+                  "fail": null
+                },
+                {
+                  "conc": 1,
+                  "rps": 8342,
+                  "p99_us": null,
+                  "fail": null
+                },
+                {
+                  "conc": 1,
+                  "rps": 8268,
+                  "p99_us": null,
+                  "fail": null
+                },
+                {
+                  "conc": 2,
+                  "rps": 15214,
+                  "p99_us": null,
+                  "fail": null
+                },
+                {
+                  "conc": 2,
+                  "rps": 15143,
+                  "p99_us": null,
+                  "fail": null
+                },
+                {
+                  "conc": 2,
+                  "rps": 15072,
+                  "p99_us": null,
+                  "fail": null
+                },
+                {
+                  "conc": 4,
+                  "rps": 30651,
+                  "p99_us": null,
+                  "fail": null
+                },
+                {
+                  "conc": 4,
+                  "rps": 30537,
+                  "p99_us": null,
+                  "fail": null
+                },
+                {
+                  "conc": 4,
+                  "rps": 30540,
+                  "p99_us": null,
+                  "fail": null
+                },
+                {
+                  "conc": 8,
+                  "rps": 44464,
+                  "p99_us": null,
+                  "fail": null
+                },
+                {
+                  "conc": 8,
+                  "rps": 44512,
+                  "p99_us": null,
+                  "fail": null
+                },
+                {
+                  "conc": 8,
+                  "rps": 44545,
+                  "p99_us": null,
+                  "fail": null
+                },
+                {
+                  "conc": 16,
+                  "rps": 46488,
+                  "p99_us": null,
+                  "fail": null
+                },
+                {
+                  "conc": 16,
+                  "rps": 46415,
+                  "p99_us": null,
+                  "fail": null
+                },
+                {
+                  "conc": 16,
+                  "rps": 46450,
+                  "p99_us": null,
+                  "fail": null
+                },
+                {
+                  "conc": 32,
+                  "rps": 46836,
+                  "p99_us": null,
+                  "fail": null
+                },
+                {
+                  "conc": 32,
+                  "rps": 47045,
+                  "p99_us": null,
+                  "fail": null
+                },
+                {
+                  "conc": 32,
+                  "rps": 46959,
+                  "p99_us": null,
+                  "fail": null
+                },
+                {
+                  "conc": 64,
+                  "rps": 46716,
+                  "p99_us": null,
+                  "fail": null
+                },
+                {
+                  "conc": 64,
+                  "rps": 46794,
+                  "p99_us": null,
+                  "fail": null
+                },
+                {
+                  "conc": 64,
+                  "rps": 46686,
+                  "p99_us": null,
+                  "fail": null
+                },
+                {
+                  "conc": 128,
+                  "rps": 45925,
+                  "p99_us": null,
+                  "fail": null
+                },
+                {
+                  "conc": 128,
+                  "rps": 46200,
+                  "p99_us": null,
+                  "fail": null
+                },
+                {
+                  "conc": 128,
+                  "rps": 46072,
+                  "p99_us": null,
+                  "fail": null
+                }
+              ],
+              "sweep_sustained_20ms": [
+                {
+                  "conc": 1,
+                  "rps": 8618,
+                  "p99_us": 134,
+                  "fail": 0
+                },
+                {
+                  "conc": 2,
+                  "rps": 15408,
+                  "p99_us": 171,
+                  "fail": 0
+                },
+                {
+                  "conc": 4,
+                  "rps": 31211,
+                  "p99_us": 178,
+                  "fail": 0
+                },
+                {
+                  "conc": 8,
+                  "rps": 45245,
+                  "p99_us": 240,
+                  "fail": 0
+                },
+                {
+                  "conc": 16,
+                  "rps": 47417,
+                  "p99_us": 514,
+                  "fail": 0
+                },
+                {
+                  "conc": 32,
+                  "rps": 48065,
+                  "p99_us": 1032,
+                  "fail": 0
+                },
+                {
+                  "conc": 64,
+                  "rps": 47961,
+                  "p99_us": 2089,
+                  "fail": 0
+                },
+                {
+                  "conc": 128,
+                  "rps": 47199,
+                  "p99_us": 4421,
+                  "fail": 0
+                },
+                {
+                  "conc": 256,
+                  "rps": 45848,
+                  "p99_us": 10822,
+                  "fail": 0
+                },
+                {
+                  "conc": 512,
+                  "rps": 43913,
+                  "p99_us": 19402,
+                  "fail": 0
+                },
+                {
+                  "conc": 1024,
+                  "rps": 40593,
+                  "p99_us": 63154,
+                  "fail": 0
+                },
+                {
+                  "conc": 768,
+                  "rps": 41267,
+                  "p99_us": 37748,
+                  "fail": 0
+                },
+                {
+                  "conc": 640,
+                  "rps": 41503,
+                  "p99_us": 26383,
+                  "fail": 0
+                },
+                {
+                  "conc": 576,
+                  "rps": 42396,
+                  "p99_us": 21992,
+                  "fail": 0
+                },
+                {
+                  "conc": 544,
+                  "rps": 42364,
+                  "p99_us": 21039,
+                  "fail": 0
+                },
+                {
+                  "conc": 528,
+                  "rps": 42464,
+                  "p99_us": 20305,
+                  "fail": 0
+                },
+                {
+                  "conc": 520,
+                  "rps": 42679,
+                  "p99_us": 20106,
+                  "fail": 0
+                },
+                {
+                  "conc": 516,
+                  "rps": 42637,
+                  "p99_us": 20084,
+                  "fail": 0
+                },
+                {
+                  "conc": 514,
+                  "rps": 42620,
+                  "p99_us": 19987,
+                  "fail": 0
+                },
+                {
+                  "conc": 515,
+                  "rps": 42624,
+                  "p99_us": 20123,
+                  "fail": 0
+                },
+                {
+                  "conc": 514,
+                  "rps": 42634,
+                  "p99_us": 19821,
+                  "fail": 0
+                },
+                {
+                  "conc": 514,
+                  "rps": 42758,
+                  "p99_us": 20200,
+                  "fail": 0
+                }
+              ],
+              "egress_reverified": null,
+              "reverify_note": "anthropic>anthropic is a same-dialect cell: there is no translation to prove, so a request-shape check upstream cannot distinguish a translating gateway from a forwarding one",
+              "c1_note": "the c=1 percentiles are taken over 51089 successful gateway round trip(s) and 232954 direct-to-mock round trip(s), each leg a single clean window with no failures"
+            },
+            "stream": {
+              "stream_served": true,
+              "reason": null,
+              "stream_error": null,
+              "added_ttft_p50_us": 170,
+              "added_ttft_p99_us": 189,
+              "added_gap_p50_us": 2,
+              "added_gap_p99_us": null,
+              "streams_sustained": 2367,
+              "streams_sustained_fps": 37840.4685970512,
+              "streams_sustained_mock_bound": false,
+              "cpu_fps": 23804.271118394303,
+              "cpu_fps_concurrency": 1024,
+              "cpu_fps_mock_bound": true,
+              "sweep_streams": [
+                {
+                  "conc": 1,
+                  "fps": 49.82650853495471,
+                  "frames": 64,
+                  "frames_expected": 64,
+                  "passed": true,
+                  "stalls": 0,
+                  "stream_errors": 0,
+                  "streams": 1
+                },
+                {
+                  "conc": 2,
+                  "fps": 99.5164783536561,
+                  "frames": 128,
+                  "frames_expected": 128,
+                  "passed": true,
+                  "stalls": 0,
+                  "stream_errors": 0,
+                  "streams": 2
+                },
+                {
+                  "conc": 4,
+                  "fps": 198.95729528076933,
+                  "frames": 256,
+                  "frames_expected": 256,
+                  "passed": true,
+                  "stalls": 0,
+                  "stream_errors": 0,
+                  "streams": 4
+                },
+                {
+                  "conc": 8,
+                  "fps": 397.86774469595207,
+                  "frames": 512,
+                  "frames_expected": 512,
+                  "passed": true,
+                  "stalls": 0,
+                  "stream_errors": 0,
+                  "streams": 8
+                },
+                {
+                  "conc": 16,
+                  "fps": 794.4128355671288,
+                  "frames": 1024,
+                  "frames_expected": 1024,
+                  "passed": true,
+                  "stalls": 0,
+                  "stream_errors": 0,
+                  "streams": 16
+                },
+                {
+                  "conc": 32,
+                  "fps": 1589.035766183843,
+                  "frames": 2048,
+                  "frames_expected": 2048,
+                  "passed": true,
+                  "stalls": 0,
+                  "stream_errors": 0,
+                  "streams": 32
+                },
+                {
+                  "conc": 64,
+                  "fps": 3166.3632996613505,
+                  "frames": 4096,
+                  "frames_expected": 4096,
+                  "passed": true,
+                  "stalls": 0,
+                  "stream_errors": 0,
+                  "streams": 64
+                },
+                {
+                  "conc": 128,
+                  "fps": 6312.630048742128,
+                  "frames": 8192,
+                  "frames_expected": 8192,
+                  "passed": true,
+                  "stalls": 0,
+                  "stream_errors": 0,
+                  "streams": 128
+                },
+                {
+                  "conc": 256,
+                  "fps": 7078.77715885634,
+                  "frames": 16384,
+                  "frames_expected": 16384,
+                  "passed": true,
+                  "stalls": 0,
+                  "stream_errors": 0,
+                  "streams": 256
+                },
+                {
+                  "conc": 512,
+                  "fps": 13005.338665724337,
+                  "frames": 32768,
+                  "frames_expected": 32768,
+                  "passed": true,
+                  "stalls": 0,
+                  "stream_errors": 0,
+                  "streams": 512
+                },
+                {
+                  "conc": 1024,
+                  "fps": 23823.49802831672,
+                  "frames": 65536,
+                  "frames_expected": 65536,
+                  "passed": true,
+                  "stalls": 0,
+                  "stream_errors": 0,
+                  "streams": 1024
+                },
+                {
+                  "conc": 2048,
+                  "fps": 8317.541389552178,
+                  "frames": 131072,
+                  "frames_expected": 131072,
+                  "passed": true,
+                  "stalls": 0,
+                  "stream_errors": 0,
+                  "streams": 2048
+                },
+                {
+                  "conc": 4096,
+                  "fps": 16542.561532727243,
+                  "frames": 262144,
+                  "frames_expected": 262144,
+                  "passed": false,
+                  "stalls": 1533,
+                  "stream_errors": 0,
+                  "streams": 4096
+                },
+                {
+                  "conc": 3072,
+                  "fps": 8016.295937319303,
+                  "frames": 168512,
+                  "frames_expected": 196608,
+                  "passed": false,
+                  "stalls": 0,
+                  "stream_errors": 439,
+                  "streams": 3072
+                },
+                {
+                  "conc": 2560,
+                  "fps": 7754.787843321629,
+                  "frames": 162944,
+                  "frames_expected": 163840,
+                  "passed": false,
+                  "stalls": 0,
+                  "stream_errors": 14,
+                  "streams": 2560
+                },
+                {
+                  "conc": 2304,
+                  "fps": 9405.12670598007,
+                  "frames": 147456,
+                  "frames_expected": 147456,
+                  "passed": true,
+                  "stalls": 0,
+                  "stream_errors": 0,
+                  "streams": 2304
+                },
+                {
+                  "conc": 2432,
+                  "fps": 5537.704459669121,
+                  "frames": 116608,
+                  "frames_expected": 155648,
+                  "passed": false,
+                  "stalls": 0,
+                  "stream_errors": 610,
+                  "streams": 2432
+                },
+                {
+                  "conc": 2368,
+                  "fps": 9619.392408504273,
+                  "frames": 151552,
+                  "frames_expected": 151552,
+                  "passed": false,
+                  "stalls": 8,
+                  "stream_errors": 0,
+                  "streams": 2368
+                },
+                {
+                  "conc": 2336,
+                  "fps": 9438.353551636825,
+                  "frames": 149504,
+                  "frames_expected": 149504,
+                  "passed": true,
+                  "stalls": 0,
+                  "stream_errors": 0,
+                  "streams": 2336
+                },
+                {
+                  "conc": 2352,
+                  "fps": 9501.643536356618,
+                  "frames": 150528,
+                  "frames_expected": 150528,
+                  "passed": true,
+                  "stalls": 0,
+                  "stream_errors": 0,
+                  "streams": 2352
+                },
+                {
+                  "conc": 2360,
+                  "fps": 9534.443374018289,
+                  "frames": 151040,
+                  "frames_expected": 151040,
+                  "passed": true,
+                  "stalls": 0,
+                  "stream_errors": 0,
+                  "streams": 2360
+                },
+                {
+                  "conc": 2364,
+                  "fps": 16939.84645174593,
+                  "frames": 151296,
+                  "frames_expected": 151296,
+                  "passed": true,
+                  "stalls": 0,
+                  "stream_errors": 0,
+                  "streams": 2364
+                },
+                {
+                  "conc": 2366,
+                  "fps": 37290.7914817092,
+                  "frames": 151424,
+                  "frames_expected": 151424,
+                  "passed": true,
+                  "stalls": 0,
+                  "stream_errors": 0,
+                  "streams": 2366
+                },
+                {
+                  "conc": 2367,
+                  "fps": 16991.732213530682,
+                  "frames": 151488,
+                  "frames_expected": 151488,
+                  "passed": true,
+                  "stalls": 0,
+                  "stream_errors": 0,
+                  "streams": 2367
+                },
+                {
+                  "conc": 2367,
+                  "fps": 37840.4685970512,
+                  "frames": 151488,
+                  "frames_expected": 151488,
+                  "passed": true,
+                  "stalls": 0,
+                  "stream_errors": 0,
+                  "streams": 2367
+                },
+                {
+                  "conc": 2367,
+                  "fps": 6797.224411898705,
+                  "frames": 143040,
+                  "frames_expected": 151488,
+                  "passed": false,
+                  "stalls": 0,
+                  "stream_errors": 132,
+                  "streams": 2367
+                }
+              ],
+              "sweep_cpu_fps": [
+                {
+                  "conc": 1,
+                  "fps": 49.80542499054748,
+                  "frames": 64,
+                  "frames_expected": 64,
+                  "passed": true,
+                  "stalls": 0,
+                  "stream_errors": 0,
+                  "streams": 1
+                },
+                {
+                  "conc": 1,
+                  "fps": 49.76478402678577,
+                  "frames": 64,
+                  "frames_expected": 64,
+                  "passed": true,
+                  "stalls": 0,
+                  "stream_errors": 0,
+                  "streams": 1
+                },
+                {
+                  "conc": 1,
+                  "fps": 49.825641551301544,
+                  "frames": 64,
+                  "frames_expected": 64,
+                  "passed": true,
+                  "stalls": 0,
+                  "stream_errors": 0,
+                  "streams": 1
+                },
+                {
+                  "conc": 2,
+                  "fps": 99.51334236060845,
+                  "frames": 128,
+                  "frames_expected": 128,
+                  "passed": true,
+                  "stalls": 0,
+                  "stream_errors": 0,
+                  "streams": 2
+                },
+                {
+                  "conc": 2,
+                  "fps": 99.56149957620326,
+                  "frames": 128,
+                  "frames_expected": 128,
+                  "passed": true,
+                  "stalls": 0,
+                  "stream_errors": 0,
+                  "streams": 2
+                },
+                {
+                  "conc": 2,
+                  "fps": 99.5236794369561,
+                  "frames": 128,
+                  "frames_expected": 128,
+                  "passed": true,
+                  "stalls": 0,
+                  "stream_errors": 0,
+                  "streams": 2
+                },
+                {
+                  "conc": 4,
+                  "fps": 199.14983278672125,
+                  "frames": 256,
+                  "frames_expected": 256,
+                  "passed": true,
+                  "stalls": 0,
+                  "stream_errors": 0,
+                  "streams": 4
+                },
+                {
+                  "conc": 4,
+                  "fps": 199.34284125022688,
+                  "frames": 256,
+                  "frames_expected": 256,
+                  "passed": true,
+                  "stalls": 0,
+                  "stream_errors": 0,
+                  "streams": 4
+                },
+                {
+                  "conc": 4,
+                  "fps": 199.21748104945462,
+                  "frames": 256,
+                  "frames_expected": 256,
+                  "passed": true,
+                  "stalls": 0,
+                  "stream_errors": 0,
+                  "streams": 4
+                },
+                {
+                  "conc": 8,
+                  "fps": 397.9543804856025,
+                  "frames": 512,
+                  "frames_expected": 512,
+                  "passed": true,
+                  "stalls": 0,
+                  "stream_errors": 0,
+                  "streams": 8
+                },
+                {
+                  "conc": 8,
+                  "fps": 397.9168446978624,
+                  "frames": 512,
+                  "frames_expected": 512,
+                  "passed": true,
+                  "stalls": 0,
+                  "stream_errors": 0,
+                  "streams": 8
+                },
+                {
+                  "conc": 8,
+                  "fps": 397.5938125668126,
+                  "frames": 512,
+                  "frames_expected": 512,
+                  "passed": true,
+                  "stalls": 0,
+                  "stream_errors": 0,
+                  "streams": 8
+                },
+                {
+                  "conc": 16,
+                  "fps": 794.1011517377112,
+                  "frames": 1024,
+                  "frames_expected": 1024,
+                  "passed": true,
+                  "stalls": 0,
+                  "stream_errors": 0,
+                  "streams": 16
+                },
+                {
+                  "conc": 16,
+                  "fps": 794.9473259750494,
+                  "frames": 1024,
+                  "frames_expected": 1024,
+                  "passed": true,
+                  "stalls": 0,
+                  "stream_errors": 0,
+                  "streams": 16
+                },
+                {
+                  "conc": 16,
+                  "fps": 793.440851971124,
+                  "frames": 1024,
+                  "frames_expected": 1024,
+                  "passed": true,
+                  "stalls": 0,
+                  "stream_errors": 0,
+                  "streams": 16
+                },
+                {
+                  "conc": 32,
+                  "fps": 1587.0473293400405,
+                  "frames": 2048,
+                  "frames_expected": 2048,
+                  "passed": true,
+                  "stalls": 0,
+                  "stream_errors": 0,
+                  "streams": 32
+                },
+                {
+                  "conc": 32,
+                  "fps": 1589.324998168047,
+                  "frames": 2048,
+                  "frames_expected": 2048,
+                  "passed": true,
+                  "stalls": 0,
+                  "stream_errors": 0,
+                  "streams": 32
+                },
+                {
+                  "conc": 32,
+                  "fps": 1589.345309662802,
+                  "frames": 2048,
+                  "frames_expected": 2048,
+                  "passed": true,
+                  "stalls": 0,
+                  "stream_errors": 0,
+                  "streams": 32
+                },
+                {
+                  "conc": 64,
+                  "fps": 3177.6536299777677,
+                  "frames": 4096,
+                  "frames_expected": 4096,
+                  "passed": true,
+                  "stalls": 0,
+                  "stream_errors": 0,
+                  "streams": 64
+                },
+                {
+                  "conc": 64,
+                  "fps": 3157.5981756304313,
+                  "frames": 4096,
+                  "frames_expected": 4096,
+                  "passed": true,
+                  "stalls": 0,
+                  "stream_errors": 0,
+                  "streams": 64
+                },
+                {
+                  "conc": 64,
+                  "fps": 3179.6677585963507,
+                  "frames": 4096,
+                  "frames_expected": 4096,
+                  "passed": true,
+                  "stalls": 0,
+                  "stream_errors": 0,
+                  "streams": 64
+                },
+                {
+                  "conc": 128,
+                  "fps": 6331.377239186972,
+                  "frames": 8192,
+                  "frames_expected": 8192,
+                  "passed": true,
+                  "stalls": 0,
+                  "stream_errors": 0,
+                  "streams": 128
+                },
+                {
+                  "conc": 128,
+                  "fps": 6314.161592539894,
+                  "frames": 8192,
+                  "frames_expected": 8192,
+                  "passed": true,
+                  "stalls": 0,
+                  "stream_errors": 0,
+                  "streams": 128
+                },
+                {
+                  "conc": 128,
+                  "fps": 6295.943039023191,
+                  "frames": 8192,
+                  "frames_expected": 8192,
+                  "passed": true,
+                  "stalls": 0,
+                  "stream_errors": 0,
+                  "streams": 128
+                },
+                {
+                  "conc": 256,
+                  "fps": 7017.659149420203,
+                  "frames": 16384,
+                  "frames_expected": 16384,
+                  "passed": true,
+                  "stalls": 0,
+                  "stream_errors": 0,
+                  "streams": 256
+                },
+                {
+                  "conc": 256,
+                  "fps": 7092.589318959097,
+                  "frames": 16384,
+                  "frames_expected": 16384,
+                  "passed": true,
+                  "stalls": 0,
+                  "stream_errors": 0,
+                  "streams": 256
+                },
+                {
+                  "conc": 256,
+                  "fps": 6947.61348387024,
+                  "frames": 16384,
+                  "frames_expected": 16384,
+                  "passed": true,
+                  "stalls": 0,
+                  "stream_errors": 0,
+                  "streams": 256
+                },
+                {
+                  "conc": 512,
+                  "fps": 13066.103691025442,
+                  "frames": 32768,
+                  "frames_expected": 32768,
+                  "passed": true,
+                  "stalls": 0,
+                  "stream_errors": 0,
+                  "streams": 512
+                },
+                {
+                  "conc": 512,
+                  "fps": 12794.203371260015,
+                  "frames": 32768,
+                  "frames_expected": 32768,
+                  "passed": true,
+                  "stalls": 0,
+                  "stream_errors": 0,
+                  "streams": 512
+                },
+                {
+                  "conc": 512,
+                  "fps": 12821.618997577192,
+                  "frames": 32768,
+                  "frames_expected": 32768,
+                  "passed": true,
+                  "stalls": 0,
+                  "stream_errors": 0,
+                  "streams": 512
+                },
+                {
+                  "conc": 1024,
+                  "fps": 23804.271118394303,
+                  "frames": 65536,
+                  "frames_expected": 65536,
+                  "passed": true,
+                  "stalls": 0,
+                  "stream_errors": 0,
+                  "streams": 1024
+                },
+                {
+                  "conc": 1024,
+                  "fps": 20827.54223303319,
+                  "frames": 65536,
+                  "frames_expected": 65536,
+                  "passed": true,
+                  "stalls": 0,
+                  "stream_errors": 0,
+                  "streams": 1024
+                },
+                {
+                  "conc": 1024,
+                  "fps": 24051.11064471715,
+                  "frames": 65536,
+                  "frames_expected": 65536,
+                  "passed": true,
+                  "stalls": 0,
+                  "stream_errors": 0,
+                  "streams": 1024
+                },
+                {
+                  "conc": 2048,
+                  "fps": 8288.002892697143,
+                  "frames": 131072,
+                  "frames_expected": 131072,
+                  "passed": true,
+                  "stalls": 0,
+                  "stream_errors": 0,
+                  "streams": 2048
+                },
+                {
+                  "conc": 2048,
+                  "fps": 32690.9449337611,
+                  "frames": 131072,
+                  "frames_expected": 131072,
+                  "passed": true,
+                  "stalls": 0,
+                  "stream_errors": 0,
+                  "streams": 2048
+                },
+                {
+                  "conc": 2048,
+                  "fps": 14686.913556789645,
+                  "frames": 131072,
+                  "frames_expected": 131072,
+                  "passed": true,
+                  "stalls": 0,
+                  "stream_errors": 0,
+                  "streams": 2048
+                },
+                {
+                  "conc": 4096,
+                  "fps": 10309.694970660219,
+                  "frames": 217088,
+                  "frames_expected": 262144,
+                  "passed": false,
+                  "stalls": 0,
+                  "stream_errors": 704,
+                  "streams": 4096
+                },
+                {
+                  "conc": 4096,
+                  "fps": 12330.451425879259,
+                  "frames": 259776,
+                  "frames_expected": 262144,
+                  "passed": false,
+                  "stalls": 0,
+                  "stream_errors": 37,
+                  "streams": 4096
+                },
+                {
+                  "conc": 4096,
+                  "fps": 11389.131176821667,
+                  "frames": 239872,
+                  "frames_expected": 262144,
+                  "passed": false,
+                  "stalls": 0,
+                  "stream_errors": 348,
+                  "streams": 4096
+                },
+                {
+                  "conc": 8192,
+                  "fps": 19169.065489805194,
+                  "frames": 423360,
+                  "frames_expected": 524288,
+                  "passed": false,
+                  "stalls": 1883,
+                  "stream_errors": 1577,
+                  "streams": 8192
+                },
+                {
+                  "conc": 8192,
+                  "fps": 18778.594101657665,
+                  "frames": 413888,
+                  "frames_expected": 524288,
+                  "passed": false,
+                  "stalls": 563,
+                  "stream_errors": 1725,
+                  "streams": 8192
+                },
+                {
+                  "conc": 8192,
+                  "fps": 17245.764595743804,
+                  "frames": 363392,
+                  "frames_expected": 524288,
+                  "passed": false,
+                  "stalls": 853,
+                  "stream_errors": 2514,
+                  "streams": 8192
+                }
+              ],
+              "stream_c1_note": "the c=1 streaming legs read 64 frame(s) through the gateway and 64 direct to the mock, out of a 64 frame budget; the added-gap figures are medians over the intervals between those frames, and the p99 fields are absent because one stream cannot support a 99th percentile"
+            },
+            "memory": {
+              "protocol": "cold restart, idle read at rest, then load at c=32 in repeated windows until the              trailing 60s is flat (cap 300s), then 60s with the load removed",
+              "served": true,
+              "serve_error": "",
+              "load_recipe": null,
+              "idle_rss_mib": 251.7109375,
+              "steady_state_rss_mib": 254.91796875,
+              "recovered_rss_mib": 254.91796875,
+              "peak_rss_mib": 254.91796875,
+              "peak_rss_hwm_mib": 254.91015625,
+              "plateaued": true,
+              "time_to_plateau_s": 6.0,
+              "growth_rate_mib_per_min": 0.0,
+              "load_s": 6,
+              "rss_series": [
+                {
+                  "t_s": 0,
+                  "rss_mib": 252.21484375
+                },
+                {
+                  "t_s": 0,
+                  "rss_mib": 254.3203125
+                },
+                {
+                  "t_s": 0,
+                  "rss_mib": 254.36328125
+                },
+                {
+                  "t_s": 0,
+                  "rss_mib": 254.40234375
+                },
+                {
+                  "t_s": 0,
+                  "rss_mib": 254.484375
+                },
+                {
+                  "t_s": 0,
+                  "rss_mib": 254.49609375
+                },
+                {
+                  "t_s": 0,
+                  "rss_mib": 254.54296875
+                },
+                {
+                  "t_s": 0,
+                  "rss_mib": 254.5625
+                },
+                {
+                  "t_s": 0,
+                  "rss_mib": 254.58203125
+                },
+                {
+                  "t_s": 0,
+                  "rss_mib": 254.609375
+                },
+                {
+                  "t_s": 1,
+                  "rss_mib": 254.6171875
+                },
+                {
+                  "t_s": 1,
+                  "rss_mib": 254.63671875
+                },
+                {
+                  "t_s": 1,
+                  "rss_mib": 254.6484375
+                },
+                {
+                  "t_s": 1,
+                  "rss_mib": 254.67578125
+                },
+                {
+                  "t_s": 1,
+                  "rss_mib": 254.70703125
+                },
+                {
+                  "t_s": 1,
+                  "rss_mib": 254.734375
+                },
+                {
+                  "t_s": 1,
+                  "rss_mib": 254.734375
+                },
+                {
+                  "t_s": 1,
+                  "rss_mib": 254.75
+                },
+                {
+                  "t_s": 1,
+                  "rss_mib": 254.75
+                },
+                {
+                  "t_s": 1,
+                  "rss_mib": 254.75390625
+                },
+                {
+                  "t_s": 2,
+                  "rss_mib": 254.765625
+                },
+                {
+                  "t_s": 2,
+                  "rss_mib": 254.765625
+                },
+                {
+                  "t_s": 2,
+                  "rss_mib": 254.765625
+                },
+                {
+                  "t_s": 2,
+                  "rss_mib": 254.7734375
+                },
+                {
+                  "t_s": 2,
+                  "rss_mib": 254.77734375
+                },
+                {
+                  "t_s": 2,
+                  "rss_mib": 254.77734375
+                },
+                {
+                  "t_s": 2,
+                  "rss_mib": 254.7890625
+                },
+                {
+                  "t_s": 2,
+                  "rss_mib": 254.7890625
+                },
+                {
+                  "t_s": 2,
+                  "rss_mib": 254.7890625
+                },
+                {
+                  "t_s": 2,
+                  "rss_mib": 254.796875
+                },
+                {
+                  "t_s": 3,
+                  "rss_mib": 254.80859375
+                },
+                {
+                  "t_s": 3,
+                  "rss_mib": 254.8125
+                },
+                {
+                  "t_s": 3,
+                  "rss_mib": 254.8203125
+                },
+                {
+                  "t_s": 3,
+                  "rss_mib": 254.8203125
+                },
+                {
+                  "t_s": 3,
+                  "rss_mib": 254.8203125
+                },
+                {
+                  "t_s": 3,
+                  "rss_mib": 254.828125
+                },
+                {
+                  "t_s": 3,
+                  "rss_mib": 254.828125
+                },
+                {
+                  "t_s": 3,
+                  "rss_mib": 254.828125
+                },
+                {
+                  "t_s": 3,
+                  "rss_mib": 254.828125
+                },
+                {
+                  "t_s": 4,
+                  "rss_mib": 254.828125
+                },
+                {
+                  "t_s": 4,
+                  "rss_mib": 254.828125
+                },
+                {
+                  "t_s": 4,
+                  "rss_mib": 254.83203125
+                },
+                {
+                  "t_s": 4,
+                  "rss_mib": 254.8359375
+                },
+                {
+                  "t_s": 4,
+                  "rss_mib": 254.8359375
+                },
+                {
+                  "t_s": 4,
+                  "rss_mib": 254.84765625
+                },
+                {
+                  "t_s": 4,
+                  "rss_mib": 254.85546875
+                },
+                {
+                  "t_s": 4,
+                  "rss_mib": 254.859375
+                },
+                {
+                  "t_s": 4,
+                  "rss_mib": 254.875
+                },
+                {
+                  "t_s": 4,
+                  "rss_mib": 254.875
+                },
+                {
+                  "t_s": 5,
+                  "rss_mib": 254.890625
+                },
+                {
+                  "t_s": 5,
+                  "rss_mib": 254.890625
+                },
+                {
+                  "t_s": 5,
+                  "rss_mib": 254.8984375
+                },
+                {
+                  "t_s": 5,
+                  "rss_mib": 254.90234375
+                },
+                {
+                  "t_s": 5,
+                  "rss_mib": 254.90234375
+                },
+                {
+                  "t_s": 5,
+                  "rss_mib": 254.90234375
+                },
+                {
+                  "t_s": 5,
+                  "rss_mib": 254.90625
+                },
+                {
+                  "t_s": 5,
+                  "rss_mib": 254.90625
+                },
+                {
+                  "t_s": 5,
+                  "rss_mib": 254.91015625
+                },
+                {
+                  "t_s": 5,
+                  "rss_mib": 254.91015625
+                },
+                {
+                  "t_s": 6,
+                  "rss_mib": 254.91015625
+                },
+                {
+                  "t_s": 6,
+                  "rss_mib": 254.91015625
+                },
+                {
+                  "t_s": 6,
+                  "rss_mib": 254.91015625
+                },
+                {
+                  "t_s": 6,
+                  "rss_mib": 254.91015625
+                },
+                {
+                  "t_s": 6,
+                  "rss_mib": 254.91015625
+                },
+                {
+                  "t_s": 6,
+                  "rss_mib": 254.91015625
+                },
+                {
+                  "t_s": 6,
+                  "rss_mib": 254.91015625
+                },
+                {
+                  "t_s": 6,
+                  "rss_mib": 254.91015625
+                },
+                {
+                  "t_s": 6,
+                  "rss_mib": 254.91015625
+                },
+                {
+                  "t_s": 6,
+                  "rss_mib": 254.91015625
+                },
+                {
+                  "t_s": 7,
+                  "rss_mib": 254.91015625
+                },
+                {
+                  "t_s": 7,
+                  "rss_mib": 254.91015625
+                },
+                {
+                  "t_s": 7,
+                  "rss_mib": 254.91015625
+                },
+                {
+                  "t_s": 7,
+                  "rss_mib": 254.91015625
+                },
+                {
+                  "t_s": 7,
+                  "rss_mib": 254.91015625
+                },
+                {
+                  "t_s": 7,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 7,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 7,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 7,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 8,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 8,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 8,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 8,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 8,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 8,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 8,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 8,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 8,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 8,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 9,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 9,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 9,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 9,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 9,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 9,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 9,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 9,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 9,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 9,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 10,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 10,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 10,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 10,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 10,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 10,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 10,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 10,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 10,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 10,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 11,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 11,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 11,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 11,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 11,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 11,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 11,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 11,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 11,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 11,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 12,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 12,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 12,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 12,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 12,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 12,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 12,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 12,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 12,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 13,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 13,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 13,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 13,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 13,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 13,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 13,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 13,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 13,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 13,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 14,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 14,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 14,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 14,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 14,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 14,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 14,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 14,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 14,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 14,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 15,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 15,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 15,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 15,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 15,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 15,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 15,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 15,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 15,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 15,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 16,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 16,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 16,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 16,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 16,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 16,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 16,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 16,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 16,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 17,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 17,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 17,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 17,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 17,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 17,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 17,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 17,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 17,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 17,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 18,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 18,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 18,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 18,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 18,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 18,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 18,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 18,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 18,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 18,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 19,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 19,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 19,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 19,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 19,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 19,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 19,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 19,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 19,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 19,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 20,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 20,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 20,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 20,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 20,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 20,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 20,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 20,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 20,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 21,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 21,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 21,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 21,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 21,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 21,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 21,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 21,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 21,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 21,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 22,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 22,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 22,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 22,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 22,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 22,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 22,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 22,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 22,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 22,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 23,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 23,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 23,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 23,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 23,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 23,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 23,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 23,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 23,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 23,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 24,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 24,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 24,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 24,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 24,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 24,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 24,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 24,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 24,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 25,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 25,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 25,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 25,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 25,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 25,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 25,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 25,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 25,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 25,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 26,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 26,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 26,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 26,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 26,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 26,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 26,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 26,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 26,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 26,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 27,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 27,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 27,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 27,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 27,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 27,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 27,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 27,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 27,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 27,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 28,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 28,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 28,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 28,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 28,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 28,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 28,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 28,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 28,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 29,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 29,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 29,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 29,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 29,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 29,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 29,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 29,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 29,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 29,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 30,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 30,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 30,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 30,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 30,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 30,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 30,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 30,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 30,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 30,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 31,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 31,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 31,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 31,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 31,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 31,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 31,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 31,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 31,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 31,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 32,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 32,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 32,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 32,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 32,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 32,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 32,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 32,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 32,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 32,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 33,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 33,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 33,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 33,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 33,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 33,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 33,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 33,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 33,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 34,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 34,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 34,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 34,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 34,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 34,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 34,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 34,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 34,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 34,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 35,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 35,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 35,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 35,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 35,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 35,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 35,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 35,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 35,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 35,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 36,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 36,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 36,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 36,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 36,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 36,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 36,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 36,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 36,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 36,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 37,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 37,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 37,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 37,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 37,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 37,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 37,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 37,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 37,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 38,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 38,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 38,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 38,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 38,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 38,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 38,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 38,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 38,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 38,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 39,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 39,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 39,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 39,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 39,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 39,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 39,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 39,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 39,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 39,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 40,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 40,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 40,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 40,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 40,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 40,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 40,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 40,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 40,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 40,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 41,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 41,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 41,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 41,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 41,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 41,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 41,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 41,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 41,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 42,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 42,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 42,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 42,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 42,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 42,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 42,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 42,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 42,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 42,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 43,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 43,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 43,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 43,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 43,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 43,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 43,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 43,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 43,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 43,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 44,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 44,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 44,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 44,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 44,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 44,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 44,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 44,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 44,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 44,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 45,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 45,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 45,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 45,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 45,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 45,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 45,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 45,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 45,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 46,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 46,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 46,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 46,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 46,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 46,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 46,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 46,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 46,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 46,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 47,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 47,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 47,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 47,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 47,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 47,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 47,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 47,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 47,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 47,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 48,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 48,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 48,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 48,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 48,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 48,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 48,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 48,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 48,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 48,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 49,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 49,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 49,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 49,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 49,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 49,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 49,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 49,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 49,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 49,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 50,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 50,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 50,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 50,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 50,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 50,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 50,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 50,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 50,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 51,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 51,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 51,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 51,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 51,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 51,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 51,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 51,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 51,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 51,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 52,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 52,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 52,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 52,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 52,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 52,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 52,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 52,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 52,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 52,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 53,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 53,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 53,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 53,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 53,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 53,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 53,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 53,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 53,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 53,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 54,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 54,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 54,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 54,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 54,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 54,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 54,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 54,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 54,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 55,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 55,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 55,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 55,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 55,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 55,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 55,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 55,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 55,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 55,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 56,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 56,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 56,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 56,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 56,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 56,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 56,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 56,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 56,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 56,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 57,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 57,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 57,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 57,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 57,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 57,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 57,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 57,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 57,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 57,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 58,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 58,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 58,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 58,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 58,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 58,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 58,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 58,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 58,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 59,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 59,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 59,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 59,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 59,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 59,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 59,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 59,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 59,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 59,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 60,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 60,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 60,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 60,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 60,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 60,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 60,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 60,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 60,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 60,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 61,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 61,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 61,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 61,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 61,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 61,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 61,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 61,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 61,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 61,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 62,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 62,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 62,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 62,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 62,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 62,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 62,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 62,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 62,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 63,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 63,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 63,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 63,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 63,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 63,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 63,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 63,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 63,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 63,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 64,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 64,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 64,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 64,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 64,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 64,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 64,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 64,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 64,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 64,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 65,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 65,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 65,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 65,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 65,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 65,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 65,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 65,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 65,
+                  "rss_mib": 254.91796875
+                },
+                {
+                  "t_s": 65,
+                  "rss_mib": 254.91796875
+                }
+              ],
+              "idle_window_s": null,
+              "recovery_window_s": 60
+            },
+            "absences": {
+              "stream.added_gap_p99_us": {
+                "reason": "not_measured",
+                "detail": "the gateway's own inter-frame gap at this percentile (21132us) came in under the mock's (21134us), which a proxy cannot really do - the added gap here is below what this rig can resolve against the mock's 20ms pacing"
+              }
+            }
+          },
+          "gemini": {
+            "served": "not_configurable",
+            "reason": "LiteLLM-Rust beta serves only the Anthropic /v1/messages route (azure_ai upstream); no other ingress or upstream dialect exists, so those cells are grey by that capability limit",
+            "status": "",
+            "path": "/v1beta/models/azure_ai/mock:generateContent",
+            "verdict_note": "LiteLLM-Rust beta serves only the Anthropic /v1/messages route (azure_ai upstream); no other ingress or upstream dialect exists, so those cells are grey by that capability limit",
+            "body_snippet": "",
+            "probe_note": null,
+            "perf_dropped": null,
+            "perf": null,
+            "stream": null,
+            "memory": null,
+            "absences": {}
+          },
+          "cohere": {
+            "served": "not_configurable",
+            "reason": "LiteLLM-Rust beta serves only the Anthropic /v1/messages route (azure_ai upstream); no other ingress or upstream dialect exists, so those cells are grey by that capability limit",
+            "status": "",
+            "path": "/v2/chat",
+            "verdict_note": "LiteLLM-Rust beta serves only the Anthropic /v1/messages route (azure_ai upstream); no other ingress or upstream dialect exists, so those cells are grey by that capability limit",
+            "body_snippet": "",
+            "probe_note": null,
+            "perf_dropped": null,
+            "perf": null,
+            "stream": null,
+            "memory": null,
+            "absences": {}
+          },
+          "bedrock": {
+            "served": "not_configurable",
+            "reason": "LiteLLM-Rust beta serves only the Anthropic /v1/messages route (azure_ai upstream); no other ingress or upstream dialect exists, so those cells are grey by that capability limit",
+            "status": "",
+            "path": "/model/azure_ai/mock/converse",
+            "verdict_note": "LiteLLM-Rust beta serves only the Anthropic /v1/messages route (azure_ai upstream); no other ingress or upstream dialect exists, so those cells are grey by that capability limit",
+            "body_snippet": "",
+            "probe_note": null,
+            "perf_dropped": null,
+            "perf": null,
+            "stream": null,
+            "memory": null,
+            "absences": {}
+          },
+          "openai-responses": {
+            "served": "not_configurable",
+            "reason": "LiteLLM-Rust beta serves only the Anthropic /v1/messages route (azure_ai upstream); no other ingress or upstream dialect exists, so those cells are grey by that capability limit",
+            "status": "",
+            "path": "/v1/responses",
+            "verdict_note": "LiteLLM-Rust beta serves only the Anthropic /v1/messages route (azure_ai upstream); no other ingress or upstream dialect exists, so those cells are grey by that capability limit",
+            "body_snippet": "",
+            "probe_note": null,
+            "perf_dropped": null,
+            "perf": null,
+            "stream": null,
+            "memory": null,
+            "absences": {}
+          }
+        }
+      },
+      "bedrock": {
+        "configurable": false,
+        "served": true,
+        "egress_config": null,
+        "serve_error": "",
+        "cells": {
+          "cohere": {
+            "served": "not_configurable",
+            "reason": "LiteLLM-Rust beta serves only the Anthropic /v1/messages route (azure_ai upstream); no other ingress or upstream dialect exists, so those cells are grey by that capability limit",
+            "status": "",
+            "path": "/v2/chat",
+            "verdict_note": "LiteLLM-Rust beta serves only the Anthropic /v1/messages route (azure_ai upstream); no other ingress or upstream dialect exists, so those cells are grey by that capability limit",
+            "body_snippet": "",
+            "probe_note": null,
+            "perf_dropped": null,
+            "perf": null,
+            "stream": null,
+            "memory": null,
+            "absences": {}
+          },
+          "bedrock": {
+            "served": "not_configurable",
+            "reason": "LiteLLM-Rust beta serves only the Anthropic /v1/messages route (azure_ai upstream); no other ingress or upstream dialect exists, so those cells are grey by that capability limit",
+            "status": "",
+            "path": "/model/azure_ai/mock/converse",
+            "verdict_note": "LiteLLM-Rust beta serves only the Anthropic /v1/messages route (azure_ai upstream); no other ingress or upstream dialect exists, so those cells are grey by that capability limit",
+            "body_snippet": "",
+            "probe_note": null,
+            "perf_dropped": null,
+            "perf": null,
+            "stream": null,
+            "memory": null,
+            "absences": {}
+          },
+          "gemini": {
+            "served": "not_configurable",
+            "reason": "LiteLLM-Rust beta serves only the Anthropic /v1/messages route (azure_ai upstream); no other ingress or upstream dialect exists, so those cells are grey by that capability limit",
+            "status": "",
+            "path": "/v1beta/models/azure_ai/mock:generateContent",
+            "verdict_note": "LiteLLM-Rust beta serves only the Anthropic /v1/messages route (azure_ai upstream); no other ingress or upstream dialect exists, so those cells are grey by that capability limit",
+            "body_snippet": "",
+            "probe_note": null,
+            "perf_dropped": null,
+            "perf": null,
+            "stream": null,
+            "memory": null,
+            "absences": {}
+          },
+          "openai": {
+            "served": "not_configurable",
+            "reason": "LiteLLM-Rust beta serves only the Anthropic /v1/messages route (azure_ai upstream); no other ingress or upstream dialect exists, so those cells are grey by that capability limit",
+            "status": "",
+            "path": "/v1/chat/completions",
+            "verdict_note": "LiteLLM-Rust beta serves only the Anthropic /v1/messages route (azure_ai upstream); no other ingress or upstream dialect exists, so those cells are grey by that capability limit",
+            "body_snippet": "",
+            "probe_note": null,
+            "perf_dropped": null,
+            "perf": null,
+            "stream": null,
+            "memory": null,
+            "absences": {}
+          },
+          "anthropic": {
+            "served": "not_configurable",
+            "reason": "LiteLLM-Rust beta serves only the Anthropic /v1/messages route (azure_ai upstream); no other ingress or upstream dialect exists, so those cells are grey by that capability limit",
+            "status": "",
+            "path": "/v1/messages",
+            "verdict_note": "LiteLLM-Rust beta serves only the Anthropic /v1/messages route (azure_ai upstream); no other ingress or upstream dialect exists, so those cells are grey by that capability limit",
+            "body_snippet": "",
+            "probe_note": null,
+            "perf_dropped": null,
+            "perf": null,
+            "stream": null,
+            "memory": null,
+            "absences": {}
+          },
+          "openai-responses": {
+            "served": "not_configurable",
+            "reason": "LiteLLM-Rust beta serves only the Anthropic /v1/messages route (azure_ai upstream); no other ingress or upstream dialect exists, so those cells are grey by that capability limit",
+            "status": "",
+            "path": "/v1/responses",
+            "verdict_note": "LiteLLM-Rust beta serves only the Anthropic /v1/messages route (azure_ai upstream); no other ingress or upstream dialect exists, so those cells are grey by that capability limit",
+            "body_snippet": "",
+            "probe_note": null,
+            "perf_dropped": null,
+            "perf": null,
+            "stream": null,
+            "memory": null,
+            "absences": {}
+          }
+        }
+      },
+      "cohere": {
+        "configurable": false,
+        "served": true,
+        "egress_config": null,
+        "serve_error": "",
+        "cells": {
+          "cohere": {
+            "served": "not_configurable",
+            "reason": "LiteLLM-Rust beta serves only the Anthropic /v1/messages route (azure_ai upstream); no other ingress or upstream dialect exists, so those cells are grey by that capability limit",
+            "status": "",
+            "path": "/v2/chat",
+            "verdict_note": "LiteLLM-Rust beta serves only the Anthropic /v1/messages route (azure_ai upstream); no other ingress or upstream dialect exists, so those cells are grey by that capability limit",
+            "body_snippet": "",
+            "probe_note": null,
+            "perf_dropped": null,
+            "perf": null,
+            "stream": null,
+            "memory": null,
+            "absences": {}
+          },
+          "openai-responses": {
+            "served": "not_configurable",
+            "reason": "LiteLLM-Rust beta serves only the Anthropic /v1/messages route (azure_ai upstream); no other ingress or upstream dialect exists, so those cells are grey by that capability limit",
+            "status": "",
+            "path": "/v1/responses",
+            "verdict_note": "LiteLLM-Rust beta serves only the Anthropic /v1/messages route (azure_ai upstream); no other ingress or upstream dialect exists, so those cells are grey by that capability limit",
+            "body_snippet": "",
+            "probe_note": null,
+            "perf_dropped": null,
+            "perf": null,
+            "stream": null,
+            "memory": null,
+            "absences": {}
+          },
+          "bedrock": {
+            "served": "not_configurable",
+            "reason": "LiteLLM-Rust beta serves only the Anthropic /v1/messages route (azure_ai upstream); no other ingress or upstream dialect exists, so those cells are grey by that capability limit",
+            "status": "",
+            "path": "/model/azure_ai/mock/converse",
+            "verdict_note": "LiteLLM-Rust beta serves only the Anthropic /v1/messages route (azure_ai upstream); no other ingress or upstream dialect exists, so those cells are grey by that capability limit",
+            "body_snippet": "",
+            "probe_note": null,
+            "perf_dropped": null,
+            "perf": null,
+            "stream": null,
+            "memory": null,
+            "absences": {}
+          },
+          "gemini": {
+            "served": "not_configurable",
+            "reason": "LiteLLM-Rust beta serves only the Anthropic /v1/messages route (azure_ai upstream); no other ingress or upstream dialect exists, so those cells are grey by that capability limit",
+            "status": "",
+            "path": "/v1beta/models/azure_ai/mock:generateContent",
+            "verdict_note": "LiteLLM-Rust beta serves only the Anthropic /v1/messages route (azure_ai upstream); no other ingress or upstream dialect exists, so those cells are grey by that capability limit",
+            "body_snippet": "",
+            "probe_note": null,
+            "perf_dropped": null,
+            "perf": null,
+            "stream": null,
+            "memory": null,
+            "absences": {}
+          },
+          "anthropic": {
+            "served": "not_configurable",
+            "reason": "LiteLLM-Rust beta serves only the Anthropic /v1/messages route (azure_ai upstream); no other ingress or upstream dialect exists, so those cells are grey by that capability limit",
+            "status": "",
+            "path": "/v1/messages",
+            "verdict_note": "LiteLLM-Rust beta serves only the Anthropic /v1/messages route (azure_ai upstream); no other ingress or upstream dialect exists, so those cells are grey by that capability limit",
+            "body_snippet": "",
+            "probe_note": null,
+            "perf_dropped": null,
+            "perf": null,
+            "stream": null,
+            "memory": null,
+            "absences": {}
+          },
+          "openai": {
+            "served": "not_configurable",
+            "reason": "LiteLLM-Rust beta serves only the Anthropic /v1/messages route (azure_ai upstream); no other ingress or upstream dialect exists, so those cells are grey by that capability limit",
+            "status": "",
+            "path": "/v1/chat/completions",
+            "verdict_note": "LiteLLM-Rust beta serves only the Anthropic /v1/messages route (azure_ai upstream); no other ingress or upstream dialect exists, so those cells are grey by that capability limit",
+            "body_snippet": "",
+            "probe_note": null,
+            "perf_dropped": null,
+            "perf": null,
+            "stream": null,
+            "memory": null,
+            "absences": {}
+          }
+        }
+      }
+    },
+    "model": null,
+    "upstream_endpoint": null,
+    "ootb_config": null,
+    "arch": null,
+    "hardware": null,
+    "rig": {
+      "arch": "arm64",
+      "release_url": "https://github.com/GetBusbar/benchmarking/releases/download/rig",
+      "engine": {
+        "commit": "dc7a53ca897cade1e1454317dd0e3e4bb7b723ec",
+        "dirty": false
+      },
+      "mock": {
+        "origin": "release",
+        "sha256": "9a1c7b0e10f846602cf0e19a96f2d1e4a0e3f50b3b2634aa6786053a13cf9ab5",
+        "asset_updated_at": "2026-07-28T22:42:50Z"
+      },
+      "ugen": null,
+      "box_qualify": {
+        "band_pct": 20.0,
+        "baseline_rps": 497607.0,
+        "baseline_samples": 1,
+        "concurrency": 32,
+        "drift_pct": 0.1087203355258266,
+        "observed_absent_reason": null,
+        "observed_rps": 498148.0,
+        "outcome": "pass"
+      }
+    },
+    "measured_at": "2026-07-28T23:01:09Z",
+    "started_at": null,
+    "finished_at": null,
+    "duration_s": null,
+    "phase_s": null,
+    "build_env": null
+  },
+  "memory": null,
+  "streaming": null
+}
