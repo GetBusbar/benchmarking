@@ -920,6 +920,28 @@ cd ~/benchmarking || exit 1
 # rewrite (commit d7fc1f4), which removed the raise and left the comment describing it.
 ulimit -n 1048576 2>/dev/null || ulimit -n "$(ulimit -Hn)" 2>/dev/null || true
 echo "[rig] loadgen/mock fd limit: $(ulimit -Sn) (hard $(ulimit -Hn))"
+
+# EPHEMERAL PORTS ARE THE REAL CONCURRENCY CEILING, so widen them deliberately rather than inherit
+# a default nobody chose.
+#
+# A TCP connection needs a unique (src ip, src port, dst ip, dst port). Every load window drives ONE
+# destination, so simultaneous connections cannot exceed this host's ephemeral source ports. Stock
+# Linux gives 32768-60999, about 28,000 - below what a fast gateway can be driven to, and the moment
+# it is reached `connect` returns EADDRNOTAVAIL, which the generator used to count as the gateway
+# refusing. Raising fd limits alone never helped: descriptors were never the binding constraint.
+#
+# 16384 as the floor because every port this rig binds is below it (mock 8000; gateways 3000, 8080,
+# 8101, 8102, 8787, 9080, 12000; plano's envoy internals up to 12001) - an ephemeral range reaching
+# down into those could steal a port before the service binds it, which would look like a gateway
+# that failed to start. The engine derives its search ceiling from whatever this ends up being
+# (`run::host_connection_ceiling`), so this is the only place the number is decided.
+#
+# tcp_tw_reuse because a closed connection holds its port through TIME_WAIT: without recycling, a
+# window that cycles connections exhausts the range well below its size. This is the safe direction
+# of that knob - it permits reuse for OUTBOUND connections only.
+sudo sysctl -w net.ipv4.ip_local_port_range="16384 65535" >/dev/null 2>&1 || true
+sudo sysctl -w net.ipv4.tcp_tw_reuse=1 >/dev/null 2>&1 || true
+echo "[rig] ephemeral ports: $(cat /proc/sys/net/ipv4/ip_local_port_range 2>/dev/null || echo unknown) (tw_reuse=$(cat /proc/sys/net/ipv4/tcp_tw_reuse 2>/dev/null || echo unknown))"
 # The checkout is sparse (gateways + lib only), so results/ does not exist here and the snapshot
 # writer does not create its own output directory - it reports an error and writes nothing.
 mkdir -p results/snapshots

@@ -60,6 +60,18 @@ pub struct GenStats {
     /// under tasks it means the runtime itself could not be built, which is the same class of fact:
     /// the rig failed to pose the question, and that is never a gateway result.
     pub spawn_failed: bool,
+    /// Connections the RIG could not make, as distinct from requests the gateway refused.
+    ///
+    /// A TCP connection needs a unique (src ip, src port, dst ip, dst port). Every window here talks
+    /// to ONE destination, so simultaneous connections are bounded by this host's ephemeral source
+    /// ports - `net.ipv4.ip_local_port_range`, which defaults to about 28,000 - and running out
+    /// raises EADDRNOTAVAIL on connect. That is our limit, not the gateway's, and it used to land in
+    /// `fail` beside a genuine refusal where nothing downstream could tell them apart: the search
+    /// would read its own port exhaustion as the gateway's ceiling and publish it.
+    ///
+    /// Counted separately so a window that ran out of rig can be recognised as one. EMFILE/ENFILE
+    /// (out of file descriptors) are the same class and counted here too.
+    pub rig_refused: u64,
     /// Every successful request's latency, microseconds. Percentiles are computed from this rather
     /// than from a running estimate: an approximate p99 is the one number nobody can check later.
     pub latencies_us: Vec<u64>,
@@ -113,14 +125,19 @@ impl GenStats {
         let p50 = Self::pct_of(&sorted, 0.50);
         let p99 = Self::pct_of(&sorted, 0.99);
         format!(
-            "rps={} fail={} p50={:.2} p99={:.2} p50us={} p99us={} ok={}",
+            "rps={} fail={} p50={:.2} p99={:.2} p50us={} p99us={} ok={} rigrefused={}",
             self.rps(),
             self.fail,
             p50 as f64 / 1000.0,
             p99 as f64 / 1000.0,
             p50,
             p99,
-            self.ok
+            self.ok,
+            // ACROSS THE SUBPROCESS BOUNDARY TOO. The load generator is a child process and this
+            // line is everything the parent learns from it, so a count that stops here would leave
+            // the parent unable to tell its own port exhaustion from the gateway refusing - which is
+            // the whole reason the count exists.
+            self.rig_refused
         )
     }
 }
@@ -132,13 +149,16 @@ impl GenStats {
 struct WorkerStats {
     ok: u64,
     fail: u64,
+    /// Connections this HOST could not make (ephemeral ports or descriptors exhausted), as opposed
+    /// to requests the gateway refused. See `GenStats::rig_refused`.
+    rig_refused: u64,
     lat: Vec<u64>,
 }
 
 /// One connection-holder's request loop. Opens a connection and reuses it, reconnecting on failure,
 /// because a fresh TCP handshake per request would measure the kernel rather than the gateway.
 async fn worker(addr: SocketAddr, req: Arc<String>, stop: Arc<AtomicBool>) -> WorkerStats {
-    let mut w = WorkerStats { ok: 0, fail: 0, lat: Vec::with_capacity(1024) };
+    let mut w = WorkerStats { ok: 0, fail: 0, rig_refused: 0, lat: Vec::with_capacity(1024) };
     let mut conn: Option<TcpStream> = None;
     // ALLOCATED ONCE, reused across every request this task sends: a fresh Vec per response would
     // put an allocator call in the timed hot path of every exchange, for a task that runs for the
@@ -160,8 +180,21 @@ async fn worker(addr: SocketAddr, req: Arc<String>, stop: Arc<AtomicBool>) -> Wo
                     Some(s)
                 }
                 // Both a connect error and a connect timeout mean no connection, and neither is a
-                // request the target answered.
-                Ok(Err(_)) | Err(_) => None,
+                // request the target answered. WHICH SIDE ran out matters, though: a refusal is the
+                // gateway declining, while EADDRNOTAVAIL/EMFILE is this host out of ephemeral ports
+                // or descriptors, which is the rig hitting its own wall.
+                Ok(Err(e)) => {
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::AddrNotAvailable | std::io::ErrorKind::AddrInUse
+                    ) || e.raw_os_error() == Some(24)
+                        || e.raw_os_error() == Some(23)
+                    {
+                        w.rig_refused += 1;
+                    }
+                    None
+                }
+                Err(_) => None,
             };
             if conn.is_none() {
                 // BACK OFF. Without this the loop spins at connect-refusal speed (microseconds on
@@ -434,6 +467,7 @@ pub fn run(cfg: &GenConfig) -> GenStats {
                 Ok(w) => {
                     g.ok += w.ok;
                     g.fail += w.fail;
+                    g.rig_refused += w.rig_refused;
                     g.latencies_us.extend_from_slice(&w.lat);
                 }
                 // A task that panicked is a HARNESS fault, and its requests are gone. Say so on
@@ -463,6 +497,7 @@ mod tests {
             elapsed_s: elapsed,
             latencies_us: lat.to_vec(),
             spawn_failed: false,
+            rig_refused: 0,
             p50_us: None,
             p99_us: None,
         }
