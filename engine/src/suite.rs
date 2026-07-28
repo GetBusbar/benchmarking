@@ -876,17 +876,34 @@ pub fn run_suite_with(
     // WRITTEN INCREMENTALLY, after every egress column, not held in memory and written once at the
     // end: these runs take hours on a box with a hard self-termination timer, so a run interrupted
     // partway through must not lose every cell it already measured. Partial progress that survives
-    // is worth more than a complete result that might not arrive, and the promote guard already
-    // refuses to let a thinner snapshot overwrite a fuller one, so re-writing is safe by
-    // construction rather than by care here.
+    // is worth more than a complete result that might not arrive.
+    //
+    // A PROMOTE-GUARD TRIP ON ONE OF THESE CHECKPOINTS IS NOT THE SAME EVENT AS ON THE FINAL WRITE.
+    // Every checkpoint before the last is, by construction, thinner than the finished run it is
+    // partway through, so tripping the guard against a fuller prior snapshot already on disk is
+    // expected mid-run, not a sign the run went bad. Propagating it with `?` used to abort this whole
+    // function - discarding every cell already measured for the rest of the grid and never reaching
+    // the final flush that would have carried the complete run. So a checkpoint trip is logged and
+    // skipped; only the FINAL flush below, once every column has been measured, may make the guard's
+    // refusal fatal.
     for result in run::run_grid_with(&rc, cfg.min_conc, cfg.max_conc, metrics) {
         let id = &result.outcome.id;
         let ing = id.ingress.clone();
         let eg = id.egress.clone();
 
         if last_egress.as_deref() != Some(eg.as_str()) {
-            if last_egress.is_some() {
-                written = Some(flush(cfg, &upstreams, any_served, Some(box_qualify.clone()))?);
+            if let Some(finished_egress) = &last_egress {
+                match flush(cfg, &upstreams, any_served, Some(box_qualify.clone())) {
+                    Ok(paths) => written = Some(paths),
+                    Err(SnapshotError::PromoteGuard { existing_served, incoming_served }) => {
+                        eprintln!(
+                            "suite: checkpoint after egress column {finished_egress} not written yet \
+                             ({incoming_served} served so far vs {existing_served} on disk) - \
+                             continuing to measure the rest of the grid"
+                        );
+                    }
+                    Err(e) => return Err(e),
+                }
             }
             last_egress = Some(eg.clone());
         }
@@ -1165,6 +1182,55 @@ mod tests {
             rig_release_url: None,
             load_cores: None,
         }
+    }
+
+    // A CHECKPOINT PROMOTE-GUARD TRIP MUST NOT ABORT THE WHOLE RUN. The incremental flush after
+    // an egress column is a thinner, unfinished view of the run, so tripping the guard against a
+    // fuller prior snapshot on disk is expected mid-run - it must not stop the remaining columns
+    // from being measured and written, only the FINAL flush's guard trip may be fatal.
+    #[test]
+    fn a_checkpoint_promote_guard_trip_does_not_abort_the_rest_of_the_grid() {
+        let dir = tmpdir("checkpoint-guard");
+        let gw = serve(200);
+        let mut cfg = cfg_for(&dir, gw);
+        cfg.dialects = vec![Dialect::Openai, Dialect::Anthropic];
+
+        // Seed the directory with a prior snapshot serving 3 cells - more than the first egress
+        // column's checkpoint (2 cells) will carry, but fewer than the finished run's 4.
+        let mut seeded_upstreams = std::collections::HashMap::new();
+        let mut cells = std::collections::HashMap::new();
+        cells.insert("openai".to_string(), crate::record::Cell { served: RecServed::Bool(true), ..Default::default() });
+        cells.insert("anthropic".to_string(), crate::record::Cell { served: RecServed::Bool(true), ..Default::default() });
+        seeded_upstreams.insert("openai".to_string(), Upstream { configurable: true, served: true, cells, ..Default::default() });
+        let mut cells2 = std::collections::HashMap::new();
+        cells2.insert("openai".to_string(), crate::record::Cell { served: RecServed::Bool(true), ..Default::default() });
+        seeded_upstreams.insert("anthropic".to_string(), Upstream { configurable: true, served: true, cells: cells2, ..Default::default() });
+        let seed = ResultSnapshot {
+            schema_version: 1,
+            gateway: "gw".into(),
+            measured_at: "2020-01-01T00-00-00Z".into(),
+            matrix: Matrix { gateway: "gw".into(), served: true, measured_at: "2020-01-01T00-00-00Z".into(), upstreams: seeded_upstreams, ..Default::default() },
+            ..Default::default()
+        };
+        crate::snapshot::write_snapshot(&dir, &seed).expect("seed snapshot should write");
+
+        let result = run_suite_with(&cfg, gw, &[]);
+        assert!(
+            result.is_ok(),
+            "a checkpoint guard trip must not abort the run: {result:?}"
+        );
+        let paths = result.expect("checked above");
+        let text = std::fs::read_to_string(&paths.current).expect("current file");
+        let back: ResultSnapshot = serde_json::from_str(&text).expect("its own output must parse");
+        let served: usize = back
+            .matrix
+            .upstreams
+            .values()
+            .flat_map(|u| u.cells.values())
+            .filter(|c| matches!(c.served, RecServed::Bool(true)))
+            .count();
+        assert_eq!(served, 4, "both egress columns must have been measured and published");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn tmpdir(tag: &str) -> std::path::PathBuf {
