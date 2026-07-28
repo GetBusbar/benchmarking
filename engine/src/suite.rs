@@ -633,16 +633,34 @@ fn apply_streams_sustained_verdict(
     reference: Measurement<f64>,
 ) {
     match rigbound::is_rig_bound(value, reference.clone()).copied() {
+        // MATCHING THE MOCK'S RATE IS THE GATEWAY SUCCEEDING, NOT THE RIG LIMITING.
+        //
+        // The mock paces its deltas at a fixed interval and says so in its own header comment: "the
+        // pacing is the model generating tokens; the stream suite measures what a gateway ADDS on
+        // top of it". So the mock's frames/sec here is not a capacity it ran out of, it is the
+        // TARGET RATE - c streams times one frame per interval. A gateway that forwards every frame
+        // as it arrives lands at ~99% of it, which is the best possible outcome, and suppressing it
+        // as rig-limited threw away the number for the gateways that did best.
+        //
+        // It cost 13 cells their streams_sustained and 11 their cpu_fps in the 2026-07-28 run.
+        // agentgateway carried 12275 frames/sec against a "ceiling" of 12360 at c=256 - keeping pace
+        // to within 0.7% - and published nothing. The arithmetic gives it away: every one of those
+        // ceilings is c x (1000/20ms) to within 4%.
+        //
+        // So the rate is published, with the flag kept as the signal it always was: the gateway
+        // matched the paced upstream. Whether it should have is what the GATE decides, and the gate
+        // is about delivery - frames arriving, nothing stalling, streams not erroring - which is the
+        // right question and is asked separately. A gateway that cannot keep pace falls short here
+        // and that shortfall is its own, published rather than hidden.
+        //
+        // This is NOT the same judgement the throughput metrics make. There the mock's capacity
+        // really can be the limit and publishing would rank the rig, so `apply_peak_verdict` keeps
+        // suppressing. The difference is that a paced stream has a target and a saturating load does
+        // not.
         Some(true) => {
-            let detail = match reference.copied() {
-                Some(r) => format!("carried {value:.0} frames/sec against a mock ceiling of {r:.0} at c={conc}"),
-                None => format!("carried {value:.0} frames/sec at c={conc} with an unusable mock reference"),
-            };
-            out.streams_sustained_fps = Measurement::absent_because(Absent::RigLimited, detail);
+            out.streams_sustained_fps = Measurement::Measured(value);
             out.streams_sustained_mock_bound = Some(true);
-            // Suppressed WITH its rate: a stream count left behind would be the operating point of a
-            // number the board is refusing to publish.
-            out.streams_sustained = Measurement::absent(Absent::RigLimited);
+            out.streams_sustained = Measurement::Measured(i64::from(conc));
         }
         Some(false) => {
             out.streams_sustained_fps = Measurement::Measured(value);
@@ -670,14 +688,12 @@ fn apply_cpu_fps_verdict(
     reference: Measurement<f64>,
 ) {
     match rigbound::is_rig_bound(value, reference.clone()).copied() {
+        // Same reasoning as the streams verdict above: the mock's frames/sec is a paced target, not
+        // a capacity, so reaching it is the gateway keeping up rather than the rig running out.
         Some(true) => {
-            let detail = match reference.copied() {
-                Some(r) => format!("peaked at {value:.0} frames/sec against a mock ceiling of {r:.0} at c={conc}"),
-                None => format!("peaked at {value:.0} frames/sec at c={conc} with an unusable mock reference"),
-            };
-            out.cpu_fps = Measurement::absent_because(Absent::RigLimited, detail);
+            out.cpu_fps = Measurement::Measured(value);
             out.cpu_fps_mock_bound = Some(true);
-            out.cpu_fps_concurrency = Measurement::absent(Absent::RigLimited);
+            out.cpu_fps_concurrency = Measurement::Measured(i64::from(conc));
         }
         Some(false) => {
             out.cpu_fps = Measurement::Measured(value);
@@ -1515,14 +1531,15 @@ mod tests {
     }
 
     #[test]
-    fn a_mock_bound_stream_ceiling_is_suppressed_with_its_stream_count() {
+    fn a_stream_rate_that_matches_the_paced_mock_is_published_with_the_flag() {
         let mut out = crate::record::CellStream::default();
-        // Reference equal to the observation: the mock, not the gateway, set this.
-        apply_streams_sustained_verdict(&mut out, 12_400.0, 256, Measurement::Measured(12_400.0));
-        assert_eq!(out.streams_sustained_fps.copied(), None, "a mock-bound rate is suppressed");
-        assert_eq!(out.streams_sustained.copied(), None, "its operating point must be suppressed with it");
-        assert_eq!(out.streams_sustained_mock_bound, Some(true));
-        assert_eq!(out.streams_sustained_fps.reason(), Some(&Absent::RigLimited));
+        // The field case: agentgateway carried 12275 frames/sec against a 12360 "ceiling" at c=256 -
+        // within 0.7% of a mock whose rate is c x (1000 / 20ms) by construction - and published
+        // nothing at all. Thirteen cells lost this metric that way in the 2026-07-28 run.
+        apply_streams_sustained_verdict(&mut out, 12_275.0, 256, Measurement::Measured(12_360.0));
+        assert_eq!(out.streams_sustained_fps.copied(), Some(12_275.0), "keeping pace is the success case");
+        assert_eq!(out.streams_sustained.copied(), Some(256), "and its operating point travels with it");
+        assert_eq!(out.streams_sustained_mock_bound, Some(true), "flagged as matching the paced upstream");
     }
 
     #[test]
@@ -1548,12 +1565,15 @@ mod tests {
     // The field case from rigbound.rs's own tests, in the lane it came from: 334838 fps against a
     // 351088 fps mock ceiling is 95.4% and says nothing about the gateway.
     #[test]
-    fn a_mock_bound_cpu_fps_peak_is_suppressed_with_its_concurrency() {
+    fn a_cpu_fps_peak_that_matches_the_paced_mock_is_published_with_the_flag() {
         let mut out = crate::record::CellStream::default();
+        // The mock paces its deltas, so its frames/sec is a TARGET, not a capacity it ran out of.
+        // Reaching it is the gateway forwarding every frame as it arrives - the best outcome there
+        // is - and this used to delete the number for it.
         apply_cpu_fps_verdict(&mut out, 334_838.0, 1024, Measurement::Measured(351_088.0));
-        assert_eq!(out.cpu_fps.copied(), None);
-        assert_eq!(out.cpu_fps_concurrency.copied(), None);
-        assert_eq!(out.cpu_fps_mock_bound, Some(true));
+        assert_eq!(out.cpu_fps.copied(), Some(334_838.0), "keeping pace is a measurement, not a rig limit");
+        assert_eq!(out.cpu_fps_concurrency.copied(), Some(1024), "and it has an operating point");
+        assert_eq!(out.cpu_fps_mock_bound, Some(true), "the flag stays as the signal it always was");
     }
 
     // A gate that nothing sustains is a real measured zero, not a mock-bound suppression: the mock

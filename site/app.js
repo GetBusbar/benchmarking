@@ -902,7 +902,7 @@ const COLUMN_SETS = {
       get: (g) => chooserStreamCell(g, "added_gap_p50_us", fmtUsMs) },
     { id: "sgap", label: "Added gap p99 (µs)", desc: false, title: "The extra pause the gateway adds between streamed tokens, p99, on the chosen cell. Lower is better.",
       get: (g) => chooserStreamCell(g, "added_gap_p99_us", fmtUsMs) },
-    { id: "streams", label: "Streams sustained", desc: true, title: "Max concurrent SSE streams sustained (bisected true concurrency) with >=99.9% frame delivery, no stalls, <0.1% errors, on the chosen cell",
+    { id: "streams", label: "Streams sustained", desc: true, title: "Max concurrent SSE streams sustained (bisected true concurrency) with EVERY expected frame delivered, no stalls, <0.1% errors, on the chosen cell",
       get: (g) => chooserStreamCell(g, "streams_sustained", fmtInt) },
     { id: "cpufps", label: "CPU-bound fps", desc: true, title: "Streaming relay throughput under an unpaced firehose (CPU-bound): sustained content frames/sec on the chosen cell. Higher is better.",
       get: (g) => chooserStreamCell(g, "cpu_fps", fmtInt) },
