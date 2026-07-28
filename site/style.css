@@ -606,3 +606,22 @@ td.memcurve.na { color: var(--fg-mute); }
   .site-header h1.brand { font-size: 1.2rem; }
   .tab { padding: .55rem .55rem; font-size: .9rem; }
 }
+
+/* Benchmark version per row. Quiet when the row was measured by the same harness as the rest of the
+   board; red when it was not, because numbers from two harnesses are not comparable and that has to
+   be visible rather than known only to the build guard. */
+.engine-pill {
+  display: inline-block;
+  margin-left: .4rem;
+  padding: 0 .35rem;
+  border-radius: 3px;
+  font: 500 11px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--muted, #6b7280);
+  background: rgba(127, 127, 127, .12);
+  vertical-align: baseline;
+}
+.engine-pill.old {
+  color: #b42318;
+  background: rgba(217, 45, 32, .12);
+  font-weight: 600;
+}

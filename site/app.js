@@ -158,7 +158,40 @@ function measuredBadge(g, now = Date.now()) {
   const stalePill = g.stale
     ? ` <span class="stale-pill" title="This gateway's data has aged past the freshness threshold; re-run it to refresh.">stale</span>`
     : "";
-  return `<span class="measured-at${g.stale ? " stale" : ""}" title="${esc(stampWithAge(g.measured_at, now))}">${esc(rel)}</span>${stalePill}`;
+  return `<span class="measured-at${g.stale ? " stale" : ""}" title="${esc(stampWithAge(g.measured_at, now))}">${esc(rel)}</span>${stalePill}${engineBadge(g)}`;
+}
+
+/* The board's own benchmark version, read defensively: this helper is called from measuredBadge(),
+   which site/test.mjs drives under Node where there is no window and no live state. */
+function boardBenchmarkVersion() {
+  try {
+    return (typeof state !== "undefined" && state.data && state.data.benchmark_version) || null;
+  } catch {
+    return null;
+  }
+}
+
+/* WHICH HARNESS MEASURED THIS ROW.
+   The engine commit already travelled into every row and nothing rendered it, so "which version of
+   the benchmark produced this number" was answerable only by opening the JSON. A row measured by an
+   older engine is not necessarily wrong, but it is not comparable to the rest of the board, and a
+   reader deciding whether to trust a side-by-side needs to see that rather than be told.
+   Current rows show the sha quietly; an older one is red and says what it should have been.
+   Returns "" when the row carries no engine at all AND the board has none either - there is nothing
+   to compare, so a badge would be noise. Pure; covered by site/test.mjs. */
+function engineBadge(g, boardEngine = boardBenchmarkVersion()) {
+  const e = g && g.engine;
+  if (!e) return "";
+  if (!e.sha) {
+    return boardEngine
+      ? ` <span class="engine-pill old" title="This row carries no benchmark version at all: it predates the stamp, so which harness measured it cannot be established. The board is on ${esc(boardEngine.slice(0, 7))}.">engine unknown</span>`
+      : "";
+  }
+  const cls = e.current ? "engine-pill" : "engine-pill old";
+  const title = e.current
+    ? `Measured by benchmark ${e.sha}, which is the version the rest of the board was measured on.`
+    : `Measured by benchmark ${e.sha}, but the board is on ${boardEngine ? boardEngine.slice(0, 7) : "a newer version"}. Numbers from two different harnesses are not directly comparable - re-run this gateway to refresh it.`;
+  return ` <span class="${cls}" title="${esc(title)}">${esc(e.short)}</span>`;
 }
 
 function esc(s) {
@@ -2475,6 +2508,17 @@ function renderStatic() {
   const bits = [];
   if (state.data.hardware) bits.push(`Ran on: ${state.data.hardware}`);
   if (state.data.latest_measured_at) bits.push(`Latest measurement: ${stampWithAge(state.data.latest_measured_at)}`);
+  // WHICH BENCHMARK PRODUCED THIS BOARD. Stated once here so the per-row sha has something to be
+  // compared against: a red row means "not this one", and a reader should not have to infer what
+  // "this one" is. Also counts the rows that are behind it, because one red pill in a long table is
+  // easy to miss and the count is the thing that decides whether the board is safely comparable.
+  if (state.data.benchmark_version) {
+    const behind = (state.data.gateways || []).filter((g) => g.engine && !g.engine.current).length;
+    const short = String(state.data.benchmark_version).slice(0, 7);
+    bits.push(behind
+      ? `Benchmark version: ${short} (${behind} row${behind === 1 ? "" : "s"} measured on an older version)`
+      : `Benchmark version: ${short}`);
+  }
   bits.push(`Site data generated: ${state.data.generated_at ? stampWithAge(state.data.generated_at) : "unknown"}`);
   const rig = rigStamp();
   if (rig) bits.push(rig);
@@ -2919,7 +2963,7 @@ if (NODE) {
   /* Exports for the node smoke test (site/test.mjs). */
   module.exports = {
     newState, encodeUrl, decodeUrl, viewPath, applyFilters,
-    fmtStamp, fmtAge, stampWithAge, measuredBadge,
+    fmtStamp, fmtAge, stampWithAge, measuredBadge, engineBadge,
     drawSweep, niceStep, fmtTick, COLUMN_SETS, columnsFor, PERF_VIEWS, TABLE_VIEWS, VIEW_SORT, LANES, naText, stripRigPaths,
     cellState, matrixCellTip, cellPerfTip, passCell, xlateCell, streamCell, memCell, rssSparkline, hasTranslation, CATEGORIES, DEFAULT_CATEGORY, VIEWS,
     CHOOSER_MODES, chooserCellPerf, chooserDialects, chooserPerfCell, chooserCellStream, chooserStreamCell, chooserHasCell, deltaToPeak, cellPopFull,
