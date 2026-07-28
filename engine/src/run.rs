@@ -738,9 +738,19 @@ pub const STREAM_PACING_INTERVAL_MS: u64 = 20;
 pub const STREAM_STALL_MULTIPLIER: u64 = 2;
 
 /// Fraction of expected frames that must arrive, and the share of streams that may fail, for a
-/// concurrency to hold the streams-sustained gate. The README's own numbers: "at least 99.9% of
-/// expected frames deliver ... and the stream error rate stays under 0.1%".
-pub const STREAM_MIN_DELIVERY_RATIO: f64 = 0.999;
+/// concurrency to hold the streams-sustained gate.
+///
+/// EVERY FRAME. A proxy that drops a frame has dropped a user's token, and there is no concurrency
+/// at which that is the gateway succeeding - so the sustained ceiling is the last rung before
+/// anything is lost, which is exactly the number this metric is for. It was 0.999, which sounds
+/// tight and is not: at c=256 and a 64-frame budget it waves through 16 lost frames per window, and
+/// the loss it admits is invisible in the published rate.
+///
+/// The bound stays reachable because the rungs below the gateway's limit really are perfect: 1169 of
+/// the 1314 passing rungs in the 2026-07-28 field run delivered every expected frame. The 145 that
+/// did not are the point - they are where a gateway started losing tokens, and the gate now stops
+/// there instead of climbing past it.
+pub const STREAM_MIN_DELIVERY_RATIO: f64 = 1.0;
 pub const STREAM_MAX_ERROR_RATIO: f64 = 0.001;
 
 
@@ -1038,7 +1048,13 @@ struct StreamFpsProbe {
 impl Probe for StreamFpsProbe {
     fn probe(&mut self, concurrency: u32) -> Option<Sample> {
         let w = stream_window(self.addr, &self.path, &self.body, &self.headers, concurrency)?;
-        let passed = w.errored == 0 && w.frames > 0;
+        // THE SAME GATE THE OTHER STREAM SEARCH USES. This was `errored == 0 && frames > 0`, which
+        // passes a window that delivered ONE frame of an expected sixty-four, and the frames/sec
+        // computed from it was published as "the most frames a second this box carries through the
+        // gateway". gomodel openai>gemini did exactly that in the 2026-07-28 run: 1/64 delivered,
+        // 1.56%, rung passed. Two searches over the same windows must not disagree about what a
+        // healthy window is.
+        let passed = streams_gate_passes(&w);
         self.points.push(point_of(&w, passed));
         Some(Sample { value: w.fps(), passed })
     }
@@ -1780,16 +1796,28 @@ while True:
         assert!(streams_gate_passes(&clean_stream_window(64, 64)));
     }
 
-    // "at least 99.9% of expected frames deliver". The bar is inclusive of 99.9% itself, unlike the
-    // error rate below, because the README words the two differently ("at least" vs "under") and a
-    // gate that read both the same way would be a rule this board does not state.
+    // EVERY FRAME, and the rung below is where the gateway's real ceiling is. A dropped frame is a
+    // dropped token; there is no concurrency at which losing one is the gateway succeeding.
     #[test]
-    fn the_delivery_bar_is_inclusive_of_the_readmes_own_999_per_thousand() {
+    fn a_single_lost_frame_fails_the_rung() {
         let mut w = clean_stream_window(1000, 1000);
-        w.frames = (w.expected_frames as f64 * STREAM_MIN_DELIVERY_RATIO).ceil() as u64;
-        assert!(streams_gate_passes(&w), "exactly the bar must pass: {w:?}");
+        assert!(streams_gate_passes(&w), "a window that delivered everything must pass: {w:?}");
         w.frames -= 1;
-        assert!(!streams_gate_passes(&w), "one frame short of the bar must fail: {w:?}");
+        assert!(!streams_gate_passes(&w), "one lost frame must fail the rung: {w:?}");
+        // The old 0.999 bar waved this through, and at a 64-frame budget that is 16 frames a window.
+        w.frames = (w.expected_frames as f64 * 0.999).ceil() as u64;
+        assert!(!streams_gate_passes(&w), "99.9% is still a gateway losing tokens: {w:?}");
+    }
+
+    // Both stream searches judge a window the same way. They did not: the cpu-fps probe passed on
+    // `errored == 0 && frames > 0`, so a window delivering 1 frame of 64 counted as a healthy rung
+    // and its frames/sec was published.
+    #[test]
+    fn both_stream_searches_use_the_same_definition_of_a_healthy_window() {
+        let mut w = clean_stream_window(64, 64);
+        w.frames = 1;
+        assert!(!streams_gate_passes(&w), "1 frame of 64 is not a healthy window: {w:?}");
+        assert!(w.errored == 0 && w.frames > 0, "...yet the old cpu-fps gate accepted exactly this");
     }
 
     // "no stream stalls past 2x the pacing interval". ONE stall anywhere fails the rung: a stall is a

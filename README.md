@@ -122,9 +122,10 @@ Against that fixed pace, per gateway:
 - **added inter-frame latency (µs)** - p50/p99 of the gateway's content-frame gap minus the
   direct-to-mock gap. Both sides carry the mock's 20 ms pace and the same timer jitter, so the
   subtraction isolates the gateway's per-frame overhead.
-- **streams sustained** - the highest concurrent stream count where at least 99.9% of expected
-  frames deliver, no stream stalls past 2x the pacing interval, and the stream error rate stays
-  under 0.1%; plus the frames/sec carried there. The mock-ceiling guardrail applies here too: the
+- **streams sustained** - the highest concurrent stream count where EVERY expected frame
+  delivers, no stream stalls past 2x the pacing interval, and the stream error rate stays
+  under 0.1%; plus the frames/sec carried there. A proxy that drops a frame has dropped a user's
+  token, so the sustained ceiling is the last concurrency before anything is lost. The mock-ceiling guardrail applies here too: the
   mock's own frames/sec at top concurrency is recorded and a result within 10% is flagged
   mock-bound.
 
