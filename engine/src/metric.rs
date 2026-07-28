@@ -669,17 +669,18 @@ impl Metric for Streaming {
         // gateway returned the token before the mock produced it.
         let added_ttft = f64::from(gw_ttft.saturating_sub(direct_ttft) as u32);
 
-        let gap_p50 = |o: &crate::http::SseOutcome| -> Option<f64> {
-            let mut gaps: Vec<u64> =
-                o.frame_offsets_us.windows(2).map(|w| w[1].saturating_sub(w[0])).collect();
-            if gaps.is_empty() {
-                return None;
-            }
-            gaps.sort_unstable();
-            Some(gaps[gaps.len() / 2] as f64)
+        // THE GAP DISTRIBUTION IS INSIDE ONE STREAM, and it is not small: a stream carries
+        // `STREAM_FRAME_BUDGET` frames, so it yields that many gaps MINUS ONE. Nearest-rank, the
+        // same convention `gen::GenStats::pct_of` and the search's median use, so a published
+        // percentile is always a gap some pair of frames actually produced.
+        let gap_pct = |o: &crate::http::SseOutcome, pct: f64| -> Option<f64> {
+            gap_percentile_us(&o.frame_offsets_us, pct)
         };
 
-        let added_gap = match (gap_p50(&through_gateway), gap_p50(&direct)) {
+        // Percentile per leg, THEN difference - the same shape `AddedLatency` publishes
+        // (`gateway_c1_p99_us` minus `direct_c1_p99_us`), so the streaming and non-streaming added
+        // figures mean the same thing rather than two things with one name.
+        let added_gap_at = |pct: f64| match (gap_pct(&through_gateway, pct), gap_pct(&direct, pct)) {
             (Some(g), Some(d)) => Measurement::Measured((g - d).max(0.0)),
             _ => Measurement::absent_because(
                 Absent::NotMeasured,
@@ -687,21 +688,26 @@ impl Metric for Streaming {
             ),
         };
 
-        // ONE STREAM CANNOT SUPPORT A p99. The board's p99 fields are a distribution over many
-        // streams; this group takes one. Publishing the single observation under a p99 name would be
-        // a number that claims a confidence it does not have, so the p99s are absent and say why.
-        let no_distribution = || {
+        // ONE STREAM CANNOT SUPPORT A TTFT p99, and only a TTFT p99. A stream produces exactly one
+        // time-to-first-token, so a percentile over it is that one observation wearing a name that
+        // claims a confidence it does not have.
+        //
+        // This same sentence used to suppress the GAP p99 as well, and for gaps it was simply
+        // untrue: the gaps live INSIDE the stream, `STREAM_FRAME_BUDGET` frames giving that many
+        // minus one of them. The field was absent on all 69 served cells of the 2026-07-28 run while
+        // charts.py drew two charts from it, so the data to publish it was in hand the whole time.
+        let no_ttft_distribution = || {
             Measurement::absent_because(
                 Absent::NotMeasured,
-                "one stream was taken, which cannot support a 99th percentile".to_string(),
+                "one stream was taken, and a stream has exactly one time to first token, which cannot support a 99th percentile".to_string(),
             )
         };
 
         let fields: Filled = vec![
             ("added_ttft_p50_us", Measurement::Measured(added_ttft)),
-            ("added_ttft_p99_us", no_distribution()),
-            ("added_gap_p50_us", added_gap),
-            ("added_gap_p99_us", no_distribution()),
+            ("added_ttft_p99_us", no_ttft_distribution()),
+            ("added_gap_p50_us", added_gap_at(0.50)),
+            ("added_gap_p99_us", added_gap_at(0.99)),
             ("gateway_c1_frames", Measurement::Measured(through_gateway.frame_offsets_us.len() as f64)),
             ("direct_c1_frames", Measurement::Measured(direct.frame_offsets_us.len() as f64)),
         ];
@@ -928,6 +934,27 @@ impl Metric for SustainedThroughput {
 // The two groups DO share their window driver (`run::stream_window`), and that is not the same thing
 // as sharing a search: sharing the instrument is what makes their numbers comparable, sharing a
 // search would be what makes them one population.
+
+/// The inter-frame gap at a percentile, over the gaps INSIDE one stream.
+///
+/// A stream carrying `STREAM_FRAME_BUDGET` frames yields that many gaps minus one, so a gap
+/// percentile is a real distribution even from a single stream - unlike time-to-first-token, of
+/// which a stream produces exactly one. Conflating those two is what left `added_gap_p99_us` absent
+/// on all 69 served cells of the 2026-07-28 run while charts.py drew a chart from it.
+///
+/// Nearest-rank, the convention `gen::GenStats::pct_of` and the search's median already use, so a
+/// published percentile is always a gap some pair of frames actually produced rather than an
+/// interpolation between two that neither did. `None` when there is no gap at all: a single frame
+/// has no inter-frame time, and a zero there would read as instant delivery.
+fn gap_percentile_us(frame_offsets_us: &[u64], pct: f64) -> Option<f64> {
+    let mut gaps: Vec<u64> = frame_offsets_us.windows(2).map(|w| w[1].saturating_sub(w[0])).collect();
+    if gaps.is_empty() {
+        return None;
+    }
+    gaps.sort_unstable();
+    let rank = (((gaps.len() as f64) * pct).ceil() as usize).clamp(1, gaps.len());
+    Some(gaps[rank - 1] as f64)
+}
 
 /// WHICH SIDE OF THE CELL CANNOT BE STREAMED, if either.
 ///
@@ -1322,5 +1349,31 @@ mod tests {
         assert_eq!(stream_blocked_by(&ctx(Dialect::Openai, "openai")), None);
         assert_eq!(stream_blocked_by(&ctx(Dialect::Anthropic, "anthropic")), None);
         assert_eq!(stream_blocked_by(&ctx(Dialect::Openai, "anthropic")), None);
+    }
+
+    // THE GAP DISTRIBUTION IS INSIDE THE STREAM.
+    //
+    // `added_gap_p99_us` was absent on all 69 served cells of the 2026-07-28 run, suppressed with
+    // "one stream was taken, which cannot support a 99th percentile". That is true of TTFT, which a
+    // stream produces exactly one of. It is not true of gaps: a stream carrying STREAM_FRAME_BUDGET
+    // frames yields that many gaps minus one. charts.py draws two charts from these fields, so the
+    // board had a permanently empty chart while the data sat in the frame offsets.
+    #[test]
+    fn the_gap_percentiles_come_from_the_gaps_inside_one_stream() {
+        // Offsets in us: gaps of 10, 10, 10, 10, 100. The tail is the whole point of a p99, and a
+        // missing one costs a reader exactly that.
+        let offs: [u64; 6] = [0, 10, 20, 30, 40, 140];
+        assert_eq!(gap_percentile_us(&offs, 0.50), Some(10.0));
+        assert_eq!(gap_percentile_us(&offs, 0.99), Some(100.0), "the p99 must reach the tail, not repeat the median");
+        // Nearest-rank never interpolates: every published percentile is a gap that really occurred.
+        let real: Vec<f64> = vec![10.0, 100.0];
+        for p in [0.5, 0.9, 0.99, 1.0] {
+            let v = gap_percentile_us(&offs, p).expect("five gaps have a percentile");
+            assert!(real.contains(&v), "p{p} returned {v}, which no pair of frames produced");
+        }
+        // A stream with one frame has no inter-frame time. Absent, never a zero - a zero would read
+        // as instant delivery.
+        assert_eq!(gap_percentile_us(&[0], 0.99), None);
+        assert_eq!(gap_percentile_us(&[], 0.5), None);
     }
 }
