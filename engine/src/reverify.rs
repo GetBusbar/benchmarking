@@ -253,10 +253,23 @@ pub fn reverify_cell(cfg: &RunConfig, id: &CellId, ingress: Dialect) -> Reverifi
         ));
     }
 
-    // The SAME request the probe sent, at the SAME path with the SAME headers: a re-verification that
-    // drove a different request would prove something about a wire this cell never measured.
+    // THE SAME REQUEST THE PROBE SENT: same path, same headers, and - the part that was wrong - the
+    // same MODEL.
+    //
+    // This sent `cfg.model`, the gateway's base model name, while the path and headers were built for
+    // `id.egress`. On every gateway whose upstreams are selected BY MODEL NAME - which is most of
+    // them, and is exactly how this harness configures them - the base name routes to the openai
+    // upstream no matter which egress the cell is about. So the gateway did the right thing, the mock
+    // recorded /v1/chat/completions, and this concluded "the gateway forwarded the ingress request
+    // rather than translating it".
+    //
+    // It said that about 18 cells across 6 gateways in the 2026-07-28 field run, including
+    // litellm-python, whose entire product is protocol translation. The verdict is an accusation
+    // published about someone else's software, and it was being made from a request that asked for
+    // the wrong upstream. `model_for` is what every probe and load window in `run.rs` uses; using
+    // anything else here means re-verifying a wire the cell never measured.
     let path = path_for(cfg, ingress, &id.egress);
-    let body = ingress.body(&cfg.model);
+    let body = ingress.body(&crate::run::model_for(cfg, &id.egress));
     let headers = crate::run::headers_for(cfg, ingress, &id.egress);
     let driven = http::post_json(cfg.gateway_addr, &path, body.as_bytes(), &headers, REVERIFY_TIMEOUT);
     if let Some(why) = control_failed(driven) {
@@ -484,5 +497,59 @@ mod tests {
         let v = reverify_cell(&cfg, &CellId::new("openai", "anthropic"), Dialect::Openai);
         assert_eq!(v.verified, None, "a rig failure must never convict the gateway");
         assert!(v.note.unwrap_or_default().contains("recorder could not be cleared"));
+    }
+
+    // RE-VERIFICATION MUST DRIVE THE CELL'S OWN WIRE.
+    //
+    // The path and headers were built from `id.egress` while the BODY carried the gateway's base
+    // model name. Most gateways here select their upstream BY MODEL NAME, so the base name routes to
+    // the openai upstream whatever the cell is about: the gateway behaved correctly, the mock
+    // recorded /v1/chat/completions, and this concluded the gateway "forwarded the ingress request
+    // rather than translating it". It published that about 18 cells across 6 gateways in the
+    // 2026-07-28 field run - including litellm-python, whose whole product is translation.
+    //
+    // A capability verdict is an accusation about somebody else's software. Making one from a
+    // request that asked for the wrong upstream is the worst way to be wrong.
+    #[test]
+    fn the_reverify_request_names_the_cells_own_egress_model() {
+        let cfg = crate::run::test_fixture(
+            "127.0.0.1:1".parse().expect("addr"),
+            "127.0.0.1:1".parse().expect("addr"),
+        );
+        let mut cfg = cfg;
+        cfg.model = "gpt-4o-mini".into();
+        cfg.egress_models = [
+            ("openai".to_string(), "gpt-4o-mini".to_string()),
+            ("anthropic".to_string(), "gpt-4o-mini-anthropic".to_string()),
+            ("gemini".to_string(), "gpt-4o-mini-gemini".to_string()),
+        ]
+        .into_iter()
+        .collect();
+
+        // What the measurement path sends for a cell, and therefore what re-verification must send:
+        // anything else re-verifies a route the cell never measured.
+        for egress in ["anthropic", "gemini"] {
+            let measured = crate::run::model_for(&cfg, egress);
+            assert_ne!(
+                measured, cfg.model,
+                "{egress} must resolve to its own model, or this test proves nothing"
+            );
+            let body = crate::ingress::Dialect::Openai.body(&measured);
+            assert!(
+                body.contains(&measured),
+                "the re-verify body must name the cell's egress model {measured}: {body}"
+            );
+            // The defect: the base name routes to the openai upstream on a model-routed gateway.
+            let wrong = crate::ingress::Dialect::Openai.body(&cfg.model);
+            assert!(
+                !wrong.contains(&measured),
+                "the base model {} must NOT be what a {egress} cell drives - that is the bug",
+                cfg.model
+            );
+        }
+
+        // An egress with no declared model falls back to the base name, and that is correct: there
+        // is no separate route to ask for.
+        assert_eq!(crate::run::model_for(&cfg, "openai"), "gpt-4o-mini");
     }
 }
