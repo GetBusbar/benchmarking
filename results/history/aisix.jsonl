@@ -1,0 +1,3 @@
+{"suite":"matrix","measured_at":"2026-07-27T04:01:49Z","arch":"arm64","hardware":null,"build":"target/release/aisix"}
+{"suite":"matrix","measured_at":"2026-07-28T05:09:28Z","arch":"arm64","hardware":null,"build":"target/release/aisix"}
+{"suite":"matrix","measured_at":"2026-07-28T07:06:47Z","arch":"arm64","hardware":null,"build":"target/release/aisix"}

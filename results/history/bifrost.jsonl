@@ -1,0 +1,4 @@
+{"suite":"matrix","measured_at":"2026-07-27T04:01:53Z","arch":"arm64","hardware":null,"build":"maximhq/bifrost:v1.6.4"}
+{"suite":"matrix","measured_at":"2026-07-27T23:14:20Z","arch":"arm64","hardware":null,"build":"maximhq/bifrost:v1.6.4"}
+{"suite":"matrix","measured_at":"2026-07-28T05:09:29Z","arch":"arm64","hardware":null,"build":"maximhq/bifrost:v1.6.4"}
+{"suite":"matrix","measured_at":"2026-07-28T07:06:48Z","arch":"arm64","hardware":null,"build":"maximhq/bifrost:v1.6.4"}
