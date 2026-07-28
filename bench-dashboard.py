@@ -35,6 +35,42 @@ SSH = ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/n
 
 CELL_RE = re.compile(r"\[cell (\d+)/(\d+)\] (\S+): (.+)")
 PHASE_RE = re.compile(r"\[phase\] (\S+) (\S+)")
+
+# WHERE A CELL'S TIME ACTUALLY GOES, so an ETA exists before the first cell finishes.
+#
+# The ETA used to need a completed SERVED cell to divide by, which on a gateway whose cells take ten
+# minutes means no estimate for the first ten minutes - exactly when an operator is deciding whether
+# the run is healthy. These weights are the measured share of a cell's wall clock per metric group,
+# from the per-cell cost breakdown the engine now records (agentgateway, 5 cells, 2026-07-28):
+# memory dominates at ~40%, and everything streaming-related is under 6% combined.
+#
+# They are one gateway's profile used as a prior for all, which is honest for an ETA and would not be
+# for a published number. It only ever affects how far along the CURRENT cell is assumed to be; once
+# a cell completes, real elapsed-per-cell takes over.
+PHASE_COST = {
+    "throughput": 0.226,
+    "memory": 0.396,
+    "streaming": 0.004,
+    "added_latency": 0.021,
+    "sustained_throughput": 0.198,
+    "streams_sustained": 0.053,
+    "cpu_fps": 0.102,
+}
+# Fraction of a cell already done when a given phase STARTS, in the order the engine runs them.
+PHASE_ORDER = ["throughput", "memory", "streaming", "added_latency",
+               "sustained_throughput", "streams_sustained", "cpu_fps"]
+
+
+def cell_fraction_done(phase_name):
+    """How much of the current cell is behind us, given the phase it is in. 0.0 when unknown."""
+    if not phase_name:
+        return 0.0
+    done = 0.0
+    for name in PHASE_ORDER:
+        if name == phase_name:
+            return done
+        done += PHASE_COST.get(name, 0.0)
+    return 0.0
 IP_RE = re.compile(r"ip=([0-9.]+)")
 TS_RE = re.compile(r"^\[(\d\d):(\d\d):(\d\d)\]")
 
@@ -98,7 +134,7 @@ def local_state(path):
             lines = f.read().split("\n")
     except OSError:
         return {}
-    st = {"ip": None, "start": None, "terminal": None}
+    st = {"ip": None, "start": None, "measuring": None, "terminal": None}
     for ln in lines:
         m = IP_RE.search(ln)
         if m:
@@ -108,6 +144,16 @@ def local_state(path):
             if m:
                 h, mi, se = (int(x) for x in m.groups())
                 st["start"] = h * 3600 + mi * 60 + se
+        # WHEN MEASUREMENT ACTUALLY STARTED, which is not when the box was launched. Provisioning and
+        # a source build can take minutes, and charging those to the first cell made the per-cell rate
+        # look several times worse than it is - aisix read as 44 minutes a cell when its cells take
+        # eight to twelve. The ETA divides by measuring time; ELAPSED still shows wall clock, because
+        # that is what an operator is paying for.
+        if st["measuring"] is None and "running " in ln:
+            m = TS_RE.match(ln)
+            if m:
+                h, mi, se = (int(x) for x in m.groups())
+                st["measuring"] = h * 3600 + mi * 60 + se
         if "] DONE" in ln:
             st["terminal"] = "DONE"
         elif "INCOMPLETE" in ln:
@@ -169,11 +215,25 @@ def row_for(gw, path, now_s):
         if elapsed < 0:
             elapsed += 86400  # the run crossed midnight
 
+    # Time spent MEASURING, which is what the per-cell rate must divide by. Falls back to the box's
+    # whole lifetime when the "running <gw>" line has not appeared yet (or a caller supplies no such
+    # stamp): a slightly pessimistic estimate beats none, and it corrects itself the moment
+    # measurement starts.
+    measuring = elapsed
+    if st.get("measuring") is not None:
+        measuring = now_s - st["measuring"]
+        if measuring < 0:
+            measuring += 24 * 3600
     eta = None
-    if elapsed and served_done > 0 and expect:
-        per = elapsed / served_done
-        left = max(expect - served_done, 0)
-        eta = per * left
+    if measuring and expect:
+        # Progress in CELLS, including the fraction of the one in flight. Without the fraction there
+        # is no estimate at all until a cell completes.
+        in_flight = cell_fraction_done(phase.split()[0] if phase else None)
+        progress = served_done + in_flight
+        if progress > 0:
+            per = measuring / progress
+            left = max(expect - progress, 0.0)
+            eta = per * left
 
     if cells is None:
         phase = phase or ("booting/building" if st.get("ip") else "launching")
