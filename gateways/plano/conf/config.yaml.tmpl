@@ -1,16 +1,28 @@
 # Plano, configured as an LLM gateway pointed at the harness mock.
 #
-# `type: model` is the LLM listener (config/plano_config_schema.yaml); `type: agent` is the
-# orchestration listener the project's README leads with, and it is NOT what this benchmark
-# measures - an agent listener would put Plano's router and its agent hop inside a number the rest
-# of the field takes without one.
+# `type: model` is the LLM listener; `type: agent` is the orchestration listener the project's README
+# leads with, and it is NOT what this benchmark measures - an agent listener would put Plano's router
+# and its agent hop inside a number the rest of the field takes without one.
+#
+# The listener port is 12000, not 10000. Plano always renders a prompt-gateway listener on 10000
+# (utils.py convert_legacy_listeners), so an LLM listener on 10000 double-binds and envoy exits at
+# boot with "'egress_traffic' has duplicate address '0.0.0.0:10000'". 12000 is Plano's own default
+# for this listener.
+#
+# NO provider_interface key here, deliberately. When the model prefix is one Plano already knows -
+# openai, anthropic and gemini all are - setting provider_interface as well is rejected by
+# config_generator.py:445, which then exits and takes the container down with it. The prefix selects
+# the interface on its own. (The error text reads "Please provide provider interface as part of model
+# name", which is the reverse of what the check does; the condition is `provider in
+# SUPPORTED_PROVIDERS and provider_interface is not None`.)
 #
 # base_url is what makes Plano testable at all: several entrants pin the vendor host and their
 # upstream cells can only be recorded untestable. Plano's model_providers take base_url, so the mock
 # stands in for every provider and the measured number is Plano's own cost.
 #
-# provider_interface selects the EGRESS dialect - the wire shape Plano speaks to the upstream. Its
-# enum has no cohere or bedrock member, which is why those columns are undeclared rather than probed.
+# What the prefix does NOT do is translate. Plano routes to the right upstream cluster and forwards
+# the request in the dialect it arrived in - see matrix_note in definition.json for the recorded
+# probe. Only the pass-through diagonal is claimed.
 version: v0.3.0
 
 listeners:
@@ -20,18 +32,15 @@ listeners:
 
 model_providers:
   - model: openai/gpt-4o-mini
-    provider_interface: openai
     base_url: 'http://127.0.0.1:{MOCK_PORT}'
     access_key: {GW_AUTH}
     default: true
 
   - model: anthropic/claude-3-5-sonnet
-    provider_interface: claude
     base_url: 'http://127.0.0.1:{MOCK_PORT}'
     access_key: {GW_AUTH}
 
   - model: gemini/gemini-1.5-pro
-    provider_interface: gemini
     base_url: 'http://127.0.0.1:{MOCK_PORT}'
     access_key: {GW_AUTH}
 

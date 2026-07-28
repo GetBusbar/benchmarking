@@ -1426,6 +1426,88 @@ mod real_field_tests {
         );
     }
 
+    /// PLANO'S TWO BOOT FAILURES, LOCKED SO A BOX IS NEVER SPENT ON THEM AGAIN.
+    ///
+    /// Both cost a launched EC2 box and produced no measurement, and both are visible in the files
+    /// alone - no gateway needs to be started to see them. A config a gateway refuses at boot is
+    /// indistinguishable, from the orchestrator's side, from a gateway that is merely slow to come
+    /// up: the box waits out its readiness attempts and is torn down INCOMPLETE.
+    ///
+    /// 1. `provider_interface` beside a model prefix Plano already knows. config_generator.py:445
+    ///    rejects the pair (`provider in SUPPORTED_PROVIDERS and provider_interface is not None`)
+    ///    and the container exits. The error text says "Please provide provider interface as part of
+    ///    model name", which reads as the opposite of the rule it enforces, so this is worth
+    ///    asserting rather than trusting a future reader to re-derive.
+    /// 2. Listener port 10000. Plano always renders its prompt-gateway listener there, so an LLM
+    ///    listener on 10000 double-binds and envoy exits with "'egress_traffic' has duplicate
+    ///    address '0.0.0.0:10000'".
+    #[test]
+    fn planos_config_cannot_regress_to_the_two_forms_it_refuses_to_boot_with() {
+        let f = field();
+        let Some(m) = f.get("plano") else { return };
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../gateways/plano");
+
+        assert_ne!(
+            m.port, 10000,
+            "plano's listener port must not be 10000: plano renders its own prompt-gateway listener \
+             there, and envoy exits at boot with a duplicate-address error rather than serving"
+        );
+
+        for cf in &m.config_files {
+            let tmpl = std::fs::read_to_string(dir.join(&cf.template))
+                .unwrap_or_else(|e| panic!("plano template {} must be readable: {e}", cf.template));
+            for (i, line) in tmpl.lines().enumerate() {
+                let code = line.split('#').next().unwrap_or("");
+                assert!(
+                    !code.contains("provider_interface"),
+                    "plano's {} line {} sets provider_interface ({:?}); its model prefixes are \
+                     providers plano already knows, and setting both makes config generation exit \
+                     and takes the container down with it",
+                    cf.template,
+                    i + 1,
+                    code.trim()
+                );
+            }
+        }
+    }
+
+    /// A GATEWAY MAY ONLY CLAIM A CELL WHOSE EGRESS DIALECT IT HAS A MODEL FOR.
+    ///
+    /// The matrix is what the board publishes as capability, and a claimed cell is measured: this
+    /// harness infers the upstream dialect from the request PATH, so a gateway that routes without
+    /// translating still answers 200 and the cell scores served. That is how plano's openai>anthropic
+    /// cell was about to publish a green for a request it forwarded in the OpenAI shape.
+    ///
+    /// Path-inference is not something a unit test can check - it needs a live upstream. What CAN be
+    /// checked is the cheaper half: a claimed egress column must at least name a model to drive it
+    /// with. A column claimed with no model behind it is a claim nobody chose deliberately.
+    #[test]
+    fn no_gateway_claims_an_egress_column_it_has_no_model_for() {
+        use crate::ingress::Dialect;
+        for (name, m) in &field() {
+            // A manifest that names no models at all leaves model selection to the harness default;
+            // this asserts against the mixed case, where SOME columns are named and a claimed one
+            // is not - that is the drift a hand-edited matrix produces.
+            if m.egress_models.is_empty() {
+                continue;
+            }
+            for row in &m.matrix {
+                for (col, ch) in row.chars().enumerate() {
+                    if ch != '1' {
+                        continue;
+                    }
+                    let egress = Dialect::ALL[col].as_str();
+                    assert!(
+                        m.egress_models.contains_key(egress),
+                        "{name} claims an egress column it cannot drive: the matrix asserts a \
+                         {egress} upstream cell, but egress_models names no {egress} model, so the \
+                         cell would be measured with whatever model the default picks"
+                    );
+                }
+            }
+        }
+    }
+
     /// The Go runtime's thread count is set from the size of the pinned core range. A literal there
     /// would run the gateway at the host's core count inside a four-core cpuset, which is not a
     /// detail: the core split IS the comparability basis of every number on the board.
