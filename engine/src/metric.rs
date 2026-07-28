@@ -568,6 +568,15 @@ impl Metric for Memory {
 pub const STREAM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 pub const STREAM_FRAME_BUDGET: usize = 64;
 
+/// How many single-token streams the TTFT distribution is taken over, per leg.
+///
+/// A percentile needs samples, and one stream yields exactly one time-to-first-token - which is why
+/// `added_ttft_p99_us` was absent on every cell ever published rather than measured. 100 is the
+/// smallest sample where a 99th percentile is a real order statistic rather than a restatement of
+/// the maximum, and it is affordable because a TTFT sample reads ONE frame and stops: milliseconds
+/// each, not the ~1.3s a full paced stream takes.
+pub const STREAM_TTFT_SAMPLES: usize = 100;
+
 /// Streaming: what the gateway ADDS to a stream, rather than what the stream costs.
 ///
 /// Every number here is a difference. The same stream is taken through the gateway and again
@@ -669,6 +678,57 @@ impl Metric for Streaming {
         // gateway returned the token before the mock produced it.
         let added_ttft = f64::from(gw_ttft.saturating_sub(direct_ttft) as u32);
 
+        // A TTFT DISTRIBUTION, because a column that can never hold a number should either be
+        // measured or deleted.
+        //
+        // `added_ttft_p99_us` was absent on all 69 served cells of the 2026-07-28 run, suppressed
+        // with "one stream was taken, which cannot support a 99th percentile". That was true and it
+        // was not a reason to keep publishing the field: one stream yields exactly one
+        // time-to-first-token, so the fix is more streams, not a better excuse.
+        //
+        // It is cheap, which is the part I had wrong when I called it a cost decision. A TTFT sample
+        // does not need the whole stream - `post_json_sse` takes a frame budget, and a budget of ONE
+        // returns the moment the first token lands. That is milliseconds, not the ~1.3s a full
+        // 64-frame paced stream takes. `STREAM_TTFT_SAMPLES` of them per leg is well under a second.
+        //
+        // Percentile per leg, THEN differenced - the same shape `AddedLatency` publishes for the
+        // non-streaming case - so the two "added" families mean the same thing rather than two
+        // things sharing a name.
+        let ttft_samples = |addr: std::net::SocketAddr, path: &str, headers: &[(String, String)]| -> Vec<u64> {
+            (0..STREAM_TTFT_SAMPLES)
+                .filter_map(|_| {
+                    crate::http::post_json_sse(addr, path, body.as_bytes(), headers, STREAM_TIMEOUT, 1)
+                        .frame_offsets_us
+                        .first()
+                        .copied()
+                })
+                .collect()
+        };
+        let gw_path = crate::run::path_for(ctx.cfg, ctx.dialect, &ctx.id.egress);
+        let direct_path = ctx.dialect.mock_direct_path(&ctx.cfg.model);
+        let mut gw_ttfts = ttft_samples(ctx.cfg.gateway_addr, &gw_path, &gw_headers);
+        let mut direct_ttfts = ttft_samples(ctx.cfg.mock_addr, &direct_path, &direct_headers);
+        gw_ttfts.sort_unstable();
+        direct_ttfts.sort_unstable();
+        let ttft_pct = |v: &[u64], pct: f64| -> Option<f64> {
+            if v.is_empty() {
+                return None;
+            }
+            let rank = (((v.len() as f64) * pct).ceil() as usize).clamp(1, v.len());
+            Some(v[rank - 1] as f64)
+        };
+        // Absent, not zero, when either leg produced nothing: a leg with no samples has no
+        // percentile, and a 0 would read as "the gateway added nothing".
+        let added_ttft_p99 = match (ttft_pct(&gw_ttfts, 0.99), ttft_pct(&direct_ttfts, 0.99)) {
+            (Some(g), Some(d)) => Measurement::Measured((g - d).max(0.0)),
+            _ => Measurement::absent_because(
+                Absent::NotMeasured,
+                format!(
+                    "no time-to-first-token arrived on one of the two legs across {STREAM_TTFT_SAMPLES} samples, so there is no distribution to difference"
+                ),
+            ),
+        };
+
         // THE GAP DISTRIBUTION IS INSIDE ONE STREAM, and it is not small: a stream carries
         // `STREAM_FRAME_BUDGET` frames, so it yields that many gaps MINUS ONE. Nearest-rank, the
         // same convention `gen::GenStats::pct_of` and the search's median use, so a published
@@ -688,24 +748,10 @@ impl Metric for Streaming {
             ),
         };
 
-        // ONE STREAM CANNOT SUPPORT A TTFT p99, and only a TTFT p99. A stream produces exactly one
-        // time-to-first-token, so a percentile over it is that one observation wearing a name that
-        // claims a confidence it does not have.
-        //
-        // This same sentence used to suppress the GAP p99 as well, and for gaps it was simply
-        // untrue: the gaps live INSIDE the stream, `STREAM_FRAME_BUDGET` frames giving that many
-        // minus one of them. The field was absent on all 69 served cells of the 2026-07-28 run while
-        // charts.py drew two charts from it, so the data to publish it was in hand the whole time.
-        let no_ttft_distribution = || {
-            Measurement::absent_because(
-                Absent::NotMeasured,
-                "one stream was taken, and a stream has exactly one time to first token, which cannot support a 99th percentile".to_string(),
-            )
-        };
 
         let fields: Filled = vec![
             ("added_ttft_p50_us", Measurement::Measured(added_ttft)),
-            ("added_ttft_p99_us", no_ttft_distribution()),
+            ("added_ttft_p99_us", added_ttft_p99),
             ("added_gap_p50_us", added_gap_at(0.50)),
             ("added_gap_p99_us", added_gap_at(0.99)),
             ("gateway_c1_frames", Measurement::Measured(through_gateway.frame_offsets_us.len() as f64)),
@@ -1385,4 +1431,32 @@ mod tests {
         assert_eq!(gap_percentile_us(&[], 0.5), None);
     }
 
+
+    // A COLUMN THAT CAN NEVER HOLD A NUMBER IS EITHER MEASURED OR DELETED.
+    //
+    // `added_ttft_p99_us` was absent on all 69 served cells of the 2026-07-28 run - and on every run
+    // before it - because one stream yields exactly one time-to-first-token. The excuse was true;
+    // keeping the field anyway was the defect. charts.py draws from it.
+    //
+    // The fix is samples, and they are cheap: a TTFT reads ONE frame and stops, so a sample is
+    // milliseconds rather than the ~1.3s a full 64-frame paced stream takes.
+    #[test]
+    fn a_ttft_percentile_needs_samples_and_the_sample_count_makes_one_real() {
+        // 100 is the smallest count where a 99th percentile is a real order statistic rather than a
+        // restatement of the maximum: nearest-rank puts it at index 99 of 100, not at the top.
+        assert!(STREAM_TTFT_SAMPLES >= 100, "a p99 over fewer than 100 samples IS the maximum");
+        let rank_of = |n: usize, pct: f64| (((n as f64) * pct).ceil() as usize).clamp(1, n);
+        assert_eq!(rank_of(STREAM_TTFT_SAMPLES, 0.99), 99);
+        assert!(rank_of(STREAM_TTFT_SAMPLES, 0.99) < STREAM_TTFT_SAMPLES,
+            "the p99 must not be the max, or it is not a percentile");
+        // One sample cannot support one: that was the whole problem, and it is why the field was
+        // empty rather than wrong.
+        assert_eq!(rank_of(1, 0.99), 1, "with a single sample the p99 IS that sample");
+
+        // Nearest-rank, matching gen::GenStats::pct_of and the search's median, so a published
+        // percentile is always a value some stream actually produced.
+        let v: Vec<u64> = (1..=100).collect();
+        assert_eq!(v[rank_of(v.len(), 0.99) - 1], 99);
+        assert_eq!(v[rank_of(v.len(), 0.50) - 1], 50);
+    }
 }
