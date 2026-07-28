@@ -1,0 +1,3 @@
+{"suite":"matrix","measured_at":"2026-07-27T04:02:08Z","arch":"arm64","hardware":null,"build":"kong:3.8"}
+{"suite":"matrix","measured_at":"2026-07-28T05:09:42Z","arch":"arm64","hardware":null,"build":"kong:3.8"}
+{"suite":"matrix","measured_at":"2026-07-28T07:08:05Z","arch":"arm64","hardware":null,"build":"kong:3.8"}
