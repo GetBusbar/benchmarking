@@ -3189,4 +3189,34 @@ test("freshness guard REFUSES a board it cannot date, rather than passing it", (
   assert.ok(msg, "expected gen-data to THROW on a board with no datable measurement, but it succeeded");
   assert.match(msg, /FRESHNESS FAILURE \(undatable board\)/, `expected the undatable-board failure, got: ${msg}`);
 });
+// ---- a paced target is not a capacity, and the seal has to know the difference ------------------
+// The engine publishing a paced-rate match is worthless if the seal still throws it away: the whole
+// point is that the number reaches the board. This pins both halves of that contract.
+test("seal: matching a PACED upstream publishes the value; matching a CAPACITY still suppresses", () => {
+  // Stream metrics: the mock paces deltas, so its frames/sec is the target rate. Reaching it is the
+  // gateway keeping up - 24 of 69 cells were deleted for exactly this in the 2026-07-28 run.
+  const paced = sealMetric(12275, { gated: true, paced: true, flag: true });
+  assert.equal(paced.value, 12275, "a gateway that kept pace must publish its rate");
+  assert.equal(paced.certified, true);
+  assert.equal(paced.suppressed, false);
+
+  // Throughput metrics: the mock's capacity really can be the limit, and publishing would rank the
+  // rig rather than the gateway. Unchanged.
+  const capacity = sealMetric(12275, { gated: true, flag: true });
+  assert.equal(capacity.value, null, "a rig-bound throughput number must still be suppressed");
+  assert.equal(capacity.suppressed, true);
+  assert.equal(capacity.reason, "mock_bound");
+
+  // An UNMEASURABLE reference suppresses on both paths: it says nothing either way, and certifying a
+  // number on no evidence is what the gate exists to prevent.
+  for (const opts of [{ gated: true, paced: true }, { gated: true }]) {
+    const unverifiable = sealMetric(12275, { ...opts, flag: null });
+    assert.equal(unverifiable.value, null, `an unusable reference must suppress (${JSON.stringify(opts)})`);
+    assert.equal(unverifiable.reason, "unverifiable");
+  }
+
+  // A clean, comfortably-under-the-ceiling reading is certified on both paths, as it always was.
+  assert.equal(sealMetric(500, { gated: true, paced: true, flag: false }).value, 500);
+  assert.equal(sealMetric(500, { gated: true, flag: false }).value, 500);
+});
 

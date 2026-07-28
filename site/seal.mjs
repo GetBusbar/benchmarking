@@ -74,6 +74,9 @@ export function makeSource(kind, sweep, build, measuredAt) {
 // the raw scalar do not survive onto the returned object except as `value` (present only when honest).
 //   value      : the raw number (or null/undefined when not measured)
 //   opts.gated : true for a throughput metric (apply the mock-bound honesty rule)
+//   opts.paced : true when the mock's reference is a PACED TARGET rather than a capacity (the stream
+//                metrics). Matching it is the gateway keeping up, so a `true` flag is carried as a
+//                signal instead of suppressing the value. An absent flag still suppresses.
 //   opts.flag  : the raw *_mock_bound sibling (false = certified, true = rig-bound, null/undefined = unverifiable)
 //   opts.source: the provenance stamp (makeSource)
 //   opts.extras: extra CERTIFIED-only fields to carry (concurrency, sweep array) - dropped when suppressed
@@ -91,7 +94,7 @@ export function makeSource(kind, sweep, build, measuredAt) {
 export const ZERO_NO_CEILING = "no_qualifying_ceiling";
 export const ZERO_MEASURED_FAIL = "measured_failure";
 export function sealMetric(value, opts = {}) {
-  const { gated = false, flag, extras = null, zeroNote = ZERO_NO_CEILING } = opts;
+  const { gated = false, paced = false, flag, extras = null, zeroNote = ZERO_NO_CEILING } = opts;
   if (value == null) {
     return { value: null, certified: false, suppressed: false, reason: "not_measured" };
   }
@@ -99,8 +102,19 @@ export function sealMetric(value, opts = {}) {
   if (gated) {
     // measured-zero: an honest, certified 0 whose NOTE names what the zero means (see zeroNote above).
     if (num === 0) return { value: 0, certified: true, suppressed: false, note: zeroNote };
-    // positive but not certified as gateway-vs-ceiling -> SUPPRESSED, raw number consumed (gone).
-    if (!(num > 0 && flag === false)) {
+    // A PACED metric's flag is not a suppression. The mock paces its stream deltas at a fixed
+    // interval - "the pacing is the model generating tokens", in the mock's own words - so its
+    // frames/sec is a TARGET rate, c streams x one frame per interval, and not a capacity it ran out
+    // of. A gateway forwarding every frame as it arrives lands at ~99% of it, which is the best
+    // possible outcome, and suppressing that threw the number away for the gateways doing best: 24
+    // of 69 cells in the 2026-07-28 run. The flag stays on the envelope as the signal it always was
+    // (this gateway matched the paced upstream), and the value is published beside it.
+    //
+    // A metric that is gated but NOT paced keeps the old rule exactly: for a saturating throughput
+    // load the mock's capacity really can be the limit, and publishing then ranks the rig.
+    // `unverifiable` still suppresses on both paths - an unmeasurable reference tells us nothing
+    // either way, and certifying a number on no evidence is what the whole gate exists to prevent.
+    if (paced ? flag == null : !(num > 0 && flag === false)) {
       const reason = flag === true ? "mock_bound" : "unverifiable";
       return { value: null, certified: false, suppressed: true, reason };
     }
