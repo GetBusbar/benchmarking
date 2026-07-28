@@ -15,6 +15,9 @@ on:
       - "charts.py"
       - "charts_test.py"
       - "mock/**"
+      - "gateways/**"
+      - "lib/**"
+      - "run-on-ec2.sh"
       - ".github/workflows/bench-tests.yml"
   pull_request:
     paths:
@@ -29,11 +32,6 @@ on:
       - "lib/**"
       - "run-on-ec2.sh"
       - ".github/workflows/bench-tests.yml"
-  pull_request:
-    paths:
-      - "gateways/**"
-      - "lib/**"
-      - "run-on-ec2.sh"
   workflow_dispatch:
 
 permissions:
