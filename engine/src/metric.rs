@@ -743,9 +743,18 @@ impl Metric for Streaming {
         // The sample set is the distribution now, for both. It is also the better one: 100 samples
         // per leg against the single stream the p50 used to come from.
         let added_ttft_at = |pct: f64| match (ttft_pct(&gw_ttfts, pct), ttft_pct(&direct_ttfts, pct)) {
-            // Saturating for the same reason the single-stream figure was: a gateway cannot be
-            // faster than the upstream it proxies, so a negative difference is rig noise.
-            (Some(g), Some(d)) => Measurement::Measured((g - d).max(0.0)),
+            (Some(g), Some(d)) if g >= d => Measurement::Measured(g - d),
+            // A gateway cannot be faster than the upstream it proxies, so a negative difference is
+            // noise - and saying so beats clamping it to a zero that claims the gateway added
+            // nothing measurable. Same rule as the gap percentiles above.
+            (Some(g), Some(d)) => Measurement::absent_because(
+                Absent::NotMeasured,
+                format!(
+                    "the gateway's own time to first token at this percentile ({g:.0}us) came in under \
+                     the mock's ({d:.0}us), which a proxy cannot really do - the added TTFT here is \
+                     below what this rig can resolve"
+                ),
+            ),
             // Absent, not zero, when either leg produced nothing: a leg with no samples has no
             // percentile, and a 0 would read as "the gateway added nothing".
             _ => Measurement::absent_because(
@@ -769,8 +778,29 @@ impl Metric for Streaming {
         // Percentile per leg, THEN difference - the same shape `AddedLatency` publishes
         // (`gateway_c1_p99_us` minus `direct_c1_p99_us`), so the streaming and non-streaming added
         // figures mean the same thing rather than two things with one name.
+        // A NEGATIVE RAW DIFFERENCE IS BELOW RESOLUTION, NOT A MEASURED ZERO.
+        //
+        // Both legs carry the mock's ~20ms pacing, so this extracts a microsecond-scale signal by
+        // differencing two ~20,000us numbers. When the gateway's own tail at a percentile lands under
+        // the mock's, the raw difference is negative - physically impossible for a proxy, so it is
+        // noise. Clamping that to 0 publishes "the gateway added nothing" with a precision this rig
+        // does not have, and it produced incoherent pairs in the 2026-07-28 run: aisix p50=4 p99=0,
+        // helicone p50=3 p99=0, plano p50=1 p99=0, tensorzero p50=1 p99=0. A p99 below its own p50
+        // cannot come from one distribution.
+        //
+        // Absent with the reason instead. "Too small for this rig to see" is a different statement
+        // from "zero", and only one of them is true.
         let added_gap_at = |pct: f64| match (gap_pct(&through_gateway, pct), gap_pct(&direct, pct)) {
-            (Some(g), Some(d)) => Measurement::Measured((g - d).max(0.0)),
+            (Some(g), Some(d)) if g >= d => Measurement::Measured(g - d),
+            (Some(g), Some(d)) => Measurement::absent_because(
+                Absent::NotMeasured,
+                format!(
+                    "the gateway's own inter-frame gap at this percentile ({g:.0}us) came in under the \
+                     mock's ({d:.0}us), which a proxy cannot really do - the added gap here is below \
+                     what this rig can resolve against the mock's {}ms pacing",
+                    crate::run::stream_pacing_interval_ms()
+                ),
+            ),
             _ => Measurement::absent_because(
                 Absent::NotMeasured,
                 "a single frame on one of the two legs leaves no inter-frame gap to difference".to_string(),
@@ -1557,5 +1587,43 @@ mod tests {
         // One sample cannot support a p99 that means anything: it is that sample, and it equals the
         // p50 rather than sitting below it.
         assert_eq!(pct(&[500], 0.99), pct(&[500], 0.50));
+    }
+
+    // A DIFFERENCE THE RIG CANNOT SEE IS NOT A MEASURED ZERO.
+    //
+    // Both streaming legs carry the mock's ~20ms pacing, so an added-gap figure is a microsecond
+    // signal extracted by differencing two ~20,000us numbers. When the gateway's tail at a percentile
+    // lands under the mock's, the raw difference is negative - impossible for a proxy, therefore
+    // noise. Clamping it to 0 published "added nothing" with precision this rig does not have, and
+    // produced pairs that cannot exist: aisix p50=4 p99=0, helicone p50=3 p99=0, plano p50=1 p99=0,
+    // tensorzero p50=1 p99=0 in the 2026-07-28 run.
+    #[test]
+    fn a_percentile_difference_below_the_rigs_resolution_is_absent_not_zero() {
+        // The rule, stated over the raw pair the engine differences.
+        let judge = |gw: f64, mock: f64| -> Option<f64> { if gw >= mock { Some(gw - mock) } else { None } };
+
+        // A real addition survives, unchanged.
+        assert_eq!(judge(20_015.0, 20_000.0), Some(15.0));
+        // Equal legs are a genuine, measurable zero: the gateway added nothing detectable AND the
+        // comparison was valid. That must still publish 0, not absent.
+        assert_eq!(judge(20_000.0, 20_000.0), Some(0.0));
+        // The gateway "faster" than the upstream it proxies is the impossible case.
+        assert_eq!(judge(19_996.0, 20_000.0), None, "a proxy cannot beat its own upstream");
+
+        // And the property that was violated: whatever the rule returns, a p99 that IS published can
+        // never sit below a p50 that is published from the same distribution.
+        let samples: Vec<f64> = (0..100).map(|i| 20_000.0 + f64::from(i % 7)).collect();
+        let pct = |v: &[f64], p: f64| {
+            let mut s = v.to_vec();
+            s.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let rank = (((s.len() as f64) * p).ceil() as usize).clamp(1, s.len());
+            s[rank - 1]
+        };
+        let mock: Vec<f64> = samples.iter().map(|v| v - 3.0).collect();
+        let p50 = judge(pct(&samples, 0.50), pct(&mock, 0.50));
+        let p99 = judge(pct(&samples, 0.99), pct(&mock, 0.99));
+        if let (Some(a), Some(b)) = (p50, p99) {
+            assert!(b >= a, "p99 {b} sits below p50 {a}");
+        }
     }
 }

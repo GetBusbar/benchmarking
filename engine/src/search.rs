@@ -240,8 +240,20 @@ pub fn bisect_ceiling<P: Probe>(probe: &mut P, min_conc: u32, max_conc: u32) -> 
 /// The winning concurrency and value of a peak search.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct PeakPoint {
+    /// The concurrency the peak was measured AT. Paired with `value`, these are one measurement -
+    /// a reader can find them together in the published sweep.
     pub concurrency: u32,
     pub value: f64,
+    /// THE KNEE: the lowest concurrency whose own reading reached the plateau, which is the
+    /// operational fact "how much concurrency before more stops helping".
+    ///
+    /// Kept as its own field rather than folded into `concurrency`, because the two answer different
+    /// questions and pairing the plateau LEVEL with the KNEE produced a (value, concurrency) pair
+    /// that no single measurement made: agentgateway published "25182 @ c=16" when c=16 measured
+    /// 24932, c=32 measured 25182 and c=64 measured 25278. A field named `rps_max_proxy`, guarded by
+    /// C6 as a maximum, has to be the highest thing measured - otherwise our own sweep contains
+    /// rungs that beat it and the guard fires on our own data.
+    pub knee_concurrency: u32,
 }
 
 /// The result of a unimodal max-search: `Measured(point)` iff the curve was seen to turn over
@@ -269,7 +281,9 @@ fn interrupted<P: Probe>(s: Search<P>) -> PeakResult {
     let mut winner: Option<PeakPoint> = None;
     for p in ordered {
         if p.passed && winner.as_ref().is_none_or(|w| p.value > w.value) {
-            winner = Some(PeakPoint { concurrency: p.concurrency, value: p.value });
+            // An interrupted search never established a plateau, so there is no knee to report:
+            // the best passing point is its own knee, which is the honest degenerate answer.
+            winner = Some(PeakPoint { concurrency: p.concurrency, value: p.value, knee_concurrency: p.concurrency });
         }
     }
     // An interruption before a turnover was observed leaves a LOWER BOUND, not a peak, and
@@ -498,20 +512,49 @@ pub fn saturation_plateau<P: Probe>(probe: &mut P, min_conc: u32, max_conc: u32)
         return PeakResult { peak: Measurement::absent_because(Absent::SearchExhausted, detail), points: s.points, exhausted: true };
     }
 
-    // THE PLATEAU is every rung within its own wobble of the best one. The knee is the lowest of
-    // them: rungs from the climb sit well below and are excluded by the same comparison that decided
-    // saturation.
-    let band = rungs
+    // THE PUBLISHED PAIR MUST BE ONE MEASUREMENT: the best rung's own median, and that rung's own
+    // concurrency.
+    //
+    // This used to publish the median of the plateau BAND's medians, paired with the KNEE - the
+    // lowest concurrency in the band. Two different rungs, published as one (value, concurrency)
+    // pair under names that say "the peak, and the concurrency that peak happened at".
+    // agentgateway anthropic>anthropic in the 2026-07-28 run published "25182 @ c=16" when c=16
+    // measured 24932, c=32 measured 25182, and c=64 measured 25278. No single measurement produced
+    // that pair, and the highest rung the gateway actually reached was published nowhere.
+    //
+    // The band median is a defensible statistic and the knee is a useful fact, but neither is what
+    // `rps_max_proxy`/`conc_at_peak` claim to be, and a reader cannot re-derive the pair from the
+    // sweep that ships beside it. Each rung's median is already the median of `WINDOWS_PER_RUNG`
+    // windows, so the best of them is a robust reading rather than a lucky draw - and it is a
+    // reading that actually happened.
+    // The band is still computed, because the knee is still worth publishing - it is just no longer
+    // welded to a value measured at a different rung.
+    let band: Vec<&Rung> = rungs
         .iter()
         .filter(|r| r.median > 0.0 && r.median >= best * (1.0 - improvement_bar(r.spread, r.windows)))
-        .collect::<Vec<_>>();
+        .collect();
     let knee = band.iter().map(|r| r.concurrency).min().unwrap_or(min_conc);
-    let mut vals: Vec<f64> = band.iter().map(|r| r.median).collect();
-    vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let plateau = nearest_rank_median(&vals).unwrap_or(best);
+    let peak = rungs
+        .iter()
+        .filter(|r| r.median > 0.0)
+        .max_by(|a, b| a.median.partial_cmp(&b.median).unwrap_or(std::cmp::Ordering::Equal));
+    let Some(peak) = peak else {
+        let detail = format!(
+            "no concurrency from {min_conc} to {max_conc} produced a usable rung, so no peak was established"
+        );
+        return PeakResult {
+            peak: Measurement::absent_because(Absent::NotMeasured, detail),
+            points: s.points,
+            exhausted: false,
+        };
+    };
 
     PeakResult {
-        peak: Measurement::Measured(PeakPoint { concurrency: knee, value: plateau }),
+        peak: Measurement::Measured(PeakPoint {
+            concurrency: peak.concurrency,
+            value: peak.median,
+            knee_concurrency: knee,
+        }),
         points: s.points,
         exhausted: false,
     }
@@ -739,9 +782,18 @@ mod tests {
         let r = saturation_plateau(&mut probe, 1, 4096);
         assert!(!r.exhausted, "a curve that plateaued must not report the range as exhausted");
         let w = r.peak.value().expect("a saturated curve has a plateau to publish");
+        // The KNEE is what "saturation is at c=64" means. The summit can land on any rung in the
+        // plateau band by chance - on a flat curve with 1% wobble that is exactly what it does - so
+        // asserting the summit here would be asserting which way the noise fell.
         assert!(
-            w.concurrency <= 256,
-            "saturation is at c=64; reporting c={} means the search kept climbing on noise",
+            w.knee_concurrency <= 256,
+            "saturation is at c=64; reporting knee c={} means the search kept climbing on noise",
+            w.knee_concurrency
+        );
+        // And the peak, wherever it landed, is a rung that was actually probed.
+        assert!(
+            r.points.iter().any(|p| p.concurrency == w.concurrency && p.passed),
+            "published c={} was never probed",
             w.concurrency
         );
         assert!(
@@ -1006,16 +1058,43 @@ mod tests {
     // is the answer to "how much concurrency do I need before more stops helping". With a median
     // value there is no single winning rung for a summit to point at anyway.
     #[test]
-    fn the_reported_concurrency_is_the_knee_not_the_highest_rung_probed() {
+    fn the_knee_is_reported_separately_from_the_peak_that_was_measured() {
         let mut probe = Saturating { knee: 64, plateau: 5000.0, wobble: 0.01, calls: 0 };
         let r = saturation_plateau(&mut probe, 1, 4096);
         let w = r.peak.value().expect("saturated");
         let highest_probed = r.points.iter().map(|p| p.concurrency).max().unwrap_or(0);
+
+        // The KNEE is still reported - "how much concurrency before more stops helping" is the
+        // operational fact this search exists to find, and it is nowhere near the top of the range.
         assert!(
-            w.concurrency < highest_probed,
-            "reported c={} equals the highest rung probed ({}), which is a summit, not a knee",
-            w.concurrency,
+            w.knee_concurrency < highest_probed,
+            "knee c={} equals the highest rung probed ({}), which is a summit, not a knee",
+            w.knee_concurrency,
             highest_probed
+        );
+
+        // THE PUBLISHED PAIR IS ONE MEASUREMENT. `value` and `concurrency` must be findable together
+        // in the sweep that ships beside them: the pair used to be the plateau band's median labelled
+        // with the knee's concurrency, which no single rung ever produced.
+        let at_that_rung: Vec<f64> = r
+            .points
+            .iter()
+            .filter(|p| p.concurrency == w.concurrency && p.passed)
+            .map(|p| p.value)
+            .collect();
+        assert!(
+            !at_that_rung.is_empty(),
+            "published c={} has no passing window in the sweep at all",
+            w.concurrency
+        );
+        let lo = at_that_rung.iter().cloned().fold(f64::MAX, f64::min);
+        let hi = at_that_rung.iter().cloned().fold(f64::MIN, f64::max);
+        assert!(
+            w.value >= lo && w.value <= hi,
+            "published {} @ c={} but that rung's own windows span {lo}..{hi} - the pair is not a \
+             measurement anyone took",
+            w.value,
+            w.concurrency
         );
     }
 
@@ -1230,10 +1309,10 @@ mod proptests {
                 // plateau level rather than anywhere on the rising part below it.
                 let off = (w.value - plateau).abs() / plateau;
                 prop_assert!(off <= wobble + 0.01, "value {} is {:.3} off the plateau {}", w.value, off, plateau);
-                // The knee is reported, so the concurrency is at or above the true knee but nowhere
-                // near the top of a range 30+ doublings wide.
-                prop_assert!(w.concurrency <= knee.saturating_mul(8).max(64),
-                    "knee={} reported c={}", knee, w.concurrency);
+                // The knee travels in its own field, at or above the true knee but nowhere near the
+                // top of a range 30+ doublings wide.
+                prop_assert!(w.knee_concurrency <= knee.saturating_mul(8).max(64),
+                    "knee={} reported knee c={}", knee, w.knee_concurrency);
             }
         }
 
