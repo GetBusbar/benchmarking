@@ -95,6 +95,46 @@ impl<'p, P: Probe> Search<'p, P> {
     }
 }
 
+/// THE ONE LADDER BOTH SEARCHES CLIMB.
+///
+/// Two searches hand-rolled the same doubling loop, and that is how they came to disagree: the
+/// plateau search was fixed to climb from the floor after it opened a 1..65536 run by asking for
+/// 32768 concurrent connections, the fix was written as a comment inside that function, and the gate
+/// search kept probing the top of its range outright for another day. Raising the engine ceiling to
+/// 65536 then made the untouched one open by asking a gateway for 65536 concurrent streams.
+///
+/// A rule that lives in one function protects one function. This is the rule as code, used by both,
+/// so "where do we probe next" has a single answer and cannot drift again. `no_search_leaps_past_the
+/// _ladder_it_climbed` holds every search in this module to it, including any added later.
+struct Ladder {
+    current: u32,
+    max: u32,
+}
+
+impl Ladder {
+    /// Starts AT THE FLOOR, always. The opening request a gateway sees must never be a function of
+    /// how wide the range was set: that is what makes a wider search a more dangerous one, and it is
+    /// the defect this type exists to make unrepresentable.
+    fn from_floor(min_conc: u32, max_conc: u32) -> Self {
+        Self { current: min_conc.max(1), max: max_conc }
+    }
+
+    fn floor(&self) -> u32 {
+        self.current
+    }
+
+    /// The next rung: double, never past the top. `None` once the top has been reached, so a caller
+    /// cannot loop forever on a saturating multiply. Doubling zero is zero, which is why the floor is
+    /// clamped to 1 above rather than trusted from the caller.
+    fn next(&mut self) -> Option<u32> {
+        if self.current >= self.max {
+            return None;
+        }
+        self.current = self.current.saturating_mul(2).min(self.max);
+        Some(self.current)
+    }
+}
+
 // ─────────────────────────────────────────── bisect_ceiling ───────────────────────────────────────
 
 /// The result of a gate-ceiling bisection: `Measured(n)` iff `n` passes and `n+1` was measured and
@@ -136,31 +176,51 @@ pub fn bisect_ceiling<P: Probe>(probe: &mut P, min_conc: u32, max_conc: u32) -> 
         };
     }
 
-    let hi_sample = match s.sample(max_conc) {
-        Some(v) => v,
-        None => {
-            // A LOWER BOUND IS NOT A CEILING, and at this point the only successful probe is the
-            // floor itself, so returning it would publish the harness's own search floor as the
-            // gateway's ceiling. Nothing is lost by refusing: `points` carries every probed rung on
-            // this path exactly as it does on the measured ones, and the detail states the bound in
-            // prose. `Measured` is not a neutral container, it is a publication claim: the board
-            // renders it as a bare rankable number with no "at least" form.
-            let detail = format!(
-                "probe interrupted after c={min_conc} passed and before any failure was measured; the ceiling is at least {min_conc}, and nothing above it was tested"
-            );
-            return BisectResult { ceiling: Measurement::absent_because(Absent::NotMeasured, detail), points: s.points };
+    // CLIMB TO THE FAILURE; NEVER OPEN AT THE TOP OF THE RANGE.
+    //
+    // This probed `max_conc` as its first move after the floor, so the opening request of the
+    // streams gate was the whole range at once. That is the same defect `saturation_plateau` already
+    // carries a comment about - "a start derived from the range made a WIDER range open with a
+    // HIGHER first probe, which is how a 1..65536 run began by asking for 32768 concurrent
+    // connections" - and raising the engine ceiling to 65536 made this one strictly worse: the first
+    // thing a gateway would have been asked for is sixty-five thousand concurrent streams.
+    //
+    // It is not only unkind to a fragile gateway, it measures the wrong thing. A rig that opens
+    // beyond what the gateway can carry learns only that the top failed, and the failure it records
+    // may be its own: the load generator, the mock and the gateway all meet the wall together and
+    // nothing in the result says which one hit it first.
+    //
+    // Doubling from the floor never asks for more than twice what the gateway has ALREADY been shown
+    // to sustain, so every probe is one the previous probe justified. The contract is unchanged: a
+    // ceiling is only `Measured` with a pass at n and a measured failure above it, and a range whose
+    // top still passes is still `SearchExhausted` rather than a published bound of ours.
+    let mut a = min_conc;
+    let mut b = None;
+    let mut ladder = Ladder::from_floor(min_conc, max_conc);
+    while let Some(c) = ladder.next() {
+        match s.sample(c) {
+            Some(sample) if sample.passed => a = c,
+            Some(_) => {
+                b = Some(c);
+                break;
+            }
+            None => {
+                let detail = format!(
+                    "probe interrupted while climbing at c={c}; the ceiling is at least {a}, and nothing above it was tested"
+                );
+                return BisectResult { ceiling: Measurement::absent_because(Absent::NotMeasured, detail), points: s.points };
+            }
         }
-    };
-    if hi_sample.passed {
-        // No failure was ever observed inside the range: publishing max_conc would report our own search
-        // bound as the gate's ceiling.
+    }
+    let Some(b_fail) = b else {
+        // No failure anywhere in the range: publishing max_conc would report our own search bound as
+        // the gate's ceiling.
         let detail = format!("c={max_conc} still passes at the top of the search range; the true ceiling is at least {max_conc}");
         return BisectResult { ceiling: Measurement::absent_because(Absent::SearchExhausted, detail), points: s.points };
-    }
+    };
 
     // Invariant from here: a passes, b fails. Bisect to +-1; b stays the recorded proof of failure.
-    let mut a = min_conc;
-    let mut b = max_conc;
+    let mut b = b_fail;
     while b - a > 1 {
         let mid = a + (b - a) / 2;
         match s.sample(mid) {
@@ -354,7 +414,8 @@ pub fn saturation_plateau<P: Probe>(probe: &mut P, min_conc: u32, max_conc: u32)
     // ZERO CONCURRENCY DOES NOT EXIST. The climb step is `c.saturating_mul(2)`, and doubling zero is
     // still zero, so a caller-supplied floor of 0 (e.g. `OTB_MIN_CONC=0`) pinned the ladder at c=0
     // forever instead of climbing.
-    let min_conc = min_conc.max(1);
+    let mut ladder = Ladder::from_floor(min_conc, max_conc);
+    let min_conc = ladder.floor();
     let mut s = Search::new(probe);
 
     // CLIMB FROM THE FLOOR, ALWAYS. The start is not derived from the range: a start that moves with
@@ -394,7 +455,10 @@ pub fn saturation_plateau<P: Probe>(probe: &mut P, min_conc: u32, max_conc: u32)
         if flat_run >= FLAT_RUNGS_TO_STOP && c >= MIN_SATURATION_CONC {
             break;
         }
-        c = c.saturating_mul(2).min(max_conc);
+        c = match ladder.next() {
+            Some(next) => next,
+            None => break,
+        };
     }
 
     let best = rungs.iter().map(|r| r.median).fold(0.0_f64, f64::max);
@@ -1257,5 +1321,92 @@ mod proptests {
         assert_eq!(improvement_bar(0.001, 100), WOBBLE_FLOOR);
         // A rung with no passing windows cannot divide by zero.
         assert_eq!(improvement_bar(0.0, 0), WOBBLE_FLOOR);
+    }
+
+    // ── THE INVARIANT BOTH SEARCHES MUST HOLD, ASSERTED ON BOTH ─────────────────────────────────
+    //
+    // This exists because the same defect was found twice, a day apart, in two functions.
+    //
+    // `saturation_plateau` used to derive its opening probe from the range, so widening the range
+    // made the FIRST request bigger - a 1..65536 run began by asking for 32768 concurrent
+    // connections. That was fixed, and the reason was written down in a comment inside
+    // `saturation_plateau`. `bisect_ceiling` had the same defect the whole time, worse: it probed
+    // `max_conc` outright as its second move. Nobody looked, because what was recorded was a note in
+    // the function that got fixed rather than a rule both functions have to obey. Raising the engine
+    // ceiling to 65536 then turned the untouched one into "open by asking a gateway for 65536
+    // concurrent streams".
+    //
+    // A comment cannot fail. This can, and it runs against every search in the module, so a third
+    // search added later is held to it without anyone remembering this happened.
+    //
+    // THE RULE: a load search may never ask for a concurrency the gateway has not already justified.
+    // It opens at the floor, and no probe exceeds twice the highest concurrency that has passed so
+    // far. That bounds the blast radius on a fragile gateway, and it keeps the failure attributable:
+    // a rig that opens beyond what the gateway can carry learns only that the top failed, and the
+    // failure may be its own - load generator, mock and gateway all hit the wall together and the
+    // result cannot say which was first.
+    struct RecordingProbe {
+        ceiling: u32,
+        asked: std::rc::Rc<std::cell::RefCell<Vec<u32>>>,
+    }
+    impl Probe for RecordingProbe {
+        fn probe(&mut self, c: u32) -> Option<Sample> {
+            self.asked.borrow_mut().push(c);
+            Some(Sample { value: f64::from(c.min(self.ceiling)), passed: c <= self.ceiling })
+        }
+    }
+
+    /// THE LADDER NEVER LEAPS: it opens at the floor, and no probe is more than double the highest
+    /// concurrency already asked for.
+    ///
+    /// Stated over ASKED rungs rather than passing ones on purpose. The two searches disagree about
+    /// what a failed rung means - a gate search learns the ceiling is below it, while the plateau
+    /// search deliberately climbs to MIN_SATURATION_CONC before it will call anything saturated,
+    /// because a rung that low would have its verdict decided by its own scatter. Both of those are
+    /// right, and a rule written around "passed" would have to pick one and be wrong about the
+    /// other. What both must obey is that the NEXT request is never more than twice the last, which
+    /// is exactly what the defect broke: jumping straight to the top of the range.
+    fn assert_the_ladder_never_leaps(asked: &[u32], min_conc: u32, who: &str) {
+        assert!(!asked.is_empty(), "{who}: a search that probed nothing proves nothing");
+        assert_eq!(
+            asked[0], min_conc,
+            "{who}: opened at c={} instead of the floor c={min_conc} - the first request a gateway \
+             sees must not be a function of how wide we set the range",
+            asked[0]
+        );
+        let mut highest = min_conc;
+        for (i, &c) in asked.iter().enumerate() {
+            assert!(
+                c <= highest.saturating_mul(2),
+                "{who}: probe {i} leapt to c={c} from a ladder that had only reached c={highest} - \
+                 a search must climb, never jump to the top of its range (asked: {asked:?})"
+            );
+            highest = highest.max(c);
+        }
+    }
+
+    #[test]
+    fn no_search_leaps_past_the_ladder_it_climbed() {
+        // Wide ranges are exactly where this bites: the wider the range, the worse the old opening
+        // probe got, which is the property that made it invisible on narrow test ranges.
+        for (min_conc, max_conc) in [(1u32, 64u32), (1, 4096), (1, 65536), (8, 65536)] {
+            for ceiling in [1u32, 3, 100, 5000, 60000] {
+                let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+                let mut p = RecordingProbe { ceiling, asked: std::rc::Rc::clone(&asked) };
+                let _ = bisect_ceiling(&mut p, min_conc, max_conc);
+                assert_the_ladder_never_leaps(
+                    &asked.borrow(), min_conc,
+                    &format!("bisect_ceiling({min_conc}..{max_conc}, gateway ceiling {ceiling})"),
+                );
+
+                let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+                let mut p = RecordingProbe { ceiling, asked: std::rc::Rc::clone(&asked) };
+                let _ = saturation_plateau(&mut p, min_conc, max_conc);
+                assert_the_ladder_never_leaps(
+                    &asked.borrow(), min_conc,
+                    &format!("saturation_plateau({min_conc}..{max_conc}, gateway ceiling {ceiling})"),
+                );
+            }
+        }
     }
 }
