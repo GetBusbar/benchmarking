@@ -1,0 +1,27 @@
+{
+  "_what": "Commits that are DIFFERENT commits but the SAME INSTRUMENT. C8 groups the board by instrument, not by commit sha; every commit listed under one instrument id is treated as that instrument. A commit absent from this file is its own instrument, which is the safe default: silence never merges anything.",
+  "_why": "C8's claim is that one instrument measured every column, so the only thing differing between two columns is the gateway. The commit sha is a PROXY for the instrument, and it is a loose one in exactly one direction: a commit can change while the instrument does not (a gateway's own config, a test, a workflow). Failing those is a false positive that costs a full field re-run for no gain in truth. The proxy is never loose the other way, so this file can only ever excuse a difference the binaries prove is not there.",
+  "_evidence_rule": "An entry is only admissible with BUILT-ARTIFACT evidence: build the shipped binaries at each commit and record their hashes. Identical bytes out of a reproducible build is proof, not argument. Do NOT add an entry reasoned from a diff - 'this looks test-only' is how a real instrument change gets waved through. If the binaries differ, the commits are different instruments and the field re-runs.",
+  "instruments": [
+    {
+      "id": "otb-1fc78d7c",
+      "commits": [
+        "dd26a545026be44a0c38589242859138df05b2eb",
+        "8d742122630fb6cf66ea37969cf50469c8affde9"
+      ],
+      "reason": "The 14-box field ran on dd26a54. Plano failed to boot on it for two config reasons, and 8d74212 fixes plano's own config, corrects plano's matrix, adds tests, and wires an existing test into CI. Re-running the other thirteen to move a gateway config file would have changed no measurement.",
+      "evidence": {
+        "method": "cargo build --release --bin otb at each commit in a clean worktree, plus the mock-arm64 asset that bench-rig rebuilt from 8d74212, compared against the hash the running boxes recorded",
+        "otb_release_sha256": {
+          "dd26a545026be44a0c38589242859138df05b2eb": "1fc78d7c1e62db459e666e69b2bab4325c17ec385417b1f60cd603078f289631",
+          "8d742122630fb6cf66ea37969cf50469c8affde9": "1fc78d7c1e62db459e666e69b2bab4325c17ec385417b1f60cd603078f289631"
+        },
+        "mock_arm64_sha256": {
+          "recorded_by_boxes_on_dd26a54": "9a1c7b0e10f846602cf0e19a96f2d1e4a0e3f50b3b2634aa6786053a13cf9ab5",
+          "rebuilt_by_ci_from_8d74212": "9a1c7b0e10f846602cf0e19a96f2d1e4a0e3f50b3b2634aa6786053a13cf9ab5"
+        },
+        "verified_at": "2026-07-28T05:50:00Z"
+      }
+    }
+  ]
+}
