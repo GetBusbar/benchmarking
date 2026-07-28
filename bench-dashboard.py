@@ -54,13 +54,34 @@ def declared_served(gw):
 
 
 def fanout_logs():
+    """The per-gateway logs of the current fanout, keyed by gateway.
+
+    A GATEWAY IS ONE THAT EXISTS, not one whose name happens to be in a filename. The log name is
+    chosen by whoever launched the run, so an orchestration log - `fanout-validate-agentgateway.log`,
+    `fanout-rerun-searchfix.log`, `fanout-field-<sha>.log` - used to appear as its own row, reported
+    DONE with no cells, and read exactly like a gateway that finished measuring nothing. Four phantom
+    rows in a 14-gateway table is not a cosmetic problem: it is the status board saying something
+    about a gateway that does not exist.
+
+    Discovered against gateways/*/definition.json, which is the same source the engine and the site
+    use, so a name only appears here if there is something to measure.
+    """
     d = os.path.join(HERE, "results")
     if not os.path.isdir(d):
         return {}
+    gwdir = os.path.join(HERE, "gateways")
+    real = {
+        name
+        for name in os.listdir(gwdir)
+        if os.path.isfile(os.path.join(gwdir, name, "definition.json"))
+    } if os.path.isdir(gwdir) else set()
     out = {}
     for f in sorted(os.listdir(d)):
-        if f.startswith("fanout-") and f.endswith(".log"):
-            out[f[len("fanout-"):-len(".log")]] = os.path.join(d, f)
+        if not (f.startswith("fanout-") and f.endswith(".log")):
+            continue
+        name = f[len("fanout-"):-len(".log")]
+        if name in real:
+            out[name] = os.path.join(d, f)
     return out
 
 
