@@ -1,5 +1,5 @@
 # Build and deploy the results site to GitHub Pages.
-# gen-data.mjs scans gateways/*/gateway.sh + results/**/*.json, copies the chart PNGs and
+# gen-data.mjs scans gateways/*/definition.json + results/**/*.json, copies the chart PNGs and
 # bundled fonts into site/, and the finished site/ directory is the Pages artifact.
 name: pages
 

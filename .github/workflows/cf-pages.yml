@@ -10,7 +10,7 @@
 # dependency on render-charts.yml's timing (whose regenerated-PNG commit carries [skip ci] and
 # would otherwise leave the deployed charts a push behind).
 #
-# gen-data.mjs scans gateways/*/gateway.sh + results/**/*.json, copies the chart
+# gen-data.mjs scans gateways/*/definition.json + results/**/*.json, copies the chart
 # PNGs and bundled fonts into site/, and the finished site/ directory is the
 # artifact that wrangler uploads to Cloudflare Pages.
 #

@@ -197,28 +197,23 @@ def _mpl():
     return plt
 
 # ── the field is discovered from the manifests, nothing is hard-coded here ─────────────────────────
-# Each gateway is fully defined by its own dir: gateways/<key>/gateway.sh declares GW_DISPLAY (label),
-# GW_LANG (color bucket), and GW_REPO (linked from the name in the report table). Add a dir → it shows
+# Each gateway is fully defined by its own dir: gateways/<key>/definition.json declares display (label),
+# lang (color bucket), and repo (linked from the name in the report table). Add a dir → it shows
 # up in the charts/tables/run-lists; delete it → it's gone everywhere. A gateway only appears in a
 # chart once it also has a result file this run. Alphabetical by key, so no entrant is seated first;
 # order here is only load order, every chart + table sorts by the MEASURED value.
 def _manifest_meta():
     out = {}
-    for man in sorted((ROOT / "gateways").glob("*/gateway.sh")):
+    for man in sorted((ROOT / "gateways").glob("*/definition.json")):
         key = man.parent.name
-        txt = man.read_text()
-
-        def grab(var, default=""):
-            m = re.search(rf'^{var}=(.*)$', txt, re.M)
-            if not m:
-                return default
-            v = m.group(1).split("#", 1)[0].strip()          # drop trailing comment
-            return v.strip('"').strip("'").strip()
-
+        try:
+            d = json.loads(man.read_text())
+        except (OSError, ValueError):
+            d = {}
         out[key] = {
-            "display": grab("GW_DISPLAY", key),
-            "lang": grab("GW_LANG", "Other"),
-            "repo": grab("GW_REPO"),
+            "display": d.get("display") or key,
+            "lang": d.get("lang") or "Other",
+            "repo": d.get("repo") or "",
         }
     return out
 
@@ -1437,7 +1432,7 @@ def _report_md(rows: list, title: str, charts: list, pending: tuple = (), chart_
     lines.append("Method: added latency = gateway p99 − direct-to-mock p99 at concurrency 1; RPS "
                  "ceiling = highest sustained req/s with p99 < 1 s and <0.1% errors; RSS idle = after "
                  "first 200, peak = under sustained load. Same box, same mock, same load, one gateway "
-                 "at a time. Each gateway's source ref is pinned in its own `gateways/<name>/gateway.sh`; "
+                 "at a time. Each gateway's source ref is pinned in its own `gateways/<name>/definition.json`; "
                  "the built commit is in each row.")
     lines.append("")
     lines.append(f"<sub>Page + charts regenerated **{RENDER_TS}** from the raw `results/*.json`.</sub>")

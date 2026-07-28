@@ -40,14 +40,14 @@ exact build/commit measured, plus the charts below.
 - **Rust** (`cargo`) - builds the mock (`mock/`, a hyper server that answers all six wire protocols and sustains 100s of k RPS, so it's never the bottleneck), the engine (including its own `otb loadgen` load generator), plus the gateways compiled from source (LiteLLM-Rust, Helicone). Source builds also need `cmake`, `clang`, and `protobuf-compiler`.
 - **Docker** - for the container-based gateways (Bifrost, Kong, GoModel, One-API, …).
 - **Python 3 + matplotlib** - draws the charts (`pip install matplotlib`). Optional; JSON results are written either way.
-- Docker. Every gateway pulls its own pinned official image on first run; the pin lives in that gateway's own `gateways/<name>/gateway.sh`. A few build from pinned source because no arm64 image exists - each says so in its own manifest header.
+- Docker. Every gateway pulls its own pinned official image on first run; the pin lives in that gateway's own `gateways/<name>/definition.json`. A few build from pinned source because no arm64 image exists - each says so in its own manifest header.
 
 **To run the one-click cloud version** (`run-on-ec2.sh`) the *only* extra dependency is **AWS CLI v2**, configured (`aws configure` - creds + a default region). The script launches a fresh Graviton box, installs everything on it, runs the full suite, pulls the results back, and **terminates the box** - nothing to set up, nothing to clean up.
 
 ## Run it - one command, every metric
 
 Clone, then run one script. Everything is at the repo root, and **every gateway provisions itself**
-from the ref pinned in its own [`gateways/<name>/gateway.sh`](gateways/) - Docker images, pip, source,
+from the ref pinned in its own [`gateways/<name>/definition.json`](gateways/) - Docker images, pip, source,
 or (for a native gateway) its released image's binary. Nothing to fetch by hand for any of them.
 
 ```sh
@@ -82,7 +82,7 @@ One-API to its arm64 tag), so nothing is quietly arm64-only or x86-only.
 
 A gateway that can't be stood up (unreachable, or needs infra a single container can't provide) is
 recorded `served: false` and shown as such - never silently dropped. To pin a different build of any
-gateway, edit the pin in its own `gateways/<name>/gateway.sh` (or override the env var); the exact ref
+gateway, edit the pin in its own `gateways/<name>/definition.json` (or override the env var); the exact ref
 is stamped into every result.
 
 ### How long it takes
