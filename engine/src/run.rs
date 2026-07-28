@@ -1312,12 +1312,77 @@ pub fn sweep_streams_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> Cel
             fps: Measurement::Measured(0.0),
             points: p.points,
         },
+        // CONFIRMED, for the same reason the sustained ceiling is: `bisect_ceiling` walks up until ONE
+        // window fails, so it lands exactly on the boundary - the highest concurrency that passed
+        // once. Re-measuring the sustained ceilings of the 2026-07-28 run found 9 of 48 held their
+        // gate in only 1 of 3 windows. This gate is STRICTER (every expected frame must arrive, no
+        // stalls), so a boundary rung here is if anything more likely to be marginal, and nothing was
+        // re-measuring it at all.
         Some(c) => match p.points.iter().find(|pt| pt.concurrency == c).map(|pt| pt.fps) {
-            Some(v) => CellStreams {
-                concurrency: Measurement::Measured(c),
-                fps: Measurement::Measured(v),
-                points: p.points,
-            },
+            Some(v) => {
+                let mut ceiling = c;
+                let mut first_fps = v;
+                let mut winner: Option<(u32, f64)> = None;
+                for _ in 0..MAX_CEILING_STEPDOWNS {
+                    let mut held = 1usize; // the bisection's own winning window is a real vote
+                    let mut total = 1usize;
+                    let mut rates = vec![first_fps];
+                    for _ in 1..crate::search::WINDOWS_PER_RUNG {
+                        let Some(w) = stream_window(cfg.gateway_addr, &p.path, &p.body, &p.headers, ceiling) else {
+                            continue;
+                        };
+                        let passed = streams_gate_passes(&w);
+                        p.points.push(point_of(&w, passed));
+                        total += 1;
+                        if passed {
+                            held += 1;
+                            rates.push(w.fps());
+                        }
+                    }
+                    if held * 2 > total {
+                        // The published rate is the median of the windows that HELD, matching how
+                        // every other repeated measurement in this engine reports.
+                        rates.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                        let fps = crate::search::nearest_rank_median(&rates).unwrap_or(first_fps);
+                        winner = Some((ceiling, fps));
+                        break;
+                    }
+                    let next = ceiling / 2;
+                    if next < lo.max(1) || next == ceiling {
+                        break;
+                    }
+                    eprintln!(
+                        "streams: c={ceiling} held the gate in only {held} of {total} windows - stepping down to c={next}"
+                    );
+                    ceiling = next;
+                    match stream_window(cfg.gateway_addr, &p.path, &p.body, &p.headers, ceiling) {
+                        Some(w) => {
+                            let passed = streams_gate_passes(&w);
+                            p.points.push(point_of(&w, passed));
+                            first_fps = w.fps();
+                        }
+                        None => break,
+                    }
+                }
+                match winner {
+                    Some((conc, fps)) => CellStreams {
+                        concurrency: Measurement::Measured(conc),
+                        fps: Measurement::Measured(fps),
+                        points: p.points,
+                    },
+                    None => CellStreams {
+                        concurrency: Measurement::absent(Absent::NotMeasured),
+                        fps: Measurement::absent_because(
+                            Absent::NotMeasured,
+                            format!(
+                                "the bisection proved c={c}, but that concurrency did not hold the stream gate \
+                                 on re-measurement and stepping down found none that did within {MAX_CEILING_STEPDOWNS} attempts"
+                            ),
+                        ),
+                        points: p.points,
+                    },
+                }
+            }
             // The search memoises every probe, so the winning rung is always in hand; if it somehow
             // were not, the ceiling publishes with an unmeasured rate rather than an invented one.
             None => CellStreams {
@@ -2652,5 +2717,31 @@ while True:
             steps += 1;
         }
         assert!(c < 252 / 8, "four halvings must reach well below the failing ceiling, got {c}");
+    }
+
+    // BOTH GATE SEARCHES CONFIRM THEIR CEILING, or neither claim is worth more than one window.
+    //
+    // `bisect_ceiling` is used twice - sustained throughput and concurrent streams - and both publish
+    // its answer. It walks up until ONE window fails, so it lands on the boundary by construction.
+    // The sustained ceilings of the 2026-07-28 run held their gate in 1 of 3 windows on 9 of 48
+    // cells; the stream ceiling was never re-measured at all, and its gate is STRICTER (every
+    // expected frame, no stalls), so a boundary rung there is if anything more marginal.
+    #[test]
+    fn every_bisected_ceiling_is_confirmed_before_it_is_published() {
+        // Both call sites must re-measure. Asserted against the source, because the alternative is a
+        // live gateway and the property is structural: a `bisect_ceiling` result that reaches a
+        // published field without confirmation is the defect.
+        let src = include_str!("run.rs");
+        let confirmations = src.matches("held * 2 > total").count();
+        assert!(
+            confirmations >= 2,
+            "found {confirmations} majority-confirmation sites; sweep_sustained_cell and \
+             sweep_streams_cell must each confirm their bisected ceiling"
+        );
+        // And each must be able to give up rather than publish an unconfirmed answer.
+        assert!(
+            src.matches("did not hold").count() >= 2,
+            "both ceilings must be able to report absent when nothing confirms"
+        );
     }
 }
