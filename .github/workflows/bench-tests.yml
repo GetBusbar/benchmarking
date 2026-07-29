@@ -18,6 +18,20 @@ on:
       - "gateways/**"
       - "lib/**"
       - "run-on-ec2.sh"
+      # The audit gate's own subjects. Without these, an edit that broke bench-audit.py (the exact
+      # wrong-key-path class its header describes) or a results push that violated every invariant
+      # never triggered the job that exists to catch it - the same paths-as-decoration defect the
+      # rig-delivery job below documents for itself.
+      - "bench-audit.py"
+      - "bench-audit_test.py"
+      - "bench-dashboard.py"
+      - "bench-dashboard_test.py"
+      - "bench-cost.py"
+      - "results/**"
+      # The audit parses site/check-consistency.mjs to prove the two copies of C6_GROSS_PCT still
+      # agree. Without this path, the ONE pull request that cross-check exists for - a tune of the
+      # JS side alone - would not run it.
+      - "site/check-consistency.mjs"
       - ".github/workflows/bench-tests.yml"
   pull_request:
     paths:
@@ -31,6 +45,20 @@ on:
       - "gateways/**"
       - "lib/**"
       - "run-on-ec2.sh"
+      # The audit gate's own subjects. Without these, an edit that broke bench-audit.py (the exact
+      # wrong-key-path class its header describes) or a results push that violated every invariant
+      # never triggered the job that exists to catch it - the same paths-as-decoration defect the
+      # rig-delivery job below documents for itself.
+      - "bench-audit.py"
+      - "bench-audit_test.py"
+      - "bench-dashboard.py"
+      - "bench-dashboard_test.py"
+      - "bench-cost.py"
+      - "results/**"
+      # The audit parses site/check-consistency.mjs to prove the two copies of C6_GROSS_PCT still
+      # agree. Without this path, the ONE pull request that cross-check exists for - a tune of the
+      # JS side alone - would not run it.
+      - "site/check-consistency.mjs"
       - ".github/workflows/bench-tests.yml"
   workflow_dispatch:
 
@@ -101,6 +129,10 @@ jobs:
       - uses: actions/checkout@v4
       - name: Every audit check can fail (and does not fail a clean cell)
         run: python3 bench-audit_test.py
+      # The dashboard's test ran NOWHERE until this line - a test nothing executes reads as covered
+      # (this file's own words, one job down).
+      - name: Dashboard self-test
+        run: python3 bench-dashboard_test.py
       # Runs against the newest engine's committed snapshots, so a board that violates an invariant
       # is red until it is re-measured. Expected to be red on any board published before the engine
       # stopped discarding the p99 of its own throughput windows.

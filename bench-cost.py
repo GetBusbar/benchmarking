@@ -12,16 +12,31 @@
 #   ./bench-cost.py                 every gateway on the newest engine
 #   ./bench-cost.py agentgateway    one gateway
 #   ./bench-cost.py --engine 8f2af5d   a specific engine, to compare two runs
+#
+# Runnable from any directory, and pinned to ONE engine, for the same two reasons bench-audit is: see
+# the notes on `_audit` and on the default `engine` in main().
 import collections
-import glob
+import importlib.util
 import json
+import os
 import sys
+
+# ONE DECLARATION OF "WHERE THE SNAPSHOTS ARE" AND "WHICH ENGINE IS CURRENT", BORROWED RATHER THAN
+# RETYPED. Both facts already live in bench-audit.py, which is the tool whose whole job is to be right
+# about the board; a second copy here would be a second thing to keep in step, and the ledger already
+# has an entry (TOOL-02) about what happens to a rule that exists twice. The import is by path because
+# the filename is hyphenated, and it is side-effect free: bench-audit's argparse lives under
+# `if __name__ == "__main__"`.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_SPEC = importlib.util.spec_from_file_location("bench_audit", os.path.join(_HERE, "bench-audit.py"))
+_audit = importlib.util.module_from_spec(_SPEC)
+_SPEC.loader.exec_module(_audit)
 
 
 def newest_snapshots(gw_filter=None, engine=None):
     """The newest snapshot per gateway, optionally pinned to an engine prefix."""
     by_gw = {}
-    for f in sorted(glob.glob("results/snapshots/result_*.json")):
+    for f in _audit.snapshot_paths():
         try:
             d = json.load(open(f))
         except Exception:
@@ -41,14 +56,32 @@ def main():
     engine = None
     if "--engine" in args:
         i = args.index("--engine")
+        if i + 1 >= len(args):
+            print("--engine needs a commit prefix", file=sys.stderr)
+            return 1
         engine = args[i + 1]
         del args[i : i + 2]
     gw_filter = args[0] if args else None
 
+    # DEFAULT TO ONE ENGINE, because the header of this file promises "every gateway on the newest
+    # engine" and the code used to leave `engine` as None, which means "every gateway's newest
+    # snapshot, whatever engine produced it". Those differ the moment a rerun covers part of the
+    # field: the per-group shares, the "slowest groups" ranking and every "halving it saves N minutes"
+    # line would then be arithmetic over two different engines' timings, presented as one run's cost
+    # profile. The whole point of this tool is to answer "what got slower", and mixing engines is the
+    # one way to get a confident wrong answer to it. Same recency rule bench-audit uses (the
+    # snapshot's own measured_at, not filename order), from the same function.
+    if engine is None:
+        engine = _audit.newest_engine()
+        if engine is None:
+            print("no snapshot carries an engine commit - nothing to attribute cost to", file=sys.stderr)
+            return 1
+
     snaps = newest_snapshots(gw_filter, engine)
     if not snaps:
-        print("no snapshots matched", file=sys.stderr)
+        print(f"no snapshots on engine {engine}", file=sys.stderr)
         return 1
+    print(f"engine {engine[:7]}  {len(snaps)} gateways\n")
 
     grand = collections.Counter()
     cells_seen = 0
