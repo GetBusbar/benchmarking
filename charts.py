@@ -565,6 +565,11 @@ CHARTS = [
         # MED-3: derived from the sustained@20ms ceiling - gate on the same mock-bound validity flag.
         served_field="rps_sustained_20ms_valid",
         not_served_text="✕ not measured (rig-limited / needs field run)",
+        # THE DEFAULT zero_text IS THE THROUGHPUT CHART'S, and it opens with a literal "0" - which on a
+        # dollar axis reads as a price of zero, the cheapest possible answer on a lower-is-better chart.
+        # This chart's absent rows are gateways whose cost is UNDEFINED because they sustained nothing,
+        # so the sentence says that and never shows a number.
+        zero_text="no cost per request: no load held p99 < 1 s",
     ),
     # ── streaming: what the gateway costs an SSE stream ───────────────────────────────────────────
     Chart(
@@ -874,7 +879,12 @@ def _perf_derived(obj: dict) -> None:
     sust = float(obj.get("rps_sustained_20ms") or 0)
     # sustained req/s you get per $/hr, and $ per 1M sustained requests. 0 when it can't sustain.
     obj["rps_per_dollar"] = (sust / GATEWAY_HOURLY_USD) if sust > 0 else 0
-    obj["cost_per_million_usd"] = (GATEWAY_HOURLY_USD / (sust * 3600) * 1e6) if sust > 0 else 0
+    # NOT `else 0`. At sust == 0 this quotient is undefined, and 0 is the CHEAPEST value on a
+    # lower-is-better chart - so the three gateways that held no load under the p99 gate rendered as
+    # free, the best possible result, while ranking last. `rps_per_dollar` above keeps its 0 because
+    # zero requests per dollar genuinely IS zero; cost per request of a gateway that served nothing is
+    # an absence, and the board's rule is that 0 is a number and n/a is not.
+    obj["cost_per_million_usd"] = (GATEWAY_HOURLY_USD / (sust * 3600) * 1e6) if sust > 0 else None
 
 
 def _proj_perf(key: str) -> dict | None:
@@ -1442,6 +1452,13 @@ def _report_md(rows: list, title: str, charts: list, pending: tuple = (), chart_
         # harness could not certify as gateway-limited; 0 = served but no tested load held p99<1s.
         if served is False:
             return "✕"
+        # NEITHER SERVED NOR NOT-SERVED. `served` is None on a row assembled from a memory record with no
+        # perf record beside it, and that fell through to `not val` and printed a bare "0" - a measured
+        # zero for a gateway whose throughput was never measured at all. The three states this column
+        # can be in are "served and this is the number", "served and nothing held the gate" (a real 0),
+        # and "there is no perf record here"; only the middle one is a zero.
+        if served is None:
+            return "-"
         if suppressed:
             return "⚠ rig-limited"
         if not val:
