@@ -268,7 +268,16 @@ const gateways = gatewayKeys.map((key) => {
     // render site has no ungated field to leak. The cell's `source` stamp discloses provenance and
     // drives every caption (no hard-coded source string can drift). See seal.mjs / Design E.
     const build = g.matrix.build ?? null, at = g.matrix.measured_at ?? null;
-    // Per-cell perf (matrix v2 + sweep): the gateway's BEST green diagonal by sustained RPS @20ms.
+    // Per-cell perf (matrix v2 + sweep): the gateway's OPENAI diagonal when it serves one, else the
+    // lowest-added-p99 diagonal it does serve. NOT "best by sustained RPS @20ms", which this comment
+    // claimed and `bestCell` has never done - it takes the openai cell unconditionally and only ranks
+    // when there is none.
+    //
+    // And that is the right rule, which is why the CODE stayed and the labels changed: comparing every
+    // gateway on the SAME cell is fairer than comparing each on whichever cell flatters it most. But
+    // three chart subtitles said "best same-dialect passthrough", and for apisix, agentgateway and
+    // plano the openai diagonal is not their best one (apisix's openai-responses cell sustains 5.7%
+    // more), so the word "best" was false on the board even though the number beside it was right.
     const bc = bestCell(g.matrix);
     if (bc) g.best_cell = sealPerfCell(bc, { ingress: bc.dialect, egress: bc.dialect, dialect: bc.dialect },
       makeSource("matrix", SWEEP.DIAGONAL, build, at), bc.absences);
