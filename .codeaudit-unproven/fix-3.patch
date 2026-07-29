@@ -1,0 +1,47 @@
+diff --git a/bench-audit_test.py b/bench-audit_test.py
+index c1a56623..7ad4a4e7 100644
+--- a/bench-audit_test.py
++++ b/bench-audit_test.py
+@@ -416,6 +416,42 @@ def main():
+         finally:
+             audit.HERE = old_here
+ 
++    # The row/column -> dialect-name mapping used by check_declaration_matches_what_we_measured is a
++    # hardcoded positional list (bench-audit.py:570), with no cross-check against the engine's own
++    # canonical order (`Dialect::ALL`, engine/src/ingress.rs) - unlike this file's other two
++    # cross-language constants (check_c6_bar_agrees_with_the_site,
++    # check_absence_fields_mirror_the_engine), which both parse the engine source to catch drift.
++    #
++    # RED: if the engine's axis order ever put a different dialect in position 0 (it has migrated
++    # before, and nothing here would notice if it did again), a manifest whose matrix declares that
++    # position's diagonal cell AND marks the correctly-named cell untestable is a real
++    # declare+untestable collision - the exact thing this check exists to catch. But because the
++    # python list is hardcoded to today's order, it mislabels the position and the collision never
++    # intersects, so the check goes silently quiet on a real violation instead of firing.
++    with isolated(failures, "per-gateway: declared+untestable survives a reordered dialect axis"):
++        tmp = tempfile.mkdtemp()
++        old_here = audit.HERE
++        try:
++            os.makedirs(os.path.join(tmp, "gateways", "reordered"))
++            with open(os.path.join(tmp, "gateways", "reordered", "definition.json"), "w") as fh:
++                json.dump({
++                    # Position (0, 0) declared capable - today's hardcoded list reads that as
++                    # "openai/openai", but if the engine's Dialect::ALL ever led with anthropic
++                    # instead, position (0, 0) IS "anthropic/anthropic".
++                    "matrix": ["100000", "000000", "000000", "000000", "000000", "000000"],
++                    "untestable": ["anthropic/anthropic"],
++                }, fh)
++            audit.HERE = tmp
++            fired = list(audit.check_declaration_matches_what_we_measured("reordered"))
++            if not fired:
++                failures.append(
++                    "check_declaration_matches_what_we_measured missed a real declared+untestable "
++                    "collision because its dialect-position mapping is hardcoded rather than "
++                    "cross-checked against the engine's Dialect::ALL order - a reordered axis makes "
++                    "this check go quiet on a real violation instead of firing")
++        finally:
++            audit.HERE = old_here
++
+     for f in failures:
+         print(f"FAIL: {f}")
+     if failures:

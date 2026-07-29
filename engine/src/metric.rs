@@ -462,6 +462,30 @@ fn steady_is_believable(samples_before: usize, samples_now: usize) -> bool {
     samples_now > samples_before
 }
 
+/// Has the series existed long enough for a steadiness verdict to MEAN anything?
+///
+/// `stats::window` selects by timestamp - everything at or after `last.t_s - window_s` - so a series
+/// only six seconds long yields a "sixty second window" holding six seconds of data. `plateau_check`'s
+/// own `n < 4` guard cannot catch that: this sampler takes ten readings a second, so six seconds is
+/// sixty samples, comfortably past four.
+///
+/// It then judges those six seconds against `MEMORY_TREND_PCT` and `MEMORY_RANGE_PCT`, thresholds
+/// chosen for a full minute, and a gateway still climbing slowly barely drifts across six seconds. So
+/// the FIRST load window could come back Steady, break the loop, and publish a steady state the
+/// gateway had not reached - understating its peak with a reading taken before it stopped moving.
+///
+/// Kept OUT of `plateau_check`, which is a general statistic with other callers and its own tests
+/// asserting that four samples suffice to judge. What is specific to this loop is the decision to
+/// STOP, and that is the decision that must not be made early.
+///
+/// Deliberately separate from `steady_is_believable`: the two answer different questions and demand
+/// opposite responses. A series that stopped GROWING means the sampler is gone and the whole group is
+/// void; a series that is merely too SHORT means keep measuring. Folding them together would abort a
+/// perfectly healthy cell on its first window.
+fn window_is_long_enough(span_s: f64) -> bool {
+    span_s >= MEMORY_PLATEAU_WINDOW_S
+}
+
 /// The unsettled SHAPE as a number, because the metric surface carries `f64` and nothing else.
 ///
 /// 1 climbing, 0 oscillating, -1 falling. Signed on purpose: the sign IS the direction, so a reader
@@ -725,8 +749,16 @@ impl Metric for Memory {
             );
             // A STEADY VERDICT OFF A SERIES THAT DID NOT GROW IS THE SAMPLER'S DEATH, NOT THE
             // GATEWAY'S CALM. See `steady_is_believable`.
+            let span = taken.last().map(|s| s.t_s).unwrap_or(0.0)
+                - taken.first().map(|s| s.t_s).unwrap_or(0.0);
             let grew = steady_is_believable(samples_before, taken.len());
             samples_before = taken.len();
+            // TOO SOON TO BELIEVE IT. Not a failure and not the gateway's answer - just a window that
+            // has not lasted long enough for `plateau_check`'s thresholds to mean what they were chosen
+            // to mean. Keep loading. See `window_is_long_enough`.
+            if matches!(verdict, crate::stats::Verdict::Steady) && !window_is_long_enough(span) {
+                verdict = crate::stats::Verdict::Undecidable;
+            }
             if matches!(verdict, crate::stats::Verdict::Steady) && !grew {
                 eprintln!(
                     "memory: the RSS series stopped growing at {} samples while the load window was \
@@ -1119,7 +1151,11 @@ impl Metric for Streaming {
         //
         // It is cheap, which is the part I had wrong when I called it a cost decision. A TTFT sample
         // does not need the whole stream - `post_json_sse` takes a frame budget, and a budget of ONE
-        // returns the moment the first token lands. That is milliseconds, not the ~1.3s a full
+        // returns on the first EVENT. Not the first token: `SseBudget::Events(1)` counts events, and a
+        // dialect that opens with scaffolding (openai sends a role delta, anthropic a `message_start`)
+        // satisfies it before any content arrives. What this measures is therefore time-to-first-EVENT,
+        // which is the honest name for it - and it is the same quantity on both legs, so the difference
+        // still isolates what the gateway added. That is milliseconds, not the ~1.3s a full
         // 64-frame paced stream takes. `STREAM_TTFT_SAMPLES` of them per leg is well under a second.
         //
         // Percentile per leg, THEN differenced - the same shape `AddedLatency` publishes for the
@@ -1745,6 +1781,31 @@ mod tests {
             !series.sweep_cpu_fps.is_empty(),
             "sweep_cpu_fps was dropped"
         );
+    }
+
+    // A SIX-SECOND WINDOW CANNOT SETTLE A SIXTY-SECOND QUESTION.
+    //
+    // `stats::window` selects by timestamp, so a series only six seconds long yields a "sixty second
+    // window" holding six seconds of data - and `plateau_check`'s `n < 4` guard waves it through,
+    // because at ten readings a second six seconds is sixty samples. Those six seconds were then
+    // judged against thresholds chosen for a full minute, and a gateway still climbing slowly barely
+    // drifts across six seconds, so the FIRST load window could declare a plateau and publish a steady
+    // state the gateway had not reached.
+    #[test]
+    fn a_plateau_verdict_needs_a_window_that_actually_lasted() {
+        assert!(
+            !super::window_is_long_enough(6.0),
+            "six seconds cannot answer a question posed over sixty"
+        );
+        assert!(
+            !super::window_is_long_enough(super::MEMORY_PLATEAU_WINDOW_S - 0.1),
+            "just short is still short: the thresholds were chosen for the full span"
+        );
+        assert!(
+            super::window_is_long_enough(super::MEMORY_PLATEAU_WINDOW_S),
+            "the full window is exactly what the thresholds were calibrated on"
+        );
+        assert!(super::window_is_long_enough(300.0), "and longer is fine");
     }
 
     // A DEAD SAMPLER MUST NOT READ AS A SETTLED GATEWAY.

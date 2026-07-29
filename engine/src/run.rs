@@ -1264,6 +1264,13 @@ pub fn stream_pacing_interval_ms() -> u64 {
     std::env::var("MOCK_STREAM_INTERVAL_MS")
         .ok()
         .and_then(|v| v.trim().parse().ok())
+        // A PACE OF ZERO IS NOT A PACE. A parsed 0 drove `stall_bound_us()` to 0, which makes EVERY
+        // inter-frame gap - including a gap of nothing - count as a stall, so both stream metrics fail
+        // on every rung of every cell and the board reads it as the gateway going quiet. The mock
+        // refuses 0 too (`chunks.max(1)` and a sleep it never takes), so the two sides would not even
+        // agree about what zero meant. Rejected in favour of the default, which is what an unset
+        // variable already gets.
+        .filter(|v| *v > 0)
         .unwrap_or(20)
 }
 /// The stall bound as a multiple of the mock's pacing interval: a gap past this is a stream that
@@ -2622,6 +2629,46 @@ mod tests {
         assert!(
             streams.is_power_of_two(),
             "the ladder doubles, so a ceiling off the ladder is never actually reached: {streams}"
+        );
+    }
+
+    // A PACING INTERVAL OF ZERO WOULD FAIL EVERY STREAM ON THE BOARD.
+    //
+    // `stall_bound_us()` is this interval times STREAM_STALL_MULTIPLIER, so a parsed 0 makes the stall
+    // bound 0 and EVERY inter-frame gap counts as a stall - including a gap of nothing. Both stream
+    // metrics would then fail on every rung of every cell, and the artifact would read that as thirteen
+    // gateways going quiet rather than as one bad environment variable.
+    #[test]
+    fn a_zero_pacing_interval_is_refused_in_favour_of_the_default() {
+        // Driven through the parse+filter chain this function uses, since the function itself reads a
+        // process-global the test suite shares.
+        let read = |raw: &str| -> u64 {
+            raw.trim()
+                .parse::<u64>()
+                .ok()
+                .filter(|v| *v > 0)
+                .unwrap_or(20)
+        };
+        assert_eq!(
+            read("0"),
+            20,
+            "zero is not a pace and must fall back to the default"
+        );
+        assert_eq!(read("  0  "), 20, "including with whitespace around it");
+        assert_eq!(read("40"), 40, "a real value is still honoured");
+        assert_eq!(
+            read(" 40 "),
+            40,
+            "and still trimmed, matching the mock's own reader"
+        );
+        assert_eq!(
+            read("nonsense"),
+            20,
+            "and an unparseable value still defaults"
+        );
+        assert!(
+            super::stream_pacing_interval_ms() > 0,
+            "the live reader can never return zero"
         );
     }
 

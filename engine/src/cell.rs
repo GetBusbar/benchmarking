@@ -134,7 +134,14 @@ pub enum Skipped {
 pub struct CellOutcome {
     pub id: CellId,
     pub served: Served,
-    /// Present only when the cell was measurable AND the suite had time for it.
+    /// Why this cell carries NO measurements - present exactly when it was not measured, and absent
+    /// when it was.
+    ///
+    /// The doc here used to read "present only when the cell was measurable AND the suite had time for
+    /// it", which is the opposite of what the field means and would lead a reader to treat every
+    /// measured cell as skipped and every skipped one as measured. It also referred to a suite
+    /// wall-clock that no longer exists: `Skipped::SuiteDeadline` was removed once it turned out
+    /// nothing ever tracked elapsed suite time or could emit it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub skipped: Option<Skipped>,
     /// Free-text evidence for a reader: the probe's own words about what it saw.

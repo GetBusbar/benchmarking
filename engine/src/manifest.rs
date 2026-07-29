@@ -989,6 +989,30 @@ impl Manifest {
             out.push(format!("definition.json: {e}"));
         }
 
+        // A HEADER LINE WITH NO COLON IS SILENTLY NEVER SENT.
+        //
+        // `headers_for` parses each declared line with `resolved.split_once(':')` and no else arm, so a
+        // line missing its colon - "x-api-key bench-token" instead of "x-api-key: bench-token" - is
+        // dropped without a word. The gateway is then measured WITHOUT a header its own manifest
+        // declared: it may answer 401 on every probe and publish as a gateway that serves nothing,
+        // which is indistinguishable from one that genuinely does not. Caught here, at validate time,
+        // for the same reason the template checks below are: before the box-hours are spent.
+        for (label, line) in
+            self.headers
+                .iter()
+                .map(|l| ("headers".to_string(), l))
+                .chain(self.egress_headers.iter().flat_map(|(eg, ls)| {
+                    ls.iter().map(move |l| (format!("egress_headers[{eg}]"), l))
+                }))
+        {
+            if !line.contains(':') {
+                out.push(format!(
+                    "{label}: header {line:?} has no colon, so it would be dropped and never sent - \
+                     write it as it appears on the wire, \"Name: value\""
+                ));
+            }
+        }
+
         // A BUILD SCRIPT THAT IS DECLARED BUT NOT THERE.
         //
         // `validate` checks config templates, not this: a declared build script that does not exist
@@ -1412,6 +1436,38 @@ pub(crate) fn test_fixture() -> Manifest {
 
 #[cfg(test)]
 mod tests {
+    // A HEADER WITH NO COLON WOULD NEVER REACH THE WIRE, SILENTLY.
+    //
+    // `headers_for` splits each declared line on ':' with no else arm, so a line missing its colon is
+    // dropped without a word and the gateway is measured WITHOUT a header its own manifest declared.
+    // A gateway missing its auth header answers 401 on every probe and publishes as one that serves
+    // nothing - indistinguishable from a gateway that genuinely does not. `otb validate` reports a
+    // gateway ok whenever problems() is empty, so this had to become a problem to be caught at all.
+    #[test]
+    fn a_header_line_without_a_colon_is_a_validate_problem() {
+        let dir = std::env::temp_dir();
+        let mut m = test_fixture();
+        m.headers = vec!["x-api-key bench-token".to_string()];
+        let found = m.problems(&dir);
+        assert!(
+            found
+                .iter()
+                .any(|p| p.contains("no colon") && p.contains("x-api-key")),
+            "a colonless header must be reported, got: {found:?}"
+        );
+
+        // The wire-shaped form is fine, and so is a value that itself contains a colon (a URL).
+        m.headers = vec![
+            "x-api-key: bench-token".to_string(),
+            "x-base-url: http://127.0.0.1:8000".to_string(),
+        ];
+        let found = m.problems(&dir);
+        assert!(
+            !found.iter().any(|p| p.contains("no colon")),
+            "a properly formed header must not be reported, got: {found:?}"
+        );
+    }
+
     use super::*;
     use std::time::Duration;
 
