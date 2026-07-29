@@ -380,7 +380,10 @@ mod tests {
     fn one_unknown_dialect_is_an_error_not_a_silently_smaller_grid() {
         let e = super::dialects_from(Some("openai,anthorpic"))
             .expect_err("a misspelled dialect must not be dropped in silence");
-        assert!(e.contains("anthorpic"), "the error must name the rejected value: {e}");
+        assert!(
+            e.contains("anthorpic"),
+            "the error must name the rejected value: {e}"
+        );
 
         // The all-bad case still errors, and a clean list still parses.
         assert!(super::dialects_from(Some("nope,also-nope")).is_err());
@@ -395,7 +398,10 @@ mod tests {
             vec![Dialect::Openai, Dialect::Anthropic]
         );
         // Unset still means the whole field.
-        assert_eq!(super::dialects_from(None).expect("unset"), Dialect::ALL.to_vec());
+        assert_eq!(
+            super::dialects_from(None).expect("unset"),
+            Dialect::ALL.to_vec()
+        );
     }
 
     use super::*;

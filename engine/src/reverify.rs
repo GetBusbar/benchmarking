@@ -650,7 +650,10 @@ mod tests {
                     let first_line = text.lines().next().unwrap_or("");
                     let body = text.rsplit("\r\n\r\n").next().unwrap_or("");
                     let json = if first_line.contains("/__mock/record") {
-                        recording.store(body.contains("\"on\":true"), std::sync::atomic::Ordering::SeqCst);
+                        recording.store(
+                            body.contains("\"on\":true"),
+                            std::sync::atomic::Ordering::SeqCst,
+                        );
                         "{}".to_string()
                     } else if first_line.contains("/__mock/reset") {
                         "{}".to_string()
@@ -767,12 +770,9 @@ mod tests {
         let mock_addr = fake_mock(std::sync::Arc::clone(&recording));
         let mut cfg = crate::run::test_fixture(gateway, mock_addr);
         cfg.model = "gpt-4o-mini".into();
-        cfg.egress_models = [(
-            "anthropic".to_string(),
-            "gpt-4o-mini-anthropic".to_string(),
-        )]
-        .into_iter()
-        .collect();
+        cfg.egress_models = [("anthropic".to_string(), "gpt-4o-mini-anthropic".to_string())]
+            .into_iter()
+            .collect();
 
         let _ = reverify_cell(&cfg, &CellId::new("openai", "anthropic"), Dialect::Openai);
 
