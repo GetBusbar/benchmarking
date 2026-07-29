@@ -1164,6 +1164,22 @@ impl SseReader {
                     }
                     None => self.pending = Some(data),
                 }
+                // THE ONE BUFFER `MAX_BODY_BYTES` DID NOT COVER.
+                //
+                // That cap guards `raw` and `body`, and both DRAIN INTO this one via `take_front` - so
+                // the bound did not transfer. A peer that sends `data:` lines and never the blank line
+                // that ends a frame grows `pending` for as long as the deadline allows, and this
+                // file's own note on the close-delimited path spells out where that goes: the
+                // allocator's failure handler calls abort() unconditionally, so it is not a panic the
+                // harness can catch, it is the whole run dying. Malformed rather than a new variant:
+                // an event stream with no frame boundary is exactly a framing fault of the peer's.
+                if self.pending.as_ref().map(String::len).unwrap_or(0) > MAX_BODY_BYTES {
+                    return Some(self.finish_with(SseEnd::Malformed(format!(
+                        "a single SSE frame exceeded the {MAX_BODY_BYTES} byte cap without a frame \
+                         boundary - the peer is sending data lines and never the blank line that ends \
+                         one"
+                    ))));
+                }
             } else if stripped.is_empty() {
                 self.flush_pending(elapsed_us);
                 if let Some(end) = self.budget_reached() {

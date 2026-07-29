@@ -139,7 +139,7 @@ impl GenStats {
         let p50 = Self::pct_of(&sorted, 0.50);
         let p99 = Self::pct_of(&sorted, 0.99);
         format!(
-            "rps={} fail={} p50={:.2} p99={:.2} p50us={} p99us={} ok={} rigrefused={} budgetexceeded={}",
+            "rps={} fail={} p50={:.2} p99={:.2} p50us={} p99us={} ok={} rigrefused={} budgetexceeded={} spawnfailed={}",
             self.rps(),
             self.fail,
             p50 as f64 / 1000.0,
@@ -152,7 +152,14 @@ impl GenStats {
             // the parent unable to tell its own port exhaustion from the gateway refusing - which is
             // the whole reason the count exists.
             self.rig_refused,
-            self.budget_exceeded
+            self.budget_exceeded,
+            // AND `spawn_failed`, for the same reason as the two above. The OS refusing a thread means
+            // the window never ran at the concurrency it claims - a RIG limit the parent's search must
+            // stop on rather than read as a turnover. The parent had a check for it
+            // (`if stats.spawn_failed` in run.rs) that could NEVER fire on this path: the flag stopped
+            // at this boundary and the parent hardcoded it to false, so a child that could not spawn
+            // its threads reported a perfectly ordinary window.
+            u8::from(self.spawn_failed)
         )
     }
 }
