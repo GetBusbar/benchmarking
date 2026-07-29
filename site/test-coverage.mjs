@@ -318,10 +318,28 @@ test("the popup reads the SAME chosen-cell values the table reads, for the same 
     assert.equal(cell.na, false, `${key} is displayable`);
     assert.ok(pop.includes(label), `the popup shows ${label}`);
   }
-  // The rig-limited and failed fields are na on the table, so the popup must omit their rows.
-  for (const label of ["Max proxy RPS", "Added latency p50"]) {
-    assert.ok(!pop.includes(label), `the popup must not show a row the table reads as n/a (${label})`);
-  }
+  // THE AGREEMENT IS "RENDERS CONTENT", NOT "IS NOT n/a" - the two came apart deliberately.
+  //
+  // `na` means "there is no number here", and two different states share it. A rig-limited value is
+  // absent and shows nothing on either surface. A MEASURED FAILURE is also `na` (0 ok, N fail: there
+  // is no latency to publish) but it is a result, and both surfaces render it in red with its
+  // counts. The popup used to drop it with the genuine absences, which is how a cell whose every
+  // metric was measured and failed printed "served, not measured on this cell" - a false claim about
+  // a cell we measured thoroughly.
+  //
+  // So the invariant is that the two surfaces agree about which rows carry content, and a failed
+  // row carries content on both.
+  const rigLimited = app.chooserPerfCell(STORY_GW, "rps_max_proxy", String, CUSTOM);
+  assert.equal(rigLimited.na, true, "the rig-limited field is absent");
+  assert.ok(!rigLimited.failed, "and it is an absence, not a measured failure");
+  assert.ok(!pop.includes("Max proxy RPS"), "so the popup omits it, exactly as the table shows nothing");
+
+  const failed = app.chooserPerfCell(STORY_GW, "added_latency_p50_us", String, CUSTOM);
+  assert.equal(failed.na, true, "a measured failure has no number");
+  assert.equal(failed.failed, true, "but it IS a result, not an absence");
+  assert.ok(pop.includes("Added latency p50"), "so the popup shows it, exactly as the table does");
+  assert.ok(pop.includes(failed.text), `the popup carries the same counts the table shows (${failed.text})`);
+  assert.ok(/failtext/.test(pop), "and marks it as a failure rather than printing it like a measurement");
 });
 
 test("a measured stream-sustain failure stays distinct from not-measured through metric() on both counts", () => {
