@@ -14,6 +14,7 @@ on:
       - ".cargo/config.toml"
       - "charts.py"
       - "charts_test.py"
+      - "charts_definitions_test.py"
       - "mock/**"
       - "gateways/**"
       - "lib/**"
@@ -26,12 +27,28 @@ on:
       - "bench-audit_test.py"
       - "bench-dashboard.py"
       - "bench-dashboard_test.py"
+      - "bench-dashboard_coverage_test.py"
       - "bench-cost.py"
+      - "bench-cost_test.py"
       - "results/**"
       # The audit parses site/check-consistency.mjs to prove the two copies of C6_GROSS_PCT still
-      # agree. Without this path, the ONE pull request that cross-check exists for - a tune of the
-      # JS side alone - would not run it.
+      # agree, and the `site` job's suites IMPORT it (its C1-C5 lints are pure exported functions,
+      # driven from site/test.mjs against both the real bundle and synthetic violating source).
+      # Without this path, the ONE pull request that cross-check exists for - a tune of the JS side
+      # alone - would not run it.
       - "site/check-consistency.mjs"
+      # The site suites' own subjects. site/test.mjs and site/test-coverage.mjs run in the `site`
+      # job below, which builds its own bundle from this checkout - so the surfaces they read
+      # (app.js), the envelope they read it through (seal.mjs), the producer that seals it
+      # (gen-data.mjs) and the suites themselves are all subjects of this gate. Without these lines
+      # a change to app.js alone - the file the whole board renders through - triggered NO job that
+      # runs a site test, which is the same paths-as-decoration defect the rig-delivery job below
+      # documents for itself.
+      - "site/app.js"
+      - "site/seal.mjs"
+      - "site/gen-data.mjs"
+      - "site/test.mjs"
+      - "site/test-coverage.mjs"
       - ".github/workflows/bench-tests.yml"
   pull_request:
     paths:
@@ -41,6 +58,7 @@ on:
       - ".cargo/config.toml"
       - "charts.py"
       - "charts_test.py"
+      - "charts_definitions_test.py"
       - "mock/**"
       - "gateways/**"
       - "lib/**"
@@ -53,12 +71,22 @@ on:
       - "bench-audit_test.py"
       - "bench-dashboard.py"
       - "bench-dashboard_test.py"
+      - "bench-dashboard_coverage_test.py"
       - "bench-cost.py"
+      - "bench-cost_test.py"
       - "results/**"
       # The audit parses site/check-consistency.mjs to prove the two copies of C6_GROSS_PCT still
-      # agree. Without this path, the ONE pull request that cross-check exists for - a tune of the
-      # JS side alone - would not run it.
+      # agree, and the `site` job's suites IMPORT it (its C1-C5 lints are pure exported functions,
+      # driven from site/test.mjs against both the real bundle and synthetic violating source).
+      # Without this path, the ONE pull request that cross-check exists for - a tune of the JS side
+      # alone - would not run it.
       - "site/check-consistency.mjs"
+      # The site suites' own subjects - see the push block above for why each one is here.
+      - "site/app.js"
+      - "site/seal.mjs"
+      - "site/gen-data.mjs"
+      - "site/test.mjs"
+      - "site/test-coverage.mjs"
       - ".github/workflows/bench-tests.yml"
   workflow_dispatch:
 
@@ -97,8 +125,9 @@ jobs:
           file target/aarch64-unknown-linux-musl/release/otb
 
   charts:
-    # Gates charts.py's validity/ranking rules directly (node site/test.mjs runs live in
-    # cf-pages.yml, so it is not duplicated here).
+    # Gates charts.py's validity/ranking rules directly. (The JS side is gated by the `site` job at
+    # the bottom of this file; it used to run ONLY in cf-pages.yml, which is why it was reachable
+    # only on a board that could be built.)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -110,6 +139,12 @@ jobs:
       # matplotlib needed (render() is not exercised).
       - name: Charts validity-gate test (streamcpu/sustained/TTFT gates + top-N ranking)
         run: python3 charts_test.py
+      # charts_test.py proves each honesty gate on the ONE lane where its defect happened; this one
+      # holds the CLASS, driving every Chart in CHARTS through the real _topn_keys. It shipped
+      # running nowhere, which is the failure mode this file keeps re-learning: the chart added
+      # tomorrow gets the same eligibility discipline only if something executes the check.
+      - name: Every chart definition obeys the same eligibility/ranking rules (class test)
+        run: python3 charts_definitions_test.py
 
   audit:
     # THE CROSS-METRIC INVARIANTS, AND THE PROOF THEY CAN FAIL.
@@ -133,6 +168,18 @@ jobs:
       # (this file's own words, one job down).
       - name: Dashboard self-test
         run: python3 bench-dashboard_test.py
+      # The coverage siblings: the fail-CLOSED served counter (the "10/8 served, ETA zero"
+      # regression), the phantom-gateway filter, the midnight-crossing clock, the phase-weighted
+      # early ETA. Written the same day as the dashboard fixes and, like the self-test above it,
+      # executed by nothing until this line.
+      - name: Dashboard coverage siblings (served counter, ETA clocks, fanout filter)
+        run: python3 bench-dashboard_coverage_test.py
+      # bench-cost.py's snapshot selection had no test at all, and every wrong answer it can give is
+      # silent - an older snapshot, another gateway's, or one from a different engine all render a
+      # plausible cost table. bench-cost.py was already a path trigger here while nothing ran its
+      # test, so this job triggered on the subject and then checked nothing about it.
+      - name: Cost-report snapshot selection (newest-per-gateway, gateway + engine filters)
+        run: python3 bench-cost_test.py
       # Runs against the newest engine's committed snapshots, so a board that violates an invariant
       # is red until it is re-measured. Expected to be red on any board published before the engine
       # stopped discarding the p99 of its own throughput windows.
@@ -162,3 +209,36 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: mock unit tests (request_shape_ok per dialect + routing)
         run: cargo test --manifest-path mock/Cargo.toml --tests
+
+  site:
+    # THE SITE SUITES, IN A JOB THAT ACTUALLY REACHES THEM.
+    #
+    # Both JS suites lived only in cf-pages.yml, behind `node site/gen-data.mjs`. On a cleared board
+    # (results/snapshots/ empty - a legitimate state, see render-charts.yml's own note) gen-data
+    # hard-fails with FRESHNESS FAILURE, the deploy job dies there, and `node site/test.mjs` is
+    # never reached. So the entire JS side of the board has been gating nothing: green cf-pages runs
+    # meant "the bundle built", and red ones meant "the bundle did not build" - in neither case did
+    # anyone learn whether the table, drawer, compare and charts still agree.
+    #
+    # Here they run with no bundle build in front of them. site/test.mjs runs gen-data ITSELF into a
+    # temp dir from this checkout, so it never needed the deploy's build to have happened; it was
+    # only ever ORDERED behind it. test-coverage.mjs needs no bundle at all - it drives the URL
+    # codec and the per-surface envelope readers directly - so it runs FIRST and reports even when
+    # the board cannot be built, which is exactly the case that used to report nothing.
+    #
+    # cf-pages keeps its own copy of test.mjs as the pre-deploy guard: that one must gate the thing
+    # being shipped. This job is what makes the suite gate the SOURCE.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      # No bundle required: enumerated URL-codec fixed points + one-envelope-one-story across
+      # table/drawer/popup/rank. Passes on an empty board, so it is the first thing to speak.
+      - name: Site coverage siblings (URL codec fixed points, one envelope one story)
+        run: node site/test-coverage.mjs
+      # Builds its own bundle from this checkout, then holds table == drawer == compare == charts
+      # and the C1-C5 structural invariants with their RED-before proofs.
+      - name: Consistency guard (table == drawer == compare == charts)
+        run: node site/test.mjs
