@@ -521,13 +521,24 @@ function bestCell(m) {
   const diag = [];
   for (const [egress, up] of Object.entries(m.upstreams)) {
     const cell = up && up.cells && up.cells[egress];        // ingress === egress
-    if (cell && cell.served === true && cell.perf && cell.perf.added_latency_p99_us != null)
+    // ADDED LATENCY RANKS THIS CHOICE; IT DOES NOT QUALIFY THE CELL.
+    //
+    // It used to be a precondition, and that quietly deleted whole rows. A gateway with a measured
+    // throughput curve but no c=1 latency reading produced NO best_cell, so its entire Peak row read
+    // n/a - while Same mode, which reads the cell directly, showed the same numbers fine. One-API
+    // published 40 rps @ c16 and Plano 85 @ c512 on the 2026-07-29 board and both vanished from Peak,
+    // which is the board disagreeing with itself about a cell it measured.
+    //
+    // A cell qualifies by having been SERVED and carrying perf. Latency then orders the candidates,
+    // and a cell without one sorts last rather than being struck from the list.
+    if (cell && cell.served === true && cell.perf)
       diag.push({ ingress: egress, egress, dialect: egress, ...cell.perf });
   }
   if (!diag.length) return null;
   const openai = diag.find((d) => d.dialect === "openai");
   if (openai) return openai;
-  return diag.reduce((a, b) => (b.added_latency_p99_us < a.added_latency_p99_us ? b : a));
+  const rank = (d) => (d.added_latency_p99_us == null ? Infinity : d.added_latency_p99_us);
+  return diag.reduce((a, b) => (rank(b) < rank(a) ? b : a));
 }
 
 // The gateway's TRANSLATION cell for the Translation tab: openai INGRESS (fixed fair input) translated
