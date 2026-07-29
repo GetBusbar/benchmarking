@@ -205,6 +205,30 @@ check("a cell position of 0 prints the position, not '-'", row["cells"], "0/36")
 
 bd.parse_progress = _orig_parse
 
+# ── render() must survive a stdout codec that cannot encode its glyphs ──────────────────────────────
+#
+# `render()` prints "·" (U+00B7) unconditionally on its summary line, with no stdout.reconfigure()
+# and no encoding safeguard anywhere in the file. That is fine on an interactive UTF-8 terminal, but a
+# cron job, a minimal container, or a plain `> log.txt` redirection under LANG=C/LC_ALL=C/
+# PYTHONIOENCODING=ascii gives Python an ASCII stdout encoder, and the very first refresh cycle raises
+# UnicodeEncodeError and kills the live monitor mid-run.
+import subprocess
+
+_render_script = (
+    "import importlib.util\n"
+    f"spec = importlib.util.spec_from_file_location('bd', {os.path.join(HERE, 'bench-dashboard.py')!r})\n"
+    "bd = importlib.util.module_from_spec(spec)\n"
+    "spec.loader.exec_module(bd)\n"
+    "bd.render([])\n"
+)
+_env = dict(os.environ)
+_env["PYTHONIOENCODING"] = "ascii"
+_env.pop("LANG", None)
+_env.pop("LC_ALL", None)
+_proc = subprocess.run([sys.executable, "-c", _render_script], env=_env, capture_output=True, text=True)
+check("render() does not crash when stdout cannot encode non-ASCII glyphs (PYTHONIOENCODING=ascii)",
+      _proc.returncode, 0)
+
 if _fail == 0:
     print("all bench-dashboard tests passed")
     sys.exit(0)
