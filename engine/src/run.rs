@@ -1207,6 +1207,13 @@ pub struct StreamWindow {
     pub errored: u64,
     /// EVERY SSE event dispatched, across every lane. What `fps` is computed from, and what anything
     /// asking "did this stream at all" wants.
+    ///
+    /// MAY EXCEED `expected_frames`, and that is not a surplus of tokens. Each lane reads until its
+    /// CONTENT budget is delivered (`http::SseBudget::Content`), so a gateway that inserts pings or
+    /// re-frames a translated stream spends more events than the mock's own layout would - which is
+    /// precisely the case the event-budgeted read used to publish as a delivery shortfall.
+    /// `expected_frames` stays the mock-shaped budget, because what it answers ("did it stream at
+    /// all", and the scale fps is read against) is unchanged by the gateway's framing style.
     pub frames: u64,
     pub expected_frames: u64,
     /// Of `frames`, the ones that carried MODEL OUTPUT, as the request's own dialect classifies them
@@ -1259,8 +1266,9 @@ impl StreamWindow {
     }
 }
 
-/// Whether one window holds the README's streams-sustained gate: nearly every expected frame
-/// arrived, no lane stalled past twice the mock's pace, and almost no stream failed outright.
+/// Whether one window holds the README's streams-sustained gate: EVERY expected content frame
+/// arrived, no lane stalled past `STREAM_STALL_MULTIPLIER` times the mock's pace, and almost no
+/// stream failed outright.
 ///
 /// A free function over plain counts, like `sustained_gate_passes`, so the one piece of judgement the
 /// whole search turns on can be pinned directly against fixed numbers rather than only through a
@@ -1316,7 +1324,7 @@ pub fn streams_gate_verdict(w: &StreamWindow) -> Option<String> {
     }
 }
 
-/// The stall bound in microseconds: twice the mock's own delta pacing.
+/// The stall bound in microseconds: `STREAM_STALL_MULTIPLIER` times the mock's own delta pacing.
 fn stall_bound_us() -> u64 {
     stream_pacing_interval_ms() * STREAM_STALL_MULTIPLIER * 1_000
 }
@@ -1362,6 +1370,11 @@ fn stream_errored(o: &crate::http::SseOutcome) -> bool {
     if o.frame_offsets_us.is_empty() {
         return true;
     }
+    // `EventCeilingReached` is deliberately NOT here. A lane that spent the whole event ceiling
+    // without delivering its content budget streamed perfectly well by every structural measure - it
+    // just did not deliver, which is the delivery clause's finding and shows up in the ratio. Calling
+    // it an errored stream would double-count one shortfall as two failures and blur the two halves
+    // of the README's gate that this function exists to keep apart.
     matches!(
         o.end,
         crate::http::SseEnd::ConnectionFailed(_)
@@ -1400,6 +1413,27 @@ pub fn stream_window(
     // The most content frames a lane's budget can hold: the budget minus what this dialect spends
     // before its first token. See `Dialect::stream_prelude_frames`.
     let content_budget = (budget as u64).saturating_sub(dialect.stream_prelude_frames());
+    // AND THE READ IS BUDGETED IN THOSE CONTENT FRAMES, not in events - which is what makes the
+    // denominator above safe to compare against.
+    //
+    // `content_budget` is a CONSTANT, computed from the MOCK's layout, while the numerator is
+    // measured on the GATEWAY's stream. Reading to a fixed number of EVENTS made every non-content
+    // event the gateway adds beyond the mock's own prelude displace exactly one content frame, so
+    // the ratio landed under `STREAM_MIN_DELIVERY_RATIO` (1.0, deliberate) at EVERY rung on a
+    // gateway that lost nothing: anthropic's real protocol sends `ping`s, a translation cell has the
+    // gateway re-emitting the stream with ITS own framing rather than the mock's, and a keepalive
+    // does the same. Same mistake `STREAM_STALL_MULTIPLIER` (2 -> 10) fixed on the other clause of
+    // this gate - a bound calibrated on the mock, applied to gateways that do not share its
+    // behaviour.
+    //
+    // Reading until the tokens arrive asks the question the metric is actually asking. A gateway
+    // that inserts framing simply spends more events on the same delivery. Bounded by
+    // `STREAM_EVENT_CEILING` (and by `STREAM_TIMEOUT` as before), and a lane that hits the ceiling
+    // short of its content is a REAL shortfall that still fails the gate on the count.
+    let lane_budget = crate::http::SseBudget::Content {
+        frames: content_budget,
+        event_ceiling: crate::metric::STREAM_EVENT_CEILING,
+    };
 
     // ONE TOKIO TASK PER LANE, NOT ONE OS THREAD.
     //
@@ -1439,7 +1473,7 @@ pub fn stream_window(
                     body.as_bytes(),
                     &headers,
                     crate::metric::STREAM_TIMEOUT,
-                    budget,
+                    lane_budget,
                     Some(dialect),
                 )
                 .await
@@ -1529,6 +1563,13 @@ pub struct StreamPoint {
     pub fps: f64,
     pub frames: u64,
     pub expected_frames: u64,
+    /// The two counts the DELIVERY clause is actually computed from. `frames`/`expected_frames` are
+    /// not: they count every SSE event, so a rung published with only those could not be re-derived
+    /// by a reader - and now that a lane reads to its content budget rather than to a fixed event
+    /// count, `frames` can legitimately come in ABOVE `expected_frames` on a gateway that inserts
+    /// framing, which reads as nonsense without the content pair beside it.
+    pub content_frames: u64,
+    pub expected_content_frames: u64,
     pub streams: u64,
     pub errored: u64,
     pub stalls: u64,
@@ -1551,6 +1592,8 @@ impl StreamPoint {
             "fps": self.fps,
             "frames": self.frames,
             "frames_expected": self.expected_frames,
+            "content_frames": self.content_frames,
+            "content_frames_expected": self.expected_content_frames,
             "streams": self.streams,
             "stream_errors": self.errored,
             "stalls": self.stalls,
@@ -1569,6 +1612,8 @@ fn point_of(w: &StreamWindow, passed: bool) -> StreamPoint {
         fps: w.fps(),
         frames: w.frames,
         expected_frames: w.expected_frames,
+        content_frames: w.content_frames,
+        expected_content_frames: w.expected_content_frames,
         streams: w.streams,
         errored: w.errored,
         stalls: w.stalls,
@@ -4331,6 +4376,178 @@ while True:
         assert_eq!(w.content_frames, w.expected_content_frames, "{w:?}");
         assert_eq!(w.delivery_ratio(), 1.0);
         assert!(streams_gate_passes(&w), "{w:?}");
+    }
+
+    // ── the delivery budget is counted in CONTENT, not in events ────────────────────────────────
+
+    /// An SSE peer SHAPED LIKE A GATEWAY RATHER THAN LIKE THE MOCK: openai's role head, then a
+    /// SECOND framing event the mock never sends, then `content` tokens with a keepalive between
+    /// each pair. Every token the client asks for is delivered; the stream just costs more events
+    /// than the mock's own layout to deliver them.
+    ///
+    /// This is not a hypothetical peer. Anthropic's real SSE protocol sends `ping` events, a
+    /// TRANSLATION cell has the gateway re-emitting the stream in the client's dialect with its own
+    /// framing, and a keepalive does the same thing on any dialect.
+    fn serve_sse_with_gateway_framing(content: usize) -> SocketAddr {
+        let l = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = l.local_addr().expect("addr");
+        std::thread::spawn(move || {
+            for c in l.incoming() {
+                let Ok(mut c) = c else { continue };
+                std::thread::spawn(move || {
+                    let mut b = [0u8; 4096];
+                    if c.read(&mut b).unwrap_or(0) == 0 {
+                        return;
+                    }
+                    let head = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nConnection: close\r\n\r\n";
+                    if c.write_all(head.as_bytes()).is_err() {
+                        return;
+                    }
+                    // Two prelude events where the mock sends one: the gateway's framing is its own.
+                    let role = "data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"}}]}\n\n";
+                    let ping = "data: {\"choices\":[{\"index\":0,\"delta\":{}}]}\n\n";
+                    for f in [role, ping] {
+                        if c.write_all(f.as_bytes()).is_err() {
+                            return;
+                        }
+                    }
+                    for i in 0..content {
+                        let frame = format!(
+                            "data: {{\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"t{i}\"}}}}]}}\n\n"
+                        );
+                        if c.write_all(frame.as_bytes()).is_err() {
+                            return;
+                        }
+                        if c.write_all(ping.as_bytes()).is_err() {
+                            return;
+                        }
+                        let _ = c.flush();
+                    }
+                });
+            }
+        });
+        addr
+    }
+
+    // A GATEWAY'S OWN FRAMING IS NOT A DELIVERY SHORTFALL.
+    //
+    // The delivery denominator is `STREAM_FRAME_BUDGET - stream_prelude_frames()`, a constant read
+    // off the MOCK's layout, while the numerator is measured on the GATEWAY's stream. While the read
+    // stopped after a fixed number of EVENTS, every ping or extra prelude chunk the gateway emitted
+    // displaced exactly one content frame: this peer delivers every token asked of it, and an
+    // event-budgeted read would have collected 31 of the 63 expected content frames - a ratio of
+    // 0.49 against a bound of 1.0, failing AT EVERY RUNG, for a shortfall the gateway did not cause.
+    // Reading to the CONTENT budget instead asks the question the metric is for.
+    #[test]
+    fn a_gateway_that_spends_extra_events_on_framing_still_delivers_every_token() {
+        let gw = serve_sse_with_gateway_framing(crate::metric::STREAM_FRAME_BUDGET);
+        let w = stream_window(gw, "/v1/chat/completions", "{}", &[], Dialect::Openai, 2)
+            .expect("the window ran");
+        assert_eq!(
+            w.errored, 0,
+            "a well-framed event stream is not an error: {w:?}"
+        );
+        assert_eq!(
+            w.content_frames, w.expected_content_frames,
+            "every token the budget asks for arrived: {w:?}"
+        );
+        assert_eq!(w.delivery_ratio(), 1.0, "{w:?}");
+        assert!(
+            streams_gate_passes(&w),
+            "a gateway that inserts framing and loses nothing must hold the gate: {:?}",
+            streams_gate_verdict(&w)
+        );
+        // And it paid for that framing in EVENTS, which is the whole point: `frames` counts every
+        // event and so runs past the mock-shaped `expected_frames`, while delivery is judged on the
+        // content pair beside it.
+        assert!(
+            w.frames > w.expected_frames,
+            "the extra framing must be visible in the raw event count: {w:?}"
+        );
+    }
+
+    // The other side of the same read, so the fix is not simply a looser gate: a gateway with the
+    // same extra framing that delivers one token FEWER than the budget asks for still fails. The
+    // read waits for content rather than for events, so a token that never arrives is the only
+    // reason the count can come up short.
+    #[test]
+    fn a_gateway_that_drops_a_token_fails_the_gate_however_it_frames_the_stream() {
+        let content = crate::metric::STREAM_FRAME_BUDGET
+            - Dialect::Openai.stream_prelude_frames() as usize
+            - 1;
+        let gw = serve_sse_with_gateway_framing(content);
+        let w = stream_window(gw, "/v1/chat/completions", "{}", &[], Dialect::Openai, 2)
+            .expect("the window ran");
+        assert_eq!(
+            w.errored, 0,
+            "the stream existed and was well-framed; it lost a token: {w:?}"
+        );
+        assert_eq!(w.content_frames, 2 * content as u64, "{w:?}");
+        assert!(w.delivery_ratio() < STREAM_MIN_DELIVERY_RATIO, "{w:?}");
+        assert!(!streams_gate_passes(&w), "{w:?}");
+        let why = streams_gate_verdict(&w).expect("a failing rung publishes a reason");
+        assert!(
+            why.contains("content frames"),
+            "the reason must name what came up short: {why}"
+        );
+    }
+
+    /// A peer that frames FOREVER and never sends a token: the pathological case a content-budgeted
+    /// read has to be bounded against, since the tokens it is waiting for are never coming.
+    fn serve_sse_endless_framing() -> SocketAddr {
+        let l = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = l.local_addr().expect("addr");
+        std::thread::spawn(move || {
+            for c in l.incoming() {
+                let Ok(mut c) = c else { continue };
+                std::thread::spawn(move || {
+                    let mut b = [0u8; 4096];
+                    if c.read(&mut b).unwrap_or(0) == 0 {
+                        return;
+                    }
+                    let head = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nConnection: close\r\n\r\n";
+                    if c.write_all(head.as_bytes()).is_err() {
+                        return;
+                    }
+                    let ping = "data: {\"choices\":[{\"index\":0,\"delta\":{}}]}\n\n";
+                    // Until the reader hangs up, which is what the ceiling makes it do.
+                    while c.write_all(ping.as_bytes()).is_ok() {
+                        let _ = c.flush();
+                    }
+                });
+            }
+        });
+        addr
+    }
+
+    // THE READ STAYS BOUNDED WITHOUT WAITING OUT THE TIMEOUT, and the shortfall is still a failure.
+    //
+    // A budget counted in content frames has no bound of its own against a peer that keeps framing,
+    // and `STREAM_TIMEOUT` alone is 20 seconds per lane - at the concurrencies these searches climb
+    // to that is a search that never returns. `STREAM_EVENT_CEILING` stops the read at 4x the frame
+    // budget; hitting it with no tokens is a real delivery shortfall, and the gate says so.
+    #[test]
+    fn an_endless_framing_stream_stops_at_the_event_ceiling_and_still_fails_the_gate() {
+        let peer = serve_sse_endless_framing();
+        let started = std::time::Instant::now();
+        let w = stream_window(peer, "/v1/chat/completions", "{}", &[], Dialect::Openai, 2)
+            .expect("the window ran");
+        assert!(
+            started.elapsed() < crate::metric::STREAM_TIMEOUT,
+            "the ceiling, not the deadline, must be what ends this read: {w:?}"
+        );
+        assert_eq!(
+            w.frames,
+            2 * crate::metric::STREAM_EVENT_CEILING as u64,
+            "each lane reads exactly to the ceiling: {w:?}"
+        );
+        assert_eq!(w.content_frames, 0, "not one token arrived: {w:?}");
+        assert_eq!(
+            w.errored, 0,
+            "the peer answered 200 and framed correctly - it delivered nothing, which is the \
+             delivery clause's finding rather than an errored stream: {w:?}"
+        );
+        assert!(!streams_gate_passes(&w), "{w:?}");
     }
 
     // ── one credential header on the wire (ledger RIG-12 remainder) ─────────────────────────────

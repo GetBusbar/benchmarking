@@ -718,6 +718,16 @@ impl FillStatus for Outcome {
 pub enum SseEnd {
     /// Collected as many frames as the caller asked for; the stream may have had more.
     FrameBudgetReached,
+    /// The read was budgeted in CONTENT frames (`SseBudget::Content`) and hit the total-event ceiling
+    /// before that many tokens arrived.
+    ///
+    /// A DELIVERY SHORTFALL, NOT AN ERRORED STREAM, and the two must stay apart: the peer answered
+    /// 200, framed correctly and kept sending - it just spent the whole ceiling on events that
+    /// carried no token. `stream_errored` therefore leaves it alone and the delivery ratio fails the
+    /// gate on the count, which is the honest reading. It is also the only end that says the read
+    /// stopped for OUR bound rather than the stream's own: a caller seeing this knows the ceiling
+    /// binds here and can weigh the counts accordingly.
+    EventCeilingReached,
     /// The deadline passed. On a stream that goes quiet this is expected and is not an error by
     /// itself: `frames` still reports whatever arrived before then, which must not be discarded
     /// just because the stream never explicitly finished.
@@ -814,6 +824,51 @@ pub enum Step {
     Done(SseEnd),
 }
 
+/// WHAT STOPS THE READ: a count of dispatched events, or a count of CONTENT frames with a ceiling on
+/// the events spent getting them.
+///
+/// Ledger RIG-11's remainder, and the half a classifier alone could not fix. `Events` was the only
+/// mode, and `run::stream_window` divides the content frames it collected by a denominator computed
+/// as `STREAM_FRAME_BUDGET - Dialect::stream_prelude_frames()` - a CONSTANT read off the mock's own
+/// layout. The numerator, though, is measured on the GATEWAY's stream, and under `Events` every
+/// non-content event the gateway emits beyond the mock's prelude consumes a budget slot and displaces
+/// exactly one content frame. Against `STREAM_MIN_DELIVERY_RATIO = 1.0` that is not a rounding
+/// difference, it is a rung that fails on arithmetic: anthropic's real SSE protocol sends `ping`
+/// events, a TRANSLATION cell has the gateway re-emitting the stream in the client's dialect with
+/// framing that is ITS own rather than the mock's, and any gateway with a keepalive does the same.
+/// A gateway that lost nothing failed at every rung, and the delivery shortfall the board published
+/// was ours.
+///
+/// `Content` asks the question the metric is actually asking - "did every token arrive" - by reading
+/// until the tokens arrive. A gateway that inserts framing then spends more EVENTS to deliver the
+/// same content, and the ratio reflects delivery instead of the gateway's framing style. It is the
+/// same correction `STREAM_STALL_MULTIPLIER` (2 -> 10) got on the other clause of the same gate: a
+/// bound calibrated on the mock's behaviour, applied to gateways that do not share it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SseBudget {
+    /// Stop after this many dispatched events, whatever they carried. What every non-delivery caller
+    /// wants: the `Streaming` group's gap distribution reads the stream AS FRAMED, and a TTFT sample
+    /// wants the first event off the wire.
+    Events(usize),
+    /// Stop once `frames` events the dialect classifies as CONTENT have arrived, or at `event_ceiling`
+    /// total events, whichever comes first.
+    ///
+    /// BOUNDED, because the ceiling is the only thing between this and a peer that pings forever.
+    /// `SseEnd::EventCeilingReached` says which bound stopped the read, and hitting it short of
+    /// `frames` is a real delivery shortfall that must still fail the gate.
+    ///
+    /// With no dialect every event counts as content (`SseReader::dialect`), so this degenerates to
+    /// `Events(frames)` under the ceiling - which is exactly right for the four dialects the mock
+    /// never streams.
+    Content { frames: u64, event_ceiling: usize },
+}
+
+impl From<usize> for SseBudget {
+    fn from(events: usize) -> Self {
+        SseBudget::Events(events)
+    }
+}
+
 /// Where the decoder is in the response.
 #[derive(Debug, PartialEq, Eq)]
 enum Phase {
@@ -840,7 +895,7 @@ pub struct SseReader {
     pending: Option<String>,
     frames: Vec<String>,
     offsets_us: Vec<u64>,
-    budget: usize,
+    budget: SseBudget,
     /// Which wire dialect these events are in, when the caller knows. The decoder does NOT inspect
     /// payloads itself - it asks the dialect (`sse_event_is_content`), because a taxonomy of events
     /// belongs to the protocol and this state machine is deliberately ignorant of both transport and
@@ -852,7 +907,8 @@ pub struct SseReader {
 }
 
 impl SseReader {
-    pub fn new(frame_budget: usize, dialect: Option<crate::ingress::Dialect>) -> Self {
+    /// `budget` takes a bare `usize` (an event count, the historic meaning) or an `SseBudget`.
+    pub fn new(budget: impl Into<SseBudget>, dialect: Option<crate::ingress::Dialect>) -> Self {
         Self {
             phase: Phase::Head,
             raw: Vec::new(),
@@ -861,7 +917,7 @@ impl SseReader {
             pending: None,
             frames: Vec::new(),
             offsets_us: Vec::new(),
-            budget: frame_budget,
+            budget: budget.into(),
             dialect,
             content_frames: 0,
             finished: None,
@@ -1086,14 +1142,36 @@ impl SseReader {
                 }
             } else if stripped.is_empty() {
                 self.flush_pending(elapsed_us);
-                if self.frames.len() >= self.budget {
-                    return Some(self.finish_with(SseEnd::FrameBudgetReached));
+                if let Some(end) = self.budget_reached() {
+                    return Some(self.finish_with(end));
                 }
             }
             // event:, id:, retry: and anything else is not a data frame and is skipped; the probe
             // only ever needs the data.
         }
         None
+    }
+
+    /// Which bound, if either, the read has now reached. Checked only after an event is DISPATCHED,
+    /// so a budget can never be satisfied by a fragment the peer never terminated.
+    fn budget_reached(&self) -> Option<SseEnd> {
+        match self.budget {
+            SseBudget::Events(n) => (self.frames.len() >= n).then_some(SseEnd::FrameBudgetReached),
+            SseBudget::Content {
+                frames,
+                event_ceiling,
+            } => {
+                if self.content_frames >= frames {
+                    Some(SseEnd::FrameBudgetReached)
+                } else if self.frames.len() >= event_ceiling {
+                    // Short of the content asked for, and out of events to wait for it in. Reported
+                    // as its own end so the shortfall is not read as a satisfied budget.
+                    Some(SseEnd::EventCeilingReached)
+                } else {
+                    None
+                }
+            }
+        }
     }
 
     fn flush_pending(&mut self, elapsed_us: u64) {
@@ -1132,7 +1210,10 @@ fn find_head_end(buf: &[u8]) -> Option<usize> {
 }
 
 /// POSTs like `post_json`, then reads Server-Sent-Event `data:` frames off the response body
-/// until `frame_budget` frames have been seen or `timeout` elapses, whichever comes first.
+/// until `budget` is satisfied or `timeout` elapses, whichever comes first.
+///
+/// `budget` is a bare event count, or an `SseBudget::Content` when the caller is measuring DELIVERY
+/// rather than framing - see `SseBudget`.
 ///
 /// Decodes `Transfer-Encoding: chunked` framing (see `ChunkedLineSource`) before splitting SSE
 /// lines out of the body, since that is the framing hyper (and thus the mock, and thus this
@@ -1143,7 +1224,7 @@ pub fn post_json_sse(
     body: &[u8],
     headers: &[(String, String)],
     timeout: Duration,
-    frame_budget: usize,
+    budget: impl Into<SseBudget>,
     dialect: Option<crate::ingress::Dialect>,
 ) -> SseOutcome {
     // BUILT BEFORE THE CONNECT, so a request we will not send never opens a socket to the gateway.
@@ -1208,7 +1289,7 @@ pub fn post_json_sse(
     // The clock starts at the WRITE, not the connect, so a slow handshake is not charged to the
     // gateway's first token.
     let sent_at = Instant::now();
-    let mut reader = SseReader::new(frame_budget, dialect);
+    let mut reader = SseReader::new(budget, dialect);
     let mut buf = [0u8; 16 * 1024];
     loop {
         let left = deadline.saturating_duration_since(Instant::now());
@@ -1251,10 +1332,14 @@ pub async fn post_json_sse_async(
     body: &[u8],
     headers: &[(String, String)],
     timeout: Duration,
-    frame_budget: usize,
+    budget: impl Into<SseBudget>,
     dialect: Option<crate::ingress::Dialect>,
 ) -> SseOutcome {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    // Resolved before the first await, so the lane's future carries an `SseBudget` rather than a
+    // generic this task would have to hold across every read.
+    let budget: SseBudget = budget.into();
 
     let ended = |end: SseEnd| SseOutcome {
         status: None,
@@ -1288,7 +1373,7 @@ pub async fn post_json_sse_async(
     // the gateway's first token and the two lanes' numbers mean the same thing.
     let sent_at = std::time::Instant::now();
     let deadline = tokio::time::Instant::now() + timeout;
-    let mut reader = SseReader::new(frame_budget, dialect);
+    let mut reader = SseReader::new(budget, dialect);
     let mut buf = vec![0u8; 16 * 1024];
     loop {
         let read = tokio::time::timeout_at(deadline, stream.read(&mut buf)).await;
@@ -3074,5 +3159,109 @@ mod tests {
         let _ = r.feed(bytes.as_bytes(), 1);
         let o = r.finish(SseEnd::StreamClosed);
         assert_eq!(o.content_frames, o.frames.len() as u64);
+    }
+
+    // ── a budget counted in CONTENT frames ───────────────────────────────────────────────────────
+
+    /// A stream with `ping`-shaped framing between its tokens, in openai's spelling: the shape a
+    /// gateway with a keepalive - or one re-emitting a translated stream in its own framing - puts on
+    /// the wire.
+    fn framed_stream(tokens: usize) -> String {
+        let mut s = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n".to_string();
+        s.push_str("data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"}}]}\n\n");
+        for i in 0..tokens {
+            s.push_str("data: {\"choices\":[{\"index\":0,\"delta\":{}}]}\n\n");
+            s.push_str(&format!(
+                "data: {{\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"t{i}\"}}}}]}}\n\n"
+            ));
+        }
+        s
+    }
+
+    // A CONTENT BUDGET COUNTS TOKENS, SO FRAMING CANNOT DISPLACE THEM.
+    //
+    // Under `Events(8)` this same stream stops having seen only THREE tokens: the eight slots go to
+    // the role head, four pings and three content frames. `run::stream_window` then divides that by
+    // a denominator computed from the MOCK's layout, which spends one slot on its head and none on
+    // pings - so a gateway that lost nothing reads as having delivered three of the frames it owed.
+    // That is the defect: the numerator is measured on the gateway's wire and the denominator is
+    // assumed from the mock's.
+    #[test]
+    fn a_content_budget_reads_past_framing_until_the_tokens_arrive() {
+        let bytes = framed_stream(16);
+
+        let mut r = SseReader::new(8usize, Some(crate::ingress::Dialect::Openai));
+        let _ = r.feed(bytes.as_bytes(), 1);
+        let o = r.finish(SseEnd::StreamClosed);
+        assert_eq!(o.frames.len(), 8, "an event budget stops at 8 events");
+        assert_eq!(
+            o.content_frames, 3,
+            "of which only three carried a token, the rest being the head and the pings: {:?}",
+            o.frames
+        );
+
+        let mut r = SseReader::new(
+            SseBudget::Content {
+                frames: 8,
+                event_ceiling: 64,
+            },
+            Some(crate::ingress::Dialect::Openai),
+        );
+        let step = r.feed(bytes.as_bytes(), 1);
+        assert_eq!(step, Step::Done(SseEnd::FrameBudgetReached));
+        let o = r.finish(SseEnd::StreamClosed);
+        assert_eq!(o.content_frames, 8, "the tokens asked for arrived");
+        assert_eq!(
+            o.frames.len(),
+            17,
+            "and the framing was paid for in events, not in tokens: {:?}",
+            o.frames
+        );
+    }
+
+    // THE CEILING IS THE ONLY THING BOUNDING A CONTENT BUDGET, so it has to bind, and hitting it is
+    // a shortfall rather than a satisfied budget: `EventCeilingReached` is a different answer from
+    // `FrameBudgetReached` precisely so a caller cannot read one as the other.
+    #[test]
+    fn a_content_budget_stops_at_the_event_ceiling_and_says_which_bound_stopped_it() {
+        // Framing only: the tokens this budget is waiting for never come.
+        let mut bytes = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n".to_string();
+        for _ in 0..100 {
+            bytes.push_str("data: {\"choices\":[{\"index\":0,\"delta\":{}}]}\n\n");
+        }
+        let mut r = SseReader::new(
+            SseBudget::Content {
+                frames: 8,
+                event_ceiling: 10,
+            },
+            Some(crate::ingress::Dialect::Openai),
+        );
+        let step = r.feed(bytes.as_bytes(), 1);
+        assert_eq!(step, Step::Done(SseEnd::EventCeilingReached));
+        let o = r.finish(SseEnd::StreamClosed);
+        assert_eq!(o.frames.len(), 10, "the read is bounded by the ceiling");
+        assert_eq!(o.content_frames, 0, "and it delivered nothing");
+    }
+
+    // A dialect with no taxonomy of its own calls every event content (`sse_event_is_content`), so a
+    // content budget must degenerate to exactly the event budget it replaced - the four dialects the
+    // mock never streams natively cannot be moved by this change.
+    #[test]
+    fn a_content_budget_without_a_dialect_reads_exactly_as_an_event_budget_does() {
+        let bytes = framed_stream(16);
+        let mut events = SseReader::new(8usize, None);
+        let _ = events.feed(bytes.as_bytes(), 1);
+        let events = events.finish(SseEnd::StreamClosed);
+
+        let mut content = SseReader::new(
+            SseBudget::Content {
+                frames: 8,
+                event_ceiling: 64,
+            },
+            None,
+        );
+        let _ = content.feed(bytes.as_bytes(), 1);
+        let content = content.finish(SseEnd::StreamClosed);
+        assert_eq!(events, content);
     }
 }
