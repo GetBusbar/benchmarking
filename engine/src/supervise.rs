@@ -444,13 +444,26 @@ mod tests {
     }
 
     /// A plausible box mid-run: an ssh session, the engine under it, the shell running a `commands`
-    /// line, the gateway itself, and a bystander. Every command line here except the gateway's
-    /// contains the gateway's `proc_match`, which is exactly what `pkill -f`/`pgrep -f` could not
-    /// tell apart.
+    /// line, the gateway itself, and a bystander. Every command line here contains the gateway's
+    /// `proc_match`, which is exactly what `pkill -f`/`pgrep -f` could not tell apart.
+    ///
+    /// The ssh session's own command line (pid 100) genuinely carries the pattern here - some sshd
+    /// builds rewrite their process title to show the command the session is running, so `ps` shows
+    /// the child's invocation inside the parent's own line. That is deliberate: an earlier version of
+    /// this fixture gave pid 100 a line ("sshd: ubuntu@pts/0") that did NOT contain the pattern, so
+    /// the "an ancestor must never be signalled" assertion below passed because pid 100 failed the
+    /// substring filter first, never because `select_matches`'s ancestor walk excluded it. Deleting
+    /// that walk entirely left every test in this module green. With the pattern genuinely present
+    /// here, only the ancestor walk keeps pid 100 out of the result, so this fixture now exercises the
+    /// logic its doc claims to.
     fn a_box_mid_run() -> Vec<ProcEntry> {
         vec![
             entry(1, 0, "/sbin/init"),
-            entry(100, 1, "sshd: ubuntu@pts/0"),
+            entry(
+                100,
+                1,
+                "sshd: ubuntu@pts/0 [otb run gateways/target/release/aisix 127.0.0.1:8000]",
+            ),
             entry(
                 200,
                 100,

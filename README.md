@@ -122,16 +122,19 @@ Against that fixed pace, per gateway:
 - **added inter-frame latency (µs)** - p50/p99 of the gateway's content-frame gap minus the
   direct-to-mock gap. Both sides carry the mock's 20 ms pace and the same timer jitter, so the
   subtraction isolates the gateway's per-frame overhead.
-- **streams sustained** - the highest concurrent stream count where EVERY expected frame
-  delivers, no stream stalls past 2x the pacing interval, and the stream error rate stays
+- **streams sustained** - the highest concurrent stream count where every expected content frame
+  arrives, no stream stalls past 10x the mock's pacing interval, and the stream error rate stays
   under 0.1%; plus the frames/sec carried there. A proxy that drops a frame has dropped a user's
   token, so the sustained ceiling is the last concurrency before anything is lost. The mock-ceiling guardrail applies here too: the
   mock's own frames/sec at top concurrency is recorded and a result within 10% is flagged
   mock-bound.
 
-A gateway that answers 200 but buffers the stream (never frames) is recorded
-`stream_served: false` in `results/stream/<gateway>.json` rather than crashing the run. The
-`stream_*` fields are additive; existing result files stay valid. Knobs: `STREAM_CHUNKS`,
+A gateway that answers 200 but buffers the stream (never frames) is recorded with its
+`stream_served` naming the absence reason (`"untestable"`, `"rig_limited"`, and the rest of the
+`Absent` vocabulary), not with a bare `false` - this engine never writes `false` here, since that
+would assert the gateway does not stream, which no observation establishes. `false` is still
+representable in `results/stream/<gateway>.json` only so older artifacts predating this vocabulary
+still parse. The `stream_*` fields are additive; existing result files stay valid. Knobs: `STREAM_CHUNKS`,
 `STREAM_INTERVAL_MS`, `STREAM_CHUNK_BYTES`, `STALL_X`, `SWEEP`, `SWEEP_DUR`.
 
 **`xlate/`** (opt-in: `SUITES="xlate matrix" ./run-all.sh`) measures protocol translation.
