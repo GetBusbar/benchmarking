@@ -25,7 +25,7 @@ import { readdirSync, readFileSync, statSync, existsSync, mkdirSync, copyFileSyn
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
-import { sealMetric, makeSource, SWEEP, UNGATED_LAT_FIELDS, UNGATED_STREAM_FIELDS, RSS_FIELD_RE, isMetricField, ZERO_MEASURED_FAIL } from "./seal.mjs";
+import { sealMetric, makeSource, SWEEP, UNGATED_LAT_FIELDS, UNGATED_STREAM_FIELDS, isMetricField, zeroNoteFor } from "./seal.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = process.argv[2] || join(HERE, "..");
@@ -199,15 +199,24 @@ const gateways = gatewayKeys.map((key) => {
       // shadow a complete one. This is NOT the "fewer served cells" case (a re-run that finds less IS
       // the new truth); it is the case where the producer was TOLD NOT TO MEASURE, so refusing it is a
       // statement about the run's MODE, never about its numbers.
+      // SHADOWING WAS NEVER THE DEFECT; BECOMING THE BOARD'S SOURCE IS. The guard only fired when a
+      // degraded snapshot was newer than a COMPLETE results/matrix/<gw>.json, so the case with nothing
+      // to shadow - a gateway whose ONLY artifact is a local smoke run - walked straight through and
+      // published as that gateway's board result, which is the exact outcome the guard's own message
+      // describes as unacceptable. A run that was TOLD NOT TO MEASURE is not a measurement whether or
+      // not a real one exists beside it; the presence of a fuller file changes the remedy, not the rule.
       const degraded = snapshotDegradedMode(snap.matrix);
-      const diskFull = g.matrix && !snapshotDegradedMode(g.matrix);
-      if (degraded && diskFull) {
+      if (degraded) {
+        const diskFull = g.matrix && !snapshotDegradedMode(g.matrix);
+        const shadows = diskFull
+          ? `yet it is NEWER than results/matrix/${key}.json (measured_at ${g.matrix.measured_at}), which ran them ` +
+            `all. Publishing it would replace a complete run with a probe-only one`
+          : `and it is the ONLY matrix artifact this gateway has, so nothing else would be replaced - the board ` +
+            `would simply carry a probe-only run`;
         throw new Error(
           `gen-data: REFUSING to publish ${key} from a DEGRADED-MODE snapshot. ${snap.__file} ` +
           `(measured_at ${snap.measured_at}) ran with ${degraded} - the phases were switched OFF, so it is a ` +
-          `local smoke run, not a measurement - yet it is NEWER than results/matrix/${key}.json ` +
-          `(measured_at ${g.matrix.measured_at}), which ran them all. Publishing it would replace a complete ` +
-          `run with a probe-only one and the board would show it as this gateway's result.\n` +
+          `local smoke run, not a measurement - ${shadows} and the board would show it as this gateway's result.\n` +
           `  Fix: delete or move that snapshot out of results/snapshots/ (a local verify-local run with ` +
           `KEEP_ARTIFACTS=1 leaves it behind; without KEEP_ARTIFACTS the teardown's git clean removes it).`);
       }
@@ -307,7 +316,15 @@ const gateways = gatewayKeys.map((key) => {
       cpu_fps: g.streamcpu ? g.streamcpu.streamcpu_frames_per_sec : null,
       cpu_fps_concurrency: g.streamcpu ? g.streamcpu.streamcpu_concurrency : null,
       cpu_fps_mock_bound: g.streamcpu ? g.streamcpu.streamcpu_mock_bound : null,
-    }, dia, makeSource("stream-fallback", SWEEP.STREAM_SUITE, g.stream.build ?? null, g.stream.measured_at ?? null));
+    }, dia, makeSource("stream-fallback", SWEEP.STREAM_SUITE, g.stream.build ?? null, g.stream.measured_at ?? null),
+    null,
+    // cpu_fps CAME FROM THE OTHER SUITE, SO IT CARRIES THE OTHER SUITE'S STAMP. The record's own stamp
+    // is the stream suite's build + measured_at; cpu_fps is produced by the SEPARATE streamcpu suite,
+    // which runs on its own cadence, so stamping it with the record's provenance dated a number to a
+    // run that never produced it. It is only carried when the two genuinely disagree - on a row where
+    // both suites ran together the record's stamp already tells the truth, and repeating it on the
+    // envelope would be bundle bloat for no added disclosure.
+    cpuFpsSourceFor(g));
   }
   if (!g.best_cell && g.perf && g.perf.served === true && g.perf.added_latency_p99_us != null) {
     // No swept diagonal, but the perf suite ran the gateway's default passthrough. Seal it into the same
@@ -446,7 +463,10 @@ function sealPerfCell(perf, path, source, absences = null) {
 // sealStreamRecord: a raw stream record -> {<sealed metrics>} (no path/source). TTFT/gap are UNGATED;
 // streams_sustained + cpu_fps are GATED on their mock-bound flags. Used for the canonical g.streaming AND
 // for sealing every matrix cell's own .stream in-place (so the popup reads envelopes).
-function sealStreamRecord(s, absences = null) {
+// `cpuSource`: the provenance stamp for cpu_fps ALONE, when that number came from a different run than
+// the rest of the record (the legacy stream-suite fallback below reads it from the SEPARATE streamcpu
+// suite). Null on every matrix path, where one cell produced the whole record.
+function sealStreamRecord(s, absences = null, cpuSource = null) {
   const rec = {};
   const abs = (k) => absentEntryFor(absences, "stream", k);
   for (const k of UNGATED_STREAM_FIELDS)
@@ -454,21 +474,34 @@ function sealStreamRecord(s, absences = null) {
   // AUDIT #11: streams_sustained_fps is the SAME bisect's rate - it inherits that bisect's mock-bound
   // honesty flag. Sealing it UNGATED beside a GATED streams_sustained let the rig-bound rate publish
   // while the count it came from was suppressed. Gate it on the same flag.
+  // The zero-note comes from seal.mjs's zeroNoteFor, the ONE place that mapping lives, so the note the
+  // independent oracle expects and the note the seal writes cannot be different notes.
   rec.streams_sustained_fps = sealMetric(s.streams_sustained_fps, {
-    gated: true, paced: true, flag: s.streams_sustained_mock_bound, zeroNote: ZERO_MEASURED_FAIL,
+    gated: true, paced: true, flag: s.streams_sustained_mock_bound, zeroNote: zeroNoteFor("streams_sustained_fps"),
     absent: abs("streams_sustained_fps") });
   // AUDIT #3: streaming counts - a 0 is a MEASURED FAILURE (offered stream load, sustained none), NOT
   // "not measured". Only a null (absent field) is not-measured. The note names which, and every surface
   // renders the two apart.
   rec.streams_sustained = sealMetric(s.streams_sustained, {
-    gated: true, paced: true, flag: s.streams_sustained_mock_bound, zeroNote: ZERO_MEASURED_FAIL,
+    gated: true, paced: true, flag: s.streams_sustained_mock_bound, zeroNote: zeroNoteFor("streams_sustained"),
     absent: abs("streams_sustained") });
-  rec.cpu_fps = sealMetric(s.cpu_fps, { gated: true, paced: true, flag: s.cpu_fps_mock_bound, zeroNote: ZERO_MEASURED_FAIL,
-    absent: abs("cpu_fps"), extras: { concurrency: s.cpu_fps_concurrency ?? null } });
+  rec.cpu_fps = sealMetric(s.cpu_fps, { gated: true, paced: true, flag: s.cpu_fps_mock_bound, zeroNote: zeroNoteFor("cpu_fps"),
+    absent: abs("cpu_fps"), extras: { concurrency: s.cpu_fps_concurrency ?? null, source: cpuSource } });
   return rec;
 }
-function sealStreaming(s, dialect, source, absences = null) {
-  return { path: { dialect }, source, stream_served: true, ...sealStreamRecord(s, absences) };
+function sealStreaming(s, dialect, source, absences = null, cpuSource = null) {
+  return { path: { dialect }, source, stream_served: true, ...sealStreamRecord(s, absences, cpuSource) };
+}
+// cpuFpsSourceFor(g): the provenance stamp cpu_fps needs OF ITS OWN on the legacy stream-suite fallback
+// row, or null when the record's own stamp already describes it. cpu_fps is measured by the streamcpu
+// suite and the rest of the record by the stream suite; they are separate runs with separate build +
+// measured_at, so the record's single stamp is the truth for one of them and a fabrication for the other
+// whenever they differ. Hoisted, so the per-gateway pass above can call it.
+function cpuFpsSourceFor(g) {
+  if (!g.streamcpu || g.streamcpu.streamcpu_frames_per_sec == null) return null;
+  const build = g.streamcpu.build ?? null, at = g.streamcpu.measured_at ?? null;
+  const sameRun = build === (g.stream.build ?? null) && at === (g.stream.measured_at ?? null);
+  return sameRun ? null : makeSource("stream-fallback", SWEEP.STREAM_SUITE, build, at);
 }
 // matrixHasCellMemory(m): does this matrix carry a per-cell memory window on any served cell? The memory
 // lane's freshness stamp ages by the matrix that produced those windows, so the lane must know whether it
@@ -509,6 +542,19 @@ function sealMatrixCellsInPlace(m) {
         cell.stream = {
           stream_served: cell.stream.stream_served,
           stream_error: cell.stream.stream_error ?? null,
+          // THE EVIDENCE FOR THE STATUS, WHICH THE REBUILD WAS DROPPING. `stream_served` is a token
+          // (`true`, any Absent token as a string, "not_probed"; `false` is legacy parse-only),
+          // `reason` is the MACHINE token for why it came out that way (the same Absent vocabulary the
+          // envelopes carry) and `stream_error` is the PROSE behind it; `stream_c1_note` is the c=1
+          // leg's own note. Rebuilding the object from a fixed key list silently deleted the reason and
+          // the c1 note - seven reasons and five c1 notes in the recovered 2026-07-29 snapshots - so the
+          // bundle published a refusal with its explanation removed. A cell whose gap figures measured
+          // now publishes stream_served:true WITH a reason token for the TTFT leg, which makes carrying
+          // the pair load-bearing rather than decorative. None of the three is a sealed metric (they are
+          // prose/vocabulary about the cell, not numbers), so they ride as plain fields; app.js renders
+          // the prose and maps the token through its own note vocabulary, never printing it verbatim.
+          reason: cell.stream.reason ?? null,
+          stream_c1_note: cell.stream.stream_c1_note ?? null,
           ...sealStreamRecord(cell.stream, cell.absences),
         };
       }
@@ -524,12 +570,32 @@ function sealMatrixCellsInPlace(m) {
     }
   }
   // A LEGACY top-level memory block (pre-per-cell results, no longer read by anything) still travels in the bundle (embedded
-  // in g.matrix + the snapshot); seal its RSS scalars so no bare ungated field survives.
+  // in g.matrix + the snapshot); seal its metrics so no bare ungated field survives.
   // Sealed BY DISCOVERY (audit #11): every `*_rss_mib` key present, not a 3-key whitelist that the
   // producer already outgrew (peak_rss_hwm_mib / post_load_rss_mib were shipping as BARE scalars).
+  // THE SAME VOCABULARY AND THE SAME ABSENCES AS A PER-CELL WINDOW, because it is the same kind of
+  // block. Testing only RSS_FIELD_RE here re-created the narrower-whitelist bug one level up: the
+  // non-RSS memory metrics (growth rate, time to plateau) shipped as bare scalars off a legacy block,
+  // and passing `{}` for the options threw away the engine's absence reason, so a legacy
+  // below-resolution or untestable hole flattened to "not_measured" on reseal.
   if (m.memory && typeof m.memory === "object") {
-    for (const k of Object.keys(m.memory)) if (RSS_FIELD_RE.test(k)) m.memory[k] = sealMetric(m.memory[k], {});
+    for (const k of Object.keys(m.memory))
+      if (isMetricField(k))
+        m.memory[k] = sealMetric(m.memory[k], { absent: absentEntryFor(m.absences, "memory", k) });
   }
+}
+
+// addedP99Rank(rec): the rank a candidate cell's added-latency p99 sorts by (lower is better).
+// A measured number ranks as itself. A null whose absences entry says "below_resolution" ranks as 0:
+// the comparison RAN and the difference was at or under what the rig can resolve, which is the
+// engine's BEST outcome, not a hole - Infinity here turned a win into a last-place sort (and, in
+// translationCell, let the legacy xlate fallback shadow a measured matrix cell). Any other null
+// (not measured, suppressed, ...) still sorts last. `rec` is a candidate record carrying the raw
+// perf fields plus the cell's `absences` map, so absentEntryFor resolves the block-prefixed key.
+function addedP99Rank(rec) {
+  if (rec.added_latency_p99_us != null) return rec.added_latency_p99_us;
+  const abs = absentEntryFor(rec.absences, "perf", "added_latency_p99_us");
+  return abs && abs.reason === "below_resolution" ? 0 : Infinity;
 }
 
 function bestCell(m) {
@@ -553,8 +619,9 @@ function bestCell(m) {
   if (!diag.length) return null;
   const openai = diag.find((d) => d.dialect === "openai");
   if (openai) return openai;
-  const rank = (d) => (d.added_latency_p99_us == null ? Infinity : d.added_latency_p99_us);
-  return diag.reduce((a, b) => (rank(b) < rank(a) ? b : a));
+  // Rank through addedP99Rank so a below-resolution p99 (the best possible reading) sorts first,
+  // not last: a null there is the engine saying "too small to weigh", never "unknown".
+  return diag.reduce((a, b) => (addedP99Rank(b) < addedP99Rank(a) ? b : a));
 }
 
 // The gateway's TRANSLATION cell for the Translation tab: openai INGRESS (fixed fair input) translated
@@ -574,15 +641,19 @@ function translationCell(m) {
   for (const [egress, up] of Object.entries(m.upstreams)) {
     for (const [ingress, cell] of Object.entries((up && up.cells) || {})) {
       if (ingress === egress) continue;                     // same dialect is passthrough, not translation
-      if (!(cell && cell.served === true && cell.perf && cell.perf.added_latency_p99_us != null)) continue;
+      if (!(cell && cell.served === true && cell.perf)) continue;
       const rec = { ingress, egress, absences: cell.absences ?? null, ...cell.perf };
+      // A cell qualifies when its p99 rank is real: a measured number OR a below-resolution reading
+      // (rank 0, the best outcome the rig can express). Requiring a non-null scalar here dropped the
+      // below-resolution win entirely and let the legacy xlate fallback publish over the matrix.
+      if (addedP99Rank(rec) === Infinity) continue;
       if (ingress === "openai" && egress !== "openai") fair.push(rec);
       any.push(rec);
     }
   }
   const cands = fair.length ? fair : any;
   if (!cands.length) return null;
-  return cands.reduce((a, b) => (b.added_latency_p99_us < a.added_latency_p99_us ? b : a));
+  return cands.reduce((a, b) => (addedP99Rank(b) < addedP99Rank(a) ? b : a));
 }
 
 // streamSuiteDialect(s): the dialect the LEGACY stream suite actually drove, read off the endpoint it

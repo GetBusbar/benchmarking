@@ -42,12 +42,32 @@ const ROOT = join(HERE, "..");
 // The metric-field vocabulary is IMPORTED from seal.mjs, the SAME list gen-data seals from, so a local
 // whitelist here can never lag the producer: one shared list plus a shape rule (any *_rss_mib) means a
 // new producer field is checked the day it appears.
-import { GATED_FIELDS, PACED_FIELDS, displayedValue, isMetricField } from "./seal.mjs";
+import { GATED_FIELDS, PACED_FIELDS, displayedValue, isMetricField, zeroNoteFor } from "./seal.mjs";
 // The origins a projected cell's source.kind may honestly carry: the single end-state "matrix" path plus
 // the LIVE deferred fallbacks (kept until the field run; sealed honestly, never mislabelled as matrix).
 const SOURCE_KINDS = new Set(["matrix", "perf-fallback", "xlate-fallback", "stream-fallback"]);
 
 function isEnvelope(x) { return x != null && typeof x === "object" && typeof x.certified === "boolean"; }
+
+// ---- reading a RAW artifact of either shape -------------------------------------------------------
+// upstreamsOf(m): the egress -> {cells} grid of a raw artifact, in ONE shape. A v2 artifact carries it
+// under `upstreams`; a v1 artifact carries its single measured egress row as a top-level `cells`, named
+// by `upstream_shape` (the same normalization gen-data applies before projecting). Reading only
+// `m.upstreams` here meant a v1 artifact produced ZERO oracle comparisons and ZERO re-derived
+// selections, and the per-gateway coverage gate then converted that silence into a hard publish
+// failure - so an honest legacy republish was blocked by the oracle's inability to READ the artifact
+// rather than by anything wrong with the data it contained.
+export function upstreamsOf(m) {
+  if (!m || typeof m !== "object") return {};
+  if (m.upstreams && typeof m.upstreams === "object") return m.upstreams;
+  if (m.cells && typeof m.cells === "object") return { [m.upstream_shape || "openai"]: { cells: m.cells } };
+  return {};
+}
+// rawCellAt(m, ingress, egress): the raw cell at one coordinate, in either artifact shape, or null.
+export function rawCellAt(m, ingress, egress) {
+  const up = upstreamsOf(m)[egress];
+  return (up && up.cells && up.cells[ingress]) || null;
+}
 
 // ---- C7: peak_rss_mib <= peak_rss_hwm_mib (a second physical-plausibility invariant) ------------
 // VmHWM is the KERNEL's own high-water mark, updated on every charge, so it cannot be lower than any
@@ -121,6 +141,12 @@ export function c7HwmBelowPeak(gwKey, rawMatrix) {
 //      that is caught directly rather than being inferred from the inversion it happens to produce.
 // A sub-band inversion is reported as a WARNING carrying its magnitude and the band it fell inside, so
 // it stays visible in the build log and on the row instead of being silently tolerated.
+// THIS LINE IS PARSED BY bench-audit.py. The same bar exists there as a twin constant, and its
+// board-level `check_c6_bar_agrees_with_the_site` reads THIS declaration out of this file and fails when
+// the two disagree - so tuning the ceiling here alone does not fork the invariant quietly, it fails the
+// python gate until both sides move together. The check also fails when it cannot find the constant at
+// all, because going blind is not a pass: keep the exact `export const C6_GROSS_PCT = <number>;` shape,
+// on one line, or the cross-check has nothing to read.
 export const C6_GROSS_PCT = 5;
 // sweepSpreadPct(sweep, winner): the rung-to-rung scatter of a sweep, as a percentage of the winning
 // rps. This is the cell's OWN measured noise: same box, same phase, same gateway, several samples of
@@ -147,8 +173,9 @@ export function c6Inversions(gwKey, rawMatrix) {
   const violations = [];
   const warnings = [];
   let cellsChecked = 0;
-  if (!rawMatrix || !rawMatrix.upstreams) return { violations, warnings, cellsChecked };
-  for (const [egress, up] of Object.entries(rawMatrix.upstreams)) {
+  // Either artifact shape (upstreamsOf): a v1 artifact's cells are just as physically implausible when
+  // they invert, and skipping them made C6 silently inert on exactly the artifacts nobody re-measures.
+  for (const [egress, up] of Object.entries(upstreamsOf(rawMatrix))) {
     for (const [ingress, cell] of Object.entries((up && up.cells) || {})) {
       const perf = cell && cell.served === true && cell.perf;
       if (!perf) continue;
@@ -374,18 +401,35 @@ function readSrc(rel) {
 
 // (1) SWEEP-KEY LEAK (C3a): the internal sweep keys are caption VOCABULARY and live ONLY in the caption
 // table / the seal. A key appearing as a user-facing string literal anywhere else is caption drift.
-export const SWEEP_KEY_RE = /"(?:6x6-diagonal|6x6-translation|6x6-memory-window|6x6-memory-diagonal|6x6-memory-translation|6x6-stream-diagonal|6x6-stream-translation|perf-suite|xlate-suite|stream-suite)"/;
+// THE TOKEN IN ANY QUOTE, AND AN EXEMPTION NARROW ENOUGH TO MEAN SOMETHING.
+//
+// Two holes, both in the direction of not firing. (1) Only DOUBLE-quoted tokens were scanned, so a
+// single-quoted literal, a template literal or a Python f-string carrying the same token walked past a
+// lint whose whole job is to catch that token in prose. (2) The exemption skipped any line matching
+// `\bsource\b` or `sweep:` ANYWHERE on it - and a caption renderer is a function that is about a
+// datum's source, so the lines most likely to contain the word "source" are precisely the lines this
+// lint exists to police. The exemption now covers the one thing it was written for: the token appearing
+// as the VALUE of a `sweep` key (provenance DATA assignment), which is checked against the text
+// immediately preceding that token rather than against the line as a whole.
+export const SWEEP_KEY_TOKENS = ["6x6-diagonal", "6x6-translation", "6x6-memory-window",
+  "6x6-memory-diagonal", "6x6-memory-translation", "6x6-stream-diagonal", "6x6-stream-translation",
+  "perf-suite", "xlate-suite", "stream-suite"];
+export const SWEEP_KEY_RE = new RegExp(`(["'\`])(?:${SWEEP_KEY_TOKENS.join("|")})\\1`);
 export function lintSweepKeys(src, name, allowRegion) {
   const errors = [];
   let inAllowed = false, sawRegion = false;
+  const scan = new RegExp(SWEEP_KEY_RE.source, "g");
   src.split("\n").forEach((line, i) => {
     if (allowRegion.enter.test(line)) { inAllowed = true; sawRegion = true; }
     if (inAllowed) { if (allowRegion.exit.test(line)) inAllowed = false; return; }
     const code = line.replace(/\/\/.*$/, "").replace(/#.*$/, "");
-    if (!SWEEP_KEY_RE.test(code)) return;
-    // rec.source = {…sweep: "6x6-diagonal"…} is legitimate PROVENANCE DATA assignment, not a caption.
-    if (/\bsource\b|\bsweep\b\s*:/.test(code)) return;
-    errors.push(`C3: ${name}:${i + 1} a sweep-key token leaked into a caption literal (keys live only in SWEEP_CAPTION): ${line.trim().slice(0, 80)}`);
+    for (const m of code.matchAll(scan)) {
+      // rec.source = {…sweep: "6x6-diagonal"…} / {"sweep": '6x6-diagonal'} is legitimate PROVENANCE
+      // DATA assignment, not a caption - judged by what sits immediately before THIS token.
+      if (/\bsweep["'`]?\s*[:=]\s*$/.test(code.slice(0, m.index))) continue;
+      errors.push(`C3: ${name}:${i + 1} a sweep-key token leaked into a caption literal (keys live only in SWEEP_CAPTION): ${line.trim().slice(0, 80)}`);
+      break;
+    }
   });
   // COVERAGE means "the scanner actually parsed this file and FOUND its allowed region" - proof the lint
   // is live. The old tag was set by the EXEMPTION path (and by the error path), so a lint that never
@@ -408,9 +452,19 @@ export function lintAccessorRouting(src, name, lang = "js") {
   const accessorDef = isPy ? PY_ACCESSOR_DEFS : JS_ACCESSOR_DEFS;
   const predicate = isPy ? /\b(?:_is_env|mval|mvalid|menote)\(\s*([A-Za-z_$][\w$]*)\s*[),]/g
     : /\b(?:isEnvelope|metric|mval)\(\s*([A-Za-z_$][\w$]*)\s*[),]/g;
-  const valueRead = (v) => isPy
-    ? new RegExp(`\\b${v}\\.get\\(\\s*["']value["']`)
-    : new RegExp(`\\b${v}\\.value\\b`);
+  // EVERY SPELLING OF "READ THE RAW NUMBER OFF THE ENVELOPE", not just the dotted one. A lint that
+  // catches `env.value` and misses `env["value"]`, `env[key].value` and `const { value } = env` is a
+  // lint that a reader routes around by accident, in three keystrokes, and then reports itself green -
+  // and the bracket form is the one a reader reaches for FIRST when the field name is a variable.
+  const valueReads = (v) => isPy
+    ? [new RegExp(`\\b${v}\\.get\\(\\s*["']value["']`),
+      new RegExp(`\\b${v}\\s*\\[\\s*["']value["']\\s*\\]`),
+      new RegExp(`\\b${v}\\s*\\[[^\\]]*\\]\\s*\\.get\\(\\s*["']value["']`),
+      new RegExp(`\\b${v}\\s*\\[[^\\]]*\\]\\s*\\[\\s*["']value["']\\s*\\]`)]
+    : [new RegExp(`\\b${v}\\.value\\b`),
+      new RegExp(`\\b${v}\\s*\\[\\s*["'\`]value["'\`]\\s*\\]`),
+      new RegExp(`\\b${v}\\s*\\[[^\\]]*\\]\\s*\\.value\\b`),
+      new RegExp(`\\{[^}]*\\bvalue\\b[^}]*\\}\\s*=\\s*${v}\\b`)];
   // PASS 1 (whole file, so a deref on a LATER line than the binding is still caught): every identifier
   // ever handed to an envelope accessor/predicate is an envelope-typed local.
   const tainted = new Set();
@@ -430,15 +484,23 @@ export function lintAccessorRouting(src, name, lang = "js") {
   lines.forEach((line, i) => {
     if (inAccessor[i]) return;
     const code = isPy ? line.replace(/#.*$/, "") : line.replace(/\/\/.*$/, "");
-    // (a) the direct form: a metric FIELD dereferenced straight to its raw number.
+    // (a) the direct form: a metric FIELD dereferenced straight to its raw number, in any spelling.
     for (const f of GATED_FIELDS) {
-      const re = isPy ? new RegExp(`\\.${f}\\b[^\\n]*\\.get\\(\\s*["']value["']`) : new RegExp(`\\.${f}\\.value\\b`);
-      if (re.test(code))
+      const res = isPy
+        ? [new RegExp(`\\.${f}\\b[^\\n]*\\.get\\(\\s*["']value["']`),
+          new RegExp(`\\.${f}\\b[^\\n]*\\[\\s*["']value["']\\s*\\]`),
+          new RegExp(`\\[\\s*["']${f}["']\\s*\\][^\\n]*\\[\\s*["']value["']\\s*\\]`),
+          new RegExp(`\\[\\s*["']${f}["']\\s*\\][^\\n]*\\.get\\(\\s*["']value["']`)]
+        : [new RegExp(`\\.${f}\\.value\\b`),
+          new RegExp(`\\.${f}\\s*\\[\\s*["'\`]value["'\`]\\s*\\]`),
+          new RegExp(`\\[\\s*["'\`]${f}["'\`]\\s*\\]\\s*\\.value\\b`),
+          new RegExp(`\\{[^}]*\\bvalue\\b[^}]*\\}\\s*=\\s*[^;]*\\.${f}\\b`)];
+      if (res.some((re) => re.test(code)))
         errors.push(`C5: ${name}:${i + 1} reads .${f}'s raw value directly (must route through metric()/mval()): ${line.trim().slice(0, 80)}`);
     }
     // (b) the form the codebase ACTUALLY uses: an envelope bound to a local, then dereferenced.
     for (const v of tainted) {
-      if (valueRead(v).test(code))
+      if (valueReads(v).some((re) => re.test(code)))
         errors.push(`C5: ${name}:${i + 1} reads the raw value off envelope-typed \`${v}\` (must route through metric()/mval()): ${line.trim().slice(0, 80)}`);
     }
   });
@@ -516,12 +578,96 @@ export function oracleExpected(raw, flag, gated, paced = false, absentReason = n
   return displayedValue(raw, flag, { gated, paced, absentReason });
 }
 
+// WHAT THE WHOLE ENVELOPE MUST SAY, not only what number it must show.
+//
+// The oracle compared `.v` and nothing else, which left everything the envelope says ABOUT its number
+// unverified: a reason flattened back to "not_measured" (the exact regression the absence-carrying seal
+// was written to end), a zero-note swapped so a measured streaming failure published as a missing RPS
+// ceiling, a lost `detail` that is the evidence a reader is shown - every one of them preserves the
+// number and so every one of them verified green. The reason WAS measured; it is data, and data the
+// board renders, so the oracle re-derives it exactly as it re-derives the value.
+//   value      - through displayedValue, the one display rule (unchanged).
+//   reason     - the engine's absence token for a hole, "mock_bound"/"unverifiable" for a suppression.
+//   note       - a certified 0's meaning, from seal.mjs's zeroNoteFor: the one place that map lives.
+//   detail     - the engine's prose for the absence, which must survive the seal.
+//   paced_match- the "this gateway matched the paced upstream" signal a paced publish carries.
+export function oracleEnvelope(raw, flag, { gated = false, paced = false, absent = null, zeroNote = null } = {}) {
+  const absentReason = absent && absent.reason ? absent.reason : null;
+  const v = displayedValue(raw, flag, { gated, paced, absentReason });
+  const none = { v, reason: null, note: null, detail: null, paced_match: false };
+  if (raw == null)
+    return { ...none, reason: absentReason || "not_measured", detail: (absent && absent.detail) || null };
+  if (gated && Number(raw) === 0) return { ...none, v: 0, note: zeroNote };
+  if (gated && v == null) return { ...none, reason: flag === true ? "mock_bound" : "unverifiable" };
+  return { ...none, paced_match: gated && paced && flag === true };
+}
+
+// ---- R4: the SELECTION itself, re-derived --------------------------------------------------------
+// The oracle above verifies the numbers at the coordinates the BUNDLE CLAIMS. That left the choice of
+// coordinates entirely unchecked: a projection that picked the wrong cell publishes correct values
+// under the wrong name, and every value comparison agrees with it. So the board could show one
+// gateway's second-best diagonal as its headline, or a translation cell the fair tier should have
+// outranked, and the independent oracle would report green on every number.
+//
+// These re-derive WHICH cell each projected record must be, from the raw artifact and the PUBLISHED
+// rule (gen-data.mjs bestCell/translationCell). That is a second implementation of a ranking, which is
+// what deferred it - but the alternative is a check that verifies the arithmetic of an answer without
+// ever asking whether it is the answer to the right question. It is written against the rule as stated
+// in gen-data's own comments, so a deliberate rule change fails here loudly and is updated in both
+// places, which is the point.
+// oracleAddedP99Rank(cell): the rank a candidate sorts by. A measured p99 ranks as itself; a
+// below-resolution absence ranks 0 (the best reading the rig can express, not a hole); anything else
+// sorts last.
+export function oracleAddedP99Rank(cell) {
+  const perf = cell && cell.perf;
+  if (perf && perf.added_latency_p99_us != null) return perf.added_latency_p99_us;
+  const a = absentEntryOf(cell && cell.absences, "perf", "added_latency_p99_us");
+  return a && a.reason === "below_resolution" ? 0 : Infinity;
+}
+// The diagonal best_cell must be projected from: the canonical openai diagonal when it is served, else
+// the served diagonal with the lowest p99 rank (first wins a tie, as the reduce does).
+export function oracleBestDialect(m) {
+  const diag = [];
+  for (const [egress, up] of Object.entries(upstreamsOf(m))) {
+    const cell = up && up.cells && up.cells[egress];
+    if (cell && cell.served === true && cell.perf) diag.push({ dialect: egress, cell });
+  }
+  if (!diag.length) return null;
+  const openai = diag.find((d) => d.dialect === "openai");
+  const win = openai || diag.reduce((a, b) => (oracleAddedP99Rank(b.cell) < oracleAddedP99Rank(a.cell) ? b : a));
+  return win.dialect;
+}
+// The translation cell that must be projected: the FAIR tier (openai ingress, identical input side on
+// every gateway) when the matrix measured any, else any served cross-dialect cell it did measure;
+// lowest p99 rank wins, first on a tie.
+export function oracleTranslationPath(m) {
+  const fair = [], any = [];
+  for (const [egress, up] of Object.entries(upstreamsOf(m))) {
+    for (const [ingress, cell] of Object.entries((up && up.cells) || {})) {
+      if (ingress === egress) continue;
+      if (!(cell && cell.served === true && cell.perf)) continue;
+      if (oracleAddedP99Rank(cell) === Infinity) continue;
+      const cand = { ingress, egress, cell };
+      if (ingress === "openai") fair.push(cand);
+      any.push(cand);
+    }
+  }
+  const cands = fair.length ? fair : any;
+  if (!cands.length) return null;
+  const w = cands.reduce((a, b) => (oracleAddedP99Rank(b.cell) < oracleAddedP99Rank(a.cell) ? b : a));
+  return { ingress: w.ingress, egress: w.egress };
+}
+
 // The engine's absence reason for one raw field, read from the raw cell's sibling `absences` map
 // (block-prefixed keys: "perf.added_latency_p50_us"). The oracle needs it because a below_resolution
 // absence DISPLAYS as 0 (see displayedValue), and an oracle blind to the reason would demand null for
 // the very value the seal correctly publishes.
+export function absentEntryOf(absences, prefix, k) {
+  if (!absences || typeof absences !== "object") return null;
+  return absences[`${prefix}.${k}`] || absences[k] || null;
+}
 export function absentReasonFor(absences, prefix, k) {
-  const e = absences && (absences[`${prefix}.${k}`] || absences[k]);
+  const e = absentEntryOf(absences, prefix, k);
   return e && e.reason ? e.reason : null;
 }
 
@@ -545,6 +691,11 @@ export function checkConsistency(data, app, opts = {}) {
   // a matrix-sourced number must appear in oracledKeys.
   const matrixPublishers = new Set();
   const oracledKeys = new Set();
+  // Gateways where a cell or a whole block could not be compared at all. Oracle credit is per gateway,
+  // so a row that lost a block in silence used to keep the credit its OTHER blocks earned; these are
+  // subtracted before the reconciliation below, which is what makes "this gateway was oracled" mean
+  // "all of it was" rather than "some of it was".
+  const unverified = new Set();
 
   // ---- C1 + C2: envelope integrity across the WHOLE bundle -------------------
   // Walk every object. (C1) a *_mock_bound key must not survive; a gated metric field must be an envelope,
@@ -652,52 +803,117 @@ export function checkConsistency(data, app, opts = {}) {
         errors.push(`R3: ${g.key}: the bundle claims matrix_from_snapshot=${claimsSnapshot} but the independently-resolved newest artifact is a ${resolved.origin} (${resolved.file}) - provenance disagreement`);
     }
     if (m) {
+      // WHAT THE BUNDLE SHOWS for one sealed metric, as the same tuple oracleEnvelope re-derives: the
+      // displayed number AND everything the envelope says about it. The number still comes through
+      // app.metric(), the reader every surface uses; the rest is read off the envelope directly,
+      // because it IS the envelope's own testimony and that is what is being verified.
+      const shownOf = (env) => ({
+        v: app.metric(env).v,
+        reason: env && env.reason != null ? env.reason : null,
+        note: env && env.note != null ? env.note : null,
+        detail: env && env.detail != null ? env.detail : null,
+        paced_match: !!(env && env.paced_match === true),
+      });
+      const say = (e) => `value=${e.v} reason=${e.reason} note=${e.note} paced_match=${e.paced_match}` +
+        (e.detail != null ? ` detail=${JSON.stringify(e.detail)}` : "");
       const cmp = (label, shown, expected) => {
         oracleCompared += 1;
         oracledKeys.add(g.key);
-        if (shown !== expected)
-          errors.push(`R1: ${g.key}.${label}: the RAW matrix on disk implies displayed=${expected} but the sealed envelope shows ${shown} (independent-oracle mismatch)`);
+        for (const f of ["v", "reason", "note", "detail", "paced_match"]) {
+          if (shown[f] === expected[f]) continue;
+          errors.push(`R1: ${g.key}.${label}: the RAW matrix on disk implies [${say(expected)}] but the sealed ` +
+            `envelope carries [${say(shown)}] - they disagree on \`${f}\` (independent-oracle mismatch)`);
+          return;
+        }
       };
-      const rawCellAt = (ingress, egress) => {
-        const up = m.upstreams && m.upstreams[egress];
-        return (up && up.cells && up.cells[ingress]) || null;
-      };
+      // The oracle's own view of one raw field, gating and pacing resolved from the ONE vocabulary.
+      const expectOf = (rawSub, absences, prefix, k) => oracleEnvelope(rawSub[k], mockBoundFlagFor(rawSub, k), {
+        gated: GATED_FIELDS.includes(k) || PACED_FIELDS.includes(k),
+        paced: PACED_FIELDS.includes(k),
+        absent: absentEntryOf(absences, prefix, k),
+        zeroNote: zeroNoteFor(k),
+      });
+      const cellAt = (ingress, egress) => rawCellAt(m, ingress, egress);
       // (a) EVERY sealed matrix cell (36 of them), perf + stream, gated + ungated.
       for (const [egress, up] of Object.entries((g.matrix && g.matrix.upstreams) || {})) {
         for (const [ingress, cell] of Object.entries((up && up.cells) || {})) {
-          const rawCell = rawCellAt(ingress, egress);
-          if (!rawCell) continue;
+          const at = `matrix[${ingress}->${egress}]`;
+          const rawCell = cellAt(ingress, egress);
+          // A CELL THE ORACLE CANNOT FIND IS NOT A CELL THE ORACLE CHECKED. Skipping in silence is how
+          // a gateway whose cells the oracle never located still counted as an oracled gateway.
+          if (!rawCell) {
+            errors.push(`R1: ${g.key}.${at}: the bundle publishes this cell but the raw artifact on disk carries no ` +
+              `cell at those coordinates - not one of its numbers can be verified`);
+            unverified.add(g.key);
+            continue;
+          }
           // cell.memory joins perf/stream here: since memory became a PER-CELL record it is displayed
           // straight off these cells, so leaving it out would mean the board's whole memory lane
           // published unoracled numbers. Its fields are ungated (RSS + growth rate + time to plateau).
           for (const [prefix, sealedSub, rawSub] of [["perf", cell && cell.perf, rawCell.perf],
             ["stream", cell && cell.stream, rawCell.stream], ["memory", cell && cell.memory, rawCell.memory]]) {
-            if (!sealedSub || !rawSub) continue;
+            if (!sealedSub && !rawSub) continue;
+            // A WHOLE BLOCK MISSING ON ONE SIDE IS THE LOUDEST THING IN THIS FILE, not the quietest.
+            // `!sealedSub || !rawSub -> continue` skipped a gateway's entire perf, stream or memory
+            // lane without a word, while the gateway still earned its per-gateway oracle credit from
+            // whichever block did compare - so a bundle that lost a block wholesale, or invented one
+            // the artifact never carried, verified green and reported itself covered.
+            if (!sealedSub || !rawSub) {
+              errors.push(`R1: ${g.key}.${at}.${prefix}: the block exists in the ${sealedSub ? "published bundle" : "raw artifact"} ` +
+                `but not in the ${sealedSub ? "raw artifact" : "published bundle"} - every metric in it went unverified`);
+              unverified.add(g.key);
+              continue;
+            }
             for (const k of Object.keys(sealedSub)) {
               if (!isMetricField(k)) continue;
-              cmp(`matrix[${ingress}->${egress}].${k}`, app.metric(sealedSub[k]).v,
-                oracleExpected(rawSub[k], mockBoundFlagFor(rawSub, k),
-                  GATED_FIELDS.includes(k) || PACED_FIELDS.includes(k), PACED_FIELDS.includes(k),
-                  absentReasonFor(rawCell.absences, prefix, k)));
+              cmp(`${at}.${k}`, shownOf(sealedSub[k]), expectOf(rawSub, rawCell.absences, prefix, k));
             }
           }
         }
       }
       // (b) the PROJECTED records: best_cell, translation_cell, streaming. (Memory projects none.)
       for (const [name, rec, rawCellSel, prefix] of [
-        ["best_cell", g.best_cell, (() => { const p = g.best_cell && g.best_cell.path; return (p && rawCellAt(p.dialect, p.dialect)) || null; })(), "perf"],
-        ["translation_cell", g.translation_cell, (() => { const p = g.translation_cell && g.translation_cell.path; return (p && rawCellAt(p.ingress, p.egress)) || null; })(), "perf"],
-        ["streaming", g.streaming, (() => { const p = g.streaming && g.streaming.path; return (p && p.dialect && rawCellAt(p.dialect, p.dialect)) || null; })(), "stream"],
+        ["best_cell", g.best_cell, (() => { const p = g.best_cell && g.best_cell.path; return (p && cellAt(p.dialect, p.dialect)) || null; })(), "perf"],
+        ["translation_cell", g.translation_cell, (() => { const p = g.translation_cell && g.translation_cell.path; return (p && cellAt(p.ingress, p.egress)) || null; })(), "perf"],
+        ["streaming", g.streaming, (() => { const p = g.streaming && g.streaming.path; return (p && p.dialect && cellAt(p.dialect, p.dialect)) || null; })(), "stream"],
       ]) {
         const raw = rawCellSel && rawCellSel[prefix];
         if (!rec || !raw || !rec.source || rec.source.kind !== "matrix") continue;
         for (const k of Object.keys(rec)) {
           if (!isMetricField(k)) continue;
-          cmp(`${name}.${k}`, app.metric(rec[k]).v,
-            oracleExpected(raw[k], mockBoundFlagFor(raw, k),
-              GATED_FIELDS.includes(k) || PACED_FIELDS.includes(k), PACED_FIELDS.includes(k),
-              absentReasonFor(rawCellSel.absences, prefix, k)));
+          cmp(`${name}.${k}`, shownOf(rec[k]), expectOf(raw, rawCellSel.absences, prefix, k));
         }
+      }
+      // (c) R4: the SELECTION, re-derived from the raw artifact rather than read off the bundle.
+      // Only for matrix-sourced records: a fallback record is projected from a legacy suite file by a
+      // different rule, and holding it to the matrix's ranking would fail an honest legacy row.
+      const bestDialect = g.best_cell && g.best_cell.path && g.best_cell.path.dialect;
+      if (g.best_cell && g.best_cell.source && g.best_cell.source.kind === "matrix") {
+        covered("R4.selection");
+        const want = oracleBestDialect(m);
+        if (want && bestDialect !== want)
+          errors.push(`R4: ${g.key}.best_cell is published as the ${bestDialect} diagonal, but re-deriving the ` +
+            `selection from the raw artifact picks ${want} - the values under that name may all verify while the ` +
+            `board still names the wrong cell as this gateway's best`);
+      }
+      if (g.translation_cell && g.translation_cell.source && g.translation_cell.source.kind === "matrix") {
+        covered("R4.selection");
+        const want = oracleTranslationPath(m);
+        const p = g.translation_cell.path || {};
+        if (want && (p.ingress !== want.ingress || p.egress !== want.egress))
+          errors.push(`R4: ${g.key}.translation_cell is published as ${p.ingress}->${p.egress}, but re-deriving the ` +
+            `selection from the raw artifact picks ${want.ingress}->${want.egress} (the fair openai-ingress tier ` +
+            `first, then lowest added-latency p99) - correct numbers under the wrong path`);
+      }
+      if (g.streaming && g.streaming.source && g.streaming.source.kind === "matrix") {
+        covered("R4.selection");
+        // Streaming projects from THE SAME diagonal best_cell was projected from (gen-data: one source
+        // of truth). A streaming record naming a different dialect is two headline lanes describing
+        // two different cells under one gateway's name.
+        const sd = g.streaming.path && g.streaming.path.dialect;
+        if (bestDialect && sd !== bestDialect)
+          errors.push(`R4: ${g.key}.streaming is published on the ${sd} diagonal but best_cell is the ${bestDialect} ` +
+            `diagonal - the two headline lanes name different cells, and streaming is projected from the best cell`);
       }
       if (oracleCompared > 0) covered("R1.oracle");
     }
@@ -747,11 +963,14 @@ export function checkConsistency(data, app, opts = {}) {
   }
   if (/\bmetric\(|\bmval\(/.test(appSrc)) covered("C5.route");
 
+  // A gateway with an unverifiable cell or block is not an oracled gateway (see `unverified`).
+  for (const k of unverified) oracledKeys.delete(k);
+
   // ---- R2 coverage: every declared invariant branch must be exercised --------
   const CHECK_BRANCHES = [
     "C1.field", "C1.certified", "C1.mock_bound", "C2.suppressed",
     "C3.stamp", "C3.lint", "C3.route", "C3.parity", "C4.cell", "C4.leak", "C6.cell", "R1.oracle",
-    "R3.selection", "C7.hwm", "C5.route", "C5.lint", "C8.engine",
+    "R3.selection", "R4.selection", "C7.hwm", "C5.route", "C5.lint", "C8.engine",
   ];
   // C8.engine was tagged by the branch below but never DECLARED here, so R2's own
   // "every covered branch is a declared branch" assertion (test.mjs) hard-failed on any bundle whose
@@ -760,6 +979,9 @@ export function checkConsistency(data, app, opts = {}) {
   // errors already fire. It stays OUT of REQUIRED because eng.checked is 0 on a legitimately
   // all-unstamped (pre-stamp) board, and C8 already errors on the dishonest case - a MIX of stamped
   // and unstamped rows - so requiring coverage here would fail the one board C8 deliberately permits.
+  // R4.selection is declared but not REQUIRED for the same reason: a gateway can be a matrix publisher
+  // on its per-cell memory alone (no best_cell, no translation_cell, no streaming), and that row has no
+  // projected selection to re-derive. It is required of nothing and fires on everything that has one.
   // C1.mock_bound / C2.suppressed / C4.leak are ERROR-only branches: they fire only on a violation, so
   // they are NOT required to be covered by a healthy bundle (their absence is the GOOD state). REQUIRED =
   // the branches a healthy bundle with projected cells MUST exercise. C3.lint and C5.lint are tagged when

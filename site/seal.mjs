@@ -7,7 +7,7 @@
 // invariant P1). app.js reads envelopes through metric(); charts.py mirrors metric() + SWEEP_CAPTION.
 //
 // Envelope shapes (Design E §2.1):
-//   CERTIFIED   { value: N,    certified: true,  suppressed: false, source, ...extras }
+//   CERTIFIED   { value: N,    certified: true,  suppressed: false, source, paced_match?, ...extras }
 //   MEASURED-0  { value: 0,    certified: true,  suppressed: false, source, note: "no_qualifying_ceiling" }
 //   SUPPRESSED  { value: null, certified: false, suppressed: true,  reason: "mock_bound"|"unverifiable", source }
 //   NOT-MEASURED{ value: null, certified: false, suppressed: false, reason: <engine absence token>, detail? }
@@ -132,12 +132,39 @@ export function makeSource(kind, sweep, build, measuredAt) {
 // gateway; null (absent field) is the ONLY not-measured state.
 export const ZERO_NO_CEILING = "no_qualifying_ceiling";
 export const ZERO_MEASURED_FAIL = "measured_failure";
+// WHICH ZERO-NOTE A FIELD TAKES, as data rather than as a literal repeated at each call site.
+//
+// The note is the whole difference between "served, but no offered load held the gates" and "offered
+// stream load and sustained none of it", and gen-data used to pick it by hand per call while the
+// independent oracle in check-consistency knew nothing about it at all - so a swapped note published a
+// measured streaming failure as a missing RPS ceiling and verified green. One list, imported by both.
+// The streaming counts are the measured-failure family; every other gated metric is an RPS ceiling.
+export const ZERO_FAIL_FIELDS = ["streams_sustained", "streams_sustained_fps", "cpu_fps"];
+export function zeroNoteFor(field) {
+  return ZERO_FAIL_FIELDS.includes(field) ? ZERO_MEASURED_FAIL : ZERO_NO_CEILING;
+}
+// PACED_MATCH: the field a paced gateway's "I kept up with the mock's pace" signal rides on.
+// It is NOT a flag re-emission: `_mock_bound` is consumed at seal time and C1 rejects any key ending in
+// `_mock_bound` anywhere in the bundle. This is a derived, human-readable claim about the comparison
+// that WAS made ("this number matched the paced upstream"), which is the information the raw flag
+// carried and which was being thrown away - a gateway that merely matched the mock's paced target was
+// indistinguishable in the bundle from one proven unbound.
+export const PACED_MATCH = "paced_match";
 //   opts.absent: the engine's `absences` entry for this field ({reason, detail}), when the caller has
 //                one. An absent value then publishes the ENGINE'S reason and its prose detail instead
 //                of the flattened "not_measured" - the reason was measured too, and discarding it here
 //                was how "below rig resolution" (a win) rendered identically to "never ran" (a hole).
 export function sealMetric(value, opts = {}) {
   const { gated = false, paced = false, flag, extras = null, zeroNote = ZERO_NO_CEILING, absent = null } = opts;
+  // The extras (concurrency, the rung, the sweep array) attach to EVERY certified envelope, including a
+  // certified 0. They used to attach only on the last line, which the measured-zero branch returned
+  // before ever reaching - so a certified 0 published without the concurrency it was measured at and
+  // without the sweep array that is the evidence FOR the zero: the one reading whose curve a reader
+  // most needs, since "0" beside a real maximum is the claim that most demands its evidence.
+  const withExtras = (env) => {
+    if (extras) for (const [k, v] of Object.entries(extras)) if (v != null) env[k] = v;
+    return env;
+  };
   if (value == null) {
     const env = { value: null, certified: false, suppressed: false, reason: (absent && absent.reason) || "not_measured" };
     if (absent && absent.detail) env.detail = absent.detail;
@@ -146,14 +173,17 @@ export function sealMetric(value, opts = {}) {
   const num = Number(value);
   if (gated) {
     // measured-zero: an honest, certified 0 whose NOTE names what the zero means (see zeroNote above).
-    if (num === 0) return { value: 0, certified: true, suppressed: false, note: zeroNote };
+    if (num === 0) return withExtras({ value: 0, certified: true, suppressed: false, note: zeroNote });
     // A PACED metric's flag is not a suppression. The mock paces its stream deltas at a fixed
     // interval - "the pacing is the model generating tokens", in the mock's own words - so its
     // frames/sec is a TARGET rate, c streams x one frame per interval, and not a capacity it ran out
     // of. A gateway forwarding every frame as it arrives lands at ~99% of it, which is the best
     // possible outcome, and suppressing that threw the number away for the gateways doing best: 24
-    // of 69 cells in the 2026-07-28 run. The flag stays on the envelope as the signal it always was
-    // (this gateway matched the paced upstream), and the value is published beside it.
+    // of 69 cells in the 2026-07-28 run. The value is published, and the SIGNAL the flag carried
+    // travels with it as `paced_match: true` (see PACED_MATCH above) - not as the raw flag, which C1
+    // refuses anywhere in the bundle, but as the claim it stood for. Without it a gateway that merely
+    // MATCHED the mock's paced target was indistinguishable from one PROVEN unbound, which is a real
+    // difference between two published numbers and was being dropped on the floor.
     //
     // A metric that is gated but NOT paced keeps the old rule exactly: for a saturating throughput
     // load the mock's capacity really can be the limit, and publishing then ranks the rig.
@@ -167,8 +197,9 @@ export function sealMetric(value, opts = {}) {
     }
   }
   const env = { value: num, certified: true, suppressed: false };
-  if (extras) for (const [k, v] of Object.entries(extras)) if (v != null) env[k] = v;
-  return env;
+  // The paced-match signal, carried in a form C1 accepts (a named claim, never the raw flag).
+  if (gated && paced && flag === true) env[PACED_MATCH] = true;
+  return withExtras(env);
 }
 
 // isEnvelope: a sealed metric is an object carrying a `certified` boolean (never a bare scalar).

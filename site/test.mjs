@@ -37,6 +37,18 @@ let passed = 0;
 // after it, which is the worst failure mode for a suite whose job is to be the gate. Ordering must not
 // decide coverage.
 const failures = [];
+// A SKIP IS NOT A PASS AND MUST NOT BE PRINTED AS ONE.
+//
+// The gated families below (empty board, no matrix donor, board still filling) returned early from
+// INSIDE the test body, so the runner saw a function that did not throw and printed `ok - <name>` for
+// a check that never executed a single assertion. On an empty board that is most of this suite reading
+// green, per-test, with only a file-level warn banner to say otherwise - and the whole point of a suite
+// that gates a publish is that its per-test output can be read as evidence. A skip now says skip, is
+// counted apart from passes, and is summarised at the end.
+//
+// EXIT SEMANTICS ARE UNCHANGED: a skip is not a failure, so it does not set a non-zero exit. The suite
+// still exits non-zero if and only if something actually failed.
+const skipped = [];
 function test(name, fn) {
   try {
     fn();
@@ -47,7 +59,15 @@ function test(name, fn) {
     console.error(`FAIL - ${name}\n      ${(e && e.message ? String(e.message) : String(e)).split("\n").join("\n      ")}`);
   }
 }
+function skip(name, why) {
+  skipped.push({ name, why });
+  console.log(`skip - ${name}  # ${why}`);
+}
 process.on("exit", () => {
+  if (skipped.length) {
+    console.warn(`\n${skipped.length} SKIPPED test(s) (not run, not passed):`);
+    for (const s of skipped) console.warn(`  - ${s.name}  # ${s.why}`);
+  }
   if (!failures.length) return;
   console.error(`\n${failures.length} FAILING test(s):`);
   for (const f of failures) console.error(`  - ${f.name}`);
@@ -194,10 +214,8 @@ if (!BOARD_HAS_DATA) {
 // Register a test that only runs against a populated board. On an empty one it is recorded as skipped
 // rather than silently dropped, so the count never quietly shrinks.
 const testWithData = (name, fn) =>
-  test(name, () => {
-    if (!BOARD_HAS_DATA) return; // vacuous: no gateway carries a number to be inconsistent about
-    fn();
-  });
+  (BOARD_HAS_DATA ? test(name, fn)
+    : skip(name, "the board carries no measurements: no gateway publishes a number to be inconsistent about"));
 
 // THE RED SELF-TESTS NEED A STRICTLY NARROWER THING THAN BOARD_HAS_DATA.
 //
@@ -226,10 +244,8 @@ if (!BOARD_HAS_MATRIX_DONOR && !BOARD_IS_COMPLETE) {
   console.warn("       the RED self-tests have nothing to revert and are reported as skipped until the board fills.");
 }
 const testWithMatrixDonor = (name, fn) =>
-  test(name, () => {
-    if (!BOARD_HAS_MATRIX_DONOR && !BOARD_IS_COMPLETE) return;
-    fn();
-  });
+  ((BOARD_HAS_MATRIX_DONOR || BOARD_IS_COMPLETE) ? test(name, fn)
+    : skip(name, `no matrix-sourced best_cell to revert yet (${PUBLISHING_GATEWAYS}/${DECLARED_GATEWAYS} gateways publishing)`));
 
 // A NARROWER GATE STILL, for the two assertions that are claims about the FIELD rather than about a
 // row: that the oracle reaches several distinct surfaces, and that R2's own failure path fires
@@ -237,10 +253,8 @@ const testWithMatrixDonor = (name, fn) =>
 // not evidence the oracle stopped covering anything. These only mean something once every gateway
 // the repo declares has published, so that is exactly when they run.
 const testWhenBoardComplete = (name, fn) =>
-  test(name, () => {
-    if (!BOARD_IS_COMPLETE) return;
-    fn();
-  });
+  (BOARD_IS_COMPLETE ? test(name, fn)
+    : skip(name, `a claim about the whole FIELD, and the board is still filling (${PUBLISHING_GATEWAYS}/${DECLARED_GATEWAYS} gateways publishing)`));
 
 // ---- freshness guard (matrix-sole-source): relaxed rules ----
 // Under matrix-sole-source each gateway is ONE atomic matrix run (hours long) published INDEPENDENTLY,
@@ -1403,6 +1417,64 @@ test("translationCell prefers the FAIR (openai-ingress) tier even when an ANY ca
   assert.equal(app.mval(g.translation_cell.added_latency_p99_us), 200);
 });
 
+// A BELOW-RESOLUTION added latency is the engine's BEST outcome (the difference was at or under what
+// the rig can resolve), so it must RANK as 0 in bestCell's lowest-p99 choice, never as the Infinity a
+// plain missing number sorts as. Non-openai diagonals only: bestCell prefers the openai diagonal
+// deterministically, which would mask the ranking under test.
+test("bestCell ranks a below-resolution p99 as 0, beating a measured diagonal", () => {
+  const root = buildStreamMemRepo();
+  const mpath = join(root, "results", "matrix", "sgw.json");
+  const m = JSON.parse(readFileSync(mpath, "utf8"));
+  delete m.cells;
+  m.upstreams = {
+    // The winner: served, p99 null, and the engine's absences entry says WHY - below the rig's resolution.
+    anthropic: { configurable: true, served: true, cells: { anthropic: { served: true,
+      perf: { added_latency_p50_us: null, added_latency_p99_us: null, rps_sustained_20ms: 30000 },
+      absences: {
+        "perf.added_latency_p50_us": { reason: "below_resolution", detail: "difference at or under the rig's resolution" },
+        "perf.added_latency_p99_us": { reason: "below_resolution", detail: "difference at or under the rig's resolution" },
+      } } } },
+    // The measured competitor: a real 350us p99, which rank 0 must beat.
+    gemini: { configurable: true, served: true, cells: { gemini: { served: true,
+      perf: { added_latency_p50_us: 200, added_latency_p99_us: 350, rps_sustained_20ms: 45000 } } } },
+  };
+  writeFileSync(mpath, JSON.stringify(m));
+  const g = genInto(root).gateways.find((x) => x.key === "sgw");
+  assert.ok(g.best_cell, "the below-resolution diagonal must still produce a best_cell");
+  assert.equal(g.best_cell.path.dialect, "anthropic", "rank 0 (below resolution) must beat a measured 350");
+  assert.equal(g.best_cell.added_latency_p99_us.reason, "below_resolution", "the envelope carries the engine's reason");
+  assert.equal(app.mval(g.best_cell.added_latency_p99_us), 0, "the site ranks/renders it as 0");
+});
+
+// The same win must QUALIFY a translation cell: a served cross-dialect cell whose p99 is below
+// resolution is a measured matrix result, and it must be selected - not silently dropped so the
+// legacy xlate suite's stale number publishes over the matrix (matrix-sole-source).
+test("translationCell selects a below-resolution matrix cell instead of falling back to legacy xlate", () => {
+  const root = buildStreamMemRepo();
+  const mpath = join(root, "results", "matrix", "sgw.json");
+  const m = JSON.parse(readFileSync(mpath, "utf8"));
+  // openai in -> anthropic out, p99 below the rig's resolution (the best a translation cell can read).
+  m.upstreams.anthropic = { configurable: true, served: true, cells: { openai: { served: true,
+    perf: { added_latency_p50_us: null, added_latency_p99_us: null, rps_sustained_20ms: 8000 },
+    absences: {
+      "perf.added_latency_p50_us": { reason: "below_resolution", detail: "difference at or under the rig's resolution" },
+      "perf.added_latency_p99_us": { reason: "below_resolution", detail: "difference at or under the rig's resolution" },
+    } } } };
+  writeFileSync(mpath, JSON.stringify(m));
+  // A live legacy xlate result that the fallback would publish if the matrix cell were dropped.
+  mkdirSync(join(root, "results", "xlate"), { recursive: true });
+  writeFileSync(join(root, "results", "xlate", "sgw.json"), JSON.stringify({
+    xlate_served: true, build: "ok", measured_at: new Date(Date.now() - 7200000).toISOString(),
+    xlate_added_latency_p50_us: 900, xlate_added_latency_p99_us: 1800, xlate_rps_sustained_20ms: 5000 }));
+  const g = genInto(root).gateways.find((x) => x.key === "sgw");
+  assert.ok(g.translation_cell, "the below-resolution cell must still produce a translation cell");
+  assert.equal(g.translation_cell.source.kind, "matrix", "the matrix wins; the legacy fallback must not fire");
+  assert.equal(g.translation_cell.path.ingress, "openai");
+  assert.equal(g.translation_cell.path.egress, "anthropic");
+  assert.equal(g.translation_cell.added_latency_p99_us.reason, "below_resolution");
+  assert.equal(app.mval(g.translation_cell.added_latency_p99_us), 0);
+});
+
 test("gen-data projects streaming from the best diagonal matrix cell", () => {
   const bundle = genInto(buildStreamMemRepo());
   const g = bundle.gateways.find((x) => x.key === "sgw");
@@ -2284,6 +2356,20 @@ test("a measured FAILURE renders red with its counts, never as the n/a an untest
     detail: "the gateway leg at c=1 was not clean: 497 ok, 3 fail" } }), String);
   assert.equal(noisy.text, "n/a");
   assert.ok(!noisy.failed);
+  // The engine emits the IDENTICAL sentence for the DIRECT-TO-MOCK leg - that is OUR reference rig
+  // failing, not the gateway. It must NOT get the red gateway-blaming render: plain n/a, with the
+  // full detail on the tooltip so the rig-side cause is still visible.
+  const directDetail = "the direct-to-mock leg at c=1 was not clean: 0 ok, 8123 fail";
+  const direct = app.metric(sealMetric(null, { absent: { reason: "not_measured",
+    detail: directDetail } }), String);
+  assert.equal(direct.text, "n/a", "a rig-side total failure renders as plain n/a");
+  assert.ok(!direct.failed, "the failed flag blames the gateway; the direct leg must never carry it");
+  assert.equal(direct.note, directDetail, "the full detail stays on the tooltip");
+  // The streaming shape of the same distinction: no frame from the mock directly is a rig problem.
+  const directFrames = app.metric(sealMetric(null, { absent: { reason: "not_measured",
+    detail: "no stream frame arrived from the mock directly, so there is nothing to difference" } }), String);
+  assert.equal(directFrames.text, "n/a");
+  assert.ok(!directFrames.failed);
 });
 
 test("a measured zero's meaning is VISIBLE on the table cell, not only in a hover tooltip", () => {
@@ -2417,14 +2503,22 @@ test("a DEGRADED-MODE snapshot must never become the board's source just by bein
     assert.equal(g.matrix_from_snapshot, true, "a newer FULL run must still win");
     assert.equal(g.best_cell, undefined, "and its honest zero-served result must publish as such");
   }
-  // (c) GREEN: a degraded snapshot is fine when there is nothing fuller to shadow (a gateway whose only
-  //     data is that run). Absence of a better run is not a reason to publish nothing.
+  // (c) RED: a LONE degraded snapshot - nothing on disk for it to shadow - must be refused too.
+  //     This case used to publish, on the reasoning that "absence of a better run is not a reason to
+  //     publish nothing". But the board does not publish "nothing" for a gateway with no artifact; it
+  //     publishes n/a, which is the true statement. What it published instead was a probe-only run
+  //     under that gateway's name, as a board RESULT, with no marker of any kind - so the one gateway
+  //     the reader has no other information about is the one shown a smoke run. Shadowing was never the
+  //     defect; becoming the board's source is, and a lone smoke snapshot does that most cheaply.
   {
     const root = buildStreamMemRepo();
     rmSync(join(root, "results", "matrix", "sgw.json"), { force: true });
     writeSnapshot(root, "sgw", { measuredAt: iso(0.5), matrix: probeOnly(iso(0.5)) });
-    const g = genInto(root).gateways.find((x) => x.key === "sgw");
-    assert.equal(g.matrix_from_snapshot, true, "the only run there is must publish");
+    assert.throws(() => genInto(root), (e) => {
+      assert.match(e.message, /DEGRADED-MODE snapshot/);
+      assert.match(e.message, /ONLY matrix artifact/, "the message must say nothing was shadowed, so the fix differs");
+      return true;
+    }, "a smoke run must not become a gateway's board result just because it is the only file there");
   }
 });
 
@@ -3262,7 +3356,454 @@ test("protocol grid: a matrix-less gateway renders an all-n/a row with its reaso
   assert.equal(oldBehaviour.length, 1, "…which is the disappearance this test exists to prevent");
 });
 
-console.log(`\n${passed} tests passed`);
+/* ---- LEDGER 2026-07-29: the deferred SITE-* findings, each with the RED it now fails ------------- */
+
+// SITE-01. The oracle compared `.v` and nothing else, so everything the envelope SAYS about its number
+// was unverified: a reason flattened back to "not_measured", a zero-note swapped between "no qualifying
+// ceiling" and "measured failure", a lost detail. Each preserves the number, so each verified green.
+test("SITE-01: the oracle re-derives the whole envelope - reason, note, detail, paced-match", () => {
+  const oe = checkMod.oracleEnvelope;
+  // an absence carries the ENGINE's reason and its prose, not a flattened token
+  assert.deepEqual(oe(null, undefined, { absent: { reason: "below_resolution", detail: "too small to weigh" } }),
+    { v: 0, reason: "below_resolution", note: null, detail: "too small to weigh", paced_match: false });
+  assert.deepEqual(oe(null, undefined, {}),
+    { v: null, reason: "not_measured", note: null, detail: null, paced_match: false });
+  // a certified zero carries the note that names WHICH zero it is
+  assert.equal(oe(0, false, { gated: true, zeroNote: ZERO_MEASURED_FAIL }).note, ZERO_MEASURED_FAIL);
+  assert.equal(oe(0, false, { gated: true, zeroNote: ZERO_NO_CEILING }).note, ZERO_NO_CEILING);
+  // a suppression names WHY it was suppressed
+  assert.equal(oe(9, true, { gated: true }).reason, "mock_bound");
+  assert.equal(oe(9, null, { gated: true }).reason, "unverifiable");
+  // and a paced publish carries the signal the raw flag stood for
+  assert.equal(oe(9, true, { gated: true, paced: true }).paced_match, true);
+  assert.equal(oe(9, false, { gated: true, paced: true }).paced_match, false);
+  // THE SEAL AND THE ORACLE MUST AGREE ON ALL OF IT, not only on the number.
+  for (const raw of [null, 0, 7]) {
+    for (const flag of [undefined, null, true, false]) {
+      for (const [gated, paced] of [[false, false], [true, false], [true, true]]) {
+        const s = sealMetric(raw, { gated, paced, flag, zeroNote: ZERO_MEASURED_FAIL });
+        const o = oe(raw, flag, { gated, paced, zeroNote: ZERO_MEASURED_FAIL });
+        assert.equal(s.reason ?? null, o.reason, `reason for raw=${raw} flag=${flag} gated=${gated} paced=${paced}`);
+        assert.equal(s.note ?? null, o.note, `note for raw=${raw} flag=${flag} gated=${gated} paced=${paced}`);
+        assert.equal(s.paced_match === true, o.paced_match, `paced_match for raw=${raw} flag=${flag}`);
+      }
+    }
+  }
+});
+
+testWithMatrixDonor("SITE-01 RED: a mangled reason / note / paced-match on a CORRECT number fails the oracle", () => {
+  const at = (d) => matrixGw(d).best_cell.rps_sustained_20ms;
+  // (a) a note the raw data does not imply: the number is untouched, so a value-only oracle sees nothing.
+  {
+    const d = clone(); at(d).note = ZERO_MEASURED_FAIL;
+    const e = checkConsistency(d, app).errors;
+    assert.ok(e.some((x) => x.startsWith("R1:") && x.includes("`note`")),
+      `the oracle must catch a note the raw artifact does not imply; got ${JSON.stringify(e.slice(0, 3))}`);
+  }
+  // (b) a reason bolted onto a certified envelope.
+  {
+    const d = clone(); at(d).reason = "not_measured";
+    const e = checkConsistency(d, app).errors;
+    assert.ok(e.some((x) => x.startsWith("R1:") && x.includes("`reason`")),
+      `the oracle must catch an invented reason; got ${JSON.stringify(e.slice(0, 3))}`);
+  }
+  // (c) a paced-match claim on a number that was never compared against a paced upstream.
+  {
+    const d = clone(); at(d).paced_match = true;
+    const e = checkConsistency(d, app).errors;
+    assert.ok(e.some((x) => x.startsWith("R1:") && x.includes("`paced_match`")),
+      `the oracle must catch a fabricated paced-match signal; got ${JSON.stringify(e.slice(0, 3))}`);
+  }
+});
+
+// SITE-02. The oracle verified the numbers at the coordinates the BUNDLE CLAIMED and never asked whether
+// those were the right coordinates, so a wrong best/translation cell published correct values under the
+// wrong name and every comparison agreed with it.
+test("SITE-02: the SELECTION is re-derived from the raw artifact, by the published rule", () => {
+  const cell = (p99, served = true) => ({ served, perf: { added_latency_p99_us: p99, rps_sustained_20ms: 1 } });
+  // the canonical openai diagonal wins whenever it is served, whatever the others read
+  const m1 = { upstreams: { openai: { cells: { openai: cell(900) } }, anthropic: { cells: { anthropic: cell(10) } } } };
+  assert.equal(checkMod.oracleBestDialect(m1), "openai");
+  // with no openai diagonal, the lowest added-latency p99 wins
+  const m2 = { upstreams: { gemini: { cells: { gemini: cell(900) } }, anthropic: { cells: { anthropic: cell(10) } } } };
+  assert.equal(checkMod.oracleBestDialect(m2), "anthropic");
+  // a BELOW-RESOLUTION p99 is the best reading the rig can express, so it ranks 0 and wins - not last
+  const m3 = { upstreams: {
+    gemini: { cells: { gemini: cell(10) } },
+    anthropic: { cells: { anthropic: { served: true, perf: { rps_sustained_20ms: 1 },
+      absences: { "perf.added_latency_p99_us": { reason: "below_resolution" } } } } } } };
+  assert.equal(checkMod.oracleBestDialect(m3), "anthropic");
+  // translation: the FAIR (openai-ingress) tier outranks a faster any-tier candidate
+  const m4 = { upstreams: {
+    anthropic: { cells: { openai: cell(500), gemini: cell(5) } } } };
+  assert.deepEqual(checkMod.oracleTranslationPath(m4), { ingress: "openai", egress: "anthropic" });
+  // and the any tier is used only when the matrix measured no openai-ingress cell at all
+  const m5 = { upstreams: { anthropic: { cells: { gemini: cell(5), bedrock: cell(50) } } } };
+  assert.deepEqual(checkMod.oracleTranslationPath(m5), { ingress: "gemini", egress: "anthropic" });
+});
+
+testWithMatrixDonor("SITE-02 RED: a projected record naming the WRONG cell fails R4", () => {
+  {
+    const d = clone(); matrixGw(d).best_cell.path.dialect = "not-a-dialect";
+    const e = checkConsistency(d, app).errors;
+    assert.ok(e.some((x) => x.startsWith("R4:") && x.includes("best_cell")),
+      `R4 must re-derive the best-cell selection; got ${JSON.stringify(e.slice(0, 3))}`);
+  }
+  {
+    const d = clone();
+    const g = d.gateways.find((x) => x.translation_cell && x.translation_cell.source.kind === "matrix");
+    if (g) {
+      g.translation_cell.path.egress = "not-a-dialect";
+      const e = checkConsistency(d, app).errors;
+      assert.ok(e.some((x) => x.startsWith("R4:") && x.includes("translation_cell")),
+        `R4 must re-derive the translation selection; got ${JSON.stringify(e.slice(0, 3))}`);
+    }
+  }
+  {
+    const d = clone();
+    const g = d.gateways.find((x) => x.streaming && x.streaming.source.kind === "matrix" && x.best_cell);
+    if (g) {
+      g.streaming.path.dialect = "not-a-dialect";
+      const e = checkConsistency(d, app).errors;
+      assert.ok(e.some((x) => x.startsWith("R4:") && x.includes("streaming")),
+        `R4 must catch streaming projected off a different cell than best_cell; got ${JSON.stringify(e.slice(0, 3))}`);
+    }
+  }
+});
+
+// SITE-03. A whole perf/stream/memory block missing on one side was skipped in silence while the gateway
+// still earned its per-gateway oracle credit from whichever block did compare.
+testWithData("SITE-03 RED: a whole block the oracle cannot compare fails, and costs the gateway its oracle credit", () => {
+  const d = clone();
+  let hit = null;
+  outer:
+  for (const g of d.gateways) {
+    for (const up of Object.values((g.matrix && g.matrix.upstreams) || {})) {
+      for (const [ingress, cell] of Object.entries((up && up.cells) || {})) {
+        if (cell && cell.stream) { delete cell.stream; hit = { key: g.key, ingress }; break outer; }
+      }
+    }
+  }
+  assert.ok(hit, "precondition: the board publishes at least one sealed stream block to drop");
+  const e = checkConsistency(d, app).errors;
+  assert.ok(e.some((x) => x.startsWith("R1:") && x.includes(hit.key) && x.includes("went unverified")),
+    `a dropped block must be reported, not skipped; got ${JSON.stringify(e.slice(0, 3))}`);
+  assert.ok(e.some((x) => x.startsWith("R2:") && x.includes("never verified") && x.includes(hit.key)),
+    `and the gateway must lose its oracle credit rather than stay 'oracled'; got ${JSON.stringify(e.slice(0, 5))}`);
+});
+
+// SITE-04. rawCellAt read only m.upstreams, so a v1-shape artifact produced ZERO comparisons - and the
+// per-gateway coverage gate then turned that silence into a hard failure on an honest legacy publish.
+test("SITE-04: a v1-shape raw artifact is read by the oracle, not skipped into a publish failure", () => {
+  const v1 = { upstream_shape: "anthropic", cells: { openai: { served: true, perf: { rps_max_proxy: 7 } } } };
+  assert.deepEqual(Object.keys(checkMod.upstreamsOf(v1)), ["anthropic"]);
+  assert.equal(checkMod.rawCellAt(v1, "openai", "anthropic").perf.rps_max_proxy, 7);
+  assert.equal(checkMod.rawCellAt(v1, "openai", "openai"), null, "the shape names the ONE measured egress");
+  // a v1 artifact with no upstream_shape is the openai row, exactly as gen-data normalizes it
+  assert.ok(checkMod.rawCellAt({ cells: { openai: { served: true } } }, "openai", "openai"));
+  // v2 is untouched, and a matrix with neither shape yields nothing rather than throwing
+  assert.equal(checkMod.rawCellAt({ upstreams: { openai: { cells: { gemini: { served: true } } } } }, "gemini", "openai").served, true);
+  assert.deepEqual(checkMod.upstreamsOf({}), {});
+  // and C6 now bites on a v1 cell: the invariant is about physics, not about the artifact's version
+  const inv = checkMod.c6Inversions("gw", { upstream_shape: "openai", cells: { openai: { served: true,
+    perf: { rps_sustained_20ms: 200, rps_max_proxy: 100 } } } });
+  assert.equal(inv.cellsChecked, 1);
+  assert.equal(inv.violations.length, 1);
+});
+
+// SITE-05. The C3 caption lint scanned DOUBLE-quoted tokens only, and exempted any line containing the
+// word "source" - which is every caption renderer, since a caption renderer is a function about where a
+// datum came from. Both holes point the same way: not firing.
+test("SITE-05: the C3 lint sees every quoting style, and its exemption is a sweep ASSIGNMENT only", () => {
+  const region = { enter: /const SWEEP_CAPTION\s*=/, exit: /^\};\s*$/m };
+  const head = 'const SWEEP_CAPTION = {\n  "6x6-diagonal": () => "x",\n};\n';
+  const fires = (line) => checkMod.lintSweepKeys(head + line + "\n", "fake.js", region).errors;
+  // every quoting style the two languages can leak a token in
+  assert.equal(fires(`const note = '6x6-diagonal';`).length, 1, "single quotes must be scanned");
+  assert.equal(fires('const note = `6x6-diagonal`;').length, 1, "template literals must be scanned");
+  assert.equal(fires('const note = "6x6-diagonal";').length, 1, "double quotes, as before");
+  // A CAPTION RENDERER IS EXACTLY WHERE THIS BUG CLASS LIVES, and it mentions "source" by nature.
+  assert.equal(fires('function sourceLabel(x) { return "6x6-diagonal"; }').length, 1,
+    "a line mentioning `source` must NOT be exempt: caption renderers are where the leak happens");
+  assert.equal(fires('const t = sweepy + "6x6-diagonal";').length, 1,
+    "a word merely containing `sweep` is not a sweep assignment");
+  // the one legitimate use stays legitimate: the token AS the value of a sweep key (provenance data)
+  assert.deepEqual(fires('rec.source = { kind: "matrix", sweep: "6x6-diagonal" };'), []);
+  assert.deepEqual(fires(`rec.source = { kind: 'matrix', sweep: '6x6-diagonal' };`), []);
+  assert.deepEqual(fires('lbl = _sweep_label({"sweep": "6x6-diagonal"})'), []);
+  // and the repo's own two scanned files stay clean under the stricter lint
+  const appSrc = readFileSync(join(HERE, "app.js"), "utf8");
+  assert.deepEqual(checkMod.lintSweepKeys(appSrc, "app.js", region).errors, []);
+  assert.deepEqual(checkMod.lintSweepKeys(readFileSync(join(HERE, "..", "charts.py"), "utf8"), "charts.py",
+    { enter: /SWEEP_CAPTION\s*=|def _sweep_label/, exit: /^def (?!_sweep_label)/ }).errors, []);
+});
+
+// SITE-06. The C5 routing lint knew one spelling of "read the raw number off the envelope". A reader
+// routes around the other three by accident, in three keystrokes, and the lint reports itself green.
+test("SITE-06: the C5 lint catches bracket, bracket-chain and destructuring reads, not just `.value`", () => {
+  const bad = (body) => checkMod.lintAccessorRouting(
+    `function draw(p, key) {\n  const env = p[key];\n  if (!isEnvelope(env)) return;\n  ${body}\n}\n`, "fake.js", "js").errors;
+  assert.equal(bad('out.push(env["value"]);').length, 1, 'env["value"] must fire');
+  assert.equal(bad("out.push(env['value']);").length, 1, "env['value'] must fire");
+  assert.equal(bad("out.push(env[key].value);").length, 1, "a bracket-then-.value chain must fire");
+  assert.equal(bad("const { value } = env;").length, 1, "a destructured read must fire");
+  assert.equal(bad("const { value: v } = env; out.push(v);").length, 1, "a renamed destructured read must fire");
+  assert.deepEqual(bad("out.push(mval(env));"), [], "the routed read stays clean");
+  // the direct field form, in the same spellings
+  const direct = (line) => checkMod.lintAccessorRouting(line + "\n", "fake.js", "js").errors;
+  assert.ok(direct('const x = p.rps_sustained_20ms["value"];').length >= 1);
+  assert.ok(direct('const x = p["rps_sustained_20ms"].value;').length >= 1);
+  assert.ok(direct("const { value } = p.rps_max_proxy;").length >= 1);
+  // python's bracket spelling of the same read
+  const py = 'def draw(bc):\n    env = bc.get("rps_sustained_20ms")\n    if _is_env(env):\n        return env["value"]\n';
+  assert.ok(checkMod.lintAccessorRouting(py, "fake.py", "py").errors.length >= 1);
+  // and the repo's own readers are still clean under the wider lint
+  for (const [rel, lang] of [["app.js", "js"], ["../charts.py", "py"]])
+    assert.deepEqual(checkMod.lintAccessorRouting(readFileSync(join(HERE, rel), "utf8"), rel, lang).errors, []);
+});
+
+// SITE-07. The paced branch's comment promised "the flag stays on the envelope as the signal it always
+// was" and nothing of the kind survived - C1 would reject the raw flag anyway. The signal is real
+// information (matched the mock's paced target vs proven unbound), so it is carried, not deleted.
+test("SITE-07: a paced publish carries the paced-match signal, in a form C1 accepts", () => {
+  const matched = sealMetric(39000, { gated: true, paced: true, flag: true, zeroNote: ZERO_MEASURED_FAIL });
+  assert.equal(matched.value, 39000, "matching a paced target publishes the number");
+  assert.equal(matched.paced_match, true, "and says so on the envelope");
+  const proven = sealMetric(39000, { gated: true, paced: true, flag: false, zeroNote: ZERO_MEASURED_FAIL });
+  assert.equal(proven.paced_match, undefined, "a proven-unbound number makes no paced-match claim");
+  assert.notEqual(JSON.stringify(matched), JSON.stringify(proven),
+    "the two must be distinguishable in the bundle; that is the whole finding");
+  // NOT a re-emitted flag: no key ending in _mock_bound survives, which is what C1 forbids.
+  for (const k of Object.keys(matched)) assert.ok(!k.endsWith("_mock_bound"));
+  // a capacity metric is unchanged: a true flag there is still a suppression
+  assert.equal(sealMetric(39000, { gated: true, paced: false, flag: true }).suppressed, true);
+  // and the reader renders it as a note rather than leaving it as a silent field
+  assert.match(app.metric(matched).note, /paced upstream/);
+  // C1/C2 accept the envelope: it is certified, and paced_match is not a recoverable number
+  const d = { gateways: [{ key: "g", streaming: { path: { dialect: "openai" },
+    source: { kind: "matrix", sweep: "6x6-stream-diagonal", build: "b", measured_at: "2026-07-24T00:00:00Z" },
+    stream_served: true, streams_sustained: matched } }] };
+  assert.deepEqual(checkConsistency(d, app, SYNTH).errors, []);
+});
+
+// SITE-08. The gated measured-zero returned before the extras were attached, so a certified 0 lost its
+// concurrency and its sweep - the curve that is the evidence FOR the zero, and the reading whose
+// evidence a reader most needs, since a 0 beside a real maximum is the claim that most demands it.
+test("SITE-08: a certified MEASURED ZERO keeps its concurrency and its sweep evidence", () => {
+  const sweep = [{ conc: 64, rps: 0, p99_us: 900000, fail: 12 }, { conc: 128, rps: 0, p99_us: 900000, fail: 40 }];
+  const z = sealMetric(0, { gated: true, zeroNote: ZERO_NO_CEILING, extras: { concurrency: 64, conc_at: 64, sweep } });
+  assert.equal(z.value, 0);
+  assert.equal(z.certified, true);
+  assert.equal(z.note, ZERO_NO_CEILING, "the note still names WHICH zero this is");
+  assert.equal(z.concurrency, 64, "a certified zero was measured AT a concurrency");
+  assert.deepEqual(z.sweep, sweep, "and its sweep is the evidence the zero rests on");
+  // a SUPPRESSED metric still drops its extras: it exposes no recoverable number (C2)
+  const s = sealMetric(500, { gated: true, flag: true, extras: { concurrency: 64, sweep } });
+  assert.equal(s.suppressed, true);
+  assert.equal(s.concurrency, undefined);
+  assert.equal(s.sweep, undefined);
+});
+
+// SITE-09. The legacy top-level memory reseal tested RSS_FIELD_RE only and passed no absent option: the
+// narrower-whitelist bug (peak_rss_hwm_mib shipping bare) re-created one level up, plus a flattened
+// absence reason on reseal.
+test("SITE-09: the LEGACY top-level memory block seals by the same vocabulary and carries its absences", () => {
+  const root = buildStreamMemRepo();
+  const mpath = join(root, "results", "matrix", "sgw.json");
+  const m = JSON.parse(readFileSync(mpath, "utf8"));
+  m.memory.growth_rate_mib_per_min = 1.5;      // a metric that is NOT an RSS field
+  m.memory.time_to_plateau_s = null;           // measured, and absent for a stated reason
+  m.absences = { "memory.time_to_plateau_s": { reason: "below_resolution", detail: "settled inside one sample" } };
+  writeFileSync(mpath, JSON.stringify(m));
+  const g = genInto(root).gateways.find((x) => x.key === "sgw");
+  const mem = g.matrix.memory;
+  assert.equal(app.isEnvelope(mem.growth_rate_mib_per_min), true,
+    "a non-RSS memory metric must not ship as a bare scalar off a legacy block");
+  assert.equal(app.mval(mem.growth_rate_mib_per_min), 1.5);
+  assert.equal(mem.time_to_plateau_s.reason, "below_resolution",
+    "the engine's own reason must survive the reseal, not flatten to not_measured");
+  assert.equal(mem.time_to_plateau_s.detail, "settled inside one sample");
+  assert.equal(app.isEnvelope(mem.peak_rss_hwm_mib), true, "RSS discovery still applies");
+});
+
+// SITE-10. sealMatrixCellsInPlace rebuilt each cell's stream object from a fixed key list, which deleted
+// the engine's `reason` prose and its c=1 note: the bundle published a refusal with its explanation
+// removed. Seven reasons and five c1 notes in the recovered 2026-07-29 snapshots.
+test("SITE-10: the in-place stream reseal carries the WHY (reason + c1 note), not only the status", () => {
+  const root = buildStreamMemRepo();
+  const mpath = join(root, "results", "matrix", "sgw.json");
+  const m = JSON.parse(readFileSync(mpath, "utf8"));
+  // The engine's shape: `reason` is the machine TOKEN (the Absent vocabulary), `stream_error` the prose.
+  for (const cells of [m.cells, m.upstreams.openai.cells]) {
+    cells.openai.stream = { ...cells.openai.stream, stream_served: "untestable",
+      reason: "untestable",
+      stream_error: "the rig cannot pose an SSE request in this dialect",
+      stream_c1_note: "the c=1 leg answered, but never framed an event" };
+  }
+  writeFileSync(mpath, JSON.stringify(m));
+  const g = genInto(root).gateways.find((x) => x.key === "sgw");
+  const s = g.matrix.upstreams.openai.cells.openai.stream;
+  assert.equal(s.stream_served, "untestable");
+  assert.equal(s.reason, "untestable", "the machine token must survive the seal");
+  assert.equal(s.stream_error, "the rig cannot pose an SSE request in this dialect",
+    "and so must the prose behind it: a status with its explanation removed is an assertion");
+  assert.equal(s.stream_c1_note, "the c=1 leg answered, but never framed an event");
+  assert.equal(app.isEnvelope(s.streams_sustained), true, "and the metrics are still sealed");
+  // the reader shows the PROSE, never the raw token
+  const na = app.naText(s, "stream_served", "stream_error");
+  assert.equal(na.text, "not testable");
+  assert.equal(na.note, "the rig cannot pose an SSE request in this dialect");
+});
+
+// SITE-12. The stream-suite fallback stamped the WHOLE record with the stream suite's build/measured_at
+// although cpu_fps comes from the separate streamcpu suite, which runs on its own cadence: the number
+// was dated to a run that never produced it.
+test("SITE-12: on a legacy fallback row, cpu_fps carries the suite that actually produced it", () => {
+  const iso = (hAgo) => new Date(Date.now() - hAgo * 3600000).toISOString();
+  const STREAM_AT = iso(2), CPU_AT = iso(72);   // fixed once: two Date.now() calls are two instants
+  const build = (root, cpuAt, cpuBuild) => {
+    const mpath = join(root, "results", "matrix", "sgw.json");
+    const m = JSON.parse(readFileSync(mpath, "utf8"));
+    for (const cells of [m.cells, m.upstreams.openai.cells]) delete cells.openai.stream;  // no matrix streaming
+    writeFileSync(mpath, JSON.stringify(m));
+    mkdirSync(join(root, "results", "stream"), { recursive: true });
+    mkdirSync(join(root, "results", "streamcpu"), { recursive: true });
+    writeFileSync(join(root, "results", "stream", "sgw.json"), JSON.stringify({
+      gateway: "sgw", build: "stream-build", measured_at: STREAM_AT, endpoint: "/v1/chat/completions",
+      stream_served: true, stream_added_ttft_p50_us: 40, stream_added_ttft_p99_us: 90,
+      stream_added_gap_p50_us: 5, stream_added_gap_p99_us: 12,
+      stream_sustained_streams: 1300, stream_sustained_fps: 39000, stream_mock_bound: false }));
+    writeFileSync(join(root, "results", "streamcpu", "sgw.json"), JSON.stringify({
+      gateway: "sgw", build: cpuBuild, measured_at: cpuAt,
+      streamcpu_frames_per_sec: 48000, streamcpu_concurrency: 768, streamcpu_mock_bound: false }));
+    return genInto(root).gateways.find((x) => x.key === "sgw");
+  };
+  // (a) the two suites ran days apart: cpu_fps must carry ITS OWN stamp, not the record's.
+  const g = build(buildStreamMemRepo(), CPU_AT, "cpu-build");
+  assert.equal(g.streaming.source.kind, "stream-fallback");
+  assert.equal(g.streaming.source.measured_at, STREAM_AT, "the record is stamped by the stream suite");
+  assert.equal(g.streaming.cpu_fps.source.measured_at, CPU_AT, "cpu_fps by the streamcpu suite that produced it");
+  assert.equal(g.streaming.cpu_fps.source.build, "cpu-build");
+  assert.match(app.metric(g.streaming.cpu_fps).note, /separate run/,
+    "and the reader discloses it rather than carrying it silently");
+  // (b) same run, same stamp: no per-envelope stamp, because there is nothing to disclose.
+  const same = build(buildStreamMemRepo(), STREAM_AT, "stream-build");
+  assert.equal(same.streaming.cpu_fps.source, undefined);
+});
+
+// SITE-13. StreamServed is `true`, `false`, or a STATUS TOKEN ("not_measured", "not_probed",
+// "untestable"). Every non-true value fell through to "did not stream", which asserts a MEASURED refusal
+// about cells the harness never offered anything to: two identical-looking n/a cells, different stories.
+test("SITE-13: a lane that never ran does not read as a lane that refused", () => {
+  const na = (status) => app.naText({ stream_served: status }, "stream_served", "stream_error").text;
+  assert.equal(na(false), "did not stream", "a MEASURED refusal keeps its wording");
+  assert.equal(na("not_measured"), "not measured", "never offered any stream load is not a refusal");
+  assert.equal(na("not_probed"), "not measured");
+  assert.equal(na("untestable"), "not testable", "a rig limit is not a gateway verdict");
+  assert.equal(na("rig_limited"), "rig-limited");
+  assert.equal(na("harness_error"), "harness error", "our own failure is not a gateway verdict either");
+  assert.equal(na("search_exhausted"), "search exhausted");
+  // an unknown token claims NOTHING rather than guessing between "never ran" and "refused", and it is
+  // never printed verbatim: the machine vocabulary is ours, not the reader's.
+  assert.equal(na("some_future_token"), "not available");
+  assert.equal(app.naText({ stream_served: "some_future_token" }, "stream_served", "stream_error").note, "");
+  // a known token with no prose still gets the vocabulary's full sentence on the tooltip
+  assert.match(app.naText({ stream_served: "untestable" }, "stream_served", "stream_error").note, /rig cannot pose/i);
+  assert.equal(app.naText(null, "stream_served", "stream_error").text, "not measured");
+  // the predicate the render sites gate on agrees: only `true` is served
+  assert.equal(app.laneServed({ stream_served: true }, "stream_served"), true);
+  assert.equal(app.laneServed({ stream_served: "not_measured" }, "stream_served"), false,
+    "a status token must not read as served, or the metric row renders numbers that do not exist");
+  assert.equal(app.laneServed({ stream_served: false }, "stream_served"), false);
+  assert.equal(app.laneServed({}, "stream_served"), true, "a record predating the flag stays served");
+  assert.equal(app.laneServed(null, "stream_served"), false);
+});
+
+// SITE-14. The roster's desc toggle reversed the WHOLE comparison, so tied rows also reversed their name
+// order: toggling a column with dense ties reshuffled rows whose values had not changed.
+test("SITE-14: descending reverses the ranking, never the name tiebreak", () => {
+  const col = { get: (g) => ({ v: g.v }) };
+  const rows = [{ display: "charlie", v: 1 }, { display: "alpha", v: 1 }, { display: "bravo", v: 2 }];
+  const names = (desc) => rows.slice().sort(app.rowComparator(col, desc)).map((r) => r.display);
+  assert.deepEqual(names(false), ["alpha", "charlie", "bravo"]);
+  assert.deepEqual(names(true), ["bravo", "alpha", "charlie"],
+    "the tied pair keeps its alphabetical order in both directions");
+  // missing values sink to the bottom in BOTH directions: an absent reading is not a low score
+  const withNull = [{ display: "zulu", v: null }, { display: "alpha", v: 5 }];
+  assert.deepEqual(withNull.slice().sort(app.rowComparator(col, true)).map((r) => r.display), ["alpha", "zulu"]);
+  assert.deepEqual(withNull.slice().sort(app.rowComparator(col, false)).map((r) => r.display), ["alpha", "zulu"]);
+  // and a string column sorts by name in the direction asked, ties impossible
+  const scol = { get: (g) => ({ v: g.display }) };
+  assert.deepEqual(rows.slice().sort(app.rowComparator(scol, true)).map((r) => r.display), ["charlie", "bravo", "alpha"]);
+});
+
+// SITE-16. bestIndex highlighted the FIRST of several tied bests, so two gateways both below resolution
+// on a metric (both ranking 0, the same reading) showed one winner - a distinction the measurement says
+// it cannot make.
+test("SITE-16: every tied best is highlighted, because a tie is a tie", () => {
+  const idx = (vals, best) => [...app.bestIndex(vals, best)].sort((a, b) => a - b);
+  assert.deepEqual(idx([0, 0, 12], "min"), [0, 1], "two below-resolution zeros are equal-best");
+  assert.deepEqual(idx([5, 9, 9], "max"), [1, 2]);
+  assert.deepEqual(idx([5, null, 3], "min"), [2]);
+  assert.deepEqual(idx([7, null], "min"), [], "one value is not a contest");
+  assert.deepEqual(idx([1, 2], null), [], "an EVIDENCE row (best:null) crowns nobody");
+});
+
+// The empty-state's `view === "translation"` arm could not be taken: `view` is coerced to a TABLE_VIEWS
+// member, and translation stopped being a tab when the pinned pair became a chooser MODE. A branch that
+// cannot fire is not a safety net, it is a claim about the UI that stopped being true.
+test("the roster's empty state has no unreachable translation arm", () => {
+  assert.equal(app.TABLE_VIEWS.has("translation"), false);
+  assert.equal(/view === "translation"/.test(readFileSync(join(HERE, "app.js"), "utf8")), false,
+    "a branch keyed on a view the table cannot be in is dead code, not a fallback");
+});
+
+// TOOL-01. A gated test returned early from inside its own body, so the runner saw a function that did
+// not throw and printed `ok - <name>` for a check that never asserted anything: on an empty board most
+// of this suite read green, per test, with only a file-level warn to say otherwise.
+test("TOOL-01: a skipped test is recorded as a skip, not counted as a pass, and does not fail the run", () => {
+  const passedBefore = passed, skippedBefore = skipped.length, failedBefore = failures.length;
+  skip("SELF-TEST probe (not a real check)", "proving a skip is visible and counted apart");
+  assert.equal(skipped.length, skippedBefore + 1, "the skip is recorded");
+  assert.equal(skipped[skipped.length - 1].why, "proving a skip is visible and counted apart",
+    "with the reason it was skipped for");
+  assert.equal(passed, passedBefore, "and is NOT counted as a pass");
+  assert.equal(failures.length, failedBefore, "and is NOT a failure: exit semantics are unchanged");
+  skipped.pop();   // leave the run's own tally honest
+});
+
+// SITE-15. sanitizeState seeded the data-derived Same dialect for the WHOLE state at boot, so a deep
+// link into performance or streaming - tabs whose own default is the declared one, which is exactly why
+// syncUrl omits ?d= on memory only - had its dialect rewritten from the data before it rendered a row.
+test("SITE-15: the data-derived Same dialect is seeded for the MEMORY tab, not for every arrival", () => {
+  const st = app.state;
+  const saved = { view: st.view, d: st.sameDialect, pinned: st.sameDialectPinned, data: st.data };
+  const gw = (key) => ({ key, display: key, lang: "Rust",
+    matrix: { upstreams: { anthropic: { cells: { anthropic: { served: true } } } } } });
+  try {
+    st.data = { gateways: [gw("a"), gw("b")] };
+    assert.equal(app.widestDialect(st.data), "anthropic", "fixture: the field's widest cell is anthropic");
+    st.sameDialectPinned = false;
+    st.sameDialect = "openai";
+    st.view = "performance";
+    app.seedMemorySameDialect();
+    assert.equal(st.sameDialect, "openai", "a non-memory arrival keeps the dialect default it declares");
+    st.view = "streaming";
+    app.seedMemorySameDialect();
+    assert.equal(st.sameDialect, "openai");
+    st.view = "memory";
+    app.seedMemorySameDialect();
+    assert.equal(st.sameDialect, "anthropic", "and memory gets the data-derived default it asks for");
+    st.sameDialect = "openai";
+    st.sameDialectPinned = true;
+    app.seedMemorySameDialect();
+    assert.equal(st.sameDialect, "openai", "a ?d= in the URL still wins on memory");
+  } finally {
+    st.view = saved.view; st.sameDialect = saved.d; st.sameDialectPinned = saved.pinned; st.data = saved.data;
+  }
+});
+
+console.log(`\n${passed} tests passed${skipped.length ? `, ${skipped.length} skipped (see the list below - a skip is not a pass)` : ""}`);
 
 // ---- C8: THE BOARD IS GROUPED BY INSTRUMENT, NOT BY COMMIT SHA -----------------------------------
 //
