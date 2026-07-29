@@ -469,7 +469,14 @@ CHARTS = [
         ],
         log=True,
         null_not_served=True,
-        not_measured_text="✕ not measured (needs a recovery-enabled field run)",
+        # THE TEXT MAY NOT NAME A CAUSE THIS CHART CANNOT ESTABLISH. It used to read "needs a
+        # recovery-enabled field run", which is one specific explanation out of several and was the
+        # wrong one every time a gateway simply did not serve the cell this chart draws: litellm-rust
+        # published recovered_rss_mib 255.0 with a 60s recovery window on anthropic>anthropic, and the
+        # chart told the reader its run had recovery switched off. The memory table beside it showed
+        # the number. Same defect class as a Measurement carrying the wrong `Absent` reason, one layer
+        # up in the renderer. Hedged the way the steady-state chart above already hedges.
+        not_measured_text="✕ no recovery reading on this cell (or cell not served)",
     ),
     # ── cost framing (AIGatewayBench's $/vCPU lens) ───────────────────────────────────────────────
     Chart(
