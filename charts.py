@@ -125,6 +125,47 @@ def mreason(env):
     return env.get("reason") if _is_env(env) else None
 
 
+# WHOSE FAULT THE ABSENCE IS, ACCORDING TO THE RECORD - not according to the chart.
+#
+# Every `not_served_text` on the streaming and cost charts reads "rig-limited / needs field run", and
+# that is asserted for EVERY absence on those charts. The artifacts disagree. On the 2026-07-29 board
+# `stream_sustained` captioned five gateways that way while their own sealed details said:
+#   helicone / litellm-rust: "the bisection proved c=1032, but that concurrency did not hold the stream
+#                             gate on re-measurement" - the GATEWAY failing a re-measurement
+#   bifrost / gomodel:       "... whether this was rig-bound is unknown"
+#   apisix:                  "the rig reference ceiling was not measurable"
+# So the chart handed two gateways an excuse the data does not support and asserted a cause for three
+# more that the engine explicitly calls unknown. The rig-vs-gateway line is the one this whole project
+# refuses to blur, and a blanket caption blurs it in both directions at once.
+#
+# The reasons below are the engine's own `Absent` tokens. `rig_limited` is the ONLY one that means our
+# equipment bounded the number; everything else is either the gateway's answer or an open question, and
+# is rendered as such.
+_ABSENCE_CAUSE = {
+    "rig_limited": "rig-limited",
+    "untestable": "the rig cannot pose this",
+    "search_exhausted": "still climbing when the range ran out",
+    "harness_error": "harness fault",
+    "not_served": "not served",
+    "below_resolution": "below measurement resolution",
+    "not_measured": "not measured",
+}
+
+
+def _absent_label(chart, r):
+    """The absent-row caption, preferring what the record says over what the chart assumes."""
+    field = chart.series[0].field if getattr(chart, "series", None) else None
+    # The row is FLATTENED - envelopes became plain numbers upstream - so the reason comes from the
+    # `_<field>_reason` the projection carries beside the value, not from the value itself.
+    reason = r.get(f"_{field}_reason") if field else None
+    if reason is None and field:
+        reason = mreason(r.get(field))
+    cause = _ABSENCE_CAUSE.get(reason or "")
+    if cause is None:
+        return chart.not_served_text
+    return f"\u2715 {cause}"
+
+
 def mvalid(env) -> bool:
     """A metric draws a bar iff its envelope carries a value (certified, incl. a measured 0), or is a
     below-resolution absence (which displays as 0, see mval)."""
@@ -470,7 +511,7 @@ CHARTS = [
         # rig-limited (mock-bound) throughput must not draw a full bar or rank #1 - it renders "not
         # proven" instead. The site (canonicalPerf) + check-consistency assert the identical rule.
         served_field="rps_max_proxy_valid",
-        not_served_text="✕ not measured (rig-limited / needs field run)",
+        not_served_text="✕ not measured - see this cell's own reason",
         annot=_perf_annot,
     ),
     Chart(
@@ -483,7 +524,7 @@ CHARTS = [
         higher_better=True,
         # MED-3: same mock-bound gate as max-proxy above (rps_sustained_20ms_valid).
         served_field="rps_sustained_20ms_valid",
-        not_served_text="✕ not measured (rig-limited / needs field run)",
+        not_served_text="✕ not measured - see this cell's own reason",
         annot=_perf_annot,
     ),
     # ── supporting: memory (matters at scale) ─────────────────────────────────────────────────────
@@ -552,7 +593,7 @@ CHARTS = [
         # MED-3: the cost lanes derive from the sustained@20ms ceiling, so a rig-limited (mock-bound)
         # sustained number must not draw a cost bar or rank #1 either - gate on the same validity flag.
         served_field="rps_sustained_20ms_valid",
-        not_served_text="✕ not measured (rig-limited / needs field run)",
+        not_served_text="✕ not measured - see this cell's own reason",
     ),
     Chart(
         name="cost_per_million",
@@ -564,7 +605,7 @@ CHARTS = [
         money=True,
         # MED-3: derived from the sustained@20ms ceiling - gate on the same mock-bound validity flag.
         served_field="rps_sustained_20ms_valid",
-        not_served_text="✕ not measured (rig-limited / needs field run)",
+        not_served_text="✕ not measured - see this cell's own reason",
         # THE DEFAULT zero_text IS THE THROUGHPUT CHART'S, and it opens with a literal "0" - which on a
         # dollar axis reads as a price of zero, the cheapest possible answer on a lower-is-better chart.
         # This chart's absent rows are gateways whose cost is UNDEFINED because they sustained nothing,
@@ -619,7 +660,7 @@ CHARTS = [
         # it renders "not proven" rather than a clean bar. A mock-bound / unverifiable count never draws a
         # full bar or ranks in the top-N - the same discipline the cpu-fps lane already applies.
         served_field="stream_sustained_valid",
-        not_served_text="✕ not measured (rig-limited / needs field run)",
+        not_served_text="✕ not measured - see this cell's own reason",
         # AUDIT #3: a certified 0 is a MEASURED FAILURE (offered stream load, sustained none), and must
         # never read like the unmeasured/rig-limited state above. Name it as the failure it is.
         zero_text="0  ·  MEASURED: sustained no stall-free stream",
@@ -665,7 +706,7 @@ CHARTS = [
         # (canonicalXlate / xlateCell) + check-consistency assert the identical rule. A gateway that
         # cannot translate at all has no xlate row (xlate_served absent) and is off the chart entirely.
         served_field="xlate_rps_sustained_20ms_valid",
-        not_served_text="✕ not measured (rig-limited / needs field run)",
+        not_served_text="✕ not measured - see this cell's own reason",
         annot=lambda r: (f"{_dialect(r.get('_xlate_ingress'))} → {_dialect(r.get('_xlate_egress'))}"
                          + _sweep_label({"sweep": r.get("_xlate_source")}))
                         if r.get("_xlate_ingress") else None,
@@ -763,6 +804,15 @@ def _proj_streaming(key: str) -> dict | None:
                            ("stream_added_gap_p99_us", "added_gap_p99_us")):
         if mreason(s.get(_env_f)) == "below_resolution":
             row[f"_{_row_f}_reason"] = "below_resolution"
+    # EVERY ABSENCE REASON, not only below_resolution. The projection flattens envelopes into plain
+    # numbers, and it used to keep the reason for exactly one token - so by the time a chart drew an
+    # absent row, WHY it was absent had been discarded and the caption fell back to a hard-coded
+    # string asserting "rig-limited" over absences the engine attributed to the gateway or called
+    # explicitly unknown. See `_absent_label`.
+    for _f in ("streams_sustained", "cpu_fps", "added_ttft_p99_us", "added_gap_p99_us"):
+        _r = mreason(s.get(_f))
+        if _r:
+            row.setdefault(f"_{_f}_reason", _r)
     return row
 
 
@@ -1246,9 +1296,17 @@ def render(chart: Chart, only_keys=None, out_stem: str | None = None) -> None:
                 elif chart.null_not_served and r.get("_primary_null"):
                     # MEDIUM-R3-3: streamed, but the primary metric is null (unmeasured) - say so, do
                     # NOT draw it as a served 0. Matches the site table's n/a for the same null.
-                    txt, col, weight = (chart.not_measured_text or chart.not_served_text), "#c2410c", "bold"
+                    #
+                    # And say it with the RECORD's own reason where there is one: see `_absent_label`.
+                    # This branch used to print a caption asserting "rig-limited" over absences the
+                    # artifact attributed to the gateway or called explicitly unknown.
+                    txt, col, weight = (
+                        _absent_label(chart, r) or chart.not_measured_text or chart.not_served_text,
+                        "#c2410c",
+                        "bold",
+                    )
                 else:
-                    txt, col, weight = chart.not_served_text, "#c2410c", "bold"
+                    txt, col, weight = _absent_label(chart, r), "#c2410c", "bold"
                 ax.text(tx, cy, txt, va="center", ha="left", fontsize=9.5,
                         fontweight=weight, color=col, zorder=4)
             elif v > 0 and _measured(r):  # secondary series (e.g. idle RSS): readable label, skip empty bars.
