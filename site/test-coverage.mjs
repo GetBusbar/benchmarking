@@ -352,3 +352,53 @@ test("a measured stream-sustain failure stays distinct from not-measured through
   assert.equal(unmeasured.v, null);
   assert.notEqual(failed.text, unmeasured.text, "the two states must never render identically");
 });
+
+// ---- family 2b: ...and "every surface" now includes the two that had no test at all ---------------
+//
+// The family above reads the drawer and compare lanes through `laneRecord`, which is the RECORD those
+// surfaces consume - not the markup they emit. That was not a shortcut, it was the only thing reachable:
+// drawerHtml() was called by no test in either file, and renderCompare() reached for
+// document.getElementById on its first useful line in a suite with no DOM. So "one story on every
+// surface" was in fact asserted on every surface except the two a reader actually opens.
+//
+// With the compare panel's row-building extracted (compareBodyHtml) and the drawer threaded through its
+// state, both render as pure functions of (gateways, state). The same four stories are now asserted on
+// the markup itself, which is where a divergence would be visible to a reader and nowhere else.
+const OTHER_GW = {
+  key: "othergw", display: "Other GW", lang: "Go",
+  matrix: { upstreams: { [OUT]: { cells: { [IN]: { served: true, status: 200, perf: {
+    rps_sustained_20ms: sealMetric(1200, { gated: true, flag: false }),
+    added_latency_p99_us: sealMetric(9000),
+    added_latency_p50_us: sealMetric(4000),
+    rps_max_proxy: sealMetric(1500, { gated: true, flag: false }),
+  } } } } } },
+};
+const STORY_STATE = { ...app.newState(), view: "performance", ...CUSTOM,
+  data: { gateways: [STORY_GW, OTHER_GW] }, cmp: [STORY_GW.key, OTHER_GW.key] };
+
+test("the DRAWER markup tells all four stories - zero, below-resolution, failure, suppression", () => {
+  const h = app.drawerHtml(STORY_GW, STORY_STATE);
+  // A: the measured zero is a digit with its meaning beside it, never a hole.
+  assert.match(h, /Sustained RPS[^<]*<\/dt><dd[^>]*>0/, "the drawer shows the measured 0");
+  assert.match(h, /no tested load|ceiling/i, "and says what the zero means");
+  // B: below-resolution is the ≈0 result, not an absence.
+  assert.match(h, /≈0/, "below-resolution reads as approximately zero in the drawer");
+  // C: the measured failure keeps its counts and its red class - the clause that survives the na filter.
+  assert.match(h, /failed · 0\/14,201/, "the measured failure keeps its counts in the drawer");
+  assert.match(h, /class="failtext"/, "and is marked as a failure");
+  // D: the suppressed number is GONE from the drawer entirely; only its absence is on offer.
+  assert.ok(!/99,?999/.test(h), "a rig-limited number must not be recoverable from the drawer markup");
+});
+
+test("the COMPARE markup tells all four stories, and the raw suppressed number appears on neither row", () => {
+  const h = app.compareBodyHtml([STORY_GW, OTHER_GW], STORY_STATE);
+  assert.match(h, /Story GW/); assert.match(h, /Other GW/);
+  assert.match(h, /≈0/, "below-resolution reads as approximately zero in compare too");
+  assert.match(h, /failed · 0\/14,201/, "the measured failure carries its counts into compare");
+  assert.match(h, /class="na failcell"/, "marked as a failure, not folded in with the untested cells");
+  assert.ok(!/99,?999/.test(h), "a rig-limited number is unrecoverable from the compare markup as well");
+  // The measured zero is a real value, so it takes part in the contest and can WIN a max-is-better row
+  // only if it is genuinely the best - here it is not, and the point is that it is rendered as 0.
+  assert.match(h, /Sustained RPS/, "the row exists");
+  assert.match(h, /class="best"/, "and a winner is called where there is a contest");
+});

@@ -199,6 +199,19 @@ function esc(s) {
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
+/* gwLink(g): the gateway's name, linked to its repo when it has one and plain text when it does not.
+   ONE PLACE, because there were FOUR and no test built a gateway with a hostile repo at any of them.
+   The roster, the perf/streaming/memory table's name column, the drawer head and the protocol-matrix
+   section each wrote out the same anchor by hand, so `g.repo` reached an href attribute at four
+   independent sites and "is it escaped here" was four separate questions with four separate answers.
+   gen-data validates the scheme on the way in (an https:// URL or null - see its `repo` field), which
+   is the primary defence; this is the second one, and the reason it is a function is so that a single
+   test can cover every href the board emits and a fifth site cannot open quietly. */
+function gwLink(g) {
+  const name = esc((g && g.display) ?? "");
+  return g && g.repo ? `<a href="${esc(g.repo)}" target="_blank" rel="noopener">${name}</a>` : name;
+}
+
 /* The benchmarking repo where config corrections are filed. */
 const BENCH_REPO = "https://github.com/GetBusbar/benchmarking";
 
@@ -903,9 +916,7 @@ const COL_NAME = {
   id: "name", label: "Gateway", desc: false,
   get: (g) => ({ v: g.display.toLowerCase(), text: null, na: false }),
   render: (g, st = state) => {
-    const a = g.repo
-      ? `<a href="${esc(g.repo)}" target="_blank" rel="noopener">${esc(g.display)}</a>`
-      : esc(g.display);
+    const a = gwLink(g);
     // No per-row date: the board is one atomic run (matrix-sole-source = one source of truth), so
     // every gateway shares a single timestamp — the board-wide "last benchmarked" (roster tab + home)
     // IS the freshness, and a per-row date is pure redundant bloat. Just the name.
@@ -2081,13 +2092,19 @@ function rssSparkline(series) {
     `<div class="stamp muted">peak ${fmt1(ymax)} → recovered ${fmt1(last.rss_mib)} MiB (${fmtInt(tspan)} s)</div></div>`;
 }
 
-function drawerHtml(g) {
+/* drawerHtml(g, st): the whole drawer for one gateway, as a string.
+   `st` is threaded through (it defaulted to the module-level state) so a test can drive the drawer in a
+   chosen mode without mutating live state - the same shape every other renderer here already has. This
+   surface had NO test of any kind: the clause that keeps a MEASURED FAILURE visible among the metrics
+   could be deleted and the suite stayed green, which would have silently removed a gateway's worst
+   result from the one place a reader goes for evidence. */
+function drawerHtml(g, st = state) {
   const langC = LANG_COLORS[g.lang] || LANG_COLORS.Other;
   // The gateway's OWN freshness stamp in the drawer head: measured_at + a stale badge when flagged,
   // the same per-gateway signal the table row shows (independent update cadences, made honest).
   const badge = measuredBadge(g);
   let h = `<header class="drawer-head">
-    <h3>${g.repo ? `<a href="${esc(g.repo)}" target="_blank" rel="noopener">${esc(g.display)}</a>` : esc(g.display)}</h3>
+    <h3>${gwLink(g)}</h3>
     <div class="chips"><span class="cls-chip">${esc(g.cls || "Gateway")}</span>
     <span class="lang-chip" style="background:${langC}">${esc(g.lang)}</span></div>
     ${badge ? `<div class="drawer-measured">${badge}</div>` : ""}
@@ -2102,7 +2119,7 @@ function drawerHtml(g) {
     // current Peak/Same/Custom mode (laneRecord), so drawer/table/compare agree in every mode; the
     // memory + xlate lanes are not chooser-driven and read their canonical accessor. The raw suite
     // object is only the legacy fallback inside the accessor itself.
-    const j = laneRecord(l, g);
+    const j = laneRecord(l, g, st);
     h += `<section class="drawer-lane"><h4>${esc(l.label)}</h4>`;
     if (!j) h += `<p class="muted">not measured</p>`;
     else if (!laneServed(j, l.flag)) {
@@ -2120,7 +2137,7 @@ function drawerHtml(g) {
       h += laneStamp(j);
     }
     else {
-      const pn = lanePathNote(l, j);
+      const pn = lanePathNote(l, j, st);
       if (pn) h += `<p class="lane-note muted">${esc(pn)}</p>`;
       // Each metric is a sealed envelope; metric() reads it (a suppressed metric is absent, reads nothing
       // here since we filter na). The operating concurrency travels INSIDE the envelope (env.concurrency).
@@ -2291,13 +2308,17 @@ function bestIndex(vals, best) {
   return winners;
 }
 
-function renderCompare() {
-  const gws = state.cmp.map((k) => state.data.gateways.find((g) => g.key === k)).filter(Boolean);
-  if (gws.length < 2) return;
-  state.cmpOpen = true;
-  const panel = document.getElementById("compare-panel");
-  panel.classList.remove("hidden");
-
+/* compareBodyHtml(gws, st): the ENTIRE compare panel as a string, given the gateways being compared.
+   IT IS SPLIT OUT SO IT CAN BE TESTED AT ALL. renderCompare reaches for document.getElementById on its
+   first useful line, the suite has no DOM, and so the compare table - the surface whose whole job is to
+   put three gateways' numbers side by side and call a winner - was structurally unreachable by every
+   test in the suite. Not under-tested: untestable. That is how a lane comes to disagree with the table
+   without anything going red, and it is exactly the divergence the "table == drawer == compare" tests
+   exist to forbid on the other two surfaces.
+   The DOM half stays in renderCompare (find the panel, set innerHTML, draw the canvases); everything
+   that DECIDES anything - which record each lane reads, which cell wins, how a failure or a suppressed
+   metric renders - lives here, as a pure function of (gateways, state). */
+function compareBodyHtml(gws, st = state) {
   let h = `<div class="table-scroll"><table class="cmp-table"><thead><tr><th></th>` + gws.map((g, i) =>
     `<th><span class="dot" style="background:${CMP_COLORS[i]}"></span>${esc(g.display)}</th>`).join("") + `</tr></thead><tbody>`;
   h += `<tr><td class="metric">Class</td>${gws.map((g) => `<td>${esc(g.cls || "Gateway")}</td>`).join("")}</tr>`;
@@ -2316,14 +2337,14 @@ function renderCompare() {
        Peak/Same/Custom mode (laneRecord); memory + xlate read their canonical accessor. So compare
        can never disagree with the table in any mode. Skip the whole lane only when no gateway measured
        it at all; an all not-served lane still renders rows so the header is never left bare. */
-    const recs = gws.map((g) => laneRecord(l, g));
+    const recs = gws.map((g) => laneRecord(l, g, st));
     if (recs.every((j) => !j)) continue;
     h += `<tr class="lane-row"><td colspan="${gws.length + 1}">${esc(l.label)}</td></tr>`;
     if (l.pathNote) {
       /* one disclosure row per canonical lane: WHICH path each gateway's numbers measured */
       h += `<tr><td class="metric">Measured path</td>` + recs.map((j) =>
         laneServed(j, l.flag)
-          ? `<td class="muted lane-note">${esc(lanePathNote(l, j))}</td>`
+          ? `<td class="muted lane-note">${esc(lanePathNote(l, j, st))}</td>`
           : `<td class="na"></td>`).join("") + `</tr>`;
     }
     for (const m of l.metrics) {
@@ -2350,7 +2371,16 @@ function renderCompare() {
   h += `</tbody></table></div>`;
   h += `<p class="fineprint">Best value per row is highlighted, decided by the measurement (lower latency and memory, higher throughput). Sweep overlays below use the sustained-throughput sweep (20 ms upstream delay) read off the SAME canonical record as the headline rows; every point is a real probe and the marked dot is the published number at its operating concurrency.</p>`;
   h += `<div id="cmp-sweeps" class="sweeps"></div>`;
-  document.getElementById("compare-body").innerHTML = h;
+  return h;
+}
+
+function renderCompare() {
+  const gws = state.cmp.map((k) => state.data.gateways.find((g) => g.key === k)).filter(Boolean);
+  if (gws.length < 2) return;
+  state.cmpOpen = true;
+  const panel = document.getElementById("compare-panel");
+  panel.classList.remove("hidden");
+  document.getElementById("compare-body").innerHTML = compareBodyHtml(gws, state);
 
   const series = gws.map((g, i) => {
     // CHOOSER-AWARE: the CHOSEN cell's sustained@20ms sweep (Peak/Same/Custom), the SAME cell the headline
@@ -2555,9 +2585,7 @@ function renderMatrix() {
     if (t.unverified) bits.push(`${t.unverified} not verified`);
     if (t.unprobed) bits.push(`${t.unprobed} unprobed (auth)`);
     return `<section class="matrix-gw">
-      <header class="matrix-gw-head"><h3>${
-        g.repo ? `<a href="${esc(g.repo)}" target="_blank" rel="noopener">${esc(g.display)}</a>` : esc(g.display)
-      }</h3><span class="muted">${bits.join(" · ")}</span></header>
+      <header class="matrix-gw-head"><h3>${gwLink(g)}</h3><span class="muted">${bits.join(" · ")}</span></header>
       <div class="table-scroll matrix-table"><table>
         <thead><tr><th class="axis">ingress &#8595; \\ upstream &#8594;</th>${
           MATRIX_CELLS.map((e) => `<th>${esc(MATRIX_LABELS[e])}</th>`).join("")
@@ -2898,9 +2926,7 @@ function renderGateways() {
   const rows = rosterRows(state.data.gateways);
   tbody.innerHTML = rows.map((g) => {
     const c = LANG_COLORS[g.lang] || LANG_COLORS.Other;
-    const name = g.repo
-      ? `<a href="${esc(g.repo)}" target="_blank" rel="noopener">${esc(g.display)}</a>`
-      : esc(g.display);
+    const name = gwLink(g);
     const stars = fmtStars(g.stars);
     const build = gatewayBuild(g);
     const age = fmtProjectAge(g.first_commit);
@@ -3192,6 +3218,11 @@ if (NODE) {
     rowComparator, bestIndex, laneServed, seedMemorySameDialect,
     // audit #21: the rig-provenance footer stamp + the live state it reads, so the class test can drive it.
     rigStamp, state,
+    // THE SURFACES THAT WERE UNREACHABLE FROM A DOM-FREE SUITE, and were therefore covered by nothing:
+    // the drawer (drawerHtml was called by no test at all - deleting the clause that keeps a MEASURED
+    // FAILURE visible in it broke no test), the compare panel's whole body (extracted from renderCompare
+    // for exactly this reason), and the one place a gateway's repo URL reaches an href.
+    drawerHtml, compareBodyHtml, gwLink, recordShowsValues,
   };
 } else {
   boot();
