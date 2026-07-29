@@ -77,6 +77,30 @@ jobs:
       - name: Charts validity-gate test (streamcpu/sustained/TTFT gates + top-N ranking)
         run: python3 charts_test.py
 
+  audit:
+    # THE CROSS-METRIC INVARIANTS, AND THE PROOF THEY CAN FAIL.
+    #
+    # Auditing a run used to mean throwaway python in a scratch directory and an opinion at the end.
+    # An opinion cannot be handed to anyone, does not survive the next run, and answers "is this data
+    # good?" with "the checks I happened to think of, passed". `bench-audit.py` is those checks as a
+    # program; this job is what makes "the audit is done" mean green rather than mean me.
+    #
+    # The self-test runs FIRST and is the more important of the two. The audit's own first draft
+    # shipped a check that read the wrong JSON path, found nothing, and reported PASS on a board that
+    # violates it on every cell - the same species as `transient_budget()` called by nothing and 27
+    # site tests asserting against an empty board. Every check must reject a cell built to violate it
+    # and accept a clean one, or it is guarding nothing.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Every audit check can fail (and does not fail a clean cell)
+        run: python3 bench-audit_test.py
+      # Runs against the newest engine's committed snapshots, so a board that violates an invariant
+      # is red until it is re-measured. Expected to be red on any board published before the engine
+      # stopped discarding the p99 of its own throughput windows.
+      - name: Published board holds every cross-metric invariant
+        run: python3 bench-audit.py
+
   rig-delivery:
     # The launcher's file fetch had no gate, and its one defect cost a full 14-box run: a raw download
     # writes whatever the umask says, so build.sh arrived non-executable and all three source-built

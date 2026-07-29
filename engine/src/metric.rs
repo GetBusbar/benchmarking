@@ -98,7 +98,10 @@ pub struct Measured {
 impl From<Filled> for Measured {
     /// A group that takes no series says so by returning its fields alone.
     fn from(fields: Filled) -> Self {
-        Measured { fields, series: Series::default() }
+        Measured {
+            fields,
+            series: Series::default(),
+        }
     }
 }
 
@@ -121,8 +124,14 @@ pub trait Metric: Sync {
 ///
 /// Adding a number to the board is: implement a group, add it here. Removing one is deleting it from
 /// this list, which is a visible act rather than a call that quietly stopped happening.
-pub const METRICS: &[&dyn Metric] =
-    &[&Throughput, &Memory, &Streaming, &AddedLatency, &SustainedThroughput, &StreamsSustained, &CpuFps];
+pub const METRICS: &[&dyn Metric] = &[
+    &Throughput,
+    &Memory,
+    &Streaming,
+    &AddedLatency,
+    &StreamsSustained,
+    &CpuFps,
+];
 
 /// Run every metric against one served cell.
 ///
@@ -131,7 +140,11 @@ pub const METRICS: &[&dyn Metric] =
 /// key and a null mean different things to `site/gen-data.mjs`, and only one of them is honest.
 pub fn process_cell(
     ctx: &CellCtx<'_>,
-) -> (BTreeMap<&'static str, Measurement<f64>>, Series, BTreeMap<&'static str, f64>) {
+) -> (
+    BTreeMap<&'static str, Measurement<f64>>,
+    Series,
+    BTreeMap<&'static str, f64>,
+) {
     process_cell_with(ctx, METRICS)
 }
 
@@ -145,7 +158,11 @@ pub fn process_cell(
 pub fn process_cell_with(
     ctx: &CellCtx<'_>,
     metrics: &[&dyn Metric],
-) -> (BTreeMap<&'static str, Measurement<f64>>, Series, BTreeMap<&'static str, f64>) {
+) -> (
+    BTreeMap<&'static str, Measurement<f64>>,
+    Series,
+    BTreeMap<&'static str, f64>,
+) {
     let mut out = BTreeMap::new();
     let mut series = Series::default();
     let mut timings: BTreeMap<&'static str, f64> = BTreeMap::new();
@@ -167,7 +184,12 @@ pub fn process_cell_with(
         let started = std::time::Instant::now();
         let produced = m.measure(ctx);
         let took = started.elapsed();
-        eprintln!("[phase] {} {} took {:.1}s", ctx.id, m.name(), took.as_secs_f64());
+        eprintln!(
+            "[phase] {} {} took {:.1}s",
+            ctx.id,
+            m.name(),
+            took.as_secs_f64()
+        );
         timings.insert(m.name(), took.as_secs_f64());
         // Series ACCUMULATE across groups rather than overwrite: the sweep comes from throughput and
         // the readings come from memory, and a later group returning none must not erase an earlier
@@ -187,12 +209,16 @@ pub fn process_cell_with(
         if !produced.series.sweep_cpu_fps.is_empty() {
             series.sweep_cpu_fps = produced.series.sweep_cpu_fps;
         }
-        let filled: BTreeMap<&'static str, Measurement<f64>> = produced.fields.into_iter().collect();
+        let filled: BTreeMap<&'static str, Measurement<f64>> =
+            produced.fields.into_iter().collect();
         for field in m.fields() {
             let value = filled.get(field).cloned().unwrap_or_else(|| {
                 Measurement::absent_because(
                     Absent::NotMeasured,
-                    format!("the {} group declares {field} but returned no value for it", m.name()),
+                    format!(
+                        "the {} group declares {field} but returned no value for it",
+                        m.name()
+                    ),
                 )
             });
             out.insert(*field, value);
@@ -213,7 +239,13 @@ impl Metric for Throughput {
     }
 
     fn fields(&self) -> &'static [&'static str] {
-        &["rps_max_proxy", "conc_at_peak"]
+        &[
+            "rps_max_proxy",
+            "conc_at_peak",
+            "rps_sustained_20ms",
+            "rps_sustained_20ms_concurrency",
+            "conc_at_sustained",
+        ]
     }
 
     fn measure(&self, ctx: &CellCtx<'_>) -> Measured {
@@ -235,26 +267,83 @@ impl Metric for Throughput {
         // to prevent.
         let conc = match perf.max_proxy_concurrency.value() {
             Some(c) => Measurement::Measured(f64::from(*c)),
-            None => Measurement::absent(perf.max_proxy.reason().cloned().unwrap_or(Absent::NotMeasured)),
+            None => Measurement::absent(
+                perf.max_proxy
+                    .reason()
+                    .cloned()
+                    .unwrap_or(Absent::NotMeasured),
+            ),
         };
         // THE SWEEP TRAVELS WITH THE PEAK. Each probed rung becomes a published point, so a reader
         // can see the shape the search walked and re-derive the maximum rather than trusting it.
-        // `p99_us` and `fail` are absent rather than zero: the search's gate records whether a rung
-        // PASSED, not the latency or the failure count behind that verdict, and a zero here would
-        // read as "measured no failures" when nothing was measured at all.
+        //
+        // `p99_us` and `fail` come from the window itself. They used to be published absent here,
+        // under the true-at-the-time note that the search's gate recorded only whether a rung PASSED
+        // and not the latency behind that verdict - but the generator had measured both all along
+        // and `Sample` was throwing them away. Re-deriving the maximum was possible from these
+        // points; re-deriving the 20ms answer was not, which is why the engine went and measured the
+        // cell a second time to get it. A rung that somehow arrives without a reading is still
+        // absent rather than zero, because "measured no failures" and "nothing was measured" are
+        // different facts and only one of them is true.
         let sweep = perf
             .points
             .iter()
             .map(|pt| crate::record::SweepPoint {
                 conc: i64::from(pt.concurrency),
                 rps: Measurement::Measured(pt.value as i64),
-                p99_us: Measurement::absent(Absent::NotMeasured),
-                fail: Measurement::absent(Absent::NotMeasured),
+                p99_us: match pt.reading.and_then(|r| r.p99_us) {
+                    Some(v) => Measurement::Measured(v as i64),
+                    None => Measurement::absent(Absent::NotMeasured),
+                },
+                fail: match pt.reading {
+                    Some(r) => Measurement::Measured(r.fail as i64),
+                    None => Measurement::absent(Absent::NotMeasured),
+                },
+            })
+            .collect();
+        // THE SECOND QUESTION, OFF THE SAME RUNGS. `sweep_cell` read this out of the windows the
+        // climb had already taken, so it needs no measurement of its own and cannot describe a
+        // different state of the gateway than `rps_max_proxy` does.
+        let s_rps = match perf.sustained.value() {
+            Some(v) => Measurement::Measured(*v),
+            None => carry(&perf.sustained),
+        };
+        let s_conc = match perf.sustained_concurrency.value() {
+            Some(c) => Measurement::Measured(f64::from(*c)),
+            None => Measurement::absent(
+                perf.sustained
+                    .reason()
+                    .cloned()
+                    .unwrap_or(Absent::NotMeasured),
+            ),
+        };
+        // The rungs as the gate saw them, plus the windows spent refining the boundary.
+        let sweep_sustained = perf
+            .sustained_points
+            .iter()
+            .map(|pt| crate::record::SweepPoint {
+                conc: i64::from(pt.concurrency),
+                rps: Measurement::Measured(pt.rps as i64),
+                p99_us: match pt.p99_us {
+                    Some(v) => Measurement::Measured(v as i64),
+                    None => Measurement::absent(Absent::NotMeasured),
+                },
+                fail: Measurement::Measured(pt.fail),
             })
             .collect();
         Measured {
-            fields: vec![("rps_max_proxy", rps), ("conc_at_peak", conc)],
-            series: Series { sweep, ..Series::default() },
+            fields: vec![
+                ("rps_max_proxy", rps),
+                ("conc_at_peak", conc),
+                ("rps_sustained_20ms", s_rps),
+                ("rps_sustained_20ms_concurrency", s_conc.clone()),
+                ("conc_at_sustained", s_conc),
+            ],
+            series: Series {
+                sweep,
+                sweep_sustained,
+                ..Series::default()
+            },
         }
     }
 }
@@ -344,11 +433,19 @@ impl Metric for Memory {
                 // explanation, rather than three independently-worded absences for one fact.
                 let why = crate::rss::root_pid(&ctx.cfg.runtime);
                 let reason = why.reason().cloned().unwrap_or(Absent::NotMeasured);
-                let detail = why.detail().unwrap_or("the gateway's process tree could not be found").to_string();
+                let detail = why
+                    .detail()
+                    .unwrap_or("the gateway's process tree could not be found")
+                    .to_string();
                 let fields: Filled = self
                     .fields()
                     .iter()
-                    .map(|f| (*f, Measurement::absent_because(reason.clone(), detail.clone())))
+                    .map(|f| {
+                        (
+                            *f,
+                            Measurement::absent_because(reason.clone(), detail.clone()),
+                        )
+                    })
                     .collect();
                 // No process, so no window ran and there is no series to carry.
                 return fields.into();
@@ -380,7 +477,9 @@ impl Metric for Memory {
             Some(spec) => match crate::run::restart_to_rest(spec, &ctx.cfg.relaunch_launcher) {
                 Err(e) => Measurement::absent_because(
                     Absent::NotMeasured,
-                    format!("the gateway could not be restarted to rest before the idle reading: {e}"),
+                    format!(
+                        "the gateway could not be restarted to rest before the idle reading: {e}"
+                    ),
                 ),
                 // Re-resolve the pid: a restart gives the tree a NEW root, and reading the old one
                 // would measure a process that no longer exists.
@@ -425,7 +524,10 @@ impl Metric for Memory {
                             // seconds, but the plateau test compares the two halves of a trailing
                             // window, and at ten readings a second a truncated stamp would put them
                             // all in the same bucket and make the trend meaningless.
-                            s.push(crate::stats::Sample::new(started.elapsed().as_secs_f64(), v));
+                            s.push(crate::stats::Sample::new(
+                                started.elapsed().as_secs_f64(),
+                                v,
+                            ));
                         }
                     }
                     std::thread::sleep(MEMORY_SAMPLE_INTERVAL);
@@ -451,7 +553,8 @@ impl Metric for Memory {
         let mut verdict = crate::stats::Verdict::Undecidable;
         let mut settled_at = None;
         loop {
-            let w = crate::run::load_window(ctx.cfg, &path, &body, &headers, MEMORY_WINDOW_CONCURRENCY);
+            let w =
+                crate::run::load_window(ctx.cfg, &path, &body, &headers, MEMORY_WINDOW_CONCURRENCY);
             // A window that produced nothing means the load never ran. Stop rather than spinning on
             // a gateway that is not answering; the peak below is then an honest absence.
             if w.is_none() {
@@ -513,7 +616,11 @@ impl Metric for Memory {
         // trailing recovery window rather than the single last reading, so one sample cannot set it.
         let recovered = {
             let cut = taken.last().map(|s| s.t_s).unwrap_or(0.0) - MEMORY_RECOVERY_S as f64 / 2.0;
-            let tail: Vec<f64> = taken.iter().filter(|s| s.t_s >= cut).map(|s| s.mib).collect();
+            let tail: Vec<f64> = taken
+                .iter()
+                .filter(|s| s.t_s >= cut)
+                .map(|s| s.mib)
+                .collect();
             crate::stats::median(&tail)
         };
         // The plateau verdict, published rather than kept. "Never settled" is a real finding about a
@@ -521,9 +628,9 @@ impl Metric for Memory {
         // carries; "we could not tell" stays a third, distinct answer.
         let (plateaued, growth) = match &verdict {
             crate::stats::Verdict::Steady => (Some(true), Measurement::Measured(0.0)),
-            crate::stats::Verdict::NotSteady { growth_rate_mib_per_min } => {
-                (Some(false), growth_rate_mib_per_min.clone())
-            }
+            crate::stats::Verdict::NotSteady {
+                growth_rate_mib_per_min,
+            } => (Some(false), growth_rate_mib_per_min.clone()),
             crate::stats::Verdict::Undecidable => (
                 None,
                 Measurement::absent_because(
@@ -682,7 +789,11 @@ impl Metric for Streaming {
             through_gateway.frame_offsets_us.first(),
             direct.frame_offsets_us.first(),
         ) else {
-            let which = if through_gateway.frame_offsets_us.is_empty() { "the gateway" } else { "the mock directly" };
+            let which = if through_gateway.frame_offsets_us.is_empty() {
+                "the gateway"
+            } else {
+                "the mock directly"
+            };
             return all(Measurement::absent_because(
                 Absent::NotMeasured,
                 format!("no stream frame arrived from {which}, so there is nothing to difference"),
@@ -710,16 +821,24 @@ impl Metric for Streaming {
         // Percentile per leg, THEN differenced - the same shape `AddedLatency` publishes for the
         // non-streaming case - so the two "added" families mean the same thing rather than two
         // things sharing a name.
-        let ttft_samples = |addr: std::net::SocketAddr, path: &str, headers: &[(String, String)]| -> Vec<u64> {
-            (0..STREAM_TTFT_SAMPLES)
-                .filter_map(|_| {
-                    crate::http::post_json_sse(addr, path, body.as_bytes(), headers, STREAM_TIMEOUT, 1)
+        let ttft_samples =
+            |addr: std::net::SocketAddr, path: &str, headers: &[(String, String)]| -> Vec<u64> {
+                (0..STREAM_TTFT_SAMPLES)
+                    .filter_map(|_| {
+                        crate::http::post_json_sse(
+                            addr,
+                            path,
+                            body.as_bytes(),
+                            headers,
+                            STREAM_TIMEOUT,
+                            1,
+                        )
                         .frame_offsets_us
                         .first()
                         .copied()
-                })
-                .collect()
-        };
+                    })
+                    .collect()
+            };
         let gw_path = crate::run::path_for(ctx.cfg, ctx.dialect, &ctx.id.egress);
         let direct_path = ctx.dialect.mock_direct_path(&ctx.cfg.model);
         let mut gw_ttfts = ttft_samples(ctx.cfg.gateway_addr, &gw_path, &gw_headers);
@@ -742,7 +861,8 @@ impl Metric for Streaming {
         //
         // The sample set is the distribution now, for both. It is also the better one: 100 samples
         // per leg against the single stream the p50 used to come from.
-        let added_ttft_at = |pct: f64| match (ttft_pct(&gw_ttfts, pct), ttft_pct(&direct_ttfts, pct)) {
+        let added_ttft_at = |pct: f64| {
+            match (ttft_pct(&gw_ttfts, pct), ttft_pct(&direct_ttfts, pct)) {
             (Some(g), Some(d)) if g >= d => Measurement::Measured(g - d),
             // A gateway cannot be faster than the upstream it proxies, so a negative difference is
             // noise - and saying so beats clamping it to a zero that claims the gateway added
@@ -763,6 +883,7 @@ impl Metric for Streaming {
                     "no time-to-first-token arrived on one of the two legs across {STREAM_TTFT_SAMPLES} samples, so there is no distribution to difference"
                 ),
             ),
+        }
         };
         let added_ttft_p50 = added_ttft_at(0.50);
         let added_ttft_p99 = added_ttft_at(0.99);
@@ -790,7 +911,8 @@ impl Metric for Streaming {
         //
         // Absent with the reason instead. "Too small for this rig to see" is a different statement
         // from "zero", and only one of them is true.
-        let added_gap_at = |pct: f64| match (gap_pct(&through_gateway, pct), gap_pct(&direct, pct)) {
+        let added_gap_at = |pct: f64| {
+            match (gap_pct(&through_gateway, pct), gap_pct(&direct, pct)) {
             (Some(g), Some(d)) if g >= d => Measurement::Measured(g - d),
             (Some(g), Some(d)) => Measurement::absent_because(
                 Absent::NotMeasured,
@@ -805,8 +927,8 @@ impl Metric for Streaming {
                 Absent::NotMeasured,
                 "a single frame on one of the two legs leaves no inter-frame gap to difference".to_string(),
             ),
+        }
         };
-
 
         let fields: Filled = vec![
             // The single-stream `added_ttft` is no longer published as the p50: it was one
@@ -816,8 +938,14 @@ impl Metric for Streaming {
             ("added_ttft_p99_us", added_ttft_p99),
             ("added_gap_p50_us", added_gap_at(0.50)),
             ("added_gap_p99_us", added_gap_at(0.99)),
-            ("gateway_c1_frames", Measurement::Measured(through_gateway.frame_offsets_us.len() as f64)),
-            ("direct_c1_frames", Measurement::Measured(direct.frame_offsets_us.len() as f64)),
+            (
+                "gateway_c1_frames",
+                Measurement::Measured(through_gateway.frame_offsets_us.len() as f64),
+            ),
+            (
+                "direct_c1_frames",
+                Measurement::Measured(direct.frame_offsets_us.len() as f64),
+            ),
         ];
         fields.into()
     }
@@ -884,8 +1012,16 @@ impl Metric for AddedLatency {
 
     fn measure(&self, ctx: &CellCtx<'_>) -> Measured {
         let all_absent = |detail: String| -> Measured {
-            let f: Filled =
-                self.fields().iter().map(|x| (*x, Measurement::absent_because(Absent::NotMeasured, detail.clone()))).collect();
+            let f: Filled = self
+                .fields()
+                .iter()
+                .map(|x| {
+                    (
+                        *x,
+                        Measurement::absent_because(Absent::NotMeasured, detail.clone()),
+                    )
+                })
+                .collect();
             f.into()
         };
 
@@ -911,8 +1047,14 @@ impl Metric for AddedLatency {
         let gw_headers = crate::run::headers_for(ctx.cfg, ctx.dialect, &ctx.id.egress);
         let direct_headers = ctx.dialect.auth_headers(&ctx.cfg.auth);
         let gw = crate::run::load_window(ctx.cfg, &gw_path, &body, &gw_headers, 1);
-        let direct =
-            crate::run::load_window_at(ctx.cfg, ctx.cfg.mock_addr, &direct_path, &body, &direct_headers, 1);
+        let direct = crate::run::load_window_at(
+            ctx.cfg,
+            ctx.cfg.mock_addr,
+            &direct_path,
+            &body,
+            &direct_headers,
+            1,
+        );
 
         let (Some(gw), Some(direct)) = (gw, direct) else {
             return all_absent(
@@ -922,10 +1064,16 @@ impl Metric for AddedLatency {
         };
         // A LEG WITH ANY FAILURE IS NOT A LATENCY READING OF THAT LEG.
         if !clean_c1_leg(gw.ok, gw.fail) {
-            return all_absent(format!("the gateway leg at c=1 was not clean: {} ok, {} fail", gw.ok, gw.fail));
+            return all_absent(format!(
+                "the gateway leg at c=1 was not clean: {} ok, {} fail",
+                gw.ok, gw.fail
+            ));
         }
         if !clean_c1_leg(direct.ok, direct.fail) {
-            return all_absent(format!("the direct-to-mock leg at c=1 was not clean: {} ok, {} fail", direct.ok, direct.fail));
+            return all_absent(format!(
+                "the direct-to-mock leg at c=1 was not clean: {} ok, {} fail",
+                direct.ok, direct.fail
+            ));
         }
         let (Some(gw_p99), Some(direct_p99)) = (gw.p99_us, direct.p99_us) else {
             return all_absent("one leg's c=1 window produced no p99 reading".to_string());
@@ -934,12 +1082,18 @@ impl Metric for AddedLatency {
         let added_p99 = added_latency_diff(gw_p99, direct_p99);
         let added_p50 = match (gw.p50_us, direct.p50_us) {
             (Some(g), Some(d)) => Measurement::Measured(added_latency_diff(g, d) as f64),
-            _ => Measurement::absent_because(Absent::NotMeasured, "one leg's c=1 window produced no p50 reading"),
+            _ => Measurement::absent_because(
+                Absent::NotMeasured,
+                "one leg's c=1 window produced no p50 reading",
+            ),
         };
 
         let fields: Filled = vec![
             ("added_latency_p50_us", added_p50),
-            ("added_latency_p99_us", Measurement::Measured(added_p99 as f64)),
+            (
+                "added_latency_p99_us",
+                Measurement::Measured(added_p99 as f64),
+            ),
             ("gateway_c1_p99_us", Measurement::Measured(gw_p99 as f64)),
             ("direct_c1_p99_us", Measurement::Measured(direct_p99 as f64)),
             // The successful round trips behind each percentile. Both legs are already known clean
@@ -968,60 +1122,6 @@ impl Metric for AddedLatency {
 /// algorithm for one of the two numbers or run two searches and call it one group, both of which this
 /// file's module doc names as the defect a group exists to prevent.
 pub struct SustainedThroughput;
-
-impl Metric for SustainedThroughput {
-    fn name(&self) -> &'static str {
-        "sustained_throughput"
-    }
-
-    fn fields(&self) -> &'static [&'static str] {
-        &["rps_sustained_20ms", "rps_sustained_20ms_concurrency", "conc_at_sustained"]
-    }
-
-    fn measure(&self, ctx: &CellCtx<'_>) -> Measured {
-        let perf = crate::run::sweep_sustained_cell(ctx.cfg, ctx.id, ctx.min_conc, ctx.max_conc);
-        let carry = |m: &Measurement<f64>| match (m.reason().cloned(), m.detail()) {
-            (Some(r), Some(d)) => Measurement::absent_because(r, d),
-            (Some(r), None) => Measurement::absent(r),
-            (None, _) => Measurement::absent(Absent::NotMeasured),
-        };
-        let rps = match perf.rps.value() {
-            Some(v) => Measurement::Measured(*v),
-            None => carry(&perf.rps),
-        };
-        // Mirrors the rps reason rather than inventing a second one, exactly as `Throughput` does for
-        // its own concurrency field.
-        let conc = match perf.concurrency.value() {
-            Some(c) => Measurement::Measured(f64::from(*c)),
-            None => Measurement::absent(perf.rps.reason().cloned().unwrap_or(Absent::NotMeasured)),
-        };
-        // THE SWEEP TRAVELS WITH THE CEILING, and unlike `Throughput`'s sweep, `p99_us` and `fail`
-        // are REAL here rather than absent: this search's own gate check needs the p99 and the fail
-        // count to judge each rung, so they are already in hand rather than something a separate
-        // measurement would have to take.
-        let sweep = perf
-            .points
-            .iter()
-            .map(|pt| crate::record::SweepPoint {
-                conc: i64::from(pt.concurrency),
-                rps: Measurement::Measured(pt.rps as i64),
-                p99_us: match pt.p99_us {
-                    Some(v) => Measurement::Measured(v as i64),
-                    None => Measurement::absent(Absent::NotMeasured),
-                },
-                fail: Measurement::Measured(pt.fail),
-            })
-            .collect();
-        Measured {
-            fields: vec![
-                ("rps_sustained_20ms", rps),
-                ("rps_sustained_20ms_concurrency", conc.clone()),
-                ("conc_at_sustained", conc),
-            ],
-            series: Series { sweep_sustained: sweep, ..Series::default() },
-        }
-    }
-}
 
 // ── the two concurrent-stream groups ──────────────────────────────────────────────────────────────
 //
@@ -1055,7 +1155,10 @@ impl Metric for SustainedThroughput {
 /// interpolation between two that neither did. `None` when there is no gap at all: a single frame
 /// has no inter-frame time, and a zero there would read as instant delivery.
 fn gap_percentile_us(frame_offsets_us: &[u64], pct: f64) -> Option<f64> {
-    let mut gaps: Vec<u64> = frame_offsets_us.windows(2).map(|w| w[1].saturating_sub(w[0])).collect();
+    let mut gaps: Vec<u64> = frame_offsets_us
+        .windows(2)
+        .map(|w| w[1].saturating_sub(w[0]))
+        .collect();
     if gaps.is_empty() {
         return None;
     }
@@ -1150,7 +1253,11 @@ impl Metric for StreamsSustained {
         Measured {
             fields: vec![("streams_sustained", conc), ("streams_sustained_fps", fps)],
             series: Series {
-                sweep_streams: found.points.iter().map(crate::run::StreamPoint::to_json).collect(),
+                sweep_streams: found
+                    .points
+                    .iter()
+                    .map(crate::run::StreamPoint::to_json)
+                    .collect(),
                 ..Series::default()
             },
         }
@@ -1193,7 +1300,11 @@ impl Metric for CpuFps {
         Measured {
             fields: vec![("cpu_fps", fps), ("cpu_fps_concurrency", conc)],
             series: Series {
-                sweep_cpu_fps: found.points.iter().map(crate::run::StreamPoint::to_json).collect(),
+                sweep_cpu_fps: found
+                    .points
+                    .iter()
+                    .map(crate::run::StreamPoint::to_json)
+                    .collect(),
                 ..Series::default()
             },
         }
@@ -1222,15 +1333,25 @@ mod tests {
     }
 
     fn ctx_for<'a>(cfg: &'a RunConfig, id: &'a CellId) -> CellCtx<'a> {
-        CellCtx { cfg, id, dialect: Dialect::Openai, min_conc: 1, max_conc: 2 }
+        CellCtx {
+            cfg,
+            id,
+            dialect: Dialect::Openai,
+            min_conc: 1,
+            max_conc: 2,
+        }
     }
 
     fn a_config() -> RunConfig {
         RunConfig {
             probe_timeout: std::time::Duration::from_millis(1),
             ..crate::run::test_fixture(
-                "127.0.0.1:1".parse().expect("a literal loopback address parses"),
-                "127.0.0.1:2".parse().expect("a literal loopback address parses"),
+                "127.0.0.1:1"
+                    .parse()
+                    .expect("a literal loopback address parses"),
+                "127.0.0.1:2"
+                    .parse()
+                    .expect("a literal loopback address parses"),
             )
         }
     }
@@ -1248,16 +1369,24 @@ mod tests {
             let value = filled.get(field).cloned().unwrap_or_else(|| {
                 Measurement::absent_because(
                     Absent::NotMeasured,
-                    format!("the {} group declares {field} but returned no value for it", Forgetful.name()),
+                    format!(
+                        "the {} group declares {field} but returned no value for it",
+                        Forgetful.name()
+                    ),
                 )
             });
             out.insert(*field, value);
         }
 
-        assert!(out.contains_key("forgotten"), "the key must exist even though the group skipped it");
+        assert!(
+            out.contains_key("forgotten"),
+            "the key must exist even though the group skipped it"
+        );
         assert_eq!(out["forgotten"].reason(), Some(&Absent::NotMeasured));
         assert!(
-            out["forgotten"].detail().is_some_and(|d| d.contains("forgetful")),
+            out["forgotten"]
+                .detail()
+                .is_some_and(|d| d.contains("forgetful")),
             "the absence must name the group that failed to fill it: {:?}",
             out["forgotten"].detail()
         );
@@ -1276,7 +1405,10 @@ mod tests {
                 }
             }
         }
-        assert!(!seen.is_empty(), "the engine must declare at least one metric");
+        assert!(
+            !seen.is_empty(),
+            "the engine must declare at least one metric"
+        );
     }
 
     /// Every group must declare at least one field, or it is a procedure with no way to be observed.
@@ -1300,12 +1432,27 @@ mod tests {
     #[test]
     fn idle_memory_is_absent_when_the_gateway_cannot_be_returned_to_rest() {
         let cfg = a_config();
-        assert!(cfg.relaunch.is_none(), "this fixture owns no gateway lifetime");
+        assert!(
+            cfg.relaunch.is_none(),
+            "this fixture owns no gateway lifetime"
+        );
         let id = CellId::new("openai", "openai");
-        let ctx = CellCtx { cfg: &cfg, id: &id, dialect: Dialect::Openai, min_conc: 1, max_conc: 2 };
+        let ctx = CellCtx {
+            cfg: &cfg,
+            id: &id,
+            dialect: Dialect::Openai,
+            min_conc: 1,
+            max_conc: 2,
+        };
         let filled: BTreeMap<_, _> = Memory.measure(&ctx).fields.into_iter().collect();
-        let idle = filled.get("memory_idle_mib").expect("the memory group declares memory_idle_mib");
-        assert_eq!(idle.copied(), None, "idle must not be published from a process that served load");
+        let idle = filled
+            .get("memory_idle_mib")
+            .expect("the memory group declares memory_idle_mib");
+        assert_eq!(
+            idle.copied(),
+            None,
+            "idle must not be published from a process that served load"
+        );
         assert!(
             idle.reason().is_some(),
             "an absent idle must carry the reason it could not be taken, not a bare null"
@@ -1318,19 +1465,33 @@ mod tests {
     fn a_clean_leg_needs_at_least_one_success_and_zero_failures() {
         assert!(clean_c1_leg(1, 0));
         assert!(clean_c1_leg(500, 0));
-        assert!(!clean_c1_leg(0, 0), "no requests completed at all is not a clean reading");
+        assert!(
+            !clean_c1_leg(0, 0),
+            "no requests completed at all is not a clean reading"
+        );
         assert!(!clean_c1_leg(0, 3), "all failures is not a clean reading");
-        assert!(!clean_c1_leg(497, 3), "even one failure disqualifies the leg");
+        assert!(
+            !clean_c1_leg(497, 3),
+            "even one failure disqualifies the leg"
+        );
     }
 
     #[test]
     fn added_latency_diff_is_saturating_never_negative() {
-        assert_eq!(added_latency_diff(1_200, 80), 1_120, "the ordinary case is a plain subtraction");
+        assert_eq!(
+            added_latency_diff(1_200, 80),
+            1_120,
+            "the ordinary case is a plain subtraction"
+        );
         assert_eq!(added_latency_diff(0, 0), 0);
         // The gateway leg reading BELOW the direct leg is rig noise (two separate windows on a real
         // box), not the gateway outrunning the upstream it proxies - saturating_sub must clamp this
         // to zero rather than wrapping or going negative.
-        assert_eq!(added_latency_diff(50, 200), 0, "a gateway reading faster than the direct leg must clamp to zero");
+        assert_eq!(
+            added_latency_diff(50, 200),
+            0,
+            "a gateway reading faster than the direct leg must clamp to zero"
+        );
     }
 
     // ── the reachability list itself carries the two new groups ────────────────────────────────
@@ -1351,15 +1512,32 @@ mod tests {
     fn a_dialect_the_mock_cannot_stream_is_untestable_in_every_stream_group() {
         let cfg = a_config();
         let id = CellId::new("gemini", "gemini");
-        let ctx = CellCtx { cfg: &cfg, id: &id, dialect: Dialect::Gemini, min_conc: 1, max_conc: 2 };
-        assert!(!Dialect::Gemini.streams_natively(), "this test is about a dialect the mock cannot stream");
-        for (name, produced) in
-            [("streams_sustained", StreamsSustained.measure(&ctx)), ("cpu_fps", CpuFps.measure(&ctx))]
-        {
+        let ctx = CellCtx {
+            cfg: &cfg,
+            id: &id,
+            dialect: Dialect::Gemini,
+            min_conc: 1,
+            max_conc: 2,
+        };
+        assert!(
+            !Dialect::Gemini.streams_natively(),
+            "this test is about a dialect the mock cannot stream"
+        );
+        for (name, produced) in [
+            ("streams_sustained", StreamsSustained.measure(&ctx)),
+            ("cpu_fps", CpuFps.measure(&ctx)),
+        ] {
             let filled: BTreeMap<_, _> = produced.fields.into_iter().collect();
-            assert!(!filled.is_empty(), "{name} must still fill the fields it declares");
+            assert!(
+                !filled.is_empty(),
+                "{name} must still fill the fields it declares"
+            );
             for (field, m) in &filled {
-                assert_eq!(m.copied(), None, "{name}/{field} cannot have measured anything");
+                assert_eq!(
+                    m.copied(),
+                    None,
+                    "{name}/{field} cannot have measured anything"
+                );
                 assert_eq!(
                     m.reason(),
                     Some(&Absent::Untestable),
@@ -1383,31 +1561,55 @@ mod tests {
     fn both_stream_groups_fill_every_declared_field_even_when_untestable() {
         let cfg = a_config();
         let id = CellId::new("cohere", "cohere");
-        let ctx = CellCtx { cfg: &cfg, id: &id, dialect: Dialect::Cohere, min_conc: 1, max_conc: 2 };
+        let ctx = CellCtx {
+            cfg: &cfg,
+            id: &id,
+            dialect: Dialect::Cohere,
+            min_conc: 1,
+            max_conc: 2,
+        };
         for m in [&StreamsSustained as &dyn Metric, &CpuFps] {
             let filled: BTreeMap<_, _> = m.measure(&ctx).fields.into_iter().collect();
             for f in m.fields() {
-                assert!(filled.contains_key(f), "{} declares {f} and did not fill it", m.name());
+                assert!(
+                    filled.contains_key(f),
+                    "{} declares {f} and did not fill it",
+                    m.name()
+                );
             }
         }
     }
 
+    /// THE FIELDS ARE WHAT MUST BE REACHABLE, NOT THE GROUP THAT HAPPENS TO OWN THEM.
+    ///
+    /// This used to also assert a group literally named `sustained_throughput` was in `METRICS`,
+    /// and that assertion failed the moment the sustained figure moved into `throughput` - where it
+    /// belongs, since it is now a summary of the same sweep rather than a search of its own. A test
+    /// that breaks when a field changes hands is testing the file layout; the property worth holding
+    /// is that no declared artifact field can quietly stop being produced by anyone.
     #[test]
-    fn added_latency_and_sustained_throughput_are_reachable_from_metrics() {
+    fn every_published_field_is_reachable_from_metrics() {
         let names: Vec<&str> = METRICS.iter().map(|m| m.name()).collect();
         assert!(names.contains(&"added_latency"), "METRICS = {names:?}");
-        assert!(names.contains(&"sustained_throughput"), "METRICS = {names:?}");
-        let all_fields: Vec<&str> = METRICS.iter().flat_map(|m| m.fields().iter().copied()).collect();
+        let all_fields: Vec<&str> = METRICS
+            .iter()
+            .flat_map(|m| m.fields().iter().copied())
+            .collect();
         for f in [
             "added_latency_p50_us",
             "added_latency_p99_us",
             "gateway_c1_p99_us",
             "direct_c1_p99_us",
+            "rps_max_proxy",
+            "conc_at_peak",
             "rps_sustained_20ms",
             "rps_sustained_20ms_concurrency",
             "conc_at_sustained",
         ] {
-            assert!(all_fields.contains(&f), "{f} is not declared by any group in METRICS: {all_fields:?}");
+            assert!(
+                all_fields.contains(&f),
+                "{f} is not declared by any group in METRICS: {all_fields:?}"
+            );
         }
     }
 
@@ -1420,15 +1622,34 @@ mod tests {
         let names: Vec<&str> = METRICS.iter().map(|m| m.name()).collect();
         assert!(names.contains(&"streams_sustained"), "METRICS = {names:?}");
         assert!(names.contains(&"cpu_fps"), "METRICS = {names:?}");
-        let all_fields: Vec<&str> = METRICS.iter().flat_map(|m| m.fields().iter().copied()).collect();
-        for f in ["streams_sustained", "streams_sustained_fps", "cpu_fps", "cpu_fps_concurrency"] {
-            assert!(all_fields.contains(&f), "{f} is not declared by any group in METRICS: {all_fields:?}");
+        let all_fields: Vec<&str> = METRICS
+            .iter()
+            .flat_map(|m| m.fields().iter().copied())
+            .collect();
+        for f in [
+            "streams_sustained",
+            "streams_sustained_fps",
+            "cpu_fps",
+            "cpu_fps_concurrency",
+        ] {
+            assert!(
+                all_fields.contains(&f),
+                "{f} is not declared by any group in METRICS: {all_fields:?}"
+            );
         }
         // The two advisory-note inputs are on the surface too: `c1_note`/`stream_c1_note` are built
         // from them in `suite.rs`, and a group that stopped filling them would silently drop the note
         // rather than fail, since a note is a plain `Option<String>` with no absence to carry.
-        for f in ["gateway_c1_samples", "direct_c1_samples", "gateway_c1_frames", "direct_c1_frames"] {
-            assert!(all_fields.contains(&f), "{f} is not declared by any group in METRICS: {all_fields:?}");
+        for f in [
+            "gateway_c1_samples",
+            "direct_c1_samples",
+            "gateway_c1_frames",
+            "direct_c1_frames",
+        ] {
+            assert!(
+                all_fields.contains(&f),
+                "{f} is not declared by any group in METRICS: {all_fields:?}"
+            );
         }
     }
 
@@ -1442,7 +1663,10 @@ mod tests {
     // the gateway failing to stream.
     #[test]
     fn a_cell_whose_egress_cannot_stream_is_the_rigs_limit_not_the_gateways() {
-        let cfg = crate::run::test_fixture("127.0.0.1:1".parse().expect("addr"), "127.0.0.1:1".parse().expect("addr"));
+        let cfg = crate::run::test_fixture(
+            "127.0.0.1:1".parse().expect("addr"),
+            "127.0.0.1:1".parse().expect("addr"),
+        );
         let ctx = |ing: Dialect, eg: &str| CellCtx {
             cfg: &cfg,
             id: Box::leak(Box::new(crate::cell::CellId::new(ing.as_str(), eg))),
@@ -1452,18 +1676,39 @@ mod tests {
         };
 
         // The exact field pairings, and the end that blocks each one.
-        assert_eq!(stream_blocked_by(&ctx(Dialect::Openai, "bedrock")).as_deref(), Some("bedrock"));
-        assert_eq!(stream_blocked_by(&ctx(Dialect::Anthropic, "bedrock")).as_deref(), Some("bedrock"));
-        assert_eq!(stream_blocked_by(&ctx(Dialect::Openai, "cohere")).as_deref(), Some("cohere"));
-        assert_eq!(stream_blocked_by(&ctx(Dialect::Openai, "gemini")).as_deref(), Some("gemini"));
+        assert_eq!(
+            stream_blocked_by(&ctx(Dialect::Openai, "bedrock")).as_deref(),
+            Some("bedrock")
+        );
+        assert_eq!(
+            stream_blocked_by(&ctx(Dialect::Anthropic, "bedrock")).as_deref(),
+            Some("bedrock")
+        );
+        assert_eq!(
+            stream_blocked_by(&ctx(Dialect::Openai, "cohere")).as_deref(),
+            Some("cohere")
+        );
+        assert_eq!(
+            stream_blocked_by(&ctx(Dialect::Openai, "gemini")).as_deref(),
+            Some("gemini")
+        );
 
         // The ingress end still blocks, and is named when it is the one at fault.
-        assert_eq!(stream_blocked_by(&ctx(Dialect::Gemini, "openai")).as_deref(), Some("gemini"));
-        assert_eq!(stream_blocked_by(&ctx(Dialect::Bedrock, "openai")).as_deref(), Some("bedrock"));
+        assert_eq!(
+            stream_blocked_by(&ctx(Dialect::Gemini, "openai")).as_deref(),
+            Some("gemini")
+        );
+        assert_eq!(
+            stream_blocked_by(&ctx(Dialect::Bedrock, "openai")).as_deref(),
+            Some("bedrock")
+        );
 
         // Both ends streamable: the question is real and must actually be asked.
         assert_eq!(stream_blocked_by(&ctx(Dialect::Openai, "openai")), None);
-        assert_eq!(stream_blocked_by(&ctx(Dialect::Anthropic, "anthropic")), None);
+        assert_eq!(
+            stream_blocked_by(&ctx(Dialect::Anthropic, "anthropic")),
+            None
+        );
         assert_eq!(stream_blocked_by(&ctx(Dialect::Openai, "anthropic")), None);
     }
 
@@ -1480,19 +1725,25 @@ mod tests {
         // missing one costs a reader exactly that.
         let offs: [u64; 6] = [0, 10, 20, 30, 40, 140];
         assert_eq!(gap_percentile_us(&offs, 0.50), Some(10.0));
-        assert_eq!(gap_percentile_us(&offs, 0.99), Some(100.0), "the p99 must reach the tail, not repeat the median");
+        assert_eq!(
+            gap_percentile_us(&offs, 0.99),
+            Some(100.0),
+            "the p99 must reach the tail, not repeat the median"
+        );
         // Nearest-rank never interpolates: every published percentile is a gap that really occurred.
         let real: Vec<f64> = vec![10.0, 100.0];
         for p in [0.5, 0.9, 0.99, 1.0] {
             let v = gap_percentile_us(&offs, p).expect("five gaps have a percentile");
-            assert!(real.contains(&v), "p{p} returned {v}, which no pair of frames produced");
+            assert!(
+                real.contains(&v),
+                "p{p} returned {v}, which no pair of frames produced"
+            );
         }
         // A stream with one frame has no inter-frame time. Absent, never a zero - a zero would read
         // as instant delivery.
         assert_eq!(gap_percentile_us(&[0], 0.99), None);
         assert_eq!(gap_percentile_us(&[], 0.5), None);
     }
-
 
     // A COLUMN THAT CAN NEVER HOLD A NUMBER IS EITHER MEASURED OR DELETED.
     //
@@ -1511,11 +1762,17 @@ mod tests {
         // the constant and would break if it were lowered, which is the real protection.)
         let rank_of = |n: usize, pct: f64| (((n as f64) * pct).ceil() as usize).clamp(1, n);
         assert_eq!(rank_of(STREAM_TTFT_SAMPLES, 0.99), 99);
-        assert!(rank_of(STREAM_TTFT_SAMPLES, 0.99) < STREAM_TTFT_SAMPLES,
-            "the p99 must not be the max, or it is not a percentile");
+        assert!(
+            rank_of(STREAM_TTFT_SAMPLES, 0.99) < STREAM_TTFT_SAMPLES,
+            "the p99 must not be the max, or it is not a percentile"
+        );
         // One sample cannot support one: that was the whole problem, and it is why the field was
         // empty rather than wrong.
-        assert_eq!(rank_of(1, 0.99), 1, "with a single sample the p99 IS that sample");
+        assert_eq!(
+            rank_of(1, 0.99),
+            1,
+            "with a single sample the p99 IS that sample"
+        );
 
         // Nearest-rank, matching gen::GenStats::pct_of and the search's median, so a published
         // percentile is always a value some stream actually produced.
@@ -1533,15 +1790,31 @@ mod tests {
     // JSON.
     #[test]
     fn every_group_that_runs_reports_what_it_cost() {
-        let cfg = crate::run::test_fixture("127.0.0.1:1".parse().expect("addr"), "127.0.0.1:1".parse().expect("addr"));
+        let cfg = crate::run::test_fixture(
+            "127.0.0.1:1".parse().expect("addr"),
+            "127.0.0.1:1".parse().expect("addr"),
+        );
         let id = crate::cell::CellId::new("openai", "openai");
-        let ctx = CellCtx { cfg: &cfg, id: &id, dialect: Dialect::Openai, min_conc: 1, max_conc: 2 };
+        let ctx = CellCtx {
+            cfg: &cfg,
+            id: &id,
+            dialect: Dialect::Openai,
+            min_conc: 1,
+            max_conc: 2,
+        };
 
         // A group that measures nothing still took time and still reports it: a zero-cost group and
         // an unreported one are different facts, and only one of them is true.
         let (_, _, timings) = process_cell_with(&ctx, &[&Streaming]);
-        assert_eq!(timings.len(), 1, "one group ran, so one cost is reported: {timings:?}");
-        assert!(timings.contains_key("streaming"), "keyed by the group's own name: {timings:?}");
+        assert_eq!(
+            timings.len(),
+            1,
+            "one group ran, so one cost is reported: {timings:?}"
+        );
+        assert!(
+            timings.contains_key("streaming"),
+            "keyed by the group's own name: {timings:?}"
+        );
         assert!(timings["streaming"] >= 0.0 && timings["streaming"].is_finite());
 
         // Every group in the list is accounted for, so a breakdown always sums to the whole - a
@@ -1575,14 +1848,23 @@ mod tests {
 
         let p50 = pct(&samples, 0.50);
         let p99 = pct(&samples, 0.99);
-        assert!(p99 >= p50, "p99 {p99} sits below p50 {p50}, which one distribution cannot produce");
-        assert!(p99 > p50, "and on a distribution with a real tail it must be strictly above");
+        assert!(
+            p99 >= p50,
+            "p99 {p99} sits below p50 {p50}, which one distribution cannot produce"
+        );
+        assert!(
+            p99 > p50,
+            "and on a distribution with a real tail it must be strictly above"
+        );
 
         // The differencing keeps that ordering: both legs are percentiles of their own sample set at
         // the same rank, so a gateway that adds a constant adds it at every percentile.
         let direct: Vec<u64> = samples.iter().map(|v| v / 2).collect();
         let add = |p: f64| (pct(&samples, p) - pct(&direct, p)).max(0.0);
-        assert!(add(0.99) >= add(0.50), "the ADDED figures must hold the same ordering");
+        assert!(
+            add(0.99) >= add(0.50),
+            "the ADDED figures must hold the same ordering"
+        );
 
         // One sample cannot support a p99 that means anything: it is that sample, and it equals the
         // p50 rather than sitting below it.
@@ -1600,7 +1882,13 @@ mod tests {
     #[test]
     fn a_percentile_difference_below_the_rigs_resolution_is_absent_not_zero() {
         // The rule, stated over the raw pair the engine differences.
-        let judge = |gw: f64, mock: f64| -> Option<f64> { if gw >= mock { Some(gw - mock) } else { None } };
+        let judge = |gw: f64, mock: f64| -> Option<f64> {
+            if gw >= mock {
+                Some(gw - mock)
+            } else {
+                None
+            }
+        };
 
         // A real addition survives, unchanged.
         assert_eq!(judge(20_015.0, 20_000.0), Some(15.0));
@@ -1608,7 +1896,11 @@ mod tests {
         // comparison was valid. That must still publish 0, not absent.
         assert_eq!(judge(20_000.0, 20_000.0), Some(0.0));
         // The gateway "faster" than the upstream it proxies is the impossible case.
-        assert_eq!(judge(19_996.0, 20_000.0), None, "a proxy cannot beat its own upstream");
+        assert_eq!(
+            judge(19_996.0, 20_000.0),
+            None,
+            "a proxy cannot beat its own upstream"
+        );
 
         // And the property that was violated: whatever the rule returns, a p99 that IS published can
         // never sit below a p50 that is published from the same distribution.
