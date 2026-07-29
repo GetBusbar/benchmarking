@@ -2137,7 +2137,7 @@ function rssSparkline(series, loadEndS = null, idleMib = null) {
     // The idle level, drawn so "how far above idle" is a thing the eye can measure rather than infer.
     (anchored
       ? `<line x1="${PAD}" y1="${y(idleMib).toFixed(1)}" x2="${(W - PAD).toFixed(1)}" y2="${y(idleMib).toFixed(1)}" ` +
-        `stroke="currentColor" stroke-opacity="0.22" stroke-width="1" stroke-dasharray="1 3">` +
+        `stroke="currentColor" stroke-opacity="0.5" stroke-width="1" stroke-dasharray="2 2">` +
         `<title>idle ${fmt1(idleMib)} MiB</title></line>`
       : "") +
     marks +
