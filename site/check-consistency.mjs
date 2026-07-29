@@ -822,8 +822,22 @@ export function checkConsistency(data, app, opts = {}) {
       }
       if (isMetricField(k)) {
         covered("C1.field");
-        if (!isEnvelope(v) && typeof v === "number") {
-          errors.push(`C1: ${path}.${k}=${v} is a BARE scalar, not a sealed envelope (a raw ungated metric field survives)`);
+        // EVERY MALFORMED SHAPE, not just a bare number.
+      //
+      // This read `!isEnvelope(v) && typeof v === "number"`, so the ONLY thing it could catch was a raw
+      // numeric leak. A metric field carrying a bare string, a boolean, an array, or - the dangerous
+      // one - a HALF-BUILT envelope like `{value: 20057}` with `certified` dropped or renamed, matched
+      // neither branch and sailed through. `isEnvelope` requires `typeof x.certified === "boolean"`, so
+      // an under-built envelope is not an envelope, and it was not a number either, so nothing fired.
+      // C1's own claim is "no raw ungated metric field exists in the bundle"; for those shapes it was
+      // not being checked at all, and this file is the deploy gate.
+      if (!isEnvelope(v) && v !== null && v !== undefined) {
+          // The message names WHAT was found, because the fix for a bare number and the fix for a
+          // half-built envelope are different, and `${v}` renders an object as "[object Object]".
+          const shape = Array.isArray(v) ? "an array"
+            : typeof v === "object" ? `a partial envelope missing \`certified\`: ${JSON.stringify(v)}`
+            : `a bare ${typeof v}`;
+          errors.push(`C1: ${path}.${k} is ${shape}, not a sealed envelope (a raw ungated metric field survives)`);
         } else if (isEnvelope(v)) {
           if (v.suppressed === true) {
             covered("C2.suppressed");

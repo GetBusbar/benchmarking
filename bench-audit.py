@@ -612,10 +612,27 @@ def main():
     # previous run so readers are never shown an empty page, which means the field is legitimately
     # mixed-engine for as long as the run takes.
     skipped = {}
+    unreadable = {}
     for f in snapshot_paths():
         try:
             d = json.load(open(f))
-        except Exception:
+        except Exception as e:
+            # A SNAPSHOT WE COULD NOT READ IS THE ONE CASE THAT USED TO VANISH COMPLETELY.
+            #
+            # This `except` fired BEFORE `gw` was read, so an unparseable file - a truncated write, a
+            # disk-full, a partial rsync left behind by a race - landed in neither `snaps` (checked)
+            # nor `skipped` (named as unaudited). It disappeared from the audit's output entirely, and
+            # if every other gateway passed, main() printed "PASS: every invariant held" over a board
+            # where one gateway's data was never examined. That is precisely the clean-verdict-over-
+            # unchecked-data dishonesty the comment above says this file exists to prevent.
+            #
+            # The name comes from the FILENAME, because the only copy inside the file is in the thing
+            # that failed to parse. Recorded as a VIOLATION rather than a disclosure: "I could not read
+            # one of my inputs" must never reduce to a PASS, and an unreadable artifact sitting in
+            # results/snapshots/ is itself a defect worth someone's attention.
+            base = os.path.basename(f)
+            gw = base[len("result_"):].rsplit("_", 1)[0] if base.startswith("result_") else base
+            unreadable[gw] = f"{base}: {e}"
             continue
         gw = d.get("gateway")
         sha = ((d.get("rig") or {}).get("engine") or {}).get("commit") or ""
@@ -642,6 +659,12 @@ def main():
                     violations[check.__name__].append(v)
         for v in check_declaration_matches_what_we_measured(gw):
             violations["check_declaration_matches_what_we_measured"].append(v)
+
+    # An input we could not parse is a board-level violation: see the note where `unreadable` is built.
+    for gw, why in sorted(unreadable.items()):
+        violations["check_every_snapshot_is_readable"].append(
+            f"{gw}: snapshot could not be parsed, so this gateway was NOT audited at all - {why}"
+        )
 
     # Board-level, not per-cell: the C6 bar is a property of the two gates, not of any one reading.
     for v in check_c6_bar_agrees_with_the_site():
