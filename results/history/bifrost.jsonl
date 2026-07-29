@@ -3,3 +3,4 @@
 {"suite":"matrix","measured_at":"2026-07-28T05:09:29Z","arch":"arm64","hardware":null,"build":"maximhq/bifrost:v1.6.4"}
 {"suite":"matrix","measured_at":"2026-07-28T07:06:48Z","arch":"arm64","hardware":null,"build":"maximhq/bifrost:v1.6.4"}
 {"suite":"matrix","measured_at":"2026-07-28T20:12:51Z","arch":"arm64","hardware":"AWS m7g.4xlarge (Graviton3, 16 cores / 64 GB). Gateway-under-test pinned to 4 cores (the comparable basis); mock and load generator on 6 cores each so the mock never bottlenecks the streaming sweep. Ubuntu 24.04. One dedicated box per gateway.","build":"maximhq/bifrost:v1.6.4"}
+{"suite":"matrix","measured_at":"2026-07-28T23:00:53Z","arch":"arm64","hardware":"AWS m7g.4xlarge (Graviton3, 16 cores / 64 GB). Gateway-under-test pinned to 4 cores (the comparable basis); mock and load generator on 6 cores each so the mock never bottlenecks the streaming sweep. Ubuntu 24.04. One dedicated box per gateway.","build":"maximhq/bifrost:v1.6.4"}
