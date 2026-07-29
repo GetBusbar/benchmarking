@@ -624,6 +624,8 @@ fn cell_stream(
         added_gap_p50_us: us("added_gap_p50_us"),
         added_gap_p99_us: us("added_gap_p99_us"),
         stream_c1_note: stream_c1_note(metrics),
+        ttft_gw_samples: as_i64(metrics.get("ttft_gw_samples")),
+        ttft_direct_samples: as_i64(metrics.get("ttft_direct_samples")),
         // THE RUNGS THE TWO STREAM SEARCHES WALKED, published whatever the verdict, for the same
         // reason `sweep_max_proxy` is: when a ceiling is suppressed as mock-bound or absent because
         // the search ran out of range, the rungs are the only thing that explains why.
@@ -653,12 +655,31 @@ fn stream_c1_note(
     if gw <= 0.0 && direct <= 0.0 {
         return None;
     }
+    // WHAT IS ACTUALLY TRUE OF EACH PERCENTILE. This note used to end "the p99 fields are absent
+    // because one stream cannot support a 99th percentile" - false of `added_ttft_p99_us` on every
+    // healthy streaming cell, because that pair is taken over STREAM_TTFT_SAMPLES separate probes, not
+    // over one stream. Only the added-GAP figures come from the intervals inside a single stream, and
+    // even there the claim was wrong in the other direction: a stream carries STREAM_FRAME_BUDGET
+    // frames, so it yields that many gaps minus one - plenty for a percentile. A reader checking either
+    // statement against the artifact would have found a published p99 sitting beside a note saying it
+    // could not exist.
+    let ttft_n = |k: &str| {
+        metrics
+            .get(k)
+            .and_then(|m| m.copied())
+            .map(|v| format!("{v:.0}"))
+            .unwrap_or_else(|| "no".to_string())
+    };
     Some(format!(
         "the c=1 streaming legs read {gw:.0} frame(s) through the gateway and {direct:.0} direct to \
-         the mock, out of a {} frame budget; the added-gap figures are medians over the intervals \
-         between those frames, and the p99 fields are absent because one stream cannot support a \
-         99th percentile",
-        crate::metric::STREAM_FRAME_BUDGET
+         the mock, out of a {} frame budget. The added-GAP figures are percentiles over the intervals \
+         inside those two streams. The added-TTFT figures are percentiles over separate probes - {} \
+         through the gateway and {} direct, out of {} attempted per leg - so they carry that weight \
+         and no more",
+        crate::metric::STREAM_FRAME_BUDGET,
+        ttft_n("ttft_gw_samples"),
+        ttft_n("ttft_direct_samples"),
+        crate::metric::STREAM_TTFT_SAMPLES
     ))
 }
 
@@ -1464,6 +1485,10 @@ fn withhold_refuted_stream(s: crate::record::CellStream, why: &str) -> crate::re
     crate::record::CellStream {
         added_ttft_p50_us: withheld(&detail),
         added_ttft_p99_us: withheld(&detail),
+        // The counts are withheld with the percentiles they weigh: publishing a sample count beside a
+        // withheld number would describe the weight of a figure this cell is refusing to state.
+        ttft_gw_samples: withheld(&detail),
+        ttft_direct_samples: withheld(&detail),
         added_gap_p50_us: withheld(&detail),
         added_gap_p99_us: withheld(&detail),
         streams_sustained: withheld(&detail),
@@ -2398,17 +2423,29 @@ mod tests {
     }
 
     #[test]
-    fn the_stream_c1_note_says_how_many_frames_each_single_stream_produced() {
+    fn the_stream_c1_note_states_the_weight_behind_each_published_percentile() {
+        // THIS TEST USED TO ENCODE THE BUG. It asserted the note "must say why the p99 fields are
+        // absent" - but `added_ttft_p99_us` is published on every healthy streaming cell, taken over
+        // STREAM_TTFT_SAMPLES separate probes rather than over one stream. So the note asserted a
+        // reason for an absence that was not absent, and the test held it there.
         let mut metrics: std::collections::BTreeMap<&'static str, Measurement<f64>> =
             std::collections::BTreeMap::new();
         metrics.insert("gateway_c1_frames", Measurement::Measured(64.0));
         metrics.insert("direct_c1_frames", Measurement::Measured(64.0));
+        metrics.insert("ttft_gw_samples", Measurement::Measured(97.0));
+        metrics.insert("ttft_direct_samples", Measurement::Measured(100.0));
         let note = stream_c1_note(&metrics).unwrap_or_default();
         assert!(note.contains("64 frame(s) through the gateway"), "{note}");
         assert!(
-            note.contains("99th percentile"),
-            "the note must say why the p99 fields are absent: {note}"
+            !note.contains("99th percentile"),
+            "the note must not claim a p99 cannot exist when one is published: {note}"
         );
+        // The weight a reader needs: how many probes each added-TTFT percentile rests on.
+        assert!(
+            note.contains("97"),
+            "the note must state the gateway leg's sample count: {note}"
+        );
+        assert!(note.contains("100"), "and the direct leg's: {note}");
 
         // A dialect the mock cannot stream took no stream at all: no note, because the absent fields
         // already carry the reason.

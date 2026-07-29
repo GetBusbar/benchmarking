@@ -470,6 +470,15 @@ pub struct CellStream {
     pub sweep_cpu_fps: Vec<serde_json::Value>,
     #[serde(default)]
     pub stream_c1_note: Option<String>,
+    /// HOW MANY TTFT PROBES SURVIVED PER LEG, so a reader can weigh `added_ttft_p50_us` and
+    /// `added_ttft_p99_us`. A failed probe was dropped inside a `filter_map`, so a percentile over
+    /// three lucky samples published identically to one over a hundred - and with a single survivor the
+    /// p50 and p99 ranks collapse to the same index, which reads as a perfectly coherent pair. Mirrors
+    /// `CellPerf`'s `gateway_c1_samples`/`direct_c1_samples`, which exist for exactly this.
+    #[serde(default = "measurement_default")]
+    pub ttft_gw_samples: Measurement<i64>,
+    #[serde(default = "measurement_default")]
+    pub ttft_direct_samples: Measurement<i64>,
 }
 
 impl CellStream {
@@ -480,6 +489,8 @@ impl CellStream {
             added_ttft_p99_us,
             added_gap_p50_us,
             added_gap_p99_us,
+            ttft_gw_samples,
+            ttft_direct_samples,
             streams_sustained,
             streams_sustained_fps,
             cpu_fps,
@@ -858,6 +869,8 @@ mod tests {
                 // own concern and is exercised there, not duplicated here.
                 added_ttft_p50_us: Measurement::absent(Absent::NotMeasured),
                 added_ttft_p99_us: Measurement::absent(Absent::NotMeasured),
+                ttft_gw_samples: Measurement::absent(Absent::NotMeasured),
+                ttft_direct_samples: Measurement::absent(Absent::NotMeasured),
                 added_gap_p50_us: Measurement::absent(Absent::NotMeasured),
                 added_gap_p99_us: Measurement::absent(Absent::NotMeasured),
                 streams_sustained: Measurement::absent(Absent::NotMeasured),
