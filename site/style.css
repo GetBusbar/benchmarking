@@ -430,7 +430,18 @@ tbody tr { cursor: pointer; }
 
 /* The size of the set a Min/Max extremum was selected from, beside the Tested-on pill ("of 26 served").
    An extremum without its candidate count is not comparable across rows, so it rides next to the cell. */
-.tested-of { font-size: .68rem; margin-left: .35rem; white-space: nowrap; }
+.tested-of {
+  font-size: .68rem;
+  white-space: nowrap;
+  /* ON ITS OWN LINE, not beside the pill. The set size only appears in Min/Max mode, but it widened
+     the "Tested on" column for EVERY mode and every tab, because a table column is as wide as its
+     widest cell: "OpenAI  of 3 served" is roughly twice the pill it annotates, and the memory table
+     has five numeric columns plus a sparkline fighting for the same width. Stacking keeps the
+     disclosure (an extremum over 26 cells and one over 1 are different searches, which is the whole
+     reason it is shown) while the column costs only the pill. */
+  display: block;
+  margin-top: .15rem;
+}
 /* Gateway-level plateau verdict on the Memory tab: RSS never went steady on ANY cell this gateway serves.
    Warm-toned rather than neutral, because unlike the freshness pill it is a finding about the gateway. */
 .noplateau-pill {
