@@ -704,6 +704,99 @@ mod tests {
         );
     }
 
+    /// A fake GATEWAY that records the request body it was handed, and answers 200.
+    ///
+    /// The mock-side fake above cannot see this: the re-verification request goes to the GATEWAY
+    /// address, and what this module has to get right is which model name it puts on that wire. So the
+    /// only way to test it is to be the gateway.
+    fn fake_gateway(seen: std::sync::Arc<std::sync::Mutex<Vec<String>>>) -> std::net::SocketAddr {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        let l = TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral port to pick one");
+        let addr = l.local_addr().expect("addr");
+        std::thread::spawn(move || {
+            for c in l.incoming() {
+                let Ok(mut c) = c else { continue };
+                let seen = std::sync::Arc::clone(&seen);
+                std::thread::spawn(move || {
+                    let mut buf = Vec::new();
+                    let mut chunk = [0u8; 4096];
+                    loop {
+                        match c.read(&mut chunk) {
+                            Ok(0) => break,
+                            Ok(n) => {
+                                buf.extend_from_slice(&chunk[..n]);
+                                if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                                    break;
+                                }
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                    let text = String::from_utf8_lossy(&buf).to_string();
+                    let body = text.rsplit("\r\n\r\n").next().unwrap_or("").to_string();
+                    seen.lock().expect("seen lock").push(body);
+                    let _ = c.write_all(
+                        b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 2\r\n\r\n{}",
+                    );
+                });
+            }
+        });
+        addr
+    }
+
+    // THE MODEL NAME THAT ACTUALLY GOES ON THE WIRE, not the one a helper would have returned.
+    //
+    // `the_reverify_request_names_the_cells_own_egress_model` below recomputes `model_for` and
+    // `Dialect::body` by hand and asserts properties of THEIR return values. It never calls
+    // `reverify_cell`, so it cannot see which body this module really sends - and reverting the
+    // construction at the top of `drive_and_read` to `ingress.body(&cfg.model)`, the exact regression
+    // this module's largest comment block describes, leaves all thirteen tests in this file green.
+    //
+    // That defect is not hypothetical: naming the base model routes a model-routed gateway to its
+    // OPENAI upstream, so the mock records openai, the egress under test is never exercised, and the
+    // cell publishes "the gateway forwarded rather than translated" about a translation that was never
+    // requested. It did that to 18 cells across 6 gateways in the 2026-07-28 field run.
+    //
+    // So this one is the gateway, and reads the body off the socket.
+    #[test]
+    fn the_body_sent_to_the_gateway_names_the_cells_own_egress_model() {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let gateway = fake_gateway(std::sync::Arc::clone(&seen));
+        let recording = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mock_addr = fake_mock(std::sync::Arc::clone(&recording));
+        let mut cfg = crate::run::test_fixture(gateway, mock_addr);
+        cfg.model = "gpt-4o-mini".into();
+        cfg.egress_models = [(
+            "anthropic".to_string(),
+            "gpt-4o-mini-anthropic".to_string(),
+        )]
+        .into_iter()
+        .collect();
+
+        let _ = reverify_cell(&cfg, &CellId::new("openai", "anthropic"), Dialect::Openai);
+
+        let bodies = seen.lock().expect("seen lock").clone();
+        assert!(
+            !bodies.is_empty(),
+            "the re-verification request never reached the gateway, so this test proves nothing"
+        );
+        let sent = bodies.join("\n");
+        assert!(
+            sent.contains("gpt-4o-mini-anthropic"),
+            "the body on the wire must name the CELL'S egress model - the anthropic upstream is what \
+             this cell claims to translate to, and re-verifying any other route says nothing about \
+             it. Sent: {sent}"
+        );
+        // And specifically NOT the base name on its own, which is the openai upstream's model and the
+        // shape of the original defect.
+        assert!(
+            !sent.contains("\"model\":\"gpt-4o-mini\""),
+            "the base model name routes a model-routed gateway to its OPENAI upstream, so the cell \
+             would re-verify a route it never measured. Sent: {sent}"
+        );
+    }
+
     // An unreachable mock is a rig fault. It must not be published as the gateway failing to
     // translate, which is the same inversion `probe.rs` exists to prevent for the served verdict.
     #[test]
