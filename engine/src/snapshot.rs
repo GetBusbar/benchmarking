@@ -15,6 +15,7 @@
 // this module's.
 
 use crate::record::{Matrix, ResultSnapshot, Served};
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -86,20 +87,35 @@ impl std::error::Error for SnapshotError {
 /// the top-level `cells` map is only a v1-compat mirror of one egress row and would undercount a
 /// gateway configured for more than one. Falls back to the compat row only for a matrix that never
 /// carried the full grid at all, so an old-shaped snapshot still has a meaningful count.
+#[cfg(test)]
 fn served_cell_count(matrix: &Matrix) -> usize {
+    served_cell_keys(matrix).len()
+}
+
+/// The identity of every cell this matrix actually served, as (egress, ingress) keys. Grid cells
+/// (`upstreams.*.cells`) are keyed by their real egress and ingress; the v1-compat top-level `cells`
+/// row has no egress dimension of its own, so it is keyed by an empty egress alongside the ingress -
+/// which is also why keys from the two branches are never compared against each other (see the
+/// `comparable` check in `write_snapshot`).
+fn served_cell_keys(matrix: &Matrix) -> BTreeSet<(String, String)> {
     if matrix.upstreams.is_empty() {
         matrix
             .cells
-            .values()
-            .filter(|c| matches!(c.served, Served::Bool(true)))
-            .count()
+            .iter()
+            .filter(|(_, c)| matches!(c.served, Served::Bool(true)))
+            .map(|(ingress, _)| (String::new(), ingress.clone()))
+            .collect()
     } else {
         matrix
             .upstreams
-            .values()
-            .flat_map(|u| u.cells.values())
-            .filter(|c| matches!(c.served, Served::Bool(true)))
-            .count()
+            .iter()
+            .flat_map(|(egress, u)| {
+                u.cells
+                    .iter()
+                    .filter(|(_, c)| matches!(c.served, Served::Bool(true)))
+                    .map(move |(ingress, _)| (egress.clone(), ingress.clone()))
+            })
+            .collect()
     }
 }
 
@@ -228,18 +244,31 @@ fn safe_component(raw: &str, what: &'static str) -> Result<String, SnapshotError
 /// path: the historical copy is already durable, the current file is not, and the caller sees an
 /// `Io` error naming the current path.
 pub fn write_snapshot(dir: &Path, snapshot: &ResultSnapshot) -> Result<Paths, SnapshotError> {
-    let incoming_served = served_cell_count(&snapshot.matrix);
     let current_path = dir.join(format!(
         "{}.json",
         safe_component(&snapshot.gateway, "gateway")?
     ));
 
     if let Some(existing) = read_existing(&current_path)? {
-        let existing_served = served_cell_count(&existing.matrix);
-        if incoming_served < existing_served {
+        let existing_keys = served_cell_keys(&existing.matrix);
+        let incoming_keys = served_cell_keys(&snapshot.matrix);
+
+        // Cell identity is only comparable when both snapshots come from the same branch of the
+        // served-cell walk: the grid keys by (egress, ingress), the v1-compat row by ingress alone
+        // (empty egress). Comparing keys across that shape boundary would read a legitimate v1 file
+        // on disk / v2 run incoming as losing every cell and wedge promotion for that directory
+        // forever, so a shape mismatch keeps the old aggregate-count rule instead.
+        let comparable =
+            existing.matrix.upstreams.is_empty() == snapshot.matrix.upstreams.is_empty();
+        let regressed = if comparable {
+            !existing_keys.is_subset(&incoming_keys)
+        } else {
+            incoming_keys.len() < existing_keys.len()
+        };
+        if regressed {
             return Err(SnapshotError::PromoteGuard {
-                existing_served,
-                incoming_served,
+                existing_served: existing_keys.len(),
+                incoming_served: incoming_keys.len(),
             });
         }
     }
@@ -696,6 +725,67 @@ mod tests {
         let current: ResultSnapshot =
             serde_json::from_str(&fs::read_to_string(dir.join("gw.json")).unwrap()).unwrap();
         assert_eq!(current, better);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // The guard only compares the AGGREGATE served count, so a run that loses a previously-measured
+    // cell while gaining a different one slips through with `incoming_served >= existing_served` and
+    // silently overwrites the good measurement for the lost cell. Same grid size (two cells, "a" and
+    // "b"), same served count (1) both times, but WHICH cell answered true flips between writes.
+    #[test]
+    fn promote_guard_fires_when_a_previously_served_cell_is_lost_even_if_another_is_gained() {
+        let dir = unique_dir("guard-per-cell");
+
+        let mut existing_cells = HashMap::new();
+        existing_cells.insert("a".to_string(), served_cell());
+        existing_cells.insert("b".to_string(), unserved_cell("not_configured"));
+        let mut existing = snapshot_of("gw", "2026-07-25T08:00:00Z", 0, 0);
+        existing.matrix.upstreams.insert(
+            "eg".to_string(),
+            Upstream {
+                configurable: true,
+                served: true,
+                egress_config: None,
+                serve_error: String::new(),
+                cells: existing_cells,
+            },
+        );
+
+        let mut incoming_cells = HashMap::new();
+        incoming_cells.insert("a".to_string(), unserved_cell("not_configured"));
+        incoming_cells.insert("b".to_string(), served_cell());
+        let mut incoming = snapshot_of("gw", "2026-07-25T09:00:00Z", 0, 0);
+        incoming.matrix.upstreams.insert(
+            "eg".to_string(),
+            Upstream {
+                configurable: true,
+                served: true,
+                egress_config: None,
+                serve_error: String::new(),
+                cells: incoming_cells,
+            },
+        );
+
+        assert_eq!(served_cell_count(&existing.matrix), 1);
+        assert_eq!(served_cell_count(&incoming.matrix), 1);
+
+        write_snapshot(&dir, &existing).unwrap();
+        let result = write_snapshot(&dir, &incoming);
+
+        assert!(
+            result.is_err(),
+            "losing a previously-served cell (\"a\") must be refused even though a different \
+             cell (\"b\") was gained and the aggregate count is unchanged"
+        );
+
+        let current: ResultSnapshot =
+            serde_json::from_str(&fs::read_to_string(dir.join("gw.json")).unwrap()).unwrap();
+        assert_eq!(
+            current, existing,
+            "the current file must still show cell \"a\" as served, not have been overwritten \
+             by a run that lost it"
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }
