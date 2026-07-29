@@ -2130,7 +2130,23 @@ pub fn stream_fps_at(
             // The reference must be a CLEAN window or it is not a ceiling: a reference taken while
             // the mock itself was dropping streams would be an understated bar, and a gateway
             // measured against it would read as rig-bound when it was not.
-            Some(w) if w.errored == 0 && w.frames > 0 => clean.push(w.fps()),
+            // WHAT THE REFERENCE WINDOW ACTUALLY SAW, on one line per window.
+            //
+            // A reference that comes back low is indistinguishable, from the artifact alone, between
+            // "the window was slow" and "the window read fewer frames" - `fps` is frames/elapsed and
+            // collapses both. On the 2026-07-29 bifrost run the reference landed at exactly 50% of
+            // theory in both cells while the gateway leg measured 86%, and there was no way to tell
+            // which half of that fraction was wrong. Locally the same window at the same concurrency
+            // is stable at 83-89% of theory with exactly 64 frames per stream, so whatever depresses
+            // it is specific to the bench box and cannot be reasoned about from here.
+            Some(w) if w.errored == 0 && w.frames > 0 => {
+                eprintln!(
+                    "[ref] c={concurrency} streams={} frames={} content={}/{} stalls={} elapsed={:.3}s fps={:.0}",
+                    w.streams, w.frames, w.content_frames, w.expected_content_frames, w.stalls,
+                    w.elapsed_s, w.fps()
+                );
+                clean.push(w.fps())
+            }
             Some(w) => {
                 why.get_or_insert(format!(
                     "the direct-to-mock stream window at c={concurrency} was not clean: {} of {} streams failed, {} frames",

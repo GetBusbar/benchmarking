@@ -839,7 +839,22 @@ pub fn saturation_plateau_gated<P: Probe>(
 
     // STILL CLIMBING AT THE BOUND is a lower bound, not a plateau. The range is our choice; reporting
     // it as the gateway's ceiling would be publishing our own search bound as its answer.
-    if hit_bound && flat_run < FLAT_RUNGS_TO_STOP {
+    //
+    // BUT A LADDER THAT ENDED ON A FAILING RUNG DID NOT RUN OUT OF RANGE - IT FOUND THE LIMIT.
+    //
+    // `flat_run` counts rungs that did not improve, and a rung whose every window FAILED the gate has
+    // a median of zero, so it cannot improve and is counted as flat. Those two are not the same
+    // finding. "We asked for more and got more, then ran out of ladder" is genuinely a lower bound.
+    // "We asked for more and the windows stopped holding" is the ceiling, and the best passing rung
+    // below it is a real measurement of it.
+    //
+    // Bifrost's cpu_fps on 2026-07-29: c=1024 passed at 43,404 frames/sec with 0 stalls, then c=2048
+    // failed all three windows with ~5,000 stalls and c=4096 failed all three with ~7,000. The
+    // measurement was sitting there, and the search published nothing because it needed a THIRD flat
+    // rung and the ladder ended one short. Raising the ceiling only moves where that happens; the
+    // rungs above are failing either way, and failing rungs are evidence rather than absence of it.
+    let ended_on_a_failure = rungs.last().is_some_and(|r| r.windows == 0);
+    if hit_bound && flat_run < FLAT_RUNGS_TO_STOP && !ended_on_a_failure {
         let top_wobble = rungs
             .last()
             .map(|r| improvement_bar(r.spread, r.windows))
@@ -2341,6 +2356,69 @@ mod proptests {
     // Drift inside the noise band is saturation (`a_plateau_that_drifts_upward_inside_the_noise_is_
     // still_saturated` pins that), so this must still PUBLISH - but from an interior rung: the final
     // rung is a proven non-improver and stays as the observed rung above the winner.
+    // A LADDER THAT ENDS ON FAILING RUNGS FOUND THE CEILING; IT DID NOT RUN OUT OF RANGE.
+    //
+    // Bifrost's cpu_fps, 2026-07-29: c=1024 passed at 43,404 frames/sec with zero stalls, then c=2048
+    // failed all three windows (~5,000 stalls) and c=4096 failed all three (~7,000). The search
+    // published NOTHING - `SearchExhausted`, "still climbing when the range ran out" - because a
+    // rung whose windows all fail has a median of zero, is therefore counted as merely "flat", and
+    // only two such rungs accumulated where the stop rule wants three.
+    //
+    // Raising the ceiling only moves where that happens: the rungs above are failing either way, and
+    // failing rungs are evidence, not the absence of it. The best passing rung IS the measurement of
+    // the ceiling those failures prove exists.
+    #[test]
+    fn a_ladder_that_ends_on_failing_rungs_publishes_the_best_passing_rung() {
+        // Bifrost's shape: healthy and climbing to c=1024, then the rig comes apart above it.
+        struct RigCollapse;
+        impl Probe for RigCollapse {
+            fn probe(&mut self, c: u32) -> Option<Sample> {
+                if c > 1024 {
+                    // Windows that FAIL the gate. They still carried frames - that is what made this
+                    // look like "still climbing" - but nothing they measured is the gateway's.
+                    Some(Sample::new(70_000.0, false))
+                } else {
+                    Some(Sample::new(f64::from(c) * 42.0, true))
+                }
+            }
+        }
+        let r = saturation_plateau(&mut RigCollapse, 1, 4096);
+        assert!(
+            !r.exhausted,
+            "the ladder found a ceiling rather than running out of range, so this is not exhaustion"
+        );
+        let pt = match r.peak {
+            Measurement::Measured(pt) => pt,
+            ref other => panic!(
+                "the best passing rung is a real measurement and must be published, got {other:?}"
+            ),
+        };
+        assert_eq!(
+            pt.concurrency, 1024,
+            "the published peak is the highest rung that actually held, not one of the failures"
+        );
+        assert!(
+            (pt.value - 43_008.0).abs() < 1.0,
+            "and its own median, not a number borrowed from a failing rung: {}",
+            pt.value
+        );
+
+        // THE CASE THAT MUST STILL BE EXHAUSTION: every rung passes and throughput is still rising
+        // when the ladder ends. Our range is our choice, and calling its top the gateway's ceiling
+        // would publish the search's own bound under the gateway's name.
+        struct StillClimbing;
+        impl Probe for StillClimbing {
+            fn probe(&mut self, c: u32) -> Option<Sample> {
+                Some(Sample::new(f64::from(c) * 42.0, true))
+            }
+        }
+        let r = saturation_plateau(&mut StillClimbing, 1, 4096);
+        assert!(
+            r.exhausted,
+            "a ladder whose every rung passed and kept improving really did run out of range"
+        );
+    }
+
     #[test]
     fn the_published_peak_never_sits_on_the_last_probed_rung() {
         struct Creep;
