@@ -890,6 +890,16 @@ pub struct SseReader {
     raw: Vec<u8>,
     /// Decoded body bytes not yet split into lines.
     body: Vec<u8>,
+    /// How far the front of `raw` / `body` has already been searched for the current phase's
+    /// delimiter and proven not to contain one. Searches resume here instead of at index 0,
+    /// because a peer that trickles a few bytes per read otherwise makes every feed() rescan
+    /// the whole accumulated buffer - O(fragments * bytes) inside the timed streaming window
+    /// whose TTFT/gap numbers are published. Mirrors gen.rs::read_response's `scanned` cursor.
+    /// The stored value is the full scanned length; the terminator-length overlap is applied at
+    /// read time, same as gen.rs. Reused by whichever phase owns the buffer: the head is fully
+    /// drained (cursor back to 0) before Phase::Chunked/Identity begins.
+    raw_scanned: usize,
+    body_scanned: usize,
     status: Option<u16>,
     /// Data lines accumulated for the event that has not been dispatched yet.
     pending: Option<String>,
@@ -913,6 +923,8 @@ impl SseReader {
             phase: Phase::Head,
             raw: Vec::new(),
             body: Vec::new(),
+            raw_scanned: 0,
+            body_scanned: 0,
             status: None,
             pending: None,
             frames: Vec::new(),
@@ -951,6 +963,7 @@ impl SseReader {
                 },
                 Phase::Identity => {
                     let taken = std::mem::take(&mut self.raw);
+                    self.raw_scanned = 0;
                     self.body.extend_from_slice(&taken);
                     if let Some(step) = self.drain_body(elapsed_us) {
                         return step;
@@ -1025,10 +1038,12 @@ impl SseReader {
 
     /// `None` = the head completed and the phase moved on, so the caller should loop again.
     fn try_head(&mut self) -> Option<Step> {
-        let Some(cut) = find_head_end(&self.raw) else {
+        let from = self.raw_scanned.saturating_sub(3);
+        let Some(cut) = find_head_end(&self.raw[from..]).map(|c| from + c) else {
+            self.raw_scanned = self.raw.len();
             return Some(Step::NeedMore);
         };
-        let head: Vec<u8> = self.raw.drain(..cut).collect();
+        let head: Vec<u8> = take_front(&mut self.raw, &mut self.raw_scanned, cut);
         let mut lines = head.split_inclusive(|b| *b == b'\n');
         let Some(status_line) = lines.next() else {
             return Some(self.finish_with(SseEnd::Malformed("empty response head".into())));
@@ -1078,10 +1093,15 @@ impl SseReader {
             };
             match remaining {
                 None => {
-                    let Some(nl) = self.raw.iter().position(|b| *b == b'\n') else {
+                    let Some(nl) = self.raw[self.raw_scanned..]
+                        .iter()
+                        .position(|b| *b == b'\n')
+                        .map(|i| self.raw_scanned + i)
+                    else {
+                        self.raw_scanned = self.raw.len();
                         return ChunkPump::NeedMore;
                     };
-                    let line: Vec<u8> = self.raw.drain(..=nl).collect();
+                    let line: Vec<u8> = take_front(&mut self.raw, &mut self.raw_scanned, nl + 1);
                     let text = String::from_utf8_lossy(strip_crlf(&line)).to_string();
                     if text.trim().is_empty() {
                         // The bare CRLF that follows a chunk's data, before the next size line.
@@ -1109,7 +1129,7 @@ impl SseReader {
                         return ChunkPump::NeedMore;
                     }
                     let take = want.min(self.raw.len());
-                    let data: Vec<u8> = self.raw.drain(..take).collect();
+                    let data: Vec<u8> = take_front(&mut self.raw, &mut self.raw_scanned, take);
                     self.body.extend_from_slice(&data);
                     let left = want - take;
                     self.phase = Phase::Chunked {
@@ -1127,8 +1147,12 @@ impl SseReader {
     /// Split whole lines out of the decoded body and assemble events. `Some` when the frame budget
     /// was reached, which is a completed read rather than an interruption.
     fn drain_body(&mut self, elapsed_us: u64) -> Option<Step> {
-        while let Some(nl) = self.body.iter().position(|b| *b == b'\n') {
-            let line: Vec<u8> = self.body.drain(..=nl).collect();
+        while let Some(nl) = self.body[self.body_scanned..]
+            .iter()
+            .position(|b| *b == b'\n')
+            .map(|i| self.body_scanned + i)
+        {
+            let line: Vec<u8> = take_front(&mut self.body, &mut self.body_scanned, nl + 1);
             let stripped = strip_crlf(&line);
             let text = String::from_utf8_lossy(stripped);
             if let Some(data) = text.strip_prefix("data:") {
@@ -1149,6 +1173,7 @@ impl SseReader {
             // event:, id:, retry: and anything else is not a data frame and is skipped; the probe
             // only ever needs the data.
         }
+        self.body_scanned = self.body.len();
         None
     }
 
@@ -1196,6 +1221,14 @@ enum ChunkPump {
     NeedMore,
     BodyEnded,
     Bad(String),
+}
+
+/// Drain `..upto` off the front of `buf`, keeping `scanned` (how far the front has already been
+/// searched, see `SseReader::raw_scanned`) pointing at the same bytes it did before.
+fn take_front(buf: &mut Vec<u8>, scanned: &mut usize, upto: usize) -> Vec<u8> {
+    let out: Vec<u8> = buf.drain(..upto).collect();
+    *scanned = scanned.saturating_sub(upto);
+    out
 }
 
 /// Byte offset just past the blank line that ends the response head, if it has all arrived.
@@ -2703,6 +2736,50 @@ mod tests {
         assert_eq!(out.frames, vec!["a".to_string(), "b".to_string()]);
         assert_eq!(out.frame_offsets_us.len(), 2);
         assert_eq!(out.end, SseEnd::StreamClosed);
+    }
+
+    // drain_body (like pump_chunked and try_head) must not rescan the accumulated buffer from
+    // index 0 on every feed(): a slow peer that writes a few bytes per TCP read would otherwise
+    // cost O(fragments * bytes) instead of O(bytes) total, and that cost sits inside the timed
+    // streaming window whose TTFT/gap numbers are published. gen.rs::read_response carries a
+    // `scanned` cursor for exactly this reason; the SSE reader has no equivalent.
+    #[test]
+    fn feeding_the_same_bytes_in_many_small_fragments_is_not_quadratically_slower() {
+        const IDENTITY_SSE_HEAD: &str =
+            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n";
+
+        // One un-terminated `data:` line delivered a handful of bytes at a time, mimicking a slow
+        // peer. No '\n' ever appears, so every feed() call must decide there is nothing to drain.
+        let payload = vec![b'x'; 50_000];
+
+        let mut fragmented = SseReader::new(usize::MAX, None);
+        assert_eq!(
+            fragmented.feed(IDENTITY_SSE_HEAD.as_bytes(), 0),
+            Step::NeedMore
+        );
+        let start = Instant::now();
+        for chunk in payload.chunks(10) {
+            assert_eq!(fragmented.feed(chunk, 0), Step::NeedMore);
+        }
+        let fragmented_elapsed = start.elapsed();
+
+        // The same bytes delivered whole exercise drain_body's scan exactly once instead of 5,000
+        // times.
+        let mut whole = SseReader::new(usize::MAX, None);
+        assert_eq!(whole.feed(IDENTITY_SSE_HEAD.as_bytes(), 0), Step::NeedMore);
+        let start = Instant::now();
+        assert_eq!(whole.feed(&payload, 0), Step::NeedMore);
+        let whole_elapsed = start.elapsed();
+
+        // A cursor that resumes where the last scan left off costs roughly the same total work no
+        // matter how the bytes were sliced up. Rescanning from index 0 on every feed() instead
+        // costs O(fragments * bytes), which for 5,000 fragments over the same buffer should be
+        // orders of magnitude slower than the un-fragmented baseline.
+        assert!(
+            fragmented_elapsed < whole_elapsed * 100 + Duration::from_millis(50),
+            "fragmented feed took {fragmented_elapsed:?} vs {whole_elapsed:?} for the same bytes \
+             delivered whole - drain_body looks like it is rescanning from index 0 on every feed()"
+        );
     }
 
     // THE PROPERTY THAT MATTERS MOST: how the bytes were split across reads must not change what was
