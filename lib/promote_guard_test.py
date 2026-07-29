@@ -149,6 +149,19 @@ check("non-matrix honest not-served (real status, no marker) PROMOTES", guard("p
 not_served_existing = {"served": False}
 check("all-dead does not block when existing was ALSO not served → PROMOTE", guard("matrix", not_served_existing, all_dead), 0)
 
+# ── MEDIUM: load() conflates 'existing file absent' with 'existing file present but unreadable' ──────
+# A committed served result that is momentarily corrupt (truncated write, concurrent-write race, CI
+# checkout glitch) must still be protected from a boot-failure clobber, exactly like a readable served
+# result. load()'s bare `except Exception: return None` makes a corrupt existing file indistinguishable
+# from a MISSING one, so is_served(existing) comes back False and the boot-failure incoming is allowed
+# to overwrite it.
+corrupt_existing = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
+corrupt_existing.write("{not valid json")  # truncated / corrupted, as a real committed file, not absent
+corrupt_existing.close()
+inc = _w(all_dead)
+rc = subprocess.run([sys.executable, GUARD, "matrix", corrupt_existing.name, inc]).returncode
+check("corrupt-but-present existing result must KEEP (not be clobbered by a boot failure)", rc, 1)
+
 
 if _fail == 0:
     print("all promote-guard tests passed")
