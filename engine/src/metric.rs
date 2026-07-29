@@ -742,6 +742,21 @@ impl Metric for Memory {
 pub const STREAM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 pub const STREAM_FRAME_BUDGET: usize = 64;
 
+/// The hard ceiling on TOTAL SSE events a delivery-budgeted read will spend (`http::SseBudget`).
+///
+/// A read budgeted in CONTENT frames stops when the tokens arrive, so something else has to stop it
+/// when they do not: a peer emitting nothing but `ping`s would otherwise be bounded only by
+/// `STREAM_TIMEOUT`, and twenty seconds per lane at high concurrency is a search that never returns.
+///
+/// 4x the frame budget, which is 256 events for the 63 content frames an openai lane wants. That is
+/// room for THREE framing events per token - far past anything a real protocol does (the mock spends
+/// 3 events on openai framing and 5 on anthropic, in TOTAL, and a ping-heavy gateway adds one event
+/// per keepalive interval) while still bounding the read at a fixed cost. Generous on purpose: the
+/// ceiling exists to stop a pathological peer, not to judge a gateway's framing style, and a ceiling
+/// tight enough to bind on a real stream would be the constant-denominator defect again in another
+/// shape.
+pub const STREAM_EVENT_CEILING: usize = 4 * STREAM_FRAME_BUDGET;
+
 /// How many single-token streams the TTFT distribution is taken over, per leg.
 ///
 /// A percentile needs samples, and one stream yields exactly one time-to-first-token - which is why
