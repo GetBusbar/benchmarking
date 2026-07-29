@@ -22,13 +22,38 @@
 #   ./bench-audit.py --engine dc7a53c   a specific engine, to audit one board
 #   ./bench-audit.py --gateway kong     narrow to one gateway while investigating
 #
+# Runnable from any directory: every path it reads is anchored to this file, not to the caller's cwd.
+#
 # Exit 0 = every invariant held. Exit 1 = at least one did not, and each violation names the cell.
 import argparse
 import collections
+import datetime
 import glob
 import json
 import os
+import re
 import sys
+
+# ── where the board lives ─────────────────────────────────────────────────────────────────────────
+#
+# ANCHORED TO THIS FILE, NOT TO THE INVOKER'S CWD (ledger TOOL-03). `glob.glob("results/snapshots/…")`
+# resolves against whatever directory the audit was started from, so running it from anywhere but the
+# repo root found zero files. That used to be a silent vacuous pass; the empty-board skip in main()
+# now prints and exits 0, which is only marginally better - it still reports "nothing published" about
+# a board that is right there on disk. An audit whose answer depends on the caller's shell state is
+# not a verdict, so the paths come off this script's own location and the tool is runnable from any
+# cwd, which is also what CI, a git hook and an operator poking at it from ~ all want.
+#
+# HERE is a module global rather than a constant baked into each call precisely so the tests can point
+# the whole audit at a fixture tree: a check that can only be exercised against the real repo is a
+# check whose RED half cannot be written.
+HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+def snapshot_paths():
+    """Every snapshot file on this board, sorted, resolved against HERE rather than the cwd."""
+    return sorted(glob.glob(os.path.join(HERE, "results", "snapshots", "result_*.json")))
+
 
 # ── the bars ──────────────────────────────────────────────────────────────────────────────────────
 #
@@ -43,7 +68,29 @@ import sys
 # the 2026-07-28 board published a "sustained" rate up to 7% above the "maximum" it was meant to sit
 # under. This stays at 5% rather than 0 because the ceiling is refined BETWEEN rungs and its rate is
 # a median of three windows there, so a point or two of disagreement is measurement, not a bug.
+#
+# THIS IS THE DECLARED SOURCE, AND THE SITE CARRIES ITS OWN COPY (ledger TOOL-02). The same ceiling is
+# spelled `export const C6_GROSS_PCT = 5;` in site/check-consistency.mjs, because that gate runs in
+# node with no python in reach and no build step to share a constant through. Two literals, one
+# invariant, and nothing that noticed when they disagreed - tune one and the two gates quietly start
+# policing different bars for the same inversion.
+#
+# The options were: emit a shared constants file from one side (a build step, and the site is not
+# mine to re-point at it), or hand-sync and hope. The least-magic third option is the one taken here:
+# both literals stay where they are, each readable on its own, and this audit PARSES the site's
+# declaration and refuses to pass when the two disagree (`check_c6_bar_agrees_with_the_site`). No
+# generated file, no import machinery, no cross-language build - just a gate that fails on drift, in
+# the tool whose entire job is to fail on drift. The coupling is documented at this end; the site end
+# carries the same note in its own comment block.
 C6_GROSS_PCT = 5.0
+
+# The site's copy of the same bar, and how to find it. Parsed, not imported: this is python reading a
+# javascript literal, and the narrowness of the pattern is the point - if the site restates the
+# constant in a shape this does not match, the check reports "could not find it", which is a
+# violation, not a pass. A cross-check that goes quiet when it stops being able to look is the exact
+# defect class this file exists to prevent.
+SITE_C6_PATH = os.path.join("site", "check-consistency.mjs")
+SITE_C6_RE = re.compile(r"^export const C6_GROSS_PCT\s*=\s*([0-9]+(?:\.[0-9]+)?)\s*;", re.M)
 
 # A rate this far above its own concurrency is not a proxy measurement.
 #
@@ -56,7 +103,7 @@ MAX_RPS_PER_CONNECTION = 20_000
 def load(engine=None, gateway=None):
     """The newest snapshot per gateway, pinned to one engine so a board is audited as a board."""
     by_gw = {}
-    for f in sorted(glob.glob("results/snapshots/result_*.json")):
+    for f in snapshot_paths():
         try:
             d = json.load(open(f))
         except Exception as e:
@@ -73,17 +120,35 @@ def load(engine=None, gateway=None):
 
 
 def newest_engine():
-    """The engine that most recently produced a snapshot, so the default audits the current board."""
-    best = None
-    for f in sorted(glob.glob("results/snapshots/result_*.json")):
+    """The engine commit of the snapshot with the newest `measured_at`, so the default audits the
+    current board. Recency is the snapshot's own timestamp, not filename order - the files sort
+    alphabetically by gateway, so "last file" is just "last gateway in the alphabet". A snapshot
+    whose `measured_at` is missing or unparseable falls back to its file mtime.
+    """
+    best = None  # (when, sha)
+    for f in snapshot_paths():
         try:
             d = json.load(open(f))
         except Exception:
             continue
         sha = ((d.get("rig") or {}).get("engine") or {}).get("commit") or ""
-        if sha:
-            best = sha
-    return best
+        if not sha:
+            continue
+        when = None
+        raw = d.get("measured_at")
+        if isinstance(raw, str):
+            try:
+                when = datetime.datetime.fromisoformat(raw.rstrip("Zz"))
+            except ValueError:
+                when = None
+        if when is None:
+            when = datetime.datetime.fromtimestamp(os.path.getmtime(f), datetime.timezone.utc)
+        # Normalise to naive UTC so a mix of offset-carrying stamps and mtime fallbacks compares.
+        if when.tzinfo is not None:
+            when = when.astimezone(datetime.timezone.utc).replace(tzinfo=None)
+        if best is None or when > best[0]:
+            best = (when, sha)
+    return best[1] if best else None
 
 
 def served_cells(d):
@@ -194,11 +259,13 @@ def check_frames_have_a_stream_behind_them(name, c):
 # THE DEFINITION OF DONE, as fields. Every metric a served cell's block may publish; a null on any
 # of these with no `absences` entry beside it is a bare hole, which the board's owner has ruled out:
 # "either this cell is measured and all data must be reported, or this cell wasn't tested and empty
-# is expected - not a combo". Mirrors the engine's per-group `fields()` declarations.
+# is expected - not a combo". Mirrors the engine's `absences()` lists in `engine/src/record.rs`
+# (CellPerf, CellStream, CellMemory), field for field.
 ABSENCE_CARRYING_FIELDS = {
     "perf": [
         "added_latency_p50_us", "added_latency_p99_us", "gateway_c1_p99_us", "direct_c1_p99_us",
-        "rps_sustained_20ms", "rps_sustained_20ms_concurrency", "rps_max_proxy", "conc_at_peak",
+        "rps_sustained_20ms", "rps_sustained_20ms_concurrency", "conc_at_sustained",
+        "rps_max_proxy", "rps_max_proxy_concurrency", "conc_at_peak",
     ],
     "stream": [
         "added_ttft_p50_us", "added_ttft_p99_us", "added_gap_p50_us", "added_gap_p99_us",
@@ -206,7 +273,12 @@ ABSENCE_CARRYING_FIELDS = {
     ],
     "memory": [
         "idle_rss_mib", "steady_state_rss_mib", "recovered_rss_mib", "peak_rss_mib",
-        "growth_rate_mib_per_min", "time_to_plateau_s",
+        "peak_rss_hwm_mib", "time_to_plateau_s", "growth_rate_mib_per_min",
+        # Newly coverable: these were bare `Option`s that collapsed the metric group's reason on the
+        # way out, so a memory window that could not judge the plateau published two nulls nothing
+        # could explain. They are `Measurement`s now and ride in the cell's absences map like every
+        # other number, which is what lets this list hold them to the same bar.
+        "plateaued", "load_s",
     ],
 }
 
@@ -229,6 +301,43 @@ def check_no_bare_absence(name, c):
         for f in fields:
             if f in blk and blk[f] is None and f"{block}.{f}" not in absences:
                 yield f"{name}: {block}.{f} is null with NO reason in absences (a bare hole)"
+
+
+def check_declared_fields_are_carried(name, c):
+    """A served cell must CARRY every field it declares - as a number, or as a null with a reason.
+
+    THE HOLE THIS CLOSES IS THE ONE `check_no_bare_absence` CANNOT SEE (ledger TOOL-04). That check
+    reads `f in blk and blk[f] is None`, so it polices a field that is PRESENT and null. A field
+    OMITTED FROM THE BLOCK ENTIRELY is invisible to it - and to every other check here, all of which
+    reach for values with `.get()` and get None back whether the serializer wrote a null or wrote
+    nothing at all. "Key missing" and "measured" are indistinguishable to the whole file, which means
+    the audit's answer to "is every metric accounted for?" was really "is every metric that happened
+    to be serialized accounted for?".
+
+    That is not hypothetical arithmetic: today the engine serializes all of these unconditionally (no
+    `skip_serializing` anywhere in record.rs), so the board is honest. One `#[serde(skip_serializing_if
+    = "Option::is_none")]` on a Measurement field - the single most ordinary thing anyone would add to
+    trim an artifact - would drop the key, and the entire absence discipline would evaporate silently
+    while this audit kept printing PASS. The board's rule is "either this cell is measured and all
+    data must be reported, or this cell wasn't tested"; a missing key is neither, so it is a
+    violation, and the shape of the artifact stops being a matter of which code path the serializer
+    took.
+
+    The block itself is held to the same standard. A served cell with no `stream` object at all is not
+    a quieter version of a cell whose streaming legs failed - it is the same claim with the evidence
+    deleted, and `c.get(block) or {}` elsewhere in this file would read it as a block full of nulls
+    with nothing to explain them.
+    """
+    for block, fields in ABSENCE_CARRYING_FIELDS.items():
+        blk = c.get(block)
+        if not isinstance(blk, dict):
+            yield (f"{name}: served cell publishes NO {block} block at all - a served cell carries "
+                   f"its declared fields or states why they are absent, it does not omit them")
+            continue
+        for f in fields:
+            if f not in blk:
+                yield (f"{name}: {block}.{f} is OMITTED from the block (not null-with-reason, "
+                       f"absent) - key-missing and measured are indistinguishable to every check")
 
 
 def check_stream_capacity_is_a_number(name, c):
@@ -260,8 +369,49 @@ CELL_CHECKS = [
     check_rate_is_physically_possible,
     check_frames_have_a_stream_behind_them,
     check_no_bare_absence,
+    check_declared_fields_are_carried,
     check_stream_capacity_is_a_number,
 ]
+
+
+def parse_site_c6(text):
+    """The site's declared C6 ceiling, read out of its source. None when it is not declared as
+    expected - which the caller must treat as a failure, never as agreement."""
+    m = SITE_C6_RE.search(text or "")
+    return float(m.group(1)) if m else None
+
+
+def check_c6_bar_agrees_with_the_site():
+    """The two copies of the gross-inversion ceiling must be the same number (ledger TOOL-02).
+
+    `C6_GROSS_PCT` is declared here and again in site/check-consistency.mjs, in two languages that
+    share no build step. Both read 5 today and both were written by someone who believed 5 was the
+    bar; nothing in either tree would have noticed if one of them had been tuned to 7 while the other
+    stayed at 5, and the two gates would then have been policing different definitions of the same
+    inversion - the site passing a cell this audit fails, or worse, the reverse.
+
+    Parsing the sibling's literal is deliberately the whole mechanism. It needs no generated file, no
+    codegen step and no edit to the site (which this tool does not own), and it fails in the one place
+    a drift would be looked for. If the site is not on disk at all, or has restated the constant in a
+    shape the pattern does not recognise, that is reported as a violation too: an audit that cannot
+    see the thing it is comparing against has not agreed with it.
+    """
+    p = os.path.join(HERE, SITE_C6_PATH)
+    try:
+        with open(p) as fh:
+            text = fh.read()
+    except OSError as e:
+        yield (f"C6 bar: cannot read the site's copy at {SITE_C6_PATH} ({e}) - the python bar is "
+               f"{C6_GROSS_PCT}, and an unverifiable twin is not an agreeing twin")
+        return
+    site = parse_site_c6(text)
+    if site is None:
+        yield (f"C6 bar: {SITE_C6_PATH} no longer declares `export const C6_GROSS_PCT = <n>;` where "
+               f"this can read it - the cross-check went blind, which is a drift, not a pass")
+        return
+    if site != C6_GROSS_PCT:
+        yield (f"C6 bar: python C6_GROSS_PCT={C6_GROSS_PCT} but {SITE_C6_PATH} declares {site} - "
+               f"two gates, one invariant, different bars")
 
 
 def check_declaration_matches_what_we_measured(gw):
@@ -272,7 +422,7 @@ def check_declaration_matches_what_we_measured(gw):
     resolution is binary and belongs in the definition, not the artifact: prove the route and drop
     the untestable entry, or drop the declaration and under-claim honestly.
     """
-    p = f"gateways/{gw}/definition.json"
+    p = os.path.join(HERE, "gateways", gw, "definition.json")
     if not os.path.exists(p):
         return
     d = json.load(open(p))
@@ -293,9 +443,17 @@ def main():
     ap.add_argument("--gateway", help="narrow to one gateway while investigating")
     args = ap.parse_args()
 
+    # AN EMPTY BOARD IS A CLEAN SKIP; A BROKEN BOARD IS A FAILURE. With zero snapshot files on disk
+    # nothing is published and there is nothing to lie, so exiting non-zero here only blocks CI on
+    # the empty board that follows every board-drop. But the skip is gated on the FILES being
+    # absent, not on the loader finding nothing: snapshots that exist and cannot be read or matched
+    # still fail, or a renamed directory would turn this audit into a permanent vacuous pass.
+    if not snapshot_paths():
+        print("SKIP: no snapshots present (empty board) - nothing published, nothing to audit")
+        return 0
     engine = args.engine or newest_engine()
     if not engine:
-        print("no snapshots to audit", file=sys.stderr)
+        print("snapshot files exist but none carries an engine commit - refusing to skip", file=sys.stderr)
         return 1
     snaps = load(engine, args.gateway)
     if not snaps:
@@ -313,8 +471,12 @@ def main():
         for v in check_declaration_matches_what_we_measured(gw):
             violations["check_declaration_matches_what_we_measured"].append(v)
 
+    # Board-level, not per-cell: the C6 bar is a property of the two gates, not of any one reading.
+    for v in check_c6_bar_agrees_with_the_site():
+        violations["check_c6_bar_agrees_with_the_site"].append(v)
+
     print(f"engine {engine[:7]}  {len(snaps)} gateways  {cells} served cells")
-    print(f"{len(CELL_CHECKS)} per-cell invariants + 1 per-gateway invariant\n")
+    print(f"{len(CELL_CHECKS)} per-cell invariants + 1 per-gateway + 1 board-level invariant\n")
 
     if not violations:
         print("PASS: every invariant held.")

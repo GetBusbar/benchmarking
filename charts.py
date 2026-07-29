@@ -116,6 +116,15 @@ def menote(env):
     return env.get("note") if _is_env(env) else None
 
 
+def mreason(env):
+    """The envelope's absence-reason token (e.g. below_resolution / not_measured), or None.
+
+    mval() collapses a below_resolution absence into a displayable 0.0, which is correct for the bar
+    but loses WHY the value is 0 - and the chart label needs the why, so a sub-resolution 0 can be
+    disclosed as such instead of reading like an exact measurement (see _zero_label)."""
+    return env.get("reason") if _is_env(env) else None
+
+
 def mvalid(env) -> bool:
     """A metric draws a bar iff its envelope carries a value (certified, incl. a measured 0), or is a
     below-resolution absence (which displays as 0, see mval)."""
@@ -274,8 +283,28 @@ class Chart:
     not_served_text: str = "✕ did not serve"   # label + legend entry when served_field is false
     not_measured_text: str = ""                 # label for a null (unmeasured) primary metric when null_not_served (falls back to not_served_text)
     zero_text: str = "0  ·  no load held p99 < 1 s"  # served, but the metric came out 0
-    clamp_negatives: bool = False  # clamp sub-noise negatives to 0 (footnoted) - never a negative bar
-    zero_ok: bool = False          # a clamped/true 0 is a GOOD result (sorts to the winning end)
+    # THE PRIMARY METRIC IS A DIFFERENCE (gateway leg minus direct-to-mock leg), which is the only
+    # shape that could ever come out negative. This flag replaced `clamp_negatives` (ledger TOOL-05).
+    #
+    # `clamp_negatives=True` used to mean "silently rewrite a negative to 0 and footnote the chart".
+    # It made sense when the engine published a raw subtraction: a gateway measuring a hair faster than
+    # direct-to-mock is measurement noise, not a negative cost, and a bar pointing backwards would have
+    # been a worse lie than a 0. The engine no longer does that. A difference that lands at or below
+    # what the rig can resolve is published as a BelowResolution absence, which arrives here as a
+    # sealed envelope that mval() renders 0.0 and _zero_label() captions "0 (≤ rig resolution)" - the
+    # same 0, but one that says why it is 0 instead of a footnote at the bottom of the image saying
+    # some unnamed bar somewhere was clamped.
+    #
+    # So the clamp had nothing left to clamp, and its footnote had not printed in any published run.
+    # Deleting it outright would have been the quiet option: if a negative ever DID arrive again, the
+    # bar would draw at 0 (the log-axis guard and `float(v or 0)` both floor it) and rank at the
+    # winning end with a bare "0" label - a broken seal contract presented as the best result on the
+    # board. The clamp is therefore not deleted but INVERTED: this flag marks the charts where a
+    # negative is possible-in-principle, and render() REFUSES to draw one (see
+    # `_negative_diff_violations`). What was a silent rewrite is now a gate that fails, which is the
+    # only honest way to remove a rewrite nobody was watching.
+    diff_metric: bool = False
+    zero_ok: bool = False          # a sub-resolution/true 0 is a GOOD result (sorts to the winning end)
     # MEDIUM-R3-3: on a zero_ok chart a MEASURED sub-noise <=0 is the winning end, but a NULL primary
     # metric is UNMEASURED (e.g. an unreliable streaming c1 window sets added_ttft/gap to null while
     # stream_served stays true). float(null or 0) would coerce it to a served 0 that ranks #1 as a bold
@@ -400,6 +429,20 @@ CHARTS = [
         # corrupted, but the label was a fabricated explanation.
         not_measured_text="✕ added latency not measured",
         null_not_served=True,
+        # A 0 on this chart is the WINNING end, not a failure: lower-is-better, and a below_resolution
+        # absence (the difference ran and came out under what the rig can resolve) charts as 0 by
+        # design (see mval). Without zero_ok that 0 fell through to the DEFAULT zero_text
+        # ("0 · no load held p99 < 1 s") - a THROUGHPUT-failure sentence, in failure orange, captioning
+        # a latency WIN. zero_ok renders it in ink at the winning end instead, and the label disclosed
+        # by _zero_label reads "0 (≤ rig resolution)" when the envelope's reason says so.
+        zero_ok=True,
+        # The primary metric is `gateway p99 - direct p99`, so this is a difference chart and gets the
+        # negative-difference refusal. It is worth noting it never carried the old `clamp_negatives`
+        # while its three siblings (translation + the two streaming latency lanes) all did, which is
+        # the flag's real legacy: three charts silently rewrote a negative and the fourth, measuring
+        # the same shape of quantity, did not. A refusal that applies to the whole family is one rule
+        # to reason about instead of four independent settings nobody was comparing.
+        diff_metric=True,
         annot=_perf_annot,
     ),
     Chart(
@@ -523,7 +566,7 @@ CHARTS = [
         served_field="stream_served",
         not_served_text="✕ no SSE streaming",
         not_measured_text="✕ TTFT not measured (unreliable c1 window)",
-        clamp_negatives=True,
+        diff_metric=True,
         zero_ok=True,
         null_not_served=True,
         auto_ms=True,
@@ -540,7 +583,7 @@ CHARTS = [
         served_field="stream_served",
         not_served_text="✕ no SSE streaming",
         not_measured_text="✕ inter-token gap not measured (unreliable c1 window)",
-        clamp_negatives=True,
+        diff_metric=True,
         zero_ok=True,
         null_not_served=True,
         auto_ms=True,
@@ -621,7 +664,7 @@ CHARTS = [
         served_field="xlate_served",
         not_served_text="✕ cannot translate",
         not_measured_text="✕ translated added latency not measured",
-        clamp_negatives=True,
+        diff_metric=True,
         zero_ok=True,
         # MEDIUM-R3-3, applied to the translation lane: without null_not_served, `float(r.get(f, 0) or 0)`
         # turns an ABSENT added-latency envelope into a measured 0.0. On a served row with zero_ok that
@@ -678,7 +721,7 @@ def _proj_streaming(key: str) -> dict | None:
     # gated (their envelope is null when suppressed); TTFT / gap are ungated latency-shaped envelopes.
     cpu = mval(s.get("cpu_fps"))
     sust = mval(s.get("streams_sustained"))
-    return {
+    row = {
         "stream_served": s.get("stream_served", True),
         "stream_added_ttft_p99_us": mval(s.get("added_ttft_p99_us")),
         "stream_added_gap_p99_us": mval(s.get("added_gap_p99_us")),
@@ -697,6 +740,13 @@ def _proj_streaming(key: str) -> dict | None:
         "streamcpu_fps_per_core": s.get("cpu_fps_per_core"),
         "streamcpu_valid": cpu is not None,
     }
+    # Same below_resolution disclosure as _proj_perf: a sub-resolution TTFT/gap charts as 0 (mval)
+    # and its label must say so (see _zero_label), not read like an exact measurement.
+    for _row_f, _env_f in (("stream_added_ttft_p99_us", "added_ttft_p99_us"),
+                           ("stream_added_gap_p99_us", "added_gap_p99_us")):
+        if mreason(s.get(_env_f)) == "below_resolution":
+            row[f"_{_row_f}_reason"] = "below_resolution"
+    return row
 
 
 def _cell_memory(key: str, ingress: str, egress: str) -> dict | None:
@@ -834,6 +884,10 @@ def _proj_perf(key: str) -> dict | None:
         v = mval(bc.get(f))
         if v is not None:
             obj[f] = v
+        # A below_resolution absence charts as 0 (mval), but the WHY must ride with the row so the
+        # chart can label its 0 "≤ rig resolution" instead of an exact reading (see _zero_label).
+        if mreason(bc.get(f)) == "below_resolution":
+            obj[f"_{f}_reason"] = "below_resolution"
     obj["served"] = True  # best_cell only exists for a served path
     src = bc.get("source") or {}
     path = bc.get("path") or {}
@@ -874,6 +928,9 @@ def _proj_xlate(key: str) -> dict | None:
         obj["xlate_added_latency_p99_us"] = lat99
     if rps is not None:
         obj["xlate_rps_sustained_20ms"] = rps
+    # Same below_resolution disclosure the passthrough row carries (see _proj_perf / _zero_label).
+    if mreason(tc.get("added_latency_p99_us")) == "below_resolution":
+        obj["_xlate_added_latency_p99_us_reason"] = "below_resolution"
     obj["xlate_rps_sustained_20ms_valid"] = rps is not None
     path = tc.get("path") or {}
     obj["_xlate_ingress"] = path.get("ingress")
@@ -913,6 +970,67 @@ def _fmt(v: float) -> str:
     return f"{v:.0f}" if v >= 10 else f"{v:.1f}"
 
 
+def _below_res(r: dict, field: str) -> bool:
+    """Did this row's `field` come out as a below_resolution absence rather than a measured number?
+
+    The projections (_proj_perf / _proj_xlate / _proj_streaming) stash the envelope's reason token
+    beside the value as `_<field>_reason`, because mval() has already collapsed the absence into a
+    displayable 0.0 and the WHY would otherwise be gone by the time anything renders it. One reader
+    for it, so the PNG label and the README cell cannot disagree about the same 0 - which they did:
+    the chart said "0 (≤ rig resolution)" and the README table printed a flat "0 µs" for the very
+    same envelope, one of them describing a rig limit and the other an exact measurement."""
+    return r.get(f"_{field}_reason") == "below_resolution"
+
+
+def _zero_label(chart: Chart, r: dict) -> str:
+    """The winning-end label a served 0 draws on a zero_ok chart.
+
+    A below_resolution absence charts as 0 (see mval) and its projected row carries the reason
+    (_<field>_reason, see _below_res); the label discloses that the rig could not resolve the
+    difference, so the 0 is never mistaken for an exact reading. A plain measured 0 stays a bare
+    "0"."""
+    return "0 (≤ rig resolution)" if _below_res(r, chart.series[0].field) else "0"
+
+
+def _negative_diff_violations(chart: Chart, rows: list) -> list:
+    """Every negative value on a difference chart, named. Empty on every chart that is not one.
+
+    THE REPLACEMENT FOR `clamp_negatives` (ledger TOOL-05). The clamp turned a negative into a 0 and
+    footnoted the image; the engine stopped producing negatives (a sub-resolution difference is a
+    BelowResolution absence now), so the clamp became configuration that described a behavior nobody
+    could observe. Deleting it silently would have left a real gap, because the code that ran AFTER it
+    still floors negatives by accident - `float(v or 0)` in _val, `v > 0` in the bar-draw gate, the
+    log-axis positive filter - so a returning negative would have drawn a 0 bar, sorted to the WINNING
+    end of a lower-is-better chart, and captioned itself a bare "0". A broken upstream contract would
+    have published as the best result on the board.
+
+    A negative here is not a data point to render politely. It means the gateway leg measured faster
+    than the direct leg AND the engine did not classify that as below-resolution, which is a
+    contradiction in the producer, not a fact about the gateway. The renderer's correct move is to
+    refuse and name the row, so someone fixes the seal or the metric rather than the picture.
+
+    Returned as a list rather than raised in place so a test can assert on it without driving
+    matplotlib, and so the message can name every offending row instead of only the first.
+    """
+    if not chart.diff_metric:
+        return []
+    out = []
+    for s in chart.series:
+        for r in rows:
+            v = r.get(s.field)
+            if isinstance(v, (int, float)) and not isinstance(v, bool) and v < 0:
+                out.append(
+                    f"charts.py: refusing to draw {chart.name}: {r.get('_key', '?')} carries a "
+                    f"NEGATIVE {s.field} ({v}).\n"
+                    "  This chart's metric is a DIFFERENCE (gateway leg minus direct leg); the engine\n"
+                    "  publishes a sub-resolution difference as a below_resolution absence, never as a\n"
+                    "  negative number. A negative means that contract broke upstream - fix the metric\n"
+                    "  or the seal. Drawing it would floor it to 0 and rank it FIRST on a\n"
+                    "  lower-is-better chart, which is the opposite of what the number says."
+                )
+    return out
+
+
 def _topn_keys(chart: Chart, n: int = 5) -> set:
     """The top-N gateway keys for THIS chart, ranked by ITS OWN primary metric, among ONLY the rows
     that have a VALID value for that metric (audit HIGH). A gateway that did not serve the chart's
@@ -942,17 +1060,32 @@ def _topn_keys(chart: Chart, n: int = 5) -> set:
 
 
 def render(chart: Chart, only_keys=None, out_stem: str | None = None) -> None:
-    if _mpl() is None:
-        return  # no matplotlib - reports still generate from JSON
     rows = _load(chart.suite)
     if only_keys is not None:  # subset (e.g. top-5): draw just these gateways, to its own PNG
         rows = [r for r in rows if r["_key"] in only_keys]
+
+    # THE NEGATIVE-DIFFERENCE REFUSAL (ledger TOOL-05), BEFORE the matplotlib bail and before any
+    # coercion can hide one. On a difference chart the engine's contract is that a sub-resolution
+    # difference is published as a BelowResolution absence, never as a negative number; a negative
+    # arriving here means that contract broke somewhere upstream (engine, seal, or projection), and
+    # every downstream step in this function would launder it into a 0 that ranks FIRST on a
+    # lower-is-better chart. This is the gate that replaces the old silent clamp, so removing the
+    # clamp cannot change a published chart without saying so.
+    #
+    # Above the `_mpl()` return deliberately: on a box with no matplotlib the PNGs are skipped but the
+    # README tables and the top-5 rankings are still written from the same rows, so a gate that only
+    # ran when a PNG was being drawn would be off on exactly the machines that publish text.
+    for v in _negative_diff_violations(chart, rows):
+        raise SystemExit(v)
+
+    if _mpl() is None:
+        return  # no matplotlib - reports still generate from JSON
     if not rows:
         print(f"skip {chart.name}: no results/{chart.suite}/*.json yet")
         return
     primary = chart.series[0].field
 
-    # MEDIUM-R3-3: capture whether the PRIMARY metric is null BEFORE any clamp/auto-ms mutation coerces
+    # MEDIUM-R3-3: capture whether the PRIMARY metric is null BEFORE the auto-ms mutation coerces
     # None→0.0 below, so a null_not_served chart can still tell "unmeasured (null)" from "measured 0".
     if chart.null_not_served:
         for r in rows:
@@ -980,20 +1113,12 @@ def render(chart: Chart, only_keys=None, out_stem: str | None = None) -> None:
         return float(r.get(field, 0) or 0)
 
     # Suite-specific preprocessing on a working COPY of the rows (never mutate the loaded dicts):
-    # clamp sub-noise negatives to 0 (footnoted - never a negative bar), and relabel a µs chart in ms
-    # once the biggest value crosses 1 ms so the numbers stay readable.
+    # relabel a µs chart in ms once the biggest value crosses 1 ms so the numbers stay readable.
     unit = chart.unit
-    clamped = False
-    if chart.clamp_negatives or chart.auto_ms:
+    if chart.auto_ms:
         rows = [dict(r) for r in rows]
         fields = [s.field for s in chart.series]
-        if chart.clamp_negatives:
-            for r in rows:
-                for f in fields:
-                    if float(r.get(f, 0) or 0) < 0:
-                        clamped = True
-                        r[f] = 0.0
-        if chart.auto_ms and unit == "µs":
+        if unit == "µs":
             if max((_val(r) for r in rows), default=0.0) >= 1000:
                 unit = "ms"
                 for r in rows:
@@ -1079,8 +1204,9 @@ def render(chart: Chart, only_keys=None, out_stem: str | None = None) -> None:
                         extra = chart.annot(r)
                         if extra:
                             txt = f"{txt}  ·  {extra}"
-                elif served and chart.zero_ok:  # sub-noise overhead - a 0 here is the winning end
-                    txt, col, weight = "0", INK, "bold"
+                elif served and chart.zero_ok:  # sub-noise overhead - a 0 here is the winning end,
+                    # in ink, never the zero_text failure sentence; a below_resolution 0 says so.
+                    txt, col, weight = _zero_label(chart, r), INK, "bold"
                 elif served:  # came up, but the metric came out 0 (see chart.zero_text for why)
                     txt, col, weight = chart.zero_text, "#c2410c", "bold"
                 elif v > 0:   # a number exists, but the gateway failed the suite's serve gate
@@ -1172,8 +1298,12 @@ def render(chart: Chart, only_keys=None, out_stem: str | None = None) -> None:
         bits.append(str(meta["hardware"]))
     if "concurrency" in meta and "payload_bytes" in meta:
         bits.append(f"{meta['concurrency']}× {int(meta['payload_bytes'])//1000}KB sustained")
-    if clamped:  # a gateway measured faster than direct-to-mock, i.e. inside measurement noise
-        bits.append("sub-noise negative differences are shown as 0")
+    # The "sub-noise negative differences are shown as 0" footnote used to live here, driven by the
+    # clamp. It went out with the clamp (ledger TOOL-05): it could only ever have printed on a chart
+    # that had already rewritten a number, and there is no longer a rewrite to disclose. The
+    # disclosure that replaced it is per-bar and precise - "0 (≤ rig resolution)" on the bar whose
+    # difference the rig could not resolve - rather than one sentence at the bottom of the image
+    # about some unnamed bar.
     bits.append("bars colored by implementation language")
     fig.text(0.008, 0.012, "  ·  ".join(bits) + f"     github.com/GetBusbar/benchmarking - regenerated {RENDER_TS} from raw results",
              fontsize=7.3, color=GRAY)
@@ -1286,7 +1416,12 @@ def _report_md(rows: list, title: str, charts: list, pending: tuple = (), chart_
         # is never mistaken for a clean win.
         lat_cell = "-"
         if lat is not None:
-            lat_cell = f"{lat:,} µs" + (" †" if served is False else "")
+            # A below_resolution added latency charts as 0 and labels itself "0 (≤ rig resolution)" on
+            # the PNG; printing "0 µs" here would state an exact measurement the rig never made, and
+            # would read as a stronger claim than the chart drawn from the same envelope. The two
+            # surfaces say the same thing (see _below_res).
+            shown = "≤ rig resolution" if _below_res(r, "added_latency_p99_us") else f"{lat:,} µs"
+            lat_cell = shown + (" †" if served is False else "")
             if served is False:
                 dnf_seen = True
         if served is False and r.get("serve_error"):
@@ -1372,7 +1507,17 @@ def _report_md(rows: list, title: str, charts: list, pending: tuple = (), chart_
             v = r.get(field)
             if v is None:
                 return "n/a"
-            v = max(float(v), 0.0)  # sub-noise negatives read as 0, matching the charts
+            # A below_resolution absence charts as 0 and the PNG labels it "0 (≤ rig resolution)"; the
+            # table said "0 µs", which reads as an exact measurement of no overhead. Same envelope,
+            # two published surfaces, two different claims about what the rig could see. Say the same
+            # thing here (ledger TOOL-05 / the below-resolution work it belongs to).
+            if _below_res(r, field):
+                return "≤ rig resolution"
+            v = float(v)
+            # The `max(v, 0.0)` that used to sit here was the report's copy of the retired
+            # clamp_negatives, and it laundered the same negative the charts now refuse to draw. There
+            # is nothing left to clamp, and a negative difference is a broken producer contract, not a
+            # cell to round up - so it is printed as measured and left visibly wrong.
             return f"{v/1000:,.1f} ms" if v >= 1000 else f"{int(round(v)):,} µs"
 
         for key in lane_keys:

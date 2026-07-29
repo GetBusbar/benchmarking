@@ -437,6 +437,165 @@ charts.GATEWAYS = {k: k for k in charts.CANON}
 check("a gateway that was never measured has no memory row", {r["_key"] for r in charts._load("memory")}, {"a"})
 
 
+# ── below_resolution on the added-latency charts: a sub-resolution 0 is a WIN, never a throughput ────
+# failure. The sealed envelope {value:null, reason:"below_resolution", detail:...} charts as 0.0 (mval:
+# the difference ran and came out under what the rig can resolve - the winning end of a lower-is-better
+# chart). Before the fix, added_latency had no zero_ok, so that 0 fell into render()'s `elif served:`
+# branch and was captioned with the DEFAULT zero_text "0  ·  no load held p99 < 1 s" - a THROUGHPUT-
+# failure sentence, in failure orange, on a latency win - and _topn_keys excluded it from the ranking
+# entirely (zero_ok False rejects a 0). Both assertions below fail against that behavior.
+_BR = {"value": None, "certified": True, "suppressed": False, "reason": "below_resolution",
+       "detail": "p99 delta under rig resolution"}
+check("mreason reads the envelope's absence-reason token", charts.mreason(_BR), "below_resolution")
+check("mval renders a below_resolution absence as 0.0 (the winning end)", charts.mval(_BR), 0.0)
+
+lat_chart = chart_by_name("added_latency")
+check("added_latency chart is zero_ok (a 0 is the winning end, never the zero_text failure)",
+      lat_chart.zero_ok, True)
+check("xlate_added_latency chart is zero_ok too", chart_by_name("xlate_added_latency").zero_ok, True)
+
+_canon_perf({
+    "subres": {"best_cell": {**bc(), "added_latency_p99_us": _BR}},   # below rig resolution
+    "slow":   {"best_cell": bc(added_latency_p99_us=120)},            # a real, higher reading
+})
+prows = {r["_key"]: r for r in charts._load("perf")}
+check("a below_resolution added-latency envelope charts as 0.0, not absent",
+      prows["subres"]["added_latency_p99_us"], 0.0)
+check("...so it is NOT flagged unmeasured on the null_not_served chart (0.0 is not None)",
+      prows["subres"]["added_latency_p99_us"] is None, False)
+check("...and it carries the reason for the label", prows["subres"]["_added_latency_p99_us_reason"],
+      "below_resolution")
+check("...it is ELIGIBLE and ranks at the WINNING end of the lower-is-better chart",
+      charts._topn_keys(lat_chart, n=1), {"subres"})
+_lbl = charts._zero_label(lat_chart, prows["subres"])
+check("...its bar label discloses sub-resolution, exactly", _lbl, "0 (≤ rig resolution)")
+check("...and NEVER the throughput-failure zero_text", "no load held p99" in _lbl, False)
+check("a plain measured 0 (no below_resolution reason) stays a bare '0'",
+      charts._zero_label(lat_chart, prows["slow"]), "0")
+
+# The translation twin carries the same treatment.
+_canon_perf({"xsub": {"translation_cell": {**tc(), "added_latency_p99_us": _BR}}})
+_xrow = charts._load("xlate")[0]
+check("a below_resolution translated added-latency charts as 0.0", _xrow["xlate_added_latency_p99_us"], 0.0)
+check("...and its label discloses sub-resolution",
+      charts._zero_label(chart_by_name("xlate_added_latency"), _xrow), "0 (≤ rig resolution)")
+check("...it is eligible on the (already zero_ok) translation chart",
+      charts._topn_keys(chart_by_name("xlate_added_latency"), n=1), {"xsub"})
+
+# The streaming latency lanes (already zero_ok) get the same disclosure on their zero.
+_rec = stream()
+_rec["added_ttft_p99_us"] = _BR
+_canon({"g": _rec})
+_srow = charts._proj_streaming("g")
+check("a below_resolution added-TTFT charts as 0.0", _srow["stream_added_ttft_p99_us"], 0.0)
+check("...and its label discloses sub-resolution",
+      charts._zero_label(chart_by_name("stream_added_ttft"), _srow), "0 (≤ rig resolution)")
+_canon({"z": stream(added_ttft_p99_us=0)})
+check("a MEASURED 0 added-TTFT still labels a bare '0' (only below_resolution gets the suffix)",
+      charts._zero_label(chart_by_name("stream_added_ttft"), charts._proj_streaming("z")), "0")
+
+
+# ── the DIFFERENCE-CHART FAMILY, as one rule instead of four settings (ledger TOOL-05) ───────────────
+#
+# `clamp_negatives` was set on three of the four charts whose primary metric is a difference and not on
+# the fourth, and nothing anywhere said which charts were supposed to carry it. The flag that replaced
+# it (`diff_metric`) is only worth having if the family is enumerated and each member is held to the
+# same treatment, so this pins the membership AND the settings each member needs for a
+# below_resolution 0 to render honestly.
+DIFF_CHARTS = {c.name for c in charts.CHARTS if c.diff_metric}
+check("the difference-chart family is exactly the four charts whose metric is a subtraction",
+      DIFF_CHARTS,
+      {"added_latency", "xlate_added_latency", "stream_added_ttft", "stream_added_gap"})
+for _c in [c for c in charts.CHARTS if c.diff_metric]:
+    # zero_ok: a below_resolution difference charts as 0, and without zero_ok that 0 falls into
+    # render()'s `elif served:` branch and is captioned with zero_text - a THROUGHPUT-failure sentence
+    # in failure orange on a latency WIN, and excluded from the ranking it should top.
+    check(f"{_c.name}: a difference chart treats 0 as the winning end (zero_ok)", _c.zero_ok, True)
+    # null_not_served: without it, `float(r.get(f, 0) or 0)` coerces an UNMEASURED null to 0.0, which
+    # on a zero_ok chart ranks the unmeasured gateway #1 for adding no overhead.
+    check(f"{_c.name}: an unmeasured null is not a served 0 (null_not_served)", _c.null_not_served, True)
+    # lower-is-better: the whole reason a 0 is the winning end.
+    check(f"{_c.name}: is lower-is-better", _c.higher_better, False)
+
+# Every member's projection must carry the `_<field>_reason` breadcrumb, or _zero_label has nothing to
+# read and the bar reverts to a bare "0" that reads as an exact measurement. Driven off DIFF_CHARTS so
+# a fifth difference chart added tomorrow is covered the day it is added.
+_BR_ROWS = {}
+_canon_perf({"p": {"best_cell": {**bc(), "added_latency_p99_us": _BR}},
+             "x": {"translation_cell": {**tc(), "added_latency_p99_us": _BR}}})
+_BR_ROWS["added_latency"] = charts._proj_perf("p")
+_BR_ROWS["xlate_added_latency"] = charts._proj_xlate("x")
+_st = stream(); _st["added_ttft_p99_us"] = _BR
+_canon({"s": _st})
+_BR_ROWS["stream_added_ttft"] = charts._proj_streaming("s")
+_sg = stream(); _sg["added_gap_p99_us"] = _BR
+_canon({"s": _sg})
+_BR_ROWS["stream_added_gap"] = charts._proj_streaming("s")
+check("every difference chart has a below_resolution fixture proving it end to end",
+      set(_BR_ROWS), DIFF_CHARTS)
+for _c in [c for c in charts.CHARTS if c.diff_metric]:
+    _f = _c.series[0].field
+    _r = _BR_ROWS[_c.name]
+    check(f"{_c.name}: a below_resolution envelope charts as 0.0, not absent", _r.get(_f), 0.0)
+    check(f"{_c.name}: its projection carries the reason breadcrumb", charts._below_res(_r, _f), True)
+    check(f"{_c.name}: and its bar label discloses the rig limit",
+          charts._zero_label(_c, _r), "0 (≤ rig resolution)")
+# The stream_added_gap half of that was previously unproven: only the TTFT twin had a test, so a
+# projection that dropped the gap breadcrumb would have shipped a bare "0" on the per-token chart.
+_canon({"z": stream(added_gap_p99_us=0)})
+check("a MEASURED 0 added-gap still labels a bare '0' (only below_resolution gets the suffix)",
+      charts._zero_label(chart_by_name("stream_added_gap"), charts._proj_streaming("z")), "0")
+
+# ── the negative-difference REFUSAL, which replaced the silent clamp (ledger TOOL-05) ────────────────
+#
+# RED: a negative on a difference chart must be refused by name. Under the old clamp this same row was
+# rewritten to 0.0, sorted to the WINNING end of a lower-is-better chart, labelled a bare "0", and
+# disclosed only by one footnote at the bottom of the image that said some unnamed bar had been
+# clamped. Deleting the clamp without this check would have kept every one of those consequences and
+# dropped the footnote too.
+_neg = [{"_key": "gw", "added_latency_p99_us": -3.0}]
+_v = charts._negative_diff_violations(chart_by_name("added_latency"), _neg)
+check("a NEGATIVE difference is refused, not clamped to a winning 0", len(_v), 1)
+check("...and the refusal names the gateway", "gw" in _v[0], True)
+check("...and names the field", "added_latency_p99_us" in _v[0], True)
+for _c in [c for c in charts.CHARTS if c.diff_metric]:
+    _row = [{"_key": "gw", _c.series[0].field: -1.0}]
+    check(f"{_c.name}: refuses a negative difference",
+          len(charts._negative_diff_violations(_c, _row)), 1)
+
+# ACCEPT: everything that is not a negative on a difference chart passes untouched - a measured 0, a
+# below_resolution 0, a real positive, an absent value, and a NON-difference chart's negative (which
+# this check has no opinion about, because a negative RSS or RPS is a different bug entirely).
+for _name, _row in (("a measured 0", {"_key": "g", "added_latency_p99_us": 0.0}),
+                    ("a real positive", {"_key": "g", "added_latency_p99_us": 120}),
+                    ("an absent value", {"_key": "g"}),
+                    ("a below_resolution 0", _BR_ROWS["added_latency"])):
+    check(f"the refusal accepts {_name}",
+          charts._negative_diff_violations(chart_by_name("added_latency"), [_row]), [])
+check("the refusal has no opinion about a non-difference chart",
+      charts._negative_diff_violations(chart_by_name("rps_max_proxy"),
+                                       [{"_key": "g", "rps_max_proxy": -1}]), [])
+# `served=False` is a bool, and bool is a subclass of int in Python - a naive `v < 0` walk over row
+# fields would be fine, but a naive `isinstance(v, int)` guard that forgot bools would start reading
+# flags as measurements. Pin that bools are never mistaken for a negative reading.
+check("a False flag in a row field is not read as a measurement",
+      charts._negative_diff_violations(chart_by_name("added_latency"),
+                                       [{"_key": "g", "added_latency_p99_us": False}]), [])
+
+# ── the README table says the SAME thing about the same envelope as the PNG ───────────────────────────
+#
+# The chart labelled a below_resolution difference "0 (≤ rig resolution)" while the report table
+# printed "0 µs" for the identical envelope - one describing a rig limit, the other an exact
+# measurement of no overhead, from one number. Both surfaces are published; they must not disagree.
+_canon_perf({"p": {"best_cell": {**bc(), "added_latency_p99_us": _BR}}})
+_md = charts._report_md(charts._ranked(), "t", [])
+check("the report's latency cell discloses a below_resolution reading, never a flat '0 µs'",
+      ("≤ rig resolution" in _md, "0.0 µs" in _md, "0 µs" in _md), (True, False, False))
+_canon_perf({"p": {"best_cell": bc(added_latency_p99_us=120)}})
+_md2 = charts._report_md(charts._ranked(), "t", [])
+check("a real measured latency still prints as a number", "120 µs" in _md2, True)
+
+
 if _fail == 0:
     print("all charts.py validity-gate tests passed")
     sys.exit(0)
