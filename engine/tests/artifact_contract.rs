@@ -48,7 +48,7 @@ const PERF_METRICS: [&str; 10] = [
     "rps_max_proxy_concurrency",
     "conc_at_peak",
 ];
-const STREAM_METRICS: [&str; 8] = [
+const STREAM_METRICS: [&str; 10] = [
     "added_ttft_p50_us",
     "added_ttft_p99_us",
     "added_gap_p50_us",
@@ -57,6 +57,11 @@ const STREAM_METRICS: [&str; 8] = [
     "streams_sustained_fps",
     "cpu_fps",
     "cpu_fps_concurrency",
+    // The weight behind the two added-TTFT percentiles. Declared like any other metric so a null here
+    // must carry a reason: a percentile whose sample count is itself an unexplained hole tells a reader
+    // nothing about how much to trust it.
+    "ttft_gw_samples",
+    "ttft_direct_samples",
 ];
 // `plateaued` and `load_s` joined this list when they stopped being bare `Option`s that collapsed
 // the memory group's reason on the way out: a window that could not judge the plateau published two
@@ -113,6 +118,8 @@ fn measured_stream() -> CellStream {
         streams_sustained_fps: Measurement::Measured(39_000.0),
         cpu_fps: Measurement::Measured(48_000.0),
         cpu_fps_concurrency: Measurement::Measured(256),
+        ttft_gw_samples: Measurement::Measured(100),
+        ttft_direct_samples: Measurement::Measured(100),
         ..CellStream::default()
     }
 }

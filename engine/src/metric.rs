@@ -214,6 +214,15 @@ pub fn process_cell_with(
         if !produced.series.sweep_cpu_fps.is_empty() {
             series.sweep_cpu_fps = produced.series.sweep_cpu_fps;
         }
+        // THE IDLE WINDOW WAS MEASURED AND THEN DROPPED ON THE FLOOR. The memory group samples a full
+        // idle window and returns it as `Series.idle_rss`, and this accumulator - a hand-written chain
+        // with one clause per field - simply had no clause for it. So `CellMemory.idle_rss_series` was
+        // published empty on every cell, the site's idle sparkline had nothing to draw, and the idle
+        // verdict beside it described a series no reader could see. Nothing failed: an accumulator that
+        // forgets a field looks exactly like a group that produced none.
+        if !produced.series.idle_rss.is_empty() {
+            series.idle_rss = produced.series.idle_rss;
+        }
         let filled: BTreeMap<&'static str, Measurement<f64>> =
             produced.fields.into_iter().collect();
         for field in m.fields() {
@@ -1014,6 +1023,14 @@ impl Metric for Streaming {
             "added_gap_p99_us",
             "gateway_c1_frames",
             "direct_c1_frames",
+            // HOW MANY TTFT PROBES SURVIVED, per leg. The percentiles above are taken over whatever
+            // came back out of `STREAM_TTFT_SAMPLES` attempts, and a failed probe was dropped inside a
+            // `filter_map` - so a p99 over three lucky samples published identically to one over a
+            // hundred, and with a single survivor the p50 and p99 ranks collapse to the same index and
+            // the pair reads as coherent. `AddedLatency` publishes `gateway_c1_samples` and
+            // `direct_c1_samples` for exactly this reason; the streaming group stated no weight at all.
+            "ttft_gw_samples",
+            "ttft_direct_samples",
         ]
     }
 
@@ -1131,6 +1148,19 @@ impl Metric for Streaming {
         let direct_path = ctx.dialect.mock_direct_path(&model);
         let mut gw_ttfts = ttft_samples(ctx.cfg.gateway_addr, &gw_path, &gw_headers);
         let mut direct_ttfts = ttft_samples(ctx.cfg.mock_addr, &direct_path, &direct_headers);
+        // LOSS IS REPORTED, not merely counted. A leg that sheds most of its probes still produces a
+        // publishable percentile, so the count below is what lets a reader weigh it - and a large loss
+        // is worth a line on stderr while the run is still happening.
+        for (leg, got) in [("gateway", gw_ttfts.len()), ("direct", direct_ttfts.len())] {
+            if got < STREAM_TTFT_SAMPLES {
+                eprintln!(
+                    "streaming: the {leg} leg returned a first token on {got} of {STREAM_TTFT_SAMPLES} \
+                     TTFT probes, so its added-TTFT percentiles carry that weight and no more"
+                );
+            }
+        }
+        let gw_n = gw_ttfts.len() as f64;
+        let direct_n = direct_ttfts.len() as f64;
         gw_ttfts.sort_unstable();
         direct_ttfts.sort_unstable();
         // The rank comes from `stats::nearest_rank_index`, the engine's ONE percentile convention,
@@ -1241,6 +1271,11 @@ impl Metric for Streaming {
                 "direct_c1_frames",
                 Measurement::Measured(direct.frame_offsets_us.len() as f64),
             ),
+            // The weight behind the two added-TTFT percentiles above. Always MEASURED, including when
+            // it is zero: "no probe came back" is a fact about this cell, and an absence here would be
+            // the one number a reader needs to judge the percentiles going missing itself.
+            ("ttft_gw_samples", Measurement::Measured(gw_n)),
+            ("ttft_direct_samples", Measurement::Measured(direct_n)),
         ];
         fields.into()
     }
@@ -1634,6 +1669,84 @@ impl Metric for CpuFps {
 
 #[cfg(test)]
 mod tests {
+    // EVERY `Series` FIELD MUST SURVIVE THE ACCUMULATOR.
+    //
+    // `process_cell_with` merges each group's Series into the cell's with a hand-written chain, one
+    // clause per field - and it had no clause for `idle_rss`. The memory group measured a full idle
+    // window, returned it, and the accumulator dropped it, so `CellMemory.idle_rss_series` published
+    // empty on every cell and the site's idle sparkline had nothing to draw. Nothing failed, because an
+    // accumulator that forgets a field is indistinguishable from a group that produced none.
+    //
+    // This drives a metric that returns EVERY field populated and asserts every one arrives. A field
+    // added to `Series` and forgotten in the merge now fails here instead of publishing silence.
+    #[test]
+    fn no_series_field_is_dropped_by_the_accumulator() {
+        struct FullSeries;
+        impl Metric for FullSeries {
+            fn name(&self) -> &'static str {
+                "full_series"
+            }
+            fn fields(&self) -> &'static [&'static str] {
+                &[]
+            }
+            fn measure(&self, _ctx: &CellCtx<'_>) -> Measured {
+                let rss = vec![crate::record::RssSample {
+                    t_s: 1,
+                    rss_mib: Measurement::Measured(10.0),
+                }];
+                let pt = || crate::record::SweepPoint {
+                    conc: 1,
+                    rps: Measurement::Measured(10),
+                    p99_us: Measurement::Measured(20),
+                    fail: Measurement::Measured(0),
+                };
+                Measured {
+                    fields: vec![],
+                    series: Series {
+                        sweep: vec![pt()],
+                        sweep_sustained: vec![pt()],
+                        rss: rss.clone(),
+                        idle_rss: rss,
+                        sweep_streams: vec![serde_json::Value::Null],
+                        sweep_cpu_fps: vec![serde_json::Value::Null],
+                    },
+                }
+            }
+        }
+        let cfg = crate::run::test_fixture(
+            "127.0.0.1:1".parse().expect("addr"),
+            "127.0.0.1:1".parse().expect("addr"),
+        );
+        let id = crate::cell::CellId::new("openai", "openai");
+        let ctx = CellCtx {
+            cfg: &cfg,
+            id: &id,
+            dialect: crate::ingress::Dialect::Openai,
+            min_conc: 1,
+            max_conc: 2,
+        };
+        let metrics: Vec<&dyn Metric> = vec![&FullSeries];
+        let (_fields, series, _timings) = process_cell_with(&ctx, &metrics);
+        assert!(!series.sweep.is_empty(), "sweep was dropped");
+        assert!(
+            !series.sweep_sustained.is_empty(),
+            "sweep_sustained was dropped"
+        );
+        assert!(!series.rss.is_empty(), "rss was dropped");
+        assert!(
+            !series.idle_rss.is_empty(),
+            "idle_rss was dropped - this is the field that was silently discarded on every cell"
+        );
+        assert!(
+            !series.sweep_streams.is_empty(),
+            "sweep_streams was dropped"
+        );
+        assert!(
+            !series.sweep_cpu_fps.is_empty(),
+            "sweep_cpu_fps was dropped"
+        );
+    }
+
     // A DEAD SAMPLER MUST NOT READ AS A SETTLED GATEWAY.
     //
     // The load loop snapshots the shared RSS series between windows and breaks the moment

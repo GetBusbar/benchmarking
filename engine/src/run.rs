@@ -1678,6 +1678,24 @@ pub fn stream_window(
     Some(w)
 }
 
+/// May a stream ceiling be PUBLISHED from these windows? Pure, so the rule can be tested without a
+/// socket - the same reason `window_refusal` and `cpu_fps_result_from_search` are separate.
+///
+/// TWO CONDITIONS, and the stream path used to carry only the second. A window that could not run is
+/// skipped without incrementing `total`, so two absent repeats left the count at 1 of 1 and `1 * 2 > 1`
+/// published the bisection's single unrepeated window as a confirmed ceiling. Both absent paths -
+/// `SseEnd::RigExhausted` when the host runs out of ephemeral ports or descriptors, and a panicked
+/// lane - are reachable exactly at the top rung, so the shrinking denominator was likeliest precisely
+/// where the published number matters most.
+///
+/// `confirm_ceiling` refuses the same input on the throughput side, and its comment says why: one
+/// lucky window is how a sustained figure lands ABOVE the peak measured from the same sweep, which is
+/// the inversion class C6 catches downstream. Every other rate on this board is a median of
+/// `WINDOWS_PER_RUNG` windows; so is this one, or it is not published.
+fn stream_ceiling_confirmed(total: usize, held: usize) -> bool {
+    total >= crate::search::WINDOWS_PER_RUNG && held * 2 > total
+}
+
 /// Why a stream window must be DISCARDED rather than published, or `None` when it may stand.
 ///
 /// Pure, and separate from the window that feeds it, for the reason `apply_peak_verdict` and
@@ -1934,12 +1952,42 @@ pub fn sweep_streams_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> Cel
                             rates.push(w.fps());
                         }
                     }
-                    if held * 2 > total {
+                    // THE SAME TWO-PART RULE `confirm_ceiling` USES, not just its majority half.
+                    //
+                    // A window that could not RUN takes the `continue` above without incrementing
+                    // `total`, so two absent repeats left this at 1 of 1 - and `1 * 2 > 1` is true, so
+                    // the bisection's single unrepeated window was published as a confirmed ceiling
+                    // along with its own raw fps. Both absent paths are reachable exactly here, at the
+                    // top rung: `SseEnd::RigExhausted` when the host runs out of ephemeral ports or
+                    // descriptors, and a panicked lane. So the shrinking denominator was likeliest
+                    // precisely where the number matters most.
+                    //
+                    // `confirm_ceiling` refuses this input on the throughput side and says why: one
+                    // lucky window is how a sustained figure lands ABOVE the peak from the same sweep.
+                    // The stream copy carried the majority test and dropped the minimum-window half,
+                    // and the comment claiming it "runs the same majority rule" was true only of the
+                    // half that survived. A rate here is a median of WINDOWS_PER_RUNG windows or it is
+                    // not published.
+                    if stream_ceiling_confirmed(total, held) {
                         // The published rate is the median of the windows that HELD, matching how
                         // every other repeated measurement in this engine reports.
                         rates.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
                         let fps = crate::search::nearest_rank_median(&rates).unwrap_or(first_fps);
                         winner = Some((ceiling, fps));
+                        break;
+                    }
+                    if total < crate::search::WINDOWS_PER_RUNG {
+                        // (see `stream_ceiling_confirmed`)
+                        // THE RIG RAN SHORT, NOT THE GATEWAY. Stepping down would walk the ceiling
+                        // down on our own missing windows and charge the gateway for them, so this
+                        // ends the search with no winner and the cell publishes an absence carrying
+                        // the reason - the same choice `confirm_ceiling` makes.
+                        eprintln!(
+                            "streams: c={ceiling} could only be measured in {total} of {} windows - \
+                             the rig ran short, so no ceiling is published rather than one taken from \
+                             a single window",
+                            crate::search::WINDOWS_PER_RUNG
+                        );
                         break;
                     }
                     let next = ceiling / 2;
@@ -2575,6 +2623,44 @@ mod tests {
             streams.is_power_of_two(),
             "the ladder doubles, so a ceiling off the ladder is never actually reached: {streams}"
         );
+    }
+
+    // ONE LUCKY WINDOW MUST NOT BECOME A CONFIRMED STREAM CEILING.
+    //
+    // The confirmation loop opens `held = 1, total = 1` because the bisection's own winning window is
+    // a real vote, then takes WINDOWS_PER_RUNG-1 repeats. A repeat that cannot RUN is skipped WITHOUT
+    // incrementing `total`, so two absent repeats left 1 of 1 - and the majority test alone reads that
+    // as a pass, publishing the single unrepeated window as the ceiling plus its own raw fps as
+    // streams_sustained_fps. Both absent paths (RigExhausted on ports/descriptors, a panicked lane)
+    // bite hardest at the top rung, which is exactly where the published number comes from.
+    //
+    // `confirm_ceiling` refuses the same input on the throughput side and explains that one lucky
+    // window is how a sustained figure lands ABOVE the peak from the same sweep. The stream copy kept
+    // the majority half and dropped the minimum-window half, while its comment claimed to run "the
+    // same majority rule" - true only of the half that survived.
+    #[test]
+    fn a_stream_ceiling_needs_as_many_windows_as_any_other_rung() {
+        let n = crate::search::WINDOWS_PER_RUNG;
+        assert!(
+            !super::stream_ceiling_confirmed(1, 1),
+            "1 of 1 is the bisection's own window with both repeats absent - not a confirmation"
+        );
+        assert!(
+            !super::stream_ceiling_confirmed(2, 2),
+            "2 of 2 is still short of a climb rung: one absent repeat must not lower the bar"
+        );
+        // A full set that genuinely held publishes.
+        assert!(
+            super::stream_ceiling_confirmed(n, n),
+            "every window held: publish"
+        );
+        // A full set with a real majority publishes; a real minority does not. This is the half that
+        // already worked, asserted so a fix to the other half cannot quietly remove it.
+        assert!(
+            super::stream_ceiling_confirmed(3, 2),
+            "2 of 3 held is a majority"
+        );
+        assert!(!super::stream_ceiling_confirmed(3, 1), "1 of 3 held is not");
     }
 
     // A WINDOW THAT LOST LANES MUST BE DISCARDED, LOUDLY.
