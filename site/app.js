@@ -2099,24 +2099,29 @@ function rssSparkline(series, loadEndS = null, idleMib = null) {
   const W = 260, H = 56, PAD = 3;
   const ts = pts.map((p) => p.t_s), ys = pts.map((p) => p.rss_mib);
   const t0 = ts[0], t1 = ts[ts.length - 1], tspan = (t1 - t0) || 1;
-  // THE AXIS IS 0 -> 2x IDLE, NOT THIS CURVE'S OWN MIN AND MAX.
+  // THE AXIS RUNS 0 -> AT LEAST TWICE IDLE, AND ALWAYS FAR ENOUGH TO SHOW THE WHOLE CURVE.
   //
-  // Auto-scaling made every curve fill the full height whatever it did, so a process that rose 1.2%
-  // off idle (litellm-rust, 252.1 -> 255.0) drew the same cliff as one that rose 801% (kong, 378 ->
-  // 3412). The chart exaggerated hardest for the gateways that behaved best, which is backwards, and
-  // it made two curves impossible to compare with each other.
+  // Two failure modes, and the fix has to avoid both.
   //
-  // Fixing the axis to twice idle gives the height a MEANING: the idle line sits at the halfway mark
-  // by construction, and how far the load curve rises above it is how much the work cost, relative to
-  // what the process cost doing nothing. A flat gateway now draws a flat line. A gateway that more
-  // than doubles clips at the top, and the caption underneath carries the real peak, because a curve
-  // that leaves its box is worse than one that stops at the edge and says so.
+  // Auto-scaling to each curve's own range made every curve fill the height whatever it did: 1.2% of
+  // growth (litellm-rust) drew the same cliff as 801% (kong). It exaggerated hardest for the gateways
+  // that behaved best, and made two curves impossible to compare.
+  //
+  // But a HARD cap at twice idle is worse, and the board caught it: every one of bifrost's six cells
+  // spends 100% of its samples above 2x idle (idle 153, rising through 525 and 665 to a peak of 875,
+  // then falling back to 605). Clipping drew that as a flat line pinned to the ceiling - so the one
+  // gateway on the board that never settles, and is labelled NEVER SETTLES with a 51 MiB/min leak
+  // beside it, was the one whose curve showed no growth at all. Hiding the finding the row exists to
+  // report is not a scale, it is a lie with a caption.
+  //
+  // So twice idle is a FLOOR on the axis, not a ceiling: a gateway that stays near idle still gets a
+  // stable, honest frame instead of magnifying its own noise, and a gateway that climbs gets a frame
+  // big enough to show the climb. Nothing is ever clipped.
   const dataMin = Math.min(...ys), dataMax = Math.max(...ys);
   const anchored = typeof idleMib === "number" && idleMib > 0;
   const ymin = anchored ? 0 : dataMin;
-  const ymax = anchored ? idleMib * 2 : dataMax;
+  const ymax = anchored ? Math.max(idleMib * 2, dataMax) : dataMax;
   const yspan = (ymax - ymin) || 1;
-  const clipped = anchored && dataMax > ymax;
   const x = (t) => PAD + ((t - t0) / tspan) * (W - 2 * PAD);
   const y = (v) => PAD + (1 - Math.min(Math.max((v - ymin) / yspan, 0), 1)) * (H - 2 * PAD);
   const path = pts.map((p, i) => `${i ? "L" : "M"}${x(p.t_s).toFixed(1)},${y(p.rss_mib).toFixed(1)}`).join("");
@@ -2131,7 +2136,7 @@ function rssSparkline(series, loadEndS = null, idleMib = null) {
     : "";
   const restNote = marks ? `, load stopped at ${fmtInt(loadEndS)} s` : "";
   return `<div class="rss-spark"><svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" role="img" ` +
-    `aria-label="RSS curve, axis 0 to twice idle: peak ${fmt1(dataMax)} MiB over ${fmtInt(tspan)} s${restNote}">` +
+    `aria-label="RSS curve from zero, idle ${anchored ? fmt1(idleMib) : "unknown"} MiB, peak ${fmt1(dataMax)} MiB over ${fmtInt(tspan)} s${restNote}">` +
     `<polyline points="${x(t0).toFixed(1)},${(H - PAD).toFixed(1)} ${x(t1).toFixed(1)},${(H - PAD).toFixed(1)}" ` +
     `fill="none" stroke="currentColor" stroke-opacity="0.15" stroke-width="1"/>` +
     // The idle level, drawn so "how far above idle" is a thing the eye can measure rather than infer.
@@ -2144,8 +2149,7 @@ function rssSparkline(series, loadEndS = null, idleMib = null) {
     `<path d="${path}" fill="none" stroke="currentColor" stroke-width="1.5"/>` +
     `<circle cx="${x(last.t_s).toFixed(1)}" cy="${y(last.rss_mib).toFixed(1)}" r="2.5" fill="currentColor"/>` +
     `</svg>` +
-    `<div class="stamp muted">peak ${fmt1(dataMax)} → recovered ${fmt1(last.rss_mib)} MiB (${fmtInt(tspan)} s)${
-      clipped ? ` · axis capped at 2× idle` : ""}</div></div>`;
+    `<div class="stamp muted">peak ${fmt1(dataMax)} → recovered ${fmt1(last.rss_mib)} MiB (${fmtInt(tspan)} s)</div></div>`;
 }
 
 /* rssCurves(mem): the memory window as TWO curves on ONE scale - what the process cost doing
