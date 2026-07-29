@@ -147,12 +147,11 @@ proptest! {
     }
 
     // FOR EVERY REASON AND ANY VALUE: no accessor yields a number for an absence; suppression
-    // discards a measured value and never relabels an existing absence; map preserves the reason and
-    // detail; the wire form is null.
+    // map preserves the reason and detail, and the wire form is null. (The suppress-helper properties
+    // that also lived here went with the helpers themselves - see measurement.rs.)
     #[test]
     fn no_accessor_route_reaches_a_number_for_any_absence(
         which in 0usize..7,
-        value in -1.0e12f64..1.0e12,
         detail in "[a-z ]{0,40}",
     ) {
         let reason = ALL_REASONS[which].clone();
@@ -177,16 +176,12 @@ proptest! {
             prop_assert_eq!(mapped.detail(), Some(detail.as_str()));
         }
 
-        // Suppressing a measured value discards it for this reason...
-        let suppressed = Measurement::Measured(value).suppress(reason.clone());
-        prop_assert_eq!(suppressed.copied(), None);
-        prop_assert_eq!(suppressed.reason(), Some(&reason));
-        // ...and suppressing an existing absence never overwrites the original, more specific reason.
-        let relabelled = absent.suppress(Absent::HarnessError);
-        prop_assert_eq!(
-            relabelled.reason(), Some(&reason),
-            "suppress() relabelled an existing absence"
-        );
+        // The `suppress` / `suppress_because` properties that used to sit here are gone with the
+        // helpers: they had no production caller, and their preserve-an-existing-absence semantics
+        // could not have served the real suppression sites, which assign `absent_because(RigLimited,
+        // detail)` over a field already carrying `NotMeasured`. What the real path must guarantee -
+        // that a suppressed number reaches the wire as null and stays unrecoverable - is asserted in
+        // measurement.rs's own `a_suppressed_number_discards_the_value_and_records_why`.
     }
 
     // record_absence: an absent measurement lands in the map under its key with reason and detail

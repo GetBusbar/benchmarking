@@ -115,14 +115,21 @@ pub fn growth_rate(samples: &[Sample]) -> Measurement<f64> {
 }
 
 /// The steadiness gate. Windows `samples` to the trailing `window_s` seconds, then requires BOTH:
-///   trend: the second half of the window's mean rises less than `trend_pct` over the first half's.
+///   trend: the two halves' means differ by less than `trend_pct`, IN EITHER DIRECTION.
 ///   range: (max - min) across the window is less than `range_pct` of the window's mean.
 ///
-/// The trend test is ONE-SIDED: only a rise disqualifies. A series falling during the window is
-/// releasing, not leaking, and pinning that at "not steady" forever would defeat the point of a
-/// measured stop condition. The range test still bounds how far it may move either way, so a series
-/// oscillating hard around a flat mean (no trend, but not steady either, since the value read depends
-/// on which instant you sampled) is still correctly rejected.
+/// The trend test is TWO-SIDED, and this comment used to say the opposite - that only a rise
+/// disqualified, on the reasoning that a falling series is releasing rather than leaking. The code
+/// deliberately compares `drift.abs()` instead, and the note at that comparison explains why: a
+/// signed value against a positive threshold bounds growth ONLY, so any decline however steep is
+/// always less than the threshold and would read as settled. `Verdict::Steady`'s own contract is "not
+/// moving in any direction that matters", and a window still handing memory back at speed is moving.
+/// Falling is not treated as leaking either - it is published as its own shape (`Shape::Falling`), so
+/// the honest reading survives without the gate having to wave it through.
+///
+/// The range test then bounds how far the series may travel within the window regardless of trend, so
+/// one oscillating hard around a flat mean - no net drift, but the value read depends on which instant
+/// you sampled - is still correctly rejected.
 ///
 /// An odd-sized window gives its extra sample to the SECOND half, so a late upward sample is never the
 /// one a rounding choice drops.

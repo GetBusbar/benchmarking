@@ -156,7 +156,7 @@ pub fn path_for(cfg: &RunConfig, ingress: Dialect, egress: &str) -> String {
 /// this run holds (one gateway mints it at launch), and the shape is what a real client of that
 /// dialect sends. A manifest able to override it could have a gateway measured under an identity the
 /// harness cannot name. Disclosed rather than silent: `Manifest::rig_owned_headers_declared` reports
-/// the collision through `otb lint`, naming the file and the header.
+/// the collision through `otb validate`, naming the file and the header.
 ///
 /// Dropping, not refusing at load, because the one manifest that trips this is a first-party file
 /// and refusing would stop the whole benchmark rather than measure it unambiguously. The comparison
