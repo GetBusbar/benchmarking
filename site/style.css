@@ -185,9 +185,18 @@ a.home-card:hover { border-color: var(--accent); text-decoration: none; }
 table { border-collapse: collapse; width: 100%; font-size: .86rem; }
 thead th {
   position: sticky; top: 0; background: var(--bg-raise); color: var(--fg-dim);
-  font-weight: 600; text-align: right; padding: .6rem .7rem; white-space: nowrap;
+  font-weight: 600; text-align: right; padding: .6rem .55rem;
   border-bottom: 1px solid var(--border); cursor: pointer; user-select: none;
 }
+/* HEADERS WRAP, NUMBERS DO NOT.
+   A column is as wide as its widest cell, and on the metric tabs that is always the header:
+   "Added TTFT p50 (µs)" is far longer than any value under it, so nowrap headers pushed the last
+   column off the right edge and the whole table scrolled. Letting the header take two short lines
+   costs one row of height once and buys back the width every row. The values keep nowrap - a
+   wrapped number reads as two numbers. max-width stops a long single word from claiming a whole
+   column on its own. */
+#results-table thead th { white-space: normal; overflow-wrap: anywhere; max-width: 7.5rem; }
+#results-table thead th:nth-child(1), #results-table thead th:nth-child(2) { white-space: nowrap; max-width: none; }
 thead th:first-child, tbody td:first-child { text-align: left; }
 /* Lock ONLY the identity of each row (checkbox + Gateway name) while the metric
    columns, Class and Lang included, scroll horizontally. Scoped to the results
@@ -218,7 +227,7 @@ thead th.sorted, tbody td.sorted-col { background: var(--sorted-col-bg); }
 /* keep the two sticky left columns opaque even when they are the sorted one */
 #results-table tbody td.sorted-col:nth-child(1),
 #results-table tbody td.sorted-col:nth-child(2) { background: var(--sorted-col-bg); }
-tbody td { padding: .5rem .7rem; text-align: right; border-bottom: 1px solid var(--border); white-space: nowrap; }
+tbody td { padding: .5rem .55rem; text-align: right; border-bottom: 1px solid var(--border); white-space: nowrap; }
 tbody tr:last-child td { border-bottom: none; }
 tbody tr:hover td { background: var(--bg-hover); }
 td.na { color: var(--fg-mute); font-size: .78rem; }
