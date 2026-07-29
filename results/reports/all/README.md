@@ -9,7 +9,7 @@ Every number below is regenerated from the raw `results/*.json` - re-run `run-al
 | [LiteLLM · Rust](https://github.com/BerriAI/litellm) | 105 µs | 42,634 | 46,959 | - | - | `` |
 | [Busbar](https://github.com/GetBusbar/busbar) | 121 µs | 43,190 | 46,934 | 7 MiB | 283 MiB | `` |
 | [agentgateway](https://github.com/agentgateway/agentgateway) | 225 µs | 24,944 | 25,158 | 23 MiB | 39 MiB | `` |
-| [AISIX (api7)](https://github.com/api7/aisix) | 247 µs | 16,876 | 18,463 | 67 MiB | 426 MiB | `` |
+| [AISIX (api7)](https://github.com/api7/aisix) | 263 µs | 15,627 | 17,360 | 67 MiB | 404 MiB | `` |
 | [Helicone](https://github.com/Helicone/ai-gateway) | 307 µs | 14,758 | 14,752 | 43 MiB | 53 MiB | `` |
 | [Kong](https://github.com/Kong/kong) | 386 µs | 24,877 | 25,901 | 386 MiB | 592 MiB | `` |
 | [APISIX](https://github.com/apache/apisix) | 415 µs | 20,570 | 20,797 | 180 MiB | 212 MiB | `` |
@@ -31,7 +31,7 @@ Same box, same mock, one gateway at a time. Streaming figures are the overhead t
 | [LiteLLM · Rust](https://github.com/BerriAI/litellm) | 189 µs | n/a | 2,367 (37,840 fps) | n/a |
 | [Busbar](https://github.com/GetBusbar/busbar) | n/a | n/a | ✕ not measured (rig-limited) | 5,714 (openai → bedrock) |
 | [agentgateway](https://github.com/agentgateway/agentgateway) | 358 µs | 5 µs | 501 (12,527 fps) | 23,220 (openai → anthropic) |
-| [AISIX (api7)](https://github.com/api7/aisix) | 476 µs | 0 µs | 950 (13,780 fps) | 16,976 (openai → anthropic) |
+| [AISIX (api7)](https://github.com/api7/aisix) | 546 µs | 121 µs | 510 (13,777 fps) | 15,973 (openai → anthropic) |
 | [Helicone](https://github.com/Helicone/ai-gateway) | 502 µs | 20 µs | ✕ not measured (rig-limited) | 14,856 (openai → anthropic) |
 | [Kong](https://github.com/Kong/kong) | 106.3 ms | 168.7 ms | ✕ 0 - MEASURED: sustained no stall-free stream | 24,035 (openai → gemini) |
 | [APISIX](https://github.com/apache/apisix) | 10.9 ms | 9.0 ms | ✕ not measured (rig-limited) | n/a |
@@ -44,33 +44,33 @@ Same box, same mock, one gateway at a time. Streaming figures are the overhead t
 
 **✕** cells are measured refusals, not gaps: the gateway was offered the load and could not do the thing (buffered instead of streaming, rejected the Anthropic shape, or has no native key/limit governance). **n/a** = that suite hasn't been run for this gateway yet.
 
-![added_latency](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/added_latency.png?v=202607290016)
+![added_latency](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/added_latency.png?v=202607290023)
 
-![rps_max_proxy](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/rps_max_proxy.png?v=202607290016)
+![rps_max_proxy](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/rps_max_proxy.png?v=202607290023)
 
-![rps_sustained_20ms](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/rps_sustained_20ms.png?v=202607290016)
+![rps_sustained_20ms](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/rps_sustained_20ms.png?v=202607290023)
 
-![memory_rss](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/memory_rss.png?v=202607290016)
+![memory_rss](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/memory_rss.png?v=202607290023)
 
-![memory_recovery](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/memory_recovery.png?v=202607290016)
+![memory_recovery](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/memory_recovery.png?v=202607290023)
 
-![rps_per_dollar](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/rps_per_dollar.png?v=202607290016)
+![rps_per_dollar](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/rps_per_dollar.png?v=202607290023)
 
-![cost_per_million](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/cost_per_million.png?v=202607290016)
+![cost_per_million](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/cost_per_million.png?v=202607290023)
 
-![stream_added_ttft](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/stream_added_ttft.png?v=202607290016)
+![stream_added_ttft](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/stream_added_ttft.png?v=202607290023)
 
-![stream_added_gap](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/stream_added_gap.png?v=202607290016)
+![stream_added_gap](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/stream_added_gap.png?v=202607290023)
 
-![stream_sustained](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/stream_sustained.png?v=202607290016)
+![stream_sustained](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/stream_sustained.png?v=202607290023)
 
-![streamcpu_fps](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/streamcpu_fps.png?v=202607290016)
+![streamcpu_fps](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/streamcpu_fps.png?v=202607290023)
 
-![xlate_rps_sustained_20ms](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/xlate_rps_sustained_20ms.png?v=202607290016)
+![xlate_rps_sustained_20ms](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/xlate_rps_sustained_20ms.png?v=202607290023)
 
-![xlate_added_latency](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/xlate_added_latency.png?v=202607290016)
+![xlate_added_latency](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/xlate_added_latency.png?v=202607290023)
 
 ---
 Method: added latency = gateway p99 − direct-to-mock p99 at concurrency 1; RPS ceiling = highest sustained req/s with p99 < 1 s and <0.1% errors; RSS idle = after first 200, peak = under sustained load. Same box, same mock, same load, one gateway at a time. Each gateway's source ref is pinned in its own `gateways/<name>/definition.json`; the built commit is in each row.
 
-<sub>Page + charts regenerated **2026-07-29 00:16 UTC** from the raw `results/*.json`.</sub>
+<sub>Page + charts regenerated **2026-07-29 00:23 UTC** from the raw `results/*.json`.</sub>
