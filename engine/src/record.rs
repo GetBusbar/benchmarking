@@ -577,6 +577,13 @@ pub struct CellMemory {
     pub load_s: Measurement<i64>,
     #[serde(default, deserialize_with = "null_as_empty_vec")]
     pub rss_series: Vec<RssSample>,
+    /// The IDLE window's own readings, so the board can draw what the process did while nothing was
+    /// asked of it rather than collapsing a whole minute to one number. Kept apart from
+    /// `rss_series` because the two answer different questions: what it costs doing nothing, versus
+    /// what work costs it. Empty on a bundle measured before this window existed, which reads as
+    /// "not recorded" and draws nothing - never as a flat line.
+    #[serde(default, deserialize_with = "null_as_empty_vec")]
+    pub idle_rss_series: Vec<RssSample>,
     #[serde(default)]
     pub idle_window_s: Option<i64>,
     #[serde(default)]

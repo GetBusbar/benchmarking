@@ -455,6 +455,8 @@ fn cell_memory(
     };
     let rss_series: Vec<crate::record::RssSample> =
         series.map(|s| s.rss.clone()).unwrap_or_default();
+    let idle_rss_series: Vec<crate::record::RssSample> =
+        series.map(|s| s.idle_rss.clone()).unwrap_or_default();
     // STEADY STATE, derived from the readings rather than left null. The trailing part of the window
     // is where the process has stopped growing, so its median is what the gateway actually costs
     // under sustained load, as distinct from the peak, which one spike can set. Absent when there
@@ -501,9 +503,13 @@ fn cell_memory(
         time_to_plateau_s: take("memory_time_to_plateau_s"),
         load_s,
         plateaued,
+        // Both windows disclose their own length. idle_window_s has been null since the field was
+        // declared, because idle was one instantaneous read and there was no window to name.
+        idle_window_s: Some(crate::metric::MEMORY_IDLE_S as i64),
         recovery_window_s: Some(crate::metric::MEMORY_RECOVERY_S as i64),
         steady_state_rss_mib: steady,
         rss_series,
+        idle_rss_series,
         ..Default::default()
     }
 }

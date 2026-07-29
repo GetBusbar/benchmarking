@@ -75,6 +75,11 @@ pub struct Series {
     pub sweep_sustained: Vec<crate::record::SweepPoint>,
     /// One entry per resident-memory reading taken across the load window.
     pub rss: Vec<crate::record::RssSample>,
+    /// One entry per reading taken across the IDLE window, before any load. Kept apart from `rss`
+    /// rather than prepended to it: they answer different questions (what it costs doing nothing,
+    /// versus what work costs it), and a reader must be able to see the idle window's own shape to
+    /// judge whether the baseline every other memory figure is measured against was itself steady.
+    pub idle_rss: Vec<crate::record::RssSample>,
     /// One entry per concurrency the STREAMS-SUSTAINED gate search probed, and one per concurrency
     /// the CPU-frames/sec peak search probed. Kept apart from each other and from the two request
     /// sweeps above for the same reason those two are kept apart: four searches over one concurrency
@@ -412,6 +417,18 @@ pub const MEMORY_MAX_LOAD_S: u64 = 300;
 /// recovered. The same 60 seconds as the settle window, so the two halves of the curve are directly
 /// comparable to a reader.
 pub const MEMORY_RECOVERY_S: u64 = 60;
+/// How long the process is watched BEFORE any load, and why it is a window rather than a reading.
+///
+/// Idle used to be one instantaneous sample taken the moment the restart returned. Two things are
+/// wrong with that. A process that is still settling - lazy allocation, warm-up threads, a runtime
+/// still building its pools - reads momentarily LOW, and every growth figure derived from idle is
+/// then overstated, on a column the board ranks ascending. And a gateway that leaks while doing
+/// NOTHING is invisible: with a single sample there is no second point to compare against.
+///
+/// The same 60 seconds as the recovery window, deliberately. It makes idle and `recovered_rss_mib`
+/// the same kind of measurement taken the same way, which is the only footing on which "did it give
+/// the memory back" is a fair question.
+pub const MEMORY_IDLE_S: u64 = 60;
 /// Percent the trailing window's two halves may differ by, and percent spread within it, before the
 /// window counts as still moving. The values the shell suite used, kept so the two agree.
 const MEMORY_TREND_PCT: f64 = 1.0;
@@ -436,6 +453,11 @@ impl Metric for Memory {
     fn fields(&self) -> &'static [&'static str] {
         &[
             "memory_idle_mib",
+            // Whether the process was STILL or GROWING while nothing was asked of it, and the rate
+            // if it grew. A leak with no load is the most damning memory result there is and the
+            // single-sample idle could not see it at all.
+            "memory_idle_static",
+            "memory_idle_growth_rate_mib_per_min",
             "memory_peak_mib",
             "memory_hwm_mib",
             "memory_recovered_mib",
@@ -489,6 +511,9 @@ impl Metric for Memory {
         // it claims to. If the harness does not own the gateway's lifetime there is no way to return
         // it to rest, and idle is published ABSENT with that reason rather than as a number we know
         // was taken under load.
+        // Filled by the idle window below and published beside the load series, so the site can draw
+        // the two windows as two curves on one scale rather than collapsing idle to a single number.
+        let mut idle_series: Vec<crate::stats::Sample> = Vec::new();
         let idle = match &ctx.cfg.relaunch {
             None => Measurement::absent_because(
                 Absent::NotMeasured,
@@ -532,7 +557,37 @@ impl Metric for Memory {
                 Ok(()) => match crate::rss::root_pid(&ctx.cfg.runtime).copied() {
                     Some(fresh) => {
                         pid = fresh;
-                        crate::rss::rss_tree_mib(fresh)
+                        // WATCH IT DO NOTHING, FOR AS LONG AS THE RECOVERY WINDOW WATCHES IT REST.
+                        //
+                        // This was one instantaneous read. A process still settling read low, which
+                        // overstated every growth figure derived from idle, and a gateway that leaks
+                        // with no load at all was invisible because one sample has nothing to
+                        // compare against. The window is sampled at the same interval as the load
+                        // window, so `idle_series` is the same shape of evidence as `rss_series`.
+                        let idle_start = std::time::Instant::now();
+                        while idle_start.elapsed().as_secs() < MEMORY_IDLE_S {
+                            if let Some(v) = crate::rss::rss_tree_mib(fresh).copied() {
+                                idle_series.push(crate::stats::Sample {
+                                    t_s: idle_start.elapsed().as_secs_f64(),
+                                    mib: v,
+                                });
+                            }
+                            std::thread::sleep(MEMORY_SAMPLE_INTERVAL);
+                        }
+                        // The MEDIAN of the window, not its first or last reading: the same
+                        // discipline `steady_state` uses, so one allocator spike cannot set the
+                        // baseline every other memory figure is measured against.
+                        let vals: Vec<f64> = idle_series.iter().map(|s| s.mib).collect();
+                        if vals.is_empty() {
+                            Measurement::absent_because(
+                                Absent::NotMeasured,
+                                format!(
+                                    "the {MEMORY_IDLE_S}s idle window produced no readable sample of the process tree"
+                                ),
+                            )
+                        } else {
+                            crate::stats::median(&vals)
+                        }
                     }
                     None => Measurement::absent_because(
                         Absent::NotMeasured,
@@ -691,6 +746,51 @@ impl Metric for Memory {
                 ),
             ),
         };
+        // THE SAME PLATEAU TEST THE LOAD WINDOW USES, pointed at the idle window. Reusing it rather
+        // than inventing a second rule means "still" means the same thing on both halves of the
+        // curve, and a reader comparing them is comparing like with like.
+        let (idle_static, idle_growth) = if idle_series.len() < 2 {
+            let why = format!(
+                "the {MEMORY_IDLE_S}s idle window produced too few readings to say whether memory moved"
+            );
+            (
+                Measurement::absent_because(Absent::NotMeasured, why.clone()),
+                Measurement::absent_because(Absent::NotMeasured, why),
+            )
+        } else {
+            // The verdict CARRIES the rate, so "it moved" can never be published without saying how
+            // fast - that coupling is the enum's own design and this reuses it rather than computing
+            // a second, independently-derived number beside it.
+            match crate::stats::plateau_check(
+                &idle_series,
+                MEMORY_IDLE_S as f64,
+                MEMORY_TREND_PCT,
+                MEMORY_RANGE_PCT,
+            ) {
+                crate::stats::Verdict::Steady => {
+                    (Measurement::Measured(1.0), Measurement::Measured(0.0))
+                }
+                crate::stats::Verdict::NotSteady {
+                    growth_rate_mib_per_min,
+                } => (Measurement::Measured(0.0), growth_rate_mib_per_min),
+                crate::stats::Verdict::Undecidable => {
+                    let why = format!(
+                        "the {MEMORY_IDLE_S}s idle window held too few readings to judge whether memory moved"
+                    );
+                    (
+                        Measurement::absent_because(Absent::NotMeasured, why.clone()),
+                        Measurement::absent_because(Absent::NotMeasured, why),
+                    )
+                }
+            }
+        };
+        let idle_rss_samples: Vec<crate::record::RssSample> = idle_series
+            .iter()
+            .map(|s| crate::record::RssSample {
+                t_s: s.t_s as i64,
+                rss_mib: Measurement::Measured(s.mib),
+            })
+            .collect();
         let rss: Vec<crate::record::RssSample> = taken
             .iter()
             .map(|s| crate::record::RssSample {
@@ -701,6 +801,8 @@ impl Metric for Memory {
         Measured {
             fields: vec![
                 ("memory_idle_mib", idle),
+                ("memory_idle_static", idle_static),
+                ("memory_idle_growth_rate_mib_per_min", idle_growth),
                 ("memory_peak_mib", peak),
                 ("memory_hwm_mib", hwm),
                 ("memory_recovered_mib", recovered),
@@ -728,7 +830,7 @@ impl Metric for Memory {
                     },
                 ),
             ],
-            series: Series { rss, ..Series::default() },
+            series: Series { rss, idle_rss: idle_rss_samples, ..Series::default() },
         }
     }
 }
