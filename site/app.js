@@ -1156,7 +1156,7 @@ const COLUMN_SETS = {
       },
       render: (g, st = state) => {
         const m = memoryFor(g, st);
-        const spark = m && recordShowsValues(m) ? rssSparkline(m.rss_series) : "";
+        const spark = m && recordShowsValues(m) ? rssSparkline(m.rss_series, m.load_s) : "";
         return spark ? `<td class="memcurve">${spark}</td>` : `<td class="memcurve na">n/a</td>`;
       } },
   ],
@@ -1242,7 +1242,7 @@ const LANES = [
     },
     // The RSS curve (idle→load→recovery, one process lifecycle). Renders ONLY when rss_series
     // exists (≥2 points); a bundle without a series → extra() returns "" and the drawer shows just the numbers.
-    extra: (j) => rssSparkline(j.rss_series),
+    extra: (j) => rssSparkline(j.rss_series, j.load_s),
     metrics: [
       { k: "idle_rss_mib", label: "Idle RSS (MiB)", best: "min", fmt: fmt1 },
       // Both shapes are listed because both shapes are published: a per-cell record carries a steady state
@@ -2068,7 +2068,12 @@ function laneStamp(j) {
    pre-recovery bundle (no series) draws NOTHING — never a fabricated flat line or a zero baseline. The
    y-axis spans the series' own min→max (its own peak is the top); a dot marks the last (recovered)
    sample. Same self-contained inline-SVG style as the matrix legend/cell swatches. */
-function rssSparkline(series) {
+// loadEndS: the second the load stopped and the recovery window began, from the record's own
+// `load_s`. Drawn as a dotted rule so the curve says WHICH part is under load and which is the
+// gateway with nothing asked of it - the whole point of the recovered figure beside it is that the
+// reader can see whether the line came down after that mark, and until now nothing on the chart
+// said where the mark was.
+function rssSparkline(series, loadEndS = null) {
   if (!Array.isArray(series) || series.length < 2) return "";
   const pts = series
     .filter((p) => p && typeof p.t_s === "number" && typeof p.rss_mib === "number")
@@ -2082,10 +2087,20 @@ function rssSparkline(series) {
   const y = (v) => PAD + (1 - (v - ymin) / yspan) * (H - 2 * PAD);
   const path = pts.map((p, i) => `${i ? "L" : "M"}${x(p.t_s).toFixed(1)},${y(p.rss_mib).toFixed(1)}`).join("");
   const last = pts[pts.length - 1];
+  // Only draw the mark when it falls INSIDE the plotted span. A load_s at or past the last sample
+  // means the recovery window produced no readings, and a rule on the axis edge would claim a
+  // boundary the curve cannot show.
+  const marks = (typeof loadEndS === "number" && loadEndS > t0 && loadEndS < t1)
+    ? `<line x1="${x(loadEndS).toFixed(1)}" y1="${PAD}" x2="${x(loadEndS).toFixed(1)}" y2="${H - PAD}" ` +
+      `stroke="currentColor" stroke-opacity="0.45" stroke-width="1" stroke-dasharray="2 2">` +
+      `<title>load stopped at ${fmtInt(loadEndS)} s; everything right of this line is the gateway at rest</title></line>`
+    : "";
+  const restNote = marks ? `, load stopped at ${fmtInt(loadEndS)} s` : "";
   return `<div class="rss-spark"><svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" role="img" ` +
-    `aria-label="RSS recovery curve: idle to peak to recovered, ${fmt1(ymin)} to ${fmt1(ymax)} MiB over ${fmtInt(tspan)} s">` +
+    `aria-label="RSS recovery curve: idle to peak to recovered, ${fmt1(ymin)} to ${fmt1(ymax)} MiB over ${fmtInt(tspan)} s${restNote}">` +
     `<polyline points="${x(t0).toFixed(1)},${(H - PAD).toFixed(1)} ${x(t1).toFixed(1)},${(H - PAD).toFixed(1)}" ` +
     `fill="none" stroke="currentColor" stroke-opacity="0.15" stroke-width="1"/>` +
+    marks +
     `<path d="${path}" fill="none" stroke="currentColor" stroke-width="1.5"/>` +
     `<circle cx="${x(last.t_s).toFixed(1)}" cy="${y(last.rss_mib).toFixed(1)}" r="2.5" fill="currentColor"/>` +
     `</svg>` +

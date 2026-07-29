@@ -1088,6 +1088,18 @@ const matrixGw = (d) => {
     "so there is no seal to revert (board is dataless, not dishonest)");
   return g;
 };
+// THE DONOR MUST BE THE ONE THE TEST CAN ACTUALLY USE, not merely the first matrix row. The
+// oracle-surface test corrupts one envelope on each of three surfaces, so it needs the row that
+// carries the most of them - picking the first matrix publisher hands it a one-cell gateway like
+// one-api and the test fails on a board that is behaving perfectly. Falls back to the first matrix
+// row so its own precondition assert still speaks when the board has nothing at all.
+const richestMatrixGw = (d) => {
+  const ranked = (d.gateways || [])
+    .map((g) => [donorSurfaces(g), g])
+    .filter(([n]) => n > 0)
+    .sort((a, b) => b[0] - a[0]);
+  return ranked.length ? ranked[0][1] : matrixGw(d);
+};
 
 testWithData("consistency guard: the real bundle satisfies the sealed-envelope invariants C1–C5", () => {
   const { errors, warnings } = checkConsistency(data, app);
@@ -3037,7 +3049,7 @@ testWithMultiSurfaceDonor("#17: the independent oracle covers EVERY matrix cell,
   let checked = 0;
   for (const [label, mutate] of surfaces) {
     const d = clone();
-    const g = matrixGw(d);
+    const g = richestMatrixGw(d);
     const where = mutate(g);
     if (!where) continue;
     checked += 1;
