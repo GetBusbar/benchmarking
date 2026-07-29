@@ -1670,7 +1670,13 @@ function drawSweep(canvas, series, opts = {}) {
   const pts = drawable.flatMap((s) => s.points);
   const W = canvas.width, H = canvas.height;
   ctx.clearRect(0, 0, W, H);
-  const padL = 58, padR = 14, padT = 16, padB = 34;
+  // padB carries the x tick labels, the axis title AND the legend row. The legend used to be drawn
+  // top-right INSIDE the plot, which is exactly where a saturating throughput curve peaks - so it
+  // collided with the peak label it was sitting on top of - and its box was a hard-coded 118px, so
+  // any label wider than that ran off the right edge and was clipped. Below the axis it cannot
+  // collide with data at any label length.
+  const legendRows = opts.legend !== false && series.filter((s) => s && s.points && s.points.length).length > 1 ? 1 : 0;
+  const padL = 58, padR = 14, padT = 16, padB = 34 + legendRows * 16;
   const fg = opts.fg || "#9aa4b2", grid = opts.grid || "rgba(154,164,178,.18)";
   if (!pts.length) {
     ctx.fillStyle = fg;
@@ -1704,11 +1710,20 @@ function drawSweep(canvas, series, opts = {}) {
   const xs = [...new Set(pts.map((p) => p.x))].sort((a, b) => a - b);
   const stride = Math.ceil(xs.length / 7);
   ctx.textAlign = "center"; ctx.textBaseline = "top";
+  // SPACED IN PIXELS, NOT IN INDEX. Taking every Nth distinct concurrency says nothing about where
+  // they land: on a log axis 12 and 14 are ~4px apart, so both labels drew on top of each other and
+  // the axis read "1214". A tick whose label cannot be placed clear of the last one drawn is dropped
+  // - the gridline is what locates the point, and an unreadable number is worse than one less tick.
+  let lastX = -Infinity;
   xs.filter((_, i) => i % stride === 0 || i === xs.length - 1).forEach((v) => {
     ctx.strokeStyle = grid;
     ctx.beginPath(); ctx.moveTo(X(v), padT); ctx.lineTo(X(v), H - padB); ctx.stroke();
+    const x = X(v);
+    const half = ((ctx.measureText ? ctx.measureText(fmtTick(v)).width : 14) / 2) + 6;
+    if (x - lastX < half * 2) return;
+    lastX = x;
     ctx.fillStyle = fg;
-    ctx.fillText(fmtTick(v), X(v), H - padB + 5);
+    ctx.fillText(fmtTick(v), x, H - padB + 5);
   });
   /* axes */
   ctx.strokeStyle = fg;
@@ -1716,7 +1731,7 @@ function drawSweep(canvas, series, opts = {}) {
   /* axis labels */
   ctx.fillStyle = fg;
   ctx.textAlign = "center";
-  ctx.fillText(opts.xLabel || "concurrency (log)", padL + (W - padL - padR) / 2, H - 14);
+  ctx.fillText(opts.xLabel || "concurrency (log)", padL + (W - padL - padR) / 2, H - padB + 20);
   ctx.save();
   ctx.translate(12, padT + (H - padT - padB) / 2); ctx.rotate(-Math.PI / 2);
   ctx.fillText(opts.yLabel || "", 0, 0);
@@ -1734,6 +1749,7 @@ function drawSweep(canvas, series, opts = {}) {
   /* published-peak markers: a distinct labeled dot at each series' peak (its headline value at its
      operating concurrency). It sits ON the curve because the headline is max() over these points. */
   ctx.font = "11px Inter, sans-serif"; ctx.textAlign = "left"; ctx.textBaseline = "bottom";
+  const placed = [];
   for (const s of drawable) {
     if (!s.mark) continue;
     const px = X(s.mark.x), py = Y(s.mark.y);
@@ -1744,18 +1760,28 @@ function drawSweep(canvas, series, opts = {}) {
     const label = s.mark.label;
     const wide = (ctx.measureText ? ctx.measureText(label).width : label.length * 6) + 10;
     const lx0 = px + 7 + wide > W - padR ? px - 7 - wide : px + 7;
-    ctx.fillText(label, lx0, py - 6);
+    // TWO PEAKS AT THE SAME PLACE ARE THE NORMAL CASE, not the edge case: sustained and max-proxy
+    // usually peak within a rung of each other, so both labels drew on the same line and neither was
+    // readable. A label that would overlap one already placed drops below the dot instead.
+    let ly = py - 6;
+    if (placed.some((q) => Math.abs(q.y - ly) < 13 && lx0 < q.x1 && lx0 + wide > q.x0)) ly = py + 16;
+    placed.push({ y: ly, x0: lx0, x1: lx0 + wide });
+    ctx.fillText(label, lx0, ly);
   }
-  /* legend, top-right */
-  if (opts.legend !== false && drawable.length > 1) {
+  /* legend, BELOW the plot: one horizontal row, centred, sized from the text it actually contains */
+  if (legendRows && drawable.length > 1) {
     ctx.textAlign = "left"; ctx.textBaseline = "middle";
-    let ly = padT + 4;
+    const measure = (t) => (ctx.measureText ? ctx.measureText(t).width : t.length * 6);
+    const SWATCH = 14, GAP = 6, ITEM_GAP = 18;
+    const total = drawable.reduce((a, s) => a + SWATCH + GAP + measure(s.label) + ITEM_GAP, -ITEM_GAP);
+    let lx = Math.max(padL, padL + (W - padL - padR - total) / 2);
+    const ly = H - 6;
     for (const s of drawable) {
       ctx.fillStyle = s.color;
-      ctx.fillRect(W - padR - 118, ly - 3, 14, 3);
+      ctx.fillRect(lx, ly - 1, SWATCH, 3);
       ctx.fillStyle = fg;
-      ctx.fillText(s.label, W - padR - 100, ly - 1);
-      ly += 15;
+      ctx.fillText(s.label, lx + SWATCH + GAP, ly);
+      lx += SWATCH + GAP + measure(s.label) + ITEM_GAP;
     }
   }
   return { X, Y, series: drawable, padL, padR, padT, padB, W, H };
@@ -2115,6 +2141,26 @@ const MATRIX_LABELS = {
   openai: "OpenAI", "openai-responses": "OpenAI Responses", anthropic: "Anthropic",
   gemini: "Gemini", cohere: "Cohere", bedrock: "Bedrock Converse",
 };
+/* matrixDiagonal(g): the same-dialect cell for each protocol - openai>openai, anthropic>anthropic -
+   which is what the drawer's six-row Protocol matrix has always been showing. Returns null when the
+   gateway carries no per-cell data at all, so "not measured" stays distinguishable from "measured and
+   this pairing was not served".
+
+   Reads `upstreams[egress].cells[ingress]`, with the legacy flat `cells` map as a fallback so older
+   boards keep rendering. An EMPTY object counts as nothing found, not as a matrix full of holes:
+   treating a truthy `{}` as data is exactly what put six "n/a" rows under every gateway. */
+function matrixDiagonal(g) {
+  const m = g && g.matrix;
+  if (!m) return null;
+  const out = {};
+  const ups = m.upstreams || {};
+  for (const d of MATRIX_CELLS) {
+    const cell = (ups[d] && ups[d].cells && ups[d].cells[d]) || (m.cells && m.cells[d]);
+    if (cell) out[d] = cell;
+  }
+  return Object.keys(out).length ? out : null;
+}
+
 /* A non-green cell is one of several very different things, and a neutral board must not
    conflate them. The harness now says which MACHINE-READABLY:
      served:"not_verified" (+ reason harness_boot_failure/suite_ceiling/mock_norecord) - the
@@ -2344,10 +2390,15 @@ function drawerHtml(g, st = state) {
 
   /* protocol matrix row with evidence */
   h += `<section class="drawer-lane"><h4>Protocol matrix</h4>`;
-  if (!(g.matrix && g.matrix.cells)) h += `<p class="muted">not measured</p>`;
+  // PRESENCE IS NOT CONTENT. This read `g.matrix.cells`, a legacy FLAT map that the per-cell artifact
+  // no longer fills - it is now always `{}`, which is truthy, so it sailed past the guard and every
+  // one of the six rows rendered "n/a" on every gateway on the board. The measurements were there the
+  // whole time, one level down in `upstreams[egress].cells[ingress]`.
+  const diag = matrixDiagonal(g);
+  if (!diag) h += `<p class="muted">not measured</p>`;
   else {
     h += `<ul class="matrix-list">` + MATRIX_CELLS.map((c) => {
-      const cell = g.matrix.cells[c];
+      const cell = diag[c];
       if (!cell) return `<li><span class="cell na"></span> ${esc(MATRIX_LABELS[c])}: <span class="muted">n/a</span></li>`;
       const [cls, label] = cellState(cell);
       return `<li><span class="cell ${cls}"></span> <b>${esc(MATRIX_LABELS[c])}</b>: ${label}` +
@@ -3410,7 +3461,7 @@ if (NODE) {
     // The roster's row order, the compare row's tied-best set, the lane served predicate and the
     // memory-tab dialect seed: pure functions the suite drives directly, because each of them was a
     // defect that no DOM-free test could reach while it lived inside a renderer.
-    rowComparator, VIEW_TIEBREAK, bestIndex, laneServed, seedMemorySameDialect,
+    rowComparator, VIEW_TIEBREAK, matrixDiagonal, bestIndex, laneServed, seedMemorySameDialect,
     // audit #21: the rig-provenance footer stamp + the live state it reads, so the class test can drive it.
     rigStamp, state,
     // THE SURFACES THAT WERE UNREACHABLE FROM A DOM-FREE SUITE, and were therefore covered by nothing:
