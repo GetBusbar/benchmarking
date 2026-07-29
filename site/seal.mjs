@@ -39,6 +39,35 @@ export const SWEEP = {
 // added on one side can never ship unsealed because the other side's whitelist lagged (audit #11).
 // GATED: the throughput-shaped metrics the mock-bound honesty rule applies to.
 export const GATED_FIELDS = ["rps_sustained_20ms", "rps_max_proxy", "streams_sustained", "cpu_fps"];
+
+// THE GATED FIELDS WHOSE MOCK REFERENCE IS A PACED TARGET, NOT A CAPACITY.
+//
+// The mock paces SSE deltas at a fixed interval, so its frames/sec is `concurrency * (1000/interval)`
+// - a number it was TOLD to produce, not a ceiling it ran into. A gateway that matches it has kept up
+// with the pace, which is the gateway succeeding, and suppressing that as "mock-bound" would hide the
+// best result the test can express. `sealMetric` has known this since paced metrics existed.
+//
+// It lives here, exported, because `check-consistency.mjs` re-derives what SHOULD be displayed as an
+// independent oracle, and an oracle that restates the rule from memory drifts from it. That is not
+// hypothetical: the oracle implemented only the non-paced branch, so every cell where the flag was
+// true had the seal correctly publish and the oracle demand null. Twenty-five of those mismatches
+// blocked every deploy for two days, on three field names. One list, imported by both.
+export const PACED_FIELDS = ["streams_sustained", "streams_sustained_fps", "cpu_fps"];
+
+// What `sealMetric` will publish for a raw value, as a pure function of the same inputs.
+//
+// THE ONE PLACE THE DISPLAY RULE LIVES. `sealMetric` builds a whole envelope (notes, provenance,
+// zero-reasons); this answers only "does the number show, and as what", which is the part an
+// independent oracle needs and the part that must never be written twice.
+export function displayedValue(raw, flag, { gated = false, paced = false } = {}) {
+  if (raw == null) return null;
+  if (!gated) return raw;
+  if (raw === 0) return 0;                      // a measured zero is honest and always shown
+  // Paced: the flag existing at all means the comparison against the mock was made. Capacity: the
+  // number only stands if it was PROVEN not to be the mock's own ceiling.
+  if (paced) return flag == null ? null : raw;
+  return (raw > 0 && flag === false) ? raw : null;
+}
 // UNGATED, latency-shaped, on a perf cell.
 export const UNGATED_LAT_FIELDS = ["added_latency_p50_us", "added_latency_p99_us", "gateway_c1_p99_us", "direct_c1_p99_us"];
 // UNGATED, latency/rate-shaped, on a stream record.
@@ -114,7 +143,9 @@ export function sealMetric(value, opts = {}) {
     // load the mock's capacity really can be the limit, and publishing then ranks the rig.
     // `unverifiable` still suppresses on both paths - an unmeasurable reference tells us nothing
     // either way, and certifying a number on no evidence is what the whole gate exists to prevent.
-    if (paced ? flag == null : !(num > 0 && flag === false)) {
+    // Routed through `displayedValue` rather than restating the condition, so this branch and the
+    // oracle in check-consistency.mjs cannot disagree about what shows: they are now the same code.
+    if (displayedValue(num, flag, { gated, paced }) == null) {
       const reason = flag === true ? "mock_bound" : "unverifiable";
       return { value: null, certified: false, suppressed: true, reason };
     }

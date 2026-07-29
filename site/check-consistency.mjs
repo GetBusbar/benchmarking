@@ -42,7 +42,7 @@ const ROOT = join(HERE, "..");
 // The metric-field vocabulary is IMPORTED from seal.mjs, the SAME list gen-data seals from, so a local
 // whitelist here can never lag the producer: one shared list plus a shape rule (any *_rss_mib) means a
 // new producer field is checked the day it appears.
-import { GATED_FIELDS, isMetricField } from "./seal.mjs";
+import { GATED_FIELDS, PACED_FIELDS, displayedValue, isMetricField } from "./seal.mjs";
 // The origins a projected cell's source.kind may honestly carry: the single end-state "matrix" path plus
 // the LIVE deferred fallbacks (kept until the field run; sealed honestly, never mislabelled as matrix).
 const SOURCE_KINDS = new Set(["matrix", "perf-fallback", "xlate-fallback", "stream-fallback"]);
@@ -488,11 +488,19 @@ export function mockBoundFlagFor(raw, field) {
   return raw[name];
 }
 
-export function oracleExpected(raw, flag, gated) {
-  if (raw == null) return null;
-  if (!gated) return raw;
-  if (raw === 0) return 0;                     // measured zero: honest, always shown
-  return (raw > 0 && flag === false) ? raw : null;   // suppressed -> n/a
+// WHAT THE BOARD SHOULD SHOW FOR ONE RAW VALUE, resolved by the same function the seal uses.
+//
+// This used to restate the rule. It implemented the capacity branch only, so every PACED field whose
+// mock-bound flag was true had the seal publish (correctly - matching a paced target is the gateway
+// keeping up, not a mock ceiling) while the oracle demanded null. Twenty-five of those mismatches
+// blocked the deploy on every commit for two days, and the board went stale while the numbers it
+// should have been showing sat in the repo.
+//
+// An independent oracle is worth having because it re-derives the answer from the RAW artifact
+// instead of trusting the bundle. That independence is about the DATA PATH, not about owning a
+// second copy of the display rule: a second copy does not catch drift, it IS the drift.
+export function oracleExpected(raw, flag, gated, paced = false) {
+  return displayedValue(raw, flag, { gated, paced });
 }
 
 // opts.syntheticFixture: this bundle is a HAND-BUILT fixture with no on-disk oracle (an invariant
@@ -646,7 +654,8 @@ export function checkConsistency(data, app, opts = {}) {
             for (const k of Object.keys(sealedSub)) {
               if (!isMetricField(k)) continue;
               cmp(`matrix[${ingress}->${egress}].${k}`, app.metric(sealedSub[k]).v,
-                oracleExpected(rawSub[k], mockBoundFlagFor(rawSub, k), GATED_FIELDS.includes(k) || k === "streams_sustained_fps"));
+                oracleExpected(rawSub[k], mockBoundFlagFor(rawSub, k),
+                  GATED_FIELDS.includes(k) || PACED_FIELDS.includes(k), PACED_FIELDS.includes(k)));
             }
           }
         }
@@ -661,7 +670,8 @@ export function checkConsistency(data, app, opts = {}) {
         for (const k of Object.keys(rec)) {
           if (!isMetricField(k)) continue;
           cmp(`${name}.${k}`, app.metric(rec[k]).v,
-            oracleExpected(raw[k], mockBoundFlagFor(raw, k), GATED_FIELDS.includes(k) || k === "streams_sustained_fps"));
+            oracleExpected(raw[k], mockBoundFlagFor(raw, k),
+              GATED_FIELDS.includes(k) || PACED_FIELDS.includes(k), PACED_FIELDS.includes(k)));
         }
       }
       if (oracleCompared > 0) covered("R1.oracle");
