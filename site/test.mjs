@@ -2264,6 +2264,28 @@ test("#3 CLASS: a MEASURED stream-sustain failure renders differently from an un
   assert.match(bound.note, /rig-limited/);
 });
 
+test("a measured FAILURE renders red with its counts, never as the n/a an untested cell gets", () => {
+  // one-api's c=1 leg after the restart bug: 0 ok, 14201 fail. The owner's rule: a failure is marked
+  // in the cell - digits prove the measurement ran, red says the gateway failed it.
+  const env = sealMetric(null, { absent: { reason: "not_measured",
+    detail: "the gateway leg at c=1 was not clean: 0 ok, 14201 fail" } });
+  const cell = app.metric(env, String);
+  assert.equal(cell.text, "failed · 0/14,201", "the counts are the cell text");
+  assert.equal(cell.failed, true);
+  assert.match(app.metricTd(cell), /class="na failcell"/, "the td carries the red failure class");
+  assert.match(app.metricTd(cell), /title="the gateway leg at c=1 was not clean/, "full evidence on hover");
+  // The streaming shape of the same fact.
+  const frames = app.metric(sealMetric(null, { absent: { reason: "not_measured",
+    detail: "no stream frame arrived from the gateway, so there is nothing to difference" } }), String);
+  assert.equal(frames.text, "failed · 0 frames");
+  assert.equal(frames.failed, true);
+  // A leg that was merely NOISY (some ok, some fail) is not a total failure and stays n/a.
+  const noisy = app.metric(sealMetric(null, { absent: { reason: "not_measured",
+    detail: "the gateway leg at c=1 was not clean: 497 ok, 3 fail" } }), String);
+  assert.equal(noisy.text, "n/a");
+  assert.ok(!noisy.failed);
+});
+
 test("a measured zero's meaning is VISIBLE on the table cell, not only in a hover tooltip", () => {
   // The 2026-07-28 board rendered rps_sustained_20ms=0 as a bare "0" beside a real maximum, which
   // reads as "this gateway does nothing". The td writer now prints the short reason under the number.

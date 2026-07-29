@@ -445,6 +445,15 @@ tbody tr { cursor: pointer; }
 /* What a MEASURED ZERO means, on the cell itself. "0" beside a real maximum reads as "does nothing";
    the short reason (no load held the gate / measured failure) rides under the number so the state is
    visible without hovering. Full sentence on the tooltip. */
+/* A MEASURED FAILURE, in red with its counts ("failed · 0/14,201"). Distinct from an untested n/a:
+   the measurement ran and the gateway failed all of it. Tooltip carries the engine's full evidence. */
+td.failcell {
+  color: #b91c1c;
+  font-weight: 600;
+  font-size: .8rem;
+  white-space: nowrap;
+}
+
 .zero-why {
   display: block;
   font-size: .66rem;
