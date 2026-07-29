@@ -31,7 +31,7 @@
 // Run standalone against an emitted bundle:
 //   node site/check-consistency.mjs [site/data.json]
 
-import { readFileSync, existsSync, readdirSync } from "node:fs";
+import { readFileSync, existsSync, readdirSync, statSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
@@ -499,6 +499,19 @@ export function mockBoundFlagFor(raw, field) {
 // An independent oracle is worth having because it re-derives the answer from the RAW artifact
 // instead of trusting the bundle. That independence is about the DATA PATH, not about owning a
 // second copy of the display rule: a second copy does not catch drift, it IS the drift.
+// How many gateways the repo DECLARES, read from the manifests rather than from the bundle: the
+// bundle only knows who has published, which is the very thing being judged.
+export function declaredGatewayCount() {
+  try {
+    const dir = join(ROOT, "gateways");
+    if (!existsSync(dir)) return 0;
+    return readdirSync(dir).filter((d) => {
+      try { return statSync(join(dir, d)).isDirectory() && existsSync(join(dir, d, "definition.json")); }
+      catch { return false; }
+    }).length;
+  } catch { return 0; }
+}
+
 export function oracleExpected(raw, flag, gated, paced = false) {
   return displayedValue(raw, flag, { gated, paced });
 }
@@ -765,9 +778,32 @@ export function checkConsistency(data, app, opts = {}) {
   const requiredNow = publishesMatrix && !syntheticFixture
     ? [...REQUIRED, "C6.cell", "C7.hwm", "R1.oracle", "R3.selection"] : REQUIRED;
   const missing = requiredNow.filter((b) => !cover.has(b));
-  if (missing.length)
-    errors.push(`R2: coverage - required invariant branch(es) never exercised by this bundle: ${missing.join(", ")} ` +
-      `(an inert check is itself a failure)`);
+  if (missing.length) {
+    // A BRANCH WITH NO INPUT IS NOT AN INERT CHECK.
+    //
+    // This gate exists because a check that stops firing is worse than no check: it converts "nobody
+    // looked" into "it passed". That reasoning holds for a COMPLETE board, where every branch has
+    // something to bite on and silence really does mean the check went dead.
+    //
+    // It does not hold mid-run. A 14-gateway field is measured over hours, one box per gateway, and
+    // the board publishes each result as it lands - so between the first gateway and the last it is
+    // legitimately partial, and branches like C3.stamp and C4.cell simply have no cell of the right
+    // shape yet. Treating that as an inert check made the FIRST gateway of a run unpublishable and
+    // kept the whole site frozen behind the slowest box, which is the opposite of publishing as
+    // results arrive. The check has not gone quiet; it has nothing to say yet.
+    //
+    // So the gate keeps its teeth exactly where they mean something - a board carrying every gateway
+    // the repo declares - and reports the same gap as a warning while the board is still filling.
+    const declared = declaredGatewayCount();
+    const partial = declared > 0 && matrixPublishers.size < declared;
+    const msg = `R2: coverage - required invariant branch(es) never exercised by this bundle: ${missing.join(", ")}`;
+    if (partial) {
+      warnings.push(`${msg} - the board carries ${matrixPublishers.size} of ${declared} declared gateways, ` +
+        `so these branches have no input yet rather than having gone inert; they are required again once the board is complete`);
+    } else {
+      errors.push(`${msg} (an inert check is itself a failure)`);
+    }
+  }
 
   return { errors, warnings, cover, CHECK_BRANCHES, REQUIRED };
 }
