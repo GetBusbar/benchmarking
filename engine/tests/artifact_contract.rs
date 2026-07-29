@@ -437,14 +437,14 @@ fn every_probe_verdict_serialises_as_exactly_its_published_token() {
     }
 }
 
-/// The Skipped vocabulary: "we ran out of time" and "there was nothing to measure" are different
-/// facts and must publish under different, stable tokens.
+/// The Skipped vocabulary publishes under a stable token, because a consumer branches on it.
+///
+/// It used to assert two tokens. `SuiteDeadline` is gone: nothing in the grid walk ever tracked
+/// elapsed suite time or built one, so no artifact could ever contain it, and a variant nothing can
+/// emit makes the enum claim a distinction the run cannot draw. What actually protects an interrupted
+/// run is that cells stream to disk as they finish.
 #[test]
-fn skipped_reasons_publish_under_distinct_stable_tokens() {
-    assert_eq!(
-        serde_json::to_string(&Skipped::SuiteDeadline).ok(),
-        Some("\"suite_deadline\"".to_string())
-    );
+fn skipped_reasons_publish_under_a_stable_token() {
     assert_eq!(
         serde_json::to_string(&Skipped::NotServed).ok(),
         Some("\"not_served\"".to_string())

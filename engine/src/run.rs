@@ -2519,10 +2519,22 @@ mod tests {
             "the PHYSICAL bound must decide it - with descriptors raised far above the port range, \
              the port range is the answer and the runaway cap must not be visible in it"
         );
+        // WHAT THE BACKSTOP IS FOR, asserted through the function rather than against the constant.
+        // This was `STREAM_RUNAWAY_CAP >= 4 * 16_384`, which clippy correctly called a constant
+        // assertion: both sides are compile-time literals, so it could never fail at runtime - a dead
+        // gate in the very test written to keep a cap honest. Driving the derivation with no physical
+        // limit at all shows the backstop is the thing that stops it, and that it sits several
+        // doublings above the highest rung the field has cleanly sustained (apisix, c=16384).
+        let unbounded_host = super::stream_ceiling_from(u32::MAX, u32::MAX);
+        assert_eq!(
+            unbounded_host,
+            super::STREAM_RUNAWAY_CAP,
+            "with no physical limit the runaway backstop must be what bounds the ladder"
+        );
         assert!(
-            super::STREAM_RUNAWAY_CAP >= 4 * 16_384,
+            unbounded_host >= 4 * 16_384,
             "the backstop must sit far above the highest rung the field has cleanly sustained \
-             (apisix, c=16384), or it is a measurement bound wearing a safety label"
+             (apisix, c=16384), or it is a measurement bound wearing a safety label: {unbounded_host}"
         );
         // Descriptors still bind when they are genuinely the smaller number: a stock 1024-descriptor
         // box must not be asked for thousands of held-open streams, each costing one descriptor on the
