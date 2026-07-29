@@ -442,6 +442,17 @@ tbody tr { cursor: pointer; }
   display: block;
   margin-top: .15rem;
 }
+/* What a MEASURED ZERO means, on the cell itself. "0" beside a real maximum reads as "does nothing";
+   the short reason (no load held the gate / measured failure) rides under the number so the state is
+   visible without hovering. Full sentence on the tooltip. */
+.zero-why {
+  display: block;
+  font-size: .66rem;
+  color: var(--fg-dim);
+  white-space: nowrap;
+  line-height: 1.2;
+}
+
 /* Gateway-level plateau verdict on the Memory tab: RSS never went steady on ANY cell this gateway serves.
    Warm-toned rather than neutral, because unlike the freshness pill it is a finding about the gateway. */
 .noplateau-pill {

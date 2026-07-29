@@ -294,6 +294,25 @@ const METRIC_NOTES = {
   not_served: "the gateway does not serve this pairing",
 };
 function noteText(tok) { return (tok && METRIC_NOTES[tok]) || tok || ""; }
+/* The SHORT on-cell form of a measured zero's meaning, rendered under the number in the table so the
+   state is visible without hovering (the full METRIC_NOTES sentence stays on the tooltip). Keyed by
+   the envelope's own note token; a plain zero with no note (a genuine 0.0 reading, e.g. memory
+   growth) renders bare, exactly as before. */
+const ZERO_WHY = {
+  no_qualifying_ceiling: "no load held the gate",
+  measured_failure: "measured failure",
+};
+/* metricTd(cell, sc): the ONE `<td>` writer for every plain (non-render) column. A MEASURED ZERO says
+   what it means ON the cell, not only in a hover tooltip: "0" beside a real maximum reads as "this
+   gateway does nothing", when the envelope's own note says "no tested load held the qualifying gates"
+   or "offered the load, sustained none". The ZERO_WHY short form rides under the number; the full
+   sentence stays on the tooltip. A zero with no note renders bare, exactly as before. */
+function metricTd(cell, sc = "") {
+  if (cell.na) return `<td class="na${sc}" title="${esc(cell.note || "")}">${esc(cell.text)}</td>`;
+  const zeroWhy = cell.v === 0 && cell.env && ZERO_WHY[cell.env.note];
+  return `<td class="${sc.trim()}"${cell.note ? ` title="${esc(cell.note)}"` : ""}>${esc(cell.text)}${
+    zeroWhy ? `<span class="zero-why">${esc(zeroWhy)}</span>` : ""}</td>`;
+}
 function metric(env, fmt = fmtInt) {
   if (!isEnvelope(env) || env.value == null) {
     // BELOW RESOLUTION IS NOT A HOLE. The comparison ran; the difference was at or under what the
@@ -861,6 +880,15 @@ const LANE_TESTED_SUFFIX = {
 };
 // Lanes that take no part in sorting (memory's cell is an attribution, not a ranking, as before).
 const LANE_TESTED_NOSORT = new Set(["memory"]);
+/* recordShowsValues(rec): does this lane record put at least ONE number (or below-resolution ≈0) on
+   the row? The pill's contract is all-or-nothing, in the owner's words: "either this cell is measured,
+   and all data must be reported, or this cell wasn't tested and empty is expected. Not a combo." A
+   record whose every envelope is empty (plano's memory cells on the 2026-07-28 board: an OpenAI pill
+   over four n/a columns) must not advertise a measurement it does not have. */
+function recordShowsValues(rec) {
+  if (!rec || typeof rec !== "object") return false;
+  return Object.values(rec).some((v) => isEnvelope(v) && !metric(v).na);
+}
 function colTested(lane) {
   const pick = LANE_RECORD[lane];
   const note = LANE_TESTED_NOTE[lane];
@@ -872,14 +900,16 @@ function colTested(lane) {
       `The cell these ${lane === "stream" ? "streaming " : ""}numbers were measured on, with the provenance of the record actually shown. Peak: each gateway's own peak cell. Same: the chosen dialect. Custom: the chosen ingress→egress cell.`,
     get: (g, st = state) => {
       const rec = pick(g, st);
-      const p = rec && cellPath(rec);
+      const shown = rec && recordShowsValues(rec);
+      const p = shown ? cellPath(rec) : null;
       const ing = p && (p.ingress ?? p.dialect);
-      return { v: rec && ing ? ing : "", text: null, na: !(rec && ing) };
+      return { v: shown && ing ? ing : "", text: null, na: !(shown && ing) };
     },
     render: (g, st = state) => {
       const rec = pick(g, st);
-      // NO record → NO pill. A row whose every column reads n/a must not advertise a measurement.
-      if (!rec) return `<td class="tested"><span class="muted">n/a</span></td>`;
+      // NO record → NO pill, and a record with NO displayable value is the same emptiness wearing a
+      // costume. A row whose every column reads n/a must not advertise a measurement.
+      if (!rec || !recordShowsValues(rec)) return `<td class="tested"><span class="muted">n/a</span></td>`;
       const p = cellPath(rec);
       const ing = p.ingress ?? p.dialect, eg = p.egress ?? p.dialect;
       if (ing == null) return `<td class="tested"><span class="muted">n/a</span></td>`;
@@ -982,6 +1012,12 @@ const COLUMN_SETS = {
         : `Cold idle process RSS: median over a ${memWindowLabel(boardMemWindows().idle)} window on a fresh cold-restarted process, before any load. Lower is better.`),
       get: (g, st = state) => {
         if (!hasPerCellMemory(stateData(st))) return memCell(g, "idle_rss_mib", fmt1, st);
+        // THE ROW IS ALL-OR-NOTHING (owner's rule): a row whose chosen cell was not tested, or whose
+        // chosen record puts no number on the row, is fully empty - idle, however cell-independent
+        // its sampling, must not survive as one lone number on an otherwise-empty row advertising a
+        // measurement the cell does not have. Pick a mode that serves the cell (Min/Max always do)
+        // and idle appears with the rest.
+        if (!recordShowsValues(memoryFor(g, st))) return { v: null, text: "n/a", na: true };
         const i = idleAcrossCells(g);
         if (!i) return { v: null, text: "n/a", na: true };
         return { v: i.median, text: fmt1(i.median), na: false,
@@ -1761,10 +1797,7 @@ function renderTable() {
         // render columns emit their own <td>; tint the sorted one by injecting the class.
         return sc ? c.render(g, state).replace("<td", `<td class="sorted-col"`).replace('class="sorted-col" class="', 'class="sorted-col ') : c.render(g, state);
       }
-      const cell = c.get(g);
-      return cell.na
-        ? `<td class="na${sc}" title="${esc(cell.note || "")}">${esc(cell.text)}</td>`
-        : `<td class="${sc.trim()}"${cell.note ? ` title="${esc(cell.note)}"` : ""}>${esc(cell.text)}</td>`;
+      return metricTd(c.get(g), sc);
     }).join("") + "</tr>"
   ).join("");
   // Empty-state line: a pinned translation pair no gateway serves (or filters that clear the
@@ -3008,6 +3041,7 @@ if (NODE) {
     canonicalPerf, canonicalXlate, canonicalStreaming, canonicalMemory, metric, mval, isEnvelope, caption, SWEEP_CAPTION, gatewayResultsJson, DEFAULT_VIEW, VIEW_LABELS, rosterRows, fmtStars,
     configCorrectionUrl, BENCH_REPO, fmtInt, fmtAdded,
     HOME_VIEW, homeCardsHtml,
+    metricTd,
     // audit #21: the rig-provenance footer stamp + the live state it reads, so the class test can drive it.
     rigStamp, state,
   };
