@@ -673,6 +673,36 @@ pub type Gate = dyn Fn(&Reading) -> bool;
 /// the ceiling is still inside the gate: in the 2026-07-28 run five aisix cells plateaued at c=64 and
 /// went on holding a 20ms p99 out to c≈180. A climb that stopped at the plateau would have published
 /// a third of their real ceiling.
+/// The index of the FIRST rung whose median reaches the best of all rungs (ignoring zero rungs), or
+/// None when no rung produced a positive median. First, not last: a later rung that ties the best has
+/// not beaten it, so on an exact-tie plateau the winner stays interior rather than drifting to
+/// whichever equal rung happened to be probed last.
+fn winner_index(rungs: &[Rung]) -> Option<usize> {
+    let best = rungs.iter().map(|r| r.median).fold(0.0_f64, f64::max);
+    if best <= 0.0 {
+        return None;
+    }
+    rungs.iter().position(|r| r.median >= best)
+}
+
+/// The rung the peak PUBLISHES, which must never be the last rung probed.
+///
+/// A curve creeping up by less than its own wobble never resets `flat_run`, but its best median
+/// keeps landing on the newest rung - kong's shape on the 2026-07-28 board, which published the
+/// search's own final rung as the gateway's maximum ("the max_proxy sweep WON at the highest
+/// concurrency it probed", the site's structural invariant). When the flat-stop has fired, the last
+/// rung is by construction one of `FLAT_RUNGS_TO_STOP` consecutive non-improvers, so if the global
+/// first-max sits on it the creep stayed inside the wobble band and the best rung BELOW it is the
+/// honest ceiling: a real measured rung, with the final rung measured above it and failing to beat
+/// it by more than the noise. Drift inside the noise band is not throughput.
+fn published_winner(rungs: &[Rung]) -> Option<&Rung> {
+    let i = winner_index(rungs)?;
+    if i + 1 == rungs.len() && rungs.len() >= 2 {
+        return winner_index(&rungs[..rungs.len() - 1]).map(|j| &rungs[j]);
+    }
+    Some(&rungs[i])
+}
+
 pub fn saturation_plateau_gated<P: Probe>(
     probe: &mut P,
     min_conc: u32,
@@ -798,11 +828,10 @@ pub fn saturation_plateau_gated<P: Probe>(
         })
         .collect();
     let knee = band.iter().map(|r| r.concurrency).min().unwrap_or(min_conc);
-    let peak = rungs.iter().filter(|r| r.median > 0.0).max_by(|a, b| {
-        a.median
-            .partial_cmp(&b.median)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    // The winning rung, demoted off the final probed rung when the creep stayed inside the wobble
+    // band - see `published_winner`. Still ONE real measurement: a rung that ran, with the rung
+    // above it measured and failing to beat it by more than the noise.
+    let peak = published_winner(&rungs);
     let Some(peak) = peak else {
         let detail = format!(
             "no concurrency from {min_conc} to {max_conc} produced a usable rung, so no peak was established"
@@ -2085,5 +2114,41 @@ mod proptests {
             Measurement::Measured(pt) => assert_eq!(pt.value, 16_000.0),
             ref other => panic!("a flat curve has a plateau, got {other:?}"),
         }
+    }
+
+    // A curve that creeps up by LESS than its own wobble on every rung never resets flat_run, but its
+    // best median keeps landing on the newest rung - kong's shape on the 2026-07-28 board, which
+    // published the search's own final rung as the gateway's maximum ("the max_proxy sweep WON at the
+    // highest concurrency it probed", the site's structural invariant, blocked the deploy on it).
+    // Drift inside the noise band is saturation (`a_plateau_that_drifts_upward_inside_the_noise_is_
+    // still_saturated` pins that), so this must still PUBLISH - but from an interior rung: the final
+    // rung is a proven non-improver and stays as the observed rung above the winner.
+    #[test]
+    fn the_published_peak_never_sits_on_the_last_probed_rung() {
+        struct Creep;
+        impl Probe for Creep {
+            fn probe(&mut self, c: u32) -> Option<Sample> {
+                // +0.5% per doubling: under the wobble floor, so every rung reads "flat" while the
+                // best median still lands on the newest rung every time.
+                let doublings = 31 - c.leading_zeros();
+                Some(Sample::new(
+                    10_000.0 * (1.0 + 0.005 * f64::from(doublings)),
+                    true,
+                ))
+            }
+        }
+        let r = saturation_plateau(&mut Creep, 1, 65_536);
+        assert!(!r.exhausted, "drift inside the noise band is a plateau");
+        let top_probed = r.points.iter().map(|p| p.concurrency).max().unwrap_or(0);
+        let pt = match r.peak {
+            Measurement::Measured(pt) => pt,
+            ref other => panic!("a creeping plateau still publishes a peak, got {other:?}"),
+        };
+        assert!(
+            pt.concurrency < top_probed,
+            "published the peak at c={} with nothing probed above it (top probed c={top_probed}) - \
+             that is the search's own stopping point wearing the gateway's name",
+            pt.concurrency
+        );
     }
 }
