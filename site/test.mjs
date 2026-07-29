@@ -3264,17 +3264,18 @@ test("memory: a gateway that never settles on ANY cell is flagged at GATEWAY lev
   assert.equal(app.neverPlateaued(leaky), true);
   assert.equal(app.neverPlateaued(fine), false);
   assert.equal(app.worstGrowth(leaky), 12.25, "the flag quantifies itself with the worst rate across cells");
-  // The flag is on the NAME cell, so no choice of cell can hide it.
+  // THE NAME CELL CARRIES NO PILL, IN ANY MODE. A red tag on a gateway's NAME reads as a verdict on
+  // the gateway, when what was measured is one window of one metric - a much larger claim than the
+  // data supports, and permanent-looking next to the name. The verdict itself is unchanged and still
+  // computed (the assertions above); what changed is that it no longer brands the row. The finding
+  // reaches the reader through the Growth column and the per-cell tooltip instead.
   for (const mode of ["min", "max", "same", "custom"]) {
     const st = memState([leaky, fine], { mode });
-    assert.match(app.COLUMN_SETS.memory.find((c) => c.id === "name").render(leaky, st), /never settles/,
-      `the never-settles flag must show in ${mode} mode`);
-    assert.ok(!/never settles/.test(app.COLUMN_SETS.memory.find((c) => c.id === "name").render(fine, st)),
-      "a gateway that settled must not be flagged");
+    for (const g of [leaky, fine]) {
+      assert.ok(!/never settles/i.test(app.COLUMN_SETS.memory.find((c) => c.id === "name").render(g, st)),
+        `the name cell must carry no plateau pill in ${mode} mode`);
+    }
   }
-  // …and only on the memory tab: it is a memory finding, not a general label.
-  assert.ok(!/never settles/.test(app.COLUMN_SETS.memory.find((c) => c.id === "name")
-    .render(leaky, memState([leaky], { view: "performance" }))));
   // Absence of measurement is not a verdict.
   assert.equal(app.neverPlateaued({ key: "x", display: "x" }), false, "no per-cell data means no verdict");
 });
