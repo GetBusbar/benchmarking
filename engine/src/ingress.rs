@@ -42,10 +42,36 @@ pub fn dialects_from(value: Option<&str>) -> Result<Vec<Dialect>, String> {
     let Some(list) = value.map(str::trim).filter(|s| !s.is_empty()) else {
         return Ok(Dialect::ALL.to_vec());
     };
-    let parsed: Vec<Dialect> = list
-        .split(',')
-        .filter_map(|d| d.trim().parse().ok())
-        .collect();
+    // EVERY UNKNOWN NAME IS AN ERROR, not just a list where they ALL are.
+    //
+    // This was `filter_map(|d| d.trim().parse().ok())` with an emptiness check after it, so a single
+    // typo was discarded in silence: `OTB_DIALECTS="openai,anthorpic"` parsed to one dialect, the
+    // emptiness check passed, and the run walked a 1-dialect grid the operator believed was 2 - with
+    // nothing on stdout, stderr, or in the artifact saying a name had been rejected. The caller in
+    // bin/otb.rs only speaks when this returns Err, so that path printed nothing either.
+    //
+    // The module already stated the right rule two lines up ("a value that names something we do not
+    // know is still an ERROR, not a silent fallback"); it was only true when every name was bad.
+    let mut parsed: Vec<Dialect> = Vec::new();
+    let mut unknown: Vec<&str> = Vec::new();
+    for name in list.split(',') {
+        let name = name.trim();
+        match name.parse::<Dialect>() {
+            Ok(d) => parsed.push(d),
+            // An empty element is a stray comma rather than a misspelled dialect, and reporting it as
+            // an unknown name would send a reader hunting for a typo that is not there.
+            Err(_) if name.is_empty() => {}
+            Err(_) => unknown.push(name),
+        }
+    }
+    if !unknown.is_empty() {
+        return Err(format!(
+            "OTB_DIALECTS={list:?} names {} this build does not know: {}. A grid quietly missing a \
+             dialect measures something other than what was asked for",
+            if unknown.len() == 1 { "a dialect" } else { "dialects" },
+            unknown.join(", ")
+        ));
+    }
     if parsed.is_empty() {
         return Err(format!(
             "OTB_DIALECTS={list:?} named no dialect this build knows"
@@ -343,6 +369,35 @@ impl FromStr for Dialect {
 
 #[cfg(test)]
 mod tests {
+    // A TYPO MUST NOT QUIETLY SHRINK THE GRID.
+    //
+    // `filter_map(...parse().ok())` dropped an unknown name in silence and only errored when EVERY
+    // name was bad, so `OTB_DIALECTS="openai,anthorpic"` ran a 1-dialect grid the operator believed
+    // was 2 - nothing on stderr, nothing in the artifact. The module's own rule ("a value that names
+    // something we do not know is still an ERROR, not a silent fallback") held only in the all-bad
+    // case.
+    #[test]
+    fn one_unknown_dialect_is_an_error_not_a_silently_smaller_grid() {
+        let e = super::dialects_from(Some("openai,anthorpic"))
+            .expect_err("a misspelled dialect must not be dropped in silence");
+        assert!(e.contains("anthorpic"), "the error must name the rejected value: {e}");
+
+        // The all-bad case still errors, and a clean list still parses.
+        assert!(super::dialects_from(Some("nope,also-nope")).is_err());
+        assert_eq!(
+            super::dialects_from(Some("openai,anthropic")).expect("both are real"),
+            vec![Dialect::Openai, Dialect::Anthropic]
+        );
+        // An empty element is a stray comma, not a misspelling: reporting it would send a reader
+        // hunting for a typo that is not there.
+        assert_eq!(
+            super::dialects_from(Some("openai,,anthropic")).expect("a stray comma is not a typo"),
+            vec![Dialect::Openai, Dialect::Anthropic]
+        );
+        // Unset still means the whole field.
+        assert_eq!(super::dialects_from(None).expect("unset"), Dialect::ALL.to_vec());
+    }
+
     use super::*;
 
     // ── path(): asserted exactly against lib/ingress.sh's canonical defaults ──────────────────────

@@ -413,6 +413,14 @@ fn build_request(cfg: &GenConfig) -> Result<String, String> {
     ))
 }
 
+/// The most response body the generator will accumulate for one exchange.
+///
+/// A rig bound, and named so it can be reasoned about: it was a bare `1 << 20` buried in the read
+/// loop. Generous by three orders of magnitude against what this rig actually asks for - every body
+/// it sends caps the response at a handful of tokens, so the mock's replies are around a kilobyte -
+/// which is what makes exceeding it a signal worth printing rather than a routine truncation.
+const RESPONSE_ACC_CAP: usize = 1 << 20;
+
 /// What one request/response exchange did to the connection.
 ///
 /// The generator reuses connections, so a failure on a REUSED one must be told apart from a failure
@@ -562,8 +570,26 @@ async fn read_response(s: &mut TcpStream, deadline: Instant, acc: &mut Vec<u8>) 
             };
         }
         acc.extend_from_slice(&buf[..n]);
-        if acc.len() > 1 << 20 {
-            return Exchange::Failed;
+        // OUR BUFFER BOUND IS OURS, NOT THE GATEWAY'S FAILURE.
+        //
+        // This was a bare `1 << 20` returning `Exchange::Failed`: an unnamed constant, no message,
+        // and counted in `fail` alongside a genuine non-2xx or a malformed head. Every other bound in
+        // this module is deliberately kept apart from a gateway failure - `rig_refused` and
+        // `budget_exceeded` exist for exactly that, because folding "our own limit fired" into "the
+        // gateway failed" is how a rig's ephemeral port range once got published as a gateway's
+        // ceiling. A response over the cap would have been indistinguishable from a broken gateway,
+        // and because `SweepProbe` requires `fail == 0` for a clean window it could discard an
+        // otherwise-good rung and understate that gateway's throughput with no diagnostic anywhere.
+        //
+        // `BudgetExceeded` is the existing seam for "a bound WE set stopped this exchange", and it is
+        // already counted separately from `fail`, so this needs no new variant. Loud, because a
+        // silent bound is the defect and not the size.
+        if acc.len() > RESPONSE_ACC_CAP {
+            eprintln!(
+                "loadgen: a response exceeded the rig's own {RESPONSE_ACC_CAP}-byte accumulator, so \
+                 this exchange was stopped by OUR bound rather than by the gateway"
+            );
+            return Exchange::BudgetExceeded;
         }
     }
 }

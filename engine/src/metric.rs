@@ -434,6 +434,25 @@ pub const MEMORY_IDLE_S: u64 = 60;
 const MEMORY_TREND_PCT: f64 = 1.0;
 const MEMORY_RANGE_PCT: f64 = 2.0;
 
+/// Whether a steady verdict may be BELIEVED, given how the series grew since the last window.
+///
+/// A DEAD SAMPLER LOOKS EXACTLY LIKE A SETTLED GATEWAY, and that is the whole problem. The load loop
+/// snapshots the shared series between windows and breaks the moment `plateau_check` returns `Steady`.
+/// If the sampler thread dies partway through - a panic on an unexpected /proc shape for one
+/// gateway's process tree is enough - the series simply stops growing. Every later snapshot is the
+/// same frozen tail, and a frozen tail has zero drift and zero spread, which is the textbook
+/// definition of steady. So the loop would publish "settled after N seconds" plus a peak that is
+/// really "whatever was captured before the sampler died", about a gateway that may have kept
+/// climbing for minutes afterwards - and the panic that caused it was thrown away by
+/// `let _ = sampler.join()`, so nothing in the log or the artifact said so.
+///
+/// The discriminator is growth: a live sampler at ten readings a second adds samples between windows,
+/// and a settled gateway still produces new samples that happen to be flat. No new samples at all is
+/// not a measurement of the gateway, it is the absence of measurement.
+fn steady_is_believable(samples_before: usize, samples_now: usize) -> bool {
+    samples_now > samples_before
+}
+
 /// The unsettled SHAPE as a number, because the metric surface carries `f64` and nothing else.
 ///
 /// 1 climbing, 0 oscillating, -1 falling. Signed on purpose: the sign IS the direction, so a reader
@@ -674,6 +693,10 @@ impl Metric for Memory {
         let mut ran = None;
         let mut verdict = crate::stats::Verdict::Undecidable;
         let mut settled_at = None;
+        // How many samples the series held when it was last looked at, so a series that stops growing
+        // is distinguishable from a gateway that stopped moving.
+        let mut samples_before = 0usize;
+        let mut sampler_died = false;
         loop {
             let w =
                 crate::run::load_window(ctx.cfg, &path, &body, &headers, MEMORY_WINDOW_CONCURRENCY);
@@ -691,6 +714,20 @@ impl Metric for Memory {
                 MEMORY_TREND_PCT,
                 MEMORY_RANGE_PCT,
             );
+            // A STEADY VERDICT OFF A SERIES THAT DID NOT GROW IS THE SAMPLER'S DEATH, NOT THE
+            // GATEWAY'S CALM. See `steady_is_believable`.
+            let grew = steady_is_believable(samples_before, taken.len());
+            samples_before = taken.len();
+            if matches!(verdict, crate::stats::Verdict::Steady) && !grew {
+                eprintln!(
+                    "memory: the RSS series stopped growing at {} samples while the load window was \
+                     still running - the sampler thread is gone, so 'steady' here is the absence of \
+                     measurement rather than a reading of the gateway",
+                    taken.len()
+                );
+                sampler_died = true;
+                break;
+            }
             if matches!(verdict, crate::stats::Verdict::Steady) {
                 settled_at = Some(load_started.elapsed().as_secs() as i64);
                 break;
@@ -713,7 +750,45 @@ impl Metric for Memory {
         std::thread::sleep(std::time::Duration::from_secs(MEMORY_RECOVERY_S));
 
         stop.store(true, std::sync::atomic::Ordering::Relaxed);
-        let _ = sampler.join();
+        // THE JOIN RESULT IS THE ONLY EVIDENCE THE SAMPLER PANICKED. It was discarded with `let _`,
+        // which is how a sampler could die mid-window and leave a plausible, self-consistent memory
+        // result behind it with nothing anywhere saying the readings had stopped. The comment a few
+        // lines below already anticipated the panic ("a poisoned lock means the sampler thread
+        // panicked") - it handled the consequence and threw away the cause.
+        if sampler.join().is_err() {
+            sampler_died = true;
+            eprintln!(
+                "memory: the RSS sampler thread PANICKED during this cell's load window, so the \
+                 readings stop at whatever it captured before dying and no plateau verdict taken \
+                 from them describes this gateway"
+            );
+        }
+
+        // A DEAD SAMPLER ABORTS THE WHOLE GROUP, for the same reason a failed restart does above:
+        // every number this window produced is the rig's own failure wearing the gateway's name. The
+        // peak is whatever was captured before the thread died, the series stops there, and the
+        // plateau verdict taken from that frozen tail describes our instrument rather than the
+        // gateway. Publishing any of it - even as "settled" with a smaller peak - would be worse than
+        // publishing nothing, because it is self-consistent and a reader has no way to tell.
+        if sampler_died {
+            let f: Filled = self
+                .fields()
+                .iter()
+                .map(|x| {
+                    (
+                        *x,
+                        Measurement::absent_because(
+                            Absent::HarnessError,
+                            "the RSS sampler stopped during the load window, so every memory reading \
+                             for this cell ends where our instrument failed rather than where the \
+                             gateway did"
+                                .to_string(),
+                        ),
+                    )
+                })
+                .collect();
+            return f.into();
+        }
 
         let peak = match (ran, peak_seen.lock().ok().map(|p| *p)) {
             // A window that never ran means the peak was never put under load. Publishing the idle
@@ -1557,6 +1632,40 @@ impl Metric for CpuFps {
 
 #[cfg(test)]
 mod tests {
+    // A DEAD SAMPLER MUST NOT READ AS A SETTLED GATEWAY.
+    //
+    // The load loop snapshots the shared RSS series between windows and breaks the moment
+    // `plateau_check` says `Steady`. When the sampler thread dies - a panic on an unexpected /proc
+    // shape for one gateway's tree is enough - the series stops growing, so every later snapshot is
+    // the same frozen tail. A frozen tail has zero drift and zero spread, which is exactly what
+    // steady looks like. The loop would then publish "settled after N seconds" and a peak that is
+    // really "whatever was captured before the thread died", about a gateway that may have gone on
+    // climbing for minutes - and `let _ = sampler.join()` had already thrown away the panic, so
+    // nothing in the log or the artifact said the readings had stopped.
+    //
+    // The discriminator is growth. At ten readings a second a LIVE sampler adds samples between
+    // windows, and a genuinely settled gateway still produces new samples that happen to be flat.
+    // No new samples at all is not a measurement of the gateway.
+    #[test]
+    fn a_frozen_rss_series_is_not_a_settled_gateway() {
+        assert!(
+            !super::steady_is_believable(120, 120),
+            "a series that did not grow between windows is the sampler's death, not the gateway's calm"
+        );
+        assert!(
+            !super::steady_is_believable(120, 119),
+            "a series that SHRANK cannot be evidence of anything"
+        );
+        assert!(
+            super::steady_is_believable(120, 121),
+            "one new sample is a live sampler, and a settled gateway still produces flat samples"
+        );
+        assert!(
+            super::steady_is_believable(0, 40),
+            "the first window has nothing to compare against and must be allowed to settle"
+        );
+    }
+
     use super::*;
 
     /// A group that lies: it declares two fields and returns one. The engine must fill the gap with
