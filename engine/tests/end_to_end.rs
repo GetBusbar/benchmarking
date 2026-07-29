@@ -347,9 +347,17 @@ fn every_module_the_artifact_needs_is_reachable_from_a_real_run() {
     // key, the same way box_qualify's observed_rps is: it is the one place this block proves the
     // concurrency-1 load path actually ran on both legs rather than merely being declared.
     let perf = &cell["perf"];
+    // A real number, or a below-resolution absence carrying its reason: both legs run against the
+    // SAME server here, so the gateway leg's p99 can honestly land under the direct leg's, and the
+    // engine publishes that as `below_resolution` rather than clamping to a 0 the rig cannot
+    // resolve. Either way the comparison provably RAN on both legs, which is what this asserts.
+    let p99_measured = perf["added_latency_p99_us"].as_f64().is_some();
+    let p99_below_res =
+        cell["absences"]["perf.added_latency_p99_us"]["reason"] == "below_resolution";
     assert!(
-        perf["added_latency_p99_us"].as_f64().is_some(),
-        "the added-latency group must publish a real added_latency_p99_us against a fixture that answers both legs: {perf:#}"
+        p99_measured || p99_below_res,
+        "the added-latency group must publish a real added_latency_p99_us, or a below-resolution \
+         absence with its reason, against a fixture that answers both legs: {cell:#}"
     );
     for field in [
         "added_latency_p50_us",
@@ -420,9 +428,20 @@ fn every_module_the_artifact_needs_is_reachable_from_a_real_run() {
     // note saying what the medians beside it were taken over. This is the streaming lane's equivalent
     // of the added-latency assertion above - the one place this block proves frames actually arrived
     // rather than that a field was published.
+    //
+    // TWO honest outcomes, not one. On this fixture both legs run over loopback against the same
+    // process, so the gateway leg's TTFT routinely lands AT OR UNDER the direct leg's - a proxy
+    // cannot really do that, and the engine publishes the difference as `below_resolution` rather
+    // than clamping it to a number the rig cannot resolve. A number proves frames arrived; a
+    // below-resolution absence proves the same thing (the comparison RAN - both legs delivered),
+    // and its reason must be on the cell's absences map. Anything else is the old defect.
+    let ttft_p50_measured = stream["added_ttft_p50_us"].as_f64().is_some();
+    let ttft_p50_below_res =
+        cell["absences"]["stream.added_ttft_p50_us"]["reason"] == "below_resolution";
     assert!(
-        stream["added_ttft_p50_us"].as_f64().is_some(),
-        "the fixture answers stream:true with frames, so a real added TTFT must be published: {stream:#}"
+        ttft_p50_measured || ttft_p50_below_res,
+        "the fixture answers stream:true with frames, so the added TTFT must be a real number or a \
+         below-resolution absence carrying its reason: {cell:#}"
     );
     let stream_note = stream["stream_c1_note"].as_str().unwrap_or_default();
     assert!(
