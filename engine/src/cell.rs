@@ -30,10 +30,12 @@ impl CellId {
             egress: egress.into(),
         }
     }
-    /// True when both sides speak the same dialect: strict passthrough, no translation.
-    pub fn is_diagonal(&self) -> bool {
-        self.ingress == self.egress
-    }
+    // NO `is_diagonal`. It compared this id's two strings and had no production caller: the one place
+    // that needs the fact - `reverify::reverify_cell` - compares the DIALECT that actually built the
+    // request against the parsed egress, after the parse guard, which is the stronger question. A
+    // helper duplicating it on the raw strings could disagree with the bytes that went on the wire,
+    // and its unit test read as coverage of diagonal detection in the real pipeline when nothing in
+    // that pipeline called it.
 }
 
 impl std::fmt::Display for CellId {
@@ -209,9 +211,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_diagonal_is_passthrough_and_an_off_diagonal_is_translation() {
-        assert!(CellId::new("openai", "openai").is_diagonal());
-        assert!(!CellId::new("openai", "anthropic").is_diagonal());
+    fn a_cell_id_renders_as_the_pairing_a_reader_greps_for() {
         assert_eq!(
             CellId::new("openai", "anthropic").to_string(),
             "openai>anthropic"

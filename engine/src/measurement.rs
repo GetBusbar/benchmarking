@@ -185,22 +185,14 @@ impl<T> Measurement<T> {
         }
     }
 
-    /// Demote a measured value to absent. The measured case is discarded ON PURPOSE: this is how a
-    /// value that was really taken, but cannot honestly be published (rig-limited, or the winner of
-    /// an exhausted search), stops being a number without becoming a zero.
-    pub fn suppress(self, reason: Absent) -> Self {
-        match self {
-            Measurement::Measured(_) => Measurement::absent(reason),
-            other => other,
-        }
-    }
-
-    pub fn suppress_because(self, reason: Absent, detail: impl Into<String>) -> Self {
-        match self {
-            Measurement::Measured(_) => Measurement::absent_because(reason, detail),
-            other => other,
-        }
-    }
+    // NO `suppress` / `suppress_because`. They were documented as "how a value that was really taken,
+    // but cannot honestly be published, stops being a number" and had no production caller: every real
+    // suppression path (`suite::apply_peak_verdict` and its siblings) ASSIGNS
+    // `absent_because(RigLimited, detail)` to the field instead. Their semantics could not have served
+    // those sites even if wired - they preserve an existing absence, and those fields arrive already
+    // absent carrying `NotMeasured`, so suppressing would have kept the weaker reason and thrown away
+    // the rig-limited one. A tested helper standing beside the path it claims to be reads as coverage
+    // of that path, which is worse than no helper at all.
 }
 
 impl<T: Copy> Measurement<T> {
@@ -306,24 +298,25 @@ mod tests {
 
     // Suppression is how a rig-limited or range-exhausted number stops being published. It must
     // DISCARD the value: keeping it recoverable is how a raw ungated number escapes to a renderer.
+    //
+    // Driven through `absent_because`, which is what the real suppression paths call
+    // (`suite::apply_peak_verdict` and its siblings assign one of these to the field). This test used
+    // to drive `suppress_because` - a helper with no production caller - so it asserted this invariant
+    // about a function no run ever executed while reading as coverage of the path that matters.
     #[test]
-    fn suppress_discards_the_value_and_records_why() {
-        let m = Measurement::Measured(334_838.0_f64).suppress_because(
+    fn a_suppressed_number_discards_the_value_and_records_why() {
+        let m: Measurement<f64> = Measurement::absent_because(
             Absent::SearchExhausted,
             "fps still rising at the top of the search range",
         );
-        assert_eq!(m.copied(), None);
+        assert_eq!(m.copied(), None, "the value must not remain recoverable");
         assert_eq!(m.reason(), Some(&Absent::SearchExhausted));
         assert!(m.detail().unwrap_or_default().contains("still rising"));
-        assert_eq!(serde_json::to_string(&m).ok(), Some("null".to_string()));
-    }
-
-    // Suppressing something already absent must not overwrite the original, more specific reason.
-    #[test]
-    fn suppress_does_not_relabel_an_existing_absence() {
-        let m: Measurement<f64> =
-            Measurement::absent(Absent::NotServed).suppress(Absent::RigLimited);
-        assert_eq!(m.reason(), Some(&Absent::NotServed));
+        assert_eq!(
+            serde_json::to_string(&m).ok(),
+            Some("null".to_string()),
+            "a suppressed number must reach the wire as null, never as its raw value"
+        );
     }
 
     #[test]
@@ -451,17 +444,19 @@ mod tests {
         assert!(mapped.is_measured());
     }
 
-    // Suppression without a detail still discards the value and still records why. The value-less
-    // form exists for the cases where the reason alone is the whole story, and it must not become a
-    // quiet no-op that leaves a rig-limited number publishable.
+    // An absence WITHOUT a detail still records why, and still carries no number. The value-less form
+    // exists for the cases where the reason alone is the whole story, and it must not become a quiet
+    // no-op that leaves a rig-limited number publishable. Driven through `absent`, which is what the
+    // real paths call - this used to drive the `suppress` helper, which had no production caller, so
+    // the invariant was asserted about a function no run executed.
     #[test]
-    fn suppress_without_a_detail_still_discards_the_value() {
+    fn an_absence_without_a_detail_still_carries_no_number() {
         for reason in ALL {
-            let m = Measurement::Measured(48_000.0_f64).suppress(reason.clone());
+            let m: Measurement<f64> = Measurement::absent(reason.clone());
             assert_eq!(
                 m.copied(),
                 None,
-                "{reason} must discard the value it suppresses"
+                "{reason} must never expose a number"
             );
             assert_eq!(m.reason(), Some(&reason));
             assert_eq!(m.detail(), None);

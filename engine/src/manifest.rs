@@ -1036,7 +1036,29 @@ impl Manifest {
             // answered every probe 404, and published as an entrant that serves nothing at all.
             // A placeholder the harness cannot supply. Caught here rather than at launch, where it
             // becomes a gateway booting with a literal `{MOCK_PORT}` in an upstream URL.
-            if let Ok(raw) = std::fs::read_to_string(&t) {
+            // A TEMPLATE WE COULD NOT READ IS NOT A TEMPLATE THAT PASSED.
+            //
+            // This was `if let Ok(raw) = ...` with no else arm, so a template that exists (the
+            // `is_file` check above passed) but cannot be read - a permissions bit, a transient EIO,
+            // an NFS hiccup on CI - skipped BOTH checks below and pushed nothing. `otb validate`
+            // reports a gateway as ok when `problems()` comes back empty, so the gate that exists
+            // precisely to catch a config with a literal `{MOCK_PORT}` in an upstream URL would pass
+            // it, with nothing distinguishing "checked and clean" from "never actually checked".
+            // That is the same silent-failure shape the comment above calls the worst possible way to
+            // fail, reproduced in the guard against it.
+            let raw = match std::fs::read_to_string(&t) {
+                Ok(raw) => Some(raw),
+                Err(e) => {
+                    out.push(format!(
+                        "{}: exists but could not be read ({e}), so neither the shell-substitution \
+                         nor the placeholder check could run on it. An unchecked template is not a \
+                         clean one",
+                        f.template
+                    ));
+                    None
+                }
+            };
+            if let Some(raw) = raw {
                 if let Some(bad) = raw.lines().find(|l| l.contains("$(")) {
                     out.push(format!(
                         "{}: contains a shell command substitution, which nothing will expand: {:?}. A config template is data; write the literal value or use a {{PLACEHOLDER}}",
@@ -1180,7 +1202,7 @@ impl Manifest {
     /// to edit - trading a silently-ambiguous measurement for no measurement at all, on a gateway
     /// whose duplicate happens to be byte-identical to the header it duplicates. So the wire is made
     /// unambiguous instead (`run::headers_for` drops the manifest's copy and keeps the dialect's),
-    /// and the collision is DISCLOSED here so `otb lint` names the file and the header rather than
+    /// and the collision is DISCLOSED here so `otb validate` names the file and the header rather than
     /// leaving the rule to be rediscovered from the code.
     ///
     /// The rig's copy wins because the credential is the harness's to assert: `cfg.auth` is the
