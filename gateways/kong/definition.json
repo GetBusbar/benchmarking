@@ -22,7 +22,7 @@
   "lang": "Other",
   "launch": {
     "args": [],
-    "image": "kong:3.8",
+    "image": "kong:3.9.3",
     "kind": "docker",
     "mounts": [
       {

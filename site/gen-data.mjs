@@ -46,6 +46,37 @@ const SUITES = ["perf", "stream", "streamcpu", "xlate", "matrix"];
 const UNGATED_LAT = UNGATED_LAT_FIELDS;
 
 // ---- gateway manifests ------------------------------------------------------
+// The version a manifest pins, as a short human string. Image tag for a container gateway, short
+// commit for one built from source. `null` when the manifest pins neither, which is a real state and
+// renders as nothing rather than as a guess.
+function declaredVersion(d) {
+  const img = d?.launch?.image;
+  if (typeof img === "string" && img.includes(":")) {
+    const tag = img.slice(img.lastIndexOf(":") + 1);
+    if (tag && tag !== "latest") return tag;
+  }
+  const commit = d?.launch?.commit;
+  if (typeof commit === "string" && commit.length >= 7) return commit.slice(0, 7);
+  return null;
+}
+
+// A gateway built from source pins its ref in its own build.sh rather than in the manifest's launch
+// block, because there is no image to name. Read it from there so those three rows carry a version
+// too: `COMMIT="${SOME_COMMIT:-<sha>}"`, optionally followed by a `# tag vX.Y.Z` the pin came from,
+// which is the more useful thing to show when it exists.
+function builtFromSourceVersion(key) {
+  const path = join(gatewaysDir, key, "build.sh");
+  if (!existsSync(path)) return null;
+  let text = "";
+  try { text = readFileSync(path, "utf8"); } catch { return null; }
+  const line = text.split("\n").find((l) => /^\s*COMMIT=/.test(l));
+  if (!line) return null;
+  const tag = line.match(/#\s*tag\s+(\S+)/);
+  if (tag) return tag[1];
+  const sha = line.match(/:-([0-9a-f]{7,40})\}/i);
+  return sha ? sha[1].slice(0, 7) : null;
+}
+
 function parseManifest(text) {
   // ONE manifest per gateway, and it is the one the engine runs from. This used to scrape
   // GW_DISPLAY/GW_LANG/GW_CLASS/GW_REPO out of a shell file that the Rust engine had already
@@ -56,8 +87,22 @@ function parseManifest(text) {
   // gateway", "API gateway", ...), never our editorial classification. Missing/unknown falls back
   // to the neutral "Gateway".
   let d = {};
-  try { d = JSON.parse(text); } catch { return { display: null, lang: null, repo: null, cls: null }; }
-  return { display: d.display ?? null, lang: d.lang ?? null, repo: d.repo ?? null, cls: d.class ?? null };
+  try { d = JSON.parse(text); } catch { return { display: null, lang: null, repo: null, cls: null, version: null }; }
+  return {
+    display: d.display ?? null,
+    lang: d.lang ?? null,
+    repo: d.repo ?? null,
+    cls: d.class ?? null,
+    // THE VERSION WE PIN, WHICH IS KNOWN WITHOUT HAVING MEASURED ANYTHING.
+    //
+    // The engine stamps the version it ACTUALLY built into every run (`build`), and that stays the
+    // authority for a row that has numbers. But it only exists once a run has happened, so a gateway
+    // awaiting its first measurement rendered as a name and nothing else - no version, no upstream,
+    // an empty row that reads as "we know nothing about this" when the manifest names the exact
+    // image. This is the declared pin, so /gateways can always say WHAT would be measured even when
+    // "last benchmarked" is honestly n/a.
+    version: declaredVersion(d),
+  };
 }
 
 const gatewaysDir = join(ROOT, "gateways");
@@ -117,6 +162,8 @@ const gateways = gatewayKeys.map((key) => {
     // `x" onfocus=alert(...) autofocus="` or a `javascript:` scheme would inject on the public board.
     // Validating the scheme/format here (reject to null otherwise) closes that sink (audit R2-L2).
     repo: (typeof meta.repo === "string" && /^https:\/\/[^\s"'<>]+$/.test(meta.repo)) ? meta.repo : null,
+    // The pinned version, present whether or not this gateway has ever been measured.
+    version: meta.version ?? builtFromSourceVersion(key),
     stars: starsSnap[key]?.stars ?? null,
     stars_as_of: starsSnap[key]?.as_of ?? null,
     // Project age context: the repo's FIRST-commit date (not created_at, which resets on

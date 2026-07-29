@@ -2605,7 +2605,14 @@ const displayedRecords = (g) => [g.best_cell, g.translation_cell, g.streaming, g
 const gatewayBuild = (g) => {
   if (g && g.matrix && g.matrix.build) return g.matrix.build;
   const rec = displayedRecords(g || {}).find((r) => r.source && r.source.build);
-  return rec ? rec.source.build : null;
+  if (rec) return rec.source.build;
+  // NOT-YET-MEASURED IS NOT NOT-KNOWN. Above this line the build is the stamp of what was actually
+  // run, which is the right authority for a row carrying numbers and stays first. But a gateway
+  // awaiting its first run has no stamp at all, and the row rendered a bare "n/a" in every column -
+  // a page that reads as "we know nothing about this project" when the manifest pins the exact
+  // version we would measure. `g.version` is that pin, so the field is always listed with what it
+  // runs; "last benchmarked" stays honestly n/a, because that part really is unknown.
+  return (g && g.version) || null;
 };
 /* The hardware the DISPLAYED numbers were measured on: the matrix stamp (sole source). */
 const gatewayHardware = (g) => (g && g.matrix && g.matrix.hardware) || null;

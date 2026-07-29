@@ -767,6 +767,23 @@ fn refine_ceiling<P: crate::search::Probe>(
             }
         }
     }
+    // A CEILING THE CLIMB ALREADY MEASURED NEEDS NO CONFIRMING.
+    //
+    // `confirm_ceiling` exists because a bisection lands on the highest concurrency that passed
+    // ONCE, and one window is not a ceiling. But when the bisection never moved - the gate was still
+    // holding at the top of the range, or the bracket was already adjacent - the answer is a rung the
+    // CLIMB measured `WINDOWS_PER_RUNG` times, whose majority verdict and median are already in hand.
+    // Re-probing it buys nothing and costs two load windows per cell, and those windows are now spent
+    // inside `Throughput`, ahead of every later group rather than after them. That is not free: it
+    // starved the streaming legs of an end-to-end run that had passed for seven commits, and the
+    // first symptom was a TTFT that stopped being published rather than anything about throughput.
+    if best == lo {
+        return Refined {
+            rps: Measurement::Measured(best_rps),
+            concurrency: Measurement::Measured(lo),
+            points,
+        };
+    }
     match confirm_ceiling(p, best, best_rps, &mut points) {
         Some((c, rps)) => Refined {
             rps: Measurement::Measured(rps),

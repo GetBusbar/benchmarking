@@ -27,7 +27,7 @@
       "-f",
       "/config.yaml"
     ],
-    "image": "ghcr.io/agentgateway/agentgateway:v1.3.1",
+    "image": "ghcr.io/agentgateway/agentgateway:v1.4.0",
     "kind": "docker",
     "mounts": [
       {
