@@ -416,6 +416,27 @@ def main():
         finally:
             audit.HERE = old_here
 
+    # A malformed definition.json must not crash the whole audit before any gateway's PASS/FAIL is
+    # printed. load() (see its own docstring), newest_engine(), and the skipped-gateway loop all wrap
+    # json.load and degrade gracefully on a bad file; check_declaration_matches_what_we_measured()
+    # does not, so one truncated definition.json for ANY gateway takes every other gateway's report
+    # down with it.
+    with isolated(failures, "per-gateway: malformed definition.json must not crash the audit"):
+        tmp = tempfile.mkdtemp()
+        old_here = audit.HERE
+        try:
+            os.makedirs(os.path.join(tmp, "gateways", "broken"))
+            with open(os.path.join(tmp, "gateways", "broken", "definition.json"), "w") as fh:
+                fh.write("{not valid json")
+            audit.HERE = tmp
+            fired = list(audit.check_declaration_matches_what_we_measured("broken"))
+            if fired:
+                failures.append(
+                    f"check_declaration_matches_what_we_measured must not fabricate violations for "
+                    f"an unreadable definition.json, got {fired!r}")
+        finally:
+            audit.HERE = old_here
+
     for f in failures:
         print(f"FAIL: {f}")
     if failures:
