@@ -30,6 +30,12 @@ pub enum Absent {
     /// The window never produced a usable sample (the probe returned nothing, or the deadline fired
     /// before anything was probed). Distinct from a measured zero, which is a real result.
     NotMeasured,
+    /// The quantity is a DIFFERENCE of two legs and the raw difference came out at or below what the
+    /// rig can resolve (the gateway leg read at or under the direct leg, which a proxy cannot really
+    /// do). This is the BEST result the comparison can express - "no overhead this rig can detect" -
+    /// and it must never be conflated with `NotMeasured`: one is a hole, the other is a win too small
+    /// to weigh. Still absent rather than a clamped 0, because 0 would claim a precision we lack.
+    BelowResolution,
     /// The number was bounded by the test rig rather than by the gateway, so it says nothing about
     /// the gateway. It must not rank, win a comparison, or draw a bar.
     RigLimited,
@@ -51,6 +57,7 @@ impl Absent {
         match self {
             Absent::NotServed => "not_served",
             Absent::NotMeasured => "not_measured",
+            Absent::BelowResolution => "below_resolution",
             Absent::RigLimited => "rig_limited",
             Absent::SearchExhausted => "search_exhausted",
             Absent::Untestable => "untestable",
@@ -277,14 +284,7 @@ mod tests {
 
     #[test]
     fn absent_serialises_as_null_never_zero() {
-        for reason in [
-            Absent::NotServed,
-            Absent::NotMeasured,
-            Absent::RigLimited,
-            Absent::SearchExhausted,
-            Absent::Untestable,
-            Absent::HarnessError,
-        ] {
+        for reason in ALL {
             let m: Measurement<f64> = Measurement::absent(reason);
             let js = serde_json::to_string(&m).unwrap_or_default();
             assert_eq!(js, "null", "an absence must serialise as null");
@@ -341,6 +341,7 @@ mod tests {
         assert!(Absent::NotServed.is_about_gateway());
         for r in [
             Absent::NotMeasured,
+            Absent::BelowResolution,
             Absent::RigLimited,
             Absent::SearchExhausted,
             Absent::Untestable,
@@ -351,9 +352,10 @@ mod tests {
     }
 
     /// Every reason, so a variant added later cannot quietly escape the invariants below.
-    const ALL: [Absent; 6] = [
+    const ALL: [Absent; 7] = [
         Absent::NotServed,
         Absent::NotMeasured,
+        Absent::BelowResolution,
         Absent::RigLimited,
         Absent::SearchExhausted,
         Absent::Untestable,
@@ -469,19 +471,11 @@ mod tests {
 
     #[test]
     fn tokens_are_stable_and_distinct() {
-        let all = [
-            Absent::NotServed,
-            Absent::NotMeasured,
-            Absent::RigLimited,
-            Absent::SearchExhausted,
-            Absent::Untestable,
-            Absent::HarnessError,
-        ];
         let mut seen = std::collections::BTreeSet::new();
-        for r in &all {
+        for r in &ALL {
             assert!(seen.insert(r.token()), "duplicate token {}", r.token());
             assert!(!r.token().is_empty());
         }
-        assert_eq!(seen.len(), all.len());
+        assert_eq!(seen.len(), ALL.len());
     }
 }

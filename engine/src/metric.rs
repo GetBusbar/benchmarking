@@ -866,9 +866,11 @@ impl Metric for Streaming {
             (Some(g), Some(d)) if g >= d => Measurement::Measured(g - d),
             // A gateway cannot be faster than the upstream it proxies, so a negative difference is
             // noise - and saying so beats clamping it to a zero that claims the gateway added
-            // nothing measurable. Same rule as the gap percentiles above.
+            // nothing measurable. Same rule as the gap percentiles above. `BelowResolution`, not
+            // `NotMeasured`: this is the comparison's best possible outcome, and the site renders
+            // the two apart.
             (Some(g), Some(d)) => Measurement::absent_because(
-                Absent::NotMeasured,
+                Absent::BelowResolution,
                 format!(
                     "the gateway's own time to first token at this percentile ({g:.0}us) came in under \
                      the mock's ({d:.0}us), which a proxy cannot really do - the added TTFT here is \
@@ -915,7 +917,7 @@ impl Metric for Streaming {
             match (gap_pct(&through_gateway, pct), gap_pct(&direct, pct)) {
             (Some(g), Some(d)) if g >= d => Measurement::Measured(g - d),
             (Some(g), Some(d)) => Measurement::absent_because(
-                Absent::NotMeasured,
+                Absent::BelowResolution,
                 format!(
                     "the gateway's own inter-frame gap at this percentile ({g:.0}us) came in under the \
                      mock's ({d:.0}us), which a proxy cannot really do - the added gap here is below \
@@ -977,13 +979,26 @@ fn clean_c1_leg(ok: u64, fail: u64) -> bool {
 }
 
 /// The added-latency difference itself: the gateway leg's reading minus the direct-to-mock leg's, at
-/// microsecond resolution. Saturating, because a gateway cannot legitimately answer faster than the
-/// upstream it proxies - a negative raw difference is rig noise (two separate processes, two separate
-/// windows, run one after the other on a real box), and publishing it as a negative added latency
-/// would claim the gateway returned a response before the mock itself had produced one, which a
-/// proxy cannot do. Mirrors `Streaming::measure`'s identical reasoning for `added_ttft`.
-fn added_latency_diff(gateway_us: u64, direct_us: u64) -> u64 {
-    gateway_us.saturating_sub(direct_us)
+/// microsecond resolution. A gateway cannot legitimately answer faster than the upstream it proxies -
+/// a negative raw difference is rig noise (two separate processes, two separate windows, run one
+/// after the other on a real box), and publishing it as a negative added latency would claim the
+/// gateway returned a response before the mock itself had produced one, which a proxy cannot do.
+/// `BelowResolution` rather than a clamped 0, the SAME rule as `Streaming::measure`'s `added_ttft`
+/// and `added_gap`: all six published differences say "too small for this rig to see" the same way,
+/// instead of two of them claiming a measured zero with a precision the rig does not have.
+fn added_latency_diff(gateway_us: u64, direct_us: u64) -> Measurement<f64> {
+    if gateway_us >= direct_us {
+        Measurement::Measured((gateway_us - direct_us) as f64)
+    } else {
+        Measurement::absent_because(
+            Absent::BelowResolution,
+            format!(
+                "the gateway leg's c=1 reading ({gateway_us}us) came in under the direct-to-mock \
+                 leg's ({direct_us}us), which a proxy cannot really do - the added latency here is \
+                 below what this rig can resolve"
+            ),
+        )
+    }
 }
 
 impl Metric for AddedLatency {
@@ -1081,7 +1096,7 @@ impl Metric for AddedLatency {
 
         let added_p99 = added_latency_diff(gw_p99, direct_p99);
         let added_p50 = match (gw.p50_us, direct.p50_us) {
-            (Some(g), Some(d)) => Measurement::Measured(added_latency_diff(g, d) as f64),
+            (Some(g), Some(d)) => added_latency_diff(g, d),
             _ => Measurement::absent_because(
                 Absent::NotMeasured,
                 "one leg's c=1 window produced no p50 reading",
@@ -1090,10 +1105,7 @@ impl Metric for AddedLatency {
 
         let fields: Filled = vec![
             ("added_latency_p50_us", added_p50),
-            (
-                "added_latency_p99_us",
-                Measurement::Measured(added_p99 as f64),
-            ),
+            ("added_latency_p99_us", added_p99),
             ("gateway_c1_p99_us", Measurement::Measured(gw_p99 as f64)),
             ("direct_c1_p99_us", Measurement::Measured(direct_p99 as f64)),
             // The successful round trips behind each percentile. Both legs are already known clean
@@ -1477,20 +1489,30 @@ mod tests {
     }
 
     #[test]
-    fn added_latency_diff_is_saturating_never_negative() {
+    fn added_latency_diff_publishes_below_resolution_never_a_clamped_zero() {
         assert_eq!(
-            added_latency_diff(1_200, 80),
-            1_120,
+            added_latency_diff(1_200, 80).copied(),
+            Some(1_120.0),
             "the ordinary case is a plain subtraction"
         );
-        assert_eq!(added_latency_diff(0, 0), 0);
-        // The gateway leg reading BELOW the direct leg is rig noise (two separate windows on a real
-        // box), not the gateway outrunning the upstream it proxies - saturating_sub must clamp this
-        // to zero rather than wrapping or going negative.
         assert_eq!(
-            added_latency_diff(50, 200),
-            0,
-            "a gateway reading faster than the direct leg must clamp to zero"
+            added_latency_diff(0, 0).copied(),
+            Some(0.0),
+            "an exact tie is a measured zero, not an absence"
+        );
+        // The gateway leg reading BELOW the direct leg is rig noise (two separate windows on a real
+        // box), not the gateway outrunning the upstream it proxies. It must publish as
+        // BelowResolution - the same rule as added_ttft/added_gap - never as a clamped 0 that claims
+        // a precision the rig does not have, and never as a wrap or a negative.
+        let below = added_latency_diff(50, 200);
+        assert_eq!(below.copied(), None);
+        assert_eq!(below.reason(), Some(&Absent::BelowResolution));
+        assert!(
+            below
+                .detail()
+                .unwrap_or_default()
+                .contains("below what this rig can resolve"),
+            "the absence must say it is a resolution limit, not a hole"
         );
     }
 
