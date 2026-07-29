@@ -3314,6 +3314,64 @@ test("memory: a WITHHELD plateau verdict is not a negative one - a rig failure i
   assert.match(app.neverPlateauedPill(leakyAll), /on any cell this gateway serves/);
 });
 
+test("sort: a MEASURED TIE breaks on the next measurement, not on the alphabet", () => {
+  // Three gateways sustained a measured ZERO ("no load held the gate") - a real result and a real
+  // three-way tie. The comparator fell straight to display order, so the bottom of the column read
+  // One-API, Plano, TensorZero: alphabetical, presented in a ranked table, which a reader scanning a
+  // sorted column takes as a ranking. Nothing in the data said that.
+  // Driven through the comparator's OWN contract - a column is anything with {id, get} - so this
+  // pins the ordering rule itself rather than a particular view's cell-selection machinery. The
+  // separate test below is what holds the real column sets to naming ids that exist.
+  const col = { id: "rps20", get: (g) => ({ v: g.rps }) };
+  const tie = { id: "lat50", get: (g) => ({ v: g.lat }) };
+  const perfGw = (display, rps, lat) => ({ display, rps, lat });
+
+  // All three tie at 0 on the sorted column; their latencies differ and are deliberately in the
+  // OPPOSITE order to their names, so name-order and latency-order cannot be confused for each other.
+  const gws = [
+    perfGw("aaa", 0, 900),
+    perfGw("mmm", 0, 100),
+    perfGw("zzz", 0, 500),
+  ];
+  const sorted = gws.slice().sort(app.rowComparator(col, true, tie)).map((g) => g.display);
+  assert.deepEqual(sorted, ["mmm", "zzz", "aaa"],
+    "tied rows order by the tiebreak measurement, lowest latency first");
+
+  // The tiebreak sorts ASCENDING even when the primary column is descending: it is not part of the
+  // sort the reader asked for, it is what to do once that sort has nothing left to say.
+  const asc = gws.slice().sort(app.rowComparator(col, false, tie)).map((g) => g.display);
+  assert.deepEqual(asc, ["mmm", "zzz", "aaa"], "the tiebreak direction does not flip with the header");
+
+  // Rows that do NOT tie are untouched by any of this.
+  const spread = [perfGw("slow", 10, 1), perfGw("fast", 900, 999)];
+  assert.deepEqual(
+    spread.slice().sort(app.rowComparator(col, true, tie)).map((g) => g.display),
+    ["fast", "slow"],
+    "a real difference in the sorted column still decides the order outright"
+  );
+
+  // Falling back to the alphabet is still correct when the tiebreak ALSO ties - it is the last
+  // resort, not something the tiebreak removed.
+  const both = [perfGw("zed", 0, 7), perfGw("abe", 0, 7)];
+  assert.deepEqual(
+    both.slice().sort(app.rowComparator(col, true, tie)).map((g) => g.display),
+    ["abe", "zed"],
+    "when the numbers genuinely run out, display order is the honest last resort"
+  );
+});
+
+test("sort: every declared tiebreak names a column that actually exists in its own view", () => {
+  // A tiebreak pointing at a renamed or deleted column does not throw - `cols.find` returns
+  // undefined and the comparator quietly reverts to the alphabet. That is the failure this whole
+  // change was made to remove, and it would come back silently on the next column rename.
+  for (const [view, id] of Object.entries(app.VIEW_TIEBREAK)) {
+    const set = app.COLUMN_SETS[view];
+    assert.ok(set, `VIEW_TIEBREAK names view ${view}, which has no column set`);
+    assert.ok(set.some((c) => c.id === id),
+      `VIEW_TIEBREAK.${view} = ${id}, which is not a column in that view - the tiebreak is dead config`);
+  }
+});
+
 test("memory: a WAVE is not a leak, and the board must stop calling it one", () => {
   // "Never settles" described two different gateways under one red pill. One climbs without bound; the
   // other swings around a level it keeps returning to - a garbage collector doing its job. Both fail the
