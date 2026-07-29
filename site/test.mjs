@@ -1191,13 +1191,33 @@ test("R2: an EMPTY bundle takes the ERROR arm, not the still-filling warning", (
     "an empty bundle must not ALSO be excused as a board that is still filling");
 });
 
-testWithMatrixDonor("C1 RED: a BARE metric scalar (raw ungated field) fails C1", () => {
-  const d = clone();
-  const g = matrixGw(d);
-  g.best_cell.rps_max_proxy = 20057;   // revert the seal: a raw ungated number
-  const e = checkConsistency(d, app).errors;
-  assert.ok(e.some((x) => x.startsWith("C1:") && x.includes("rps_max_proxy") && x.includes("BARE scalar")),
-    `C1 must flag a bare metric scalar; got: ${JSON.stringify(e.filter((x) => x.startsWith("C1")))}`);
+testWithMatrixDonor("C1 RED: EVERY malformed metric shape fails C1, not just a bare number", () => {
+  // C1's walk used to read `!isEnvelope(v) && typeof v === "number"`, so a raw numeric leak was the
+  // ONLY thing it could catch. A bare string, a boolean, an array, or - the dangerous one - a
+  // half-built envelope like {value: 20057} with `certified` dropped matched neither branch and sailed
+  // through the deploy gate. `isEnvelope` demands a boolean `certified`, so a partial envelope is not
+  // an envelope, and it is not a number either, so nothing fired. This test only ever drove the number.
+  for (const [what, bad] of [
+    ["a bare number", 20057],
+    ["a bare string", "n/a"],
+    ["a boolean", false],
+    ["an array", [20057]],
+    ["a partial envelope with no certified flag", { value: 20057 }],
+  ]) {
+    const d = clone();
+    const g = matrixGw(d);
+    g.best_cell.rps_max_proxy = bad;
+    const e = checkConsistency(d, app).errors;
+    assert.ok(
+      e.some((x) => x.startsWith("C1:") && x.includes("rps_max_proxy")),
+      `C1 must flag ${what}; got: ${JSON.stringify(e.filter((x) => x.startsWith("C1")))}`
+    );
+  }
+  // And the shape that must still PASS: a real sealed envelope. A rule that rejects everything is as
+  // useless as one that rejects nothing.
+  const ok = clone();
+  const e = checkConsistency(ok, app).errors;
+  assert.ok(!e.some((x) => x.startsWith("C1:")), `a clean bundle must raise no C1: ${JSON.stringify(e)}`);
 });
 
 testWithMatrixDonor("C1 RED: a surviving *_mock_bound flag fails C1", () => {
