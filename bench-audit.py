@@ -298,8 +298,17 @@ ABSENCE_CARRYING_FIELDS = {
         # could explain. They are `Measurement`s now and ride in the cell's absences map like every
         # other number, which is what lets this list hold them to the same bar.
         "plateaued", "load_s",
+        # Absent BECAUSE the measurement succeeded: these describe HOW a window failed to settle, so a
+        # window that DID settle has no shape to publish and says exactly that. They are listed here
+        # for the reason every other field is - a null must carry a reason - and NOT held to
+        # check_no_bare_absence's "a served cell publishes a number", which is why that check reads
+        # SHAPE_FIELDS below and lets a reasoned absence stand.
+        "shape", "idle_shape",
     ],
 }
+
+# The fields whose absence is a RESULT rather than a gap. See the note in ABSENCE_CARRYING_FIELDS.
+SHAPE_FIELDS = {"memory": {"shape", "idle_shape"}}
 
 # The absence reasons that legitimately excuse a CAPACITY metric from being a number. Everything
 # else must be a number - a gateway that failed the gate at every rung is a measured 0, not a hole.
@@ -322,7 +331,7 @@ def check_no_bare_absence(name, c):
                 yield f"{name}: {block}.{f} is null with NO reason in absences (a bare hole)"
 
 
-def check_declared_fields_are_carried(name, c):
+def check_declared_fields_are_carried(name, c, known=None):
     """A served cell must CARRY every field it declares - as a number, or as a null with a reason.
 
     THE HOLE THIS CLOSES IS THE ONE `check_no_bare_absence` CANNOT SEE (ledger TOOL-04). That check
@@ -355,6 +364,16 @@ def check_declared_fields_are_carried(name, c):
             continue
         for f in fields:
             if f not in blk:
+                # A field the PRODUCING ENGINE never had is a different thing from one it dropped.
+                # `known` is computed per snapshot from that snapshot's own cells: a field no cell in
+                # it carries was not in the engine that wrote it, and demanding it would be demanding
+                # that yesterday's artifact contain tomorrow's field. Crucially this is all-or-
+                # nothing per snapshot, so the defect this check exists for - a serializer that
+                # started dropping a key on SOME cells - still fails loudly, because those cells sit
+                # beside cells that carry it. A snapshot that omits a field everywhere is DISCLOSED
+                # at the end of the run instead, never silently forgiven.
+                if known is not None and f not in known.get(block, ()):
+                    continue
                 yield (f"{name}: {block}.{f} is OMITTED from the block (not null-with-reason, "
                        f"absent) - key-missing and measured are indistinguishable to every check")
 
@@ -387,6 +406,25 @@ def check_stream_capacity_is_a_number(name, c):
                 continue
             yield (f"{name}: stream.{f} is absent with reason {reason!r} and NO detail on a served "
                    f"streaming cell - a search that stops producing must say why")
+
+
+def fields_the_producer_knew(d):
+    """Which declared fields THIS snapshot's engine actually serializes, read from the snapshot.
+
+    The board is not always written by one engine - run N's artifacts outlive the commit that made
+    them, and a field added afterwards cannot appear in them. Rather than trusting a commit-to-field
+    mapping that nothing would keep honest, this asks the artifact: a field that appears on ANY served
+    cell was known to the producer, so every OTHER cell must carry it too. That keeps the real defect
+    (a key dropped on some cells but not others) failing, while a field uniformly absent is reported
+    as an unaudited gap rather than 64 identical violations that drown out everything else.
+    """
+    known = {b: set() for b in ABSENCE_CARRYING_FIELDS}
+    for _name, c in served_cells(d):
+        for block, fields in ABSENCE_CARRYING_FIELDS.items():
+            blk = c.get(block)
+            if isinstance(blk, dict):
+                known[block].update(f for f in fields if f in blk)
+    return known
 
 
 CELL_CHECKS = [
@@ -588,11 +626,19 @@ def main():
 
     violations = collections.defaultdict(list)
     cells = 0
+    # Fields no snapshot's producer knew about: disclosed below, never silently skipped.
+    unknown_fields = {}
     for gw, (_path, d, _sha) in sorted(snaps.items()):
+        known = fields_the_producer_knew(d)
+        for block, fields in ABSENCE_CARRYING_FIELDS.items():
+            missing = [f for f in fields if f not in known.get(block, ())]
+            if missing:
+                unknown_fields.setdefault(gw, []).extend(f"{block}.{f}" for f in missing)
         for name, c in served_cells(d):
             cells += 1
             for check in CELL_CHECKS:
-                for v in check(f"{gw} {name}", c):
+                kw = {"known": known} if check is check_declared_fields_are_carried else {}
+                for v in check(f"{gw} {name}", c, **kw):
                     violations[check.__name__].append(v)
         for v in check_declaration_matches_what_we_measured(gw):
             violations["check_declaration_matches_what_we_measured"].append(v)
@@ -613,6 +659,13 @@ def main():
         print("  They are published but were NOT checked by this run. Audit that engine explicitly")
         print("  with --engine <sha>, or re-measure them. A board is fully audited only when one")
         print("  engine produced all of it.")
+    if unknown_fields:
+        n = len(unknown_fields)
+        every = sorted({f for fs in unknown_fields.values() for f in fs})
+        print(f"NOT AUDITED: {n} snapshot(s) predate {len(every)} declared field(s): {', '.join(every)}")
+        print("  No cell in those snapshots carries them, so the engine that wrote them did not have")
+        print("  them yet and this run could not check them. They are checked the moment a snapshot")
+        print("  from an engine that DOES publish them lands - re-measure to audit them.")
     print(f"{len(CELL_CHECKS)} per-cell invariants + 1 per-gateway + 2 board-level invariants\n")
 
     if not violations:
