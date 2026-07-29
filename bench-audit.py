@@ -571,7 +571,11 @@ def check_declaration_matches_what_we_measured(gw):
     p = os.path.join(HERE, "gateways", gw, "definition.json")
     if not os.path.exists(p):
         return
-    d = json.load(open(p))
+    try:
+        d = json.load(open(p))
+    except Exception as e:
+        print(f"  unreadable {gw} definition.json {p}: {e}", file=sys.stderr)
+        return
     dialects = ["openai", "openai-responses", "anthropic", "gemini", "cohere", "bedrock"]
     declared = set()
     for ri, row in enumerate(d.get("matrix") or []):
