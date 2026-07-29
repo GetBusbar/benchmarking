@@ -308,7 +308,8 @@ const ZERO_WHY = {
    or "offered the load, sustained none". The ZERO_WHY short form rides under the number; the full
    sentence stays on the tooltip. A zero with no note renders bare, exactly as before. */
 function metricTd(cell, sc = "") {
-  if (cell.na) return `<td class="na${sc}" title="${esc(cell.note || "")}">${esc(cell.text)}</td>`;
+  if (cell.na)
+    return `<td class="na${cell.failed ? " failcell" : ""}${sc}" title="${esc(cell.note || "")}">${esc(cell.text)}</td>`;
   const zeroWhy = cell.v === 0 && cell.env && ZERO_WHY[cell.env.note];
   return `<td class="${sc.trim()}"${cell.note ? ` title="${esc(cell.note)}"` : ""}>${esc(cell.text)}${
     zeroWhy ? `<span class="zero-why">${esc(zeroWhy)}</span>` : ""}</td>`;
@@ -322,7 +323,17 @@ function metric(env, fmt = fmtInt) {
     // added-gap p99 with no p50 - impossible for one distribution, so the table looked broken.
     if (env && env.reason === "below_resolution")
       return { v: 0, text: "≈0", na: false, note: env.detail || noteText(env.reason), env };
-    return { v: null, text: "n/a", na: true, note: (env && env.detail) || noteText(env && env.reason), env: env || null };
+    // A MEASURED FAILURE READS AS ONE, in red, with its counts - never as the same n/a an untested
+    // cell gets. The engine's detail carries the evidence ("0 ok, 14201 fail" - one-api's c=1 leg
+    // after the restart bug; "no stream frame arrived"), and the cell shows the digits so a
+    // screenshot proves the measurement ran and the gateway failed it.
+    const detail = env && env.detail;
+    const okFail = detail && /(\d+) ok, (\d+) fail/.exec(detail);
+    if (okFail && Number(okFail[1]) === 0 && Number(okFail[2]) > 0)
+      return { v: null, text: `failed · 0/${fmtInt(Number(okFail[2]))}`, na: true, failed: true, note: detail, env };
+    if (detail && /no stream frame arrived/.test(detail))
+      return { v: null, text: "failed · 0 frames", na: true, failed: true, note: detail, env };
+    return { v: null, text: "n/a", na: true, note: detail || noteText(env && env.reason), env: env || null };
   }
   return { v: env.value, text: fmt(env.value), na: false, note: noteText(env.note), env };
 }
