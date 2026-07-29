@@ -3315,6 +3315,36 @@ test("memory: a WITHHELD plateau verdict is not a negative one - a rig failure i
   assert.match(app.neverPlateauedPill(leakyAll), /on any cell this gateway serves/);
 });
 
+test("drawer protocol matrix: a truthy-but-EMPTY cells map is not data", () => {
+  // The drawer read `g.matrix.cells`, a legacy FLAT map the per-cell artifact stopped filling. It is
+  // now always `{}` - which is truthy - so it passed the `if (!g.matrix.cells)` guard and then every
+  // lookup missed, rendering "n/a" on all six protocol rows of every gateway on the board. The
+  // measurements were present the entire time, one level down under upstreams.
+  const cell = (served) => ({ served, status: 200, path: "/v1/chat/completions" });
+  const modern = { matrix: { cells: {}, upstreams: {
+    openai: { cells: { openai: cell(true) } },
+    anthropic: { cells: { anthropic: cell(false) } },
+  } } };
+  const diag = app.matrixDiagonal(modern);
+  assert.ok(diag, "an empty legacy map must not hide a populated upstreams tree");
+  assert.equal(diag.openai.served, true);
+  assert.equal(diag.anthropic.served, false, "a NOT-SERVED cell is data too, and must survive");
+  assert.ok(!("gemini" in diag), "a pairing with no cell stays absent rather than being invented");
+
+  // The legacy shape still renders, so older boards do not go blank.
+  assert.equal(app.matrixDiagonal({ matrix: { cells: { openai: cell(true) } } }).openai.served, true);
+
+  // And the two genuinely empty cases stay "not measured" rather than six rows of n/a.
+  assert.equal(app.matrixDiagonal({ matrix: { cells: {}, upstreams: {} } }), null);
+  assert.equal(app.matrixDiagonal({}), null);
+
+  // Against the REAL bundle: every gateway resolves its diagonal, or this fix is theatre.
+  for (const g of data.gateways) {
+    if (!(g.matrix && g.matrix.upstreams)) continue;
+    assert.ok(app.matrixDiagonal(g), `${g.key} publishes a matrix but its drawer diagonal is empty`);
+  }
+});
+
 test("sort: a MEASURED TIE breaks on the next measurement, not on the alphabet", () => {
   // Three gateways sustained a measured ZERO ("no load held the gate") - a real result and a real
   // three-way tie. The comparator fell straight to display order, so the bottom of the column read
