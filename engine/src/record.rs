@@ -948,6 +948,32 @@ mod tests {
         assert_eq!(perf, back);
     }
 
+    // THE REGRESSION THIS PINS: `Cell`'s hand-written `Serialize` lists its fields one by one, so
+    // adding a field to the struct does not add it to the wire - the compiler cannot catch a
+    // forgotten `st.serialize_field` call the way it would catch a forgotten struct literal field.
+    // `timings_s` was added to the struct, filled by the suite ("Cost belongs in the artifact"),
+    // and dropped by this exact omission earlier today; every other test here builds a `Cell` and
+    // only checks the fields it already knows to look for, so all 15 of this module's tests and all
+    // 11 of `artifact_contract.rs` stayed green with the line missing. This test looks at the one
+    // field none of them asserted on.
+    #[test]
+    fn timings_s_reaches_the_wire() {
+        let mut cell = sample_cell();
+        let mut timings = std::collections::BTreeMap::new();
+        timings.insert("load".to_string(), 12.5);
+        cell.timings_s = Some(timings);
+
+        let v: serde_json::Value = serde_json::to_value(&cell).unwrap();
+        assert_eq!(
+            v.get("timings_s"),
+            Some(&serde_json::json!({"load": 12.5})),
+            "timings_s must be on the wire: got {v}"
+        );
+
+        let back: Cell = serde_json::from_str(&serde_json::to_string(&cell).unwrap()).unwrap();
+        assert_eq!(back.timings_s, cell.timings_s);
+    }
+
     #[test]
     fn served_status_variant_round_trips() {
         for s in [
