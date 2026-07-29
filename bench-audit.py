@@ -289,6 +289,11 @@ ABSENCE_CARRYING_FIELDS = {
     "stream": [
         "added_ttft_p50_us", "added_ttft_p99_us", "added_gap_p50_us", "added_gap_p99_us",
         "streams_sustained", "streams_sustained_fps", "cpu_fps", "cpu_fps_concurrency",
+        # The WEIGHT behind the two added-TTFT percentiles. A failed probe used to be dropped inside a
+        # filter_map, so a p99 over three lucky samples published identically to one over a hundred -
+        # and with a single survivor the p50 and p99 ranks collapse to the same index, which reads as a
+        # coherent pair. These carry the count so a reader can weigh the percentile beside them.
+        "ttft_gw_samples", "ttft_direct_samples",
     ],
     "memory": [
         "idle_rss_mib", "steady_state_rss_mib", "recovered_rss_mib", "peak_rss_mib",
