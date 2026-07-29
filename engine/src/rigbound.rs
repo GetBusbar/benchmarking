@@ -22,11 +22,6 @@ use crate::measurement::{Absent, Measurement};
 /// gateway-bound. Matches the shell's `c >= 0.9 * m`.
 pub const BOUND_FRACTION: f64 = 0.9;
 
-/// Judge a measured value against the rig's reference ceiling AT THE SAME OPERATING POINT.
-///
-/// Absent when the reference is unusable: an unmeasurable rig ceiling means we cannot say whether
-/// the gateway was bounded by it, and guessing `false` there would quietly certify a number the rig
-/// may well have produced. That is why this returns a `Measurement<bool>` rather than a bare bool.
 /// How far above the reference a measurement may sit before the REFERENCE is the thing in doubt.
 ///
 /// The rig drives the gateway, and the gateway forwards to the same mock the reference is taken

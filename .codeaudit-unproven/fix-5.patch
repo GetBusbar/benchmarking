@@ -1,0 +1,42 @@
+diff --git a/bench-dashboard_test.py b/bench-dashboard_test.py
+index 8ad1daea..3cfceba3 100644
+--- a/bench-dashboard_test.py
++++ b/bench-dashboard_test.py
+@@ -22,6 +22,7 @@
+ import importlib.util
+ import os
+ import re
++import subprocess
+ import sys
+ 
+ HERE = os.path.dirname(os.path.abspath(__file__))
+@@ -205,6 +206,29 @@ check("a cell position of 0 prints the position, not '-'", row["cells"], "0/36")
+ 
+ bd.parse_progress = _orig_parse
+ 
++
++# ── remote_tail: a fetch failure must not read as "nothing logged yet" ──────────────────────────────
++#
++# remote_tail wraps the ssh subprocess in a bare `except Exception: return ""`. That makes an SSH
++# timeout on a box that has been running for hours indistinguishable from a box that has genuinely
++# logged nothing: both come back as "". parse_progress("") then reports `complete=True` (there is
++# nothing to be short of), so row_for shows "booting/building", served "0/expect" with NO "≥" floor
++# marker - exactly the reading a healthy, freshly-launched box would get. A real fetch failure must
++# not collapse into that same string.
++_orig_run = bd.subprocess.run
++
++
++def _raise(*a, **k):
++    raise subprocess.TimeoutExpired(cmd="ssh", timeout=15)
++
++
++bd.subprocess.run = _raise
++try:
++    check("a failed fetch is distinguishable from an empty-but-successful one",
++          bd.remote_tail("1.2.3.4") == "", False)
++finally:
++    bd.subprocess.run = _orig_run
++
+ if _fail == 0:
+     print("all bench-dashboard tests passed")
+     sys.exit(0)

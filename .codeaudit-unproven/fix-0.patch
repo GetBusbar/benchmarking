@@ -1,0 +1,59 @@
+diff --git a/bench-audit_test.py b/bench-audit_test.py
+index c1a56623..bce8d640 100644
+--- a/bench-audit_test.py
++++ b/bench-audit_test.py
+@@ -416,6 +416,54 @@ def main():
+         finally:
+             audit.HERE = old_here
+ 
++    # ── `known` must be pooled across the whole engine commit, not scoped per gateway ──────────────
++    #
++    # `load(engine, ...)` already pins every gateway in `snaps` to ONE engine commit, so they
++    # provably share one producer build. If gateway A carries a declared field on every cell and
++    # gateway B - same commit - drops it on every cell, that is a serializer regression on B, not an
++    # unaudited gap: A proves the engine produced the field. `fields_the_producer_knew(d)` is called
++    # once per gateway on that gateway's OWN `d` (main(), just above this block), so `known` never
++    # sees A's evidence while auditing B, and the drop is swallowed into `unknown_fields` and printed
++    # only as the informational "NOT AUDITED" banner - never a violation, never a nonzero exit. RED
++    # proves the gate cannot fail for the whole-gateway case; it must fail once `known` is pooled.
++    with isolated(failures, "known fields are pooled across one engine's gateways, not per gateway"):
++        tmp = tempfile.mkdtemp()
++        engine_sha = "abc123def4567890abc123def4567890abc1234"
++        # `memory={}` on both: an absent memory BLOCK is its own unconditional violation
++        # (check_declared_fields_are_carried, unrelated to this defect), so an empty dict keeps that
++        # check quiet about memory and isolates the assertion to the one differing stream field.
++        gw_a = cell(memory={}, stream__streams_sustained_fps=128.0)
++        gw_b = cell(memory={})  # same shape, minus streams_sustained_fps - dropped on every cell
++        for gw, c in (("test-gw-a", gw_a), ("test-gw-b", gw_b)):
++            snap = {
++                "gateway": gw,
++                "measured_at": "2026-07-29T00:00:00Z",
++                "rig": {"engine": {"commit": engine_sha}},
++                "matrix": {"upstreams": {"openai": {"cells": {"openai": c}}}},
++            }
++            with open(os.path.join(tmp, f"result_{gw}.json"), "w") as fh:
++                json.dump(snap, fh)
++        paths = sorted(
++            os.path.join(tmp, n) for n in os.listdir(tmp) if n.startswith("result_")
++        )
++        old_snapshot_paths, old_argv = audit.snapshot_paths, sys.argv
++        try:
++            audit.snapshot_paths = lambda: paths
++            sys.argv = ["bench-audit.py"]
++            with open(os.devnull, "w") as devnull:
++                with contextlib.redirect_stdout(devnull):
++                    rc = audit.main()
++            if rc == 0:
++                failures.append(
++                    "main() exited 0 (PASS) with gw-a carrying stream.streams_sustained_fps on "
++                    "every cell and gw-b - the SAME engine commit - dropping it on every cell: "
++                    "the declared-field gate is scoped per-gateway and cannot fail for a "
++                    "whole-gateway drop, so a real serializer regression is reported only as "
++                    "NOT AUDITED")
++        finally:
++            audit.snapshot_paths = old_snapshot_paths
++            sys.argv = old_argv
++
+     for f in failures:
+         print(f"FAIL: {f}")
+     if failures:

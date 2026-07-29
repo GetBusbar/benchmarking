@@ -3,10 +3,17 @@
 //
 // Box qualification: deciding whether a cloud box is fit to measure on before it measures anything.
 //
-// A contaminated box (its own no-gateway latency floor drifted, or its peak throughput collapsed)
-// must not run a full 6x6 and have the result published as a gateway regression. Two stages catch
-// that. Stage 1 compares the box's own gateway-free latency floor against a rolling baseline; stage
-// 2 replays a known cell and compares throughput, which is the stronger signal of the two.
+// A contaminated box - one whose peak throughput has collapsed - must not run a full 6x6 and have the
+// result published as a gateway regression. It replays a known load with no gateway in the path and
+// compares the throughput against a rolling baseline (`PEAK_DRIFT_PCT`), and that verdict is published
+// as `rig.box_qualify` inside the snapshot.
+//
+// ONE STAGE, NOT TWO. This header used to describe a stage 1 that compared the box's gateway-free
+// LATENCY FLOOR against its own baseline, ahead of the throughput stage. That stage is not wired:
+// `FLOOR_DRIFT_PCT` below appears nowhere outside its own definition and this module's tests, and
+// `Sense::LowerIsBetter` exists only to serve it. The machinery is kept because the throughput stage
+// shares `judge`, and a latency stage would be a caller away - but a reader must not be told two
+// things guard the box when one does.
 
 use crate::measurement::{Absent, Measurement};
 use serde::{Deserialize, Serialize};
