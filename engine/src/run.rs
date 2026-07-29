@@ -255,6 +255,24 @@ pub fn host_connection_ceiling() -> u32 {
 /// A THIRD OF THE DESCRIPTOR BUDGET, not all of it: the rig needs descriptors for everything else it
 /// is doing, and a ladder that climbs until the process runs out of file handles measures the ladder.
 /// Still capped by the port rule, which remains a real bound and is simply not the first one to bite.
+///
+/// AND CAPPED BY WHAT THE RIG CAN CARRY, which on the bench box is the only one of the three that
+/// actually binds. The first version of this function derived from descriptors and ports alone, and
+/// on the real box it changed nothing at all: run-on-ec2.sh raises the descriptor limit to 1,048,576,
+/// so a third of it is 349,525, and `min` handed back the port ceiling - the same 32,768 that caused
+/// the problem. The test passed because it asserted the DERIVATION rather than the outcome, which is
+/// the same shape as every other defect this session turned up: a rule that is exercised and wired to
+/// nothing.
+///
+/// So the binding number is stated in the units the rig actually spends. The mock paces 64 frames at
+/// 20ms, so every held-open lane costs ~50 frames/sec of SSE that the rig must parse: c=4096 asks it
+/// to carry 204,800 frames/sec, and c=32768 asks for 1,638,400. The second is not a gateway
+/// measurement. 4096 also leaves most of a doubling of headroom over the highest concurrency any
+/// gateway on this field has actually reached (gomodel, c=2178) - the one higher reading, litellm-rust
+/// at c=6144, failed its own re-measurement, which is the shape of a rig that has run out rather than
+/// a gateway that went faster.
+const STREAM_MAX_CONC: u32 = 4096;
+
 pub fn stream_connection_ceiling() -> u32 {
     // Read the process's own limit rather than assuming a distro default: run-on-ec2.sh raises it,
     // and a derived ceiling means raising it is the only thing anyone has to change.
@@ -271,6 +289,11 @@ pub fn stream_connection_ceiling() -> u32 {
     stream_ceiling_from(soft_fds, host_connection_ceiling())
 }
 
+/// What the rig can carry, in the units it spends: see `STREAM_MAX_CONC`.
+fn rig_stream_capacity() -> u32 {
+    STREAM_MAX_CONC
+}
+
 /// The derivation itself, PURE, so it can be tested against a box other than the one running the
 /// test. The host-reading wrapper above cannot be: on a developer machine `/proc` is absent and both
 /// ceilings collapse to their fallbacks, so a test driving it agrees with any implementation - the
@@ -282,7 +305,7 @@ fn stream_ceiling_from(soft_fds: u32, port_ceiling: u32) -> u32 {
     while ceiling * 2 <= usable {
         ceiling *= 2;
     }
-    ceiling.min(port_ceiling)
+    ceiling.min(port_ceiling).min(rig_stream_capacity())
 }
 
 /// a real status with a healthy rig is the gateway's own answer, no HTTP answer at all is not.
@@ -2474,23 +2497,37 @@ mod tests {
             streams.is_power_of_two(),
             "the ladder doubles, so a ceiling off the ladder is never actually reached: {streams}"
         );
-        // THE BENCH BOX'S OWN NUMBERS, which is the case that actually went wrong and the one a
-        // developer machine cannot reproduce: 49,152 usable ephemeral ports made the port rule allow
-        // c=32768, and apisix's ladder went there.
-        let port_ceiling_that_day = 32_768;
+        // THE BENCH BOX'S OWN NUMBERS. This is the assertion the first version of this test was
+        // missing: it checked that the DERIVATION was arithmetically right and never that the
+        // ceiling actually drops on the machine we run on. It passed while the fix did nothing,
+        // because run-on-ec2.sh raises the descriptor limit to 1,048,576 - a third of that is
+        // 349,525, so `min` handed back the port ceiling and the answer stayed 32,768, exactly the
+        // value that emptied apisix's cpu_fps. A test that verifies the arithmetic of a rule that
+        // never fires is the same defect as the code it was written to protect.
+        let bench_box_fds = 1_048_576;
+        let bench_box_ports = 32_768;
         assert_eq!(
-            super::stream_ceiling_from(65_536, port_ceiling_that_day),
-            16_384,
-            "a generous descriptor budget still lands far below the port rule"
+            super::stream_ceiling_from(bench_box_fds, bench_box_ports),
+            4_096,
+            "ON THE REAL BOX the ceiling must actually bind - descriptors and ports both leave it at \
+             32,768 there, so only a bound stated in what the rig can carry changes anything"
         );
         assert!(
-            super::stream_ceiling_from(1024, port_ceiling_that_day) <= 512,
+            super::stream_ceiling_from(1024, bench_box_ports) <= 512,
             "a stock 1024-descriptor box must not be asked for thousands of held-open streams"
         );
-        // The regression in one line: the port ceiling alone must never be the answer.
+        // 4096 lanes x ~50 frames/sec each is already 204,800 frames/sec of SSE for the rig to parse;
+        // 32768 would be 1,638,400, which is a measurement of the box and not of a gateway.
         assert!(
-            super::stream_ceiling_from(65_536, port_ceiling_that_day) < port_ceiling_that_day,
+            super::stream_ceiling_from(bench_box_fds, bench_box_ports) < bench_box_ports,
             "32k held-open streams is a measurement of the rig, not of a gateway"
+        );
+        // And it must still leave real headroom over the highest concurrency any gateway on this
+        // field has actually reached (gomodel, c=2178) - a ceiling that clips real answers is the
+        // opposite fix.
+        assert!(
+            super::stream_ceiling_from(bench_box_fds, bench_box_ports) > 2_178,
+            "the ceiling must sit above every confirmed observation, or it invents its own limit"
         );
     }
 
