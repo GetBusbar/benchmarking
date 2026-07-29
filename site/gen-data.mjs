@@ -771,11 +771,40 @@ const boardNewest = Math.max(...gateways.map(displayedMeasuredMs), 0);
 //
 // Publishing generated_at=now over a board we cannot date is exactly what the 180-day floor exists
 // to refuse, so an unresolvable board is a hard failure with its own reason rather than a pass.
-if (boardNewest <= 0 && gateways.length > 0) {
+//
+// BUT: "UNDATABLE" AND "EMPTY" ARE NOT THE SAME BOARD, AND ONLY ONE OF THEM IS A DEFECT.
+//
+// The guard as first written asked only "is boardNewest 0", which is true of BOTH a board carrying
+// numbers nobody can date AND a board carrying nothing at all. Those are opposite situations. A board
+// that publishes measurements with no resolvable stamp is genuinely undatable and must not ship - that
+// is the case this guard was written for. A board where NO gateway has been benchmarked yet is not
+// ambiguous in the slightest: nothing has been measured, there is nothing to date, and the honest
+// bundle is one that says so on every row. app.js and the site suite already treat that as a first-
+// class state and say so at length (BOARD_HAS_DATA, testWithData, testWithMatrixDonor).
+//
+// Conflating the two cost more than a bad error message. A clean checkout has an empty
+// results/snapshots/ - no artifacts are committed - so gen-data THREW on every fresh clone, which
+// meant `node site/test.mjs` died at its own line ~167 (it runs gen-data for real into a temp dir)
+// before reaching a single assertion: zero ok lines, zero FAIL lines, exit non-zero for a reason that
+// had nothing to do with the code under test. Its documented fallback to a committed site/data.json
+// cannot rescue it either, because that file is gitignored. So the whole site suite gated nothing in
+// CI, and the deploy workflows failed three steps before they ever reached a site test.
+//
+// The distinction is made on EVIDENCE OF MEASUREMENT, not on gateway count: a gateway is "measured" if
+// it carries any suite artifact or any projected record at all. If even one does and the board still
+// cannot be dated, the original hard failure stands, exactly as strict as before.
+const measuredGateways = gateways.filter((g) =>
+  SUITES.some((s) => g[s] != null) || !!g.best_cell || !!g.translation_cell || !!g.streaming || !!g.memory_read);
+if (boardNewest <= 0 && measuredGateways.length > 0) {
   throw new Error(
-    `gen-data: FRESHNESS FAILURE (undatable board): ${gateways.length} gateway(s) but not one carries a resolvable ` +
-    `displayed measured_at, so the board's age cannot be established at all. Refusing to publish ` +
-    `generated_at=${generatedAt} over data that cannot be dated.`);
+    `gen-data: FRESHNESS FAILURE (undatable board): ${measuredGateways.length} of ${gateways.length} gateway(s) carry ` +
+    `measurements but not one carries a resolvable displayed measured_at, so the board's age cannot be established ` +
+    `at all. Refusing to publish generated_at=${generatedAt} over data that cannot be dated.`);
+}
+if (boardNewest <= 0 && measuredGateways.length === 0 && gateways.length > 0) {
+  console.warn(`gen-data: the board carries NO measurements at all (${gateways.length} declared gateway(s), none benchmarked). ` +
+    `Emitting an honest empty board: every row reads n/a and there is no age to publish. This is a legitimate ` +
+    `state (a fresh checkout has no artifacts committed), not an undatable one.`);
 }
 if (boardNewest > 0) {
   const boardAgeDays = (Date.parse(generatedAt) - boardNewest) / 86400000;

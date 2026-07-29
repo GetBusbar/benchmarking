@@ -445,6 +445,50 @@ export function lintSweepKeys(src, name, allowRegion) {
 // its raw `.value` / `.get("value")` outside the accessor definitions themselves bypasses the reader.
 const JS_ACCESSOR_DEFS = /^\s*(?:export\s+)?function\s+(?:metric|mval|isEnvelope)\b|^\s*(?:export\s+)?const\s+(?:metric|mval|isEnvelope)\s*=/;
 const PY_ACCESSOR_DEFS = /^\s*def\s+(?:mval|mvalid|menote|_is_env)\b/;
+// THE FIELD-NAME LINT POLICES THE WHOLE SEALED VOCABULARY, NOT FOUR NAMES OF IT.
+//
+// The direct-form scan below used to iterate GATED_FIELDS - the four throughput metrics - and nothing
+// else, so it covered 4 of the ~20 fields seal.mjs actually seals. Every latency, ttft, gap, growth,
+// plateau and RSS envelope could be dereferenced straight to its raw number and the lint reported
+// green: `g.best_cell.added_latency_p99_us.value`, `g.best_cell["added_ttft_p99_us"]["value"]` and
+// `g.matrix...peak_rss_mib.value` all passed a check whose whole purpose is to forbid exactly that.
+// A lint that knows a fifth of its own vocabulary is the inert-check failure in miniature: it fires
+// often enough to look alive while the bug class walks past it.
+//
+// So the direct form is DISCOVERED rather than enumerated. Each raw-deref spelling captures the FIELD
+// NAME it dereferences, and seal.mjs's own `isMetricField` decides whether that name is a sealed
+// metric - the same predicate gen-data seals by and C1 asserts by. There is no second list to keep in
+// step: a field added to seal.mjs's vocabulary is policed here the moment it is added, and the RSS
+// family (discovered by regex, never enumerated anywhere) is covered for the first time.
+const ID = "[A-Za-z_$][\\w$]*";
+// Each entry captures group 1 = the dereferenced field name.
+const JS_FIELD_DEREFS = [
+  new RegExp(`\\.(${ID})\\s*\\.value\\b`, "g"),                                        // .field.value
+  new RegExp(`\\.(${ID})\\s*\\[\\s*["'\`]value["'\`]\\s*\\]`, "g"),                     // .field["value"]
+  new RegExp(`\\[\\s*["'\`](${ID})["'\`]\\s*\\]\\s*\\.value\\b`, "g"),                  // ["field"].value
+  new RegExp(`\\[\\s*["'\`](${ID})["'\`]\\s*\\]\\s*\\[\\s*["'\`]value["'\`]\\s*\\]`, "g"), // ["field"]["value"]
+  new RegExp(`\\{[^}]*\\bvalue\\b[^}]*\\}\\s*=\\s*[^;]*\\.(${ID})\\b`, "g"),            // const { value } = x.field
+];
+const PY_FIELD_DEREFS = [
+  new RegExp(`\\.(${ID})\\b[^\\n]*?\\.get\\(\\s*["']value["']`, "g"),
+  new RegExp(`\\.(${ID})\\b[^\\n]*?\\[\\s*["']value["']\\s*\\]`, "g"),
+  new RegExp(`\\[\\s*["'](${ID})["']\\s*\\][^\\n]*?\\[\\s*["']value["']\\s*\\]`, "g"),
+  new RegExp(`\\[\\s*["'](${ID})["']\\s*\\][^\\n]*?\\.get\\(\\s*["']value["']`, "g"),
+];
+// A SEALED FIELD BOUND TO A LOCAL IS AN ENVELOPE, whether or not that local ever meets an accessor.
+//
+//   const rec = g.best_cell.added_latency_p50_us;
+//   return rec.value;
+//
+// routed around BOTH passes below: the binding line carries no `.value`, and `rec` was never handed to
+// metric()/mval()/isEnvelope(), so the taint set never learned it was an envelope. Two lines, no lint,
+// no error - the exact shape a reader writes when the deref is inconvenient on one line. The field's
+// OWN NAME is sufficient evidence of the type, so a binding read off a sealed field taints its target
+// exactly as an accessor call does.
+const JS_BINDING = new RegExp(`(?:const|let|var)\\s+(${ID})\\s*=\\s*([^;\\n]*)`, "g");
+const PY_BINDING = new RegExp(`^\\s*(${ID})\\s*=\\s*([^\\n]*)`, "gm");
+const JS_FIELD_IN_EXPR = new RegExp(`\\.(${ID})\\b|\\[\\s*["'\`](${ID})["'\`]\\s*\\]`, "g");
+const PY_FIELD_IN_EXPR = new RegExp(`\\.get\\(\\s*["'](${ID})["']|\\[\\s*["'](${ID})["']\\s*\\]|\\.(${ID})\\b`, "g");
 export function lintAccessorRouting(src, name, lang = "js") {
   const errors = [];
   const lines = src.split("\n");
@@ -469,6 +513,22 @@ export function lintAccessorRouting(src, name, lang = "js") {
   // ever handed to an envelope accessor/predicate is an envelope-typed local.
   const tainted = new Set();
   for (const m of src.matchAll(predicate)) tainted.add(m[1]);
+  // PASS 1b: ...and so is every identifier bound DIRECTLY OFF A SEALED FIELD (see JS_BINDING above).
+  // The name of the field is the type evidence; no accessor call is needed to know what `rec` is in
+  // `const rec = g.best_cell.added_latency_p50_us`.
+  {
+    const bind = isPy ? PY_BINDING : JS_BINDING;
+    const fieldIn = isPy ? PY_FIELD_IN_EXPR : JS_FIELD_IN_EXPR;
+    bind.lastIndex = 0;
+    for (const m of src.matchAll(bind)) {
+      const rhs = m[2] || "";
+      fieldIn.lastIndex = 0;
+      for (const f of rhs.matchAll(fieldIn)) {
+        const nm = f.slice(1).find((x) => x != null);
+        if (nm && isMetricField(nm)) { tainted.add(m[1]); break; }
+      }
+    }
+  }
   // PASS 2: mark the line ranges that ARE the accessor definitions - the one place `.value` is legal.
   const inAccessor = new Array(lines.length).fill(false);
   for (let i = 0; i < lines.length; i++) {
@@ -485,18 +545,16 @@ export function lintAccessorRouting(src, name, lang = "js") {
     if (inAccessor[i]) return;
     const code = isPy ? line.replace(/#.*$/, "") : line.replace(/\/\/.*$/, "");
     // (a) the direct form: a metric FIELD dereferenced straight to its raw number, in any spelling.
-    for (const f of GATED_FIELDS) {
-      const res = isPy
-        ? [new RegExp(`\\.${f}\\b[^\\n]*\\.get\\(\\s*["']value["']`),
-          new RegExp(`\\.${f}\\b[^\\n]*\\[\\s*["']value["']\\s*\\]`),
-          new RegExp(`\\[\\s*["']${f}["']\\s*\\][^\\n]*\\[\\s*["']value["']\\s*\\]`),
-          new RegExp(`\\[\\s*["']${f}["']\\s*\\][^\\n]*\\.get\\(\\s*["']value["']`)]
-        : [new RegExp(`\\.${f}\\.value\\b`),
-          new RegExp(`\\.${f}\\s*\\[\\s*["'\`]value["'\`]\\s*\\]`),
-          new RegExp(`\\[\\s*["'\`]${f}["'\`]\\s*\\]\\s*\\.value\\b`),
-          new RegExp(`\\{[^}]*\\bvalue\\b[^}]*\\}\\s*=\\s*[^;]*\\.${f}\\b`)];
-      if (res.some((re) => re.test(code)))
+    // The field name is DISCOVERED from the deref and judged by seal.mjs's isMetricField, so this arm
+    // covers the whole sealed vocabulary (gated, latency, ttft/gap, memory, and the RSS family that no
+    // list anywhere enumerates) instead of the four GATED_FIELDS it used to know about.
+    for (const re of (isPy ? PY_FIELD_DEREFS : JS_FIELD_DEREFS)) {
+      re.lastIndex = 0;
+      for (const m of code.matchAll(re)) {
+        const f = m[1];
+        if (!f || !isMetricField(f)) continue;
         errors.push(`C5: ${name}:${i + 1} reads .${f}'s raw value directly (must route through metric()/mval()): ${line.trim().slice(0, 80)}`);
+      }
     }
     // (b) the form the codebase ACTUALLY uses: an envelope bound to a local, then dereferenced.
     for (const v of tainted) {
@@ -505,6 +563,49 @@ export function lintAccessorRouting(src, name, lang = "js") {
     }
   });
   return { errors, scanned: lines.length > 1, tainted };
+}
+
+// (2b) COVERAGE WIRING (R2): every declared invariant branch has a LIVE call site tagging it.
+//
+// THE ANTI-INERT GATE WAS ITSELF INERT, AND ON A PARTIAL BOARD IT COULD NOT BE ANYTHING ELSE.
+//
+// R2's runtime coverage check asks "was every required branch exercised by this bundle". Mid-run that
+// question has no honest answer - a branch can be silent because its input has not landed yet - so the
+// finding is downgraded to a warning while the board is still filling (see the long note at the R2
+// gate below, which is right about the tension it describes). The cost was that on a 5-of-14 board the
+// ERROR arm was unreachable, and therefore so was every consequence of switching a check OFF: comment
+// out the one line that tags R1.oracle and both `node check-consistency.mjs` and `node test.mjs` still
+// exited 0. The independent oracle could be disabled entirely and the publish gate stayed green.
+//
+// "THIS BRANCH HAD NO INPUT" AND "THIS BRANCH IS NOT WIRED UP" ARE DIFFERENT FACTS, and only the first
+// one depends on how full the board is. The second is a property of the SOURCE: a branch that no
+// surviving call site tags can never be exercised by any bundle, complete or not, and that is a defect
+// today rather than a maybe-tomorrow. So it is checked statically, against this file's own text, and
+// it is an ERROR unconditionally - board completeness has nothing to say about whether a line exists.
+//
+// A commented-out call site is not a call site: a leading `//` on the line is precisely how a check
+// gets switched off "temporarily", so any tag whose line has a comment marker before it is ignored.
+// The reverse direction is checked too: a call site tagging a branch nobody declared is a token that
+// can never be required, which is the same hole approached from the other side (it is how C8.engine
+// was tagged-but-undeclared, hard-failing every stamped board).
+export function lintCoverageWiring(src, branches) {
+  const errors = [];
+  const live = new Set();
+  src.split("\n").forEach((line) => {
+    for (const m of line.matchAll(/covered\(\s*["'`]([^"'`]+)["'`]\s*\)/g)) {
+      if (line.slice(0, m.index).includes("//")) continue;   // commented out = switched off, not wired
+      live.add(m[1]);
+    }
+  });
+  for (const b of branches)
+    if (!live.has(b))
+      errors.push(`R2: wiring - declared invariant branch "${b}" has NO live call site tagging it in check-consistency.mjs ` +
+        `(the branch cannot be exercised by ANY bundle, so its silence is not "no input yet" - the check is off)`);
+  for (const b of live)
+    if (!branches.includes(b))
+      errors.push(`R2: wiring - branch "${b}" is tagged in check-consistency.mjs but is not declared in CHECK_BRANCHES ` +
+        `(an undeclared token can never be REQUIRED of anything, so the branch it names is unguarded)`);
+  return { errors, live };
 }
 
 // (3) PER-LANE chart provenance (C3b): assert PER LANE, not merely that `_sweep_label(` appears
@@ -972,6 +1073,11 @@ export function checkConsistency(data, app, opts = {}) {
     "C3.stamp", "C3.lint", "C3.route", "C3.parity", "C4.cell", "C4.leak", "C6.cell", "R1.oracle",
     "R3.selection", "R4.selection", "C7.hwm", "C5.route", "C5.lint", "C8.engine",
   ];
+  // WIRING FIRST, COVERAGE SECOND. Whether each declared branch still HAS a call site is a question
+  // about this file, answerable without a single gateway, and it is never downgraded by how full the
+  // board is - see lintCoverageWiring. This is what makes "switch a check off" a failing state on a
+  // 5-of-14 board, where the coverage gate below can only warn.
+  errors.push(...lintCoverageWiring(readSrc("check-consistency.mjs"), CHECK_BRANCHES).errors);
   // C8.engine was tagged by the branch below but never DECLARED here, so R2's own
   // "every covered branch is a declared branch" assertion (test.mjs) hard-failed on any bundle whose
   // gateways carry engine stamps - i.e. on every post-stamp real board, while passing on the synthetic
@@ -987,7 +1093,15 @@ export function checkConsistency(data, app, opts = {}) {
   // the branches a healthy bundle with projected cells MUST exercise. C3.lint and C5.lint are tagged when
   // the SCANNER ran, not when it found a violation or took an exemption, so an inert (never-scanning)
   // lint is itself a coverage failure.
-  const REQUIRED = ["C1.field", "C1.certified", "C3.stamp", "C3.route", "C3.parity",
+  // REQUIRED_ALWAYS = the branches required of ANY bundle, including a pure-fallback or synthetic one.
+  // It is not the whole requirement: a bundle that publishes matrix numbers owes four more (see
+  // REQUIRED below). The two used to be a constant and an unexported local respectively, and only the
+  // constant was returned - so test.mjs, which iterates the returned REQUIRED directly, asserted
+  // coverage of nine branches and knew nothing about C6.cell, C7.hwm, R1.oracle or R3.selection. The
+  // oracle's own coverage token was outside the set the test walked, which is why deleting the line
+  // that tags it failed nothing. The returned REQUIRED is now what this bundle is ACTUALLY required to
+  // cover, and the unconditional floor is returned beside it under its own name.
+  const REQUIRED_ALWAYS = ["C1.field", "C1.certified", "C3.stamp", "C3.route", "C3.parity",
     "C3.lint", "C5.lint", "C4.cell", "C5.route"];
   // The oracle branches are required whenever the bundle publishes ANY matrix-sourced number; a gateway
   // that publishes matrix numbers with no on-disk matrix is already an error above (its numbers are
@@ -1009,9 +1123,9 @@ export function checkConsistency(data, app, opts = {}) {
     if (eng.checked > 0) covered("C8.engine");
     errors.push(...eng.errors);
   }
-  const requiredNow = publishesMatrix && !syntheticFixture
-    ? [...REQUIRED, "C6.cell", "C7.hwm", "R1.oracle", "R3.selection"] : REQUIRED;
-  const missing = requiredNow.filter((b) => !cover.has(b));
+  const REQUIRED = publishesMatrix && !syntheticFixture
+    ? [...REQUIRED_ALWAYS, "C6.cell", "C7.hwm", "R1.oracle", "R3.selection"] : REQUIRED_ALWAYS;
+  const missing = REQUIRED.filter((b) => !cover.has(b));
   if (missing.length) {
     // A BRANCH WITH NO INPUT IS NOT AN INERT CHECK.
     //
@@ -1028,8 +1142,31 @@ export function checkConsistency(data, app, opts = {}) {
     //
     // So the gate keeps its teeth exactly where they mean something - a board carrying every gateway
     // the repo declares - and reports the same gap as a warning while the board is still filling.
+    //
+    // A BUNDLE WITH NO ROWS AT ALL IS NOT A BOARD THAT IS STILL FILLING - IT IS A BROKEN PROJECTION.
+    //
+    // "Partial" was `publishers < declared`, which is also true of a bundle carrying NO GATEWAYS
+    // WHATSOEVER - so the one input on which every single required branch is unexercised took the
+    // gentle arm and produced no error at all. That is precisely the failure path R2 exists for, and it
+    // was the one input that could not reach it. The suite's own test of it
+    // (`checkConsistency({gateways: []})` must error) had to be marked skipped to stay green, which is
+    // how a skip came to conceal a failing assertion.
+    //
+    // The mid-run argument is about a board that HAS ROWS: fourteen gateways are on it, some have
+    // published and the rest are still on their boxes, and the branches their cells would exercise have
+    // no input yet. A bundle with zero rows is not that. The repo declares gateways, so a projection
+    // that emitted none of them lost every row it was given - nothing about board timing explains that,
+    // and there is nothing to publish either way, so the gate keeps its teeth.
+    //
+    // NOTE the deliberately different quantity on each side: rows ON THE BOARD decides whether this is
+    // a board at all, and matrix PUBLISHERS decides whether it has finished filling. A fresh checkout
+    // (fourteen rows, none benchmarked yet - gen-data emits exactly that, see its "empty is not
+    // undatable" note) is a real board at the start of its life and warns; it does not block a deploy.
+    // And "a check was switched off" no longer depends on any of this: that is caught statically and
+    // unconditionally by lintCoverageWiring, which is the whole point of separating the two facts.
     const declared = declaredGatewayCount();
-    const partial = declared > 0 && matrixPublishers.size < declared;
+    const rowsOnBoard = (data.gateways || []).length;
+    const partial = declared > 0 && rowsOnBoard > 0 && matrixPublishers.size < declared;
     const msg = `R2: coverage - required invariant branch(es) never exercised by this bundle: ${missing.join(", ")}`;
     if (partial) {
       warnings.push(`${msg} - the board carries ${matrixPublishers.size} of ${declared} declared gateways, ` +
@@ -1039,7 +1176,7 @@ export function checkConsistency(data, app, opts = {}) {
     }
   }
 
-  return { errors, warnings, cover, CHECK_BRANCHES, REQUIRED };
+  return { errors, warnings, cover, CHECK_BRANCHES, REQUIRED, REQUIRED_ALWAYS };
 }
 
 /* CLI: node site/check-consistency.mjs [data.json] */
