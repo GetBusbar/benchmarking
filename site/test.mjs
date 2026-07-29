@@ -2264,6 +2264,21 @@ test("#3 CLASS: a MEASURED stream-sustain failure renders differently from an un
   assert.match(bound.note, /rig-limited/);
 });
 
+test("a measured zero's meaning is VISIBLE on the table cell, not only in a hover tooltip", () => {
+  // The 2026-07-28 board rendered rps_sustained_20ms=0 as a bare "0" beside a real maximum, which
+  // reads as "this gateway does nothing". The td writer now prints the short reason under the number.
+  const zeroCeiling = app.metric(sealMetric(0, { gated: true }), String);
+  assert.match(app.metricTd(zeroCeiling), /class=""/);
+  assert.match(app.metricTd(zeroCeiling), /<span class="zero-why">no load held the gate<\/span>/);
+  const zeroFail = app.metric(sealMetric(0, { gated: true, zeroNote: ZERO_MEASURED_FAIL }), String);
+  assert.match(app.metricTd(zeroFail), /<span class="zero-why">measured failure<\/span>/);
+  // A plain zero with no note (e.g. memory growth 0.0) renders bare, exactly as before.
+  const plainZero = app.metric(sealMetric(0, {}), String);
+  assert.ok(!app.metricTd(plainZero).includes("zero-why"), "an unannotated zero stays a bare 0");
+  // And n/a cells are untouched by the writer refactor.
+  assert.match(app.metricTd(app.metric(sealMetric(null, {}), String)), /class="na"/);
+});
+
 test("#2b CLASS: a below-resolution difference renders as ≈0, ranks as 0, and is never a bare n/a", () => {
   // The engine publishes a difference that came out at or under the rig's resolution as
   // {reason:"below_resolution", detail:"..."} in the cell's absences map. That is the BEST result the
@@ -3036,7 +3051,7 @@ test("memory: a WITHHELD plateau verdict is not a negative one - a rig failure i
   assert.match(app.neverPlateauedPill(leakyAll), /on any cell this gateway serves/);
 });
 
-test("memory idle stays OUTSIDE the chooser: median of the cold samples, identical in every mode", () => {
+test("memory idle: one cold-sample median wherever the row shows, and GONE when the row is empty", () => {
   const g = memGw("g", {
     "openai>openai": { idle_rss_mib: 20, steady_state_rss_mib: 100 },
     "openai>gemini": { idle_rss_mib: 24, steady_state_rss_mib: 200 },
@@ -3044,13 +3059,21 @@ test("memory idle stays OUTSIDE the chooser: median of the cold samples, identic
   });
   const i = app.idleAcrossCells(g);
   assert.deepEqual({ median: i.median, min: i.min, max: i.max, n: i.n }, { median: 22, min: 20, max: 24, n: 3 });
+  // Wherever the chosen cell displays, idle is the SAME cross-cell cold median: sampled before the
+  // first request, no cell involved, so it cannot vary by which served cell is chosen.
   const seen = new Set();
-  for (const mode of ["min", "max", "same", "custom"]) {
+  for (const mode of ["min", "max", "same"]) {
     const c = memCol("memidle").get(g, memState([g], { mode }));
     seen.add(c.text);
     assert.match(c.note, /median of 3 cold samples/, "the spread is disclosed, not hidden behind one sample");
   }
-  assert.deepEqual([...seen], ["22.0"], "idle is sampled cold with no cell involved, so it cannot vary by mode");
+  assert.deepEqual([...seen], ["22.0"], "idle is one number wherever it appears");
+  // THE ROW IS ALL-OR-NOTHING (the owner's rule): a chosen cell the gateway does not serve renders a
+  // FULLY empty row. Idle - measured, real, cell-independent - must not survive as one lone number on
+  // an otherwise-empty row: that combo reads as a measured cell with holes, which is the exact shape
+  // the 2026-07-28 board shipped for litellm-rust (idle 251.8, everything else n/a, no pill).
+  const empty = memCol("memidle").get(g, memState([g], { mode: "custom", xlateIn: "gemini", xlateOut: "cohere" }));
+  assert.equal(empty.na, true, "an untested chosen cell empties the WHOLE row, idle included");
 });
 
 test("memory Same defaults to the WIDEST-COVERAGE dialect, computed from the data (no protocol is named)", () => {
@@ -3112,6 +3135,25 @@ test("memory degrades to the LEGACY single-window shape when the bundle has no p
   // The legacy row keeps its own honest caption (it really was measured on a throughput-peak cell).
   assert.match(memCol("tested").render(legacy, st), /peak cell/);
   assert.match(app.memoryCaption(st.data, st).join(" "), /chosen by throughput/);
+});
+
+test("memory: a record with NO displayable value paints NO pill (all-or-nothing, the plano shape)", () => {
+  // plano on the 2026-07-28 board: a served openai>openai cell whose memory window produced nothing -
+  // every envelope null. The pill advertised a measurement over four n/a columns. The pill's contract
+  // is content, not existence: a row is fully measured or fully empty, never a combo.
+  const nothing = { steady_state_rss_mib: null, idle_rss_mib: null, recovered_rss_mib: null,
+    time_to_plateau_s: null, growth_rate_mib_per_min: null, plateaued: null };
+  const g = memGw("g", { "openai>openai": nothing });
+  const st = memState([g], { mode: "same", sameDialect: "openai" });
+  assert.ok(app.chosenMemory(g, st), "the record EXISTS - that is exactly why existence cannot gate the pill");
+  assert.equal(memCol("tested").render(g, st).includes("tested-pill"), false,
+    "a record with no displayable value must not paint a pill");
+  assert.equal(memCol("tested").get(g, st).na, true);
+  assert.equal(memCol("memidle").get(g, st).na, true, "no lone idle number on an otherwise-empty row");
+  // And the same gateway with one real value paints the pill again.
+  const ok = memGw("ok", { "openai>openai": { steady_state_rss_mib: 55 } });
+  const st2 = memState([ok], { mode: "same", sameDialect: "openai" });
+  assert.ok(memCol("tested").render(ok, st2).includes("tested-pill"), "one displayable value restores the pill");
 });
 
 test("memory: an unserved chosen cell reads n/a and nothing is substituted from another cell", () => {
