@@ -92,6 +92,14 @@ C6_GROSS_PCT = 5.0
 SITE_C6_PATH = os.path.join("site", "check-consistency.mjs")
 SITE_C6_RE = re.compile(r"^export const C6_GROSS_PCT\s*=\s*([0-9]+(?:\.[0-9]+)?)\s*;", re.M)
 
+# The engine's own declaration of the field list ABSENCE_CARRYING_FIELDS claims to mirror. Same
+# reasoning as SITE_C6_PATH/SITE_C6_RE just above: this is python parsing a sibling in another
+# language rather than importing it, because there is no build step to share the list through
+# either. See check_absence_fields_mirror_the_engine() for what happens when the two disagree.
+RECORD_RS_PATH = os.path.join("engine", "src", "record.rs")
+RECORD_RS_STRUCTS = {"perf": "CellPerf", "stream": "CellStream", "memory": "CellMemory"}
+_RUST_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
 # A rate this far above its own concurrency is not a proxy measurement.
 #
 # One connection cannot issue 20000 requests per second against a real socket; a number that says so
@@ -414,6 +422,80 @@ def check_c6_bar_agrees_with_the_site():
                f"two gates, one invariant, different bars")
 
 
+def parse_rust_absences(text, struct_name):
+    """The exact field list `struct_name::absences()` walks, read out of record.rs's own
+    `absences_of!(self, ...)` invocation. None when the shape this expects - one
+    `impl <struct_name> { ... absences_of!(self, a, b, c, ...) ... }` block, fields separated by
+    commas, comments allowed between them - is not found. The caller must treat None as a failure,
+    never as agreement: the same rule parse_site_c6's caller follows, and for the same reason. The
+    macro's own argument list has no parentheses in it (only field identifiers and `//` comments), so
+    a non-greedy match up to the first `)` after `absences_of!(self,` is exactly the call's closing
+    paren, not a premature one hiding inside a comment.
+    """
+    m = re.search(rf"impl\s+{re.escape(struct_name)}\s*\{{.*?absences_of!\(\s*self\s*,(.*?)\)",
+                  text or "", re.S)
+    if not m:
+        return None
+    body = re.sub(r"//[^\n]*", "", m.group(1))  # strip line comments before splitting on commas
+    fields = []
+    for tok in body.split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        if not _RUST_IDENT_RE.match(tok):
+            return None  # not a bare identifier - the shape drifted, go blind rather than guess
+        fields.append(tok)
+    return fields
+
+
+def check_absence_fields_mirror_the_engine():
+    """ABSENCE_CARRYING_FIELDS must name EXACTLY the fields `CellPerf`/`CellStream`/`CellMemory`'s own
+    `absences()` walk in the engine - not a superset, not a subset.
+
+    THE HOLE (round-2 audit): the comment above ABSENCE_CARRYING_FIELDS has always claimed it mirrors
+    record.rs "field for field", and nothing checked that claim. Deleting `cpu_fps_concurrency` from
+    the stream list, or `plateaued`/`load_s` from the memory list, left bench-audit_test.py green,
+    because that file's accept-side fixture is GENERATED FROM ABSENCE_CARRYING_FIELDS - it shrinks
+    exactly in step with the list it is meant to be proving against, so a shrunk list always "agrees
+    with itself" and check_declared_fields_are_carried never notices the field it stopped looking
+    for. Only a check that reads the engine's OWN declaration, independent of this file's list, can
+    catch that a field quietly stopped being policed - or that the engine grew one this list never
+    learned about, which is the same hole from the other side: a field the engine now reports
+    absences for, that this audit silently never checks for a bare null.
+
+    Modeled directly on check_c6_bar_agrees_with_the_site (ledger TOOL-02): parse the sibling's
+    declaration rather than importing it, and treat "cannot find the shape expected" as a violation,
+    not a pass. Going blind is a drift, not agreement - the established rule in this file.
+    """
+    p = os.path.join(HERE, RECORD_RS_PATH)
+    try:
+        with open(p) as fh:
+            text = fh.read()
+    except OSError as e:
+        yield (f"absence fields: cannot read the engine's declaration at {RECORD_RS_PATH} ({e}) - "
+               f"an unreadable twin is not an agreeing twin")
+        return
+    for block, struct_name in RECORD_RS_STRUCTS.items():
+        engine_fields = parse_rust_absences(text, struct_name)
+        if engine_fields is None:
+            yield (f"absence fields: {RECORD_RS_PATH} no longer declares "
+                   f"`impl {struct_name} {{ ... absences_of!(self, ...) ... }}` where this can read "
+                   f"it - the cross-check went blind, which is a drift, not a pass")
+            continue
+        engine_set, python_set = set(engine_fields), set(ABSENCE_CARRYING_FIELDS.get(block, []))
+        missing = engine_set - python_set  # the engine carries a field this audit never learned about
+        extra = python_set - engine_set    # this audit polices a field the engine no longer carries
+        if missing:
+            yield (f"absence fields: {struct_name}::absences() carries {sorted(missing)} that "
+                   f"ABSENCE_CARRYING_FIELDS['{block}'] does not - the python list has fallen behind "
+                   f"the engine's own definition of done, and every check built on that list is "
+                   f"silently blind to those field(s)")
+        if extra:
+            yield (f"absence fields: ABSENCE_CARRYING_FIELDS['{block}'] carries {sorted(extra)} that "
+                   f"{struct_name}::absences() does not - the python list is policing field(s) the "
+                   f"engine no longer defines")
+
+
 def check_declaration_matches_what_we_measured(gw):
     """A gateway may not both DECLARE a cell and mark it untestable.
 
@@ -475,8 +557,13 @@ def main():
     for v in check_c6_bar_agrees_with_the_site():
         violations["check_c6_bar_agrees_with_the_site"].append(v)
 
+    # Also board-level: ABSENCE_CARRYING_FIELDS is a property of this file's agreement with the
+    # engine's own record.rs, not of any one cell's data.
+    for v in check_absence_fields_mirror_the_engine():
+        violations["check_absence_fields_mirror_the_engine"].append(v)
+
     print(f"engine {engine[:7]}  {len(snaps)} gateways  {cells} served cells")
-    print(f"{len(CELL_CHECKS)} per-cell invariants + 1 per-gateway + 1 board-level invariant\n")
+    print(f"{len(CELL_CHECKS)} per-cell invariants + 1 per-gateway + 2 board-level invariants\n")
 
     if not violations:
         print("PASS: every invariant held.")
