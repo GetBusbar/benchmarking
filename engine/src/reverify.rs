@@ -275,12 +275,48 @@ pub fn reverify_cell(cfg: &RunConfig, id: &CellId, ingress: Dialect) -> Reverifi
     // two ways to be wrong here are both unacceptable: assuming it is ON yields a refutation drawn
     // from an empty record, and assuming it is OFF leaves recording enabled for every load window
     // that follows. Reporting unchecked, with the reason, is the answer that asserts neither.
-    if let Some(why) = set_recording(cfg, true) {
-        return Reverified::unchecked(format!(
+    //
+    // ONE ENABLE, ONE DISABLE, AND NOTHING RETURNS BETWEEN THEM. The failure is a VALUE from here on,
+    // never a `return`: every way this can go wrong used to leave the function on its own line, and a
+    // gateway that merely timed out on this single request therefore left the recorder ON for its own
+    // load windows and for every cell after it - a slower mock under the rest of the grid, with
+    // nothing in the artifact saying so. `drive_and_read` hands its failures back instead, so the
+    // disable below is the only way out.
+    let outcome = match set_recording(cfg, true) {
+        Some(why) => Err(Reverified::unchecked(format!(
             "the mock's recorder could not be enabled for this cell, so what the gateway emitted upstream was never observed: {why}"
-        ));
+        ))),
+        // The enable answered badly, and a toggle that answered badly may still have TAKEN, so this
+        // arm falls through to the same disable the success path does rather than returning here.
+        None => drive_and_read(cfg, id, ingress),
+    };
+
+    // OFF AGAIN BEFORE ANYTHING ELSE RUNS, including before this function's own return path decides
+    // anything: every load window on this cell happens after this point, and the guarantee they rely
+    // on is that the mock is quiet by the time they start. Unconditional, and the only exit from this
+    // function is past it.
+    let disabled = set_recording(cfg, false);
+    // A recorder that could not be turned back off has left every window that follows measuring a
+    // slower mock, which is a claim about the RIG's state and belongs beside this cell's verdict even
+    // though the verdict itself is sound.
+    if let Some(why) = disabled {
+        eprintln!("reverify: the mock's recorder could not be disabled after {}>{}, so the windows that follow are taken against a recording mock: {why}", ingress.as_str(), egress.as_str());
     }
 
+    match outcome {
+        Ok(state) => verdict(&state, ingress, egress),
+        Err(unchecked) => unchecked,
+    }
+}
+
+/// Drive the one re-verification request and read the recorder back.
+///
+/// SEPARATED SO THE DISABLE CANNOT BE SKIPPED, which is the same reason `parse_state` and `verdict`
+/// above are free functions: what is left in the caller is sequencing, and sequencing with one exit
+/// cannot forget a step. Its caller has turned the mock's recorder ON and owes the run a matching
+/// turn-off, so every failure in here is an `Err(Reverified)` the caller carries PAST that turn-off
+/// rather than a `return` that jumps over it. A new failure mode added here inherits that for free.
+fn drive_and_read(cfg: &RunConfig, id: &CellId, ingress: Dialect) -> Result<MockState, Reverified> {
     // THE SAME REQUEST THE PROBE SENT: same path, same headers, and - the part that was wrong - the
     // same MODEL.
     //
@@ -307,37 +343,20 @@ pub fn reverify_cell(cfg: &RunConfig, id: &CellId, ingress: Dialect) -> Reverifi
         REVERIFY_TIMEOUT,
     );
     if let Some(why) = control_failed(driven) {
-        return Reverified::unchecked(format!(
+        return Err(Reverified::unchecked(format!(
             "the re-verification request to the gateway produced no answer, so nothing was driven upstream to observe: {why}"
-        ));
+        )));
     }
 
-    let read = http::get(cfg.mock_addr, "/__mock/state", &[], REVERIFY_TIMEOUT);
-    // OFF AGAIN BEFORE ANYTHING ELSE RUNS, including before this function's own return path decides
-    // anything: every load window on this cell happens after this point, and the guarantee they rely
-    // on is that the mock is quiet by the time they start.
-    let disabled = set_recording(cfg, false);
-    let state = match read {
-        Outcome::Response(r) => match parse_state(r.body()) {
-            Ok(s) => s,
-            Err(e) => {
-                return Reverified::unchecked(format!("the mock's recorder could not be read: {e}"))
-            }
-        },
-        other => {
-            return Reverified::unchecked(format!(
-                "the mock's recorder could not be read: {}",
-                control_failed(other).unwrap_or_else(|| "no response".to_string())
-            ))
-        }
-    };
-    // A recorder that could not be turned back off has left every window that follows measuring a
-    // slower mock, which is a claim about the RIG's state and belongs beside this cell's verdict even
-    // though the verdict itself is sound.
-    if let Some(why) = disabled {
-        eprintln!("reverify: the mock's recorder could not be disabled after {}>{}, so the windows that follow are taken against a recording mock: {why}", ingress.as_str(), egress.as_str());
+    match http::get(cfg.mock_addr, "/__mock/state", &[], REVERIFY_TIMEOUT) {
+        Outcome::Response(r) => parse_state(r.body()).map_err(|e| {
+            Reverified::unchecked(format!("the mock's recorder could not be read: {e}"))
+        }),
+        other => Err(Reverified::unchecked(format!(
+            "the mock's recorder could not be read: {}",
+            control_failed(other).unwrap_or_else(|| "no response".to_string())
+        ))),
     }
-    verdict(&state, ingress, egress)
 }
 
 /// Turn the mock's recorder on or off, returning why it could not be done.
@@ -593,6 +612,96 @@ mod tests {
         // And it never touched the network: the mock address above is a dead port, so a check that
         // tried to reach it would have come back with a connection failure in the note instead.
         assert!(!note.contains("connection"), "{note}");
+    }
+
+    // A minimal stand-in for the mock's control plane: tracks whether `/__mock/record` last turned
+    // recording on or off, and answers `/__mock/reset` and `/__mock/state` well enough for
+    // `reverify_cell` to drive its whole sequence against it. No `Content-Length` framing subtlety
+    // beyond what `reverify_cell` itself sends, since this is standing in for the mock, not testing
+    // this client's HTTP parsing (that is `http.rs`'s own job).
+    fn fake_mock(recording: std::sync::Arc<std::sync::atomic::AtomicBool>) -> std::net::SocketAddr {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        let l = TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral port to pick one");
+        let addr = l.local_addr().expect("addr");
+        std::thread::spawn(move || {
+            for c in l.incoming() {
+                let Ok(mut c) = c else { continue };
+                let recording = std::sync::Arc::clone(&recording);
+                std::thread::spawn(move || {
+                    let mut buf = Vec::new();
+                    let mut chunk = [0u8; 4096];
+                    // Read until the head/body this test ever sends has fully arrived: reset and
+                    // record bodies are a handful of bytes, so one read is enough in practice, but
+                    // loop for robustness against a split read.
+                    loop {
+                        match c.read(&mut chunk) {
+                            Ok(0) => break,
+                            Ok(n) => {
+                                buf.extend_from_slice(&chunk[..n]);
+                                if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                                    break;
+                                }
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                    let text = String::from_utf8_lossy(&buf);
+                    let first_line = text.lines().next().unwrap_or("");
+                    let body = text.rsplit("\r\n\r\n").next().unwrap_or("");
+                    let json = if first_line.contains("/__mock/record") {
+                        recording.store(body.contains("\"on\":true"), std::sync::atomic::Ordering::SeqCst);
+                        "{}".to_string()
+                    } else if first_line.contains("/__mock/reset") {
+                        "{}".to_string()
+                    } else if first_line.contains("/__mock/state") {
+                        format!(
+                            "{{\"recording\":{},\"dialects\":{{}}}}",
+                            recording.load(std::sync::atomic::Ordering::SeqCst)
+                        )
+                    } else {
+                        "{}".to_string()
+                    };
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+                        json.len(),
+                        json
+                    );
+                    let _ = c.write_all(resp.as_bytes());
+                });
+            }
+        });
+        addr
+    }
+
+    // THE DEFECT THIS PINS: if the single re-verification request to the GATEWAY fails (here,
+    // nothing is listening on the gateway address at all, the cheapest way to force
+    // `control_failed` to fire on the send at reverify.rs:302-308), `reverify_cell` returns early at
+    // line 309-313 without ever reaching the `set_recording(cfg, false)` call at line 319. The
+    // recorder the mock was told to turn ON at line 278 is left ON, so every load window the suite
+    // runs on this cell (and any cell after it, until some later re-verify happens to succeed) is
+    // measured against a recording - and therefore slower - mock.
+    #[test]
+    fn a_failed_gateway_request_must_not_leave_the_mocks_recorder_on() {
+        let recording = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mock_addr = fake_mock(std::sync::Arc::clone(&recording));
+        // Nothing listens here: the gateway leg of the re-verification request fails to connect,
+        // which is `control_failed`'s cheapest, fastest-to-trigger branch.
+        let dead_gateway: std::net::SocketAddr = "127.0.0.1:1".parse().expect("literal");
+        let cfg = crate::run::test_fixture(dead_gateway, mock_addr);
+
+        let v = reverify_cell(&cfg, &CellId::new("openai", "anthropic"), Dialect::Openai);
+
+        assert_eq!(
+            v.verified, None,
+            "an unreachable gateway must not be published as a failed translation"
+        );
+        assert!(
+            !recording.load(std::sync::atomic::Ordering::SeqCst),
+            "the mock's recorder must be turned back OFF once the re-verification request to the \
+             gateway fails, so every load window that follows measures against a quiet mock; it is \
+             still ON"
+        );
     }
 
     // An unreachable mock is a rig fault. It must not be published as the gateway failing to
