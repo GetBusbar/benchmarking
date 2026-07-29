@@ -227,6 +227,18 @@ function stripRigPaths(s) {
   return String(s || "").replace(RIG_PATH_RE, "<rig path>");
 }
 
+/* STATUS_LABEL: the SHORT cell label for a served-flag that is a TOKEN rather than a boolean.
+   `stream_served` publishes `true`, any of the engine's Absent tokens as a string, "not_probed", and
+   `false` only as a legacy parse-only value (record.rs). Those tokens are machine vocabulary: the badge
+   renders the token's MEANING and the full sentence rides on the tooltip (METRIC_NOTES, the same
+   vocabulary the envelope reasons render through), because a raw `search_exhausted` on a public board is
+   a leak of our own field names, not a disclosure. A token this table does not know renders as "not
+   available" - which claims nothing - rather than as a guess at which of "never ran" or "refused" it is. */
+const STATUS_LABEL = {
+  not_measured: "not measured", not_probed: "not measured", not_served: "not served",
+  untestable: "not testable", rig_limited: "rig-limited", search_exhausted: "search exhausted",
+  harness_error: "harness error", below_resolution: "below resolution",
+};
 /* naText: compact honest label for a lane that was not served. The suites emit
    long diagnostic notes (passthrough evidence, launch errors); those must never
    be dumped as metric values or they blow the table layout wide open. The cell
@@ -236,6 +248,17 @@ function naText(j, flag, errKey) {
   if (!j) return { text: "not measured", note: "" };
   const note = stripRigPaths(j[errKey] || j.serve_error || "");
   let text = "not served";
+  // A REFUSAL AND A LANE THAT NEVER RAN ARE DIFFERENT FINDINGS AND MUST NOT SHARE A LABEL.
+  //
+  // The served flag is not a boolean on every lane: StreamServed is `true`, `false`, or a STATUS TOKEN
+  // ("not_measured", "not_probed", "untestable" - record.rs), and the recovered 2026-07-29 snapshots
+  // carry seven cells of exactly that. Every non-true value used to fall through to "did not stream",
+  // which asserts a MEASURED refusal - the gateway was offered stream load and framed none - about
+  // cells the harness never offered anything to. That is the compare table making an accusation out of
+  // a gap in its own coverage, and the two read identically on a screenshot.
+  const status = j[flag];
+  if (typeof status === "string")
+    return { text: STATUS_LABEL[status] || "not available", note: note || METRIC_NOTES[status] || "" };
   // A lane the gateway never CLAIMED (manifest declares the capability 0, with a cited note) is
   // "not declared", never a failure - same rule as the matrix capability grid.
   if (j.xlate_declared === false) text = "not declared";
@@ -257,9 +280,20 @@ function naText(j, flag, errKey) {
 
 /* laneVal: if the suite file exists but the served flag is false, surface a
    compact label (full note in .note); if the file is absent, "not measured". */
+/* laneServed(j, flag): did this lane actually serve? Only `true` is served. `false` and every STATUS
+   TOKEN the producer can put there (StreamServed's "not_measured" / "not_probed" / "untestable") are
+   not, and each keeps its own wording through naText - reading "anything that is not literally false"
+   as served is what let an unprobed cell render as a measured streaming refusal. A flag the record does
+   not carry at all is treated as served: the legacy per-suite records predate the flag, and demoting
+   them would turn every one of their published numbers into an n/a. */
+function laneServed(j, flag) {
+  if (!j) return false;
+  const v = j[flag];
+  return v == null ? true : v === true;
+}
 function lane(g, suite, flag, errKey, pick) {
   const j = g[suite];
-  if (!j || j[flag] === false) {
+  if (!laneServed(j, flag)) {
     const na = naText(j, flag, errKey);
     return { v: null, text: na.text, note: na.note, na: true };
   }
@@ -292,6 +326,12 @@ const METRIC_NOTES = {
   search_exhausted: "not shown: the search ran off the end of its range still improving, so any number would be a lower bound, not a ceiling",
   harness_error: "not shown: the harness itself failed here; this says nothing about the gateway",
   not_served: "the gateway does not serve this pairing",
+  // NOT an absence and NOT a suppression: a PUBLISHED number that also carries what the comparison
+  // against the mock found. The mock paces its stream deltas at a fixed interval, so its frames/sec is
+  // a target it was told to produce; a gateway that lands on it kept up, which is the best outcome the
+  // test can express - but it is a different statement from a number proven to sit below the rig's own
+  // ceiling, and the bundle used to publish the two identically (seal.mjs PACED_MATCH).
+  paced_match: "matched the harness's paced upstream: the gateway kept up with the rate the mock was told to produce (not a proven-unbounded reading)",
 };
 function noteText(tok) { return (tok && METRIC_NOTES[tok]) || tok || ""; }
 /* The SHORT on-cell form of a measured zero's meaning, rendered under the number in the table so the
@@ -327,15 +367,31 @@ function metric(env, fmt = fmtInt) {
     // cell gets. The engine's detail carries the evidence ("0 ok, 14201 fail" - one-api's c=1 leg
     // after the restart bug; "no stream frame arrived"), and the cell shows the digits so a
     // screenshot proves the measurement ran and the gateway failed it.
+    // ONLY when the detail blames THE GATEWAY'S OWN LEG. The engine emits the identical sentence
+    // shape for the direct-to-mock leg ("the direct-to-mock leg at c=1 was not clean: 0 ok, N
+    // fail"), which is OUR reference rig failing, not the gateway - painting that red would accuse
+    // the gateway of a failure it never had. A rig-side total failure renders as a plain n/a with
+    // the full detail on the tooltip.
     const detail = env && env.detail;
-    const okFail = detail && /(\d+) ok, (\d+) fail/.exec(detail);
+    const okFail = detail && /the gateway leg.*?(\d+) ok, (\d+) fail/.exec(detail);
     if (okFail && Number(okFail[1]) === 0 && Number(okFail[2]) > 0)
       return { v: null, text: `failed · 0/${fmtInt(Number(okFail[2]))}`, na: true, failed: true, note: detail, env };
-    if (detail && /no stream frame arrived/.test(detail))
+    if (detail && /no stream frame arrived from the gateway/.test(detail))
       return { v: null, text: "failed · 0 frames", na: true, failed: true, note: detail, env };
     return { v: null, text: "n/a", na: true, note: detail || noteText(env && env.reason), env: env || null };
   }
-  return { v: env.value, text: fmt(env.value), na: false, note: noteText(env.note), env };
+  // A CERTIFIED NUMBER CAN CARRY MORE THAN ONE THING WORTH SAYING, so the note is composed rather than
+  // being whichever single token the envelope happened to have: the zero's meaning, the paced-match
+  // signal, and (on the legacy fallback rows) a provenance stamp OF ITS OWN when this number came out
+  // of a different run than the record around it - cpu_fps is measured by the streamcpu suite while its
+  // record is stamped by the stream suite, and dating it to the wrong run is a claim, not a formatting
+  // detail. Each is rendered only when the envelope actually carries it.
+  const notes = [];
+  if (env.note) notes.push(noteText(env.note));
+  if (env.paced_match === true) notes.push(noteText("paced_match"));
+  if (env.source && (env.source.build || env.source.measured_at))
+    notes.push(`from a separate run than the rest of this record: build ${env.source.build || "?"}, measured ${env.source.measured_at || "?"}`);
+  return { v: env.value, text: fmt(env.value), na: false, note: notes.join(" · "), env };
 }
 // mval: the bare displayable value of an envelope (null when suppressed/absent). For arithmetic
 // (deltas, best-of ranking) where only the number matters. Never returns a suppressed number.
@@ -709,7 +765,8 @@ function xlateCell(g, key, fmt) {
 // the matrix cell's sealed .perf (metrics at top, no path/source — the caller stamps dialects).
 function chooserCellPerf(g, st = state) {
   if (st.mode === "peak") return g.best_cell || null;
-  const [ingress, egress] = st.mode === "same" ? [st.sameDialect, st.sameDialect] : [st.xlateIn, st.xlateOut];
+  const [ingress, egress] = chooserDialects(g, st);
+  if (ingress == null) return null;
   const perf = xlateMatrixCell(g, ingress, egress);
   return perf ? stampChosen(perf, g, ingress, egress, "") : null;
 }
@@ -732,6 +789,15 @@ function stampChosen(rec, g, ingress, egress, lane = "") {
 // The (ingress, egress) dialects the chosen cell is measured on — used for the pill/labels + the popup.
 function chooserDialects(g, st = state) {
   if (st.mode === "peak") { const d = g.best_cell ? g.best_cell.path.dialect : null; return d ? [d, d] : [null, null]; }
+  // MEMORY'S MIN/MAX NAME A CELL ONLY THROUGH THE MEMORY CHOOSER'S OWN PICK. Before this branch they
+  // fell into the Custom arm below and every other lane (drawer perf/stream, compare, the sweep
+  // charts) silently rendered the STALE xlateIn/xlateOut pair - a cell the user never chose - while
+  // lanePathNote captioned it as "the lowest steady-state cell the table shows".
+  if (st.mode === "min" || st.mode === "max") {
+    const m = chosenMemory(g, st);
+    const p = m && m.path;
+    return p ? [p.ingress ?? p.dialect ?? null, p.egress ?? p.dialect ?? null] : [null, null];
+  }
   return st.mode === "same" ? [st.sameDialect, st.sameDialect] : [st.xlateIn, st.xlateOut];
 }
 // A perf-metric cell for the chosen cell. Reads the sealed envelope through metric(); a suppressed/absent
@@ -838,7 +904,7 @@ const COL_NAME = {
   get: (g) => ({ v: g.display.toLowerCase(), text: null, na: false }),
   render: (g, st = state) => {
     const a = g.repo
-      ? `<a href="${g.repo}" target="_blank" rel="noopener">${esc(g.display)}</a>`
+      ? `<a href="${esc(g.repo)}" target="_blank" rel="noopener">${esc(g.display)}</a>`
       : esc(g.display);
     // No per-row date: the board is one atomic run (matrix-sole-source = one source of truth), so
     // every gateway shares a single timestamp — the board-wide "last benchmarked" (roster tab + home)
@@ -896,9 +962,18 @@ const LANE_TESTED_NOSORT = new Set(["memory"]);
    and all data must be reported, or this cell wasn't tested and empty is expected. Not a combo." A
    record whose every envelope is empty (plano's memory cells on the 2026-07-28 board: an OpenAI pill
    over four n/a columns) must not advertise a measurement it does not have. */
+// Envelope keys NO surface displays as a column or drawer metric. They must not satisfy the
+// all-or-nothing test: a record whose only value is the harness's own direct-leg reading, or a
+// plateau timing no column renders, would otherwise paint a pill (and keep idle alive) over a row
+// whose every VISIBLE cell reads n/a - the plano shape back through a side door.
+const UNDISPLAYED_ENVELOPE_KEYS = new Set([
+  "time_to_plateau_s", "direct_c1_p99_us", "gateway_c1_p99_us",
+  "gateway_c1_samples", "direct_c1_samples", "peak_rss_hwm_mib",
+]);
 function recordShowsValues(rec) {
   if (!rec || typeof rec !== "object") return false;
-  return Object.values(rec).some((v) => isEnvelope(v) && !metric(v).na);
+  return Object.entries(rec).some(([k, v]) =>
+    !UNDISPLAYED_ENVELOPE_KEYS.has(k) && isEnvelope(v) && !metric(v).na);
 }
 function colTested(lane) {
   const pick = LANE_RECORD[lane];
@@ -1060,10 +1135,17 @@ const COLUMN_SETS = {
       title: () => (hasPerCellMemory()
         ? "RSS across one process lifecycle on the chosen cell: cold idle → load run to steady state → recovery."
         : `RSS across the memory window on one process lifecycle: ${memWindowLabel(boardMemWindows().idle)} cold idle → fixed load on the peak cell → ${memWindowLabel(boardMemWindows().recovery)} recovery`),
-      get: (g, st = state) => { const m = memoryFor(g, st); return { v: null, text: "", na: !(m && Array.isArray(m.rss_series) && m.rss_series.length >= 2) }; },
+      // ALL-OR-NOTHING, like every other memory column: a record whose every envelope is empty must
+      // not keep a live sparkline as the one surviving cell on an otherwise-n/a row - the raw
+      // rss_series is not a sealed metric, so without this guard it outlived the rule.
+      get: (g, st = state) => {
+        const m = memoryFor(g, st);
+        const shows = recordShowsValues(m) && Array.isArray(m.rss_series) && m.rss_series.length >= 2;
+        return { v: null, text: "", na: !shows };
+      },
       render: (g, st = state) => {
         const m = memoryFor(g, st);
-        const spark = m ? rssSparkline(m.rss_series) : "";
+        const spark = m && recordShowsValues(m) ? rssSparkline(m.rss_series) : "";
         return spark ? `<td class="memcurve">${spark}</td>` : `<td class="memcurve na">n/a</td>`;
       } },
   ],
@@ -1078,6 +1160,26 @@ function txt(x) { return typeof x === "function" ? String(x() ?? "") : String(x 
 function columnsFor(view, data = (typeof state !== "undefined" ? state.data : null)) {
   const cols = COLUMN_SETS[view] || COLUMN_SETS.performance;
   return hasPerCellMemory(data) ? cols : cols.filter((c) => !c.perCellOnly);
+}
+/* rowComparator(col, desc): the roster's row order for one column and one direction.
+   THE NAME TIEBREAK IS NOT PART OF WHAT THE READER ASKED TO REVERSE. Toggling a column to descending
+   reverses the RANKING; it does not mean "and also reverse the alphabet". The direction used to be
+   applied to the whole comparison, so every group of equal-valued rows flipped its name order too - and
+   on a column with dense ties (two gateways both below resolution, a lane where several rows read the
+   same round number) the table visibly reshuffled rows whose values had not changed at all. Direction
+   decides the value comparison; the name tiebreak is always ascending, so a tie sits still.
+   Missing values always sink to the bottom, in both directions: an absent reading is not a low score. */
+function rowComparator(col, desc) {
+  return (a, b) => {
+    const va = col.get(a).v, vb = col.get(b).v;
+    const byName = a.display.localeCompare(b.display);
+    if (va === null && vb === null) return byName;
+    if (va === null) return 1;
+    if (vb === null) return -1;
+    const cmp = typeof va === "string" ? va.localeCompare(vb) : va - vb;
+    if (cmp === 0) return byName;
+    return desc ? -cmp : cmp;
+  };
 }
 /* Every column id across all tabs - used to validate a sort id coming from a shared URL. */
 const ALL_COLUMN_IDS = new Set(Object.values(COLUMN_SETS).flat().map((c) => c.id));
@@ -1792,14 +1894,7 @@ function renderTable() {
   if (count) count.textContent = `${rows.length} of ${data.gateways.length}`;
 
   const col = cols.find((c) => c.id === state.sortCol) || cols.find((c) => c.id === VIEW_SORT[view]) || cols[3];
-  rows = rows.slice().sort((a, b) => {
-    const va = col.get(a).v, vb = col.get(b).v;
-    if (va === null && vb === null) return a.display.localeCompare(b.display);
-    if (va === null) return 1; /* missing values always sink to the bottom */
-    if (vb === null) return -1;
-    if (typeof va === "string") return state.sortDesc ? vb.localeCompare(va) : va.localeCompare(vb);
-    return state.sortDesc ? vb - va : va - vb;
-  });
+  rows = rows.slice().sort(rowComparator(col, state.sortDesc));
 
   tbody.innerHTML = rows.map((g) =>
     `<tr data-gw="${esc(g.key)}">` + cols.map((c) => {
@@ -1811,12 +1906,15 @@ function renderTable() {
       return metricTd(c.get(g), sc);
     }).join("") + "</tr>"
   ).join("");
-  // Empty-state line: a pinned translation pair no gateway serves (or filters that clear the
-  // table) must never render as a bare header over nothing.
+  // Empty-state line: filters that clear the table must never render as a bare header over nothing.
+  // There is no "no gateway serves this pair" case to branch on. `view` is coerced to a TABLE_VIEWS
+  // member at the top of this function, and "translation" is not one - it was retired when the pinned
+  // pair became a chooser MODE rather than a tab, so that arm had been unreachable ever since. A branch
+  // that cannot be taken is not a safety net; it is a claim about the UI that stopped being true, and
+  // the rows are unfiltered by the chosen cell anyway: a gateway that does not serve the pinned pair
+  // stays on the board reading n/a, deliberately, so the table can never be emptied by the chooser.
   if (!rows.length) {
-    tbody.innerHTML = `<tr><td colspan="${cols.length}" class="na">${
-      view === "translation" ? "No gateway serves this pair on this rig." : "No gateways match the current filters."
-    }</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="${cols.length}" class="na">No gateways match the current filters.</td></tr>`;
   }
 
   thead.querySelectorAll("th").forEach((th) => {
@@ -1989,7 +2087,7 @@ function drawerHtml(g) {
   // the same per-gateway signal the table row shows (independent update cadences, made honest).
   const badge = measuredBadge(g);
   let h = `<header class="drawer-head">
-    <h3>${g.repo ? `<a href="${g.repo}" target="_blank" rel="noopener">${esc(g.display)}</a>` : esc(g.display)}</h3>
+    <h3>${g.repo ? `<a href="${esc(g.repo)}" target="_blank" rel="noopener">${esc(g.display)}</a>` : esc(g.display)}</h3>
     <div class="chips"><span class="cls-chip">${esc(g.cls || "Gateway")}</span>
     <span class="lang-chip" style="background:${langC}">${esc(g.lang)}</span></div>
     ${badge ? `<div class="drawer-measured">${badge}</div>` : ""}
@@ -2007,11 +2105,13 @@ function drawerHtml(g) {
     const j = laneRecord(l, g);
     h += `<section class="drawer-lane"><h4>${esc(l.label)}</h4>`;
     if (!j) h += `<p class="muted">not measured</p>`;
-    else if (j[l.flag] === false) {
+    else if (!laneServed(j, l.flag)) {
       // A multi-line diagnostic (e.g. a captured stack trace) must not dump ~25 raw lines into
       // the drawer: show the first line as the verdict, fold the rest into a collapsed Evidence
       // block, and scrub absolute rig paths (harness noise, not evidence).
-      const note = stripRigPaths(j[l.err] || "not served");
+      // The fallback headline comes from naText, not from the literal "not served": with no error note
+      // to show, a lane the harness never probed would otherwise announce a refusal it never observed.
+      const note = stripRigPaths(j[l.err] || "") || naText(j, l.flag, l.err).text;
       const nl = note.indexOf("\n");
       const head = nl >= 0 ? note.slice(0, nl) : note;
       const rest = nl >= 0 ? note.slice(nl + 1).trim() : "";
@@ -2024,10 +2124,17 @@ function drawerHtml(g) {
       if (pn) h += `<p class="lane-note muted">${esc(pn)}</p>`;
       // Each metric is a sealed envelope; metric() reads it (a suppressed metric is absent, reads nothing
       // here since we filter na). The operating concurrency travels INSIDE the envelope (env.concurrency).
-      h += `<dl>` + l.metrics.map((m) => ({ m, c: metric(j[m.k], m.fmt) })).filter((x) => !x.c.na).map(({ m, c }) => {
+      // A MEASURED FAILURE stays a row (red, with its counts) rather than vanishing with the
+      // genuinely-absent metrics, and a measured zero carries its short reason - the drawer must
+      // tell the same story the table does, or the two surfaces disagree about the same envelope.
+      h += `<dl>` + l.metrics.map((m) => ({ m, c: metric(j[m.k], m.fmt) })).filter((x) => !x.c.na || x.c.failed).map(({ m, c }) => {
+        if (c.failed)
+          return `<div><dt>${esc(txt(m.label))}</dt><dd class="failtext" title="${esc(c.note || "")}">${esc(c.text)}</dd></div>`;
         const conc = c.env && c.env.concurrency;
         const cc = conc != null && c.v > 0 ? ` (@ c=${fmtInt(conc)})` : "";
-        return `<div><dt>${esc(txt(m.label))}</dt><dd>${esc(c.text + cc)}</dd></div>`;
+        const zeroWhy = c.v === 0 && c.env && ZERO_WHY[c.env.note];
+        return `<div><dt>${esc(txt(m.label))}</dt><dd${c.note ? ` title="${esc(c.note)}"` : ""}>${esc(c.text + cc)}${
+          zeroWhy ? ` <span class="muted">(${esc(zeroWhy)})</span>` : ""}</dd></div>`;
       }).join("") + `</dl>` + (l.extra ? l.extra(j) : "") + `${laneStamp(j)}`;
     }
     h += `</section>`;
@@ -2164,19 +2271,24 @@ function renderCompareBar() {
   });
 }
 
+/* bestIndex(vals, best): the indices of the best value in a compare row - EVERY index holding it, not
+   the first one to reach it. A tie is a tie: two gateways both below resolution on a metric both rank
+   as 0, which is the same reading, and highlighting only the leftmost of them draws a distinction the
+   measurement explicitly says it cannot make. Returns a Set (empty when there is no contest to call). */
 function bestIndex(vals, best) {
   // best == null means the row is EVIDENCE, not a contest: direct_c1_p99_us is the harness's own
   // direct-to-mock leg, a property of the rig rather than of any gateway, so crowning a "winner" on it
   // would invent a ranking out of measurement noise on a baseline every row shares. Without this the
   // `best === "min" ? ... : ...` ternary would silently fall through to max and highlight one anyway.
-  if (best == null) return -1;
-  let bi = -1;
-  vals.forEach((v, i) => {
-    if (v == null) return;
-    if (bi < 0 || (best === "min" ? v < vals[bi] : v > vals[bi])) bi = i;
-  });
+  const none = new Set();
+  if (best == null) return none;
+  const present = vals.filter((v) => v != null);
   /* only highlight when there is an actual contest */
-  return vals.filter((v) => v != null).length >= 2 ? bi : -1;
+  if (present.length < 2) return none;
+  const win = best === "min" ? Math.min(...present) : Math.max(...present);
+  const winners = new Set();
+  vals.forEach((v, i) => { if (v != null && v === win) winners.add(i); });
+  return winners;
 }
 
 function renderCompare() {
@@ -2210,21 +2322,28 @@ function renderCompare() {
     if (l.pathNote) {
       /* one disclosure row per canonical lane: WHICH path each gateway's numbers measured */
       h += `<tr><td class="metric">Measured path</td>` + recs.map((j) =>
-        j && j[l.flag] !== false
+        laneServed(j, l.flag)
           ? `<td class="muted lane-note">${esc(lanePathNote(l, j))}</td>`
           : `<td class="na"></td>`).join("") + `</tr>`;
     }
     for (const m of l.metrics) {
-      // Each metric is a sealed envelope; mval() is its displayable value (null when suppressed/absent).
-      const vals = recs.map((j) => (j && j[l.flag] !== false ? mval(j[m.k]) : null));
-      const bi = bestIndex(vals, m.best);
-      h += `<tr><td class="metric">${esc(txt(m.label))}</td>` + vals.map((v, i) => {
-        if (v == null) {
-          const j = recs[i];
-          const na = j && j[l.flag] !== false ? { text: "n/a", note: "" } : naText(j, l.flag, l.err);
+      // Each metric is a sealed envelope, read through the SAME metric() accessor the table uses -
+      // routing this surface through mval() alone collapsed the states the table renders apart: a
+      // measured failure showed as a bare n/a with no evidence, below-resolution's ≈0 showed as a
+      // plain 0, and a suppressed metric's reason vanished. Ranking still uses mval() (failed and
+      // absent rank as nothing; below-resolution ranks as 0).
+      const cells = recs.map((j) => (laneServed(j, l.flag) ? metric(j[m.k], m.fmt) : null));
+      const bi = bestIndex(cells.map((c) => (c ? c.v : null)), m.best);   // a Set: every tied best
+      h += `<tr><td class="metric">${esc(txt(m.label))}</td>` + cells.map((c, i) => {
+        if (!c || c.na) {
+          if (c && c.failed) return `<td class="na failcell" title="${esc(c.note || "")}">${esc(c.text)}</td>`;
+          if (c) return `<td class="na" title="${esc(c.note || "")}">${esc(c.text)}</td>`;
+          const na = naText(recs[i], l.flag, l.err);
           return `<td class="na" title="${esc(na.note)}">${esc(na.text)}</td>`;
         }
-        return `<td class="${i === bi ? "best" : ""}">${esc(m.fmt(v))}</td>`;
+        const zeroWhy = c.v === 0 && c.env && ZERO_WHY[c.env.note];
+        return `<td class="${bi.has(i) ? "best" : ""}"${c.note ? ` title="${esc(c.note)}"` : ""}>${esc(c.text)}${
+          zeroWhy ? `<span class="zero-why">${esc(zeroWhy)}</span>` : ""}</td>`;
       }).join("") + `</tr>`;
     }
   }
@@ -2333,18 +2452,18 @@ function cellPopFull(g, ingress, egress) {
   // Read the SAME gated values the tables read, by pinning a synthetic Custom-mode state on this cell.
   const st = { mode: "custom", xlateIn: ingress, xlateOut: egress };
   const rows = [];
-  const perfRow = (key, fmt, lbl) => {
-    const c = chooserPerfCell(g, key, fmt, st);
+  // A MEASURED FAILURE IS A ROW, not a filtered-out absence: dropping it left a popup claiming
+  // "served, not measured on this cell" over a cell whose every metric was measured and failed.
+  const pushRow = (lbl, c) => {
     if (!c.na) rows.push(`<div><span>${lbl}</span><b>${esc(c.text)}</b></div>`);
+    else if (c.failed) rows.push(`<div><span>${lbl}</span><b class="failtext" title="${esc(c.note || "")}">${esc(c.text)}</b></div>`);
   };
+  const perfRow = (key, fmt, lbl) => pushRow(lbl, chooserPerfCell(g, key, fmt, st));
   perfRow("added_latency_p50_us", fmtAdded, "Added latency p50");
   perfRow("added_latency_p99_us", fmtAdded, "Added latency p99");
   perfRow("rps_sustained_20ms", fmtInt, "Sustained @20ms");
   perfRow("rps_max_proxy", fmtInt, "Max proxy RPS");
-  const streamRow = (key, fmt, lbl) => {
-    const c = chooserStreamCell(g, key, fmt, st);
-    if (!c.na) rows.push(`<div><span>${lbl}</span><b>${esc(c.text)}</b></div>`);
-  };
+  const streamRow = (key, fmt, lbl) => pushRow(lbl, chooserStreamCell(g, key, fmt, st));
   streamRow("added_ttft_p99_us", fmtUsMs, "Added TTFT p99");
   streamRow("streams_sustained", fmtInt, "Streams sustained");
   const perfBlock = rows.length
@@ -2437,7 +2556,7 @@ function renderMatrix() {
     if (t.unprobed) bits.push(`${t.unprobed} unprobed (auth)`);
     return `<section class="matrix-gw">
       <header class="matrix-gw-head"><h3>${
-        g.repo ? `<a href="${g.repo}" target="_blank" rel="noopener">${esc(g.display)}</a>` : esc(g.display)
+        g.repo ? `<a href="${esc(g.repo)}" target="_blank" rel="noopener">${esc(g.display)}</a>` : esc(g.display)
       }</h3><span class="muted">${bits.join(" · ")}</span></header>
       <div class="table-scroll matrix-table"><table>
         <thead><tr><th class="axis">ingress &#8595; \\ upstream &#8594;</th>${
@@ -2780,7 +2899,7 @@ function renderGateways() {
   tbody.innerHTML = rows.map((g) => {
     const c = LANG_COLORS[g.lang] || LANG_COLORS.Other;
     const name = g.repo
-      ? `<a href="${g.repo}" target="_blank" rel="noopener">${esc(g.display)}</a>`
+      ? `<a href="${esc(g.repo)}" target="_blank" rel="noopener">${esc(g.display)}</a>`
       : esc(g.display);
     const stars = fmtStars(g.stars);
     const build = gatewayBuild(g);
@@ -2902,6 +3021,9 @@ function renderCatNav() {
 
 function showView(view) {
   state.view = view;
+  // Memory's data-derived Same default is seeded on ARRIVAL at memory, not once globally at boot, so
+  // the other tabs keep the dialect default they declare (see seedMemorySameDialect).
+  seedMemorySameDialect();
   // The chooser mode travels with the reader across tabs, but the tabs do not offer the same modes: Peak
   // is meaningless (and dishonest) on memory, Min/Max are meaningless on the perf lanes. Coerce on arrival
   // so the segmented control and the numbers can never disagree about which mode is active.
@@ -2947,19 +3069,30 @@ function applyState(st) {
   });
 }
 
+/* seedMemorySameDialect(): seed the Same dialect from the DATA - the identity cell the most gateways
+   serve - FOR THE TAB THAT ASKS FOR IT. Memory's Same mode defaults to it (only Same/Custom are
+   like-for-like, so the default has to be the cell the widest slice of the field can actually be
+   compared on), and it is computed, never named: no protocol is special-cased anywhere in this engine.
+   A ?d= in the URL wins.
+
+   IT IS A MEMORY-TAB DEFAULT, SO IT IS SEEDED FOR THE MEMORY TAB. Seeding it for the whole state at
+   boot meant a deep link into performance or streaming - tabs that share this one dialect field and
+   whose own default is the declared one, which is exactly why syncUrl only omits ?d= on memory - had
+   its dialect silently rewritten from the data before it rendered a single row. The seed now happens on
+   arrival at memory (and at boot when memory IS the arrival tab), so a tab gets the default it declares
+   rather than another tab's. */
+function seedMemorySameDialect() {
+  if (state.view !== "memory" || state.sameDialectPinned || !state.data) return;
+  const w = widestDialect(state.data);
+  if (w) state.sameDialect = w;
+}
+
 /* Drop selections that reference gateways no longer in data.json (removed
    entrants linger in shared URLs); a shrunken compare set must not leave the
    panel open on a partial table. */
 function sanitizeState() {
   const gws = state.data.gateways;
-  /* Seed the Same dialect from the DATA: the identity cell the most gateways serve. Memory's Same mode
-     defaults to it (only Same/Custom are like-for-like, so the default has to be the cell the widest slice
-     of the field can actually be compared on), and it is computed, never named - no protocol is
-     special-cased anywhere in this engine. A ?d= in the URL wins. */
-  if (!state.sameDialectPinned) {
-    const w = widestDialect(state.data);
-    if (w) state.sameDialect = w;
-  }
+  seedMemorySameDialect();
   state.cmp = state.cmp.filter((k) => gws.some((g) => g.key === k));
   if (state.cmp.length < 2) state.cmpOpen = false;
   if (state.drawer && !gws.some((g) => g.key === state.drawer)) state.drawer = null;
@@ -3053,6 +3186,10 @@ if (NODE) {
     configCorrectionUrl, BENCH_REPO, fmtInt, fmtAdded,
     HOME_VIEW, homeCardsHtml,
     metricTd,
+    // The roster's row order, the compare row's tied-best set, the lane served predicate and the
+    // memory-tab dialect seed: pure functions the suite drives directly, because each of them was a
+    // defect that no DOM-free test could reach while it lived inside a renderer.
+    rowComparator, bestIndex, laneServed, seedMemorySameDialect,
     // audit #21: the rig-provenance footer stamp + the live state it reads, so the class test can drive it.
     rigStamp, state,
   };
