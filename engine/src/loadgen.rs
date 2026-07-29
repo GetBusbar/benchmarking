@@ -46,6 +46,10 @@ pub struct UgenStats {
     /// Requests that exhausted the generator's response budget. Optional on the wire for the same
     /// reason as `rig_refused`.
     pub budget_exceeded: i64,
+    /// Whether the CHILD could not spawn the threads for this window - the OS refusing, not the gateway.
+    /// Optional on the wire for the same reason as the two above: an older generator's line simply has
+    /// no such field, and `false` means "none reported".
+    pub spawn_failed: bool,
 }
 
 fn parse_ugen_fields(line: &str) -> Result<UgenStats, String> {
@@ -64,6 +68,10 @@ fn parse_ugen_fields(line: &str) -> Result<UgenStats, String> {
             .get("budgetexceeded")
             .and_then(|v| v.parse::<i64>().ok())
             .unwrap_or(0),
+        spawn_failed: fields
+            .get("spawnfailed")
+            .map(|v| v.trim() != "0" && !v.trim().is_empty())
+            .unwrap_or(false),
     })
 }
 
@@ -124,6 +132,41 @@ pub fn decode_headers(raw: Option<&str>) -> Vec<(String, String)> {
 
 #[cfg(test)]
 mod tests {
+    // THE FLAG THE PARENT CHECKED BUT COULD NEVER RECEIVE.
+    //
+    // The child sets `spawn_failed` when the OS refuses a thread, which means the window never ran at
+    // the concurrency it claims - a rig limit `SweepProbe::probe` stops the search on. But the flag
+    // stopped at the subprocess boundary: the stats line did not carry it and the parent hardcoded
+    // `spawn_failed: false`, so `if stats.spawn_failed` could not fire on the only path that matters
+    // and a window that never ran was read as an ordinary result of the gateway.
+    #[test]
+    fn spawn_failed_survives_the_subprocess_boundary() {
+        let base = "rps=1000 fail=0 p50=1.0 p99=2.0 p50us=1000 p99us=2000 ok=1000";
+        let got = parse_ugen_line(&format!("{base} spawnfailed=1"))
+            .into_value()
+            .expect("a complete line parses");
+        assert!(
+            got.spawn_failed,
+            "the child said it could not spawn; the parent must hear it"
+        );
+
+        let got = parse_ugen_line(&format!("{base} spawnfailed=0"))
+            .into_value()
+            .expect("a complete line parses");
+        assert!(
+            !got.spawn_failed,
+            "and a healthy window must not read as a spawn failure"
+        );
+
+        // An OLDER generator's line has no such field. Absent means "none reported", and refusing to
+        // parse an otherwise-complete line would be worse than defaulting - the same reasoning
+        // `rig_refused` and `budget_exceeded` already carry.
+        let got = parse_ugen_line(base)
+            .into_value()
+            .expect("a line without the field still parses");
+        assert!(!got.spawn_failed);
+    }
+
     use super::*;
 
     // The exact format `otb loadgen` emits on its own stdout.
@@ -141,7 +184,8 @@ mod tests {
                 p99_us: 45_000,
                 ok: 14_808,
                 rig_refused: 0,
-                budget_exceeded: 0
+                budget_exceeded: 0,
+                spawn_failed: false
             })
         );
     }

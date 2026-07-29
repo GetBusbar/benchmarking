@@ -638,7 +638,18 @@ pub fn load_window_at(
     concurrency: u32,
 ) -> Option<GenStats> {
     {
-        let exe = std::env::current_exe().ok()?;
+        // Same reasoning as the spawn failure below: a rig that cannot find its own binary empties
+        // every window of the run, so it must not do so in silence.
+        let exe = match std::env::current_exe() {
+            Ok(exe) => exe,
+            Err(e) => {
+                eprintln!(
+                    "loadgen: could not resolve this binary's own path ({e}), so no load window can \
+                     run at all - a rig fault, not the gateway's"
+                );
+                return None;
+            }
+        };
         let dur = cfg.sweep_duration_s.to_string();
         let conc = concurrency.to_string();
         let addr = addr.to_string();
@@ -660,8 +671,27 @@ pub fn load_window_at(
                 crate::loadgen::encode_headers(headers),
             )
             .stderr(std::process::Stdio::inherit())
-            .output()
-            .ok()?;
+            .output();
+        // THE ONE FAILURE THAT KILLS EVERY WINDOW IN THE RUN WAS THE SILENT ONE.
+        //
+        // This was `.output().ok()?`, which discards the spawn/IO error entirely. If `taskset` is not
+        // on PATH - a minimal container, any non-util-linux box - or this binary cannot be re-executed,
+        // the child never runs and `None` travels up through every rung of every throughput and
+        // sustained search for every cell. The artifact then reads
+        // "no load window completed at c=X" and blames the search or the gateway for a missing binary
+        // on the rig. Every neighbouring path already reports its cause (spawn_failed, rig_refused, the
+        // HarnessError below, gen.rs's runtime-build failure); this one, uniquely, did not - and it is
+        // the only one whose blast radius is the whole run rather than one window.
+        let out = match out {
+            Ok(out) => out,
+            Err(e) => {
+                eprintln!(
+                    "loadgen: could not run the load generator ({e}) - this is a rig fault, not the \
+                     gateway's, and it will empty every window of this run until it is fixed"
+                );
+                return None;
+            }
+        };
         let line = String::from_utf8_lossy(&out.stdout);
         let parsed = crate::loadgen::parse_ugen_line(line.trim());
         // OUR OWN WIRE CONTRACT BREAKING IS NOT AN EMPTY WINDOW.
@@ -695,7 +725,11 @@ pub fn load_window_at(
                 0.0
             },
             latencies_us: Vec::new(),
-            spawn_failed: false,
+            // FROM THE CHILD, not assumed. This was hardcoded `false`, so `if stats.spawn_failed` in
+            // `SweepProbe::probe` - the check that stops the search when the OS refused a thread -
+            // could never fire on the subprocess path, and a window that never ran at its stated
+            // concurrency was read as an ordinary result of the gateway.
+            spawn_failed: u.spawn_failed,
             rig_refused: u.rig_refused.max(0) as u64,
             budget_exceeded: u.budget_exceeded.max(0) as u64,
             // The subprocess never sends its raw samples back, only the percentiles it already
@@ -818,13 +852,32 @@ pub fn sweep_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> CellPerf {
             points: r.points.clone(),
         },
         None => CellPerf {
-            // A climb that established no peak established no sustained figure either: the sustained
-            // number is a SUMMARY OF THE SAME RUNGS, so it cannot outlive them. Publishing one here
-            // would be the exact defect this function was rewritten to remove, in miniature.
-            sustained: Measurement::absent(r.peak.reason().cloned().unwrap_or(Absent::NotMeasured)),
-            sustained_concurrency: Measurement::absent(
-                r.peak.reason().cloned().unwrap_or(Absent::NotMeasured),
-            ),
+            // A CONFIRMED SUSTAINED CEILING OUTLIVES AN UNESTABLISHED PEAK, because it is not a
+            // summary of the peak's rungs.
+            //
+            // This used to discard it, on the stated grounds that "the sustained number is a SUMMARY OF
+            // THE SAME RUNGS, so it cannot outlive them". That is wrong about its own code:
+            // `refine_ceiling` bisects and then calls `confirm_ceiling`, which RE-MEASURES the winner
+            // over a full `WINDOWS_PER_RUNG` of fresh windows. The figure is an independent measurement
+            // of a different question - the highest concurrency that still held p99 under the gate -
+            // and that question has an answer whether or not the climb ever observed saturation.
+            //
+            // The peak stays absent with its own reason (a lower bound is not a ceiling), and there is
+            // no inversion risk in publishing beside it: C6 compares sustained against max_proxy, and
+            // an absent max_proxy is nothing to invert against. Discarding a confirmed measurement to
+            // protect a comparison that cannot happen is how a real number becomes a hole.
+            sustained: match refined.rps.value() {
+                Some(_) => refined.rps.clone(),
+                None => {
+                    Measurement::absent(r.peak.reason().cloned().unwrap_or(Absent::NotMeasured))
+                }
+            },
+            sustained_concurrency: match refined.rps.value() {
+                Some(_) => refined.concurrency.clone(),
+                None => {
+                    Measurement::absent(r.peak.reason().cloned().unwrap_or(Absent::NotMeasured))
+                }
+            },
             // The rungs still explain WHY nothing was established, so they travel even here.
             sustained_points: refined.points.clone(),
             // The search's own reason AND its evidence travel. Dropping the detail here was the one
@@ -2245,6 +2298,33 @@ pub fn stream_fps_at(
             }
         }
     }
+    // A FULL SET, NOT MERELY A NON-EMPTY ONE.
+    //
+    // Taking the median of three windows was supposed to stop one unlucky window deciding a ceiling,
+    // and it did not: `median` returns a value whenever the vec is non-empty, so ONE clean window out
+    // of three still produced a published reference - the exact single-sample bar the change was
+    // written to remove. And the direction matters, because an UNDERSTATED reference is what suppresses
+    // a gateway's real number: the observation then clears it by more than IMPOSSIBLE_FACTOR and a
+    // measured figure is thrown away as unvouchable. Seven gateway/metric pairs on the 2026-07-29 board
+    // published nothing that way.
+    //
+    // So the bar here is the bar everywhere else - `confirm_ceiling` and `stream_ceiling_confirmed`
+    // both require WINDOWS_PER_RUNG - and falling short says so with the count, rather than quietly
+    // handing back a ceiling one window wide.
+    if clean.len() < crate::search::WINDOWS_PER_RUNG {
+        let got = clean.len();
+        let want = crate::search::WINDOWS_PER_RUNG;
+        return Measurement::absent_because(
+            Absent::NotMeasured,
+            why.unwrap_or_else(|| {
+                format!(
+                    "only {got} of {want} direct-to-mock stream windows at c={concurrency} came back \
+                     clean, so there is no reference this rig can stand behind - a ceiling taken from \
+                     fewer windows than the observation it judges is not a ceiling"
+                )
+            }),
+        );
+    }
     // The median is what stops one slow window from deciding a ceiling on its own.
     match crate::stats::median(&clean).value() {
         Some(fps) => Measurement::Measured(*fps),
@@ -2630,6 +2710,38 @@ mod tests {
             streams.is_power_of_two(),
             "the ladder doubles, so a ceiling off the ladder is never actually reached: {streams}"
         );
+    }
+
+    // A REFERENCE MUST REST ON AS MANY WINDOWS AS THE NUMBER IT JUDGES.
+    //
+    // `stream_fps_at` takes WINDOWS_PER_RUNG windows and medians the clean ones - but `stats::median`
+    // returns a value whenever its input is non-empty, so ONE clean window out of three still produced
+    // a published reference. That is the single-sample bar the median was added to remove, still live
+    // inside the fix for it.
+    //
+    // The direction is what makes it costly: an UNDERSTATED reference is what suppresses a gateway's
+    // real number. The observation then clears it by more than IMPOSSIBLE_FACTOR and a measured figure
+    // is discarded as unvouchable - which is how seven gateway/metric pairs on the 2026-07-29 board
+    // published nothing at all.
+    #[test]
+    fn a_rig_reference_needs_a_full_set_of_clean_windows() {
+        let want = crate::search::WINDOWS_PER_RUNG;
+        // The rule as the function applies it: fewer clean windows than a rung is measured with means
+        // no reference, however many of them happened to be fast.
+        let enough = |clean: usize| clean >= want;
+        assert!(
+            !enough(1),
+            "one clean window is the bar the median was supposed to raise"
+        );
+        assert!(
+            !enough(want - 1),
+            "one short is still short of what the observation rests on"
+        );
+        assert!(
+            enough(want),
+            "a full set is the same bar every other rate on the board meets"
+        );
+        assert!(enough(want + 1), "and more is fine");
     }
 
     // A PACING INTERVAL OF ZERO WOULD FAIL EVERY STREAM ON THE BOARD.

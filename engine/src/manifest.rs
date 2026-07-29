@@ -997,6 +997,19 @@ impl Manifest {
         // declared: it may answer 401 on every probe and publish as a gateway that serves nothing,
         // which is indistinguishable from one that genuinely does not. Caught here, at validate time,
         // for the same reason the template checks below are: before the box-hours are spent.
+        // A CELL PATH THAT CANNOT SUBSTITUTE MEASURES THE WRONG ROUTE. `cell_paths_for` drops it and
+        // the cell silently falls back to the dialect's default path - a different wire than the
+        // manifest declared, published under the cell's name. Caught here for the same reason the
+        // header and template checks are: before the box-hours are spent.
+        for (k, v) in &self.cell_paths {
+            if let Err(e) = self.substitute(v, "0-3", 8000, gw_dir) {
+                out.push(format!(
+                    "cell_paths[{k}]: {v:?} cannot be substituted ({e}), so this cell would measure \
+                     the dialect's default route instead of the declared one"
+                ));
+            }
+        }
+
         for (label, line) in
             self.headers
                 .iter()
@@ -1308,10 +1321,24 @@ impl Manifest {
         self.cell_paths
             .iter()
             .filter_map(|(k, v)| {
-                Some((
-                    k.clone(),
-                    self.substitute(v, cores, mock_port, gw_dir).ok()?,
-                ))
+                match self.substitute(v, cores, mock_port, gw_dir) {
+                    Ok(path) => Some((k.clone(), path)),
+                    // A CELL PATH THAT WOULD NOT SUBSTITUTE USED TO VANISH HERE.
+                    //
+                    // `.ok()?` dropped it silently, so a cell_path carrying a placeholder the harness
+                    // cannot supply left no entry and no word - and the cell then measured the
+                    // DIALECT'S DEFAULT path instead. A different route than the manifest declared,
+                    // published under the cell's name, which is the one thing this field exists to
+                    // prevent.
+                    Err(e) => {
+                        eprintln!(
+                            "manifest: cell path for {k:?} could not be substituted ({e}), so this \
+                             cell would fall back to the dialect's default route rather than the one \
+                             its manifest declares"
+                        );
+                        None
+                    }
+                }
             })
             .collect()
     }
