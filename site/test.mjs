@@ -235,6 +235,27 @@ const testWithData = (name, fn) =>
 // declares, a missing donor means something really did stop publishing, and these must run.
 const BOARD_HAS_MATRIX_DONOR = (data.gateways || []).some(
   (g) => g && g.best_cell && g.best_cell.source && g.best_cell.source.kind === "matrix");
+// A DONOR ROW IS NOT THE SAME THING AS A DONOR WITH SEVERAL SURFACES, and the oracle-surface test
+// needs the second. It corrupts one envelope on each of: a NON-best matrix cell, the translation
+// cell, and a best_cell latency field - so a gateway that declares exactly ONE cell offers only the
+// third, and the test fails on a board that is behaving perfectly. That is not hypothetical: one-api
+// declares a single cell and was the first gateway to publish in the 2026-07-29 run, so the test went
+// red on a one-row board while the row itself was correct. The gate now counts what the test actually
+// consumes, so the two cannot disagree about when it is runnable.
+const donorSurfaces = (g) => {
+  if (!(g && g.best_cell && g.best_cell.source && g.best_cell.source.kind === "matrix")) return 0;
+  let n = 1;                                    // the best_cell latency field is always available
+  const d = g.best_cell.path && g.best_cell.path.dialect;
+  for (const [eg, up] of Object.entries((g.matrix && g.matrix.upstreams) || {}))
+    for (const [ing, c] of Object.entries((up && up.cells) || {})) {
+      if (ing === d && eg === d) continue;      // the best cell itself is not a SECOND surface
+      const v = c && c.perf && c.perf.added_latency_p99_us;
+      if (v && v.value != null) { n += 1; break; }
+    }
+  if (g.translation_cell && g.translation_cell.source && g.translation_cell.source.kind === "matrix") n += 1;
+  return n;
+};
+const BOARD_HAS_MULTI_SURFACE_DONOR = (data.gateways || []).some((g) => donorSurfaces(g) >= 2);
 const DECLARED_GATEWAYS = (data.gateways || []).length;
 const isPublishing = (g) => !!(g && [g.best_cell, g.translation_cell, g.streaming].some((r) => r && r.source));
 const PUBLISHING_GATEWAYS = (data.gateways || []).filter(isPublishing).length;
@@ -263,6 +284,10 @@ if (!BOARD_HAS_MATRIX_DONOR && !BOARD_IS_COMPLETE) {
 const testWithMatrixDonor = (name, fn) =>
   ((BOARD_HAS_MATRIX_DONOR || BOARD_IS_COMPLETE) ? test(name, fn)
     : skip(name, `no matrix-sourced best_cell to revert yet (${PUBLISHING_GATEWAYS}/${DECLARED_GATEWAYS} gateways publishing)`));
+// For the tests that need a donor carrying MORE THAN ONE oracled surface. See donorSurfaces.
+const testWithMultiSurfaceDonor = (name, fn) =>
+  (BOARD_HAS_MULTI_SURFACE_DONOR ? test(name, fn)
+    : skip(name, `no gateway publishing 2+ oracled surfaces yet (${PUBLISHING_GATEWAYS}/${DECLARED_GATEWAYS} gateways publishing)`));
 
 // THERE IS NO "ONLY WHEN THE WHOLE FIELD HAS LANDED" GATE ANY MORE, and it is worth saying why it
 // went rather than letting it reappear.
@@ -2984,7 +3009,7 @@ testWithData("#21 CLASS: R3 catches the board rendering a different run than the
     "R3 must flag a bundle whose matrix_from_snapshot claim disagrees with the disk");
 });
 
-testWithMatrixDonor("#17: the independent oracle covers EVERY matrix cell, translation, streaming and memory - not 2 fields", () => {
+testWithMultiSurfaceDonor("#17: the independent oracle covers EVERY matrix cell, translation, streaming and memory - not 2 fields", () => {
   // RED-before, per surface: corrupt ONE sealed envelope on each previously-UNORACLED surface and assert
   // the oracle catches it. Before this change only best_cell's two RPS fields were compared, so each of
   // these mutations shipped undetected.
