@@ -1460,7 +1460,8 @@ pub fn stream_window(
     let body = body.to_string();
     let headers = headers.to_vec();
 
-    let (outcomes, elapsed_s): (Vec<crate::http::SseOutcome>, f64) = rt.block_on(async move {
+    let (outcomes, panicked, elapsed_s): (Vec<crate::http::SseOutcome>, usize, f64) =
+        rt.block_on(async move {
         let mut lanes = Vec::with_capacity(concurrency as usize);
         for _ in 0..concurrency {
             let path = path.clone();
@@ -1484,15 +1485,23 @@ pub fn stream_window(
         // the high rungs the search is climbing toward.
         let started = std::time::Instant::now();
         let mut out = Vec::with_capacity(lanes.len());
+        let mut panicked = 0usize;
         for l in lanes {
             // A PANICKED LANE IS A HARNESS FAULT, not a gateway failure, and it is also not a
             // stream: it is counted in neither column, because attributing our own defect to the
             // gateway's error rate is the exact inversion this engine refuses everywhere else.
-            if let Ok(o) = l.await {
-                out.push(o);
+            //
+            // COUNTED, THOUGH. Dropping it silently is what made a four-hour run undiagnosable: a
+            // lane that panicked left no number, no message, and no trace anywhere in the artifact
+            // or the log, so the only visible symptom was a metric that took 0.0s and published an
+            // absence. "Not the gateway's fault" is a reason to keep it out of the gateway's error
+            // rate, never a reason to lose it.
+            match l.await {
+                Ok(o) => out.push(o),
+                Err(_) => panicked += 1,
             }
         }
-        (out, started.elapsed().as_secs_f64())
+        (out, panicked, started.elapsed().as_secs_f64())
     });
     let mut w = StreamWindow {
         concurrency,
@@ -1543,12 +1552,51 @@ pub fn stream_window(
         w.content_frames += o.content_frames;
         w.stalls += stalls_in(&o.frame_offsets_us);
     }
-    // Every lane panicked, so nothing was observed. Unmeasured, not a failing window.
-    if w.streams == 0 {
+    // A WINDOW MISSING LANES NEVER RAN AT THE CONCURRENCY IT CLAIMS. Identical reasoning to the
+    // rig-exhaustion check above, which already refuses a window for the same defect arriving by a
+    // different route - and refusing it is not the conservative choice here, it is the correct one.
+    //
+    // Both `streams` and `expected_frames` are accumulated PER SURVIVING LANE, so a panicked lane
+    // left the numerator and the denominator alike: a window where half the lanes died reported the
+    // surviving half's delivery ratio as though it were the whole window's, and passed the gate on
+    // it. The ratio looked perfect precisely because the evidence of the failure had been removed
+    // from both sides of it. That is a flattering number, published as a measurement.
+    //
+    // LOUD, because the silence was the real defect. This was the ONLY one of this function's four
+    // refusals that returned without saying anything, and it is the one that fired: busbar's cpu_fps
+    // took 0.0s on every streamable cell across a four-hour run and left not one line to explain it.
+    if let Some(why) = window_refusal(panicked, w.streams, concurrency) {
+        eprintln!("{why}");
         return None;
     }
     Some(w)
 }
+
+/// Why a stream window must be DISCARDED rather than published, or `None` when it may stand.
+///
+/// Pure, and separate from the window that feeds it, for the reason `apply_peak_verdict` and
+/// `cpu_fps_result_from_search` are separate from theirs: the rule is plain arithmetic, while the
+/// only part that needs a socket is opening one. Deciding it inline left it unreachable from any
+/// test - and the rule it encodes had already cost a four-hour run its cpu_fps on every streamable
+/// cell, silently, which is precisely the defect class this codebase treats as its worst.
+fn window_refusal(panicked: usize, streams: u64, concurrency: u32) -> Option<String> {
+    if panicked > 0 {
+        return Some(format!(
+            "stream window: {panicked} of {concurrency} lanes PANICKED - a harness fault, not the \
+             gateway's. The window is discarded rather than published from the survivors, because \
+             their delivery ratio would count neither the failures nor what they were expected to \
+             deliver"
+        ));
+    }
+    if streams == 0 {
+        return Some(format!(
+            "stream window: c={concurrency} produced no streams at all - unmeasured, not a failing \
+             window"
+        ));
+    }
+    None
+}
+
 
 /// One rung a stream search actually probed, carrying the counts behind its verdict.
 ///
@@ -2283,6 +2331,42 @@ pub(crate) fn test_fixture(gw: SocketAddr, mock: SocketAddr) -> RunConfig {
 
 #[cfg(test)]
 mod tests {
+    // A WINDOW THAT LOST LANES MUST BE DISCARDED, LOUDLY.
+    //
+    // This rule cost a four-hour run every cpu_fps number it should have produced, and left nothing
+    // to diagnose it with. A panicked lane was dropped on the floor - no count, no message - and
+    // when every lane went, `streams == 0` returned `None` through the ONE refusal in that function
+    // that said nothing. The visible symptom was a metric that took 0.0s and published an absence,
+    // on every streamable cell, with no line anywhere in the log or the artifact explaining why.
+    //
+    // The subtler half is why survivors are not good enough: `streams` and `expected_frames` are
+    // both accumulated per surviving lane, so a panicked lane leaves the numerator AND the
+    // denominator. A window that lost half its lanes reported the survivors' delivery ratio as the
+    // whole window's and passed the gate on it - flattered by the removal of its own failures.
+    #[test]
+    fn a_window_that_lost_lanes_is_refused_and_says_so() {
+        let why = super::window_refusal(4, 60, 64).expect("lost lanes must refuse the window");
+        assert!(why.contains("PANICKED"), "the refusal must name the fault: {why}");
+        assert!(why.contains('4') && why.contains("64"),
+            "and must quantify it - how many of how many: {why}");
+
+        // Even ONE lost lane. The survivors' ratio is not this window's ratio, and there is no
+        // threshold below which a measurement may quietly describe a different window than it ran.
+        assert!(super::window_refusal(1, 63, 64).is_some(),
+            "one lost lane still means the window did not run at the concurrency it claims");
+
+        // Nothing came back at all, nothing panicked: unmeasured, and it must still SAY so rather
+        // than returning in silence the way the old path did.
+        let why = super::window_refusal(0, 0, 8).expect("an empty window must refuse");
+        assert!(why.contains("no streams"), "{why}");
+
+        // And the case that must still be PUBLISHED: every lane came home. A refusal rule that
+        // refuses everything is as useless as one that refuses nothing.
+        assert_eq!(super::window_refusal(0, 64, 64), None,
+            "a whole window is a real measurement and must not be thrown away");
+        assert_eq!(super::window_refusal(0, 1, 1), None);
+    }
+
 
     /// THE TWO PUBLISHED THROUGHPUT NUMBERS DESCRIBE ONE SET OF WINDOWS.
     ///
