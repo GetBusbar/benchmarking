@@ -460,7 +460,17 @@ fn cell_memory(
     // under sustained load, as distinct from the peak, which one spike can set. Absent when there
     // are too few readings to have a trailing part at all, because a "steady state" computed from
     // one sample would be the sample.
-    let steady = steady_state(&rss_series);
+    //
+    // ONLY THE LOAD WINDOW'S OWN READINGS. The sampler runs from before the load through the whole
+    // recovery window, so `rss_series` is load THEN recovery, and taking the trailing half of the
+    // WHOLE series mixes the two: on the 2026-07-29 run one-api's trailing half was 38s of load
+    // against 60s of recovery, and the published figure came out 1.3 MiB under what the load window
+    // measured. For a gateway that actually releases - 400 MiB under load, 50 after - the blend lands
+    // between the two and is neither, while `recovered_rss_mib` beside it already answers "does it
+    // give the memory back". Two fields the record deliberately distinguishes must not collapse into
+    // each other.
+    let load_end = metrics.get("memory_load_s").and_then(|m| m.copied());
+    let steady = steady_state(&rss_series, load_end);
     // The plateau verdict travels as a number across the metric surface (every group speaks f64), so
     // it is turned back into the tri-state it really is here: settled, did not settle, or could not
     // be judged. An absent verdict must stay absent rather than collapsing to false, because "it did
@@ -498,15 +508,25 @@ fn cell_memory(
     }
 }
 
-/// The median of the trailing half of the window's readings.
+/// The median of the trailing half of the LOAD window's readings.
 ///
 /// Median, not mean: one allocator spike at the end of a window would drag a mean and misreport the
 /// level the process settled at. Trailing half, because the start of the window is the ramp, and
 /// including the ramp measures how fast it grew rather than where it stopped.
-fn steady_state(series: &[crate::record::RssSample]) -> Measurement<f64> {
-    let mut tail: Vec<f64> = series
+///
+/// `load_end_s` bounds which readings count. The series it is given spans the load AND the recovery
+/// window that follows it, so without the bound the "trailing half" is mostly post-load samples and
+/// this reports where memory settled AFTER the load stopped - which is `recovered_rss_mib`'s
+/// question, not this one. `None` means the load duration was never established, and then the whole
+/// series is all there is to work with.
+fn steady_state(series: &[crate::record::RssSample], load_end_s: Option<f64>) -> Measurement<f64> {
+    let under_load: Vec<&crate::record::RssSample> = match load_end_s {
+        Some(end) => series.iter().filter(|s| (s.t_s as f64) <= end).collect(),
+        None => series.iter().collect(),
+    };
+    let mut tail: Vec<f64> = under_load
         .iter()
-        .skip(series.len() / 2)
+        .skip(under_load.len() / 2)
         .filter_map(|s| s.rss_mib.copied())
         .collect();
     if tail.len() < 2 {
@@ -2627,6 +2647,48 @@ mod tests {
         );
         assert_eq!(out.stream_error, None, "there was no prose to invent");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // STEADY STATE IS WHAT IT COSTS UNDER LOAD, NOT WHAT IT COSTS AFTER.
+    //
+    // The sampler runs from before the load through the whole recovery window, so the series is load
+    // THEN recovery. Taking the trailing half of the WHOLE series therefore reports where memory
+    // settled after the load stopped, which is `recovered_rss_mib`'s question. The fixture is the
+    // shape that makes the two answers differ: a gateway that holds 400 MiB under load and releases
+    // to 50 MiB, with a recovery window longer than the load window - exactly the profile the blend
+    // flatters. Measured on the 2026-07-29 field run at 1.3 MiB for one-api, which barely releases;
+    // this fixture is what a gateway that does release looks like.
+    #[test]
+    fn steady_state_reads_the_load_window_not_the_recovery_that_follows_it() {
+        let sample = |t: i64, mib: f64| crate::record::RssSample {
+            t_s: t,
+            rss_mib: Measurement::Measured(mib),
+        };
+        let mut series = Vec::new();
+        for t in 0..10 {
+            series.push(sample(t, if t < 2 { 100.0 } else { 400.0 })); // ramp, then flat under load
+        }
+        for t in 10..40 {
+            series.push(sample(t, 50.0)); // recovery: released, and three times as many samples
+        }
+
+        let under_load = steady_state(&series, Some(9.0));
+        assert_eq!(
+            under_load.copied(),
+            Some(400.0),
+            "the steady state is what the process held while the load ran"
+        );
+
+        // The defect, stated as the assertion that would have passed before: with no bound the
+        // trailing half is entirely recovery samples and the figure collapses onto the recovered
+        // level, making two deliberately distinct fields report the same number.
+        let blended = steady_state(&series, None);
+        assert_eq!(blended.copied(), Some(50.0));
+        assert_ne!(
+            blended.copied(),
+            under_load.copied(),
+            "if these ever agree the fixture has stopped exercising the defect"
+        );
     }
 
     // EVERY NULL ON A SERVED CELL CARRIES A REASON, including the two that used to travel as plain
