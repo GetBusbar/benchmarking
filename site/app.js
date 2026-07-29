@@ -991,11 +991,12 @@ const COL_NAME = {
     // No per-row date: the board is one atomic run (matrix-sole-source = one source of truth), so
     // every gateway shares a single timestamp — the board-wide "last benchmarked" (roster tab + home)
     // IS the freshness, and a per-row date is pure redundant bloat. Just the name.
-    // The ONE exception is the memory tab's gateway-level plateau verdict: "RSS never went steady on ANY
-    // cell" is a property of the gateway, not of whichever cell the chooser is on, and it is the strongest
-    // statement this metric makes. Burying it in a cell would mean a reader has to select the right cell to
-    // discover it, so it rides next to the name and is visible in every mode.
-    return `<td class="name">${a}${st && st.view === "memory" ? neverPlateauedPill(g) : ""}</td>`;
+    // NO PILL BESIDE THE NAME. The plateau verdict used to ride here on the memory tab, and a red
+    // NEVER SETTLES tag on a gateway's name reads as a verdict on the GATEWAY rather than on one
+    // window of one measurement - which is a much larger claim than the metric supports. The finding
+    // is not hidden: the Growth column carries the rate, and the per-cell tooltip says what each
+    // window did and, when it did not settle, whether it climbed or merely swung.
+    return `<td class="name">${a}</td>`;
   },
 };
 // The "Tested on" column: present in EVERY mode (identical column set across Peak/Same/Custom). It reads
