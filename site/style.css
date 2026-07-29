@@ -665,3 +665,11 @@ td.memcurve.na { color: var(--fg-mute); }
   background: rgba(217, 45, 32, .12);
   font-weight: 600;
 }
+
+/* The memory window as two curves side by side: what the process cost doing nothing, then what work
+   cost it. They share one axis (0 to twice idle) so the pair is directly comparable - a flat idle
+   curve under a rising load curve is healthy, a rising idle curve is a leak with nothing asked of
+   it. Stacked rather than side by side because the RSS column is already the widest on the row. */
+.rss-pair { display: flex; flex-direction: column; gap: .35rem; }
+.rss-half { display: flex; flex-direction: column; }
+.rss-label { font-size: .68rem; line-height: 1.2; text-align: left; }

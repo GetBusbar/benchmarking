@@ -1168,7 +1168,7 @@ const COLUMN_SETS = {
       },
       render: (g, st = state) => {
         const m = memoryFor(g, st);
-        const spark = m && recordShowsValues(m) ? rssSparkline(m.rss_series, m.load_s) : "";
+        const spark = m && recordShowsValues(m) ? rssCurves(m) : "";
         return spark ? `<td class="memcurve">${spark}</td>` : `<td class="memcurve na">n/a</td>`;
       } },
   ],
@@ -1254,7 +1254,7 @@ const LANES = [
     },
     // The RSS curve (idle→load→recovery, one process lifecycle). Renders ONLY when rss_series
     // exists (≥2 points); a bundle without a series → extra() returns "" and the drawer shows just the numbers.
-    extra: (j) => rssSparkline(j.rss_series, j.load_s),
+    extra: (j) => rssCurves(j),
     metrics: [
       { k: "idle_rss_mib", label: "Idle RSS (MiB)", best: "min", fmt: fmt1 },
       // Both shapes are listed because both shapes are published: a per-cell record carries a steady state
@@ -2082,14 +2082,15 @@ function laneStamp(j) {
 /* rssSparkline: a compact inline-SVG recovery curve (idle → peak → recovery) built from a memory
    record's rss_series [{t_s,rss_mib},…]. Returns "" when the series is absent or has < 2 points, so a
    pre-recovery bundle (no series) draws NOTHING — never a fabricated flat line or a zero baseline. The
-   y-axis spans the series' own min→max (its own peak is the top); a dot marks the last (recovered)
-   sample. Same self-contained inline-SVG style as the matrix legend/cell swatches. */
+   y-axis runs from IDLE to the series' own peak, so the height of the line is the growth under load
+   and a flat gateway draws a flat line; a dot marks the last (recovered) sample. Same self-contained
+   inline-SVG style as the matrix legend/cell swatches. */
 // loadEndS: the second the load stopped and the recovery window began, from the record's own
 // `load_s`. Drawn as a dotted rule so the curve says WHICH part is under load and which is the
 // gateway with nothing asked of it - the whole point of the recovered figure beside it is that the
 // reader can see whether the line came down after that mark, and until now nothing on the chart
 // said where the mark was.
-function rssSparkline(series, loadEndS = null) {
+function rssSparkline(series, loadEndS = null, idleMib = null) {
   if (!Array.isArray(series) || series.length < 2) return "";
   const pts = series
     .filter((p) => p && typeof p.t_s === "number" && typeof p.rss_mib === "number")
@@ -2098,9 +2099,26 @@ function rssSparkline(series, loadEndS = null) {
   const W = 260, H = 56, PAD = 3;
   const ts = pts.map((p) => p.t_s), ys = pts.map((p) => p.rss_mib);
   const t0 = ts[0], t1 = ts[ts.length - 1], tspan = (t1 - t0) || 1;
-  const ymin = Math.min(...ys), ymax = Math.max(...ys), yspan = (ymax - ymin) || 1;
+  // THE AXIS IS 0 -> 2x IDLE, NOT THIS CURVE'S OWN MIN AND MAX.
+  //
+  // Auto-scaling made every curve fill the full height whatever it did, so a process that rose 1.2%
+  // off idle (litellm-rust, 252.1 -> 255.0) drew the same cliff as one that rose 801% (kong, 378 ->
+  // 3412). The chart exaggerated hardest for the gateways that behaved best, which is backwards, and
+  // it made two curves impossible to compare with each other.
+  //
+  // Fixing the axis to twice idle gives the height a MEANING: the idle line sits at the halfway mark
+  // by construction, and how far the load curve rises above it is how much the work cost, relative to
+  // what the process cost doing nothing. A flat gateway now draws a flat line. A gateway that more
+  // than doubles clips at the top, and the caption underneath carries the real peak, because a curve
+  // that leaves its box is worse than one that stops at the edge and says so.
+  const dataMin = Math.min(...ys), dataMax = Math.max(...ys);
+  const anchored = typeof idleMib === "number" && idleMib > 0;
+  const ymin = anchored ? 0 : dataMin;
+  const ymax = anchored ? idleMib * 2 : dataMax;
+  const yspan = (ymax - ymin) || 1;
+  const clipped = anchored && dataMax > ymax;
   const x = (t) => PAD + ((t - t0) / tspan) * (W - 2 * PAD);
-  const y = (v) => PAD + (1 - (v - ymin) / yspan) * (H - 2 * PAD);
+  const y = (v) => PAD + (1 - Math.min(Math.max((v - ymin) / yspan, 0), 1)) * (H - 2 * PAD);
   const path = pts.map((p, i) => `${i ? "L" : "M"}${x(p.t_s).toFixed(1)},${y(p.rss_mib).toFixed(1)}`).join("");
   const last = pts[pts.length - 1];
   // Only draw the mark when it falls INSIDE the plotted span. A load_s at or past the last sample
@@ -2113,14 +2131,57 @@ function rssSparkline(series, loadEndS = null) {
     : "";
   const restNote = marks ? `, load stopped at ${fmtInt(loadEndS)} s` : "";
   return `<div class="rss-spark"><svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" role="img" ` +
-    `aria-label="RSS recovery curve: idle to peak to recovered, ${fmt1(ymin)} to ${fmt1(ymax)} MiB over ${fmtInt(tspan)} s${restNote}">` +
+    `aria-label="RSS curve, axis 0 to twice idle: peak ${fmt1(dataMax)} MiB over ${fmtInt(tspan)} s${restNote}">` +
     `<polyline points="${x(t0).toFixed(1)},${(H - PAD).toFixed(1)} ${x(t1).toFixed(1)},${(H - PAD).toFixed(1)}" ` +
     `fill="none" stroke="currentColor" stroke-opacity="0.15" stroke-width="1"/>` +
+    // The idle level, drawn so "how far above idle" is a thing the eye can measure rather than infer.
+    (anchored
+      ? `<line x1="${PAD}" y1="${y(idleMib).toFixed(1)}" x2="${(W - PAD).toFixed(1)}" y2="${y(idleMib).toFixed(1)}" ` +
+        `stroke="currentColor" stroke-opacity="0.22" stroke-width="1" stroke-dasharray="1 3">` +
+        `<title>idle ${fmt1(idleMib)} MiB</title></line>`
+      : "") +
     marks +
     `<path d="${path}" fill="none" stroke="currentColor" stroke-width="1.5"/>` +
     `<circle cx="${x(last.t_s).toFixed(1)}" cy="${y(last.rss_mib).toFixed(1)}" r="2.5" fill="currentColor"/>` +
     `</svg>` +
-    `<div class="stamp muted">peak ${fmt1(ymax)} → recovered ${fmt1(last.rss_mib)} MiB (${fmtInt(tspan)} s)</div></div>`;
+    `<div class="stamp muted">peak ${fmt1(dataMax)} → recovered ${fmt1(last.rss_mib)} MiB (${fmtInt(tspan)} s)${
+      clipped ? ` · axis capped at 2× idle` : ""}</div></div>`;
+}
+
+/* rssCurves(mem): the memory window as TWO curves on ONE scale - what the process cost doing
+   nothing, then what work cost it.
+   Idle used to be a single number in a column, so a gateway that grew while completely idle looked
+   identical to one that sat still, and the load curve's baseline was a value the reader had to take
+   on trust. Both curves share the 0 -> 2x idle axis (see rssSparkline), so the idle line sits at the
+   halfway mark in both and the two are directly comparable: a flat idle curve under a rising load
+   curve is a healthy gateway, and a rising idle curve is a leak with nothing asked of it.
+   Returns just the load curve when there is no idle series, which is every bundle measured before
+   the idle window existed. */
+function rssCurves(mem) {
+  if (!mem || typeof mem !== "object") return "";
+  const idle = mval(mem.idle_rss_mib);
+  const load = rssSparkline(mem.rss_series, mval(mem.load_s), idle);
+  const idleSeries = mem.idle_rss_series;
+  if (!Array.isArray(idleSeries) || idleSeries.length < 2) return load;
+  // The idle window carries no load boundary to mark, so no dotted rule: the whole window IS idle.
+  const idleCurve = rssSparkline(idleSeries, null, idle);
+  if (!idleCurve) return load;
+  const verdict = idleStatic(mem);
+  return `<div class="rss-pair">` +
+    `<div class="rss-half"><div class="rss-label muted">idle${verdict ? ` · ${esc(verdict)}` : ""}</div>${idleCurve}</div>` +
+    `<div class="rss-half"><div class="rss-label muted">load → recovery</div>${load}</div>` +
+    `</div>`;
+}
+
+/* idleStatic(mem): what the idle window itself did, as a phrase. The engine judges it with the same
+   plateau test the load window uses and publishes the verdict plus its rate, so this only has to
+   render what was decided - it never re-derives the verdict from the series. */
+function idleStatic(mem) {
+  const st = mval(mem.memory_idle_static ?? mem.idle_static);
+  if (st == null) return "";
+  if (st === 1) return "steady";
+  const rate = mval(mem.memory_idle_growth_rate_mib_per_min ?? mem.idle_growth_rate_mib_per_min);
+  return rate != null ? `growing ${fmt1(rate)} MiB/min` : "growing";
 }
 
 /* drawerHtml(g, st): the whole drawer for one gateway, as a string.
