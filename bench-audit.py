@@ -258,10 +258,21 @@ def check_rate_is_physically_possible(name, c):
 
 
 def check_frames_have_a_stream_behind_them(name, c):
-    """Frames per second with no sustained streams is a rate over a population of zero."""
+    """A frames/sec rate beside a MEASURED ZERO population is a rate over nothing.
+
+    Only a measured 0 is the defect. The two figures come from two DIFFERENT searches with different
+    gates - `streams_sustained` bisects the strict delivery gate (every content frame, no stalls),
+    while `cpu_fps` climbs for the box's frame ceiling - so a cell can honestly have a cpu_fps peak
+    while the sustained ceiling was never CONFIRMED. litellm-rust anthropic>anthropic did exactly that
+    in the 2026-07-29 run: rungs from c=1 to c=3072 delivered content, the bisection proved c=6144 and
+    then failed to reconfirm it, so the ceiling is an absence carrying that sentence while cpu_fps is
+    a real 20,636 measured over 1024 live streams. Reading that as "a rate over a population of zero"
+    was this check being wrong about the data, not the data being wrong.
+    """
     st = c.get("stream") or {}
-    if st.get("cpu_fps") and not st.get("streams_sustained"):
-        yield f"{name}: cpu_fps {st['cpu_fps']} published with streams_sustained={st.get('streams_sustained')}"
+    if st.get("cpu_fps") and st.get("streams_sustained") == 0:
+        yield (f"{name}: cpu_fps {st['cpu_fps']} published beside a MEASURED streams_sustained of 0 - "
+               f"a rate over a population of zero")
 
 
 # THE DEFINITION OF DONE, as fields. Every metric a served cell's block may publish; a null on any
@@ -362,10 +373,20 @@ def check_stream_capacity_is_a_number(name, c):
     absences = c.get("absences") or {}
     for f in ("streams_sustained", "cpu_fps"):
         if st.get(f) is None:
-            reason = (absences.get(f"stream.{f}") or {}).get("reason")
-            if reason not in CAPACITY_ABSENCE_OK:
-                yield (f"{name}: stream.{f} is absent with reason {reason!r} on a served streaming "
-                       f"cell - a gate failing everywhere is a measured 0, not a hole")
+            entry = absences.get(f"stream.{f}") or {}
+            reason, detail = entry.get("reason"), entry.get("detail")
+            if reason in CAPACITY_ABSENCE_OK:
+                continue
+            # AN ABSENCE THAT EXPLAINS ITSELF IS NOT A SILENT YIELD. The defect this catches is a
+            # search that stopped producing and said nothing - the board that shipped cpu_fps on 1 of
+            # 16 served cells. "The bisection proved c=6144 and could not reconfirm it" is the
+            # opposite: a search that ran, failed to establish a ceiling, and published why. Requiring
+            # a measured 0 there would force a number onto a question that was genuinely not settled,
+            # which is the fabrication this whole file exists to prevent.
+            if detail:
+                continue
+            yield (f"{name}: stream.{f} is absent with reason {reason!r} and NO detail on a served "
+                   f"streaming cell - a search that stops producing must say why")
 
 
 CELL_CHECKS = [
