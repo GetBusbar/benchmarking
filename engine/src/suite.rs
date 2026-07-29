@@ -128,6 +128,7 @@ fn rig_ceiling(cfg: &SuiteConfig, dialect: Dialect, at_conc: u32) -> Measurement
         // The reference drives the MOCK directly. There is no gateway process behind it, so there is
         // nothing to restart, and a spec here would let a reference measurement bounce the gateway.
         relaunch: None,
+        relaunch_commands: Vec::new(),
         relaunch_launcher: Default::default(),
         // The reference drives the MOCK, which serves every dialect at its standard path. A
         // gateway's prefix must not follow it here or the reference would probe a path the mock
@@ -656,6 +657,15 @@ fn judge_cpu_fps(
         return;
     };
     let conc = conc_f as u32;
+    // c == 0 is the search's own MEASURED "no concurrency carried a clean frame": the load was
+    // offered and every rung failed the gate. Same semantics as `judge_streams_sustained`'s zero -
+    // a real 0, never mock-bound, because the mock was never the limit of nothing.
+    if conc == 0 {
+        out.cpu_fps = Measurement::Measured(0.0);
+        out.cpu_fps_concurrency = Measurement::Measured(0);
+        out.cpu_fps_mock_bound = Some(false);
+        return;
+    }
     apply_cpu_fps_verdict(out, value, conc, stream_rig_ceiling(cfg, dialect, conc));
 }
 
@@ -804,6 +814,7 @@ fn qualify_box(cfg: &SuiteConfig, history: &[f64]) -> serde_json::Value {
         // The reference drives the MOCK directly. There is no gateway process behind it, so there is
         // nothing to restart, and a spec here would let a reference measurement bounce the gateway.
         relaunch: None,
+        relaunch_commands: Vec::new(),
         relaunch_launcher: Default::default(),
         // The reference drives the MOCK, which serves every dialect at its standard path. A
         // gateway's prefix must not follow it here or the reference would probe a path the mock
@@ -944,6 +955,10 @@ pub fn run_suite_with(
                 Duration::from_secs(2),
             )
             .and_then(|r| r.ok()),
+        // Replayed on every restart: a docker stop destroys the writable layer, and with it any
+        // configuration these commands wrote (one-api's channels and quota live in an in-container
+        // database). See `RunConfig::relaunch_commands`.
+        relaunch_commands: cfg.manifest.commands.clone(),
         // The launcher `restart_to_rest` reuses across every cell this run measures, so a native
         // child it spawns is still reachable - and reapable - the next time this same gateway is
         // put back at rest.
