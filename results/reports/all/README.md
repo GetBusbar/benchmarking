@@ -1,27 +1,27 @@
 # All gateways - full field
 
-**Ran on:** unknown  ·  2026-07-29T01:51:12Z
+**Ran on:** AWS m7g.4xlarge (Graviton3, 16 cores / 64 GB). Gateway-under-test pinned to 4 cores (the comparable basis); mock and load generator on 6 cores each so the mock never bottlenecks the streaming sweep. Ubuntu 24.04. One dedicated box per gateway.  ·  2026-07-29T13:54:18Z
 
 Every number below is regenerated from the raw `results/*.json` - re-run `run-all.sh` and this page updates. Passthrough and translation figures are the canonical per-gateway records (matrix per-cell sweep, perf/xlate-suite fallback) from `site/data.json`, the same values the site table ranks. Chart bars are **colored by implementation language** (Rust / Go / Python / Node / Other). **Rows are sorted by added latency (p99), lowest first.**
 
 | Gateway | Added latency (p99) | Sustained RPS (20 ms upstream) | Max proxy RPS | Idle RAM | Steady-state RAM | Built |
 |---|--:|--:|--:|--:|--:|---|
-| [LiteLLM · Rust](https://github.com/BerriAI/litellm) | 106 µs | 40,446 | 47,576 | - | - | `` |
-| [Helicone](https://github.com/Helicone/ai-gateway) | 301 µs | 14,567 | 14,675 | 43 MiB | 52 MiB | `` |
-| [Kong](https://github.com/Kong/kong) | 410 µs | 21,670 | 22,194 | 377 MiB | 592 MiB | `` |
-| [APISIX](https://github.com/apache/apisix) | 433 µs | 18,796 | 19,202 | 178 MiB | 211 MiB | `` |
-| [One-API](https://github.com/songquanpeng/one-api) | - | 0 | 40 | 85 MiB | 143 MiB | `` |
-| [Plano](https://github.com/katanemo/plano) | - | 0 | 85 | - | - | `` |
+| [One-API](https://github.com/songquanpeng/one-api) | 983,572 µs | 0 | 33 | 89 MiB | 143 MiB | `justsong/one-api:v0.6.10` |
 | [agentgateway](https://github.com/agentgateway/agentgateway) | ⏳ *pending* | - | - | - | - | *pending measurement* |
 | [AISIX (api7)](https://github.com/api7/aisix) | ⏳ *pending* | - | - | - | - | *pending measurement* |
+| [APISIX](https://github.com/apache/apisix) | ⏳ *pending* | - | - | - | - | *pending measurement* |
 | [Bifrost](https://github.com/maximhq/bifrost) | ⏳ *pending* | - | - | - | - | *pending measurement* |
 | [Busbar](https://github.com/GetBusbar/busbar) | ⏳ *pending* | - | - | - | - | *pending measurement* |
 | [GoModel](https://github.com/ENTERPILOT/GOModel) | ⏳ *pending* | - | - | - | - | *pending measurement* |
+| [Helicone](https://github.com/Helicone/ai-gateway) | ⏳ *pending* | - | - | - | - | *pending measurement* |
+| [Kong](https://github.com/Kong/kong) | ⏳ *pending* | - | - | - | - | *pending measurement* |
 | [LiteLLM · Python](https://github.com/BerriAI/litellm) | ⏳ *pending* | - | - | - | - | *pending measurement* |
+| [LiteLLM · Rust](https://github.com/BerriAI/litellm) | ⏳ *pending* | - | - | - | - | *pending measurement* |
+| [Plano](https://github.com/katanemo/plano) | ⏳ *pending* | - | - | - | - | *pending measurement* |
 | [Portkey](https://github.com/Portkey-AI/gateway) | ⏳ *pending* | - | - | - | - | *pending measurement* |
 | [TensorZero](https://github.com/tensorzero/tensorzero) | ⏳ *pending* | - | - | - | - | *pending measurement* |
 
-⏳ **Pending measurement** (a manifest exists; not yet run on the rig): agentgateway, AISIX (api7), Bifrost, Busbar, GoModel, LiteLLM · Python, Portkey, TensorZero. These land here as their runs complete - nothing is hidden.
+⏳ **Pending measurement** (a manifest exists; not yet run on the rig): agentgateway, AISIX (api7), APISIX, Bifrost, Busbar, GoModel, Helicone, Kong, LiteLLM · Python, LiteLLM · Rust, Plano, Portkey, TensorZero. These land here as their runs complete - nothing is hidden.
 
 Two throughput numbers: **max proxy RPS** (instant upstream - raw forwarding speed) and **sustained RPS under a 20 ms upstream delay** (AIGatewayBench's metric - concurrent in-flight capacity under realistic LLM latency).
 **⏳** = a manifest exists but it hasn't been run on the rig yet.
@@ -32,40 +32,37 @@ Same box, same mock, one gateway at a time. Streaming figures are the overhead t
 
 | Gateway | Added TTFT (p99) | Added per-token (p99) | SSE streams | Translated RPS (20 ms upstream) |
 |---|--:|--:|--:|--:|
-| [LiteLLM · Rust](https://github.com/BerriAI/litellm) | 233 µs | 22 µs | 877 (16,635 fps) | n/a |
-| [Helicone](https://github.com/Helicone/ai-gateway) | 476 µs | n/a | ✕ not measured (rig-limited) | 14,542 (openai → anthropic) |
-| [Kong](https://github.com/Kong/kong) | 106.5 ms | 168.6 ms | ✕ 0 - MEASURED: sustained no stall-free stream | 20,087 (openai → anthropic) |
-| [APISIX](https://github.com/apache/apisix) | 11.2 ms | 9.0 ms | ✕ not measured (rig-limited) | n/a |
+| [One-API](https://github.com/songquanpeng/one-api) | 848 µs | ≤ rig resolution | 213 (6,144 fps) | n/a |
 
 **✕** cells are measured refusals, not gaps: the gateway was offered the load and could not do the thing (buffered instead of streaming, rejected the Anthropic shape, or has no native key/limit governance). **n/a** = that suite hasn't been run for this gateway yet.
 
-![added_latency](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/added_latency.png?v=202607290242)
+![added_latency](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/added_latency.png?v=202607291405)
 
-![rps_max_proxy](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/rps_max_proxy.png?v=202607290242)
+![rps_max_proxy](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/rps_max_proxy.png?v=202607291405)
 
-![rps_sustained_20ms](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/rps_sustained_20ms.png?v=202607290242)
+![rps_sustained_20ms](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/rps_sustained_20ms.png?v=202607291405)
 
-![memory_rss](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/memory_rss.png?v=202607290242)
+![memory_rss](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/memory_rss.png?v=202607291405)
 
-![memory_recovery](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/memory_recovery.png?v=202607290242)
+![memory_recovery](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/memory_recovery.png?v=202607291405)
 
-![rps_per_dollar](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/rps_per_dollar.png?v=202607290242)
+![rps_per_dollar](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/rps_per_dollar.png?v=202607291405)
 
-![cost_per_million](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/cost_per_million.png?v=202607290242)
+![cost_per_million](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/cost_per_million.png?v=202607291405)
 
-![stream_added_ttft](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/stream_added_ttft.png?v=202607290242)
+![stream_added_ttft](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/stream_added_ttft.png?v=202607291405)
 
-![stream_added_gap](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/stream_added_gap.png?v=202607290242)
+![stream_added_gap](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/stream_added_gap.png?v=202607291405)
 
-![stream_sustained](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/stream_sustained.png?v=202607290242)
+![stream_sustained](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/stream_sustained.png?v=202607291405)
 
-![streamcpu_fps](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/streamcpu_fps.png?v=202607290242)
+![streamcpu_fps](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/streamcpu_fps.png?v=202607291405)
 
-![xlate_rps_sustained_20ms](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/xlate_rps_sustained_20ms.png?v=202607290242)
+![xlate_rps_sustained_20ms](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/xlate_rps_sustained_20ms.png?v=202607291405)
 
-![xlate_added_latency](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/xlate_added_latency.png?v=202607290242)
+![xlate_added_latency](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/xlate_added_latency.png?v=202607291405)
 
 ---
 Method: added latency = gateway p99 − direct-to-mock p99 at concurrency 1; RPS ceiling = highest sustained req/s with p99 < 1 s and <0.1% errors; RSS idle = after first 200, peak = under sustained load. Same box, same mock, same load, one gateway at a time. Each gateway's source ref is pinned in its own `gateways/<name>/definition.json`; the built commit is in each row.
 
-<sub>Page + charts regenerated **2026-07-29 02:42 UTC** from the raw `results/*.json`.</sub>
+<sub>Page + charts regenerated **2026-07-29 14:05 UTC** from the raw `results/*.json`.</sub>
