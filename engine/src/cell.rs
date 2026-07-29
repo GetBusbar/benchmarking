@@ -203,7 +203,6 @@ impl CellOutcome {
             note: Some(n),
         }
     }
-
 }
 
 #[cfg(test)]

@@ -453,11 +453,7 @@ mod tests {
     fn an_absence_without_a_detail_still_carries_no_number() {
         for reason in ALL {
             let m: Measurement<f64> = Measurement::absent(reason.clone());
-            assert_eq!(
-                m.copied(),
-                None,
-                "{reason} must never expose a number"
-            );
+            assert_eq!(m.copied(), None, "{reason} must never expose a number");
             assert_eq!(m.reason(), Some(&reason));
             assert_eq!(m.detail(), None);
             assert_eq!(serde_json::to_string(&m).ok(), Some("null".to_string()));

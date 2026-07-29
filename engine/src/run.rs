@@ -2544,7 +2544,10 @@ mod tests {
             "a stock descriptor limit is a real bound and must still bite"
         );
         let streams = super::stream_connection_ceiling();
-        assert!(streams >= 1, "a ceiling of zero would measure nothing: {streams}");
+        assert!(
+            streams >= 1,
+            "a ceiling of zero would measure nothing: {streams}"
+        );
         assert!(
             streams.is_power_of_two(),
             "the ladder doubles, so a ceiling off the ladder is never actually reached: {streams}"
