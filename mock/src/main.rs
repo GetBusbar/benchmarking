@@ -521,10 +521,17 @@ async fn main() {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
+    // TRIMMED, BECAUSE THE ENGINE TRIMS. These knobs are read on BOTH sides of the measurement: the
+    // mock paces frames by them, and the engine reads MOCK_STREAM_INTERVAL_MS to know what pace to
+    // judge a stall against. The engine's reader is `v.trim().parse()`; this one was `v.parse()`, so a
+    // value carrying any whitespace - trivially easy through a shell export or a CI variable - made the
+    // mock silently keep its DEFAULT while the engine believed the new number. Nothing reports that:
+    // the two sides simply measure against different cadences, and every streaming rung is then judged
+    // by a pace nothing is producing. One truth read two ways is the drift this repo keeps finding.
     let envn = |k: &str, d: u64| {
         std::env::var(k)
             .ok()
-            .and_then(|v| v.parse().ok())
+            .and_then(|v| v.trim().parse().ok())
             .unwrap_or(d)
     };
     let s_chunks = envn("MOCK_STREAM_CHUNKS", 64) as u32;
