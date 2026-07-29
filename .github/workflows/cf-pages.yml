@@ -26,6 +26,11 @@ on:
       - "results/**"
       - "gateways/**"
       - "site/**"
+      # This job regenerates the PNGs with charts.py, so a charts.py-only change must redeploy.
+      # Without this it did not: the only workflow it triggered was render-charts, whose
+      # regenerated-PNG commit carries [skip ci], which this file's own header says it does not want
+      # to depend on. The chart code could change and the deployed board keep the old images.
+      - "charts.py"
       - ".github/workflows/cf-pages.yml"
   workflow_dispatch:
 
@@ -69,6 +74,19 @@ jobs:
           python3 charts.py
       - name: Refresh site data + copy fresh chart PNGs
         run: node site/gen-data.mjs
+      # THE SHIPPED BUNDLE, not a regenerated stand-in. site/test.mjs below re-runs gen-data into a
+      # temp dir and checks THAT bundle; the file wrangler actually uploads is site/data.json, which
+      # additionally went through the second gen-data pass (PNG copy + re-stamp). Running the lints'
+      # CLI against the artifact closes that gap. It was a path trigger on bench-tests.yml while no
+      # workflow ever executed it as a step - a gate named in a trigger list and run nowhere is the
+      # same decoration this repo keeps finding.
+      - name: Structural invariants C1-C5 on the bundle being deployed
+        run: node site/check-consistency.mjs site/data.json
+      # Both site suites also run in bench-tests.yml's `site` job, which has no bundle build in
+      # front of them - that is where they gate the SOURCE. This copy gates the DEPLOY: nothing
+      # ships that has not just been checked in the tree it ships from.
+      - name: Site coverage siblings (URL codec fixed points, one envelope one story)
+        run: node site/test-coverage.mjs
       - name: Consistency guard (table == drawer == compare == charts)
         run: node site/test.mjs
       - name: Deploy to Cloudflare Pages
