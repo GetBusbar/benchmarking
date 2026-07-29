@@ -573,13 +573,27 @@ impl Serialize for Cell {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         let mut absences: BTreeMap<String, AbsentEntry> = BTreeMap::new();
         if let Some(perf) = &self.perf {
-            absences.extend(perf.absences().into_iter().map(|(k, v)| (format!("perf.{k}"), v)));
+            absences.extend(
+                perf.absences()
+                    .into_iter()
+                    .map(|(k, v)| (format!("perf.{k}"), v)),
+            );
         }
         if let Some(stream) = &self.stream {
-            absences.extend(stream.absences().into_iter().map(|(k, v)| (format!("stream.{k}"), v)));
+            absences.extend(
+                stream
+                    .absences()
+                    .into_iter()
+                    .map(|(k, v)| (format!("stream.{k}"), v)),
+            );
         }
         if let Some(memory) = &self.memory {
-            absences.extend(memory.absences().into_iter().map(|(k, v)| (format!("memory.{k}"), v)));
+            absences.extend(
+                memory
+                    .absences()
+                    .into_iter()
+                    .map(|(k, v)| (format!("memory.{k}"), v)),
+            );
         }
 
         let mut st = s.serialize_struct("Cell", 12)?;
@@ -640,8 +654,17 @@ mod tests {
         // proves the defaults still cover the shape.
         let matrix_memory: MatrixMemory = serde_json::from_str(r#"{"served":true}"#).unwrap();
         let v = serde_json::to_value(&matrix_memory).unwrap();
-        for key in ["idle_rss_mib", "peak_rss_mib", "peak_rss_hwm_mib", "post_load_rss_mib", "recovered_rss_mib"] {
-            assert!(v.get(key).is_some(), "matrix memory must publish {key}: site/ reads it by this exact name");
+        for key in [
+            "idle_rss_mib",
+            "peak_rss_mib",
+            "peak_rss_hwm_mib",
+            "post_load_rss_mib",
+            "recovered_rss_mib",
+        ] {
+            assert!(
+                v.get(key).is_some(),
+                "matrix memory must publish {key}: site/ reads it by this exact name"
+            );
         }
 
         let cell_memory = CellMemory::default();
@@ -655,10 +678,12 @@ mod tests {
             "time_to_plateau_s",
             "growth_rate_mib_per_min",
         ] {
-            assert!(v.get(key).is_some(), "cell memory must publish {key}: site/ reads it by this exact name");
+            assert!(
+                v.get(key).is_some(),
+                "cell memory must publish {key}: site/ reads it by this exact name"
+            );
         }
     }
-
 
     fn sample_perf() -> CellPerf {
         CellPerf {
@@ -792,7 +817,9 @@ mod tests {
             arch: Some("arm64".to_string()),
             hardware: Some("m7g.4xlarge".to_string()),
             rig: None,
-            config: ConfigFiles { files: HashMap::new() },
+            config: ConfigFiles {
+                files: HashMap::new(),
+            },
             matrix: sample_matrix(),
             memory: None,
             streaming: None,
@@ -819,7 +846,11 @@ mod tests {
 
     #[test]
     fn served_status_variant_round_trips() {
-        for s in [Served::Bool(true), Served::Bool(false), Served::Status("untestable".to_string())] {
+        for s in [
+            Served::Bool(true),
+            Served::Bool(false),
+            Served::Status("untestable".to_string()),
+        ] {
             let js = serde_json::to_string(&s).unwrap();
             let back: Served = serde_json::from_str(&js).unwrap();
             assert_eq!(s, back);
@@ -833,14 +864,21 @@ mod tests {
         let rec = sample_record();
         let v: serde_json::Value = serde_json::to_value(&rec).unwrap();
         // Key paths pulled directly from a real committed snapshot, not invented here.
-        assert!(v.pointer("/matrix/upstreams/openai/cells/openai/perf/rps_max_proxy").is_some());
-        assert!(v.pointer("/matrix/upstreams/openai/cells/openai/perf/sweep_max_proxy/0/conc").is_some());
-        assert!(v.pointer("/matrix/upstreams/openai/cells/openai/stream/stream_served").is_some());
+        assert!(v
+            .pointer("/matrix/upstreams/openai/cells/openai/perf/rps_max_proxy")
+            .is_some());
+        assert!(v
+            .pointer("/matrix/upstreams/openai/cells/openai/perf/sweep_max_proxy/0/conc")
+            .is_some());
+        assert!(v
+            .pointer("/matrix/upstreams/openai/cells/openai/stream/stream_served")
+            .is_some());
         assert!(v.pointer("/matrix/cells/openai/served").is_some());
         assert!(v.pointer("/matrix/upstreams/openai/configurable").is_some());
         assert!(v.pointer("/config/files").is_some());
         assert_eq!(
-            v.pointer("/matrix/upstreams/openai/cells/openai/perf/rps_max_proxy").unwrap(),
+            v.pointer("/matrix/upstreams/openai/cells/openai/perf/rps_max_proxy")
+                .unwrap(),
             &serde_json::json!(12_298)
         );
     }
@@ -896,7 +934,8 @@ mod tests {
 
     #[test]
     fn hostile_strings_round_trip_exactly() {
-        let hostile = "quote\" backslash\\ newline\n tab\t control\u{0007} unicode: caf\u{e9} \u{1f600}";
+        let hostile =
+            "quote\" backslash\\ newline\n tab\t control\u{0007} unicode: caf\u{e9} \u{1f600}";
         let mut cell = sample_cell();
         cell.verdict_note = hostile.to_string();
         cell.body_snippet = hostile.to_string();
@@ -917,7 +956,10 @@ mod tests {
         // serde_json must have escaped it, so the raw byte must not appear verbatim in the output.
         assert!(!js.contains('\u{0001}'));
         let reparsed: serde_json::Value = serde_json::from_str(&js).unwrap();
-        assert_eq!(reparsed["verdict_note"], serde_json::json!("line one\nline two\u{0001}"));
+        assert_eq!(
+            reparsed["verdict_note"],
+            serde_json::json!("line one\nline two\u{0001}")
+        );
     }
 
     // ── the shapes the published artifact must hold ─────────────────────────────────────────────
@@ -937,12 +979,20 @@ mod tests {
         let back: ResultSnapshot = serde_json::from_str(&js).expect("its own output must parse");
         assert_eq!(back.schema_version, 1);
         assert!(back.matrix.served);
-        let egress = back.matrix.upstreams.values().next().expect("an egress row");
+        let egress = back
+            .matrix
+            .upstreams
+            .values()
+            .next()
+            .expect("an egress row");
         assert!(egress.served);
         let cell = egress.cells.values().next().expect("a cell");
         assert!(matches!(cell.served, Served::Bool(true)));
         let perf = cell.perf.as_ref().expect("a served cell carries perf");
-        assert!(perf.rps_max_proxy.is_measured(), "a measured peak must survive the round trip");
+        assert!(
+            perf.rps_max_proxy.is_measured(),
+            "a measured peak must survive the round trip"
+        );
     }
 
     // The other half: a cell that was not served must not arrive carrying numbers. Fabricating a
@@ -964,7 +1014,10 @@ mod tests {
             assert!(!up.served);
             for cell in up.cells.values() {
                 assert!(cell.perf.is_none(), "an unserved cell must not carry perf");
-                assert!(cell.stream.is_none(), "an unserved cell must not carry stream");
+                assert!(
+                    cell.stream.is_none(),
+                    "an unserved cell must not carry stream"
+                );
             }
         }
     }
@@ -1001,8 +1054,7 @@ mod tests {
             "the value slot itself must still be a bare null, unchanged for existing consumers"
         );
         assert_eq!(
-            value["absences"]["perf.rps_max_proxy"]["reason"],
-            "search_exhausted",
+            value["absences"]["perf.rps_max_proxy"]["reason"], "search_exhausted",
             "the real reason must be published, not thrown away: got {value}"
         );
         assert!(
@@ -1013,12 +1065,15 @@ mod tests {
             "the operator-facing detail must survive too: got {value}"
         );
         assert_eq!(
-            value["absences"]["stream.cpu_fps"]["reason"],
-            "rig_limited",
+            value["absences"]["stream.cpu_fps"]["reason"], "rig_limited",
             "every absent metric must appear, not just the first one: got {value}"
         );
         assert!(
-            value["absences"].get("stream.cpu_fps").unwrap().get("detail").is_none()
+            value["absences"]
+                .get("stream.cpu_fps")
+                .unwrap()
+                .get("detail")
+                .is_none()
                 || value["absences"]["stream.cpu_fps"]["detail"].is_null(),
             "a reason with no detail must not fabricate one"
         );

@@ -112,7 +112,10 @@ mod tests {
     use super::*;
 
     fn obs(status: Option<u16>, mock_healthy: bool) -> Observation {
-        Observation { status, mock_healthy }
+        Observation {
+            status,
+            mock_healthy,
+        }
     }
 
     // The verdict must depend only on what was observed, so two cells that differ ONLY in what the
@@ -165,8 +168,14 @@ mod tests {
     // No HTTP answer at all cannot be attributed to the gateway: it may never have been reached.
     #[test]
     fn no_http_answer_is_never_blamed_on_the_gateway() {
-        assert_eq!(persistent_transient_verdict(obs(None, true)), Verdict::NotVerified);
-        assert_eq!(persistent_transient_verdict(obs(None, false)), Verdict::NotVerified);
+        assert_eq!(
+            persistent_transient_verdict(obs(None, true)),
+            Verdict::NotVerified
+        );
+        assert_eq!(
+            persistent_transient_verdict(obs(None, false)),
+            Verdict::NotVerified
+        );
     }
 
     // If the rig could not confirm itself, nothing observed through it is attributable, whatever
@@ -200,16 +209,25 @@ mod tests {
     fn a_status_that_says_temporarily_is_retried_and_a_settled_answer_is_not() {
         // "Temporarily unavailable", "too many requests", "timed out" - all moments, not capabilities.
         for s in [408, 425, 429, 500, 502, 503, 504, 507, 509] {
-            assert!(status_is_transient(s), "HTTP {s} describes a moment and must not be graded as a capability");
+            assert!(
+                status_is_transient(s),
+                "HTTP {s} describes a moment and must not be graded as a capability"
+            );
         }
         // A route that does not exist is an ANSWER. NotConfigured already carries it, and spending a
         // 60-second budget to hear it twice more just burns box-time.
         for s in [404, 501] {
-            assert!(!status_is_transient(s), "HTTP {s} is the gateway stating the route does not exist");
+            assert!(
+                !status_is_transient(s),
+                "HTTP {s} is the gateway stating the route does not exist"
+            );
         }
         // Neither is a request the gateway rejected on its merits: the same bytes get the same answer.
         for s in [400, 401, 403, 405, 409, 413, 415, 422] {
-            assert!(!status_is_transient(s), "HTTP {s} is deterministic - a retry sends the same request");
+            assert!(
+                !status_is_transient(s),
+                "HTTP {s} is deterministic - a retry sends the same request"
+            );
         }
         // And success is never a retry case.
         for s in [200, 201, 204] {
@@ -223,7 +241,13 @@ mod tests {
     #[test]
     fn the_budget_funds_more_than_one_attempt_and_pauses_between_them() {
         let (attempts, pause_s) = transient_budget();
-        assert!(attempts > 1, "a budget of {attempts} attempt(s) cannot outlast anything transient");
-        assert!(pause_s > 0, "retrying with no pause re-asks inside the same moment that failed");
+        assert!(
+            attempts > 1,
+            "a budget of {attempts} attempt(s) cannot outlast anything transient"
+        );
+        assert!(
+            pause_s > 0,
+            "retrying with no pause re-asks inside the same moment that failed"
+        );
     }
 }

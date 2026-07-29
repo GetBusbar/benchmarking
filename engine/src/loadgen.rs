@@ -13,13 +13,17 @@ use std::collections::BTreeMap;
 /// Split a stats line into its `k=v` pairs. Unrecognised keys are kept (and simply never looked up),
 /// which is how an unfamiliar future field is ignored rather than rejected.
 fn parse_kv(line: &str) -> BTreeMap<&str, &str> {
-    line.split_whitespace().filter_map(|tok| tok.split_once('=')).collect()
+    line.split_whitespace()
+        .filter_map(|tok| tok.split_once('='))
+        .collect()
 }
 
 fn require_i64(fields: &BTreeMap<&str, &str>, key: &str, line: &str) -> Result<i64, String> {
     match fields.get(key) {
         None => Err(format!("missing field '{key}' in stats line: '{line}'")),
-        Some(v) => v.parse::<i64>().map_err(|_| format!("non-numeric field '{key}={v}' in stats line: '{line}'")),
+        Some(v) => v
+            .parse::<i64>()
+            .map_err(|_| format!("non-numeric field '{key}={v}' in stats line: '{line}'")),
     }
 }
 
@@ -52,8 +56,14 @@ fn parse_ugen_fields(line: &str) -> Result<UgenStats, String> {
         p50_us: require_i64(&fields, "p50us", line)?,
         p99_us: require_i64(&fields, "p99us", line)?,
         ok: require_i64(&fields, "ok", line)?,
-        rig_refused: fields.get("rigrefused").and_then(|v| v.parse::<i64>().ok()).unwrap_or(0),
-        budget_exceeded: fields.get("budgetexceeded").and_then(|v| v.parse::<i64>().ok()).unwrap_or(0),
+        rig_refused: fields
+            .get("rigrefused")
+            .and_then(|v| v.parse::<i64>().ok())
+            .unwrap_or(0),
+        budget_exceeded: fields
+            .get("budgetexceeded")
+            .and_then(|v| v.parse::<i64>().ok())
+            .unwrap_or(0),
     })
 }
 
@@ -108,7 +118,8 @@ pub fn encode_headers(headers: &[(String, String)]) -> String {
 /// failure, whereas the placeholder that used to be hardcoded here was a wrong credential that looked
 /// exactly like a gateway falling over under load.
 pub fn decode_headers(raw: Option<&str>) -> Vec<(String, String)> {
-    raw.and_then(|s| serde_json::from_str::<Vec<(String, String)>>(s).ok()).unwrap_or_default()
+    raw.and_then(|s| serde_json::from_str::<Vec<(String, String)>>(s).ok())
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -123,7 +134,15 @@ mod tests {
         let m = parse_ugen_line(UGEN_LINE);
         assert_eq!(
             m,
-            Measurement::Measured(UgenStats { rps: 1234, fail: 3, p50_us: 12_500, p99_us: 45_000, ok: 14_808, rig_refused: 0, budget_exceeded: 0 })
+            Measurement::Measured(UgenStats {
+                rps: 1234,
+                fail: 3,
+                p50_us: 12_500,
+                p99_us: 45_000,
+                ok: 14_808,
+                rig_refused: 0,
+                budget_exceeded: 0
+            })
         );
     }
 
@@ -142,7 +161,10 @@ mod tests {
         let m = parse_ugen_line(line);
         assert!(!m.is_measured());
         assert_eq!(m.reason(), Some(&Absent::HarnessError));
-        assert!(m.detail().unwrap_or_default().contains(line), "detail must carry the offending line");
+        assert!(
+            m.detail().unwrap_or_default().contains(line),
+            "detail must carry the offending line"
+        );
         assert!(m.detail().unwrap_or_default().contains("p50us"));
     }
 
@@ -190,8 +212,14 @@ mod tests {
     #[test]
     fn a_hostile_header_value_crosses_intact_rather_than_splitting() {
         let hostile = vec![
-            ("authorization".to_string(), "Bearer a:b\nx-injected: yes\r\n".to_string()),
-            ("x-route".to_string(), "  spaces and \"quotes\"  ".to_string()),
+            (
+                "authorization".to_string(),
+                "Bearer a:b\nx-injected: yes\r\n".to_string(),
+            ),
+            (
+                "x-route".to_string(),
+                "  spaces and \"quotes\"  ".to_string(),
+            ),
         ];
         assert_eq!(decode_headers(Some(&encode_headers(&hostile))), hostile);
     }
@@ -200,8 +228,10 @@ mod tests {
     // header names that some dialects distinguish from a single comma-joined one.
     #[test]
     fn repeated_header_names_are_not_collapsed_in_transit() {
-        let dupes =
-            vec![("x-h".to_string(), "one".to_string()), ("x-h".to_string(), "two".to_string())];
+        let dupes = vec![
+            ("x-h".to_string(), "one".to_string()),
+            ("x-h".to_string(), "two".to_string()),
+        ];
         assert_eq!(decode_headers(Some(&encode_headers(&dupes))), dupes);
     }
 

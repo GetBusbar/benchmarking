@@ -122,7 +122,9 @@ fn rig_ceiling(cfg: &SuiteConfig, dialect: Dialect, at_conc: u32) -> Measurement
         // attribute the gateway's tree to a run that never touched it.
         static_headers: Vec::new(),
         egress_headers: Default::default(),
-        runtime: crate::manifest::Runtime::Native { proc_match: String::new() },
+        runtime: crate::manifest::Runtime::Native {
+            proc_match: String::new(),
+        },
         // The reference drives the MOCK directly. There is no gateway process behind it, so there is
         // nothing to restart, and a spec here would let a reference measurement bounce the gateway.
         relaunch: None,
@@ -162,7 +164,9 @@ fn as_i64(m: Option<&Measurement<f64>>) -> Measurement<i64> {
                 (None, _) => Measurement::absent(Absent::NotMeasured),
             },
         },
-        None => Measurement::absent_because(Absent::NotMeasured, "no metric group fills this field"),
+        None => {
+            Measurement::absent_because(Absent::NotMeasured, "no metric group fills this field")
+        }
     }
 }
 
@@ -179,8 +183,12 @@ fn judge_cell(
     metrics: &std::collections::BTreeMap<&'static str, Measurement<f64>>,
 ) -> Judged {
     let mut out = empty_perf();
-    let missing = || Measurement::absent_because(Absent::NotMeasured, "no metric group fills this field");
-    let rps = metrics.get("rps_max_proxy").cloned().unwrap_or_else(missing);
+    let missing =
+        || Measurement::absent_because(Absent::NotMeasured, "no metric group fills this field");
+    let rps = metrics
+        .get("rps_max_proxy")
+        .cloned()
+        .unwrap_or_else(missing);
     let conc_m = metrics.get("conc_at_peak").cloned().unwrap_or_else(missing);
 
     match (rps.value(), conc_m.value()) {
@@ -226,7 +234,13 @@ fn judge_cell(
 /// address, path and headers as arguments, so the direct leg is expressed directly instead of as a
 /// gateway config with the gateway parts blanked out one field at a time.
 fn stream_rig_ceiling(cfg: &SuiteConfig, dialect: Dialect, at_conc: u32) -> Measurement<f64> {
-    run::stream_fps_at(cfg.mock_addr, &cfg.manifest.model, &cfg.manifest.auth, dialect, at_conc)
+    run::stream_fps_at(
+        cfg.mock_addr,
+        &cfg.manifest.model,
+        &cfg.manifest.auth,
+        dialect,
+        at_conc,
+    )
 }
 
 /// Fill the added-latency fields straight from the metric surface.
@@ -236,7 +250,10 @@ fn stream_rig_ceiling(cfg: &SuiteConfig, dialect: Dialect, at_conc: u32) -> Meas
 /// IS the rig correction, the same way `Streaming::measure`'s `added_ttft`/`added_gap` need no second
 /// rig judgement layered on top. So this is a plain "take", exactly the pattern `cell_memory` and
 /// `cell_stream` already use for fields with no rig-bound question to ask.
-fn judge_added_latency(out: &mut CellPerf, metrics: &std::collections::BTreeMap<&'static str, Measurement<f64>>) {
+fn judge_added_latency(
+    out: &mut CellPerf,
+    metrics: &std::collections::BTreeMap<&'static str, Measurement<f64>>,
+) {
     out.added_latency_p50_us = as_i64(metrics.get("added_latency_p50_us"));
     out.added_latency_p99_us = as_i64(metrics.get("added_latency_p99_us"));
     out.gateway_c1_p99_us = as_i64(metrics.get("gateway_c1_p99_us"));
@@ -275,9 +292,16 @@ fn judge_sustained(
     out: &mut CellPerf,
     metrics: &std::collections::BTreeMap<&'static str, Measurement<f64>>,
 ) {
-    let missing = || Measurement::absent_because(Absent::NotMeasured, "no metric group fills this field");
-    let rps = metrics.get("rps_sustained_20ms").cloned().unwrap_or_else(missing);
-    let conc_m = metrics.get("rps_sustained_20ms_concurrency").cloned().unwrap_or_else(missing);
+    let missing =
+        || Measurement::absent_because(Absent::NotMeasured, "no metric group fills this field");
+    let rps = metrics
+        .get("rps_sustained_20ms")
+        .cloned()
+        .unwrap_or_else(missing);
+    let conc_m = metrics
+        .get("rps_sustained_20ms_concurrency")
+        .cloned()
+        .unwrap_or_else(missing);
 
     let (Some(&value), Some(&conc_f)) = (rps.value(), conc_m.value()) else {
         let absent = match (rps.reason().cloned(), rps.detail()) {
@@ -319,7 +343,9 @@ fn apply_sustained_verdict(out: &mut CellPerf, value: f64, conc: u32, reference:
     match rigbound::is_rig_bound(value, reference.clone()).copied() {
         Some(true) => {
             let detail = match reference.copied() {
-                Some(r) => format!("sustained {value:.0} against a rig ceiling of {r:.0} at c={conc}"),
+                Some(r) => {
+                    format!("sustained {value:.0} against a rig ceiling of {r:.0} at c={conc}")
+                }
                 None => format!("sustained {value:.0} at c={conc} with an unusable rig reference"),
             };
             out.rps_sustained_20ms = Measurement::absent_because(Absent::RigLimited, detail);
@@ -360,7 +386,9 @@ fn apply_peak_verdict(out: &mut CellPerf, value: f64, conc: u32, reference: Meas
         // tie they did not earn.
         Some(true) => {
             let detail = match reference.copied() {
-                Some(r) => format!("reached {value:.0} against a rig ceiling of {r:.0} at c={conc}"),
+                Some(r) => {
+                    format!("reached {value:.0} against a rig ceiling of {r:.0} at c={conc}")
+                }
                 None => format!("reached {value:.0} at c={conc} with an unusable rig reference"),
             };
             out.rps_max_proxy = Measurement::absent_because(Absent::RigLimited, detail);
@@ -406,10 +434,9 @@ fn cell_memory(
     series: Option<&crate::metric::Series>,
 ) -> crate::record::CellMemory {
     let take = |k: &str| {
-        metrics
-            .get(k)
-            .cloned()
-            .unwrap_or_else(|| Measurement::absent_because(Absent::NotMeasured, "no metric group fills this field"))
+        metrics.get(k).cloned().unwrap_or_else(|| {
+            Measurement::absent_because(Absent::NotMeasured, "no metric group fills this field")
+        })
     };
     let rss_series: Vec<crate::record::RssSample> =
         series.map(|s| s.rss.clone()).unwrap_or_default();
@@ -471,8 +498,11 @@ fn steady_state(series: &[crate::record::RssSample]) -> Measurement<f64> {
     }
     tail.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let mid = tail.len() / 2;
-    let median =
-        if tail.len().is_multiple_of(2) { (tail[mid - 1] + tail[mid]) / 2.0 } else { tail[mid] };
+    let median = if tail.len().is_multiple_of(2) {
+        (tail[mid - 1] + tail[mid]) / 2.0
+    } else {
+        tail[mid]
+    };
     Measurement::Measured(median)
 }
 
@@ -493,16 +523,17 @@ fn cell_stream(
     let us = |k: &str| -> Measurement<i64> { as_i64(metrics.get(k)) };
 
     let ttft = metrics.get("added_ttft_p50_us");
-    let (stream_served, reason) = match ttft.map(|m| (m.is_measured(), m.reason().cloned(), m.detail())) {
-        Some((true, _, _)) => (crate::record::StreamServed::Bool(true), None),
-        // Probed, and the answer was not a number. The reason travels as the status so a reader is
-        // never left to infer a gateway property from a rig limit.
-        Some((false, Some(r), detail)) => (
-            crate::record::StreamServed::Status(r.token().to_string()),
-            detail.map(str::to_string),
-        ),
-        _ => (crate::record::StreamServed::default(), None),
-    };
+    let (stream_served, reason) =
+        match ttft.map(|m| (m.is_measured(), m.reason().cloned(), m.detail())) {
+            Some((true, _, _)) => (crate::record::StreamServed::Bool(true), None),
+            // Probed, and the answer was not a number. The reason travels as the status so a reader is
+            // never left to infer a gateway property from a rig limit.
+            Some((false, Some(r), detail)) => (
+                crate::record::StreamServed::Status(r.token().to_string()),
+                detail.map(str::to_string),
+            ),
+            _ => (crate::record::StreamServed::default(), None),
+        };
 
     let mut out = crate::record::CellStream {
         stream_served,
@@ -561,9 +592,16 @@ fn judge_streams_sustained(
     out: &mut crate::record::CellStream,
     metrics: &std::collections::BTreeMap<&'static str, Measurement<f64>>,
 ) {
-    let missing = || Measurement::absent_because(Absent::NotMeasured, "no metric group fills this field");
-    let fps = metrics.get("streams_sustained_fps").cloned().unwrap_or_else(missing);
-    let conc_m = metrics.get("streams_sustained").cloned().unwrap_or_else(missing);
+    let missing =
+        || Measurement::absent_because(Absent::NotMeasured, "no metric group fills this field");
+    let fps = metrics
+        .get("streams_sustained_fps")
+        .cloned()
+        .unwrap_or_else(missing);
+    let conc_m = metrics
+        .get("streams_sustained")
+        .cloned()
+        .unwrap_or_else(missing);
 
     let (Some(&value), Some(&conc_f)) = (fps.value(), conc_m.value()) else {
         let absent = carry_absence(&fps);
@@ -594,9 +632,13 @@ fn judge_cpu_fps(
     out: &mut crate::record::CellStream,
     metrics: &std::collections::BTreeMap<&'static str, Measurement<f64>>,
 ) {
-    let missing = || Measurement::absent_because(Absent::NotMeasured, "no metric group fills this field");
+    let missing =
+        || Measurement::absent_because(Absent::NotMeasured, "no metric group fills this field");
     let fps = metrics.get("cpu_fps").cloned().unwrap_or_else(missing);
-    let conc_m = metrics.get("cpu_fps_concurrency").cloned().unwrap_or_else(missing);
+    let conc_m = metrics
+        .get("cpu_fps_concurrency")
+        .cloned()
+        .unwrap_or_else(missing);
 
     let (Some(&value), Some(&conc_f)) = (fps.value(), conc_m.value()) else {
         let absent = carry_absence(&fps);
@@ -750,7 +792,9 @@ fn qualify_box(cfg: &SuiteConfig, history: &[f64]) -> serde_json::Value {
         // No gateway is in this path at all, so there is no gateway process to attribute anything to.
         static_headers: Vec::new(),
         egress_headers: Default::default(),
-        runtime: crate::manifest::Runtime::Native { proc_match: String::new() },
+        runtime: crate::manifest::Runtime::Native {
+            proc_match: String::new(),
+        },
         // The reference drives the MOCK directly. There is no gateway process behind it, so there is
         // nothing to restart, and a spec here would let a reference measurement bounce the gateway.
         relaunch: None,
@@ -770,8 +814,12 @@ fn qualify_box(cfg: &SuiteConfig, history: &[f64]) -> serde_json::Value {
     let observed = run::measure_at(&direct, &id, QUALIFY_CONCURRENCY);
 
     let baseline = crate::qualify::rolling_baseline(history.to_vec());
-    let (outcome, drift) =
-        crate::qualify::judge(observed.clone(), baseline.clone(), QUALIFY_BAND_PCT, crate::qualify::Sense::HigherIsBetter);
+    let (outcome, drift) = crate::qualify::judge(
+        observed.clone(),
+        baseline.clone(),
+        QUALIFY_BAND_PCT,
+        crate::qualify::Sense::HigherIsBetter,
+    );
 
     serde_json::json!({
         "outcome": outcome.token(),
@@ -806,7 +854,10 @@ fn qualify_box(cfg: &SuiteConfig, history: &[f64]) -> serde_json::Value {
 /// one: it is the box being qualified.
 fn qualify_history(results_dir: &Path) -> Vec<f64> {
     let mut out = qualify_history_on_disk(results_dir);
-    if let Some(v) = std::env::var("OTB_QUALIFY_BASELINE").ok().and_then(|v| v.trim().parse::<f64>().ok()) {
+    if let Some(v) = std::env::var("OTB_QUALIFY_BASELINE")
+        .ok()
+        .and_then(|v| v.trim().parse::<f64>().ok())
+    {
         if v > 0.0 {
             out.push(v);
         }
@@ -827,9 +878,16 @@ fn qualify_history_on_disk(results_dir: &Path) -> Vec<f64> {
         if !name.starts_with("result_") || !name.ends_with(".json") {
             continue;
         }
-        let Ok(text) = std::fs::read_to_string(entry.path()) else { continue };
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else { continue };
-        if let Some(rps) = value.pointer("/rig/box_qualify/observed_rps").and_then(serde_json::Value::as_f64) {
+        let Ok(text) = std::fs::read_to_string(entry.path()) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        if let Some(rps) = value
+            .pointer("/rig/box_qualify/observed_rps")
+            .and_then(serde_json::Value::as_f64)
+        {
             out.push(rps);
         }
     }
@@ -863,7 +921,9 @@ pub fn run_suite_with(
         // restart cannot differ from the launch it is repeating. `None` for a manifest that declares
         // no launch: the harness does not own that gateway's lifetime and must not bounce it.
         declared_path: cfg.manifest.path.clone(),
-        cell_paths: cfg.manifest.cell_paths_for(&cfg.gw_cores, cfg.mock_addr.port(), &cfg.gw_dir),
+        cell_paths: cfg
+            .manifest
+            .cell_paths_for(&cfg.gw_cores, cfg.mock_addr.port(), &cfg.gw_dir),
         matrix: cfg.manifest.matrix.clone(),
         matrix_note: cfg.manifest.matrix_note.clone(),
         untestable_cells: cfg.manifest.untestable.clone(),
@@ -893,10 +953,16 @@ pub fn run_suite_with(
             .dialects
             .iter()
             .filter_map(|d| {
-                let mut h = cfg.manifest.headers_for(d.as_str(), &cfg.gw_cores, cfg.mock_addr.port(), &cfg.gw_dir).ok()?;
+                let mut h = cfg
+                    .manifest
+                    .headers_for(d.as_str(), &cfg.gw_cores, cfg.mock_addr.port(), &cfg.gw_dir)
+                    .ok()?;
                 // headers_for prepends the always-on set; the run config carries those separately, so
                 // strip them here rather than sending each one twice.
-                let statics = cfg.manifest.headers_for("", &cfg.gw_cores, cfg.mock_addr.port(), &cfg.gw_dir).ok()?;
+                let statics = cfg
+                    .manifest
+                    .headers_for("", &cfg.gw_cores, cfg.mock_addr.port(), &cfg.gw_dir)
+                    .ok()?;
                 h.retain(|x| !statics.contains(x));
                 Some((d.as_str().to_string(), h))
             })
@@ -949,7 +1015,10 @@ pub fn run_suite_with(
             if let Some(finished_egress) = &last_egress {
                 match flush(cfg, &upstreams, any_served, Some(box_qualify.clone())) {
                     Ok(paths) => written = Some(paths),
-                    Err(SnapshotError::PromoteGuard { existing_served, incoming_served }) => {
+                    Err(SnapshotError::PromoteGuard {
+                        existing_served,
+                        incoming_served,
+                    }) => {
                         eprintln!(
                             "suite: checkpoint after egress column {finished_egress} not written yet \
                              ({incoming_served} served so far vs {existing_served} on disk) - \
@@ -1049,7 +1118,10 @@ pub fn run_suite_with(
                 _ => result.outcome.note.clone().unwrap_or_default(),
             },
             perf,
-            memory: result.metrics.as_ref().map(|m| cell_memory(m, result.series.as_ref())),
+            memory: result
+                .metrics
+                .as_ref()
+                .map(|m| cell_memory(m, result.series.as_ref())),
             stream: match (&result.metrics, ing.parse::<Dialect>()) {
                 (Some(m), Ok(d)) => Some(cell_stream(cfg, d, m, result.series.as_ref())),
                 _ => None,
@@ -1191,13 +1263,21 @@ mod tests {
         let dir = tmpdir("phases");
         let gw = serve(200);
         let cfg = cfg_for(&dir, gw);
-        let paths = run_suite_with(&cfg, gw, crate::metric::METRICS).expect("the suite should write");
+        let paths =
+            run_suite_with(&cfg, gw, crate::metric::METRICS).expect("the suite should write");
         let text = std::fs::read_to_string(&paths.current).expect("current file");
         let back: ResultSnapshot = serde_json::from_str(&text).expect("its own output must parse");
 
         assert!(back.matrix.cell_perf_sweep, "the perf sweep ran");
-        assert!(back.matrix.cell_stream, "the streaming group is in METRICS and ran");
-        assert_eq!(back.matrix.cell_memory, Some(true), "the memory group is in METRICS and ran");
+        assert!(
+            back.matrix.cell_stream,
+            "the streaming group is in METRICS and ran"
+        );
+        assert_eq!(
+            back.matrix.cell_memory,
+            Some(true),
+            "the memory group is in METRICS and ran"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1261,17 +1341,57 @@ mod tests {
         // column's checkpoint (2 cells) will carry, but fewer than the finished run's 4.
         let mut seeded_upstreams = std::collections::HashMap::new();
         let mut cells = std::collections::HashMap::new();
-        cells.insert("openai".to_string(), crate::record::Cell { served: RecServed::Bool(true), ..Default::default() });
-        cells.insert("anthropic".to_string(), crate::record::Cell { served: RecServed::Bool(true), ..Default::default() });
-        seeded_upstreams.insert("openai".to_string(), Upstream { configurable: true, served: true, cells, ..Default::default() });
+        cells.insert(
+            "openai".to_string(),
+            crate::record::Cell {
+                served: RecServed::Bool(true),
+                ..Default::default()
+            },
+        );
+        cells.insert(
+            "anthropic".to_string(),
+            crate::record::Cell {
+                served: RecServed::Bool(true),
+                ..Default::default()
+            },
+        );
+        seeded_upstreams.insert(
+            "openai".to_string(),
+            Upstream {
+                configurable: true,
+                served: true,
+                cells,
+                ..Default::default()
+            },
+        );
         let mut cells2 = std::collections::HashMap::new();
-        cells2.insert("openai".to_string(), crate::record::Cell { served: RecServed::Bool(true), ..Default::default() });
-        seeded_upstreams.insert("anthropic".to_string(), Upstream { configurable: true, served: true, cells: cells2, ..Default::default() });
+        cells2.insert(
+            "openai".to_string(),
+            crate::record::Cell {
+                served: RecServed::Bool(true),
+                ..Default::default()
+            },
+        );
+        seeded_upstreams.insert(
+            "anthropic".to_string(),
+            Upstream {
+                configurable: true,
+                served: true,
+                cells: cells2,
+                ..Default::default()
+            },
+        );
         let seed = ResultSnapshot {
             schema_version: 1,
             gateway: "gw".into(),
             measured_at: "2020-01-01T00-00-00Z".into(),
-            matrix: Matrix { gateway: "gw".into(), served: true, measured_at: "2020-01-01T00-00-00Z".into(), upstreams: seeded_upstreams, ..Default::default() },
+            matrix: Matrix {
+                gateway: "gw".into(),
+                served: true,
+                measured_at: "2020-01-01T00-00-00Z".into(),
+                upstreams: seeded_upstreams,
+                ..Default::default()
+            },
             ..Default::default()
         };
         crate::snapshot::write_snapshot(&dir, &seed).expect("seed snapshot should write");
@@ -1291,7 +1411,10 @@ mod tests {
             .flat_map(|u| u.cells.values())
             .filter(|c| matches!(c.served, RecServed::Bool(true)))
             .count();
-        assert_eq!(served, 4, "both egress columns must have been measured and published");
+        assert_eq!(
+            served, 4,
+            "both egress columns must have been measured and published"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1313,7 +1436,10 @@ mod tests {
         let back: ResultSnapshot = serde_json::from_str(&text).expect("its own output must parse");
         assert_eq!(back.gateway, "gw");
         assert!(back.matrix.served, "a 2xx gateway serves its diagonal");
-        assert!(paths.historical.exists(), "the timestamped copy must land too");
+        assert!(
+            paths.historical.exists(),
+            "the timestamped copy must land too"
+        );
         // THE CASE THAT WAS BROKEN: site/gen-data.mjs reads matrix.measured_at, not the snapshot
         // root's - a snapshot whose matrix carries no stamp of its own renders as "never measured"
         // on the board no matter how fresh the run actually was.
@@ -1338,15 +1464,25 @@ mod tests {
         let dir = tmpdir("stamp");
         let gw = serve(200);
         let mut cfg = cfg_for(&dir, gw);
-        cfg.engine_stamp = Some(crate::record::EngineStamp { commit: "deadbeef".into(), dirty: true });
+        cfg.engine_stamp = Some(crate::record::EngineStamp {
+            commit: "deadbeef".into(),
+            dirty: true,
+        });
         let up = HashMap::new();
         let paths = flush(&cfg, &up, false, None).expect("the snapshot should write");
         let text = std::fs::read_to_string(&paths.current).expect("current file");
         let back: ResultSnapshot = serde_json::from_str(&text).expect("its own output must parse");
-        let rig = back.rig.expect("a run with a commit must carry a rig block");
-        let eng = rig.engine.expect("rig.engine must survive with no box qualification beside it");
+        let rig = back
+            .rig
+            .expect("a run with a commit must carry a rig block");
+        let eng = rig
+            .engine
+            .expect("rig.engine must survive with no box qualification beside it");
         assert_eq!(eng.commit, "deadbeef");
-        assert!(eng.dirty, "a dirty tree must be published as dirty, not quietly cleaned");
+        assert!(
+            eng.dirty,
+            "a dirty tree must be published as dirty, not quietly cleaned"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1360,7 +1496,11 @@ mod tests {
         let paths = run_suite_with(&cfg, gw, &[]).expect("a refusing gateway is still a result");
         let text = std::fs::read_to_string(&paths.current).expect("current file");
         let back: ResultSnapshot = serde_json::from_str(&text).expect("parse");
-        let up = back.matrix.upstreams.get("openai").expect("the egress row exists");
+        let up = back
+            .matrix
+            .upstreams
+            .get("openai")
+            .expect("the egress row exists");
         let cell = up.cells.get("openai").expect("the cell row exists");
         assert!(!matches!(cell.served, RecServed::Bool(true)));
         assert!(cell.perf.is_none(), "an unserved cell carries no perf");
@@ -1380,7 +1520,11 @@ mod tests {
         // verdict is the measured branch. Driving this through judge_cell instead is what made the
         // first version of this test vacuous: its fixture is always rig-bound.
         apply_peak_verdict(&mut out, 46_863.0, 116, Measurement::Measured(400_000.0));
-        assert_eq!(out.rps_max_proxy.copied(), Some(46_863), "a gateway-bound peak is published");
+        assert_eq!(
+            out.rps_max_proxy.copied(),
+            Some(46_863),
+            "a gateway-bound peak is published"
+        );
         assert_eq!(
             out.rps_max_proxy_concurrency.copied(),
             Some(116),
@@ -1396,7 +1540,11 @@ mod tests {
         let mut out = empty_perf();
         // Reference equal to the observation: the rig, not the gateway, set this.
         apply_peak_verdict(&mut out, 46_863.0, 116, Measurement::Measured(46_863.0));
-        assert_eq!(out.rps_max_proxy.copied(), None, "a rig-bound peak is suppressed");
+        assert_eq!(
+            out.rps_max_proxy.copied(),
+            None,
+            "a rig-bound peak is suppressed"
+        );
         assert_eq!(
             out.rps_max_proxy_concurrency.copied(),
             None,
@@ -1426,7 +1574,11 @@ mod tests {
         let mut out = empty_perf();
         // Reference equal to the observation: the rig, not the gateway, set this ceiling.
         apply_sustained_verdict(&mut out, 11_968.0, 1024, Measurement::Measured(11_968.0));
-        assert_eq!(out.rps_sustained_20ms.copied(), None, "a rig-bound sustained rate is suppressed");
+        assert_eq!(
+            out.rps_sustained_20ms.copied(),
+            None,
+            "a rig-bound sustained rate is suppressed"
+        );
         assert_eq!(
             out.rps_sustained_20ms_concurrency.copied(),
             None,
@@ -1439,7 +1591,12 @@ mod tests {
     #[test]
     fn an_unusable_sustained_reference_is_unknown_never_a_guessed_false() {
         let mut out = empty_perf();
-        apply_sustained_verdict(&mut out, 11_968.0, 1024, Measurement::absent(Absent::NotMeasured));
+        apply_sustained_verdict(
+            &mut out,
+            11_968.0,
+            1024,
+            Measurement::absent(Absent::NotMeasured),
+        );
         assert_eq!(out.rps_sustained_20ms.copied(), None);
         assert_eq!(
             out.rps_sustained_20ms_mock_bound, None,
@@ -1456,14 +1613,19 @@ mod tests {
         let gw = serve(200);
         let cfg = cfg_for(&dir, gw);
         let mut out = empty_perf();
-        let mut metrics: std::collections::BTreeMap<&'static str, Measurement<f64>> = std::collections::BTreeMap::new();
+        let mut metrics: std::collections::BTreeMap<&'static str, Measurement<f64>> =
+            std::collections::BTreeMap::new();
         metrics.insert("rps_sustained_20ms", Measurement::Measured(0.0));
         metrics.insert("rps_sustained_20ms_concurrency", Measurement::Measured(0.0));
         judge_sustained(&cfg, Dialect::Openai, &mut out, &metrics);
         assert_eq!(out.rps_sustained_20ms.copied(), Some(0));
         assert_eq!(out.rps_sustained_20ms_concurrency.copied(), Some(0));
         assert_eq!(out.conc_at_sustained.copied(), Some(0));
-        assert_eq!(out.rps_sustained_20ms_mock_bound, Some(false), "0 cannot be rig-bound: the rig was never asked to do anything");
+        assert_eq!(
+            out.rps_sustained_20ms_mock_bound,
+            Some(false),
+            "0 cannot be rig-bound: the rig was never asked to do anything"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1472,7 +1634,8 @@ mod tests {
     #[test]
     fn added_latency_fields_are_taken_straight_from_the_metric_surface() {
         let mut out = empty_perf();
-        let mut metrics: std::collections::BTreeMap<&'static str, Measurement<f64>> = std::collections::BTreeMap::new();
+        let mut metrics: std::collections::BTreeMap<&'static str, Measurement<f64>> =
+            std::collections::BTreeMap::new();
         metrics.insert("added_latency_p50_us", Measurement::Measured(40_939.0));
         metrics.insert("added_latency_p99_us", Measurement::Measured(40_945.0));
         metrics.insert("gateway_c1_p99_us", Measurement::Measured(41_026.0));
@@ -1490,14 +1653,22 @@ mod tests {
     #[test]
     fn a_missing_added_latency_field_carries_the_groups_own_absence_reason() {
         let mut out = empty_perf();
-        let mut metrics: std::collections::BTreeMap<&'static str, Measurement<f64>> = std::collections::BTreeMap::new();
+        let mut metrics: std::collections::BTreeMap<&'static str, Measurement<f64>> =
+            std::collections::BTreeMap::new();
         metrics.insert(
             "added_latency_p99_us",
-            Measurement::absent_because(Absent::NotMeasured, "the gateway leg at c=1 was not clean: 0 ok, 4 fail"),
+            Measurement::absent_because(
+                Absent::NotMeasured,
+                "the gateway leg at c=1 was not clean: 0 ok, 4 fail",
+            ),
         );
         judge_added_latency(&mut out, &metrics);
         assert_eq!(out.added_latency_p99_us.copied(), None);
-        assert!(out.added_latency_p99_us.detail().unwrap_or_default().contains("not clean"));
+        assert!(out
+            .added_latency_p99_us
+            .detail()
+            .unwrap_or_default()
+            .contains("not clean"));
         // gateway_c1_p99_us was never inserted into the map at all: still a key, still an absence.
         assert_eq!(out.gateway_c1_p99_us.copied(), None);
     }
@@ -1543,15 +1714,32 @@ mod tests {
         // within 0.7% of a mock whose rate is c x (1000 / 20ms) by construction - and published
         // nothing at all. Thirteen cells lost this metric that way in the 2026-07-28 run.
         apply_streams_sustained_verdict(&mut out, 12_275.0, 256, Measurement::Measured(12_360.0));
-        assert_eq!(out.streams_sustained_fps.copied(), Some(12_275.0), "keeping pace is the success case");
-        assert_eq!(out.streams_sustained.copied(), Some(256), "and its operating point travels with it");
-        assert_eq!(out.streams_sustained_mock_bound, Some(true), "flagged as matching the paced upstream");
+        assert_eq!(
+            out.streams_sustained_fps.copied(),
+            Some(12_275.0),
+            "keeping pace is the success case"
+        );
+        assert_eq!(
+            out.streams_sustained.copied(),
+            Some(256),
+            "and its operating point travels with it"
+        );
+        assert_eq!(
+            out.streams_sustained_mock_bound,
+            Some(true),
+            "flagged as matching the paced upstream"
+        );
     }
 
     #[test]
     fn an_unusable_stream_reference_is_unknown_never_a_guessed_false() {
         let mut out = crate::record::CellStream::default();
-        apply_streams_sustained_verdict(&mut out, 12_400.0, 256, Measurement::absent(Absent::NotMeasured));
+        apply_streams_sustained_verdict(
+            &mut out,
+            12_400.0,
+            256,
+            Measurement::absent(Absent::NotMeasured),
+        );
         assert_eq!(out.streams_sustained_fps.copied(), None);
         assert_eq!(
             out.streams_sustained_mock_bound, None,
@@ -1577,9 +1765,21 @@ mod tests {
         // Reaching it is the gateway forwarding every frame as it arrives - the best outcome there
         // is - and this used to delete the number for it.
         apply_cpu_fps_verdict(&mut out, 334_838.0, 1024, Measurement::Measured(351_088.0));
-        assert_eq!(out.cpu_fps.copied(), Some(334_838.0), "keeping pace is a measurement, not a rig limit");
-        assert_eq!(out.cpu_fps_concurrency.copied(), Some(1024), "and it has an operating point");
-        assert_eq!(out.cpu_fps_mock_bound, Some(true), "the flag stays as the signal it always was");
+        assert_eq!(
+            out.cpu_fps.copied(),
+            Some(334_838.0),
+            "keeping pace is a measurement, not a rig limit"
+        );
+        assert_eq!(
+            out.cpu_fps_concurrency.copied(),
+            Some(1024),
+            "and it has an operating point"
+        );
+        assert_eq!(
+            out.cpu_fps_mock_bound,
+            Some(true),
+            "the flag stays as the signal it always was"
+        );
     }
 
     // A gate that nothing sustains is a real measured zero, not a mock-bound suppression: the mock
@@ -1592,7 +1792,8 @@ mod tests {
         let gw = serve(200);
         let cfg = cfg_for(&dir, gw);
         let mut out = crate::record::CellStream::default();
-        let mut metrics: std::collections::BTreeMap<&'static str, Measurement<f64>> = std::collections::BTreeMap::new();
+        let mut metrics: std::collections::BTreeMap<&'static str, Measurement<f64>> =
+            std::collections::BTreeMap::new();
         metrics.insert("streams_sustained", Measurement::Measured(0.0));
         metrics.insert("streams_sustained_fps", Measurement::Measured(0.0));
         judge_streams_sustained(&cfg, Dialect::Openai, &mut out, &metrics);
@@ -1615,16 +1816,33 @@ mod tests {
         let gw = serve(200);
         let cfg = cfg_for(&dir, gw);
         let mut out = crate::record::CellStream::default();
-        let mut metrics: std::collections::BTreeMap<&'static str, Measurement<f64>> = std::collections::BTreeMap::new();
+        let mut metrics: std::collections::BTreeMap<&'static str, Measurement<f64>> =
+            std::collections::BTreeMap::new();
         metrics.insert(
             "streams_sustained_fps",
-            Measurement::absent_because(Absent::SearchExhausted, "c=65536 still passes at the top of the search range"),
+            Measurement::absent_because(
+                Absent::SearchExhausted,
+                "c=65536 still passes at the top of the search range",
+            ),
         );
-        metrics.insert("streams_sustained", Measurement::absent(Absent::SearchExhausted));
+        metrics.insert(
+            "streams_sustained",
+            Measurement::absent(Absent::SearchExhausted),
+        );
         judge_streams_sustained(&cfg, Dialect::Openai, &mut out, &metrics);
-        assert_eq!(out.streams_sustained_fps.reason(), Some(&Absent::SearchExhausted));
-        assert!(out.streams_sustained_fps.detail().unwrap_or_default().contains("65536"));
-        assert_eq!(out.streams_sustained.reason(), Some(&Absent::SearchExhausted));
+        assert_eq!(
+            out.streams_sustained_fps.reason(),
+            Some(&Absent::SearchExhausted)
+        );
+        assert!(out
+            .streams_sustained_fps
+            .detail()
+            .unwrap_or_default()
+            .contains("65536"));
+        assert_eq!(
+            out.streams_sustained.reason(),
+            Some(&Absent::SearchExhausted)
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1635,13 +1853,20 @@ mod tests {
     #[test]
     fn the_c1_note_says_how_many_round_trips_each_percentile_was_taken_over() {
         let mut out = empty_perf();
-        let mut metrics: std::collections::BTreeMap<&'static str, Measurement<f64>> = std::collections::BTreeMap::new();
+        let mut metrics: std::collections::BTreeMap<&'static str, Measurement<f64>> =
+            std::collections::BTreeMap::new();
         metrics.insert("gateway_c1_samples", Measurement::Measured(4_812.0));
         metrics.insert("direct_c1_samples", Measurement::Measured(5_003.0));
         judge_added_latency(&mut out, &metrics);
         let note = out.c1_note.unwrap_or_default();
-        assert!(note.contains("4812"), "the gateway leg's own count must appear: {note}");
-        assert!(note.contains("5003"), "the direct leg's own count must appear: {note}");
+        assert!(
+            note.contains("4812"),
+            "the gateway leg's own count must appear: {note}"
+        );
+        assert!(
+            note.contains("5003"),
+            "the direct leg's own count must appear: {note}"
+        );
     }
 
     // No counts means the group never completed a c=1 window, and the added-latency fields are
@@ -1650,23 +1875,29 @@ mod tests {
     #[test]
     fn the_c1_note_is_absent_rather_than_prose_about_nothing() {
         let mut out = empty_perf();
-        let metrics: std::collections::BTreeMap<&'static str, Measurement<f64>> = std::collections::BTreeMap::new();
+        let metrics: std::collections::BTreeMap<&'static str, Measurement<f64>> =
+            std::collections::BTreeMap::new();
         judge_added_latency(&mut out, &metrics);
         assert_eq!(out.c1_note, None);
     }
 
     #[test]
     fn the_stream_c1_note_says_how_many_frames_each_single_stream_produced() {
-        let mut metrics: std::collections::BTreeMap<&'static str, Measurement<f64>> = std::collections::BTreeMap::new();
+        let mut metrics: std::collections::BTreeMap<&'static str, Measurement<f64>> =
+            std::collections::BTreeMap::new();
         metrics.insert("gateway_c1_frames", Measurement::Measured(64.0));
         metrics.insert("direct_c1_frames", Measurement::Measured(64.0));
         let note = stream_c1_note(&metrics).unwrap_or_default();
         assert!(note.contains("64 frame(s) through the gateway"), "{note}");
-        assert!(note.contains("99th percentile"), "the note must say why the p99 fields are absent: {note}");
+        assert!(
+            note.contains("99th percentile"),
+            "the note must say why the p99 fields are absent: {note}"
+        );
 
         // A dialect the mock cannot stream took no stream at all: no note, because the absent fields
         // already carry the reason.
-        let empty: std::collections::BTreeMap<&'static str, Measurement<f64>> = std::collections::BTreeMap::new();
+        let empty: std::collections::BTreeMap<&'static str, Measurement<f64>> =
+            std::collections::BTreeMap::new();
         assert_eq!(stream_c1_note(&empty), None);
     }
 
@@ -1690,7 +1921,9 @@ mod tests {
         // UNCHECKED with a reason - never `false`, which would convict a gateway on our own rig.
         for (eg, up) in &back.matrix.upstreams {
             for (ing, cell) in &up.cells {
-                let Some(perf) = cell.perf.as_ref() else { continue };
+                let Some(perf) = cell.perf.as_ref() else {
+                    continue;
+                };
                 assert_ne!(
                     perf.egress_reverified,
                     Some(false),
@@ -1711,7 +1944,11 @@ mod tests {
             .and_then(|c| c.perf.as_ref())
             .expect("the openai diagonal is served and carries perf");
         assert!(
-            diagonal.reverify_note.clone().unwrap_or_default().contains("same-dialect"),
+            diagonal
+                .reverify_note
+                .clone()
+                .unwrap_or_default()
+                .contains("same-dialect"),
             "{:?}",
             diagonal.reverify_note
         );
@@ -1743,7 +1980,10 @@ mod tests {
             .flat_map(|u| u.cells.values())
             .find(|c| matches!(&c.served, RecServed::Status(v) if v == "not_configured"))
             .expect("a healthy rig plus a refusing gateway is the gateway's own answer");
-        assert_eq!(cell.status, "404", "the observed status must reach the artifact");
+        assert_eq!(
+            cell.status, "404",
+            "the observed status must reach the artifact"
+        );
         assert!(
             cell.verdict_note.contains("404"),
             "the note must name what was observed, got {:?}",
@@ -1776,7 +2016,11 @@ mod tests {
             crate::qualify::Sense::HigherIsBetter,
         );
         assert_eq!(outcome.token(), "seed");
-        assert_eq!(drift.value().copied(), None, "seeding has nothing to drift against");
+        assert_eq!(
+            drift.value().copied(),
+            None,
+            "seeding has nothing to drift against"
+        );
 
         // What the orchestrator can hand over, since it holds the record the box does not.
         std::env::set_var("OTB_QUALIFY_BASELINE", "497862");
@@ -1793,7 +2037,11 @@ mod tests {
             .0
             .token()
         };
-        assert_eq!(judge_at(475_906.0), "pass", "the slowest real box of the field must still pass");
+        assert_eq!(
+            judge_at(475_906.0),
+            "pass",
+            "the slowest real box of the field must still pass"
+        );
         assert_eq!(judge_at(509_142.0), "pass", "and so must the fastest");
         // The box this guard exists for: far enough under that its gateway's whole column would
         // have been measured on a rig nothing compared against anything.
@@ -1817,7 +2065,8 @@ mod tests {
         cfg.hardware = Some(label.into());
         let paths = run_suite_with(&cfg, gw, &[]).expect("the suite writes a snapshot");
         let snap: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&paths.current).expect("read")).expect("parse");
+            serde_json::from_str(&std::fs::read_to_string(&paths.current).expect("read"))
+                .expect("parse");
         assert_eq!(
             snap.get("hardware").and_then(serde_json::Value::as_str),
             Some(label),
@@ -1830,7 +2079,13 @@ mod tests {
         cfg2.hardware = None;
         let paths2 = run_suite_with(&cfg2, gw, &[]).expect("the suite writes a snapshot");
         let snap2: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&paths2.current).expect("read")).expect("parse");
-        assert!(snap2.get("hardware").is_some_and(serde_json::Value::is_null), "absent must publish as a literal null");
+            serde_json::from_str(&std::fs::read_to_string(&paths2.current).expect("read"))
+                .expect("parse");
+        assert!(
+            snap2
+                .get("hardware")
+                .is_some_and(serde_json::Value::is_null),
+            "absent must publish as a literal null"
+        );
     }
 }

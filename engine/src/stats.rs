@@ -38,7 +38,9 @@ pub enum Verdict {
     Steady,
     /// A real, publishable result: the window did not settle. Carries the growth rate so a caller can
     /// never say "not steady" without also saying how fast it moved.
-    NotSteady { growth_rate_mib_per_min: Measurement<f64> },
+    NotSteady {
+        growth_rate_mib_per_min: Measurement<f64>,
+    },
     /// Fewer than four samples fell inside the window: not enough evidence to judge either way. This
     /// is a distinct case from `NotSteady`, on purpose: "we could not tell" and "we could tell and it
     /// moved" are different claims, and collapsing them would let a too-short measurement masquerade
@@ -124,7 +126,9 @@ pub fn plateau_check(samples: &[Sample], window_s: f64, trend_pct: f64, range_pc
     // A non-positive mean makes both percentages meaningless (division by zero or sign flip), so this
     // cannot be called steady; it is a real result (not undecidable), matching the shell original.
     if mean <= 0.0 {
-        return Verdict::NotSteady { growth_rate_mib_per_min };
+        return Verdict::NotSteady {
+            growth_rate_mib_per_min,
+        };
     }
 
     let drift = (mean2 - mean1) / mean * 100.0;
@@ -140,7 +144,9 @@ pub fn plateau_check(samples: &[Sample], window_s: f64, trend_pct: f64, range_pc
     if drift.abs() < trend_pct && spread < range_pct {
         Verdict::Steady
     } else {
-        Verdict::NotSteady { growth_rate_mib_per_min }
+        Verdict::NotSteady {
+            growth_rate_mib_per_min,
+        }
     }
 }
 
@@ -154,7 +160,11 @@ pub fn median(values: &[f64]) -> Measurement<f64> {
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let n = sorted.len();
     let mid = n / 2;
-    let v = if n % 2 == 1 { sorted[mid] } else { (sorted[mid - 1] + sorted[mid]) / 2.0 };
+    let v = if n % 2 == 1 {
+        sorted[mid]
+    } else {
+        (sorted[mid - 1] + sorted[mid]) / 2.0
+    };
     Measurement::Measured(v)
 }
 
@@ -200,7 +210,15 @@ mod tests {
     fn mkseries_jitter(v0: f64, d: f64, n: usize, j: f64) -> Vec<Sample> {
         (0..n)
             .map(|i| {
-                let w = if j > 0.0 { if i % 2 == 1 { j } else { -j } } else { 0.0 };
+                let w = if j > 0.0 {
+                    if i % 2 == 1 {
+                        j
+                    } else {
+                        -j
+                    }
+                } else {
+                    0.0
+                };
                 Sample::new((i * 2) as f64, v0 + d * i as f64 + w)
             })
             .collect()
@@ -223,7 +241,10 @@ mod tests {
     #[test]
     fn a_steadily_rising_series_is_not_a_plateau() {
         let s = mkseries(100.0, 1.0, 30);
-        assert!(!matches!(plateau_check(&s, WHOLE, 1.0, 2.0), Verdict::Steady));
+        assert!(!matches!(
+            plateau_check(&s, WHOLE, 1.0, 2.0),
+            Verdict::Steady
+        ));
     }
 
     // THE CASE THE TREND TEST EXISTS FOR: a leak levelling off. 30 samples, +0.05 MiB each, around 118
@@ -237,19 +258,28 @@ mod tests {
         let hi = max(&values).copied().unwrap_or(0.0);
         let mean = values.iter().sum::<f64>() / values.len() as f64;
         let spread_pct = (hi - lo) / mean * 100.0;
-        assert!(spread_pct < 2.0, "the RED case: spread alone looks settled ({spread_pct}%)");
+        assert!(
+            spread_pct < 2.0,
+            "the RED case: spread alone looks settled ({spread_pct}%)"
+        );
     }
 
     #[test]
     fn green_the_trend_test_rejects_the_asymptoting_leak() {
         let s = mkseries(118.0, 0.05, 30);
-        assert!(!matches!(plateau_check(&s, WHOLE, 0.5, 2.0), Verdict::Steady));
+        assert!(!matches!(
+            plateau_check(&s, WHOLE, 0.5, 2.0),
+            Verdict::Steady
+        ));
     }
 
     #[test]
     fn oscillation_around_a_flat_mean_is_not_a_plateau() {
         let s = mkseries_jitter(100.0, 0.0, 30, 5.0);
-        assert!(!matches!(plateau_check(&s, WHOLE, 1.0, 2.0), Verdict::Steady));
+        assert!(!matches!(
+            plateau_check(&s, WHOLE, 1.0, 2.0),
+            Verdict::Steady
+        ));
     }
 
     // The trend gate is one-sided: falling memory means the gateway is releasing, which is not the
@@ -290,7 +320,12 @@ mod tests {
             Sample::new(3.0, 100.5),
         ];
         // mean1=99.5, mean2=100.5, mean=100.0, drift=(100.5-99.5)/100.0*100=1.0 exactly.
-        assert_eq!(plateau_check(&s, WHOLE, 1.0, 1_000.0), Verdict::NotSteady { growth_rate_mib_per_min: growth_rate(&s) });
+        assert_eq!(
+            plateau_check(&s, WHOLE, 1.0, 1_000.0),
+            Verdict::NotSteady {
+                growth_rate_mib_per_min: growth_rate(&s)
+            }
+        );
     }
 
     #[test]
@@ -302,7 +337,10 @@ mod tests {
             Sample::new(2.0, 100.0),
             Sample::new(3.0, 101.0),
         ];
-        assert!(!matches!(plateau_check(&s, WHOLE, 1_000.0, 2.0), Verdict::Steady));
+        assert!(!matches!(
+            plateau_check(&s, WHOLE, 1_000.0, 2.0),
+            Verdict::Steady
+        ));
     }
 
     // ---- growth_rate: ported from plateau_test.sh --------------------------------------------------
@@ -340,7 +378,10 @@ mod tests {
         let mut s = mkseries(100.0, 0.0, 29);
         s.push(Sample::new(58.0, 150.0));
         let v = growth_rate(&s).copied();
-        assert!(matches!(v, Some(x) if x < 60.0), "endpoint dominated the fit: {v:?}");
+        assert!(
+            matches!(v, Some(x) if x < 60.0),
+            "endpoint dominated the fit: {v:?}"
+        );
     }
 
     // ---- window: ported from plateau_test.sh ----------------------------------------------------
@@ -366,7 +407,9 @@ mod tests {
 
     fn linear_series(base: f64, rate_mib_per_min: f64, dt_s: f64, n: usize) -> Vec<Sample> {
         let per_sample = rate_mib_per_min / 60.0 * dt_s;
-        (0..n).map(|i| Sample::new(i as f64 * dt_s, base + per_sample * i as f64)).collect()
+        (0..n)
+            .map(|i| Sample::new(i as f64 * dt_s, base + per_sample * i as f64))
+            .collect()
     }
 
     // A DECLINE MUST FAIL THE TREND TEST EXACTLY AS A CLIMB DOES. `drift` is signed; a window whose
@@ -402,7 +445,10 @@ mod tests {
         for _ in 0..80 {
             let mid = (lo + hi) / 2.0;
             let series = linear_series(base, mid, dt, n);
-            let steady = matches!(plateau_check(&series, window_s, trend_pct, 1.0e9), Verdict::Steady);
+            let steady = matches!(
+                plateau_check(&series, window_s, trend_pct, 1.0e9),
+                Verdict::Steady
+            );
             if steady {
                 lo = mid;
             } else {
@@ -421,7 +467,10 @@ mod tests {
         let n = 400; // dense sampling so the discrete boundary tracks the continuous one closely
         let b60 = boundary_rate(60.0, n, 1.0, base);
         let b30 = boundary_rate(30.0, n, 1.0, base);
-        assert!((b30 - 2.0 * b60).abs() / b60 < 0.01, "b60={b60} b30={b30}, expected b30 ~= 2*b60");
+        assert!(
+            (b30 - 2.0 * b60).abs() / b60 < 0.01,
+            "b60={b60} b30={b30}, expected b30 ~= 2*b60"
+        );
         // matches the worked example in the calibration note: ~2.4 MiB/min at 60s vs ~4.8 at 30s on a 120 MiB base.
         assert!((b60 - 2.4).abs() < 0.05, "b60={b60}");
         assert!((b30 - 4.8).abs() < 0.1, "b30={b30}");

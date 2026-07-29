@@ -491,7 +491,12 @@ pub fn post_json(
 ///
 /// No `content-type` is sent: a GET with no body has no type to declare, and `post_json`'s default
 /// exists for the opposite reason (a gateway that 415s a typeless JSON body).
-pub fn get(addr: SocketAddr, path: &str, headers: &[(String, String)], timeout: Duration) -> Outcome {
+pub fn get(
+    addr: SocketAddr,
+    path: &str,
+    headers: &[(String, String)],
+    timeout: Duration,
+) -> Outcome {
     send("GET", addr, path, &[], headers, timeout, false)
 }
 
@@ -526,7 +531,11 @@ fn send(
     // and be published as NOT SERVING a pairing it would have loaded fine, a gateway property
     // asserted from a malformed request of ours, the worst direction for this error to run. A
     // caller may still override it below.
-    if json_body && !headers.iter().any(|(n, _)| n.eq_ignore_ascii_case("content-type")) {
+    if json_body
+        && !headers
+            .iter()
+            .any(|(n, _)| n.eq_ignore_ascii_case("content-type"))
+    {
         request.extend_from_slice(b"content-type: application/json\r\n");
     }
     // Always close: this client never pools connections, so there is nothing to keep alive for.
@@ -695,7 +704,6 @@ pub struct SseOutcome {
     pub end: SseEnd,
 }
 
-
 // ─────────────────────────────────── the transport-agnostic SSE reader ───────────────────────────
 //
 // ONE DECODER, FED BY BOTH TRANSPORTS.
@@ -827,7 +835,9 @@ impl SseReader {
                     }
                     ChunkPump::Bad(msg) => return self.finish_with(SseEnd::Malformed(msg)),
                 },
-                Phase::Ended => return Step::Done(self.finished.clone().unwrap_or(SseEnd::StreamClosed)),
+                Phase::Ended => {
+                    return Step::Done(self.finished.clone().unwrap_or(SseEnd::StreamClosed))
+                }
             }
         }
     }
@@ -840,7 +850,12 @@ impl SseReader {
             self.flush_pending(elapsed_us);
         }
         let end = self.finished.clone().unwrap_or(end);
-        SseOutcome { status: self.status, frames: self.frames, frame_offsets_us: self.offsets_us, end }
+        SseOutcome {
+            status: self.status,
+            frames: self.frames,
+            frame_offsets_us: self.offsets_us,
+            end,
+        }
     }
 
     fn finish_with(&mut self, end: SseEnd) -> Step {
@@ -851,7 +866,9 @@ impl SseReader {
 
     /// `None` = the head completed and the phase moved on, so the caller should loop again.
     fn try_head(&mut self) -> Option<Step> {
-        let Some(cut) = find_head_end(&self.raw) else { return Some(Step::NeedMore) };
+        let Some(cut) = find_head_end(&self.raw) else {
+            return Some(Step::NeedMore);
+        };
         let head: Vec<u8> = self.raw.drain(..cut).collect();
         let mut lines = head.split_inclusive(|b| *b == b'\n');
         let Some(status_line) = lines.next() else {
@@ -869,7 +886,10 @@ impl SseReader {
             if text.is_empty() {
                 break;
             }
-            if let Some((name, value)) = std::str::from_utf8(text).ok().and_then(|t| t.split_once(':')) {
+            if let Some((name, value)) = std::str::from_utf8(text)
+                .ok()
+                .and_then(|t| t.split_once(':'))
+            {
                 headers.push((name.trim().to_string(), value.trim().to_string()));
             }
         }
@@ -884,13 +904,19 @@ impl SseReader {
         let chunked = header_value(&headers, "transfer-encoding")
             .map(|v| v.to_ascii_lowercase().contains("chunked"))
             .unwrap_or(false);
-        self.phase = if chunked { Phase::Chunked { remaining: None } } else { Phase::Identity };
+        self.phase = if chunked {
+            Phase::Chunked { remaining: None }
+        } else {
+            Phase::Identity
+        };
         None
     }
 
     fn pump_chunked(&mut self) -> ChunkPump {
         loop {
-            let Phase::Chunked { remaining } = self.phase else { return ChunkPump::BodyEnded };
+            let Phase::Chunked { remaining } = self.phase else {
+                return ChunkPump::BodyEnded;
+            };
             match remaining {
                 None => {
                     let Some(nl) = self.raw.iter().position(|b| *b == b'\n') else {
@@ -915,7 +941,9 @@ impl SseReader {
                             "chunked SSE body exceeded the {MAX_BODY_BYTES} byte cap"
                         ));
                     }
-                    self.phase = Phase::Chunked { remaining: Some(size) };
+                    self.phase = Phase::Chunked {
+                        remaining: Some(size),
+                    };
                 }
                 Some(want) => {
                     if self.raw.is_empty() {
@@ -925,7 +953,9 @@ impl SseReader {
                     let data: Vec<u8> = self.raw.drain(..take).collect();
                     self.body.extend_from_slice(&data);
                     let left = want - take;
-                    self.phase = Phase::Chunked { remaining: if left == 0 { None } else { Some(left) } };
+                    self.phase = Phase::Chunked {
+                        remaining: if left == 0 { None } else { Some(left) },
+                    };
                     if left == 0 {
                         return ChunkPump::Progress;
                     }
@@ -980,10 +1010,13 @@ enum ChunkPump {
 
 /// Byte offset just past the blank line that ends the response head, if it has all arrived.
 fn find_head_end(buf: &[u8]) -> Option<usize> {
-    buf.windows(4).position(|w| w == b"\r\n\r\n").map(|i| i + 4).or_else(|| {
-        // Tolerate bare-LF heads, which some minimal peers (and this repo's own test servers) emit.
-        buf.windows(2).position(|w| w == b"\n\n").map(|i| i + 2)
-    })
+    buf.windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .map(|i| i + 4)
+        .or_else(|| {
+            // Tolerate bare-LF heads, which some minimal peers (and this repo's own test servers) emit.
+            buf.windows(2).position(|w| w == b"\n\n").map(|i| i + 2)
+        })
 }
 
 /// POSTs like `post_json`, then reads Server-Sent-Event `data:` frames off the response body
@@ -1025,13 +1058,20 @@ pub fn post_json_sse(
     }
     if let Err(e) = stream.write_all(&request) {
         return if is_timeout(&e) {
-            SseOutcome { status: None, frames: Vec::new(), frame_offsets_us: Vec::new(), end: SseEnd::Timeout }
+            SseOutcome {
+                status: None,
+                frames: Vec::new(),
+                frame_offsets_us: Vec::new(),
+                end: SseEnd::Timeout,
+            }
         } else {
             SseOutcome {
                 status: None,
                 frames: Vec::new(),
                 frame_offsets_us: Vec::new(),
-                end: SseEnd::ConnectionFailed(format!("connection dropped while sending the request: {e}")),
+                end: SseEnd::ConnectionFailed(format!(
+                    "connection dropped while sending the request: {e}"
+                )),
             }
         };
     }
@@ -1050,7 +1090,9 @@ pub fn post_json_sse(
             return reader.finish(SseEnd::Timeout, sent_at.elapsed().as_micros() as u64);
         }
         match stream.read(&mut buf) {
-            Ok(0) => return reader.finish(SseEnd::StreamClosed, sent_at.elapsed().as_micros() as u64),
+            Ok(0) => {
+                return reader.finish(SseEnd::StreamClosed, sent_at.elapsed().as_micros() as u64)
+            }
             Ok(n) => {
                 let at = sent_at.elapsed().as_micros() as u64;
                 if let Step::Done(end) = reader.feed(&buf[..n], at) {
@@ -1061,11 +1103,12 @@ pub fn post_json_sse(
                 return reader.finish(SseEnd::Timeout, sent_at.elapsed().as_micros() as u64)
             }
             // A peer that resets mid-stream still delivered what it delivered.
-            Err(_) => return reader.finish(SseEnd::StreamClosed, sent_at.elapsed().as_micros() as u64),
+            Err(_) => {
+                return reader.finish(SseEnd::StreamClosed, sent_at.elapsed().as_micros() as u64)
+            }
         }
     }
 }
-
 
 /// The same SSE read, driven by tokio instead of a blocked thread.
 ///
@@ -1160,8 +1203,10 @@ pub async fn post_json_sse_async(
 /// descriptor left. Neither is the gateway declining anything - it was never asked. Everything else
 /// (refused, unreachable, reset) is the peer's, and stays a connection failure.
 fn connect_end(e: &std::io::Error) -> SseEnd {
-    let ours = matches!(e.kind(), std::io::ErrorKind::AddrNotAvailable | std::io::ErrorKind::AddrInUse)
-        || matches!(e.raw_os_error(), Some(23) | Some(24));
+    let ours = matches!(
+        e.kind(),
+        std::io::ErrorKind::AddrNotAvailable | std::io::ErrorKind::AddrInUse
+    ) || matches!(e.raw_os_error(), Some(23) | Some(24));
     if ours {
         SseEnd::RigExhausted(e.to_string())
     } else {
@@ -1172,7 +1217,12 @@ fn connect_end(e: &std::io::Error) -> SseEnd {
 /// The request both SSE transports send. Written once so the blocking lane and the async lane cannot
 /// authenticate or frame differently: two lanes sending different bytes would make their numbers
 /// incomparable in a way nothing downstream could see.
-fn build_sse_request(addr: SocketAddr, path: &str, body: &[u8], headers: &[(String, String)]) -> Vec<u8> {
+fn build_sse_request(
+    addr: SocketAddr,
+    path: &str,
+    body: &[u8],
+    headers: &[(String, String)],
+) -> Vec<u8> {
     let mut request = Vec::new();
     request.extend_from_slice(format!("POST {path} HTTP/1.1\r\n").as_bytes());
     request.extend_from_slice(format!("Host: {addr}\r\n").as_bytes());
@@ -1180,7 +1230,10 @@ fn build_sse_request(addr: SocketAddr, path: &str, body: &[u8], headers: &[(Stri
     // THE PROBE AND THE LOAD MUST SEND THE SAME REQUEST, matching gen.rs's build_request: a gateway
     // that requires content-type on a JSON body would otherwise answer 415 to the probe and be
     // published as NOT SERVING a pairing it would have loaded fine.
-    if !headers.iter().any(|(n, _)| n.eq_ignore_ascii_case("content-type")) {
+    if !headers
+        .iter()
+        .any(|(n, _)| n.eq_ignore_ascii_case("content-type"))
+    {
         request.extend_from_slice(b"content-type: application/json\r\n");
     }
     request.extend_from_slice(b"Connection: close\r\n");
@@ -1323,10 +1376,17 @@ mod tests {
     #[test]
     fn the_probe_sends_a_json_content_type_like_the_load_generator_does() {
         let (addr, seen) = echo_request_server();
-        let _ = post_json(addr, "/v1/chat/completions", b"{}", &[], Duration::from_secs(2));
+        let _ = post_json(
+            addr,
+            "/v1/chat/completions",
+            b"{}",
+            &[],
+            Duration::from_secs(2),
+        );
         let req = seen.lock().map(|g| g.clone()).unwrap_or_default();
         assert!(
-            req.to_lowercase().contains("content-type: application/json"),
+            req.to_lowercase()
+                .contains("content-type: application/json"),
             "probe request must carry a json content-type, got:\n{req}"
         );
     }
@@ -1335,10 +1395,21 @@ mod tests {
     #[test]
     fn an_explicit_content_type_from_the_caller_is_not_duplicated() {
         let (addr, seen) = echo_request_server();
-        let hdrs = vec![("content-type".to_string(), "application/x-ndjson".to_string())];
+        let hdrs = vec![(
+            "content-type".to_string(),
+            "application/x-ndjson".to_string(),
+        )];
         let _ = post_json(addr, "/x", b"{}", &hdrs, Duration::from_secs(2));
-        let req = seen.lock().map(|g| g.clone()).unwrap_or_default().to_lowercase();
-        assert_eq!(req.matches("content-type:").count(), 1, "exactly one content-type:\n{req}");
+        let req = seen
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_default()
+            .to_lowercase();
+        assert_eq!(
+            req.matches("content-type:").count(),
+            1,
+            "exactly one content-type:\n{req}"
+        );
         assert!(req.contains("application/x-ndjson"));
     }
 
@@ -1475,7 +1546,11 @@ mod tests {
 
         // Offsets are cumulative from the request, so they only ever increase.
         for w in outcome.frame_offsets_us.windows(2) {
-            assert!(w[1] >= w[0], "frame arrival times must not go backwards: {:?}", outcome.frame_offsets_us);
+            assert!(
+                w[1] >= w[0],
+                "frame arrival times must not go backwards: {:?}",
+                outcome.frame_offsets_us
+            );
         }
 
         // THE DISCRIMINATING CHECK. The gap after the first token is much smaller than the wait for
@@ -1499,7 +1574,10 @@ mod tests {
         });
         let outcome = post_json_sse(addr, "/x", b"{}", &[], Duration::from_millis(300), 10);
         assert!(outcome.frames.is_empty());
-        assert!(outcome.frame_offsets_us.is_empty(), "no frames means no arrival times, not a zero");
+        assert!(
+            outcome.frame_offsets_us.is_empty(),
+            "no frames means no arrival times, not a zero"
+        );
     }
 
     // ── FRAMING ─────────────────────────────────────────────────────────────────────────────────
@@ -1530,14 +1608,19 @@ mod tests {
     fn an_http_1_0_response_is_a_real_response_not_a_malformed_one() {
         let addr = spawn_server(|mut conn| {
             let _ = read_request_head(&conn);
-            let _ = conn.write_all(head("HTTP/1.0 503 Service Unavailable", &["Content-Length: 2"]).as_bytes());
+            let _ = conn.write_all(
+                head("HTTP/1.0 503 Service Unavailable", &["Content-Length: 2"]).as_bytes(),
+            );
             let _ = conn.write_all(b"no");
         });
 
         let outcome = post_json(addr, "/x", b"{}", &[], Duration::from_secs(5));
         match outcome {
             Outcome::Response(r) => {
-                assert_eq!(r.status, 503, "an HTTP/1.0 status must be read, not defaulted");
+                assert_eq!(
+                    r.status, 503,
+                    "an HTTP/1.0 status must be read, not defaulted"
+                );
                 assert_eq!(r.body(), b"no");
             }
             other => panic!("HTTP/1.0 must parse as a real response, got {other:?}"),
@@ -1551,7 +1634,8 @@ mod tests {
     fn a_close_delimited_body_with_no_framing_headers_is_read_in_full() {
         let addr = spawn_server(|mut conn| {
             let _ = read_request_head(&conn);
-            let _ = conn.write_all(head("HTTP/1.1 200 OK", &["Content-Type: application/json"]).as_bytes());
+            let _ = conn
+                .write_all(head("HTTP/1.1 200 OK", &["Content-Type: application/json"]).as_bytes());
             let _ = conn.write_all(b"{\"closed\":\"delimited\"}");
             // Dropping the connection here IS the framing signal.
         });
@@ -1583,7 +1667,10 @@ mod tests {
         match outcome {
             Outcome::Malformed { seen, message } => {
                 assert!(message.contains('5') && message.contains("100"), "the message must state how much of the declared length arrived, got {message:?}");
-                assert!(seen.ends_with(b"short"), "the bytes actually seen must travel with the verdict");
+                assert!(
+                    seen.ends_with(b"short"),
+                    "the bytes actually seen must travel with the verdict"
+                );
             }
             other => panic!("a truncated body must be Malformed, got {other:?}"),
         }
@@ -1608,7 +1695,11 @@ mod tests {
         match outcome {
             Outcome::Response(r) => {
                 assert_eq!(r.status, 200);
-                assert!(r.body().is_empty(), "a zero length body is empty, got {:?}", r.body());
+                assert!(
+                    r.body().is_empty(),
+                    "a zero length body is empty, got {:?}",
+                    r.body()
+                );
             }
             other => panic!("Content-Length: 0 must frame the body, got {other:?}"),
         }
@@ -1634,7 +1725,10 @@ mod tests {
         let outcome = post_json(addr, "/x", b"{}", &[], Duration::from_secs(5));
         match outcome {
             Outcome::Response(r) => {
-                assert_eq!(r.status, 201, "the split status line must be reassembled before it is parsed");
+                assert_eq!(
+                    r.status, 201,
+                    "the split status line must be reassembled before it is parsed"
+                );
                 assert_eq!(r.body(), b"ok");
             }
             other => panic!("a split status line must still parse, got {other:?}"),
@@ -1658,7 +1752,11 @@ mod tests {
         let outcome = post_json(addr, "/x", b"{}", &[], Duration::from_secs(5));
         match outcome {
             Outcome::Response(r) => {
-                assert_eq!(r.body(), b"Wikipedia", "the split length header must still frame the body");
+                assert_eq!(
+                    r.body(),
+                    b"Wikipedia",
+                    "the split length header must still frame the body"
+                );
                 assert_eq!(r.header("x-split"), Some("yes"));
             }
             other => panic!("split headers must still parse, got {other:?}"),
@@ -1722,7 +1820,10 @@ mod tests {
         let outcome = post_json(addr, "/x", b"{}", &[], Duration::from_secs(20));
         match outcome {
             Outcome::Malformed { message, .. } => {
-                assert!(message.contains("cap"), "must name the cap it exceeded, got {message:?}")
+                assert!(
+                    message.contains("cap"),
+                    "must name the cap it exceeded, got {message:?}"
+                )
             }
             other => panic!("a close-delimited body past the cap must be Malformed, got {other:?}"),
         }
@@ -1760,7 +1861,10 @@ mod tests {
         let outcome = post_json(addr, "/x", b"{}", &[], Duration::from_secs(20));
         match outcome {
             Outcome::Malformed { message, .. } => {
-                assert!(message.contains("cap"), "must name the cap it exceeded, got {message:?}")
+                assert!(
+                    message.contains("cap"),
+                    "must name the cap it exceeded, got {message:?}"
+                )
             }
             other => panic!("a chunked body past the cap must be Malformed, got {other:?}"),
         }
@@ -1780,7 +1884,11 @@ mod tests {
         let addr = spawn_server(|mut conn| {
             let _ = read_request_head(&conn);
             let _ = conn.write_all(
-                head("HTTP/1.1 200 OK", &["Content-Length: 5", "Transfer-Encoding: chunked"]).as_bytes(),
+                head(
+                    "HTTP/1.1 200 OK",
+                    &["Content-Length: 5", "Transfer-Encoding: chunked"],
+                )
+                .as_bytes(),
             );
             let _ = conn.write_all(b"4\r\nWiki\r\n5\r\npedia\r\n0\r\n\r\n");
         });
@@ -1807,7 +1915,10 @@ mod tests {
             let _ = conn.write_all(
                 head(
                     "HTTP/1.1 503 Service Unavailable",
-                    &["Content-Type: application/json", "Transfer-Encoding: chunked"],
+                    &[
+                        "Content-Type: application/json",
+                        "Transfer-Encoding: chunked",
+                    ],
                 )
                 .as_bytes(),
             );
@@ -1817,7 +1928,10 @@ mod tests {
         let outcome = post_json(addr, "/x", b"{}", &[], Duration::from_secs(5));
         match outcome {
             Outcome::Response(r) => {
-                assert_eq!(r.status, 503, "the head's status must survive chunk decoding");
+                assert_eq!(
+                    r.status, 503,
+                    "the head's status must survive chunk decoding"
+                );
                 assert_eq!(
                     r.header("content-type"),
                     Some("application/json"),
@@ -1836,7 +1950,8 @@ mod tests {
     fn a_chunk_size_extension_is_stripped_before_the_hex_is_parsed() {
         let addr = spawn_server(|mut conn| {
             let _ = read_request_head(&conn);
-            let _ = conn.write_all(head("HTTP/1.1 200 OK", &["Transfer-Encoding: chunked"]).as_bytes());
+            let _ =
+                conn.write_all(head("HTTP/1.1 200 OK", &["Transfer-Encoding: chunked"]).as_bytes());
             let _ = conn.write_all(b"4;charset=utf-8\r\nWiki\r\n0\r\n\r\n");
         });
 
@@ -1854,7 +1969,8 @@ mod tests {
     fn chunked_trailers_are_consumed_and_never_land_in_the_body() {
         let addr = spawn_server(|mut conn| {
             let _ = read_request_head(&conn);
-            let _ = conn.write_all(head("HTTP/1.1 200 OK", &["Transfer-Encoding: chunked"]).as_bytes());
+            let _ =
+                conn.write_all(head("HTTP/1.1 200 OK", &["Transfer-Encoding: chunked"]).as_bytes());
             let _ = conn.write_all(b"4\r\nWiki\r\n0\r\nX-Trailer: served\r\n\r\n");
             // Hold the connection open afterwards: the terminating blank line, not the close, is
             // what must end the read.
@@ -1886,7 +2002,8 @@ mod tests {
     fn a_chunked_body_that_ends_before_its_terminating_chunk_is_malformed() {
         let addr = spawn_server(|mut conn| {
             let _ = read_request_head(&conn);
-            let _ = conn.write_all(head("HTTP/1.1 200 OK", &["Transfer-Encoding: chunked"]).as_bytes());
+            let _ =
+                conn.write_all(head("HTTP/1.1 200 OK", &["Transfer-Encoding: chunked"]).as_bytes());
             let _ = conn.write_all(b"4\r\nWiki\r\n");
         });
 
@@ -1908,7 +2025,8 @@ mod tests {
     fn a_chunked_stream_that_dies_inside_its_trailer_is_malformed() {
         let addr = spawn_server(|mut conn| {
             let _ = read_request_head(&conn);
-            let _ = conn.write_all(head("HTTP/1.1 200 OK", &["Transfer-Encoding: chunked"]).as_bytes());
+            let _ =
+                conn.write_all(head("HTTP/1.1 200 OK", &["Transfer-Encoding: chunked"]).as_bytes());
             let _ = conn.write_all(b"4\r\nWiki\r\n0\r\nX-Trailer: half");
         });
 
@@ -1927,7 +2045,8 @@ mod tests {
     fn an_unparseable_chunk_size_names_what_it_saw() {
         let addr = spawn_server(|mut conn| {
             let _ = read_request_head(&conn);
-            let _ = conn.write_all(head("HTTP/1.1 200 OK", &["Transfer-Encoding: chunked"]).as_bytes());
+            let _ =
+                conn.write_all(head("HTTP/1.1 200 OK", &["Transfer-Encoding: chunked"]).as_bytes());
             let _ = conn.write_all(b"nonsense\r\n");
         });
 
@@ -1950,7 +2069,11 @@ mod tests {
         let addr = spawn_server(|mut conn| {
             let _ = read_request_head(&conn);
             let _ = conn.write_all(
-                head("HTTP/1.1 200 OK", &["this line has no colon", "Content-Length: 2"]).as_bytes(),
+                head(
+                    "HTTP/1.1 200 OK",
+                    &["this line has no colon", "Content-Length: 2"],
+                )
+                .as_bytes(),
             );
             let _ = conn.write_all(b"ok");
         });
@@ -1959,7 +2082,11 @@ mod tests {
         match outcome {
             Outcome::Response(r) => {
                 assert_eq!(r.status, 200);
-                assert_eq!(r.body(), b"ok", "the framing header after the stray line must still be read");
+                assert_eq!(
+                    r.body(),
+                    b"ok",
+                    "the framing header after the stray line must still be read"
+                );
             }
             other => panic!("a stray head line must not sink the response, got {other:?}"),
         }
@@ -2020,7 +2147,11 @@ mod tests {
                     .map(|(_, v)| v.as_str())
                     .collect();
                 assert_eq!(rates, vec!["first", "second"], "both values must survive");
-                assert_eq!(r.header("x-rate"), Some("first"), "the accessor returns the first, in wire order");
+                assert_eq!(
+                    r.header("x-rate"),
+                    Some("first"),
+                    "the accessor returns the first, in wire order"
+                );
             }
             other => panic!("expected a response, got {other:?}"),
         }
@@ -2059,7 +2190,11 @@ mod tests {
         let addr = spawn_server(|mut conn| {
             let _ = read_request_head(&conn);
             let _ = conn.write_all(
-                head("HTTP/1.1 200 OK", &["Content-Length: 2", "Content-Length: 4"]).as_bytes(),
+                head(
+                    "HTTP/1.1 200 OK",
+                    &["Content-Length: 2", "Content-Length: 4"],
+                )
+                .as_bytes(),
             );
             let _ = conn.write_all(b"ok");
         });
@@ -2083,7 +2218,11 @@ mod tests {
         let addr = spawn_server(|mut conn| {
             let _ = read_request_head(&conn);
             let _ = conn.write_all(
-                head("HTTP/1.1 200 OK", &["Content-Length: 2", "Content-Length: 2"]).as_bytes(),
+                head(
+                    "HTTP/1.1 200 OK",
+                    &["Content-Length: 2", "Content-Length: 2"],
+                )
+                .as_bytes(),
             );
             let _ = conn.write_all(b"ok");
         });
@@ -2091,7 +2230,9 @@ mod tests {
         let outcome = post_json(addr, "/x", b"{}", &[], Duration::from_secs(5));
         match outcome {
             Outcome::Response(r) => assert_eq!(r.body(), b"ok"),
-            other => panic!("identical duplicate Content-Length must not be rejected, got {other:?}"),
+            other => {
+                panic!("identical duplicate Content-Length must not be rejected, got {other:?}")
+            }
         }
     }
 
@@ -2105,7 +2246,8 @@ mod tests {
     fn an_sse_probe_against_a_plain_json_answer_returns_at_once_and_names_the_type() {
         let addr = spawn_server(|mut conn| {
             let _ = read_request_head(&conn);
-            let _ = conn.write_all(head("HTTP/1.1 200 OK", &["Content-Type: application/json"]).as_bytes());
+            let _ = conn
+                .write_all(head("HTTP/1.1 200 OK", &["Content-Type: application/json"]).as_bytes());
             // Then hold the connection open: only the content-type may end this probe.
             thread::sleep(Duration::from_secs(30));
             drop(conn);
@@ -2113,8 +2255,15 @@ mod tests {
 
         let start = Instant::now();
         let outcome = post_json_sse(addr, "/x", b"{}", &[], Duration::from_secs(3), 10);
-        assert_eq!(outcome.end, SseEnd::NotAnEventStream("application/json".to_string()));
-        assert_eq!(outcome.status, Some(200), "the peer answered, so its status is evidence about it");
+        assert_eq!(
+            outcome.end,
+            SseEnd::NotAnEventStream("application/json".to_string())
+        );
+        assert_eq!(
+            outcome.status,
+            Some(200),
+            "the peer answered, so its status is evidence about it"
+        );
         assert!(
             start.elapsed() < Duration::from_secs(2),
             "a non-stream content-type must end the probe immediately, took {:?}",
@@ -2134,7 +2283,11 @@ mod tests {
         });
 
         let outcome = post_json_sse(addr, "/x", b"{}", &[], Duration::from_secs(5), 10);
-        assert_eq!(outcome.frames, vec!["undeclared"], "an unannounced stream must still be read");
+        assert_eq!(
+            outcome.frames,
+            vec!["undeclared"],
+            "an unannounced stream must still be read"
+        );
     }
 
     // The budget is a CEILING, not a target: an off-by-one here reads one extra frame off every
@@ -2144,7 +2297,9 @@ mod tests {
     fn sse_stops_at_the_frame_budget_and_says_so() {
         let addr = spawn_server(|mut conn| {
             let _ = read_request_head(&conn);
-            let _ = conn.write_all(head("HTTP/1.1 200 OK", &["Content-Type: text/event-stream"]).as_bytes());
+            let _ = conn.write_all(
+                head("HTTP/1.1 200 OK", &["Content-Type: text/event-stream"]).as_bytes(),
+            );
             for i in 0..20 {
                 let _ = conn.write_all(format!("data: f{i}\n\n").as_bytes());
             }
@@ -2154,7 +2309,11 @@ mod tests {
 
         let start = Instant::now();
         let outcome = post_json_sse(addr, "/x", b"{}", &[], Duration::from_secs(5), 3);
-        assert_eq!(outcome.frames, vec!["f0", "f1", "f2"], "exactly the budget, in order");
+        assert_eq!(
+            outcome.frames,
+            vec!["f0", "f1", "f2"],
+            "exactly the budget, in order"
+        );
         assert_eq!(outcome.end, SseEnd::FrameBudgetReached);
         assert_eq!(outcome.frame_offsets_us.len(), 3);
         assert!(
@@ -2176,7 +2335,10 @@ mod tests {
             let _ = conn.write_all(
                 head(
                     "HTTP/1.1 200 OK",
-                    &["Content-Type: text/event-stream", "Transfer-Encoding: chunked"],
+                    &[
+                        "Content-Type: text/event-stream",
+                        "Transfer-Encoding: chunked",
+                    ],
                 )
                 .as_bytes(),
             );
@@ -2210,8 +2372,11 @@ mod tests {
     fn sse_counts_only_data_frames_and_trims_their_leading_space() {
         let addr = spawn_server(|mut conn| {
             let _ = read_request_head(&conn);
-            let _ = conn.write_all(head("HTTP/1.1 200 OK", &["Content-Type: text/event-stream"]).as_bytes());
-            let _ = conn.write_all(b": a comment\nevent: content_block_delta\nid: 7\ndata:tight\n\n");
+            let _ = conn.write_all(
+                head("HTTP/1.1 200 OK", &["Content-Type: text/event-stream"]).as_bytes(),
+            );
+            let _ =
+                conn.write_all(b": a comment\nevent: content_block_delta\nid: 7\ndata:tight\n\n");
             let _ = conn.write_all(b"retry: 1000\ndata:    padded\n\n");
         });
 
@@ -2238,7 +2403,10 @@ mod tests {
             "a broken head must be Malformed, got {:?}",
             outcome.end
         );
-        assert_eq!(outcome.status, None, "a status here would claim the peer answered");
+        assert_eq!(
+            outcome.status, None,
+            "a status here would claim the peer answered"
+        );
         assert!(outcome.frames.is_empty());
     }
 
@@ -2250,7 +2418,9 @@ mod tests {
     fn consecutive_data_lines_before_a_blank_line_join_into_one_frame() {
         let addr = spawn_server(|mut conn| {
             let _ = read_request_head(&conn);
-            let _ = conn.write_all(head("HTTP/1.1 200 OK", &["Content-Type: text/event-stream"]).as_bytes());
+            let _ = conn.write_all(
+                head("HTTP/1.1 200 OK", &["Content-Type: text/event-stream"]).as_bytes(),
+            );
             let _ = conn.write_all(b"data: line one\ndata: line two\n\ndata: second event\n\n");
         });
 
@@ -2260,7 +2430,11 @@ mod tests {
             vec!["line one\nline two", "second event"],
             "consecutive data lines before a blank must join into one frame; the blank line starts the next event"
         );
-        assert_eq!(outcome.frame_offsets_us.len(), 2, "one arrival time per EVENT, not per line");
+        assert_eq!(
+            outcome.frame_offsets_us.len(),
+            2,
+            "one arrival time per EVENT, not per line"
+        );
     }
 
     #[test]
@@ -2339,11 +2513,21 @@ mod tests {
         let mut bytes = SSE_HEAD.as_bytes().to_vec();
         bytes.extend_from_slice(&body);
         let whole = read_all(&bytes, 64, bytes.len());
-        assert_eq!(whole.frames, vec!["hello".to_string(), "world".to_string(), "third".to_string()]);
+        assert_eq!(
+            whole.frames,
+            vec![
+                "hello".to_string(),
+                "world".to_string(),
+                "third".to_string()
+            ]
+        );
         // Every fragmentation, down to one byte at a time, must agree with it.
         for split in [1, 2, 3, 5, 7, 13, 64, 500] {
             let got = read_all(&bytes, 64, split);
-            assert_eq!(got.frames, whole.frames, "fragmenting every {split} bytes changed the frames");
+            assert_eq!(
+                got.frames, whole.frames,
+                "fragmenting every {split} bytes changed the frames"
+            );
             assert_eq!(got.status, whole.status);
             assert_eq!(got.end, whole.end);
         }
@@ -2351,10 +2535,16 @@ mod tests {
 
     #[test]
     fn identity_framing_is_read_the_same_way() {
-        let bytes = b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\ndata: x\n\ndata: y\n\n".to_vec();
+        let bytes =
+            b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\ndata: x\n\ndata: y\n\n"
+                .to_vec();
         for split in [1, 4, 999] {
             let out = read_all(&bytes, 64, split);
-            assert_eq!(out.frames, vec!["x".to_string(), "y".to_string()], "split {split}");
+            assert_eq!(
+                out.frames,
+                vec!["x".to_string(), "y".to_string()],
+                "split {split}"
+            );
         }
     }
 
@@ -2371,11 +2561,19 @@ mod tests {
 
     #[test]
     fn non_data_lines_are_skipped_and_the_budget_stops_the_read() {
-        let body = chunked(&["event: ping\nid: 7\ndata: a\n\n", "data: b\n\n", "data: c\n\n"]);
+        let body = chunked(&[
+            "event: ping\nid: 7\ndata: a\n\n",
+            "data: b\n\n",
+            "data: c\n\n",
+        ]);
         let mut bytes = SSE_HEAD.as_bytes().to_vec();
         bytes.extend_from_slice(&body);
         let out = read_all(&bytes, 2, 5);
-        assert_eq!(out.frames, vec!["a".to_string(), "b".to_string()], "the budget stops at two");
+        assert_eq!(
+            out.frames,
+            vec!["a".to_string(), "b".to_string()],
+            "the budget stops at two"
+        );
         assert_eq!(out.end, SseEnd::FrameBudgetReached);
     }
 
@@ -2383,8 +2581,14 @@ mod tests {
     fn a_peer_that_is_not_streaming_is_answered_immediately() {
         let bytes = b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\r\n{}".to_vec();
         let out = read_all(&bytes, 64, 7);
-        assert!(matches!(out.end, SseEnd::NotAnEventStream(ref ct) if ct.contains("application/json")));
-        assert_eq!(out.status, Some(200), "the status is still what the peer said");
+        assert!(
+            matches!(out.end, SseEnd::NotAnEventStream(ref ct) if ct.contains("application/json"))
+        );
+        assert_eq!(
+            out.status,
+            Some(200),
+            "the status is still what the peer said"
+        );
         assert!(out.frames.is_empty());
     }
 
@@ -2419,7 +2623,11 @@ mod tests {
         assert_eq!(r.feed(&chunked_open("data: b\n\n"), 250), Step::NeedMore);
         let out = r.finish(SseEnd::Timeout, 250);
         assert_eq!(out.frames, vec!["a".to_string(), "b".to_string()]);
-        assert_eq!(out.frame_offsets_us, vec![100, 250], "the gap between frames is the measurement");
+        assert_eq!(
+            out.frame_offsets_us,
+            vec![100, 250],
+            "the gap between frames is the measurement"
+        );
     }
 
     fn chunked_open(payload: &str) -> Vec<u8> {
@@ -2449,17 +2657,36 @@ mod tests {
             .enable_all()
             .build()
             .expect("a runtime for the async lane");
-        let asynced = rt.block_on(post_json_sse_async(addr, path, b"{}", &headers, Duration::from_secs(5), 8));
+        let asynced = rt.block_on(post_json_sse_async(
+            addr,
+            path,
+            b"{}",
+            &headers,
+            Duration::from_secs(5),
+            8,
+        ));
 
-        assert_eq!(asynced.status, blocking.status, "the two lanes disagree on the status");
-        assert_eq!(asynced.frames, blocking.frames, "the two lanes decoded different frames");
-        assert_eq!(asynced.end, blocking.end, "the two lanes ended for different reasons");
+        assert_eq!(
+            asynced.status, blocking.status,
+            "the two lanes disagree on the status"
+        );
+        assert_eq!(
+            asynced.frames, blocking.frames,
+            "the two lanes decoded different frames"
+        );
+        assert_eq!(
+            asynced.end, blocking.end,
+            "the two lanes ended for different reasons"
+        );
         assert_eq!(
             asynced.frame_offsets_us.len(),
             blocking.frame_offsets_us.len(),
             "the two lanes credited a different number of frames"
         );
-        assert!(!blocking.frames.is_empty(), "the fixture must actually stream, or this proves nothing");
+        assert!(
+            !blocking.frames.is_empty(),
+            "the fixture must actually stream, or this proves nothing"
+        );
     }
 
     /// A peer that streams in awkward pieces: chunk boundaries that fall inside `data:` lines, a

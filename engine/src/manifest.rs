@@ -314,15 +314,25 @@ pub enum LaunchDecl {
 /// failed" with no path is the same as no message when a gateway has four of them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ManifestLoadError {
-    Unreadable { path: std::path::PathBuf, why: String },
-    Malformed { path: std::path::PathBuf, why: String },
+    Unreadable {
+        path: std::path::PathBuf,
+        why: String,
+    },
+    Malformed {
+        path: std::path::PathBuf,
+        why: String,
+    },
 }
 
 impl std::fmt::Display for ManifestLoadError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ManifestLoadError::Unreadable { path, why } => write!(f, "cannot read {}: {why}", path.display()),
-            ManifestLoadError::Malformed { path, why } => write!(f, "{} is not valid: {why}", path.display()),
+            ManifestLoadError::Unreadable { path, why } => {
+                write!(f, "cannot read {}: {why}", path.display())
+            }
+            ManifestLoadError::Malformed { path, why } => {
+                write!(f, "{} is not valid: {why}", path.display())
+            }
         }
     }
 }
@@ -359,17 +369,32 @@ fn parse_env(raw: &str) -> (Vec<(String, String)>, Vec<String>) {
 /// with no path is the same as no message at all when a gateway has more than one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfigRenderError {
-    Unreadable { path: std::path::PathBuf, why: String },
-    Unwritable { path: std::path::PathBuf, why: String },
-    Placeholder { path: std::path::PathBuf, why: String },
+    Unreadable {
+        path: std::path::PathBuf,
+        why: String,
+    },
+    Unwritable {
+        path: std::path::PathBuf,
+        why: String,
+    },
+    Placeholder {
+        path: std::path::PathBuf,
+        why: String,
+    },
 }
 
 impl std::fmt::Display for ConfigRenderError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ConfigRenderError::Unreadable { path, why } => write!(f, "cannot read config template {}: {why}", path.display()),
-            ConfigRenderError::Unwritable { path, why } => write!(f, "cannot write rendered config {}: {why}", path.display()),
-            ConfigRenderError::Placeholder { path, why } => write!(f, "config template {}: {why}", path.display()),
+            ConfigRenderError::Unreadable { path, why } => {
+                write!(f, "cannot read config template {}: {why}", path.display())
+            }
+            ConfigRenderError::Unwritable { path, why } => {
+                write!(f, "cannot write rendered config {}: {why}", path.display())
+            }
+            ConfigRenderError::Placeholder { path, why } => {
+                write!(f, "config template {}: {why}", path.display())
+            }
         }
     }
 }
@@ -384,15 +409,23 @@ pub enum ManifestError {
     /// EXTRACTED from shell, where one gateway writes `GW_MODEL="$SOME_MODEL"` - one indirection away
     /// from the literal it resolves to. Extract the wrong side of that and the field holds the
     /// reference instead of a model name. Non-empty, so every existing check passes it.
-    UnexpandedVariable { field: &'static str, raw: String },
+    UnexpandedVariable {
+        field: &'static str,
+        raw: String,
+    },
     /// A config setting with no stated necessity cannot be lint-checked, so it cannot ship.
     ConfigWithoutReason(String),
     /// A launch declaration refers to something the harness does not supply. Loud rather than passed
     /// through: a `{TYPO}` reaching a container as a literal is a misconfiguration that boots and
     /// measures fine, and publishes a number taken under the wrong settings.
-    UnknownPlaceholder { name: String, raw: String },
+    UnknownPlaceholder {
+        name: String,
+        raw: String,
+    },
     /// A declared constant refers to itself, directly or through a ring of others.
-    ConstantCycle { name: String },
+    ConstantCycle {
+        name: String,
+    },
 }
 
 /// How deep a constant may refer to other constants before it is treated as a cycle. One real chain
@@ -468,15 +501,21 @@ fn pinned_parallelism(ncore: u32) -> Vec<(String, String)> {
 /// compatible with a manifest that sets no `matrix` at all); `Some(bool)` is the declared answer,
 /// and a `Some(false)` cell must never be probed - see `Manifest::matrix`'s own doc for why.
 pub fn matrix_declared_capable(matrix: &[String], ingress: &str, egress: &str) -> Option<bool> {
-    let ing_i = crate::ingress::Dialect::ALL.iter().position(|d| d.as_str() == ingress)?;
-    let eg_i = crate::ingress::Dialect::ALL.iter().position(|d| d.as_str() == egress)?;
+    let ing_i = crate::ingress::Dialect::ALL
+        .iter()
+        .position(|d| d.as_str() == ingress)?;
+    let eg_i = crate::ingress::Dialect::ALL
+        .iter()
+        .position(|d| d.as_str() == egress)?;
     let row = matrix.get(ing_i)?;
     row.as_bytes().get(eg_i).map(|b| *b == b'1')
 }
 
 /// Whether this cell is one the RIG cannot pose at all (distinct from a declared incapability).
 pub fn is_untestable_cell(untestable: &[String], ingress: &str, egress: &str) -> bool {
-    untestable.iter().any(|pair| pair.as_str() == format!("{ingress}/{egress}"))
+    untestable
+        .iter()
+        .any(|pair| pair.as_str() == format!("{ingress}/{egress}"))
 }
 
 impl Manifest {
@@ -519,12 +558,18 @@ impl Manifest {
             (&self.class, "class"),
         ] {
             if v.contains('$') {
-                return Err(ManifestError::UnexpandedVariable { field, raw: v.clone() });
+                return Err(ManifestError::UnexpandedVariable {
+                    field,
+                    raw: v.clone(),
+                });
             }
         }
         for h in &self.headers {
             if h.contains('$') {
-                return Err(ManifestError::UnexpandedVariable { field: "headers", raw: h.clone() });
+                return Err(ManifestError::UnexpandedVariable {
+                    field: "headers",
+                    raw: h.clone(),
+                });
             }
         }
         if self.runtime.identity().contains('$') {
@@ -621,7 +666,9 @@ impl Manifest {
                 // directly or in a ring, stops with a named error instead of a stack overflow.
                 name if self.constants.contains_key(name) => {
                     if depth >= MAX_CONSTANT_DEPTH {
-                        return Err(ManifestError::ConstantCycle { name: name.to_string() });
+                        return Err(ManifestError::ConstantCycle {
+                            name: name.to_string(),
+                        });
                     }
                     let raw = self.constants.get(name).cloned().unwrap_or_default();
                     self.substitute_at(&raw, cores, mock_port, gw_dir, depth + 1)?
@@ -676,7 +723,10 @@ impl Manifest {
         // reason: it installs a toolchain and compiles, and that must not happen inside a
         // measurement window.
         let pre_launch = match decl {
-            LaunchDecl::Native { build: Some(script), .. } => Some(crate::launch::PreLaunchStep {
+            LaunchDecl::Native {
+                build: Some(script),
+                ..
+            } => Some(crate::launch::PreLaunchStep {
                 command: gw_dir.join(script).to_string_lossy().into_owned(),
                 args: Vec::new(),
                 // A release build of a gateway from source, on a cold box that may also be
@@ -688,7 +738,12 @@ impl Manifest {
         };
 
         let kind = match decl {
-            LaunchDecl::Docker { image, env, args, mounts } => {
+            LaunchDecl::Docker {
+                image,
+                env,
+                args,
+                mounts,
+            } => {
                 let env = match subst_env(env) {
                     Ok(e) => e,
                     Err(e) => return Some(Err(e)),
@@ -702,7 +757,10 @@ impl Manifest {
                     // THE HARNESS WINS. The gateway's own env goes first and the pinning values
                     // last, because a later assignment overrides an earlier one and no entrant may
                     // opt out of the core limit it is being measured under.
-                    env: env.into_iter().chain(pinned_parallelism(core_count(cores))).collect(),
+                    env: env
+                        .into_iter()
+                        .chain(pinned_parallelism(core_count(cores)))
+                        .collect(),
                     // Every entrant uses host networking: the gateway binds the port it declares and
                     // the harness drives that port. A published mapping would put a NAT hop inside
                     // every measured request.
@@ -732,7 +790,13 @@ impl Manifest {
                     command: args,
                 }
             }
-            LaunchDecl::Native { build, binary, args, env, env_unset } => {
+            LaunchDecl::Native {
+                build,
+                binary,
+                args,
+                env,
+                env_unset,
+            } => {
                 // The FIRST declared candidate that exists and is executable. One entrant's crate has
                 // no stable output name, so the shell searched three; declaring them keeps the search
                 // as data. Falling back to the first candidate when none exists yet is deliberate:
@@ -760,7 +824,10 @@ impl Manifest {
                     binary: bin.to_string_lossy().into_owned(),
                     args,
                     // Same precedence as the container path: the harness states the core limit last.
-                    env: env.into_iter().chain(pinned_parallelism(core_count(cores))).collect(),
+                    env: env
+                        .into_iter()
+                        .chain(pinned_parallelism(core_count(cores)))
+                        .collect(),
                     env_unset: env_unset.clone(),
                 }
             }
@@ -796,7 +863,11 @@ impl Manifest {
         // `validate` checks config templates, not this: a declared build script that does not exist
         // would point the launcher at a binary nothing had built, surfacing on a bench box as
         // `never became ready` instead of here, in a second.
-        if let Some(crate::manifest::LaunchDecl::Native { build: Some(script), .. }) = &self.launch {
+        if let Some(crate::manifest::LaunchDecl::Native {
+            build: Some(script),
+            ..
+        }) = &self.launch
+        {
             let path = gw_dir.join(script);
             if !path.is_file() {
                 out.push(format!(
@@ -867,7 +938,10 @@ impl Manifest {
         // A native entrant with no binary to run.
         if let Some(LaunchDecl::Native { binary, .. }) = &self.launch {
             if binary.is_empty() {
-                out.push("launch declares no binary candidates, so there is nothing to start".to_string());
+                out.push(
+                    "launch declares no binary candidates, so there is nothing to start"
+                        .to_string(),
+                );
             }
         }
 
@@ -900,15 +974,24 @@ impl Manifest {
     /// no config file at all; one has neither and is just a definition.
     pub fn load(dir: &std::path::Path) -> Result<Manifest, ManifestLoadError> {
         let def_path = dir.join("definition.json");
-        let text = std::fs::read_to_string(&def_path)
-            .map_err(|e| ManifestLoadError::Unreadable { path: def_path.clone(), why: e.to_string() })?;
-        let mut m: Manifest = serde_json::from_str(&text)
-            .map_err(|e| ManifestLoadError::Malformed { path: def_path.clone(), why: e.to_string() })?;
+        let text =
+            std::fs::read_to_string(&def_path).map_err(|e| ManifestLoadError::Unreadable {
+                path: def_path.clone(),
+                why: e.to_string(),
+            })?;
+        let mut m: Manifest =
+            serde_json::from_str(&text).map_err(|e| ManifestLoadError::Malformed {
+                path: def_path.clone(),
+                why: e.to_string(),
+            })?;
 
         let env_path = dir.join("env");
         if env_path.is_file() {
-            let raw = std::fs::read_to_string(&env_path)
-                .map_err(|e| ManifestLoadError::Unreadable { path: env_path.clone(), why: e.to_string() })?;
+            let raw =
+                std::fs::read_to_string(&env_path).map_err(|e| ManifestLoadError::Unreadable {
+                    path: env_path.clone(),
+                    why: e.to_string(),
+                })?;
             let (env, unset) = parse_env(&raw);
             m.apply_env(env, unset);
         }
@@ -919,7 +1002,10 @@ impl Manifest {
         let commands_path = dir.join("commands");
         if commands_path.is_file() {
             let raw = std::fs::read_to_string(&commands_path).map_err(|e| {
-                ManifestLoadError::Unreadable { path: commands_path.clone(), why: e.to_string() }
+                ManifestLoadError::Unreadable {
+                    path: commands_path.clone(),
+                    why: e.to_string(),
+                }
             })?;
             m.commands = raw
                 .lines()
@@ -931,10 +1017,17 @@ impl Manifest {
 
         let headers_path = dir.join("headers.json");
         if headers_path.is_file() {
-            let raw = std::fs::read_to_string(&headers_path)
-                .map_err(|e| ManifestLoadError::Unreadable { path: headers_path.clone(), why: e.to_string() })?;
-            m.egress_headers = serde_json::from_str(&raw)
-                .map_err(|e| ManifestLoadError::Malformed { path: headers_path.clone(), why: e.to_string() })?;
+            let raw = std::fs::read_to_string(&headers_path).map_err(|e| {
+                ManifestLoadError::Unreadable {
+                    path: headers_path.clone(),
+                    why: e.to_string(),
+                }
+            })?;
+            m.egress_headers =
+                serde_json::from_str(&raw).map_err(|e| ManifestLoadError::Malformed {
+                    path: headers_path.clone(),
+                    why: e.to_string(),
+                })?;
         }
         Ok(m)
     }
@@ -943,7 +1036,11 @@ impl Manifest {
     fn apply_env(&mut self, env: Vec<(String, String)>, unset: Vec<String>) {
         match self.launch.as_mut() {
             Some(LaunchDecl::Docker { env: e, .. }) => *e = env,
-            Some(LaunchDecl::Native { env: e, env_unset: u, .. }) => {
+            Some(LaunchDecl::Native {
+                env: e,
+                env_unset: u,
+                ..
+            }) => {
                 *e = env;
                 *u = unset;
             }
@@ -974,7 +1071,12 @@ impl Manifest {
     ) -> std::collections::BTreeMap<String, String> {
         self.cell_paths
             .iter()
-            .filter_map(|(k, v)| Some((k.clone(), self.substitute(v, cores, mock_port, gw_dir).ok()?)))
+            .filter_map(|(k, v)| {
+                Some((
+                    k.clone(),
+                    self.substitute(v, cores, mock_port, gw_dir).ok()?,
+                ))
+            })
             .collect()
     }
 
@@ -991,7 +1093,10 @@ impl Manifest {
         gw_dir: &std::path::Path,
     ) -> Result<Vec<(String, String)>, ManifestError> {
         let mut out = Vec::new();
-        let lines = self.headers.iter().chain(self.egress_headers.get(egress).into_iter().flatten());
+        let lines = self
+            .headers
+            .iter()
+            .chain(self.egress_headers.get(egress).into_iter().flatten());
         for line in lines {
             let resolved = self.substitute(line, cores, mock_port, gw_dir)?;
             // A manifest writes headers the way they appear on the wire, "Name: value", because that
@@ -1021,18 +1126,29 @@ impl Manifest {
         let mut written = Vec::new();
         for file in &self.config_files {
             let template_path = gw_dir.join(&file.template);
-            let raw = std::fs::read_to_string(&template_path)
-                .map_err(|e| ConfigRenderError::Unreadable { path: template_path.clone(), why: e.to_string() })?;
+            let raw = std::fs::read_to_string(&template_path).map_err(|e| {
+                ConfigRenderError::Unreadable {
+                    path: template_path.clone(),
+                    why: e.to_string(),
+                }
+            })?;
             let body = self
                 .substitute(&raw, cores, mock_port, gw_dir)
-                .map_err(|e| ConfigRenderError::Placeholder { path: template_path.clone(), why: e.to_string() })?;
+                .map_err(|e| ConfigRenderError::Placeholder {
+                    path: template_path.clone(),
+                    why: e.to_string(),
+                })?;
             let out_path = gw_dir.join(&file.output);
             if let Some(parent) = out_path.parent() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|e| ConfigRenderError::Unwritable { path: out_path.clone(), why: e.to_string() })?;
+                std::fs::create_dir_all(parent).map_err(|e| ConfigRenderError::Unwritable {
+                    path: out_path.clone(),
+                    why: e.to_string(),
+                })?;
             }
-            std::fs::write(&out_path, &body)
-                .map_err(|e| ConfigRenderError::Unwritable { path: out_path.clone(), why: e.to_string() })?;
+            std::fs::write(&out_path, &body).map_err(|e| ConfigRenderError::Unwritable {
+                path: out_path.clone(),
+                why: e.to_string(),
+            })?;
             written.push((out_path, body));
         }
         Ok(written)
@@ -1063,7 +1179,9 @@ pub(crate) fn test_fixture() -> Manifest {
         egress_models: Default::default(),
         auth: "dummy".into(),
         headers: vec![],
-        runtime: Runtime::Docker { container: "gw-bench".into() },
+        runtime: Runtime::Docker {
+            container: "gw-bench".into(),
+        },
         egress: vec!["openai".into()],
         matrix: vec![],
         matrix_note: String::new(),
@@ -1096,9 +1214,14 @@ mod tests {
     #[test]
     fn a_cell_path_resolves_its_placeholders_before_it_ever_reaches_a_probe() {
         let mut m = docker_manifest();
-        m.constants.insert("BEDROCK_MODEL".into(), "vendor.model-v1:0".into());
-        m.constants.insert("MATRIX_PATH_BEDROCK".into(), "/model/{BEDROCK_MODEL}/converse".into());
-        m.cell_paths.insert("bedrock>bedrock".into(), "{MATRIX_PATH_BEDROCK}".into());
+        m.constants
+            .insert("BEDROCK_MODEL".into(), "vendor.model-v1:0".into());
+        m.constants.insert(
+            "MATRIX_PATH_BEDROCK".into(),
+            "/model/{BEDROCK_MODEL}/converse".into(),
+        );
+        m.cell_paths
+            .insert("bedrock>bedrock".into(), "{MATRIX_PATH_BEDROCK}".into());
 
         let got = m.cell_paths_for("0-3", 8000, std::path::Path::new("."));
         assert_eq!(
@@ -1113,8 +1236,13 @@ mod tests {
     #[test]
     fn an_unresolvable_cell_path_is_dropped_rather_than_sent_half_substituted() {
         let mut m = docker_manifest();
-        m.cell_paths.insert("bedrock>bedrock".into(), "/model/{NO_SUCH_CONSTANT}/converse".into());
-        assert!(m.cell_paths_for("0-3", 8000, std::path::Path::new(".")).is_empty());
+        m.cell_paths.insert(
+            "bedrock>bedrock".into(),
+            "/model/{NO_SUCH_CONSTANT}/converse".into(),
+        );
+        assert!(m
+            .cell_paths_for("0-3", 8000, std::path::Path::new("."))
+            .is_empty());
     }
 
     // Axis order is `Dialect::ALL` both ways: row 0 = openai ingress, col 0 = openai egress.
@@ -1128,10 +1256,22 @@ mod tests {
             "000000".to_string(),
             "000000".to_string(),
         ];
-        assert_eq!(matrix_declared_capable(&matrix, "openai", "openai"), Some(true));
-        assert_eq!(matrix_declared_capable(&matrix, "openai", "anthropic"), Some(false));
-        assert_eq!(matrix_declared_capable(&matrix, "anthropic", "anthropic"), Some(true));
-        assert_eq!(matrix_declared_capable(&matrix, "gemini", "openai"), Some(false));
+        assert_eq!(
+            matrix_declared_capable(&matrix, "openai", "openai"),
+            Some(true)
+        );
+        assert_eq!(
+            matrix_declared_capable(&matrix, "openai", "anthropic"),
+            Some(false)
+        );
+        assert_eq!(
+            matrix_declared_capable(&matrix, "anthropic", "anthropic"),
+            Some(true)
+        );
+        assert_eq!(
+            matrix_declared_capable(&matrix, "gemini", "openai"),
+            Some(false)
+        );
     }
 
     // Empty matrix means undeclared: every cell probes normally, unchanged from before this field
@@ -1145,14 +1285,20 @@ mod tests {
     #[test]
     fn a_dialect_name_the_matrix_does_not_recognise_is_also_undeclared() {
         let matrix = vec!["1".repeat(6); 6];
-        assert_eq!(matrix_declared_capable(&matrix, "not-a-real-dialect", "openai"), None);
+        assert_eq!(
+            matrix_declared_capable(&matrix, "not-a-real-dialect", "openai"),
+            None
+        );
     }
 
     #[test]
     fn untestable_cells_match_the_exact_ingress_egress_pair_only() {
         let untestable = vec!["openai/bedrock".to_string()];
         assert!(is_untestable_cell(&untestable, "openai", "bedrock"));
-        assert!(!is_untestable_cell(&untestable, "bedrock", "openai"), "direction matters");
+        assert!(
+            !is_untestable_cell(&untestable, "bedrock", "openai"),
+            "direction matters"
+        );
         assert!(!is_untestable_cell(&untestable, "openai", "anthropic"));
     }
 
@@ -1170,7 +1316,12 @@ mod tests {
 
     #[test]
     fn a_native_runtime_carries_a_process_match_not_a_container() {
-        let m = Manifest { runtime: Runtime::Native { proc_match: "target/release/gw".into() }, ..docker_manifest() };
+        let m = Manifest {
+            runtime: Runtime::Native {
+                proc_match: "target/release/gw".into(),
+            },
+            ..docker_manifest()
+        };
         assert!(!m.runtime.is_docker());
         assert_eq!(m.runtime.identity(), "target/release/gw");
     }
@@ -1178,14 +1329,22 @@ mod tests {
     // A runtime with no identity cannot be measured or stopped, so it must not validate.
     #[test]
     fn an_empty_runtime_identity_is_rejected() {
-        let m = Manifest { runtime: Runtime::Docker { container: "  ".into() }, ..docker_manifest() };
+        let m = Manifest {
+            runtime: Runtime::Docker {
+                container: "  ".into(),
+            },
+            ..docker_manifest()
+        };
         assert_eq!(m.validate(), Err(ManifestError::Empty("runtime identity")));
     }
 
     #[test]
     fn required_fields_are_required() {
         for (mutate, field) in [
-            (Box::new(|m: &mut Manifest| m.name.clear()) as Box<dyn Fn(&mut Manifest)>, "name"),
+            (
+                Box::new(|m: &mut Manifest| m.name.clear()) as Box<dyn Fn(&mut Manifest)>,
+                "name",
+            ),
             (Box::new(|m: &mut Manifest| m.display.clear()), "display"),
             (Box::new(|m: &mut Manifest| m.repo.clear()), "repo"),
             (Box::new(|m: &mut Manifest| m.path.clear()), "path"),
@@ -1193,7 +1352,11 @@ mod tests {
         ] {
             let mut m = docker_manifest();
             mutate(&mut m);
-            assert_eq!(m.validate(), Err(ManifestError::Empty(field)), "{field} must be required");
+            assert_eq!(
+                m.validate(),
+                Err(ManifestError::Empty(field)),
+                "{field} must be required"
+            );
         }
         let mut m = docker_manifest();
         m.port = 0;
@@ -1223,20 +1386,55 @@ mod tests {
     // model name. The corpus shipped exactly this.
     #[test]
     fn a_field_holding_an_unexpanded_shell_variable_is_rejected() {
-        let m = Manifest { model: "$SOME_MODEL".into(), ..docker_manifest() };
+        let m = Manifest {
+            model: "$SOME_MODEL".into(),
+            ..docker_manifest()
+        };
         assert_eq!(
             m.validate(),
-            Err(ManifestError::UnexpandedVariable { field: "model", raw: "$SOME_MODEL".into() })
+            Err(ManifestError::UnexpandedVariable {
+                field: "model",
+                raw: "$SOME_MODEL".into()
+            })
         );
-        assert!(!m.model.trim().is_empty(), "the point: it is non-empty, so the emptiness checks pass it");
+        assert!(
+            !m.model.trim().is_empty(),
+            "the point: it is non-empty, so the emptiness checks pass it"
+        );
 
         // Every field a request or a launch is built from, not just the model.
-        let m = Manifest { auth: "${GW_KEY}".into(), ..docker_manifest() };
-        assert!(matches!(m.validate(), Err(ManifestError::UnexpandedVariable { field: "auth", .. })));
-        let m = Manifest { headers: vec!["x-api-key: $GW_AUTH".into()], ..docker_manifest() };
-        assert!(matches!(m.validate(), Err(ManifestError::UnexpandedVariable { field: "headers", .. })));
-        let m = Manifest { runtime: Runtime::Docker { container: "$NAME-bench".into() }, ..docker_manifest() };
-        assert!(matches!(m.validate(), Err(ManifestError::UnexpandedVariable { field: "runtime identity", .. })));
+        let m = Manifest {
+            auth: "${GW_KEY}".into(),
+            ..docker_manifest()
+        };
+        assert!(matches!(
+            m.validate(),
+            Err(ManifestError::UnexpandedVariable { field: "auth", .. })
+        ));
+        let m = Manifest {
+            headers: vec!["x-api-key: $GW_AUTH".into()],
+            ..docker_manifest()
+        };
+        assert!(matches!(
+            m.validate(),
+            Err(ManifestError::UnexpandedVariable {
+                field: "headers",
+                ..
+            })
+        ));
+        let m = Manifest {
+            runtime: Runtime::Docker {
+                container: "$NAME-bench".into(),
+            },
+            ..docker_manifest()
+        };
+        assert!(matches!(
+            m.validate(),
+            Err(ManifestError::UnexpandedVariable {
+                field: "runtime identity",
+                ..
+            })
+        ));
 
         // A clean manifest is untouched by the new rule.
         assert!(docker_manifest().validate().is_ok());
@@ -1245,24 +1443,37 @@ mod tests {
     #[test]
     fn a_setting_with_no_key_cannot_ship() {
         let m = Manifest {
-            config: vec![ConfigSetting { key: " ".into(), reason: ConfigReason::RequiredToBoot, note: String::new() }],
+            config: vec![ConfigSetting {
+                key: " ".into(),
+                reason: ConfigReason::RequiredToBoot,
+                note: String::new(),
+            }],
             ..docker_manifest()
         };
-        assert!(matches!(m.validate(), Err(ManifestError::ConfigWithoutReason(_))));
+        assert!(matches!(
+            m.validate(),
+            Err(ManifestError::ConfigWithoutReason(_))
+        ));
     }
 
     #[test]
     fn round_trips_through_json_including_the_runtime_tag() {
         let m = docker_manifest();
         let js = serde_json::to_string(&m).unwrap();
-        assert!(js.contains(r#""kind":"docker""#), "the runtime kind must be explicit on the wire: {js}");
+        assert!(
+            js.contains(r#""kind":"docker""#),
+            "the runtime kind must be explicit on the wire: {js}"
+        );
         let back: Manifest = serde_json::from_str(&js).unwrap();
         assert_eq!(back, m);
     }
 
     #[test]
     fn the_url_is_built_from_the_declared_port_and_path() {
-        assert_eq!(docker_manifest().url(), "http://127.0.0.1:8080/v1/chat/completions");
+        assert_eq!(
+            docker_manifest().url(),
+            "http://127.0.0.1:8080/v1/chat/completions"
+        );
     }
 
     // EVERY GATEWAY IS TOLD ITS CORE COUNT, BY THE HARNESS, THE SAME WAY.
@@ -1287,7 +1498,9 @@ mod tests {
             mounts: vec![],
         });
         let mut native = docker_manifest();
-        native.runtime = Runtime::Native { proc_match: "gw".into() };
+        native.runtime = Runtime::Native {
+            proc_match: "gw".into(),
+        };
         native.launch = Some(LaunchDecl::Native {
             build: None,
             binary: vec!["gw".into()],
@@ -1298,14 +1511,25 @@ mod tests {
         for (label, m) in [("container", container), ("native", native)] {
             let dir = std::path::Path::new(".");
             let spec = m
-                .launch_spec("0-3", 8000, dir, Duration::from_secs(1), Duration::from_secs(1))
+                .launch_spec(
+                    "0-3",
+                    8000,
+                    dir,
+                    Duration::from_secs(1),
+                    Duration::from_secs(1),
+                )
                 .expect("this manifest declares a launch")
                 .expect("and it resolves");
             let env = match &spec.kind {
                 crate::launch::LaunchKind::Docker { env, .. } => env,
                 crate::launch::LaunchKind::Native { env, .. } => env,
             };
-            let got = |k: &str| env.iter().rev().find(|(n, _)| n == k).map(|(_, v)| v.as_str());
+            let got = |k: &str| {
+                env.iter()
+                    .rev()
+                    .find(|(n, _)| n == k)
+                    .map(|(_, v)| v.as_str())
+            };
             // "0-3" is four cores, and that is what the runtime must be told, not the host's count.
             // Read the LAST assignment for each name: the harness appends its values after the
             // gateway's, so a gateway that sets its own GOMAXPROCS cannot escape the pinning.
@@ -1315,7 +1539,6 @@ mod tests {
             assert_eq!(got("OMP_NUM_THREADS"), Some("4"), "{label}: openmp");
         }
     }
-
 }
 
 #[cfg(test)]
@@ -1336,13 +1559,15 @@ mod real_field_tests {
     fn field() -> BTreeMap<String, Manifest> {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../gateways");
         let mut out = BTreeMap::new();
-        for entry in std::fs::read_dir(&root).expect("the gateways directory must exist").flatten() {
+        for entry in std::fs::read_dir(&root)
+            .expect("the gateways directory must exist")
+            .flatten()
+        {
             let def = entry.path().join("definition.json");
             if !def.is_file() {
                 continue;
             }
-            let m = Manifest::load(&entry.path())
-                .unwrap_or_else(|e| panic!("{e}"));
+            let m = Manifest::load(&entry.path()).unwrap_or_else(|e| panic!("{e}"));
             out.insert(m.name.clone(), m);
         }
         assert!(!out.is_empty(), "no gateways/*/definition.json found");
@@ -1352,9 +1577,17 @@ mod real_field_tests {
     #[test]
     fn every_real_manifest_parses_and_validates() {
         let f = field();
-        assert!(f.len() >= 13, "the whole field should be represented, got {}", f.len());
+        assert!(
+            f.len() >= 13,
+            "the whole field should be represented, got {}",
+            f.len()
+        );
         for (name, m) in &f {
-            assert!(m.validate().is_ok(), "{name} must validate: {:?}", m.validate());
+            assert!(
+                m.validate().is_ok(),
+                "{name} must validate: {:?}",
+                m.validate()
+            );
             assert_eq!(&m.name, name, "the key and the declared name must agree");
         }
     }
@@ -1365,7 +1598,10 @@ mod real_field_tests {
     fn no_manifest_can_name_two_different_things_to_measure() {
         for (name, m) in &field() {
             let id = m.runtime.identity();
-            assert!(!id.trim().is_empty(), "{name} must declare something measurable");
+            assert!(
+                !id.trim().is_empty(),
+                "{name} must declare something measurable"
+            );
             // Both readers and the stop path take this one string. Asserting it twice is the closest
             // a test can get to asserting that a second spelling does not exist.
             assert_eq!(m.runtime.identity(), id);
@@ -1380,7 +1616,13 @@ mod real_field_tests {
         let mut launchable = 0;
         for (name, m) in &field() {
             let spec = m
-                .launch_spec("0-3", 8000, std::path::Path::new("/gw"), Duration::from_secs(1), Duration::from_secs(1))
+                .launch_spec(
+                    "0-3",
+                    8000,
+                    std::path::Path::new("/gw"),
+                    Duration::from_secs(1),
+                    Duration::from_secs(1),
+                )
                 .unwrap_or_else(|| panic!("{name} must declare how it is launched"))
                 .unwrap_or_else(|e| panic!("{name} must produce a launchable spec: {e}"));
             assert!(spec.validate().is_ok(), "{name}: {:?}", spec.validate());
@@ -1388,7 +1630,11 @@ mod real_field_tests {
             let inv = crate::launch::build_invocation(&spec);
             // A container is started by the container runtime; a source-built entrant is started
             // pinned, directly. Both must be launchable.
-            let expected = if m.runtime.is_docker() { "docker" } else { "taskset" };
+            let expected = if m.runtime.is_docker() {
+                "docker"
+            } else {
+                "taskset"
+            };
             assert_eq!(inv.program, expected, "{name}");
             if !m.runtime.is_docker() {
                 launchable += 1;
@@ -1397,20 +1643,30 @@ mod real_field_tests {
             // The container name comes from runtime.identity(), NOT from the launch block, so the
             // thing started, the thing measured and the thing stopped cannot be three containers.
             assert!(
-                inv.args.windows(2).any(|w| w == ["--name".to_string(), m.runtime.identity().to_string()]),
+                inv.args
+                    .windows(2)
+                    .any(|w| w == ["--name".to_string(), m.runtime.identity().to_string()]),
                 "{name} must launch under its declared identity: {:?}",
                 inv.args
             );
             assert!(
-                inv.args.windows(2).any(|w| w == ["--cpuset-cpus".to_string(), "0-3".to_string()]),
+                inv.args
+                    .windows(2)
+                    .any(|w| w == ["--cpuset-cpus".to_string(), "0-3".to_string()]),
                 "{name} must be pinned: {:?}",
                 inv.args
             );
             // A mount is resolved against the gateway's own directory: an absolute path in a manifest
             // only works on the machine it was written on.
             for a in &inv.args {
-                assert!(!a.contains("$GW_DIR"), "{name} left an unexpanded shell path: {a}");
-                assert!(!a.contains('{') || !a.contains('}'), "{name} left an unresolved placeholder: {a}");
+                assert!(
+                    !a.contains("$GW_DIR"),
+                    "{name} left an unexpanded shell path: {a}"
+                );
+                assert!(
+                    !a.contains('{') || !a.contains('}'),
+                    "{name} left an unresolved placeholder: {a}"
+                );
             }
             launchable += 1;
         }
@@ -1525,19 +1781,35 @@ mod real_field_tests {
                 })
             })
             .collect();
-        assert!(!with_ncore.is_empty(), "some entrants set their thread count from the core pin");
+        assert!(
+            !with_ncore.is_empty(),
+            "some entrants set their thread count from the core pin"
+        );
 
         for (name, m) in with_ncore {
             for (cores, expected) in [("0-3", "4"), ("4-9", "6"), ("2", "1")] {
                 let spec = m
-                    .launch_spec(cores, 8000, std::path::Path::new("/gw"), Duration::from_secs(1), Duration::from_secs(1))
+                    .launch_spec(
+                        cores,
+                        8000,
+                        std::path::Path::new("/gw"),
+                        Duration::from_secs(1),
+                        Duration::from_secs(1),
+                    )
                     .and_then(Result::ok)
                     .unwrap_or_else(|| panic!("{name} must build a spec"));
                 let crate::launch::LaunchKind::Docker { env, .. } = &spec.kind else {
                     panic!("{name} is a container entrant")
                 };
-                let v = env.iter().find(|(k, _)| k == "GOMAXPROCS").map(|(_, v)| v.as_str());
-                assert_eq!(v, Some(expected), "{name} on cores {cores} must run {expected} threads");
+                let v = env
+                    .iter()
+                    .find(|(k, _)| k == "GOMAXPROCS")
+                    .map(|(_, v)| v.as_str());
+                assert_eq!(
+                    v,
+                    Some(expected),
+                    "{name} on cores {cores} must run {expected} threads"
+                );
             }
         }
     }
@@ -1558,7 +1830,9 @@ mod real_field_tests {
         let scrubbing: Vec<_> = f
             .iter()
             .filter(|(_, m)| {
-                m.launch.as_ref().is_some_and(|l| matches!(l, LaunchDecl::Native { env_unset, .. } if !env_unset.is_empty()))
+                m.launch.as_ref().is_some_and(
+                    |l| matches!(l, LaunchDecl::Native { env_unset, .. } if !env_unset.is_empty()),
+                )
             })
             .collect();
         assert!(
@@ -1568,7 +1842,13 @@ mod real_field_tests {
 
         for (name, m) in scrubbing {
             let spec = m
-                .launch_spec("0-3", 8000, std::path::Path::new("/gw"), Duration::from_secs(1), Duration::from_secs(1))
+                .launch_spec(
+                    "0-3",
+                    8000,
+                    std::path::Path::new("/gw"),
+                    Duration::from_secs(1),
+                    Duration::from_secs(1),
+                )
                 .and_then(Result::ok)
                 .unwrap_or_else(|| panic!("{name} must build a spec"));
             let inv = crate::launch::build_invocation(&spec);
@@ -1598,12 +1878,23 @@ mod real_field_tests {
     fn every_setup_mistake_the_validator_exists_for_is_actually_reported() {
         let dir = std::env::temp_dir().join(format!("otb-validate-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("scratch dir");
-        std::fs::write(dir.join("typo.tmpl"), "port: {NOT_A_REAL_THING}\n").expect("write template");
+        std::fs::write(dir.join("typo.tmpl"), "port: {NOT_A_REAL_THING}\n")
+            .expect("write template");
 
-        let mut m = field().values().find(|m| m.runtime.is_docker()).cloned().expect("an entrant");
+        let mut m = field()
+            .values()
+            .find(|m| m.runtime.is_docker())
+            .cloned()
+            .expect("an entrant");
         m.config_files = vec![
-            ConfigFile { template: "missing.tmpl".into(), output: "a.yaml".into() },
-            ConfigFile { template: "typo.tmpl".into(), output: "b.yaml".into() },
+            ConfigFile {
+                template: "missing.tmpl".into(),
+                output: "a.yaml".into(),
+            },
+            ConfigFile {
+                template: "typo.tmpl".into(),
+                output: "b.yaml".into(),
+            },
         ];
         m.launch = Some(LaunchDecl::Docker {
             image: "x:1".into(),
@@ -1615,26 +1906,46 @@ mod real_field_tests {
                 read_only: true,
             }],
         });
-        m.egress_headers = [("notadialect".to_string(), vec!["x-a: b".to_string()])].into_iter().collect();
+        m.egress_headers = [("notadialect".to_string(), vec!["x-a: b".to_string()])]
+            .into_iter()
+            .collect();
 
         let problems = m.problems(&dir);
         let joined = problems.join("\n");
 
-        assert!(joined.contains("missing.tmpl"), "a declared template that is absent must be reported: {joined}");
-        assert!(joined.contains("NOT_A_REAL_THING"), "a placeholder the harness cannot supply must be reported: {joined}");
+        assert!(
+            joined.contains("missing.tmpl"),
+            "a declared template that is absent must be reported: {joined}"
+        );
+        assert!(
+            joined.contains("NOT_A_REAL_THING"),
+            "a placeholder the harness cannot supply must be reported: {joined}"
+        );
         assert!(
             joined.contains("never-rendered.yaml"),
             "a mount nothing renders must be reported - this is the one that costs the most to diagnose, because the container just exits: {joined}"
         );
-        assert!(joined.contains("notadialect"), "a header keyed by a dialect we do not speak must be reported: {joined}");
+        assert!(
+            joined.contains("notadialect"),
+            "a header keyed by a dialect we do not speak must be reported: {joined}"
+        );
 
         // The message has to tell a maintainer what to DO, not just that something is wrong.
-        assert!(joined.contains("MOCK_PORT"), "the placeholder error must list what IS available: {joined}");
+        assert!(
+            joined.contains("MOCK_PORT"),
+            "the placeholder error must list what IS available: {joined}"
+        );
 
         // A correct gateway stays quiet, or the validator is noise and gets ignored.
         for (name, real) in &field() {
-            let gw_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../gateways").join(name);
-            assert!(real.problems(&gw_dir).is_empty(), "{name} is a real entrant and must validate clean: {:?}", real.problems(&gw_dir));
+            let gw_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../gateways")
+                .join(name);
+            assert!(
+                real.problems(&gw_dir).is_empty(),
+                "{name} is a real entrant and must validate clean: {:?}",
+                real.problems(&gw_dir)
+            );
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1658,7 +1969,11 @@ mod real_field_tests {
         use std::time::Duration;
         // Built here rather than borrowed from the other test module: this one walks the real
         // corpus, and a fixture that drifts from the real shape would prove nothing about it.
-        let mut m = field().values().find(|m| m.runtime.is_docker()).cloned().expect("a container entrant");
+        let mut m = field()
+            .values()
+            .find(|m| m.runtime.is_docker())
+            .cloned()
+            .expect("a container entrant");
         m.launch = Some(LaunchDecl::Docker {
             image: "gw:1".into(),
             env: vec![("X".into(), "{NOT_A_THING}".into())],
@@ -1666,7 +1981,13 @@ mod real_field_tests {
             mounts: vec![],
         });
         let err = m
-            .launch_spec("0-3", 8000, std::path::Path::new("/gw"), Duration::from_secs(1), Duration::from_secs(1))
+            .launch_spec(
+                "0-3",
+                8000,
+                std::path::Path::new("/gw"),
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+            )
             .and_then(Result::err);
         assert!(
             matches!(err, Some(ManifestError::UnknownPlaceholder { ref name, .. }) if name == "NOT_A_THING"),
@@ -1686,14 +2007,21 @@ mod real_field_tests {
             if m.config_files.is_empty() {
                 continue;
             }
-            let gw_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../gateways").join(name);
-            let out = std::env::temp_dir().join(format!("otb-render-{}-{}", name, std::process::id()));
+            let gw_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../gateways")
+                .join(name);
+            let out =
+                std::env::temp_dir().join(format!("otb-render-{}-{}", name, std::process::id()));
             std::fs::create_dir_all(&out).expect("scratch dir");
 
             for file in &m.config_files {
                 let template_path = gw_dir.join(&file.template);
-                let raw = std::fs::read_to_string(&template_path)
-                    .unwrap_or_else(|e| panic!("{name} declares {} which cannot be read: {e}", file.template));
+                let raw = std::fs::read_to_string(&template_path).unwrap_or_else(|e| {
+                    panic!(
+                        "{name} declares {} which cannot be read: {e}",
+                        file.template
+                    )
+                });
                 let body = m
                     .substitute(&raw, "0-3", 8000, &gw_dir)
                     .unwrap_or_else(|e| panic!("{name} template {}: {e}", file.template));
@@ -1704,28 +2032,43 @@ mod real_field_tests {
                 // which is indistinguishable from an unresolved placeholder by looking at the
                 // result. The guarantee lives in `substitute`, which refuses an unknown name
                 // outright, so reaching this line means every placeholder was supplied.
-                assert!(!body.trim().is_empty(), "{name} rendered {} to nothing", file.output);
+                assert!(
+                    !body.trim().is_empty(),
+                    "{name} rendered {} to nothing",
+                    file.output
+                );
                 rendered += 1;
             }
             let _ = std::fs::remove_dir_all(&out);
         }
-        assert!(rendered >= 13, "every declared template must render, got {rendered}");
+        assert!(
+            rendered >= 13,
+            "every declared template must render, got {rendered}"
+        );
     }
 
     #[test]
     fn both_runtime_kinds_are_present_in_the_real_field() {
         let f = field();
-        assert!(f.values().any(|m| m.runtime.is_docker()), "some entrants run in containers");
-        assert!(f.values().any(|m| !m.runtime.is_docker()), "some entrants run natively from source");
+        assert!(
+            f.values().any(|m| m.runtime.is_docker()),
+            "some entrants run in containers"
+        );
+        assert!(
+            f.values().any(|m| !m.runtime.is_docker()),
+            "some entrants run natively from source"
+        );
     }
 
     #[test]
     fn every_manifest_declares_a_reachable_url() {
         for (name, m) in &field() {
             let u = m.url();
-            assert!(u.starts_with("http://127.0.0.1:"), "{name} must be driven on loopback, got {u}");
+            assert!(
+                u.starts_with("http://127.0.0.1:"),
+                "{name} must be driven on loopback, got {u}"
+            );
             assert!(u.contains(&m.port.to_string()));
         }
     }
-
 }

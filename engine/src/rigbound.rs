@@ -74,22 +74,40 @@ mod tests {
 
     #[test]
     fn at_or_above_nine_tenths_of_the_ceiling_is_rig_bound() {
-        assert_eq!(is_rig_bound(90.0, Measurement::Measured(100.0)).copied(), Some(true));
-        assert_eq!(is_rig_bound(95.4, Measurement::Measured(100.0)).copied(), Some(true));
+        assert_eq!(
+            is_rig_bound(90.0, Measurement::Measured(100.0)).copied(),
+            Some(true)
+        );
+        assert_eq!(
+            is_rig_bound(95.4, Measurement::Measured(100.0)).copied(),
+            Some(true)
+        );
         // The field case: 334838 fps against a 351088 fps rig ceiling is 95.4% and rig-bound.
-        assert_eq!(is_rig_bound(334_838.0, Measurement::Measured(351_088.0)).copied(), Some(true));
+        assert_eq!(
+            is_rig_bound(334_838.0, Measurement::Measured(351_088.0)).copied(),
+            Some(true)
+        );
     }
 
     #[test]
     fn comfortably_below_the_ceiling_is_the_gateway_s_own_number() {
-        assert_eq!(is_rig_bound(50.0, Measurement::Measured(100.0)).copied(), Some(false));
+        assert_eq!(
+            is_rig_bound(50.0, Measurement::Measured(100.0)).copied(),
+            Some(false)
+        );
         // The other field case: 169125 fps against the same rig ceiling is 48%, a real measurement.
-        assert_eq!(is_rig_bound(169_125.0, Measurement::Measured(351_088.0)).copied(), Some(false));
+        assert_eq!(
+            is_rig_bound(169_125.0, Measurement::Measured(351_088.0)).copied(),
+            Some(false)
+        );
     }
 
     #[test]
     fn exactly_at_the_fraction_counts_as_bound() {
-        assert_eq!(is_rig_bound(90.0, Measurement::Measured(100.0)).copied(), Some(true));
+        assert_eq!(
+            is_rig_bound(90.0, Measurement::Measured(100.0)).copied(),
+            Some(true)
+        );
     }
 
     // An unmeasurable ceiling must not silently certify the gateway's number. Answering false here
@@ -107,7 +125,6 @@ mod tests {
         }
     }
 
-
     // A REFERENCE THE OBSERVATION OVERSHOOTS IS EVIDENCE ABOUT THE REFERENCE.
     //
     // The gateway forwards to the same mock the reference is measured from, at the same operating
@@ -117,15 +134,24 @@ mod tests {
     //
     // These are the 2026-07-28 field run's own numbers.
     #[test]
-    fn an_observation_that_beats_the_reference_makes_the_reference_unusable_not_the_verdict_certain() {
-        for (observed, reference) in [(192_671.0, 24_854.0), (608.0, 49.0), (673.0, 392.0), (272.0, 98.0)] {
+    fn an_observation_that_beats_the_reference_makes_the_reference_unusable_not_the_verdict_certain(
+    ) {
+        for (observed, reference) in [
+            (192_671.0, 24_854.0),
+            (608.0, 49.0),
+            (673.0, 392.0),
+            (272.0, 98.0),
+        ] {
             let v = is_rig_bound(observed, Measurement::Measured(reference));
             assert_eq!(
-                v.copied(), None,
+                v.copied(),
+                None,
                 "{observed:.0} against a {reference:.0} ceiling is impossible for a proxy of that \
                  same mock, so it cannot be reported as a confident verdict either way"
             );
-            assert!(v.detail().is_some_and(|d| d.contains("reference did not measure what it claims to")));
+            assert!(v
+                .detail()
+                .is_some_and(|d| d.contains("reference did not measure what it claims to")));
         }
     }
 
@@ -134,10 +160,22 @@ mod tests {
     #[test]
     fn a_little_over_the_reference_is_still_a_verdict_not_an_unknown() {
         // Just above the ceiling: rig-bound, which is the honest reading of a gateway pinned there.
-        assert_eq!(is_rig_bound(105.0, Measurement::Measured(100.0)).copied(), Some(true));
-        assert_eq!(is_rig_bound(149.0, Measurement::Measured(100.0)).copied(), Some(true));
+        assert_eq!(
+            is_rig_bound(105.0, Measurement::Measured(100.0)).copied(),
+            Some(true)
+        );
+        assert_eq!(
+            is_rig_bound(149.0, Measurement::Measured(100.0)).copied(),
+            Some(true)
+        );
         // The field cases this guard was built on still classify exactly as before.
-        assert_eq!(is_rig_bound(334_838.0, Measurement::Measured(351_088.0)).copied(), Some(true));
-        assert_eq!(is_rig_bound(169_125.0, Measurement::Measured(351_088.0)).copied(), Some(false));
+        assert_eq!(
+            is_rig_bound(334_838.0, Measurement::Measured(351_088.0)).copied(),
+            Some(true)
+        );
+        assert_eq!(
+            is_rig_bound(169_125.0, Measurement::Measured(351_088.0)).copied(),
+            Some(false)
+        );
     }
 }

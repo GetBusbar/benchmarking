@@ -166,7 +166,13 @@ struct WorkerStats {
 /// One connection-holder's request loop. Opens a connection and reuses it, reconnecting on failure,
 /// because a fresh TCP handshake per request would measure the kernel rather than the gateway.
 async fn worker(addr: SocketAddr, req: Arc<String>, stop: Arc<AtomicBool>) -> WorkerStats {
-    let mut w = WorkerStats { ok: 0, fail: 0, rig_refused: 0, budget_exceeded: 0, lat: Vec::with_capacity(1024) };
+    let mut w = WorkerStats {
+        ok: 0,
+        fail: 0,
+        rig_refused: 0,
+        budget_exceeded: 0,
+        lat: Vec::with_capacity(1024),
+    };
     let mut conn: Option<TcpStream> = None;
     // ALLOCATED ONCE, reused across every request this task sends: a fresh Vec per response would
     // put an allocator call in the timed hot path of every exchange, for a task that runs for the
@@ -182,7 +188,9 @@ async fn worker(addr: SocketAddr, req: Arc<String>, stop: Arc<AtomicBool>) -> Wo
         fresh = false;
         if conn.is_none() {
             fresh = true;
-            conn = match tokio::time::timeout(Duration::from_secs(5), TcpStream::connect(addr)).await {
+            conn = match tokio::time::timeout(Duration::from_secs(5), TcpStream::connect(addr))
+                .await
+            {
                 Ok(Ok(s)) => {
                     let _ = s.set_nodelay(true);
                     Some(s)
@@ -220,7 +228,11 @@ async fn worker(addr: SocketAddr, req: Arc<String>, stop: Arc<AtomicBool>) -> Wo
         let outcome = if s.write_all(req.as_bytes()).await.is_err() {
             // A write that fails on a REUSED connection is the same stale-connection case as a read
             // that sees nothing: the peer closed it while it sat idle.
-            if fresh { Exchange::Failed } else { Exchange::ClosedBeforeAnyBytes }
+            if fresh {
+                Exchange::Failed
+            } else {
+                Exchange::ClosedBeforeAnyBytes
+            }
         } else {
             read_response(s, response_deadline, &mut acc).await
         };
@@ -313,7 +325,11 @@ enum Exchange {
 /// opts out with `connection: close`. Getting that default backwards is what makes a well-behaved
 /// HTTP/1.0 peer look like it is failing half its requests.
 fn peer_will_close(head_lower: &str) -> bool {
-    let says = |name: &str| head_lower.lines().any(|l| l.starts_with("connection:") && l.contains(name));
+    let says = |name: &str| {
+        head_lower
+            .lines()
+            .any(|l| l.starts_with("connection:") && l.contains(name))
+    };
     if says("close") {
         return true;
     }
@@ -341,7 +357,13 @@ async fn read_response(s: &mut TcpStream, deadline: Instant, acc: &mut Vec<u8>) 
     let mut framing_kind: Option<Framing> = None;
     let mut scanned: usize = 0;
     let mut closing = false;
-    let complete = |closing: bool| if closing { Exchange::LastOnConnection } else { Exchange::Reusable };
+    let complete = |closing: bool| {
+        if closing {
+            Exchange::LastOnConnection
+        } else {
+            Exchange::Reusable
+        }
+    };
     loop {
         if hdr_end.is_none() {
             if let Some(he) = find_headers_end(acc) {
@@ -421,7 +443,10 @@ enum Framing {
 
 /// How the body's end is signalled. Absent framing is its own case, never a zero-length body.
 fn framing(head_lower: &str) -> Framing {
-    if head_lower.lines().any(|l| l.starts_with("transfer-encoding:") && l.contains("chunked")) {
+    if head_lower
+        .lines()
+        .any(|l| l.starts_with("transfer-encoding:") && l.contains("chunked"))
+    {
         return Framing::Chunked;
     }
     match content_length(head_lower) {
@@ -451,13 +476,19 @@ pub fn run(cfg: &GenConfig) -> GenStats {
     // Worker threads default to `available_parallelism`, which honours the CPU affinity mask
     // `taskset -c $LOADCORES` sets, so the generator still runs on exactly the cores it is pinned
     // to. That pinning is the comparability basis of every published number.
-    let rt = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
+    let rt = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
         Ok(rt) => rt,
         Err(e) => {
             // The rig could not pose the question at all. Reported the same way a refused thread
             // was: a window that never ran is not a measurement of the gateway at any concurrency.
             eprintln!("loadgen: could not build the async runtime: {e}");
-            return GenStats { spawn_failed: true, ..Default::default() };
+            return GenStats {
+                spawn_failed: true,
+                ..Default::default()
+            };
         }
     };
 
@@ -470,7 +501,11 @@ pub fn run(cfg: &GenConfig) -> GenStats {
         let stop = Arc::new(AtomicBool::new(false));
         let mut handles = Vec::with_capacity(concurrency as usize);
         for _ in 0..concurrency {
-            handles.push(tokio::spawn(worker(addr, Arc::clone(&req), Arc::clone(&stop))));
+            handles.push(tokio::spawn(worker(
+                addr,
+                Arc::clone(&req),
+                Arc::clone(&stop),
+            )));
         }
 
         // THE WINDOW IS THE SLEEP, and it starts once every task exists.
@@ -486,7 +521,10 @@ pub fn run(cfg: &GenConfig) -> GenStats {
         stop.store(true, Ordering::Relaxed);
         let load_elapsed = started.elapsed();
 
-        let mut g = GenStats { elapsed_s: load_elapsed.as_secs_f64(), ..Default::default() };
+        let mut g = GenStats {
+            elapsed_s: load_elapsed.as_secs_f64(),
+            ..Default::default()
+        };
         for h in handles {
             match h.await {
                 Ok(w) => {
@@ -539,7 +577,11 @@ mod tests {
         assert_eq!(s.pct_us(0.50), 60, "index (10*0.5)=5 -> the 6th value");
         assert_eq!(s.pct_us(0.99), 100, "index (10*0.99)=9 -> the last value");
         assert_eq!(s.pct_us(0.0), 10);
-        assert_eq!(s.pct_us(1.0), 100, "q=1.0 clamps to the last index rather than overflowing");
+        assert_eq!(
+            s.pct_us(1.0),
+            100,
+            "q=1.0 clamps to the last index rather than overflowing"
+        );
     }
 
     #[test]
@@ -552,7 +594,11 @@ mod tests {
         // Measured elapsed, because a run that took longer than asked must not report the rate it
         // would have had. The Go generator makes the same choice.
         assert_eq!(stats(&[1], 1000, 0, 10.0).rps(), 100);
-        assert_eq!(stats(&[1], 1000, 0, 0.0).rps(), 0, "no elapsed time is no rate, not a division");
+        assert_eq!(
+            stats(&[1], 1000, 0, 0.0).rps(),
+            0,
+            "no elapsed time is no rate, not a division"
+        );
     }
 
     #[test]
@@ -564,14 +610,20 @@ mod tests {
         }
         // The existing Rust parser must read our own output.
         let parsed = crate::loadgen::parse_ugen_line(&line);
-        assert!(parsed.is_measured(), "our own stats line must parse: {line}");
+        assert!(
+            parsed.is_measured(),
+            "our own stats line must parse: {line}"
+        );
     }
 
     #[test]
     fn a_failed_request_counts_as_a_failure_and_contributes_no_latency() {
         let s = stats(&[], 0, 5, 1.0);
         assert_eq!(s.fail, 5);
-        assert!(s.latencies_us.is_empty(), "a failure has no latency to report");
+        assert!(
+            s.latencies_us.is_empty(),
+            "a failure has no latency to report"
+        );
         assert_eq!(s.rps(), 0, "failures are not throughput");
     }
 
@@ -590,7 +642,10 @@ mod tests {
         assert!(r.starts_with("POST /v1/chat/completions HTTP/1.1\r\n"));
         assert!(r.contains("x-one: 1\r\n") && r.contains("x-two: 2\r\n"));
         assert!(r.ends_with(r#"{"a":1}"#));
-        assert!(r.contains("content-length: 7\r\n"), "length must match the body exactly");
+        assert!(
+            r.contains("content-length: 7\r\n"),
+            "length must match the body exactly"
+        );
     }
 
     // End to end against a real socket: the generator must actually move requests and record them.
@@ -609,7 +664,9 @@ mod tests {
                 std::thread::spawn(move || {
                     let mut b = [0u8; 4096];
                     while c.read(&mut b).unwrap_or(0) > 0 {
-                        if c.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok").is_err() {
+                        if c.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok")
+                            .is_err()
+                        {
                             return;
                         }
                     }
@@ -629,7 +686,11 @@ mod tests {
         let g = run(&cfg);
         stop.store(true, Ordering::Relaxed);
         assert!(g.ok > 0, "the generator must actually complete requests");
-        assert_eq!(g.latencies_us.len() as u64, g.ok, "every success contributes exactly one latency");
+        assert_eq!(
+            g.latencies_us.len() as u64,
+            g.ok,
+            "every success contributes exactly one latency"
+        );
         assert!(g.elapsed_s > 0.0);
         assert!(g.rps() > 0, "a run that completed requests has a rate");
     }
@@ -669,10 +730,19 @@ mod tests {
             ttft_ms: 0,
         };
         let g = run(&cfg);
-        assert!(g.ok > 1, "chunked responses must complete, got ok={} fail={}", g.ok, g.fail);
+        assert!(
+            g.ok > 1,
+            "chunked responses must complete, got ok={} fail={}",
+            g.ok,
+            g.fail
+        );
         // The real tell: with an undrained body the connection desyncs and every request after the
         // first is misread as a non-2xx, so failures would dominate.
-        assert_eq!(g.fail, 0, "a drained connection must not manufacture failures, got {}", g.fail);
+        assert_eq!(
+            g.fail, 0,
+            "a drained connection must not manufacture failures, got {}",
+            g.fail
+        );
     }
 
     // A PEER THAT CLOSES IS NOT A PEER THAT FAILED.
@@ -713,7 +783,10 @@ mod tests {
             ttft_ms: 0,
         });
 
-        assert!(stats.ok > 0, "the peer answers every request, so there must be successes");
+        assert!(
+            stats.ok > 0,
+            "the peer answers every request, so there must be successes"
+        );
         assert_eq!(
             stats.fail, 0,
             "a peer closing a connection it said it would close is not a failed request: ok={} fail={}",
@@ -747,7 +820,10 @@ mod tests {
         });
 
         assert_eq!(stats.ok, 0, "nothing was ever answered");
-        assert!(stats.fail > 0, "a peer that never answers must be recorded as failing");
+        assert!(
+            stats.fail > 0,
+            "a peer that never answers must be recorded as failing"
+        );
     }
 
     // A chunked body delivered across MANY small reads. The terminator search must look only at
@@ -764,7 +840,10 @@ mod tests {
                 std::thread::spawn(move || {
                     let mut b = [0u8; 4096];
                     while conn.read(&mut b).unwrap_or(0) > 0 {
-                        if conn.write_all(b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n").is_err() {
+                        if conn
+                            .write_all(b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n")
+                            .is_err()
+                        {
                             return;
                         }
                         // Many small chunks, then the terminator written one byte at a time so it
@@ -794,17 +873,34 @@ mod tests {
             ttft_ms: 0,
         };
         let stats = run(&cfg);
-        assert!(stats.ok > 0, "a fragmented chunked body must complete, ok={} fail={}", stats.ok, stats.fail);
-        assert_eq!(stats.fail, 0, "a terminator split across reads must not read as a failure");
+        assert!(
+            stats.ok > 0,
+            "a fragmented chunked body must complete, ok={} fail={}",
+            stats.ok,
+            stats.fail
+        );
+        assert_eq!(
+            stats.fail, 0,
+            "a terminator split across reads must not read as a failure"
+        );
     }
 
     // A body with no length header and no chunking runs to connection close. That is a legitimate
     // framing, NOT a zero-length body, and it must not be confused with one.
     #[test]
     fn a_response_with_no_framing_header_is_not_treated_as_an_empty_body() {
-        assert!(matches!(framing("http/1.1 200 ok\r\n"), Framing::UntilClose));
-        assert!(matches!(framing("http/1.1 200 ok\r\ncontent-length: 12\r\n"), Framing::Length(12)));
-        assert!(matches!(framing("http/1.1 200 ok\r\ntransfer-encoding: chunked\r\n"), Framing::Chunked));
+        assert!(matches!(
+            framing("http/1.1 200 ok\r\n"),
+            Framing::UntilClose
+        ));
+        assert!(matches!(
+            framing("http/1.1 200 ok\r\ncontent-length: 12\r\n"),
+            Framing::Length(12)
+        ));
+        assert!(matches!(
+            framing("http/1.1 200 ok\r\ntransfer-encoding: chunked\r\n"),
+            Framing::Chunked
+        ));
     }
 
     // A non-2xx is a FAILURE, not a fast success. Counting an error page as throughput is how a
@@ -818,7 +914,8 @@ mod tests {
                 let Ok(mut c) = c else { continue };
                 let mut b = [0u8; 4096];
                 let _ = c.read(&mut b);
-                let _ = c.write_all(b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\n\r\n");
+                let _ =
+                    c.write_all(b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\n\r\n");
             }
         });
         let cfg = GenConfig {
@@ -851,7 +948,9 @@ mod tests {
                 std::thread::spawn(move || {
                     let mut b = [0u8; 4096];
                     while c.read(&mut b).unwrap_or(0) > 0 {
-                        if c.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok").is_err() {
+                        if c.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok")
+                            .is_err()
+                        {
                             return;
                         }
                     }
@@ -871,11 +970,19 @@ mod tests {
         });
         let wall = started.elapsed();
 
-        assert!(g.ok > 0, "2048 concurrent holders must still complete requests, ok={} fail={}", g.ok, g.fail);
+        assert!(
+            g.ok > 0,
+            "2048 concurrent holders must still complete requests, ok={} fail={}",
+            g.ok,
+            g.fail
+        );
         // The old failure mode was wall clock exploding far past the requested window because
         // spawning and joining the holders dwarfed the window itself. A generous bound: this is a
         // regression guard against collapse, not a performance assertion.
-        assert!(wall < Duration::from_secs(20), "a 500ms window at c=2048 took {wall:?}; the holders are not cheap");
+        assert!(
+            wall < Duration::from_secs(20),
+            "a 500ms window at c=2048 took {wall:?}; the holders are not cheap"
+        );
     }
 
     // A RIG LIMIT MUST NEVER BE INDISTINGUISHABLE FROM A GATEWAY FAILURE.
@@ -898,12 +1005,23 @@ mod tests {
             p99_us: None,
         };
         let line = g.stats_line();
-        assert!(line.contains("rigrefused=3"), "our port/descriptor exhaustion must cross the wire: {line}");
-        assert!(line.contains("budgetexceeded=2"), "our response budget must cross the wire: {line}");
-        assert!(line.contains("fail=7"), "and the gateway's own failure count is unchanged: {line}");
+        assert!(
+            line.contains("rigrefused=3"),
+            "our port/descriptor exhaustion must cross the wire: {line}"
+        );
+        assert!(
+            line.contains("budgetexceeded=2"),
+            "our response budget must cross the wire: {line}"
+        );
+        assert!(
+            line.contains("fail=7"),
+            "and the gateway's own failure count is unchanged: {line}"
+        );
 
         // The parent reads them back.
-        let parsed = crate::loadgen::parse_ugen_line(&line).into_value().expect("a line this generator wrote must parse");
+        let parsed = crate::loadgen::parse_ugen_line(&line)
+            .into_value()
+            .expect("a line this generator wrote must parse");
         assert_eq!(parsed.rig_refused, 3);
         assert_eq!(parsed.budget_exceeded, 2);
         assert_eq!(parsed.fail, 7);
@@ -912,7 +1030,9 @@ mod tests {
         // reported", which is not the same as "did not happen", and refusing an otherwise complete
         // line would turn a cosmetic version skew into a lost measurement.
         let old = "rps=1000 fail=1 p50=1.00 p99=2.00 p50us=1000 p99us=2000 ok=999";
-        let legacy = crate::loadgen::parse_ugen_line(old).into_value().expect("an older line must still parse");
+        let legacy = crate::loadgen::parse_ugen_line(old)
+            .into_value()
+            .expect("an older line must still parse");
         assert_eq!(legacy.rig_refused, 0);
         assert_eq!(legacy.budget_exceeded, 0);
         assert_eq!(legacy.ok, 999);
