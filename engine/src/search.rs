@@ -387,6 +387,9 @@ fn summarize(rungs: &[Rung]) -> Vec<RungSummary> {
             concurrency: r.concurrency,
             median: r.median,
             median_reading: r.median_reading,
+            windows: r.windows,
+            observed_median: r.observed_median,
+            observed_median_reading: r.observed_median_reading,
             gate_median: r.gate.map(|g| g.median),
             gate_median_reading: r.gate.and_then(|g| g.median_reading),
             gate_holds: r.gate.is_some_and(|g| g.holds()),
@@ -525,6 +528,17 @@ struct Rung {
     /// How many windows actually passed and went into the median. The bar below divides by its root,
     /// so a rung that lost windows to failures is judged on the evidence it really has.
     windows: usize,
+    /// The median window over EVERY window at this rung, passing or not, and what it read.
+    ///
+    /// Separate from `median` deliberately, exactly as `gate` is: `median` covers only the windows
+    /// that PASSED, and a failed window must stay out of it because letting one in made the spread
+    /// ~100% and froze an earlier version of this search near the floor. This answers a third
+    /// question - "what was this rung observed serving at all" - which is the only honest number for
+    /// the EVIDENCE row of a rung where nothing passed. `None` only if the rung produced no window.
+    observed_median: Option<f64>,
+    /// What the window behind `observed_median` read, so a published row's rate, p99 and loss come
+    /// from one window rather than three windows' numbers mixed together.
+    observed_median_reading: Option<Reading>,
     /// What this rung's windows said about the CALLER'S gate, when one was supplied.
     ///
     /// Separate from `windows`/`median` above, which answer "how fast", because this answers "how
@@ -568,7 +582,22 @@ impl GateEvidence {
 pub struct RungSummary {
     pub concurrency: u32,
     /// The median rate over every window that passed at this rung.
+    ///
+    /// `0.0` when `windows` is 0: no window passed, so there was no median to take and this is a
+    /// sentinel rather than a rate. A caller PUBLISHING such a rung must read `observed_median`
+    /// instead - a fabricated 0 in an evidence row says the gateway served nothing at a rate nothing
+    /// ever observed it serving.
     pub median: f64,
+    /// How many windows passed and went into `median`. Zero is the sentinel condition above.
+    ///
+    /// Carried because dropping it here was the whole defect: `Rung` knew the rung had no passing
+    /// window and the summary did not, so the 0.0 arrived downstream indistinguishable from a rate.
+    pub windows: usize,
+    /// The median rate over EVERY window at this rung, passing or not. `None` only when the rung
+    /// produced no window at all.
+    pub observed_median: Option<f64>,
+    /// What the window behind `observed_median` read.
+    pub observed_median_reading: Option<Reading>,
     /// What the window behind `median` observed.
     ///
     /// Carried so a caller can publish a rung's REAL latency and loss beside its rate. The sustained
@@ -620,6 +649,7 @@ fn measure_rung<P: Probe>(s: &mut Search<P>, c: u32, gate: Option<&Gate>) -> Opt
     // mixed into a row none of them measured.
     let mut vals: Vec<(f64, Option<Reading>)> = Vec::with_capacity(WINDOWS_PER_RUNG);
     let mut held: Vec<(f64, Option<Reading>)> = Vec::with_capacity(WINDOWS_PER_RUNG);
+    let mut all: Vec<(f64, Option<Reading>)> = Vec::with_capacity(WINDOWS_PER_RUNG);
     let mut judged = 0usize;
     for i in 0..WINDOWS_PER_RUNG {
         // The first window may come from the memo; the repeats must not, since the whole point is
@@ -638,12 +668,14 @@ fn measure_rung<P: Probe>(s: &mut Search<P>, c: u32, gate: Option<&Gate>) -> Opt
                 held.push((sample.value, sample.reading));
             }
         }
+        all.push((sample.value, sample.reading));
         if sample.passed {
             vals.push((sample.value, sample.reading));
         }
     }
     let held_count = held.len();
     let gate_window = median_window(held);
+    let observed = median_window(all);
     let evidence = gate.map(|_| GateEvidence {
         held: held_count,
         judged,
@@ -657,6 +689,8 @@ fn measure_rung<P: Probe>(s: &mut Search<P>, c: u32, gate: Option<&Gate>) -> Opt
             median_reading: None,
             spread: 0.0,
             windows: 0,
+            observed_median: observed.map(|(v, _)| v),
+            observed_median_reading: observed.and_then(|(_, r)| r),
             gate: evidence,
         });
     }
@@ -672,6 +706,8 @@ fn measure_rung<P: Probe>(s: &mut Search<P>, c: u32, gate: Option<&Gate>) -> Opt
             0.0
         },
         windows: rates.len(),
+        observed_median: observed.map(|(v, _)| v),
+        observed_median_reading: observed.and_then(|(_, r)| r),
         gate: evidence,
     })
 }

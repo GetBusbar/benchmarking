@@ -40,12 +40,23 @@ def served_field(suite):
     return "governed_served" if suite == "governed" else "served"
 
 
+# A file that is ABSENT and a file that is PRESENT BUT UNREADABLE are different facts and must not
+# collapse into the same None. Absent means there is no prior result to protect; unreadable (permission
+# error, a truncated or malformed write, a path that is not a file) means there may well be perfectly
+# good committed data behind it that we simply cannot see. Guessing "not served" for the second case
+# lets a boot/build failure clobber it, which is the one thing this guard exists to prevent, so an
+# unreadable file gets its own sentinel and every caller fails CLOSED on it.
+UNREADABLE = object()
+
+
 def load(path):
     try:
         with open(path) as f:
             return json.load(f)
+    except FileNotFoundError:
+        return None  # genuinely no file: nothing to protect, nothing to promote
     except Exception:
-        return None
+        return UNREADABLE  # present but unreadable: assume it may be good data
 
 
 def is_served(doc, suite):
@@ -158,15 +169,18 @@ def main():
         return 0  # fail-open on misuse: do not block the pipeline, just promote
     suite, existing_path, incoming_path = sys.argv[1], sys.argv[2], sys.argv[3]
     incoming = load(incoming_path)
-    if incoming is None:
-        # no incoming result at all -> nothing to promote, keep whatever exists
+    if incoming is None or incoming is UNREADABLE:
+        # no incoming result at all, or one we cannot read -> nothing to promote, keep whatever exists
         return 1
     existing = load(existing_path)
     # If the incoming file is a genuine boot/build failure AND the existing file was a real
     # served result, REFUSE the overwrite. Otherwise promote.
-    if is_boot_failure(incoming, suite) and is_served(existing, suite):
+    # An existing file we could not read is treated as if it were served: we cannot prove it was not,
+    # and destroying possibly-good committed data with a harness failure is the worse of the two errors.
+    if is_boot_failure(incoming, suite) and (existing is UNREADABLE or is_served(existing, suite)):
+        prior = "UNREADABLE" if existing is UNREADABLE else existing.get(served_field(suite))
         print(
-            f"GUARD: refusing to overwrite served={existing.get(served_field(suite))} "
+            f"GUARD: refusing to overwrite served={prior} "
             f"{suite} result with a boot/build failure "
             f"(status={incoming.get('last_http_status')}, "
             f"err={(incoming.get('serve_error') or '')[:80]})",
