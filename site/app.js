@@ -76,10 +76,22 @@ const CHOOSER_MODES = new Set(["peak", "same", "custom"]);
    Their candidate sets still differ per gateway (min-of-26 vs min-of-1), which is why the row shows the
    cell count, and why the two are offered together (Min flatters breadth, Max penalises it). */
 const MEM_CHOOSER_MODES = new Set(["min", "max", "same", "custom"]);
-// The modes a view offers, and the mode it lands on when none is pinned. Memory defaults to Same (the
-// widest-coverage dialect, computed from the data) because only Same/Custom are like-for-like.
+// The modes a view offers, and the mode it lands on when none is pinned.
+//
+// MEMORY DEFAULTS TO MIN, NOT SAME. Same is the like-for-like comparison and it is the right tool
+// when you want one shared cell, but it makes the DEFAULT view depend on which dialect happens to be
+// the widest on a part-published board: a gateway that does not serve the chosen cell reads n/a and
+// drops out, correctly and by design, so a reader arriving at the tab can see a row missing for a
+// gateway that measured perfectly well on a cell it does declare. one-api declares exactly one cell
+// (openai) and vanished from a board whose widest dialect was anthropic. Min shows every gateway on
+// its own lowest steady-state cell, so nobody drops out of the default view, and the row states the
+// size of the set the minimum came from so the comparison discloses its own basis.
 function modesFor(view) { return view === "memory" ? MEM_CHOOSER_MODES : CHOOSER_MODES; }
-function defaultMode(view) { return view === "memory" ? "same" : "peak"; }
+function defaultMode(view) { return view === "memory" ? "min" : "peak"; }
+/* Which chooser family a view belongs to. The perf lanes offer Peak/Same/Custom; memory offers
+   Min/Max/Same/Custom. They overlap on Same/Custom but not on the mode most readers want, which is
+   why a single carried-across `mode` cannot serve both. */
+function modeFamily(view) { return view === "memory" ? "memory" : "perf"; }
 /* resolveMode: coerce a mode onto a view that offers it. This is what a SHARED URL hits: a link carrying
    ?mode=peak that lands on the memory tab must NOT render a throughput-selected memory number, so it falls
    back to Same; the reverse (?mode=min on Performance) falls back to Peak rather than reading nothing. */
@@ -1365,6 +1377,10 @@ function newState() {
     q: "",
     sortCol: "rps20",
     sortDesc: true,
+    // The mode each chooser family was last left on, so crossing tabs restores the reader's own
+    // choice rather than the coercion the other family forced. Never encoded into the URL: a link
+    // carries ONE mode, for the view it names.
+    modeMemo: { perf: "peak", memory: "min" },
     needStream: false,
     needXlate: false,
     // CELL CHOOSER (Performance + Streaming): which cell(s) of the ONE 6x6 run to show.
@@ -3065,10 +3081,19 @@ function showView(view) {
   // Memory's data-derived Same default is seeded on ARRIVAL at memory, not once globally at boot, so
   // the other tabs keep the dialect default they declare (see seedMemorySameDialect).
   seedMemorySameDialect();
-  // The chooser mode travels with the reader across tabs, but the tabs do not offer the same modes: Peak
-  // is meaningless (and dishonest) on memory, Min/Max are meaningless on the perf lanes. Coerce on arrival
-  // so the segmented control and the numbers can never disagree about which mode is active.
-  state.mode = resolveMode(state.mode, view);
+  // EACH FAMILY REMEMBERS ITS OWN MODE, because coercing across them is LOSSY.
+  //
+  // The tabs do not offer the same modes: Peak is meaningless (and dishonest) on memory, Min/Max are
+  // meaningless on the perf lanes. Coercing on arrival keeps the control and the numbers agreeing,
+  // but it also OVERWRITES the mode - so Performance(Peak) -> Memory coerced to Min, and coming back
+  // to Performance kept Min's coercion instead of the Peak the reader had chosen. It destroyed a
+  // selection in both directions: a Min/Max choice died the same way on a round trip through a perf
+  // tab. Stashing the outgoing family's mode before coercing makes a tab flip lossless, while a
+  // shared URL still coerces exactly as before (decodeUrl, unchanged).
+  const arriving = modeFamily(view);
+  const leaving = modeFamily(state.view);
+  if (leaving !== arriving) state.modeMemo[leaving] = state.mode;
+  state.mode = resolveMode(state.modeMemo[arriving] ?? state.mode, view);
   // Home is the root above the category nav: the header's category row, tab bar
   // and category tagline belong to the category view only, so a body class hides
   // them (style.css) while the home hero carries the brand treatment instead.

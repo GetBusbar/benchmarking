@@ -3189,13 +3189,18 @@ test("memory chooser RED: Peak is not offered, not decodable, and cannot select 
   assert.ok(!app.modesFor("memory").has("peak"), "modesFor(memory) must not contain Peak");
   assert.ok(app.modesFor("performance").has("peak"), "the perf lanes keep Peak (select on throughput, report throughput)");
   assert.deepEqual([...app.MEM_CHOOSER_MODES], ["min", "max", "same", "custom"]);
-  // (2) a SHARED URL carrying ?mode=peak that lands on memory falls back to Same, not to a peak cell.
-  assert.equal(app.decodeUrl("/gateways/memory", "?mode=peak").mode, "same",
-    "a ?mode=peak link opened on the memory tab must fall back to Same");
+  // (2) a SHARED URL carrying ?mode=peak that lands on memory falls back to memory's own default,
+  // not to a peak cell. That default is MIN: it shows every gateway on its own lowest steady-state
+  // cell, so nobody drops out of the view a reader arrives at. Same is a like-for-like comparison
+  // and a gateway that does not serve the chosen dialect correctly reads n/a there - honest, but the
+  // wrong thing to land on by default, because one-api declares a single cell and vanished entirely
+  // from a board whose widest dialect was anthropic.
+  assert.equal(app.decodeUrl("/gateways/memory", "?mode=peak").mode, "min",
+    "a ?mode=peak link opened on the memory tab must fall back to memory's default, Min");
   assert.equal(app.decodeUrl("/gateways/performance", "?mode=peak").mode, "peak", "the perf tabs still decode Peak");
   assert.equal(app.decodeUrl("/gateways/performance", "?mode=min").mode, "peak", "Min is not a perf mode");
-  assert.equal(app.resolveMode("peak", "memory"), "same");
-  assert.equal(app.memoryMode({ mode: "peak" }), "same", "the memory choke point can never return Peak");
+  assert.equal(app.resolveMode("peak", "memory"), "min");
+  assert.equal(app.memoryMode({ mode: "peak" }), "min", "the memory choke point can never return Peak");
   // (3) BEHAVIOURAL: a gateway whose throughput-peak cell is memory-heavy and whose identity cell is
   // light. Forcing mode:"peak" must NOT surface the heavy peak-cell number.
   const g = memGw("g", { "openai>openai": { steady_state_rss_mib: 50 }, "openai>gemini": { steady_state_rss_mib: 900 } });
@@ -3349,20 +3354,21 @@ test("memory Same defaults to the WIDEST-COVERAGE dialect, computed from the dat
 
 test("memory URL codec: the new modes round-trip, and old memory links keep working", () => {
   const rt = (path, qs) => app.encodeUrl({ ...app.decodeUrl(path, qs), data: null });
-  assert.equal(rt("/gateways/memory", "?mode=min"), "/gateways/memory?mode=min");
   assert.equal(rt("/gateways/memory", "?mode=max"), "/gateways/memory?mode=max");
   assert.equal(rt("/gateways/memory", "?mode=custom&in=openai&out=gemini"),
     "/gateways/memory?mode=custom&in=openai&out=gemini");
-  // Same is memory's DEFAULT mode, so it is not spelled out; the dialect is, unless it is the data's own
-  // widest-coverage default (which a bundle-less state cannot claim to know).
-  assert.equal(rt("/gateways/memory", "?d=anthropic"), "/gateways/memory?d=anthropic");
+  // MIN is memory's default, so it is the mode that goes UNSPELLED - a clean memory URL means Min,
+  // and every other mode has to name itself. A dialect rides along whenever one is pinned, because
+  // Same and Custom are one click away for the like-for-like comparison.
+  assert.equal(rt("/gateways/memory", "?mode=min"), "/gateways/memory");
+  assert.equal(rt("/gateways/memory", "?mode=same&d=anthropic"), "/gateways/memory?mode=same&d=anthropic");
   const st = { ...app.decodeUrl("/gateways/memory", ""), data: { gateways: [memGw("a", { "openai>openai": {} })] } };
   st.sameDialect = "openai";
   assert.equal(app.encodeUrl(st), "/gateways/memory", "the pristine memory view keeps a clean URL");
   // Old shared links: the sort id is a URL CONTRACT and survives the column's rename.
   const old = app.decodeUrl("/gateways/memory", "?sort=mempeak&dir=asc");
   assert.equal(old.sortCol, "mempeak");
-  assert.equal(old.mode, "same", "an old memory link with no mode lands on Same");
+  assert.equal(old.mode, "min", "an old memory link with no mode lands on memory's default, Min");
   // The perf lanes' encoding is untouched.
   assert.equal(rt("/gateways/performance", "?mode=same&d=openai"), "/gateways/performance?mode=same&d=openai");
   assert.equal(rt("/gateways/performance", ""), "/gateways/performance");
