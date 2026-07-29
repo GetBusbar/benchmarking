@@ -81,6 +81,11 @@ REJECTS = [
      "50000 rps on a single connection"),
     (audit.check_frames_have_a_stream_behind_them, cell(stream__streams_sustained=0),
      "frames per second over a population of zero"),
+    (audit.check_no_bare_absence, cell(stream__added_gap_p50_us=None),
+     "a null metric with no reason in absences (a bare hole)"),
+    (audit.check_stream_capacity_is_a_number,
+     cell(stream__stream_served=True, stream__cpu_fps=None),
+     "a served streaming cell whose capacity metric is a hole instead of a measured 0"),
 ]
 
 
@@ -99,6 +104,21 @@ def main():
         got = list(check("t", clean))
         if got:
             failures.append(f"{check.__name__} rejected a clean cell: {got}")
+
+    # The other side of the two new definition-of-done checks: an absence WITH its reason, and a
+    # measured zero, must both be accepted - the checks forbid bare holes, not honest absences.
+    with_reason = cell(stream__added_gap_p50_us=None,
+                       absences={"stream.added_gap_p50_us": {"reason": "below_resolution", "detail": "x"}})
+    if list(audit.check_no_bare_absence("t", with_reason)):
+        failures.append("check_no_bare_absence rejected a null that carries its reason")
+    zeroed = cell(stream__stream_served=True, stream__cpu_fps=0, stream__streams_sustained=0)
+    zeroed["stream"].pop("cpu_fps_concurrency", None)
+    if list(audit.check_stream_capacity_is_a_number("t", zeroed)):
+        failures.append("check_stream_capacity_is_a_number rejected a measured 0")
+    excused = cell(stream__stream_served=True, stream__cpu_fps=None,
+                   absences={"stream.cpu_fps": {"reason": "untestable"}})
+    if list(audit.check_stream_capacity_is_a_number("t", excused)):
+        failures.append("check_stream_capacity_is_a_number rejected a rig-class absence")
 
     # The per-gateway invariant is driven off real definitions rather than a fixture, because its
     # whole subject is what the repo actually declares.

@@ -191,6 +191,66 @@ def check_frames_have_a_stream_behind_them(name, c):
         yield f"{name}: cpu_fps {st['cpu_fps']} published with streams_sustained={st.get('streams_sustained')}"
 
 
+# THE DEFINITION OF DONE, as fields. Every metric a served cell's block may publish; a null on any
+# of these with no `absences` entry beside it is a bare hole, which the board's owner has ruled out:
+# "either this cell is measured and all data must be reported, or this cell wasn't tested and empty
+# is expected - not a combo". Mirrors the engine's per-group `fields()` declarations.
+ABSENCE_CARRYING_FIELDS = {
+    "perf": [
+        "added_latency_p50_us", "added_latency_p99_us", "gateway_c1_p99_us", "direct_c1_p99_us",
+        "rps_sustained_20ms", "rps_sustained_20ms_concurrency", "rps_max_proxy", "conc_at_peak",
+    ],
+    "stream": [
+        "added_ttft_p50_us", "added_ttft_p99_us", "added_gap_p50_us", "added_gap_p99_us",
+        "streams_sustained", "streams_sustained_fps", "cpu_fps", "cpu_fps_concurrency",
+    ],
+    "memory": [
+        "idle_rss_mib", "steady_state_rss_mib", "recovered_rss_mib", "peak_rss_mib",
+        "growth_rate_mib_per_min", "time_to_plateau_s",
+    ],
+}
+
+# The absence reasons that legitimately excuse a CAPACITY metric from being a number. Everything
+# else must be a number - a gateway that failed the gate at every rung is a measured 0, not a hole.
+CAPACITY_ABSENCE_OK = {"untestable", "rig_limited", "search_exhausted", "harness_error", "not_served"}
+
+
+def check_no_bare_absence(name, c):
+    """0 is a number; a bare n/a is not. Every null metric on a served cell carries its reason.
+
+    The 2026-07-28 board's defining defect: holes with no stated cause, indistinguishable from cells
+    that never ran. The engine has always written the reason into the cell's `absences` map; this
+    pins that the map actually covers every null the cell publishes, so no consumer ever has to
+    render an unexplained blank.
+    """
+    absences = c.get("absences") or {}
+    for block, fields in ABSENCE_CARRYING_FIELDS.items():
+        blk = c.get(block) or {}
+        for f in fields:
+            if f in blk and blk[f] is None and f"{block}.{f}" not in absences:
+                yield f"{name}: {block}.{f} is null with NO reason in absences (a bare hole)"
+
+
+def check_stream_capacity_is_a_number(name, c):
+    """A streaming cell's capacity metrics are numbers (0 included), or a rig-class absence.
+
+    The yield gate: streams_sustained and cpu_fps produced values (or measured zeroes) on every
+    served streaming cell once the gate published failures as 0. An absence whose reason is
+    `not_measured` here means a search quietly stopped producing - the exact silent-yield defect
+    that shipped a board with cpu_fps on 1 of 16 served cells.
+    """
+    st = c.get("stream") or {}
+    if st.get("stream_served") is not True:
+        return
+    absences = c.get("absences") or {}
+    for f in ("streams_sustained", "cpu_fps"):
+        if st.get(f) is None:
+            reason = (absences.get(f"stream.{f}") or {}).get("reason")
+            if reason not in CAPACITY_ABSENCE_OK:
+                yield (f"{name}: stream.{f} is absent with reason {reason!r} on a served streaming "
+                       f"cell - a gate failing everywhere is a measured 0, not a hole")
+
+
 CELL_CHECKS = [
     check_sustained_not_above_peak,
     check_peak_came_from_its_own_sweep,
@@ -199,6 +259,8 @@ CELL_CHECKS = [
     check_rate_and_concurrency_travel_together,
     check_rate_is_physically_possible,
     check_frames_have_a_stream_behind_them,
+    check_no_bare_absence,
+    check_stream_capacity_is_a_number,
 ]
 
 
