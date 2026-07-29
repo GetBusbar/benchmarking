@@ -510,6 +510,8 @@ fn cell_memory(
         steady_state_rss_mib: steady,
         rss_series,
         idle_rss_series,
+        shape: take("memory_shape"),
+        idle_shape: take("memory_idle_shape"),
         ..Default::default()
     }
 }

@@ -3159,13 +3159,17 @@ test("#1 CLASS: the MEMORY tab's Tested-on cell is the SAME pill, showing the me
 // cellMem: a sealed per-cell memory window, exactly as gen-data seals cell.memory in place.
 function cellMem(o = {}) {
   const { steady_state_rss_mib = 100, idle_rss_mib = 20, recovered_rss_mib = 30,
-    plateaued = true, time_to_plateau_s = 25, growth_rate_mib_per_min = 0.1, rss_series = null } = o;
+    plateaued = true, time_to_plateau_s = 25, growth_rate_mib_per_min = 0.1, rss_series = null,
+    // shape: undefined by default ON PURPOSE, so every fixture that does not opt in exercises the
+    // no-shape-published path a pre-shape board takes. Opting in is how a test says "I mean a wave".
+    shape = undefined } = o;
   const rec = {
     steady_state_rss_mib: seal(steady_state_rss_mib), idle_rss_mib: seal(idle_rss_mib),
     recovered_rss_mib: seal(recovered_rss_mib), time_to_plateau_s: seal(time_to_plateau_s),
     growth_rate_mib_per_min: seal(growth_rate_mib_per_min), plateaued,
   };
   if (rss_series != null) rec.rss_series = rss_series;
+  if (shape !== undefined) rec.shape = seal(shape);
   return rec;
 }
 /* memGw: a gateway whose matrix carries a per-cell memory window on each listed cell.
@@ -3308,6 +3312,63 @@ test("memory: a WITHHELD plateau verdict is not a negative one - a rig failure i
     "openai>openai": { steady_state_rss_mib: null, plateaued: false, growth_rate_mib_per_min: 7.5 },
   });
   assert.match(app.neverPlateauedPill(leakyAll), /on any cell this gateway serves/);
+});
+
+test("memory: a WAVE is not a leak, and the board must stop calling it one", () => {
+  // "Never settles" described two different gateways under one red pill. One climbs without bound; the
+  // other swings around a level it keeps returning to - a garbage collector doing its job. Both fail the
+  // steadiness test, so both were rendered NEVER SETTLES in red beside a number the column labels a leak
+  // rate. The second gateway was being accused of the first one's defect, on a public board, by name.
+  const climbing = memGw("climbing", {
+    "openai>openai": { steady_state_rss_mib: null, plateaued: false, growth_rate_mib_per_min: 51, shape: 1 },
+  });
+  const swinging = memGw("swinging", {
+    "openai>openai": { steady_state_rss_mib: null, plateaued: false, growth_rate_mib_per_min: 51, shape: 0 },
+  });
+
+  // Both are unsettled - that verdict does not change, and neither one gets a steady-state number.
+  assert.equal(app.neverPlateaued(climbing), true);
+  assert.equal(app.neverPlateaued(swinging), true);
+
+  const cp = app.neverPlateauedPill(climbing), sp = app.neverPlateauedPill(swinging);
+  assert.ok(!/neutral/.test(cp), "unbounded growth is the defect this metric exists to catch: keep it red");
+  assert.match(cp, /still growing at up to 51/, "and keep quantifying it");
+  assert.match(sp, /neutral/, "a wave must not be painted in the leak colour");
+  assert.match(sp, /no growth/, "and the label must say so without the reader opening a tooltip");
+  assert.match(sp, /never grew either/, "the tooltip explains what it saw instead of asserting a defect");
+  assert.ok(!/still growing/.test(sp), "and nothing about a wave may be described as growth");
+
+  // THE FALLBACK. A board generated before shapes existed carries no shape at all, and an unshaped
+  // gateway must NOT be quietly cleared - "no evidence of growth" and "evidence of no growth" are
+  // different claims, and only the second earns the neutral pill.
+  const unshaped = memGw("unshaped", {
+    "openai>openai": { steady_state_rss_mib: null, plateaued: false, growth_rate_mib_per_min: 51 },
+  });
+  assert.ok(!/neutral/.test(app.neverPlateauedPill(unshaped)),
+    "a board too old to carry shapes has not cleared anyone");
+
+  // The per-cell tooltip carries the same distinction, because the drawer is where a reader goes to
+  // check the pill rather than take it on faith.
+  const tipC = app.memCellTip({ plateaued: false, growth_rate_mib_per_min: seal(51), shape: seal(1) });
+  const tipS = app.memCellTip({ plateaued: false, growth_rate_mib_per_min: seal(51), shape: seal(0) });
+  const tipF = app.memCellTip({ plateaued: false, growth_rate_mib_per_min: seal(-51), shape: seal(-1) });
+  assert.match(tipC, /still growing at 51\.0 MiB\/min/);
+  assert.match(tipS, /did not grow/);
+  assert.match(tipS, /the swing, not a leak/, "the same rate means something different under a swing");
+  assert.match(tipF, /RELEASING/, "a window still handing memory back is the OPPOSITE of a leak");
+  assert.ok(!/still growing/.test(tipF), "and it must never be described as growing");
+});
+
+test("memory idle: a swinging idle window is not reported as growing", () => {
+  // Idle is the one window where a wave is genuinely uninteresting - nothing is being asked of the
+  // gateway - so "growing 3.0 MiB/min" there is not merely harsh, it is wrong.
+  assert.equal(app.idleStatic({ idle_static: seal(0), idle_growth_rate_mib_per_min: seal(3), idle_shape: seal(0) }),
+    "swinging, not growing");
+  assert.equal(app.idleStatic({ idle_static: seal(0), idle_growth_rate_mib_per_min: seal(-3), idle_shape: seal(-1) }),
+    "releasing");
+  assert.equal(app.idleStatic({ idle_static: seal(0), idle_growth_rate_mib_per_min: seal(3), idle_shape: seal(1) }),
+    "growing 3.0 MiB/min", "a climbing idle window is a real finding and keeps its rate");
+  assert.equal(app.idleStatic({ idle_static: seal(1) }), "steady");
 });
 
 test("memory idle: one cold-sample median wherever the row shows, and GONE when the row is empty", () => {

@@ -1,0 +1,15 @@
+engine commit: a2738919ce03006c6a5256baa06583e42cb66963
+tree clean at launch: YES
+field: 14
+
+fixes in this run vs the 04:34 attempt:
+  - dirty-check excludes results/ (that is what made ALL 14 unpublishable via C8)
+  - cloud-init wait + sudo retry + provision exit-code checked (killed litellm-python)
+  - plano mounts its config where the image reads it (killed plano)
+  - mid-run checkpoint guard trip no longer aborts the whole grid
+  - stream window no longer times its own lane-spawn ramp
+  - boxes fetch ~4 files, not a 46MB repo archive
+
+STILL UNEXPLAINED: one-api published 38 @ c=8 on a curve still climbing (29,33,34,37,40,45).
+  Local replay of that exact curve asks for c=64 and returns Absent, not Measured(38).
+  Watch one-api this run; if it recurs the artifact still cannot say why the search stopped.

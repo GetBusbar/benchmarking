@@ -422,6 +422,16 @@ function metric(env, fmt = fmtInt) {
 // (deltas, best-of ranking) where only the number matters. Never returns a suppressed number.
 // A below-resolution absence ranks as 0, the same value metric() displays it as: the comparison ran
 // and found nothing the rig could weigh, which is equal-best, not missing.
+/* mcode(env): mval() for a metric whose value is a CODE rather than a magnitude.
+   mval maps a `below_resolution` absence to 0, which is the honest reading of "smaller than we can
+   measure" for a magnitude. For a code, 0 is a real value with a meaning of its own (shape 0 =
+   oscillating), so that coercion would turn an unmeasured field into a positive claim. Everything else
+   about the read is identical, so this defers to mval rather than reaching into the envelope itself. */
+function mcode(env) {
+  if (isEnvelope(env) && env.reason === "below_resolution") return null;
+  return mval(env);
+}
+
 function mval(env) {
   if (!isEnvelope(env)) return null;
   if (env.value != null) return env.value;
@@ -677,6 +687,33 @@ function neverPlateaued(g) {
   const judged = memoryCells(g).filter((c) => c.mem.plateaued != null);
   return judged.length > 0 && judged.every((c) => c.mem.plateaued === false);
 }
+/* memShape(rec): HOW a window failed to settle - "climbing", "swinging", "releasing" - or "" when it
+   settled, when the producer did not publish a shape, or when the record predates the field.
+
+   "Never settles" describes two different gateways. One climbs without bound. The other swings around
+   a level it keeps returning to, which is a garbage collector working, not a leak. Rendered under one
+   phrase - NEVER SETTLES, in red, beside a rate the column calls a leak rate - the second gateway is
+   accused of the first one's defect. The engine now separates them; everything below reads its verdict
+   and never re-derives one from the series. */
+function memShape(rec) {
+  // mcode, not mval: 0 is a real shape code here, so an absence must not decay into "it swung".
+  const c = mcode(rec && (rec.shape ?? rec.memory_shape));
+  return c === 1 ? "climbing" : c === 0 ? "swinging" : c === -1 ? "releasing" : "";
+}
+/* memGrowing(g): this gateway is CLIMBING on at least one cell. The distinction the red pill turns on:
+   an unsettled gateway is only accused when something is actually growing. A gateway whose every
+   unsettled cell merely oscillates is reported, in neutral type, as what it is. Records with no shape
+   published (older boards, withheld verdicts) do not vote either way - the pill falls back to the
+   unshaped wording rather than guessing. */
+function memGrowing(g) {
+  return memoryCells(g).some((c) => memShape(c.mem) === "climbing");
+}
+/* memShaped(g): at least one unsettled cell told us its shape, so the shape-aware wording is available.
+   Without this an all-oscillating gateway and a gateway on a board too old to carry shapes would render
+   identically, and only one of them has actually been cleared. */
+function memShaped(g) {
+  return memoryCells(g).some((c) => c.mem.plateaued === false && memShape(c.mem) !== "");
+}
 // memoryUnjudged(g): how many of this gateway's measured cells had their verdict WITHHELD. The pill's
 // wording depends on it: "on any cell this gateway serves" overclaims when some cells were never judged.
 function memoryUnjudged(g) { return memoryCells(g).filter((c) => c.mem.plateaued == null).length; }
@@ -707,8 +744,20 @@ function memCellTip(rec) {
       : `settled after ${fmtInt(t)} s${conf}`);
   } else if (rec && rec.plateaued === false) {
     const gr = mval(rec.growth_rate_mib_per_min);
-    bits.push(gr != null ? `NEVER SETTLED: still growing at ${fmt1(gr)} MiB/min when the cap was reached`
-      : "NEVER SETTLED: still growing when the cap was reached");
+    const sh = memShape(rec);
+    // The rate is the same number in all three cases; what it MEANS is not. Under a climb it is a leak
+    // rate. Under a swing it is how fast the window happened to be moving when it closed, which is a
+    // fact about the sampling instant and not about the gateway - so it is not called a leak there.
+    const what = sh === "swinging"
+      ? "NEVER SETTLED, but did not grow: RSS swung around a level it kept returning to"
+      : sh === "releasing"
+      ? "NEVER SETTLED: still RELEASING memory when the cap was reached, not growing"
+      : "NEVER SETTLED: still growing when the cap was reached";
+    bits.push(gr != null && sh !== "swinging" && sh !== "releasing"
+      ? `NEVER SETTLED: still growing at ${fmt1(gr)} MiB/min when the cap was reached`
+      : gr != null && sh === "swinging"
+      ? `${what} (moving ${fmt1(gr)} MiB/min at the close, which is the swing, not a leak)`
+      : what);
   }
   // Stated mode-neutrally: in Min/Max it is the size of the search, and in Same/Custom it is still the
   // context a reader needs for the row above it.
@@ -904,7 +953,17 @@ function neverPlateauedPill(g) {
   const scope = un > 0
     ? `on any cell we could measure it on (${fmtInt(un)} further cell${un === 1 ? "" : "s"} were not measured)`
     : "on any cell this gateway serves";
-  return ` <span class="noplateau-pill" title="${esc(`RSS never went steady ${scope}${rate}. Its memory under load is bounded by how long we ran the load, not by the gateway, so no steady-state number is published for it.`)}">never settles</span>`;
+  // A gateway is only ACCUSED when something is climbing. One that never settled but only ever
+  // oscillated gets the same information in neutral type: it is a real finding (no steady-state number
+  // can be published for it) but it is not a leak, and the red pill said it was.
+  const growing = memGrowing(g);
+  const cleared = !growing && memShaped(g);
+  const cls = growing || !memShaped(g) ? "noplateau-pill" : "noplateau-pill neutral";
+  const label = cleared ? "never settles (no growth)" : "never settles";
+  const why = cleared
+    ? `RSS never went steady ${scope}, but it never grew either: it swung around a level it kept returning to, which is memory being reclaimed rather than leaked. No steady-state number is published for it because there is no single level to publish, not because it is climbing.`
+    : `RSS never went steady ${scope}${rate}. Its memory under load is bounded by how long we ran the load, not by the gateway, so no steady-state number is published for it.`;
+  return ` <span class="${cls}" title="${esc(why)}">${label}</span>`;
 }
 
 /* ---- column model ----------------------------------------------------------- */
@@ -2185,6 +2244,12 @@ function idleStatic(mem) {
   if (st == null) return "";
   if (st === 1) return "steady";
   const rate = mval(mem.memory_idle_growth_rate_mib_per_min ?? mem.idle_growth_rate_mib_per_min);
+  // An idle window that swings is the one place a wave is genuinely uninteresting - nothing is being
+  // asked of the gateway - so saying "growing" there is simply wrong, not merely harsh.
+  // mcode for the same reason as memShape: 0 is a real code, not an unmeasured magnitude.
+  const sh = mcode(mem.idle_shape ?? mem.memory_idle_shape);
+  if (sh === 0) return "swinging, not growing";
+  if (sh === -1) return "releasing";
   return rate != null ? `growing ${fmt1(rate)} MiB/min` : "growing";
 }
 
@@ -3308,6 +3373,7 @@ if (NODE) {
     MEM_CHOOSER_MODES, CHOOSER_VIEWS, modesFor, defaultMode, resolveMode, memoryMode,
     perCellMemory, memoryCells, hasPerCellMemory, widestDialect, chosenMemory, memoryFor,
     idleAcrossCells, neverPlateaued, worstGrowth, memCellTip, neverPlateauedPill,
+    idleStatic, memShape, memGrowing, memShaped,
     hasMatrixGrid, matrixFailureReason, matrixRoster,
     laneRecord, lanePathNote, perfSweepSeries, concAt, sustainedChooserCell, maxProxyChooserCell,
     colTested, gatewayBuild, gatewayHardware, runMode, laneAgeSummary,
