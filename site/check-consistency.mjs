@@ -512,8 +512,17 @@ export function declaredGatewayCount() {
   } catch { return 0; }
 }
 
-export function oracleExpected(raw, flag, gated, paced = false) {
-  return displayedValue(raw, flag, { gated, paced });
+export function oracleExpected(raw, flag, gated, paced = false, absentReason = null) {
+  return displayedValue(raw, flag, { gated, paced, absentReason });
+}
+
+// The engine's absence reason for one raw field, read from the raw cell's sibling `absences` map
+// (block-prefixed keys: "perf.added_latency_p50_us"). The oracle needs it because a below_resolution
+// absence DISPLAYS as 0 (see displayedValue), and an oracle blind to the reason would demand null for
+// the very value the seal correctly publishes.
+export function absentReasonFor(absences, prefix, k) {
+  const e = absences && (absences[`${prefix}.${k}`] || absences[k]);
+  return e && e.reason ? e.reason : null;
 }
 
 // opts.syntheticFixture: this bundle is a HAND-BUILT fixture with no on-disk oracle (an invariant
@@ -661,30 +670,33 @@ export function checkConsistency(data, app, opts = {}) {
           // cell.memory joins perf/stream here: since memory became a PER-CELL record it is displayed
           // straight off these cells, so leaving it out would mean the board's whole memory lane
           // published unoracled numbers. Its fields are ungated (RSS + growth rate + time to plateau).
-          for (const [sealedSub, rawSub] of [[cell && cell.perf, rawCell.perf], [cell && cell.stream, rawCell.stream],
-            [cell && cell.memory, rawCell.memory]]) {
+          for (const [prefix, sealedSub, rawSub] of [["perf", cell && cell.perf, rawCell.perf],
+            ["stream", cell && cell.stream, rawCell.stream], ["memory", cell && cell.memory, rawCell.memory]]) {
             if (!sealedSub || !rawSub) continue;
             for (const k of Object.keys(sealedSub)) {
               if (!isMetricField(k)) continue;
               cmp(`matrix[${ingress}->${egress}].${k}`, app.metric(sealedSub[k]).v,
                 oracleExpected(rawSub[k], mockBoundFlagFor(rawSub, k),
-                  GATED_FIELDS.includes(k) || PACED_FIELDS.includes(k), PACED_FIELDS.includes(k)));
+                  GATED_FIELDS.includes(k) || PACED_FIELDS.includes(k), PACED_FIELDS.includes(k),
+                  absentReasonFor(rawCell.absences, prefix, k)));
             }
           }
         }
       }
       // (b) the PROJECTED records: best_cell, translation_cell, streaming. (Memory projects none.)
-      for (const [name, rec, raw] of [
-        ["best_cell", g.best_cell, (() => { const p = g.best_cell && g.best_cell.path; const c = p && rawCellAt(p.dialect, p.dialect); return c && c.perf; })()],
-        ["translation_cell", g.translation_cell, (() => { const p = g.translation_cell && g.translation_cell.path; const c = p && rawCellAt(p.ingress, p.egress); return c && c.perf; })()],
-        ["streaming", g.streaming, (() => { const p = g.streaming && g.streaming.path; const c = p && p.dialect && rawCellAt(p.dialect, p.dialect); return c && c.stream; })()],
+      for (const [name, rec, rawCellSel, prefix] of [
+        ["best_cell", g.best_cell, (() => { const p = g.best_cell && g.best_cell.path; return (p && rawCellAt(p.dialect, p.dialect)) || null; })(), "perf"],
+        ["translation_cell", g.translation_cell, (() => { const p = g.translation_cell && g.translation_cell.path; return (p && rawCellAt(p.ingress, p.egress)) || null; })(), "perf"],
+        ["streaming", g.streaming, (() => { const p = g.streaming && g.streaming.path; return (p && p.dialect && rawCellAt(p.dialect, p.dialect)) || null; })(), "stream"],
       ]) {
+        const raw = rawCellSel && rawCellSel[prefix];
         if (!rec || !raw || !rec.source || rec.source.kind !== "matrix") continue;
         for (const k of Object.keys(rec)) {
           if (!isMetricField(k)) continue;
           cmp(`${name}.${k}`, app.metric(rec[k]).v,
             oracleExpected(raw[k], mockBoundFlagFor(raw, k),
-              GATED_FIELDS.includes(k) || PACED_FIELDS.includes(k), PACED_FIELDS.includes(k)));
+              GATED_FIELDS.includes(k) || PACED_FIELDS.includes(k), PACED_FIELDS.includes(k),
+              absentReasonFor(rawCellSel.absences, prefix, k)));
         }
       }
       if (oracleCompared > 0) covered("R1.oracle");

@@ -2264,6 +2264,39 @@ test("#3 CLASS: a MEASURED stream-sustain failure renders differently from an un
   assert.match(bound.note, /rig-limited/);
 });
 
+test("#2b CLASS: a below-resolution difference renders as ≈0, ranks as 0, and is never a bare n/a", () => {
+  // The engine publishes a difference that came out at or under the rig's resolution as
+  // {reason:"below_resolution", detail:"..."} in the cell's absences map. That is the BEST result the
+  // comparison can express; rendering it as n/a turned a win into a hole (APISIX published an
+  // added-gap p99 with no p50 - impossible for one distribution - on the 2026-07-28 board).
+  const absent = { reason: "below_resolution", detail: "the gateway's own inter-frame gap at this percentile (20073us) came in under the mock's (21070us)" };
+  const env = sealMetric(null, { absent });
+  assert.equal(env.value, null, "the envelope still carries NO number - 0 was not measured");
+  assert.equal(env.reason, "below_resolution", "the engine's reason survives the seal");
+  assert.match(env.detail, /came in under the mock's/, "the engine's prose survives the seal");
+  const cell = app.metric(env, String);
+  assert.equal(cell.na, false, "below-resolution is a display state, not a hole");
+  assert.equal(cell.text, "≈0", "it reads as approximately zero, never as n/a");
+  assert.equal(cell.v, 0, "it ranks as 0 - equal-best on every lower-is-better sort");
+  assert.match(cell.note, /came in under the mock's/, "the tooltip carries the engine's own evidence");
+  // mval agrees with metric(): the compare table and deltas rank it as 0, not as missing.
+  assert.equal(app.mval(env), 0);
+  // The oracle derives the same display from the RAW artifact, or R1 would block every deploy.
+  assert.equal(oracleExpected(null, undefined, false, false, "below_resolution"), 0);
+  assert.equal(oracleExpected(null, undefined, false, false, "not_measured"), null,
+    "every OTHER absence still displays as nothing");
+  // And every other engine absence reason survives the seal instead of flattening to not_measured.
+  for (const reason of ["rig_limited", "untestable", "search_exhausted", "harness_error"]) {
+    const e = sealMetric(null, { absent: { reason, detail: "why" } });
+    assert.equal(e.reason, reason, `the seal must carry ${reason}, not flatten it`);
+    const c = app.metric(e, String);
+    assert.equal(c.na, true, `${reason} still reads n/a`);
+    assert.equal(c.note, "why", "the engine's detail is the tooltip when present");
+  }
+  // Without an absences entry the seal behaves exactly as before (bit-for-bit envelope shape).
+  assert.deepEqual(sealMetric(null, {}), { value: null, certified: false, suppressed: false, reason: "not_measured" });
+});
+
 // ---- #25: the snapshot ingest path (task #65) had NO test at all ----------------------------------
 // certifyRepo(root, mutate?): buildStreamMemRepo's matrix has no *_mock_bound flags, so its gated RPS
 // seals to "unverifiable". Stamp flag=false (the harness certified it) so these tests assert on the
