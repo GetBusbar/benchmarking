@@ -1251,15 +1251,37 @@ function columnsFor(view, data = (typeof state !== "undefined" ? state.data : nu
    same round number) the table visibly reshuffled rows whose values had not changed at all. Direction
    decides the value comparison; the name tiebreak is always ascending, so a tie sits still.
    Missing values always sink to the bottom, in both directions: an absent reading is not a low score. */
-function rowComparator(col, desc) {
+/* TIEBREAK: the second-best measurement, not the alphabet.
+   Three gateways sustained a MEASURED ZERO (no load held the gate), which is a real result and a real
+   three-way tie. Falling straight to display order put them in alphabetical order, which reads as a
+   ranking it is not - a reader scanning the bottom of a sorted column sees One-API above Plano above
+   TensorZero and infers something the data never said. When the sorted column cannot separate rows,
+   the next-most-relevant MEASUREMENT should, and the alphabet is only the last resort once the numbers
+   genuinely run out. Lower is better for every tiebreak column named here (they are all latencies), so
+   the tiebreak always sorts ascending regardless of the primary column's direction: it is not part of
+   the sort the reader asked for, it is what to do when that sort has nothing left to say. */
+const VIEW_TIEBREAK = {
+  performance: "lat50",
+  streaming: "sttft50",
+  memory: "memidle",
+};
+function rowComparator(col, desc, tiebreak) {
   return (a, b) => {
     const va = col.get(a).v, vb = col.get(b).v;
     const byName = a.display.localeCompare(b.display);
-    if (va === null && vb === null) return byName;
+    // The tie-breaking measurement, used only when the primary column ties. Never the sorted column
+    // itself: comparing a column with itself always returns 0 and would just re-add the alphabet.
+    const byTie = () => {
+      if (!tiebreak || tiebreak.id === col.id) return byName;
+      const ta = tiebreak.get(a).v, tb = tiebreak.get(b).v;
+      if (ta === null || tb === null || typeof ta === "string" || typeof tb === "string") return byName;
+      return ta === tb ? byName : ta - tb;
+    };
+    if (va === null && vb === null) return byTie();
     if (va === null) return 1;
     if (vb === null) return -1;
     const cmp = typeof va === "string" ? va.localeCompare(vb) : va - vb;
-    if (cmp === 0) return byName;
+    if (cmp === 0) return byTie();
     return desc ? -cmp : cmp;
   };
 }
@@ -1980,7 +2002,8 @@ function renderTable() {
   if (count) count.textContent = `${rows.length} of ${data.gateways.length}`;
 
   const col = cols.find((c) => c.id === state.sortCol) || cols.find((c) => c.id === VIEW_SORT[view]) || cols[3];
-  rows = rows.slice().sort(rowComparator(col, state.sortDesc));
+  const tiebreak = cols.find((c) => c.id === VIEW_TIEBREAK[view]);
+  rows = rows.slice().sort(rowComparator(col, state.sortDesc, tiebreak));
 
   tbody.innerHTML = rows.map((g) =>
     `<tr data-gw="${esc(g.key)}">` + cols.map((c) => {
@@ -3386,7 +3409,7 @@ if (NODE) {
     // The roster's row order, the compare row's tied-best set, the lane served predicate and the
     // memory-tab dialect seed: pure functions the suite drives directly, because each of them was a
     // defect that no DOM-free test could reach while it lived inside a renderer.
-    rowComparator, bestIndex, laneServed, seedMemorySameDialect,
+    rowComparator, VIEW_TIEBREAK, bestIndex, laneServed, seedMemorySameDialect,
     // audit #21: the rig-provenance footer stamp + the live state it reads, so the class test can drive it.
     rigStamp, state,
     // THE SURFACES THAT WERE UNREACHABLE FROM A DOM-FREE SUITE, and were therefore covered by nothing:
