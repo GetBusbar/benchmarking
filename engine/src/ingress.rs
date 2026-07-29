@@ -191,6 +191,105 @@ impl Dialect {
         matches!(self, Dialect::Openai | Dialect::Anthropic)
     }
 
+    /// Does this SSE `data:` payload carry MODEL OUTPUT, or is it protocol scaffolding?
+    ///
+    /// Ledger RIG-11. The stream reader counted every dispatched event as a delivered frame, and the
+    /// two dialects that stream do not spend the same number of events on scaffolding. Verified
+    /// against `mock/src/main.rs`'s own `StreamFrames::build`, which is what actually produces the
+    /// frames this rig measures: openai sends 1 head (a `delta` carrying only `role`) + N content
+    /// deltas + 2 tail (an empty `delta` with `finish_reason`, then `data: [DONE]`) = N+3 events;
+    /// anthropic sends 2 head (`message_start`, `content_block_start`) + N deltas + 3 tail
+    /// (`content_block_stop`, `message_delta`, `message_stop`) = N+5.
+    ///
+    /// That offset CANCELS in the added-TTFT and added-gap figures, because both legs of those speak
+    /// the same dialect and the difference subtracts it away. It does NOT cancel in
+    /// `run::StreamWindow::delivery_ratio`, which is a fraction of a fixed frame budget: there, a
+    /// stream that delivered no tokens at all still satisfied 1 (openai) or 2 (anthropic) frames of
+    /// the budget before its first content delta, and the two dialects differed from each other by
+    /// exactly that. A delivery gate whose numerator counts `message_start` is not measuring
+    /// delivery.
+    ///
+    /// OWNED BY THE DIALECT, deliberately. The alternative is a heuristic inside `http::SseReader`
+    /// sniffing for `[DONE]`, and that decoder is transport-agnostic AND protocol-agnostic on
+    /// purpose - it is fed by two lanes and knows nothing about who it is talking to. A taxonomy of
+    /// events is a property of the wire dialect, so it lives with the rest of that dialect's wire
+    /// knowledge, beside `body`, `path` and `auth_headers`.
+    ///
+    /// The rule per dialect is the real protocol's, not the mock's spelling:
+    /// - openai: a chunk is content iff a `delta` carries a non-empty `content` string. The role
+    ///   head, the `finish_reason` tail and the `[DONE]` sentinel all fail that, and `[DONE]` is not
+    ///   even JSON.
+    /// - anthropic: an event is content iff its `type` is `content_block_delta`. Every other typed
+    ///   event in that protocol is framing.
+    /// - everything else: `true`, which is what `frames` already counts. NOT a taxonomy we invented
+    ///   for a wire we cannot test: `streams_natively` is false for all four, so the mock answers
+    ///   them with plain JSON and no SSE event of theirs ever reaches this. If one ever does, it
+    ///   counts exactly as it did before, rather than being silently reclassified by a rule nobody
+    ///   validated against that protocol.
+    pub fn sse_event_is_content(&self, data: &str) -> bool {
+        match self {
+            Dialect::Openai => {
+                // `[DONE]` is a sentinel, not JSON, so it fails at the parse and needs no special
+                // case - which is the point of asking the dialect rather than sniffing the string.
+                let Ok(v) = serde_json::from_str::<serde_json::Value>(data) else {
+                    return false;
+                };
+                v.get("choices")
+                    .and_then(|c| c.as_array())
+                    .is_some_and(|choices| {
+                        choices.iter().any(|c| {
+                            c.get("delta")
+                                .and_then(|d| d.get("content"))
+                                .and_then(|t| t.as_str())
+                                .is_some_and(|t| !t.is_empty())
+                        })
+                    })
+            }
+            Dialect::Anthropic => serde_json::from_str::<serde_json::Value>(data)
+                .ok()
+                .and_then(|v| v.get("type").and_then(|t| t.as_str()).map(str::to_string))
+                .is_some_and(|t| t == "content_block_delta"),
+            Dialect::OpenaiResponses | Dialect::Gemini | Dialect::Cohere | Dialect::Bedrock => true,
+        }
+    }
+
+    /// How many events this dialect spends BEFORE its first content frame.
+    ///
+    /// The half of ledger RIG-11 that a classifier alone cannot fix. A stream is read to a fixed
+    /// frame budget (`metric::STREAM_FRAME_BUDGET`), and the reader stops counting at that many
+    /// events whether or not they carried tokens - so the most content frames a budget can possibly
+    /// hold is the budget minus this. Comparing content frames against the raw budget would make
+    /// every clean openai stream read as 63/64 delivered and every clean anthropic one as 62/64,
+    /// failing `STREAM_MIN_DELIVERY_RATIO` (1.0, deliberate) on gateways that lost nothing.
+    ///
+    /// Read off `mock/src/main.rs`'s `StreamFrames::build` head vectors, the same source
+    /// `sse_event_is_content` is: openai_head is one frame, anthropic_head is two. The TAIL is not
+    /// counted here - at the rig's own settings (`MOCK_STREAM_CHUNKS` 64, budget 64) the budget is
+    /// reached inside the deltas and no tail event ever arrives, and a stream that DOES reach its
+    /// tail ended early, which is a delivery shortfall this gate should see rather than excuse.
+    pub fn stream_prelude_frames(&self) -> u64 {
+        match self {
+            Dialect::Anthropic => 2,
+            Dialect::Openai => 1,
+            // No SSE reaches these (`streams_natively`), so there is no prelude to discount and
+            // nothing is invented for a wire this rig cannot pose the question to.
+            Dialect::OpenaiResponses | Dialect::Gemini | Dialect::Cohere | Dialect::Bedrock => 0,
+        }
+    }
+
+    /// The header names the RIG ITSELF puts on every request of this dialect.
+    ///
+    /// Derived from `auth_headers` rather than listed again, so it cannot go stale the day a dialect
+    /// changes how it authenticates. Used by `manifest::Manifest` to refuse a manifest that declares
+    /// one of these itself: see the duplicate-credential refusal there for why sending both is a
+    /// measurement fault rather than an untidiness.
+    pub fn rig_owned_header_names(&self) -> Vec<String> {
+        self.auth_headers("")
+            .into_iter()
+            .map(|(n, _)| n.to_ascii_lowercase())
+            .collect()
+    }
+
     /// Whether a real client of this dialect authenticates by a scheme THE HARNESS CANNOT PRODUCE.
     ///
     /// Bedrock is signed with AWS SigV4 over the request. `auth_headers` sends a bearer token
@@ -546,5 +645,90 @@ mod tests {
     fn a_dialect_list_naming_nothing_we_know_is_an_error_not_a_fallback() {
         assert!(dialects_from(Some("nonsense")).is_err());
         assert_eq!(dialects_from(Some("openai")), Ok(vec![Dialect::Openai]));
+    }
+
+    // ── the SSE content taxonomy (ledger RIG-11) ────────────────────────────────────────────────
+
+    // THE FRAMES ARE THE MOCK'S OWN, copied from mock/src/main.rs's `StreamFrames::build` rather
+    // than paraphrased, because a classifier validated against invented strings classifies invented
+    // streams. openai: 1 head + N deltas + 2 tail. anthropic: 2 head + N deltas + 3 tail.
+    #[test]
+    fn only_the_deltas_that_carry_a_token_count_as_content() {
+        let openai_head = r#"{"id":"chatcmpl-x","object":"chat.completion.chunk","created":1,"model":"mock","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}"#;
+        let openai_delta = r#"{"id":"chatcmpl-x","object":"chat.completion.chunk","created":1,"model":"mock","choices":[{"index":0,"delta":{"content":"xxxx"},"finish_reason":null}]}"#;
+        let openai_finish = r#"{"id":"chatcmpl-x","object":"chat.completion.chunk","created":1,"model":"mock","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#;
+        let d = Dialect::Openai;
+        assert!(d.sse_event_is_content(openai_delta));
+        assert!(
+            !d.sse_event_is_content(openai_head),
+            "the role chunk carries no token"
+        );
+        assert!(!d.sse_event_is_content(openai_finish));
+        // The sentinel is not JSON, so it fails at the parse - no `[DONE]` string match anywhere,
+        // which is exactly why this lives on the dialect and not inside the transport decoder.
+        assert!(!d.sse_event_is_content("[DONE]"));
+
+        let a = Dialect::Anthropic;
+        assert!(a.sse_event_is_content(
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"xxxx"}}"#
+        ));
+        for framing in [
+            r#"{"type":"message_start","message":{"id":"msg_x","type":"message","role":"assistant","model":"mock","content":[],"stop_reason":null,"usage":{"input_tokens":10,"output_tokens":0}}}"#,
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
+            r#"{"type":"content_block_stop","index":0}"#,
+            r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":64}}"#,
+            r#"{"type":"message_stop"}"#,
+        ] {
+            assert!(
+                !a.sse_event_is_content(framing),
+                "{framing} is framing, not a token"
+            );
+        }
+
+        // Nothing is claimed about a wire this rig cannot pose the question to: those dialects get
+        // no SSE from the mock at all, and inventing a taxonomy for them would be a rule nobody
+        // validated against the real protocol.
+        for other in Dialect::ALL {
+            if other.streams_natively() {
+                continue;
+            }
+            assert!(other.sse_event_is_content("anything at all"));
+            assert_eq!(other.stream_prelude_frames(), 0);
+        }
+    }
+
+    // THE PRELUDE IS WHY A DELIVERY RATIO NEEDS A DENOMINATOR OF ITS OWN. A fixed frame budget is
+    // spent on the head events before a single token arrives, so the most content a budget can hold
+    // is the budget minus this - and the two streaming dialects differ by exactly the two the ledger
+    // names.
+    #[test]
+    fn the_two_streaming_dialects_spend_different_budget_before_the_first_token() {
+        assert_eq!(Dialect::Openai.stream_prelude_frames(), 1);
+        assert_eq!(Dialect::Anthropic.stream_prelude_frames(), 2);
+        assert_eq!(
+            Dialect::Anthropic.stream_prelude_frames() - Dialect::Openai.stream_prelude_frames(),
+            1,
+            "the head difference; the tails differ by one more, which the budget never reaches"
+        );
+    }
+
+    // The names the rig puts on the wire itself are DERIVED from `auth_headers`, so a dialect that
+    // changes how it authenticates cannot leave the duplicate-header rule guarding a stale name.
+    #[test]
+    fn the_rig_owned_header_names_are_exactly_what_the_dialect_sends() {
+        for d in Dialect::ALL {
+            let sent: Vec<String> = d
+                .auth_headers("tok")
+                .into_iter()
+                .map(|(n, _)| n.to_ascii_lowercase())
+                .collect();
+            assert_eq!(d.rig_owned_header_names(), sent, "{d}");
+        }
+        assert!(Dialect::Openai
+            .rig_owned_header_names()
+            .contains(&"authorization".to_string()));
+        assert!(Dialect::Anthropic
+            .rig_owned_header_names()
+            .contains(&"x-api-key".to_string()));
     }
 }

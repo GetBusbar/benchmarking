@@ -394,8 +394,24 @@ impl CellPerf {
 }
 
 /// Whether/how a cell's streaming path was exercised. Like `Served`, this is a verdict label rather
-/// than a number: `true`, `false`, or `"untestable"` (the mock/rig cannot pose this question at all
-/// for this pairing).
+/// than a number.
+///
+/// THE VOCABULARY, in full, because it used to be documented as `true` / `false` / `"untestable"`
+/// while the producer (`suite::cell_stream`) emitted the token of WHICHEVER `Absent` reason the
+/// comparison carried - so `"rig_limited"`, `"below_resolution"`, `"search_exhausted"`,
+/// `"harness_error"` and the rest could all appear at a field whose doc named three values. A
+/// consumer written against the old doc would treat every one of them as an unknown label:
+///
+/// - `true`: at least one gateway-vs-direct streaming comparison on this cell produced a number, so
+///   frames flowed through the gateway and were timed. `Cell::stream.reason` then names the token of
+///   any comparison that did NOT produce one (a cell whose gap figures measured cleanly while the
+///   TTFT legs failed is still a served stream, and used to be published as if it were not).
+/// - any `Absent` token (`"not_measured"`, `"rig_limited"`, `"untestable"`, ...): the stream was
+///   probed and NO comparison produced a number; the token is that absence's own reason, so a rig
+///   limit is never published as a claim about the gateway.
+/// - `"not_probed"`: the streaming group did not run on this cell at all.
+/// - `false`: never written by this engine (a bare `false` would assert the gateway does not stream,
+///   which no observation here establishes). Kept representable so older artifacts still parse.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum StreamServed {
@@ -413,8 +429,16 @@ impl Default for StreamServed {
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CellStream {
     pub stream_served: StreamServed,
+    /// The machine-readable REASON TOKEN behind a non-`true` `stream_served`, or behind a `true` one
+    /// whose TTFT half is absent - the same vocabulary `Cell::reason` uses, and the same meaning.
+    ///
+    /// It carried the absence's free-text DETAIL instead, so two fields with one name meant two
+    /// different things across the artifact, and a cell whose absence had no detail published a
+    /// `null` reason beside a status that plainly had one. The prose has its own field below.
     #[serde(default)]
     pub reason: Option<String>,
+    /// The operator-facing detail behind `reason`, when the absence carried one. Prose: nothing may
+    /// branch on it.
     #[serde(default)]
     pub stream_error: Option<String>,
     #[serde(default = "measurement_default")]
@@ -535,14 +559,22 @@ pub struct CellMemory {
     pub peak_rss_mib: Measurement<f64>,
     #[serde(default = "measurement_default")]
     pub peak_rss_hwm_mib: Measurement<f64>,
-    #[serde(default)]
-    pub plateaued: Option<bool>,
+    /// Whether the window settled. A `Measurement`, not an `Option<bool>`, because the three states
+    /// are "it settled", "it did not settle" and "the window could not tell" - and the last of those
+    /// is an absence with a reason like every other. As an `Option` it published a bare `null` that
+    /// `absences()` below could not see (the macro walks `Measurement` fields only), so a served cell
+    /// could carry a hole with nothing anywhere saying why: the exact bare null the artifact contract
+    /// forbids. The wire form is unchanged - `Measurement` serialises to the bare value or `null`.
+    #[serde(default = "measurement_default")]
+    pub plateaued: Measurement<bool>,
     #[serde(default = "measurement_default")]
     pub time_to_plateau_s: Measurement<f64>,
     #[serde(default = "measurement_default")]
     pub growth_rate_mib_per_min: Measurement<f64>,
-    #[serde(default)]
-    pub load_s: Option<i64>,
+    /// How long load was applied. `Measurement` for the same reason `plateaued` is: a window that
+    /// never ran has to say so with a reason rather than with a null nothing explains.
+    #[serde(default = "measurement_default")]
+    pub load_s: Measurement<i64>,
     #[serde(default, deserialize_with = "null_as_empty_vec")]
     pub rss_series: Vec<RssSample>,
     #[serde(default)]
@@ -562,6 +594,10 @@ impl CellMemory {
             peak_rss_hwm_mib,
             time_to_plateau_s,
             growth_rate_mib_per_min,
+            // Covered here, not merely serialised: these two are the fields whose absence used to
+            // publish as a bare null on a served cell because they were plain `Option`s.
+            plateaued,
+            load_s,
         )
     }
 }
@@ -596,7 +632,7 @@ impl Serialize for Cell {
             );
         }
 
-        let mut st = s.serialize_struct("Cell", 12)?;
+        let mut st = s.serialize_struct("Cell", 13)?;
         st.serialize_field("served", &self.served)?;
         st.serialize_field("reason", &self.reason)?;
         st.serialize_field("status", &self.status)?;
@@ -608,6 +644,9 @@ impl Serialize for Cell {
         st.serialize_field("perf", &self.perf)?;
         st.serialize_field("stream", &self.stream)?;
         st.serialize_field("memory", &self.memory)?;
+        // The suite fills this deliberately ("Cost belongs in the artifact") and this hand-written
+        // list silently dropped it: the one field the derive would have carried for free.
+        st.serialize_field("timings_s", &self.timings_s)?;
         st.serialize_field("absences", &absences)?;
         st.end()
     }
@@ -677,12 +716,74 @@ mod tests {
             "recovered_rss_mib",
             "time_to_plateau_s",
             "growth_rate_mib_per_min",
+            // Both changed from plain `Option` to `Measurement` so their absence can carry a reason.
+            // The wire name and the wire form (bare value or null) are unchanged, and this is where
+            // that is pinned.
+            "plateaued",
+            "load_s",
         ] {
             assert!(
                 v.get(key).is_some(),
                 "cell memory must publish {key}: site/ reads it by this exact name"
             );
         }
+        assert_eq!(
+            v["plateaued"],
+            serde_json::Value::Null,
+            "an unjudged plateau is a null on the wire, not a false"
+        );
+        assert_eq!(v["load_s"], serde_json::Value::Null);
+        let back: CellMemory =
+            serde_json::from_str(r#"{"served":true,"plateaued":true,"load_s":90}"#)
+                .expect("the published form must parse back");
+        assert_eq!(back.plateaued.copied(), Some(true));
+        assert_eq!(back.load_s.copied(), Some(90));
+    }
+
+    // EVERY NULL ON A SERVED CELL CARRIES A REASON. `plateaued` and `load_s` were plain `Option`s, so
+    // `absences_of!` - which walks `Measurement` fields - could not see them: a served cell whose
+    // memory window could not judge the plateau published a bare null with nothing, anywhere in the
+    // artifact, saying why. That is the exact hole the absences map exists to close, and it was open
+    // on the two memory fields that are hardest to reason about from the numbers alone.
+    #[test]
+    fn a_memory_window_that_could_not_judge_the_plateau_publishes_why_not_a_bare_null() {
+        let cell = Cell {
+            served: Served::Bool(true),
+            memory: Some(CellMemory {
+                served: true,
+                plateaued: Measurement::absent_because(
+                    Absent::NotMeasured,
+                    "too few readings fell inside the settle window to judge whether memory moved",
+                ),
+                load_s: Measurement::absent(Absent::HarnessError),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let v: serde_json::Value = serde_json::to_value(&cell)
+            .expect("a cell must serialise")
+            .clone();
+
+        assert_eq!(
+            v["memory"]["plateaued"],
+            serde_json::Value::Null,
+            "the value slot stays a bare null for existing consumers"
+        );
+        assert_eq!(
+            v["absences"]["memory.plateaued"]["reason"], "not_measured",
+            "the plateau verdict's absence must be published with its reason: got {v}"
+        );
+        assert!(
+            v["absences"]["memory.plateaued"]["detail"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("settle window"),
+            "and with the window's own evidence: got {v}"
+        );
+        assert_eq!(
+            v["absences"]["memory.load_s"]["reason"], "harness_error",
+            "load_s must be coverable too: got {v}"
+        );
     }
 
     fn sample_perf() -> CellPerf {
@@ -725,7 +826,10 @@ mod tests {
             perf: Some(sample_perf()),
             stream: Some(CellStream {
                 stream_served: StreamServed::Status("untestable".to_string()),
-                reason: Some("stream_mock_unready".to_string()),
+                // The TOKEN in `reason` and the prose in `stream_error`: `reason` used to carry the
+                // detail string, which made one field name mean two different things depending on
+                // which block a reader was in.
+                reason: Some("untestable".to_string()),
                 stream_error: Some("did not rebind the mock port".to_string()),
                 // NotMeasured, not Untestable: a `null` on the wire always deserialises back to
                 // NotMeasured (measurement.rs's Deserialize cannot recover a more specific reason
@@ -903,6 +1007,36 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&js).unwrap();
         assert_eq!(v["added_ttft_p99_us"], serde_json::Value::Null);
         assert_eq!(v["cpu_fps"], serde_json::Value::Null);
+    }
+
+    // THE TOKEN AND THE PROSE ARE TWO FIELDS. `CellStream.reason` shares its name with `Cell.reason`,
+    // which every consumer reads as a stable token, while the stream block put the absence's free
+    // text there instead - so branching on `reason` gave a token in one block and a sentence in the
+    // other, and a reasonless absence published a null beside a status that plainly had a reason.
+    #[test]
+    fn a_stream_block_publishes_a_reason_token_with_its_prose_in_its_own_field() {
+        let cell = sample_cell();
+        let stream = cell.stream.expect("the fixture carries a stream block");
+        let v: serde_json::Value = serde_json::to_value(&stream).expect("must serialise");
+        let reason = v["reason"].as_str().unwrap_or_default();
+        assert!(
+            [
+                Absent::NotServed,
+                Absent::NotMeasured,
+                Absent::BelowResolution,
+                Absent::RigLimited,
+                Absent::SearchExhausted,
+                Absent::Untestable,
+                Absent::HarnessError,
+            ]
+            .iter()
+            .any(|a| a.token() == reason),
+            "stream.reason must be a token from the absence vocabulary, got {reason:?}"
+        );
+        assert_eq!(
+            v["stream_error"], "did not rebind the mock port",
+            "the prose belongs in stream_error, not in reason"
+        );
     }
 
     #[test]

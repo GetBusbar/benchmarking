@@ -61,6 +61,18 @@ impl HttpResponse {
 /// exactly that distinction.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
+    /// THE RIG REFUSED TO SEND, and this is the one variant that describes US.
+    ///
+    /// Every other variant is a claim about the PEER - it refused the connection, it never answered,
+    /// it sent bytes that do not parse. This one is the opposite: the request could not be framed
+    /// without smuggling something onto the wire, so nothing was sent and the gateway was never
+    /// asked. Reusing `ConnectionFailed` or `Malformed` for it would charge a gateway with a fault
+    /// of ours, which is the exact attribution inversion this engine refuses everywhere else.
+    ///
+    /// A caller must therefore never grade this as the gateway failing. It is loud on purpose: the
+    /// manifest that caused it is a first-party file with a defect in it, and the run should stop
+    /// pointing at that rather than publish a red.
+    RigRefused(String),
     /// A complete, well-formed HTTP response, whatever its status.
     Response(HttpResponse),
     /// The TCP connection itself could not be made or was severed before any response existed.
@@ -500,6 +512,47 @@ pub fn get(
     send("GET", addr, path, &[], headers, timeout, false)
 }
 
+/// WHY THIS REQUEST CANNOT BE PUT ON THE WIRE, or `None` when it can.
+///
+/// Every request this engine sends is assembled by interpolating a manifest-supplied path and
+/// manifest-supplied header pairs into the HTTP framing with `format!`. HTTP/1.1 has exactly one
+/// terminator for a header and one for the request line, so a `\r` or `\n` anywhere in those strings
+/// does not produce a header with a strange value - it produces EXTRA HEADERS, or a whole second
+/// request, chosen by whoever wrote the manifest rather than by the harness. A `:` inside a header
+/// NAME renames the header and turns the rest into a value. A space in the path rewrites the request
+/// line's HTTP version. NUL is refused for the same reason a name is: nothing downstream of this
+/// process has to agree with us about where a C string ends.
+///
+/// ONE VALIDATOR, THREE LANES. Ledger RIG-12 was closed for the load lane only: `gen.rs`'s
+/// `build_request` grew these rules while `send` (the probe and re-verify lanes) and
+/// `build_sse_request` (the streaming lane) kept interpolating the SAME manifest headers raw. A rule
+/// enforced on one of three lanes is not enforced; it is a lane a reader thinks is covered. This is
+/// the rule, and all three call it.
+///
+/// The answer is prose because the only honest thing to do with it is refuse loudly and name the
+/// header - manifests are first-party files, so this is a defect to fix in one, never a gateway
+/// property to publish.
+pub fn unsendable_request(path: &str, headers: &[(String, String)]) -> Option<String> {
+    // The request target is interpolated into the request LINE, where a space or a line break is
+    // just as much of a second request as one in a header.
+    if path.contains([' ', '\t', '\r', '\n', '\0']) {
+        return Some(format!(
+            "request path {path:?} carries whitespace or a line break, which would rewrite the request line"
+        ));
+    }
+    for (name, value) in headers {
+        // The name is checked too: a colon or CRLF in a name smuggles a header just as well as one
+        // in a value, and a name is no more trusted than the value beside it.
+        if name.contains([':', '\r', '\n', '\0']) || value.contains(['\r', '\n', '\0']) {
+            return Some(format!(
+                "header {name:?} carries a line break, a colon in its name, or a NUL, which would inject \
+                 headers onto the wire: {value:?}"
+            ));
+        }
+    }
+    None
+}
+
 /// One request/response exchange. Shared by `post_json` and `get` so the two cannot drift in their
 /// framing, deadline handling, or `Outcome` classification - the distinctions this module's header
 /// describes are the whole point of it, and a second hand-rolled request builder is a second place
@@ -513,6 +566,13 @@ fn send(
     timeout: Duration,
     json_body: bool,
 ) -> Outcome {
+    // REFUSED BEFORE THE CONNECT, so a request we will not send never even touches the gateway: a
+    // connection opened and abandoned is a connection the peer logged and had to clean up for a
+    // request of ours that was never valid.
+    if let Some(why) = unsendable_request(path, headers) {
+        return Outcome::RigRefused(why);
+    }
+
     let deadline = Instant::now() + timeout;
 
     let mut stream = match TcpStream::connect_timeout(&addr, timeout) {
@@ -675,6 +735,14 @@ pub enum SseEnd {
     /// publish the exhaustion as the gateway's stream ceiling - the same defect the load generator
     /// had, in the path that reaches high concurrency soonest.
     RigExhausted(String),
+    /// THE RIG REFUSED TO SEND. Not a claim about the peer at all - see `Outcome::RigRefused`, which
+    /// is the same fact on the non-streaming lanes.
+    ///
+    /// Distinct from `RigExhausted`, which is also ours but is a resource limit reached honestly
+    /// mid-run. This one is a request the harness would have had to smuggle to send, so it did not
+    /// send it: no connection was made and the gateway was never asked. It must never count toward
+    /// an errored stream or a failing rung.
+    RigRefused(String),
     /// The response head itself did not parse (wrong status line, broken headers): there is no
     /// stream to read frames from at all.
     Malformed(String),
@@ -701,6 +769,17 @@ pub struct SseOutcome {
     /// Measured from the write, not from the connect, so a slow DNS or TCP handshake is not charged
     /// to the gateway's first token.
     pub frame_offsets_us: Vec<u64>,
+    /// How many of `frames` carried MODEL OUTPUT rather than protocol scaffolding, as the request's
+    /// own dialect classifies them (`ingress::Dialect::sse_event_is_content`).
+    ///
+    /// Ledger RIG-11: `frames` counts every dispatched SSE event, which is right for anything that
+    /// wants the whole stream (fps, gap timings, "did it stream at all") and wrong for a DELIVERY
+    /// ratio - openai spends 3 events and anthropic 5 on framing, so a stream could satisfy part of
+    /// a frame budget having delivered no tokens, and the two dialects differed by two.
+    ///
+    /// Equals `frames.len()` when the caller passed no dialect: no taxonomy was supplied, so nothing
+    /// is claimed about which events were content and this reads exactly as `frames` does.
+    pub content_frames: u64,
     pub end: SseEnd,
 }
 
@@ -762,11 +841,18 @@ pub struct SseReader {
     frames: Vec<String>,
     offsets_us: Vec<u64>,
     budget: usize,
+    /// Which wire dialect these events are in, when the caller knows. The decoder does NOT inspect
+    /// payloads itself - it asks the dialect (`sse_event_is_content`), because a taxonomy of events
+    /// belongs to the protocol and this state machine is deliberately ignorant of both transport and
+    /// protocol. `None` means no taxonomy was supplied and every event counts, exactly as `frames`
+    /// does.
+    dialect: Option<crate::ingress::Dialect>,
+    content_frames: u64,
     finished: Option<SseEnd>,
 }
 
 impl SseReader {
-    pub fn new(frame_budget: usize) -> Self {
+    pub fn new(frame_budget: usize, dialect: Option<crate::ingress::Dialect>) -> Self {
         Self {
             phase: Phase::Head,
             raw: Vec::new(),
@@ -776,6 +862,8 @@ impl SseReader {
             frames: Vec::new(),
             offsets_us: Vec::new(),
             budget: frame_budget,
+            dialect,
+            content_frames: 0,
             finished: None,
         }
     }
@@ -830,7 +918,12 @@ impl SseReader {
                         if let Some(step) = self.drain_body(elapsed_us) {
                             return step;
                         }
-                        self.flush_pending(elapsed_us);
+                        // The terminal chunk ends the BODY, and any `data:` lines still held were
+                        // never dispatched: SSE dispatches on the blank line. Held lines are dropped
+                        // here for the same reason `finish` drops them - a fragment the peer never
+                        // terminated is not a frame it delivered - so which way the stream ended
+                        // cannot change whether the fragment counts.
+                        self.pending = None;
                         return self.finish_with(SseEnd::StreamClosed);
                     }
                     ChunkPump::Bad(msg) => return self.finish_with(SseEnd::Malformed(msg)),
@@ -843,17 +936,27 @@ impl SseReader {
     }
 
     /// The peer stopped sending, or the deadline passed. Whatever arrived still counts: a stream
-    /// that goes quiet is not an error, and discarding its frames would publish nothing for a
-    /// gateway that streamed perfectly well up to that point.
-    pub fn finish(mut self, end: SseEnd, elapsed_us: u64) -> SseOutcome {
-        if self.finished.is_none() {
-            self.flush_pending(elapsed_us);
-        }
+    /// that goes quiet is not an error, and discarding its DISPATCHED frames would publish nothing
+    /// for a gateway that streamed perfectly well up to that point.
+    ///
+    /// AN EVENT THE PEER NEVER TERMINATED IS NOT A DELIVERED FRAME. This used to flush the held
+    /// `data:` lines as one more frame, stamped at the close or the deadline - so a gateway that
+    /// died mid-event was credited with delivering the fragment that killed it, and the fabricated
+    /// arrival time (the timeout instant, up to the whole stream timeout after the last real byte)
+    /// entered the gap samples as a stall no frame arrival ever produced. Dropped rather than
+    /// stamped: SSE dispatches on the blank line, so a fragment is an event that never happened, and
+    /// there is no honest arrival time for a frame the peer never finished writing.
+    ///
+    /// Takes no arrival time on purpose: there is nothing left here that could honestly be stamped
+    /// with one, and a parameter for it is an invitation to stamp something again.
+    pub fn finish(mut self, end: SseEnd) -> SseOutcome {
+        self.pending = None;
         let end = self.finished.clone().unwrap_or(end);
         SseOutcome {
             status: self.status,
             frames: self.frames,
             frame_offsets_us: self.offsets_us,
+            content_frames: self.content_frames,
             end,
         }
     }
@@ -995,6 +1098,15 @@ impl SseReader {
 
     fn flush_pending(&mut self, elapsed_us: u64) {
         if let Some(data) = self.pending.take() {
+            // Classified at dispatch, by the DIALECT, never by this decoder reading the bytes for
+            // itself - see the `dialect` field. With no dialect every dispatched event counts, which
+            // is what `frames` has always meant.
+            if self
+                .dialect
+                .is_none_or(|d| d.sse_event_is_content(data.as_str()))
+            {
+                self.content_frames += 1;
+            }
             self.offsets_us.push(elapsed_us);
             self.frames.push(data);
         }
@@ -1032,7 +1144,21 @@ pub fn post_json_sse(
     headers: &[(String, String)],
     timeout: Duration,
     frame_budget: usize,
+    dialect: Option<crate::ingress::Dialect>,
 ) -> SseOutcome {
+    // BUILT BEFORE THE CONNECT, so a request we will not send never opens a socket to the gateway.
+    let request = match build_sse_request(addr, path, body, headers) {
+        Ok(r) => r,
+        Err(why) => {
+            return SseOutcome {
+                status: None,
+                frames: Vec::new(),
+                frame_offsets_us: Vec::new(),
+                content_frames: 0,
+                end: SseEnd::RigRefused(why),
+            }
+        }
+    };
     let deadline = Instant::now() + timeout;
     let mut stream = match TcpStream::connect_timeout(&addr, timeout) {
         Ok(s) => s,
@@ -1041,18 +1167,19 @@ pub fn post_json_sse(
                 status: None,
                 frames: Vec::new(),
                 frame_offsets_us: Vec::new(),
+                content_frames: 0,
                 end: connect_end(&e),
             }
         }
     };
 
-    let request = build_sse_request(addr, path, body, headers);
     let write_deadline = deadline.saturating_duration_since(Instant::now());
     if stream.set_write_timeout(Some(write_deadline)).is_err() {
         return SseOutcome {
             status: None,
             frames: Vec::new(),
             frame_offsets_us: Vec::new(),
+            content_frames: 0,
             end: SseEnd::ConnectionFailed("could not set a write deadline".to_string()),
         };
     }
@@ -1062,6 +1189,7 @@ pub fn post_json_sse(
                 status: None,
                 frames: Vec::new(),
                 frame_offsets_us: Vec::new(),
+                content_frames: 0,
                 end: SseEnd::Timeout,
             }
         } else {
@@ -1069,6 +1197,7 @@ pub fn post_json_sse(
                 status: None,
                 frames: Vec::new(),
                 frame_offsets_us: Vec::new(),
+                content_frames: 0,
                 end: SseEnd::ConnectionFailed(format!(
                     "connection dropped while sending the request: {e}"
                 )),
@@ -1079,33 +1208,27 @@ pub fn post_json_sse(
     // The clock starts at the WRITE, not the connect, so a slow handshake is not charged to the
     // gateway's first token.
     let sent_at = Instant::now();
-    let mut reader = SseReader::new(frame_budget);
+    let mut reader = SseReader::new(frame_budget, dialect);
     let mut buf = [0u8; 16 * 1024];
     loop {
         let left = deadline.saturating_duration_since(Instant::now());
         if left.is_zero() {
-            return reader.finish(SseEnd::Timeout, sent_at.elapsed().as_micros() as u64);
+            return reader.finish(SseEnd::Timeout);
         }
         if stream.set_read_timeout(Some(left)).is_err() {
-            return reader.finish(SseEnd::Timeout, sent_at.elapsed().as_micros() as u64);
+            return reader.finish(SseEnd::Timeout);
         }
         match stream.read(&mut buf) {
-            Ok(0) => {
-                return reader.finish(SseEnd::StreamClosed, sent_at.elapsed().as_micros() as u64)
-            }
+            Ok(0) => return reader.finish(SseEnd::StreamClosed),
             Ok(n) => {
                 let at = sent_at.elapsed().as_micros() as u64;
                 if let Step::Done(end) = reader.feed(&buf[..n], at) {
-                    return reader.finish(end, at);
+                    return reader.finish(end);
                 }
             }
-            Err(e) if is_timeout(&e) => {
-                return reader.finish(SseEnd::Timeout, sent_at.elapsed().as_micros() as u64)
-            }
+            Err(e) if is_timeout(&e) => return reader.finish(SseEnd::Timeout),
             // A peer that resets mid-stream still delivered what it delivered.
-            Err(_) => {
-                return reader.finish(SseEnd::StreamClosed, sent_at.elapsed().as_micros() as u64)
-            }
+            Err(_) => return reader.finish(SseEnd::StreamClosed),
         }
     }
 }
@@ -1129,70 +1252,57 @@ pub async fn post_json_sse_async(
     headers: &[(String, String)],
     timeout: Duration,
     frame_budget: usize,
+    dialect: Option<crate::ingress::Dialect>,
 ) -> SseOutcome {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    let failed = |e: String| SseOutcome {
+    let ended = |end: SseEnd| SseOutcome {
         status: None,
         frames: Vec::new(),
         frame_offsets_us: Vec::new(),
-        end: SseEnd::ConnectionFailed(e),
+        content_frames: 0,
+        end,
+    };
+    let failed = |e: String| ended(SseEnd::ConnectionFailed(e));
+
+    // BUILT BEFORE THE CONNECT, so a request we will not send never opens a socket to the gateway.
+    let request = match build_sse_request(addr, path, body, headers) {
+        Ok(r) => r,
+        Err(why) => return ended(SseEnd::RigRefused(why)),
     };
 
     let connect = tokio::time::timeout(timeout, tokio::net::TcpStream::connect(addr));
     let mut stream = match connect.await {
         Ok(Ok(s)) => s,
-        Ok(Err(e)) => {
-            return SseOutcome {
-                status: None,
-                frames: Vec::new(),
-                frame_offsets_us: Vec::new(),
-                end: connect_end(&e),
-            }
-        }
-        Err(_) => {
-            return SseOutcome {
-                status: None,
-                frames: Vec::new(),
-                frame_offsets_us: Vec::new(),
-                end: SseEnd::Timeout,
-            }
-        }
+        Ok(Err(e)) => return ended(connect_end(&e)),
+        Err(_) => return ended(SseEnd::Timeout),
     };
 
-    let request = build_sse_request(addr, path, body, headers);
     match tokio::time::timeout(timeout, stream.write_all(&request)).await {
         Ok(Ok(())) => {}
         Ok(Err(e)) => return failed(format!("connection dropped while sending the request: {e}")),
-        Err(_) => {
-            return SseOutcome {
-                status: None,
-                frames: Vec::new(),
-                frame_offsets_us: Vec::new(),
-                end: SseEnd::Timeout,
-            }
-        }
+        Err(_) => return ended(SseEnd::Timeout),
     }
 
     // Clock from the WRITE, exactly as the blocking lane does, so a slow handshake is not charged to
     // the gateway's first token and the two lanes' numbers mean the same thing.
     let sent_at = std::time::Instant::now();
     let deadline = tokio::time::Instant::now() + timeout;
-    let mut reader = SseReader::new(frame_budget);
+    let mut reader = SseReader::new(frame_budget, dialect);
     let mut buf = vec![0u8; 16 * 1024];
     loop {
         let read = tokio::time::timeout_at(deadline, stream.read(&mut buf)).await;
         let at = sent_at.elapsed().as_micros() as u64;
         match read {
-            Ok(Ok(0)) => return reader.finish(SseEnd::StreamClosed, at),
+            Ok(Ok(0)) => return reader.finish(SseEnd::StreamClosed),
             Ok(Ok(n)) => {
                 if let Step::Done(end) = reader.feed(&buf[..n], at) {
-                    return reader.finish(end, at);
+                    return reader.finish(end);
                 }
             }
             // A peer that resets mid-stream still delivered what it delivered.
-            Ok(Err(_)) => return reader.finish(SseEnd::StreamClosed, at),
-            Err(_) => return reader.finish(SseEnd::Timeout, at),
+            Ok(Err(_)) => return reader.finish(SseEnd::StreamClosed),
+            Err(_) => return reader.finish(SseEnd::Timeout),
         }
     }
 }
@@ -1217,12 +1327,19 @@ fn connect_end(e: &std::io::Error) -> SseEnd {
 /// The request both SSE transports send. Written once so the blocking lane and the async lane cannot
 /// authenticate or frame differently: two lanes sending different bytes would make their numbers
 /// incomparable in a way nothing downstream could see.
+///
+/// `Err` when the request cannot be framed without smuggling - the same rule the probe and load
+/// lanes apply, in the same function, so the streaming lane cannot be the one that stayed
+/// injectable (it was; see `unsendable_request`).
 fn build_sse_request(
     addr: SocketAddr,
     path: &str,
     body: &[u8],
     headers: &[(String, String)],
-) -> Vec<u8> {
+) -> Result<Vec<u8>, String> {
+    if let Some(why) = unsendable_request(path, headers) {
+        return Err(why);
+    }
     let mut request = Vec::new();
     request.extend_from_slice(format!("POST {path} HTTP/1.1\r\n").as_bytes());
     request.extend_from_slice(format!("Host: {addr}\r\n").as_bytes());
@@ -1242,7 +1359,7 @@ fn build_sse_request(
     }
     request.extend_from_slice(b"\r\n");
     request.extend_from_slice(body);
-    request
+    Ok(request)
 }
 
 #[cfg_attr(test, allow(clippy::panic, clippy::unwrap_used, clippy::expect_used))]
@@ -1501,7 +1618,7 @@ mod tests {
             // Then close cleanly.
         });
 
-        let outcome = post_json_sse(addr, "/x", b"{}", &[], Duration::from_secs(5), 10);
+        let outcome = post_json_sse(addr, "/x", b"{}", &[], Duration::from_secs(5), 10, None);
         assert_eq!(outcome.status, Some(200));
         assert_eq!(outcome.frames, vec!["chunk-0", "chunk-1", "chunk-2"]);
         assert_eq!(outcome.end, SseEnd::StreamClosed);
@@ -1528,7 +1645,7 @@ mod tests {
             }
         });
 
-        let outcome = post_json_sse(addr, "/x", b"{}", &[], Duration::from_secs(5), 10);
+        let outcome = post_json_sse(addr, "/x", b"{}", &[], Duration::from_secs(5), 10, None);
         assert_eq!(outcome.frames.len(), 3);
         assert_eq!(
             outcome.frame_offsets_us.len(),
@@ -1572,7 +1689,7 @@ mod tests {
             // Head, then nothing. There is no first token, so there is no time to first token: an
             // empty list, never a zero, which would read as an instant response.
         });
-        let outcome = post_json_sse(addr, "/x", b"{}", &[], Duration::from_millis(300), 10);
+        let outcome = post_json_sse(addr, "/x", b"{}", &[], Duration::from_millis(300), 10, None);
         assert!(outcome.frames.is_empty());
         assert!(
             outcome.frame_offsets_us.is_empty(),
@@ -2254,7 +2371,7 @@ mod tests {
         });
 
         let start = Instant::now();
-        let outcome = post_json_sse(addr, "/x", b"{}", &[], Duration::from_secs(3), 10);
+        let outcome = post_json_sse(addr, "/x", b"{}", &[], Duration::from_secs(3), 10, None);
         assert_eq!(
             outcome.end,
             SseEnd::NotAnEventStream("application/json".to_string())
@@ -2282,7 +2399,7 @@ mod tests {
             let _ = conn.write_all(b"data: undeclared\n\n");
         });
 
-        let outcome = post_json_sse(addr, "/x", b"{}", &[], Duration::from_secs(5), 10);
+        let outcome = post_json_sse(addr, "/x", b"{}", &[], Duration::from_secs(5), 10, None);
         assert_eq!(
             outcome.frames,
             vec!["undeclared"],
@@ -2308,7 +2425,7 @@ mod tests {
         });
 
         let start = Instant::now();
-        let outcome = post_json_sse(addr, "/x", b"{}", &[], Duration::from_secs(5), 3);
+        let outcome = post_json_sse(addr, "/x", b"{}", &[], Duration::from_secs(5), 3, None);
         assert_eq!(
             outcome.frames,
             vec!["f0", "f1", "f2"],
@@ -2354,7 +2471,7 @@ mod tests {
             let _ = conn.write_all(b"0\r\n\r\n");
         });
 
-        let outcome = post_json_sse(addr, "/x", b"{}", &[], Duration::from_secs(5), 10);
+        let outcome = post_json_sse(addr, "/x", b"{}", &[], Duration::from_secs(5), 10, None);
         assert_eq!(
             outcome.frames,
             vec!["hello world", "second"],
@@ -2380,7 +2497,7 @@ mod tests {
             let _ = conn.write_all(b"retry: 1000\ndata:    padded\n\n");
         });
 
-        let outcome = post_json_sse(addr, "/x", b"{}", &[], Duration::from_secs(5), 10);
+        let outcome = post_json_sse(addr, "/x", b"{}", &[], Duration::from_secs(5), 10, None);
         assert_eq!(
             outcome.frames,
             vec!["tight", "padded"],
@@ -2397,7 +2514,7 @@ mod tests {
             let _ = conn.write_all(b"GARBAGE\r\n\r\n");
         });
 
-        let outcome = post_json_sse(addr, "/x", b"{}", &[], Duration::from_secs(5), 10);
+        let outcome = post_json_sse(addr, "/x", b"{}", &[], Duration::from_secs(5), 10, None);
         assert!(
             matches!(outcome.end, SseEnd::Malformed(_)),
             "a broken head must be Malformed, got {:?}",
@@ -2424,7 +2541,7 @@ mod tests {
             let _ = conn.write_all(b"data: line one\ndata: line two\n\ndata: second event\n\n");
         });
 
-        let outcome = post_json_sse(addr, "/x", b"{}", &[], Duration::from_secs(5), 10);
+        let outcome = post_json_sse(addr, "/x", b"{}", &[], Duration::from_secs(5), 10, None);
         assert_eq!(
             outcome.frames,
             vec!["line one\nline two", "second event"],
@@ -2450,7 +2567,7 @@ mod tests {
         });
 
         let start = Instant::now();
-        let outcome = post_json_sse(addr, "/x", b"{}", &[], Duration::from_millis(300), 10);
+        let outcome = post_json_sse(addr, "/x", b"{}", &[], Duration::from_millis(300), 10, None);
         assert_eq!(outcome.end, SseEnd::Timeout);
         assert_eq!(outcome.frames, vec!["only-one"]);
         assert!(
@@ -2480,15 +2597,15 @@ mod tests {
         "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n";
 
     fn read_all(bytes: &[u8], budget: usize, split: usize) -> SseOutcome {
-        let mut r = SseReader::new(budget);
+        let mut r = SseReader::new(budget, None);
         let mut t = 0u64;
         for piece in bytes.chunks(split.max(1)) {
             t += 1;
             if let Step::Done(end) = r.feed(piece, t) {
-                return r.finish(end, t);
+                return r.finish(end);
             }
         }
-        r.finish(SseEnd::StreamClosed, t)
+        r.finish(SseEnd::StreamClosed)
     }
 
     #[test]
@@ -2606,9 +2723,9 @@ mod tests {
         let body = chunked(&["data: a\n\ndata: b\n\n"]);
         let mut bytes = SSE_HEAD.as_bytes().to_vec();
         bytes.extend_from_slice(&body[..body.len() - 5]); // truncated: no terminal chunk
-        let mut r = SseReader::new(64);
+        let mut r = SseReader::new(64, None);
         assert_eq!(r.feed(&bytes, 10), Step::NeedMore);
-        let out = r.finish(SseEnd::Timeout, 10);
+        let out = r.finish(SseEnd::Timeout);
         assert_eq!(out.frames, vec!["a".to_string(), "b".to_string()]);
         assert_eq!(out.end, SseEnd::Timeout);
     }
@@ -2617,17 +2734,66 @@ mod tests {
     // number is a timing and a shared timestamp would flatten the gaps to zero.
     #[test]
     fn each_frame_is_credited_the_arrival_of_its_own_bytes() {
-        let mut r = SseReader::new(64);
+        let mut r = SseReader::new(64, None);
         assert_eq!(r.feed(SSE_HEAD.as_bytes(), 0), Step::NeedMore);
         assert_eq!(r.feed(&chunked_open("data: a\n\n"), 100), Step::NeedMore);
         assert_eq!(r.feed(&chunked_open("data: b\n\n"), 250), Step::NeedMore);
-        let out = r.finish(SseEnd::Timeout, 250);
+        let out = r.finish(SseEnd::Timeout);
         assert_eq!(out.frames, vec!["a".to_string(), "b".to_string()]);
         assert_eq!(
             out.frame_offsets_us,
             vec![100, 250],
             "the gap between frames is the measurement"
         );
+    }
+
+    // AN EVENT THE PEER NEVER TERMINATED IS NOT A FRAME IT DELIVERED.
+    //
+    // `finish` used to flush the held `data:` lines as one more frame stamped at the close or the
+    // deadline, so a gateway that died mid-event was credited with delivering the fragment that
+    // killed it, and the manufactured arrival time - here nine seconds after the last real byte -
+    // entered the gap samples as a stall no frame arrival produced.
+    #[test]
+    fn an_event_the_peer_never_terminated_is_not_counted_as_a_delivered_frame() {
+        let mut r = SseReader::new(64, None);
+        assert_eq!(r.feed(SSE_HEAD.as_bytes(), 0), Step::NeedMore);
+        assert_eq!(r.feed(&chunked_open("data: a\n\n"), 100), Step::NeedMore);
+        // A COMPLETE data line that no blank line ever dispatched: the event the peer was still
+        // in the middle of when it went quiet.
+        assert_eq!(
+            r.feed(&chunked_open("data: half-writ\n"), 250),
+            Step::NeedMore
+        );
+        let out = r.finish(SseEnd::Timeout);
+        assert_eq!(
+            out.frames,
+            vec!["a".to_string()],
+            "only the dispatched event counts, got {:?}",
+            out.frames
+        );
+        assert_eq!(
+            out.frame_offsets_us,
+            vec![100],
+            "and no frame is stamped at the deadline, which would be a fabricated gap"
+        );
+        assert_eq!(out.end, SseEnd::Timeout);
+    }
+
+    // The same fragment, on a stream the peer ended deliberately: how the stream ended must not
+    // decide whether an un-dispatched fragment counts.
+    #[test]
+    fn a_fragment_left_by_a_terminal_chunk_is_dropped_the_same_way() {
+        let mut r = SseReader::new(64, None);
+        assert_eq!(r.feed(SSE_HEAD.as_bytes(), 0), Step::NeedMore);
+        assert_eq!(r.feed(&chunked_open("data: a\n\n"), 100), Step::NeedMore);
+        assert_eq!(
+            r.feed(&chunked_open("data: cut off\n"), 250),
+            Step::NeedMore
+        );
+        assert_eq!(r.feed(b"0\r\n\r\n", 300), Step::Done(SseEnd::StreamClosed));
+        let out = r.finish(SseEnd::StreamClosed);
+        assert_eq!(out.frames, vec!["a".to_string()]);
+        assert_eq!(out.frame_offsets_us, vec![100]);
     }
 
     fn chunked_open(payload: &str) -> Vec<u8> {
@@ -2650,7 +2816,15 @@ mod tests {
         let path = "/v1/chat/completions";
         let headers: Vec<(String, String)> = vec![("authorization".into(), "Bearer dummy".into())];
 
-        let blocking = post_json_sse(addr, path, b"{}", &headers, Duration::from_secs(5), 8);
+        let blocking = post_json_sse(
+            addr,
+            path,
+            b"{}",
+            &headers,
+            Duration::from_secs(5),
+            8,
+            Some(crate::ingress::Dialect::Openai),
+        );
 
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
@@ -2664,6 +2838,7 @@ mod tests {
             &headers,
             Duration::from_secs(5),
             8,
+            Some(crate::ingress::Dialect::Openai),
         ));
 
         assert_eq!(
@@ -2673,6 +2848,12 @@ mod tests {
         assert_eq!(
             asynced.frames, blocking.frames,
             "the two lanes decoded different frames"
+        );
+        // The content classification travels with the decode, so a lane that classified differently
+        // would publish a different delivery ratio from identical bytes.
+        assert_eq!(
+            asynced.content_frames, blocking.content_frames,
+            "the two lanes classified different numbers of content frames"
         );
         assert_eq!(
             asynced.end, blocking.end,
@@ -2721,5 +2902,177 @@ mod tests {
             }
         });
         addr
+    }
+
+    // ── the rig refuses to smuggle, on EVERY lane ────────────────────────────────────────────────
+
+    /// The header and path shapes that would put something on the wire nobody asked for. Shared by
+    /// the probe-lane and stream-lane tests below so the two cannot be given different hostile input
+    /// and both look covered.
+    fn smuggling_shapes() -> Vec<(&'static str, Vec<(String, String)>)> {
+        let h = |n: &str, v: &str| vec![(n.to_string(), v.to_string())];
+        vec![
+            (
+                "/v1/chat/completions",
+                h("authorization", "Bearer t\r\nx-injected: yes"),
+            ),
+            (
+                "/v1/chat/completions",
+                h("authorization", "Bearer t\nx-injected: yes"),
+            ),
+            ("/v1/chat/completions", h("x-route\r\nx-injected", "yes")),
+            ("/v1/chat/completions", h("x-route:extra", "yes")),
+            ("/v1/chat/completions", h("x-route", "a\0b")),
+            ("/v1/chat HTTP/1.1\r\nx-injected: yes", Vec::new()),
+            ("/v1/chat completions", Vec::new()),
+        ]
+    }
+
+    // THE PROBE AND RE-VERIFY LANES WERE STILL INJECTABLE, and that is ledger RIG-12's other half.
+    //
+    // `gen.rs::build_request` was hardened against CRLF in a manifest header; `send` - which every
+    // probe, every capability verdict and every mock control-plane call goes through - kept doing
+    // `format!("{name}: {value}\r\n")` over the SAME manifest headers. A rule enforced on one of
+    // three lanes is not enforced.
+    //
+    // Refused as `RigRefused`, never as `ConnectionFailed` or `Malformed`: those describe the PEER,
+    // and this is a fault of ours. A gateway that was never asked must not be charged with anything.
+    #[test]
+    fn the_probe_lane_refuses_a_request_it_would_have_to_smuggle() {
+        // A live, well-behaved peer, so nothing about the refusal can be an accident of an address
+        // with nothing on it.
+        let addr = spawn_server(|mut conn| {
+            let _ = read_request_head(&conn);
+            let _ = conn.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\n{}");
+        });
+        for (path, headers) in smuggling_shapes() {
+            let outcome = post_json(addr, path, b"{}", &headers, Duration::from_secs(2));
+            match &outcome {
+                Outcome::RigRefused(why) => assert!(
+                    why.contains("inject") || why.contains("request line"),
+                    "the refusal must name what it prevented: {why}"
+                ),
+                other => {
+                    panic!("{path:?} with {headers:?} was sent rather than refused: {other:?}")
+                }
+            }
+        }
+        // A GET goes through the same builder and gets the same answer, or the control plane is the
+        // lane that stayed open.
+        assert!(matches!(
+            get(
+                addr,
+                "/__mock/state",
+                &[("x\r\ny".into(), "z".into())],
+                Duration::from_secs(2)
+            ),
+            Outcome::RigRefused(_)
+        ));
+    }
+
+    // The rule must not refuse ordinary requests: a validator that fails closed on everything is a
+    // benchmark that measures nothing, which is a worse answer than the one it replaced.
+    #[test]
+    fn an_ordinary_request_still_goes_out() {
+        assert_eq!(
+            unsendable_request(
+                "/v1/chat/completions",
+                &[
+                    ("authorization".into(), "Bearer sk-abc.def-123".into()),
+                    (
+                        "x-portkey-custom-host".into(),
+                        "http://127.0.0.1:9099/v1".into()
+                    ),
+                    ("anthropic-version".into(), "2023-06-01".into()),
+                ],
+            ),
+            None
+        );
+    }
+
+    // THE STREAMING LANE WAS THE THIRD. `build_sse_request` is shared by the blocking and async
+    // stream transports, so one unenforced rule there covered both - every TTFT sample, every gap
+    // percentile and every lane of every concurrent-stream window.
+    #[test]
+    fn the_streaming_lanes_refuse_a_request_they_would_have_to_smuggle() {
+        let addr = spawn_server(|mut conn| {
+            let _ = read_request_head(&conn);
+            let _ = conn.write_all(
+                b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\ndata: {}\n\n",
+            );
+        });
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime");
+        for (path, headers) in smuggling_shapes() {
+            let blocking = post_json_sse(
+                addr,
+                path,
+                b"{}",
+                &headers,
+                Duration::from_secs(2),
+                4,
+                Some(crate::ingress::Dialect::Openai),
+            );
+            assert!(
+                matches!(blocking.end, SseEnd::RigRefused(_)),
+                "the blocking stream lane sent {path:?} with {headers:?}: {blocking:?}"
+            );
+            assert!(blocking.frames.is_empty() && blocking.status.is_none());
+
+            let asynced = rt.block_on(post_json_sse_async(
+                addr,
+                path,
+                b"{}",
+                &headers,
+                Duration::from_secs(2),
+                4,
+                Some(crate::ingress::Dialect::Openai),
+            ));
+            assert!(
+                matches!(asynced.end, SseEnd::RigRefused(_)),
+                "the async stream lane sent {path:?} with {headers:?}: {asynced:?}"
+            );
+        }
+    }
+
+    // ── content frames vs every event (ledger RIG-11) ────────────────────────────────────────────
+
+    // The decoder counts CONTENT frames only when it is told which wire it is reading, and it asks
+    // the dialect rather than sniffing for `[DONE]` itself. Both halves matter: the count has to be
+    // right, and the taxonomy has to live where the protocol does.
+    #[test]
+    fn the_reader_counts_content_frames_by_asking_the_dialect() {
+        // Exactly the shapes mock/src/main.rs emits for openai: role head, content deltas, the
+        // finish_reason tail, then the [DONE] sentinel.
+        let body = concat!(
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"}}]}\n\n",
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"a\"}}]}\n\n",
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"b\"}}]}\n\n",
+            "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let bytes = format!("HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n{body}");
+
+        let mut r = SseReader::new(64, Some(crate::ingress::Dialect::Openai));
+        let _ = r.feed(bytes.as_bytes(), 1);
+        let o = r.finish(SseEnd::StreamClosed);
+        assert_eq!(
+            o.frames.len(),
+            5,
+            "every event is still counted in `frames`"
+        );
+        assert_eq!(
+            o.content_frames, 2,
+            "only the two deltas carried a token: {:?}",
+            o.frames
+        );
+
+        // Without a dialect nothing is claimed, so this reads exactly as `frames` does.
+        let mut r = SseReader::new(64, None);
+        let _ = r.feed(bytes.as_bytes(), 1);
+        let o = r.finish(SseEnd::StreamClosed);
+        assert_eq!(o.content_frames, o.frames.len() as u64);
     }
 }

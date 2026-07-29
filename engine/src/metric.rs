@@ -318,19 +318,7 @@ impl Metric for Throughput {
             ),
         };
         // The rungs as the gate saw them, plus the windows spent refining the boundary.
-        let sweep_sustained = perf
-            .sustained_points
-            .iter()
-            .map(|pt| crate::record::SweepPoint {
-                conc: i64::from(pt.concurrency),
-                rps: Measurement::Measured(pt.rps as i64),
-                p99_us: match pt.p99_us {
-                    Some(v) => Measurement::Measured(v as i64),
-                    None => Measurement::absent(Absent::NotMeasured),
-                },
-                fail: Measurement::Measured(pt.fail),
-            })
-            .collect();
+        let sweep_sustained = sustained_evidence(&perf.sustained_points);
         Measured {
             fields: vec![
                 ("rps_max_proxy", rps),
@@ -346,6 +334,41 @@ impl Metric for Throughput {
             },
         }
     }
+}
+
+/// The sustained search's rungs as PUBLISHED EVIDENCE rows.
+///
+/// A free function so the one mapping that decides what a rung's evidence says can be pinned against
+/// fixed points, rather than only through `Throughput::measure`, which needs a live gateway and a
+/// live mock behind it to reach at all.
+fn sustained_evidence(points: &[crate::run::SustainedPoint]) -> Vec<crate::record::SweepPoint> {
+    points
+        .iter()
+        .map(|pt| crate::record::SweepPoint {
+            conc: i64::from(pt.concurrency),
+            rps: Measurement::Measured(pt.rps as i64),
+            p99_us: match pt.p99_us {
+                Some(v) => Measurement::Measured(v as i64),
+                None => Measurement::absent(Absent::NotMeasured),
+            },
+            // ABSENT WHEN NO WINDOW CARRIED A READING, never a zero. This was
+            // `Measured(pt.fail)` over an `i64` that had no way to be absent, so a rung whose
+            // windows produced nothing published `fail: 0` - a number saying the gateway lost
+            // nothing at a rate it was never observed serving. The reason travels with it: an
+            // evidence row a reader cannot re-derive the verdict from is the defect class this whole
+            // series exists to avoid.
+            fail: match pt.fail {
+                Some(f) => Measurement::Measured(f),
+                None => Measurement::absent_because(
+                    Absent::NotMeasured,
+                    format!(
+                        "no window at c={} came back with a reading, so this rung has no failure count",
+                        pt.concurrency
+                    ),
+                ),
+            },
+        })
+        .collect()
 }
 
 /// The concurrency the memory window runs at.
@@ -479,12 +502,31 @@ impl Metric for Memory {
                 &ctx.cfg.relaunch_launcher,
                 &ctx.cfg.relaunch_commands,
             ) {
-                Err(e) => Measurement::absent_because(
-                    Absent::NotMeasured,
-                    format!(
-                        "the gateway could not be restarted to rest before the idle reading: {e}"
-                    ),
-                ),
+                // A FAILED RESTART ABORTS THE WHOLE GROUP, not just the idle reading. The old
+                // behaviour marked idle absent and fell through to the sampler and the load
+                // window - against a gateway in an unknown state (possibly relaunched but with
+                // its post-boot configuration half-replayed), with `pid` still pointing at the
+                // pre-restart tree. Every number that window produced would be the rig's own
+                // failure wearing the gateway's name. HarnessError, because that is what it is.
+                Err(e) => {
+                    let f: Filled = self
+                        .fields()
+                        .iter()
+                        .map(|x| {
+                            (
+                                *x,
+                                Measurement::absent_because(
+                                    Absent::HarnessError,
+                                    format!(
+                                        "the gateway could not be restarted to rest, so the memory \
+                                         window did not run: {e}"
+                                    ),
+                                ),
+                            )
+                        })
+                        .collect();
+                    return f.into();
+                }
                 // Re-resolve the pid: a restart gives the tree a NEW root, and reading the old one
                 // would measure a process that no longer exists.
                 Ok(()) => match crate::rss::root_pid(&ctx.cfg.runtime).copied() {
@@ -540,7 +582,12 @@ impl Metric for Memory {
         };
 
         let path = crate::run::path_for(ctx.cfg, ctx.dialect, &ctx.id.egress);
-        let body = ctx.dialect.body(&ctx.cfg.model);
+        // THE CELL'S OWN MODEL, never the bare declared one: most gateways route on the model name,
+        // so a fixed model would drive this window at a different upstream than the cell it is
+        // published under (run::model_for's own contract).
+        let body = ctx
+            .dialect
+            .body(&crate::run::model_for(ctx.cfg, &ctx.id.egress));
         // The SAME headers the probe authenticated this cell with. A memory window driven with the
         // wrong credential measures a process serving 401s, which is a different workload from the
         // one every other gateway's window is compared against.
@@ -767,7 +814,10 @@ impl Metric for Streaming {
         // select an upstream INSIDE a gateway and mean nothing to the mock.
         let gw_headers = crate::run::headers_for(ctx.cfg, ctx.dialect, &ctx.id.egress);
         let direct_headers = ctx.dialect.auth_headers(&ctx.cfg.auth);
-        let body = ctx.dialect.stream_body(&ctx.cfg.model);
+        // The cell's own model (run::model_for): a fixed model would stream against the wrong
+        // upstream on any model-routed gateway's translation cell.
+        let model = crate::run::model_for(ctx.cfg, &ctx.id.egress);
+        let body = ctx.dialect.stream_body(&model);
 
         let through_gateway = crate::http::post_json_sse(
             ctx.cfg.gateway_addr,
@@ -776,14 +826,16 @@ impl Metric for Streaming {
             &gw_headers,
             STREAM_TIMEOUT,
             STREAM_FRAME_BUDGET,
+            Some(ctx.dialect),
         );
         let direct = crate::http::post_json_sse(
             ctx.cfg.mock_addr,
-            &ctx.dialect.mock_direct_path(&ctx.cfg.model),
+            &ctx.dialect.mock_direct_path(&model),
             body.as_bytes(),
             &direct_headers,
             STREAM_TIMEOUT,
             STREAM_FRAME_BUDGET,
+            Some(ctx.dialect),
         );
 
         // A leg that produced no frame has no time to first token. Subtracting against a missing
@@ -836,6 +888,7 @@ impl Metric for Streaming {
                             headers,
                             STREAM_TIMEOUT,
                             1,
+                            Some(ctx.dialect),
                         )
                         .frame_offsets_us
                         .first()
@@ -844,17 +897,21 @@ impl Metric for Streaming {
                     .collect()
             };
         let gw_path = crate::run::path_for(ctx.cfg, ctx.dialect, &ctx.id.egress);
-        let direct_path = ctx.dialect.mock_direct_path(&ctx.cfg.model);
+        let direct_path = ctx.dialect.mock_direct_path(&model);
         let mut gw_ttfts = ttft_samples(ctx.cfg.gateway_addr, &gw_path, &gw_headers);
         let mut direct_ttfts = ttft_samples(ctx.cfg.mock_addr, &direct_path, &direct_headers);
         gw_ttfts.sort_unstable();
         direct_ttfts.sort_unstable();
+        // The rank comes from `stats::nearest_rank_index`, the engine's ONE percentile convention,
+        // rather than being spelled out again here. Ledger SRCH-04: this expression used to carry
+        // its own ceil while `gen.rs`, `stats.rs` and `search.rs` each carried their own floor, and
+        // the comments here claimed all four agreed. Over the 100 samples this leg takes they
+        // disagree by a rank on every percentile whose `n * p` is a whole number.
         let ttft_pct = |v: &[u64], pct: f64| -> Option<f64> {
             if v.is_empty() {
                 return None;
             }
-            let rank = (((v.len() as f64) * pct).ceil() as usize).clamp(1, v.len());
-            Some(v[rank - 1] as f64)
+            Some(v[crate::stats::nearest_rank_index(v.len(), pct)] as f64)
         };
         // BOTH PERCENTILES COME FROM THE SAME SAMPLES, or they are not percentiles of one thing.
         //
@@ -895,9 +952,10 @@ impl Metric for Streaming {
         let added_ttft_p99 = added_ttft_at(0.99);
 
         // THE GAP DISTRIBUTION IS INSIDE ONE STREAM, and it is not small: a stream carries
-        // `STREAM_FRAME_BUDGET` frames, so it yields that many gaps MINUS ONE. Nearest-rank, the
-        // same convention `gen::GenStats::pct_of` and the search's median use, so a published
-        // percentile is always a gap some pair of frames actually produced.
+        // `STREAM_FRAME_BUDGET` frames, so it yields that many gaps MINUS ONE. Nearest-rank through
+        // `stats::nearest_rank_index`, the one convention `gen::GenStats::pct_of` and the search's
+        // median now resolve through too, so a published percentile is always a gap some pair of
+        // frames actually produced AND means the same thing as every other percentile on the board.
         let gap_pct = |o: &crate::http::SseOutcome, pct: f64| -> Option<f64> {
             gap_percentile_us(&o.frame_offsets_us, pct)
         };
@@ -1044,9 +1102,12 @@ impl Metric for AddedLatency {
             f.into()
         };
 
-        let body = ctx.dialect.body(&ctx.cfg.model);
+        // The cell's own model on BOTH legs (run::model_for): the gateway leg must reach this
+        // cell's upstream, and the direct leg must ask the mock the same question.
+        let model = crate::run::model_for(ctx.cfg, &ctx.id.egress);
+        let body = ctx.dialect.body(&model);
         let gw_path = crate::run::path_for(ctx.cfg, ctx.dialect, &ctx.id.egress);
-        let direct_path = ctx.dialect.mock_direct_path(&ctx.cfg.model);
+        let direct_path = ctx.dialect.mock_direct_path(&model);
 
         // THE SAME DURATION EVERY OTHER WINDOW IN THIS ENGINE USES, not a second magic number.
         //
@@ -1088,7 +1149,8 @@ impl Metric for AddedLatency {
         let not_clean = |leg: &str, s: &crate::gen::GenStats| {
             let budget = if s.budget_exceeded > 0 {
                 format!(
-                    " ({} of them exceeded the response budget, a bound of ours)",
+                    " ({} of them exceeded a bound of OURS rather than being refused: the response \
+                     budget, or the connect budget)",
                     s.budget_exceeded
                 )
             } else {
@@ -1177,10 +1239,12 @@ pub struct SustainedThroughput;
 /// which a stream produces exactly one. Conflating those two is what left `added_gap_p99_us` absent
 /// on all 69 served cells of the 2026-07-28 run while charts.py drew a chart from it.
 ///
-/// Nearest-rank, the convention `gen::GenStats::pct_of` and the search's median already use, so a
+/// Nearest-rank through `stats::nearest_rank_index`, the engine's single percentile convention, so a
 /// published percentile is always a gap some pair of frames actually produced rather than an
-/// interpolation between two that neither did. `None` when there is no gap at all: a single frame
-/// has no inter-frame time, and a zero there would read as instant delivery.
+/// interpolation between two that neither did - and so it means the same thing as the load
+/// generator's p99 it is published beside, which it did not before ledger SRCH-04 was closed.
+/// `None` when there is no gap at all: a single frame has no inter-frame time, and a zero there
+/// would read as instant delivery.
 fn gap_percentile_us(frame_offsets_us: &[u64], pct: f64) -> Option<f64> {
     let mut gaps: Vec<u64> = frame_offsets_us
         .windows(2)
@@ -1190,8 +1254,7 @@ fn gap_percentile_us(frame_offsets_us: &[u64], pct: f64) -> Option<f64> {
         return None;
     }
     gaps.sort_unstable();
-    let rank = (((gaps.len() as f64) * pct).ceil() as usize).clamp(1, gaps.len());
-    Some(gaps[rank - 1] as f64)
+    Some(gaps[crate::stats::nearest_rank_index(gaps.len(), pct)] as f64)
 }
 
 // THE STREAM SEARCHES TAKE THE ENGINE'S FULL CEILING, like the throughput searches always did.
@@ -1483,6 +1546,116 @@ mod tests {
         assert!(
             idle.reason().is_some(),
             "an absent idle must carry the reason it could not be taken, not a bare null"
+        );
+    }
+
+    // A FAILED RESTART ABORTS THE WHOLE MEMORY GROUP. The old behaviour marked only idle absent
+    // (NotMeasured) and fell through to the sampler and the load window - against a gateway in an
+    // unknown state, with the pre-restart pid still in hand - so every number that window produced
+    // was the rig's own failure wearing the gateway's name. This pins the fix: EVERY declared field
+    // is absent with reason HarnessError, the shared detail says the window never ran, and no
+    // series is produced (the sampler and load window are never started).
+    //
+    // The fixture: a real marker process stands in for the gateway tree so `root_pid` resolves, and
+    // the relaunch spec's stop path matches nothing (stopping "succeeds" instantly) while its
+    // binary does not exist, so `restart_to_rest` fails fast on any platform - the FAILURE path
+    // needs no taskset, unlike run.rs's restart tests that need the launch to SUCCEED.
+    #[test]
+    fn a_failed_restart_to_rest_makes_every_memory_field_a_harness_error_and_skips_the_window() {
+        if std::process::Command::new("sh")
+            .args(["-c", "command -v python3"])
+            .output()
+            .map(|o| !o.status.success())
+            .unwrap_or(true)
+        {
+            eprintln!("skipping a_failed_restart_to_rest_makes_every_memory_field_a_harness_error_and_skips_the_window: no python3 on this platform");
+            return;
+        }
+        let marker = format!("otb-test-memory-restart-abort-{}", std::process::id());
+        let mut child = std::process::Command::new("python3")
+            .args(["-c", "import time,sys; time.sleep(120)", &marker])
+            .spawn()
+            .expect("spawn a marker process to stand in for the gateway tree");
+
+        let mut cfg = a_config();
+        cfg.runtime = crate::manifest::Runtime::Native {
+            proc_match: marker.clone(),
+        };
+        let port = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0")
+                .expect("bind an ephemeral port to pick one");
+            l.local_addr().expect("addr").port()
+        };
+        cfg.relaunch = Some(crate::launch::LaunchSpec {
+            runtime: crate::manifest::Runtime::Native {
+                // Deliberately NOT the marker: the stop path must succeed (nothing to stop) so the
+                // failure under test is the relaunch itself, and the marker process survives to
+                // prove the load window never drove anything.
+                proc_match: format!("{marker}-relaunch-matches-nothing"),
+            },
+            kind: crate::launch::LaunchKind::Native {
+                binary: "/nonexistent-otb-gateway-binary".into(),
+                args: vec![marker.clone()],
+                env: vec![],
+                env_unset: vec![],
+            },
+            cores: "0".into(),
+            port,
+            ready_budget: std::time::Duration::from_millis(200),
+            boot_backoff: std::time::Duration::from_millis(10),
+            pre_launch: None,
+        });
+
+        // The marker process must be visible before the group runs, or the test would exercise the
+        // earlier "no process tree" path instead of the restart failure.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while crate::rss::root_pid(&cfg.runtime).value().is_none()
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(
+            crate::rss::root_pid(&cfg.runtime).value().is_some(),
+            "the marker process never became visible to root_pid"
+        );
+
+        let id = CellId::new("openai", "openai");
+        let ctx = ctx_for(&cfg, &id);
+        let produced = Memory.measure(&ctx);
+        let _ = child.kill();
+        let _ = child.wait();
+
+        let filled: BTreeMap<_, _> = produced.fields.into_iter().collect();
+        for field in Memory.fields() {
+            let m = filled
+                .get(field)
+                .unwrap_or_else(|| panic!("the memory group declares {field} and must fill it"));
+            assert_eq!(
+                m.copied(),
+                None,
+                "{field}: nothing may be measured against a gateway in an unknown state"
+            );
+            assert_eq!(
+                m.reason(),
+                Some(&Absent::HarnessError),
+                "{field}: a failed restart is the HARNESS's failure, and every field says so"
+            );
+            assert!(
+                m.detail()
+                    .unwrap_or_default()
+                    .contains("could not be restarted to rest"),
+                "{field}: the detail must name the restart failure: {:?}",
+                m.detail()
+            );
+            assert!(
+                m.detail().unwrap_or_default().contains("did not run"),
+                "{field}: the detail must say the memory window never ran: {:?}",
+                m.detail()
+            );
+        }
+        assert!(
+            produced.series.rss.is_empty(),
+            "no sampler ran, so there is no series to carry"
         );
     }
 
@@ -1797,25 +1970,30 @@ mod tests {
         // (No `assert!(SAMPLES >= 100)` here: an assertion over a constant cannot fail, which is the
         // exact species of dead guard this audit spent the day removing. The rank checks below use
         // the constant and would break if it were lowered, which is the real protection.)
-        let rank_of = |n: usize, pct: f64| (((n as f64) * pct).ceil() as usize).clamp(1, n);
-        assert_eq!(rank_of(STREAM_TTFT_SAMPLES, 0.99), 99);
+        // The rank is the ENGINE's, not this module's: `stats::nearest_rank_index` is what
+        // `ttft_pct` calls, and calling it here too is what makes this a check on production rather
+        // than on a formula retyped in a test. It used to be retyped, and it was retyped with the
+        // ceil convention while `gen.rs` and `search.rs` used floor - ledger SRCH-04, the split this
+        // now cannot come back from.
+        let idx_of = crate::stats::nearest_rank_index;
+        assert_eq!(idx_of(STREAM_TTFT_SAMPLES, 0.99), 98);
         assert!(
-            rank_of(STREAM_TTFT_SAMPLES, 0.99) < STREAM_TTFT_SAMPLES,
+            idx_of(STREAM_TTFT_SAMPLES, 0.99) < STREAM_TTFT_SAMPLES - 1,
             "the p99 must not be the max, or it is not a percentile"
         );
         // One sample cannot support one: that was the whole problem, and it is why the field was
         // empty rather than wrong.
         assert_eq!(
-            rank_of(1, 0.99),
-            1,
+            idx_of(1, 0.99),
+            0,
             "with a single sample the p99 IS that sample"
         );
 
-        // Nearest-rank, matching gen::GenStats::pct_of and the search's median, so a published
-        // percentile is always a value some stream actually produced.
+        // Nearest-rank on the one convention, so a published percentile is always a value some
+        // stream actually produced and the same word means the same rank everywhere on the board.
         let v: Vec<u64> = (1..=100).collect();
-        assert_eq!(v[rank_of(v.len(), 0.99) - 1], 99);
-        assert_eq!(v[rank_of(v.len(), 0.50) - 1], 50);
+        assert_eq!(v[idx_of(v.len(), 0.99)], 99);
+        assert_eq!(v[idx_of(v.len(), 0.50)], 50);
     }
 
     // WHAT A CELL COST, PER GROUP, IN THE ARTIFACT.
@@ -1954,5 +2132,45 @@ mod tests {
         if let (Some(a), Some(b)) = (p50, p99) {
             assert!(b >= a, "p99 {b} sits below p50 {a}");
         }
+    }
+
+    // A FABRICATED ZERO IN PUBLISHED EVIDENCE, on the artifact side of the same defect.
+    //
+    // `SustainedPoint.fail` was an `i64` and this mapping was `Measurement::Measured(pt.fail)`
+    // unconditionally, so a rung whose windows all came back without a reading published `fail: 0`
+    // in `sweep_sustained_20ms` - a row stating the gateway lost nothing at a rate nothing ever
+    // observed it serving. The board's rule is that an absent measurement publishes null WITH A
+    // REASON and is never substituted by a number, so the absence has to carry one.
+    #[test]
+    fn a_rung_with_no_reading_publishes_an_absent_failure_count_with_its_reason() {
+        let pt = |conc: u32, p99: Option<u64>, fail: Option<i64>| crate::run::SustainedPoint {
+            concurrency: conc,
+            passed: true,
+            rps: 16_000.0,
+            p99_us: p99,
+            fail,
+        };
+        let rows = sustained_evidence(&[pt(64, Some(5_000), Some(3)), pt(128, None, None)]);
+
+        // A measured rung still publishes its count, including a real zero - "measured no failures"
+        // is a fact, and it must not be collateral damage of making the absent case honest.
+        assert_eq!(rows[0].fail.value().copied(), Some(3));
+        assert_eq!(
+            sustained_evidence(&[pt(8, None, Some(0))])[0]
+                .fail
+                .value()
+                .copied(),
+            Some(0),
+            "a window that measured zero failures measured something"
+        );
+
+        // The absent one is absent, and says why at the rung it happened on.
+        assert_eq!(rows[1].fail.value(), None);
+        assert_eq!(rows[1].fail.reason(), Some(&Absent::NotMeasured));
+        let detail = rows[1].fail.detail().unwrap_or_default();
+        assert!(
+            detail.contains("c=128") && detail.contains("no window"),
+            "the absence must name the rung it happened on: {detail:?}"
+        );
     }
 }

@@ -138,15 +138,52 @@ pub fn path_for(cfg: &RunConfig, ingress: Dialect, egress: &str) -> String {
     standard
 }
 
+/// The exact header list one cell is driven with: the dialect's own credential headers, then the
+/// manifest's always-on headers, then the ones that select this egress column.
+///
+/// ONE HEADER PER NAME ON THE WIRE, and the rig's own copy is the one that goes.
+///
+/// Ledger RIG-12's remainder. This used to concatenate all three sources unfiltered, and nothing
+/// stopped a manifest declaring a name the dialect already sends - `gateways/litellm-rust` declares
+/// `Authorization: Bearer {GW_AUTH}`, which collides with the bearer header the openai,
+/// openai-responses, cohere and bedrock ingress dialects each send. Two `authorization` headers left
+/// on one request, and HTTP does not define which a server honours: first, last, or comma-joined and
+/// rejected, by implementation. Nothing errors, the gateway authenticates as SOMEBODY, and a clean
+/// number is published for a request whose credential and therefore whose tenant and route we cannot
+/// state. A wrong measurement that looks entirely right.
+///
+/// The dialect's wins because the credential is the HARNESS's to assert: `cfg.auth` is the token
+/// this run holds (one gateway mints it at launch), and the shape is what a real client of that
+/// dialect sends. A manifest able to override it could have a gateway measured under an identity the
+/// harness cannot name. Disclosed rather than silent: `Manifest::rig_owned_headers_declared` reports
+/// the collision through `otb lint`, naming the file and the header.
+///
+/// Dropping, not refusing at load, because the one manifest that trips this is a first-party file
+/// and refusing would stop the whole benchmark rather than measure it unambiguously. The comparison
+/// is exact today - that manifest's value is byte-identical to the header it duplicates - so this
+/// changes what goes on the wire only in the case that was undefined anyway.
 pub(crate) fn headers_for(
     cfg: &RunConfig,
     ingress: Dialect,
     egress: &str,
 ) -> Vec<(String, String)> {
     let mut out = ingress.auth_headers(&cfg.auth);
-    out.extend(cfg.static_headers.iter().cloned());
+    // Case-insensitively, because HTTP header names are (`HttpResponse::header` already reasons this
+    // way) and `Authorization` vs `authorization` is the same header to every server that reads it.
+    let rig_owned: Vec<String> = out.iter().map(|(n, _)| n.to_ascii_lowercase()).collect();
+    let push = |out: &mut Vec<(String, String)>, (n, v): (String, String)| {
+        if rig_owned.contains(&n.to_ascii_lowercase()) {
+            return;
+        }
+        out.push((n, v));
+    };
+    for h in cfg.static_headers.iter().cloned() {
+        push(&mut out, h);
+    }
     if let Some(extra) = cfg.egress_headers.get(egress) {
-        out.extend(extra.iter().cloned());
+        for h in extra.iter().cloned() {
+            push(&mut out, h);
+        }
     }
     out
 }
@@ -347,6 +384,28 @@ fn probe_cell_once(cfg: &RunConfig, id: &CellId, mock_healthy: bool) -> (Served,
             Served::Untestable(format!("unparseable response: {message}")),
             None,
         ),
+        // WE NEVER ASKED, so there is nothing here to grade. `Untestable` and never `Served::No`:
+        // every other arm above describes something the GATEWAY did, and this one describes a
+        // manifest of ours that declared a header we will not put on the wire. Recording it as a
+        // capability verdict would convict a gateway of our defect, and `probe::Verdict` has the
+        // right word for it already - NotVerified is "a statement about the RIG, not the gateway",
+        // which `Untestable` is how this function spells.
+        //
+        // No retry: the manifest will say the same thing on the next attempt, so the budget would be
+        // spent to be refused identically. It is loud on stderr so the run points at the file to fix.
+        Outcome::RigRefused(why) => {
+            eprintln!(
+                "probe: refused to send to {}>{} - {why}. The gateway was never asked; fix the \
+                 manifest that declared it",
+                id.ingress, id.egress
+            );
+            (
+                Served::Untestable(format!(
+                    "the rig refused to send this request, so the gateway was never asked: {why}"
+                )),
+                None,
+            )
+        }
     }
 }
 
@@ -709,6 +768,11 @@ pub fn sweep_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> CellPerf {
 /// on the highest concurrency that passed ONCE, and a ceiling a gateway holds a third of the time is
 /// not a ceiling it sustains. A confirmation that fails steps down and confirms again, bounded,
 /// since each step at least halves the distance back to a concurrency already known to hold.
+///
+/// A bracket only exists when the climb SAW a rung fail. When the gate was still holding at the top
+/// of the range there is no boundary to refine and no ceiling to publish - only a lower bound, which
+/// this returns as `SearchExhausted` rather than dressing our own `max_conc` up as the gateway's
+/// answer. `bisect_ceiling` has always refused that case; this is the same refusal.
 fn refine_ceiling<P: crate::search::Probe>(
     p: &mut P,
     rungs: &[crate::search::RungSummary],
@@ -718,12 +782,38 @@ fn refine_ceiling<P: crate::search::Probe>(
     // the boundary. Publishing only the refinement would show a reader the last two probes and hide
     // the curve that decided where to probe.
     for r in rungs {
+        // WHAT THE RUNG MEASURED, WITH THE VERDICT IT EARNED - not a correct verdict beside invented
+        // companion numbers. Every climb rung used to publish `p99_us: None, fail: 0` and a rate read
+        // off `gate_median`, which is the median of the windows that HELD the gate - so a rung that
+        // failed, having held in none of its windows, published `rps: 0` from that field's
+        // `unwrap_or(0.0)`. A reader re-deriving the verdict from `sweep_sustained_20ms` saw a rung
+        // that served nothing and lost nothing, when it had in fact served (say) 15000 rps at a 30ms
+        // p99 and been failed for exactly that. The failing rung's evidence is the evidence for the
+        // ceiling sitting below it, and it was the one row with no real numbers on it.
+        //
+        // A holding rung still publishes its GATE median - the rate it sustained under the ceiling -
+        // and a failing rung publishes its own median, the rate it served at while blowing it. Each
+        // comes with the reading of the window that produced it, so the row is one window's evidence
+        // rather than three windows' numbers assembled into a measurement none of them made.
+        let (rps, window) = if r.gate_holds {
+            (
+                r.gate_median.unwrap_or(r.median),
+                r.gate_median_reading.or(r.median_reading),
+            )
+        } else {
+            (r.median, r.median_reading)
+        };
         points.push(SustainedPoint {
             concurrency: r.concurrency,
             passed: r.gate_holds,
-            rps: r.gate_median.unwrap_or(r.median),
-            p99_us: None,
-            fail: 0,
+            rps,
+            p99_us: window.and_then(|w| w.p99_us),
+            // A rung whose windows all came back without a reading has no loss count to publish, and
+            // now says so: `None` travels to `metric.rs` as an absence rather than as the zero this
+            // used to invent. Every rung the load generator actually measures carries a reading, so
+            // this is the rare path - which is exactly why a fabricated 0 here would have gone
+            // unnoticed while reading as a clean rung.
+            fail: window.map(|w| w.fail as i64),
         });
     }
     let held: Vec<&crate::search::RungSummary> = rungs.iter().filter(|r| r.gate_holds).collect();
@@ -752,12 +842,35 @@ fn refine_ceiling<P: crate::search::Probe>(
         .iter()
         .find(|r| r.concurrency > lo && !r.gate_holds)
         .map(|r| r.concurrency);
+    let Some(hi) = hi else {
+        // THE GATE STILL HELD AT THE TOP OF THE RANGE, SO WHAT WE HAVE IS OUR OWN SEARCH BOUND.
+        //
+        // `lo` is the highest rung the climb probed, and nothing above it was ever asked: the true
+        // ceiling is at least `lo` and could be anywhere above. Publishing `lo` as Measured makes two
+        // gateways with different real ceilings collapse onto the same number - ours - and the
+        // difference between them reads as agreement. `bisect_ceiling` refuses precisely this case
+        // ("publishing max_conc would report our own search bound as the gate's ceiling") and this
+        // path is the same fact about the same kind of search, so it gets the same answer. The lower
+        // bound travels as prose, and every rung that proved it travels as evidence.
+        let detail = format!(
+            "c={lo} still held the {}ms gate at the top of the search range; the sustained ceiling is at least {lo}, which is a bound this search chose rather than one the gateway showed us",
+            SUSTAINED_P99_CEILING_US / 1_000
+        );
+        return Refined {
+            rps: Measurement::absent_because(Absent::SearchExhausted, detail),
+            // The detail lives once, on the rate; the concurrency mirrors its reason so one absence
+            // cannot come back with two explanations.
+            concurrency: Measurement::absent(Absent::SearchExhausted),
+            points,
+        };
+    };
     let mut best = lo;
     let mut best_rps = top.gate_median.unwrap_or(top.median);
-    if let Some(hi) = hi {
+    {
         let (mut a, mut b) = (lo, hi);
-        // Single windows are fine for SEARCHING - cheap and convergent. The answer gets confirmed
-        // below with more than one, which is the part that has to be right.
+        // Single windows are fine for SEARCHING - cheap and convergent - and are never what gets
+        // published: `confirm_ceiling` re-measures the winner over a full `WINDOWS_PER_RUNG` and
+        // refuses to publish a candidate it could not, which is the part that has to be right.
         while b - a > 1 {
             let mid = a + (b - a) / 2;
             let probed = p.probe(mid);
@@ -768,7 +881,7 @@ fn refine_ceiling<P: crate::search::Probe>(
                         passed: sustained_gate_passes(r.p99_us, r.ok, r.fail),
                         rps: s.value,
                         p99_us: r.p99_us,
-                        fail: r.fail as i64,
+                        fail: Some(r.fail as i64),
                     });
                 }
             }
@@ -812,9 +925,14 @@ fn refine_ceiling<P: crate::search::Probe>(
             concurrency: Measurement::Measured(c),
             points,
         },
+        // THE BISECTED CANDIDATE FAILED TO CONFIRM - THAT DOES NOT ERASE WHAT THE CLIMB PROVED.
+        // `lo` held the gate by a majority of the climb's own windows; publishing 0 here would put
+        // a zero beside a sweep whose evidence shows that rung holding, and would fold a rig
+        // interruption during confirmation into a gateway verdict. Fall back to the climb's last
+        // proven holder - the same answer the `best == lo` fast path publishes.
         None => Refined {
-            rps: Measurement::Measured(0.0),
-            concurrency: Measurement::Measured(0),
+            rps: Measurement::Measured(top.gate_median.unwrap_or(top.median)),
+            concurrency: Measurement::Measured(lo),
             points,
         },
     }
@@ -828,7 +946,9 @@ struct Refined {
 }
 
 /// Re-measure a proven ceiling `WINDOWS_PER_RUNG` times and publish the median of the windows that
-/// HELD, stepping down by half whenever a majority does not.
+/// HELD, stepping down by half whenever a majority does not - and publishing nothing at all when
+/// fewer than `WINDOWS_PER_RUNG` windows could be judged, since a rate nobody re-measured is one
+/// window's luck rather than a ceiling.
 fn confirm_ceiling<P: crate::search::Probe>(
     p: &mut P,
     from: u32,
@@ -851,18 +971,37 @@ fn confirm_ceiling<P: crate::search::Probe>(
                 passed,
                 rps: s.value,
                 p99_us: r.p99_us,
-                fail: r.fail as i64,
+                fail: Some(r.fail as i64),
             });
             if passed {
                 held += 1;
             }
             repeats.push((s.value, passed));
         }
-        if held * 2 > judged {
+        // A RUNG THAT PRODUCED FEWER WINDOWS THAN A CLIMB RUNG IS MEASURED WITH CANNOT PUBLISH.
+        //
+        // `judged` opens at 1 because the bisection's own window at this concurrency is a real vote,
+        // and the bisection takes SINGLE windows by design - cheap and convergent, which is right for
+        // a search but not for a published rate. When both repeats came back empty (a deadline, a
+        // window that produced nothing) the majority test read 1 of 1 and published that one window's
+        // uncorrected `value` as the cell's sustained throughput. One lucky window is exactly how a
+        // sustained figure lands ABOVE the peak measured from the same sweep, the inversion class C6
+        // catches downstream, and it is the one rate in this engine that was never a median of
+        // `WINDOWS_PER_RUNG` windows. Every other rung on the board is measured that way; so is this
+        // one now, or it is not published at all. The evidence shows which happened: the windows that
+        // did land are in `points`, so a reader counts fewer than `WINDOWS_PER_RUNG` at a candidate
+        // that was dropped and sees the climb's own rung published in its place.
+        if judged >= crate::search::WINDOWS_PER_RUNG && held * 2 > judged {
             // THE SAME RULE THE SEPARATE SEARCH PUBLISHED BY, kept as one tested function rather
             // than re-implemented here: only windows that HELD the gate count toward the median,
             // and the window that proved the ceiling is the fallback when none of the repeats did.
             return Some((ceiling, sustained_median(first, &repeats)));
+        }
+        if judged < crate::search::WINDOWS_PER_RUNG {
+            // THE RIG RAN SHORT, NOT THE GATEWAY. Stepping down here would walk the ceiling downward
+            // on our own missing windows and charge the gateway for them; the caller falls back to
+            // the climb's last proven holder, which is itself a `WINDOWS_PER_RUNG` median.
+            return None;
         }
         if ceiling <= 1 {
             return None;
@@ -877,7 +1016,7 @@ fn confirm_ceiling<P: crate::search::Probe>(
                     passed: sustained_gate_passes(r.p99_us, r.ok, r.fail),
                     rps: s.value,
                     p99_us: r.p99_us,
-                    fail: r.fail as i64,
+                    fail: Some(r.fail as i64),
                 });
             }
         }
@@ -929,7 +1068,15 @@ pub struct SustainedPoint {
     pub passed: bool,
     pub rps: f64,
     pub p99_us: Option<u64>,
-    pub fail: i64,
+    /// Failed requests in the window behind this rung, or `None` when no window carried a reading.
+    ///
+    /// `Option`, not `i64`, and that is the whole point: this was a bare `i64` whose only value for
+    /// "no window reported" was 0, and `metric.rs` mapped it to `Measurement::Measured(0)`
+    /// unconditionally - so a rung nothing was ever read from published `fail: 0` in
+    /// `sweep_sustained_20ms`, a fabricated zero that reads as "it served this rate losing nothing".
+    /// The board's central rule is that an absent measurement publishes null with a reason and is
+    /// never substituted by a number; the type had no way to obey it.
+    pub fail: Option<i64>,
 }
 
 /// Whether one window satisfies the sustained-throughput gate: p99 under the latency ceiling AND
@@ -1058,8 +1205,21 @@ pub struct StreamWindow {
     /// delivery shortfall, and the two are separate halves of the README's gate.
     pub streams: u64,
     pub errored: u64,
+    /// EVERY SSE event dispatched, across every lane. What `fps` is computed from, and what anything
+    /// asking "did this stream at all" wants.
     pub frames: u64,
     pub expected_frames: u64,
+    /// Of `frames`, the ones that carried MODEL OUTPUT, as the request's own dialect classifies them
+    /// (`ingress::Dialect::sse_event_is_content`), and the most a full budget could have carried.
+    ///
+    /// Ledger RIG-11, and the reason there are two pairs of counts here rather than one. The delivery
+    /// gate is the one number that must not count scaffolding: openai spends 3 events on framing and
+    /// anthropic 5, so a lane could satisfy 1 (openai) or 2 (anthropic) frames of its budget before
+    /// a single token arrived, and the two dialects differed from each other by exactly two on a
+    /// ratio that is compared against a fixed bound of 1.0. `frames`/`expected_frames` are kept
+    /// beside them unchanged, because fps and "did it stream" legitimately want every event.
+    pub content_frames: u64,
+    pub expected_content_frames: u64,
     /// Inter-frame gaps that exceeded the stall bound, summed across every lane.
     pub stalls: u64,
     pub elapsed_s: f64,
@@ -1076,11 +1236,19 @@ impl StreamWindow {
         self.frames as f64 / self.elapsed_s
     }
 
+    /// The share of expected MODEL OUTPUT that arrived - the numerator counts content frames, not
+    /// every SSE event.
+    ///
+    /// This used to be `frames / expected_frames`, which credited a lane for `message_start` and
+    /// `content_block_start` exactly as it credited it for a token. Against a bound of 1.0 that is
+    /// not a rounding difference: it is 1 (openai) or 2 (anthropic) frames of every lane's budget
+    /// satisfied by scaffolding, and a two-frame constant offset BETWEEN the two dialects on a
+    /// number the board compares across them.
     pub fn delivery_ratio(&self) -> f64 {
-        if self.expected_frames == 0 {
+        if self.expected_content_frames == 0 {
             return 0.0;
         }
-        self.frames as f64 / self.expected_frames as f64
+        self.content_frames as f64 / self.expected_content_frames as f64
     }
 
     pub fn error_ratio(&self) -> f64 {
@@ -1109,14 +1277,26 @@ pub fn streams_gate_verdict(w: &StreamWindow) -> Option<String> {
     // A window that opened no stream, or expected no frame, has not PASSED anything - it measured
     // nothing, and a ratio computed from zero must never read as a clean window by accident of
     // floating-point division.
-    if w.streams == 0 || w.expected_frames == 0 {
+    if w.streams == 0 {
         return Some("the window opened no stream, so it measured nothing".to_string());
+    }
+    // Expected CONTENT frames, because that is the denominator the delivery clause below divides by.
+    // A dialect whose whole budget is prelude expects no tokens at all, and a ratio computed from
+    // zero must never read as a clean window by accident of floating-point division.
+    if w.expected_content_frames == 0 {
+        return Some(format!(
+            "the window opened {} stream(s) but expected no content frames, so it measured nothing",
+            w.streams
+        ));
     }
     let mut why = Vec::new();
     if w.delivery_ratio() < STREAM_MIN_DELIVERY_RATIO {
+        // Content frames on BOTH sides of the "of", and said in words, because the raw event count
+        // beside it is larger and a reader comparing the two would otherwise think frames went
+        // missing that never carried a token in the first place.
         why.push(format!(
-            "delivered {} of {} expected frames",
-            w.frames, w.expected_frames
+            "delivered {} of {} expected content frames ({} SSE events in total)",
+            w.content_frames, w.expected_content_frames, w.frames
         ));
     }
     if w.stalls > 0 {
@@ -1169,6 +1349,13 @@ fn stream_errored(o: &crate::http::SseOutcome) -> bool {
     if matches!(o.end, crate::http::SseEnd::RigExhausted(_)) {
         return false;
     }
+    // NEITHER IS A REQUEST WE REFUSED TO SEND. The gateway was never asked, so it cannot have
+    // errored; `stream_window` discards the whole window and says so loudly, exactly as it does for
+    // exhaustion. Charging a manifest defect of ours to the gateway's stream error rate is the
+    // attribution inversion this file refuses everywhere else.
+    if matches!(o.end, crate::http::SseEnd::RigRefused(_)) {
+        return false;
+    }
     if !o.status.is_some_and(|s| (200..300).contains(&s)) {
         return true;
     }
@@ -1197,14 +1384,22 @@ fn stream_errored(o: &crate::http::SseOutcome) -> bool {
 /// comparison. What this does NOT get is the generator's core pinning, and at concurrencies high
 /// enough to saturate the box that is a real limitation on the absolute frames/sec - which is exactly
 /// why the mock-bound guardrail is applied to these numbers rather than them being published bare.
+///
+/// `dialect` is the wire the request speaks, and it is not optional here: without it the delivery
+/// ratio counts protocol scaffolding as delivered tokens (ledger RIG-11), which is the one place the
+/// distinction changes a published verdict.
 pub fn stream_window(
     addr: SocketAddr,
     path: &str,
     body: &str,
     headers: &[(String, String)],
+    dialect: Dialect,
     concurrency: u32,
 ) -> Option<StreamWindow> {
     let budget = crate::metric::STREAM_FRAME_BUDGET;
+    // The most content frames a lane's budget can hold: the budget minus what this dialect spends
+    // before its first token. See `Dialect::stream_prelude_frames`.
+    let content_budget = (budget as u64).saturating_sub(dialect.stream_prelude_frames());
 
     // ONE TOKIO TASK PER LANE, NOT ONE OS THREAD.
     //
@@ -1245,6 +1440,7 @@ pub fn stream_window(
                     &headers,
                     crate::metric::STREAM_TIMEOUT,
                     budget,
+                    Some(dialect),
                 )
                 .await
             }));
@@ -1270,9 +1466,24 @@ pub fn stream_window(
         errored: 0,
         frames: 0,
         expected_frames: 0,
+        content_frames: 0,
+        expected_content_frames: 0,
         stalls: 0,
         elapsed_s,
     };
+    // A REQUEST WE REFUSED TO SEND MEASURED NOTHING AT ALL, and unlike exhaustion it is not even a
+    // resource limit - it is a defect in a first-party manifest that would have put a smuggled header
+    // on the wire. Loud, unmeasured, never the gateway's: see `http::SseEnd::RigRefused`.
+    if let Some(why) = outcomes.iter().find_map(|o| match &o.end {
+        crate::http::SseEnd::RigRefused(why) => Some(why.clone()),
+        _ => None,
+    }) {
+        eprintln!(
+            "stream window: refused to send at c={concurrency} - {why}. The gateway was never asked, \
+             so this window measured nothing about it; fix the manifest that declared it"
+        );
+        return None;
+    }
     // A WINDOW THAT RAN OUT OF RIG NEVER RAN AT THE CONCURRENCY IT CLAIMS, exactly as a loadgen
     // window with `rig_refused` did not. Unmeasured, not a failing rung: the alternative is
     // publishing this host's ephemeral port range as the gateway's concurrent-stream ceiling.
@@ -1290,10 +1501,12 @@ pub fn stream_window(
     for o in outcomes {
         w.streams += 1;
         w.expected_frames += budget as u64;
+        w.expected_content_frames += content_budget;
         if stream_errored(&o) {
             w.errored += 1;
         }
         w.frames += o.frame_offsets_us.len() as u64;
+        w.content_frames += o.content_frames;
         w.stalls += stalls_in(&o.frame_offsets_us);
     }
     // Every lane panicked, so nothing was observed. Unmeasured, not a failing window.
@@ -1373,6 +1586,7 @@ struct StreamGateProbe {
     path: String,
     body: String,
     headers: Vec<(String, String)>,
+    dialect: Dialect,
     points: Vec<StreamPoint>,
 }
 
@@ -1383,6 +1597,7 @@ impl Probe for StreamGateProbe {
             &self.path,
             &self.body,
             &self.headers,
+            self.dialect,
             concurrency,
         )?;
         let passed = streams_gate_passes(&w);
@@ -1404,6 +1619,7 @@ struct StreamFpsProbe {
     path: String,
     body: String,
     headers: Vec<(String, String)>,
+    dialect: Dialect,
     points: Vec<StreamPoint>,
 }
 
@@ -1414,6 +1630,7 @@ impl Probe for StreamFpsProbe {
             &self.path,
             &self.body,
             &self.headers,
+            self.dialect,
             concurrency,
         )?;
         // THE SAME GATE THE OTHER STREAM SEARCH USES. This was `errored == 0 && frames > 0`, which
@@ -1443,6 +1660,10 @@ struct StreamTarget {
     path: String,
     body: String,
     headers: Vec<(String, String)>,
+    /// The ingress wire these frames come back in. Resolved here with everything else for the same
+    /// reason: the two searches must classify content frames by the SAME dialect they addressed the
+    /// gateway in, or their delivery ratios are about two different protocols.
+    dialect: Dialect,
 }
 
 fn stream_target(cfg: &RunConfig, id: &CellId) -> Option<StreamTarget> {
@@ -1451,6 +1672,7 @@ fn stream_target(cfg: &RunConfig, id: &CellId) -> Option<StreamTarget> {
         path: path_for(cfg, ing, &id.egress),
         body: ing.stream_body(&model_for(cfg, &id.egress)),
         headers: headers_for(cfg, ing, &id.egress),
+        dialect: ing,
     })
 }
 
@@ -1472,6 +1694,7 @@ pub fn sweep_streams_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> Cel
         path: t.path,
         body: t.body,
         headers: t.headers,
+        dialect: t.dialect,
         points: Vec::new(),
     };
     let r = search::bisect_ceiling(&mut p, lo, hi);
@@ -1499,7 +1722,7 @@ pub fn sweep_streams_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> Cel
                     let mut total = 1usize;
                     let mut rates = vec![first_fps];
                     for _ in 1..crate::search::WINDOWS_PER_RUNG {
-                        let Some(w) = stream_window(cfg.gateway_addr, &p.path, &p.body, &p.headers, ceiling) else {
+                        let Some(w) = stream_window(cfg.gateway_addr, &p.path, &p.body, &p.headers, p.dialect, ceiling) else {
                             continue;
                         };
                         let passed = streams_gate_passes(&w);
@@ -1526,10 +1749,18 @@ pub fn sweep_streams_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> Cel
                         "streams: c={ceiling} held the gate in only {held} of {total} windows - stepping down to c={next}"
                     );
                     ceiling = next;
-                    match stream_window(cfg.gateway_addr, &p.path, &p.body, &p.headers, ceiling) {
+                    // The stepped rung's own first window seeds the next iteration's `held = 1`,
+                    // so it must actually HOLD the gate to be that vote - `confirm_ceiling` has the
+                    // same rule. Seeding with a failing window let a rung reach majority with only
+                    // one real hold out of three, folding a gate-failing window's rate into the
+                    // published sustained figure.
+                    match stream_window(cfg.gateway_addr, &p.path, &p.body, &p.headers, p.dialect, ceiling) {
                         Some(w) => {
                             let passed = streams_gate_passes(&w);
                             p.points.push(point_of(&w, passed));
+                            if !passed {
+                                break;
+                            }
                             first_fps = w.fps();
                         }
                         None => break,
@@ -1602,6 +1833,7 @@ pub fn sweep_cpu_fps_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> Cel
         path: t.path,
         body: t.body,
         headers: t.headers,
+        dialect: t.dialect,
         points: Vec::new(),
     };
     // No start argument: `saturation_plateau` always climbs from the floor. A start derived from the
@@ -1674,7 +1906,7 @@ pub fn stream_fps_at(
     // The MOCK's own auth shape, with no gateway routing headers: those select an upstream INSIDE a
     // gateway and mean nothing here, exactly as `mock_healthy` already reasons.
     let headers = dialect.auth_headers(auth);
-    match stream_window(mock_addr, &path, &body, &headers, concurrency) {
+    match stream_window(mock_addr, &path, &body, &headers, dialect, concurrency) {
         // The reference must be a CLEAN window or it is not a ceiling: a reference taken while the
         // mock itself was dropping streams would be an understated bar, and a gateway measured
         // against it would read as rig-bound when it was not.
@@ -1756,10 +1988,25 @@ pub fn run_grid_with(
     let total_cells = cfg.dialects.len() * cfg.dialects.len();
     let total = total_cells;
     let mut done = 0usize;
+    // Set when a mid-grid restart FAILED: from that point the harness cannot vouch for the
+    // gateway's state (it may be up but half-configured), so every remaining cell is recorded as
+    // untestable naming our failure instead of being measured into a false gateway verdict.
+    let mut restart_poisoned: Option<String> = None;
     for eg in &cfg.dialects {
         for ing in &cfg.dialects {
             let id = CellId::new(ing.as_str(), eg.as_str());
             done += 1;
+            if let Some(why) = &restart_poisoned {
+                eprintln!("[cell {done}/{total}] {id}: untestable (harness: restart failed earlier in the grid)");
+                out.push(CellResult {
+                    outcome: CellOutcome::untestable(id, why.clone()),
+                    metrics: None,
+                    series: None,
+                    timings_s: None,
+                    reverify: Default::default(),
+                });
+                continue;
+            }
             // A CELL THE MANIFEST DECLARES OUT OF SCOPE, OR THE RIG CANNOT POSE, IS NEVER PROBED.
             // Checked before `probe_cell` runs at all: sending the request and then discarding its
             // status is not the same as never sending it, because a global auth gate or rate limiter
@@ -1852,9 +2099,21 @@ pub fn run_grid_with(
                                 }
                             );
                         }
-                        Err(e) => eprintln!(
-                            "[cell {done}/{total}] {id}: the gateway could not be restarted: {e}"
-                        ),
+                        // A FAILED RESTART POISONS EVERYTHING AFTER IT. The stop may have half
+                        // succeeded, the relaunch may be up with its post-boot configuration
+                        // half-replayed - a gateway that ANSWERS while misconfigured, which is the
+                        // worst state to keep measuring: every later cell's failure would publish
+                        // as the gateway's own. The cell keeps its honest verdict; the rest of the
+                        // grid is marked untestable naming OUR failure, and the probe loop stops
+                        // asking a gateway whose state the harness can no longer vouch for.
+                        Err(e) => {
+                            eprintln!(
+                                "[cell {done}/{total}] {id}: the gateway could not be restarted: {e} - refusing to measure the rest of the grid against an unvouched process"
+                            );
+                            restart_poisoned = Some(format!(
+                                "a mid-grid restart failed ({e}), so the harness can no longer vouch for the gateway's state; measuring on would publish our failure as the gateway's"
+                            ));
+                        }
                     }
                 }
             }
@@ -2062,6 +2321,348 @@ mod tests {
         assert_eq!(refined.rps.value().copied(), Some(0.0));
         assert_eq!(refined.concurrency.value().copied(), Some(0));
     }
+
+    // THE ERASED-CLIMB DEFECT THIS PINS. When the bisected candidate failed to confirm all the way
+    // down (`confirm_ceiling` returned None), `refine_ceiling` published Measured(0.0)/Measured(0) -
+    // a zero sitting beside a sweep whose own evidence shows a rung holding the gate by a majority
+    // of the climb's windows. The published fallback must be the climb's last proven holder, the
+    // same answer the `best == lo` fast path gives, never a fabricated zero.
+    #[test]
+    fn a_ceiling_that_fails_confirmation_falls_back_to_the_climbs_last_proven_holder() {
+        // Holds the gate up to c=21 while the climb and the bisection first look at each rung,
+        // then sours: every repeat window at the bisected candidate (c=21) fails, and so does the
+        // stepped-down rung (c=10), so `confirm_ceiling` gives up and returns None.
+        struct SoursDuringConfirmation {
+            calls_at: std::collections::HashMap<u32, u32>,
+        }
+        impl crate::search::Probe for SoursDuringConfirmation {
+            fn probe(&mut self, c: u32) -> Option<crate::search::Sample> {
+                let n = self.calls_at.entry(c).or_insert(0);
+                *n += 1;
+                let holds = c <= 21 && !(c == 21 && *n > 1) && c != 10;
+                let p99 = if holds { 5_000 } else { 50_000 };
+                Some(
+                    crate::search::Sample::new(f64::from(c) * 100.0, true).with_reading(
+                        crate::search::Reading {
+                            p99_us: Some(p99),
+                            ok: 1_000,
+                            fail: 0,
+                        },
+                    ),
+                )
+            }
+        }
+        let gate = sustained_gate();
+        let mut p = SoursDuringConfirmation {
+            calls_at: Default::default(),
+        };
+        // The climb walks 1,2,4,8,16 (held), 32 and 64 (failed): the last proven holder is c=16.
+        let r = crate::search::saturation_plateau_gated(&mut p, 1, 64, Some(&gate));
+        assert!(
+            r.rungs.iter().any(|s| s.concurrency == 16 && s.gate_holds),
+            "the fixture must give the climb a rung it proved: got {:?}",
+            r.rungs
+                .iter()
+                .map(|s| (s.concurrency, s.gate_holds))
+                .collect::<Vec<_>>()
+        );
+        let refined = refine_ceiling(&mut p, &r.rungs);
+        assert_eq!(
+            refined.concurrency.value().copied(),
+            Some(16),
+            "a failed confirmation must fall back to the climb's last proven holder, not erase it"
+        );
+        assert_eq!(
+            refined.rps.value().copied(),
+            Some(1_600.0),
+            "the fallback rate must be that rung's own gate median, never the Measured(0.0) that \
+             would put a zero beside evidence of the rung holding"
+        );
+    }
+
+    /// A CEILING WE NEVER SAW BREAK IS OUR RANGE, NOT THE GATEWAY'S ANSWER.
+    ///
+    /// `bisect_ceiling` has always refused this - "publishing max_conc would report our own search
+    /// bound as the gate's ceiling" - and the sustained refinement published it as Measured. Two
+    /// gateways whose real ceilings sit either side of 8000 both come back as exactly `max_conc`,
+    /// and the board reads that as agreement between them rather than as a bound we chose.
+    #[test]
+    fn a_ceiling_still_holding_at_the_top_of_the_range_is_a_lower_bound_not_a_measurement() {
+        // Saturates at c=16 and holds its p99 at every concurrency it is ever asked about, so no
+        // rung above the top holder ever fails and there is no bracket to bisect.
+        struct HoldsEverywhere;
+        impl crate::search::Probe for HoldsEverywhere {
+            fn probe(&mut self, c: u32) -> Option<crate::search::Sample> {
+                let rps = if c <= 16 {
+                    f64::from(c) * 1000.0
+                } else {
+                    16_000.0
+                };
+                Some(
+                    crate::search::Sample::new(rps, true).with_reading(crate::search::Reading {
+                        p99_us: Some(5_000),
+                        ok: 100_000,
+                        fail: 0,
+                    }),
+                )
+            }
+        }
+        let gate = sustained_gate();
+        let mut p = HoldsEverywhere;
+        let r = crate::search::saturation_plateau_gated(&mut p, 1, 4096, Some(&gate));
+        assert!(
+            r.rungs
+                .last()
+                .is_some_and(|s| s.concurrency == 4096 && s.gate_holds),
+            "the fixture must leave the gate holding at the top of the range: got {:?}",
+            r.rungs
+                .iter()
+                .map(|s| (s.concurrency, s.gate_holds))
+                .collect::<Vec<_>>()
+        );
+        let refined = refine_ceiling(&mut p, &r.rungs);
+        assert_eq!(
+            refined.concurrency.value().copied(),
+            None,
+            "the top of our own search range must never be published as a measured ceiling"
+        );
+        assert_eq!(refined.rps.reason(), Some(&Absent::SearchExhausted));
+        let detail = refined
+            .rps
+            .detail()
+            .expect("the lower bound travels as prose");
+        assert!(
+            detail.contains("at least 4096"),
+            "the absence must still carry what the search did prove, got {detail}"
+        );
+        // And the rungs that proved the lower bound still travel as evidence.
+        assert!(
+            refined
+                .points
+                .iter()
+                .any(|pt| pt.concurrency == 4096 && pt.passed),
+            "an absent ceiling still publishes the sweep that explains it"
+        );
+    }
+
+    /// A FAILED RUNG'S EVIDENCE ROW IS THE EVIDENCE FOR THE CEILING SITTING BELOW IT.
+    ///
+    /// Every climb rung published `p99_us: None, fail: 0` and a rate taken from `gate_median`, which
+    /// is the median of the windows that HELD the gate - so a rung that held in none of them
+    /// published `rps: 0` out of that field's `unwrap_or(0.0)`. The verdict flag was right and every
+    /// number beside it was invented: a reader re-deriving the ceiling from `sweep_sustained_20ms`
+    /// saw a rung that served nothing, when it had served at full rate and been failed for its p99.
+    #[test]
+    fn a_failed_rungs_evidence_row_carries_what_it_measured_not_placeholders() {
+        // Serves 16000 rps at every rung. Above c=64 its p99 blows the 20ms gate and it starts
+        // dropping requests - still far under the gate's own 0.1% loss bar, so the p99 is what fails
+        // it, and the loss is a real number the row has to carry.
+        struct FailsOnLatencyNotOnLoss;
+        impl crate::search::Probe for FailsOnLatencyNotOnLoss {
+            fn probe(&mut self, c: u32) -> Option<crate::search::Sample> {
+                let rps = if c <= 16 {
+                    f64::from(c) * 1000.0
+                } else {
+                    16_000.0
+                };
+                let over = c > 64;
+                Some(
+                    crate::search::Sample::new(rps, true).with_reading(crate::search::Reading {
+                        p99_us: Some(if over { 30_000 } else { 5_000 }),
+                        ok: 100_000,
+                        fail: if over { 7 } else { 0 },
+                    }),
+                )
+            }
+        }
+        let gate = sustained_gate();
+        let mut p = FailsOnLatencyNotOnLoss;
+        let r = crate::search::saturation_plateau_gated(&mut p, 1, 512, Some(&gate));
+        let refined = refine_ceiling(&mut p, &r.rungs);
+        let failed = refined
+            .points
+            .iter()
+            .find(|pt| pt.concurrency == 128)
+            .expect("the climb probed c=128 and failed it");
+        assert!(!failed.passed, "c=128 blew the 20ms gate");
+        assert_eq!(
+            failed.rps, 16_000.0,
+            "the failed rung served 16000 rps at a 30ms p99; publishing 0 says it served nothing"
+        );
+        assert_eq!(
+            failed.p99_us,
+            Some(30_000),
+            "the p99 that failed the rung is the whole reason it failed, and it was published as null"
+        );
+        assert_eq!(
+            failed.fail,
+            Some(7),
+            "the loss the window measured, not the 0 the row used to carry"
+        );
+        // A holding rung keeps publishing what it sustained UNDER the ceiling, with that window's
+        // own reading beside it.
+        let held = refined
+            .points
+            .iter()
+            .find(|pt| pt.concurrency == 64)
+            .expect("the climb probed c=64 and held it");
+        assert!(held.passed);
+        assert_eq!(held.rps, 16_000.0);
+        assert_eq!(held.p99_us, Some(5_000));
+        assert_eq!(held.fail, Some(0));
+    }
+
+    /// A RATE NOBODY RE-MEASURED IS ONE WINDOW'S LUCK, NOT A SUSTAINED CEILING.
+    ///
+    /// The bracket bisection takes SINGLE windows - correct for a search, cheap and convergent - and
+    /// `confirm_ceiling` opens its majority count at 1 with that window as the vote. When both
+    /// repeats came back empty, 1 of 1 was a majority and the bisection's own uncorrected `value`
+    /// became the cell's published sustained throughput. That is the rate that can land above the
+    /// peak measured from the same sweep, which is the inversion C6 flags downstream.
+    #[test]
+    fn a_candidate_the_rig_could_not_re_measure_is_never_published() {
+        // Holds the gate to c=64 and fails above it, so the climb hands over a real 64..128 bracket.
+        // Every concurrency the BISECTION invents (never a power of two) answers its first window
+        // and then produces nothing at all - the rig running short, not the gateway failing.
+        struct RigRunsShortDuringConfirmation {
+            calls_at: std::collections::HashMap<u32, u32>,
+        }
+        impl crate::search::Probe for RigRunsShortDuringConfirmation {
+            fn probe(&mut self, c: u32) -> Option<crate::search::Sample> {
+                let n = self.calls_at.entry(c).or_insert(0);
+                *n += 1;
+                if !c.is_power_of_two() && *n > 1 {
+                    return None;
+                }
+                let holds = c <= 64 || !c.is_power_of_two();
+                Some(
+                    crate::search::Sample::new(f64::from(c.min(64)) * 100.0, true).with_reading(
+                        crate::search::Reading {
+                            p99_us: Some(if holds { 5_000 } else { 50_000 }),
+                            ok: 10_000,
+                            fail: 0,
+                        },
+                    ),
+                )
+            }
+        }
+        let gate = sustained_gate();
+        let mut p = RigRunsShortDuringConfirmation {
+            calls_at: Default::default(),
+        };
+        let r = crate::search::saturation_plateau_gated(&mut p, 1, 512, Some(&gate));
+        let refined = refine_ceiling(&mut p, &r.rungs);
+        assert_eq!(
+            refined.concurrency.value().copied(),
+            Some(64),
+            "an unconfirmable bisection candidate must give way to the climb's last proven holder"
+        );
+        assert_eq!(
+            refined.rps.value().copied(),
+            Some(6_400.0),
+            "and the rate published with it must be that rung's own three-window gate median"
+        );
+        // The evidence shows exactly why: the candidate is in the sweep with fewer than a rung's
+        // worth of windows behind it, so the drop is readable rather than silent.
+        let candidate_windows = refined
+            .points
+            .iter()
+            .filter(|pt| !pt.concurrency.is_power_of_two() && pt.concurrency > 64)
+            .count();
+        assert!(
+            candidate_windows > 0,
+            "the bisection's own windows must still be published as evidence"
+        );
+        // The published rung is a CLIMB rung, so the windows behind it are the climb's own
+        // `WINDOWS_PER_RUNG`, and its evidence row says it held.
+        let windows_at_published = p.calls_at.get(&64).copied().unwrap_or(0) as usize;
+        assert!(
+            windows_at_published >= crate::search::WINDOWS_PER_RUNG,
+            "the published rung must have been measured a full rung's worth, got \
+             {windows_at_published}"
+        );
+        assert!(
+            refined
+                .points
+                .iter()
+                .any(|pt| pt.concurrency == 64 && pt.passed),
+            "and its evidence row must show it holding the gate"
+        );
+    }
+
+    /// BOTH GATE SEARCHES CONFIRM THEIR CEILING, or neither claim is worth more than one window.
+    ///
+    /// The bisection walks up until ONE window fails, so it lands on the boundary by construction.
+    /// The sustained ceilings of the 2026-07-28 run held their gate in 1 of 3 windows on 9 of 48
+    /// cells - agentgateway c=252 saw 19866, 20036, 20404 against a 20000us gate.
+    ///
+    /// THIS TEST USED TO ASSERT AGAINST ITS OWN SOURCE FILE. It counted occurrences of the string
+    /// `held * 2 > total` in `run.rs` and demanded two, and its own two literals satisfied the
+    /// count - so the confirmation could have been deleted from production entirely and it would
+    /// still have passed. A test that cannot fail is worse than no test, because it is read as
+    /// coverage. This drives the real refinement against a scripted probe instead.
+    #[test]
+    fn every_published_ceiling_was_measured_by_a_full_rung_of_windows() {
+        // The field shape: the boundary rung passes the FIRST time it is asked and fails every
+        // re-measurement, which is exactly what a bisection is built to find and exactly what must
+        // not be published. Below c=64 the gateway is solid.
+        struct PassesOnceAboveTheClimb {
+            calls_at: std::collections::HashMap<u32, u32>,
+        }
+        impl crate::search::Probe for PassesOnceAboveTheClimb {
+            fn probe(&mut self, c: u32) -> Option<crate::search::Sample> {
+                let n = self.calls_at.entry(c).or_insert(0);
+                *n += 1;
+                let holds = c <= 64 || (c <= 200 && *n == 1);
+                Some(
+                    crate::search::Sample::new(f64::from(c.min(64)) * 100.0, true).with_reading(
+                        crate::search::Reading {
+                            p99_us: Some(if holds { 5_000 } else { 50_000 }),
+                            ok: 10_000,
+                            fail: 0,
+                        },
+                    ),
+                )
+            }
+        }
+        let gate = sustained_gate();
+        let mut p = PassesOnceAboveTheClimb {
+            calls_at: Default::default(),
+        };
+        let r = crate::search::saturation_plateau_gated(&mut p, 1, 512, Some(&gate));
+        let refined = refine_ceiling(&mut p, &r.rungs);
+        let published = refined
+            .concurrency
+            .value()
+            .copied()
+            .expect("the climb proved a ceiling below the boundary");
+        assert!(
+            published < 127,
+            "c=127 passed exactly one window and must not be the published ceiling, got {published}"
+        );
+        assert_eq!(
+            published, 63,
+            "the confirmation steps down by halves and publishes the rung that actually held"
+        );
+        // THE PROPERTY, stated against the probe's own call counts rather than against a string:
+        // whatever concurrency is published was asked at least a full rung's worth of times.
+        let windows_at_published = p.calls_at.get(&published).copied().unwrap_or(0) as usize;
+        assert!(
+            windows_at_published >= crate::search::WINDOWS_PER_RUNG,
+            "the published ceiling c={published} was measured {windows_at_published} times; a \
+             ceiling is confirmed over {} windows or it is not published",
+            crate::search::WINDOWS_PER_RUNG
+        );
+        // And the windows that refused the candidate are in the published sweep, so the step-down is
+        // re-derivable rather than asserted.
+        assert!(
+            refined
+                .points
+                .iter()
+                .any(|pt| pt.concurrency == 127 && !pt.passed),
+            "the failing re-measurements at the bisected candidate must travel as evidence"
+        );
+    }
     use super::*;
     use std::io::{Read, Write};
     use std::net::TcpListener;
@@ -2262,6 +2863,92 @@ while True:
         );
     }
 
+    /// An SSE "gateway" whose behaviour is scripted per CONNECTION: the `pass` predicate is handed
+    /// the 1-based accept-order index of each connection, and a passing connection streams the full
+    /// frame budget while a failing one delivers a single frame and closes (a delivery shortfall,
+    /// which fails the streams gate without counting as an errored stream). Windows run one after
+    /// another and every lane of a window connects before the next window starts, so accept order
+    /// maps connections to windows deterministically.
+    fn sse_ladder_server(pass: impl Fn(usize) -> bool + Send + Sync + 'static) -> SocketAddr {
+        let l = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = l.local_addr().expect("addr");
+        let pass = std::sync::Arc::new(pass);
+        std::thread::spawn(move || {
+            let mut conn_no = 0usize;
+            for c in l.incoming() {
+                let Ok(mut c) = c else { continue };
+                conn_no += 1;
+                let n = conn_no;
+                let pass = std::sync::Arc::clone(&pass);
+                std::thread::spawn(move || {
+                    let mut b = [0u8; 8192];
+                    let _ = c.read(&mut b);
+                    let _ =
+                        c.write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n");
+                    // Openai-shaped, like `serve_sse` and like the mock: a role head that carries no
+                    // token, then content deltas. The delivery gate counts CONTENT frames, so a
+                    // ladder of bare `data: f0` events would fail every rung for the wrong reason.
+                    let _ = c.write_all(
+                        b"data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"}}]}\n\n",
+                    );
+                    let frames = if pass(n) {
+                        crate::metric::STREAM_FRAME_BUDGET
+                    } else {
+                        1
+                    };
+                    for i in 0..frames {
+                        let _ = c.write_all(
+                            format!(
+                                "data: {{\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"f{i}\"}}}}]}}\n\n"
+                            )
+                            .as_bytes(),
+                        );
+                    }
+                    // Then close: a passing lane has already hit the client's frame budget, and a
+                    // failing lane's early close is what makes the shortfall visible at once.
+                });
+            }
+        });
+        addr
+    }
+
+    // THE SELF-VOTING STEP-DOWN DEFECT THIS PINS. In `sweep_streams_cell`'s step-down loop the
+    // fresh first window at a stepped-down ceiling seeded the next iteration's `held = 1` even when
+    // it FAILED the gate, so a rung could reach "majority" with one real hold out of three and fold
+    // a gate-failing window's rate into the published sustained figure. A failing stepped window
+    // must end the search instead - the same rule `confirm_ceiling` applies on the throughput side.
+    //
+    // The script, by accept-order connection index (lo=1, hi=4): conns 1-3 are the climb's passing
+    // windows at c=1 and c=2; conns 4-15 fail (the climb's c=4, the bisection's c=3, both
+    // confirmation windows at c=2, and the fresh window at the stepped-down c=1); conns 16+ would
+    // pass. Under the old code the two follow-up windows at c=1 landed on 16-17 and, with the
+    // failing fresh window casting the seed vote, c=1 published as a sustained ceiling.
+    #[test]
+    fn a_stepped_down_stream_rung_whose_fresh_window_fails_ends_the_search_without_a_vote() {
+        let gw = sse_ladder_server(|n| n <= 3 || n >= 16);
+        let cfg = cfg_for(gw, gw);
+        let id = CellId::new("openai", "openai");
+        let r = sweep_streams_cell(&cfg, &id, 1, 4);
+        assert_ne!(
+            r.concurrency.value().copied(),
+            Some(1),
+            "the stepped-down rung must not publish on the strength of its own failing seed window"
+        );
+        assert_eq!(
+            r.concurrency.value().copied(),
+            None,
+            "no rung held a majority of real windows, so nothing was proven sustained"
+        );
+        assert!(
+            r.fps
+                .detail()
+                .unwrap_or_default()
+                .contains("did not hold the stream gate"),
+            "the absence must carry why the confirmed ceiling was not published: {:?}",
+            r.fps.detail()
+        );
+    }
+
     /// A server that answers every request with a fixed status.
     fn serve(status: u16) -> SocketAddr {
         let l = TcpListener::bind("127.0.0.1:0").expect("bind");
@@ -2400,6 +3087,88 @@ while True:
         // pay for every real measurement to assert that every pairing appears.
         let rows = run_grid_with(&cfg, 1, 2, &[]);
         assert_eq!(rows.len(), 4);
+    }
+
+    /// A relaunch spec that cannot come back up: its stop path matches no process (so stopping
+    /// "succeeds" instantly) and its binary does not exist, so `restart_to_rest` fails fast on any
+    /// platform - no taskset gating needed, because the FAILURE path is what is under test.
+    fn unlaunchable_spec(marker: &str) -> crate::launch::LaunchSpec {
+        let port = {
+            let l = TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral port to pick one");
+            l.local_addr().expect("addr").port()
+        };
+        crate::launch::LaunchSpec {
+            runtime: crate::manifest::Runtime::Native {
+                proc_match: marker.to_string(),
+            },
+            kind: crate::launch::LaunchKind::Native {
+                binary: "/nonexistent-otb-gateway-binary".into(),
+                args: vec![marker.to_string()],
+                env: vec![],
+                env_unset: vec![],
+            },
+            cores: "0".into(),
+            port,
+            ready_budget: Duration::from_millis(200),
+            boot_backoff: Duration::from_millis(10),
+            pre_launch: None,
+        }
+    }
+
+    // THE UNVOUCHED-PROCESS DEFECT THIS PINS. A mid-grid restart that FAILED used to be one eprintln
+    // and business as usual: the loop went on probing a gateway whose stop may have half succeeded
+    // and whose relaunch may be up half-configured, so every later cell's failure published as the
+    // gateway's own. After a failed restart, every remaining cell must be recorded untestable with a
+    // detail naming the HARNESS's failure, and nothing after it may be probed or measured.
+    #[test]
+    fn a_failed_mid_grid_restart_marks_every_remaining_cell_untestable_naming_the_harness() {
+        // Nothing listens at the gateway address, so the first cell's probe ends "no connection",
+        // which is exactly the verdict that triggers the restart attempt; the spec then cannot
+        // launch, so the restart fails and the grid is poisoned from cell 2 onward.
+        let dead: SocketAddr = "127.0.0.1:1".parse().expect("literal");
+        let mock = serve(200);
+        let mut cfg = cfg_for(dead, mock);
+        cfg.dialects = vec![Dialect::Openai, Dialect::Anthropic];
+        let marker = format!("otb-test-grid-poison-{}", std::process::id());
+        cfg.relaunch = Some(unlaunchable_spec(&marker));
+
+        let rows = run_grid_with(&cfg, 1, 2, &[]);
+        assert_eq!(rows.len(), 4, "a poisoned grid still records every pairing");
+
+        // The cell that observed the failure keeps its own honest verdict.
+        match &rows[0].outcome.served {
+            Served::Untestable(why) => assert!(
+                why.contains("no connection"),
+                "the first cell keeps the probe's own verdict, got: {why}"
+            ),
+            other => panic!("the first cell must be untestable, got {other:?}"),
+        }
+        // Every cell after it is untestable because of OUR restart, and says so.
+        for row in &rows[1..] {
+            match &row.outcome.served {
+                Served::Untestable(why) => {
+                    assert!(
+                        why.contains("restart failed"),
+                        "{}: a poisoned cell must name the failed restart, got: {why}",
+                        row.outcome.id
+                    );
+                    assert!(
+                        why.contains("vouch"),
+                        "{}: the detail must say the harness cannot vouch for the gateway, got: {why}",
+                        row.outcome.id
+                    );
+                }
+                other => panic!(
+                    "{}: every cell after a failed restart must be untestable, got {other:?}",
+                    row.outcome.id
+                ),
+            }
+            assert!(
+                row.metrics.is_none(),
+                "{}: a poisoned cell must never be measured",
+                row.outcome.id
+            );
+        }
     }
 
     // A cell the manifest declares OUT of its capability grid must never be probed at all, even when
@@ -2565,12 +3334,18 @@ while True:
     /// A window that passes everything, as a starting point each test below breaks in one way.
     fn clean_stream_window(concurrency: u32, streams: u64) -> StreamWindow {
         let budget = crate::metric::STREAM_FRAME_BUDGET as u64;
+        // Shaped like a real openai window: the budget's worth of SSE events, one of which is the
+        // dialect's role head, so the content counts are the budget minus that prelude. A helper
+        // that set content == every event would model the very state RIG-11 was about.
+        let content = budget - Dialect::Openai.stream_prelude_frames();
         StreamWindow {
             concurrency,
             streams,
             errored: 0,
             frames: streams * budget,
             expected_frames: streams * budget,
+            content_frames: streams * content,
+            expected_content_frames: streams * content,
             stalls: 0,
             elapsed_s: 1.0,
         }
@@ -2590,13 +3365,13 @@ while True:
             streams_gate_passes(&w),
             "a window that delivered everything must pass: {w:?}"
         );
-        w.frames -= 1;
+        w.content_frames -= 1;
         assert!(
             !streams_gate_passes(&w),
             "one lost frame must fail the rung: {w:?}"
         );
         // The old 0.999 bar waved this through, and at a 64-frame budget that is 16 frames a window.
-        w.frames = (w.expected_frames as f64 * 0.999).ceil() as u64;
+        w.content_frames = (w.expected_content_frames as f64 * 0.999).ceil() as u64;
         assert!(
             !streams_gate_passes(&w),
             "99.9% is still a gateway losing tokens: {w:?}"
@@ -2610,6 +3385,7 @@ while True:
     fn both_stream_searches_use_the_same_definition_of_a_healthy_window() {
         let mut w = clean_stream_window(64, 64);
         w.frames = 1;
+        w.content_frames = 1;
         assert!(
             !streams_gate_passes(&w),
             "1 frame of 64 is not a healthy window: {w:?}"
@@ -2655,6 +3431,8 @@ while True:
         let mut w = clean_stream_window(4, 0);
         w.frames = 0;
         w.expected_frames = 0;
+        w.content_frames = 0;
+        w.expected_content_frames = 0;
         assert!(!streams_gate_passes(&w));
         assert_eq!(w.delivery_ratio(), 0.0);
         assert_eq!(w.error_ratio(), 1.0, "no streams is not a zero error rate");
@@ -2692,9 +3470,14 @@ while True:
 
     // ── a real window against a real SSE peer ───────────────────────────────────────────────────
 
-    /// A minimal SSE peer: `frames` data frames, `gap_ms` apart, then the connection closes. Enough
-    /// to drive `stream_window` for real - the gate above is pure, but nothing else proves the lanes
+    /// A minimal SSE peer, SHAPED LIKE THE MOCK'S OPENAI STREAM: one role head frame carrying no
+    /// content, then `frames` content deltas `gap_ms` apart, then the connection closes. Enough to
+    /// drive `stream_window` for real - the gate above is pure, but nothing else proves the lanes
     /// actually open, read frames, and are joined.
+    ///
+    /// The head frame is not decoration. A peer that sent nothing but content deltas could not
+    /// distinguish the delivery ratio RIG-11 fixed from the one it replaced, because the two agree
+    /// exactly when no scaffolding arrives.
     fn serve_sse(frames: usize, gap_ms: u64) -> SocketAddr {
         let l = TcpListener::bind("127.0.0.1:0").expect("bind");
         let addr = l.local_addr().expect("addr");
@@ -2710,13 +3493,20 @@ while True:
                     if c.write_all(head.as_bytes()).is_err() {
                         return;
                     }
+                    // The role head: openai's first chunk, which carries no token.
+                    let role = "data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"}}]}\n\n";
+                    if c.write_all(role.as_bytes()).is_err() {
+                        return;
+                    }
+                    let _ = c.flush();
                     for i in 0..frames {
-                        if i > 0 && gap_ms > 0 {
+                        if gap_ms > 0 {
                             std::thread::sleep(Duration::from_millis(gap_ms));
                         }
-                        if c.write_all(format!("data: {{\"i\":{i}}}\n\n").as_bytes())
-                            .is_err()
-                        {
+                        let frame = format!(
+                            "data: {{\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"t{i}\"}}}}]}}\n\n"
+                        );
+                        if c.write_all(frame.as_bytes()).is_err() {
                             return;
                         }
                         let _ = c.flush();
@@ -2730,7 +3520,7 @@ while True:
     #[test]
     fn a_stream_window_reads_every_lane_and_counts_its_frames() {
         let sse = serve_sse(crate::metric::STREAM_FRAME_BUDGET, 0);
-        let w = stream_window(sse, "/v1/chat/completions", "{}", &[], 4)
+        let w = stream_window(sse, "/v1/chat/completions", "{}", &[], Dialect::Openai, 4)
             .expect("four lanes against a live SSE peer must produce a window");
         assert_eq!(w.streams, 4, "every lane must be joined and counted: {w:?}");
         assert_eq!(
@@ -2793,7 +3583,7 @@ while True:
     #[test]
     fn a_peer_that_answers_json_instead_of_frames_counts_as_an_errored_stream() {
         let json = serve_json(200);
-        let w = stream_window(json, "/v1/chat/completions", "{}", &[], 2)
+        let w = stream_window(json, "/v1/chat/completions", "{}", &[], Dialect::Openai, 2)
             .expect("the window still ran");
         assert_eq!(w.streams, 2);
         assert_eq!(
@@ -2811,12 +3601,15 @@ while True:
     fn a_short_stream_is_a_delivery_shortfall_rather_than_an_error() {
         let short = crate::metric::STREAM_FRAME_BUDGET / 2;
         let sse = serve_sse(short, 0);
-        let w = stream_window(sse, "/v1/chat/completions", "{}", &[], 2).expect("the window ran");
+        let w = stream_window(sse, "/v1/chat/completions", "{}", &[], Dialect::Openai, 2)
+            .expect("the window ran");
         assert_eq!(
             w.errored, 0,
             "the stream existed; it just ended early: {w:?}"
         );
-        assert_eq!(w.frames, 2 * short as u64);
+        // The role head arrives too, so the raw event count is one more per lane than the tokens.
+        assert_eq!(w.frames, 2 * (short as u64 + 1));
+        assert_eq!(w.content_frames, 2 * short as u64);
         assert!(w.delivery_ratio() < STREAM_MIN_DELIVERY_RATIO);
         assert!(!streams_gate_passes(&w));
     }
@@ -2845,8 +3638,15 @@ while True:
         // lanes bought nothing but contention - a test that fails its neighbours is a bad test.
         let concurrency = 64;
         let sse = serve_sse(crate::metric::STREAM_FRAME_BUDGET, 0);
-        let w = stream_window(sse, "/v1/chat/completions", "{}", &[], concurrency)
-            .expect("a fleet of instant-answering lanes must produce a window");
+        let w = stream_window(
+            sse,
+            "/v1/chat/completions",
+            "{}",
+            &[],
+            Dialect::Openai,
+            concurrency,
+        )
+        .expect("a fleet of instant-answering lanes must produce a window");
         assert_eq!(
             w.streams,
             u64::from(concurrency),
@@ -2925,9 +3725,16 @@ while True:
     #[test]
     fn a_window_that_failed_the_gate_is_not_folded_into_the_sustained_number() {
         // The failing window is the FASTEST - blowing the latency ceiling usually means more
-        // requests, not fewer - so counting it would drag the published number UP, not down.
-        let with_failure = [(90000.0, false), (20000.0, true)];
+        // requests, not fewer - so counting it would drag the published number UP, not down. Stated
+        // over three held windows so the assertion is about the FILTER rather than about which of
+        // two the median lands on: nearest-rank over an even count takes the lower, which is the
+        // engine's one convention (`stats::nearest_rank_index`) and not this rule's business.
+        let with_failure = [(90000.0, false), (20000.0, true), (21000.0, true)];
         assert_eq!(sustained_median(19000.0, &with_failure), 20000.0);
+        assert!(
+            sustained_median(19000.0, &[(90000.0, false), (20000.0, true)]) < 90000.0,
+            "the failing window must not reach the median at any sample count"
+        );
 
         // Nothing survives the filter: fall back to the bisection's own window, which is a real
         // measured reading that already proved this ceiling - never a zero, and never the failure.
@@ -3215,6 +4022,7 @@ while True:
             status: None,
             frames: Vec::new(),
             frame_offsets_us: Vec::new(),
+            content_frames: 0,
             end: crate::http::SseEnd::RigExhausted(
                 "Cannot assign requested address (os error 99)".into(),
             ),
@@ -3229,6 +4037,7 @@ while True:
             status: None,
             frames: Vec::new(),
             frame_offsets_us: Vec::new(),
+            content_frames: 0,
             end: crate::http::SseEnd::ConnectionFailed("Connection refused (os error 111)".into()),
         };
         assert!(
@@ -3241,6 +4050,7 @@ while True:
             status: Some(200),
             frames: Vec::new(),
             frame_offsets_us: Vec::new(),
+            content_frames: 0,
             end: crate::http::SseEnd::NotAnEventStream("application/json".into()),
         };
         assert!(stream_errored(&not_sse));
@@ -3347,29 +4157,306 @@ while True:
         );
     }
 
-    // BOTH GATE SEARCHES CONFIRM THEIR CEILING, or neither claim is worth more than one window.
+    // The sustained ceiling's own confirmation is driven end to end by
+    // `every_published_ceiling_was_measured_by_a_full_rung_of_windows`, against a scripted probe.
+    // The stream ceiling's confirmation (`sweep_streams_cell`) runs the same majority rule inline
+    // and is not reachable without a live SSE gateway, so it stays covered by the end-to-end run
+    // rather than by a unit test asserting against this file's own text.
+
+    // ── the rig refuses to smuggle: the lanes run.rs owns ───────────────────────────────────────
+
+    // A PROBE WE REFUSE TO SEND IS UNTESTABLE, NEVER A CAPABILITY VERDICT.
     //
-    // `bisect_ceiling` is used twice - sustained throughput and concurrent streams - and both publish
-    // its answer. It walks up until ONE window fails, so it lands on the boundary by construction.
-    // The sustained ceilings of the 2026-07-28 run held their gate in 1 of 3 windows on 9 of 48
-    // cells; the stream ceiling was never re-measured at all, and its gate is STRICTER (every
-    // expected frame, no stalls), so a boundary rung there is if anything more marginal.
+    // Ledger RIG-12: the probe lane composed the same manifest headers the load lane did and
+    // interpolated them raw. Now `http::send` refuses, and this is what the refusal must become on
+    // the way out - `Served::Untestable`, the spelling of `probe::Verdict::NotVerified`, which is
+    // "a statement about the RIG, not the gateway". `Served::No` here would convict a gateway of a
+    // defect in one of our own manifest files.
     #[test]
-    fn every_bisected_ceiling_is_confirmed_before_it_is_published() {
-        // Both call sites must re-measure. Asserted against the source, because the alternative is a
-        // live gateway and the property is structural: a `bisect_ceiling` result that reaches a
-        // published field without confirmation is the defect.
-        let src = include_str!("run.rs");
-        let confirmations = src.matches("held * 2 > total").count();
+    fn a_probe_the_rig_refuses_to_send_is_untestable_rather_than_a_refusal() {
+        // A live, healthy peer, so nothing about this verdict can come from an address with nothing
+        // on it: the refusal happens before the connect, and that is the point.
+        let peer = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = peer.local_addr().expect("addr");
+        std::thread::spawn(move || {
+            for c in peer.incoming() {
+                let Ok(mut c) = c else { continue };
+                let mut b = [0u8; 4096];
+                let _ = c.read(&mut b);
+                let _ = c.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\n{}");
+            }
+        });
+
+        let mut cfg = test_fixture(addr, addr);
+        cfg.static_headers = vec![("x-route".into(), "a\r\nx-injected: b".into())];
+        let id = CellId::new("openai", "openai");
+        let (served, retry) = probe_cell_once(&cfg, &id, true);
+        match &served {
+            Served::Untestable(why) => assert!(
+                why.contains("never asked") || why.contains("refused to send"),
+                "the verdict must say the gateway was never asked: {why}"
+            ),
+            other => panic!("a request we refused to send was graded as {other:?}"),
+        }
         assert!(
-            confirmations >= 2,
-            "found {confirmations} majority-confirmation sites; sweep_sustained_cell and \
-             sweep_streams_cell must each confirm their bisected ceiling"
+            retry.is_none(),
+            "asking again spends the budget to be refused identically"
         );
-        // And each must be able to give up rather than publish an unconfirmed answer.
+
+        // The same cfg without the hostile header reaches the peer, so this test proves a refusal
+        // rather than a broken fixture.
+        cfg.static_headers = vec![("x-route".into(), "b".into())];
         assert!(
-            src.matches("did not hold").count() >= 2,
-            "both ceilings must be able to report absent when nothing confirms"
+            !matches!(probe_cell_once(&cfg, &id, true).0, Served::Untestable(_)),
+            "a benign header must still be probed"
         );
+    }
+
+    // A STREAM WINDOW WE REFUSE TO SEND MEASURED NOTHING, so it is unmeasured - not a failing rung,
+    // and not an errored stream. Charging the gateway for a header of ours is the attribution
+    // inversion this engine refuses everywhere.
+    #[test]
+    fn a_stream_window_the_rig_refuses_to_send_is_unmeasured_not_a_failing_rung() {
+        let sse = serve_sse(crate::metric::STREAM_FRAME_BUDGET, 0);
+        let hostile = vec![("authorization".to_string(), "Bearer t\r\nx: y".to_string())];
+        assert!(
+            stream_window(
+                sse,
+                "/v1/chat/completions",
+                "{}",
+                &hostile,
+                Dialect::Openai,
+                4
+            )
+            .is_none(),
+            "a window whose request we would not send has measured nothing about the gateway"
+        );
+        // And the lane-level rule underneath it: a refusal is not the gateway erroring.
+        let refused = crate::http::SseOutcome {
+            status: None,
+            frames: Vec::new(),
+            frame_offsets_us: Vec::new(),
+            content_frames: 0,
+            end: crate::http::SseEnd::RigRefused("a header we will not send".into()),
+        };
+        assert!(
+            !stream_errored(&refused),
+            "our own refusal must not be charged to the gateway's stream error rate"
+        );
+    }
+
+    // ── delivery counts TOKENS, not events (ledger RIG-11) ──────────────────────────────────────
+
+    /// A peer that answers with a full budget of well-formed openai events, NONE of which carries a
+    /// token: the role head, then finish/`[DONE]` scaffolding repeated. A real gateway does not do
+    /// this; the point is that nothing in the old accounting could tell it apart from one that
+    /// streamed perfectly.
+    fn serve_sse_without_tokens(events: usize) -> SocketAddr {
+        let l = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = l.local_addr().expect("addr");
+        std::thread::spawn(move || {
+            for c in l.incoming() {
+                let Ok(mut c) = c else { continue };
+                std::thread::spawn(move || {
+                    let mut b = [0u8; 4096];
+                    if c.read(&mut b).unwrap_or(0) == 0 {
+                        return;
+                    }
+                    let head = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nConnection: close\r\n\r\n";
+                    if c.write_all(head.as_bytes()).is_err() {
+                        return;
+                    }
+                    for _ in 0..events {
+                        let frame = "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":null}]}\n\n";
+                        if c.write_all(frame.as_bytes()).is_err() {
+                            return;
+                        }
+                        let _ = c.flush();
+                    }
+                });
+            }
+        });
+        addr
+    }
+
+    // A STREAM THAT DELIVERED NO TOKENS HAS NOT DELIVERED.
+    //
+    // Ledger RIG-11. `delivery_ratio` was `frames / expected_frames` over every dispatched SSE
+    // event, so a peer that filled its whole frame budget with framing satisfied the gate - ratio
+    // 1.0, no stalls, no errors, published as the gateway carrying clean streams at that
+    // concurrency. The counts a reader needs to see this are on the window either way; only the
+    // ratio's numerator changed.
+    #[test]
+    fn a_full_budget_of_scaffolding_is_not_a_delivered_stream() {
+        let peer = serve_sse_without_tokens(crate::metric::STREAM_FRAME_BUDGET);
+        let w = stream_window(peer, "/v1/chat/completions", "{}", &[], Dialect::Openai, 2)
+            .expect("the window ran");
+        assert_eq!(
+            w.frames,
+            2 * crate::metric::STREAM_FRAME_BUDGET as u64,
+            "every event still counts in `frames`, which is what fps is for: {w:?}"
+        );
+        assert_eq!(
+            w.errored, 0,
+            "the stream existed and was well-formed: {w:?}"
+        );
+        assert_eq!(w.content_frames, 0, "not one token arrived: {w:?}");
+        assert_eq!(w.delivery_ratio(), 0.0);
+        assert!(
+            !streams_gate_passes(&w),
+            "a stream that delivered no tokens must not hold the delivery gate: {w:?}"
+        );
+        let why = streams_gate_verdict(&w).expect("a failing rung publishes a reason");
+        assert!(
+            why.contains("content frames"),
+            "the reason must say what was counted: {why}"
+        );
+    }
+
+    // The other half: a peer that DOES deliver every token it could still holds the gate, so the
+    // tightened numerator is not simply failing everything. The denominator is the budget minus the
+    // dialect's prelude, which is why an openai stream delivering 63 tokens of a 64-frame budget is
+    // complete rather than one short.
+    #[test]
+    fn a_stream_that_delivers_every_token_the_budget_allows_still_holds_the_gate() {
+        let sse = serve_sse(crate::metric::STREAM_FRAME_BUDGET, 0);
+        let w = stream_window(sse, "/v1/chat/completions", "{}", &[], Dialect::Openai, 2)
+            .expect("the window ran");
+        let budget = crate::metric::STREAM_FRAME_BUDGET as u64;
+        assert_eq!(w.frames, 2 * budget);
+        assert_eq!(
+            w.expected_content_frames,
+            2 * (budget - Dialect::Openai.stream_prelude_frames())
+        );
+        assert_eq!(w.content_frames, w.expected_content_frames, "{w:?}");
+        assert_eq!(w.delivery_ratio(), 1.0);
+        assert!(streams_gate_passes(&w), "{w:?}");
+    }
+
+    // ── one credential header on the wire (ledger RIG-12 remainder) ─────────────────────────────
+
+    // TWO `authorization` HEADERS ON ONE REQUEST IS A MEASUREMENT NOBODY CAN ATTRIBUTE.
+    //
+    // `headers_for` composed the dialect's credential header and then appended the manifest's
+    // verbatim, and `gateways/litellm-rust/definition.json` declares `Authorization: Bearer
+    // {GW_AUTH}` today. HTTP does not define which of two same-named headers a server honours, so
+    // the gateway authenticated as somebody and published a clean number for a request whose tenant
+    // and route we could not state.
+    #[test]
+    fn only_one_copy_of_a_header_the_rig_owns_reaches_the_wire() {
+        let a: SocketAddr = "127.0.0.1:1".parse().expect("addr");
+        let mut cfg = test_fixture(a, a);
+        // Spelled as the live manifest spells it, capital A and all: HTTP header names are
+        // case-insensitive, and a rule that only caught the lowercase one would not have caught the
+        // manifest that motivated it.
+        cfg.static_headers = vec![
+            ("Authorization".into(), "Bearer manifest-token".into()),
+            ("x-route".into(), "keep-me".into()),
+        ];
+        cfg.egress_headers = [(
+            "openai".to_string(),
+            vec![("authorization".to_string(), "Bearer per-column".to_string())],
+        )]
+        .into_iter()
+        .collect();
+
+        let h = headers_for(&cfg, Dialect::Openai, "openai");
+        let auths: Vec<&(String, String)> = h
+            .iter()
+            .filter(|(n, _)| n.eq_ignore_ascii_case("authorization"))
+            .collect();
+        assert_eq!(
+            auths.len(),
+            1,
+            "exactly one credential header may leave: {h:?}"
+        );
+        assert_eq!(
+            auths[0].1, "Bearer dummy",
+            "the surviving one is the rig's own, built from the token this run holds: {h:?}"
+        );
+        // Nothing else is dropped: a routing header is how a column selects its upstream, and losing
+        // one would publish a number for a pairing that was never driven.
+        assert!(
+            h.contains(&("x-route".to_string(), "keep-me".to_string())),
+            "{h:?}"
+        );
+
+        // The dialect decides which names it owns, so anthropic's protocol constant is protected
+        // too - two `anthropic-version` headers is the same undefined resolution.
+        cfg.static_headers = vec![
+            ("anthropic-version".into(), "1999-01-01".into()),
+            ("X-Api-Key".into(), "manifest-key".into()),
+        ];
+        cfg.egress_headers = Default::default();
+        let h = headers_for(&cfg, Dialect::Anthropic, "anthropic");
+        assert_eq!(
+            h.iter()
+                .filter(|(n, _)| n.eq_ignore_ascii_case("anthropic-version"))
+                .count(),
+            1,
+            "{h:?}"
+        );
+        assert_eq!(
+            h.iter()
+                .filter(|(n, _)| n.eq_ignore_ascii_case("x-api-key"))
+                .count(),
+            1,
+            "{h:?}"
+        );
+        assert!(
+            h.contains(&("x-api-key".to_string(), "dummy".to_string())),
+            "{h:?}"
+        );
+        assert!(
+            h.contains(&("anthropic-version".to_string(), "2023-06-01".to_string())),
+            "{h:?}"
+        );
+    }
+
+    // ── a rung with no reading has no failure count ─────────────────────────────────────────────
+
+    // A FABRICATED ZERO IN PUBLISHED EVIDENCE.
+    //
+    // `SustainedPoint.fail` was an `i64` whose only value for "no window reported" was 0, so a climb
+    // rung whose windows all came back without a reading published `fail: 0` in
+    // `sweep_sustained_20ms` - a row saying the gateway lost nothing at a rate it was never observed
+    // serving. The board's rule is that an absent measurement publishes null with a reason; the type
+    // had no way to obey it.
+    #[test]
+    fn a_rung_no_window_reported_publishes_no_failure_count_rather_than_zero() {
+        // A probe that answers with a value and a verdict but never a reading - the shape a window
+        // that ran out of time or produced nothing leaves behind.
+        struct Readingless;
+        impl crate::search::Probe for Readingless {
+            fn probe(&mut self, _c: u32) -> Option<crate::search::Sample> {
+                Some(crate::search::Sample::new(1000.0, true))
+            }
+        }
+        let rungs = vec![
+            crate::search::RungSummary {
+                concurrency: 8,
+                median: 1000.0,
+                gate_holds: true,
+                gate_median: Some(1000.0),
+                median_reading: None,
+                gate_median_reading: None,
+            },
+            crate::search::RungSummary {
+                concurrency: 16,
+                median: 1000.0,
+                gate_holds: false,
+                gate_median: None,
+                median_reading: None,
+                gate_median_reading: None,
+            },
+        ];
+        let refined = refine_ceiling(&mut Readingless, &rungs);
+        for pt in refined.points.iter().filter(|pt| pt.concurrency <= 16) {
+            assert_eq!(
+                pt.fail, None,
+                "no window at c={} carried a reading, so there is no loss count",
+                pt.concurrency
+            );
+        }
     }
 }

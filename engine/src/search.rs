@@ -222,6 +222,16 @@ pub fn bisect_ceiling<P: Probe>(probe: &mut P, min_conc: u32, max_conc: u32) -> 
     } else {
         (max_conc, min_conc)
     };
+    // ZERO CONCURRENCY IS NOT A LOAD WINDOW, and this search probed it literally.
+    //
+    // `Ladder::from_floor` floors the CLIMB at 1, but the opening probe here is taken at `min_conc`
+    // before the ladder is built, so a configured floor of 0 (`OTB_MIN_CONC=0`) asked the gateway
+    // for zero concurrent requests and then anchored the whole bisection on whatever that window
+    // claimed - a "pass" at c=0 is a window that sent nothing and lost nothing, so it passes any
+    // gate by construction. `saturation_plateau_gated` already carries the same floor for the same
+    // reason; this is that rule applied to the search that was still missing it.
+    let min_conc = min_conc.max(1);
+    let max_conc = max_conc.max(1);
     let mut s = Search::new(probe);
 
     let lo_sample = match s.sample(min_conc) {
@@ -376,7 +386,9 @@ fn summarize(rungs: &[Rung]) -> Vec<RungSummary> {
         .map(|r| RungSummary {
             concurrency: r.concurrency,
             median: r.median,
+            median_reading: r.median_reading,
             gate_median: r.gate.map(|g| g.median),
+            gate_median_reading: r.gate.and_then(|g| g.median_reading),
             gate_holds: r.gate.is_some_and(|g| g.holds()),
         })
         .collect()
@@ -415,7 +427,12 @@ fn interrupted<P: Probe>(s: Search<P>, rungs: &[Rung]) -> PeakResult {
         None => "the search was interrupted before any concurrency passed the gate".to_string(),
     };
     PeakResult {
-        peak: Measurement::absent_because(Absent::NotMeasured, detail),
+        // RigLimited, not NotMeasured: an interruption is the RIG failing to finish asking (a
+        // refused window, an exhausted port range), never a fact about the gateway. It must also
+        // stay distinguishable from "every rung genuinely failed the gate", which
+        // `sweep_cpu_fps_cell` publishes as a measured 0 - under one shared reason a rig
+        // interruption would have become the gateway's zero.
+        peak: Measurement::absent_because(Absent::RigLimited, detail),
         points: s.points,
         exhausted: false,
         rungs: summarize(rungs),
@@ -469,24 +486,41 @@ fn relative_spread(v: &[f64]) -> f64 {
     (max - min) / max
 }
 
-/// Nearest-rank p50 over a sorted slice: the SAME convention `gen::GenStats::pct_of` uses for the
-/// published latency percentiles, and it returns a value some window actually produced rather than
-/// the average of two that none did.
+/// Nearest-rank p50 over a sorted slice: the SAME convention every other published percentile in
+/// this engine uses, because it resolves its rank through the one function they all call
+/// (`stats::nearest_rank_index`) rather than reimplementing it. It returns a value some window
+/// actually produced rather than the average of two that none did.
+///
+/// The rank moved out of here as part of ledger SRCH-04: this file's floor and `metric.rs`'s ceil
+/// disagreed by one rank on every even window count, while three comments claimed they matched.
 pub fn nearest_rank_median(sorted: &[f64]) -> Option<f64> {
     if sorted.is_empty() {
         return None;
     }
-    let mut i = (sorted.len() as f64 * 0.5) as usize;
-    if i >= sorted.len() {
-        i = sorted.len() - 1;
-    }
-    Some(sorted[i])
+    Some(sorted[crate::stats::nearest_rank_index(sorted.len(), 0.5)])
+}
+
+/// The window BEHIND a rung's median, not just the number it produced.
+///
+/// Nearest-rank returns a value some window actually measured, so the rate and the latency and loss
+/// published beside it can be ONE window's evidence rather than three windows' numbers assembled
+/// into a row no window ever produced. The caller needs it because a rung's evidence row used to
+/// carry `p99_us: None, fail: 0` beside a correct FAILED verdict - a row saying the rung served
+/// cleanly at a rate it had just been judged not to sustain.
+fn median_window(mut windows: Vec<(f64, Option<Reading>)>) -> Option<(f64, Option<Reading>)> {
+    windows.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    let vals: Vec<f64> = windows.iter().map(|(v, _)| *v).collect();
+    let m = nearest_rank_median(&vals)?;
+    windows.into_iter().find(|(v, _)| *v == m)
 }
 
 /// One rung, measured: its median throughput and the spread of the windows behind it.
 struct Rung {
     concurrency: u32,
     median: f64,
+    /// What the window behind `median` observed. Absent only when the probe measures no latency at
+    /// all (the stream searches), never as a stand-in for "measured nothing".
+    median_reading: Option<Reading>,
     spread: f64,
     /// How many windows actually passed and went into the median. The bar below divides by its root,
     /// so a rung that lost windows to failures is judged on the evidence it really has.
@@ -511,6 +545,9 @@ struct GateEvidence {
     /// nothing, so folding its rate into a sustained number would publish throughput the gate had
     /// just refused.
     median: f64,
+    /// What the window behind `median` observed, so a published sustained rung's p99 and fail count
+    /// come from the same window as its rate.
+    median_reading: Option<Reading>,
 }
 
 impl GateEvidence {
@@ -532,8 +569,17 @@ pub struct RungSummary {
     pub concurrency: u32,
     /// The median rate over every window that passed at this rung.
     pub median: f64,
+    /// What the window behind `median` observed.
+    ///
+    /// Carried so a caller can publish a rung's REAL latency and loss beside its rate. The sustained
+    /// sweep used to publish `p99_us: None, fail: 0` for every climb rung, including the ones it had
+    /// just failed, so a reader re-deriving the verdict from the published evidence saw a rung that
+    /// had served nothing when it had in fact served at a rate the gate refused.
+    pub median_reading: Option<Reading>,
     /// The median rate over the windows that held the caller's gate, when one was supplied.
     pub gate_median: Option<f64>,
+    /// What the window behind `gate_median` observed.
+    pub gate_median_reading: Option<Reading>,
     /// Whether a majority of judged windows held the gate.
     pub gate_holds: bool,
 }
@@ -569,8 +615,11 @@ fn improvement_bar(spread: f64, windows: usize) -> f64 {
 /// that held the gate contributes its rate to `gate.median` as well as to `median`; one that blew it
 /// contributes to neither, exactly as a window that failed outright contributes to neither.
 fn measure_rung<P: Probe>(s: &mut Search<P>, c: u32, gate: Option<&Gate>) -> Option<Rung> {
-    let mut vals = Vec::with_capacity(WINDOWS_PER_RUNG);
-    let mut held = Vec::with_capacity(WINDOWS_PER_RUNG);
+    // Each window travels WITH the reading it produced, so the rung's published rate and the p99 and
+    // fail count published beside it are one window's evidence rather than three windows' numbers
+    // mixed into a row none of them measured.
+    let mut vals: Vec<(f64, Option<Reading>)> = Vec::with_capacity(WINDOWS_PER_RUNG);
+    let mut held: Vec<(f64, Option<Reading>)> = Vec::with_capacity(WINDOWS_PER_RUNG);
     let mut judged = 0usize;
     for i in 0..WINDOWS_PER_RUNG {
         // The first window may come from the memo; the repeats must not, since the whole point is
@@ -586,40 +635,43 @@ fn measure_rung<P: Probe>(s: &mut Search<P>, c: u32, gate: Option<&Gate>) -> Opt
         if let (Some(g), Some(r)) = (gate, sample.reading) {
             judged += 1;
             if g(&r) {
-                held.push(sample.value);
+                held.push((sample.value, sample.reading));
             }
         }
         if sample.passed {
-            vals.push(sample.value);
+            vals.push((sample.value, sample.reading));
         }
     }
-    let evidence = gate.map(|_| {
-        held.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        GateEvidence {
-            held: held.len(),
-            judged,
-            median: nearest_rank_median(&held).unwrap_or(0.0),
-        }
+    let held_count = held.len();
+    let gate_window = median_window(held);
+    let evidence = gate.map(|_| GateEvidence {
+        held: held_count,
+        judged,
+        median: gate_window.map(|(v, _)| v).unwrap_or(0.0),
+        median_reading: gate_window.and_then(|(_, r)| r),
     });
     if vals.is_empty() {
         return Some(Rung {
             concurrency: c,
             median: 0.0,
+            median_reading: None,
             spread: 0.0,
             windows: 0,
             gate: evidence,
         });
     }
-    vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let rates: Vec<f64> = vals.iter().map(|(v, _)| *v).collect();
+    let window = median_window(vals);
     Some(Rung {
         concurrency: c,
-        median: nearest_rank_median(&vals).unwrap_or(0.0),
-        spread: if vals.len() >= 2 {
-            relative_spread(&vals)
+        median: window.map(|(v, _)| v).unwrap_or(0.0),
+        median_reading: window.and_then(|(_, r)| r),
+        spread: if rates.len() >= 2 {
+            relative_spread(&rates)
         } else {
             0.0
         },
-        windows: vals.len(),
+        windows: rates.len(),
         gate: evidence,
     })
 }
@@ -821,16 +873,18 @@ pub fn saturation_plateau_gated<P: Probe>(
     // reading that actually happened.
     // The band is still computed, because the knee is still worth publishing - it is just no longer
     // welded to a value measured at a different rung.
-    let band: Vec<&Rung> = rungs
-        .iter()
-        .filter(|r| {
-            r.median > 0.0 && r.median >= best * (1.0 - improvement_bar(r.spread, r.windows))
-        })
-        .collect();
-    let knee = band.iter().map(|r| r.concurrency).min().unwrap_or(min_conc);
-    // The winning rung, demoted off the final probed rung when the creep stayed inside the wobble
-    // band - see `published_winner`. Still ONE real measurement: a rung that ran, with the rung
-    // above it measured and failing to beat it by more than the noise.
+    //
+    // The winning rung comes FIRST, and the band is drawn around IT rather than around the raw
+    // global maximum. Drawn around the maximum, the band described a rung the search had already
+    // decided not to publish: a noisy final rung (big wobble, so it fails to "improve" and gets
+    // demoted by `published_winner`) still set the band's threshold, and a quiet published rung
+    // 14% below it then fell OUTSIDE the band annotating it. Worse, the knee - the band's lowest
+    // concurrency - was taken over ALL rungs including that final one, so a band containing only
+    // rungs ABOVE the published peak produced `knee > conc_at_peak`: a published pair claiming more
+    // concurrency was needed to reach the plateau than the rung the plateau's own value came from.
+    // Around the published winner the band contains it by construction, and capping the knee at the
+    // published concurrency makes the pair readable in one direction only, which is the only
+    // direction it means anything in.
     let peak = published_winner(&rungs);
     let Some(peak) = peak else {
         let detail = format!(
@@ -843,6 +897,19 @@ pub fn saturation_plateau_gated<P: Probe>(
             rungs: summarize(&rungs),
         };
     };
+
+    // THE KNEE IS THE LOWEST RUNG INDISTINGUISHABLE FROM WHAT WE PUBLISHED, and it can never sit
+    // above the rung we published. `<= peak.concurrency` is the whole of that guarantee.
+    let knee = rungs
+        .iter()
+        .filter(|r| {
+            r.concurrency <= peak.concurrency
+                && r.median > 0.0
+                && r.median >= peak.median * (1.0 - improvement_bar(r.spread, r.windows))
+        })
+        .map(|r| r.concurrency)
+        .min()
+        .unwrap_or(peak.concurrency);
 
     let summary = summarize(&rungs);
     PeakResult {
@@ -892,6 +959,46 @@ mod tests {
         let mut probe = MonotoneGate { ceiling: 0 };
         let r = bisect_ceiling(&mut probe, 1, 64);
         assert_eq!(r.ceiling, Measurement::Measured(0));
+    }
+
+    /// ZERO CONCURRENCY IS NOT A LOAD WINDOW, and this search took one.
+    ///
+    /// `Ladder::from_floor` floors the climb at 1, but the opening probe was taken at `min_conc`
+    /// before the ladder existed, so a configured floor of 0 asked the gateway for zero concurrent
+    /// requests. That window sends nothing and loses nothing, so it passes any gate by construction,
+    /// and the whole bisection is then anchored on a "pass" that measured nothing at all.
+    #[test]
+    fn the_gate_bisection_never_opens_with_a_zero_concurrency_window() {
+        struct RecordsWhatItWasAsked {
+            seen: Vec<u32>,
+            ceiling: u32,
+        }
+        impl Probe for RecordsWhatItWasAsked {
+            fn probe(&mut self, c: u32) -> Option<Sample> {
+                self.seen.push(c);
+                Some(Sample::new(f64::from(c), c <= self.ceiling))
+            }
+        }
+        let mut probe = RecordsWhatItWasAsked {
+            seen: Vec::new(),
+            ceiling: 100,
+        };
+        let r = bisect_ceiling(&mut probe, 0, 4096);
+        assert!(
+            !probe.seen.contains(&0),
+            "a floor of 0 must never be probed literally, asked: {:?}",
+            probe.seen
+        );
+        assert_eq!(
+            probe.seen.first(),
+            Some(&1),
+            "the search opens at the floored floor"
+        );
+        assert_eq!(
+            r.ceiling,
+            Measurement::Measured(100),
+            "and the floor being clamped does not change the ceiling it finds"
+        );
     }
 
     #[test]
@@ -1531,6 +1638,64 @@ mod tests {
         );
     }
 
+    /// A KNEE ABOVE THE PEAK RUNG IS AN INCOHERENT PUBLISHED PAIR.
+    ///
+    /// The knee is "how much concurrency before more stops helping" and the peak concurrency is the
+    /// rung the published value was measured at, so a knee ABOVE it claims the plateau began after
+    /// the rung whose reading is the plateau's own value. It was reachable: the band was drawn around
+    /// the raw global maximum, `published_winner` demoted off a noisy final rung, and the demoted
+    /// winner then sat outside the band annotating it - leaving the final rung as the band's only
+    /// member and its concurrency as the knee.
+    #[test]
+    fn the_knee_never_sits_above_the_rung_the_peak_was_published_from() {
+        // A quiet climb into a plateau, and one final rung whose three windows scatter 800/1150/1150.
+        // Its median beats every rung below it, but by less than its own 17.6% wobble, so the climb
+        // calls it saturation and the winner is demoted off it - while a band drawn at 1150 excluded
+        // every rung the search was actually willing to publish.
+        struct NoisyFinalRung {
+            calls_at: std::collections::BTreeMap<u32, u32>,
+        }
+        impl Probe for NoisyFinalRung {
+            fn probe(&mut self, c: u32) -> Option<Sample> {
+                let n = self.calls_at.entry(c).or_insert(0);
+                *n += 1;
+                let v = match c {
+                    1 => 100.0,
+                    2 => 200.0,
+                    4 => 400.0,
+                    8 => 800.0,
+                    16 => 1000.0,
+                    32 => 1005.0,
+                    64 => 1010.0,
+                    _ if *n == 1 => 800.0,
+                    _ => 1150.0,
+                };
+                Some(Sample::new(v, true))
+            }
+        }
+        let mut probe = NoisyFinalRung {
+            calls_at: Default::default(),
+        };
+        let r = saturation_plateau(&mut probe, 1, 256);
+        let w = r.peak.value().expect("the curve saturated at c=128");
+        assert_eq!(
+            w.concurrency, 64,
+            "the noisy final rung must be demoted off, leaving c=64 as the published rung"
+        );
+        assert!(
+            w.knee_concurrency <= w.concurrency,
+            "knee c={} sits above the rung the peak was measured at (c={}), which is a pair no \
+             reading supports",
+            w.knee_concurrency,
+            w.concurrency
+        );
+        assert_eq!(
+            w.knee_concurrency, 16,
+            "the knee is the lowest rung indistinguishable from what was PUBLISHED (1010), not from \
+             a maximum the search declined to publish"
+        );
+    }
+
     // A curve that never stops climbing has no plateau, and the range bound is OUR choice, not the
     // gateway's ceiling. Publishing it would be the same fabrication at the other end of the search.
     #[test]
@@ -1643,6 +1808,59 @@ mod tests {
         assert!(
             !r.points.is_empty(),
             "the probes that did land are still evidence"
+        );
+        // RigLimited, not NotMeasured: the interruption is the RIG failing to finish asking, never
+        // a fact about the gateway, and it must stay distinguishable from "every rung genuinely
+        // failed the gate" (NotMeasured), which callers may publish as a measured zero.
+        assert_eq!(
+            r.peak.reason(),
+            Some(&Absent::RigLimited),
+            "an interrupted search is a rig limit, not an unmeasured gateway"
+        );
+        assert!(
+            r.peak.detail().unwrap_or_default().contains("interrupted"),
+            "the absence must say the search was interrupted: {:?}",
+            r.peak.detail()
+        );
+    }
+
+    // THE ZERO-BY-COLLISION DEFECT THIS PINS. `run::sweep_cpu_fps_cell` publishes a measured 0 when
+    // the peak is absent with reason NotMeasured and every probed point failed its gate - the
+    // honest "the gateway carried nothing" verdict. An interruption that lands AFTER failing rungs
+    // produces exactly that point shape, so when `interrupted()` also said NotMeasured the rig's
+    // own abort (a refused window, an exhausted port range) was published as the gateway's zero.
+    // The interrupted reason must stay RigLimited even when every point seen so far had failed.
+    #[test]
+    fn an_interruption_after_only_failing_rungs_stays_rig_limited_never_the_gateways_zero() {
+        struct FailsThenDies {
+            calls: u32,
+        }
+        impl Probe for FailsThenDies {
+            fn probe(&mut self, _c: u32) -> Option<Sample> {
+                self.calls += 1;
+                if self.calls > WINDOWS_PER_RUNG as u32 {
+                    return None;
+                }
+                // One full rung of gate-failing windows before the rig gives out.
+                Some(Sample::new(0.0, false))
+            }
+        }
+        let r = saturation_plateau(&mut FailsThenDies { calls: 0 }, 1, 64);
+        assert!(
+            !r.points.is_empty() && r.points.iter().all(|p| !p.passed),
+            "the fixture must produce the all-points-failed shape the measured-zero rule keys on"
+        );
+        assert_eq!(r.peak.value(), None);
+        assert_eq!(
+            r.peak.reason(),
+            Some(&Absent::RigLimited),
+            "an interruption after failing rungs must not collapse into the NotMeasured that reads \
+             as a measured gateway zero downstream"
+        );
+        assert!(
+            r.peak.detail().unwrap_or_default().contains("interrupted"),
+            "the absence must say the search was interrupted: {:?}",
+            r.peak.detail()
         );
     }
 

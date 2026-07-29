@@ -31,13 +31,17 @@
 
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 /// Hard ceiling on one request/response exchange, independent of the socket's per-read timeout.
 const RESPONSE_BUDGET: Duration = Duration::from_secs(30);
+
+/// Hard ceiling on ONE connect attempt. A bound of ours exactly as `RESPONSE_BUDGET` is, and named
+/// so the code that charges a connect timeout can say which bound fired.
+const CONNECT_BUDGET: Duration = Duration::from_secs(5);
 
 pub struct GenConfig {
     pub addr: SocketAddr,
@@ -72,9 +76,16 @@ pub struct GenStats {
     /// Counted separately so a window that ran out of rig can be recognised as one. EMFILE/ENFILE
     /// (out of file descriptors) are the same class and counted here too.
     pub rig_refused: u64,
-    /// Requests that exhausted `RESPONSE_BUDGET`, a bound of OURS. Also counted in `fail`, because a
-    /// caller waiting thirty seconds got nothing - but separable, so a window failing for our reason
-    /// cannot look identical to one failing for the gateway's.
+    /// Requests a bound of OURS cut short: `RESPONSE_BUDGET` on an exchange, or `CONNECT_BUDGET` on
+    /// a connect that never completed. Also counted in `fail`, because a caller waiting thirty
+    /// seconds got nothing - but separable, so a window failing for our reason cannot look identical
+    /// to one failing for the gateway's.
+    ///
+    /// A CONNECT TIMEOUT IS NOT `rig_refused`. `rig_refused` is the claim "this host had no
+    /// ephemeral port or descriptor left", and `run.rs` treats a window containing any of those as
+    /// UNMEASURED, so filing a hung gateway there would erase the very failure it caused. A connect
+    /// timeout carries no evidence about which side ran out; what is certainly true is that our
+    /// five-second bound fired, which is exactly what this counter says.
     pub budget_exceeded: u64,
     /// Every successful request's latency, microseconds. Percentiles are computed from this rather
     /// than from a running estimate: an approximate p99 is the one number nobody can check later.
@@ -98,8 +109,11 @@ impl GenStats {
         (self.ok as f64 / self.elapsed_s) as u64
     }
 
-    /// Nearest-rank percentile: a convention that differs by one index from what a reader of the
-    /// published numbers assumes is a silent disagreement, not a rounding difference.
+    /// Nearest-rank percentile, through `stats::nearest_rank_index` so this cannot drift from the
+    /// streaming percentiles it is published beside: a convention that differs by one index from
+    /// what a reader of the published numbers assumes is a silent disagreement, not a rounding
+    /// difference, and this engine shipped exactly that disagreement (ledger SRCH-04) until the
+    /// rank moved into one function.
     pub fn pct_us(&self, q: f64) -> u64 {
         Self::pct_of(&self.sorted_latencies(), q)
     }
@@ -116,11 +130,7 @@ impl GenStats {
         if v.is_empty() {
             return 0;
         }
-        let mut i = (v.len() as f64 * q) as usize;
-        if i >= v.len() {
-            i = v.len() - 1;
-        }
-        v[i]
+        v[crate::stats::nearest_rank_index(v.len(), q)]
     }
 
     /// The exact line the Go generator prints, so every existing parser reads this unchanged.
@@ -157,15 +167,104 @@ struct WorkerStats {
     /// Connections this HOST could not make (ephemeral ports or descriptors exhausted), as opposed
     /// to requests the gateway refused. See `GenStats::rig_refused`.
     rig_refused: u64,
-    /// Requests that ran out of `RESPONSE_BUDGET`. Counted as failures AND counted here, so a
-    /// window whose failures are really our timeout can be recognised as one.
+    /// Requests a bound of ours cut short (`RESPONSE_BUDGET` or `CONNECT_BUDGET`). Counted as
+    /// failures AND counted here, so a window whose failures are really our own timeout can be
+    /// recognised as one.
     budget_exceeded: u64,
     lat: Vec<u64>,
 }
 
+impl WorkerStats {
+    /// Charge a connect that produced no connection. Always a failure - nothing was answered - and
+    /// always attributed, because "our port range ran out", "our connect bound fired" and "the peer
+    /// refused" are three different claims that used to arrive as one number.
+    fn charge_connect_fault(&mut self, fault: ConnectFault) {
+        self.fail += 1;
+        match fault {
+            ConnectFault::RigExhausted => self.rig_refused += 1,
+            ConnectFault::OurConnectBound => self.budget_exceeded += 1,
+            ConnectFault::PeerRefused => {}
+        }
+    }
+}
+
+/// Which side a connect attempt that produced no connection belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConnectFault {
+    /// EADDRNOTAVAIL/EADDRINUSE (no ephemeral source port) or EMFILE/ENFILE (no descriptor): THIS
+    /// HOST ran out, and the gateway was never asked anything.
+    RigExhausted,
+    /// `CONNECT_BUDGET` elapsed with no answer. Ours in the same sense `RESPONSE_BUDGET` is: the
+    /// peer may be wedged, may be blackholing SYNs, may be behind a full accept backlog, and this
+    /// side cannot tell - but it CAN say that the thirty seconds a caller would have waited was cut
+    /// at five by us. Filed as a failure with that attribution rather than as a bare `fail`, which
+    /// used to read exactly like a refusal.
+    OurConnectBound,
+    /// Refused, unreachable, reset: the peer's answer, and the only one of the three that is the
+    /// gateway's own failure.
+    PeerRefused,
+}
+
+/// Classify a connect that produced no connection. `None` means our own `CONNECT_BUDGET` elapsed
+/// rather than the OS answering at all.
+fn connect_fault(err: Option<&std::io::Error>) -> ConnectFault {
+    let Some(e) = err else {
+        return ConnectFault::OurConnectBound;
+    };
+    let ours = matches!(
+        e.kind(),
+        std::io::ErrorKind::AddrNotAvailable | std::io::ErrorKind::AddrInUse
+    ) || matches!(e.raw_os_error(), Some(23) | Some(24));
+    if ours {
+        ConnectFault::RigExhausted
+    } else {
+        ConnectFault::PeerRefused
+    }
+}
+
+/// THE MEASURED WINDOW, so the rate's numerator and its denominator describe the same interval.
+///
+/// `elapsed_s` is the sleep between these two instants. Everything a task did outside them used to
+/// land in `ok` anyway: the spawn ramp before `start`, and - the one that matters - the drain after
+/// `end`, where every lane's in-flight response completed and was counted against a denominator that
+/// had already stopped. At high concurrency with slow responses that is one extra success per lane
+/// for free, which biases the peak search toward exactly the high rungs it is climbing toward.
+///
+/// Published as the two instants happen, never guessed: `start` once every task exists, `end` when
+/// the sleep returns and BEFORE the stop flag is set, so no task can be past the end without being
+/// able to see it.
+#[derive(Default)]
+struct Window {
+    start: OnceLock<Instant>,
+    end: OnceLock<Instant>,
+}
+
+impl Window {
+    /// Whether an exchange that COMPLETED at `at` belongs to the measured window. Completion, not
+    /// start: a request is a success when its response arrived, and that is the instant the rate
+    /// counts.
+    fn contains(&self, at: Instant) -> bool {
+        match (self.start.get(), self.end.get()) {
+            // The clock has not started, so this is the spawn ramp: real work, but outside the
+            // interval `elapsed_s` measures, and counting it inflates the same rate from the other
+            // end.
+            (None, _) => false,
+            // The window is open. `end` is published before the stop flag, so a task that has not
+            // seen an end has not passed one.
+            (Some(s), None) => at >= *s,
+            (Some(s), Some(e)) => at >= *s && at <= *e,
+        }
+    }
+}
+
 /// One connection-holder's request loop. Opens a connection and reuses it, reconnecting on failure,
 /// because a fresh TCP handshake per request would measure the kernel rather than the gateway.
-async fn worker(addr: SocketAddr, req: Arc<String>, stop: Arc<AtomicBool>) -> WorkerStats {
+async fn worker(
+    addr: SocketAddr,
+    req: Arc<String>,
+    stop: Arc<AtomicBool>,
+    window: Arc<Window>,
+) -> WorkerStats {
     let mut w = WorkerStats {
         ok: 0,
         fail: 0,
@@ -188,35 +287,26 @@ async fn worker(addr: SocketAddr, req: Arc<String>, stop: Arc<AtomicBool>) -> Wo
         fresh = false;
         if conn.is_none() {
             fresh = true;
-            conn = match tokio::time::timeout(Duration::from_secs(5), TcpStream::connect(addr))
-                .await
-            {
+            // Both a connect error and a connect timeout mean no connection, and neither is a
+            // request the target answered. WHICH SIDE ran out matters, though, and all three
+            // answers - the rig out of ports/descriptors, our own connect bound firing, the peer
+            // refusing - used to arrive as one undifferentiated `fail`.
+            let fault = match tokio::time::timeout(CONNECT_BUDGET, TcpStream::connect(addr)).await {
                 Ok(Ok(s)) => {
                     let _ = s.set_nodelay(true);
-                    Some(s)
-                }
-                // Both a connect error and a connect timeout mean no connection, and neither is a
-                // request the target answered. WHICH SIDE ran out matters, though: a refusal is the
-                // gateway declining, while EADDRNOTAVAIL/EMFILE is this host out of ephemeral ports
-                // or descriptors, which is the rig hitting its own wall.
-                Ok(Err(e)) => {
-                    if matches!(
-                        e.kind(),
-                        std::io::ErrorKind::AddrNotAvailable | std::io::ErrorKind::AddrInUse
-                    ) || e.raw_os_error() == Some(24)
-                        || e.raw_os_error() == Some(23)
-                    {
-                        w.rig_refused += 1;
-                    }
+                    conn = Some(s);
                     None
                 }
-                Err(_) => None,
+                Ok(Err(e)) => Some(connect_fault(Some(&e))),
+                Err(_) => Some(connect_fault(None)),
             };
-            if conn.is_none() {
+            if let Some(fault) = fault {
+                if window.contains(Instant::now()) {
+                    w.charge_connect_fault(fault);
+                }
                 // BACK OFF. Without this the loop spins at connect-refusal speed (microseconds on
                 // loopback) once a gateway stops accepting, burning a core and inflating `fail`
                 // into a measure of how fast connect can fail rather than a request count.
-                w.fail += 1;
                 tokio::time::sleep(Duration::from_millis(5)).await;
                 continue;
             }
@@ -237,16 +327,25 @@ async fn worker(addr: SocketAddr, req: Arc<String>, stop: Arc<AtomicBool>) -> Wo
             read_response(s, response_deadline, &mut acc).await
         };
 
+        // WHEN the exchange finished decides whether it is part of the measurement, and the
+        // connection bookkeeping happens either way: a broken connection is still broken after the
+        // window closes.
+        let done = Instant::now();
+        let counted = window.contains(done);
         match outcome {
             Exchange::Reusable => {
-                w.lat.push(t0.elapsed().as_micros() as u64);
-                w.ok += 1;
+                if counted {
+                    w.lat.push(done.duration_since(t0).as_micros() as u64);
+                    w.ok += 1;
+                }
             }
             // ANSWERED, and the peer said that was the last one on this connection. A success: the
             // target did exactly what it advertised. Only the connection is discarded.
             Exchange::LastOnConnection => {
-                w.lat.push(t0.elapsed().as_micros() as u64);
-                w.ok += 1;
+                if counted {
+                    w.lat.push(done.duration_since(t0).as_micros() as u64);
+                    w.ok += 1;
+                }
                 conn = None;
             }
             // A stale connection we chose to reuse. The request never reached a listening peer, so
@@ -258,13 +357,17 @@ async fn worker(addr: SocketAddr, req: Arc<String>, stop: Arc<AtomicBool>) -> Wo
             // Out of budget is a failure the caller would have felt, and also a bound of ours, so it
             // is counted in both places rather than hidden in one.
             Exchange::BudgetExceeded => {
-                w.fail += 1;
-                w.budget_exceeded += 1;
+                if counted {
+                    w.fail += 1;
+                    w.budget_exceeded += 1;
+                }
                 conn = None;
             }
             // The same thing on a connection opened moments ago is the target refusing to answer.
             Exchange::ClosedBeforeAnyBytes | Exchange::Failed => {
-                w.fail += 1;
+                if counted {
+                    w.fail += 1;
+                }
                 conn = None; // a broken connection is not reused: the next request would inherit its state
             }
         }
@@ -273,19 +376,41 @@ async fn worker(addr: SocketAddr, req: Arc<String>, stop: Arc<AtomicBool>) -> Wo
     w
 }
 
-fn build_request(cfg: &GenConfig) -> String {
+/// Build the one request every task in this window sends, or refuse to build it.
+///
+/// A HEADER IS INTERPOLATED INTO THE WIRE FORMAT, so a value carrying CRLF is not a header value at
+/// all: `x-route: a\r\nx-other: b` puts a second header on the wire, and `\r\n\r\n` ends the head
+/// and makes the rest of the value a second request on the connection. The header list comes across
+/// a process boundary from the manifest (`loadgen::decode_headers`), which is exactly the kind of
+/// input that must not be able to choose what bytes this generator sends.
+///
+/// REFUSED, NOT SANITISED. Stripping the CRLF would send a header the manifest did not write -
+/// silently a different credential or a different routing key - and publish the resulting numbers
+/// under the pairing the manifest asked for. A window that cannot pose the question honestly does
+/// not run: `run` turns this into `spawn_failed`, the same "the rig never asked" answer a runtime
+/// that would not build gets.
+fn build_request(cfg: &GenConfig) -> Result<String, String> {
+    // ONE RULE, SHARED WITH THE PROBE AND STREAMING LANES. This check used to live here, spelled
+    // out, and only here: `http::send` and `http::build_sse_request` interpolated the same
+    // manifest-supplied path and headers raw, so the probe, streaming and re-verify lanes stayed
+    // injectable while this one was not (ledger RIG-12). A rule enforced on one of three lanes is a
+    // lane a reader thinks is covered, so it moved to `http::unsendable_request` and all three call
+    // it.
+    if let Some(why) = crate::http::unsendable_request(&cfg.path, &cfg.headers) {
+        return Err(why);
+    }
     let mut h = String::new();
     for (k, v) in &cfg.headers {
         h.push_str(&format!("{k}: {v}\r\n"));
     }
-    format!(
+    Ok(format!(
         "POST {} HTTP/1.1\r\nHost: {}\r\ncontent-type: application/json\r\ncontent-length: {}\r\n{}\r\n{}",
         cfg.path,
         cfg.addr,
         cfg.body.len(),
         h,
         cfg.body
-    )
+    ))
 }
 
 /// What one request/response exchange did to the connection.
@@ -407,11 +532,19 @@ async fn read_response(s: &mut TcpStream, deadline: Instant, acc: &mut Vec<u8>) 
             return Exchange::BudgetExceeded;
         }
         let n = match tokio::time::timeout(remaining, s.read(&mut buf)).await {
-            // Nothing arrived at all. The caller decides what that means: on a reused connection it
-            // is a stale one, on a fresh connection it is a failure. A timeout with nothing received
-            // is the same observation as a read error with nothing received.
-            Err(_) | Ok(Err(_)) if acc.is_empty() => return Exchange::ClosedBeforeAnyBytes,
-            Err(_) | Ok(Err(_)) => return Exchange::Failed,
+            // THE DEADLINE ELAPSED, and that is our bound firing, never a stale connection. This
+            // read is bounded by what is left of `RESPONSE_BUDGET`, so `Err` here means the peer
+            // held a live connection for the whole budget and said nothing - a gateway that hangs.
+            // Folding it into `ClosedBeforeAnyBytes` made it invisible on a reused connection (the
+            // caller retries that case silently: no ok, no fail, nothing but depressed rps) and a
+            // bare `fail` on a fresh one, where "our thirty seconds fired" read exactly like a
+            // refusal. A timeout is always accounted and always attributed to the bound that fired.
+            Err(_) => return Exchange::BudgetExceeded,
+            // A read ERROR with nothing received is the peer going away, which the caller reads by
+            // freshness: on a reused connection it is a stale connection of ours, on a fresh one it
+            // is a failure.
+            Ok(Err(_)) if acc.is_empty() => return Exchange::ClosedBeforeAnyBytes,
+            Ok(Err(_)) => return Exchange::Failed,
             Ok(Ok(n)) => n,
         };
         if n == 0 {
@@ -492,19 +625,33 @@ pub fn run(cfg: &GenConfig) -> GenStats {
         }
     };
 
-    let req = Arc::new(build_request(cfg));
+    let req = match build_request(cfg) {
+        Ok(r) => Arc::new(r),
+        // The rig could not pose the question honestly, which is the same class of fact as a runtime
+        // it could not build: reported as a window that never ran, never as a window of failures the
+        // gateway would be charged with.
+        Err(why) => {
+            eprintln!("loadgen: refusing to send this window's request: {why}");
+            return GenStats {
+                spawn_failed: true,
+                ..Default::default()
+            };
+        }
+    };
     let addr = cfg.addr;
     let duration = cfg.duration;
     let concurrency = cfg.concurrency.max(1);
 
     rt.block_on(async move {
         let stop = Arc::new(AtomicBool::new(false));
+        let window = Arc::new(Window::default());
         let mut handles = Vec::with_capacity(concurrency as usize);
         for _ in 0..concurrency {
             handles.push(tokio::spawn(worker(
                 addr,
                 Arc::clone(&req),
                 Arc::clone(&stop),
+                Arc::clone(&window),
             )));
         }
 
@@ -516,10 +663,19 @@ pub fn run(cfg: &GenConfig) -> GenStats {
         // against the concurrencies it was climbing toward. Spawning tasks is cheap enough that the
         // ramp is no longer a meaningful share of the window, and timing the sleep alone is what
         // the original comment always said this measured.
+        // AND THE SAME WINDOW IS WHAT COUNTS. `start` opens the interval the tasks credit their
+        // completions to; `end` closes it, published BEFORE the stop flag so no task can be past the
+        // end without being able to see it. Everything that completes in the drain after `end` is
+        // real work that finished outside the interval `elapsed_s` measures, and counting it into
+        // `ok` raised rps by one free success per lane - worst at high concurrency with slow
+        // responses, which is precisely where the peak search is looking.
         let started = Instant::now();
+        let _ = window.start.set(started);
         tokio::time::sleep(duration).await;
+        let ended = Instant::now();
+        let _ = window.end.set(ended);
         stop.store(true, Ordering::Relaxed);
-        let load_elapsed = started.elapsed();
+        let load_elapsed = ended.duration_since(started);
 
         let mut g = GenStats {
             elapsed_s: load_elapsed.as_secs_f64(),
@@ -568,19 +724,45 @@ mod tests {
         }
     }
 
-    // The percentile convention must match the Go generator EXACTLY. A one-index difference is a
-    // silent disagreement between two instruments that both look correct, and it would surface as an
-    // unexplained step change in published p99 the day the instrument was swapped.
+    // THE PERCENTILE CONVENTION IS THE ENGINE'S, NOT THIS FILE'S. A one-index difference is a silent
+    // disagreement between two instruments that both look correct, and this engine shipped one
+    // (ledger SRCH-04): the load generator resolved a rank with floor while the streaming
+    // percentiles used ceil, with comments in both files claiming they agreed.
+    //
+    // The floor convention this test used to pin is exactly what makes the case below wrong: it put
+    // p50 at index 5 of ten (the SIXTH value, above the middle) and p99 at index 9 (the MAXIMUM),
+    // and the assertion literally read "the last value". A percentile that is the maximum is not a
+    // percentile, which `metric.rs`'s own test asserted in the same crate.
     #[test]
-    fn percentiles_are_nearest_rank_matching_the_go_generator() {
+    fn percentiles_are_nearest_rank_on_the_engines_one_convention() {
         let s = stats(&[10, 20, 30, 40, 50, 60, 70, 80, 90, 100], 10, 0, 1.0);
-        assert_eq!(s.pct_us(0.50), 60, "index (10*0.5)=5 -> the 6th value");
-        assert_eq!(s.pct_us(0.99), 100, "index (10*0.99)=9 -> the last value");
+        assert_eq!(
+            s.pct_us(0.50),
+            50,
+            "ceil(10*0.5)=5 -> index 4 -> the 5th value"
+        );
         assert_eq!(s.pct_us(0.0), 10);
         assert_eq!(
             s.pct_us(1.0),
             100,
             "q=1.0 clamps to the last index rather than overflowing"
+        );
+        // Every rank goes through the one function, so this cannot drift back apart.
+        for q in [0.0, 0.5, 0.9, 0.95, 0.99, 1.0] {
+            let sorted = s.sorted_latencies();
+            assert_eq!(
+                s.pct_us(q),
+                sorted[crate::stats::nearest_rank_index(sorted.len(), q)]
+            );
+        }
+        // Over a hundred samples - the count the streaming legs take - a p99 must not be the max.
+        let big: Vec<u64> = (1..=100).collect();
+        let s100 = stats(&big, 100, 0, 1.0);
+        assert_eq!(s100.pct_us(0.99), 99);
+        assert_eq!(s100.pct_us(0.50), 50);
+        assert!(
+            s100.pct_us(0.99) < s100.pct_us(1.0),
+            "a p99 that equals the maximum is the worst sample wearing a percentile's name"
         );
     }
 
@@ -638,7 +820,7 @@ mod tests {
             duration: Duration::from_millis(1),
             ttft_ms: 0,
         };
-        let r = build_request(&cfg);
+        let r = build_request(&cfg).expect("a well-formed header list must build");
         assert!(r.starts_with("POST /v1/chat/completions HTTP/1.1\r\n"));
         assert!(r.contains("x-one: 1\r\n") && r.contains("x-two: 2\r\n"));
         assert!(r.ends_with(r#"{"a":1}"#));
@@ -1036,5 +1218,240 @@ mod tests {
         assert_eq!(legacy.rig_refused, 0);
         assert_eq!(legacy.budget_exceeded, 0);
         assert_eq!(legacy.ok, 999);
+    }
+
+    // A GATEWAY THAT ACCEPTS AND THEN HANGS MUST BE VISIBLE.
+    //
+    // A read timeout used to be reported as `ClosedBeforeAnyBytes`, which the worker retries in
+    // silence on a reused connection - no ok, no fail, no budget count, so a hung gateway showed up
+    // only as mysteriously low rps - and counted as a bare `fail` on a fresh one, where our own
+    // thirty-second bound firing read exactly like the gateway refusing. The deadline passing is our
+    // bound, on every connection, and it says so.
+    #[test]
+    fn a_read_timeout_on_a_live_connection_is_our_budget_firing_not_a_stale_connection() {
+        let hangs = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let hang_addr = hangs.local_addr().expect("addr");
+        std::thread::spawn(move || {
+            for c in hangs.incoming() {
+                let Ok(c) = c else { continue };
+                // Accept, then say nothing and hold the connection open.
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_secs(5));
+                    drop(c);
+                });
+            }
+        });
+
+        let closes = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let close_addr = closes.local_addr().expect("addr");
+        std::thread::spawn(move || {
+            for c in closes.incoming() {
+                drop(c); // accept and close at once: a peer going away, not a peer hanging
+            }
+        });
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime to drive one exchange");
+        rt.block_on(async move {
+            let mut acc: Vec<u8> = Vec::new();
+            let mut hung = TcpStream::connect(hang_addr).await.expect("connect");
+            let out = read_response(
+                &mut hung,
+                Instant::now() + Duration::from_millis(150),
+                &mut acc,
+            )
+            .await;
+            assert_eq!(
+                out,
+                Exchange::BudgetExceeded,
+                "a peer holding a live connection past the deadline is our bound firing, got {out:?}"
+            );
+
+            // The other half of the rule, unchanged: a peer that GOES AWAY with nothing sent is
+            // still the stale-connection case the worker retries on a reused connection, so this fix
+            // must not turn every idle keep-alive close into a failure.
+            let mut gone = TcpStream::connect(close_addr).await.expect("connect");
+            let out = read_response(
+                &mut gone,
+                Instant::now() + Duration::from_secs(30),
+                &mut acc,
+            )
+            .await;
+            assert_eq!(
+                out,
+                Exchange::ClosedBeforeAnyBytes,
+                "a peer that closed without answering is not our budget, got {out:?}"
+            );
+        });
+    }
+
+    // OUR CONNECT BOUND IS NOT THE GATEWAY REFUSING, AND IT IS NOT THE RIG RUNNING OUT EITHER.
+    //
+    // The five-second connect timeout used to land in `fail` with no attribution at all, beside
+    // EADDRNOTAVAIL/EMFILE which do get `rig_refused`. It is filed as our bound firing:
+    // `rig_refused` is the claim "this host had no port or descriptor left", and run.rs turns a
+    // window containing any of those into an UNMEASURED one - so filing a hung gateway there would
+    // erase the failure it caused.
+    #[test]
+    fn a_connect_timeout_is_charged_to_our_own_bound_never_to_rig_exhaustion() {
+        assert_eq!(connect_fault(None), ConnectFault::OurConnectBound);
+        assert_eq!(
+            connect_fault(Some(&std::io::Error::from_raw_os_error(24))),
+            ConnectFault::RigExhausted,
+            "EMFILE is this host out of descriptors"
+        );
+        assert_eq!(
+            connect_fault(Some(&std::io::Error::from(
+                std::io::ErrorKind::AddrNotAvailable
+            ))),
+            ConnectFault::RigExhausted,
+            "EADDRNOTAVAIL is this host out of ephemeral ports"
+        );
+        assert_eq!(
+            connect_fault(Some(&std::io::Error::from(
+                std::io::ErrorKind::ConnectionRefused
+            ))),
+            ConnectFault::PeerRefused
+        );
+
+        let charged = |f: ConnectFault| {
+            let mut w = WorkerStats::default();
+            w.charge_connect_fault(f);
+            (w.fail, w.rig_refused, w.budget_exceeded)
+        };
+        assert_eq!(
+            charged(ConnectFault::OurConnectBound),
+            (1, 0, 1),
+            "a connect timeout is a failure the caller felt AND our bound, never rig exhaustion"
+        );
+        assert_eq!(charged(ConnectFault::RigExhausted), (1, 1, 0));
+        assert_eq!(
+            charged(ConnectFault::PeerRefused),
+            (1, 0, 0),
+            "a refusal is the gateway's alone"
+        );
+    }
+
+    // THE RATE'S NUMERATOR AND DENOMINATOR MUST DESCRIBE THE SAME WINDOW.
+    //
+    // Every lane's in-flight response used to complete during the post-stop drain and count into
+    // `ok` while `elapsed_s` stayed frozen at the sleep - one free success per lane, largest exactly
+    // where the peak search is climbing (high concurrency, slow responses). Here nothing can
+    // possibly answer inside the window, so an honest window reports nothing rather than a rate
+    // built entirely out of the drain.
+    #[test]
+    fn responses_that_land_after_the_window_closes_are_not_counted_into_its_rate() {
+        let served = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let counter = Arc::clone(&served);
+        let l = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = l.local_addr().expect("addr");
+        std::thread::spawn(move || {
+            for c in l.incoming() {
+                let Ok(mut c) = c else { continue };
+                let counter = Arc::clone(&counter);
+                std::thread::spawn(move || {
+                    let mut b = [0u8; 4096];
+                    if c.read(&mut b).unwrap_or(0) == 0 {
+                        return;
+                    }
+                    counter.fetch_add(1, Ordering::Relaxed);
+                    // Answer well after the load window has closed: a real response, delivered
+                    // during the drain.
+                    std::thread::sleep(Duration::from_millis(700));
+                    let _ = c.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok");
+                });
+            }
+        });
+
+        let g = run(&GenConfig {
+            addr,
+            path: "/x".into(),
+            body: "{}".into(),
+            headers: vec![],
+            concurrency: 4,
+            duration: Duration::from_millis(200),
+            ttft_ms: 0,
+        });
+
+        assert!(
+            served.load(Ordering::Relaxed) > 0,
+            "the window must actually have driven requests, or this proves nothing"
+        );
+        assert_eq!(
+            g.ok, 0,
+            "no response arrived inside the window, so none of them is throughput it sustained"
+        );
+        assert!(
+            g.latencies_us.is_empty(),
+            "a completion outside the window contributes no latency either"
+        );
+        assert_eq!(g.rps(), 0);
+    }
+
+    // A HEADER VALUE IS NOT ALLOWED TO CHOOSE WHAT BYTES GO ON THE WIRE.
+    //
+    // Header values arrive from the manifest across a process boundary, and they are interpolated
+    // straight into the request head: a CRLF in one appends a header the manifest never wrote, and a
+    // double CRLF ends the head and makes the rest a second request on the connection.
+    #[test]
+    fn a_header_carrying_crlf_is_refused_rather_than_smuggled_onto_the_wire() {
+        let with = |headers: Vec<(String, String)>, path: &str| GenConfig {
+            addr: "127.0.0.1:1".parse().expect("literal"),
+            path: path.into(),
+            body: r#"{"a":1}"#.into(),
+            headers,
+            concurrency: 1,
+            duration: Duration::from_millis(1),
+            ttft_ms: 0,
+        };
+
+        for (name, value) in [
+            ("authorization", "Bearer t\r\nx-injected: yes"),
+            ("authorization", "Bearer t\r\n\r\nPOST /other HTTP/1.1"),
+            ("authorization", "Bearer t\nx-injected: yes"),
+            ("x-route\r\nx-injected", "yes"),
+            ("x-route: x", "yes"),
+        ] {
+            let cfg = with(vec![(name.into(), value.into())], "/v1/chat/completions");
+            let err = build_request(&cfg)
+                .expect_err("a header that would inject must not build a request");
+            assert!(
+                err.contains("inject"),
+                "the refusal must name the defect: {err}"
+            );
+        }
+
+        // The request line is the same wire format and the same manifest source.
+        assert!(build_request(&with(vec![], "/v1/chat HTTP/1.1\r\nx: y")).is_err());
+
+        // And an ordinary header list still builds, so the rule is about line breaks rather than
+        // about anything a real credential contains.
+        let ok = build_request(&with(
+            vec![("authorization".into(), "Bearer sk-abc.DEF_123-+/=".into())],
+            "/v1/chat/completions",
+        ))
+        .expect("a real credential must still send");
+        assert!(ok.contains("authorization: Bearer sk-abc.DEF_123-+/=\r\n"));
+    }
+
+    // And the window built from such a manifest NEVER RUNS: a sanitised header would send a
+    // credential or a routing key the manifest did not write and publish the result under the
+    // pairing it asked for, while a window of failures would charge the gateway for our refusal.
+    // `spawn_failed` is the existing "the rig never posed the question" answer.
+    #[test]
+    fn a_window_whose_request_would_inject_never_runs_and_charges_the_gateway_nothing() {
+        let g = run(&GenConfig {
+            addr: "127.0.0.1:1".parse().expect("literal"),
+            path: "/x".into(),
+            body: "{}".into(),
+            headers: vec![("x-route".into(), "a\r\nx-injected: b".into())],
+            concurrency: 2,
+            duration: Duration::from_millis(50),
+            ttft_ms: 0,
+        });
+        assert!(g.spawn_failed, "the rig could not pose the question");
+        assert_eq!((g.ok, g.fail), (0, 0), "and nothing is charged to anyone");
     }
 }

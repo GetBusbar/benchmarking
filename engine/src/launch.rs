@@ -220,8 +220,20 @@ pub fn build_invocation(spec: &LaunchSpec) -> Invocation {
                 "run".to_string(),
                 "-d".to_string(),
                 "--name".to_string(),
-                name.to_string(),
+                name,
             ];
+            // LABELS SO A SWEEP CAN FIND THIS RUN'S CONTAINERS WITHOUT GUESSING AT NAMES. The name
+            // is run-scoped precisely so one run cannot remove another's container, which leaves a
+            // question the name alone no longer answers: which containers belong to this run, and
+            // which gateway is any given one. `docker ps --filter label=otb.run=<id>` answers the
+            // first and `label=otb.gateway=<name>` the second, the same way run-on-ec2.sh's teardown
+            // filters boxes on `tag:run` rather than parsing instance names.
+            args.push("--label".to_string());
+            args.push(format!("otb.gateway={}", spec.runtime.declared_identity()));
+            if let Some(scope) = spec.runtime.run_scope() {
+                args.push("--label".to_string());
+                args.push(format!("otb.run={scope}"));
+            }
             match port {
                 PortMapping::Host => {
                     args.push("--network".to_string());
@@ -375,24 +387,79 @@ pub trait Launcher {
     }
 }
 
-/// Run ONE line from a gateway's `commands` file, through a shell, with a hard timeout.
+/// THE DIRECTORY A `commands` LINE'S RELATIVE PATHS RESOLVE AGAINST.
+///
+/// A commands line is transcribed from the gateway's own documentation, and such a line writes and
+/// reads relative paths (`> .minted-auth`, `-f config.yaml`). Run with the engine's inherited cwd,
+/// that artifact lands wherever the operator happened to launch `otb` from, which is not where
+/// anything looks for it: `resolve_minted_auth` reads `<gw_dir>/.minted-auth`, so a credential minted
+/// into the wrong directory is silently not found and the run authenticates with the manifest's
+/// placeholder.
+///
+/// A PROCESS-WIDE VALUE, SET ONCE, and that is the deliberate part. The commands are replayed by
+/// `run::restart_to_rest` on every memory-phase restart, and that call site has no gateway directory
+/// to pass (its `RunConfig` carries the relaunch spec and the command lines, not the directory). A
+/// second spelling of the directory - one for the initial launch, one for the replay - is exactly the
+/// drift `manifest.rs`'s single-identity rule exists to rule out, so there is one, set by the binary
+/// before the first command runs and never changed after.
+static COMMANDS_DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+/// Declare the directory every `commands` line runs in. Set once, by the binary, before any command
+/// runs; a second call is ignored, so a later caller cannot quietly move the ground under a replay.
+pub fn set_commands_dir(dir: std::path::PathBuf) {
+    let _ = COMMANDS_DIR.set(dir);
+}
+
+/// Where `run_line` will run. `None` until the binary declares one, which keeps the library's
+/// behaviour explicit rather than inventing a directory of its own.
+pub fn commands_dir() -> Option<&'static std::path::Path> {
+    COMMANDS_DIR.get().map(std::path::PathBuf::as_path)
+}
+
+/// Run ONE line from a gateway's `commands` file, through a shell, with a hard timeout, in the
+/// directory `set_commands_dir` declared.
 ///
 /// A shell because these lines are what a gateway's own documentation tells an operator to type,
 /// and those instructions use pipes, quoting and redirection. The alternative is a bespoke argv
 /// encoding that every author would have to learn in order to transcribe a documented curl.
 pub fn run_line(line: &str, timeout: Duration) -> Result<(), String> {
-    run_with_timeout("/bin/sh", &["-c".to_string(), line.to_string()], timeout)
+    run_line_in(commands_dir(), line, timeout)
+}
+
+/// The same, with the directory passed explicitly. `None` means the inherited cwd, which is only
+/// correct for a line that touches no relative path at all.
+pub fn run_line_in(
+    dir: Option<&std::path::Path>,
+    line: &str,
+    timeout: Duration,
+) -> Result<(), String> {
+    run_with_timeout_in(
+        dir,
+        "/bin/sh",
+        &["-c".to_string(), line.to_string()],
+        timeout,
+    )
 }
 
 /// Run a pre-launch command with its own hard timeout, using only `std::process`: poll
 /// `Child::try_wait` rather than blocking on `wait`, so a hung command is killed instead of hanging
 /// this call forever.
 fn run_with_timeout(command: &str, args: &[String], timeout: Duration) -> Result<(), String> {
-    let mut child = Command::new(command)
-        .args(args)
-        .stdin(Stdio::null())
-        .spawn()
-        .map_err(|e| format!("failed to start: {e}"))?;
+    run_with_timeout_in(None, command, args, timeout)
+}
+
+fn run_with_timeout_in(
+    dir: Option<&std::path::Path>,
+    command: &str,
+    args: &[String],
+    timeout: Duration,
+) -> Result<(), String> {
+    let mut cmd = Command::new(command);
+    cmd.args(args).stdin(Stdio::null());
+    if let Some(dir) = dir {
+        cmd.current_dir(dir);
+    }
+    let mut child = cmd.spawn().map_err(|e| format!("failed to start: {e}"))?;
 
     let deadline = Instant::now() + timeout;
     loop {
@@ -406,6 +473,13 @@ fn run_with_timeout(command: &str, args: &[String], timeout: Duration) -> Result
             }
             Ok(None) => {
                 if Instant::now() >= deadline {
+                    // KILL THE WHOLE TREE, NOT JUST THE SHELL. `child.kill()` signals the
+                    // `/bin/sh -c` this spawned and nothing below it, so a line like
+                    // `curl ... | tee` or a backgrounded `docker exec` outlives the timeout and keeps
+                    // configuring the gateway - or holding its port - AFTER the timeout was reported
+                    // as a failure and measurement moved on. A command that reconfigures the gateway
+                    // mid-window changes what is being measured while it is being measured.
+                    kill_descendants(child.id());
                     let _ = child.kill();
                     let _ = child.wait();
                     return Err(format!("timed out after {timeout:?}"));
@@ -415,6 +489,51 @@ fn run_with_timeout(command: &str, args: &[String], timeout: Duration) -> Result
             Err(e) => return Err(format!("failed to poll status: {e}")),
         }
     }
+}
+
+/// Hard-kill everything below `root` in the process tree.
+///
+/// FREEZE FIRST, THEN KILL. Signalling the tree one layer at a time loses a race the timeout path
+/// cannot afford: kill the leaf `sleep` and its parent shell wakes up and runs the NEXT command in
+/// the line (the `touch`, the `curl` that reconfigures the gateway) before the signal aimed at it
+/// arrives. SIGSTOP on the whole tree first means nothing in it is scheduled again at all, so the
+/// SIGKILL that follows lands on a tree that cannot have advanced.
+///
+/// Reads one process table snapshot (`supervise::process_table`) rather than creating a process
+/// group: `unsafe_code` is forbidden in this crate, so `setsid` before exec is not available, and a
+/// `setsid` binary is not present on every platform a contributor runs the tests on. The accepted
+/// limitation is a grandchild already reparented away from `root` before the snapshot - its link to
+/// this tree is gone from the kernel's own records at that point, so nothing could have found it.
+fn kill_descendants(root: u32) {
+    let table = crate::supervise::process_table();
+    let mut tree: Vec<u32> = vec![root];
+    let mut frontier = vec![root];
+    while let Some(parent) = frontier.pop() {
+        for e in table.iter() {
+            if e.ppid == parent && !tree.contains(&e.pid) {
+                tree.push(e.pid);
+                frontier.push(e.pid);
+            }
+        }
+    }
+    let descendants = &tree[1..];
+    if descendants.is_empty() {
+        return;
+    }
+    // The root is frozen along with them: it is the shell that would otherwise start the next
+    // command in the line. Its own SIGKILL comes from the caller's `Child::kill`, which is the only
+    // way to also reap it.
+    signal_tree("-STOP", &tree);
+    signal_tree("-KILL", descendants);
+}
+
+fn signal_tree(signal: &str, pids: &[u32]) {
+    let _ = Command::new("kill")
+        .arg(signal)
+        .args(pids.iter().map(u32::to_string))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
 }
 
 /// Collects a native gateway's `Child`, if there is one, so the OS releases its process table entry
@@ -545,11 +664,11 @@ impl Launcher for RealLauncher {
     /// and a page of startup warnings, and only then fails, pushed the actual error out of a shorter
     /// window: one entrant's capture was twenty lines of nginx warnings and no error at all.
     fn diagnostics(&mut self, spec: &LaunchSpec) -> Option<String> {
-        let Runtime::Docker { container } = &spec.runtime else {
+        if !spec.runtime.is_docker() {
             return None;
-        };
+        }
         let out = Command::new("docker")
-            .args(["logs", "--tail", "60", container])
+            .args(["logs", "--tail", "60", &spec.runtime.identity()])
             .stdin(Stdio::null())
             .output()
             .ok()?;
@@ -652,6 +771,7 @@ mod tests {
         LaunchSpec {
             runtime: Runtime::Docker {
                 container: "gw-bench".into(),
+                run_scope: None,
             },
             kind: LaunchKind::Docker {
                 image: "gw:1.0".into(),
@@ -739,6 +859,64 @@ mod tests {
         );
     }
 
+    // ---- commands run in the gateway's own directory -----------------------------------------------
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        // Shell-safe by construction: this path is interpolated into a `/bin/sh -c` line below, and
+        // a thread id (`ThreadId(7)`) would put parentheses into it.
+        let dir =
+            std::env::temp_dir().join(format!("otb-launch-test-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        dir
+    }
+
+    // THE DEFECT: a `commands` line is transcribed from a gateway's own docs and writes relative
+    // paths (`> .minted-auth` is the one that already matters). Run with the engine's inherited cwd,
+    // that artifact landed wherever otb was started from, and `resolve_minted_auth` - which reads
+    // `<gw_dir>/.minted-auth` - never saw it, so the run silently authenticated with the manifest's
+    // placeholder.
+    #[test]
+    fn a_commands_line_writes_its_relative_artifact_into_the_gateway_directory() {
+        let dir = scratch("cwd");
+        run_line_in(
+            Some(&dir),
+            "printf 'sk-minted-123' > .minted-auth",
+            Duration::from_secs(10),
+        )
+        .expect("the line runs");
+        assert_eq!(
+            std::fs::read_to_string(dir.join(".minted-auth")).unwrap(),
+            "sk-minted-123",
+            "the credential must land in the gateway directory, not in the engine's cwd"
+        );
+    }
+
+    // A LINE THAT HANGS MUST NOT LEAVE ITS GRANDCHILDREN RUNNING. Killing only the spawned shell let
+    // a backgrounded curl or `docker exec` outlive the timeout and keep configuring the gateway after
+    // the timeout had been reported and measurement had moved on - a gateway reconfigured mid-window
+    // is not the gateway that was measured.
+    #[test]
+    fn a_timed_out_commands_line_takes_its_grandchildren_with_it() {
+        let dir = scratch("tree-kill");
+        let marker = dir.join("grandchild-survived");
+        // The shell backgrounds a grandchild that would touch the marker a second from now, then
+        // waits. `child.kill()` alone reaches the shell only; the grandchild goes on to write.
+        let line = format!(
+            "/bin/sh -c 'sleep 1; touch {}' & wait",
+            marker.to_string_lossy()
+        );
+        let err = run_line_in(Some(&dir), &line, Duration::from_millis(250))
+            .expect_err("the line must time out");
+        assert!(err.contains("timed out"), "{err}");
+
+        std::thread::sleep(Duration::from_millis(2500));
+        assert!(
+            !marker.exists(),
+            "a grandchild of the timed-out line survived the kill and went on working"
+        );
+    }
+
     // ---- required: container argument construction ------------------------------------------------
 
     #[test]
@@ -782,11 +960,45 @@ mod tests {
         // readers and the stop path take: there is no second name to disagree with it.
         assert_eq!(
             Runtime::Docker {
-                container: "gw-bench".into()
+                container: "gw-bench".into(),
+                run_scope: None,
             }
             .identity(),
             "gw-bench"
         );
+    }
+
+    // A RUN-SCOPED NAME, AND LABELS SO THE RUN CAN STILL FIND ITS OWN. Two overlapping runs of the
+    // same gateway used to name one container, so the second run's retry-loop `docker rm -f` deleted
+    // the first run's container mid-measurement.
+    #[test]
+    fn a_containers_name_is_scoped_to_the_run_that_created_it() {
+        let mut spec = docker_spec();
+        spec.runtime = spec.runtime.scoped_to_run("run-7");
+        let inv = build_invocation(&spec);
+        assert!(
+            inv.args
+                .windows(2)
+                .any(|w| w == ["--name".to_string(), "gw-bench-run-7".to_string()]),
+            "{:?}",
+            inv.args
+        );
+        assert!(
+            !inv.args.contains(&"gw-bench".to_string()),
+            "the unscoped name must not be what gets created: {:?}",
+            inv.args
+        );
+        // The stop path targets this same identity, so teardown removes its own container and only
+        // its own; the labels are how a cross-run sweep finds them without parsing names.
+        assert_eq!(spec.runtime.identity(), "gw-bench-run-7");
+        assert!(inv
+            .args
+            .windows(2)
+            .any(|w| w == ["--label".to_string(), "otb.run=run-7".to_string()]));
+        assert!(inv
+            .args
+            .windows(2)
+            .any(|w| w == ["--label".to_string(), "otb.gateway=gw-bench".to_string()]));
     }
 
     #[test]

@@ -184,19 +184,48 @@ pub fn max(values: &[f64]) -> Measurement<f64> {
     }
 }
 
-/// The `p`-th percentile of `values`, for `p` in `0.0..=1.0`, by NEAREST RANK: sort ascending and take
-/// the element at `floor(n * p)`, clamped to the last index, matching the same convention `gen.rs`'s
-/// load generator uses. Absent on an empty slice.
+/// THE ONE PERCENTILE CONVENTION THIS ENGINE USES. Every published percentile - the load
+/// generator's p50/p99, the search's rung median, the streaming TTFT and inter-frame-gap
+/// percentiles - resolves its rank through here, so no two of them can mean different things by the
+/// same name.
+///
+/// NEAREST RANK, CEILING: the 0-based index of the `ceil(n * p)`-th smallest value, clamped into
+/// `0..n`. Never interpolates, so a published percentile is always a value some sample really
+/// produced.
+///
+/// CEIL WON, and the engine used to be split. `metric.rs` computed `ceil(n*p)` (1-based) while
+/// `gen.rs`, `stats.rs` and `search.rs` computed `floor(n*p)` (0-based), and comments in all three
+/// places claimed the conventions matched. They agree whenever `n * p` is fractional and disagree by
+/// exactly one rank whenever it is a whole number - which is precisely the sample counts this rig
+/// chooses: n=100 TTFT samples per leg (`metric::STREAM_TTFT_SAMPLES`) puts p99 at index 98 under
+/// ceil and index 99 under floor, and index 99 of 100 IS THE MAXIMUM. That is the defect, and it is
+/// not cosmetic: floor turns a p99 into "the single worst sample", the one order statistic a tail
+/// percentile exists to avoid. `gen.rs`'s own test asserted it outright - `pct_us(0.99) == 100` over
+/// ten samples, commented "the last value" - and `metric.rs`'s asserted the opposite rule in the
+/// same crate ("the p99 must not be the max, or it is not a percentile"). Ceil is also the textbook
+/// nearest-rank definition (the smallest value at or above which at least `p` of the data falls), so
+/// the convention that survives is the one a reader of the board would assume.
+///
+/// This moves published percentiles by at most one rank, downward, on the whole-number cases. That
+/// is expected and it is the correction: the numbers it changes were the maximum wearing a
+/// percentile's name.
+///
+/// `n` must be non-zero; an empty sample set has no percentile at all and every caller answers that
+/// with an absence rather than a rank.
+pub fn nearest_rank_index(n: usize, p: f64) -> usize {
+    let rank = ((n as f64) * p).ceil() as usize;
+    rank.clamp(1, n.max(1)) - 1
+}
+
+/// The `p`-th percentile of `values`, for `p` in `0.0..=1.0`, by NEAREST RANK - see
+/// `nearest_rank_index` for the convention and why it is that one. Absent on an empty slice.
 pub fn percentile(values: &[f64], p: f64) -> Measurement<f64> {
     if values.is_empty() {
         return Measurement::absent(Absent::NotMeasured);
     }
     let mut sorted = values.to_vec();
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let n = sorted.len();
-    let idx = ((n as f64) * p).floor() as usize;
-    let idx = idx.min(n - 1);
-    Measurement::Measured(sorted[idx])
+    Measurement::Measured(sorted[nearest_rank_index(sorted.len(), p)])
 }
 
 #[cfg(test)]
@@ -507,9 +536,40 @@ mod tests {
     fn percentile_by_nearest_rank() {
         let v: Vec<f64> = (1..=10).map(|i| i as f64).collect(); // 1..10
         assert_eq!(percentile(&v, 0.0).copied(), Some(1.0));
-        assert_eq!(percentile(&v, 0.5).copied(), Some(6.0)); // floor(10*0.5)=5 -> index 5 -> value 6
+        assert_eq!(percentile(&v, 0.5).copied(), Some(5.0)); // ceil(10*0.5)=5 -> index 4 -> value 5
         assert_eq!(percentile(&v, 0.99).copied(), Some(10.0));
         assert_eq!(percentile(&v, 1.0).copied(), Some(10.0)); // clamped to the last index
+    }
+
+    // ONE CONVENTION, OR THE SAME WORD MEANS TWO THINGS ON ONE BOARD.
+    //
+    // Ledger SRCH-04: `metric.rs` resolved a rank with ceil while `gen.rs`, `stats.rs` and
+    // `search.rs` used floor, and comments in three files claimed they agreed. Over the sample
+    // counts this rig actually chooses - 100 TTFT samples a leg - floor puts p99 at index 99 of
+    // 100, which is the MAXIMUM. This pins the ranks directly so a future edit cannot quietly
+    // reintroduce the split.
+    #[test]
+    fn one_nearest_rank_convention_and_a_p99_that_is_not_the_maximum() {
+        // The whole-number cases are exactly where floor and ceil disagreed.
+        assert_eq!(nearest_rank_index(100, 0.99), 98);
+        assert_eq!(nearest_rank_index(100, 0.50), 49);
+        assert_eq!(nearest_rank_index(10, 0.50), 4);
+        assert!(
+            nearest_rank_index(100, 0.99) < 99,
+            "a p99 that lands on the last index is the maximum, not a percentile"
+        );
+        // Fractional n*p: both conventions always agreed here, and the answer must not move.
+        assert_eq!(nearest_rank_index(5, 0.5), 2);
+        assert_eq!(nearest_rank_index(7, 0.9), 6);
+        // The ends stay in range: p=0 is the smallest sample, p=1 the largest, never an out-of-bounds
+        // rank or a rank of zero.
+        for n in 1..200usize {
+            assert_eq!(nearest_rank_index(n, 0.0), 0);
+            assert_eq!(nearest_rank_index(n, 1.0), n - 1);
+            for p in [0.5, 0.9, 0.95, 0.99] {
+                assert!(nearest_rank_index(n, p) < n);
+            }
+        }
     }
 
     // ---- properties ---------------------------------------------------------------------------------

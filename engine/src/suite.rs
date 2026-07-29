@@ -157,17 +157,21 @@ fn rig_ceiling(cfg: &SuiteConfig, dialect: Dialect, at_conc: u32) -> Measurement
 /// this is the one narrowing point shared by every place a metric field becomes a record field.
 fn as_i64(m: Option<&Measurement<f64>>) -> Measurement<i64> {
     match m {
-        Some(m) => match m.value() {
-            Some(v) => Measurement::Measured(*v as i64),
-            None => match (m.reason().cloned(), m.detail()) {
-                (Some(r), Some(d)) => Measurement::absent_because(r, d),
-                (Some(r), None) => Measurement::absent(r),
-                (None, _) => Measurement::absent(Absent::NotMeasured),
-            },
-        },
+        Some(m) => carry(m, |v| v as i64),
         None => {
             Measurement::absent_because(Absent::NotMeasured, "no metric group fills this field")
         }
+    }
+}
+
+/// Narrow a metric-surface reading into whatever type the record publishes it as, keeping the reason
+/// AND the detail when it is absent. What matters is that the absent branch goes through
+/// `carry_absence` rather than through `.copied().map(...)`, which silently converts "absent, and
+/// here is why" into "absent".
+fn carry<T>(m: &Measurement<f64>, f: impl Fn(f64) -> T) -> Measurement<T> {
+    match m.value() {
+        Some(&v) => Measurement::Measured(f(v)),
+        None => carry_absence(m),
     }
 }
 
@@ -202,17 +206,13 @@ fn judge_cell(
         }
         _ => {
             // Carry the search's own reason and evidence rather than flattening it.
-            let absent = match (rps.reason().cloned(), rps.detail()) {
-                (Some(r), Some(d)) => Measurement::absent_because(r, d),
-                (Some(r), None) => Measurement::absent(r),
-                (None, _) => Measurement::absent(Absent::NotMeasured),
-            };
-            // The concurrency travels WITH the peak, present or absent. Leaving it at empty_perf()'s
-            // default published a different reason for the two halves of one fact.
-            out.rps_max_proxy_concurrency = match absent.reason().cloned() {
-                Some(r) => Measurement::absent(r),
-                None => Measurement::absent(Absent::NotMeasured),
-            };
+            let absent: Measurement<i64> = carry_absence(&rps);
+            // The concurrency travels WITH the peak, present or absent, and carries the same detail:
+            // leaving it at empty_perf()'s default published a different reason for the two halves of
+            // one fact, and re-deriving it from the reason alone published a thinner one.
+            out.rps_max_proxy_concurrency = carry_absence(&absent);
+            // conc_at_peak is the third face of the same fact and moves with it.
+            out.conc_at_peak = carry_absence(&absent);
             out.rps_max_proxy = absent;
         }
     }
@@ -305,15 +305,9 @@ fn judge_sustained(
         .unwrap_or_else(missing);
 
     let (Some(&value), Some(&conc_f)) = (rps.value(), conc_m.value()) else {
-        let absent = match (rps.reason().cloned(), rps.detail()) {
-            (Some(r), Some(d)) => Measurement::absent_because(r, d),
-            (Some(r), None) => Measurement::absent(r),
-            (None, _) => Measurement::absent(Absent::NotMeasured),
-        };
-        out.rps_sustained_20ms_concurrency = match absent.reason().cloned() {
-            Some(r) => Measurement::absent(r),
-            None => Measurement::absent(Absent::NotMeasured),
-        };
+        let absent: Measurement<i64> = carry_absence(&rps);
+        out.rps_sustained_20ms_concurrency = carry_absence(&absent);
+        out.conc_at_sustained = carry_absence(&absent);
         out.rps_sustained_20ms = absent;
         return;
     };
@@ -341,7 +335,8 @@ fn judge_sustained(
 /// and the mock are the same server, so the verdict logic has to be testable independent of
 /// `rig_ceiling` actually running one.
 fn apply_sustained_verdict(out: &mut CellPerf, value: f64, conc: u32, reference: Measurement<f64>) {
-    match rigbound::is_rig_bound(value, reference.clone()).copied() {
+    let verdict = rigbound::is_rig_bound(value, reference.clone());
+    match verdict.copied() {
         Some(true) => {
             let detail = match reference.copied() {
                 Some(r) => {
@@ -351,8 +346,12 @@ fn apply_sustained_verdict(out: &mut CellPerf, value: f64, conc: u32, reference:
             };
             out.rps_sustained_20ms = Measurement::absent_because(Absent::RigLimited, detail);
             out.rps_sustained_20ms_mock_bound = Some(true);
-            out.rps_sustained_20ms_concurrency = Measurement::absent(Absent::RigLimited);
-            out.conc_at_sustained = Measurement::absent(Absent::RigLimited);
+            // Suppressed WITH their number, and carrying its evidence: a concurrency left behind
+            // would be the operating point of a number the board is refusing to publish, and one
+            // left carrying the bare reason would name the suppression without the ceiling that
+            // caused it.
+            out.rps_sustained_20ms_concurrency = carry_absence(&out.rps_sustained_20ms);
+            out.conc_at_sustained = carry_absence(&out.rps_sustained_20ms);
         }
         Some(false) => {
             out.rps_sustained_20ms = Measurement::Measured(value as i64);
@@ -361,15 +360,19 @@ fn apply_sustained_verdict(out: &mut CellPerf, value: f64, conc: u32, reference:
             out.conc_at_sustained = Measurement::Measured(i64::from(conc));
         }
         None => {
+            let why = verdict.detail().map(str::to_string).unwrap_or_else(||
+                "the rig reference could not be measured, so it is unknown whether the gateway or the rig set this".to_string());
+            let reason = verdict.reason().cloned().unwrap_or(Absent::RigLimited);
             out.rps_sustained_20ms = Measurement::absent_because(
-                Absent::RigLimited,
-                format!(
-                    "sustained {value:.0} at c={conc}, but the rig reference could not be measured, so it is unknown whether the gateway or the rig set this"
-                ),
+                reason,
+                format!("sustained {value:.0} at c={conc}: {why}"),
             );
             out.rps_sustained_20ms_mock_bound = None;
-            out.rps_sustained_20ms_concurrency = Measurement::absent(Absent::RigLimited);
-            out.conc_at_sustained = Measurement::absent(Absent::RigLimited);
+            out.rps_sustained_20ms_concurrency = carry_absence(&out.rps_sustained_20ms);
+            // conc_at_sustained was assigned twice here, and the second assignment overwrote the
+            // verdict's own reason with a flat `RigLimited` - so a cell whose rig reference was
+            // unmeasurable published "the rig bounded this" beside a peak that says no such thing.
+            out.conc_at_sustained = carry_absence(&out.rps_sustained_20ms);
         }
     }
 }
@@ -381,7 +384,8 @@ fn apply_sustained_verdict(out: &mut CellPerf, value: f64, conc: u32, reference:
 /// and the measured branch was unreachable - a test written against `judge_cell` passed identically
 /// with the fix reverted, which is a test that is not testing anything.
 fn apply_peak_verdict(out: &mut CellPerf, value: f64, conc: u32, reference: Measurement<f64>) {
-    match rigbound::is_rig_bound(value, reference.clone()).copied() {
+    let verdict = rigbound::is_rig_bound(value, reference.clone());
+    match verdict.copied() {
         // Bounded by our own rig: this says nothing about the gateway, so it must not rank, win a
         // comparison, or draw a bar. Two fast gateways both pinned here would otherwise read as a
         // tie they did not earn.
@@ -394,9 +398,12 @@ fn apply_peak_verdict(out: &mut CellPerf, value: f64, conc: u32, reference: Meas
             };
             out.rps_max_proxy = Measurement::absent_because(Absent::RigLimited, detail);
             out.rps_max_proxy_mock_bound = Some(true);
-            // Suppressed WITH its peak: a concurrency left behind would be the operating point of a
-            // number the board is refusing to publish.
-            out.rps_max_proxy_concurrency = Measurement::absent(Absent::RigLimited);
+            // Suppressed WITH its peak, and with its peak's evidence: a concurrency left behind would
+            // be the operating point of a number the board is refusing to publish, and one carrying
+            // the bare reason names the suppression without the ceiling that caused it.
+            // conc_at_peak is the same fact again.
+            out.rps_max_proxy_concurrency = carry_absence(&out.rps_max_proxy);
+            out.conc_at_peak = carry_absence(&out.rps_max_proxy);
         }
         Some(false) => {
             out.rps_max_proxy = Measurement::Measured(value as i64);
@@ -410,12 +417,19 @@ fn apply_peak_verdict(out: &mut CellPerf, value: f64, conc: u32, reference: Meas
         // The reference itself was unusable, so whether the rig bounded this is UNKNOWN. Publishing
         // the number would assert it was gateway-bound, which was never established.
         None => {
+            // The verdict's OWN reason and evidence: "the reference was unmeasurable" and "the
+            // reference measured something impossible" are different findings, and re-labelling
+            // both as rig_limited with an invented sentence published two lies about one state.
+            let why = verdict.detail().map(str::to_string).unwrap_or_else(||
+                "the rig reference could not be measured, so it is unknown whether the gateway or the rig set this".to_string());
+            let reason = verdict.reason().cloned().unwrap_or(Absent::RigLimited);
             out.rps_max_proxy = Measurement::absent_because(
-                Absent::RigLimited,
-                format!("reached {value:.0} at c={conc}, but the rig reference could not be measured, so it is unknown whether the gateway or the rig set this"),
+                reason,
+                format!("reached {value:.0} at c={conc}: {why}"),
             );
             out.rps_max_proxy_mock_bound = None;
-            out.rps_max_proxy_concurrency = Measurement::absent(Absent::RigLimited);
+            out.rps_max_proxy_concurrency = carry_absence(&out.rps_max_proxy);
+            out.conc_at_peak = carry_absence(&out.rps_max_proxy);
         }
     }
 }
@@ -451,7 +465,14 @@ fn cell_memory(
     // it is turned back into the tri-state it really is here: settled, did not settle, or could not
     // be judged. An absent verdict must stay absent rather than collapsing to false, because "it did
     // not settle" is a claim about the gateway and "we could not tell" is a claim about the window.
-    let plateaued = take("memory_plateaued").copied().map(|v| v != 0.0);
+    //
+    // AS A MEASUREMENT, not an `Option<bool>`. `.copied().map(...)` threw the group's reason away on
+    // the way through, and the record field it landed in was a plain `Option` the absences map could
+    // not see - so a served cell whose window could not judge the plateau published a bare `null`
+    // with nothing anywhere saying why, which is the one thing every other null in this artifact
+    // cannot do. Same for `load_s` below.
+    let plateaued = carry(&take("memory_plateaued"), |v| v != 0.0);
+    let load_s = carry(&take("memory_load_s"), |v| v as i64);
     crate::record::CellMemory {
         // `served` here means the cell was served, which is the only reason a window ran at all.
         served: true,
@@ -468,7 +489,7 @@ fn cell_memory(
         recovered_rss_mib: take("memory_recovered_mib"),
         growth_rate_mib_per_min: take("memory_growth_rate_mib_per_min"),
         time_to_plateau_s: take("memory_time_to_plateau_s"),
-        load_s: take("memory_load_s").copied().map(|v| v as i64),
+        load_s,
         plateaued,
         recovery_window_s: Some(crate::metric::MEMORY_RECOVERY_S as i64),
         steady_state_rss_mib: steady,
@@ -523,28 +544,53 @@ fn cell_stream(
     // one type. Truncation here loses at most a microsecond off a latency difference.
     let us = |k: &str| -> Measurement<i64> { as_i64(metrics.get(k)) };
 
+    // A comparison COUNTS AS SERVED when it produced a number, and equally when the difference came
+    // out below what the rig can resolve: both legs delivered frames and the comparison ran; only the
+    // difference was too small to weigh. Publishing that as a status would read as "the stream did not
+    // flow", the opposite of what happened.
+    let flowed = |k: &str| {
+        metrics
+            .get(k)
+            .is_some_and(|m| m.is_measured() || matches!(m.reason(), Some(Absent::BelowResolution)))
+    };
     let ttft = metrics.get("added_ttft_p50_us");
-    let (stream_served, reason) =
-        match ttft.map(|m| (m.is_measured(), m.reason().cloned(), m.detail())) {
-            Some((true, _, _)) => (crate::record::StreamServed::Bool(true), None),
-            // A below-resolution difference IS a served stream: both legs delivered frames and the
-            // comparison ran; only the difference was too small to weigh. Publishing it as a status
-            // would read as "the stream did not flow", the opposite of what happened.
-            Some((false, Some(Absent::BelowResolution), _)) => {
-                (crate::record::StreamServed::Bool(true), None)
-            }
-            // Probed, and the answer was not a number. The reason travels as the status so a reader is
-            // never left to infer a gateway property from a rig limit.
-            Some((false, Some(r), detail)) => (
+    // THE VERDICT IS OVER EVERY STREAMING COMPARISON, NOT THE TTFT ONE ALONE. It read
+    // `added_ttft_p50_us` and nothing else, so a cell whose gap figures measured cleanly - which can
+    // only happen if frames flowed through the gateway and were timed - published `stream_served` as
+    // the TTFT leg's absence token and read as a cell that did not stream, while carrying measured
+    // streaming numbers two fields down.
+    let (stream_served, reason, stream_error) = match ttft {
+        Some(_) if flowed("added_ttft_p50_us") => {
+            (crate::record::StreamServed::Bool(true), None, None)
+        }
+        // Probed, the TTFT half produced nothing, but the gap half did: served, with the TTFT
+        // absence's own reason beside it so the partial is stated rather than implied.
+        Some(m) if flowed("added_gap_p50_us") || flowed("added_gap_p99_us") => (
+            crate::record::StreamServed::Bool(true),
+            m.reason().map(|r| r.token().to_string()),
+            m.detail().map(str::to_string),
+        ),
+        // Probed, and no comparison was a number. The reason travels as the status so a reader is
+        // never left to infer a gateway property from a rig limit.
+        Some(m) => match m.reason() {
+            Some(r) => (
                 crate::record::StreamServed::Status(r.token().to_string()),
-                detail.map(str::to_string),
+                Some(r.token().to_string()),
+                m.detail().map(str::to_string),
             ),
-            _ => (crate::record::StreamServed::default(), None),
-        };
+            None => (crate::record::StreamServed::default(), None, None),
+        },
+        None => (crate::record::StreamServed::default(), None, None),
+    };
 
     let mut out = crate::record::CellStream {
         stream_served,
+        // THE TOKEN, and the prose in the field that is for prose. `reason` carried the absence's
+        // free-text detail while the identically named `Cell::reason` carries a token, so one name
+        // meant two things in one artifact and a cell whose absence had no detail published a null
+        // reason beside a status that plainly had one.
         reason,
+        stream_error,
         added_ttft_p50_us: us("added_ttft_p50_us"),
         added_ttft_p99_us: us("added_ttft_p99_us"),
         added_gap_p50_us: us("added_gap_p50_us"),
@@ -611,11 +657,8 @@ fn judge_streams_sustained(
         .unwrap_or_else(missing);
 
     let (Some(&value), Some(&conc_f)) = (fps.value(), conc_m.value()) else {
-        let absent = carry_absence(&fps);
-        out.streams_sustained = match absent.reason().cloned() {
-            Some(r) => Measurement::absent(r),
-            None => Measurement::absent(Absent::NotMeasured),
-        };
+        let absent: Measurement<f64> = carry_absence(&fps);
+        out.streams_sustained = carry_absence(&absent);
         out.streams_sustained_fps = absent;
         return;
     };
@@ -648,11 +691,8 @@ fn judge_cpu_fps(
         .unwrap_or_else(missing);
 
     let (Some(&value), Some(&conc_f)) = (fps.value(), conc_m.value()) else {
-        let absent = carry_absence(&fps);
-        out.cpu_fps_concurrency = match absent.reason().cloned() {
-            Some(r) => Measurement::absent(r),
-            None => Measurement::absent(Absent::NotMeasured),
-        };
+        let absent: Measurement<f64> = carry_absence(&fps);
+        out.cpu_fps_concurrency = carry_absence(&absent);
         out.cpu_fps = absent;
         return;
     };
@@ -672,7 +712,17 @@ fn judge_cpu_fps(
 /// Re-wrap an absence so its reason AND its detail survive a narrowing. The searches attach their
 /// lower bound as prose, and flattening that to a bare null is the one place "the engine discards the
 /// measurement" was literally true.
-fn carry_absence<T>(m: &Measurement<f64>) -> Measurement<T> {
+///
+/// GENERIC IN THE SOURCE TYPE as well as the target, so it also serves the companion fields:
+/// `rps_max_proxy_concurrency` and `conc_at_peak` beside `rps_max_proxy`, and their sustained and
+/// stream equivalents. Those were built with `Measurement::absent(reason)`, which keeps the label and
+/// drops the evidence - "rig_limited" with no "against a rig ceiling of N at c=M" - so a reader who
+/// opened the absences map at a twin's key got strictly less than at the primary's, about a value the
+/// board is refusing to publish. One absence, one story, at every key that carries it.
+///
+/// A measured input yields `NotMeasured`, which is unreachable from the call sites (all inside an
+/// absent branch) and is the conservative answer if one ever stops being.
+fn carry_absence<A, T>(m: &Measurement<A>) -> Measurement<T> {
     match (m.reason().cloned(), m.detail()) {
         (Some(r), Some(d)) => Measurement::absent_because(r, d),
         (Some(r), None) => Measurement::absent(r),
@@ -690,7 +740,8 @@ fn apply_streams_sustained_verdict(
     conc: u32,
     reference: Measurement<f64>,
 ) {
-    match rigbound::is_rig_bound(value, reference.clone()).copied() {
+    let verdict = rigbound::is_rig_bound(value, reference.clone());
+    match verdict.copied() {
         // MATCHING THE MOCK'S RATE IS THE GATEWAY SUCCEEDING, NOT THE RIG LIMITING.
         //
         // The mock paces its deltas at a fixed interval and says so in its own header comment: "the
@@ -726,14 +777,15 @@ fn apply_streams_sustained_verdict(
             out.streams_sustained = Measurement::Measured(i64::from(conc));
         }
         None => {
+            let why = verdict.detail().map(str::to_string).unwrap_or_else(||
+                "the mock reference could not be measured, so it is unknown whether the gateway or the rig set this".to_string());
+            let reason = verdict.reason().cloned().unwrap_or(Absent::RigLimited);
             out.streams_sustained_fps = Measurement::absent_because(
-                Absent::RigLimited,
-                format!(
-                    "carried {value:.0} frames/sec at c={conc}, but the mock reference could not be measured, so it is unknown whether the gateway or the rig set this"
-                ),
+                reason,
+                format!("carried {value:.0} frames/sec at c={conc}: {why}"),
             );
             out.streams_sustained_mock_bound = None;
-            out.streams_sustained = Measurement::absent(Absent::RigLimited);
+            out.streams_sustained = carry_absence(&out.streams_sustained_fps);
         }
     }
 }
@@ -745,7 +797,8 @@ fn apply_cpu_fps_verdict(
     conc: u32,
     reference: Measurement<f64>,
 ) {
-    match rigbound::is_rig_bound(value, reference.clone()).copied() {
+    let verdict = rigbound::is_rig_bound(value, reference.clone());
+    match verdict.copied() {
         // Same reasoning as the streams verdict above: the mock's frames/sec is a paced target, not
         // a capacity, so reaching it is the gateway keeping up rather than the rig running out.
         Some(true) => {
@@ -759,14 +812,15 @@ fn apply_cpu_fps_verdict(
             out.cpu_fps_concurrency = Measurement::Measured(i64::from(conc));
         }
         None => {
+            let why = verdict.detail().map(str::to_string).unwrap_or_else(||
+                "the mock reference could not be measured, so it is unknown whether the gateway or the rig set this".to_string());
+            let reason = verdict.reason().cloned().unwrap_or(Absent::RigLimited);
             out.cpu_fps = Measurement::absent_because(
-                Absent::RigLimited,
-                format!(
-                    "peaked at {value:.0} frames/sec at c={conc}, but the mock reference could not be measured, so it is unknown whether the gateway or the rig set this"
-                ),
+                reason,
+                format!("peaked at {value:.0} frames/sec at c={conc}: {why}"),
             );
             out.cpu_fps_mock_bound = None;
-            out.cpu_fps_concurrency = Measurement::absent(Absent::RigLimited);
+            out.cpu_fps_concurrency = carry_absence(&out.cpu_fps);
         }
     }
 }
@@ -884,6 +938,17 @@ fn qualify_history(results_dir: &Path) -> Vec<f64> {
 
 /// The part that reads the directory, separated so the env contribution above is testable without a
 /// filesystem and this stays a pure function of what is on disk.
+///
+/// ONLY RUNS THAT QUALIFY CONTRIBUTE. `Outcome::qualifies_as_baseline` states the rule - a pass or a
+/// seed is a measurement taken on a box nothing was wrong with, a fail is a box that was already
+/// judged contaminated, and a skip measured nothing - but this harvested every record it could parse,
+/// so a failed qualification's rps went straight into the median that decides whether the NEXT run
+/// fails. A contaminated box would have spent its whole history dragging the band down toward itself
+/// until nothing failed the gate at all, which is the gate quietly switching itself off.
+///
+/// A record with no readable outcome does not contribute either. "Not known to qualify" is treated as
+/// "does not qualify" because the alternative is admitting a fail on the strength of it being
+/// unlabelled, and the whole point of the filter is what it keeps out.
 fn qualify_history_on_disk(results_dir: &Path) -> Vec<f64> {
     let Ok(entries) = std::fs::read_dir(results_dir) else {
         return Vec::new();
@@ -901,6 +966,14 @@ fn qualify_history_on_disk(results_dir: &Path) -> Vec<f64> {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
             continue;
         };
+        let qualifies = value
+            .pointer("/rig/box_qualify/outcome")
+            .and_then(serde_json::Value::as_str)
+            .and_then(crate::qualify::Outcome::from_token)
+            .is_some_and(|o| o.qualifies_as_baseline());
+        if !qualifies {
+            continue;
+        }
         if let Some(rps) = value
             .pointer("/rig/box_qualify/observed_rps")
             .and_then(serde_json::Value::as_f64)
@@ -923,6 +996,24 @@ pub fn run_suite_with(
     gateway_addr: SocketAddr,
     metrics: &[&dyn crate::metric::Metric],
 ) -> Result<Paths, SnapshotError> {
+    // A HEADER THIS MANIFEST DECLARES THAT THE RIG ALREADY SENDS ITSELF, said once per gateway
+    // before anything is measured.
+    //
+    // Ledger RIG-12's remainder. `run::headers_for` used to emit both copies, and HTTP does not
+    // define which of two same-named headers a server honours - so a gateway authenticated as
+    // somebody and published a clean number for a request whose credential nobody could name. The
+    // wire is unambiguous now (the rig's copy wins, the manifest's is dropped), and this is the
+    // other half of that fix: a precedence rule nobody is told about is the same silence as the
+    // ambiguity it replaced.
+    //
+    // Here rather than in `Manifest::problems`, which is the "this gateway is misconfigured" gate a
+    // real entrant must pass clean. This is not a setup mistake that breaks a launch: it is a line
+    // to delete from a first-party file, and `gateways/litellm-rust/definition.json` has it today
+    // (`Authorization: Bearer {GW_AUTH}`). Once per gateway, not once per cell, because a note
+    // repeated 36 times is a note nobody reads.
+    for note in cfg.manifest.rig_owned_headers_declared() {
+        eprintln!("[manifest] {}: {note}", cfg.manifest.name);
+    }
     let rc = RunConfig {
         gateway_addr,
         mock_addr: cfg.mock_addr,
@@ -1104,12 +1195,13 @@ pub fn run_suite_with(
                     p.sweep_sustained_20ms = series.sweep_sustained.clone();
                 }
                 // THE ANTI-FALSE-POSITIVE GUARD, published beside the numbers it qualifies. A cell
-                // whose egress dialect was NOT proven still carries its measurements - they are real
-                // observations of what the gateway did - but it can no longer be read as an
+                // whose egress dialect was NOT PROVEN (`None`) still carries its measurements - they
+                // are real observations of what the gateway did - but it can no longer be read as an
                 // unqualified translation claim, because the flag beside them says so and the note
                 // names what the mock actually received instead. See `reverify.rs` for why `None`
                 // (diagonal cell, recording off, mock unreachable) is a first-class third answer
-                // rather than a failure.
+                // rather than a failure. A `Some(false)` - proof of a MISROUTE - is handled below;
+                // that one does not get to publish numbers at all.
                 p.egress_reverified = result.reverify.verified;
                 p.reverify_note = result.reverify.note.clone();
                 Some(p)
@@ -1117,7 +1209,16 @@ pub fn run_suite_with(
             _ => None,
         };
 
+        let stream = match (&result.metrics, ing.parse::<Dialect>()) {
+            (Some(m), Ok(d)) => Some(cell_stream(cfg, d, m, result.series.as_ref())),
+            _ => None,
+        };
+
+        let (perf, stream, perf_dropped) =
+            withhold_if_refuted(&result.reverify, perf, stream, &ing, &eg);
+
         let cell = Cell {
+            perf_dropped,
             served,
             reason,
             // THE PATH THIS CELL WAS ACTUALLY DRIVEN AT, not the dialect's standard one recomputed
@@ -1143,10 +1244,7 @@ pub fn run_suite_with(
                 .metrics
                 .as_ref()
                 .map(|m| cell_memory(m, result.series.as_ref())),
-            stream: match (&result.metrics, ing.parse::<Dialect>()) {
-                (Some(m), Ok(d)) => Some(cell_stream(cfg, d, m, result.series.as_ref())),
-                _ => None,
-            },
+            stream,
             // What this cell COST, per metric group. Owned strings because the record is
             // deserialisable and a &'static str key cannot come back off disk.
             timings_s: result
@@ -1179,6 +1277,100 @@ pub fn run_suite_with(
     // The final write always happens, so a grid with a single egress column is not lost.
     let _ = written;
     flush(cfg, &upstreams, any_served, Some(box_qualify))
+}
+
+/// A REFUTED RE-VERIFICATION WITHHOLDS THE NUMBERS, IT DOES NOT MERELY ANNOTATE THEM.
+///
+/// `Some(false)` is leg 3 PROVING the request did not reach the mock as this cell's egress dialect
+/// (`reverify.rs`): either the gateway forwarded the ingress bytes verbatim or it emitted some third
+/// dialect. Every perf and stream number on the cell was then taken over that same wrong wire, so
+/// publishing them under `<ingress>-><egress>` states a translation throughput for a translation that
+/// did not happen - the exact false positive the guard exists to prevent, arriving through the
+/// numbers instead of through `served`.
+///
+/// `perf_dropped` was documented as the mechanism for precisely this and no writer ever set it, so a
+/// refutation published the refuted figures untouched with a note beside them. THE EVIDENCE ALL
+/// STAYS: `verdict_note` still names the refutation, `egress_reverified` still reads `false`,
+/// `reverify_note` still says what the mock actually received. What goes is the numbers, and
+/// `perf_dropped` says so in one string a consumer can branch on.
+///
+/// `None` (not checked: a diagonal cell, a mock that was not recording, a mock we could not reach)
+/// and `Some(true)` both leave the blocks alone. Only PROOF of a misroute withholds; suspicion does
+/// not, or every unrecordable run would silently stop publishing.
+///
+/// Pure, and separate from the grid loop, because this is the one branch in the suite that decides
+/// whether a measured number reaches the board at all, and the loop around it cannot be driven to a
+/// refutation from a fixture where one loopback server plays both the gateway and the mock.
+fn withhold_if_refuted(
+    reverify: &crate::reverify::Reverified,
+    perf: Option<CellPerf>,
+    stream: Option<crate::record::CellStream>,
+    ingress: &str,
+    egress: &str,
+) -> (
+    Option<CellPerf>,
+    Option<crate::record::CellStream>,
+    Option<String>,
+) {
+    if reverify.verified != Some(false) {
+        return (perf, stream, None);
+    }
+    let why = reverify
+        .note
+        .clone()
+        .unwrap_or_else(|| "no evidence was recorded with the refutation".to_string());
+    (
+        perf.map(|p| withhold_refuted_perf(p, &why)),
+        None,
+        Some(format!(
+            "perf and stream withheld: re-verification proved this cell's request did not reach the \
+             mock as {egress}, so every number taken here belongs to a wire that is not \
+             {ingress}>{egress}: {why}"
+        )),
+    )
+}
+
+/// Strip a refuted cell's measurements, keeping the block and the evidence that refuted it.
+///
+/// The block is kept rather than dropped to `None` because `egress_reverified` and `reverify_note`
+/// live in it, and they are the finding: a cell with no perf block at all cannot say WHY it has no
+/// numbers, which is how a refutation would come to look like a cell that was never measured.
+///
+/// `NotServed` is the reason on every field, and it is the honest one out of the vocabulary: the
+/// refutation is a statement about the GATEWAY (it did not serve this pairing - it answered by
+/// speaking some other dialect upstream), not about the rig and not about a search that ran out of
+/// room. The detail carries the mock's own evidence so the null is never bare.
+///
+/// The sweeps go too. They are rps against concurrency on the same misrouted wire, and a rung is as
+/// much a published number as the ceiling drawn from it.
+fn withhold_refuted_perf(p: CellPerf, why: &str) -> CellPerf {
+    let detail = format!(
+        "withheld: re-verification proved the request did not reach the mock as this cell's egress \
+         dialect, so this number was taken over a wire that is not this pairing: {why}"
+    );
+    let withheld = || Measurement::absent_because(Absent::NotServed, detail.clone());
+    CellPerf {
+        added_latency_p50_us: withheld(),
+        added_latency_p99_us: withheld(),
+        gateway_c1_p99_us: withheld(),
+        direct_c1_p99_us: withheld(),
+        rps_sustained_20ms: withheld(),
+        rps_sustained_20ms_concurrency: withheld(),
+        conc_at_sustained: withheld(),
+        rps_sustained_20ms_mock_bound: None,
+        rps_max_proxy: withheld(),
+        rps_max_proxy_concurrency: withheld(),
+        conc_at_peak: withheld(),
+        rps_max_proxy_mock_bound: None,
+        sweep_max_proxy: Vec::new(),
+        sweep_sustained_20ms: Vec::new(),
+        // THE EVIDENCE, kept verbatim: this is the whole reason the block survives.
+        egress_reverified: p.egress_reverified,
+        reverify_note: p.reverify_note,
+        // A sample-count note about legs that measured the wrong wire would describe the weight of a
+        // number nobody is publishing.
+        c1_note: None,
+    }
 }
 
 /// What the harness actually launched, as the artifact's `build` string.
@@ -1226,6 +1418,11 @@ fn flush(
             box_qualify,
         },
     );
+    // Resolved once and used at BOTH levels. `gateway_build` re-resolves the manifest's launch spec,
+    // and the matrix must name the same build the root does or the two levels of one artifact would
+    // disagree about what was measured.
+    let build =
+        gateway_build(cfg).unwrap_or_else(|| format!("otb-engine {}", env!("CARGO_PKG_VERSION")));
     let snap = ResultSnapshot {
         schema_version: 1,
         gateway: cfg.manifest.name.clone(),
@@ -1235,8 +1432,7 @@ fn flush(
         // image produced a number. Falls back to the engine string only when the manifest declares
         // no launch, i.e. when the harness did not start the thing it measured and genuinely does
         // not know its build.
-        build: gateway_build(cfg)
-            .unwrap_or_else(|| format!("otb-engine {}", env!("CARGO_PKG_VERSION"))),
+        build: build.clone(),
         measured_at: cfg.measured_at.clone(),
         arch: Some(cfg.arch.clone()),
         hardware: cfg.hardware.clone(),
@@ -1259,6 +1455,14 @@ fn flush(
             // both places, and a reader that finds it in one and not the other cannot tell which is
             // authoritative.
             rig,
+            // THE SAME REASONING, FOR THE SAME REASON, one level down. The root's hardware/arch/build
+            // were filled and the matrix's were left at Default, so the block that holds every number
+            // could not say what machine or build produced them: exactly the "hardware: null" episode
+            // the root's own field comment records, repeating inside the block a reader exports and
+            // diffs on its own. There is nothing to derive here - the values are already in hand.
+            build,
+            arch: Some(cfg.arch.clone()),
+            hardware: cfg.hardware.clone(),
             measured_at: cfg.measured_at.clone(),
             ..Default::default()
         },
@@ -2107,6 +2311,333 @@ mod tests {
                 .get("hardware")
                 .is_some_and(serde_json::Value::is_null),
             "absent must publish as a literal null"
+        );
+    }
+
+    // THE BLOCK THAT HOLDS THE NUMBERS MUST NAME WHAT PRODUCED THEM. The snapshot root's
+    // hardware/arch/build were filled and `matrix`'s were left at `Default` - null, null, empty - so
+    // the "hardware: null" episode the root's own comment records repeated one level down, inside the
+    // block that a reader exports, diffs and archives on its own.
+    #[test]
+    fn the_matrix_block_names_the_box_and_build_that_produced_its_numbers() {
+        let dir = tmpdir("matrix-provenance");
+        let gw = serve(200);
+        let mut cfg = cfg_for(&dir, gw);
+        cfg.hardware = Some("AWS m7g.4xlarge (16 cores / 64 GB)".into());
+        let paths = run_suite_with(&cfg, gw, &[]).expect("the suite writes a snapshot");
+        let back: ResultSnapshot =
+            serde_json::from_str(&std::fs::read_to_string(&paths.current).expect("read"))
+                .expect("its own output must parse");
+
+        assert_eq!(
+            back.matrix.hardware, back.hardware,
+            "the matrix must name the same box the root does"
+        );
+        assert_eq!(
+            back.matrix.hardware.as_deref(),
+            Some("AWS m7g.4xlarge (16 cores / 64 GB)")
+        );
+        assert_eq!(back.matrix.arch, back.arch);
+        assert_eq!(
+            back.matrix.build, back.build,
+            "and the same build: two levels of one artifact must not disagree about what was measured"
+        );
+        assert!(!back.matrix.build.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // A FAILED QUALIFICATION MUST NEVER SEED THE BASELINE IT FAILED AGAINST.
+    //
+    // `Outcome::qualifies_as_baseline` stated the rule and nothing called it: the harvest took every
+    // record on disk, so a contaminated box's own low reading joined the median that decides whether
+    // the next run fails - the gate slowly moving toward whatever the sick box was doing until
+    // nothing failed it at all.
+    #[test]
+    fn only_a_qualifying_run_contributes_to_the_rolling_baseline() {
+        let dir = tmpdir("qualify-history");
+        let write = |name: &str, outcome: &str, rps: f64| {
+            std::fs::write(
+                dir.join(name),
+                format!(
+                    r#"{{"rig":{{"box_qualify":{{"outcome":"{outcome}","observed_rps":{rps}}}}}}}"#
+                ),
+            )
+            .expect("fixture write");
+        };
+        write("result_gw_pass.json", "pass", 500_000.0);
+        write("result_gw_seed.json", "seed", 480_000.0);
+        write("result_gw_fail.json", "fail", 300_000.0);
+        write("result_gw_skip.json", "skip", 10.0);
+        // A record whose qualification predates the outcome field, or whose token this build does
+        // not know: not known to qualify, so it does not.
+        std::fs::write(
+            dir.join("result_gw_untagged.json"),
+            r#"{"rig":{"box_qualify":{"observed_rps":1.0}}}"#,
+        )
+        .expect("fixture write");
+
+        let mut history = qualify_history_on_disk(&dir);
+        history.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        assert_eq!(
+            history,
+            vec![480_000.0, 500_000.0],
+            "only pass and seed may seed the baseline, got {history:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // A REFUTED CELL PUBLISHES NO NUMBERS UNDER A NAME THE WIRE DID NOT EARN.
+    //
+    // `perf_dropped` was documented as the mechanism that withholds perf and stream when leg-3
+    // re-verification proves a misroute, and no writer ever set it: a cell whose request demonstrably
+    // never reached the mock as its own egress dialect still published a full throughput and
+    // streaming block under `<ingress>-><egress>`, which is a translation claim the gateway did not
+    // earn - the exact false positive reverify.rs exists to prevent, arriving by another door.
+    #[test]
+    fn a_refuted_reverification_withholds_the_numbers_and_keeps_the_evidence() {
+        let mut perf = empty_perf();
+        perf.rps_max_proxy = Measurement::Measured(46_863);
+        perf.rps_max_proxy_concurrency = Measurement::Measured(116);
+        perf.sweep_max_proxy = vec![crate::record::SweepPoint {
+            conc: 116,
+            rps: Measurement::Measured(46_863),
+            p99_us: Measurement::Measured(900),
+            fail: Measurement::Measured(0),
+        }];
+        perf.egress_reverified = Some(false);
+        perf.reverify_note = Some("the request arrived on the mock's anthropic endpoint".into());
+        let stream = crate::record::CellStream {
+            stream_served: crate::record::StreamServed::Bool(true),
+            added_ttft_p50_us: Measurement::Measured(1_200),
+            ..Default::default()
+        };
+        let refuted = crate::reverify::Reverified {
+            verified: Some(false),
+            note: Some("the request arrived on the mock's anthropic endpoint".into()),
+        };
+
+        let (perf, stream, dropped) =
+            withhold_if_refuted(&refuted, Some(perf), Some(stream), "anthropic", "openai");
+
+        let perf = perf.expect("the block stays: it carries the evidence");
+        assert_eq!(
+            perf.rps_max_proxy.copied(),
+            None,
+            "a peak measured over a misrouted wire must not publish under this cell's name"
+        );
+        assert_eq!(perf.rps_max_proxy_concurrency.copied(), None);
+        assert!(
+            perf.sweep_max_proxy.is_empty(),
+            "the rungs are numbers on that same wire and go with it"
+        );
+        assert_eq!(
+            perf.rps_max_proxy.reason(),
+            Some(&Absent::NotServed),
+            "the withholding is a finding about the gateway, not about the rig"
+        );
+        assert!(perf
+            .rps_max_proxy
+            .detail()
+            .unwrap_or_default()
+            .contains("anthropic endpoint"));
+        assert!(stream.is_none(), "the streaming numbers go the same way");
+        assert_eq!(
+            perf.egress_reverified,
+            Some(false),
+            "the evidence that refuted it must survive"
+        );
+        assert!(perf.reverify_note.is_some());
+        let dropped = dropped.expect("perf_dropped is the marker a consumer branches on");
+        assert!(
+            dropped.contains("anthropic>openai"),
+            "the marker must name the pairing whose claim was withheld, got {dropped:?}"
+        );
+    }
+
+    // The other half, and the reason this is not "drop whenever it is not proven": `None` is NOT
+    // CHECKED (a diagonal cell, a mock that was not recording, a mock we could not reach), and
+    // withholding on it would let our own configuration erase a gateway's real measurements.
+    #[test]
+    fn an_unchecked_reverification_withholds_nothing() {
+        let mut perf = empty_perf();
+        perf.rps_max_proxy = Measurement::Measured(46_863);
+        for verified in [None, Some(true)] {
+            let r = crate::reverify::Reverified {
+                verified,
+                note: Some("openai>openai is a same-dialect cell".into()),
+            };
+            let (kept, stream, dropped) = withhold_if_refuted(
+                &r,
+                Some(perf.clone()),
+                Some(crate::record::CellStream::default()),
+                "openai",
+                "openai",
+            );
+            assert_eq!(
+                kept.and_then(|p| p.rps_max_proxy.copied()),
+                Some(46_863),
+                "an unproven egress still publishes what was really measured"
+            );
+            assert!(stream.is_some());
+            assert_eq!(
+                dropped, None,
+                "nothing was withheld, so nothing says it was"
+            );
+        }
+    }
+
+    // A CELL WHOSE STREAM DEMONSTRABLY FLOWED MUST NOT READ AS ONE THAT DID NOT. `stream_served` was
+    // derived from `added_ttft_p50_us` alone, so a cell whose gap figures measured cleanly - which
+    // can only happen if frames arrived through the gateway and were timed - published the TTFT
+    // leg's absence token as its status while carrying measured streaming numbers two fields down.
+    #[test]
+    fn gap_figures_that_measured_make_a_served_stream_even_when_the_ttft_legs_failed() {
+        let dir = tmpdir("stream-status");
+        let gw = serve(200);
+        let cfg = cfg_for(&dir, gw);
+        let mut metrics: std::collections::BTreeMap<&'static str, Measurement<f64>> =
+            std::collections::BTreeMap::new();
+        metrics.insert(
+            "added_ttft_p50_us",
+            Measurement::absent_because(
+                Absent::RigLimited,
+                "the direct leg's first frame was not timeable",
+            ),
+        );
+        metrics.insert("added_gap_p50_us", Measurement::Measured(1_400.0));
+        metrics.insert("added_gap_p99_us", Measurement::Measured(9_100.0));
+
+        let out = cell_stream(&cfg, Dialect::Openai, &metrics, None);
+        assert!(
+            matches!(out.stream_served, crate::record::StreamServed::Bool(true)),
+            "frames flowed and were timed: this is a served stream, got {:?}",
+            out.stream_served
+        );
+        assert_eq!(
+            out.reason.as_deref(),
+            Some("rig_limited"),
+            "the partial must still be stated, as the TOKEN"
+        );
+        assert_eq!(
+            out.stream_error.as_deref(),
+            Some("the direct leg's first frame was not timeable"),
+            "and the prose belongs in the prose field"
+        );
+        assert_eq!(out.added_gap_p50_us.copied(), Some(1_400));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // A stream that produced nothing at all still publishes the reason as the STATUS, and now also as
+    // a token in `reason` - which used to hold the free-text detail, and was null whenever the
+    // absence had none, so the one field a consumer would branch on was prose or nothing.
+    #[test]
+    fn a_stream_that_produced_nothing_publishes_its_reason_as_a_token() {
+        let dir = tmpdir("stream-status-none");
+        let gw = serve(200);
+        let cfg = cfg_for(&dir, gw);
+        let mut metrics: std::collections::BTreeMap<&'static str, Measurement<f64>> =
+            std::collections::BTreeMap::new();
+        metrics.insert("added_ttft_p50_us", Measurement::absent(Absent::Untestable));
+        metrics.insert("added_gap_p50_us", Measurement::absent(Absent::Untestable));
+
+        let out = cell_stream(&cfg, Dialect::Openai, &metrics, None);
+        assert!(
+            matches!(&out.stream_served, crate::record::StreamServed::Status(s) if s == "untestable"),
+            "got {:?}",
+            out.stream_served
+        );
+        assert_eq!(
+            out.reason.as_deref(),
+            Some("untestable"),
+            "a status with no detail still has a reason, and must publish it"
+        );
+        assert_eq!(out.stream_error, None, "there was no prose to invent");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // EVERY NULL ON A SERVED CELL CARRIES A REASON, including the two that used to travel as plain
+    // `Option`s. `.copied().map(...)` threw the memory group's own reason away on the way into the
+    // record, and the record field it landed in was invisible to the absences map, so a window that
+    // could not judge the plateau published a bare null and nothing anywhere said why.
+    #[test]
+    fn a_memory_window_carries_the_groups_reason_for_an_unjudged_plateau() {
+        let mut metrics: std::collections::BTreeMap<&'static str, Measurement<f64>> =
+            std::collections::BTreeMap::new();
+        metrics.insert(
+            "memory_plateaued",
+            Measurement::absent_because(
+                Absent::NotMeasured,
+                "too few readings fell inside the settle window to judge whether memory moved",
+            ),
+        );
+        metrics.insert("memory_load_s", Measurement::Measured(90.0));
+
+        let mem = cell_memory(&metrics, None);
+        assert_eq!(mem.plateaued.copied(), None);
+        assert_eq!(mem.plateaued.reason(), Some(&Absent::NotMeasured));
+        assert!(
+            mem.plateaued
+                .detail()
+                .unwrap_or_default()
+                .contains("settle window"),
+            "the group's own evidence must survive the trip into the record"
+        );
+        assert_eq!(mem.load_s.copied(), Some(90));
+        assert!(
+            mem.absences().contains_key("plateaued"),
+            "and the absence must be reachable from the published absences map"
+        );
+    }
+
+    // A SUPPRESSED NUMBER'S TWINS CARRY ITS EVIDENCE, NOT JUST ITS LABEL. The companion fields were
+    // built with `Measurement::absent(reason)`, so a reader who opened the absences map at
+    // `perf.conc_at_peak` got "rig_limited" with no sign of the ceiling that caused it, while the
+    // primary two keys away carried the whole story.
+    #[test]
+    fn a_suppressed_peaks_twins_carry_the_same_evidence_the_peak_does() {
+        let mut out = empty_perf();
+        apply_peak_verdict(&mut out, 46_863.0, 116, Measurement::Measured(46_863.0));
+        let detail = out
+            .rps_max_proxy
+            .detail()
+            .expect("the suppressed peak states what bounded it")
+            .to_string();
+        assert!(detail.contains("rig ceiling"));
+        assert_eq!(
+            out.rps_max_proxy_concurrency.detail(),
+            Some(detail.as_str()),
+            "the twin must carry the same evidence, not a bare reason"
+        );
+        assert_eq!(out.conc_at_peak.detail(), Some(detail.as_str()));
+    }
+
+    // AND THE TWINS MUST CARRY THE SAME REASON. `conc_at_sustained` was assigned twice in the
+    // unknown-verdict branch, and the second assignment overwrote the verdict's own reason with a
+    // flat `RigLimited` - so a cell whose rig reference was unmeasurable published "the rig bounded
+    // this" on one field beside "we could not tell" on the two next to it.
+    #[test]
+    fn an_unknown_sustained_verdict_does_not_relabel_its_concurrency_as_rig_bound() {
+        let mut out = empty_perf();
+        apply_sustained_verdict(
+            &mut out,
+            11_968.0,
+            1024,
+            Measurement::absent(Absent::NotMeasured),
+        );
+        assert_eq!(out.rps_sustained_20ms.reason(), Some(&Absent::NotMeasured));
+        assert_eq!(
+            out.conc_at_sustained.reason(),
+            Some(&Absent::NotMeasured),
+            "the concurrency must carry the verdict's reason, not a relabelled rig limit"
+        );
+        assert_eq!(
+            out.conc_at_sustained.detail(),
+            out.rps_sustained_20ms.detail(),
+            "one absence, one story, at every key that carries it"
+        );
+        assert_eq!(
+            out.rps_sustained_20ms_concurrency.reason(),
+            Some(&Absent::NotMeasured)
         );
     }
 }

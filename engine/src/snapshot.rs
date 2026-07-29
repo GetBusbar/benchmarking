@@ -179,14 +179,6 @@ fn read_existing(path: &Path) -> Result<Option<ResultSnapshot>, SnapshotError> {
     }
 }
 
-/// Write `snapshot` durably into `dir`: the per-gateway current file (`<gateway>.json`) and a
-/// timestamped historical copy (`result_<gateway>_<measured_at, ':' -> '-'>.json`), both by
-/// temp-then-rename-then-fsync (see `atomic_write`).
-///
-/// If a current file already exists and `snapshot` served strictly fewer cells, this returns
-/// `SnapshotError::PromoteGuard` and writes NEITHER file: a rewrite of the promote guard's own
-/// rejection into a historical copy would still be publishing the worse result, just under a
-/// different name.
 /// A filename component the caller supplied, made safe to join onto a directory.
 ///
 /// `PathBuf::join` has a sharp edge: an ABSOLUTE argument replaces the base entirely, and `..`
@@ -214,6 +206,27 @@ fn safe_component(raw: &str, what: &'static str) -> Result<String, SnapshotError
     }
 }
 
+/// Write `snapshot` durably into `dir`: the per-gateway current file (`<gateway>.json`) and a
+/// timestamped historical copy (`result_<gateway>_<measured_at, ':' -> '-'>.json`), both by
+/// temp-then-rename-then-fsync (see `atomic_write`).
+///
+/// If a current file already exists and `snapshot` served strictly fewer cells, this returns
+/// `SnapshotError::PromoteGuard` and writes NEITHER file: a rewrite of the promote guard's own
+/// rejection into a historical copy would still be publishing the worse result, just under a
+/// different name.
+///
+/// EACH FILE IS ATOMIC; THE PAIR IS NOT, and it cannot be without a two-phase commit this module has
+/// no reason to grow. So the ORDER is the guarantee instead: the historical copy lands first, the
+/// current file second. That makes the one observable in-between state - a box that dies between the
+/// two renames, which these self-terminating runs really do - "a historical copy with no current
+/// file", which is a run whose result is on disk and simply not promoted yet, and which the next run
+/// rewrites in full. The other order produced the opposite state: a promoted current file, read by
+/// the board, with no historical copy behind it, so the day's number existed with nothing to answer
+/// "what did this gateway look like then" and nothing anywhere recording that a copy was missing.
+///
+/// A failure on the SECOND write is therefore reported with both files' fate implied by the error's
+/// path: the historical copy is already durable, the current file is not, and the caller sees an
+/// `Io` error naming the current path.
 pub fn write_snapshot(dir: &Path, snapshot: &ResultSnapshot) -> Result<Paths, SnapshotError> {
     let incoming_served = served_cell_count(&snapshot.matrix);
     let current_path = dir.join(format!(
@@ -245,8 +258,10 @@ pub fn write_snapshot(dir: &Path, snapshot: &ResultSnapshot) -> Result<Paths, Sn
     body.push('\n');
     let bytes = body.into_bytes();
 
-    atomic_write(dir, &current_path, &bytes)?;
+    // HISTORICAL FIRST, CURRENT SECOND. See this function's header: the pair is not atomic as a pair,
+    // so the order chooses which half-written state a crash can leave behind.
     atomic_write(dir, &historical_path, &bytes)?;
+    atomic_write(dir, &current_path, &bytes)?;
 
     Ok(Paths {
         current: current_path,
@@ -485,6 +500,40 @@ mod tests {
             entries.len(),
             2,
             "exactly two historical copies for two distinct measured_at values"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // THE PAIR IS NOT ATOMIC AS A PAIR, SO THE ORDER IS THE GUARANTEE.
+    //
+    // Each file is written atomically, but two atomic writes are not one transaction: a box that dies
+    // between them - which these self-terminating runs really do - leaves one of the two behind. With
+    // the current file written first, that state was "a promoted result the board reads, with no
+    // historical copy behind it", so the day's numbers existed with nothing able to answer "what did
+    // this gateway look like then" and nothing recording that a copy was missing. Historical first
+    // inverts it into the harmless half: a copy on disk, simply not promoted yet, which the next run
+    // rewrites in full.
+    //
+    // Observed from the side the test can drive: make the HISTORICAL write fail (a directory sitting
+    // at its path cannot be renamed over) and assert nothing was promoted. Under the old order the
+    // current file was already on disk by then - the board reading a result with no history behind it,
+    // and no error anywhere the board could see.
+    #[test]
+    fn a_result_is_never_promoted_before_its_historical_copy_is_durable() {
+        let dir = unique_dir("pair-order");
+        let snap = snapshot_with_served_cells("gw", "2026-07-25T08:26:15Z", 1);
+        fs::create_dir_all(dir.join("result_gw_2026-07-25T08-26-15Z.json")).unwrap();
+
+        let result = write_snapshot(&dir, &snap);
+
+        assert!(
+            result.is_err(),
+            "a historical copy that could not be written must be reported, not swallowed"
+        );
+        assert!(
+            !dir.join("gw.json").exists(),
+            "nothing may be promoted to the current file while its historical copy is missing"
         );
 
         let _ = fs::remove_dir_all(&dir);

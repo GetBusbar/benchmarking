@@ -17,8 +17,10 @@
 // TESTABILITY. The polling and escalation logic is the thing worth testing, and it must be tested
 // without a real process or a real socket. `Lifecycle` is the seam: it says "signal a stop", "is
 // this identity still alive", and "kill it, this hard", and every polling decision is made against
-// that trait alone. The syscall layer (`RealLifecycle`, shelling out to docker/pgrep/pkill, and the
-// TCP connect probe in `port_state`) is kept thin on purpose, with nothing worth unit testing in it.
+// that trait alone. The syscall layer (`RealLifecycle`, shelling out to docker/ps/kill, and the
+// TCP connect probe in `port_state`) is kept thin on purpose, with nothing worth unit testing in it -
+// with ONE exception: `select_matches`, which decides which pids a `proc_match` names, is pure and
+// tested here, because getting it wrong means signalling the harness instead of the gateway.
 //
 // A DELIBERATE CHANGE FROM THE SHELL: `mock_stop_wait`/`gw_stop_wait` read a global port variable
 // (`MOCK_PORT`, `GW_PORT`) set by whichever suite sourced the harness. That is exactly the kind of
@@ -32,6 +34,134 @@ use std::io::ErrorKind;
 use std::net::{SocketAddr, TcpStream};
 use std::process::Command;
 use std::time::Duration;
+
+/// One live process, as the harness sees it. Enough to decide whether a command line that contains a
+/// manifest's `proc_match` is the gateway, the harness itself, or a bystander.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcEntry {
+    pub pid: u32,
+    pub ppid: u32,
+    /// The FULL command line, argv joined by spaces, exactly what `pgrep -f` would have matched.
+    pub cmdline: String,
+}
+
+/// Command names whose command line quotes somebody else's. The harness runs every `commands` line
+/// as `/bin/sh -c "<line>"`, and those lines routinely name the gateway (a curl at its admin API, a
+/// `docker exec` into it), so the shell's own argv contains the gateway's `proc_match` while the
+/// shell is not the gateway. Signalling it would kill the harness's own setup step; counting it as
+/// alive would make `stop_and_wait` wait for a process that is not the one being stopped. No gateway
+/// in this field is started through a shell: `launch::build_invocation` execs `docker` or `taskset`
+/// directly.
+const WRAPPER_COMMANDS: [&str; 6] = ["sh", "bash", "dash", "zsh", "ash", "ksh"];
+
+/// Every live process, read once. `ps` rather than `pgrep -f`: this way the SUBSTRING match a
+/// manifest means is done here, on text the harness can also inspect for who owns it, instead of
+/// inside `pgrep`, which matches a REGEX (a `proc_match` containing `.` or `+` silently means
+/// something else there) and offers no way to exclude the harness from its own answer.
+pub fn process_table() -> Vec<ProcEntry> {
+    let Ok(out) = Command::new("ps")
+        .args(["-Ao", "pid=,ppid=,args="])
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !out.status.success() {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(parse_ps_line)
+        .collect()
+}
+
+fn parse_ps_line(line: &str) -> Option<ProcEntry> {
+    let (pid, rest) = line.trim_start().split_once(char::is_whitespace)?;
+    let (ppid, cmdline) = rest.trim_start().split_once(char::is_whitespace)?;
+    Some(ProcEntry {
+        pid: pid.parse().ok()?,
+        ppid: ppid.parse().ok()?,
+        cmdline: cmdline.trim().to_string(),
+    })
+}
+
+fn program_basename(cmdline: &str) -> &str {
+    let argv0 = cmdline.split_whitespace().next().unwrap_or("");
+    argv0.rsplit('/').next().unwrap_or(argv0)
+}
+
+/// Which pids a manifest's `proc_match` may legitimately name, given the whole process table.
+///
+/// PURE, AND THE ONLY PLACE THE MATCH RULE LIVES, because the rule is what makes the difference
+/// between stopping the gateway and stopping the harness. `pkill -f <pattern>` matches a bare
+/// substring against every full command line on the box, so three families of wrong process used to
+/// qualify:
+///
+///  - THE HARNESS ITSELF. The engine's own argv names the gateway directory it was invoked with, so a
+///    `proc_match` that is a substring of it made `signal_stop` kill the run, and made `is_alive`
+///    report the gateway alive forever (it was reading the engine's own command line), so every
+///    `stop_and_wait` spent its whole budget and returned `StillHeld` and every restart failed.
+///  - THE SHELL RUNNING A `commands` LINE, which quotes the gateway's name without being it.
+///  - A SECOND ENGINE on the same box, whose argv looks exactly like ours.
+///
+/// So: self and every ancestor of self are excluded, other instances of this same program are
+/// excluded, and shell wrappers are excluded. What remains is a process whose own command line names
+/// the pattern and which is not part of the measuring apparatus. An EMPTY pattern selects NOTHING,
+/// never everything: "no identity was declared" must resolve to an absence, and `pgrep -f ""` matches
+/// every process on the box including init.
+pub fn select_matches(table: &[ProcEntry], pattern: &str, self_pid: u32) -> Vec<u32> {
+    let pattern = pattern.trim();
+    if pattern.is_empty() {
+        return Vec::new();
+    }
+    let ppid_of: std::collections::BTreeMap<u32, u32> =
+        table.iter().map(|e| (e.pid, e.ppid)).collect();
+
+    // Self and its ancestors: the engine, the shell that started it, the ssh session above that.
+    let mut apparatus = std::collections::BTreeSet::new();
+    let mut walk = Some(self_pid);
+    while let Some(pid) = walk {
+        if !apparatus.insert(pid) {
+            break; // a cycle in a reported ppid chain must not loop forever.
+        }
+        walk = ppid_of.get(&pid).copied().filter(|p| *p != 0);
+    }
+
+    let self_program = table
+        .iter()
+        .find(|e| e.pid == self_pid)
+        .map(|e| program_basename(&e.cmdline).to_string());
+
+    table
+        .iter()
+        .filter(|e| e.cmdline.contains(pattern))
+        .filter(|e| !apparatus.contains(&e.pid))
+        .filter(|e| !WRAPPER_COMMANDS.contains(&program_basename(&e.cmdline)))
+        .filter(|e| self_program.as_deref() != Some(program_basename(&e.cmdline)))
+        .map(|e| e.pid)
+        .collect()
+}
+
+/// The pids a `proc_match` names on this box right now, harness excluded. Shared by the stop path
+/// here and by `rss::RealPids`, so the process a memory reading is taken from is the same process
+/// this file signals.
+pub fn matching_pids(pattern: &str) -> Vec<u32> {
+    select_matches(&process_table(), pattern, std::process::id())
+}
+
+/// Signal an explicit list of pids. Never `pkill -f`: a pattern re-matched at signal time can select
+/// a process the caller never inspected, and the caller has already decided which pids are the
+/// gateway's.
+fn signal_pids(signal: &str, pids: &[u32]) {
+    if pids.is_empty() {
+        return;
+    }
+    let mut cmd = Command::new("kill");
+    cmd.arg(signal);
+    for pid in pids {
+        cmd.arg(pid.to_string());
+    }
+    let _ = cmd.status();
+}
 
 /// A cheap, dependency-light snapshot of whether anything holds a TCP port. Used purely as failure
 /// evidence (for a stop-budget error, or a readiness report), never as the sole gate on its own:
@@ -107,8 +237,8 @@ pub trait Lifecycle {
     fn signal_kill(&self, runtime: &Runtime);
 }
 
-/// The real syscall layer: shells out to docker/pgrep/pkill exactly as the shell harness did. Kept
-/// thin deliberately; the logic worth testing lives in `stop_and_wait`, not here.
+/// The real syscall layer: docker for a container, an explicit pid list for a native process. Kept
+/// thin deliberately; the logic worth testing lives in `stop_and_wait` and `select_matches`.
 pub struct RealLifecycle;
 
 impl Lifecycle for RealLifecycle {
@@ -118,45 +248,39 @@ impl Lifecycle for RealLifecycle {
             // never exposed to the shell bug); `rm -f` here is also this runtime's escalation, so
             // calling it as the first signal is not a shortcut, it is simply what "stop" means for
             // a container.
-            Runtime::Docker { container } => {
+            // The container this run started, under its run-scoped name (`Runtime::identity`), so a
+            // concurrent run's container of the same gateway is not the one removed.
+            Runtime::Docker { .. } => {
                 let _ = Command::new("docker")
-                    .args(["rm", "-f", container])
+                    .args(["rm", "-f", &runtime.identity()])
                     .status();
             }
-            Runtime::Native { proc_match } => {
-                let _ = Command::new("pkill").args(["-f", proc_match]).status();
-            }
+            // Resolved to explicit pids first: `pkill -f` would re-match the pattern against every
+            // command line on the box, harness included.
+            Runtime::Native { proc_match } => signal_pids("-TERM", &matching_pids(proc_match)),
         }
     }
 
     fn is_alive(&self, runtime: &Runtime, port: u16) -> bool {
         let process_alive = match runtime {
-            Runtime::Docker { container } => Command::new("docker")
-                .args(["inspect", "-f", "{{.State.Running}}", container])
+            Runtime::Docker { .. } => Command::new("docker")
+                .args(["inspect", "-f", "{{.State.Running}}", &runtime.identity()])
                 .output()
                 .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "true")
                 .unwrap_or(false),
-            Runtime::Native { proc_match } => Command::new("pgrep")
-                .args(["-f", proc_match])
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false),
+            Runtime::Native { proc_match } => !matching_pids(proc_match).is_empty(),
         };
         process_alive || matches!(port_state(port), PortState::Held)
     }
 
     fn signal_kill(&self, runtime: &Runtime) {
         match runtime {
-            Runtime::Docker { container } => {
+            Runtime::Docker { .. } => {
                 let _ = Command::new("docker")
-                    .args(["rm", "-f", container])
+                    .args(["rm", "-f", &runtime.identity()])
                     .status();
             }
-            Runtime::Native { proc_match } => {
-                let _ = Command::new("pkill")
-                    .args(["-9", "-f", proc_match])
-                    .status();
-            }
+            Runtime::Native { proc_match } => signal_pids("-KILL", &matching_pids(proc_match)),
         }
     }
 }
@@ -307,6 +431,131 @@ mod tests {
         Runtime::Native {
             proc_match: "target/release/mock".into(),
         }
+    }
+
+    // ---- which processes a proc_match may name -----------------------------------------------------
+
+    fn entry(pid: u32, ppid: u32, cmdline: &str) -> ProcEntry {
+        ProcEntry {
+            pid,
+            ppid,
+            cmdline: cmdline.to_string(),
+        }
+    }
+
+    /// A plausible box mid-run: an ssh session, the engine under it, the shell running a `commands`
+    /// line, the gateway itself, and a bystander. Every command line here except the gateway's
+    /// contains the gateway's `proc_match`, which is exactly what `pkill -f`/`pgrep -f` could not
+    /// tell apart.
+    fn a_box_mid_run() -> Vec<ProcEntry> {
+        vec![
+            entry(1, 0, "/sbin/init"),
+            entry(100, 1, "sshd: ubuntu@pts/0"),
+            entry(
+                200,
+                100,
+                "/usr/bin/otb run gateways/target/release/aisix 127.0.0.1:8000",
+            ),
+            entry(
+                300,
+                200,
+                "/bin/sh -c curl -s localhost:8080/admin -d target/release/aisix",
+            ),
+            entry(400, 200, "target/release/aisix --config /etc/aisix.toml"),
+            entry(500, 1, "grep -r target/release/aisix /home/ubuntu"),
+        ]
+    }
+
+    // THE DEFECT: the engine's own argv names the gateway directory it was invoked with, so a
+    // substring match selected the harness. `signal_stop` then killed the run, and `is_alive` read
+    // the engine's own command line as proof the gateway was still up - so every `stop_and_wait`
+    // burned its whole budget and returned StillHeld, and every restart after it failed.
+    #[test]
+    fn the_harness_is_never_selected_by_the_gateways_own_proc_match() {
+        let table = a_box_mid_run();
+        let picked = select_matches(&table, "target/release/aisix", 200);
+        assert!(
+            !picked.contains(&200),
+            "the engine selected itself for its own stop signal: {picked:?}"
+        );
+        assert!(
+            !picked.contains(&100),
+            "an ancestor of the engine (the ssh session) must never be signalled: {picked:?}"
+        );
+        assert!(
+            picked.contains(&400),
+            "the gateway itself must still be found: {picked:?}"
+        );
+    }
+
+    // The shell running a `commands` line quotes the gateway's name without being the gateway.
+    #[test]
+    fn the_shell_running_a_commands_line_is_not_the_gateway() {
+        let picked = select_matches(&a_box_mid_run(), "target/release/aisix", 200);
+        assert!(
+            !picked.contains(&300),
+            "the /bin/sh running a setup line was selected as the gateway: {picked:?}"
+        );
+    }
+
+    // A second engine on the same box looks exactly like this one. Killing it (or waiting for it) is
+    // a co-located run destroying its peer.
+    #[test]
+    fn a_second_engine_on_the_box_is_not_this_gateway() {
+        let mut table = a_box_mid_run();
+        table.push(entry(
+            600,
+            1,
+            "/usr/bin/otb run gateways/target/release/aisix 127.0.0.1:9000",
+        ));
+        let picked = select_matches(&table, "target/release/aisix", 200);
+        assert!(
+            !picked.contains(&600),
+            "another engine process was selected as this gateway: {picked:?}"
+        );
+    }
+
+    // A bystander whose command line merely mentions the pattern is still selected, and that is the
+    // limit of what a substring match can promise - which is why `manifest::proc_match_problem`
+    // refuses an indistinct pattern at load time rather than pretending this layer can fix it.
+    #[test]
+    fn a_distinctive_pattern_selects_the_gateway_and_the_match_is_a_substring_not_a_regex() {
+        let table = vec![entry(10, 1, "target/release/ai-gateway --port 8080")];
+        assert_eq!(select_matches(&table, "target/release/ai-gateway", 1), [10]);
+        // `.` is a literal here. Under `pgrep -f` it was a regex metacharacter matching any byte.
+        assert!(select_matches(&table, "release.ai-gateway", 1).is_empty());
+    }
+
+    // AN EMPTY MATCH RESOLVES TO NOTHING. `pgrep -f ""` matches every process on the box, so an
+    // undeclared identity used to make init's tree a candidate for the gateway's memory, and made
+    // `is_alive` true forever.
+    #[test]
+    fn an_empty_proc_match_selects_no_process_rather_than_every_process() {
+        let table = a_box_mid_run();
+        assert!(select_matches(&table, "", 200).is_empty());
+        assert!(select_matches(&table, "   ", 200).is_empty());
+        // And against the real box, through the same entry point the memory reader uses.
+        assert!(matching_pids("").is_empty());
+    }
+
+    #[test]
+    fn a_ps_line_parses_into_pid_parent_and_the_whole_command_line() {
+        let e = parse_ps_line("  4242  1 /usr/bin/gw --flag a b").unwrap();
+        assert_eq!(e.pid, 4242);
+        assert_eq!(e.ppid, 1);
+        assert_eq!(e.cmdline, "/usr/bin/gw --flag a b");
+        assert!(parse_ps_line("not a process line").is_none());
+    }
+
+    // The real table on this box must at least contain this test process, or every match decision
+    // above is being made against nothing.
+    #[test]
+    fn the_real_process_table_can_be_read_and_contains_this_process() {
+        let table = process_table();
+        assert!(
+            table.iter().any(|e| e.pid == std::process::id()),
+            "the process table did not include the reader itself"
+        );
     }
 
     fn counting_sleep(count: &RefCell<u32>) -> impl FnMut(Duration) + '_ {
