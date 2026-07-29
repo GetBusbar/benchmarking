@@ -262,18 +262,19 @@ const gateways = gatewayKeys.map((key) => {
     // Per-cell perf (matrix v2 + sweep): the gateway's BEST green diagonal by sustained RPS @20ms.
     const bc = bestCell(g.matrix);
     if (bc) g.best_cell = sealPerfCell(bc, { ingress: bc.dialect, egress: bc.dialect, dialect: bc.dialect },
-      makeSource("matrix", SWEEP.DIAGONAL, build, at));
+      makeSource("matrix", SWEEP.DIAGONAL, build, at), bc.absences);
     // The gateway's TRANSLATION cell (openai in -> best non-openai egress).
     const tc = translationCell(g.matrix);
     if (tc) g.translation_cell = sealPerfCell(tc, { ingress: tc.ingress, egress: tc.egress },
-      makeSource("matrix", SWEEP.TRANSLATION, build, at));
+      makeSource("matrix", SWEEP.TRANSLATION, build, at), tc.absences);
     // STREAMING projection (matrix single source): the BEST DIAGONAL cell's streaming - the SAME
     // (ingress==egress) cell the headline perf is projected from (one source of truth). Only when the
     // diagonal ACTUALLY STREAMED (stream_served===true); a non-streaming cell leaves g.streaming absent.
     if (bc) {
       const cell = g.matrix.upstreams?.[bc.dialect]?.cells?.[bc.dialect];
       if (cell && cell.stream && cell.stream.stream_served === true) {
-        g.streaming = sealStreaming(cell.stream, bc.dialect, makeSource("matrix", SWEEP.STREAM_DIAGONAL, build, at));
+        g.streaming = sealStreaming(cell.stream, bc.dialect,
+          makeSource("matrix", SWEEP.STREAM_DIAGONAL, build, at), cell.absences);
       }
     }
     // MEMORY: NOT projected. Memory is measured per cell (its own cold-started, plateau-terminated
@@ -397,11 +398,18 @@ const gateways = gatewayKeys.map((key) => {
 // The projected record carries `path` (ingress/egress/dialect), `source` (the provenance stamp), and one
 // SEALED envelope per metric under its own field name. The raw scalar + its _mock_bound flag are consumed
 // here and never re-emitted, so no ungated field survives for a render site to leak (invariant P1).
+// absentEntryFor: the engine's `absences` entry for one field, tolerant of the block-prefixed key
+// shape the cell publishes ("perf.added_latency_p50_us") and the bare one a projected record carries.
+function absentEntryFor(absences, prefix, k) {
+  if (!absences || typeof absences !== "object") return null;
+  return absences[`${prefix}.${k}`] || absences[k] || null;
+}
 // A throughput metric: its sealed envelope folds in the concurrency + charted sweep array + the NEW
 // conc_at_* rung so the headline, its operating concurrency, and its curve all travel as one datum.
-function sealThroughput(perf, key, concAtKey) {
+function sealThroughput(perf, key, concAtKey, absences) {
   return sealMetric(perf[key], {
     gated: true, flag: perf[`${key}_mock_bound`],
+    absent: absentEntryFor(absences, "perf", key),
     extras: {
       concurrency: perf[`${key}_concurrency`] ?? null,
       conc_at: perf[concAtKey] ?? null,          // NEW (snapshot #65): the rung peak/sustained held at
@@ -412,11 +420,14 @@ function sealThroughput(perf, key, concAtKey) {
 // sealPerfCellPerf: a raw perf object -> {<sealed metrics>} (no path/source; the caller stamps those).
 // Used BOTH for the canonical best_cell/translation_cell AND to seal every matrix cell in-place, so the
 // matrix popup reads envelopes, never raw scalars (invariant C1: no ungated field survives in the bundle).
-function sealPerfCellPerf(perf) {
+// `absences` is the raw CELL's sibling reason map; an absent metric now emits an envelope CARRYING that
+// reason instead of no key at all - a missing key was how "below rig resolution" rendered as a bare n/a.
+function sealPerfCellPerf(perf, absences = null) {
   const rec = {};
-  for (const k of UNGATED_LAT) if (perf[k] != null) rec[k] = sealMetric(perf[k], {});
-  rec.rps_sustained_20ms = sealThroughput(perf, "rps_sustained_20ms", "conc_at_sustained");
-  rec.rps_max_proxy = sealThroughput(perf, "rps_max_proxy", "conc_at_peak");
+  for (const k of UNGATED_LAT)
+    rec[k] = sealMetric(perf[k], { absent: absentEntryFor(absences, "perf", k) });
+  rec.rps_sustained_20ms = sealThroughput(perf, "rps_sustained_20ms", "conc_at_sustained", absences);
+  rec.rps_max_proxy = sealThroughput(perf, "rps_max_proxy", "conc_at_peak", absences);
   if (perf.egress_reverified != null) rec.egress_reverified = perf.egress_reverified;
   // The verdict without its evidence is an assertion. egress_reverified is the fairness guard's boolean
   // (did this gateway actually TRANSLATE to the egress dialect, or just proxy the ingress request
@@ -429,31 +440,35 @@ function sealPerfCellPerf(perf) {
   return rec;
 }
 // sealPerfCell: a matrix/fallback perf object -> the canonical {path, source, <sealed metrics>} record.
-function sealPerfCell(perf, path, source) {
-  return { path: { ...path }, source, ...sealPerfCellPerf(perf) };
+function sealPerfCell(perf, path, source, absences = null) {
+  return { path: { ...path }, source, ...sealPerfCellPerf(perf, absences) };
 }
 // sealStreamRecord: a raw stream record -> {<sealed metrics>} (no path/source). TTFT/gap are UNGATED;
 // streams_sustained + cpu_fps are GATED on their mock-bound flags. Used for the canonical g.streaming AND
 // for sealing every matrix cell's own .stream in-place (so the popup reads envelopes).
-function sealStreamRecord(s) {
+function sealStreamRecord(s, absences = null) {
   const rec = {};
-  for (const k of UNGATED_STREAM_FIELDS) if (s[k] != null) rec[k] = sealMetric(s[k], {});
+  const abs = (k) => absentEntryFor(absences, "stream", k);
+  for (const k of UNGATED_STREAM_FIELDS)
+    rec[k] = sealMetric(s[k], { absent: abs(k) });
   // AUDIT #11: streams_sustained_fps is the SAME bisect's rate - it inherits that bisect's mock-bound
   // honesty flag. Sealing it UNGATED beside a GATED streams_sustained let the rig-bound rate publish
   // while the count it came from was suppressed. Gate it on the same flag.
   rec.streams_sustained_fps = sealMetric(s.streams_sustained_fps, {
-    gated: true, paced: true, flag: s.streams_sustained_mock_bound, zeroNote: ZERO_MEASURED_FAIL });
+    gated: true, paced: true, flag: s.streams_sustained_mock_bound, zeroNote: ZERO_MEASURED_FAIL,
+    absent: abs("streams_sustained_fps") });
   // AUDIT #3: streaming counts - a 0 is a MEASURED FAILURE (offered stream load, sustained none), NOT
   // "not measured". Only a null (absent field) is not-measured. The note names which, and every surface
   // renders the two apart.
   rec.streams_sustained = sealMetric(s.streams_sustained, {
-    gated: true, paced: true, flag: s.streams_sustained_mock_bound, zeroNote: ZERO_MEASURED_FAIL });
+    gated: true, paced: true, flag: s.streams_sustained_mock_bound, zeroNote: ZERO_MEASURED_FAIL,
+    absent: abs("streams_sustained") });
   rec.cpu_fps = sealMetric(s.cpu_fps, { gated: true, paced: true, flag: s.cpu_fps_mock_bound, zeroNote: ZERO_MEASURED_FAIL,
-    extras: { concurrency: s.cpu_fps_concurrency ?? null } });
+    absent: abs("cpu_fps"), extras: { concurrency: s.cpu_fps_concurrency ?? null } });
   return rec;
 }
-function sealStreaming(s, dialect, source) {
-  return { path: { dialect }, source, stream_served: true, ...sealStreamRecord(s) };
+function sealStreaming(s, dialect, source, absences = null) {
+  return { path: { dialect }, source, stream_served: true, ...sealStreamRecord(s, absences) };
 }
 // matrixHasCellMemory(m): does this matrix carry a per-cell memory window on any served cell? The memory
 // lane's freshness stamp ages by the matrix that produced those windows, so the lane must know whether it
@@ -481,7 +496,7 @@ function sealMatrixCellsInPlace(m) {
     for (const cell of Object.values(cells)) {
       if (!cell || typeof cell !== "object" || seen.has(cell)) continue;
       seen.add(cell);
-      if (cell.perf) cell.perf = sealPerfCellPerf(cell.perf);
+      if (cell.perf) cell.perf = sealPerfCellPerf(cell.perf, cell.absences);
       // THE CASE THIS GUARD MISSED: stream_served is `true`/`false`/a status string ("not_measured",
       // "untestable", "not_probed" - StreamServed's real shape, record.rs), and in real field data it
       // is almost NEVER the literal boolean true - a non-streaming or untestable cell still carries a
@@ -494,7 +509,7 @@ function sealMatrixCellsInPlace(m) {
         cell.stream = {
           stream_served: cell.stream.stream_served,
           stream_error: cell.stream.stream_error ?? null,
-          ...sealStreamRecord(cell.stream),
+          ...sealStreamRecord(cell.stream, cell.absences),
         };
       }
       // PER-CELL MEMORY: its own cold-started, plateau-terminated window per cell. The memory tab reads
@@ -503,7 +518,8 @@ function sealMatrixCellsInPlace(m) {
       // memory metrics the vocabulary names (growth rate, time to plateau).
       if (cell.memory && typeof cell.memory === "object") {
         for (const k of Object.keys(cell.memory))
-          if (isMetricField(k)) cell.memory[k] = sealMetric(cell.memory[k], {});
+          if (isMetricField(k))
+            cell.memory[k] = sealMetric(cell.memory[k], { absent: absentEntryFor(cell.absences, "memory", k) });
       }
     }
   }
@@ -532,7 +548,7 @@ function bestCell(m) {
     // A cell qualifies by having been SERVED and carrying perf. Latency then orders the candidates,
     // and a cell without one sorts last rather than being struck from the list.
     if (cell && cell.served === true && cell.perf)
-      diag.push({ ingress: egress, egress, dialect: egress, ...cell.perf });
+      diag.push({ ingress: egress, egress, dialect: egress, absences: cell.absences ?? null, ...cell.perf });
   }
   if (!diag.length) return null;
   const openai = diag.find((d) => d.dialect === "openai");
@@ -559,7 +575,7 @@ function translationCell(m) {
     for (const [ingress, cell] of Object.entries((up && up.cells) || {})) {
       if (ingress === egress) continue;                     // same dialect is passthrough, not translation
       if (!(cell && cell.served === true && cell.perf && cell.perf.added_latency_p99_us != null)) continue;
-      const rec = { ingress, egress, ...cell.perf };
+      const rec = { ingress, egress, absences: cell.absences ?? null, ...cell.perf };
       if (ingress === "openai" && egress !== "openai") fair.push(rec);
       any.push(rec);
     }

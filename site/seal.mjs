@@ -10,7 +10,14 @@
 //   CERTIFIED   { value: N,    certified: true,  suppressed: false, source, ...extras }
 //   MEASURED-0  { value: 0,    certified: true,  suppressed: false, source, note: "no_qualifying_ceiling" }
 //   SUPPRESSED  { value: null, certified: false, suppressed: true,  reason: "mock_bound"|"unverifiable", source }
-//   NOT-MEASURED{ value: null, certified: false, suppressed: false, reason: "not_measured", source }
+//   NOT-MEASURED{ value: null, certified: false, suppressed: false, reason: <engine absence token>, detail? }
+//
+// The NOT-MEASURED reason is no longer the hardcoded literal "not_measured": the engine publishes WHY a
+// field is absent (measurement.rs `Absent` - not_measured, below_resolution, rig_limited, untestable,
+// search_exhausted, harness_error, not_served) in the cell's sibling `absences` map, and the seal now
+// CARRIES that reason + its prose detail instead of flattening every hole to one token. In particular
+// "below_resolution" is a difference that came out at or below what the rig can resolve - the best
+// result the comparison can express - and every surface renders it apart from a never-measured hole.
 //
 // GATED metrics (throughput; the mock-bound honesty flag applies): rps_sustained_20ms, rps_max_proxy,
 // streams_sustained, cpu_fps, and the translation sustained RPS. A gated metric is CERTIFIED only when
@@ -59,8 +66,11 @@ export const PACED_FIELDS = ["streams_sustained", "streams_sustained_fps", "cpu_
 // THE ONE PLACE THE DISPLAY RULE LIVES. `sealMetric` builds a whole envelope (notes, provenance,
 // zero-reasons); this answers only "does the number show, and as what", which is the part an
 // independent oracle needs and the part that must never be written twice.
-export function displayedValue(raw, flag, { gated = false, paced = false } = {}) {
-  if (raw == null) return null;
+export function displayedValue(raw, flag, { gated = false, paced = false, absentReason = null } = {}) {
+  // A below-resolution absence DISPLAYS as 0: the comparison ran and the difference was too small
+  // for the rig to weigh, which ranks equal-best and renders as "≈0", never as a hole. Every other
+  // absence displays as nothing.
+  if (raw == null) return absentReason === "below_resolution" ? 0 : null;
   if (!gated) return raw;
   if (raw === 0) return 0;                      // a measured zero is honest and always shown
   // Paced: the flag existing at all means the comparison against the mock was made. Capacity: the
@@ -122,10 +132,16 @@ export function makeSource(kind, sweep, build, measuredAt) {
 // gateway; null (absent field) is the ONLY not-measured state.
 export const ZERO_NO_CEILING = "no_qualifying_ceiling";
 export const ZERO_MEASURED_FAIL = "measured_failure";
+//   opts.absent: the engine's `absences` entry for this field ({reason, detail}), when the caller has
+//                one. An absent value then publishes the ENGINE'S reason and its prose detail instead
+//                of the flattened "not_measured" - the reason was measured too, and discarding it here
+//                was how "below rig resolution" (a win) rendered identically to "never ran" (a hole).
 export function sealMetric(value, opts = {}) {
-  const { gated = false, paced = false, flag, extras = null, zeroNote = ZERO_NO_CEILING } = opts;
+  const { gated = false, paced = false, flag, extras = null, zeroNote = ZERO_NO_CEILING, absent = null } = opts;
   if (value == null) {
-    return { value: null, certified: false, suppressed: false, reason: "not_measured" };
+    const env = { value: null, certified: false, suppressed: false, reason: (absent && absent.reason) || "not_measured" };
+    if (absent && absent.detail) env.detail = absent.detail;
+    return env;
   }
   const num = Number(value);
   if (gated) {

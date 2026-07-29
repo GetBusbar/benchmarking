@@ -284,16 +284,38 @@ const METRIC_NOTES = {
   mock_bound: "not shown: rig-limited — the harness's own ceiling bounded this number, so it is not a gateway reading",
   unverifiable: "not shown: this number could not be certified against the harness's own ceiling",
   not_measured: "not measured: no reading exists for this cell",
+  // The engine's own absence reasons (measurement.rs Absent), carried through the seal since the
+  // reason-flattening fix. below_resolution is handled in metric() as a display state, not a hole.
+  below_resolution: "below measurement resolution: the comparison ran and the gateway's overhead was too small for this rig to detect (the best result this test can express)",
+  rig_limited: "not shown: rig-limited, the harness's own ceiling bounded this number, so it is not a gateway reading",
+  untestable: "not testable: the rig cannot pose this question for this dialect (a rig limit, not a gateway fault)",
+  search_exhausted: "not shown: the search ran off the end of its range still improving, so any number would be a lower bound, not a ceiling",
+  harness_error: "not shown: the harness itself failed here; this says nothing about the gateway",
+  not_served: "the gateway does not serve this pairing",
 };
 function noteText(tok) { return (tok && METRIC_NOTES[tok]) || tok || ""; }
 function metric(env, fmt = fmtInt) {
-  if (!isEnvelope(env) || env.value == null)
-    return { v: null, text: "n/a", na: true, note: noteText(env && env.reason), env: env || null };
+  if (!isEnvelope(env) || env.value == null) {
+    // BELOW RESOLUTION IS NOT A HOLE. The comparison ran; the difference was at or under what the
+    // rig can resolve, which is the best outcome the test can express. It displays as "≈0", ranks
+    // as 0 (equal-best on every lower-is-better sort), and carries the engine's own prose as the
+    // tooltip. Rendering it as n/a turned a win into a blank, which is how APISIX published an
+    // added-gap p99 with no p50 - impossible for one distribution, so the table looked broken.
+    if (env && env.reason === "below_resolution")
+      return { v: 0, text: "≈0", na: false, note: env.detail || noteText(env.reason), env };
+    return { v: null, text: "n/a", na: true, note: (env && env.detail) || noteText(env && env.reason), env: env || null };
+  }
   return { v: env.value, text: fmt(env.value), na: false, note: noteText(env.note), env };
 }
 // mval: the bare displayable value of an envelope (null when suppressed/absent). For arithmetic
 // (deltas, best-of ranking) where only the number matters. Never returns a suppressed number.
-function mval(env) { return isEnvelope(env) && env.value != null ? env.value : null; }
+// A below-resolution absence ranks as 0, the same value metric() displays it as: the comparison ran
+// and found nothing the rig could weigh, which is equal-best, not missing.
+function mval(env) {
+  if (!isEnvelope(env)) return null;
+  if (env.value != null) return env.value;
+  return env.reason === "below_resolution" ? 0 : null;
+}
 
 /* ---- provenance-driven captions (Design E §3.2) -----------------------------
    EVERY caption/label that names where a datum came from is rendered FROM the cell's `source.sweep`

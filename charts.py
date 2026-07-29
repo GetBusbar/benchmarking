@@ -93,7 +93,11 @@ def mval(env):
     A BARE SCALAR is REJECTED, not tolerated: tolerating one would let charts.py publish a raw ungated
     number if a producer field ever escaped the seal (the exact class C1 exists to prevent), and would
     silently disagree with app.js's metric(), which returns n/a for a non-envelope. Absent (None) is fine
-    and reads "not measured"; anything else is a bug, loudly."""
+    and reads "not measured"; anything else is a bug, loudly.
+
+    A below_resolution absence displays as 0.0, the same value app.js's metric()/mval render it as: the
+    difference ran and came out under what the rig can resolve, which is the winning end of every
+    lower-is-better chart, not a hole."""
     if env is None:
         return None
     if not _is_env(env):
@@ -102,6 +106,8 @@ def mval(env):
             "  Every metric in site/data.json must be a sealed envelope ({value, certified, suppressed, …}).\n"
             "  A bare scalar means gen-data.mjs did not seal a producer field - fix the seal, not the reader."
         )
+    if env.get("value") is None and env.get("reason") == "below_resolution":
+        return 0.0
     return env.get("value")
 
 
@@ -111,8 +117,9 @@ def menote(env):
 
 
 def mvalid(env) -> bool:
-    """A metric draws a bar iff its envelope carries a value (certified, incl. a measured 0)."""
-    return _is_env(env) and env.get("value") is not None
+    """A metric draws a bar iff its envelope carries a value (certified, incl. a measured 0), or is a
+    below-resolution absence (which displays as 0, see mval)."""
+    return _is_env(env) and (env.get("value") is not None or env.get("reason") == "below_resolution")
 
 
 # ---- provenance-driven captions (Python mirror of app.js SWEEP_CAPTION) -----------------------------
