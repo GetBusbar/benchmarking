@@ -1146,7 +1146,11 @@ pub fn run_suite_with(
     // the final flush that would have carried the complete run. So a checkpoint trip is logged and
     // skipped; only the FINAL flush below, once every column has been measured, may make the guard's
     // refusal fatal.
-    for result in run::run_grid_with(&rc, cfg.min_conc, cfg.max_conc, metrics) {
+    // STREAMED, so the checkpoint above is a checkpoint. This was `for result in run_grid_with(...)`,
+    // which returns a Vec: the whole grid had to finish before the loop began, so the per-column
+    // flush - and the promise in the comment above it - could never fire on an interrupted run.
+    // Busbar measured 16 of 36 cells over four hours and not one of them reached disk.
+    run::run_grid_streaming(&rc, cfg.min_conc, cfg.max_conc, metrics, &mut |result| {
         let id = &result.outcome.id;
         let ing = id.ingress.clone();
         let eg = id.egress.clone();
@@ -1165,7 +1169,20 @@ pub fn run_suite_with(
                              continuing to measure the rest of the grid"
                         );
                     }
-                    Err(e) => return Err(e),
+                    // A CHECKPOINT THAT FAILS TO WRITE MUST NOT DISCARD THE CELLS STILL TO COME.
+                    // This used to `return Err`, abandoning the rest of the grid over a write that
+                    // the FINAL flush is about to attempt again anyway - the same reasoning the
+                    // promote-guard arm above already applies, arriving by a different error. The
+                    // failure is remembered, not swallowed: if the final write also fails, that is
+                    // the error the run reports, and if it succeeds the run really is fine and this
+                    // was transient. Either way, hours of measurement are not thrown away over a
+                    // mid-run disk hiccup.
+                    Err(e) => {
+                        eprintln!(
+                            "suite: checkpoint after egress column {finished_egress} failed to \
+                             write ({e}) - continuing to measure; the final write decides the run"
+                        );
+                    }
                 }
             }
             last_egress = Some(eg.clone());
@@ -1268,7 +1285,7 @@ pub fn run_suite_with(
             })
             .cells
             .insert(ing, cell);
-    }
+    });
 
     // The final write always happens, so a grid with a single egress column is not lost.
     let _ = written;
@@ -1493,6 +1510,40 @@ fn gateway_build(cfg: &SuiteConfig) -> Option<String> {
 }
 
 /// Build the record from what has been measured so far and write it.
+/// THE CONFIG THE GATEWAY ACTUALLY RAN FROM, captured into the same artifact as the numbers.
+///
+/// `ResultSnapshot.config` existed, was serialized, was read by `gen-data.mjs` as its FIRST choice of
+/// config source, and nothing ever filled it: the field fell through to `Default`, so every gateway
+/// on the board published `config: {files: {}}` and every drawer read "Config: not published".
+///
+/// That is not cosmetic. The config is the evidence for the claim the whole board rests on - that
+/// each gateway was measured as it ships, not as we tuned it. Without it a reader is asked to take
+/// that on trust, which is the one thing this project refuses to ask.
+///
+/// Read at flush time from the gateway's own directory, so what lands in the artifact is the text
+/// the process was actually started with rather than a template re-rendered later - the exact class
+/// of bug this field's own doc comment describes ("a chart read against a config that was since
+/// overwritten on disk"). A file that cannot be read is skipped rather than failing the run: a
+/// finished measurement must not be discarded over its own provenance, and an absent config still
+/// renders honestly as "not published".
+fn rendered_config(cfg: &SuiteConfig) -> crate::record::ConfigFiles {
+    let mut files = std::collections::HashMap::new();
+    for f in &cfg.manifest.config_files {
+        let path = cfg.gw_dir.join(&f.output);
+        match std::fs::read_to_string(&path) {
+            Ok(text) => {
+                files.insert(f.output.clone(), text);
+            }
+            Err(e) => eprintln!(
+                "suite: config {} could not be read for the artifact ({e}) - the run stands, but \
+                 this gateway publishes no config",
+                path.display()
+            ),
+        }
+    }
+    crate::record::ConfigFiles { files }
+}
+
 fn flush(
     cfg: &SuiteConfig,
     upstreams: &HashMap<String, Upstream>,
@@ -1520,6 +1571,7 @@ fn flush(
         gateway_build(cfg).unwrap_or_else(|| format!("otb-engine {}", env!("CARGO_PKG_VERSION")));
     let snap = ResultSnapshot {
         schema_version: 1,
+        config: rendered_config(cfg),
         gateway: cfg.manifest.name.clone(),
         // WHAT WAS MEASURED, not what measured it: the engine identifies itself in rig.engine,
         // where it belongs, so this field must be the gateway's own build string, not the engine's,
@@ -1644,6 +1696,140 @@ mod tests {
             rig_release_url: None,
             load_cores: None,
         }
+    }
+
+    /// A metric that measures nothing and watches the RESULTS DIRECTORY instead.
+    ///
+    /// The only way to prove a checkpoint is a checkpoint is to look at the disk while the grid is
+    /// still running. Interrupting a run mid-flight inside a test is not something this harness can
+    /// do; observing, from inside a cell, whether earlier cells have already reached disk is exactly
+    /// equivalent and is deterministic.
+    struct SnapshotWatcher {
+        dir: std::path::PathBuf,
+        seen: std::sync::Arc<std::sync::Mutex<Vec<bool>>>,
+    }
+
+    impl crate::metric::Metric for SnapshotWatcher {
+        fn name(&self) -> &'static str {
+            "snapshot_watcher"
+        }
+        fn fields(&self) -> &'static [&'static str] {
+            &[]
+        }
+        fn measure(&self, _ctx: &crate::metric::CellCtx<'_>) -> crate::metric::Measured {
+            let any = std::fs::read_dir(&self.dir)
+                .map(|rd| {
+                    rd.filter_map(|e| e.ok())
+                        .any(|e| e.file_name().to_string_lossy().ends_with(".json"))
+                })
+                .unwrap_or(false);
+            self.seen.lock().expect("watcher lock").push(any);
+            let f: crate::metric::Filled = Vec::new().into_iter().collect();
+            f.into()
+        }
+    }
+
+    // THE CONFIG IS THE EVIDENCE FOR THE CLAIM THE BOARD RESTS ON.
+    //
+    // `ResultSnapshot.config` existed, serialized, and was gen-data's FIRST choice of config source -
+    // and nothing ever filled it. Every gateway published `config: {files: {}}`, so every drawer read
+    // "Config: not published", on all 13 gateways of a finished run. Without it the claim that each
+    // gateway ran as it ships is something a reader has to take on trust.
+    #[test]
+    fn the_snapshot_carries_the_config_the_gateway_ran_from() {
+        let dir = tmpdir("config-capture");
+        let gw = serve(200);
+        let mut cfg = cfg_for(&dir, gw);
+        // A gateway directory with one rendered config, exactly as run.sh leaves it.
+        let gw_dir = dir.join("gw-under-test");
+        std::fs::create_dir_all(&gw_dir).expect("gw dir");
+        std::fs::write(gw_dir.join("config.gen.yaml"), "listen: 8080\nupstream: mock\n")
+            .expect("config");
+        cfg.gw_dir = gw_dir;
+        cfg.manifest.config_files = vec![crate::manifest::ConfigFile {
+            template: "config.gen.yaml.tmpl".into(),
+            output: "config.gen.yaml".into(),
+        }];
+
+        let got = rendered_config(&cfg);
+        assert_eq!(got.files.len(), 1, "the rendered config must reach the artifact: {got:?}");
+        assert!(
+            got.files["config.gen.yaml"].contains("listen: 8080"),
+            "verbatim, not a re-render: {got:?}"
+        );
+
+        // A config that cannot be read must not take the run down with it: a finished measurement is
+        // not discarded over its own provenance, it just publishes no config.
+        cfg.manifest.config_files = vec![crate::manifest::ConfigFile {
+            template: "gone.tmpl".into(),
+            output: "not-written.yaml".into(),
+        }];
+        assert!(rendered_config(&cfg).files.is_empty(), "an unreadable config is absent, not fatal");
+
+        // AND THAT IT IS ACTUALLY CALLED. Everything above passes with the one line that wires this
+        // into the snapshot deleted - which is exactly how the field came to be empty on a finished
+        // board in the first place. The assertion that matters is on what reached the disk.
+        cfg.manifest.config_files = vec![crate::manifest::ConfigFile {
+            template: "config.gen.yaml.tmpl".into(),
+            output: "config.gen.yaml".into(),
+        }];
+        let paths = run_suite_with(&cfg, gw, &[]).expect("the run should complete");
+        let text = std::fs::read_to_string(&paths.current).expect("current file");
+        let back: ResultSnapshot = serde_json::from_str(&text).expect("its own output must parse");
+        assert_eq!(
+            back.config.files.get("config.gen.yaml").map(String::as_str),
+            Some("listen: 8080\nupstream: mock\n"),
+            "the WRITTEN artifact must carry the config, not merely be able to compute it"
+        );
+    }
+
+    // A PARTIAL RUN MUST LEAVE ITS MEASUREMENTS ON DISK.
+    //
+    // suite.rs has flushed a snapshot at every egress-column boundary for a long time, under a
+    // comment promising that "a run interrupted partway through must not lose every cell it already
+    // measured". The promise could not be kept: the loop iterated `run_grid_with`, which returns a
+    // `Vec`, so the ENTIRE grid had to finish before the first flush could run. Nothing enforced the
+    // difference, because every test ran the grid to completion, where both shapes look identical.
+    //
+    // busbar measured 16 of 36 cells across four hours on a box with a self-termination timer. The
+    // loop never started. Zero snapshots were written, and every one of those measurements died with
+    // the instance - the run log records only where the time went, never a single value.
+    //
+    // This watches the results directory from inside the cells themselves: with two dialects the
+    // grid is two egress columns, so by the time the second column is being measured the first
+    // column's checkpoint must already be on disk. Collecting the grid first makes every cell see an
+    // empty directory, which is precisely the bug.
+    #[test]
+    fn cells_reach_disk_while_the_grid_is_still_running() {
+        let dir = tmpdir("partial-run-survives");
+        let gw = serve(200);
+        let mut cfg = cfg_for(&dir, gw);
+        cfg.dialects = vec![Dialect::Openai, Dialect::Anthropic];
+
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let watcher = SnapshotWatcher {
+            dir: dir.clone(),
+            seen: std::sync::Arc::clone(&seen),
+        };
+        let metrics: Vec<&dyn crate::metric::Metric> = vec![&watcher];
+        run_suite_with(&cfg, gw, &metrics).expect("the run should complete");
+
+        let seen = seen.lock().expect("watcher lock").clone();
+        assert_eq!(seen.len(), 4, "two dialects is a 2x2 grid: {seen:?}");
+        assert!(
+            !seen[0],
+            "nothing can be on disk before the first cell has been measured: {seen:?}"
+        );
+        assert!(
+            seen.iter().any(|s| *s),
+            "at least one cell must have found an earlier cell's snapshot already written - with \
+             none, the whole grid was collected before anything reached disk and an interrupted run \
+             loses everything it measured: {seen:?}"
+        );
+        assert!(
+            seen[3],
+            "by the LAST cell, the first egress column's checkpoint must certainly be on disk: {seen:?}"
+        );
     }
 
     // A CHECKPOINT PROMOTE-GUARD TRIP MUST NOT ABORT THE WHOLE RUN. The incremental flush after
