@@ -104,11 +104,16 @@ Each entry: claim, concrete trigger, why deferred, and what promotes it to urgen
 - Deferred: latent - the confirmation pass bounds it, and C6 catches the gross case.
 - Promote when: C6 warnings recur on the same cell across runs.
 
-### SRCH-04 percentile convention split with comments claiming otherwise
-- Claim: `ttft_pct` (engine/src/metric.rs:881) and `gap_percentile_us` (metric.rs:1221) use ceil nearest-rank, while `stats::percentile` (engine/src/stats.rs:197) and gen.rs use floor, and the stats.rs:187-189 / gen.rs:101 comments claim the conventions match.
-- Trigger: small samples (n under ~20) where floor vs ceil differ by one rank; cross-metric comparisons shift by one sample.
-- Deferred: needs-design - unifying changes published numbers, so it needs a deliberate cut-over run.
-- Promote when: any metric pairs a stats.rs percentile against a metric.rs percentile in one published figure.
+### SRCH-04 percentile convention split with comments claiming otherwise - CLOSED 2026-07-29
+- Claim (as filed): metric.rs used ceil nearest-rank while stats.rs/gen.rs/search.rs used floor, with
+  comments in three files claiming they matched.
+- RESOLVED in 9f43beb2. `stats::nearest_rank_index` is now the single rank resolver and every producer
+  routes through it: gen.rs, search.rs, and both metric.rs percentiles. Ceil won - floor put p99 at the
+  MAXIMUM over 100 samples, which is exactly the sample count this rig chooses, and two tests in one
+  crate asserted opposite rules. Every false comment corrected.
+- Residual, not a defect: the CURRENTLY PUBLISHED board was measured under the old floor convention, so
+  re-deriving its TTFT/gap numbers against today's engine compares two instruments. The next full run
+  replaces it.
 
 ### SRCH-05 confirmation test pins nothing
 - Claim: `every_bisected_ceiling_is_confirmed_before_it_is_published` (engine/src/run.rs:3404) asserts against strings taken from its own source, so it passes vacuously.
@@ -136,11 +141,16 @@ Each entry: claim, concrete trigger, why deferred, and what promotes it to urgen
 
 ## Engine - artifact
 
-### ART-01 CellMemory load_s/plateaued can be null with no absences entry
-- Claim: suite.rs builds `plateaued` and `load_s` via `take(...).copied()` (engine/src/suite.rs:475, :492), collapsing why-absent; these Option fields are not coverable by `absences_of!` (engine/src/record.rs:369), which only walks Measurement fields.
-- Trigger: a served cell whose memory leg lacked those readings publishes bare nulls, the exact "bare hole" bench-audit polices for Measurement fields.
-- Deferred: needs-design - wants Measurement-typed fields or an Option-aware absences path.
-- Promote when: bench-audit's field list grows to cover them, or a consumer reads load_s/plateaued.
+### ART-01 CellMemory load_s/plateaued can be null with no absences entry - CLOSED 2026-07-29
+- RESOLVED in 9f43beb2. Both are `Measurement`s now (record.rs), listed in `absences_of!`, and suite.rs
+  carries the metric group's reason instead of collapsing it. The wire form is unchanged (a bare value
+  or null), so no consumer had to change. bench-audit's field list covers them.
+- CONSEQUENCE, and it is the live one: the audit is now STRICTER THAN EVERY SNAPSHOT ON DISK. The
+  recovered plano snapshots come from engine 939896b, before this change, so they publish
+  memory.plateaued and memory.load_s as bare nulls and `bench-audit.py` correctly reports 6 violations
+  against them. CI is green only because results/snapshots is untracked and the audit takes its
+  empty-board SKIP. This resolves itself the moment the next run publishes, because every box runs one
+  pinned BENCH_COMMIT. See TOOL-06 for the general form of the risk.
 
 ### ART-02 qualify baseline harvests observed_rps from failed runs
 - Claim: `Outcome::qualifies_as_baseline` (engine/src/qualify.rs:46) exists but `qualify_history_on_disk` (engine/src/suite.rs:912, called at :898) harvests every on-disk record unconditionally.
@@ -154,17 +164,20 @@ Each entry: claim, concrete trigger, why deferred, and what promotes it to urgen
 - Deferred: needs-design - what a refutation should do to already-measured blocks is a policy call.
 - Promote when: reverify refutations occur in a published run.
 
-### ART-04 CellStream.reason carries prose, null when reasonless
-- Claim: `cell_stream` (engine/src/suite.rs:537-548) puts detail prose in `reason` rather than a stable token, and null when there is none.
-- Trigger: any consumer trying to branch on reason gets free text.
-- Deferred: cosmetic - the site displays it verbatim and nothing branches on it.
-- Promote when: reason-driven UI or audit rules are added.
+### ART-04 CellStream.reason carries prose, null when reasonless - CLOSED 2026-07-29
+- RESOLVED in 9f43beb2. `reason` carries the machine token (the same vocabulary as `Cell.reason`) and
+  the prose moved to `stream_error`. The site reads prose from `stream_error` and maps the token
+  through STATUS_LABEL, so a raw token is never printed.
+- The original entry also said "the site displays it verbatim". That was wrong when filed: nothing
+  displayed it then and nothing does now. See SITE-17 for the dead-payload half.
 
-### ART-05 stream_served vocabulary wider than the doc
-- Claim: `stream_served` statuses produced at suite.rs:533-567 exceed what the record.rs:415 doc lists, and can misdescribe gap-measured cells when only the TTFT legs failed.
-- Trigger: a cell with good gap data but failed TTFT legs reads as less served than it was.
-- Deferred: cosmetic - display-only today.
-- Promote when: stream_served becomes machine-consumed or the doc is cited externally.
+### ART-05 stream_served vocabulary wider than the doc - CLOSED 2026-07-29
+- RESOLVED in 9f43beb2. record.rs enumerates the real vocabulary (true, any Absent token, "not_probed",
+  and false as parse-only legacy), and the derivation now takes every streaming comparison rather than
+  added_ttft_p50 alone - so a cell whose gap figures measured publishes `true` with the TTFT leg's
+  token in `reason`, instead of reading as a cell that never streamed.
+- Site coverage verified complete against the full token set, unknown tokens read "not available" and
+  are never printed raw.
 
 ### ART-06 mirrored twin absences drop detail by design
 - Claim: companion fields sharing one absence (e.g. a value and its `_conc` twin) get the reason token via `absences_of!` (engine/src/record.rs:369) but the twin's entry drops the detail string.
@@ -313,6 +326,68 @@ Each entry: claim, concrete trigger, why deferred, and what promotes it to urgen
 - Trigger: none today; it is dead configuration that misleads a reader about where clamping happens.
 - Deferred: cosmetic - removing it changes no pixels.
 - Promote when: charts.py is next refactored; delete it then.
+
+## Round 2 findings (2026-07-29, against committed 9f43beb2)
+
+A second round of five audits ran against the committed, CI-green tree. Its theme was different from
+round 1: the CODE fixes held (every claim an auditor could test proved red-before-green, and no
+regressions were found), but a meaningful share of the GUARDS around them were weaker than they
+looked. Everything HIGH from round 2 was fixed same-day. What remains:
+
+### TOOL-06 a mixed-engine board publishes rows the audit never checked
+- Claim: `bench-audit.py`'s `load()` pins the board to ONE engine (`newest_engine()`), so on a board
+  where some gateways were measured by an older engine, those gateways are silently EXCLUDED from the
+  audit rather than failing it. `main()` does not require snapshots to match the checked-out HEAD.
+- Trigger: a partial re-run. Gateways left on the previous engine publish to the site and are audited
+  by nothing, while the report prints a gateway count that looks complete.
+- Deferred: low practical risk for a full run - every box clones one pinned BENCH_COMMIT, so a
+  full-field run cannot mix. The risk is the single-gateway re-run (`run-on-ec2.sh <name>`).
+- Promote when: any partial re-run publishes, or the field is ever split across two engines.
+
+### ART-09 a null `fail` in a sweep row carries no reason on the wire
+- Claim: `SustainedPoint.fail` became `Option<i64>` and `metric.rs` maps `None` to an absence WITH a
+  reason - but `record::SweepPoint` has no `absences` map, so the reason is constructed and then
+  discarded at serialization. The published sweep row carries a bare null.
+- Trigger: a rung whose windows produced no reading at all.
+- Deferred: nothing reads `fail` from a sweep row today (site reads conc/rps/p99_us; bench-audit reads
+  rps/p99_us; charts.py never touches sweep rows), so no surface can be misled by it yet. The typing
+  improved without the reason reaching a reader.
+- Promote when: any consumer reads a sweep row's `fail`, or `check_no_bare_absence` is extended to
+  cover sweep rows.
+
+### SITE-17 stream.reason and stream_c1_note ship in the bundle and are read by nothing
+- Claim: `gen-data.mjs` carries `reason` and `stream_c1_note` into the bundle with a comment saying
+  "app.js renders the prose and maps the token through its own note vocabulary". Grep finds zero
+  readers of either in app.js. The explanation still reaches the reader for the partial case through
+  the per-metric absences envelope, so nothing is hidden - but the payload is dead and the comment
+  asserts behaviour that does not exist.
+- Deferred: cosmetic - carrying it costs bundle bytes, and it is the right data to render if the
+  drawer ever explains a non-streaming cell.
+- Promote when: the drawer or popup gains a why-it-did-not-stream sentence.
+
+### RIG-14 a rig-refused streaming leg is described as the gateway's silence
+- Claim: `metric.rs` never matches on `SseEnd`, so a leg the RIG refused to send (the new
+  `SseEnd::RigRefused`, raised when a manifest header would have to be smuggled) falls into the
+  generic branch and publishes `Absent::NotMeasured` with the prose "no stream frame arrived from THE
+  GATEWAY". Truthful that nothing arrived; wrong about whose fault it was. `HarnessError` is the
+  reason the enum's own doc reserves for this.
+- Trigger: only reachable via a hostile or malformed manifest header, which no shipped manifest has.
+- Deferred: latent - unreachable with today's manifests.
+- Promote when: a manifest is added by anyone outside this repo, or the refusal path fires once.
+
+### RIG-15 OTB_RUN_ID is documented as the orchestrator's handshake and never exported
+- Claim: `manifest.rs` and `otb.rs` both say the orchestrator passes `OTB_RUN_ID` "the same run id it
+  tags its boxes with". `run-on-ec2.sh` has `RUN_ID` but never exports `OTB_RUN_ID`, so container
+  scoping always falls back to the pid.
+- Deferred: harmless today - one box per gateway, so the pid is unique per run. The affordance the
+  comments describe is simply unwired.
+- Promote when: two runs ever share a box, which is exactly what the scoping was added to survive.
+
+### DOC-01 README documents a value the engine no longer produces
+- Claim: README says a non-streaming gateway is "recorded `stream_served: false`". record.rs now states
+  `false` is never written by this engine and is retained only so older artifacts parse.
+- Deferred: cosmetic.
+- Promote when: the README's streaming section is next revised.
 
 ## Process note
 
