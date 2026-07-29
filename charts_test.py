@@ -16,6 +16,8 @@
 # Run: python3 charts_test.py
 import json
 import os
+import pathlib
+import re
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -676,6 +678,69 @@ with isolated('the README table says the SAME thing about the same envelope as t
     _canon_perf({"p": {"best_cell": bc(added_latency_p99_us=120)}})
     _md2 = charts._report_md(charts._ranked(), "t", [])
     check("a real measured latency still prints as a number", "120 µs" in _md2, True)
+
+# ── write_reports() must survive a non-UTF-8 locale (routine in a minimal CI container) ───────────────
+#
+# _report_md's body embeds literal non-ASCII glyphs (✕, ⚠, µs, ≤, ·, ...) into every report it writes.
+# write_reports() saves both README.md files with Path.write_text() and no encoding=, so when the box's
+# locale is C/POSIX with no UTF-8 coercion (PYTHONUTF8=0 PYTHONCOERCECLOCALE=0 LC_ALL=C LANG=C - routine
+# in a minimal CI container, and NOT reproducible by monkeypatching locale.getpreferredencoding() from
+# Python: CPython's TextIOWrapper resolves the "None" encoding at the C level, so only a real subprocess
+# with that environment exercises it) that write raises UnicodeEncodeError and BOTH reports are never
+# written - the exact regression this pins.
+with isolated("write_reports() must survive a non-UTF-8 locale"):
+    import subprocess
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as _tmp:
+        _row = {"hardware": "test-rig", "measured_at": "2026-07-24T00:00:00Z",
+                "added_latency_p99_us": 120, "served": True}
+        _script = (
+            "import json, os, sys; sys.path.insert(0, %r)\n"
+            "_created = False\n"
+            "if not os.path.exists(_DATA := os.path.join(%r, 'site', 'data.json')):\n"
+            "    os.makedirs(os.path.dirname(_DATA), exist_ok=True)\n"
+            "    with open(_DATA, 'w') as _f: json.dump({'gateways': []}, _f)\n"
+            "    _created = True\n"
+            "import charts, pathlib\n"
+            "if _created: os.remove(_DATA)\n"
+            "charts.RESULTS = pathlib.Path(%r) / 'results'\n"
+            "charts.GATEWAYS = {'p': 'p'}\n"
+            "charts._ranked = lambda: [('p', %r)]\n"
+            "charts.write_reports()\n"
+        ) % (HERE, HERE, _tmp, _row)
+        _env = dict(os.environ, PYTHONUTF8="0", PYTHONCOERCECLOCALE="0", LC_ALL="C", LANG="C")
+        _proc = subprocess.run([sys.executable, "-c", _script], env=_env,
+                                capture_output=True, text=True)
+        _all_readme = os.path.join(_tmp, "results", "reports", "all", "README.md")
+        _top5_readme = os.path.join(_tmp, "results", "reports", "top5", "README.md")
+        check("write_reports() writes both README.md files under an ASCII-only (LC_ALL=C) locale",
+              (_proc.returncode == 0, os.path.exists(_all_readme), os.path.exists(_top5_readme)),
+              (True, True, True))
+
+# ── every read_text(/write_text( call in charts.py must pin an explicit encoding ──────────────────────
+#
+# The locale case above pins the two write sites and the manifest read site by hand, but nothing stops
+# the next read_text/write_text call site from being added without encoding= and silently reopening the
+# same class of bug. Scoped to charts.py only - this is not a repo-wide lint.
+with isolated("every read_text(/write_text( call in charts.py carries an explicit encoding="):
+    _src = (pathlib.Path(HERE) / "charts.py").read_text(encoding="utf-8")
+    _bad = []
+    for _m in re.finditer(r"\.(read_text|write_text)\(", _src):
+        _start = _m.end()
+        _depth = 1
+        _i = _start
+        while _depth > 0 and _i < len(_src):
+            if _src[_i] == "(":
+                _depth += 1
+            elif _src[_i] == ")":
+                _depth -= 1
+            _i += 1
+        _call_args = _src[_start:_i - 1]
+        if "encoding=" not in _call_args:
+            _line_no = _src.count("\n", 0, _m.start()) + 1
+            _bad.append(f"{_m.group(1)}() at line {_line_no}")
+    check("every read_text(/write_text( call in charts.py carries an explicit encoding=", _bad, [])
 
 
 if _fail == 0:
