@@ -231,6 +231,17 @@ const testWithMatrixDonor = (name, fn) =>
     fn();
   });
 
+// A NARROWER GATE STILL, for the two assertions that are claims about the FIELD rather than about a
+// row: that the oracle reaches several distinct surfaces, and that R2's own failure path fires
+// across them. One donor row satisfies neither - "got 1" is the honest count of a two-gateway board,
+// not evidence the oracle stopped covering anything. These only mean something once every gateway
+// the repo declares has published, so that is exactly when they run.
+const testWhenBoardComplete = (name, fn) =>
+  test(name, () => {
+    if (!BOARD_IS_COMPLETE) return;
+    fn();
+  });
+
 // ---- freshness guard (matrix-sole-source): relaxed rules ----
 // Under matrix-sole-source each gateway is ONE atomic matrix run (hours long) published INDEPENDENTLY,
 // so the board legitimately carries mixed per-gateway ages. The old RELATIVE guards are gone:
@@ -2649,7 +2660,7 @@ test("#2/#22 RED: the per-lane chart-provenance lint and the cross-language capt
     Object.keys(app.SWEEP_CAPTION)).errors, []);
 });
 
-testWithMatrixDonor("#16/#19 RED: R2's own failure path fires, and R1 coverage is claimed only after a real comparison", () => {
+testWhenBoardComplete("#16/#19 RED: R2's own failure path fires, and R1 coverage is claimed only after a real comparison", () => {
   // #19: the missing.length branch - never exercised by any test before. An EMPTY bundle exercises no
   // required branch at all, so R2 must FAIL rather than silently pass on an inert check.
   const empty = checkConsistency({ gateways: [] }, app).errors;
@@ -2708,7 +2719,7 @@ testWithData("#21 CLASS: R3 catches the board rendering a different run than the
     "R3 must flag a bundle whose matrix_from_snapshot claim disagrees with the disk");
 });
 
-testWithMatrixDonor("#17: the independent oracle covers EVERY matrix cell, translation, streaming and memory - not 2 fields", () => {
+testWhenBoardComplete("#17: the independent oracle covers EVERY matrix cell, translation, streaming and memory - not 2 fields", () => {
   // RED-before, per surface: corrupt ONE sealed envelope on each previously-UNORACLED surface and assert
   // the oracle catches it. Before this change only best_cell's two RPS fields were compared, so each of
   // these mutations shipped undetected.
