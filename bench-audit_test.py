@@ -83,7 +83,7 @@ REJECTS = [
     (audit.check_rate_is_physically_possible, cell(perf__conc_at_peak=1, perf__rps_max_proxy=50_000),
      "50000 rps on a single connection"),
     (audit.check_frames_have_a_stream_behind_them, cell(stream__streams_sustained=0),
-     "frames per second over a population of zero"),
+     "frames per second beside a MEASURED zero population"),
     (audit.check_no_bare_absence, cell(stream__added_gap_p50_us=None),
      "a null metric with no reason in absences (a bare hole)"),
     # The other half of the hole: `check_no_bare_absence` reads `f in blk and blk[f] is None`, so a
@@ -94,7 +94,7 @@ REJECTS = [
      "a served cell whose blocks omit declared fields entirely"),
     (audit.check_stream_capacity_is_a_number,
      cell(stream__stream_served=True, stream__cpu_fps=None),
-     "a served streaming cell whose capacity metric is a hole instead of a measured 0"),
+     "a served streaming cell whose capacity metric is a hole with nothing explaining it"),
 ]
 
 
@@ -163,6 +163,23 @@ def main():
                        absences={"stream.cpu_fps": {"reason": "untestable"}})
         if list(audit.check_stream_capacity_is_a_number("t", excused)):
             failures.append("check_stream_capacity_is_a_number rejected a rig-class absence")
+        # A search that RAN, failed to establish a ceiling, and said WHY is not a silent yield.
+        # Demanding a measured 0 there fabricates an answer to a question that was never settled.
+        # This is the real shape from the 2026-07-29 field run.
+        explained = cell(stream__stream_served=True, stream__streams_sustained=None,
+                         absences={"stream.streams_sustained": {
+                             "reason": "not_measured",
+                             "detail": "the bisection proved c=6144, but that concurrency did not "
+                                       "hold the stream gate on re-measurement and stepping down "
+                                       "found none that did within 4 attempts"}})
+        if list(audit.check_stream_capacity_is_a_number("t", explained)):
+            failures.append("check_stream_capacity_is_a_number rejected an absence that explains itself")
+        # The other side of the same coin: a cpu_fps peak beside an UNCONFIRMED ceiling is honest,
+        # because the two figures come from two different searches with different gates.
+        unconfirmed = cell(stream__cpu_fps=20636.8, stream__streams_sustained=None)
+        if list(audit.check_frames_have_a_stream_behind_them("t", unconfirmed)):
+            failures.append("check_frames_have_a_stream_behind_them rejected a peak beside an "
+                            "unconfirmed (not zero) ceiling")
 
     # ── the omitted-field check, both ways (ledger TOOL-04) ───────────────────────────────────────
     #
