@@ -76,7 +76,10 @@ impl fmt::Display for SuperviseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             SuperviseError::StillHeld { port, waited } => {
-                write!(f, "port {port} still held after waiting {waited:?}; stop budget exhausted")
+                write!(
+                    f,
+                    "port {port} still held after waiting {waited:?}; stop budget exhausted"
+                )
             }
         }
     }
@@ -116,7 +119,9 @@ impl Lifecycle for RealLifecycle {
             // calling it as the first signal is not a shortcut, it is simply what "stop" means for
             // a container.
             Runtime::Docker { container } => {
-                let _ = Command::new("docker").args(["rm", "-f", container]).status();
+                let _ = Command::new("docker")
+                    .args(["rm", "-f", container])
+                    .status();
             }
             Runtime::Native { proc_match } => {
                 let _ = Command::new("pkill").args(["-f", proc_match]).status();
@@ -131,9 +136,11 @@ impl Lifecycle for RealLifecycle {
                 .output()
                 .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "true")
                 .unwrap_or(false),
-            Runtime::Native { proc_match } => {
-                Command::new("pgrep").args(["-f", proc_match]).status().map(|s| s.success()).unwrap_or(false)
-            }
+            Runtime::Native { proc_match } => Command::new("pgrep")
+                .args(["-f", proc_match])
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false),
         };
         process_alive || matches!(port_state(port), PortState::Held)
     }
@@ -141,10 +148,14 @@ impl Lifecycle for RealLifecycle {
     fn signal_kill(&self, runtime: &Runtime) {
         match runtime {
             Runtime::Docker { container } => {
-                let _ = Command::new("docker").args(["rm", "-f", container]).status();
+                let _ = Command::new("docker")
+                    .args(["rm", "-f", container])
+                    .status();
             }
             Runtime::Native { proc_match } => {
-                let _ = Command::new("pkill").args(["-9", "-f", proc_match]).status();
+                let _ = Command::new("pkill")
+                    .args(["-9", "-f", proc_match])
+                    .status();
             }
         }
     }
@@ -187,7 +198,10 @@ pub fn stop_and_wait_with<L: Lifecycle>(
             killed = true;
         }
         if attempt >= budget_secs {
-            return Err(SuperviseError::StillHeld { port, waited: Duration::from_secs(attempt + 1) });
+            return Err(SuperviseError::StillHeld {
+                port,
+                waited: Duration::from_secs(attempt + 1),
+            });
         }
         sleep(Duration::from_secs(1));
         attempt += 1;
@@ -233,7 +247,11 @@ pub fn wait_until_ready_with(
             PortState::Unknown => {}
         }
         if attempt >= budget_secs {
-            return if ever_determined { ReadyOutcome::NotReady } else { ReadyOutcome::Unmeasured };
+            return if ever_determined {
+                ReadyOutcome::NotReady
+            } else {
+                ReadyOutcome::Unmeasured
+            };
         }
         sleep(Duration::from_secs(1));
         attempt += 1;
@@ -274,7 +292,11 @@ mod tests {
         fn is_alive(&self, _runtime: &Runtime, _port: u16) -> bool {
             *self.is_alive_calls.borrow_mut() += 1;
             let mut a = self.alive.borrow_mut();
-            if a.len() > 1 { a.remove(0) } else { *a.last().unwrap_or(&false) }
+            if a.len() > 1 {
+                a.remove(0)
+            } else {
+                *a.last().unwrap_or(&false)
+            }
         }
         fn signal_kill(&self, _runtime: &Runtime) {
             *self.kill_calls.borrow_mut() += 1;
@@ -282,7 +304,9 @@ mod tests {
     }
 
     fn native() -> Runtime {
-        Runtime::Native { proc_match: "target/release/mock".into() }
+        Runtime::Native {
+            proc_match: "target/release/mock".into(),
+        }
     }
 
     fn counting_sleep(count: &RefCell<u32>) -> impl FnMut(Duration) + '_ {
@@ -294,12 +318,26 @@ mod tests {
     fn already_stopped_is_reported_stopped_with_no_sleep() {
         let lc = FakeLifecycle::new(vec![false]);
         let sleeps = RefCell::new(0u32);
-        let r = stop_and_wait_with(&lc, &native(), 8081, Duration::from_secs(15), counting_sleep(&sleeps));
+        let r = stop_and_wait_with(
+            &lc,
+            &native(),
+            8081,
+            Duration::from_secs(15),
+            counting_sleep(&sleeps),
+        );
         assert_eq!(r, Ok(()));
         assert_eq!(*lc.is_alive_calls.borrow(), 1);
-        assert_eq!(*sleeps.borrow(), 0, "a process already gone must not cost a single sleep");
+        assert_eq!(
+            *sleeps.borrow(),
+            0,
+            "a process already gone must not cost a single sleep"
+        );
         assert_eq!(*lc.kill_calls.borrow(), 0, "nothing to escalate against");
-        assert_eq!(*lc.stop_calls.borrow(), 1, "the polite signal is still sent exactly once");
+        assert_eq!(
+            *lc.stop_calls.borrow(),
+            1,
+            "the polite signal is still sent exactly once"
+        );
     }
 
     // ---- required: a lingering process gets the SIGKILL escalation, asserted directly -------------
@@ -308,9 +346,19 @@ mod tests {
         // budget 10s, halfway = 5. Alive for attempts 0..=5 (six checks), gone on the 7th.
         let lc = FakeLifecycle::new(vec![true, true, true, true, true, true, false]);
         let sleeps = RefCell::new(0u32);
-        let r = stop_and_wait_with(&lc, &native(), 8081, Duration::from_secs(10), counting_sleep(&sleeps));
+        let r = stop_and_wait_with(
+            &lc,
+            &native(),
+            8081,
+            Duration::from_secs(10),
+            counting_sleep(&sleeps),
+        );
         assert_eq!(r, Ok(()));
-        assert_eq!(*lc.kill_calls.borrow(), 1, "escalation must actually have fired, not just succeeded eventually");
+        assert_eq!(
+            *lc.kill_calls.borrow(),
+            1,
+            "escalation must actually have fired, not just succeeded eventually"
+        );
     }
 
     // ---- required: a process that never dies exhausts the budget and returns a LOUD error --------
@@ -318,9 +366,25 @@ mod tests {
     fn a_process_that_never_dies_is_a_hard_error_never_a_silent_pass() {
         let lc = FakeLifecycle::new(vec![true]); // always alive
         let sleeps = RefCell::new(0u32);
-        let r = stop_and_wait_with(&lc, &native(), 8081, Duration::from_secs(3), counting_sleep(&sleeps));
-        assert_eq!(r, Err(SuperviseError::StillHeld { port: 8081, waited: Duration::from_secs(4) }));
-        assert_eq!(*lc.kill_calls.borrow(), 1, "the budget running out must still have tried to escalate");
+        let r = stop_and_wait_with(
+            &lc,
+            &native(),
+            8081,
+            Duration::from_secs(3),
+            counting_sleep(&sleeps),
+        );
+        assert_eq!(
+            r,
+            Err(SuperviseError::StillHeld {
+                port: 8081,
+                waited: Duration::from_secs(4)
+            })
+        );
+        assert_eq!(
+            *lc.kill_calls.borrow(),
+            1,
+            "the budget running out must still have tried to escalate"
+        );
     }
 
     // ---- required: a zero budget still makes at least one attempt ---------------------------------
@@ -328,10 +392,27 @@ mod tests {
     fn a_zero_budget_still_makes_one_attempt() {
         let lc = FakeLifecycle::new(vec![true]);
         let sleeps = RefCell::new(0u32);
-        let r = stop_and_wait_with(&lc, &native(), 8081, Duration::from_secs(0), counting_sleep(&sleeps));
-        assert!(r.is_err(), "an unresponsive identity with no budget must still fail, never silently pass");
-        assert_eq!(*lc.is_alive_calls.borrow(), 1, "exactly one attempt, not zero");
-        assert_eq!(*lc.kill_calls.borrow(), 1, "halfway of a zero budget is zero, so escalation fires immediately");
+        let r = stop_and_wait_with(
+            &lc,
+            &native(),
+            8081,
+            Duration::from_secs(0),
+            counting_sleep(&sleeps),
+        );
+        assert!(
+            r.is_err(),
+            "an unresponsive identity with no budget must still fail, never silently pass"
+        );
+        assert_eq!(
+            *lc.is_alive_calls.borrow(),
+            1,
+            "exactly one attempt, not zero"
+        );
+        assert_eq!(
+            *lc.kill_calls.borrow(),
+            1,
+            "halfway of a zero budget is zero, so escalation fires immediately"
+        );
         assert_eq!(*sleeps.borrow(), 0, "a zero budget must not sleep");
     }
 
@@ -341,7 +422,13 @@ mod tests {
         // budget 4s, halfway = 2. Gone by the third check (attempt index 2).
         let lc = FakeLifecycle::new(vec![true, true, false]);
         let sleeps = RefCell::new(0u32);
-        let r = stop_and_wait_with(&lc, &native(), 8081, Duration::from_secs(4), counting_sleep(&sleeps));
+        let r = stop_and_wait_with(
+            &lc,
+            &native(),
+            8081,
+            Duration::from_secs(4),
+            counting_sleep(&sleeps),
+        );
         assert_eq!(r, Ok(()));
     }
 
@@ -354,7 +441,12 @@ mod tests {
             PortState::Held
         };
         let sleeps = RefCell::new(0u32);
-        let r = wait_until_ready_with(8080, Duration::from_secs(30), &mut probe, counting_sleep(&sleeps));
+        let r = wait_until_ready_with(
+            8080,
+            Duration::from_secs(30),
+            &mut probe,
+            counting_sleep(&sleeps),
+        );
         assert_eq!(r, ReadyOutcome::Ready);
         assert_eq!(*calls.borrow(), 1);
         assert_eq!(*sleeps.borrow(), 0);
@@ -365,7 +457,12 @@ mod tests {
     fn readiness_reports_unmeasured_when_it_could_never_check() {
         let mut probe = |_p: u16| PortState::Unknown;
         let sleeps = RefCell::new(0u32);
-        let r = wait_until_ready_with(8080, Duration::from_secs(2), &mut probe, counting_sleep(&sleeps));
+        let r = wait_until_ready_with(
+            8080,
+            Duration::from_secs(2),
+            &mut probe,
+            counting_sleep(&sleeps),
+        );
         assert_eq!(r, ReadyOutcome::Unmeasured);
     }
 
@@ -373,7 +470,12 @@ mod tests {
     fn readiness_reports_not_ready_when_the_port_was_confirmed_free_throughout() {
         let mut probe = |_p: u16| PortState::Free;
         let sleeps = RefCell::new(0u32);
-        let r = wait_until_ready_with(8080, Duration::from_secs(2), &mut probe, counting_sleep(&sleeps));
+        let r = wait_until_ready_with(
+            8080,
+            Duration::from_secs(2),
+            &mut probe,
+            counting_sleep(&sleeps),
+        );
         assert_eq!(r, ReadyOutcome::NotReady);
     }
 

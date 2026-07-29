@@ -62,7 +62,9 @@ impl ProcSource for RealProc {
         };
         for entry in entries.flatten() {
             let name = entry.file_name();
-            let Some(pid) = name.to_str().and_then(|s| s.parse::<u32>().ok()) else { continue };
+            let Some(pid) = name.to_str().and_then(|s| s.parse::<u32>().ok()) else {
+                continue;
+            };
             if let Some(ppid) = read_ppid(pid) {
                 map.insert(pid, ppid);
             }
@@ -129,8 +131,12 @@ fn sum_field_mib<S: ProcSource>(source: &S, root_pid: u32, field: &str) -> Measu
     let mut total_kb: u64 = 0;
     let mut read_any = false;
     for pid in pids {
-        let Some(status) = source.status(pid) else { continue };
-        let Some(kb) = parse_field_kb(&status, field) else { continue };
+        let Some(status) = source.status(pid) else {
+            continue;
+        };
+        let Some(kb) = parse_field_kb(&status, field) else {
+            continue;
+        };
         read_any = true;
         total_kb += kb;
     }
@@ -204,7 +210,10 @@ impl PidSource for RealPids {
     }
 
     fn matching_pid(&self, pattern: &str) -> Option<u32> {
-        let out = std::process::Command::new("pgrep").args(["-f", pattern]).output().ok()?;
+        let out = std::process::Command::new("pgrep")
+            .args(["-f", pattern])
+            .output()
+            .ok()?;
         if !out.status.success() {
             return None;
         }
@@ -239,7 +248,11 @@ pub fn root_pid_from<S: PidSource>(source: &S, runtime: &Runtime) -> Measurement
             Absent::NotMeasured,
             format!(
                 "no running process found for the declared {} identity {:?}",
-                if runtime.is_docker() { "container" } else { "process-match" },
+                if runtime.is_docker() {
+                    "container"
+                } else {
+                    "process-match"
+                },
                 runtime.identity()
             ),
         ),
@@ -274,14 +287,31 @@ mod pid_tests {
     // launched and the tree that gets stopped.
     #[test]
     fn the_lookup_is_driven_by_the_one_declared_identity() {
-        let f = FakePids { docker: Some(42), ..Default::default() };
-        let rt = Runtime::Docker { container: "gw-bench".into() };
+        let f = FakePids {
+            docker: Some(42),
+            ..Default::default()
+        };
+        let rt = Runtime::Docker {
+            container: "gw-bench".into(),
+        };
         assert_eq!(root_pid_from(&f, &rt).copied(), Some(42));
-        assert_eq!(f.seen_docker.borrow().as_slice(), ["gw-bench"], "the container name came from identity()");
-        assert!(f.seen_native.borrow().is_empty(), "a container must not be looked up as a process match");
+        assert_eq!(
+            f.seen_docker.borrow().as_slice(),
+            ["gw-bench"],
+            "the container name came from identity()"
+        );
+        assert!(
+            f.seen_native.borrow().is_empty(),
+            "a container must not be looked up as a process match"
+        );
 
-        let f = FakePids { native: Some(7), ..Default::default() };
-        let rt = Runtime::Native { proc_match: "target/release/gw".into() };
+        let f = FakePids {
+            native: Some(7),
+            ..Default::default()
+        };
+        let rt = Runtime::Native {
+            proc_match: "target/release/gw".into(),
+        };
         assert_eq!(root_pid_from(&f, &rt).copied(), Some(7));
         assert_eq!(f.seen_native.borrow().as_slice(), ["target/release/gw"]);
         assert!(f.seen_docker.borrow().is_empty());
@@ -292,17 +322,29 @@ mod pid_tests {
     #[test]
     fn a_missing_process_is_an_absence_that_names_what_was_looked_for() {
         let f = FakePids::default();
-        let rt = Runtime::Docker { container: "gw-bench".into() };
+        let rt = Runtime::Docker {
+            container: "gw-bench".into(),
+        };
         let m = root_pid_from(&f, &rt);
         assert!(!m.is_measured());
         assert_eq!(m.reason(), Some(&Absent::NotMeasured));
         let detail = m.detail().unwrap_or_default();
-        assert!(detail.contains("gw-bench"), "the reason must name the identity: {detail}");
-        assert!(detail.contains("container"), "and which kind it was: {detail}");
+        assert!(
+            detail.contains("gw-bench"),
+            "the reason must name the identity: {detail}"
+        );
+        assert!(
+            detail.contains("container"),
+            "and which kind it was: {detail}"
+        );
 
-        let rt = Runtime::Native { proc_match: "no-such-binary".into() };
+        let rt = Runtime::Native {
+            proc_match: "no-such-binary".into(),
+        };
         let m = root_pid_from(&f, &rt);
-        assert!(m.detail().is_some_and(|d| d.contains("process-match") && d.contains("no-such-binary")));
+        assert!(m
+            .detail()
+            .is_some_and(|d| d.contains("process-match") && d.contains("no-such-binary")));
     }
 }
 
@@ -325,7 +367,10 @@ mod tests {
             self
         }
         fn rss(mut self, pid: u32, kb: u64) -> Self {
-            self.status.insert(pid, format!("Name:\tp{pid}\nVmRSS:\t{kb} kB\nVmHWM:\t{kb} kB\n"));
+            self.status.insert(
+                pid,
+                format!("Name:\tp{pid}\nVmRSS:\t{kb} kB\nVmHWM:\t{kb} kB\n"),
+            );
             self
         }
         fn status_text(mut self, pid: u32, text: &str) -> Self {
@@ -372,7 +417,11 @@ mod tests {
     #[test]
     fn an_unreadable_pid_is_excluded_not_counted_as_zero() {
         // child(3) has a ppid entry (it exists in the tree) but no status text: it exited mid-scan.
-        let f = FakeProc::default().rss(1, 1000).child(2, 1).rss(2, 2000).child(3, 1);
+        let f = FakeProc::default()
+            .rss(1, 1000)
+            .child(2, 1)
+            .rss(2, 2000)
+            .child(3, 1);
         let got = rss(&f, 1).copied();
         // The readable-only total: (1000+2000)/1024.
         let readable_only = (1000.0 + 2000.0) / 1024.0;
@@ -389,7 +438,11 @@ mod tests {
     #[test]
     fn missing_pid_is_excluded_but_present_siblings_still_sum_correctly() {
         // Three pids in the tree, only two readable. Total must equal exactly those two.
-        let f = FakeProc::default().rss(1, 500).child(2, 1).rss(2, 1500).child(3, 1); // 3: unreadable
+        let f = FakeProc::default()
+            .rss(1, 500)
+            .child(2, 1)
+            .rss(2, 1500)
+            .child(3, 1); // 3: unreadable
         assert_eq!(rss(&f, 1).copied(), Some((500.0 + 1500.0) / 1024.0));
     }
 
@@ -420,7 +473,12 @@ mod tests {
     #[test]
     fn a_cycle_in_the_tree_is_counted_once_per_pid() {
         // 1 -> 2 -> 3 -> 1 (a cycle including the root). Each pid must still be summed exactly once.
-        let f = FakeProc::default().rss(1, 1000).child(2, 1).rss(2, 2000).child(3, 2).rss(3, 3000);
+        let f = FakeProc::default()
+            .rss(1, 1000)
+            .child(2, 1)
+            .rss(2, 2000)
+            .child(3, 2)
+            .rss(3, 3000);
         let mut cyclic = f.clone();
         cyclic.ppid.insert(1, 3); // close the loop back onto the root.
         let got = rss(&cyclic, 1).copied();
@@ -432,7 +490,13 @@ mod tests {
         // Two "parent" rows both claiming the same child pid 3 (a corrupted/duplicate listing): the
         // map can only hold one ppid per key, so the second insert simply overwrites the first, and
         // the walk must still find and count pid 3 exactly once either way.
-        let f = FakeProc::default().rss(1, 100).child(2, 1).rss(2, 200).child(3, 1).rss(3, 300).child(3, 2);
+        let f = FakeProc::default()
+            .rss(1, 100)
+            .child(2, 1)
+            .rss(2, 200)
+            .child(3, 1)
+            .rss(3, 300)
+            .child(3, 2);
         assert_eq!(rss(&f, 1).copied(), Some((100.0 + 200.0 + 300.0) / 1024.0));
     }
 
@@ -501,10 +565,7 @@ mod tests {
     #[test]
     fn rss_and_hwm_are_read_from_their_own_fields_not_conflated() {
         // Different VmRSS and VmHWM values on the same pid: each reader must pick its own field.
-        let f = FakeProc::default().status_text(
-            1,
-            "Name:\tgw\nVmRSS:\t2048 kB\nVmHWM:\t8192 kB\n",
-        );
+        let f = FakeProc::default().status_text(1, "Name:\tgw\nVmRSS:\t2048 kB\nVmHWM:\t8192 kB\n");
         assert_eq!(rss(&f, 1).copied(), Some(2.0));
         assert_eq!(hwm(&f, 1).copied(), Some(8.0));
     }

@@ -166,7 +166,11 @@ mod tests {
     }
 
     fn setting(key: &str, value: &str, reason: ConfigReason) -> ConfigSetting {
-        ConfigSetting { key: key.into(), reason, note: value.into() }
+        ConfigSetting {
+            key: key.into(),
+            reason,
+            note: value.into(),
+        }
     }
 
     // THE CASE A NAIVE LINT GETS WRONG. A gateway that needs no configuration is the ideal, not an
@@ -176,7 +180,10 @@ mod tests {
         let m = base();
         assert!(m.config.is_empty());
         let findings = lint(&m, &Defaults::new());
-        assert!(findings.is_empty(), "an empty config is the ideal case: {findings:?}");
+        assert!(
+            findings.is_empty(),
+            "an empty config is the ideal case: {findings:?}"
+        );
     }
 
     #[test]
@@ -196,16 +203,27 @@ mod tests {
         defaults.insert("metrics.enabled".into(), "true".into());
 
         let mut restated = base();
-        restated.config = vec![setting("metrics.enabled", "true", ConfigReason::RequiredToBoot)];
+        restated.config = vec![setting(
+            "metrics.enabled",
+            "true",
+            ConfigReason::RequiredToBoot,
+        )];
         let findings = lint(&restated, &defaults);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].rule, Rule::RestatesDefault);
         assert!(findings[0].message.contains("metrics.enabled"));
 
         let mut overridden = base();
-        overridden.config = vec![setting("metrics.enabled", "false", ConfigReason::RequiredToBoot)];
+        overridden.config = vec![setting(
+            "metrics.enabled",
+            "false",
+            ConfigReason::RequiredToBoot,
+        )];
         let findings = lint(&overridden, &defaults);
-        assert!(findings.is_empty(), "a value that differs from the default is a real override: {findings:?}");
+        assert!(
+            findings.is_empty(),
+            "a value that differs from the default is a real override: {findings:?}"
+        );
     }
 
     #[test]
@@ -231,14 +249,21 @@ mod tests {
         m.config = vec![setting("base_url", "  ", ConfigReason::UpstreamToMock)];
         let findings = lint(&m, &Defaults::new());
         assert!(findings.iter().any(|f| f.rule == Rule::EmptyValue));
-        let f = findings.iter().find(|f| f.rule == Rule::EmptyValue).unwrap();
+        let f = findings
+            .iter()
+            .find(|f| f.rule == Rule::EmptyValue)
+            .unwrap();
         assert!(f.message.contains("base_url"));
     }
 
     #[test]
     fn an_empty_value_is_silent_on_a_clean_setting() {
         let mut m = base();
-        m.config = vec![setting("base_url", "http://mock", ConfigReason::UpstreamToMock)];
+        m.config = vec![setting(
+            "base_url",
+            "http://mock",
+            ConfigReason::UpstreamToMock,
+        )];
         let findings = lint(&m, &Defaults::new());
         assert!(findings.iter().all(|f| f.rule != Rule::EmptyValue));
     }
@@ -251,7 +276,10 @@ mod tests {
             setting("listen.port", "8081", ConfigReason::RequiredToBoot),
         ];
         let findings = lint(&m, &Defaults::new());
-        let dupes: Vec<_> = findings.iter().filter(|f| f.rule == Rule::DuplicateKey).collect();
+        let dupes: Vec<_> = findings
+            .iter()
+            .filter(|f| f.rule == Rule::DuplicateKey)
+            .collect();
         assert_eq!(dupes.len(), 1, "{findings:?}");
         assert!(dupes[0].message.contains("listen.port"));
     }
@@ -310,7 +338,11 @@ mod real_field_tests {
     #[test]
     fn the_lint_runs_over_every_real_manifest_without_panicking() {
         let f = field();
-        assert!(f.len() >= 13, "the whole field should be represented, got {}", f.len());
+        assert!(
+            f.len() >= 13,
+            "the whole field should be represented, got {}",
+            f.len()
+        );
         for (name, m) in &f {
             let findings = lint(m, &Defaults::new());
             // Every entrant gets a result, whether or not it is empty.

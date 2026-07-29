@@ -25,7 +25,10 @@ pub struct CellId {
 
 impl CellId {
     pub fn new(ingress: impl Into<String>, egress: impl Into<String>) -> Self {
-        Self { ingress: ingress.into(), egress: egress.into() }
+        Self {
+            ingress: ingress.into(),
+            egress: egress.into(),
+        }
     }
     /// True when both sides speak the same dialect: strict passthrough, no translation.
     pub fn is_diagonal(&self) -> bool {
@@ -130,22 +133,47 @@ pub struct CellOutcome {
 
 impl CellOutcome {
     pub fn served(id: CellId) -> Self {
-        Self { id, served: Served::Yes, skipped: None, note: None }
+        Self {
+            id,
+            served: Served::Yes,
+            skipped: None,
+            note: None,
+        }
     }
 
-    pub fn not_served(id: CellId, verdict: Verdict, evidence: Evidence, note: impl Into<String>) -> Self {
-        Self { id, served: Served::No(verdict, evidence), skipped: Some(Skipped::NotServed), note: Some(note.into()) }
+    pub fn not_served(
+        id: CellId,
+        verdict: Verdict,
+        evidence: Evidence,
+        note: impl Into<String>,
+    ) -> Self {
+        Self {
+            id,
+            served: Served::No(verdict, evidence),
+            skipped: Some(Skipped::NotServed),
+            note: Some(note.into()),
+        }
     }
 
     /// This pairing is outside the gateway's own declared capability matrix, so it was never probed.
     pub fn not_configurable(id: CellId, reason: impl Into<String>) -> Self {
         let r = reason.into();
-        Self { id, served: Served::NotConfigurable(r.clone()), skipped: Some(Skipped::NotServed), note: Some(r) }
+        Self {
+            id,
+            served: Served::NotConfigurable(r.clone()),
+            skipped: Some(Skipped::NotServed),
+            note: Some(r),
+        }
     }
 
     pub fn untestable(id: CellId, reason: impl Into<String>) -> Self {
         let r = reason.into();
-        Self { id, served: Served::Untestable(r.clone()), skipped: Some(Skipped::NotServed), note: Some(r) }
+        Self {
+            id,
+            served: Served::Untestable(r.clone()),
+            skipped: Some(Skipped::NotServed),
+            note: Some(r),
+        }
     }
 
     /// The gateway refused a credential the rig cannot legitimately produce. Not measurable, and
@@ -157,7 +185,12 @@ impl CellOutcome {
              harness does not forge signatures, so nothing was learned about this pairing",
             evidence.status
         );
-        Self { id, served: Served::UnprobedAuth(evidence), skipped: Some(Skipped::NotServed), note: Some(n) }
+        Self {
+            id,
+            served: Served::UnprobedAuth(evidence),
+            skipped: Some(Skipped::NotServed),
+            note: Some(n),
+        }
     }
 
     /// Reached after the suite clock expired. The cell is recorded as PRESENT and unmeasured, never
@@ -166,7 +199,9 @@ impl CellOutcome {
     pub fn out_of_time(id: CellId) -> Self {
         Self {
             id,
-            served: Served::Untestable("the suite wall clock expired before this cell was measured".into()),
+            served: Served::Untestable(
+                "the suite wall clock expired before this cell was measured".into(),
+            ),
             skipped: Some(Skipped::SuiteDeadline),
             note: None,
         }
@@ -181,7 +216,10 @@ mod tests {
     fn a_diagonal_is_passthrough_and_an_off_diagonal_is_translation() {
         assert!(CellId::new("openai", "openai").is_diagonal());
         assert!(!CellId::new("openai", "anthropic").is_diagonal());
-        assert_eq!(CellId::new("openai", "anthropic").to_string(), "openai>anthropic");
+        assert_eq!(
+            CellId::new("openai", "anthropic").to_string(),
+            "openai>anthropic"
+        );
     }
 
     // `run.rs`'s real grid walk builds `CellOutcome` through exactly these three constructors
@@ -195,8 +233,12 @@ mod tests {
         assert!(served.served.is_measurable());
         assert_eq!(served.skipped, None);
 
-        let ev = Evidence { status: 404, body_snippet: "not found".into() };
-        let ns = CellOutcome::not_served(id.clone(), Verdict::NotConfigured, ev.clone(), "declined");
+        let ev = Evidence {
+            status: 404,
+            body_snippet: "not found".into(),
+        };
+        let ns =
+            CellOutcome::not_served(id.clone(), Verdict::NotConfigured, ev.clone(), "declined");
         assert_eq!(ns.served, Served::No(Verdict::NotConfigured, ev));
         assert_eq!(ns.skipped, Some(Skipped::NotServed));
         assert_eq!(ns.note.as_deref(), Some("declined"));
@@ -207,6 +249,9 @@ mod tests {
 
         let oot = CellOutcome::out_of_time(id);
         assert_eq!(oot.skipped, Some(Skipped::SuiteDeadline));
-        assert!(!oot.served.is_measurable(), "a cell never reached cannot read as served");
+        assert!(
+            !oot.served.is_measurable(),
+            "a cell never reached cannot read as served"
+        );
     }
 }

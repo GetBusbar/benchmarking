@@ -208,9 +208,20 @@ pub struct Invocation {
 /// this invocation and `supervise::stop_and_wait`'s target cannot name two different things.
 pub fn build_invocation(spec: &LaunchSpec) -> Invocation {
     match &spec.kind {
-        LaunchKind::Docker { image, env, port, mounts, command } => {
+        LaunchKind::Docker {
+            image,
+            env,
+            port,
+            mounts,
+            command,
+        } => {
             let name = spec.runtime.identity();
-            let mut args = vec!["run".to_string(), "-d".to_string(), "--name".to_string(), name.to_string()];
+            let mut args = vec![
+                "run".to_string(),
+                "-d".to_string(),
+                "--name".to_string(),
+                name.to_string(),
+            ];
             match port {
                 PortMapping::Host => {
                     args.push("--network".to_string());
@@ -234,9 +245,19 @@ pub fn build_invocation(spec: &LaunchSpec) -> Invocation {
             }
             args.push(image.clone());
             args.extend(command.iter().cloned());
-            Invocation { program: "docker".to_string(), args, env: Vec::new(), env_unset: Vec::new() }
+            Invocation {
+                program: "docker".to_string(),
+                args,
+                env: Vec::new(),
+                env_unset: Vec::new(),
+            }
         }
-        LaunchKind::Native { binary, args: bin_args, env, env_unset } => {
+        LaunchKind::Native {
+            binary,
+            args: bin_args,
+            env,
+            env_unset,
+        } => {
             let mut args = vec!["-c".to_string(), spec.cores.clone(), binary.clone()];
             args.extend(bin_args.iter().cloned());
             Invocation {
@@ -296,7 +317,12 @@ impl fmt::Display for LaunchError {
             LaunchError::PreLaunchFailed { command, reason } => {
                 write!(f, "pre-launch step {command:?} failed: {reason}")
             }
-            LaunchError::NeverReady { attempts, last_port_state, last_spawn_error, last_output } => {
+            LaunchError::NeverReady {
+                attempts,
+                last_port_state,
+                last_spawn_error,
+                last_output,
+            } => {
                 let said = match last_output {
                     Some(o) if !o.trim().is_empty() => format!("; it said: {}", o.trim()),
                     _ => String::new(),
@@ -308,7 +334,7 @@ impl fmt::Display for LaunchError {
                 ),
                 None => write!(f, "never became ready after {attempts} attempt(s); last port state: {last_port_state:?}{said}"),
             }
-            },
+            }
         }
     }
 }
@@ -497,7 +523,10 @@ impl Launcher for RealLauncher {
     }
 
     fn is_ready(&mut self, spec: &LaunchSpec) -> bool {
-        matches!(supervise::wait_until_ready(spec.port, spec.ready_budget), ReadyOutcome::Ready)
+        matches!(
+            supervise::wait_until_ready(spec.port, spec.ready_budget),
+            ReadyOutcome::Ready
+        )
     }
 
     fn stop(&mut self, spec: &LaunchSpec) {
@@ -534,13 +563,20 @@ impl Launcher for RealLauncher {
 
 /// Launch `spec`, retrying up to `attempts` times (a zero is treated as one: this is not a way to
 /// skip trying). Never returns `Ok` without `Launcher::is_ready` having actually reported true.
-pub fn launch(launcher: &mut impl Launcher, spec: &LaunchSpec, attempts: u32) -> Result<Launched, LaunchError> {
+pub fn launch(
+    launcher: &mut impl Launcher,
+    spec: &LaunchSpec,
+    attempts: u32,
+) -> Result<Launched, LaunchError> {
     launch_with(launcher, spec, attempts, std::thread::sleep)
 }
 
 /// Launch `spec` using the crate's default attempt bound (`DEFAULT_LAUNCH_ATTEMPTS`), matching the
 /// shell's `HARNESS_BOOT_ATTEMPTS` default.
-pub fn launch_default(launcher: &mut impl Launcher, spec: &LaunchSpec) -> Result<Launched, LaunchError> {
+pub fn launch_default(
+    launcher: &mut impl Launcher,
+    spec: &LaunchSpec,
+) -> Result<Launched, LaunchError> {
     launch(launcher, spec, DEFAULT_LAUNCH_ATTEMPTS)
 }
 
@@ -559,7 +595,10 @@ pub fn launch_with(
     if let Some(step) = &spec.pre_launch {
         launcher
             .run_pre_launch(step)
-            .map_err(|reason| LaunchError::PreLaunchFailed { command: step.command.clone(), reason })?;
+            .map_err(|reason| LaunchError::PreLaunchFailed {
+                command: step.command.clone(),
+                reason,
+            })?;
     }
 
     let bounded = attempts.max(1);
@@ -574,7 +613,10 @@ pub fn launch_with(
             }
         };
         if spawned && launcher.is_ready(spec) {
-            return Ok(Launched { runtime: spec.runtime.clone(), attempts: attempt });
+            return Ok(Launched {
+                runtime: spec.runtime.clone(),
+                attempts: attempt,
+            });
         }
         // READ ITS LOG BEFORE KILLING IT. For docker, `stop` is `rm -f`, which takes the container
         // and its log with it, so reading it after that stop would arrive with no evidence.
@@ -594,7 +636,12 @@ pub fn launch_with(
     }
 
     let last_port_state = launcher.port_snapshot(spec);
-    Err(LaunchError::NeverReady { attempts: bounded, last_port_state, last_spawn_error, last_output })
+    Err(LaunchError::NeverReady {
+        attempts: bounded,
+        last_port_state,
+        last_spawn_error,
+        last_output,
+    })
 }
 
 #[cfg(test)]
@@ -603,12 +650,18 @@ mod tests {
 
     fn docker_spec() -> LaunchSpec {
         LaunchSpec {
-            runtime: Runtime::Docker { container: "gw-bench".into() },
+            runtime: Runtime::Docker {
+                container: "gw-bench".into(),
+            },
             kind: LaunchKind::Docker {
                 image: "gw:1.0".into(),
                 env: vec![("A".into(), "B".into())],
                 port: PortMapping::Host,
-                mounts: vec![Mount { host_path: "/tmp/gw.yaml".into(), container_path: "/config.yaml".into(), read_only: true }],
+                mounts: vec![Mount {
+                    host_path: "/tmp/gw.yaml".into(),
+                    container_path: "/config.yaml".into(),
+                    read_only: true,
+                }],
                 command: vec!["-f".into(), "/config.yaml".into()],
             },
             cores: "0-3".into(),
@@ -621,7 +674,9 @@ mod tests {
 
     fn native_spec() -> LaunchSpec {
         LaunchSpec {
-            runtime: Runtime::Native { proc_match: "gw-native".into() },
+            runtime: Runtime::Native {
+                proc_match: "gw-native".into(),
+            },
             kind: LaunchKind::Native {
                 binary: "/opt/gw/bin/gw-native".into(),
                 args: vec!["--port".into(), "8080".into()],
@@ -656,7 +711,10 @@ mod tests {
     // proves `reap_native_child` collects it.
     #[test]
     fn reap_native_child_collects_a_finished_process_not_just_the_handle() {
-        let child = Command::new("/bin/sh").args(["-c", "exit 0"]).spawn().expect("spawn a real process");
+        let child = Command::new("/bin/sh")
+            .args(["-c", "exit 0"])
+            .spawn()
+            .expect("spawn a real process");
         let pid = child.id();
         let mut slot = Some(child);
 
@@ -687,18 +745,48 @@ mod tests {
     fn container_args_include_name_image_env_port_mapping_and_pinning() {
         let inv = build_invocation(&docker_spec());
         assert_eq!(inv.program, "docker");
-        assert!(inv.args.windows(2).any(|w| w == ["--name".to_string(), "gw-bench".to_string()]), "{:?}", inv.args);
-        assert!(inv.args.windows(2).any(|w| w == ["--network".to_string(), "host".to_string()]), "{:?}", inv.args);
         assert!(
-            inv.args.windows(2).any(|w| w == ["--cpuset-cpus".to_string(), "0-3".to_string()]),
+            inv.args
+                .windows(2)
+                .any(|w| w == ["--name".to_string(), "gw-bench".to_string()]),
+            "{:?}",
+            inv.args
+        );
+        assert!(
+            inv.args
+                .windows(2)
+                .any(|w| w == ["--network".to_string(), "host".to_string()]),
+            "{:?}",
+            inv.args
+        );
+        assert!(
+            inv.args
+                .windows(2)
+                .any(|w| w == ["--cpuset-cpus".to_string(), "0-3".to_string()]),
             "cpu pinning must be present: {:?}",
             inv.args
         );
-        assert!(inv.args.windows(2).any(|w| w == ["-e".to_string(), "A=B".to_string()]), "{:?}", inv.args);
-        assert!(inv.args.contains(&"gw:1.0".to_string()), "the image must appear: {:?}", inv.args);
+        assert!(
+            inv.args
+                .windows(2)
+                .any(|w| w == ["-e".to_string(), "A=B".to_string()]),
+            "{:?}",
+            inv.args
+        );
+        assert!(
+            inv.args.contains(&"gw:1.0".to_string()),
+            "the image must appear: {:?}",
+            inv.args
+        );
         // The container name comes from spec.runtime.identity(), the same identity the memory
         // readers and the stop path take: there is no second name to disagree with it.
-        assert_eq!(Runtime::Docker { container: "gw-bench".into() }.identity(), "gw-bench");
+        assert_eq!(
+            Runtime::Docker {
+                container: "gw-bench".into()
+            }
+            .identity(),
+            "gw-bench"
+        );
     }
 
     #[test]
@@ -707,12 +795,21 @@ mod tests {
         spec.kind = LaunchKind::Docker {
             image: "gw:1.0".into(),
             env: vec![],
-            port: PortMapping::Published { host: 8080, container: 9090 },
+            port: PortMapping::Published {
+                host: 8080,
+                container: 9090,
+            },
             mounts: vec![],
             command: vec![],
         };
         let inv = build_invocation(&spec);
-        assert!(inv.args.windows(2).any(|w| w == ["-p".to_string(), "8080:9090".to_string()]), "{:?}", inv.args);
+        assert!(
+            inv.args
+                .windows(2)
+                .any(|w| w == ["-p".to_string(), "8080:9090".to_string()]),
+            "{:?}",
+            inv.args
+        );
         assert!(!inv.args.contains(&"--network".to_string()));
     }
 
@@ -722,7 +819,13 @@ mod tests {
     fn native_args_include_binary_args_and_pinning() {
         let inv = build_invocation(&native_spec());
         assert_eq!(inv.program, "taskset");
-        assert!(inv.args.windows(2).any(|w| w == ["-c".to_string(), "0-3".to_string()]), "cpu pinning must be present: {:?}", inv.args);
+        assert!(
+            inv.args
+                .windows(2)
+                .any(|w| w == ["-c".to_string(), "0-3".to_string()]),
+            "cpu pinning must be present: {:?}",
+            inv.args
+        );
         assert!(inv.args.contains(&"/opt/gw/bin/gw-native".to_string()));
         assert!(inv.args.contains(&"--port".to_string()));
         assert!(inv.args.contains(&"8080".to_string()));
@@ -788,7 +891,10 @@ mod tests {
         let launched = launch_with(&mut fake, &spec, 3, no_sleep).unwrap();
         assert_eq!(launched.attempts, 1);
         assert_eq!(fake.spawn_calls, 1);
-        assert_eq!(fake.stop_calls, 0, "a successful first attempt has nothing to clean up");
+        assert_eq!(
+            fake.stop_calls, 0,
+            "a successful first attempt has nothing to clean up"
+        );
     }
 
     // ---- required: ready on the third attempt succeeds, asserting three attempts happened ---------
@@ -801,8 +907,14 @@ mod tests {
         let launched = launch_with(&mut fake, &spec, 3, |_| sleeps += 1).unwrap();
         assert_eq!(launched.attempts, 3);
         assert_eq!(fake.spawn_calls, 3);
-        assert_eq!(fake.stop_calls, 2, "the two failed attempts are cleaned up before the next try");
-        assert_eq!(sleeps, 2, "backoff happens between attempts, not after the final success");
+        assert_eq!(
+            fake.stop_calls, 2,
+            "the two failed attempts are cleaned up before the next try"
+        );
+        assert_eq!(
+            sleeps, 2,
+            "backoff happens between attempts, not after the final success"
+        );
     }
 
     // ---- required: a gateway never ready exhausts the bound with a typed error, never success -----
@@ -815,9 +927,17 @@ mod tests {
         let err = launch_with(&mut fake, &spec, 3, no_sleep).unwrap_err();
         assert_eq!(
             err,
-            LaunchError::NeverReady { attempts: 3, last_port_state: PortState::Free, last_spawn_error: None, last_output: None }
+            LaunchError::NeverReady {
+                attempts: 3,
+                last_port_state: PortState::Free,
+                last_spawn_error: None,
+                last_output: None
+            }
         );
-        assert_eq!(fake.spawn_calls, 3, "the bound must be respected exactly, not exceeded");
+        assert_eq!(
+            fake.spawn_calls, 3,
+            "the bound must be respected exactly, not exceeded"
+        );
     }
 
     // ---- required: a failing pre-launch step aborts loudly and the gateway is never started --------
@@ -835,10 +955,16 @@ mod tests {
         let err = launch_with(&mut fake, &spec, 3, no_sleep).unwrap_err();
         assert_eq!(
             err,
-            LaunchError::PreLaunchFailed { command: "cargo".to_string(), reason: "build failed".to_string() }
+            LaunchError::PreLaunchFailed {
+                command: "cargo".to_string(),
+                reason: "build failed".to_string()
+            }
         );
         assert_eq!(fake.pre_launch_calls, 1);
-        assert_eq!(fake.spawn_calls, 0, "the gateway must never be started when the pre-launch step fails");
+        assert_eq!(
+            fake.spawn_calls, 0,
+            "the gateway must never be started when the pre-launch step fails"
+        );
     }
 
     // ---- required: a spec with no cpu pinning is rejected ------------------------------------------
@@ -850,7 +976,10 @@ mod tests {
         spec.cores = "".into();
         let err = launch_with(&mut fake, &spec, 3, no_sleep).unwrap_err();
         assert_eq!(err, LaunchError::InvalidSpec(SpecError::NoCpuPinning));
-        assert_eq!(fake.spawn_calls, 0, "an unpinned spec must never reach a spawn attempt");
+        assert_eq!(
+            fake.spawn_calls, 0,
+            "an unpinned spec must never reach a spawn attempt"
+        );
 
         let mut whitespace_only = docker_spec();
         whitespace_only.cores = "   ".into();
@@ -873,7 +1002,10 @@ mod tests {
         // second field either could read a different name from.
         assert_eq!(spec.runtime.identity(), "gw-bench");
         let inv = build_invocation(&spec);
-        assert!(inv.args.windows(2).any(|w| w == ["--name".to_string(), spec.runtime.identity().to_string()]));
+        assert!(inv
+            .args
+            .windows(2)
+            .any(|w| w == ["--name".to_string(), spec.runtime.identity().to_string()]));
     }
 
     #[test]
@@ -889,11 +1021,22 @@ mod tests {
     #[test]
     fn validate_rejects_an_empty_image_or_binary() {
         let mut d = docker_spec();
-        d.kind = LaunchKind::Docker { image: "  ".into(), env: vec![], port: PortMapping::Host, mounts: vec![], command: vec![] };
+        d.kind = LaunchKind::Docker {
+            image: "  ".into(),
+            env: vec![],
+            port: PortMapping::Host,
+            mounts: vec![],
+            command: vec![],
+        };
         assert_eq!(d.validate(), Err(SpecError::Empty("image")));
 
         let mut n = native_spec();
-        n.kind = LaunchKind::Native { binary: " ".into(), args: vec![], env: vec![], env_unset: vec![] };
+        n.kind = LaunchKind::Native {
+            binary: " ".into(),
+            args: vec![],
+            env: vec![],
+            env_unset: vec![],
+        };
         assert_eq!(n.validate(), Err(SpecError::Empty("binary")));
     }
 
@@ -952,7 +1095,10 @@ mod tests {
                 Some(self.said.to_string())
             }
         }
-        let mut l = Dying { said: "config: unknown field `nope`", stopped: false };
+        let mut l = Dying {
+            said: "config: unknown field `nope`",
+            stopped: false,
+        };
         let err = launch(&mut l, &docker_spec(), 2).expect_err("it never becomes ready");
         let LaunchError::NeverReady { last_output, .. } = &err else {
             panic!("expected NeverReady, got {err:?}");

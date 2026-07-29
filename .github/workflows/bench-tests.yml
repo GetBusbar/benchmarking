@@ -48,6 +48,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+      # rustfmt has been INSTALLED here since this job was written and never run, so the workspace
+      # drifted out of shape and the drift only surfaced when someone ran `cargo fmt` and watched it
+      # rewrite 23 files they had not touched. That turns every future formatting run into a diff
+      # that buries the change it travelled with. Gating it is what keeps a `cargo fmt` a no-op.
+      - name: Formatting
+        run: cargo fmt --all --check
       - name: Build
         run: cargo build --workspace --all-targets
       - name: Clippy (denies unwrap/expect/panic outside tests)

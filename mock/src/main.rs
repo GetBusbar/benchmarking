@@ -172,8 +172,15 @@ fn request_shape_ok(dialect: &str, body: &[u8]) -> bool {
     }
 }
 
-const DIALECTS: [&str; 7] =
-    ["openai", "openai-responses", "anthropic", "gemini", "cohere", "bedrock", "other"];
+const DIALECTS: [&str; 7] = [
+    "openai",
+    "openai-responses",
+    "anthropic",
+    "gemini",
+    "cohere",
+    "bedrock",
+    "other",
+];
 
 /// Per-dialect request record (recording only): request count, whether the last body passed the
 /// dialect's shape check, and the last path + a body snippet as evidence.
@@ -199,7 +206,12 @@ type RecordFlag = std::sync::atomic::AtomicBool;
 /// product.
 fn wants_recording(body: &[u8]) -> Option<bool> {
     let has = |needle: &str| body.windows(needle.len()).any(|w| w == needle.as_bytes());
-    match (has("\"on\":true"), has("\"on\": true"), has("\"on\":false"), has("\"on\": false")) {
+    match (
+        has("\"on\":true"),
+        has("\"on\": true"),
+        has("\"on\":false"),
+        has("\"on\": false"),
+    ) {
         (true, _, false, false) | (_, true, false, false) => Some(true),
         (false, false, true, _) | (false, false, _, true) => Some(false),
         _ => None,
@@ -312,7 +324,8 @@ impl StreamFrames {
 
 /// Does the request body ask for streaming? Cheap substring scan - no JSON parse on the hot path.
 fn wants_stream(body: &[u8]) -> bool {
-    body.windows(13).any(|w| w == b"\"stream\":true") || body.windows(14).any(|w| w == b"\"stream\": true")
+    body.windows(13).any(|w| w == b"\"stream\":true")
+        || body.windows(14).any(|w| w == b"\"stream\": true")
 }
 
 // Same cap engine/src/http.rs enforces on the client side (MAX_BODY_BYTES there). A gateway (or a
@@ -337,7 +350,10 @@ async fn send_frame(
     tx: &tokio::sync::mpsc::Sender<Result<Frame<Bytes>, Infallible>>,
     frame: Bytes,
 ) -> bool {
-    matches!(tokio::time::timeout(SSE_SEND_TIMEOUT, tx.send(Ok(Frame::data(frame)))).await, Ok(Ok(())))
+    matches!(
+        tokio::time::timeout(SSE_SEND_TIMEOUT, tx.send(Ok(Frame::data(frame)))).await,
+        Ok(Ok(()))
+    )
 }
 
 fn sse_response(frames: Arc<StreamFrames>, anthropic: bool, ttft_ms: u64) -> Response<OutBody> {
@@ -347,12 +363,22 @@ fn sse_response(frames: Arc<StreamFrames>, anthropic: bool, ttft_ms: u64) -> Res
             tokio::time::sleep(Duration::from_millis(ttft_ms)).await;
         }
         let (head, deltas, tail) = if anthropic {
-            (&frames.anthropic_head, &frames.anthropic_deltas, &frames.anthropic_tail)
+            (
+                &frames.anthropic_head,
+                &frames.anthropic_deltas,
+                &frames.anthropic_tail,
+            )
         } else {
-            (&frames.openai_head, &frames.openai_deltas, &frames.openai_tail)
+            (
+                &frames.openai_head,
+                &frames.openai_deltas,
+                &frames.openai_tail,
+            )
         };
         for f in head {
-            if !send_frame(&tx, f.clone()).await { return; }
+            if !send_frame(&tx, f.clone()).await {
+                return;
+            }
         }
         for i in 0..frames.chunks {
             if i > 0 {
@@ -360,10 +386,14 @@ fn sse_response(frames: Arc<StreamFrames>, anthropic: bool, ttft_ms: u64) -> Res
             }
             // distinct frame per index (index embedded in the pad) so a gateway repeat-guard is fair
             let delta = &deltas[(i as usize) % deltas.len()];
-            if !send_frame(&tx, delta.clone()).await { return; }
+            if !send_frame(&tx, delta.clone()).await {
+                return;
+            }
         }
         for f in tail {
-            if !send_frame(&tx, f.clone()).await { return; }
+            if !send_frame(&tx, f.clone()).await {
+                return;
+            }
         }
     });
     Response::builder()
@@ -405,7 +435,10 @@ async fn handle(
     // believes it enabled the recorder and did not would read an empty record as a gateway failing to
     // translate.
     if path == "/__mock/record" {
-        let body = match Limited::new(req.into_body(), MAX_BODY_BYTES).collect().await {
+        let body = match Limited::new(req.into_body(), MAX_BODY_BYTES)
+            .collect()
+            .await
+        {
             Ok(c) => c.to_bytes(),
             Err(_) => Bytes::new(),
         };
@@ -433,7 +466,10 @@ async fn handle(
     // Drain the request body so the connection stays keep-alive; only the stream flag is looked at.
     // Capped at MAX_BODY_BYTES: an unbounded read here lets one oversized (or buggy) gateway request
     // exhaust this process's memory over an 8-hour run.
-    let reqbody = match Limited::new(req.into_body(), MAX_BODY_BYTES).collect().await {
+    let reqbody = match Limited::new(req.into_body(), MAX_BODY_BYTES)
+        .collect()
+        .await
+    {
         Ok(c) => c.to_bytes(),
         Err(_) => {
             return Ok(Response::builder()
@@ -481,8 +517,16 @@ async fn main() {
             port = v.parse().unwrap_or(8000);
         }
     }
-    let ttft_ms: u64 = std::env::var("MOCK_TTFT_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
-    let envn = |k: &str, d: u64| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
+    let ttft_ms: u64 = std::env::var("MOCK_TTFT_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    let envn = |k: &str, d: u64| {
+        std::env::var(k)
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(d)
+    };
     let s_chunks = envn("MOCK_STREAM_CHUNKS", 64) as u32;
     let s_interval = envn("MOCK_STREAM_INTERVAL_MS", 20);
     let s_bytes = envn("MOCK_STREAM_CHUNK_BYTES", 16) as usize;
@@ -490,8 +534,11 @@ async fn main() {
     // The STARTING state only. `/__mock/record` changes it at runtime, which is how the harness keeps
     // its load windows running against exactly the mock behaviour every previously published number
     // was taken against.
-    let recording: Arc<RecordFlag> =
-        Arc::new(RecordFlag::new(std::env::var("MOCK_RECORD").map(|v| v == "1").unwrap_or(false)));
+    let recording: Arc<RecordFlag> = Arc::new(RecordFlag::new(
+        std::env::var("MOCK_RECORD")
+            .map(|v| v == "1")
+            .unwrap_or(false),
+    ));
     let recorder: Arc<Recorder> = Arc::new(Recorder::default());
 
     // Bind 0.0.0.0 (not just loopback) so container-networked gateways (Arch via host.docker.internal,
@@ -553,7 +600,13 @@ async fn main() {
                 .serve_connection(
                     io,
                     service_fn(move |r| {
-                        handle(r, ttft_ms, frames.clone(), recorder.clone(), recording.clone())
+                        handle(
+                            r,
+                            ttft_ms,
+                            frames.clone(),
+                            recorder.clone(),
+                            recording.clone(),
+                        )
                     }),
                 )
                 .await;
@@ -566,7 +619,7 @@ mod tests {
     use super::{
         body_for, dialect_for, handle, json_escape, models_for, request_shape_ok, send_frame,
         state_json, wants_recording, wants_stream, Arc, BodyExt, Bytes, Frame, Full, Limited,
-        RecordFlag, Recorder, StreamFrames, DIALECTS, ANTHROPIC, MAX_BODY_BYTES, OPENAI,
+        RecordFlag, Recorder, StreamFrames, ANTHROPIC, DIALECTS, MAX_BODY_BYTES, OPENAI,
         SSE_SEND_TIMEOUT,
     };
     use hyper::service::service_fn;
@@ -581,8 +634,14 @@ mod tests {
 
     #[test]
     fn openai_accepts_messages() {
-        assert!(request_shape_ok("openai", br#"{"model":"m","messages":[{"role":"user","content":"hi"}]}"#));
-        assert!(!request_shape_ok("openai", br#"{"model":"m","input":"hi"}"#));
+        assert!(request_shape_ok(
+            "openai",
+            br#"{"model":"m","messages":[{"role":"user","content":"hi"}]}"#
+        ));
+        assert!(!request_shape_ok(
+            "openai",
+            br#"{"model":"m","input":"hi"}"#
+        ));
     }
 
     #[test]
@@ -608,22 +667,40 @@ mod tests {
 
     #[test]
     fn cohere_accepts_v2_and_v1_shapes() {
-        assert!(request_shape_ok("cohere", br#"{"model":"m","messages":[{"role":"user","content":"hi"}]}"#)); // v2 chat
-        assert!(request_shape_ok("cohere", br#"{"message":"hi","chat_history":[]}"#)); // v1 chat
+        assert!(request_shape_ok(
+            "cohere",
+            br#"{"model":"m","messages":[{"role":"user","content":"hi"}]}"#
+        )); // v2 chat
+        assert!(request_shape_ok(
+            "cohere",
+            br#"{"message":"hi","chat_history":[]}"#
+        )); // v1 chat
         assert!(!request_shape_ok("cohere", br#"{"input":"hi"}"#));
     }
 
     #[test]
     fn anthropic_requires_messages_and_max_tokens() {
-        assert!(request_shape_ok("anthropic", br#"{"model":"m","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}"#));
-        assert!(!request_shape_ok("anthropic", br#"{"model":"m","messages":[{"role":"user","content":"hi"}]}"#));
+        assert!(request_shape_ok(
+            "anthropic",
+            br#"{"model":"m","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}"#
+        ));
+        assert!(!request_shape_ok(
+            "anthropic",
+            br#"{"model":"m","messages":[{"role":"user","content":"hi"}]}"#
+        ));
     }
 
     #[test]
     fn responses_and_gemini_markers() {
         assert!(request_shape_ok("openai-responses", br#"{"input":"hi"}"#));
-        assert!(request_shape_ok("openai-responses", br#"{"instructions":"be brief"}"#));
-        assert!(request_shape_ok("gemini", br#"{"contents":[{"parts":[{"text":"hi"}]}]}"#));
+        assert!(request_shape_ok(
+            "openai-responses",
+            br#"{"instructions":"be brief"}"#
+        ));
+        assert!(request_shape_ok(
+            "gemini",
+            br#"{"contents":[{"parts":[{"text":"hi"}]}]}"#
+        ));
         assert!(!request_shape_ok("gemini", br#"{"messages":[]}"#));
     }
 
@@ -652,7 +729,10 @@ mod tests {
             ("/v2/chat", "\"finish_reason\":\"COMPLETE\""),
         ] {
             let body = String::from_utf8_lossy(body_for(path)).into_owned();
-            assert!(body.contains(marker), "{path} must answer its own dialect, got {body}");
+            assert!(
+                body.contains(marker),
+                "{path} must answer its own dialect, got {body}"
+            );
         }
     }
 
@@ -678,10 +758,20 @@ mod tests {
             ("/v2/models", "command-r", "claude"),
         ] {
             let body = String::from_utf8_lossy(models_for(path)).into_owned();
-            assert!(body.contains(mine), "{path} must advertise its own models, got {body}");
-            assert!(!body.contains(theirs), "{path} must not advertise another provider's models, got {body}");
+            assert!(
+                body.contains(mine),
+                "{path} must advertise its own models, got {body}"
+            );
+            assert!(
+                !body.contains(theirs),
+                "{path} must not advertise another provider's models, got {body}"
+            );
             // And the chat router must hand a models path to the model list, not to a chat body.
-            assert_eq!(body_for(path), models_for(path), "{path} must route to the model list");
+            assert_eq!(
+                body_for(path),
+                models_for(path),
+                "{path} must route to the model list"
+            );
         }
         // The query-string form, which is how some clients ask.
         assert!(String::from_utf8_lossy(body_for("/v1/models?limit=100")).contains("gpt-4o-mini"));
@@ -695,15 +785,23 @@ mod tests {
     // which reads as a gateway timeout. Both directions publish a wrong number rather than an error.
     #[test]
     fn a_stream_request_is_detected_with_or_without_the_space_after_the_colon() {
-        assert!(wants_stream(br#"{"model":"m","stream":true,"messages":[]}"#));
-        assert!(wants_stream(br#"{"model":"m","stream": true,"messages":[]}"#));
+        assert!(wants_stream(
+            br#"{"model":"m","stream":true,"messages":[]}"#
+        ));
+        assert!(wants_stream(
+            br#"{"model":"m","stream": true,"messages":[]}"#
+        ));
     }
 
     #[test]
     fn a_non_stream_request_is_never_mistaken_for_a_stream() {
-        assert!(!wants_stream(br#"{"model":"m","stream":false,"messages":[]}"#));
+        assert!(!wants_stream(
+            br#"{"model":"m","stream":false,"messages":[]}"#
+        ));
         assert!(!wants_stream(br#"{"model":"m","messages":[]}"#));
-        assert!(!wants_stream(br#"{"stream_options":{"include_usage":true}}"#));
+        assert!(!wants_stream(
+            br#"{"stream_options":{"include_usage":true}}"#
+        ));
         // Shorter than the marker itself: the windowed scan must not panic on a tiny body.
         assert!(!wants_stream(b""));
         assert!(!wants_stream(b"{}"));
@@ -718,9 +816,22 @@ mod tests {
     fn exactly_the_openai_and_anthropic_paths_select_a_streamable_body() {
         assert_eq!(body_for("/v1/chat/completions"), OPENAI);
         assert_eq!(body_for("/v1/messages"), ANTHROPIC);
-        for path in ["/v1beta/models/m:generateContent", "/model/m/converse", "/v2/chat", "/v1/responses"] {
-            assert_ne!(body_for(path), OPENAI, "{path} must not be answered with a streamable body");
-            assert_ne!(body_for(path), ANTHROPIC, "{path} must not be answered with a streamable body");
+        for path in [
+            "/v1beta/models/m:generateContent",
+            "/model/m/converse",
+            "/v2/chat",
+            "/v1/responses",
+        ] {
+            assert_ne!(
+                body_for(path),
+                OPENAI,
+                "{path} must not be answered with a streamable body"
+            );
+            assert_ne!(
+                body_for(path),
+                ANTHROPIC,
+                "{path} must not be answered with a streamable body"
+            );
         }
     }
 
@@ -736,7 +847,10 @@ mod tests {
         for deltas in [&f.openai_deltas, &f.anthropic_deltas] {
             assert_eq!(deltas.len(), 8, "one prebuilt frame per chunk index");
             for w in deltas.windows(2) {
-                assert_ne!(w[0], w[1], "consecutive deltas must differ or a repeat-guard trips");
+                assert_ne!(
+                    w[0], w[1],
+                    "consecutive deltas must differ or a repeat-guard trips"
+                );
                 assert_eq!(w[0].len(), w[1].len(), "every delta must be the same size");
             }
         }
@@ -748,8 +862,13 @@ mod tests {
     #[test]
     fn a_chunk_payload_narrower_than_the_frame_index_is_truncated_not_overflowed() {
         let f = StreamFrames::build(200, 0, 1);
-        let sizes: std::collections::BTreeSet<usize> = f.openai_deltas.iter().map(|d| d.len()).collect();
-        assert_eq!(sizes.len(), 1, "a one byte payload must give every frame the same size, got {sizes:?}");
+        let sizes: std::collections::BTreeSet<usize> =
+            f.openai_deltas.iter().map(|d| d.len()).collect();
+        assert_eq!(
+            sizes.len(),
+            1,
+            "a one byte payload must give every frame the same size, got {sizes:?}"
+        );
     }
 
     // A zero-chunk stream must still build: `chunks.max(1)` keeps the delta vector non-empty, and
@@ -768,7 +887,11 @@ mod tests {
     #[test]
     fn each_stream_dialect_ends_with_the_terminator_its_clients_wait_for() {
         let f = StreamFrames::build(4, 0, 16);
-        let tail = |v: &Vec<Bytes>| v.iter().map(|b| String::from_utf8_lossy(b).into_owned()).collect::<String>();
+        let tail = |v: &Vec<Bytes>| {
+            v.iter()
+                .map(|b| String::from_utf8_lossy(b).into_owned())
+                .collect::<String>()
+        };
         assert!(tail(&f.openai_tail).contains("data: [DONE]"));
         assert!(tail(&f.anthropic_tail).contains("message_stop"));
         assert!(tail(&f.openai_head).contains("\"role\":\"assistant\""));
@@ -790,7 +913,11 @@ mod tests {
             Ok(v) => v,
             Err(e) => panic!("the escaped snippet must be valid JSON: {e} in {doc}"),
         };
-        assert_eq!(parsed["s"], serde_json::Value::String(nasty.to_string()), "escaping must round trip exactly");
+        assert_eq!(
+            parsed["s"],
+            serde_json::Value::String(nasty.to_string()),
+            "escaping must round trip exactly"
+        );
     }
 
     // Every dialect is present in the document whether or not it was hit, so a runner can tell "no
@@ -807,8 +934,14 @@ mod tests {
         };
         assert_eq!(parsed["recording"], serde_json::Value::Bool(true));
         for d in DIALECTS {
-            assert_eq!(parsed["dialects"][d]["count"], 0, "{d} must be present with a zero count");
-            assert_eq!(parsed["dialects"][d]["body_ok"], false, "{d} must not claim a passed shape check");
+            assert_eq!(
+                parsed["dialects"][d]["count"], 0,
+                "{d} must be present with a zero count"
+            );
+            assert_eq!(
+                parsed["dialects"][d]["body_ok"], false,
+                "{d} must not claim a passed shape check"
+            );
         }
     }
 
@@ -846,7 +979,10 @@ mod tests {
         assert_eq!(parsed["dialects"]["anthropic"]["count"], 3);
         assert_eq!(parsed["dialects"]["anthropic"]["body_ok"], true);
         assert_eq!(parsed["dialects"]["anthropic"]["last_path"], "/v1/messages");
-        assert_eq!(parsed["dialects"]["anthropic"]["last_snippet"], "{\"messages\":[]}");
+        assert_eq!(
+            parsed["dialects"]["anthropic"]["last_snippet"],
+            "{\"messages\":[]}"
+        );
         // An untouched dialect in the same document is unaffected.
         assert_eq!(parsed["dialects"]["openai"]["count"], 0);
     }
@@ -869,11 +1005,26 @@ mod tests {
     // which is a false accusation produced entirely by a defaulted control message.
     #[test]
     fn a_record_control_body_that_says_neither_is_refused_rather_than_defaulted() {
-        for body in [&b""[..], b"{}", b"true", b"not json", br#"{"recording":true}"#, br#"{"on":"yes"}"#] {
-            assert_eq!(wants_recording(body), None, "{:?} must be refused", String::from_utf8_lossy(body));
+        for body in [
+            &b""[..],
+            b"{}",
+            b"true",
+            b"not json",
+            br#"{"recording":true}"#,
+            br#"{"on":"yes"}"#,
+        ] {
+            assert_eq!(
+                wants_recording(body),
+                None,
+                "{:?} must be refused",
+                String::from_utf8_lossy(body)
+            );
         }
         // Contradictory is also refused: there is no way to know which the caller meant.
-        assert_eq!(wants_recording(br#"{"on":true,"off":true,"on":false}"#), None);
+        assert_eq!(
+            wants_recording(br#"{"on":true,"off":true,"on":false}"#),
+            None
+        );
     }
 
     // The whole point of the toggle, over a real connection: recording starts off, `/__mock/record`
@@ -897,7 +1048,9 @@ mod tests {
         let recording: Arc<RecordFlag> = Arc::new(RecordFlag::new(false));
         tokio::spawn(async move {
             loop {
-                let Ok((stream, _)) = listener.accept().await else { return };
+                let Ok((stream, _)) = listener.accept().await else {
+                    return;
+                };
                 let io = TokioIo::new(stream);
                 let frames = frames.clone();
                 let recorder = recorder.clone();
@@ -938,7 +1091,10 @@ mod tests {
         let chat = r#"{"model":"m","messages":[{"role":"user","content":"hi"}]}"#;
         for _ in 0..3 {
             let r = call(addr, "POST", "/v1/chat/completions", chat).await;
-            assert!(r.contains("chat.completion"), "the mock must still answer normally: {r}");
+            assert!(
+                r.contains("chat.completion"),
+                "the mock must still answer normally: {r}"
+            );
         }
         let state = call(addr, "GET", "/__mock/state", "").await;
         assert!(state.contains("\"recording\":false"), "{state}");
@@ -953,21 +1109,36 @@ mod tests {
         let _ = call(addr, "POST", "/v1/chat/completions", chat).await;
         let state = call(addr, "GET", "/__mock/state", "").await;
         assert!(state.contains("\"recording\":true"), "{state}");
-        assert!(state.contains("\"openai\":{\"count\":1,\"body_ok\":true"), "{state}");
-        assert!(state.contains("/v1/chat/completions"), "the evidence must travel: {state}");
+        assert!(
+            state.contains("\"openai\":{\"count\":1,\"body_ok\":true"),
+            "{state}"
+        );
+        assert!(
+            state.contains("/v1/chat/completions"),
+            "the evidence must travel: {state}"
+        );
 
         // And off again: the count stops moving, so the windows that follow pay nothing.
         let off = call(addr, "POST", "/__mock/record", r#"{"on":false}"#).await;
         assert!(off.contains("\"recording\":false"), "{off}");
         let _ = call(addr, "POST", "/v1/chat/completions", chat).await;
         let state = call(addr, "GET", "/__mock/state", "").await;
-        assert!(state.contains("\"openai\":{\"count\":1,"), "the count must not have moved: {state}");
+        assert!(
+            state.contains("\"openai\":{\"count\":1,"),
+            "the count must not have moved: {state}"
+        );
 
         // A control body that says neither is refused, and leaves the flag where it was.
         let bad = call(addr, "POST", "/__mock/record", "{}").await;
-        assert!(bad.contains("400"), "an unparseable control body must be refused: {bad}");
+        assert!(
+            bad.contains("400"),
+            "an unparseable control body must be refused: {bad}"
+        );
         let state = call(addr, "GET", "/__mock/state", "").await;
-        assert!(state.contains("\"recording\":false"), "a refused control must not flip the flag: {state}");
+        assert!(
+            state.contains("\"recording\":false"),
+            "a refused control must not flip the flag: {state}"
+        );
     }
 
     #[test]
@@ -1009,7 +1180,9 @@ mod tests {
             let _ = hyper::server::conn::http1::Builder::new()
                 .serve_connection(
                     io,
-                    service_fn(move |r| handle(r, 0, frames.clone(), recorder.clone(), recording.clone())),
+                    service_fn(move |r| {
+                        handle(r, 0, frames.clone(), recorder.clone(), recording.clone())
+                    }),
                 )
                 .await;
         });
@@ -1035,7 +1208,10 @@ mod tests {
             panic!("reading the response must succeed: {e}");
         }
         let status_line = String::from_utf8_lossy(&resp[..resp.len().min(32)]).into_owned();
-        assert!(status_line.contains("413"), "a body over the cap must get 413, got: {status_line}");
+        assert!(
+            status_line.contains("413"),
+            "a body over the cap must get 413, got: {status_line}"
+        );
     }
 
     // The library primitive the fix relies on: a body at exactly the cap is unaffected, so the cap
@@ -1045,7 +1221,10 @@ mod tests {
     async fn a_body_at_exactly_the_cap_is_still_accepted() {
         let ok = Full::new(Bytes::from(vec![0u8; MAX_BODY_BYTES]));
         let res = Limited::new(ok, MAX_BODY_BYTES).collect().await;
-        assert!(res.is_ok(), "a body at exactly the cap must not be rejected");
+        assert!(
+            res.is_ok(),
+            "a body at exactly the cap must not be rejected"
+        );
     }
 
     // ── accept loop connection cap ──────────────────────────────────────────────────────────────
@@ -1064,9 +1243,15 @@ mod tests {
             Ok(p) => p,
             Err(e) => panic!("second permit must be available: {e}"),
         };
-        assert!(sem.try_acquire().is_err(), "a third permit must not be available once the cap is reached");
+        assert!(
+            sem.try_acquire().is_err(),
+            "a third permit must not be available once the cap is reached"
+        );
         drop(p1);
-        assert!(sem.try_acquire().is_ok(), "releasing a permit must free capacity for the next connection");
+        assert!(
+            sem.try_acquire().is_ok(),
+            "releasing a permit must free capacity for the next connection"
+        );
     }
 
     // ── SSE writer send timeout ─────────────────────────────────────────────────────────────────
@@ -1084,10 +1269,21 @@ mod tests {
         let start = tokio::time::Instant::now();
         // Bounded well above SSE_SEND_TIMEOUT so a regression back to an unbounded .send().await
         // fails this test on the assertion below rather than hanging the whole suite.
-        let sent = tokio::time::timeout(SSE_SEND_TIMEOUT * 20, send_frame(&tx, Bytes::from_static(b"second"))).await;
+        let sent = tokio::time::timeout(
+            SSE_SEND_TIMEOUT * 20,
+            send_frame(&tx, Bytes::from_static(b"second")),
+        )
+        .await;
         let elapsed = start.elapsed();
-        assert_eq!(sent, Ok(false), "a send into a full channel with a stalled receiver must give up, not hang");
-        assert!(elapsed >= SSE_SEND_TIMEOUT, "must wait out SSE_SEND_TIMEOUT before giving up, elapsed {elapsed:?}");
+        assert_eq!(
+            sent,
+            Ok(false),
+            "a send into a full channel with a stalled receiver must give up, not hang"
+        );
+        assert!(
+            elapsed >= SSE_SEND_TIMEOUT,
+            "must wait out SSE_SEND_TIMEOUT before giving up, elapsed {elapsed:?}"
+        );
         drop(rx);
     }
 }

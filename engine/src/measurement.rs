@@ -85,11 +85,18 @@ pub struct AbsentEntry {
 impl<T> Measurement<T> {
     /// If absent, inserts `key` -> this measurement's reason and detail into `out`. A no-op for a
     /// measured value: there is nothing to explain.
-    pub fn record_absence(&self, key: &str, out: &mut std::collections::BTreeMap<String, AbsentEntry>) {
+    pub fn record_absence(
+        &self,
+        key: &str,
+        out: &mut std::collections::BTreeMap<String, AbsentEntry>,
+    ) {
         if let Measurement::Absent { reason, detail } = self {
             out.insert(
                 key.to_string(),
-                AbsentEntry { reason: reason.clone(), detail: detail.clone() },
+                AbsentEntry {
+                    reason: reason.clone(),
+                    detail: detail.clone(),
+                },
             );
         }
     }
@@ -103,18 +110,27 @@ impl<T> Measurement<T> {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Measurement<T> {
     Measured(T),
-    Absent { reason: Absent, detail: Option<String> },
+    Absent {
+        reason: Absent,
+        detail: Option<String>,
+    },
 }
 
 impl<T> Measurement<T> {
     pub fn absent(reason: Absent) -> Self {
-        Measurement::Absent { reason, detail: None }
+        Measurement::Absent {
+            reason,
+            detail: None,
+        }
     }
 
     /// An absence with operator-facing evidence attached. Use this whenever the reason alone would
     /// leave a reader asking "bounded by what?".
     pub fn absent_because(reason: Absent, detail: impl Into<String>) -> Self {
-        Measurement::Absent { reason, detail: Some(detail.into()) }
+        Measurement::Absent {
+            reason,
+            detail: Some(detail.into()),
+        }
     }
 
     pub fn is_measured(&self) -> bool {
@@ -197,7 +213,10 @@ impl<T: Copy> Measurement<T> {
 /// free by the derive macro.
 impl<T> Default for Measurement<T> {
     fn default() -> Self {
-        Measurement::Absent { reason: Absent::NotMeasured, detail: None }
+        Measurement::Absent {
+            reason: Absent::NotMeasured,
+            detail: None,
+        }
     }
 }
 
@@ -250,7 +269,10 @@ mod tests {
         assert_eq!(absent.copied(), None);
         assert_ne!(zero, absent);
         assert_eq!(serde_json::to_string(&zero).ok(), Some("0.0".to_string()));
-        assert_eq!(serde_json::to_string(&absent).ok(), Some("null".to_string()));
+        assert_eq!(
+            serde_json::to_string(&absent).ok(),
+            Some("null".to_string())
+        );
     }
 
     #[test]
@@ -273,10 +295,12 @@ mod tests {
     // Reading a snapshot back must not invent a value. null in, absent out.
     #[test]
     fn null_deserialises_to_absent_not_zero() {
-        let m: Measurement<f64> = serde_json::from_str("null").unwrap_or(Measurement::Measured(1.0));
+        let m: Measurement<f64> =
+            serde_json::from_str("null").unwrap_or(Measurement::Measured(1.0));
         assert!(!m.is_measured());
         assert_eq!(m.copied(), None);
-        let v: Measurement<f64> = serde_json::from_str("12.5").unwrap_or(Measurement::absent(Absent::HarnessError));
+        let v: Measurement<f64> =
+            serde_json::from_str("12.5").unwrap_or(Measurement::absent(Absent::HarnessError));
         assert_eq!(v.copied(), Some(12.5));
     }
 
@@ -297,13 +321,15 @@ mod tests {
     // Suppressing something already absent must not overwrite the original, more specific reason.
     #[test]
     fn suppress_does_not_relabel_an_existing_absence() {
-        let m: Measurement<f64> = Measurement::absent(Absent::NotServed).suppress(Absent::RigLimited);
+        let m: Measurement<f64> =
+            Measurement::absent(Absent::NotServed).suppress(Absent::RigLimited);
         assert_eq!(m.reason(), Some(&Absent::NotServed));
     }
 
     #[test]
     fn map_preserves_the_reason_and_detail() {
-        let m: Measurement<f64> = Measurement::absent_because(Absent::Untestable, "no SSE for this dialect");
+        let m: Measurement<f64> =
+            Measurement::absent_because(Absent::Untestable, "no SSE for this dialect");
         let mapped = m.map(|v| v as i64);
         assert_eq!(mapped.reason(), Some(&Absent::Untestable));
         assert_eq!(mapped.detail(), Some("no SSE for this dialect"));
@@ -348,9 +374,11 @@ mod tests {
                 format!("\"{}\"", reason.token()),
                 "the wire form and the published token must be the same string"
             );
-            let back: Absent =
-                serde_json::from_str(&json).unwrap_or(Absent::HarnessError);
-            assert_eq!(back, reason, "a reason must survive a snapshot round trip unchanged");
+            let back: Absent = serde_json::from_str(&json).unwrap_or(Absent::HarnessError);
+            assert_eq!(
+                back, reason,
+                "a reason must survive a snapshot round trip unchanged"
+            );
         }
     }
 
@@ -369,7 +397,10 @@ mod tests {
 
         let row = Row {
             rps: Measurement::Measured(1234.5),
-            ceiling: Measurement::absent_because(Absent::SearchExhausted, "still passing at the top"),
+            ceiling: Measurement::absent_because(
+                Absent::SearchExhausted,
+                "still passing at the top",
+            ),
         };
         let json = serde_json::to_string(&row).unwrap_or_default();
         assert_eq!(json, r#"{"rps":1234.5,"ceiling":null}"#);
@@ -382,7 +413,11 @@ mod tests {
             Err(e) => panic!("a row we just wrote must read back: {e}"),
         };
         assert_eq!(back.rps.copied(), Some(1234.5));
-        assert_eq!(back.ceiling.copied(), None, "a null must never read back as a number");
+        assert_eq!(
+            back.ceiling.copied(),
+            None,
+            "a null must never read back as a number"
+        );
         assert_eq!(
             back.ceiling.reason(),
             Some(&Absent::NotMeasured),
@@ -421,7 +456,11 @@ mod tests {
     fn suppress_without_a_detail_still_discards_the_value() {
         for reason in ALL {
             let m = Measurement::Measured(48_000.0_f64).suppress(reason.clone());
-            assert_eq!(m.copied(), None, "{reason} must discard the value it suppresses");
+            assert_eq!(
+                m.copied(),
+                None,
+                "{reason} must discard the value it suppresses"
+            );
             assert_eq!(m.reason(), Some(&reason));
             assert_eq!(m.detail(), None);
             assert_eq!(serde_json::to_string(&m).ok(), Some("null".to_string()));

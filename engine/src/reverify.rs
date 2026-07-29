@@ -67,15 +67,24 @@ impl Reverified {
     /// Not checked, for a stated reason. Never `false`: "we did not ask" and "we asked and it failed"
     /// are different claims and only one of them is about the gateway.
     fn unchecked(note: impl Into<String>) -> Self {
-        Reverified { verified: None, note: Some(note.into()) }
+        Reverified {
+            verified: None,
+            note: Some(note.into()),
+        }
     }
 
     fn proven() -> Self {
-        Reverified { verified: Some(true), note: None }
+        Reverified {
+            verified: Some(true),
+            note: None,
+        }
     }
 
     fn refuted(note: impl Into<String>) -> Self {
-        Reverified { verified: Some(false), note: Some(note.into()) }
+        Reverified {
+            verified: Some(false),
+            note: Some(note.into()),
+        }
     }
 }
 
@@ -104,8 +113,8 @@ pub struct MockState {
 /// against malformed ones) with no mock, no socket and no gateway - the same reason
 /// `run::sustained_gate_passes` is a free function rather than logic inside a probe.
 pub fn parse_state(body: &[u8]) -> Result<MockState, String> {
-    let v: serde_json::Value =
-        serde_json::from_slice(body).map_err(|e| format!("the mock's state document did not parse: {e}"))?;
+    let v: serde_json::Value = serde_json::from_slice(body)
+        .map_err(|e| format!("the mock's state document did not parse: {e}"))?;
     // A MISSING `recording` KEY IS NOT `false`. False is the mock telling us it was not recording;
     // missing means this is not the document we think it is, and reading it as "not recording" would
     // publish a parse failure of ours as a configuration fact about the run.
@@ -119,9 +128,19 @@ pub fn parse_state(body: &[u8]) -> Result<MockState, String> {
             dialects.insert(
                 name.clone(),
                 DialectState {
-                    count: row.get("count").and_then(serde_json::Value::as_u64).unwrap_or(0),
-                    body_ok: row.get("body_ok").and_then(serde_json::Value::as_bool).unwrap_or(false),
-                    last_path: row.get("last_path").and_then(serde_json::Value::as_str).unwrap_or_default().to_string(),
+                    count: row
+                        .get("count")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(0),
+                    body_ok: row
+                        .get("body_ok")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false),
+                    last_path: row
+                        .get("last_path")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
                     last_snippet: row
                         .get("last_snippet")
                         .and_then(serde_json::Value::as_str)
@@ -131,7 +150,10 @@ pub fn parse_state(body: &[u8]) -> Result<MockState, String> {
             );
         }
     }
-    Ok(MockState { recording, dialects })
+    Ok(MockState {
+        recording,
+        dialects,
+    })
 }
 
 /// THE VERDICT ITSELF, over an already-read recorder state. Pure.
@@ -151,7 +173,11 @@ pub fn verdict(state: &MockState, ingress: Dialect, egress: Dialect) -> Reverifi
              say which dialect the gateway spoke upstream",
         );
     }
-    let row = state.dialects.get(egress.as_str()).cloned().unwrap_or_default();
+    let row = state
+        .dialects
+        .get(egress.as_str())
+        .cloned()
+        .unwrap_or_default();
     if row.count > 0 {
         return if row.body_ok {
             Reverified::proven()
@@ -184,7 +210,9 @@ pub fn verdict(state: &MockState, ingress: Dialect, egress: Dialect) -> Reverifi
         .iter()
         .map(|(n, d)| format!("{n} (count {}, last path {:?})", d.count, d.last_path))
         .collect();
-    let forwarded_verbatim = elsewhere.iter().any(|(n, _)| n.as_str() == ingress.as_str());
+    let forwarded_verbatim = elsewhere
+        .iter()
+        .any(|(n, _)| n.as_str() == ingress.as_str());
     Reverified::refuted(if forwarded_verbatim {
         format!(
             "the request arrived on the mock's {} endpoint - the client's own ingress dialect - and \
@@ -271,7 +299,13 @@ pub fn reverify_cell(cfg: &RunConfig, id: &CellId, ingress: Dialect) -> Reverifi
     let path = path_for(cfg, ingress, &id.egress);
     let body = ingress.body(&crate::run::model_for(cfg, &id.egress));
     let headers = crate::run::headers_for(cfg, ingress, &id.egress);
-    let driven = http::post_json(cfg.gateway_addr, &path, body.as_bytes(), &headers, REVERIFY_TIMEOUT);
+    let driven = http::post_json(
+        cfg.gateway_addr,
+        &path,
+        body.as_bytes(),
+        &headers,
+        REVERIFY_TIMEOUT,
+    );
     if let Some(why) = control_failed(driven) {
         return Reverified::unchecked(format!(
             "the re-verification request to the gateway produced no answer, so nothing was driven upstream to observe: {why}"
@@ -286,7 +320,9 @@ pub fn reverify_cell(cfg: &RunConfig, id: &CellId, ingress: Dialect) -> Reverifi
     let state = match read {
         Outcome::Response(r) => match parse_state(r.body()) {
             Ok(s) => s,
-            Err(e) => return Reverified::unchecked(format!("the mock's recorder could not be read: {e}")),
+            Err(e) => {
+                return Reverified::unchecked(format!("the mock's recorder could not be read: {e}"))
+            }
         },
         other => {
             return Reverified::unchecked(format!(
@@ -311,7 +347,13 @@ pub fn reverify_cell(cfg: &RunConfig, id: &CellId, ingress: Dialect) -> Reverifi
 /// rests on.
 fn set_recording(cfg: &RunConfig, on: bool) -> Option<String> {
     let body = format!("{{\"on\":{on}}}");
-    control_failed(http::post_json(cfg.mock_addr, "/__mock/record", body.as_bytes(), &[], REVERIFY_TIMEOUT))
+    control_failed(http::post_json(
+        cfg.mock_addr,
+        "/__mock/record",
+        body.as_bytes(),
+        &[],
+        REVERIFY_TIMEOUT,
+    ))
 }
 
 /// Leave the mock's recorder OFF before a run's measurements begin.
@@ -359,7 +401,10 @@ mod tests {
                 },
             );
         }
-        MockState { recording, dialects }
+        MockState {
+            recording,
+            dialects,
+        }
     }
 
     // ── the document ────────────────────────────────────────────────────────────────────────────
@@ -391,7 +436,11 @@ mod tests {
 
     #[test]
     fn a_request_in_the_egress_dialects_own_shape_proves_the_translation() {
-        let v = verdict(&state(true, &[("anthropic", 1, true)]), Dialect::Openai, Dialect::Anthropic);
+        let v = verdict(
+            &state(true, &[("anthropic", 1, true)]),
+            Dialect::Openai,
+            Dialect::Anthropic,
+        );
         assert_eq!(v.verified, Some(true));
         assert_eq!(v.note, None, "a proven translation needs no explanation");
     }
@@ -401,33 +450,60 @@ mod tests {
     // cell publishes a translation the gateway never performed.
     #[test]
     fn a_request_forwarded_verbatim_to_the_ingress_endpoint_is_refuted_with_what_was_seen() {
-        let v = verdict(&state(true, &[("openai", 1, true)]), Dialect::Openai, Dialect::Anthropic);
+        let v = verdict(
+            &state(true, &[("openai", 1, true)]),
+            Dialect::Openai,
+            Dialect::Anthropic,
+        );
         assert_eq!(v.verified, Some(false));
         let note = v.note.unwrap_or_default();
-        assert!(note.contains("openai"), "the note must name the endpoint that was actually hit: {note}");
-        assert!(note.contains("forwarded"), "the finding is a forward, not a mistranslation: {note}");
-        assert!(note.contains("/openai"), "the last path is the evidence and must travel: {note}");
+        assert!(
+            note.contains("openai"),
+            "the note must name the endpoint that was actually hit: {note}"
+        );
+        assert!(
+            note.contains("forwarded"),
+            "the finding is a forward, not a mistranslation: {note}"
+        );
+        assert!(
+            note.contains("/openai"),
+            "the last path is the evidence and must travel: {note}"
+        );
     }
 
     // Arrived on the right endpoint, wrong shape: the mock's own `request_shape_ok` said no. Still a
     // refutation, but a different one, and the note must not claim a verbatim forward.
     #[test]
     fn a_request_on_the_right_endpoint_in_the_wrong_shape_is_refuted_with_the_body_it_sent() {
-        let v = verdict(&state(true, &[("anthropic", 1, false)]), Dialect::Openai, Dialect::Anthropic);
+        let v = verdict(
+            &state(true, &[("anthropic", 1, false)]),
+            Dialect::Openai,
+            Dialect::Anthropic,
+        );
         assert_eq!(v.verified, Some(false));
         let note = v.note.unwrap_or_default();
         assert!(note.contains("not the anthropic request shape"), "{note}");
-        assert!(note.contains("seen"), "the body snippet is the evidence and must travel: {note}");
+        assert!(
+            note.contains("seen"),
+            "the body snippet is the evidence and must travel: {note}"
+        );
     }
 
     // Landed on a third dialect entirely: not a verbatim forward, but still not this cell's egress.
     #[test]
     fn a_request_that_lands_on_some_other_dialect_is_refuted_without_calling_it_a_forward() {
-        let v = verdict(&state(true, &[("gemini", 3, true)]), Dialect::Openai, Dialect::Anthropic);
+        let v = verdict(
+            &state(true, &[("gemini", 3, true)]),
+            Dialect::Openai,
+            Dialect::Anthropic,
+        );
         assert_eq!(v.verified, Some(false));
         let note = v.note.unwrap_or_default();
         assert!(note.contains("gemini"), "{note}");
-        assert!(!note.contains("forwarded"), "nothing was forwarded verbatim here: {note}");
+        assert!(
+            !note.contains("forwarded"),
+            "nothing was forwarded verbatim here: {note}"
+        );
     }
 
     // ── the three ways this is UNCHECKED, none of which may read as a failed gateway ─────────────
@@ -435,20 +511,30 @@ mod tests {
     #[test]
     fn a_mock_that_was_never_recording_is_unchecked_never_false() {
         let v = verdict(&state(false, &[]), Dialect::Openai, Dialect::Anthropic);
-        assert_eq!(v.verified, None, "a mock that was not recording says nothing about the gateway");
+        assert_eq!(
+            v.verified, None,
+            "a mock that was not recording says nothing about the gateway"
+        );
         // The note must say the RECORDER was off, not that the gateway did anything wrong. The field
         // boots the mock quiet on purpose and the engine toggles recording around this one request,
         // so reaching here means the toggle did not take - a rig fault, and the note has to read as
         // one or a reader will take it for a gateway defect.
         let note = v.note.unwrap_or_default();
-        assert!(note.contains("recording"), "the note must name the recorder as the reason: {note}");
+        assert!(
+            note.contains("recording"),
+            "the note must name the recorder as the reason: {note}"
+        );
     }
 
     // NOTHING ARRIVED is an absence of evidence, not evidence of absence. Publishing `false` here
     // would convict a gateway because our own observation failed.
     #[test]
     fn a_recorder_that_saw_nothing_at_all_is_unchecked_never_false() {
-        let v = verdict(&state(true, &[("openai", 0, false)]), Dialect::Openai, Dialect::Anthropic);
+        let v = verdict(
+            &state(true, &[("openai", 0, false)]),
+            Dialect::Openai,
+            Dialect::Anthropic,
+        );
         assert_eq!(v.verified, None);
         assert!(v.note.unwrap_or_default().contains("never observed"));
     }
@@ -460,10 +546,21 @@ mod tests {
     #[test]
     fn an_untouched_dialects_default_body_ok_false_is_never_read_as_a_refutation() {
         let mut s = state(true, &[]);
-        for d in ["openai", "openai-responses", "anthropic", "gemini", "cohere", "bedrock", "other"] {
+        for d in [
+            "openai",
+            "openai-responses",
+            "anthropic",
+            "gemini",
+            "cohere",
+            "bedrock",
+            "other",
+        ] {
             s.dialects.insert(d.to_string(), DialectState::default());
         }
-        assert_eq!(verdict(&s, Dialect::Openai, Dialect::Anthropic).verified, None);
+        assert_eq!(
+            verdict(&s, Dialect::Openai, Dialect::Anthropic).verified,
+            None
+        );
     }
 
     // ── the diagonal ────────────────────────────────────────────────────────────────────────────
@@ -474,8 +571,12 @@ mod tests {
     #[test]
     fn a_same_dialect_cell_is_unchecked_because_there_is_nothing_to_prove() {
         let cfg = crate::run::test_fixture(
-            "127.0.0.1:1".parse().expect("a literal loopback address parses"),
-            "127.0.0.1:2".parse().expect("a literal loopback address parses"),
+            "127.0.0.1:1"
+                .parse()
+                .expect("a literal loopback address parses"),
+            "127.0.0.1:2"
+                .parse()
+                .expect("a literal loopback address parses"),
         );
         let v = reverify_cell(&cfg, &CellId::new("openai", "openai"), Dialect::Openai);
         assert_eq!(v.verified, None);
@@ -491,12 +592,22 @@ mod tests {
     #[test]
     fn an_unreachable_mock_is_unchecked_never_false() {
         let cfg = crate::run::test_fixture(
-            "127.0.0.1:1".parse().expect("a literal loopback address parses"),
-            "127.0.0.1:2".parse().expect("a literal loopback address parses"),
+            "127.0.0.1:1"
+                .parse()
+                .expect("a literal loopback address parses"),
+            "127.0.0.1:2"
+                .parse()
+                .expect("a literal loopback address parses"),
         );
         let v = reverify_cell(&cfg, &CellId::new("openai", "anthropic"), Dialect::Openai);
-        assert_eq!(v.verified, None, "a rig failure must never convict the gateway");
-        assert!(v.note.unwrap_or_default().contains("recorder could not be cleared"));
+        assert_eq!(
+            v.verified, None,
+            "a rig failure must never convict the gateway"
+        );
+        assert!(v
+            .note
+            .unwrap_or_default()
+            .contains("recorder could not be cleared"));
     }
 
     // RE-VERIFICATION MUST DRIVE THE CELL'S OWN WIRE.

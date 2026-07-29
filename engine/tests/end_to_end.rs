@@ -101,7 +101,10 @@ fn handle(stream: TcpStream, stop: Arc<AtomicBool>) {
             if trimmed.is_empty() {
                 break; // end of headers
             }
-            if let Some(v) = trimmed.strip_prefix("Content-Length: ").or_else(|| trimmed.strip_prefix("content-length: ")) {
+            if let Some(v) = trimmed
+                .strip_prefix("Content-Length: ")
+                .or_else(|| trimmed.strip_prefix("content-length: "))
+            {
                 content_length = v.trim().parse().unwrap_or(0);
             }
             // The openai dialect's own shape, which is the only one this narrowed grid drives. Case
@@ -134,7 +137,10 @@ fn handle(stream: TcpStream, stop: Arc<AtomicBool>) {
                 "HTTP/1.1 401 Unauthorized\r\ncontent-type: application/json\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n",
                 body.len()
             );
-            if out.write_all(head.as_bytes()).is_err() || out.write_all(body).is_err() || out.flush().is_err() {
+            if out.write_all(head.as_bytes()).is_err()
+                || out.write_all(body).is_err()
+                || out.flush().is_err()
+            {
                 return;
             }
             continue;
@@ -157,7 +163,8 @@ fn handle(stream: TcpStream, stop: Arc<AtomicBool>) {
             }
             let mut ok = true;
             for i in 0..96 {
-                let frame = format!("data: {{\"choices\":[{{\"delta\":{{\"content\":\"{i}\"}}}}]}}\n\n");
+                let frame =
+                    format!("data: {{\"choices\":[{{\"delta\":{{\"content\":\"{i}\"}}}}]}}\n\n");
                 let chunk = format!("{:x}\r\n{frame}\r\n", frame.len());
                 if out.write_all(chunk.as_bytes()).is_err() || out.flush().is_err() {
                     ok = false;
@@ -177,7 +184,10 @@ fn handle(stream: TcpStream, stop: Arc<AtomicBool>) {
             "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n",
             body.len()
         );
-        if out.write_all(head.as_bytes()).is_err() || out.write_all(body).is_err() || out.flush().is_err() {
+        if out.write_all(head.as_bytes()).is_err()
+            || out.write_all(body).is_err()
+            || out.flush().is_err()
+        {
             return;
         }
     }
@@ -278,8 +288,14 @@ fn a_real_run_writes_a_snapshot_with_the_cell_it_measured() {
 
     // The grid was one dialect, so exactly one cell, and the fixture answers 200, so it is served.
     let cell = &snap["matrix"]["upstreams"]["openai"]["cells"]["openai"];
-    assert!(!cell.is_null(), "the openai/openai cell must appear in the artifact: {snap:#}");
-    assert_eq!(cell["served"], true, "the fixture answered 200, so the cell is served: {cell:#}");
+    assert!(
+        !cell.is_null(),
+        "the openai/openai cell must appear in the artifact: {snap:#}"
+    );
+    assert_eq!(
+        cell["served"], true,
+        "the fixture answered 200, so the cell is served: {cell:#}"
+    );
     assert_eq!(snap["matrix"]["served"], true);
 
     stop.store(true, Ordering::Relaxed);
@@ -306,11 +322,20 @@ fn every_module_the_artifact_needs_is_reachable_from_a_real_run() {
 
     // --- wired, and held here ---------------------------------------------------------------------
     // run + cell + probe: the cell exists and carries a verdict.
-    assert!(!cell["served"].is_null(), "run/probe/cell must produce a verdict");
+    assert!(
+        !cell["served"].is_null(),
+        "run/probe/cell must produce a verdict"
+    );
     // ingress: the path the request went to is recorded, and it is the dialect's path.
-    assert_eq!(cell["path"], "/v1/chat/completions", "ingress must decide the path");
+    assert_eq!(
+        cell["path"], "/v1/chat/completions",
+        "ingress must decide the path"
+    );
     // search + stats + gen + loadgen + http: a sweep ran and produced a perf block.
-    assert!(!cell["perf"].is_null(), "search/gen/loadgen must produce perf for a served cell");
+    assert!(
+        !cell["perf"].is_null(),
+        "search/gen/loadgen must produce perf for a served cell"
+    );
     // measurement + record + snapshot: it round-tripped to disk as valid JSON with our shape.
     assert_eq!(snap["gateway"], "e2e");
 
@@ -326,8 +351,16 @@ fn every_module_the_artifact_needs_is_reachable_from_a_real_run() {
         perf["added_latency_p99_us"].as_f64().is_some(),
         "the added-latency group must publish a real added_latency_p99_us against a fixture that answers both legs: {perf:#}"
     );
-    for field in ["added_latency_p50_us", "added_latency_p99_us", "gateway_c1_p99_us", "direct_c1_p99_us"] {
-        assert!(perf.get(field).is_some(), "the added-latency group declares {field} and must publish it: {perf:#}");
+    for field in [
+        "added_latency_p50_us",
+        "added_latency_p99_us",
+        "gateway_c1_p99_us",
+        "direct_c1_p99_us",
+    ] {
+        assert!(
+            perf.get(field).is_some(),
+            "the added-latency group declares {field} and must publish it: {perf:#}"
+        );
     }
 
     // --- sustained_throughput: WIRED ------------------------------------------------------------------
@@ -337,11 +370,19 @@ fn every_module_the_artifact_needs_is_reachable_from_a_real_run() {
     // to prove a ceiling, and this fixture never fails a request, so `SearchExhausted` is the honest
     // result. What this proves is that the group ran and filled its declared fields rather than being
     // skipped, exactly the standard the memory block above already holds itself to on this fixture.
-    for field in ["rps_sustained_20ms", "rps_sustained_20ms_concurrency", "conc_at_sustained"] {
-        assert!(perf.get(field).is_some(), "the sustained-throughput group declares {field} and must publish it: {perf:#}");
+    for field in [
+        "rps_sustained_20ms",
+        "rps_sustained_20ms_concurrency",
+        "conc_at_sustained",
+    ] {
+        assert!(
+            perf.get(field).is_some(),
+            "the sustained-throughput group declares {field} and must publish it: {perf:#}"
+        );
     }
     assert!(
-        perf.get("sweep_sustained_20ms").is_some_and(|v| v.is_array()),
+        perf.get("sweep_sustained_20ms")
+            .is_some_and(|v| v.is_array()),
         "the sustained-throughput search's own probed rungs must travel as evidence: {perf:#}"
     );
 
@@ -353,8 +394,16 @@ fn every_module_the_artifact_needs_is_reachable_from_a_real_run() {
     // answers with plain JSON rather than SSE frames, so the honest result here is an absence, and
     // the block must still say so rather than being missing.
     let stream = &cell["stream"];
-    assert!(!stream.is_null(), "the streaming block must be published on a served cell: {cell:#}");
-    for field in ["added_ttft_p50_us", "added_ttft_p99_us", "added_gap_p50_us", "added_gap_p99_us"] {
+    assert!(
+        !stream.is_null(),
+        "the streaming block must be published on a served cell: {cell:#}"
+    );
+    for field in [
+        "added_ttft_p50_us",
+        "added_ttft_p99_us",
+        "added_gap_p50_us",
+        "added_gap_p99_us",
+    ] {
         assert!(
             stream.get(field).is_some(),
             "the streaming group declares {field} and must publish it, measured or absent: {stream:#}"
@@ -393,23 +442,45 @@ fn every_module_the_artifact_needs_is_reachable_from_a_real_run() {
     // The SWEEP TRACES are asserted as real, because they are what proves the searches actually ran:
     // a rung only lands there once a window of concurrent stream lanes has opened, read frames off a
     // live socket, and been judged.
-    for field in ["streams_sustained", "streams_sustained_fps", "cpu_fps", "cpu_fps_concurrency"] {
+    for field in [
+        "streams_sustained",
+        "streams_sustained_fps",
+        "cpu_fps",
+        "cpu_fps_concurrency",
+    ] {
         assert!(
             stream.get(field).is_some(),
             "the concurrent-stream groups declare {field} and must publish it, measured or absent: {stream:#}"
         );
     }
-    for (field, group) in [("sweep_streams", "streams-sustained gate"), ("sweep_cpu_fps", "cpu frames/sec peak")] {
-        let rungs = stream[field].as_array().unwrap_or_else(|| panic!("{field} must be an array: {stream:#}"));
-        assert!(!rungs.is_empty(), "the {group} search must publish the rungs it probed: {stream:#}");
+    for (field, group) in [
+        ("sweep_streams", "streams-sustained gate"),
+        ("sweep_cpu_fps", "cpu frames/sec peak"),
+    ] {
+        let rungs = stream[field]
+            .as_array()
+            .unwrap_or_else(|| panic!("{field} must be an array: {stream:#}"));
+        assert!(
+            !rungs.is_empty(),
+            "the {group} search must publish the rungs it probed: {stream:#}"
+        );
         let first = &rungs[0];
         assert!(
             first["fps"].as_f64().is_some_and(|v| v > 0.0),
             "a probed rung must carry the real frames/sec it measured, which is what proves the stream window ran: {first:#}"
         );
-        assert!(first["conc"].as_u64().is_some(), "a rung must name the concurrency it was taken at: {first:#}");
-        assert!(first["passed"].is_boolean(), "a rung must carry the verdict it was judged with: {first:#}");
-        assert!(first["frames"].as_u64().is_some_and(|v| v > 0), "a rung must carry its own frame count: {first:#}");
+        assert!(
+            first["conc"].as_u64().is_some(),
+            "a rung must name the concurrency it was taken at: {first:#}"
+        );
+        assert!(
+            first["passed"].is_boolean(),
+            "a rung must carry the verdict it was judged with: {first:#}"
+        );
+        assert!(
+            first["frames"].as_u64().is_some_and(|v| v > 0),
+            "a rung must carry its own frame count: {first:#}"
+        );
     }
 
     // --- reverify.rs: WIRED -----------------------------------------------------------------------
@@ -428,7 +499,9 @@ fn every_module_the_artifact_needs_is_reachable_from_a_real_run() {
         "a same-dialect cell has no translation to prove: {perf:#}"
     );
     assert!(
-        perf["reverify_note"].as_str().is_some_and(|n| n.contains("same-dialect")),
+        perf["reverify_note"]
+            .as_str()
+            .is_some_and(|n| n.contains("same-dialect")),
         "an unchecked cell must say WHY it was not checked: {perf:#}"
     );
 
@@ -448,12 +521,18 @@ fn every_module_the_artifact_needs_is_reachable_from_a_real_run() {
     // On a first run there is no history, so the honest outcome is "seed" - this run IS the baseline.
     // Asserting "pass" would only hold on a machine with prior runs, i.e. never in a fresh checkout.
     let bq = &snap["rig"]["box_qualify"];
-    assert!(!bq.is_null(), "the box-qualification verdict must be published: {snap:#}");
+    assert!(
+        !bq.is_null(),
+        "the box-qualification verdict must be published: {snap:#}"
+    );
     assert_eq!(
         bq["outcome"], "seed",
         "with no history the run seeds the baseline rather than passing against nothing: {bq:#}"
     );
-    assert_eq!(bq["baseline_samples"], 0, "a fresh results dir has no prior observations: {bq:#}");
+    assert_eq!(
+        bq["baseline_samples"], 0,
+        "a fresh results dir has no prior observations: {bq:#}"
+    );
 
     // THE ONE PLACE THIS TEST ASSERTS A REAL NUMBER, and it is the load path end to end: a pinned
     // `otb loadgen` child ran a window against the fixture and its rate came back through the
@@ -463,8 +542,18 @@ fn every_module_the_artifact_needs_is_reachable_from_a_real_run() {
         bq["observed_rps"].as_f64().is_some_and(|v| v > 0.0),
         "the box observation must be a real rate, which is what proves the load path works: {bq:#}"
     );
-    for field in ["outcome", "band_pct", "concurrency", "observed_rps", "baseline_rps", "drift_pct"] {
-        assert!(bq.get(field).is_some(), "the verdict must publish {field}: {bq:#}");
+    for field in [
+        "outcome",
+        "band_pct",
+        "concurrency",
+        "observed_rps",
+        "baseline_rps",
+        "drift_pct",
+    ] {
+        assert!(
+            bq.get(field).is_some(),
+            "the verdict must publish {field}: {bq:#}"
+        );
     }
 
     // --- NOT YET WIRED: these are the holes this test exists to make visible ----------------------
@@ -489,7 +578,10 @@ fn every_module_the_artifact_needs_is_reachable_from_a_real_run() {
     // gateway - i.e. it would be a test that cannot run where it is written. What this DOES prove is
     // that the memory group ran and filled its declared fields rather than being skipped.
     let memory = &cell["memory"];
-    assert!(!memory.is_null(), "the memory window must be taken on a served cell: {cell:#}");
+    assert!(
+        !memory.is_null(),
+        "the memory window must be taken on a served cell: {cell:#}"
+    );
     for field in ["idle_rss_mib", "peak_rss_mib", "peak_rss_hwm_mib"] {
         assert!(
             memory.get(field).is_some(),
@@ -501,7 +593,9 @@ fn every_module_the_artifact_needs_is_reachable_from_a_real_run() {
     // config every gw_config() exists to publish never lands. record.rs calls this "the whole point
     // (kills the class of bug where a chart is read against a config that was since overwritten)".
     assert!(
-        snap["config"]["files"].as_object().is_none_or(|m| m.is_empty()),
+        snap["config"]["files"]
+            .as_object()
+            .is_none_or(|m| m.is_empty()),
         "the published config is now populated: assert it is non-empty instead"
     );
 
@@ -509,7 +603,9 @@ fn every_module_the_artifact_needs_is_reachable_from_a_real_run() {
     // manifests to fill this, and nothing calls it: the board's reproducibility claim currently
     // identifies the wrong artifact.
     assert!(
-        snap["build"].as_str().is_some_and(|b| b.starts_with("otb-engine")),
+        snap["build"]
+            .as_str()
+            .is_some_and(|b| b.starts_with("otb-engine")),
         "build still names the engine rather than the gateway under test: {:?}",
         snap["build"]
     );
@@ -542,16 +638,24 @@ fn every_load_window_authenticates_with_the_manifests_own_credential() {
 
     let snap = run_engine(&results, &manifest, addr);
     let cell = &snap["matrix"]["upstreams"]["openai"]["cells"]["openai"];
-    assert_eq!(cell["served"], true, "the probe authenticates, and always did: {cell:#}");
+    assert_eq!(
+        cell["served"], true,
+        "the probe authenticates, and always did: {cell:#}"
+    );
 
     // The pinned `otb loadgen` child, straight through: every rung it probed carries the rate it
     // measured, and a window whose every request was refused reports rps=0.
     let rungs = cell["perf"]["sweep_max_proxy"]
         .as_array()
         .unwrap_or_else(|| panic!("the throughput search must publish its rungs: {cell:#}"));
-    assert!(!rungs.is_empty(), "the throughput search must have probed something: {cell:#}");
     assert!(
-        rungs.iter().any(|r| r["rps"].as_f64().is_some_and(|v| v > 0.0)),
+        !rungs.is_empty(),
+        "the throughput search must have probed something: {cell:#}"
+    );
+    assert!(
+        rungs
+            .iter()
+            .any(|r| r["rps"].as_f64().is_some_and(|v| v > 0.0)),
         "every load window authenticated as something the gateway refused: {rungs:#?}"
     );
 
@@ -567,7 +671,9 @@ fn every_load_window_authenticates_with_the_manifests_own_credential() {
     // manifest's auth, so it fails the same way and this is what proves the whole load path, not just
     // the gateway-facing half of it.
     assert!(
-        snap["rig"]["box_qualify"]["observed_rps"].as_f64().is_some_and(|v| v > 0.0),
+        snap["rig"]["box_qualify"]["observed_rps"]
+            .as_f64()
+            .is_some_and(|v| v > 0.0),
         "the box observation is a load window too: {:#}",
         snap["rig"]["box_qualify"]
     );
@@ -622,7 +728,10 @@ fn a_manifest_that_fails_the_config_standard_is_refused_before_anything_is_measu
         .expect("the otb binary must run");
 
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(!output.status.success(), "a manifest that fails the standard must not be measured\n{stderr}");
+    assert!(
+        !output.status.success(),
+        "a manifest that fails the standard must not be measured\n{stderr}"
+    );
     assert!(
         stderr.contains("config lint"),
         "the refusal must say which rule refused it, not just fail: {stderr}"

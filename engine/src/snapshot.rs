@@ -32,15 +32,24 @@ pub struct Paths {
 /// (or the directory fsync) it came from, and a promote-guard rejection is not an IO failure at all.
 #[derive(Debug)]
 pub enum SnapshotError {
-    Io { path: PathBuf, source: io::Error },
+    Io {
+        path: PathBuf,
+        source: io::Error,
+    },
     Json(serde_json::Error),
     /// The incoming snapshot serves strictly fewer cells than the one already on disk at the current
     /// path. Refusing here is the whole point: a boot failure that served nothing must never overwrite
     /// a prior run that served most of the grid just because it happened to run later.
-    PromoteGuard { existing_served: usize, incoming_served: usize },
+    PromoteGuard {
+        existing_served: usize,
+        incoming_served: usize,
+    },
     /// A value that becomes part of a path is not a safe filename component. Refused rather than
     /// sanitised: silently rewriting a name would publish one gateway's result under another's.
-    UnsafeName { what: &'static str, raw: String },
+    UnsafeName {
+        what: &'static str,
+        raw: String,
+    },
 }
 
 impl std::fmt::Display for SnapshotError {
@@ -79,7 +88,11 @@ impl std::error::Error for SnapshotError {
 /// carried the full grid at all, so an old-shaped snapshot still has a meaningful count.
 fn served_cell_count(matrix: &Matrix) -> usize {
     if matrix.upstreams.is_empty() {
-        matrix.cells.values().filter(|c| matches!(c.served, Served::Bool(true))).count()
+        matrix
+            .cells
+            .values()
+            .filter(|c| matches!(c.served, Served::Bool(true)))
+            .count()
     } else {
         matrix
             .upstreams
@@ -99,16 +112,27 @@ fn served_cell_count(matrix: &Matrix) -> usize {
 /// durable on its own, and these runs die on a hard self-termination timer, so "renamed, then the box
 /// died a moment later" is a real window, not a theoretical one).
 fn atomic_write(dir: &Path, target: &Path, bytes: &[u8]) -> Result<(), SnapshotError> {
-    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
     let tmp_path = dir.join(format!(".snapshot-tmp-{}-{nanos}", std::process::id()));
 
     let write_result = (|| -> Result<(), SnapshotError> {
-        let mut tmp_file = fs::File::create(&tmp_path)
-            .map_err(|source| SnapshotError::Io { path: tmp_path.clone(), source })?;
+        let mut tmp_file = fs::File::create(&tmp_path).map_err(|source| SnapshotError::Io {
+            path: tmp_path.clone(),
+            source,
+        })?;
         tmp_file
             .write_all(bytes)
-            .map_err(|source| SnapshotError::Io { path: tmp_path.clone(), source })?;
-        tmp_file.sync_all().map_err(|source| SnapshotError::Io { path: tmp_path.clone(), source })?;
+            .map_err(|source| SnapshotError::Io {
+                path: tmp_path.clone(),
+                source,
+            })?;
+        tmp_file.sync_all().map_err(|source| SnapshotError::Io {
+            path: tmp_path.clone(),
+            source,
+        })?;
         Ok(())
     })();
 
@@ -119,12 +143,19 @@ fn atomic_write(dir: &Path, target: &Path, bytes: &[u8]) -> Result<(), SnapshotE
         return Err(err);
     }
 
-    fs::rename(&tmp_path, target)
-        .map_err(|source| SnapshotError::Io { path: target.to_path_buf(), source })?;
+    fs::rename(&tmp_path, target).map_err(|source| SnapshotError::Io {
+        path: target.to_path_buf(),
+        source,
+    })?;
 
-    let dir_handle =
-        fs::File::open(dir).map_err(|source| SnapshotError::Io { path: dir.to_path_buf(), source })?;
-    dir_handle.sync_all().map_err(|source| SnapshotError::Io { path: dir.to_path_buf(), source })?;
+    let dir_handle = fs::File::open(dir).map_err(|source| SnapshotError::Io {
+        path: dir.to_path_buf(),
+        source,
+    })?;
+    dir_handle.sync_all().map_err(|source| SnapshotError::Io {
+        path: dir.to_path_buf(),
+        source,
+    })?;
 
     Ok(())
 }
@@ -136,11 +167,15 @@ fn atomic_write(dir: &Path, target: &Path, bytes: &[u8]) -> Result<(), SnapshotE
 fn read_existing(path: &Path) -> Result<Option<ResultSnapshot>, SnapshotError> {
     match fs::read(path) {
         Ok(bytes) => {
-            let existing: ResultSnapshot = serde_json::from_slice(&bytes).map_err(SnapshotError::Json)?;
+            let existing: ResultSnapshot =
+                serde_json::from_slice(&bytes).map_err(SnapshotError::Json)?;
             Ok(Some(existing))
         }
         Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(source) => Err(SnapshotError::Io { path: path.to_path_buf(), source }),
+        Err(source) => Err(SnapshotError::Io {
+            path: path.to_path_buf(),
+            source,
+        }),
     }
 }
 
@@ -165,23 +200,34 @@ fn safe_component(raw: &str, what: &'static str) -> Result<String, SnapshotError
         && raw.len() <= 128
         && raw != "."
         && raw != ".."
-        && raw.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        && raw
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
         && !raw.starts_with('.');
     if ok {
         Ok(raw.to_string())
     } else {
-        Err(SnapshotError::UnsafeName { what, raw: raw.to_string() })
+        Err(SnapshotError::UnsafeName {
+            what,
+            raw: raw.to_string(),
+        })
     }
 }
 
 pub fn write_snapshot(dir: &Path, snapshot: &ResultSnapshot) -> Result<Paths, SnapshotError> {
     let incoming_served = served_cell_count(&snapshot.matrix);
-    let current_path = dir.join(format!("{}.json", safe_component(&snapshot.gateway, "gateway")?));
+    let current_path = dir.join(format!(
+        "{}.json",
+        safe_component(&snapshot.gateway, "gateway")?
+    ));
 
     if let Some(existing) = read_existing(&current_path)? {
         let existing_served = served_cell_count(&existing.matrix);
         if incoming_served < existing_served {
-            return Err(SnapshotError::PromoteGuard { existing_served, incoming_served });
+            return Err(SnapshotError::PromoteGuard {
+                existing_served,
+                incoming_served,
+            });
         }
     }
 
@@ -189,17 +235,23 @@ pub fn write_snapshot(dir: &Path, snapshot: &ResultSnapshot) -> Result<Paths, Sn
     // write time: re-writing the same measurement later (a retry, a re-publish) must not invent a new
     // measurement instant just because the write happened again.
     let ts_safe = snapshot.measured_at.replace(':', "-");
-    let historical_path = dir.join(format!("result_{}_{}.json", safe_component(&snapshot.gateway, "gateway")?, safe_component(&ts_safe, "measured_at")?));
+    let historical_path = dir.join(format!(
+        "result_{}_{}.json",
+        safe_component(&snapshot.gateway, "gateway")?,
+        safe_component(&ts_safe, "measured_at")?
+    ));
 
-    let mut body =
-        serde_json::to_string_pretty(snapshot).map_err(SnapshotError::Json)?;
+    let mut body = serde_json::to_string_pretty(snapshot).map_err(SnapshotError::Json)?;
     body.push('\n');
     let bytes = body.into_bytes();
 
     atomic_write(dir, &current_path, &bytes)?;
     atomic_write(dir, &historical_path, &bytes)?;
 
-    Ok(Paths { current: current_path, historical: historical_path })
+    Ok(Paths {
+        current: current_path,
+        historical: historical_path,
+    })
 }
 
 #[cfg(test)]
@@ -211,7 +263,16 @@ mod tests {
     // gateway name or timestamp could write outside the results tree while the call reported success.
     #[test]
     fn a_name_that_would_escape_the_directory_is_refused() {
-        for bad in ["/etc/cron.d/evil", "../../../etc/passwd", "..", ".", "", ".hidden", "a/b", "a\\b"] {
+        for bad in [
+            "/etc/cron.d/evil",
+            "../../../etc/passwd",
+            "..",
+            ".",
+            "",
+            ".hidden",
+            "a/b",
+            "a\\b",
+        ] {
             assert!(
                 safe_component(bad, "gateway").is_err(),
                 "{bad:?} must not be accepted as a filename component"
@@ -222,7 +283,10 @@ mod tests {
     #[test]
     fn ordinary_names_and_timestamps_are_accepted() {
         for good in ["gw", "gw-two", "gw_two", "2026-07-26T00-00-00Z", "a.b"] {
-            assert!(safe_component(good, "gateway").is_ok(), "{good:?} should be accepted");
+            assert!(
+                safe_component(good, "gateway").is_ok(),
+                "{good:?} should be accepted"
+            );
         }
     }
 
@@ -230,9 +294,14 @@ mod tests {
     use std::collections::HashMap;
 
     fn unique_dir(name: &str) -> PathBuf {
-        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-        let dir = std::env::temp_dir()
-            .join(format!("otb-engine-snapshot-test-{name}-{}-{nanos}", std::process::id()));
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "otb-engine-snapshot-test-{name}-{}-{nanos}",
+            std::process::id()
+        ));
         fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -258,7 +327,10 @@ mod tests {
     /// enumerates every cell (`run::run_grid`, the live walker), so this — not a missing row — is
     /// what a lost capability actually looks like in a snapshot.
     fn unserved_cell(status: &str) -> Cell {
-        Cell { served: Served::Status(status.to_string()), ..served_cell() }
+        Cell {
+            served: Served::Status(status.to_string()),
+            ..served_cell()
+        }
     }
 
     /// `served` cells that answered true, plus `unserved` cells that were probed and did not. Total
@@ -275,7 +347,13 @@ mod tests {
         let mut upstreams = HashMap::new();
         upstreams.insert(
             "eg".to_string(),
-            Upstream { configurable: true, served: true, egress_config: None, serve_error: String::new(), cells },
+            Upstream {
+                configurable: true,
+                served: true,
+                egress_config: None,
+                serve_error: String::new(),
+                cells,
+            },
         );
         Matrix {
             gateway: gateway.to_string(),
@@ -317,7 +395,12 @@ mod tests {
         snapshot_of(gateway, measured_at, n, 0)
     }
 
-    fn snapshot_of(gateway: &str, measured_at: &str, served: usize, unserved: usize) -> ResultSnapshot {
+    fn snapshot_of(
+        gateway: &str,
+        measured_at: &str,
+        served: usize,
+        unserved: usize,
+    ) -> ResultSnapshot {
         ResultSnapshot {
             schema_version: 1,
             gateway: gateway.to_string(),
@@ -330,7 +413,9 @@ mod tests {
             arch: None,
             hardware: None,
             rig: None,
-            config: ConfigFiles { files: HashMap::new() },
+            config: ConfigFiles {
+                files: HashMap::new(),
+            },
             matrix: matrix_of(gateway, measured_at, served, unserved),
             memory: None,
             streaming: None,
@@ -363,7 +448,10 @@ mod tests {
         let paths = write_snapshot(&dir, &snap).unwrap();
 
         assert_eq!(paths.current, dir.join("gw.json"));
-        assert_eq!(paths.historical, dir.join("result_gw_2026-07-25T08-26-15Z.json"));
+        assert_eq!(
+            paths.historical,
+            dir.join("result_gw_2026-07-25T08-26-15Z.json")
+        );
         assert!(paths.current.exists());
         assert!(paths.historical.exists());
 
@@ -393,7 +481,11 @@ mod tests {
             .filter_map(|e| e.ok())
             .filter(|e| e.file_name().to_string_lossy().starts_with("result_gw_"))
             .collect();
-        assert_eq!(entries.len(), 2, "exactly two historical copies for two distinct measured_at values");
+        assert_eq!(
+            entries.len(),
+            2,
+            "exactly two historical copies for two distinct measured_at values"
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -427,7 +519,10 @@ mod tests {
             .filter_map(|e| e.ok())
             .filter(|e| e.file_name().to_string_lossy().contains("snapshot-tmp"))
             .collect();
-        assert!(litter.is_empty(), "no temp file should survive a successful write");
+        assert!(
+            litter.is_empty(),
+            "no temp file should survive a successful write"
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -444,7 +539,10 @@ mod tests {
         let err = write_snapshot(&dir, &worse).unwrap_err();
 
         match err {
-            SnapshotError::PromoteGuard { existing_served, incoming_served } => {
+            SnapshotError::PromoteGuard {
+                existing_served,
+                incoming_served,
+            } => {
                 assert_eq!(existing_served, 4);
                 assert_eq!(incoming_served, 1);
             }
@@ -476,7 +574,11 @@ mod tests {
         // Same four cells, still all present and still all probed: three now answer not_configured.
         let degraded = snapshot_of("gw", "2026-07-25T09:00:00Z", 1, 3);
 
-        assert_eq!(served_cell_count(&good.matrix), 4, "fixture check: the baseline serves four cells");
+        assert_eq!(
+            served_cell_count(&good.matrix),
+            4,
+            "fixture check: the baseline serves four cells"
+        );
         assert_eq!(
             good.matrix.upstreams.values().map(|u| u.cells.len()).sum::<usize>(),
             degraded.matrix.upstreams.values().map(|u| u.cells.len()).sum::<usize>(),
@@ -487,16 +589,25 @@ mod tests {
         let err = write_snapshot(&dir, &degraded).unwrap_err();
 
         match err {
-            SnapshotError::PromoteGuard { existing_served, incoming_served } => {
+            SnapshotError::PromoteGuard {
+                existing_served,
+                incoming_served,
+            } => {
                 assert_eq!(existing_served, 4);
-                assert_eq!(incoming_served, 1, "only cells answering true count as served");
+                assert_eq!(
+                    incoming_served, 1,
+                    "only cells answering true count as served"
+                );
             }
             other => panic!("expected PromoteGuard, got {other:?}"),
         }
 
         let current: ResultSnapshot =
             serde_json::from_str(&fs::read_to_string(dir.join("gw.json")).unwrap()).unwrap();
-        assert_eq!(current, good, "the degraded run must not have replaced the good one");
+        assert_eq!(
+            current, good,
+            "the degraded run must not have replaced the good one"
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -509,11 +620,17 @@ mod tests {
         let mut m = matrix_of("gw", "2026-07-25T08:00:00Z", 0, 0);
         m.upstreams.clear(); // force the compat branch
         m.cells.insert("openai".into(), served_cell());
-        m.cells.insert("anthropic".into(), unserved_cell("not_configured"));
-        m.cells.insert("gemini".into(), unserved_cell("not_verified"));
+        m.cells
+            .insert("anthropic".into(), unserved_cell("not_configured"));
+        m.cells
+            .insert("gemini".into(), unserved_cell("not_verified"));
 
         assert_eq!(m.cells.len(), 3, "fixture check: three cells are present");
-        assert_eq!(served_cell_count(&m), 1, "only the cell that answered true is served");
+        assert_eq!(
+            served_cell_count(&m),
+            1,
+            "only the cell that answered true is served"
+        );
     }
 
     #[test]
@@ -550,7 +667,10 @@ mod tests {
         // restore write permission before cleanup, regardless of the assertion outcome below.
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
 
-        assert!(result.is_err(), "a read-only directory must not report a successful write");
+        assert!(
+            result.is_err(),
+            "a read-only directory must not report a successful write"
+        );
         assert!(!dir.join("gw.json").exists());
 
         let _ = fs::remove_dir_all(&dir);

@@ -84,7 +84,9 @@ fn utc_stamp() -> String {
 }
 
 fn arg_f64(args: &[String], i: usize, default: f64) -> f64 {
-    args.get(i).and_then(|s| s.parse::<f64>().ok()).unwrap_or(default)
+    args.get(i)
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or(default)
 }
 
 fn main() -> ExitCode {
@@ -97,7 +99,9 @@ fn main() -> ExitCode {
             let addr = match args.get(1).and_then(|a| a.parse().ok()) {
                 Some(a) => a,
                 None => {
-                    eprintln!("usage: otb loadgen <ip:port> <path> <concurrency> <duration_s> [body]");
+                    eprintln!(
+                        "usage: otb loadgen <ip:port> <path> <concurrency> <duration_s> [body]"
+                    );
                     return ExitCode::from(2);
                 }
             };
@@ -119,7 +123,9 @@ fn main() -> ExitCode {
             // wrong credential is worse than none. The warning is because a hand-run `otb loadgen`
             // against an authenticating gateway would otherwise read as the gateway falling over.
             let headers = otb_engine::loadgen::decode_headers(
-                std::env::var(otb_engine::loadgen::HEADERS_ENV).ok().as_deref(),
+                std::env::var(otb_engine::loadgen::HEADERS_ENV)
+                    .ok()
+                    .as_deref(),
             );
             if headers.is_empty() {
                 eprintln!(
@@ -166,7 +172,9 @@ fn main() -> ExitCode {
                 // and the memory group reports an absence naming it, which is the honest answer.
                 static_headers: Vec::new(),
                 egress_headers: Default::default(),
-                runtime: otb_engine::manifest::Runtime::Native { proc_match: String::new() },
+                runtime: otb_engine::manifest::Runtime::Native {
+                    proc_match: String::new(),
+                },
                 // `smoke` runs against a target someone else started, so the harness does not own
                 // its lifetime and must never restart it.
                 // `smoke` drives a target at whatever path the dialect defines; it takes no manifest.
@@ -197,7 +205,15 @@ fn main() -> ExitCode {
                         .join(" "),
                     None => "not measured".into(),
                 };
-                println!("{:<28} {:<12} {}", r.outcome.id.to_string(), format!("{:?}", r.outcome.served).chars().take(11).collect::<String>(), perf);
+                println!(
+                    "{:<28} {:<12} {}",
+                    r.outcome.id.to_string(),
+                    format!("{:?}", r.outcome.served)
+                        .chars()
+                        .take(11)
+                        .collect::<String>(),
+                    perf
+                );
             }
             ExitCode::SUCCESS
         }
@@ -207,7 +223,9 @@ fn main() -> ExitCode {
             use otb_engine::manifest::Manifest;
             use otb_engine::suite::{run_suite, SuiteConfig};
             let Some(manifest_path) = args.get(1) else {
-                eprintln!("usage: otb run <manifest.json> <gateway ip:port> <mock ip:port> [results_dir]");
+                eprintln!(
+                    "usage: otb run <manifest.json> <gateway ip:port> <mock ip:port> [results_dir]"
+                );
                 return ExitCode::from(2);
             };
             // A gateway is a DIRECTORY, not a file: definition.json plus whatever sidecars it has.
@@ -215,7 +233,11 @@ fn main() -> ExitCode {
             // were reading a moment ago and get the same thing.
             let dir = {
                 let p = std::path::Path::new(manifest_path);
-                if p.is_dir() { p.to_path_buf() } else { p.parent().unwrap_or(p).to_path_buf() }
+                if p.is_dir() {
+                    p.to_path_buf()
+                } else {
+                    p.parent().unwrap_or(p).to_path_buf()
+                }
             };
             let manifest: Manifest = match Manifest::load(&dir) {
                 Ok(m) => m,
@@ -237,7 +259,8 @@ fn main() -> ExitCode {
             // Defaults are empty for now: there is no per-gateway source of "what this ships with out
             // of the box" in the tree yet, so the restated-default rule cannot fire. The structural
             // rules - an unusable key, a duplicate claim - do fire, and this is where they belong.
-            let findings = otb_engine::config_lint::lint(&manifest, &otb_engine::config_lint::Defaults::new());
+            let findings =
+                otb_engine::config_lint::lint(&manifest, &otb_engine::config_lint::Defaults::new());
             for f in &findings {
                 eprintln!("config lint: {}", f.message);
             }
@@ -249,7 +272,10 @@ fn main() -> ExitCode {
             // A caller-supplied port is a second spelling of one fact, and the run would drive
             // whatever answered on it - which is how a measurement ends up attributed to the wrong
             // gateway. An explicit address is still accepted for driving something already running.
-            let Some(mk) = args.get(2).and_then(|a| a.parse::<std::net::SocketAddr>().ok()) else {
+            let Some(mk) = args
+                .get(2)
+                .and_then(|a| a.parse::<std::net::SocketAddr>().ok())
+            else {
                 eprintln!("usage: otb run <gateway dir> <mock ip:port> [results_dir] [sweep_s]");
                 eprintln!("  the gateway's own address comes from its definition; OTB_GATEWAY_ADDR overrides it");
                 return ExitCode::from(2);
@@ -265,12 +291,18 @@ fn main() -> ExitCode {
                 Err(_) => match format!("127.0.0.1:{}", manifest.port).parse() {
                     Ok(a) => a,
                     Err(e) => {
-                        eprintln!("{} declares port {} which is not usable: {e}", manifest.name, manifest.port);
+                        eprintln!(
+                            "{} declares port {} which is not usable: {e}",
+                            manifest.name, manifest.port
+                        );
                         return ExitCode::FAILURE;
                     }
                 },
             };
-            let results_dir = args.get(3).cloned().unwrap_or_else(|| "results/snapshots".into());
+            let results_dir = args
+                .get(3)
+                .cloned()
+                .unwrap_or_else(|| "results/snapshots".into());
             if let Err(e) = std::fs::create_dir_all(&results_dir) {
                 eprintln!("cannot create {results_dir}: {e}");
                 return ExitCode::FAILURE;
@@ -287,7 +319,12 @@ fn main() -> ExitCode {
                     return ExitCode::from(2);
                 }
             };
-            let env_u32 = |k: &str, d: u32| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
+            let env_u32 = |k: &str, d: u32| {
+                std::env::var(k)
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(d)
+            };
             let gw_dir = dir.clone();
             let gw_cores = std::env::var("OTB_GW_CORES").unwrap_or_else(|_| "0-3".into());
 
@@ -358,7 +395,9 @@ fn main() -> ExitCode {
                 measured_at: utc_stamp(),
                 arch: std::env::var("BENCH_ARCH").unwrap_or_else(|_| "unknown".into()),
                 // Same path as arch: the orchestrator knows the box shape, the box does not.
-                hardware: std::env::var("BENCH_HARDWARE").ok().filter(|v| !v.trim().is_empty()),
+                hardware: std::env::var("BENCH_HARDWARE")
+                    .ok()
+                    .filter(|v| !v.trim().is_empty()),
                 // WHICH COMMIT PRODUCED THIS RUN. run-on-ec2.sh resolves it before the box exists
                 // and exports it, because the box cannot work it out for itself: its clone is a
                 // detached checkout and this binary arrived as a release download, so neither the
@@ -373,7 +412,9 @@ fn main() -> ExitCode {
                     .ok()
                     .filter(|v| !v.is_empty())
                     .map(|sha| otb_engine::record::BinaryProvenance {
-                        origin: std::env::var("OTB_RIG_MOCK_ORIGIN").ok().filter(|v| !v.is_empty()),
+                        origin: std::env::var("OTB_RIG_MOCK_ORIGIN")
+                            .ok()
+                            .filter(|v| !v.is_empty()),
                         sha256: Some(sha),
                         asset_updated_at: std::env::var("OTB_RIG_MOCK_UPDATED_AT")
                             .ok()
@@ -414,7 +455,11 @@ fn main() -> ExitCode {
                     let mut launcher = otb_engine::launch::RealLauncher::default();
                     match otb_engine::launch::launch_default(&mut launcher, &spec) {
                         Ok(l) => {
-                            println!("launched {} in {} attempt(s)", spec.runtime.identity(), l.attempts);
+                            println!(
+                                "launched {} in {} attempt(s)",
+                                spec.runtime.identity(),
+                                l.attempts
+                            );
                             // COMMANDS, in order, now that it is up and before anything is measured.
                             //
                             // A gateway with no config file is configured through its own admin API
@@ -448,7 +493,10 @@ fn main() -> ExitCode {
                             // process - the only thing that survives across those separate
                             // invocations is a file. See `resolve_minted_auth`.
                             if let Some(minted) = resolve_minted_auth(&gw_dir) {
-                                println!("setup: using minted auth from {}", gw_dir.join(".minted-auth").display());
+                                println!(
+                                    "setup: using minted auth from {}",
+                                    gw_dir.join(".minted-auth").display()
+                                );
                                 cfg.manifest.auth = minted;
                             }
                             Some(spec)
@@ -470,7 +518,11 @@ fn main() -> ExitCode {
             // cores the NEXT gateway needs, and the failure that causes looks like the next gateway
             // refusing to boot.
             if let Some(spec) = &launched {
-                let _ = otb_engine::supervise::stop_and_wait(&spec.runtime, spec.port, Duration::from_secs(15));
+                let _ = otb_engine::supervise::stop_and_wait(
+                    &spec.runtime,
+                    spec.port,
+                    Duration::from_secs(15),
+                );
             }
 
             match outcome {
@@ -509,7 +561,10 @@ fn main() -> ExitCode {
 
             let mut bad = 0usize;
             for dir in &targets {
-                let name = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                let name = dir
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
                 match Manifest::load(dir) {
                     Err(e) => {
                         println!("{name}: FAIL");
@@ -531,8 +586,16 @@ fn main() -> ExitCode {
                 }
             }
             println!();
-            println!("{} of {} gateways are ready to run", targets.len() - bad, targets.len());
-            if bad == 0 { ExitCode::SUCCESS } else { ExitCode::FAILURE }
+            println!(
+                "{} of {} gateways are ready to run",
+                targets.len() - bad,
+                targets.len()
+            );
+            if bad == 0 {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            }
         }
         Some("version") => {
             println!("{}", env!("CARGO_PKG_VERSION"));
@@ -542,7 +605,12 @@ fn main() -> ExitCode {
         Some("plateau-check") => {
             let samples = read_samples();
             let steady = matches!(
-                stats::plateau_check(&samples, f64::INFINITY, arg_f64(&args, 1, 1.0), arg_f64(&args, 2, 2.0)),
+                stats::plateau_check(
+                    &samples,
+                    f64::INFINITY,
+                    arg_f64(&args, 1, 1.0),
+                    arg_f64(&args, 2, 2.0)
+                ),
                 Verdict::Steady
             );
             println!("{}", u8::from(steady));
@@ -593,9 +661,10 @@ mod utc_stamp_tests {
             && bytes[13] == b':'
             && bytes[16] == b':'
             && bytes[19] == b'Z'
-            && bytes.iter().enumerate().all(|(i, b)| {
-                matches!(i, 4 | 7 | 10 | 13 | 16 | 19) || b.is_ascii_digit()
-            })
+            && bytes
+                .iter()
+                .enumerate()
+                .all(|(i, b)| matches!(i, 4 | 7 | 10 | 13 | 16 | 19) || b.is_ascii_digit())
     }
 }
 
@@ -606,7 +675,10 @@ mod minted_auth_tests {
     // A tiny throwaway directory per test, so tests can run concurrently without treading on each
     // other's `.minted-auth`. Not `tempfile`: this crate takes no dev-dependency for one file.
     fn scratch_dir(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("otb-minted-auth-test-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "otb-minted-auth-test-{name}-{}",
+            std::process::id()
+        ));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -617,7 +689,10 @@ mod minted_auth_tests {
     fn a_minted_file_overrides_the_declared_auth() {
         let dir = scratch_dir("present");
         std::fs::write(dir.join(".minted-auth"), "sk-real-key-123\n").unwrap();
-        assert_eq!(resolve_minted_auth(&dir), Some("sk-real-key-123".to_string()));
+        assert_eq!(
+            resolve_minted_auth(&dir),
+            Some("sk-real-key-123".to_string())
+        );
     }
 
     // TWELVE OF THIRTEEN ENTRANTS: no file, so the declared `auth` stands untouched.

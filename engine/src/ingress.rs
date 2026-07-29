@@ -42,17 +42,28 @@ pub fn dialects_from(value: Option<&str>) -> Result<Vec<Dialect>, String> {
     let Some(list) = value.map(str::trim).filter(|s| !s.is_empty()) else {
         return Ok(Dialect::ALL.to_vec());
     };
-    let parsed: Vec<Dialect> = list.split(',').filter_map(|d| d.trim().parse().ok()).collect();
+    let parsed: Vec<Dialect> = list
+        .split(',')
+        .filter_map(|d| d.trim().parse().ok())
+        .collect();
     if parsed.is_empty() {
-        return Err(format!("OTB_DIALECTS={list:?} named no dialect this build knows"));
+        return Err(format!(
+            "OTB_DIALECTS={list:?} named no dialect this build knows"
+        ));
     }
     Ok(parsed)
 }
 
 impl Dialect {
     /// Every dialect, in the canonical order used across the harness (lib/ingress.sh, matrix/run.sh).
-    pub const ALL: [Dialect; 6] =
-        [Dialect::Openai, Dialect::OpenaiResponses, Dialect::Anthropic, Dialect::Gemini, Dialect::Cohere, Dialect::Bedrock];
+    pub const ALL: [Dialect; 6] = [
+        Dialect::Openai,
+        Dialect::OpenaiResponses,
+        Dialect::Anthropic,
+        Dialect::Gemini,
+        Dialect::Cohere,
+        Dialect::Bedrock,
+    ];
 
     /// The canonical short name used on the wire, in JSON, and in every shell script this ports.
     pub fn as_str(&self) -> &'static str {
@@ -88,15 +99,23 @@ impl Dialect {
     pub fn body(&self, model: &str) -> String {
         match self {
             Dialect::Openai => {
-                format!(r#"{{"model":"{model}","messages":[{{"role":"user","content":"hello"}}],"max_tokens":16}}"#)
+                format!(
+                    r#"{{"model":"{model}","messages":[{{"role":"user","content":"hello"}}],"max_tokens":16}}"#
+                )
             }
             Dialect::OpenaiResponses => format!(r#"{{"model":"{model}","input":"hello"}}"#),
             Dialect::Anthropic => {
-                format!(r#"{{"model":"{model}","max_tokens":64,"messages":[{{"role":"user","content":"hello"}}]}}"#)
+                format!(
+                    r#"{{"model":"{model}","max_tokens":64,"messages":[{{"role":"user","content":"hello"}}]}}"#
+                )
             }
             Dialect::Gemini => r#"{"contents":[{"parts":[{"text":"hello"}]}]}"#.to_string(),
-            Dialect::Cohere => format!(r#"{{"model":"{model}","messages":[{{"role":"user","content":"hello"}}]}}"#),
-            Dialect::Bedrock => r#"{"messages":[{"role":"user","content":[{"text":"hello"}]}]}"#.to_string(),
+            Dialect::Cohere => {
+                format!(r#"{{"model":"{model}","messages":[{{"role":"user","content":"hello"}}]}}"#)
+            }
+            Dialect::Bedrock => {
+                r#"{"messages":[{"role":"user","content":[{"text":"hello"}]}]}"#.to_string()
+            }
         }
     }
 
@@ -232,11 +251,20 @@ mod tests {
     #[test]
     fn path_matches_ingress_sh_defaults() {
         assert_eq!(Dialect::Openai.path("gpt-4o-mini"), "/v1/chat/completions");
-        assert_eq!(Dialect::OpenaiResponses.path("gpt-4o-mini"), "/v1/responses");
+        assert_eq!(
+            Dialect::OpenaiResponses.path("gpt-4o-mini"),
+            "/v1/responses"
+        );
         assert_eq!(Dialect::Anthropic.path("gpt-4o-mini"), "/v1/messages");
-        assert_eq!(Dialect::Gemini.path("gpt-4o-mini"), "/v1beta/models/gpt-4o-mini:generateContent");
+        assert_eq!(
+            Dialect::Gemini.path("gpt-4o-mini"),
+            "/v1beta/models/gpt-4o-mini:generateContent"
+        );
         assert_eq!(Dialect::Cohere.path("gpt-4o-mini"), "/v2/chat");
-        assert_eq!(Dialect::Bedrock.path("gpt-4o-mini"), "/model/gpt-4o-mini/converse");
+        assert_eq!(
+            Dialect::Bedrock.path("gpt-4o-mini"),
+            "/model/gpt-4o-mini/converse"
+        );
     }
 
     // The model is a parameter, so a different model must produce a different path for the two
@@ -248,7 +276,10 @@ mod tests {
         let b = Dialect::Gemini.path("gpt-4o-mini-gemini");
         assert_ne!(a, b);
         assert!(b.contains("gpt-4o-mini-gemini"));
-        assert!(!b.contains("models/gpt-4o-mini:"), "must not retain the stale model as a prefix match");
+        assert!(
+            !b.contains("models/gpt-4o-mini:"),
+            "must not retain the stale model as a prefix match"
+        );
 
         let a = Dialect::Bedrock.path("gpt-4o-mini");
         let b = Dialect::Bedrock.path("gpt-4o-mini-bedrock");
@@ -281,7 +312,11 @@ mod tests {
                 assert!(p.contains(m));
                 seen.insert(p);
             }
-            assert_eq!(seen.len(), models.len(), "{d} produced fewer distinct paths than distinct models");
+            assert_eq!(
+                seen.len(),
+                models.len(),
+                "{d} produced fewer distinct paths than distinct models"
+            );
         }
     }
 
@@ -289,12 +324,24 @@ mod tests {
 
     #[test]
     fn mock_direct_path_matches_run_sh() {
-        assert_eq!(Dialect::Openai.mock_direct_path("m"), "/v1/chat/completions");
-        assert_eq!(Dialect::OpenaiResponses.mock_direct_path("m"), "/v1/responses");
+        assert_eq!(
+            Dialect::Openai.mock_direct_path("m"),
+            "/v1/chat/completions"
+        );
+        assert_eq!(
+            Dialect::OpenaiResponses.mock_direct_path("m"),
+            "/v1/responses"
+        );
         assert_eq!(Dialect::Anthropic.mock_direct_path("m"), "/v1/messages");
-        assert_eq!(Dialect::Gemini.mock_direct_path("gpt-4o-mini"), "/v1beta/models/gpt-4o-mini:generateContent");
+        assert_eq!(
+            Dialect::Gemini.mock_direct_path("gpt-4o-mini"),
+            "/v1beta/models/gpt-4o-mini:generateContent"
+        );
         assert_eq!(Dialect::Cohere.mock_direct_path("m"), "/v2/chat");
-        assert_eq!(Dialect::Bedrock.mock_direct_path("gpt-4o-mini"), "/model/gpt-4o-mini/converse");
+        assert_eq!(
+            Dialect::Bedrock.mock_direct_path("gpt-4o-mini"),
+            "/model/gpt-4o-mini/converse"
+        );
     }
 
     // ── body(): exact against lib/ingress_body ... and always valid, non-empty JSON ────────────────
@@ -305,17 +352,26 @@ mod tests {
             Dialect::Openai.body("gpt-4o-mini"),
             r#"{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hello"}],"max_tokens":16}"#
         );
-        assert_eq!(Dialect::OpenaiResponses.body("gpt-4o-mini"), r#"{"model":"gpt-4o-mini","input":"hello"}"#);
+        assert_eq!(
+            Dialect::OpenaiResponses.body("gpt-4o-mini"),
+            r#"{"model":"gpt-4o-mini","input":"hello"}"#
+        );
         assert_eq!(
             Dialect::Anthropic.body("gpt-4o-mini"),
             r#"{"model":"gpt-4o-mini","max_tokens":64,"messages":[{"role":"user","content":"hello"}]}"#
         );
-        assert_eq!(Dialect::Gemini.body("gpt-4o-mini"), r#"{"contents":[{"parts":[{"text":"hello"}]}]}"#);
+        assert_eq!(
+            Dialect::Gemini.body("gpt-4o-mini"),
+            r#"{"contents":[{"parts":[{"text":"hello"}]}]}"#
+        );
         assert_eq!(
             Dialect::Cohere.body("gpt-4o-mini"),
             r#"{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hello"}]}"#
         );
-        assert_eq!(Dialect::Bedrock.body("gpt-4o-mini"), r#"{"messages":[{"role":"user","content":[{"text":"hello"}]}]}"#);
+        assert_eq!(
+            Dialect::Bedrock.body("gpt-4o-mini"),
+            r#"{"messages":[{"role":"user","content":[{"text":"hello"}]}]}"#
+        );
     }
 
     #[test]
@@ -323,8 +379,8 @@ mod tests {
         for d in Dialect::ALL {
             let b = d.body("gpt-4o-mini");
             assert!(!b.is_empty(), "{d} produced an empty body");
-            let parsed: serde_json::Value =
-                serde_json::from_str(&b).unwrap_or_else(|e| panic!("{d} body is not valid JSON: {e}"));
+            let parsed: serde_json::Value = serde_json::from_str(&b)
+                .unwrap_or_else(|e| panic!("{d} body is not valid JSON: {e}"));
             assert!(parsed.is_object(), "{d} body must be a JSON object");
         }
     }
@@ -338,16 +394,37 @@ mod tests {
     #[test]
     fn each_dialect_authenticates_the_way_its_own_protocol_does() {
         let anthropic = Dialect::Anthropic.auth_headers("K");
-        assert!(anthropic.iter().any(|(n, v)| n == "x-api-key" && v == "K"), "{anthropic:?}");
-        assert!(anthropic.iter().any(|(n, _)| n == "anthropic-version"), "the version header is mandatory: {anthropic:?}");
-        assert!(!anthropic.iter().any(|(n, _)| n == "authorization"), "anthropic does not take a bearer token");
+        assert!(
+            anthropic.iter().any(|(n, v)| n == "x-api-key" && v == "K"),
+            "{anthropic:?}"
+        );
+        assert!(
+            anthropic.iter().any(|(n, _)| n == "anthropic-version"),
+            "the version header is mandatory: {anthropic:?}"
+        );
+        assert!(
+            !anthropic.iter().any(|(n, _)| n == "authorization"),
+            "anthropic does not take a bearer token"
+        );
 
         let gemini = Dialect::Gemini.auth_headers("K");
-        assert_eq!(gemini, vec![("x-goog-api-key".to_string(), "K".to_string())]);
+        assert_eq!(
+            gemini,
+            vec![("x-goog-api-key".to_string(), "K".to_string())]
+        );
 
-        for d in [Dialect::Openai, Dialect::OpenaiResponses, Dialect::Cohere, Dialect::Bedrock] {
+        for d in [
+            Dialect::Openai,
+            Dialect::OpenaiResponses,
+            Dialect::Cohere,
+            Dialect::Bedrock,
+        ] {
             let h = d.auth_headers("K");
-            assert!(h.iter().any(|(n, v)| n == "authorization" && v == "Bearer K"), "{d}: {h:?}");
+            assert!(
+                h.iter()
+                    .any(|(n, v)| n == "authorization" && v == "Bearer K"),
+                "{d}: {h:?}"
+            );
         }
 
         // Every dialect must authenticate somehow: a dialect with no credential at all would be
@@ -364,15 +441,25 @@ mod tests {
         for d in Dialect::ALL {
             let plain: serde_json::Value =
                 serde_json::from_str(&d.body("m")).expect("every probe body must be valid JSON");
-            let streamed: serde_json::Value =
-                serde_json::from_str(&d.stream_body("m")).expect("every stream body must be valid JSON");
+            let streamed: serde_json::Value = serde_json::from_str(&d.stream_body("m"))
+                .expect("every stream body must be valid JSON");
 
-            assert_eq!(streamed.get("stream"), Some(&serde_json::Value::Bool(true)), "{d} must ask for a stream");
+            assert_eq!(
+                streamed.get("stream"),
+                Some(&serde_json::Value::Bool(true)),
+                "{d} must ask for a stream"
+            );
 
             // Every other key is untouched, and no key is lost: same question, streamed.
             let mut without_flag = streamed.clone();
-            without_flag.as_object_mut().expect("a JSON object").remove("stream");
-            assert_eq!(without_flag, plain, "{d}: the stream body must differ from the probe body ONLY by the flag");
+            without_flag
+                .as_object_mut()
+                .expect("a JSON object")
+                .remove("stream");
+            assert_eq!(
+                without_flag, plain,
+                "{d}: the stream body must differ from the probe body ONLY by the flag"
+            );
         }
     }
 
@@ -380,7 +467,11 @@ mod tests {
     fn only_openai_and_anthropic_stream_natively_in_the_mock() {
         for d in Dialect::ALL {
             let expected = matches!(d, Dialect::Openai | Dialect::Anthropic);
-            assert_eq!(d.streams_natively(), expected, "{d} streams_natively mismatch");
+            assert_eq!(
+                d.streams_natively(),
+                expected,
+                "{d} streams_natively mismatch"
+            );
         }
     }
 
@@ -390,7 +481,9 @@ mod tests {
     fn display_then_parse_round_trips_for_every_dialect() {
         for d in Dialect::ALL {
             let printed = d.to_string();
-            let parsed: Dialect = printed.parse().unwrap_or_else(|e| panic!("{printed:?} failed to parse back: {e:?}"));
+            let parsed: Dialect = printed
+                .parse()
+                .unwrap_or_else(|e| panic!("{printed:?} failed to parse back: {e:?}"));
             assert_eq!(parsed, d);
             assert_eq!(parsed.as_str(), d.as_str());
         }
@@ -411,7 +504,17 @@ mod tests {
     #[test]
     fn all_lists_exactly_the_six_canonical_dialects_in_order() {
         let names: Vec<&str> = Dialect::ALL.iter().map(Dialect::as_str).collect();
-        assert_eq!(names, vec!["openai", "openai-responses", "anthropic", "gemini", "cohere", "bedrock"]);
+        assert_eq!(
+            names,
+            vec![
+                "openai",
+                "openai-responses",
+                "anthropic",
+                "gemini",
+                "cohere",
+                "bedrock"
+            ]
+        );
     }
 
     // std::env::var returns Ok("") for a variable that is set but empty, and the orchestrator always
@@ -419,9 +522,21 @@ mod tests {
     // must mean every dialect, not zero.
     #[test]
     fn an_empty_dialect_list_means_every_dialect_not_none() {
-        assert_eq!(dialects_from(None), Ok(Dialect::ALL.to_vec()), "unset means the whole grid");
-        assert_eq!(dialects_from(Some("")), Ok(Dialect::ALL.to_vec()), "SET BUT EMPTY means the whole grid too");
-        assert_eq!(dialects_from(Some("   ")), Ok(Dialect::ALL.to_vec()), "whitespace is empty");
+        assert_eq!(
+            dialects_from(None),
+            Ok(Dialect::ALL.to_vec()),
+            "unset means the whole grid"
+        );
+        assert_eq!(
+            dialects_from(Some("")),
+            Ok(Dialect::ALL.to_vec()),
+            "SET BUT EMPTY means the whole grid too"
+        );
+        assert_eq!(
+            dialects_from(Some("   ")),
+            Ok(Dialect::ALL.to_vec()),
+            "whitespace is empty"
+        );
     }
 
     // A value that names something unknown must still fail. Falling back to the whole grid there
