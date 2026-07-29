@@ -563,6 +563,29 @@ def main():
         print(f"no snapshots on engine {engine}", file=sys.stderr)
         return 1
 
+    # A GATEWAY THIS AUDIT DID NOT LOOK AT MUST BE NAMED, NOT SILENTLY DROPPED.
+    #
+    # `load` pins the board to ONE engine so a board is audited as a board, which is right: two
+    # engines' numbers are not comparable. But the gateways on the OTHER engine are still on disk and
+    # still live on the site, and printing "5 gateways, PASS" while quietly skipping them is the exact
+    # shape of dishonesty this file exists to prevent - a clean verdict over data nobody checked.
+    #
+    # It is reachable by design, not by accident: the board is updated gateway by gateway over the
+    # previous run so readers are never shown an empty page, which means the field is legitimately
+    # mixed-engine for as long as the run takes.
+    skipped = {}
+    for f in snapshot_paths():
+        try:
+            d = json.load(open(f))
+        except Exception:
+            continue
+        gw = d.get("gateway")
+        sha = ((d.get("rig") or {}).get("engine") or {}).get("commit") or ""
+        if not gw or (args.gateway and gw != args.gateway) or gw in snaps:
+            continue
+        if not sha.startswith(engine):
+            skipped[gw] = sha[:7] or "no engine stamp"
+
     violations = collections.defaultdict(list)
     cells = 0
     for gw, (_path, d, _sha) in sorted(snaps.items()):
@@ -584,6 +607,12 @@ def main():
         violations["check_absence_fields_mirror_the_engine"].append(v)
 
     print(f"engine {engine[:7]}  {len(snaps)} gateways  {cells} served cells")
+    if skipped:
+        listed = ", ".join(f"{g} (engine {e})" for g, e in sorted(skipped.items()))
+        print(f"NOT AUDITED: {len(skipped)} gateway(s) measured by a different engine: {listed}")
+        print("  They are published but were NOT checked by this run. Audit that engine explicitly")
+        print("  with --engine <sha>, or re-measure them. A board is fully audited only when one")
+        print("  engine produced all of it.")
     print(f"{len(CELL_CHECKS)} per-cell invariants + 1 per-gateway + 2 board-level invariants\n")
 
     if not violations:
