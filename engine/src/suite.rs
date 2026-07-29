@@ -1321,7 +1321,7 @@ fn withhold_if_refuted(
         .unwrap_or_else(|| "no evidence was recorded with the refutation".to_string());
     (
         perf.map(|p| withhold_refuted_perf(p, &why)),
-        None,
+        stream.map(|s| withhold_refuted_stream(s, &why)),
         Some(format!(
             "perf and stream withheld: re-verification proved this cell's request did not reach the \
              mock as {egress}, so every number taken here belongs to a wire that is not \
@@ -1370,6 +1370,53 @@ fn withhold_refuted_perf(p: CellPerf, why: &str) -> CellPerf {
         // A sample-count note about legs that measured the wrong wire would describe the weight of a
         // number nobody is publishing.
         c1_note: None,
+    }
+}
+
+/// The streaming half of the same withholding, and it exists because the block used to be DROPPED.
+///
+/// `withhold_if_refuted` set `stream` to `None` while keeping the perf block, which contradicts the
+/// reasoning directly above: a cell with no block at all cannot say WHY it has no numbers, so a
+/// refuted stream read as a cell that was never probed rather than one whose numbers were withheld.
+/// The evidence went with it - `stream_served`, the reason, the prose and the rungs all vanished,
+/// leaving `perf_dropped`'s sentence as the only thing that said otherwise, and that is prose.
+///
+/// Same rule as the perf half, for the same reason: `NotServed` on every measurement (the refutation
+/// is a statement about the GATEWAY - it answered by speaking some other dialect upstream), the
+/// mock's own evidence as the detail so no null is bare, and the sweeps dropped because a rung
+/// measured on a misrouted wire is as much a published number as the ceiling drawn from it.
+fn withhold_refuted_stream(s: crate::record::CellStream, why: &str) -> crate::record::CellStream {
+    let detail = format!(
+        "withheld: re-verification proved the request did not reach the mock as this cell's egress \
+         dialect, so this number was taken over a wire that is not this pairing: {why}"
+    );
+    // A generic fn rather than a closure: this block mixes `Measurement<i64>` (the percentiles, the
+    // concurrencies) with `Measurement<f64>` (the rates), and a closure would fix itself to whichever
+    // it saw first.
+    fn withheld<T>(detail: &str) -> Measurement<T> {
+        Measurement::absent_because(Absent::NotServed, detail.to_string())
+    }
+    crate::record::CellStream {
+        added_ttft_p50_us: withheld(&detail),
+        added_ttft_p99_us: withheld(&detail),
+        added_gap_p50_us: withheld(&detail),
+        added_gap_p99_us: withheld(&detail),
+        streams_sustained: withheld(&detail),
+        streams_sustained_fps: withheld(&detail),
+        streams_sustained_mock_bound: None,
+        cpu_fps: withheld(&detail),
+        cpu_fps_concurrency: withheld(&detail),
+        cpu_fps_mock_bound: None,
+        sweep_streams: Vec::new(),
+        sweep_cpu_fps: Vec::new(),
+        // A note about how many frames the c=1 legs read would describe the weight of a number
+        // nobody is publishing, exactly as the perf half's sample-count note would.
+        stream_c1_note: None,
+        // THE EVIDENCE, kept verbatim: whether it streamed at all, and why it says what it says.
+        // This is the whole reason the block survives rather than becoming a None.
+        stream_served: s.stream_served,
+        reason: s.reason,
+        stream_error: s.stream_error,
     }
 }
 
@@ -2440,7 +2487,34 @@ mod tests {
             .detail()
             .unwrap_or_default()
             .contains("anthropic endpoint"));
-        assert!(stream.is_none(), "the streaming numbers go the same way");
+        // THE STREAM BLOCK IS WITHHELD, NOT DELETED - the same rule as the perf half, and it used to
+        // be the opposite. Setting it to None took the evidence with it, so a refuted cell read as
+        // one that was never probed rather than one whose numbers were withheld.
+        let stream = stream.expect("the stream block stays: it carries its own evidence");
+        assert_eq!(
+            stream.added_ttft_p50_us.copied(),
+            None,
+            "a TTFT measured over a misrouted wire must not publish under this cell's name"
+        );
+        assert_eq!(
+            stream.added_ttft_p50_us.reason(),
+            Some(&Absent::NotServed),
+            "and it is withheld for the same reason the perf numbers are"
+        );
+        assert!(stream
+            .added_ttft_p50_us
+            .detail()
+            .unwrap_or_default()
+            .contains("anthropic endpoint"));
+        assert!(
+            stream.sweep_streams.is_empty() && stream.sweep_cpu_fps.is_empty(),
+            "the stream rungs are numbers on that same wire and go with it"
+        );
+        assert_eq!(
+            stream.stream_served,
+            crate::record::StreamServed::Bool(true),
+            "whether it streamed at all is evidence, not a measurement, and must survive"
+        );
         assert_eq!(
             perf.egress_reverified,
             Some(false),
