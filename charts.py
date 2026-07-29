@@ -394,7 +394,12 @@ def _perf_annot(r):
 # stream-suite reading (source "stream-suite"), so it must disclose that just like its sibling charts do.
 def _stream_annot(r, extra=None):
     lbl = _sweep_label({"sweep": r.get("_stream_source")}).strip(" ()")
-    bits = [b for b in (extra, lbl) if b]
+    # AND THE DIALECT, on the same rule `_perf_annot` uses: named whenever it is not the common openai
+    # diagonal. Without it a stream measured on another protocol is ranked against openai readings with
+    # nothing saying so, which is a comparison the chart cannot support.
+    d = r.get("_stream_dialect")
+    dial = f"on {_dialect(d)}" if d and d != "openai" else None
+    bits = [b for b in (extra, dial, lbl) if b]
     return "  ·  ".join(bits) if bits else None
 
 
@@ -471,7 +476,7 @@ CHARTS = [
         name="added_latency",
         suite="perf",
         title="Added latency - what the gateway costs you",
-        subtitle="p99 the gateway adds on top of the upstream, concurrency 1, best same-dialect passthrough (lower is better)",
+        subtitle="p99 the gateway adds on top of the upstream, concurrency 1, same-dialect passthrough (OpenAI where served) (lower is better)",
         unit="µs",
         series=[Series("added_latency_p99_us", "p99 added latency", "rank")],
         log=True,
@@ -502,7 +507,7 @@ CHARTS = [
         name="rps_max_proxy",
         suite="perf",
         title="Max proxy throughput - raw forwarding speed",
-        subtitle="highest sustained req/s with p99 < 1s, <0.1% errors, instant upstream, best same-dialect passthrough (higher is better)",
+        subtitle="highest sustained req/s with p99 < 1s, <0.1% errors, instant upstream, same-dialect passthrough (OpenAI where served) (higher is better)",
         unit="requests / sec",
         series=[Series("rps_max_proxy", "max proxy RPS", "rank")],
         higher_better=True,
@@ -518,7 +523,7 @@ CHARTS = [
         name="rps_sustained_20ms",
         suite="perf",
         title="Sustained throughput under 20 ms LLM latency",
-        subtitle="req/s held with p99 < 1s + <0.1% errors under a realistic 20 ms model delay, best same-dialect passthrough (higher is better)",
+        subtitle="req/s held with p99 < 1s + <0.1% errors under a realistic 20 ms model delay, same-dialect passthrough (OpenAI where served) (higher is better)",
         unit="requests / sec",
         series=[Series("rps_sustained_20ms", "sustained RPS @20ms", "rank")],
         higher_better=True,
@@ -792,6 +797,12 @@ def _proj_streaming(key: str) -> dict | None:
         # The streaming lane's PROVENANCE stamp, so the four streaming PNGs disclose their legacy
         # stream-suite source the same way the sibling perf/xlate charts disclose theirs via _sweep_label.
         "_stream_source": (s.get("source") or {}).get("sweep"),
+        # WHICH DIALECT THE STREAM WAS MEASURED ON. The perf lane carries `_dialect` and `_perf_annot`
+        # names it whenever it is not the common openai diagonal; the streaming lane carried nothing, so
+        # a reading taken on a DIFFERENT protocol ranked silently against twelve openai readings. On the
+        # 2026-07-29 board litellm-rust's streaming cell is anthropic and every other gateway's is
+        # openai - and on top5_stream_added_ttft that unlabelled row is the WINNING bar.
+        "_stream_dialect": (s.get("path") or {}).get("dialect"),
         "streamcpu_frames_per_sec": cpu,
         # cpu_fps_per_core is not emitted today (always null); kept null-safe so the column reappears
         # automatically once the harness emits it. It is not an envelope (plumbing placeholder).
@@ -1128,6 +1139,20 @@ def _topn_keys(chart: Chart, n: int = 5) -> set:
     # is the winning end); elsewhere a non-positive metric is not a real value and is not ranked.
     eligible = [r for r in rows if _served(r) and (_val(r) > 0 or chart.zero_ok)]
     eligible.sort(key=lambda r: (-_val(r) if chart.higher_better else _val(r)))
+    # A TOP-N OF WINNERS THAT CANNOT DRAW IS A KNOWN, ACCEPTED CONSEQUENCE.
+    #
+    # On a `zero_ok` chart a sub-resolution 0 is the WINNING end and ranks first, which is right. On
+    # `stream_added_gap` five gateways sit there, so all five top-5 slots go to rows whose value is a
+    # below-resolution absence - and those render as text, not bars, so that PNG comes out with no bars
+    # and no readable scale while the five gateways with a real measured overhead (5, 10, 24, 64, 85 us)
+    # appear nowhere on it.
+    #
+    # A fallback to "the best rows that can draw" was tried and reverted: it breaks the tested invariant
+    # that a below-resolution row is ELIGIBLE and ranks at the winning end
+    # (charts_test.py asserts exactly that), and that invariant is worth more than the visual. Ranking
+    # by drawability would mean a gateway with the best possible result loses its place to a slower one.
+    # The measured values remain on the FULL chart, which lists every gateway and states the
+    # sub-resolution rows as such.
     return {r["_key"] for r in eligible[:n]}
 
 
