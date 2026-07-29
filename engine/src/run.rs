@@ -233,6 +233,58 @@ pub fn host_connection_ceiling() -> u32 {
     ceiling
 }
 
+/// The concurrency ceiling for a HELD-OPEN STREAM, which is a different physical bound from a request.
+///
+/// `host_connection_ceiling` derives its answer from the ephemeral port range, and for short requests
+/// that is exactly right: a request opens a socket, completes in milliseconds, and hands the port
+/// back, so how many can be in flight at once is a question about ports.
+///
+/// A streaming lane does not do that. It holds its connection open for the whole window - the mock
+/// paces 64 frames at 20ms, so about 1.28 seconds - and for that entire time it also holds a task, a
+/// read buffer, and a file descriptor on the rig, one on the gateway, and one on the mock. The
+/// binding resource is therefore DESCRIPTORS, not ports, and descriptors are the smaller number by a
+/// wide margin on a stock box.
+///
+/// The 2026-07-29 run inherited the port bound and climbed apisix's stream ladder to c=32768 on both
+/// of its streamable cells. Forty-nine thousand usable ports made that the largest power of two the
+/// port rule allowed, so the ladder ran to the top, never plateaued - because past a few thousand
+/// held-open streams the RIG is what is saturating, and a saturating rig keeps yielding small
+/// increments rather than the flat run the search stops on - and published nothing at all. Thirty-two
+/// thousand concurrently-held SSE streams on one box is not a measurement of a gateway.
+///
+/// A THIRD OF THE DESCRIPTOR BUDGET, not all of it: the rig needs descriptors for everything else it
+/// is doing, and a ladder that climbs until the process runs out of file handles measures the ladder.
+/// Still capped by the port rule, which remains a real bound and is simply not the first one to bite.
+pub fn stream_connection_ceiling() -> u32 {
+    // Read the process's own limit rather than assuming a distro default: run-on-ec2.sh raises it,
+    // and a derived ceiling means raising it is the only thing anyone has to change.
+    let soft_fds = std::fs::read_to_string("/proc/self/limits")
+        .ok()
+        .and_then(|t| {
+            t.lines()
+                .find(|l| l.starts_with("Max open files"))
+                .and_then(|l| l.split_whitespace().nth(3).and_then(|v| v.parse::<u32>().ok()))
+        })
+        // POSIX's own floor when the limit cannot be read. Deliberately small: guessing high here
+        // would reintroduce exactly the ladder this function exists to bound.
+        .unwrap_or(1024);
+    stream_ceiling_from(soft_fds, host_connection_ceiling())
+}
+
+/// The derivation itself, PURE, so it can be tested against a box other than the one running the
+/// test. The host-reading wrapper above cannot be: on a developer machine `/proc` is absent and both
+/// ceilings collapse to their fallbacks, so a test driving it agrees with any implementation - the
+/// exact shape of a guard that cannot fail. The numbers that mattered came from the bench box, and
+/// this is what lets them be asserted from anywhere.
+fn stream_ceiling_from(soft_fds: u32, port_ceiling: u32) -> u32 {
+    let usable = (soft_fds / 3).max(1);
+    let mut ceiling = 1u32;
+    while ceiling * 2 <= usable {
+        ceiling *= 2;
+    }
+    ceiling.min(port_ceiling)
+}
+
 /// a real status with a healthy rig is the gateway's own answer, no HTTP answer at all is not.
 pub fn probe_cell(cfg: &RunConfig, id: &CellId, mock_healthy: bool) -> Served {
     let (attempts, pause_s) = crate::probe::transient_budget();
@@ -1790,6 +1842,9 @@ pub fn sweep_streams_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> Cel
         dialect: t.dialect,
         points: Vec::new(),
     };
+    // The stream ceiling, not the caller's request ceiling: see `stream_connection_ceiling`.
+    let hi = hi.min(stream_connection_ceiling());
+    let lo = lo.min(hi);
     let r = search::bisect_ceiling(&mut p, lo, hi);
     match r.ceiling.copied() {
         // `bisect_ceiling`'s own MEASURED "nothing sustains this gate": there is no rung to read a
@@ -1932,6 +1987,10 @@ pub fn sweep_cpu_fps_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> Cel
     // No start argument: `saturation_plateau` always climbs from the floor. A start derived from the
     // range made the ladder arbitrary and made a WIDER range open with a HIGHER first probe, which is
     // how a 1..65536 run began by asking for 32768 concurrent connections.
+    // Same bound as the sustained search above, and for the same reason: these two climb the same
+    // held-open streams, so a ceiling that is right for one cannot be wrong for the other.
+    let hi = hi.min(stream_connection_ceiling());
+    let lo = lo.min(hi);
     let r = search::saturation_plateau(&mut p, lo, hi);
     cpu_fps_result_from_search(&r.peak, p.points)
 }
@@ -2013,21 +2072,61 @@ pub fn stream_fps_at(
     // The MOCK's own auth shape, with no gateway routing headers: those select an upstream INSIDE a
     // gateway and mean nothing here, exactly as `mock_healthy` already reasons.
     let headers = dialect.auth_headers(auth);
-    match stream_window(mock_addr, &path, &body, &headers, dialect, concurrency) {
-        // The reference must be a CLEAN window or it is not a ceiling: a reference taken while the
-        // mock itself was dropping streams would be an understated bar, and a gateway measured
-        // against it would read as rig-bound when it was not.
-        Some(w) if w.errored == 0 && w.frames > 0 => Measurement::Measured(w.fps()),
-        Some(w) => Measurement::absent_because(
-            Absent::NotMeasured,
-            format!(
-                "the direct-to-mock stream window at c={concurrency} was not clean: {} of {} streams failed, {} frames",
-                w.errored, w.streams, w.frames
-            ),
-        ),
+
+    // THE MEDIAN OF THE SAME NUMBER OF WINDOWS THE OBSERVATION GETS.
+    //
+    // This took ONE window, and its fps became the ceiling that judges a number the search built from
+    // the median of `WINDOWS_PER_RUNG` windows - a bar chosen by a single sample, policing a figure
+    // deliberately made "resistant to one unlucky window". When the single reference window came in
+    // low, the observation cleared it by more than `IMPOSSIBLE_FACTOR` and the gateway's real,
+    // repeatedly-measured number was thrown away as unvouchable.
+    //
+    // That is not hypothetical. The mock streams 64 frames at 20ms, so a lane carries ~50 frames/sec
+    // and c=469 has a theoretical ceiling near 23,450. Bifrost was measured at 21,404 there - 91% of
+    // theory, entirely plausible - which means the reference must have come back under 14,269, about
+    // 61% of theory. Seven gateway/metric pairs on the 2026-07-29 board published nothing for this
+    // reason. The gateway cannot beat the mock it forwards to, so an overshoot was always evidence
+    // about this measurement rather than about the gateway; making it as strong as the number it
+    // polices is the fix, not widening the factor that catches it.
+    // AND LET THE BOX SETTLE FIRST. The reference is taken at the WINNING concurrency, which is only
+    // known once the search has finished - so it is measured immediately after a ladder that just
+    // drove thousands of concurrent streams through this same host. Sockets are still draining and
+    // the CPU is still hot, and every one of those depresses the direct-to-mock number that is about
+    // to be used as a ceiling. The median above defends against ONE unlucky window; it cannot defend
+    // against a box that is uniformly busy, which is what this pause is for.
+    //
+    // Short on purpose. It runs twice per served streaming cell, so it is minutes across a field run,
+    // and it does not need to outlast TIME_WAIT to be worth having - the queues and the run queue
+    // drain in far less than that, and those are what move this number.
+    std::thread::sleep(std::time::Duration::from_secs(2));
+
+    let mut clean: Vec<f64> = Vec::with_capacity(crate::search::WINDOWS_PER_RUNG);
+    let mut why: Option<String> = None;
+    for _ in 0..crate::search::WINDOWS_PER_RUNG {
+        match stream_window(mock_addr, &path, &body, &headers, dialect, concurrency) {
+            // The reference must be a CLEAN window or it is not a ceiling: a reference taken while
+            // the mock itself was dropping streams would be an understated bar, and a gateway
+            // measured against it would read as rig-bound when it was not.
+            Some(w) if w.errored == 0 && w.frames > 0 => clean.push(w.fps()),
+            Some(w) => {
+                why.get_or_insert(format!(
+                    "the direct-to-mock stream window at c={concurrency} was not clean: {} of {} streams failed, {} frames",
+                    w.errored, w.streams, w.frames
+                ));
+            }
+            None => {
+                why.get_or_insert(format!("no direct-to-mock stream window ran at c={concurrency}"));
+            }
+        }
+    }
+    // The median is what stops one slow window from deciding a ceiling on its own.
+    match crate::stats::median(&clean).value() {
+        Some(fps) => Measurement::Measured(*fps),
         None => Measurement::absent_because(
             Absent::NotMeasured,
-            format!("no direct-to-mock stream window ran at c={concurrency}"),
+            why.unwrap_or_else(|| {
+                format!("no clean direct-to-mock stream window ran at c={concurrency}")
+            }),
         ),
     }
 }
@@ -2352,6 +2451,49 @@ pub(crate) fn test_fixture(gw: SocketAddr, mock: SocketAddr) -> RunConfig {
 
 #[cfg(test)]
 mod tests {
+    // A HELD-OPEN STREAM IS BOUND BY DESCRIPTORS, NOT BY PORTS.
+    //
+    // The stream ladder inherited `host_connection_ceiling`, which answers "how many short requests
+    // can be in flight", a question about ephemeral ports. A streaming lane holds its connection for
+    // the whole ~1.28s window along with a task, a buffer, and a descriptor on each of the rig, the
+    // gateway and the mock. On the 2026-07-29 box 49,152 usable ports made the port rule allow
+    // c=32768, so apisix's cpu_fps ladder climbed to thirty-two thousand concurrently-held SSE
+    // streams on both streamable cells, never plateaued - past a few thousand it is the RIG that is
+    // saturating, and a saturating rig yields small increments instead of the flat run the search
+    // stops on - and published nothing at all.
+    #[test]
+    fn streams_are_bounded_by_descriptors_not_by_the_port_range() {
+        let streams = super::stream_connection_ceiling();
+        let requests = super::host_connection_ceiling();
+        assert!(streams >= 1, "a ceiling of zero would measure nothing: {streams}");
+        assert!(
+            streams <= requests,
+            "the port bound is still real; it is just not the first one to bite ({streams} > {requests})"
+        );
+        assert!(
+            streams.is_power_of_two(),
+            "the ladder doubles, so a ceiling off the ladder is never actually reached: {streams}"
+        );
+        // THE BENCH BOX'S OWN NUMBERS, which is the case that actually went wrong and the one a
+        // developer machine cannot reproduce: 49,152 usable ephemeral ports made the port rule allow
+        // c=32768, and apisix's ladder went there.
+        let port_ceiling_that_day = 32_768;
+        assert_eq!(
+            super::stream_ceiling_from(65_536, port_ceiling_that_day),
+            16_384,
+            "a generous descriptor budget still lands far below the port rule"
+        );
+        assert!(
+            super::stream_ceiling_from(1024, port_ceiling_that_day) <= 512,
+            "a stock 1024-descriptor box must not be asked for thousands of held-open streams"
+        );
+        // The regression in one line: the port ceiling alone must never be the answer.
+        assert!(
+            super::stream_ceiling_from(65_536, port_ceiling_that_day) < port_ceiling_that_day,
+            "32k held-open streams is a measurement of the rig, not of a gateway"
+        );
+    }
+
     // A WINDOW THAT LOST LANES MUST BE DISCARDED, LOUDLY.
     //
     // This rule cost a four-hour run every cpu_fps number it should have produced, and left nothing
