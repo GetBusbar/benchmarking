@@ -560,6 +560,26 @@ def check_absence_fields_mirror_the_engine():
                    f"engine no longer defines")
 
 
+# Declarations this run could not parse, keyed by gateway. Populated by the check below and reported by
+# `check_every_declaration_is_readable`, so an unparseable file is named rather than silently skipped.
+UNREADABLE_DECLARATIONS: dict = {}
+
+
+def check_every_declaration_is_readable():
+    """A gateway whose definition.json will not parse had its declaration check SKIPPED.
+
+    Separate from the check that reads it, because the two are different claims: that one is about
+    whether a gateway's measurements match what it promised, and this one is about whether we could
+    read the promise at all. Folding them together would publish a finding about a gateway's data on
+    the strength of a file WE failed to parse.
+    """
+    for gw, why in sorted(UNREADABLE_DECLARATIONS.items()):
+        yield (
+            f"{gw}: definition.json could not be parsed ({why}), so what this gateway DECLARES it "
+            f"serves was never compared against what it was measured doing"
+        )
+
+
 def check_declaration_matches_what_we_measured(gw):
     """A gateway may not both DECLARE a cell and mark it untestable.
 
@@ -574,7 +594,23 @@ def check_declaration_matches_what_we_measured(gw):
     try:
         d = json.load(open(p))
     except Exception as e:
+        # NOT A BARE `return`. Crashing the whole audit over one bad file was the defect; skipping that
+        # gateway's declaration check in silence is a smaller version of the same one, and this file has
+        # already been bitten by it once today - an unreadable SNAPSHOT used to vanish from both the
+        # checked set and the not-audited list, so the run printed "PASS: every invariant held" over a
+        # gateway nobody had looked at. A declaration we could not read is the same shape: the check
+        # that compares what a gateway CLAIMS to serve against what it was measured doing simply did
+        # not run, and only a stderr line said so while the exit code stayed 0.
+        # Reported, not YIELDED. This check compares a declaration against a measurement, so a
+        # declaration it cannot read gives it nothing to compare - and a violation here would be a
+        # finding about the GATEWAY'S DATA, which may be perfectly fine. The defect is in our own repo.
+        #
+        # But it must not vanish either: an unreadable SNAPSHOT used to disappear from both the checked
+        # set and the not-audited list, so the run printed "PASS: every invariant held" over a gateway
+        # nobody had examined. So this is surfaced by `check_every_declaration_is_readable` at board
+        # level instead, under its own name, where it cannot be mistaken for a claim about the numbers.
         print(f"  unreadable {gw} definition.json {p}: {e}", file=sys.stderr)
+        UNREADABLE_DECLARATIONS[gw] = str(e)
         return
     dialects = ["openai", "openai-responses", "anthropic", "gemini", "cohere", "bedrock"]
     declared = set()
@@ -683,6 +719,11 @@ def main():
     # engine's own record.rs, not of any one cell's data.
     for v in check_absence_fields_mirror_the_engine():
         violations["check_absence_fields_mirror_the_engine"].append(v)
+
+    # Board-level for the same reason: it is about which declarations this run could read, not about any
+    # one gateway's numbers. Must run AFTER the per-gateway loop that populates it.
+    for v in check_every_declaration_is_readable():
+        violations["check_every_declaration_is_readable"].append(v)
 
     print(f"engine {engine[:7]}  {len(snaps)} gateways  {cells} served cells")
     if skipped:
