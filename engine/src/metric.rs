@@ -936,7 +936,9 @@ impl Metric for Memory {
                         Some(t) => Measurement::Measured(t as f64),
                         None => Measurement::absent_because(
                             Absent::NotMeasured,
-                            "memory never settled inside the load cap, so there is no time-to-plateau"
+                            // Reason strings ride into the board's tooltips verbatim, so this one states
+                            // what the window measured and stops there - no verdict on the gateway.
+                            "memory reached no steady state inside the load cap, so there is no time-to-plateau"
                                 .to_string(),
                         ),
                     },

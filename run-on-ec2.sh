@@ -35,6 +35,10 @@ CREATED_KEY=0; CREATED_SG=0   # only delete the shared key/SG on exit if THIS in
 # BOTH together, keeping the box net at or above the matrix ceiling, if a gateway legitimately needs
 # more than 8 h.
 BENCH_MAX_MIN="${BENCH_MAX_MIN:-480}"
+# How long a FINISHED box keeps itself alive so its results can still be pulled. The boot-time
+# backstop is sized for the work; this one is sized for the harvest, and the box swaps to it as soon as
+# it writes `.run-done`. Bounded, so a forgotten box still cannot bleed cost indefinitely.
+HARVEST_GRACE_MIN="${HARVEST_GRACE_MIN:-120}"
 
 # WHAT THE BOXES MEASURE, resolved ONCE for the whole run.
 #
@@ -308,6 +312,70 @@ esac
 HW_LABEL="AWS ${ITYPE} (${CPU_LABEL}, 16 cores / 64 GB). Gateway-under-test pinned to 4 cores (the comparable basis); mock and load generator on 6 cores each so the mock never bottlenecks the streaming sweep. Ubuntu 24.04. One dedicated box per gateway."
 KEYNAME="gateway-bench-key"; KEYFILE="${TMPDIR:-/tmp}/${KEYNAME}.pem"; SGNAME="gateway-bench-sg"
 SSHOPT="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=12 -i $KEYFILE"
+
+# NOTE ON PLACEMENT: `harvest` sits HERE, below KEYFILE/SSHOPT, not up with `kill`. It needs the ssh
+# identity to reach a box; `kill` only needs the AWS API and can therefore live earlier. The first
+# version of this block was written beside `kill` and would have run every rsync with an empty $SSHOPT
+# - the same shape as the dead gates this script's own audit keeps turning up.
+# `run-on-ec2.sh harvest [gw ...]` - PULL FROM BOXES A DEAD ORCHESTRATOR LEFT BEHIND.
+#
+# Every pull in this script lives inside the foreground process that launched the boxes. The boxes do
+# not: they run detached under setsid, so they finish the grid and write their snapshots whether or not
+# anyone is still listening. If the orchestrator dies - a closed terminal, a slept laptop, a dropped
+# SSH session - nothing pulls, and the box's own shutdown timer eventually terminates it with
+# DeleteOnTermination=true on the root volume. Finished measurements, deleted on a timer.
+#
+# That happened on 2026-07-29: four gateways completed 36-cell runs and sat unharvested because the
+# publisher had stopped. There was no way to reattach, so they were pulled by hand with ad-hoc rsync.
+# This is that recovery, written down: find the live boxes by their shared tag, pull whatever each one
+# has on disk, and say plainly what it found. Safe to run at any time, including mid-run - it copies,
+# it never terminates, and a partial snapshot is worth having now that the engine writes them
+# incrementally.
+if [[ "${1:-}" == "harvest" ]]; then
+  shift
+  want=("$@")
+  echo "harvest: looking for gateway-bench boxes in $AWS_DEFAULT_REGION ..."
+  rows=$(aws ec2 describe-instances --filters "Name=tag:purpose,Values=gateway-bench" \
+    "Name=instance-state-name,Values=running" \
+    --query 'Reservations[].Instances[].[Tags[?Key==`Name`]|[0].Value,PublicIpAddress]' \
+    --output text 2>/dev/null | grep -E '^gateway-bench-' || true)
+  if [ -z "$rows" ]; then echo "harvest: no running boxes found"; exit 0; fi
+
+  mkdir -p "$HERE/results/snapshots" "$HERE/results/config" "$HERE/results/history"
+  found=0
+  while read -r tag ip; do
+    [ -n "$ip" ] || continue
+    gw="${tag#gateway-bench-}"
+    # An explicit gateway list narrows it; no list means every box that is up.
+    if [ "${#want[@]}" -gt 0 ]; then
+      case " ${want[*]} " in *" $gw "*) ;; *) continue ;; esac
+    fi
+    echo "harvest: $gw at $ip"
+    # `|| true` on each: one unreachable box must not stop the others being rescued, which is the whole
+    # point of running this at all. rc=23 is rsync's "source absent" - a box with nothing written yet.
+    rsync -az --timeout=60 -e "ssh $SSHOPT" \
+      "ubuntu@$ip:~/benchmarking/results/snapshots/result_${gw}_*.json" \
+      "$HERE/results/snapshots/" 2>/dev/null || true
+    rsync -az --timeout=60 -e "ssh $SSHOPT" \
+      "ubuntu@$ip:~/benchmarking/results/config/$gw.txt" "$HERE/results/config/" 2>/dev/null || true
+    rsync -az --timeout=60 -e "ssh $SSHOPT" \
+      "ubuntu@$ip:~/benchmarking/results/history/$gw.jsonl" "$HERE/results/history/" 2>/dev/null || true
+    # The run log is the only record of WHY a metric came back absent, and it is not in the snapshot.
+    rsync -az --timeout=60 -e "ssh $SSHOPT" \
+      "ubuntu@$ip:~/benchmarking/.run.log" "$HERE/results/history/${gw}.run.log" 2>/dev/null || true
+    n=$(ls -1 "$HERE"/results/snapshots/result_"$gw"_*.json 2>/dev/null | wc -l | tr -d ' ')
+    done_rc=$(ssh $SSHOPT ubuntu@"$ip" 'cat ~/benchmarking/.run-done 2>/dev/null' 2>/dev/null || true)
+    cells=$(ssh $SSHOPT ubuntu@"$ip" 'grep -cE "^\[cell " ~/benchmarking/.run.log 2>/dev/null' 2>/dev/null || echo 0)
+    echo "harvest: $gw -> $n snapshot(s) on disk, ${cells:-0} cells logged, run-done=${done_rc:-<still running>}"
+    found=$((found + 1))
+  done <<< "$rows"
+
+  echo "harvest: pulled from $found box(es). Nothing was terminated - use 'run-on-ec2.sh kill' for that."
+  echo "harvest: regenerate and check the board before publishing:"
+  echo "  node site/gen-data.mjs && node site/check-consistency.mjs && python3 bench-audit.py"
+  exit 0
+fi
+
 log(){ echo "[$(date +%H:%M:%S)] $*"; }
 
 # Default field: every gateway with a manifest under gateways/ (discovered from disk, alphabetical;
@@ -1022,8 +1090,31 @@ done
 OTB_GW_CORES=$CORES LOADCORES=$LOADCORES \
   ./otb run "gateways/$gw" 127.0.0.1:8000 results/snapshots
 echo $? > .run-done
+
+# A FINISHED BOX MUST NOT BE DESTROYED BY A TIMER SIZED FOR THE WORK.
+#
+# The boot-time backstop is `shutdown -h +BENCH_MAX_MIN`, and BENCH_MAX_MIN is deliberately EQUAL to
+# the suite's own ceiling. That is right for a wedged box and wrong for a finished one: a gateway that
+# uses most of its budget crosses the line with almost no margin left, and the root volume is
+# DeleteOnTermination=true, so when the timer fires AWS deletes the disk carrying results nobody pulled.
+#
+# That is not hypothetical. On 2026-07-29 four gateways completed full 36-cell runs and sat unharvested
+# because the orchestrator process had stopped; they were found by hand. Had they not been, the timer
+# would have destroyed all four finished runs.
+#
+# So the moment the work is done, the deadline stops being about the work and starts being about the
+# harvest: cancel the boot timer and re-arm a bounded window. Cost stays capped either way, and a dead
+# orchestrator now has a known amount of time to come back (see `run-on-ec2.sh harvest`) instead of
+# racing whatever happened to be left of the work budget.
+sudo shutdown -c 2>/dev/null || true
+sudo shutdown -h +__HARVEST_GRACE_MIN__ 2>/dev/null || true
+echo "[box] run finished; results held for __HARVEST_GRACE_MIN__ min for harvest, then self-terminate"
 REMOTE
   )"
+  # The grace window is substituted here rather than expanded on the box: the run script is a QUOTED
+  # heredoc precisely so nothing in it is interpreted locally, which also means it cannot read an
+  # orchestrator variable.
+  _run_sh="${_run_sh//__HARVEST_GRACE_MIN__/$HARVEST_GRACE_MIN}"
   printf '%s\n' "$_run_sh" | ssh $SSHOPT ubuntu@"$ip" "cat > ~/benchmarking/.run.sh" >>"$glog" 2>&1
   local launch_rc=$?
   if [ "$launch_rc" -eq 0 ]; then
