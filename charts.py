@@ -223,7 +223,7 @@ def _manifest_meta():
     for man in sorted((ROOT / "gateways").glob("*/definition.json")):
         key = man.parent.name
         try:
-            d = json.loads(man.read_text())
+            d = json.loads(man.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             d = {}
         out[key] = {
@@ -1695,14 +1695,14 @@ def write_reports() -> None:
     (RESULTS / "reports" / "all").mkdir(parents=True, exist_ok=True)
     (RESULTS / "reports" / "top5").mkdir(parents=True, exist_ok=True)
     (RESULTS / "reports" / "all" / "README.md").write_text(
-        _report_md(ranked, "All gateways - full field", charts, pending=pending))
+        _report_md(ranked, "All gateways - full field", charts, pending=pending), encoding="utf-8")
     # top5 report points at its own top5_*.png charts (rendered in main). The TABLE below is the 5
     # lowest-added-latency gateways; each CHART shows the top 5 by ITS OWN metric among gateways with a
     # valid value for that metric (audit HIGH) - a gateway that cannot do a thing is never ranked into
     # that thing's chart, so a "cannot translate" gateway never appears on the translation top-5.
     (RESULTS / "reports" / "top5" / "README.md").write_text(
         _report_md(ranked[:5], "Top 5 gateways (table: lowest added latency; each chart: top 5 by its own metric)",
-                   charts, chart_prefix="top5_"))
+                   charts, chart_prefix="top5_"), encoding="utf-8")
     print(f"wrote results/reports/all + top5 ({len(ranked)} gateways)")
 
 
