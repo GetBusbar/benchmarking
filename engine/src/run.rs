@@ -663,26 +663,47 @@ pub fn load_window_at(
             .output()
             .ok()?;
         let line = String::from_utf8_lossy(&out.stdout);
-        crate::loadgen::parse_ugen_line(line.trim())
-            .into_value()
-            .map(|u| GenStats {
-                ok: u.ok.max(0) as u64,
-                fail: u.fail.max(0) as u64,
-                elapsed_s: if u.rps > 0 {
-                    u.ok as f64 / u.rps as f64
-                } else {
-                    0.0
-                },
-                latencies_us: Vec::new(),
-                spawn_failed: false,
-                rig_refused: u.rig_refused.max(0) as u64,
-                budget_exceeded: u.budget_exceeded.max(0) as u64,
-                // The subprocess never sends its raw samples back, only the percentiles it already
-                // computed over them, so these are filled straight from the stats line rather than left
-                // for a caller to (wrongly) derive from the now-empty `latencies_us` above.
-                p50_us: Some(u.p50_us.max(0) as u64),
-                p99_us: Some(u.p99_us.max(0) as u64),
-            })
+        let parsed = crate::loadgen::parse_ugen_line(line.trim());
+        // OUR OWN WIRE CONTRACT BREAKING IS NOT AN EMPTY WINDOW.
+        //
+        // `parse_ugen_line` classifies a stats line missing a required field, or carrying a
+        // non-numeric one, as `HarnessError` with a detail naming the field and quoting the line -
+        // and `.into_value()` erased both one call later. `None` then travels up through
+        // `load_window`, `SweepProbe::probe` and the search until the cell publishes
+        // `NotMeasured("no load window completed at c=X")`, the same message an idle or killed window
+        // gets. The one piece of evidence that would tell an operator "this is the engine
+        // disagreeing with its own loadgen child, not the gateway and not the rig" was generated and
+        // then thrown away.
+        //
+        // Reported rather than threaded: the value still has to become `None` here, because there is
+        // no window to report on, but the reason it is `None` now reaches stderr and the run log
+        // instead of dying at this line.
+        if let (Some(reason), detail) = (parsed.reason(), parsed.detail()) {
+            eprintln!(
+                "loadgen: the stats line from our own child could not be read ({reason}){} - this \
+                 window is unmeasured because of a harness fault, not because the gateway or the rig \
+                 did anything",
+                detail.map(|d| format!(": {d}")).unwrap_or_default()
+            );
+        }
+        parsed.into_value().map(|u| GenStats {
+            ok: u.ok.max(0) as u64,
+            fail: u.fail.max(0) as u64,
+            elapsed_s: if u.rps > 0 {
+                u.ok as f64 / u.rps as f64
+            } else {
+                0.0
+            },
+            latencies_us: Vec::new(),
+            spawn_failed: false,
+            rig_refused: u.rig_refused.max(0) as u64,
+            budget_exceeded: u.budget_exceeded.max(0) as u64,
+            // The subprocess never sends its raw samples back, only the percentiles it already
+            // computed over them, so these are filled straight from the stats line rather than left
+            // for a caller to (wrongly) derive from the now-empty `latencies_us` above.
+            p50_us: Some(u.p50_us.max(0) as u64),
+            p99_us: Some(u.p99_us.max(0) as u64),
+        })
     }
 }
 
@@ -1217,17 +1238,19 @@ pub(crate) fn sustained_median(first: f64, repeats: &[(f64, bool)]) -> f64 {
     crate::search::nearest_rank_median(&vals).unwrap_or(first)
 }
 
-/// The pace the mock delivers content deltas at, and how far past it a gap counts as a STALL.
-///
-/// Mirrors the mock's own `MOCK_STREAM_INTERVAL_MS` default (see mock/src/main.rs's `StreamFrames`),
-/// and the README's "no stream stalls past 2x the pacing interval". Both are named here rather than
-/// inlined at the one comparison because the pair IS the gate's definition: a reader who wants to
-/// know what "stalled" means on this board should find one place that says so.
-///
-/// A rig that boots the mock with a different interval makes this wrong in the strict direction (a
-/// slower mock would read as stalls); the mock's interval is a boot-time environment knob the engine
-/// cannot observe over the wire, so this is a documented coupling rather than a derived value.
 /// The mock's own delta interval, READ FROM THE VARIABLE THE MOCK READS.
+///
+/// Named here rather than inlined at the one comparison because this and `STREAM_STALL_MULTIPLIER`
+/// together ARE the gate's definition - the README states it as "no stream stalls past 10x the mock's
+/// pacing interval", and a reader who wants to know what "stalled" means on this board should find
+/// one place that says so.
+///
+/// An older paragraph here claimed the interval was "a boot-time environment knob the engine cannot
+/// observe over the wire, so this is a documented coupling rather than a derived value". The function
+/// below reads that exact variable, so the claim was the direct opposite of the code beneath it, and
+/// it also cited the README's threshold as 2x when both the README and `STREAM_STALL_MULTIPLIER` say
+/// 10x. A reader cross-checking either statement would have concluded the wrong thing about which
+/// side was stale.
 ///
 /// This was a `20` hardcoded here to match `MOCK_STREAM_INTERVAL_MS`'s default over in the mock, with
 /// a comment calling it a documented coupling. It is the same two-places-one-truth shape as the two

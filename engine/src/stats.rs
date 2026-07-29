@@ -169,8 +169,19 @@ pub fn plateau_check(samples: &[Sample], window_s: f64, trend_pct: f64, range_pc
     }
 
     let drift = (mean2 - mean1) / mean * 100.0;
-    let lo = win.iter().map(|s| s.mib).fold(f64::INFINITY, f64::min);
-    let hi = win.iter().map(|s| s.mib).fold(f64::NEG_INFINITY, f64::max);
+    // THROUGH `min`/`max`, not a second inline fold. These two lines used to roll their own
+    // `fold(f64::INFINITY, f64::min)` while `stats::min` and `stats::max` sat unused a hundred lines
+    // below with unit tests of their own - so the tests read as coverage of this engine's min/max
+    // handling while the number that actually reaches the board's spread and plateau figures came from
+    // code they never touched. `win` is non-empty here (the guard above returns early otherwise), so
+    // the absent case cannot arise; `unwrap_or` keeps that from becoming a panic if that guard ever
+    // moves.
+    let lo = min(&win.iter().map(|s| s.mib).collect::<Vec<_>>())
+        .copied()
+        .unwrap_or(f64::INFINITY);
+    let hi = max(&win.iter().map(|s| s.mib).collect::<Vec<_>>())
+        .copied()
+        .unwrap_or(f64::NEG_INFINITY);
     let spread = (hi - lo) / mean * 100.0;
 
     // MAGNITUDE, NOT SIGN. `drift` is signed - positive when the window is still climbing, negative
