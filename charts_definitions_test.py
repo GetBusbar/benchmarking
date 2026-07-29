@@ -85,6 +85,12 @@ for c in charts.CHARTS:
         check(f"{c.name}: the primary series names a real field", bool(c.series and c.series[0].field), True)
         for s in c.series:
             check(f"{c.name}/{s.field}: the legend labels the series", bool(s.legend), True)
+            # A chart with two bars per gateway spends colour on implementation language, so colour
+            # cannot also say which bar is which: without a tag beside each number the two bars are
+            # indistinguishable to anyone who does not read charts.py.
+            if len(c.series) > 1:
+                check(f"{c.name}/{s.field}: a multi-series chart tags each bar with its metric",
+                      bool(s.tag), True)
         check(f"{c.name}: a not-served row has a label (a blank label is a bar with no story)",
               bool(c.not_served_text), True)
         check(f"{c.name}: a served zero has a label", bool(c.zero_text), True)

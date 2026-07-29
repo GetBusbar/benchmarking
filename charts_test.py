@@ -410,8 +410,8 @@ with isolated('memory RECOVERY: recovered_rss_mib is null_not_served - a gateway
 # ── memory RSS: steady_state_rss_mib is null_not_served. Two DISTINCT ways to have no number, and ─────
 # neither may draw a fabricated served-0 bar (audit #7/#23): a gateway that does not serve the comparison
 # cell at all, and one that served it but whose RSS NEVER WENT STEADY - the second is the interesting one,
-# because the honest answer there is not a number at all. Its growth rate is the finding, and the bar says
-# "never settled" instead of substituting a peak (which would report when the load stopped).
+# because the honest answer there is not a number at all. Its growth rate is the finding, and the bar
+# publishes that rate instead of substituting a peak (which would report when the load stopped).
 with isolated('memory RSS: steady_state_rss_mib is null_not_served. Two DISTINCT w...'):
     rss_chart = chart_by_name("memory_rss")
     check("memory_rss chart is null_not_served (no fabricated 0 for a gateway with no steady state)",
@@ -429,8 +429,24 @@ with isolated('memory RSS: steady_state_rss_mib is null_not_served. Two DISTINCT
     check("memory_rss: an unserved cell is NOT eligible (never a fabricated 0 bar)", "nocell" in rss_topn, False)
     check("memory_rss: a gateway that never settled is NOT eligible (no steady state to rank)",
           "leaks" in rss_topn, False)
-    check("memory_rss: the never-settled bar says so, and quantifies it with the growth rate",
-          "never settled: +42.5 MiB/min" in (charts._mem_annot(mrows["leaks"]) or ""), True)
+    check("memory_rss: a bar with no steady state publishes the growth rate, signed and united",
+          "+42.5 MiB/min under load" in (charts._mem_annot(mrows["leaks"]) or ""), True)
+    # THE RATE IS THE FINDING, AND ONLY THE RATE. A verdict layered on top of it ("never settled") reads
+    # as the board calling a gateway out rather than reporting a measurement, so no chart string may
+    # carry that wording again.
+    check("memory_rss: the bar carries no verdict wording, only the measurement",
+          "settl" in (charts._mem_annot(mrows["leaks"]) or "").lower(), False)
+    # A window still RELEASING memory at the cap has a NEGATIVE rate; "+" hard-coded in front of it
+    # printed "+-3.2", and a reader who trusted the sign would have read a leak off a gateway giving
+    # memory back.
+    charts.CANON["releases"] = _mem(idle_rss_mib=20, steady_state_rss_mib=None, plateaued=False,
+                                    growth_rate_mib_per_min=-3.2)
+    charts.GATEWAYS = {k: k for k in charts.CANON}
+    _rel = {r["_key"]: r for r in charts._load("memory")}["releases"]
+    check("memory_rss: a negative rate keeps its own sign", "-3.2 MiB/min under load" in (charts._mem_annot(_rel) or ""), True)
+    del charts.CANON["releases"]
+    charts.GATEWAYS = {k: k for k in charts.CANON}
+    mrows = {r["_key"]: r for r in charts._load("memory")}
     # ...and it KEEPS its measured cold-idle number. The idle sample is taken cold, before the gateway
     # serves a single request, so it is valid whether or not the RSS later went steady. Deleting it because
     # the steady state (a different field on the same record) is null would apply "unmeasurable means

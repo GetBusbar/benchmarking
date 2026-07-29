@@ -748,13 +748,16 @@ function memCellTip(rec) {
     // The rate is the same number in all three cases; what it MEANS is not. Under a climb it is a leak
     // rate. Under a swing it is how fast the window happened to be moving when it closed, which is a
     // fact about the sampling instant and not about the gateway - so it is not called a leak there.
+    // NO VERDICT WORDING. The rate, its sign and its units ARE the finding; "NEVER SETTLED" in caps on
+    // top of them was the board passing judgement on a gateway instead of publishing a measurement.
+    // Nothing is dropped - every reading these branches carried still prints.
     const what = sh === "swinging"
-      ? "NEVER SETTLED, but did not grow: RSS swung around a level it kept returning to"
+      ? "no steady state, and did not grow: RSS swung around a level it kept returning to"
       : sh === "releasing"
-      ? "NEVER SETTLED: still RELEASING memory when the cap was reached, not growing"
-      : "NEVER SETTLED: still growing when the cap was reached";
+      ? "no steady state: still RELEASING memory when the cap was reached, not growing"
+      : "no steady state: RSS was still rising when the cap was reached";
     bits.push(gr != null && sh !== "swinging" && sh !== "releasing"
-      ? `NEVER SETTLED: still growing at ${fmt1(gr)} MiB/min when the cap was reached`
+      ? `no steady state: ${fmt1(gr)} MiB/min under load when the cap was reached`
       : gr != null && sh === "swinging"
       ? `${what} (moving ${fmt1(gr)} MiB/min at the close, which is the swing, not a leak)`
       : what);
@@ -959,7 +962,10 @@ function neverPlateauedPill(g) {
   const growing = memGrowing(g);
   const cleared = !growing && memShaped(g);
   const cls = growing || !memShaped(g) ? "noplateau-pill" : "noplateau-pill neutral";
-  const label = cleared ? "never settles (no growth)" : "never settles";
+  // The label states the measurement (there is no steady-state level to publish), not a verdict on the
+  // gateway: "never settles" read as the board calling a gateway out, and the rate below carries the
+  // finding on its own.
+  const label = cleared ? "no steady state (no growth)" : "no steady state";
   const why = cleared
     ? `RSS never went steady ${scope}, but it never grew either: it swung around a level it kept returning to, which is memory being reclaimed rather than leaked. No steady-state number is published for it because there is no single level to publish, not because it is climbing.`
     : `RSS never went steady ${scope}${rate}. Its memory under load is bounded by how long we ran the load, not by the gateway, so no steady-state number is published for it.`;
@@ -1202,7 +1208,7 @@ const COLUMN_SETS = {
     // informative thing the metric produces - it turns "did not plateau" from a missing value into the
     // headline finding - so it is a column of its own rather than a footnote on the steady-state n/a.
     { id: "memgrowth", label: "Growth (MiB/min)", desc: false, perCellOnly: true,
-      title: "How fast RSS was still rising over the final window on the chosen cell. Around zero once the gateway has settled. If it never settled, this IS its leak rate under this load, and no steady-state number exists to report instead. Lower is better.",
+      title: "How fast RSS was still rising over the final window on the chosen cell. Around zero once the gateway has settled. If no steady state was reached, this rate under this load IS the reading, and no steady-state number exists to report instead. Lower is better.",
       get: (g, st = state) => {
         const m = memoryFor(g, st);
         const c = memCell(g, "growth_rate_mib_per_min", fmt1, st);
@@ -1953,13 +1959,15 @@ function memoryCaption(data = state.data, st = state) {
       : `Every gateway on the ${inL}→${outL} cell: client speaks ${inL}, upstream speaks ${outL}, the gateway translates both ways.`,
   }[mode];
   const flagged = ((data && data.gateways) || []).filter(neverPlateaued);
+  // States the count and where to read the rate. It used to say "never settled ... (flagged by name)":
+  // a verdict, and a pointer to a name-column pill that no longer exists.
   const never = flagged.length
-    ? ` ${fmtInt(flagged.length)} gateway${flagged.length === 1 ? "" : "s"} never settled on any cell (flagged by name): their memory under load is bounded by how long the load ran, not by the gateway.`
+    ? ` ${fmtInt(flagged.length)} gateway${flagged.length === 1 ? "" : "s"} reached no steady state on any cell, so no steady-state number is published for ${flagged.length === 1 ? "it" : "them"} and the Growth column carries the rate instead: their memory under load is bounded by how long the load ran, not by the gateway.`
     : "";
   return [
     "Every cell gets its own cold-started process and its own load, run until RSS stops climbing rather than for a fixed time. Nothing is averaged across cells; the chooser picks which cell each row shows.",
     pick,
-    `Idle is sampled cold, before the first request, so no cell is involved and it is valid in every mode. Growth is around zero once a gateway has settled and is its leak rate when it never did. Recovered @${R}: RSS after the load stops: does it release?${never}`,
+    `Idle is sampled cold, before the first request, so no cell is involved and it is valid in every mode. Growth is around zero once a gateway has settled, and is the rate RSS was still moving at when no steady state was reached. Recovered @${R}: RSS after the load stops: does it release?${never}`,
     "Lower is better on every column. A gateway that does not serve the chosen cell reads n/a and sinks to the bottom; nothing is substituted from another cell.",
   ];
 }
@@ -2239,8 +2247,8 @@ function rssSparkline(series, loadEndS = null, idleMib = null) {
   // But a HARD cap at twice idle is worse, and the board caught it: every one of bifrost's six cells
   // spends 100% of its samples above 2x idle (idle 153, rising through 525 and 665 to a peak of 875,
   // then falling back to 605). Clipping drew that as a flat line pinned to the ceiling - so the one
-  // gateway on the board that never settles, and is labelled NEVER SETTLES with a 51 MiB/min leak
-  // beside it, was the one whose curve showed no growth at all. Hiding the finding the row exists to
+  // gateway on the board that reached no steady state, and publishes a 51 MiB/min growth rate instead
+  // of one, was the one whose curve showed no growth at all. Hiding the finding the row exists to
   // report is not a scale, it is a lie with a caption.
   //
   // So twice idle is a FLOOR on the axis, not a ceiling: a gateway that stays near idle still gets a

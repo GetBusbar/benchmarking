@@ -3251,11 +3251,11 @@ test("memory Min/Max: a cell that never went steady is not a candidate (no stead
   const cust = memState([g], { mode: "custom", xlateIn: "openai", xlateOut: "gemini" });
   assert.equal(memCol("mempeak").get(g, cust).na, true, "no steady state was reached, so none is published");
   const growth = memCol("memgrowth").get(g, cust);
-  assert.equal(growth.text, "14.2 (leak)", "the growth rate IS the reading when a gateway never settles");
+  assert.equal(growth.text, "14.2 (leak)", "the growth rate IS the reading when no steady state was reached");
   assert.match(growth.note, /never went steady/);
 });
 
-test("memory: a gateway that never settles on ANY cell is flagged at GATEWAY level, in every mode", () => {
+test("memory: a gateway that reaches no steady state on ANY cell is flagged at GATEWAY level, in every mode", () => {
   const leaky = memGw("leaky", {
     "openai>openai": { steady_state_rss_mib: null, plateaued: false, growth_rate_mib_per_min: 7.5 },
     "openai>gemini": { steady_state_rss_mib: null, plateaued: false, growth_rate_mib_per_min: 12.25 },
@@ -3272,7 +3272,7 @@ test("memory: a gateway that never settles on ANY cell is flagged at GATEWAY lev
   for (const mode of ["min", "max", "same", "custom"]) {
     const st = memState([leaky, fine], { mode });
     for (const g of [leaky, fine]) {
-      assert.ok(!/never settles/i.test(app.COLUMN_SETS.memory.find((c) => c.id === "name").render(g, st)),
+      assert.ok(!/never settles|no steady state/i.test(app.COLUMN_SETS.memory.find((c) => c.id === "name").render(g, st)),
         `the name cell must carry no plateau pill in ${mode} mode`);
     }
   }
@@ -3291,21 +3291,21 @@ test("memory: a WITHHELD plateau verdict is not a negative one - a rig failure i
     "openai>gemini": { steady_state_rss_mib: null, plateaued: null, growth_rate_mib_per_min: null },
   });
   assert.equal(app.neverPlateaued(unmeasured), false,
-    "a gateway whose every verdict was WITHHELD must not be labelled 'never settles'");
+    "a gateway whose every verdict was WITHHELD must not be labelled as having reached no steady state");
   const st = memState([unmeasured], { mode: "same" });
-  assert.ok(!/never settles/.test(app.COLUMN_SETS.memory.find((c) => c.id === "name").render(unmeasured, st)),
+  assert.ok(!/never settles|no steady state/i.test(app.COLUMN_SETS.memory.find((c) => c.id === "name").render(unmeasured, st)),
     "and it must not be painted with the pill either");
-  assert.ok(!app.memoryCaption({ gateways: [unmeasured] }, st).join(" ").match(/never settled on any cell/),
-    "nor counted in the caption's tally of gateways that never settled");
+  assert.ok(!app.memoryCaption({ gateways: [unmeasured] }, st).join(" ").match(/no steady state on any cell/),
+    "nor counted in the caption's tally of gateways with no steady state");
   // MIXED: one cell judged and failing, one withheld. The gateway IS flagged - we watched it fail
   // somewhere - but the claim narrows to what was actually measured.
   const mixed = memGw("mixed", {
     "openai>openai": { steady_state_rss_mib: null, plateaued: false, growth_rate_mib_per_min: 9 },
     "openai>gemini": { steady_state_rss_mib: null, plateaued: null, growth_rate_mib_per_min: null },
   });
-  assert.equal(app.neverPlateaued(mixed), true, "a cell we DID judge, and it never settled, is a finding");
+  assert.equal(app.neverPlateaued(mixed), true, "a cell we DID judge, and it reached no steady state, is a finding");
   const pill = app.neverPlateauedPill(mixed);
-  assert.match(pill, /never settles/);
+  assert.match(pill, /no steady state/);
   assert.match(pill, /cell we could measure it on/, "the claim must narrow to the cells actually judged");
   assert.match(pill, /1 further cell/, "and say how many were not measured");
   // A gateway with every cell judged keeps the unqualified claim.
@@ -3441,7 +3441,7 @@ test("memory: a WAVE is not a leak, and the board must stop calling it one", () 
   const tipC = app.memCellTip({ plateaued: false, growth_rate_mib_per_min: seal(51), shape: seal(1) });
   const tipS = app.memCellTip({ plateaued: false, growth_rate_mib_per_min: seal(51), shape: seal(0) });
   const tipF = app.memCellTip({ plateaued: false, growth_rate_mib_per_min: seal(-51), shape: seal(-1) });
-  assert.match(tipC, /still growing at 51\.0 MiB\/min/);
+  assert.match(tipC, /51\.0 MiB\/min under load/);
   assert.match(tipS, /did not grow/);
   assert.match(tipS, /the swing, not a leak/, "the same rate means something different under a swing");
   assert.match(tipF, /RELEASING/, "a window still handing memory back is the OPPOSITE of a leak");

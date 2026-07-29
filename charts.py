@@ -265,6 +265,13 @@ class Series:
     field: str            # json key
     legend: str           # legend label
     kind: str = "rank"    # "rank" → green-to-winner/slate-to-rest; or a hex color for a fixed tint
+    # WHICH METRIC THIS BAR IS, in one or two words, printed beside the bar's own number. Required on
+    # every chart that draws more than one bar per gateway: colour there encodes implementation
+    # LANGUAGE, so it cannot also say which of the two bars is idle and which is under load. A reader
+    # looking at "46" above "42" with no tag has no way to tell the cold sample from the loaded one,
+    # and guessing from the sizes is wrong as often as it is right (idle above steady-state is a real
+    # result). Unused on a single-series chart, where there is nothing to confuse it with.
+    tag: str = ""
 
 
 @dataclass(frozen=True)
@@ -399,10 +406,15 @@ def _mem_annot(r):
     if cell:
         bits.append(f"on {cell}")
     # A cell that never plateaued has NO steady state, so its bar is absent from the ranked series. Say
-    # why, and quantify it: at the cap the growth rate IS the leak rate.
+    # why, and quantify it: at the cap the growth rate is the whole finding.
+    #
+    # The RATE is the finding; the old wording ("never settled") stacked a verdict on top of it, which
+    # reads as the board calling a gateway out rather than reporting what it measured. Signed, so a
+    # window that was still RELEASING memory at the cap reads as the negative it is instead of a "+"
+    # in front of a minus sign.
     if r.get("_mem_plateaued") is False:
         gr = r.get("_mem_growth_rate_mib_per_min")
-        bits.append("never settled" + (f": +{gr:,.1f} MiB/min" if isinstance(gr, (int, float)) else ""))
+        bits.append(f"{gr:+,.1f} MiB/min under load" if isinstance(gr, (int, float)) else "no steady-state RSS")
     proto = r.get("_mem_protocol") or ""
     clauses = [c.strip() for c in proto.split(";")[1:] if c.strip()]
     if clauses:
@@ -483,14 +495,14 @@ CHARTS = [
         annot=_mem_annot,
         unit="MiB RAM",
         series=[
-            Series("steady_state_rss_mib", "steady-state RAM (under load)", "rank"),
-            Series("idle_rss_mib", "idle RAM (cold, before load)", MUTE),
+            Series("steady_state_rss_mib", "steady-state RAM (under load)", "rank", tag="steady-state"),
+            Series("idle_rss_mib", "idle RAM (cold, before load)", MUTE, tag="idle"),
         ],
         log=True,
         # NULL-SAFE (audit #7/#23): a gateway whose RSS never went steady on this cell has
         # steady_state_rss_mib None → drawn "not measured", never a fabricated served-0 bar and never a
-        # peak substituted for a steady state (a peak would describe when the load stopped). The bar says
-        # "never settled" plus its growth rate instead (_mem_annot). Same for a gateway that does not
+        # peak substituted for a steady state (a peak would describe when the load stopped). The bar
+        # carries its growth rate instead (_mem_annot). Same for a gateway that does not
         # serve the cell at all. The secondary (idle) label is likewise suppressed for such a row (see
         # render), so a not-measured gateway shows no idle number either.
         null_not_served=True,
@@ -514,8 +526,8 @@ CHARTS = [
         annot=_mem_annot,
         unit="MiB RAM",
         series=[
-            Series("recovered_rss_mib", "recovered RAM (60s after load)", "rank"),
-            Series("steady_state_rss_mib", "steady-state RAM (under load)", MUTE),
+            Series("recovered_rss_mib", "recovered RAM (60s after load)", "rank", tag="recovered"),
+            Series("steady_state_rss_mib", "steady-state RAM (under load)", MUTE, tag="steady-state"),
         ],
         log=True,
         null_not_served=True,
@@ -1169,6 +1181,13 @@ def render(chart: Chart, only_keys=None, out_stem: str | None = None) -> None:
             return f"{int(round(v)):,}"
         return _fmt(v)
 
+    # WHICH METRIC A BAR IS, printed on the bar itself. A chart with two bars per gateway had nothing
+    # anywhere on the image tying either bar to its series: the legend's colours are LANGUAGES, and the
+    # only clue was bar order, which a reader cannot recover from the picture. Tagging each number is
+    # what survives cropping, greyscale printing and a legend read out of order.
+    def _tagged(s: Series, v: float) -> str:
+        return f"{_numlab(v)} {s.tag}" if ns > 1 and s.tag else _numlab(v)
+
     for si, s in enumerate(chart.series):
         offset = group_h / 2 - bar_h / 2 - si * bar_h
         vals = [float(r.get(s.field, 0) or 0) for r in rows]
@@ -1199,7 +1218,7 @@ def render(chart: Chart, only_keys=None, out_stem: str | None = None) -> None:
             cy = bar.get_y() + bar.get_height() / 2
             if rank:
                 if served and v > 0:
-                    txt, col, weight = _numlab(v), INK, "bold"
+                    txt, col, weight = _tagged(s, v), INK, "bold"
                     if chart.annot:  # extra per-bar context (frames/s, governed-vs-plain %)
                         extra = chart.annot(r)
                         if extra:
@@ -1227,7 +1246,7 @@ def render(chart: Chart, only_keys=None, out_stem: str | None = None) -> None:
                 # show a secondary idle number beside a "did not serve" primary. But a row whose PRIMARY
                 # is merely null still measured this series, and deleting a real measurement because a
                 # neighbouring field is null is the opposite of the honesty rule it was written for.
-                ax.text(tx, cy, _numlab(v), va="center", ha="left", fontsize=9,
+                ax.text(tx, cy, _tagged(s, v), va="center", ha="left", fontsize=9,
                         fontweight="normal", color=MUTE_TXT, zorder=4)
 
     ax.set_yticks(y0)
@@ -1278,9 +1297,30 @@ def render(chart: Chart, only_keys=None, out_stem: str | None = None) -> None:
     handles = [Patch(facecolor=LANG_COLORS[l], label=l) for l in present]
     if any(not _served(r) for r in rows):
         handles.append(Patch(facecolor=MUTE, label=chart.not_served_text.lstrip("✕ ").strip()))
-    if ns > 1:  # a muted secondary series (idle RAM) - label it too
-        handles.append(Patch(facecolor=MUTE, label=chart.series[1].legend))
-    if handles:
+    # THE SERIES KEY, on its own row above the language legend. It used to be one grey swatch appended
+    # to the language legend, under the title "colored by language" - so the chart named the secondary
+    # series inside a legend that said colour meant something else, and never named the PRIMARY series
+    # at all. Colour cannot carry both meanings: it is spent on language. So the key identifies each
+    # series by its POSITION in the group (which is what the reader can actually see) and repeats the
+    # per-bar tag that _tagged() prints, and it is kept out of the language legend so neither key
+    # borrows the other's title.
+    skeys = []
+    if ns > 1:
+        # POSITION IS COUNTED THE WAY THE READER SEES IT, not the way the series are indexed. Within a
+        # group the offset DECREASES with si while the y axis is INVERTED, so series 0 - the ranked,
+        # language-coloured one - is drawn at the BOTTOM of its group. A key that called it the upper bar
+        # would be worse than no key at all: it would confidently name the wrong bar.
+        for si, s in reversed(list(enumerate(chart.series))):
+            from_top = ns - si
+            where = ("upper bar" if from_top == 1 else "lower bar" if from_top == ns
+                     else f"bar {from_top} from the top")
+            lab = f'{where}, tagged "{s.tag}": {s.legend}' if s.tag else f"{where}: {s.legend}"
+            # The ranked series has no fixed colour to swatch (it is language-coloured, which the
+            # legend below states), so its entry is text-only rather than a swatch that would claim
+            # one language's colour for the whole series.
+            skeys.append(Patch(facecolor="none", edgecolor="none", label=lab) if s.kind == "rank"
+                         else Patch(facecolor=s.kind, label=lab))
+    if handles or skeys:
         # The legend gets its OWN BAND BELOW THE AXES, never an overlay: no single corner is empty on
         # every chart (a higher-is-better chart's longest bar sits opposite a lower-is-better chart's),
         # so placing it inside the plot always collides with some chart's bars. Anchoring in FIGURE
@@ -1288,9 +1328,19 @@ def render(chart: Chart, only_keys=None, out_stem: str | None = None) -> None:
         # count. The offset is computed from the figure height so the gap is a CONSTANT number of
         # inches rather than shrinking as charts get taller.
         fig_h = 0.92 * n + 1.9    # must match the figsize above
-        fig.legend(handles=handles, loc="lower center", bbox_to_anchor=(0.5, legend_in / fig_h),
-                   fontsize=8.5, frameon=False, ncols=min(len(handles), 6),
-                   title="colored by language")
+        if handles:
+            fig.legend(handles=handles, loc="lower center", bbox_to_anchor=(0.5, legend_in / fig_h),
+                       fontsize=8.5, frameon=False, ncols=min(len(handles), 6),
+                       title="colored by language")
+        if skeys:
+            # A SECOND figure legend, anchored a constant 0.5 in above the language band (the same
+            # inches-not-fractions rule the band itself uses, so the gap holds on a tall chart). One
+            # row: these labels are sentences, and wrapping them into a column would read as a list of
+            # unrelated notes rather than "top bar is this, bottom bar is that".
+            fig.legend(handles=skeys, loc="lower center",
+                       bbox_to_anchor=(0.5, (legend_in + 0.5) / fig_h),
+                       fontsize=8.5, frameon=False, ncols=len(skeys),
+                       title=f"{ns} bars per gateway", handlelength=1.4)
 
     meta = rows[0]
     bits = []
@@ -1309,8 +1359,11 @@ def render(chart: Chart, only_keys=None, out_stem: str | None = None) -> None:
              fontsize=7.3, color=GRAY)
 
     # Reserve the band the out-of-axes legend now occupies (audit #21), in the SAME constant-inches
-    # terms it is anchored in, so the axes never grow down into it on a tall chart.
-    fig.tight_layout(rect=(0, max(0.05, (legend_in + 0.55) / (0.92 * n + 1.9)), 1, 0.93))
+    # terms it is anchored in, so the axes never grow down into it on a tall chart. The series key sits
+    # 0.5 in above the language band, so a multi-series chart must reserve that much more or the axes
+    # grow down over the one label that says which bar is which.
+    band_in = legend_in + 0.55 + (0.5 if ns > 1 else 0.0)
+    fig.tight_layout(rect=(0, max(0.05, band_in / (0.92 * n + 1.9)), 1, 0.93))
     out = RESULTS / f"{out_stem or chart.name}.png"
     fig.savefig(out, dpi=300, bbox_inches="tight", facecolor="white")
     plt.close(fig)
