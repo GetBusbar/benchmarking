@@ -21,7 +21,8 @@ import { createRequire } from "node:module";
 import assert from "node:assert/strict";
 import { checkConsistency, c6Inversions, c7HwmBelowPeak, hasCellMemory } from "./check-consistency.mjs";
 import * as checkMod from "./check-consistency.mjs";
-import { sealMetric, ZERO_NO_CEILING, ZERO_MEASURED_FAIL } from "./seal.mjs";
+import { sealMetric, displayedValue, GATED_FIELDS, PACED_FIELDS, ZERO_NO_CEILING, ZERO_MEASURED_FAIL } from "./seal.mjs";
+import { oracleExpected } from "./check-consistency.mjs";
 // A HAND-BUILT fixture has no results/matrix/<key>.json oracle, so it needs an EXPLICIT opt-in
 // (the CLI never passes it) to waive the oracle-verifiable requirement.
 const SYNTH = { syntheticFixture: true };
@@ -316,6 +317,54 @@ function genData(root) {
 }
 const isoAgo = (h) => new Date(Date.now() - h * 3600000).toISOString();
 const isoDaysAgo = (d) => new Date(Date.now() - d * 86400000).toISOString();
+
+// THE SEAL AND ITS ORACLE MUST BE THE SAME RULE, over every input either can see.
+//
+// check-consistency.mjs re-derives what the board should show, straight from the raw artifact, as an
+// independent check on the bundle. That independence is about the DATA PATH. It used to extend to the
+// RULE as well - the oracle carried its own copy of the display condition - and the copy implemented
+// only the capacity branch. When paced metrics arrived, the seal learned that matching a paced target
+// is the gateway keeping up rather than a mock ceiling, and the oracle did not. Every cell whose
+// mock-bound flag was true then had the seal publish and the oracle demand null: 25 mismatches, which
+// hard-failed the deploy on every commit for two days while the board served a stale build.
+//
+// A second copy of a rule does not catch drift. It is the drift. Both now call `displayedValue`, and
+// this walks the whole input space to hold them there.
+test("seal and oracle agree on every (raw, flag, gated, paced) the board can produce", () => {
+  const RAWS = [null, 0, 1, 1234.5, -1];
+  const FLAGS = [undefined, null, true, false];
+  const mismatches = [];
+  for (const raw of RAWS) {
+    for (const flag of FLAGS) {
+      for (const gated of [false, true]) {
+        for (const paced of [false, true]) {
+          const oracle = oracleExpected(raw, flag, gated, paced);
+          const sealed = sealMetric(raw, { gated, paced, flag });
+          const shown = sealed.suppressed ? null : sealed.value;
+          if (shown !== oracle) {
+            mismatches.push(`raw=${raw} flag=${flag} gated=${gated} paced=${paced}: seal shows ${shown}, oracle expects ${oracle}`);
+          }
+        }
+      }
+    }
+  }
+  assert(mismatches.length === 0, `seal/oracle disagree:\n  ${mismatches.join("\n  ")}`);
+});
+
+// The paced set is a CLAIM ABOUT THE MOCK, so it may only name fields the mock actually paces: the
+// stream lane. A throughput field landing in here would publish a number the mock's own capacity
+// produced, which is the rig ranking itself.
+test("only stream-lane fields are treated as paced, and each is gated", () => {
+  for (const f of PACED_FIELDS) {
+    assert(/stream|fps/.test(f), `${f} is marked paced but is not a stream-lane field`);
+  }
+  // streams_sustained_fps is derived from streams_sustained and is gated with it rather than listed
+  // in GATED_FIELDS separately; the rest must be genuinely gated or "paced" qualifies nothing.
+  for (const f of PACED_FIELDS) {
+    assert(GATED_FIELDS.includes(f) || f === "streams_sustained_fps",
+      `${f} is marked paced but is not gated - paced only modifies how a GATED field is judged`);
+  }
+});
 
 test("freshness guard HARD-FAILS a wholesale-stale board (absolute age floor kept)", () => {
   // The whole board is older than MAX_BOARD_AGE_DAYS (180d): NOTHING has refreshed at all. This is the
