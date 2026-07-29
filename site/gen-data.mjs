@@ -987,5 +987,59 @@ const data = {
 for (const g of gateways) {
   for (const suite of ["perf", "stream", "streamcpu", "xlate"]) delete g[suite];
 }
-writeFileSync(join(OUT, "data.json"), JSON.stringify(data, null, 1) + "\n");
+/* THINNING THE RSS SERIES FOR THE WIRE.
+   The bundle reached 14.1 MB, of which 5.2 MB was 156,506 raw RSS samples, and the browser paid to
+   decompress and parse every one of them before the first row appeared. They feed one thing: a
+   sparkline about fifty pixels wide. Nothing re-derives a value from them - every memory verdict
+   (steady state, growth rate, time to plateau, shape) is decided in the engine from the FULL series
+   and published as its own field, and the full series stays in the snapshot artifacts, which are what
+   an auditor reads. This is a drawing resolution, not a measurement.
+
+   Decimation is MIN/MAX PRESERVING per bucket, not "every Nth sample". Taking every Nth is how a
+   thinned curve loses the spike that was the whole finding: a gateway that touched 900 MiB for three
+   seconds would draw flat if those three seconds fell between strides. Keeping both extremes of every
+   bucket, in the order they occurred, means the drawn envelope still touches every high and low the
+   full series reached. The first and last samples are always kept so the window's own boundaries -
+   which the load/recovery rule reads - never move. */
+const RSS_DRAW_POINTS = 240;
+function thinSeries(series) {
+  if (!Array.isArray(series) || series.length <= RSS_DRAW_POINTS) return series;
+  const buckets = Math.floor(RSS_DRAW_POINTS / 2);
+  const size = series.length / buckets;
+  const val = (p) => (p && typeof p === "object" ? (p.rss_mib ?? p.mib ?? 0) : 0);
+  const out = [series[0]];
+  for (let b = 0; b < buckets; b++) {
+    const lo = Math.floor(b * size), hi = Math.min(series.length, Math.floor((b + 1) * size));
+    if (hi <= lo) continue;
+    let min = series[lo], max = series[lo], minI = lo, maxI = lo;
+    for (let i = lo + 1; i < hi; i++) {
+      if (val(series[i]) < val(min)) { min = series[i]; minI = i; }
+      if (val(series[i]) > val(max)) { max = series[i]; maxI = i; }
+    }
+    // In the order they actually occurred: a rise drawn as a fall is a different curve.
+    for (const pt of (minI <= maxI ? [min, max] : [max, min])) {
+      if (out[out.length - 1] !== pt) out.push(pt);
+    }
+  }
+  const last = series[series.length - 1];
+  if (out[out.length - 1] !== last) out.push(last);
+  return out;
+}
+let thinnedFrom = 0, thinnedTo = 0;
+(function thinAll(o) {
+  if (Array.isArray(o)) { for (const x of o) thinAll(x); return; }
+  if (!o || typeof o !== "object") return;
+  for (const [k, v] of Object.entries(o)) {
+    if ((k === "rss_series" || k === "idle_rss_series") && Array.isArray(v)) {
+      const t = thinSeries(v);
+      thinnedFrom += v.length; thinnedTo += t.length;
+      o[k] = t;
+    } else thinAll(v);
+  }
+})(data);
+
+// Compact, not indented. The indentation was one space per level on a 14 MB document - megabytes of
+// whitespace shipped to every reader for a file no human opens by hand.
+writeFileSync(join(OUT, "data.json"), JSON.stringify(data) + "\n");
+if (thinnedFrom) console.log(`gen-data: rss samples ${thinnedFrom} -> ${thinnedTo} for drawing (full series stay in the snapshots)`);
 console.log(`gen-data: ${gateways.length} gateways, ${charts.length} charts -> ${join(OUT, "data.json")}`);
