@@ -55,8 +55,18 @@ with tempfile.TemporaryDirectory() as td:
     with open(os.path.join(d, "result_anon_2026-07-25.json"), "w") as f:
         json.dump({"measured_at": "x"}, f)
 
+    # POINT THE AUDIT'S PATH ANCHOR AT THE FIXTURE, DO NOT chdir.
+    #
+    # bench-cost reads snapshots through bench-audit's `snapshot_paths()`, which resolves against the
+    # SCRIPT's directory so the audit can be run from anywhere. A chdir therefore no longer changes
+    # what it reads: this test used to chdir into the fixture and then silently assert against the
+    # real repo's snapshots - passing or failing on whatever board happened to be checked out. Moving
+    # HERE is the only thing that redirects it, and it is what bench-audit_test.py's own RED proof
+    # does for the same reason.
+    audit_mod = sys.modules.get("bench_audit") or bc._audit
+    old_here = audit_mod.HERE
+    audit_mod.HERE = td
     old_cwd = os.getcwd()
-    os.chdir(td)  # newest_snapshots globs relative to the working directory
     try:
         allsnaps = bc.newest_snapshots()
         check("every real gateway appears once", sorted(allsnaps), ["alpha", "bravo"])
@@ -75,6 +85,7 @@ with tempfile.TemporaryDirectory() as td:
         check("a non-matching engine prefix yields nothing rather than a fallback",
               bc.newest_snapshots(engine="zzz"), {})
     finally:
+        audit_mod.HERE = old_here
         os.chdir(old_cwd)
 
 if _fail == 0:

@@ -73,14 +73,26 @@ log = "\n".join([
     "[cell 5/36] openai>bedrock: cost throughput=120s memory=200s",  # the regression line shape
     "[phase] openai>bedrock memory",
 ])
-cells, total, served_done, phase = bd.parse_progress(log)
+# `complete` was added when the dashboard stopped presenting a lower bound as a count: the log tail
+# it reads can start mid-grid, and then served_done is a floor, not a total. Unpacked here so this
+# test breaks loudly if the tuple changes again rather than silently reading the wrong field.
+cells, total, served_done, phase, complete = bd.parse_progress(log)
 check("parse_progress: latest cell position wins", (cells, total), (5, 36))
 check("parse_progress: ONLY measured verdicts count as served (2 of 6 lines)", served_done, 2)
 check("parse_progress: an unrecognised same-prefix line is ignored, never believed",
       served_done <= 5, True)
 check("parse_progress: the latest phase is reported with its cell id", phase, "memory openai>bedrock")
-check("parse_progress: an empty tail has no position and no phase",
-      bd.parse_progress(""), (None, None, 0, None))
+# An empty tail reports complete=True, which reads like vacuous truth and is not: `complete` only
+# ever qualifies a COUNT, and with no cell line there is no count (cells is None, so the caller
+# renders "-"). Saying "incomplete" here would attach a bound to a number that does not exist. The
+# fail-closed case that matters is the one below: a tail that DID see cells but missed the start.
+check("parse_progress: an empty tail has no position, no phase, and nothing to bound",
+      bd.parse_progress(""), (None, None, 0, None, True))
+check("parse_progress: a log carrying every cell position from 1 is complete", complete, True)
+# The fail-closed half: a tail that starts mid-grid knows it cannot count, so the dashboard can say
+# 'at least N' rather than passing a floor off as a reading.
+_, _, _, _, partial = bd.parse_progress("[cell 7/36] openai>openai: served")
+check("parse_progress: a tail starting mid-grid reports itself incomplete", partial, False)
 
 # ── local_state: what the orchestrator's log yields ──────────────────────────────────────────────
 with tempfile.TemporaryDirectory() as td:
