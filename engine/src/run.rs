@@ -263,7 +263,11 @@ pub fn stream_connection_ceiling() -> u32 {
         .and_then(|t| {
             t.lines()
                 .find(|l| l.starts_with("Max open files"))
-                .and_then(|l| l.split_whitespace().nth(3).and_then(|v| v.parse::<u32>().ok()))
+                .and_then(|l| {
+                    l.split_whitespace()
+                        .nth(3)
+                        .and_then(|v| v.parse::<u32>().ok())
+                })
         })
         // POSIX's own floor when the limit cannot be read. Deliberately small: guessing high here
         // would reintroduce exactly the ladder this function exists to bound.
@@ -851,6 +855,17 @@ fn refine_ceiling<P: crate::search::Probe>(
             (
                 r.gate_median.unwrap_or(r.median),
                 r.gate_median_reading.or(r.median_reading),
+            )
+        } else if r.windows == 0 {
+            // NO WINDOW AT THIS RUNG PASSED, SO ITS `median` IS A SENTINEL AND NOT A RATE.
+            // `search::measure_rung` has no median to take when every window failed, so it returns
+            // 0.0 - and this row used to publish that 0 beside a null p99 and a null loss count, a
+            // rung that read as having served nothing when the windows had watched it serve at full
+            // rate and drop requests. What it was OBSERVED doing is the evidence, and the reading of
+            // the window behind it travels so the row stays one window's account of itself.
+            (
+                r.observed_median.unwrap_or(r.median),
+                r.observed_median_reading.or(r.median_reading),
             )
         } else {
             (r.median, r.median_reading)
@@ -1514,47 +1529,47 @@ pub fn stream_window(
 
     let (outcomes, panicked, elapsed_s): (Vec<crate::http::SseOutcome>, usize, f64) =
         rt.block_on(async move {
-        let mut lanes = Vec::with_capacity(concurrency as usize);
-        for _ in 0..concurrency {
-            let path = path.clone();
-            let body = body.clone();
-            let headers = headers.clone();
-            lanes.push(tokio::spawn(async move {
-                crate::http::post_json_sse_async(
-                    addr,
-                    &path,
-                    body.as_bytes(),
-                    &headers,
-                    crate::metric::STREAM_TIMEOUT,
-                    lane_budget,
-                    Some(dialect),
-                )
-                .await
-            }));
-        }
-        // The clock starts once every lane exists, exactly as `gen.rs::run` does: the ramp of
-        // creating them must not land in the denominator, or fps() is depressed hardest at exactly
-        // the high rungs the search is climbing toward.
-        let started = std::time::Instant::now();
-        let mut out = Vec::with_capacity(lanes.len());
-        let mut panicked = 0usize;
-        for l in lanes {
-            // A PANICKED LANE IS A HARNESS FAULT, not a gateway failure, and it is also not a
-            // stream: it is counted in neither column, because attributing our own defect to the
-            // gateway's error rate is the exact inversion this engine refuses everywhere else.
-            //
-            // COUNTED, THOUGH. Dropping it silently is what made a four-hour run undiagnosable: a
-            // lane that panicked left no number, no message, and no trace anywhere in the artifact
-            // or the log, so the only visible symptom was a metric that took 0.0s and published an
-            // absence. "Not the gateway's fault" is a reason to keep it out of the gateway's error
-            // rate, never a reason to lose it.
-            match l.await {
-                Ok(o) => out.push(o),
-                Err(_) => panicked += 1,
+            let mut lanes = Vec::with_capacity(concurrency as usize);
+            for _ in 0..concurrency {
+                let path = path.clone();
+                let body = body.clone();
+                let headers = headers.clone();
+                lanes.push(tokio::spawn(async move {
+                    crate::http::post_json_sse_async(
+                        addr,
+                        &path,
+                        body.as_bytes(),
+                        &headers,
+                        crate::metric::STREAM_TIMEOUT,
+                        lane_budget,
+                        Some(dialect),
+                    )
+                    .await
+                }));
             }
-        }
-        (out, panicked, started.elapsed().as_secs_f64())
-    });
+            // The clock starts once every lane exists, exactly as `gen.rs::run` does: the ramp of
+            // creating them must not land in the denominator, or fps() is depressed hardest at exactly
+            // the high rungs the search is climbing toward.
+            let started = std::time::Instant::now();
+            let mut out = Vec::with_capacity(lanes.len());
+            let mut panicked = 0usize;
+            for l in lanes {
+                // A PANICKED LANE IS A HARNESS FAULT, not a gateway failure, and it is also not a
+                // stream: it is counted in neither column, because attributing our own defect to the
+                // gateway's error rate is the exact inversion this engine refuses everywhere else.
+                //
+                // COUNTED, THOUGH. Dropping it silently is what made a four-hour run undiagnosable: a
+                // lane that panicked left no number, no message, and no trace anywhere in the artifact
+                // or the log, so the only visible symptom was a metric that took 0.0s and published an
+                // absence. "Not the gateway's fault" is a reason to keep it out of the gateway's error
+                // rate, never a reason to lose it.
+                match l.await {
+                    Ok(o) => out.push(o),
+                    Err(_) => panicked += 1,
+                }
+            }
+            (out, panicked, started.elapsed().as_secs_f64())
+        });
     let mut w = StreamWindow {
         concurrency,
         streams: 0,
@@ -1648,7 +1663,6 @@ fn window_refusal(panicked: usize, streams: u64, concurrency: u32) -> Option<Str
     }
     None
 }
-
 
 /// One rung a stream search actually probed, carrying the counts behind its verdict.
 ///
@@ -2115,7 +2129,9 @@ pub fn stream_fps_at(
                 ));
             }
             None => {
-                why.get_or_insert(format!("no direct-to-mock stream window ran at c={concurrency}"));
+                why.get_or_insert(format!(
+                    "no direct-to-mock stream window ran at c={concurrency}"
+                ));
             }
         }
     }
@@ -2465,7 +2481,10 @@ mod tests {
     fn streams_are_bounded_by_descriptors_not_by_the_port_range() {
         let streams = super::stream_connection_ceiling();
         let requests = super::host_connection_ceiling();
-        assert!(streams >= 1, "a ceiling of zero would measure nothing: {streams}");
+        assert!(
+            streams >= 1,
+            "a ceiling of zero would measure nothing: {streams}"
+        );
         assert!(
             streams <= requests,
             "the port bound is still real; it is just not the first one to bite ({streams} > {requests})"
@@ -2509,14 +2528,21 @@ mod tests {
     #[test]
     fn a_window_that_lost_lanes_is_refused_and_says_so() {
         let why = super::window_refusal(4, 60, 64).expect("lost lanes must refuse the window");
-        assert!(why.contains("PANICKED"), "the refusal must name the fault: {why}");
-        assert!(why.contains('4') && why.contains("64"),
-            "and must quantify it - how many of how many: {why}");
+        assert!(
+            why.contains("PANICKED"),
+            "the refusal must name the fault: {why}"
+        );
+        assert!(
+            why.contains('4') && why.contains("64"),
+            "and must quantify it - how many of how many: {why}"
+        );
 
         // Even ONE lost lane. The survivors' ratio is not this window's ratio, and there is no
         // threshold below which a measurement may quietly describe a different window than it ran.
-        assert!(super::window_refusal(1, 63, 64).is_some(),
-            "one lost lane still means the window did not run at the concurrency it claims");
+        assert!(
+            super::window_refusal(1, 63, 64).is_some(),
+            "one lost lane still means the window did not run at the concurrency it claims"
+        );
 
         // Nothing came back at all, nothing panicked: unmeasured, and it must still SAY so rather
         // than returning in silence the way the old path did.
@@ -2525,11 +2551,13 @@ mod tests {
 
         // And the case that must still be PUBLISHED: every lane came home. A refusal rule that
         // refuses everything is as useless as one that refuses nothing.
-        assert_eq!(super::window_refusal(0, 64, 64), None,
-            "a whole window is a real measurement and must not be thrown away");
+        assert_eq!(
+            super::window_refusal(0, 64, 64),
+            None,
+            "a whole window is a real measurement and must not be thrown away"
+        );
         assert_eq!(super::window_refusal(0, 1, 1), None);
     }
-
 
     /// THE TWO PUBLISHED THROUGHPUT NUMBERS DESCRIBE ONE SET OF WINDOWS.
     ///
@@ -2816,6 +2844,55 @@ mod tests {
         assert_eq!(held.rps, 16_000.0);
         assert_eq!(held.p99_us, Some(5_000));
         assert_eq!(held.fail, Some(0));
+    }
+
+    /// A RUNG WHERE NO WINDOW EVER PASSED PUBLISHES A FABRICATED 0, NOT ITS REAL RATE.
+    ///
+    /// `search::measure_rung` returns `Rung { median: 0.0, median_reading: None, windows: 0 }` when
+    /// every window at a rung comes back with `Sample::passed == false` (`vals.is_empty()`,
+    /// search.rs:653-661) - a sentinel, not a measurement. `RungSummary` (search.rs:568-585) copies
+    /// `median`/`median_reading` but has no `windows` field, so nothing downstream can tell this rung
+    /// apart from one that genuinely served nothing. `refine_ceiling`'s non-holding branch then reads
+    /// `r.median` straight into `SustainedPoint.rps`, so this rung publishes `rps: 0.0` in
+    /// `sweep_sustained_20ms` even though the window really served 16000 rps and only failed because
+    /// every window at that concurrency dropped requests.
+    #[test]
+    fn a_rung_where_every_window_failed_publishes_a_fabricated_zero_rate() {
+        // Serves 16000 rps at every rung, same curve as the sibling test above, but past c=64 it
+        // marks the window itself FAILED (the probe's own passed verdict, as `SweepProbe::probe`
+        // computes it: `stats.fail == 0 && stats.ok > 0`) rather than merely blowing the 20ms gate.
+        struct FailsOutright;
+        impl crate::search::Probe for FailsOutright {
+            fn probe(&mut self, c: u32) -> Option<crate::search::Sample> {
+                let rps = if c <= 16 {
+                    f64::from(c) * 1000.0
+                } else {
+                    16_000.0
+                };
+                let over = c > 64;
+                Some(
+                    crate::search::Sample::new(rps, !over).with_reading(crate::search::Reading {
+                        p99_us: Some(if over { 30_000 } else { 5_000 }),
+                        ok: 100_000,
+                        fail: if over { 7 } else { 0 },
+                    }),
+                )
+            }
+        }
+        let gate = sustained_gate();
+        let mut p = FailsOutright;
+        let r = crate::search::saturation_plateau_gated(&mut p, 1, 512, Some(&gate));
+        let refined = refine_ceiling(&mut p, &r.rungs);
+        let failed = refined
+            .points
+            .iter()
+            .find(|pt| pt.concurrency == 128)
+            .expect("the climb probed c=128 and failed it");
+        assert!(!failed.passed, "c=128 blew the 20ms gate");
+        assert_eq!(
+            failed.rps, 16_000.0,
+            "the rung served 16000 rps at every window; publishing 0 says it served nothing"
+        );
     }
 
     /// A RATE NOBODY RE-MEASURED IS ONE WINDOW'S LUCK, NOT A SUSTAINED CEILING.
@@ -4971,6 +5048,9 @@ while True:
                 gate_median: Some(1000.0),
                 median_reading: None,
                 gate_median_reading: None,
+                windows: 3,
+                observed_median: Some(1000.0),
+                observed_median_reading: None,
             },
             crate::search::RungSummary {
                 concurrency: 16,
@@ -4979,6 +5059,9 @@ while True:
                 gate_median: None,
                 median_reading: None,
                 gate_median_reading: None,
+                windows: 3,
+                observed_median: Some(1000.0),
+                observed_median_reading: None,
             },
         ];
         let refined = refine_ceiling(&mut Readingless, &rungs);

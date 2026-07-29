@@ -1743,8 +1743,11 @@ mod tests {
         // A gateway directory with one rendered config, exactly as run.sh leaves it.
         let gw_dir = dir.join("gw-under-test");
         std::fs::create_dir_all(&gw_dir).expect("gw dir");
-        std::fs::write(gw_dir.join("config.gen.yaml"), "listen: 8080\nupstream: mock\n")
-            .expect("config");
+        std::fs::write(
+            gw_dir.join("config.gen.yaml"),
+            "listen: 8080\nupstream: mock\n",
+        )
+        .expect("config");
         cfg.gw_dir = gw_dir;
         cfg.manifest.config_files = vec![crate::manifest::ConfigFile {
             template: "config.gen.yaml.tmpl".into(),
@@ -1752,7 +1755,11 @@ mod tests {
         }];
 
         let got = rendered_config(&cfg);
-        assert_eq!(got.files.len(), 1, "the rendered config must reach the artifact: {got:?}");
+        assert_eq!(
+            got.files.len(),
+            1,
+            "the rendered config must reach the artifact: {got:?}"
+        );
         assert!(
             got.files["config.gen.yaml"].contains("listen: 8080"),
             "verbatim, not a re-render: {got:?}"
@@ -1764,7 +1771,10 @@ mod tests {
             template: "gone.tmpl".into(),
             output: "not-written.yaml".into(),
         }];
-        assert!(rendered_config(&cfg).files.is_empty(), "an unreadable config is absent, not fatal");
+        assert!(
+            rendered_config(&cfg).files.is_empty(),
+            "an unreadable config is absent, not fatal"
+        );
 
         // AND THAT IT IS ACTUALLY CALLED. Everything above passes with the one line that wires this
         // into the snapshot deleted - which is exactly how the field came to be empty on a finished
