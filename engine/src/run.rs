@@ -256,22 +256,20 @@ pub fn host_connection_ceiling() -> u32 {
 /// is doing, and a ladder that climbs until the process runs out of file handles measures the ladder.
 /// Still capped by the port rule, which remains a real bound and is simply not the first one to bite.
 ///
-/// AND CAPPED BY WHAT THE RIG CAN CARRY, which on the bench box is the only one of the three that
-/// actually binds. The first version of this function derived from descriptors and ports alone, and
-/// on the real box it changed nothing at all: run-on-ec2.sh raises the descriptor limit to 1,048,576,
-/// so a third of it is 349,525, and `min` handed back the port ceiling - the same 32,768 that caused
-/// the problem. The test passed because it asserted the DERIVATION rather than the outcome, which is
-/// the same shape as every other defect this session turned up: a rule that is exercised and wired to
-/// nothing.
+/// AND A RUNAWAY BACKSTOP, WHICH IS NOT THE SAME AS A MEASUREMENT BOUND.
 ///
-/// So the binding number is stated in the units the rig actually spends. The mock paces 64 frames at
-/// 20ms, so every held-open lane costs ~50 frames/sec of SSE that the rig must parse: c=4096 asks it
-/// to carry 204,800 frames/sec, and c=32768 asks for 1,638,400. The second is not a gateway
-/// measurement. 4096 also leaves most of a doubling of headroom over the highest concurrency any
-/// gateway on this field has actually reached (gomodel, c=2178) - the one higher reading, litellm-rust
-/// at c=6144, failed its own re-measurement, which is the shape of a rig that has run out rather than
-/// a gateway that went faster.
-const STREAM_MAX_CONC: u32 = 4096;
+/// An earlier version of this put a constant ceiling at 4096, reasoning that no gateway had cleanly
+/// exceeded c=2178. The field's own sweeps said otherwise: apisix sustained c=16384 with ZERO stalls
+/// and every window passing, litellm-rust c=6144, aisix c=4096. That constant would have clipped
+/// three gateways and published a smaller rung as their peak - a wrong number, which is worse than an
+/// honest hole. A ceiling chosen near where measurements live becomes part of the measurement.
+///
+/// So the ladder's real stopping condition is MEASURED: it climbs until its rungs stop holding, and
+/// `saturation_plateau` publishes the best rung that actually passed (see the bound-versus-ceiling
+/// note there). `STREAM_RUNAWAY_CAP` exists only so a bug cannot climb forever - it sits far above
+/// anything this field has produced or plausibly could, so it never participates in a result. If a
+/// search ever reaches it, that is a runaway to investigate and not a gateway's ceiling to publish.
+const STREAM_RUNAWAY_CAP: u32 = 65_536;
 
 pub fn stream_connection_ceiling() -> u32 {
     // Read the process's own limit rather than assuming a distro default: run-on-ec2.sh raises it,
@@ -289,11 +287,6 @@ pub fn stream_connection_ceiling() -> u32 {
     stream_ceiling_from(soft_fds, host_connection_ceiling())
 }
 
-/// What the rig can carry, in the units it spends: see `STREAM_MAX_CONC`.
-fn rig_stream_capacity() -> u32 {
-    STREAM_MAX_CONC
-}
-
 /// The derivation itself, PURE, so it can be tested against a box other than the one running the
 /// test. The host-reading wrapper above cannot be: on a developer machine `/proc` is absent and both
 /// ceilings collapse to their fallbacks, so a test driving it agrees with any implementation - the
@@ -305,7 +298,7 @@ fn stream_ceiling_from(soft_fds: u32, port_ceiling: u32) -> u32 {
     while ceiling * 2 <= usable {
         ceiling *= 2;
     }
-    ceiling.min(port_ceiling).min(rig_stream_capacity())
+    ceiling.min(port_ceiling).min(STREAM_RUNAWAY_CAP)
 }
 
 /// a real status with a healthy rig is the gateway's own answer, no HTTP answer at all is not.
@@ -2501,49 +2494,42 @@ mod tests {
     // saturating, and a saturating rig yields small increments instead of the flat run the search
     // stops on - and published nothing at all.
     #[test]
-    fn streams_are_bounded_by_descriptors_not_by_the_port_range() {
-        let streams = super::stream_connection_ceiling();
-        let requests = super::host_connection_ceiling();
-        assert!(streams >= 1, "a ceiling of zero would measure nothing: {streams}");
-        assert!(
-            streams <= requests,
-            "the port bound is still real; it is just not the first one to bite ({streams} > {requests})"
-        );
-        assert!(
-            streams.is_power_of_two(),
-            "the ladder doubles, so a ceiling off the ladder is never actually reached: {streams}"
-        );
-        // THE BENCH BOX'S OWN NUMBERS. This is the assertion the first version of this test was
-        // missing: it checked that the DERIVATION was arithmetically right and never that the
-        // ceiling actually drops on the machine we run on. It passed while the fix did nothing,
-        // because run-on-ec2.sh raises the descriptor limit to 1,048,576 - a third of that is
-        // 349,525, so `min` handed back the port ceiling and the answer stayed 32,768, exactly the
-        // value that emptied apisix's cpu_fps. A test that verifies the arithmetic of a rule that
-        // never fires is the same defect as the code it was written to protect.
+    fn the_stream_bound_is_physical_and_the_runaway_cap_never_participates() {
+        // A CAP CHOSEN NEAR WHERE MEASUREMENTS LIVE BECOMES PART OF THE MEASUREMENT. The first version
+        // of this bound was a constant 4096, picked because no gateway had cleanly exceeded c=2178.
+        // The field's own sweeps said otherwise - apisix sustained c=16384 with ZERO stalls and every
+        // window passing, litellm-rust c=6144, aisix c=4096 - so it would have clipped three gateways
+        // and published a smaller rung as their peak. A wrong number is worse than an honest hole.
+        //
+        // The real stopping condition is measured (see
+        // `search::a_ladder_that_ends_on_failing_rungs_publishes_the_best_passing_rung`). The cap here
+        // is only a runaway backstop, and these assertions are what keep it from quietly becoming
+        // anything more.
         let bench_box_fds = 1_048_576;
         let bench_box_ports = 32_768;
         assert_eq!(
             super::stream_ceiling_from(bench_box_fds, bench_box_ports),
-            4_096,
-            "ON THE REAL BOX the ceiling must actually bind - descriptors and ports both leave it at \
-             32,768 there, so only a bound stated in what the rig can carry changes anything"
+            bench_box_ports,
+            "the PHYSICAL bound must decide it - with descriptors raised far above the port range, \
+             the port range is the answer and the runaway cap must not be visible in it"
         );
+        assert!(
+            super::STREAM_RUNAWAY_CAP >= 4 * 16_384,
+            "the backstop must sit far above the highest rung the field has cleanly sustained \
+             (apisix, c=16384), or it is a measurement bound wearing a safety label"
+        );
+        // Descriptors still bind when they are genuinely the smaller number: a stock 1024-descriptor
+        // box must not be asked for thousands of held-open streams, each costing one descriptor on the
+        // rig, one on the gateway and one on the mock.
         assert!(
             super::stream_ceiling_from(1024, bench_box_ports) <= 512,
-            "a stock 1024-descriptor box must not be asked for thousands of held-open streams"
+            "a stock descriptor limit is a real bound and must still bite"
         );
-        // 4096 lanes x ~50 frames/sec each is already 204,800 frames/sec of SSE for the rig to parse;
-        // 32768 would be 1,638,400, which is a measurement of the box and not of a gateway.
+        let streams = super::stream_connection_ceiling();
+        assert!(streams >= 1, "a ceiling of zero would measure nothing: {streams}");
         assert!(
-            super::stream_ceiling_from(bench_box_fds, bench_box_ports) < bench_box_ports,
-            "32k held-open streams is a measurement of the rig, not of a gateway"
-        );
-        // And it must still leave real headroom over the highest concurrency any gateway on this
-        // field has actually reached (gomodel, c=2178) - a ceiling that clips real answers is the
-        // opposite fix.
-        assert!(
-            super::stream_ceiling_from(bench_box_fds, bench_box_ports) > 2_178,
-            "the ceiling must sit above every confirmed observation, or it invents its own limit"
+            streams.is_power_of_two(),
+            "the ladder doubles, so a ceiling off the ladder is never actually reached: {streams}"
         );
     }
 
