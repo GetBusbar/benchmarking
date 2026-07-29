@@ -33,6 +33,19 @@ KEY = os.path.join(os.environ.get("TMPDIR", "/tmp"), "gateway-bench-key.pem")
 SSH = ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
        "-o", "ConnectTimeout=6", "-o", "BatchMode=yes", "-i", KEY]
 
+
+def _configure_stdout():
+    for kwargs in ({"encoding": "utf-8", "errors": "backslashreplace"},
+                   {"errors": "backslashreplace"}):
+        try:
+            sys.stdout.reconfigure(**kwargs)
+            return
+        except (AttributeError, ValueError, OSError):
+            continue
+
+
+_configure_stdout()
+
 CELL_RE = re.compile(r"\[cell (\d+)/(\d+)\] (\S+): (.+)")
 PHASE_RE = re.compile(r"\[phase\] (\S+) (\S+)")
 
