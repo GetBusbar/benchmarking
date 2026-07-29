@@ -801,10 +801,21 @@ export function checkConsistency(data, app, opts = {}) {
   // ---- C1 + C2: envelope integrity across the WHOLE bundle -------------------
   // Walk every object. (C1) a *_mock_bound key must not survive; a gated metric field must be an envelope,
   // never a bare number. (C2) a suppressed envelope has value:null and no other numeric field on it.
-  const walk = (node, path) => {
-    if (Array.isArray(node)) { node.forEach((v, i) => walk(v, `${path}[${i}]`)); return; }
+  // `timings_s` IS A COST RECORD, NOT A METRIC BLOCK, and its keys collide with metric names.
+  //
+  // It maps each metric GROUP to the seconds that group spent on this cell, so it legitimately
+  // carries keys named `cpu_fps` and `streams_sustained` whose values are DURATIONS. C1 matches on
+  // the field NAME, so it read those seconds as unsealed metrics and blocked the deploy the first
+  // time a real snapshot carried them - the engine only started serializing timings_s today, so the
+  // collision could not appear until a box published. A duration is not a measurement of the
+  // gateway and must not be sealed; the subtree is skipped whole, the way rss_series and
+  // load_recipe already are by not being metric fields at all.
+  const walk = (node, path, inTimings = false) => {
+    if (Array.isArray(node)) { node.forEach((v, i) => walk(v, `${path}[${i}]`, inTimings)); return; }
     if (node == null || typeof node !== "object") return;
+    if (inTimings) return;
     for (const [k, v] of Object.entries(node)) {
+      if (k === "timings_s") { covered("C1.timings"); continue; }
       if (k.endsWith("_mock_bound")) {
         errors.push(`C1: ${path}.${k} - a raw *_mock_bound flag survives in the bundle (must be consumed at seal time)`);
         covered("C1.mock_bound");
@@ -1071,7 +1082,7 @@ export function checkConsistency(data, app, opts = {}) {
   const CHECK_BRANCHES = [
     "C1.field", "C1.certified", "C1.mock_bound", "C2.suppressed",
     "C3.stamp", "C3.lint", "C3.route", "C3.parity", "C4.cell", "C4.leak", "C6.cell", "R1.oracle",
-    "R3.selection", "R4.selection", "C7.hwm", "C5.route", "C5.lint", "C8.engine",
+    "R3.selection", "R4.selection", "C7.hwm", "C5.route", "C5.lint", "C8.engine", "C1.timings",
   ];
   // WIRING FIRST, COVERAGE SECOND. Whether each declared branch still HAS a call site is a question
   // about this file, answerable without a single gateway, and it is never downgraded by how full the
