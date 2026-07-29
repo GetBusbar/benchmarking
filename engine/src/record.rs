@@ -575,6 +575,17 @@ pub struct CellMemory {
     /// never ran has to say so with a reason rather than with a null nothing explains.
     #[serde(default = "measurement_default")]
     pub load_s: Measurement<i64>,
+    /// HOW each window failed to settle, when it did: 1 climbing, 0 oscillating, -1 falling, absent
+    /// when the window settled and there is no unsettled shape to describe.
+    ///
+    /// "Did not settle" describes two very different gateways. One climbs without bound; the other
+    /// swings around a level it keeps returning to, which is a garbage collector working, not a leak.
+    /// Published under one word they are indistinguishable, and the board renders that word as
+    /// NEVER SETTLES in red beside a leak rate - an accusation the oscillating gateway did not earn.
+    #[serde(default = "measurement_default")]
+    pub shape: Measurement<f64>,
+    #[serde(default = "measurement_default")]
+    pub idle_shape: Measurement<f64>,
     #[serde(default, deserialize_with = "null_as_empty_vec")]
     pub rss_series: Vec<RssSample>,
     /// The IDLE window's own readings, so the board can draw what the process did while nothing was
@@ -605,6 +616,8 @@ impl CellMemory {
             // publish as a bare null on a served cell because they were plain `Option`s.
             plateaued,
             load_s,
+            shape,
+            idle_shape,
         )
     }
 }

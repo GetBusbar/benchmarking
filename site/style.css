@@ -479,6 +479,10 @@ td.failcell {
   font-size: .64rem; font-weight: 600; text-transform: uppercase; letter-spacing: .04em;
   vertical-align: middle; cursor: help;
 }
+/* ...unless nothing was GROWING. An unsettled-but-oscillating gateway is a finding, not a defect, and
+   red is the wrong colour for it: the reader should see it without reading it as a leak. */
+.noplateau-pill.neutral { border-color: var(--fg-mute); color: var(--fg-mute); }
+
 /* A gateway that produced NO protocol matrix still gets a row (all n/a); this carries the reason. */
 .matrix-nores { color: var(--fg-mute); font-style: italic; }
 

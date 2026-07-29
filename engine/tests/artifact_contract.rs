@@ -62,6 +62,18 @@ const STREAM_METRICS: [&str; 8] = [
 // the memory group's reason on the way out: a window that could not judge the plateau published two
 // nulls nothing could explain. They are `Measurement`s now, so they ride in the absences map like
 // every other number and are held to the same contract here.
+/// CONDITIONAL FIELDS: absent BECAUSE the measurement succeeded.
+///
+/// `shape` and `idle_shape` describe HOW a window failed to settle. On a window that DID settle there
+/// is no unsettled shape to describe, so the honest publication is an absence carrying exactly that
+/// reason. That is the opposite of a hole - the absence IS the result.
+///
+/// They are therefore excluded from MEMORY_METRICS, which asserts "measured means a number", and
+/// named here instead so the fully-measured test still holds them to carrying a reason. Forcing them
+/// into the numeric list would make that fixture fake an unsettled window in order to satisfy a
+/// contract about settled ones.
+const CONDITIONAL_MEMORY_METRICS: [&str; 2] = ["shape", "idle_shape"];
+
 const MEMORY_METRICS: [&str; 9] = [
     "idle_rss_mib",
     "steady_state_rss_mib",
@@ -158,9 +170,30 @@ fn a_fully_measured_cell_has_every_declared_field_present_and_no_absences() {
     let absences = v["absences"]
         .as_object()
         .expect("absences must always be an object, even when empty");
+    // The conditional fields are allowed to be absent on a SETTLED window - that is what they mean -
+    // and are still required to say why. Split them out rather than ignoring them, so "settled, so
+    // there is no unsettled shape" has to be a stated reason and not a silent gap.
+    for f in CONDITIONAL_MEMORY_METRICS {
+        let key = format!("memory.{f}");
+        let entry = absences
+            .get(&key)
+            .unwrap_or_else(|| panic!("{key} must be a reasoned absence on a settled window"));
+        assert!(
+            entry.get("reason").is_some(),
+            "{key} is absent and must carry a reason: {entry:?}"
+        );
+    }
+    let unexplained: std::collections::BTreeMap<_, _> = absences
+        .iter()
+        .filter(|(k, _)| {
+            !CONDITIONAL_MEMORY_METRICS
+                .iter()
+                .any(|f| *k == &format!("memory.{f}"))
+        })
+        .collect();
     assert!(
-        absences.is_empty(),
-        "a fully measured cell has nothing to explain, but absences = {absences:?}"
+        unexplained.is_empty(),
+        "a fully measured cell has nothing left to explain, but absences = {unexplained:?}"
     );
 }
 
@@ -185,6 +218,11 @@ fn every_null_metric_carries_exactly_one_absence_and_no_absence_points_at_a_numb
         ("perf", &PERF_METRICS[..]),
         ("stream", &STREAM_METRICS[..]),
         ("memory", &MEMORY_METRICS[..]),
+        // The conditional fields are exempt from "measured means a number", NOT from the bijection.
+        // On this all-defaulted cell nothing was measured at all, so they are null here like every
+        // other field and must still carry a reason - drop them from this walk and a shape field
+        // added to the block but forgotten in absences_of! would become a bare hole nothing catches.
+        ("memory", &CONDITIONAL_MEMORY_METRICS[..]),
     ] {
         for key in keys {
             assert!(

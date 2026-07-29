@@ -434,6 +434,19 @@ pub const MEMORY_IDLE_S: u64 = 60;
 const MEMORY_TREND_PCT: f64 = 1.0;
 const MEMORY_RANGE_PCT: f64 = 2.0;
 
+/// The unsettled SHAPE as a number, because the metric surface carries `f64` and nothing else.
+///
+/// 1 climbing, 0 oscillating, -1 falling. Signed on purpose: the sign IS the direction, so a reader
+/// or a consumer that only understands "greater than zero is bad" gets the right answer without a
+/// lookup table, and the neutral shape sits at zero between the two.
+fn shape_code(shape: crate::stats::Shape) -> f64 {
+    match shape {
+        crate::stats::Shape::Climbing => 1.0,
+        crate::stats::Shape::Oscillating => 0.0,
+        crate::stats::Shape::Falling => -1.0,
+    }
+}
+
 /// Memory: what the gateway's process tree costs at rest and under load.
 ///
 /// FOUR READINGS OF ONE WINDOW, which is why this is a group. Taking idle from one window and peak
@@ -458,6 +471,9 @@ impl Metric for Memory {
             // single-sample idle could not see it at all.
             "memory_idle_static",
             "memory_idle_growth_rate_mib_per_min",
+            // HOW each window failed to settle, when it did. See `shape_code`.
+            "memory_idle_shape",
+            "memory_shape",
             "memory_peak_mib",
             "memory_hwm_mib",
             "memory_recovered_mib",
@@ -732,11 +748,22 @@ impl Metric for Memory {
         // The plateau verdict, published rather than kept. "Never settled" is a real finding about a
         // gateway and it must arrive WITH the rate it was climbing at, which is what NotSteady
         // carries; "we could not tell" stays a third, distinct answer.
+        // The shape rides with the verdict. "Never settled" describes both a gateway climbing without
+        // bound and one oscillating around a level it keeps returning to, and only the first is a
+        // leak - publishing them under one word brands a working garbage collector as a defect.
+        let mut memory_shape = Measurement::absent_because(
+            Absent::NotMeasured,
+            "a settled window has no unsettled shape to describe".to_string(),
+        );
         let (plateaued, growth) = match &verdict {
             crate::stats::Verdict::Steady => (Some(true), Measurement::Measured(0.0)),
             crate::stats::Verdict::NotSteady {
                 growth_rate_mib_per_min,
-            } => (Some(false), growth_rate_mib_per_min.clone()),
+                shape,
+            } => {
+                memory_shape = Measurement::Measured(shape_code(*shape));
+                (Some(false), growth_rate_mib_per_min.clone())
+            }
             crate::stats::Verdict::Undecidable => (
                 None,
                 Measurement::absent_because(
@@ -749,6 +776,10 @@ impl Metric for Memory {
         // THE SAME PLATEAU TEST THE LOAD WINDOW USES, pointed at the idle window. Reusing it rather
         // than inventing a second rule means "still" means the same thing on both halves of the
         // curve, and a reader comparing them is comparing like with like.
+        let mut idle_shape = Measurement::absent_because(
+            Absent::NotMeasured,
+            "a settled idle window has no unsettled shape to describe".to_string(),
+        );
         let (idle_static, idle_growth) = if idle_series.len() < 2 {
             let why = format!(
                 "the {MEMORY_IDLE_S}s idle window produced too few readings to say whether memory moved"
@@ -772,7 +803,11 @@ impl Metric for Memory {
                 }
                 crate::stats::Verdict::NotSteady {
                     growth_rate_mib_per_min,
-                } => (Measurement::Measured(0.0), growth_rate_mib_per_min),
+                    shape,
+                } => {
+                    idle_shape = Measurement::Measured(shape_code(shape));
+                    (Measurement::Measured(0.0), growth_rate_mib_per_min)
+                }
                 crate::stats::Verdict::Undecidable => {
                     let why = format!(
                         "the {MEMORY_IDLE_S}s idle window held too few readings to judge whether memory moved"
@@ -803,6 +838,8 @@ impl Metric for Memory {
                 ("memory_idle_mib", idle),
                 ("memory_idle_static", idle_static),
                 ("memory_idle_growth_rate_mib_per_min", idle_growth),
+                ("memory_idle_shape", idle_shape),
+                ("memory_shape", memory_shape),
                 ("memory_peak_mib", peak),
                 ("memory_hwm_mib", hwm),
                 ("memory_recovered_mib", recovered),

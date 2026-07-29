@@ -15,6 +15,7 @@
 // never settles. A caller must publish that rather than quietly substituting the last sample.
 
 use crate::measurement::{Absent, Measurement};
+use serde::{Deserialize, Serialize};
 
 /// One point of a memory (or any monotone-ish quantity) series: seconds since the series began, and
 /// the value in MiB at that instant.
@@ -30,6 +31,28 @@ impl Sample {
     }
 }
 
+/// HOW a window failed to settle. A gateway whose memory oscillates around a stable level - a
+/// garbage collector doing its job, an allocator returning and reclaiming arenas - is not leaking,
+/// however far it swings. A gateway whose memory trends upward for the whole window and is still
+/// rising at the end has no level at all, and that is the finding a reader needs.
+///
+/// Both fail the steadiness test, so publishing them under one word ("NEVER SETTLES", in red, beside
+/// a leak rate) brands a healthy sawtooth as a leak. The two are separable from numbers the test
+/// already computes: `drift` is the net movement between the window's halves, `spread` is how far it
+/// ranged. A climb has large drift. A wave has large spread and near-zero drift.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Shape {
+    /// Trending in one direction across the window and still going at the end. Unbounded growth is
+    /// the real defect this metric exists to catch.
+    Climbing,
+    /// Ranging widely but with no net trend: it returns to where it was. Not a leak.
+    Oscillating,
+    /// Trending DOWNWARD across the window - still releasing memory when the window closed. Not
+    /// steady, but the opposite of a leak, and it must never be labelled as one.
+    Falling,
+}
+
 /// The outcome of the steadiness gate over a trailing window.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Verdict {
@@ -37,9 +60,12 @@ pub enum Verdict {
     /// matters, and a caller may publish a steady-state number from it.
     Steady,
     /// A real, publishable result: the window did not settle. Carries the growth rate so a caller can
-    /// never say "not steady" without also saying how fast it moved.
+    /// never say "not steady" without also saying how fast it moved, and the SHAPE of the movement,
+    /// because "did not settle" describes two very different gateways and only one of them is a
+    /// defect. See `Shape`.
     NotSteady {
         growth_rate_mib_per_min: Measurement<f64>,
+        shape: Shape,
     },
     /// Fewer than four samples fell inside the window: not enough evidence to judge either way. This
     /// is a distinct case from `NotSteady`, on purpose: "we could not tell" and "we could tell and it
@@ -128,6 +154,10 @@ pub fn plateau_check(samples: &[Sample], window_s: f64, trend_pct: f64, range_pc
     if mean <= 0.0 {
         return Verdict::NotSteady {
             growth_rate_mib_per_min,
+            // No usable mean means no usable drift percentage either, so the shape cannot be told
+            // from these samples. `Oscillating` is the conservative answer: it is the one that does
+            // not accuse the gateway of leaking.
+            shape: Shape::Oscillating,
         };
     }
 
@@ -144,8 +174,21 @@ pub fn plateau_check(samples: &[Sample], window_s: f64, trend_pct: f64, range_pc
     if drift.abs() < trend_pct && spread < range_pct {
         Verdict::Steady
     } else {
+        // The shape is decided by DRIFT, the net movement between the two halves, not by spread.
+        // A window that ranged 40% but ended where it started is a wave; one that drifted upward is
+        // a climb even if it did so smoothly. The same `trend_pct` bar that decides "settled"
+        // decides "has a direction", so a window cannot be called directionless by one test and
+        // directional by the other.
+        let shape = if drift >= trend_pct {
+            Shape::Climbing
+        } else if drift <= -trend_pct {
+            Shape::Falling
+        } else {
+            Shape::Oscillating
+        };
         Verdict::NotSteady {
             growth_rate_mib_per_min,
+            shape,
         }
     }
 }
@@ -338,6 +381,69 @@ mod tests {
 
     // Boundary: drift and spread comparisons are strict "<", so sitting EXACTLY on either threshold
     // must fail, not pass. Two samples per half, chosen so drift lands at precisely 1% of the mean.
+    // A SAWTOOTH IS NOT A LEAK, AND THE VERDICT HAS TO SAY WHICH IT SAW.
+    //
+    // Both windows below fail the steadiness test, and before `Shape` existed both published as the
+    // same word - which the board renders as "NEVER SETTLES" in red beside a leak rate. One of them
+    // is a garbage collector doing its job and returning to the level it started at; the other never
+    // has a level. Branding the first as a leak is the accusation this distinction prevents.
+    //
+    // The bifrost cells on the 2026-07-29 board are the climbing shape, measured: 449 -> 537 -> 631
+    // -> 792 -> 867 MiB across the load window, still rising in the final fifth.
+    #[test]
+    fn a_sawtooth_and_a_climb_both_fail_to_settle_and_are_told_apart() {
+        // A wave: swings 40 MiB peak to trough, ends where it began. Wide spread, no drift.
+        let wave: Vec<Sample> = (0..40)
+            .map(|i| Sample {
+                t_s: i as f64,
+                mib: 100.0 + if i % 2 == 0 { 20.0 } else { -20.0 },
+            })
+            .collect();
+        match plateau_check(&wave, WHOLE, 1.0, 2.0) {
+            Verdict::NotSteady { shape, .. } => assert_eq!(
+                shape,
+                Shape::Oscillating,
+                "a window that returns to where it started is a wave, never a leak"
+            ),
+            other => panic!("a 40 MiB swing is not settled: {other:?}"),
+        }
+
+        // A climb: rises steadily and is still rising at the end.
+        let climb: Vec<Sample> = (0..40)
+            .map(|i| Sample {
+                t_s: i as f64,
+                mib: 100.0 + i as f64 * 5.0,
+            })
+            .collect();
+        match plateau_check(&climb, WHOLE, 1.0, 2.0) {
+            Verdict::NotSteady { shape, .. } => {
+                assert_eq!(
+                    shape,
+                    Shape::Climbing,
+                    "unbounded growth is the real defect"
+                )
+            }
+            other => panic!("a 200 MiB rise is not settled: {other:?}"),
+        }
+
+        // And the mirror image: still RELEASING when the window closed. Not steady, but the opposite
+        // of a leak, and it must never be labelled as one.
+        let falling: Vec<Sample> = (0..40)
+            .map(|i| Sample {
+                t_s: i as f64,
+                mib: 300.0 - i as f64 * 5.0,
+            })
+            .collect();
+        match plateau_check(&falling, WHOLE, 1.0, 2.0) {
+            Verdict::NotSteady { shape, .. } => assert_eq!(
+                shape,
+                Shape::Falling,
+                "a window still giving memory back is not a leak"
+            ),
+            other => panic!("a 200 MiB decline is not settled: {other:?}"),
+        }
+    }
+
     #[test]
     fn drift_exactly_at_the_trend_threshold_is_not_steady() {
         // halves: {100, 100} then {101, 101}; mean1=100 mean2=101 mean=100.5, drift = 1/100.5*100 ~ 0.995%.
@@ -352,7 +458,9 @@ mod tests {
         assert_eq!(
             plateau_check(&s, WHOLE, 1.0, 1_000.0),
             Verdict::NotSteady {
-                growth_rate_mib_per_min: growth_rate(&s)
+                growth_rate_mib_per_min: growth_rate(&s),
+                // drift is +1.0, exactly the trend bar, so this is the boundary case for CLIMBING.
+                shape: Shape::Climbing,
             }
         );
     }
