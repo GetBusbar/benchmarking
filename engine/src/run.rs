@@ -2092,6 +2092,28 @@ pub fn run_grid_with(
     metrics: &[&dyn metric::Metric],
 ) -> Vec<CellResult> {
     let mut out = Vec::new();
+    run_grid_streaming(cfg, lo, hi, metrics, &mut |c| out.push(c));
+    out
+}
+
+/// The same walk, HANDING EACH CELL OVER AS IT FINISHES rather than at the end.
+///
+/// `run_grid_with` returns a `Vec`, which means the whole grid must finish before its caller sees
+/// anything. `suite.rs` iterates that `Vec` and flushes a snapshot at every egress-column boundary,
+/// under a comment promising that "a run interrupted partway through must not lose every cell it
+/// already measured" - a promise the shape of the call made impossible to keep. Busbar measured 16
+/// of 36 cells across four hours; the loop never started, no checkpoint was ever written, and the
+/// box was torn down with every one of those measurements still in memory. Not one number survived.
+///
+/// So the walk pushes, and the caller decides when that is worth persisting. `run_grid_with` stays
+/// as the collecting wrapper because most tests genuinely do want the whole grid at once.
+pub fn run_grid_streaming(
+    cfg: &RunConfig,
+    lo: u32,
+    hi: u32,
+    metrics: &[&dyn metric::Metric],
+    on_cell: &mut dyn FnMut(CellResult),
+) {
     let total_cells = cfg.dialects.len() * cfg.dialects.len();
     let total = total_cells;
     let mut done = 0usize;
@@ -2105,7 +2127,7 @@ pub fn run_grid_with(
             done += 1;
             if let Some(why) = &restart_poisoned {
                 eprintln!("[cell {done}/{total}] {id}: untestable (harness: restart failed earlier in the grid)");
-                out.push(CellResult {
+                on_cell(CellResult {
                     outcome: CellOutcome::untestable(id, why.clone()),
                     metrics: None,
                     series: None,
@@ -2131,7 +2153,7 @@ pub fn run_grid_with(
                 // reached, and a live run can be tailed for real progress instead of going dark
                 // until the sentinel lands.
                 eprintln!("[cell {done}/{total}] {id}: untestable");
-                out.push(CellResult {
+                on_cell(CellResult {
                     outcome: CellOutcome::untestable(id, note),
                     metrics: None,
                     series: None,
@@ -2152,7 +2174,7 @@ pub fn run_grid_with(
                     cfg.matrix_note.clone()
                 };
                 eprintln!("[cell {done}/{total}] {id}: not_configurable");
-                out.push(CellResult {
+                on_cell(CellResult {
                     outcome: CellOutcome::not_configurable(id, note),
                     metrics: None,
                     series: None,
@@ -2285,7 +2307,7 @@ pub fn run_grid_with(
                 Served::UnprobedAuth(ev) => format!("unprobed_auth (HTTP {})", ev.status),
             };
             eprintln!("[cell {done}/{total}] {}: {label}", outcome.id);
-            out.push(CellResult {
+            on_cell(CellResult {
                 outcome,
                 metrics,
                 series,
@@ -2294,7 +2316,6 @@ pub fn run_grid_with(
             });
         }
     }
-    out
 }
 
 /// A minimal `RunConfig` for tests across this crate, mirroring `manifest::test_fixture` (one place
