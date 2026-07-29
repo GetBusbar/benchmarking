@@ -474,7 +474,11 @@ impl Metric for Memory {
                  post-load RSS under another name"
                     .to_string(),
             ),
-            Some(spec) => match crate::run::restart_to_rest(spec, &ctx.cfg.relaunch_launcher) {
+            Some(spec) => match crate::run::restart_to_rest(
+                spec,
+                &ctx.cfg.relaunch_launcher,
+                &ctx.cfg.relaunch_commands,
+            ) {
                 Err(e) => Measurement::absent_because(
                     Absent::NotMeasured,
                     format!(
@@ -1077,18 +1081,29 @@ impl Metric for AddedLatency {
                     .to_string(),
             );
         };
-        // A LEG WITH ANY FAILURE IS NOT A LATENCY READING OF THAT LEG.
+        // A LEG WITH ANY FAILURE IS NOT A LATENCY READING OF THAT LEG. The counts publish in the
+        // detail because they ARE the finding when everything failed - the site renders "failed -
+        // 0/14201 ok" off exactly this sentence - and the budget-exceeded share separates "the
+        // gateway refused" from "the response outran a bound of ours".
+        let not_clean = |leg: &str, s: &crate::gen::GenStats| {
+            let budget = if s.budget_exceeded > 0 {
+                format!(
+                    " ({} of them exceeded the response budget, a bound of ours)",
+                    s.budget_exceeded
+                )
+            } else {
+                String::new()
+            };
+            format!(
+                "the {leg} leg at c=1 was not clean: {} ok, {} fail{budget}",
+                s.ok, s.fail
+            )
+        };
         if !clean_c1_leg(gw.ok, gw.fail) {
-            return all_absent(format!(
-                "the gateway leg at c=1 was not clean: {} ok, {} fail",
-                gw.ok, gw.fail
-            ));
+            return all_absent(not_clean("gateway", &gw));
         }
         if !clean_c1_leg(direct.ok, direct.fail) {
-            return all_absent(format!(
-                "the direct-to-mock leg at c=1 was not clean: {} ok, {} fail",
-                direct.ok, direct.fail
-            ));
+            return all_absent(not_clean("direct-to-mock", &direct));
         }
         let (Some(gw_p99), Some(direct_p99)) = (gw.p99_us, direct.p99_us) else {
             return all_absent("one leg's c=1 window produced no p99 reading".to_string());

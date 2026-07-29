@@ -73,6 +73,15 @@ pub struct RunConfig {
     /// a run against an already-up target). The memory group then publishes idle as ABSENT rather
     /// than as a reading it knows was taken under load - see `Memory::measure`.
     pub relaunch: Option<crate::launch::LaunchSpec>,
+    /// The manifest's post-boot `commands`, REPLAYED ON EVERY RESTART. A gateway with no config
+    /// file is configured through its own admin API after it boots, and for docker a stop is
+    /// `docker rm -f`: the container's writable layer - the database those commands wrote - is
+    /// destroyed with it. Restarting without replaying them relaunches an UNCONFIGURED gateway:
+    /// on the 2026-07-28 board one-api lost its three channels at the memory group's restart, and
+    /// every metric measured after it (streaming, added latency) failed 100% while throughput,
+    /// measured before it, published real numbers - a half-configured gateway answering probes is
+    /// exactly the state the initial-launch path refuses to measure.
+    pub relaunch_commands: Vec<String>,
     /// THE ONE LAUNCHER THAT OWNS THIS GATEWAY'S NATIVE CHILD, for every restart across every cell.
     ///
     /// `restart_to_rest` used to build a throwaway `RealLauncher` per call: the `Child` it held was
@@ -435,6 +444,7 @@ impl SweepProbe<'_> {
 pub fn restart_to_rest(
     spec: &crate::launch::LaunchSpec,
     launcher: &std::sync::Mutex<crate::launch::RealLauncher>,
+    commands: &[String],
 ) -> Result<(), String> {
     let mut launcher = launcher
         .lock()
@@ -447,7 +457,19 @@ pub fn restart_to_rest(
     launcher.reap_previous_native_child();
     crate::launch::launch_default(&mut *launcher, spec)
         .map(|_| ())
-        .map_err(|e| format!("it did not come back up: {e:?}"))
+        .map_err(|e| format!("it did not come back up: {e:?}"))?;
+    // REPLAY THE POST-BOOT COMMANDS, exactly as the initial launch ran them. For docker the stop
+    // above was `docker rm -f`: any configuration those commands wrote into the container (an
+    // admin-API-configured gateway's database - its channels, its quota) died with the writable
+    // layer, and a gateway that comes back up unconfigured answers probes while serving nothing.
+    // A failure here is the restart failing, not a softer state: a half-configured gateway is
+    // worse than a down one, because every later metric would measure the missing configuration
+    // and publish it as the gateway's own failure.
+    for line in commands {
+        crate::launch::run_line(line, Duration::from_secs(120))
+            .map_err(|why| format!("its post-boot configuration failed: {line}: {why}"))?;
+    }
+    Ok(())
 }
 
 pub fn load_window(
@@ -991,7 +1013,20 @@ pub fn stream_pacing_interval_ms() -> u64 {
         .and_then(|v| v.trim().parse().ok())
         .unwrap_or(20)
 }
-pub const STREAM_STALL_MULTIPLIER: u64 = 2;
+/// The stall bound as a multiple of the mock's pacing interval: a gap past this is a stream that
+/// WENT QUIET, not one that wobbled off the mock's clock.
+///
+/// It was 2, and 2x a 20ms pace is a 40ms budget - a bar that mostly measured whether the gateway
+/// could keep to the mock's own clock under concurrency, which is the added_gap percentiles' job
+/// (they quantify pacing fidelity to the microsecond, per leg, and publish it). On the 2026-07-28
+/// board that budget failed nearly every gateway at every rung (streams_sustained on 6 of 16 served
+/// cells, cpu_fps on 1), so the search returned absence across the board and the metric measured
+/// nothing at all. This metric's question is DELIVERY: every expected frame arrives
+/// (`STREAM_MIN_DELIVERY_RATIO = 1.0`, deliberate, unchanged) and no lane goes quiet mid-stream.
+/// 10x the pace (200ms at the default 20ms) is a bound a reader would recognise as "the stream
+/// stalled", while scheduler jitter and GC pauses well past the mock's clock stay the gap metric's
+/// finding rather than this gate's.
+pub const STREAM_STALL_MULTIPLIER: u64 = 10;
 
 /// Fraction of expected frames that must arrive, and the share of streams that may fail, for a
 /// concurrency to hold the streams-sustained gate.
@@ -1063,15 +1098,42 @@ impl StreamWindow {
 /// whole search turns on can be pinned directly against fixed numbers rather than only through a
 /// window that needs a live mock behind it.
 pub fn streams_gate_passes(w: &StreamWindow) -> bool {
+    streams_gate_verdict(w).is_none()
+}
+
+/// WHY one window failed the gate, or `None` when it held. The clause that tripped is named with the
+/// counts that tripped it, so a rung that fails publishes evidence a reader can weigh instead of a
+/// bare `passed: false` - "a gateway failing at every rung must publish a reason, never a bare
+/// absence" is the defect class this exists for.
+pub fn streams_gate_verdict(w: &StreamWindow) -> Option<String> {
     // A window that opened no stream, or expected no frame, has not PASSED anything - it measured
     // nothing, and a ratio computed from zero must never read as a clean window by accident of
     // floating-point division.
     if w.streams == 0 || w.expected_frames == 0 {
-        return false;
+        return Some("the window opened no stream, so it measured nothing".to_string());
     }
-    w.delivery_ratio() >= STREAM_MIN_DELIVERY_RATIO
-        && w.stalls == 0
-        && w.error_ratio() < STREAM_MAX_ERROR_RATIO
+    let mut why = Vec::new();
+    if w.delivery_ratio() < STREAM_MIN_DELIVERY_RATIO {
+        why.push(format!(
+            "delivered {} of {} expected frames",
+            w.frames, w.expected_frames
+        ));
+    }
+    if w.stalls > 0 {
+        why.push(format!(
+            "{} inter-frame gap(s) past the {}ms stall bound",
+            w.stalls,
+            stall_bound_us() / 1000
+        ));
+    }
+    if w.error_ratio() >= STREAM_MAX_ERROR_RATIO {
+        why.push(format!("{} of {} streams errored", w.errored, w.streams));
+    }
+    if why.is_empty() {
+        None
+    } else {
+        Some(why.join("; "))
+    }
 }
 
 /// The stall bound in microseconds: twice the mock's own delta pacing.
@@ -1257,6 +1319,10 @@ pub struct StreamPoint {
     pub streams: u64,
     pub errored: u64,
     pub stalls: u64,
+    /// WHY the gate failed, from `streams_gate_verdict`, when it did. A failing rung publishes the
+    /// clause that tripped with the counts that tripped it, so "no rung passed" is never a bare
+    /// absence a reader has to re-derive from the raw counts.
+    pub why: Option<String>,
 }
 
 impl StreamPoint {
@@ -1266,7 +1332,7 @@ impl StreamPoint {
     /// pinned a shape against a real artifact, because none has ever carried one), so this is where
     /// the shape is decided, in one place, rather than at each of the two searches.
     pub fn to_json(&self) -> serde_json::Value {
-        serde_json::json!({
+        let mut v = serde_json::json!({
             "conc": self.concurrency,
             "passed": self.passed,
             "fps": self.fps,
@@ -1275,7 +1341,11 @@ impl StreamPoint {
             "streams": self.streams,
             "stream_errors": self.errored,
             "stalls": self.stalls,
-        })
+        });
+        if let (Some(why), Some(obj)) = (&self.why, v.as_object_mut()) {
+            obj.insert("why".to_string(), serde_json::json!(why));
+        }
+        v
     }
 }
 
@@ -1289,6 +1359,11 @@ fn point_of(w: &StreamWindow, passed: bool) -> StreamPoint {
         streams: w.streams,
         errored: w.errored,
         stalls: w.stalls,
+        why: if passed {
+            None
+        } else {
+            streams_gate_verdict(w)
+        },
     }
 }
 
@@ -1539,17 +1614,37 @@ pub fn sweep_cpu_fps_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> Cel
             fps: Measurement::Measured(pt.value),
             points: p.points,
         },
-        None => CellStreams {
-            concurrency: Measurement::absent(
-                r.peak.reason().cloned().unwrap_or(Absent::NotMeasured),
-            ),
-            fps: match (r.peak.reason().cloned(), r.peak.detail()) {
-                (Some(reason), Some(detail)) => Measurement::absent_because(reason, detail),
-                (Some(reason), None) => Measurement::absent(reason),
-                (None, _) => Measurement::absent(Absent::NotMeasured),
-            },
-            points: p.points,
-        },
+        None => {
+            // A MEASURED FAILURE IS A ZERO, NOT AN ABSENCE (the board's own rule, stated by its
+            // owner: 0 is a number, n/a is not). When the load was really offered (rungs exist) and
+            // every rung failed the gate, the gateway carried zero clean frames/sec - the same
+            // semantics `sweep_streams_cell` already publishes for a floor that fails. Each failed
+            // rung's `why` travels in the sweep, so the zero arrives with its evidence. Absence
+            // remains only for the cases where the question was never posed or the answer is a
+            // lower bound: untestable, rig-limited, an exhausted search, an interrupted probe.
+            let offered = !p.points.is_empty();
+            let gate_failed_everywhere = offered
+                && r.peak.reason() == Some(&Absent::NotMeasured)
+                && p.points.iter().all(|pt| !pt.passed);
+            if gate_failed_everywhere {
+                return CellStreams {
+                    concurrency: Measurement::Measured(0),
+                    fps: Measurement::Measured(0.0),
+                    points: p.points,
+                };
+            }
+            CellStreams {
+                concurrency: Measurement::absent(
+                    r.peak.reason().cloned().unwrap_or(Absent::NotMeasured),
+                ),
+                fps: match (r.peak.reason().cloned(), r.peak.detail()) {
+                    (Some(reason), Some(detail)) => Measurement::absent_because(reason, detail),
+                    (Some(reason), None) => Measurement::absent(reason),
+                    (None, _) => Measurement::absent(Absent::NotMeasured),
+                },
+                points: p.points,
+            }
+        }
     }
 }
 
@@ -1745,7 +1840,7 @@ pub fn run_grid_with(
             if let (Served::Untestable(ref why), Some(spec)) = (&served, cfg.relaunch.as_ref()) {
                 if why.contains("no connection") {
                     eprintln!("[cell {done}/{total}] {id}: {why} - restarting the gateway before writing off the rest of the grid");
-                    match restart_to_rest(spec, &cfg.relaunch_launcher) {
+                    match restart_to_rest(spec, &cfg.relaunch_launcher, &cfg.relaunch_commands) {
                         Ok(()) => {
                             served = probe_cell(cfg, &id, healthy);
                             eprintln!(
@@ -1863,6 +1958,7 @@ pub(crate) fn test_fixture(gw: SocketAddr, mock: SocketAddr) -> RunConfig {
         untestable_cells: Vec::new(),
         untestable_note: String::new(),
         relaunch: None,
+        relaunch_commands: Vec::new(),
         relaunch_launcher: Default::default(),
     }
 }
@@ -2051,19 +2147,70 @@ while True:
         let spec = listening_native_spec(port, &marker);
         let launcher: std::sync::Mutex<crate::launch::RealLauncher> = Default::default();
 
-        restart_to_rest(&spec, &launcher).expect("the first restart must come up");
+        restart_to_rest(&spec, &launcher, &[]).expect("the first restart must come up");
         let pid1 = launcher
             .lock()
             .expect("lock")
             .native_pid()
             .expect("a native child must be tracked");
 
-        restart_to_rest(&spec, &launcher).expect("the second restart must come up");
+        restart_to_rest(&spec, &launcher, &[]).expect("the second restart must come up");
 
         assert!(
             !ps_state(pid1).contains('Z'),
             "the process the second restart replaced must be reaped, not left as a zombie; ps state was {:?}",
             ps_state(pid1)
+        );
+
+        let _ = crate::supervise::stop_and_wait(&spec.runtime, spec.port, Duration::from_secs(5));
+    }
+
+    // THE UNCONFIGURED-RELAUNCH DEFECT THIS GUARDS AGAINST. A gateway with no config file is
+    // configured through its own admin API by the manifest's `commands`, run once after the initial
+    // launch. For docker a stop is `docker rm -f`, so the database those commands wrote dies with
+    // the container - and `restart_to_rest` relaunched WITHOUT replaying them. On the 2026-07-28
+    // board one-api lost its three channels at the memory group's restart: throughput (measured
+    // before it) published real numbers, and streaming + added latency (measured after it) failed
+    // 100%, publishing the missing configuration as the gateway's own failure. The restart must
+    // replay the commands, and a command that fails must fail the restart: a half-configured
+    // gateway answering probes is worse than a down one.
+    #[test]
+    fn restart_to_rest_replays_the_post_boot_commands_and_fails_when_they_do() {
+        if std::process::Command::new("sh")
+            .args(["-c", "command -v taskset"])
+            .output()
+            .map(|o| !o.status.success())
+            .unwrap_or(true)
+        {
+            eprintln!("skipping restart_to_rest_replays_the_post_boot_commands_and_fails_when_they_do: no taskset on this platform");
+            return;
+        }
+        let marker = format!("otb-test-restart-commands-{}", std::process::id());
+        let port = {
+            let l = TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral port to pick one");
+            l.local_addr().expect("addr").port()
+        };
+        let spec = listening_native_spec(port, &marker);
+        let launcher: std::sync::Mutex<crate::launch::RealLauncher> = Default::default();
+
+        // A witness file only the replayed command writes: its existence IS the replay.
+        let witness = std::env::temp_dir().join(format!("{marker}.witness"));
+        let _ = std::fs::remove_file(&witness);
+        let write = format!("touch {}", witness.display());
+        restart_to_rest(&spec, &launcher, &[write])
+            .expect("a restart whose post-boot command succeeds must come up");
+        assert!(
+            witness.exists(),
+            "the restart must REPLAY the post-boot commands, not just relaunch the process"
+        );
+        let _ = std::fs::remove_file(&witness);
+
+        // And a failing command is the restart failing, loudly, naming the command.
+        let err = restart_to_rest(&spec, &launcher, &["false".to_string()])
+            .expect_err("a failing post-boot command must fail the restart");
+        assert!(
+            err.contains("post-boot configuration failed"),
+            "the error must name the configuration stage, got: {err}"
         );
 
         let _ = crate::supervise::stop_and_wait(&spec.runtime, spec.port, Duration::from_secs(5));
