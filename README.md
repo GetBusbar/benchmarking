@@ -32,7 +32,7 @@ Full, auto-generated result pages (regenerated from the raw JSON on every run - 
 Each page shows added latency (µs), RPS ceiling, idle/peak memory, whether the gateway served, and the
 exact build/commit measured, plus the charts below.
 
-> Numbers land here as runs complete. Re-run `run-all.sh` and these pages + charts update in place.
+> Numbers land here as runs complete. Re-run `run-on-ec2.sh` and these pages + charts update in place.
 
 ## Prerequisites
 
@@ -53,9 +53,15 @@ or (for a native gateway) its released image's binary. Nothing to fetch by hand 
 ```sh
 git clone https://github.com/GetBusbar/benchmarking && cd benchmarking
 
-./run-all.sh                     # every gateway, all metrics (latency + throughput + memory)
-./run-all.sh litellm-rust bifrost   # a subset
+./run-on-ec2.sh                      # every gateway, one fresh box each, in parallel
+./run-on-ec2.sh litellm-rust bifrost # a subset
+./run-on-ec2.sh harvest              # pull results from boxes a dead run left behind
+./run-on-ec2.sh kill                 # terminate every box now
 ```
+
+Requires awscli v2 (configured), `ssh` and `rsync`. Every gateway gets its own fresh
+`m7g.4xlarge`, so no gateway inherits another's page cache or disk state, and the wall clock is
+the slowest single gateway rather than the sum of all of them.
 
 One run measures **latency, throughput, and memory** for every gateway on the same box, then
 regenerates the charts and the report pages. Out comes `results/matrix/<gateway>.json` (the
@@ -93,7 +99,7 @@ Plan for it - this is a build-and-measure benchmark, not a quick script:
   `m7g.4xlarge`. Most of that is *building* - LiteLLM-Rust from source is the long pole (~15–20 min),
   plus the LiteLLM/Kong/Helicone images and busbar. The measurement itself is only ~5–6 min per
   gateway (latency + throughput sweep + a memory soak).
-- **A single gateway** (e.g. `run-all.sh busbar`): **~8–12 min**, or ~2–3 min if it's already built.
+- **A single gateway** (e.g. `run-on-ec2.sh busbar`): **~8–12 min**, or ~2–3 min if it's already built.
 - **Locally**, subtract the box provisioning (~2–3 min) but expect the same build/measure times.
 
 The one-click EC2 script does all of this unattended and terminates the box when done, so the wall
@@ -112,7 +118,7 @@ faster.
 The matrix's best same-dialect diagonal cell IS this passthrough measurement (the retired standalone
 `perf/` suite is gone; gen-data projects the board's headline perf from the matrix cell).
 
-**`stream/`** (opt-in: `SUITES="stream matrix" ./run-all.sh`) - what the gateway adds to a
+**`stream/`** (opt-in: `SUITES="stream matrix" ./run-on-ec2.sh`) - what the gateway adds to a
 token stream. The mock answers `stream:true` with a valid SSE stream: a role chunk, then 64
 content deltas paced at 20 ms, then finish + `[DONE]` (Anthropic event shape on `/messages`).
 Against that fixed pace, per gateway:
@@ -137,7 +143,7 @@ representable in `results/stream/<gateway>.json` only so older artifacts predati
 still parse. The `stream_*` fields are additive; existing result files stay valid. Knobs: `STREAM_CHUNKS`,
 `STREAM_INTERVAL_MS`, `STREAM_CHUNK_BYTES`, `STALL_X`, `SWEEP`, `SWEEP_DUR`.
 
-**`xlate/`** (opt-in: `SUITES="xlate matrix" ./run-all.sh`) measures protocol translation.
+**`xlate/`** (opt-in: `SUITES="xlate matrix" ./run-on-ec2.sh`) measures protocol translation.
 The client speaks Anthropic (POST `/v1/messages`, a Messages body, `anthropic-version` and
 `x-api-key` headers) while the upstream mock speaks OpenAI on the manifest's `GW_PATH`, so the
 gateway must translate the request out and the response back. The mock is untouched; that is the
