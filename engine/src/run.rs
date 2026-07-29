@@ -1885,43 +1885,57 @@ pub fn sweep_cpu_fps_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> Cel
     // range made the ladder arbitrary and made a WIDER range open with a HIGHER first probe, which is
     // how a 1..65536 run began by asking for 32768 concurrent connections.
     let r = search::saturation_plateau(&mut p, lo, hi);
-    match r.peak.value() {
-        Some(pt) => CellStreams {
+    cpu_fps_result_from_search(&r.peak, p.points)
+}
+
+/// Turn what the fps search found into the cell's published pair. PURE, and separate from the search
+/// that feeds it, for the reason `apply_peak_verdict` is separate from its judge: everything this
+/// decides is plain data, while the only part that needs a socket is building the probe. Deciding it
+/// inline left the rule untestable - a round-2 audit deleted the `NotMeasured` key below and all 60
+/// `run::` tests plus all 11 search-property tests stayed green, which is the whole defect class this
+/// codebase treats as its worst.
+///
+/// A MEASURED FAILURE IS A ZERO, NOT AN ABSENCE (the board's own rule, stated by its owner: 0 is a
+/// number, n/a is not). When the load was really offered (rungs exist) and every rung failed the
+/// gate, the gateway carried zero clean frames/sec - the same semantics `sweep_streams_cell` already
+/// publishes for a floor that fails. Each failed rung's `why` travels in the sweep, so the zero
+/// arrives with its evidence.
+///
+/// THE `NotMeasured` KEY IS LOad-BEARING. Absence remains for every case where the question was never
+/// posed or the answer is a lower bound - untestable, rig-limited, an exhausted search, an
+/// interrupted probe - and an interruption is exactly the shape that reaches here with rungs present
+/// and all of them failed. Without the key, a rig that aborted mid-climb publishes as the gateway's
+/// honestly-measured zero.
+fn cpu_fps_result_from_search(
+    peak: &Measurement<crate::search::PeakPoint>,
+    points: Vec<StreamPoint>,
+) -> CellStreams {
+    if let Some(pt) = peak.value() {
+        return CellStreams {
             concurrency: Measurement::Measured(pt.concurrency),
             fps: Measurement::Measured(pt.value),
-            points: p.points,
+            points,
+        };
+    }
+    let offered = !points.is_empty();
+    let gate_failed_everywhere = offered
+        && peak.reason() == Some(&Absent::NotMeasured)
+        && points.iter().all(|pt| !pt.passed);
+    if gate_failed_everywhere {
+        return CellStreams {
+            concurrency: Measurement::Measured(0),
+            fps: Measurement::Measured(0.0),
+            points,
+        };
+    }
+    CellStreams {
+        concurrency: Measurement::absent(peak.reason().cloned().unwrap_or(Absent::NotMeasured)),
+        fps: match (peak.reason().cloned(), peak.detail()) {
+            (Some(reason), Some(detail)) => Measurement::absent_because(reason, detail),
+            (Some(reason), None) => Measurement::absent(reason),
+            (None, _) => Measurement::absent(Absent::NotMeasured),
         },
-        None => {
-            // A MEASURED FAILURE IS A ZERO, NOT AN ABSENCE (the board's own rule, stated by its
-            // owner: 0 is a number, n/a is not). When the load was really offered (rungs exist) and
-            // every rung failed the gate, the gateway carried zero clean frames/sec - the same
-            // semantics `sweep_streams_cell` already publishes for a floor that fails. Each failed
-            // rung's `why` travels in the sweep, so the zero arrives with its evidence. Absence
-            // remains only for the cases where the question was never posed or the answer is a
-            // lower bound: untestable, rig-limited, an exhausted search, an interrupted probe.
-            let offered = !p.points.is_empty();
-            let gate_failed_everywhere = offered
-                && r.peak.reason() == Some(&Absent::NotMeasured)
-                && p.points.iter().all(|pt| !pt.passed);
-            if gate_failed_everywhere {
-                return CellStreams {
-                    concurrency: Measurement::Measured(0),
-                    fps: Measurement::Measured(0.0),
-                    points: p.points,
-                };
-            }
-            CellStreams {
-                concurrency: Measurement::absent(
-                    r.peak.reason().cloned().unwrap_or(Absent::NotMeasured),
-                ),
-                fps: match (r.peak.reason().cloned(), r.peak.detail()) {
-                    (Some(reason), Some(detail)) => Measurement::absent_because(reason, detail),
-                    (Some(reason), None) => Measurement::absent(reason),
-                    (None, _) => Measurement::absent(Absent::NotMeasured),
-                },
-                points: p.points,
-            }
-        }
+        points,
     }
 }
 
@@ -2968,6 +2982,59 @@ while True:
     // confirmation windows at c=2, and the fresh window at the stepped-down c=1); conns 16+ would
     // pass. Under the old code the two follow-up windows at c=1 landed on 16-17 and, with the
     // failing fresh window casting the seed vote, c=1 published as a sustained ceiling.
+    // A RIG ABORT IS NOT THE GATEWAY'S ZERO, and this pins the key that keeps them apart.
+    //
+    // `cpu_fps_result_from_search` publishes a MEASURED 0 when the load was offered and every rung
+    // failed the gate. An interrupted climb arrives in exactly that shape - rungs present, none of
+    // them passing - so the only thing separating "the gateway carried nothing" from "our own rig
+    // stopped asking" is the `NotMeasured` reason key. A round-2 audit deleted that key and all 60
+    // run:: tests and all 11 search-property tests stayed green, so the rule was real and unguarded.
+    #[test]
+    fn a_rig_abort_with_every_rung_failing_is_absent_not_the_gateways_measured_zero() {
+        let failed_rung = |c: u32| StreamPoint {
+            concurrency: c,
+            passed: false,
+            fps: 0.0,
+            frames: 0,
+            expected_frames: 64,
+            content_frames: 0,
+            expected_content_frames: 63,
+            streams: c as u64,
+            errored: 0,
+            stalls: 0,
+            why: Some("delivered 0 of 63 expected content frames".to_string()),
+        };
+        let points = vec![failed_rung(1), failed_rung(2)];
+
+        // The genuine failure: every rung was offered and every rung failed. A real, measured zero.
+        let genuine: Measurement<crate::search::PeakPoint> = Measurement::absent_because(
+            Absent::NotMeasured,
+            "no concurrency from 1 to 2 passed the gate",
+        );
+        let r = cpu_fps_result_from_search(&genuine, points.clone());
+        assert_eq!(
+            r.fps.copied(),
+            Some(0.0),
+            "the gateway carried no clean frames, which is a 0"
+        );
+        assert_eq!(r.concurrency.copied(), Some(0));
+
+        // The rig abort, in the SAME shape: rungs present, all failing. It must stay absent.
+        let interrupted: Measurement<crate::search::PeakPoint> = Measurement::absent_because(
+            Absent::RigLimited,
+            "probe interrupted; the curve was never observed to turn over",
+        );
+        let r = cpu_fps_result_from_search(&interrupted, points);
+        assert_eq!(
+            r.fps.copied(),
+            None,
+            "an interruption is the rig failing to finish asking, never the gateway's measured zero"
+        );
+        assert_eq!(r.fps.reason(), Some(&Absent::RigLimited));
+        assert!(r.fps.detail().unwrap_or_default().contains("interrupted"));
+        assert_eq!(r.concurrency.reason(), Some(&Absent::RigLimited));
+    }
+
     #[test]
     fn a_stepped_down_stream_rung_whose_fresh_window_fails_ends_the_search_without_a_vote() {
         let gw = sse_ladder_server(|n| n <= 3 || n >= 16);
