@@ -1211,39 +1211,7 @@ pub fn run_suite_with(
             any_served = true;
         }
 
-        let perf = match (&result.metrics, ing.parse::<Dialect>()) {
-            (Some(m), Ok(d)) => {
-                let mut p = judge_cell(cfg, d, m).perf;
-                // THE RUNGS THE SEARCH WALKED. Published whatever the verdict: when the peak is
-                // suppressed as rig-bound, or absent because the search never found a turnover, the
-                // sweep is the only thing that explains WHY, and a bare null with no points beside
-                // it is unreviewable.
-                if let Some(series) = result.series.as_ref() {
-                    p.sweep_max_proxy = series.sweep.clone();
-                    p.sweep_sustained_20ms = series.sweep_sustained.clone();
-                }
-                // THE ANTI-FALSE-POSITIVE GUARD, published beside the numbers it qualifies. A cell
-                // whose egress dialect was NOT PROVEN (`None`) still carries its measurements - they
-                // are real observations of what the gateway did - but it can no longer be read as an
-                // unqualified translation claim, because the flag beside them says so and the note
-                // names what the mock actually received instead. See `reverify.rs` for why `None`
-                // (diagonal cell, recording off, mock unreachable) is a first-class third answer
-                // rather than a failure. A `Some(false)` - proof of a MISROUTE - is handled below;
-                // that one does not get to publish numbers at all.
-                p.egress_reverified = result.reverify.verified;
-                p.reverify_note = result.reverify.note.clone();
-                Some(p)
-            }
-            _ => None,
-        };
-
-        let stream = match (&result.metrics, ing.parse::<Dialect>()) {
-            (Some(m), Ok(d)) => Some(cell_stream(cfg, d, m, result.series.as_ref())),
-            _ => None,
-        };
-
-        let (perf, stream, perf_dropped) =
-            withhold_if_refuted(&result.reverify, perf, stream, &ing, &eg);
+        let (perf, stream, perf_dropped) = assemble_cell_measurements(cfg, &result, &ing, &eg);
 
         let cell = Cell {
             perf_dropped,
@@ -1329,6 +1297,58 @@ pub fn run_suite_with(
 /// Pure, and separate from the grid loop, because this is the one branch in the suite that decides
 /// whether a measured number reaches the board at all, and the loop around it cannot be driven to a
 /// refutation from a fixture where one loopback server plays both the gateway and the mock.
+/// Build a cell's perf and stream blocks and apply the refutation withholding to BOTH, as one step.
+///
+/// Extracted from `run_suite_with` so the composition is drivable. `withhold_if_refuted` had thorough
+/// tests, but nothing tested that it was CALLED: the whole block lived inline in a function that needs
+/// a gateway, a mock and a socket to reach, so deleting the call left every test green while a cell
+/// whose egress was PROVEN MISROUTED published its numbers as an unqualified translation claim. A
+/// guard that cannot be shown to run is not a guard, which is the defect class this codebase treats as
+/// its worst, so the guard and its invocation now live behind one pure function a test can drive.
+fn assemble_cell_measurements(
+    cfg: &SuiteConfig,
+    result: &crate::run::CellResult,
+    ing: &str,
+    eg: &str,
+) -> (
+    Option<crate::record::CellPerf>,
+    Option<crate::record::CellStream>,
+    Option<String>,
+) {
+    let perf = match (&result.metrics, ing.parse::<Dialect>()) {
+        (Some(m), Ok(d)) => {
+            let mut p = judge_cell(cfg, d, m).perf;
+            // THE RUNGS THE SEARCH WALKED. Published whatever the verdict: when the peak is
+            // suppressed as rig-bound, or absent because the search never found a turnover, the
+            // sweep is the only thing that explains WHY, and a bare null with no points beside
+            // it is unreviewable.
+            if let Some(series) = result.series.as_ref() {
+                p.sweep_max_proxy = series.sweep.clone();
+                p.sweep_sustained_20ms = series.sweep_sustained.clone();
+            }
+            // THE ANTI-FALSE-POSITIVE GUARD, published beside the numbers it qualifies. A cell
+            // whose egress dialect was NOT PROVEN (`None`) still carries its measurements - they
+            // are real observations of what the gateway did - but it can no longer be read as an
+            // unqualified translation claim, because the flag beside them says so and the note
+            // names what the mock actually received instead. See `reverify.rs` for why `None`
+            // (diagonal cell, recording off, mock unreachable) is a first-class third answer
+            // rather than a failure. A `Some(false)` - proof of a MISROUTE - is handled below;
+            // that one does not get to publish numbers at all.
+            p.egress_reverified = result.reverify.verified;
+            p.reverify_note = result.reverify.note.clone();
+            Some(p)
+        }
+        _ => None,
+    };
+
+    let stream = match (&result.metrics, ing.parse::<Dialect>()) {
+        (Some(m), Ok(d)) => Some(cell_stream(cfg, d, m, result.series.as_ref())),
+        _ => None,
+    };
+
+    withhold_if_refuted(&result.reverify, perf, stream, ing, eg)
+}
+
 fn withhold_if_refuted(
     reverify: &crate::reverify::Reverified,
     perf: Option<CellPerf>,
@@ -2553,6 +2573,79 @@ mod tests {
         assert!(
             dropped.contains("anthropic>openai"),
             "the marker must name the pairing whose claim was withheld, got {dropped:?}"
+        );
+    }
+
+    // THE CALL SITE, not the guard. The three tests around this one drive `withhold_if_refuted`
+    // directly and pin its behaviour thoroughly - and every one of them stayed green while the
+    // question "is it ever called on a real cell?" went unasked. The call lived inline in
+    // `run_suite_with`, which needs a gateway process, a mock and a socket to reach, so nothing
+    // could reach it: deleting the line published a PROVEN MISROUTE's numbers as an unqualified
+    // translation claim with the whole suite passing. This drives the composition instead.
+    #[test]
+    fn a_refuted_cell_is_withheld_by_the_assembly_not_only_by_the_guard() {
+        let dir = tmpdir("assemble-withhold");
+        let cfg = cfg_for(&dir, "127.0.0.1:1".parse().expect("addr"));
+        let mut metrics = std::collections::BTreeMap::new();
+        metrics.insert("rps_max_proxy", Measurement::Measured(1_200.0));
+        metrics.insert("conc_at_peak", Measurement::Measured(64.0));
+        // The assertions below are about the WITHHOLDING DECISION, not about any published rate.
+        // This fixture points the gateway and the mock at the same address, so every peak comes back
+        // rig-bound and absent either way - asserting on a number here would pass identically with
+        // the withholding deleted, which is the exact defect this test exists to rule out. What
+        // separates the two cases is the marker, the stream block, and the surviving evidence.
+        let refuted = crate::run::CellResult {
+            outcome: crate::cell::CellOutcome::served(crate::cell::CellId {
+                ingress: "anthropic".into(),
+                egress: "openai".into(),
+            }),
+            metrics: Some(metrics),
+            series: None,
+            timings_s: None,
+            reverify: crate::reverify::Reverified {
+                verified: Some(false),
+                note: Some("the mock received an anthropic request on the openai leg".into()),
+            },
+        };
+
+        let (perf, stream, dropped) =
+            assemble_cell_measurements(&cfg, &refuted, "anthropic", "openai");
+        let perf = perf.expect("the evidence must survive - withholding is not deletion");
+        assert_eq!(
+            perf.egress_reverified,
+            Some(false),
+            "the proof that refuted the cell must reach the artifact"
+        );
+        let marker = dropped.expect("the assembly must publish the marker a consumer branches on");
+        assert!(
+            marker.contains("anthropic>openai"),
+            "the marker names the pairing whose claim was withheld, got {marker:?}"
+        );
+        assert!(
+            stream.is_some(),
+            "a refuted cell keeps its stream block, withheld - deleting it would erase the evidence"
+        );
+
+        // The mirror, so this is not "the assembly always drops" passing for the wrong reason: an
+        // UNCHECKED re-verification (diagonal cell, mock not recording, mock unreachable) is not a
+        // refutation, and withholding on it would let our own configuration erase real measurements.
+        let unchecked = crate::run::CellResult {
+            reverify: crate::reverify::Reverified {
+                verified: None,
+                note: None,
+            },
+            ..refuted
+        };
+        let (perf, _stream, dropped) =
+            assemble_cell_measurements(&cfg, &unchecked, "anthropic", "openai");
+        assert!(
+            dropped.is_none(),
+            "an unchecked cell withholds nothing, got {dropped:?}"
+        );
+        assert_eq!(
+            perf.expect("perf survives").egress_reverified,
+            None,
+            "and it must not be recorded as having been checked"
         );
     }
 

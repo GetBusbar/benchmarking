@@ -1,9 +1,12 @@
 /* On the Bench: AI tool benchmark results site. Dark-first, Inter, no framework. */
 
-@font-face { font-family: "Inter"; src: url("fonts/Inter-Regular.ttf") format("truetype"); font-weight: 400; font-display: swap; }
-@font-face { font-family: "Inter"; src: url("fonts/Inter-Medium.ttf") format("truetype"); font-weight: 500; font-display: swap; }
-@font-face { font-family: "Inter"; src: url("fonts/Inter-SemiBold.ttf") format("truetype"); font-weight: 600; font-display: swap; }
-@font-face { font-family: "Inter"; src: url("fonts/Inter-Bold.ttf") format("truetype"); font-weight: 700; font-display: swap; }
+/* woff2 first, ttf second: the same four faces were 1.6 MB of TrueType, ~780 KB on the wire and the
+   slowest thing on the page. woff2 is ~140 KB each. The ttf stays as the fallback for anything that
+   cannot read woff2 - it costs nothing, since a browser only fetches the first format it supports. */
+@font-face { font-family: "Inter"; src: url("fonts/Inter-Regular.woff2") format("woff2"), url("fonts/Inter-Regular.ttf") format("truetype"); font-weight: 400; font-display: swap; }
+@font-face { font-family: "Inter"; src: url("fonts/Inter-Medium.woff2") format("woff2"), url("fonts/Inter-Medium.ttf") format("truetype"); font-weight: 500; font-display: swap; }
+@font-face { font-family: "Inter"; src: url("fonts/Inter-SemiBold.woff2") format("woff2"), url("fonts/Inter-SemiBold.ttf") format("truetype"); font-weight: 600; font-display: swap; }
+@font-face { font-family: "Inter"; src: url("fonts/Inter-Bold.woff2") format("woff2"), url("fonts/Inter-Bold.ttf") format("truetype"); font-weight: 700; font-display: swap; }
 
 /* Theme palettes. Every colour used across the site is a variable here, so a
    single [data-theme] flip on <html> restyles every surface, including the
