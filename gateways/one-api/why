@@ -18,3 +18,26 @@ INITIAL_ROOT_TOKEN boot  # its relay routes serve nothing without a token it iss
 # the mock, and create the API key the harness authenticates with. Every one of those is either
 # booting the process into a usable state or pointing an upstream at the mock.
 curl upstream  # the admin-API calls that wire this gateway's upstreams to the test mock
+
+## The anthropic and gemini cells are undeclared, not untestable (2026-07-29)
+
+They used to be declared in the matrix AND listed in `untestable_cells`. That is a contradiction: a
+declaration claims the gateway does the thing, and `untestable` admits we could not show that it
+does. Holding both publishes a grey where the board owes a yes or a no, and it was two of One-API's
+three declared cells - so the row was one measured cell out of three claimed.
+
+What was tried, and what is known:
+
+- Channels are created by `commands` (types 14 and 24, `claude-3-5-sonnet-20240620` and
+  `gemini-1.5-pro`, `base_url` on the mock). The POSTs succeed.
+- A relay request for either model answers HTTP 503 with One-API's own "no available channel for
+  model ... under group default".
+- The OpenAI channel (type 1) is created by the SAME payload shape, in the same group, with the same
+  key and base_url, and routes normally. So group membership, model-list matching and credential are
+  all working; whatever differs is specific to channel types 14 and 24.
+- True in all eight runs of 2026-07-27/28, including the oldest engine. Not a regression in One-API
+  or in this harness - a configuration we have not got right.
+
+Rather than guess at it on the eve of a full run, the cells are undeclared. That under-claims: if
+One-API does translate to these dialects, this board says nothing about it rather than saying no.
+Re-declare the moment the correct channel setup is known - the `commands` file is the whole of it.

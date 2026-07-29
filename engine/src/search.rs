@@ -34,12 +34,58 @@ use crate::measurement::{Absent, Measurement};
 use serde::Serialize;
 use std::collections::BTreeMap;
 
+/// What a load window observed BESIDE its rate: the latency it ran at and the requests it lost.
+///
+/// The load generator computes both for every window it runs and always has. They used to die at
+/// this boundary, because `Sample` carried a rate and a verdict and nothing else - so a sweep of 33
+/// windows published 33 rates and threw away 33 latency readings it had already paid for. The cost
+/// of that was not the lost evidence, it was the second search: `rps_sustained_20ms` could not be
+/// read off the throughput sweep, so it re-drove the whole cell minutes later, after the memory
+/// group had restarted the gateway. The two published throughput numbers then described two
+/// different states of the same gateway, and on three cells of the 2026-07-28 run the "sustained"
+/// number came out ABOVE the "maximum" one. Neither reading was wrong; they were not simultaneous.
+///
+/// Carrying this is what lets one sweep answer both questions from one set of windows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct Reading {
+    /// `None` when the window ran but reported no percentile. Absent, not zero: a gate that needs a
+    /// latency has not earned one from a window that never produced it.
+    pub p99_us: Option<u64>,
+    pub ok: u64,
+    pub fail: u64,
+}
+
 /// One probe outcome at a concurrency: whether the gate passed, and the value it produced (rps,
 /// fps, or 0.0 for a gate with no scalar output beyond pass/fail).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Sample {
     pub value: f64,
     pub passed: bool,
+    /// The latency and loss behind `passed`, for probes that measure them.
+    ///
+    /// `None` is a real state and not a placeholder: the stream searches judge frames per second and
+    /// never take an HTTP latency percentile, so they have no reading to give. A consumer that needs
+    /// one must handle its absence rather than read a zero as "measured no failures".
+    pub reading: Option<Reading>,
+}
+
+impl Sample {
+    /// A probe outcome with no latency reading behind it.
+    pub fn new(value: f64, passed: bool) -> Self {
+        Sample {
+            value,
+            passed,
+            reading: None,
+        }
+    }
+
+    /// The same outcome, carrying what the window observed.
+    pub fn with_reading(self, reading: Reading) -> Self {
+        Sample {
+            reading: Some(reading),
+            ..self
+        }
+    }
 }
 
 /// A concurrency probe. `None` means the window produced nothing (deadline fired, or the caller's
@@ -55,6 +101,9 @@ pub struct ProbedPoint {
     pub concurrency: u32,
     pub passed: bool,
     pub value: f64,
+    /// What the window observed, when the probe measures it. Published beside the rate so a reader
+    /// can re-derive BOTH throughput answers from the one sweep rather than taking the pair on trust.
+    pub reading: Option<Reading>,
 }
 
 /// Memoised probe access shared by both searches: a concurrency is never probed twice, and every
@@ -67,7 +116,11 @@ struct Search<'p, P: Probe> {
 
 impl<'p, P: Probe> Search<'p, P> {
     fn new(probe: &'p mut P) -> Self {
-        Self { probe, cache: BTreeMap::new(), points: Vec::new() }
+        Self {
+            probe,
+            cache: BTreeMap::new(),
+            points: Vec::new(),
+        }
     }
 
     fn sample(&mut self, c: u32) -> Option<Sample> {
@@ -75,7 +128,12 @@ impl<'p, P: Probe> Search<'p, P> {
             return Some(s.clone());
         }
         let sample = self.probe.probe(c)?;
-        self.points.push(ProbedPoint { concurrency: c, passed: sample.passed, value: sample.value });
+        self.points.push(ProbedPoint {
+            concurrency: c,
+            passed: sample.passed,
+            value: sample.value,
+            reading: sample.reading,
+        });
         self.cache.insert(c, sample.clone());
         Some(sample)
     }
@@ -89,7 +147,12 @@ impl<'p, P: Probe> Search<'p, P> {
     /// noise floor was derived from rather than asking a reader to take it on trust.
     fn sample_repeat(&mut self, c: u32) -> Option<Sample> {
         let sample = self.probe.probe(c)?;
-        self.points.push(ProbedPoint { concurrency: c, passed: sample.passed, value: sample.value });
+        self.points.push(ProbedPoint {
+            concurrency: c,
+            passed: sample.passed,
+            value: sample.value,
+            reading: sample.reading,
+        });
         self.cache.insert(c, sample.clone());
         Some(sample)
     }
@@ -116,7 +179,10 @@ impl Ladder {
     /// how wide the range was set: that is what makes a wider search a more dangerous one, and it is
     /// the defect this type exists to make unrepresentable.
     fn from_floor(min_conc: u32, max_conc: u32) -> Self {
-        Self { current: min_conc.max(1), max: max_conc }
+        Self {
+            current: min_conc.max(1),
+            max: max_conc,
+        }
     }
 
     fn floor(&self) -> u32 {
@@ -151,12 +217,21 @@ pub struct BisectResult {
 /// concurrency (everything at or below the ceiling passes, everything above fails). `min_conc` and `max_conc`
 /// are normalised (swapped) if given reversed.
 pub fn bisect_ceiling<P: Probe>(probe: &mut P, min_conc: u32, max_conc: u32) -> BisectResult {
-    let (min_conc, max_conc) = if min_conc <= max_conc { (min_conc, max_conc) } else { (max_conc, min_conc) };
+    let (min_conc, max_conc) = if min_conc <= max_conc {
+        (min_conc, max_conc)
+    } else {
+        (max_conc, min_conc)
+    };
     let mut s = Search::new(probe);
 
     let lo_sample = match s.sample(min_conc) {
         Some(v) => v,
-        None => return BisectResult { ceiling: Measurement::absent(Absent::NotMeasured), points: s.points },
+        None => {
+            return BisectResult {
+                ceiling: Measurement::absent(Absent::NotMeasured),
+                points: s.points,
+            }
+        }
     };
     if !lo_sample.passed {
         // A FAILING FLOOR ONLY PROVES THE CEILING IS BELOW THE FLOOR.
@@ -167,12 +242,18 @@ pub fn bisect_ceiling<P: Probe>(probe: &mut P, min_conc: u32, max_conc: u32) -> 
         // publish a specific number the search never established, which is the same fabrication as
         // publishing the range bound at the top end, just at the other end of the range.
         return if min_conc <= 1 {
-            BisectResult { ceiling: Measurement::Measured(0), points: s.points }
+            BisectResult {
+                ceiling: Measurement::Measured(0),
+                points: s.points,
+            }
         } else {
             let detail = format!(
                 "the search floor c={min_conc} already failed the gate, so the ceiling is below it and was never probed"
             );
-            BisectResult { ceiling: Measurement::absent_because(Absent::SearchExhausted, detail), points: s.points }
+            BisectResult {
+                ceiling: Measurement::absent_because(Absent::SearchExhausted, detail),
+                points: s.points,
+            }
         };
     }
 
@@ -208,7 +289,10 @@ pub fn bisect_ceiling<P: Probe>(probe: &mut P, min_conc: u32, max_conc: u32) -> 
                 let detail = format!(
                     "probe interrupted while climbing at c={c}; the ceiling is at least {a}, and nothing above it was tested"
                 );
-                return BisectResult { ceiling: Measurement::absent_because(Absent::NotMeasured, detail), points: s.points };
+                return BisectResult {
+                    ceiling: Measurement::absent_because(Absent::NotMeasured, detail),
+                    points: s.points,
+                };
             }
         }
     }
@@ -216,7 +300,10 @@ pub fn bisect_ceiling<P: Probe>(probe: &mut P, min_conc: u32, max_conc: u32) -> 
         // No failure anywhere in the range: publishing max_conc would report our own search bound as
         // the gate's ceiling.
         let detail = format!("c={max_conc} still passes at the top of the search range; the true ceiling is at least {max_conc}");
-        return BisectResult { ceiling: Measurement::absent_because(Absent::SearchExhausted, detail), points: s.points };
+        return BisectResult {
+            ceiling: Measurement::absent_because(Absent::SearchExhausted, detail),
+            points: s.points,
+        };
     };
 
     // Invariant from here: a passes, b fails. Bisect to +-1; b stays the recorded proof of failure.
@@ -227,12 +314,20 @@ pub fn bisect_ceiling<P: Probe>(probe: &mut P, min_conc: u32, max_conc: u32) -> 
             Some(sample) if sample.passed => a = mid,
             Some(_) => b = mid,
             None => {
-                let detail = format!("probe interrupted mid-bisect; last known pass={a}, last known fail={b}");
-                return BisectResult { ceiling: Measurement::absent_because(Absent::NotMeasured, detail), points: s.points };
+                let detail = format!(
+                    "probe interrupted mid-bisect; last known pass={a}, last known fail={b}"
+                );
+                return BisectResult {
+                    ceiling: Measurement::absent_because(Absent::NotMeasured, detail),
+                    points: s.points,
+                };
             }
         }
     }
-    BisectResult { ceiling: Measurement::Measured(a), points: s.points }
+    BisectResult {
+        ceiling: Measurement::Measured(a),
+        points: s.points,
+    }
 }
 
 // ────────────────────────────────────────────── peak_max ──────────────────────────────────────────
@@ -266,6 +361,25 @@ pub struct PeakResult {
     pub peak: Measurement<PeakPoint>,
     pub points: Vec<ProbedPoint>,
     pub exhausted: bool,
+    /// Every rung the climb judged, with what its windows said about the caller's gate.
+    ///
+    /// Handed back so the caller can answer its OWN question off the same windows - "and how much
+    /// while p99 held?" - instead of running a second search for it later, against a gateway the
+    /// intervening groups have since restarted.
+    pub rungs: Vec<RungSummary>,
+}
+
+/// The rungs, in the order they were climbed, for a caller that owns the gate.
+fn summarize(rungs: &[Rung]) -> Vec<RungSummary> {
+    rungs
+        .iter()
+        .map(|r| RungSummary {
+            concurrency: r.concurrency,
+            median: r.median,
+            gate_median: r.gate.map(|g| g.median),
+            gate_holds: r.gate.is_some_and(|g| g.holds()),
+        })
+        .collect()
 }
 
 /// An interruption (a deadline, or a window that produced nothing) after real probes have already
@@ -275,7 +389,7 @@ pub struct PeakResult {
 /// not.
 ///
 /// Only a search that was cut off before ANY gate-passing point is genuinely unmeasured.
-fn interrupted<P: Probe>(s: Search<P>) -> PeakResult {
+fn interrupted<P: Probe>(s: Search<P>, rungs: &[Rung]) -> PeakResult {
     let mut ordered: Vec<&ProbedPoint> = s.points.iter().collect();
     ordered.sort_by_key(|p| p.concurrency);
     let mut winner: Option<PeakPoint> = None;
@@ -283,7 +397,11 @@ fn interrupted<P: Probe>(s: Search<P>) -> PeakResult {
         if p.passed && winner.as_ref().is_none_or(|w| p.value > w.value) {
             // An interrupted search never established a plateau, so there is no knee to report:
             // the best passing point is its own knee, which is the honest degenerate answer.
-            winner = Some(PeakPoint { concurrency: p.concurrency, value: p.value, knee_concurrency: p.concurrency });
+            winner = Some(PeakPoint {
+                concurrency: p.concurrency,
+                value: p.value,
+                knee_concurrency: p.concurrency,
+            });
         }
     }
     // An interruption before a turnover was observed leaves a LOWER BOUND, not a peak, and
@@ -296,7 +414,12 @@ fn interrupted<P: Probe>(s: Search<P>) -> PeakResult {
         ),
         None => "the search was interrupted before any concurrency passed the gate".to_string(),
     };
-    PeakResult { peak: Measurement::absent_because(Absent::NotMeasured, detail), points: s.points, exhausted: false }
+    PeakResult {
+        peak: Measurement::absent_because(Absent::NotMeasured, detail),
+        points: s.points,
+        exhausted: false,
+        rungs: summarize(rungs),
+    }
 }
 
 /// Windows taken at every rung. Three is the smallest sample with a middle value, and the median of
@@ -368,6 +491,51 @@ struct Rung {
     /// How many windows actually passed and went into the median. The bar below divides by its root,
     /// so a rung that lost windows to failures is judged on the evidence it really has.
     windows: usize,
+    /// What this rung's windows said about the CALLER'S gate, when one was supplied.
+    ///
+    /// Separate from `windows`/`median` above, which answer "how fast", because this answers "how
+    /// fast while still under the ceiling" - and the whole reason it lives on the same rung is that
+    /// the two must be answers about the SAME windows. When they were two searches, the second one
+    /// ran minutes after the first, on the far side of a gateway restart.
+    gate: Option<GateEvidence>,
+}
+
+/// One rung's verdict against the caller's gate, over the same windows that produced its median.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct GateEvidence {
+    /// Windows at this rung that carried a reading and held the gate.
+    held: usize,
+    /// Windows at this rung that carried a reading at all.
+    judged: usize,
+    /// The median rate over the gate-HOLDING windows. A window that blew the ceiling sustained
+    /// nothing, so folding its rate into a sustained number would publish throughput the gate had
+    /// just refused.
+    median: f64,
+}
+
+impl GateEvidence {
+    /// A rung holds the gate when a MAJORITY of its judged windows did. The bisection needs one
+    /// window to decide, and that is the right shape for a search; publishing needs more than one,
+    /// because the boundary rung is by construction the one that passed exactly once.
+    fn holds(&self) -> bool {
+        self.judged > 0 && self.held * 2 > self.judged
+    }
+}
+
+/// A rung's summary, published for the caller that owns the gate.
+///
+/// `search` climbs ladders and judges rungs; it does not know what 20ms means. The gate predicate
+/// and the ceiling's confirmation belong to the caller, so the climb hands back what it measured and
+/// lets `run` decide what counts as sustained.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct RungSummary {
+    pub concurrency: u32,
+    /// The median rate over every window that passed at this rung.
+    pub median: f64,
+    /// The median rate over the windows that held the caller's gate, when one was supplied.
+    pub gate_median: Option<f64>,
+    /// Whether a majority of judged windows held the gate.
+    pub gate_holds: bool,
 }
 
 /// THE BAR A RUNG MUST CLEAR TO COUNT AS AN IMPROVEMENT, and the half-width of the plateau band.
@@ -397,25 +565,62 @@ fn improvement_bar(spread: f64, windows: usize) -> f64 {
 /// A window that FAILED its gate measured no throughput, so it is excluded from both the median and
 /// the spread - it is still recorded in `points` as evidence about the rung. Letting one in made the
 /// spread ~100% and froze an earlier version of this search near the floor.
-fn measure_rung<P: Probe>(s: &mut Search<P>, c: u32) -> Option<Rung> {
+/// THE GATE IS JUDGED OVER THE SAME WINDOWS AS THE MEDIAN, not over a later re-measurement. A window
+/// that held the gate contributes its rate to `gate.median` as well as to `median`; one that blew it
+/// contributes to neither, exactly as a window that failed outright contributes to neither.
+fn measure_rung<P: Probe>(s: &mut Search<P>, c: u32, gate: Option<&Gate>) -> Option<Rung> {
     let mut vals = Vec::with_capacity(WINDOWS_PER_RUNG);
+    let mut held = Vec::with_capacity(WINDOWS_PER_RUNG);
+    let mut judged = 0usize;
     for i in 0..WINDOWS_PER_RUNG {
         // The first window may come from the memo; the repeats must not, since the whole point is
         // that identical conditions produce different numbers.
-        let sample = if i == 0 { s.sample(c)? } else { s.sample_repeat(c)? };
+        let sample = if i == 0 {
+            s.sample(c)?
+        } else {
+            s.sample_repeat(c)?
+        };
+        // A window is judged against the gate whether or not it passed the search's own verdict: the
+        // gate is a claim about latency and loss, and a window with failures has already told us
+        // something about loss. Only a window with no reading at all is unjudgeable.
+        if let (Some(g), Some(r)) = (gate, sample.reading) {
+            judged += 1;
+            if g(&r) {
+                held.push(sample.value);
+            }
+        }
         if sample.passed {
             vals.push(sample.value);
         }
     }
+    let evidence = gate.map(|_| {
+        held.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        GateEvidence {
+            held: held.len(),
+            judged,
+            median: nearest_rank_median(&held).unwrap_or(0.0),
+        }
+    });
     if vals.is_empty() {
-        return Some(Rung { concurrency: c, median: 0.0, spread: 0.0, windows: 0 });
+        return Some(Rung {
+            concurrency: c,
+            median: 0.0,
+            spread: 0.0,
+            windows: 0,
+            gate: evidence,
+        });
     }
     vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     Some(Rung {
         concurrency: c,
         median: nearest_rank_median(&vals).unwrap_or(0.0),
-        spread: if vals.len() >= 2 { relative_spread(&vals) } else { 0.0 },
+        spread: if vals.len() >= 2 {
+            relative_spread(&vals)
+        } else {
+            0.0
+        },
         windows: vals.len(),
+        gate: evidence,
     })
 }
 
@@ -442,7 +647,43 @@ fn measure_rung<P: Probe>(s: &mut Search<P>, c: u32) -> Option<Rung> {
 /// `min_conc`/`max_conc` are normalised if given reversed, and `min_conc` is floored at 1 (there
 /// is no such thing as zero concurrency).
 pub fn saturation_plateau<P: Probe>(probe: &mut P, min_conc: u32, max_conc: u32) -> PeakResult {
-    let (min_conc, max_conc) = if min_conc <= max_conc { (min_conc, max_conc) } else { (max_conc, min_conc) };
+    saturation_plateau_gated(probe, min_conc, max_conc, None)
+}
+
+/// A predicate over one window's reading: does this window hold the caller's ceiling?
+///
+/// `search` does not know what 20ms means, and should not. It climbs, it judges rungs against their
+/// own noise, and it hands back what each rung's windows said about whatever gate the caller cares
+/// about. The gate's definition and the ceiling's confirmation stay in `run`, next to the constants
+/// that give them meaning.
+pub type Gate = dyn Fn(&Reading) -> bool;
+
+/// THE SAME CLIMB, told what the caller's ceiling is.
+///
+/// One implementation, not two. The engine has been burned twice by a rule that lived in one copy of
+/// a loop while a second copy went on doing the old thing - the ladder itself became a type for that
+/// reason, and this is the same lesson applied to the stopping rule. `saturation_plateau` is this
+/// function with no gate.
+///
+/// WHAT THE GATE CHANGES: the stopping rule becomes a UNION. Without a gate the climb stops when
+/// throughput has been flat for `FLAT_RUNGS_TO_STOP` rungs, which is the right answer to "where does
+/// this saturate". With one it must ALSO keep climbing until a rung fails the gate, because those are
+/// different questions and the second one's answer sits well above the first's. Past saturation a
+/// gateway keeps accepting concurrency and converting it to queueing, and queueing that stays under
+/// the ceiling is still inside the gate: in the 2026-07-28 run five aisix cells plateaued at c=64 and
+/// went on holding a 20ms p99 out to c≈180. A climb that stopped at the plateau would have published
+/// a third of their real ceiling.
+pub fn saturation_plateau_gated<P: Probe>(
+    probe: &mut P,
+    min_conc: u32,
+    max_conc: u32,
+    gate: Option<&Gate>,
+) -> PeakResult {
+    let (min_conc, max_conc) = if min_conc <= max_conc {
+        (min_conc, max_conc)
+    } else {
+        (max_conc, min_conc)
+    };
     // ZERO CONCURRENCY DOES NOT EXIST. The climb step is `c.saturating_mul(2)`, and doubling zero is
     // still zero, so a caller-supplied floor of 0 (e.g. `OTB_MIN_CONC=0`) pinned the ladder at c=0
     // forever instead of climbing.
@@ -461,9 +702,9 @@ pub fn saturation_plateau<P: Probe>(probe: &mut P, min_conc: u32, max_conc: u32)
     let mut hit_bound = false;
 
     loop {
-        let rung = match measure_rung(&mut s, c) {
+        let rung = match measure_rung(&mut s, c, gate) {
             Some(r) => r,
-            None => return interrupted(s),
+            None => return interrupted(s, &rungs),
         };
         let best_so_far = rungs.iter().map(|r| r.median).fold(0.0_f64, f64::max);
         // The bar is this rung's own measured wobble, floored. Judging a rung against the noise of a
@@ -483,8 +724,16 @@ pub fn saturation_plateau<P: Probe>(probe: &mut P, min_conc: u32, max_conc: u32)
             break;
         }
         // Saturation needs consecutive flat rungs AND a rung high enough for "more does not help" to
-        // mean anything.
-        if flat_run >= FLAT_RUNGS_TO_STOP && c >= MIN_SATURATION_CONC {
+        // mean anything - AND, when a gate was supplied, a rung that has actually failed it. See
+        // this function's own note on why the second condition cannot be dropped: the gate's ceiling
+        // routinely sits far above the throughput knee, and stopping at the knee would publish the
+        // knee under the ceiling's name.
+        let gate_broken = gate.is_none()
+            || rungs
+                .last()
+                .and_then(|r| r.gate)
+                .is_some_and(|g| g.judged > 0 && !g.holds());
+        if flat_run >= FLAT_RUNGS_TO_STOP && c >= MIN_SATURATION_CONC && gate_broken {
             break;
         }
         c = match ladder.next() {
@@ -498,18 +747,31 @@ pub fn saturation_plateau<P: Probe>(probe: &mut P, min_conc: u32, max_conc: u32)
         let detail = format!(
             "no concurrency from {min_conc} to {max_conc} passed the gate, so no throughput was established at any rung"
         );
-        return PeakResult { peak: Measurement::absent_because(Absent::NotMeasured, detail), points: s.points, exhausted: false };
+        return PeakResult {
+            peak: Measurement::absent_because(Absent::NotMeasured, detail),
+            points: s.points,
+            exhausted: false,
+            rungs: summarize(&rungs),
+        };
     }
 
     // STILL CLIMBING AT THE BOUND is a lower bound, not a plateau. The range is our choice; reporting
     // it as the gateway's ceiling would be publishing our own search bound as its answer.
     if hit_bound && flat_run < FLAT_RUNGS_TO_STOP {
-        let top_wobble = rungs.last().map(|r| improvement_bar(r.spread, r.windows)).unwrap_or(WOBBLE_FLOOR);
+        let top_wobble = rungs
+            .last()
+            .map(|r| improvement_bar(r.spread, r.windows))
+            .unwrap_or(WOBBLE_FLOOR);
         let detail = format!(
             "throughput was still climbing by more than the measured {:.1}% window-to-window wobble at c={max_conc} ({best:.0}) when the search range ran out, so saturation was never observed and no plateau was established",
             top_wobble * 100.0
         );
-        return PeakResult { peak: Measurement::absent_because(Absent::SearchExhausted, detail), points: s.points, exhausted: true };
+        return PeakResult {
+            peak: Measurement::absent_because(Absent::SearchExhausted, detail),
+            points: s.points,
+            exhausted: true,
+            rungs: summarize(&rungs),
+        };
     }
 
     // THE PUBLISHED PAIR MUST BE ONE MEASUREMENT: the best rung's own median, and that rung's own
@@ -531,13 +793,16 @@ pub fn saturation_plateau<P: Probe>(probe: &mut P, min_conc: u32, max_conc: u32)
     // welded to a value measured at a different rung.
     let band: Vec<&Rung> = rungs
         .iter()
-        .filter(|r| r.median > 0.0 && r.median >= best * (1.0 - improvement_bar(r.spread, r.windows)))
+        .filter(|r| {
+            r.median > 0.0 && r.median >= best * (1.0 - improvement_bar(r.spread, r.windows))
+        })
         .collect();
     let knee = band.iter().map(|r| r.concurrency).min().unwrap_or(min_conc);
-    let peak = rungs
-        .iter()
-        .filter(|r| r.median > 0.0)
-        .max_by(|a, b| a.median.partial_cmp(&b.median).unwrap_or(std::cmp::Ordering::Equal));
+    let peak = rungs.iter().filter(|r| r.median > 0.0).max_by(|a, b| {
+        a.median
+            .partial_cmp(&b.median)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     let Some(peak) = peak else {
         let detail = format!(
             "no concurrency from {min_conc} to {max_conc} produced a usable rung, so no peak was established"
@@ -546,20 +811,22 @@ pub fn saturation_plateau<P: Probe>(probe: &mut P, min_conc: u32, max_conc: u32)
             peak: Measurement::absent_because(Absent::NotMeasured, detail),
             points: s.points,
             exhausted: false,
+            rungs: summarize(&rungs),
         };
     };
 
+    let summary = summarize(&rungs);
     PeakResult {
         peak: Measurement::Measured(PeakPoint {
             concurrency: peak.concurrency,
             value: peak.median,
             knee_concurrency: knee,
         }),
+        rungs: summary,
         points: s.points,
         exhausted: false,
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -572,7 +839,7 @@ mod tests {
     }
     impl Probe for MonotoneGate {
         fn probe(&mut self, c: u32) -> Option<Sample> {
-            Some(Sample { value: c as f64, passed: c <= self.ceiling })
+            Some(Sample::new(c as f64, c <= self.ceiling))
         }
     }
 
@@ -583,7 +850,12 @@ mod tests {
         let mut probe = MonotoneGate { ceiling: 1300 };
         let r = bisect_ceiling(&mut probe, 8, 4096);
         assert_eq!(r.ceiling, Measurement::Measured(1300));
-        assert!(r.points.contains(&ProbedPoint { concurrency: 1301, passed: false, value: 1301.0 }));
+        assert!(r.points.contains(&ProbedPoint {
+            concurrency: 1301,
+            passed: false,
+            value: 1301.0,
+            reading: None,
+        }));
     }
 
     #[test]
@@ -611,7 +883,7 @@ mod tests {
             if self.calls > self.fires_after {
                 return None;
             }
-            Some(Sample { value: c as f64, passed: c <= 50 })
+            Some(Sample::new(c as f64, c <= 50))
         }
     }
 
@@ -622,7 +894,10 @@ mod tests {
     #[test]
     fn an_interrupted_search_never_publishes_the_harness_own_floor() {
         for floor in [1u32, 8, 16, 64] {
-            let mut probe = Interrupter { fires_after: 1, calls: 0 };
+            let mut probe = Interrupter {
+                fires_after: 1,
+                calls: 0,
+            };
             let r = bisect_ceiling(&mut probe, floor, 4096);
             assert_eq!(
                 r.ceiling.copied(),
@@ -630,9 +905,15 @@ mod tests {
                 "floor={floor} leaked into the published ceiling, which is a readout of our config"
             );
             // The measurement is NOT lost: every probed rung still travels.
-            assert!(!r.points.is_empty(), "the probed trace must survive an absent verdict");
             assert!(
-                r.ceiling.detail().unwrap_or_default().contains(&floor.to_string()),
+                !r.points.is_empty(),
+                "the probed trace must survive an absent verdict"
+            );
+            assert!(
+                r.ceiling
+                    .detail()
+                    .unwrap_or_default()
+                    .contains(&floor.to_string()),
                 "the lower bound belongs in the evidence, not in the value"
             );
         }
@@ -642,8 +923,14 @@ mod tests {
     // would report the identical number despite behaving completely differently.
     #[test]
     fn two_unlike_gateways_do_not_collapse_to_the_same_interrupted_answer() {
-        let mut slow = Interrupter { fires_after: 1, calls: 0 };
-        let mut fast = Interrupter { fires_after: 1, calls: 0 };
+        let mut slow = Interrupter {
+            fires_after: 1,
+            calls: 0,
+        };
+        let mut fast = Interrupter {
+            fires_after: 1,
+            calls: 0,
+        };
         let a = bisect_ceiling(&mut slow, 8, 4096);
         let b = bisect_ceiling(&mut fast, 8, 4096);
         assert_eq!(a.ceiling.copied(), None);
@@ -654,7 +941,10 @@ mod tests {
     #[test]
     fn bisect_interrupted_before_any_pass_is_unmeasured() {
         // fires_after: 0 means even the floor probe returns nothing.
-        let mut probe = Interrupter { fires_after: 0, calls: 0 };
+        let mut probe = Interrupter {
+            fires_after: 0,
+            calls: 0,
+        };
         let r = bisect_ceiling(&mut probe, 1, 1000);
         assert_eq!(r.ceiling.copied(), None);
         assert_eq!(r.ceiling.reason(), Some(&Absent::NotMeasured));
@@ -666,19 +956,36 @@ mod tests {
     // configuration as the gateway's ceiling. The lower bound belongs in the evidence, not the value.
     #[test]
     fn bisect_interrupted_after_a_pass_is_absent_with_the_bound_as_evidence() {
-        let mut probe = Interrupter { fires_after: 1, calls: 0 };
+        let mut probe = Interrupter {
+            fires_after: 1,
+            calls: 0,
+        };
         let r = bisect_ceiling(&mut probe, 1, 1000);
-        assert_eq!(r.ceiling.copied(), None, "no failure was measured, so no ceiling was proven");
+        assert_eq!(
+            r.ceiling.copied(),
+            None,
+            "no failure was measured, so no ceiling was proven"
+        );
         assert_eq!(r.ceiling.reason(), Some(&Absent::NotMeasured));
-        assert!(r.points.iter().any(|p| p.concurrency == 1 && p.passed), "the pass still travels");
-        assert!(r.ceiling.detail().unwrap_or_default().contains("at least 1"));
+        assert!(
+            r.points.iter().any(|p| p.concurrency == 1 && p.passed),
+            "the pass still travels"
+        );
+        assert!(r
+            .ceiling
+            .detail()
+            .unwrap_or_default()
+            .contains("at least 1"));
     }
 
     // The partial answer is still a LOWER BOUND, never the search range: an interrupted run must
     // not report the top of the range it never confirmed.
     #[test]
     fn an_interrupted_bisect_never_reports_the_unconfirmed_top() {
-        let mut probe = Interrupter { fires_after: 1, calls: 0 };
+        let mut probe = Interrupter {
+            fires_after: 1,
+            calls: 0,
+        };
         let r = bisect_ceiling(&mut probe, 1, 1000);
         assert_ne!(r.ceiling.copied(), Some(1000));
     }
@@ -692,7 +999,11 @@ mod tests {
     fn a_failing_floor_above_one_is_absent_never_the_measured_zero_reserved_for_c_equals_one() {
         let mut probe = MonotoneGate { ceiling: 0 };
         let r = bisect_ceiling(&mut probe, 8, 4096);
-        assert_eq!(r.ceiling.copied(), None, "no concurrency in [0, 7] was probed, so 0 was never measured");
+        assert_eq!(
+            r.ceiling.copied(),
+            None,
+            "no concurrency in [0, 7] was probed, so 0 was never measured"
+        );
         assert_eq!(r.ceiling.reason(), Some(&Absent::SearchExhausted));
         assert!(
             r.ceiling.detail().unwrap_or_default().contains("c=8"),
@@ -702,7 +1013,10 @@ mod tests {
         // The refusal is about the FLOOR, not about the gate: with a floor of one the identical gate
         // yields a real measured zero, and the two answers must not be interchangeable.
         let mut same_gate = MonotoneGate { ceiling: 0 };
-        assert_eq!(bisect_ceiling(&mut same_gate, 1, 4096).ceiling, Measurement::Measured(0));
+        assert_eq!(
+            bisect_ceiling(&mut same_gate, 1, 4096).ceiling,
+            Measurement::Measured(0)
+        );
     }
 
     // The range bounds are normalised, so a caller that passes them reversed gets the same answer
@@ -716,7 +1030,11 @@ mod tests {
         let a = bisect_ceiling(&mut forwards, 8, 4096);
         let b = bisect_ceiling(&mut backwards, 4096, 8);
         assert_eq!(a.ceiling.copied(), Some(1300));
-        assert_eq!(b.ceiling.copied(), a.ceiling.copied(), "an inverted range must be normalised, not searched inverted");
+        assert_eq!(
+            b.ceiling.copied(),
+            a.ceiling.copied(),
+            "an inverted range must be normalised, not searched inverted"
+        );
     }
 
     // A RANGE OF ONE PROVES NOTHING ABOUT A CEILING. The single rung passed, and nothing above it
@@ -726,7 +1044,11 @@ mod tests {
     fn a_single_point_range_that_passes_is_exhausted_not_a_ceiling() {
         let mut probe = MonotoneGate { ceiling: 1000 };
         let r = bisect_ceiling(&mut probe, 64, 64);
-        assert_eq!(r.ceiling.copied(), None, "one passing rung is a lower bound, not a proven ceiling");
+        assert_eq!(
+            r.ceiling.copied(),
+            None,
+            "one passing rung is a lower bound, not a proven ceiling"
+        );
         assert_eq!(r.ceiling.reason(), Some(&Absent::SearchExhausted));
     }
 
@@ -766,9 +1088,12 @@ mod tests {
                 1 => -1.0,
                 _ => 0.0,
             };
-            let level =
-                if c >= self.knee { self.plateau } else { self.plateau * (c as f64 / self.knee as f64) };
-            Some(Sample { value: level * (1.0 + sign * self.wobble), passed: true })
+            let level = if c >= self.knee {
+                self.plateau
+            } else {
+                self.plateau * (c as f64 / self.knee as f64)
+            };
+            Some(Sample::new(level * (1.0 + sign * self.wobble), true))
         }
     }
 
@@ -778,10 +1103,21 @@ mod tests {
     // answered yes, and it published the range bound as the gateway's maximum.
     #[test]
     fn a_flat_curve_saturates_and_never_walks_to_the_top_of_the_range() {
-        let mut probe = Saturating { knee: 64, plateau: 6000.0, wobble: 0.01, calls: 0 };
+        let mut probe = Saturating {
+            knee: 64,
+            plateau: 6000.0,
+            wobble: 0.01,
+            calls: 0,
+        };
         let r = saturation_plateau(&mut probe, 1, 4096);
-        assert!(!r.exhausted, "a curve that plateaued must not report the range as exhausted");
-        let w = r.peak.value().expect("a saturated curve has a plateau to publish");
+        assert!(
+            !r.exhausted,
+            "a curve that plateaued must not report the range as exhausted"
+        );
+        let w = r
+            .peak
+            .value()
+            .expect("a saturated curve has a plateau to publish");
         // The KNEE is what "saturation is at c=64" means. The summit can land on any rung in the
         // plateau band by chance - on a flat curve with 1% wobble that is exactly what it does - so
         // asserting the summit here would be asserting which way the noise fell.
@@ -792,7 +1128,9 @@ mod tests {
         );
         // And the peak, wherever it landed, is a rung that was actually probed.
         assert!(
-            r.points.iter().any(|p| p.concurrency == w.concurrency && p.passed),
+            r.points
+                .iter()
+                .any(|p| p.concurrency == w.concurrency && p.passed),
             "published c={} was never probed",
             w.concurrency
         );
@@ -827,17 +1165,32 @@ mod tests {
             } else {
                 self.plateau * (c as f64 / self.knee as f64)
             };
-            Some(Sample { value: level, passed: true })
+            Some(Sample::new(level, true))
         }
     }
 
     #[test]
     fn a_zero_floor_still_climbs_and_terminates() {
-        let mut probe = CountBudgetedSaturating { knee: 64, plateau: 6000.0, calls: 0, max_calls: 200 };
+        let mut probe = CountBudgetedSaturating {
+            knee: 64,
+            plateau: 6000.0,
+            calls: 0,
+            max_calls: 200,
+        };
         let r = saturation_plateau(&mut probe, 0, 4096);
-        assert!(!r.exhausted, "a curve that plateaued must not report the range as exhausted");
-        let w = r.peak.value().expect("a saturated curve has a plateau to publish");
-        assert!(w.concurrency >= 1, "knee reported at c={}, which is not a real concurrency", w.concurrency);
+        assert!(
+            !r.exhausted,
+            "a curve that plateaued must not report the range as exhausted"
+        );
+        let w = r
+            .peak
+            .value()
+            .expect("a saturated curve has a plateau to publish");
+        assert!(
+            w.concurrency >= 1,
+            "knee reported at c={}, which is not a real concurrency",
+            w.concurrency
+        );
     }
 
     // THE WHOLE CLIMB, FROM A REAL RUN THAT GOT IT WRONG.
@@ -867,7 +1220,10 @@ mod tests {
         seq.insert(512, vec![60.0, 61.0, 60.0]);
         seq.insert(1024, vec![61.0, 60.0, 61.0]);
 
-        let mut p = ReplayWindows { seq, seen: Default::default() };
+        let mut p = ReplayWindows {
+            seq,
+            seen: Default::default(),
+        };
         let r = saturation_plateau(&mut p, 1, 4096);
         let w = r.peak.value().expect("a curve that flattens has a plateau");
         assert!(
@@ -905,7 +1261,7 @@ mod tests {
             let n = *i;
             *i += 1;
             let xs = self.seq.get(&c)?;
-            Some(Sample { value: xs[n.min(xs.len() - 1)], passed: true })
+            Some(Sample::new(xs[n.min(xs.len() - 1)], true))
         }
     }
 
@@ -929,7 +1285,10 @@ mod tests {
         seq.insert(2048, vec![48.0, 49.0, 48.0]);
         seq.insert(4096, vec![49.0, 48.0, 49.0]);
 
-        let mut p = ReplayWindows { seq, seen: Default::default() };
+        let mut p = ReplayWindows {
+            seq,
+            seen: Default::default(),
+        };
         let r = saturation_plateau(&mut p, 1, 4096);
         let w = r.peak.value().expect("a climbing curve has a plateau");
         assert!(
@@ -966,7 +1325,7 @@ mod tests {
             let vals = self.seq.get(&c).cloned().unwrap_or_else(|| vec![60.0]);
             let v = vals[n.min(vals.len() - 1)];
             // The floor's SECOND window fails its gate, exactly as the field box produced.
-            Some(Sample { value: v, passed: !(c == 1 && n == 1) })
+            Some(Sample::new(v, !(c == 1 && n == 1)))
         }
     }
 
@@ -981,16 +1340,26 @@ mod tests {
         seq.insert(32, vec![45.0, 46.0, 47.0]);
         seq.insert(64, vec![52.0, 52.0, 53.0]);
         seq.insert(128, vec![58.0, 58.0, 59.0]);
-        let mut p = FlakyFloor { seq, seen: Default::default() };
+        let mut p = FlakyFloor {
+            seq,
+            seen: Default::default(),
+        };
         let r = saturation_plateau(&mut p, 1, 4096);
-        let w = r.peak.value().expect("a climbing curve with one bad floor window still has a plateau");
+        let w = r
+            .peak
+            .value()
+            .expect("a climbing curve with one bad floor window still has a plateau");
         assert!(
             w.value > 50.0,
             "published {} - the search froze near the floor because a failed window poisoned the \
              wobble; this curve climbs to 60",
             w.value
         );
-        assert!(w.concurrency >= 64, "reported c={} is still on the rising part", w.concurrency);
+        assert!(
+            w.concurrency >= 64,
+            "reported c={} is still on the rising part",
+            w.concurrency
+        );
     }
 
     // THE FIELD FAILURE, REPRODUCED EXACTLY. A saturated gateway whose rungs DRIFT UPWARD inside the
@@ -1008,10 +1377,16 @@ mod tests {
     impl Probe for DriftingPlateau {
         fn probe(&mut self, c: u32) -> Option<Sample> {
             if c < self.knee {
-                return Some(Sample { value: self.plateau * (c as f64 / self.knee as f64), passed: true });
+                return Some(Sample::new(
+                    self.plateau * (c as f64 / self.knee as f64),
+                    true,
+                ));
             }
             let doublings = (c as f64 / self.knee as f64).log2().max(0.0);
-            Some(Sample { value: self.plateau * (1.0 + self.drift * doublings), passed: true })
+            Some(Sample::new(
+                self.plateau * (1.0 + self.drift * doublings),
+                true,
+            ))
         }
     }
 
@@ -1019,10 +1394,20 @@ mod tests {
     fn a_plateau_that_drifts_upward_inside_the_noise_is_still_saturated() {
         // 0.4% per doubling: eleven doublings of it is under 5%, and no gateway "gains throughput"
         // that way. A search comparing against zero climbs every one of them.
-        let mut probe = DriftingPlateau { knee: 32, plateau: 6000.0, drift: 0.004 };
+        let mut probe = DriftingPlateau {
+            knee: 32,
+            plateau: 6000.0,
+            drift: 0.004,
+        };
         let r = saturation_plateau(&mut probe, 1, 65_536);
-        assert!(!r.exhausted, "drift inside the noise band must not read as failing to saturate");
-        let w = r.peak.value().expect("a drifting plateau is still a plateau");
+        assert!(
+            !r.exhausted,
+            "drift inside the noise band must not read as failing to saturate"
+        );
+        let w = r
+            .peak
+            .value()
+            .expect("a drifting plateau is still a plateau");
         assert!(
             w.concurrency <= 512,
             "the search followed {:.1}%-per-doubling drift up to c={}; that is noise, not throughput",
@@ -1040,10 +1425,20 @@ mod tests {
     // only by noise, so "best" is a measure of luck rather than of the gateway.
     #[test]
     fn the_published_value_is_the_plateau_median_not_its_luckiest_rung() {
-        let mut probe = Saturating { knee: 32, plateau: 1000.0, wobble: 0.05, calls: 0 };
+        let mut probe = Saturating {
+            knee: 32,
+            plateau: 1000.0,
+            wobble: 0.05,
+            calls: 0,
+        };
         let r = saturation_plateau(&mut probe, 1, 2048);
         let w = r.peak.value().expect("saturated");
-        let best_seen = r.points.iter().filter(|p| p.passed).map(|p| p.value).fold(f64::MIN, f64::max);
+        let best_seen = r
+            .points
+            .iter()
+            .filter(|p| p.passed)
+            .map(|p| p.value)
+            .fold(f64::MIN, f64::max);
         assert!(
             w.value < best_seen,
             "published {} is the best rung seen ({}), so the luckiest window won",
@@ -1051,7 +1446,11 @@ mod tests {
             best_seen
         );
         // ... and it is still a real plateau figure, not something dragged down by the rising part.
-        assert!(w.value > 1000.0 * 0.9, "published {} is far below the plateau level", w.value);
+        assert!(
+            w.value > 1000.0 * 0.9,
+            "published {} is far below the plateau level",
+            w.value
+        );
     }
 
     // The reported concurrency is the KNEE - the lowest rung that reached the plateau - because that
@@ -1059,7 +1458,12 @@ mod tests {
     // value there is no single winning rung for a summit to point at anyway.
     #[test]
     fn the_knee_is_reported_separately_from_the_peak_that_was_measured() {
-        let mut probe = Saturating { knee: 64, plateau: 5000.0, wobble: 0.01, calls: 0 };
+        let mut probe = Saturating {
+            knee: 64,
+            plateau: 5000.0,
+            wobble: 0.01,
+            calls: 0,
+        };
         let r = saturation_plateau(&mut probe, 1, 4096);
         let w = r.peak.value().expect("saturated");
         let highest_probed = r.points.iter().map(|p| p.concurrency).max().unwrap_or(0);
@@ -1105,12 +1509,16 @@ mod tests {
         struct Rising;
         impl Probe for Rising {
             fn probe(&mut self, c: u32) -> Option<Sample> {
-                Some(Sample { value: c as f64 * 100.0, passed: true })
+                Some(Sample::new(c as f64 * 100.0, true))
             }
         }
         let r = saturation_plateau(&mut Rising, 1, 512);
         assert!(r.exhausted);
-        assert_eq!(r.peak.value(), None, "a lower bound must never be published as a plateau");
+        assert_eq!(
+            r.peak.value(),
+            None,
+            "a lower bound must never be published as a plateau"
+        );
         assert_eq!(r.peak.reason(), Some(&Absent::SearchExhausted));
         assert!(
             r.peak.detail().unwrap_or_default().contains("wobble"),
@@ -1123,18 +1531,32 @@ mod tests {
     // read a 10% flutter as a real climb; a search with a hardcoded tighter threshold would.
     #[test]
     fn a_noisy_rig_does_not_read_its_own_wobble_as_a_climb() {
-        let mut probe = Saturating { knee: 16, plateau: 2000.0, wobble: 0.10, calls: 0 };
+        let mut probe = Saturating {
+            knee: 16,
+            plateau: 2000.0,
+            wobble: 0.10,
+            calls: 0,
+        };
         let r = saturation_plateau(&mut probe, 1, 8192);
         assert!(!r.exhausted, "a flat-but-noisy curve must still saturate");
         let w = r.peak.value().expect("saturated");
-        assert!(w.concurrency <= 512, "noise carried the search to c={}", w.concurrency);
+        assert!(
+            w.concurrency <= 512,
+            "noise carried the search to c={}",
+            w.concurrency
+        );
     }
 
     // The calibration must actually re-probe: a memoised repeat would hand back the first window's
     // answer, report a spread of zero, and quietly restore the guessed-threshold bug.
     #[test]
     fn the_calibration_really_reprobes_rather_than_reading_the_memo() {
-        let mut probe = Saturating { knee: 8, plateau: 900.0, wobble: 0.03, calls: 0 };
+        let mut probe = Saturating {
+            knee: 8,
+            plateau: 900.0,
+            wobble: 0.03,
+            calls: 0,
+        };
         let r = saturation_plateau(&mut probe, 1, 1024);
         assert!(r.peak.value().is_some());
         let mut seen = std::collections::BTreeMap::new();
@@ -1154,13 +1576,17 @@ mod tests {
         struct NeverPasses;
         impl Probe for NeverPasses {
             fn probe(&mut self, _c: u32) -> Option<Sample> {
-                Some(Sample { value: 0.0, passed: false })
+                Some(Sample::new(0.0, false))
             }
         }
         let r = saturation_plateau(&mut NeverPasses, 1, 64);
         assert_eq!(r.peak.value(), None);
         assert_eq!(r.peak.reason(), Some(&Absent::NotMeasured));
-        assert!(r.peak.detail().unwrap_or_default().contains("passed the gate"));
+        assert!(r
+            .peak
+            .detail()
+            .unwrap_or_default()
+            .contains("passed the gate"));
     }
 
     // A stopped clock is not a measurement. Whatever was proved before it stopped may travel as
@@ -1176,24 +1602,43 @@ mod tests {
                 if self.calls > 3 {
                     return None;
                 }
-                Some(Sample { value: c as f64 * 10.0, passed: true })
+                Some(Sample::new(c as f64 * 10.0, true))
             }
         }
         let r = saturation_plateau(&mut Interrupter { calls: 0 }, 1, 4096);
         assert_eq!(r.peak.value(), None);
-        assert!(!r.exhausted, "an interruption is not the same fact as running out of range");
-        assert!(!r.points.is_empty(), "the probes that did land are still evidence");
+        assert!(
+            !r.exhausted,
+            "an interruption is not the same fact as running out of range"
+        );
+        assert!(
+            !r.points.is_empty(),
+            "the probes that did land are still evidence"
+        );
     }
 
     // The range given backwards is the same interval, so it must produce the same answer rather than
     // silently searching nothing.
     #[test]
     fn a_plateau_range_given_backwards_searches_the_same_interval() {
-        let mut a = Saturating { knee: 32, plateau: 4000.0, wobble: 0.01, calls: 0 };
-        let mut b = Saturating { knee: 32, plateau: 4000.0, wobble: 0.01, calls: 0 };
+        let mut a = Saturating {
+            knee: 32,
+            plateau: 4000.0,
+            wobble: 0.01,
+            calls: 0,
+        };
+        let mut b = Saturating {
+            knee: 32,
+            plateau: 4000.0,
+            wobble: 0.01,
+            calls: 0,
+        };
         let fwd = saturation_plateau(&mut a, 1, 2048);
         let rev = saturation_plateau(&mut b, 2048, 1);
-        assert_eq!(fwd.peak.value().map(|w| w.concurrency), rev.peak.value().map(|w| w.concurrency));
+        assert_eq!(
+            fwd.peak.value().map(|w| w.concurrency),
+            rev.peak.value().map(|w| w.concurrency)
+        );
     }
 
     // THE START IS THE FLOOR, ALWAYS, AND DOES NOT MOVE WITH THE RANGE. A start derived from the
@@ -1202,10 +1647,19 @@ mod tests {
     #[test]
     fn the_search_always_opens_at_the_floor_however_wide_the_range() {
         for hi in [64u32, 4096, 65536] {
-            let mut probe = Saturating { knee: 16, plateau: 700.0, wobble: 0.01, calls: 0 };
+            let mut probe = Saturating {
+                knee: 16,
+                plateau: 700.0,
+                wobble: 0.01,
+                calls: 0,
+            };
             let r = saturation_plateau(&mut probe, 1, hi);
             let first = r.points.first().map(|p| p.concurrency);
-            assert_eq!(first, Some(1), "with hi={hi} the search opened at {first:?} instead of the floor");
+            assert_eq!(
+                first,
+                Some(1),
+                "with hi={hi} the search opened at {first:?} instead of the floor"
+            );
         }
     }
 
@@ -1213,13 +1667,21 @@ mod tests {
     // is what lets a reader re-derive the plateau instead of trusting it.
     #[test]
     fn the_probe_trace_travels_with_the_result() {
-        let mut probe = Saturating { knee: 64, plateau: 3000.0, wobble: 0.02, calls: 0 };
+        let mut probe = Saturating {
+            knee: 64,
+            plateau: 3000.0,
+            wobble: 0.02,
+            calls: 0,
+        };
         let r = saturation_plateau(&mut probe, 1, 4096);
-        assert!(r.points.len() > 4, "too few points to re-derive anything: {:?}", r.points.len());
+        assert!(
+            r.points.len() > 4,
+            "too few points to re-derive anything: {:?}",
+            r.points.len()
+        );
         assert!(r.points.iter().all(|p| p.concurrency >= 1));
     }
 }
-
 
 #[cfg(test)]
 mod proptests {
@@ -1231,14 +1693,14 @@ mod proptests {
     }
     impl Probe for MonotoneGate {
         fn probe(&mut self, c: u32) -> Option<Sample> {
-            Some(Sample { value: c as f64, passed: c <= self.ceiling })
+            Some(Sample::new(c as f64, c <= self.ceiling))
         }
     }
 
     struct AlwaysPasses;
     impl Probe for AlwaysPasses {
         fn probe(&mut self, c: u32) -> Option<Sample> {
-            Some(Sample { value: c as f64, passed: true })
+            Some(Sample::new(c as f64, true))
         }
     }
 
@@ -1261,9 +1723,12 @@ mod proptests {
                 1 => -1.0,
                 _ => 0.0,
             };
-            let level =
-                if c >= self.knee { self.plateau } else { self.plateau * (c as f64 / self.knee as f64) };
-            Some(Sample { value: level * (1.0 + sign * self.wobble), passed: true })
+            let level = if c >= self.knee {
+                self.plateau
+            } else {
+                self.plateau * (c as f64 / self.knee as f64)
+            };
+            Some(Sample::new(level * (1.0 + sign * self.wobble), true))
         }
     }
 
@@ -1324,7 +1789,7 @@ mod proptests {
                 fn probe(&mut self, c: u32) -> Option<Sample> {
                     self.calls += 1;
                     if self.calls > self.fires_after { return None; }
-                    Some(Sample { value: c as f64, passed: c <= 50 })
+                    Some(Sample::new(c as f64, c <= 50))
                 }
             }
             let mut p1 = Interrupter { fires_after, calls: 0 };
@@ -1369,7 +1834,7 @@ mod proptests {
                 None => self.beyond,
             };
             *i += 1;
-            Some(Sample { value: v, passed: true })
+            Some(Sample::new(v, true))
         }
     }
 
@@ -1381,7 +1846,11 @@ mod proptests {
         by_conc.insert(8, vec![22466.0, 18819.0, 17755.0]);
         by_conc.insert(16, vec![24740.0, 21065.0, 19837.0]);
         by_conc.insert(32, vec![20871.0, 20732.0, 26506.0]);
-        RecordedWindows { by_conc, taken: Default::default(), beyond: 26098.0 }
+        RecordedWindows {
+            by_conc,
+            taken: Default::default(),
+            beyond: 26098.0,
+        }
     }
 
     #[test]
@@ -1402,7 +1871,10 @@ mod proptests {
         );
         // It must actually climb past where the field stopped, not just wobble one rung further.
         let top = r.points.iter().map(|p| p.concurrency).max().unwrap_or(0);
-        assert!(top > 32, "the ladder stopped at c={top}, the same rung the field run stopped at");
+        assert!(
+            top > 32,
+            "the ladder stopped at c={top}, the same rung the field run stopped at"
+        );
     }
 
     // The bar is the uncertainty of the rung's MEDIAN, so more windows behind a median make it
@@ -1412,7 +1884,10 @@ mod proptests {
     fn the_improvement_bar_tightens_as_a_rung_gathers_more_windows() {
         let spread = 0.20;
         assert!(improvement_bar(spread, 9) < improvement_bar(spread, 3));
-        assert!(improvement_bar(spread, 3) < spread, "the median is steadier than its windows' range");
+        assert!(
+            improvement_bar(spread, 3) < spread,
+            "the median is steadier than its windows' range"
+        );
         // Never below the floor, however tidy the windows look: three can agree by luck.
         assert_eq!(improvement_bar(0.0, 3), WOBBLE_FLOOR);
         assert_eq!(improvement_bar(0.001, 100), WOBBLE_FLOOR);
@@ -1449,7 +1924,10 @@ mod proptests {
     impl Probe for RecordingProbe {
         fn probe(&mut self, c: u32) -> Option<Sample> {
             self.asked.borrow_mut().push(c);
-            Some(Sample { value: f64::from(c.min(self.ceiling)), passed: c <= self.ceiling })
+            Some(Sample::new(
+                f64::from(c.min(self.ceiling)),
+                c <= self.ceiling,
+            ))
         }
     }
 
@@ -1464,7 +1942,10 @@ mod proptests {
     /// other. What both must obey is that the NEXT request is never more than twice the last, which
     /// is exactly what the defect broke: jumping straight to the top of the range.
     fn assert_the_ladder_never_leaps(asked: &[u32], min_conc: u32, who: &str) {
-        assert!(!asked.is_empty(), "{who}: a search that probed nothing proves nothing");
+        assert!(
+            !asked.is_empty(),
+            "{who}: a search that probed nothing proves nothing"
+        );
         assert_eq!(
             asked[0], min_conc,
             "{who}: opened at c={} instead of the floor c={min_conc} - the first request a gateway \
@@ -1489,19 +1970,29 @@ mod proptests {
         for (min_conc, max_conc) in [(1u32, 64u32), (1, 4096), (1, 65536), (8, 65536)] {
             for ceiling in [1u32, 3, 100, 5000, 60000] {
                 let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-                let mut p = RecordingProbe { ceiling, asked: std::rc::Rc::clone(&asked) };
+                let mut p = RecordingProbe {
+                    ceiling,
+                    asked: std::rc::Rc::clone(&asked),
+                };
                 let _ = bisect_ceiling(&mut p, min_conc, max_conc);
                 assert_the_ladder_never_leaps(
-                    &asked.borrow(), min_conc,
+                    &asked.borrow(),
+                    min_conc,
                     &format!("bisect_ceiling({min_conc}..{max_conc}, gateway ceiling {ceiling})"),
                 );
 
                 let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-                let mut p = RecordingProbe { ceiling, asked: std::rc::Rc::clone(&asked) };
+                let mut p = RecordingProbe {
+                    ceiling,
+                    asked: std::rc::Rc::clone(&asked),
+                };
                 let _ = saturation_plateau(&mut p, min_conc, max_conc);
                 assert_the_ladder_never_leaps(
-                    &asked.borrow(), min_conc,
-                    &format!("saturation_plateau({min_conc}..{max_conc}, gateway ceiling {ceiling})"),
+                    &asked.borrow(),
+                    min_conc,
+                    &format!(
+                        "saturation_plateau({min_conc}..{max_conc}, gateway ceiling {ceiling})"
+                    ),
                 );
             }
         }
@@ -1524,9 +2015,13 @@ mod proptests {
             let i = self.taken.entry(c).or_insert(0);
             // Above what the max search actually probed, the sustained search's own readings at the
             // same concurrencies stand in: same box, same mock, same cell, minutes apart.
-            let v = self.rungs.get(&c).map(|w| w[(*i).min(w.len() - 1)]).unwrap_or(17_800.0);
+            let v = self
+                .rungs
+                .get(&c)
+                .map(|w| w[(*i).min(w.len() - 1)])
+                .unwrap_or(17_800.0);
             *i += 1;
-            Some(Sample { value: v, passed: true })
+            Some(Sample::new(v, true))
         }
     }
 
@@ -1543,7 +2038,10 @@ mod proptests {
         rungs.insert(64, vec![17466.0; 3]);
         rungs.insert(128, vec![17829.0; 3]);
 
-        let mut p = KongCurve { rungs, taken: Default::default() };
+        let mut p = KongCurve {
+            rungs,
+            taken: Default::default(),
+        };
         let r = saturation_plateau(&mut p, 1, 4096);
         let peak = match r.peak {
             Measurement::Measured(pt) => pt.value,
@@ -1559,7 +2057,10 @@ mod proptests {
         );
         // Concretely: it must get past the rung where two-flat-rungs used to quit.
         let top = r.points.iter().map(|x| x.concurrency).max().unwrap_or(0);
-        assert!(top >= 128, "the ladder stopped at c={top}; kong keeps climbing to c~94");
+        assert!(
+            top >= 128,
+            "the ladder stopped at c={top}; kong keeps climbing to c~94"
+        );
     }
 
     // The other half of the same rule: a curve that really HAS levelled off must still stop, and
@@ -1570,7 +2071,7 @@ mod proptests {
         impl Probe for Flat {
             fn probe(&mut self, c: u32) -> Option<Sample> {
                 // Rises to c=16 then dead flat, with clean windows.
-                Some(Sample { value: f64::from(c.min(16)) * 1000.0, passed: true })
+                Some(Sample::new(f64::from(c.min(16)) * 1000.0, true))
             }
         }
         let r = saturation_plateau(&mut Flat, 1, 65536);
