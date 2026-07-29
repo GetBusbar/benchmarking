@@ -526,6 +526,12 @@ fn cell_stream(
     let (stream_served, reason) =
         match ttft.map(|m| (m.is_measured(), m.reason().cloned(), m.detail())) {
             Some((true, _, _)) => (crate::record::StreamServed::Bool(true), None),
+            // A below-resolution difference IS a served stream: both legs delivered frames and the
+            // comparison ran; only the difference was too small to weigh. Publishing it as a status
+            // would read as "the stream did not flow", the opposite of what happened.
+            Some((false, Some(Absent::BelowResolution), _)) => {
+                (crate::record::StreamServed::Bool(true), None)
+            }
             // Probed, and the answer was not a number. The reason travels as the status so a reader is
             // never left to infer a gateway property from a rig limit.
             Some((false, Some(r), detail)) => (
