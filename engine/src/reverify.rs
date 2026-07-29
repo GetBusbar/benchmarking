@@ -381,6 +381,14 @@ fn control_failed(outcome: Outcome) -> Option<String> {
         Outcome::ConnectionFailed(e) => Some(format!("no connection: {e}")),
         Outcome::TimedOut => Some("timed out".to_string()),
         Outcome::Malformed { message, .. } => Some(format!("unparseable response: {message}")),
+        // OUR OWN REFUSAL, and it lands here rather than anywhere near the cell's verdict for exactly
+        // the reason this function exists: everything it returns is a RIG fault that makes the
+        // re-verification unusable, never evidence about a gateway. The re-verify lane composes the
+        // same manifest headers the load lane does, and until `http::unsendable_request` was applied
+        // to `send` it was the lane that still interpolated them raw.
+        Outcome::RigRefused(why) => Some(format!(
+            "the rig refused to send this control-plane request: {why}"
+        )),
     }
 }
 

@@ -184,8 +184,53 @@ pub fn hwm_tree_mib(root_pid: u32) -> Measurement<f64> {
 pub trait PidSource {
     /// The container runtime's reported root pid for a container name.
     fn docker_pid(&self, container: &str) -> Option<u32>;
-    /// The oldest pid whose command line matches, which is the parent of any workers it forked.
-    fn matching_pid(&self, pattern: &str) -> Option<u32>;
+    /// The root of the process tree whose command lines match, or why there is no single answer.
+    fn matching_pid(&self, pattern: &str) -> PidLookup;
+}
+
+/// What looking a `proc_match` up on the live box produced. THREE OUTCOMES, NOT TWO: "several
+/// processes match and none of them is the parent of the others" is not the same finding as "nothing
+/// matches", and it must not be answered with a guess. The old code took the numerically smallest
+/// matching pid, which on a box where an older unrelated process happened to match published THAT
+/// process's tree as the gateway's memory - a real number, from the wrong process.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PidLookup {
+    /// Exactly one process matched, or several did and one of them is the ancestor of all the rest -
+    /// which is a gateway that forked workers, and the ancestor is the root of its tree.
+    Found(u32),
+    /// Nothing matched. Includes an empty pattern, which names nothing and must never be read as
+    /// naming everything.
+    NotRunning,
+    /// Several unrelated processes matched. Refusing to measure is the honest answer: any choice
+    /// among them would be a coin toss published as this gateway's memory.
+    Ambiguous(Vec<u32>),
+}
+
+/// The one match among `pids` that every other match descends from, if there is exactly one.
+///
+/// A forking gateway is the case this exists for: master and workers all carry the same command
+/// line, so they all match, and the tree to sum is the master's. Two unrelated matches have no
+/// common member and yield `None`, which the caller turns into an absence rather than a guess.
+fn sole_tree_root(pids: &[u32], ppid_of: &BTreeMap<u32, u32>) -> Option<u32> {
+    let is_ancestor_of = |candidate: u32, mut pid: u32| -> bool {
+        let mut seen = BTreeSet::new();
+        while seen.insert(pid) {
+            if pid == candidate {
+                return true;
+            }
+            match ppid_of.get(&pid).copied() {
+                Some(0) | None => return false,
+                Some(parent) => pid = parent,
+            }
+        }
+        false // a cycle in the reported parent links: not an ancestry we can assert.
+    };
+    let mut roots = pids
+        .iter()
+        .copied()
+        .filter(|&c| pids.iter().all(|&p| is_ancestor_of(c, p)));
+    let first = roots.next()?;
+    roots.next().is_none().then_some(first)
 }
 
 /// The real lookups: the container runtime for a container, a command-line match for a native
@@ -209,22 +254,25 @@ impl PidSource for RealPids {
         }
     }
 
-    fn matching_pid(&self, pattern: &str) -> Option<u32> {
-        let out = std::process::Command::new("pgrep")
-            .args(["-f", pattern])
-            .output()
-            .ok()?;
-        if !out.status.success() {
-            return None;
+    /// THE SAME MATCH RULE THE STOP PATH USES, from `supervise::select_matches`: the harness, the
+    /// shells running `commands` lines and a second engine are excluded, and an empty pattern names
+    /// nothing. What is left is resolved by ANCESTRY rather than by pid order - the old
+    /// smallest-pid rule was a guess dressed as a heuristic, and an older bystander that happened to
+    /// match won it.
+    fn matching_pid(&self, pattern: &str) -> PidLookup {
+        let table = crate::supervise::process_table();
+        let pids = crate::supervise::select_matches(&table, pattern, std::process::id());
+        match pids.len() {
+            0 => PidLookup::NotRunning,
+            1 => PidLookup::Found(pids[0]),
+            _ => {
+                let ppid_of: BTreeMap<u32, u32> = table.iter().map(|e| (e.pid, e.ppid)).collect();
+                match sole_tree_root(&pids, &ppid_of) {
+                    Some(root) => PidLookup::Found(root),
+                    None => PidLookup::Ambiguous(pids),
+                }
+            }
         }
-        // `pgrep -f` lists newest-first on some systems and oldest-first on others, so take the
-        // NUMERICALLY smallest rather than the first line: the parent is started before the workers
-        // it forks, and summing from a worker would silently exclude its siblings and the parent.
-        String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .filter_map(|l| l.trim().parse::<u32>().ok())
-            .filter(|p| *p != 0)
-            .min()
     }
 }
 
@@ -236,15 +284,31 @@ pub fn root_pid(runtime: &Runtime) -> Measurement<u32> {
 /// The testable core.
 pub fn root_pid_from<S: PidSource>(source: &S, runtime: &Runtime) -> Measurement<u32> {
     let found = match runtime {
-        Runtime::Docker { container } => source.docker_pid(container),
+        // The RUN-SCOPED name, so a concurrent run's container of the same gateway is never the one
+        // measured here.
+        Runtime::Docker { .. } => match source.docker_pid(&runtime.identity()) {
+            Some(pid) => PidLookup::Found(pid),
+            None => PidLookup::NotRunning,
+        },
         Runtime::Native { proc_match } => source.matching_pid(proc_match),
     };
     match found {
-        Some(pid) => Measurement::Measured(pid),
+        PidLookup::Found(pid) => Measurement::Measured(pid),
+        // SEVERAL UNRELATED PROCESSES ANSWER TO THIS IDENTITY. Not "the gateway is missing" and not
+        // a number: naming the ambiguity is the only honest reading, and the pids are listed so the
+        // operator can see what else on the box answers to the manifest's `proc_match`.
+        PidLookup::Ambiguous(pids) => Measurement::absent_because(
+            Absent::NotMeasured,
+            format!(
+                "{} unrelated processes match the declared process-match {:?} ({pids:?}) and none is the parent of the others; refusing to guess which tree is the gateway's",
+                pids.len(),
+                runtime.identity()
+            ),
+        ),
         // NotMeasured, not Untestable: the rig worked, we asked, and the process was not there. The
         // detail names the identity so a reader can tell "the gateway died" from "we looked for the
         // wrong thing", which are the two causes and they have different fixes.
-        None => Measurement::absent_because(
+        PidLookup::NotRunning => Measurement::absent_because(
             Absent::NotMeasured,
             format!(
                 "no running process found for the declared {} identity {:?}",
@@ -267,6 +331,8 @@ mod pid_tests {
     struct FakePids {
         docker: Option<u32>,
         native: Option<u32>,
+        /// Set to script the "several unrelated processes answer to this pattern" lookup.
+        ambiguous: Option<Vec<u32>>,
         seen_docker: std::cell::RefCell<Vec<String>>,
         seen_native: std::cell::RefCell<Vec<String>>,
     }
@@ -276,9 +342,13 @@ mod pid_tests {
             self.seen_docker.borrow_mut().push(container.to_string());
             self.docker
         }
-        fn matching_pid(&self, pattern: &str) -> Option<u32> {
+        fn matching_pid(&self, pattern: &str) -> PidLookup {
             self.seen_native.borrow_mut().push(pattern.to_string());
-            self.native
+            match (&self.native, &self.ambiguous) {
+                (_, Some(pids)) => PidLookup::Ambiguous(pids.clone()),
+                (Some(pid), None) => PidLookup::Found(*pid),
+                (None, None) => PidLookup::NotRunning,
+            }
         }
     }
 
@@ -293,6 +363,7 @@ mod pid_tests {
         };
         let rt = Runtime::Docker {
             container: "gw-bench".into(),
+            run_scope: None,
         };
         assert_eq!(root_pid_from(&f, &rt).copied(), Some(42));
         assert_eq!(
@@ -317,6 +388,86 @@ mod pid_tests {
         assert!(f.seen_docker.borrow().is_empty());
     }
 
+    // A FORKING GATEWAY: master and workers all carry the same command line, so they all match, and
+    // the tree to sum is the master's. Resolved by ANCESTRY, not by pid order - the old rule took the
+    // numerically smallest match, which is only the master by coincidence.
+    #[test]
+    fn several_matches_in_one_tree_resolve_to_the_ancestor_of_them_all() {
+        // 40 is the master; 61 and 12 are its workers. The smallest pid is a WORKER here, so a rule
+        // that took the smallest would sum a worker's subtree and miss the master and its sibling.
+        let ppid: BTreeMap<u32, u32> = [(40, 1), (61, 40), (12, 40)].into_iter().collect();
+        assert_eq!(sole_tree_root(&[40, 61, 12], &ppid), Some(40));
+        assert_ne!(
+            sole_tree_root(&[40, 61, 12], &ppid),
+            Some(12),
+            "the smallest pid is not the root of anything"
+        );
+    }
+
+    // TWO UNRELATED PROCESSES ANSWER TO THE SAME PATTERN. There is no honest choice between them.
+    #[test]
+    fn unrelated_matches_have_no_sole_root() {
+        let ppid: BTreeMap<u32, u32> = [(40, 1), (900, 1)].into_iter().collect();
+        assert_eq!(sole_tree_root(&[40, 900], &ppid), None);
+    }
+
+    #[test]
+    fn a_cycle_in_the_reported_parent_links_does_not_hang_the_root_search() {
+        let ppid: BTreeMap<u32, u32> = [(7, 8), (8, 7)].into_iter().collect();
+        let _ = sole_tree_root(&[7, 8], &ppid);
+    }
+
+    // THE DEFECT THIS REPLACES: the smallest matching pid was measured as the gateway, so an older
+    // bystander that happened to match published ITS memory under the gateway's name. Refusing is the
+    // honest answer, and the absence names what else matched.
+    #[test]
+    fn several_unrelated_matches_refuse_to_measure_rather_than_guess() {
+        let f = FakePids {
+            ambiguous: Some(vec![317, 4820]),
+            ..Default::default()
+        };
+        let rt = Runtime::Native {
+            proc_match: "gateway-binary".into(),
+        };
+        let m = root_pid_from(&f, &rt);
+        assert!(
+            !m.is_measured(),
+            "an ambiguous match must not resolve to a pid at all, got {m:?}"
+        );
+        assert_ne!(
+            m.copied(),
+            Some(317),
+            "the smallest matching pid must no longer be chosen"
+        );
+        assert_eq!(m.reason(), Some(&Absent::NotMeasured));
+        let detail = m.detail().unwrap_or_default();
+        assert!(
+            detail.contains("317") && detail.contains("4820"),
+            "the absence must name what else answered to the pattern: {detail}"
+        );
+    }
+
+    // AN UNDECLARED IDENTITY RESOLVES TO NOTHING. `smoke` and the rig-reference configs pass an empty
+    // `proc_match` meaning "there is no gateway process here"; `pgrep -f ""` answered with every
+    // process on the box, so init's tree could be summed and published as a gateway's RSS. Driven
+    // against the REAL box, because that is where the old behaviour lived.
+    #[test]
+    fn an_empty_declared_identity_measures_nothing_on_the_real_box() {
+        assert_eq!(
+            RealPids.matching_pid(""),
+            PidLookup::NotRunning,
+            "an empty match must name no process at all"
+        );
+        let m = root_pid_from(
+            &RealPids,
+            &Runtime::Native {
+                proc_match: String::new(),
+            },
+        );
+        assert!(!m.is_measured());
+        assert_eq!(m.reason(), Some(&Absent::NotMeasured));
+    }
+
     // A process that is not there is an ABSENCE WITH A REASON. Never a zero, never a default pid:
     // summing a tree from the wrong root publishes another process's memory as the gateway's.
     #[test]
@@ -324,6 +475,7 @@ mod pid_tests {
         let f = FakePids::default();
         let rt = Runtime::Docker {
             container: "gw-bench".into(),
+            run_scope: None,
         };
         let m = root_pid_from(&f, &rt);
         assert!(!m.is_measured());

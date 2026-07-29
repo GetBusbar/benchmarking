@@ -486,7 +486,15 @@ fn an_interrupted_climb_keeps_its_evidence_but_publishes_no_number() {
     };
     let r = saturation_plateau(&mut probe, 1, 4096);
     assert_eq!(r.peak.copied(), None, "no turnover was ever observed");
-    assert_eq!(r.peak.reason(), Some(&Absent::NotMeasured));
+    // RigLimited, not NotMeasured. An interruption is the RIG failing to finish asking (a refused
+    // window, an exhausted port range), never a fact about the gateway - and the distinction is
+    // load-bearing: `sweep_cpu_fps_cell` publishes a MEASURED 0 when every rung genuinely failed
+    // the gate, keyed on NotMeasured. Under one shared reason a rig abort became the gateway's zero.
+    assert_eq!(r.peak.reason(), Some(&Absent::RigLimited));
+    assert!(
+        r.peak.detail().unwrap_or_default().contains("interrupted"),
+        "and it says so, so the absence can be read without re-deriving it from the rungs"
+    );
     assert!(!r.exhausted, "an interruption is not exhaustion");
     assert!(
         !r.points.is_empty(),

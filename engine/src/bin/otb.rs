@@ -30,6 +30,52 @@ fn resolve_minted_auth(gw_dir: &std::path::Path) -> Option<String> {
     Some(trimmed.to_string())
 }
 
+/// WHY A GATEWAY THAT MINTS ITS OWN CREDENTIAL CANNOT BE MEASURED THROUGH A RESTART.
+///
+/// `resolve_minted_auth` runs ONCE, right after the initial launch, and the credential it finds is
+/// copied into the config every later request authenticates with. The memory phase then stops and
+/// relaunches the gateway (`run::restart_to_rest`), replaying the same `commands`: a gateway that
+/// mints a fresh credential per boot mints a new one there, and every request after that point
+/// carries a token the gateway no longer accepts. The symptom is not an error, it is a grid of
+/// failures attributed to the gateway.
+///
+/// The engine cannot re-resolve it from here (the restart happens deep inside the grid, against a
+/// credential the run config captured by value), so the honest move is to refuse the combination
+/// rather than publish a run whose second half authenticated with a dead token. Returns the refusal
+/// to print, or `None` when there is nothing to refuse.
+fn stale_minted_auth_refusal(minted: Option<&str>, harness_restarts_it: bool) -> Option<String> {
+    if minted.is_none() || !harness_restarts_it {
+        return None;
+    }
+    Some(
+        "this gateway minted its own credential at boot, and the harness owns its lifetime: the \
+         memory phase restarts it mid-run and replays `commands`, which would mint a DIFFERENT \
+         credential while every later request kept using this one. Refusing to measure rather than \
+         publish a run whose second half authenticated with a stale token. Fix by re-resolving \
+         .minted-auth after each restart (run.rs `restart_to_rest`), or by giving the gateway a \
+         credential it accepts across boots."
+            .to_string(),
+    )
+}
+
+/// The loud end-of-run stop failure, or `None` if the gateway really is gone.
+///
+/// The final `stop_and_wait` used to be discarded with `let _`. A gateway that outlives the stop
+/// budget keeps the port and the cores the NEXT gateway needs, so the failure surfaces one gateway
+/// later as that gateway "never becoming ready" - the run that caused it having already reported
+/// success.
+fn end_of_run_stop_failure(
+    identity: &str,
+    stop: &Result<(), otb_engine::supervise::SuperviseError>,
+) -> Option<String> {
+    let err = stop.as_ref().err()?;
+    Some(format!(
+        "{identity} survived the stop budget ({err}); it still holds its port and cores, and the \
+         NEXT gateway launched on this box will fail to boot because of it. Kill it before running \
+         anything else here."
+    ))
+}
+
 fn usage() -> ExitCode {
     eprintln!(
         "otb {}\n\nSamples arrive on stdin as \"<t_s> <mib>\" per line, matching the shell's series files.\n\n\
@@ -81,6 +127,16 @@ fn utc_stamp() -> String {
     let mth = if mp < 10 { mp + 3 } else { mp - 9 };
     let year = if mth <= 2 { y + 1 } else { y };
     format!("{year:04}-{mth:02}-{d:02}T{h:02}:{m:02}:{sec:02}Z")
+}
+
+/// The id every container this invocation creates is scoped to. `OTB_RUN_ID` when the orchestrator
+/// set one (run-on-ec2.sh already has a `RUN_ID` it tags its boxes with), otherwise this process's
+/// pid, which is all two runs sharing a box need in order to stop naming each other's containers.
+fn run_scope() -> String {
+    std::env::var("OTB_RUN_ID")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| std::process::id().to_string())
 }
 
 fn arg_f64(args: &[String], i: usize, default: f64) -> f64 {
@@ -168,8 +224,10 @@ fn main() -> ExitCode {
                 probe_timeout: Duration::from_secs(10),
                 load_cores: std::env::var("LOADCORES").ok(),
                 // `smoke` drives an already-running gateway and takes no manifest, so it has no
-                // declared identity to measure memory against. An empty match resolves to nothing
-                // and the memory group reports an absence naming it, which is the honest answer.
+                // declared identity to measure memory against. An empty match resolves to nothing -
+                // enforced in `supervise::select_matches`, because the `pgrep -f ""` this used to be
+                // matched EVERY process on the box and could publish init's tree as the gateway's
+                // RSS - and the memory group reports an absence naming it, which is the honest answer.
                 static_headers: Vec::new(),
                 egress_headers: Default::default(),
                 runtime: otb_engine::manifest::Runtime::Native {
@@ -240,13 +298,19 @@ fn main() -> ExitCode {
                     p.parent().unwrap_or(p).to_path_buf()
                 }
             };
-            let manifest: Manifest = match Manifest::load(&dir) {
+            let mut manifest: Manifest = match Manifest::load(&dir) {
                 Ok(m) => m,
                 Err(e) => {
                     eprintln!("{e}");
                     return ExitCode::FAILURE;
                 }
             };
+            // BIND EVERY CONTAINER THIS INVOCATION CREATES TO THIS INVOCATION. Without it the
+            // container name is the manifest's alone, identical on every run of this gateway on this
+            // box, so a second run's boot-retry `docker rm -f` deletes the FIRST run's container in
+            // the middle of its measurement. `OTB_RUN_ID` lets the orchestrator use the same run id
+            // it tags its boxes with; a bare pid is enough to separate two runs on one box.
+            manifest.runtime = manifest.runtime.scoped_to_run(&run_scope());
             if let Err(e) = manifest.validate() {
                 eprintln!("manifest {manifest_path} is incomplete: {e}");
                 return ExitCode::FAILURE;
@@ -471,6 +535,12 @@ fn main() -> ExitCode {
                             // A failure here stops the run. A half-configured gateway is worse than
                             // one that never started: it answers probes, and publishes a verdict for
                             // an upstream that was never wired up.
+                            // IN THE GATEWAY'S OWN DIRECTORY, not wherever otb was invoked from: a
+                            // line transcribed from a gateway's docs writes and reads relative paths
+                            // (`> .minted-auth` is the one that already matters), and only this
+                            // directory is where anything looks for them. Declared once here so the
+                            // memory phase's replay of the same commands lands in the same place.
+                            otb_engine::launch::set_commands_dir(gw_dir.clone());
                             for line in &cfg.manifest.commands {
                                 match otb_engine::launch::run_line(line, Duration::from_secs(120)) {
                                     Ok(()) => println!("setup: {line}"),
@@ -493,7 +563,21 @@ fn main() -> ExitCode {
                             // an `export` in one command is invisible to the next and to this
                             // process - the only thing that survives across those separate
                             // invocations is a file. See `resolve_minted_auth`.
-                            if let Some(minted) = resolve_minted_auth(&gw_dir) {
+                            let minted = resolve_minted_auth(&gw_dir);
+                            // The harness owning the lifetime is exactly the condition under which
+                            // the memory phase restarts the gateway, so a per-boot credential would
+                            // go stale mid-run. Refused here, before a single measurement, rather
+                            // than published as the gateway failing every cell after the restart.
+                            if let Some(why) = stale_minted_auth_refusal(minted.as_deref(), true) {
+                                eprintln!("{}: {why}", cfg.manifest.name);
+                                let _ = otb_engine::supervise::stop_and_wait(
+                                    &spec.runtime,
+                                    spec.port,
+                                    Duration::from_secs(15),
+                                );
+                                return ExitCode::FAILURE;
+                            }
+                            if let Some(minted) = minted {
                                 println!(
                                     "setup: using minted auth from {}",
                                     gw_dir.join(".minted-auth").display()
@@ -518,18 +602,31 @@ fn main() -> ExitCode {
             // Stop what we started, whatever happened. A gateway left running holds the port and the
             // cores the NEXT gateway needs, and the failure that causes looks like the next gateway
             // refusing to boot.
+            // AND SAY SO IF IT DID NOT STOP. Discarding this result let a gateway that outlived the
+            // budget keep the port and the cores, and the only report of it was the NEXT gateway
+            // failing to boot.
+            let mut stop_failed = false;
             if let Some(spec) = &launched {
-                let _ = otb_engine::supervise::stop_and_wait(
+                let stop = otb_engine::supervise::stop_and_wait(
                     &spec.runtime,
                     spec.port,
                     Duration::from_secs(15),
                 );
+                if let Some(why) = end_of_run_stop_failure(&spec.runtime.identity(), &stop) {
+                    eprintln!("{why}");
+                    stop_failed = true;
+                }
             }
 
             match outcome {
                 Ok(paths) => {
                     println!("wrote {}", paths.current.display());
                     println!("wrote {}", paths.historical.display());
+                    // The snapshot is written and honest; the BOX is not clean. A zero exit here
+                    // would tell the orchestrator it may launch the next gateway on this box.
+                    if stop_failed {
+                        return ExitCode::FAILURE;
+                    }
                     ExitCode::SUCCESS
                 }
                 Err(e) => {
@@ -666,6 +763,69 @@ mod utc_stamp_tests {
                 .iter()
                 .enumerate()
                 .all(|(i, b)| matches!(i, 4 | 7 | 10 | 13 | 16 | 19) || b.is_ascii_digit())
+    }
+}
+
+#[cfg(test)]
+mod end_of_run_tests {
+    use super::{end_of_run_stop_failure, stale_minted_auth_refusal};
+    use otb_engine::supervise::SuperviseError;
+    use std::time::Duration;
+
+    // THE DEFECT: the final stop's result was dropped with `let _`, so a gateway that outlived the
+    // 15s budget kept the port and the cores, and the only report of it was the NEXT gateway on the
+    // box failing to boot - attributed to that gateway rather than to this one.
+    #[test]
+    fn a_gateway_that_survives_the_stop_budget_is_reported_loudly() {
+        let stop = Err(SuperviseError::StillHeld {
+            port: 8080,
+            waited: Duration::from_secs(16),
+        });
+        let said =
+            end_of_run_stop_failure("gw-bench-4242", &stop).expect("a survivor is a failure");
+        assert!(
+            said.contains("gw-bench-4242"),
+            "the message must name what is still running: {said}"
+        );
+        assert!(
+            said.contains("8080"),
+            "and the port it is still holding: {said}"
+        );
+        assert!(
+            said.contains("NEXT gateway"),
+            "and what it will break next: {said}"
+        );
+    }
+
+    #[test]
+    fn a_gateway_that_actually_stopped_reports_nothing() {
+        assert_eq!(end_of_run_stop_failure("gw-bench-4242", &Ok(())), None);
+    }
+
+    // THE DEFECT: minted auth is resolved once, after the initial launch, and the memory phase then
+    // restarts the gateway and replays `commands`. A gateway that mints per boot would hand out a new
+    // credential there while every later request kept using the first one, and the whole second half
+    // of the grid would read as the gateway refusing its own traffic.
+    #[test]
+    fn a_minting_gateway_the_harness_restarts_is_refused_before_it_is_measured() {
+        let why = stale_minted_auth_refusal(Some("sk-minted-1"), true)
+            .expect("this combination cannot be measured honestly");
+        assert!(
+            why.contains("stale"),
+            "the refusal must name the defect: {why}"
+        );
+    }
+
+    #[test]
+    fn a_gateway_that_mints_nothing_is_measured_as_before() {
+        assert_eq!(stale_minted_auth_refusal(None, true), None);
+    }
+
+    // Someone else's gateway, someone else's lifetime: nothing here restarts it, so the credential it
+    // minted at ITS boot stays valid for the whole run.
+    #[test]
+    fn a_minting_gateway_the_harness_never_restarts_is_fine() {
+        assert_eq!(stale_minted_auth_refusal(Some("sk-minted-1"), false), None);
     }
 }
 

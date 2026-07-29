@@ -18,24 +18,141 @@ use serde::{Deserialize, Serialize};
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Runtime {
     /// A container. The root pid comes from the container runtime, and the tree walk starts there.
-    Docker { container: String },
+    Docker {
+        /// The name as the manifest declares it, stable across runs.
+        container: String,
+        /// THE RUN THAT OWNS THIS CONTAINER, appended to the declared name to form the real one.
+        ///
+        /// A container's `--name` used to be the declared name alone, which is the same string on
+        /// every run of that gateway on that box. Two overlapping runs then name ONE container: the
+        /// second run's `docker run` collides, and its retry loop's `stop()` is `docker rm -f` on
+        /// that shared name, which deletes the FIRST run's container in the middle of its
+        /// measurement. Scoping the name means a run can only ever remove its own.
+        ///
+        /// Not in any manifest and never serialized back into one: it is assigned per invocation
+        /// (`Runtime::scoped_to_run`), the same way run-on-ec2.sh tags the boxes it launched with
+        /// `run=$RUN_ID` so its teardown filters to its own and leaves a peer run's alone.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        run_scope: Option<String>,
+    },
     /// A process started directly on the box, located by a match against its command line.
     Native { proc_match: String },
 }
 
 impl Runtime {
     /// The one identity string, whatever the kind. Readers take this rather than being handed a name
-    /// per call site, which is what makes a mismatch between them unrepresentable.
-    pub fn identity(&self) -> &str {
+    /// per call site, which is what makes a mismatch between them unrepresentable. For a container
+    /// this is the RUN-SCOPED name: the name that was created, that gets measured, and that gets
+    /// removed, all three from here.
+    pub fn identity(&self) -> String {
         match self {
-            Runtime::Docker { container } => container,
+            Runtime::Docker {
+                container,
+                run_scope: Some(scope),
+            } => format!("{container}-{scope}"),
+            Runtime::Docker { container, .. } => container.clone(),
+            Runtime::Native { proc_match } => proc_match.clone(),
+        }
+    }
+
+    /// The identity as the MANIFEST spells it, without a run scope. For validation messages and for
+    /// the `otb.gateway` label, where the stable name is the useful one; never for naming, finding or
+    /// removing a container, which must all go through `identity`.
+    pub fn declared_identity(&self) -> &str {
+        match self {
+            Runtime::Docker { container, .. } => container,
             Runtime::Native { proc_match } => proc_match,
+        }
+    }
+
+    /// Which run owns this identity, if it has been scoped to one.
+    pub fn run_scope(&self) -> Option<&str> {
+        match self {
+            Runtime::Docker { run_scope, .. } => run_scope.as_deref(),
+            Runtime::Native { .. } => None,
+        }
+    }
+
+    /// Bind this identity to one run, so concurrent runs on a shared host cannot name (and therefore
+    /// cannot remove) each other's containers.
+    ///
+    /// A NATIVE identity is returned UNCHANGED, and that is not an oversight: `proc_match` matches a
+    /// command line the gateway itself produces, and no run id appears in it. The isolation a native
+    /// gateway needs comes from the port it binds, which two overlapping runs cannot share anyway.
+    pub fn scoped_to_run(&self, run_id: &str) -> Runtime {
+        match self {
+            Runtime::Docker { container, .. } => Runtime::Docker {
+                container: container.clone(),
+                run_scope: sanitize_run_scope(run_id),
+            },
+            Runtime::Native { .. } => self.clone(),
         }
     }
 
     pub fn is_docker(&self) -> bool {
         matches!(self, Runtime::Docker { .. })
     }
+}
+
+/// A run id reduced to what a container name accepts (`[a-zA-Z0-9_.-]`), because the scope is
+/// concatenated into `--name` and a rejected name is a launch that never happens. `None` for a scope
+/// that survives as nothing, so an unusable id leaves the name unscoped rather than trailing a bare
+/// separator.
+fn sanitize_run_scope(run_id: &str) -> Option<String> {
+    let cleaned: String = run_id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
+        .collect();
+    let cleaned = cleaned.trim_matches(['.', '-', '_']).to_string();
+    (!cleaned.is_empty()).then_some(cleaned)
+}
+
+/// Command-line fragments too generic to name one process. Matching is a SUBSTRING against every
+/// full command line on the box (`supervise::select_matches`), so a `proc_match` like `sh` or `node`
+/// selects a crowd, and whichever member of that crowd the stop path signals or the memory reader
+/// sums is a coin toss the artifact reports as the gateway's.
+const GENERIC_PROC_MATCHES: [&str; 14] = [
+    "sh", "bash", "python", "python3", "node", "java", "docker", "server", "proxy", "gateway",
+    "main", "app", "run", "start",
+];
+
+/// The shortest a `proc_match` may be. Four characters of a command line is not an identity; every
+/// entrant in the field declares a path or a full binary name, which is what this asks for.
+const MIN_PROC_MATCH_LEN: usize = 8;
+
+/// Why a declared `proc_match` cannot be trusted to name exactly one process, or `None` if it can.
+///
+/// Checked at manifest level rather than only at match time because a generic pattern's damage is
+/// silent: the wrong process is stopped, or a bystander's memory is published as the gateway's, and
+/// both read as a plausible number rather than as an error.
+pub fn proc_match_problem(proc_match: &str) -> Option<String> {
+    let m = proc_match.trim();
+    if m.is_empty() {
+        return Some("proc_match is empty, so nothing identifies the process".to_string());
+    }
+    if m.len() < MIN_PROC_MATCH_LEN {
+        return Some(format!(
+            "proc_match {m:?} is only {} characters; a substring that short matches command lines that have nothing to do with this gateway. Declare the binary path the gateway actually runs as (e.g. \"target/release/<binary>\")",
+            m.len()
+        ));
+    }
+    if GENERIC_PROC_MATCHES
+        .iter()
+        .any(|g| g.eq_ignore_ascii_case(m))
+    {
+        return Some(format!(
+            "proc_match {m:?} is a generic command name: it matches processes that are not this gateway"
+        ));
+    }
+    // The engine's own binary. A pattern that appears in the harness's argv makes the harness a
+    // candidate for its own stop signal, and makes `is_alive` read the engine's command line as
+    // proof the gateway is still up.
+    if m.contains("otb") {
+        return Some(format!(
+            "proc_match {m:?} contains the engine's own binary name, so it can match the harness's command line rather than the gateway's"
+        ));
+    }
+    None
 }
 
 /// Why a config setting exists. The board's fairness rule is that every gateway config is the bare
@@ -426,6 +543,10 @@ pub enum ManifestError {
     ConstantCycle {
         name: String,
     },
+    /// A native `proc_match` too generic to name one process. Refused at load rather than at match
+    /// time: by then the wrong process has already been signalled or measured, and the result looks
+    /// like a number rather than like a fault.
+    IndistinctProcMatch(String),
 }
 
 /// How deep a constant may refer to other constants before it is treated as a cycle. One real chain
@@ -440,6 +561,7 @@ impl std::fmt::Display for ManifestError {
             ManifestError::ConfigWithoutReason(k) => {
                 write!(f, "config setting {k:?} has no key to attach a reason to")
             }
+            ManifestError::IndistinctProcMatch(why) => write!(f, "{why}"),
             ManifestError::ConstantCycle { name } => {
                 write!(f, "constant {name:?} refers to itself, directly or through a ring of others")
             }
@@ -572,14 +694,23 @@ impl Manifest {
                 });
             }
         }
-        if self.runtime.identity().contains('$') {
+        if self.runtime.declared_identity().contains('$') {
             return Err(ManifestError::UnexpandedVariable {
                 field: "runtime identity",
-                raw: self.runtime.identity().to_string(),
+                raw: self.runtime.declared_identity().to_string(),
             });
         }
-        if self.runtime.identity().trim().is_empty() {
+        if self.runtime.declared_identity().trim().is_empty() {
             return Err(ManifestError::Empty("runtime identity"));
+        }
+        // A NATIVE IDENTITY MUST BE DISTINCTIVE, checked here rather than trusted at match time. The
+        // stop path signals, and the memory reader sums, whatever command lines contain this string;
+        // a generic one selects a bystander and publishes its memory - or kills it - under this
+        // gateway's name.
+        if let Runtime::Native { proc_match } = &self.runtime {
+            if let Some(why) = proc_match_problem(proc_match) {
+                return Err(ManifestError::IndistinctProcMatch(why));
+            }
         }
         if self.port == 0 {
             return Err(ManifestError::BadPort);
@@ -1032,6 +1163,65 @@ impl Manifest {
         Ok(m)
     }
 
+    /// Manifest headers that name something the RIG already sends on every request of some dialect.
+    ///
+    /// Ledger RIG-12's remainder. `run::headers_for` composes the dialect's own credential header
+    /// (`Dialect::auth_headers`) and then appends the manifest's `headers` and `egress_headers`
+    /// verbatim. Nothing stopped a manifest declaring `authorization` itself, and one does today -
+    /// `gateways/litellm-rust/definition.json` line 15, `"Authorization: Bearer {GW_AUTH}"`, which
+    /// collides with the bearer header the openai, openai-responses, cohere and bedrock ingress
+    /// dialects all send. Both went out on one request, and HTTP does not define which of two
+    /// same-named headers a server honours: some take the first, some the last, some join them with
+    /// a comma and fail the parse. Nothing errors. The gateway authenticates as SOMEBODY and
+    /// publishes a clean number for a request whose credential we cannot state.
+    ///
+    /// PRECEDENCE, NOT REFUSAL, and the live manifest above is why. Refusing at load is the tidier
+    /// rule and it would stop the whole benchmark on a first-party file this change is not allowed
+    /// to edit - trading a silently-ambiguous measurement for no measurement at all, on a gateway
+    /// whose duplicate happens to be byte-identical to the header it duplicates. So the wire is made
+    /// unambiguous instead (`run::headers_for` drops the manifest's copy and keeps the dialect's),
+    /// and the collision is DISCLOSED here so `otb lint` names the file and the header rather than
+    /// leaving the rule to be rediscovered from the code.
+    ///
+    /// The rig's copy wins because the credential is the harness's to assert: `cfg.auth` is the
+    /// token this run holds (one gateway mints it at launch), and the header shape is what a real
+    /// client of that dialect sends. A manifest that could override it could have the gateway
+    /// measured under an identity the harness cannot name, which is the same defect one level up.
+    ///
+    /// The name list is DERIVED from `Dialect::auth_headers` via `rig_owned_header_names`, over
+    /// every dialect, so it cannot go stale when a dialect changes how it authenticates. Every
+    /// dialect's, not just the ones this gateway declares: `egress` is a wiring declaration, the
+    /// matrix probes all six ingress dialects regardless, and a header in `headers` is sent on every
+    /// one of them.
+    pub fn rig_owned_headers_declared(&self) -> Vec<String> {
+        let owned: std::collections::BTreeSet<String> = crate::ingress::Dialect::ALL
+            .iter()
+            .flat_map(|d| d.rig_owned_header_names())
+            .collect();
+        let declared = self.headers.iter().map(|l| ("headers", l)).chain(
+            self.egress_headers
+                .iter()
+                .flat_map(|(col, lines)| lines.iter().map(move |l| (col.as_str(), l))),
+        );
+        let mut out = Vec::new();
+        for (where_, line) in declared {
+            let Some((name, _)) = line.split_once(':') else {
+                continue;
+            };
+            let name = name.trim().to_ascii_lowercase();
+            if owned.contains(&name) {
+                out.push(format!(
+                    "declares the header {name:?} (in {where_}), which the harness already sends itself \
+                     on every request of the dialects that use it. Only the harness's own copy goes on \
+                     the wire (`run::headers_for` drops this one), because two same-named headers on one \
+                     request is a credential or route no reader of the board could name. Remove it from \
+                     the manifest"
+                ));
+            }
+        }
+        out
+    }
+
     /// Put a sidecar's env onto whichever launch kind this manifest declares.
     fn apply_env(&mut self, env: Vec<(String, String)>, unset: Vec<String>) {
         match self.launch.as_mut() {
@@ -1181,6 +1371,7 @@ pub(crate) fn test_fixture() -> Manifest {
         headers: vec![],
         runtime: Runtime::Docker {
             container: "gw-bench".into(),
+            run_scope: None,
         },
         egress: vec!["openai".into()],
         matrix: vec![],
@@ -1326,12 +1517,96 @@ mod tests {
         assert_eq!(m.runtime.identity(), "target/release/gw");
     }
 
+    // ---- run-scoped container identity ------------------------------------------------------------
+
+    // THE DEFECT: a container's `--name` was the manifest's name alone, identical on every run of
+    // this gateway on this box. Two overlapping runs then named ONE container, and the second run's
+    // boot-retry `docker rm -f` deleted the first run's container mid-measurement.
+    #[test]
+    fn two_runs_of_one_gateway_cannot_name_the_same_container() {
+        let declared = Runtime::Docker {
+            container: "gw-bench".into(),
+            run_scope: None,
+        };
+        let a = declared.scoped_to_run("20260729-101500-4242");
+        let b = declared.scoped_to_run("20260729-101500-4243");
+        assert_ne!(
+            a.identity(),
+            b.identity(),
+            "two concurrent runs must not name the same container"
+        );
+        assert!(a.identity().starts_with("gw-bench-"), "{}", a.identity());
+        // And teardown still finds its OWN: the stop path takes this same identity, and the declared
+        // name stays available for the label a cross-run sweep filters on.
+        assert_eq!(a.declared_identity(), "gw-bench");
+        assert_eq!(a.run_scope(), Some("20260729-101500-4242"));
+    }
+
+    // A NATIVE IDENTITY IS UNCHANGED BY SCOPING: `proc_match` matches a command line the gateway
+    // itself produces, and no run id appears in it. Scoping it would match nothing at all.
+    #[test]
+    fn scoping_a_native_identity_leaves_the_process_match_alone() {
+        let rt = Runtime::Native {
+            proc_match: "target/release/gw".into(),
+        };
+        assert_eq!(rt.scoped_to_run("run-1").identity(), "target/release/gw");
+        assert_eq!(rt.scoped_to_run("run-1").run_scope(), None);
+    }
+
+    // A run id a container runtime would reject must not produce a name that cannot be launched.
+    #[test]
+    fn a_run_id_is_reduced_to_what_a_container_name_accepts() {
+        let declared = Runtime::Docker {
+            container: "gw".into(),
+            run_scope: None,
+        };
+        assert_eq!(declared.scoped_to_run("a b/c:d").identity(), "gw-abcd");
+        assert_eq!(
+            declared.scoped_to_run("///").identity(),
+            "gw",
+            "a run id that survives as nothing leaves the name unscoped, never trailing a separator"
+        );
+    }
+
+    // ---- a proc_match must name one process --------------------------------------------------------
+
+    // THE DEFECT: matching is a SUBSTRING against every command line on the box, so a short or
+    // generic pattern selects a crowd, and whichever member the stop path signals or the memory
+    // reader sums is a coin toss published as this gateway's.
+    #[test]
+    fn an_indistinct_proc_match_is_refused_at_load_not_discovered_at_match_time() {
+        for bad in ["gw", "node", "server", "sh", "otb-run"] {
+            let m = Manifest {
+                runtime: Runtime::Native {
+                    proc_match: bad.into(),
+                },
+                ..docker_manifest()
+            };
+            assert!(
+                matches!(m.validate(), Err(ManifestError::IndistinctProcMatch(_))),
+                "{bad:?} must not validate: it matches command lines that are not this gateway"
+            );
+        }
+    }
+
+    #[test]
+    fn a_binary_path_is_a_distinctive_enough_proc_match() {
+        for good in [
+            "target/release/aisix",
+            "target/release/ai-gateway",
+            "litellm-ai-gateway",
+        ] {
+            assert_eq!(proc_match_problem(good), None, "{good:?} was refused");
+        }
+    }
+
     // A runtime with no identity cannot be measured or stopped, so it must not validate.
     #[test]
     fn an_empty_runtime_identity_is_rejected() {
         let m = Manifest {
             runtime: Runtime::Docker {
                 container: "  ".into(),
+                run_scope: None,
             },
             ..docker_manifest()
         };
@@ -1425,6 +1700,7 @@ mod tests {
         let m = Manifest {
             runtime: Runtime::Docker {
                 container: "$NAME-bench".into(),
+                run_scope: None,
             },
             ..docker_manifest()
         };
@@ -1538,6 +1814,60 @@ mod tests {
             assert_eq!(got("RAYON_NUM_THREADS"), Some("4"), "{label}: rayon");
             assert_eq!(got("OMP_NUM_THREADS"), Some("4"), "{label}: openmp");
         }
+    }
+
+    // A MANIFEST THAT RESTATES A HEADER THE RIG ALREADY SENDS IS DISCLOSED, NOT SILENT.
+    //
+    // Ledger RIG-12's remainder. `run::headers_for` composed the dialect's credential header and
+    // then appended the manifest's verbatim, and `gateways/litellm-rust/definition.json` declares
+    // `Authorization: Bearer {GW_AUTH}` today - so two `authorization` headers went out on one
+    // request and HTTP does not define which a server honours. The wire is resolved there (the rig's
+    // copy wins); the collision is named here, so a precedence rule nobody is told about is not the
+    // same silence as the ambiguity it replaced.
+    #[test]
+    fn a_manifest_restating_a_header_the_rig_owns_is_reported() {
+        let m = Manifest {
+            headers: vec!["Authorization: Bearer {GW_AUTH}".into()],
+            ..docker_manifest()
+        };
+        let found = m.rig_owned_headers_declared();
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(
+            found[0].contains("authorization") && found[0].contains("headers"),
+            "the report must name the header and where it was declared: {found:?}"
+        );
+        // Reported case-insensitively, because HTTP header names are: the live manifest spells it
+        // with a capital A, and a rule that only caught the lowercase one would not have caught the
+        // file that motivated it. `found[0]` above is the lowercased name.
+
+        // Every dialect's, not just the ones this gateway wires up: a header in `headers` is sent on
+        // every ingress dialect the matrix probes, and the matrix probes all six regardless.
+        for name in ["x-api-key", "x-goog-api-key", "anthropic-version"] {
+            let m = Manifest {
+                egress_headers: [("openai".to_string(), vec![format!("{name}: whatever")])]
+                    .into_iter()
+                    .collect(),
+                ..docker_manifest()
+            };
+            assert_eq!(
+                m.rig_owned_headers_declared().len(),
+                1,
+                "{name} is a header the rig sends itself"
+            );
+        }
+
+        // A routing header the harness never sends is the normal case and must stay silent.
+        let m = Manifest {
+            headers: vec!["x-llm-provider: anthropic".into()],
+            egress_headers: [(
+                "openai".to_string(),
+                vec!["x-portkey-custom-host: http://127.0.0.1:{MOCK_PORT}/v1".into()],
+            )]
+            .into_iter()
+            .collect(),
+            ..docker_manifest()
+        };
+        assert!(m.rig_owned_headers_declared().is_empty());
     }
 }
 

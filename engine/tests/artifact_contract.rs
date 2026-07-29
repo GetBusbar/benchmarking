@@ -58,12 +58,18 @@ const STREAM_METRICS: [&str; 8] = [
     "cpu_fps",
     "cpu_fps_concurrency",
 ];
-const MEMORY_METRICS: [&str; 7] = [
+// `plateaued` and `load_s` joined this list when they stopped being bare `Option`s that collapsed
+// the memory group's reason on the way out: a window that could not judge the plateau published two
+// nulls nothing could explain. They are `Measurement`s now, so they ride in the absences map like
+// every other number and are held to the same contract here.
+const MEMORY_METRICS: [&str; 9] = [
     "idle_rss_mib",
     "steady_state_rss_mib",
     "recovered_rss_mib",
     "peak_rss_mib",
     "peak_rss_hwm_mib",
+    "plateaued",
+    "load_s",
     "time_to_plateau_s",
     "growth_rate_mib_per_min",
 ];
@@ -109,6 +115,8 @@ fn measured_memory() -> CellMemory {
         peak_rss_hwm_mib: Measurement::Measured(185.0),
         time_to_plateau_s: Measurement::Measured(72.0),
         growth_rate_mib_per_min: Measurement::Measured(0.3),
+        plateaued: Measurement::Measured(true),
+        load_s: Measurement::Measured(120),
         ..CellMemory::default()
     }
 }
@@ -137,9 +145,13 @@ fn a_fully_measured_cell_has_every_declared_field_present_and_no_absences() {
     ] {
         for key in keys {
             let field = &v[block][key];
+            // PRESENT AND NOT NULL is the contract, not "is a number". Most measurements are
+            // numeric, but `memory.plateaued` is a `Measurement<bool>` and publishes `true` - a
+            // real measured value. Demanding a number here would have forced that field back into
+            // the bare-`Option` shape whose whole defect was that it could not carry a reason.
             assert!(
-                field.is_number(),
-                "{block}.{key} was measured and must publish as a number, got {field}"
+                !field.is_null() && (field.is_number() || field.is_boolean()),
+                "{block}.{key} was measured and must publish its value, got {field}"
             );
         }
     }

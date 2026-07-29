@@ -46,6 +46,24 @@ impl Outcome {
     pub fn qualifies_as_baseline(&self) -> bool {
         matches!(self, Outcome::Pass | Outcome::Seed)
     }
+
+    /// The inverse of `token`: read an outcome back off a published artifact.
+    ///
+    /// Written out rather than derived from serde, because the published vocabulary is `token`'s and
+    /// `Skipped` publishes as `"skip"` - a `#[serde(rename_all = "snake_case")]` round trip would
+    /// silently fail to parse the one token whose name is not its variant's. `None` for anything
+    /// else, including a token a future engine adds: an outcome this build cannot name is one it
+    /// cannot vouch for, and the caller (`suite::qualify_history_on_disk`) treats that as
+    /// "not known to qualify" rather than guessing.
+    pub fn from_token(token: &str) -> Option<Outcome> {
+        match token {
+            "pass" => Some(Outcome::Pass),
+            "fail" => Some(Outcome::Fail),
+            "seed" => Some(Outcome::Seed),
+            "skip" => Some(Outcome::Skipped),
+            _ => None,
+        }
+    }
 }
 
 /// Which direction of deviation is the BAD one.
@@ -332,5 +350,31 @@ mod tests {
         assert_eq!(Outcome::Fail.token(), "fail");
         assert_eq!(Outcome::Seed.token(), "seed");
         assert_eq!(Outcome::Skipped.token(), "skip");
+    }
+
+    // Every token this engine PUBLISHES must be one it can read back, or the baseline filter that
+    // reads outcomes off disk would treat a real verdict as unrecognised. `Skipped` is the one that
+    // catches a serde-derived round trip: it publishes as "skip", not "skipped".
+    #[test]
+    fn every_published_token_reads_back_as_the_outcome_that_wrote_it() {
+        for o in [
+            Outcome::Pass,
+            Outcome::Fail,
+            Outcome::Seed,
+            Outcome::Skipped,
+        ] {
+            assert_eq!(
+                Outcome::from_token(o.token()),
+                Some(o),
+                "{} must round trip through its published token",
+                o.token()
+            );
+        }
+        assert_eq!(
+            Outcome::from_token("skipped"),
+            None,
+            "a token this build does not publish must not be guessed at"
+        );
+        assert_eq!(Outcome::from_token(""), None);
     }
 }
