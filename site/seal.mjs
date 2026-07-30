@@ -244,12 +244,25 @@ export function sealMetric(value, opts = {}) {
 // reading always reports the bound IT was taken under even if the mirror above ever drifts.
 // `lower_bound` travels because a rate the sweep never found a ceiling for is a floor, and a surface
 // that renders it as a ceiling is making a claim the data does not support.
+//
+// THE ABSENCE KEY IS BLOCK-PREFIXED, and getting that wrong silently destroyed the distinction this
+// whole metric exists to preserve. `CellPerf::absences()` keys the frontier as
+// `perf.frontier.10ms.rps`; this looked up `frontier.10ms.rps`, found nothing, and every absent reading
+// fell back to a bare `not_measured` with no detail.
+//
+// The damage was not cosmetic. one-api genuinely cannot serve under a 10 ms tail - its own rungs never
+// got below 34 ms - and the engine says exactly that, with `below_resolution` and the prose "every
+// cleanly-served rung had a tail latency at or above 10ms". Flattened to `not_measured`, no surface
+// could tell "measured, and it cannot do this" from "nothing was measured here", and the neutral
+// reading FLATTERS the gateway. Both prefixed and bare keys are accepted, matching
+// `gen-data.mjs::absentEntryFor`, because a projected record carries the bare form.
 export function sealFrontier(readings, absences = null) {
   if (!Array.isArray(readings)) return [];
   return readings.map((r) => {
     const us = Number.isFinite(r.p99_bound_us) ? r.p99_bound_us : null;
     const at = us == null ? "unbounded" : `${Math.round(us / 1000)}ms`;
-    const abs = absences ? absences[`frontier.${at}.rps`] || null : null;
+    const key = `frontier.${at}.rps`;
+    const abs = absences ? absences[`perf.${key}`] || absences[key] || null : null;
     return {
       bound_ms: us == null ? null : Math.round(us / 1000),
       rps: sealMetric(r.rps, { absent: abs }),
