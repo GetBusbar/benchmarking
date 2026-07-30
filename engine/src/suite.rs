@@ -261,12 +261,24 @@ fn cell_memory(
     crate::record::CellMemory {
         // `served` here means the cell was served, which is the only reason a window ran at all.
         served: true,
+        // THE PROTOCOL, PUBLISHED. Every duration and every threshold a reader would need to check the
+        // numbers below, in the artifact, from the constants themselves - so it cannot drift from what
+        // ran. It used to say "until the trailing 60s is flat (cap 300s)", which described a load whose
+        // LENGTH depended on the gateway: the flatness test ended the measurement, so a gateway that
+        // looked settled early was asked a shorter question than one that looked busy, and their peaks
+        // were then ranked against each other. Every cell now gets the same load.
         protocol: format!(
-            "cold restart, idle read at rest, then load at c={} in repeated windows until the              trailing {}s is flat (cap {}s), then {}s with the load removed",
+            "cold restart, {}s idle read at rest, then load at c={} for {}s, then {}s with the load \
+             removed. `plateaued` is a verdict over the trailing {}s, taken at the END of the load: \
+             steady means drift under {}% and range under {}% of the mean. The verdict does not end the \
+             load - every cell is loaded for the full duration.",
+            crate::metric::MEMORY_IDLE_S,
             crate::metric::MEMORY_WINDOW_CONCURRENCY,
-            crate::metric::MEMORY_PLATEAU_WINDOW_S,
-            crate::metric::MEMORY_MAX_LOAD_S,
+            crate::metric::MEMORY_LOAD_S,
             crate::metric::MEMORY_RECOVERY_S,
+            crate::metric::MEMORY_PLATEAU_WINDOW_S,
+            crate::metric::MEMORY_TREND_PCT,
+            crate::metric::MEMORY_RANGE_PCT,
         ),
         idle_rss_mib: take("memory_idle_mib"),
         peak_rss_mib: take("memory_peak_mib"),

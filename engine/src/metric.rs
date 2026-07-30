@@ -405,7 +405,7 @@ const MEMORY_SAMPLE_INTERVAL: std::time::Duration = std::time::Duration::from_mi
 /// The cap is not a fallback, it is the whole reason a leak terminates: a gateway that never settles
 /// would otherwise run forever. Hitting it is a result (`NotSteady`), never an error.
 pub const MEMORY_PLATEAU_WINDOW_S: f64 = 60.0;
-pub const MEMORY_MAX_LOAD_S: u64 = 300;
+pub const MEMORY_LOAD_S: u64 = 300;
 
 /// AND THEN WATCH IT FOR A MINUTE WITH THE LOAD GONE.
 ///
@@ -445,8 +445,8 @@ pub const MEMORY_RECOVERY_MEDIAN_S: u64 = MEMORY_RECOVERY_S / 2;
 pub const MEMORY_IDLE_S: u64 = 60;
 /// Percent the trailing window's two halves may differ by, and percent spread within it, before the
 /// window counts as still moving. The values the shell suite used, kept so the two agree.
-const MEMORY_TREND_PCT: f64 = 1.0;
-const MEMORY_RANGE_PCT: f64 = 2.0;
+pub const MEMORY_TREND_PCT: f64 = 1.0;
+pub const MEMORY_RANGE_PCT: f64 = 2.0;
 
 /// Whether a steady verdict may be BELIEVED, given how the series grew since the last window.
 ///
@@ -774,15 +774,49 @@ impl Metric for Memory {
                 sampler_died = true;
                 break;
             }
-            if verdict.is_steady() {
+            // THE VERDICT IS RECORDED, NOT ACTED ON. When the trailing window first reads flat this
+            // notes WHEN, and keeps loading.
+            //
+            // It used to `break` here, and that is the same defect the throughput scalars had one lane
+            // over: a threshold deciding when to stop measuring, and therefore deciding the number.
+            // `MEMORY_TREND_PCT = 1.0` and `MEMORY_RANGE_PCT = 2.0` are the values the shell suite used,
+            // kept so the two agree - nothing derives them - and stopping on them bounded
+            // `peak_rss_mib`, `load_s` and everything read from the tail of the series. The field data
+            // shows what that cost: across 66 cells on the 2026-07-29 board `load_s` ran from 6 seconds
+            // to 301, median 201. A gateway that looked flat early was never asked the question a
+            // gateway that looked busy was asked, and their peaks were then ranked against each other.
+            //
+            // So every cell now gets the same `MEMORY_LOAD_S`. That costs ~8.4 minutes per gateway
+            // (+55% of this phase), which is wall-clock this run can afford because the gateways run one
+            // to a box, and it buys a peak that means the same thing on every row.
+            if verdict.is_steady() && settled_at.is_none() {
                 settled_at = Some(load_started.elapsed().as_secs() as i64);
-                break;
             }
-            if load_started.elapsed().as_secs() >= MEMORY_MAX_LOAD_S {
+            if load_started.elapsed().as_secs() >= MEMORY_LOAD_S {
                 break;
             }
         }
         let load_s = load_started.elapsed().as_secs() as i64;
+
+        // THE VERDICT, TAKEN OVER THE FULL LOAD. The loop's last `plateau_check` ran mid-load and only
+        // to note `settled_at`; the published verdict must describe the window the artifact says was
+        // measured, which is all of it. A cell that settled at 90s and then climbed again for 200 more
+        // is NOT steady, and the mid-load reading would have said it was.
+        if !sampler_died {
+            let full: Vec<crate::stats::Sample> =
+                series.lock().map(|s| s.clone()).unwrap_or_default();
+            let span = full.last().map(|x| x.t_s).unwrap_or(0.0)
+                - full.first().map(|x| x.t_s).unwrap_or(0.0);
+            verdict = crate::stats::plateau_check(
+                &full,
+                MEMORY_PLATEAU_WINDOW_S,
+                MEMORY_TREND_PCT,
+                MEMORY_RANGE_PCT,
+            );
+            if verdict.is_steady() && !window_is_long_enough(span) {
+                verdict = crate::stats::Verdict::Undecidable;
+            }
+        }
 
         // The kernel's high-water mark is read BEFORE the recovery window, while it still describes
         // the loaded process. It survives the load ending, but reading it here keeps it beside the
