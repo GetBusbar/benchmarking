@@ -158,19 +158,24 @@ pub fn judge(
 
 /// Rolling median of the baseline candidates. A single wild run must not own the baseline, which is
 /// why this is a median and not the last value or a mean.
+///
+/// DELEGATED RATHER THAN REPEATED. This sorted and took the middle itself, using the same
+/// `partial_cmp(b).unwrap_or(Equal)` comparator that made `stats::median` and `stats::percentile`
+/// return an ARRIVAL-ORDER-DEPENDENT answer on a slice containing NaN. It was safe only because of
+/// the `retain(is_finite)` on the line above - a guard this copy happened to have and the others did
+/// not. `suite::steady_state` was the same statistic written a third time, and it had no such guard.
+///
+/// One statistic, one implementation: a guard added to the shared one now protects every caller,
+/// which is exactly what the three-way duplication prevented. The `retain` stays because it is a
+/// DIFFERENT rule from the shared one - qualification history legitimately accumulates non-finite
+/// entries from old or partial runs and drops them, where a non-finite LATENCY sample means the rig
+/// malfunctioned and must refuse. Dropping bad history is not the same act as refusing a bad window.
 pub fn rolling_baseline(mut candidates: Vec<f64>) -> Measurement<f64> {
     candidates.retain(|v| v.is_finite());
     if candidates.is_empty() {
         return Measurement::absent_because(Absent::NotMeasured, "no qualifying history");
     }
-    candidates.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let n = candidates.len();
-    let med = if n % 2 == 1 {
-        candidates[n / 2]
-    } else {
-        (candidates[n / 2 - 1] + candidates[n / 2]) / 2.0
-    };
-    Measurement::Measured(med)
+    crate::stats::median(&candidates)
 }
 
 #[cfg(test)]

@@ -936,14 +936,23 @@ pub struct SustainedPoint {
 /// the error rate under the README's bar.
 ///
 /// A free function rather than logic inlined into a probe, so the gate's pass/fail boundary - the one
-/// piece of judgement this whole metric turns on - can be unit-tested directly against fixed numbers,
-/// the same reason `rigbound::is_rig_bound` is a free function rather than logic buried inside
-/// `apply_peak_verdict`. A probe's own `probe()` drives a real subprocess load window and cannot be
-/// exercised that way in this crate's unit tests (see `tests/end_to_end.rs`'s own note on why: under
-/// `cargo test` the current exe is the test binary, not `otb`).
+/// piece of judgement this whole metric turns on - can be unit-tested directly against fixed numbers.
+/// A probe's own `probe()` drives a real subprocess load window and cannot be exercised that way in
+/// this crate's unit tests (see `tests/end_to_end.rs`'s own note on why: under `cargo test` the
+/// current exe is the test binary, not `otb`).
 ///
-/// It is now applied to the SAME windows the throughput sweep took, via `sustained_gate`, rather
-/// than to a second search's windows measured minutes later.
+/// NOTHING IN THE MEASUREMENT PATH CALLS THIS ANY MORE. The sustained-throughput scalar it gated was
+/// retired when the frontier replaced it (`record.rs`, `metric.rs`), and the only callers left are
+/// this file's own unit tests. It is kept because the tests pin the README's stated bar - p99 under
+/// the ceiling AND under 0.1% errors - and that bar is still the definition the frontier's
+/// `served_cleanly` descends from; deleting it would delete the only executable statement of it.
+///
+/// Two claims were removed from this comment rather than left to mislead: it said the gate "is now
+/// applied to the SAME windows the throughput sweep took, via `sustained_gate`" - there is no
+/// `sustained_gate` function anywhere in the crate, and this one has no production caller - and it
+/// cited `rigbound::is_rig_bound` as a live example, which was itself deleted (see `rigbound.rs`'s
+/// own header). A doc comment describing an integration that does not exist sends the next reader
+/// looking for code that was removed.
 pub fn sustained_gate_passes(p99_us: Option<u64>, ok: u64, fail: u64) -> bool {
     let total = ok + fail;
     let fail_ratio = if total == 0 {

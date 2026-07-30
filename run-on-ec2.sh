@@ -220,6 +220,23 @@ publish_lock_acquire() {
 # Release only a lock this process owns. For the mkdir path, re-verify the unique token inside the
 # lockdir still matches the one this publish wrote before rmdir'ing, so a stale/handed-off dir (a peer
 # that re-acquired after we timed out and lost ownership) is never deleted out from under its real holder.
+# THE LOCK FILE IS NEVER UNLINKED, AND THAT IS THE POINT.
+#
+# End-of-run cleanup used to do `rm -f "$PUBLISH_LOCK"; rmdir "${PUBLISH_LOCK}.d"` unconditionally, at
+# two places, with no ownership check - bypassing this function entirely. An flock lives on the OPEN
+# FILE DESCRIPTION, not on the path, so unlinking the path while another invocation holds fd 9 open on
+# that inode does not release their lock: it DETACHES it. The next `publish_lock_acquire` then runs
+# `exec 9>"$PUBLISH_LOCK"`, which CREATES A NEW INODE, and its `flock` on that new inode succeeds
+# immediately - so two invocations both believe they hold the publish lock and run `git add/commit/push`
+# against the same checkout concurrently.
+#
+# That is not hypothetical here: the lock is keyed on the checkout path ($HERE) rather than the run id
+# SPECIFICALLY so that a second invocation contends, because "operator re-runs one gateway while a field
+# run is still finishing" is a documented, expected workflow.
+#
+# So there is nothing to clean up: the lock file is a rendezvous point that should persist between runs,
+# exactly like a pid file's directory. Releasing means closing the descriptor (flock path) or removing
+# the token dir we own (mkdir fallback), which is all this function does.
 publish_lock_release() {
   if [ -n "${PUBLISH_LOCK_FD:-}" ]; then
     flock -u "$PUBLISH_LOCK_FD" 2>/dev/null || true
@@ -428,6 +445,54 @@ if [[ $# -gt 0 ]]; then GATEWAYS=("$@"); else GATEWAYS=("${DEFAULT_GATEWAYS[@]}"
 # happens when the keypair was cleaned up out-of-band (teardown, `kill`, manual) while the local .pem
 # lingered; reusing that stale local key launches every box into "key pair does not exist". Checking
 # AWS too keeps them in lockstep.
+# REGISTERED BEFORE THE FIRST AWS RESOURCE IS CREATED, not after.
+#
+# This trap used to sit ~70 lines below, past the key-pair and security-group creation and past two
+# `exit 1` paths (a checkip failure after 3 retries, and a fatal authorize-security-group-ingress).
+# Exiting through either of those left a freshly created key pair and SG on AWS with CREATED_KEY=1 /
+# CREATED_SG=1 set and nothing registered to act on them. They cost nothing, but the leaked KEY is not
+# harmless: the private half lives only in $TMPDIR, so once that is cleaned every later run finds the
+# pair in AWS, reuses it, and cannot ssh to anything until someone deletes it by hand.
+#
+# Bash binds a function body at CALL time, so defining teardown here - while CREATED_KEY and CREATED_SG
+# are still 0 and $SG is unset - is safe: it is a no-op until those flip, and it becomes live the
+# instant they do. That is the whole point of moving it.
+# TIDINESS + COST: on ANY exit (normal, error, Ctrl-C, SIGTERM) terminate ONLY the boxes THIS run
+# launched - filtered by tag:run=$RUN_ID, NOT the shared purpose=gateway-bench tag - so a second or
+# concurrent invocation never terminates another run's still-live boxes before their results are
+# pulled. (SIGKILL can't be trapped; the boxes' own `shutdown -h` timer is the backstop.)
+# IDs are split via xargs - piping --output text straight into --instance-ids passes a tab-joined
+# blob that no-ops. The shared keypair/SG are deleted only if THIS invocation created them (otherwise
+# a concurrent run's ssh/rsync would break with "Permission denied (publickey)"); `run-on-ec2.sh kill`
+# stays the global cleanup for the shared key/SG.
+teardown() {
+  aws ec2 describe-instances --filters "Name=tag:run,Values=$RUN_ID" \
+    "Name=instance-state-name,Values=running,pending" --query 'Reservations[].Instances[].InstanceId' --output text 2>/dev/null \
+    | tr '\t' '\n' | grep -E '^i-' | xargs -r -n25 aws ec2 terminate-instances --output text --instance-ids >/dev/null 2>&1
+  if [[ "$CREATED_KEY" == 1 ]]; then aws ec2 delete-key-pair --key-name "$KEYNAME" >/dev/null 2>&1 || true; rm -f "$KEYFILE"; fi
+  if [[ "$CREATED_SG" == 1 ]]; then
+    # The just-terminated instances are `shutting-down`, not `running/pending`, but they STILL hold
+    # ENI associations to this SG for a short window - so an IMMEDIATE delete-security-group fails with
+    # DependencyViolation (swallowed by `|| true`) and the SG persists (a first-run-only cost leak). Wait
+    # for the instances THIS run launched to reach `terminated` (ENIs detached) before deleting the SG.
+    # Best-effort + time-bounded so teardown never hangs; the SG is shared/reused so a leaked one is minor.
+    local _tids
+    _tids=$(aws ec2 describe-instances --filters "Name=tag:run,Values=$RUN_ID" \
+      --query 'Reservations[].Instances[].InstanceId' --output text 2>/dev/null | tr '\t' '\n' | grep -E '^i-' | tr '\n' ' ')
+    if [[ -n "${_tids// }" ]]; then
+      # aws ec2 wait has its own ~600s ceiling; wrap in a timeout where available (Linux) so a wedged wait
+      # can't hang teardown. macOS has no `timeout` - fall back to the bare wait (its own ceiling applies).
+      if command -v timeout >/dev/null 2>&1; then
+        timeout 300 aws ec2 wait instance-terminated --instance-ids $_tids >/dev/null 2>&1 || true
+      else
+        aws ec2 wait instance-terminated --instance-ids $_tids >/dev/null 2>&1 || true
+      fi
+    fi
+    aws ec2 delete-security-group --group-id "$SG" >/dev/null 2>&1 || true
+  fi
+}
+trap teardown EXIT INT TERM
+
 if [[ ! -s "$KEYFILE" ]] || ! aws ec2 describe-key-pairs --key-names "$KEYNAME" >/dev/null 2>&1; then
   aws ec2 delete-key-pair --key-name "$KEYNAME" >/dev/null 2>&1 || true
   rm -f "$KEYFILE"
@@ -469,41 +534,6 @@ _sg_err=$(aws ec2 authorize-security-group-ingress --group-id "$SG" --protocol t
             exit 1 ;;
        esac; }
 
-# TIDINESS + COST: on ANY exit (normal, error, Ctrl-C, SIGTERM) terminate ONLY the boxes THIS run
-# launched - filtered by tag:run=$RUN_ID, NOT the shared purpose=gateway-bench tag - so a second or
-# concurrent invocation never terminates another run's still-live boxes before their results are
-# pulled. (SIGKILL can't be trapped; the boxes' own `shutdown -h` timer is the backstop.)
-# IDs are split via xargs - piping --output text straight into --instance-ids passes a tab-joined
-# blob that no-ops. The shared keypair/SG are deleted only if THIS invocation created them (otherwise
-# a concurrent run's ssh/rsync would break with "Permission denied (publickey)"); `run-on-ec2.sh kill`
-# stays the global cleanup for the shared key/SG.
-teardown() {
-  aws ec2 describe-instances --filters "Name=tag:run,Values=$RUN_ID" \
-    "Name=instance-state-name,Values=running,pending" --query 'Reservations[].Instances[].InstanceId' --output text 2>/dev/null \
-    | tr '\t' '\n' | grep -E '^i-' | xargs -r -n25 aws ec2 terminate-instances --output text --instance-ids >/dev/null 2>&1
-  if [[ "$CREATED_KEY" == 1 ]]; then aws ec2 delete-key-pair --key-name "$KEYNAME" >/dev/null 2>&1 || true; rm -f "$KEYFILE"; fi
-  if [[ "$CREATED_SG" == 1 ]]; then
-    # The just-terminated instances are `shutting-down`, not `running/pending`, but they STILL hold
-    # ENI associations to this SG for a short window - so an IMMEDIATE delete-security-group fails with
-    # DependencyViolation (swallowed by `|| true`) and the SG persists (a first-run-only cost leak). Wait
-    # for the instances THIS run launched to reach `terminated` (ENIs detached) before deleting the SG.
-    # Best-effort + time-bounded so teardown never hangs; the SG is shared/reused so a leaked one is minor.
-    local _tids
-    _tids=$(aws ec2 describe-instances --filters "Name=tag:run,Values=$RUN_ID" \
-      --query 'Reservations[].Instances[].InstanceId' --output text 2>/dev/null | tr '\t' '\n' | grep -E '^i-' | tr '\n' ' ')
-    if [[ -n "${_tids// }" ]]; then
-      # aws ec2 wait has its own ~600s ceiling; wrap in a timeout where available (Linux) so a wedged wait
-      # can't hang teardown. macOS has no `timeout` - fall back to the bare wait (its own ceiling applies).
-      if command -v timeout >/dev/null 2>&1; then
-        timeout 300 aws ec2 wait instance-terminated --instance-ids $_tids >/dev/null 2>&1 || true
-      else
-        aws ec2 wait instance-terminated --instance-ids $_tids >/dev/null 2>&1 || true
-      fi
-    fi
-    aws ec2 delete-security-group --group-id "$SG" >/dev/null 2>&1 || true
-  fi
-}
-trap teardown EXIT INT TERM
 
 AMI=$(aws ssm get-parameter --name "$SSM" --query Parameter.Value --output text)
 
@@ -1388,7 +1418,7 @@ fi
 if [ ! -s "$FRESH_SNAPSHOTS" ]; then
   log "NO GATEWAY MEASURED ANYTHING THIS RUN - not appending history, not regenerating charts, not pushing."
   log "  The board keeps exactly what it had. Re-run the gateways above; their fanout logs say why each failed."
-  rm -f "$PUBLISH_LOCK" 2>/dev/null || true; rmdir "${PUBLISH_LOCK}.d" 2>/dev/null || true
+  publish_lock_release
   exit "$fail"
 fi
 log "$(wc -l < "$FRESH_SNAPSHOTS" | tr -d ' ') gateway(s) produced a fresh snapshot this run - regenerating and publishing from them"
@@ -1475,6 +1505,6 @@ else
   log "PUBLISH=0 - not pushing history/charts (left in the working tree)"
 fi
 # Clean up the publish lock artifacts this run created.
-rm -f "$PUBLISH_LOCK" 2>/dev/null || true; rmdir "${PUBLISH_LOCK}.d" 2>/dev/null || true
+publish_lock_release
 
 exit "$fail"

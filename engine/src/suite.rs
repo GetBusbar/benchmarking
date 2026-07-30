@@ -891,10 +891,22 @@ pub fn run_suite_with(
         // The gateway's own headers, resolved once for the run. A column whose headers cannot be
         // resolved gets NONE rather than a partial set: sending half a routing header selects the
         // wrong upstream and publishes a number for a pairing that was never driven.
+        // REFUSED, NOT DEFAULTED. This was `.unwrap_or_default()`, which turned an unresolvable
+        // header into an EMPTY header set and measured the whole run without it. The comment above
+        // justifies "NONE rather than a partial set" - and that reasoning is sound for a partial set -
+        // but it does not cover resolution failing outright, which is what the default silently did.
+        //
+        // The consequence was the worst this harness can produce: a gateway whose auth header failed
+        // to resolve serves nothing, every cell records `served: false`, and the board publishes that
+        // the GATEWAY does not work when the harness dropped its credentials. `otb run` calls only
+        // `manifest.validate()`, which checks headers for shell-style `$` and never exercises `{...}`
+        // substitution, so an unknown placeholder passes the gate and arrives here.
         static_headers: cfg
             .manifest
             .headers_for("", &cfg.gw_cores, cfg.mock_addr.port(), &cfg.gw_dir)
-            .unwrap_or_default(),
+            .map_err(|e| crate::snapshot::SnapshotError::UnresolvableHeader {
+                detail: e.to_string(),
+            })?,
         egress_headers: cfg
             .dialects
             .iter()

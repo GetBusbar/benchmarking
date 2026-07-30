@@ -96,7 +96,13 @@ def main():
     gateways = set()
 
     for p in paths:
-        d = json.load(open(p))
+        try:
+            d = json.load(open(p))
+        except (OSError, ValueError):
+            # See verify-turnover.py: a snapshot mid-write during a live run is not a defect, and this
+            # tool is most useful precisely while a run is in flight.
+            print(f"  SKIP {p}: not readable as JSON yet (a snapshot mid-write is not a defect)")
+            continue
         gw = d.get("gateway", "?")
         gateways.add(gw)
         for eg, up in ((d.get("matrix") or {}).get("upstreams") or {}).items():

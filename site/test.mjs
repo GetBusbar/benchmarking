@@ -22,7 +22,7 @@ import assert from "node:assert/strict";
 import { checkConsistency, c6Inversions, c7HwmBelowPeak, hasCellMemory } from "./check-consistency.mjs";
 import * as checkMod from "./check-consistency.mjs";
 import { sealMetric, displayedValue, THROUGHPUT_FIELDS, isMetricField, zeroNoteFor, ZERO_NO_CEILING, ZERO_MEASURED_FAIL,
-  FRONTIER_BOUNDS_MS, DEFAULT_BOUND_MS } from "./seal.mjs";
+  FRONTIER_BOUNDS_MS, DEFAULT_BOUND_MS, sealFrontier } from "./seal.mjs";
 import { oracleExpected } from "./check-consistency.mjs";
 // A HAND-BUILT fixture has no results/matrix/<key>.json oracle, so it needs an EXPLICIT opt-in
 // (the CLI never passes it) to waive the oracle-verifiable requirement.
@@ -5400,6 +5400,48 @@ test("FRONTIER: the curve is drawn on a SHARED log scale, with three distinguish
   assert.match(td, /frontier-spark/, "the sparkline still renders for the slowest row on the board");
   assert.equal((td.match(/<title>[^<]*no rung held this tail<\/title>/g) || []).length, 5,
     "five ticks on the floor - one per bound the gateway could not hold - and one real point");
+});
+
+test("FRONTIER: an absent reading keeps its OWN reason, which needs the block-prefixed absences key", () => {
+  /* THIS PINS A FIX THAT SHIPPED WITHOUT A TEST, AND THE BUG IT FIXED WAS SILENT.
+
+     `sealFrontier` looks its absences up under `perf.frontier.<bound>.rps` - the block-prefixed key the
+     engine actually writes - and once looked them up under the bare `frontier.<bound>.rps`. Nothing threw:
+     every lookup simply missed, so all 36 absent frontier readings degraded to a flat `not_measured` with
+     no detail, and the board stopped being able to say WHY a gateway carried nothing at a bound. "No rung
+     held this tail" and "we did not measure this" render identically once the reason is gone, which is
+     invariant 1 - a measured absence and an unmeasured one must never look alike.
+
+     It was found by a chart agent noticing the reasons had vanished, not by any check. A refactor that
+     renamed the prefix, or "simplified" the lookup back to the bare key, would restore the silence. */
+  const readings = [
+    { p99_bound_us: 1000, rps: null, concurrency: null, p99_us: null, first_disqualified_conc: null, lower_bound: false },
+    { p99_bound_us: null, rps: 19, concurrency: 8, p99_us: 889100, first_disqualified_conc: null, lower_bound: false },
+  ];
+  const absences = {
+    "perf.frontier.1ms.rps": {
+      reason: "below_resolution",
+      detail: "every cleanly-served rung had a tail latency at or above 1ms, so this gateway carried no measurable throughput under that bound",
+    },
+  };
+  const sealed = sealFrontier(readings, absences);
+  const tight = sealed.find((r) => r.bound_ms === 1);
+  assert.equal(tight.rps.value, null, "an absent reading has no value");
+  assert.equal(tight.rps.reason, "below_resolution",
+    "the reading must carry the engine's OWN reason - a bare `not_measured` here means the prefixed key was missed");
+  assert.match(tight.rps.detail || "", /carried no measurable throughput/,
+    "the detail is the half a reader acts on; losing it is the silent form of this bug");
+
+  // AND THE BARE KEY MUST NOT BE THE ONLY THING THAT WORKS: an absences map written the old way is still
+  // honoured (the `|| absences[key]` fallback), so this test cannot pass merely because both spellings
+  // were collapsed into one.
+  const bareOnly = sealFrontier(readings, { "frontier.1ms.rps": { reason: "below_resolution", detail: "legacy spelling" } });
+  assert.equal(bareOnly.find((r) => r.bound_ms === 1).rps.reason, "below_resolution",
+    "the legacy unprefixed key is still read, so older bundles keep their reasons");
+
+  // A reading that IS measured must be untouched by any of this.
+  const unbounded = sealed.find((r) => r.bound_ms === null);
+  assert.equal(unbounded.rps.value, 19, "a measured reading keeps its number");
 });
 
 test("FRONTIER: every metric's definition is reachable from the surface that shows it", () => {
