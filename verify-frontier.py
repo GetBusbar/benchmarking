@@ -51,6 +51,15 @@ def declared_bounds_us():
     return [int(x.strip().replace("_", "")) for x in m.group(1).split(",") if x.strip()]
 
 
+def _rate(v):
+    """A rate as text for a PROBLEM message. `:.0f` printed a genuine 0.25 as "0", so an operator read
+    the tool's own finding as "the re-derived reading is nothing" and dismissed it as noise - the
+    message describing a caught defect made the defect invisible."""
+    if v is None:
+        return "none"
+    return f"{v:.2f}" if v < 1 else f"{v:,.0f}"
+
+
 def num(v):
     """A published Measurement is either a bare number or null. Absence is None, never 0."""
     if isinstance(v, dict):
@@ -172,13 +181,20 @@ def check(path, bounds_us, verbose):
                     continue
                 if mine is not None and pub_rps is None:
                     problems.append(
-                        f"{at} {label}: published nothing but rungs qualify (best {mine['rps']:.0f} at c={mine['conc']})"
+                        f"{at} {label}: published nothing but rungs qualify (best {_rate(mine['rps'])} at c={mine['conc']})"
                     )
                     continue
                 if mine is None:
                     continue
-                if abs(mine["rps"] - pub_rps) > 1.0:
-                    problems.append(f"{at} {label}: published {pub_rps} rps, re-derived {mine['rps']:.0f}")
+                # EXACT, NOT WITHIN 1.0 req/s. No arithmetic happens on either side - `derive` returns
+                # a published rung's rate verbatim and `pub_rps` is the published reading - so these are
+                # the same float or the engine disagrees with its own rungs. The old tolerance of 1.0
+                # made this oracle UNABLE TO FAIL anywhere below 1 req/s, which is the entire domain the
+                # fractional rate was introduced for: a regression republishing 0.25 as 0 scored
+                # abs(0.25) < 1.0 and passed. bench-audit.py compares exactly, so the two independent
+                # re-derivations disagreed about the rule - the same signature as both engine bugs.
+                if mine["rps"] is None or pub_rps is None or mine["rps"] != pub_rps:
+                    problems.append(f"{at} {label}: published {pub_rps} rps, re-derived {_rate(mine['rps'])}")
                 if num(r.get("concurrency")) != mine["conc"]:
                     problems.append(
                         f"{at} {label}: published c={num(r.get('concurrency'))}, re-derived c={mine['conc']}"

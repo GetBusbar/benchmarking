@@ -801,7 +801,7 @@ function frontierSpark(frontier, opts = {}) {
       ? `<circle cx="${cx}" cy="${cy}" r="2.4" fill="none" stroke="currentColor" stroke-width="1.2">${title}</circle>`
       : `<circle cx="${cx}" cy="${cy}" r="1.9" fill="currentColor">${title}</circle>`;
   }).join("");
-  const aria = pts.map((p) => `${boundLabel(p.b)}: ${p.onFloor ? "no rung held this tail" : `${fmtInt(p.v)}${p.floor ? " or more" : ""}`}`).join("; ");
+  const aria = pts.map((p) => `${boundLabel(p.b)}: ${p.onFloor ? "no rung held this tail" : `${fmtRate(p.v)}${p.floor ? " or more" : ""}`}`).join("; ");
   return `<svg class="frontier-spark" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" role="img" ` +
     `aria-label="throughput across the published tail-latency bounds, log scale - ${esc(aria)}">` +
     `<line x1="${PAD}" y1="${H - PAD}" x2="${W - PAD}" y2="${H - PAD}" stroke="currentColor" stroke-opacity="0.15" stroke-width="1"/>` +
@@ -1656,7 +1656,7 @@ function frontierShapeCell(g, st = state) {
     : "";
   return { v: heldSortKey(originIndex, h.frac), na: false, frontier: f,
     text: `${heldPct(h.frac)}% of its full rate at ${boundLabel(h.boundMs)}`,
-    note: `${fmtInt(h.held)} req/s ${boundClause(h.boundMs)}, against ${fmtInt(h.full)} req/s ` +
+    note: `${fmtRate(h.held)} req/s ${boundClause(h.boundMs)}, against ${fmtRate(h.full)} req/s ` +
       `${boundClause(null)}: ${heldPct(h.frac)}% of its full rate. A gateway near 100% at ` +
       `${boundLabel(FRONTIER_BOUNDS_MS[0])} gives up almost nothing when you demand a tight tail; a low share ` +
       `means it needs a loose tail to go fast.${tighter}${floorNote}` };
@@ -2063,7 +2063,7 @@ function frontierBlock(rec, opts = {}) {
   if (!spark) return "";
   const h = frontierHeld(f);
   const words = h
-    ? `${heldPct(h.frac)}% of its full rate at ${boundLabel(h.boundMs)} (${fmtInt(h.held)} of ${fmtInt(h.full)} req/s)`
+    ? `${heldPct(h.frac)}% of its full rate at ${boundLabel(h.boundMs)} (${fmtRate(h.held)} of ${fmtRate(h.full)} req/s)`
     : "one reading only: no share of full rate to state";
   return `<div class="frontier-block${opts.compact ? " compact" : ""}">${spark}` +
     `<div class="stamp muted">${esc(words)}</div></div>`;
@@ -2553,7 +2553,7 @@ function renderSweepCharts(container, sweepSeries, theme) {
   const rps = usable.map((s) => ({ label: s.label, color: s.color,
     points: s.sweep.map((p) => ({ x: p.conc, y: p.rps })),
     mark: s.peak && s.peak.rps > 0 && s.peak.conc != null
-      ? { x: s.peak.conc, y: s.peak.rps, label: `${fmtInt(s.peak.rps)} @ c=${fmtInt(s.peak.conc)}` } : null }));
+      ? { x: s.peak.conc, y: s.peak.rps, label: `${fmtRate(s.peak.rps)} @ c=${fmtInt(s.peak.conc)}` } : null }));
   const p99 = usable.map((s) => ({ label: s.label, color: s.color, points: s.sweep.map((p) => ({ x: p.conc, y: p.p99_us })) }));
   // SAME x-axis: both charts share ONE concurrency domain (min..max across BOTH series) so they stack
   // and align vertically. Compute it from every probed concurrency on either chart.

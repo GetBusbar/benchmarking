@@ -2575,8 +2575,8 @@ def _climb_table(rows: list) -> list:
         # at: "none" is a measured result across the whole ladder, and it is the good one.
         fail = f"c={s['c_first_fail']:g}" if s["c_first_fail"] is not None else "none"
         out.append(
-            f"| {_linked(key)} | {int(round(s['rps_first'])):,} at c={s['c_first']:g} "
-            f"| {int(round(s['rps_peak'])):,} at c={s['c_peak']:g} "
+            f"| {_linked(key)} | {_rate_str(s['rps_first'])} at c={s['c_first']:g} "
+            f"| {_rate_str(s['rps_peak'])} at c={s['c_peak']:g} "
             f"| {gain} "
             f"| c={s['c_sat']:g} "
             f"| {_us(s['p99_first'])} → {_us(s['p99_top'])} "

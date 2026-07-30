@@ -31,6 +31,16 @@ import glob
 import json
 
 
+def _rate(v):
+    """A rate as text. Every rate this tool printed used `,.0f`, so a cell whose peak is 0.75 and whose
+    slower rung above is 0.25 printed "peak 0 ... then clean 0 (slower, fail=0)" - two rates the tool had
+    just PROVED unequal, displayed as the same number. The verdicts were right; the evidence shown for
+    them was unreadable, which is worse than no evidence because it reads as a contradiction."""
+    if v is None:
+        return "none"
+    return f"{v:.2f}" if v < 1 else f"{v:,.0f}"
+
+
 def num(v):
     if isinstance(v, dict):
         v = v.get("value")
@@ -116,7 +126,7 @@ print(f"TURNOVER PROOF for {tot} unbounded readings")
 print("=" * 96)
 print(f"\nPROVED ({len(proved)}) - a clean rung above the peak served strictly slower:")
 for at, wr, wc, c, r in proved:
-    print(f"  {at[:44]:44s} peak {wr:9,.0f} @c={wc:<6} then clean {r:9,.0f} @c={c} (slower, fail=0)")
+    print(f"  {at[:44]:44s} peak {_rate(wr):>9} @c={wc:<6} then clean {_rate(r):>9} @c={c} (slower, fail=0)")
 
 # THE CLIFFS SPLIT IN TWO, and only one half has anything at stake.
 #
@@ -135,8 +145,8 @@ print(f"\nCLIFF-BUT-MOOT ({len(moot)}) - the next rung failed AND was slower, so
 if not moot:
     print("  NONE.")
 for at, wr, wc, c, f, b in moot:
-    print(f"  {at[:44]:44s} peak {wr:9,.0f} @c={wc:<6} next c={c} failed {f:,.0f} but only reached "
-          f"{b:,.0f} - slower than the peak, so the peak is a turnover either way")
+    print(f"  {at[:44]:44s} peak {_rate(wr):>9} @c={wc:<6} next c={c} failed {f:,.0f} but only reached "
+          f"{_rate(b)} - slower than the peak, so the peak is a turnover either way")
 
 print(f"\nCLIFF-THAT-MATTERS ({len(live)}) - the excluded rung was FASTER; the number depends on the exclusion:")
 if not live:
@@ -149,17 +159,17 @@ for at, wr, wc, c, f, b in live:
     # That is not an exotic input: the docstring's own worked example of a cliff is `c=512 - fail=900`,
     # a rung that failed everything and therefore has no rate to report.
     if b is None:
-        print(f"  {at[:44]:44s} published {wr:9,.0f} @c={wc:<6} | c={c} produced NO rate at all "
+        print(f"  {at[:44]:44s} published {_rate(wr):>9} @c={wc:<6} | c={c} produced NO rate at all "
               f"and failed {f:,.0f} - the exclusion cannot be compared, only disclosed")
         continue
     delta = (b - wr) / wr * 100 if b and wr else 0
-    print(f"  {at[:44]:44s} published {wr:9,.0f} @c={wc:<6} | c={c} reached {b:,.0f} "
+    print(f"  {at[:44]:44s} published {_rate(wr):>9} @c={wc:<6} | c={c} reached {_rate(b)} "
           f"(+{delta:.1f}%) but failed {f:,.0f}")
 
 print(f"\nDISCLOSED FLOOR ({len(disclosed_floor)}) - nothing probed above the peak, and the artifact SAYS SO")
 print("  (lower_bound=true, so the site renders these as \">= N\" rather than as a ceiling - not a defect)")
 for at, wr, wc in disclosed_floor:
-    print(f"  {at[:44]:44s} >= {wr:9,.0f} @c={wc} (top of the probed ladder)")
+    print(f"  {at[:44]:44s} >= {_rate(wr):>9} @c={wc} (top of the probed ladder)")
 if not disclosed_floor:
     print("  NONE.")
 
@@ -167,7 +177,7 @@ print(f"\nTOP ({len(top)}) - nothing probed above the peak AND the artifact does
 if not top:
     print("  NONE.")
 for at, wr, wc in top:
-    print(f"  {at[:44]:44s} peak {wr:9,.0f} @c={wc} - lower_bound is not set, so this rate is published")
+    print(f"  {at[:44]:44s} peak {_rate(wr):>9} @c={wc} - lower_bound is not set, so this rate is published")
     print(f"  {'':44s}   as a ceiling when nothing above it was ever measured")
 
 print()

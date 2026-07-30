@@ -747,7 +747,11 @@ impl Metric for Memory {
         // being reached is a RESULT (the gateway never settled) rather than a failure.
         let load_started = std::time::Instant::now();
         let mut ran = None;
-        let mut verdict = crate::stats::Verdict::Undecidable;
+        let mut verdict =
+            crate::stats::Verdict::Undecidable(crate::stats::Undecidable::TooFewReadings {
+                got: 0,
+                need: 4,
+            });
         let mut settled_at = None;
         // How many samples the series held when it was last looked at, so a series that stops growing
         // is distinguishable from a gateway that stopped moving.
@@ -780,7 +784,8 @@ impl Metric for Memory {
             // has not lasted long enough for `plateau_check`'s thresholds to mean what they were chosen
             // to mean. Keep loading. See `window_is_long_enough`.
             if verdict.is_steady() && !window_is_long_enough(span) {
-                verdict = crate::stats::Verdict::Undecidable;
+                verdict =
+                    crate::stats::Verdict::Undecidable(crate::stats::Undecidable::WindowTooShort);
             }
             if verdict.is_steady() && !grew {
                 eprintln!(
@@ -832,7 +837,8 @@ impl Metric for Memory {
                 MEMORY_RANGE_PCT,
             );
             if verdict.is_steady() && !window_is_long_enough(span) {
-                verdict = crate::stats::Verdict::Undecidable;
+                verdict =
+                    crate::stats::Verdict::Undecidable(crate::stats::Undecidable::WindowTooShort);
             }
         }
 
@@ -945,13 +951,13 @@ impl Metric for Memory {
                 memory_shape = Measurement::Measured(shape_code(*shape));
                 (Some(false), growth_rate_mib_per_min.clone())
             }
-            crate::stats::Verdict::Undecidable => (
+            // THE CAUSE DECIDES THE VARIANT AND THE WORDS, because this arm used to assert one cause
+            // for both. It published `NotMeasured` with "too few readings fell inside the settle
+            // window" - on a FULL window - whenever a non-finite sample made the window unjudgeable,
+            // filing a harness malfunction as a coverage gap and erasing the rig-vs-gateway distinction.
+            crate::stats::Verdict::Undecidable(cause) => (
                 None,
-                Measurement::absent_because(
-                    Absent::NotMeasured,
-                    "too few readings fell inside the settle window to judge whether memory moved"
-                        .to_string(),
-                ),
+                Measurement::absent_because(cause.absent_kind(), cause.detail("settle window")),
             ),
         };
         // THE SAME PLATEAU TEST THE LOAD WINDOW USES, pointed at the idle window. Reusing it rather
@@ -991,13 +997,13 @@ impl Metric for Memory {
                     idle_shape = Measurement::Measured(shape_code(shape));
                     (Measurement::Measured(0.0), growth_rate_mib_per_min)
                 }
-                crate::stats::Verdict::Undecidable => {
-                    let why = format!(
-                        "the {MEMORY_IDLE_S}s idle window held too few readings to judge whether memory moved"
-                    );
+                // Same fix as the load window above: this sibling carried the identical false reason,
+                // and `plateau_check` was changed once while neither of its two consumers was read.
+                crate::stats::Verdict::Undecidable(cause) => {
+                    let why = cause.detail(&format!("{MEMORY_IDLE_S}s idle window"));
                     (
-                        Measurement::absent_because(Absent::NotMeasured, why.clone()),
-                        Measurement::absent_because(Absent::NotMeasured, why),
+                        Measurement::absent_because(cause.absent_kind(), why.clone()),
+                        Measurement::absent_because(cause.absent_kind(), why),
                     )
                 }
             }
