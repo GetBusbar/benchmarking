@@ -58,14 +58,38 @@ const WRAPPER_COMMANDS: [&str; 6] = ["sh", "bash", "dash", "zsh", "ash", "ksh"];
 /// manifest means is done here, on text the harness can also inspect for who owns it, instead of
 /// inside `pgrep`, which matches a REGEX (a `proc_match` containing `.` or `+` silently means
 /// something else there) and offers no way to exclude the harness from its own answer.
+/// AN EMPTY TABLE AND AN ABSENT `ps` USED TO LOOK IDENTICAL, and they mean opposite things.
+///
+/// Both returned `Vec::new()`, so a box without `ps` on PATH reported "no process matched" for a
+/// gateway that was running perfectly - the machine-as-untrusted-input class that already cost a full
+/// gateway when `docker` was silently absent. There is no honest empty answer here: this host always
+/// has processes, so an empty table means the QUESTION failed, not that the answer is none.
+///
+/// It still returns a Vec, because every caller reasonably treats "no match" as a fact about the
+/// gateway and rewriting four call sites to thread a Result would spread the concern. What changed is
+/// that the failure is no longer SILENT: it says which of the two happened, on stderr, where the box's
+/// own fanout log captures it. A run that then reports "no running process found" has a line above it
+/// naming the real cause.
 pub fn process_table() -> Vec<ProcEntry> {
-    let Ok(out) = Command::new("ps")
+    let out = match Command::new("ps")
         .args(["-Ao", "pid=,ppid=,args="])
         .output()
-    else {
-        return Vec::new();
+    {
+        Ok(out) => out,
+        Err(e) => {
+            eprintln!(
+                "supervise: could not run `ps` ({e}) - the process table is UNKNOWN, not empty. Any \
+                 'no running process found' below is this failure, not a gateway that exited."
+            );
+            return Vec::new();
+        }
     };
     if !out.status.success() {
+        eprintln!(
+            "supervise: `ps` exited {} - the process table is UNKNOWN, not empty. Any 'no running \
+             process found' below is this failure, not a gateway that exited.",
+            out.status
+        );
         return Vec::new();
     }
     String::from_utf8_lossy(&out.stdout)

@@ -153,6 +153,21 @@ fn read_line(stream: &mut TcpStream, deadline: Instant) -> ReadOutcome {
 /// approach this, so exceeding it is Malformed rather than a measurement.
 const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
 
+/// Ceiling on the size of a response HEAD - status line plus all header lines together.
+///
+/// `read_line` caps ONE line at 64 KiB and `MAX_BODY_BYTES` caps every body framing, but nothing capped
+/// the NUMBER of header lines: a peer answering with a status line followed by an endless stream of
+/// short, legal headers grew `raw` and the `headers` Vec until the probe deadline, with only that
+/// 10-second timeout standing between the engine and its own memory.
+///
+/// The peer here is one of fourteen third-party gateways, several built from upstream at whatever
+/// revision the manifest pins - this file already treats it as untrusted with the engine's address
+/// space. A header-accumulation loop (a proxy echoing Via or Set-Cookie on an internal retry) is a
+/// mundane bug in somebody else's code that should cost that gateway its cell, not the whole run.
+///
+/// 256 KiB is far above any real response head and far below anything that matters to the box.
+const MAX_HEAD_BYTES: usize = 256 * 1024;
+
 /// Reads exactly `n` bytes (a known Content-Length or chunk body), honouring `deadline`.
 fn read_exact_deadline(stream: &mut TcpStream, deadline: Instant, n: usize) -> ReadOutcome {
     // NEVER RESERVE WHAT THE PEER ASKED FOR. `n` arrives from the gateway under test, as a
@@ -330,6 +345,12 @@ fn read_head(
             }
         };
         raw.extend_from_slice(&line);
+        if raw.len() > MAX_HEAD_BYTES {
+            return Err(malformed(
+                &raw,
+                format!("response head exceeds the {MAX_HEAD_BYTES} byte cap - refusing to keep reading headers"),
+            ));
+        }
         let stripped = strip_crlf(&line);
         if stripped.is_empty() {
             break;
@@ -3356,5 +3377,57 @@ mod tests {
         let _ = content.feed(bytes.as_bytes(), 1);
         let content = content.finish(SseEnd::StreamClosed);
         assert_eq!(events, content);
+    }
+}
+
+#[cfg(test)]
+mod head_cap_tests {
+    use super::*;
+
+    // A CAP THAT CANNOT FIRE IS NOT A CAP, so this drives the actual reader against a peer that does
+    // the thing the cap exists for: answers with endless short, legal header lines.
+    #[test]
+    fn an_endless_header_stream_is_refused_rather_than_accumulated() {
+        use std::io::{BufRead, BufReader, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let server = std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().expect("accept");
+            // Consume the request head so the client is not blocked on its own write.
+            let mut r = BufReader::new(sock.try_clone().expect("clone"));
+            let mut line = String::new();
+            while r.read_line(&mut line).unwrap_or(0) > 0 {
+                if line == "\r\n" || line.is_empty() {
+                    break;
+                }
+                line.clear();
+            }
+            let _ = sock.write_all(b"HTTP/1.1 200 OK\r\n");
+            // Endless legal headers. If the cap does not fire the client reads until its deadline.
+            loop {
+                if sock
+                    .write_all(b"X-Pad: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\r\n")
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+
+        let mut stream = std::net::TcpStream::connect(addr).expect("connect");
+        stream
+            .write_all(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+            .expect("write");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let got = read_head(&mut stream, deadline);
+        drop(stream);
+        let _ = server.join();
+
+        let err = got.expect_err("an endless header stream must be refused, not accumulated");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("exceeds the") && msg.contains("byte cap"),
+            "the refusal must name the cap that fired rather than reading to the deadline: {msg}"
+        );
     }
 }

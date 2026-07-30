@@ -5147,9 +5147,15 @@ test("compare: the table renders through metric(), so a bare-mval read cannot co
       // A metric the ENGINE reports as rig-limited: an absence with a stated reason, and the reason is
       // the disclosure. This used to be `sealMetric(32000, {gated: true, flag: true})` - a SUPPRESSED
       // envelope, the seal hiding a number it had. That shape is gone (the 32,000 would now publish), and
-      // with it went the only fixture in this test that produced a reason to render. `rig_limited` is a
-      // live engine absence token with its own prose, so the property under test - a no-number cell
-      // discloses WHY instead of vanishing into the same n/a an untested cell gets - is unchanged.
+      // with it went the only fixture in this test that produced a reason to render.
+      //
+      // `rig_limited` IS A DECLARED TOKEN WITH NO CURRENT PRODUCER, and this comment used to call it a
+      // "live engine absence token", which is not true: `Absent::RigLimited` is constructed nowhere in
+      // the engine outside test modules (checked across measurement.rs, suite.rs, run.rs, record.rs).
+      // It stays as the fixture because what is under test is the SITE's behaviour - a no-number cell
+      // must disclose WHY rather than vanishing into the same n/a an unmeasured cell gets - and that
+      // property holds for any reason token the engine may emit. What must not stand is a test comment
+      // asserting a fact about the engine that stopped being true.
       gateway_c1_p99_us: sealMetric(null, { absent: { reason: "rig_limited" } }) } };
   const st = { ...app.newState(), view: "performance", mode: "peak",
     data: { gateways: [failing, bound] }, cmp: ["a", "b"] };

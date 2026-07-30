@@ -25,6 +25,8 @@ on:
       # rig-delivery job below documents for itself.
       - "bench-audit.py"
       - "verify-latency.py"
+      - "verify-frontier.py"
+      - "verify-turnover.py"
       - "audit-every-metric.py"
       - "verify_tools_test.py"
       - "bench-audit_test.py"
@@ -72,6 +74,8 @@ on:
       # rig-delivery job below documents for itself.
       - "bench-audit.py"
       - "verify-latency.py"
+      - "verify-frontier.py"
+      - "verify-turnover.py"
       - "audit-every-metric.py"
       - "verify_tools_test.py"
       - "bench-audit_test.py"
@@ -197,7 +201,7 @@ jobs:
       # as the defects they exist to catch. A typo'd field name that always resolved to None would
       # leave their counters at 0 and print PASS on every board forever, and nothing would notice.
       # This runs their red fixtures, so each check is shown to fail on the violation it names.
-      - name: Auditor red fixtures (verify-latency, audit-every-metric)
+      - name: Auditor red fixtures (all four external auditors)
         run: python3 verify_tools_test.py
 
   rig-delivery:

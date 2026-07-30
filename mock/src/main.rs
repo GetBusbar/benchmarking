@@ -166,10 +166,23 @@ fn request_shape_ok(dialect: &str, body: &[u8]) -> bool {
             let block_content = has("\"content\":[") && has("\"text\":");
             has("\"messages\"") && (block_content || has("\"inferenceConfig\""))
         }
-        // Cohere: v2 chat carries `messages`; v1 chat carries `message`/`chat_history`. Accept either
-        // dialect's marker (still shallow, but at least a per-dialect arm rather than the shared one).
+        // Cohere: v2 chat carries `messages`; v1 chat carries `message`/`chat_history`.
+        //
+        // KNOWN WEAK, AND SAID SO RATHER THAN IMPLIED. A cohere v2 body and an OpenAI chat body are
+        // near-identical at this depth - both are `{"model":…,"messages":[{"role","content"}]}` - so a
+        // gateway that forwarded the client's OpenAI body VERBATIM to the cohere endpoint would satisfy
+        // this arm. `reverify` still catches the common case, because it checks WHICH ENDPOINT the
+        // request landed on and a verbatim forward hits the ingress dialect's own path (that is what
+        // caught aisix's openai-responses>openai cell). What this arm cannot catch is a gateway that
+        // routes correctly and translates nothing, and pretending otherwise would be worse than saying
+        // it. Compare the `bedrock` arm above, which CAN discriminate because Converse genuinely
+        // reshapes the body into content blocks.
         "cohere" => has("\"messages\"") || has("\"message\"") || has("\"chat_history\""),
         "openai-responses" => has("\"input\"") || has("\"instructions\""),
+        // Anthropic: `max_tokens` is REQUIRED here where OpenAI treats it as optional, so requiring
+        // both is the strongest marker available at this depth. Same caveat as `cohere`: the OpenAI
+        // probe body carries a `max_tokens` too, so a verbatim forward would satisfy this arm and is
+        // caught by the ENDPOINT check rather than by this one.
         "anthropic" => has("\"messages\"") && has("\"max_tokens\""),
         "gemini" => has("\"contents\""),
         _ => false,
@@ -581,9 +594,24 @@ async fn main() {
     };
     eprintln!("mock listening on {addr} (ttft={ttft_ms}ms, proto=h1+h2c, stream={s_chunks}x{s_bytes}B@{s_interval}ms on stream:true) - OpenAI/Responses/Anthropic/Gemini/Bedrock/Cohere");
     // Backstop against unbounded in-flight connections over an 8-hour run (a leak or a runaway
-    // client), not a tight operational limit - OTB_MAX_CONC's own ceiling elsewhere in this repo
-    // defaults to 512, so this is set far above anything the benchmark's own concurrency produces.
-    let conn_permits = Arc::new(tokio::sync::Semaphore::new(20_000));
+    // client), not a tight operational limit.
+    //
+    // THE OLD JUSTIFICATION IS VOID AND THE CAP CAN NOW BIND. It read "OTB_MAX_CONC's own ceiling
+    // elsewhere in this repo defaults to 512, so this is set far above anything the benchmark's own
+    // concurrency produces". That default is gone: `otb.rs` now defaults max_conc to
+    // `host_connection_ceiling()`, which on the bench box (ip_local_port_range 16384-65535) is 32,768 -
+    // above this cap, not far below it.
+    //
+    // Why that matters here rather than being a tidy-up: a gateway that does NOT pool upstream
+    // connections opens roughly one mock connection per in-flight request. At the top of the ladder
+    // that exceeds 20,000, the accept loop parks on `acquire_owned().await`, and every further connect
+    // either stalls until CONNECT_BUDGET or completes seconds late - and the load generator charges all
+    // of that to the GATEWAY. A cap on the reference instrument that binds during a measurement stops
+    // being a backstop and becomes part of the number.
+    //
+    // Raised to sit above the host's own connection ceiling so it is once again the thing it claims to
+    // be: reachable only by a leak, never by the benchmark running as designed.
+    let conn_permits = Arc::new(tokio::sync::Semaphore::new(40_000));
     loop {
         let (stream, _) = match listener.accept().await {
             Ok(s) => s,

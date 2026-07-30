@@ -1968,6 +1968,13 @@ pub fn stream_fps_at(
     // to be used as a ceiling. The median above defends against ONE unlucky window; it cannot defend
     // against a box that is uniformly busy, which is what this pause is for.
     //
+    // NOT ON THE LIVE PATH. `suite::stream_rig_ceiling` calls `mock_frame_ceiling_fps` - a pure arithmetic
+    // derivation from the mock's declared pacing - and nothing outside this file's tests calls this
+    // function. So the protocol described below (median of WINDOWS_PER_RUNG clean windows, settle first,
+    // IMPOSSIBLE_FACTOR guard) is NOT what any published streams_sustained_fps was checked against; the
+    // live reference is one-shot arithmetic with none of those safeguards. Kept because the arithmetic
+    // ceiling has no measured cross-check at all, and this is the only implementation of one - but a
+    // reader must not infer from the detail here that it is running.
     // Short on purpose. It runs twice per served streaming cell, so it is minutes across a field run,
     // and it does not need to outlast TIME_WAIT to be worth having - the queues and the run queue
     // drain in far less than that, and those are what move this number.
