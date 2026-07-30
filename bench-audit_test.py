@@ -337,6 +337,40 @@ def main():
                             "while sibling cells in the same snapshot publish one - it cannot fail, "
                             "so it guards nothing")
 
+        # ── WITHHELD IS NOT DROPPED ───────────────────────────────────────────────────────────────
+        #
+        # The live case this carve-out exists for: aisix openai-responses>openai answers 200 (so
+        # `served` is True and its siblings all carry frontiers - the exact shape the RED case above
+        # calls a drop), but egress re-verification proved the gateway never translated. The request
+        # arrived on the mock's openai-responses endpoint and nothing arrived on openai, so it
+        # forwarded the ingress request unchanged. Every number taken there describes a different wire,
+        # so the engine withheld the whole perf group and published `egress_reverified: false`. An
+        # empty frontier is the CORRECT artifact; demanding one would demand a throughput figure for a
+        # translation that did not happen.
+        withheld = cell(perf__frontier=[], perf__egress_reverified=False)
+        if list(audit.check_frontier_is_complete("t", withheld, frontier_known=True)):
+            failures.append("check_frontier_is_complete flagged a cell whose perf was WITHHELD because "
+                            "egress re-verification proved the gateway did not translate - an empty "
+                            "frontier is correct there, and calling it a drop cries wolf on the one "
+                            "case where the harness behaved best")
+
+        # RED, and this is the half that matters: the exemption is keyed on the DISCLOSURE, not on
+        # trusting the producer. A cell that merely lost its frontier has no `egress_reverified: false`
+        # and must still fail, in both the reverified-true and field-absent shapes.
+        if not list(audit.check_frontier_is_complete(
+                "t", cell(perf__frontier=[], perf__egress_reverified=True), frontier_known=True)):
+            failures.append("the withheld-cell exemption swallowed a REAL dropped frontier on a cell "
+                            "that re-verified TRUE - it must key on the disclosure, not on the field "
+                            "merely being present")
+
+        # RED: and the exemption covers an EMPTY frontier only. A withheld cell that publishes a
+        # malformed one is still a malformed frontier.
+        if not list(audit.check_frontier_is_complete(
+                "t", cell(perf__frontier=[{"p99_bound_us": 1000}], perf__egress_reverified=False),
+                frontier_known=True)):
+            failures.append("the withheld-cell exemption swallowed a MALFORMED frontier - it must "
+                            "cover an absent frontier, not excuse a wrong one")
+
         # RED: drop one reading (5, not 6). Nothing else in this file would notice a shrunk board.
         five = json.loads(json.dumps(_BASE_FRONTIER))[:5]
         fired = list(audit.check_frontier_is_complete("t", cell(perf__frontier=five)))

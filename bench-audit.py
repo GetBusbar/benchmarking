@@ -567,6 +567,24 @@ def check_frontier_is_complete(name, c, frontier_known=False):
     """
     fr = frontier_of(c)
     if not fr:
+        # WITHHELD IS NOT DROPPED, and conflating them made this check cry wolf on the one cell on the
+        # board where the harness behaved best.
+        #
+        # aisix openai-responses>openai answers 200, so `served` is True and its siblings all carry a
+        # frontier - which is exactly the shape this check calls a drop. But EGRESS RE-VERIFICATION
+        # PROVED THE GATEWAY NEVER TRANSLATED: the request arrived on the mock's openai-responses
+        # endpoint and nothing arrived on openai, so it forwarded the ingress request unchanged. Every
+        # number taken there describes a wire that is not openai-responses>openai, and the engine
+        # therefore withheld the whole perf group and published `egress_reverified: false` plus the
+        # evidence in `perf_dropped`. An empty frontier is the CORRECT artifact for that cell; demanding
+        # one would be demanding a throughput figure for a translation that did not happen.
+        #
+        # So the exemption is not "trust the producer" - it is keyed on the producer having published
+        # the DISCLOSURE. A cell that simply lost its frontier has no `egress_reverified: false` and
+        # still fails, which is the case this check exists for.
+        perf = (c.get("perf") or {}) if isinstance(c, dict) else {}
+        if perf.get("egress_reverified") is False:
+            return
         if frontier_known:
             yield (f"{name}: served cell publishes NO frontier while other cells in the same snapshot "
                    f"do - the producing engine had the metric, so this cell's throughput answer was "

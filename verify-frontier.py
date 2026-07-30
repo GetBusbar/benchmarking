@@ -102,7 +102,17 @@ def derive(rungs, bound_us):
     ok = [r for r in rungs if qualifies(r, bound_us)]
     if not ok:
         return None
-    best = max(ok, key=lambda r: r["rps"])
+    # THE TIE-BREAK IS PART OF THE RULE, so it is spelled out here rather than left to `max`.
+    #
+    # This read `max(ok, key=lambda r: r["rps"])`, which returns the FIRST maximum, while the engine used
+    # `max_by` in Rust, which returns the LAST. On gomodel that disagreement surfaced as "published
+    # c=512, re-derived c=256" on a cell where four rungs tied at 109 rps - and it was the ENGINE that
+    # was wrong: naming a higher concurrency claims the rate needs more connections than it does.
+    #
+    # Both sides now state the same rule: highest rate, and among rungs tied on rate, the lowest
+    # concurrency. Relying on either language's max-adapter would leave this agreeing by coincidence of
+    # input order, which is not agreement at all.
+    best = min(ok, key=lambda r: (-r["rps"], r["conc"]))
     above = [r["conc"] for r in rungs if r["conc"] > best["conc"] and not qualifies(r, bound_us)]
     top = max((r["conc"] for r in rungs), default=0)
     return {
