@@ -173,10 +173,28 @@ pub fn read_at(rungs: &[Rung], bound: Option<u64>) -> Option<Reading> {
     // The winning rung is the one with the highest RATE among those that qualify - not the highest
     // concurrency. Those differ whenever a gateway's throughput turns over before its tail breaks the
     // bound, and the question is how much it carried, not how many connections it held.
+    //
+    // ON A TIE, THE LOWEST CONCURRENCY WINS, AND THIS HAS TO BE SAID RATHER THAN INHERITED.
+    //
+    // It used to be `max_by(|a, b| a.rps.total_cmp(&b.rps))` alone, and `max_by` returns the LAST
+    // maximum, so a tie silently resolved to the HIGHEST concurrency - deciding on concurrency, at its
+    // worst end, in the two lines directly under a comment promising it does not decide on concurrency
+    // at all. gomodel openai-responses>openai-responses published "107 rps at c=1024" when c=256 reached
+    // the same 107: a 4x overstatement of the connections the rate needs. Nothing was wrong with the
+    // rate; the reading simply named the wrong rung as the place it happened.
+    //
+    // Publishing the lowest is both the more useful fact (a reader choosing an operating point wants the
+    // cheapest concurrency that reaches the rate) and the conservative claim about the gateway. The real
+    // point is that a tie-break AUTHORS A PUBLISHED NUMBER, so it must be a stated rule with a reason -
+    // not a by-product of which end of a sequence a standard-library adapter happens to keep.
+    //
+    // Ordering by rate ascending, then concurrency DESCENDING, makes the maximum "highest rate, lowest
+    // concurrency". Rungs identical in both are repeated windows at one concurrency, where either choice
+    // reports the same pair.
     let best = rungs
         .iter()
         .filter(|r| r.qualifies(bound))
-        .max_by(|a, b| a.rps.total_cmp(&b.rps))?;
+        .max_by(|a, b| a.rps.total_cmp(&b.rps).then(b.concurrency.cmp(&a.concurrency)))?;
     // The boundary proof: the lowest concurrency ABOVE the winner that did not qualify. Read from the
     // rungs rather than assumed, so a sweep that never probed higher reports no boundary instead of
     // an invented one.
@@ -258,6 +276,51 @@ mod tests {
             ok: 10_000,
             fail,
         }
+    }
+
+    // THE TIE-BREAK, from gomodel openai-responses>openai-responses on the 2026-07-30 board: four
+    // qualifying rungs all reached 107 rps, at c=256, 512, 1024 and 2048. The published reading named
+    // c=1024 - a 4x overstatement of the concurrency the rate needs - because `max_by` returns the LAST
+    // maximum and nothing here declared a rule, so the answer came from a library's iteration order.
+    //
+    // There was no test for a tie at all, which is exactly why the behaviour could be inherited rather
+    // than chosen. This is that test.
+    #[test]
+    fn a_tie_on_rate_reports_the_lowest_concurrency_that_reached_it() {
+        // Deliberately NOT in ascending order, so a pass cannot come from the input happening to be
+        // sorted the convenient way - which would make this test agree with the bug it exists to catch.
+        let rungs = vec![
+            rung(1024, 107.0, 5_800, 0),
+            rung(256, 107.0, 4_900, 0),
+            rung(2048, 107.0, 5_900, 0),
+            rung(512, 107.0, 5_500, 0),
+        ];
+        let r = read_at(&rungs, None).expect("four clean rungs qualify with no bound");
+        assert_eq!(r.rps, 107.0, "the rate is the maximum, which the tie does not change");
+        assert_eq!(
+            r.concurrency, 256,
+            "on a tie the LOWEST concurrency that reached the rate is published: naming a higher one \
+             claims the rate needs more connections than it does"
+        );
+        // And the tie must not corrupt the boundary proof: the winner is now c=256, so the first
+        // disqualified concurrency is read relative to THAT rung, not to whichever rung won before.
+        assert_eq!(
+            r.p99_us,
+            Some(4_900_000),
+            "the published tail belongs to the rung actually named, not to a sibling that tied on rate"
+        );
+    }
+
+    // A tie must not override the rate itself: a LOWER-rate rung at lower concurrency stays a loser.
+    #[test]
+    fn the_tie_break_never_outranks_a_higher_rate() {
+        let rungs = vec![rung(16, 900.0, 1_000, 0), rung(256, 1_500.0, 2_000, 0)];
+        let r = read_at(&rungs, None).expect("both rungs qualify");
+        assert_eq!(r.rps, 1_500.0);
+        assert_eq!(
+            r.concurrency, 256,
+            "concurrency only breaks a tie; it must never beat a genuinely higher rate"
+        );
     }
 
     // THE FIELD CURVE, from apisix anthropic>anthropic on the 2026-07-29 board: 7,015 rps at a 1ms
