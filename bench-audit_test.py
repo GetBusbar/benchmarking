@@ -484,43 +484,18 @@ def main():
         finally:
             audit.HERE = old_here
 
-    # ── the C6 cross-language bar (ledger TOOL-02) ────────────────────────────────────────────────
+    # REMOVED: the C6 cross-language bar test (ledger TOOL-02).
     #
-    # ACCEPT: the real site file, as it stands on disk, must agree with the python constant. This is
-    # the assertion that actually runs in CI, and it is the one that fires the day someone tunes
-    # either literal.
-    with isolated(failures, "C6 cross-language bar (ledger TOOL-02)"):
-        live = list(audit.check_c6_bar_agrees_with_the_site())
-        if live:
-            failures.append(f"the two C6_GROSS_PCT literals disagree right now: {live}")
-
-        # REJECT #1: the parser must read the site's NUMBER, not echo python's. Feed it a source that
-        # declares a different bar and it must report that different bar.
-        if audit.parse_site_c6("export const C6_GROSS_PCT = 7.5;\n") != 7.5:
-            failures.append("parse_site_c6 does not actually read the site's literal - a cross-check that "
-                            "returns its own side's value agrees with everything")
-        # REJECT #2: with the site pointed at a fixture declaring 7, the check must fire.
-        tmp2 = tempfile.mkdtemp()
-        os.makedirs(os.path.join(tmp2, "site"))
-        with open(os.path.join(tmp2, "site", "check-consistency.mjs"), "w") as fh:
-            fh.write("// drifted\nexport const C6_GROSS_PCT = 7;\n")
-        old_here = audit.HERE
-        try:
-            audit.HERE = tmp2
-            drifted = list(audit.check_c6_bar_agrees_with_the_site())
-            if len(drifted) != 1 or "different bars" not in drifted[0]:
-                failures.append(f"check_c6_bar_agrees_with_the_site must reject a site declaring 7 while "
-                                f"python declares {audit.C6_GROSS_PCT}, got {drifted!r}")
-            # REJECT #3: going BLIND is a violation, not a pass. A missing/renamed site file must fail
-            # rather than let the audit quietly stop comparing.
-            os.remove(os.path.join(tmp2, "site", "check-consistency.mjs"))
-            blind = list(audit.check_c6_bar_agrees_with_the_site())
-            if len(blind) != 1 or "unverifiable twin" not in blind[0]:
-                failures.append(f"check_c6_bar_agrees_with_the_site must fail when it cannot read the "
-                                f"site's copy, got {blind!r}")
-        finally:
-            audit.HERE = old_here
-
+    # It asserted that bench-audit's `C6_GROSS_PCT` and site/check-consistency.mjs's own
+    # `export const C6_GROSS_PCT = 5;` were the same number, by parsing the JS literal. Both the
+    # constant and the gate are gone: the ceiling capped how much window noise could excuse a
+    # sustained figure sitting above the maximum it was meant to sit under, and BOTH of those fields
+    # are deleted. The frontier makes that inversion unrepresentable rather than merely bounded - six
+    # maxima over sets that only grow as the bound relaxes - so a gate policing agreement between two
+    # dead literals would have been decoration of exactly the kind this file exists to catch.
+    #
+    # What covers the invariant now, both halves, above: monotonicity across all six readings, and
+    # re-derivation of every reading from the raw rungs.
     # ── ABSENCE_CARRYING_FIELDS must mirror record.rs's absences_of!() lists, field for field ───────
     #
     # ACCEPT: the real engine/src/record.rs, as it stands on disk, must agree with the python lists.
