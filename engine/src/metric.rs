@@ -93,7 +93,6 @@ pub struct Series {
     /// JSON: no committed snapshot has ever carried one, so there was no real artifact to pin a shape
     /// against. `run::StreamPoint::to_json` is where the shape is decided.
     pub sweep_streams: Vec<serde_json::Value>,
-    pub sweep_cpu_fps: Vec<serde_json::Value>,
 }
 
 /// What a group produced: the fields it promised, and the evidence behind them.
@@ -138,7 +137,6 @@ pub const METRICS: &[&dyn Metric] = &[
     &Streaming,
     &AddedLatency,
     &StreamsSustained,
-    &CpuFps,
 ];
 
 /// Run every metric against one served cell.
@@ -219,9 +217,6 @@ pub fn process_cell_with(
         if !produced.series.sweep_streams.is_empty() {
             series.sweep_streams = produced.series.sweep_streams;
         }
-        if !produced.series.sweep_cpu_fps.is_empty() {
-            series.sweep_cpu_fps = produced.series.sweep_cpu_fps;
-        }
         // THE IDLE WINDOW WAS MEASURED AND THEN DROPPED ON THE FLOOR. The memory group samples a full
         // idle window and returns it as `Series.idle_rss`, and this accumulator - a hand-written chain
         // with one clause per field - simply had no clause for it. So `CellMemory.idle_rss_series` was
@@ -260,42 +255,19 @@ impl Metric for Throughput {
         "throughput"
     }
 
+    /// NO SCALAR FIELDS. This group's whole output is the FRONTIER, which is a sequence and so travels
+    /// on the series beside the sweep it is read from - `Filled` carries scalars.
+    ///
+    /// It used to declare five: `rps_max_proxy` / `conc_at_peak` and `rps_sustained_20ms` /
+    /// `rps_sustained_20ms_concurrency` / `conc_at_sustained`. Those were one set of windows summarised
+    /// twice, once by a plateau search and once by a gate bisection, each collapsing a tradeoff curve to
+    /// a point chosen by a constant. See `frontier.rs`.
     fn fields(&self) -> &'static [&'static str] {
-        &[
-            "rps_max_proxy",
-            "conc_at_peak",
-            "rps_sustained_20ms",
-            "rps_sustained_20ms_concurrency",
-            "conc_at_sustained",
-        ]
+        &[]
     }
 
     fn measure(&self, ctx: &CellCtx<'_>) -> Measured {
         let perf = crate::run::sweep_cell(ctx.cfg, ctx.id, ctx.min_conc, ctx.max_conc);
-        // The search's reason AND its evidence travel with the absence. A peak search that ran out
-        // of range publishes a lower bound as prose; flattening that to a bare null is the one place
-        // "the engine discards the measurement" was literally true.
-        let carry = |m: &Measurement<f64>| match (m.reason().cloned(), m.detail()) {
-            (Some(r), Some(d)) => Measurement::absent_because(r, d),
-            (Some(r), None) => Measurement::absent(r),
-            (None, _) => Measurement::absent(Absent::NotMeasured),
-        };
-        let rps = match perf.max_proxy.value() {
-            Some(v) => Measurement::Measured(*v),
-            None => carry(&perf.max_proxy),
-        };
-        // Mirrors the rps reason rather than inventing a second one: two different explanations for
-        // one absence, in one cell, is a smaller version of the reason-swapping `Measurement` exists
-        // to prevent.
-        let conc = match perf.max_proxy_concurrency.value() {
-            Some(c) => Measurement::Measured(f64::from(*c)),
-            None => Measurement::absent(
-                perf.max_proxy
-                    .reason()
-                    .cloned()
-                    .unwrap_or(Absent::NotMeasured),
-            ),
-        };
         // THE FRONTIER, READ OFF THE RUNGS THIS SWEEP ALREADY PROBED. No extra measurement: the whole
         // point is that one sweep answers the throughput question at every bound, and the two scalars
         // below were that same sweep collapsed by a chosen ceiling. See `frontier.rs`.
@@ -394,75 +366,15 @@ impl Metric for Throughput {
                 },
             })
             .collect();
-        // THE SECOND QUESTION, OFF THE SAME RUNGS. `sweep_cell` read this out of the windows the
-        // climb had already taken, so it needs no measurement of its own and cannot describe a
-        // different state of the gateway than `rps_max_proxy` does.
-        let s_rps = match perf.sustained.value() {
-            Some(v) => Measurement::Measured(*v),
-            None => carry(&perf.sustained),
-        };
-        let s_conc = match perf.sustained_concurrency.value() {
-            Some(c) => Measurement::Measured(f64::from(*c)),
-            None => Measurement::absent(
-                perf.sustained
-                    .reason()
-                    .cloned()
-                    .unwrap_or(Absent::NotMeasured),
-            ),
-        };
-        // The rungs as the gate saw them, plus the windows spent refining the boundary.
-        let sweep_sustained = sustained_evidence(&perf.sustained_points);
         Measured {
-            fields: vec![
-                ("rps_max_proxy", rps),
-                ("conc_at_peak", conc),
-                ("rps_sustained_20ms", s_rps),
-                ("rps_sustained_20ms_concurrency", s_conc.clone()),
-                ("conc_at_sustained", s_conc),
-            ],
+            fields: Vec::new(),
             series: Series {
                 frontier,
                 sweep,
-                sweep_sustained,
                 ..Series::default()
             },
         }
     }
-}
-
-/// The sustained search's rungs as PUBLISHED EVIDENCE rows.
-///
-/// A free function so the one mapping that decides what a rung's evidence says can be pinned against
-/// fixed points, rather than only through `Throughput::measure`, which needs a live gateway and a
-/// live mock behind it to reach at all.
-fn sustained_evidence(points: &[crate::run::SustainedPoint]) -> Vec<crate::record::SweepPoint> {
-    points
-        .iter()
-        .map(|pt| crate::record::SweepPoint {
-            conc: i64::from(pt.concurrency),
-            rps: Measurement::Measured(pt.rps as i64),
-            p99_us: match pt.p99_us {
-                Some(v) => Measurement::Measured(v as i64),
-                None => Measurement::absent(Absent::NotMeasured),
-            },
-            // ABSENT WHEN NO WINDOW CARRIED A READING, never a zero. This was
-            // `Measured(pt.fail)` over an `i64` that had no way to be absent, so a rung whose
-            // windows produced nothing published `fail: 0` - a number saying the gateway lost
-            // nothing at a rate it was never observed serving. The reason travels with it: an
-            // evidence row a reader cannot re-derive the verdict from is the defect class this whole
-            // series exists to avoid.
-            fail: match pt.fail {
-                Some(f) => Measurement::Measured(f),
-                None => Measurement::absent_because(
-                    Absent::NotMeasured,
-                    format!(
-                        "no window at c={} came back with a reading, so this rung has no failure count",
-                        pt.concurrency
-                    ),
-                ),
-            },
-        })
-        .collect()
 }
 
 /// The concurrency the memory window runs at.
@@ -1759,53 +1671,6 @@ impl Metric for StreamsSustained {
     }
 }
 
-/// CPU frames/sec: the most frames a second this box carries through the gateway, and the stream
-/// concurrency it peaked at.
-pub struct CpuFps;
-
-impl Metric for CpuFps {
-    fn name(&self) -> &'static str {
-        "cpu_fps"
-    }
-
-    fn fields(&self) -> &'static [&'static str] {
-        &["cpu_fps", "cpu_fps_concurrency"]
-    }
-
-    fn measure(&self, ctx: &CellCtx<'_>) -> Measured {
-        if let Some(side) = stream_blocked_by(ctx) {
-            let m = stream_untestable_named(&side);
-            let f: Filled = self.fields().iter().map(|x| (*x, m.clone())).collect();
-            return f.into();
-        }
-        let found = crate::run::sweep_cpu_fps_cell(ctx.cfg, ctx.id, ctx.min_conc, ctx.max_conc);
-        let carry = |m: &Measurement<f64>| match (m.reason().cloned(), m.detail()) {
-            (Some(r), Some(d)) => Measurement::absent_because(r, d),
-            (Some(r), None) => Measurement::absent(r),
-            (None, _) => Measurement::absent(Absent::NotMeasured),
-        };
-        let fps = match found.fps.value() {
-            Some(v) => Measurement::Measured(*v),
-            None => carry(&found.fps),
-        };
-        let conc = match found.concurrency.value() {
-            Some(c) => Measurement::Measured(f64::from(*c)),
-            None => Measurement::absent(fps.reason().cloned().unwrap_or(Absent::NotMeasured)),
-        };
-        Measured {
-            fields: vec![("cpu_fps", fps), ("cpu_fps_concurrency", conc)],
-            series: Series {
-                sweep_cpu_fps: found
-                    .points
-                    .iter()
-                    .map(crate::run::StreamPoint::to_json)
-                    .collect(),
-                ..Series::default()
-            },
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     // EVERY `Series` FIELD MUST SURVIVE THE ACCUMULATOR.
@@ -1848,7 +1713,6 @@ mod tests {
                         rss: rss.clone(),
                         idle_rss: rss,
                         sweep_streams: vec![serde_json::Value::Null],
-                        sweep_cpu_fps: vec![serde_json::Value::Null],
                     },
                 }
             }
@@ -1880,10 +1744,6 @@ mod tests {
         assert!(
             !series.sweep_streams.is_empty(),
             "sweep_streams was dropped"
-        );
-        assert!(
-            !series.sweep_cpu_fps.is_empty(),
-            "sweep_cpu_fps was dropped"
         );
     }
 
@@ -2044,12 +1904,32 @@ mod tests {
         );
     }
 
-    /// Every group must declare at least one field, or it is a procedure with no way to be observed.
+    /// Every group must be OBSERVABLE - it declares scalar fields, or it fills a series lane.
+    ///
+    /// It used to demand scalar fields from every group, on the reasoning that a group with none is a
+    /// procedure with no way to be observed. That reasoning is right and the test was too narrow: the
+    /// `throughput` group's entire output is the FRONTIER, which is a sequence and so travels on the
+    /// series rather than in `Filled` (see `frontier.rs`). It is observable - more so than the two
+    /// scalars it replaced, since every reading carries its own evidence - just not through `fields()`.
+    ///
+    /// So the property is unchanged in spirit and widened in letter: a group must produce SOMETHING.
+    /// The series-only exception is named explicitly rather than allowed by a blanket, so a group that
+    /// silently stops filling anything still fails here.
+    const SERIES_ONLY_GROUPS: &[&str] = &["throughput"];
+
     #[test]
     fn every_group_declares_what_it_fills() {
         for m in METRICS {
-            assert!(!m.fields().is_empty(), "{} declares no fields", m.name());
             assert!(!m.name().is_empty());
+            if SERIES_ONLY_GROUPS.contains(&m.name()) {
+                assert!(
+                    m.fields().is_empty(),
+                    "{} is listed series-only but declares scalar fields - one or the other is stale",
+                    m.name()
+                );
+                continue;
+            }
+            assert!(!m.fields().is_empty(), "{} declares no fields", m.name());
         }
     }
 
@@ -2256,135 +2136,24 @@ mod tests {
     // dropped either struct back out of the list without anything else failing.
     // ── the two concurrent-stream groups ────────────────────────────────────────────────────────
 
-    // A DIALECT THE MOCK CANNOT STREAM IS A RIG LIMIT, and it must be stated the same way in all
-    // three streaming groups. `Untestable`, not `NotMeasured`: the first says the rig cannot pose the
-    // question, the second says we asked and got nothing, and only one of those is true here.
-    // Publishing "this gateway sustains no streams" because our own mock does not synthesise gemini
-    // frames is the harness-bug-as-gateway-property inversion this project forbids.
+    // The same gate for the concurrent-stream group. `CellStream` declared these fields and NOTHING in
+    // the engine ever filled them: the artifact carried the keys, always null, on every cell of every
+    // gateway ever published. A group that falls back out of `METRICS` returns the board to exactly
+    // that state with nothing else failing, which is what this holds.
+    //
+    // ONE GROUP, NOT TWO. `cpu_fps` is retired - see `run.rs`'s own note for the field evidence: 4 of
+    // 16 cells had it INVERTED below the proven delivery boundary, 5 were redundant with
+    // `streams_sustained_fps`, and 7 were measured at a concurrency where the delivery gate did not
+    // hold at all.
     #[test]
-    fn a_dialect_the_mock_cannot_stream_is_untestable_in_every_stream_group() {
-        let cfg = a_config();
-        let id = CellId::new("gemini", "gemini");
-        let ctx = CellCtx {
-            cfg: &cfg,
-            id: &id,
-            dialect: Dialect::Gemini,
-            min_conc: 1,
-            max_conc: 2,
-        };
-        assert!(
-            !Dialect::Gemini.streams_natively(),
-            "this test is about a dialect the mock cannot stream"
-        );
-        for (name, produced) in [
-            ("streams_sustained", StreamsSustained.measure(&ctx)),
-            ("cpu_fps", CpuFps.measure(&ctx)),
-        ] {
-            let filled: BTreeMap<_, _> = produced.fields.into_iter().collect();
-            assert!(
-                !filled.is_empty(),
-                "{name} must still fill the fields it declares"
-            );
-            for (field, m) in &filled {
-                assert_eq!(
-                    m.copied(),
-                    None,
-                    "{name}/{field} cannot have measured anything"
-                );
-                assert_eq!(
-                    m.reason(),
-                    Some(&Absent::Untestable),
-                    "{name}/{field} must name the RIG's limit, not ours"
-                );
-                assert!(
-                    m.detail().unwrap_or_default().contains("gemini"),
-                    "{name}/{field} must say which dialect the mock cannot stream: {:?}",
-                    m.detail()
-                );
-            }
-            // And no rung was probed at all, because the search never ran: a sweep trace here would
-            // be evidence for a measurement that was never taken.
-            assert!(filled.len() >= 2);
-        }
-    }
-
-    // A group that declines to measure must still fill EVERY field it declared, which is what stops a
-    // silently missing key from being indistinguishable from an unmeasured one.
-    #[test]
-    fn both_stream_groups_fill_every_declared_field_even_when_untestable() {
-        let cfg = a_config();
-        let id = CellId::new("cohere", "cohere");
-        let ctx = CellCtx {
-            cfg: &cfg,
-            id: &id,
-            dialect: Dialect::Cohere,
-            min_conc: 1,
-            max_conc: 2,
-        };
-        for m in [&StreamsSustained as &dyn Metric, &CpuFps] {
-            let filled: BTreeMap<_, _> = m.measure(&ctx).fields.into_iter().collect();
-            for f in m.fields() {
-                assert!(
-                    filled.contains_key(f),
-                    "{} declares {f} and did not fill it",
-                    m.name()
-                );
-            }
-        }
-    }
-
-    /// THE FIELDS ARE WHAT MUST BE REACHABLE, NOT THE GROUP THAT HAPPENS TO OWN THEM.
-    ///
-    /// This used to also assert a group literally named `sustained_throughput` was in `METRICS`,
-    /// and that assertion failed the moment the sustained figure moved into `throughput` - where it
-    /// belongs, since it is now a summary of the same sweep rather than a search of its own. A test
-    /// that breaks when a field changes hands is testing the file layout; the property worth holding
-    /// is that no declared artifact field can quietly stop being produced by anyone.
-    #[test]
-    fn every_published_field_is_reachable_from_metrics() {
-        let names: Vec<&str> = METRICS.iter().map(|m| m.name()).collect();
-        assert!(names.contains(&"added_latency"), "METRICS = {names:?}");
-        let all_fields: Vec<&str> = METRICS
-            .iter()
-            .flat_map(|m| m.fields().iter().copied())
-            .collect();
-        for f in [
-            "added_latency_p50_us",
-            "added_latency_p99_us",
-            "gateway_c1_p99_us",
-            "direct_c1_p99_us",
-            "rps_max_proxy",
-            "conc_at_peak",
-            "rps_sustained_20ms",
-            "rps_sustained_20ms_concurrency",
-            "conc_at_sustained",
-        ] {
-            assert!(
-                all_fields.contains(&f),
-                "{f} is not declared by any group in METRICS: {all_fields:?}"
-            );
-        }
-    }
-
-    // The same gate for the two concurrent-stream groups. `CellStream` declared these four fields and
-    // NOTHING in the engine ever filled them: the artifact carried the keys, always null, on every
-    // cell of every gateway ever published. A group that falls back out of `METRICS` returns the
-    // board to exactly that state with nothing else failing, which is what this holds.
-    #[test]
-    fn the_two_stream_groups_are_reachable_from_metrics() {
+    fn the_stream_group_is_reachable_from_metrics() {
         let names: Vec<&str> = METRICS.iter().map(|m| m.name()).collect();
         assert!(names.contains(&"streams_sustained"), "METRICS = {names:?}");
-        assert!(names.contains(&"cpu_fps"), "METRICS = {names:?}");
         let all_fields: Vec<&str> = METRICS
             .iter()
             .flat_map(|m| m.fields().iter().copied())
             .collect();
-        for f in [
-            "streams_sustained",
-            "streams_sustained_fps",
-            "cpu_fps",
-            "cpu_fps_concurrency",
-        ] {
+        for f in ["streams_sustained", "streams_sustained_fps"] {
             assert!(
                 all_fields.contains(&f),
                 "{f} is not declared by any group in METRICS: {all_fields:?}"
@@ -2675,45 +2444,5 @@ mod tests {
         if let (Some(a), Some(b)) = (p50, p99) {
             assert!(b >= a, "p99 {b} sits below p50 {a}");
         }
-    }
-
-    // A FABRICATED ZERO IN PUBLISHED EVIDENCE, on the artifact side of the same defect.
-    //
-    // `SustainedPoint.fail` was an `i64` and this mapping was `Measurement::Measured(pt.fail)`
-    // unconditionally, so a rung whose windows all came back without a reading published `fail: 0`
-    // in `sweep_sustained_20ms` - a row stating the gateway lost nothing at a rate nothing ever
-    // observed it serving. The board's rule is that an absent measurement publishes null WITH A
-    // REASON and is never substituted by a number, so the absence has to carry one.
-    #[test]
-    fn a_rung_with_no_reading_publishes_an_absent_failure_count_with_its_reason() {
-        let pt = |conc: u32, p99: Option<u64>, fail: Option<i64>| crate::run::SustainedPoint {
-            concurrency: conc,
-            passed: true,
-            rps: 16_000.0,
-            p99_us: p99,
-            fail,
-        };
-        let rows = sustained_evidence(&[pt(64, Some(5_000), Some(3)), pt(128, None, None)]);
-
-        // A measured rung still publishes its count, including a real zero - "measured no failures"
-        // is a fact, and it must not be collateral damage of making the absent case honest.
-        assert_eq!(rows[0].fail.value().copied(), Some(3));
-        assert_eq!(
-            sustained_evidence(&[pt(8, None, Some(0))])[0]
-                .fail
-                .value()
-                .copied(),
-            Some(0),
-            "a window that measured zero failures measured something"
-        );
-
-        // The absent one is absent, and says why at the rung it happened on.
-        assert_eq!(rows[1].fail.value(), None);
-        assert_eq!(rows[1].fail.reason(), Some(&Absent::NotMeasured));
-        let detail = rows[1].fail.detail().unwrap_or_default();
-        assert!(
-            detail.contains("c=128") && detail.contains("no window"),
-            "the absence must name the rung it happened on: {detail:?}"
-        );
     }
 }

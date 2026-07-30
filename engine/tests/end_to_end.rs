@@ -371,27 +371,51 @@ fn every_module_the_artifact_needs_is_reachable_from_a_real_run() {
         );
     }
 
-    // --- sustained_throughput: WIRED ------------------------------------------------------------------
+    // --- throughput: WIRED, as the FRONTIER ---------------------------------------------------------
     //
-    // The grid here is narrowed to [1, 2] (see `run_engine`'s OTB_MIN_CONC/OTB_MAX_CONC), so this is
-    // asserted as KEYS, not real numbers: `bisect_ceiling` over a two-rung range needs a real failure
-    // to prove a ceiling, and this fixture never fails a request, so `SearchExhausted` is the honest
-    // result. What this proves is that the group ran and filled its declared fields rather than being
-    // skipped, exactly the standard the memory block above already holds itself to on this fixture.
-    for field in [
-        "rps_sustained_20ms",
-        "rps_sustained_20ms_concurrency",
-        "conc_at_sustained",
-    ] {
+    // The grid here is narrowed to [1, 2] (see `run_engine`'s OTB_MIN_CONC/OTB_MAX_CONC) and this fixture
+    // never fails a request, so the climb runs to the top of its two-rung range still serving cleanly.
+    // Every reading is therefore a LOWER BOUND, which is a real published rate rather than the absence
+    // the retired bisection produced for the same state. What this proves is that the group ran and
+    // filled the frontier rather than being skipped.
+    let frontier = perf["frontier"]
+        .as_array()
+        .unwrap_or_else(|| panic!("the throughput group must publish a frontier: {perf:#}"));
+    assert_eq!(
+        frontier.len(),
+        6,
+        "one reading per declared bound plus the unbounded one, on every cell: {perf:#}"
+    );
+    // The bounds ascend and the unbounded reading is last, so the published sequence reads as the
+    // tradeoff curve it is.
+    let bounds: Vec<Option<i64>> = frontier
+        .iter()
+        .map(|r| r["p99_bound_us"].as_i64())
+        .collect();
+    assert_eq!(
+        bounds,
+        vec![
+            Some(1_000),
+            Some(5_000),
+            Some(10_000),
+            Some(50_000),
+            Some(100_000),
+            None
+        ],
+        "the frontier's bounds must be ascending with the unbounded reading last: {perf:#}"
+    );
+    // MONOTONICITY ON A REAL RUN. `frontier.rs` proves it over synthetic rungs; this holds it over
+    // numbers a live gateway and a live mock actually produced.
+    let rates: Vec<f64> = frontier.iter().filter_map(|r| r["rps"].as_f64()).collect();
+    for w in rates.windows(2) {
         assert!(
-            perf.get(field).is_some(),
-            "the sustained-throughput group declares {field} and must publish it: {perf:#}"
+            w[1] >= w[0],
+            "relaxing the bound lowered the published rate on a real run: {rates:?}"
         );
     }
     assert!(
-        perf.get("sweep_sustained_20ms")
-            .is_some_and(|v| v.is_array()),
-        "the sustained-throughput search's own probed rungs must travel as evidence: {perf:#}"
+        perf.get("sweep_max_proxy").is_some_and(|v| v.is_array()),
+        "the rungs every reading was taken from must travel as evidence: {perf:#}"
     );
 
     // --- streaming: WIRED --------------------------------------------------------------------------
@@ -449,9 +473,9 @@ fn every_module_the_artifact_needs_is_reachable_from_a_real_run() {
         "the c=1 streaming legs must say how many frames each produced: {stream:#}"
     );
 
-    // --- streams_sustained + cpu_fps: WIRED --------------------------------------------------------
+    // --- streams_sustained: WIRED ------------------------------------------------------------------
     //
-    // `CellStream` declared these four fields and nothing in the engine ever filled them, so every
+    // `CellStream` declared these fields and nothing in the engine ever filled them, so every
     // published board carried them as permanent nulls. The SCALARS are asserted as keys rather than
     // numbers, for the same two reasons the sustained-throughput block above is: the grid is narrowed
     // to [1, 2], so `bisect_ceiling` has no failing rung to prove a ceiling with and `SearchExhausted`
@@ -461,21 +485,14 @@ fn every_module_the_artifact_needs_is_reachable_from_a_real_run() {
     // The SWEEP TRACES are asserted as real, because they are what proves the searches actually ran:
     // a rung only lands there once a window of concurrent stream lanes has opened, read frames off a
     // live socket, and been judged.
-    for field in [
-        "streams_sustained",
-        "streams_sustained_fps",
-        "cpu_fps",
-        "cpu_fps_concurrency",
-    ] {
+    for field in ["streams_sustained", "streams_sustained_fps"] {
         assert!(
             stream.get(field).is_some(),
             "the concurrent-stream groups declare {field} and must publish it, measured or absent: {stream:#}"
         );
     }
-    for (field, group) in [
-        ("sweep_streams", "streams-sustained gate"),
-        ("sweep_cpu_fps", "cpu frames/sec peak"),
-    ] {
+    {
+        let (field, group) = ("sweep_streams", "streams-sustained gate");
         let rungs = stream[field]
             .as_array()
             .unwrap_or_else(|| panic!("{field} must be an array: {stream:#}"));

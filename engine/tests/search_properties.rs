@@ -20,11 +20,8 @@
 // opposite case: failures must be loud. Scoped to this file, same as engine/tests/end_to_end.rs.
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
-use otb_engine::measurement::{Absent, Measurement};
-use otb_engine::search::{
-    bisect_ceiling, saturation_plateau, saturation_plateau_gated, BisectResult, PeakResult, Probe,
-    ProbedPoint, Reading, Sample,
-};
+use otb_engine::measurement::Absent;
+use otb_engine::search::{bisect_ceiling, climb_rungs, BisectResult, Probe, ProbedPoint, Sample};
 use proptest::prelude::*;
 
 // ---- probes -------------------------------------------------------------------------------------
@@ -37,62 +34,6 @@ struct MonotoneGate {
 impl Probe for MonotoneGate {
     fn probe(&mut self, c: u32) -> Option<Sample> {
         Some(Sample::new(c as f64, c <= self.ceiling))
-    }
-}
-
-/// A throughput curve that rises linearly to a knee and then holds a flat plateau - the honest
-/// shape `saturation_plateau`'s own doc says a healthy gateway has. Deterministic (zero window
-/// spread), so a rung's median is exactly f(c).
-struct StepCurve {
-    knee: u32,
-    level: f64,
-}
-impl StepCurve {
-    fn f(&self, c: u32) -> f64 {
-        if c >= self.knee {
-            self.level
-        } else {
-            self.level * c as f64 / self.knee as f64
-        }
-    }
-}
-impl Probe for StepCurve {
-    fn probe(&mut self, c: u32) -> Option<Sample> {
-        Some(Sample::new(self.f(c), true))
-    }
-}
-
-/// A curve that never stops rising: f(c) = c. At the top of any range it is still improving by a
-/// full doubling, so the only honest verdict is SearchExhausted.
-struct EverRising;
-impl Probe for EverRising {
-    fn probe(&mut self, c: u32) -> Option<Sample> {
-        Some(Sample::new(c as f64, true))
-    }
-}
-
-/// An arbitrary-but-deterministic probe: pass/fail and value are a pure function of c (seeded), so
-/// repeated windows at one rung agree and the global invariants can be checked against any shape,
-/// including non-monotone ones no real fixture would produce on demand.
-struct HashedProbe {
-    seed: u64,
-}
-impl HashedProbe {
-    fn at(&self, c: u32) -> (f64, bool) {
-        // splitmix64: cheap, deterministic, and spreads a seed+c pair across the whole shape space.
-        let mut z = self.seed ^ (u64::from(c)).wrapping_mul(0x9E37_79B9_7F4A_7C15);
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        z ^= z >> 31;
-        let passed = z & 3 != 0; // pass ~75% of rungs, so both verdict shapes occur often
-        let value = ((z >> 8) & 0xFFFF) as f64 + 1.0;
-        (value, passed)
-    }
-}
-impl Probe for HashedProbe {
-    fn probe(&mut self, c: u32) -> Option<Sample> {
-        let (value, passed) = self.at(c);
-        Some(Sample::new(value, passed))
     }
 }
 
@@ -122,22 +63,6 @@ fn assert_no_ladder_leap(points: &[ProbedPoint], floor: u32) {
             p.concurrency
         );
         seen_max = seen_max.max(p.concurrency);
-    }
-}
-
-/// `exhausted` is a plain-bool mirror of `reason() == SearchExhausted`; the two must never diverge,
-/// or a caller reading the bool suppresses a different absence than the reason names.
-fn assert_exhausted_coherent(r: &PeakResult) {
-    let by_reason = r.peak.reason() == Some(&Absent::SearchExhausted);
-    assert_eq!(
-        r.exhausted,
-        by_reason,
-        "exhausted={} but reason={:?}: the bool and the reason are one claim and must agree",
-        r.exhausted,
-        r.peak.reason()
-    );
-    if r.peak.is_measured() {
-        assert!(!r.exhausted, "a measured peak cannot also claim exhaustion");
     }
 }
 
@@ -248,261 +173,79 @@ proptest! {
         prop_assert_eq!(fwd.ceiling.copied(), rev.ceiling.copied());
     }
 
-    // THE PLATEAU CONTRACT on the honest curve shape: rises to a knee, then holds. The published
-    // peak is the plateau LEVEL, at a rung that really ran, and never the last rung probed. The
-    // ranges here guarantee the plateau is observable well inside the range (knee*16 <= max), so a
-    // published absence would be the search failing to see a plateau that was there.
+
+    // ── climb_rungs: the ladder walk that replaced `saturation_plateau` ──────────────────────────
+    //
+    // The retired search's properties were about a VERDICT it reached - the plateau level, the rung it
+    // published, whether it flagged itself exhausted. `climb_rungs` reaches no verdict, so its
+    // invariants are all about COVERAGE and TERMINATION: it must probe every rung the frontier could
+    // read, and it must stop.
+
+    // THE CLIMB REACHES THE FAILURE BOUNDARY, WHATEVER THE CURVE'S SHAPE DOES.
+    //
+    // This is the property the retired flat-run counter broke. It stopped after three rungs that did
+    // not improve by more than their own measured noise, so a curve creeping up inside its wobble - or
+    // one that had genuinely plateaued but kept serving cleanly far above the knee - was abandoned
+    // early and the rungs above it never entered the record. kong published 15909 that way while the
+    // sustained reading of the same windows reached 17898.
+    //
+    // Now the only stopping condition is a rung that serves nothing cleanly, so for ANY curve shape
+    // the climb must reach the gateway's real failure point (or the top of the range).
     #[test]
-    fn a_reachable_plateau_is_published_at_its_own_level_and_never_on_the_last_rung(
+    fn the_climb_always_reaches_the_failure_boundary_whatever_the_curve_does(
+        limit in 1u32..4096,
         knee in 2u32..64,
-        mult in 16u32..64,
         level in 100.0f64..1_000_000.0,
     ) {
-        let max_conc = knee * mult;
-        let mut probe = StepCurve { knee, level };
-        let r = saturation_plateau(&mut probe, 1, max_conc);
-        assert_exhausted_coherent(&r);
-        let peak = match r.peak {
-            Measurement::Measured(p) => p,
-            ref other => panic!("a plateau inside the range must be measured, got {other:?}"),
-        };
-        // The value is the plateau's own level - a reading the curve actually produced - and the
-        // rung it is paired with really measured it (one measurement, not a pair from two rungs).
-        prop_assert!(
-            (peak.value - level).abs() < 1e-9,
-            "published {} but the plateau level is {}", peak.value, level
-        );
-        prop_assert!(
-            peak.concurrency >= knee,
-            "the winning rung c={} sits below the knee {} and cannot have measured the level",
-            peak.concurrency, knee
-        );
-        prop_assert!(peak.concurrency <= max_conc, "published above the range");
-        prop_assert!(
-            r.points.iter().any(|p| p.concurrency == peak.concurrency
-                && (p.value - peak.value).abs() < 1e-9 && p.passed),
-            "the published (value, concurrency) pair must be a probe that ran"
-        );
-        // Never the last rung: the last rung is by construction inside the flat-stop's noise band,
-        // and publishing it is the "sweep won at the highest concurrency it probed" defect.
-        let last = r.rungs.last().expect("a measured peak implies rungs").concurrency;
-        prop_assert!(r.rungs.len() >= 2);
-        prop_assert!(
-            peak.concurrency != last,
-            "the peak was published on the final probed rung c={last}"
-        );
-        // The knee travels as a rung that ran, inside the range.
-        prop_assert!(
-            r.rungs.iter().any(|s| s.concurrency == peak.knee_concurrency),
-            "knee c={} is not a rung the climb measured", peak.knee_concurrency
-        );
-        assert_points_within(&r.points, 1, max_conc);
-        assert_no_ladder_leap(&r.points, 1);
-    }
-
-    // A curve still rising at the bound is ALWAYS an absence: the bound is the harness's choice, and
-    // for f(c)=c every range top would otherwise become a published "peak" equal to our own config.
-    #[test]
-    fn still_rising_at_the_bound_is_always_exhausted_never_a_number(
-        min_conc in 1u32..16,
-        max_conc in 64u32..8192,
-    ) {
-        let mut probe = EverRising;
-        let r = saturation_plateau(&mut probe, min_conc, max_conc);
-        prop_assert_eq!(
-            r.peak.copied(), None,
-            "a strictly rising curve has no interior peak; a number here is the range bound"
-        );
-        prop_assert_eq!(r.peak.reason(), Some(&Absent::SearchExhausted));
-        prop_assert!(r.exhausted);
-        // The evidence still travels: the probed rungs are not thrown away with the verdict.
-        prop_assert!(!r.points.is_empty());
-        assert_points_within(&r.points, min_conc, max_conc);
-        assert_no_ladder_leap(&r.points, min_conc);
-    }
-
-    // THE GLOBAL INVARIANTS AGAINST ARBITRARY SHAPES: whatever the curve does - non-monotone,
-    // gappy, adversarial - the search never probes outside its range, never leaps the ladder, never
-    // lets `exhausted` and the reason disagree, and any measured peak is a probe that really ran
-    // with that value, never on the final rung of a multi-rung climb.
-    #[test]
-    fn plateau_invariants_hold_for_arbitrary_curve_shapes(
-        seed in any::<u64>(),
-        min_conc in 1u32..32,
-        span in 1u32..4096,
-        gated in any::<bool>(),
-    ) {
-        let max_conc = min_conc + span;
-        let mut probe = HashedProbe { seed };
-        let gate = |r: &Reading| r.fail == 0 && r.p99_us.unwrap_or(u64::MAX) < 20_000;
-        let r = if gated {
-            saturation_plateau_gated(&mut probe, min_conc, max_conc, Some(&gate))
-        } else {
-            saturation_plateau(&mut probe, min_conc, max_conc)
-        };
-        assert_exhausted_coherent(&r);
-        assert_points_within(&r.points, min_conc, max_conc);
-        assert_no_ladder_leap(&r.points, min_conc);
-        if let Measurement::Measured(p) = &r.peak {
-            prop_assert!(p.concurrency >= min_conc && p.concurrency <= max_conc);
-            prop_assert!(p.knee_concurrency >= min_conc && p.knee_concurrency <= max_conc);
-            prop_assert!(
-                r.points.iter().any(|pt| pt.concurrency == p.concurrency
-                    && (pt.value - p.value).abs() < 1e-9 && pt.passed),
-                "measured peak (c={}, v={}) is not a probe that ran and passed", p.concurrency, p.value
-            );
-            if r.rungs.len() >= 2 {
-                let last = r.rungs.last().expect("len checked").concurrency;
-                prop_assert!(
-                    p.concurrency != last,
-                    "peak published on the final probed rung c={last}"
-                );
-            }
-        }
-    }
-
-    // An all-failing curve is NotMeasured, never a zero and never exhausted: no rung established any
-    // throughput, and claiming exhaustion would say the range was too small when the gateway simply
-    // failed everywhere.
-    #[test]
-    fn a_curve_that_never_passes_is_unmeasured_not_zero_and_not_exhausted(
-        min_conc in 1u32..32,
-        span in 1u32..2048,
-    ) {
-        struct AlwaysFails;
-        impl Probe for AlwaysFails {
+        // Serves cleanly up to `limit`, and its RATE plateaus at `knee` - far below `limit`. A search
+        // that stopped on flatness would quit near the knee and never see the boundary.
+        struct PlateauThenFail { knee: u32, level: f64, limit: u32 }
+        impl Probe for PlateauThenFail {
             fn probe(&mut self, c: u32) -> Option<Sample> {
-                Some(Sample::new(c as f64, false))
+                let v = if c >= self.knee { self.level } else { self.level * f64::from(c) / f64::from(self.knee) };
+                Some(Sample::new(v, c <= self.limit))
             }
         }
-        let r = saturation_plateau(&mut AlwaysFails, min_conc, min_conc + span);
-        prop_assert_eq!(r.peak.copied(), None);
-        prop_assert_eq!(r.peak.reason(), Some(&Absent::NotMeasured));
-        prop_assert!(!r.exhausted);
+        let max_conc = 65_536;
+        let mut probe = PlateauThenFail { knee, level, limit };
+        let points = climb_rungs(&mut probe, 1, max_conc);
+        let top = points.iter().map(|p| p.concurrency).max().unwrap_or(0);
+        prop_assert!(
+            top > limit || top == max_conc,
+            "climb stopped at c={top} with a clean limit of {limit} and a knee at {knee}: a rung that \
+             still served was never probed"
+        );
+        // Every rung it recorded below the limit served cleanly, so the frontier can read them.
+        prop_assert!(points.iter().filter(|p| p.concurrency <= limit).all(|p| p.passed));
     }
-}
 
-// ---- targeted examples that a property cannot state cleanly -------------------------------------
+    // IT ALWAYS TERMINATES, and only ever inside the range. An unbounded climb would hang a cell; a
+    // climb that probed past `max_conc` would ask the box for load the caller ruled out.
+    #[test]
+    fn the_climb_terminates_within_the_range_for_any_limit(
+        floor in 1u32..64,
+        span in 1u32..8192,
+        limit in 0u32..16_384,
+    ) {
+        let max_conc = floor + span;
+        let mut probe = MonotoneGate { ceiling: limit };
+        let points = climb_rungs(&mut probe, floor, max_conc);
+        assert_points_within(&points, floor, max_conc);
+        assert_no_ladder_leap(&points, floor);
+    }
 
-/// A gate supplied to the gated climb keeps the search going past the throughput knee: the gate
-/// ceiling routinely sits far above saturation, and stopping at the knee publishes the knee under
-/// the ceiling's name. The ungated climb on the same curve stops near the knee, which is the
-/// contrast that proves the gate changed the stopping rule rather than being ignored.
-#[test]
-fn the_gate_extends_the_climb_past_the_throughput_knee() {
-    let knee = 8u32;
-    let level = 10_000.0;
-    // Ungated: stops a few flat rungs past the knee.
-    let mut probe = StepCurve { knee, level };
-    let ungated = saturation_plateau(&mut probe, 1, 4096);
-    let ungated_top = ungated
-        .rungs
-        .iter()
-        .map(|r| r.concurrency)
-        .max()
-        .expect("rungs");
-
-    // Gated, with a gate that only breaks at c > 512: the climb must keep going until it sees the
-    // gate fail, not stop where throughput went flat.
-    struct GatedCurve {
-        inner: StepCurve,
-        gate_ceiling: u32,
+    // A CURVE THAT NEVER SERVES CLEANLY YIELDS RUNGS BUT NO CLEAN ONE - never an invented zero, and
+    // never a climb that keeps going. The floor failed; nothing above it can un-fail it.
+    #[test]
+    fn a_gateway_that_fails_at_the_floor_is_probed_once_and_no_further(
+        floor in 1u32..64,
+        span in 1u32..4096,
+    ) {
+        let mut probe = MonotoneGate { ceiling: 0 };
+        let points = climb_rungs(&mut probe, floor, floor + span);
+        prop_assert!(!points.is_empty(), "the floor is still probed and still recorded");
+        prop_assert!(points.iter().all(|p| p.concurrency == floor),
+            "nothing above a failing floor may be probed");
+        prop_assert!(points.iter().all(|p| !p.passed));
     }
-    impl Probe for GatedCurve {
-        fn probe(&mut self, c: u32) -> Option<Sample> {
-            let v = self.inner.f(c);
-            let reading = Reading {
-                p99_us: Some(if c <= self.gate_ceiling {
-                    5_000
-                } else {
-                    50_000
-                }),
-                ok: 100,
-                fail: 0,
-            };
-            Some(Sample::new(v, true).with_reading(reading))
-        }
-    }
-    let mut probe = GatedCurve {
-        inner: StepCurve { knee, level },
-        gate_ceiling: 512,
-    };
-    let gate = |r: &Reading| r.p99_us.is_some_and(|p| p < 20_000) && r.fail == 0;
-    let gated = saturation_plateau_gated(&mut probe, 1, 4096, Some(&gate));
-    let gated_top = gated
-        .rungs
-        .iter()
-        .map(|r| r.concurrency)
-        .max()
-        .expect("rungs");
-
-    assert!(
-        gated_top > 512,
-        "the gated climb stopped at c={gated_top} without ever seeing the gate break at 512"
-    );
-    assert!(
-        gated_top > ungated_top,
-        "the gate did not extend the climb (gated top c={gated_top}, ungated top c={ungated_top})"
-    );
-    // And the rung evidence tells the caller which rungs held the gate: rungs at or below the gate
-    // ceiling hold, rungs above it do not.
-    for r in &gated.rungs {
-        if r.concurrency <= 512 {
-            assert!(
-                r.gate_holds,
-                "rung c={} held a 5ms p99 against a 20ms gate and must be marked holding",
-                r.concurrency
-            );
-        } else {
-            assert!(
-                !r.gate_holds,
-                "rung c={} blew the gate and must not be marked holding",
-                r.concurrency
-            );
-        }
-    }
-}
-
-/// A probe interruption after real rungs landed keeps the evidence and publishes an absence whose
-/// detail names the best passing point - never a number, because a turnover was never observed.
-#[test]
-fn an_interrupted_climb_keeps_its_evidence_but_publishes_no_number() {
-    struct DiesAfter {
-        calls: u32,
-        budget: u32,
-    }
-    impl Probe for DiesAfter {
-        fn probe(&mut self, c: u32) -> Option<Sample> {
-            self.calls += 1;
-            if self.calls > self.budget {
-                return None;
-            }
-            Some(Sample::new(c as f64 * 10.0, true))
-        }
-    }
-    let mut probe = DiesAfter {
-        calls: 0,
-        budget: 7,
-    };
-    let r = saturation_plateau(&mut probe, 1, 4096);
-    assert_eq!(r.peak.copied(), None, "no turnover was ever observed");
-    // RigLimited, not NotMeasured. An interruption is the RIG failing to finish asking (a refused
-    // window, an exhausted port range), never a fact about the gateway - and the distinction is
-    // load-bearing: `sweep_cpu_fps_cell` publishes a MEASURED 0 when every rung genuinely failed
-    // the gate, keyed on NotMeasured. Under one shared reason a rig abort became the gateway's zero.
-    assert_eq!(r.peak.reason(), Some(&Absent::RigLimited));
-    assert!(
-        r.peak.detail().unwrap_or_default().contains("interrupted"),
-        "and it says so, so the absence can be read without re-deriving it from the rungs"
-    );
-    assert!(!r.exhausted, "an interruption is not exhaustion");
-    assert!(
-        !r.points.is_empty(),
-        "the rungs that ran before the interruption are evidence and must travel"
-    );
-    assert!(
-        r.peak.detail().unwrap_or_default().contains("lower bound"),
-        "the absence must say the best passing point is a lower bound, got {:?}",
-        r.peak.detail()
-    );
 }

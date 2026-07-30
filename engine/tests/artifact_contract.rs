@@ -36,27 +36,22 @@ use otb_engine::record::{
 // strings on purpose: a test that asked the struct for its field names would agree with any rename
 // and hold nothing. If a Measurement field is added to a block without being added here, the
 // every-field-absent test below fails on the extra absences entry, so the list cannot go stale.
-const PERF_METRICS: [&str; 10] = [
+// THE SIX THROUGHPUT SCALARS ARE GONE, replaced by `CellPerf.frontier` - a sequence, so its absences
+// are keyed per bound (`frontier.10ms.rps`) rather than by a field name and cannot be listed here. Their
+// own contract is asserted directly in `record.rs`, which is where the per-bound keys are built.
+const PERF_METRICS: [&str; 4] = [
     "added_latency_p50_us",
     "added_latency_p99_us",
     "gateway_c1_p99_us",
     "direct_c1_p99_us",
-    "rps_sustained_20ms",
-    "rps_sustained_20ms_concurrency",
-    "conc_at_sustained",
-    "rps_max_proxy",
-    "rps_max_proxy_concurrency",
-    "conc_at_peak",
 ];
-const STREAM_METRICS: [&str; 10] = [
+const STREAM_METRICS: [&str; 8] = [
     "added_ttft_p50_us",
     "added_ttft_p99_us",
     "added_gap_p50_us",
     "added_gap_p99_us",
     "streams_sustained",
     "streams_sustained_fps",
-    "cpu_fps",
-    "cpu_fps_concurrency",
     // The weight behind the two added-TTFT percentiles. Declared like any other metric so a null here
     // must carry a reason: a percentile whose sample count is itself an unexplained hole tells a reader
     // nothing about how much to trust it.
@@ -97,12 +92,14 @@ fn measured_perf() -> CellPerf {
         added_latency_p99_us: Measurement::Measured(480),
         gateway_c1_p99_us: Measurement::Measured(2_000),
         direct_c1_p99_us: Measurement::Measured(1_520),
-        rps_sustained_20ms: Measurement::Measured(28_000),
-        rps_sustained_20ms_concurrency: Measurement::Measured(96),
-        conc_at_sustained: Measurement::Measured(96),
-        rps_max_proxy: Measurement::Measured(31_000),
-        rps_max_proxy_concurrency: Measurement::Measured(128),
-        conc_at_peak: Measurement::Measured(128),
+        frontier: vec![otb_engine::record::FrontierReading {
+            p99_bound_us: Some(10_000),
+            rps: Measurement::Measured(31_000),
+            concurrency: Measurement::Measured(128),
+            p99_us: Measurement::Measured(4_000),
+            first_disqualified_conc: Measurement::Measured(256),
+            lower_bound: false,
+        }],
         ..CellPerf::default()
     }
 }
@@ -116,8 +113,6 @@ fn measured_stream() -> CellStream {
         added_gap_p99_us: Measurement::Measured(12),
         streams_sustained: Measurement::Measured(1_300),
         streams_sustained_fps: Measurement::Measured(39_000.0),
-        cpu_fps: Measurement::Measured(48_000.0),
-        cpu_fps_concurrency: Measurement::Measured(256),
         ttft_gw_samples: Measurement::Measured(100),
         ttft_direct_samples: Measurement::Measured(100),
         ..CellStream::default()
@@ -267,60 +262,6 @@ fn every_null_metric_carries_exactly_one_absence_and_no_absence_points_at_a_numb
     );
 }
 
-/// A mixed cell: the absences carry the SPECIFIC reason and detail each suppression recorded, under
-/// the right prefixed key, while the measured fields beside them stay numbers with no entry.
-#[test]
-fn each_absence_travels_under_its_own_key_with_its_own_reason_and_detail() {
-    let perf = CellPerf {
-        rps_max_proxy: Measurement::absent_because(
-            Absent::SearchExhausted,
-            "still climbing at c=4096",
-        ),
-        rps_max_proxy_concurrency: Measurement::absent(Absent::SearchExhausted),
-        conc_at_peak: Measurement::absent(Absent::SearchExhausted),
-        ..measured_perf()
-    };
-    let stream = CellStream {
-        added_ttft_p50_us: Measurement::absent_because(
-            Absent::BelowResolution,
-            "gateway leg read under the direct leg",
-        ),
-        cpu_fps: Measurement::absent(Absent::RigLimited),
-        ..measured_stream()
-    };
-    let cell = Cell {
-        served: Served::Bool(true),
-        perf: Some(perf),
-        stream: Some(stream),
-        ..Cell::default()
-    };
-    let v = as_json(&cell);
-    let absences = v["absences"].as_object().expect("absences object");
-
-    assert_eq!(absences["perf.rps_max_proxy"]["reason"], "search_exhausted");
-    assert_eq!(
-        absences["perf.rps_max_proxy"]["detail"], "still climbing at c=4096",
-        "the operator-facing evidence must survive to the wire"
-    );
-    assert_eq!(
-        absences["stream.added_ttft_p50_us"]["reason"],
-        "below_resolution"
-    );
-    assert_eq!(absences["stream.cpu_fps"]["reason"], "rig_limited");
-    assert!(
-        v["perf"]["rps_max_proxy"].is_null() && v["stream"]["cpu_fps"].is_null(),
-        "a suppressed metric is null on the wire, never the number it discarded"
-    );
-    assert!(
-        !absences.contains_key("perf.rps_sustained_20ms"),
-        "a measured field must not carry an absences entry"
-    );
-    assert!(
-        v["perf"]["rps_sustained_20ms"].is_number(),
-        "the measured neighbours stay numbers"
-    );
-}
-
 /// Contract 3: THE SERVED VOCABULARY IS CLOSED AND ITS DEFAULT IS CONSERVATIVE. `true`/`false` are measured
 /// verdicts; the status strings are the documented reader-facing tokens; and a cell nobody probed
 /// says "not_probed" - a default of `false` would claim a measured refusal by omission, and a
@@ -364,39 +305,6 @@ fn served_and_stream_served_publish_only_the_documented_vocabulary() {
         default_stream["stream_served"],
         serde_json::Value::Bool(false),
         "false is a claim about the gateway; a default may never make it"
-    );
-}
-
-/// Contract 4: The wire round-trip: measured stays measured, absent stays absent (reason downgraded to the
-/// bare-null NotMeasured, which is the documented loss - the reason travels in `absences`, not
-/// inside the number), and nothing becomes a zero.
-#[test]
-fn a_cell_round_trips_without_inventing_or_losing_values() {
-    let cell = Cell {
-        served: Served::Bool(true),
-        perf: Some(CellPerf {
-            rps_max_proxy: Measurement::absent(Absent::SearchExhausted),
-            ..measured_perf()
-        }),
-        ..Cell::default()
-    };
-    let json = serde_json::to_string(&cell).expect("serialise");
-    let back: Cell = serde_json::from_str(&json).expect("a cell we wrote must read back");
-    let perf = back.perf.expect("perf block survives");
-    assert_eq!(
-        perf.rps_sustained_20ms.copied(),
-        Some(28_000),
-        "a measured value must survive the round trip"
-    );
-    assert_eq!(
-        perf.rps_max_proxy.copied(),
-        None,
-        "a null must never read back as a number"
-    );
-    assert_eq!(
-        perf.rps_max_proxy.reason(),
-        Some(&Absent::NotMeasured),
-        "a bare null reads back as the weakest reason; the specific one lives in absences"
     );
 }
 
