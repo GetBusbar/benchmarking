@@ -66,6 +66,9 @@ pub type Filled = Vec<(&'static str, Measurement<f64>)>;
 /// Empty is honest and common: a group that took no series simply returns none.
 #[derive(Default)]
 pub struct Series {
+    /// The frontier read off `sweep` below. Structured rather than a flat field for the same reason the
+    /// sweep is: it is a sequence, and the group machinery's `Filled` carries scalars.
+    pub frontier: Vec<crate::record::FrontierReading>,
     /// One entry per concurrency the throughput search actually probed, in probe order.
     pub sweep: Vec<crate::record::SweepPoint>,
     /// One entry per concurrency the SUSTAINED-throughput search actually probed, in probe order.
@@ -202,6 +205,11 @@ pub fn process_cell_with(
         if !produced.series.sweep.is_empty() {
             series.sweep = produced.series.sweep;
         }
+        // Guarded the same way, and for the same reason: a later group returning no frontier must not
+        // erase the throughput group's.
+        if !produced.series.frontier.is_empty() {
+            series.frontier = produced.series.frontier;
+        }
         if !produced.series.sweep_sustained.is_empty() {
             series.sweep_sustained = produced.series.sweep_sustained;
         }
@@ -288,6 +296,77 @@ impl Metric for Throughput {
                     .unwrap_or(Absent::NotMeasured),
             ),
         };
+        // THE FRONTIER, READ OFF THE RUNGS THIS SWEEP ALREADY PROBED. No extra measurement: the whole
+        // point is that one sweep answers the throughput question at every bound, and the two scalars
+        // below were that same sweep collapsed by a chosen ceiling. See `frontier.rs`.
+        //
+        // A rung with no window reading contributes nothing - not a zero. `ok`/`fail` of 0/0 fails
+        // `served_cleanly`, so such a rung is disqualified from every bound rather than counted as a
+        // clean one, which is the same rule the sweep points below follow when they publish an absent
+        // `fail` rather than a fabricated 0.
+        let rungs: Vec<crate::frontier::Rung> = perf
+            .points
+            .iter()
+            .map(|pt| crate::frontier::Rung {
+                concurrency: pt.concurrency,
+                rps: pt.value,
+                p99_us: pt.reading.and_then(|r| r.p99_us),
+                ok: pt.reading.map(|r| r.ok).unwrap_or(0),
+                fail: pt.reading.map(|r| r.fail).unwrap_or(0),
+            })
+            .collect();
+        let frontier: Vec<crate::record::FrontierReading> = crate::frontier::P99_BOUNDS_US
+            .iter()
+            .map(|b| Some(*b))
+            .chain(std::iter::once(None))
+            .map(|bound| match crate::frontier::read_at(&rungs, bound) {
+                Some(r) => crate::record::FrontierReading {
+                    p99_bound_us: bound.map(|b| b as i64),
+                    rps: Measurement::Measured(r.rps as i64),
+                    concurrency: Measurement::Measured(i64::from(r.concurrency)),
+                    // The tail the winning rung ACTUALLY produced. Absent when the rung carried no
+                    // latency reading, which only the unbounded reading can select.
+                    p99_us: match r.p99_us {
+                        Some(p) => Measurement::Measured(p as i64),
+                        None => Measurement::absent_because(
+                            Absent::NotMeasured,
+                            "no window behind this rung reported a tail latency".to_string(),
+                        ),
+                    },
+                    first_disqualified_conc: match r.first_disqualified_conc {
+                        Some(c) => Measurement::Measured(i64::from(c)),
+                        // Not a hole: the sweep ran out of range while this bound still held, which is
+                        // exactly what `lower_bound` beside it reports.
+                        None => Measurement::absent_because(
+                            Absent::SearchExhausted,
+                            "every rung above this one also held this bound, so the sweep ran out of \
+                             range rather than finding the boundary"
+                                .to_string(),
+                        ),
+                    },
+                    lower_bound: r.is_lower_bound(),
+                },
+                // A bound nothing qualified for is still a published column, carrying WHY. Dropping the
+                // entry would make the frontier's length vary per cell and a reader could not tell a
+                // bound that yielded nothing from a bound we forgot to report.
+                None => {
+                    let absent = crate::frontier::absence_for(&rungs, bound);
+                    let carry = || match (absent.reason().cloned(), absent.detail()) {
+                        (Some(rr), Some(d)) => Measurement::absent_because(rr, d),
+                        (Some(rr), None) => Measurement::absent(rr),
+                        (None, _) => Measurement::absent(Absent::NotMeasured),
+                    };
+                    crate::record::FrontierReading {
+                        p99_bound_us: bound.map(|b| b as i64),
+                        rps: carry(),
+                        concurrency: carry(),
+                        p99_us: carry(),
+                        first_disqualified_conc: carry(),
+                        lower_bound: false,
+                    }
+                }
+            })
+            .collect();
         // THE SWEEP TRAVELS WITH THE PEAK. Each probed rung becomes a published point, so a reader
         // can see the shape the search walked and re-derive the maximum rather than trusting it.
         //
@@ -342,6 +421,7 @@ impl Metric for Throughput {
                 ("conc_at_sustained", s_conc),
             ],
             series: Series {
+                frontier,
                 sweep,
                 sweep_sustained,
                 ..Series::default()
@@ -1762,6 +1842,7 @@ mod tests {
                 Measured {
                     fields: vec![],
                     series: Series {
+                        frontier: Vec::new(),
                         sweep: vec![pt()],
                         sweep_sustained: vec![pt()],
                         rss: rss.clone(),
