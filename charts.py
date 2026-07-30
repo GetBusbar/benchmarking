@@ -2972,7 +2972,10 @@ def _assert_no_silent_drop() -> None:
     served_on_disk = {}
     for p in sorted((RESULTS / "snapshots").glob("*.json")):
         try:
-            d = json.loads(p.read_text())
+            # encoding= is explicit everywhere in this file and a test enforces it: the CI runner and
+            # this Mac disagree about the default, and a snapshot read under the wrong one fails on a
+            # gateway's non-ASCII description rather than on anything to do with the measurement.
+            d = json.loads(p.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue  # a snapshot mid-write during a live run is not a staleness signal
         key = d.get("gateway")
