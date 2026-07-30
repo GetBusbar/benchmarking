@@ -1291,6 +1291,61 @@ pub(crate) fn sustained_median(first: f64, repeats: &[(f64, bool)]) -> f64 {
     crate::search::nearest_rank_median(&vals).unwrap_or(first)
 }
 
+/// How many content frames the MOCK sends per stream, read from the variable the mock reads.
+///
+/// NOT `STREAM_FRAME_BUDGET`, and the difference is the point. That constant is how many frames the RIG
+/// ASKS FOR - our own choice, legitimately a constant. This is how many the mock actually SENDS, which
+/// is the mock's configuration and must be read from it. They coincide at 64 today, which is exactly why
+/// nothing noticed the engine mirroring the mock's default instead of reading it: set
+/// MOCK_STREAM_CHUNKS=128 and the mock sends 128 while the engine still believes 64, silently.
+///
+/// It matters now because the ceiling below is DERIVED from it. A frame count mirrored rather than read
+/// would make that ceiling wrong by exactly the ratio of the two, and a derived bound built on a magic
+/// number is still a magic number.
+pub fn mock_stream_chunks() -> u32 {
+    std::env::var("MOCK_STREAM_CHUNKS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        // Same reason `stream_pacing_interval_ms` rejects 0: the mock floors this at 1 (`chunks.max(1)`),
+        // so a 0 here would describe a stream neither side produces.
+        .filter(|v| *v > 0)
+        .unwrap_or(64)
+}
+
+/// THE MOST FRAMES A SECOND THE MOCK CAN PHYSICALLY EMIT at this concurrency. Arithmetic, not a
+/// measurement - we own the mock, so its ceiling is known rather than probed.
+///
+/// This replaces a MEASURED direct-to-mock reference, and the bench box's own core partitioning is why.
+/// The two legs do not get the same machine:
+///
+///   through the gateway   the loadgen reads c streams from the gateway, and the GATEWAY drives c
+///                         streams to the mock on its own cores - three core sets engaged.
+///   direct to the mock    the loadgen BOTH drives and reads c streams on its cores; the gateway's sit
+///                         idle - two core sets.
+///
+/// Removing the hop does not make the path leaner, it moves the driving half onto the already-busiest
+/// component. So the direct leg is systematically SLOWER than the path it was meant to bound, and that
+/// is structural rather than a fault - the partitioning is exactly right for comparing gateways.
+///
+/// Measured on the 2026-07-29 box at c=1024: the direct leg took 2.53-3.37s per window where this
+/// arithmetic says 1.26s, delivering every frame with zero stalls - 38-50% of what the mock can emit.
+/// The gateway leg reached 83%. NEITHER exceeded the real ceiling; the gateway only exceeded the weak
+/// measurement of it, by 1.67x, and a chosen 1.5x factor discarded it for that. Seven gateway/metric
+/// pairs on that board published nothing for the same reason.
+///
+/// The mock cannot emit frames faster than it sleeps, and both terms are declared: `mock_stream_chunks`
+/// frames per stream, `stream_pacing_interval_ms` between them. It sleeps before every delta except the
+/// first, so a stream lasts `(chunks - 1) * interval` and carries `chunks` frames. Nothing is chosen.
+pub fn mock_frame_ceiling_fps(concurrency: u32) -> f64 {
+    let chunks = f64::from(mock_stream_chunks());
+    let interval_s = stream_pacing_interval_ms() as f64 / 1000.0;
+    let per_stream_s = (chunks - 1.0).max(1.0) * interval_s;
+    if per_stream_s <= 0.0 || concurrency == 0 {
+        return 0.0;
+    }
+    f64::from(concurrency) * chunks / per_stream_s
+}
+
 /// The mock's own delta interval, READ FROM THE VARIABLE THE MOCK READS.
 ///
 /// Named here rather than inlined at the one comparison because this and `STREAM_STALL_MULTIPLIER`
@@ -1429,6 +1484,54 @@ impl StreamWindow {
             return 1.0;
         }
         self.errored as f64 / self.streams as f64
+    }
+
+    /// Why THIS ENGINE is at fault for the numbers in this window, if it is. `None` when the counts are
+    /// arithmetically possible - which is not the same as the gateway having done well.
+    ///
+    /// A NUMBER THAT CANNOT HAPPEN IS OUR BUG, NEVER THE GATEWAY'S. That is the whole reason this
+    /// exists, and it is the half of the old rig-ceiling comparison that was worth keeping. The other
+    /// half - deciding that a legitimately fast gateway was "rig-bound" and withholding its number -
+    /// is gone; see `rigbound.rs`. What survives is the case where the observation is not a
+    /// measurement of anything: there is no gateway behaviour that produces it, so attributing it to
+    /// the gateway (or to our rig's capacity) would publish a defect of ours as a finding about theirs.
+    /// `Absent::HarnessError` is the only honest label, and `measurement.rs` already states that it and
+    /// `RigLimited` must never be swapped.
+    ///
+    /// EXACT, WITH NO FACTOR AND NO TOLERANCE. Every clause below is arithmetic over counts this rig
+    /// took itself, so there is nothing to tune and nothing to get wrong by a few percent:
+    ///
+    /// - Content frames above the expected content budget. The mock emits a DECLARED number of content
+    ///   deltas per stream and `expected_content_frames` accumulates exactly that budget per surviving
+    ///   lane, so counting more model output than the mock could have produced means we counted wrong.
+    ///   Confirmed against the field data before relying on it: every instrumented window on the
+    ///   2026-07-29 box delivered content exactly at budget (`content=64512/64512`, 24 of 24), never
+    ///   above, and 1169 of the 1314 passing rungs on the 2026-07-28 board sat at exactly 1.0.
+    /// - A non-finite or negative rate. `fps` divides counts by a wall clock; either is a broken clock
+    ///   or a broken counter, and an infinity would win every peak search it appeared in.
+    ///
+    /// DELIBERATELY NOT CHECKED: `frames` above `expected_frames`. That one is legal and happens - a
+    /// gateway that inserts pings or re-frames a translated stream spends more SSE events than the
+    /// mock's own layout would, which is why the delivery gate counts content frames rather than
+    /// events (Ledger RIG-11). Bounding the event count would fail honest gateways for their framing
+    /// style, so the exact bound is available on content and only on content.
+    pub fn engine_fault(&self) -> Option<String> {
+        if self.content_frames > self.expected_content_frames {
+            return Some(format!(
+                "counted {} content frames where the mock's own budget for {} stream(s) is {} - a \
+                 gateway cannot invent model output, so this rig counted wrong",
+                self.content_frames, self.streams, self.expected_content_frames
+            ));
+        }
+        let fps = self.fps();
+        if !fps.is_finite() || fps < 0.0 {
+            return Some(format!(
+                "{} frames over {:.6}s yields {fps} frames/sec, which is not a rate - the window's \
+                 clock or its counter is wrong",
+                self.frames, self.elapsed_s
+            ));
+        }
+        None
     }
 }
 
@@ -1733,6 +1836,15 @@ pub fn stream_window(
     // took 0.0s on every streamable cell across a four-hour run and left not one line to explain it.
     if let Some(why) = window_refusal(panicked, w.streams, concurrency) {
         eprintln!("{why}");
+        return None;
+    }
+    // AND A WINDOW WHOSE OWN COUNTS CANNOT HAPPEN IS DISCARDED, for the same reason a panicked lane is:
+    // it is a fault of ours, and publishing it would attribute our defect to the gateway. Loud and
+    // named, because a silently dropped impossible window is how a counting bug survives a four-hour
+    // run. See `StreamWindow::engine_fault` - the check is exact arithmetic over counts this rig took
+    // itself, so it cannot misfire on a gateway that is merely fast or merely unusual.
+    if let Some(why) = w.engine_fault() {
+        eprintln!("stream window: c={concurrency} is an ENGINE FAULT, not a measurement - {why}");
         return None;
     }
     Some(w)
@@ -5381,5 +5493,165 @@ while True:
                 pt.concurrency
             );
         }
+    }
+
+    // ── the derived mock ceiling, and the engine-fault check that replaced the old suppression ──────
+
+    // ARITHMETIC, NOT A MEASUREMENT, and this is the arithmetic. The mock sleeps `interval` before every
+    // delta except the first, so `chunks` frames take `(chunks - 1) * interval` and c concurrent streams
+    // carry `c * chunks` of them in that time. Both terms come from the variables the MOCK reads, so
+    // this test states the identity rather than a remembered number.
+    #[test]
+    fn the_mock_ceiling_is_the_mocks_own_declared_pacing_and_nothing_else() {
+        let chunks = f64::from(mock_stream_chunks());
+        let interval_s = stream_pacing_interval_ms() as f64 / 1000.0;
+        for c in [1u32, 8, 256, 1024, 16_384] {
+            let want = f64::from(c) * chunks / ((chunks - 1.0) * interval_s);
+            let got = mock_frame_ceiling_fps(c);
+            assert!(
+                (got - want).abs() < 1e-6,
+                "c={c}: {got} is not {chunks} frames per stream over {interval_s}s gaps"
+            );
+        }
+        // Linear in concurrency, because the mock's pacing is per stream and the streams are concurrent.
+        assert!(
+            (mock_frame_ceiling_fps(2048) - 2.0 * mock_frame_ceiling_fps(1024)).abs() < 1e-6,
+            "twice the streams is twice the frames at the same pace"
+        );
+    }
+
+    // THE NUMBER THIS BOX ACTUALLY HAS, so a defaults change cannot quietly move the ceiling without a
+    // test noticing. 64 frames 20ms apart is 1.26s per stream; 1024 streams carry 65536 frames in that
+    // time, which is 52013 frames/sec - the figure the 2026-07-29 investigation turned on. The measured
+    // reference that day read 25893 (50% of physics) and the gateway leg 43297 (83%): the gateway beat
+    // the disadvantaged CONTROL by 1.67x while sitting comfortably under the real bound, and a chosen
+    // 1.5x factor discarded it on that basis.
+    #[test]
+    fn the_ceiling_reproduces_the_bench_boxs_own_measured_night() {
+        // Only meaningful on the box's defaults; if either knob is set, the identity above is the test.
+        if mock_stream_chunks() != 64 || stream_pacing_interval_ms() != 20 {
+            return;
+        }
+        let ceiling = mock_frame_ceiling_fps(1024);
+        assert!(
+            (ceiling - 52_012.7).abs() < 1.0,
+            "1024 x 64 frames over 1.26s is 52013 frames/sec, got {ceiling}"
+        );
+        for (leg, observed, want_share) in [
+            ("direct control", 25_893.0),
+            ("through the gateway", 43_297.0),
+        ]
+        .iter()
+        .zip([0.4978, 0.8325])
+        .map(|((l, o), w)| (*l, *o, w))
+        {
+            let share = observed / ceiling;
+            assert!(
+                (share - want_share).abs() < 0.001,
+                "{leg} read {observed}, which is {share} of physics"
+            );
+            assert!(
+                share < 1.0,
+                "{leg} did not exceed the mock's own pacing, so nothing that night was impossible"
+            );
+        }
+    }
+
+    // A ceiling of zero rather than an infinity when there is nothing to bound. An infinity would make
+    // every headroom fraction 0.0 and read as "miles below the rig" on every cell.
+    #[test]
+    fn no_streams_means_no_frame_rate_to_bound_against() {
+        assert_eq!(mock_frame_ceiling_fps(0), 0.0);
+    }
+
+    // ── engine_fault: exact, and only where an exact bound exists ───────────────────────────────────
+
+    // A window at its budget is the SUCCESS case and must never be called a fault. This is the shape
+    // every clean rung has (`content=64512/64512` in the field logs), and the old rig comparison
+    // suppressed exactly these.
+    #[test]
+    fn a_window_delivering_exactly_its_content_budget_is_not_a_fault() {
+        let w = StreamWindow {
+            concurrency: 1024,
+            streams: 1024,
+            errored: 0,
+            frames: 65_536,
+            expected_frames: 65_536,
+            content_frames: 64_512,
+            expected_content_frames: 64_512,
+            stalls: 0,
+            elapsed_s: 1.26,
+        };
+        assert_eq!(w.engine_fault(), None, "{w:?}");
+    }
+
+    // MORE MODEL OUTPUT THAN THE MOCK COULD HAVE SENT IS OUR BUG. The gateway cannot invent tokens, so
+    // there is no gateway behaviour that produces this and no rig capacity that explains it - the only
+    // honest label is a fault of ours. Exact: one frame over budget is over budget, with no tolerance
+    // to tune.
+    #[test]
+    fn counting_more_content_than_the_mock_can_send_is_this_engines_fault() {
+        let w = StreamWindow {
+            concurrency: 1024,
+            streams: 1024,
+            errored: 0,
+            frames: 65_536,
+            expected_frames: 65_536,
+            content_frames: 64_513,
+            expected_content_frames: 64_512,
+            stalls: 0,
+            elapsed_s: 1.26,
+        };
+        let why = w.engine_fault().expect("one frame over budget is a fault");
+        assert!(why.contains("64513") && why.contains("64512"), "{why}");
+        assert!(
+            why.contains("counted wrong"),
+            "it must read as OUR defect, not as a finding about the gateway: {why}"
+        );
+    }
+
+    // EXTRA SSE EVENTS ARE LEGAL AND MUST NOT BE A FAULT. A gateway that inserts pings or re-frames a
+    // translated stream spends more events than the mock's own layout would - Ledger RIG-11, and the
+    // whole reason the delivery gate counts content frames. Bounding the event count would fail honest
+    // gateways for their framing style, so this asserts the bound is NOT there.
+    #[test]
+    fn a_gateway_that_adds_its_own_framing_is_not_a_fault() {
+        let w = StreamWindow {
+            concurrency: 256,
+            streams: 256,
+            errored: 0,
+            // Well over the mock's own event layout: pings between every delta.
+            frames: 40_000,
+            expected_frames: 16_384,
+            // Content exactly at budget - not one token more.
+            content_frames: 16_128,
+            expected_content_frames: 16_128,
+            stalls: 0,
+            elapsed_s: 1.26,
+        };
+        assert_eq!(
+            w.engine_fault(),
+            None,
+            "extra framing is the gateway's style, not our miscount: {w:?}"
+        );
+    }
+
+    // A rate that is not a rate. `fps` divides counts by a wall clock, so a non-finite result means the
+    // clock or the counter is broken - and an infinity would win every peak search it appeared in.
+    #[test]
+    fn a_rate_that_is_not_finite_is_this_engines_fault() {
+        let w = StreamWindow {
+            concurrency: 8,
+            streams: 8,
+            errored: 0,
+            frames: 512,
+            expected_frames: 512,
+            content_frames: 504,
+            expected_content_frames: 504,
+            stalls: 0,
+            elapsed_s: f64::NAN,
+        };
+        let why = w.engine_fault().expect("a NaN clock is a fault");
+        assert!(why.contains("is wrong"), "{why}");
     }
 }
