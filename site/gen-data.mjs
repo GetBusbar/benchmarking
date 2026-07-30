@@ -25,7 +25,7 @@ import { readdirSync, readFileSync, statSync, existsSync, mkdirSync, copyFileSyn
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
-import { sealMetric, makeSource, SWEEP, UNGATED_LAT_FIELDS, UNGATED_STREAM_FIELDS, isMetricField, zeroNoteFor } from "./seal.mjs";
+import { sealMetric, sealFrontier, makeSource, SWEEP, UNGATED_LAT_FIELDS, UNGATED_STREAM_FIELDS, isMetricField, zeroNoteFor } from "./seal.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = process.argv[2] || join(HERE, "..");
@@ -325,10 +325,7 @@ const gateways = gatewayKeys.map((key) => {
       // state and no fraction - which now costs the headroom and not the number.
       streams_sustained_mock_ceiling: g.stream.stream_mock_ceiling ?? null,
       streams_sustained_headroom: g.stream.stream_headroom ?? null,
-      cpu_fps: g.streamcpu ? g.streamcpu.streamcpu_frames_per_sec : null,
-      cpu_fps_concurrency: g.streamcpu ? g.streamcpu.streamcpu_concurrency : null,
-      cpu_fps_mock_ceiling: g.streamcpu ? (g.streamcpu.streamcpu_mock_ceiling ?? null) : null,
-      cpu_fps_headroom: g.streamcpu ? (g.streamcpu.streamcpu_headroom ?? null) : null,
+
     }, dia, makeSource("stream-fallback", SWEEP.STREAM_SUITE, g.stream.build ?? null, g.stream.measured_at ?? null),
     null,
     // cpu_fps CAME FROM THE OTHER SUITE, SO IT CARRIES THE OTHER SUITE'S STAMP. The record's own stamp
@@ -346,14 +343,13 @@ const gateways = gatewayKeys.map((key) => {
     g.best_cell = sealPerfCell({
       added_latency_p50_us: g.perf.added_latency_p50_us,
       added_latency_p99_us: g.perf.added_latency_p99_us,
-      rps_sustained_20ms: g.perf.rps_sustained_20ms,
-      rps_sustained_20ms_concurrency: g.perf.rps_sustained_20ms_concurrency ?? null,
-      rps_sustained_20ms_rig_ceiling: g.perf.rps_sustained_20ms_rig_ceiling ?? null,
-      rps_sustained_20ms_headroom: g.perf.rps_sustained_20ms_headroom ?? null,
-      rps_max_proxy: g.perf.rps_max_proxy,
-      rps_max_proxy_concurrency: g.perf.rps_max_proxy_concurrency ?? null,
-      rps_max_proxy_rig_ceiling: g.perf.rps_max_proxy_rig_ceiling ?? null,
-      rps_max_proxy_headroom: g.perf.rps_max_proxy_headroom ?? null,
+      // NO FRONTIER FROM THE LEGACY PERF SUITE. It measured a single throughput scalar under one
+      // chosen latency ceiling and recorded no per-rung tail latencies, so there is nothing to read a
+      // frontier off. Publishing its old number in one bound's column would put a differently-defined
+      // measurement in a column that names a definition it does not meet - which is the exact class of
+      // mislabelling this whole change removes. The cell keeps its latency figures, which ARE comparable,
+      // and shows no throughput until a matrix run replaces it.
+      frontier: [],
       sweep_max_proxy: g.perf.sweep_max_proxy ?? null,
       sweep_sustained_20ms: g.perf.sweep_sustained_20ms ?? null,
     }, { ingress: dia, egress: dia, dialect: dia },
@@ -365,10 +361,9 @@ const gateways = gatewayKeys.map((key) => {
     g.translation_cell = sealPerfCell({
       added_latency_p50_us: g.xlate.xlate_added_latency_p50_us,
       added_latency_p99_us: g.xlate.xlate_added_latency_p99_us,
-      rps_sustained_20ms: g.xlate.xlate_rps_sustained_20ms,
-      rps_sustained_20ms_concurrency: g.xlate.xlate_rps_sustained_20ms_concurrency ?? null,
-      rps_sustained_20ms_rig_ceiling: g.xlate.xlate_rps_sustained_20ms_rig_ceiling ?? null,
-      rps_sustained_20ms_headroom: g.xlate.xlate_rps_sustained_20ms_headroom ?? null,
+      // Same as the perf fallback above: the legacy xlate suite has no per-rung tails to read a
+      // frontier from, so it publishes none rather than mislabelling its scalar as one bound's reading.
+      frontier: [],
     }, { ingress: "anthropic", egress: "openai" },
       makeSource("xlate-fallback", SWEEP.XLATE_SUITE, g.xlate.build ?? null, g.xlate.measured_at ?? null));
   }
@@ -437,31 +432,6 @@ function absentEntryFor(absences, prefix, k) {
   if (!absences || typeof absences !== "object") return null;
   return absences[`${prefix}.${k}`] || absences[k] || null;
 }
-// A throughput metric: its sealed envelope folds in the concurrency + charted sweep array + the NEW
-// conc_at_* rung so the headline, its operating concurrency, and its curve all travel as one datum -
-// plus the rig ceiling it was measured against and the fraction of that ceiling it reached.
-//
-// The ceiling and the fraction replace `flag: perf[`${key}_mock_bound`]`, which was the engine's VERDICT
-// that our own rig had set this limit and which caused the value to be published as null. The engine no
-// longer reaches that verdict; it publishes the two numbers the verdict was derived from, and they
-// travel with the measurement instead of replacing it. See seal.mjs.
-function sealThroughput(perf, key, concAtKey, absences) {
-  return sealMetric(perf[key], {
-    headroom: perf[`${key}_headroom`] ?? null,
-    ceiling: perf[`${key}_rig_ceiling`] ?? null,
-    // From seal.mjs's zeroNoteFor, the ONE place that mapping lives, so the note the independent oracle
-    // expects and the note the seal writes cannot be different notes. It used to arrive as the default,
-    // which is how every zero in the bundle - memory growth rates included - came to claim that no
-    // tested load held a throughput gate.
-    zeroNote: zeroNoteFor(key),
-    absent: absentEntryFor(absences, "perf", key),
-    extras: {
-      concurrency: perf[`${key}_concurrency`] ?? null,
-      conc_at: perf[concAtKey] ?? null,          // NEW (snapshot #65): the rung peak/sustained held at
-      sweep: perf[`sweep_${key === "rps_sustained_20ms" ? "sustained_20ms" : "max_proxy"}`] ?? null,
-    },
-  });
-}
 // sealPerfCellPerf: a raw perf object -> {<sealed metrics>} (no path/source; the caller stamps those).
 // Used BOTH for the canonical best_cell/translation_cell AND to seal every matrix cell in-place, so the
 // matrix popup reads envelopes, never raw scalars (invariant C1: no ungated field survives in the bundle).
@@ -471,8 +441,17 @@ function sealPerfCellPerf(perf, absences = null) {
   const rec = {};
   for (const k of UNGATED_LAT)
     rec[k] = sealMetric(perf[k], { absent: absentEntryFor(absences, "perf", k) });
-  rec.rps_sustained_20ms = sealThroughput(perf, "rps_sustained_20ms", "conc_at_sustained", absences);
-  rec.rps_max_proxy = sealThroughput(perf, "rps_max_proxy", "conc_at_peak", absences);
+  // THE THROUGHPUT ANSWER: one reading per declared tail-latency bound, off one sweep.
+  //
+  // This replaces `sealThroughput` and the two scalars it produced (`rps_sustained_20ms` and
+  // `rps_max_proxy`), which were the same sweep collapsed twice by a chosen ceiling - and which could
+  // invert against each other, because two different algorithms summarised one set of windows. See
+  // seal.mjs and the engine's `frontier.rs`.
+  rec.frontier = sealFrontier(perf.frontier, absences);
+  // The rungs every reading was taken from, so a reader can re-derive the whole frontier rather than
+  // taking it on trust. It rides as a plain field: it is evidence, not a metric.
+  if (Array.isArray(perf.sweep_max_proxy) && perf.sweep_max_proxy.length)
+    rec.sweep = perf.sweep_max_proxy;
   if (perf.egress_reverified != null) rec.egress_reverified = perf.egress_reverified;
   // The verdict without its evidence is an assertion. egress_reverified is the fairness guard's boolean
   // (did this gateway actually TRANSLATE to the egress dialect, or just proxy the ingress request
@@ -524,10 +503,11 @@ function sealStreamRecord(s, absences = null, cpuSource = null) {
     headroom: streamHeadroom, ceiling: streamCeiling,
     zeroNote: zeroNoteFor("streams_sustained"),
     absent: abs("streams_sustained") });
-  rec.cpu_fps = sealMetric(s.cpu_fps, {
-    headroom: s.cpu_fps_headroom ?? null, ceiling: s.cpu_fps_mock_ceiling ?? null,
-    zeroNote: zeroNoteFor("cpu_fps"),
-    absent: abs("cpu_fps"), extras: { concurrency: s.cpu_fps_concurrency ?? null, source: cpuSource } });
+  // NO cpu_fps. Retired: of the 16 cells that published both it and `streams_sustained_fps` (the rate
+  // at the PROVEN delivery boundary), 4 had it INVERTED below that boundary, 5 were redundant within 1%,
+  // and 7 were measured at a concurrency where the delivery gate did not hold - a frame rate recorded
+  // while dropping frames. See the engine's `run.rs` for the per-gateway numbers.
+  void cpuSource;
   return rec;
 }
 function sealStreaming(s, dialect, source, absences = null, cpuSource = null) {

@@ -63,7 +63,30 @@ export const SWEEP = {
 // are metrics that must be envelopes), never again a gate (which values are allowed to show). It is the
 // set of throughput-shaped metrics, and it is the set that carries `headroom` when a rig ceiling was
 // available for the comparison.
-export const THROUGHPUT_FIELDS = ["rps_sustained_20ms", "rps_max_proxy", "streams_sustained", "cpu_fps"];
+export const THROUGHPUT_FIELDS = ["streams_sustained", "streams_sustained_fps"];
+
+// THE FRONTIER'S DECLARED TAIL-LATENCY BOUNDS, in milliseconds, mirroring the engine's
+// `frontier::P99_BOUNDS_US`. Ascending, with the unbounded reading rendered separately.
+//
+// A MIRROR IS A SECOND SOURCE OF TRUTH, so this one is CHECKED rather than trusted: the bundle carries
+// each reading's own `p99_bound_us`, `check-consistency` compares this list against what the raw
+// artifacts actually contain, and a divergence is a violation rather than a silently short table. The
+// alternative - deriving the columns from whatever the first gateway happens to publish - would let a
+// gateway missing a bound quietly shrink the board for everyone.
+export const FRONTIER_BOUNDS_MS = [1, 5, 10, 50, 100];
+
+// WHICH BOUND THE BOARD SHOWS BEFORE THE READER PICKS ONE.
+//
+// It has to default to something to render a table, and this is the honest way to choose: 10 ms sits at
+// the middle of where the field population actually separates (of 1632 recorded rungs, 16% hold 1 ms,
+// 47% hold 10 ms, 88% hold 100 ms, and 96% hold 1 s - so a looser default would put nearly every gateway
+// on the same side of it and discriminate between almost nothing).
+//
+// IT IS A VIEW, NOT A VERDICT, and that is the whole difference from the constant it replaces.
+// `SUSTAINED_P99_CEILING_US` decided which measurements existed; this decides which column opens first.
+// Every bound is published on every cell, the UI names the one it is showing, and switching it re-ranks
+// the board in front of the reader.
+export const DEFAULT_BOUND_MS = 10;
 
 // What `sealMetric` will publish for a raw value, as a pure function of the same inputs.
 //
@@ -203,6 +226,48 @@ export function sealMetric(value, opts = {}) {
     return withExtras(env);
   }
   return withExtras({ value: num, certified: true, suppressed: false });
+}
+
+// sealFrontier: the engine's frontier -> one sealed reading per bound.
+//
+// Each reading's RATE is a sealed envelope for the same reason every other published number is: absent
+// means absent, with the engine's own reason, and no surface can reach a raw scalar. The rest of the
+// reading is EVIDENCE ABOUT that rate - the concurrency it was observed at, the tail it actually came
+// with, the concurrency above it that stopped qualifying - and rides as plain fields, exactly as
+// `source` and `reverify_note` do.
+//
+// `bound_ms` is derived from the engine's `p99_bound_us` rather than from `FRONTIER_BOUNDS_MS`, so a
+// reading always reports the bound IT was taken under even if the mirror above ever drifts.
+// `lower_bound` travels because a rate the sweep never found a ceiling for is a floor, and a surface
+// that renders it as a ceiling is making a claim the data does not support.
+export function sealFrontier(readings, absences = null) {
+  if (!Array.isArray(readings)) return [];
+  return readings.map((r) => {
+    const us = Number.isFinite(r.p99_bound_us) ? r.p99_bound_us : null;
+    const at = us == null ? "unbounded" : `${Math.round(us / 1000)}ms`;
+    const abs = absences ? absences[`frontier.${at}.rps`] || null : null;
+    return {
+      bound_ms: us == null ? null : Math.round(us / 1000),
+      rps: sealMetric(r.rps, { absent: abs }),
+      concurrency: numOrNull(r.concurrency),
+      p99_us: numOrNull(r.p99_us),
+      first_disqualified_conc: numOrNull(r.first_disqualified_conc),
+      lower_bound: r.lower_bound === true,
+    };
+  });
+}
+// The engine writes an absent number as `null`; anything else is a number or is not publishable.
+function numOrNull(v) {
+  return Number.isFinite(v) ? v : null;
+}
+
+// THE READING THE BOARD IS CURRENTLY SHOWING, by bound. `null` selects the unbounded reading.
+//
+// One accessor, so every surface - table, drawer, compare, charts - reads the same reading for the same
+// bound and cannot disagree about which column it is displaying.
+export function frontierAt(frontier, boundMs) {
+  if (!Array.isArray(frontier)) return null;
+  return frontier.find((r) => (boundMs == null ? r.bound_ms == null : r.bound_ms === boundMs)) || null;
 }
 
 // isEnvelope: a sealed metric is an object carrying a `certified` boolean (never a bare scalar).

@@ -169,46 +169,76 @@ function peakRanOutOfLadder(sweep, winnerConc) {
   if (concs.length < 2) return false;
   return Number(winnerConc) === Math.max(...concs);
 }
+// C6: THE FRONTIER MUST NOT INVERT, AND A READING MUST NOT CLAIM MORE THAN IT PROVED.
+//
+// C6 used to compare `rps_sustained_20ms` against `rps_max_proxy` and fail the build when the
+// "sustained" figure exceeded the "maximum" - which happened, on aisix openai-responses>anthropic
+// (16,610 vs 16,232) and bifrost openai-responses>openai-responses (5,174 vs 5,113), because the two
+// numbers came from two different algorithms over ONE set of windows and the bisection reached rungs
+// the plateau search had already quit before.
+//
+// Both scalars are gone. The frontier makes that inversion UNREPRESENTABLE: a reading is a maximum over
+// the rungs qualifying at its bound, and relaxing a bound only adds rungs, so a looser reading cannot be
+// smaller. This checks it anyway - an invariant nothing verifies is an invariant nobody notices
+// breaking, and the whole point of an independent oracle is that it does not take the producer's word
+// for its own guarantees.
 export function c6Inversions(gwKey, rawMatrix) {
   const violations = [];
   const warnings = [];
   let cellsChecked = 0;
-  // Either artifact shape (upstreamsOf): a v1 artifact's cells are just as physically implausible when
-  // they invert, and skipping them made C6 silently inert on exactly the artifacts nobody re-measures.
   for (const [egress, up] of Object.entries(upstreamsOf(rawMatrix))) {
     for (const [ingress, cell] of Object.entries((up && up.cells) || {})) {
       const perf = cell && cell.served === true && cell.perf;
-      if (!perf) continue;
-      const sus = perf.rps_sustained_20ms, max = perf.rps_max_proxy;
-      if (sus == null || max == null || max === 0) continue;
+      if (!perf || !Array.isArray(perf.frontier) || !perf.frontier.length) continue;
       cellsChecked += 1;
       const at = `${gwKey}.${ingress}->${egress}`;
-      // (1) LADDER EXHAUSTION - an error on its own, whether or not this cell also inverted. A peak that
-      // is the top rung probed is not a peak, it is where we stopped climbing.
-      if (peakRanOutOfLadder(perf.sweep_max_proxy, perf.rps_max_proxy_concurrency)) {
-        violations.push(`${at}: the max_proxy sweep WON at the highest concurrency it probed ` +
-          `(${perf.rps_max_proxy_concurrency}), so it never observed a fall-off and never established a ` +
-          `ceiling - the published maximum is where the ladder ended, not where the gateway did`);
+
+      // (1) THE BOUNDS ASCEND, with the unbounded reading last. The published sequence has to read as
+      // the tradeoff curve it is, or a reader checking monotonicity by eye is checking the wrong order.
+      const bounds = perf.frontier.map((r) => (r.p99_bound_us == null ? Infinity : r.p99_bound_us));
+      for (let i = 1; i < bounds.length; i += 1) {
+        if (!(bounds[i] > bounds[i - 1])) {
+          violations.push(`${at}: the frontier's bounds are not ascending (${bounds.join(", ")}) - the ` +
+            `sequence must read as a curve, with the unbounded reading last`);
+          break;
+        }
       }
-      if (!(sus > max)) continue;
-      const pct = (sus / max - 1) * 100;
-      const band = sweepSpreadPct(perf.sweep_max_proxy, max);
-      const inBand = band != null && pct <= band && pct <= C6_GROSS_PCT;
-      const detail = `sustained@20ms ${sus} > max_proxy ${max} (a ${pct.toFixed(2)}% inversion`;
-      if (inBand) {
-        // Inside the cell's own measured scatter: the two sweeps sampled one ceiling twice and the
-        // difference is smaller than the difference between the peak sweep's own rungs. Visible, with
-        // the band that excused it stated, so the judgement can be checked rather than trusted.
-        warnings.push(`${at}: ${detail}, within this cell's own max-proxy sweep scatter of ` +
-          `${band.toFixed(2)}% - the two phases sampled the same ceiling and the data cannot resolve which is higher)`);
-      } else {
-        const why = band == null
-          ? "the max-proxy sweep has too few rungs to have measured its own variability, so nothing establishes this gap as noise"
-          : pct > C6_GROSS_PCT
-            ? `above the ${C6_GROSS_PCT}% ceiling on excusable noise (this cell's sweep scatter is ${band.toFixed(2)}%)`
-            : `outside this cell's own max-proxy sweep scatter of ${band.toFixed(2)}%`;
-        violations.push(`${at}: ${detail}, ${why}) - the number the board publishes as a MAXIMUM was ` +
-          `exceeded by another measurement on the same box against the same mock, which makes it not a maximum`);
+
+      // (2) MONOTONICITY. Relaxing the bound can only widen the set a maximum is taken over.
+      let prev = null;
+      let prevAt = null;
+      for (const r of perf.frontier) {
+        const v = typeof r.rps === "number" ? r.rps : null;
+        if (v == null) continue;
+        const label = r.p99_bound_us == null ? "unbounded" : `${r.p99_bound_us / 1000}ms`;
+        if (prev != null && v < prev) {
+          violations.push(`${at}: the frontier inverts - ${label} reads ${v} but the tighter ${prevAt} ` +
+            `reads ${prev}. Relaxing a tail bound can only ADD rungs to the set the maximum is taken ` +
+            `over, so a looser reading cannot be smaller: this cannot happen unless the readings came ` +
+            `from different rungs than they claim`);
+        }
+        prev = v;
+        prevAt = label;
+      }
+
+      // (3) A READING MUST NOT CLAIM A CEILING IT DID NOT ESTABLISH. `lower_bound` is true exactly when
+      // the winning rung is the highest one probed - we stopped because the range ended, not because the
+      // gateway did. The retired check tested this as `peakRanOutOfLadder` against the max_proxy sweep
+      // and treated it as a violation; it is not a violation, it is a fact that must be DISCLOSED. So
+      // what is checked is that the disclosure agrees with the rungs.
+      const topProbed = Math.max(
+        0,
+        ...(Array.isArray(perf.sweep_max_proxy) ? perf.sweep_max_proxy : []).map((p) => Number(p.conc) || 0),
+      );
+      for (const r of perf.frontier) {
+        if (typeof r.rps !== "number" || typeof r.concurrency !== "number" || !topProbed) continue;
+        const label = r.p99_bound_us == null ? "unbounded" : `${r.p99_bound_us / 1000}ms`;
+        const shouldBeLower = r.concurrency >= topProbed;
+        if (shouldBeLower !== (r.lower_bound === true)) {
+          violations.push(`${at}: the ${label} reading won at c=${r.concurrency} of ${topProbed} probed ` +
+            `but reports lower_bound=${r.lower_bound === true} - a rate is a floor rather than a ceiling ` +
+            `exactly when nothing above it was looked at, and the artifact must say which it is`);
+        }
       }
     }
   }
