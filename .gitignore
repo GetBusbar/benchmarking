@@ -50,3 +50,8 @@ gateways/*/bfdata/*
 !gateways/*/bfdata/*.tmpl
 gateways/*/config/*.toml
 gateways/*/launch.log
+
+# Layout-review screenshots from site/screenshot-matrix.mjs: ~138 full-page PNGs of every page x
+# every control combination x three widths. Regenerable from the working tree in one command, and a
+# committed set would be a stale picture of a CSS file that moved - the CSS is the durable artifact.
+results/screenshots/

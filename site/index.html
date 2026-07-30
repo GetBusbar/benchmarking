@@ -118,28 +118,47 @@
         <span id="row-count" class="muted count"></span>
       </div>
     </div>
-    <!-- THE TAIL-LATENCY BOUND the throughput readings are shown at (Performance + Frontier only, since
-         nothing on Streaming or Memory is read at a bound). Rendered by app.js so the buttons come from
-         the one published list of bounds; switching re-ranks the board in front of the reader. -->
-    <div class="control-group bound-chooser hidden" id="bound-chooser">
-      <span class="bound-label" id="bound-legend">Tail-latency bound</span>
-      <div class="seg" id="bound-seg" role="tablist" aria-labelledby="bound-legend"></div>
-      <span class="bound-note muted" id="bound-note"></span>
-    </div>
-    <!-- Cell chooser (Performance, Streaming, Memory): which cell(s) of the one 6x6 run to show, plus the
-         dialect dropdown(s) each mode needs. Its own row. The MODE BUTTONS are rendered by app.js
-         (renderFilters), because the tabs offer different mode sets: Peak | Same | Custom on the perf
-         lanes, Min | Max | Same | Custom on memory, which must never be able to paint a Peak button
-         (Peak selects by throughput, and selecting on throughput to report memory is the defect
-         per-cell measurement exists to remove). -->
-    <div class="control-group cell-chooser hidden" id="cell-chooser">
-      <div class="seg" id="mode-seg" role="tablist" aria-label="Which cell to show"></div>
-      <label class="chooser-same hidden" id="chooser-same">Dialect
-        <select id="same-dialect" aria-label="Dialect diagonal to show for every gateway"></select></label>
-      <label class="chooser-custom hidden" id="chooser-custom">Cell
-        <select id="cell-in" aria-label="Ingress dialect the client speaks"></select>
-        <span class="xlate-arrow">&rarr;</span>
-        <select id="cell-out" aria-label="Egress dialect the upstream speaks"></select></label>
+    <!-- THE TWO FILTER AXES, AS ONE LABELLED BLOCK. The owner's words on the live board: "filter formatting
+         is ugly, align them". They were two sibling rows, one with a text label that indented its chips and
+         one whose chips started flush at the far left, so they read as ragged - and the second axis was never
+         NAMED at all, which is why it looked like loose chips rather than a control.
+         They are two DIFFERENT questions (which tail bound, and which cell of the 6x6 run), so the fix is not
+         an indent on the second row: each axis gets a label in a shared gutter, and the one left edge falls
+         out of the grid (style.css .filters) instead of being hand-tuned. Each group stays its own element
+         because they hide independently - the bound axis only exists on Performance + Frontier - and
+         `display: contents` lets a hidden axis take its whole grid row with it, shifting nothing sideways. -->
+    <div class="filters" id="filters">
+      <!-- THE TAIL-LATENCY BOUND the throughput readings are shown at (Performance + Frontier only, since
+           nothing on Streaming or Memory is read at a bound). Rendered by app.js so the buttons come from
+           the one published list of bounds; switching re-ranks the board in front of the reader. -->
+      <div class="control-group bound-chooser hidden" id="bound-chooser">
+        <span class="flabel" id="bound-legend">Tail-latency bound</span>
+        <div class="fcontrols">
+          <div class="seg" id="bound-seg" role="tablist" aria-labelledby="bound-legend"></div>
+        </div>
+        <span class="fnote muted" id="bound-note"></span>
+      </div>
+      <!-- Cell chooser (Performance, Streaming, Memory): which cell(s) of the one 6x6 run to show, plus the
+           dialect dropdown(s) each mode needs. The MODE BUTTONS are rendered by app.js (renderFilters),
+           because the tabs offer different mode sets: Peak | Same | Custom on the perf lanes, Min | Max |
+           Same | Custom on memory, which must never be able to paint a Peak button (Peak selects by
+           throughput, and selecting on throughput to report memory is the defect per-cell measurement
+           exists to remove).
+           THE LABEL IS VISIBLE, and the seg is aria-labelledby it rather than carrying its own aria-label:
+           a control whose name only exists for a screen reader was a control with no name for everyone else,
+           and that was half of why this row read as ragged chips. -->
+      <div class="control-group cell-chooser hidden" id="cell-chooser">
+        <span class="flabel" id="mode-legend">Cell shown</span>
+        <div class="fcontrols">
+          <div class="seg" id="mode-seg" role="tablist" aria-labelledby="mode-legend"></div>
+          <label class="chooser-same hidden" id="chooser-same">Dialect
+            <select id="same-dialect" aria-label="Dialect diagonal to show for every gateway"></select></label>
+          <label class="chooser-custom hidden" id="chooser-custom">Cell
+            <select id="cell-in" aria-label="Ingress dialect the client speaks"></select>
+            <span class="xlate-arrow">&rarr;</span>
+            <select id="cell-out" aria-label="Egress dialect the upstream speaks"></select></label>
+        </div>
+      </div>
     </div>
     <div class="table-scroll">
       <table id="results-table">
