@@ -451,7 +451,13 @@ fn cell_memory(
         // Both windows disclose their own length. idle_window_s has been null since the field was
         // declared, because idle was one instantaneous read and there was no window to name.
         idle_window_s: Some(crate::metric::MEMORY_IDLE_S as i64),
-        recovery_window_s: Some(crate::metric::MEMORY_RECOVERY_S as i64),
+        // THE SLICE THE NUMBER CAME FROM, not the length of the wait. This published
+        // `MEMORY_RECOVERY_S` (60) while `recovered_rss_mib` is the median over the trailing
+        // `MEMORY_RECOVERY_MEDIAN_S` (30) - the first half still holds the descent from peak, so a median
+        // across the whole minute would report a level the process never sat at. The wait is still 60 s
+        // and the `protocol` string above still says so; this field names the window the published figure
+        // is a median of, which is what a reader checking it needs.
+        recovery_window_s: Some(crate::metric::MEMORY_RECOVERY_MEDIAN_S as i64),
         steady_state_rss_mib: steady,
         rss_series,
         idle_rss_series,
