@@ -62,6 +62,13 @@ def snapshot_paths():
 
 # How far the sustained figure may sit above the peak before it is a defect rather than window noise.
 #
+# NO PER-CELL CONSUMER ANY MORE. `check_sustained_not_above_peak` read this bar; the pair it policed
+# (`rps_max_proxy` vs `rps_sustained_20ms`) is deleted, so the bar's only remaining job in this file is
+# the DRIFT GATE below (`check_c6_bar_agrees_with_the_site`), which is about two literals in two
+# languages and not about any cell's data. It stays declared, with its reasoning intact, because the
+# site still declares its own copy and a gate that stops being able to compare is the defect class this
+# file exists to prevent. See the removal note at `check_sustained_not_above_peak`'s old site.
+#
 # The two numbers now come out of ONE climb over ONE state of the gateway (`run::sweep_cell`), so a
 # genuine inversion means the throughput curve spiked between two doublings - which gateways do not
 # do. Before that change they were two searches separated by a gateway restart, and three cells of
@@ -99,6 +106,23 @@ SITE_C6_RE = re.compile(r"^export const C6_GROSS_PCT\s*=\s*([0-9]+(?:\.[0-9]+)?)
 RECORD_RS_PATH = os.path.join("engine", "src", "record.rs")
 RECORD_RS_STRUCTS = {"perf": "CellPerf", "stream": "CellStream", "memory": "CellMemory"}
 _RUST_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+# ── the frontier ──────────────────────────────────────────────────────────────────────────────────
+#
+# The tail-latency bounds every served cell must publish a reading at, in microseconds, ascending, with
+# the UNBOUNDED reading (`p99_bound_us: null`, failures only, no latency claim) last. This is the
+# engine's `frontier::P99_BOUNDS_US`, restated here for the same reason ABSENCE_CARRYING_FIELDS restates
+# record.rs's field lists: there is no build step to share a constant across the two languages. And for
+# the same reason it is CROSS-CHECKED rather than trusted - `check_frontier_bounds_agree_with_the_engine`
+# parses the rust declaration and fails on drift, because a python copy that fell behind would let a
+# board publish five columns while this file cheerfully audited four.
+#
+# WHY A LIST AND NOT "whatever the artifact carries": the length and the ordering are the invariant. A
+# cell publishing four readings, or the same five bounds in a different order, silently changes what the
+# board means without any single number being wrong - see `check_frontier_is_complete`.
+P99_BOUNDS_US = [1_000, 5_000, 10_000, 50_000, 100_000]
+FRONTIER_RS_PATH = os.path.join("engine", "src", "frontier.rs")
+FRONTIER_RS_RE = re.compile(r"pub const P99_BOUNDS_US:\s*\[u64;\s*\d+\]\s*=\s*\[([^\]]*)\]\s*;")
 
 # A rate this far above its own concurrency is not a proxy measurement.
 #
@@ -179,27 +203,26 @@ def median(v):
 # these stops firing on data that used to trip it, that is a finding, not a pass.
 
 
-def check_sustained_not_above_peak(name, c):
-    """The two throughput numbers summarise ONE sweep, so the gated one cannot exceed the ungated one.
+# REMOVED: check_sustained_not_above_peak. It compared `perf.rps_sustained_20ms` against
+# `perf.rps_max_proxy` and allowed C6_GROSS_PCT of window noise between them. BOTH FIELDS ARE DELETED,
+# and the state it guarded - a gated reading coming out ABOVE the ungated one over the same windows - is
+# now unrepresentable rather than unchecked. It was reachable because the two numbers came from two
+# different algorithms over the same rungs (a plateau search that quit on three flat rungs, and a gate
+# bisection that walked past where the plateau search had stopped), so the "maximum" could be a max over
+# a SUBSET of what the "sustained" figure searched. It fired for real: aisix openai-responses>anthropic
+# published 16,232 max against 16,610 sustained, and bifrost openai-responses>openai-responses 5,113
+# against 5,174. The frontier is six readings of ONE rung set, each a maximum over a set that only GROWS
+# as the bound relaxes, so the inversion class is structural nonsense now - and the ordering it implied
+# is asserted anyway, over all six readings rather than two, by
+# `check_frontier_rates_are_monotone_in_the_bound`. See `engine/src/frontier.rs`'s module note.
 
-    The 2026-07-28 board tripped this on apisix anthropic>anthropic (1.065x), kong openai>gemini
-    (1.054x) and litellm-python openai>openai-responses (1.074x). The cause was not any gateway: the
-    sustained leg was a second search that ran after the memory group cold-restarted the process, so
-    the pair compared two different states of it.
-    """
-    p = c.get("perf") or {}
-    mx, su = p.get("rps_max_proxy"), p.get("rps_sustained_20ms")
-    if mx and su and mx > 0 and su > mx * (1 + C6_GROSS_PCT / 100):
-        yield f"{name}: sustained {su:.0f} exceeds peak {mx:.0f} by {(su/mx-1)*100:.1f}%"
-
-
-def check_peak_came_from_its_own_sweep(name, c):
-    """A published peak must be a rate some window in its own sweep actually produced."""
-    p = c.get("perf") or {}
-    mx = p.get("rps_max_proxy")
-    rates = [r["rps"] for r in (p.get("sweep_max_proxy") or []) if r.get("rps") is not None]
-    if mx and rates and mx > max(rates):
-        yield f"{name}: peak {mx:.0f} exceeds every window it came from (best {max(rates)})"
+# REMOVED: check_peak_came_from_its_own_sweep. It held `perf.rps_max_proxy` to `max(sweep_max_proxy)`,
+# which is one direction of one comparison against one deleted scalar. Its successor is strictly
+# stronger and not a rewrite of it: `check_frontier_is_rederivable_from_its_sweep` recomputes EVERY
+# reading from the rungs - the qualifying set, the maximum over it, the concurrency it was observed at,
+# the tail that came with it and the boundary rung above it - and demands equality in both directions,
+# where this only caught a peak that was too HIGH. A peak that was too LOW (the actual field defect: a
+# plateau search that stopped early) passed this check every time.
 
 
 def check_sweep_carries_its_latency(name, c):
@@ -235,44 +258,32 @@ def check_ttft_percentiles_are_ordered(name, c):
         yield f"{name}: added_ttft p99 {b} sits below p50 {a}"
 
 
-def check_rate_and_concurrency_travel_together(name, c):
-    """A rate without the concurrency it was measured at cannot be re-derived or charted."""
-    p = c.get("perf") or {}
-    for rate, conc, label in (
-        ("rps_sustained_20ms", "rps_sustained_20ms_concurrency", "sustained"),
-        ("rps_max_proxy", "conc_at_peak", "peak"),
-    ):
-        r, k = p.get(rate), p.get(conc)
-        if r is not None and k is None:
-            yield f"{name}: {label} rate published with no concurrency beside it"
-        if k is not None and r is None:
-            yield f"{name}: {label} concurrency published with no rate beside it"
+# REMOVED: check_rate_and_concurrency_travel_together. It paired `rps_sustained_20ms` with
+# `rps_sustained_20ms_concurrency` and `rps_max_proxy` with `conc_at_peak`, and the failure it guarded was
+# a rate published with the concurrency it was observed at MISSING - unre-derivable, unchartable. All
+# four fields are deleted, and the state is unreachable by construction rather than by policing: a rate
+# and its concurrency are no longer two sibling keys that can drift apart, they are two fields of ONE
+# `FrontierReading` object emitted from one `frontier::Reading`, which cannot exist without both. What
+# CAN still go wrong is a reading whose halves disagree with the rungs, and that is checked head-on by
+# `check_frontier_is_rederivable_from_its_sweep` (the concurrency must name a rung that actually carried
+# the winning rate at that bound), plus `check_every_absent_frontier_reading_has_a_reason` for the
+# absent case.
 
+# REMOVED (RE-POINTED, NOT DROPPED): check_rate_is_physically_possible read `rps_max_proxy / conc_at_peak`
+# against MAX_RPS_PER_CONNECTION. Both fields are deleted, but the defect class - a rate divided by the
+# wrong thing - is a property of ANY published rate/concurrency pair and did not go away with them, so it
+# is re-pointed at all six readings by `check_frontier_rate_is_physically_possible` below. That is more
+# coverage than before, not less: the old check looked at one pair per cell, the new one at up to six.
 
-def check_rate_is_physically_possible(name, c):
-    """A per-connection rate above `MAX_RPS_PER_CONNECTION` is a units error, not a fast gateway."""
-    p = c.get("perf") or {}
-    mx, k = p.get("rps_max_proxy"), p.get("conc_at_peak")
-    if mx and k and k > 0 and mx / k > MAX_RPS_PER_CONNECTION:
-        yield f"{name}: {mx:.0f} rps at c={k} is {mx/k:.0f} per connection"
-
-
-def check_frames_have_a_stream_behind_them(name, c):
-    """A frames/sec rate beside a MEASURED ZERO population is a rate over nothing.
-
-    Only a measured 0 is the defect. The two figures come from two DIFFERENT searches with different
-    gates - `streams_sustained` bisects the strict delivery gate (every content frame, no stalls),
-    while `cpu_fps` climbs for the box's frame ceiling - so a cell can honestly have a cpu_fps peak
-    while the sustained ceiling was never CONFIRMED. litellm-rust anthropic>anthropic did exactly that
-    in the 2026-07-29 run: rungs from c=1 to c=3072 delivered content, the bisection proved c=6144 and
-    then failed to reconfirm it, so the ceiling is an absence carrying that sentence while cpu_fps is
-    a real 20,636 measured over 1024 live streams. Reading that as "a rate over a population of zero"
-    was this check being wrong about the data, not the data being wrong.
-    """
-    st = c.get("stream") or {}
-    if st.get("cpu_fps") and st.get("streams_sustained") == 0:
-        yield (f"{name}: cpu_fps {st['cpu_fps']} published beside a MEASURED streams_sustained of 0 - "
-               f"a rate over a population of zero")
+# REMOVED: check_frames_have_a_stream_behind_them. It fired when `stream.cpu_fps` was published beside a
+# MEASURED `streams_sustained` of 0 - a frames/sec rate over a population of zero streams. `cpu_fps` and
+# its `cpu_fps_concurrency` / `sweep_cpu_fps` are deleted, so there is no longer any frame rate in the
+# artifact that can be divided by a stream count: `streams_sustained_fps` is the frame rate OF
+# `streams_sustained` itself, measured in the same window rather than by a separate climb, so it cannot
+# be a rate over a population it was not measured against. Note the check had already been narrowed once
+# (litellm-rust anthropic>anthropic 2026-07-29) to a MEASURED 0 rather than a reasoned absence - the
+# residual risk that survived that narrowing was exactly the two-searches-two-populations shape, and the
+# second search is gone.
 
 
 # THE DEFINITION OF DONE, as fields. Every metric a served cell's block may publish; a null on any
@@ -282,13 +293,26 @@ def check_frames_have_a_stream_behind_them(name, c):
 # (CellPerf, CellStream, CellMemory), field for field.
 ABSENCE_CARRYING_FIELDS = {
     "perf": [
+        # THE THROUGHPUT SCALARS ARE NOT LISTED HERE ANY MORE, and their absence is checked, not
+        # assumed: `rps_sustained_20ms` / `rps_sustained_20ms_concurrency` / `conc_at_sustained` /
+        # `rps_max_proxy` / `rps_max_proxy_concurrency` / `conc_at_peak` are deleted from `CellPerf`, so
+        # keeping them here would make `check_absence_fields_mirror_the_engine` fail as "policing fields
+        # the engine no longer defines" - which is exactly what it did before this list was cut, and is
+        # the reason that check exists.
+        #
+        # WHAT REPLACES THEM IS NOT A FIELD ON THIS LIST. `perf.frontier` is a Vec, unreachable by the
+        # engine's `absences_of!` macro (which walks scalar `Measurement` fields), so `CellPerf::absences`
+        # populates its keys in a hand-written loop under BOUND-keyed names - `perf.frontier.10ms.rps`,
+        # `perf.frontier.unbounded.rps`. Adding "frontier" here would break the mirror check in the other
+        # direction and would police the wrong shape anyway; the frontier's own null-carries-a-reason
+        # invariant is `check_every_absent_frontier_reading_has_a_reason`.
         "added_latency_p50_us", "added_latency_p99_us", "gateway_c1_p99_us", "direct_c1_p99_us",
-        "rps_sustained_20ms", "rps_sustained_20ms_concurrency", "conc_at_sustained",
-        "rps_max_proxy", "rps_max_proxy_concurrency", "conc_at_peak",
     ],
     "stream": [
+        # `cpu_fps` and `cpu_fps_concurrency` are deleted from `CellStream` (with `sweep_cpu_fps`), same
+        # reasoning as the perf block above: a field the engine no longer defines cannot be policed here.
         "added_ttft_p50_us", "added_ttft_p99_us", "added_gap_p50_us", "added_gap_p99_us",
-        "streams_sustained", "streams_sustained_fps", "cpu_fps", "cpu_fps_concurrency",
+        "streams_sustained", "streams_sustained_fps",
         # The WEIGHT behind the two added-TTFT percentiles. A failed probe used to be dropped inside a
         # filter_map, so a p99 over three lucky samples published identically to one over a hundred -
         # and with a single survivor the p50 and p99 ranks collapse to the same index, which reads as a
@@ -390,12 +414,18 @@ def check_stream_capacity_is_a_number(name, c):
     served streaming cell once the gate published failures as 0. An absence whose reason is
     `not_measured` here means a search quietly stopped producing - the exact silent-yield defect
     that shipped a board with cpu_fps on 1 of 16 served cells.
+
+    `cpu_fps` IS NO LONGER IN THE FIELD LIST BELOW - it is deleted from `CellStream`. The silent-yield
+    defect it was watched for is still live for `streams_sustained`, which is a bisection that can stop
+    producing, so this check keeps its job with a shorter list rather than being removed. The historical
+    1-of-16 board is what motivated it and is left in the paragraph above because it is why the bar is
+    "a number or a reasoned absence" rather than "a value if the search felt like it".
     """
     st = c.get("stream") or {}
     if st.get("stream_served") is not True:
         return
     absences = c.get("absences") or {}
-    for f in ("streams_sustained", "cpu_fps"):
+    for f in ("streams_sustained",):
         if st.get(f) is None:
             entry = absences.get(f"stream.{f}") or {}
             reason, detail = entry.get("reason"), entry.get("detail")
@@ -411,6 +441,445 @@ def check_stream_capacity_is_a_number(name, c):
                 continue
             yield (f"{name}: stream.{f} is absent with reason {reason!r} and NO detail on a served "
                    f"streaming cell - a search that stops producing must say why")
+
+
+# ── the frontier's invariants ─────────────────────────────────────────────────────────────────────
+#
+# `perf.frontier` is SIX READINGS OF ONE RUNG SET, published beside the rung set itself
+# (`perf.sweep_max_proxy`), which is what makes every one of them re-derivable rather than asserted -
+# and re-derivation is the check that matters here. The old scalars could only be sanity-checked
+# (is the peak at least as big as the sustained figure? is the peak a rate some window produced?)
+# because the algorithm that produced them had thrown away the evidence: a plateau search's stopping
+# point is not in the artifact. The frontier's arithmetic is `max(rps) over {rungs that qualify}`, every
+# input to it is published, so this file can run that arithmetic itself and demand the same answer.
+#
+# The bar for these is deliberately "recompute and compare", not "looks plausible". A summary that
+# disagrees with the rungs it claims to summarise is the one defect the frontier design cannot rule out
+# structurally - `frontier.rs` derives monotonicity from the algorithm, but nothing in the artifact
+# proves the published readings CAME from that algorithm over these rungs. That proof is here.
+
+
+def bound_key(us):
+    """The name a reading's absences are filed under: `10ms`, or `unbounded` for the failure-only one.
+
+    Mirrors `CellPerf::absences`'s `format!("{}ms", us / 1000)` exactly, because a key this file computes
+    differently from the engine would look like a missing reason for every absent reading on the board -
+    a false FAIL, which costs as much trust as a false pass.
+    """
+    return "unbounded" if us is None else f"{us // 1000}ms"
+
+
+def frontier_of(c):
+    """The cell's frontier readings, or [] when it has none (a pre-frontier artifact, or a shrunk one -
+    `check_frontier_is_complete` is the only place allowed to tell those two apart)."""
+    fr = (c.get("perf") or {}).get("frontier")
+    return fr if isinstance(fr, list) else []
+
+
+def sweep_rungs(c):
+    """The rungs the frontier is read from. Every reading must be re-derivable from exactly these."""
+    return [r for r in ((c.get("perf") or {}).get("sweep_max_proxy") or []) if isinstance(r, dict)]
+
+
+def rung_served_cleanly(r):
+    """Did the gateway serve every request it accepted at this rung? `frontier::Rung::served_cleanly`.
+
+    ZERO FAILURES, NOT A TOLERANCE - the engine's rule, and the reason is that the rig's own refused
+    connects never reach the rung (`GenStats::rig_refused` discards those windows), so a failure here is
+    the gateway failing a request it accepted.
+
+    `ok` IS THE ONE INPUT THE ARTIFACT DOES NOT PUBLISH. `SweepPoint` carries conc/rps/p99_us/fail, so
+    the engine's `ok > 0` half - which stops a window that completed NOTHING from reading as "no
+    failures" by the accident that 0 of 0 looks clean - has to be approximated here, and `rps > 0` is the
+    approximation: a rung that completed nothing produced no rate. It is exact except for a rung whose
+    true rate rounds down to 0 through `as i64`, i.e. under one request per second, which the
+    re-derivation check handles explicitly rather than pretending cannot happen. An ABSENT `fail` is not
+    a clean rung either: "measured no failures" and "nothing was measured" are different facts.
+    """
+    fail, rps = r.get("fail"), r.get("rps")
+    return fail == 0 and isinstance(rps, (int, float)) and rps > 0
+
+
+def rung_qualifies(r, bound_us):
+    """Does this rung count toward the reading at `bound_us`? `None` = the failure-only reading.
+
+    `frontier::Rung::qualifies`, restated: clean, and under the bound STRICTLY (`p99 < bound`, so a rung
+    sitting exactly on a bound does not clear it - "under 1 ms" means under). A rung with no p99 is
+    disqualified from every BOUNDED reading, because a rung with no latency reading has not earned a
+    claim about latency - but not from the unbounded one, which makes no latency claim to earn.
+    """
+    if not rung_served_cleanly(r):
+        return False
+    if bound_us is None:
+        return True
+    p99 = r.get("p99_us")
+    return isinstance(p99, (int, float)) and p99 < bound_us
+
+
+def top_probed_conc(rungs):
+    """The highest concurrency the sweep asked for, qualifying or not - `Reading::top_probed_conc`. A
+    rung that failed is still a rung we looked at, and is exactly what proves we did not stop early."""
+    concs = [r.get("conc") for r in rungs if isinstance(r.get("conc"), (int, float))]
+    return max(concs) if concs else None
+
+
+def check_frontier_is_complete(name, c, frontier_known=False):
+    """Every served cell publishes ALL SIX readings: the declared bounds ascending, unbounded last.
+
+    A CELL PUBLISHING FOUR WOULD SILENTLY SHRINK THE BOARD. Nothing else here would notice: every other
+    check iterates whatever readings are present and would pass over a cell missing its 1ms and 5ms
+    columns, while the site would render the gateway as though those bounds had never been asked about.
+    The engine writes an absent-with-reason reading for a bound nothing qualified at, precisely so that
+    "no throughput under 1ms" and "we did not report 1ms" stay distinguishable - and this is the check
+    that makes the difference visible instead of merely intended.
+
+    THE ORDER IS PART OF THE INVARIANT, not presentation. `frontier.rs` derives monotonicity in the
+    BOUND; a reader (and `check_frontier_rates_are_monotone_in_the_bound`) reads that off the sequence
+    positionally, so a permuted sequence turns a true property into a false alarm or hides a real one.
+
+    `frontier_known` IS HOW A PRE-FRONTIER ARTIFACT IS TOLD FROM A SHRUNK ONE - the same mechanism, and
+    the same reasoning, as `fields_the_producer_knew`: ask the artifact. A snapshot where NO served cell
+    carries a frontier was written by an engine that did not have the metric, and demanding it would be
+    demanding that yesterday's artifact contain tomorrow's field; those are disclosed by count at the end
+    of the run, never silently forgiven. A snapshot where SOME cell carries one knew how, so a cell
+    without it dropped it, which is the defect.
+    """
+    fr = frontier_of(c)
+    if not fr:
+        if frontier_known:
+            yield (f"{name}: served cell publishes NO frontier while other cells in the same snapshot "
+                   f"do - the producing engine had the metric, so this cell's throughput answer was "
+                   f"dropped rather than never measured")
+        return
+    expected = list(P99_BOUNDS_US) + [None]
+    got = [r.get("p99_bound_us") if isinstance(r, dict) else "<not an object>" for r in fr]
+    if got != expected:
+        yield (f"{name}: frontier publishes bounds {got} but the board is defined at {expected} "
+               f"(the declared bounds ascending, then the unbounded reading) - a frontier of a "
+               f"different shape is a different board")
+    # EVERY FIELD PRESENT, not merely non-null. Same reasoning as check_declared_fields_are_carried: a
+    # key the serializer omitted and a key it wrote as null are indistinguishable to every `.get()` in
+    # this file, so a `skip_serializing_if` on any of these would evaporate the absence discipline while
+    # the audit kept printing PASS.
+    for r in fr:
+        if not isinstance(r, dict):
+            continue
+        for f in ("p99_bound_us", "rps", "concurrency", "p99_us", "first_disqualified_conc",
+                  "lower_bound"):
+            if f not in r:
+                yield (f"{name}: frontier reading at {bound_key(r.get('p99_bound_us'))} OMITS `{f}` - "
+                       f"key-missing and measured are indistinguishable to every check here")
+
+
+def check_frontier_rates_are_monotone_in_the_bound(name, c):
+    """Relaxing the bound can never lower the reading.
+
+    THIS IS STRUCTURAL IN THE ENGINE AND ASSERTED ANYWAY. A rung qualifies at bound B if its tail is
+    under B and it failed nothing, so relaxing B only ADDS rungs to the qualifying set, and each reading
+    is a maximum over that set - a max over a superset cannot be smaller. `frontier.rs` says so in its
+    module note and its own test walks hostile inputs. So a violation here does NOT mean "the gateway
+    behaved strangely"; it means the published readings did not come from the rungs they claim to
+    summarise, which is the one thing the structure cannot rule out. An invariant nothing checks is an
+    invariant nobody notices breaking - and the inversion class it descends from (`rps_max_proxy` below
+    `rps_sustained_20ms`) shipped on two real cells before it was structural.
+
+    An ABSENT looser reading beside a PRESENT tighter one is the same violation in its degenerate form:
+    the looser bound's qualifying set contains the tighter one's, so it cannot be empty when that one
+    was not.
+    """
+    prev_rps = prev_key = None
+    for r in frontier_of(c):
+        if not isinstance(r, dict):
+            continue
+        key = bound_key(r.get("p99_bound_us"))
+        rps = r.get("rps")
+        if rps is None:
+            if prev_rps is not None:
+                yield (f"{name}: frontier.{key} published NO rate while the tighter frontier."
+                       f"{prev_key} published {prev_rps} - a looser bound's qualifying set contains "
+                       f"the tighter one's, so it cannot be empty when that one was not")
+            continue
+        if prev_rps is not None and rps < prev_rps:
+            yield (f"{name}: frontier.{key} reads {rps} rps, BELOW frontier.{prev_key}'s {prev_rps} - "
+                   f"relaxing the bound lowered the reading, which the max-over-a-superset structure "
+                   f"makes impossible, so these readings are not the rungs they claim")
+        prev_rps, prev_key = rps, key
+
+
+def check_frontier_is_rederivable_from_its_sweep(name, c):
+    """Recompute every reading from `sweep_max_proxy` and demand the published one matches.
+
+    THE STRONGEST CHECK IN THIS FILE, and the only one that verifies the engine's ARITHMETIC rather than
+    the plausibility of its summary. Each reading is `max(rps)` over the rungs that qualify at its bound,
+    the concurrency that maximum was observed at, the tail THAT rung produced, and the lowest
+    concurrency above it that stopped qualifying. All four inputs are published per rung, so all four
+    outputs are recomputable, and a summary that disagrees with the rungs behind it fails here.
+
+    It replaces `check_peak_came_from_its_own_sweep`, which only caught a peak that was too HIGH. The
+    actual field defect was the opposite - a plateau search that stopped three flat rungs in and reported
+    a maximum BELOW what its own sibling search reached - and that passed the old check every time.
+
+    TWO PLACES WHERE THE ARTIFACT IS GENUINELY SHORT OF INFORMATION, both handled rather than assumed
+    away: `ok` is not published per rung (see `rung_served_cleanly`), so a re-derived best of exactly 0
+    cannot be told from a rung that completed nothing and is not held against an absence; and rungs may
+    repeat a concurrency, so ties are matched against the SET of rungs carrying the winning rate at the
+    published concurrency rather than against one assumed argmax.
+    """
+    fr = frontier_of(c)
+    if not fr:
+        return
+    rungs = sweep_rungs(c)
+    if not rungs:
+        # A frontier with no rungs under it is a summary with its evidence deleted. The engine cannot
+        # produce it - no rungs means every reading is an absence - so a published rate here is a number
+        # from nowhere, which is worse than a missing one.
+        published = [bound_key(r.get("p99_bound_us")) for r in fr
+                     if isinstance(r, dict) and r.get("rps") is not None]
+        if published:
+            yield (f"{name}: frontier publishes rates at {published} but sweep_max_proxy carries NO "
+                   f"rungs - the readings cannot be re-derived from anything")
+        return
+    for r in fr:
+        if not isinstance(r, dict):
+            continue
+        bound, key = r.get("p99_bound_us"), bound_key(r.get("p99_bound_us"))
+        quals = [q for q in rungs if rung_qualifies(q, bound)]
+        best = max((q["rps"] for q in quals), default=None)
+        pub_rps, pub_conc, pub_p99 = r.get("rps"), r.get("concurrency"), r.get("p99_us")
+        if best is None:
+            if pub_rps is not None:
+                yield (f"{name}: frontier.{key} publishes {pub_rps} rps but NO rung in sweep_max_proxy "
+                       f"qualifies at that bound (clean and under it) - the reading has no rung behind "
+                       f"it")
+            continue
+        if pub_rps is None:
+            # `best == 0` is the `ok` ambiguity above, not a disagreement: the engine disqualifies a
+            # rung that completed nothing and this file cannot see that it did.
+            if best > 0:
+                yield (f"{name}: frontier.{key} publishes no rate, but rung(s) in sweep_max_proxy "
+                       f"qualify at that bound and the best carries {best} rps")
+            continue
+        if pub_rps != best:
+            yield (f"{name}: frontier.{key} publishes {pub_rps} rps, re-derived from its own rungs it "
+                   f"is {best} - the summary disagrees with the sweep it claims to summarise")
+            continue
+        winners = [q for q in quals if q.get("rps") == best]
+        if pub_conc is None:
+            yield (f"{name}: frontier.{key} publishes {pub_rps} rps with NO concurrency - the rate "
+                   f"cannot be placed on the ladder it was observed on")
+        else:
+            at_conc = [w for w in winners if w.get("conc") == pub_conc]
+            if not at_conc:
+                yield (f"{name}: frontier.{key} says {pub_rps} rps at c={pub_conc}, but no rung at "
+                       f"that concurrency both qualifies at the bound and carries that rate "
+                       f"(qualifying winners sit at c="
+                       f"{sorted({w.get('conc') for w in winners})})")
+            elif all(w.get("p99_us") != pub_p99 for w in at_conc):
+                # The tail must be the WINNING RUNG'S OWN. See `Reading::p99_us`: publishing anything
+                # else - the bound especially - restates the question as though it were the answer.
+                measured = sorted((w.get("p99_us") for w in at_conc),
+                                  key=lambda v: (v is None, v))
+                yield (f"{name}: frontier.{key} publishes p99 {pub_p99} but the qualifying rung(s) at "
+                       f"c={pub_conc} measured {measured}")
+        # THE BOUNDARY PROOF, re-derived: the lowest concurrency ABOVE the winner that stopped
+        # qualifying. Absent is not a hole here - it is the positive finding that the sweep ran out of
+        # range while this bound still held, which is why `first_disqualified_conc` is the one reading
+        # field the engine deliberately keeps OUT of the absences map (see `CellPerf::absences`).
+        if isinstance(pub_conc, (int, float)):
+            above = [q["conc"] for q in rungs
+                     if isinstance(q.get("conc"), (int, float)) and q["conc"] > pub_conc
+                     and not rung_qualifies(q, bound)]
+            expect_fd = min(above) if above else None
+            got_fd = r.get("first_disqualified_conc")
+            if got_fd != expect_fd:
+                yield (f"{name}: frontier.{key} names first_disqualified_conc={got_fd}, re-derived "
+                       f"from the rungs above c={pub_conc} it is {expect_fd} - the half of the "
+                       f"reading's proof that says this really is the boundary")
+
+
+def check_frontier_disclosure_agrees_with_the_ladder(name, c):
+    """`lower_bound` is true exactly when the winning rung is the highest concurrency probed.
+
+    IT IS A DISCLOSURE, AND A DISCLOSURE THAT DISAGREES WITH THE DATA IS WORSE THAN NONE. True means "we
+    ran out of ladder, so this rate is a floor and not a ceiling"; false means "we probed higher and it
+    was worse, so the peak is established". Publishing false where the sweep topped out overstates the
+    finding on every surface that repeats it, and publishing true where throughput visibly turned over
+    understates a real peak - which is exactly the bug `is_lower_bound` had when it read
+    `first_disqualified_conc.is_none()`: the 2026-07-30 smoke run probed to c=256, peaked at c=32 with
+    every rung above still holding a 5ms tail, and five of six readings claimed to be lower bounds.
+
+    An ABSENT reading cannot be a lower bound of anything - there is no rate to qualify - so its flag
+    must be false. The engine writes false there; this pins it, because a stray true would put a
+    "measured at least this much" label on a column with no measurement in it.
+    """
+    fr = frontier_of(c)
+    if not fr:
+        return
+    top = top_probed_conc(sweep_rungs(c))
+    for r in fr:
+        if not isinstance(r, dict):
+            continue
+        key, flag, conc = bound_key(r.get("p99_bound_us")), r.get("lower_bound"), r.get("concurrency")
+        if r.get("rps") is None:
+            if flag:
+                yield (f"{name}: frontier.{key} has no rate but claims lower_bound=true - an absence "
+                       f"is not a floor under anything")
+            continue
+        if conc is None or top is None:
+            continue  # already a violation elsewhere; nothing to compare the ladder against
+        expect = conc >= top
+        if bool(flag) != expect:
+            yield (f"{name}: frontier.{key} says lower_bound={flag} at c={conc} with the sweep's top "
+                   f"rung at c={top} - " + ("the winner IS the top of the ladder, so the rate is a "
+                   "floor and must say so" if expect else "the sweep probed past the winner, so the "
+                   "peak is established and must not be published as a floor"))
+
+
+def check_frontier_p99_is_the_observed_tail(name, c):
+    """A bounded reading's `p99_us` is the tail its winning rung PRODUCED, never the bound restated.
+
+    Qualification is strict (`p99 < bound`, `frontier::Rung::qualifies`), so for a reading that published
+    a rate:
+
+      * a tail ABOVE its own bound is a straight violation - that rung could not have qualified, so
+        either the tail or the rate belongs to some other rung;
+      * a tail EQUAL to its own bound is the same violation arithmetically (strict `<` excludes it) and
+        is reported separately because it is also the signature of the specific defect worth naming: the
+        bound being copied into the answer slot. `Reading::p99_us` exists to keep those apart - "a
+        gateway holding 4 ms under a 100 ms bound is not the same finding as one sitting at 99 ms";
+      * no tail at all, on a BOUNDED reading, is a latency claim with no latency reading behind it. Only
+        the unbounded reading may publish an absent tail, and it may because it makes no such claim.
+    """
+    for r in frontier_of(c):
+        if not isinstance(r, dict):
+            continue
+        bound = r.get("p99_bound_us")
+        if bound is None or r.get("rps") is None:
+            continue
+        key, p99 = bound_key(bound), r.get("p99_us")
+        if p99 is None:
+            yield (f"{name}: frontier.{key} publishes a rate with NO p99 - a rung with no tail reading "
+                   f"cannot qualify for a latency-bounded reading")
+        elif p99 > bound:
+            yield (f"{name}: frontier.{key} publishes p99 {p99}us, ABOVE its own {bound}us bound - the "
+                   f"winning rung could not have qualified")
+        elif p99 == bound:
+            yield (f"{name}: frontier.{key} publishes p99 exactly {p99}us, its own bound - "
+                   f"qualification is strictly under the bound, so this is the question restated as "
+                   f"the answer, not a tail any rung measured")
+
+
+def check_frontier_rate_is_physically_possible(name, c):
+    """A per-connection rate above `MAX_RPS_PER_CONNECTION` is a units error, not a fast gateway.
+
+    Inherited from `check_rate_is_physically_possible`, which read the deleted `rps_max_proxy` /
+    `conc_at_peak` pair. Every reading carries its own rate and the concurrency it was observed at, so
+    the same arithmetic now runs up to six times per cell instead of once.
+    """
+    for r in frontier_of(c):
+        if not isinstance(r, dict):
+            continue
+        rps, conc = r.get("rps"), r.get("concurrency")
+        if rps and conc and conc > 0 and rps / conc > MAX_RPS_PER_CONNECTION:
+            yield (f"{name}: frontier.{bound_key(r.get('p99_bound_us'))} reads {rps:.0f} rps at "
+                   f"c={conc}, which is {rps/conc:.0f} per connection")
+
+
+def check_every_absent_frontier_reading_has_a_reason(name, c):
+    """A null frontier reading carries its reason in the cell's absences map, keyed by its BOUND.
+
+    THIS IS THE ONE STATE THE WHOLE `Measurement` DESIGN EXISTS TO PREVENT, and the frontier reopened it
+    once already: a `Measurement` serializes an absence as a bare `null` and its reason lives in the
+    cell's sibling `absences` map, populated by the engine's `absences_of!` macro - which walks scalar
+    fields and so could not see a Vec. Until `CellPerf::absences` grew its hand-written loop, a bound
+    nothing qualified at published `null` with its reason nowhere in the artifact at all.
+
+    KEYED BY BOUND, NOT INDEX (`perf.frontier.10ms.rps`, `perf.frontier.unbounded.rps`): the index is an
+    artifact of ordering, the bound is the identity. This check is therefore also what pins the two
+    naming schemes together - if the engine ever switched to indices, every reason would be filed under a
+    key nothing looks up, and a reader asking why the 10ms column is empty would find nothing.
+
+    `first_disqualified_conc` IS DELIBERATELY EXEMPT. Its absence is not a hole but the positive finding
+    that the sweep ran out of range while this bound still held, which the reading's own
+    `lower_bound: true` states directly - and `CellPerf::absences` keeps it out of the map for exactly
+    that reason, so requiring an entry here would fail every honest lower-bound reading on the board.
+    """
+    fr = frontier_of(c)
+    if not fr:
+        return
+    absences = c.get("absences") or {}
+    for r in fr:
+        if not isinstance(r, dict):
+            continue
+        key = bound_key(r.get("p99_bound_us"))
+        for f in ("rps", "concurrency", "p99_us"):
+            if r.get(f) is not None:
+                continue
+            entry = absences.get(f"perf.frontier.{key}.{f}") or {}
+            if not entry.get("reason"):
+                yield (f"{name}: frontier.{key}.{f} is null with NO reason in absences under "
+                       f"`perf.frontier.{key}.{f}` (a bare hole)")
+
+
+def producer_knew_the_frontier(d):
+    """Did the engine that wrote THIS snapshot publish frontiers at all?
+
+    True when any served cell carries a non-empty `perf.frontier`. Same mechanism and same reasoning as
+    `fields_the_producer_knew`: the artifact is asked, rather than a commit-to-field table nothing would
+    keep honest. False means the snapshot predates the metric, its cells are disclosed as unaudited-for-
+    the-frontier at the end of the run, and `check_frontier_is_complete` stays silent instead of printing
+    a violation per cell for a field that could not have existed when the file was written.
+    """
+    return any(frontier_of(c) for _name, c in served_cells(d))
+
+
+def parse_rust_frontier_bounds(text):
+    """The engine's own `P99_BOUNDS_US`, read out of frontier.rs. None when the declaration is not in
+    the shape this expects - which the caller must treat as a failure, never as agreement, the same rule
+    parse_site_c6 and parse_rust_absences follow."""
+    m = FRONTIER_RS_RE.search(text or "")
+    if not m:
+        return None
+    out = []
+    for tok in m.group(1).split(","):
+        tok = tok.strip().replace("_", "")
+        if not tok:
+            continue
+        if not tok.isdigit():
+            return None  # not a plain literal - the shape drifted, go blind rather than guess
+        out.append(int(tok))
+    return out or None
+
+
+def check_frontier_bounds_agree_with_the_engine():
+    """`P99_BOUNDS_US` here must be exactly the engine's `frontier::P99_BOUNDS_US` (ledger TOOL-02 shape).
+
+    The third instance of this file's cross-language pattern, after the site's C6 bar and record.rs's
+    absence field lists, and it exists for the sharpest version of the reason: the bounds decide how many
+    columns a board HAS. If the engine added a 500ms bound and this list stayed at five, every cell would
+    trip `check_frontier_is_complete` (loud, fine); if the engine DROPPED one and this list kept it, the
+    completeness check would fail the whole board for a column nobody publishes any more - and if someone
+    then "fixed" it by trimming the python list, the audit would stop noticing a shrinking board, which
+    is the failure mode. Parse the sibling, fail on drift, and treat "cannot find the declaration" as
+    drift rather than as agreement.
+    """
+    p = os.path.join(HERE, FRONTIER_RS_PATH)
+    try:
+        with open(p) as fh:
+            text = fh.read()
+    except OSError as e:
+        yield (f"frontier bounds: cannot read the engine's declaration at {FRONTIER_RS_PATH} ({e}) - "
+               f"the python bounds are {P99_BOUNDS_US}, and an unverifiable twin is not an agreeing one")
+        return
+    engine = parse_rust_frontier_bounds(text)
+    if engine is None:
+        yield (f"frontier bounds: {FRONTIER_RS_PATH} no longer declares "
+               f"`pub const P99_BOUNDS_US: [u64; N] = [...];` where this can read it - the cross-check "
+               f"went blind, which is a drift, not a pass")
+        return
+    if engine != P99_BOUNDS_US:
+        yield (f"frontier bounds: python P99_BOUNDS_US={P99_BOUNDS_US} but {FRONTIER_RS_PATH} declares "
+               f"{engine} - the audit and the engine disagree about how many columns the board has")
 
 
 def fields_the_producer_knew(d):
@@ -432,18 +901,27 @@ def fields_the_producer_knew(d):
     return known
 
 
+# The frontier's own invariants, listed apart from the rest so the run can SAY how many of them it
+# skipped on a snapshot that predates the metric. `check_frontier_is_complete` is first on purpose: it is
+# the one that decides whether this cell has a frontier to talk about at all, so its violation reads
+# before the others' silence on an empty one.
+FRONTIER_CHECKS = [
+    check_frontier_is_complete,
+    check_frontier_rates_are_monotone_in_the_bound,
+    check_frontier_is_rederivable_from_its_sweep,
+    check_frontier_disclosure_agrees_with_the_ladder,
+    check_frontier_p99_is_the_observed_tail,
+    check_frontier_rate_is_physically_possible,
+    check_every_absent_frontier_reading_has_a_reason,
+]
+
 CELL_CHECKS = [
-    check_sustained_not_above_peak,
-    check_peak_came_from_its_own_sweep,
     check_sweep_carries_its_latency,
     check_ttft_percentiles_are_ordered,
-    check_rate_and_concurrency_travel_together,
-    check_rate_is_physically_possible,
-    check_frames_have_a_stream_behind_them,
     check_no_bare_absence,
     check_declared_fields_are_carried,
     check_stream_capacity_is_a_number,
-]
+] + FRONTIER_CHECKS
 
 
 def parse_site_c6(text):
@@ -690,16 +1168,32 @@ def main():
     cells = 0
     # Fields no snapshot's producer knew about: disclosed below, never silently skipped.
     unknown_fields = {}
+    # Cells whose snapshot PREDATES the frontier, so its seven checks had nothing to run on. Counted per
+    # cell and per gateway and printed with the other NOT AUDITED disclosures: "this metric was not
+    # checked here" is a fact about the run and must not read as "this metric held". Every snapshot on
+    # disk on 2026-07-29 is in this bucket - the frontier replaced the throughput scalars after they were
+    # written - so a silent skip here would be the whole new invariant set quietly doing nothing.
+    prefrontier_cells = 0
+    prefrontier_gws = []
     for gw, (_path, d, _sha) in sorted(snaps.items()):
         known = fields_the_producer_knew(d)
+        frontier_known = producer_knew_the_frontier(d)
+        if not frontier_known:
+            prefrontier_gws.append(gw)
         for block, fields in ABSENCE_CARRYING_FIELDS.items():
             missing = [f for f in fields if f not in known.get(block, ())]
             if missing:
                 unknown_fields.setdefault(gw, []).extend(f"{block}.{f}" for f in missing)
         for name, c in served_cells(d):
             cells += 1
+            if not frontier_known:
+                prefrontier_cells += 1
             for check in CELL_CHECKS:
-                kw = {"known": known} if check is check_declared_fields_are_carried else {}
+                kw = {}
+                if check is check_declared_fields_are_carried:
+                    kw = {"known": known}
+                elif check is check_frontier_is_complete:
+                    kw = {"frontier_known": frontier_known}
                 for v in check(f"{gw} {name}", c, **kw):
                     violations[check.__name__].append(v)
         for v in check_declaration_matches_what_we_measured(gw):
@@ -711,19 +1205,18 @@ def main():
             f"{gw}: snapshot could not be parsed, so this gateway was NOT audited at all - {why}"
         )
 
-    # Board-level, not per-cell: the C6 bar is a property of the two gates, not of any one reading.
-    for v in check_c6_bar_agrees_with_the_site():
-        violations["check_c6_bar_agrees_with_the_site"].append(v)
-
-    # Also board-level: ABSENCE_CARRYING_FIELDS is a property of this file's agreement with the
-    # engine's own record.rs, not of any one cell's data.
-    for v in check_absence_fields_mirror_the_engine():
-        violations["check_absence_fields_mirror_the_engine"].append(v)
-
-    # Board-level for the same reason: it is about which declarations this run could read, not about any
-    # one gateway's numbers. Must run AFTER the per-gateway loop that populates it.
-    for v in check_every_declaration_is_readable():
-        violations["check_every_declaration_is_readable"].append(v)
+    # BOARD-LEVEL, NOT PER-CELL. Each of these is a property of this file's agreement with a sibling in
+    # another language (the site's C6 bar, record.rs's absence field lists, frontier.rs's declared
+    # bounds), or of which of this run's inputs could be read at all - never of any one cell's numbers.
+    # They run AFTER the per-gateway loop because `check_every_declaration_is_readable` reports what that
+    # loop populated.
+    board_checks = (check_c6_bar_agrees_with_the_site,
+                    check_absence_fields_mirror_the_engine,
+                    check_frontier_bounds_agree_with_the_engine,
+                    check_every_declaration_is_readable)
+    for check in board_checks:
+        for v in check():
+            violations[check.__name__].append(v)
 
     print(f"engine {engine[:7]}  {len(snaps)} gateways  {cells} served cells")
     if skipped:
@@ -739,7 +1232,16 @@ def main():
         print("  No cell in those snapshots carries them, so the engine that wrote them did not have")
         print("  them yet and this run could not check them. They are checked the moment a snapshot")
         print("  from an engine that DOES publish them lands - re-measure to audit them.")
-    print(f"{len(CELL_CHECKS)} per-cell invariants + 1 per-gateway + 2 board-level invariants\n")
+    if prefrontier_cells:
+        print(f"NOT AUDITED: the frontier on {prefrontier_cells} served cell(s) across "
+              f"{len(prefrontier_gws)} snapshot(s) that predate it: {', '.join(prefrontier_gws)}")
+        print("  No cell in those snapshots publishes perf.frontier, so the engine that wrote them still")
+        print(f"  had the rps_max_proxy / rps_sustained_20ms scalars and these {len(FRONTIER_CHECKS)} "
+              f"invariants had nothing")
+        print("  to run on. They run the moment a snapshot from an engine that DOES publish readings")
+        print("  lands - re-measure to audit them.")
+    print(f"{len(CELL_CHECKS)} per-cell invariants ({len(FRONTIER_CHECKS)} of them the frontier's) + 1 "
+          f"per-gateway + {len(board_checks)} board-level invariants\n")
 
     if not violations:
         print("PASS: every invariant held.")
