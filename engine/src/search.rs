@@ -738,6 +738,80 @@ pub fn saturation_plateau<P: Probe>(probe: &mut P, min_conc: u32, max_conc: u32)
     saturation_plateau_gated(probe, min_conc, max_conc, None)
 }
 
+/// WALK THE LADDER AND PROBE. DECIDE NOTHING.
+///
+/// Returns every rung probed, in probe order, and no verdict. The caller reads whatever answer it
+/// wants off them - see `frontier.rs`, which reads the throughput answer at six different tail-latency
+/// bounds from one call to this.
+///
+/// THIS REPLACED `saturation_plateau`, and the difference is the whole point. That function climbed AND
+/// decided: it judged each rung against its own measured wobble floored at `WOBBLE_FLOOR = 0.02`,
+/// counted `FLAT_RUNGS_TO_STOP = 3` consecutive non-improvers, required `MIN_SATURATION_CONC = 16`
+/// before believing saturation, and then picked a winner with `published_winner`. Four chosen numbers,
+/// and every one of them could move a published throughput figure:
+///
+///   - Stopping early publishes a smaller number as the gateway's maximum. kong's own case, recorded in
+///     the retired constant's doc: at FLAT=2 the climb stopped at c=32 and published 15909, which the
+///     sustained reading of the SAME windows then beat at 17898. A maximum another reading beats is not
+///     a maximum.
+///   - Judging "improvement" against a noise floor decided which of two real rungs got published.
+///   - And a climb that ran to the top still improving was converted into an ABSENCE
+///     (`Absent::SearchExhausted`), discarding a real measured rate for failing to prove maximality.
+///
+/// None of that is needed once nothing is looking for the shape of a curve. Every rung probed is a rung
+/// the frontier considers, so there is no "peak" to locate and no flatness to detect.
+///
+/// THE STOPPING RULE IS A PREDICATE FLIP, NOT A COUNT. The climb stops when a rung produces no clean
+/// window at all - `SweepProbe`'s `passed` is `fail == 0`, so that means every window at this
+/// concurrency lost at least one request the gateway had accepted. Past that point more concurrency
+/// cannot un-fail those requests, and a rung that fails every window contributes to no reading at any
+/// bound (see `frontier::Rung::served_cleanly`). So continuing would cost load and add nothing, and
+/// stopping cannot lower a published number - which is exactly what could not be said of the flat-run
+/// counter it replaces.
+///
+/// It also still climbs to `max_conc` when nothing fails, and that is a LOWER BOUND rather than a
+/// ceiling. `frontier::Reading::is_lower_bound` reports it as one instead of throwing the rate away.
+pub fn climb_rungs<P: Probe>(probe: &mut P, min_conc: u32, max_conc: u32) -> Vec<ProbedPoint> {
+    // Normalised the same way every other search here normalises, so a reversed range is a caller's
+    // typo rather than a silently empty climb.
+    let (min_conc, max_conc) = if min_conc <= max_conc {
+        (min_conc, max_conc)
+    } else {
+        (max_conc, min_conc)
+    };
+    let mut s = Search::new(probe);
+    let mut ladder = Ladder::from_floor(min_conc, max_conc);
+    // The floor is probed FIRST: `Ladder::next` doubles before it yields, so reading it before the
+    // floor would skip the floor entirely and open the climb at twice the intended concurrency.
+    let mut c = ladder.floor();
+    loop {
+        let mut any_clean = false;
+        for i in 0..WINDOWS_PER_RUNG {
+            // The first window may come from the memo; the repeats must not, since the whole reason
+            // there are three is that identical conditions produce different numbers.
+            let sample = if i == 0 {
+                s.sample(c)
+            } else {
+                s.sample_repeat(c)
+            };
+            match sample {
+                Some(sm) => any_clean |= sm.passed,
+                // The RIG could not run this window. Not a finding about the gateway, so the climb
+                // ends with what it has rather than reading the failure as a ceiling.
+                None => return s.points,
+            }
+        }
+        if !any_clean {
+            break;
+        }
+        c = match ladder.next() {
+            Some(next) => next,
+            None => break,
+        };
+    }
+    s.points
+}
+
 /// A predicate over one window's reading: does this window hold the caller's ceiling?
 ///
 /// `search` does not know what 20ms means, and should not. It climbs, it judges rungs against their
@@ -1251,6 +1325,162 @@ mod tests {
             r.points.iter().any(|p| p.concurrency == 5 && !p.passed),
             "the measured failure at 5 is the proof, and it must be in the trace"
         );
+    }
+
+    // ── climb_rungs: walk the ladder, decide nothing ────────────────────────────────────────────
+
+    /// A gateway that keeps serving cleanly to a limit, then starts losing requests above it. `passed`
+    /// is `fail == 0`, which is what `SweepProbe` means by it.
+    struct CleanToLimit {
+        limit: u32,
+    }
+    impl Probe for CleanToLimit {
+        fn probe(&mut self, c: u32) -> Option<Sample> {
+            Some(Sample::new(f64::from(c) * 10.0, c <= self.limit))
+        }
+    }
+
+    // THE LADDER IS WALKED WHOLE, and the climb stops on the predicate flip: the first rung where no
+    // window served cleanly. Nothing counts flat rungs, so nothing can stop short of a rung the
+    // frontier would have read.
+    #[test]
+    fn the_climb_stops_when_requests_start_failing_not_when_the_curve_flattens() {
+        let mut probe = CleanToLimit { limit: 1024 };
+        let points = climb_rungs(&mut probe, 1, 65_536);
+        let probed: Vec<u32> = {
+            let mut v: Vec<u32> = points.iter().map(|p| p.concurrency).collect();
+            v.dedup();
+            v
+        };
+        assert_eq!(
+            probed,
+            vec![1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048],
+            "every doubling from the floor, plus the first failing rung, and then stop"
+        );
+        // The first failing rung IS probed and IS returned - it is the evidence that the one below it
+        // is a boundary rather than a place we stopped. `frontier` needs it for
+        // `first_disqualified_conc`.
+        assert!(points.iter().any(|p| p.concurrency == 2048 && !p.passed));
+        assert!(
+            !points.iter().any(|p| p.concurrency == 4096),
+            "and nothing above it: more concurrency cannot un-fail those requests"
+        );
+    }
+
+    // THE REGRESSION THE OLD STOP RULE CAUSED. kong's curve creeps up by less than its own
+    // window-to-window wobble, so `FLAT_RUNGS_TO_STOP = 3` fired while throughput was still rising and
+    // the climb stopped at c=32 - publishing 15909 as the maximum, which the sustained reading of the
+    // same windows then beat at 17898. Here the same shape must be climbed to the end.
+    #[test]
+    fn a_curve_that_creeps_inside_its_own_noise_is_still_climbed_to_the_end() {
+        struct Creeping;
+        impl Probe for Creeping {
+            fn probe(&mut self, c: u32) -> Option<Sample> {
+                // Gains ~3% per doubling - smaller than a noisy gateway's window spread, which is
+                // exactly the shape the flat-run counter mistook for saturation.
+                Some(Sample::new(
+                    15_000.0 * (1.0 + 0.03 * f64::from(c.ilog2())),
+                    true,
+                ))
+            }
+        }
+        let mut probe = Creeping;
+        let points = climb_rungs(&mut probe, 1, 4096);
+        let top = points.iter().map(|p| p.concurrency).max().unwrap();
+        assert_eq!(
+            top, 4096,
+            "a creeping curve must be climbed to the top of the range"
+        );
+        let best = points.iter().map(|p| p.value).fold(0.0_f64, f64::max);
+        let at_32 = points
+            .iter()
+            .filter(|p| p.concurrency == 32)
+            .map(|p| p.value)
+            .fold(0.0_f64, f64::max);
+        assert!(
+            best > at_32,
+            "the rungs above c=32 are better and must be in the record: {best} vs {at_32}"
+        );
+    }
+
+    // A rung that fails EVERY window ends the climb; a rung that fails only some does not. The stop
+    // condition is "no clean window at all", because a single clean window is still a real observation
+    // the frontier can read.
+    #[test]
+    fn a_rung_with_one_clean_window_does_not_end_the_climb() {
+        struct FlakyAtOneRung {
+            seen: std::collections::BTreeMap<u32, usize>,
+        }
+        impl Probe for FlakyAtOneRung {
+            fn probe(&mut self, c: u32) -> Option<Sample> {
+                let n = self.seen.entry(c).or_insert(0);
+                *n += 1;
+                // At c=16 the first two windows fail and the third is clean.
+                let passed = if c == 16 { *n >= 3 } else { true };
+                Some(Sample::new(f64::from(c), passed))
+            }
+        }
+        let mut probe = FlakyAtOneRung {
+            seen: Default::default(),
+        };
+        let points = climb_rungs(&mut probe, 1, 64);
+        assert!(
+            points.iter().any(|p| p.concurrency == 64),
+            "one clean window at c=16 keeps the climb going: {:?}",
+            points.iter().map(|p| p.concurrency).collect::<Vec<_>>()
+        );
+    }
+
+    // Every rung gets `WINDOWS_PER_RUNG` windows, so the frontier reads a rate backed by repeats rather
+    // than by one lucky window. The memo may serve the FIRST window; the repeats must be real.
+    #[test]
+    fn every_rung_is_probed_the_full_number_of_windows() {
+        let mut probe = CleanToLimit { limit: 64 };
+        let points = climb_rungs(&mut probe, 1, 8);
+        for c in [1u32, 2, 4, 8] {
+            let n = points.iter().filter(|p| p.concurrency == c).count();
+            assert_eq!(n, WINDOWS_PER_RUNG, "c={c} got {n} windows");
+        }
+    }
+
+    // A RIG THAT CANNOT RUN A WINDOW ENDS THE CLIMB WITH WHAT IT HAS, and does not read as a ceiling.
+    // The distinction is the project's central rule: our failure is never their result.
+    #[test]
+    fn a_rig_that_stops_answering_ends_the_climb_without_inventing_a_limit() {
+        struct DiesAt {
+            at: u32,
+        }
+        impl Probe for DiesAt {
+            fn probe(&mut self, c: u32) -> Option<Sample> {
+                if c >= self.at {
+                    return None;
+                }
+                Some(Sample::new(f64::from(c), true))
+            }
+        }
+        let mut probe = DiesAt { at: 32 };
+        let points = climb_rungs(&mut probe, 1, 4096);
+        assert!(points.iter().all(|p| p.concurrency < 32));
+        assert!(
+            points.iter().all(|p| p.passed),
+            "nothing recorded a failure, so no reading may later read one as the gateway's limit"
+        );
+    }
+
+    // Normalised like every other search here: a reversed range is a typo, not an empty climb.
+    #[test]
+    fn a_climb_range_given_backwards_walks_the_same_interval() {
+        let mut a = CleanToLimit { limit: 4096 };
+        let mut b = CleanToLimit { limit: 4096 };
+        let fwd: Vec<u32> = climb_rungs(&mut a, 1, 64)
+            .iter()
+            .map(|p| p.concurrency)
+            .collect();
+        let rev: Vec<u32> = climb_rungs(&mut b, 64, 1)
+            .iter()
+            .map(|p| p.concurrency)
+            .collect();
+        assert_eq!(fwd, rev);
     }
 
     // ── saturation_plateau ──────────────────────────────────────────────────────────────────────
