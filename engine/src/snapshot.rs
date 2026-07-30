@@ -447,6 +447,7 @@ mod tests {
     ) -> ResultSnapshot {
         ResultSnapshot {
             schema_version: 1,
+            definitions: Default::default(),
             gateway: gateway.to_string(),
             build: String::new(),
             measured_at: measured_at.to_string(),
