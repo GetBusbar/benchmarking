@@ -152,18 +152,29 @@ _ABSENCE_CAUSE = {
 }
 
 
-def _absent_label(chart, r):
-    """The absent-row caption, preferring what the record says over what the chart assumes."""
+def _absent_cause(chart, r):
+    """The cause the RECORD gives for this row's absence, or None when it gives none.
+
+    None rather than a fallback ON PURPOSE. This returned `chart.not_served_text` for an unrecognised
+    reason, and because that is never falsy it made every chart's `not_measured_text` unreachable
+    through the `or` chain at the call site - so an unmeasured metric on a cell that DID serve was
+    captioned as a gateway that did not. `memory_rss` printed "did not serve" beside its own
+    `+12.3 MiB/min under load` on the same bar; `stream_added_ttft` asserted "no SSE streaming" over a
+    record whose `stream_served` is true. Returning None lets the caller reach the wording its author
+    wrote for exactly this case."""
     field = chart.series[0].field if getattr(chart, "series", None) else None
+    if not field:
+        return None
     # The row is FLATTENED - envelopes became plain numbers upstream - so the reason comes from the
     # `_<field>_reason` the projection carries beside the value, not from the value itself.
-    reason = r.get(f"_{field}_reason") if field else None
-    if reason is None and field:
-        reason = mreason(r.get(field))
+    reason = r.get(f"_{field}_reason") or mreason(r.get(field))
     cause = _ABSENCE_CAUSE.get(reason or "")
-    if cause is None:
-        return chart.not_served_text
-    return f"\u2715 {cause}"
+    return f"\u2715 {cause}" if cause else None
+
+
+def _absent_label(chart, r):
+    """The absent-row caption: what the record says, else what the chart's author wrote."""
+    return _absent_cause(chart, r) or chart.not_served_text
 
 
 def mvalid(env) -> bool:
@@ -681,12 +692,18 @@ CHARTS = [
         unit="frames / sec",
         series=[Series("streamcpu_frames_per_sec", "sustained frames/sec", "rank")],
         higher_better=True,
-        # served_field is streamcpu_valid (streamed AND not mock-bound): a mock-bound result is not a
-        # valid gateway-vs-ceiling comparison, so it renders as "not proven" rather than a clean bar.
-        # On an UNPINNED box every result is mock-bound; only the EC2 field run (real core pinning)
-        # yields streamcpu_valid=true, so unproven laptop numbers are never surfaced as a comparison.
+        # served_field is streamcpu_valid: the envelope carries a value. There is no mock-bound half to
+        # it any more - a frame rate near the mock's own paced ceiling is published with the fraction it
+        # reached, not withheld - so this gates on absence alone.
+        #
+        # The caption used to read "needs pinned field run", which asserted OUR equipment as the cause of
+        # every absence on this chart: a cpu_fps hole recorded as harness_error, search_exhausted or
+        # not_measured printed the same rig excuse. It is the identical defect the memory_recovery chart
+        # below already fixed for the same reason, and the two neighbouring throughput charts were hedged
+        # with it; this one was missed. The per-row caption now comes from the record (see _absent_cause)
+        # and this is only the wording of last resort.
         served_field="streamcpu_valid",
-        not_served_text="✕ not measured (needs pinned field run)",
+        not_served_text="✕ not measured - see this cell's own reason",
         zero_text="0  ·  MEASURED: relayed no qualifying frames",
         annot=lambda r: _stream_annot(
             r, (lambda f: f"{f:,.0f}/core" if f > 0 else None)(float(r.get("streamcpu_fps_per_core") or 0))),
@@ -820,10 +837,20 @@ def _proj_streaming(key: str) -> dict | None:
     # absent row, WHY it was absent had been discarded and the caption fell back to a hard-coded
     # string asserting "rig-limited" over absences the engine attributed to the gateway or called
     # explicitly unknown. See `_absent_label`.
-    for _f in ("streams_sustained", "cpu_fps", "added_ttft_p99_us", "added_gap_p99_us"):
-        _r = mreason(s.get(_f))
+    # KEYED BY THE ROW FIELD, NOT THE ENVELOPE FIELD. This wrote `_streams_sustained_reason` and
+    # `_cpu_fps_reason` while `_absent_label` looks the reason up as `_<chart.series[0].field>_reason` -
+    # and the row field names are `stream_sustained_streams` and `streamcpu_frames_per_sec`. So the
+    # lookup never resolved for ANY chart, `_ABSENCE_CAUSE` was dead in production, and the blanket
+    # captions it was written to replace are what actually printed. Two names for one fact is how a fix
+    # ships and changes nothing.
+    for _env_f, _row_f in (("streams_sustained", "stream_sustained_streams"),
+                           ("streams_sustained_fps", "stream_sustained_fps"),
+                           ("cpu_fps", "streamcpu_frames_per_sec"),
+                           ("added_ttft_p99_us", "stream_added_ttft_p99_us"),
+                           ("added_gap_p99_us", "stream_added_gap_p99_us")):
+        _r = mreason(s.get(_env_f))
         if _r:
-            row.setdefault(f"_{_f}_reason", _r)
+            row.setdefault(f"_{_row_f}_reason", _r)
     return row
 
 
@@ -979,10 +1006,15 @@ def _proj_perf(key: str) -> dict | None:
     for _m in ("rps_max_proxy", "rps_sustained_20ms"):
         env = bc.get(_m)
         obj[f"{_m}_valid"] = obj.get(_m) is not None
-        # suppressed = the harness could not certify a positive value (rig-limited / unverifiable). The
-        # envelope carries this explicitly; the README renders "not measured (rig-limited)" for it, distinct
+        # RETIRED. `*_suppressed` was projected from the envelope's `suppressed` flag, which the seal set
+        # when a measurement reached a chosen fraction of the rig's own ceiling - deleting a correct number
+        # to avoid publishing an ambiguous one. The number is published now, with the ceiling it was
+        # measured against and the fraction of it reached, and no producer can set the flag. Kept as a
+        # constant False rather than dropped so a stale consumer reads "not suppressed" instead of
+        # KeyError-ing on a board that no longer suppresses anything.
+        # (was: the harness could not certify a positive value - rig-limited / unverifiable, distinct
         # from a measured 0 (value 0, honest) and from an unserved path (no best_cell at all).
-        obj[f"{_m}_suppressed"] = bool(_is_env(env) and env.get("suppressed"))
+        obj[f"{_m}_suppressed"] = False
     obj["build"] = src.get("build")
     obj["measured_at"] = src.get("measured_at")
     hw = (g.get("matrix") or {}).get("hardware")
@@ -1014,6 +1046,12 @@ def _proj_xlate(key: str) -> dict | None:
     # Same below_resolution disclosure the passthrough row carries (see _proj_perf / _zero_label).
     if mreason(tc.get("added_latency_p99_us")) == "below_resolution":
         obj["_xlate_added_latency_p99_us_reason"] = "below_resolution"
+    # EVERY ABSENCE REASON on the throughput figure, so the report table can name the record's own cause
+    # instead of asserting one. Without this the column printed "(rig-limited)" over a hole the engine
+    # recorded as search_exhausted or harness_error, and there was no way for the caption to know better.
+    _rps_reason = mreason(tc.get("rps_sustained_20ms"))
+    if _rps_reason:
+        obj["_xlate_rps_sustained_20ms_reason"] = _rps_reason
     obj["xlate_rps_sustained_20ms_valid"] = rps is not None
     path = tc.get("path") or {}
     obj["_xlate_ingress"] = path.get("ingress")
@@ -1326,7 +1364,7 @@ def render(chart: Chart, only_keys=None, out_stem: str | None = None) -> None:
                     # This branch used to print a caption asserting "rig-limited" over absences the
                     # artifact attributed to the gateway or called explicitly unknown.
                     txt, col, weight = (
-                        _absent_label(chart, r) or chart.not_measured_text or chart.not_served_text,
+                        _absent_cause(chart, r) or chart.not_measured_text or chart.not_served_text,
                         "#c2410c",
                         "bold",
                     )
@@ -1525,13 +1563,14 @@ def _report_md(rows: list, title: str, charts: list, pending: tuple = (), chart_
     lines.append("")
     lines.append("| Gateway | Added latency (p99) | Sustained RPS (20 ms upstream) | Max proxy RPS | Idle RAM | Steady-state RAM | Built |")
     lines.append("|---|--:|--:|--:|--:|--:|---|")
-    mock_bound_seen = False
+
     zero_load_seen = False
     dnf_seen = False
     fail_notes = []  # (gateway, serve_error) for every ❌ row - the receipt behind "did not serve"
 
-    def rps_cell(val, suppressed, served):
-        # ✕ = never served under load; ⚠ rig-limited = the sealed envelope suppressed a positive value the
+    def rps_cell(val, served):
+        # ✕ = never served under load; a real 0 = came up but nothing held the gate. (There used to be a
+        # third state here, "⚠ rig-limited", for a positive value the sealed envelope suppressed - see
         # harness could not certify as gateway-limited; 0 = served but no tested load held p99<1s.
         if served is False:
             return "✕"
@@ -1542,8 +1581,12 @@ def _report_md(rows: list, title: str, charts: list, pending: tuple = (), chart_
         # and "there is no perf record here"; only the middle one is a zero.
         if served is None:
             return "-"
-        if suppressed:
-            return "⚠ rig-limited"
+        # NO SUPPRESSED BRANCH. It printed "⚠ rig-limited" off a boolean that ALSO covered the engine's
+        # explicit unknown: seal.mjs emitted `suppressed: true` with reason "mock_bound" when the rig was
+        # judged the limit and "unverifiable" when the reference could not be established at all, and this
+        # rendered the second as a positive claim about the first. Both are gone - the suppression layer
+        # is retired, a measurement near the rig's ceiling is published with the fraction it reached, and
+        # no producer can set the flag. C2 asserts no envelope in a published bundle carries it.
         if not val:
             return "0"
         return f"{int(val):,}"
@@ -1559,10 +1602,8 @@ def _report_md(rows: list, title: str, charts: list, pending: tuple = (), chart_
         # peak (which would report when the load stopped, not what the gateway holds).
         peak = r.get("steady_state_rss_mib")
         served = r.get("served", None)
-        proxy = rps_cell(r.get("rps_max_proxy"), r.get("rps_max_proxy_suppressed"), served)
-        llm = rps_cell(r.get("rps_sustained_20ms"), r.get("rps_sustained_20ms_suppressed"), served)
-        if r.get("rps_max_proxy_suppressed") or r.get("rps_sustained_20ms_suppressed"):
-            mock_bound_seen = True
+        proxy = rps_cell(r.get("rps_max_proxy"), served)
+        llm = rps_cell(r.get("rps_sustained_20ms"), served)
         if served is not False and r.get("rps_max_proxy") == 0:
             zero_load_seen = True
         # Latency cell: a did-not-serve gateway may still have a concurrency-1 number - flag it † so it
@@ -1610,9 +1651,9 @@ def _report_md(rows: list, title: str, charts: list, pending: tuple = (), chart_
     if dnf_seen:
         legend.append("**†** = a concurrency-1 latency exists, but the gateway failed under load: "
                       "not a clean result.")
-    if mock_bound_seen:
-        legend.append("**⚠ rig-limited** = a positive throughput the harness could not certify as "
-                      "gateway-limited (rig / mock-bound); suppressed, not shown as a number.")
+    # NO rig-limited legend. Nothing renders that marker any more: a throughput the harness could not
+    # certify as gateway-limited is published with the fraction of our own rig's ceiling it reached, which
+    # is the fact the marker was standing in for, and it needs no legend entry because it is a number.
     if pending:
         legend.append("**⏳** = a manifest exists but it hasn't been run on the rig yet.")
     if legend:
@@ -1683,13 +1724,20 @@ def _report_md(rows: list, title: str, charts: list, pending: tuple = (), chart_
                 ttft = us_cell(s, "stream_added_ttft_p99_us")
                 gap = us_cell(s, "stream_added_gap_p99_us")
                 # MEDIUM-R3-5: gate the sustained count on stream_sustained_valid (streamed AND not
-                # mock-bound), matching the stream_sustained PNG (served_field=stream_sustained_valid)
-                # and the site drawer. Reading stream_sustained_streams raw would print a concrete count
-                # (e.g. "256") for a gateway whose bisect saturated near the paced-mock ceiling - a
-                # rig-limited number the chart renders "not measured (rig-limited)" - two published
-                # surfaces diverging from the same record.
+                # Gate on the envelope carrying a value, matching the stream_sustained PNG
+                # (served_field=stream_sustained_valid) and the site drawer, so two published surfaces
+                # cannot diverge from the same record.
+                #
+                # AND NAME THE RECORD'S OWN CAUSE. This printed "not measured (rig-limited)" for EVERY
+                # absence of this figure. `stream_sustained_valid` is `sust is not None`, true only when a
+                # value exists - so search_exhausted ("still climbing when the range ran out"),
+                # harness_error, and a not_measured whose own detail says "whether this was rig-bound is
+                # unknown" all published as an assertion that our equipment was the limit. It is also now
+                # wrong in every case it can fire: a streams figure near the mock's ceiling is published
+                # with its headroom, so a null here can no longer BE rig-limited.
                 if not s.get("stream_sustained_valid"):
-                    streams = "✕ not measured (rig-limited)"
+                    _cause = _ABSENCE_CAUSE.get(s.get("_stream_sustained_streams_reason") or "")
+                    streams = f"✕ {_cause}" if _cause else "✕ not measured"
                 elif int(s.get("stream_sustained_streams") or 0) == 0:
                     # AUDIT #3: a MEASURED FAILURE. The gateway was offered stream load and sustained
                     # none of it - publishing that as "not measured (rig-limited)" (the branch above)
@@ -1711,11 +1759,14 @@ def _report_md(rows: list, title: str, charts: list, pending: tuple = (), chart_
             elif not x.get("xlate_served"):
                 xl = "✕ cannot translate"
             elif not x.get("xlate_rps_sustained_20ms_valid"):
-                # Gate the translation RPS on the mock-bound honesty flag (xlate_rps_sustained_20ms_valid),
-                # exactly as the SSE-streams column above gates on stream_sustained_valid and the
-                # translation PNG gates on served_field, so a rig-limited (mock-bound) number is never
-                # printed as if it were a real reading. A legitimate measured 0 stays valid (shows "0").
-                xl = "✕ not measured (rig-limited)"
+                # Gate on the envelope carrying a value, as the SSE-streams column above does and as the
+                # translation PNG's served_field does. A legitimate measured 0 stays valid (shows "0").
+                #
+                # The cause comes from the record for the same reason as the streams column above: this
+                # read "(rig-limited)" for every absence, and `xlate_rps_sustained_20ms_valid` is
+                # `rps is not None`, which is false for every absence reason there is.
+                _cause = _ABSENCE_CAUSE.get(x.get("_xlate_rps_sustained_20ms_reason") or "")
+                xl = f"✕ {_cause}" if _cause else "✕ not measured"
                 if x.get("_xlate_ingress"):
                     xl += f" ({x['_xlate_ingress']} → {x['_xlate_egress']})"
                 # Render the legacy-xlate-suite fallback marker from the source stamp, like every PNG.
