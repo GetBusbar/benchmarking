@@ -1563,23 +1563,22 @@ impl Metric for AddedLatency {
     }
 }
 
-/// Sustained throughput: the highest concurrency at which the gateway holds p99 under
-/// `run::SUSTAINED_P99_CEILING_US` with an error rate under `run::SUSTAINED_MAX_FAIL_RATIO` (the
-/// README's own gate), and the requests/sec it sustains there.
-///
-/// ONE BISECTION, TWO NUMBERS - the ceiling and the rate it sustains there come from the SAME search
-/// for the same reason `Throughput`'s peak and its concurrency do: re-deriving the rate from a second
-/// window at the winning concurrency would measure a different population than the one that proved
-/// the ceiling.
-///
-/// A DIFFERENT SEARCH SHAPE THAN `Throughput`, which is why this is a separate group rather than a
-/// third and fourth field bolted onto it. Peak throughput is unimodal (rises then falls) and is found
-/// by `search::saturation_plateau`; sustained throughput is a monotone pass/fail gate in concurrency (once p99
-/// blows past the ceiling it does not come back under it as concurrency keeps climbing) and is found
-/// by `search::bisect_ceiling`. Conflating the two searches into one group would either run the wrong
-/// algorithm for one of the two numbers or run two searches and call it one group, both of which this
-/// file's module doc names as the defect a group exists to prevent.
-pub struct SustainedThroughput;
+// SUSTAINED THROUGHPUT WAS A METRIC GROUP AND IS NOT ONE ANY MORE.
+//
+// It measured the highest concurrency holding p99 under a fixed ceiling with errors under 0.1%, and
+// the rate it sustained there. The FRONTIER replaced it: rather than one scalar under one chosen
+// ceiling, the board now publishes a reading at each declared bound, so "how much can it carry under
+// a tail I accept" is answered across the whole axis instead of at a single point somebody picked.
+//
+// The struct outlived the group. `pub struct SustainedThroughput;` sat here with a full doc comment
+// describing a live bisection search, no `impl Metric` anywhere in the crate, and no entry in
+// `METRICS` - and this file's own module doc says "a metric is in `METRICS` or it does not exist".
+// Its doc also cited `search::saturation_plateau`, which is itself deleted. A test comment further
+// down claimed the struct HAD been added to `METRICS`, so a reader had two mutually-contradicting
+// statements and neither matched the list six lines from the top of the file.
+//
+// Deleted rather than left inert: an unreachable metric group with authoritative-sounding
+// documentation is worse than no documentation, because it reads as a description of what runs.
 
 // ── the two concurrent-stream groups ──────────────────────────────────────────────────────────────
 //
@@ -1589,17 +1588,23 @@ pub struct SustainedThroughput;
 // `streams_sustained` and `streams_sustained_fps` come from one `bisect_ceiling` over a monotone
 // pass/fail gate (the README's "99.9% of expected frames, no stall past 2x the pace, under 0.1%
 // stream errors"), and the frames/sec is read straight off the winning rung of that same bisection -
-// so they are one group for exactly the reason `SustainedThroughput`'s ceiling and rate are.
+// so they are one group for the same reason `Throughput`'s peak and its concurrency are: two numbers
+// off ONE search.
 //
-// `cpu_fps` and `cpu_fps_concurrency` come from a `saturation_plateau` over a saturating curve. That is a
-// DIFFERENT ALGORITHM over a DIFFERENT verdict, and folding it in beside the gate would mean either
-// running the wrong search for one of the four numbers or running two searches inside one group and
-// calling it one - the two failure modes the module doc names. Same reasoning that already split
-// `Throughput` from `SustainedThroughput`, applied to the same axis one lane over.
+// THE SECOND GROUP IS GONE, AND SO IS THE FUNCTION THIS PARAGRAPH USED TO NAME. It said `cpu_fps` and
+// `cpu_fps_concurrency` "come from a `saturation_plateau` over a saturating curve" - present tense,
+// about a metric that was RETIRED (of the 16 cells publishing both it and `streams_sustained_fps`, 4
+// had it inverted below the proven delivery boundary, 5 were redundant within 1%, and 7 were measured
+// at a concurrency where the delivery gate did not hold) and a search function that has since been
+// deleted outright. Two dead things described as live, in one sentence.
 //
-// The two groups DO share their window driver (`run::stream_window`), and that is not the same thing
-// as sharing a search: sharing the instrument is what makes their numbers comparable, sharing a
-// search would be what makes them one population.
+// The RULE it was illustrating still stands and is why this note survives at all: numbers from ONE
+// search share a group, numbers from SEPARATE searches do not. Folding two searches into one group
+// means either running the wrong algorithm for some of the numbers or running two searches and
+// calling it one - the two failure modes the module doc names.
+//
+// Sharing a window driver (`run::stream_window`) is NOT sharing a search: sharing the instrument is
+// what makes numbers comparable, sharing a search is what makes them one population.
 
 /// The inter-frame gap at a percentile, over the gaps INSIDE one stream.
 ///
@@ -1704,7 +1709,7 @@ impl Metric for StreamsSustained {
             None => carry(&found.fps),
         };
         // Mirrors the rate's reason rather than inventing a second one, exactly as `Throughput` and
-        // `SustainedThroughput` do for their own concurrency fields.
+        // `Throughput` does for its own concurrency field.
         let conc = match found.concurrency.value() {
             Some(c) => Measurement::Measured(f64::from(*c)),
             None => Measurement::absent(found.fps.reason().cloned().unwrap_or(Absent::NotMeasured)),
@@ -2183,10 +2188,14 @@ mod tests {
     // ── the reachability list itself carries the two new groups ────────────────────────────────
     //
     // `no_two_groups_claim_the_same_artifact_field` and `every_group_declares_what_it_fills` above
-    // already run over `METRICS`, so adding `AddedLatency`/`SustainedThroughput` to that list is
-    // what makes them reachable per this file's own module doc ("a metric is in `METRICS` or it does
-    // not exist"). This test names the two fields those tests would silently miss if a future edit
-    // dropped either struct back out of the list without anything else failing.
+    // already run over `METRICS`, so being IN that list is what makes a group reachable per this
+    // file's own module doc ("a metric is in `METRICS` or it does not exist"). This test names the
+    // field those tests would silently miss if a future edit dropped `AddedLatency` back out of the
+    // list without anything else failing.
+    //
+    // It used to say "adding `AddedLatency`/`SustainedThroughput` to that list", which was false for
+    // the second: `SustainedThroughput` was never in `METRICS`, had no `impl Metric`, and has now
+    // been deleted along with the group the frontier replaced.
     // ── the two concurrent-stream groups ────────────────────────────────────────────────────────
 
     // The same gate for the concurrent-stream group. `CellStream` declared these fields and NOTHING in

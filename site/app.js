@@ -617,7 +617,10 @@ const NO_FRONTIER_NOTE = "no frontier in this record: it was measured before the
    `p99_us` IS THE OBSERVED TAIL, NEVER THE BOUND. 4 ms under a 100 ms bound and 99 ms under it are very
    different findings, and a tooltip that echoed the bound back would restate the question as the answer. */
 function readingSentence(rd, v) {
-  const bits = [`${fmtInt(v)} req/s ${boundClause(rd.bound_ms)}.`];
+  /* fmtRate, not fmtInt: this sentence explains the cell beside it, and rounding here put
+     "0 req/s" one hover away from a cell reading 0.25 - the same false statement the engine and the
+     cell renderer were both changed to stop making. */
+  const bits = [`${fmtRate(v)} req/s ${boundClause(rd.bound_ms)}.`];
   if (rd.concurrency != null) bits.push(`Observed with ${fmtInt(rd.concurrency)} concurrent requests in flight.`);
   if (rd.p99_us != null) bits.push(`The tail it actually produced there was ${fmtTail(rd.p99_us)}.`);
   if (rd.lower_bound === true)
@@ -791,7 +794,7 @@ function frontierSpark(frontier, opts = {}) {
        floor tick  - served, but nothing held this tail (a measured nothing, not a missing measurement) */
   const dots = pts.map((p) => {
     const cx = x(p.i).toFixed(1), cy = y(p.v).toFixed(1);
-    const title = `<title>${esc(`${boundLabel(p.b)}: ${p.onFloor ? "no rung held this tail" : `${fmtInt(p.v)} req/s${p.floor ? " or more" : ""}`}`)}</title>`;
+    const title = `<title>${esc(`${boundLabel(p.b)}: ${p.onFloor ? "no rung held this tail" : `${fmtRate(p.v)} req/s${p.floor ? " or more" : ""}`}`)}</title>`;
     if (p.onFloor)
       return `<line x1="${cx}" y1="${(H - PAD - 3).toFixed(1)}" x2="${cx}" y2="${H - PAD}" stroke="currentColor" stroke-width="1.2" stroke-opacity="0.55">${title}</line>`;
     return p.floor

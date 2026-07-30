@@ -426,7 +426,20 @@ fn read_chunked_body(stream: &mut TcpStream, deadline: Instant, raw: &[u8]) -> O
         };
         if size == 0 {
             // Trailing headers (rare, usually absent) run up to the final blank line.
+            //
+            // CAPPED FOR THE SAME REASON THE RESPONSE HEAD IS, and this loop was missed when that cap
+            // was added: `read_line` bounds ONE line at 64 KiB and `MAX_BODY_BYTES` bounds `body`, but
+            // nothing bounded the NUMBER of trailer lines or the growth of `seen`. A peer that sends a
+            // terminal `0\r\n` and then legal trailers forever, never sending the closing blank line,
+            // grows this at loopback speed for the whole deadline. Fixing read_head's loop and leaving
+            // this one is the half-fix shape this audit keeps finding.
             loop {
+                if seen.len() > MAX_HEAD_BYTES {
+                    return malformed(
+                        &seen,
+                        format!("chunked trailer exceeds the {MAX_HEAD_BYTES} byte cap - refusing to keep reading"),
+                    );
+                }
                 match read_line(stream, deadline) {
                     ReadOutcome::Full(line) => {
                         seen.extend_from_slice(&line);

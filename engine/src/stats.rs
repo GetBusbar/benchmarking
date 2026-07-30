@@ -193,15 +193,23 @@ pub fn plateau_check(samples: &[Sample], window_s: f64, trend_pct: f64, range_pc
     // `fold(f64::INFINITY, f64::min)` while `stats::min` and `stats::max` sat unused a hundred lines
     // below with unit tests of their own - so the tests read as coverage of this engine's min/max
     // handling while the number that actually reaches the board's spread and plateau figures came from
-    // code they never touched. `win` is non-empty here (the guard above returns early otherwise), so
-    // the absent case cannot arise; `unwrap_or` keeps that from becoming a panic if that guard ever
-    // moves.
-    let lo = min(&win.iter().map(|s| s.mib).collect::<Vec<_>>())
-        .copied()
-        .unwrap_or(f64::INFINITY);
-    let hi = max(&win.iter().map(|s| s.mib).collect::<Vec<_>>())
-        .copied()
-        .unwrap_or(f64::NEG_INFINITY);
+    // code they never touched.
+    //
+    // THE ABSENT CASE IS REACHABLE NOW, and this comment used to say it was not. It read "`win` is
+    // non-empty here ... so the absent case cannot arise" - true when min/max only failed on an empty
+    // slice. They now REFUSE a non-finite sample (a NaN or an infinity out of a /proc read or a
+    // division in the sampler) and return `Absent::HarnessError` naming how many samples were bad.
+    // `unwrap_or(±INFINITY)` threw that away: `hi - lo` became negative infinity, and the function went
+    // on to publish a `NotSteady` verdict about the GATEWAY'S memory for a window the engine had just
+    // proved was OUR malfunction. The one piece of evidence naming it as ours was generated and
+    // discarded on the same line - which is the defect shape this whole audit keeps finding.
+    //
+    // Undecidable is the honest answer: the window cannot be judged, and that is not a fact about the
+    // gateway. The caller already publishes an absence with a reason for this verdict.
+    let samples: Vec<f64> = win.iter().map(|s| s.mib).collect();
+    let (Some(lo), Some(hi)) = (min(&samples).copied(), max(&samples).copied()) else {
+        return Verdict::Undecidable;
+    };
     let spread = (hi - lo) / mean * 100.0;
 
     // MAGNITUDE, NOT SIGN. `drift` is signed - positive when the window is still climbing, negative

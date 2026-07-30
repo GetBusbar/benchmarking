@@ -192,9 +192,26 @@ def main():
     expect("a frontier missing declared bounds FAILS", c, o, True)
 
     print("verify-turnover.py:")
-    # ACCEPT: a peak with a clean, slower rung above it is a proved turnover.
+    # ACCEPT, AND FOR THE RIGHT REASON. This fixture used to be CLEAN_CELL, whose only rung above the
+    # winner carries `fail: 1` - so verify-turnover classified it CLIFF-BUT-MOOT and NEVER entered the
+    # `proved` branch. The test passed, and the tool's central classification - the thing its entire
+    # docstring is about - was unexercised: inverting the `best < win_rps` comparison in the tool would
+    # have left all 16 fixtures green.
+    #
+    # So this one carries a genuinely CLEAN, strictly slower rung above the peak, which is what a proved
+    # turnover IS, and asserts the tool says so.
+    proved = copy.deepcopy(CLEAN_CELL)
+    proved["perf"]["sweep_max_proxy"] = [
+        {"conc": 8, "ok": 100, "rps": 100.0, "p99_us": 900, "fail": 0},
+        {"conc": 16, "ok": 120, "rps": 120.0, "p99_us": 1500, "fail": 0},
+        {"conc": 32, "ok": 110, "rps": 110.0, "p99_us": 2500, "fail": 0},
+    ]
+    c, o = run("verify-turnover.py", proved)
+    expect("a proved turnover passes AND is classified PROVED", c, o, False, "PROVED (1)")
+
+    # And the moot case stays distinguishable from it: a failing rung above that was also SLOWER.
     c, o = run("verify-turnover.py", CLEAN_CELL)
-    expect("a proved turnover passes", c, o, False)
+    expect("a cliff whose failing rung was slower is MOOT, not proved", c, o, False, "CLIFF-BUT-MOOT (1)")
 
     # RED: the peak sits at the TOP of the probed ladder and the artifact does NOT disclose it, so a
     # floor is published as though it were a ceiling. This is the tool's only failing exit, and until
