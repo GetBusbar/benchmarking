@@ -726,12 +726,18 @@ bench_gateway_once() {
     # + psutil (the memory suite reads RSS). NO build-essential/rust/go/node here - the mock+loadgen
     # are prebuilt binaries pulled from the rig release, and the 2 source-built gateways pull their
     # own toolchain via gw_prereqs() on their box ALONE. Docker-image gateways are up in ~2 min.
-    sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y -q docker.io curl ca-certificates jq python3-pip git build-essential
+    # RETRIED, for the same reason `apt-get update` above is: the install contends with
+    # unattended-upgrades for the dpkg lock, and a single attempt turns a lock we only had to wait for
+    # into a lost box. Without `set -e` tripping on the first two tries.
+    for _ in 1 2 3; do
+      sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y -q docker.io curl ca-certificates jq python3-pip git build-essential && break
+      sleep 10
+    done
     # A box that came up without docker cannot measure most entrants, and every launch on it fails
     # with \"failed to run docker: No such file or directory\", which reads as a broken gateway rather
     # than a box that never finished provisioning. Better to lose the box here than to publish its
     # verdicts.
-    command -v docker >/dev/null || { echo 'PROVISION FAILED: docker did not install on this box'; exit 1; }
+    command -v docker >/dev/null || { echo "PROVISION FAILED: docker did not install on this box"; exit 1; }
     # The engine is BUILT ON THE BOX from the cloned commit, once, before any measurement starts.
     # It is not shipped from the orchestrator: a binary from a laptop has no provenance, and the
     # whole point of cloning a revision is that the thing doing the measuring came from it too.
@@ -746,6 +752,26 @@ bench_gateway_once() {
     # that was retired the raise went with it while this comment kept citing it.
     echo "{ \"default-ulimits\": { \"nofile\": { \"Name\": \"nofile\", \"Hard\": 1048576, \"Soft\": 1048576 } } }" | sudo tee /etc/docker/daemon.json >/dev/null
     sudo systemctl restart docker || sudo service docker restart || true
+    # THE BINARY EXISTING IS NOT EVIDENCE THE DAEMON WILL ANSWER, and it was the daemon that was
+    # missing when this last bit.
+    #
+    # litellm-python lost its box on 2026-07-30 to `chmod: cannot access /var/run/docker.sock` followed
+    # by `failed to run docker: No such file or directory`, ten seconds into its run - AFTER the
+    # `command -v docker` guard above had passed. That guard proves a file is on PATH; it proves
+    # nothing about whether dockerd is up and accepting connections on its socket. `systemctl restart
+    # docker` is asynchronous and the `|| true` on it means even an outright failure to restart is
+    # swallowed, so provisioning could report success while the socket never appeared.
+    #
+    # So wait for the thing actually needed - a daemon that answers - and fail the box here if it never
+    # does. Losing a box during provisioning costs one re-run; publishing INCOMPLETE for a gateway
+    # whose box had no docker reads as a broken ENTRANT, which is a false statement about somebody
+    # else's software.
+    _dockok=0
+    for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+      if sudo -n docker info >/dev/null 2>&1; then _dockok=1; break; fi
+      sleep 2
+    done
+    [ "$_dockok" = 1 ] || { echo "PROVISION FAILED: docker installed but the daemon never answered on /var/run/docker.sock after 30s"; exit 1; }
     python3 -m pip install --user -q --break-system-packages psutil 2>/dev/null || pip3 install -q psutil || true' >>"$glog" 2>&1
   local prov_rc=$?
   # A FAILED PROVISION MUST END THE BOX, not be discovered as a broken gateway later.
