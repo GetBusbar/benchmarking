@@ -123,15 +123,29 @@ else:
 
 check("the phase weights still sum to one whole cell", round(sum(bd.PHASE_COST.values()), 6), 1.0)
 
-# The fabricated-progress regression, stated as the number it produced. With the phantom
-# `sustained_throughput` in the table, a cell in `streams_sustained` reported 0.226+0.396+0.004+0.021
-# +0.198 = 0.845 of a cell behind it; the work that 0.198 described does not happen, and the sustained
-# search's real cost now lives inside `throughput`. The fraction is the same TOTAL - the point is that
-# it is reached by summing groups that exist.
-check("progress into streams_sustained counts only groups the engine actually runs",
-      round(bd.cell_fraction_done("streams_sustained"), 6), round(0.424 + 0.396 + 0.004 + 0.021, 6))
-check("progress into cpu_fps likewise", round(bd.cell_fraction_done("cpu_fps"), 6),
-      round(1.0 - 0.102, 6))
+# THE FABRICATED-PROGRESS REGRESSION, tested as the PROPERTY rather than as a number.
+#
+# It has now happened twice. First a phantom `sustained_throughput` sat in the table at 0.198 for a
+# group metric.rs does not have, so a cell in `streams_sustained` counted that weight as already
+# elapsed. Then `cpu_fps` was retired from the engine and its 0.102 became phantom in exactly the same
+# way. Both times the real defect was the same: `cell_fraction_done` accumulates PHASE_ORDER weight
+# until it reaches the phase it was given, so any entry for work that does not happen inflates every
+# later phase's progress and shortens every ETA built on it.
+#
+# The first version of this test hardcoded the sums (0.845, and 1.0 - 0.102). That caught the phantom
+# but ALSO broke on a legitimate reweight - which is what happened when the weights were re-measured
+# after the memory phase became a fixed duration. A test that fires on a correct change is a test that
+# gets edited until it stops firing. So: assert the cumulative fraction equals the sum of exactly the
+# phases BEFORE it in PHASE_ORDER, computed from the table itself. That is phantom-weight-proof
+# (a phantom is not in PHASE_ORDER, or is, and then the keys check above fails) and reweight-proof.
+for _i, _phase in enumerate(bd.PHASE_ORDER):
+    _before = sum(bd.PHASE_COST[p] for p in bd.PHASE_ORDER[:_i])
+    check(f"progress into {_phase} is exactly the phases before it, no invented work",
+          round(bd.cell_fraction_done(_phase), 6), round(_before, 6))
+
+# And a RETIRED phase name claims nothing. `cpu_fps` ran in this harness for months; a log line naming
+# it must now contribute 0.0 rather than silently matching some other phase's weight.
+check("the retired cpu_fps group contributes nothing", bd.cell_fraction_done("cpu_fps"), 0.0)
 check("the retired sustained_throughput group contributes nothing",
       bd.cell_fraction_done("sustained_throughput"), 0.0)
 check("an unrecognised phase claims NO progress (pessimistic, never confidently wrong)",
