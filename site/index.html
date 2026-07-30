@@ -65,6 +65,11 @@
       <a class="tab active" data-view="gateways" href="/gateways">Gateways</a>
       <a class="tab" data-view="memory" href="/gateways/memory">Memory</a>
       <a class="tab" data-view="performance" href="/gateways/performance">Performance</a>
+      <!-- Frontier: the whole latency-throughput curve, all six published readings per gateway side by
+           side. Its own tab because it answers a different question from Performance (what SHAPE is this
+           gateway, not who is fastest at my bound) and because a second table below the first would be a
+           taller page - the board's rule is that less scrolling wins even at the cost of another tab. -->
+      <a class="tab" data-view="frontier" href="/gateways/frontier">Frontier</a>
       <a class="tab" data-view="streaming" href="/gateways/streaming">Streaming</a>
       <a class="tab" data-view="matrix" href="/gateways/matrix">Protocol matrix</a>
       <a class="tab" data-view="method" href="/gateways/method">Method</a>
@@ -112,6 +117,21 @@
         <input type="search" id="search" placeholder="Search gateways" aria-label="Search gateways by name">
         <span id="row-count" class="muted count"></span>
       </div>
+    </div>
+    <!-- The engine's OWN definition of every metric this table shows, generated from the constants that
+         ran (data.definitions, engine/src/suite.rs metric_definitions) and populated by app.js. Collapsed,
+         so it costs one line until a reader asks. It is here rather than only on the Method tab because
+         the failure it prevents is a reader reasoning carefully about a test that never ran: every
+         published surface once described the retired throughput gate as "p99 < 1 s" while the engine
+         enforced 20 ms, and a definition you must leave the page to find is a definition nobody reads. -->
+    <div id="table-defs"></div>
+    <!-- THE TAIL-LATENCY BOUND the throughput readings are shown at (Performance + Frontier only, since
+         nothing on Streaming or Memory is read at a bound). Rendered by app.js so the buttons come from
+         the one published list of bounds; switching re-ranks the board in front of the reader. -->
+    <div class="control-group bound-chooser hidden" id="bound-chooser">
+      <span class="bound-label" id="bound-legend">Tail-latency bound</span>
+      <div class="seg" id="bound-seg" role="tablist" aria-labelledby="bound-legend"></div>
+      <span class="bound-note muted" id="bound-note"></span>
     </div>
     <!-- Cell chooser (Performance, Streaming, Memory): which cell(s) of the one 6x6 run to show, plus the
          dialect dropdown(s) each mode needs. Its own row. The MODE BUTTONS are rendered by app.js

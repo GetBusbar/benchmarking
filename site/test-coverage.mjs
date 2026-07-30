@@ -201,14 +201,42 @@ test("compare/drawer/search/caps state survives alongside the chooser on one URL
 
 // ---- family 2: one envelope, one story on every surface ---------------------------------------
 
-// A gateway whose openai->anthropic cell carries one field per story, so every surface can be read
-// off the SAME record. Metrics seal through the REAL sealMetric, exactly as gen-data does.
+/* A gateway whose openai->anthropic cell carries one field per story, so every surface can be read off the
+   SAME record. Metrics seal through the REAL sealMetric, exactly as gen-data does.
+
+   THE FOUR STORIES CHANGED, BECAUSE ONE OF THEM STOPPED EXISTING. They were: a measured zero, a
+   below-resolution absence, a measured failure, and a RIG-LIMITED SUPPRESSION - a sealed envelope
+   withholding a number it had, because our own rig might have bounded it. Suppression is gone: the
+   measurement was correct in every one of those cells and only its INTERPRETATION was open, so the number
+   is published with the fraction of the rig's ceiling it reached and the reader draws the conclusion.
+   The fourth story is now the LOWER BOUND, which the frontier introduced: a rate whose sweep ran out of
+   ladder while that concurrency was still qualifying. It is real, it is not a maximum, and a surface that
+   renders it as a ceiling is making a claim the data does not support - the same class of error the
+   suppression was, in the opposite direction. So the four remain four, and each is still one substitution
+   away from being indistinguishable from its neighbour, which is why every surface is checked. */
 const IN = "openai";
 const OUT = "anthropic";
+// The frontier as it arrives on a projected record: a sealed rate per reading, with the reading's own
+// evidence beside it. Written out rather than built by a helper so each story is visible at its bound.
+const STORY_FRONTIER = [
+  // story A: SERVED, BUT NO RUNG HELD THIS TAIL. `below_resolution` on a throughput reading - a measured
+  // nothing, not a missing measurement. On the field data this is five of six columns for the slowest
+  // gateways, so it is the state most likely to be misread as "no data".
+  { bound_ms: 1, concurrency: null, p99_us: null, first_disqualified_conc: null, lower_bound: false,
+    rps: sealMetric(null, { absent: { reason: "below_resolution",
+      detail: "every cleanly-served rung had a tail latency at or above 1ms, so this gateway carried no measurable throughput under that bound" } }) },
+  // an ordinary reading, so the stories above and below have something to be distinct FROM.
+  { bound_ms: 10, concurrency: 64, p99_us: 4200, first_disqualified_conc: 128, lower_bound: false,
+    rps: sealMetric(20000) },
+  // story D: A FLOOR, not a ceiling.
+  { bound_ms: null, concurrency: 1024, p99_us: 40000, first_disqualified_conc: null, lower_bound: true,
+    rps: sealMetric(22000) },
+];
 const STORY_CELL_PERF = {
-  // story A: a measured zero with its ceiling note - a real result, not a hole.
-  rps_sustained_20ms: sealMetric(0, { gated: true }),
-  // story B: a below-resolution absence - the best result the comparison can express.
+  frontier: STORY_FRONTIER,
+  // story B: a below-resolution absence on a LATENCY difference - the best result the comparison can
+  // express. Note it is the SAME engine reason as story A and must render differently, because the
+  // sentence differs: "smaller than we can measure" for a difference, "held nothing" for a rate.
   added_latency_p99_us: sealMetric(null, {
     absent: { reason: "below_resolution", detail: "the gateway leg (20073us) came in under the direct leg (21070us)" },
   }),
@@ -216,8 +244,9 @@ const STORY_CELL_PERF = {
   added_latency_p50_us: sealMetric(null, {
     absent: { reason: "not_measured", detail: "the gateway leg at c=1 was not clean: 0 ok, 14201 fail" },
   }),
-  // story D: a rig-limited suppression - the number is gone, only the reason remains.
-  rps_max_proxy: sealMetric(99999, { gated: true, flag: true }),
+  // A number taken NEAR THE RIG'S OWN CEILING, published with the comparison's facts on it. This is what
+  // replaced the suppression, and it is here so the inverted property has something to hold.
+  gateway_c1_p99_us: sealMetric(99999, { headroom: 0.996, ceiling: 100400 }),
 };
 const STORY_GW = {
   key: "storygw",
@@ -229,24 +258,26 @@ const STORY_GW = {
     },
   },
 };
-const CUSTOM = { mode: "custom", xlateIn: IN, xlateOut: OUT };
+const CUSTOM = { ...app.newState(), mode: "custom", xlateIn: IN, xlateOut: OUT };
 const perfLane = app.LANES.find((l) => l.key === "perf");
+const laneRow = (bound) => perfLane.metrics.find((m) => m.k === `frontier.${bound}`);
 
-test("a measured ZERO is the number 0 on every surface, with its meaning visible, never n/a", () => {
-  const table = app.chooserPerfCell(STORY_GW, "rps_sustained_20ms", String, CUSTOM);
-  assert.equal(table.na, false, "a measured zero is not a hole");
+test("a MEASURED NOTHING is a 0 that says why, on every surface, and is never a missing measurement", () => {
+  const table = app.frontierBoundCell(STORY_GW, 1, CUSTOM);
+  assert.equal(table.na, false, "the gateway served and the sweep ran: this is a result, not a hole");
   assert.equal(table.text, "0", "the table shows the digit");
-  assert.equal(table.v, 0, "it ranks as 0");
-  assert.match(app.metricTd(table), /zero-why/, "the cell says what the zero means, on the cell");
+  assert.equal(table.v, 0, "it ranks as 0 - last on a higher-is-better sort, which is the honest place");
+  assert.equal(table.why, "no rung held this tail", "and the cell says WHY, not just '0'");
+  assert.match(app.metricTd(table), /no rung held this tail/, "on the cell itself, not only on hover");
+  assert.match(table.note, /no measurable throughput under that bound/, "with the engine's own prose on the tooltip");
 
   const rec = app.laneRecord(perfLane, STORY_GW, CUSTOM);
   assert.ok(rec, "the drawer/compare lane reads the same cell");
-  assert.equal(app.mval(rec.rps_sustained_20ms), 0, "drawer/compare rank the same 0");
-  assert.equal(rec.rps_sustained_20ms.note, ZERO_NO_CEILING, "the note travels with the record");
+  assert.equal(laneRow("1ms").cell(rec).v, 0, "drawer/compare rank the same 0");
+  assert.equal(laneRow("1ms").cell(rec).why, "no rung held this tail", "and tell the same story");
 
   const pop = app.cellPopFull(STORY_GW, IN, OUT);
-  assert.match(pop, /Sustained @20ms/, "the popup shows the measured-zero row");
-  assert.match(pop, /<b>0<\/b>/, "the popup shows the same 0 the table shows");
+  assert.match(pop, /frontier-spark/, "the popup carries the cell's curve, where that 0 is a tick on the floor");
 });
 
 test("a BELOW-RESOLUTION absence reads as approximately-zero on every surface, never a bare n/a", () => {
@@ -255,6 +286,11 @@ test("a BELOW-RESOLUTION absence reads as approximately-zero on every surface, n
   assert.equal(table.text, "≈0", "the table reads approximately zero");
   assert.equal(table.v, 0, "it ranks as 0, equal-best on a lower-is-better sort");
   assert.match(table.note, /came in under the direct leg/, "the engine's evidence is the tooltip");
+  // THE SAME REASON, A DIFFERENT SENTENCE. Story A above is `below_resolution` too, and it must NOT read
+  // "≈0": "approximately zero" is the right words for a difference too small to weigh and the wrong words
+  // for a gateway that held nothing under a tail.
+  assert.notEqual(app.frontierBoundCell(STORY_GW, 1, CUSTOM).text, table.text,
+    "one absence reason, two findings: they must not render identically");
 
   const rec = app.laneRecord(perfLane, STORY_GW, CUSTOM);
   assert.equal(app.mval(rec.added_latency_p99_us), 0, "drawer/compare rank the same 0");
@@ -275,77 +311,108 @@ test("a MEASURED FAILURE yields a number on NO surface, but carries its counts o
   assert.equal(app.mval(rec.added_latency_p50_us), null, "drawer/compare agree: no number");
 
   // The failure is DISTINCT from an untested cell on every surface: an untested cell has no counts.
-  const untested = app.chooserPerfCell(STORY_GW, "added_latency_p50_us", String, { mode: "custom", xlateIn: "gemini", xlateOut: "cohere" });
+  const untested = app.chooserPerfCell(STORY_GW, "added_latency_p50_us", String, { ...CUSTOM, xlateIn: "gemini", xlateOut: "cohere" });
   assert.equal(untested.text, "n/a");
   assert.ok(!untested.failed, "an untested cell must never wear the failure red");
 });
 
-test("a RIG-LIMITED suppression is n/a on every surface and the raw number is unrecoverable from any of them", () => {
-  const table = app.chooserPerfCell(STORY_GW, "rps_max_proxy", String, CUSTOM);
-  assert.equal(table.na, true, "a rig-bound number is suppressed");
-  assert.equal(table.v, null);
-  assert.match(table.note, /rig-limited|mock/i, "the note names the rig, not the gateway");
+/* THE INVERTED STORY. This test used to be "a RIG-LIMITED suppression is n/a on every surface and the raw
+   number is unrecoverable from any of them": a measurement at or above a chosen fraction of our own rig's
+   ceiling had its value replaced with null, and the test asserted that no surface could recover it.
+   That was withholding a correct measurement. The engine reached the verdict by comparing the observation
+   against a rig reference and applying a chosen fraction, and it fired hardest on the gateways that did
+   best - a gateway keeping pace with the paced mock to within 0.7% published nothing at all. So the
+   opposite property is the one that must hold now, and it is asserted in both directions: the number is
+   PUBLISHED on every surface with the comparison's own facts attached, and the suppression vocabulary
+   cannot come back (invariant C2 asserts the same thing from the bundle side). */
+test("a NEAR-CEILING measurement is published on every surface, and suppression cannot come back", () => {
+  const table = app.chooserPerfCell(STORY_GW, "gateway_c1_p99_us", String, CUSTOM);
+  assert.equal(table.na, false, "a number near the rig's own ceiling is not a hole");
+  assert.equal(table.v, 99999, "the table shows the number that was measured");
+  assert.match(table.note, /of this rig's own ceiling/, "with the fraction of that ceiling it reached");
+  assert.match(table.note, /100,400/, "and the ceiling it is a fraction of, so the claim is checkable");
 
   const rec = app.laneRecord(perfLane, STORY_GW, CUSTOM);
-  assert.equal(app.mval(rec.rps_max_proxy), null, "drawer/compare agree: suppressed");
-  assert.ok(
-    !JSON.stringify(rec).includes("99999"),
-    "the suppressed number must not be recoverable from the drawer/compare record",
-  );
+  assert.equal(app.mval(rec.gateway_c1_p99_us), 99999, "drawer/compare publish the same number");
+  assert.equal(rec.gateway_c1_p99_us.headroom, 0.996, "the fraction travels with the record");
+  // AND NO SURFACE WITHHOLDS IT. Every sealed envelope on the record is unsuppressed, which is the
+  // structural half: there is no `suppressed: true` shape left for a value to hide behind.
+  for (const [k, v] of Object.entries(rec))
+    if (app.isEnvelope(v)) assert.equal(v.suppressed, false, `${k} must not be suppressed`);
+  for (const r of rec.frontier) assert.equal(r.rps.suppressed, false, "nor may any frontier reading's rate be");
+});
 
-  const pop = app.cellPopFull(STORY_GW, IN, OUT);
-  assert.ok(!pop.includes("Max proxy RPS"), "the popup omits the suppressed row rather than showing a number");
-  assert.ok(!pop.includes("99999"), "the suppressed number must not leak into the popup HTML");
+test("a LOWER BOUND is a floor on every surface, never rendered as a ceiling", () => {
+  const table = app.frontierBoundCell(STORY_GW, null, CUSTOM);
+  assert.equal(table.v, 22000, "the rate is real and is published");
+  assert.equal(table.text, "≥ 22,000", "and it is a FLOOR: the sweep ran out of ladder, so this is not a maximum");
+  assert.match(table.note, /FLOOR/, "the tooltip says what the glyph means");
+  assert.match(table.note, /did not look higher/, "and why it is not a maximum");
+
+  const rec = app.laneRecord(perfLane, STORY_GW, CUSTOM);
+  assert.equal(laneRow("unbounded").cell(rec).text, "≥ 22,000", "the drawer/compare row agrees, glyph and all");
+
+  // The ordinary reading beside it carries NO floor glyph, or the mark would mean nothing.
+  assert.equal(app.frontierBoundCell(STORY_GW, 10, CUSTOM).text, "20,000");
+  // And the curve marks it apart: an open dot for a floor, a filled dot for an established ceiling.
+  const spark = app.frontierSpark(STORY_FRONTIER, { min: 20000, max: 22000, boundMs: 10 });
+  assert.match(spark, /fill="none"/, "the floor reading is drawn open, not as a proven peak");
+  assert.match(spark, /or more/, "and says so to a screen reader");
 });
 
 test("an UNTESTED cell is empty on every surface: no row, no record, no popup, no fabricated value", () => {
-  const missing = { mode: "custom", xlateIn: "gemini", xlateOut: "cohere" };
+  const missing = { ...CUSTOM, xlateIn: "gemini", xlateOut: "cohere" };
   assert.equal(app.chooserHasCell(STORY_GW, missing), false, "the chooser knows there is no cell");
-  assert.equal(app.chooserPerfCell(STORY_GW, "rps_sustained_20ms", String, missing).na, true, "the table reads n/a");
+  assert.equal(app.frontierChooserCell(STORY_GW, missing).na, true, "the table reads n/a");
   assert.equal(app.laneRecord(perfLane, STORY_GW, missing), null, "the drawer/compare lane has no record");
   assert.equal(app.cellPopFull(STORY_GW, "gemini", "cohere"), "", "the popup renders nothing for a cell that does not exist");
 });
 
-test("the popup reads the SAME chosen-cell values the table reads, for the same coordinates", () => {
-  // The agreement stated directly: every non-n/a perf value the table would show for this cell
-  // appears verbatim in the popup, and nothing else does.
+test("the popup reads the SAME chosen-cell values the table reads, at the SAME bound", () => {
+  // The agreement stated directly: every non-n/a perf value the table would show for this cell appears
+  // verbatim in the popup, and nothing else does.
   const pop = app.cellPopFull(STORY_GW, IN, OUT);
   for (const [key, label] of [
-    ["rps_sustained_20ms", "Sustained @20ms"],
     ["added_latency_p99_us", "Added latency p99"],
+    ["added_latency_p50_us", "Added latency p50"],
   ]) {
-    const cell = app.chooserPerfCell(STORY_GW, key, String, CUSTOM);
-    assert.equal(cell.na, false, `${key} is displayable`);
     assert.ok(pop.includes(label), `the popup shows ${label}`);
+    assert.ok(app.chooserPerfCell(STORY_GW, key, String, CUSTOM), `${key} is read by the same accessor`);
   }
+  /* THE THROUGHPUT ROW IS LABELLED WITH ITS BOUND, AND FOLLOWS THE SELECTOR. This replaces the old
+     "the popup shows Sustained @20ms" check, whose column is deleted - and it is a strictly stronger
+     property, because a bound selector creates a way for two surfaces to disagree that a fixed column
+     could not: the popup could keep showing 10 ms after the reader switched to 1 ms. Both read
+     selectedBound() through the same accessors, so both move together or neither does. */
+  const prev = app.state.bound;
+  try {
+    for (const bound of app.BOUND_CHOICES) {
+      app.state.bound = bound;
+      const h = app.cellPopFull(STORY_GW, IN, OUT);
+      assert.ok(h.includes(app.boundColLabel(bound)), `the popup names the ${app.boundLabel(bound)} bound it read`);
+      const cell = app.frontierChooserCell(STORY_GW, { ...CUSTOM, bound });
+      if (!cell.na)
+        assert.ok(h.includes(cell.text), `the popup carries the table's own text at ${app.boundLabel(bound)} (${cell.text})`);
+    }
+  } finally { app.state.bound = prev; }
   // THE AGREEMENT IS "RENDERS CONTENT", NOT "IS NOT n/a" - the two came apart deliberately.
   //
-  // `na` means "there is no number here", and two different states share it. A rig-limited value is
-  // absent and shows nothing on either surface. A MEASURED FAILURE is also `na` (0 ok, N fail: there
-  // is no latency to publish) but it is a result, and both surfaces render it in red with its
-  // counts. The popup used to drop it with the genuine absences, which is how a cell whose every
-  // metric was measured and failed printed "served, not measured on this cell" - a false claim about
-  // a cell we measured thoroughly.
-  //
-  // So the invariant is that the two surfaces agree about which rows carry content, and a failed
-  // row carries content on both.
-  const rigLimited = app.chooserPerfCell(STORY_GW, "rps_max_proxy", String, CUSTOM);
-  assert.equal(rigLimited.na, true, "the rig-limited field is absent");
-  assert.ok(!rigLimited.failed, "and it is an absence, not a measured failure");
-  assert.ok(!pop.includes("Max proxy RPS"), "so the popup omits it, exactly as the table shows nothing");
-
+  // `na` means "there is no number here", and two different states share it. A never-measured value is
+  // absent and shows nothing on either surface. A MEASURED FAILURE is also `na` (0 ok, N fail: there is no
+  // latency to publish) but it is a result, and both surfaces render it in red with its counts. The popup
+  // used to drop it with the genuine absences, which is how a cell whose every metric was measured and
+  // failed printed "served, not measured on this cell" - a false claim about a cell we measured thoroughly.
   const failed = app.chooserPerfCell(STORY_GW, "added_latency_p50_us", String, CUSTOM);
   assert.equal(failed.na, true, "a measured failure has no number");
   assert.equal(failed.failed, true, "but it IS a result, not an absence");
-  assert.ok(pop.includes("Added latency p50"), "so the popup shows it, exactly as the table does");
   assert.ok(pop.includes(failed.text), `the popup carries the same counts the table shows (${failed.text})`);
   assert.ok(/failtext/.test(pop), "and marks it as a failure rather than printing it like a measurement");
 });
 
 test("a measured stream-sustain failure stays distinct from not-measured through metric() on both counts", () => {
   // The streaming shape of the same discipline, driven through the same seal the site uses.
-  const failed = app.metric(sealMetric(0, { gated: true, zeroNote: ZERO_MEASURED_FAIL }), String);
-  const unmeasured = app.metric(sealMetric(null, { gated: true }), String);
+  const failed = app.metric(sealMetric(0, { zeroNote: ZERO_MEASURED_FAIL }), String);
+  const unmeasured = app.metric(sealMetric(null), String);
   assert.equal(failed.na, false);
   assert.equal(failed.v, 0);
   assert.equal(unmeasured.na, true);
@@ -367,38 +434,48 @@ test("a measured stream-sustain failure stays distinct from not-measured through
 const OTHER_GW = {
   key: "othergw", display: "Other GW", lang: "Go",
   matrix: { upstreams: { [OUT]: { cells: { [IN]: { served: true, status: 200, perf: {
-    rps_sustained_20ms: sealMetric(1200, { gated: true, flag: false }),
+    frontier: [
+      { bound_ms: 1, concurrency: 32, p99_us: 400, first_disqualified_conc: 64, lower_bound: false, rps: sealMetric(1100) },
+      { bound_ms: 10, concurrency: 64, p99_us: 4000, first_disqualified_conc: 128, lower_bound: false, rps: sealMetric(1200) },
+      { bound_ms: null, concurrency: 128, p99_us: 40000, first_disqualified_conc: null, lower_bound: false, rps: sealMetric(1500) },
+    ],
     added_latency_p99_us: sealMetric(9000),
     added_latency_p50_us: sealMetric(4000),
-    rps_max_proxy: sealMetric(1500, { gated: true, flag: false }),
   } } } } } },
 };
-const STORY_STATE = { ...app.newState(), view: "performance", ...CUSTOM,
+const STORY_STATE = { ...app.newState(), view: "performance", mode: "custom", xlateIn: IN, xlateOut: OUT,
   data: { gateways: [STORY_GW, OTHER_GW] }, cmp: [STORY_GW.key, OTHER_GW.key] };
 
-test("the DRAWER markup tells all four stories - zero, below-resolution, failure, suppression", () => {
+test("the DRAWER markup tells all four stories - a measured nothing, below-resolution, a failure, a floor", () => {
   const h = app.drawerHtml(STORY_GW, STORY_STATE);
-  // A: the measured zero is a digit with its meaning beside it, never a hole.
-  assert.match(h, /Sustained RPS[^<]*<\/dt><dd[^>]*>0/, "the drawer shows the measured 0");
-  assert.match(h, /no tested load|ceiling/i, "and says what the zero means");
+  // A: the measured nothing is a digit with its reason beside it, never a hole and never a blank.
+  assert.match(h, /99% under 1 ms/, "the drawer names the reading's own bound");
+  assert.match(h, /no rung held this tail/, "and says what its 0 means");
   // B: below-resolution is the ≈0 result, not an absence.
   assert.match(h, /≈0/, "below-resolution reads as approximately zero in the drawer");
   // C: the measured failure keeps its counts and its red class - the clause that survives the na filter.
   assert.match(h, /failed · 0\/14,201/, "the measured failure keeps its counts in the drawer");
   assert.match(h, /class="failtext"/, "and is marked as a failure");
-  // D: the suppressed number is GONE from the drawer entirely; only its absence is on offer.
-  assert.ok(!/99,?999/.test(h), "a rig-limited number must not be recoverable from the drawer markup");
+  // D: the floor is a floor. A bare 22,000 here would publish our own range as the gateway's answer.
+  assert.match(h, /≥ 22,000/, "a lower-bound reading is rendered as a floor in the drawer");
+  // ...and the near-ceiling number is PUBLISHED, which is what replaced the suppression this asserted.
+  assert.match(h, /99,999/, "a measurement near the rig's ceiling is published, not withheld");
+  // (the prose is HTML-escaped into the title attribute, so the match avoids its apostrophe)
+  assert.match(h, /own ceiling/, "with the fraction of that ceiling it reached");
 });
 
-test("the COMPARE markup tells all four stories, and the raw suppressed number appears on neither row", () => {
+test("the COMPARE markup tells all four stories, and the curves sit side by side", () => {
   const h = app.compareBodyHtml([STORY_GW, OTHER_GW], STORY_STATE);
   assert.match(h, /Story GW/); assert.match(h, /Other GW/);
   assert.match(h, /≈0/, "below-resolution reads as approximately zero in compare too");
   assert.match(h, /failed · 0\/14,201/, "the measured failure carries its counts into compare");
   assert.match(h, /class="na failcell"/, "marked as a failure, not folded in with the untested cells");
-  assert.ok(!/99,?999/.test(h), "a rig-limited number is unrecoverable from the compare markup as well");
-  // The measured zero is a real value, so it takes part in the contest and can WIN a max-is-better row
-  // only if it is genuinely the best - here it is not, and the point is that it is rendered as 0.
-  assert.match(h, /Sustained RPS/, "the row exists");
+  assert.match(h, /≥ 22,000/, "and a floor stays a floor when set beside another gateway's ceiling");
+  assert.match(h, /no rung held this tail/, "the measured nothing keeps its reason here as well");
+  // EVERY BOUND IS A ROW, so three gateways' whole curves are comparable as digits...
+  for (const bound of app.BOUND_CHOICES) assert.ok(h.includes(app.boundColLabel(bound)), `${app.boundLabel(bound)} has a row`);
+  // ...and as shapes, which is the comparison a single scalar made impossible.
+  assert.match(h, /Curve across bounds/, "the curves get a row of their own");
+  assert.equal((h.match(/frontier-spark/g) || []).length, 2, "one curve per gateway being compared");
   assert.match(h, /class="best"/, "and a winner is called where there is a contest");
 });
