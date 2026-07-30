@@ -564,6 +564,99 @@ fn apply_streams_sustained_verdict(
     out.streams_sustained_headroom = rigbound::headroom(value, &reference);
 }
 
+/// WHAT EACH PUBLISHED METRIC MEANS, built from the constants that define it.
+///
+/// Every entry answers the three questions a reader needs to check a number rather than trust it:
+/// what quantity is this, which observations counted, and how did the measurement know to stop. The
+/// third is the one this engine got wrong for a long time - a search that stopped on a chosen flatness
+/// count published a smaller number as a "maximum" and said nothing about having chosen.
+///
+/// Formatted from the constants, never hand-written. The retired throughput gate is why: every surface
+/// described it as "p99 < 1 s" while the engine enforced 20 ms - a bar 96% of the 1632 recorded rungs
+/// pass, against 57% for the real one - so readers reasoned about a test that never ran.
+fn metric_definitions() -> std::collections::BTreeMap<String, String> {
+    let mut d = std::collections::BTreeMap::new();
+    let bounds: Vec<String> = crate::frontier::P99_BOUNDS_US
+        .iter()
+        .map(|us| format!("{}ms", us / 1000))
+        .collect();
+    d.insert(
+        "perf.frontier".to_string(),
+        format!(
+            "THROUGHPUT AT A TAIL LATENCY YOU ACCEPT. For each declared bound, the most requests/sec \
+             this cell carried while 99% of requests finished under that bound AND it failed none it \
+             accepted. Bounds: {} plus one reading with no latency bound at all (failures only). \
+             \
+             ONE MEASUREMENT, READ SIX WAYS: a single concurrency sweep, published as `sweep_max_proxy`, \
+             so every reading is re-derivable from the rungs rather than taken on trust. Monotone \
+             non-decreasing across the bounds BY CONSTRUCTION - relaxing a bound only adds rungs to the \
+             set a maximum is taken over - so a reading cannot exceed a looser one. \
+             \
+             ZERO FAILURES, not a tolerance: the load generator counts connections the RIG could not \
+             open separately (`rig_refused`, and those windows are discarded), so a failure reaching a \
+             reading is the gateway losing a request it had accepted. \
+             \
+             TERMINATION: the sweep climbs a doubling ladder from the floor and stops at the first \
+             concurrency where no window served cleanly, because more concurrency cannot un-fail those \
+             requests. Each reading names `first_disqualified_conc`, the lowest concurrency above it that \
+             stopped qualifying - that pair is the proof it is a boundary. When nothing above it \
+             disqualified, the sweep ran out of range instead of finding a limit, and the reading sets \
+             `lower_bound: true`: the rate is real, it is simply a floor rather than a ceiling. \
+             \
+             The `p99_us` on a reading is the tail the winning rung ACTUALLY produced, never the bound - \
+             4ms under a 100ms bound is not the same finding as 99ms.",
+            bounds.join(", ")
+        ),
+    );
+    d.insert(
+        "perf.added_latency".to_string(),
+        "WHAT THE GATEWAY ADDS, at concurrency 1. The gateway leg's percentile minus the same request \
+         taken straight to the mock, one at a time, both legs in the same window. No search and no \
+         threshold: there is nothing to stop early and nothing to decide. A difference at or below what \
+         the rig can resolve publishes `below_resolution` - the best result the comparison can express - \
+         and every surface renders that apart from a never-measured hole."
+            .to_string(),
+    );
+    d.insert(
+        "stream.streams_sustained".to_string(),
+        format!(
+            "THE MOST CONCURRENT SSE STREAMS THIS CELL CARRIES CLEANLY, and the frames/sec at that \
+             point. A concurrency holds the gate when every expected content frame arrives (ratio \
+             {:.1}, i.e. no tolerance - a proxy that drops a frame has dropped a user's token), no \
+             inter-frame gap exceeds {}x the mock's own pacing interval, and under {:.1}% of streams \
+             error. \
+             \
+             TERMINATION: the gate is monotone in concurrency, so the ceiling is a boundary found by \
+             bisection - a pass proven at n and a failure measured above it. `sweep_streams` carries \
+             every rung probed. A range whose top still passed publishes an absence rather than a \
+             ceiling, because the top of the range is our choice and not the gateway's answer.",
+            crate::run::STREAM_MIN_DELIVERY_RATIO,
+            crate::run::STREAM_STALL_MULTIPLIER,
+            crate::run::STREAM_MAX_ERROR_RATIO * 100.0,
+        ),
+    );
+    d.insert(
+        "stream.added_ttft_and_gap".to_string(),
+        "WHAT THE GATEWAY ADDS TO A STREAM, at concurrency 1: time to the first event, and the gaps \
+         between frames inside one stream, each as the gateway leg minus the same stream taken straight \
+         to the mock. Time-to-first-EVENT rather than first token, deliberately and by the same \
+         definition on both legs: a frame budget of one is satisfied by a dialect's opening scaffolding \
+         (openai sends a role delta, anthropic a `message_start`), so the quantity is the same on both \
+         sides and the difference still isolates what the gateway added."
+            .to_string(),
+    );
+    // Memory's definition is the `protocol` string on the memory block itself, where it has been since
+    // before this map existed. Duplicating it here would create the second place for one statement to
+    // drift that this map's own doc warns about.
+    d.insert(
+        "memory".to_string(),
+        "See `matrix.memory.protocol` and each cell's `memory.protocol`, which state the durations and \
+         both plateau thresholds formatted from the constants that ran."
+            .to_string(),
+    );
+    d
+}
+
 /// The concurrency the box-qualification observation is taken at, and the band it must hold.
 ///
 /// Both constants, for the same reason the memory window is: this number is compared against the
@@ -1281,6 +1374,7 @@ fn flush(
         gateway_build(cfg).unwrap_or_else(|| format!("otb-engine {}", env!("CARGO_PKG_VERSION")));
     let snap = ResultSnapshot {
         schema_version: 1,
+        definitions: metric_definitions(),
         config: rendered_config(cfg),
         gateway: cfg.manifest.name.clone(),
         // WHAT WAS MEASURED, not what measured it: the engine identifies itself in rig.engine,
@@ -1331,6 +1425,59 @@ fn flush(
 
 #[cfg(test)]
 mod tests {
+    // A DEFINITION THAT DRIFTS FROM THE CODE IS WORSE THAN NO DEFINITION.
+    //
+    // The retired throughput gate is the case: every surface said "p99 < 1 s" while the engine enforced
+    // 20 ms - a bar 96% of the 1632 recorded rungs pass, against 57% for the real one - so a reader
+    // reasoning carefully about our numbers reasoned about a test we never ran. This asserts the
+    // published text is generated FROM the constants, by checking it says what those constants
+    // currently say. Change a constant without regenerating and this fails.
+    #[test]
+    fn the_published_definitions_are_generated_from_the_constants_that_ran() {
+        let d = super::metric_definitions();
+        let f = d
+            .get("perf.frontier")
+            .expect("the frontier has a definition");
+        for us in crate::frontier::P99_BOUNDS_US {
+            let label = format!("{}ms", us / 1000);
+            assert!(
+                f.contains(&label),
+                "the frontier definition must name every declared bound; missing {label}"
+            );
+        }
+        assert!(
+            f.contains("no latency bound"),
+            "the unbounded reading must be described, not left implied: {f}"
+        );
+        // The two fields a reader needs in order to CHECK a reading rather than trust it.
+        assert!(f.contains("lower_bound"), "{f}");
+        assert!(f.contains("first_disqualified_conc"), "{f}");
+
+        let st = d
+            .get("stream.streams_sustained")
+            .expect("the stream gate has a definition");
+        assert!(
+            st.contains(&format!("{}x", crate::run::STREAM_STALL_MULTIPLIER)),
+            "the stall bound must come from the constant: {st}"
+        );
+        assert!(
+            st.contains(&format!(
+                "{:.1}%",
+                crate::run::STREAM_MAX_ERROR_RATIO * 100.0
+            )),
+            "the error bar must come from the constant: {st}"
+        );
+
+        // NOTHING may claim a 1 s tail bound anywhere. That number described a gate this engine never
+        // enforced, and it must not come back through prose.
+        for (k, v) in &d {
+            assert!(
+                !v.contains("p99 < 1 s") && !v.contains("under 1 s"),
+                "{k} states a 1 s bound, which no gate in this engine has used: {v}"
+            );
+        }
+    }
+
     use super::*;
     use std::io::{Read, Write};
     use std::net::TcpListener;
@@ -1609,6 +1756,7 @@ mod tests {
         );
         let seed = ResultSnapshot {
             schema_version: 1,
+            definitions: Default::default(),
             gateway: "gw".into(),
             measured_at: "2020-01-01T00-00-00Z".into(),
             matrix: Matrix {

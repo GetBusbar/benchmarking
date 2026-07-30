@@ -52,6 +52,22 @@ where
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ResultSnapshot {
     pub schema_version: u32,
+    /// WHAT EACH PUBLISHED METRIC MEANS, keyed by metric, built from the engine's own constants.
+    ///
+    /// A number a reader cannot check is a number they have to trust, and this project's whole claim is
+    /// that they should not have to. Each entry states the quantity, the predicate that decides which
+    /// observations count, and how the measurement terminates - so "is this the peak?" is answerable from
+    /// the artifact instead of from us.
+    ///
+    /// TOP-LEVEL, NOT PER CELL, because a definition does not vary by cell: repeating it across 36 cells
+    /// would be bloat, and worse, would create 36 places for one statement to drift.
+    ///
+    /// Formatted from the constants themselves rather than hand-written, for the reason the memory
+    /// `protocol` string learned the hard way: every published surface described the retired throughput
+    /// gate as "p99 < 1 s" while the engine enforced 20 ms, a bar 96% of recorded rungs pass versus 57%.
+    /// A definition maintained by hand is a definition that will disagree with the code.
+    #[serde(default)]
+    pub definitions: std::collections::BTreeMap<String, String>,
     pub gateway: String,
     #[serde(default)]
     pub build: String,
@@ -1110,6 +1126,7 @@ mod tests {
     fn sample_record() -> ResultSnapshot {
         ResultSnapshot {
             schema_version: 1,
+            definitions: Default::default(),
             gateway: "gw".to_string(),
             build: "gw:1.0.0".to_string(),
             measured_at: "2026-07-25T08:26:15Z".to_string(),
