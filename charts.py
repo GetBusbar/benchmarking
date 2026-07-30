@@ -2452,6 +2452,21 @@ def _merge() -> dict:
     return gws
 
 
+def _rate_str(rate) -> str:
+    """A rate as text: two decimals below 1/s, whole numbers at or above it.
+
+    ONE HELPER, BECAUSE THERE WERE TWO RENDERERS AND THEY DISAGREED. `_rate_cell` was fixed to stop
+    truncating a sub-1/s rate to "0" - the exact statement the engine was changed to stop making - and
+    the translation table four hundred lines below kept its bare `int()`. One script, two published
+    surfaces, opposite claims about the same number. The split matches the engine's own.
+    """
+    if rate is None:
+        return "n/a"
+    if not rate:
+        return "0"
+    return f"{rate:.2f}" if rate < 1 else f"{int(rate):,}"
+
+
 def _rate_cell(rd) -> str:
     """One frontier reading as a table cell: the rate, a floor as a floor, an absence with its own reason.
 
@@ -2474,8 +2489,7 @@ def _rate_cell(rd) -> str:
     #
     # Two decimals below 1/s, whole numbers at or above it - the same split the engine uses, so the two
     # never disagree about what a rate looks like.
-    rate = rd["rps"]
-    shown = f"{rate:.2f}" if rate < 1 else f"{int(rate):,}"
+    shown = _rate_str(rd["rps"])
     return ("≥ " if rd["lower_bound"] else "") + shown
 
 
@@ -2872,7 +2886,7 @@ def _report_md(rows: list, title: str, charts: list, pending: tuple = (), chart_
                 # "≥" on a floor, as everywhere else: a rate the sweep found no ceiling for is not a
                 # maximum, and this column must not be the one surface that implies it is.
                 xl = (("≥ " if x.get("_xlate_rps_at_bound_lower_bound") else "")
-                      + f"{int(x.get('xlate_rps_at_bound') or 0):,}")
+                      + _rate_str(x.get("xlate_rps_at_bound")))
                 if x.get("_xlate_ingress"):  # canonical direction, named so no two surfaces mix paths
                     xl += f" ({x['_xlate_ingress']} → {x['_xlate_egress']})"
                 xl += _sweep_label({"sweep": x.get("_xlate_source")})

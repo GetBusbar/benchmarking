@@ -71,16 +71,32 @@ _REPO_NAME="$(basename "${BENCH_REPO%.git}")"
 # with BENCH_SKIP_PREFLIGHT=1 for a deliberate experiment on a local revision.
 if [ -z "${BENCH_SKIP_PREFLIGHT:-}" ] && [ -n "$BENCH_COMMIT" ]; then
   _here="$(dirname "${BASH_SOURCE[0]}")"
-  if [ -n "$(git -C "$_here" status --porcelain 2>/dev/null)" ]; then
-    echo "PREFLIGHT FAILED: the harness tree is DIRTY, so \`engine.commit\` would not identify what ran." >&2
+  # DIRTY MEANS WHAT `BENCH_ENGINE_DIRTY` MEANS, not something stricter.
+  #
+  # This checked a bare `status --porcelain`, but the stamp it is protecting is computed at line ~311
+  # as `status --porcelain -- . ':(exclude)results'` - the repo has already decided that churn under
+  # results/ does NOT make `engine.commit` unidentifiable. Without that exclusion the preflight refused
+  # exactly the state the script itself creates: a `PUBLISH=0` run leaves results uncommitted BY DESIGN
+  # ("results are still pulled and left in the working tree for the operator to inspect"), and
+  # regenerating charts writes PNGs there. A gate that blocks its own documented workflow gets disabled,
+  # and then it protects nothing.
+  if [ -n "$(git -C "$_here" status --porcelain -- . ':(exclude)results' 2>/dev/null)" ]; then
+    echo "PREFLIGHT FAILED: the harness tree is DIRTY outside results/, so \`engine.commit\` would not identify what ran." >&2
     echo "  C8 rejects a board measured on a dirty tree - it is not reproducible. Commit or stash first:" >&2
-    git -C "$_here" status --short 2>/dev/null | sed 's/^/    /' >&2
+    git -C "$_here" status --short -- . ':(exclude)results' 2>/dev/null | sed 's/^/    /' >&2
     exit 1
   fi
-  if ! git -C "$_here" branch -r --contains HEAD 2>/dev/null | grep -q .; then
-    echo "PREFLIGHT FAILED: HEAD ($BENCH_COMMIT) is not on any remote branch." >&2
+  # CHECK THE COMMIT THE BOXES ACTUALLY FETCH, which is $BENCH_COMMIT and NOT necessarily HEAD.
+  #
+  # This tested HEAD while printing $BENCH_COMMIT in the failure, so the two could differ. That is not
+  # cosmetic: BENCH_COMMIT is an overridable env var, and the dangerous direction passes the gate -
+  # `BENCH_COMMIT=<local unpushed sha>` with a pushed HEAD would sail through here and then kill all
+  # fourteen boxes with FETCH FAILED ninety seconds in, which is the precise failure this exists to
+  # prevent. The harmless direction (an older pushed BENCH_COMMIT under an unpushed HEAD) was refused.
+  if ! git -C "$_here" branch -r --contains "$BENCH_COMMIT" 2>/dev/null | grep -q .; then
+    echo "PREFLIGHT FAILED: BENCH_COMMIT ($BENCH_COMMIT) is not on any remote branch." >&2
     echo "  Every box fetches the harness BY SHA from $BENCH_REPO, so all of them would fail to fetch" >&2
-    echo "  a commit that exists only on this machine. Push first." >&2
+    echo "  a commit that exists only on this machine. Push it first (or set BENCH_COMMIT to a pushed sha)." >&2
     exit 1
   fi
 fi

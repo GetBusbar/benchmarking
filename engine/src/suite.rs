@@ -907,24 +907,44 @@ pub fn run_suite_with(
             .map_err(|e| crate::snapshot::SnapshotError::UnresolvableHeader {
                 detail: e.to_string(),
             })?,
+        // THE SAME REFUSAL AS `static_headers` ABOVE, because this is the same defect one lane over.
+        //
+        // `static_headers` was changed from `unwrap_or_default()` to `?` so an unresolvable header
+        // stops the run instead of measuring without it. This sibling still swallowed the identical
+        // error with `.ok()?` - and inside a `filter_map`, which is WORSE than the empty-set failure it
+        // was fixed for: the dialect is DROPPED from the map entirely, `run.rs`'s
+        // `cfg.egress_headers.get(egress)` finds nothing, and every cell on that egress runs with no
+        // routing or auth header at all. Each records `served: false`, and the board publishes that the
+        // GATEWAY does not serve that dialect when the harness dropped its headers.
+        //
+        // Collected into a Result so the first failure propagates with its manifest error, rather than
+        // filtered - a per-dialect resolution failure is a manifest defect, not a dialect this gateway
+        // declines to serve, and those two must never look alike.
         egress_headers: cfg
             .dialects
             .iter()
-            .filter_map(|d| {
+            .map(|d| {
                 let mut h = cfg
                     .manifest
                     .headers_for(d.as_str(), &cfg.gw_cores, cfg.mock_addr.port(), &cfg.gw_dir)
-                    .ok()?;
+                    .map_err(|e| crate::snapshot::SnapshotError::UnresolvableHeader {
+                        detail: format!("egress {}: {e}", d.as_str()),
+                    })?;
                 // headers_for prepends the always-on set; the run config carries those separately, so
                 // strip them here rather than sending each one twice.
+                // Same refusal again: this resolves the always-on set purely to subtract it, but a
+                // failure here would silently leave the duplicates in (or, with the old `.ok()?`, drop
+                // the dialect) rather than saying the manifest cannot be resolved.
                 let statics = cfg
                     .manifest
                     .headers_for("", &cfg.gw_cores, cfg.mock_addr.port(), &cfg.gw_dir)
-                    .ok()?;
+                    .map_err(|e| crate::snapshot::SnapshotError::UnresolvableHeader {
+                        detail: e.to_string(),
+                    })?;
                 h.retain(|x| !statics.contains(x));
-                Some((d.as_str().to_string(), h))
+                Ok((d.as_str().to_string(), h))
             })
-            .collect(),
+            .collect::<Result<_, crate::snapshot::SnapshotError>>()?,
         runtime: cfg.manifest.runtime.clone(),
     };
 

@@ -112,7 +112,14 @@ def derive(rungs, bound_us):
     # Both sides now state the same rule: highest rate, and among rungs tied on rate, the lowest
     # concurrency. Relying on either language's max-adapter would leave this agreeing by coincidence of
     # input order, which is not agreement at all.
-    best = min(ok, key=lambda r: (-r["rps"], r["conc"]))
+    # A RUNG CAN QUALIFY WITH NO RATE, so the tie-break must not assume one.
+    #
+    # `clean()` deliberately admits a rung carrying a p99 but no rps - its docstring says a percentile
+    # cannot exist without a completed request, so a null rate there means the rate rounded away, not
+    # that nothing was served. The key then did `-r["rps"]`, which raises TypeError on None and takes
+    # the whole tool down mid-board. Treating an absent rate as the lowest candidate keeps the rung
+    # eligible (which is the point of admitting it) without letting it win a maximum it cannot state.
+    best = min(ok, key=lambda r: (-(r["rps"] if r["rps"] is not None else 0.0), r["conc"]))
     above = [r["conc"] for r in rungs if r["conc"] > best["conc"] and not qualifies(r, bound_us)]
     top = max((r["conc"] for r in rungs), default=0)
     return {

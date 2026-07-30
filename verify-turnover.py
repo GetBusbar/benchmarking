@@ -142,6 +142,16 @@ print(f"\nCLIFF-THAT-MATTERS ({len(live)}) - the excluded rung was FASTER; the n
 if not live:
     print("  NONE.")
 for at, wr, wc, c, f, b in live:
+    # THE RUNG ABOVE MAY HAVE NO RATE AT ALL, and this printed it with `,.0f` regardless.
+    #
+    # `live` is the complement of `moot`, and `moot` requires `b is not None` - so every cliff whose
+    # failing rung produced NO rate lands here with b=None and crashed the report with a TypeError.
+    # That is not an exotic input: the docstring's own worked example of a cliff is `c=512 - fail=900`,
+    # a rung that failed everything and therefore has no rate to report.
+    if b is None:
+        print(f"  {at[:44]:44s} published {wr:9,.0f} @c={wc:<6} | c={c} produced NO rate at all "
+              f"and failed {f:,.0f} - the exclusion cannot be compared, only disclosed")
+        continue
     delta = (b - wr) / wr * 100 if b and wr else 0
     print(f"  {at[:44]:44s} published {wr:9,.0f} @c={wc:<6} | c={c} reached {b:,.0f} "
           f"(+{delta:.1f}%) but failed {f:,.0f}")
