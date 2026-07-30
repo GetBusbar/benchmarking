@@ -2382,6 +2382,11 @@ function niceStep(raw) {
 function fmtTick(v) {
   if (v >= 1e6) return `${+(v / 1e6).toFixed(1)}M`;
   if (v >= 1e3) return `${+(v / 1e3).toFixed(1)}k`;
+  // BELOW 1 THE ROUNDING ATE THE WHOLE AXIS. niceStep happily produces a sub-1 step for a sub-1
+  // domain, so a sweep of ~0.25 req/s rungs draws gridlines at 0, 0.1 and 0.2 - and Math.round
+  // labelled all three "0", a chart whose entire vertical scale reads zero for a gateway that was
+  // measurably serving. Two significant figures separates 0.25 from 0.04 without inventing digits.
+  if (v > 0 && v < 1) return String(+v.toPrecision(2));
   return String(Math.round(v));
 }
 
@@ -2530,7 +2535,12 @@ function attachSweepHover(canvas, series, opts) {
     ctx.beginPath(); ctx.arc(geo.X(best.p.x), geo.Y(best.p.y), 4.2, 0, Math.PI * 2); ctx.stroke();
     ctx.font = "11px Inter, sans-serif"; ctx.textAlign = "left"; ctx.textBaseline = "top";
     ctx.fillStyle = opts.fg || "#e6edf3";
-    ctx.fillText(`${best.s.label}  conc ${fmtInt(best.p.x)}: ${fmtInt(best.p.y)} ${opts.unit || ""}`, geo.padL + 6, 2);
+    // fmtY, NOT fmtInt: this readout shares its series with the peak marker seven lines below, and
+    // that marker was already fixed to fmtRate. Hovering the same point printed "0 rps" while the
+    // label beside it printed "0.25" - one chart, two claims about one number. The p99 chart passes
+    // fmtInt because a sub-1 MICROSECOND tail is not a thing; the rate chart passes fmtRate.
+    const fmtY = opts.fmtY || fmtInt;
+    ctx.fillText(`${best.s.label}  conc ${fmtInt(best.p.x)}: ${fmtY(best.p.y)} ${opts.unit || ""}`, geo.padL + 6, 2);
   });
   canvas.addEventListener("mouseleave", redraw);
 }
@@ -2559,8 +2569,8 @@ function renderSweepCharts(container, sweepSeries, theme) {
   // and align vertically. Compute it from every probed concurrency on either chart.
   const allX = [...rps, ...p99].flatMap((s) => s.points.map((p) => p.x));
   const xDomain = allX.length ? [Math.min(...allX), Math.max(...allX)] : null;
-  const o1 = { yLabel: "RPS", unit: "rps", xDomain, ...theme };
-  const o2 = { yLabel: "p99 (µs)", unit: "µs p99", xDomain, ...theme };
+  const o1 = { yLabel: "RPS", unit: "rps", fmtY: fmtRate, xDomain, ...theme };
+  const o2 = { yLabel: "p99 (µs)", unit: "µs p99", fmtY: fmtInt, xDomain, ...theme };
   drawSweep(c1, rps, o1); attachSweepHover(c1, rps, o1);
   drawSweep(c2, p99, o2); attachSweepHover(c2, p99, o2);
 }
@@ -3946,7 +3956,7 @@ function cellPerfTip(cell, ingress, egress, best, boundMs = selectedBound()) {
   const bp = cellPath(best), bRps = bpRd ? mval(bpRd.rps) : null;
   // The bound is NAMED, and the "≥" travels: a floor stated as a ceiling is the one thing this popup must
   // never do (the sweep ran out of ladder; the rate is real and maximality is not established).
-  let s = `${rd.lower_bound === true ? "≥ " : ""}${fmtInt(rps)} req/s ${boundClause(boundMs)}`;
+  let s = `${rd.lower_bound === true ? "≥ " : ""}${fmtRate(rps)} req/s ${boundClause(boundMs)}`;
   if (lat != null) s += `, +${fmtInt(lat)} µs p99 added`;
   if (bRps != null && bRps > 0) {
     if (bp.ingress === ingress && bp.egress === egress) s += " - reference cell (ranks the table)";

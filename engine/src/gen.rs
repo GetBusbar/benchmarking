@@ -4,8 +4,10 @@
 // The load generator, in Rust. `otb loadgen` (this module) is run as a subprocess by `run.rs`'s
 // `load_window`.
 //
-// It prints a stats line (`rps=%d fail=%d ... p50us=%d ...`) that `engine/src/loadgen.rs::
-// parse_ugen_line` parses on the other end; the two must stay in the same shape.
+// It prints a stats line (`rps=<f64> fail=%d ... p50us=%d ...`) that `engine/src/loadgen.rs::
+// parse_ugen_line` parses on the other end; the two must stay in the same shape. `rps` is a FLOAT,
+// not a count: below 1/s the rate is fractional and printing it as an integer would send `rps=0`
+// for a window that carried requests. See `UgenStats::rps` for the full reasoning.
 //
 // ONE ASYNC TASK PER UNIT OF CONCURRENCY, NOT ONE OS THREAD.
 //

@@ -884,6 +884,24 @@ with isolated("every read_text(/write_text( call in charts.py carries an explici
     check("every read_text(/write_text( call in charts.py carries an explicit encoding=", _bad, [])
 
 
+# ---- FINDING 39: a sub-1/s rate must survive the chart's axes and captions ------------------
+# _fmt bottoms out at one decimal, so it renders 0.25 as "0.2" and 0.04 as "0.0" - and it was the
+# formatter on THREE rate axes plus the climb panel's caption. A tick reading "0.0" under a curve
+# that is visibly above the axis is the same false-zero the engine's fractional rate exists to
+# prevent, published as a picture. The caption additionally disagreed with the climb TABLE printed
+# directly beneath it, which round 4 had already moved to _rate_str - two renderings of one number.
+check("_fmt truncates a sub-1/s rate (the defect these guard)", (charts._fmt(0.25), charts._fmt(0.04)), ("0.2", "0.0"))
+check("_rate_axis keeps a sub-1/s rate legible", (charts._rate_axis(0.25), charts._rate_axis(0.04)), ("0.25", "0.04"))
+# a MEASURED zero stays "0" - the whole point is that it remains distinguishable from a truncated fraction
+check("_rate_axis: a measured 0 is still 0", (charts._rate_axis(0), charts._rate_axis(None)), ("0", "n/a"))
+# and the integer domain is byte-identical to what the published PNGs already show
+check("_rate_axis leaves the compact form untouched at scale",
+      tuple(charts._rate_axis(v) for v in (1, 9.5, 44382, 150000)),
+      tuple(charts._fmt(v) for v in (1, 9.5, 44382, 150000)))
+# the caption and the table below it must agree, because the caption's own comment promises exactly that
+check("climb caption and climb table render one rate identically",
+      charts._rate_str(0.25), "0.25")
+
 if _fail == 0:
     print("all charts.py validity-gate tests passed")
     sys.exit(0)

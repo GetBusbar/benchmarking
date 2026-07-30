@@ -1678,7 +1678,9 @@ def render(chart: Chart, only_keys=None, out_stem: str | None = None) -> None:
             return f"{v:,.1f}"
         if unit == "concurrent streams":  # a discrete count - "1,024", never "1.0k"
             return f"{int(round(v)):,}"
-        return _fmt(v)
+        # Everything left here is a RATE (req/s, fps), so it goes through the rate formatter: _fmt
+        # alone would print a sub-1/s tick as "0.0".
+        return _rate_axis(v)
 
     # WHICH METRIC A BAR IS, printed on the bar itself. A chart with two bars per gateway had nothing
     # anywhere on the image tying either bar to its series: the legend's colours are LANGUAGES, and the
@@ -2052,7 +2054,7 @@ def render_frontier_shape(out_stem: str | None = None) -> None:
         ax.annotate(sub, xy=(0, 1), xycoords="axes fraction", xytext=(0, 2),
                     textcoords="offset points", fontsize=8, color=GRAY, va="bottom", ha="left")
         from matplotlib.ticker import FuncFormatter
-        ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _p: _fmt(v) if v > 0 else "0"))
+        ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _p: _rate_axis(v)))
     for ax in axes[n:]:
         ax.set_visible(False)
 
@@ -2240,7 +2242,7 @@ def render_frontier_climb(out_stem: str | None = None) -> None:
             # so the picture is re-derivable from the artifact beside it.
             g = f"{s['gain']:.1f}×" if s["gain"] else "?"
             cg = f"{s['conc_gain']:.0f}×" if s["conc_gain"] else "?"
-            line1 = (f"{_fmt(s['rps_first'])} at c={s['c_first']:g} → {_fmt(s['rps_peak'])} peak "
+            line1 = (f"{_rate_str(s['rps_first'])} at c={s['c_first']:g} → {_rate_str(s['rps_peak'])} peak "
                      f"({g} the rate for {cg} the concurrency)")
             line2 = (f"95% of peak by c={s['c_sat']:g}"
                      + (f"  ·  tail {_us(s['p99_first'])} → {_us(s['p99_top'])}"
@@ -2250,7 +2252,7 @@ def render_frontier_climb(out_stem: str | None = None) -> None:
 
         from matplotlib.ticker import FuncFormatter, NullFormatter
         ax.xaxis.set_major_formatter(FuncFormatter(lambda v, _p: f"{v:,.0f}"))
-        ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _p: _fmt(v)))
+        ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _p: _rate_axis(v)))
         ax.yaxis.set_minor_formatter(NullFormatter())
         ax2.yaxis.set_major_formatter(FuncFormatter(lambda v, _p: _us(v)))
         ax2.yaxis.set_minor_formatter(NullFormatter())
@@ -2465,6 +2467,23 @@ def _rate_str(rate) -> str:
     if not rate:
         return "0"
     return f"{rate:.2f}" if rate < 1 else f"{int(rate):,}"
+
+
+def _rate_axis(rate) -> str:
+    """A rate as an AXIS TICK or a chart caption: compact at scale, honest below 1/s.
+
+    `_rate_str` is for tables, where "12,000" is what a reader wants to compare digit by digit.
+    An axis wants `_fmt`'s "12k". But `_fmt` bottoms out at one decimal, so it renders 0.25 as
+    "0.2" and 0.04 as "0.0" - and a tick reading "0.0" on a chart whose curve is visibly above
+    the axis is the same false-zero claim the fractional rate exists to prevent, published as a
+    picture instead of a number. Below 1/s the compact form has nothing to compact, so give the
+    digits: two significant ones, which distinguishes 0.25 from 0.04 without inventing precision.
+    """
+    if rate is None:
+        return "n/a"
+    if not rate or rate <= 0:
+        return "0"
+    return f"{float(f'{rate:.2g}'):g}" if rate < 1 else _fmt(rate)
 
 
 def _rate_cell(rd) -> str:
