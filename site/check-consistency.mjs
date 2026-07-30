@@ -115,39 +115,13 @@ export function c7HwmBelowPeak(gwKey, rawMatrix) {
   return { warnings, checked };
 }
 
-// ---- C6 as a pure function: sustained@20ms <= max_proxy on every served cell --------------------
-// max_proxy is the UNCONSTRAINED throughput ceiling; sustained-under-SLO cannot EXCEED it. A
-// max_proxy of 0 is "did not qualify" (no ceiling), not an inversion, and is skipped. The magnitude is
-// stamped so a gross inversion is legible at a glance.
-//
-// Exported and pure (AUDIT #21) so its RED-before test can INJECT an inversion into a synthetic matrix
-// instead of depending on a real gateway staying broken.
-// C6 SEVERITY IS DECIDED BY THE MEASUREMENT'S OWN NOISE, NOT BY A FIXED RULE IN EITHER DIRECTION: a
-// fixed hard-fail is wrong on a CPU-bound gateway, where the sustained and max-proxy sweeps measure THE
-// SAME ceiling in two separate phases, so which one comes out higher is decided by run-to-run variation.
-//
-// The test is therefore not "is sustained > max_proxy" and not "is the gap under some chosen percent".
-// It is: IS THE GAP LARGER THAN THIS CELL'S OWN MEASURED SPREAD? The peak sweep probes many rungs and
-// their rps values scatter; that scatter IS this gateway-and-cell's measurement noise, measured on the
-// same box in the same phase, for free. An inversion inside that band is a comparison the data cannot
-// resolve. An inversion outside it is a number that the gateway's own repeated measurements say should
-// not have happened, and that is a real finding.
-//
-// Two things bound how far this can be stretched:
-//   1. C6_GROSS_PCT caps how much noise may ever be excused, so a degenerate two-rung sweep with a wild
-//      spread cannot license an arbitrarily large inversion.
-//   2. The bound-termination check below is an ERROR ON ITS OWN, at any magnitude. A peak sweep whose
-//      WINNING rung is the highest rung it probed has not found a ceiling, it ran out of ladder, and
-//      that is caught directly rather than being inferred from the inversion it happens to produce.
-// A sub-band inversion is reported as a WARNING carrying its magnitude and the band it fell inside, so
-// it stays visible in the build log and on the row instead of being silently tolerated.
-// THIS LINE IS PARSED BY bench-audit.py. The same bar exists there as a twin constant, and its
-// board-level `check_c6_bar_agrees_with_the_site` reads THIS declaration out of this file and fails when
-// the two disagree - so tuning the ceiling here alone does not fork the invariant quietly, it fails the
-// python gate until both sides move together. The check also fails when it cannot find the constant at
-// all, because going blind is not a pass: keep the exact `export const C6_GROSS_PCT = <number>;` shape,
-// on one line, or the cross-check has nothing to read.
-export const C6_GROSS_PCT = 5;
+// The gross-inversion ceiling that used to live here is RETIRED. It capped how much window noise could
+// excuse a sustained figure sitting above the maximum it was meant to sit under; both of those fields
+// are deleted and the frontier makes that inversion unrepresentable (six maxima over sets that only
+// grow). bench-audit.py used to parse this file's `export const C6_GROSS_PCT = 5;` to catch drift
+// between the two copies - a sound mechanism for a live constant, and pure decoration once the constant
+// governed nothing, so it went too. C6 above now checks the frontier's ordering and its disclosure.
+
 // sweepSpreadPct(sweep, winner): the rung-to-rung scatter of a sweep, as a percentage of the winning
 // rps. This is the cell's OWN measured noise: same box, same phase, same gateway, several samples of
 // the same ceiling. Null when there is nothing to measure it from (fewer than two rungs), which is the

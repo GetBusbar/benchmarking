@@ -64,7 +64,7 @@ def snapshot_paths():
 #
 # NO PER-CELL CONSUMER ANY MORE. `check_sustained_not_above_peak` read this bar; the pair it policed
 # (`rps_max_proxy` vs `rps_sustained_20ms`) is deleted, so the bar's only remaining job in this file is
-# the DRIFT GATE below (`check_c6_bar_agrees_with_the_site`), which is about two literals in two
+# the retired drift gate (see the block below), which was about two literals in two
 # languages and not about any cell's data. It stays declared, with its reasoning intact, because the
 # site still declares its own copy and a gate that stops being able to compare is the defect class this
 # file exists to prevent. See the removal note at `check_sustained_not_above_peak`'s old site.
@@ -76,28 +76,23 @@ def snapshot_paths():
 # under. This stays at 5% rather than 0 because the ceiling is refined BETWEEN rungs and its rate is
 # a median of three windows there, so a point or two of disagreement is measurement, not a bug.
 #
-# THIS IS THE DECLARED SOURCE, AND THE SITE CARRIES ITS OWN COPY (ledger TOOL-02). The same ceiling is
-# spelled `export const C6_GROSS_PCT = 5;` in site/check-consistency.mjs, because that gate runs in
-# node with no python in reach and no build step to share a constant through. Two literals, one
-# invariant, and nothing that noticed when they disagreed - tune one and the two gates quietly start
-# policing different bars for the same inversion.
+# THE GROSS-INVERSION CEILING IS RETIRED, and with it the cross-language drift gate that policed it.
 #
-# The options were: emit a shared constants file from one side (a build step, and the site is not
-# mine to re-point at it), or hand-sync and hope. The least-magic third option is the one taken here:
-# both literals stay where they are, each readable on its own, and this audit PARSES the site's
-# declaration and refuses to pass when the two disagree (`check_c6_bar_agrees_with_the_site`). No
-# generated file, no import machinery, no cross-language build - just a gate that fails on drift, in
-# the tool whose entire job is to fail on drift. The coupling is documented at this end; the site end
-# carries the same note in its own comment block.
-C6_GROSS_PCT = 5.0
-
-# The site's copy of the same bar, and how to find it. Parsed, not imported: this is python reading a
-# javascript literal, and the narrowness of the pattern is the point - if the site restates the
-# constant in a shape this does not match, the check reports "could not find it", which is a
-# violation, not a pass. A cross-check that goes quiet when it stops being able to look is the exact
-# defect class this file exists to prevent.
-SITE_C6_PATH = os.path.join("site", "check-consistency.mjs")
-SITE_C6_RE = re.compile(r"^export const C6_GROSS_PCT\s*=\s*([0-9]+(?:\.[0-9]+)?)\s*;", re.M)
+# `C6_GROSS_PCT = 5.0` capped how much window noise could excuse a `rps_sustained_20ms` figure sitting
+# ABOVE the `rps_max_proxy` it was meant to sit under. Both fields are deleted. The inversion is not
+# merely bounded now, it is UNREPRESENTABLE: the frontier is six maxima over sets that only grow as the
+# bound relaxes, so a looser reading cannot come out below a tighter one for any input at all.
+#
+# The gate went with it, and that is the point rather than an omission. `check_c6_bar_agrees_with_the_site`
+# parsed the site's own `export const C6_GROSS_PCT = 5;` and failed on disagreement - a good mechanism,
+# for a constant that governed something. Kept after the constant stopped governing anything, it would
+# have been a gate policing agreement between two dead literals: exactly the decoration this file's
+# whole job is to find, and which it has caught twice elsewhere (a phantom phase weight, a trigger
+# listing a step no workflow ran).
+#
+# What replaced the invariant: `check_frontier_rates_are_monotone_in_the_bound` asserts the ordering
+# over all six readings, and `check_frontier_is_rederivable_from_its_sweep` recomputes every one of them
+# from the raw rungs - which catches a mis-ordered pair and much more besides, with no tolerance to tune.
 
 # The engine's own declaration of the field list ABSENCE_CARRYING_FIELDS claims to mirror. Same
 # reasoning as SITE_C6_PATH/SITE_C6_RE just above: this is python parsing a sibling in another
@@ -923,47 +918,6 @@ CELL_CHECKS = [
     check_stream_capacity_is_a_number,
 ] + FRONTIER_CHECKS
 
-
-def parse_site_c6(text):
-    """The site's declared C6 ceiling, read out of its source. None when it is not declared as
-    expected - which the caller must treat as a failure, never as agreement."""
-    m = SITE_C6_RE.search(text or "")
-    return float(m.group(1)) if m else None
-
-
-def check_c6_bar_agrees_with_the_site():
-    """The two copies of the gross-inversion ceiling must be the same number (ledger TOOL-02).
-
-    `C6_GROSS_PCT` is declared here and again in site/check-consistency.mjs, in two languages that
-    share no build step. Both read 5 today and both were written by someone who believed 5 was the
-    bar; nothing in either tree would have noticed if one of them had been tuned to 7 while the other
-    stayed at 5, and the two gates would then have been policing different definitions of the same
-    inversion - the site passing a cell this audit fails, or worse, the reverse.
-
-    Parsing the sibling's literal is deliberately the whole mechanism. It needs no generated file, no
-    codegen step and no edit to the site (which this tool does not own), and it fails in the one place
-    a drift would be looked for. If the site is not on disk at all, or has restated the constant in a
-    shape the pattern does not recognise, that is reported as a violation too: an audit that cannot
-    see the thing it is comparing against has not agreed with it.
-    """
-    p = os.path.join(HERE, SITE_C6_PATH)
-    try:
-        with open(p) as fh:
-            text = fh.read()
-    except OSError as e:
-        yield (f"C6 bar: cannot read the site's copy at {SITE_C6_PATH} ({e}) - the python bar is "
-               f"{C6_GROSS_PCT}, and an unverifiable twin is not an agreeing twin")
-        return
-    site = parse_site_c6(text)
-    if site is None:
-        yield (f"C6 bar: {SITE_C6_PATH} no longer declares `export const C6_GROSS_PCT = <n>;` where "
-               f"this can read it - the cross-check went blind, which is a drift, not a pass")
-        return
-    if site != C6_GROSS_PCT:
-        yield (f"C6 bar: python C6_GROSS_PCT={C6_GROSS_PCT} but {SITE_C6_PATH} declares {site} - "
-               f"two gates, one invariant, different bars")
-
-
 def parse_rust_absences(text, struct_name):
     """The exact field list `struct_name::absences()` walks, read out of record.rs's own
     `absences_of!(self, ...)` invocation. None when the shape this expects - one
@@ -1005,7 +959,7 @@ def check_absence_fields_mirror_the_engine():
     learned about, which is the same hole from the other side: a field the engine now reports
     absences for, that this audit silently never checks for a bare null.
 
-    Modeled directly on check_c6_bar_agrees_with_the_site (ledger TOOL-02): parse the sibling's
+    Modeled on the retired C6-bar drift gate (ledger TOOL-02): parse the sibling's
     declaration rather than importing it, and treat "cannot find the shape expected" as a violation,
     not a pass. Going blind is a drift, not agreement - the established rule in this file.
     """
@@ -1210,7 +1164,7 @@ def main():
     # bounds), or of which of this run's inputs could be read at all - never of any one cell's numbers.
     # They run AFTER the per-gateway loop because `check_every_declaration_is_readable` reports what that
     # loop populated.
-    board_checks = (check_c6_bar_agrees_with_the_site,
+    board_checks = (
                     check_absence_fields_mirror_the_engine,
                     check_frontier_bounds_agree_with_the_engine,
                     check_every_declaration_is_readable)
