@@ -3,6 +3,24 @@
 Written 2026-07-29 at the end of a long session. State, findings, and what to do next.
 Delete this file once the board is published.
 
+> **SUPERSEDED IN PART, 2026-07-30.** Read the metric names below as HISTORY, not as the current
+> artifact. Everything this file says about `rps_sustained_20ms`, `rps_max_proxy` and `cpu_fps` was
+> true when written; all three are now deleted.
+>
+> - The two throughput scalars are replaced by `CellPerf.frontier`: six readings off ONE sweep, at
+>   tail-latency bounds of 1/5/10/50/100 ms plus one unbounded. A scalar could not express the
+>   tradeoff, and the two of them could invert against each other because two algorithms read one set
+>   of windows. See `engine/src/frontier.rs`.
+> - `cpu_fps` is retired outright. Of the 16 cells that published both it and `streams_sustained_fps`,
+>   4 had it INVERTED below the proven delivery boundary, 5 were redundant within 1%, and 7 were
+>   measured at a concurrency where the delivery gate did not hold - a frame rate recorded while
+>   dropping frames.
+> - The "p99 under 1 s" bar quoted on the old surfaces was never enforced: the retired gate was 20 ms.
+>
+> The acceptance bar in the next section - every cell needs data, `n/a` is a major issue - still
+> stands, and the frontier serves it better: nothing is suppressed now, so a measured number always
+> reaches the board even when what it MEANS is open.
+
 ## THE REQUIREMENT: every cell needs data. `n/a` is a major issue.
 
 This is the acceptance bar, set by the owner while looking at the live site. A board where most
