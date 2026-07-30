@@ -800,7 +800,12 @@ bench_gateway_once() {
     sudo -n true 2>/dev/null || { echo "PROVISION FAILED: passwordless sudo never became available"; exit 1; }
     # apt itself is contended at boot (unattended-upgrades holds the dpkg lock), so retry rather
     # than fail the whole box on a lock we only had to wait for.
-    for _ in 1 2 3; do sudo -n apt-get update -q && break; sleep 10; done
+    # NEEDRESTART MUST NOT RESTART SERVICES UNDER A RUNNING PROVISION. Ubuntu 24.04 ships needrestart
+    # hooked into apt, and on 2026-07-30 it restarted polkit, dbus and ssh on all fourteen boxes
+    # mid-install - after which every sudo in this block failed for a password and the entire field
+    # was lost. `a` (automatic, no prompt) still lets it do its bookkeeping but stops it interrupting
+    # the session we are provisioning through. Exported so it covers every apt call below too.
+    for _ in 1 2 3; do sudo -n NEEDRESTART_MODE=l apt-get update -q && break; sleep 10; done
     # BARE base only: docker (for the image gateways), curl (fetch the prebuilt rig), jq, and python3
     # + psutil (the memory suite reads RSS). NO build-essential/rust/go/node here - the mock+loadgen
     # are prebuilt binaries pulled from the rig release, and the 2 source-built gateways pull their
@@ -809,7 +814,7 @@ bench_gateway_once() {
     # unattended-upgrades for the dpkg lock, and a single attempt turns a lock we only had to wait for
     # into a lost box. Without `set -e` tripping on the first two tries.
     for _ in 1 2 3; do
-      sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y -q docker.io curl ca-certificates jq python3-pip git build-essential && break
+      sudo -n NEEDRESTART_MODE=l DEBIAN_FRONTEND=noninteractive apt-get install -y -q docker.io curl ca-certificates jq python3-pip git build-essential && break
       sleep 10
     done
     # A box that came up without docker cannot measure most entrants, and every launch on it fails
@@ -826,8 +831,8 @@ bench_gateway_once() {
     if ! command -v docker >/dev/null; then
       echo "docker missing after install; attempting dpkg repair"
       sudo -n dpkg --configure -a >/dev/null 2>&1 || true
-      sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y -q --fix-broken >/dev/null 2>&1 || true
-      sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y -q --reinstall docker.io >/dev/null 2>&1 || true
+      sudo -n NEEDRESTART_MODE=l DEBIAN_FRONTEND=noninteractive apt-get install -y -q --fix-broken >/dev/null 2>&1 || true
+      sudo -n NEEDRESTART_MODE=l DEBIAN_FRONTEND=noninteractive apt-get install -y -q --reinstall docker.io >/dev/null 2>&1 || true
     fi
     command -v docker >/dev/null || { echo "PROVISION FAILED: docker did not install on this box (after retry and dpkg repair)"; exit 1; }
     # The engine is BUILT ON THE BOX from the cloned commit, once, before any measurement starts.
@@ -836,14 +841,37 @@ bench_gateway_once() {
     # Installed here, at provision time, so no toolchain work happens inside a measurement window -
     # the same reason the source-built gateways build before the memory baseline is taken.
     command -v cargo >/dev/null || (curl -sSf https://sh.rustup.rs | sh -s -- -y -q >/dev/null 2>&1)
-    sudo usermod -aG docker ubuntu || true
+    # PASSWORDLESS SUDO CAN LAPSE MID-PROVISION, AND IT TOOK THE WHOLE FIELD ON 2026-07-30.
+    #
+    # All fourteen boxes died here in the same second. `sudo -n` worked for apt, then every sudo below
+    # failed with "a terminal is required to read the password" - so the run reported
+    # "docker daemon never answered" on fourteen gateways when the daemon was never asked. The apt
+    # install triggers needrestart, which restarts polkit, dbus and ssh (the fanout logs show exactly
+    # that list); a sudo landing in that window can find PAM mid-restart. One box provisioned alone
+    # does NOT reproduce it, which is why fourteen-at-once found it and every prior single-box test
+    # did not.
+    #
+    # Three defences, because the window is environmental and cannot be argued away:
+    #   1. NEEDRESTART_MODE=l below stops apt restarting services underneath us at all.
+    #   2. This loop WAITS the lapse out instead of losing the box to it - same shape as the
+    #      pre-apt wait, which exists for the same class of reason.
+    #   3. Every sudo from here on is `-n`. There is no tty on this connection, so a bare `sudo` can
+    #      only fail or hang, and it did: those three bare calls were the only ones in this block.
+    # And it FAILS AS ITSELF: a sudo failure must never be published as a docker failure.
+    for _ in 1 2 3 4 5 6 7 8 9 10; do sudo -n true 2>/dev/null && break; sleep 3; done
+    sudo -n true 2>/dev/null || {
+      echo "PROVISION FAILED: passwordless sudo lapsed after apt (needrestart window) and did not return in 30s"
+      echo "  this is a RIG failure, not the gateway's, and not docker's - the daemon was never asked"
+      exit 1
+    }
+    sudo -n usermod -aG docker ubuntu || true
     # FAIRNESS: a container inherits the docker DAEMON fd limit, NOT the host-shell ulimit. Left at
     # the ~1024 default, a containerised gateway fast enough to hold >1024 concurrent connections
     # hits EMFILE and collapses at exactly c=1024. The native side (loadgen, mock, native gateways)
     # is raised to match in the remote run script below - it used to be perf/run.sh's job, and when
     # that was retired the raise went with it while this comment kept citing it.
-    echo "{ \"default-ulimits\": { \"nofile\": { \"Name\": \"nofile\", \"Hard\": 1048576, \"Soft\": 1048576 } } }" | sudo tee /etc/docker/daemon.json >/dev/null
-    sudo systemctl restart docker || sudo service docker restart || true
+    echo "{ \"default-ulimits\": { \"nofile\": { \"Name\": \"nofile\", \"Hard\": 1048576, \"Soft\": 1048576 } } }" | sudo -n tee /etc/docker/daemon.json >/dev/null
+    sudo -n systemctl restart docker || sudo -n service docker restart || true
     # THE BINARY EXISTING IS NOT EVIDENCE THE DAEMON WILL ANSWER, and it was the daemon that was
     # missing when this last bit.
     #
@@ -879,6 +907,15 @@ bench_gateway_once() {
     if [ "$_dockok" != 1 ]; then
       # The box is lost either way, so spend a second saying WHY - a bare "the daemon never answered"
       # sends the next person to ssh into a machine that has already been terminated.
+      # NAME THE RIGHT CULPRIT. Every probe below runs through sudo, so if sudo itself is refusing,
+      # "the daemon never answered" is a claim about docker built entirely from a failure to ASK it -
+      # which is how fourteen gateways were reported as docker failures on 2026-07-30. Check the tool
+      # before blaming the subject.
+      if ! sudo -n true 2>/dev/null; then
+        echo "PROVISION FAILED: passwordless sudo is refusing, so the docker daemon was never actually probed"
+        echo "  this is a RIG failure. Do NOT read it as a docker or gateway fault."
+        exit 1
+      fi
       echo "PROVISION FAILED: docker installed but the daemon never answered on /var/run/docker.sock after 3 rounds (~90s)"
       echo "  docker binary : $(command -v docker || echo MISSING)"
       echo "  systemctl     : $(sudo -n systemctl is-active docker 2>&1 | head -1)"
@@ -1162,8 +1199,8 @@ echo "[rig] loadgen/mock fd limit: $(ulimit -Sn) (hard $(ulimit -Hn))"
 # tcp_tw_reuse because a closed connection holds its port through TIME_WAIT: without recycling, a
 # window that cycles connections exhausts the range well below its size. This is the safe direction
 # of that knob - it permits reuse for OUTBOUND connections only.
-sudo sysctl -w net.ipv4.ip_local_port_range="16384 65535" >/dev/null 2>&1 || true
-sudo sysctl -w net.ipv4.tcp_tw_reuse=1 >/dev/null 2>&1 || true
+sudo -n sysctl -w net.ipv4.ip_local_port_range="16384 65535" >/dev/null 2>&1 || true
+sudo -n sysctl -w net.ipv4.tcp_tw_reuse=1 >/dev/null 2>&1 || true
 echo "[rig] ephemeral ports: $(cat /proc/sys/net/ipv4/ip_local_port_range 2>/dev/null || echo unknown) (tw_reuse=$(cat /proc/sys/net/ipv4/tcp_tw_reuse 2>/dev/null || echo unknown))"
 # The checkout is sparse (gateways + lib only), so results/ does not exist here and the snapshot
 # writer does not create its own output directory - it reports an error and writes nothing.
@@ -1251,8 +1288,8 @@ echo $? > .run-done
 # harvest: cancel the boot timer and re-arm a bounded window. Cost stays capped either way, and a dead
 # orchestrator now has a known amount of time to come back (see `run-on-ec2.sh harvest`) instead of
 # racing whatever happened to be left of the work budget.
-sudo shutdown -c 2>/dev/null || true
-sudo shutdown -h +__HARVEST_GRACE_MIN__ 2>/dev/null || true
+sudo -n shutdown -c 2>/dev/null || true
+sudo -n shutdown -h +__HARVEST_GRACE_MIN__ 2>/dev/null || true
 echo "[box] run finished; results held for __HARVEST_GRACE_MIN__ min for harvest, then self-terminate"
 REMOTE
   )"
