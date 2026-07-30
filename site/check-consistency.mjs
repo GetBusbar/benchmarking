@@ -1022,6 +1022,43 @@ export function checkConsistency(data, app, opts = {}) {
               if (!isMetricField(k)) continue;
               cmp(`${at}.${k}`, shownOf(sealedSub[k]), expectOf(rawSub, rawCell.absences, prefix, k));
             }
+            // AND EVERY FRONTIER READING'S OWN ABSENCE REASON, which nothing above reaches.
+            //
+            // `isMetricField` recognises scalar keys; the frontier is a Vec of readings, each with its
+            // own sealed rate whose absence reason lives in the cell's map under a BOUND-KEYED name
+            // (`perf.frontier.10ms.rps`). So this loop walked straight past it, and the projection could
+            // - and did - lose every frontier absence reason without a single check firing.
+            //
+            // The bug it missed: `sealFrontier` looked up the bare `frontier.10ms.rps` instead of the
+            // prefixed key, found nothing, and defaulted every absent reading to `not_measured` with no
+            // detail. one-api genuinely cannot serve under a 10 ms tail - its own rungs never got below
+            // 34 ms, and the engine says so with `below_resolution` plus the prose naming the bound.
+            // Flattened, no surface could tell "measured, and it cannot do this" from "nothing was
+            // measured", and the neutral reading FLATTERS the gateway. An oracle that compares the
+            // bundle against the raw artifact has to compare THIS too, or the comparison has a hole
+            // exactly where the metric's meaning lives.
+            if (prefix === "perf" && Array.isArray(sealedSub.frontier)) {
+              for (const r of sealedSub.frontier) {
+                const at2 = r.bound_ms == null ? "unbounded" : `${r.bound_ms}ms`;
+                const key = `frontier.${at2}.rps`;
+                const rawAbs = absentEntryOf(rawCell.absences, "perf", key);
+                const shownReason = r.rps && r.rps.reason != null ? r.rps.reason : null;
+                const wantReason = rawAbs && rawAbs.reason ? rawAbs.reason : null;
+                // A published rate needs no reason; an absent one must carry the artifact's own.
+                if (r.rps && r.rps.value == null && wantReason && shownReason !== wantReason) {
+                  errors.push(`R1: ${g.key}.${at}.frontier.${at2}: the raw artifact records this absence as ` +
+                    `\`${wantReason}\` but the sealed envelope carries \`${shownReason}\` - an absence that ` +
+                    `loses its reason cannot be told from a hole nobody measured, and for a tail bound ` +
+                    `that difference is the whole finding`);
+                }
+                const shownDetail = r.rps && r.rps.detail != null ? r.rps.detail : null;
+                const wantDetail = rawAbs && rawAbs.detail ? rawAbs.detail : null;
+                if (r.rps && r.rps.value == null && wantDetail && shownDetail !== wantDetail) {
+                  errors.push(`R1: ${g.key}.${at}.frontier.${at2}: the absence's own evidence was dropped in ` +
+                    `projection (artifact says ${JSON.stringify(wantDetail.slice(0, 60))})`);
+                }
+              }
+            }
           }
         }
       }

@@ -118,19 +118,27 @@ with isolated('fixtures: a canonical bundle keyed like CANON (key -> record with
 
 
     # stream(**over): build a raw stream record from the base intent (value + mock_bound), then SEAL it into
-    # the envelope-carrying record _proj_streaming reads. `over` names the raw values (e.g. cpu_fps_mock_bound=
-    # True); the seal turns them into the correct envelope, exactly as gen-data does.
+    # the envelope-carrying record _proj_streaming reads. `over` names the raw values; the seal turns them
+    # into the correct envelope, exactly as gen-data does.
+    #
+    # `cpu_fps` IS NOT IN THE BASE RECORD ANY MORE, because the producer no longer emits it: across the 16
+    # cells that published both it and `streams_sustained_fps`, 4 were INVERTED below the proven delivery
+    # boundary, 5 were redundant within 1%, and 7 were measured at a concurrency where the delivery gate did
+    # not hold. It is still ACCEPTED as an override, and there is a guard below that a stale bundle still
+    # carrying it projects no streamcpu_* row keys - the retired metric's absence being the property under
+    # test, rather than the metric.
     def stream(**over):
         raw = dict(added_ttft_p99_us=90, added_gap_p99_us=12,
-                   streams_sustained=1300, streams_sustained_fps=40000, streams_sustained_mock_bound=False,
-                   cpu_fps=48000, cpu_fps_mock_bound=False)
+                   streams_sustained=1300, streams_sustained_fps=40000, streams_sustained_mock_bound=False)
         raw.update(over)
         rec = {"stream_served": True, "path": {"dialect": "openai"}, "source": _SRC,
                "added_ttft_p99_us": _seal(raw["added_ttft_p99_us"]),
                "added_gap_p99_us": _seal(raw["added_gap_p99_us"]),
                "streams_sustained_fps": _seal(raw["streams_sustained_fps"], gated=True, flag=raw["streams_sustained_mock_bound"], zero_note="measured_failure"),
-               "streams_sustained": _seal(raw["streams_sustained"], gated=True, flag=raw["streams_sustained_mock_bound"], zero_note="measured_failure"),
-               "cpu_fps": _seal(raw["cpu_fps"], gated=True, flag=raw["cpu_fps_mock_bound"], zero_note="measured_failure")}
+               "streams_sustained": _seal(raw["streams_sustained"], gated=True, flag=raw["streams_sustained_mock_bound"], zero_note="measured_failure")}
+        if "cpu_fps" in raw:   # a STALE bundle: sealed, present, and required to be ignored
+            rec["cpu_fps"] = _seal(raw["cpu_fps"], gated=True, flag=raw.get("cpu_fps_mock_bound", False),
+                                   zero_note="measured_failure")
         return rec
 
 
@@ -157,25 +165,38 @@ with isolated('fixtures: a canonical bundle keyed like CANON (key -> record with
 with isolated('_proj_streaming: the streamcpu / sustained validity gates'):
     _canon({"g": stream()})
     row = charts._proj_streaming("g")
-    check("_proj_streaming: certified cpu_fps (present, >0, mock_bound False) -> streamcpu_valid True", row["streamcpu_valid"], True)
-    check("_proj_streaming: certified sustained (present, >0, mock_bound False) -> stream_sustained_valid True", row["stream_sustained_valid"], True)
+    check("_proj_streaming: certified sustained (present, >0) -> stream_sustained_valid True", row["stream_sustained_valid"], True)
 
-    # cpu_fps mock-bound True -> NOT valid (a rig-limited number is not a gateway-vs-ceiling comparison).
-    _canon({"g": stream(cpu_fps_mock_bound=True)})
-    check("_proj_streaming: cpu_fps mock_bound True -> streamcpu_valid False", charts._proj_streaming("g")["streamcpu_valid"], False)
+    # ── THE cpu_fps GATES ARE INVERTED, NOT DELETED ──────────────────────────────────────────────────
+    # This block used to assert four things about `streamcpu_valid` (certified -> True, mock_bound True ->
+    # False, mock_bound None -> False, measured 0 -> a real reading). All four described a metric that is
+    # retired at the producer, so the assertions cannot be kept as they were. Deleting them outright would
+    # leave nothing pinning the removal: a projection that started re-emitting `streamcpu_*` keys - or a
+    # revert of the deletion - would break no test. So the PROPERTY UNDER TEST IS NOW THE ABSENCE, driven by
+    # a fixture that deliberately still carries the retired field, which is exactly the shape of every
+    # snapshot on disk that predates the removal.
+    check("cpu_fps is not in the base stream fixture (the producer no longer emits it)",
+          "cpu_fps" in stream(), False)
+    _canon({"g": stream(cpu_fps=48000)})          # a STALE bundle, still carrying a certified cpu_fps
+    _stale = charts._proj_streaming("g")
+    check("RETIRED: a stale bundle's cpu_fps projects NO streamcpu_frames_per_sec row key",
+          "streamcpu_frames_per_sec" in _stale, False)
+    check("RETIRED: a stale bundle's cpu_fps projects NO streamcpu_valid gate",
+          "streamcpu_valid" in _stale, False)
+    check("RETIRED: no streamcpu_* row key survives the projection at all",
+          [k for k in _stale if k.startswith("streamcpu")], [])
+    check("RETIRED: a stale cpu_fps does not smuggle in a _cpu_fps_reason either",
+          [k for k in _stale if "cpu_fps" in k], [])
+    # ...and the metric that SURVIVED the cull is still projected. `streams_sustained_fps` is the
+    # delivery-proven frame rate - measured at a concurrency where every expected frame arrived - which is
+    # why it is the one that stayed. A cull that also lost it would be a regression, not a simplification.
+    check("SURVIVED: streams_sustained_fps is still projected (the delivery-proven frame rate)",
+          _stale["stream_sustained_fps"], 40000)
+    check("RETIRED: no chart reads the streamcpu lane any more",
+          [c.name for c in charts.CHARTS if c.suite == "streamcpu"], [])
+    check("RETIRED: 'streamcpu' is not a projected suite",
+          "streamcpu" in charts._PROJECTED_SUITES, False)
 
-    # cpu_fps mock-bound NULL (ceiling probe read 0, unverifiable) -> NOT valid. Guards the MEDIUM-5 leak:
-    # `not None` is True in Python, so a naive gate would have leaked this through as proven.
-    _canon({"g": stream(cpu_fps_mock_bound=None)})
-    check("_proj_streaming: cpu_fps mock_bound None (unverifiable) -> streamcpu_valid False", charts._proj_streaming("g")["streamcpu_valid"], False)
-
-    # AUDIT #3: cpu_fps == 0 with mock_bound False is a MEASURED FAILURE (the gateway relayed no qualifying
-    # frames), NOT "not measured". It stays a REAL reading (valid) and is rendered as the failure it is; only
-    # a NULL is unmeasured. Folding the measured zero into "not measured (rig-limited)" flattered the gateway.
-    _canon({"g": stream(cpu_fps=0)})
-    _r0 = charts._proj_streaming("g")
-    check("AUDIT #3: cpu_fps measured 0 is a REAL reading, not 'not measured'", _r0["streamcpu_valid"], True)
-    check("AUDIT #3: cpu_fps measured 0 keeps its value (0, not None)", _r0["streamcpu_frames_per_sec"], 0)
     _canon({"g": stream(streams_sustained=0, streams_sustained_fps=0)})
     _s0 = charts._proj_streaming("g")
     check("AUDIT #3: a measured stream-sustain FAILURE is 0, distinguishable from unmeasured",
@@ -209,17 +230,15 @@ with isolated('_proj_streaming: the streamcpu / sustained validity gates'):
 
 
 # ── _topn_keys: only VALID served rows are eligible; ranking direction is correct ────────────────────
-# streamcpu_fps chart: served_field=streamcpu_valid. Only the certified gateway is eligible + ranked.
+# This block ranked `streamcpu_fps`, whose chart is deleted with its metric. The ELIGIBILITY RULE it was
+# testing is still live and is now carried by the frontier ranked bar (served_field=rps_at_bound_valid), so
+# the check moves rather than dies - see the frontier block further down for the by-name coverage. What is
+# pinned here is that the retired chart is gone from CHARTS at all, which is what `chart_by_name` raising
+# would otherwise have reported as an error in the test rather than as the intended state.
 with isolated('_topn_keys: only VALID served rows are eligible; ranking direction ...'):
-    _canon({
-        "good": stream(cpu_fps=48000, cpu_fps_mock_bound=False),
-        "bound": stream(cpu_fps=99999, cpu_fps_mock_bound=True),   # higher raw fps but MOCK-BOUND -> excluded
-        "zero": stream(cpu_fps=0, cpu_fps_mock_bound=False),        # no measurement -> excluded
-    })
-    topn = charts._topn_keys(chart_by_name("streamcpu_fps"))
-    check("_topn_keys: a mock-bound cpu_fps is NOT eligible even with a higher raw value", "bound" in topn, False)
-    check("_topn_keys: a zero cpu_fps is NOT eligible", "zero" in topn, False)
-    check("_topn_keys: the certified cpu_fps IS eligible", "good" in topn, True)
+    for _gone in ("streamcpu_fps", "rps_max_proxy", "rps_sustained_20ms", "xlate_rps_sustained_20ms"):
+        check(f"RETIRED: no chart named {_gone} remains in CHARTS",
+              any(c.name == _gone for c in charts.CHARTS), False)
 
     # stream_sustained chart: higher-is-better. The valid gateway with the higher count ranks first.
     _canon({
@@ -276,26 +295,71 @@ with isolated('HIGH-1: perf + xlate charts project from the CANONICAL best_cell 
     _BC_SRC = {"kind": "matrix", "sweep": "6x6-diagonal", "build": "img:1", "measured_at": "2026-07-24T00:00:00Z"}
 
 
-    def bc(added_latency_p99_us=120, added_latency_p50_us=40,
-           rps_max_proxy=44000, rps_max_proxy_mock_bound=False,
-           rps_sustained_20ms=22000, rps_sustained_20ms_mock_bound=False, dialect="openai"):
-        """A SEALED best_cell fixture: raw intent (value + mock_bound) -> the envelope shape gen-data emits."""
-        return {
+    # fr(): a SEALED FRONTIER - one reading per declared tail-latency bound, ascending, unbounded last, in
+    # the shape seal.mjs's sealFrontier emits. This replaces the two scalar-throughput fixtures
+    # (`rps_max_proxy` / `rps_sustained_20ms` with their mock_bound flags), which described metrics the
+    # producer retired: they were one concurrency sweep collapsed twice by different algorithms, and the pair
+    # could invert against each other in the field.
+    #
+    # Every state a surface has to render is expressible, because each one is rendered DIFFERENTLY and the
+    # difference is the whole contract:
+    #   rates={b: v}   a reading whose rate is present (v may be 0 - a measured "nothing held this bound")
+    #   a bound absent from `rates` but not in `omit` -> a reading whose rate is ABSENT, carrying `reason`
+    #   omit=(b,)      NO reading at all for that bound (a record that never published it)
+    #   lower_bound=   the sweep ran out of ladder: the rate is a FLOOR, and must render as one
+    def fr(rates=None, omit=(), lower_bound=(), reason="not_measured",
+           conc=64, p99_us=9000, first_disq=128):
+        if rates is None:      # a plain monotone frontier: tight tails cost throughput
+            rates = {1: 9000, 5: 17000, 10: 22000, 50: 25000, 100: 25500, None: 26000}
+        out = []
+        for b in charts.FRONTIER_BOUNDS_MS + [None]:
+            if b in omit:
+                continue
+            v = rates.get(b) if b in rates else None
+            out.append({
+                "bound_ms": b,
+                "rps": (_seal(v) if v is not None
+                        else {"value": None, "certified": False, "suppressed": False, "reason": reason}),
+                "concurrency": conc if v is not None else None,
+                "p99_us": p99_us if v is not None else None,
+                "first_disqualified_conc": None if b in lower_bound else first_disq,
+                "lower_bound": b in lower_bound,
+            })
+        return out
+
+
+    # A concurrency sweep, the plain (UNSEALED) evidence every frontier reading is derived from. Plain on
+    # purpose: gen-data publishes it unsealed so a reader can re-derive the readings, and _proj_sweep must
+    # read it without mval() - which would reject a bare scalar.
+    def sweep(rungs=((1, 4000, 250, 0), (2, 8000, 320, 0), (4, 16000, 570, 0), (8, 22000, 9000, 0))):
+        return [{"conc": c, "rps": r, "p99_us": p, "fail": f} for c, r, p, f in rungs]
+
+
+    def bc(added_latency_p99_us=120, added_latency_p50_us=40, frontier=None, dialect="openai",
+           rungs=None, direct_c1_p99_us=32):
+        """A SEALED best_cell fixture: raw intent -> the envelope shape gen-data emits."""
+        rec = {
             "path": {"ingress": dialect, "egress": dialect, "dialect": dialect}, "source": _BC_SRC,
             "added_latency_p50_us": _seal(added_latency_p50_us),
             "added_latency_p99_us": _seal(added_latency_p99_us),
-            "rps_max_proxy": _seal(rps_max_proxy, gated=True, flag=rps_max_proxy_mock_bound),
-            "rps_sustained_20ms": _seal(rps_sustained_20ms, gated=True, flag=rps_sustained_20ms_mock_bound),
+            "frontier": fr() if frontier is None else frontier,
+            "sweep": sweep() if rungs is None else sweep(rungs),
+            # The only measured basis for the climb's zero-overhead reference line.
+            "direct_c1_p99_us": _seal(direct_c1_p99_us),
+            "gateway_c1_p99_us": _seal(direct_c1_p99_us + added_latency_p99_us
+                                       if isinstance(added_latency_p99_us, (int, float)) else None),
         }
+        return rec
 
 
     def tc(ingress="openai", egress="anthropic", added_latency_p99_us=200,
-           added_latency_p50_us=None, rps_sustained_20ms=15000, rps_sustained_20ms_mock_bound=False):
-        """A SEALED translation_cell fixture."""
+           added_latency_p50_us=None, frontier=None):
+        """A SEALED translation_cell fixture. It carries its OWN frontier, off its own sweep."""
         rec = {"path": {"ingress": ingress, "egress": egress},
                "source": {"kind": "matrix", "sweep": "6x6-translation", "build": "img:1", "measured_at": "2026-07-24T00:00:00Z"},
                "added_latency_p99_us": _seal(added_latency_p99_us),
-               "rps_sustained_20ms": _seal(rps_sustained_20ms, gated=True, flag=rps_sustained_20ms_mock_bound)}
+               "frontier": (fr({1: 6000, 5: 12000, 10: 15000, 50: 16000, 100: 16200, None: 16500})
+                            if frontier is None else frontier)}
         if added_latency_p50_us is not None:
             rec["added_latency_p50_us"] = _seal(added_latency_p50_us)
         return rec
@@ -307,8 +371,16 @@ with isolated('HIGH-1: perf + xlate charts project from the CANONICAL best_cell 
     perf_keys = {r["_key"] for r in perf_rows}
     check("HIGH-1: a matrix-only gateway (best_cell, no results/perf file) appears as a perf chart row",
           "matrixonly" in perf_keys, True)
-    check("HIGH-1: the projected perf row carries the canonical sustained RPS (from best_cell, not disk)",
-          next(r["rps_sustained_20ms"] for r in perf_rows if r["_key"] == "matrixonly"), 22000)
+    # The projected row carries the FRONTIER READING AT THE BOARD'S DEFAULT BOUND, which is what replaced
+    # the canonical sustained scalar this used to read. Same assertion - the number comes from best_cell and
+    # not from a retired file on disk - against the metric that now exists.
+    check("HIGH-1: the projected perf row carries the frontier reading at the default bound (from best_cell, not disk)",
+          next(r["rps_at_bound"] for r in perf_rows if r["_key"] == "matrixonly"), 22000)
+    check("HIGH-1: ...and the whole frontier travels with it, so the shape chart can be drawn",
+          len(next(r["_frontier"] for r in perf_rows if r["_key"] == "matrixonly")),
+          len(charts.FRONTIER_BOUNDS_MS) + 1)
+    check("HIGH-1: ...and so does the unsealed sweep the readings are derived from (the climb)",
+          len(next(r["_sweep"] for r in perf_rows if r["_key"] == "matrixonly")), 4)
 
     # A gateway with NO best_cell is absent from the perf charts (never served) - no retired-file read.
     _canon_perf({"noserve": {}})
@@ -320,7 +392,8 @@ with isolated('HIGH-1: perf + xlate charts project from the CANONICAL best_cell 
     merged = charts._merge()
     check("HIGH-1: _merge (report leaderboard) includes a matrix-only gateway (best_cell, no disk perf)",
           "matrixonly" in merged, True)
-    check("HIGH-1: the merged report row carries the canonical sustained RPS", merged["matrixonly"]["rps_sustained_20ms"], 22000)
+    check("HIGH-1: the merged report row carries the frontier reading at the default bound",
+          merged["matrixonly"]["rps_at_bound"], 22000)
 
     # xlate charts project from translation_cell, not results/xlate/<key>.json.
     _canon_perf({"xl": {"translation_cell": tc()}})
@@ -330,20 +403,30 @@ with isolated('HIGH-1: perf + xlate charts project from the CANONICAL best_cell 
     check("HIGH-1: _suite_map('xlate') enumerates translation_cell (report translation table)",
           "xl" in charts._suite_map("xlate"), True)
 
-    # The README translation TABLE must suppress a mock-bound (rig-limited) translation RPS, exactly as the
-    # translation PNG (served_field=xlate_rps_sustained_20ms_valid) and the site do: printing the raw value
-    # would publish a number the chart + site both hide.
-    # Certified cell -> the number prints; mock-bound cell -> "not measured (rig-limited)", not the raw value.
+    # The README translation TABLE must render an ABSENT translated throughput as an absence, never as a
+    # number, and must name the RECORD'S OWN reason for it.
+    #
+    # This block was FINDING 24, about a mock-bound (rig-limited) value leaking its raw number into the
+    # table. The suppression layer it tested is retired - a measurement near the rig's ceiling is now
+    # published with the fraction of that ceiling it reached, and no producer can set the flag - so
+    # "rig-limited" is no longer a state this column can be in. What survives, and is what the finding was
+    # really about, is that an absent reading must not print a number and must not be captioned with a cause
+    # the record does not give. `search_exhausted` is used here because it is the reason the field artifacts
+    # actually carried while the old code printed "(rig-limited)" over it.
     _canon_perf({
-        "xcert": {"best_cell": bc(), "translation_cell": tc(rps_sustained_20ms=15000, rps_sustained_20ms_mock_bound=False)},
-        "xbound": {"best_cell": bc(), "translation_cell": tc(rps_sustained_20ms=99999, rps_sustained_20ms_mock_bound=True)},
+        "xcert": {"best_cell": bc(),
+                  "translation_cell": tc(frontier=fr({1: 6000, 5: 12000, 10: 15000, None: 16500}))},
+        "xgone": {"best_cell": bc(),
+                  "translation_cell": tc(frontier=fr({50: 99999, None: 99999}, reason="search_exhausted"))},
     })
     md = charts._report_md(list(charts._merge().items()), "t", [])
-    check("FINDING 24: a CERTIFIED translation RPS prints its value in the README table", "15,000" in md, True)
-    check("FINDING 24: a mock-bound translation RPS does NOT leak its raw value into the README table",
+    check("a PRESENT translated frontier reading prints its value in the README table", "15,000" in md, True)
+    check("an ABSENT translated reading does NOT leak a number from another bound into its cell",
           "99,999" in md, False)
-    check("FINDING 24: a mock-bound translation cell reads 'rig-limited' in the README table",
-          "rig-limited" in md, True)
+    check("an ABSENT translated reading is captioned with the RECORD'S OWN reason, not a blanket cause",
+          "still climbing when the range ran out" in md, True)
+    check("...and no surface invents 'rig-limited' for a reason the record never gave",
+          "rig-limited" in md, False)
 
     # HIGH-1 (consistency): EVERY gateway with a best_cell appears as a perf chart row, and vice-versa
     # (chart-row presence <=> best_cell presence). This is the assertion the audit asks for, enforced here
@@ -355,31 +438,81 @@ with isolated('HIGH-1: perf + xlate charts project from the CANONICAL best_cell 
           row_keys, bc_keys)
 
 
-# ── MED-3: the passthrough RPS charts gate the bar on the mock-bound honesty flag (rps_*_valid) ──────
-# A mock-bound (rig-limited) throughput must NOT draw a full bar or rank #1 - mirroring the streaming lane.
-with isolated('MED-3: the passthrough RPS charts gate the bar on the mock-bound ho...'):
+# ── the throughput bar is gated on THIS BOUND's own reading carrying a rate ───────────────────────────
+#
+# This was MED-3, "the passthrough RPS charts gate the bar on the mock-bound honesty flag", over the two
+# retired scalars and the retired suppression layer. Both halves of that are gone: the scalars are replaced
+# by the frontier, and a measurement near the rig's ceiling is now published with the fraction it reached
+# rather than withheld, so there is no mock-bound flag left to gate on.
+#
+# The RULE the section existed to protect is still live and still worth a red test: a bar may be drawn, and
+# a gateway may be ranked, ONLY on a reading that actually carries a rate at the bound the chart names.
+# What changed is that validity is now per-READING rather than per-metric, which makes a new mistake
+# possible and worth pinning: a gateway with a huge rate at a LOOSER bound must not rank on the chart for a
+# TIGHTER one. That is the frontier's whole point, and a naive "does this record have any throughput"
+# gate would get it backwards.
+with isolated('the throughput bar is gated on THIS BOUND own reading carrying a rate'):
+    _B = charts.DEFAULT_BOUND_MS
     _canon_perf({
-        "clean": {"best_cell": bc(rps_sustained_20ms=20000, rps_sustained_20ms_mock_bound=False)},
-        "bound": {"best_cell": bc(rps_sustained_20ms=99999, rps_sustained_20ms_mock_bound=True)},   # higher raw, rig-limited
-        "unver": {"best_cell": bc(rps_sustained_20ms=88888, rps_sustained_20ms_mock_bound=None)},   # unverifiable
+        # holds the default bound: eligible, and its rate is the one at THAT bound (not its best)
+        "clean": {"best_cell": bc(frontier=fr({1: 5000, 5: 15000, _B: 20000, None: 40000}))},
+        # a far higher rate, but only once the bound is relaxed past the one this chart names
+        "looser": {"best_cell": bc(frontier=fr({50: 99999, 100: 99999, None: 99999}))},
+        # a reading exists at this bound but its rate is absent, with the engine's own reason
+        "absent": {"best_cell": bc(frontier=fr({None: 88888}, reason="search_exhausted"))},
+        # the sweep ran and NO rung held this bound while failing nothing: a measured 0, which is a number
+        "zero":   {"best_cell": bc(frontier=fr({_B: 0, None: 777}))},
+        # no frontier at all (every snapshot predating the frontier)
+        "norec":  {"best_cell": bc(frontier=[])},
     })
-    # the projected rows carry the validity flags
     prows = {r["_key"]: r for r in charts._load("perf")}
-    check("MED-3: a NOT-mock-bound sustained RPS is valid", prows["clean"]["rps_sustained_20ms_valid"], True)
-    check("MED-3: a mock-bound sustained RPS is NOT valid", prows["bound"]["rps_sustained_20ms_valid"], False)
-    check("MED-3: an unverifiable (null mock_bound) sustained RPS is NOT valid", prows["unver"]["rps_sustained_20ms_valid"], False)
-    sust_topn = charts._topn_keys(chart_by_name("rps_sustained_20ms"), n=5)
-    check("MED-3: a mock-bound sustained RPS is out of the top-N despite the highest raw value", "bound" in sust_topn, False)
-    check("MED-3: an unverifiable sustained RPS is out of the top-N", "unver" in sust_topn, False)
-    check("MED-3: the clean sustained RPS IS ranked", "clean" in sust_topn, True)
-    # max-proxy chart carries the same gate
-    _canon_perf({
-        "clean": {"best_cell": bc(rps_max_proxy=40000, rps_max_proxy_mock_bound=False)},
-        "bound": {"best_cell": bc(rps_max_proxy=99999, rps_max_proxy_mock_bound=True)},
-    })
-    proxy_topn = charts._topn_keys(chart_by_name("rps_max_proxy"), n=5)
-    check("MED-3: a mock-bound max-proxy RPS is out of the top-N", "bound" in proxy_topn, False)
-    check("MED-3: the clean max-proxy RPS IS ranked", "clean" in proxy_topn, True)
+    check("a reading carrying a rate at the named bound is valid", prows["clean"]["rps_at_bound_valid"], True)
+    check("...and the row carries the rate AT THAT BOUND, not the gateway's best",
+          prows["clean"]["rps_at_bound"], 20000)
+    check("a rate only at a LOOSER bound is NOT valid at this one", prows["looser"]["rps_at_bound_valid"], False)
+    check("an absent rate is NOT valid", prows["absent"]["rps_at_bound_valid"], False)
+    check("...and the record's OWN reason travels for the caption, under the name _absent_cause looks up",
+          prows["absent"]["_rps_at_bound_reason"], "search_exhausted")
+    check("a MEASURED 0 at this bound IS valid (it is a number, not an absence)",
+          prows["zero"]["rps_at_bound_valid"], True)
+    check("a record with NO frontier is not valid", prows["norec"]["rps_at_bound_valid"], False)
+    check("...and asserts NO reason, because the record gives none",
+          "_rps_at_bound_reason" in prows["norec"], False)
+
+    topn = charts._topn_keys(chart_by_name("frontier_rps_at_bound"), n=5)
+    check("a gateway whose rate is only at a looser bound is out of the top-N despite the highest raw value",
+          "looser" in topn, False)
+    check("an absent-rate gateway is out of the top-N", "absent" in topn, False)
+    check("a record with no frontier is out of the top-N", "norec" in topn, False)
+    check("the gateway that held the named bound IS ranked", "clean" in topn, True)
+    # A measured 0 is a real reading but not a positive one, so it is ranked only where a 0 is the winning
+    # end - which a higher-is-better throughput chart is not (zero_ok is False on it).
+    check("a measured 0 is not ranked on a higher-is-better chart (zero_ok is False)", "zero" in topn, False)
+
+    # THE BOUND IS IN THE TITLE, rendered from the constant, on every chart that shows one bound. This is the
+    # non-negotiable the retired board broke: it captioned numbers "p99 < 1 s" while the engine enforced
+    # 20 ms - a bar 96% of all 1632 recorded rungs pass, against 57% for the real one.
+    for _n in ("frontier_rps_at_bound", "xlate_frontier_rps_at_bound"):
+        check(f"{_n}: names its bound in the title", f"{_B:g} ms" in chart_by_name(_n).title, True)
+    check("no chart caption claims the 1 s bar the engine never enforced",
+          [c.name for c in charts.CHARTS
+           if "1 s" in str(c.title) or (isinstance(c.subtitle, str) and "1 s" in c.subtitle)
+           or (isinstance(c.subtitle, str) and "< 1s" in c.subtitle)], [])
+    check("...and neither does the Chart default zero_text (it names no bound at all)",
+          "1 s" in charts.Chart.zero_text, False)
+
+    # THE FLOOR RENDERS AS A FLOOR. A reading the sweep never found a ceiling for is a lower bound, and the
+    # bar must say so on the NUMBER (numlab_prefix), not only in the prose beside it.
+    _canon_perf({"floor": {"best_cell": bc(frontier=fr({_B: 12000, None: 12000}, lower_bound=(_B, None)))}})
+    _fl = {r["_key"]: r for r in charts._load("perf")}["floor"]
+    check("a lower_bound reading is flagged on the row", _fl["_rps_at_bound_lower_bound"], True)
+    check("...and the bar's number is prefixed with the floor marker",
+          chart_by_name("frontier_rps_at_bound").numlab_prefix(_fl), "≥ ")
+    check("...while a bounded reading gets no prefix",
+          chart_by_name("frontier_rps_at_bound").numlab_prefix(prows["clean"]), "")
+    _md_fl = charts._report_md(list(charts._merge().items()), "t", [])
+    check("...and the report table prints it as a floor too, never as a bare ceiling",
+          "≥ 12,000" in _md_fl, True)
 
 
 # ── memory RECOVERY: recovered_rss_mib is null_not_served - a gateway measured BEFORE the recovery ────
@@ -629,9 +762,12 @@ with isolated('the negative-difference REFUSAL, which replaced the silent clamp 
                         ("a below_resolution 0", _BR_ROWS["added_latency"])):
         check(f"the refusal accepts {_name}",
               charts._negative_diff_violations(chart_by_name("added_latency"), [_row]), [])
+    # A NON-difference chart, which used to be rps_max_proxy (deleted with its metric). Any throughput chart
+    # serves: the point is that this gate has no opinion outside difference metrics, because a negative RSS
+    # or a negative rate is a different bug entirely and not this function's to name.
     check("the refusal has no opinion about a non-difference chart",
-          charts._negative_diff_violations(chart_by_name("rps_max_proxy"),
-                                           [{"_key": "g", "rps_max_proxy": -1}]), [])
+          charts._negative_diff_violations(chart_by_name("frontier_rps_at_bound"),
+                                           [{"_key": "g", "rps_at_bound": -1}]), [])
     # `served=False` is a bool, and bool is a subclass of int in Python - a naive `v < 0` walk over row
     # fields would be fine, but a naive `isinstance(v, int)` guard that forgot bools would start reading
     # flags as measurements. Pin that bools are never mistaken for a negative reading.
@@ -673,8 +809,13 @@ with isolated('WIRING: the refusal must fire from render() itself, not just from
 with isolated('the README table says the SAME thing about the same envelope as the...'):
     _canon_perf({"p": {"best_cell": {**bc(), "added_latency_p99_us": _BR}}})
     _md = charts._report_md(charts._ranked(), "t", [])
+    # THE CELL, NOT THE PAGE. This asserted `"0 µs" not in _md` over the whole document, which is a
+    # substring test that any measured latency ending in a zero satisfies - "250 µs" contains "0 µs". It
+    # passed only because no other µs figure happened to be on the page; the climb table's "p99 at lowest c"
+    # column put one there and the assertion started failing on correct output. Anchored to the table
+    # delimiters it tests what it was written to test: that no CELL is a flat "0 µs".
     check("the report's latency cell discloses a below_resolution reading, never a flat '0 µs'",
-          ("≤ rig resolution" in _md, "0.0 µs" in _md, "0 µs" in _md), (True, False, False))
+          ("≤ rig resolution" in _md, "| 0.0 µs " in _md, "| 0 µs " in _md), (True, False, False))
     _canon_perf({"p": {"best_cell": bc(added_latency_p99_us=120)}})
     _md2 = charts._report_md(charts._ranked(), "t", [])
     check("a real measured latency still prints as a number", "120 µs" in _md2, True)
