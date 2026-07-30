@@ -52,6 +52,39 @@ BENCH_COMMIT="${BENCH_COMMIT:-$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-pars
 # to name the members it wants. Derived from the clone URL rather than hardcoded.
 _REPO_NAME="$(basename "${BENCH_REPO%.git}")"
 
+# ── LAUNCH PRECONDITIONS: two git facts, checked before a single box is created ───────────────────
+#
+# Both failures below happened on 2026-07-30, back to back, and each cost a full fan-out:
+#
+#   DIRTY TREE   Two agents held uncommitted edits when the run launched, so the snapshots recorded
+#                `engine.commit=<sha> with uncommitted edits`. C8 rejected the whole board on arrival
+#                - correctly, because a commit that does not describe the working tree does not
+#                identify the instrument, and an unidentifiable instrument is not reproducible. The
+#                measurement itself was fine; it was simply unusable.
+#
+#   UNPUSHED     HEAD was committed but not pushed. Every box fetches the harness BY SHA from origin,
+#                so all 14 died with `FETCH FAILED (rc=22)` about ninety seconds in. The comment above
+#                already said the commit "must be pushed" and that the failure is loud - it is, but it
+#                is loud AFTER fourteen instances exist and have been paid for.
+#
+# Both are one git command. Checking them here turns two lost fan-outs into two lines of output. Skip
+# with BENCH_SKIP_PREFLIGHT=1 for a deliberate experiment on a local revision.
+if [ -z "${BENCH_SKIP_PREFLIGHT:-}" ] && [ -n "$BENCH_COMMIT" ]; then
+  _here="$(dirname "${BASH_SOURCE[0]}")"
+  if [ -n "$(git -C "$_here" status --porcelain 2>/dev/null)" ]; then
+    echo "PREFLIGHT FAILED: the harness tree is DIRTY, so \`engine.commit\` would not identify what ran." >&2
+    echo "  C8 rejects a board measured on a dirty tree - it is not reproducible. Commit or stash first:" >&2
+    git -C "$_here" status --short 2>/dev/null | sed 's/^/    /' >&2
+    exit 1
+  fi
+  if ! git -C "$_here" branch -r --contains HEAD 2>/dev/null | grep -q .; then
+    echo "PREFLIGHT FAILED: HEAD ($BENCH_COMMIT) is not on any remote branch." >&2
+    echo "  Every box fetches the harness BY SHA from $BENCH_REPO, so all of them would fail to fetch" >&2
+    echo "  a commit that exists only on this machine. Push first." >&2
+    exit 1
+  fi
+fi
+
 # ── INCREMENTAL PER-GATEWAY PUBLISH (matrix-sole-source) ──────────────────────────────────────────
 # Each gateway's entire benchmark is one atomic matrix run, and gateways publish independently: we
 # commit + push each gateway's result the moment its box finishes cleanly (DONE, all suites pulled,
@@ -737,7 +770,20 @@ bench_gateway_once() {
     # with \"failed to run docker: No such file or directory\", which reads as a broken gateway rather
     # than a box that never finished provisioning. Better to lose the box here than to publish its
     # verdicts.
-    command -v docker >/dev/null || { echo "PROVISION FAILED: docker did not install on this box"; exit 1; }
+    #
+    # RECOVER BEFORE GIVING UP. If the binary is absent after three attempts, the dpkg state is the
+    # usual reason (a half-finished install from unattended-upgrades leaves the lock released but the
+    # package unconfigured, and further `apt-get install` calls then no-op while returning 0 - which is
+    # how a box reaches the measurement phase with no docker and a provisioning step that reported
+    # success). `--fix-broken` and `dpkg --configure -a` are the two repairs that address exactly that,
+    # so try them once rather than losing the box to a condition that is routinely fixable.
+    if ! command -v docker >/dev/null; then
+      echo "docker missing after install; attempting dpkg repair"
+      sudo -n dpkg --configure -a >/dev/null 2>&1 || true
+      sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y -q --fix-broken >/dev/null 2>&1 || true
+      sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y -q --reinstall docker.io >/dev/null 2>&1 || true
+    fi
+    command -v docker >/dev/null || { echo "PROVISION FAILED: docker did not install on this box (after retry and dpkg repair)"; exit 1; }
     # The engine is BUILT ON THE BOX from the cloned commit, once, before any measurement starts.
     # It is not shipped from the orchestrator: a binary from a laptop has no provenance, and the
     # whole point of cloning a revision is that the thing doing the measuring came from it too.
@@ -766,12 +812,34 @@ bench_gateway_once() {
     # does. Losing a box during provisioning costs one re-run; publishing INCOMPLETE for a gateway
     # whose box had no docker reads as a broken ENTRANT, which is a false statement about somebody
     # else's software.
+    # And it RECOVERS rather than only detecting: three rounds of (wait 30s for the socket, then try a
+    # different way of starting it). `systemctl enable --now` is included because a daemon that is
+    # installed but not enabled comes back dead after any restart, and `service` covers a box where
+    # systemd is not the thing managing it. Only after all three rounds fail is the box lost - the
+    # earlier version failed on the first 30s timeout, which would have turned a slow-starting daemon
+    # into a discarded gateway.
     _dockok=0
-    for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
-      if sudo -n docker info >/dev/null 2>&1; then _dockok=1; break; fi
-      sleep 2
+    for _round in 1 2 3; do
+      for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+        if sudo -n docker info >/dev/null 2>&1; then _dockok=1; break; fi
+        sleep 2
+      done
+      [ "$_dockok" = 1 ] && break
+      echo "docker daemon not answering (round $_round); attempting to start it"
+      sudo -n systemctl enable --now docker >/dev/null 2>&1 \
+        || sudo -n systemctl restart docker >/dev/null 2>&1 \
+        || sudo -n service docker restart >/dev/null 2>&1 || true
     done
-    [ "$_dockok" = 1 ] || { echo "PROVISION FAILED: docker installed but the daemon never answered on /var/run/docker.sock after 30s"; exit 1; }
+    if [ "$_dockok" != 1 ]; then
+      # The box is lost either way, so spend a second saying WHY - a bare "the daemon never answered"
+      # sends the next person to ssh into a machine that has already been terminated.
+      echo "PROVISION FAILED: docker installed but the daemon never answered on /var/run/docker.sock after 3 rounds (~90s)"
+      echo "  docker binary : $(command -v docker || echo MISSING)"
+      echo "  systemctl     : $(sudo -n systemctl is-active docker 2>&1 | head -1)"
+      echo "  socket        : $(ls -l /var/run/docker.sock 2>&1 | head -1)"
+      echo "  last journal  : $(sudo -n journalctl -u docker -n 5 --no-pager 2>&1 | tail -5)"
+      exit 1
+    fi
     python3 -m pip install --user -q --break-system-packages psutil 2>/dev/null || pip3 install -q psutil || true' >>"$glog" 2>&1
   local prov_rc=$?
   # A FAILED PROVISION MUST END THE BOX, not be discovered as a broken gateway later.
