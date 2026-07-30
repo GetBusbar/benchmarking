@@ -170,12 +170,6 @@ a.home-card:hover { border-color: var(--accent); text-decoration: none; }
    it used to be is gone with the two ragged rows, and re-declaring it here would be a layout that never wins. */
 .toggle { color: var(--fg-dim); font-size: .86rem; display: inline-flex; gap: .35rem; align-items: center; cursor: pointer; }
 .toggle input { accent-color: var(--accent); }
-.chip-filter {
-  appearance: none; font: inherit; font-size: .8rem; font-weight: 500; cursor: pointer;
-  border: 1px solid var(--border); border-radius: 999px; padding: .15rem .7rem;
-  background: var(--bg-raise); color: var(--fg-dim);
-}
-.chip-filter.on { color: var(--chip-fg); border-color: transparent; }
 #search {
   font: inherit; font-size: .86rem; color: var(--fg);
   background: var(--bg-raise); border: 1px solid var(--border); border-radius: 6px;
@@ -792,8 +786,6 @@ td.memcurve.na { color: var(--fg-mute); }
   .table-head .controls { flex-direction: row; align-items: center; width: 100%; }
   .controls { gap: .7rem; }
   #search { flex: 1 1 100%; min-width: 0; padding: .5rem .6rem; }
-  .chip-filter, .toggle { min-height: 40px; display: inline-flex; align-items: center; }
-  .chip-filter { padding: .3rem .8rem; }
   .count { margin-left: 0; flex: 1 1 100%; }
 
   thead th, tbody td { padding: .5rem .55rem; }

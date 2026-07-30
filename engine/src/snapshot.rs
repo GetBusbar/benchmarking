@@ -51,6 +51,17 @@ pub enum SnapshotError {
         what: &'static str,
         raw: String,
     },
+    /// A header this gateway's manifest declares could not be resolved, so the run would have measured
+    /// it with NO headers at all.
+    ///
+    /// Refused rather than tolerated, because the alternative is the worst outcome this harness can
+    /// produce: every cell fails to serve, the board publishes `served: false`, and a reader concludes
+    /// the GATEWAY does not work when in fact the harness dropped its authentication. `validate()`
+    /// checks headers for shell-style `$` but never exercises `{...}` substitution, so a manifest with
+    /// an unknown placeholder passes the gate and reaches the measurement path.
+    UnresolvableHeader {
+        detail: String,
+    },
 }
 
 impl std::fmt::Display for SnapshotError {
@@ -68,6 +79,12 @@ impl std::fmt::Display for SnapshotError {
                 f,
                 "{what} {raw:?} is not a safe filename component, refusing to build a path from it"
             ),
+            SnapshotError::UnresolvableHeader { detail } => write!(
+                f,
+                "a header this manifest declares could not be resolved ({detail}) - refusing to \
+                 measure with no headers, because every cell would fail to serve and the board would \
+                 report the GATEWAY as not serving when the harness dropped its headers"
+            ),
         }
     }
 }
@@ -77,7 +94,9 @@ impl std::error::Error for SnapshotError {
         match self {
             SnapshotError::Io { source, .. } => Some(source),
             SnapshotError::Json(source) => Some(source),
-            SnapshotError::PromoteGuard { .. } | SnapshotError::UnsafeName { .. } => None,
+            SnapshotError::PromoteGuard { .. }
+            | SnapshotError::UnsafeName { .. }
+            | SnapshotError::UnresolvableHeader { .. } => None,
         }
     }
 }

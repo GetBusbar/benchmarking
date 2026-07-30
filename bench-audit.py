@@ -186,11 +186,6 @@ def served_cells(d):
                 yield f"{ing}>{eg}", c
 
 
-def median(v):
-    s = sorted(v)
-    return s[len(s) // 2] if len(s) % 2 else s[len(s) // 2 - 1]
-
-
 # ── the invariants ────────────────────────────────────────────────────────────────────────────────
 #
 # Each takes one served cell and yields a string per violation. A check that can never yield is a

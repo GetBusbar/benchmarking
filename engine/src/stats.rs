@@ -299,16 +299,30 @@ pub fn median(values: &[f64]) -> Measurement<f64> {
     Measurement::Measured(v)
 }
 
-/// The smallest value in `values`. Absent (never zero, never an arbitrary sentinel) on an empty slice.
+/// The smallest value in `values`. Absent (never zero, never an arbitrary sentinel) on an empty slice,
+/// and REFUSED on a non-finite one for the same reason `median` and `percentile` refuse it.
+///
+/// `f64::min` and `f64::max` IGNORE NaN - they return the other operand - so `reduce(f64::min)` over a
+/// slice containing one silently drops it and reports a min over the remaining samples as though the
+/// window were clean. That is quieter than the sort corruption those two had, and worse in one respect:
+/// there is no disagreement for anyone to notice. A rig that produced a non-finite latency is
+/// malfunctioning, and every order statistic over that window must say so rather than each deciding
+/// separately how much of the window to believe.
 pub fn min(values: &[f64]) -> Measurement<f64> {
+    if let Some(refusal) = refuse_non_finite(values, "minimum") {
+        return refusal;
+    }
     match values.iter().copied().reduce(f64::min) {
         Some(v) => Measurement::Measured(v),
         None => Measurement::absent(Absent::NotMeasured),
     }
 }
 
-/// The largest value in `values`. Absent on an empty slice.
+/// The largest value in `values`. Absent on an empty slice, refused on a non-finite one - see `min`.
 pub fn max(values: &[f64]) -> Measurement<f64> {
+    if let Some(refusal) = refuse_non_finite(values, "maximum") {
+        return refusal;
+    }
     match values.iter().copied().reduce(f64::max) {
         Some(v) => Measurement::Measured(v),
         None => Measurement::absent(Absent::NotMeasured),
@@ -401,6 +415,31 @@ mod tests {
                 Measurement::Absent { .. }
             ),
             "an infinity is equally unorderable in practice and equally a rig fault"
+        );
+
+        // MIN AND MAX TOO, and they failed differently and far more quietly. `f64::min` and `f64::max`
+        // IGNORE NaN - they return the other operand - so `reduce(f64::min)` silently DROPPED the bad
+        // sample and reported a minimum over the remaining ones as though the window were clean. There
+        // is no sort to corrupt and no disagreement for anyone to notice, which is why this outlived
+        // the two order statistics that were fixed first. Every statistic over one window has to reach
+        // the same verdict about whether that window is usable.
+        assert!(
+            matches!(min(&with_nan), Measurement::Absent { .. }),
+            "min silently skipped the NaN and reported a minimum over the remaining samples"
+        );
+        assert!(
+            matches!(max(&with_nan), Measurement::Absent { .. }),
+            "max silently skipped the NaN and reported a maximum over the remaining samples"
+        );
+        assert_eq!(
+            min(&[3.0, 1.0, 2.0]),
+            Measurement::Measured(1.0),
+            "the clean path must still answer"
+        );
+        assert_eq!(
+            max(&[3.0, 1.0, 2.0]),
+            Measurement::Measured(3.0),
+            "the clean path must still answer"
         );
     }
 

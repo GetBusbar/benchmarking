@@ -24,6 +24,9 @@ on:
       # never triggered the job that exists to catch it - the same paths-as-decoration defect the
       # rig-delivery job below documents for itself.
       - "bench-audit.py"
+      - "verify-latency.py"
+      - "audit-every-metric.py"
+      - "verify_tools_test.py"
       - "bench-audit_test.py"
       - "bench-dashboard.py"
       - "bench-dashboard_test.py"
@@ -68,6 +71,9 @@ on:
       # never triggered the job that exists to catch it - the same paths-as-decoration defect the
       # rig-delivery job below documents for itself.
       - "bench-audit.py"
+      - "verify-latency.py"
+      - "audit-every-metric.py"
+      - "verify_tools_test.py"
       - "bench-audit_test.py"
       - "bench-dashboard.py"
       - "bench-dashboard_test.py"
@@ -185,6 +191,14 @@ jobs:
       # stopped discarding the p99 of its own throughput windows.
       - name: Published board holds every cross-metric invariant
         run: python3 bench-audit.py
+
+      # THE TWO AUDITORS THAT HAD NO GATE. verify-latency.py and audit-every-metric.py were written
+      # during a live run and shipped with no test file and no CI invocation - which is the same shape
+      # as the defects they exist to catch. A typo'd field name that always resolved to None would
+      # leave their counters at 0 and print PASS on every board forever, and nothing would notice.
+      # This runs their red fixtures, so each check is shown to fail on the violation it names.
+      - name: Auditor red fixtures (verify-latency, audit-every-metric)
+        run: python3 verify_tools_test.py
 
   rig-delivery:
     # The launcher's file fetch had no gate, and its one defect cost a full 14-box run: a raw download

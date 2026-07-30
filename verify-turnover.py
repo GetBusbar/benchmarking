@@ -37,10 +37,18 @@ def num(v):
     return v if isinstance(v, (int, float)) else None
 
 
-proved, cliff, top = [], [], []
+proved, cliff, top, disclosed_floor = [], [], [], []
 
 for p in sorted(glob.glob("results/snapshots/*.json")):
-    d = json.load(open(p))
+    try:
+        d = json.load(open(p))
+    except (OSError, ValueError):
+        # A snapshot being written by a live run is not a defect. Every sibling auditor
+        # (bench-audit.py, verify-frontier.py, verify-latency.py, charts.py) already skips one; these
+        # two were written later and did not, so running them DURING a run - which is exactly when they
+        # are most useful - could kill the whole audit on one half-written file.
+        print(f"  SKIP {p}: not readable as JSON yet (a snapshot mid-write is not a defect)")
+        continue
     gw = d.get("gateway", "?")
     for eg, up in ((d.get("matrix") or {}).get("upstreams") or {}).items():
         for ing, cell in (up.get("cells") or {}).items():
@@ -74,7 +82,21 @@ for p in sorted(glob.glob("results/snapshots/*.json")):
 
             above = sorted(c for c in by_c if c > win_c)
             if not above:
-                top.append((at, win_rps, win_c))
+                # NOTHING WAS PROBED ABOVE THE PEAK - so this reading established no boundary. Whether
+                # that is a DEFECT depends entirely on whether the artifact SAYS SO, which is what
+                # `lower_bound` is for: it is set exactly when the winning rung is the highest probed,
+                # and the site renders such a rate as a floor (">= N") rather than a ceiling.
+                #
+                # This used to append unconditionally and exit non-zero, while the closing comment
+                # claimed the failure condition was "one appears here while the artifact does not flag
+                # it". The flag was never read - `lower_bound` appeared nowhere in the code, only in
+                # that comment - so the tool both cried wolf on correctly-disclosed floors AND could
+                # not detect the single disagreement it said it existed to catch. A gate that cannot
+                # fail on the thing it names is worse than no gate.
+                if last.get("lower_bound") is True:
+                    disclosed_floor.append((at, win_rps, win_c))
+                else:
+                    top.append((at, win_rps, win_c))
                 continue
             slower_clean = [
                 (c, by_c[c]["best"])
@@ -124,11 +146,19 @@ for at, wr, wc, c, f, b in live:
     print(f"  {at[:44]:44s} published {wr:9,.0f} @c={wc:<6} | c={c} reached {b:,.0f} "
           f"(+{delta:.1f}%) but failed {f:,.0f}")
 
-print(f"\nTOP ({len(top)}) - nothing probed above the peak:")
+print(f"\nDISCLOSED FLOOR ({len(disclosed_floor)}) - nothing probed above the peak, and the artifact SAYS SO")
+print("  (lower_bound=true, so the site renders these as \">= N\" rather than as a ceiling - not a defect)")
+for at, wr, wc in disclosed_floor:
+    print(f"  {at[:44]:44s} >= {wr:9,.0f} @c={wc} (top of the probed ladder)")
+if not disclosed_floor:
+    print("  NONE.")
+
+print(f"\nTOP ({len(top)}) - nothing probed above the peak AND the artifact does NOT disclose it:")
 if not top:
     print("  NONE.")
 for at, wr, wc in top:
-    print(f"  {at[:44]:44s} peak {wr:9,.0f} @c={wc}")
+    print(f"  {at[:44]:44s} peak {wr:9,.0f} @c={wc} - lower_bound is not set, so this rate is published")
+    print(f"  {'':44s}   as a ceiling when nothing above it was ever measured")
 
 print()
 if not live and not top:

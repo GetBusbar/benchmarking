@@ -22,10 +22,16 @@
 // RECORDING IS TURNED ON FOR THIS ONE REQUEST AND OFF AGAIN AFTERWARDS, and that is a
 // measurement-integrity requirement rather than tidiness. A recorded request takes a process-wide
 // lock in the mock, and the mock's own throughput is the reference every gateway's number is judged
-// against (`suite::rig_ceiling` + `rigbound::is_rig_bound`): a slower mock means MORE cells land
-// within 10% of its ceiling and have their real, honest throughput suppressed as mock-bound. That is
-// a regression that hides inside a correct-looking suppression, which is the worst way for one to
-// hide.
+// against: a slower mock means every gateway measured against it looks slower, and a rig regression
+// that shifts the reference is the worst kind, because every number stays internally consistent
+// while all of them move together.
+//
+// The earlier version of this comment described the consequence as cells "having their real, honest
+// throughput SUPPRESSED as mock-bound" within 10% of the ceiling, citing `rigbound::is_rig_bound`.
+// That suppression mechanism was deleted - `rigbound.rs`'s own header records why, and the function
+// named here no longer exists - so nothing is suppressed today; a slow mock now simply understates
+// every gateway. The requirement below is unchanged, but the reason it protects is a different one,
+// and leaving the old reason in place would have a reader looking for a threshold that is gone.
 //
 // So the invariant is: recording is off for every load window, on for exactly one request per cell.
 // It applies to the gateway's windows AND to the mock's own reference window, which is what keeps
