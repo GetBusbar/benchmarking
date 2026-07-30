@@ -302,7 +302,7 @@ const gateways = gatewayKeys.map((key) => {
     // exactly the defect the per-cell design removes. The windows are sealed in place below.
     // SEAL every matrix cell in-place (AFTER selection/projection, which read raw). The matrix popup +
     // Protocol view read cell.perf / cell.stream directly, so those must be envelopes too - otherwise a
-    // raw ungated scalar (and its _mock_bound flag) survives in the bundle (invariant C1).
+    // raw ungated scalar survives in the bundle (invariant C1).
     sealMatrixCellsInPlace(g.matrix);
   }
   // LIVE DEFERRED FALLBACKS (stay until the field run folds them into the matrix; DO NOT break them).
@@ -321,10 +321,14 @@ const gateways = gatewayKeys.map((key) => {
       added_gap_p99_us: g.stream.stream_added_gap_p99_us,
       streams_sustained: g.stream.stream_sustained_streams,
       streams_sustained_fps: g.stream.stream_sustained_fps,
-      streams_sustained_mock_bound: g.stream.stream_mock_bound ?? null,
+      // The legacy stream suite predates both the flag and these fields, so there is no ceiling to
+      // state and no fraction - which now costs the headroom and not the number.
+      streams_sustained_mock_ceiling: g.stream.stream_mock_ceiling ?? null,
+      streams_sustained_headroom: g.stream.stream_headroom ?? null,
       cpu_fps: g.streamcpu ? g.streamcpu.streamcpu_frames_per_sec : null,
       cpu_fps_concurrency: g.streamcpu ? g.streamcpu.streamcpu_concurrency : null,
-      cpu_fps_mock_bound: g.streamcpu ? g.streamcpu.streamcpu_mock_bound : null,
+      cpu_fps_mock_ceiling: g.streamcpu ? (g.streamcpu.streamcpu_mock_ceiling ?? null) : null,
+      cpu_fps_headroom: g.streamcpu ? (g.streamcpu.streamcpu_headroom ?? null) : null,
     }, dia, makeSource("stream-fallback", SWEEP.STREAM_SUITE, g.stream.build ?? null, g.stream.measured_at ?? null),
     null,
     // cpu_fps CAME FROM THE OTHER SUITE, SO IT CARRIES THE OTHER SUITE'S STAMP. The record's own stamp
@@ -344,10 +348,12 @@ const gateways = gatewayKeys.map((key) => {
       added_latency_p99_us: g.perf.added_latency_p99_us,
       rps_sustained_20ms: g.perf.rps_sustained_20ms,
       rps_sustained_20ms_concurrency: g.perf.rps_sustained_20ms_concurrency ?? null,
-      rps_sustained_20ms_mock_bound: g.perf.rps_sustained_20ms_mock_bound ?? null,
+      rps_sustained_20ms_rig_ceiling: g.perf.rps_sustained_20ms_rig_ceiling ?? null,
+      rps_sustained_20ms_headroom: g.perf.rps_sustained_20ms_headroom ?? null,
       rps_max_proxy: g.perf.rps_max_proxy,
       rps_max_proxy_concurrency: g.perf.rps_max_proxy_concurrency ?? null,
-      rps_max_proxy_mock_bound: g.perf.rps_max_proxy_mock_bound ?? null,
+      rps_max_proxy_rig_ceiling: g.perf.rps_max_proxy_rig_ceiling ?? null,
+      rps_max_proxy_headroom: g.perf.rps_max_proxy_headroom ?? null,
       sweep_max_proxy: g.perf.sweep_max_proxy ?? null,
       sweep_sustained_20ms: g.perf.sweep_sustained_20ms ?? null,
     }, { ingress: dia, egress: dia, dialect: dia },
@@ -361,7 +367,8 @@ const gateways = gatewayKeys.map((key) => {
       added_latency_p99_us: g.xlate.xlate_added_latency_p99_us,
       rps_sustained_20ms: g.xlate.xlate_rps_sustained_20ms,
       rps_sustained_20ms_concurrency: g.xlate.xlate_rps_sustained_20ms_concurrency ?? null,
-      rps_sustained_20ms_mock_bound: g.xlate.xlate_rps_sustained_20ms_mock_bound ?? null,
+      rps_sustained_20ms_rig_ceiling: g.xlate.xlate_rps_sustained_20ms_rig_ceiling ?? null,
+      rps_sustained_20ms_headroom: g.xlate.xlate_rps_sustained_20ms_headroom ?? null,
     }, { ingress: "anthropic", egress: "openai" },
       makeSource("xlate-fallback", SWEEP.XLATE_SUITE, g.xlate.build ?? null, g.xlate.measured_at ?? null));
   }
@@ -422,8 +429,8 @@ const gateways = gatewayKeys.map((key) => {
 // as hiding it. `dialect` (== ingress == egress) is the label the tab's "Tested on" pill shows.
 // ---- envelope sealers (Design E §2): raw cell -> sealed, envelope-carrying record ----------
 // The projected record carries `path` (ingress/egress/dialect), `source` (the provenance stamp), and one
-// SEALED envelope per metric under its own field name. The raw scalar + its _mock_bound flag are consumed
-// here and never re-emitted, so no ungated field survives for a render site to leak (invariant P1).
+// SEALED envelope per metric under its own field name. The raw scalar is consumed here and never
+// re-emitted, so no ungated field survives for a render site to leak (invariant P1).
 // absentEntryFor: the engine's `absences` entry for one field, tolerant of the block-prefixed key
 // shape the cell publishes ("perf.added_latency_p50_us") and the bare one a projected record carries.
 function absentEntryFor(absences, prefix, k) {
@@ -431,10 +438,22 @@ function absentEntryFor(absences, prefix, k) {
   return absences[`${prefix}.${k}`] || absences[k] || null;
 }
 // A throughput metric: its sealed envelope folds in the concurrency + charted sweep array + the NEW
-// conc_at_* rung so the headline, its operating concurrency, and its curve all travel as one datum.
+// conc_at_* rung so the headline, its operating concurrency, and its curve all travel as one datum -
+// plus the rig ceiling it was measured against and the fraction of that ceiling it reached.
+//
+// The ceiling and the fraction replace `flag: perf[`${key}_mock_bound`]`, which was the engine's VERDICT
+// that our own rig had set this limit and which caused the value to be published as null. The engine no
+// longer reaches that verdict; it publishes the two numbers the verdict was derived from, and they
+// travel with the measurement instead of replacing it. See seal.mjs.
 function sealThroughput(perf, key, concAtKey, absences) {
   return sealMetric(perf[key], {
-    gated: true, flag: perf[`${key}_mock_bound`],
+    headroom: perf[`${key}_headroom`] ?? null,
+    ceiling: perf[`${key}_rig_ceiling`] ?? null,
+    // From seal.mjs's zeroNoteFor, the ONE place that mapping lives, so the note the independent oracle
+    // expects and the note the seal writes cannot be different notes. It used to arrive as the default,
+    // which is how every zero in the bundle - memory growth rates included - came to claim that no
+    // tested load held a throughput gate.
+    zeroNote: zeroNoteFor(key),
     absent: absentEntryFor(absences, "perf", key),
     extras: {
       concurrency: perf[`${key}_concurrency`] ?? null,
@@ -469,8 +488,7 @@ function sealPerfCellPerf(perf, absences = null) {
 function sealPerfCell(perf, path, source, absences = null) {
   return { path: { ...path }, source, ...sealPerfCellPerf(perf, absences) };
 }
-// sealStreamRecord: a raw stream record -> {<sealed metrics>} (no path/source). TTFT/gap are UNGATED;
-// streams_sustained + cpu_fps are GATED on their mock-bound flags. Used for the canonical g.streaming AND
+// sealStreamRecord: a raw stream record -> {<sealed metrics>} (no path/source). Used for the canonical g.streaming AND
 // for sealing every matrix cell's own .stream in-place (so the popup reads envelopes).
 // `cpuSource`: the provenance stamp for cpu_fps ALONE, when that number came from a different run than
 // the rest of the record (the legacy stream-suite fallback below reads it from the SEPARATE streamcpu
@@ -480,21 +498,35 @@ function sealStreamRecord(s, absences = null, cpuSource = null) {
   const abs = (k) => absentEntryFor(absences, "stream", k);
   for (const k of UNGATED_STREAM_FIELDS)
     rec[k] = sealMetric(s[k], { absent: abs(k) });
-  // AUDIT #11: streams_sustained_fps is the SAME bisect's rate - it inherits that bisect's mock-bound
-  // honesty flag. Sealing it UNGATED beside a GATED streams_sustained let the rig-bound rate publish
-  // while the count it came from was suppressed. Gate it on the same flag.
+  // streams_sustained_fps and streams_sustained are the SAME bisect's rate and count, so they carry the
+  // same comparison: one derived mock ceiling, one fraction of it. (They used to share a mock-bound FLAG
+  // for the same reason - audit #11 was that sealing the rate ungated beside a gated count let the rate
+  // publish while the count it came from was suppressed. Neither is suppressed now; what they share is
+  // the fact, not a gate.)
+  //
+  // THE CEILING HERE IS DERIVED, NOT MEASURED - `run::mock_frame_ceiling_fps`, from the mock's own
+  // declared frame count and pacing interval. So a gateway at ~1.0 of it forwarded every frame as it
+  // arrived, which is the best outcome a proxy of a paced upstream can have. That case used to publish
+  // nothing: 13 cells lost this metric on the 2026-07-28 board.
+  //
   // The zero-note comes from seal.mjs's zeroNoteFor, the ONE place that mapping lives, so the note the
   // independent oracle expects and the note the seal writes cannot be different notes.
+  const streamCeiling = s.streams_sustained_mock_ceiling ?? null;
+  const streamHeadroom = s.streams_sustained_headroom ?? null;
   rec.streams_sustained_fps = sealMetric(s.streams_sustained_fps, {
-    gated: true, paced: true, flag: s.streams_sustained_mock_bound, zeroNote: zeroNoteFor("streams_sustained_fps"),
+    headroom: streamHeadroom, ceiling: streamCeiling,
+    zeroNote: zeroNoteFor("streams_sustained_fps"),
     absent: abs("streams_sustained_fps") });
   // AUDIT #3: streaming counts - a 0 is a MEASURED FAILURE (offered stream load, sustained none), NOT
   // "not measured". Only a null (absent field) is not-measured. The note names which, and every surface
   // renders the two apart.
   rec.streams_sustained = sealMetric(s.streams_sustained, {
-    gated: true, paced: true, flag: s.streams_sustained_mock_bound, zeroNote: zeroNoteFor("streams_sustained"),
+    headroom: streamHeadroom, ceiling: streamCeiling,
+    zeroNote: zeroNoteFor("streams_sustained"),
     absent: abs("streams_sustained") });
-  rec.cpu_fps = sealMetric(s.cpu_fps, { gated: true, paced: true, flag: s.cpu_fps_mock_bound, zeroNote: zeroNoteFor("cpu_fps"),
+  rec.cpu_fps = sealMetric(s.cpu_fps, {
+    headroom: s.cpu_fps_headroom ?? null, ceiling: s.cpu_fps_mock_ceiling ?? null,
+    zeroNote: zeroNoteFor("cpu_fps"),
     absent: abs("cpu_fps"), extras: { concurrency: s.cpu_fps_concurrency ?? null, source: cpuSource } });
   return rec;
 }

@@ -340,8 +340,11 @@ function isEnvelope(x) { return x != null && typeof x === "object" && typeof x.c
 const METRIC_NOTES = {
   no_qualifying_ceiling: "served, but no tested load held p99 < 1 s at <0.1% errors (no qualifying throughput ceiling)",
   measured_failure: "MEASURED FAILURE: the gateway was offered the load and sustained none of it (a real 0, not an unmeasured cell)",
-  mock_bound: "not shown: rig-limited — the harness's own ceiling bounded this number, so it is not a gateway reading",
-  unverifiable: "not shown: this number could not be certified against the harness's own ceiling",
+  // NO `mock_bound` / `unverifiable`. Those were the two suppression reasons: a measurement at or above
+  // 90% of the rig's own ceiling was replaced with null and rendered as "not shown". The measurement was
+  // correct in every one of those cells - only what it MEANT was open - so the engine now publishes the
+  // number along with the ceiling it was measured against and the fraction of it reached, and a reader
+  // draws the conclusion these sentences used to draw for them. No producer can emit either token.
   not_measured: "not measured: no reading exists for this cell",
   // The engine's own absence reasons (measurement.rs Absent), carried through the seal since the
   // reason-flattening fix. below_resolution is handled in metric() as a display state, not a hole.
@@ -351,14 +354,19 @@ const METRIC_NOTES = {
   search_exhausted: "not shown: the search ran off the end of its range still improving, so any number would be a lower bound, not a ceiling",
   harness_error: "not shown: the harness itself failed here; this says nothing about the gateway",
   not_served: "the gateway does not serve this pairing",
-  // NOT an absence and NOT a suppression: a PUBLISHED number that also carries what the comparison
-  // against the mock found. The mock paces its stream deltas at a fixed interval, so its frames/sec is
-  // a target it was told to produce; a gateway that lands on it kept up, which is the best outcome the
-  // test can express - but it is a different statement from a number proven to sit below the rig's own
-  // ceiling, and the bundle used to publish the two identically (seal.mjs PACED_MATCH).
-  paced_match: "matched the harness's paced upstream: the gateway kept up with the rate the mock was told to produce (not a proven-unbounded reading)",
 };
 function noteText(tok) { return (tok && METRIC_NOTES[tok]) || tok || ""; }
+/* The comparison-against-our-own-rig sentence, from the fraction and the ceiling it is a fraction of.
+   Both come off the envelope; neither is re-derived here, so this cannot disagree with the engine.
+   The ceiling is named when it is known, because a bare percentage of an unstated quantity is not a
+   fact a reader can check. Above 100% is rendered as it is: two separately-timed legs scatter, and a
+   gateway that adds its own SSE framing legitimately carries more events per second than the mock's own
+   layout would - hiding that would hide the reader's best clue that the reference is the soft number. */
+function headroomText(frac, ceiling) {
+  const pct = frac >= 0.1 ? (frac * 100).toFixed(0) : (frac * 100).toFixed(1);
+  const of = Number.isFinite(ceiling) ? ` (${fmtInt(ceiling)})` : "";
+  return `${pct}% of this rig's own ceiling${of} at the same concurrency`;
+}
 /* The SHORT on-cell form of a measured zero's meaning, rendered under the number in the table so the
    state is visible without hovering (the full METRIC_NOTES sentence stays on the tooltip). Keyed by
    the envelope's own note token; a plain zero with no note (a genuine 0.0 reading, e.g. memory
@@ -413,7 +421,16 @@ function metric(env, fmt = fmtInt) {
   // detail. Each is rendered only when the envelope actually carries it.
   const notes = [];
   if (env.note) notes.push(noteText(env.note));
-  if (env.paced_match === true) notes.push(noteText("paced_match"));
+  // HOW CLOSE THIS CAME TO OUR OWN RIG'S CEILING, stated rather than acted on.
+  //
+  // This is what replaced the suppression, and it has to be VISIBLE or the trade was not made: a number
+  // near the rig's limit used to be deleted, and deleting it at least told the reader something. Saying
+  // "43297 frames/sec, 83% of the mock's own 52013 ceiling" tells them strictly more and costs them
+  // nothing. A `paced_match: true` boolean rode here before, which could not distinguish 0.993 from 0.20.
+  //
+  // Rendered as a percentage because that is how the fraction reads: 99% says "kept pace with a paced
+  // upstream, the best outcome available", 20% says "plainly the gateway's own limit".
+  if (Number.isFinite(env.headroom)) notes.push(headroomText(env.headroom, env.rig_ceiling));
   if (env.source && (env.source.build || env.source.measured_at))
     notes.push(`from a separate run than the rest of this record: build ${env.source.build || "?"}, measured ${env.source.measured_at || "?"}`);
   return { v: env.value, text: fmt(env.value), na: false, note: notes.join(" · "), env };
@@ -1412,8 +1429,8 @@ function laneRecord(l, g, st = state) {
   return l.get ? l.get(g) : g[l.key];
 }
 /* perfSweepSeries(g, colors, st): the sweep-curve series for the CHOSEN cell (Peak/Same/Custom), used by
-   the drawer + compare so the plotted curve reads the SAME cell the table + headline do. MOCK-BOUND GATE
-   (finding 22): a metric whose headline is suppressed (rig-bound / unverifiable — mock_bound !== false)
+   the drawer + compare so the plotted curve reads the SAME cell the table + headline do. ABSENT-HEADLINE
+   GATE (finding 22): a metric whose headline is ABSENT (no reading exists at all)
    reads n/a on every honest surface, so its curve is DROPPED here too — a rig-bound sweep must not reveal
    on the curve a number the gate hides on the headline. Returns [] when the chosen cell is absent. */
 function perfSweepSeries(g, colors, st = state) {
@@ -2688,9 +2705,10 @@ function matrixCellTip(cell) {
    p99, and its RPS delta vs THIS gateway's REFERENCE cell (the one the Passthrough tab ranks; not
    necessarily the fastest, so it is named, never called "best"). Grey/red/unprobed cells carry no
    perf and return "".
-   Dead on the live UI (cellPopFull is used instead) but still EXPORTED. Under the sealed envelope it
-   CANNOT leak a rig-bound number: it reads the metric through mval(), which returns null for a
-   suppressed envelope, so there is no ungated field to surface. */
+   Dead on the live UI (cellPopFull is used instead) but still EXPORTED. It reads every metric through
+   mval(), so an ABSENT figure surfaces as its own reason rather than as a bare number - there is no
+   ungated field here for a render site to leak. (It used to be the suppression this guarded against; a
+   measurement near the rig's ceiling is now published, and only a genuine absence has nothing to show.) */
 function cellPerfTip(cell, ingress, egress, best) {
   const p = cell && cell.served === true ? cell.perf : null;
   const rps = p ? mval(p.rps_sustained_20ms) : null;
@@ -2698,7 +2716,13 @@ function cellPerfTip(cell, ingress, egress, best) {
   if (!p || !isEnvelope(p.rps_sustained_20ms)) return "";
   // Suppressed sustained RPS: {value:null}. Show the certified added-latency alone rather than a bare "".
   if (rps == null) {
-    return lat != null ? `+${fmtInt(lat)} µs p99 added (sustained RPS n/a: rig-limited)` : "";
+    // THE RECORD'S OWN REASON, NOT A GUESSED ONE. This read "sustained RPS n/a: rig-limited" for EVERY
+    // absent sustained figure - not_measured, harness_error and search_exhausted alike - so a hole this
+    // rig caused and a hole nobody has measured told the reader the same untrue thing. Everywhere else in
+    // this file an absence reason travels through METRIC_NOTES; this one sentence was hand-written.
+    const env = p.rps_sustained_20ms;
+    const why = env && env.reason ? noteText(env.reason) : "not measured";
+    return lat != null ? `+${fmtInt(lat)} µs p99 added (sustained RPS n/a: ${why})` : "";
   }
   const bp = cellPath(best), bRps = mval(best && best.rps_sustained_20ms);
   let s = `${fmtInt(rps)} req/s (20 ms upstream)`;
