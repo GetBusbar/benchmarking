@@ -242,9 +242,15 @@ pub fn plateau_check(samples: &[Sample], window_s: f64, trend_pct: f64, range_pc
 /// does not merely misplace the NaN - it leaves the whole slice in an unspecified permutation. Measured
 /// on this comparator:
 ///
-///     one NaN in ten samples          -> [10,20,30,40,50,60,70,80,90,NaN], p99 reads NaN
-///     the same values, NaN rotated    -> [80,90,NaN,10,20,30,40,50,60,70], not sorted at all
-///     median of the same five values, NaN first vs NaN in the middle -> 30 vs 20
+/// ```text
+/// one NaN in ten samples          -> [10,20,30,40,50,60,70,80,90,NaN], p99 reads NaN
+/// the same values, NaN rotated    -> [80,90,NaN,10,20,30,40,50,60,70], not sorted at all
+/// median of the same five values, NaN first vs NaN in the middle -> 30 vs 20
+/// ```
+///
+/// (Fenced as `text` deliberately: an indented block in a doc comment is a DOCTEST, and rustdoc tried
+/// to compile this table as Rust. CI caught it - `expected one of ! or ::, found NaN` - on the very
+/// commit that fixed a correctness bug, which is how a real fix gets reverted for a cosmetic reason.)
 ///
 /// The last line is the one that matters: THE SAME SET OF SAMPLES PRODUCED A DIFFERENT PUBLISHED NUMBER
 /// DEPENDING ON THE ORDER THEY ARRIVED IN. A board whose premise is that every number regenerates from
