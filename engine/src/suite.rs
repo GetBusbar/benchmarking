@@ -93,6 +93,9 @@ fn empty_perf() -> CellPerf {
         rps_sustained_20ms: Measurement::absent(Absent::NotMeasured),
         rps_sustained_20ms_concurrency: Measurement::absent(Absent::NotMeasured),
         conc_at_sustained: Measurement::absent(Absent::NotMeasured),
+        // The frontier is filled from the metric group's series (see `cell_perf`), not here: this is
+        // the empty shape every field starts absent in.
+        frontier: Vec::new(),
         rps_sustained_20ms_rig_ceiling: None,
         rps_sustained_20ms_headroom: None,
         rps_max_proxy: Measurement::absent(Absent::NotMeasured),
@@ -1261,6 +1264,10 @@ fn assemble_cell_measurements(
             // sweep is the only thing that explains WHY, and a bare null with no points beside
             // it is unreviewable.
             if let Some(series) = result.series.as_ref() {
+                // THE PUBLISHED THROUGHPUT ANSWER. One reading per declared tail-latency bound, off
+                // the same rungs `sweep_max_proxy` below carries - so a reader can re-derive every
+                // reading from the sweep rather than taking the frontier on trust.
+                p.frontier = series.frontier.clone();
                 p.sweep_max_proxy = series.sweep.clone();
                 p.sweep_sustained_20ms = series.sweep_sustained.clone();
             }
@@ -1350,6 +1357,10 @@ fn withhold_refuted_perf(p: CellPerf, why: &str) -> CellPerf {
         conc_at_peak: withheld(),
         rps_max_proxy_rig_ceiling: None,
         rps_max_proxy_headroom: None,
+        // THE FRONTIER GOES TOO, for the reason the sweeps do: every reading in it is rps against
+        // concurrency measured over a wire that is not this pairing, and a reading is as much a
+        // published number as a ceiling drawn from it.
+        frontier: Vec::new(),
         sweep_max_proxy: Vec::new(),
         sweep_sustained_20ms: Vec::new(),
         // THE EVIDENCE, kept verbatim: this is the whole reason the block survives.

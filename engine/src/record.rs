@@ -309,6 +309,42 @@ pub struct Cell {
     pub timings_s: Option<std::collections::BTreeMap<String, f64>>,
 }
 
+/// ONE READING OF THE SWEEP, at one declared tail-latency bound: the most throughput the gateway
+/// carried while 99% of requests finished under `p99_bound_us` and it failed none it accepted.
+///
+/// The frontier of these replaces `rps_max_proxy` and `rps_sustained_20ms`, which were the same sweep
+/// collapsed to two scalars by a chosen ceiling. `frontier.rs`'s module note has the full reasoning;
+/// the short version is that throughput and tail latency rise together, so "the throughput" is a point
+/// on a curve, and picking the point for the reader both hid the tradeoff and let the two scalars
+/// invert against each other.
+///
+/// EVERY FIELD IS EVIDENCE FOR THE ONE ABOVE IT. `rps` is the claim; `concurrency` is where it was
+/// observed; `p99_us` is the tail it ACTUALLY came with (never the bound - 4ms under a 100ms bound is
+/// not the same finding as 99ms); `first_disqualified_conc` is the lowest concurrency above it that
+/// stopped qualifying, which is what makes "this is the most under this bound" checkable instead of
+/// asserted.
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FrontierReading {
+    /// The bound, in microseconds. `None` is the failure-only reading: no latency constraint at all,
+    /// answering "how much can it carry before it starts failing requests".
+    #[serde(default)]
+    pub p99_bound_us: Option<i64>,
+    #[serde(default = "measurement_default")]
+    pub rps: Measurement<i64>,
+    #[serde(default = "measurement_default")]
+    pub concurrency: Measurement<i64>,
+    #[serde(default = "measurement_default")]
+    pub p99_us: Measurement<i64>,
+    #[serde(default = "measurement_default")]
+    pub first_disqualified_conc: Measurement<i64>,
+    /// Did the sweep RUN OUT OF RANGE while still qualifying? Then `rps` is a lower bound, not a
+    /// ceiling, and every surface must say so. The retired search published `SearchExhausted` - a null -
+    /// for this state, discarding a real measured rate because it could not prove maximality. The rate
+    /// is right either way; only the word for it changes.
+    #[serde(default)]
+    pub lower_bound: bool,
+}
+
 /// One rung of a concurrency sweep. `rps` / `p99_us` / `fail` are `Measurement` on principle (a rung
 /// the harness could not sample would otherwise have nowhere honest to put that fact), even though
 /// every rung the shell engine has ever published carried real values for all three.
@@ -366,6 +402,14 @@ pub struct CellPerf {
     pub rps_max_proxy_rig_ceiling: Option<f64>,
     #[serde(default)]
     pub rps_max_proxy_headroom: Option<f64>,
+    /// THE FRONTIER: one reading per declared tail-latency bound, ascending, with the failure-only
+    /// reading last. The published throughput answer, replacing `rps_max_proxy` /
+    /// `rps_sustained_20ms`.
+    ///
+    /// Monotone non-decreasing in the bound BY CONSTRUCTION (see `frontier.rs`), so a reader can check
+    /// the sequence by eye and `bench-audit.py` asserts it.
+    #[serde(default)]
+    pub frontier: Vec<FrontierReading>,
     #[serde(default)]
     pub sweep_max_proxy: Vec<SweepPoint>,
     #[serde(default)]
@@ -388,11 +432,15 @@ macro_rules! absences_of {
         out
     }};
 }
+// NOTE: callers that need to add keys the macro cannot reach (a Vec field's per-element absences, see
+// `CellPerf::absences`) bind its result mutably and extend it, rather than the macro growing a second
+// shape. The macro's whole value is that every key it writes is `stringify!`d from the field it names
+// and so cannot drift from it; a variant taking arbitrary key expressions would give that up.
 
 impl CellPerf {
     /// Every absent metric on this block, keyed by its own field name. Empty when nothing is absent.
     pub fn absences(&self) -> BTreeMap<String, AbsentEntry> {
-        absences_of!(
+        let mut out = absences_of!(
             self,
             added_latency_p50_us,
             added_latency_p99_us,
@@ -404,7 +452,36 @@ impl CellPerf {
             rps_max_proxy,
             rps_max_proxy_concurrency,
             conc_at_peak,
-        )
+        );
+        // AND EVERY FRONTIER READING'S OWN ABSENCES, keyed by the bound they belong to.
+        //
+        // A `Measurement` serializes an absence as a bare `null` and its REASON lives here, in the
+        // cell's sibling map - that is this artifact's central convention. So a frontier reading that
+        // could not be taken published `null` with its reason nowhere at all until these keys existed:
+        // the one state the whole `Measurement` design exists to prevent, reintroduced by a field that
+        // is a Vec rather than a scalar and so was not reachable by `absences_of!`.
+        //
+        // Keyed by the BOUND (`frontier.10ms.rps`) rather than by array index, because the index is an
+        // artifact of ordering and the bound is the identity: a reader looking up why the 10ms column is
+        // empty should not have to count columns, and inserting a bound later must not renumber the
+        // keys of every reading after it.
+        for r in &self.frontier {
+            let at = match r.p99_bound_us {
+                Some(us) => format!("{}ms", us / 1000),
+                None => "unbounded".to_string(),
+            };
+            r.rps
+                .record_absence(&format!("frontier.{at}.rps"), &mut out);
+            r.concurrency
+                .record_absence(&format!("frontier.{at}.concurrency"), &mut out);
+            r.p99_us
+                .record_absence(&format!("frontier.{at}.p99_us"), &mut out);
+            // NOT recorded: `first_disqualified_conc`. Its absence is not a hole - it is the positive
+            // finding that the sweep ran out of range while this bound still held, which the reading's
+            // own `lower_bound: true` states directly. Publishing it as an absence too would put one
+            // fact in the artifact twice, in two vocabularies, which is what this map exists to avoid.
+        }
+        out
     }
 }
 
@@ -728,6 +805,134 @@ pub struct StreamingProjection {
 
 #[cfg(test)]
 mod tests {
+    // THE FRONTIER SURVIVES THE ARTIFACT, MONOTONICITY AND ALL.
+    //
+    // `frontier.rs` proves the ordering holds over rungs; this proves the published SHAPE keeps it.
+    // A serialization that reordered the readings, or dropped the unbounded one, would leave a board
+    // whose columns no longer read as a curve while every individual number stayed correct - and the
+    // ordering is the whole reason a reader can check us by eye.
+    #[test]
+    fn a_serialized_frontier_keeps_its_order_and_its_monotonicity() {
+        use super::*;
+        // apisix anthropic>anthropic, 2026-07-29: the real curve.
+        let rows = [
+            (Some(1_000i64), 7_015i64),
+            (Some(5_000), 15_438),
+            (Some(10_000), 18_943),
+            (Some(50_000), 19_284),
+            (Some(100_000), 19_284),
+            (None, 19_284),
+        ];
+        let frontier: Vec<FrontierReading> = rows
+            .iter()
+            .map(|(b, rps)| FrontierReading {
+                p99_bound_us: *b,
+                rps: Measurement::Measured(*rps),
+                concurrency: Measurement::Measured(256),
+                p99_us: Measurement::Measured(4_000),
+                first_disqualified_conc: Measurement::Measured(1024),
+                lower_bound: false,
+            })
+            .collect();
+        let text = serde_json::to_string(&frontier).expect("serialize");
+        let back: Vec<FrontierReading> = serde_json::from_str(&text).expect("round trip");
+        assert_eq!(back.len(), 6);
+        // The unbounded reading is LAST and its bound serializes as null, not as a missing key or a
+        // sentinel number - "no latency bound" is a distinct state from "some bound we forgot".
+        assert_eq!(back[5].p99_bound_us, None);
+        assert!(text.contains("\"p99_bound_us\":null"), "{text}");
+        let bounds: Vec<Option<i64>> = back.iter().map(|r| r.p99_bound_us).collect();
+        assert_eq!(
+            bounds,
+            vec![
+                Some(1_000),
+                Some(5_000),
+                Some(10_000),
+                Some(50_000),
+                Some(100_000),
+                None
+            ],
+            "bounds must stay ascending with the unbounded reading last"
+        );
+        let rates: Vec<i64> = back.iter().map(|r| r.rps.copied().unwrap()).collect();
+        for w in rates.windows(2) {
+            assert!(
+                w[1] >= w[0],
+                "the published sequence must not invert: {rates:?}"
+            );
+        }
+    }
+
+    // A reading that ran out of range publishes its rate AND says the rate is a floor. The retired
+    // search published null here and threw the measurement away for failing to prove maximality.
+    #[test]
+    fn a_lower_bound_reading_publishes_its_rate_and_declares_itself_a_floor() {
+        use super::*;
+        let r = FrontierReading {
+            p99_bound_us: Some(10_000),
+            rps: Measurement::Measured(19_000),
+            concurrency: Measurement::Measured(16_384),
+            p99_us: Measurement::Measured(3_000),
+            first_disqualified_conc: Measurement::absent(Absent::SearchExhausted),
+            lower_bound: true,
+        };
+        let back: FrontierReading =
+            serde_json::from_str(&serde_json::to_string(&r).expect("ser")).expect("de");
+        assert_eq!(
+            back.rps.copied(),
+            Some(19_000),
+            "the rate is real and is published"
+        );
+        assert!(
+            back.lower_bound,
+            "and it is labelled a floor rather than a ceiling"
+        );
+        // The REASON does not survive the envelope, and that is this artifact's convention rather than
+        // a defect: an absent `Measurement` serializes as a bare null and its reason lives in the
+        // CELL's sibling `absences` map. The test that matters is that the map carries it - the next
+        // one - and that was a real hole until the frontier's keys were added to `CellPerf::absences`.
+        // A Vec field is unreachable by `absences_of!`, so before that every absent reading published
+        // a null with its reason nowhere at all: the one state `Measurement` exists to prevent.
+        assert_eq!(back.first_disqualified_conc.copied(), None);
+    }
+
+    // THE ABSENCE MAP CARRIES EVERY READING'S REASON, KEYED BY ITS BOUND.
+    #[test]
+    fn an_absent_frontier_reading_publishes_its_reason_in_the_cells_absence_map() {
+        let mut perf = sample_perf();
+        perf.frontier = vec![
+            FrontierReading {
+                p99_bound_us: Some(1_000),
+                rps: Measurement::absent_because(
+                    Absent::BelowResolution,
+                    "every cleanly-served rung had a tail at or above 1ms",
+                ),
+                concurrency: Measurement::absent(Absent::BelowResolution),
+                p99_us: Measurement::absent(Absent::BelowResolution),
+                first_disqualified_conc: Measurement::absent(Absent::BelowResolution),
+                lower_bound: false,
+            },
+            FrontierReading {
+                p99_bound_us: None,
+                rps: Measurement::Measured(19_284),
+                concurrency: Measurement::Measured(1024),
+                p99_us: Measurement::Measured(40_000),
+                first_disqualified_conc: Measurement::Measured(2048),
+                lower_bound: false,
+            },
+        ];
+        let abs = perf.absences();
+        let e = abs
+            .get("frontier.1ms.rps")
+            .expect("keyed by its BOUND, so a reader need not count columns to find it");
+        assert_eq!(e.reason, Absent::BelowResolution);
+        assert!(e.detail.as_deref().unwrap_or_default().contains("1ms"));
+        assert!(abs.contains_key("frontier.1ms.concurrency"));
+        assert!(abs.contains_key("frontier.1ms.p99_us"));
+        // The reading that WAS taken contributes no keys at all.
+        assert!(!abs.keys().any(|k| k.starts_with("frontier.unbounded")));
+    }
+
     use super::*;
     use crate::measurement::Absent;
 
@@ -858,6 +1063,7 @@ mod tests {
             conc_at_peak: Measurement::Measured(1024),
             rps_max_proxy_rig_ceiling: None,
             rps_max_proxy_headroom: None,
+            frontier: Vec::new(),
             sweep_max_proxy: vec![SweepPoint {
                 conc: 256,
                 rps: Measurement::Measured(6_209),
