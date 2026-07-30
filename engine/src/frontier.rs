@@ -191,10 +191,11 @@ pub fn read_at(rungs: &[Rung], bound: Option<u64>) -> Option<Reading> {
     // Ordering by rate ascending, then concurrency DESCENDING, makes the maximum "highest rate, lowest
     // concurrency". Rungs identical in both are repeated windows at one concurrency, where either choice
     // reports the same pair.
-    let best = rungs
-        .iter()
-        .filter(|r| r.qualifies(bound))
-        .max_by(|a, b| a.rps.total_cmp(&b.rps).then(b.concurrency.cmp(&a.concurrency)))?;
+    let best = rungs.iter().filter(|r| r.qualifies(bound)).max_by(|a, b| {
+        a.rps
+            .total_cmp(&b.rps)
+            .then(b.concurrency.cmp(&a.concurrency))
+    })?;
     // The boundary proof: the lowest concurrency ABOVE the winner that did not qualify. Read from the
     // rungs rather than assumed, so a sweep that never probed higher reports no boundary instead of
     // an invented one.
@@ -296,7 +297,10 @@ mod tests {
             rung(512, 107.0, 5_500, 0),
         ];
         let r = read_at(&rungs, None).expect("four clean rungs qualify with no bound");
-        assert_eq!(r.rps, 107.0, "the rate is the maximum, which the tie does not change");
+        assert_eq!(
+            r.rps, 107.0,
+            "the rate is the maximum, which the tie does not change"
+        );
         assert_eq!(
             r.concurrency, 256,
             "on a tie the LOWEST concurrency that reached the rate is published: naming a higher one \
