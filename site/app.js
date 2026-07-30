@@ -4841,7 +4841,7 @@ if (NODE) {
     // #4: the ×N gain factor's sort key and the reference prose that says what the ratio is OF. Exported
     // because "×1.0 from 1 ms" and "×1.0 from 50 ms" are opposite findings that used to render identically,
     // and a guard no test can reach is a guard that can be deleted without anything going red.
-    heldSortKey, HELD_NOTHING_INDEX, HELD_REFERENCE, BOUND_GROUP_LABEL, theadHtml,
+    heldSortKey, HELD_NOTHING_INDEX, HELD_REFERENCE, BOUND_GROUP_LABEL, theadHtml, colgroupHtml, colWidth, COL_WIDTHS,
     // #1: the lead/notes split, its flattener, and the dispatch every renderer goes through.
     captionText, captionFor, notesFold,
     // #6: the version column's two halves. parseBuildVersion returns NULL for a build stamp that names no

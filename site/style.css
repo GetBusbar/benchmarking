@@ -166,7 +166,8 @@ a.home-card:hover { border-color: var(--accent); text-decoration: none; }
 .controls { display: flex; flex-wrap: wrap; gap: 1.2rem; align-items: center; margin-top: 1.4rem; margin-bottom: .9rem; }
 .table-head .controls { flex: 0 0 auto; flex-direction: column; align-items: flex-end; gap: .5rem; margin: 0; }
 .table-head .count { margin: 0; }
-.control-group { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; }
+/* `.control-group` survives only as the hook .filters uses to make each axis display:contents; the flex box
+   it used to be is gone with the two ragged rows, and re-declaring it here would be a layout that never wins. */
 .toggle { color: var(--fg-dim); font-size: .86rem; display: inline-flex; gap: .35rem; align-items: center; cursor: pointer; }
 .toggle input { accent-color: var(--accent); }
 .chip-filter {
@@ -202,7 +203,6 @@ table { border-collapse: collapse; width: 100%; font-size: .86rem; }
    reads as two numbers) but the sub-lines under them are prose, and prose wraps: "no rung held this tail" is
    wider than any rate above it, so left nowrap it would be the thing sizing a numeric column - the same
    defect, one element down. */
-.reading-none, .reading-tail, .zero-why { white-space: normal; }
 thead th {
   position: sticky; top: 0; background: var(--bg-raise); color: var(--fg-dim);
   font-weight: 600; text-align: right; padding: .6rem .55rem;
@@ -508,7 +508,10 @@ td.failcell {
   display: block;
   font-size: .66rem;
   color: var(--fg-dim);
-  white-space: nowrap;
+  /* WRAPS, unlike the number above it. td.reading/td.shape set nowrap so a rate never splits into two
+     numbers, and this sub-line inherits it - which made a 22-character reason, not the rate, the thing
+     sizing a numeric column. A reason reads fine on two lines; a number does not. */
+  white-space: normal;
   line-height: 1.2;
 }
 
@@ -527,9 +530,9 @@ td.failcell {
 /* A gateway that produced NO protocol matrix still gets a row (all n/a); this carries the reason. */
 .matrix-nores { color: var(--fg-mute); font-style: italic; }
 
-/* Cell chooser (Performance, Streaming, Memory): the segmented mode control + dialect dropdowns. */
-.cell-chooser { display: flex; flex-wrap: wrap; gap: .6rem; align-items: center; }
-.cell-chooser.hidden { display: none; }
+/* Cell chooser (Performance, Streaming, Memory): the dialect dropdowns beside the segmented mode control.
+   No box of its own: the axis is laid out by .filters (display: contents), and its show/hide is
+   .filters > .control-group.hidden. */
 .cell-chooser label { display: inline-flex; align-items: center; gap: .4rem; color: var(--fg-dim); font-size: .85rem; }
 .cell-chooser label.hidden { display: none; }
 .cell-chooser select {
@@ -587,7 +590,12 @@ td.failcell {
    line of 0.76rem text run to 1440px is not a sentence anyone reads.
    The bound must be legible as WORDS and not only as a highlighted button: the defect this whole surface
    exists to prevent is a reader inferring a bar the test never enforced. */
-.filters .fnote { grid-column: 2; font-size: .76rem; max-width: 46rem; margin: -.15rem 0 0; }
+/* Explicitly the THIRD row, so it sits BELOW both axes rather than between them. In DOM order it belongs to
+   the bound axis (it explains the bound), but auto-placed it split the two axis rows apart and they stopped
+   reading as a pair - which is the one thing this block exists to make legible. Explicit placement does not
+   advance the auto cursor, so the cell axis still lands on row 2, and when the bound axis is hidden this
+   element is hidden with it and the row simply does not exist. */
+.filters .fnote { grid-column: 2; grid-row: 3; font-size: .76rem; max-width: 46rem; margin: 0; }
 .filters .fnote:empty { display: none; }
 /* CONSISTENT CHIP GEOMETRY WITHIN AN AXIS. "1 ms" and "no bound" are the same kind of choice, so they are
    the same size of target; six chips of six different widths was the other half of "ugly". Centred, because
@@ -600,19 +608,21 @@ td.failcell {
 /* THE CURVE, per row. `color: currentColor` throughout the SVG, so the line inherits the accent here and
    stays legible in both themes without a second palette to keep in sync (same approach as .rss-spark). */
 .frontier-spark { display: block; color: var(--accent, currentColor); }
-td.shape { white-space: nowrap; }
+/* nowrap for the NUMBER; the sub-line under it wraps (see .shape-gain) - a column sized by a sentence is
+   the column-width defect one element down from where it was fixed. */
+td.shape { white-space: nowrap; overflow: hidden; }
 /* The gain factor beside the curve: the shape as one sortable, readable-aloud number. Small, because the
    line is what the eye should reach first - but present, because a picture cannot be sorted or spoken. */
-.shape-gain { display: block; font-size: .7rem; color: var(--fg-dim); line-height: 1.2; }
+.shape-gain { display: block; font-size: .7rem; color: var(--fg-dim); line-height: 1.2; white-space: normal; }
 /* The frontier tab's per-bound cells: the rate, with the tail it ACTUALLY produced under it. A column of
    rates alone cannot tell 4 ms under a 100 ms bound from 99 ms under it. */
 td.reading { white-space: nowrap; }
-.reading-tail { display: block; font-size: .66rem; color: var(--fg-dim); line-height: 1.2; }
+.reading-tail { display: block; font-size: .66rem; color: var(--fg-dim); line-height: 1.2; white-space: normal; }
 /* "SERVED, BUT NOTHING HELD THIS TAIL" - a measured nothing. It must not read as missing data: on the
    slowest gateways five of six columns are this state, and "no data" is a neutral impression of a damning
    measurement. The number stays muted (it is a zero) while the reason is stated in ink beneath it. */
 td.reading-zero { color: var(--fg-dim); }
-.reading-none { display: block; font-size: .66rem; color: var(--red); line-height: 1.2; }
+.reading-none { display: block; font-size: .66rem; color: var(--red); line-height: 1.2; white-space: normal; }
 /* The column the board is currently ranked at, marked so the Performance tab's number is locatable in the
    full curve. Deliberately the same tint the sorted column uses: it IS the sorted column by default, and
    the mark has to survive the reader sorting by something else. */
@@ -782,7 +792,6 @@ td.memcurve.na { color: var(--fg-mute); }
   .table-head .controls { flex-direction: row; align-items: center; width: 100%; }
   .controls { gap: .7rem; }
   #search { flex: 1 1 100%; min-width: 0; padding: .5rem .6rem; }
-  .control-group { gap: .45rem; }
   .chip-filter, .toggle { min-height: 40px; display: inline-flex; align-items: center; }
   .chip-filter { padding: .3rem .8rem; }
   .count { margin-left: 0; flex: 1 1 100%; }

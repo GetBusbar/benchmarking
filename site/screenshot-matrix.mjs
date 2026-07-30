@@ -75,11 +75,41 @@ function urlFor({ view, mode, bound }) {
 
 const name = ({ view, mode, bound }, w) => `shot-${view}-${mode || "na"}-${bound || "na"}-${w}.png`;
 
+/* geometryAudit(page, view): does this view's column geometry depend on its CONTENT?
+
+   The owner's complaint was "changing filters shouldn't change column widths", and the obvious check - measure
+   under two filter combos, compare - only fires when the board HAS data wide enough to differ. This measures
+   the underlying property instead: take the widths, replace every body cell's text with a string far wider
+   than any real value, take them again. Under auto table layout the second measurement is different by
+   construction; under declared geometry (table-layout: fixed + the colgroup renderTable emits) it is
+   identical, and no filter, no future value and no thin data.json can move a column sideways.
+   It is deliberately destructive to the DOM, so it runs on its own page load and nothing is screenshotted
+   after it. */
+async function geometryAudit(page, view) {
+  return page.evaluate(() => {
+    const table = document.querySelector("#results-table");
+    const row = table.querySelector("tbody tr");
+    if (!row) return null;
+    const widths = () => [...table.querySelectorAll("tbody tr:first-child > *")]
+      .map((td) => Math.round(td.getBoundingClientRect().width));
+    const before = widths();
+    const scroll = table.closest(".table-scroll");
+    // Overflow is read BEFORE the mutation: the stuffed strings would report a table width no board ever has.
+    const overflow = Math.round(table.scrollWidth - scroll.clientWidth);
+    const wide = "OpenAI→Bedrock Converse 2,083,807 no rung held this tail";
+    for (const td of table.querySelectorAll("tbody td")) td.textContent = wide;
+    for (const th of table.querySelectorAll("thead th")) th.textContent = wide;
+    const after = widths();
+    return { before, after, stable: before.join(",") === after.join(","), overflow };
+  }).then((r) => (r ? { view, ...r } : null));
+}
+
 async function main() {
   await mkdir(OUT, { recursive: true });
   const browser = await chromium.launch();
   const shots = [];
   const problems = [];
+  const geometry = [];
   for (const w of WIDTHS) {
     const ctx = await browser.newContext({ viewport: { width: w, height: 900 }, deviceScaleFactor: 1 });
     const page = await ctx.newPage();
@@ -97,12 +127,25 @@ async function main() {
       await page.screenshot({ path: f, fullPage: true });
       shots.push(name(c, w));
     }
+    // One geometry audit per table view per width, on a fresh load (it mutates the DOM).
+    for (const view of VIEWS) {
+      if (!TABLE_VIEWS.has(view)) continue;
+      await page.goto(urlFor({ view, mode: modesFor(view)[0], bound: null }), { waitUntil: "networkidle" });
+      await page.waitForFunction(() => document.querySelectorAll("#results-table tbody tr").length > 0, null, { timeout: 15000 })
+        .catch(() => {});
+      const g = await geometryAudit(page, view);
+      if (g) geometry.push({ width: w, ...g });
+    }
     await ctx.close();
   }
   await browser.close();
+  for (const g of geometry) {
+    console.log(`geometry ${g.view} @${g.width}: ${g.stable ? "STABLE" : "CONTENT-DEPENDENT"} overflow=${g.overflow}px`);
+    if (!g.stable) console.log(`   before ${g.before.join(" ")}\n   after  ${g.after.join(" ")}`);
+  }
   // An index, so a reviewer can map a filename back to the URL that produced it without re-deriving it.
   await writeFile(path.join(OUT, "index.json"),
-    JSON.stringify({ base: BASE, widths: WIDTHS, shots: combos().flatMap((c) => WIDTHS.map((w) => ({ file: name(c, w), width: w, url: urlFor(c) }))), problems }, null, 2));
+    JSON.stringify({ base: BASE, widths: WIDTHS, geometry, shots: combos().flatMap((c) => WIDTHS.map((w) => ({ file: name(c, w), width: w, url: urlFor(c) }))), problems }, null, 2));
   console.log(`${shots.length} screenshots -> ${OUT}`);
   for (const p of problems) console.log(`PROBLEM ${p}`);
 }
