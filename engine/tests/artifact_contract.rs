@@ -58,6 +58,16 @@ const STREAM_METRICS: [&str; 8] = [
     "ttft_gw_samples",
     "ttft_direct_samples",
 ];
+// DERIVED FROM `streams_sustained`, AND NOW CARRYING ITS REASON. These two are `Option<f64>` rather
+// than `Measurement`, so they have no slot of their own for a reason and `absences_of!` cannot reach
+// them - which left them null on 64 cells of the 2026-07-30 board with nothing in `absences` to
+// explain them. `CellStream::absences` now copies the parent's reason onto them when the parent is
+// absent, so they belong in the walk below: an absence entry that points at no declared metric is
+// exactly what the last assertion in this file rejects.
+const DERIVED_STREAM_METRICS: [&str; 2] = [
+    "streams_sustained_mock_ceiling",
+    "streams_sustained_headroom",
+];
 // `plateaued` and `load_s` joined this list when they stopped being bare `Option`s that collapsed
 // the memory group's reason on the way out: a window that could not judge the plateau published two
 // nulls nothing could explain. They are `Measurement`s now, so they ride in the absences map like
@@ -94,7 +104,7 @@ fn measured_perf() -> CellPerf {
         direct_c1_p99_us: Measurement::Measured(1_520),
         frontier: vec![otb_engine::record::FrontierReading {
             p99_bound_us: Some(10_000),
-            rps: Measurement::Measured(31_000),
+            rps: Measurement::Measured(31_000.0),
             concurrency: Measurement::Measured(128),
             p99_us: Measurement::Measured(4_000),
             first_disqualified_conc: Measurement::Measured(256),
@@ -219,6 +229,10 @@ fn every_null_metric_carries_exactly_one_absence_and_no_absence_points_at_a_numb
     for (block, keys) in [
         ("perf", &PERF_METRICS[..]),
         ("stream", &STREAM_METRICS[..]),
+        // Derived from `streams_sustained` and inheriting its reason - see the const's own note. They
+        // belong in the BIJECTION walk but not in the "measured means a number" walk above, because
+        // they are only ever present when their parent is.
+        ("stream", &DERIVED_STREAM_METRICS[..]),
         ("memory", &MEMORY_METRICS[..]),
         // The conditional fields are exempt from "measured means a number", NOT from the bijection.
         // On this all-defaulted cell nothing was measured at all, so they are null here like every
@@ -316,12 +330,16 @@ fn a_sweep_point_publishes_nulls_for_what_it_could_not_sample() {
     let point = SweepPoint {
         conc: 64,
         ok: Measurement::Measured(1_000),
-        rps: Measurement::Measured(10_000),
+        rps: Measurement::Measured(10_000.0),
         p99_us: Measurement::absent(Absent::NotMeasured),
         fail: Measurement::Measured(0),
     };
     let v = serde_json::to_value(&point).expect("serialise");
-    assert_eq!(v["rps"], 10_000);
+    // A FLOAT ON THE WIRE NOW, same value. `rps` became f64 so a rung serving 0.25 req/s cannot be
+    // published as `0` (see GenStats::rps); serde therefore writes 10000.0 where it used to write
+    // 10000. Compared as a number rather than by literal so this asserts the VALUE, which is what the
+    // contract is about - every JSON consumer parses both to the same thing.
+    assert_eq!(v["rps"].as_f64(), Some(10_000.0));
     assert!(v["p99_us"].is_null(), "an unsampled p99 is null, not 0");
     assert_eq!(v["fail"], 0, "a measured zero failure count stays a zero");
 

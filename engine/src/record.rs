@@ -345,8 +345,10 @@ pub struct FrontierReading {
     /// answering "how much can it carry before it starts failing requests".
     #[serde(default)]
     pub p99_bound_us: Option<i64>,
+    /// FRACTIONAL BELOW 1/s, whole at or above it - see `GenStats::rps`. Published as a float so a
+    /// cell serving 0.25 req/s cannot report `0`, which says it carried nothing.
     #[serde(default = "measurement_default")]
-    pub rps: Measurement<i64>,
+    pub rps: Measurement<f64>,
     #[serde(default = "measurement_default")]
     pub concurrency: Measurement<i64>,
     #[serde(default = "measurement_default")]
@@ -383,8 +385,10 @@ pub struct SweepPoint {
     /// next occurrence may have nobody watching. The input the rule needs is now in the artifact.
     #[serde(default = "measurement_default")]
     pub ok: Measurement<i64>,
+    /// See the frontier reading's `rps`: fractional below 1/s so a rung that completed one request in
+    /// four seconds is not published as having carried nothing.
     #[serde(default = "measurement_default")]
-    pub rps: Measurement<i64>,
+    pub rps: Measurement<f64>,
     #[serde(default = "measurement_default")]
     pub p99_us: Measurement<i64>,
     #[serde(default = "measurement_default")]
@@ -565,7 +569,7 @@ pub struct CellStream {
 
 impl CellStream {
     pub fn absences(&self) -> BTreeMap<String, AbsentEntry> {
-        absences_of!(
+        let mut out = absences_of!(
             self,
             added_ttft_p50_us,
             added_ttft_p99_us,
@@ -575,7 +579,39 @@ impl CellStream {
             ttft_direct_samples,
             streams_sustained,
             streams_sustained_fps,
-        )
+        );
+        // THE TWO DERIVED FIELDS INHERIT THEIR PARENT'S REASON, because they cannot state one.
+        //
+        // `streams_sustained_mock_ceiling` and `_headroom` are `Option<f64>`, not `Measurement`, so
+        // they have no slot for a reason and `absences_of!` cannot cover them. On the 2026-07-30 board
+        // that left them null on 64 cells with NO entry in the cell's absences map - nulls nobody had
+        // to explain, which is the one thing this artifact is not supposed to contain.
+        //
+        // They are DERIVED from `streams_sustained` (headroom is the carried fraction of the ceiling),
+        // so when the parent is absent they are absent for precisely the parent's reason and copying it
+        // is a statement of fact rather than an invented one. Converting them to `Measurement` would be
+        // the tidier fix and would also let them carry a reason of their OWN - worth doing if a case
+        // ever appears where they are absent while the parent is present.
+        if let Measurement::Absent { reason, detail } = &self.streams_sustained {
+            for key in [
+                "streams_sustained_mock_ceiling",
+                "streams_sustained_headroom",
+            ] {
+                let missing = match key {
+                    "streams_sustained_mock_ceiling" => {
+                        self.streams_sustained_mock_ceiling.is_none()
+                    }
+                    _ => self.streams_sustained_headroom.is_none(),
+                };
+                if missing {
+                    out.entry(key.to_string()).or_insert_with(|| AbsentEntry {
+                        reason: reason.clone(),
+                        detail: detail.clone(),
+                    });
+                }
+            }
+        }
+        out
     }
 }
 
@@ -794,7 +830,7 @@ mod tests {
             sweep_max_proxy: vec![SweepPoint {
                 conc: 256,
                 ok: Measurement::Measured(1_000),
-                rps: Measurement::Measured(6_209),
+                rps: Measurement::Measured(6_209.0),
                 p99_us: Measurement::Measured(43_969),
                 fail: Measurement::Measured(0),
             }],
@@ -826,7 +862,7 @@ mod tests {
             .iter()
             .map(|(b, rps)| FrontierReading {
                 p99_bound_us: *b,
-                rps: Measurement::Measured(*rps),
+                rps: Measurement::Measured(*rps as f64),
                 concurrency: Measurement::Measured(256),
                 p99_us: Measurement::Measured(4_000),
                 first_disqualified_conc: Measurement::Measured(1024),
@@ -853,7 +889,7 @@ mod tests {
             ],
             "bounds must stay ascending with the unbounded reading last"
         );
-        let rates: Vec<i64> = back.iter().map(|r| r.rps.copied().unwrap()).collect();
+        let rates: Vec<f64> = back.iter().map(|r| r.rps.copied().unwrap()).collect();
         for w in rates.windows(2) {
             assert!(
                 w[1] >= w[0],
@@ -869,7 +905,7 @@ mod tests {
         use super::*;
         let r = FrontierReading {
             p99_bound_us: Some(10_000),
-            rps: Measurement::Measured(19_000),
+            rps: Measurement::Measured(19_000.0),
             concurrency: Measurement::Measured(16_384),
             p99_us: Measurement::Measured(3_000),
             first_disqualified_conc: Measurement::absent(Absent::SearchExhausted),
@@ -879,7 +915,7 @@ mod tests {
             serde_json::from_str(&serde_json::to_string(&r).expect("ser")).expect("de");
         assert_eq!(
             back.rps.copied(),
-            Some(19_000),
+            Some(19_000.0),
             "the rate is real and is published"
         );
         assert!(
@@ -913,7 +949,7 @@ mod tests {
             },
             FrontierReading {
                 p99_bound_us: None,
-                rps: Measurement::Measured(19_284),
+                rps: Measurement::Measured(19_284.0),
                 concurrency: Measurement::Measured(1024),
                 p99_us: Measurement::Measured(40_000),
                 first_disqualified_conc: Measurement::Measured(2048),

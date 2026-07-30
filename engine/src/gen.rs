@@ -102,11 +102,40 @@ pub struct GenStats {
 }
 
 impl GenStats {
-    pub fn rps(&self) -> u64 {
+    /// Completed requests per second. A WHOLE NUMBER AT OR ABOVE 1/s, AND FRACTIONAL BELOW IT.
+    ///
+    /// This returned `u64` via `(ok as f64 / elapsed_s) as u64`, which truncates toward zero - so a
+    /// rung that completed one request in four seconds published `0`. That is not a rounding
+    /// difference, it is a false statement: `0` says the gateway carried nothing when it carried
+    /// 0.25/s. plano hit it twice (c=256 on two cells, `rps: 0` sitting beside a `p99_us` of 3.4 s),
+    /// and both external auditors had to carry a documented special case - "a percentile cannot exist
+    /// without a completed request, so the rate merely rounded down" - to avoid calling a correct
+    /// engine wrong.
+    ///
+    /// THE SPLIT IS DELIBERATE, rather than simply returning the exact float everywhere. Below 1/s,
+    /// truncation destroys the entire magnitude of the answer, so precision there is the whole point.
+    /// At or above 1/s, `trunc()` reproduces every number this engine has ever published EXACTLY -
+    /// so the change cannot quietly move a single existing figure while fixing the one case that was
+    /// wrong, and 44,363.7 req/s is not made truer by carrying a tenth.
+    ///
+    /// Sub-1/s rates are not a curiosity. They are what a gateway collapsing under concurrency looks
+    /// like, which is precisely where the board must not round the evidence away to zero.
+    pub fn rps(&self) -> f64 {
         if self.elapsed_s <= 0.0 {
-            return 0;
+            return 0.0;
         }
-        (self.ok as f64 / self.elapsed_s) as u64
+        let exact = self.ok as f64 / self.elapsed_s;
+        // A non-finite rate is the rig malfunctioning, and `as i64` on an infinity SATURATES rather
+        // than wrapping - publishing 9,223,372,036,854,775,807 req/s as though it were a measurement.
+        // Guarded the same way `stats` now guards its order statistics.
+        if !exact.is_finite() {
+            return 0.0;
+        }
+        if exact >= 1.0 {
+            exact.trunc()
+        } else {
+            exact
+        }
     }
 
     /// Nearest-rank percentile, through `stats::nearest_rank_index` so this cannot drift from the
@@ -808,10 +837,10 @@ mod tests {
     fn rps_is_successes_over_measured_elapsed_not_nominal_duration() {
         // Measured elapsed, because a run that took longer than asked must not report the rate it
         // would have had. The Go generator makes the same choice.
-        assert_eq!(stats(&[1], 1000, 0, 10.0).rps(), 100);
+        assert_eq!(stats(&[1], 1000, 0, 10.0).rps(), 100.0);
         assert_eq!(
             stats(&[1], 1000, 0, 0.0).rps(),
-            0,
+            0.0,
             "no elapsed time is no rate, not a division"
         );
     }
@@ -839,7 +868,7 @@ mod tests {
             s.latencies_us.is_empty(),
             "a failure has no latency to report"
         );
-        assert_eq!(s.rps(), 0, "failures are not throughput");
+        assert_eq!(s.rps(), 0.0, "failures are not throughput");
     }
 
     #[test]
@@ -907,7 +936,7 @@ mod tests {
             "every success contributes exactly one latency"
         );
         assert!(g.elapsed_s > 0.0);
-        assert!(g.rps() > 0, "a run that completed requests has a rate");
+        assert!(g.rps() > 0.0, "a run that completed requests has a rate");
     }
 
     // A chunked response is what a real gateway sends whenever it does not buffer to compute a
@@ -1420,7 +1449,7 @@ mod tests {
             g.latencies_us.is_empty(),
             "a completion outside the window contributes no latency either"
         );
-        assert_eq!(g.rps(), 0);
+        assert_eq!(g.rps(), 0.0);
     }
 
     // A HEADER VALUE IS NOT ALLOWED TO CHOOSE WHAT BYTES GO ON THE WIRE.
@@ -1486,5 +1515,65 @@ mod tests {
         });
         assert!(g.spawn_failed, "the rig could not pose the question");
         assert_eq!((g.ok, g.fail), (0, 0), "and nothing is charged to anyone");
+    }
+}
+
+#[cfg(test)]
+mod rate_precision_tests {
+    use super::*;
+
+    fn s(ok: u64, elapsed_s: f64) -> GenStats {
+        GenStats {
+            ok,
+            elapsed_s,
+            ..Default::default()
+        }
+    }
+
+    // THE CASE THAT WAS PUBLISHED AS ZERO. plano hit it twice: one request completed in four seconds
+    // is 0.25 req/s, and `as u64` truncation published `0` - which does not say "slow", it says the
+    // gateway carried NOTHING. Both external auditors had to carry a written special case to avoid
+    // calling a correct engine wrong.
+    #[test]
+    fn a_sub_one_per_second_rate_is_not_published_as_zero() {
+        let r = s(1, 4.0).rps();
+        assert!(
+            (r - 0.25).abs() < 1e-9,
+            "one request in four seconds is 0.25/s, got {r}"
+        );
+        assert!(
+            r > 0.0,
+            "a completed request must never publish as a zero rate"
+        );
+        assert!((s(1, 2.0).rps() - 0.5).abs() < 1e-9);
+        assert!((s(3, 4.0).rps() - 0.75).abs() < 1e-9);
+    }
+
+    // AND THE OTHER HALF: nothing at or above 1/s moves. The split exists precisely so this change
+    // cannot quietly restate a single number the board has already published - if it rounded instead
+    // of truncating, every rate on the board could shift by one.
+    #[test]
+    fn rates_at_or_above_one_per_second_are_unchanged_whole_numbers() {
+        assert_eq!(s(100, 1.0).rps(), 100.0);
+        assert_eq!(s(44_363, 1.0).rps(), 44_363.0);
+        // 19.9/s must still publish 19, exactly as `as u64` did - not 20.
+        assert_eq!(
+            s(199, 10.0).rps(),
+            19.0,
+            "truncation, not rounding, above 1/s"
+        );
+        assert_eq!(
+            s(1, 1.0).rps(),
+            1.0,
+            "exactly 1/s is the boundary and stays whole"
+        );
+    }
+
+    // A rate is undefined without elapsed time, and an infinity cast to an integer SATURATES rather
+    // than wrapping - which would publish 9,223,372,036,854,775,807 req/s as a measurement.
+    #[test]
+    fn a_rate_with_no_elapsed_time_is_zero_not_an_infinity() {
+        assert_eq!(s(10, 0.0).rps(), 0.0);
+        assert_eq!(s(0, 0.0).rps(), 0.0);
     }
 }
