@@ -390,7 +390,10 @@ mod tests {
             "median must refuse the same input percentile refuses; they share the broken comparator"
         );
         assert!(
-            matches!(percentile(&[1.0, f64::INFINITY], 0.5), Measurement::Absent { .. }),
+            matches!(
+                percentile(&[1.0, f64::INFINITY], 0.5),
+                Measurement::Absent { .. }
+            ),
             "an infinity is equally unorderable in practice and equally a rig fault"
         );
     }
