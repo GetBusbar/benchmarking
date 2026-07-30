@@ -9,8 +9,8 @@ Every number below is regenerated from the raw `results/*.json` - re-run `run-al
 | [LiteLLM · Rust](https://github.com/BerriAI/litellm) | 105 µs | 44,382 <sub>(+1% from 1 ms to no bound)</sub> | - | - | `litellm-ai-gateway` |
 | [Helicone](https://github.com/Helicone/ai-gateway) | 322 µs | 14,826 <sub>(+6% from 1 ms to no bound)</sub> | 43 MiB | 56 MiB | `target/release/ai-gateway` |
 | [Kong](https://github.com/Kong/kong) | 389 µs | 21,867 <sub>(+63% from 1 ms to no bound)</sub> | 382 MiB | 595 MiB | `kong:3.9.3` |
+| [APISIX](https://github.com/apache/apisix) | 446 µs | 20,229 <sub>(+74% from 1 ms to no bound)</sub> | 180 MiB | 211 MiB | `apache/apisix:3.17.0-debian` |
 | [TensorZero](https://github.com/tensorzero/tensorzero) | 40,990 µs | 0 | 49 MiB | 70 MiB | `tensorzero/gateway:2026.6.0` |
-| [Plano](https://github.com/katanemo/plano) | 201,977 µs | 0 | 614 MiB | 968 MiB | `katanemo/plano:0.4.29` |
 
 **Throughput is a curve, not a number.** The column above is one reading of each gateway's concurrency sweep: the most req/s it carried while 99% of requests finished under **10 ms** and it failed **none** it accepted. The same sweep is published at 5 tail-latency bounds (1 ms, 5 ms, 10 ms, 50 ms, 100 ms) plus with no bound at all, and the shape across them is the comparison that matters: a gateway already at its ceiling at 1 ms is a different machine from one that doubles when given 5 ms. See the frontier-shape chart. **≥** on a number means the sweep's top rung won, so that rate is a floor and no ceiling was established.
 **✕** = did not serve under load (0 successful req/s). &nbsp; **0** = came up, but no tested concurrency held p99 &lt; 10 ms while failing none of the requests it accepted.
@@ -24,8 +24,8 @@ The most req/s each gateway carried while 99% of requests finished under the col
 | [LiteLLM · Rust](https://github.com/BerriAI/litellm) | 43,818 | 44,382 | 44,382 | 44,382 | 44,382 | 44,382 | c=32, p99 1.11 ms, c=256 broke it |
 | [Helicone](https://github.com/Helicone/ai-gateway) | 14,007 | 14,768 | 14,826 | 14,826 | 14,826 | 14,826 | c=64, p99 7.03 ms, c=128 broke it |
 | [Kong](https://github.com/Kong/kong) | 13,539 | 21,283 | 21,867 | 22,033 | 22,033 | 22,033 | c=64, p99 9.84 ms, c=128 broke it |
+| [APISIX](https://github.com/apache/apisix) | 11,929 | 18,704 | 20,229 | 20,775 | 20,775 | 20,775 | c=64, p99 7.99 ms, c=128 broke it |
 | [TensorZero](https://github.com/tensorzero/tensorzero) | 0 | 0 | 0 | 6,351 | 13,332 | 13,332 | - |
-| [Plano](https://github.com/katanemo/plano) | 0 | 0 | 0 | 0 | 0 | 21 | - |
 
 **≥** = the sweep's top rung won, so that rate is a **floor** and no ceiling was established. **0** = the sweep ran and no rung held that bound while failing nothing. **n/a** = the record carries no reading at that bound. A **✕** cell names the record's own reason for the absence.
 
@@ -38,8 +38,8 @@ Every rung of the same sweep the frontier readings above are taken from, summari
 | [LiteLLM · Rust](https://github.com/BerriAI/litellm) | 8,152 at c=1 | 44,377 at c=32 | 5.4× / 32× | c=16 | 139 µs → 4.97 s | none | c=32768 |
 | [Helicone](https://github.com/Helicone/ai-gateway) | 3,253 at c=1 | 14,785 at c=64 | 4.5× / 64× | c=16 | 332 µs → 35.1 ms | c=128 | c=256 |
 | [Kong](https://github.com/Kong/kong) | 4,392 at c=1 | 21,936 at c=128 | 5.0× / 128× | c=16 | 430 µs → 114 ms | c=1024 | c=2048 |
+| [APISIX](https://github.com/apache/apisix) | 4,088 at c=1 | 20,754 at c=128 | 5.1× / 128× | c=64 | 461 µs → 153 ms | c=16384 | c=16384 |
 | [TensorZero](https://github.com/tensorzero/tensorzero) | 24 at c=1 | 13,747 at c=2048 | 572.8× / 2048× | c=1024 | 41 ms → 55 ms | c=1024 | c=2048 |
-| [Plano](https://github.com/katanemo/plano) | 4 at c=1 | 21 at c=8 | 5.2× / 8× | c=8 | 199 ms → 5.68 s | none | c=128 |
 
 A rung that failed a request it had accepted qualifies for **no** frontier reading at any bound, so rate measured at or above the failing concurrency is not throughput the board will publish - the climb chart rules that region off. **none** in that column is a measured result across the whole ladder, not a missing one.
 
@@ -52,34 +52,34 @@ Same box, same mock, one gateway at a time. Streaming figures are the overhead t
 | [LiteLLM · Rust](https://github.com/BerriAI/litellm) | 255 µs | 156 µs | ✕ not measured | n/a |
 | [Helicone](https://github.com/Helicone/ai-gateway) | 582 µs | ≤ rig resolution | 405 (19,136 fps) | 14,182 (openai → anthropic) |
 | [Kong](https://github.com/Kong/kong) | 106.4 ms | 168.7 ms | 856 (39,811 fps) | 20,032 (openai → anthropic) |
+| [APISIX](https://github.com/apache/apisix) | 11.3 ms | 9.1 ms | 13,942 (56,926 fps) | n/a |
 | [TensorZero](https://github.com/tensorzero/tensorzero) | 716 µs | 50 µs | 642 (9,251 fps) | 0 (openai → openai-responses) |
-| [Plano](https://github.com/katanemo/plano) | 169.2 ms | ≤ rig resolution | 81 (944 fps) | n/a |
 
 **✕** cells are measured refusals, not gaps: the gateway was offered the load and could not do the thing (buffered instead of streaming, rejected the Anthropic shape, or has no native key/limit governance). **n/a** = that suite hasn't been run for this gateway yet.
 
-![added_latency](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/top5_added_latency.png?v=202607300624)
+![added_latency](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/top5_added_latency.png?v=202607300633)
 
-![frontier_rps_at_bound](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/top5_frontier_rps_at_bound.png?v=202607300624)
+![frontier_rps_at_bound](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/top5_frontier_rps_at_bound.png?v=202607300633)
 
-![memory_rss](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/top5_memory_rss.png?v=202607300624)
+![memory_rss](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/top5_memory_rss.png?v=202607300633)
 
-![memory_recovery](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/top5_memory_recovery.png?v=202607300624)
+![memory_recovery](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/top5_memory_recovery.png?v=202607300633)
 
-![rps_per_dollar](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/top5_rps_per_dollar.png?v=202607300624)
+![rps_per_dollar](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/top5_rps_per_dollar.png?v=202607300633)
 
-![cost_per_million](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/top5_cost_per_million.png?v=202607300624)
+![cost_per_million](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/top5_cost_per_million.png?v=202607300633)
 
-![stream_added_ttft](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/top5_stream_added_ttft.png?v=202607300624)
+![stream_added_ttft](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/top5_stream_added_ttft.png?v=202607300633)
 
-![stream_added_gap](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/top5_stream_added_gap.png?v=202607300624)
+![stream_added_gap](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/top5_stream_added_gap.png?v=202607300633)
 
-![stream_sustained](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/top5_stream_sustained.png?v=202607300624)
+![stream_sustained](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/top5_stream_sustained.png?v=202607300633)
 
-![xlate_frontier_rps_at_bound](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/top5_xlate_frontier_rps_at_bound.png?v=202607300624)
+![xlate_frontier_rps_at_bound](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/top5_xlate_frontier_rps_at_bound.png?v=202607300633)
 
-![xlate_added_latency](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/top5_xlate_added_latency.png?v=202607300624)
+![xlate_added_latency](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/top5_xlate_added_latency.png?v=202607300633)
 
 ---
 Method: added latency = gateway p99 − direct-to-mock p99 at concurrency 1; a frontier reading = the highest req/s any probed concurrency carried while 99% of requests finished under the STATED bound and the gateway failed none it accepted (readings are published at 1, 5, 10, 50, 100 ms and with no bound; the columns above use 10 ms, and every caption names the bound it used); cost figures divide that 10 ms reading by $0.1632/hr for the pinned 4-core (m7g.xlarge) slice; RSS idle = after first 200, steady state = the level the RSS settled at under load. Same box, same mock, same load, one gateway at a time. Each gateway's source ref is pinned in its own `gateways/<name>/definition.json`; the built commit is in each row.
 
-<sub>Page + charts regenerated **2026-07-30 06:24 UTC** from the raw `results/*.json`.</sub>
+<sub>Page + charts regenerated **2026-07-30 06:33 UTC** from the raw `results/*.json`.</sub>
