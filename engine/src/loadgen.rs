@@ -18,6 +18,30 @@ fn parse_kv(line: &str) -> BTreeMap<&str, &str> {
         .collect()
 }
 
+/// The rate is the one field that is legitimately fractional - see `UgenStats::rps`. Kept beside
+/// `require_i64` rather than replacing it: every OTHER field on this line is a count, and a count that
+/// arrives fractional is a corrupt line that should still be refused.
+fn require_f64(fields: &BTreeMap<&str, &str>, key: &str, line: &str) -> Result<f64, String> {
+    match fields.get(key) {
+        None => Err(format!("missing field '{key}' in stats line: '{line}'")),
+        Some(v) => v
+            .parse::<f64>()
+            .map_err(|_| format!("non-numeric field '{key}={v}' in stats line: '{line}'"))
+            .and_then(|n| {
+                // A non-finite rate is the child reporting something impossible; refuse it here rather
+                // than letting an infinity reach a cast that would SATURATE into a plausible-looking
+                // 9,223,372,036,854,775,807.
+                if n.is_finite() {
+                    Ok(n)
+                } else {
+                    Err(format!(
+                        "non-finite field '{key}={v}' in stats line: '{line}'"
+                    ))
+                }
+            }),
+    }
+}
+
 fn require_i64(fields: &BTreeMap<&str, &str>, key: &str, line: &str) -> Result<i64, String> {
     match fields.get(key) {
         None => Err(format!("missing field '{key}' in stats line: '{line}'")),
@@ -33,7 +57,15 @@ fn require_i64(fields: &BTreeMap<&str, &str>, key: &str, line: &str) -> Result<i
 /// dropped here; `ok` is kept because a caller can still want it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct UgenStats {
-    pub rps: i64,
+    /// FRACTIONAL BELOW 1/s, so this is f64 and not i64.
+    ///
+    /// `GenStats::rps` publishes a fraction under 1/s (a rung completing one request in four seconds is
+    /// 0.25/s, not 0), and the child prints it with `{}` - so the wire carries "rps=0.25". Parsed as i64
+    /// that FAILS, and `parse_ugen_line` classifies the whole window as a HarnessError: the sub-1/s
+    /// rungs the fractional rate was introduced for would be DISCARDED rather than published, which is
+    /// strictly worse than the false `0` it replaced. The type has to follow the value across the
+    /// process boundary, not just inside the child.
+    pub rps: f64,
     pub fail: i64,
     pub p50_us: i64,
     pub p99_us: i64,
@@ -55,7 +87,7 @@ pub struct UgenStats {
 fn parse_ugen_fields(line: &str) -> Result<UgenStats, String> {
     let fields = parse_kv(line);
     Ok(UgenStats {
-        rps: require_i64(&fields, "rps", line)?,
+        rps: require_f64(&fields, "rps", line)?,
         fail: require_i64(&fields, "fail", line)?,
         p50_us: require_i64(&fields, "p50us", line)?,
         p99_us: require_i64(&fields, "p99us", line)?,
@@ -178,7 +210,7 @@ mod tests {
         assert_eq!(
             m,
             Measurement::Measured(UgenStats {
-                rps: 1234,
+                rps: 1234.0,
                 fail: 3,
                 p50_us: 12_500,
                 p99_us: 45_000,
@@ -226,7 +258,7 @@ mod tests {
         let line = "rps=0 fail=0 p50=0.00 p99=0.00 p50us=0 p99us=0 ok=0";
         let m = parse_ugen_line(line);
         assert!(m.is_measured());
-        assert_eq!(m.value().map(|s| s.rps), Some(0));
+        assert_eq!(m.value().map(|s| s.rps), Some(0.0));
     }
 
     #[test]
@@ -287,5 +319,75 @@ mod tests {
         assert!(decode_headers(Some("")).is_empty());
         assert!(decode_headers(Some("not json")).is_empty());
         assert!(decode_headers(Some("{\"authorization\":\"Bearer dummy\"}")).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod sub_one_rate_roundtrip_tests {
+    use super::*;
+
+    // THE SUBPROCESS BOUNDARY IS WHERE THE FRACTIONAL RATE ALMOST DIED.
+    //
+    // `GenStats::rps` was changed to publish a fraction below 1/s, because truncating "one request in
+    // four seconds" to `0` says the gateway carried NOTHING. The child prints that with `{}`, so the
+    // wire carries `rps=0.25` - and this parser read `rps` as an i64, which FAILS. `parse_ugen_line`
+    // then classifies the entire window as a HarnessError, so the sub-1/s rungs the change was written
+    // for would have been DISCARDED instead of published: strictly worse than the false `0` it replaced.
+    //
+    // Nothing caught it. The engine's own unit tests all sit on one side of the boundary or the other,
+    // and the format string and the parser are in different files. This pins the seam.
+    #[test]
+    fn a_sub_one_per_second_rate_survives_the_stats_line_round_trip() {
+        for (line, want) in [
+            (
+                "rps=0.25 fail=0 p50=1.0 p99=2.0 p50us=1000 p99us=2000 ok=1",
+                0.25_f64,
+            ),
+            (
+                "rps=0.5 fail=0 p50=1.0 p99=2.0 p50us=1000 p99us=2000 ok=2",
+                0.5,
+            ),
+            (
+                "rps=19 fail=0 p50=1.0 p99=2.0 p50us=1000 p99us=2000 ok=76",
+                19.0,
+            ),
+            (
+                "rps=44363 fail=0 p50=1.0 p99=2.0 p50us=1000 p99us=2000 ok=177452",
+                44_363.0,
+            ),
+        ] {
+            let got = parse_ugen_line(line)
+                .into_value()
+                .unwrap_or_else(|| panic!("a well-formed stats line must parse: {line}"));
+            assert!(
+                (got.rps - want).abs() < 1e-9,
+                "rps round-tripped as {} from {line}, wanted {want}",
+                got.rps
+            );
+        }
+    }
+
+    // The rate is the ONLY field allowed to be fractional. A fractional COUNT is a corrupt line and
+    // must still be refused - relaxing every field to f64 would have hidden that.
+    #[test]
+    fn a_fractional_count_is_still_refused() {
+        assert!(
+            parse_ugen_line("rps=10 fail=0.5 p50=1.0 p99=2.0 p50us=1000 p99us=2000 ok=40")
+                .into_value()
+                .is_none(),
+            "a fractional failure COUNT is a corrupt line, not a measurement"
+        );
+    }
+
+    // A non-finite rate must not reach a cast that would SATURATE it into a plausible-looking integer.
+    #[test]
+    fn a_non_finite_rate_is_refused_rather_than_saturated() {
+        for bad in ["rps=inf", "rps=NaN"] {
+            let line = format!("{bad} fail=0 p50=1.0 p99=2.0 p50us=1000 p99us=2000 ok=1");
+            assert!(
+                parse_ugen_line(&line).into_value().is_none(),
+                "a non-finite rate must be refused: {line}"
+            );
+        }
     }
 }

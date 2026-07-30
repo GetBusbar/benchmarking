@@ -32,11 +32,15 @@
 // while the mock runs, and GET /__mock/state reports it.
 //
 // The reason is what recording costs and what that cost would do to the published board. This mock's
-// own throughput is the reference every gateway's number is judged against (the harness's
-// rig_ceiling + is_rig_bound): a result within 10% of the mock's ceiling is suppressed as
-// mock-bound rather than published. So anything that slows the mock down converts real gateway
-// measurements into suppressed ones - honestly suppressed, and therefore invisible as a regression,
-// which is what makes it dangerous. A recorded request takes a process-wide lock, and the harness
+// own throughput is the reference every gateway's number is judged against, so anything that slows the
+// mock down understates EVERY gateway measured against it - and it does so consistently, which is what
+// makes it dangerous: all the numbers stay internally plausible while all of them move together.
+//
+// This paragraph used to say a result within 10% of the mock's ceiling was "suppressed as mock-bound"
+// via `is_rig_bound`. That suppression mechanism and that function were both deleted (see
+// `rigbound.rs`'s own header); nothing is suppressed today. It was the third copy of the same stale
+// claim - `run.rs` and `reverify.rs` carried the other two - which is what a fact repeated in three
+// comments instead of stated in one place does when the code beneath it changes. A recorded request takes a process-wide lock, and the harness
 // needs the record for exactly ONE request per cell while it drives millions through the same
 // process for the throughput and memory windows.
 //
@@ -517,9 +521,14 @@ async fn main() {
             port = v.parse().unwrap_or(8000);
         }
     }
+    // TRIMMED, for the reason the block below spells out at length: this knob sat three lines above a
+    // comment explaining that exact bug for its neighbours and did not have the fix itself. A value
+    // carrying whitespace - a shell export, a CI variable, a generated env file's trailing newline -
+    // made `parse()` fail, `.ok()` swallow it, and the mock silently keep 0 while the operator believed
+    // the TTFT they set was in effect.
     let ttft_ms: u64 = std::env::var("MOCK_TTFT_MS")
         .ok()
-        .and_then(|v| v.parse().ok())
+        .and_then(|v| v.trim().parse().ok())
         .unwrap_or(0);
     // TRIMMED, BECAUSE THE ENGINE TRIMS. These knobs are read on BOTH sides of the measurement: the
     // mock paces frames by them, and the engine reads MOCK_STREAM_INTERVAL_MS to know what pace to

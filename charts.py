@@ -2465,7 +2465,18 @@ def _rate_cell(rd) -> str:
         return f"✕ {cause}" if cause else "✕ not measured"
     if not rd["rps"]:
         return "0"
-    return ("≥ " if rd["lower_bound"] else "") + f"{int(rd['rps']):,}"
+    # A SUB-1/s RATE MUST NOT RENDER AS "0" - that is the exact statement the engine stopped making.
+    #
+    # `GenStats::rps` was changed to publish a fraction below 1/s precisely because `int()`-style
+    # truncation turned "one request every four seconds" into "carried nothing". Then this line did the
+    # truncation again on the way to the page, so the fix reached the artifact and died at the renderer:
+    # 0.25 arrives correctly and prints "0", indistinguishable from a cell that genuinely served nothing.
+    #
+    # Two decimals below 1/s, whole numbers at or above it - the same split the engine uses, so the two
+    # never disagree about what a rate looks like.
+    rate = rd["rps"]
+    shown = f"{rate:.2f}" if rate < 1 else f"{int(rate):,}"
+    return ("≥ " if rd["lower_bound"] else "") + shown
 
 
 def _frontier_table(rows: list) -> list:

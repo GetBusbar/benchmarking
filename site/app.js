@@ -175,6 +175,13 @@ const LANG_COLORS = {
 const CMP_COLORS = ["#4cc38a", "#6cb6ff", "#e5a54b"];
 
 const fmtInt = (v) => Math.round(v).toLocaleString("en-US");
+/* A RATE, WHICH IS THE ONE METRIC THAT CAN LEGITIMATELY BE BELOW 1.
+   `Math.round` sends 0.25 req/s to "0", and "0" on this board means "measured, and it carried nothing"
+   - so a gateway serving one request every four seconds would be reported as serving none. The engine
+   was changed to stop making exactly that statement (GenStats::rps publishes a fraction below 1/s and a
+   whole number at or above it); rounding here re-made it at the last step, which is how a fix reaches
+   the artifact and dies at the renderer. Same split as the engine's, so the two cannot disagree. */
+const fmtRate = (v) => (v > 0 && v < 1 ? v.toFixed(2) : fmtInt(v));
 // Added-latency deltas are shown raw (no noise-floor smoothing). On the paced stream
 // suite the per-frame value is noise-dominated and can flip sign run-to-run; the honest
 // per-frame number comes from the CPU-bound stream suite, not from massaging this one.
@@ -635,7 +642,7 @@ function frontierCell(rec, boundMs) {
   if (!rd)
     return { v: null, text: "n/a", na: true,
       note: `this record publishes no reading at ${boundLabel(boundMs)}` };
-  const c = metric(rd.rps, fmtInt);
+  const c = metric(rd.rps, fmtRate);
   if (c.na) return c;   // the engine's absence reason, rendered by the one accessor
   /* "MEASURED, AND IT CANNOT DO THIS" IS NOT "NOT MEASURED", and the two must never look alike.
      `below_resolution` is how the engine says "rungs served cleanly, but NONE held THIS bound, so the
