@@ -355,6 +355,13 @@ impl Metric for Throughput {
             .iter()
             .map(|pt| crate::record::SweepPoint {
                 conc: i64::from(pt.concurrency),
+                // From the same window as everything else on this rung. Absent - never a fabricated 0 -
+                // when no window reported, for the reason `fail` is: "completed nothing" and "nothing
+                // was measured" are different facts, and only one of them is about the gateway.
+                ok: match pt.reading {
+                    Some(r) => Measurement::Measured(r.ok as i64),
+                    None => Measurement::absent(Absent::NotMeasured),
+                },
                 rps: Measurement::Measured(pt.value as i64),
                 p99_us: match pt.reading.and_then(|r| r.p99_us) {
                     Some(v) => Measurement::Measured(v as i64),
@@ -1734,6 +1741,7 @@ mod tests {
                 }];
                 let pt = || crate::record::SweepPoint {
                     conc: 1,
+                    ok: Measurement::Measured(1_000),
                     rps: Measurement::Measured(10),
                     p99_us: Measurement::Measured(20),
                     fail: Measurement::Measured(0),

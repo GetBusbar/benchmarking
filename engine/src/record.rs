@@ -367,6 +367,22 @@ pub struct FrontierReading {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SweepPoint {
     pub conc: i64,
+    /// SUCCESSFUL COMPLETIONS IN THIS WINDOW. Published so a reader - or an independent checker - can
+    /// apply the engine's own "served cleanly" rule (`frontier::Rung::served_cleanly`: `ok > 0 &&
+    /// fail == 0`) EXACTLY, rather than approximating it.
+    ///
+    /// It was not published, and that cost a real false alarm. `bench-audit.py` had to stand in
+    /// `rps > 0` for `ok > 0`, and plano at c=256 published `rps: 0, p99_us: 3398432, fail: 0` - which
+    /// that rule calls dirty. But a percentile cannot exist without a completed, timed request, so
+    /// `ok >= 1` and the window was clean; its RATE merely rounded down through the `as i64` below (one
+    /// request over a four-second window is 0.25 rps). The audit then re-derived a
+    /// `first_disqualified_conc` the engine had correctly left absent, and the disagreement had to be
+    /// settled BY HAND against the raw numbers.
+    ///
+    /// Hand-settling a disagreement between two checkers is not a solution: it does not scale, and the
+    /// next occurrence may have nobody watching. The input the rule needs is now in the artifact.
+    #[serde(default = "measurement_default")]
+    pub ok: Measurement<i64>,
     #[serde(default = "measurement_default")]
     pub rps: Measurement<i64>,
     #[serde(default = "measurement_default")]
@@ -777,6 +793,7 @@ mod tests {
             frontier: Vec::new(),
             sweep_max_proxy: vec![SweepPoint {
                 conc: 256,
+                ok: Measurement::Measured(1_000),
                 rps: Measurement::Measured(6_209),
                 p99_us: Measurement::Measured(43_969),
                 fail: Measurement::Measured(0),
