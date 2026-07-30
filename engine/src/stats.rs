@@ -235,11 +235,51 @@ pub fn plateau_check(samples: &[Sample], window_s: f64, trend_pct: f64, range_pc
     }
 }
 
+/// A NON-FINITE SAMPLE MAKES AN ORDER STATISTIC UNANSWERABLE, SO IT IS REFUSED RATHER THAN SORTED.
+///
+/// `median` and `percentile` both sorted with `a.partial_cmp(b).unwrap_or(Ordering::Equal)`, which
+/// makes a NaN compare EQUAL TO EVERYTHING. That is not a total order, and an inconsistent comparator
+/// does not merely misplace the NaN - it leaves the whole slice in an unspecified permutation. Measured
+/// on this comparator:
+///
+///     one NaN in ten samples          -> [10,20,30,40,50,60,70,80,90,NaN], p99 reads NaN
+///     the same values, NaN rotated    -> [80,90,NaN,10,20,30,40,50,60,70], not sorted at all
+///     median of the same five values, NaN first vs NaN in the middle -> 30 vs 20
+///
+/// The last line is the one that matters: THE SAME SET OF SAMPLES PRODUCED A DIFFERENT PUBLISHED NUMBER
+/// DEPENDING ON THE ORDER THEY ARRIVED IN. A board whose premise is that every number regenerates from
+/// committed JSON cannot contain a figure that depends on arrival order, and "NaN sorts as equal to
+/// everything" is exactly the kind of undeclared rule that has no business authoring a measurement -
+/// the same fault as the frontier's tie-break falling out of `max_by` keeping the last maximum.
+///
+/// So this is a HarnessError, not a NotMeasured: a non-finite latency is the rig malfunctioning, and it
+/// must be reported as the rig's failure rather than quietly absorbed into a percentile or blamed on the
+/// gateway. `run.rs` already refuses a non-finite stream rate the same way (`StreamWindow::engine_fault`).
+fn refuse_non_finite(values: &[f64], what: &str) -> Option<Measurement<f64>> {
+    let bad = values.iter().filter(|v| !v.is_finite()).count();
+    if bad == 0 {
+        return None;
+    }
+    Some(Measurement::absent_because(
+        Absent::HarnessError,
+        format!(
+            "{bad} of {} samples were not finite, so the {what} cannot be computed: ordering a slice \
+             containing NaN or an infinity leaves it in an unspecified permutation, and the answer \
+             would depend on the order the samples arrived in rather than on the samples",
+            values.len()
+        ),
+    ))
+}
+
 /// The median of `values`. Even counts average the two middle values after sorting, matching the
-/// shell harness's own median helpers. Absent (never zero) on an empty slice.
+/// shell harness's own median helpers. Absent (never zero) on an empty slice, and refused outright if
+/// any sample is non-finite - see `refuse_non_finite`.
 pub fn median(values: &[f64]) -> Measurement<f64> {
     if values.is_empty() {
         return Measurement::absent(Absent::NotMeasured);
+    }
+    if let Some(refusal) = refuse_non_finite(values, "median") {
+        return refusal;
     }
     let mut sorted = values.to_vec();
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
@@ -308,6 +348,12 @@ pub fn percentile(values: &[f64], p: f64) -> Measurement<f64> {
     if values.is_empty() {
         return Measurement::absent(Absent::NotMeasured);
     }
+    // Same refusal as `median`, and for the same reason: with a NaN present the sort's output is an
+    // unspecified permutation, so `sorted[nearest_rank_index(..)]` would return whichever element the
+    // arrival order happened to leave at that index. Every p50 and p99 on the board comes through here.
+    if let Some(refusal) = refuse_non_finite(values, "percentile") {
+        return refusal;
+    }
     let mut sorted = values.to_vec();
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     Measurement::Measured(sorted[nearest_rank_index(sorted.len(), p)])
@@ -315,6 +361,64 @@ pub fn percentile(values: &[f64], p: f64) -> Measurement<f64> {
 
 #[cfg(test)]
 mod tests {
+    // AN ORDER STATISTIC OVER A NON-FINITE SAMPLE IS REFUSED, NOT GUESSED.
+    //
+    // The comparator was `a.partial_cmp(b).unwrap_or(Ordering::Equal)`, under which NaN is equal to
+    // everything - not a total order, so the sort's output is an unspecified permutation of the whole
+    // slice. The consequence was not a misplaced NaN but an ARRIVAL-ORDER-DEPENDENT ANSWER, which is
+    // disqualifying on a board whose premise is that every number regenerates from committed JSON.
+    #[test]
+    fn a_non_finite_sample_is_refused_rather_than_sorted() {
+        let with_nan = [10.0, 20.0, 30.0, f64::NAN, 50.0];
+        match percentile(&with_nan, 0.99) {
+            Measurement::Absent { reason, detail } => {
+                assert!(
+                    matches!(reason, Absent::HarnessError),
+                    "a non-finite latency is the RIG malfunctioning, so it must be a HarnessError - \
+                     NotMeasured would file the rig's fault under the gateway's results"
+                );
+                let detail = detail.unwrap_or_default();
+                assert!(
+                    detail.contains("not finite"),
+                    "the refusal must say what was wrong with the input, got: {detail}"
+                );
+            }
+            other => panic!("percentile published {other:?} over a slice containing NaN"),
+        }
+        assert!(
+            matches!(median(&with_nan), Measurement::Absent { .. }),
+            "median must refuse the same input percentile refuses; they share the broken comparator"
+        );
+        assert!(
+            matches!(percentile(&[1.0, f64::INFINITY], 0.5), Measurement::Absent { .. }),
+            "an infinity is equally unorderable in practice and equally a rig fault"
+        );
+    }
+
+    // THE PROPERTY THE BUG ACTUALLY VIOLATED, pinned directly: a permutation of one sample set must
+    // never change the answer. This is what makes the number a measurement rather than an artifact of
+    // arrival order, and it is the assertion that fails loudest if the refusal is ever removed - the
+    // old code returned 30 for one ordering and 20 for the other.
+    #[test]
+    fn an_order_statistic_never_depends_on_the_order_samples_arrived_in() {
+        let a = [10.0, 20.0, 30.0, f64::NAN, 50.0];
+        let b = [f64::NAN, 10.0, 20.0, 30.0, 50.0];
+        assert_eq!(
+            format!("{:?}", median(&a)),
+            format!("{:?}", median(&b)),
+            "the same five samples in a different order produced different medians"
+        );
+
+        // And the clean path keeps its ordering-independence, so the fix is not merely refusing
+        // everything: a real window must still answer, and answer identically under permutation.
+        let clean = [50.0, 10.0, 40.0, 20.0, 30.0];
+        let rotated = [30.0, 50.0, 10.0, 40.0, 20.0];
+        assert_eq!(median(&clean), Measurement::Measured(30.0));
+        assert_eq!(median(&clean), median(&rotated));
+        assert_eq!(percentile(&clean, 1.0), Measurement::Measured(50.0));
+        assert_eq!(percentile(&clean, 1.0), percentile(&rotated, 1.0));
+    }
+
     // A STEADY WINDOW STILL HAS A SLOPE, AND PUBLISHES IT.
     //
     // `Verdict::Steady` was a unit variant, and `metric.rs` answered it with
