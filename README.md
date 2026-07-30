@@ -112,8 +112,21 @@ faster.
 
 - **added latency (µs)** - p99 the gateway adds over the upstream at concurrency 1
   (gateway p99 − direct-to-mock p99). Microseconds, because at this scale ms hides the story.
-- **RPS ceiling** - highest sustained requests/sec with p99 under 1 s and **a <0.1% error rate** -
-  "how much can it carry before it falls over."
+- **the throughput frontier** - requests/sec at each tail latency you are willing to accept:
+  **1 ms, 5 ms, 10 ms, 50 ms, 100 ms**, plus one reading with no latency bound at all. Each is the
+  most req/s the cell carried while 99% of requests finished under that bound AND it failed none it
+  accepted. Read as: *"18,995 req/s while 99% of requests finished under 10 ms."*
+
+  This replaced a single "RPS ceiling with p99 under a chosen bar", and the reason is that a scalar
+  cannot express a tradeoff. Throughput and tail latency rise together with concurrency, so "the
+  throughput" is a POINT ON A CURVE and picking the point for the reader hides the shape. Two real
+  cells from the same board: agentgateway carries 23,630 req/s at a **1 ms** tail and gains only 7%
+  by dropping the bound entirely, while apisix nearly DOUBLES between 1 ms and 5 ms. Published as one
+  number those looked comparable; they are not the same machine.
+
+  All six readings come off ONE concurrency sweep, published in full beside them, so every reading is
+  re-derivable from the rungs rather than taken on trust. The sequence is monotone by construction:
+  relaxing a bound only adds rungs to the set the maximum is taken over.
 
 The matrix's best same-dialect diagonal cell IS this passthrough measurement (the retired standalone
 `perf/` suite is gone; gen-data projects the board's headline perf from the matrix cell).
@@ -148,8 +161,8 @@ The client speaks Anthropic (POST `/v1/messages`, a Messages body, `anthropic-ve
 `x-api-key` headers) while the upstream mock speaks OpenAI on the manifest's `GW_PATH`, so the
 gateway must translate the request out and the response back. The mock is untouched; that is the
 point. The lane repeats the c1 added-latency measurement and the sustained-RPS-@20ms sweep on the
-translation path and writes `results/xlate/<gateway>.json` (`xlate_added_latency_p99_us`,
-`xlate_rps_sustained_20ms`). One honest asymmetry, recorded in the JSON as
+translation path and writes `results/xlate/<gateway>.json` (`xlate_added_latency_p99_us`, and the
+translation cell's own throughput frontier). One honest asymmetry, recorded in the JSON as
 `xlate_baseline_shape: openai`: the mock does not translate, so the direct baseline is the OpenAI
 shape straight to the mock, and the added-latency figure therefore includes the translation work,
 which is exactly what this lane exists to price. Many gateways cannot serve Anthropic ingress
@@ -215,17 +228,26 @@ a per-request delay simulating the model doing work.
 against a **zero-delay** mock. Zero base keeps the overhead a clean microsecond delta; a 20 ms base
 would just add noise to a sub-millisecond number.
 
-**Throughput - two honest numbers, not one.** A single throughput figure invites "you picked the
-flattering metric," so we report both, same 20 ms delay for every gateway:
-- **Max proxy throughput** (instant mock): raw forwarding speed - trivial requests/sec the gateway
-  pushes, its CPU-bound ceiling.
-- **Sustained RPS @ 20 ms** (delayed mock): **AIGatewayBench's exact metric** - how many concurrent
-  in-flight requests the gateway holds while the model takes 20 ms, at p99 < 1 s with <0.1% errors.
-  Production-shaped (a gateway's real job is holding thousands of slow calls) and directly comparable
-  to their published numbers.
+**Throughput - a frontier, not a number.** A single throughput figure invites "you picked the
+flattering metric", and it deserved the accusation: whichever tail latency you allow decides the
+answer, and any one choice is arbitrary. So every cell reports its rate at **six declared bounds**
+(1/5/10/50/100 ms and unbounded) off one sweep, and the reader ranks at whichever bound matters to
+them. Nothing is suppressed and nothing is chosen on the reader's behalf.
 
-A **mock-ceiling guardrail** measures the mock's own throughput each sweep and flags (⚠) any result
-within 10% of it - so a number that's really the *harness's* limit is marked a floor, never sold as
+This replaced two scalars that were the same sweep summarised twice under a chosen ceiling - and
+which could **invert against each other**, because two different algorithms read one set of windows:
+the "maximum" came out BELOW the "sustained" figure on real cells (aisix 16,232 vs 16,610; bifrost
+5,113 vs 5,174). A maximum another reading of the same windows beats is not a maximum. Six maxima
+over sets that only grow makes that unrepresentable rather than merely policed.
+
+Each reading carries its own evidence: the concurrency it was observed at, the tail it **actually**
+produced (never the bound - 4 ms under a 100 ms bound is a different finding from 99 ms), and the
+concurrency above it that stopped qualifying. When nothing above it was probed at all, the rate is a
+**floor** and says so, rather than being discarded for failing to prove maximality.
+
+A rig limit is never charged to the gateway: connections **this host** could not open (ephemeral
+ports or descriptors exhausted) are counted separately and the window is discarded unmeasured, so our
+own port range can never be published as
 the gateway's ceiling.
 
 **Memory.** A **per-cell memory window**, not a synthetic burst (the old standalone 150 KB x 1500c
