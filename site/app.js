@@ -42,17 +42,24 @@ const HOME_VIEW = "home";
 // TAB BAR (matrix-sole-source): Gateways · Memory · Performance · Streaming · Protocol matrix · Method.
 // `performance` is ONE cell-chooser-driven tab (Peak | Same | Custom picks which cell of the ONE 6x6
 // run to show).
-const VIEWS = ["gateways", "memory", "performance", "streaming", "matrix", "method"];
-const VIEW_LABELS = { gateways: "Gateways", memory: "Memory", performance: "Performance", streaming: "Streaming", matrix: "Protocol matrix", method: "Method" };
+// A `frontier` TAB rather than six more columns on Performance, or a taller Performance page: the whole
+// curve is a different question ("what shape is this gateway") from the ranking ("who is fastest at my
+// bound"), and the layout rule here is that less scrolling wins even at the cost of another tab.
+const VIEWS = ["gateways", "memory", "performance", "frontier", "streaming", "matrix", "method"];
+const VIEW_LABELS = { gateways: "Gateways", memory: "Memory", performance: "Performance", frontier: "Frontier", streaming: "Streaming", matrix: "Protocol matrix", method: "Method" };
 // The default (bare /gateways) view: the roster overview.
 const DEFAULT_VIEW = "gateways";
 // The tabs whose columns read a PERF/STREAM cell of the one 6x6 run (Peak | Same | Custom).
-const PERF_VIEWS = new Set(["performance", "streaming"]);
+const PERF_VIEWS = new Set(["performance", "frontier", "streaming"]);
 // The views that render the shared results table (#view-table).
-const TABLE_VIEWS = new Set(["performance", "streaming", "memory"]);
+const TABLE_VIEWS = new Set(["performance", "frontier", "streaming", "memory"]);
 // The views the CELL CHOOSER drives. Memory chooses its cell like every other lane, with its OWN
 // mode set (below).
-const CHOOSER_VIEWS = new Set(["performance", "streaming", "memory"]);
+const CHOOSER_VIEWS = new Set(["performance", "frontier", "streaming", "memory"]);
+// The views whose numbers are READ AT A TAIL-LATENCY BOUND, so the bound selector belongs on them. It is
+// not a global control: nothing on Streaming or Memory is read at a bound, and a control that changed
+// nothing would imply those numbers had a bound too.
+const BOUND_VIEWS = new Set(["performance", "frontier"]);
 // Maps retired view names onto the current tabs so old shared links keep resolving. `translation`
 // aliases to `performance` (its ?xin/?xout still decode into the Custom in/out below).
 const VIEW_ALIASES = { results: "performance", charts: "method", peak: "performance", matched: "performance", passthrough: "performance", translation: "performance" };
@@ -62,7 +69,17 @@ const VIEW_ALIASES = { results: "performance", charts: "method", peak: "performa
 // harness cap (1024 in the current field data) so it ties several gateways and breaks ties by name,
 // floating a slow-TTFT gateway above a fast one at the same count. Added TTFT is the streaming-overhead
 // discriminator that a user actually feels first and it does not saturate.
-const VIEW_SORT = { performance: "rps20", streaming: "sttft", memory: "mempeak" };
+// The frontier tab lands on the DEFAULT BOUND's column, and follows the reader's selection from there
+// (renderTable moves the sort with the bound, so switching re-ranks the board in front of them).
+// "f10" is `boundColId(DEFAULT_BOUND_MS)` written out, because this object is initialised before that
+// constant exists; site/test.mjs asserts the two agree, so the literal cannot outlive the default.
+const VIEW_SORT = { performance: "rps", frontier: "f10", streaming: "sttft", memory: "mempeak" };
+/* RETIRED SORT IDS, remapped so a shared permalink still lands on a ranking. `?sort=rps20` and
+   `?sort=rpsmax` are in every link ever shared to the Performance tab and in the charts' deep links; the
+   columns they name are gone with the two scalar metrics, and an unrecognised sort id silently falls back to
+   the tab default, which is fine - but both of those links MEANT "rank by throughput", and the frontier
+   reading at the selected bound is that ranking. Mapping them says so instead of quietly dropping them. */
+const SORT_ALIASES = { rps20: "rps", rpsmax: "rps", cpufps: "streamfps" };
 // The cell-chooser modes shared by Performance + Streaming: which cell(s) of the ONE 6x6 run to show.
 //   peak   — each gateway on its OWN best same-dialect diagonal (best_cell). Default. Shows a per-row pill.
 //   same   — ONE picked dialect's diagonal (X→X) for every gateway. No pill (the dialect is in the control).
@@ -338,7 +355,14 @@ function isEnvelope(x) { return x != null && typeof x === "object" && typeof x.c
    offered the load and sustained none: a certified 0) and NOT MEASURED (no reading at all: null) are
    different states and must read differently. */
 const METRIC_NOTES = {
-  no_qualifying_ceiling: "served, but no tested load held p99 < 1 s at <0.1% errors (no qualifying throughput ceiling)",
+  /* THE ZERO THAT ONLY THE STREAMING COUNTS CAN CARRY, and it names THEIR gate. It used to read "served,
+     but no tested load held p99 < 1 s at <0.1% errors", which by the end was wrong twice over: no gate ever
+     enforced 1 s (the retired throughput gate used 20 ms, and the frontier that replaced it names its bound
+     on every surface), and the frontier grants no error tolerance at all - a rung qualifies only if it
+     failed nothing it accepted. The two retired throughput columns were the only surfaces that showed this
+     note; seal.mjs now emits it for `streams_sustained` / `streams_sustained_fps` alone, so it states the
+     STREAM delivery gate, which is the one this token is now ever true about. */
+  no_qualifying_ceiling: "served, but no tested concurrency held the stream delivery gate (every expected frame delivered, no stall, under 0.1% of streams erroring), so there is no qualifying ceiling to publish",
   measured_failure: "MEASURED FAILURE: the gateway was offered the load and sustained none of it (a real 0, not an unmeasured cell)",
   // NO `mock_bound` / `unverifiable`. Those were the two suppression reasons: a measurement at or above
   // 90% of the rig's own ceiling was replaced with null and rendered as "not shown". The measurement was
@@ -351,6 +375,11 @@ const METRIC_NOTES = {
   below_resolution: "below measurement resolution: the comparison ran and the gateway's overhead was too small for this rig to detect (the best result this test can express)",
   rig_limited: "not shown: rig-limited, the harness's own ceiling bounded this number, so it is not a gateway reading",
   untestable: "not testable: the rig cannot pose this question for this dialect (a rig limit, not a gateway fault)",
+  // Still emitted, and now ONLY by the streaming ceiling: a stream-concurrency range whose top rung still
+  // passed publishes an absence, because the top of the range is our choice and not the gateway's answer.
+  // THE THROUGHPUT LANE NO LONGER REACHES THIS. It used to discard a real measured rate for the same
+  // condition; a frontier reading in that state is published and labelled a FLOOR ("≥ 19,000"), which tells
+  // the reader strictly more than the null did.
   search_exhausted: "not shown: the search ran off the end of its range still improving, so any number would be a lower bound, not a ceiling",
   harness_error: "not shown: the harness itself failed here; this says nothing about the gateway",
   not_served: "the gateway does not serve this pairing",
@@ -383,7 +412,10 @@ const ZERO_WHY = {
 function metricTd(cell, sc = "") {
   if (cell.na)
     return `<td class="na${cell.failed ? " failcell" : ""}${sc}" title="${esc(cell.note || "")}">${esc(cell.text)}</td>`;
-  const zeroWhy = cell.v === 0 && cell.env && ZERO_WHY[cell.env.note];
+  // `cell.why` is an EXPLICIT short on-cell reason, for a state whose meaning is not carried by an envelope
+  // note token: a frontier reading where no rung held the bound is a measured 0 whose reason lives on the
+  // READING, not on the envelope, and "0" alone would read as "no data" for the gateways it matters most on.
+  const zeroWhy = cell.why || (cell.v === 0 && cell.env && ZERO_WHY[cell.env.note]);
   return `<td class="${sc.trim()}"${cell.note ? ` title="${esc(cell.note)}"` : ""}>${esc(cell.text)}${
     zeroWhy ? `<span class="zero-why">${esc(zeroWhy)}</span>` : ""}</td>`;
 }
@@ -453,6 +485,301 @@ function mval(env) {
   if (!isEnvelope(env)) return null;
   if (env.value != null) return env.value;
   return env.reason === "below_resolution" ? 0 : null;
+}
+
+/* ---- the latency-throughput frontier ----------------------------------------
+   WHAT THIS REPLACED, AND WHY THE UI IS SHAPED THE WAY IT IS. The board used to publish two throughput
+   scalars per cell, `rps_sustained_20ms` and `rps_max_proxy`. Both were the SAME concurrency sweep
+   collapsed to one number by a chosen latency ceiling (engine/src/frontier.rs states the case), and one
+   of the two columns even captioned a qualifying bar of "p99 < 1 s" that the engine never enforced.
+   They are deleted. Each perf record now carries `frontier`: one sealed reading per declared tail-latency
+   bound (1, 5, 10, 50, 100 ms) plus one unbounded reading, ascending, from seal.mjs `sealFrontier`.
+
+   THE HEADLINE FINDING IS THE SHAPE OF THE CURVE, not any one of its six points. On the 2026-07-29 board
+   agentgateway carried 23,630 req/s under a 1 ms tail and gained 7% by dropping the bound entirely, while
+   apisix went 10,697 → 19,339 by letting its tail out from 1 ms to 5 ms and apisix anthropic>anthropic
+   nearly tripled across the range. Published as one number those three read as comparable machines. They
+   are not, and the difference was in the data the whole time. So every surface that shows a throughput
+   number here shows the SHAPE beside it (frontierSpark + the gain factor), and the bound the number was
+   read at is NAMED on the column and switchable by the reader. */
+// THE DECLARED BOUNDS, in milliseconds. A MIRROR of seal.mjs FRONTIER_BOUNDS_MS / DEFAULT_BOUND_MS, which
+// mirrors the engine's `frontier::P99_BOUNDS_US` - app.js is loaded as a plain <script> in the browser and
+// cannot import the module, so the list is duplicated and the duplication is CHECKED: site/test.mjs asserts
+// these two constants equal seal.mjs's, so a bound added on one side cannot quietly shorten the other's table.
+const FRONTIER_BOUNDS_MS = [1, 5, 10, 50, 100];
+// WHICH BOUND THE BOARD OPENS ON. A VIEW, NOT A VERDICT (seal.mjs says why 10 ms): it decides which column
+// opens first, never which measurement exists. Every bound is published on every cell and the reader can
+// switch, which re-ranks the board in front of them.
+const DEFAULT_BOUND_MS = 10;
+// The readings in published order: each declared bound, then the unbounded one (`null` = no latency bound,
+// zero failures only). `null` is a first-class choice here, not a missing value.
+const BOUND_CHOICES = [...FRONTIER_BOUNDS_MS, null];
+// A bound's short name, for a control or a column header.
+function boundLabel(ms) { return ms == null ? "no bound" : `${ms} ms`; }
+/* THE PHRASING WAS SETTLED WITH THE OWNER: "18,995 req/s while 99% of requests finished under 10 ms."
+   Not "rps at 10 ms", which reads as a category error - the 10 ms is not a rate and the reading is not a
+   latency. Every caption, tooltip and column header renders the clause from here, so no surface can state
+   the bound in a way that implies the gateway was held to a target it was not. */
+function boundClause(ms) {
+  return ms == null
+    ? "under no latency bound at all, having failed no request it accepted"
+    : `while 99% of requests finished under ${ms} ms`;
+}
+// The column header for a reading at `ms`. Names the bound it is showing, always: the retired board's
+// captions claimed "p99 < 1 s" while the engine enforced 20 ms - a bar 96% of rungs pass against 57% for
+// the real one - so readers reasoned about a test that never ran.
+function boundColLabel(ms) { return ms == null ? "Req/s · no bound" : `Req/s · 99% under ${ms} ms`; }
+// The frontier tab's per-bound column id. Stable, so a shared ?sort=f10 keeps resolving.
+function boundColId(ms) { return ms == null ? "fnone" : `f${ms}`; }
+// The reader's currently-selected bound, read defensively: these helpers are called from renderers the
+// node suite drives with a hand-built state, and from column labels that take no arguments.
+function selectedBound(st = (typeof state !== "undefined" ? state : null)) {
+  if (!st || !("bound" in st)) return DEFAULT_BOUND_MS;
+  return st.bound === null || FRONTIER_BOUNDS_MS.includes(st.bound) ? st.bound : DEFAULT_BOUND_MS;
+}
+// A TAIL LATENCY as a reader reads it. Sub-millisecond tails are real and common (agentgateway's 1 ms
+// column sits at 584 µs), so they keep their own unit rather than rounding to "0.6 ms".
+function fmtTail(us) { return us < 1000 ? `${fmtInt(us)} µs` : `${fmt1(us / 1000)} ms`; }
+// frontierOf(rec): the record's readings, or [] - which is what EVERY snapshot measured before the
+// frontier existed carries, so an empty array is the normal shape of an old record and not an error.
+function frontierOf(rec) { return rec && Array.isArray(rec.frontier) ? rec.frontier : []; }
+/* frontierAt(frontier, boundMs): the reading taken at one bound. Mirrors seal.mjs's accessor of the same
+   name (and charts.py's `_frontier_at`), so the table, the drawer, the compare panel and the charts all
+   read the SAME reading for the same bound and cannot disagree about which column they are showing.
+   `null` selects the unbounded reading; it is a bound value, never "unset". */
+function frontierAt(frontier, boundMs) {
+  if (!Array.isArray(frontier)) return null;
+  return frontier.find((r) => (boundMs == null ? r.bound_ms == null : r.bound_ms === boundMs)) || null;
+}
+// A cell with no frontier at all shows NO THROUGHPUT - never a 0, and never a blank that reads as one
+// (requirement: a legacy row and a gateway not yet re-measured are the same state, and both are absence).
+const NO_FRONTIER_NOTE = "no frontier in this record: it was measured before the throughput frontier " +
+  "existed, or this cell has not been re-measured. There is no throughput to show - which is not the same " +
+  "as a throughput of zero.";
+/* readingSentence(rd, v): the whole reading, in words, with its own evidence attached. Both halves of the
+   proof travel because the engine publishes both (frontier.rs: `concurrency` is where the winning rate was
+   observed, `first_disqualified_conc` is the lowest concurrency above it that stopped qualifying).
+   `p99_us` IS THE OBSERVED TAIL, NEVER THE BOUND. 4 ms under a 100 ms bound and 99 ms under it are very
+   different findings, and a tooltip that echoed the bound back would restate the question as the answer. */
+function readingSentence(rd, v) {
+  const bits = [`${fmtInt(v)} req/s ${boundClause(rd.bound_ms)}.`];
+  if (rd.concurrency != null) bits.push(`Observed with ${fmtInt(rd.concurrency)} concurrent requests in flight.`);
+  if (rd.p99_us != null) bits.push(`The tail it actually produced there was ${fmtTail(rd.p99_us)}.`);
+  if (rd.lower_bound === true)
+    // A FLOOR, NOT A CEILING. The sweep ran out of ladder while this rung was still qualifying, so the
+    // rate is real and maximality is not established. The retired search published null for this state,
+    // discarding a measured rate for failing to prove something the reader never asked it to prove.
+    bits.push("The sweep ran out of ladder with this concurrency still qualifying, so this is a FLOOR (≥), " +
+      "not a maximum: the gateway carries at least this much and we did not look higher.");
+  else if (rd.first_disqualified_conc != null)
+    bits.push(`The next concurrency probed above it (${fmtInt(rd.first_disqualified_conc)}) stopped qualifying, which is what establishes this as the boundary.`);
+  return bits.join(" ");
+}
+/* frontierCell(rec, boundMs): the {v, text, na, note} cell shape every table column and popup uses, for
+   one record at one bound. The RATE is read through metric() like every other published number, so an
+   absent reading surfaces the engine's own reason (frontier.rs `absence_for` distinguishes "nothing served
+   cleanly anywhere" from "nothing held THIS bound") instead of a flattened hole.
+   A `lower_bound` reading renders "≥ 19,000": the floor is in the glyph, not only in the tooltip. */
+function frontierCell(rec, boundMs) {
+  const f = frontierOf(rec);
+  if (!f.length) return { v: null, text: "no frontier", na: true, note: NO_FRONTIER_NOTE };
+  const rd = frontierAt(f, boundMs);
+  if (!rd)
+    return { v: null, text: "n/a", na: true,
+      note: `this record publishes no reading at ${boundLabel(boundMs)}` };
+  const c = metric(rd.rps, fmtInt);
+  if (c.na) return c;   // the engine's absence reason, rendered by the one accessor
+  /* "MEASURED, AND IT CANNOT DO THIS" IS NOT "NOT MEASURED", and the two must never look alike.
+     `below_resolution` is how the engine says "rungs served cleanly, but NONE held THIS bound, so the
+     gateway carried no measurable throughput under it" (frontier.rs `absence_for`). On the field data that
+     is the majority of some rows: plano's tail is ~890 ms at c=8, so five of its six columns are this state
+     and only the unbounded reading carries a rate. A dash or an "n/a" there would read as "no data", which
+     is a NEUTRAL impression of a DAMNING measurement - and it would flatter the slowest gateways on the
+     board, which is the worst direction for an error like this to run.
+     So it ranks as the 0 it is (metric() already does that, which is why it is not `na`), and it SAYS what
+     it is on the cell: "0" with "no rung held this tail" underneath, distinct at a glance from the "no
+     frontier" of a record that was never measured at all. The engine's own prose stays on the tooltip.
+     No reading sentence is composed on top: "0 req/s while 99% of requests finished under 1 ms" describes a
+     measurement that did not happen, and it would talk over the reason that did.
+     Detected through mcode(), not by reading the envelope's raw `.value` (invariant C5 forbids that here,
+     and rightly: the display rule must live in the accessors). mcode is exactly the accessor that returns
+     null for a below-resolution absence while mval coerces it to 0. */
+  if (mcode(rd.rps) == null) return { ...c, text: "0", why: "no rung held this tail", reading: rd };
+  const floor = rd.lower_bound === true;
+  return { ...c, text: floor ? `≥ ${c.text}` : c.text, note: readingSentence(rd, c.v), reading: rd, floor };
+}
+/* frontierGain(frontier): THE SHAPE, AS ONE NUMBER. How much more the gateway carries once the tail is
+   unbounded than it carries under the TIGHTEST bound it has any reading at.
+   It exists because a picture alone is not sortable and is not readable by a screen reader: 1.07x
+   (agentgateway: it holds its rate even when you demand a tight tail) and 2.7x (apisix anthropic: it needs
+   a loose tail to go fast) is the finding, and this is the form of it a reader can rank the board by.
+   The tightest bound with a reading is used rather than a fixed 1 ms, because a gateway whose 1 ms column
+   is absent has no shape to state at 1 ms and inventing one from the next column up would understate it. */
+function frontierGain(frontier) {
+  const f = Array.isArray(frontier) ? frontier : [];
+  const tight = f.find((r) => r.bound_ms != null && mval(r.rps) > 0);
+  const loose = frontierAt(f, null);
+  const lo = tight ? mval(tight.rps) : null, hi = loose ? mval(loose.rps) : null;
+  if (lo == null || hi == null || !(lo > 0)) return null;
+  return { factor: hi / lo, fromBoundMs: tight.bound_ms, from: lo, to: hi, lowerBound: loose.lower_bound === true };
+}
+/* frontierSpark(frontier, opts): the curve, drawn.
+   WHY A SPARKLINE AND NOT SIX NUMBERS. The finding is a SLOPE - "flat" vs "nearly doubles by 5 ms" - and a
+   slope is something the eye reads in one pass and a row of digits is not. Six numbers per row across
+   fourteen rows is 84 figures a reader has to hold in their head to notice that two gateways with similar
+   headline rates are not the same machine at all. The line makes that difference pre-attentive; the gain
+   factor beside it carries the same fact in text for sorting and for a screen reader.
+   THE Y SCALE IS SHARED ACROSS THE BOARD (opts.min/opts.max, from boardFrontierScale), NOT per-row. Per-row
+   auto-scaling would draw every gateway's curve full-height, so a 7% climb and a 170% climb would look
+   identical - the exact defect the RSS sparkline was fixed for.
+   AND IT IS LOGARITHMIC, which is what makes the shape the thing the eye reads. On a log axis equal SLOPES
+   are equal RATIOS, and the ratio IS the finding: ×1.07 (holds its rate under a tight tail) and ×2.7 (needs
+   a loose tail to go fast) are two visibly different slopes whatever the gateway's absolute level. A shared
+   LINEAR axis cannot do that at this field's spread - the 2026-07-30 run has litellm-rust at 44,363 req/s
+   and plano at 19 - because plano's entire curve would collapse onto the baseline and the row would read as
+   broken rather than as slow. The charts moved to a log y axis for the same reason.
+   A BOUND THE GATEWAY SERVED BUT COULD NOT HOLD IS DRAWN ON THE FLOOR, not skipped. That state is
+   `below_resolution` - "no rung held this tail" - and it is a MEASUREMENT, so a gap there (which is what a
+   never-measured bound gets) would turn plano's five damning columns into five shrugs. On the floor, with an
+   open tick, the row reads as what it is: flat on the bottom until the bound is dropped entirely.
+   x IS THE BOUND'S INDEX, not its value: the bounds are ticks decided by where the field's p99 population
+   separates (1, 5, 10, 50, 100), so spacing them linearly by value would crush the first three columns -
+   where nearly all of the movement is - into the left 10% of the line. */
+function frontierSpark(frontier, opts = {}) {
+  const f = Array.isArray(frontier) ? frontier : [];
+  /* One point per PUBLISHED reading position, so a missing bound leaves a gap rather than shifting the curve
+     left and mis-stating which bound a point belongs to. Three states, deliberately kept apart:
+       a rate           -> a point at its level
+       a measured 0     -> a point ON THE FLOOR (`onFloor`), because the gateway held nothing under this tail
+       no reading / no rate for another reason -> nothing, a genuine gap */
+  const pts = BOUND_CHOICES.map((b, i) => {
+    const rd = frontierAt(f, b);
+    if (!rd) return null;
+    const v = mval(rd.rps);
+    if (v == null) return null;
+    return { i, b, v, onFloor: !(v > 0), floor: rd.lower_bound === true, p99: rd.p99_us };
+  }).filter(Boolean);
+  if (!pts.length) return "";
+  const W = 108, H = 26, PAD = 3;
+  const rates = pts.filter((p) => p.v > 0).map((p) => p.v);
+  // The shared domain, widened if this row happens to exceed it (it cannot, but a caller may pass none).
+  const hi = Math.max(Number.isFinite(opts.max) ? opts.max : 0, ...rates, 1);
+  const loSeed = Number.isFinite(opts.min) && opts.min > 0 ? opts.min : Math.min(...rates, hi);
+  // A DECADE OF HEADROOM BELOW THE FIELD'S FLOOR, so the slowest row's own points sit above the baseline
+  // rather than on it - the baseline is reserved for "held nothing under this tail", which is a different
+  // statement and must not be confused with "slowest on the board".
+  const lo = Math.max(Math.min(loSeed, ...rates) / 2, 1);
+  const l0 = Math.log10(lo), l1 = Math.log10(Math.max(hi, lo * 2));
+  const x = (i) => PAD + (i / (BOUND_CHOICES.length - 1)) * (W - 2 * PAD);
+  const y = (v) => (v > 0
+    ? PAD + (1 - (Math.log10(Math.max(v, lo)) - l0) / (l1 - l0)) * (H - 2 * PAD - 3)
+    : H - PAD);
+  const path = pts.map((p, i) => `${i ? "L" : "M"}${x(p.i).toFixed(1)},${y(p.v).toFixed(1)}`).join("");
+  // The SELECTED bound is marked on the curve, so the reader can see which point of the shape the ranked
+  // column is reading. A number in a column and a shape beside it that do not say how they relate is two
+  // facts a reader has to join up themselves.
+  const selIdx = BOUND_CHOICES.indexOf(opts.boundMs === undefined ? null : opts.boundMs);
+  const rule = selIdx >= 0
+    ? `<line x1="${x(selIdx).toFixed(1)}" y1="${PAD}" x2="${x(selIdx).toFixed(1)}" y2="${H - PAD}" ` +
+      `stroke="currentColor" stroke-opacity="0.35" stroke-width="1" stroke-dasharray="2 2"/>`
+    : "";
+  /* THREE MARKERS, THREE CLAIMS:
+       filled dot  - an established ceiling at that bound
+       open dot    - a FLOOR: the sweep ran out of ladder with that concurrency still qualifying, so a
+                     filled dot identical to a proven ceiling would state something the sweep did not
+       floor tick  - served, but nothing held this tail (a measured nothing, not a missing measurement) */
+  const dots = pts.map((p) => {
+    const cx = x(p.i).toFixed(1), cy = y(p.v).toFixed(1);
+    const title = `<title>${esc(`${boundLabel(p.b)}: ${p.onFloor ? "no rung held this tail" : `${fmtInt(p.v)} req/s${p.floor ? " or more" : ""}`}`)}</title>`;
+    if (p.onFloor)
+      return `<line x1="${cx}" y1="${(H - PAD - 3).toFixed(1)}" x2="${cx}" y2="${H - PAD}" stroke="currentColor" stroke-width="1.2" stroke-opacity="0.55">${title}</line>`;
+    return p.floor
+      ? `<circle cx="${cx}" cy="${cy}" r="2.4" fill="none" stroke="currentColor" stroke-width="1.2">${title}</circle>`
+      : `<circle cx="${cx}" cy="${cy}" r="1.9" fill="currentColor">${title}</circle>`;
+  }).join("");
+  const aria = pts.map((p) => `${boundLabel(p.b)}: ${p.onFloor ? "no rung held this tail" : `${fmtInt(p.v)}${p.floor ? " or more" : ""}`}`).join("; ");
+  return `<svg class="frontier-spark" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" role="img" ` +
+    `aria-label="throughput across the published tail-latency bounds, log scale - ${esc(aria)}">` +
+    `<line x1="${PAD}" y1="${H - PAD}" x2="${W - PAD}" y2="${H - PAD}" stroke="currentColor" stroke-opacity="0.15" stroke-width="1"/>` +
+    rule +
+    `<path d="${path}" fill="none" stroke="currentColor" stroke-width="1.4"/>` + dots + `</svg>`;
+}
+/* boardFrontierScale(data): the SHARED log domain for every sparkline on the board - the lowest and highest
+   rate any row publishes at any bound. Computed over the whole bundle rather than the filtered rows, so the
+   scale does not move when a reader types in the search box: a curve that changes shape because a different
+   gateway was filtered out is a curve that cannot be trusted. Zero rates are excluded from the floor, since
+   "held nothing under this tail" is drawn on the baseline rather than placed on the scale. */
+const FRONTIER_SCALE_CACHE = new WeakMap();
+function boardFrontierScale(data = (typeof state !== "undefined" ? state.data : null)) {
+  if (!data || !Array.isArray(data.gateways)) return { min: null, max: null };
+  if (FRONTIER_SCALE_CACHE.has(data)) return FRONTIER_SCALE_CACHE.get(data);
+  let max = 0, min = Infinity;
+  const scan = (rec) => {
+    for (const rd of frontierOf(rec)) {
+      const v = mval(rd.rps);
+      if (v == null || !(v > 0)) continue;
+      if (v > max) max = v;
+      if (v < min) min = v;
+    }
+  };
+  for (const g of data.gateways) {
+    scan(g.best_cell); scan(g.translation_cell);
+    const ups = (g.matrix && g.matrix.upstreams) || {};
+    for (const eg of Object.keys(ups)) {
+      const cells = (ups[eg] && ups[eg].cells) || {};
+      for (const ing of Object.keys(cells)) scan(cells[ing] && cells[ing].perf);
+    }
+  }
+  const out = max > 0 ? { min, max } : { min: null, max: null };
+  FRONTIER_SCALE_CACHE.set(data, out);
+  return out;
+}
+
+/* ---- the engine's own metric definitions, on the surface that shows the number --
+   `data.definitions` is a metric-key -> prose map GENERATED FROM THE ENGINE'S CONSTANTS
+   (engine/src/suite.rs `metric_definitions`), stating for each metric what quantity it is, which
+   observations counted, and how the measurement knew to stop.
+   IT IS SURFACED RATHER THAN FILED because the failure it exists to prevent is a reader reasoning
+   carefully about a test that never ran: every published surface described the retired throughput gate as
+   "p99 < 1 s" while the engine enforced 20 ms. A definition a reader has to leave the page to find is a
+   definition nobody reads, so each table and each drawer lane carries a fold with the definitions for the
+   metrics IT shows, verbatim from the engine.
+   SELECTED BY KEY PREFIX, never by an enumerated list: a definition the engine adds under `perf.` appears
+   on the Performance surfaces with no change here, which is the only way this cannot go stale. */
+const DEFINITION_PREFIXES = { performance: ["perf."], frontier: ["perf.frontier"], streaming: ["stream."], memory: ["memory"] };
+// Lane -> the prefixes whose definitions belong in that drawer/compare lane.
+const LANE_DEFINITION_PREFIXES = { perf: ["perf."], xlate: ["perf."], stream: ["stream."], memory: ["memory"] };
+// The reader-facing name for a definition key. An unknown key still renders, under its own key, because a
+// definition the engine has published and this table has not learned about is still worth showing.
+const DEFINITION_LABELS = {
+  "perf.frontier": "Throughput at a tail-latency bound",
+  "perf.added_latency": "Added latency",
+  "stream.streams_sustained": "Streams sustained",
+  "stream.added_ttft_and_gap": "Added time-to-first-token and inter-frame gap",
+  memory: "Memory",
+};
+// definitionsFor(prefixes, data): [[key, prose]] for every published definition under those prefixes.
+// An empty result is the normal shape for a bundle generated before the engine published definitions.
+function definitionsFor(prefixes, data = (typeof state !== "undefined" ? state.data : null)) {
+  const defs = data && data.definitions;
+  if (!defs || typeof defs !== "object") return [];
+  return Object.keys(defs).sort()
+    .filter((k) => prefixes.some((p) => k === p || k.startsWith(p)))
+    .filter((k) => typeof defs[k] === "string" && defs[k].trim())
+    .map((k) => [k, defs[k]]);
+}
+/* definitionsFold(prefixes, data): the collapsed "What these numbers mean" block. Collapsed by default so
+   it costs no vertical space until asked for (the board's whole layout rule is that less scrolling wins),
+   and rendered as prose exactly as the engine wrote it - reworded here it would be a second source of
+   truth, which is the defect the generated map exists to close. Returns "" when the bundle carries none. */
+function definitionsFold(prefixes, data = (typeof state !== "undefined" ? state.data : null)) {
+  const entries = definitionsFor(prefixes, data);
+  if (!entries.length) return "";
+  return `<details class="metric-defs"><summary>What these numbers mean, from the engine's own constants</summary>` +
+    entries.map(([k, prose]) =>
+      `<div class="metric-def"><b>${esc(DEFINITION_LABELS[k] || k)}</b> <code class="muted">${esc(k)}</code>` +
+      `<p>${esc(prose)}</p></div>`).join("") +
+    `</details>`;
 }
 
 /* ---- provenance-driven captions (Design E §3.2) -----------------------------
@@ -810,15 +1137,14 @@ function memCell(g, key, fmt, st = state) {
   return m ? metric(m[key], fmt) : { v: null, text: "n/a", na: true };
 }
 
-/* A throughput cell of 0 is a real, honest measurement, not a broken benchmark: the gateway
-   served, but NO tested load level passed the qualifying gates (p99 < 1 s at <0.1% errors), so
-   that run has no qualifying throughput ceiling. Distinct from sweep noise (see the caption and
-   the check-consistency guard, which flags max=0 separately from a small inversion). The cell
-   still shows "0" and this note travels in its title tooltip. */
-const ZERO_RPS_NOTE = METRIC_NOTES.no_qualifying_ceiling;
-function withZeroNote(cell) {
-  return !cell.na && cell.v === 0 ? { ...cell, note: cell.note || ZERO_RPS_NOTE } : cell;
-}
+/* DELETED: `ZERO_RPS_NOTE` / `withZeroNote(cell)`, which annotated a throughput 0 with "served, but no
+   tested load held p99 < 1 s at <0.1% errors". Its only two callers were the two retired scalar columns,
+   and the sentence was doubly wrong by the end: no gate ever enforced 1 s (the engine used 20 ms), and the
+   frontier does not grant a 0.1% error tolerance at all - a rung qualifies only if it failed nothing it
+   accepted. A frontier reading that found no qualifying rung is an ABSENCE carrying the engine's own reason
+   (frontier.rs `absence_for` separates "nothing served cleanly anywhere" from "nothing held THIS bound"),
+   so there is no 0 left here for a note to explain. The equivalent annotation for the streaming zeros it
+   never covered lives where it always did, in METRIC_NOTES. */
 
 /* xlateMatrixCell: the perf object for a gateway's ingress->egress translation cell, straight from the
    matrix (upstreams[egress].cells[ingress]). Returns cell.perf when that exact pair is served and
@@ -941,11 +1267,14 @@ function cellPath(rec) {
   if (!rec) return {};
   return rec.path || { ingress: rec.ingress, egress: rec.egress };
 }
-// Δ-to-Peak for a chosen cell vs the gateway's OWN best diagonal (best_cell): "+18% latency, -9% RPS".
-// Returns "" for the peak cell itself, or when either reference number is missing. Honest by construction:
-// mval() returns null for a suppressed/absent envelope, so a rig-bound RPS never enters the delta — there
-// is no separate mock-bound flag to check, because the envelope already dropped the number.
-function deltaToPeak(cellPerf, best) {
+/* Δ-to-Peak for a chosen cell vs the gateway's OWN best diagonal (best_cell): "+18% latency, -9% req/s".
+   Returns "" for the peak cell itself, or when either reference number is missing. Honest by construction:
+   mval() returns null for an absent envelope, so a hole never enters the delta.
+   THE THROUGHPUT HALF IS COMPARED AT ONE NAMED BOUND, and the caller states which. It used to compare
+   `rps_sustained_20ms`, one collapsed reading against another; comparing two frontier readings taken at
+   DIFFERENT bounds would be a percentage between two different questions, so both sides read the same bound
+   and a cell with no reading there contributes nothing rather than a number built out of two. */
+function deltaToPeak(cellPerf, best, boundMs = selectedBound()) {
   if (!cellPerf || !best) return "";
   const cp = cellPath(cellPerf), bp = cellPath(best);
   if (bp.ingress === cp.ingress && bp.egress === cp.egress) return "";   // same cell as the reference
@@ -953,9 +1282,10 @@ function deltaToPeak(cellPerf, best) {
   const cLat = mval(cellPerf.added_latency_p99_us), bLat = mval(best.added_latency_p99_us);
   if (cLat != null && bLat != null && bLat > 0)
     bits.push(`${fmtPct((cLat / bLat - 1) * 100)} latency`);
-  const cRps = mval(cellPerf.rps_sustained_20ms), bRps = mval(best.rps_sustained_20ms);
+  const cRd = frontierAt(frontierOf(cellPerf), boundMs), bRd = frontierAt(frontierOf(best), boundMs);
+  const cRps = cRd ? mval(cRd.rps) : null, bRps = bRd ? mval(bRd.rps) : null;
   if (cRps != null && bRps != null && bRps > 0)
-    bits.push(`${fmtPct((cRps / bRps - 1) * 100)} RPS`);
+    bits.push(`${fmtPct((cRps / bRps - 1) * 100)} req/s at ${boundLabel(boundMs)}`);
   return bits.join(", ");
 }
 
@@ -1078,6 +1408,12 @@ const UNDISPLAYED_ENVELOPE_KEYS = new Set([
 ]);
 function recordShowsValues(rec) {
   if (!rec || typeof rec !== "object") return false;
+  // A FRONTIER READING IS A DISPLAYED VALUE, and it is not an envelope ON the record - the record carries an
+  // ARRAY of readings, each with its own sealed rate. Without this clause a cell whose throughput published
+  // and whose added-latency did not (the whole point of per-metric absences) would fail the all-or-nothing
+  // test and paint "n/a" over a row that shows six real rates: the plano rule inverted into hiding a
+  // measurement rather than advertising a missing one.
+  if (frontierOf(rec).some((rd) => !metric(rd.rps).na)) return true;
   return Object.entries(rec).some(([k, v]) =>
     !UNDISPLAYED_ENVELOPE_KEYS.has(k) && isEnvelope(v) && !metric(v).na);
 }
@@ -1127,28 +1463,58 @@ function concAt(env) {
   if (!isEnvelope(env)) return null;
   return env.conc_at ?? env.concurrency ?? null;
 }
-// sustainedChooserCell: the sustained@20ms cell for the chosen cell, carrying the winning-concurrency
-// tooltip when the chosen cell records it (the concurrency travels INSIDE the sealed envelope). The
-// concurrency is ALSO shown inline on the cell text ("N @ Y conc") — snapshot #65's Performance-tab ask.
-function sustainedChooserCell(g, st = state) {
-  const cell = withZeroNote(chooserPerfCell(g, "rps_sustained_20ms", fmtInt, st));
+/* THE TWO RETIRED THROUGHPUT CELLS. `sustainedChooserCell` and `maxProxyChooserCell` read
+   `rps_sustained_20ms` and `rps_max_proxy`, which no producer emits: they were one sweep collapsed to one
+   number by a chosen ceiling, twice, by two algorithms that contradicted each other in the field (a
+   "maximum" of 16,232 against the same cell's sustained 16,610). Their replacement is one reader over the
+   frontier, at a bound the reader NAMES - and it shows the concurrency inline exactly as they did, because
+   "18,995 @ 8 conc" was the useful half of what they published. */
+// frontierChooserCell: the chosen cell's frontier reading at the reader's selected bound, as a table cell.
+// The concurrency rides inline ("18,995 @ 8 conc") and the full reading sentence - the observed tail, the
+// boundary proof, or the floor disclosure - rides on the tooltip.
+function frontierChooserCell(g, st = state, boundMs = selectedBound(st)) {
   const p = chooserCellPerf(g, st);
-  const cc = p ? concAt(p.rps_sustained_20ms) : null;
-  if (!cell.na && cell.v > 0 && cc != null)
-    return { ...cell, text: `${cell.text} @ ${fmtInt(cc)} conc`,
-      note: `Peaked at ${fmtInt(cell.v)} req/s with ${fmtInt(cc)} concurrent requests in flight - the load level that maximised sustained throughput under 20 ms LLM latency (higher concurrency added latency without more throughput).` };
-  return cell;
+  if (!p) return { v: null, text: "n/a", na: true };
+  const cell = frontierCell(p, boundMs);
+  const rd = cell.reading;
+  if (cell.na || !rd || rd.concurrency == null) return cell;
+  return { ...cell, text: `${cell.text} @ ${fmtInt(rd.concurrency)} conc` };
 }
-// maxProxyChooserCell: the max-proxy cell for the chosen cell, showing its own peak concurrency inline
-// ("N @ Y conc") next to the number — the sibling of sustainedChooserCell for the peak throughput.
-function maxProxyChooserCell(g, st = state) {
-  const cell = withZeroNote(chooserPerfCell(g, "rps_max_proxy", fmtInt, st));
+// frontierBoundCell: the chosen cell's reading at ONE NAMED bound, for the frontier tab's per-bound
+// columns. No inline concurrency (six columns of "@ N conc" is noise); the number and its observed tail are
+// what a reader compares across the row, and the tooltip carries the rest of the evidence.
+function frontierBoundCell(g, boundMs, st = state) {
   const p = chooserCellPerf(g, st);
-  const cc = p ? concAt(p.rps_max_proxy) : null;
-  if (!cell.na && cell.v > 0 && cc != null)
-    return { ...cell, text: `${cell.text} @ ${fmtInt(cc)} conc`,
-      note: `Peaked at ${fmtInt(cell.v)} req/s with ${fmtInt(cc)} concurrent requests in flight - the throughput ceiling against an instant mock.` };
-  return cell;
+  if (!p) return { v: null, text: "n/a", na: true };
+  return frontierCell(p, boundMs);
+}
+/* frontierShapeCell: the SHAPE column - the sparkline plus the gain factor, for the chosen cell.
+   Sortable BY THE GAIN, deliberately: "which gateways need a loose tail to go fast" is a question about
+   the field that no single-bound ranking can answer, and it is the question the frontier exists to expose.
+   `v` is the gain factor so the sort is the measurement; the render puts the curve beside it. */
+function frontierShapeCell(g, st = state) {
+  const p = chooserCellPerf(g, st);
+  const f = frontierOf(p);
+  if (!f.length) return { v: null, text: "n/a", na: true, note: p ? NO_FRONTIER_NOTE : "" };
+  const gain = frontierGain(f);
+  /* A CURVE WITH NO RATIO IS STILL A CURVE, and it is the most damning shape on the board: plano carried
+     nothing under ANY declared bound and 19 req/s unbounded, so there is no pair of rates to divide. The
+     cell stays NOT-n/a - the sparkline still draws, five ticks on the floor and one point at the right,
+     which reads as "it cannot meet any bound we publish" - and only the ratio is withheld, because a ratio
+     against zero is not a number. Rendering the whole cell as n/a here would delete the finding, and it
+     would delete it for exactly the gateways it is about. */
+  if (!gain) return { v: null, text: "—", na: false, frontier: f,
+    note: "No ratio can be stated: this cell carried no measurable throughput under any published bound, so " +
+      "the only reading it has is the unbounded one. The curve beside this is the whole finding - a tick on " +
+      "the floor at every bound the gateway could not hold." };
+  const floorNote = gain.lowerBound
+    ? " The unbounded reading is itself a floor (the sweep ran out of ladder), so the real gain may be larger."
+    : "";
+  return { v: gain.factor, text: `×${fmt1(gain.factor)}`, na: false,
+    note: `${fmtInt(gain.from)} req/s ${boundClause(gain.fromBoundMs)}, rising to ${fmtInt(gain.to)} req/s ` +
+      `${boundClause(null)}: ×${fmt1(gain.factor)}. A gateway near ×1 holds its rate even when you demand a ` +
+      `tight tail; a large factor means it needs a loose tail to go fast.${floorNote}`,
+    frontier: f };
 }
 const COLUMN_SETS = {
   // PERFORMANCE (Peak | Same | Custom): per-cell latency + throughput from the ONE 6x6 run. The columns
@@ -1161,10 +1527,74 @@ const COLUMN_SETS = {
       get: (g) => chooserPerfCell(g, "added_latency_p50_us", fmtAdded) },
     { id: "lat", label: "Added latency p99 (µs)", desc: false, title: "Gateway p99 minus direct-to-mock p99 at concurrency 1 on the chosen cell",
       get: (g) => chooserPerfCell(g, "added_latency_p99_us", fmtAdded) },
-    { id: "rps20", label: "Sustained RPS (20 ms upstream)", desc: true, title: "Sustained requests/sec on the chosen cell while the mock upstream holds every response for 20 ms, standing in for a real model's time to first token. The 20 ms is the UPSTREAM's delay, not a latency target the gateway is held to: the qualifying bar is p99 under 1 s with fewer than 0.1% errors. Hover a cell for the concurrency it peaked at.",
-      get: (g, st = state) => sustainedChooserCell(g, st) },
-    { id: "rpsmax", label: "Max proxy RPS", desc: true, title: "Throughput ceiling against an instant mock (p99 < 1 s, <0.1% errors) on the chosen cell. Shows the concurrency it peaked at.",
-      get: (g, st = state) => maxProxyChooserCell(g, st) },
+    /* THE RANKED THROUGHPUT COLUMN, at the bound the reader selected. Its LABEL names that bound
+       (boundColLabel) and re-renders when the selection changes, so no header can imply a bound it did not
+       use - which is exactly what the two columns this replaces did ("Sustained RPS (20 ms upstream)", with
+       a tooltip asserting a p99 < 1 s bar the engine never enforced, over a metric read at 20 ms).
+       Switching the bound re-reads this column and re-sorts the table in front of the reader. */
+    { id: "rps", label: () => boundColLabel(selectedBound()), desc: true,
+      title: () => `The most requests/sec the chosen cell carried ${boundClause(selectedBound())} and it failed no request it accepted, with the concurrency it was observed at. ` +
+        `One of ${BOUND_CHOICES.length} readings of the SAME concurrency sweep published on every cell - switch the bound above to re-rank the board. ` +
+        `A "≥" is a floor: the sweep ran out of ladder while that concurrency was still qualifying. Hover a cell for the tail it actually produced and the concurrency that stopped qualifying above it.`,
+      get: (g, st = state) => frontierChooserCell(g, st) },
+    /* THE SHAPE, beside the number. A row of six figures does not communicate a slope; this does, and the
+       gain factor makes it sortable and readable aloud. See frontierSpark on the shared y scale. */
+    { id: "shape", label: "Curve across bounds", desc: true,
+      title: () => `The whole frontier as one line: throughput at ${BOUND_CHOICES.map(boundLabel).join(", ")}, left to right, on a scale shared by every row. ` +
+        `Flat means the gateway holds its rate even under a tight tail; a line climbing from the floor means it needs a loose tail to go fast. ` +
+        `Log scale, so equal slopes are equal RATIOS - which is what the shape means - and the slowest gateway on the board is still visible. ` +
+        `The dotted rule marks the bound the ranked column is reading; an open dot marks a reading that is a floor rather than a ceiling; a tick on the baseline means the gateway served but NO concurrency held that tail (a measured nothing, not a missing measurement); and ×N is the gain from the tightest published bound to no bound at all (sort by it).`,
+      get: (g, st = state) => frontierShapeCell(g, st),
+      render: (g, st = state) => {
+        const c = frontierShapeCell(g, st);
+        if (c.na) return `<td class="shape na" title="${esc(c.note || "")}">${esc(c.text)}</td>`;
+        return `<td class="shape" title="${esc(c.note)}">${frontierSpark(c.frontier, { ...boardFrontierScale(stateData(st)), boundMs: selectedBound(st) })}` +
+          `<span class="shape-gain">${esc(c.text)}</span></td>`;
+      } },
+  ],
+  /* FRONTIER: THE WHOLE CURVE, ONE ROW PER GATEWAY, ALL SIX READINGS SIDE BY SIDE.
+     Its own tab rather than more columns on Performance, and rather than a longer page: the owner's rule is
+     that less scrolling wins and more tabs are the acceptable cost. Performance answers "who is fastest at
+     MY bound"; this answers "what shape is each gateway", which is the finding the two retired scalars
+     averaged away. Fourteen rows by eight columns fits one screen, so a reader compares shapes without
+     scrolling and without opening anything.
+     Every column is a real published reading - none is derived - and the selected bound's column is marked
+     so the ranked column on Performance is locatable here. */
+  frontier: [
+    COL_SEL, COL_NAME, COL_TESTED,
+    ...BOUND_CHOICES.map((b) => ({
+      id: boundColId(b), label: boundColLabel(b), desc: true,
+      // Each column names its OWN bound and nothing else. The observed tail rides UNDER the number
+      // (frontierBoundCell) because "4 ms under a 100 ms bound" and "99 ms under it" are different
+      // findings and a column of rates alone cannot tell them apart.
+      title: `The most requests/sec the chosen cell carried ${boundClause(b)} and it failed no request it accepted. ` +
+        `Under each number is the tail it ACTUALLY produced there, which is never the bound. "≥" marks a floor.`,
+      get: (g, st = state) => frontierBoundCell(g, b, st),
+      render: (g, st = state) => {
+        const c = frontierBoundCell(g, b, st);
+        const sel = selectedBound(st) === b || (b == null && selectedBound(st) == null) ? " bound-col" : "";
+        if (c.na) return `<td class="na${sel}" title="${esc(c.note || "")}">${esc(c.text)}</td>`;
+        const rd = c.reading;
+        /* THE SUB-LINE UNDER THE NUMBER carries whichever of the two things this cell has to say. For a real
+           reading it is the tail the gateway ACTUALLY produced (4 ms under a 100 ms bound is not the same
+           finding as 99 ms). For a measured nothing it is WHY - "no rung held this tail" - because five
+           bare cells in a row would read as five missing measurements on exactly the gateways where the
+           measurement is the most damning thing on the board. */
+        const sub = c.why
+          ? `<span class="reading-none">${esc(c.why)}</span>`
+          : (rd && rd.p99_us != null ? `<span class="reading-tail">tail ${esc(fmtTail(rd.p99_us))}</span>` : "");
+        return `<td class="reading${c.why ? " reading-zero" : ""}${sel}" title="${esc(c.note)}">${esc(c.text)}${sub}</td>`;
+      },
+    })),
+    { id: "shape", label: "Curve", desc: true,
+      title: "The six readings as one line, on a scale shared by every row, with ×N the gain from the tightest published bound to no bound at all.",
+      get: (g, st = state) => frontierShapeCell(g, st),
+      render: (g, st = state) => {
+        const c = frontierShapeCell(g, st);
+        if (c.na) return `<td class="shape na" title="${esc(c.note || "")}">${esc(c.text)}</td>`;
+        return `<td class="shape" title="${esc(c.note)}">${frontierSpark(c.frontier, { ...boardFrontierScale(stateData(st)), boundMs: selectedBound(st) })}` +
+          `<span class="shape-gain">${esc(c.text)}</span></td>`;
+      } },
   ],
   // STREAMING (Peak | Same | Custom): per-cell SSE columns from the SAME run. Per-cell streaming is
   // measured on the diagonal today, so Same reads it only on the gateway's own measured diagonal and
@@ -1181,8 +1611,13 @@ const COLUMN_SETS = {
       get: (g) => chooserStreamCell(g, "added_gap_p99_us", fmtUsMs) },
     { id: "streams", label: "Streams sustained", desc: true, title: "Max concurrent SSE streams sustained (bisected true concurrency) with EVERY expected frame delivered, no stalls, <0.1% errors, on the chosen cell",
       get: (g) => chooserStreamCell(g, "streams_sustained", fmtInt) },
-    { id: "cpufps", label: "CPU-bound fps", desc: true, title: "Streaming relay throughput under an unpaced firehose (CPU-bound): sustained content frames/sec on the chosen cell. Higher is better.",
-      get: (g) => chooserStreamCell(g, "cpu_fps", fmtInt) },
+    // THE `cpufps` COLUMN IS GONE with the `cpu_fps` metric the producer retired: it counted frames/sec
+    // under an unpaced firehose WITHOUT the delivery gate, so a gateway dropping frames could post a higher
+    // relay rate than one delivering all of them - a loss rate with a numerator, not a throughput. The
+    // frame rate a reader can act on survives as `streams_sustained_fps`, measured at a concurrency where
+    // every frame arrived, and it is in the drawer's streaming lane.
+    { id: "streamfps", label: "Streams sustained (frames/s)", desc: true, title: "The frame rate the sustained-streams ceiling held, on the chosen cell: the throughput behind the stream count, measured where every expected frame was delivered. Higher is better.",
+      get: (g) => chooserStreamCell(g, "streams_sustained_fps", fmtInt) },
   ],
   // MEMORY (one row per gateway, cell-chooser driven with its OWN Min | Max | Same | Custom modes):
   // idle / steady-state / growth / recovered RSS (best = min), the cell the chosen window ran on, plus the
@@ -1286,6 +1721,10 @@ function columnsFor(view, data = (typeof state !== "undefined" ? state.data : nu
    the sort the reader asked for, it is what to do when that sort has nothing left to say. */
 const VIEW_TIEBREAK = {
   performance: "lat50",
+  // The frontier tab has no latency column to fall back on, and its own columns are all rates (higher is
+  // better), so the ascending-tiebreak rule above does not fit any of them. Ties there fall to the name,
+  // which is honest: two gateways with the identical reading at the sorted bound genuinely tie on it, and
+  // the curve column beside them is where the difference shows.
   streaming: "sttft50",
   memory: "memidle",
 };
@@ -1338,11 +1777,26 @@ const LANES = [
       // same baseline for every row, so it is evidence rather than a contest (see bestIndex).
       { k: "gateway_c1_p99_us", label: "Gateway p99 @ c=1 (µs)", best: "min", fmt: fmtUsMs },
       { k: "direct_c1_p99_us", label: "Direct-to-mock p99 @ c=1 (µs)", best: null, fmt: fmtUsMs },
-      // The operating concurrency travels INSIDE the sealed envelope (env.concurrency); the drawer shows
-      // it as "(@ c=Y)" so the headline surfaces the load level its marked sweep peak sat at.
-      { k: "rps_max_proxy", label: "Max proxy RPS", best: "max", fmt: fmtInt },
-      { k: "rps_sustained_20ms", label: "Sustained RPS (20 ms upstream)", best: "max", fmt: fmtInt },
+      /* EVERY READING, ONE ROW EACH, in published order - replacing `rps_max_proxy` and
+         `rps_sustained_20ms`, which were the same sweep collapsed twice and which contradicted each other
+         in the field. All six are listed rather than only the selected one BECAUSE THE DRAWER AND THE
+         COMPARE PANEL ARE WHERE A READER GOES FOR THE EVIDENCE: the shape across bounds is the finding, and
+         in compare it puts three gateways' whole curves side by side as numbers, which is the one place
+         digits beat the sparkline. `cell` (not `k`+`fmt`) because a reading is not a bare envelope on the
+         record - it is an envelope plus its own evidence, and frontierCell is what renders that pair. */
+      ...BOUND_CHOICES.map((b) => ({
+        // A stable key per reading, mirroring the engine's absence keys (frontier.10ms.rps): the tests and
+        // any future per-metric lookup need to name a row, and its bound is the only thing that identifies it.
+        k: `frontier.${b == null ? "unbounded" : `${b}ms`}`,
+        label: boundColLabel(b), best: "max", cell: (rec) => frontierCell(rec, b),
+      })),
     ],
+    // The curve itself, under the numbers: the same sparkline the table shows, at the same shared scale, so
+    // the drawer's six rows arrive with the shape they describe rather than leaving the reader to plot it.
+    extra: (j) => frontierBlock(j),
+    // And in the compare panel, one row of curves across the gateways being compared - three shapes beside
+    // each other is the comparison the two retired scalars made impossible.
+    cmpExtra: (j) => frontierBlock(j, { compact: true }),
   },
   {
     key: "memory", label: "Memory", flag: "served", err: "serve_error",
@@ -1391,7 +1845,10 @@ const LANES = [
       // board published a stream COUNT with no throughput behind it. Two gateways holding the same number
       // of streams at very different frame rates read as identical without this row.
       { k: "streams_sustained_fps", label: "Streams sustained (frames/s)", best: "max", fmt: fmtInt },
-      { k: "cpu_fps", label: "CPU-bound fps (peak)", best: "max", fmt: fmtInt },
+      // DELETED: `cpu_fps` ("CPU-bound fps (peak)"). The producer retired the metric because it counted
+      // relay frames/sec WITHOUT the delivery gate, so a gateway dropping frames could out-score one
+      // delivering all of them - a loss rate with a numerator. The frame rate a reader can act on is the
+      // row above, measured at a concurrency where every expected frame arrived.
     ],
   },
   {
@@ -1401,10 +1858,35 @@ const LANES = [
     metrics: [
       { k: "added_latency_p50_us", label: "Added latency p50 (µs)", best: "min", fmt: fmtInt },
       { k: "added_latency_p99_us", label: "Added latency p99 (µs)", best: "min", fmt: fmtInt },
-      { k: "rps_sustained_20ms", label: "Sustained RPS (20 ms upstream)", best: "max", fmt: fmtInt },
+      /* ONE READING HERE, at the bound the reader selected, rather than the perf lane's six. The translation
+         cell carries its own frontier off its own sweep, and the question this lane answers is "what does
+         translating cost", which is only answerable by comparing against the passthrough lane AT THE SAME
+         BOUND - so the row is labelled with that bound and moves with the selector, and the whole curve is
+         drawn underneath (extra) for anyone who wants the shape. */
+      { k: "frontier.selected", label: () => boundColLabel(selectedBound()), best: "max",
+        cell: (rec) => frontierCell(rec, selectedBound()) },
     ],
+    extra: (j) => frontierBlock(j),
+    cmpExtra: (j) => frontierBlock(j, { compact: true }),
   },
 ];
+/* frontierBlock(rec, opts): the curve as a block, for the drawer and the compare panel. The sparkline plus
+   the gain sentence in words - the two forms of the same fact, because the picture is what makes the shape
+   legible at a glance and the sentence is what a reader can quote, sort by, or hear read aloud.
+   Returns "" for a record with no frontier, so a legacy row simply has no curve rather than an empty frame
+   captioned as if a measurement were behind it. */
+function frontierBlock(rec, opts = {}) {
+  const f = frontierOf(rec);
+  if (!f.length) return "";
+  const spark = frontierSpark(f, { ...boardFrontierScale(), boundMs: selectedBound() });
+  if (!spark) return "";
+  const gain = frontierGain(f);
+  const words = gain
+    ? `×${fmt1(gain.factor)} from ${boundLabel(gain.fromBoundMs)} to no bound (${fmtInt(gain.from)} → ${fmtInt(gain.to)} req/s)`
+    : "one reading only: no pair to compare a shape across";
+  return `<div class="frontier-block${opts.compact ? " compact" : ""}">${spark}` +
+    `<div class="stamp muted">${esc(words)}</div></div>`;
+}
 
 /* laneRecord(l, g, st): the record a drawer/compare lane shows, CHOOSER-AWARE so it agrees with the
    TABLE in every mode. The perf + streaming lanes are cell-chooser driven (PERF_VIEWS): Peak reads the
@@ -1429,26 +1911,28 @@ function laneRecord(l, g, st = state) {
   return l.get ? l.get(g) : g[l.key];
 }
 /* perfSweepSeries(g, colors, st): the sweep-curve series for the CHOSEN cell (Peak/Same/Custom), used by
-   the drawer + compare so the plotted curve reads the SAME cell the table + headline do. ABSENT-HEADLINE
-   GATE (finding 22): a metric whose headline is ABSENT (no reading exists at all)
-   reads n/a on every honest surface, so its curve is DROPPED here too — a rig-bound sweep must not reveal
-   on the curve a number the gate hides on the headline. Returns [] when the chosen cell is absent. */
+   the drawer + compare so the plotted curve reads the SAME cell the table + headline do.
+   ONE CURVE, NOT TWO. It used to draw the sustained and max-proxy sweeps as separate series, which was
+   always a fiction: they were ONE sweep read twice, so the two curves were the same points with two
+   different markers on them, and the pair could contradict each other (a "maximum" below the sustained
+   figure). The cell now publishes that one sweep once (`rec.sweep`, every rung with its own concurrency,
+   rate, tail and failure count) and the marker is the reading AT THE SELECTED BOUND - so the dot a reader
+   sees on the curve is the number the ranked column shows, at the concurrency it was observed at.
+   Returns [] when the chosen cell is absent or carries no rungs. */
 function perfSweepSeries(g, colors, st = state) {
   const p = chooserCellPerf(g, st);
-  if (!p) return [];
-  const out = [];
-  const add = (key, label, color) => {
-    const env = p[key];
-    // C5: the displayable number comes through the ONE accessor (mval), never a bare `.value` deref.
-    // A suppressed headline is {value:null,…}: no number, so no curve (finding 22, now structural — the
-    // sweep array is INSIDE the envelope and a suppressed envelope carries neither value nor sweep).
-    const v = mval(env);
-    if (v == null || !(env.sweep && env.sweep.length)) return;
-    out.push({ label, color, sweep: env.sweep, peak: { rps: v, conc: concAt(env) } });
-  };
-  add("rps_sustained_20ms", colors.sustainedLabel || "sustained (20 ms upstream)", colors.sustained);
-  add("rps_max_proxy", colors.maxLabel || "max proxy", colors.max);
-  return out;
+  if (!p || !Array.isArray(p.sweep) || !p.sweep.length) return [];
+  const bound = selectedBound(st);
+  const rd = frontierAt(frontierOf(p), bound);
+  // C5: the displayable number comes through the ONE accessor (mval), never a bare `.value` deref. An
+  // absent reading marks nothing rather than marking a rung the reading does not claim.
+  const v = rd ? mval(rd.rps) : null;
+  return [{
+    label: colors.sweepLabel || `req/s across the sweep · marked at ${boundLabel(bound)}`,
+    color: colors.sustained || colors.max,
+    sweep: p.sweep,
+    peak: v != null && rd.concurrency != null ? { rps: v, conc: rd.concurrency } : null,
+  }];
 }
 /* laneAgeNote(j): the age of the RECORD THIS LANE SHOWS, from its own source.measured_at (audit #8).
    The row badge ages the matrix, but a lane can project from a never-refreshed legacy suite (every
@@ -1480,8 +1964,14 @@ function newState() {
     category: DEFAULT_CATEGORY,
     view: DEFAULT_VIEW,
     q: "",
-    sortCol: "rps20",
+    sortCol: "rps",
     sortDesc: true,
+    /* THE TAIL-LATENCY BOUND THE BOARD IS SHOWING. `null` is a real choice (the unbounded reading), so the
+       absent state is DEFAULT_BOUND_MS and never null.
+       IT IS A VIEW, NOT A VERDICT. The constant it replaces, the engine's `SUSTAINED_P99_CEILING_US`,
+       decided which measurements existed and no surface said so; this decides which column opens first,
+       every bound is published on every cell, and switching it re-ranks the board in front of the reader. */
+    bound: DEFAULT_BOUND_MS,
     // The mode each chooser family was last left on, so crossing tabs restores the reader's own
     // choice rather than the coercion the other family forced. Never encoded into the URL: a link
     // carries ONE mode, for the view it names.
@@ -1526,8 +2016,17 @@ function encodeUrl(st) {
   if (st.q) p.set("q", st.q);
   const caps = CAPS.filter(([k]) => st[k]).map(([, name]) => name);
   if (caps.length) p.set("cap", caps.join("|"));
+  /* THE BOUND IS IN THE URL, so a shared link reproduces the reading it was shared at. Encoded only on the
+     tabs whose numbers ARE read at a bound (BOUND_VIEWS): a ?bound= on the memory tab would claim the memory
+     figures had one. `none` is the unbounded reading, spelled out rather than encoded as an empty value, so
+     the link says which of the six readings it means. The default is omitted, keeping the pristine URL clean. */
+  if (BOUND_VIEWS.has(st.view) && selectedBound(st) !== DEFAULT_BOUND_MS)
+    p.set("bound", selectedBound(st) == null ? "none" : String(selectedBound(st)));
   // Each perf tab's clean URL omits the sort when it equals that tab's default column + direction.
-  const defSort = VIEW_SORT[st.view] || "rps20";
+  // On the frontier tab the default column FOLLOWS the selected bound (the tab ranks at the bound the
+  // reader chose), so the link stays clean when the sort is simply that - and carries ?sort= when the
+  // reader ranked by something else, e.g. the curve.
+  const defSort = st.view === "frontier" ? boundColId(selectedBound(st)) : (VIEW_SORT[st.view] || "rps");
   const defCol = columnsFor(st.view).find((c) => c.id === defSort);
   const defDesc = defCol ? defCol.desc !== false : true;
   if (st.sortCol !== defSort || st.sortDesc !== defDesc) {
@@ -1590,16 +2089,26 @@ function decodeUrl(pathname, search, hash) {
     const hit = CAPS.find(([, name]) => name === cap);
     if (hit) st[hit[0]] = true;
   }
+  /* THE BOUND, before the sort: a `?sort=f50` link and a `?bound=50` link are the same intent expressed
+     two ways, and the sort default below is derived from the bound on the frontier tab.
+     A bound the board does not publish is IGNORED rather than honoured - an old or hand-edited ?bound=20
+     (the retired gate's ceiling, and the one value a reader is most likely to try) must not render a column
+     labelled with a bound no reading was taken at. It falls back to the default, which is named on screen. */
+  const rawBound = p.get("bound");
+  if (rawBound === "none") st.bound = null;
+  else if (rawBound != null && FRONTIER_BOUNDS_MS.includes(Number(rawBound))) st.bound = Number(rawBound);
   // Accept any real, sortable column id from any tab; renderTable snaps it back to the tab's
-  // default if it does not belong to the resolved view.
-  if (p.get("sort") && ALL_COLUMN_IDS.has(p.get("sort")) && p.get("sort") !== "sel") {
-    st.sortCol = p.get("sort");
+  // default if it does not belong to the resolved view. A retired throughput sort id (?sort=rps20 /
+  // ?sort=rpsmax, in every Performance link ever shared) maps onto the column that carries that ranking now.
+  const rawSort = SORT_ALIASES[p.get("sort")] || p.get("sort");
+  if (rawSort && ALL_COLUMN_IDS.has(rawSort) && rawSort !== "sel") {
+    st.sortCol = rawSort;
     st.sortDesc = p.get("dir") !== "asc";
   } else {
     // No sort param: default to this view's headline column AND its natural direction. Leaving
     // sortDesc at the global default would sort added-latency defaults (sttft) descending, i.e.
     // worst-first. Derive the direction from the column's own `desc` flag.
-    st.sortCol = VIEW_SORT[st.view] || "rps20";
+    st.sortCol = st.view === "frontier" ? boundColId(st.bound) : (VIEW_SORT[st.view] || "rps");
     const dc = columnsFor(st.view).find((c) => c.id === st.sortCol);
     st.sortDesc = dc ? dc.desc !== false : true;
   }
@@ -1920,6 +2429,9 @@ function laneAgeSummary(data, lane, now = Date.now()) {
   return age ? `, measured ${age}` : "";
 }
 function chooserLead(view, data) {
+  // The frontier tab shows no latency column (its readings ARE the latency-bounded throughput), so its lead
+  // must not promise one - the cell chooser it describes is the same one, though.
+  if (view === "frontier") return "Per-cell throughput from the one 6x6 run; the cell chooser picks which cell every row reads.";
   if (view !== "streaming") return "Per-cell latency + throughput from the one 6x6 run.";
   const prov = streamingProvenance(data).all;
   if (prov === "matrix") return "Per-cell streaming from the one 6x6 run.";
@@ -1988,11 +2500,31 @@ function memoryCaption(data = state.data, st = state) {
     "Lower is better on every column. A gateway that does not serve the chosen cell reads n/a and sinks to the bottom; nothing is substituted from another cell.",
   ];
 }
+/* frontierCaption(st, data): the Frontier tab's own standfirst. It states the finding the tab exists for -
+   that two gateways with similar headline rates can be completely different machines - and names the
+   evidence on the row, because a table of six rates with no explanation of what varies across them is the
+   same "six numbers" that fails the reader. */
+function frontierCaption(st = state, data = state.data) {
+  const sel = selectedBound(st);
+  return [
+    `One concurrency sweep per cell, read at every bound the board publishes: ${BOUND_CHOICES.map(boundLabel).join(", ")}. Each reading is the most requests/sec that cell carried while 99% of requests finished under that bound and it failed no request it accepted.`,
+    `Read across a row, not down a column: a row that barely moves holds its rate even under a tight tail, and a row that climbs steeply needs a loose tail to go fast. Published as a single number those two look comparable, and they are not the same machine.`,
+    `The ${boundLabel(sel)} column is the one the Performance tab ranks and is marked here; every other column is published on every cell too, so nothing is chosen for you. "≥" marks a reading whose sweep ran out of ladder while still qualifying: a floor, not a maximum. "tail" under a number is the tail that reading ACTUALLY produced, never the bound.`,
+    `A "0 · no rung held this tail" is a MEASUREMENT: the gateway served cleanly and no concurrency it was offered kept 99% of requests under that bound. It is not missing data - a cell with no measurement at all reads "no frontier" instead - and the difference matters most on the slowest rows, where five of the six columns can be that finding.`,
+    chooserLead("frontier", data),
+  ];
+}
 function updateTableCaption(view) {
   const el = document.getElementById("table-caption");
   if (!el) return;
-  const lines = view === "memory" ? memoryCaption(state.data, state) : chooserCaption(view, state, state.data);
+  const lines = view === "memory" ? memoryCaption(state.data, state)
+    : view === "frontier" ? frontierCaption(state, state.data)
+    : chooserCaption(view, state, state.data);
   el.innerHTML = lines.map((l) => esc(l)).join("<br>");
+  // The engine's own definitions for the metrics THIS tab shows, one collapsed fold under the caption. An
+  // unknown view contributes no prefixes and renders nothing rather than everything.
+  const defs = document.getElementById("table-defs");
+  if (defs) defs.innerHTML = definitionsFold(DEFINITION_PREFIXES[view] || [], state.data);
 }
 /* Memory tab: show the memory-recovery + memory-rss charts (charts.py PNGs) under the per-gateway table.
    Hidden on Performance/Streaming. Same lightbox behaviour as the main gallery. Absent PNGs → hidden. */
@@ -2134,6 +2666,14 @@ function initFilterControls() {
     state.mode = btn.dataset.mode;
     renderFilters(); renderTable(); syncUrl(true);
   });
+  // THE BOUND SELECTOR. One delegated listener, for the same reason the mode buttons have one: the buttons
+  // are re-rendered per view, so per-button listeners would bind to elements that no longer exist.
+  const bseg = document.getElementById("bound-seg");
+  if (bseg) bseg.addEventListener("click", (ev) => {
+    const btn = ev.target.closest(".seg-btn");
+    if (!btn) return;
+    selectBound(btn.dataset.bound === "none" ? null : Number(btn.dataset.bound));
+  });
   const onSame = () => { state.sameDialect = same.value; renderTable(); syncUrl(true); };
   const onCustom = () => { state.xlateIn = cin.value; state.xlateOut = cout.value; renderTable(); syncUrl(true); };
   if (same) same.addEventListener("change", onSame);
@@ -2141,8 +2681,41 @@ function initFilterControls() {
   if (cout) cout.addEventListener("change", onCustom);
 }
 
+/* selectBound(ms): the reader picked a tail-latency bound.
+   RE-RANKING IN FRONT OF THE READER IS THE POINT, not a side effect: the whole claim of the frontier is
+   that a gateway's position depends on the tail you are willing to accept, and a control that changed only
+   the numbers in place would leave that claim unmade. The Performance tab's ranked column re-reads the new
+   bound on its own; the frontier tab's ranking is per-bound COLUMN, so the sort follows the selection -
+   unless the reader had deliberately sorted by something else (the curve, a name, a latency), in which case
+   their choice is left alone. */
+function selectBound(ms) {
+  const prev = selectedBound(state);
+  state.bound = ms;
+  if (state.view === "frontier" && state.sortCol === boundColId(prev)) state.sortCol = boundColId(ms);
+  // The STATE change above is the whole decision and is testable on its own; the three calls below are the
+  // DOM half, skipped under node exactly as syncUrl skips its history write, so the suite can drive the
+  // selector without a document. A guard here is the difference between "the re-rank is covered" and "the
+  // one behaviour the bound selector exists for is covered by nothing".
+  if (NODE) return;
+  renderFilters(); renderTable(); syncUrl(true);
+}
+/* renderBoundChooser(): paint the bound buttons from the ONE published list, mark the selection, and state
+   in words what the selected column means. The sentence is rendered from boundClause(), the same function
+   every column header and tooltip uses, so the control and the columns cannot describe the bound differently. */
+function renderBoundChooser() {
+  const seg = document.getElementById("bound-seg");
+  if (!seg) return;
+  const sel = selectedBound(state);
+  seg.innerHTML = BOUND_CHOICES.map((b) =>
+    `<button type="button" class="seg-btn${(b == null ? sel == null : b === sel) ? " active" : ""}" ` +
+    `data-bound="${b == null ? "none" : b}" role="tab" ` +
+    `title="${esc(`Rank the board on the most requests/sec each gateway carried ${boundClause(b)}`)}">${esc(boundLabel(b))}</button>`).join("");
+  const note = document.getElementById("bound-note");
+  if (note) note.textContent = `showing the most req/s each gateway carried ${boundClause(sel)}`;
+}
 function renderFilters() {
   document.getElementById("search").value = state.q;
+  renderBoundChooser();
   for (const [, name] of CAPS) { const el = document.getElementById(`f-${name}`); if (el) el.checked = state[CAPS.find(([, n]) => n === name)[0]]; }
   // Cell chooser: paint the buttons THIS view offers, mark the active one, and show only the dropdown(s)
   // that mode needs (Same → one dialect; Custom → in→out pair; Peak/Min/Max → none). Peak is simply not
@@ -2400,7 +2973,10 @@ function drawerHtml(g, st = state) {
       // A MEASURED FAILURE stays a row (red, with its counts) rather than vanishing with the
       // genuinely-absent metrics, and a measured zero carries its short reason - the drawer must
       // tell the same story the table does, or the two surfaces disagree about the same envelope.
-      h += `<dl>` + l.metrics.map((m) => ({ m, c: metric(j[m.k], m.fmt) })).filter((x) => !x.c.na || x.c.failed).map(({ m, c }) => {
+      // `m.cell` is a metric whose value is a reading PLUS its evidence (the frontier), so the record does
+      // not carry a plain envelope under `m.k` and the cell renderer is the metric's own. Everything else is
+      // an envelope read through metric(), exactly as before.
+      h += `<dl>` + l.metrics.map((m) => ({ m, c: m.cell ? m.cell(j, st) : metric(j[m.k], m.fmt) })).filter((x) => !x.c.na || x.c.failed).map(({ m, c }) => {
         if (c.failed)
           return `<div><dt>${esc(txt(m.label))}</dt><dd class="failtext" title="${esc(c.note || "")}">${esc(c.text)}</dd></div>`;
         const conc = c.env && c.env.concurrency;
@@ -2408,7 +2984,10 @@ function drawerHtml(g, st = state) {
         const zeroWhy = c.v === 0 && c.env && ZERO_WHY[c.env.note];
         return `<div><dt>${esc(txt(m.label))}</dt><dd${c.note ? ` title="${esc(c.note)}"` : ""}>${esc(c.text + cc)}${
           zeroWhy ? ` <span class="muted">(${esc(zeroWhy)})</span>` : ""}</dd></div>`;
-      }).join("") + `</dl>` + (l.extra ? l.extra(j) : "") + `${laneStamp(j)}`;
+      // The engine's definition of this lane's metrics, right under the numbers it defines: a reader who
+      // asks "what does 'under 10 ms' actually mean" gets the answer without leaving the drawer.
+      }).join("") + `</dl>` + (l.extra ? l.extra(j) : "") +
+        definitionsFold(LANE_DEFINITION_PREFIXES[l.key] || [], stateData(st)) + `${laneStamp(j)}`;
     }
     h += `</section>`;
   }
@@ -2435,8 +3014,11 @@ function drawerHtml(g, st = state) {
   }
   h += `</section>`;
 
-  h += `<section class="drawer-lane"><h4>Throughput sweeps</h4>` +
-    `<p class="lane-note muted">Every point is a real probe; the search sweeps then bisects to the peak; the marked dot is the published number at its operating concurrency. The headline numbers above are that same marked peak.</p>` +
+  // THE SWEEP THE WHOLE FRONTIER IS READ FROM, plotted once. The caption no longer says "the search sweeps
+  // then bisects to the peak": nothing searches for a shape any more - every rung probed is a rung
+  // considered, and the six published readings are maxima over subsets of these same points.
+  h += `<section class="drawer-lane"><h4>The concurrency sweep</h4>` +
+    `<p class="lane-note muted">One sweep per cell, and every published throughput reading is a maximum over some subset of these same rungs: every point is a real probe, nothing decides when to stop looking. The marked dot is the reading at the bound the board is currently showing (${esc(boundLabel(selectedBound(st)))}), at the concurrency it was observed at.</p>` +
     `<div id="drawer-sweeps" class="sweeps"></div></section>`;
 
   /* OOTB config artifact: the exact as-shipped default config this gateway ran from (pointed at the
@@ -2614,7 +3196,9 @@ function compareBodyHtml(gws, st = state) {
       // measured failure showed as a bare n/a with no evidence, below-resolution's ≈0 showed as a
       // plain 0, and a suppressed metric's reason vanished. Ranking still uses mval() (failed and
       // absent rank as nothing; below-resolution ranks as 0).
-      const cells = recs.map((j) => (laneServed(j, l.flag) ? metric(j[m.k], m.fmt) : null));
+      // `m.cell` is a metric that is a reading plus its own evidence (a frontier reading), whose renderer
+      // travels with the metric; everything else is a plain envelope on the record.
+      const cells = recs.map((j) => (laneServed(j, l.flag) ? (m.cell ? m.cell(j, st) : metric(j[m.k], m.fmt)) : null));
       const bi = bestIndex(cells.map((c) => (c ? c.v : null)), m.best);   // a Set: every tied best
       h += `<tr><td class="metric">${esc(txt(m.label))}</td>` + cells.map((c, i) => {
         if (!c || c.na) {
@@ -2628,9 +3212,20 @@ function compareBodyHtml(gws, st = state) {
           zeroWhy ? `<span class="zero-why">${esc(zeroWhy)}</span>` : ""}</td>`;
       }).join("") + `</tr>`;
     }
+    /* THE CURVES, SIDE BY SIDE. The rows above give three gateways' six readings as digits, which is
+       precise and slow to read; this row is the same three curves on the same shared scale, which is the
+       comparison a reader makes in one glance - and it is the comparison the two retired scalars made
+       impossible, since a single number cannot show that one of these machines needs a loose tail and
+       another does not. */
+    if (l.cmpExtra) {
+      const blocks = recs.map((j) => (laneServed(j, l.flag) ? l.cmpExtra(j, st) : ""));
+      if (blocks.some(Boolean))
+        h += `<tr><td class="metric">Curve across bounds</td>` +
+          blocks.map((b) => (b ? `<td class="shape">${b}</td>` : `<td class="na"></td>`)).join("") + `</tr>`;
+    }
   }
   h += `</tbody></table></div>`;
-  h += `<p class="fineprint">Best value per row is highlighted, decided by the measurement (lower latency and memory, higher throughput). Sweep overlays below use the sustained-throughput sweep (20 ms upstream delay) read off the SAME canonical record as the headline rows; every point is a real probe and the marked dot is the published number at its operating concurrency.</p>`;
+  h += `<p class="fineprint">Best value per row is highlighted, decided by the measurement (lower latency and memory, higher throughput). The sweep below each gateway is the ONE concurrency sweep its cell was measured on - every published throughput reading is a maximum over some subset of these same rungs - and the marked dot is the reading at the bound the board is currently showing, at the concurrency it was observed at.</p>`;
   h += `<div id="cmp-sweeps" class="sweeps"></div>`;
   return h;
 }
@@ -2643,21 +3238,10 @@ function renderCompare() {
   panel.classList.remove("hidden");
   document.getElementById("compare-body").innerHTML = compareBodyHtml(gws, state);
 
-  const series = gws.map((g, i) => {
-    // CHOOSER-AWARE: the CHOSEN cell's sustained@20ms sweep (Peak/Same/Custom), the SAME cell the headline
-    // rows read, so the marked peak is the published sustained@20ms at its operating concurrency. A
-    // suppressed metric is {value:null,…} and its sweep array lives INSIDE that envelope — so a rig-bound
-    // curve cannot surface a number the headline hides (finding 22, now structural).
-    const p = chooserCellPerf(g);
-    const env = p && p.rps_sustained_20ms;
-    // C5: read the number through mval(), never a bare `.value` deref (audit #15).
-    const v = mval(env);
-    return {
-      label: g.display, color: CMP_COLORS[i],
-      sweep: v != null ? (env.sweep ?? null) : null,
-      peak: v != null ? { rps: v, conc: concAt(env) } : null,
-    };
-  });
+  // CHOOSER-AWARE + BOUND-AWARE: each gateway's CHOSEN cell, its ONE sweep, marked at the SAME bound the
+  // rest of the panel is showing - through perfSweepSeries, the one place that decides what a perf curve is,
+  // so the drawer and the compare panel cannot plot a different thing from the same record.
+  const series = gws.map((g, i) => ({ ...perfSweepSeries(g, { sustained: CMP_COLORS[i] })[0], label: g.display, color: CMP_COLORS[i] }));
   renderSweepCharts(document.getElementById("cmp-sweeps"), series, chartTheme());
 }
 function closeCompare(sync = true) {
@@ -2709,23 +3293,29 @@ function matrixCellTip(cell) {
    mval(), so an ABSENT figure surfaces as its own reason rather than as a bare number - there is no
    ungated field here for a render site to leak. (It used to be the suppression this guarded against; a
    measurement near the rig's ceiling is now published, and only a genuine absence has nothing to show.) */
-function cellPerfTip(cell, ingress, egress, best) {
+function cellPerfTip(cell, ingress, egress, best, boundMs = selectedBound()) {
   const p = cell && cell.served === true ? cell.perf : null;
-  const rps = p ? mval(p.rps_sustained_20ms) : null;
+  const rd = p ? frontierAt(frontierOf(p), boundMs) : null;
+  const rps = rd ? mval(rd.rps) : null;
   const lat = p ? mval(p.added_latency_p99_us) : null;
-  if (!p || !isEnvelope(p.rps_sustained_20ms)) return "";
-  // Suppressed sustained RPS: {value:null}. Show the certified added-latency alone rather than a bare "".
+  // A record with no reading AT ALL at this bound has nothing to say about throughput here. It used to test
+  // `isEnvelope(p.rps_sustained_20ms)`, i.e. "does this record carry the field"; the equivalent question now
+  // is whether the frontier has a reading at the bound being displayed.
+  if (!p || !rd) return "";
+  // An ABSENT reading at this bound: show the certified added-latency alone rather than a bare "".
   if (rps == null) {
     // THE RECORD'S OWN REASON, NOT A GUESSED ONE. This read "sustained RPS n/a: rig-limited" for EVERY
-    // absent sustained figure - not_measured, harness_error and search_exhausted alike - so a hole this
+    // absent sustained figure - not_measured, harness_error and below_resolution alike - so a hole this
     // rig caused and a hole nobody has measured told the reader the same untrue thing. Everywhere else in
     // this file an absence reason travels through METRIC_NOTES; this one sentence was hand-written.
-    const env = p.rps_sustained_20ms;
-    const why = env && env.reason ? noteText(env.reason) : "not measured";
-    return lat != null ? `+${fmtInt(lat)} µs p99 added (sustained RPS n/a: ${why})` : "";
+    const why = rd.rps && rd.rps.reason ? noteText(rd.rps.reason) : "not measured";
+    return lat != null ? `+${fmtInt(lat)} µs p99 added (no reading at ${boundLabel(boundMs)}: ${why})` : "";
   }
-  const bp = cellPath(best), bRps = mval(best && best.rps_sustained_20ms);
-  let s = `${fmtInt(rps)} req/s (20 ms upstream)`;
+  const bpRd = frontierAt(frontierOf(best), boundMs);
+  const bp = cellPath(best), bRps = bpRd ? mval(bpRd.rps) : null;
+  // The bound is NAMED, and the "≥" travels: a floor stated as a ceiling is the one thing this popup must
+  // never do (the sweep ran out of ladder; the rate is real and maximality is not established).
+  let s = `${rd.lower_bound === true ? "≥ " : ""}${fmtInt(rps)} req/s ${boundClause(boundMs)}`;
   if (lat != null) s += `, +${fmtInt(lat)} µs p99 added`;
   if (bRps != null && bRps > 0) {
     if (bp.ingress === ingress && bp.egress === egress) s += " - reference cell (ranks the table)";
@@ -2759,8 +3349,21 @@ function cellPopFull(g, ingress, egress) {
   const perfRow = (key, fmt, lbl) => pushRow(lbl, chooserPerfCell(g, key, fmt, st));
   perfRow("added_latency_p50_us", fmtAdded, "Added latency p50");
   perfRow("added_latency_p99_us", fmtAdded, "Added latency p99");
-  perfRow("rps_sustained_20ms", fmtInt, "Sustained @20ms");
-  perfRow("rps_max_proxy", fmtInt, "Max proxy RPS");
+  // THROUGHPUT AT THE BOUND THE BOARD IS SHOWING, labelled with that bound, through the same reader the
+  // Performance table uses - so the popup and the table can never disagree about which reading they show.
+  // It replaces "Sustained @20ms" and "Max proxy RPS": one sweep collapsed twice, and the first label named
+  // a bound the qualifying gate did not use.
+  /* AND IT IS ALWAYS RENDERED, even when this cell has no reading at that bound. Every other row here is
+     dropped when it has nothing to say, which is right for a metric that is simply absent - but the bound is
+     the READER'S CHOICE, and a popup that silently omits the throughput row leaves them unable to tell
+     "this cell cannot do it at 5 ms" from "the popup does not show throughput". Those are opposite
+     conclusions, and on the slowest gateways the first one is most of the row. */
+  {
+    const lbl = esc(boundColLabel(selectedBound(state)));
+    const c = frontierChooserCell(g, st, selectedBound(state));
+    if (!c.na) pushRow(lbl, c);
+    else rows.push(`<div><span>${lbl}</span><b class="muted" title="${esc(c.note || "")}">${esc(c.text)}</b></div>`);
+  }
   const streamRow = (key, fmt, lbl) => pushRow(lbl, chooserStreamCell(g, key, fmt, st));
   streamRow("added_ttft_p99_us", fmtUsMs, "Added TTFT p99");
   streamRow("streams_sustained", fmtInt, "Streams sustained");
@@ -2770,6 +3373,10 @@ function cellPopFull(g, ingress, egress) {
     : (cell.served === true ? `<div class="pop-perf muted">served, not measured on this cell</div>` : "");
   // Δ-to-Peak: this cell vs the gateway's own best diagonal (best_cell). "" for the peak cell itself.
   const cellPerf = chooserCellPerf(g, st);
+  // THE CELL'S CURVE, in the popup that is the visual face of Custom mode. A single rate tells a reader
+  // whether this cell is fast; the shape tells them whether it is fast because the tail was allowed to grow,
+  // which is the difference this matrix is most often used to look for.
+  const shapeBlock = cellPerf ? frontierBlock(cellPerf, { compact: true }) : "";
   const cellPerfLabeled = cellPerf ? { ingress, egress, ...cellPerf } : null;
   const delta = deltaToPeak(cellPerfLabeled, g.best_cell);
   const bp = g.best_cell ? g.best_cell.path : null;
@@ -2793,7 +3400,7 @@ function cellPopFull(g, ingress, egress) {
       cellPerf.reverify_note ? ` - ${esc(cellPerf.reverify_note)}` : ""}</div>`
     : "";
   const cta = cell.served === true ? `<div class="pop-cta muted">click → Performance (Custom, this cell)</div>` : "";
-  return head + perfBlock + deltaBlock + verdict + reverify + cta;
+  return head + perfBlock + shapeBlock + deltaBlock + verdict + reverify + cta;
 }
 /* hasMatrixGrid(g): did this gateway produce a protocol matrix at all? */
 function hasMatrixGrid(g) { return !!(g && g.matrix && (g.matrix.upstreams || g.matrix.cells)); }
@@ -2923,8 +3530,18 @@ function renderMatrix() {
 /* ---- charts gallery --------------------------------------------------------- */
 const CHART_CAPTIONS = {
   added_latency: "Added latency vs direct-to-mock, p99 in microseconds, concurrency 1, on each gateway's best same-dialect passthrough (the same canonical record the table ranks). Lower is better.",
-  rps_sustained_20ms: "Sustained RPS with a 20 ms mock LLM latency (p99 under 1 s, error rate under 0.1 percent), best same-dialect passthrough. Higher is better.",
-  rps_max_proxy: "Max proxy RPS against an instant mock, best same-dialect passthrough. Higher is better.",
+  /* DELETED: `rps_sustained_20ms` and `rps_max_proxy`. Both captioned the same concurrency sweep collapsed
+     to one number, and the first asserted a qualifying bar of "p99 under 1 s, error rate under 0.1 percent"
+     that no gate in the engine ever enforced. The charts that replace them name their bound in the picture
+     itself, and these captions say the same thing in the same words the board's columns use. */
+  frontier_rps_at_bound: `Throughput at a named tail-latency bound: the most requests/sec each gateway carried ${boundClause(DEFAULT_BOUND_MS)} and it failed no request it accepted, on its best same-dialect passthrough. One of ${BOUND_CHOICES.length} readings of the same sweep published on every cell - the Frontier tab shows them all. Higher is better.`,
+  xlate_frontier_rps_at_bound: `Cross-protocol translation: the most requests/sec each gateway carried on its canonical translation path (direction named on the bar) ${boundClause(DEFAULT_BOUND_MS)} and it failed no request it accepted, under a 20 ms model delay. Higher is better.`,
+  frontier_shape: "One panel per gateway: throughput at every published tail-latency bound, on a shared log scale. Read the SHAPE, not the level - a flat panel holds its rate even when you demand a tight tail, a rising one needs a loose tail to go fast, and those two are completely different machines even when their headline numbers match.",
+  // The two charts that read the SWEEP rather than the frontier: what the gateway bought for each doubling
+  // of concurrency, and the vocabulary for reading those curves. Captioned here because the gallery renders
+  // from this table and an uncaptioned panel is a picture with no claim attached.
+  frontier_climb: "What each doubling of concurrency actually bought: throughput and tail latency against concurrency, log-log, one panel per gateway. A rate line that is already horizontal while the tail climbs means extra concurrency buys latency and nothing else.",
+  frontier_shapes_key: "ILLUSTRATIVE, not measured: four drawn archetypes of the climb curves above, each naming a gateway on the current board that shows it. No axis numbers, because there is no data in it.",
   memory_rss: "Process RSS in MiB: cold idle vs the steady state reached under an identical fixed load, on the SAME cell for every gateway (a process cold-started for that cell, the load run until the RSS is steady). A gateway whose RSS never went steady has no steady state and is drawn not-measured, with its growth rate on the bar. Lower is better.",
   memory_recovery: "RSS 60 s after the fixed load stops (recovered) vs the steady state under load: does the gateway release the memory it took? Lower recovery is better.",
   cost_per_million: "Instance cost per million requests at the canonical sustained rate. Lower is better.",
@@ -2932,9 +3549,10 @@ const CHART_CAPTIONS = {
   stream_added_ttft: "Streaming: added time-to-first-token vs direct-to-mock, p99. Lower is better.",
   stream_added_gap: "Streaming: added inter-frame (per-token) latency vs direct-to-mock, p99. Lower is better.",
   stream_sustained: "Streaming: max concurrent SSE streams sustained without frame loss or stalls. Higher is better.",
-  streamcpu_fps: "Streaming relay throughput under an unpaced firehose (CPU-bound): sustained content frames/sec. Higher is better.",
+  // DELETED: `streamcpu_fps`. The metric behind it (`cpu_fps`) is retired - it counted relay frames/sec
+  // without the delivery gate, so dropping frames could raise the score. charts.py deleted the chart; a
+  // caption for a PNG nothing emits is dead vocabulary, and a committed stale PNG would keep it alive.
   xlate_added_latency: "Translation on each gateway's canonical path (direction named on the bar; matrix per-cell sweep): added latency p99. Lower is better.",
-  xlate_rps_sustained_20ms: "Translation on each gateway's canonical path (direction named on the bar): sustained RPS at 20 ms LLM latency. Higher is better.",
 };
 function chartCaption(file) {
   const base = file.replace(/^charts\//, "").replace(/\?.*$/, "").replace(/\.png$/, "");
@@ -3349,6 +3967,11 @@ function showView(view) {
   const chooser = document.getElementById("cell-chooser");
   if (chooser) chooser.classList.toggle("hidden",
     !CHOOSER_VIEWS.has(view) || (view === "memory" && !hasPerCellMemory(state.data)));
+  // The bound selector belongs only to the tabs whose numbers are READ AT a bound. Offering it over the
+  // streaming or memory columns would imply those figures had a tail-latency bound too, which is the exact
+  // class of claim - a surface implying a bound it did not use - that the frontier exists to end.
+  const bound = document.getElementById("bound-chooser");
+  if (bound) bound.classList.toggle("hidden", !BOUND_VIEWS.has(view));
   // Switching between table tabs changes columns/caption/filtering, so re-render the table.
   if (TABLE_VIEWS.has(view) && state.data) { renderFilters(); renderTable(); }
   updateTitle();
@@ -3366,6 +3989,10 @@ function applyState(st) {
   Object.assign(state, {
     category: st.category, view: st.view, q: st.q, sortCol: st.sortCol, sortDesc: st.sortDesc,
     needStream: st.needStream, needXlate: st.needXlate,
+    // The bound travels with the rest of the shareable state; a decoded ?bound= that is missing leaves the
+    // default in place (newState), never undefined - selectedBound() would coerce it back anyway, but a
+    // state field that means "unbounded" when absent is exactly the confusion this board is removing.
+    bound: st.bound === null || FRONTIER_BOUNDS_MS.includes(st.bound) ? st.bound : DEFAULT_BOUND_MS,
     mode: st.mode, sameDialect: st.sameDialect, sameDialectPinned: st.sameDialectPinned,
     xlateIn: st.xlateIn, xlateOut: st.xlateOut,
     cmp: st.cmp, cmpOpen: st.cmpOpen, drawer: st.drawer,
@@ -3482,7 +4109,17 @@ if (NODE) {
     idleAcrossCells, neverPlateaued, worstGrowth, memCellTip, neverPlateauedPill,
     idleStatic, memShape, memGrowing, memShaped,
     hasMatrixGrid, matrixFailureReason, matrixRoster,
-    laneRecord, lanePathNote, perfSweepSeries, concAt, sustainedChooserCell, maxProxyChooserCell,
+    laneRecord, lanePathNote, perfSweepSeries, concAt,
+    // THE FRONTIER: the constants (mirrored from seal.mjs and checked against it), the readers every
+    // surface goes through, and the two renderers that make the curve's SHAPE legible. Exported because the
+    // shape is the headline finding and a renderer no test can reach is a renderer that can be deleted
+    // without anything going red - which is how the retired scalars' captions came to describe a test that
+    // never ran. `sustainedChooserCell` / `maxProxyChooserCell` are GONE with the two metrics they read.
+    FRONTIER_BOUNDS_MS, DEFAULT_BOUND_MS, BOUND_CHOICES, BOUND_VIEWS, SORT_ALIASES,
+    boundLabel, boundClause, boundColLabel, boundColId, selectedBound, fmtTail,
+    frontierOf, frontierAt, frontierCell, frontierGain, frontierSpark, frontierBlock, boardFrontierScale,
+    frontierChooserCell, frontierBoundCell, frontierShapeCell, frontierCaption, selectBound,
+    definitionsFor, definitionsFold, DEFINITION_PREFIXES, LANE_DEFINITION_PREFIXES, METRIC_NOTES,
     colTested, gatewayBuild, gatewayHardware, runMode, laneAgeSummary,
     chooserCaption, chooserLead, streamingProvenance,
     memoryCaption, memWindows, boardMemWindows, memLoadCellLabel, memLoadRecipeTip, memDisclosure,

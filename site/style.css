@@ -509,6 +509,53 @@ td.failcell {
 .seg-btn:hover { color: var(--fg); }
 .seg-btn.active { background: var(--accent, #4cc38a); color: #06120c; font-weight: 600; }
 
+/* ---- the latency-throughput frontier ----------------------------------------
+   THE TAIL-LATENCY BOUND SELECTOR (Performance + Frontier). Reuses the segmented control above, because it
+   is the same kind of choice as the cell chooser - which view of the one measurement to show - and a
+   second visual language for it would suggest a different kind of decision. */
+.bound-chooser { display: flex; flex-wrap: wrap; gap: .6rem; align-items: center; margin-top: .4rem; }
+.bound-chooser.hidden { display: none; }
+.bound-label { color: var(--fg-dim); font-size: .85rem; }
+/* The sentence under the control ("showing the most req/s each gateway carried while 99% of requests
+   finished under 10 ms"). The bound must be legible as WORDS and not only as a highlighted button: the
+   defect this whole surface exists to prevent is a reader inferring a bar the test never enforced. */
+.bound-note { font-size: .76rem; }
+
+/* THE CURVE, per row. `color: currentColor` throughout the SVG, so the line inherits the accent here and
+   stays legible in both themes without a second palette to keep in sync (same approach as .rss-spark). */
+.frontier-spark { display: block; color: var(--accent, currentColor); }
+td.shape { white-space: nowrap; }
+/* The gain factor beside the curve: the shape as one sortable, readable-aloud number. Small, because the
+   line is what the eye should reach first - but present, because a picture cannot be sorted or spoken. */
+.shape-gain { display: block; font-size: .7rem; color: var(--fg-dim); line-height: 1.2; }
+/* The frontier tab's per-bound cells: the rate, with the tail it ACTUALLY produced under it. A column of
+   rates alone cannot tell 4 ms under a 100 ms bound from 99 ms under it. */
+td.reading { white-space: nowrap; }
+.reading-tail { display: block; font-size: .66rem; color: var(--fg-dim); line-height: 1.2; }
+/* "SERVED, BUT NOTHING HELD THIS TAIL" - a measured nothing. It must not read as missing data: on the
+   slowest gateways five of six columns are this state, and "no data" is a neutral impression of a damning
+   measurement. The number stays muted (it is a zero) while the reason is stated in ink beneath it. */
+td.reading-zero { color: var(--fg-dim); }
+.reading-none { display: block; font-size: .66rem; color: var(--red); line-height: 1.2; }
+/* The column the board is currently ranked at, marked so the Performance tab's number is locatable in the
+   full curve. Deliberately the same tint the sorted column uses: it IS the sorted column by default, and
+   the mark has to survive the reader sorting by something else. */
+td.bound-col { background: var(--sorted-col-bg); }
+/* The curve in the drawer / compare panel / matrix popup, with its gain sentence under it. */
+.frontier-block { margin: .5rem 0 .2rem; }
+.frontier-block .frontier-spark { max-width: 100%; }
+.frontier-block .stamp { margin-top: .15rem; }
+.frontier-block.compact { margin: .2rem 0; }
+
+/* THE ENGINE'S OWN METRIC DEFINITIONS, folded. Collapsed by default so it costs one line of height until a
+   reader asks for it; the prose is verbatim from the engine's constants, so it is set as body text rather
+   than as fine print - it is the definition of the number above it, not a footnote to it. */
+.metric-defs { margin: .35rem 0 .2rem; font-size: .8rem; }
+.metric-defs > summary { cursor: pointer; color: var(--fg-dim); }
+.metric-defs > summary:hover { color: var(--fg); }
+.metric-def { margin: .5rem 0; padding-left: .6rem; border-left: 2px solid var(--border); }
+.metric-def p { margin: .2rem 0 0; color: var(--fg-dim); line-height: 1.5; }
+
 /* Floating hover popup for matrix cells: a small card that follows the hovered cell. */
 .matrix-pop {
   position: absolute; z-index: 50; max-width: 24rem; pointer-events: none;

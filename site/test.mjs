@@ -21,7 +21,8 @@ import { createRequire } from "node:module";
 import assert from "node:assert/strict";
 import { checkConsistency, c6Inversions, c7HwmBelowPeak, hasCellMemory } from "./check-consistency.mjs";
 import * as checkMod from "./check-consistency.mjs";
-import { sealMetric, displayedValue, THROUGHPUT_FIELDS, isMetricField, zeroNoteFor, ZERO_NO_CEILING, ZERO_MEASURED_FAIL } from "./seal.mjs";
+import { sealMetric, displayedValue, THROUGHPUT_FIELDS, isMetricField, zeroNoteFor, ZERO_NO_CEILING, ZERO_MEASURED_FAIL,
+  FRONTIER_BOUNDS_MS, DEFAULT_BOUND_MS } from "./seal.mjs";
 import { oracleExpected } from "./check-consistency.mjs";
 // A HAND-BUILT fixture has no results/matrix/<key>.json oracle, so it needs an EXPLICIT opt-in
 // (the CLI never passes it) to waive the oracle-verifiable requirement.
@@ -92,26 +93,55 @@ process.on("exit", () => {
 // point under test: a fixture builder here can never drift from what seal.mjs actually does.
 const seal = sealMetric;
 const SRC = (kind, sweep) => ({ kind, sweep, build: "img:1", measured_at: "2026-07-24T00:00:00Z" });
+/* ---- the frontier, as a fixture --------------------------------------------------------------------
+   THE RETIRED THROUGHPUT INTENTS ARE GONE from these builders: `rps_sustained_20ms`, `rps_max_proxy`,
+   their headroom/ceiling/concurrency siblings and their two sweep arrays. No producer emits any of them
+   (engine/src/frontier.rs replaced the pair with one sweep read at each declared bound), so a fixture that
+   still offered them would let a test assert on a shape the board can never receive - which is exactly how
+   the retired scalars' captions came to describe a test that never ran.
+   The intent is now the CURVE, because the curve is the finding:
+     frontier: 30000                          - flat: the same rate at every published bound
+     frontier: {1: 7015, 5: 15438, none: ...} - a real shape; a slot left out is a bound with NO qualifying
+                                                rung, which the engine omits from the array entirely
+     frontier: null                           - no frontier at all (a record measured before it existed)
+   A slot whose value is null is a reading whose RATE is absent, carrying the engine's own reason. */
+const FRONTIER_SLOTS = [1, 5, 10, 50, 100, "none"];
+function fxFrontier(spec = 30000, o = {}) {
+  if (spec == null) return [];
+  const flat = typeof spec === "number";
+  const slots = flat ? FRONTIER_SLOTS : FRONTIER_SLOTS.filter((k) => Object.prototype.hasOwnProperty.call(spec, k));
+  return slots.map((k) => {
+    const v = flat ? spec : spec[k];
+    const isLower = o.lowerBound === true || (Array.isArray(o.lowerBound) && o.lowerBound.includes(k));
+    return {
+      bound_ms: k === "none" ? null : k,
+      // Sealed through the REAL sealMetric, so a fixture reading can never carry an envelope shape the
+      // producer would not emit. An absent rate carries the engine's own absence reason.
+      rps: seal(v, { absent: v == null ? (o.absent || { reason: "below_resolution", detail: "every cleanly-served rung had a tail latency at or above this bound" }) : null }),
+      concurrency: v == null ? null : (o.conc ?? 512),
+      // THE OBSERVED TAIL, not the bound: 40% of it, so a fixture never accidentally asserts that a reading
+      // sat exactly on its own bound (which would not have qualified - the comparison is p99 < bound).
+      p99_us: v == null ? null : (o.p99_us ?? (k === "none" ? 40_000 : k * 400)),
+      first_disqualified_conc: v == null || isLower ? null : (o.firstDisq ?? 1024),
+      lower_bound: isLower,
+    };
+  });
+}
 // bcCell: a sealed best_cell (or same-dialect diagonal) from raw perf intent.
 function bcCell(o = {}) {
   const {
     dialect = "openai", ingress = dialect, egress = dialect, kind = "matrix",
     sweep = (kind === "perf-fallback" ? "perf-suite" : ingress === egress ? "6x6-diagonal" : "6x6-translation"),
     added_latency_p50_us = 100, added_latency_p99_us = 110,
-    rps_sustained_20ms = 30000, rps_sustained_20ms_headroom = null, rps_sustained_20ms_rig_ceiling = null,
-    rps_sustained_20ms_concurrency = null, sweep_sustained_20ms = null,
-    rps_max_proxy = 32000, rps_max_proxy_headroom = null, rps_max_proxy_rig_ceiling = null,
-    rps_max_proxy_concurrency = null, sweep_max_proxy = null,
+    frontier = 30000, frontierOpts = {}, sweepRungs = null,
   } = o;
   const rec = { path: { ingress, egress, ...(ingress === egress ? { dialect } : {}) }, source: SRC(kind, sweep) };
   if (added_latency_p50_us != null) rec.added_latency_p50_us = seal(added_latency_p50_us);
   if (added_latency_p99_us != null) rec.added_latency_p99_us = seal(added_latency_p99_us);
-  rec.rps_sustained_20ms = seal(rps_sustained_20ms, {
-    headroom: rps_sustained_20ms_headroom, ceiling: rps_sustained_20ms_rig_ceiling,
-    extras: { concurrency: rps_sustained_20ms_concurrency, sweep: sweep_sustained_20ms } });
-  rec.rps_max_proxy = seal(rps_max_proxy, {
-    headroom: rps_max_proxy_headroom, ceiling: rps_max_proxy_rig_ceiling,
-    extras: { concurrency: rps_max_proxy_concurrency, sweep: sweep_max_proxy } });
+  rec.frontier = fxFrontier(frontier, frontierOpts);
+  // The rungs every reading was taken from, as gen-data carries them: evidence, not a metric, so it is a
+  // plain array on the record rather than an envelope.
+  if (sweepRungs) rec.sweep = sweepRungs;
   return rec;
 }
 // tCell: a sealed translation_cell.
@@ -120,15 +150,12 @@ function tCell(o = {}) {
     ingress = "openai", egress = "anthropic", kind = "matrix",
     sweep = kind === "xlate-fallback" ? "xlate-suite" : "6x6-translation",
     added_latency_p50_us = null, added_latency_p99_us = 200,
-    rps_sustained_20ms = 3000, rps_sustained_20ms_headroom = null, rps_sustained_20ms_rig_ceiling = null,
-    rps_sustained_20ms_concurrency = null,
+    frontier = 3000, frontierOpts = {},
   } = o;
   const rec = { path: { ingress, egress }, source: SRC(kind, sweep) };
   if (added_latency_p50_us != null) rec.added_latency_p50_us = seal(added_latency_p50_us);
   if (added_latency_p99_us != null) rec.added_latency_p99_us = seal(added_latency_p99_us);
-  rec.rps_sustained_20ms = seal(rps_sustained_20ms, {
-    headroom: rps_sustained_20ms_headroom, ceiling: rps_sustained_20ms_rig_ceiling,
-    extras: { concurrency: rps_sustained_20ms_concurrency } });
+  rec.frontier = fxFrontier(frontier, frontierOpts);
   return rec;
 }
 // streamRec: a sealed streaming record (projected g.streaming, or a per-cell .stream when path omitted).
@@ -905,14 +932,34 @@ test("legacy hash URLs (#view=...&sort=...) still decode", () => {
 
 test("decode rejects a bogus sort column", () => {
   const back = app.decodeUrl("/gateways", "?sort=evil&dir=asc");
-  assert.equal(back.sortCol, "rps20");
+  assert.equal(back.sortCol, "rps");
+});
+
+// A RETIRED SORT ID STILL LANDS ON A RANKING. `?sort=rps20` / `?sort=rpsmax` are in every Performance link
+// ever shared and in the charts' deep links; the two columns they name are gone with the two scalar metrics
+// they read, and both links MEANT "rank by throughput" - which is now the frontier reading at the selected
+// bound. Falling through to the tab default would land in the same place by accident; the alias says so.
+test("a retired throughput sort id decodes onto the column that carries that ranking now", () => {
+  for (const old of ["rps20", "rpsmax"]) {
+    const st = app.decodeUrl("/gateways/performance", `?sort=${old}&dir=desc`);
+    assert.equal(st.sortCol, "rps", `?sort=${old} must rank by the frontier reading`);
+    assert.equal(st.sortDesc, true);
+  }
+  // And the retired streaming id lands on the surviving frame-rate column, not on nothing.
+  assert.equal(app.decodeUrl("/gateways/streaming", "?sort=cpufps").sortCol, "streamfps");
 });
 
 test("a direct URL load defaults each tab to its column's natural direction", () => {
-  // Performance headline on Sustained RPS -> descending (higher is better)
+  // Performance headline on the frontier reading at the selected bound -> descending (higher is better)
   const pass = app.decodeUrl("/gateways/performance", "");
-  assert.equal(pass.sortCol, "rps20");
+  assert.equal(pass.sortCol, "rps");
   assert.equal(pass.sortDesc, true);
+  // The Frontier tab ranks at the DEFAULT BOUND's own column, so a reader arriving with no params is
+  // ranked at the bound the caption names rather than at whichever column happens to be listed first.
+  const front = app.decodeUrl("/gateways/frontier", "");
+  assert.equal(front.sortCol, app.boundColId(app.DEFAULT_BOUND_MS));
+  assert.equal(front.sortDesc, true);
+  assert.equal(front.bound, app.DEFAULT_BOUND_MS);
   // Memory headline on Peak RSS -> ascending (lower is better)
   const mem = app.decodeUrl("/gateways/memory", "");
   assert.equal(mem.sortCol, "mempeak");
@@ -947,11 +994,15 @@ test("star counts format compactly and degrade to null", () => {
   assert.equal(app.fmtStars(undefined), null);
 });
 
-test("the unified tab order: Gateways · Memory · Performance · Streaming · matrix · method", () => {
-  assert.deepEqual(app.VIEWS, ["gateways", "memory", "performance", "streaming", "matrix", "method"]);
+test("the unified tab order: Gateways · Memory · Performance · Frontier · Streaming · matrix · method", () => {
+  // FRONTIER SITS BESIDE PERFORMANCE, not at the end: it is the same measurement read every published way,
+  // and a reader who has just looked at a ranking at one bound is one tab away from the whole curve. The
+  // order is asserted because it is the reading order of the board, not an implementation detail.
+  assert.deepEqual(app.VIEWS, ["gateways", "memory", "performance", "frontier", "streaming", "matrix", "method"]);
   assert.equal(app.VIEW_LABELS.gateways, "Gateways");
   assert.equal(app.VIEW_LABELS.memory, "Memory");
   assert.equal(app.VIEW_LABELS.performance, "Performance");
+  assert.equal(app.VIEW_LABELS.frontier, "Frontier");
   // the overview is a roster section, not a ranked perf table
   assert.ok(!app.PERF_VIEWS.has("gateways"));
   assert.ok(!(app.VIEW_SORT && "gateways" in app.VIEW_SORT));
@@ -973,18 +1024,23 @@ const mkMatrix = (cells) => ({ upstreams: Object.fromEntries(
     Object.entries(ing).map(([i, c]) => [i, c])) }])) });
 
 test("Passthrough is BEST-OF: every gateway shows on its best diagonal, none filtered", () => {
-  // best_cell (openai diagonal, sealed envelope) -> that number. A certified value shows.
-  const green = { best_cell: bcCell({ dialect: "openai", rps_sustained_20ms: 30000 }) };
-  assert.equal(app.passCell(green, "rps_sustained_20ms", String).na, false);
-  assert.equal(app.passCell(green, "rps_sustained_20ms", String).text, "30000");
+  // best_cell (openai diagonal) -> that reading. THE THROUGHPUT IS READ THROUGH THE FRONTIER now, at a
+  // named bound: `passCell` takes a metric FIELD and the frontier is an array of readings, not a field, so
+  // the sibling accessor is frontierCell. The latency half of this record is still a plain envelope and is
+  // still read by passCell, which is the point of keeping both here.
+  const green = { best_cell: bcCell({ dialect: "openai", frontier: 30000 }) };
+  assert.equal(app.frontierCell(green.best_cell, 10).na, false);
+  assert.equal(app.frontierCell(green.best_cell, 10).text, "30,000");
+  assert.equal(app.passCell(green, "added_latency_p99_us", String).text, "110");
   // no best_cell at all (a gateway whose sweep did not land): reads n/a - there is no legacy perf reservoir.
   const unswept = { matrix: mkMatrix({ openai: { openai: { served: true } } }) };
-  assert.equal(app.passCell(unswept, "rps_sustained_20ms", String).na, true);
+  assert.equal(app.passCell(unswept, "added_latency_p99_us", String).na, true);
+  assert.equal(app.frontierChooserCell(unswept, { ...app.newState(), mode: "peak" }).na, true);
   // openai not served: BEST-OF shows the native diagonal (one gateway -> anthropic), NOT n/a and
   // NOT filtered. gen-data picks it; here best_cell carries the anthropic number.
-  const native = { best_cell: bcCell({ dialect: "anthropic", rps_sustained_20ms: 32354 }) };
-  assert.equal(app.passCell(native, "rps_sustained_20ms", String).na, false);
-  assert.equal(app.passCell(native, "rps_sustained_20ms", String).text, "32354");
+  const native = { best_cell: bcCell({ dialect: "anthropic", frontier: 32354 }) };
+  assert.equal(app.frontierCell(native.best_cell, 10).na, false);
+  assert.equal(app.frontierCell(native.best_cell, 10).text, "32,354");
   // and Passthrough does NOT filter: a gateway with only a native diagonal still appears
   const st = app.newState(); // view passthrough
   const rows = app.applyFilters([{ display: "x", key: "x", lang: "Rust", ...native }], st);
@@ -1012,19 +1068,20 @@ test("Performance Custom shows EVERY gateway (unfiltered); a gateway lacking the
   // appears, and one that does not serve the pinned in->out cell simply reads n/a on that row.
   // g0 serves openai->anthropic, g1 serves only openai->gemini. Cell perf is SEALED in place.
   const g0 = { display: "g0", key: "g0", lang: "Rust",
-    matrix: mkMatrix({ anthropic: { openai: { served: true, perf: cellPerf({ rps_sustained_20ms: 100, added_latency_p99_us: 200 }) } } }) };
+    matrix: mkMatrix({ anthropic: { openai: { served: true, perf: cellPerf({ frontier: 100, added_latency_p99_us: 200 }) } } }) };
   const g1 = { display: "g1", key: "g1", lang: "Go",
-    matrix: mkMatrix({ gemini: { openai: { served: true, perf: cellPerf({ rps_sustained_20ms: 90, added_latency_p99_us: 300 }) } } }) };
+    matrix: mkMatrix({ gemini: { openai: { served: true, perf: cellPerf({ frontier: 90, added_latency_p99_us: 300 }) } } }) };
   const st = { ...app.newState(), view: "performance", mode: "custom", xlateIn: "openai", xlateOut: "anthropic" };
   // BOTH gateways appear (no filtering in Custom mode).
   assert.deepEqual(app.applyFilters([g0, g1], st).map((g) => g.key), ["g0", "g1"]);
-  // g0 serves the pinned cell -> a number; g1 does not -> n/a.
-  assert.equal(app.chooserPerfCell(g0, "rps_sustained_20ms", String, st).text, "100");
-  assert.equal(app.chooserPerfCell(g1, "rps_sustained_20ms", String, st).na, true);
+  // g0 serves the pinned cell -> a number; g1 does not -> n/a. Read through the frontier accessor the
+  // Performance column uses, at the state's own selected bound.
+  assert.equal(app.frontierChooserCell(g0, st).text, "100 @ 512 conc");
+  assert.equal(app.frontierChooserCell(g1, st).na, true);
   // Repin to openai->gemini: now g1 reads a number and g0 reads n/a, still both present.
   const st2 = { ...st, xlateOut: "gemini" };
-  assert.equal(app.chooserPerfCell(g1, "rps_sustained_20ms", String, st2).text, "90");
-  assert.equal(app.chooserPerfCell(g0, "rps_sustained_20ms", String, st2).na, true);
+  assert.equal(app.frontierChooserCell(g1, st2).text, "90 @ 512 conc");
+  assert.equal(app.frontierChooserCell(g0, st2).na, true);
   assert.deepEqual(app.applyFilters([g0, g1], st2).map((g) => g.key), ["g0", "g1"]);
 });
 
@@ -1046,29 +1103,41 @@ testWithData("consistency guard: table == drawer == compare == charts on the rea
 // alongside so a reader can weigh it. So the second half holds the OPPOSITE property: the near-ceiling
 // number reaches every surface, its `headroom` and `rig_ceiling` reach it too, and the bundle is still
 // structurally clean (C1/C2) with them on board.
-test("sealed envelope: every surface reads best_cell through metric(); a near-ceiling number is PUBLISHED", () => {
+test("sealed envelope: every surface reads best_cell through metric(); a frontier reading is one too", () => {
   const g = { key: "seal", display: "Seal", lang: "Rust",
-    best_cell: bcCell({ added_latency_p99_us: 111, rps_sustained_20ms: 22222, rps_max_proxy: 33333 }) };
+    best_cell: bcCell({ added_latency_p99_us: 111, frontier: { 1: 22222, 10: 30000, none: 33333 } }) };
   // table (passCell) reads the envelope value
   assert.equal(app.passCell(g, "added_latency_p99_us", String).v, 111);
-  assert.equal(app.passCell(g, "rps_sustained_20ms", String).v, 22222);
-  assert.equal(app.passCell(g, "rps_max_proxy", String).v, 33333);
-  // drawer/compare read the SAME canonical record (the projected best_cell), metrics as envelopes
+  // AND THE THROUGHPUT READINGS ARE ENVELOPES TOO, one per bound, read through the same metric()
+  // accessor - which is the property that survived the two scalars this test used to check. The rate is
+  // sealed; the concurrency, the observed tail and the boundary proof ride beside it as plain evidence.
+  assert.equal(app.frontierCell(g.best_cell, 1).v, 22222);
+  assert.equal(app.frontierCell(g.best_cell, 10).v, 30000);
+  assert.equal(app.frontierCell(g.best_cell, null).v, 33333);
+  assert.ok(app.isEnvelope(app.frontierAt(g.best_cell.frontier, 10).rps), "each reading's rate is a sealed envelope");
+  // A bound the record has no reading at is an ABSENCE with a reason, never a zero and never a blank.
+  assert.equal(app.frontierCell(g.best_cell, 50).na, true);
+  assert.match(app.frontierCell(g.best_cell, 50).note, /no reading at 50 ms/);
+  // drawer/compare read the SAME canonical record (the projected best_cell)
   const perfLane = app.LANES.find((l) => l.key === "perf");
   assert.equal(perfLane.get, app.canonicalPerf, "perf lane reads the canonical accessor");
   const rec = perfLane.get(g);
-  assert.equal(app.mval(rec.rps_sustained_20ms), 22222);
-  assert.equal(app.mval(rec.rps_max_proxy), 33333);
+  const laneRow = (bound) => perfLane.metrics.find((m) => m.k === `frontier.${bound}`);
+  assert.equal(laneRow("10ms").cell(rec).v, 30000, "the drawer row reads the same reading the table does");
+  assert.equal(laneRow("unbounded").cell(rec).v, 33333);
   assert.deepEqual(checkConsistency({ gateways: [g] }, app, SYNTH).errors, [], "a clean sealed bundle is consistent");
-  // A NEAR-CEILING sustained (0.97 of the rig's measured 25,700): published, on every surface, with the
-  // comparison's own facts attached rather than a hole where the number was.
+  // A LATENCY metric near the rig's own ceiling is still PUBLISHED with the comparison's own facts on it
+  // (the headroom/ceiling pair that replaced the suppression). The throughput lane no longer carries
+  // headroom - a frontier reading is a maximum over qualifying rungs, not a comparison against a rig
+  // reference - so the property is asserted where it still exists.
   const bound = { key: "sealb", display: "SealB", lang: "Rust",
-    best_cell: bcCell({ rps_sustained_20ms: 24999, rps_sustained_20ms_headroom: 0.97, rps_sustained_20ms_rig_ceiling: 25700 }) };
-  assert.equal(app.passCell(bound, "rps_sustained_20ms", String).na, false, "a near-ceiling metric is not n/a");
-  assert.equal(app.passCell(bound, "rps_sustained_20ms", String).v, 24999, "the table shows the number that was measured");
-  assert.equal(app.mval(bound.best_cell.rps_sustained_20ms), 24999, "and the drawer/compare read the same one");
-  assert.equal(bound.best_cell.rps_sustained_20ms.headroom, 0.97, "the fraction of the rig ceiling reached travels with it");
-  assert.equal(bound.best_cell.rps_sustained_20ms.rig_ceiling, 25700, "as does the ceiling it is a fraction of");
+    best_cell: { ...bcCell({ frontier: 24999 }),
+      added_latency_p99_us: seal(24999, { headroom: 0.97, ceiling: 25700 }) } };
+  assert.equal(app.passCell(bound, "added_latency_p99_us", String).na, false, "a near-ceiling metric is not n/a");
+  assert.equal(app.passCell(bound, "added_latency_p99_us", String).v, 24999, "the table shows the number that was measured");
+  assert.equal(app.mval(bound.best_cell.added_latency_p99_us), 24999, "and the drawer/compare read the same one");
+  assert.equal(bound.best_cell.added_latency_p99_us.headroom, 0.97, "the fraction of the rig ceiling reached travels with it");
+  assert.equal(bound.best_cell.added_latency_p99_us.rig_ceiling, 25700, "as does the ceiling it is a fraction of");
   assert.deepEqual(checkConsistency({ gateways: [bound] }, app, SYNTH).errors, [],
     "the facts on the envelope are structurally clean: C1 accepts them, C2 finds no suppression");
 });
@@ -1121,27 +1190,72 @@ test("HIGH class: a certified xlate-fallback value survives the seal and reaches
   // Provenance is honestly stamped as the fallback (source.kind), NOT mislabelled matrix.
   assert.equal(g.best_cell.source.kind, "perf-fallback", "best_cell stamped perf-fallback");
   assert.equal(g.translation_cell.source.kind, "xlate-fallback", "translation_cell stamped xlate-fallback");
-  // The certified values are sealed as certified envelopes (value present) - never suppressed.
-  assert.equal(app.mval(g.best_cell.rps_sustained_20ms), 19286, "certified perf-fallback sustained survives");
-  assert.equal(app.mval(g.translation_cell.rps_sustained_20ms), 17437, "certified xlate-fallback RPS survives (the HIGH class)");
-  // The table accessor surfaces the real number, not n/a.
-  assert.equal(app.xlateCell({ ...g, matrix: undefined } , "rps_sustained_20ms", String).na, true); // no matrix cell to read
-  assert.equal(app.mval(app.canonicalXlate(g).rps_sustained_20ms), 17437, "certified xlate RPS reaches the drawer/compare");
+  // The certified LATENCY values are sealed as certified envelopes (value present) - never suppressed.
+  assert.equal(app.mval(g.best_cell.added_latency_p99_us), 20, "certified perf-fallback latency survives");
+  assert.equal(app.mval(g.translation_cell.added_latency_p99_us), 30, "certified xlate-fallback latency survives (the HIGH class)");
+  /* AND THE THROUGHPUT PUBLISHES NOTHING AT ALL, on purpose. A legacy suite record carries one scalar taken
+     under one chosen ceiling; the frontier is six readings off a sweep the suite never recorded, so there is
+     nothing to project. gen-data emits `frontier: []` rather than dressing the old 19,286 as one bound's
+     reading - which would be the retired defect exactly, a number published under a bound it was not
+     measured at. THE UI'S JOB HERE IS TO SHOW NO THROUGHPUT, never a zero and never a blank that reads as
+     one, and that is what is asserted. */
+  assert.deepEqual(g.best_cell.frontier, [], "a perf-suite fallback projects NO frontier");
+  assert.deepEqual(g.translation_cell.frontier, [], "an xlate-suite fallback projects NO frontier");
+  const cell = app.frontierCell(g.best_cell, app.DEFAULT_BOUND_MS);
+  assert.equal(cell.na, true, "no frontier reads as an absence");
+  assert.equal(cell.v, null, "and carries no value at all - not a 0");
+  assert.match(cell.text, /no frontier/, "the cell says so on its face, not only in a tooltip");
+  assert.match(cell.note, /not the same as a throughput of zero/);
+  // The retired scalars are GONE from the bundle: a fallback row cannot smuggle them back in.
+  assert.ok(!JSON.stringify(bundle).includes("rps_sustained_20ms"), "no rps_sustained_20ms survives anywhere");
+  assert.ok(!JSON.stringify(bundle).includes("rps_max_proxy"), "no rps_max_proxy survives anywhere");
   // And C1 holds: no _mock_bound flag survives anywhere in the emitted bundle.
   assert.ok(!JSON.stringify(bundle).includes("_mock_bound"), "no *_mock_bound flag survives the seal");
 });
 
-test("a zero RPS cell renders 0 with the no-qualifying-ceiling tooltip", () => {
-  const zero = { best_cell: bcCell({ dialect: "openai", rps_sustained_20ms: 18, rps_max_proxy: 0 }) };
+/* WAS: "a zero RPS cell renders 0 with the no-qualifying-ceiling tooltip". That test asserted that a
+   measured `rps_max_proxy` of 0 rendered as an honest "0" annotated "no tested load held p99 < 1 s at
+   <0.1% errors". BOTH HALVES ARE GONE: the metric is deleted, and the sentence was wrong twice over (no
+   gate enforced 1 s, and the frontier grants no error tolerance at all). There is no throughput zero left
+   to render - a bound no rung qualified at is an ABSENCE carrying the engine's own reason.
+   So the property is inverted into the guard that the zero cannot come back, and the two absences the
+   engine distinguishes are asserted to render apart, which is the finding that replaced it. */
+test("a throughput hole is an ABSENCE with the engine's reason, never a zero", () => {
+  const st = { ...app.newState(), mode: "peak" };
+  /* THE ENGINE DISTINGUISHES TWO ABSENCES and the board must render them apart (frontier.rs
+     `absence_for`: "the two cases are genuinely different and the old code published one token for both").
+     (a) NOTHING SERVED CLEANLY ANYWHERE - a fact about the GATEWAY, and a genuine hole: no value at all. */
+  const nothing = { best_cell: bcCell({ dialect: "openai", frontier: { 1: null, 10: 18, none: 20 },
+    frontierOpts: { absent: { reason: "not_measured", detail: "no concurrency in this sweep served every request it accepted, across 9 rung(s) probed" } } }) };
+  const at1 = app.frontierCell(nothing.best_cell, 1);
+  assert.equal(at1.na, true, "nothing served cleanly is an absence");
+  assert.equal(at1.v, null, "with NO value - a 0 here would claim a measurement of zero throughput");
+  assert.notEqual(at1.text, "0");
+  assert.match(at1.note, /served every request it accepted/, "the engine's own reason travels to the cell");
+  /* (b) SERVED CLEANLY, BUT NOTHING HELD THIS BOUND - a fact about the BOUND, and the engine states it as
+     below_resolution with the prose "carried no measurable throughput under that bound". That IS a measured
+     zero for this bound, so it displays as the one accessor displays below_resolution ("≈0", ranking 0) -
+     the reader sees a gateway that carried nothing under a tight tail, which is the finding, not a hole. */
+  const tooSlow = { best_cell: bcCell({ dialect: "openai", frontier: { 1: null, 10: 18, none: 20 } }) };
+  const slow1 = app.frontierCell(tooSlow.best_cell, 1);
+  assert.equal(slow1.v, 0, "no rung held this bound ranks as zero throughput under it");
+  assert.equal(slow1.text, "0");
+  // AND IT SAYS SO ON THE CELL. On the field data plano is this state at five of six bounds; a bare cell
+  // there would read as five missing measurements instead of the one damning finding it is.
+  assert.equal(slow1.why, "no rung held this tail");
+  assert.match(app.metricTd(slow1), /no rung held this tail/, "the reason renders in the td, not only on hover");
+  assert.match(slow1.note, /tail latency at or above/, "and the engine's own prose is the tooltip");
+  const hole = tooSlow;
+  // (b) A REAL READING still reads as one, at the bound it was taken at, with its concurrency inline.
   const cols = app.COLUMN_SETS.performance;
-  const rpsmax = cols.find((c) => c.id === "rpsmax").get(zero);
-  assert.equal(rpsmax.text, "0", "a measured-zero RPS ceiling shows 0 (honest), never suppressed");
-  assert.equal(rpsmax.na, false);
-  assert.ok(/no tested load held p99 < 1 s/.test(rpsmax.note), "tooltip explains the 0");
-  // a non-zero cell carries no note
-  const rps20 = cols.find((c) => c.id === "rps20").get(zero);
-  assert.equal(rps20.text, "18");
-  assert.ok(!rps20.note);
+  const rps = cols.find((c) => c.id === "rps").get(hole, st);
+  assert.equal(rps.text, "18 @ 512 conc");
+  assert.match(rps.note, /while 99% of requests finished under 10 ms/);
+  // (c) AND THE RETIRED VOCABULARY IS UNREACHABLE: no surface can name a bound the run did not enforce.
+  assert.ok(!Object.values(app.METRIC_NOTES).some((s) => /p99 < 1 s|<0\.1% errors/.test(s)),
+    "no metric note may assert the retired throughput gate's fabricated bar");
+  for (const tok of ["mock_bound", "unverifiable", "paced_match"])
+    assert.ok(!(tok in app.METRIC_NOTES), `${tok} is retired vocabulary and must not be renderable`);
 });
 
 // ---- check-consistency: STRUCTURAL INVARIANTS C1–C5 + R1 oracle + R2 coverage ------------------------
@@ -1278,10 +1392,12 @@ testWithMatrixDonor("C1 RED: EVERY malformed metric shape fails C1, not just a b
   ]) {
     const d = clone();
     const g = matrixGw(d);
-    g.best_cell.rps_max_proxy = bad;
+    // INJECTED ON A SURVIVING ENVELOPE. It used to be `rps_max_proxy`, which no producer emits; the
+    // invariant is about the SHAPE of any sealed metric, so any metric field proves it.
+    g.best_cell.added_latency_p99_us = bad;
     const e = checkConsistency(d, app).errors;
     assert.ok(
-      e.some((x) => x.startsWith("C1:") && x.includes("rps_max_proxy")),
+      e.some((x) => x.startsWith("C1:") && x.includes("added_latency_p99_us")),
       `C1 must flag ${what}; got: ${JSON.stringify(e.filter((x) => x.startsWith("C1")))}`
     );
   }
@@ -1295,7 +1411,7 @@ testWithMatrixDonor("C1 RED: EVERY malformed metric shape fails C1, not just a b
 testWithMatrixDonor("C1 RED: a surviving *_mock_bound flag fails C1", () => {
   const d = clone();
   const g = matrixGw(d);
-  g.best_cell.rps_max_proxy_mock_bound = false;   // the flag must have been consumed at seal time
+  g.best_cell.added_latency_p99_us_mock_bound = false;   // the flag must have been consumed at seal time
   const e = checkConsistency(d, app).errors;
   assert.ok(e.some((x) => x.startsWith("C1:") && x.includes("_mock_bound")),
     `C1 must flag a surviving *_mock_bound flag; got: ${JSON.stringify(e.filter((x) => x.startsWith("C1")))}`);
@@ -1304,9 +1420,11 @@ testWithMatrixDonor("C1 RED: a surviving *_mock_bound flag fails C1", () => {
 testWithMatrixDonor("C2 RED: a suppressed metric that still exposes a value fails C2", () => {
   const d = clone();
   const g = matrixGw(d);
-  g.best_cell.rps_sustained_20ms = { value: 19469, certified: false, suppressed: true, reason: "mock_bound" };
+  // Injected on a surviving metric field, and with the retired suppression reason it used to carry: the
+  // vocabulary is dead, and C2 is the guard that it stays dead whatever field it is smuggled in on.
+  g.best_cell.added_latency_p99_us = { value: 19469, certified: false, suppressed: true, reason: "mock_bound" };
   const e = checkConsistency(d, app).errors;
-  assert.ok(e.some((x) => x.startsWith("C2:") && x.includes("rps_sustained_20ms")),
+  assert.ok(e.some((x) => x.startsWith("C2:") && x.includes("added_latency_p99_us")),
     `C2 must flag a suppressed metric that still carries a value; got: ${JSON.stringify(e.filter((x) => x.startsWith("C2")))}`);
 });
 
@@ -1341,118 +1459,100 @@ testWithMatrixDonor("R1 RED: a best_cell envelope that disagrees with the RAW ma
   const d = clone();
   const g = matrixGw(d);
   // corrupt the sealed headline so it no longer equals the raw matrix diagonal cell on disk.
-  const cur = g.best_cell.rps_sustained_20ms;
-  g.best_cell.rps_sustained_20ms = { value: (app.mval(cur) || 0) + 12345, certified: true, suppressed: false };
+  const cur = g.best_cell.added_latency_p99_us;
+  g.best_cell.added_latency_p99_us = { value: (app.mval(cur) || 0) + 12345, certified: true, suppressed: false };
   const e = checkConsistency(d, app).errors;
-  assert.ok(e.some((x) => x.startsWith("R1:") && x.includes(g.key) && x.includes("rps_sustained_20ms")),
+  assert.ok(e.some((x) => x.startsWith("R1:") && x.includes(g.key) && x.includes("added_latency_p99_us")),
     `R1 must flag a headline that disagrees with the raw matrix cell; got: ${JSON.stringify(e.filter((x) => x.startsWith("R1")))}`);
 });
 
-// ---- C6: the physical-plausibility invariant, proven on INJECTED data --------------------------
-// C6 is a pure exported function, so the RED case is injected here rather than relying on a particular
-// gateway's shipped data staying inverted, and the check is proven independent of the live board.
-const c6Matrix = (sus, max, served = true, extra = {}) => ({
-  upstreams: { openai: { cells: { openai: { served,
-    perf: { rps_sustained_20ms: sus, rps_max_proxy: max, ...extra } } } } },
+/* ---- C6: THE FRONTIER'S ORDERING AND ITS DISCLOSURE, proven on INJECTED data --------------------
+   WHAT THIS FAMILY USED TO TEST, AND WHY NONE OF IT SURVIVES AS WRITTEN. C6 compared `rps_sustained_20ms`
+   against `rps_max_proxy` and failed the build when the "sustained" figure exceeded the "maximum" - with a
+   whole severity band around it (the cell's own sweep scatter excused a small inversion, a gross-percentage
+   ceiling capped what noise could excuse, a plateau median explained an inversion of up to half the
+   scatter, and a peak that won at its top rung was flagged separately). Six tests pinned those edges.
+   Both metrics are DELETED. The inversion they policed is now unrepresentable: a reading is a maximum over
+   the rungs qualifying at its bound, relaxing a bound only ADDS rungs, so a looser reading cannot be
+   smaller - which is why the elaborate band has nothing left to be a band around. The scatter machinery is
+   gone with it, and so are the tests that pinned its edges: there is no chosen tolerance left to test.
+   What C6 checks now is the same INVARIANT from the other side, and it is checked precisely because it is
+   structural - an invariant nothing verifies is an invariant nobody notices breaking. The three claims:
+   the bounds ascend with the unbounded reading last; the readings do not invert; and `lower_bound` agrees
+   with the rungs actually probed. The third is the direct descendant of the retired "won at its top rung"
+   test - the state is identical, but it is no longer a violation: a rate whose sweep ran out of ladder is
+   published and DISCLOSED as a floor, and what must hold is that the disclosure is truthful. */
+// A raw matrix carrying one cell whose frontier is the readings given, plus the sweep rungs they were read
+// from (which is what `lower_bound` is checked against).
+const c6Matrix = (readings, opts = {}) => ({
+  upstreams: { openai: { cells: { openai: { served: opts.served !== false,
+    perf: { frontier: readings, sweep_max_proxy: opts.sweep ?? [{ conc: 64, rps: 100 }, { conc: 128, rps: 90 }] } } } } },
 });
-// A max-proxy sweep whose rungs scatter by `spreadPct` around `max`, winning at `winnerConc` and with a
-// rung ABOVE the winner (so the ladder was not exhausted). This is what a real cell carries.
-const c6Sweep = (max, spreadPct, winnerConc = 64) => ({
-  rps_max_proxy_concurrency: winnerConc,
-  sweep_max_proxy: [
-    { conc: 32, rps: Math.round(max * (1 - spreadPct / 100)) },
-    { conc: winnerConc, rps: max },
-    { conc: winnerConc * 2, rps: Math.round(max * (1 - spreadPct / 200)) },
-  ],
-});
-
-test("C6 RED: an INJECTED sustained@20ms > max_proxy cell with no measured scatter is a HARD FAILURE", () => {
-  const r = c6Inversions("gw", c6Matrix(14351, 14325));
-  assert.equal(r.cellsChecked, 1, "the inverted cell must have been checked");
-  assert.equal(r.violations.length, 1, `C6 must flag an injected inversion; got: ${JSON.stringify(r.violations)}`);
-  assert.ok(r.violations[0].includes("gw.openai->openai") && r.violations[0].includes("sustained@20ms")
-    && r.violations[0].includes("max_proxy") && r.violations[0].includes("0.18%"),
-    `the C6 violation must name the cell, both ceilings and the magnitude; got: ${r.violations[0]}`);
-});
-
-// C6 SEVERITY IS DECIDED BY THE CELL'S OWN MEASURED SCATTER: a blanket warning would hide a peak sweep
-// that terminated on its own upper bound without ever finding a ceiling, and a blanket error would make
-// the board unpublishable over ordinary run-to-run variation on a flat CPU-bound curve. The band is not
-// a chosen number, it is the peak sweep's own rung-to-rung spread, measured on the same box in the same
-// phase. These tests pin BOTH edges.
-test("C6 band: an inversion INSIDE the cell's own sweep scatter warns; OUTSIDE it errors", () => {
-  // one gateway's real shape: a flat ~175 rps curve sampled twice, 2.21% apart, scatter 6.08%.
-  const inBand = c6Inversions("gw", c6Matrix(185, 181, true, c6Sweep(181, 6.08)));
-  assert.equal(inBand.violations.length, 0, `an inversion inside the cell's own scatter must not block the publish; got: ${JSON.stringify(inBand.violations)}`);
-  assert.equal(inBand.warnings.length, 1, "it must still be REPORTED, not silently tolerated");
-  assert.match(inBand.warnings[0], /2\.21% inversion/, "the warning states the magnitude");
-  assert.match(inBand.warnings[0], /scatter of 6\.0/, "and the band that excused it, so the judgement can be checked");
-  // Same inversion, a cell whose own sweep is TIGHT: now the gap is larger than anything the gateway's
-  // repeated measurements produced, so it is a finding rather than noise.
-  const outOfBand = c6Inversions("gw", c6Matrix(185, 181, true, c6Sweep(181, 0.5)));
-  assert.equal(outOfBand.violations.length, 1, "an inversion larger than the cell's own scatter must block");
-  assert.match(outOfBand.violations[0], /outside this cell's own max-proxy sweep scatter/);
+// One raw reading, in the engine's own units (bounds in microseconds, `null` = the unbounded reading).
+const rd = (boundMs, rps, o = {}) => ({
+  p99_bound_us: boundMs == null ? null : boundMs * 1000,
+  rps, concurrency: o.conc ?? 64, p99_us: o.p99_us ?? (boundMs == null ? 40_000 : boundMs * 400),
+  first_disqualified_conc: o.firstDisq ?? 128, lower_bound: o.lowerBound === true,
 });
 
-// A MEDIAN max_proxy SITS AT THE CENTRE OF ITS PLATEAU, so a sustained window drawn from the upper
-// half of the SAME distribution legitimately exceeds it. This is new: the engine used to publish the
-// best rung (the top of the scatter), which no sustained window could beat by construction; it now
-// publishes the plateau median, because on a plateau the rungs differ only by luck and the best rung
-// rewards the kindest window. The inversion that creates is bounded by half the scatter, and C6's
-// band is the FULL scatter - so this must warn, never block. Numbers are one entrant's real cell:
-// rungs spanning 5631..6062 (7.1% scatter) with a median of 5884.
-test("C6: a sustained window above a MEDIAN plateau is inside the scatter and must not block", () => {
-  const r = c6Inversions("gw", c6Matrix(6014, 5884, true, c6Sweep(5884, 7.11)));
-  assert.equal(r.violations.length, 0,
-    `a sustained draw above the plateau median is ordinary scatter, not a physical impossibility; got: ${JSON.stringify(r.violations)}`);
-  assert.equal(r.warnings.length, 1, "it must still be reported so the judgement can be checked");
-  // And the guard has NOT gone blind: an inversion far larger than the plateau's own scatter, which
-  // no median could explain, still blocks.
-  const real = c6Inversions("gw", c6Matrix(7500, 5884, true, c6Sweep(5884, 7.11)));
-  assert.equal(real.violations.length, 1, "an inversion beyond the scatter must still block");
+test("C6 RED: a frontier that INVERTS is a hard failure - a looser bound cannot carry less", () => {
+  // 5 ms reads lower than 1 ms. Relaxing the bound only adds rungs to the set the maximum is taken over,
+  // so this cannot arise from the rungs it claims: it is a producer defect, not scatter.
+  const r = c6Inversions("gw", c6Matrix([rd(1, 14351), rd(5, 14325), rd(null, 20000)]));
+  assert.equal(r.cellsChecked, 1, "the cell must have been checked");
+  assert.equal(r.violations.length, 1, `C6 must flag an inverted frontier; got: ${JSON.stringify(r.violations)}`);
+  assert.ok(r.violations[0].includes("gw.openai->openai") && r.violations[0].includes("5ms")
+    && r.violations[0].includes("14325") && r.violations[0].includes("14351"),
+    `the violation must name the cell, the bound and both rates; got: ${r.violations[0]}`);
 });
 
-test("C6 ceiling: sweep scatter can never excuse an arbitrarily large inversion", () => {
-  // A degenerate sweep with a wild spread must not license a gross inversion: C6_GROSS_PCT caps it.
-  const gross = c6Inversions("gw", c6Matrix(400, 200, true, c6Sweep(200, 90)));
-  assert.equal(gross.violations.length, 1, "a 100% inversion must block however noisy the sweep was");
-  assert.match(gross.violations[0], /ceiling on excusable noise/);
+test("C6 RED: the bounds must ASCEND, with the unbounded reading last", () => {
+  // Published out of order, the sequence stops reading as the tradeoff curve it is, and a reader checking
+  // monotonicity by eye is checking the wrong order.
+  const shuffled = c6Inversions("gw", c6Matrix([rd(5, 100), rd(1, 90), rd(null, 200)]));
+  assert.ok(shuffled.violations.some((v) => /bounds are not ascending/.test(v)),
+    `C6 must flag a non-ascending sequence; got: ${JSON.stringify(shuffled.violations)}`);
+  // The unbounded reading in the MIDDLE is the same defect: it is the loosest reading there is.
+  const misplaced = c6Inversions("gw", c6Matrix([rd(1, 90), rd(null, 200), rd(5, 100)]));
+  assert.ok(misplaced.violations.some((v) => /bounds are not ascending/.test(v)),
+    `the unbounded reading must be last; got: ${JSON.stringify(misplaced.violations)}`);
 });
 
-test("C6 unmeasured noise is NOT excusable noise: too few rungs means the gap is unexplained", () => {
-  // No sweep array at all (or one rung): nothing has measured this cell's variability, so there is no
-  // band to fall inside and the inversion stands as a finding. This is also what keeps the RED-before
-  // proof above honest, since its injected matrix carries no sweep.
-  const noSweep = c6Inversions("gw", c6Matrix(14351, 14325));
-  assert.equal(noSweep.violations.length, 1, "an inversion with no measured scatter must block");
-  assert.match(noSweep.violations[0], /too few rungs/);
+/* C6 RED: THE FLOOR DISCLOSURE MUST BE TRUTHFUL, in both directions.
+   This is what became of "a peak sweep that WON at its top rung is an error": the state is real and
+   common, it is no longer an error, and the rate is published either way - so what must hold is that the
+   artifact says WHICH it is. A reading that won at the top of the ladder and does not say so publishes our
+   own range as the gateway's answer; one that says so when the curve turned over inside the range
+   understates a peak it did establish. */
+test("C6 RED: lower_bound must agree with the rungs actually probed, in both directions", () => {
+  const sweep = [{ conc: 64, rps: 100 }, { conc: 256, rps: 120 }];
+  // Won at c=256, the top rung probed, but claims a ceiling.
+  const claimed = c6Inversions("gw", c6Matrix([rd(10, 120, { conc: 256 })], { sweep }));
+  assert.ok(claimed.violations.some((v) => /lower_bound=false/.test(v) && /c=256 of 256 probed/.test(v)),
+    `a reading at the top of the ladder must disclose it; got: ${JSON.stringify(claimed.violations)}`);
+  // Won at c=64 with a rung probed above it, but claims to be only a floor.
+  const understated = c6Inversions("gw", c6Matrix([rd(10, 100, { conc: 64, lowerBound: true })], { sweep }));
+  assert.ok(understated.violations.some((v) => /lower_bound=true/.test(v)),
+    `a peak established inside the range must not be published as a floor; got: ${JSON.stringify(understated.violations)}`);
+  // And the truthful pair raises nothing.
+  assert.equal(c6Inversions("gw", c6Matrix([rd(10, 120, { conc: 256, lowerBound: true })], { sweep })).violations.length, 0);
+  assert.equal(c6Inversions("gw", c6Matrix([rd(10, 100, { conc: 64 })], { sweep })).violations.length, 0);
 });
 
-test("C6 RED: a peak sweep that WON at its top rung is an error at any magnitude, inversion or not", () => {
-  // A peak search that never sees a fall-off never found a ceiling, and that is caught directly rather
-  // than being inferred from the inversion it happens to produce. Note there is NO inversion here
-  // (sustained < max_proxy); it still must fail.
-  const ladder = c6Inversions("gw", c6Matrix(100, 500, true, {
-    rps_max_proxy_concurrency: 256,
-    sweep_max_proxy: [{ conc: 64, rps: 300 }, { conc: 128, rps: 420 }, { conc: 256, rps: 500 }],
-  }));
-  assert.equal(ladder.violations.length, 1, "a bound-terminated peak sweep must block the publish");
-  assert.match(ladder.violations[0], /WON at the highest concurrency it probed/);
-  assert.match(ladder.violations[0], /never established a ceiling/);
-  // A sweep that fell off after its winner has established one, and is clean.
-  const clean = c6Inversions("gw", c6Matrix(100, 500, true, c6Sweep(500, 4)));
-  assert.equal(clean.violations.length, 0, "a peak with a fall-off rung above it is a real ceiling");
-});
-
-test("C6 GREEN: a plausible cell, an unqualified ceiling and an unserved cell are NOT flagged", () => {
-  assert.equal(c6Inversions("gw", c6Matrix(14325, 14351)).violations.length, 0, "sustained < max_proxy is plausible");
-  assert.equal(c6Inversions("gw", c6Matrix(100, 100)).violations.length, 0, "equality is not an inversion");
-  // max_proxy 0 = "did not qualify" (no ceiling to invert), and must not be counted as a checked cell.
-  const zero = c6Inversions("gw", c6Matrix(100, 0));
-  assert.equal(zero.violations.length, 0, "a 0 max_proxy is 'did not qualify', not an inversion");
-  assert.equal(zero.cellsChecked, 0, "a cell with no ceiling is not a checked cell");
+test("C6 GREEN: a monotone frontier, an absent reading and an unserved cell are NOT flagged", () => {
+  // The ordinary shape: equal readings across a range the gateway holds flat, then a gain when the tail is
+  // let out. Equality is not an inversion.
+  const ok = c6Inversions("gw", c6Matrix([rd(1, 14325), rd(5, 14325), rd(10, 14351), rd(null, 20000)]));
+  assert.equal(ok.violations.length, 0, `a monotone frontier is clean; got: ${JSON.stringify(ok.violations)}`);
+  // A reading whose RATE is absent (no rung held that bound) is skipped by the ordering check rather than
+  // read as a zero that would invert against everything after it.
+  const withHole = c6Inversions("gw", c6Matrix([rd(1, null), rd(5, 14325), rd(null, 20000)]));
+  assert.equal(withHole.violations.length, 0, `an absent reading is not an inversion; got: ${JSON.stringify(withHole.violations)}`);
+  // A cell with NO frontier at all is not a checked cell: there is nothing to order.
+  const none = c6Inversions("gw", c6Matrix([]));
+  assert.equal(none.cellsChecked, 0, "a cell with no frontier is not a checked cell");
   // an UNSERVED cell carries no honest perf to compare.
-  assert.equal(c6Inversions("gw", c6Matrix(14351, 14325, false)).cellsChecked, 0, "unserved cells are skipped");
+  assert.equal(c6Inversions("gw", c6Matrix([rd(1, 100)], { served: false })).cellsChecked, 0, "unserved cells are skipped");
   // null-safe on absent/edge inputs (older snapshots, a not-served matrix).
   for (const bad of [null, undefined, {}, { upstreams: null }, { upstreams: {} }])
     assert.equal(c6Inversions("gw", bad).cellsChecked, 0, `C6 must be null-safe on ${JSON.stringify(bad)}`);
@@ -1553,8 +1653,25 @@ test("C6 on the live bundle: every inversion is adjudicated against its own cell
 const STREAM_CELL = {
   stream_served: true, added_ttft_p50_us: 40, added_ttft_p99_us: 90,
   added_gap_p50_us: 5, added_gap_p99_us: 12, streams_sustained: 1300, streams_sustained_fps: 39000,
-  streams_sustained_mock_bound: false, cpu_fps: 48000, cpu_fps_concurrency: 768, cpu_fps_mock_bound: false,
+  // NO `cpu_fps` / `cpu_fps_concurrency`: the producer retired the metric (it counted relay frames/sec
+  // without the delivery gate, so dropping frames could raise the score). A fixture that still offered it
+  // would be a raw artifact shape the engine cannot emit.
+  streams_sustained_mock_bound: false,
 };
+/* rawFrontier(spec): the frontier as the ENGINE writes it into a raw artifact - bounds in MICROSECONDS
+   under `p99_bound_us`, rates as bare numbers - which is the shape gen-data's sealFrontier consumes. The
+   sealed, bound_ms-in-milliseconds shape is what fxFrontier above builds, and the two are deliberately kept
+   apart: a fixture that fed the SEALED shape into gen-data would test the seal against itself. */
+function rawFrontier(spec) {
+  return FRONTIER_SLOTS.filter((k) => Object.prototype.hasOwnProperty.call(spec, k)).map((k) => ({
+    p99_bound_us: k === "none" ? null : k * 1000,
+    rps: spec[k],
+    concurrency: 512,
+    p99_us: k === "none" ? 40_000 : k * 400,
+    first_disqualified_conc: 1024,
+    lower_bound: false,
+  }));
+}
 // CELL_MEM: one served cell's own memory window, as matrix/run.sh emits it (RAW scalars - gen-data seals
 // them in place). This is the ONLY shape memory ships in now: per cell, cold-started, plateau-terminated.
 const CELL_MEM = { served: true, protocol: "per-cell, own cold-started process", serve_error: "",
@@ -1573,10 +1690,12 @@ function buildStreamMemRepo() {
       matrix: ["100000", "000000", "000000", "000000", "000000", "000000"] }));
   mkdirSync(join(root, "results", "matrix"), { recursive: true });
   const iso = new Date(Date.now() - 3600000).toISOString();
-  const perf = { added_latency_p50_us: 10, added_latency_p99_us: 20, rps_sustained_20ms: 45000,
-    rps_sustained_20ms_concurrency: 512, rps_max_proxy: 50000, rps_max_proxy_concurrency: 256,
-    sweep_max_proxy: [{ conc: 256, rps: 50000, p99_us: 100, fail: 0 }],
-    sweep_sustained_20ms: [{ conc: 512, rps: 45000, p99_us: 200, fail: 0 }] };
+  // The RAW cell shape the engine emits: one frontier off one sweep. `sweep_max_proxy` keeps its producer
+  // name (it is the rung array gen-data carries onto the record as `sweep`); the two retired scalars and the
+  // second sweep array are gone with the metrics that needed them.
+  const perf = { added_latency_p50_us: 10, added_latency_p99_us: 20,
+    frontier: rawFrontier({ 1: 40000, 10: 45000, none: 50000 }),
+    sweep_max_proxy: [{ conc: 256, rps: 50000, p99_us: 100, fail: 0 }] };
   const cellMem = { ...CELL_MEM };   // ONE object, shared by both views, so a mutator reaches the cell
   const matrix = {
     gateway: "sgw", build: "ok", matrix_version: 2, served: true, measured_at: iso,
@@ -1613,7 +1732,7 @@ test("translationCell falls through to the ANY tier when no openai-ingress cell 
   // ever be picked by the "any" tier, never the "fair" one.
   m.upstreams.openai.cells.gemini = {
     served: true,
-    perf: { added_latency_p50_us: 40, added_latency_p99_us: 90, rps_sustained_20ms: 12000, rps_max_proxy: 13000 },
+    perf: { added_latency_p50_us: 40, added_latency_p99_us: 90, frontier: rawFrontier({ 10: 12000, none: 13000 }) },
   };
   writeFileSync(mpath, JSON.stringify(m));
   const g = genInto(root).gateways.find((x) => x.key === "sgw");
@@ -1633,12 +1752,12 @@ test("translationCell prefers the FAIR (openai-ingress) tier even when an ANY ca
   // Fair candidate: openai in -> anthropic out (m.upstreams is keyed by EGRESS, cells by INGRESS), higher latency.
   m.upstreams.anthropic = { configurable: true, served: true, cells: { openai: {
     served: true,
-    perf: { added_latency_p50_us: 50, added_latency_p99_us: 200, rps_sustained_20ms: 9000, rps_max_proxy: 9500 },
+    perf: { added_latency_p50_us: 50, added_latency_p99_us: 200, frontier: rawFrontier({ 10: 9000, none: 9500 }) },
   } } };
   // Any-only candidate: gemini in -> openai out, LOWER latency, but not eligible for the fair tier.
   m.upstreams.openai.cells.gemini = {
     served: true,
-    perf: { added_latency_p50_us: 10, added_latency_p99_us: 20, rps_sustained_20ms: 12000, rps_max_proxy: 13000 },
+    perf: { added_latency_p50_us: 10, added_latency_p99_us: 20, frontier: rawFrontier({ 10: 12000, none: 13000 }) },
   };
   writeFileSync(mpath, JSON.stringify(m));
   const g = genInto(root).gateways.find((x) => x.key === "sgw");
@@ -1659,14 +1778,14 @@ test("bestCell ranks a below-resolution p99 as 0, beating a measured diagonal", 
   m.upstreams = {
     // The winner: served, p99 null, and the engine's absences entry says WHY - below the rig's resolution.
     anthropic: { configurable: true, served: true, cells: { anthropic: { served: true,
-      perf: { added_latency_p50_us: null, added_latency_p99_us: null, rps_sustained_20ms: 30000 },
+      perf: { added_latency_p50_us: null, added_latency_p99_us: null, frontier: rawFrontier({ 10: 30000 }) },
       absences: {
         "perf.added_latency_p50_us": { reason: "below_resolution", detail: "difference at or under the rig's resolution" },
         "perf.added_latency_p99_us": { reason: "below_resolution", detail: "difference at or under the rig's resolution" },
       } } } },
     // The measured competitor: a real 350us p99, which rank 0 must beat.
     gemini: { configurable: true, served: true, cells: { gemini: { served: true,
-      perf: { added_latency_p50_us: 200, added_latency_p99_us: 350, rps_sustained_20ms: 45000 } } } },
+      perf: { added_latency_p50_us: 200, added_latency_p99_us: 350, frontier: rawFrontier({ 10: 45000 }) } } } },
   };
   writeFileSync(mpath, JSON.stringify(m));
   const g = genInto(root).gateways.find((x) => x.key === "sgw");
@@ -1685,7 +1804,7 @@ test("translationCell selects a below-resolution matrix cell instead of falling 
   const m = JSON.parse(readFileSync(mpath, "utf8"));
   // openai in -> anthropic out, p99 below the rig's resolution (the best a translation cell can read).
   m.upstreams.anthropic = { configurable: true, served: true, cells: { openai: { served: true,
-    perf: { added_latency_p50_us: null, added_latency_p99_us: null, rps_sustained_20ms: 8000 },
+    perf: { added_latency_p50_us: null, added_latency_p99_us: null, frontier: rawFrontier({ 10: 8000 }) },
     absences: {
       "perf.added_latency_p50_us": { reason: "below_resolution", detail: "difference at or under the rig's resolution" },
       "perf.added_latency_p99_us": { reason: "below_resolution", detail: "difference at or under the rig's resolution" },
@@ -1714,10 +1833,14 @@ test("gen-data projects streaming from the best diagonal matrix cell", () => {
   // metrics are sealed envelopes
   assert.equal(app.mval(g.streaming.added_ttft_p99_us), 90);
   assert.equal(app.mval(g.streaming.streams_sustained), 1300);
-  assert.equal(app.mval(g.streaming.cpu_fps), 48000);
+  // `cpu_fps` IS RETIRED (it counted relay frames/sec without the delivery gate, so dropping frames could
+  // raise the score). The frame rate a reader can act on is the one measured where every expected frame
+  // arrived, which is what is asserted in its place.
+  assert.equal(g.streaming.cpu_fps, undefined, "the retired metric cannot come back through the projection");
+  assert.equal(app.mval(g.streaming.streams_sustained_fps), 39000);
   // the table accessor reads the same projected value
   assert.equal(app.streamCell(g, "streams_sustained", String).text, "1300");
-  assert.equal(app.streamCell(g, "cpu_fps", String).text, "48000");
+  assert.equal(app.streamCell(g, "streams_sustained_fps", String).text, "39000");
 });
 
 test("MEDIUM-1: a NON-streaming diagonal cell does NOT project g.streaming (stream_served gate)", () => {
@@ -1732,8 +1855,8 @@ test("MEDIUM-1: a NON-streaming diagonal cell does NOT project g.streaming (stre
       path: "/v1/chat/completions", auth: "dummy", egress: ["openai"],
       matrix: ["100000", "000000", "000000", "000000", "000000", "000000"] }));
   const iso = new Date(Date.now() - 3600000).toISOString();
-  const perf = { added_latency_p50_us: 10, added_latency_p99_us: 20, rps_sustained_20ms: 40000,
-    rps_sustained_20ms_concurrency: 512, rps_max_proxy: 44000, rps_max_proxy_concurrency: 256,
+  const perf = { added_latency_p50_us: 10, added_latency_p99_us: 20,
+    frontier: rawFrontier({ 1: 35000, 10: 40000, none: 44000 }),
     sweep_max_proxy: [{ conc: 256, rps: 44000, p99_us: 100, fail: 0 }],
     sweep_sustained_20ms: [{ conc: 512, rps: 40000, p99_us: 200, fail: 0 }] };
   const nonStreamCell = { served: true, perf, stream: { stream_served: false, stream_error: "buffered, no SSE frames" } };
@@ -1809,40 +1932,47 @@ test("streaming honesty: a near-ceiling streams_sustained is PUBLISHED with its 
   assert.equal(app.streamCell(atCeiling, "cpu_fps", String).text, "48000");
 });
 
-// THE TRANSLATION SUPPRESSION IS GONE TOO, and the measured-0 rule it was contrasted against is not.
-//
-// This used to assert that a translation RPS whose `*_mock_bound` flag was `true`/`null` read n/a on both
-// the Translation tab (xlateCell, reading the pinned matrix cell) and the drawer (canonicalXlate), with a
-// measured 0 as the contrast case that was NOT suppressed. The suppression half was wrong for the same
-// reason everywhere else: the throughput number was measured correctly and withholding it published a
-// hole instead of a fact. The contrast half was always right and is untouched - a measured 0 is an honest
-// certified reading, and it must stay 0 rather than collapsing into the n/a an unmeasured cell gets.
-// Default state pins openai→anthropic.
-test("translation honesty: a near-ceiling translation RPS is PUBLISHED on both surfaces; a measured 0 stays 0", () => {
-  const mkG = (headroom, ceiling) => ({ key: "xg", display: "XG", lang: "Rust",
-    translation_cell: tCell({ ingress: "openai", egress: "anthropic", rps_sustained_20ms: 5000,
-      rps_sustained_20ms_headroom: headroom, rps_sustained_20ms_rig_ceiling: ceiling }),
-    matrix: mkMatrix({ anthropic: { openai: { served: true, perf: cellPerf({ rps_sustained_20ms: 5000,
-      rps_sustained_20ms_headroom: headroom, rps_sustained_20ms_rig_ceiling: ceiling, added_latency_p99_us: 200 }) } } }) });
-  // comfortably under the rig's ceiling: both surfaces show the number, as they always did
-  const cert = mkG(0.19, 26315);
-  assert.equal(app.xlateCell(cert, "rps_sustained_20ms", String).text, "5000");
-  assert.equal(app.mval(app.canonicalXlate(cert).rps_sustained_20ms), 5000);
-  // AT the rig's ceiling: the number still shows on both surfaces, with the headroom saying how close
-  // it came, which is the interpretation the reader now makes instead of the seal making it for them.
-  const atCeiling = mkG(0.99, 5050);
-  assert.equal(app.xlateCell(atCeiling, "rps_sustained_20ms", String).na, false, "a near-ceiling translation RPS is not n/a");
-  assert.equal(app.mval(app.canonicalXlate(atCeiling).rps_sustained_20ms), 5000, "drawer/compare publish it too");
-  assert.equal(app.canonicalXlate(atCeiling).rps_sustained_20ms.headroom, 0.99, "with the fraction of the ceiling reached");
-  assert.equal(app.canonicalXlate(atCeiling).rps_sustained_20ms.rig_ceiling, 5050);
-  // no usable reference: the facts are omitted, the value is not
-  const noRef = mkG(null, null);
-  assert.equal(app.xlateCell(noRef, "rps_sustained_20ms", String).text, "5000", "an unreferenced translation RPS still publishes");
-  assert.equal(app.canonicalXlate(noRef).rps_sustained_20ms.headroom, undefined);
-  // a MEASURED 0 is a certified reading and stays 0 - not the n/a an unmeasured cell gets (unchanged).
-  const zero = { key: "xz", display: "XZ", lang: "Rust",
-    translation_cell: tCell({ ingress: "openai", egress: "anthropic", rps_sustained_20ms: 0 }) };
-  assert.equal(app.mval(app.canonicalXlate(zero).rps_sustained_20ms), 0, "a measured 0 stays 0, not n/a");
+/* THE TRANSLATION LANE READS ITS OWN FRONTIER, AT THE SAME BOUND AS THE PASSTHROUGH LANE.
+   This used to assert that a translation `rps_sustained_20ms` near the rig's ceiling was PUBLISHED rather
+   than suppressed, on both the Translation surface (xlateCell, reading the pinned matrix cell) and the
+   drawer (canonicalXlate). The metric is gone; the property that matters survives and is the one asserted
+   here, because it is what makes the translation cost readable at all: the translation cell carries its OWN
+   frontier off its own sweep, and the drawer row for it is labelled with - and moves with - the SAME bound
+   the passthrough lane is showing. Comparing a translated rate read at one bound against a passthrough rate
+   read at another would be a percentage between two different questions.
+   The `headroom`/`rig_ceiling` half moved with the metric: a frontier reading is a maximum over qualifying
+   rungs, not a comparison against a rig reference, so there is no fraction to carry. SITE-07 asserts that
+   pair where it still exists. Default state pins openai→anthropic. */
+test("translation honesty: the translation cell's own frontier is read at the SAME bound as passthrough", () => {
+  const g = { key: "xg", display: "XG", lang: "Rust",
+    best_cell: bcCell({ dialect: "openai", frontier: { 1: 9000, 10: 20000, none: 21000 } }),
+    translation_cell: tCell({ ingress: "openai", egress: "anthropic", frontier: { 1: 2000, 10: 5000, none: 6000 } }),
+    matrix: mkMatrix({ anthropic: { openai: { served: true,
+      perf: cellPerf({ frontier: { 1: 2000, 10: 5000, none: 6000 }, added_latency_p99_us: 200 }) } } }) };
+  const xlateLane = app.LANES.find((l) => l.key === "xlate");
+  const row = xlateLane.metrics.find((m) => m.k === "frontier.selected");
+  const rec = app.canonicalXlate(g);
+  // At the board's default bound the label names it and the row reads that bound's reading.
+  assert.equal(typeof row.label, "function", "the label is rendered from the selected bound, not fixed");
+  assert.equal(row.label(), app.boundColLabel(app.DEFAULT_BOUND_MS));
+  assert.equal(row.cell(rec).v, 5000, "the translation row reads the selected bound");
+  assert.equal(app.frontierCell(g.best_cell, app.DEFAULT_BOUND_MS).v, 20000, "and the passthrough lane the same bound");
+  // MOVE THE BOUND: both lanes move together, so the ratio between them is always one question.
+  const prev = app.state.bound;
+  try {
+    app.state.bound = 1;
+    assert.equal(row.label(), app.boundColLabel(1));
+    assert.equal(row.cell(rec).v, 2000, "the translation row follows the selector");
+    assert.equal(app.frontierCell(g.best_cell, app.selectedBound(app.state)).v, 9000);
+  } finally { app.state.bound = prev; }
+  // The pinned-cell surface (the Translation table's own accessor) reads the SAME cell's frontier.
+  assert.equal(app.frontierCell(app.canonicalXlate(g), app.DEFAULT_BOUND_MS).v, 5000);
+  // A record with no frontier at all publishes NO throughput here either - never a zero.
+  const none = { key: "xz", display: "XZ", lang: "Rust",
+    translation_cell: tCell({ ingress: "openai", egress: "anthropic", frontier: null }) };
+  const cell = row.cell(app.canonicalXlate(none));
+  assert.equal(cell.na, true);
+  assert.equal(cell.v, null, "no frontier is not a throughput of zero");
 });
 
 test("streaming: a null added-TTFT/gap reads n/a on the table (the envelope carries the absence)", () => {
@@ -2004,7 +2134,7 @@ test("Performance Custom (openai->anthropic): the served/swept-vs-unswept guard 
     const m = JSON.parse(readFileSync(mpath, "utf8"));
     m.upstreams.anthropic = { configurable: true, served: true, cells: { openai: {
       served: true,
-      perf: { added_latency_p50_us: 12, added_latency_p99_us: 30, rps_sustained_20ms: 8000, rps_max_proxy: 8500 },
+      perf: { added_latency_p50_us: 12, added_latency_p99_us: 30, frontier: rawFrontier({ 10: 8000, none: 8500 }) },
     } } };
     writeFileSync(mpath, JSON.stringify(m));
     const g = genInto(root).gateways.find((x) => x.key === "sgw");
@@ -2114,18 +2244,28 @@ test("stripRigPaths scrubs absolute bench-box paths from diagnostic notes", () =
 test("cellPerfTip shows a green cell's perf and its deviation from the gateway's best cell", () => {
   // cellPerfTip reads the sealed envelopes via mval(): a certified cell + reference show the number + delta;
   // an envelope with no value cannot become a number on hover (asserted in the next test).
-  const best = bcCell({ ingress: "openai", egress: "openai", rps_sustained_20ms: 30000 });
-  const green = { served: true, perf: cellPerf({ rps_sustained_20ms: 25500, added_latency_p99_us: 900 }) };
-  const tip = app.cellPerfTip(green, "anthropic", "openai", best);
-  assert.ok(tip.includes("25,500 req/s (20 ms upstream)"), tip);
+  // THE RATE IS NAMED WITH ITS BOUND - "while 99% of requests finished under 10 ms" - and both sides of the
+  // delta are read at the SAME bound, or the percentage would be between two different questions.
+  const best = bcCell({ ingress: "openai", egress: "openai", frontier: 30000 });
+  const green = { served: true, perf: cellPerf({ frontier: 25500, added_latency_p99_us: 900 }) };
+  const tip = app.cellPerfTip(green, "anthropic", "openai", best, 10);
+  assert.ok(tip.includes("25,500 req/s while 99% of requests finished under 10 ms"), tip);
   assert.ok(tip.includes("+900 µs p99 added"), tip);
   assert.ok(tip.includes("-15.0% req/s vs the OpenAI→OpenAI cell"), tip); // human labels, not raw dialect keys
-  const bestTip = app.cellPerfTip({ served: true, perf: cellPerf({ rps_sustained_20ms: 30000 }) }, "openai", "openai", best);
+  const bestTip = app.cellPerfTip({ served: true, perf: cellPerf({ frontier: 30000 }) }, "openai", "openai", best, 10);
   assert.ok(bestTip.includes("reference cell"), bestTip);
+  // A FLOOR SAYS SO ON THE HOVER TOO: the sweep ran out of ladder with that concurrency still qualifying,
+  // so the rate is real and is not a maximum. Rendering it as a bare number would state a ceiling.
+  const floorTip = app.cellPerfTip(
+    { served: true, perf: cellPerf({ frontier: 25500, frontierOpts: { lowerBound: true }, added_latency_p99_us: 900 }) },
+    "anthropic", "openai", best, 10);
+  assert.ok(floorTip.includes("≥ 25,500 req/s"), floorTip);
   // red/grey/unprobed cells and perf-less greens carry NO perf line
-  assert.equal(app.cellPerfTip({ served: false, perf: cellPerf({ rps_sustained_20ms: 1 }) }, "a", "b", best), "");
-  assert.equal(app.cellPerfTip({ served: "not_configurable" }, "a", "b", best), "");
-  assert.equal(app.cellPerfTip({ served: true }, "a", "b", best), "");
+  assert.equal(app.cellPerfTip({ served: false, perf: cellPerf({ frontier: 1 }) }, "a", "b", best, 10), "");
+  assert.equal(app.cellPerfTip({ served: "not_configurable" }, "a", "b", best, 10), "");
+  assert.equal(app.cellPerfTip({ served: true }, "a", "b", best, 10), "");
+  // A cell with NO frontier at all has nothing to say about throughput and says nothing.
+  assert.equal(app.cellPerfTip({ served: true, perf: cellPerf({ frontier: null }) }, "a", "b", best, 10), "");
 });
 
 // FINDING 33 was that the matrix hover tip read the RAW cell scalar, so a number no other surface would
@@ -2141,25 +2281,33 @@ test("cellPerfTip shows a green cell's perf and its deviation from the gateway's
 //   - a delta needs BOTH sides, so an absent reference yields the number and no percentage.
 // And the inverted half: a near-ceiling RPS now renders in the tip like any other measurement.
 test("FINDING 33: cellPerfTip renders only what the envelope carries - an absent RPS cannot become a number", () => {
-  const best = bcCell({ ingress: "openai", egress: "openai", rps_sustained_20ms: 30000 });
-  // A cell whose sustained sweep never ran: {value:null}. The added-latency survives, labelled n/a.
-  const unmeasured = { served: true, perf: cellPerf({ rps_sustained_20ms: null, added_latency_p99_us: 900 }) };
-  const tip = app.cellPerfTip(unmeasured, "anthropic", "openai", best);
-  assert.ok(!tip.includes("req/s"), `an absent RPS must not produce a rate on hover; got: ${tip}`);
-  assert.ok(tip.includes("sustained RPS n/a"), tip);
+  const best = bcCell({ ingress: "openai", egress: "openai", frontier: 30000 });
+  // A cell whose reading at this bound has no rate: {value:null} with the engine's reason. The
+  // added-latency survives, and the hover says which bound has no reading rather than implying a rate.
+  const unmeasured = { served: true, perf: cellPerf({ frontier: { 10: null }, added_latency_p99_us: 900,
+    frontierOpts: { absent: { reason: "not_measured", detail: "no reading" } } }) };
+  const tip = app.cellPerfTip(unmeasured, "anthropic", "openai", best, 10);
+  assert.ok(!tip.includes("req/s"), `an absent reading must not produce a rate on hover; got: ${tip}`);
+  assert.ok(tip.includes("no reading at 10 ms"), tip);
   assert.ok(tip.includes("+900 µs p99 added"), tip);
   // A certified cell against an ABSENT reference: the number shows, but no delta - the divisor is null.
-  const noRef = bcCell({ ingress: "openai", egress: "openai", rps_sustained_20ms: null });
-  const t = app.cellPerfTip({ served: true, perf: cellPerf({ rps_sustained_20ms: 25500, added_latency_p99_us: 900 }) }, "anthropic", "openai", noRef);
-  assert.ok(t.includes("25,500 req/s (20 ms upstream)"), t);
+  const noRef = bcCell({ ingress: "openai", egress: "openai", frontier: { 10: null },
+    frontierOpts: { absent: { reason: "not_measured", detail: "no reading" } } });
+  const t = app.cellPerfTip({ served: true, perf: cellPerf({ frontier: 25500, added_latency_p99_us: 900 }) }, "anthropic", "openai", noRef, 10);
+  assert.ok(t.includes("25,500 req/s while 99% of requests finished under 10 ms"), t);
   assert.ok(!t.includes("vs the"), `no delta against a reference with no number; got: ${t}`);
-  // THE INVERSION: a cell that came within a percent of the rig's own ceiling is a measurement like any
-  // other, and the hover shows it - with its delta - rather than the n/a the suppression used to leave.
-  const atCeiling = { served: true, perf: cellPerf({ rps_sustained_20ms: 29900,
-    rps_sustained_20ms_headroom: 0.996, rps_sustained_20ms_rig_ceiling: 30020, added_latency_p99_us: 900 }) };
-  const ceilTip = app.cellPerfTip(atCeiling, "anthropic", "openai", best);
-  assert.ok(ceilTip.includes("29,900 req/s (20 ms upstream)"), `a near-ceiling RPS belongs on the hover; got: ${ceilTip}`);
-  assert.ok(ceilTip.includes("vs the OpenAI→OpenAI cell"), `and it can be differenced like any number; got: ${ceilTip}`);
+  /* AND THE BOUND IS THE ONE THE CALLER ASKED FOR, on both sides. This is the failure mode a bound selector
+     introduces and the retired scalars could not have: a surface still showing the previous bound's number
+     after the reader switched. Reading the same pair at 1 ms must produce the 1 ms figures and the 1 ms
+     delta - a shape where the two bounds disagree is exactly the divergence this family of tests forbids. */
+  const shaped = { served: true, perf: cellPerf({ frontier: { 1: 5000, 10: 25500, none: 26000 }, added_latency_p99_us: 900 }) };
+  const shapedBest = bcCell({ ingress: "openai", egress: "openai", frontier: { 1: 10000, 10: 30000, none: 31000 } });
+  const at1 = app.cellPerfTip(shaped, "anthropic", "openai", shapedBest, 1);
+  assert.ok(at1.includes("5,000 req/s while 99% of requests finished under 1 ms"), at1);
+  assert.ok(at1.includes("-50.0% req/s vs the OpenAI→OpenAI cell"), `the delta is read at the SAME bound; got: ${at1}`);
+  const at10 = app.cellPerfTip(shaped, "anthropic", "openai", shapedBest, 10);
+  assert.ok(at10.includes("25,500 req/s while 99% of requests finished under 10 ms"), at10);
+  assert.ok(at10.includes("-15.0% req/s vs the OpenAI→OpenAI cell"), at10);
 });
 
 // ---- sweep chart on a stub canvas with real committed data ------------------
@@ -2330,38 +2478,48 @@ test("gen-data preserves the per-cell verdict_note reason for grey cells", () =>
 // anthropic diagonal, and an openai->anthropic translation cell.
 const CHOOSER_GW = {
   key: "cg", display: "CG", lang: "Rust",
+  // Each cell carries its own frontier, and the three have DIFFERENT SHAPES on purpose: the openai
+  // diagonal is nearly flat (30,000 at 1 ms), the anthropic diagonal needs a loose tail to reach its own
+  // ceiling (12,000 at 1 ms, 25,000 unbounded), the translation cell sits between them. A chooser that
+  // read the wrong cell used to show a wrong number; it can now also show a wrong SHAPE, which is the
+  // thing a reader is being asked to compare.
   best_cell: bcCell({ dialect: "openai", added_latency_p50_us: 100, added_latency_p99_us: 110,
-    rps_sustained_20ms: 30000, rps_max_proxy: 32000 }),
+    frontier: { 1: 29000, 10: 30000, none: 32000 } }),
   matrix: { upstreams: {
     openai: { cells: { openai: { served: true, perf: cellPerf({
-      added_latency_p50_us: 100, added_latency_p99_us: 110, rps_sustained_20ms: 30000, rps_max_proxy: 32000 }) } } },
+      added_latency_p50_us: 100, added_latency_p99_us: 110, frontier: { 1: 29000, 10: 30000, none: 32000 } }) } } },
     anthropic: { cells: {
       anthropic: { served: true, perf: cellPerf({
-        added_latency_p50_us: 200, added_latency_p99_us: 220, rps_sustained_20ms: 25000, rps_max_proxy: 27000 }) },
+        added_latency_p50_us: 200, added_latency_p99_us: 220, frontier: { 1: 12000, 10: 25000, none: 27000 } }) },
       openai: { served: true, perf: cellPerf({
-        added_latency_p50_us: 130, added_latency_p99_us: 145, rps_sustained_20ms: 26000, rps_max_proxy: 28000 }) } } },
+        added_latency_p50_us: 130, added_latency_p99_us: 145, frontier: { 1: 20000, 10: 26000, none: 28000 } }) } } },
   } },
 };
 
 test("cell chooser: Peak reads the best diagonal, Same reads a chosen diagonal, Custom any cell", () => {
   const g = CHOOSER_GW;
   // Peak → the openai best diagonal (110 p99, 30000 sustained), with the Tested-on dialect openai.
-  const peak = { mode: "peak" };
+  const peak = { ...app.newState(), mode: "peak" };
   assert.equal(app.chooserPerfCell(g, "added_latency_p99_us", String, peak).text, "110");
-  assert.equal(app.chooserPerfCell(g, "rps_sustained_20ms", String, peak).text, "30000");
+  assert.equal(app.frontierChooserCell(g, peak).v, 30000);
   assert.deepEqual(app.chooserDialects(g, peak), ["openai", "openai"]);
-  // Same anthropic → the anthropic→anthropic diagonal (220 p99, 25000).
-  const same = { mode: "same", sameDialect: "anthropic" };
+  // Same anthropic → the anthropic→anthropic diagonal (220 p99, 25,000 at the default bound).
+  const same = { ...app.newState(), mode: "same", sameDialect: "anthropic" };
   assert.equal(app.chooserPerfCell(g, "added_latency_p99_us", String, same).text, "220");
-  assert.equal(app.chooserPerfCell(g, "rps_sustained_20ms", String, same).text, "25000");
+  assert.equal(app.frontierChooserCell(g, same).v, 25000);
   assert.deepEqual(app.chooserDialects(g, same), ["anthropic", "anthropic"]);
-  // Custom openai→anthropic → the translation cell (145 p99, 26000).
-  const cust = { mode: "custom", xlateIn: "openai", xlateOut: "anthropic" };
+  // Custom openai→anthropic → the translation cell (145 p99, 26,000).
+  const cust = { ...app.newState(), mode: "custom", xlateIn: "openai", xlateOut: "anthropic" };
   assert.equal(app.chooserPerfCell(g, "added_latency_p99_us", String, cust).text, "145");
-  assert.equal(app.chooserPerfCell(g, "rps_sustained_20ms", String, cust).text, "26000");
+  assert.equal(app.frontierChooserCell(g, cust).v, 26000);
+  // AND THE CHOSEN CELL'S SHAPE TRAVELS WITH IT. The three cells have different curves; the shape column
+  // must read the chosen one, or the row shows one cell's rate beside another cell's slope.
+  assert.equal(app.frontierShapeCell(g, peak).text, `×${(32000 / 29000).toFixed(1)}`);
+  assert.equal(app.frontierShapeCell(g, same).text, `×${(27000 / 12000).toFixed(1)}`);
   // A cell the gateway does NOT serve reads n/a (never fabricated), and the row is not dropped.
-  const missing = { mode: "custom", xlateIn: "gemini", xlateOut: "cohere" };
-  assert.equal(app.chooserPerfCell(g, "rps_sustained_20ms", String, missing).na, true);
+  const missing = { ...app.newState(), mode: "custom", xlateIn: "gemini", xlateOut: "cohere" };
+  assert.equal(app.frontierChooserCell(g, missing).na, true);
+  assert.equal(app.frontierShapeCell(g, missing).na, true);
   assert.equal(app.chooserHasCell(g, missing), false);
 });
 
@@ -2396,32 +2554,47 @@ test("Cluster-B: drawer/compare (laneRecord) read the SAME chosen cell as the ta
 // and its curve is published WITH it: that curve is the evidence for exactly the reading a reader most
 // needs to weigh, and dropping it was the second half of the same mistake. The invariant survives
 // against the state that genuinely publishes nothing - a metric that was never measured on this cell.
-test("Cluster-B/22: perfSweepSeries is chooser-aware; an UNMEASURED metric has no curve, a near-ceiling one keeps its", () => {
+/* THE DRAWER/COMPARE CURVE IS ONE SWEEP, MARKED AT THE SELECTED BOUND.
+   This test used to assert that perfSweepSeries plotted TWO curves (the sustained sweep and the max-proxy
+   sweep) and dropped either one whose headline was absent. Both halves are gone with the two metrics: they
+   were ONE sweep read twice, so the "two curves" were the same rungs drawn twice with two markers, and the
+   pair could disagree with itself. The cell now publishes that sweep ONCE (`rec.sweep`) and every reading is
+   a maximum over a subset of it, so the properties worth guarding are the ones asserted here:
+     - one series, off the cell's own rungs, chooser-aware (it must be the CHOSEN cell's sweep);
+     - the marker is the reading AT THE SELECTED BOUND, at the concurrency that reading names - so the dot a
+       reader sees is the number the ranked column shows, and moving the bound moves the dot;
+     - a cell with no rungs plots nothing rather than an empty frame captioned as a measurement. */
+test("Cluster-B/22: perfSweepSeries plots the ONE sweep, chooser-aware, marked at the selected bound", () => {
   const colors = { sustained: "#4cc38a", max: "#6cb6ff" };
-  // Peak: the openai diagonal's sweeps (both metrics certified) are plotted, marked at the published peak.
-  const withSweep = { ...CHOOSER_GW, best_cell: bcCell({ dialect: "openai",
-    rps_sustained_20ms: 30000, sweep_sustained_20ms: [{ conc: 512, rps: 30000, p99_us: 200, fail: 0 }],
-    rps_max_proxy: 32000, sweep_max_proxy: [{ conc: 256, rps: 32000, p99_us: 100, fail: 0 }] }) };
-  const peak = app.perfSweepSeries(withSweep, colors, { mode: "peak" });
-  assert.equal(peak.length, 2, "both certified metrics plotted");
-  assert.equal(peak[0].peak.rps, 30000, "sustained curve marks the published peak");
-  // An UNMEASURED sustained is {value:null} and carries no sweep, so its curve is dropped - the chart
-  // cannot claim a shape for a metric the cell beside it reads n/a on.
-  const unmeasured = { ...CHOOSER_GW, best_cell: bcCell({ dialect: "openai",
-    rps_sustained_20ms: null, sweep_sustained_20ms: [{ conc: 512, rps: 99999, p99_us: 200, fail: 0 }],
-    rps_max_proxy: 32000, sweep_max_proxy: [{ conc: 256, rps: 32000, p99_us: 100, fail: 0 }] }) };
-  const dropped = app.perfSweepSeries(unmeasured, colors, { mode: "peak" });
-  assert.equal(dropped.length, 1, "the unmeasured sustained curve is dropped; only the measured max remains");
-  assert.equal(dropped[0].peak.rps, 32000, "the surviving curve is the max-proxy");
-  // A NEAR-CEILING sustained keeps both its number and its curve: the sweep is the evidence a reader
-  // needs in order to do anything with the headroom the envelope hands them.
-  const atCeiling = { ...CHOOSER_GW, best_cell: bcCell({ dialect: "openai",
-    rps_sustained_20ms: 29900, rps_sustained_20ms_headroom: 0.996, rps_sustained_20ms_rig_ceiling: 30020,
-    sweep_sustained_20ms: [{ conc: 512, rps: 29900, p99_us: 200, fail: 0 }],
-    rps_max_proxy: 32000, sweep_max_proxy: [{ conc: 256, rps: 32000, p99_us: 100, fail: 0 }] }) };
-  const kept = app.perfSweepSeries(atCeiling, colors, { mode: "peak" });
-  assert.equal(kept.length, 2, "a near-ceiling metric is plotted like any other");
-  assert.equal(kept[0].peak.rps, 29900, "and its curve is marked at the number that was published");
+  const rungs = [
+    { conc: 8, rps: 20000, p99_us: 900, fail: 0 },
+    { conc: 64, rps: 30000, p99_us: 4000, fail: 0 },
+    { conc: 512, rps: 32000, p99_us: 40000, fail: 0 },
+  ];
+  const withSweep = { ...CHOOSER_GW, best_cell: bcCell({ dialect: "openai", sweepRungs: rungs,
+    frontier: { 1: 20000, 10: 30000, none: 32000 },
+    frontierOpts: { conc: 64 } }) };
+  const peak = app.perfSweepSeries(withSweep, colors, { ...app.newState(), mode: "peak" });
+  assert.equal(peak.length, 1, "ONE sweep, not one per collapsed reading");
+  assert.equal(peak[0].sweep.length, 3, "every probed rung is on the curve");
+  assert.equal(peak[0].peak.rps, 30000, "marked at the reading for the selected bound");
+  assert.equal(peak[0].peak.conc, 64, "at the concurrency that reading names");
+  assert.match(peak[0].label, /10 ms/, "and the label says which bound the mark is");
+  // MOVE THE BOUND: the same rungs, a different mark. A curve whose marker did not follow the selector
+  // would show the reader a dot that is not the number in the column beside it.
+  const at1 = app.perfSweepSeries(withSweep, colors, { ...app.newState(), mode: "peak", bound: 1 });
+  assert.equal(at1[0].peak.rps, 20000);
+  assert.match(at1[0].label, /1 ms/);
+  // A reading that is absent at the selected bound marks nothing - the curve is still the evidence, but
+  // nothing on it may be labelled as a published number that does not exist.
+  const noReading = { ...CHOOSER_GW, best_cell: bcCell({ dialect: "openai", sweepRungs: rungs,
+    frontier: { none: 32000 } }) };
+  const unmarked = app.perfSweepSeries(noReading, colors, { ...app.newState(), mode: "peak" });
+  assert.equal(unmarked.length, 1);
+  assert.equal(unmarked[0].peak, null, "no reading at this bound, so no marker");
+  // NO RUNGS: nothing is plotted at all (a legacy record, or a cell whose sweep never landed).
+  const noRungs = { ...CHOOSER_GW, best_cell: bcCell({ dialect: "openai", frontier: 30000 }) };
+  assert.deepEqual(app.perfSweepSeries(noRungs, colors, { ...app.newState(), mode: "peak" }), []);
 });
 
 test("Cluster-C/20: chooserStreamCell reads the right streaming cell across Peak/Same/Custom", () => {
@@ -2475,29 +2648,52 @@ test("Cluster-C/12: the streaming caption is CONDITIONAL on provenance (no hard 
 
 test("Δ-to-Peak: a non-peak cell reports its deviation vs the gateway's own best diagonal", () => {
   const g = CHOOSER_GW;
-  const cust = { mode: "custom", xlateIn: "openai", xlateOut: "anthropic" };
+  const cust = { ...app.newState(), mode: "custom", xlateIn: "openai", xlateOut: "anthropic" };
   const cp = { ingress: "openai", egress: "anthropic", ...app.chooserCellPerf(g, cust) };
-  const d = app.deltaToPeak(cp, g.best_cell);
-  // p99 145 vs 110 = +31.8% latency; sustained 26000 vs 30000 = -13.3% RPS.
+  const d = app.deltaToPeak(cp, g.best_cell, 10);
+  // p99 145 vs 110 = +31.8% latency; 26,000 vs 30,000 at the 10 ms bound = -13.3% req/s.
   assert.ok(/\+31\.8% latency/.test(d), d);
-  assert.ok(/-13\.3% RPS/.test(d), d);
+  // THE THROUGHPUT HALF NAMES ITS BOUND. Both sides are read at the same one, and the label says which:
+  // a bare "-13.3% RPS" over a board with six published readings is a percentage between two unstated
+  // questions, which is the ambiguity the two retired scalars shipped with.
+  assert.ok(/-13\.3% req\/s at 10 ms/.test(d), d);
+  // At a DIFFERENT bound the same pair of cells deviates differently, because the two cells have different
+  // shapes - which is the finding, and it is invisible if the delta is computed at one hidden bound.
+  const at1 = app.deltaToPeak(cp, g.best_cell, 1);
+  assert.ok(/-31\.0% req\/s at 1 ms/.test(at1), at1);
   // The peak cell itself has no delta.
-  assert.equal(app.deltaToPeak({ ingress: "openai", egress: "openai", ...g.best_cell }, g.best_cell), "");
+  assert.equal(app.deltaToPeak({ ingress: "openai", egress: "openai", ...g.best_cell }, g.best_cell, 10), "");
 });
 
-testWithData("matrix popup shows the SAME gated value the Performance/Custom table shows, plus Δ-to-peak", () => {
+testWithData("matrix popup shows the SAME chosen-cell values the Performance/Custom table shows, at the SAME bound", () => {
   const g = CHOOSER_GW;
+  const cust = { ...app.newState(), mode: "custom", xlateIn: "openai", xlateOut: "anthropic" };
   const html = app.cellPopFull(g, "openai", "anthropic");
-  // The popup carries the cell's own gated numbers (formatted en-US) …
+  // The popup carries the cell's own numbers (formatted en-US) …
   assert.ok(html.includes("<b>145</b>"), "popup shows the cell's added latency p99");
-  assert.ok(html.includes("<b>26,000</b>"), "popup shows the cell's sustained RPS");
-  // … the SAME numbers the Custom table reads through chooserPerfCell …
-  const cust = { mode: "custom", xlateIn: "openai", xlateOut: "anthropic" };
-  const enUS = (v) => Number(v).toLocaleString("en-US");
-  assert.equal(app.chooserPerfCell(g, "rps_sustained_20ms", enUS, cust).text, "26,000");
+  assert.ok(html.includes("<b>26,000 @ 512 conc</b>"), `popup shows the cell's reading at the shown bound; got ${html}`);
+  // … LABELLED WITH THE BOUND IT WAS READ AT, and the same one the table's ranked column is showing.
+  assert.ok(html.includes(app.boundColLabel(app.selectedBound(app.state))), "the popup names the bound it read");
+  // … the SAME number the Custom table reads through the same accessor …
+  assert.equal(app.frontierChooserCell(g, cust).text, "26,000 @ 512 conc");
+  /* … AND IT FOLLOWS THE SELECTOR. A bound selector adds a way for two surfaces to disagree that the
+     retired scalars could not: the popup could keep showing 10 ms after the reader switched to 1 ms. Both
+     surfaces read selectedBound() through the same accessors, so switching moves both. */
+  const prev = app.state.bound;
+  try {
+    app.state.bound = 1;
+    const html1 = app.cellPopFull(g, "openai", "anthropic");
+    assert.ok(html1.includes("<b>20,000 @ 512 conc</b>"), `the popup follows the selected bound; got ${html1}`);
+    assert.ok(html1.includes(app.boundColLabel(1)), "and relabels itself with the bound it is now reading");
+    assert.equal(app.frontierChooserCell(g, { ...cust, bound: 1 }).text, "20,000 @ 512 conc",
+      "the table reads the same reading at the same bound");
+  } finally { app.state.bound = prev; }
   // … and the Δ-to-Peak vs the gateway's own best diagonal.
   assert.ok(/vs peak \(OpenAI→OpenAI\)/.test(html), "popup names the peak reference cell");
   assert.ok(/\+31\.8% latency/.test(html), "popup shows Δ latency");
+  // THE SHAPE IS ON THE POPUP TOO: a rate alone cannot say whether this cell is fast because the tail was
+  // allowed to grow, which is what the matrix is most often opened to find out.
+  assert.ok(/frontier-spark/.test(html), "the popup carries the cell's own curve");
   // The consistency guard proves popup == table per cell on the whole bundle (no divergence ships).
   const { errors } = checkConsistency(data, app);
   assert.deepEqual(errors, [], `popup/table divergence: ${JSON.stringify(errors)}`);
@@ -2637,9 +2833,16 @@ test("#24 CLASS: the REAL sealMetric() is the honesty choke point (no hand-copie
     "a zero on a field with no zero-note vocabulary must not borrow a throughput sentence");
   assert.equal(zeroNoteFor("growth_rate_mib_per_min"), null,
     "and the ONE place that mapping lives must be the thing that says so");
-  assert.deepEqual(sealMetric(0, { zeroNote: zeroNoteFor("rps_max_proxy") }),
-    { value: 0, certified: true, suppressed: false, note: ZERO_NO_CEILING },
-    "an RPS ceiling's zero DOES mean 'no tested load held the gates', and says it");
+  /* THE FIELD THAT STILL CARRIES THIS NOTE IS A STREAMING ONE. It used to be `rps_max_proxy`: a throughput
+     ceiling whose zero meant "served, but no tested load held the qualifying gates". That metric is
+     deleted, and a frontier reading has no zero of that kind at all - a bound no rung qualified at is an
+     ABSENCE with the engine's own reason, not a certified 0. `streams_sustained` is the surviving member of
+     the family (seal.mjs THROUGHPUT_FIELDS), so it is what proves the per-field mapping still works. */
+  assert.deepEqual(sealMetric(0, { zeroNote: zeroNoteFor("streams_sustained") }),
+    { value: 0, certified: true, suppressed: false, note: ZERO_MEASURED_FAIL },
+    "a surviving throughput field's zero carries its own note, and says which zero it is");
+  assert.equal(zeroNoteFor("rps_max_proxy"), null,
+    "and the RETIRED throughput fields have no note left to borrow: nothing may emit them");
   assert.deepEqual(sealMetric(0, { zeroNote: ZERO_MEASURED_FAIL }),
     { value: 0, certified: true, suppressed: false, note: ZERO_MEASURED_FAIL },
     "a measured stream-sustain FAILURE must be a certified 0, DISTINGUISHABLE from not-measured");
@@ -2885,12 +3088,12 @@ test("#25 CLASS: the snapshot ingest path - newest wins, RECENCY beats existence
     const root = buildStreamMemRepo();
     const mk = (rps, at) => ({ gateway: "sgw", build: "snap", matrix_version: 2, served: true, measured_at: at,
       upstreams: { openai: { configurable: true, served: true, cells: { openai: { served: true, perf: {
-        added_latency_p50_us: 1, added_latency_p99_us: 2, rps_sustained_20ms: rps, rps_sustained_20ms_mock_bound: false,
-        rps_max_proxy: rps + 1, rps_max_proxy_mock_bound: false } } } } } });
+        added_latency_p50_us: 1, added_latency_p99_us: 2,
+        frontier: rawFrontier({ 10: rps, none: rps + 1 }) } } } } } });
     writeSnapshot(root, "sgw", { measuredAt: iso(2), matrix: mk(11111, iso(2)) });
     writeSnapshot(root, "sgw", { measuredAt: iso(0.5), matrix: mk(22222, iso(0.5)) });
     const g = genInto(root).gateways.find((x) => x.key === "sgw");
-    assert.equal(app.mval(g.best_cell.rps_sustained_20ms), 22222, "the NEWEST snapshot must win");
+    assert.equal(app.frontierCell(g.best_cell, 10).v, 22222, "the NEWEST snapshot must win");
     assert.equal(g.matrix_from_snapshot, true);
   }
   // (b) #5 RED-before: an OLDER snapshot must NOT shadow a NEWER results/matrix/<gw>.json. Before the
@@ -2899,10 +3102,10 @@ test("#25 CLASS: the snapshot ingest path - newest wins, RECENCY beats existence
     const root = certifyRepo(buildStreamMemRepo());   // matrix stamped 1h ago, rps_sustained_20ms 45000
     writeSnapshot(root, "sgw", { measuredAt: iso(72), matrix: { gateway: "sgw", build: "old", matrix_version: 2,
       served: true, measured_at: iso(72), upstreams: { openai: { configurable: true, served: true, cells: { openai: {
-        served: true, perf: { added_latency_p50_us: 9, added_latency_p99_us: 9, rps_sustained_20ms: 33333,
-          rps_sustained_20ms_mock_bound: false, rps_max_proxy: 33334, rps_max_proxy_mock_bound: false } } } } } } });
+        served: true, perf: { added_latency_p50_us: 9, added_latency_p99_us: 9,
+          frontier: rawFrontier({ 10: 33333, none: 33334 }) } } } } } } });
     const g = genInto(root).gateways.find((x) => x.key === "sgw");
-    assert.equal(app.mval(g.best_cell.rps_sustained_20ms), 45000,
+    assert.equal(app.frontierCell(g.best_cell, 10).v, 45000,
       "a 3-day-old snapshot must NOT shadow the newer matrix on disk (recency, not existence)");
     assert.ok(!g.matrix_from_snapshot);
   }
@@ -2920,7 +3123,7 @@ test("#25 CLASS: the snapshot ingest path - newest wins, RECENCY beats existence
     mkdirSync(join(root, "results", "snapshots"), { recursive: true });
     writeFileSync(join(root, "results", "snapshots", "result_sgw_corrupt.json"), "{not json");
     const g = genInto(root).gateways.find((x) => x.key === "sgw");
-    assert.equal(app.mval(g.best_cell.rps_sustained_20ms), 45000, "a matrix-less snapshot must not blank the row");
+    assert.equal(app.frontierCell(g.best_cell, 10).v, 45000, "a matrix-less snapshot must not blank the row");
     assert.ok(g.best_cell.source.kind === "matrix");
   }
 });
@@ -2945,8 +3148,8 @@ test("#21 CLASS: rig provenance travels from the snapshot into the bundle, and i
   const mkMatrix = (at, rig) => ({
     gateway: "sgw", build: "snap", matrix_version: 2, served: true, measured_at: at, rig,
     upstreams: { openai: { configurable: true, served: true, cells: { openai: { served: true, perf: {
-      added_latency_p50_us: 1, added_latency_p99_us: 2, rps_sustained_20ms: 100, rps_sustained_20ms_mock_bound: false,
-      rps_max_proxy: 101, rps_max_proxy_mock_bound: false } } } } },
+      added_latency_p50_us: 1, added_latency_p99_us: 2,
+      frontier: rawFrontier({ 10: 100, none: 101 }) } } } } },
   });
   // (a) present: the block reaches the bundle intact, so the instrument is recoverable from the board.
   {
@@ -3000,36 +3203,48 @@ test("#21 CLASS: the footer rig stamp shows one digest, flags DISAGREEING rows, 
     `the mixed stamp must attribute each instrument to its row count; got: ${mixed}`);
 });
 
-// ---- #26: conc_at / concAt() - the Performance-tab payload of task #65 - was never exercised -------
-test("#26 CLASS: conc_at travels inside the sealed envelope and drives the '@ N conc' render", () => {
-  // (a) the accessor: conc_at WINS over the legacy *_concurrency; either alone works; neither -> null.
+/* ---- #26: THE OPERATING CONCURRENCY - the Performance-tab payload of task #65 --------------------
+   WHERE IT LIVES CHANGED. It used to ride INSIDE the sealed throughput envelope (`conc_at` / `concurrency`
+   on `rps_sustained_20ms`, captured by gen-data from the raw cell's `conc_at_sustained`), and `concAt()`
+   read it out. Those metrics are deleted. The concurrency is now a FIELD ON THE READING - each frontier
+   reading names the concurrency its winning rate was observed at - which is a better home for it: the
+   number belongs to the reading, and each of the six readings has its own.
+   `concAt()` survives for the metrics that still carry it inside their envelope (the stream ceiling), so it
+   is still exercised here; the render half is asserted against the frontier reading that drives it now. */
+test("#26 CLASS: the operating concurrency travels with the reading and drives the '@ N conc' render", () => {
+  // (a) the accessor, on an envelope that still carries a rung inside it: conc_at WINS over the legacy
+  // *_concurrency; either alone works; neither -> null.
   assert.equal(app.concAt(sealMetric(9, { extras: { conc_at: 512, concurrency: 64 } })), 512);
   assert.equal(app.concAt(sealMetric(9, { extras: { concurrency: 64 } })), 64);
   assert.equal(app.concAt(sealMetric(9)), null, "no rung recorded -> null, never fabricated");
   assert.equal(app.concAt(null), null);
   assert.equal(app.concAt(42), null, "a bare scalar is not an envelope");
-  // (b) gen-data actually CAPTURES conc_at_sustained / conc_at_peak off the raw cell (the #65 payload).
+  // (b) gen-data carries each READING's own concurrency through the seal, off the raw frontier.
   const root = certifyRepo(buildStreamMemRepo(), (m) => {
     for (const cells of [m.cells, m.upstreams.openai.cells]) {
-      cells.openai.perf.conc_at_sustained = 384;
-      cells.openai.perf.conc_at_peak = 192;
+      cells.openai.perf.frontier = [
+        { p99_bound_us: 1000, rps: 40000, concurrency: 192, p99_us: 400, first_disqualified_conc: 384, lower_bound: false },
+        { p99_bound_us: 10000, rps: 45000, concurrency: 384, p99_us: 4000, first_disqualified_conc: 768, lower_bound: false },
+        { p99_bound_us: null, rps: 50000, concurrency: 768, p99_us: 40000, first_disqualified_conc: null, lower_bound: false },
+      ];
     }
   });
   const g = genInto(root).gateways.find((x) => x.key === "sgw");
-  assert.equal(app.concAt(g.best_cell.rps_sustained_20ms), 384);
-  assert.equal(app.concAt(g.best_cell.rps_max_proxy), 192);
-  // (c) the RENDER: the Performance cells show "N @ Y conc" with the operating-concurrency tooltip.
+  assert.equal(app.frontierAt(g.best_cell.frontier, 10).concurrency, 384);
+  assert.equal(app.frontierAt(g.best_cell.frontier, 1).concurrency, 192);
+  // (c) the RENDER: the Performance cell shows "N @ Y conc" with the reading's own evidence on the tooltip,
+  // and it is the SELECTED bound's concurrency - a different bound is a different rung.
   const st = { ...app.newState(), mode: "peak", data: { gateways: [g] } };
-  const sus = app.sustainedChooserCell(g, st), max = app.maxProxyChooserCell(g, st);
-  assert.match(sus.text, /@ 384 conc/);
-  assert.match(sus.note, /384 concurrent/);
-  assert.match(max.text, /@ 192 conc/);
-  // (d) the NULL-conc render: no rung recorded -> the bare number, NEVER "@ null conc".
+  const at10 = app.frontierChooserCell(g, st);
+  assert.match(at10.text, /@ 384 conc/);
+  assert.match(at10.note, /Observed with 384 concurrent requests/);
+  const at1 = app.frontierChooserCell(g, { ...st, bound: 1 });
+  assert.match(at1.text, /@ 192 conc/, "the concurrency follows the bound, because the rung does");
+  // (d) the NULL-conc render: no concurrency recorded -> the bare number, NEVER "@ null conc".
   const noConc = structuredClone(g);
-  delete noConc.best_cell.rps_sustained_20ms.conc_at;
-  delete noConc.best_cell.rps_sustained_20ms.concurrency;
-  const bare = app.sustainedChooserCell(noConc, st);
-  assert.ok(!/conc/.test(bare.text), `a cell with no recorded rung must render the bare number; got ${bare.text}`);
+  for (const r of noConc.best_cell.frontier) r.concurrency = null;
+  const bare = app.frontierChooserCell(noConc, st);
+  assert.ok(!/conc/.test(bare.text), `a reading with no recorded rung must render the bare number; got ${bare.text}`);
 });
 
 // ---- #27: the producer's fabricated-0 -> honest-NULL change; the site must be NULL-SAFE ------------
@@ -3132,7 +3347,9 @@ test("#15/#20 RED: the C5 accessor-routing lint FIRES on the access style the co
   assert.equal(r.errors.length, 1, `the lint must FIRE on a bound-then-deref read; got ${JSON.stringify(r.errors)}`);
   assert.match(r.errors[0], /envelope-typed `env`/);
   // RED (the direct form the old lint DID cover) still fires.
-  assert.ok(checkMod.lintAccessorRouting("const x = p.rps_sustained_20ms.value;\n", "fake.js", "js").errors.length >= 1);
+  // The sample field must be one seal.mjs still calls a metric: the lint DISCOVERS the vocabulary through
+  // `isMetricField` rather than enumerating it, so a retired field name is (correctly) not policed.
+  assert.ok(checkMod.lintAccessorRouting("const x = p.added_latency_p99_us.value;\n", "fake.js", "js").errors.length >= 1);
   // GREEN: routed through the accessor.
   const good = [
     "function draw(p, key) {",
@@ -3148,7 +3365,7 @@ test("#15/#20 RED: the C5 accessor-routing lint FIRES on the access style the co
     "function metric(env, fmt) {\n  if (!isEnvelope(env) || env.value == null) return null;\n  return fmt(env.value);\n}\n",
     "fake.js", "js").errors, []);
   // NON-app.js readers are covered too (charts.py's Python equivalent).
-  const badPy = 'def draw(bc):\n    env = bc.get("rps_sustained_20ms")\n    if _is_env(env):\n        return env.get("value")\n';
+  const badPy = 'def draw(bc):\n    env = bc.get("added_latency_p99_us")\n    if _is_env(env):\n        return env.get("value")\n';
   assert.ok(checkMod.lintAccessorRouting(badPy, "fake.py", "py").errors.length >= 1,
     "the routing lint must cover non-app.js readers");
   // AND the repo's own two files are CLEAN (the two real violations this lint should have caught are fixed).
@@ -3212,9 +3429,11 @@ testWithMatrixDonor("#21 CLASS: EVERY matrix-publishing gateway is independently
   const g = d.gateways.find((x) => x.matrix_from_snapshot === true
     && x.best_cell && x.best_cell.source && x.best_cell.source.kind === "matrix");
   assert.ok(g, "the bundle must contain a snapshot-sourced matrix gateway for this class test to mean anything");
-  g.best_cell.rps_max_proxy = { value: (app.mval(g.best_cell.rps_max_proxy) || 0) + 9999, certified: true, suppressed: false };
+  // Corrupted on a surviving envelope field (it used to be `rps_max_proxy`, which no producer emits):
+  // the class is "is this row compared at all", and any sealed metric on it proves that.
+  g.best_cell.added_latency_p99_us = { value: (app.mval(g.best_cell.added_latency_p99_us) || 0) + 9999, certified: true, suppressed: false };
   const e = checkConsistency(d, app).errors;
-  assert.ok(e.some((x) => x.startsWith("R1:") && x.includes(g.key) && x.includes("rps_max_proxy")),
+  assert.ok(e.some((x) => x.startsWith("R1:") && x.includes(g.key) && x.includes("added_latency_p99_us")),
     `a corrupted SNAPSHOT-sourced envelope must be caught by the oracle; got: ${JSON.stringify(e.filter((x) => x.startsWith("R1")))}`);
 });
 
@@ -3277,28 +3496,38 @@ testWithMultiSurfaceDonor("#17: the independent oracle covers EVERY matrix cell,
   assert.ok(checked >= 2, `expected the real bundle to exercise several oracled surfaces, got ${checked}`);
 });
 
-test("#21: C6 fires on an INJECTED inversion - the assertion cannot silently pass when a row is absent", () => {
-  // Drive the invariant DIRECTLY on an injected cell rather than a named gateway's live data, so the
-  // assertion cannot skip vacuously when that gateway's file is missing or its inversion resolves.
-  const inverted = { rps_sustained_20ms: 1000, rps_max_proxy: 900 };
-  const ok = { rps_sustained_20ms: 900, rps_max_proxy: 1000 };
-  const noCeiling = { rps_sustained_20ms: 500, rps_max_proxy: 0 };   // "did not qualify", not an inversion
-  const flag = (perf) => {
-    const sus = perf.rps_sustained_20ms, max = perf.rps_max_proxy;
-    return !(sus == null || max == null || max === 0) && sus > max;
+test("#21: C6 fires on an INJECTED frontier inversion - the assertion cannot silently pass when a row is absent", () => {
+  /* Drive the invariant DIRECTLY on an injected cell rather than a named gateway's live data, so the
+     assertion cannot skip vacuously when that gateway's file is missing or its inversion resolves.
+     WHAT IS INJECTED CHANGED WITH THE METRIC. It used to be a `sustained@20ms > max_proxy` pair, re-derived
+     by a local copy of the flag so the test proved the rule independently of the checker. The pair is gone
+     and the property is now internal to ONE curve: a looser bound cannot read lower than a tighter one. The
+     local re-derivation stays, for the same reason it existed - the test must be able to disagree with the
+     checker rather than only echo it. */
+  const rate = (r) => (typeof r.rps === "number" ? r.rps : null);
+  const inverts = (readings) => {
+    let prev = null;
+    for (const r of readings) {
+      const v = rate(r);
+      if (v == null) continue;
+      if (prev != null && v < prev) return true;
+      prev = v;
+    }
+    return false;
   };
-  assert.equal(flag(inverted), true, "an injected inversion MUST be flagged");
-  assert.equal(flag(ok), false);
-  assert.equal(flag(noCeiling), false, "max_proxy 0 is 'no qualifying ceiling', not an inversion");
-  // and the REAL checker agrees on the same injected cell, through its own code path. The severity is
-  // decided by the cell's own measured scatter (see the C6 band tests above): with no sweep to measure
-  // that scatter from, an inversion is a hard failure, because nothing establishes the gap as noise.
-  const injected = c6Inversions("gw", c6Matrix(1000, 900));
-  assert.equal(injected.violations.length, 1, "an inversion with no measured scatter must block");
+  const inverted = [rd(1, 1000), rd(5, 900), rd(null, 1200)];
+  const ok = [rd(1, 900), rd(5, 1000), rd(null, 1200)];
+  const withHole = [rd(1, null), rd(5, 500), rd(null, 1200)];
+  assert.equal(inverts(inverted), true, "an injected inversion MUST be flagged");
+  assert.equal(inverts(ok), false);
+  assert.equal(inverts(withHole), false, "an absent reading is a hole, not an inversion");
+  // and the REAL checker agrees on the same injected cell, through its own code path.
+  assert.equal(c6Inversions("gw", c6Matrix(inverted)).violations.length, 1, "the checker must block an inverted frontier");
+  assert.equal(c6Inversions("gw", c6Matrix(ok)).violations.length, 0);
   const { errors, warnings } = checkConsistency(data, app);
-  const c6all = [...errors, ...warnings].filter((e) => e.includes("sustained@20ms"));
-  assert.ok(c6all.every((e) => /sustained@20ms .* > max_proxy /.test(e)),
-    "every C6 message must name the inversion it found");
+  const c6all = [...errors, ...warnings].filter((e) => e.includes("the frontier inverts"));
+  assert.ok(c6all.every((e) => /reads \d+ but the tighter/.test(e)),
+    "every C6 inversion message must name both rates it found");
 });
 
 // ---- #1 CLASS: "Tested on" describes the record the row ACTUALLY displays, in EVERY lane -----------
@@ -4041,7 +4270,10 @@ test("SITE-01: the oracle re-derives the whole envelope - reason, note, detail, 
 });
 
 testWithMatrixDonor("SITE-01 RED: a mangled reason / note / headroom on a CORRECT number fails the oracle", () => {
-  const at = (d) => matrixGw(d).best_cell.rps_sustained_20ms;
+  // Mangled on a surviving sealed envelope. It used to be `rps_sustained_20ms`, which no producer emits;
+  // the oracle's claim is about the SHAPE of a published envelope, so any sealed metric on the record proves
+  // it. (A frontier reading's rate is an envelope too and is oracled through the same walk.)
+  const at = (d) => matrixGw(d).best_cell.added_latency_p99_us;
   // THE CONTROL, so each mangle below is proved to be what fires the oracle rather than something else on
   // the board being the real cause. An untouched clone owes NO R1 finding on this envelope at all; if this
   // line ever fails, every assertion under it is passing for the wrong reason.
@@ -4159,20 +4391,21 @@ testWithData("SITE-03 RED: a whole block the oracle cannot compare fails, and co
 // SITE-04. rawCellAt read only m.upstreams, so a v1-shape artifact produced ZERO comparisons - and the
 // per-gateway coverage gate then turned that silence into a hard failure on an honest legacy publish.
 test("SITE-04: a v1-shape raw artifact is read by the oracle, not skipped into a publish failure", () => {
-  const v1 = { upstream_shape: "anthropic", cells: { openai: { served: true, perf: { rps_max_proxy: 7 } } } };
+  const v1 = { upstream_shape: "anthropic", cells: { openai: { served: true, perf: { added_latency_p99_us: 7 } } } };
   assert.deepEqual(Object.keys(checkMod.upstreamsOf(v1)), ["anthropic"]);
-  assert.equal(checkMod.rawCellAt(v1, "openai", "anthropic").perf.rps_max_proxy, 7);
+  assert.equal(checkMod.rawCellAt(v1, "openai", "anthropic").perf.added_latency_p99_us, 7);
   assert.equal(checkMod.rawCellAt(v1, "openai", "openai"), null, "the shape names the ONE measured egress");
   // a v1 artifact with no upstream_shape is the openai row, exactly as gen-data normalizes it
   assert.ok(checkMod.rawCellAt({ cells: { openai: { served: true } } }, "openai", "openai"));
   // v2 is untouched, and a matrix with neither shape yields nothing rather than throwing
   assert.equal(checkMod.rawCellAt({ upstreams: { openai: { cells: { gemini: { served: true } } } } }, "gemini", "openai").served, true);
   assert.deepEqual(checkMod.upstreamsOf({}), {});
-  // and C6 now bites on a v1 cell: the invariant is about physics, not about the artifact's version
+  // and C6 now bites on a v1 cell: the invariant is about the ordering of one curve, not about the
+  // artifact's version. An inverted frontier on a v1-shaped cell must still block.
   const inv = checkMod.c6Inversions("gw", { upstream_shape: "openai", cells: { openai: { served: true,
-    perf: { rps_sustained_20ms: 200, rps_max_proxy: 100 } } } });
+    perf: { frontier: [rd(1, 200), rd(5, 100)], sweep_max_proxy: [{ conc: 64, rps: 200 }, { conc: 128, rps: 90 }] } } } });
   assert.equal(inv.cellsChecked, 1);
-  assert.equal(inv.violations.length, 1);
+  assert.ok(inv.violations.some((v) => /the frontier inverts/.test(v)), JSON.stringify(inv.violations));
 });
 
 // SITE-05. The C3 caption lint scanned DOUBLE-quoted tokens only, and exempted any line containing the
@@ -4215,11 +4448,11 @@ test("SITE-06: the C5 lint catches bracket, bracket-chain and destructuring read
   assert.deepEqual(bad("out.push(mval(env));"), [], "the routed read stays clean");
   // the direct field form, in the same spellings
   const direct = (line) => checkMod.lintAccessorRouting(line + "\n", "fake.js", "js").errors;
-  assert.ok(direct('const x = p.rps_sustained_20ms["value"];').length >= 1);
-  assert.ok(direct('const x = p["rps_sustained_20ms"].value;').length >= 1);
-  assert.ok(direct("const { value } = p.rps_max_proxy;").length >= 1);
+  assert.ok(direct('const x = p.added_latency_p99_us["value"];').length >= 1);
+  assert.ok(direct('const x = p["added_latency_p99_us"].value;').length >= 1);
+  assert.ok(direct("const { value } = p.added_latency_p50_us;").length >= 1);
   // python's bracket spelling of the same read
-  const py = 'def draw(bc):\n    env = bc.get("rps_sustained_20ms")\n    if _is_env(env):\n        return env["value"]\n';
+  const py = 'def draw(bc):\n    env = bc.get("added_latency_p99_us")\n    if _is_env(env):\n        return env["value"]\n';
   assert.ok(checkMod.lintAccessorRouting(py, "fake.py", "py").errors.length >= 1);
   // and the repo's own readers are still clean under the wider lint
   for (const [rel, lang] of [["app.js", "js"], ["../charts.py", "py"]])
@@ -4386,41 +4619,18 @@ test("SITE-10: the in-place stream reseal carries the WHY (reason + c1 note), no
   assert.equal(na.note, "the rig cannot pose an SSE request in this dialect");
 });
 
-// SITE-12. The stream-suite fallback stamped the WHOLE record with the stream suite's build/measured_at
-// although cpu_fps comes from the separate streamcpu suite, which runs on its own cadence: the number
-// was dated to a run that never produced it.
-test("SITE-12: on a legacy fallback row, cpu_fps carries the suite that actually produced it", () => {
-  const iso = (hAgo) => new Date(Date.now() - hAgo * 3600000).toISOString();
-  const STREAM_AT = iso(2), CPU_AT = iso(72);   // fixed once: two Date.now() calls are two instants
-  const build = (root, cpuAt, cpuBuild) => {
-    const mpath = join(root, "results", "matrix", "sgw.json");
-    const m = JSON.parse(readFileSync(mpath, "utf8"));
-    for (const cells of [m.cells, m.upstreams.openai.cells]) delete cells.openai.stream;  // no matrix streaming
-    writeFileSync(mpath, JSON.stringify(m));
-    mkdirSync(join(root, "results", "stream"), { recursive: true });
-    mkdirSync(join(root, "results", "streamcpu"), { recursive: true });
-    writeFileSync(join(root, "results", "stream", "sgw.json"), JSON.stringify({
-      gateway: "sgw", build: "stream-build", measured_at: STREAM_AT, endpoint: "/v1/chat/completions",
-      stream_served: true, stream_added_ttft_p50_us: 40, stream_added_ttft_p99_us: 90,
-      stream_added_gap_p50_us: 5, stream_added_gap_p99_us: 12,
-      stream_sustained_streams: 1300, stream_sustained_fps: 39000, stream_mock_bound: false }));
-    writeFileSync(join(root, "results", "streamcpu", "sgw.json"), JSON.stringify({
-      gateway: "sgw", build: cpuBuild, measured_at: cpuAt,
-      streamcpu_frames_per_sec: 48000, streamcpu_concurrency: 768, streamcpu_mock_bound: false }));
-    return genInto(root).gateways.find((x) => x.key === "sgw");
-  };
-  // (a) the two suites ran days apart: cpu_fps must carry ITS OWN stamp, not the record's.
-  const g = build(buildStreamMemRepo(), CPU_AT, "cpu-build");
-  assert.equal(g.streaming.source.kind, "stream-fallback");
-  assert.equal(g.streaming.source.measured_at, STREAM_AT, "the record is stamped by the stream suite");
-  assert.equal(g.streaming.cpu_fps.source.measured_at, CPU_AT, "cpu_fps by the streamcpu suite that produced it");
-  assert.equal(g.streaming.cpu_fps.source.build, "cpu-build");
-  assert.match(app.metric(g.streaming.cpu_fps).note, /separate run/,
-    "and the reader discloses it rather than carrying it silently");
-  // (b) same run, same stamp: no per-envelope stamp, because there is nothing to disclose.
-  const same = build(buildStreamMemRepo(), STREAM_AT, "stream-build");
-  assert.equal(same.streaming.cpu_fps.source, undefined);
-});
+/* SITE-12 IS DELETED, AND NOTHING SURVIVES IT.
+   It asserted that on a legacy stream-suite fallback row, `cpu_fps` carried the provenance of the SEPARATE
+   streamcpu suite that produced it (its own build and measured_at) rather than being dated to the stream
+   suite's run, plus the reader disclosing that split with a "from a separate run" note.
+   `cpu_fps` IS RETIRED. It counted relay frames/sec under an unpaced firehose WITHOUT the delivery gate, so
+   a gateway dropping frames could post a higher rate than one delivering every frame - a loss rate with a
+   numerator. No producer emits it and no surface renders it, so there is no metric left whose provenance
+   could be mis-stamped.
+   The per-envelope-stamp MACHINERY it exercised is not orphaned: `metric()` still composes the "from a
+   separate run than the rest of this record" note from any envelope carrying its own `source`, and the
+   surviving streaming metrics all come from one run today. If a future metric is ever again projected from a
+   different suite than its record, this test is the shape to restore - against that metric. */
 
 // SITE-13. StreamServed is `true`, `false`, or a STATUS TOKEN ("not_measured", "not_probed",
 // "untestable"). Every non-true value fell through to "did not stream", which asserts a MEASURED refusal
@@ -4655,8 +4865,7 @@ function undatableRoot(withUnstampedMatrix) {
       served: true,
       upstreams: { openai: { cells: { openai: { served: true, perf: {
         added_latency_p50_us: 100, added_latency_p99_us: 200,
-        rps_sustained_20ms: 1000, rps_sustained_20ms_mock_bound: false,
-        rps_max_proxy: 1200, rps_max_proxy_mock_bound: false,
+        frontier: rawFrontier({ 10: 1000, none: 1200 }),
       } } } } },
     }));
   }
@@ -4782,32 +4991,52 @@ test("benchmark version: current rows are quiet, older rows are marked red with 
 // metrics with `.filter((x) => !x.c.na || x.c.failed)`, and a MEASURED FAILURE is `na: true,
 // failed: true` - so deleting `|| x.c.failed` deletes a gateway's worst measured result from the one
 // place a reader goes looking for it, and no test noticed.
-const failEnv = () => sealMetric(null, { absent: { reason: "not_measured",
-  detail: "the gateway leg at c=1 was not clean: 0 ok, 14201 fail" } });
+const FAIL_DETAIL = { reason: "not_measured", detail: "the gateway leg at c=1 was not clean: 0 ok, 14201 fail" };
+const failEnv = () => sealMetric(null, { absent: FAIL_DETAIL });
+/* The drawer fixture carries FOUR DISTINCT STATES on one record, because the drawer's job is to render
+   them apart and each pair of them is one substitution away from being indistinguishable:
+     a measured FAILURE   - the 1 ms reading's rate: the harness ran and the gateway failed everything
+     a below-RESOLUTION   - the p50 added latency: the comparison ran and the answer was under the floor
+     a real reading       - the 10 ms reading
+     a LOWER BOUND        - the unbounded reading: a floor, not a ceiling
+   The fourth replaces the retired SUPPRESSION state (a sealed envelope withholding a number it had). It
+   is genuinely new, it is the state the frontier introduced, and rendering it as a ceiling would be the
+   same class of error the suppression was: a surface making a claim the measurement does not support. */
 const drawerGw = () => ({
   key: "dgw", display: "Drawer GW", lang: "Rust", cls: "AI proxy",
   repo: "https://github.com/example/dgw",
   measured_at: "2026-07-25T00:00:00Z",
-  best_cell: { ...bcCell({ dialect: "openai" }), rps_max_proxy: failEnv() },
+  best_cell: bcCell({ dialect: "openai", frontier: { 1: null, 10: 20000, none: 22000 },
+    frontierOpts: { absent: FAIL_DETAIL, lowerBound: ["none"] } }),
 });
 const drawerState = (g, over = {}) => ({ ...app.newState(), view: "performance", mode: "peak",
   data: { gateways: [g] }, ...over });
 
-test("drawer: a MEASURED FAILURE stays visible among the metrics, with its counts and its red class", () => {
+test("drawer: the four states render APART - failure, below-resolution, a reading, and a floor", () => {
   const g = drawerGw();
   const h = app.drawerHtml(g, drawerState(g));
+  // (1) A MEASURED FAILURE keeps its counts and its red class, under the label of the reading that failed.
   assert.match(h, /failed · 0\/14,201/,
     "a measured failure must appear in the drawer with its counts - it is a result, not an absence");
   assert.match(h, /class="failtext"/, "and it is marked as a failure, not rendered as an ordinary value");
-  assert.match(h, /Max proxy RPS/, "under the label of the metric that failed");
+  assert.match(h, /99% under 1 ms/, "under the label of the reading that failed, which names its bound");
   assert.match(h, /the gateway leg at c=1 was not clean/, "with the engine's own evidence on the tooltip");
-  // The distinction the clause exists to preserve: a genuinely ABSENT metric is still filtered out, so
-  // this is not "show everything" - it is "a failure is not an absence".
+  // (2) A real reading renders as its number, with the concurrency it was observed at.
+  assert.match(h, /20,000/, "the measured reading is the number that was measured");
+  // (3) A LOWER BOUND renders as a FLOOR. A bare "22,000" beside the others would state a maximum the
+  // sweep never established - it ran out of ladder with that concurrency still qualifying.
+  assert.match(h, /≥ 22,000/, "a reading whose sweep ran out of ladder is a floor, and says so");
+  assert.match(h, /FLOOR/, "and the tooltip explains what the glyph means");
+  // (4) THE CURVE, under the numbers: the shape is the finding, so the drawer draws it rather than
+  // leaving the reader to plot six rows in their head.
+  assert.match(h, /frontier-spark/, "the drawer carries the cell's own curve");
+  // The distinction the failure clause exists to preserve: a genuinely ABSENT reading is still filtered
+  // out, so this is not "show everything" - it is "a failure is not an absence".
   const absent = drawerGw();
-  absent.best_cell.rps_sustained_20ms = sealMetric(null);
+  app.frontierAt(absent.best_cell.frontier, 1).rps = sealMetric(null);
   const h2 = app.drawerHtml(absent, drawerState(absent));
-  assert.ok(!/Sustained RPS/.test(h2),
-    "a never-measured metric is still omitted; only a measured failure earns a row");
+  assert.ok(!/failed · /.test(h2), "a never-measured reading is omitted; only a measured failure earns a row");
+  assert.ok(!/99% under 1 ms/.test(h2), "and its label goes with it");
 });
 
 test("drawer: the surface renders - name, class, lanes, values and provenance", () => {
@@ -4835,8 +5064,11 @@ test("drawer: the surface renders - name, class, lanes, values and provenance", 
 // loses the engine's reason for it.
 test("compare: the table renders through metric(), so a bare-mval read cannot collapse the states", () => {
   const failing = { key: "a", display: "Alpha", lang: "Rust", cls: "AI proxy",
-    best_cell: { ...bcCell({ dialect: "openai", added_latency_p99_us: 110 }),
-      rps_max_proxy: failEnv(),
+    best_cell: { ...bcCell({ dialect: "openai", added_latency_p99_us: 110,
+      // A measured FAILURE on one reading, and a FLOOR on another: two states the compare table must
+      // render apart from each other and from an ordinary number.
+      frontier: { 1: null, 10: 20000, none: 22000 },
+      frontierOpts: { absent: FAIL_DETAIL, lowerBound: ["none"] } }),
       // below-resolution: the comparison RAN and the difference was under what the rig can weigh.
       added_latency_p50_us: sealMetric(null, { absent: { reason: "below_resolution",
         detail: "the difference was at or below what the rig can resolve" } }) } };
@@ -4848,7 +5080,7 @@ test("compare: the table renders through metric(), so a bare-mval read cannot co
       // with it went the only fixture in this test that produced a reason to render. `rig_limited` is a
       // live engine absence token with its own prose, so the property under test - a no-number cell
       // discloses WHY instead of vanishing into the same n/a an untested cell gets - is unchanged.
-      rps_max_proxy: sealMetric(null, { absent: { reason: "rig_limited" } }) } };
+      gateway_c1_p99_us: sealMetric(null, { absent: { reason: "rig_limited" } }) } };
   const st = { ...app.newState(), view: "performance", mode: "peak",
     data: { gateways: [failing, bound] }, cmp: ["a", "b"] };
   const h = app.compareBodyHtml([failing, bound], st);
@@ -4875,6 +5107,275 @@ test("compare: the table renders through metric(), so a bare-mval read cannot co
   // split("<td") yields [prefix, metric-label cell, Alpha's cell, Beta's cell].
   const bestCol = p99Row.split("<td").findIndex((c) => c.includes('class="best"'));
   assert.equal(bestCol, 2, `lower added latency wins the row (Alpha); got column ${bestCol}`);
+});
+
+// ================================================================================================
+// THE FRONTIER SURFACES: the bound is named, switchable, and re-ranks the board
+//
+// The retired board's failure was not a wrong number, it was a caption: every surface described the
+// throughput gate as "p99 < 1 s" while the engine enforced 20 ms - a bar 96% of the 1632 recorded rungs
+// pass, against 57% for the real one - so a reader who reasoned carefully about our numbers reasoned about
+// a test we never ran. Everything below is a guard on the property that replaced it: the bound the board is
+// showing is DECLARED, the reader can change it, and changing it changes the ranking in front of them.
+// ================================================================================================
+
+test("FRONTIER: the board's bound vocabulary MIRRORS seal.mjs, which mirrors the engine", () => {
+  // app.js is loaded as a plain <script> and cannot import the module, so the list is duplicated. A second
+  // source of truth is only acceptable while something checks it: a bound added to the engine and to
+  // seal.mjs must not leave the board rendering a table one column short, silently.
+  assert.deepEqual(app.FRONTIER_BOUNDS_MS, FRONTIER_BOUNDS_MS,
+    "the board's declared bounds must equal seal.mjs's, which mirror frontier::P99_BOUNDS_US");
+  assert.equal(app.DEFAULT_BOUND_MS, DEFAULT_BOUND_MS, "and so must the bound the board opens on");
+  // The published order: every declared bound ascending, then the UNBOUNDED reading, which is a real
+  // choice (`null`) and not an unset value.
+  assert.deepEqual(app.BOUND_CHOICES, [...FRONTIER_BOUNDS_MS, null]);
+  for (const w of app.FRONTIER_BOUNDS_MS.slice(1).map((b, i) => [app.FRONTIER_BOUNDS_MS[i], b]))
+    assert.ok(w[0] < w[1], `bounds must ascend: ${app.FRONTIER_BOUNDS_MS}`);
+  // The frontier tab's default sort is the DEFAULT BOUND's own column, written out as a literal because
+  // VIEW_SORT is initialised before the constant exists. This is the check that keeps them agreeing.
+  assert.equal(app.VIEW_SORT.frontier, app.boundColId(app.DEFAULT_BOUND_MS));
+});
+
+test("FRONTIER: every surface NAMES the bound it is showing, and none can imply one it did not use", () => {
+  // THE PHRASING WAS SETTLED WITH THE OWNER: "18,995 req/s while 99% of requests finished under 10 ms".
+  // Not "rps at 10 ms", which reads as a category error - the bound is not a rate.
+  for (const b of app.FRONTIER_BOUNDS_MS) {
+    assert.equal(app.boundClause(b), `while 99% of requests finished under ${b} ms`);
+    assert.match(app.boundColLabel(b), new RegExp(`99% under ${b} ms`));
+  }
+  // The unbounded reading makes NO latency claim, and says so rather than borrowing the clause.
+  assert.match(app.boundClause(null), /no latency bound at all/);
+  assert.match(app.boundClause(null), /failed no request it accepted/);
+  assert.ok(!/99%/.test(app.boundColLabel(null)), "the unbounded column must not imply a percentile bound");
+  // NO SURFACE MAY STATE A BOUND AS A BARE NUMBER-AND-UNIT: the column header, the tooltip, the caption
+  // and the popup all render their clause from boundClause(), so there is one sentence to be wrong.
+  const col = app.COLUMN_SETS.performance.find((c) => c.id === "rps");
+  const prev = app.state.bound;
+  try {
+    for (const b of app.BOUND_CHOICES) {
+      app.state.bound = b;
+      assert.equal(String(col.label()), app.boundColLabel(b), `the header renames itself for ${app.boundLabel(b)}`);
+      assert.ok(String(col.title()).includes(app.boundClause(b)), "and the tooltip states the same clause");
+      assert.ok(app.frontierCaption(app.state, null).join(" ").includes(app.boundLabel(b)),
+        "and the Frontier caption names the column it has marked");
+    }
+  } finally { app.state.bound = prev; }
+});
+
+test("FRONTIER: the bound is in the URL, is a fixed point, and a bound the board never used is refused", () => {
+  // A shared link reproduces the reading it was shared at, on the tabs whose numbers ARE read at a bound.
+  for (const view of ["performance", "frontier"]) {
+    for (const b of app.BOUND_CHOICES) {
+      const st = { ...app.newState(), view, bound: b, sortCol: app.VIEW_SORT[view] };
+      if (view === "frontier") st.sortCol = app.boundColId(b);
+      const url = app.encodeUrl(st);
+      const back = app.decodeUrl(...(() => { const u = new URL(url, "https://x.invalid"); return [u.pathname, u.search]; })());
+      assert.equal(back.bound, b, `${url}: the bound survives the round trip`);
+      assert.equal(app.encodeUrl(back), url, `${url}: and the URL is a fixed point`);
+    }
+  }
+  // The DEFAULT is omitted, so the pristine link stays clean...
+  assert.ok(!app.encodeUrl({ ...app.newState(), view: "performance" }).includes("bound="));
+  // ...and the unbounded reading is spelled out rather than encoded as an empty value.
+  assert.match(app.encodeUrl({ ...app.newState(), view: "performance", bound: null }), /bound=none/);
+  // A BOUND THE BOARD DOES NOT PUBLISH IS IGNORED, not honoured. 20 ms is the retired gate's ceiling and
+  // the value a reader is most likely to try by hand; rendering a column labelled "99% under 20 ms" over
+  // readings taken at 10 ms would be the original defect, re-created by a URL parameter.
+  assert.equal(app.decodeUrl("/gateways/performance", "?bound=20").bound, app.DEFAULT_BOUND_MS);
+  assert.equal(app.decodeUrl("/gateways/performance", "?bound=abc").bound, app.DEFAULT_BOUND_MS);
+  assert.equal(app.decodeUrl("/gateways/performance", "?bound=").bound, app.DEFAULT_BOUND_MS);
+  // The selector is offered ONLY where something is read at a bound: a control over the memory columns
+  // would imply those numbers had a tail-latency bound too.
+  assert.deepEqual([...app.BOUND_VIEWS].sort(), ["frontier", "performance"]);
+  for (const v of ["streaming", "memory"]) assert.ok(!app.BOUND_VIEWS.has(v), `${v} is not read at a bound`);
+  assert.ok(!app.encodeUrl({ ...app.newState(), view: "memory", bound: 1 }).includes("bound="),
+    "a memory link must not carry a bound it does not use");
+});
+
+test("FRONTIER: switching the bound RE-RANKS the board, in front of the reader", () => {
+  /* THE LOAD-BEARING BEHAVIOUR. The whole claim of the frontier is that a gateway's position depends on the
+     tail you are willing to accept; a selector that changed only the digits in place would leave that claim
+     unmade. These two gateways are the field's two shapes, from the 2026-07-29 board: agentgateway holds
+     23,630 under a 1 ms tail and gains 7% unbounded; apisix carries 10,697 at 1 ms and nearly doubles by
+     5 ms. Ranked at 1 ms the flat one wins; ranked unbounded the steep one does. */
+  const flat = { key: "flat", display: "Flat GW", lang: "Rust",
+    best_cell: bcCell({ dialect: "openai", frontier: { 1: 23630, 5: 24712, 10: 25158, none: 25290 } }) };
+  const steep = { key: "steep", display: "Steep GW", lang: "Go",
+    best_cell: bcCell({ dialect: "openai", frontier: { 1: 10697, 5: 19339, 10: 20352, none: 26000 } }) };
+  const rows = [flat, steep];
+  const rank = (bound) => {
+    const st = { ...app.newState(), view: "performance", mode: "peak", bound, data: { gateways: rows } };
+    const col = app.COLUMN_SETS.performance.find((c) => c.id === "rps");
+    return rows.slice().sort(app.rowComparator({ ...col, get: (g) => col.get(g, st) }, true, null)).map((g) => g.key);
+  };
+  assert.deepEqual(rank(1), ["flat", "steep"], "at a 1 ms tail the gateway that holds its rate wins");
+  assert.deepEqual(rank(null), ["steep", "flat"], "with no bound at all the ranking INVERTS");
+  // ...and the two are not the same machine, which is what the shape column says in one number.
+  const gainOf = (g, bound) => app.frontierShapeCell(g, { ...app.newState(), mode: "peak", bound });
+  assert.equal(gainOf(flat, 10).text, "×1.1", "flat: it barely gains by letting the tail out");
+  assert.equal(gainOf(steep, 10).text, "×2.4", "steep: it needs a loose tail to go fast");
+  assert.ok(gainOf(steep, 10).v > gainOf(flat, 10).v, "so the shape column separates them at any bound");
+  // The gain is bound-INDEPENDENT (it is a property of the whole curve), which is why it is a stable
+  // second ranking rather than a third reading of the selected bound.
+  assert.equal(gainOf(steep, 1).text, gainOf(steep, null).text);
+  // AND SELECTING A BOUND MOVES THE FRONTIER TAB'S SORT ONTO THAT BOUND'S COLUMN, so the re-rank is
+  // visible rather than merely available.
+  const st = { ...app.newState(), view: "frontier", bound: 10, sortCol: app.boundColId(10) };
+  Object.assign(app.state, st, { data: { gateways: rows } });
+  try {
+    app.selectBound(1);
+    assert.equal(app.state.sortCol, app.boundColId(1), "the ranking follows the reader's selection");
+    // ...unless they had deliberately ranked by something else, which is their choice to keep.
+    app.state.sortCol = "shape";
+    app.selectBound(50);
+    assert.equal(app.state.sortCol, "shape", "a deliberate sort is not overwritten by a bound change");
+  } finally { Object.assign(app.state, app.newState()); }
+});
+
+test("FRONTIER: the tab publishes every reading as its own column, marked at the selected bound", () => {
+  const cols = app.COLUMN_SETS.frontier;
+  // ONE COLUMN PER PUBLISHED READING, in the engine's own order, each labelled with its own bound.
+  for (const b of app.BOUND_CHOICES) {
+    const c = cols.find((x) => x.id === app.boundColId(b));
+    assert.ok(c, `the frontier tab has a column for ${app.boundLabel(b)}`);
+    assert.equal(String(c.label), app.boundColLabel(b));
+    assert.ok(String(c.title).includes(app.boundClause(b)), "and states its own clause, not a shared one");
+  }
+  assert.ok(cols.some((c) => c.id === "shape"), "plus the curve, so the shape is legible without reading six numbers");
+  // A row with a SHAPE: the six cells are the six readings, and each carries the tail it ACTUALLY produced.
+  const g = { key: "s", display: "S", lang: "Rust",
+    best_cell: bcCell({ dialect: "openai", frontier: { 1: 7015, 5: 15438, 10: 18943, 50: 19284, none: 19284 },
+      frontierOpts: { conc: 64 } }) };
+  const st = { ...app.newState(), view: "frontier", mode: "peak", data: { gateways: [g] } };
+  assert.equal(cols.find((c) => c.id === "f1").get(g, st).v, 7015);
+  assert.equal(cols.find((c) => c.id === "f5").get(g, st).v, 15438);
+  assert.equal(cols.find((c) => c.id === "fnone").get(g, st).v, 19284);
+  // 100 ms has no reading (the engine omits a bound no rung qualified at): n/a, with the bound named.
+  const at100 = cols.find((c) => c.id === "f100").get(g, st);
+  assert.equal(at100.na, true);
+  assert.match(at100.note, /no reading at 100 ms/);
+  // The OBSERVED TAIL rides under the number, because 4 ms under a 100 ms bound and 99 ms under it are
+  // different findings and a column of rates alone cannot tell them apart.
+  const td = cols.find((c) => c.id === "f10").render(g, st);
+  assert.match(td, /tail 4\.0 ms/, `the observed tail is on the cell; got ${td}`);
+  assert.ok(!/10 ms<\/span>/.test(td), "and it is the tail, never the bound echoed back");
+  // THE SELECTED BOUND'S COLUMN IS MARKED, so the number the Performance tab ranks is locatable here.
+  assert.match(cols.find((c) => c.id === "f10").render(g, { ...st, bound: 10 }), /bound-col/);
+  assert.ok(!/bound-col/.test(cols.find((c) => c.id === "f1").render(g, { ...st, bound: 10 })));
+});
+
+test("FRONTIER: the curve is drawn on a SHARED log scale, with three distinguishable markers", () => {
+  /* THE SHAPE HAS TO BE LEGIBLE WITHOUT READING NUMBERS, which is what the sparkline is for, and the scale
+     is what makes it honest. Shared, so two rows are comparable; logarithmic, so equal slopes are equal
+     ratios (the ratio IS the finding) and the slowest gateway on the board is still visible - the field
+     spans litellm-rust at 44,363 req/s and plano at 19, which no shared linear axis can show at once. */
+  const board = { gateways: [
+    { key: "fast", best_cell: bcCell({ dialect: "openai", frontier: { 1: 40000, none: 44363 } }) },
+    { key: "slow", best_cell: bcCell({ dialect: "openai", frontier: { none: 19 } }) },
+  ] };
+  const scale = app.boardFrontierScale(board);
+  assert.deepEqual(scale, { min: 19, max: 44363 }, "the domain spans the whole board, not one row");
+  // A SLOW ROW IS STILL A SHAPE, not an empty frame with one dot: its curve is drawn on the same scale and
+  // its points are placed, so "slow" reads as slow rather than as broken.
+  const slow = app.frontierSpark(board.gateways[1].best_cell.frontier, { ...scale, boundMs: 10 });
+  assert.match(slow, /<path d="M/, "the slow row still draws a path");
+  assert.match(slow, /log scale/, "and says which scale it is on, for a screen reader");
+  // THE THREE MARKERS, THREE CLAIMS. A ceiling, a floor, and a bound the gateway served but could not hold.
+  const three = [
+    { bound_ms: 1, rps: sealMetric(null, { absent: { reason: "below_resolution", detail: "none held it" } }),
+      concurrency: null, p99_us: null, first_disqualified_conc: null, lower_bound: false },
+    { bound_ms: 10, rps: sealMetric(20000), concurrency: 64, p99_us: 4000, first_disqualified_conc: 128, lower_bound: false },
+    { bound_ms: null, rps: sealMetric(22000), concurrency: 1024, p99_us: 40000, first_disqualified_conc: null, lower_bound: true },
+  ];
+  const svg = app.frontierSpark(three, { min: 19, max: 44363, boundMs: 10 });
+  assert.match(svg, /no rung held this tail/, "a bound nothing held is drawn ON THE FLOOR, and titled");
+  assert.match(svg, /r="1\.9" fill="currentColor"/, "an established ceiling is a filled dot");
+  assert.match(svg, /r="2\.4" fill="none"/, "a floor is an OPEN dot - it is not a proven peak");
+  assert.match(svg, /stroke-dasharray="2 2"/, "and the selected bound is ruled, so the ranked number is locatable");
+  // A record with no frontier draws NOTHING - never an empty frame that reads as a measurement.
+  assert.equal(app.frontierSpark([], { ...scale }), "");
+  assert.equal(app.frontierSpark(null, { ...scale }), "");
+  /* THE SLOWEST SHAPE ON THE BOARD MUST STILL BE A SHAPE. plano's real curve: nothing under any declared
+     bound (its tail is ~890 ms at c=8) and 19 req/s unbounded. There is no ratio to state - a ratio against
+     zero is not a number - but the CURVE is the whole finding, so the cell keeps it and withholds only the
+     ×N. Rendering the cell as n/a here would delete the finding for exactly the gateways it is about, and
+     "no data" is a neutral impression of a damning measurement. */
+  const floorOnly = bcCell({ dialect: "openai", frontier: { 1: null, 5: null, 10: null, 50: null, 100: null, none: 19 } });
+  const g = { key: "slow", display: "Slow", lang: "Go", best_cell: floorOnly };
+  const cell = app.frontierShapeCell(g, { ...app.newState(), mode: "peak" });
+  assert.equal(cell.na, false, "a curve with no ratio is still a curve");
+  assert.equal(cell.text, "—", "and the ratio - not the curve - is what is withheld");
+  assert.match(cell.note, /no measurable throughput under any published bound/);
+  const td = app.COLUMN_SETS.performance.find((c) => c.id === "shape").render(g, { ...app.newState(), mode: "peak", data: { gateways: [g] } });
+  assert.match(td, /frontier-spark/, "the sparkline still renders for the slowest row on the board");
+  assert.equal((td.match(/<title>[^<]*no rung held this tail<\/title>/g) || []).length, 5,
+    "five ticks on the floor - one per bound the gateway could not hold - and one real point");
+});
+
+test("FRONTIER: every metric's definition is reachable from the surface that shows it", () => {
+  /* THE DEFINITIONS ARE GENERATED FROM THE ENGINE'S CONSTANTS (suite.rs metric_definitions) and surfaced
+     where the number is, because the failure they exist to prevent is a reader reasoning carefully about a
+     test that never ran. A definition filed on another page is a definition nobody reads. */
+  const defs = {
+    "perf.frontier": "THROUGHPUT AT A TAIL LATENCY YOU ACCEPT. For each declared bound...",
+    "perf.added_latency": "WHAT THE GATEWAY ADDS, at concurrency 1...",
+    "stream.streams_sustained": "THE MOST CONCURRENT SSE STREAMS THIS CELL CARRIES CLEANLY...",
+    memory: "See matrix.memory.protocol...",
+  };
+  const data = { gateways: [], definitions: defs };
+  // SELECTED BY PREFIX, never by an enumerated list: a definition the engine adds under `perf.` reaches the
+  // Performance surfaces with no change here, which is the only way this cannot go stale.
+  assert.deepEqual(app.definitionsFor(app.DEFINITION_PREFIXES.performance, data).map((e) => e[0]),
+    ["perf.added_latency", "perf.frontier"]);
+  assert.deepEqual(app.definitionsFor(app.DEFINITION_PREFIXES.streaming, data).map((e) => e[0]), ["stream.streams_sustained"]);
+  assert.deepEqual(app.definitionsFor(app.DEFINITION_PREFIXES.memory, data).map((e) => e[0]), ["memory"]);
+  const unknown = { gateways: [], definitions: { "perf.something_new": "a metric this table has not learned about" } };
+  assert.equal(app.definitionsFor(app.DEFINITION_PREFIXES.performance, unknown).length, 1,
+    "a definition the engine publishes and this table does not know still surfaces");
+  // The fold carries the engine's prose VERBATIM - reworded here it would be a second source of truth.
+  const html = app.definitionsFold(app.DEFINITION_PREFIXES.performance, data);
+  assert.match(html, /<details class="metric-defs">/);
+  assert.match(html, /THROUGHPUT AT A TAIL LATENCY YOU ACCEPT/);
+  assert.match(html, /WHAT THE GATEWAY ADDS/);
+  // A bundle generated before the engine published definitions renders nothing, not an empty fold.
+  assert.equal(app.definitionsFold(app.DEFINITION_PREFIXES.performance, { gateways: [] }), "");
+  assert.equal(app.definitionsFold(app.DEFINITION_PREFIXES.performance, null), "");
+  // And the drawer reaches it from the lane that shows the numbers.
+  const g = { key: "d", display: "D", lang: "Rust", best_cell: bcCell({ dialect: "openai" }) };
+  const h = app.drawerHtml(g, { ...app.newState(), view: "performance", mode: "peak", data: { gateways: [g], definitions: defs } });
+  assert.match(h, /THROUGHPUT AT A TAIL LATENCY YOU ACCEPT/, "the drawer's perf lane carries its own definition");
+});
+
+test("FRONTIER: the retired throughput vocabulary is unreachable from every board surface", () => {
+  // The producer cannot emit these any more; this is the guard that no RENDERER can either. A caption or a
+  // note that still names them would describe a measurement the board no longer takes - which is precisely
+  // the class of error the frontier was built to end.
+  const raw = readFileSync(join(HERE, "app.js"), "utf8");
+  // COMMENTS ARE WHERE THE HISTORY IS KEPT DELIBERATELY - every deletion in this file names what it removed
+  // and why - so they are stripped and the scan is of STRING LITERALS ONLY: the text a reader can actually
+  // see on the page.
+  const src = raw.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+  const literals = src.match(/"[^"\n]*"|'[^'\n]*'|`[^`]*`/g) || [];
+  for (const tok of ["rps_sustained_20ms", "rps_max_proxy", "cpu_fps", "mock_bound", "unverifiable", "paced_match"]) {
+    const hit = literals.filter((l) => l.includes(tok) && !/DELETED|retired|RETIRED/.test(l));
+    assert.deepEqual(hit, [], `${tok} must not appear in any rendered string; got ${JSON.stringify(hit)}`);
+  }
+  // And the two columns that read them are gone from every column set, by id and by label.
+  const ids = Object.values(app.COLUMN_SETS).flat().map((c) => c.id);
+  for (const id of ["rps20", "rpsmax", "cpufps"]) assert.ok(!ids.includes(id), `the ${id} column is retired`);
+  const labels = Object.values(app.COLUMN_SETS).flat().map((c) => String(typeof c.label === "function" ? c.label() : c.label));
+  assert.ok(!labels.some((l) => /20 ms upstream|Max proxy|CPU-bound/.test(l)),
+    `no column may still be labelled with a retired metric; got ${JSON.stringify(labels)}`);
+  // The tooltip that was wrong in both halves - "The 20 ms is the UPSTREAM's delay, not a latency target
+  // the gateway is held to" - went with the column. Nothing may say it again.
+  assert.ok(!/not a latency target the gateway is held to/.test(src));
+  assert.ok(!/p99 under 1 s|p99 < 1 s/.test(src), "and no surface may assert the gate's fabricated bar");
+  // The same scan over the two files a reader also sees, for the same reason.
+  for (const f of ["index.html", "style.css"]) {
+    const t = readFileSync(join(HERE, f), "utf8");
+    for (const tok of ["rps_sustained_20ms", "rps_max_proxy", "cpu_fps", "Sustained RPS", "Max proxy"])
+      assert.ok(!t.includes(tok), `${f} must not name the retired ${tok}`);
+  }
 });
 
 // ---- the repo URL reaches an href at four sites, and nothing built a hostile one -----------------
