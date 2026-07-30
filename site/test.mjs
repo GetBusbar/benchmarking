@@ -2246,6 +2246,34 @@ test("stripRigPaths scrubs absolute bench-box paths from diagnostic notes", () =
   assert.ok(!na.note.includes("/home/"));
 });
 
+test("FINDING 39: a sub-1/s rate survives every axis tick and every hover sentence", () => {
+  // THE RATE HAS NOW LEAKED AT SIXTEEN BOUNDARIES ACROSS FIVE AUDIT ROUNDS, always the same shape:
+  // one renderer is taught the fractional rate and a sibling reading the SAME number is missed. These
+  // pin the two that round 5 found, so the next miss is a red test rather than a published "0".
+
+  // fmtTick is the y-axis label formatter for the RPS sweep chart. niceStep correctly produces a
+  // sub-1 step for a sub-1 domain, so the gridlines were being drawn - and then every one of them
+  // was labelled "0", an axis whose entire scale read zero for a gateway that was measurably serving.
+  assert.equal(app.fmtTick(0.25), "0.25");
+  assert.equal(app.fmtTick(0.1), "0.1");
+  assert.equal(app.fmtTick(0.04), "0.04");
+  // 0 is still "0" - it is a MEASURED zero, and the whole point is that it stays distinguishable
+  // from a truncated fraction rather than both rendering alike.
+  assert.equal(app.fmtTick(0), "0");
+  // and nothing about the integer domain moved: these are what the published charts already show.
+  assert.equal(app.fmtTick(1), "1");
+  assert.equal(app.fmtTick(44382), "44.4k");
+
+  // cellPerfTip composes a "req/s" SENTENCE, and it was the last literal fmtInt() on a rate in app.js.
+  // Its integer form asserted the gateway carried nothing, from a reading that says otherwise - while
+  // frontierCell, the live equivalent reading the same envelope, printed "0.25".
+  const best = bcCell({ ingress: "openai", egress: "openai", frontier: 30000 });
+  const slow = { served: true, perf: cellPerf({ frontier: 0.25 }) };
+  const tip = app.cellPerfTip(slow, "anthropic", "openai", best, 10);
+  assert.ok(tip.includes("0.25 req/s"), tip);
+  assert.ok(!/\b0 req\/s/.test(tip), `a measured 0.25 must never print as "0 req/s": ${tip}`);
+});
+
 // ---- per-cell perf: best-path deviation on the matrix hover -----------------
 test("cellPerfTip shows a green cell's perf and its deviation from the gateway's best cell", () => {
   // cellPerfTip reads the sealed envelopes via mval(): a certified cell + reference show the number + delta;

@@ -52,7 +52,15 @@ fn require_i64(fields: &BTreeMap<&str, &str>, key: &str, line: &str) -> Result<i
 }
 
 /// The throughput lane's stats, from the stats line:
-/// `rps=%d fail=%d p50=%.2f p99=%.2f p50us=%d p99us=%d ok=%d`.
+/// `rps=<f64> fail=%d p50=%.2f p99=%.2f p50us=%d p99us=%d ok=%d`,
+/// optionally followed by `rigrefused=%d budgetexceeded=%d spawnfailed=%d`.
+///
+/// `rps` IS NOT AN INTEGER ON THE WIRE - it is printed from an f64 with `{}`, so a window that
+/// completed one request in four seconds sends `rps=0.25`. This line is the protocol's only
+/// specification, and it declared `%d` here long after the producer stopped emitting one; a second
+/// generator written against the stale text would print `rps=0` for that window and be parsed
+/// without complaint, reintroducing across the process boundary exactly the truncation the f64 on
+/// `UgenStats::rps` exists to carry.
 /// The `p50`/`p99` millisecond floats are redundant with the microsecond fields actually read and are
 /// dropped here; `ok` is kept because a caller can still want it.
 #[derive(Debug, Clone, PartialEq)]
