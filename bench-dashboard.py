@@ -69,7 +69,7 @@ PHASE_RE = re.compile(r"\[phase\] (\S+) (\S+)")
 # group existed). Nothing ever emitted `[phase] <cell> sustained_throughput`, so the entry was not
 # merely unused: `cell_fraction_done` walks PHASE_ORDER accumulating weight until it reaches the
 # phase it was given, so the phantom's 0.198 was ADDED to the progress of every cell that reached
-# `streams_sustained` or `cpu_fps`. A cell in cpu_fps reported 89.8% done when 70% of its declared
+# `streams_sustained` or the since-retired `cpu_fps`. A cell reported 89.8% done when 70% of its declared
 # weight had elapsed, which shortened the ETA of every gateway in the last third of every cell - a
 # fabricated number, arrived at by counting work that does not exist.
 #
@@ -78,17 +78,38 @@ PHASE_RE = re.compile(r"\[phase\] (\S+) (\S+)")
 # test parses metric.rs's METRICS list and fails if this table and the engine's groups ever diverge
 # again, because "the dashboard's phase table matches the engine" is exactly the kind of fact that is
 # true when written and silently false a refactor later.
+# RE-MEASURED, AND `cpu_fps` IS GONE - which is the same defect this comment block describes, recurring.
+#
+# `cpu_fps` was retired from the engine (see run.rs: of the 16 cells that published both it and
+# `streams_sustained_fps`, 4 had it INVERTED below the proven delivery boundary, 5 were redundant, and 7
+# were measured where the delivery gate did not hold). Its 0.102 then became exactly the phantom weight
+# described above: `cell_fraction_done` accumulates PHASE_ORDER weight until it reaches the given phase,
+# so a cell in `streams_sustained` would have reported progress including 10.2% of work that no longer
+# exists. The test that parses metric.rs's METRICS caught it, which is what it is for.
+#
+# The remaining five are re-derived from MEASURED wall clock on the new engine rather than by
+# redistributing the old guesses, because two things changed size at once: the sustained bisection was
+# deleted (its windows folded into the climb) and the memory phase became a FIXED duration instead of
+# stopping when the RSS trace looked flat. From a 2026-07-30 single-cell run:
+#
+#     memory 360.5s | throughput 162.2s | streams_sustained 12.3s | added_latency 12.0s | streaming 2.7s
+#     total 549.7s
+#
+# PROVISIONAL, and honestly so: that is one cell, on one box, with the mock standing in for the gateway,
+# so the throughput share in particular will move on a real gateway whose climb runs further. The
+# in-flight 14-gateway board emits a `[cost N/M] <cell>: ...` line per cell with exactly these
+# per-phase seconds, so the table can be re-derived from the real field distribution once it lands.
+# These are strictly better than what they replace either way: the old numbers predated both changes.
 PHASE_COST = {
-    "throughput": 0.424,   # 0.226 climb + the 0.198 the retired sustained_throughput group used to own
-    "memory": 0.396,
-    "streaming": 0.004,
-    "added_latency": 0.021,
-    "streams_sustained": 0.053,
-    "cpu_fps": 0.102,
+    "throughput": 0.295,
+    "memory": 0.656,
+    "streaming": 0.005,
+    "added_latency": 0.022,
+    "streams_sustained": 0.022,
 }
 # Fraction of a cell already done when a given phase STARTS, in the order the engine runs them
 # (metric::METRICS, in that order).
-PHASE_ORDER = ["throughput", "memory", "streaming", "added_latency", "streams_sustained", "cpu_fps"]
+PHASE_ORDER = ["throughput", "memory", "streaming", "added_latency", "streams_sustained"]
 
 
 def cell_fraction_done(phase_name):

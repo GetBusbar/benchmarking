@@ -167,7 +167,11 @@ export const ZERO_MEASURED_FAIL = "measured_failure";
 // independent oracle in check-consistency knew nothing about it at all - so a swapped note published a
 // measured streaming failure as a missing RPS ceiling and verified green. One list, imported by both.
 // The streaming counts are the measured-failure family; every other throughput metric is an RPS ceiling.
-export const ZERO_FAIL_FIELDS = ["streams_sustained", "streams_sustained_fps", "cpu_fps"];
+// `cpu_fps` is gone from this list because the metric is retired - see the engine's `run.rs`. A field
+// name left in a vocabulary after the field stops existing is not harmless: `zeroNoteFor` would keep
+// answering ZERO_MEASURED_FAIL for it, so a future field that happened to reuse the name would silently
+// inherit a "the gateway was offered load and sustained none of it" annotation it never earned.
+export const ZERO_FAIL_FIELDS = ["streams_sustained", "streams_sustained_fps"];
 // NULL FOR A FIELD WITH NO ZERO-NOTE VOCABULARY, which is most of them. The two tokens above are claims
 // about a THROUGHPUT measurement - "no tested load held the qualifying gates", "offered stream load and
 // sustained none" - and neither is a true sentence about anything else.

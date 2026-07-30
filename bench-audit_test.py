@@ -34,25 +34,59 @@ audit = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(audit)
 
 
+# A rung ladder built so every one of the six frontier readings is a distinct, checkable answer: each
+# doubling of concurrency both raises the rate and pushes the tail into the next bound's territory, so
+# every bound's winning rung, its boundary rung above it, and the final lower-bound reading are all
+# exercised by one small ladder rather than asserted in isolation.
+#
+#   conc   rps    p99_us   qualifies under (strict <)
+#   8      500      800    1ms, 5ms, 10ms, 50ms, 100ms, unbounded
+#   32    1500     3000          5ms, 10ms, 50ms, 100ms, unbounded
+#   128   3000     8000                10ms, 50ms, 100ms, unbounded
+#   512   5000    40000                      50ms, 100ms, unbounded
+#   2048  6000    90000                            100ms, unbounded
+#   8192  6500   200000                                    unbounded
+_BASE_RUNGS = [
+    {"conc": 8, "rps": 500, "p99_us": 800, "fail": 0},
+    {"conc": 32, "rps": 1_500, "p99_us": 3_000, "fail": 0},
+    {"conc": 128, "rps": 3_000, "p99_us": 8_000, "fail": 0},
+    {"conc": 512, "rps": 5_000, "p99_us": 40_000, "fail": 0},
+    {"conc": 2_048, "rps": 6_000, "p99_us": 90_000, "fail": 0},
+    {"conc": 8_192, "rps": 6_500, "p99_us": 200_000, "fail": 0},
+]
+
+# The frontier re-derived from `_BASE_RUNGS` by hand, per `frontier::read_at`: the max rps among
+# qualifying rungs, the concurrency it was observed at, that rung's own p99, the lowest concurrency
+# above it that stopped qualifying, and whether the winner is the top of the ladder. Only the last
+# reading (unbounded) wins at the ladder's top rung, so it is the only one with `lower_bound: True`.
+_BASE_FRONTIER = [
+    {"p99_bound_us": 1_000, "rps": 500, "concurrency": 8, "p99_us": 800,
+     "first_disqualified_conc": 32, "lower_bound": False},
+    {"p99_bound_us": 5_000, "rps": 1_500, "concurrency": 32, "p99_us": 3_000,
+     "first_disqualified_conc": 128, "lower_bound": False},
+    {"p99_bound_us": 10_000, "rps": 3_000, "concurrency": 128, "p99_us": 8_000,
+     "first_disqualified_conc": 512, "lower_bound": False},
+    {"p99_bound_us": 50_000, "rps": 5_000, "concurrency": 512, "p99_us": 40_000,
+     "first_disqualified_conc": 2_048, "lower_bound": False},
+    {"p99_bound_us": 100_000, "rps": 6_000, "concurrency": 2_048, "p99_us": 90_000,
+     "first_disqualified_conc": 8_192, "lower_bound": False},
+    {"p99_bound_us": None, "rps": 6_500, "concurrency": 8_192, "p99_us": 200_000,
+     "first_disqualified_conc": None, "lower_bound": True},
+]
+
+
 def cell(**over):
     """A cell that violates nothing, as the baseline every check is proven against."""
     c = {
         "served": True,
         "perf": {
-            "rps_max_proxy": 10_000,
-            "conc_at_peak": 64,
-            "rps_sustained_20ms": 9_000,
-            "rps_sustained_20ms_concurrency": 40,
-            "sweep_max_proxy": [
-                {"conc": 64, "rps": 10_000, "p99_us": 5_000, "fail": 0},
-                {"conc": 128, "rps": 9_500, "p99_us": 30_000, "fail": 0},
-            ],
+            "sweep_max_proxy": json.loads(json.dumps(_BASE_RUNGS)),
+            "frontier": json.loads(json.dumps(_BASE_FRONTIER)),
         },
         "stream": {
             "added_ttft_p50_us": 100,
             "added_ttft_p99_us": 400,
             "streams_sustained": 128,
-            "cpu_fps": 6_400,
         },
     }
     for k, v in over.items():
@@ -64,26 +98,49 @@ def cell(**over):
     return c
 
 
+def frontier_with(i, **field_over):
+    """A deep copy of `_BASE_FRONTIER` with reading `i` mutated - the standard shape for a red fixture
+    that must trip exactly one frontier check without disturbing the five readings around it."""
+    fr = json.loads(json.dumps(_BASE_FRONTIER))
+    fr[i].update(field_over)
+    return fr
+
+
 # Each entry: the check, a cell it must REJECT, and what the violation is about.
+#
+# REMOVED: check_sustained_not_above_peak compared `perf.rps_sustained_20ms` against
+# `perf.rps_max_proxy` and allowed C6_GROSS_PCT of window noise between them. BOTH FIELDS ARE DELETED
+# from `CellPerf` - see `frontier.rs`'s module header, reason #3: the two scalars came off two
+# different algorithms over the same rungs (a plateau search vs. a gate bisection) and could disagree,
+# which is exactly the state this check policed. The frontier is one algorithm - `max(rps)` over a
+# qualifying set that only grows as the bound relaxes - so the inversion is structural nonsense now,
+# not merely unchecked, and its successor `check_frontier_rates_are_monotone_in_the_bound` asserts the
+# ordering over all six readings instead of two. Tested below.
+#
+# REMOVED: check_peak_came_from_its_own_sweep held `perf.rps_max_proxy` to `max(sweep_max_proxy)` -
+# one direction of one comparison against a deleted scalar. Its strictly stronger successor,
+# `check_frontier_is_rederivable_from_its_sweep`, recomputes all four fields of every reading (rate,
+# concurrency, tail, boundary rung) from the rungs and demands equality both ways. Tested below.
 REJECTS = [
-    (audit.check_sustained_not_above_peak, cell(perf__rps_sustained_20ms=11_000),
-     "a sustained figure above the peak it shares a sweep with"),
-    (audit.check_peak_came_from_its_own_sweep, cell(perf__rps_max_proxy=99_000),
-     "a peak no window in its own sweep produced"),
     (audit.check_sweep_carries_its_latency,
      cell(perf__sweep_max_proxy=[{"conc": 64, "rps": 10_000, "p99_us": None, "fail": None}]),
      "throughput windows published without the p99 they measured"),
     (audit.check_ttft_percentiles_are_ordered, cell(stream__added_ttft_p99_us=50),
      "a p99 below the p50 from the same sample set"),
-    (audit.check_rate_and_concurrency_travel_together, cell(perf__rps_sustained_20ms_concurrency=None),
-     "a rate with no concurrency beside it"),
-    # Past MAX_RPS_PER_CONNECTION, deliberately: the bar is loose on purpose (it catches a rate
-    # divided by the wrong thing, not marginal optimism), so the fixture has to clear it rather than
-    # the bar being lowered to meet the fixture.
-    (audit.check_rate_is_physically_possible, cell(perf__conc_at_peak=1, perf__rps_max_proxy=50_000),
-     "50000 rps on a single connection"),
-    (audit.check_frames_have_a_stream_behind_them, cell(stream__streams_sustained=0),
-     "frames per second beside a MEASURED zero population"),
+    # REMOVED: check_rate_and_concurrency_travel_together paired `rps_sustained_20ms` with
+    # `rps_sustained_20ms_concurrency`, and `rps_max_proxy` with `conc_at_peak` - all four fields
+    # deleted. A rate and its concurrency are no longer two sibling keys that can drift apart; they
+    # are two fields of one `Reading` object emitted from one `frontier::read_at` call, which cannot
+    # exist without both. What CAN still go wrong - a reading's concurrency naming a rung that did not
+    # actually carry its published rate - is caught by `check_frontier_is_rederivable_from_its_sweep`
+    # (tested above) and by `check_every_absent_frontier_reading_has_a_reason` for the absent case
+    # (tested below).
+    #
+    # REMOVED (RE-POINTED, NOT DROPPED): check_rate_is_physically_possible read
+    # `rps_max_proxy / conc_at_peak`, both deleted. The defect class it guarded - a rate divided by the
+    # wrong thing - is a property of any published rate/concurrency pair and did not go away with the
+    # scalars, so it moved to `check_frontier_rate_is_physically_possible` (tested above), which runs
+    # the same arithmetic up to six times per cell instead of once.
     (audit.check_no_bare_absence, cell(stream__added_gap_p50_us=None),
      "a null metric with no reason in absences (a bare hole)"),
     # The other half of the hole: `check_no_bare_absence` reads `f in blk and blk[f] is None`, so a
@@ -93,8 +150,36 @@ REJECTS = [
     (audit.check_declared_fields_are_carried, cell(),
      "a served cell whose blocks omit declared fields entirely"),
     (audit.check_stream_capacity_is_a_number,
-     cell(stream__stream_served=True, stream__cpu_fps=None),
+     cell(stream__stream_served=True, stream__streams_sustained=None),
      "a served streaming cell whose capacity metric is a hole with nothing explaining it"),
+    # REMOVED: check_frames_have_a_stream_behind_them fired when `stream.cpu_fps` was published beside
+    # a MEASURED `streams_sustained` of 0 - a frames/sec rate over a population of zero streams.
+    # `cpu_fps`, `cpu_fps_concurrency` and `sweep_cpu_fps` are deleted from `CellStream` with nothing
+    # taking their place: `streams_sustained_fps` is the frame rate OF `streams_sustained` itself,
+    # measured in the SAME window rather than by a separate climb, so it can no longer be a rate over a
+    # population it was not measured against. There is no frame rate left in the artifact this check
+    # could still be pointed at.
+    # ── the frontier's own REJECTS entries ────────────────────────────────────────────────────────
+    #
+    # `check_frontier_is_complete` and `check_every_absent_frontier_reading_has_a_reason`'s reject
+    # cases live in dedicated blocks below rather than here, because the first needs the
+    # `frontier_known` kwarg exercised in both states and the second's mangle table has more than one
+    # shape worth pinning individually. The five here each have exactly one failure mode to prove.
+    (audit.check_frontier_rates_are_monotone_in_the_bound,
+     cell(perf__frontier=frontier_with(1, rps=100)),  # 5ms now reads 100, BELOW 1ms's own 500
+     "a looser bound reading a lower rate than a tighter one"),
+    (audit.check_frontier_is_rederivable_from_its_sweep,
+     cell(perf__frontier=frontier_with(2, rps=3_037)),  # +37 off the 3,000 its qualifying rungs carry
+     "a reading whose rate its own rungs do not carry"),
+    (audit.check_frontier_disclosure_agrees_with_the_ladder,
+     cell(perf__frontier=frontier_with(5, lower_bound=False)),  # winner IS the top rung; flipped false
+     "lower_bound flipped false at the reading whose winner IS the top of the ladder"),
+    (audit.check_frontier_p99_is_the_observed_tail,
+     cell(perf__frontier=frontier_with(2, p99_us=15_000)),  # above its own 10ms bound
+     "a reading's p99 published above its own bound"),
+    (audit.check_frontier_rate_is_physically_possible,
+     cell(perf__frontier=frontier_with(5, rps=5_000_000, concurrency=1)),
+     "5,000,000 rps on a single connection"),
 ]
 
 
@@ -155,12 +240,16 @@ def main():
                            absences={"stream.added_gap_p50_us": {"reason": "below_resolution", "detail": "x"}})
         if list(audit.check_no_bare_absence("t", with_reason)):
             failures.append("check_no_bare_absence rejected a null that carries its reason")
-        zeroed = cell(stream__stream_served=True, stream__cpu_fps=0, stream__streams_sustained=0)
-        zeroed["stream"].pop("cpu_fps_concurrency", None)
+        # `cpu_fps` IS GONE FROM `check_stream_capacity_is_a_number` (it is deleted from `CellStream`
+        # entirely, see the REMOVED note at `check_frames_have_a_stream_behind_them`'s old site in
+        # bench-audit.py) - the check's field list below it is just `("streams_sustained",)` now, so
+        # every fixture here is about that one field rather than the cpu_fps/cpu_fps_concurrency pair
+        # the pre-frontier version of this test exercised.
+        zeroed = cell(stream__stream_served=True, stream__streams_sustained=0)
         if list(audit.check_stream_capacity_is_a_number("t", zeroed)):
             failures.append("check_stream_capacity_is_a_number rejected a measured 0")
-        excused = cell(stream__stream_served=True, stream__cpu_fps=None,
-                       absences={"stream.cpu_fps": {"reason": "untestable"}})
+        excused = cell(stream__stream_served=True, stream__streams_sustained=None,
+                       absences={"stream.streams_sustained": {"reason": "untestable"}})
         if list(audit.check_stream_capacity_is_a_number("t", excused)):
             failures.append("check_stream_capacity_is_a_number rejected a rig-class absence")
         # A search that RAN, failed to establish a ceiling, and said WHY is not a silent yield.
@@ -174,12 +263,6 @@ def main():
                                        "found none that did within 4 attempts"}})
         if list(audit.check_stream_capacity_is_a_number("t", explained)):
             failures.append("check_stream_capacity_is_a_number rejected an absence that explains itself")
-        # The other side of the same coin: a cpu_fps peak beside an UNCONFIRMED ceiling is honest,
-        # because the two figures come from two different searches with different gates.
-        unconfirmed = cell(stream__cpu_fps=20636.8, stream__streams_sustained=None)
-        if list(audit.check_frames_have_a_stream_behind_them("t", unconfirmed)):
-            failures.append("check_frames_have_a_stream_behind_them rejected a peak beside an "
-                            "unconfirmed (not zero) ceiling")
 
     # ── the omitted-field check, both ways (ledger TOOL-04) ───────────────────────────────────────
     #
@@ -193,8 +276,13 @@ def main():
             carried[_b] = {_f: 1.0 for _f in _fs}
         if list(audit.check_declared_fields_are_carried("t", carried)):
             failures.append("check_declared_fields_are_carried rejected a cell that carries every field")
+        # A field to null out / drop below, picked off the LIVE list rather than hardcoded - a field
+        # this audit used to name here (`perf.conc_at_peak`) is exactly the kind of thing that gets
+        # deleted out from under a fixture, which is what made this test start raising KeyError
+        # instead of testing anything.
+        _perf_field = audit.ABSENCE_CARRYING_FIELDS["perf"][0]
         carried_with_null = json.loads(json.dumps(carried))
-        carried_with_null["stream"]["cpu_fps"] = None
+        carried_with_null["perf"][_perf_field] = None
         if list(audit.check_declared_fields_are_carried("t", carried_with_null)):
             failures.append("check_declared_fields_are_carried rejected an explicit null - it polices "
                             "OMISSION, and a null-with-reason is the honest shape it exists to require")
@@ -203,9 +291,9 @@ def main():
         # violation naming that key. The blanket reject above (a sparse cell) would still fire if the
         # check degenerated into "the block is small"; this pins that it is the missing KEY it sees.
         one_short = json.loads(json.dumps(carried))
-        del one_short["perf"]["conc_at_peak"]
+        del one_short["perf"][_perf_field]
         fired = list(audit.check_declared_fields_are_carried("t", one_short))
-        if len(fired) != 1 or "perf.conc_at_peak" not in fired[0]:
+        if len(fired) != 1 or f"perf.{_perf_field}" not in fired[0]:
             failures.append(f"check_declared_fields_are_carried must name the one omitted key, got {fired!r}")
 
         # REJECT: a whole block deleted is the same claim with the evidence removed, not a quieter cell.
@@ -215,6 +303,186 @@ def main():
         if len(fired) != 1 or "NO memory block" not in fired[0]:
             failures.append(f"check_declared_fields_are_carried must reject a served cell with no memory "
                             f"block at all, got {fired!r}")
+
+    # ── check_frontier_is_complete: shape and ordering, both ways ─────────────────────────────────
+    #
+    # ACCEPT: the clean cell's frontier is all six readings, declared bounds ascending then unbounded,
+    # every field present - whether or not the caller claims the producer knew about the metric.
+    with isolated(failures, "frontier: check_frontier_is_complete accept side"):
+        if list(audit.check_frontier_is_complete("t", cell())):
+            failures.append("check_frontier_is_complete rejected a complete, correctly-ordered frontier")
+        if list(audit.check_frontier_is_complete("t", cell(), frontier_known=True)):
+            failures.append("check_frontier_is_complete rejected a complete frontier with "
+                            "frontier_known=True")
+
+        # ACCEPT (the "Also" case in the brief): a snapshot that PREDATES the metric publishes no
+        # frontier anywhere, and that must read as "nothing to audit here" rather than a violation -
+        # frontier_known False is how the caller tells this apart from a cell that dropped it.
+        no_metric = cell(perf__frontier=[])
+        if list(audit.check_frontier_is_complete("t", no_metric, frontier_known=False)):
+            failures.append("check_frontier_is_complete rejected a cell from a pre-frontier snapshot "
+                            "(frontier_known=False) - demanding the metric from an engine that never "
+                            "had it")
+
+        # RED: the other half of the same case - SOME cell in this snapshot knows the metric, so a
+        # cell with no frontier at all dropped it rather than never measuring it.
+        fired = list(audit.check_frontier_is_complete("t", no_metric, frontier_known=True))
+        if not fired:
+            failures.append("check_frontier_is_complete accepted a served cell with NO frontier "
+                            "while sibling cells in the same snapshot publish one - it cannot fail, "
+                            "so it guards nothing")
+
+        # RED: drop one reading (5, not 6). Nothing else in this file would notice a shrunk board.
+        five = json.loads(json.dumps(_BASE_FRONTIER))[:5]
+        fired = list(audit.check_frontier_is_complete("t", cell(perf__frontier=five)))
+        if not fired:
+            failures.append("check_frontier_is_complete accepted a frontier with only 5 of 6 readings")
+
+        # RED: omit the `lower_bound` key entirely (present-but-null is a different, legal shape for
+        # the OTHER fields, but every key must at least be present - see check_frontier_is_complete's
+        # own docstring on key-missing vs. measured).
+        no_lb = json.loads(json.dumps(_BASE_FRONTIER))
+        del no_lb[0]["lower_bound"]
+        fired = list(audit.check_frontier_is_complete("t", cell(perf__frontier=no_lb)))
+        if not any("OMITS `lower_bound`" in v for v in fired):
+            failures.append(f"check_frontier_is_complete must name a reading that omits "
+                            f"`lower_bound`, got {fired!r}")
+
+        # RED: reorder two readings. The order IS the invariant (bounds ascending, unbounded last), so
+        # a permutation must trip completeness - AND, because the two checks share one sequence,
+        # monotonicity too: swapping 1ms and 5ms puts a 1500-rps reading before a 500-rps one.
+        reordered = json.loads(json.dumps(_BASE_FRONTIER))
+        reordered[0], reordered[1] = reordered[1], reordered[0]
+        reordered_cell = cell(perf__frontier=reordered)
+        if not list(audit.check_frontier_is_complete("t", reordered_cell)):
+            failures.append("check_frontier_is_complete accepted a frontier with two readings swapped")
+        if not list(audit.check_frontier_rates_are_monotone_in_the_bound("t", reordered_cell)):
+            failures.append("check_frontier_rates_are_monotone_in_the_bound accepted a frontier with "
+                            "two readings swapped - reordering put a lower rate ahead of a higher one")
+
+    # ── check_frontier_rates_are_monotone_in_the_bound: the degenerate form ───────────────────────
+    #
+    # A looser bound publishing NO rate while a tighter one published one is the same violation with
+    # the rate missing rather than merely low - the looser bound's qualifying set contains the
+    # tighter's, so it cannot be empty when the tighter one was not.
+    with isolated(failures, "frontier: monotonicity degenerate form (absent looser, present tighter)"):
+        absent_looser = frontier_with(1, rps=None, concurrency=None, p99_us=None,
+                                       first_disqualified_conc=None)
+        fired = list(audit.check_frontier_rates_are_monotone_in_the_bound(
+            "t", cell(perf__frontier=absent_looser)))
+        if not any("published NO rate while the tighter" in v for v in fired):
+            failures.append(f"check_frontier_rates_are_monotone_in_the_bound must catch a looser "
+                            f"reading gone absent beside a tighter one that read, got {fired!r}")
+
+    # ── check_frontier_is_rederivable_from_its_sweep: the re-derivation must check EVERY field ─────
+    #
+    # The REJECTS entry above already proves a wrong RATE is caught; these two prove the concurrency
+    # and the boundary proof are independently re-derived rather than trusted once the rate matches.
+    with isolated(failures, "frontier: re-derivation catches bad concurrency / bad boundary proof"):
+        bad_conc = frontier_with(2, concurrency=99_999)  # no rung at c=99999 carries the 10ms rate
+        fired = list(audit.check_frontier_is_rederivable_from_its_sweep(
+            "t", cell(perf__frontier=bad_conc)))
+        if not any("no rung at that concurrency" in v for v in fired):
+            failures.append(f"check_frontier_is_rederivable_from_its_sweep must catch a concurrency "
+                            f"no qualifying rung carries, got {fired!r}")
+
+        bad_fd = frontier_with(0, first_disqualified_conc=999_999)
+        fired = list(audit.check_frontier_is_rederivable_from_its_sweep(
+            "t", cell(perf__frontier=bad_fd)))
+        if not any("first_disqualified_conc=999999" in v for v in fired):
+            failures.append(f"check_frontier_is_rederivable_from_its_sweep must catch a fabricated "
+                            f"first_disqualified_conc, got {fired!r}")
+
+    # ── check_frontier_p99_is_the_observed_tail: the bound-copied-into-the-answer signature ────────
+    #
+    # The REJECTS entry above proves a p99 ABOVE its own bound is caught; this proves the check reports
+    # p99 EXACTLY EQUAL to the bound as its OWN, distinct finding - "qualification is strictly under
+    # the bound" - because that shape is the specific defect worth naming (the bound restated as the
+    # answer), not just another instance of the inequality.
+    with isolated(failures, "frontier: p99 exactly equal to its own bound"):
+        on_the_nose = frontier_with(2, p99_us=10_000)  # the 10ms reading's own bound, verbatim
+        fired = list(audit.check_frontier_p99_is_the_observed_tail(
+            "t", cell(perf__frontier=on_the_nose)))
+        if not any("its own bound" in v and "exactly" in v for v in fired):
+            failures.append(f"check_frontier_p99_is_the_observed_tail must name p99-equals-bound as "
+                            f"its own signature, distinct from p99-above-bound, got {fired!r}")
+
+    # ── check_every_absent_frontier_reading_has_a_reason ──────────────────────────────────────────
+    with isolated(failures, "frontier: every absent reading has a reason"):
+        # ACCEPT: nothing is absent.
+        if list(audit.check_every_absent_frontier_reading_has_a_reason("t", cell())):
+            failures.append("check_every_absent_frontier_reading_has_a_reason rejected a frontier "
+                            "with no absent readings")
+        # ACCEPT: a reading absent WITH its reason filed under the BOUND-keyed name.
+        absent_reading = frontier_with(0, rps=None, concurrency=None, p99_us=None,
+                                        first_disqualified_conc=None)
+        with_reasons = cell(
+            perf__frontier=absent_reading,
+            absences={f"perf.frontier.1ms.{f}": {"reason": "below_resolution", "detail": "x"}
+                      for f in ("rps", "concurrency", "p99_us")})
+        if list(audit.check_every_absent_frontier_reading_has_a_reason("t", with_reasons)):
+            failures.append("check_every_absent_frontier_reading_has_a_reason rejected an absent "
+                            "reading whose reasons are filed under perf.frontier.1ms.*")
+        # RED: the same absent reading with NO entry in the absences map at all - the bare hole this
+        # whole check exists to close. Must name all three bare fields, not just report "something".
+        bare = cell(perf__frontier=absent_reading)
+        fired = list(audit.check_every_absent_frontier_reading_has_a_reason("t", bare))
+        named = {f for f in ("rps", "concurrency", "p99_us")
+                if any(f"perf.frontier.1ms.{f}" in v for v in fired)}
+        if named != {"rps", "concurrency", "p99_us"}:
+            failures.append(f"check_every_absent_frontier_reading_has_a_reason must name all three "
+                            f"bare fields (rps, concurrency, p99_us) under perf.frontier.1ms.*, "
+                            f"named {named}, got {fired!r}")
+
+    # ── board-level: check_frontier_bounds_agree_with_the_engine (ledger TOOL-02 shape) ────────────
+    #
+    # ACCEPT: the real engine/src/frontier.rs, as it stands on disk, must agree with python's
+    # P99_BOUNDS_US. This is the assertion that actually runs in CI.
+    with isolated(failures, "frontier bounds mirror the engine"):
+        live = list(audit.check_frontier_bounds_agree_with_the_engine())
+        if live:
+            failures.append(f"python P99_BOUNDS_US and engine/src/frontier.rs's disagree right now: "
+                            f"{live}")
+
+        # REJECT #1: the parser must read the ENGINE'S bounds, not echo python's own list back.
+        if audit.parse_rust_frontier_bounds(
+                "pub const P99_BOUNDS_US: [u64; 3] = [1_000, 2_000, 3_000];") != [1_000, 2_000, 3_000]:
+            failures.append("parse_rust_frontier_bounds does not actually read the engine's literal "
+                            "array - a cross-check that returns its own side's value agrees with "
+                            "everything")
+
+        # RED (the mangle from the brief): the engine GAINS a bound the python mirror does not have -
+        # a sixth column the board would publish that this audit would never check for completeness,
+        # monotonicity or re-derivation, because it does not know the column exists.
+        tmp4 = tempfile.mkdtemp()
+        os.makedirs(os.path.join(tmp4, "engine", "src"))
+        with open(os.path.join(tmp4, "engine", "src", "frontier.rs"), "w") as fh:
+            fh.write("pub const P99_BOUNDS_US: [u64; 6] = "
+                    "[1_000, 5_000, 10_000, 50_000, 100_000, 500_000];\n")
+        old_here = audit.HERE
+        try:
+            audit.HERE = tmp4
+            drifted = list(audit.check_frontier_bounds_agree_with_the_engine())
+            if len(drifted) != 1 or "disagree" not in drifted[0]:
+                failures.append(f"check_frontier_bounds_agree_with_the_engine must reject an engine "
+                                f"that declares a 500ms bound python's P99_BOUNDS_US does not have, "
+                                f"got {drifted!r}")
+            # RED: going BLIND (declaration restated in an unrecognised shape) must fail, not skip.
+            with open(os.path.join(tmp4, "engine", "src", "frontier.rs"), "w") as fh:
+                fh.write("// the array moved to a different name\n")
+            blind = list(audit.check_frontier_bounds_agree_with_the_engine())
+            if not any("went blind" in v for v in blind):
+                failures.append(f"check_frontier_bounds_agree_with_the_engine must fail when "
+                                f"frontier.rs no longer declares P99_BOUNDS_US where this can read "
+                                f"it, got {blind!r}")
+            # RED: an unreadable frontier.rs must also fail, not skip.
+            os.remove(os.path.join(tmp4, "engine", "src", "frontier.rs"))
+            unreadable = list(audit.check_frontier_bounds_agree_with_the_engine())
+            if not any("cannot read" in v for v in unreadable):
+                failures.append(f"check_frontier_bounds_agree_with_the_engine must fail when it "
+                                f"cannot read frontier.rs at all, got {unreadable!r}")
+        finally:
+            audit.HERE = old_here
 
     # ── the C6 cross-language bar (ledger TOOL-02) ────────────────────────────────────────────────
     #
