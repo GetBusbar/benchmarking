@@ -798,6 +798,40 @@ bench_gateway_once() {
     # before relying on it, rather than discovering it three commands later.
     for _ in 1 2 3 4 5 6 7 8 9 10; do sudo -n true 2>/dev/null && break; sleep 3; done
     sudo -n true 2>/dev/null || { echo "PROVISION FAILED: passwordless sudo never became available"; exit 1; }
+
+    # SUDO HERE IS INTERMITTENT, NOT MERELY LATE - AND A ONE-SHOT WAIT DOES NOT COVER THAT.
+    #
+    # Second attempt at the 2026-07-30 field wipe. The first fix waited for sudo once after apt, on
+    # the theory that it lapsed and stayed lapsed. The re-run proved otherwise: the wait PASSED
+    # (`sudo -n true` succeeded, no failure message) and the very next sudo failed anyway. So sudo
+    # works, then does not, then works - a race against something still mutating the box, most
+    # plausibly unattended-upgrades touching the sudo package or its sudoers.d drop-in while we are
+    # using it. Fourteen boxes provisioning at once hit it every time; one box alone never did.
+    #
+    # A value that flickers cannot be established by asking once, however carefully. Retry the CALL.
+    # This wrapper is used for every sudo whose failure costs the box; the throwaway probes stay bare.
+    sudoq() {
+      local i
+      for i in 1 2 3 4 5 6 7 8; do
+        sudo -n "$@" && return 0
+        sleep 2
+      done
+      # Say which command, because the whole point is that the failure is not about the SUBJECT of
+      # the command - a `usermod` that could not get root is not a docker fault or a gateway fault.
+      echo "RIG: sudo -n $1 failed 8 times over ~16s (passwordless sudo is flapping on this box)" >&2
+      return 1
+    }
+    # And do not race the thing that is most likely mutating sudo: let unattended-upgrades finish
+    # before we start, rather than discovering it through a sudo that fails for no visible reason.
+    # Bounded, because a box that never settles should be lost here rather than measured on.
+    for _ in $(seq 1 40); do
+      systemctl is-active --quiet unattended-upgrades.service 2>/dev/null || break
+      sleep 3
+    done
+    for _ in $(seq 1 40); do
+      sudo -n fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || break
+      sleep 3
+    done
     # apt itself is contended at boot (unattended-upgrades holds the dpkg lock), so retry rather
     # than fail the whole box on a lock we only had to wait for.
     # NEEDRESTART MUST NOT RESTART SERVICES UNDER A RUNNING PROVISION. Ubuntu 24.04 ships needrestart
@@ -805,7 +839,7 @@ bench_gateway_once() {
     # mid-install - after which every sudo in this block failed for a password and the entire field
     # was lost. `a` (automatic, no prompt) still lets it do its bookkeeping but stops it interrupting
     # the session we are provisioning through. Exported so it covers every apt call below too.
-    for _ in 1 2 3; do sudo -n NEEDRESTART_MODE=l apt-get update -q && break; sleep 10; done
+    for _ in 1 2 3; do sudoq NEEDRESTART_MODE=l apt-get update -q && break; sleep 10; done
     # BARE base only: docker (for the image gateways), curl (fetch the prebuilt rig), jq, and python3
     # + psutil (the memory suite reads RSS). NO build-essential/rust/go/node here - the mock+loadgen
     # are prebuilt binaries pulled from the rig release, and the 2 source-built gateways pull their
@@ -814,7 +848,7 @@ bench_gateway_once() {
     # unattended-upgrades for the dpkg lock, and a single attempt turns a lock we only had to wait for
     # into a lost box. Without `set -e` tripping on the first two tries.
     for _ in 1 2 3; do
-      sudo -n NEEDRESTART_MODE=l DEBIAN_FRONTEND=noninteractive apt-get install -y -q docker.io curl ca-certificates jq python3-pip git build-essential && break
+      sudoq NEEDRESTART_MODE=l DEBIAN_FRONTEND=noninteractive apt-get install -y -q docker.io curl ca-certificates jq python3-pip git build-essential && break
       sleep 10
     done
     # A box that came up without docker cannot measure most entrants, and every launch on it fails
@@ -830,9 +864,9 @@ bench_gateway_once() {
     # so try them once rather than losing the box to a condition that is routinely fixable.
     if ! command -v docker >/dev/null; then
       echo "docker missing after install; attempting dpkg repair"
-      sudo -n dpkg --configure -a >/dev/null 2>&1 || true
-      sudo -n NEEDRESTART_MODE=l DEBIAN_FRONTEND=noninteractive apt-get install -y -q --fix-broken >/dev/null 2>&1 || true
-      sudo -n NEEDRESTART_MODE=l DEBIAN_FRONTEND=noninteractive apt-get install -y -q --reinstall docker.io >/dev/null 2>&1 || true
+      sudoq dpkg --configure -a >/dev/null 2>&1 || true
+      sudoq NEEDRESTART_MODE=l DEBIAN_FRONTEND=noninteractive apt-get install -y -q --fix-broken >/dev/null 2>&1 || true
+      sudoq NEEDRESTART_MODE=l DEBIAN_FRONTEND=noninteractive apt-get install -y -q --reinstall docker.io >/dev/null 2>&1 || true
     fi
     command -v docker >/dev/null || { echo "PROVISION FAILED: docker did not install on this box (after retry and dpkg repair)"; exit 1; }
     # The engine is BUILT ON THE BOX from the cloned commit, once, before any measurement starts.
@@ -864,14 +898,14 @@ bench_gateway_once() {
       echo "  this is a RIG failure, not the gateway's, and not docker's - the daemon was never asked"
       exit 1
     }
-    sudo -n usermod -aG docker ubuntu || true
+    sudoq usermod -aG docker ubuntu || true
     # FAIRNESS: a container inherits the docker DAEMON fd limit, NOT the host-shell ulimit. Left at
     # the ~1024 default, a containerised gateway fast enough to hold >1024 concurrent connections
     # hits EMFILE and collapses at exactly c=1024. The native side (loadgen, mock, native gateways)
     # is raised to match in the remote run script below - it used to be perf/run.sh's job, and when
     # that was retired the raise went with it while this comment kept citing it.
-    echo "{ \"default-ulimits\": { \"nofile\": { \"Name\": \"nofile\", \"Hard\": 1048576, \"Soft\": 1048576 } } }" | sudo -n tee /etc/docker/daemon.json >/dev/null
-    sudo -n systemctl restart docker || sudo -n service docker restart || true
+    echo "{ \"default-ulimits\": { \"nofile\": { \"Name\": \"nofile\", \"Hard\": 1048576, \"Soft\": 1048576 } } }" | sudoq tee /etc/docker/daemon.json >/dev/null
+    sudoq systemctl restart docker || sudoq service docker restart || true
     # THE BINARY EXISTING IS NOT EVIDENCE THE DAEMON WILL ANSWER, and it was the daemon that was
     # missing when this last bit.
     #
@@ -900,7 +934,7 @@ bench_gateway_once() {
       done
       [ "$_dockok" = 1 ] && break
       echo "docker daemon not answering (round $_round); attempting to start it"
-      sudo -n systemctl enable --now docker >/dev/null 2>&1 \
+      sudoq systemctl enable --now docker >/dev/null 2>&1 \
         || sudo -n systemctl restart docker >/dev/null 2>&1 \
         || sudo -n service docker restart >/dev/null 2>&1 || true
     done
@@ -1161,6 +1195,21 @@ FILELIST
 # Every relative path below is relative to the repo, so anchor it rather than inheriting a cwd from
 # the login shell that starts this script.
 cd ~/benchmarking || exit 1
+# Same flapping-sudo wrapper the provision block defines, redefined here because this heredoc is a
+# SEPARATE script with its own shell - a `sudoq` inherited by name would be an undefined command,
+# and the two calls below are `|| true`, so it would have failed SILENTLY and left the ephemeral
+# port range at its default. That range is where `run::host_connection_ceiling` gets its number, so
+# a silent miss there does not break the run, it quietly changes the ceiling every sweep is read
+# against. See the provision block for why one attempt is not enough.
+sudoq() {
+  local i
+  for i in 1 2 3 4 5 6 7 8; do
+    sudo -n "$@" && return 0
+    sleep 2
+  done
+  echo "RIG: sudo -n $1 failed 8 times over ~16s (passwordless sudo is flapping on this box)" >&2
+  return 1
+}
 # THE MEASURING INSTRUMENT NEEDS AS MANY SOCKETS AS THE THING IT MEASURES.
 #
 # The load generator opens ONE connection per unit of concurrency, so a sweep to c=4096 needs 4096
@@ -1199,8 +1248,8 @@ echo "[rig] loadgen/mock fd limit: $(ulimit -Sn) (hard $(ulimit -Hn))"
 # tcp_tw_reuse because a closed connection holds its port through TIME_WAIT: without recycling, a
 # window that cycles connections exhausts the range well below its size. This is the safe direction
 # of that knob - it permits reuse for OUTBOUND connections only.
-sudo -n sysctl -w net.ipv4.ip_local_port_range="16384 65535" >/dev/null 2>&1 || true
-sudo -n sysctl -w net.ipv4.tcp_tw_reuse=1 >/dev/null 2>&1 || true
+sudoq sysctl -w net.ipv4.ip_local_port_range="16384 65535" >/dev/null 2>&1 || true
+sudoq sysctl -w net.ipv4.tcp_tw_reuse=1 >/dev/null 2>&1 || true
 echo "[rig] ephemeral ports: $(cat /proc/sys/net/ipv4/ip_local_port_range 2>/dev/null || echo unknown) (tw_reuse=$(cat /proc/sys/net/ipv4/tcp_tw_reuse 2>/dev/null || echo unknown))"
 # The checkout is sparse (gateways + lib only), so results/ does not exist here and the snapshot
 # writer does not create its own output directory - it reports an error and writes nothing.
@@ -1288,8 +1337,8 @@ echo $? > .run-done
 # harvest: cancel the boot timer and re-arm a bounded window. Cost stays capped either way, and a dead
 # orchestrator now has a known amount of time to come back (see `run-on-ec2.sh harvest`) instead of
 # racing whatever happened to be left of the work budget.
-sudo -n shutdown -c 2>/dev/null || true
-sudo -n shutdown -h +__HARVEST_GRACE_MIN__ 2>/dev/null || true
+sudoq shutdown -c 2>/dev/null || true
+sudoq shutdown -h +__HARVEST_GRACE_MIN__ 2>/dev/null || true
 echo "[box] run finished; results held for __HARVEST_GRACE_MIN__ min for harvest, then self-terminate"
 REMOTE
   )"
