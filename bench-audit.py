@@ -644,19 +644,18 @@ def check_frontier_is_rederivable_from_its_sweep(name, c, ok_known=True):
     rungs may repeat a concurrency, so ties are matched against the SET of rungs carrying the winning
     rate at the published concurrency rather than against one assumed argmax.
 
-    `ok_known` GATES THE RE-DERIVATION ENTIRELY, because `rung_qualifies` now reads `ok` off every
-    rung (see `rung_served_cleanly`) and every snapshot on disk as of 2026-07-29 predates that field.
-    On those rungs `rung_served_cleanly` returns False for LACK OF PROOF, not for lack of cleanliness -
-    and if this function ran anyway, that would empty every qualifying set on an old board and flag
-    every honest published rate as unbacked. That is exactly the "calling old snapshots dirty" false
-    alarm this file was rewritten to stop repeating (see `rung_served_cleanly`'s plano paragraph), so
-    `ok_known=False` skips the re-derivation instead of guessing at it. `producer_knew_ok` is how the
-    caller decides, the same mechanism `producer_knew_the_frontier` uses for a pre-frontier snapshot,
-    and the skip is disclosed by count at the end of the run - never silently forgiven, and gone the
-    moment a snapshot from an engine that publishes `ok` lands.
-    """
-    if not ok_known:
-        return
+    `ok_known` IS NOW DISCLOSURE ONLY - IT NO LONGER SKIPS ANYTHING, and that reversal is the point.
+    It first gated the whole re-derivation, on the reasoning that `rung_served_cleanly` reads `ok` and
+    every snapshot predating that field would fail cleanliness for LACK OF PROOF, emptying every
+    qualifying set and flagging honest rates as unbacked.
+
+    That was true of the first shape of the fix and it traded one failure for a worse one: THE STRONGEST
+    CHECK IN THIS FILE went unrun on every cell of the board about to ship, and a skipped check is weaker
+    than an approximate one. `rung_served_cleanly` now FALLS BACK to the p99-as-proof-of-completion rule
+    when `ok` is absent, which is wider than the engine's rule rather than narrower, so its residual
+    error is a missed catch and never a false alarm. With that in place the re-derivation runs on every
+    board, exactly or approximately, and `ok_known` only records WHICH it was so the run can say so.
+"""
     fr = frontier_of(c)
     if not fr:
         return
@@ -1264,13 +1263,21 @@ def main():
         print("  to run on. They run the moment a snapshot from an engine that DOES publish readings")
         print("  lands - re-measure to audit them.")
     if preok_cells:
-        print(f"NOT AUDITED: check_frontier_is_rederivable_from_its_sweep on {preok_cells} served "
-              f"cell(s) across {len(preok_gws)} snapshot(s) that predate `ok`: {', '.join(preok_gws)}")
-        print("  No rung in those snapshots carries sweep_max_proxy.ok, so this file cannot prove any")
-        print("  of them served cleanly and skipped the re-derivation rather than call every rung dirty")
-        print("  - the same false alarm plano's c=256 window produced under the old rps>0 approximation.")
-        print("  It runs the moment a snapshot from an engine that publishes ok lands - re-measure to")
-        print("  audit them.")
+        # AUDITED, BUT APPROXIMATELY - and saying "NOT AUDITED" here would be the same class of
+        # misstatement this file exists to catch. The re-derivation DID run on these cells; what it could
+        # not do is apply the engine's `ok > 0` half exactly, because no rung in these snapshots carries
+        # `sweep_max_proxy.ok`. It fell back to treating a positive rate OR a p99 as proof of completion,
+        # which is WIDER than the engine's rule (a completion always leaves a latency sample, while a
+        # rate can round away through `as i64`), so what these cells risk is a MISSED catch, never a
+        # false alarm. The distinction is worth the four extra lines: a reader deciding how much this
+        # PASS is worth needs to know which cells were checked exactly and which approximately.
+        print(f"AUDITED APPROXIMATELY: check_frontier_is_rederivable_from_its_sweep on {preok_cells} "
+              f"served cell(s) across {len(preok_gws)} snapshot(s) that predate `sweep_max_proxy.ok`: "
+              f"{', '.join(preok_gws)}")
+        print("  The re-derivation ran on all of them. Without `ok` it could not apply the engine's")
+        print("  `ok > 0` half exactly, so it treated a positive rate or a p99 as proof that the window")
+        print("  completed something - wider than the engine's rule, so a missed catch rather than a")
+        print("  false alarm. An engine that publishes `ok` makes these exact; nothing here is skipped.")
     print(f"{len(CELL_CHECKS)} per-cell invariants ({len(FRONTIER_CHECKS)} of them the frontier's) + 1 "
           f"per-gateway + {len(board_checks)} board-level invariants\n")
 

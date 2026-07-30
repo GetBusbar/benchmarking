@@ -415,12 +415,21 @@ def main():
         if audit.rung_served_cleanly({"conc": 999, "rps": None, "p99_us": None, "fail": 0, "ok": 0}):
             failures.append("rung_served_cleanly accepted ok=0, fail=0 as clean - a window that "
                             "completed nothing must not count as having served cleanly")
-        # RED: `ok` absent entirely (every snapshot on disk as of 2026-07-29). Unverifiable, and an
-        # unverifiable rung does not get to read as clean - "measured nothing" and "measured no
-        # failures" are different facts, per the docstring's own reasoning for `fail`.
-        if audit.rung_served_cleanly({"conc": 8, "rps": 500, "p99_us": 800, "fail": 0}):
-            failures.append("rung_served_cleanly accepted a rung with no `ok` field as clean - an "
-                            "absent ok is unverifiable, not a pass")
+        # GREEN, and this one INVERTED: `ok` absent entirely (every snapshot measured before the field
+        # existed). It first refused these, on the reasoning that unverifiable must not read as clean -
+        # but refusing meant the re-derivation had to skip whole boards, and a skipped check is weaker
+        # than an approximate one. So an absent `ok` FALLS BACK: a positive rate or a p99 is proof the
+        # window completed something, which is WIDER than the engine's `ok > 0` (a completion always
+        # leaves a latency sample, while a rate can round away through `as i64`), so the residual error
+        # is a missed catch rather than a false alarm.
+        if not audit.rung_served_cleanly({"conc": 8, "rps": 500, "p99_us": 800, "fail": 0}):
+            failures.append("rung_served_cleanly refused a rung with no `ok` but a real rate and tail - "
+                            "it must fall back rather than refuse, or the re-derivation skips whole "
+                            "pre-`ok` boards and the strongest check goes unrun on what ships")
+        # AND THE FALLBACK STILL HAS A FLOOR: no `ok`, no rate, no tail proves nothing at all.
+        if audit.rung_served_cleanly({"conc": 8, "rps": None, "p99_us": None, "fail": 0}):
+            failures.append("rung_served_cleanly accepted a rung with no ok, no rate and no tail - "
+                            "nothing there evidences a completion, so the fallback must still refuse")
         # RED, the sibling: `fail` absent with `ok` present must not read as clean either - unchanged
         # from before `ok` existed, pinned again here so the exact rewrite did not quietly drop it.
         if audit.rung_served_cleanly({"conc": 8, "rps": 500, "p99_us": 800, "ok": 500}):
@@ -444,40 +453,57 @@ def main():
                             f"fail=0 win the 10ms reading - re-derived from the rungs that can PROVE "
                             f"they served cleanly the answer is 1500, got {fired!r}")
 
+        # THE ABSENT-`ok` SIBLING INVERTED for the same reason as the unit case above: with the fallback
+        # in place, a rung missing `ok` but carrying a real rate and tail is proven clean by that rate, so
+        # it legitimately KEEPS the reading and nothing should fire. Asserting silence here is the
+        # non-vacuous half - it proves the fallback re-derives rather than merely declining to look, and
+        # the `ok: 0` case just above proves it still catches a rung that truly completed nothing.
         ok_absent_rungs = json.loads(json.dumps(_BASE_RUNGS))
         del ok_absent_rungs[2]["ok"]
         fired = list(audit.check_frontier_is_rederivable_from_its_sweep(
             "t", cell(perf__sweep_max_proxy=ok_absent_rungs)))
-        if not any("is 1500" in v for v in fired):
-            failures.append(f"check_frontier_is_rederivable_from_its_sweep let a rung with no `ok` "
-                            f"field win the 10ms reading - unverifiable must not count as clean, "
-                            f"got {fired!r}")
+        if fired:
+            failures.append(f"a rung with no `ok` but a real rate and tail must keep its reading through "
+                            f"the fallback, not be treated as unproven: got {fired!r}")
 
-    # ── ok_known=False: a snapshot that predates `ok` is skipped, not flagged dirty ───────────────────
+    # ── a snapshot that predates `ok` is RE-DERIVED ANYWAY, via the wider fallback ────────────────────
     #
-    # This is the false alarm the brief calls out by name: every snapshot on disk right now carries NO
-    # `ok` at all, so if the re-derivation ran anyway every rung would fail `rung_served_cleanly` for
-    # lack of proof, every qualifying set would come back empty, and every honestly published rate
-    # would be flagged as having no rung behind it - the entire board, at once, for a field its engine
-    # never had. `ok_known=False` must suppress that instead.
-    with isolated(failures, "check_frontier_is_rederivable_from_its_sweep: ok_known=False skips rather than flags"):
+    # THIS TEST WAS INVERTED, and the inversion is the finding. It used to assert that `ok_known=False`
+    # SKIPPED the re-derivation entirely, on the reasoning that without `ok` every rung fails
+    # `rung_served_cleanly` for lack of proof, every qualifying set empties, and every honestly published
+    # rate gets flagged as having no rung behind it - the whole board at once, for a field its engine
+    # never had.
+    #
+    # That reasoning was sound and the remedy was wrong. Skipping meant the STRONGEST check in the file
+    # went unrun on all 26 cells of the board that was about to ship, and a skipped check is weaker than
+    # an approximate one. `rung_served_cleanly` now falls back to treating a positive rate OR a p99 as
+    # proof of completion when `ok` is absent - wider than the engine's rule, since a completion always
+    # leaves a latency sample while a rate can round away through `as i64` - so the residual error is a
+    # missed catch rather than a false alarm, which is the only direction an approximation may err in a
+    # tool whose warnings have to be trusted.
+    #
+    # So: a pre-`ok` cell whose readings genuinely match its rungs must now PASS, not be skipped. That is
+    # a stronger property than the old one - it proves the fallback actually re-derives correctly rather
+    # than merely declining to look.
+    with isolated(failures, "re-derivation runs on a pre-`ok` snapshot instead of skipping it"):
         no_ok_rungs = [{k: v for k, v in r.items() if k != "ok"} for r in json.loads(json.dumps(_BASE_RUNGS))]
         preok_cell = cell(perf__sweep_max_proxy=no_ok_rungs)
-        # Sanity: with ok_known left at its True default this cell IS flagged (every rung unverifiable,
-        # so every reading loses its winning rung) - proving the skip below is doing real work, not
-        # passing because the fixture happened to already agree.
-        would_fire = list(audit.check_frontier_is_rederivable_from_its_sweep("t", preok_cell))
-        if not would_fire:
-            failures.append("test fixture is broken: a cell with no `ok` anywhere must trip the "
-                            "re-derivation under the default ok_known=True, or the skip below proves "
-                            "nothing")
-        fired = list(audit.check_frontier_is_rederivable_from_its_sweep(
-            "t", preok_cell, ok_known=False))
+        fired = list(audit.check_frontier_is_rederivable_from_its_sweep("t", preok_cell))
         if fired:
-            failures.append(f"check_frontier_is_rederivable_from_its_sweep must skip entirely when "
-                            f"ok_known=False (a pre-ok snapshot), got {fired!r} - calling every rung "
-                            f"dirty for a field its engine never had is the false alarm this exists "
-                            f"to stop")
+            failures.append(f"a pre-`ok` cell whose frontier matches its own rungs must re-derive clean "
+                            f"through the fallback, not be flagged: got {fired!r}")
+        # AND THE FALLBACK MUST STILL CATCH A REAL DEFECT. An approximation that accepts everything is
+        # not a check; this is what distinguishes "wider than the engine's rule" from "switched off".
+        broken = cell(perf__sweep_max_proxy=no_ok_rungs,
+                      perf__frontier=frontier_with(2, rps=_BASE_FRONTIER[2]["rps"] + 37))
+        if not list(audit.check_frontier_is_rederivable_from_its_sweep("t", broken)):
+            failures.append("the pre-`ok` fallback accepted a reading 37 rps off its own rungs - a "
+                            "fallback that catches nothing is a disabled check, not a wider one")
+        # `ok_known` is disclosure now, not a gate: passing it False must not change the verdict.
+        as_false = list(audit.check_frontier_is_rederivable_from_its_sweep("t", broken, ok_known=False))
+        if not as_false:
+            failures.append("ok_known=False still suppresses the re-derivation - it is meant to record "
+                            "which cells were checked approximately, never to skip them")
 
     # ── producer_knew_ok: the artifact is asked, same mechanism as producer_knew_the_frontier ─────────
     def _snapshot(c):
