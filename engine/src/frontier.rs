@@ -136,21 +136,35 @@ pub struct Reading {
     /// holding 4 ms under a 100 ms bound is not the same finding as one sitting at 99 ms.
     pub p99_us: Option<u64>,
     /// The lowest concurrency above `concurrency` that did NOT qualify, when the sweep probed one.
-    /// `None` means every rung above also qualified, i.e. the sweep ran out of range rather than
-    /// finding a boundary - which makes this reading a LOWER BOUND and it says so.
+    /// `None` means every rung above this one also qualified - which is a fact about the BOUND, not
+    /// about the range: the gateway held this tail all the way up, and the reading is simply the best
+    /// RATE among those rungs.
     pub first_disqualified_conc: Option<u32>,
+    /// The highest concurrency this sweep probed at all, qualifying or not.
+    ///
+    /// Carried so `is_lower_bound` can tell "we ran out of ladder" from "throughput turned over",
+    /// which `first_disqualified_conc` alone cannot - see that method.
+    pub top_probed_conc: u32,
 }
 
 impl Reading {
-    /// Is this the most the gateway can do under this bound, or only the most we asked for?
+    /// Is this the most the gateway can do under this bound, or only the most we ASKED for?
     ///
-    /// A reading with nothing disqualified above it is a lower bound, and publishing it as a ceiling
-    /// would be publishing our own range as the gateway's answer. The old search turned this state
-    /// into an ABSENCE (`Absent::SearchExhausted`, value null) - which threw away a real measured
-    /// rate because we could not prove it was the maximum. The number is right either way; only the
-    /// word for it changes, so the number is published and the word is published with it.
+    /// True only when the winning rung is the highest concurrency the sweep probed. Then there is
+    /// nothing above it in the record, we stopped because the range ended, and publishing the rate as a
+    /// ceiling would be publishing our own range as the gateway's answer. The retired search turned
+    /// this state into an ABSENCE (`Absent::SearchExhausted`, value null), throwing away a real
+    /// measured rate for failing to prove maximality; the rate is right either way, so it is published
+    /// and the word for it is published with it.
+    ///
+    /// NOT `first_disqualified_conc.is_none()`, which is what this was and which was wrong. That
+    /// conflates two different findings, and the live smoke run showed the difference immediately: the
+    /// sweep probed to c=256, the best rate landed at c=32, and every rung above it still held a 5ms
+    /// tail while simply being SLOWER. Nothing disqualified, so the old test said "lower bound" - but
+    /// throughput had visibly turned over inside the range and the peak was established. The honest
+    /// question is whether we looked higher, not whether what we found up there passed a latency bound.
     pub fn is_lower_bound(&self) -> bool {
-        self.first_disqualified_conc.is_none()
+        self.concurrency >= self.top_probed_conc
     }
 }
 
@@ -171,12 +185,16 @@ pub fn read_at(rungs: &[Rung], bound: Option<u64>) -> Option<Reading> {
         .filter(|r| r.concurrency > best.concurrency && !r.qualifies(bound))
         .map(|r| r.concurrency)
         .min();
+    // The top of what we ASKED FOR, over every rung probed - qualifying or not, since a rung that failed
+    // is still a rung we looked at and is exactly what proves we did not stop early.
+    let top_probed_conc = rungs.iter().map(|r| r.concurrency).max().unwrap_or(0);
     Some(Reading {
         p99_bound_us: bound,
         rps: best.rps,
         concurrency: best.concurrency,
         p99_us: best.p99_us,
         first_disqualified_conc,
+        top_probed_conc,
     })
 }
 
@@ -387,18 +405,49 @@ mod tests {
         assert!(!r.is_lower_bound());
     }
 
-    // NOTHING DISQUALIFIED ABOVE IT MEANS WE RAN OUT OF RANGE, NOT THAT WE FOUND THE CEILING. The old
-    // search published `Absent::SearchExhausted` - null - for this, discarding a real measured rate
-    // because it could not prove maximality. The rate is published and labelled instead.
+    // WINNING AT THE TOP OF THE LADDER MEANS WE RAN OUT OF RANGE. The retired search published
+    // `Absent::SearchExhausted` - null - for this, discarding a real measured rate because it could not
+    // prove maximality. The rate is published and labelled instead.
     #[test]
-    fn a_sweep_that_never_stopped_qualifying_reads_as_a_lower_bound_not_an_absence() {
+    fn a_sweep_that_won_at_its_top_rung_reads_as_a_lower_bound_not_an_absence() {
         let rungs = vec![rung(1024, 900.0, 2, 0), rung(16384, 19_000.0, 3, 0)];
         let r = read_at(&rungs, Some(10_000)).expect("a real rate, not an absence");
         assert_eq!(r.rps, 19_000.0);
-        assert_eq!(r.first_disqualified_conc, None);
+        assert_eq!(r.concurrency, 16_384);
         assert!(
             r.is_lower_bound(),
-            "still qualifying at the top of the range: a lower bound, published as one"
+            "the best rate is the highest rung probed, so nothing establishes it as a ceiling"
+        );
+    }
+
+    // BUT A CURVE THAT TURNED OVER INSIDE THE RANGE IS A REAL PEAK, even when every rung above the
+    // winner still held the bound.
+    //
+    // THE LIVE SMOKE RUN CAUGHT THIS. `is_lower_bound` was `first_disqualified_conc.is_none()`, which
+    // conflates "we ran out of ladder" with "throughput turned over". The 2026-07-30 local run probed to
+    // c=256, peaked at c=32, and every rung above still held a 5ms tail while simply being slower -
+    // nothing disqualified, so five of the six readings claimed to be lower bounds when the peak was
+    // plainly established. The honest question is whether we LOOKED higher, not whether what we found
+    // up there passed a latency bound.
+    #[test]
+    fn a_curve_that_turned_over_inside_the_range_is_a_peak_not_a_lower_bound() {
+        let rungs = vec![
+            rung(8, 90_000.0, 1, 0),
+            rung(32, 187_407.0, 1, 0),  // the peak
+            rung(128, 150_000.0, 2, 0), // probed, still under the bound, and SLOWER
+            rung(256, 120_000.0, 3, 0),
+        ];
+        let r = read_at(&rungs, Some(5_000)).unwrap();
+        assert_eq!(r.rps, 187_407.0);
+        assert_eq!(r.concurrency, 32);
+        assert_eq!(
+            r.first_disqualified_conc, None,
+            "nothing above broke the bound - that is a fact about the BOUND, not about the range"
+        );
+        assert_eq!(r.top_probed_conc, 256);
+        assert!(
+            !r.is_lower_bound(),
+            "we probed 3 rungs past the winner and they were worse: the peak is established"
         );
     }
 
