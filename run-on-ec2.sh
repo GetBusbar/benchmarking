@@ -919,7 +919,12 @@ bench_gateway_once() {
   # launcher runs directly, and fetching it 0644 kills the run with "build script ... is not
   # executable". The tarball this replaced preserved modes for free, so dropping to a mode-blind
   # copy lost them silently - it took out exactly the three native gateways and nothing else.
-  _files="$(git -C "$HERE" ls-tree -r "$BENCH_COMMIT" -- "gateways/$gw" lib/rig.sh 2>/dev/null | awk '{print $1"\t"$4}')"
+    # SPLIT ON THE TAB, NOT ON WHITESPACE. `git ls-tree` emits "<mode> <type> <sha>\t<path>", so the path
+  # is everything after the TAB - `awk '{print $4}'` takes only the first whitespace-delimited word of
+  # it and silently truncates any gateway file whose name contains a space. The box then 404s fetching a
+  # path that does not exist, and the gateway is published INCOMPLETE as though its own run had failed.
+  _files="$(git -C "$HERE" ls-tree -r "$BENCH_COMMIT" -- "gateways/$gw" lib/rig.sh 2>/dev/null \
+    | awk -F'\t' '{split($1, a, " "); print a[1]"\t"$2}')"
   if [ -z "$_files" ]; then
     glog_echo "FETCH FAILED: commit ${BENCH_COMMIT:0:12} contains no gateways/$gw - refusing to measure"
     return 1

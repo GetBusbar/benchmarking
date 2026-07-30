@@ -5,7 +5,10 @@
 # RED FIXTURES FOR THE TWO AUDITORS THAT HAD NEITHER A TEST NOR A PLACE IN THE CI GATE.
 #
 # `verify-latency.py` and `audit-every-metric.py` were written in one sitting during a live run and
-# shipped with no test file and no CI invocation. That is the same shape as the defects they exist to
+# shipped with no test file and no CI invocation. A later audit round found that `verify-frontier.py`
+# and `verify-turnover.py` - the OLDER and more important pair, and the ones that actually re-derive
+# the frontier - had neither either, so fixing only the two newest was a half-fix. All four are
+# covered here now. That is the same shape as the defects they exist to
 # catch: an oracle nobody has shown can fail is an oracle nobody should believe. A typo'd field name
 # that always resolves to `None` would leave `checked` at 0 and print PASS on every board forever, and
 # nothing would notice.
@@ -33,16 +36,29 @@ CLEAN_CELL = {
         "added_latency_p99_us": 105,
         "gateway_c1_p99_us": 136,
         "direct_c1_p99_us": 31,
+        # ALL SIX DECLARED BOUNDS. verify-frontier.py checks the published sequence against
+        # frontier.rs's P99_BOUNDS_US and rejects a frontier of a different shape, so a two-entry
+        # fixture would fail for the wrong reason and hide whatever the test meant to assert.
         "frontier": [
+            # At 1 ms the c=16 rung (p99 1500us) is already disqualified, so the boundary above the
+            # winner is 16 - not 32. The tool caught this fixture error, which is the behaviour wanted.
             {"p99_bound_us": 1000, "rps": 100.0, "concurrency": 8, "p99_us": 900,
              "first_disqualified_conc": 16, "lower_bound": False},
+            {"p99_bound_us": 5000, "rps": 120.0, "concurrency": 16, "p99_us": 1500,
+             "first_disqualified_conc": 32, "lower_bound": False},
+            {"p99_bound_us": 10000, "rps": 120.0, "concurrency": 16, "p99_us": 1500,
+             "first_disqualified_conc": 32, "lower_bound": False},
+            {"p99_bound_us": 50000, "rps": 120.0, "concurrency": 16, "p99_us": 1500,
+             "first_disqualified_conc": 32, "lower_bound": False},
+            {"p99_bound_us": 100000, "rps": 120.0, "concurrency": 16, "p99_us": 1500,
+             "first_disqualified_conc": 32, "lower_bound": False},
             {"p99_bound_us": None, "rps": 120.0, "concurrency": 16, "p99_us": 1500,
-             "first_disqualified_conc": None, "lower_bound": False},
+             "first_disqualified_conc": 32, "lower_bound": False},
         ],
         "sweep_max_proxy": [
             {"conc": 8, "ok": 100, "rps": 100.0, "p99_us": 900, "fail": 0},
             {"conc": 16, "ok": 120, "rps": 120.0, "p99_us": 1500, "fail": 0},
-            {"conc": 32, "ok": 110, "rps": 110.0, "p99_us": 2500, "fail": 0},
+            {"conc": 32, "ok": 110, "rps": 110.0, "p99_us": 2500, "fail": 1},
         ],
     },
     "memory": {
@@ -65,14 +81,21 @@ def snapshot(cell):
 
 
 def run(tool, cell):
-    """Run one auditor over a one-cell board and return (exit_code, output)."""
+    """Run one auditor over a one-cell board and return (exit_code, output).
+
+    `verify-frontier.py` deliberately PARSES engine/src/frontier.rs for the declared bounds rather than
+    hardcoding them - so it cannot police a different axis than the one that ran, and going blind counts
+    as a failure rather than a pass. The fixture tree therefore has to carry that file too.
+    """
     d = tempfile.mkdtemp()
     try:
         os.makedirs(os.path.join(d, "results", "snapshots"))
+        os.makedirs(os.path.join(d, "engine", "src"), exist_ok=True)
+        shutil.copy(os.path.join(HERE, "engine", "src", "frontier.rs"),
+                    os.path.join(d, "engine", "src", "frontier.rs"))
         with open(os.path.join(d, "results", "snapshots", "result_fixture_2026-07-30T00-00-00Z.json"), "w") as f:
             json.dump(snapshot(cell), f)
         shutil.copy(os.path.join(HERE, tool), d)
-        # verify-frontier.py parses the engine for its declared bounds; not needed by these two.
         p = subprocess.run([sys.executable, tool], cwd=d, capture_output=True, text=True)
         return p.returncode, p.stdout + p.stderr
     finally:
@@ -143,13 +166,62 @@ def main():
     c, o = run("audit-every-metric.py", CLEAN_CELL)
     expect("it reports the cell count it actually examined", c, o, False, "1 served cells")
 
+    print("verify-frontier.py:")
+    # ACCEPT: a cell whose six readings each re-derive from its own rungs.
+    c, o = run("verify-frontier.py", CLEAN_CELL)
+    expect("a frontier that re-derives from its rungs passes", c, o, False)
+
+    # RED: the published rate is not the maximum its own rungs support. This is the check that would
+    # have caught the tie-break bug, and it had no test at all until now.
+    bad = copy.deepcopy(CLEAN_CELL)
+    bad["perf"]["frontier"][-1]["rps"] = 9999.0
+    c, o = run("verify-frontier.py", bad)
+    expect("a rate that does not re-derive FAILS", c, o, True, "re-derived")
+
+    # RED: the winning CONCURRENCY disagrees with the rungs - the exact shape of the tie-break defect,
+    # where the rate was right and the rung it was attributed to was not.
+    bad = copy.deepcopy(CLEAN_CELL)
+    bad["perf"]["frontier"][-1]["concurrency"] = 32
+    c, o = run("verify-frontier.py", bad)
+    expect("a concurrency that does not re-derive FAILS", c, o, True)
+
+    # RED: a frontier of a different SHAPE is a different board.
+    bad = copy.deepcopy(CLEAN_CELL)
+    bad["perf"]["frontier"] = bad["perf"]["frontier"][:3]
+    c, o = run("verify-frontier.py", bad)
+    expect("a frontier missing declared bounds FAILS", c, o, True)
+
+    print("verify-turnover.py:")
+    # ACCEPT: a peak with a clean, slower rung above it is a proved turnover.
+    c, o = run("verify-turnover.py", CLEAN_CELL)
+    expect("a proved turnover passes", c, o, False)
+
+    # RED: the peak sits at the TOP of the probed ladder and the artifact does NOT disclose it, so a
+    # floor is published as though it were a ceiling. This is the tool's only failing exit, and until
+    # this round it could not fire at all because `lower_bound` was never read.
+    bad = copy.deepcopy(CLEAN_CELL)
+    bad["perf"]["sweep_max_proxy"] = [{"conc": 8, "ok": 100, "rps": 100.0, "p99_us": 900, "fail": 0}]
+    for r in bad["perf"]["frontier"]:
+        r["rps"], r["concurrency"], r["p99_us"], r["lower_bound"] = 100.0, 8, 900, False
+        r["first_disqualified_conc"] = None
+    c, o = run("verify-turnover.py", bad)
+    expect("an UNDISCLOSED floor FAILS", c, o, True, "does NOT disclose")
+
+    # ACCEPT: the same shape, but the artifact discloses it. Not a defect - and this is the half that
+    # was broken in the opposite direction, failing honest boards.
+    good = copy.deepcopy(bad)
+    for r in good["perf"]["frontier"]:
+        r["lower_bound"] = True
+    c, o = run("verify-turnover.py", good)
+    expect("a DISCLOSED floor passes", c, o, False, "DISCLOSED FLOOR")
+
     print()
     if FAILURES:
         for f in FAILURES:
             print("FAILURE: " + f)
         print(f"\n{len(FAILURES)} failure(s)")
         return 1
-    print("PASS: both auditors reject each violation they exist to catch, and accept a clean cell.")
+    print("PASS: all four auditors reject each violation they exist to catch, and accept a clean board.")
     return 0
 
 
