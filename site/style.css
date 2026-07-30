@@ -186,6 +186,23 @@ a.home-card:hover { border-color: var(--accent); text-decoration: none; }
 /* results table */
 .table-scroll { overflow-x: auto; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-raise); }
 table { border-collapse: collapse; width: 100%; font-size: .86rem; }
+/* THE COLUMN GEOMETRY IS DECLARED, NOT DISCOVERED. The owner: "changing filters shouldn't change column
+   widths, just an annoyance." Under auto layout a column is as wide as its widest RENDERED cell, so clicking
+   a bound chip - which swaps 20,119 for 20,389, moves which column is highlighted, and can flip a row between
+   a number and "no rung held this tail" - re-solved the whole grid and every column jumped. Measured across
+   filter combos, all four table views drifted at all three widths.
+   `fixed` makes the browser take the widths from the <colgroup> renderTable emits (app.js COL_WIDTHS) and
+   never consult a cell, so the geometry is a property of the COLUMN SET - which does not change between
+   filters - rather than of the rows currently passing through it. The two halves are one mechanism: without
+   the colgroup, `fixed` would divide the width equally and make the checkbox as wide as the gateway names.
+   It also fixes the complaint from the other side ("column widths - Tested on is huge (cos of 1 large
+   openai > cohere)"): a column can no longer be sized by its longest value in one mode. */
+#results-table { table-layout: fixed; }
+/* A DECLARED WIDTH IS ONLY HONOURED IF THE CONTENT CAN LIVE INSIDE IT. Values keep nowrap (a wrapped number
+   reads as two numbers) but the sub-lines under them are prose, and prose wraps: "no rung held this tail" is
+   wider than any rate above it, so left nowrap it would be the thing sizing a numeric column - the same
+   defect, one element down. */
+.reading-none, .reading-tail, .zero-why { white-space: normal; }
 thead th {
   position: sticky; top: 0; background: var(--bg-raise); color: var(--fg-dim);
   font-weight: 600; text-align: right; padding: .6rem .55rem;
@@ -198,7 +215,13 @@ thead th {
    costs one row of height once and buys back the width every row. The values keep nowrap - a
    wrapped number reads as two numbers. max-width stops a long single word from claiming a whole
    column on its own. */
-#results-table thead th { white-space: normal; overflow-wrap: anywhere; max-width: 7.5rem; }
+/* A HEADER MAY WRAP BETWEEN WORDS AND MUST NEVER SPLIT ONE.
+   `overflow-wrap: anywhere` was here to stop one long word claiming a whole column, and instead it let
+   "Recovered @30 s" render as "Recovere / d @30 s" once the memory table squeezed that column to 73px - a
+   header that looks like a rendering fault, which is worse than a wide column. keep-all pins breaking to the
+   spaces; max-width still caps the column, and a hypothetical single unbreakable word now overflows its cap
+   (visible, ugly, honest) rather than being cut in half. */
+#results-table thead th { white-space: normal; overflow-wrap: normal; word-break: keep-all; max-width: 7.5rem; }
 /* EVERY nth-child RULE FOR THE STICKY IDENTITY COLUMNS IS PINNED TO thead tr:first-child.
    The Frontier tab's head is now TWO rows (a spanning "Req/s · 99% of requests under:" group over six
    bound sub-headers), and in the second row nth-child(1) is the 1 ms column, not the checkbox. Unscoped,
@@ -524,17 +547,55 @@ td.failcell {
 .seg-btn:hover { color: var(--fg); }
 .seg-btn.active { background: var(--accent, #4cc38a); color: #06120c; font-weight: 600; }
 
-/* ---- the latency-throughput frontier ----------------------------------------
-   THE TAIL-LATENCY BOUND SELECTOR (Performance + Frontier). Reuses the segmented control above, because it
-   is the same kind of choice as the cell chooser - which view of the one measurement to show - and a
-   second visual language for it would suggest a different kind of decision. */
-.bound-chooser { display: flex; flex-wrap: wrap; gap: .6rem; align-items: center; margin-top: .4rem; }
-.bound-chooser.hidden { display: none; }
-.bound-label { color: var(--fg-dim); font-size: .85rem; }
-/* The sentence under the control ("showing the most req/s each gateway carried while 99% of requests
-   finished under 10 ms"). The bound must be legible as WORDS and not only as a highlighted button: the
-   defect this whole surface exists to prevent is a reader inferring a bar the test never enforced. */
-.bound-note { font-size: .76rem; }
+/* ---- THE FILTER BLOCK: two labelled axes, one left edge -----------------------
+   THE OWNER, ON THE LIVE FRONTIER TAB: "filter formatting is ugly, align them", "generally needs some ui
+   help". What shipped was two sibling flex rows - "Tail-latency bound [chips] showing the req/s..." and
+   below it a bare "[Own cell][Same][Custom]". The first row's text label indented its chips; the second
+   row's chips started flush at the far left; the trailing sentence ran to a width nothing else shared.
+
+   WHY A GRID AND NOT AN INDENT ON THE SECOND ROW. These are two DIFFERENT axes - WHICH TAIL BOUND, and
+   WHICH CELL - and the second one had no label at all, which is the real reason it read as loose chips.
+   Naming both and putting the names in a `max-content` gutter makes the shared left edge a consequence of
+   the layout: it is exactly as wide as the longer label, so it cannot drift when either label's wording
+   changes, and no magic indent exists to be forgotten. A hand-set padding on the second row would have
+   aligned today's two strings and nothing else.
+
+   THE AXES STAY SEPARATE ELEMENTS because they hide independently (the bound axis exists only on
+   Performance + Frontier). `display: contents` makes each group's label and controls direct items of the ONE
+   grid, so a hidden axis takes its whole row with it and the surviving axis does not move sideways. */
+.filters {
+  display: grid; grid-template-columns: max-content minmax(0, 1fr);
+  gap: .5rem .9rem; align-items: center;
+  margin: .9rem 0; padding: .7rem .9rem;
+  background: var(--bg-raise); border: 1px solid var(--border); border-radius: 8px;
+}
+/* The block itself disappears when NEITHER axis applies (matrix/method have no table), rather than leaving
+   an empty framed box above the data. */
+.filters:not(:has(> .control-group:not(.hidden))) { display: none; }
+.filters > .control-group { display: contents; }
+.filters > .control-group.hidden { display: none; }
+/* The axis name. Small caps rather than sentence case: it labels an axis, and at this size a run of
+   lowercase words beside a row of chips reads as prose the reader should be following. */
+.filters .flabel {
+  color: var(--fg-dim); font-size: .74rem; font-weight: 600;
+  text-transform: uppercase; letter-spacing: .05em; white-space: nowrap;
+}
+.filters .fcontrols { display: flex; flex-wrap: wrap; gap: .6rem; align-items: center; }
+/* The sentence under the bound chips ("showing the req/s each gateway's chosen cell carried while 99% of
+   requests finished under 10 ms"). ITS OWN LINE, in the CONTROLS column, so it starts at the same left edge
+   as the chips it explains rather than trailing off the end of them - and capped to a measure, because a
+   line of 0.76rem text run to 1440px is not a sentence anyone reads.
+   The bound must be legible as WORDS and not only as a highlighted button: the defect this whole surface
+   exists to prevent is a reader inferring a bar the test never enforced. */
+.filters .fnote { grid-column: 2; font-size: .76rem; max-width: 46rem; margin: -.15rem 0 0; }
+.filters .fnote:empty { display: none; }
+/* CONSISTENT CHIP GEOMETRY WITHIN AN AXIS. "1 ms" and "no bound" are the same kind of choice, so they are
+   the same size of target; six chips of six different widths was the other half of "ugly". Centred, because
+   a min-width with left-aligned text just moves the ragged edge inside the chip. */
+#bound-seg .seg-btn { min-width: 4.4rem; text-align: center; }
+#mode-seg .seg-btn { min-width: 5rem; text-align: center; }
+
+/* ---- the latency-throughput frontier ---------------------------------------- */
 
 /* THE CURVE, per row. `color: currentColor` throughout the SVG, so the line inherits the accent here and
    stays legible in both themes without a second palette to keep in sync (same approach as .rss-spark). */
@@ -592,9 +653,41 @@ td.bound-col { background: var(--sorted-col-bg); }
 /* A served (green) matrix cell is clickable → Performance Custom. */
 .cell.served { cursor: pointer; }
 
-/* Memory tab: the recovery-curve column cell + the memory chart region under the table. */
-td.memcurve { min-width: 260px; }
+/* Memory tab: the recovery-curve column cell + the memory chart region under the table.
+   CAPPED AT WHAT THE SPARKLINE NEEDS. The svg is a fixed 260px, but the column rendered at 446 - roughly half
+   the table - because `tbody td { white-space: nowrap }` applies to the caption under it, and the longest
+   caption is one long line. So the column was sized by a sentence, and the four numeric columns (the actual
+   content) were crushed to 70-93px between it and the Tested-on pill. The cap plus a wrapping caption keeps
+   the picture at full size and gives the width back to the numbers. */
+td.memcurve { width: 180px; min-width: 180px; max-width: 180px; padding-top: .2rem; padding-bottom: .2rem; }
 td.memcurve.na { color: var(--fg-mute); }
+/* The caption wraps INSIDE the capped column instead of widening it (it inherits nowrap from tbody td).
+   It only appears in the DRAWER now; the table row carries no caption at all. */
+.rss-spark .stamp { white-space: normal; }
+/* THE INLINE LIFECYCLE CURVE, and the control that makes it reachable.
+   A memory row stood ~350px tall because this one cell stacked six block elements. It now holds a single
+   ~34px curve, which is why the row can be as short as a frontier row. The <button> is the reachability
+   guarantee, not decoration: it carries the whole summary as its accessible name, so a keyboard or screen
+   reader user gets every figure the captions used to show, and activating it opens the drawer. Styled to
+   disappear - the row must not look like it is full of buttons - but it keeps a real focus ring. */
+.rss-life-btn {
+  display: block; width: 100%; padding: 0; margin: 0; border: 0; background: none;
+  color: var(--accent, currentColor); cursor: pointer; border-radius: 4px; line-height: 0;
+}
+.rss-life-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.rss-life { display: block; max-width: 100%; }
+/* The axis-break glyph sits between the two segments. Muted, because it is notation rather than data - but
+   it must be VISIBLE: it is the disclosure that the two halves are drawn at different time scales. */
+.rss-break { pointer-events: none; }
+/* "Tested on" on the memory table: capped, because it was sized by its longest pill
+   ("OpenAI→Bedrock Converse") for every row. The pill truncates with an ellipsis and its full value stays on
+   the tooltip it already carries, so nothing is lost but the width. */
+#results-table td.tested { max-width: 8.5rem; }
+#results-table td.tested .tested-pill { max-width: 100%; overflow: hidden; text-overflow: ellipsis; vertical-align: bottom; }
+/* THE RELEASE MARK: how much of what it gained under load the gateway gave back, as a tick between two
+   levels already plotted (peak → last sample). Thick and faint so it reads as a magnitude behind the curve
+   rather than as another line on it; a gateway that released nothing draws none at all. */
+.rss-release { color: var(--accent, currentColor); }
 .memory-charts.hidden { display: none; }
 .memory-charts { margin-top: 1.5rem; }
 

@@ -125,6 +125,28 @@ function modeFamily(view) { return view === "memory" ? "memory" : "perf"; }
    ?mode=peak that lands on the memory tab must NOT render a throughput-selected memory number, so it falls
    back to Same; the reverse (?mode=min on Performance) falls back to Peak rather than reading nothing. */
 function resolveMode(mode, view) { return modesFor(view).has(mode) ? mode : defaultMode(view); }
+/* modeOnArrival(fromView, toView, mode, memo): the mode and the family memo after navigating fromView->toView.
+
+   EACH FAMILY REMEMBERS ITS OWN MODE, because coercing across them is LOSSY. The tabs do not offer the same
+   modes: Peak is meaningless (and dishonest) on memory, Min/Max are meaningless on the perf lanes. Coercing on
+   arrival keeps the control and the numbers agreeing, but it also OVERWRITES the mode - Performance(Custom) ->
+   Memory coerces to Min, and coming back to Performance kept Min's coercion instead of the Custom the reader
+   had chosen. Stashing the OUTGOING family's mode before coercing makes a tab flip lossless in both directions.
+
+   A SAME-FAMILY ARRIVAL MUST NOT CONSULT THE MEMO AT ALL, and that is the half that was broken: the memo is
+   pre-seeded (newState gives it perf:"peak", memory:"min"), so `memo[arriving] ?? mode` never falls through to
+   `mode`, and reading it on every arrival - including the first render of a deep link, and every re-render of
+   the view you are already on - overwrote the mode decodeUrl had just parsed out of the URL. Frontier ->
+   Performance is one family; so is a plain re-render; neither is a place where a remembered mode can be more
+   authoritative than the current one.
+
+   Pure, and exported, because showView is DOM-bound and this decision is not: the round trip has to be
+   assertable without a browser. */
+function modeOnArrival(fromView, toView, mode, memo) {
+  const leaving = modeFamily(fromView), arriving = modeFamily(toView);
+  if (leaving === arriving) return { mode: resolveMode(mode, toView), memo };
+  return { mode: resolveMode(memo[arriving] ?? mode, toView), memo: { ...memo, [leaving]: mode } };
+}
 /* memoryMode: THE choke point for the memory lane's mode. Every memory reader routes through it, so even a
    state hand-built with mode:"peak" (a stale in-memory state, a test, a future caller) cannot produce a
    peak-selected memory number - it reads Same instead. */
@@ -634,51 +656,67 @@ function frontierCell(rec, boundMs) {
   const floor = rd.lower_bound === true;
   return { ...c, text: floor ? `≥ ${c.text}` : c.text, note: readingSentence(rd, c.v), reading: rd, floor };
 }
-/* frontierGain(frontier): THE SHAPE, AS ONE NUMBER. How much more the gateway carries once the tail is
-   unbounded than it carries under the TIGHTEST bound it has any reading at.
-   It exists because a picture alone is not sortable and is not readable by a screen reader: 1.07x
-   (agentgateway: it holds its rate even when you demand a tight tail) and 2.7x (apisix anthropic: it needs
-   a loose tail to go fast) is the finding, and this is the form of it a reader can rank the board by.
-   The tightest bound with a reading is used rather than a fixed 1 ms, because a gateway whose 1 ms column
-   is absent has no shape to state at 1 ms and inventing one from the next column up would understate it.
+/* frontierHeld(frontier): THE SHAPE, AS ONE NUMBER — what FRACTION of its full rate the cell still carried
+   at the tightest tail-latency bound it holds at all.
 
-   WHICH BOUND THE RATIO STARTS FROM IS HALF THE FINDING, AND IT HAS TO TRAVEL WITH THE RATIO.
-   The factor alone is not comparable across rows and the board proved it: on the 2026-07-30 data
-   litellm-rust reads ×1.0 from 1 ms (43,876 req/s at a 0.56 ms tail - full rate at the tightest tail we
-   publish) and tensorzero also reads ×1.0, from 50 ms - it holds NOTHING under 10 ms. Rendered as two bare
-   "×1.0"s the column told a reader those two gateways have the same curve, which is the exact opposite of
-   the truth and the one claim this metric exists to make. one-api is the same trap the other way: ×1.3 from
-   50 ms looks better-behaved than kong's ×1.8 from 1 ms, while one-api serves nothing at all under 50 ms.
-   So `fromBoundMs` is rendered ON THE CELL, not only in the tooltip, and `sortKey` groups the column by
-   bound-of-origin before ranking on the factor (see frontierShapeCell). */
-function frontierGain(frontier) {
+   IT REPLACED A GAIN FACTOR ("×1.0 from 1 ms"), AND THE REASON IS THE OWNER READING HIS OWN COLUMN:
+   "its just not clear what this means, even I know and i cant figure it out". A gain factor made the reader
+   assemble one sentence out of three scattered pieces - the multiplier (of WHAT?), "from 1 ms" (to what?),
+   and the missing half of that ("to no bound") stranded up in the column header. Worse, ×1.0 was the BEST
+   possible result and read like an unfilled default. A percentage of full rate is the same measurement with
+   none of that: the direction is obvious without a legend (more is better), and the number is a share of a
+   quantity the reader can see in the columns to the left.
+
+   THE DENOMINATOR IS THE UNBOUNDED READING, never the 100 ms one and never a max across bounds. The frontier
+   is monotone by construction (a looser tail can only admit more concurrency), so the unbounded reading IS
+   the maximum and "full rate" is well defined. If it is somehow absent while a bounded reading exists we
+   publish NO percentage rather than promote the 100 ms reading into a denominator it is not - that would
+   silently rebase one row against a different quantity from every other row while looking identical to them.
+
+   THE NUMERATOR IS THE TIGHTEST BOUND THAT HAS A READING, and the cell NAMES that bound, because for most of
+   the field it is not 1 ms. This is the fact a bare factor destroyed: on the 2026-07-30 data litellm-rust and
+   tensorzero both read "×1.0" - the same six characters - while the first runs at full rate with a 0.56 ms
+   tail and the second cannot serve one request under 10 ms. "99% of its full rate at 1 ms" and "99% of its
+   full rate at 50 ms" are still one form, so they are still comparable, but they can no longer be mistaken
+   for the same finding. */
+function frontierHeld(frontier) {
   const f = Array.isArray(frontier) ? frontier : [];
   const tight = f.find((r) => r.bound_ms != null && mval(r.rps) > 0);
   const loose = frontierAt(f, null);
-  const lo = tight ? mval(tight.rps) : null, hi = loose ? mval(loose.rps) : null;
-  if (lo == null || hi == null || !(lo > 0)) return null;
-  return { factor: hi / lo, fromBoundMs: tight.bound_ms, from: lo, to: hi, lowerBound: loose.lower_bound === true };
+  const held = tight ? mval(tight.rps) : null, full = loose ? mval(loose.rps) : null;
+  if (held == null || full == null || !(held > 0) || !(full > 0)) return null;
+  return { frac: held / full, boundMs: tight.bound_ms, held, full, lowerBound: loose.lower_bound === true };
 }
-/* gainSortKey(originIndex, factor): ONE number that ranks the shape column by (bound-of-origin, then factor).
-   A ratio measured from 50 ms and a ratio measured from 1 ms are answers to different questions, so ranking
-   ×2.17-from-50ms against ×1.01-from-1ms on the bare factor would sort two incomparable things as though
-   they were one - and would put the gateway that cannot serve under 10 ms above the one that runs at full
-   rate at 0.56 ms. Origin dominates: needing a looser tail before you serve anything at all IS the strongest
-   form of "needs a loose tail to go fast", so descending order puts those rows on top, where the column's
-   own question ("who needs a loose tail") points.
-   The factor rides in the fractional part through 1 - 1/factor, which maps [1, ∞) onto [0, 1) monotonically
-   and exactly - no clamp, and no gain however large can leak into the next origin group. */
-function gainSortKey(originIndex, factor) { return originIndex + (1 - 1 / factor); }
-/* The origin index a cell with NO ratio at all sorts at: one past the loosest declared bound.
-   plano carried nothing under ANY published bound and 19 req/s unbounded, so no pair of rates exists to
-   divide - and that is the most extreme shape on the board, not a missing measurement. It used to carry
-   `v: null`, which rowComparator sinks to the bottom regardless of direction, so the single worst curve in
-   the field sorted as though it had not been measured. It now ranks past every bound, which is where it
-   belongs. */
-const GAIN_NO_RATIO_INDEX = FRONTIER_BOUNDS_MS.length;
-/* The reference paragraph for the ×N column, rendered BELOW the table (see captionText). The owner's words:
-   "i dont know what 1.3x or whatever means". Nothing on the page said what the ratio was OF. */
-const GAIN_REFERENCE = `"×N from B" in the curve column is the gain factor: how many times more requests/sec the cell carried with no latency bound at all than it carried at B, the tightest published bound it has any reading at. ×1.0 from 1 ms is the good shape - full rate even when you demand a 1 ms tail. A large factor means the gateway needs a loose tail to go fast. The bound it starts FROM matters as much as the factor: ×1.0 from 50 ms is not a flat gateway, it is a gateway that holds nothing tighter than 50 ms, so the column sorts by that bound first and the factor second.`;
+/* heldPct(frac): the fraction as a whole percent, WHICH NEVER READS 100% UNLESS THE CURVE IS EXACTLY FLAT.
+   Rounding 99.6% up to "100% of its full rate" would assert the gateway loses nothing at all to a tight tail
+   when its own two readings say it loses something, and that assertion is the exact class of overclaim this
+   column exists to remove. So anything short of equality floors at 99, and only held === full - two readings
+   that are the same number - is allowed to print 100.
+   Whole percent rather than a decimal because the discriminating differences in the field are tens of points
+   (31%, 56%, 66%, 93%), and a tenth of a percent off a single concurrency sweep is not a difference we
+   measured. */
+function heldPct(frac) { return frac >= 1 ? 100 : Math.min(99, Math.round(frac * 100)); }
+/* heldSortKey(originIndex, frac): ONE number ranking the column by (bound-of-origin, then share of full rate),
+   with BIGGER = BETTER, so the column's descending default puts the gateways that hold their rate at the
+   tightest tail on top - where the column's own question ("what does it still carry when you demand a tight
+   tail") points.
+   Origin dominates, and it has to: 99% at 50 ms and 99% at 1 ms are answers to different questions, and
+   ranking them on the share alone would file a gateway that serves nothing under 10 ms beside one running at
+   full rate at 0.56 ms. Origin is INVERTED (a tighter bound scores higher) and scaled by 2, so each origin
+   group owns a disjoint interval of width 2 while `frac` spans [0, 1] - no share, not even an exactly flat
+   1.0, can leak into the neighbouring group. */
+function heldSortKey(originIndex, frac) { return (HELD_NOTHING_INDEX - originIndex) * 2 + frac; }
+/* The origin index a cell that held NOTHING under any published bound sorts at: one past the loosest bound,
+   which through heldSortKey's inversion makes it the bottom of the ranking.
+   plano carried nothing under ANY declared bound and 19 req/s unbounded, so there is no share of full rate to
+   state - and that is the most extreme shape on the board, not a missing measurement. It must not carry
+   `v: null`, which rowComparator sinks to the bottom regardless of direction: the single worst curve in the
+   field would then sort as though it had not been measured. */
+const HELD_NOTHING_INDEX = FRONTIER_BOUNDS_MS.length;
+/* The reference paragraph for the column, rendered BELOW the table (see captionText). It states the two
+   things six words on a cell cannot: which reading is the denominator, and why the named bound is part of the
+   number rather than a footnote. */
+const HELD_REFERENCE = `"N% of its full rate at B" in the last column is what the cell still carried at B, the TIGHTEST tail-latency bound it holds any rate at, as a share of its full rate with no latency bound at all. 99% at 1 ms is the good shape: the gateway gives up almost nothing even when you demand a 1 ms tail. A low percentage means it needs a loose tail to go fast. The bound matters as much as the percentage - 99% at 50 ms is not a flat gateway, it is a gateway that holds no rate at all under 50 ms - so the column sorts by that bound first and the percentage second, and a cell that held nothing under any published bound says so in words instead of showing 0%.`;
 /* frontierSpark(frontier, opts): the curve, drawn.
    WHY A SPARKLINE AND NOT SIX NUMBERS. The finding is a SLOPE - "flat" vs "nearly doubles by 5 ms" - and a
    slope is something the eye reads in one pass and a row of digits is not. Six numbers per row across
@@ -1548,63 +1586,87 @@ function frontierBoundCell(g, boundMs, st = state) {
   if (!p) return { v: null, text: "n/a", na: true };
   return frontierCell(p, boundMs);
 }
-/* frontierShapeCell: the SHAPE column - the sparkline plus the gain factor, for the chosen cell.
-   Sortable BY THE GAIN, deliberately: "which gateways need a loose tail to go fast" is a question about
-   the field that no single-bound ranking can answer, and it is the question the frontier exists to expose.
-   `v` is gainSortKey, which ranks bound-of-origin first and the factor within it, because two ratios taken
-   from different bounds are not one quantity (see gainSortKey); the render puts the curve beside it. */
+/* frontierFullRate(frontier): the UNBOUNDED reading's rate, i.e. the denominator that "full rate" means.
+   Named, and read through the same accessor as every other rate, so the share stated in the shape column and
+   the number rendered in the "no bound" column can never come from two different readings. */
+function frontierFullRate(frontier) {
+  const rd = frontierAt(Array.isArray(frontier) ? frontier : [], null);
+  return rd ? mval(rd.rps) : null;
+}
+/* frontierShapeCell: the SHAPE column - the sparkline plus, in words, what share of its full rate the cell
+   still carried at the tightest tail it holds.
+   Sortable BY THAT SHARE, deliberately: "which gateways need a loose tail to go fast" is a question about the
+   field that no single-bound ranking can answer, and it is the question the frontier exists to expose. `v` is
+   heldSortKey, which ranks bound-of-origin first and the share within it, because a share read at 1 ms and one
+   read at 50 ms are not one quantity (see heldSortKey); the render puts the curve beside it. */
 function frontierShapeCell(g, st = state) {
   const p = chooserCellPerf(g, st);
   const f = frontierOf(p);
   if (!f.length) return { v: null, text: "n/a", na: true, note: p ? NO_FRONTIER_NOTE : "" };
-  const gain = frontierGain(f);
-  /* A CURVE WITH NO RATIO IS STILL A CURVE, and it is the most damning shape on the board: plano carried
-     nothing under ANY declared bound and 19 req/s unbounded, so there is no pair of rates to divide. The
-     cell stays NOT-n/a - the sparkline still draws, five ticks on the floor and one point at the right,
-     which reads as "it cannot meet any bound we publish" - and only the ratio is withheld, because a ratio
-     against zero is not a number. Rendering the whole cell as n/a here would delete the finding, and it
-     would delete it for exactly the gateways it is about.
-     IT SAYS SO IN WORDS RATHER THAN DRAWING A DASH. The owner read the bare "—" as missing data, which is
-     the one thing it is not: plano SERVED, cleanly, and no concurrency it was offered kept 99% of requests
-     under even the loosest bound we publish. A dash is the neutral rendering of a damning measurement, and
-     it flattered the slowest row on the board. */
-  if (!gain) return { v: gainSortKey(GAIN_NO_RATIO_INDEX, Infinity), text: "no ratio", na: false, frontier: f,
-    why: `no rung held any bound to ${boundLabel(FRONTIER_BOUNDS_MS[FRONTIER_BOUNDS_MS.length - 1])}`,
-    note: "No ratio can be stated: this cell carried no measurable throughput under ANY published bound, so " +
-      "the only reading it has is the unbounded one. That is a measurement, not a gap - the gateway served " +
-      "cleanly and no concurrency it was offered kept 99% of requests under even the loosest bound on the " +
-      "board. The curve beside this is the whole finding - a tick on the floor at every bound it could not hold." };
-  const floorNote = gain.lowerBound
-    ? " The unbounded reading is itself a floor (the sweep ran out of ladder), so the real gain may be larger."
+  const h = frontierHeld(f);
+  if (!h) {
+    const full = frontierFullRate(f);
+    const anyBounded = f.some((r) => r.bound_ms != null);
+    /* THE DENOMINATOR IS MISSING. Structurally it cannot be - every cell publishes a reading at every declared
+       bound plus the unbounded one - but a share needs a whole to be a share OF, and promoting the 100 ms
+       reading into that role would rebase this one row against a different quantity from every other row on
+       the board while looking identical to them. So: no percentage. Not 100%, and not a 0. */
+    if (full == null || !(full > 0) || !anyBounded) {
+      return { v: null, text: "n/a", na: false, frontier: f,
+        note: "No share of full rate can be stated: this cell has no unbounded reading for the bounded ones to " +
+          "be a share of. The curve beside this is what was measured." };
+    }
+    /* HELD NOTHING, ANYWHERE - and that is still a curve, and it is the most damning shape on the board:
+       plano carried nothing under ANY declared bound and 19 req/s unbounded. The sparkline still draws (five
+       ticks on the floor and one point at the right, which reads as "it cannot meet any bound we publish");
+       what is withheld is only the percentage, because a share of a rate the gateway never reached under any
+       bound is not a number. Rendering the whole cell n/a here would delete the finding for exactly the
+       gateways it is about, and a "0%" would claim a share at a bound where no rung qualified at all.
+       IT SAYS SO IN WORDS RATHER THAN DRAWING A DASH. The owner read the bare "—" as missing data, which is
+       the one thing it is not: plano SERVED, cleanly, and no concurrency it was offered kept 99% of requests
+       under even the loosest bound we publish. A dash is the neutral rendering of a damning measurement. */
+    const loosest = FRONTIER_BOUNDS_MS[FRONTIER_BOUNDS_MS.length - 1];
+    return { v: heldSortKey(HELD_NOTHING_INDEX, 0), text: `served nothing under ${boundLabel(loosest)}`,
+      zero: true, na: false, frontier: f,
+      note: `No share of full rate can be stated: this cell carried no measurable throughput under ANY ` +
+        `published bound, so the only reading it has is the unbounded one. That is a measurement, not a gap - ` +
+        `the gateway served cleanly and no concurrency it was offered kept 99% of requests under even ` +
+        `${boundLabel(loosest)}, the loosest bound on the board. The curve beside this is the whole finding - ` +
+        `a tick on the floor at every bound it could not hold.` };
+  }
+  const floorNote = h.lowerBound
+    ? " The unbounded reading is itself a floor (the sweep ran out of ladder), so the real full rate may be higher and this share correspondingly lower."
     : "";
-  const originIndex = FRONTIER_BOUNDS_MS.indexOf(gain.fromBoundMs);
-  /* THE ORIGIN BOUND IS PART OF THE NUMBER, so it is part of the text. "×1.0" on its own was rendered for
-     both litellm-rust (from 1 ms, 43,876 req/s at a 0.56 ms tail) and tensorzero (from 50 ms, nothing under
-     10 ms) - the same six characters for two opposite findings. Naming the origin on EVERY row, including
-     the 1 ms rows, is deliberate: a reader must never have to know which bound is the default to know
-     whether "×1.0" means "flat" or "flat above 50 ms". */
-  const tightest = originIndex > 0
-    ? ` It carries nothing under ${boundLabel(FRONTIER_BOUNDS_MS[originIndex - 1])}, so this ratio starts at ${boundLabel(gain.fromBoundMs)} rather than at the tightest bound the board publishes.`
+  const originIndex = FRONTIER_BOUNDS_MS.indexOf(h.boundMs);
+  /* THE BOUND IS PART OF THE NUMBER, so it is part of the text - on EVERY row, including the 1 ms rows. A
+     reader must never have to know which bound is the default to know whether "99%" means "full rate at the
+     tightest tail we publish" or "full rate, but only once you allow 50 ms". */
+  const tighter = originIndex > 0
+    ? ` It holds no rate at all under ${boundLabel(FRONTIER_BOUNDS_MS[originIndex - 1])}, which is why this share is read at ${boundLabel(h.boundMs)} rather than at the tightest bound the board publishes.`
     : "";
-  return { v: gainSortKey(originIndex, gain.factor), text: `×${fmt1(gain.factor)} from ${boundLabel(gain.fromBoundMs)}`, na: false,
-    note: `${fmtInt(gain.from)} req/s ${boundClause(gain.fromBoundMs)}, rising to ${fmtInt(gain.to)} req/s ` +
-      `${boundClause(null)}: ×${fmt1(gain.factor)}. A gateway near ×1 from ${boundLabel(FRONTIER_BOUNDS_MS[0])} holds its rate even when you demand a ` +
-      `tight tail; a large factor means it needs a loose tail to go fast.${tightest}${floorNote}`,
-    frontier: f };
+  return { v: heldSortKey(originIndex, h.frac), na: false, frontier: f,
+    text: `${heldPct(h.frac)}% of its full rate at ${boundLabel(h.boundMs)}`,
+    note: `${fmtInt(h.held)} req/s ${boundClause(h.boundMs)}, against ${fmtInt(h.full)} req/s ` +
+      `${boundClause(null)}: ${heldPct(h.frac)}% of its full rate. A gateway near 100% at ` +
+      `${boundLabel(FRONTIER_BOUNDS_MS[0])} gives up almost nothing when you demand a tight tail; a low share ` +
+      `means it needs a loose tail to go fast.${tighter}${floorNote}` };
 }
 /* frontierShapeTd(g, st): the shape column's <td>, for BOTH tabs that carry it.
    ONE renderer, because the two used to be a copy-paste pair and the Frontier tab is where this column is
-   read most: any fix applied to one and not the other would ship a board that disagrees with itself about
-   the same cell. The "no ratio" row gets the same two-line treatment a measured zero gets in the reading
-   columns - the mark, then WHY underneath - so a reader never has to hover to learn that the blank-looking
-   cell is the strongest finding in the column. */
+   read most: any fix applied to one and not the other would ship a board that disagrees with itself about the
+   same cell.
+   The held-nothing row gets the MEASURED-ZERO treatment the reading columns use - muted cell, the statement
+   itself in the same ink a "no rung held this tail" carries - so a reader never has to hover to learn that
+   the row without a percentage is the strongest finding in the column. It is keyed off `zero`, not off the
+   presence of a second line, because that row's whole content IS the statement: a mark plus a why underneath
+   would be the same sentence twice. */
 function frontierShapeTd(g, st = state) {
   const c = frontierShapeCell(g, st);
   if (c.na) return `<td class="shape na" title="${esc(c.note || "")}">${esc(c.text)}</td>`;
-  const why = c.why ? `<span class="reading-none">${esc(c.why)}</span>` : "";
-  return `<td class="shape${c.why ? " reading-zero" : ""}" title="${esc(c.note)}">` +
+  const label = c.zero ? `<span class="reading-none">${esc(c.text)}</span>` : esc(c.text);
+  return `<td class="shape${c.zero ? " reading-zero" : ""}" title="${esc(c.note)}">` +
     `${frontierSpark(c.frontier, { ...boardFrontierScale(stateData(st)), boundMs: selectedBound(st) })}` +
-    `<span class="shape-gain">${esc(c.text)}${why}</span></td>`;
+    `<span class="shape-gain">${label}</span></td>`;
 }
 const COLUMN_SETS = {
   // PERFORMANCE (Peak | Same | Custom): per-cell latency + throughput from the ONE 6x6 run. The columns
@@ -1628,16 +1690,17 @@ const COLUMN_SETS = {
         `A "≥" is a floor: the sweep ran out of ladder while that concurrency was still qualifying. Hover a cell for the tail it actually produced and the concurrency that stopped qualifying above it.`,
       get: (g, st = state) => frontierChooserCell(g, st) },
     /* THE SHAPE, beside the number. A row of six figures does not communicate a slope; this does, and the
-       gain factor makes it sortable and readable aloud. See frontierSpark on the shared y scale. */
-    /* THE HEADER NAMES THE RATIO. It read "Curve across bounds" over a column of bare "×1.3"s and the
-       owner's response was "i dont know what 1.3x or whatever means" - correctly, because nothing on the page
-       said what the ratio was of. The header now states it and GAIN_REFERENCE spells it out under the table. */
-    { id: "shape", label: "Curve across bounds · ×gain to no bound", desc: true,
+       share of full rate makes it sortable and readable aloud. See frontierSpark on the shared y scale. */
+    /* THE HEADER STATES THE QUANTITY IN WORDS. It read "Curve across bounds" over a column of bare "×1.3"s
+       ("i dont know what 1.3x or whatever means"), then named a gain factor - and the owner still could not
+       read it: "its just not clear what this means, even I know and i cant figure it out". A ratio needed a
+       legend; a share of a rate the reader can see in the columns to the left does not. */
+    { id: "shape", label: "Rate held at its tightest bound", desc: true,
       title: () => `The whole frontier as one line: throughput at ${BOUND_CHOICES.map(boundLabel).join(", ")}, left to right, on a scale shared by every row. ` +
         `Flat means the gateway holds its rate even under a tight tail; a line climbing from the floor means it needs a loose tail to go fast. ` +
         `Log scale, so equal slopes are equal RATIOS - which is what the shape means - and the slowest gateway on the board is still visible. ` +
         `The dotted rule marks the bound the ranked column is reading; an open dot marks a reading that is a floor rather than a ceiling; a tick on the baseline means the gateway served but NO concurrency held that tail (a measured nothing, not a missing measurement). ` +
-        `×N FROM B is the gain factor: how many times more req/s the cell carried unbounded than it carried at B, the tightest published bound it has any reading at. Sorting groups the column by that bound first, because ×1.0 from 1 ms and ×1.0 from 50 ms are opposite findings.`,
+        `"N% OF ITS FULL RATE AT B" is what the cell still carried at B, the tightest published bound it holds any rate at, as a share of its rate with no latency bound at all. Sorting groups the column by that bound first, because 99% at 1 ms and 99% at 50 ms are opposite findings.`,
       get: (g, st = state) => frontierShapeCell(g, st),
       render: (g, st = state) => frontierShapeTd(g, st) },
   ],
@@ -1681,8 +1744,8 @@ const COLUMN_SETS = {
         return `<td class="reading${c.why ? " reading-zero" : ""}${sel}" title="${esc(c.note)}">${esc(c.text)}${sub}</td>`;
       },
     })),
-    { id: "shape", label: "Curve · ×gain to no bound", desc: true,
-      title: "The six readings as one line, on a scale shared by every row. ×N FROM B is the gain factor: how many times more req/s this cell carried with no latency bound at all than it carried at B, the tightest published bound it has any reading at. ×1.0 from 1 ms is the good shape (full rate at the tightest tail we publish); ×1.0 from 50 ms is a gateway that holds nothing tighter than 50 ms. Sorting groups by that bound first for exactly that reason.",
+    { id: "shape", label: "Rate held at its tightest bound", desc: true,
+      title: "The six readings as one line, on a scale shared by every row, and beside it what the cell still carried at the TIGHTEST bound it holds any rate at, as a share of its full rate with no latency bound at all. 99% at 1 ms is the good shape (it gives up almost nothing at the tightest tail we publish); 99% at 50 ms is a gateway that holds no rate at all under 50 ms. Sorting groups by that bound first for exactly that reason.",
       get: (g, st = state) => frontierShapeCell(g, st),
       render: (g, st = state) => frontierShapeTd(g, st) },
   ],
@@ -1723,7 +1786,14 @@ const COLUMN_SETS = {
     // Tested on: the SAME pill renderer every other tab uses (colTested), bound to the MEMORY lane so it
     // names the cell this row's memory numbers came from, not the perf cell.
     COL_TESTED_MEMORY,
-    { id: "memidle", label: "Idle RSS (MiB)", desc: false,
+    /* THE HEADER NAMES THE SCOPE OF ITS MEDIAN. With per-cell data this column is the median ACROSS the
+       gateway's cold samples, one per served cell (idle is sampled before any request, so no cell is involved
+       in it); the curve on the same row belongs to the SELECTED CELL. The two differ on six of the live
+       board's eleven measured rows - apisix 177.9 against 178.1, bifrost 244.3 against 222.6 - and with both
+       labelled only "median" a reader comparing them concludes one is wrong. The tooltip always said this;
+       the ROW did not, and a disclosure you must hover to find does not stop a reader trusting the wrong
+       number. The legacy single-window shape has one cell, makes no such claim, and keeps the plain label. */
+    { id: "memidle", label: () => (hasPerCellMemory() ? "Idle RSS (MiB, all cells)" : "Idle RSS (MiB)"), desc: false,
       title: () => (hasPerCellMemory()
         ? "Cold idle process RSS, before the first request is served. Sampled once per cell with no cell-specific work involved, so this is the median across those cold samples (hover for the spread) and it is valid in every mode. Lower is better."
         : `Cold idle process RSS: median over a ${memWindowLabel(boardMemWindows().idle)} window on a fresh cold-restarted process, before any load. Lower is better.`),
@@ -1774,10 +1844,21 @@ const COLUMN_SETS = {
         const shows = recordShowsValues(m) && Array.isArray(m.rss_series) && m.rss_series.length >= 2;
         return { v: null, text: "", na: !shows };
       },
+      /* ONE COMPACT LIFECYCLE CURVE, INSIDE A REAL FOCUSABLE CONTROL.
+         The cell used to stack six block elements (label, sparkline, caption, label, sparkline, caption) and
+         the row stood ~350px tall. It is now one ~34px curve, and everything the captions carried lives on
+         this control's accessible name (memCurveSummary) plus the drawer.
+         IT IS A <button> AND NOT A DIV BECAUSE OF THE REACHABILITY RULE: content that exists only in a
+         `title` is invisible to touch and to keyboard users, which is deletion for some readers. A button is
+         focusable, announces its aria-label, and its Enter/Space activation bubbles to the row handler that
+         opens the drawer - so the full detail is reachable without a pointer. */
       render: (g, st = state) => {
         const m = memoryFor(g, st);
-        const spark = m && recordShowsValues(m) ? rssCurves(m) : "";
-        return spark ? `<td class="memcurve">${spark}</td>` : `<td class="memcurve na">n/a</td>`;
+        const spark = m && recordShowsValues(m) ? rssCurves(m, { compact: true }) : "";
+        if (!spark) return `<td class="memcurve na">n/a</td>`;
+        const summary = memCurveSummary(m);
+        return `<td class="memcurve"><button type="button" class="rss-life-btn" title="${esc(summary)}" ` +
+          `aria-label="${esc(summary)}">${spark}</button></td>`;
       } },
   ],
   // Governance is RETIRED under matrix-sole-source: no tab, no column (busbar-only, non-default suite).
@@ -1961,7 +2042,7 @@ const LANES = [
   },
 ];
 /* frontierBlock(rec, opts): the curve as a block, for the drawer and the compare panel. The sparkline plus
-   the gain sentence in words - the two forms of the same fact, because the picture is what makes the shape
+   the share of full rate in words - the two forms of the same fact, because the picture is what makes the shape
    legible at a glance and the sentence is what a reader can quote, sort by, or hear read aloud.
    Returns "" for a record with no frontier, so a legacy row simply has no curve rather than an empty frame
    captioned as if a measurement were behind it. */
@@ -1970,10 +2051,10 @@ function frontierBlock(rec, opts = {}) {
   if (!f.length) return "";
   const spark = frontierSpark(f, { ...boardFrontierScale(), boundMs: selectedBound() });
   if (!spark) return "";
-  const gain = frontierGain(f);
-  const words = gain
-    ? `×${fmt1(gain.factor)} from ${boundLabel(gain.fromBoundMs)} to no bound (${fmtInt(gain.from)} → ${fmtInt(gain.to)} req/s)`
-    : "one reading only: no pair to compare a shape across";
+  const h = frontierHeld(f);
+  const words = h
+    ? `${heldPct(h.frac)}% of its full rate at ${boundLabel(h.boundMs)} (${fmtInt(h.held)} of ${fmtInt(h.full)} req/s)`
+    : "one reading only: no share of full rate to state";
   return `<div class="frontier-block${opts.compact ? " compact" : ""}">${spark}` +
     `<div class="stamp muted">${esc(words)}</div></div>`;
 }
@@ -2558,9 +2639,9 @@ function chooserLead(view, data) {
 function captionText(c) { return [...c.lead, ...c.notes].join(" "); }
 function chooserCaption(view, st, data) {
   const lead = chooserLead(view, data);
-  // GAIN_REFERENCE belongs to whichever tab actually renders the ×N column. Performance does; Streaming has
-  // no frontier column at all, and explaining a ratio that is not on the page is noise.
-  const extra = view === "performance" ? [GAIN_REFERENCE] : [];
+  // HELD_REFERENCE belongs to whichever tab actually renders the shape column. Performance does; Streaming
+  // has no frontier column at all, and explaining a number that is not on the page is noise.
+  const extra = view === "performance" ? [HELD_REFERENCE] : [];
   if (st.mode === "peak")
     return { lead: [lead,
       // NOT "best" and NOT "peak": bestCell prefers the openai diagonal and otherwise ranks on added
@@ -2618,7 +2699,12 @@ function memoryCaption(data = state.data, st = state) {
     ],
     notes: [
       "Nothing is averaged across cells; the chooser picks which cell each row shows.",
-      `Idle is sampled cold, before the first request, so no cell is involved and it is valid in every mode. Growth is around zero once a gateway has settled, and is the rate RSS was still moving at when no steady state was reached. Recovered @${R}: RSS after the load stops: does it release?${never}`,
+      /* THE WINDOW LENGTHS ARE BOARD FACTS, STATED ONCE HERE. Every row's curve used to print "(360 s)" and
+         "over 59 s at rest" - one property of the harness, identical on all fourteen rows, repeated fourteen
+         times inside the cell whose height was the complaint. The RSS curve column is the same lifecycle for
+         every gateway; only the shape differs, so only the shape is per-row. */
+      `Every RSS curve is one process's whole lifetime, left to right: ${memWindowLabel(w.idle)} at rest before the first request, then the load run to steady state, then ${R} of recovery after it stops. Those windows are the same for every gateway. The break in the middle of each curve is the time axis changing scale between them - the at-rest window is far shorter than the load run, and is drawn wider than its duration earns so its shape stays legible. Hover a curve for its figures, or click the row for the two windows full size and separated.`,
+      `Idle is sampled cold, before the first request, so no cell is involved and it is valid in every mode - which is why the Idle column is the median across ALL of a gateway's cells while its curve is the chosen cell's own window; the two can differ. Growth is around zero once a gateway has settled, and is the rate RSS was still moving at when no steady state was reached. Recovered @${R}: RSS ${R} after the load stops, which on a gateway still releasing is not the last figure its curve reaches.${never}`,
       "Lower is better on every column. A gateway that does not serve the chosen cell reads n/a and sinks to the bottom; nothing is substituted from another cell.",
     ] };
 }
@@ -2640,7 +2726,7 @@ function frontierCaption(st = state, data = state.data) {
       `Each reading is the most requests/sec that cell carried while 99% of requests finished under that bound and it failed no request it accepted. Published as a single number, a flat row and a climbing row look comparable, and they are not the same machine.`,
       `The ${boundLabel(sel)} column is the one the Performance tab ranks and is marked here; every other column is published on every cell too, so nothing is chosen for you. "≥" marks a reading whose sweep ran out of ladder while still qualifying: a floor, not a maximum. "tail" under a number is the tail that reading ACTUALLY produced, never the bound.`,
       `A "0 · no rung held this tail" is a MEASUREMENT: the gateway served cleanly and no concurrency it was offered kept 99% of requests under that bound. It is not missing data - a cell with no measurement at all reads "no frontier" instead - and the difference matters most on the slowest rows, where five of the six columns can be that finding.`,
-      GAIN_REFERENCE,
+      HELD_REFERENCE,
       chooserLead("frontier", data),
     ] };
 }
@@ -2697,6 +2783,55 @@ function renderMemoryCharts(view) {
     document.body.appendChild(lb);
   }));
 }
+/* ---- DECLARED COLUMN GEOMETRY -------------------------------------------------
+   THE OWNER: "changing filters shouldn't change column widths, just an annoyance." Measured across filter
+   combos on the live board, every table view drifted at every width. The frontier tab at 1440, first body
+   row, per column:
+       mode=peak   bound=10   36 165  90 118 118 118 118 118  93 165
+       mode=same   bound=10   36 165  84 119 119 119 119 119  93 167
+       mode=custom bound=10   36 165 144 125 125 125  80  80  87 173
+   Nothing about the measurement changed - only which cell each row reads - and the whole grid re-solved.
+
+   THE CAUSE IS AUTO TABLE LAYOUT: a column is as wide as its widest RENDERED cell, so a filter that swaps
+   `20,119` for `20,389`, or a passthrough pill for `OpenAI→Bedrock Converse`, or a number for `no rung held
+   this tail`, re-measures every column. And the widest thing a column CAN hold is usually not in the combo
+   on screen - `Added latency p99` holds 2,083,807 for one-api and 232,065 for plano - so sizing from what is
+   rendered cannot be stable even in principle.
+
+   SO THE WIDTH IS A PROPERTY OF THE COLUMN, declared here, and `table-layout: fixed` (style.css) makes the
+   browser use it instead of consulting a cell. Excess width is then distributed proportionally over the
+   declared widths, which is also content-independent, so the table still fills its container and no filter
+   can move a column sideways.
+
+   IT IS ONE TABLE, NOT ONE PER COLUMN DEFINITION, deliberately: geometry is a property of the table as a
+   whole (the frontier's ten columns have to add up to something that fits a narrow desktop), and spreading
+   the numbers across forty column definitions would make that sum impossible to see or to check.
+   THE TWO OVER-WIDE COLUMNS ARE THE ONES THAT GIVE, which is the owner's other complaint - "column widths -
+   Tested on is huge (cos of 1 large openai > cohere)" - seen from the other side: `tested` is an annotation
+   and is narrower than any column of readings, and the curve columns are sized to their own SVG. The numbers
+   are never what shrinks. */
+const COL_W_DEFAULT = "7rem";
+const COL_WIDTHS = {
+  sel: "2.4rem",   // the compare checkbox; matches the sticky rule in style.css
+  name: "9.5rem",  // the gateway name, sticky beside it
+  tested: "5rem",  // AN ANNOTATION, capped: its longest pill truncates (with the full value on hover)
+  // performance
+  lat50: "7rem", lat: "7rem", rps: "9.5rem", shape: "7.5rem",
+  // frontier: six reading columns. 6rem holds "44,363" and lets the sub-line under it wrap.
+  f1: "6rem", f5: "6rem", f10: "6rem", f50: "6rem", f100: "6rem", fnone: "6rem",
+  // streaming
+  sttft50: "7rem", sttft: "7rem", sgap50: "7rem", sgap: "7rem", streams: "6.5rem", streamfps: "6.5rem",
+  // memory. memcurve matches td.memcurve's own 180px: the lifecycle SVG is a fixed width and the column has
+  // no reason to be wider than the picture in it.
+  memidle: "7.5rem", mempeak: "7.5rem", memgrowth: "7.5rem", memrecov: "7.5rem", memcurve: "11.25rem",
+};
+function colWidth(c) { return COL_WIDTHS[c.id] || COL_W_DEFAULT; }
+/* colgroupHtml(cols): the <colgroup> children for a column set. A <col> per column, in order - the mapping is
+   positional, so a missing one would silently shift every width onto the wrong column, which is why the test
+   asserts the count rather than the contents. */
+function colgroupHtml(cols) {
+  return cols.map((c) => `<col style="width:${colWidth(c)}">`).join("");
+}
 /* theadHtml(cols, st): the table head, ONE row normally and TWO when any column declares a `group`.
    WHY A SPANNING HEADER AT ALL: the Frontier tab's six reading columns each read "Req/s · 99% under N ms" -
    thirty of the same words in one header strip, which is the owner's "make Req/s 99% a header that spans all
@@ -2734,8 +2869,9 @@ function theadHtml(cols, st = state) {
 }
 function renderTable() {
   const { data } = state;
-  const thead = document.querySelector("#results-table thead");
-  const tbody = document.querySelector("#results-table tbody");
+  const table = document.querySelector("#results-table");
+  const thead = table.querySelector("thead");
+  const tbody = table.querySelector("tbody");
 
   // Which tab's columns to render. matrix/method have no table, so fall back to performance
   // (the section is hidden anyway) and never mutate the sort while off a table tab.
@@ -2756,6 +2892,14 @@ function renderTable() {
   renderMemoryCharts(view);
 
   thead.innerHTML = theadHtml(cols, state);
+  /* THE DECLARED GEOMETRY, re-stated whenever the column set changes. A <colgroup> has to be a child of the
+     <table> and the first one at that, so it cannot ride along in theadHtml's string; it is created once and
+     refilled, rather than replaced, so nothing else on the table is disturbed. Without it `table-layout:
+     fixed` would divide the width equally between the columns - the frontier's checkbox as wide as its
+     gateway names - so the CSS rule and this element are one mechanism and neither works alone. */
+  const cg = table.querySelector("colgroup") ||
+    table.insertBefore(document.createElement("colgroup"), table.firstChild);
+  cg.innerHTML = colgroupHtml(cols);
 
   let rows = applyFilters(data.gateways, state);
   const count = document.getElementById("row-count");
@@ -3002,6 +3146,108 @@ function laneStamp(j) {
    cell ramps 65-102 MiB (up to 74%) through its first fifth and then goes flat. Those fill their frames, and
    the stamp states the MiB either way so no magnitude has to be inferred from the picture. */
 const IDLE_AXIS_MIN_SPAN = 0.02;
+/* idleShapeNote(pts, span, floorSpan): WHAT THE IDLE WINDOW DID, as a phrase describing its SHAPE.
+   THE WORDING THIS REPLACES CAUSED A REAL MISREADING. The caption said "(6.59 MiB over 59 s at rest)", and
+   "over 59 s" is the window LENGTH, not a duration over which anything moved - so it read as 6.59 MiB of
+   drift accumulating across the minute, and the person auditing the board reported apisix as an idle drifter
+   on the strength of it. apisix does no such thing: it holds 178.078 for 127 of its 130 samples, steps DOWN
+   6.594 MiB at 98% through, and holds. One late release.
+   A span cannot distinguish these and neither can a floored axis, so the words have to.
+   THIS IS GEOMETRY, NOT A VERDICT. It says where the movement was, how big, and which direction - all read
+   off the plotted series. It does not judge whether the gateway is leaking or healthy: the engine owns that
+   (`memory_idle_static` / `idle_shape`) and idleStatic() renders the engine's own word whenever a bundle
+   carries one. This board publishes none, which is exactly why the shape of the line is all a reader has.
+   NEVER "X over N s": no phrase here may pair a magnitude with the window length, because that pairing is
+   what reads as a rate. */
+function idleShapeNote(pts, span, floorSpan) {
+  const n = pts.length;
+  // BELOW THE AXIS FLOOR IS THE EXPECTED CASE (nine of the board's eleven measured windows) and it renders
+  // flat, so it says flat. RSS is sampled in whole pages, so a static process still reports a page or two of
+  // jitter; "flat to within X" states the resolution rather than claiming an impossible zero. Sharing the
+  // axis floor is deliberate: the words and the picture must agree about what counts as movement.
+  if (!(span > 0)) return "no movement at all";
+  if (span < floorSpan) return `flat to within ${fmt2(span)} MiB`;
+  /* WHERE THE MOVEMENT SITS IN TIME IS THE WHOLE DISTINCTION, and it is not "how big is the biggest single
+     step". Keying on one sample-to-sample delta got bifrost wrong: its climb is eight consecutive samples of
+     ~10 MiB each, none of which dominates the span, so it was described as gradual when it in fact completes
+     inside the first 2 s of a 59 s window and then holds flat.
+     So: total variation, then the SHORTEST contiguous run of samples accounting for most of it. A step is
+     movement packed into a small slice of the window whatever its sample count; drift is movement spread
+     across the window. */
+  const d = [];
+  let tv = 0;
+  for (let i = 1; i < n; i += 1) { const v = Math.abs(pts[i].rss_mib - pts[i - 1].rss_mib); d.push(v); tv += v; }
+  if (!(tv > 0)) return `flat to within ${fmt2(span)} MiB`;
+  const want = tv * 0.8;
+  let a = 0, b = d.length - 1, lo = 0, run = 0;
+  for (let hi = 0; hi < d.length; hi += 1) {
+    run += d[hi];
+    while (run - d[lo] >= want) { run -= d[lo]; lo += 1; }
+    if (run >= want && (hi - lo) < (b - a)) { a = lo; b = hi; }
+  }
+  const t0 = pts[a].t_s, t1 = pts[b + 1].t_s, tEnd = pts[n - 1].t_s, tSpan = (tEnd - pts[0].t_s) || 1;
+  const net = pts[b + 1].rss_mib - pts[a].rss_mib;
+  const dir = net > 0 ? "up" : "down";
+  // The EXTENT of the concentrated run (its own min to max), not the net across its endpoints: the run's
+  // boundaries can land mid-climb, and bifrost's then read "71.2 MiB up" beside a stated span of 151.0-252.5.
+  const runVals = pts.slice(a, b + 2).map((q) => q.rss_mib);
+  const mag = fmt2(Math.max(...runVals) - Math.min(...runVals) || span);
+  /* "THEN HELD" IS A CLAIM ABOUT THE REST OF THE WINDOW, made only when the rest of the window earns it.
+     bifrost climbs to 252.5 in its first 2 s then falls back ~30 MiB to 222.6 before going flat, so "settled
+     up, then held" would paper over a second movement larger than most gateways' entire span. */
+  const restVar = d.reduce((acc, v, i) => (i < a || i > b ? acc + v : acc), 0);
+  const held = restVar < floorSpan ? ", then held" : "";
+  /* 20% OF THE WINDOW is the line between a step and drift. apisix packs its move into one sample at 98%
+     through; bifrost into ~3% at the start. No gateway on the current board is a genuine drifter, which is
+     precisely why the retired wording - which described every one of them as though it were - misled. */
+  if ((t1 - t0) / tSpan <= 0.2) {
+    if (t0 <= tSpan * 0.15) return `moved ${mag} MiB ${dir} inside the first ${fmtInt(Math.max(1, t1))} s${held}`;
+    if (t1 >= tSpan * 0.7) {
+      // "0 s from the end" is what a sub-second tail rounds to, and it reads as a missing number.
+      const tail = Math.round(tEnd - t0);
+      return `flat, then stepped ${mag} MiB ${dir} ${tail >= 1 ? `${fmtInt(tail)} s from the end` : "right at the end"}`;
+    }
+    return `flat, then stepped ${mag} MiB ${dir} ${fmtInt(t0)} s in`;
+  }
+  return `moved ${fmt2(span)} MiB gradually across the window`;
+}
+/* recoveryTail(lastMib, opts): the END of the load caption, naming the WINDOW each figure belongs to.
+   THE COLLISION THIS REMOVES. The caption said "peak 144.4 → recovered 129.6 MiB (365 s)" while the
+   `Recovered @30 s` column on the same row said 139.1. Both are right: one-api kept releasing after the 30 s
+   recovery mark, so the scalar the engine publishes AT that mark and the last sample of a 365 s observation
+   are two readings of one falling curve. Two figures under the single word "recovered" reads as an
+   inconsistency in the data rather than a difference of when it was read.
+   So "recovered" belongs to the column that names its window, and this states BOTH points in time order when
+   they differ - which turns the discrepancy into the finding it actually is, "it was still falling at 30 s" -
+   and collapses to one figure when they agree, which is most rows. */
+function recoveryTail(lastMib, opts = {}) {
+  const at = opts.recoveredAt, w = opts.recoveryWindowS;
+  const end = fmt1(lastMib);
+  if (at == null || w == null) return `${end} MiB at the last sample`;
+  const marked = fmt1(at);
+  if (marked === end) return `${marked} MiB at the ${memWindowLabel(w)} recovery mark, and still there at the end`;
+  return `${marked} MiB at the ${memWindowLabel(w)} recovery mark, ${at > lastMib ? "still falling" : "risen again"} to ${end} MiB by the last sample`;
+}
+/* releaseMark(g): DID IT GIVE THE MEMORY BACK - drawn, not asserted.
+   "Don't let 'releases nothing' and 'releases most of it' render with identical emphasis if a cheap visual
+   distinction is available." TensorZero peaks at 65.8 and ends at 65.8, releasing none of the ~19 MiB it
+   gained; bifrost peaks at 870.0 and comes back to 580.3. Both rendered as a line, a dot and two grey
+   numbers.
+   NO NEW METRIC AND NO VERDICT: a tick between two levels ALREADY PLOTTED - the peak and the final sample -
+   at the x of that final sample. Released nothing, nothing to draw. Released a lot, a tall mark, in
+   proportion. Its title states the fall and what it is a fall out of, both from figures the row already
+   shows. Returns "" on an at-rest window: nothing is released before any load. */
+function releaseMark(g) {
+  if (!g) return "";
+  const drop = g.peak - g.end;
+  // Below 0.05 MiB is under what fmt1 can print, so a mark there would be a line with no legible cause.
+  if (!(drop > 0.05)) return "";
+  const gained = typeof g.idle === "number" && g.idle > 0 ? g.peak - g.idle : null;
+  const of = gained && gained > 0 ? ` of the ${fmt1(gained)} MiB it gained` : "";
+  return `<line class="rss-release" x1="${g.x.toFixed(1)}" y1="${g.yPeak.toFixed(1)}" x2="${g.x.toFixed(1)}" y2="${g.yEnd.toFixed(1)}" ` +
+    `stroke="currentColor" stroke-width="3" stroke-opacity="0.35" stroke-linecap="round">` +
+    `<title>released ${fmt1(drop)} MiB${of} between its peak and the last sample</title></line>`;
+}
 /* rssSparkline: a compact inline-SVG recovery curve (idle → peak → recovery) built from a memory
    record's rss_series [{t_s,rss_mib},…]. Returns "" when the series is absent or has < 2 points, so a
    pre-recovery bundle (no series) draws NOTHING — never a fabricated flat line or a zero baseline. The
@@ -3013,7 +3259,9 @@ const IDLE_AXIS_MIN_SPAN = 0.02;
 // gateway with nothing asked of it - the whole point of the recovered figure beside it is that the
 // reader can see whether the line came down after that mark, and until now nothing on the chart
 // said where the mark was.
-function rssSparkline(series, loadEndS = null, idleMib = null, kind = "load") {
+// `opts` carries the two facts the LOAD panel needs in order to stop colliding with the Recovered column:
+// the scalar that column publishes, and the window it was read at (see recoveryTail).
+function rssSparkline(series, loadEndS = null, idleMib = null, kind = "load", opts = {}) {
   if (!Array.isArray(series) || series.length < 2) return "";
   const pts = series
     .filter((p) => p && typeof p.t_s === "number" && typeof p.rss_mib === "number")
@@ -3091,11 +3339,19 @@ function rssSparkline(series, loadEndS = null, idleMib = null, kind = "load") {
   // formatting fault where the fact is that the process never moved a tenth of a MiB. It says "held" instead,
   // and the exact movement still travels in the parenthesis (litellm-rust: 0.00781 MiB, one 8 KiB page).
   const flatToTenth = fmt1(dataMin) === fmt1(dataMax);
+  /* "THIS CELL: MEDIAN X", NEVER A BARE "MEDIAN X". The Idle RSS column beside this is the median ACROSS the
+     gateway's cells (idle is sampled cold before any request, so no cell is involved in it - which is what
+     that column's own tooltip says); this is the SELECTED CELL's own window. Both are correct and they differ
+     on six of the live board's eleven measured rows: apisix 177.9 against 178.1, bifrost 244.3 against 222.6,
+     a 21.7 MiB gap. Two figures under one unqualified word "median" reads as one of them being wrong, so each
+     names its scope - the column in its header, this in its caption.
+     THE PARENTHETICAL DESCRIBES SHAPE, NOT A RATE (idleShapeNote): "(6.59 MiB over 59 s at rest)" paired a
+     magnitude with the window length and so read as gradual drift, which is not what apisix did. */
   const stamp = idleWin
-    ? `${anchored ? `median ${fmt1(idleMib)} MiB · ` : ""}` +
+    ? `${anchored ? `this cell: median ${fmt1(idleMib)} MiB · ` : ""}` +
       (flatToTenth ? `held ${fmt1(dataMax)} MiB` : `spanned ${fmt1(dataMin)}–${fmt1(dataMax)} MiB`) +
-      ` (${fmt2(span)} MiB over ${fmtInt(tspan)} s at rest)`
-    : `peak ${fmt1(dataMax)} → recovered ${fmt1(last.rss_mib)} MiB (${fmtInt(tspan)} s)`;
+      ` at rest: ${idleShapeNote(pts, span, floorSpan || dataMax * IDLE_AXIS_MIN_SPAN)}`
+    : `peak ${fmt1(dataMax)} → ${recoveryTail(last.rss_mib, opts)}`;
   const aria = idleWin
     ? `RSS at rest over ${fmtInt(tspan)} s, ${fmt1(dataMin)} to ${fmt1(dataMax)} MiB, published median ${anchored ? fmt1(idleMib) : "unknown"} MiB`
     : `RSS curve from zero, idle ${anchored ? fmt1(idleMib) : "unknown"} MiB, peak ${fmt1(dataMax)} MiB over ${fmtInt(tspan)} s${restNote}`;
@@ -3118,6 +3374,7 @@ function rssSparkline(series, loadEndS = null, idleMib = null, kind = "load") {
       : "") +
     marks +
     `<path d="${path}" fill="none" stroke="currentColor" stroke-width="1.5"/>` +
+    releaseMark(idleWin ? null : { x: x(last.t_s), yPeak: y(dataMax), yEnd: y(last.rss_mib), peak: dataMax, end: last.rss_mib, idle: idleMib }) +
     `<circle cx="${x(last.t_s).toFixed(1)}" cy="${y(last.rss_mib).toFixed(1)}" r="2.5" fill="currentColor"/>` +
     `</svg>` +
     `<div class="stamp muted">${esc(stamp)}</div></div>`;
@@ -3137,10 +3394,122 @@ function rssSparkline(series, loadEndS = null, idleMib = null, kind = "load") {
    what keeps the panels comparable now that their axes are not.
    Returns just the load curve when there is no idle series, which is every bundle measured before
    the idle window existed. */
-function rssCurves(mem) {
-  if (!mem || typeof mem !== "object") return "";
+/* THE INLINE ROW IS ONE LIFECYCLE, ONE LINE. Fraction of the width given to the at-rest segment.
+   WHY THERE IS A SPLIT AT ALL: idle and load+recovery are not two experiments, they are one process's
+   lifetime in time order - cold start, at rest, load applied, load removed, recovery. The row rendered them
+   as two stacked panels only because the engine hands over two arrays. But the two windows are wildly
+   different lengths: ~59 s at rest against ~360 s under load. On a true shared time axis the at-rest window
+   would occupy 14% of the width, and bifrost's entire finding lives in the first 2 SECONDS of it - under 1%
+   of a 420 s axis, i.e. invisible.
+   SO THE SEGMENTS ARE GIVEN WIDTHS THEIR DURATIONS DO NOT EARN, AND THE BREAK IS SHOWN. Silently rescaling
+   two different time scales into one smooth line would draw a continuous axis that is not continuous - a
+   picture asserting when things happened, wrongly. Instead there is a real gap with an axis-break glyph in
+   it (the conventional double-slash), the two halves are drawn as two separate paths so no line crosses the
+   discontinuity, and the hover text names both window lengths. An honest discontinuity beats a dishonest
+   smooth line. */
+const LIFECYCLE_IDLE_FRAC = 0.3;
+/* rssLifecycle(mem, opts): the whole process lifetime as ONE inline sparkline, for the table row.
+   ONE SHARED Y AXIS across both segments - that part must not be broken, because the entire point of putting
+   them on one line is that the reader can see how far above its resting level work pushed the process. It is
+   the load axis (0 → at least twice idle, never clipping), so the at-rest segment sits low and flat, which is
+   the truth: idle is a small fraction of peak.
+   THE TRADE THIS MAKES, STATED: on a shared axis a 6.59 MiB step at rest is ~2% of the frame and is not
+   legible inline. That is what the hover text and the drawer are for - the drawer keeps the separated panels,
+   where the at-rest window has its own floored axis (IDLE_AXIS_MIN_SPAN) and its movement is legible. Inline
+   answers "what shape is this process's life"; the drawer answers "what did each window do". */
+function rssLifecycle(mem, opts = {}) {
+  const clean = (s) => (Array.isArray(s) ? s.filter((p) => p && typeof p.t_s === "number" && typeof p.rss_mib === "number")
+    .sort((a, b) => a.t_s - b.t_s) : []);
+  const rest = clean(mem.idle_rss_series), load = clean(mem.rss_series);
+  if (load.length < 2) return "";
   const idle = mval(mem.idle_rss_mib);
-  const load = rssSparkline(mem.rss_series, mval(mem.load_s), idle);
+  const W = opts.w || 168, H = opts.h || 34, PAD = 3, GAP = 7;
+  const all = [...rest, ...load].map((p) => p.rss_mib);
+  const dataMax = Math.max(...all);
+  const anchored = typeof idle === "number" && idle > 0;
+  // The SAME axis rule as the load panel: twice idle is a floor, never a ceiling, so nothing is ever clipped.
+  const ymax = anchored ? Math.max(idle * 2, dataMax) : dataMax;
+  const y = (v) => PAD + (1 - Math.min(Math.max(v / (ymax || 1), 0), 1)) * (H - 2 * PAD);
+  // Segment bands. With no at-rest series the load curve takes the whole width and there is no break to draw.
+  const twoSeg = rest.length >= 2;
+  const inner = W - 2 * PAD - (twoSeg ? GAP : 0);
+  const wRest = twoSeg ? inner * LIFECYCLE_IDLE_FRAC : 0;
+  const xRest0 = PAD, xLoad0 = PAD + wRest + (twoSeg ? GAP : 0), wLoad = inner - wRest;
+  const band = (pts, x0, w) => {
+    const t0 = pts[0].t_s, span = (pts[pts.length - 1].t_s - t0) || 1;
+    return pts.map((p, i) => `${i ? "L" : "M"}${(x0 + ((p.t_s - t0) / span) * w).toFixed(1)},${y(p.rss_mib).toFixed(1)}`).join("");
+  };
+  const paths = (twoSeg ? `<path d="${band(rest, xRest0, wRest)}" fill="none" stroke="currentColor" stroke-width="1.4"/>` : "") +
+    `<path d="${band(load, xLoad0, wLoad)}" fill="none" stroke="currentColor" stroke-width="1.4"/>`;
+  // THE AXIS BREAK, drawn: two slashes in the gap, so the discontinuity is a thing the reader can see rather
+  // than an assumption they have to avoid making.
+  const bx = PAD + wRest + GAP / 2;
+  const brk = twoSeg
+    ? `<g class="rss-break" stroke="currentColor" stroke-opacity="0.5" stroke-width="1">` +
+      `<line x1="${(bx - 2).toFixed(1)}" y1="${H - PAD}" x2="${(bx + 0.5).toFixed(1)}" y2="${PAD}"/>` +
+      `<line x1="${(bx + 0.5).toFixed(1)}" y1="${H - PAD}" x2="${(bx + 3).toFixed(1)}" y2="${PAD}"/>` +
+      `<title>the time axis breaks here: left is the ${memWindowLabel(memWindows(mem).idle)} at-rest window, right is the load and recovery run. They are drawn at different time scales so the short window stays legible; they are not continuous.</title></g>`
+    : "";
+  const lastLoad = load[load.length - 1];
+  const idleRule = anchored
+    ? `<line x1="${PAD}" y1="${y(idle).toFixed(1)}" x2="${(W - PAD).toFixed(1)}" y2="${y(idle).toFixed(1)}" ` +
+      `stroke="currentColor" stroke-opacity="0.4" stroke-width="1" stroke-dasharray="2 2"/>`
+    : "";
+  return `<svg class="rss-life" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" aria-hidden="true" focusable="false">` +
+    `<polyline points="${PAD},${(H - PAD).toFixed(1)} ${(W - PAD).toFixed(1)},${(H - PAD).toFixed(1)}" fill="none" stroke="currentColor" stroke-opacity="0.15" stroke-width="1"/>` +
+    idleRule + brk + paths +
+    releaseMark({ x: xLoad0 + wLoad, yPeak: y(Math.max(...load.map((p) => p.rss_mib))), yEnd: y(lastLoad.rss_mib),
+      peak: Math.max(...load.map((p) => p.rss_mib)), end: lastLoad.rss_mib, idle }) +
+    `<circle cx="${(xLoad0 + wLoad).toFixed(1)}" cy="${y(lastLoad.rss_mib).toFixed(1)}" r="2.2" fill="currentColor"/>` +
+    `</svg>`;
+}
+/* memCurveSummary(mem): EVERY figure the row's captions used to show, as one sentence.
+   THE REACHABILITY RULE: nothing may become unreachable when a caption folds. This string is the accessible
+   name of the row's curve control, so it is read by a screen reader and reachable by keyboard focus, not by
+   hover alone - a value that lives only in a tooltip is deleted for touch and keyboard users. It is also the
+   hover text, and the drawer shows the same facts laid out in full. Each figure names its own scope and its
+   own window, because that is the whole point of the memory tab's two labelling fixes. */
+function memCurveSummary(mem) {
+  if (!mem || typeof mem !== "object") return "";
+  const w = memWindows(mem), bits = [];
+  const rest = Array.isArray(mem.idle_rss_series) ? mem.idle_rss_series.filter((p) => p && typeof p.rss_mib === "number") : [];
+  const idle = mval(mem.idle_rss_mib);
+  if (rest.length >= 2) {
+    const vs = rest.map((p) => p.rss_mib), lo = Math.min(...vs), hi = Math.max(...vs);
+    const pts = rest.slice().sort((a, b) => a.t_s - b.t_s);
+    // A record can carry the SERIES and no idle SCALAR (the envelope is absent for its own published reason).
+    // fmt1(null) throws, and a fabricated 0 would be worse than the omission, so the median clause is simply
+    // not composed - the span and the shape still are, because those come from the series itself.
+    const med = idle != null ? `this cell: median ${fmt1(idle)} MiB, ` : "";
+    bits.push(`At rest (${memWindowLabel(w.idle)}, before any request): ${med}` +
+      (fmt1(lo) === fmt1(hi) ? `held ${fmt1(hi)} MiB` : `spanned ${fmt1(lo)}–${fmt1(hi)} MiB`) +
+      `, ${idleShapeNote(pts, hi - lo, (idle || hi) * IDLE_AXIS_MIN_SPAN)}.`);
+  } else if (idle != null) bits.push(`At rest: this cell: median ${fmt1(idle)} MiB.`);
+  const load = Array.isArray(mem.rss_series) ? mem.rss_series.filter((p) => p && typeof p.rss_mib === "number") : [];
+  if (load.length >= 2) {
+    const peak = Math.max(...load.map((p) => p.rss_mib));
+    const last = load[load.length - 1].rss_mib;
+    bits.push(`Under load: peak ${fmt1(peak)} MiB → ${recoveryTail(last, { recoveredAt: mval(mem.recovered_rss_mib), recoveryWindowS: w.recovery })}.`);
+    const drop = peak - last, gained = idle != null ? peak - idle : null;
+    if (drop > 0.05 && gained > 0) bits.push(`Released ${fmt1(drop)} MiB of the ${fmt1(gained)} MiB it gained.`);
+    else if (gained > 0) bits.push(`Released none of the ${fmt1(gained)} MiB it gained.`);
+  }
+  bits.push("Click the row for the full-size separated windows.");
+  return bits.join(" ");
+}
+function rssCurves(mem, opts = {}) {
+  if (!mem || typeof mem !== "object") return "";
+  /* COMPACT IS THE TABLE ROW: the lifecycle curve alone, no prose labels and no caption lines. A memory row
+     was ~350px tall - six block elements stacked in one cell - so three gateways filled a screen and a
+     fourteen-row comparison table stopped being comparable ("massive rows are not professional"). Everything
+     that was in those captions is in memCurveSummary, on the control's accessible name, and in the drawer. */
+  if (opts.compact) return rssLifecycle(mem, opts);
+  const idle = mval(mem.idle_rss_mib);
+  // The load panel needs the scalar the Recovered column publishes, and the window it was read at, so its
+  // caption can name that same window instead of colliding with it. Both come off this very record.
+  const load = rssSparkline(mem.rss_series, mval(mem.load_s), idle, "load", {
+    recoveredAt: mval(mem.recovered_rss_mib), recoveryWindowS: memWindows(mem).recovery,
+  });
   const idleSeries = mem.idle_rss_series;
   if (!Array.isArray(idleSeries) || idleSeries.length < 2) return load;
   // The idle window carries no load boundary to mark, so no dotted rule: the whole window IS idle.
@@ -4272,23 +4641,22 @@ function renderCatNav() {
 }
 
 function showView(view) {
+  /* THE OUTGOING VIEW IS READ BEFORE state.view MOVES, and that ordering is the whole correctness of the
+     mode memo below. It used to read `modeFamily(state.view)` one line AFTER `state.view = view`, so
+     `leaving` was always the view being ARRIVED at: the two families always compared equal, the stash branch
+     was unreachable, and the memo was frozen at its newState defaults forever. What shipped was not a lossy
+     memo - it was `state.mode = resolveMode(modeMemo[family])` on every render, which silently threw away
+     the mode the URL had just decoded. `/gateways/performance?mode=same&d=openai` rendered Own cell WITH
+     "?mode=same" still in the address bar, i.e. a shared link showed different cells from the ones its own
+     URL named. */
+  const leaving = modeFamily(state.view);
   state.view = view;
   // Memory's data-derived Same default is seeded on ARRIVAL at memory, not once globally at boot, so
   // the other tabs keep the dialect default they declare (see seedMemorySameDialect).
   seedMemorySameDialect();
-  // EACH FAMILY REMEMBERS ITS OWN MODE, because coercing across them is LOSSY.
-  //
-  // The tabs do not offer the same modes: Peak is meaningless (and dishonest) on memory, Min/Max are
-  // meaningless on the perf lanes. Coercing on arrival keeps the control and the numbers agreeing,
-  // but it also OVERWRITES the mode - so Performance(Peak) -> Memory coerced to Min, and coming back
-  // to Performance kept Min's coercion instead of the Peak the reader had chosen. It destroyed a
-  // selection in both directions: a Min/Max choice died the same way on a round trip through a perf
-  // tab. Stashing the outgoing family's mode before coercing makes a tab flip lossless, while a
-  // shared URL still coerces exactly as before (decodeUrl, unchanged).
-  const arriving = modeFamily(view);
-  const leaving = modeFamily(state.view);
-  if (leaving !== arriving) state.modeMemo[leaving] = state.mode;
-  state.mode = resolveMode(state.modeMemo[arriving] ?? state.mode, view);
+  const nx = modeOnArrival(leaving, view, state.mode, state.modeMemo);
+  state.mode = nx.mode;
+  state.modeMemo = nx.memo;
   // Home is the root above the category nav: the header's category row, tab bar
   // and category tagline belong to the category view only, so a body class hides
   // them (style.css) while the home hero carries the brand treatment instead.
@@ -4455,7 +4823,7 @@ if (NODE) {
     cellState, matrixCellTip, cellPerfTip, passCell, xlateCell, streamCell, memCell, rssSparkline, hasTranslation, CATEGORIES, DEFAULT_CATEGORY, VIEWS,
     CHOOSER_MODES, MODE_LABELS, MODE_TIPS, chooserCellPerf, chooserDialects, chooserPerfCell, chooserCellStream, chooserStreamCell, chooserHasCell, deltaToPeak, cellPopFull,
     // memory cell chooser (Min | Max | Same | Custom, never Peak) + the matrix roster hole-closer.
-    MEM_CHOOSER_MODES, CHOOSER_VIEWS, modesFor, defaultMode, resolveMode, memoryMode,
+    MEM_CHOOSER_MODES, CHOOSER_VIEWS, modesFor, defaultMode, resolveMode, modeFamily, modeOnArrival, memoryMode,
     perCellMemory, memoryCells, hasPerCellMemory, widestDialect, chosenMemory, memoryFor,
     idleAcrossCells, neverPlateaued, worstGrowth, memCellTip, neverPlateauedPill,
     idleStatic, memShape, memGrowing, memShaped,
@@ -4468,12 +4836,12 @@ if (NODE) {
     // never ran. `sustainedChooserCell` / `maxProxyChooserCell` are GONE with the two metrics they read.
     FRONTIER_BOUNDS_MS, DEFAULT_BOUND_MS, BOUND_CHOICES, BOUND_VIEWS, SORT_ALIASES,
     boundLabel, boundClause, boundColLabel, boundColId, selectedBound, fmtTail,
-    frontierOf, frontierAt, frontierCell, frontierGain, frontierSpark, frontierBlock, boardFrontierScale,
+    frontierOf, frontierAt, frontierCell, frontierHeld, frontierFullRate, heldPct, frontierSpark, frontierBlock, boardFrontierScale,
     frontierChooserCell, frontierBoundCell, frontierShapeCell, frontierShapeTd, frontierCaption, selectBound,
     // #4: the ×N gain factor's sort key and the reference prose that says what the ratio is OF. Exported
     // because "×1.0 from 1 ms" and "×1.0 from 50 ms" are opposite findings that used to render identically,
     // and a guard no test can reach is a guard that can be deleted without anything going red.
-    gainSortKey, GAIN_NO_RATIO_INDEX, GAIN_REFERENCE, BOUND_GROUP_LABEL, theadHtml,
+    heldSortKey, HELD_NOTHING_INDEX, HELD_REFERENCE, BOUND_GROUP_LABEL, theadHtml,
     // #1: the lead/notes split, its flattener, and the dispatch every renderer goes through.
     captionText, captionFor, notesFold,
     // #6: the version column's two halves. parseBuildVersion returns NULL for a build stamp that names no
@@ -4483,6 +4851,13 @@ if (NODE) {
     pageTitle, SITE_TITLE,
     // #5: the idle axis floor, so the "flat must render flat" guard can assert against the real constant.
     IDLE_AXIS_MIN_SPAN, rssCurves, fmt2,
+    /* THE MEMORY TAB'S LABELLING + ROW-HEIGHT WORK. Exported because every one of these was a case of a
+       CORRECT number placed so as to look wrong, and a guard that cannot reach the composed sentence cannot
+       stop the wording sliding back: idleShapeNote (a span is not a rate), recoveryTail (two windows, not two
+       facts), releaseMark (released nothing vs released most, drawn), rssLifecycle (one process, one line,
+       with the axis break SHOWN) and memCurveSummary (the reachability guarantee - every folded figure, on a
+       focusable control's accessible name). */
+    idleShapeNote, recoveryTail, releaseMark, rssLifecycle, memCurveSummary, LIFECYCLE_IDLE_FRAC,
     definitionsFor, definitionsFold, DEFINITION_PREFIXES, LANE_DEFINITION_PREFIXES, METRIC_NOTES,
     colTested, gatewayBuild, gatewayHardware, runMode, laneAgeSummary,
     chooserCaption, chooserLead, streamingProvenance,
