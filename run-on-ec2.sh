@@ -895,14 +895,14 @@ bench_gateway_once() {
     for _ in 1 2 3 4 5 6 7 8 9 10; do sudo -n true 2>/dev/null && break; sleep 3; done
     sudo -n true 2>/dev/null || {
       echo "PROVISION FAILED: passwordless sudo lapsed after apt (needrestart window) and did not return in 30s"
-      echo "  this is a RIG failure, not the gateway's, and not docker's - the daemon was never asked"
+      echo "  this is a RIG failure, not the gateway fault, and not a docker fault - the daemon was never asked"
       exit 1
     }
     sudoq usermod -aG docker ubuntu || true
     # FAIRNESS: a container inherits the docker DAEMON fd limit, NOT the host-shell ulimit. Left at
     # the ~1024 default, a containerised gateway fast enough to hold >1024 concurrent connections
     # hits EMFILE and collapses at exactly c=1024. The native side (loadgen, mock, native gateways)
-    # is raised to match in the remote run script below - it used to be perf/run.sh's job, and when
+    # is raised to match in the remote run script below - it used to be the job of perf/run.sh, and when
     # that was retired the raise went with it while this comment kept citing it.
     echo "{ \"default-ulimits\": { \"nofile\": { \"Name\": \"nofile\", \"Hard\": 1048576, \"Soft\": 1048576 } } }" | sudoq tee /etc/docker/daemon.json >/dev/null
     sudoq systemctl restart docker || sudoq service docker restart || true
@@ -918,8 +918,8 @@ bench_gateway_once() {
     #
     # So wait for the thing actually needed - a daemon that answers - and fail the box here if it never
     # does. Losing a box during provisioning costs one re-run; publishing INCOMPLETE for a gateway
-    # whose box had no docker reads as a broken ENTRANT, which is a false statement about somebody
-    # else's software.
+    # whose box had no docker reads as a broken ENTRANT, which is a false statement about software
+    # that somebody else wrote.
     # And it RECOVERS rather than only detecting: three rounds of (wait 30s for the socket, then try a
     # different way of starting it). `systemctl enable --now` is included because a daemon that is
     # installed but not enabled comes back dead after any restart, and `service` covers a box where

@@ -242,5 +242,34 @@ def main():
     return 0
 
 
+# ---- run-on-ec2.sh: the provision payload is SINGLE-QUOTED, so it cannot contain an apostrophe ----
+# This cost a full 14-box launch on 2026-07-30. The provisioning block is passed as
+# `ssh host 'set -e ... '`, so the FIRST apostrophe inside it closes the string - and everything
+# after runs on the ORCHESTRATOR instead of the box. The symptom is maximally misleading: the error
+# reads "./run-on-ec2.sh: line 907: sudoq: command not found", naming a local line number for a
+# helper that is defined and correct on the remote side, while every box reports PROVISION FAILED.
+# Parity does not save it: an even number of apostrophes re-closes the string but still executes the
+# span between them locally. The only safe rule is ZERO apostrophes in the payload, including prose
+# in comments - which is exactly where all three came from ("the gateway's", "run.sh's", "else's").
+def _test_provision_payload_has_no_apostrophe():
+    import re
+    src = open(os.path.join(HERE, "run-on-ec2.sh"), encoding="utf-8").read().split("\n")
+    start = next((i for i, l in enumerate(src) if "ssh $SSHOPT ubuntu@" in l and l.rstrip().endswith("'set -e")), None)
+    assert start is not None, "could not find the provision ssh payload opener"
+    end = next((i for i in range(start + 1, len(src)) if re.match(r"^\s*.*'\s*>>\"\$glog\"", src[i])), None)
+    assert end is not None, "could not find the provision ssh payload terminator"
+    bad = [(i + 1, src[i]) for i in range(start + 1, end) if "'" in src[i]]
+    return bad
+
+
+_bad_quotes = _test_provision_payload_has_no_apostrophe()
+if _bad_quotes:
+    for _ln, _txt in _bad_quotes:
+        print(f"FAIL - run-on-ec2.sh:{_ln} apostrophe inside the single-quoted ssh payload: {_txt.strip()[:90]}")
+    print("FAIL - the provision payload must contain ZERO apostrophes (see comment above this check)")
+    sys.exit(1)
+print("ok   - run-on-ec2.sh provision payload contains no apostrophe (would execute locally)")
+
+
 if __name__ == "__main__":
     sys.exit(main())
