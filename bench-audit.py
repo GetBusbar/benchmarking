@@ -483,36 +483,42 @@ def rung_served_cleanly(r):
     connects never reach the rung (`GenStats::rig_refused` discards those windows), so a failure here is
     the gateway failing a request it accepted.
 
-    `ok` IS THE ONE INPUT THE ARTIFACT DOES NOT PUBLISH. `SweepPoint` carries conc/rps/p99_us/fail, so
-    the engine's `ok > 0` half - which stops a window that completed NOTHING from reading as "no
-    failures" by the accident that 0 of 0 looks clean - has to be approximated here.
+    EXACT NOW: `ok > 0 and fail == 0`, both read directly off the rung, because `SweepPoint` publishes
+    `ok`. It did not used to: `SweepPoint` carried conc/rps/p99_us/fail only, so this file had to
+    APPROXIMATE the engine's `ok > 0` half - first as `rps > 0` alone, which produced a real FALSE
+    POSITIVE on live data. Plano at c=256 published `rps: 0, p99_us: 3398432, fail: 0`, and `rps > 0`
+    called that window dirty. But a percentile cannot exist without a completed, timed request - so
+    `ok >= 1`, the window served cleanly, and its rate merely rounded down through the engine's `as
+    i64` (one request over a four-second window is 0.25 rps, published as 0). The engine was right and
+    this check was wrong, and it mattered: the approximation then re-derived a
+    `first_disqualified_conc` the engine had correctly left absent, and the disagreement between the
+    two checkers had to be settled BY HAND. `SweepPoint` publishing `ok` is what removes that class of
+    disagreement rather than merely widening the approximation again - there is no approximation left
+    to widen.
 
-    A P99 IS THE PROOF OF COMPLETION, and `rps > 0` alone was the wrong approximation. It produced a
-    FALSE POSITIVE on real data: plano at c=256 published `rps: 0, p99_us: 3398432, fail: 0`, and
-    `rps > 0` called that window dirty. But a percentile cannot exist without a completed, timed
-    request - so `ok >= 1`, the window served cleanly, and its rate merely rounded down through
-    `as i64` (one request over a four-second window is 0.25 rps, published as 0). The engine was right
-    and this check was wrong, which mattered because it then re-derived a
-    `first_disqualified_conc` the engine had correctly left absent.
+    AND WHEN `ok` IS ABSENT ENTIRELY - a snapshot measured before the field existed - this FALLS BACK to
+    the p99 rule rather than refusing. Refusing was the first shape of this fix, and it was worse: with
+    `ok` unavailable every rung on such a board fails cleanliness-for-lack-of-proof, so the re-derivation
+    check had to be skipped wholesale, and the STRONGEST invariant in this file went unaudited on every
+    cell of the board about to ship. A skipped check is weaker than an approximate one. The fallback is
+    the p99-as-proof-of-completion rule, which is WIDER than the engine's (a completion always leaves a
+    latency sample; a rate can round away), so its residual error is a missed catch and never a false
+    alarm - which is the only direction an approximation may err in a tool whose warnings must be
+    trusted.
 
-    The earlier comment here claimed the approximation "can only ever be WIDER than the engine's". That
-    was backwards: `rps > 0` is NARROWER than `ok > 0`, because a rate can round away while completions
-    cannot. Narrower means false positives, and a checker that cries wolf on correct data gets muted.
-
-    So a rung counts as having completed something if it carries EITHER a positive rate or a p99. That
-    is still an approximation - a window with `ok > 0` and neither would slip through - but it is now
-    wider than the engine's rule rather than narrower, so its residual error is a missed catch instead of
-    a false alarm. The real fix is for `SweepPoint` to publish `ok`; recorded as a follow-up rather than
-    done mid-run, because changing the engine would invalidate every column measured so far.
-
-    An ABSENT `fail` is not a clean rung either: "measured no failures" and "nothing was measured" are
-    different facts.
+    An ABSENT `fail` is still not a clean rung: "measured nothing" and "measured no failures"
+    are different facts, and a rung this file cannot prove clean does not get to count as one. Every
+    snapshot on disk as of 2026-07-29 predates `ok`, so this returns False for ALL of their rungs - see
+    `producer_knew_ok` for how that is kept from reading as "every old rung was dirty" at the one place
+    (`check_frontier_is_rederivable_from_its_sweep`) that would otherwise turn it into a false alarm.
     """
-    fail, rps, p99 = r.get("fail"), r.get("rps"), r.get("p99_us")
-    if fail != 0:
+    ok, fail, p99 = r.get("ok"), r.get("fail"), r.get("p99_us")
+    if not isinstance(fail, (int, float)) or fail != 0:
         return False
-    completed = (isinstance(rps, (int, float)) and rps > 0) or isinstance(p99, (int, float))
-    return completed
+    if isinstance(ok, (int, float)):
+        return ok > 0
+    # `ok` absent: this rung predates the field. Fall back rather than refuse - see the docstring.
+    return (isinstance(r.get("rps"), (int, float)) and r.get("rps") > 0) or isinstance(p99, (int, float))
 
 
 def rung_qualifies(r, bound_us):
@@ -621,7 +627,7 @@ def check_frontier_rates_are_monotone_in_the_bound(name, c):
         prev_rps, prev_key = rps, key
 
 
-def check_frontier_is_rederivable_from_its_sweep(name, c):
+def check_frontier_is_rederivable_from_its_sweep(name, c, ok_known=True):
     """Recompute every reading from `sweep_max_proxy` and demand the published one matches.
 
     THE STRONGEST CHECK IN THIS FILE, and the only one that verifies the engine's ARITHMETIC rather than
@@ -634,12 +640,23 @@ def check_frontier_is_rederivable_from_its_sweep(name, c):
     actual field defect was the opposite - a plateau search that stopped three flat rungs in and reported
     a maximum BELOW what its own sibling search reached - and that passed the old check every time.
 
-    TWO PLACES WHERE THE ARTIFACT IS GENUINELY SHORT OF INFORMATION, both handled rather than assumed
-    away: `ok` is not published per rung (see `rung_served_cleanly`), so a re-derived best of exactly 0
-    cannot be told from a rung that completed nothing and is not held against an absence; and rungs may
-    repeat a concurrency, so ties are matched against the SET of rungs carrying the winning rate at the
-    published concurrency rather than against one assumed argmax.
+    ONE PLACE WHERE THE ARTIFACT IS GENUINELY SHORT OF INFORMATION, handled rather than assumed away:
+    rungs may repeat a concurrency, so ties are matched against the SET of rungs carrying the winning
+    rate at the published concurrency rather than against one assumed argmax.
+
+    `ok_known` GATES THE RE-DERIVATION ENTIRELY, because `rung_qualifies` now reads `ok` off every
+    rung (see `rung_served_cleanly`) and every snapshot on disk as of 2026-07-29 predates that field.
+    On those rungs `rung_served_cleanly` returns False for LACK OF PROOF, not for lack of cleanliness -
+    and if this function ran anyway, that would empty every qualifying set on an old board and flag
+    every honest published rate as unbacked. That is exactly the "calling old snapshots dirty" false
+    alarm this file was rewritten to stop repeating (see `rung_served_cleanly`'s plano paragraph), so
+    `ok_known=False` skips the re-derivation instead of guessing at it. `producer_knew_ok` is how the
+    caller decides, the same mechanism `producer_knew_the_frontier` uses for a pre-frontier snapshot,
+    and the skip is disclosed by count at the end of the run - never silently forgiven, and gone the
+    moment a snapshot from an engine that publishes `ok` lands.
     """
+    if not ok_known:
+        return
     fr = frontier_of(c)
     if not fr:
         return
@@ -668,11 +685,12 @@ def check_frontier_is_rederivable_from_its_sweep(name, c):
                        f"it")
             continue
         if pub_rps is None:
-            # `best == 0` is the `ok` ambiguity above, not a disagreement: the engine disqualifies a
-            # rung that completed nothing and this file cannot see that it did.
-            if best > 0:
-                yield (f"{name}: frontier.{key} publishes no rate, but rung(s) in sweep_max_proxy "
-                       f"qualify at that bound and the best carries {best} rps")
+            # `best` IS EXACT NOW - including 0, which used to be the `ok` ambiguity this branch had to
+            # excuse. A rung with `ok > 0` and a rate that rounded down to 0 (plano at c=256) is a
+            # PROVEN clean rung with a real reading of 0, not a hole, so a published absence beside it
+            # is a genuine disagreement rather than something this file cannot see.
+            yield (f"{name}: frontier.{key} publishes no rate, but rung(s) in sweep_max_proxy "
+                   f"qualify at that bound and the best carries {best} rps")
             continue
         if pub_rps != best:
             yield (f"{name}: frontier.{key} publishes {pub_rps} rps, re-derived from its own rungs it "
@@ -846,6 +864,23 @@ def producer_knew_the_frontier(d):
     a violation per cell for a field that could not have existed when the file was written.
     """
     return any(frontier_of(c) for _name, c in served_cells(d))
+
+
+def producer_knew_ok(d):
+    """Did the engine that wrote THIS snapshot publish `ok` per rung? Same mechanism and reasoning as
+    `producer_knew_the_frontier` immediately above, one field lower: the artifact is asked, rather than
+    a commit-to-field table nothing would keep honest.
+
+    True when any rung on any served cell carries the key at all - `isinstance` is deliberately not
+    checked here, an `ok` of the wrong TYPE is a shape violation for something else to catch, this
+    function only asks whether the field exists in this snapshot's vocabulary. False means every rung
+    in the snapshot predates `ok`, so `rung_served_cleanly` cannot be proven true OR false for any of
+    them, and `check_frontier_is_rederivable_from_its_sweep` stays silent on that cell instead of
+    flagging every honest published rate as unbacked by a qualifying set it can never fill. Every
+    snapshot on disk as of 2026-07-29 is in this bucket, the same as every snapshot was pre-frontier
+    before that metric shipped - and it clears the same way, cell by cell, as engines re-measure.
+    """
+    return any("ok" in r for _name, c in served_cells(d) for r in sweep_rungs(c))
 
 
 def parse_rust_frontier_bounds(text):
@@ -1149,11 +1184,21 @@ def main():
     # written - so a silent skip here would be the whole new invariant set quietly doing nothing.
     prefrontier_cells = 0
     prefrontier_gws = []
+    # Cells whose snapshot PREDATES `ok` (see `producer_knew_ok`), so `check_frontier_is_rederivable_
+    # from_its_sweep` has nothing sound to re-derive with and stays silent on them rather than call
+    # every rung dirty. Every snapshot on disk on 2026-07-29 is in this bucket too - `ok` shipped after
+    # every column currently published - so, same as `prefrontier_*` above, a silent skip here would
+    # hide that the strongest check in the file is not actually running yet.
+    preok_cells = 0
+    preok_gws = []
     for gw, (_path, d, _sha) in sorted(snaps.items()):
         known = fields_the_producer_knew(d)
         frontier_known = producer_knew_the_frontier(d)
         if not frontier_known:
             prefrontier_gws.append(gw)
+        ok_known = producer_knew_ok(d)
+        if not ok_known:
+            preok_gws.append(gw)
         for block, fields in ABSENCE_CARRYING_FIELDS.items():
             missing = [f for f in fields if f not in known.get(block, ())]
             if missing:
@@ -1162,12 +1207,16 @@ def main():
             cells += 1
             if not frontier_known:
                 prefrontier_cells += 1
+            if not ok_known:
+                preok_cells += 1
             for check in CELL_CHECKS:
                 kw = {}
                 if check is check_declared_fields_are_carried:
                     kw = {"known": known}
                 elif check is check_frontier_is_complete:
                     kw = {"frontier_known": frontier_known}
+                elif check is check_frontier_is_rederivable_from_its_sweep:
+                    kw = {"ok_known": ok_known}
                 for v in check(f"{gw} {name}", c, **kw):
                     violations[check.__name__].append(v)
         for v in check_declaration_matches_what_we_measured(gw):
@@ -1214,6 +1263,14 @@ def main():
               f"invariants had nothing")
         print("  to run on. They run the moment a snapshot from an engine that DOES publish readings")
         print("  lands - re-measure to audit them.")
+    if preok_cells:
+        print(f"NOT AUDITED: check_frontier_is_rederivable_from_its_sweep on {preok_cells} served "
+              f"cell(s) across {len(preok_gws)} snapshot(s) that predate `ok`: {', '.join(preok_gws)}")
+        print("  No rung in those snapshots carries sweep_max_proxy.ok, so this file cannot prove any")
+        print("  of them served cleanly and skipped the re-derivation rather than call every rung dirty")
+        print("  - the same false alarm plano's c=256 window produced under the old rps>0 approximation.")
+        print("  It runs the moment a snapshot from an engine that publishes ok lands - re-measure to")
+        print("  audit them.")
     print(f"{len(CELL_CHECKS)} per-cell invariants ({len(FRONTIER_CHECKS)} of them the frontier's) + 1 "
           f"per-gateway + {len(board_checks)} board-level invariants\n")
 

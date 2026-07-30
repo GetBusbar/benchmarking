@@ -39,6 +39,11 @@ _SPEC.loader.exec_module(audit)
 # every bound's winning rung, its boundary rung above it, and the final lower-bound reading are all
 # exercised by one small ladder rather than asserted in isolation.
 #
+# `ok` carries a positive count on every rung (arbitrarily set equal to `rps`, since the exact value
+# does not matter to any check here - only `ok > 0` does) so this ladder reads as `ok_known=True` and
+# every rung is PROVABLY clean under the exact `rung_served_cleanly` rule, not merely clean by the
+# `fail: 0` that used to be the whole story.
+#
 #   conc   rps    p99_us   qualifies under (strict <)
 #   8      500      800    1ms, 5ms, 10ms, 50ms, 100ms, unbounded
 #   32    1500     3000          5ms, 10ms, 50ms, 100ms, unbounded
@@ -47,12 +52,12 @@ _SPEC.loader.exec_module(audit)
 #   2048  6000    90000                            100ms, unbounded
 #   8192  6500   200000                                    unbounded
 _BASE_RUNGS = [
-    {"conc": 8, "rps": 500, "p99_us": 800, "fail": 0},
-    {"conc": 32, "rps": 1_500, "p99_us": 3_000, "fail": 0},
-    {"conc": 128, "rps": 3_000, "p99_us": 8_000, "fail": 0},
-    {"conc": 512, "rps": 5_000, "p99_us": 40_000, "fail": 0},
-    {"conc": 2_048, "rps": 6_000, "p99_us": 90_000, "fail": 0},
-    {"conc": 8_192, "rps": 6_500, "p99_us": 200_000, "fail": 0},
+    {"conc": 8, "rps": 500, "p99_us": 800, "fail": 0, "ok": 500},
+    {"conc": 32, "rps": 1_500, "p99_us": 3_000, "fail": 0, "ok": 1_500},
+    {"conc": 128, "rps": 3_000, "p99_us": 8_000, "fail": 0, "ok": 3_000},
+    {"conc": 512, "rps": 5_000, "p99_us": 40_000, "fail": 0, "ok": 5_000},
+    {"conc": 2_048, "rps": 6_000, "p99_us": 90_000, "fail": 0, "ok": 6_000},
+    {"conc": 8_192, "rps": 6_500, "p99_us": 200_000, "fail": 0, "ok": 6_500},
 ]
 
 # The frontier re-derived from `_BASE_RUNGS` by hand, per `frontier::read_at`: the max rps among
@@ -392,6 +397,102 @@ def main():
         if not any("first_disqualified_conc=999999" in v for v in fired):
             failures.append(f"check_frontier_is_rederivable_from_its_sweep must catch a fabricated "
                             f"first_disqualified_conc, got {fired!r}")
+
+    # ── rung_served_cleanly: exact now, `ok` is read directly off the rung ───────────────────────────
+    #
+    # This is the property `ok` exists to make provable at all - see its docstring's plano paragraph.
+    # "0 of 0 looks clean" is the defect `ok > 0` guards against, and it was UNVERIFIABLE before this
+    # field was published: `fail == 0` alone cannot tell a window that completed nothing from one that
+    # completed everything it accepted, and the file's old approximation (`rps > 0` or a p99) could not
+    # see a window with `ok: 0` at all - it had no signal to read. Now it does.
+    with isolated(failures, "rung_served_cleanly: exact ok/fail rule"):
+        # ACCEPT: the ordinary clean rung - ok > 0, fail == 0.
+        if not audit.rung_served_cleanly({"conc": 8, "rps": 500, "p99_us": 800, "fail": 0, "ok": 500}):
+            failures.append("rung_served_cleanly rejected an ordinary clean rung (ok=500, fail=0)")
+        # RED: `ok: 0` alongside `fail: 0` - a window that completed NOTHING. "0 of 0 looks clean" is
+        # exactly the ambiguity `ok > 0` exists to break, and it was unreachable by this file before
+        # `ok` was published - there was no field to hold a real 0 apart from an absence.
+        if audit.rung_served_cleanly({"conc": 999, "rps": None, "p99_us": None, "fail": 0, "ok": 0}):
+            failures.append("rung_served_cleanly accepted ok=0, fail=0 as clean - a window that "
+                            "completed nothing must not count as having served cleanly")
+        # RED: `ok` absent entirely (every snapshot on disk as of 2026-07-29). Unverifiable, and an
+        # unverifiable rung does not get to read as clean - "measured nothing" and "measured no
+        # failures" are different facts, per the docstring's own reasoning for `fail`.
+        if audit.rung_served_cleanly({"conc": 8, "rps": 500, "p99_us": 800, "fail": 0}):
+            failures.append("rung_served_cleanly accepted a rung with no `ok` field as clean - an "
+                            "absent ok is unverifiable, not a pass")
+        # RED, the sibling: `fail` absent with `ok` present must not read as clean either - unchanged
+        # from before `ok` existed, pinned again here so the exact rewrite did not quietly drop it.
+        if audit.rung_served_cleanly({"conc": 8, "rps": 500, "p99_us": 800, "ok": 500}):
+            failures.append("rung_served_cleanly accepted a rung with no `fail` field as clean")
+
+    # ── the ok:0/fail:0 and ok-absent defects must not let a rung WIN a reading ──────────────────────
+    #
+    # A unit-level pass on `rung_served_cleanly` is necessary but not sufficient - the actual bar is
+    # that a rung which cannot prove it served cleanly must not be the rung a published frontier
+    # reading is built on. Rung index 2 (c=128) is the winner of the 10ms reading in `_BASE_FRONTIER`
+    # (3,000 rps at p99=8,000us); knocking out ITS cleanliness must knock its reading's re-derivation
+    # loose, because the true winner drops to rung index 1 (c=32, 1,500 rps) and the published 3,000
+    # no longer matches anything the sweep can back.
+    with isolated(failures, "ok:0/fail:0 and ok-absent rungs must not win a frontier reading"):
+        ok_zero_rungs = json.loads(json.dumps(_BASE_RUNGS))
+        ok_zero_rungs[2]["ok"] = 0  # was 3_000; the rung still publishes fail: 0 and a real rate/p99
+        fired = list(audit.check_frontier_is_rederivable_from_its_sweep(
+            "t", cell(perf__sweep_max_proxy=ok_zero_rungs)))
+        if not any("is 1500" in v for v in fired):
+            failures.append(f"check_frontier_is_rederivable_from_its_sweep let a rung with ok=0, "
+                            f"fail=0 win the 10ms reading - re-derived from the rungs that can PROVE "
+                            f"they served cleanly the answer is 1500, got {fired!r}")
+
+        ok_absent_rungs = json.loads(json.dumps(_BASE_RUNGS))
+        del ok_absent_rungs[2]["ok"]
+        fired = list(audit.check_frontier_is_rederivable_from_its_sweep(
+            "t", cell(perf__sweep_max_proxy=ok_absent_rungs)))
+        if not any("is 1500" in v for v in fired):
+            failures.append(f"check_frontier_is_rederivable_from_its_sweep let a rung with no `ok` "
+                            f"field win the 10ms reading - unverifiable must not count as clean, "
+                            f"got {fired!r}")
+
+    # ── ok_known=False: a snapshot that predates `ok` is skipped, not flagged dirty ───────────────────
+    #
+    # This is the false alarm the brief calls out by name: every snapshot on disk right now carries NO
+    # `ok` at all, so if the re-derivation ran anyway every rung would fail `rung_served_cleanly` for
+    # lack of proof, every qualifying set would come back empty, and every honestly published rate
+    # would be flagged as having no rung behind it - the entire board, at once, for a field its engine
+    # never had. `ok_known=False` must suppress that instead.
+    with isolated(failures, "check_frontier_is_rederivable_from_its_sweep: ok_known=False skips rather than flags"):
+        no_ok_rungs = [{k: v for k, v in r.items() if k != "ok"} for r in json.loads(json.dumps(_BASE_RUNGS))]
+        preok_cell = cell(perf__sweep_max_proxy=no_ok_rungs)
+        # Sanity: with ok_known left at its True default this cell IS flagged (every rung unverifiable,
+        # so every reading loses its winning rung) - proving the skip below is doing real work, not
+        # passing because the fixture happened to already agree.
+        would_fire = list(audit.check_frontier_is_rederivable_from_its_sweep("t", preok_cell))
+        if not would_fire:
+            failures.append("test fixture is broken: a cell with no `ok` anywhere must trip the "
+                            "re-derivation under the default ok_known=True, or the skip below proves "
+                            "nothing")
+        fired = list(audit.check_frontier_is_rederivable_from_its_sweep(
+            "t", preok_cell, ok_known=False))
+        if fired:
+            failures.append(f"check_frontier_is_rederivable_from_its_sweep must skip entirely when "
+                            f"ok_known=False (a pre-ok snapshot), got {fired!r} - calling every rung "
+                            f"dirty for a field its engine never had is the false alarm this exists "
+                            f"to stop")
+
+    # ── producer_knew_ok: the artifact is asked, same mechanism as producer_knew_the_frontier ─────────
+    def _snapshot(c):
+        """The minimal shape `served_cells` actually reads: `matrix.upstreams.<eg>.cells.<ing>`, per
+        that function's own contract - not a guess at a snapshot's full schema."""
+        return {"matrix": {"upstreams": {"eg1": {"cells": {"ing1": c}}}}}
+
+    with isolated(failures, "producer_knew_ok"):
+        d_with_ok = _snapshot(cell())
+        d_without_ok = _snapshot(cell(perf__sweep_max_proxy=no_ok_rungs))
+        if not audit.producer_knew_ok(d_with_ok):
+            failures.append("producer_knew_ok said False for a snapshot whose rungs carry `ok`")
+        if audit.producer_knew_ok(d_without_ok):
+            failures.append("producer_knew_ok said True for a snapshot with no `ok` anywhere - "
+                            "it must ask the artifact, not assume the newer shape")
 
     # ── check_frontier_p99_is_the_observed_tail: the bound-copied-into-the-answer signature ────────
     #
