@@ -369,39 +369,6 @@ pub struct CellPerf {
     pub gateway_c1_p99_us: Measurement<i64>,
     #[serde(default = "measurement_default")]
     pub direct_c1_p99_us: Measurement<i64>,
-    #[serde(default = "measurement_default")]
-    pub rps_sustained_20ms: Measurement<i64>,
-    #[serde(default = "measurement_default")]
-    pub rps_sustained_20ms_concurrency: Measurement<i64>,
-    #[serde(default = "measurement_default")]
-    pub conc_at_sustained: Measurement<i64>,
-    /// The rig's own throughput at `rps_sustained_20ms_concurrency`, and the fraction of it the
-    /// gateway reached. CONTEXT FOR THE NUMBER ABOVE, never a gate on it.
-    ///
-    /// These replace `rps_sustained_20ms_mock_bound: Option<bool>`, which was a VERDICT: `true` meant
-    /// the engine had decided our rig set this limit, and the sustained figure was published as `null`
-    /// with the reason `rig_limited` whenever the fraction reached 0.9. The measurement was correct in
-    /// every one of those cells - only its interpretation was uncertain - so the interpretation is now
-    /// the reader's and the two numbers it would be drawn from are stated. See `rigbound.rs`.
-    ///
-    /// Both `None` when the reference could not be established, which costs the headroom and NOT the
-    /// measurement: an unmeasurable ceiling used to make the gateway's own number disappear.
-    #[serde(default)]
-    pub rps_sustained_20ms_rig_ceiling: Option<f64>,
-    #[serde(default)]
-    pub rps_sustained_20ms_headroom: Option<f64>,
-    #[serde(default = "measurement_default")]
-    pub rps_max_proxy: Measurement<i64>,
-    #[serde(default = "measurement_default")]
-    pub rps_max_proxy_concurrency: Measurement<i64>,
-    #[serde(default = "measurement_default")]
-    pub conc_at_peak: Measurement<i64>,
-    /// The rig's own throughput at `rps_max_proxy_concurrency`, and the fraction of it reached. Same
-    /// meaning and same history as the sustained pair above.
-    #[serde(default)]
-    pub rps_max_proxy_rig_ceiling: Option<f64>,
-    #[serde(default)]
-    pub rps_max_proxy_headroom: Option<f64>,
     /// THE FRONTIER: one reading per declared tail-latency bound, ascending, with the failure-only
     /// reading last. The published throughput answer, replacing `rps_max_proxy` /
     /// `rps_sustained_20ms`.
@@ -412,8 +379,6 @@ pub struct CellPerf {
     pub frontier: Vec<FrontierReading>,
     #[serde(default)]
     pub sweep_max_proxy: Vec<SweepPoint>,
-    #[serde(default)]
-    pub sweep_sustained_20ms: Vec<SweepPoint>,
     #[serde(default)]
     pub egress_reverified: Option<bool>,
     #[serde(default)]
@@ -446,12 +411,6 @@ impl CellPerf {
             added_latency_p99_us,
             gateway_c1_p99_us,
             direct_c1_p99_us,
-            rps_sustained_20ms,
-            rps_sustained_20ms_concurrency,
-            conc_at_sustained,
-            rps_max_proxy,
-            rps_max_proxy_concurrency,
-            conc_at_peak,
         );
         // AND EVERY FRONTIER READING'S OWN ABSENCES, keyed by the bound they belong to.
         //
@@ -554,22 +513,11 @@ pub struct CellStream {
     pub streams_sustained_mock_ceiling: Option<f64>,
     #[serde(default)]
     pub streams_sustained_headroom: Option<f64>,
-    #[serde(default = "measurement_default")]
-    pub cpu_fps: Measurement<f64>,
-    #[serde(default = "measurement_default")]
-    pub cpu_fps_concurrency: Measurement<i64>,
-    /// The same derived mock ceiling at `cpu_fps_concurrency`, and the fraction of it reached.
-    #[serde(default)]
-    pub cpu_fps_mock_ceiling: Option<f64>,
-    #[serde(default)]
-    pub cpu_fps_headroom: Option<f64>,
-    /// The sweep points behind `streams_sustained` / `cpu_fps`. Shaped like `SweepPoint` in run.sh's
+    /// The sweep points behind `streams_sustained`. Shaped like `SweepPoint` in run.sh's
     /// own accumulator, but no committed snapshot has ever populated it, so each point is passed
     /// through as opaque JSON rather than typed against an unconfirmed shape.
     #[serde(default)]
     pub sweep_streams: Vec<serde_json::Value>,
-    #[serde(default)]
-    pub sweep_cpu_fps: Vec<serde_json::Value>,
     #[serde(default)]
     pub stream_c1_note: Option<String>,
     /// HOW MANY TTFT PROBES SURVIVED PER LEG, so a reader can weigh `added_ttft_p50_us` and
@@ -595,8 +543,6 @@ impl CellStream {
             ttft_direct_samples,
             streams_sustained,
             streams_sustained_fps,
-            cpu_fps,
-            cpu_fps_concurrency,
         )
     }
 }
@@ -799,12 +745,32 @@ pub struct StreamingProjection {
     pub added_gap_p99_us: Measurement<i64>,
     #[serde(default = "measurement_default")]
     pub streams_sustained: Measurement<i64>,
-    #[serde(default = "measurement_default")]
-    pub cpu_fps: Measurement<f64>,
 }
 
 #[cfg(test)]
 mod tests {
+    fn sample_perf() -> CellPerf {
+        CellPerf {
+            added_latency_p50_us: Measurement::Measured(40_939),
+            added_latency_p99_us: Measurement::Measured(40_945),
+            gateway_c1_p99_us: Measurement::Measured(41_026),
+            direct_c1_p99_us: Measurement::Measured(81),
+            // The throughput answer is the FRONTIER now. The six scalars this fixture used to carry -
+            // `rps_max_proxy` / `rps_sustained_20ms` and their concurrency twins - were one sweep
+            // summarised twice by a chosen ceiling, and they are gone from the artifact.
+            frontier: Vec::new(),
+            sweep_max_proxy: vec![SweepPoint {
+                conc: 256,
+                rps: Measurement::Measured(6_209),
+                p99_us: Measurement::Measured(43_969),
+                fail: Measurement::Measured(0),
+            }],
+            egress_reverified: Some(true),
+            reverify_note: None,
+            c1_note: None,
+        }
+    }
+
     // THE FRONTIER SURVIVES THE ARTIFACT, MONOTONICITY AND ALL.
     //
     // `frontier.rs` proves the ordering holds over rungs; this proves the published SHAPE keeps it.
@@ -1047,36 +1013,6 @@ mod tests {
         );
     }
 
-    fn sample_perf() -> CellPerf {
-        CellPerf {
-            added_latency_p50_us: Measurement::Measured(40_939),
-            added_latency_p99_us: Measurement::Measured(40_945),
-            gateway_c1_p99_us: Measurement::Measured(41_026),
-            direct_c1_p99_us: Measurement::Measured(81),
-            rps_sustained_20ms: Measurement::Measured(11_968),
-            rps_sustained_20ms_concurrency: Measurement::Measured(1024),
-            conc_at_sustained: Measurement::Measured(1024),
-            rps_sustained_20ms_rig_ceiling: None,
-            rps_sustained_20ms_headroom: None,
-            rps_max_proxy: Measurement::Measured(12_298),
-            rps_max_proxy_concurrency: Measurement::Measured(1024),
-            conc_at_peak: Measurement::Measured(1024),
-            rps_max_proxy_rig_ceiling: None,
-            rps_max_proxy_headroom: None,
-            frontier: Vec::new(),
-            sweep_max_proxy: vec![SweepPoint {
-                conc: 256,
-                rps: Measurement::Measured(6_209),
-                p99_us: Measurement::Measured(43_969),
-                fail: Measurement::Measured(0),
-            }],
-            sweep_sustained_20ms: vec![],
-            egress_reverified: Some(true),
-            reverify_note: None,
-            c1_note: None,
-        }
-    }
-
     fn sample_cell() -> Cell {
         Cell {
             served: Served::Bool(true),
@@ -1110,12 +1046,7 @@ mod tests {
                 streams_sustained_fps: Measurement::absent(Absent::NotMeasured),
                 streams_sustained_mock_ceiling: None,
                 streams_sustained_headroom: None,
-                cpu_fps: Measurement::absent(Absent::NotMeasured),
-                cpu_fps_concurrency: Measurement::absent(Absent::NotMeasured),
-                cpu_fps_mock_ceiling: None,
-                cpu_fps_headroom: None,
                 sweep_streams: vec![],
-                sweep_cpu_fps: vec![],
                 stream_c1_note: None,
             }),
             memory: None,
@@ -1257,41 +1188,7 @@ mod tests {
 
     // ── golden shape ─────────────────────────────────────────────────────────────────────────────
 
-    #[test]
-    fn golden_shape_matches_real_key_paths() {
-        let rec = sample_record();
-        let v: serde_json::Value = serde_json::to_value(&rec).unwrap();
-        // Key paths pulled directly from a real committed snapshot, not invented here.
-        assert!(v
-            .pointer("/matrix/upstreams/openai/cells/openai/perf/rps_max_proxy")
-            .is_some());
-        assert!(v
-            .pointer("/matrix/upstreams/openai/cells/openai/perf/sweep_max_proxy/0/conc")
-            .is_some());
-        assert!(v
-            .pointer("/matrix/upstreams/openai/cells/openai/stream/stream_served")
-            .is_some());
-        assert!(v.pointer("/matrix/cells/openai/served").is_some());
-        assert!(v.pointer("/matrix/upstreams/openai/configurable").is_some());
-        assert!(v.pointer("/config/files").is_some());
-        assert_eq!(
-            v.pointer("/matrix/upstreams/openai/cells/openai/perf/rps_max_proxy")
-                .unwrap(),
-            &serde_json::json!(12_298)
-        );
-    }
-
     // ── absence ──────────────────────────────────────────────────────────────────────────────────
-
-    #[test]
-    fn absent_perf_metric_serialises_as_null_never_zero() {
-        let mut perf = sample_perf();
-        perf.rps_max_proxy = Measurement::absent(Absent::SearchExhausted);
-        let js = serde_json::to_string(&perf).unwrap();
-        let v: serde_json::Value = serde_json::from_str(&js).unwrap();
-        assert_eq!(v["rps_max_proxy"], serde_json::Value::Null);
-        assert!(!js.contains("\"rps_max_proxy\":0"));
-    }
 
     #[test]
     fn absent_stream_metric_serialises_as_null() {
@@ -1300,7 +1197,6 @@ mod tests {
         let js = serde_json::to_string(&stream).unwrap();
         let v: serde_json::Value = serde_json::from_str(&js).unwrap();
         assert_eq!(v["added_ttft_p99_us"], serde_json::Value::Null);
-        assert_eq!(v["cpu_fps"], serde_json::Value::Null);
     }
 
     // THE TOKEN AND THE PROSE ARE TWO FIELDS. `CellStream.reason` shares its name with `Cell.reason`,
@@ -1331,33 +1227,6 @@ mod tests {
             v["stream_error"], "did not rebind the mock port",
             "the prose belongs in stream_error, not in reason"
         );
-    }
-
-    #[test]
-    fn null_field_deserialises_to_absent_not_measured_zero() {
-        let js = r#"{
-            "added_latency_p50_us": null,
-            "added_latency_p99_us": null,
-            "gateway_c1_p99_us": null,
-            "direct_c1_p99_us": null,
-            "rps_sustained_20ms": null,
-            "rps_sustained_20ms_concurrency": null,
-            "conc_at_sustained": null,
-            "rps_sustained_20ms_rig_ceiling": null,
-            "rps_sustained_20ms_headroom": null,
-            "rps_max_proxy": null,
-            "rps_max_proxy_concurrency": null,
-            "conc_at_peak": null,
-            "rps_max_proxy_rig_ceiling": null,
-            "rps_max_proxy_headroom": null,
-            "sweep_max_proxy": [],
-            "sweep_sustained_20ms": [],
-            "egress_reverified": null
-        }"#;
-        let perf: CellPerf = serde_json::from_str(js).unwrap();
-        assert!(!perf.rps_max_proxy.is_measured());
-        assert_eq!(perf.rps_max_proxy.copied(), None);
-        assert_ne!(perf.rps_max_proxy, Measurement::Measured(0));
     }
 
     // ── escaping ─────────────────────────────────────────────────────────────────────────────────
@@ -1400,31 +1269,6 @@ mod tests {
     // parse is a stronger claim and is covered where it belongs: engine/tests/end_to_end.rs drives
     // the real binary and reads back the snapshot it actually wrote.
 
-    // A served cell carries its perf block through a serialise/deserialise round trip. The wire is
-    // the boundary this file exists to defend: every consumer sees the JSON, not the struct.
-    #[test]
-    fn a_served_cell_keeps_its_measured_throughput_across_the_wire() {
-        let snap = sample_record();
-        let js = serde_json::to_string(&snap).expect("a snapshot must serialise");
-        let back: ResultSnapshot = serde_json::from_str(&js).expect("its own output must parse");
-        assert_eq!(back.schema_version, 1);
-        assert!(back.matrix.served);
-        let egress = back
-            .matrix
-            .upstreams
-            .values()
-            .next()
-            .expect("an egress row");
-        assert!(egress.served);
-        let cell = egress.cells.values().next().expect("a cell");
-        assert!(matches!(cell.served, Served::Bool(true)));
-        let perf = cell.perf.as_ref().expect("a served cell carries perf");
-        assert!(
-            perf.rps_max_proxy.is_measured(),
-            "a measured peak must survive the round trip"
-        );
-    }
-
     // The other half: a cell that was not served must not arrive carrying numbers. Fabricating a
     // perf block for an unserved cell would publish a capability the gateway never demonstrated.
     #[test]
@@ -1450,62 +1294,5 @@ mod tests {
                 );
             }
         }
-    }
-
-    // A bare `null` on the wire cannot be the whole story: the reason WHY a metric is absent
-    // (rig-limited vs. search-exhausted vs. a harness bug) must survive serialisation, or a reader
-    // of a published snapshot has no way to tell "the gateway does not do this" from "our own
-    // search ran out of range" from "the harness broke" - three completely different claims that
-    // would otherwise render as the identical bare `null`.
-    #[test]
-    fn a_cell_publishes_why_each_absent_metric_is_absent_not_just_that_it_is() {
-        let mut cell = Cell {
-            served: Served::Bool(true),
-            perf: Some(CellPerf {
-                rps_max_proxy: Measurement::absent_because(
-                    Absent::SearchExhausted,
-                    "still rising at the top of the search range, c=512",
-                ),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-        cell.stream = Some(CellStream {
-            cpu_fps: Measurement::absent(Absent::RigLimited),
-            ..Default::default()
-        });
-
-        let js = serde_json::to_string(&cell).expect("a cell must serialise");
-        let value: serde_json::Value = serde_json::from_str(&js).expect("must be valid JSON");
-
-        assert_eq!(
-            value["perf"]["rps_max_proxy"],
-            serde_json::Value::Null,
-            "the value slot itself must still be a bare null, unchanged for existing consumers"
-        );
-        assert_eq!(
-            value["absences"]["perf.rps_max_proxy"]["reason"], "search_exhausted",
-            "the real reason must be published, not thrown away: got {value}"
-        );
-        assert!(
-            value["absences"]["perf.rps_max_proxy"]["detail"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("c=512"),
-            "the operator-facing detail must survive too: got {value}"
-        );
-        assert_eq!(
-            value["absences"]["stream.cpu_fps"]["reason"], "rig_limited",
-            "every absent metric must appear, not just the first one: got {value}"
-        );
-        assert!(
-            value["absences"]
-                .get("stream.cpu_fps")
-                .unwrap()
-                .get("detail")
-                .is_none()
-                || value["absences"]["stream.cpu_fps"]["detail"].is_null(),
-            "a reason with no detail must not fabricate one"
-        );
     }
 }
