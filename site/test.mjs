@@ -6229,7 +6229,10 @@ test("UI: the two filter axes are ONE labelled control block, not two ragged row
 
   // ONE BLOCK, containing both axes, so their alignment is a property of the layout and not a coincidence.
   assert.match(html, /<div class="filters" id="filters">/, "the two axes live in one control block");
-  const block = html.slice(html.indexOf('id="filters"'), html.indexOf('<div class="table-scroll">'));
+  // Bounded from the block's own start: index.html has an earlier .table-scroll (the roster table), so an
+  // unanchored indexOf for the terminator finds it and slices backwards to nothing.
+  const from = html.indexOf('id="filters"');
+  const block = html.slice(from, html.indexOf('<div class="table-scroll">', from));
   assert.ok(block.includes('id="bound-chooser"'), "the bound axis is inside it");
   assert.ok(block.includes('id="cell-chooser"'), "and so is the cell axis");
 
@@ -6287,6 +6290,13 @@ test("UI: column geometry is FIXED, so changing a filter never moves a column si
 
   // THE WIDTHS ARE DECLARED PER COLUMN, in one place, and every column in every table view has one.
   for (const view of ["performance", "frontier", "streaming", "memory"]) {
+    /* BOTH the declared set and the set actually RENDERED. columnsFor() drops a column the current bundle
+       cannot fill (memory sheds `memgrowth` without per-cell windows), and the <col>-to-column mapping is
+       POSITIONAL: a colgroup built from the superset while the body renders the subset would put every width
+       on the wrong column - stable geometry, wrong geometry. */
+    for (const set of [app.COLUMN_SETS[view], app.columnsFor(view)])
+      assert.equal((app.colgroupHtml(set).match(/<col /g) || []).length, set.length,
+        `${view}: the colgroup is built from the columns being rendered, one <col> each`);
     const cols = app.COLUMN_SETS[view];
     const cg = app.colgroupHtml(cols);
     assert.equal((cg.match(/<col /g) || []).length, cols.length,
