@@ -1,29 +1,43 @@
 // SPDX-License-Identifier: Apache-2.0
-// seal.mjs: the data-honesty ENVELOPE - the single point where "is this number honest to show?"
-// is decided, at PROJECTION time (gen-data.mjs), never at read time. Every metric the board
-// consumes is sealed here into EITHER a certified envelope OR an explicit suppressed envelope; the
-// raw scalar AND its `_mock_bound` flag are CONSUMED at seal time and are NEVER re-emitted into the
-// projected bundle. There is therefore no ungated raw field for any render site to leak (Design E,
-// invariant P1). app.js reads envelopes through metric(); charts.py mirrors metric() + SWEEP_CAPTION.
+// seal.mjs: the data-honesty ENVELOPE - the single point where a measurement becomes a published
+// datum, at PROJECTION time (gen-data.mjs), never at read time. Every metric the board consumes is
+// sealed here, and the raw scalar is CONSUMED at seal time so there is no ungated raw field for any
+// render site to leak (Design E, invariant P1). app.js reads envelopes through metric(); charts.py
+// mirrors metric() + SWEEP_CAPTION.
 //
-// Envelope shapes (Design E §2.1):
-//   CERTIFIED   { value: N,    certified: true,  suppressed: false, source, paced_match?, ...extras }
-//   MEASURED-0  { value: 0,    certified: true,  suppressed: false, source, note: "no_qualifying_ceiling" }
-//   SUPPRESSED  { value: null, certified: false, suppressed: true,  reason: "mock_bound"|"unverifiable", source }
+// Envelope shapes:
+//   CERTIFIED   { value: N,    certified: true,  suppressed: false, headroom?, rig_ceiling?, ...extras }
+//   MEASURED-0  { value: 0,    certified: true,  suppressed: false, note: "no_qualifying_ceiling" }
 //   NOT-MEASURED{ value: null, certified: false, suppressed: false, reason: <engine absence token>, detail? }
 //
-// The NOT-MEASURED reason is no longer the hardcoded literal "not_measured": the engine publishes WHY a
-// field is absent (measurement.rs `Absent` - not_measured, below_resolution, rig_limited, untestable,
-// search_exhausted, harness_error, not_served) in the cell's sibling `absences` map, and the seal now
-// CARRIES that reason + its prose detail instead of flattening every hole to one token. In particular
-// "below_resolution" is a difference that came out at or below what the rig can resolve - the best
-// result the comparison can express - and every surface renders it apart from a never-measured hole.
+// A PRESENT NUMBER IS ALWAYS PUBLISHED. There used to be a fourth shape - SUPPRESSED, `{value: null,
+// certified: false, suppressed: true, reason: "mock_bound"|"unverifiable"}` - and a whole GATED/PACED
+// vocabulary feeding it. A "gated" metric was certified only when the engine's `*_mock_bound` flag
+// proved the number was not our own rig's ceiling; a positive value whose flag was `true` (rig-bound)
+// or `null` (unmeasurable reference) had its value replaced with null.
 //
-// GATED metrics (throughput; the mock-bound honesty flag applies): rps_sustained_20ms, rps_max_proxy,
-// streams_sustained, cpu_fps, and the translation sustained RPS. A gated metric is CERTIFIED only when
-// value is present AND (value === 0 [measured-zero, honest] OR (value > 0 AND flag === false)). A
-// positive value whose flag !== false is SUPPRESSED (reason mock_bound when flag === true, unverifiable
-// when flag == null). UNGATED metrics (latency, ttft, gap, rss, …) are always certified when present.
+// That withheld correct measurements. The engine reached the flag by comparing the observation against
+// a rig reference and applying a chosen fraction, and it fired hardest on the gateways that did best:
+// on the 2026-07-28 board a gateway keeping pace with the paced mock to within 0.7% published nothing
+// at all. The number was right; only its INTERPRETATION was open, and deleting the number is not a way
+// to resolve that.
+//
+// So the engine no longer produces a verdict, and this no longer consumes one. It produces the two
+// facts the verdict was derived from - the ceiling the measurement was taken against and the fraction
+// of it reached - and they ride ON the certified envelope as `rig_ceiling` and `headroom`. A reader
+// sees `43297 frames/sec, 83% of the mock's own 52013 ceiling` and draws their own conclusion. Nothing
+// in this file chooses a threshold, because nothing in this file reaches a conclusion.
+//
+// `suppressed: false` is still emitted on every envelope. It is load-bearing for consumers and for
+// invariant C2, which asserts no envelope in a published bundle carries `suppressed: true` - the guard
+// that the retired machinery has not come back.
+//
+// The NOT-MEASURED reason is not a hardcoded literal: the engine publishes WHY a field is absent
+// (measurement.rs `Absent` - not_measured, below_resolution, rig_limited, untestable, search_exhausted,
+// harness_error, not_served) in the cell's sibling `absences` map, and the seal CARRIES that reason plus
+// its prose detail instead of flattening every hole to one token. In particular "below_resolution" is a
+// difference that came out at or below what the rig can resolve - the best result the comparison can
+// express - and every surface renders it apart from a never-measured hole.
 
 // ---- provenance stamp + caption vocabulary ---------------------------------
 // The `sweep` token names WHICH projection of the run the datum is; every caption renders FROM it via
@@ -44,39 +58,27 @@ export const SWEEP = {
 // ---- the ONE metric-field vocabulary ---------------------------------------
 // gen-data seals these, check-consistency asserts these. Both IMPORT from here, so a producer field
 // added on one side can never ship unsealed because the other side's whitelist lagged (audit #11).
-// GATED: the throughput-shaped metrics the mock-bound honesty rule applies to.
-export const GATED_FIELDS = ["rps_sustained_20ms", "rps_max_proxy", "streams_sustained", "cpu_fps"];
-
-// THE GATED FIELDS WHOSE MOCK REFERENCE IS A PACED TARGET, NOT A CAPACITY.
 //
-// The mock paces SSE deltas at a fixed interval, so its frames/sec is `concurrency * (1000/interval)`
-// - a number it was TOLD to produce, not a ceiling it ran into. A gateway that matches it has kept up
-// with the pace, which is the gateway succeeding, and suppressing that as "mock-bound" would hide the
-// best result the test can express. `sealMetric` has known this since paced metrics existed.
-//
-// It lives here, exported, because `check-consistency.mjs` re-derives what SHOULD be displayed as an
-// independent oracle, and an oracle that restates the rule from memory drifts from it. That is not
-// hypothetical: the oracle implemented only the non-paced branch, so every cell where the flag was
-// true had the seal correctly publish and the oracle demand null. Twenty-five of those mismatches
-// blocked every deploy for two days, on three field names. One list, imported by both.
-export const PACED_FIELDS = ["streams_sustained", "streams_sustained_fps", "cpu_fps"];
+// THROUGHPUT_FIELDS was `GATED_FIELDS`, and the rename is the point: this is a VOCABULARY (which keys
+// are metrics that must be envelopes), never again a gate (which values are allowed to show). It is the
+// set of throughput-shaped metrics, and it is the set that carries `headroom` when a rig ceiling was
+// available for the comparison.
+export const THROUGHPUT_FIELDS = ["rps_sustained_20ms", "rps_max_proxy", "streams_sustained", "cpu_fps"];
 
 // What `sealMetric` will publish for a raw value, as a pure function of the same inputs.
 //
-// THE ONE PLACE THE DISPLAY RULE LIVES. `sealMetric` builds a whole envelope (notes, provenance,
-// zero-reasons); this answers only "does the number show, and as what", which is the part an
-// independent oracle needs and the part that must never be written twice.
-export function displayedValue(raw, flag, { gated = false, paced = false, absentReason = null } = {}) {
+// THE ONE PLACE THE DISPLAY RULE LIVES. `sealMetric` builds a whole envelope (notes, headroom, absence
+// reasons); this answers only "does the number show, and as what", which is the part an independent
+// oracle needs and the part that must never be written twice.
+//
+// It used to take a `flag` and `{gated, paced}` and return null for a measured number whose flag was
+// not `false`. It now has exactly one branch, because a measured number always shows.
+export function displayedValue(raw, { absentReason = null } = {}) {
   // A below-resolution absence DISPLAYS as 0: the comparison ran and the difference was too small
   // for the rig to weigh, which ranks equal-best and renders as "≈0", never as a hole. Every other
   // absence displays as nothing.
   if (raw == null) return absentReason === "below_resolution" ? 0 : null;
-  if (!gated) return raw;
-  if (raw === 0) return 0;                      // a measured zero is honest and always shown
-  // Paced: the flag existing at all means the comparison against the mock was made. Capacity: the
-  // number only stands if it was PROVEN not to be the mock's own ceiling.
-  if (paced) return flag == null ? null : raw;
-  return (raw > 0 && flag === false) ? raw : null;
+  return raw;
 }
 // UNGATED, latency-shaped, on a perf cell.
 export const UNGATED_LAT_FIELDS = ["added_latency_p50_us", "added_latency_p99_us", "gateway_c1_p99_us", "direct_c1_p99_us"];
@@ -96,7 +98,7 @@ export const UNGATED_MEM_FIELDS = ["growth_rate_mib_per_min", "time_to_plateau_s
 // isMetricField(k): is this key a sealed-envelope metric field? The single predicate both gen-data
 // (what to seal) and check-consistency (what must BE an envelope) use.
 export function isMetricField(k) {
-  return GATED_FIELDS.includes(k) || UNGATED_LAT_FIELDS.includes(k) ||
+  return THROUGHPUT_FIELDS.includes(k) || UNGATED_LAT_FIELDS.includes(k) ||
     UNGATED_STREAM_FIELDS.includes(k) || UNGATED_MEM_FIELDS.includes(k) ||
     k === "streams_sustained_fps" || RSS_FIELD_RE.test(k);
 }
@@ -109,27 +111,30 @@ export function makeSource(kind, sweep, build, measuredAt) {
 }
 
 // ---- the seal ---------------------------------------------------------------
-// sealMetric: raw scalar + its mock-bound flag (for gated metrics) -> a sealed envelope. The flag and
-// the raw scalar do not survive onto the returned object except as `value` (present only when honest).
-//   value      : the raw number (or null/undefined when not measured)
-//   opts.gated : true for a throughput metric (apply the mock-bound honesty rule)
-//   opts.paced : true when the mock's reference is a PACED TARGET rather than a capacity (the stream
-//                metrics). Matching it is the gateway keeping up, so a `true` flag is carried as a
-//                signal instead of suppressing the value. An absent flag still suppresses.
-//   opts.flag  : the raw *_mock_bound sibling (false = certified, true = rig-bound, null/undefined = unverifiable)
-//   opts.source: the provenance stamp (makeSource)
-//   opts.extras: extra CERTIFIED-only fields to carry (concurrency, sweep array) - dropped when suppressed
+// sealMetric: a raw scalar -> a sealed envelope. The raw scalar does not survive onto the returned
+// object except as `value`.
+//   value        : the raw number (or null/undefined when not measured)
+//   opts.source  : the provenance stamp (makeSource)
+//   opts.extras  : extra CERTIFIED-only fields to carry (concurrency, sweep array)
+//   opts.headroom: the fraction of the rig's own ceiling this measurement reached, from the engine's
+//                  `*_headroom`. A FACT ABOUT THE COMPARISON, carried so a reader can weigh a number
+//                  that sat near our equipment's limit. Omitted when the engine had no usable ceiling -
+//                  which costs the fraction and NOT the value. It used to cost both.
+//   opts.ceiling : the ceiling that fraction is of, from `*_rig_ceiling` / `*_mock_ceiling`, so the
+//                  headroom is checkable rather than asserted. For the stream metrics this is DERIVED
+//                  from the mock's declared pacing (run::mock_frame_ceiling_fps), not measured.
 // The envelope is LEAN: it does NOT repeat the provenance stamp (the CELL carries `source`, which is
 // authoritative and drives every caption). Keeping the stamp off each envelope avoids ~10x bundle bloat
-// across the 36-cell matrix while preserving invariant P1 (no raw scalar / no _mock_bound survives).
-// opts.zeroNote: for a GATED metric, WHAT a measured 0 MEANS. A 0 is ALWAYS an honest MEASURED value
-// (the harness ran and the answer was zero) and is ALWAYS certified - it is NEVER folded into
-// "not measured", which is exclusively `value == null` (audit #3). The note names the meaning so each
-// surface can render the two apart:
-//   ZERO_NO_CEILING  (RPS ceilings) - served, but no tested load held the qualifying gates.
+// across the 36-cell matrix while preserving invariant P1 (no raw scalar survives).
+//
+// opts.zeroNote: WHAT a measured 0 MEANS. A 0 is ALWAYS an honest MEASURED value (the harness ran and
+// the answer was zero) and is ALWAYS certified - it is NEVER folded into "not measured", which is
+// exclusively `value == null` (audit #3). The note names the meaning so each surface can render the two
+// apart:
+//   ZERO_NO_CEILING    (RPS ceilings)     - served, but no tested load held the qualifying gates.
 //   ZERO_MEASURED_FAIL (streaming counts) - the gateway was offered stream load and sustained NONE.
-// Publishing a measured stream-sustain FAILURE as "not measured (rig-limited)" would flatter the
-// gateway; null (absent field) is the ONLY not-measured state.
+// Publishing a measured stream-sustain FAILURE as "not measured" would flatter the gateway; null (an
+// absent field) is the ONLY not-measured state.
 export const ZERO_NO_CEILING = "no_qualifying_ceiling";
 export const ZERO_MEASURED_FAIL = "measured_failure";
 // WHICH ZERO-NOTE A FIELD TAKES, as data rather than as a literal repeated at each call site.
@@ -138,24 +143,38 @@ export const ZERO_MEASURED_FAIL = "measured_failure";
 // stream load and sustained none of it", and gen-data used to pick it by hand per call while the
 // independent oracle in check-consistency knew nothing about it at all - so a swapped note published a
 // measured streaming failure as a missing RPS ceiling and verified green. One list, imported by both.
-// The streaming counts are the measured-failure family; every other gated metric is an RPS ceiling.
+// The streaming counts are the measured-failure family; every other throughput metric is an RPS ceiling.
 export const ZERO_FAIL_FIELDS = ["streams_sustained", "streams_sustained_fps", "cpu_fps"];
+// NULL FOR A FIELD WITH NO ZERO-NOTE VOCABULARY, which is most of them. The two tokens above are claims
+// about a THROUGHPUT measurement - "no tested load held the qualifying gates", "offered stream load and
+// sustained none" - and neither is a true sentence about anything else.
+//
+// This used to fall through to ZERO_NO_CEILING for every field it did not recognise. That was harmless
+// only because the caller applied it under a `gated` flag; when the gate was removed the fallthrough
+// became live, and 37 `growth_rate_mib_per_min` zeros and 6 `added_gap_p50_us` zeros shipped annotated
+// "served, but no tested load held p99 < 1 s at <0.1% errors" - a fabricated claim about a memory growth
+// rate and an inter-frame gap. Neither surface could tell, and the independent oracle called
+// `zeroNoteFor` too, so it expected the same wrong note and the bundle verified green.
 export function zeroNoteFor(field) {
-  return ZERO_FAIL_FIELDS.includes(field) ? ZERO_MEASURED_FAIL : ZERO_NO_CEILING;
+  if (ZERO_FAIL_FIELDS.includes(field)) return ZERO_MEASURED_FAIL;
+  return THROUGHPUT_FIELDS.includes(field) ? ZERO_NO_CEILING : null;
 }
-// PACED_MATCH: the field a paced gateway's "I kept up with the mock's pace" signal rides on.
-// It is NOT a flag re-emission: `_mock_bound` is consumed at seal time and C1 rejects any key ending in
-// `_mock_bound` anywhere in the bundle. This is a derived, human-readable claim about the comparison
-// that WAS made ("this number matched the paced upstream"), which is the information the raw flag
-// carried and which was being thrown away - a gateway that merely matched the mock's paced target was
-// indistinguishable in the bundle from one proven unbound.
-export const PACED_MATCH = "paced_match";
+// HEADROOM: the field the "how close to our own rig's ceiling did this come" fact rides on, and the
+// ceiling it is a fraction of.
+//
+// These replace `PACED_MATCH`, which was a boolean re-statement of the engine's retired `*_mock_bound`
+// flag ("this number matched the paced upstream"). A boolean was all that could be carried while the
+// engine only published a verdict; now that it publishes the ceiling and the ratio, the same
+// information is available as a number a reader can actually weigh. 0.993 and 0.20 were both
+// `paced_match: undefined` before.
+export const HEADROOM = "headroom";
+export const RIG_CEILING = "rig_ceiling";
 //   opts.absent: the engine's `absences` entry for this field ({reason, detail}), when the caller has
 //                one. An absent value then publishes the ENGINE'S reason and its prose detail instead
 //                of the flattened "not_measured" - the reason was measured too, and discarding it here
 //                was how "below rig resolution" (a win) rendered identically to "never ran" (a hole).
 export function sealMetric(value, opts = {}) {
-  const { gated = false, paced = false, flag, extras = null, zeroNote = ZERO_NO_CEILING, absent = null } = opts;
+  const { extras = null, zeroNote = null, absent = null, headroom = null, ceiling = null } = opts;
   // The extras (concurrency, the rung, the sweep array) attach to EVERY certified envelope, including a
   // certified 0. They used to attach only on the last line, which the measured-zero branch returned
   // before ever reaching - so a certified 0 published without the concurrency it was measured at and
@@ -163,6 +182,10 @@ export function sealMetric(value, opts = {}) {
   // most needs, since "0" beside a real maximum is the claim that most demands its evidence.
   const withExtras = (env) => {
     if (extras) for (const [k, v] of Object.entries(extras)) if (v != null) env[k] = v;
+    // The comparison's own facts, on every certified envelope that has them - including a certified 0,
+    // for the same reason the extras are.
+    if (Number.isFinite(headroom)) env[HEADROOM] = headroom;
+    if (Number.isFinite(ceiling)) env[RIG_CEILING] = ceiling;
     return env;
   };
   if (value == null) {
@@ -171,35 +194,15 @@ export function sealMetric(value, opts = {}) {
     return env;
   }
   const num = Number(value);
-  if (gated) {
-    // measured-zero: an honest, certified 0 whose NOTE names what the zero means (see zeroNote above).
-    if (num === 0) return withExtras({ value: 0, certified: true, suppressed: false, note: zeroNote });
-    // A PACED metric's flag is not a suppression. The mock paces its stream deltas at a fixed
-    // interval - "the pacing is the model generating tokens", in the mock's own words - so its
-    // frames/sec is a TARGET rate, c streams x one frame per interval, and not a capacity it ran out
-    // of. A gateway forwarding every frame as it arrives lands at ~99% of it, which is the best
-    // possible outcome, and suppressing that threw the number away for the gateways doing best: 24
-    // of 69 cells in the 2026-07-28 run. The value is published, and the SIGNAL the flag carried
-    // travels with it as `paced_match: true` (see PACED_MATCH above) - not as the raw flag, which C1
-    // refuses anywhere in the bundle, but as the claim it stood for. Without it a gateway that merely
-    // MATCHED the mock's paced target was indistinguishable from one PROVEN unbound, which is a real
-    // difference between two published numbers and was being dropped on the floor.
-    //
-    // A metric that is gated but NOT paced keeps the old rule exactly: for a saturating throughput
-    // load the mock's capacity really can be the limit, and publishing then ranks the rig.
-    // `unverifiable` still suppresses on both paths - an unmeasurable reference tells us nothing
-    // either way, and certifying a number on no evidence is what the whole gate exists to prevent.
-    // Routed through `displayedValue` rather than restating the condition, so this branch and the
-    // oracle in check-consistency.mjs cannot disagree about what shows: they are now the same code.
-    if (displayedValue(num, flag, { gated, paced }) == null) {
-      const reason = flag === true ? "mock_bound" : "unverifiable";
-      return { value: null, certified: false, suppressed: true, reason };
-    }
+  // A measured zero is honest and certified, and its NOTE names what the zero means (see zeroNote) - but
+  // ONLY for the fields that have such a meaning. An unannotated zero stays a bare 0 rather than
+  // borrowing a throughput sentence.
+  if (num === 0) {
+    const env = { value: 0, certified: true, suppressed: false };
+    if (zeroNote != null) env.note = zeroNote;
+    return withExtras(env);
   }
-  const env = { value: num, certified: true, suppressed: false };
-  // The paced-match signal, carried in a form C1 accepts (a named claim, never the raw flag).
-  if (gated && paced && flag === true) env[PACED_MATCH] = true;
-  return withExtras(env);
+  return withExtras({ value: num, certified: true, suppressed: false });
 }
 
 // isEnvelope: a sealed metric is an object carrying a `certified` boolean (never a bare scalar).

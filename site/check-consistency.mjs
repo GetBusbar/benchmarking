@@ -42,7 +42,7 @@ const ROOT = join(HERE, "..");
 // The metric-field vocabulary is IMPORTED from seal.mjs, the SAME list gen-data seals from, so a local
 // whitelist here can never lag the producer: one shared list plus a shape rule (any *_rss_mib) means a
 // new producer field is checked the day it appears.
-import { GATED_FIELDS, PACED_FIELDS, displayedValue, isMetricField, zeroNoteFor } from "./seal.mjs";
+import { displayedValue, isMetricField, zeroNoteFor } from "./seal.mjs";
 // The origins a projected cell's source.kind may honestly carry: the single end-state "matrix" path plus
 // the LIVE deferred fallbacks (kept until the field run; sealed honestly, never mislabelled as matrix).
 const SOURCE_KINDS = new Set(["matrix", "perf-fallback", "xlate-fallback", "stream-fallback"]);
@@ -637,18 +637,29 @@ export function lintCaptionParity(chartsSrc, jsCaptionKeys) {
 }
 
 // ---- the INDEPENDENT ORACLE (Design F R1) --------------------------------------------------------
-// oracleExpected(raw, flag, gated): re-derive what a metric MUST display, from the RAW value + its own
-// _mock_bound flag, through a path DISJOINT from metric()/seal.mjs. A gated metric is shown only when it
-// is null-free and either a measured 0 (honest) or a positive value the harness certified (flag===false).
-// WHICH FLAG GATES A FIELD. Almost always its own `<field>_mock_bound`, with one deliberate
-// exception: `streams_sustained_fps` is the rate produced by the SAME bisect that produced
-// `streams_sustained`, so it carries no flag of its own and inherits the count's (gen-data.mjs seals
-// it that way for exactly this reason, see AUDIT #11 there). Looking for a flag that is never written
-// yields `undefined`, which reads as "not proven unbound" and makes the oracle demand null for a rate
-// the bundle correctly publishes - four gateways' streaming rates blocked the deploy on a name.
-export function mockBoundFlagFor(raw, field) {
-  const name = field === "streams_sustained_fps" ? "streams_sustained_mock_bound" : `${field}_mock_bound`;
-  return raw[name];
+// Re-derive what a metric MUST publish from the RAW artifact, through a path DISJOINT from
+// metric()/seal.mjs.
+//
+// THE ORACLE NO LONGER RE-DERIVES A GATE, because there is no longer a gate: a present number is always
+// published (see seal.mjs). What it re-derives now is the two FACTS that ride with the number - the rig
+// ceiling the measurement was taken against and the fraction of it reached - because those are published
+// and anything published must be verified. An oracle that checked only the value would let a headroom
+// fraction attach to the wrong metric, or drift from the ceiling it claims to be a fraction of, and
+// report green.
+//
+// WHICH FIELDS' FACTS A METRIC CARRIES. Almost always its own, with one deliberate exception:
+// `streams_sustained_fps` is the rate produced by the SAME bisect that produced `streams_sustained`, so
+// it carries no comparison of its own and inherits the count's (gen-data.mjs seals it that way for
+// exactly this reason, see AUDIT #11 there). Looking for a name that is never written yields `undefined`
+// and the oracle would demand no headroom for a rate the bundle correctly annotates - the shape of the
+// bug that blocked the deploy for two days on the retired flag's name.
+const STREAM_FACT_OWNER = { streams_sustained_fps: "streams_sustained" };
+export function comparisonFactsFor(raw, field) {
+  const owner = STREAM_FACT_OWNER[field] || field;
+  // The stream metrics' ceiling is DERIVED from the mock's pacing and named `*_mock_ceiling`; the
+  // throughput metrics' is MEASURED and named `*_rig_ceiling`. One of the two is present per field.
+  const ceiling = raw[`${owner}_mock_ceiling`] ?? raw[`${owner}_rig_ceiling`] ?? null;
+  return { headroom: raw[`${owner}_headroom`] ?? null, ceiling };
 }
 
 // WHAT THE BOARD SHOULD SHOW FOR ONE RAW VALUE, resolved by the same function the seal uses.
@@ -675,8 +686,8 @@ export function declaredGatewayCount() {
   } catch { return 0; }
 }
 
-export function oracleExpected(raw, flag, gated, paced = false, absentReason = null) {
-  return displayedValue(raw, flag, { gated, paced, absentReason });
+export function oracleExpected(raw, absentReason = null) {
+  return displayedValue(raw, { absentReason });
 }
 
 // WHAT THE WHOLE ENVELOPE MUST SAY, not only what number it must show.
@@ -687,20 +698,32 @@ export function oracleExpected(raw, flag, gated, paced = false, absentReason = n
 // ceiling, a lost `detail` that is the evidence a reader is shown - every one of them preserves the
 // number and so every one of them verified green. The reason WAS measured; it is data, and data the
 // board renders, so the oracle re-derives it exactly as it re-derives the value.
-//   value      - through displayedValue, the one display rule (unchanged).
-//   reason     - the engine's absence token for a hole, "mock_bound"/"unverifiable" for a suppression.
+//   value      - through displayedValue, the one display rule.
+//   reason     - the engine's absence token for a hole.
 //   note       - a certified 0's meaning, from seal.mjs's zeroNoteFor: the one place that map lives.
 //   detail     - the engine's prose for the absence, which must survive the seal.
-//   paced_match- the "this gateway matched the paced upstream" signal a paced publish carries.
-export function oracleEnvelope(raw, flag, { gated = false, paced = false, absent = null, zeroNote = null } = {}) {
+//   headroom   - the fraction of the rig's own ceiling the measurement reached, and
+//   ceiling    - the ceiling that fraction is of. Both null when the engine had no usable reference,
+//                which costs the facts and NOT the value.
+//
+// The `reason: "mock_bound"|"unverifiable"` branch is gone with the suppression that produced it. Nothing
+// here can return a null value for a raw number that is present, which is the property C2 asserts from
+// the other direction.
+export function oracleEnvelope(raw, { absent = null, zeroNote = null, headroom = null, ceiling = null } = {}) {
   const absentReason = absent && absent.reason ? absent.reason : null;
-  const v = displayedValue(raw, flag, { gated, paced, absentReason });
-  const none = { v, reason: null, note: null, detail: null, paced_match: false };
+  const v = displayedValue(raw, { absentReason });
+  const facts = {
+    headroom: Number.isFinite(headroom) ? headroom : null,
+    ceiling: Number.isFinite(ceiling) ? ceiling : null,
+  };
+  const none = { v, reason: null, note: null, detail: null, ...facts };
   if (raw == null)
-    return { ...none, reason: absentReason || "not_measured", detail: (absent && absent.detail) || null };
-  if (gated && Number(raw) === 0) return { ...none, v: 0, note: zeroNote };
-  if (gated && v == null) return { ...none, reason: flag === true ? "mock_bound" : "unverifiable" };
-  return { ...none, paced_match: gated && paced && flag === true };
+    return { ...none, reason: absentReason || "not_measured", detail: (absent && absent.detail) || null,
+      // An absent metric publishes no comparison: seal.mjs attaches the facts through `withExtras`,
+      // which the absent branch returns before reaching.
+      headroom: null, ceiling: null };
+  if (Number(raw) === 0) return { ...none, v: 0, note: zeroNote };
+  return none;
 }
 
 // ---- R4: the SELECTION itself, re-derived --------------------------------------------------------
@@ -938,24 +961,25 @@ export function checkConsistency(data, app, opts = {}) {
         reason: env && env.reason != null ? env.reason : null,
         note: env && env.note != null ? env.note : null,
         detail: env && env.detail != null ? env.detail : null,
-        paced_match: !!(env && env.paced_match === true),
+        headroom: env && Number.isFinite(env.headroom) ? env.headroom : null,
+        ceiling: env && Number.isFinite(env.rig_ceiling) ? env.rig_ceiling : null,
       });
-      const say = (e) => `value=${e.v} reason=${e.reason} note=${e.note} paced_match=${e.paced_match}` +
+      const say = (e) => `value=${e.v} reason=${e.reason} note=${e.note} headroom=${e.headroom} ceiling=${e.ceiling}` +
         (e.detail != null ? ` detail=${JSON.stringify(e.detail)}` : "");
       const cmp = (label, shown, expected) => {
         oracleCompared += 1;
         oracledKeys.add(g.key);
-        for (const f of ["v", "reason", "note", "detail", "paced_match"]) {
+        for (const f of ["v", "reason", "note", "detail", "headroom", "ceiling"]) {
           if (shown[f] === expected[f]) continue;
           errors.push(`R1: ${g.key}.${label}: the RAW matrix on disk implies [${say(expected)}] but the sealed ` +
             `envelope carries [${say(shown)}] - they disagree on \`${f}\` (independent-oracle mismatch)`);
           return;
         }
       };
-      // The oracle's own view of one raw field, gating and pacing resolved from the ONE vocabulary.
-      const expectOf = (rawSub, absences, prefix, k) => oracleEnvelope(rawSub[k], mockBoundFlagFor(rawSub, k), {
-        gated: GATED_FIELDS.includes(k) || PACED_FIELDS.includes(k),
-        paced: PACED_FIELDS.includes(k),
+      // The oracle's own view of one raw field, with the comparison's facts resolved from the raw
+      // artifact rather than read back off the bundle being judged.
+      const expectOf = (rawSub, absences, prefix, k) => oracleEnvelope(rawSub[k], {
+        ...comparisonFactsFor(rawSub, k),
         absent: absentEntryOf(absences, prefix, k),
         zeroNote: zeroNoteFor(k),
       });

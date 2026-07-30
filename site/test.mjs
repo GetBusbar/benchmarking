@@ -21,7 +21,7 @@ import { createRequire } from "node:module";
 import assert from "node:assert/strict";
 import { checkConsistency, c6Inversions, c7HwmBelowPeak, hasCellMemory } from "./check-consistency.mjs";
 import * as checkMod from "./check-consistency.mjs";
-import { sealMetric, displayedValue, GATED_FIELDS, PACED_FIELDS, ZERO_NO_CEILING, ZERO_MEASURED_FAIL } from "./seal.mjs";
+import { sealMetric, displayedValue, THROUGHPUT_FIELDS, isMetricField, zeroNoteFor, ZERO_NO_CEILING, ZERO_MEASURED_FAIL } from "./seal.mjs";
 import { oracleExpected } from "./check-consistency.mjs";
 // A HAND-BUILT fixture has no results/matrix/<key>.json oracle, so it needs an EXPLICIT opt-in
 // (the CLI never passes it) to waive the oracle-verifiable requirement.
@@ -75,14 +75,21 @@ process.on("exit", () => {
 });
 
 // ---- sealed-envelope fixture helpers (mirror seal.mjs / gen-data) ------------
-// Every metric in the bundle is a SEALED ENVELOPE. These builders take RAW intent (value + mock_bound)
-// and produce the exact envelope shape gen-data emits, so fixtures stay readable while exercising the
-// real reader (app.metric/mval). See seal.mjs: a GATED metric is certified only when present AND
-// (value===0 [always: a measured zero is certified, its NOTE names what the zero means] OR (value>0 AND
-// flag===false)); else suppressed. Ungated = certified when present. RPS ceilings note ZERO_NO_CEILING;
-// streaming counts note ZERO_MEASURED_FAIL - a measured failure, never folded into "not measured" (#3).
-// The fixtures seal through the REAL exported sealMetric(), so `seal` IS the choke point under test:
-// a fixture builder here can never drift from what seal.mjs actually does.
+// Every metric in the bundle is a SEALED ENVELOPE. These builders take RAW intent (the value, plus the
+// two facts the engine publishes about the comparison it was taken in) and produce the exact envelope
+// shape gen-data emits, so fixtures stay readable while exercising the real reader (app.metric/mval).
+//
+// The raw intent USED to be (value + `*_mock_bound`), the engine's verdict that our own rig had set the
+// limit, and a GATED metric was certified only when that verdict was `false`; a positive value with a
+// `true` or `null` flag was published as {value:null, suppressed:true}. That is gone: a present number is
+// always published, and the builders now take `*_headroom` (the fraction of the rig's own ceiling the
+// measurement reached) and `*_rig_ceiling` / `*_mock_ceiling` (the ceiling that fraction is of), which
+// ride ON the certified envelope for the reader to weigh. See seal.mjs.
+//
+// A measured 0 is still certified, and its NOTE names which zero it is: RPS ceilings note
+// ZERO_NO_CEILING, streaming counts note ZERO_MEASURED_FAIL - a measured failure, never folded into
+// "not measured" (#3). The fixtures seal through the REAL exported sealMetric(), so `seal` IS the choke
+// point under test: a fixture builder here can never drift from what seal.mjs actually does.
 const seal = sealMetric;
 const SRC = (kind, sweep) => ({ kind, sweep, build: "img:1", measured_at: "2026-07-24T00:00:00Z" });
 // bcCell: a sealed best_cell (or same-dialect diagonal) from raw perf intent.
@@ -91,15 +98,19 @@ function bcCell(o = {}) {
     dialect = "openai", ingress = dialect, egress = dialect, kind = "matrix",
     sweep = (kind === "perf-fallback" ? "perf-suite" : ingress === egress ? "6x6-diagonal" : "6x6-translation"),
     added_latency_p50_us = 100, added_latency_p99_us = 110,
-    rps_sustained_20ms = 30000, rps_sustained_20ms_mock_bound = false, rps_sustained_20ms_concurrency = null, sweep_sustained_20ms = null,
-    rps_max_proxy = 32000, rps_max_proxy_mock_bound = false, rps_max_proxy_concurrency = null, sweep_max_proxy = null,
+    rps_sustained_20ms = 30000, rps_sustained_20ms_headroom = null, rps_sustained_20ms_rig_ceiling = null,
+    rps_sustained_20ms_concurrency = null, sweep_sustained_20ms = null,
+    rps_max_proxy = 32000, rps_max_proxy_headroom = null, rps_max_proxy_rig_ceiling = null,
+    rps_max_proxy_concurrency = null, sweep_max_proxy = null,
   } = o;
   const rec = { path: { ingress, egress, ...(ingress === egress ? { dialect } : {}) }, source: SRC(kind, sweep) };
   if (added_latency_p50_us != null) rec.added_latency_p50_us = seal(added_latency_p50_us);
   if (added_latency_p99_us != null) rec.added_latency_p99_us = seal(added_latency_p99_us);
-  rec.rps_sustained_20ms = seal(rps_sustained_20ms, { gated: true, flag: rps_sustained_20ms_mock_bound,
+  rec.rps_sustained_20ms = seal(rps_sustained_20ms, {
+    headroom: rps_sustained_20ms_headroom, ceiling: rps_sustained_20ms_rig_ceiling,
     extras: { concurrency: rps_sustained_20ms_concurrency, sweep: sweep_sustained_20ms } });
-  rec.rps_max_proxy = seal(rps_max_proxy, { gated: true, flag: rps_max_proxy_mock_bound,
+  rec.rps_max_proxy = seal(rps_max_proxy, {
+    headroom: rps_max_proxy_headroom, ceiling: rps_max_proxy_rig_ceiling,
     extras: { concurrency: rps_max_proxy_concurrency, sweep: sweep_max_proxy } });
   return rec;
 }
@@ -109,12 +120,14 @@ function tCell(o = {}) {
     ingress = "openai", egress = "anthropic", kind = "matrix",
     sweep = kind === "xlate-fallback" ? "xlate-suite" : "6x6-translation",
     added_latency_p50_us = null, added_latency_p99_us = 200,
-    rps_sustained_20ms = 3000, rps_sustained_20ms_mock_bound = false, rps_sustained_20ms_concurrency = null,
+    rps_sustained_20ms = 3000, rps_sustained_20ms_headroom = null, rps_sustained_20ms_rig_ceiling = null,
+    rps_sustained_20ms_concurrency = null,
   } = o;
   const rec = { path: { ingress, egress }, source: SRC(kind, sweep) };
   if (added_latency_p50_us != null) rec.added_latency_p50_us = seal(added_latency_p50_us);
   if (added_latency_p99_us != null) rec.added_latency_p99_us = seal(added_latency_p99_us);
-  rec.rps_sustained_20ms = seal(rps_sustained_20ms, { gated: true, flag: rps_sustained_20ms_mock_bound,
+  rec.rps_sustained_20ms = seal(rps_sustained_20ms, {
+    headroom: rps_sustained_20ms_headroom, ceiling: rps_sustained_20ms_rig_ceiling,
     extras: { concurrency: rps_sustained_20ms_concurrency } });
   return rec;
 }
@@ -124,17 +137,22 @@ function streamRec(o = {}) {
     dialect = "openai", kind = "matrix", sweep = kind === "stream-fallback" ? "stream-suite" : "6x6-stream-diagonal",
     withPathSource = true,
     added_ttft_p50_us = 40, added_ttft_p99_us = 90, added_gap_p50_us = 5, added_gap_p99_us = 12,
-    streams_sustained = 1300, streams_sustained_mock_bound = false, streams_sustained_fps = 39000,
-    cpu_fps = 48000, cpu_fps_mock_bound = false, cpu_fps_concurrency = null,
+    streams_sustained = 1300, streams_sustained_headroom = null, streams_sustained_mock_ceiling = null,
+    streams_sustained_fps = 39000,
+    cpu_fps = 48000, cpu_fps_headroom = null, cpu_fps_mock_ceiling = null, cpu_fps_concurrency = null,
   } = o;
   const rec = { stream_served: true };
   if (withPathSource) { rec.path = { dialect }; rec.source = SRC(kind, sweep); }
   const put = (k, v) => { if (v != null) rec[k] = seal(v); };
   put("added_ttft_p50_us", added_ttft_p50_us); put("added_ttft_p99_us", added_ttft_p99_us);
   put("added_gap_p50_us", added_gap_p50_us); put("added_gap_p99_us", added_gap_p99_us);
-  rec.streams_sustained_fps = seal(streams_sustained_fps, { gated: true, flag: streams_sustained_mock_bound, zeroNote: ZERO_MEASURED_FAIL });
-  rec.streams_sustained = seal(streams_sustained, { gated: true, flag: streams_sustained_mock_bound, zeroNote: ZERO_MEASURED_FAIL });
-  rec.cpu_fps = seal(cpu_fps, { gated: true, flag: cpu_fps_mock_bound, zeroNote: ZERO_MEASURED_FAIL, extras: { concurrency: cpu_fps_concurrency } });
+  rec.streams_sustained_fps = seal(streams_sustained_fps, {
+    headroom: streams_sustained_headroom, ceiling: streams_sustained_mock_ceiling, zeroNote: ZERO_MEASURED_FAIL });
+  rec.streams_sustained = seal(streams_sustained, {
+    headroom: streams_sustained_headroom, ceiling: streams_sustained_mock_ceiling, zeroNote: ZERO_MEASURED_FAIL });
+  rec.cpu_fps = seal(cpu_fps, {
+    headroom: cpu_fps_headroom, ceiling: cpu_fps_mock_ceiling, zeroNote: ZERO_MEASURED_FAIL,
+    extras: { concurrency: cpu_fps_concurrency } });
   return rec;
 }
 // memRec: a sealed memory_read record.
@@ -435,41 +453,81 @@ const isoDaysAgo = (d) => new Date(Date.now() - d * 86400000).toISOString();
 // mock-bound flag was true then had the seal publish and the oracle demand null: 25 mismatches, which
 // hard-failed the deploy on every commit for two days while the board served a stale build.
 //
-// A second copy of a rule does not catch drift. It is the drift. Both now call `displayedValue`, and
-// this walks the whole input space to hold them there.
-test("seal and oracle agree on every (raw, flag, gated, paced) the board can produce", () => {
+// A second copy of a rule does not catch drift. It is the drift. Both call `displayedValue`, and this
+// walks the whole input space to hold them there.
+//
+// The space USED to be (raw, flag, gated, paced) - the flag being the engine's retired verdict that our
+// own rig had set the limit, which suppressed the value. There is no flag and no gate now, so the space
+// is the raw value and the absence reason, and the property is stronger than agreement: a present number
+// must SHOW.
+test("seal and oracle agree on every (raw, absentReason) the board can produce", () => {
   const RAWS = [null, 0, 1, 1234.5, -1];
-  const FLAGS = [undefined, null, true, false];
+  const REASONS = [null, "not_measured", "below_resolution", "rig_limited", "harness_error"];
   const mismatches = [];
   for (const raw of RAWS) {
-    for (const flag of FLAGS) {
-      for (const gated of [false, true]) {
-        for (const paced of [false, true]) {
-          const oracle = oracleExpected(raw, flag, gated, paced);
-          const sealed = sealMetric(raw, { gated, paced, flag });
-          const shown = sealed.suppressed ? null : sealed.value;
-          if (shown !== oracle) {
-            mismatches.push(`raw=${raw} flag=${flag} gated=${gated} paced=${paced}: seal shows ${shown}, oracle expects ${oracle}`);
-          }
-        }
-      }
+    for (const reason of REASONS) {
+      const absent = reason ? { reason } : null;
+      const oracle = oracleExpected(raw, reason);
+      const sealed = sealMetric(raw, { absent });
+      // COMPARE LIKE WITH LIKE - the two sides must answer the SAME question.
+      //
+      // `oracleExpected` is `displayedValue`, which answers "what does the board SHOW". For a
+      // `below_resolution` absence that is 0: the comparison ran, the difference came out at or under
+      // what the rig can resolve, and that is the best reading the test can express. The SEAL never
+      // writes that 0 - it publishes {value: null, reason: "below_resolution"} and the DISPLAY layer
+      // (app.metric) turns the reason into the ≈0 state. Reading `sealed.value` here compared a
+      // seal-layer field against a display-layer answer and reported a disagreement where the two
+      // agree completely. The envelope goes through the reader every surface uses instead.
+      const shown = app.metric(sealed).v;
+      if (shown !== oracle)
+        mismatches.push(`raw=${raw} reason=${reason}: seal shows ${shown}, oracle expects ${oracle}`);
+      // AND NOTHING SUPPRESSES. The retired shape is unreachable by construction; this holds it there.
+      if (sealed.suppressed)
+        mismatches.push(`raw=${raw} reason=${reason}: the seal produced a SUPPRESSED envelope, which no longer exists`);
+      if (raw != null && sealed.value !== Number(raw))
+        mismatches.push(`raw=${raw} reason=${reason}: a present measurement was not published as itself`);
     }
   }
   assert(mismatches.length === 0, `seal/oracle disagree:\n  ${mismatches.join("\n  ")}`);
+  // AND THE BELOW-RESOLUTION 0 BELONGS TO THE DISPLAY LAYER, not to the seal. Pinned separately so the
+  // loop above cannot be read as a claim that the seal invents a zero for a field nothing was measured
+  // on: the envelope carries the absence and its reason, and the reader derives the ≈0 from the reason.
+  const belowRes = sealMetric(null, { absent: { reason: "below_resolution" } });
+  assert.equal(belowRes.value, null, "the seal publishes the absence, never a fabricated 0");
+  assert.equal(belowRes.reason, "below_resolution", "with the engine's own reason, which is what carries the display");
+  assert.equal(app.metric(belowRes).v, 0, "the ≈0 is the display reader's, derived from that reason");
 });
 
-// The paced set is a CLAIM ABOUT THE MOCK, so it may only name fields the mock actually paces: the
-// stream lane. A throughput field landing in here would publish a number the mock's own capacity
-// produced, which is the rig ranking itself.
-test("only stream-lane fields are treated as paced, and each is gated", () => {
-  for (const f of PACED_FIELDS) {
-    assert(/stream|fps/.test(f), `${f} is marked paced but is not a stream-lane field`);
+// THE FACTS RIDE WITH THE NUMBER, AND ONLY WITH A NUMBER.
+//
+// `headroom` and `rig_ceiling` are what replaced the suppression: a reader gets the fraction of our own
+// rig's ceiling the measurement reached and decides for themselves. They attach through `withExtras`, so
+// they reach a certified 0 as well as a certified positive - a 0 beside a real ceiling is the claim that
+// most demands its evidence - and they must never appear on an absence, which has no comparison.
+test("headroom and its ceiling ride on certified envelopes and never on an absence", () => {
+  const opts = { headroom: 0.83, ceiling: 52013 };
+  for (const raw of [1, 1234.5, 0]) {
+    const env = sealMetric(raw, opts);
+    assert.equal(env.headroom, 0.83, `raw=${raw} lost its headroom`);
+    assert.equal(env.rig_ceiling, 52013, `raw=${raw} lost the ceiling its headroom is a fraction of`);
+    assert.equal(env.certified, true);
   }
-  // streams_sustained_fps is derived from streams_sustained and is gated with it rather than listed
-  // in GATED_FIELDS separately; the rest must be genuinely gated or "paced" qualifies nothing.
-  for (const f of PACED_FIELDS) {
-    assert(GATED_FIELDS.includes(f) || f === "streams_sustained_fps",
-      `${f} is marked paced but is not gated - paced only modifies how a GATED field is judged`);
+  const absent = sealMetric(null, { ...opts, absent: { reason: "harness_error" } });
+  assert.equal(absent.headroom, undefined, "an absence has no comparison to state a fraction of");
+  assert.equal(absent.rig_ceiling, undefined);
+  // No usable reference costs the FACTS and not the value - it used to cost both.
+  const noRef = sealMetric(43297, { headroom: null, ceiling: null });
+  assert.equal(noRef.value, 43297);
+  assert.equal(noRef.certified, true);
+  assert.equal(noRef.headroom, undefined);
+});
+
+// The throughput vocabulary is a list of KEYS THAT MUST BE ENVELOPES, not a list of values that must
+// pass a gate - that is the whole of the rename from GATED_FIELDS. A field in it must therefore be one
+// `isMetricField` recognises, or the seal and the C1 walk disagree about what has to be sealed.
+test("every throughput field is part of the sealed-metric vocabulary", () => {
+  for (const f of THROUGHPUT_FIELDS) {
+    assert(isMetricField(f), `${f} is a throughput metric but isMetricField does not recognise it`);
   }
 });
 
@@ -977,9 +1035,18 @@ testWithData("consistency guard: table == drawer == compare == charts on the rea
   assert.deepEqual(errors, [], `numeric divergence across surfaces:\n${errors.join("\n")}`);
 });
 
-// A best_cell whose metrics are sealed envelopes: the table reads the value through metric(); a suppressed
-// metric is {value:null} in the DATA, so there is no ungated field to leak - the class of bug is gone.
-test("sealed envelope: every surface reads best_cell through metric(); a suppressed metric is n/a", () => {
+// A best_cell whose metrics are sealed envelopes: every surface reads the value through metric(), so no
+// render site holds a raw scalar of its own (invariant P1).
+//
+// The second half of this test used to assert the SUPPRESSION: a `rps_sustained_20ms_mock_bound: true`
+// cell published {value:null} and read n/a on every surface, "so there is no ungated field to leak". The
+// leak class it guarded is real and still guarded (the raw scalar is consumed at seal time), but the
+// price was deleting the measurement itself - a number the harness took correctly, withheld because our
+// own rig might have bounded it. It now publishes, with the fraction of that ceiling it reached riding
+// alongside so a reader can weigh it. So the second half holds the OPPOSITE property: the near-ceiling
+// number reaches every surface, its `headroom` and `rig_ceiling` reach it too, and the bundle is still
+// structurally clean (C1/C2) with them on board.
+test("sealed envelope: every surface reads best_cell through metric(); a near-ceiling number is PUBLISHED", () => {
   const g = { key: "seal", display: "Seal", lang: "Rust",
     best_cell: bcCell({ added_latency_p99_us: 111, rps_sustained_20ms: 22222, rps_max_proxy: 33333 }) };
   // table (passCell) reads the envelope value
@@ -993,12 +1060,17 @@ test("sealed envelope: every surface reads best_cell through metric(); a suppres
   assert.equal(app.mval(rec.rps_sustained_20ms), 22222);
   assert.equal(app.mval(rec.rps_max_proxy), 33333);
   assert.deepEqual(checkConsistency({ gateways: [g] }, app, SYNTH).errors, [], "a clean sealed bundle is consistent");
-  // A SUPPRESSED (mock-bound) sustained: the envelope carries value:null - n/a everywhere, no leak.
+  // A NEAR-CEILING sustained (0.97 of the rig's measured 25,700): published, on every surface, with the
+  // comparison's own facts attached rather than a hole where the number was.
   const bound = { key: "sealb", display: "SealB", lang: "Rust",
-    best_cell: bcCell({ rps_sustained_20ms: 99999, rps_sustained_20ms_mock_bound: true }) };
-  assert.equal(app.passCell(bound, "rps_sustained_20ms", String).na, true, "a suppressed metric reads n/a");
-  assert.equal(app.mval(bound.best_cell.rps_sustained_20ms), null, "the raw number is GONE from the envelope");
-  assert.deepEqual(checkConsistency({ gateways: [bound] }, app, SYNTH).errors, []);
+    best_cell: bcCell({ rps_sustained_20ms: 24999, rps_sustained_20ms_headroom: 0.97, rps_sustained_20ms_rig_ceiling: 25700 }) };
+  assert.equal(app.passCell(bound, "rps_sustained_20ms", String).na, false, "a near-ceiling metric is not n/a");
+  assert.equal(app.passCell(bound, "rps_sustained_20ms", String).v, 24999, "the table shows the number that was measured");
+  assert.equal(app.mval(bound.best_cell.rps_sustained_20ms), 24999, "and the drawer/compare read the same one");
+  assert.equal(bound.best_cell.rps_sustained_20ms.headroom, 0.97, "the fraction of the rig ceiling reached travels with it");
+  assert.equal(bound.best_cell.rps_sustained_20ms.rig_ceiling, 25700, "as does the ceiling it is a fraction of");
+  assert.deepEqual(checkConsistency({ gateways: [bound] }, app, SYNTH).errors, [],
+    "the facts on the envelope are structurally clean: C1 accepts them, C2 finds no suppression");
 });
 
 // The HIGH class: a certified fallback value must NOT be suppressed. Run gen-data for real over a
@@ -1678,55 +1750,98 @@ test("MEDIUM-1: a NON-streaming diagonal cell does NOT project g.streaming (stre
   assert.equal(app.streamCell(quiet, "streams_sustained", String).na, true);
 });
 
-test("streaming honesty: cpu_fps mock-bound/unverifiable is n/a; certified shows (via the sealed envelope)", () => {
-  // The gate is UPSTREAM (seal time): a rig-limited/unverifiable cpu_fps is {value:null} in the streaming
-  // record, so streamCell reads n/a. The other streaming metrics stay visible regardless.
-  const certified = { key: "cert", display: "Cert", lang: "Rust", streaming: streamRec({ cpu_fps: 48000, cpu_fps_mock_bound: false }) };
+// THE STREAMING SUPPRESSION IS GONE, AND THESE TWO HOLD IT GONE.
+//
+// This pair used to assert the inverse: a cpu_fps or streams_sustained whose engine `*_mock_bound` flag
+// read `true` (our own rig set the limit) or `null` (no usable reference) was replaced with {value:null}
+// at seal time, so every surface read n/a. That deleted correct measurements, and it deleted them from
+// the gateways doing best: the mock paces its stream deltas, so its frames/sec is a TARGET rate, and a
+// relay forwarding every frame as it arrives lands within a percent of it - the best possible outcome,
+// suppressed for looking like a ceiling. 24 of 69 cells on the 2026-07-28 board published nothing.
+//
+// The number is now always published, and the two facts the retired verdict was derived from ride with
+// it: `headroom` (the fraction of the ceiling reached) and `rig_ceiling` (the ceiling it is a fraction
+// of - for the stream metrics DERIVED from the mock's declared pacing). So the property under test is
+// the opposite one, and it is stronger: no near-ceiling reading and no missing reference can cost the
+// value, and where the engine supplied the facts they travel with it.
+test("streaming honesty: a near-ceiling cpu_fps is PUBLISHED with its headroom, never suppressed", () => {
+  const certified = { key: "cert", display: "Cert", lang: "Rust",
+    streaming: streamRec({ cpu_fps: 48000, cpu_fps_headroom: 0.62, cpu_fps_mock_ceiling: 77419 }) };
   assert.equal(app.streamCell(certified, "cpu_fps", String).text, "48000");
   assert.equal(app.mval(app.canonicalStreaming(certified).cpu_fps), 48000);
-  // mock-bound (true) → suppressed → n/a
-  const bound = { key: "bound", display: "B", lang: "Rust", streaming: streamRec({ cpu_fps: 99999, cpu_fps_mock_bound: true }) };
-  assert.equal(app.streamCell(bound, "cpu_fps", String).na, true, "mock-bound cpu_fps reads n/a");
-  assert.equal(app.mval(app.canonicalStreaming(bound).cpu_fps), null, "the raw number is gone from the envelope");
-  // null flag (unverifiable) → suppressed → n/a (the MEDIUM-5 leak class, now structural)
-  const nullFlag = { key: "nf", display: "NF", lang: "Rust", streaming: streamRec({ cpu_fps: 88888, cpu_fps_mock_bound: null }) };
-  assert.equal(app.streamCell(nullFlag, "cpu_fps", String).na, true, "unverifiable cpu_fps reads n/a");
-  // the other streaming metrics stay visible regardless of cpu_fps gating
-  assert.equal(app.streamCell(bound, "streams_sustained", String).text, "1300");
+  // 0.993 of the mock's own paced ceiling - the reading the retired flag suppressed hardest, because
+  // keeping pace with a paced upstream is exactly what a relay doing its job looks like.
+  const atCeiling = { key: "bound", display: "B", lang: "Rust",
+    streaming: streamRec({ cpu_fps: 51649, cpu_fps_headroom: 0.993, cpu_fps_mock_ceiling: 52013 }) };
+  assert.equal(app.streamCell(atCeiling, "cpu_fps", String).na, false, "a near-ceiling cpu_fps is NOT n/a");
+  assert.equal(app.streamCell(atCeiling, "cpu_fps", String).text, "51649", "the table shows the frames/sec that were measured");
+  const env = app.canonicalStreaming(atCeiling).cpu_fps;
+  assert.equal(app.mval(env), 51649, "the number is IN the envelope, where every surface reads it");
+  assert.equal(env.headroom, 0.993, "the fraction of the rig's own ceiling reached rides with the number");
+  assert.equal(env.rig_ceiling, 52013, "and the ceiling it is a fraction of, so the fraction is checkable");
+  // NO USABLE REFERENCE (the retired `null` flag - the MEDIUM-5 leak class) costs the FACTS, not the value.
+  const noRef = { key: "nf", display: "NF", lang: "Rust",
+    streaming: streamRec({ cpu_fps: 88888, cpu_fps_headroom: null, cpu_fps_mock_ceiling: null }) };
+  assert.equal(app.streamCell(noRef, "cpu_fps", String).text, "88888", "an unreferenced cpu_fps still publishes");
+  assert.equal(app.canonicalStreaming(noRef).cpu_fps.headroom, undefined, "claiming no fraction it cannot state");
+  // the sibling streaming metrics are unaffected either way
+  assert.equal(app.streamCell(atCeiling, "streams_sustained", String).text, "1300");
 });
 
-test("streaming honesty: streams_sustained mock-bound/unverifiable is n/a; certified shows", () => {
-  const certified = { key: "sc", display: "SC", lang: "Rust", streaming: streamRec({ streams_sustained: 1300, streams_sustained_mock_bound: false }) };
+test("streaming honesty: a near-ceiling streams_sustained is PUBLISHED with its headroom, never suppressed", () => {
+  const certified = { key: "sc", display: "SC", lang: "Rust",
+    streaming: streamRec({ streams_sustained: 1300, streams_sustained_headroom: 0.41, streams_sustained_mock_ceiling: 3170 }) };
   assert.equal(app.streamCell(certified, "streams_sustained", String).text, "1300");
-  const bound = { key: "sb", display: "SB", lang: "Rust", streaming: streamRec({ streams_sustained: 9999, streams_sustained_mock_bound: true }) };
-  assert.equal(app.streamCell(bound, "streams_sustained", String).na, true, "mock-bound streams_sustained reads n/a");
-  const nullFlag = { key: "sn", display: "SN", lang: "Rust", streaming: streamRec({ streams_sustained: 8888, streams_sustained_mock_bound: null }) };
-  assert.equal(app.streamCell(nullFlag, "streams_sustained", String).na, true, "unverifiable streams_sustained reads n/a");
-  // cpu_fps stays visible independent of the sustained gate (the two lanes gate independently)
-  assert.equal(app.streamCell(bound, "cpu_fps", String).text, "48000");
+  const atCeiling = { key: "sb", display: "SB", lang: "Rust",
+    streaming: streamRec({ streams_sustained: 9999, streams_sustained_headroom: 0.998, streams_sustained_mock_ceiling: 10019 }) };
+  assert.equal(app.streamCell(atCeiling, "streams_sustained", String).text, "9999", "a near-ceiling stream count publishes");
+  const env = app.canonicalStreaming(atCeiling).streams_sustained;
+  assert.equal(env.headroom, 0.998, "with the fraction of the paced ceiling it reached");
+  assert.equal(env.rig_ceiling, 10019);
+  // streams_sustained_fps carries no comparison of its own: it is the rate out of the SAME bisect, so it
+  // inherits the count's facts (gen-data seals it that way, and the oracle looks them up the same way).
+  const fps = app.canonicalStreaming(atCeiling).streams_sustained_fps;
+  assert.equal(fps.headroom, 0.998, "the rate inherits the count's comparison, never an invented one");
+  const noRef = { key: "sn", display: "SN", lang: "Rust",
+    streaming: streamRec({ streams_sustained: 8888, streams_sustained_headroom: null, streams_sustained_mock_ceiling: null }) };
+  assert.equal(app.streamCell(noRef, "streams_sustained", String).text, "8888", "no usable reference still publishes the count");
+  // cpu_fps is measured by its own suite and carries its own facts, independent of the sustained lane
+  assert.equal(app.streamCell(atCeiling, "cpu_fps", String).text, "48000");
 });
 
-test("translation honesty: mock-bound/unverifiable translation RPS is n/a; certified + measured-0 show", () => {
-  // The Translation tab (xlateCell reads the pinned matrix cell) + the drawer (canonicalXlate) both read
-  // the sealed envelope: a rig-limited translation RPS is {value:null} → n/a; a certified value shows; a
-  // measured 0 stays 0 (distinct from a rig ceiling). Default state pins openai→anthropic.
-  const mkG = (bound) => ({ key: "xg", display: "XG", lang: "Rust",
-    translation_cell: tCell({ ingress: "openai", egress: "anthropic", rps_sustained_20ms: 5000, rps_sustained_20ms_mock_bound: bound }),
-    matrix: mkMatrix({ anthropic: { openai: { served: true, perf: cellPerf({ rps_sustained_20ms: 5000, rps_sustained_20ms_mock_bound: bound, added_latency_p99_us: 200 }) } } }) });
-  // certified: both surfaces show the number
-  const cert = mkG(false);
+// THE TRANSLATION SUPPRESSION IS GONE TOO, and the measured-0 rule it was contrasted against is not.
+//
+// This used to assert that a translation RPS whose `*_mock_bound` flag was `true`/`null` read n/a on both
+// the Translation tab (xlateCell, reading the pinned matrix cell) and the drawer (canonicalXlate), with a
+// measured 0 as the contrast case that was NOT suppressed. The suppression half was wrong for the same
+// reason everywhere else: the throughput number was measured correctly and withholding it published a
+// hole instead of a fact. The contrast half was always right and is untouched - a measured 0 is an honest
+// certified reading, and it must stay 0 rather than collapsing into the n/a an unmeasured cell gets.
+// Default state pins openai→anthropic.
+test("translation honesty: a near-ceiling translation RPS is PUBLISHED on both surfaces; a measured 0 stays 0", () => {
+  const mkG = (headroom, ceiling) => ({ key: "xg", display: "XG", lang: "Rust",
+    translation_cell: tCell({ ingress: "openai", egress: "anthropic", rps_sustained_20ms: 5000,
+      rps_sustained_20ms_headroom: headroom, rps_sustained_20ms_rig_ceiling: ceiling }),
+    matrix: mkMatrix({ anthropic: { openai: { served: true, perf: cellPerf({ rps_sustained_20ms: 5000,
+      rps_sustained_20ms_headroom: headroom, rps_sustained_20ms_rig_ceiling: ceiling, added_latency_p99_us: 200 }) } } }) });
+  // comfortably under the rig's ceiling: both surfaces show the number, as they always did
+  const cert = mkG(0.19, 26315);
   assert.equal(app.xlateCell(cert, "rps_sustained_20ms", String).text, "5000");
   assert.equal(app.mval(app.canonicalXlate(cert).rps_sustained_20ms), 5000);
-  // mock-bound: n/a on both surfaces
-  const bound = mkG(true);
-  assert.equal(app.xlateCell(bound, "rps_sustained_20ms", String).na, true, "mock-bound translation RPS reads n/a");
-  assert.equal(app.mval(app.canonicalXlate(bound).rps_sustained_20ms), null, "drawer/compare suppresses a mock-bound value");
-  // unverifiable (null flag): also n/a
-  const nullFlag = mkG(null);
-  assert.equal(app.xlateCell(nullFlag, "rps_sustained_20ms", String).na, true, "unverifiable translation RPS reads n/a");
-  // a LEGITIMATE measured 0 is NOT suppressed - it stays 0 (an RPS ceiling zero is honest)
+  // AT the rig's ceiling: the number still shows on both surfaces, with the headroom saying how close
+  // it came, which is the interpretation the reader now makes instead of the seal making it for them.
+  const atCeiling = mkG(0.99, 5050);
+  assert.equal(app.xlateCell(atCeiling, "rps_sustained_20ms", String).na, false, "a near-ceiling translation RPS is not n/a");
+  assert.equal(app.mval(app.canonicalXlate(atCeiling).rps_sustained_20ms), 5000, "drawer/compare publish it too");
+  assert.equal(app.canonicalXlate(atCeiling).rps_sustained_20ms.headroom, 0.99, "with the fraction of the ceiling reached");
+  assert.equal(app.canonicalXlate(atCeiling).rps_sustained_20ms.rig_ceiling, 5050);
+  // no usable reference: the facts are omitted, the value is not
+  const noRef = mkG(null, null);
+  assert.equal(app.xlateCell(noRef, "rps_sustained_20ms", String).text, "5000", "an unreferenced translation RPS still publishes");
+  assert.equal(app.canonicalXlate(noRef).rps_sustained_20ms.headroom, undefined);
+  // a MEASURED 0 is a certified reading and stays 0 - not the n/a an unmeasured cell gets (unchanged).
   const zero = { key: "xz", display: "XZ", lang: "Rust",
-    translation_cell: tCell({ ingress: "openai", egress: "anthropic", rps_sustained_20ms: 0, rps_sustained_20ms_mock_bound: null }) };
+    translation_cell: tCell({ ingress: "openai", egress: "anthropic", rps_sustained_20ms: 0 }) };
   assert.equal(app.mval(app.canonicalXlate(zero).rps_sustained_20ms), 0, "a measured 0 stays 0, not n/a");
 });
 
@@ -1736,12 +1851,12 @@ test("streaming: a null added-TTFT/gap reads n/a on the table (the envelope carr
   // measured value reads the number. There is no "site-visible vs chart draws-bar" gate to tie any more -
   // the envelope IS the single decision (the retired drift check cannot arise: one datum, one value).
   const okStream = streamRec({ added_ttft_p99_us: 90, added_gap_p99_us: 12,
-    streams_sustained: 1300, streams_sustained_mock_bound: false, cpu_fps: 48000, cpu_fps_mock_bound: false });
+    streams_sustained: 1300, cpu_fps: 48000 });
   const okGw = { key: "tok", display: "Tok", lang: "Rust", streaming: okStream };
   assert.equal(app.streamCell(okGw, "added_ttft_p99_us", String).text, "90", "measured added-TTFT shows the number");
   assert.deepEqual(checkConsistency({ gateways: [okGw] }, app, SYNTH).errors, [], "a sealed streaming record is consistent");
   const nullStream = streamRec({ added_ttft_p99_us: null, added_gap_p99_us: null,
-    streams_sustained: 1300, streams_sustained_mock_bound: false, cpu_fps: 48000, cpu_fps_mock_bound: false });
+    streams_sustained: 1300, cpu_fps: 48000 });
   const nullGw = { key: "tnull", display: "Tnull", lang: "Rust", streaming: nullStream };
   assert.equal(app.streamCell(nullGw, "added_ttft_p99_us", String).na, true, "null added-TTFT reads n/a on the table");
   assert.equal(app.streamCell(nullGw, "added_gap_p99_us", String).na, true, "null added-gap reads n/a on the table");
@@ -1808,21 +1923,30 @@ test("recovery sparkline: renders only when rss_series exists (≥2 points), nev
   assert.equal(app.rssSparkline([ { t_s: 0, rss_mib: 40 } ]), "", "a single point → no sparkline");
 });
 
-test("streaming: a sealed streaming record reads its gated metrics through the envelope", () => {
-  // Under the sealed envelope, streaming is ONE projected record whose gated metrics (streams_sustained,
-  // cpu_fps) are sealed at projection time. A certified value shows; a suppressed one reads n/a. There is
-  // no headline-vs-cell "projection drift" to guard any more - there is exactly one record, one value.
+// Under the sealed envelope, streaming is ONE projected record whose throughput metrics
+// (streams_sustained, cpu_fps) are sealed at projection time; every surface reads them through the
+// envelope, so there is no headline-vs-cell "projection drift" to guard - one record, one value.
+//
+// The second half used to prove that a `cpu_fps_mock_bound: true` reading was {value:null} and "cannot
+// leak". What it actually proved was that the reading was deleted: 99,999 frames/sec measured, nothing
+// published, because our own rig might have been the limiter. It now publishes with its headroom, and
+// what this half holds is that the envelope stays STRUCTURALLY clean while carrying those facts - C1
+// accepts `headroom`/`rig_ceiling` as envelope fields, and C2's "no suppression anywhere" still holds,
+// which is the guard that the retired shape has not come back.
+test("streaming: a sealed streaming record publishes its throughput metrics, facts and all", () => {
   const certified = { key: "sg", display: "SG", lang: "Rust",
-    streaming: streamRec({ streams_sustained: 1300, streams_sustained_mock_bound: false, cpu_fps: 48000, cpu_fps_mock_bound: false }) };
+    streaming: streamRec({ streams_sustained: 1300, cpu_fps: 48000 }) };
   assert.equal(app.streamCell(certified, "streams_sustained", app.fmtInt).text, "1,300");
   assert.equal(app.streamCell(certified, "cpu_fps", app.fmtInt).text, "48,000");
   assert.deepEqual(checkConsistency({ gateways: [certified] }, app, SYNTH).errors, [], "a certified sealed streaming record is consistent");
-  // A rig-limited (mock-bound) cpu_fps is {value:null} in the data - it reads n/a and cannot leak.
-  const bound = { key: "bs", display: "BS", lang: "Rust",
-    streaming: streamRec({ streams_sustained: 1300, streams_sustained_mock_bound: false, cpu_fps: 99999, cpu_fps_mock_bound: true }) };
-  assert.equal(app.streamCell(bound, "cpu_fps", app.fmtInt).na, true, "a mock-bound cpu_fps reads n/a (the number is gone)");
-  assert.equal(app.streamCell(bound, "streams_sustained", app.fmtInt).text, "1,300", "the certified sibling still shows");
-  assert.deepEqual(checkConsistency({ gateways: [bound] }, app, SYNTH).errors, [], "a suppressed cpu_fps sealed record is consistent (C2 holds)");
+  // A cpu_fps that came within 0.4% of the mock's paced ceiling: published, annotated, and consistent.
+  const atCeiling = { key: "bs", display: "BS", lang: "Rust",
+    streaming: streamRec({ streams_sustained: 1300, cpu_fps: 99999, cpu_fps_headroom: 0.996, cpu_fps_mock_ceiling: 100400 }) };
+  assert.equal(app.streamCell(atCeiling, "cpu_fps", app.fmtInt).text, "99,999", "the near-ceiling reading IS the cell");
+  assert.equal(app.streamCell(atCeiling, "streams_sustained", app.fmtInt).text, "1,300", "the sibling is unaffected");
+  assert.equal(atCeiling.streaming.cpu_fps.headroom, 0.996, "the reader is given the fraction, not a verdict");
+  assert.deepEqual(checkConsistency({ gateways: [atCeiling] }, app, SYNTH).errors, [],
+    "an annotated record is structurally clean: C1 accepts the facts, C2 finds no suppression to reject");
 });
 
 test("download: gatewayResultsJson is the gateway's complete record as parseable JSON", () => {
@@ -1989,14 +2113,14 @@ test("stripRigPaths scrubs absolute bench-box paths from diagnostic notes", () =
 // ---- per-cell perf: best-path deviation on the matrix hover -----------------
 test("cellPerfTip shows a green cell's perf and its deviation from the gateway's best cell", () => {
   // cellPerfTip reads the sealed envelopes via mval(): a certified cell + reference show the number + delta;
-  // a suppressed value is {value:null} and cannot leak (asserted in the next test).
-  const best = bcCell({ ingress: "openai", egress: "openai", rps_sustained_20ms: 30000, rps_sustained_20ms_mock_bound: false });
-  const green = { served: true, perf: cellPerf({ rps_sustained_20ms: 25500, rps_sustained_20ms_mock_bound: false, added_latency_p99_us: 900 }) };
+  // an envelope with no value cannot become a number on hover (asserted in the next test).
+  const best = bcCell({ ingress: "openai", egress: "openai", rps_sustained_20ms: 30000 });
+  const green = { served: true, perf: cellPerf({ rps_sustained_20ms: 25500, added_latency_p99_us: 900 }) };
   const tip = app.cellPerfTip(green, "anthropic", "openai", best);
   assert.ok(tip.includes("25,500 req/s (20 ms upstream)"), tip);
   assert.ok(tip.includes("+900 µs p99 added"), tip);
   assert.ok(tip.includes("-15.0% req/s vs the OpenAI→OpenAI cell"), tip); // human labels, not raw dialect keys
-  const bestTip = app.cellPerfTip({ served: true, perf: cellPerf({ rps_sustained_20ms: 30000, rps_sustained_20ms_mock_bound: false }) }, "openai", "openai", best);
+  const bestTip = app.cellPerfTip({ served: true, perf: cellPerf({ rps_sustained_20ms: 30000 }) }, "openai", "openai", best);
   assert.ok(bestTip.includes("reference cell"), bestTip);
   // red/grey/unprobed cells and perf-less greens carry NO perf line
   assert.equal(app.cellPerfTip({ served: false, perf: cellPerf({ rps_sustained_20ms: 1 }) }, "a", "b", best), "");
@@ -2004,23 +2128,38 @@ test("cellPerfTip shows a green cell's perf and its deviation from the gateway's
   assert.equal(app.cellPerfTip({ served: true }, "a", "b", best), "");
 });
 
-test("FINDING 33: cellPerfTip cannot leak a suppressed sustained RPS (the number is gone from the data)", () => {
-  const best = bcCell({ ingress: "openai", egress: "openai", rps_sustained_20ms: 30000, rps_sustained_20ms_mock_bound: false });
-  // A rig-bound (mock_bound:true) cell is {value:null} - its raw RPS does not exist; the added-latency
-  // survives, labelled n/a. There is no ungated field to leak.
-  const bound = { served: true, perf: cellPerf({ rps_sustained_20ms: 99999, rps_sustained_20ms_mock_bound: true, added_latency_p99_us: 900 }) };
-  const boundTip = app.cellPerfTip(bound, "anthropic", "openai", best);
-  assert.ok(!boundTip.includes("99,999"), `a suppressed RPS cannot leak into the tip; got: ${boundTip}`);
-  assert.ok(boundTip.includes("sustained RPS n/a: rig-limited"), boundTip);
-  assert.ok(boundTip.includes("+900 µs p99 added"), boundTip);
-  // An UNSTAMPED value (no mock_bound flag) seals to unverifiable → suppressed → {value:null}.
-  const unstamped = { served: true, perf: cellPerf({ rps_sustained_20ms: 25500, rps_sustained_20ms_mock_bound: null, added_latency_p99_us: 900 }) };
-  assert.ok(!app.cellPerfTip(unstamped, "anthropic", "openai", best).includes("25,500"), "unstamped RPS is suppressed");
-  // A certified cell vs a SUPPRESSED reference: the number shows but no delta (the divisor is null).
-  const uncertRef = bcCell({ ingress: "openai", egress: "openai", rps_sustained_20ms: 30000, rps_sustained_20ms_mock_bound: true });  // suppressed ref
-  const t = app.cellPerfTip({ served: true, perf: cellPerf({ rps_sustained_20ms: 25500, rps_sustained_20ms_mock_bound: false, added_latency_p99_us: 900 }) }, "anthropic", "openai", uncertRef);
+// FINDING 33 was that the matrix hover tip read the RAW cell scalar, so a number no other surface would
+// show still appeared on hover. The fix was structural - the tip reads through mval(), so it can only
+// ever render what the envelope carries - and that is what survives here.
+//
+// What does NOT survive is the state the test used to demonstrate it with: a `mock_bound: true` cell
+// whose 99,999 req/s had been replaced with {value:null}, so "the number is gone from the data" was the
+// assertion. The number is no longer gone, because deleting a correct measurement is not a way to
+// qualify it. So the tip's two live properties are pinned against the state that DOES still produce an
+// empty envelope - a metric the harness never measured on that cell:
+//   - an absent RPS cannot become a number on hover, and the certified added-latency beside it survives;
+//   - a delta needs BOTH sides, so an absent reference yields the number and no percentage.
+// And the inverted half: a near-ceiling RPS now renders in the tip like any other measurement.
+test("FINDING 33: cellPerfTip renders only what the envelope carries - an absent RPS cannot become a number", () => {
+  const best = bcCell({ ingress: "openai", egress: "openai", rps_sustained_20ms: 30000 });
+  // A cell whose sustained sweep never ran: {value:null}. The added-latency survives, labelled n/a.
+  const unmeasured = { served: true, perf: cellPerf({ rps_sustained_20ms: null, added_latency_p99_us: 900 }) };
+  const tip = app.cellPerfTip(unmeasured, "anthropic", "openai", best);
+  assert.ok(!tip.includes("req/s"), `an absent RPS must not produce a rate on hover; got: ${tip}`);
+  assert.ok(tip.includes("sustained RPS n/a"), tip);
+  assert.ok(tip.includes("+900 µs p99 added"), tip);
+  // A certified cell against an ABSENT reference: the number shows, but no delta - the divisor is null.
+  const noRef = bcCell({ ingress: "openai", egress: "openai", rps_sustained_20ms: null });
+  const t = app.cellPerfTip({ served: true, perf: cellPerf({ rps_sustained_20ms: 25500, added_latency_p99_us: 900 }) }, "anthropic", "openai", noRef);
   assert.ok(t.includes("25,500 req/s (20 ms upstream)"), t);
-  assert.ok(!t.includes("vs the"), `no delta against a suppressed reference; got: ${t}`);
+  assert.ok(!t.includes("vs the"), `no delta against a reference with no number; got: ${t}`);
+  // THE INVERSION: a cell that came within a percent of the rig's own ceiling is a measurement like any
+  // other, and the hover shows it - with its delta - rather than the n/a the suppression used to leave.
+  const atCeiling = { served: true, perf: cellPerf({ rps_sustained_20ms: 29900,
+    rps_sustained_20ms_headroom: 0.996, rps_sustained_20ms_rig_ceiling: 30020, added_latency_p99_us: 900 }) };
+  const ceilTip = app.cellPerfTip(atCeiling, "anthropic", "openai", best);
+  assert.ok(ceilTip.includes("29,900 req/s (20 ms upstream)"), `a near-ceiling RPS belongs on the hover; got: ${ceilTip}`);
+  assert.ok(ceilTip.includes("vs the OpenAI→OpenAI cell"), `and it can be differenced like any number; got: ${ceilTip}`);
 });
 
 // ---- sweep chart on a stub canvas with real committed data ------------------
@@ -2248,24 +2387,41 @@ test("Cluster-B: drawer/compare (laneRecord) read the SAME chosen cell as the ta
     app.mval(app.canonicalPerf(g).rps_sustained_20ms), "Peak lane record == canonicalPerf");
 });
 
-test("Cluster-B/22: perfSweepSeries is chooser-aware and drops a mock-bound-suppressed metric's curve", () => {
+// Finding 22 was that the drawer chart plotted a curve for a metric the table showed no number for, so
+// the chart contradicted the cell beside it. The fix was structural: the sweep array travels INSIDE the
+// sealed envelope (env.sweep), so a metric with no published value has no curve to plot either.
+//
+// The state the test used to demonstrate that with was a suppression - a `mock_bound: true` sustained
+// whose 99,999 and whose sweep were both discarded at seal time. A near-ceiling number is now published,
+// and its curve is published WITH it: that curve is the evidence for exactly the reading a reader most
+// needs to weigh, and dropping it was the second half of the same mistake. The invariant survives
+// against the state that genuinely publishes nothing - a metric that was never measured on this cell.
+test("Cluster-B/22: perfSweepSeries is chooser-aware; an UNMEASURED metric has no curve, a near-ceiling one keeps its", () => {
   const colors = { sustained: "#4cc38a", max: "#6cb6ff" };
   // Peak: the openai diagonal's sweeps (both metrics certified) are plotted, marked at the published peak.
-  // The sweep array travels INSIDE the sealed envelope (env.sweep) - a suppressed metric carries none.
   const withSweep = { ...CHOOSER_GW, best_cell: bcCell({ dialect: "openai",
     rps_sustained_20ms: 30000, sweep_sustained_20ms: [{ conc: 512, rps: 30000, p99_us: 200, fail: 0 }],
     rps_max_proxy: 32000, sweep_max_proxy: [{ conc: 256, rps: 32000, p99_us: 100, fail: 0 }] }) };
   const peak = app.perfSweepSeries(withSweep, colors, { mode: "peak" });
   assert.equal(peak.length, 2, "both certified metrics plotted");
   assert.equal(peak[0].peak.rps, 30000, "sustained curve marks the published peak");
-  // A mock-bound metric is {value:null} - its sweep array is gone with it, so its curve is DROPPED
-  // (finding 22, now structural: a suppressed envelope carries neither value nor sweep).
-  const bound = { ...CHOOSER_GW, best_cell: bcCell({ dialect: "openai",
-    rps_sustained_20ms: 99999, rps_sustained_20ms_mock_bound: true, sweep_sustained_20ms: [{ conc: 512, rps: 99999, p99_us: 200, fail: 0 }],
-    rps_max_proxy: 32000, rps_max_proxy_mock_bound: false, sweep_max_proxy: [{ conc: 256, rps: 32000, p99_us: 100, fail: 0 }] }) };
-  const gated = app.perfSweepSeries(bound, colors, { mode: "peak" });
-  assert.equal(gated.length, 1, "the suppressed sustained curve is dropped; only certified max remains");
-  assert.equal(gated[0].peak.rps, 32000, "the surviving curve is the certified max-proxy");
+  // An UNMEASURED sustained is {value:null} and carries no sweep, so its curve is dropped - the chart
+  // cannot claim a shape for a metric the cell beside it reads n/a on.
+  const unmeasured = { ...CHOOSER_GW, best_cell: bcCell({ dialect: "openai",
+    rps_sustained_20ms: null, sweep_sustained_20ms: [{ conc: 512, rps: 99999, p99_us: 200, fail: 0 }],
+    rps_max_proxy: 32000, sweep_max_proxy: [{ conc: 256, rps: 32000, p99_us: 100, fail: 0 }] }) };
+  const dropped = app.perfSweepSeries(unmeasured, colors, { mode: "peak" });
+  assert.equal(dropped.length, 1, "the unmeasured sustained curve is dropped; only the measured max remains");
+  assert.equal(dropped[0].peak.rps, 32000, "the surviving curve is the max-proxy");
+  // A NEAR-CEILING sustained keeps both its number and its curve: the sweep is the evidence a reader
+  // needs in order to do anything with the headroom the envelope hands them.
+  const atCeiling = { ...CHOOSER_GW, best_cell: bcCell({ dialect: "openai",
+    rps_sustained_20ms: 29900, rps_sustained_20ms_headroom: 0.996, rps_sustained_20ms_rig_ceiling: 30020,
+    sweep_sustained_20ms: [{ conc: 512, rps: 29900, p99_us: 200, fail: 0 }],
+    rps_max_proxy: 32000, sweep_max_proxy: [{ conc: 256, rps: 32000, p99_us: 100, fail: 0 }] }) };
+  const kept = app.perfSweepSeries(atCeiling, colors, { mode: "peak" });
+  assert.equal(kept.length, 2, "a near-ceiling metric is plotted like any other");
+  assert.equal(kept[0].peak.rps, 29900, "and its curve is marked at the number that was published");
 });
 
 test("Cluster-C/20: chooserStreamCell reads the right streaming cell across Peak/Same/Custom", () => {
@@ -2273,13 +2429,12 @@ test("Cluster-C/20: chooserStreamCell reads the right streaming cell across Peak
   // openai->anthropic cell that carries its own per-cell stream record.
   const g = {
     key: "sc", display: "SC", lang: "Rust",
-    streaming: streamRec({ dialect: "openai", added_ttft_p99_us: 90, streams_sustained: 1300, streams_sustained_mock_bound: false,
-      cpu_fps: 48000, cpu_fps_mock_bound: false }),
+    streaming: streamRec({ dialect: "openai", added_ttft_p99_us: 90, streams_sustained: 1300, cpu_fps: 48000 }),
     matrix: { upstreams: {
       openai: { cells: { openai: { served: true, perf: cellPerf({ added_latency_p99_us: 10 }),
-        stream: cellStream({ added_ttft_p99_us: 90, streams_sustained: 1300, streams_sustained_mock_bound: false }) } } },
+        stream: cellStream({ added_ttft_p99_us: 90, streams_sustained: 1300 }) } } },
       anthropic: { cells: { openai: { served: true, perf: cellPerf({ added_latency_p99_us: 20 }),
-        stream: cellStream({ added_ttft_p99_us: 140, streams_sustained: 900, streams_sustained_mock_bound: false }) } } },
+        stream: cellStream({ added_ttft_p99_us: 140, streams_sustained: 900 }) } } },
     } },
   };
   // Peak → the projected diagonal streaming (90 TTFT, 1300 streams).
@@ -2445,53 +2600,90 @@ test("#24 CLASS: the REAL sealMetric() is the honesty choke point (no hand-copie
   // (a) absent -> NOT MEASURED (never suppressed: nothing was hidden, nothing was measured).
   assert.deepEqual(sealMetric(null), { value: null, certified: false, suppressed: false, reason: "not_measured" });
   assert.deepEqual(sealMetric(undefined), { value: null, certified: false, suppressed: false, reason: "not_measured" });
-  // (b) UNGATED -> always certified when present (latency/RSS have no mock-bound flag).
+  // (b) PRESENT -> always certified. There is no second condition any more: this used to be the "ungated"
+  //     case (latency/RSS, which had no mock-bound flag) and it is now the whole rule. A present ZERO is
+  //     certified too, and case (d) below pins its shape, because a 0 additionally carries a note.
   assert.deepEqual(sealMetric(12.5), { value: 12.5, certified: true, suppressed: false });
-  assert.deepEqual(sealMetric(0), { value: 0, certified: true, suppressed: false });
-  // (c) GATED positive: certified ONLY when the harness certified it (flag === false).
-  assert.equal(sealMetric(100, { gated: true, flag: false }).value, 100);
-  assert.deepEqual(sealMetric(100, { gated: true, flag: true }),
-    { value: null, certified: false, suppressed: true, reason: "mock_bound" });
-  assert.deepEqual(sealMetric(100, { gated: true, flag: null }),
-    { value: null, certified: false, suppressed: true, reason: "unverifiable" });
-  assert.deepEqual(sealMetric(100, { gated: true }),
-    { value: null, certified: false, suppressed: true, reason: "unverifiable" });
-  // (d) a GATED measured 0 is CERTIFIED and carries a note naming what the zero MEANS: never folded into
+  // (c) A PRESENT NUMBER IS PUBLISHED, whatever the comparison says about it.
+  //
+  //     This case used to be the gate: `sealMetric(100, {gated: true, flag: true})` returned
+  //     {value: null, certified: false, suppressed: true, reason: "mock_bound"}, and a `null` flag (no
+  //     usable reference) returned the same with reason "unverifiable". Both threw away a measurement the
+  //     harness had taken correctly, on the strength of a comparison against our own rig - and hardest on
+  //     the gateways that came closest to keeping up. Nothing about the number was in doubt; only how to
+  //     weigh it, and the answer to that is to publish the weighing, not to delete the number.
+  //
+  //     So the facts ride ON the certified envelope, and the seal reaches no conclusion:
+  assert.deepEqual(sealMetric(100, { headroom: 0.83, ceiling: 120 }),
+    { value: 100, certified: true, suppressed: false, headroom: 0.83, rig_ceiling: 120 },
+    "a near-ceiling number publishes, with the fraction and the ceiling a reader needs to weigh it");
+  assert.deepEqual(sealMetric(100, { headroom: 0.999, ceiling: 100.1 }),
+    { value: 100, certified: true, suppressed: false, headroom: 0.999, rig_ceiling: 100.1 },
+    "even AT the ceiling: 0.999 is a fact about the comparison, never a reason to withhold the number");
+  assert.deepEqual(sealMetric(100), { value: 100, certified: true, suppressed: false },
+    "and no usable reference costs the FACTS, not the value - it used to cost both");
+  // (d) a measured 0 is CERTIFIED and carries a note naming what the zero MEANS: never folded into
   //     {value:null, reason:"not_measured"}, which would publish a measured FAILURE as an unmeasured cell.
-  assert.deepEqual(sealMetric(0, { gated: true }),
-    { value: 0, certified: true, suppressed: false, note: ZERO_NO_CEILING });
-  assert.deepEqual(sealMetric(0, { gated: true, zeroNote: ZERO_MEASURED_FAIL }),
+  //
+  //     THE NOTE IS PER-FIELD, NOT A DEFAULT. This case asserted that a bare `sealMetric(0, {})` came
+  //     back annotated ZERO_NO_CEILING, because the note used to be the default argument and the caller
+  //     only reached it under a `gated` flag. With the gate gone the default became live for every field,
+  //     and 37 `growth_rate_mib_per_min` zeros and 6 `added_gap_p50_us` zeros shipped claiming "served,
+  //     but no tested load held p99 < 1 s at <0.1% errors" - a sentence about a throughput ceiling,
+  //     rendered on a memory growth rate. `zeroNoteFor` now answers null outside the two families that
+  //     have such a meaning, so an unannotated zero stays a bare 0.
+  assert.deepEqual(sealMetric(0, {}),
+    { value: 0, certified: true, suppressed: false },
+    "a zero on a field with no zero-note vocabulary must not borrow a throughput sentence");
+  assert.equal(zeroNoteFor("growth_rate_mib_per_min"), null,
+    "and the ONE place that mapping lives must be the thing that says so");
+  assert.deepEqual(sealMetric(0, { zeroNote: zeroNoteFor("rps_max_proxy") }),
+    { value: 0, certified: true, suppressed: false, note: ZERO_NO_CEILING },
+    "an RPS ceiling's zero DOES mean 'no tested load held the gates', and says it");
+  assert.deepEqual(sealMetric(0, { zeroNote: ZERO_MEASURED_FAIL }),
     { value: 0, certified: true, suppressed: false, note: ZERO_MEASURED_FAIL },
     "a measured stream-sustain FAILURE must be a certified 0, DISTINGUISHABLE from not-measured");
   // and the two states are not the same object shape.
-  assert.notDeepEqual(sealMetric(0, { gated: true, zeroNote: ZERO_MEASURED_FAIL }), sealMetric(null, { gated: true }));
-  // (e) extras ride ONLY on a certified envelope; a suppressed one leaks nothing recoverable (C2).
-  const withExtras = sealMetric(50, { gated: true, flag: false, extras: { concurrency: 8, conc_at: 16, sweep: null } });
+  assert.notDeepEqual(sealMetric(0, { zeroNote: ZERO_MEASURED_FAIL }), sealMetric(null));
+  // (e) extras ride on a certified envelope; an ABSENCE - the only remaining no-value shape - carries no
+  //     recoverable number at all, which is what C2 asserts from the bundle side.
+  const withExtras = sealMetric(50, { extras: { concurrency: 8, conc_at: 16, sweep: null } });
   assert.equal(withExtras.concurrency, 8);
   assert.equal(withExtras.conc_at, 16);
   assert.ok(!("sweep" in withExtras), "a null extra must not be emitted");
-  const suppressed = sealMetric(50, { gated: true, flag: true, extras: { concurrency: 8, conc_at: 16 } });
-  assert.deepEqual(Object.keys(suppressed).filter((k) => typeof suppressed[k] === "number"), [],
-    "a suppressed envelope must carry NO recoverable numeric field");
-  // (f) the raw scalar and its flag are CONSUMED - they never survive onto the envelope (invariant P1).
-  for (const env of [withExtras, suppressed, sealMetric(0, { gated: true })])
-    assert.ok(!Object.keys(env).some((k) => k.endsWith("_mock_bound")), "no flag may survive the seal");
+  const absent = sealMetric(null, { extras: { concurrency: 8, conc_at: 16 }, headroom: 0.5, ceiling: 100 });
+  assert.deepEqual(Object.keys(absent).filter((k) => typeof absent[k] === "number"), [],
+    "an absent envelope must carry NO recoverable numeric field - not an extra, not a ceiling");
+  // (f) the raw scalar and its engine siblings are CONSUMED - the retired `*_mock_bound` verdict cannot
+  //     reappear under any name, and the facts that replaced it are published under their OWN names
+  //     (`headroom`, `rig_ceiling`), never as the raw `<field>_headroom` key C1 refuses.
+  for (const env of [withExtras, absent, sealMetric(0, {}), sealMetric(100, { headroom: 0.83, ceiling: 120 })])
+    for (const k of Object.keys(env))
+      assert.ok(!/_(mock_bound|headroom|rig_ceiling|mock_ceiling)$/.test(k),
+        `no raw engine sibling may survive the seal; found ${k}`);
 });
 
 test("#3 CLASS: a MEASURED stream-sustain failure renders differently from an unmeasured one", () => {
   // The site: a measured 0 shows the number 0 with a MEASURED-FAILURE note; an unmeasured one reads n/a.
-  const failed = app.metric(sealMetric(0, { gated: true, zeroNote: ZERO_MEASURED_FAIL }), String);
-  const unmeasured = app.metric(sealMetric(null, { gated: true }), String);
+  // Publishing "the gateway was offered stream load and sustained none of it" as "not measured" would
+  // flatter the gateway, so null - an absent field - is the ONLY not-measured state.
+  const failed = app.metric(sealMetric(0, { zeroNote: ZERO_MEASURED_FAIL }), String);
+  const unmeasured = app.metric(sealMetric(null), String);
   assert.equal(failed.text, "0");
   assert.equal(failed.na, false);
   assert.match(failed.note, /MEASURED FAILURE/);
   assert.equal(unmeasured.text, "n/a");
   assert.equal(unmeasured.na, true);
   assert.match(unmeasured.note, /not measured/);
-  // and a rig-limited one is a THIRD state (suppressed), never conflated with either.
-  const bound = app.metric(sealMetric(1300, { gated: true, flag: true }), String);
-  assert.equal(bound.na, true);
-  assert.match(bound.note, /rig-limited/);
+  // AND THERE IS NO THIRD STATE. This used to assert that a rig-limited 1300 was one - a suppressed
+  // envelope reading n/a with a "rig-limited" note, "never conflated with either" of the two above. It
+  // was a third state only because the seal invented it: the harness measured 1300 streams and the board
+  // showed a blank. A near-ceiling reading is now simply a measurement, so it renders as its number and
+  // the only two no-number states left are the honest ones - a measured 0 and an absence.
+  const atCeiling = app.metric(sealMetric(1300, { headroom: 0.98, ceiling: 1326 }), String);
+  assert.equal(atCeiling.na, false, "a near-ceiling stream count is a number, not a state");
+  assert.equal(atCeiling.text, "1300");
+  assert.equal(atCeiling.env.headroom, 0.98, "how close it came travels with it, for the reader to weigh");
 });
 
 test("a measured FAILURE renders red with its counts, never as the n/a an untested cell gets", () => {
@@ -2533,12 +2725,16 @@ test("a measured FAILURE renders red with its counts, never as the n/a an untest
 test("a measured zero's meaning is VISIBLE on the table cell, not only in a hover tooltip", () => {
   // The 2026-07-28 board rendered rps_sustained_20ms=0 as a bare "0" beside a real maximum, which
   // reads as "this gateway does nothing". The td writer now prints the short reason under the number.
-  const zeroCeiling = app.metric(sealMetric(0, { gated: true }), String);
+  const zeroCeiling = app.metric(sealMetric(0, { zeroNote: ZERO_NO_CEILING }), String);
   assert.match(app.metricTd(zeroCeiling), /class=""/);
   assert.match(app.metricTd(zeroCeiling), /<span class="zero-why">no load held the gate<\/span>/);
-  const zeroFail = app.metric(sealMetric(0, { gated: true, zeroNote: ZERO_MEASURED_FAIL }), String);
+  const zeroFail = app.metric(sealMetric(0, { zeroNote: ZERO_MEASURED_FAIL }), String);
   assert.match(app.metricTd(zeroFail), /<span class="zero-why">measured failure<\/span>/);
-  // A plain zero with no note (e.g. memory growth 0.0) renders bare, exactly as before.
+  // A plain zero on a field with NO zero-note vocabulary (memory growth 0.0, an added gap of 0) renders
+  // bare, exactly as before. ZERO_WHY is keyed by the envelope's own note token, and the two tokens mean
+  // "no tested load held the qualifying gates" (RPS ceilings) and "offered stream load, sustained none"
+  // (streaming counts) - neither is a true statement about a memory growth rate, so an untagged zero must
+  // arrive at the td with no note for the writer to render. seal.mjs's own header states the same scope.
   const plainZero = app.metric(sealMetric(0, {}), String);
   assert.ok(!app.metricTd(plainZero).includes("zero-why"), "an unannotated zero stays a bare 0");
   // And n/a cells are untouched by the writer refactor.
@@ -2562,9 +2758,11 @@ test("#2b CLASS: a below-resolution difference renders as ≈0, ranks as 0, and 
   assert.match(cell.note, /came in under the mock's/, "the tooltip carries the engine's own evidence");
   // mval agrees with metric(): the compare table and deltas rank it as 0, not as missing.
   assert.equal(app.mval(env), 0);
-  // The oracle derives the same display from the RAW artifact, or R1 would block every deploy.
-  assert.equal(oracleExpected(null, undefined, false, false, "below_resolution"), 0);
-  assert.equal(oracleExpected(null, undefined, false, false, "not_measured"), null,
+  // The oracle derives the same display from the RAW artifact, or R1 would block every deploy. Its
+  // signature is (raw, absentReason): the flag and the gated/paced pair it also used to take were the
+  // retired suppression's inputs and are gone from both sides of the rule.
+  assert.equal(oracleExpected(null, "below_resolution"), 0);
+  assert.equal(oracleExpected(null, "not_measured"), null,
     "every OTHER absence still displays as nothing");
   // And every other engine absence reason survives the seal instead of flattening to not_measured.
   for (const reason of ["rig_limited", "untestable", "search_exhausted", "harness_error"]) {
@@ -2579,16 +2777,16 @@ test("#2b CLASS: a below-resolution difference renders as ≈0, ranks as 0, and 
 });
 
 // ---- #25: the snapshot ingest path (task #65) had NO test at all ----------------------------------
-// certifyRepo(root, mutate?): buildStreamMemRepo's matrix has no *_mock_bound flags, so its gated RPS
-// seals to "unverifiable". Stamp flag=false (the harness certified it) so these tests assert on the
-// SELECTION being tested, not on the honesty gate (which its own tests cover).
+// certifyRepo(root, mutate?): apply an optional edit to buildStreamMemRepo's matrix artifact on the way
+// in, so the tests below assert on the SELECTION they exist to test.
+//
+// It used to also stamp `*_mock_bound: false` into every cell, because without the flag a gated RPS
+// sealed to "unverifiable" and published nothing - so a test about which snapshot wins would have failed
+// on the honesty gate instead. There is no gate to satisfy now (a present number is published, annotated
+// with the comparison's facts), so the stamping is gone and the helper does only what its name says.
 function certifyRepo(root, mutate) {
   const mpath = join(root, "results", "matrix", "sgw.json");
   const m = JSON.parse(readFileSync(mpath, "utf8"));
-  for (const cells of [m.cells, m.upstreams.openai.cells]) {
-    cells.openai.perf.rps_sustained_20ms_mock_bound = false;
-    cells.openai.perf.rps_max_proxy_mock_bound = false;
-  }
   if (mutate) mutate(m);
   writeFileSync(mpath, JSON.stringify(m));
   return root;
@@ -2805,9 +3003,9 @@ test("#21 CLASS: the footer rig stamp shows one digest, flags DISAGREEING rows, 
 // ---- #26: conc_at / concAt() - the Performance-tab payload of task #65 - was never exercised -------
 test("#26 CLASS: conc_at travels inside the sealed envelope and drives the '@ N conc' render", () => {
   // (a) the accessor: conc_at WINS over the legacy *_concurrency; either alone works; neither -> null.
-  assert.equal(app.concAt(sealMetric(9, { gated: true, flag: false, extras: { conc_at: 512, concurrency: 64 } })), 512);
-  assert.equal(app.concAt(sealMetric(9, { gated: true, flag: false, extras: { concurrency: 64 } })), 64);
-  assert.equal(app.concAt(sealMetric(9, { gated: true, flag: false })), null, "no rung recorded -> null, never fabricated");
+  assert.equal(app.concAt(sealMetric(9, { extras: { conc_at: 512, concurrency: 64 } })), 512);
+  assert.equal(app.concAt(sealMetric(9, { extras: { concurrency: 64 } })), 64);
+  assert.equal(app.concAt(sealMetric(9)), null, "no rung recorded -> null, never fabricated");
   assert.equal(app.concAt(null), null);
   assert.equal(app.concAt(42), null, "a bare scalar is not an envelope");
   // (b) gen-data actually CAPTURES conc_at_sustained / conc_at_peak off the raw cell (the #65 payload).
@@ -2892,8 +3090,7 @@ test("#27 CLASS: every RSS field is NULL-SAFE - a null RSS renders 'not measured
 
 test("#27: a fallback stream record with NULL counts seals to not-measured, never a fabricated 0", () => {
   // The producer can now abort before any rung: streams_sustained / _fps / cpu_fps are all nullable.
-  const rec = streamRec({ streams_sustained: null, streams_sustained_fps: null, cpu_fps: null,
-    streams_sustained_mock_bound: null, cpu_fps_mock_bound: null });
+  const rec = streamRec({ streams_sustained: null, streams_sustained_fps: null, cpu_fps: null });
   for (const k of ["streams_sustained", "streams_sustained_fps", "cpu_fps"]) {
     assert.equal(app.mval(rec[k]), null);
     assert.equal(rec[k].suppressed, false, `${k}: an ABSENT reading is not-measured, never "suppressed"`);
@@ -3798,38 +3995,58 @@ test("protocol grid: a matrix-less gateway renders an all-n/a row with its reaso
 // SITE-01. The oracle compared `.v` and nothing else, so everything the envelope SAYS about its number
 // was unverified: a reason flattened back to "not_measured", a zero-note swapped between "no qualifying
 // ceiling" and "measured failure", a lost detail. Each preserves the number, so each verified green.
-test("SITE-01: the oracle re-derives the whole envelope - reason, note, detail, paced-match", () => {
+// The `paced_match` arm this test used to carry is gone with the suppression it belonged to: it was a
+// boolean restatement of the retired `*_mock_bound` verdict ("this number matched the paced upstream"),
+// which was all a verdict could express. The engine now publishes the ceiling and the fraction of it
+// reached, so the same information arrives as `headroom` + `rig_ceiling` - numbers a reader can weigh,
+// where 0.993 and 0.20 were both `paced_match: undefined` before. They are PUBLISHED fields, so the
+// oracle must re-derive them for the same reason it re-derives the reason and the note: anything the
+// envelope says about its number is data the board renders, and an unverified fact can drift.
+test("SITE-01: the oracle re-derives the whole envelope - reason, note, detail, headroom, ceiling", () => {
   const oe = checkMod.oracleEnvelope;
   // an absence carries the ENGINE's reason and its prose, not a flattened token
-  assert.deepEqual(oe(null, undefined, { absent: { reason: "below_resolution", detail: "too small to weigh" } }),
-    { v: 0, reason: "below_resolution", note: null, detail: "too small to weigh", paced_match: false });
-  assert.deepEqual(oe(null, undefined, {}),
-    { v: null, reason: "not_measured", note: null, detail: null, paced_match: false });
+  assert.deepEqual(oe(null, { absent: { reason: "below_resolution", detail: "too small to weigh" } }),
+    { v: 0, reason: "below_resolution", note: null, detail: "too small to weigh", headroom: null, ceiling: null });
+  assert.deepEqual(oe(null, {}),
+    { v: null, reason: "not_measured", note: null, detail: null, headroom: null, ceiling: null });
+  // an absence publishes NO comparison, even when the raw artifact carried one: there is no measurement
+  // for a fraction to be a fraction of, and the seal's absent branch returns before the facts attach.
+  assert.deepEqual(oe(null, { headroom: 0.83, ceiling: 120, absent: { reason: "harness_error" } }),
+    { v: null, reason: "harness_error", note: null, detail: null, headroom: null, ceiling: null });
   // a certified zero carries the note that names WHICH zero it is
-  assert.equal(oe(0, false, { gated: true, zeroNote: ZERO_MEASURED_FAIL }).note, ZERO_MEASURED_FAIL);
-  assert.equal(oe(0, false, { gated: true, zeroNote: ZERO_NO_CEILING }).note, ZERO_NO_CEILING);
-  // a suppression names WHY it was suppressed
-  assert.equal(oe(9, true, { gated: true }).reason, "mock_bound");
-  assert.equal(oe(9, null, { gated: true }).reason, "unverifiable");
-  // and a paced publish carries the signal the raw flag stood for
-  assert.equal(oe(9, true, { gated: true, paced: true }).paced_match, true);
-  assert.equal(oe(9, false, { gated: true, paced: true }).paced_match, false);
+  assert.equal(oe(0, { zeroNote: ZERO_MEASURED_FAIL }).note, ZERO_MEASURED_FAIL);
+  assert.equal(oe(0, { zeroNote: ZERO_NO_CEILING }).note, ZERO_NO_CEILING);
+  // and the comparison's facts, which a certified 0 carries as much as a certified maximum does
+  assert.deepEqual(oe(0, { zeroNote: ZERO_MEASURED_FAIL, headroom: 0, ceiling: 52013 }),
+    { v: 0, reason: null, note: ZERO_MEASURED_FAIL, detail: null, headroom: 0, ceiling: 52013 });
+  assert.deepEqual(oe(9, { headroom: 0.993, ceiling: 9.06 }),
+    { v: 9, reason: null, note: null, detail: null, headroom: 0.993, ceiling: 9.06 });
+  // a present number NEVER resolves to a null value: the branch that could is gone, which is the
+  // property C2 asserts from the bundle side (no envelope in a published bundle is suppressed).
+  for (const h of [null, 0, 0.5, 1, 1.4]) assert.equal(oe(9, { headroom: h, ceiling: 10 }).v, 9);
   // THE SEAL AND THE ORACLE MUST AGREE ON ALL OF IT, not only on the number.
   for (const raw of [null, 0, 7]) {
-    for (const flag of [undefined, null, true, false]) {
-      for (const [gated, paced] of [[false, false], [true, false], [true, true]]) {
-        const s = sealMetric(raw, { gated, paced, flag, zeroNote: ZERO_MEASURED_FAIL });
-        const o = oe(raw, flag, { gated, paced, zeroNote: ZERO_MEASURED_FAIL });
-        assert.equal(s.reason ?? null, o.reason, `reason for raw=${raw} flag=${flag} gated=${gated} paced=${paced}`);
-        assert.equal(s.note ?? null, o.note, `note for raw=${raw} flag=${flag} gated=${gated} paced=${paced}`);
-        assert.equal(s.paced_match === true, o.paced_match, `paced_match for raw=${raw} flag=${flag}`);
+    for (const headroom of [null, 0, 0.5, 0.993, 1]) {
+      for (const ceiling of [null, 52013]) {
+        const s = sealMetric(raw, { headroom, ceiling, zeroNote: ZERO_MEASURED_FAIL });
+        const o = oe(raw, { headroom, ceiling, zeroNote: ZERO_MEASURED_FAIL });
+        const at = `raw=${raw} headroom=${headroom} ceiling=${ceiling}`;
+        assert.equal(s.reason ?? null, o.reason, `reason for ${at}`);
+        assert.equal(s.note ?? null, o.note, `note for ${at}`);
+        assert.equal(s.headroom ?? null, o.headroom, `headroom for ${at}`);
+        assert.equal(s.rig_ceiling ?? null, o.ceiling, `ceiling for ${at}`);
       }
     }
   }
 });
 
-testWithMatrixDonor("SITE-01 RED: a mangled reason / note / paced-match on a CORRECT number fails the oracle", () => {
+testWithMatrixDonor("SITE-01 RED: a mangled reason / note / headroom on a CORRECT number fails the oracle", () => {
   const at = (d) => matrixGw(d).best_cell.rps_sustained_20ms;
+  // THE CONTROL, so each mangle below is proved to be what fires the oracle rather than something else on
+  // the board being the real cause. An untouched clone owes NO R1 finding on this envelope at all; if this
+  // line ever fails, every assertion under it is passing for the wrong reason.
+  assert.deepEqual(checkConsistency(clone(), app).errors.filter((x) => x.startsWith("R1:")), [],
+    "an unmangled bundle must produce no independent-oracle finding, or the RED cases below prove nothing");
   // (a) a note the raw data does not imply: the number is untouched, so a value-only oracle sees nothing.
   {
     const d = clone(); at(d).note = ZERO_MEASURED_FAIL;
@@ -3844,12 +4061,22 @@ testWithMatrixDonor("SITE-01 RED: a mangled reason / note / paced-match on a COR
     assert.ok(e.some((x) => x.startsWith("R1:") && x.includes("`reason`")),
       `the oracle must catch an invented reason; got ${JSON.stringify(e.slice(0, 3))}`);
   }
-  // (c) a paced-match claim on a number that was never compared against a paced upstream.
+  // (c) A HEADROOM THE RAW ARTIFACT DOES NOT IMPLY. This case used to mangle `paced_match`, the boolean
+  //     the retired verdict was carried as. The published fact is now a fraction, which is strictly more
+  //     mangleable than a boolean was - it can attach to the wrong metric, or drift away from the ceiling
+  //     it claims to be a fraction of - and every one of those preserves the number, so a value-only
+  //     oracle reports green on all of them. Both halves of the fact are mangled here, separately.
   {
-    const d = clone(); at(d).paced_match = true;
+    const d = clone(); at(d).headroom = 0.42;
     const e = checkConsistency(d, app).errors;
-    assert.ok(e.some((x) => x.startsWith("R1:") && x.includes("`paced_match`")),
-      `the oracle must catch a fabricated paced-match signal; got ${JSON.stringify(e.slice(0, 3))}`);
+    assert.ok(e.some((x) => x.startsWith("R1:") && x.includes("`headroom`")),
+      `the oracle must catch a headroom the raw artifact does not imply; got ${JSON.stringify(e.slice(0, 3))}`);
+  }
+  {
+    const d = clone(); at(d).rig_ceiling = 1;
+    const e = checkConsistency(d, app).errors;
+    assert.ok(e.some((x) => x.startsWith("R1:") && x.includes("`ceiling`")),
+      `the oracle must catch a ceiling the raw artifact does not imply; got ${JSON.stringify(e.slice(0, 3))}`);
   }
 });
 
@@ -4040,24 +4267,39 @@ test("C5 lint: EVERY sealed metric field is policed, not just the four gated one
     "a field NAME passed as a string argument does not make the result an envelope");
 });
 
-// SITE-07. The paced branch's comment promised "the flag stays on the envelope as the signal it always
-// was" and nothing of the kind survived - C1 would reject the raw flag anyway. The signal is real
-// information (matched the mock's paced target vs proven unbound), so it is carried, not deleted.
-test("SITE-07: a paced publish carries the paced-match signal, in a form C1 accepts", () => {
-  const matched = sealMetric(39000, { gated: true, paced: true, flag: true, zeroNote: ZERO_MEASURED_FAIL });
+// SITE-07. The finding was that a published number said NOTHING about the comparison it came out of: the
+// paced branch's comment promised "the flag stays on the envelope as the signal it always was" and
+// nothing of the kind survived, so a gateway that merely matched the mock's paced target and one proven
+// far below its ceiling were indistinguishable in the bundle. That is a real difference between two
+// published numbers, and it was being dropped on the floor.
+//
+// The `paced_match: true` this test used to assert is gone with the verdict it restated - and the finding
+// it was the fix for is BETTER served now, which is why the test survives rather than being deleted. The
+// engine publishes the ceiling and the fraction of it reached, so instead of one boolean covering every
+// near-match, the envelope carries the number itself: 0.993 and 0.20 were both `paced_match: undefined`
+// before. What must hold is unchanged in shape - the signal reaches the envelope in a form C1 accepts
+// (named fields, never the raw `*_mock_bound` / `*_mock_ceiling` keys C1 refuses), it distinguishes the
+// two cases in the bundle, and C2 finds nothing suppressed.
+test("SITE-07: a near-ceiling publish carries the comparison's facts, in a form C1 accepts", () => {
+  const matched = sealMetric(39000, { headroom: 0.993, ceiling: 39275, zeroNote: ZERO_MEASURED_FAIL });
   assert.equal(matched.value, 39000, "matching a paced target publishes the number");
-  assert.equal(matched.paced_match, true, "and says so on the envelope");
-  const proven = sealMetric(39000, { gated: true, paced: true, flag: false, zeroNote: ZERO_MEASURED_FAIL });
-  assert.equal(proven.paced_match, undefined, "a proven-unbound number makes no paced-match claim");
+  assert.equal(matched.headroom, 0.993, "and says how close it came, on the envelope");
+  assert.equal(matched.rig_ceiling, 39275, "against a stated ceiling, so the fraction is checkable");
+  const proven = sealMetric(39000, { headroom: 0.2, ceiling: 195000, zeroNote: ZERO_MEASURED_FAIL });
+  assert.equal(proven.headroom, 0.2, "a proven-unbound number states its own, much smaller, fraction");
   assert.notEqual(JSON.stringify(matched), JSON.stringify(proven),
     "the two must be distinguishable in the bundle; that is the whole finding");
-  // NOT a re-emitted flag: no key ending in _mock_bound survives, which is what C1 forbids.
-  for (const k of Object.keys(matched)) assert.ok(!k.endsWith("_mock_bound"));
-  // a capacity metric is unchanged: a true flag there is still a suppression
-  assert.equal(sealMetric(39000, { gated: true, paced: false, flag: true }).suppressed, true);
-  // and the reader renders it as a note rather than leaving it as a silent field
-  assert.match(app.metric(matched).note, /paced upstream/);
-  // C1/C2 accept the envelope: it is certified, and paced_match is not a recoverable number
+  // NOT a re-emitted raw sibling: the engine's own key names are consumed, which is what C1 forbids
+  // anywhere in a published bundle.
+  for (const k of Object.keys(matched))
+    assert.ok(!/_(mock_bound|headroom|mock_ceiling|rig_ceiling)$/.test(k), `raw engine key ${k} survived the seal`);
+  // No usable reference costs the facts and NOT the value - the case that used to suppress outright.
+  const unreferenced = sealMetric(39000, { headroom: null, ceiling: null });
+  assert.equal(unreferenced.value, 39000);
+  assert.equal(unreferenced.suppressed, false);
+  assert.equal(unreferenced.headroom, undefined, "an unstated fraction is absent, never invented");
+  // C1/C2 accept the envelope in a real bundle: it is certified, and the facts are not a hidden second
+  // number for a render site to reach past the reader with.
   const d = { gateways: [{ key: "g", streaming: { path: { dialect: "openai" },
     source: { kind: "matrix", sweep: "6x6-stream-diagonal", build: "b", measured_at: "2026-07-24T00:00:00Z" },
     stream_served: true, streams_sustained: matched } }] };
@@ -4069,17 +4311,28 @@ test("SITE-07: a paced publish carries the paced-match signal, in a form C1 acce
 // evidence a reader most needs, since a 0 beside a real maximum is the claim that most demands it.
 test("SITE-08: a certified MEASURED ZERO keeps its concurrency and its sweep evidence", () => {
   const sweep = [{ conc: 64, rps: 0, p99_us: 900000, fail: 12 }, { conc: 128, rps: 0, p99_us: 900000, fail: 40 }];
-  const z = sealMetric(0, { gated: true, zeroNote: ZERO_NO_CEILING, extras: { concurrency: 64, conc_at: 64, sweep } });
+  const z = sealMetric(0, { zeroNote: ZERO_NO_CEILING, extras: { concurrency: 64, conc_at: 64, sweep },
+    headroom: 0, ceiling: 25700 });
   assert.equal(z.value, 0);
   assert.equal(z.certified, true);
   assert.equal(z.note, ZERO_NO_CEILING, "the note still names WHICH zero this is");
   assert.equal(z.concurrency, 64, "a certified zero was measured AT a concurrency");
   assert.deepEqual(z.sweep, sweep, "and its sweep is the evidence the zero rests on");
-  // a SUPPRESSED metric still drops its extras: it exposes no recoverable number (C2)
-  const s = sealMetric(500, { gated: true, flag: true, extras: { concurrency: 64, sweep } });
-  assert.equal(s.suppressed, true);
+  // The comparison's facts attach through the SAME path as the extras, for the same reason: a 0 beside a
+  // real ceiling is the claim that most demands its evidence, so "0 out of a rig ceiling of 25,700"
+  // reaches the reader rather than a bare 0.
+  assert.equal(z.headroom, 0, "a measured zero states its headroom too - zero of the ceiling is a reading");
+  assert.equal(z.rig_ceiling, 25700);
+  // AN ABSENCE - now the only no-value envelope - carries none of it: no extra, no fact, nothing
+  // recoverable (C2). This half used to make that point about a SUPPRESSED envelope, the shape that no
+  // longer exists; the property is the same one and the absence is what still has it.
+  const s = sealMetric(null, { extras: { concurrency: 64, sweep }, headroom: 0.9, ceiling: 25700 });
+  assert.equal(s.value, null);
+  assert.equal(s.suppressed, false, "an absence is not a suppression: nothing was withheld, nothing was measured");
   assert.equal(s.concurrency, undefined);
   assert.equal(s.sweep, undefined);
+  assert.equal(s.headroom, undefined, "and no fraction of a ceiling nothing was measured against");
+  assert.equal(s.rig_ceiling, undefined);
 });
 
 // SITE-09. The legacy top-level memory reseal tested RSS_FIELD_RE only and passed no absent option: the
@@ -4436,35 +4689,49 @@ test("freshness guard PUBLISHES a board with nothing measured on it (empty is no
   assert.ok(!data.gateways[0].best_cell, "with nothing measured there is no projected record to show");
   assert.ok(data.generated_at, "the bundle still stamps when it was generated");
 });
-// ---- a paced target is not a capacity, and the seal has to know the difference ------------------
-// The engine publishing a paced-rate match is worthless if the seal still throws it away: the whole
-// point is that the number reaches the board. This pins both halves of that contract.
-test("seal: matching a PACED upstream publishes the value; matching a CAPACITY still suppresses", () => {
-  // Stream metrics: the mock paces deltas, so its frames/sec is the target rate. Reaching it is the
-  // gateway keeping up - 24 of 69 cells were deleted for exactly this in the 2026-07-28 run.
-  const paced = sealMetric(12275, { gated: true, paced: true, flag: true });
+// ---- the rig's ceiling is a FACT ABOUT THE COMPARISON, never a reason to withhold ------------------
+// This test's title used to be "matching a PACED upstream publishes the value; matching a CAPACITY still
+// suppresses", and it pinned exactly that split: a stream metric at the mock's paced rate published,
+// while a throughput metric at the rig's capacity was replaced with {value:null, reason:"mock_bound"}, on
+// the reasoning that publishing it "would rank the rig rather than the gateway".
+//
+// The split was the wrong shape of answer. Both halves are the same situation - a measurement taken
+// against equipment that has a ceiling of its own - and in both the number is correct; what differs is
+// only how much weight it will bear. Suppressing the throughput half deleted correct measurements and
+// deleted the most of them from the gateways that performed best, while the reader was given no way to
+// tell a withheld number from one that was never taken. There is no split now: a present number is always
+// published, with the ceiling it was taken against and the fraction of it reached, and the reader does
+// the weighing the seal used to do on their behalf and without telling them.
+test("seal: a measurement at the rig's own ceiling is PUBLISHED, with the ceiling and the fraction reached", () => {
+  // Stream metrics: the mock paces deltas, so its frames/sec is a TARGET rate. Reaching it is the gateway
+  // keeping up - 24 of 69 cells were deleted for exactly this in the 2026-07-28 run.
+  const paced = sealMetric(12275, { headroom: 0.997, ceiling: 12312 });
   assert.equal(paced.value, 12275, "a gateway that kept pace must publish its rate");
   assert.equal(paced.certified, true);
   assert.equal(paced.suppressed, false);
+  assert.equal(paced.headroom, 0.997);
+  assert.equal(paced.rig_ceiling, 12312);
 
-  // Throughput metrics: the mock's capacity really can be the limit, and publishing would rank the
-  // rig rather than the gateway. Unchanged.
-  const capacity = sealMetric(12275, { gated: true, flag: true });
-  assert.equal(capacity.value, null, "a rig-bound throughput number must still be suppressed");
-  assert.equal(capacity.suppressed, true);
-  assert.equal(capacity.reason, "mock_bound");
+  // Throughput metrics: the SAME rule, which is the whole change. A saturating load really can hit the
+  // rig's capacity rather than the gateway's, and that is what the 0.997 says - it is stated, not acted on.
+  const capacity = sealMetric(12275, { headroom: 0.997, ceiling: 12312 });
+  assert.equal(capacity.value, 12275, "a near-ceiling throughput number is published, not withheld");
+  assert.equal(capacity.suppressed, false, "the SUPPRESSED envelope shape no longer exists at all");
+  assert.equal(capacity.reason, undefined, "and a certified number carries no absence reason");
+  assert.deepEqual(capacity, paced, "there is no longer a paced path and a capacity path - there is one rule");
 
-  // An UNMEASURABLE reference suppresses on both paths: it says nothing either way, and certifying a
-  // number on no evidence is what the gate exists to prevent.
-  for (const opts of [{ gated: true, paced: true }, { gated: true }]) {
-    const unverifiable = sealMetric(12275, { ...opts, flag: null });
-    assert.equal(unverifiable.value, null, `an unusable reference must suppress (${JSON.stringify(opts)})`);
-    assert.equal(unverifiable.reason, "unverifiable");
-  }
+  // AN UNMEASURABLE REFERENCE used to suppress on both paths ("certifying a number on no evidence is what
+  // the gate exists to prevent"). It was the number that had the evidence; the missing evidence was for
+  // the INTERPRETATION, so it is the interpretation that goes missing - the fraction is simply not stated.
+  const unreferenced = sealMetric(12275, { headroom: null, ceiling: null });
+  assert.equal(unreferenced.value, 12275, "an unusable reference costs the fraction, not the measurement");
+  assert.equal(unreferenced.certified, true);
+  assert.equal(unreferenced.headroom, undefined);
+  assert.equal(unreferenced.rig_ceiling, undefined);
 
-  // A clean, comfortably-under-the-ceiling reading is certified on both paths, as it always was.
-  assert.equal(sealMetric(500, { gated: true, paced: true, flag: false }).value, 500);
-  assert.equal(sealMetric(500, { gated: true, flag: false }).value, 500);
+  // A clean, comfortably-under-the-ceiling reading is certified exactly as it always was.
+  assert.equal(sealMetric(500, { headroom: 0.02, ceiling: 25000 }).value, 500);
+  assert.equal(sealMetric(500).value, 500);
 });
 // ---- the benchmark version is visible, and an older one is loud -------------------------------
 // The engine commit travelled into every row from the start and nothing rendered it, so "which
@@ -4564,8 +4831,8 @@ test("drawer: the surface renders - name, class, lanes, values and provenance", 
 // sit side by side and a winner is declared, covered by nothing. The row-building half is now
 // compareBodyHtml(gws, st), a pure function, and this is the regression the audit named: routing those
 // cells through mval() instead of metric() collapses states the table renders apart - a measured
-// failure becomes a bare n/a with no evidence, below-resolution's "≈0" becomes a plain 0, and a
-// suppressed metric loses its reason.
+// failure becomes a bare n/a with no evidence, below-resolution's "≈0" becomes a plain 0, and an absence
+// loses the engine's reason for it.
 test("compare: the table renders through metric(), so a bare-mval read cannot collapse the states", () => {
   const failing = { key: "a", display: "Alpha", lang: "Rust", cls: "AI proxy",
     best_cell: { ...bcCell({ dialect: "openai", added_latency_p99_us: 110 }),
@@ -4575,8 +4842,13 @@ test("compare: the table renders through metric(), so a bare-mval read cannot co
         detail: "the difference was at or below what the rig can resolve" } }) } };
   const bound = { key: "b", display: "Beta", lang: "Go", cls: "AI proxy",
     best_cell: { ...bcCell({ dialect: "openai", added_latency_p99_us: 500 }),
-      // a rig-bound throughput number: suppressed, and its REASON is the disclosure.
-      rps_max_proxy: sealMetric(32000, { gated: true, flag: true }) } };
+      // A metric the ENGINE reports as rig-limited: an absence with a stated reason, and the reason is
+      // the disclosure. This used to be `sealMetric(32000, {gated: true, flag: true})` - a SUPPRESSED
+      // envelope, the seal hiding a number it had. That shape is gone (the 32,000 would now publish), and
+      // with it went the only fixture in this test that produced a reason to render. `rig_limited` is a
+      // live engine absence token with its own prose, so the property under test - a no-number cell
+      // discloses WHY instead of vanishing into the same n/a an untested cell gets - is unchanged.
+      rps_max_proxy: sealMetric(null, { absent: { reason: "rig_limited" } }) } };
   const st = { ...app.newState(), view: "performance", mode: "peak",
     data: { gateways: [failing, bound] }, cmp: ["a", "b"] };
   const h = app.compareBodyHtml([failing, bound], st);
@@ -4588,8 +4860,13 @@ test("compare: the table renders through metric(), so a bare-mval read cannot co
   assert.match(h, /class="na failcell"/, "and is marked red, not folded in with the untested cells");
   // (2) BELOW-RESOLUTION reads ≈0, which is a RESULT (equal-best), not a hole and not a plain 0.
   assert.match(h, /≈0/, "below-resolution renders as ≈0 - the best answer the comparison can express");
-  // (3) A SUPPRESSED metric carries its reason on the tooltip rather than vanishing silently.
-  assert.match(h, /rig-limited|mock/i, "a suppressed number discloses WHY it is not shown");
+  // (3) A metric with NO NUMBER carries its reason on the tooltip rather than vanishing silently. The
+  // assertion is anchored on the engine reason's own prose, not on the word "mock": every perf column
+  // title in this table says "direct-to-mock", so a loose /mock/i matched the table's furniture and
+  // passed no matter what the cell rendered.
+  // (The prose is HTML-escaped into the title attribute, so the match avoids its apostrophe.)
+  assert.match(h, /own ceiling bounded this number/,
+    "a cell with no number discloses WHY, in the reason's own words");
   // (4) The contest is still called, on the metric that both gateways measured.
   assert.match(h, /class="best"/, "the winning cell per row is highlighted");
   // (5) ...and the winner is the one the measurement picks (lower added latency).
