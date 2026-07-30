@@ -13,7 +13,7 @@ Every number below is regenerated from the raw `results/*.json` - re-run `run-al
 | [Helicone](https://github.com/Helicone/ai-gateway) | 284 µs | 15,770 <sub>(+7% from 1 ms to no bound)</sub> | 43 MiB | 56 MiB | `target/release/ai-gateway` |
 | [Kong](https://github.com/Kong/kong) | 408 µs | 19,210 <sub>(+69% from 1 ms to no bound)</sub> | 403 MiB | 614 MiB | `kong:3.9.3` |
 | [APISIX](https://github.com/apache/apisix) | 457 µs | 19,319 <sub>(+185% from 1 ms to no bound)</sub> | 180 MiB | 212 MiB | `apache/apisix:3.17.0-debian` |
-| [Bifrost](https://github.com/maximhq/bifrost) | 900 µs | 5,198 <sub>(+225% from 1 ms to no bound)</sub> | 235 MiB | 815 MiB | `maximhq/bifrost:v1.6.6` |
+| [Bifrost](https://github.com/maximhq/bifrost) | 935 µs | 5,332 <sub>(+214% from 1 ms to no bound)</sub> | 251 MiB | 828 MiB | `maximhq/bifrost:v1.6.6` |
 | [GoModel](https://github.com/ENTERPILOT/GOModel) | 2,020 µs | 1,828 <sub>(+52% from 5 ms to no bound)</sub> | 51 MiB | 86 MiB | `enterpilot/gomodel:0.1.63` |
 | [Portkey](https://github.com/Portkey-AI/gateway) | 3,476 µs | 877 <sub>(+0% from 5 ms to no bound)</sub> | 124 MiB | 244 MiB | `portkeyai/gateway:1.15.2` |
 | [TensorZero](https://github.com/tensorzero/tensorzero) | 40,990 µs | 0 | 49 MiB | 70 MiB | `tensorzero/gateway:2026.6.0` |
@@ -39,7 +39,7 @@ The most req/s each gateway carried while 99% of requests finished under the col
 | [Helicone](https://github.com/Helicone/ai-gateway) | 14,799 | 15,564 | 15,770 | 15,770 | 15,770 | 15,770 | c=64, p99 6.65 ms, c=128 broke it |
 | [Kong](https://github.com/Kong/kong) | 12,412 | 19,210 | 19,210 | 20,945 | 20,945 | 20,945 | c=16, p99 2.53 ms, c=64 broke it |
 | [APISIX](https://github.com/apache/apisix) | 6,897 | 17,550 | 19,319 | 19,681 | 19,681 | 19,681 | c=64, p99 8.33 ms, c=128 broke it |
-| [Bifrost](https://github.com/maximhq/bifrost) | 1,812 | 4,883 | 5,198 | 5,198 | 5,198 | 5,883 | c=8, p99 5.07 ms, c=16 broke it |
+| [Bifrost](https://github.com/maximhq/bifrost) | 1,868 | 5,332 | 5,332 | 5,348 | 5,348 | 5,860 | c=8, p99 4.84 ms, c=16 broke it |
 | [GoModel](https://github.com/ENTERPILOT/GOModel) | 0 | 1,746 | 1,828 | 2,654 | 2,656 | 2,656 | c=4, p99 5.83 ms, c=8 broke it |
 | [Portkey](https://github.com/Portkey-AI/gateway) | 0 | 877 | 877 | 881 | 881 | 881 | c=1, p99 3.41 ms, c=8 broke it |
 | [TensorZero](https://github.com/tensorzero/tensorzero) | 0 | 0 | 0 | 6,351 | 13,332 | 13,332 | - |
@@ -61,7 +61,7 @@ Every rung of the same sweep the frontier readings above are taken from, summari
 | [Helicone](https://github.com/Helicone/ai-gateway) | 3,443 at c=1 | 15,710 at c=64 | 4.6× / 64× | c=16 | 316 µs → 32.9 ms | c=64 | c=256 |
 | [Kong](https://github.com/Kong/kong) | 3,976 at c=1 | 20,677 at c=128 | 5.2× / 128× | c=128 | 452 µs → 4.25 s | none | c=32768 |
 | [APISIX](https://github.com/apache/apisix) | 4,031 at c=1 | 19,237 at c=64 | 4.8× / 64× | c=64 | 482 µs → 158 ms | c=4096 | c=16384 |
-| [Bifrost](https://github.com/maximhq/bifrost) | 1,803 at c=1 | 5,803 at c=2048 | 3.2× / 2048× | c=1024 | 979 µs → 3.83 s | none | c=32768 |
+| [Bifrost](https://github.com/maximhq/bifrost) | 1,846 at c=1 | 5,790 at c=2048 | 3.1× / 2048× | c=1024 | 986 µs → 3.71 s | none | c=32768 |
 | [GoModel](https://github.com/ENTERPILOT/GOModel) | 1,356 at c=1 | 2,651 at c=128 | 2.0× / 128× | c=64 | 2.74 ms → 5.49 s | none | c=32768 |
 | [Portkey](https://github.com/Portkey-AI/gateway) | 861 at c=1 | 879 at c=8 | 1.0× / 8× | c=1 | 3.41 ms → 2.18 s | c=1024 | c=16384 |
 | [TensorZero](https://github.com/tensorzero/tensorzero) | 24 at c=1 | 13,747 at c=2048 | 572.8× / 2048× | c=1024 | 41 ms → 55 ms | c=1024 | c=2048 |
@@ -83,7 +83,7 @@ Same box, same mock, one gateway at a time. Streaming figures are the overhead t
 | [Helicone](https://github.com/Helicone/ai-gateway) | 461 µs | 14 µs | 255 (12,121 fps) | 15,578 (openai → anthropic) |
 | [Kong](https://github.com/Kong/kong) | 106.5 ms | 168.7 ms | 403 (18,980 fps) | 18,874 (openai → anthropic) |
 | [APISIX](https://github.com/apache/apisix) | 11.0 ms | 10.0 ms | 6,912 (90,909 fps) | n/a |
-| [Bifrost](https://github.com/maximhq/bifrost) | 984 µs | ≤ rig resolution | 1,027 (40,468 fps) | 5,037 (openai → cohere) |
+| [Bifrost](https://github.com/maximhq/bifrost) | 885 µs | ≤ rig resolution | 518 (22,481 fps) | 5,247 (openai → gemini) |
 | [GoModel](https://github.com/ENTERPILOT/GOModel) | 1.9 ms | ≤ rig resolution | 2,013 (60,430 fps) | 1,812 (openai → anthropic) |
 | [Portkey](https://github.com/Portkey-AI/gateway) | 29.3 ms | 448 µs | 952 (6,008 fps) | 876 (openai → cohere) |
 | [TensorZero](https://github.com/tensorzero/tensorzero) | 716 µs | 50 µs | 642 (9,251 fps) | 0 (openai → openai-responses) |
@@ -92,35 +92,35 @@ Same box, same mock, one gateway at a time. Streaming figures are the overhead t
 
 **✕** cells are measured refusals, not gaps: the gateway was offered the load and could not do the thing (buffered instead of streaming, rejected the Anthropic shape, or has no native key/limit governance). **n/a** = that suite hasn't been run for this gateway yet.
 
-![frontier_shape](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/frontier_shape.png?v=202607302109)
+![frontier_shape](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/frontier_shape.png?v=202607302118)
 
-![frontier_shapes_key](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/frontier_shapes_key.png?v=202607302109)
+![frontier_shapes_key](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/frontier_shapes_key.png?v=202607302118)
 
-![frontier_climb](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/frontier_climb.png?v=202607302109)
+![frontier_climb](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/frontier_climb.png?v=202607302118)
 
-![added_latency](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/added_latency.png?v=202607302109)
+![added_latency](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/added_latency.png?v=202607302118)
 
-![frontier_rps_at_bound](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/frontier_rps_at_bound.png?v=202607302109)
+![frontier_rps_at_bound](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/frontier_rps_at_bound.png?v=202607302118)
 
-![memory_rss](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/memory_rss.png?v=202607302109)
+![memory_rss](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/memory_rss.png?v=202607302118)
 
-![memory_recovery](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/memory_recovery.png?v=202607302109)
+![memory_recovery](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/memory_recovery.png?v=202607302118)
 
-![rps_per_dollar](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/rps_per_dollar.png?v=202607302109)
+![rps_per_dollar](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/rps_per_dollar.png?v=202607302118)
 
-![cost_per_million](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/cost_per_million.png?v=202607302109)
+![cost_per_million](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/cost_per_million.png?v=202607302118)
 
-![stream_added_ttft](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/stream_added_ttft.png?v=202607302109)
+![stream_added_ttft](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/stream_added_ttft.png?v=202607302118)
 
-![stream_added_gap](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/stream_added_gap.png?v=202607302109)
+![stream_added_gap](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/stream_added_gap.png?v=202607302118)
 
-![stream_sustained](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/stream_sustained.png?v=202607302109)
+![stream_sustained](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/stream_sustained.png?v=202607302118)
 
-![xlate_frontier_rps_at_bound](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/xlate_frontier_rps_at_bound.png?v=202607302109)
+![xlate_frontier_rps_at_bound](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/xlate_frontier_rps_at_bound.png?v=202607302118)
 
-![xlate_added_latency](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/xlate_added_latency.png?v=202607302109)
+![xlate_added_latency](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/xlate_added_latency.png?v=202607302118)
 
 ---
 Method: added latency = gateway p99 − direct-to-mock p99 at concurrency 1; a frontier reading = the highest req/s any probed concurrency carried while 99% of requests finished under the STATED bound and the gateway failed none it accepted (readings are published at 1, 5, 10, 50, 100 ms and with no bound; the columns above use 10 ms, and every caption names the bound it used); cost figures divide that 10 ms reading by $0.1632/hr for the pinned 4-core (m7g.xlarge) slice; RSS idle = after first 200, steady state = the level the RSS settled at under load. Same box, same mock, same load, one gateway at a time. Each gateway's source ref is pinned in its own `gateways/<name>/definition.json`; the built commit is in each row.
 
-<sub>Page + charts regenerated **2026-07-30 21:09 UTC** from the raw `results/*.json`.</sub>
+<sub>Page + charts regenerated **2026-07-30 21:18 UTC** from the raw `results/*.json`.</sub>
