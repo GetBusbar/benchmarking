@@ -1,0 +1,216 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (C) 2026 Busbar Inc and contributors
+#
+# RE-DERIVE THE FRONTIER FROM THE RAW RUNGS, INDEPENDENTLY OF THE ENGINE AND OF bench-audit.py.
+#
+# bench-audit.py already re-derives each reading from `sweep_max_proxy`. This exists anyway, and the
+# reason is not redundancy: that audit and the engine were written by the same hand in the same
+# sitting, so an agreement between them is one mind checking its own arithmetic. This file is written
+# from the PUBLISHED DEFINITION - `ResultSnapshot.definitions["perf.frontier"]`, the prose the board
+# shows a reader - rather than from `frontier.rs`. If the definition and the implementation ever say
+# different things, this is what notices.
+#
+# It is also the operator's tool during a run: point it at a snapshot the moment it harvests and it
+# prints the curve, the per-bound arithmetic, and anything that does not add up - which is how the
+# `lower_bound` semantics bug was caught on the first live run rather than on the published board.
+#
+# THE RULE, quoted from the published definition: for each declared bound, the most requests/sec the
+# cell carried while 99% of requests finished under that bound AND it failed none it accepted. Plus
+# one reading with no latency bound at all. Monotone non-decreasing across the bounds, because
+# relaxing a bound only ADDS rungs to the set the maximum is taken over.
+#
+# WHERE THIS IS DELIBERATELY LESS PRECISE THAN THE ENGINE, and why that is safe: a published
+# `SweepPoint` carries no `ok` count, so "served cleanly" cannot be spelled `ok > 0 and fail == 0` as
+# the engine spells it. It is approximated as `rps > 0 and fail == 0`. The approximation can only ever
+# be WIDER than the engine's (a window with ok == 0 also has rps == 0), so a reading this file accepts
+# and the engine rejected would be reported here as a disagreement to investigate, never hidden.
+
+import glob
+import json
+import sys
+
+# Mirrors frontier::P99_BOUNDS_US. Parsed from the engine rather than hardcoded, so this cannot
+# quietly police a different axis than the one that ran - the same anti-drift reasoning bench-audit.py
+# uses for its own mirrors, and going blind counts as a failure rather than a pass.
+ENGINE_FRONTIER = "engine/src/frontier.rs"
+
+
+def declared_bounds_us():
+    import re
+
+    try:
+        src = open(ENGINE_FRONTIER).read()
+    except OSError as e:
+        raise SystemExit(f"cannot read {ENGINE_FRONTIER} to learn the declared bounds: {e}")
+    m = re.search(r"pub const P99_BOUNDS_US:\s*\[u64;\s*\d+\]\s*=\s*\[([^\]]+)\]", src)
+    if not m:
+        raise SystemExit(
+            f"could not find P99_BOUNDS_US in {ENGINE_FRONTIER}; refusing to guess the axis"
+        )
+    return [int(x.strip().replace("_", "")) for x in m.group(1).split(",") if x.strip()]
+
+
+def num(v):
+    """A published Measurement is either a bare number or null. Absence is None, never 0."""
+    if isinstance(v, dict):
+        v = v.get("value")
+    return v if isinstance(v, (int, float)) else None
+
+
+def rungs_of(perf):
+    out = []
+    for p in perf.get("sweep_max_proxy") or []:
+        out.append(
+            {
+                "conc": num(p.get("conc")),
+                "rps": num(p.get("rps")),
+                "p99_us": num(p.get("p99_us")),
+                "fail": num(p.get("fail")),
+            }
+        )
+    return [r for r in out if r["conc"] is not None]
+
+
+def clean(r):
+    # See the header: `rps > 0` stands in for the engine's `ok > 0`, and can only be wider.
+    return r["rps"] is not None and r["rps"] > 0 and r["fail"] == 0
+
+
+def qualifies(r, bound_us):
+    if not clean(r):
+        return False
+    if bound_us is None:
+        return True
+    return r["p99_us"] is not None and r["p99_us"] < bound_us
+
+
+def derive(rungs, bound_us):
+    ok = [r for r in rungs if qualifies(r, bound_us)]
+    if not ok:
+        return None
+    best = max(ok, key=lambda r: r["rps"])
+    above = [r["conc"] for r in rungs if r["conc"] > best["conc"] and not qualifies(r, bound_us)]
+    top = max((r["conc"] for r in rungs), default=0)
+    return {
+        "rps": best["rps"],
+        "conc": best["conc"],
+        "p99_us": best["p99_us"],
+        "disq": min(above) if above else None,
+        "lower_bound": best["conc"] >= top,
+    }
+
+
+def check(path, bounds_us, verbose):
+    d = json.load(open(path))
+    gw = d.get("gateway", "?")
+    eng = ((d.get("rig") or {}).get("engine") or {}).get("commit", "?")[:7]
+    problems = []
+    cells = 0
+    curves = []
+    for eg, up in ((d.get("matrix") or {}).get("upstreams") or {}).items():
+        for ing, cell in (up.get("cells") or {}).items():
+            if cell.get("served") is not True:
+                continue
+            perf = cell.get("perf") or {}
+            fr = perf.get("frontier")
+            at = f"{gw} {ing}>{eg}"
+            if not fr:
+                # A cell with no frontier is only honest if NO cell in this snapshot has one (the
+                # artifact predates the metric). Mixed is a dropped reading.
+                continue
+            cells += 1
+            rungs = rungs_of(perf)
+            if not rungs:
+                problems.append(f"{at}: publishes a frontier but no sweep - nothing can be re-derived")
+                continue
+            want_bounds = list(bounds_us) + [None]
+            got_bounds = [r.get("p99_bound_us") for r in fr]
+            if got_bounds != want_bounds:
+                problems.append(f"{at}: bounds {got_bounds} != declared {want_bounds}")
+            rates = []
+            row = []
+            for r in fr:
+                b = r.get("p99_bound_us")
+                label = "unbounded" if b is None else f"{b // 1000}ms"
+                pub_rps = num(r.get("rps"))
+                mine = derive(rungs, b)
+                rates.append(pub_rps)
+                row.append((label, pub_rps, r.get("concurrency"), num(r.get("p99_us")), r.get("lower_bound")))
+                if mine is None and pub_rps is not None:
+                    problems.append(f"{at} {label}: published {pub_rps} but no rung qualifies")
+                    continue
+                if mine is not None and pub_rps is None:
+                    problems.append(
+                        f"{at} {label}: published nothing but rungs qualify (best {mine['rps']:.0f} at c={mine['conc']})"
+                    )
+                    continue
+                if mine is None:
+                    continue
+                if abs(mine["rps"] - pub_rps) > 1.0:
+                    problems.append(f"{at} {label}: published {pub_rps} rps, re-derived {mine['rps']:.0f}")
+                if num(r.get("concurrency")) != mine["conc"]:
+                    problems.append(
+                        f"{at} {label}: published c={num(r.get('concurrency'))}, re-derived c={mine['conc']}"
+                    )
+                if bool(r.get("lower_bound")) != mine["lower_bound"]:
+                    problems.append(
+                        f"{at} {label}: lower_bound={r.get('lower_bound')}, re-derived {mine['lower_bound']}"
+                    )
+                if b is not None and mine["p99_us"] is not None and mine["p99_us"] >= b:
+                    problems.append(f"{at} {label}: winning rung's tail {mine['p99_us']}us is not under its own bound")
+            present = [x for x in rates if x is not None]
+            for a, bb in zip(present, present[1:]):
+                if bb < a:
+                    problems.append(f"{at}: frontier inverts across bounds: {rates}")
+                    break
+            spread = (max(present) / min(present)) if present and min(present) else None
+            curves.append((at, row, spread, max((r["conc"] for r in rungs), default=0), len(rungs)))
+    if verbose:
+        for at, row, spread, top, nrungs in curves:
+            print(f"\n--- {at}   ({nrungs} rungs, top c={top}"
+                  + (f", spread {spread:.2f}x)" if spread else ")"))
+            for label, rps, conc, p99, lb in row:
+                pl = "-" if p99 is None else f"{p99/1000:.2f}ms"
+                print(f"    {label:>9} {str(rps):>9} rps @c={str(conc):>6}  p99={pl:>10}"
+                      + ("  FLOOR" if lb else ""))
+    return gw, eng, cells, problems
+
+
+def main():
+    args = [a for a in sys.argv[1:] if not a.startswith("-")]
+    verbose = "-v" in sys.argv or "--verbose" in sys.argv
+    paths = args or sorted(glob.glob("results/snapshots/*.json"))
+    bounds = declared_bounds_us()
+    print(f"declared bounds (from {ENGINE_FRONTIER}): {[b//1000 for b in bounds]} ms + unbounded")
+    total_cells = 0
+    all_problems = []
+    engines = {}
+    for p in paths:
+        try:
+            gw, eng, cells, problems = check(p, bounds, verbose)
+        except Exception as e:  # a snapshot mid-write during a live run is not a defect
+            print(f"  SKIP {p}: {e}")
+            continue
+        if cells == 0:
+            continue
+        engines.setdefault(eng, []).append(gw)
+        total_cells += cells
+        all_problems += problems
+        print(f"\n{gw:16s} engine {eng}  {cells} cell(s) with a frontier"
+              + ("" if not problems else f"  <-- {len(problems)} PROBLEM(S)"))
+    print(f"\n{'=' * 78}")
+    print(f"re-derived {total_cells} cell(s) carrying a frontier")
+    if len(engines) > 1:
+        print(f"MIXED ENGINES: {dict((k, len(v)) for k, v in engines.items())} - not comparable")
+    for x in all_problems:
+        print(f"  PROBLEM: {x}")
+    if all_problems:
+        print(f"\nFAIL: {len(all_problems)} problem(s)")
+        return 1
+    print("\nPASS: every published reading re-derives from its own rungs")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
