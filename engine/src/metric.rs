@@ -294,7 +294,7 @@ impl Metric for Throughput {
             .map(|bound| match crate::frontier::read_at(&rungs, bound) {
                 Some(r) => crate::record::FrontierReading {
                     p99_bound_us: bound.map(|b| b as i64),
-                    rps: Measurement::Measured(r.rps as i64),
+                    rps: Measurement::Measured(r.rps),
                     concurrency: Measurement::Measured(i64::from(r.concurrency)),
                     // The tail the winning rung ACTUALLY produced. Absent when the rung carried no
                     // latency reading, which only the unbounded reading can select.
@@ -323,17 +323,28 @@ impl Metric for Throughput {
                 // bound that yielded nothing from a bound we forgot to report.
                 None => {
                     let absent = crate::frontier::absence_for(&rungs, bound);
-                    let carry = || match (absent.reason().cloned(), absent.detail()) {
-                        (Some(rr), Some(d)) => Measurement::absent_because(rr, d),
-                        (Some(rr), None) => Measurement::absent(rr),
-                        (None, _) => Measurement::absent(Absent::NotMeasured),
+                    // Generic over the measurement's type: `rps` is f64 (fractional below 1/s) while
+                    // its siblings are counts, and one absence has to be spellable for both.
+                    let carry = |()| -> Measurement<f64> {
+                        match (absent.reason().cloned(), absent.detail()) {
+                            (Some(rr), Some(d)) => Measurement::absent_because(rr, d),
+                            (Some(rr), None) => Measurement::absent(rr),
+                            (None, _) => Measurement::absent(Absent::NotMeasured),
+                        }
+                    };
+                    let carry_i = |()| -> Measurement<i64> {
+                        match (absent.reason().cloned(), absent.detail()) {
+                            (Some(rr), Some(d)) => Measurement::absent_because(rr, d),
+                            (Some(rr), None) => Measurement::absent(rr),
+                            (None, _) => Measurement::absent(Absent::NotMeasured),
+                        }
                     };
                     crate::record::FrontierReading {
                         p99_bound_us: bound.map(|b| b as i64),
-                        rps: carry(),
-                        concurrency: carry(),
-                        p99_us: carry(),
-                        first_disqualified_conc: carry(),
+                        rps: carry(()),
+                        concurrency: carry_i(()),
+                        p99_us: carry_i(()),
+                        first_disqualified_conc: carry_i(()),
                         lower_bound: false,
                     }
                 }
@@ -362,7 +373,7 @@ impl Metric for Throughput {
                     Some(r) => Measurement::Measured(r.ok as i64),
                     None => Measurement::absent(Absent::NotMeasured),
                 },
-                rps: Measurement::Measured(pt.value as i64),
+                rps: Measurement::Measured(pt.value),
                 p99_us: match pt.reading.and_then(|r| r.p99_us) {
                     Some(v) => Measurement::Measured(v as i64),
                     None => Measurement::absent(Absent::NotMeasured),
@@ -1742,7 +1753,7 @@ mod tests {
                 let pt = || crate::record::SweepPoint {
                     conc: 1,
                     ok: Measurement::Measured(1_000),
-                    rps: Measurement::Measured(10),
+                    rps: Measurement::Measured(10.0),
                     p99_us: Measurement::Measured(20),
                     fail: Measurement::Measured(0),
                 };

@@ -539,7 +539,7 @@ impl Probe for SweepProbe<'_> {
         // numbers described two different states of it. Carrying the reading is what lets one sweep
         // answer both, from one set of windows, on one state of the gateway.
         Some(
-            Sample::new(stats.rps() as f64, stats.fail == 0 && stats.ok > 0).with_reading(
+            Sample::new(stats.rps(), stats.fail == 0 && stats.ok > 0).with_reading(
                 crate::search::Reading {
                     p99_us: stats.p99_us,
                     ok: stats.ok,
@@ -846,6 +846,66 @@ pub const SUSTAINED_MAX_FAIL_RATIO: f64 = 0.001;
 /// bisection's answer - far enough to find a rung that genuinely holds, short enough that a cell
 /// cannot spend its whole budget here.
 const MAX_CEILING_STEPDOWNS: usize = 4;
+
+/// WHY the sustained-stream search ended without a ceiling.
+///
+/// It exists because the absence used to be described by one hardcoded sentence no matter how the
+/// search ended, and the five endings are not the same fact - one of them is OURS. Publishing "the
+/// gateway did not hold the gate" for a window the RIG failed to take is the attribution error this
+/// whole board is built to avoid, and it is invisible: the sentence reads like a measurement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StreamStop {
+    /// The rig could not complete its windows at this concurrency. Never the gateway's result.
+    RigRanShort { measured: usize, wanted: usize },
+    /// Halving reached the floor of the searched range without finding a rung that holds.
+    FloorReached { last: u32 },
+    /// A stepped-down rung failed the gate on its very first window.
+    SteppedRungFailed { at: u32 },
+    /// The window could not be taken at all at this concurrency.
+    WindowUnavailable { at: u32 },
+    /// The step-down budget was genuinely spent without finding a rung that holds.
+    BudgetExhausted,
+}
+
+impl StreamStop {
+    /// A rig failure is a `HarnessError`; everything else is a measurement that did not resolve.
+    /// Filing our own shortfall under `NotMeasured` would put it among the gateway's results.
+    fn absent_kind(self) -> Absent {
+        match self {
+            StreamStop::RigRanShort { .. } | StreamStop::WindowUnavailable { .. } => {
+                Absent::HarnessError
+            }
+            _ => Absent::NotMeasured,
+        }
+    }
+
+    fn describe(self, proved: u32, budget: usize) -> String {
+        match self {
+            StreamStop::RigRanShort { measured, wanted } => format!(
+                "the bisection proved c={proved}, but re-measurement completed only {measured} of \
+                 {wanted} windows - the RIG ran short, not the gateway, so no ceiling is published \
+                 rather than one walked down on our own missing windows"
+            ),
+            StreamStop::FloorReached { last } => format!(
+                "the bisection proved c={proved}, but it did not hold on re-measurement and halving \
+                 reached the bottom of the searched range at c={last} without finding a concurrency \
+                 that did"
+            ),
+            StreamStop::SteppedRungFailed { at } => format!(
+                "the bisection proved c={proved}, but it did not hold on re-measurement and the \
+                 stepped-down rung at c={at} failed the stream gate on its first window"
+            ),
+            StreamStop::WindowUnavailable { at } => format!(
+                "the bisection proved c={proved}, but re-measurement could not take a window at all \
+                 at c={at} - a rig failure, so nothing is published about the gateway here"
+            ),
+            StreamStop::BudgetExhausted => format!(
+                "the bisection proved c={proved}, but that concurrency did not hold the stream gate \
+                 on re-measurement and stepping down found none that did within {budget} attempts"
+            ),
+        }
+    }
+}
 
 /// One rung as the sustained-throughput GATE saw it, carrying the p99 and fail count behind its
 /// pass/fail verdict.
@@ -1675,6 +1735,9 @@ pub fn sweep_streams_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> Cel
                 let mut ceiling = c;
                 let mut first_fps = v;
                 let mut winner: Option<(u32, f64)> = None;
+                // Defaults to the budget case, which is what the loop ends on when nothing else
+                // interrupts it; every other exit overwrites this at its own `break`.
+                let mut stop = StreamStop::BudgetExhausted;
                 for _ in 0..MAX_CEILING_STEPDOWNS {
                     let mut held = 1usize; // the bisection's own winning window is a real vote
                     let mut total = 1usize;
@@ -1727,10 +1790,15 @@ pub fn sweep_streams_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> Cel
                              a single window",
                             crate::search::WINDOWS_PER_RUNG
                         );
+                        stop = StreamStop::RigRanShort {
+                            measured: total,
+                            wanted: crate::search::WINDOWS_PER_RUNG,
+                        };
                         break;
                     }
                     let next = ceiling / 2;
                     if next < lo.max(1) || next == ceiling {
+                        stop = StreamStop::FloorReached { last: ceiling };
                         break;
                     }
                     eprintln!(
@@ -1747,11 +1815,15 @@ pub fn sweep_streams_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> Cel
                             let passed = streams_gate_passes(&w);
                             p.points.push(point_of(&w, passed));
                             if !passed {
+                                stop = StreamStop::SteppedRungFailed { at: ceiling };
                                 break;
                             }
                             first_fps = w.fps();
                         }
-                        None => break,
+                        None => {
+                            stop = StreamStop::WindowUnavailable { at: ceiling };
+                            break;
+                        }
                     }
                 }
                 match winner {
@@ -1760,14 +1832,31 @@ pub fn sweep_streams_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> Cel
                         fps: Measurement::Measured(fps),
                         points: p.points,
                     },
+                    // THE REASON IS THE ONE THAT ACTUALLY HAPPENED, not one sentence for five outcomes.
+                    //
+                    // This was a single hardcoded string - "stepping down found none that did within N
+                    // attempts" - emitted for EVERY way the search ends without a winner. There are five,
+                    // and they are not the same fact:
+                    //
+                    //   * the rig could not complete its windows          (OUR failure, and the code says
+                    //                                                      so five lines up before
+                    //                                                      breaking with this message)
+                    //   * the step-down floor was reached
+                    //   * a stepped rung's first window failed the gate
+                    //   * the window could not be taken at all
+                    //   * the step-down budget was genuinely exhausted
+                    //
+                    // Reporting a RIG shortfall as "the gateway did not hold the gate" is the precise
+                    // error this board exists to avoid, and it was doing it in a sentence that reads like
+                    // a measurement. It also made two opposite findings render identically: busbar
+                    // delivering ZERO frames on re-measurement and litellm-rust degrading gracefully near
+                    // a real ceiling of ~3,144 streams got the same words, so the site could not tell a
+                    // gateway's collapse from our own instrument giving up.
                     None => CellStreams {
                         concurrency: Measurement::absent(Absent::NotMeasured),
                         fps: Measurement::absent_because(
-                            Absent::NotMeasured,
-                            format!(
-                                "the bisection proved c={c}, but that concurrency did not hold the stream gate \
-                                 on re-measurement and stepping down found none that did within {MAX_CEILING_STEPDOWNS} attempts"
-                            ),
+                            stop.absent_kind(),
+                            stop.describe(c, MAX_CEILING_STEPDOWNS),
                         ),
                         points: p.points,
                     },
@@ -2744,12 +2833,17 @@ while True:
             None,
             "no rung held a majority of real windows, so nothing was proven sustained"
         );
+        // TIGHTENED, not relaxed. It used to accept the generic "did not hold the stream gate",
+        // which was the ONE sentence every ending shared - so this assertion passed for endings that
+        // had nothing to do with a stepped-down rung, including a RIG shortfall. This test's own name
+        // says which ending it builds, so it now demands that ending's own words.
         assert!(
             r.fps
                 .detail()
                 .unwrap_or_default()
-                .contains("did not hold the stream gate"),
-            "the absence must carry why the confirmed ceiling was not published: {:?}",
+                .contains("failed the stream gate on its first window"),
+            "the absence must name THIS ending - a stepped-down rung failing its first window - \
+             rather than a sentence shared with every other way the search can end: {:?}",
             r.fps.detail()
         );
     }
@@ -4490,5 +4584,88 @@ while True:
         };
         let why = w.engine_fault().expect("a NaN clock is a fault");
         assert!(why.contains("is wrong"), "{why}");
+    }
+}
+
+#[cfg(test)]
+mod stream_stop_tests {
+    use super::*;
+
+    // ONE SENTENCE FOR FIVE OUTCOMES WAS THE BUG, so the test is that the five outcomes say five
+    // different things - and that the two which are OURS are attributed to the harness.
+    #[test]
+    fn each_way_the_stream_search_ends_reports_its_own_cause() {
+        let proved = 3144;
+        let budget = MAX_CEILING_STEPDOWNS;
+        let cases = [
+            StreamStop::RigRanShort {
+                measured: 1,
+                wanted: 3,
+            },
+            StreamStop::FloorReached { last: 4 },
+            StreamStop::SteppedRungFailed { at: 1572 },
+            StreamStop::WindowUnavailable { at: 786 },
+            StreamStop::BudgetExhausted,
+        ];
+        let texts: Vec<String> = cases.iter().map(|c| c.describe(proved, budget)).collect();
+        for (i, a) in texts.iter().enumerate() {
+            for (j, b) in texts.iter().enumerate() {
+                assert!(
+                    i == j || a != b,
+                    "two different endings publish the SAME sentence, which is the defect: {a}"
+                );
+            }
+            assert!(
+                a.contains("3144"),
+                "every reason names the concurrency the bisection proved"
+            );
+        }
+
+        // THE ATTRIBUTION, which is the half that matters. A window the RIG failed to take is not a
+        // fact about the gateway, and filing it under NotMeasured would put our shortfall among the
+        // gateway's results.
+        assert!(
+            matches!(
+                StreamStop::RigRanShort {
+                    measured: 1,
+                    wanted: 3
+                }
+                .absent_kind(),
+                Absent::HarnessError
+            ),
+            "a rig shortfall must be a HarnessError, not a gateway measurement"
+        );
+        assert!(
+            matches!(
+                StreamStop::WindowUnavailable { at: 1 }.absent_kind(),
+                Absent::HarnessError
+            ),
+            "a window we could not take is our failure"
+        );
+        assert!(
+            matches!(
+                StreamStop::BudgetExhausted.absent_kind(),
+                Absent::NotMeasured
+            ),
+            "exhausting the step-down budget IS a statement about the gateway"
+        );
+        assert!(
+            matches!(
+                StreamStop::SteppedRungFailed { at: 1 }.absent_kind(),
+                Absent::NotMeasured
+            ),
+            "a rung that failed the gate is the gateway's result"
+        );
+
+        // And the rig case must SAY it was the rig, in words a reader of the board will see.
+        let rig = StreamStop::RigRanShort {
+            measured: 1,
+            wanted: 3,
+        }
+        .describe(proved, budget);
+        assert!(
+            rig.contains("RIG ran short") && rig.contains("not the gateway"),
+            "the rig's own shortfall must name itself rather than reading as the gateway's failure: {rig}"
+        );
     }
 }
