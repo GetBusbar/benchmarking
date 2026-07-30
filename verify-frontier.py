@@ -73,8 +73,21 @@ def rungs_of(perf):
 
 
 def clean(r):
-    # See the header: `rps > 0` stands in for the engine's `ok > 0`, and can only be wider.
-    return r["rps"] is not None and r["rps"] > 0 and r["fail"] == 0
+    """Did this rung serve everything it accepted? Approximates the engine's `ok > 0 and fail == 0`.
+
+    A P99 COUNTS AS PROOF OF COMPLETION. `rps > 0` alone was wrong, and it cost a real catch: plano at
+    c=256 published `rps: 0, p99_us: 3398432, fail: 0`, which `rps > 0` reads as dirty - but a percentile
+    cannot exist without a completed, timed request, so ok >= 1 and the rate merely rounded down through
+    the engine's `as i64` (one request over four seconds is 0.25 rps). Treating it as dirty makes this
+    tool disagree with a correct engine.
+
+    `ok` is the one input `SweepPoint` does not publish, so this stays an approximation - but a wider one
+    than the engine's rule rather than a narrower one, which means its residual error is a missed catch
+    rather than a false alarm.
+    """
+    if r["fail"] != 0:
+        return False
+    return (r["rps"] is not None and r["rps"] > 0) or r["p99_us"] is not None
 
 
 def qualifies(r, bound_us):
@@ -156,6 +169,18 @@ def check(path, bounds_us, verbose):
                 if bool(r.get("lower_bound")) != mine["lower_bound"]:
                     problems.append(
                         f"{at} {label}: lower_bound={r.get('lower_bound')}, re-derived {mine['lower_bound']}"
+                    )
+                # THE BOUNDARY PROOF, which this tool did not check at all and should have.
+                #
+                # bench-audit.py caught a first_disqualified_conc disagreement on plano that this file
+                # walked straight past, because it compared the rate, the concurrency, the tail and the
+                # floor flag - and not the one field that makes a reading a BOUNDARY rather than just a
+                # maximum. Two independent checkers are only worth two if they check the same claims.
+                pub_disq = num(r.get("first_disqualified_conc"))
+                if pub_disq != mine["disq"]:
+                    problems.append(
+                        f"{at} {label}: first_disqualified_conc={pub_disq}, re-derived {mine['disq']}"
+                        " - this is the half of the reading's proof that says it really is the boundary"
                     )
                 if b is not None and mine["p99_us"] is not None and mine["p99_us"] >= b:
                     problems.append(f"{at} {label}: winning rung's tail {mine['p99_us']}us is not under its own bound")

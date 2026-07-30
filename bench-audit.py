@@ -485,14 +485,34 @@ def rung_served_cleanly(r):
 
     `ok` IS THE ONE INPUT THE ARTIFACT DOES NOT PUBLISH. `SweepPoint` carries conc/rps/p99_us/fail, so
     the engine's `ok > 0` half - which stops a window that completed NOTHING from reading as "no
-    failures" by the accident that 0 of 0 looks clean - has to be approximated here, and `rps > 0` is the
-    approximation: a rung that completed nothing produced no rate. It is exact except for a rung whose
-    true rate rounds down to 0 through `as i64`, i.e. under one request per second, which the
-    re-derivation check handles explicitly rather than pretending cannot happen. An ABSENT `fail` is not
-    a clean rung either: "measured no failures" and "nothing was measured" are different facts.
+    failures" by the accident that 0 of 0 looks clean - has to be approximated here.
+
+    A P99 IS THE PROOF OF COMPLETION, and `rps > 0` alone was the wrong approximation. It produced a
+    FALSE POSITIVE on real data: plano at c=256 published `rps: 0, p99_us: 3398432, fail: 0`, and
+    `rps > 0` called that window dirty. But a percentile cannot exist without a completed, timed
+    request - so `ok >= 1`, the window served cleanly, and its rate merely rounded down through
+    `as i64` (one request over a four-second window is 0.25 rps, published as 0). The engine was right
+    and this check was wrong, which mattered because it then re-derived a
+    `first_disqualified_conc` the engine had correctly left absent.
+
+    The earlier comment here claimed the approximation "can only ever be WIDER than the engine's". That
+    was backwards: `rps > 0` is NARROWER than `ok > 0`, because a rate can round away while completions
+    cannot. Narrower means false positives, and a checker that cries wolf on correct data gets muted.
+
+    So a rung counts as having completed something if it carries EITHER a positive rate or a p99. That
+    is still an approximation - a window with `ok > 0` and neither would slip through - but it is now
+    wider than the engine's rule rather than narrower, so its residual error is a missed catch instead of
+    a false alarm. The real fix is for `SweepPoint` to publish `ok`; recorded as a follow-up rather than
+    done mid-run, because changing the engine would invalidate every column measured so far.
+
+    An ABSENT `fail` is not a clean rung either: "measured no failures" and "nothing was measured" are
+    different facts.
     """
-    fail, rps = r.get("fail"), r.get("rps")
-    return fail == 0 and isinstance(rps, (int, float)) and rps > 0
+    fail, rps, p99 = r.get("fail"), r.get("rps"), r.get("p99_us")
+    if fail != 0:
+        return False
+    completed = (isinstance(rps, (int, float)) and rps > 0) or isinstance(p99, (int, float))
+    return completed
 
 
 def rung_qualifies(r, bound_us):
