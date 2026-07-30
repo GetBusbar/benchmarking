@@ -426,6 +426,19 @@ pub const MEMORY_MAX_LOAD_S: u64 = 300;
 /// recovered. The same 60 seconds as the settle window, so the two halves of the curve are directly
 /// comparable to a reader.
 pub const MEMORY_RECOVERY_S: u64 = 60;
+/// The trailing slice of that window the published `recovered_rss_mib` is the MEDIAN OF.
+///
+/// Not the whole 60 s, deliberately: the first half still holds the descent from peak as allocators
+/// return pages, so a median over the full window would sit between the loaded and the recovered level
+/// and report neither. The trailing half is the part that has stopped moving.
+///
+/// NAMED, AND PUBLISHED, because it was neither. It was the expression `MEMORY_RECOVERY_S / 2.0` inline
+/// at the one call site, while `CellMemory.recovery_window_s` published 60 and the chart subtitle read
+/// "recovered RSS at the end of the 60 s recovery window". The number was a median over the trailing 30.
+/// A gateway still releasing memory across that minute therefore published a figure the stated window
+/// would not produce, and nothing in the artifact let a reader tell. The artifact now discloses the slice
+/// the number actually came from.
+pub const MEMORY_RECOVERY_MEDIAN_S: u64 = MEMORY_RECOVERY_S / 2;
 /// How long the process is watched BEFORE any load, and why it is a window rather than a reading.
 ///
 /// Idle used to be one instantaneous sample taken the moment the restart returned. Two things are
@@ -756,10 +769,10 @@ impl Metric for Memory {
             // TOO SOON TO BELIEVE IT. Not a failure and not the gateway's answer - just a window that
             // has not lasted long enough for `plateau_check`'s thresholds to mean what they were chosen
             // to mean. Keep loading. See `window_is_long_enough`.
-            if matches!(verdict, crate::stats::Verdict::Steady) && !window_is_long_enough(span) {
+            if verdict.is_steady() && !window_is_long_enough(span) {
                 verdict = crate::stats::Verdict::Undecidable;
             }
-            if matches!(verdict, crate::stats::Verdict::Steady) && !grew {
+            if verdict.is_steady() && !grew {
                 eprintln!(
                     "memory: the RSS series stopped growing at {} samples while the load window was \
                      still running - the sampler thread is gone, so 'steady' here is the absence of \
@@ -769,7 +782,7 @@ impl Metric for Memory {
                 sampler_died = true;
                 break;
             }
-            if matches!(verdict, crate::stats::Verdict::Steady) {
+            if verdict.is_steady() {
                 settled_at = Some(load_started.elapsed().as_secs() as i64);
                 break;
             }
@@ -853,7 +866,7 @@ impl Metric for Memory {
         // RECOVERED: where the curve ends, after the load has been gone for a minute. Taken from the
         // trailing recovery window rather than the single last reading, so one sample cannot set it.
         let recovered = {
-            let cut = taken.last().map(|s| s.t_s).unwrap_or(0.0) - MEMORY_RECOVERY_S as f64 / 2.0;
+            let cut = taken.last().map(|s| s.t_s).unwrap_or(0.0) - MEMORY_RECOVERY_MEDIAN_S as f64;
             let tail: Vec<f64> = taken
                 .iter()
                 .filter(|s| s.t_s >= cut)
@@ -872,7 +885,15 @@ impl Metric for Memory {
             "a settled window has no unsettled shape to describe".to_string(),
         );
         let (plateaued, growth) = match &verdict {
-            crate::stats::Verdict::Steady => (Some(true), Measurement::Measured(0.0)),
+            // STEADY PUBLISHES THE MEASURED SLOPE, NOT A ZERO. This substituted `Measured(0.0)` for the
+            // rate `plateau_check` had just fitted, so a window drifting 0.9% across the minute - inside
+            // `MEMORY_TREND_PCT`, hence steady - published a growth rate of exactly 0.000, and the number
+            // a reader would use to spot a slow leak was a constant a threshold chose. `plateaued` is the
+            // verdict and this is the measurement; the artifact publishes both, and neither is derived
+            // from the other.
+            crate::stats::Verdict::Steady {
+                growth_rate_mib_per_min,
+            } => (Some(true), growth_rate_mib_per_min.clone()),
             crate::stats::Verdict::NotSteady {
                 growth_rate_mib_per_min,
                 shape,
@@ -914,9 +935,11 @@ impl Metric for Memory {
                 MEMORY_TREND_PCT,
                 MEMORY_RANGE_PCT,
             ) {
-                crate::stats::Verdict::Steady => {
-                    (Measurement::Measured(1.0), Measurement::Measured(0.0))
-                }
+                // Same fix as the load window above: the flag is the verdict, the rate is the
+                // measurement, and a steady idle window still has a fitted slope worth publishing.
+                crate::stats::Verdict::Steady {
+                    growth_rate_mib_per_min,
+                } => (Measurement::Measured(1.0), growth_rate_mib_per_min),
                 crate::stats::Verdict::NotSteady {
                     growth_rate_mib_per_min,
                     shape,

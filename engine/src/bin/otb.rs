@@ -14,7 +14,7 @@ use std::io::Read;
 use std::process::ExitCode;
 
 use otb_engine::gen::{self, GenConfig};
-use otb_engine::stats::{self, Sample, Verdict};
+use otb_engine::stats::{self, Sample};
 use std::time::Duration;
 
 /// If `commands` left a minted credential at `<gw_dir>/.minted-auth`, its trimmed contents are what
@@ -702,15 +702,13 @@ fn main() -> ExitCode {
         // The shell is handed an ALREADY-WINDOWED file, so window over everything here to match.
         Some("plateau-check") => {
             let samples = read_samples();
-            let steady = matches!(
-                stats::plateau_check(
-                    &samples,
-                    f64::INFINITY,
-                    arg_f64(&args, 1, 1.0),
-                    arg_f64(&args, 2, 2.0)
-                ),
-                Verdict::Steady
-            );
+            let steady = stats::plateau_check(
+                &samples,
+                f64::INFINITY,
+                arg_f64(&args, 1, 1.0),
+                arg_f64(&args, 2, 2.0),
+            )
+            .is_steady();
             println!("{}", u8::from(steady));
             ExitCode::SUCCESS
         }

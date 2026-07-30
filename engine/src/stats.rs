@@ -58,7 +58,17 @@ pub enum Shape {
 pub enum Verdict {
     /// Both the trend test and the range test passed: the window is not moving in any direction that
     /// matters, and a caller may publish a steady-state number from it.
-    Steady,
+    ///
+    /// IT CARRIES THE MEASURED RATE TOO, and that is the point. This was a unit variant, and the caller
+    /// answered a Steady verdict by publishing `growth_rate_mib_per_min: Measured(0.0)` - substituting an
+    /// exact zero for the slope this function had just fitted. So a gateway drifting 0.9% across the
+    /// window (inside `MEMORY_TREND_PCT`, therefore "steady") published a growth rate of exactly zero,
+    /// and the number a reader would use to judge a slow leak was a constant chosen by a threshold rather
+    /// than anything measured. "Steady" is a verdict; the rate is a measurement; the artifact publishes
+    /// both, in separate fields, and neither may be derived from the other here.
+    Steady {
+        growth_rate_mib_per_min: Measurement<f64>,
+    },
     /// A real, publishable result: the window did not settle. Carries the growth rate so a caller can
     /// never say "not steady" without also saying how fast it moved, and the SHAPE of the movement,
     /// because "did not settle" describes two very different gateways and only one of them is a
@@ -72,6 +82,16 @@ pub enum Verdict {
     /// moved" are different claims, and collapsing them would let a too-short measurement masquerade
     /// as a settled one.
     Undecidable,
+}
+
+impl Verdict {
+    /// Did the window settle? A NAMED PREDICATE rather than `matches!(v, Verdict::Steady { .. })` at each
+    /// site: `Steady` gained a field (the fitted slope it used to make its caller invent), and a
+    /// brace-pattern inside `prop_assert!` breaks that macro's stringification of the expression. Callers
+    /// that only ask the yes/no question should not have to spell the payload they are ignoring.
+    pub fn is_steady(&self) -> bool {
+        matches!(self, Verdict::Steady { .. })
+    }
 }
 
 /// Keep only the trailing `window_s` seconds of `samples`, anchored to the LAST sample's own
@@ -190,7 +210,11 @@ pub fn plateau_check(samples: &[Sample], window_s: f64, trend_pct: f64, range_pc
     // positive threshold would bound growth only, since any decline, however steep, is always less
     // than a positive threshold and would read as settled.
     if drift.abs() < trend_pct && spread < range_pct {
-        Verdict::Steady
+        // The fitted slope travels WITH the verdict. It is already computed above for every path, and it
+        // was being dropped on exactly the path where the caller would otherwise invent a zero.
+        Verdict::Steady {
+            growth_rate_mib_per_min,
+        }
     } else {
         // The shape is decided by DRIFT, the net movement between the two halves, not by spread.
         // A window that ranged 40% but ended where it started is a wave; one that drifted upward is
@@ -291,6 +315,49 @@ pub fn percentile(values: &[f64], p: f64) -> Measurement<f64> {
 
 #[cfg(test)]
 mod tests {
+    // A STEADY WINDOW STILL HAS A SLOPE, AND PUBLISHES IT.
+    //
+    // `Verdict::Steady` was a unit variant, and `metric.rs` answered it with
+    // `growth_rate_mib_per_min: Measured(0.0)` - substituting an exact zero for the rate this function
+    // had just fitted. So a window drifting a little under `trend_pct` (steady, correctly) published a
+    // growth rate of precisely 0.000, and the number a reader would use to spot a SLOW leak was a
+    // constant chosen by the threshold rather than anything measured. Reverting the variant to a unit
+    // and the caller to `Measured(0.0)` fails on the second assertion below.
+    #[test]
+    fn a_steady_verdict_carries_the_slope_it_fitted_rather_than_an_assumed_zero() {
+        // Ten readings climbing gently: about 0.5% across the window, inside a 1% trend bar, so this is
+        // genuinely Steady - and genuinely still moving.
+        let s: Vec<super::Sample> = (0..10)
+            .map(|i| super::Sample {
+                t_s: i as f64 * 6.0,
+                mib: 100.0 + i as f64 * 0.05,
+            })
+            .collect();
+        let v = super::plateau_check(&s, f64::INFINITY, 1.0, 2.0);
+        assert!(
+            v.is_steady(),
+            "a 0.5% drift inside a 1% bar is steady: {v:?}"
+        );
+        let super::Verdict::Steady {
+            growth_rate_mib_per_min,
+        } = &v
+        else {
+            unreachable!("just asserted steady")
+        };
+        let rate = growth_rate_mib_per_min
+            .copied()
+            .expect("ten readings over a minute fit a slope");
+        assert!(
+            rate > 0.0,
+            "the window IS climbing at {rate} MiB/min - publishing 0.0 here would tell a reader the \
+             memory was flat when this function measured that it was not"
+        );
+        // And it is the same slope `growth_rate` computes standalone: the verdict must not carry a
+        // second, differently-derived rate.
+        let direct = super::growth_rate(&s).copied().expect("a slope");
+        assert!((rate - direct).abs() < 1e-9, "{rate} vs {direct}");
+    }
+
     use super::*;
     use proptest::prelude::*;
 
@@ -325,7 +392,10 @@ mod tests {
     #[test]
     fn a_genuinely_flat_series_is_a_plateau() {
         let s = mkseries(100.0, 0.0, 30);
-        assert_eq!(plateau_check(&s, WHOLE, 1.0, 2.0), Verdict::Steady);
+        assert!(matches!(
+            plateau_check(&s, WHOLE, 1.0, 2.0),
+            Verdict::Steady { .. }
+        ));
     }
 
     #[test]
@@ -333,7 +403,7 @@ mod tests {
         let s = mkseries(100.0, 1.0, 30);
         assert!(!matches!(
             plateau_check(&s, WHOLE, 1.0, 2.0),
-            Verdict::Steady
+            Verdict::Steady { .. }
         ));
     }
 
@@ -359,7 +429,7 @@ mod tests {
         let s = mkseries(118.0, 0.05, 30);
         assert!(!matches!(
             plateau_check(&s, WHOLE, 0.5, 2.0),
-            Verdict::Steady
+            Verdict::Steady { .. }
         ));
     }
 
@@ -368,7 +438,7 @@ mod tests {
         let s = mkseries_jitter(100.0, 0.0, 30, 5.0);
         assert!(!matches!(
             plateau_check(&s, WHOLE, 1.0, 2.0),
-            Verdict::Steady
+            Verdict::Steady { .. }
         ));
     }
 
@@ -377,7 +447,10 @@ mod tests {
     #[test]
     fn a_slight_downward_drift_within_the_range_gate_is_a_plateau() {
         let s = mkseries(100.0, -0.02, 30);
-        assert_eq!(plateau_check(&s, WHOLE, 1.0, 2.0), Verdict::Steady);
+        assert!(matches!(
+            plateau_check(&s, WHOLE, 1.0, 2.0),
+            Verdict::Steady { .. }
+        ));
     }
 
     #[test]
@@ -394,7 +467,10 @@ mod tests {
     #[test]
     fn exactly_four_samples_is_enough_to_judge() {
         let s = mkseries(100.0, 0.0, 4);
-        assert_eq!(plateau_check(&s, WHOLE, 1.0, 2.0), Verdict::Steady);
+        assert!(matches!(
+            plateau_check(&s, WHOLE, 1.0, 2.0),
+            Verdict::Steady { .. }
+        ));
     }
 
     // Boundary: drift and spread comparisons are strict "<", so sitting EXACTLY on either threshold
@@ -494,7 +570,7 @@ mod tests {
         ];
         assert!(!matches!(
             plateau_check(&s, WHOLE, 1_000.0, 2.0),
-            Verdict::Steady
+            Verdict::Steady { .. }
         ));
     }
 
@@ -602,7 +678,7 @@ mod tests {
             let series = linear_series(base, mid, dt, n);
             let steady = matches!(
                 plateau_check(&series, window_s, trend_pct, 1.0e9),
-                Verdict::Steady
+                Verdict::Steady { .. }
             );
             if steady {
                 lo = mid;
@@ -724,7 +800,7 @@ mod tests {
             let rate = boundary * margin;
             let series = linear_series(base, rate, dt, n);
             let verdict = plateau_check(&series, window_s, trend_pct, range_pct);
-            prop_assert!(!matches!(verdict, Verdict::Steady));
+            prop_assert!(!verdict.is_steady());
         }
 
         // Too few samples is always Undecidable, never a false NotSteady or Steady, regardless of what
