@@ -243,7 +243,26 @@ pub fn host_connection_ceiling() -> u32 {
 /// paces 64 frames at 20ms, so about 1.28 seconds - and for that entire time it also holds a task, a
 /// read buffer, and a file descriptor on the rig, one on the gateway, and one on the mock. The
 /// binding resource is therefore DESCRIPTORS, not ports, and descriptors are the smaller number by a
-/// wide margin on a stock box.
+/// wide margin on a STOCK box.
+///
+/// ON THE BENCH BOX IT IS NOT, AND THIS GUARD NEVER BINDS THERE. `run-on-ec2.sh` raises the fd limit
+/// to 1,048,576, so the descriptor term is 1048576/3 rounded down to a power of two = 262,144, while
+/// the port term is 32,768. `min()` therefore picks ports on every field run and the descriptor half
+/// of this derivation has never once participated in a result. The 2026-07-29 run climbing apisix to
+/// c=32,768 held-open streams is what that looks like: the guard written to stop it was inert.
+///
+/// NOT PAPERED OVER WITH A SMALLER NUMBER, deliberately. The note above on `STREAM_RUNAWAY_CAP`
+/// explains why - litellm-rust reached c=6,144 and aisix c=4,096 with every window passing, so a cap
+/// chosen anywhere near where measurements live would have clipped three gateways and published a
+/// smaller rung as their peak, which is worse than an honest hole. A ceiling chosen near where
+/// measurements live becomes part of the measurement.
+///
+/// What actually binds at 32,768 concurrent lanes is neither ports nor descriptors: it is MEMORY AND
+/// CPU IN THE ENGINE PROCESS, which holds an `SseReader` with its buffers per lane on a box that is
+/// also running the pinned gateway and the mock. That is the rig saturating, and the ladder cannot
+/// tell it apart from a gateway that is still fast - so the honest fix is to DETECT and disclose rig
+/// saturation, not to guess a number that stops the climb before it. Left as a known gap rather than
+/// closed with an invented threshold.
 ///
 /// The 2026-07-29 run inherited the port bound and climbed apisix's stream ladder to c=32768 on both
 /// of its streamable cells. Forty-nine thousand usable ports made that the largest power of two the
