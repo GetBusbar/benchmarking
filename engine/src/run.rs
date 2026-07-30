@@ -719,8 +719,11 @@ pub fn load_window_at(
         parsed.into_value().map(|u| GenStats {
             ok: u.ok.max(0) as u64,
             fail: u.fail.max(0) as u64,
-            elapsed_s: if u.rps > 0 {
-                u.ok as f64 / u.rps as f64
+            // `u.rps` is f64 now (fractional below 1/s), so the comparison and the division are
+            // both float. A sub-1/s window previously could not even reach here: it failed the i64
+            // parse and the whole window was classified as a HarnessError.
+            elapsed_s: if u.rps > 0.0 {
+                u.ok as f64 / u.rps
             } else {
                 0.0
             },
