@@ -2514,8 +2514,8 @@ test("cell chooser: Peak reads the best diagonal, Same reads a chosen diagonal, 
   assert.equal(app.frontierChooserCell(g, cust).v, 26000);
   // AND THE CHOSEN CELL'S SHAPE TRAVELS WITH IT. The three cells have different curves; the shape column
   // must read the chosen one, or the row shows one cell's rate beside another cell's slope.
-  assert.equal(app.frontierShapeCell(g, peak).text, `×${(32000 / 29000).toFixed(1)}`);
-  assert.equal(app.frontierShapeCell(g, same).text, `×${(27000 / 12000).toFixed(1)}`);
+  assert.equal(app.frontierShapeCell(g, peak).text, `×${(32000 / 29000).toFixed(1)} from ${app.boundLabel(1)}`);
+  assert.equal(app.frontierShapeCell(g, same).text, `×${(27000 / 12000).toFixed(1)} from ${app.boundLabel(1)}`);
   // A cell the gateway does NOT serve reads n/a (never fabricated), and the row is not dropped.
   const missing = { ...app.newState(), mode: "custom", xlateIn: "gemini", xlateOut: "cohere" };
   assert.equal(app.frontierChooserCell(g, missing).na, true);
@@ -2635,15 +2635,15 @@ test("Cluster-C/12: the streaming caption is CONDITIONAL on provenance (no hard 
   const fbData = { gateways: [{ key: "a", streaming: { source: { kind: "stream-fallback" } } },
     { key: "b", streaming: { source: { kind: "stream-fallback" } } }] };
   assert.equal(app.streamingProvenance(fbData).all, "fallback");
-  const fbCap = app.chooserCaption("streaming", st, fbData).join(" ");
+  const fbCap = app.captionText(app.chooserCaption("streaming", st, fbData));
   assert.ok(!/from the one 6x6 run/.test(fbCap), `fallback streaming caption must not positively claim the 6x6 run; got: ${fbCap}`);
   assert.ok(/stream suite/.test(fbCap), "fallback caption names the standalone stream suite");
   // Matrix-sourced streaming: the 6x6 claim IS honest.
   const mxData = { gateways: [{ key: "a", streaming: { source: { kind: "matrix" } } }] };
   assert.equal(app.streamingProvenance(mxData).all, "matrix");
-  assert.ok(/from the one 6x6 run/.test(app.chooserCaption("streaming", st, mxData).join(" ")), "matrix streaming may claim the 6x6 run");
+  assert.ok(/from the one 6x6 run/.test(app.captionText(app.chooserCaption("streaming", st, mxData))), "matrix streaming may claim the 6x6 run");
   // The Performance (perf) tab is always the 6x6 matrix - its caption is unaffected by streaming provenance.
-  assert.ok(/from the one 6x6 run/.test(app.chooserCaption("performance", st, fbData).join(" ")), "perf caption always names the 6x6 run");
+  assert.ok(/from the one 6x6 run/.test(app.captionText(app.chooserCaption("performance", st, fbData))), "perf caption always names the 6x6 run");
 });
 
 test("Δ-to-Peak: a non-peak cell reports its deviation vs the gateway's own best diagonal", () => {
@@ -2689,7 +2689,10 @@ testWithData("matrix popup shows the SAME chosen-cell values the Performance/Cus
       "the table reads the same reading at the same bound");
   } finally { app.state.bound = prev; }
   // … and the Δ-to-Peak vs the gateway's own best diagonal.
-  assert.ok(/vs peak \(OpenAI→OpenAI\)/.test(html), "popup names the peak reference cell");
+  // "vs its own cell", NOT "vs peak": best_cell prefers the openai diagonal and otherwise ranks on latency,
+  // so it is a representative cell and a positive req/s delta against it is ordinary, not impossible.
+  assert.ok(/vs its own cell \(OpenAI→OpenAI\)/.test(html), "popup names the reference cell without calling it a peak");
+  assert.ok(!/vs peak/.test(html), "and never calls it the peak");
   assert.ok(/\+31\.8% latency/.test(html), "popup shows Δ latency");
   // THE SHAPE IS ON THE POPUP TOO: a rate alone cannot say whether this cell is fast because the tail was
   // allowed to grow, which is what the matrix is most often opened to find out.
@@ -2740,7 +2743,7 @@ test("Memory tab attributes each gateway's peak cell (load_cell) and states the 
   assert.equal(memcell.get(bare).na, true);
   assert.ok(!memcell.render(bare).includes("tested-pill"), "no load_cell -> no pill");
   // The caption states the fixed identical load + cold-restart, NOT a "6x6 drives memory" claim.
-  const cap = app.memoryCaption({ gateways: [] }).join(" ");
+  const cap = app.captionText(app.memoryCaption({ gateways: [] }));
   assert.ok(/identical fixed load/i.test(cap) && /cold-?restart/i.test(cap), "caption states the fair fixed-load basis + cold restart");
   assert.ok(!/6x6 (sweep )?drives/i.test(cap), "caption drops any 6x6-drives-memory wording");
 });
@@ -3292,7 +3295,7 @@ test("#27 CLASS: every RSS field is NULL-SAFE - a null RSS renders 'not measured
   assert.deepEqual(app.memWindows(mem), { idle: 30, recovery: 45, steady: null });
   assert.deepEqual(app.boardMemWindows(bundle), { idle: 30, recovery: 45, steady: null },
     "the board's window labels must read the PER-CELL windows, not fall back to the 60 s default");
-  const cap = app.memoryCaption(bundle, st).join(" ");
+  const cap = app.captionText(app.memoryCaption(bundle, st));
   assert.ok(cap.includes("45 s"), `memory caption must render the run's own windows; got: ${cap}`);
   assert.ok(!/60 s/.test(cap), "the caption must not hard-code the default window");
   // (d) the DISCLOSURE the producer rides in memory.protocol must reach the board, not be silently carried.
@@ -3741,7 +3744,7 @@ test("memory: a WITHHELD plateau verdict is not a negative one - a rig failure i
   const st = memState([unmeasured], { mode: "same" });
   assert.ok(!/never settles|no steady state/i.test(app.COLUMN_SETS.memory.find((c) => c.id === "name").render(unmeasured, st)),
     "and it must not be painted with the pill either");
-  assert.ok(!app.memoryCaption({ gateways: [unmeasured] }, st).join(" ").match(/no steady state on any cell/),
+  assert.ok(!app.captionText(app.memoryCaption({ gateways: [unmeasured] }, st)).match(/no steady state on any cell/),
     "nor counted in the caption's tally of gateways with no steady state");
   // MIXED: one cell judged and failing, one withheld. The gateway IS flagged - we watched it fail
   // somewhere - but the claim narrows to what was actually measured.
@@ -3990,7 +3993,7 @@ test("memory degrades to the LEGACY single-window shape when the bundle has no p
   assert.ok(app.columnsFor("memory", perCell).map((c) => c.id).includes("memgrowth"));
   // The legacy row keeps its own honest caption (it really was measured on a throughput-peak cell).
   assert.match(memCol("tested").render(legacy, st), /peak cell/);
-  assert.match(app.memoryCaption(st.data, st).join(" "), /chosen by throughput/);
+  assert.match(app.captionText(app.memoryCaption(st.data, st)), /chosen by throughput/);
 });
 
 test("memory: a record with NO displayable value paints NO pill (all-or-nothing, the plano shape)", () => {
@@ -5009,6 +5012,9 @@ const drawerGw = () => ({
   best_cell: bcCell({ dialect: "openai", frontier: { 1: null, 10: 20000, none: 22000 },
     frontierOpts: { absent: FAIL_DETAIL, lowerBound: ["none"] } }),
 });
+/* A column's label/title may be a FUNCTION (a header whose wording depends on the selected bound or on a
+   tunable harness window). txtOf resolves either form, so a guard can scan every column's real copy. */
+const txtOf = (v) => (typeof v === "function" ? String(v()) : String(v ?? ""));
 const drawerState = (g, over = {}) => ({ ...app.newState(), view: "performance", mode: "peak",
   data: { gateways: [g] }, ...over });
 
@@ -5156,7 +5162,7 @@ test("FRONTIER: every surface NAMES the bound it is showing, and none can imply 
       app.state.bound = b;
       assert.equal(String(col.label()), app.boundColLabel(b), `the header renames itself for ${app.boundLabel(b)}`);
       assert.ok(String(col.title()).includes(app.boundClause(b)), "and the tooltip states the same clause");
-      assert.ok(app.frontierCaption(app.state, null).join(" ").includes(app.boundLabel(b)),
+      assert.ok(app.captionText(app.frontierCaption(app.state, null)).includes(app.boundLabel(b)),
         "and the Frontier caption names the column it has marked");
     }
   } finally { app.state.bound = prev; }
@@ -5212,8 +5218,10 @@ test("FRONTIER: switching the bound RE-RANKS the board, in front of the reader",
   assert.deepEqual(rank(null), ["steep", "flat"], "with no bound at all the ranking INVERTS");
   // ...and the two are not the same machine, which is what the shape column says in one number.
   const gainOf = (g, bound) => app.frontierShapeCell(g, { ...app.newState(), mode: "peak", bound });
-  assert.equal(gainOf(flat, 10).text, "×1.1", "flat: it barely gains by letting the tail out");
-  assert.equal(gainOf(steep, 10).text, "×2.4", "steep: it needs a loose tail to go fast");
+  // THE ORIGIN BOUND IS PART OF THE TEXT, always, including on the 1 ms rows. "×1.0" alone was rendered for
+  // both a gateway at full rate under a 1 ms tail and a gateway that holds nothing under 10 ms.
+  assert.equal(gainOf(flat, 10).text, "×1.1 from 1 ms", "flat: it barely gains by letting the tail out");
+  assert.equal(gainOf(steep, 10).text, "×2.4 from 1 ms", "steep: it needs a loose tail to go fast");
   assert.ok(gainOf(steep, 10).v > gainOf(flat, 10).v, "so the shape column separates them at any bound");
   // The gain is bound-INDEPENDENT (it is a property of the whole curve), which is why it is a stable
   // second ranking rather than a third reading of the selected bound.
@@ -5238,9 +5246,16 @@ test("FRONTIER: the tab publishes every reading as its own column, marked at the
   for (const b of app.BOUND_CHOICES) {
     const c = cols.find((x) => x.id === app.boundColId(b));
     assert.ok(c, `the frontier tab has a column for ${app.boundLabel(b)}`);
-    assert.equal(String(c.label), app.boundColLabel(b));
+    /* THE SHARED WORDS ARE STATED ONCE, IN A SPANNING GROUP HEADER, and each sub-header carries only what
+       differs. Six headers each reading "Req/s · 99% under N ms" was the same five words six times across
+       the widest table on the board. The 99% qualifier has NOT been dropped - it moved into the group
+       header, which is now the only place on that table it appears, so this asserts both halves. */
+    assert.equal(String(c.label), app.boundLabel(b), "the sub-header carries only its own bound");
+    assert.equal(c.group, app.BOUND_GROUP_LABEL, "and shares the one spanning group header");
     assert.ok(String(c.title).includes(app.boundClause(b)), "and states its own clause, not a shared one");
   }
+  assert.match(app.BOUND_GROUP_LABEL, /Req\/s/, "the group header names the quantity");
+  assert.match(app.BOUND_GROUP_LABEL, /99% of requests under/, "and carries the 99% qualifier the sub-headers no longer repeat");
   assert.ok(cols.some((c) => c.id === "shape"), "plus the curve, so the shape is legible without reading six numbers");
   // A row with a SHAPE: the six cells are the six readings, and each carries the tail it ACTUALLY produced.
   const g = { key: "s", display: "S", lang: "Rust",
@@ -5304,8 +5319,14 @@ test("FRONTIER: the curve is drawn on a SHARED log scale, with three distinguish
   const g = { key: "slow", display: "Slow", lang: "Go", best_cell: floorOnly };
   const cell = app.frontierShapeCell(g, { ...app.newState(), mode: "peak" });
   assert.equal(cell.na, false, "a curve with no ratio is still a curve");
-  assert.equal(cell.text, "—", "and the ratio - not the curve - is what is withheld");
-  assert.match(cell.note, /no measurable throughput under any published bound/);
+  /* AND IT SAYS SO IN WORDS. A bare "—" was what shipped, and the owner read it as missing data - which is
+     the one thing it is not: this gateway SERVED and no concurrency it was offered held any published tail.
+     A dash is the neutral rendering of a damning measurement, so the cell states the finding and carries a
+     sub-line explaining it, exactly as a measured 0 does in the reading columns. */
+  assert.equal(cell.text, "no ratio", "the ratio - not the curve - is what is withheld, and the cell says so");
+  assert.match(cell.why, /no rung held any bound/, "and WHY rides on the cell, not only in the tooltip");
+  assert.ok(cell.v != null, "a curve that holds nothing at any bound is the most extreme shape on the board, not a null that sinks to the bottom");
+  assert.match(cell.note, /no measurable throughput under ANY published bound/);
   const td = app.COLUMN_SETS.performance.find((c) => c.id === "shape").render(g, { ...app.newState(), mode: "peak", data: { gateways: [g] } });
   assert.match(td, /frontier-spark/, "the sparkline still renders for the slowest row on the board");
   assert.equal((td.match(/<title>[^<]*no rung held this tail<\/title>/g) || []).length, 5,
@@ -5427,4 +5448,384 @@ test("every repo href escapes, and all FOUR render sites route through the one h
     assert.match(body.slice(0, body.indexOf("\n}\n") + 3), /gwLink\(g\)/,
       `${fn} must render the gateway name through gwLink`);
   }
+});
+
+/* ============================================================================================
+   THE 2026-07-30 REVIEW: the owner's own findings on the live board, each with a guard.
+   Every one of these is an OVERCLAIM CLASS - a surface asserting more than the measurement
+   establishes - which is the class this whole project exists to eliminate, so each gets a test that
+   fails if the wording or the ranking slides back.
+   ============================================================================================ */
+
+test("#2 OVERCLAIM: no surface claims a MAXIMUM ACROSS CELLS, because nothing computes one", () => {
+  /* WHAT WENT WRONG. The bound chooser's note read "showing the most req/s each gateway carried while 99% of
+     requests finished under 10 ms". That asserts a maximum over a GATEWAY - over all of its cells - and the
+     selection does no such thing: gen-data.mjs `bestCell` takes the openai diagonal unconditionally and
+     otherwise ranks on added-latency p99, so it never reads a throughput number at all. On the live board
+     kong's four diagonals spanned 3,903 to 22,891 req/s at one bound, making "the most" wrong by ~6x on that
+     one row, and no choice of bound could have changed which cell was picked. */
+  const board = { gateways: [] };
+  const st = { ...app.newState(), view: "performance", mode: "peak", bound: 10, data: board };
+
+  // THE LABEL. "Peak" named a maximum the chooser does not compute; the key stays (it is a URL contract).
+  assert.ok(app.CHOOSER_MODES.has("peak"), "the ?mode=peak URL token is unchanged - every shared link uses it");
+  assert.notEqual(app.MODE_LABELS.peak, "Peak", "but the CONTROL must not call it a peak");
+  assert.match(app.MODE_LABELS.peak, /own cell/i, "it is a representative-cell chooser, and says so");
+  assert.match(app.MODE_TIPS.peak, /lowest-added-latency|added.latency/i,
+    "and the tooltip names the rule that actually selects the cell");
+  assert.match(app.MODE_TIPS.peak, /cannot change which cell/i,
+    "including the consequence: the bound cannot move this selection");
+
+  /* THE PHRASE ITSELF, hunted across every string the board can put in front of a reader. This is a
+     CLASS guard, not a spot fix: it fails on any future surface that revives the wording, which is how the
+     retired "p99 < 1 s" caption survived for as long as it did. "each gateway carried" is the exact shape of
+     the claim - a rate attributed to the GATEWAY rather than to the one cell it was measured on. */
+  const surfaces = [
+    app.captionText(app.chooserCaption("performance", st, board)),
+    app.captionText(app.chooserCaption("streaming", st, board)),
+    app.captionText(app.frontierCaption(st, board)),
+    ...app.COLUMN_SETS.performance.map((c) => `${txtOf(c.label)} ${txtOf(c.title)}`),
+    ...app.COLUMN_SETS.frontier.map((c) => `${txtOf(c.label)} ${txtOf(c.title)}`),
+    ...app.BOUND_CHOICES.map((b) => app.boundColLabel(b) + " " + app.boundClause(b)),
+    app.GAIN_REFERENCE, app.BOUND_GROUP_LABEL,
+  ];
+  for (const s of surfaces)
+    assert.ok(!/most\s+req(uests)?\/?s?e?c?[^.]*each gateway carried/i.test(s),
+      `a surface attributes a rate to the GATEWAY rather than to the cell it was measured on: ${s}`);
+  // A reading IS the top qualifying rung of ONE cell's sweep, so "the most ... the chosen cell carried" is
+  // exact and must stay - the fix was the scope of the claim, not the strength of it.
+  const rps = app.COLUMN_SETS.performance.find((c) => c.id === "rps");
+  assert.match(txtOf(rps.title), /the chosen cell carried/, "the per-CELL maximum is real and still claimed");
+
+  // AND THE DELTA'S REFERENCE CELL IS NOT CALLED A PEAK EITHER: a positive req/s delta against it is
+  // ordinary (it was chosen on latency), and "peak" made that read as impossible.
+  const src = readFileSync(join(HERE, "app.js"), "utf8");
+  assert.ok(!/vs peak \(/.test(src), "no surface labels the reference cell 'vs peak'");
+});
+
+test("#4 OVERCLAIM: the ×N gain names the bound it starts FROM, and a curve with no ratio says so", () => {
+  /* THE TRAP, FROM THE LIVE BOARD. `frontierGain` already measured from the tightest bound with a reading -
+     correctly - but the cell printed only the factor, so:
+       litellm-rust  ×1.0  from 1 ms   (43,876 req/s at a 0.56 ms tail: full rate at the tightest tail)
+       tensorzero    ×1.0  from 50 ms  (holds NOTHING under 10 ms)
+     rendered as the same six characters. The column was telling a reader those two gateways have the same
+     curve, which is the exact opposite of the truth and the one claim this metric exists to make. one-api is
+     the same trap in the other direction: ×1.3 from 50 ms looked better-behaved than kong's ×1.8 from 1 ms. */
+  const stFor = (g) => ({ ...app.newState(), mode: "peak", data: { gateways: [g] } });
+  const gw = (key, frontier) => ({ key, display: key, lang: "Rust", best_cell: bcCell({ dialect: "openai", frontier }) });
+
+  const tight = gw("tight", { 1: 43876, 5: 44363, 10: 44363, 50: 44363, 100: 44363, none: 44363 });
+  const loose = gw("loose", { 1: null, 5: null, 10: null, 50: 11875, 100: 11936, none: 11936 });
+  const tc = app.frontierShapeCell(tight, stFor(tight));
+  const lc = app.frontierShapeCell(loose, stFor(loose));
+  assert.equal(tc.text, "×1.0 from 1 ms", "the tightest-tail gateway names its origin");
+  assert.equal(lc.text, "×1.0 from 50 ms", "and so does the gateway that holds nothing tighter than 50 ms");
+  assert.notEqual(tc.text, lc.text, "THE TWO MUST NOT RENDER IDENTICALLY: they are opposite findings");
+  assert.match(lc.note, /carries nothing under 10 ms/,
+    "and the tooltip states the tighter bound it could not serve, which is the finding");
+
+  /* THE RANKING. Ranking on the bare factor would sort ×1.0-from-50ms beside ×1.0-from-1ms as though they
+     measured one quantity, and would put the gateway that cannot serve under 10 ms above the one running at
+     full rate at 0.56 ms. Bound-of-origin dominates; the factor orders within it. */
+  assert.ok(lc.v > tc.v, "a ratio that starts at a looser bound ranks as the worse shape, whatever its factor");
+  const steepFromTight = gw("steep", { 1: 10697, 5: 19339, 10: 20352, 50: 26000, 100: 26000, none: 26000 });
+  const sc = app.frontierShapeCell(steepFromTight, stFor(steepFromTight));
+  assert.ok(sc.v > tc.v, "within one origin the bigger gain still ranks worse");
+  assert.ok(lc.v > sc.v, "but a looser ORIGIN outranks any factor from a tighter one - they are not one quantity");
+  // The key is exact and monotone, so no gain however large can leak into the next origin group.
+  assert.ok(app.gainSortKey(0, 1e9) < app.gainSortKey(1, 1),
+    "an unbounded factor at 1 ms still sorts below the smallest factor at 5 ms");
+  assert.equal(app.gainSortKey(0, 1), 0, "×1 from the tightest bound is the floor of the ranking - the good shape");
+
+  /* THE ABSENT-TIGHTEST-READING CASE, which is what the owner actually saw: plano carried nothing under ANY
+     published bound and 19 req/s unbounded, so no pair of rates exists to divide. It rendered a bare "—",
+     which reads as missing data when the truth is a measurement: it SERVED, cleanly, and no concurrency it
+     was offered held even the loosest tail on the board. A dash is the neutral rendering of a damning
+     finding, and it flattered the slowest row. */
+  const none = gw("none", { 1: null, 5: null, 10: null, 50: null, 100: null, none: 19 });
+  const nc = app.frontierShapeCell(none, stFor(none));
+  assert.equal(nc.na, false, "the curve is still a curve");
+  assert.ok(!/^[—–-]+$/.test(nc.text), `a bare dash reads as missing data, which this is not: ${nc.text}`);
+  assert.match(nc.text, /no ratio/i, "the cell states that no ratio can be formed");
+  assert.match(nc.why, /no rung held any bound/i, "and WHY rides on the cell, visible without hovering");
+  assert.match(nc.note, /not a gap/i, "the tooltip insists it is a measurement");
+  assert.ok(nc.v > lc.v, "and it ranks past every bound: it is the most extreme shape on the board, not a null");
+  // Rendered, it carries the same two-line treatment a measured zero gets in the reading columns.
+  const td = app.frontierShapeTd(none, stFor(none));
+  assert.match(td, /reading-zero/, "the markup marks it as a measured nothing, not an absence");
+  assert.match(td, /reading-none/, "and carries the why sub-line");
+  assert.match(td, /frontier-spark/, "with the curve, which is the whole finding");
+
+  // A cell with NO frontier at all is a different state and still reads n/a - that one really is absence.
+  const bare = { key: "b", display: "b", lang: "Go", best_cell: bcCell({ dialect: "openai", frontier: null }) };
+  assert.equal(app.frontierShapeCell(bare, stFor(bare)).na, true, "no frontier at all stays n/a, distinct from 'no ratio'");
+
+  // AND THE COLUMN NAMES THE RATIO. "i dont know what 1.3x or whatever means" was the owner's response to a
+  // header that said "Curve across bounds" over a column of bare factors.
+  for (const set of ["performance", "frontier"]) {
+    const col = app.COLUMN_SETS[set].find((c) => c.id === "shape");
+    assert.match(txtOf(col.label), /gain/i, `the ${set} tab's shape header names the ratio`);
+    assert.match(txtOf(col.title), /tightest published bound/, "and the tooltip says what it is a ratio OF");
+  }
+  assert.match(app.GAIN_REFERENCE, /how many times more/i, "the reference block spells the ratio out");
+  assert.match(app.GAIN_REFERENCE, /×1\.0 from 50 ms/, "and names the exact trap it exists to prevent");
+});
+
+test("#1 PROSE: one or two sentences above the table, everything else below it as reference", () => {
+  /* THE OWNER'S INSTRUCTION, VERBATIM: "way too much text on each tab", "1-2 sentence english, definitions go
+     below data table like references". The Frontier tab had SIX paragraphs before its first number. Nothing
+     was deleted - the notes carry findings, and the "0 · no rung held this tail" distinction in particular is
+     the difference between a damning measurement and a shrug - so this asserts BOTH halves: the lead is short,
+     and every relocated claim is still reachable on the tab. */
+  const board = { gateways: [], definitions: {} };
+  const st = { ...app.newState(), view: "frontier", mode: "peak", bound: 10, data: board };
+  for (const view of ["performance", "streaming", "frontier", "memory"]) {
+    const c = app.captionFor(view, { ...st, view }, board);
+    assert.ok(Array.isArray(c.lead) && Array.isArray(c.notes), `${view} splits into lead + notes`);
+    assert.ok(c.lead.length >= 1 && c.lead.length <= 2, `${view} leads with 1-2 sentences, got ${c.lead.length}`);
+    // A "sentence" that is a paragraph defeats the point, so the lead is length-capped too.
+    const chars = c.lead.join(" ").length;
+    assert.ok(chars <= 320, `${view}'s lead is ${chars} chars; the owner's limit is a sentence or two`);
+  }
+  // THE FRONTIER'S RELOCATED CLAIMS ARE ALL STILL THERE, below the table.
+  const fc = app.frontierCaption(st, board);
+  const notes = fc.notes.join(" ");
+  assert.match(notes, /no rung held this tail/, "the measured-zero distinction survives the move");
+  assert.match(notes, /It is not missing data/, "including the sentence that makes it a finding rather than a gap");
+  assert.match(notes, /"≥" marks a reading whose sweep ran out of ladder/, "and the floor marker's meaning");
+  assert.match(notes, /never the bound/, "and the observed-tail-is-not-the-bound rule");
+  assert.ok(fc.notes.includes(app.GAIN_REFERENCE), "and the ×N reference the owner asked for");
+  assert.ok(!/no rung held this tail/.test(fc.lead.join(" ")), "none of which is above the table any more");
+  // The Performance tab carries the ×N column, so it carries the reference; Streaming has no such column.
+  assert.ok(app.chooserCaption("performance", st, board).notes.includes(app.GAIN_REFERENCE));
+  assert.ok(!app.chooserCaption("streaming", st, board).notes.includes(app.GAIN_REFERENCE),
+    "a tab must not explain a ratio it does not render");
+  // The notes render as a collapsed fold, so relocating them costs no vertical space...
+  const fold = app.notesFold(fc.notes);
+  assert.match(fold, /<details/, "the reference block is collapsed by default");
+  assert.match(fold, /How to read this table/, "and says what it is");
+  assert.equal(app.notesFold([]), "", "a view with nothing to say renders no empty fold");
+  // ...and it lives BELOW the table in the markup, which is the whole instruction.
+  const html = readFileSync(join(HERE, "index.html"), "utf8");
+  assert.ok(html.indexOf(`id="results-table"`) < html.indexOf(`id="table-defs"`),
+    "the reference block must come AFTER the table in the document, like references");
+  assert.ok(html.indexOf(`id="table-caption"`) < html.indexOf(`id="results-table"`),
+    "and the lead before it");
+  // captionText flattens both halves, so a claim can be asserted without pinning which half carries it.
+  assert.equal(app.captionText(fc), [...fc.lead, ...fc.notes].join(" "));
+});
+
+test("#3 HEADERS: the six per-bound columns share ONE spanning group instead of repeating five words", () => {
+  /* "make Req/s 99% a header that spans all columns vs repeating?" - the owner. Six headers each read
+     "Req/s · 99% under N ms": the same five words six times across the widest table on the board. */
+  const cols = app.COLUMN_SETS.frontier;
+  const bound = cols.filter((c) => c.group === app.BOUND_GROUP_LABEL);
+  assert.equal(bound.length, app.BOUND_CHOICES.length, "every published reading is under the one group");
+  for (const c of bound)
+    assert.ok(!/Req\/s|99%/.test(txtOf(c.label)), `a sub-header still repeats the shared words: ${txtOf(c.label)}`);
+  const st = { ...app.newState(), view: "frontier", bound: 10, sortCol: app.boundColId(10), sortDesc: true };
+  const head = app.theadHtml(cols, st);
+  // TWO ROWS: the group over the six, and the six under it.
+  assert.equal((head.match(/<tr/g) || []).length, 2, "a grouped head is two rows");
+  assert.equal((head.match(/class="colgroup nosort" colspan="6"/g) || []).length, 1,
+    "one group cell spanning exactly the six reading columns");
+  // THE UNGROUPED COLUMNS SPAN BOTH ROWS, so the body stays aligned under them.
+  const ungrouped = cols.filter((c) => !c.group).length;
+  assert.equal((head.match(/rowspan="2"/g) || []).length, ungrouped,
+    "every ungrouped column spans both header rows");
+  /* THE SELECTED BOUND'S SORT AFFORDANCE SURVIVES THE SPLIT. The group cell must NOT be sortable (it is not
+     a column), and the marker + direction arrow must stay on the reader's own column in the second row -
+     otherwise switching the bound would re-rank the board with nothing on screen saying so. */
+  assert.ok(!/<th class="colgroup nosort"[^>]*data-col=/.test(head), "the group header is not a sortable column");
+  const sub = head.slice(head.indexOf('class="subhead"'));
+  assert.match(sub, new RegExp(`data-col="${app.boundColId(10)}" class="sorted"`), "the selected column is marked");
+  assert.match(sub, /▾/, "and carries the direction arrow");
+  // A tab with no groups is still ONE row, and gains no phantom rowspan.
+  const flat = app.theadHtml(app.COLUMN_SETS.streaming, { ...app.newState(), view: "streaming" });
+  assert.equal((flat.match(/<tr/g) || []).length, 1, "an ungrouped tab keeps a single header row");
+  assert.ok(!/rowspan/.test(flat), "with no rowspan, which would reserve a header row that does not exist");
+});
+
+test("#5 IDLE CURVE: it is not a recovery curve, and a flat window renders flat", () => {
+  /* TWO DEFECTS IN ONE TEMPLATE. The idle and load sparklines shared a caption - "peak X → recovered Y MiB" -
+     and on the idle window every word of that is wrong: the window is the process AT REST, sampled BEFORE any
+     load, so nothing has been recovered from anything.
+     And it could not show its own finding. Framed on the load axis (0 → 2x idle) every idle series in the
+     field is a nearly-flat line at the idle level, so all 26 of them drew the same picture - hiding that
+     every bifrost cell jumps ~100 MiB while idle and then holds, which no other gateway does. */
+  const at = (n, f) => Array.from({ length: n }, (_, i) => ({ t_s: i * 0.5, rss_mib: f(i, n) }));
+  // litellm-rust's real shape: 252.2578 → 252.2656, one 8 KiB page of movement across the whole window.
+  const flatSeries = at(120, (i) => 252.2578125 + (i > 60 ? 0.0078125 : 0));
+  // bifrost openai>openai: 152.3 climbing to 237.3 inside the first seconds, then dead flat.
+  const rampSeries = at(120, (i) => (i < 8 ? 152.3 + (i / 8) * 85 : 237.3));
+
+  const flat = app.rssSparkline(flatSeries, null, 252.265625, "idle");
+  const ramp = app.rssSparkline(rampSeries, null, 217.0, "idle");
+  const load = app.rssSparkline(rampSeries, 60, 217.0);
+
+  // 1. THE WORD "RECOVERED" IS A LOAD-WINDOW WORD and must not appear on an idle panel, nor "peak".
+  for (const [name, svg] of [["flat", flat], ["ramp", ramp]]) {
+    assert.ok(!/recovered/i.test(svg), `${name}: nothing is recovered in a window taken before any load`);
+    assert.ok(!/\bpeak\b/i.test(svg), `${name}: the highest sample at rest is not a peak under load`);
+    assert.match(svg, /at rest/, `${name}: it says what the window is`);
+  }
+  assert.match(load, /peak .* → recovered/, "the LOAD panel keeps the recovery vocabulary, which is correct there");
+
+  /* 2. A FLAT WINDOW RENDERS FLAT. This is the trap a bare auto-scale walks into, and it is the same bug the
+     load axis was already fixed for: RSS is sampled in whole pages, so a static process still reports one or
+     two pages of jitter, and scaled to its own range that one page becomes a full-height cliff - a panel
+     claiming a memory event where the truth is "this process did not move". The span is floored at
+     IDLE_AXIS_MIN_SPAN of the published idle figure. */
+  const ys = (svg) => [...svg.matchAll(/[ML]([\d.]+),([\d.]+)/g)].map((m) => Number(m[2]));
+  const height = (svg) => Math.max(...ys(svg)) - Math.min(...ys(svg));
+  assert.ok(height(flat) < 2, `0.008 MiB on a 252 MiB process must draw flat, drew ${height(flat).toFixed(1)}px`);
+  assert.ok(height(ramp) > 25, `an 85 MiB climb must fill the frame, drew ${height(ramp).toFixed(1)}px`);
+  assert.ok(app.IDLE_AXIS_MIN_SPAN > 0 && app.IDLE_AXIS_MIN_SPAN < 1, "the floor is a fraction of idle");
+  // The floor is what does it: 0.008/252 is far below it, 85/217 far above.
+  assert.ok(0.0078125 / 252.265625 < app.IDLE_AXIS_MIN_SPAN, "the flat case sits under the floor by construction");
+  assert.ok(85 / 217 > app.IDLE_AXIS_MIN_SPAN, "and the ramp above it");
+
+  /* 3. THE MAGNITUDE IS STATED IN NUMBERS, so it never has to be read off a floored axis - which is what
+     keeps 0.008 MiB and 85 MiB distinguishable however they are drawn. fmt1 would round the first to "0.0",
+     a flat zero, which is exactly the "nothing happened" claim the span exists to distinguish from. */
+  assert.match(flat, /0\.00781 MiB/, "the exact movement is published, not rounded away to 0.0");
+  assert.match(ramp, /85 MiB/, "and so is the climb");
+  assert.notEqual(flat.match(/\(([^)]*MiB over)/)[1], ramp.match(/\(([^)]*MiB over)/)[1],
+    "so the two windows are distinguishable in text whatever the axis does");
+  assert.equal(app.fmt2(0.0078125), "0.00781");
+  // A range whose ends round to one figure is not a range; it says "held", because "252.3–252.3" reads as a bug.
+  assert.match(flat, /held 252\.3 MiB/, "a window that never moved a tenth of a MiB says it held its level");
+  assert.match(ramp, /spanned 152\.3–237\.3 MiB/, "a window that moved states the band");
+
+  /* 4. THE MEDIAN IS ANNOTATED, because idle_rss_mib IS the median of this very window: drawing it is what
+     makes the sparkline and the scalar in the column beside it visibly agree instead of merely coexisting. */
+  assert.match(ramp, /median 217\.0 MiB/, "the published figure is named in the stamp");
+  assert.match(ramp, /<title>median 217\.0 MiB - the published idle figure/, "and ruled on the chart");
+  assert.ok(!/<title>median/.test(load), "the load panel's dashed rule is still the idle BASELINE, not a median");
+  // The idle axis does not reach zero, so no rule may be drawn along its bottom edge claiming one.
+  assert.ok(!/<polyline/.test(ramp), "no zero baseline on an axis that does not contain zero");
+  assert.match(load, /<polyline/, "the load axis starts at 0, so its baseline IS zero and stays drawn");
+
+  // 5. AND THE PANEL SAYS WHICH WINDOW IT IS, in the pair the drawer renders.
+  const pair = app.rssCurves({ idle_rss_mib: seal(217.0), idle_rss_series: rampSeries,
+    rss_series: rampSeries, load_s: seal(60) });
+  assert.match(pair, /at rest, before any load/, "the idle half names itself");
+  assert.match(pair, /load → recovery/, "and the load half keeps its own name");
+});
+
+test("#6 VERSION: a build path is not a version, and the column never dresses one up as one", () => {
+  /* THE LIVE BOARD showed Helicone's Version as "target/release/ai-gat…" and LiteLLM · Rust's as
+     "litellm-ai-gateway". Those are a compiler output path and a binary name. fmtBuild's four recognisers all
+     declined them and its fallback then printed the raw stamp anyway, so the column asserted a version it had
+     explicitly failed to find. */
+  assert.equal(app.parseBuildVersion("target/release/ai-gateway"), null, "a build path names no version");
+  assert.equal(app.parseBuildVersion("litellm-ai-gateway"), null, "nor does a bare binary name");
+  assert.equal(app.parseBuildVersion("apache/apisix:3.17.0-debian"), "3.17.0-debian", "an image tag does");
+  assert.equal(app.parseBuildVersion("somepkg==1.93.0"), "1.93.0");
+  assert.equal(app.parseBuildVersion("repo@9649b27abcdef"), "@9649b27");
+  assert.equal(app.parseBuildVersion("somegateway 1.4.1"), "1.4.1");
+
+  // A SOURCE BUILD falls back to the manifest pin, which for these two IS the version (the commit built),
+  // marked with "@" so a bare hex string cannot read as a release name.
+  const helicone = { key: "helicone", display: "Helicone", lang: "Rust", version: "9649b27",
+    matrix: { build: "target/release/ai-gateway" } };
+  assert.equal(app.versionToken(helicone), "@9649b27");
+  assert.ok(!/target|release/.test(app.versionToken(helicone)), "and no part of the path survives into the cell");
+  // The path is not thrown away - it is provenance for HOW the thing was launched, so it rides the tooltip.
+  assert.match(app.versionBasis(helicone), /Launched as: target\/release\/ai-gateway/);
+  assert.match(app.versionBasis(helicone), /names no version/, "which the tooltip says outright");
+
+  // An image tag is the strongest evidence and wins: it is what the process actually reported.
+  const kong = { key: "kong", display: "Kong", lang: "Lua", version: "3.9.3", matrix: { build: "kong:3.9.3" } };
+  assert.equal(app.versionToken(kong), "3.9.3");
+  assert.match(app.versionBasis(kong), /Measured running: kong:3\.9\.3/);
+
+  /* AN UNMEASURED GATEWAY IS NOT A SOURCE BUILD. gatewayBuild deliberately falls back to the manifest pin, so
+     a caller that cannot tell the two apart captions a never-run row as though its pin were a launch stamp
+     ("Launched as: v0.5.0"). measuredBuild is the stamp of what RAN, and only that. */
+  const unrun = { key: "aisix", display: "AISIX", lang: "Go", version: "v0.5.0" };
+  assert.equal(app.measuredBuild(unrun), null, "nothing ran, so there is no launch stamp");
+  assert.equal(app.versionToken(unrun), "v0.5.0", "but the manifest pin is what we would measure, so it shows");
+  assert.ok(!/Launched as/.test(app.versionBasis(unrun)), "and it is never described as a launch stamp");
+  assert.match(app.versionBasis(unrun), /has not been measured/, "the tooltip says which state this is");
+
+  // NEITHER SOURCE: the cell says so in words rather than showing a path or an empty dash.
+  const nothing = { key: "x", display: "X", lang: "Go" };
+  assert.equal(app.versionToken(nothing), null);
+  assert.match(app.versionBasis(nothing), /Nothing published/);
+  // And the sort key is the token the cell RENDERS, so a "no version published" row sorts as the null it is.
+  assert.equal(app.ROSTER_KEY.version(nothing), null);
+  assert.equal(app.ROSTER_KEY.version(helicone), "@9649b27");
+});
+
+test("#7 TITLE: every view titles itself, from the URL, without waiting on the data fetch", () => {
+  /* Playwright saw the generic site title on views that should have named themselves. The cause was ordering:
+     the title was only ever written from showView, which runs inside renderAll, which runs after data.json
+     resolves - three quarters of a megabyte. Until then every deep link reported index.html's static <title>,
+     and on the fetch-failure path it stayed generic forever. */
+  const src = readFileSync(join(HERE, "app.js"), "utf8");
+  const boot = src.slice(src.indexOf("function boot()"), src.indexOf("if (NODE) {"));
+  const decode = boot.indexOf("applyState(decodeUrl");
+  assert.ok(boot.slice(0, boot.indexOf("ensureData()")).includes("updateTitle()"),
+    "boot must title the page BEFORE ensureData(), from state it has already decoded");
+  assert.ok(boot.indexOf("updateTitle()") > decode, "and after the URL is decoded, so it titles the right view");
+  assert.ok(boot.slice(boot.indexOf(".catch(")).includes("updateTitle()"),
+    "and the failure path still names the view the reader asked for");
+
+  // EVERY VIEW GETS ITS OWN TITLE, and they are all distinct - a browser tab strip is the use case.
+  const titles = new Map();
+  for (const view of app.VIEWS) {
+    const t = app.pageTitle({ ...app.newState(), category: app.DEFAULT_CATEGORY, view });
+    assert.ok(t.endsWith(app.SITE_TITLE), `${view} keeps the site name as context`);
+    assert.ok(!titles.has(t), `${view} must not share a title with ${titles.get(t)}`);
+    titles.set(t, view);
+  }
+  // THE VIEW LEADS, because it is the only part that differs between two open tabs or two shared links. The
+  // old form was "${category} ${view}" - two nouns, no separator ("Gateways Frontier"), truncating in a tab
+  // strip to the one word every view shares.
+  assert.ok(app.pageTitle({ ...app.newState(), view: "frontier" }).startsWith(`${app.VIEW_LABELS.frontier} · `),
+    "the view's own name comes first, separated");
+  // The default view is the category itself, so it does not repeat its own label.
+  const def = app.pageTitle({ ...app.newState(), view: app.DEFAULT_VIEW });
+  assert.equal(def, `${app.CATEGORIES[app.DEFAULT_CATEGORY].label} · ${app.SITE_TITLE}`);
+  // Home is the level above the categories and titles itself as the site.
+  assert.equal(app.pageTitle({ ...app.newState(), view: app.HOME_VIEW }), app.SITE_TITLE);
+});
+
+test("#8 FOOTER: 'measured on an older version' and 'not yet measured' are two facts, counted apart", () => {
+  /* WHAT SHIPPED. The footer read "Benchmark version: 4c45e0b (7 rows measured on an older version)". There
+     were ZERO rows on an older engine. The seven were gateways carrying `engine: {sha: null}` - never
+     measured on this benchmark at all, several of them mid-run. The count was `!engine.current`, which is
+     true for both:
+       a DIFFERENT sha  -> the row has numbers, and they are not comparable with the rest;
+       NO sha at all    -> the row has no numbers.
+     So the board asserted "we are showing you stale results for half the field" when the truth was "we have
+     none for it yet" - a false statement about the board's own trustworthiness, in the one line a reader
+     consults to decide whether to trust it. The null stamp is deliberate upstream (a row with no stamp must
+     not imply it matches the board's engine); the defect was reading absence as a version. */
+  const cur = (sha) => ({ engine: { sha, short: sha.slice(0, 7), current: true } });
+  const old = (sha) => ({ engine: { sha, short: sha.slice(0, 7), current: false } });
+  const none = () => ({ engine: { sha: null, short: null, current: false } });
+  const stamp = (gateways) => app.benchmarkVersionStamp({ benchmark_version: "4c45e0b4fa92", gateways });
+
+  // THE LIVE SHAPE: seven current, seven never measured, none behind. It must not mention an older version.
+  const live = stamp([...Array(7)].map(() => cur("4c45e0b4fa92")).concat([...Array(7)].map(none)));
+  assert.ok(!/older version/.test(live), `no row is behind, so nothing may say one is: ${live}`);
+  assert.match(live, /7 not yet measured on it/, "and the seven unmeasured rows are counted as what they are");
+
+  // A GENUINELY BEHIND ROW still gets the original sentence - that fact is real and worth flagging.
+  const behind = stamp([cur("4c45e0b4fa92"), old("beefcafe1234")]);
+  assert.match(behind, /1 row measured on an older version/, "singular, and named as an older version");
+  assert.ok(!/not yet measured/.test(behind), "and a clause for an empty set is not rendered");
+
+  // BOTH NON-EMPTY: both are stated, because they are different facts about different rows.
+  const mixed = stamp([cur("4c45e0b4fa92"), old("beefcafe1234"), old("d00dfeed5678"), none(), none(), none()]);
+  assert.match(mixed, /2 rows measured on an older version/);
+  assert.match(mixed, /3 not yet measured on it/);
+
+  // A CLEAN BOARD reads as one bare version, with no parenthesis at all.
+  assert.equal(stamp([cur("4c45e0b4fa92"), cur("4c45e0b4fa92")]), "Benchmark version: 4c45e0b");
+  // And a bundle with no version stamped contributes nothing rather than the word "unknown".
+  assert.equal(app.benchmarkVersionStamp({ gateways: [none()] }), "");
+  assert.equal(app.benchmarkVersionStamp(null), "");
 });

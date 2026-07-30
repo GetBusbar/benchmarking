@@ -199,7 +199,13 @@ thead th {
    wrapped number reads as two numbers. max-width stops a long single word from claiming a whole
    column on its own. */
 #results-table thead th { white-space: normal; overflow-wrap: anywhere; max-width: 7.5rem; }
-#results-table thead th:nth-child(1), #results-table thead th:nth-child(2) { white-space: nowrap; max-width: none; }
+/* EVERY nth-child RULE FOR THE STICKY IDENTITY COLUMNS IS PINNED TO thead tr:first-child.
+   The Frontier tab's head is now TWO rows (a spanning "Req/s · 99% of requests under:" group over six
+   bound sub-headers), and in the second row nth-child(1) is the 1 ms column, not the checkbox. Unscoped,
+   these rules gave that bound column position:sticky, left:0 and width:2.4rem, which shoved the sub-header
+   strip out of alignment with the body underneath it. The identity columns only ever live in the first row -
+   they carry rowspan="2" - so first-child is the exact and only correct scope. */
+#results-table thead tr:first-child th:nth-child(1), #results-table thead tr:first-child th:nth-child(2) { white-space: nowrap; max-width: none; }
 thead th:first-child, tbody td:first-child { text-align: left; }
 /* Lock ONLY the identity of each row (checkbox + Gateway name) while the metric
    columns, Class and Lang included, scroll horizontally. Scoped to the results
@@ -207,16 +213,16 @@ thead th:first-child, tbody td:first-child { text-align: left; }
    .table-scroll). Fixed widths give the Gateway column a stable left offset
    equal to the checkbox width; the inset border is the divider the scrolling
    columns slide under. Applies at every viewport width. */
-#results-table thead th:nth-child(1), #results-table tbody td:nth-child(1),
-#results-table thead th:nth-child(2), #results-table tbody td:nth-child(2) { position: sticky; z-index: 1; background: var(--bg-raise); }
-#results-table thead th:nth-child(1), #results-table thead th:nth-child(2) { z-index: 3; }
+#results-table thead tr:first-child th:nth-child(1), #results-table tbody td:nth-child(1),
+#results-table thead tr:first-child th:nth-child(2), #results-table tbody td:nth-child(2) { position: sticky; z-index: 1; background: var(--bg-raise); }
+#results-table thead tr:first-child th:nth-child(1), #results-table thead tr:first-child th:nth-child(2) { z-index: 3; }
 /* Widths must be >= the widest content in each column (auto table-layout would otherwise
    grow the real column past these and the left offset would drift). min-width pins them. */
 /* Slim padding keeps the checkbox column's real width at its declared 2.4rem
    (content + default padding would overflow it and drift the Gateway column's
    sticky left offset by the difference). */
-#results-table thead th:nth-child(1), #results-table tbody td:nth-child(1) { left: 0; width: 2.4rem; min-width: 2.4rem; padding-left: .4rem; padding-right: .4rem; }
-#results-table thead th:nth-child(2), #results-table tbody td:nth-child(2) { left: 2.4rem; width: 11rem; min-width: 11rem; box-shadow: inset -1px 0 0 var(--border); }
+#results-table thead tr:first-child th:nth-child(1), #results-table tbody td:nth-child(1) { left: 0; width: 2.4rem; min-width: 2.4rem; padding-left: .4rem; padding-right: .4rem; }
+#results-table thead tr:first-child th:nth-child(2), #results-table tbody td:nth-child(2) { left: 2.4rem; width: 11rem; min-width: 11rem; box-shadow: inset -1px 0 0 var(--border); }
 #results-table tbody tr:hover td:nth-child(1), #results-table tbody tr:hover td:nth-child(2) { background: var(--bg-hover); }
 /* Even, full-width matrix columns: fixed layout so the six upstream columns share the row
    equally instead of clumping by header-text width. */
@@ -259,6 +265,15 @@ td.name a { color: var(--fg); font-weight: 600; }
 td.sel { width: 1.6rem; }
 td.sel input { accent-color: var(--accent); cursor: pointer; }
 thead th.nosort { cursor: default; }
+/* THE SPANNING GROUP HEADER over the Frontier tab's six per-bound columns. Centred over its span, with a
+   hairline under it so the eye reads "these six belong together" rather than "one very wide column".
+   It is `top: 0` and its sub-header row sticks BELOW it (the sub row's own offset is its height), so both
+   rows survive a vertical scroll of a fourteen-row board. */
+thead th.colgroup {
+  text-align: center; font-weight: 600; color: var(--fg-dim); letter-spacing: .01em;
+  border-bottom: 1px solid var(--border); white-space: nowrap; max-width: none;
+}
+#results-table thead tr.subhead th { top: 2.2rem; font-weight: 500; }
 tbody tr { cursor: pointer; }
 
 /* Gateways overview roster: a neutral roster, not a ranked perf table. Sortable by any column,
