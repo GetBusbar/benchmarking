@@ -315,6 +315,7 @@ fn served_and_stream_served_publish_only_the_documented_vocabulary() {
 fn a_sweep_point_publishes_nulls_for_what_it_could_not_sample() {
     let point = SweepPoint {
         conc: 64,
+        ok: Measurement::Measured(1_000),
         rps: Measurement::Measured(10_000),
         p99_us: Measurement::absent(Absent::NotMeasured),
         fail: Measurement::Measured(0),
