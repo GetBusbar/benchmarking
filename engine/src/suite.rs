@@ -323,7 +323,7 @@ fn steady_state(series: &[crate::record::RssSample], load_end_s: Option<f64>) ->
         Some(end) => series.iter().filter(|s| (s.t_s as f64) <= end).collect(),
         None => series.iter().collect(),
     };
-    let mut tail: Vec<f64> = under_load
+    let tail: Vec<f64> = under_load
         .iter()
         .skip(under_load.len() / 2)
         .filter_map(|s| s.rss_mib.copied())
@@ -337,14 +337,16 @@ fn steady_state(series: &[crate::record::RssSample], load_end_s: Option<f64>) ->
             ),
         );
     }
-    tail.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let mid = tail.len() / 2;
-    let median = if tail.len().is_multiple_of(2) {
-        (tail[mid - 1] + tail[mid]) / 2.0
-    } else {
-        tail[mid]
-    };
-    Measurement::Measured(median)
+    // DELEGATED RATHER THAN REPEATED. This was a hand-rolled sort-and-take-the-middle using
+    // `partial_cmp(b).unwrap_or(Ordering::Equal)` - the identical comparator, and therefore the
+    // identical defect, as `stats::median` had: a non-finite sample makes that comparator a non-total
+    // order, which leaves the whole slice in an unspecified permutation and makes the answer depend on
+    // the order the samples arrived in rather than on the samples.
+    //
+    // `stats::median` now refuses a non-finite input outright. Two implementations of one statistic
+    // means a guard added to either is absent from the other, so the duplicate is gone instead of
+    // separately patched: whatever the board's rule for a median is, there is one place it lives.
+    crate::stats::median(&tail)
 }
 
 /// The published per-cell streaming block, from the numbers the streaming group took.
