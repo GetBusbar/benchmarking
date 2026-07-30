@@ -13,6 +13,7 @@
 
 pub mod cell;
 pub mod config_lint;
+pub mod frontier;
 pub mod gen;
 pub mod http;
 pub mod ingress;
