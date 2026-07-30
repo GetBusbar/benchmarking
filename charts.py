@@ -70,10 +70,13 @@ def _canonical() -> dict:
             "  table, drawer, compare, charts - shows the same value."
         )
     data = json.loads(SITE_DATA.read_text(encoding="utf-8"))
-    return {g["key"]: g for g in data.get("gateways", [])}
+    # The bundle's own timestamp travels with it: when the staleness guard fires, the first thing the
+    # operator needs is WHEN this snapshot of the board was taken, so the message can be acted on
+    # without a second command to go find out.
+    return {g["key"]: g for g in data.get("gateways", [])}, data.get("generated_at")
 
 
-CANON = _canonical()
+CANON, CANON_GENERATED_AT = _canonical()
 # THE SCALAR-THROUGHPUT FIELDS ARE GONE FROM THIS LIST, and from the producer.
 #
 # It used to read (..., "rps_sustained_20ms", "rps_max_proxy"). Both came off the SAME concurrency sweep
@@ -2945,8 +2948,63 @@ def write_reports() -> None:
     print(f"wrote results/reports/all + top5 ({len(ranked)} gateways)")
 
 
+def _assert_no_silent_drop() -> None:
+    """FAIL LOUDLY IF A MEASURED GATEWAY IS ABOUT TO BE DRAWN OUT OF EXISTENCE.
+
+    Every chart on this page is projected from CANON (`site/data.json`), never from the snapshots on
+    disk. That is deliberate - it is what keeps the PNGs and the site table from disagreeing - but it
+    makes staleness INVISIBLE: if data.json was generated before a snapshot landed, that gateway has no
+    `best_cell`, `_proj_perf` returns None, `_merge` skips it, and every chart plus the report table
+    renders without it AND WITHOUT COMPLAINING. The count in the closing line goes from 8 to 7 and
+    nothing says which one left.
+
+    That is not hypothetical. It happened here: bifrost harvested at 20:52, data.json was from 20:44,
+    and a full `python3 charts.py` printed "(7 gateways)" over a board with eight - six served cells with
+    a valid frontier silently absent from every PNG. The pipeline order in cf-pages.yml (gen-data →
+    charts → gen-data) is what normally prevents it, which means the protection lives entirely in the
+    sequencing of a YAML file and nothing checks that it held.
+
+    So compare the two sources and refuse to draw on disagreement. A snapshot with served cells whose
+    gateway has no best_cell in CANON means CANON is stale, and the fix is to re-run gen-data - never to
+    publish the smaller board. Raising beats warning: a warning in CI scrolls past, and the artifact it
+    would have let through looks complete.
+    """
+    served_on_disk = {}
+    for p in sorted((RESULTS / "snapshots").glob("*.json")):
+        try:
+            d = json.loads(p.read_text())
+        except (OSError, ValueError):
+            continue  # a snapshot mid-write during a live run is not a staleness signal
+        key = d.get("gateway")
+        if not key:
+            continue
+        n = sum(
+            1
+            for up in ((d.get("matrix") or {}).get("upstreams") or {}).values()
+            for cell in (up.get("cells") or {}).values()
+            if cell.get("served") is True
+        )
+        if n:
+            served_on_disk[key] = n
+    missing = {
+        k: n for k, n in served_on_disk.items() if not (CANON.get(k) or {}).get("best_cell")
+    }
+    if missing:
+        detail = ", ".join(f"{k} ({n} served cell(s))" for k, n in sorted(missing.items()))
+        raise SystemExit(
+            f"REFUSING TO DRAW A STALE BOARD: {detail} {'has' if len(missing) == 1 else 'have'} "
+            f"measured results on disk but no best_cell in site/data.json, so "
+            f"{'it' if len(missing) == 1 else 'they'} would be silently absent from every chart and "
+            f"from the report table.\n"
+            f"site/data.json was generated at {CANON_GENERATED_AT or 'an unrecorded time'}.\n"
+            f"Run `node site/gen-data.mjs` first, then re-run this."
+        )
+
+
 def main() -> None:
     RESULTS.mkdir(exist_ok=True)
+    # Before any rendering: the board we are about to draw must contain everything we measured.
+    _assert_no_silent_drop()
     any_done = False
     # THE TWO CURVES AND THE KEY THAT TEACHES ONE OF THEM, each drawn by its own renderer rather than by the
     # bar machinery (see each function for why a Chart cannot express it). Both data charts skip themselves
