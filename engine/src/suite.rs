@@ -93,7 +93,8 @@ fn empty_perf() -> CellPerf {
         rps_sustained_20ms: Measurement::absent(Absent::NotMeasured),
         rps_sustained_20ms_concurrency: Measurement::absent(Absent::NotMeasured),
         conc_at_sustained: Measurement::absent(Absent::NotMeasured),
-        rps_sustained_20ms_mock_bound: None,
+        rps_sustained_20ms_rig_ceiling: None,
+        rps_sustained_20ms_headroom: None,
         rps_max_proxy: Measurement::absent(Absent::NotMeasured),
         rps_max_proxy_concurrency: Measurement::absent(Absent::NotMeasured),
         conc_at_peak: Measurement::absent(Absent::NotMeasured),
@@ -234,14 +235,20 @@ fn judge_cell(
 /// request generator's search plumbing can be pointed at the mock; the stream window takes its
 /// address, path and headers as arguments, so the direct leg is expressed directly instead of as a
 /// gateway config with the gateway parts blanked out one field at a time.
-fn stream_rig_ceiling(cfg: &SuiteConfig, dialect: Dialect, at_conc: u32) -> Measurement<f64> {
-    run::stream_fps_at(
-        cfg.mock_addr,
-        &cfg.manifest.model,
-        &cfg.manifest.auth,
-        dialect,
-        at_conc,
-    )
+fn stream_rig_ceiling(_cfg: &SuiteConfig, _dialect: Dialect, at_conc: u32) -> Measurement<f64> {
+    // DERIVED, NOT MEASURED. See `run::mock_frame_ceiling_fps`: the direct-to-mock leg engages fewer of
+    // this box's cores than the gateway leg (the loadgen drives AND reads, with the gateway's cores
+    // idle), so it is systematically slower than the path it was meant to bound - and judging a gateway
+    // against it discarded real numbers on seven gateway/metric pairs. We own the mock, so its ceiling
+    // is arithmetic: it cannot emit frames faster than it sleeps.
+    let ceiling = run::mock_frame_ceiling_fps(at_conc);
+    if ceiling <= 0.0 {
+        return Measurement::absent_because(
+            Absent::NotMeasured,
+            "the mock's declared pacing yields no frame rate to bound against".to_string(),
+        );
+    }
+    Measurement::Measured(ceiling)
 }
 
 /// Fill the added-latency fields straight from the metric surface.
@@ -321,7 +328,9 @@ fn judge_sustained(
         out.rps_sustained_20ms = Measurement::Measured(0);
         out.rps_sustained_20ms_concurrency = Measurement::Measured(0);
         out.conc_at_sustained = Measurement::Measured(0);
-        out.rps_sustained_20ms_mock_bound = Some(false);
+        // No concurrency to take a reference AT, so there is no ceiling and no fraction to state.
+        out.rps_sustained_20ms_rig_ceiling = None;
+        out.rps_sustained_20ms_headroom = None;
         return;
     }
 
@@ -329,109 +338,45 @@ fn judge_sustained(
     apply_sustained_verdict(out, value, conc, reference);
 }
 
-/// Fill the sustained fields from the rig verdict. PURE, and separate from `judge_sustained`, for the
-/// identical reason `apply_peak_verdict` is separate from `judge_cell`: a live rig measurement cannot
-/// be driven to the rig-bound and gateway-bound branches on demand from a fixture where the gateway
-/// and the mock are the same server, so the verdict logic has to be testable independent of
-/// `rig_ceiling` actually running one.
+/// Fill the sustained fields from the measurement and the rig reference. PURE, and separate from
+/// `judge_sustained`, for the identical reason `apply_peak_verdict` is separate from `judge_cell`: a
+/// live rig measurement cannot be driven from a fixture where the gateway and the mock are the same
+/// server, so this has to be testable without `rig_ceiling` actually running one.
+///
+/// THE MEASUREMENT IS ALWAYS PUBLISHED. It used to be withheld when it reached `BOUND_FRACTION` of the
+/// reference, on the argument that a rig-bound number would rank the rig. But the number was correct -
+/// what was uncertain was what it MEANT, and deleting the number is not a way to resolve that. The
+/// reference and the fraction of it reached are published instead, so the reader has the same evidence
+/// and still has the measurement. See `rigbound.rs`.
 fn apply_sustained_verdict(out: &mut CellPerf, value: f64, conc: u32, reference: Measurement<f64>) {
-    let verdict = rigbound::is_rig_bound(value, reference.clone());
-    match verdict.copied() {
-        Some(true) => {
-            let detail = match reference.copied() {
-                Some(r) => {
-                    format!("sustained {value:.0} against a rig ceiling of {r:.0} at c={conc}")
-                }
-                None => format!("sustained {value:.0} at c={conc} with an unusable rig reference"),
-            };
-            out.rps_sustained_20ms = Measurement::absent_because(Absent::RigLimited, detail);
-            out.rps_sustained_20ms_mock_bound = Some(true);
-            // Suppressed WITH their number, and carrying its evidence: a concurrency left behind
-            // would be the operating point of a number the board is refusing to publish, and one
-            // left carrying the bare reason would name the suppression without the ceiling that
-            // caused it.
-            out.rps_sustained_20ms_concurrency = carry_absence(&out.rps_sustained_20ms);
-            out.conc_at_sustained = carry_absence(&out.rps_sustained_20ms);
-        }
-        Some(false) => {
-            out.rps_sustained_20ms = Measurement::Measured(value as i64);
-            out.rps_sustained_20ms_mock_bound = Some(false);
-            out.rps_sustained_20ms_concurrency = Measurement::Measured(i64::from(conc));
-            out.conc_at_sustained = Measurement::Measured(i64::from(conc));
-        }
-        None => {
-            let why = verdict.detail().map(str::to_string).unwrap_or_else(||
-                "the rig reference could not be measured, so it is unknown whether the gateway or the rig set this".to_string());
-            let reason = verdict.reason().cloned().unwrap_or(Absent::RigLimited);
-            out.rps_sustained_20ms = Measurement::absent_because(
-                reason,
-                format!("sustained {value:.0} at c={conc}: {why}"),
-            );
-            out.rps_sustained_20ms_mock_bound = None;
-            out.rps_sustained_20ms_concurrency = carry_absence(&out.rps_sustained_20ms);
-            // conc_at_sustained was assigned twice here, and the second assignment overwrote the
-            // verdict's own reason with a flat `RigLimited` - so a cell whose rig reference was
-            // unmeasurable published "the rig bounded this" beside a peak that says no such thing.
-            out.conc_at_sustained = carry_absence(&out.rps_sustained_20ms);
-        }
-    }
+    out.rps_sustained_20ms = Measurement::Measured(value as i64);
+    out.rps_sustained_20ms_concurrency = Measurement::Measured(i64::from(conc));
+    out.conc_at_sustained = Measurement::Measured(i64::from(conc));
+    out.rps_sustained_20ms_rig_ceiling = reference.copied();
+    out.rps_sustained_20ms_headroom = rigbound::headroom(value, &reference);
 }
 
-/// Fill the peak fields from the rig verdict. PURE, and separate from `judge_cell`, for one reason:
-/// the peak and the concurrency it happened at must agree about whether they exist, and that could
-/// not be tested while the decision was welded to a live rig measurement. The fixture the suite
-/// tests use points the gateway and the mock at the SAME server, so every cell comes back rig-bound
-/// and the measured branch was unreachable - a test written against `judge_cell` passed identically
-/// with the fix reverted, which is a test that is not testing anything.
+/// Fill the peak fields from the measurement and the rig reference. PURE, and separate from
+/// `judge_cell`, for one reason: the peak and the concurrency it happened at must agree about whether
+/// they exist, and that could not be tested while the decision was welded to a live rig measurement.
+/// The fixture the suite tests use points the gateway and the mock at the SAME server, so every cell
+/// came back rig-bound and the measured branch was unreachable - a test written against `judge_cell`
+/// passed identically with the fix reverted, which is a test that is not testing anything.
+///
+/// THE PEAK IS ALWAYS PUBLISHED, with the ceiling it was measured against beside it. The suppression
+/// this replaced is described in `rigbound.rs`: `rps_max_proxy` became `null` with the reason
+/// `rig_limited` whenever the gateway came within a tenth of the reference, which is exactly the set
+/// of gateways whose numbers were most worth having.
+///
+/// `conc_at_peak` and `rps_max_proxy_concurrency` are the same fact and are both set, because they are
+/// both read - a measured peak once shipped with `rps_max_proxy_concurrency` still null while its value
+/// sat in the very next field, and `rps_max_proxy_concurrency` is the one consumers use.
 fn apply_peak_verdict(out: &mut CellPerf, value: f64, conc: u32, reference: Measurement<f64>) {
-    let verdict = rigbound::is_rig_bound(value, reference.clone());
-    match verdict.copied() {
-        // Bounded by our own rig: this says nothing about the gateway, so it must not rank, win a
-        // comparison, or draw a bar. Two fast gateways both pinned here would otherwise read as a
-        // tie they did not earn.
-        Some(true) => {
-            let detail = match reference.copied() {
-                Some(r) => {
-                    format!("reached {value:.0} against a rig ceiling of {r:.0} at c={conc}")
-                }
-                None => format!("reached {value:.0} at c={conc} with an unusable rig reference"),
-            };
-            out.rps_max_proxy = Measurement::absent_because(Absent::RigLimited, detail);
-            out.rps_max_proxy_mock_bound = Some(true);
-            // Suppressed WITH its peak, and with its peak's evidence: a concurrency left behind would
-            // be the operating point of a number the board is refusing to publish, and one carrying
-            // the bare reason names the suppression without the ceiling that caused it.
-            // conc_at_peak is the same fact again.
-            out.rps_max_proxy_concurrency = carry_absence(&out.rps_max_proxy);
-            out.conc_at_peak = carry_absence(&out.rps_max_proxy);
-        }
-        Some(false) => {
-            out.rps_max_proxy = Measurement::Measured(value as i64);
-            out.rps_max_proxy_mock_bound = Some(false);
-            out.conc_at_peak = Measurement::Measured(i64::from(conc));
-            // THE PUBLISHED FIELD. conc_at_peak alone was set here, so every measured peak shipped
-            // with rps_max_proxy_concurrency still null - a peak with no operating point beside it,
-            // while the value sat in the very next field. This is what consumers read.
-            out.rps_max_proxy_concurrency = Measurement::Measured(i64::from(conc));
-        }
-        // The reference itself was unusable, so whether the rig bounded this is UNKNOWN. Publishing
-        // the number would assert it was gateway-bound, which was never established.
-        None => {
-            // The verdict's OWN reason and evidence: "the reference was unmeasurable" and "the
-            // reference measured something impossible" are different findings, and re-labelling
-            // both as rig_limited with an invented sentence published two lies about one state.
-            let why = verdict.detail().map(str::to_string).unwrap_or_else(||
-                "the rig reference could not be measured, so it is unknown whether the gateway or the rig set this".to_string());
-            let reason = verdict.reason().cloned().unwrap_or(Absent::RigLimited);
-            out.rps_max_proxy = Measurement::absent_because(
-                reason,
-                format!("reached {value:.0} at c={conc}: {why}"),
-            );
-            out.rps_max_proxy_mock_bound = None;
-            out.rps_max_proxy_concurrency = carry_absence(&out.rps_max_proxy);
-            out.conc_at_peak = carry_absence(&out.rps_max_proxy);
-        }
-    }
+    out.rps_max_proxy = Measurement::Measured(value as i64);
+    out.rps_max_proxy_concurrency = Measurement::Measured(i64::from(conc));
+    out.conc_at_peak = Measurement::Measured(i64::from(conc));
+    out.rps_max_proxy_rig_ceiling = reference.copied();
+    out.rps_max_proxy_headroom = rigbound::headroom(value, &reference);
 }
 
 /// The published per-cell memory window, from the numbers the memory group took.
@@ -718,7 +663,8 @@ fn judge_streams_sustained(
     if conc == 0 {
         out.streams_sustained = Measurement::Measured(0);
         out.streams_sustained_fps = Measurement::Measured(0.0);
-        out.streams_sustained_mock_bound = Some(false);
+        out.streams_sustained_mock_ceiling = None;
+        out.streams_sustained_headroom = None;
         return;
     }
     apply_streams_sustained_verdict(out, value, conc, stream_rig_ceiling(cfg, dialect, conc));
@@ -752,7 +698,8 @@ fn judge_cpu_fps(
     if conc == 0 {
         out.cpu_fps = Measurement::Measured(0.0);
         out.cpu_fps_concurrency = Measurement::Measured(0);
-        out.cpu_fps_mock_bound = Some(false);
+        out.cpu_fps_mock_ceiling = None;
+        out.cpu_fps_headroom = None;
         return;
     }
     apply_cpu_fps_verdict(out, value, conc, stream_rig_ceiling(cfg, dialect, conc));
@@ -779,99 +726,46 @@ fn carry_absence<A, T>(m: &Measurement<A>) -> Measurement<T> {
     }
 }
 
-/// Fill the streams-sustained fields from the mock verdict. PURE, and separate from its judge, for
-/// the identical reason `apply_peak_verdict` is separate from `judge_cell`: the suite's own fixture
-/// points the gateway and the mock at one server, so every cell comes back bound and the measured
-/// branch would be unreachable from an end-to-end test.
+/// Fill the streams-sustained fields from the measurement and the mock's derived ceiling. PURE, and
+/// separate from its judge, for the identical reason `apply_peak_verdict` is: the suite's own fixture
+/// points the gateway and the mock at one server, so a decision welded to a live reference would be
+/// untestable end to end.
+///
+/// MATCHING THE MOCK'S RATE IS THE GATEWAY SUCCEEDING. The mock paces its deltas at a fixed interval
+/// and says so in its own header: "the pacing is the model generating tokens; the stream suite measures
+/// what a gateway ADDS on top of it". So the mock's frames/sec is not a capacity it ran out of, it is
+/// the TARGET RATE - c streams times one frame per interval. A gateway that forwards every frame as it
+/// arrives lands at ~99% of it, which is the best available outcome, and it was suppressed as
+/// rig-limited: 13 cells lost `streams_sustained` and 11 lost `cpu_fps` on the 2026-07-28 board, with
+/// agentgateway keeping pace to within 0.7% and publishing nothing.
+///
+/// Whether it SHOULD have kept pace is what the gate decides, and the gate is about delivery - frames
+/// arriving, nothing stalling, streams not erroring. That is the right question and it is asked
+/// separately, so a gateway that cannot keep pace falls short there and the shortfall is published as
+/// its own rather than hidden behind ours.
 fn apply_streams_sustained_verdict(
     out: &mut crate::record::CellStream,
     value: f64,
     conc: u32,
     reference: Measurement<f64>,
 ) {
-    let verdict = rigbound::is_rig_bound(value, reference.clone());
-    match verdict.copied() {
-        // MATCHING THE MOCK'S RATE IS THE GATEWAY SUCCEEDING, NOT THE RIG LIMITING.
-        //
-        // The mock paces its deltas at a fixed interval and says so in its own header comment: "the
-        // pacing is the model generating tokens; the stream suite measures what a gateway ADDS on
-        // top of it". So the mock's frames/sec here is not a capacity it ran out of, it is the
-        // TARGET RATE - c streams times one frame per interval. A gateway that forwards every frame
-        // as it arrives lands at ~99% of it, which is the best possible outcome, and suppressing it
-        // as rig-limited threw away the number for the gateways that did best.
-        //
-        // It cost 13 cells their streams_sustained and 11 their cpu_fps in the 2026-07-28 run.
-        // agentgateway carried 12275 frames/sec against a "ceiling" of 12360 at c=256 - keeping pace
-        // to within 0.7% - and published nothing. The arithmetic gives it away: every one of those
-        // ceilings is c x (1000/20ms) to within 4%.
-        //
-        // So the rate is published, with the flag kept as the signal it always was: the gateway
-        // matched the paced upstream. Whether it should have is what the GATE decides, and the gate
-        // is about delivery - frames arriving, nothing stalling, streams not erroring - which is the
-        // right question and is asked separately. A gateway that cannot keep pace falls short here
-        // and that shortfall is its own, published rather than hidden.
-        //
-        // This is NOT the same judgement the throughput metrics make. There the mock's capacity
-        // really can be the limit and publishing would rank the rig, so `apply_peak_verdict` keeps
-        // suppressing. The difference is that a paced stream has a target and a saturating load does
-        // not.
-        Some(true) => {
-            out.streams_sustained_fps = Measurement::Measured(value);
-            out.streams_sustained_mock_bound = Some(true);
-            out.streams_sustained = Measurement::Measured(i64::from(conc));
-        }
-        Some(false) => {
-            out.streams_sustained_fps = Measurement::Measured(value);
-            out.streams_sustained_mock_bound = Some(false);
-            out.streams_sustained = Measurement::Measured(i64::from(conc));
-        }
-        None => {
-            let why = verdict.detail().map(str::to_string).unwrap_or_else(||
-                "the mock reference could not be measured, so it is unknown whether the gateway or the rig set this".to_string());
-            let reason = verdict.reason().cloned().unwrap_or(Absent::RigLimited);
-            out.streams_sustained_fps = Measurement::absent_because(
-                reason,
-                format!("carried {value:.0} frames/sec at c={conc}: {why}"),
-            );
-            out.streams_sustained_mock_bound = None;
-            out.streams_sustained = carry_absence(&out.streams_sustained_fps);
-        }
-    }
+    out.streams_sustained_fps = Measurement::Measured(value);
+    out.streams_sustained = Measurement::Measured(i64::from(conc));
+    out.streams_sustained_mock_ceiling = reference.copied();
+    out.streams_sustained_headroom = rigbound::headroom(value, &reference);
 }
 
-/// The same verdict for the cpu-frames/sec peak.
+/// The same for the cpu-frames/sec peak, for the same reasons.
 fn apply_cpu_fps_verdict(
     out: &mut crate::record::CellStream,
     value: f64,
     conc: u32,
     reference: Measurement<f64>,
 ) {
-    let verdict = rigbound::is_rig_bound(value, reference.clone());
-    match verdict.copied() {
-        // Same reasoning as the streams verdict above: the mock's frames/sec is a paced target, not
-        // a capacity, so reaching it is the gateway keeping up rather than the rig running out.
-        Some(true) => {
-            out.cpu_fps = Measurement::Measured(value);
-            out.cpu_fps_mock_bound = Some(true);
-            out.cpu_fps_concurrency = Measurement::Measured(i64::from(conc));
-        }
-        Some(false) => {
-            out.cpu_fps = Measurement::Measured(value);
-            out.cpu_fps_mock_bound = Some(false);
-            out.cpu_fps_concurrency = Measurement::Measured(i64::from(conc));
-        }
-        None => {
-            let why = verdict.detail().map(str::to_string).unwrap_or_else(||
-                "the mock reference could not be measured, so it is unknown whether the gateway or the rig set this".to_string());
-            let reason = verdict.reason().cloned().unwrap_or(Absent::RigLimited);
-            out.cpu_fps = Measurement::absent_because(
-                reason,
-                format!("peaked at {value:.0} frames/sec at c={conc}: {why}"),
-            );
-            out.cpu_fps_mock_bound = None;
-            out.cpu_fps_concurrency = carry_absence(&out.cpu_fps);
-        }
-    }
+    out.cpu_fps = Measurement::Measured(value);
+    out.cpu_fps_concurrency = Measurement::Measured(i64::from(conc));
+    out.cpu_fps_mock_ceiling = reference.copied();
+    out.cpu_fps_headroom = rigbound::headroom(value, &reference);
 }
 
 /// The concurrency the box-qualification observation is taken at, and the band it must hold.
@@ -1443,11 +1337,13 @@ fn withhold_refuted_perf(p: CellPerf, why: &str) -> CellPerf {
         rps_sustained_20ms: withheld(),
         rps_sustained_20ms_concurrency: withheld(),
         conc_at_sustained: withheld(),
-        rps_sustained_20ms_mock_bound: None,
+        rps_sustained_20ms_rig_ceiling: None,
+        rps_sustained_20ms_headroom: None,
         rps_max_proxy: withheld(),
         rps_max_proxy_concurrency: withheld(),
         conc_at_peak: withheld(),
-        rps_max_proxy_mock_bound: None,
+        rps_max_proxy_rig_ceiling: None,
+        rps_max_proxy_headroom: None,
         sweep_max_proxy: Vec::new(),
         sweep_sustained_20ms: Vec::new(),
         // THE EVIDENCE, kept verbatim: this is the whole reason the block survives.
@@ -1493,10 +1389,12 @@ fn withhold_refuted_stream(s: crate::record::CellStream, why: &str) -> crate::re
         added_gap_p99_us: withheld(&detail),
         streams_sustained: withheld(&detail),
         streams_sustained_fps: withheld(&detail),
-        streams_sustained_mock_bound: None,
+        streams_sustained_mock_ceiling: None,
+        streams_sustained_headroom: None,
         cpu_fps: withheld(&detail),
         cpu_fps_concurrency: withheld(&detail),
-        cpu_fps_mock_bound: None,
+        cpu_fps_mock_ceiling: None,
+        cpu_fps_headroom: None,
         sweep_streams: Vec::new(),
         sweep_cpu_fps: Vec::new(),
         // A note about how many frames the c=1 legs read would describe the weight of a number
@@ -2048,8 +1946,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // The rig judgement is WIRED. A gateway measured against itself as the reference is by
-    // definition at 100% of the reference, so it must be suppressed rather than published.
     // A peak with no operating point beside it is not a measurement anyone can reproduce. The first
     // real EC2 run published rps_max_proxy=46863 with rps_max_proxy_concurrency=null while the very
     // next field, conc_at_peak, held 116: the measured branch set conc_at_peak and left the PUBLISHED
@@ -2057,40 +1953,70 @@ mod tests {
     #[test]
     fn a_measured_peak_publishes_the_concurrency_it_happened_at() {
         let mut out = empty_perf();
-        // A reference far ABOVE the observation, so the rig plainly did not set this number and the
-        // verdict is the measured branch. Driving this through judge_cell instead is what made the
-        // first version of this test vacuous: its fixture is always rig-bound.
         apply_peak_verdict(&mut out, 46_863.0, 116, Measurement::Measured(400_000.0));
-        assert_eq!(
-            out.rps_max_proxy.copied(),
-            Some(46_863),
-            "a gateway-bound peak is published"
-        );
+        assert_eq!(out.rps_max_proxy.copied(), Some(46_863));
         assert_eq!(
             out.rps_max_proxy_concurrency.copied(),
             Some(116),
             "the published peak must carry the concurrency it happened at"
         );
         assert_eq!(out.conc_at_peak.copied(), Some(116));
+        // The ceiling and the fraction of it reached travel with the number, so a reader has the
+        // evidence without the engine drawing the conclusion.
+        assert_eq!(out.rps_max_proxy_rig_ceiling, Some(400_000.0));
+        let h = out
+            .rps_max_proxy_headroom
+            .expect("a usable reference yields a fraction");
+        assert!((h - 0.1172).abs() < 0.001, "{h}");
     }
 
-    // The other direction: a suppressed peak must not leave its operating point behind, or the board
-    // shows the concurrency of a number it is deliberately refusing to publish.
+    // THE SUPPRESSION IS GONE, AND MUST NOT COME BACK.
+    //
+    // This test is the inverse of the one it replaces (`a_suppressed_peak_leaves_no_concurrency
+    // _behind`), which asserted that a peak AT the rig reference was published as `null` with the
+    // reason `rig_limited`. That threw away a correct measurement to avoid publishing an ambiguous
+    // one - the number was right, only its meaning was open - and it fired hardest on the gateways
+    // whose numbers were most worth having. A reference equal to the observation is the strongest
+    // case: headroom 1.0, and the peak is still published.
     #[test]
-    fn a_suppressed_peak_leaves_no_concurrency_behind() {
+    fn a_peak_at_the_rig_ceiling_is_published_with_its_headroom_not_withheld() {
         let mut out = empty_perf();
-        // Reference equal to the observation: the rig, not the gateway, set this.
         apply_peak_verdict(&mut out, 46_863.0, 116, Measurement::Measured(46_863.0));
         assert_eq!(
             out.rps_max_proxy.copied(),
-            None,
-            "a rig-bound peak is suppressed"
+            Some(46_863),
+            "a measurement at the rig ceiling is still a measurement"
         );
         assert_eq!(
             out.rps_max_proxy_concurrency.copied(),
-            None,
-            "its operating point must be suppressed with it"
+            Some(116),
+            "and it keeps the operating point a reader needs to reproduce it"
         );
+        assert_eq!(out.conc_at_peak.copied(), Some(116));
+        assert_eq!(
+            out.rps_max_proxy_headroom,
+            Some(1.0),
+            "the fact the old suppression was reacting to is published instead of acted on"
+        );
+    }
+
+    // An unusable reference costs the HEADROOM, never the measurement. It used to cost both: an
+    // unmeasurable rig ceiling published `null` for a peak the gateway had really reached, on the
+    // grounds that we could not say whether the rig caused it. We still cannot - and now we say so by
+    // omitting the fraction rather than by deleting the number.
+    #[test]
+    fn an_unusable_peak_reference_costs_the_headroom_and_not_the_peak() {
+        let mut out = empty_perf();
+        apply_peak_verdict(
+            &mut out,
+            46_863.0,
+            116,
+            Measurement::absent(Absent::NotMeasured),
+        );
+        assert_eq!(out.rps_max_proxy.copied(), Some(46_863));
+        assert_eq!(out.rps_max_proxy_concurrency.copied(), Some(116));
+        assert_eq!(out.rps_max_proxy_rig_ceiling, None);
+        assert_eq!(out.rps_max_proxy_headroom, None);
     }
 
     // ── apply_sustained_verdict: the same rig-bound machinery as the peak, applied to the gate ──────
@@ -2107,30 +2033,27 @@ mod tests {
             "the published rate must carry the concurrency it was sustained at"
         );
         assert_eq!(out.conc_at_sustained.copied(), Some(1024));
-        assert_eq!(out.rps_sustained_20ms_mock_bound, Some(false));
+        assert_eq!(out.rps_sustained_20ms_rig_ceiling, Some(400_000.0));
+        assert!(out.rps_sustained_20ms_headroom.is_some());
     }
 
+    // The sustained lane's half of the same regression: a rate at the rig reference is published.
     #[test]
-    fn a_rig_bound_sustained_ceiling_is_suppressed_with_its_concurrency() {
+    fn a_sustained_rate_at_the_rig_ceiling_is_published_with_its_headroom() {
         let mut out = empty_perf();
-        // Reference equal to the observation: the rig, not the gateway, set this ceiling.
         apply_sustained_verdict(&mut out, 11_968.0, 1024, Measurement::Measured(11_968.0));
         assert_eq!(
             out.rps_sustained_20ms.copied(),
-            None,
-            "a rig-bound sustained rate is suppressed"
+            Some(11_968),
+            "a sustained rate at the rig ceiling is still a sustained rate"
         );
-        assert_eq!(
-            out.rps_sustained_20ms_concurrency.copied(),
-            None,
-            "its operating point must be suppressed with it"
-        );
-        assert_eq!(out.conc_at_sustained.copied(), None);
-        assert_eq!(out.rps_sustained_20ms_mock_bound, Some(true));
+        assert_eq!(out.rps_sustained_20ms_concurrency.copied(), Some(1024));
+        assert_eq!(out.conc_at_sustained.copied(), Some(1024));
+        assert_eq!(out.rps_sustained_20ms_headroom, Some(1.0));
     }
 
     #[test]
-    fn an_unusable_sustained_reference_is_unknown_never_a_guessed_false() {
+    fn an_unusable_sustained_reference_costs_the_headroom_and_not_the_rate() {
         let mut out = empty_perf();
         apply_sustained_verdict(
             &mut out,
@@ -2138,10 +2061,12 @@ mod tests {
             1024,
             Measurement::absent(Absent::NotMeasured),
         );
-        assert_eq!(out.rps_sustained_20ms.copied(), None);
+        assert_eq!(out.rps_sustained_20ms.copied(), Some(11_968));
+        assert_eq!(out.rps_sustained_20ms_concurrency.copied(), Some(1024));
+        assert_eq!(out.rps_sustained_20ms_rig_ceiling, None);
         assert_eq!(
-            out.rps_sustained_20ms_mock_bound, None,
-            "an unmeasurable rig reference must not be guessed as gateway-bound"
+            out.rps_sustained_20ms_headroom, None,
+            "no reference means no fraction to state - it does not mean no measurement"
         );
     }
 
@@ -2163,9 +2088,8 @@ mod tests {
         assert_eq!(out.rps_sustained_20ms_concurrency.copied(), Some(0));
         assert_eq!(out.conc_at_sustained.copied(), Some(0));
         assert_eq!(
-            out.rps_sustained_20ms_mock_bound,
-            Some(false),
-            "0 cannot be rig-bound: the rig was never asked to do anything"
+            out.rps_sustained_20ms_headroom, None,
+            "there is no concurrency to take a reference at, so there is no fraction"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2214,23 +2138,17 @@ mod tests {
         assert_eq!(out.gateway_c1_p99_us.copied(), None);
     }
 
-    // NOT COVERED HERE BY DESIGN: an end-to-end suite test driving the whole pipeline with the
-    // gateway and mock pointed at the same server, asserting suppression IF
-    // `rps_max_proxy_mock_bound == Some(true)`, would be vacuous in practice - `cfg_for`'s fixture
-    // (sweep_duration_s: 1, max_conc: 2) is too tight for `search::saturation_plateau` to complete even one
-    // probe before its own search deadline interrupts it, so the search always returns zero sweep
-    // points and `mock_bound` is always `None`, never `Some(true)`, and the guarded assertion body
-    // would never run. The behavior ("a value at the rig ceiling must not be published, and its
-    // concurrency must be suppressed with it") is already covered directly and
-    // deterministically by `a_suppressed_peak_leaves_no_concurrency_behind` above, which drives
-    // `apply_peak_verdict` with a reference equal to the observation, and by rigbound.rs's
-    // `at_or_above_nine_tenths_of_the_ceiling_is_rig_bound` / `exactly_at_the_fraction_counts_as_bound`,
-    // which cover the 90% threshold itself. Making the end-to-end version actually reach `Some(true)`
-    // would mean growing the fixture's sweep duration until a real search completes, which trades a
-    // fast, deterministic unit test for a slow one whose pass/fail would still depend on two live
-    // measurement passes against the same loopback server landing within 10% of each other - a real
-    // flakiness risk for no additional coverage over what the two pure-function suites above already
-    // give.
+    // NOT COVERED HERE BY DESIGN: an end-to-end suite test driving the whole pipeline with the gateway
+    // and mock pointed at the same server. `cfg_for`'s fixture (sweep_duration_s: 1, max_conc: 2) is too
+    // tight for `search::saturation_plateau` to complete even one probe before its own deadline
+    // interrupts it, so the search always returns zero sweep points and the verdict path is never
+    // reached at all. The behaviour that matters - a measurement AT the reference reaches the board,
+    // carrying the reference and the fraction of it - is covered directly and deterministically by
+    // `a_peak_at_the_rig_ceiling_is_published_with_its_headroom_not_withheld` and its sustained and
+    // stream counterparts, which drive the pure functions with a reference equal to the observation.
+    // Growing the fixture until a real search completes would trade a fast deterministic test for a
+    // slow one whose result depends on two live measurement passes against the same loopback server -
+    // real flakiness for no coverage the pure suites do not already give.
 
     // ── the two stream verdicts: the same mock-bound machinery, one lane over ────────────────────
 
@@ -2245,11 +2163,12 @@ mod tests {
             Some(256),
             "the published rate must carry the stream count it was carried at"
         );
-        assert_eq!(out.streams_sustained_mock_bound, Some(false));
+        assert_eq!(out.streams_sustained_mock_ceiling, Some(400_000.0));
+        assert!(out.streams_sustained_headroom.is_some());
     }
 
     #[test]
-    fn a_stream_rate_that_matches_the_paced_mock_is_published_with_the_flag() {
+    fn a_stream_rate_that_matches_the_paced_mock_is_published_with_its_headroom() {
         let mut out = crate::record::CellStream::default();
         // The field case: agentgateway carried 12275 frames/sec against a 12360 "ceiling" at c=256 -
         // within 0.7% of a mock whose rate is c x (1000 / 20ms) by construction - and published
@@ -2265,15 +2184,17 @@ mod tests {
             Some(256),
             "and its operating point travels with it"
         );
-        assert_eq!(
-            out.streams_sustained_mock_bound,
-            Some(true),
-            "flagged as matching the paced upstream"
+        let h = out
+            .streams_sustained_headroom
+            .expect("the fraction of the paced target it carried");
+        assert!(
+            h > 0.99 && h < 1.0,
+            "keeping pace to within 0.7% reads as ~0.993, not as an absence: {h}"
         );
     }
 
     #[test]
-    fn an_unusable_stream_reference_is_unknown_never_a_guessed_false() {
+    fn an_unusable_stream_reference_costs_the_headroom_and_not_the_rate() {
         let mut out = crate::record::CellStream::default();
         apply_streams_sustained_verdict(
             &mut out,
@@ -2281,11 +2202,14 @@ mod tests {
             256,
             Measurement::absent(Absent::NotMeasured),
         );
-        assert_eq!(out.streams_sustained_fps.copied(), None);
         assert_eq!(
-            out.streams_sustained_mock_bound, None,
-            "an unmeasurable mock reference must not be guessed as gateway-bound"
+            out.streams_sustained_fps.copied(),
+            Some(12_400.0),
+            "the frames really were carried; only the fraction is unavailable"
         );
+        assert_eq!(out.streams_sustained.copied(), Some(256));
+        assert_eq!(out.streams_sustained_mock_ceiling, None);
+        assert_eq!(out.streams_sustained_headroom, None);
     }
 
     #[test]
@@ -2294,13 +2218,17 @@ mod tests {
         apply_cpu_fps_verdict(&mut out, 169_125.0, 1024, Measurement::Measured(351_088.0));
         assert_eq!(out.cpu_fps.copied(), Some(169_125.0));
         assert_eq!(out.cpu_fps_concurrency.copied(), Some(1024));
-        assert_eq!(out.cpu_fps_mock_bound, Some(false));
+        assert_eq!(out.cpu_fps_mock_ceiling, Some(351_088.0));
+        let h = out
+            .cpu_fps_headroom
+            .expect("a fraction of the derived ceiling");
+        assert!((h - 0.4817).abs() < 0.001, "{h}");
     }
 
     // The field case from rigbound.rs's own tests, in the lane it came from: 334838 fps against a
     // 351088 fps mock ceiling is 95.4% and says nothing about the gateway.
     #[test]
-    fn a_cpu_fps_peak_that_matches_the_paced_mock_is_published_with_the_flag() {
+    fn a_cpu_fps_peak_that_matches_the_paced_mock_is_published_with_its_headroom() {
         let mut out = crate::record::CellStream::default();
         // The mock paces its deltas, so its frames/sec is a TARGET, not a capacity it ran out of.
         // Reaching it is the gateway forwarding every frame as it arrives - the best outcome there
@@ -2316,10 +2244,12 @@ mod tests {
             Some(1024),
             "and it has an operating point"
         );
-        assert_eq!(
-            out.cpu_fps_mock_bound,
-            Some(true),
-            "the flag stays as the signal it always was"
+        let h = out
+            .cpu_fps_headroom
+            .expect("a fraction of the derived ceiling");
+        assert!(
+            (h - 0.9537).abs() < 0.001,
+            "95.4% of the mock's paced target is the fact to publish: {h}"
         );
     }
 
@@ -2341,9 +2271,8 @@ mod tests {
         assert_eq!(out.streams_sustained.copied(), Some(0));
         assert_eq!(out.streams_sustained_fps.copied(), Some(0.0));
         assert_eq!(
-            out.streams_sustained_mock_bound,
-            Some(false),
-            "0 cannot be mock-bound: the mock was never asked to carry anything"
+            out.streams_sustained_headroom, None,
+            "no concurrency means no reference to take, so there is no fraction"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -3059,55 +2988,112 @@ mod tests {
         );
     }
 
-    // A SUPPRESSED NUMBER'S TWINS CARRY ITS EVIDENCE, NOT JUST ITS LABEL. The companion fields were
-    // built with `Measurement::absent(reason)`, so a reader who opened the absences map at
-    // `perf.conc_at_peak` got "rig_limited" with no sign of the ceiling that caused it, while the
-    // primary two keys away carried the whole story.
+    // AN ABSENT NUMBER'S TWINS CARRY ITS EVIDENCE, NOT JUST ITS LABEL.
+    //
+    // REPOINTED, NOT DELETED. These two tests used to drive `apply_peak_verdict` /
+    // `apply_sustained_verdict` with a reference that made the value rig-bound or the verdict unknown,
+    // and assert that the suppressed primary's companion fields carried its detail and its reason. Both
+    // of those states are now unreachable: those functions publish the measurement unconditionally, so
+    // there is no suppressed primary on that path to have twins.
+    //
+    // The INVARIANT still holds and still has a live path - the early return in each judge, where the
+    // metric surface itself had nothing to offer. That is where `carry_absence` is still called, and it
+    // is still the place the defect lived: the companion fields were built with
+    // `Measurement::absent(reason)`, which keeps the label and drops the evidence, so a reader who
+    // opened the absences map at `perf.conc_at_peak` got a bare token while the primary two keys away
+    // carried the whole story. Deleting the tests along with the suppression would have taken the guard
+    // off a path that never changed.
     #[test]
-    fn a_suppressed_peaks_twins_carry_the_same_evidence_the_peak_does() {
+    fn an_absent_sustained_rate_gives_its_twins_the_same_reason_and_evidence() {
+        let dir = tmpdir("sustained-twins");
+        let gw = serve(200);
+        let cfg = cfg_for(&dir, gw);
         let mut out = empty_perf();
-        apply_peak_verdict(&mut out, 46_863.0, 116, Measurement::Measured(46_863.0));
+        let mut metrics: std::collections::BTreeMap<&'static str, Measurement<f64>> =
+            std::collections::BTreeMap::new();
+        metrics.insert(
+            "rps_sustained_20ms",
+            Measurement::absent_because(
+                Absent::SearchExhausted,
+                "c=16384 still sustains the gate at the top of the search range",
+            ),
+        );
+        metrics.insert(
+            "rps_sustained_20ms_concurrency",
+            Measurement::absent(Absent::SearchExhausted),
+        );
+        judge_sustained(&cfg, Dialect::Openai, &mut out, &metrics);
+
+        let detail = out
+            .rps_sustained_20ms
+            .detail()
+            .expect("the search's own evidence survives into the record")
+            .to_string();
+        assert!(detail.contains("16384"), "{detail}");
+        assert_eq!(
+            out.rps_sustained_20ms.reason(),
+            Some(&Absent::SearchExhausted)
+        );
+        // One absence, one story, at every key that carries it. `conc_at_sustained` was assigned twice
+        // in the old unknown-verdict branch and the second assignment flattened the reason to
+        // `RigLimited`, so a cell published "the rig bounded this" beside "still climbing" on the field
+        // next to it.
+        for (name, twin) in [
+            (
+                "rps_sustained_20ms_concurrency",
+                &out.rps_sustained_20ms_concurrency,
+            ),
+            ("conc_at_sustained", &out.conc_at_sustained),
+        ] {
+            assert_eq!(
+                twin.reason(),
+                Some(&Absent::SearchExhausted),
+                "{name} must carry the primary's reason, not a relabelled rig limit"
+            );
+            assert_eq!(
+                twin.detail(),
+                Some(detail.as_str()),
+                "{name} must carry the primary's evidence, not a bare token"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // The peak lane's half of the same invariant, on the same surviving path.
+    #[test]
+    fn an_absent_peak_gives_its_twins_the_same_reason_and_evidence() {
+        let dir = tmpdir("peak-twins");
+        let gw = serve(200);
+        let cfg = cfg_for(&dir, gw);
+        let mut metrics: std::collections::BTreeMap<&'static str, Measurement<f64>> =
+            std::collections::BTreeMap::new();
+        metrics.insert(
+            "rps_max_proxy",
+            Measurement::absent_because(
+                Absent::HarnessError,
+                "the generator could not spawn its threads at c=2048",
+            ),
+        );
+        metrics.insert("conc_at_peak", Measurement::absent(Absent::HarnessError));
+        let out = judge_cell(&cfg, Dialect::Openai, &metrics).perf;
+
         let detail = out
             .rps_max_proxy
             .detail()
-            .expect("the suppressed peak states what bounded it")
+            .expect("the harness fault's own evidence survives")
             .to_string();
-        assert!(detail.contains("rig ceiling"));
-        assert_eq!(
-            out.rps_max_proxy_concurrency.detail(),
-            Some(detail.as_str()),
-            "the twin must carry the same evidence, not a bare reason"
-        );
-        assert_eq!(out.conc_at_peak.detail(), Some(detail.as_str()));
-    }
-
-    // AND THE TWINS MUST CARRY THE SAME REASON. `conc_at_sustained` was assigned twice in the
-    // unknown-verdict branch, and the second assignment overwrote the verdict's own reason with a
-    // flat `RigLimited` - so a cell whose rig reference was unmeasurable published "the rig bounded
-    // this" on one field beside "we could not tell" on the two next to it.
-    #[test]
-    fn an_unknown_sustained_verdict_does_not_relabel_its_concurrency_as_rig_bound() {
-        let mut out = empty_perf();
-        apply_sustained_verdict(
-            &mut out,
-            11_968.0,
-            1024,
-            Measurement::absent(Absent::NotMeasured),
-        );
-        assert_eq!(out.rps_sustained_20ms.reason(), Some(&Absent::NotMeasured));
-        assert_eq!(
-            out.conc_at_sustained.reason(),
-            Some(&Absent::NotMeasured),
-            "the concurrency must carry the verdict's reason, not a relabelled rig limit"
-        );
-        assert_eq!(
-            out.conc_at_sustained.detail(),
-            out.rps_sustained_20ms.detail(),
-            "one absence, one story, at every key that carries it"
-        );
-        assert_eq!(
-            out.rps_sustained_20ms_concurrency.reason(),
-            Some(&Absent::NotMeasured)
-        );
+        assert!(detail.contains("2048"), "{detail}");
+        for (name, twin) in [
+            ("rps_max_proxy_concurrency", &out.rps_max_proxy_concurrency),
+            ("conc_at_peak", &out.conc_at_peak),
+        ] {
+            assert_eq!(
+                twin.reason(),
+                Some(&Absent::HarnessError),
+                "{name} must not relabel a fault of OURS as anything else"
+            );
+            assert_eq!(twin.detail(), Some(detail.as_str()), "{name}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -339,18 +339,33 @@ pub struct CellPerf {
     pub rps_sustained_20ms_concurrency: Measurement<i64>,
     #[serde(default = "measurement_default")]
     pub conc_at_sustained: Measurement<i64>,
-    /// Whether the sustained-throughput rung was bounded by the mock/rig rather than the gateway. A
-    /// flag, not a `Measurement`: it qualifies the number above, it is not itself absent-able.
+    /// The rig's own throughput at `rps_sustained_20ms_concurrency`, and the fraction of it the
+    /// gateway reached. CONTEXT FOR THE NUMBER ABOVE, never a gate on it.
+    ///
+    /// These replace `rps_sustained_20ms_mock_bound: Option<bool>`, which was a VERDICT: `true` meant
+    /// the engine had decided our rig set this limit, and the sustained figure was published as `null`
+    /// with the reason `rig_limited` whenever the fraction reached 0.9. The measurement was correct in
+    /// every one of those cells - only its interpretation was uncertain - so the interpretation is now
+    /// the reader's and the two numbers it would be drawn from are stated. See `rigbound.rs`.
+    ///
+    /// Both `None` when the reference could not be established, which costs the headroom and NOT the
+    /// measurement: an unmeasurable ceiling used to make the gateway's own number disappear.
     #[serde(default)]
-    pub rps_sustained_20ms_mock_bound: Option<bool>,
+    pub rps_sustained_20ms_rig_ceiling: Option<f64>,
+    #[serde(default)]
+    pub rps_sustained_20ms_headroom: Option<f64>,
     #[serde(default = "measurement_default")]
     pub rps_max_proxy: Measurement<i64>,
     #[serde(default = "measurement_default")]
     pub rps_max_proxy_concurrency: Measurement<i64>,
     #[serde(default = "measurement_default")]
     pub conc_at_peak: Measurement<i64>,
+    /// The rig's own throughput at `rps_max_proxy_concurrency`, and the fraction of it reached. Same
+    /// meaning and same history as the sustained pair above.
     #[serde(default)]
-    pub rps_max_proxy_mock_bound: Option<bool>,
+    pub rps_max_proxy_rig_ceiling: Option<f64>,
+    #[serde(default)]
+    pub rps_max_proxy_headroom: Option<f64>,
     #[serde(default)]
     pub sweep_max_proxy: Vec<SweepPoint>,
     #[serde(default)]
@@ -453,14 +468,24 @@ pub struct CellStream {
     pub streams_sustained: Measurement<i64>,
     #[serde(default = "measurement_default")]
     pub streams_sustained_fps: Measurement<f64>,
+    /// The most frames/sec the MOCK can emit at `streams_sustained` concurrency, and the fraction of
+    /// it carried. The ceiling here is DERIVED from the mock's declared pacing rather than measured -
+    /// see `run::mock_frame_ceiling_fps` - so it is exact arithmetic, and a gateway reaching ~1.0 of it
+    /// is forwarding every frame as it arrives, which is the best available outcome rather than a
+    /// limit.
     #[serde(default)]
-    pub streams_sustained_mock_bound: Option<bool>,
+    pub streams_sustained_mock_ceiling: Option<f64>,
+    #[serde(default)]
+    pub streams_sustained_headroom: Option<f64>,
     #[serde(default = "measurement_default")]
     pub cpu_fps: Measurement<f64>,
     #[serde(default = "measurement_default")]
     pub cpu_fps_concurrency: Measurement<i64>,
+    /// The same derived mock ceiling at `cpu_fps_concurrency`, and the fraction of it reached.
     #[serde(default)]
-    pub cpu_fps_mock_bound: Option<bool>,
+    pub cpu_fps_mock_ceiling: Option<f64>,
+    #[serde(default)]
+    pub cpu_fps_headroom: Option<f64>,
     /// The sweep points behind `streams_sustained` / `cpu_fps`. Shaped like `SweepPoint` in run.sh's
     /// own accumulator, but no committed snapshot has ever populated it, so each point is passed
     /// through as opaque JSON rather than typed against an unconfirmed shape.
@@ -826,11 +851,13 @@ mod tests {
             rps_sustained_20ms: Measurement::Measured(11_968),
             rps_sustained_20ms_concurrency: Measurement::Measured(1024),
             conc_at_sustained: Measurement::Measured(1024),
-            rps_sustained_20ms_mock_bound: Some(false),
+            rps_sustained_20ms_rig_ceiling: None,
+            rps_sustained_20ms_headroom: None,
             rps_max_proxy: Measurement::Measured(12_298),
             rps_max_proxy_concurrency: Measurement::Measured(1024),
             conc_at_peak: Measurement::Measured(1024),
-            rps_max_proxy_mock_bound: Some(false),
+            rps_max_proxy_rig_ceiling: None,
+            rps_max_proxy_headroom: None,
             sweep_max_proxy: vec![SweepPoint {
                 conc: 256,
                 rps: Measurement::Measured(6_209),
@@ -875,10 +902,12 @@ mod tests {
                 added_gap_p99_us: Measurement::absent(Absent::NotMeasured),
                 streams_sustained: Measurement::absent(Absent::NotMeasured),
                 streams_sustained_fps: Measurement::absent(Absent::NotMeasured),
-                streams_sustained_mock_bound: None,
+                streams_sustained_mock_ceiling: None,
+                streams_sustained_headroom: None,
                 cpu_fps: Measurement::absent(Absent::NotMeasured),
                 cpu_fps_concurrency: Measurement::absent(Absent::NotMeasured),
-                cpu_fps_mock_bound: None,
+                cpu_fps_mock_ceiling: None,
+                cpu_fps_headroom: None,
                 sweep_streams: vec![],
                 sweep_cpu_fps: vec![],
                 stream_c1_note: None,
@@ -1108,11 +1137,13 @@ mod tests {
             "rps_sustained_20ms": null,
             "rps_sustained_20ms_concurrency": null,
             "conc_at_sustained": null,
-            "rps_sustained_20ms_mock_bound": null,
+            "rps_sustained_20ms_rig_ceiling": null,
+            "rps_sustained_20ms_headroom": null,
             "rps_max_proxy": null,
             "rps_max_proxy_concurrency": null,
             "conc_at_peak": null,
-            "rps_max_proxy_mock_bound": null,
+            "rps_max_proxy_rig_ceiling": null,
+            "rps_max_proxy_headroom": null,
             "sweep_max_proxy": [],
             "sweep_sustained_20ms": [],
             "egress_reverified": null
