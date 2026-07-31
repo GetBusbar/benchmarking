@@ -670,6 +670,7 @@ pub fn load_window_costed(
     // spec (the `smoke` path, which drives a gateway this process never pinned) yields no cores and
     // therefore an absent utilisation - measuring some other process's cores and labelling the
     // result this gateway's would be worse than reporting nothing.
+    let started = std::time::Instant::now();
     let cores = crate::procsample::parse_cores(&cfg.gw_cores);
     let cpu_before = if cores.is_empty() {
         None
@@ -706,14 +707,44 @@ pub fn load_window_costed(
     } else {
         crate::procsample::cpu_busy_total(&crate::rss::RealProc, &cores)
     };
-    let util = if cores.is_empty() {
-        crate::measurement::Measurement::absent_because(
+    // UTILISATION IS DERIVED FROM THE GATEWAY OWN CPU, NOT FROM /proc/stat. It was the other way
+    // round for exactly one field run, and tensorzero proved it wrong.
+    //
+    // /proc/stat per-CPU counters are TICK-SAMPLED; per-process utime/stime is accounted by the
+    // scheduler at every context switch. Those disagree badly for a bursty workload. Measured on a
+    // live box: tensorzero accumulated 66-255 jiffies in five seconds while its four pinned cores
+    // reported 3-18 busy - a 14x to 41x undercount - because it serves ~380us requests that begin and
+    // end between ticks. The tell was the denominator: total jiffies for those cores read 1741-1933
+    // per five seconds instead of ~2000, and FELL as load rose.
+    //
+    // A continuously-busy gateway does not show this, which is why eleven of twelve passed the
+    // cross-check and only the bursty one failed. The error is therefore not uniform and cannot be
+    // corrected for - it is worst exactly where "is this gateway CPU-bound?" is most interesting.
+    //
+    // Wall time is MEASURED here rather than taken from `sweep_duration_s`, which is the CONFIGURED
+    // length and not what elapsed.
+    let elapsed_s = started.elapsed().as_secs_f64();
+    let util = match (cores.is_empty(), cost.cpu_us.copied()) {
+        (true, _) => crate::measurement::Measurement::absent_because(
             crate::measurement::Absent::NotMeasured,
-            "this run declares no gateway core pinning, so there is no core set whose utilisation              could be attributed to the gateway",
-        )
-    } else {
-        crate::procsample::utilisation(cpu_before, cpu_after)
+            "this run declares no gateway core pinning, so there is no core set whose utilisation could be attributed to the gateway",
+        ),
+        (false, None) => crate::measurement::Measurement::absent_because(
+            crate::measurement::Absent::NotMeasured,
+            "the gateway CPU for this window is absent, so its share of the pinned cores cannot be derived",
+        ),
+        (false, Some(cpu_us)) if elapsed_s > 0.0 => crate::measurement::Measurement::Measured(
+            (cpu_us / 1_000_000.0) / (elapsed_s * cores.len() as f64),
+        ),
+        (false, Some(_)) => crate::measurement::Measurement::absent_because(
+            crate::measurement::Absent::NotMeasured,
+            "the window reported no elapsed time, so utilisation cannot be divided out",
+        ),
     };
+    // The tick-sampled reading is computed but NOT published as utilisation. Kept so the two can be
+    // compared deliberately: where a gateway is continuously busy they agree, and a large gap is
+    // itself the signal that the workload is bursty.
+    let _tick_sampled = crate::procsample::utilisation(cpu_before, cpu_after);
     (stats, cost, util)
 }
 

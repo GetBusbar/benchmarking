@@ -201,35 +201,23 @@ def main():
                         f"{(peak - hwm):.1f} MiB ({(peak / hwm - 1) * 100:.2f}%) - transient-worker artefact"
                     )
 
-                # THE COST WINDOW MUST AGREE WITH ITSELF, and with the cores it ran on.
+                # NO CPU-vs-CORES CROSS-CHECK HERE ANY MORE, AND THE REASON IS WORTH KEEPING.
                 #
-                # Two INDEPENDENT instruments produce these numbers: /proc/<pid>/stat sums the
-                # gateway's process tree, /proc/stat reads the pinned cores. Nothing makes them agree
-                # by construction, so comparing them is a real check rather than the tautology I
-                # first wrote (cpu_us_per_request x rps_per_cpu_second is 1,000,000 by definition -
-                # the same quantity inverted - and it "passed" while telling me nothing).
+                # There was one: it compared the gateway CPU against what /proc/stat said its pinned
+                # cores had accumulated, on the grounds that a process cannot use more CPU than its
+                # cores report busy. It fired on tensorzero, on its first field run, on three cells -
+                # and the investigation showed the CHECK was wrong, not the gateway.
                 #
-                # The gateway cannot burn more CPU than its pinned cores accumulated. It can burn
-                # LESS, and legitimately does: the cores are shared with nothing else here, but the
-                # utilisation window spans slightly more wall time than the load window. So this is
-                # bounded generously and only fires on a real contradiction - the case that would
-                # mean the process is not confined to the cores we are measuring, and the whole
-                # comparable-basis claim is false.
-                pf = cell.get("perf") or {}
-                ok, wrps = num(pf.get("cost_window_ok")), num(pf.get("cost_window_rps"))
-                cpu_us, util = num(pf.get("cpu_us_per_request")), num(pf.get("cost_core_utilisation"))
-                cores = COST_PINNED_CORES
-                if None not in (ok, wrps, cpu_us, util) and wrps > 0 and util > 0 and ok > 0:
-                    wall = ok / wrps
-                    cpu_s = ok * cpu_us / 1e6
-                    implied = cpu_s / (wall * cores)
-                    if implied > util * COST_UTIL_TOLERANCE:
-                        problems.append(
-                            f"{at}: the gateway burned {cpu_s:.3f} CPU-s but its {cores} pinned cores "
-                            f"only reported {util * 100:.2f}% busy over {wall:.2f}s (implying {implied * 100:.2f}%) - "
-                            f"a process cannot use more CPU than the cores it is pinned to, so either the "
-                            f"pinning is not in force or the two samplers are describing different processes"
-                        )
+                # /proc/stat per-CPU counters are TICK-SAMPLED. Measured on a live box, tensorzero
+                # accumulated 66-255 process jiffies in five seconds while those cores reported 3-18
+                # busy, because it serves ~380us requests that begin and end between ticks. Eleven of
+                # twelve gateways passed only because they were continuously busy enough for ticks to
+                # land on them.
+                #
+                # `cost_core_utilisation` is now DERIVED from the gateway own precisely-accounted CPU,
+                # so re-deriving it here would compare a number with itself - the tautology this file
+                # already fell for once (cpu_us_per_request x rps_per_cpu_second is 1,000,000 by
+                # construction). A check that cannot fail is worse than no check, so there is none.
 
                 st = cell.get("stream") or {}
                 if st.get("stream_served") is True:
