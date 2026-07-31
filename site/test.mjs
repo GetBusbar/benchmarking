@@ -2246,6 +2246,53 @@ test("stripRigPaths scrubs absolute bench-box paths from diagnostic notes", () =
   assert.ok(!na.note.includes("/home/"));
 });
 
+test("COST: the cost columns appear only on a board that can answer them, and read through the envelope", () => {
+  // ADDITIVE, NOT A REPLACEMENT. The existing columns are untouched; these follow the per-cell-memory
+  // precedent and appear only when the board carries the field.
+  //
+  // WHY GATE AT ALL, when every other absence renders per row: a row missing ONE metric still has the
+  // rest, so "not measured" there is disclosure. A cost column on a board measured before the capture
+  // existed is n/a on EVERY row - a column asking a question nothing on the page can answer, which is
+  // noise. It lights up by itself on the first board carrying the field.
+  const noCost = { gateways: [{ key: "a", best_cell: bcCell({}) }] };
+  assert.equal(app.hasCost(noCost), false);
+  const ids = app.columnsFor("performance", noCost).map((c) => c.id);
+  assert.ok(!ids.includes("cpu"), `no cost column on a board without cost: ${ids.join(",")}`);
+  assert.ok(ids.includes("rps"), "the throughput column is untouched");
+
+  // A board that DOES carry cost shows them, and reads the value through the sealed envelope.
+  const withCost = {
+    gateways: [{
+      key: "a",
+      best_cell: { ...bcCell({}), cpu_us_per_request: seal(37.5), rps_per_cpu_second: seal(26666) },
+    }],
+  };
+  assert.equal(app.hasCost(withCost), true);
+  const cols = app.columnsFor("performance", withCost);
+  const cpu = cols.find((c) => c.id === "cpu");
+  assert.ok(cpu, "the cost column appears once the board can answer it");
+  assert.equal(cpu.desc, false, "less CPU per request is better, so it sorts ascending");
+  const st = { data: withCost, mode: "peak", bound: 10 };
+  assert.equal(cpu.get(withCost.gateways[0], st).v, 37.5);
+  assert.equal(cols.find((c) => c.id === "rpscpu").get(withCost.gateways[0], st).v, 26666);
+});
+
+test("COST: an absent cost renders 'not measured', never a 0 that would look infinitely efficient", () => {
+  // A gateway measured before the capture existed carries a null envelope. Rendering that as 0 would
+  // make the LEAST-measured gateway look like the cheapest one on the board.
+  const board = {
+    gateways: [
+      { key: "measured", best_cell: { ...bcCell({}), cpu_us_per_request: seal(40) } },
+      { key: "not-yet", best_cell: { ...bcCell({}), cpu_us_per_request: seal(null, { reason: "not_measured" }) } },
+    ],
+  };
+  const cpu = app.columnsFor("performance", board).find((c) => c.id === "cpu");
+  const st = { data: board, mode: "peak", bound: 10 };
+  const absent = cpu.get(board.gateways[1], st);
+  assert.equal(absent.v, null, "an unmeasured cost has no value");
+  assert.ok(!/^0/.test(absent.text), `must not render as a zero: ${absent.text}`);
+});
+
 test("FINDING 39: a sub-1/s rate survives every axis tick and every hover sentence", () => {
   // THE RATE HAS NOW LEAKED AT SIXTEEN BOUNDARIES ACROSS FIVE AUDIT ROUNDS, always the same shape:
   // one renderer is taught the fractional rate and a sibling reading the SAME number is missed. These
