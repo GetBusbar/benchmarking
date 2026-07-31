@@ -1099,6 +1099,50 @@ function rigResolutionPct(data = (typeof state !== "undefined" ? state.data : nu
   return out;
 }
 
+/* costSaturation(cell): whether a cell's core utilisation may be read as a saturation verdict.
+
+   THE NUMBER ALONE IS MISLEADING AND I MISREAD IT MYSELF. The cost window runs at ONE concurrency,
+   held identical for every gateway, which is what makes cost per request comparable. But a gateway
+   whose peak needs far more concurrency is barely loaded there - tensorzero's window carried 200 rps
+   against a 13,303 peak, 2% of it - so its idle cores say nothing whatever about whether it
+   saturates at its peak. I wrote "tensorzero is not CPU-bound" from exactly that figure.
+
+   one-api is the case that IS a verdict: 95% of its peak at that same concurrency and still using
+   2.6% of its cores. Same utilisation shape, opposite meaning, and only the ratio distinguishes them.
+
+   So this returns the utilisation WITH the ratio that qualifies it, and `verdict` is null whenever
+   the window did not get close enough to the peak for the question to be answerable. A caller cannot
+   render the number without also holding the reason it may or may not be believed. */
+const SATURATION_NEEDS_FRAC_OF_PEAK = 0.75;
+function costSaturation(cell) {
+  const util = mval((cell || {}).cost_core_utilisation);
+  const wrps = mval((cell || {}).cost_window_rps);
+  const peak = peakFrontierRps(cell);
+  if (util == null || wrps == null || !peak) return null;
+  const frac = wrps / peak;
+  if (frac < SATURATION_NEEDS_FRAC_OF_PEAK) {
+    return { util, frac, verdict: null,
+      why: `measured at ${Math.round(frac * 100)}% of this cell's peak rate, too far below it to say whether the gateway saturates at its peak` };
+  }
+  return { util, frac,
+    verdict: util >= 0.85 ? "cpu-bound" : "headroom",
+    why: util >= 0.85
+      ? `at ${Math.round(frac * 100)}% of its peak rate it was using ${(util * 100).toFixed(0)}% of the cores it was given - this peak is its own CPU wall`
+      : `at ${Math.round(frac * 100)}% of its peak rate it was using only ${(util * 100).toFixed(0)}% of the cores it was given - something other than CPU is holding it` };
+}
+
+/* The highest rate any frontier reading on this cell carried, for the ratio above. */
+function peakFrontierRps(cell) {
+  const fr = (cell || {}).frontier;
+  if (!Array.isArray(fr)) return null;
+  let best = null;
+  for (const r of fr) {
+    const v = mval(r && r.rps);
+    if (v != null && (best == null || v > best)) best = v;
+  }
+  return best;
+}
+
 /* tiedRuns(rows, col, state, pct): the keys of rows the SORTED column cannot separate from the row
    directly above them.
 
@@ -4955,7 +4999,7 @@ if (NODE) {
     perCellMemory, memoryCells, hasPerCellMemory, widestDialect, chosenMemory, memoryFor,
     idleAcrossCells, neverPlateaued, worstGrowth, memCellTip, neverPlateauedPill,
     idleStatic, memShape, memGrowing, memShaped,
-    hasMatrixGrid, matrixFailureReason, matrixRoster, hasCost, rigResolutionPct, indistinguishable, tiedRuns,
+    hasMatrixGrid, matrixFailureReason, matrixRoster, hasCost, rigResolutionPct, indistinguishable, tiedRuns, costSaturation,
     laneRecord, lanePathNote, perfSweepSeries, concAt,
     // THE FRONTIER: the constants (mirrored from seal.mjs and checked against it), the readers every
     // surface goes through, and the two renderers that make the curve's SHAPE legible. Exported because the

@@ -2267,6 +2267,36 @@ test("NOISE: the rig's resolution is DERIVED from box qualification, never a cho
   assert.equal(app.rigResolutionPct(mixed), 5);
 });
 
+test("SATURATION: a utilisation figure cannot be read as a verdict unless the window reached the peak", () => {
+  // The real numbers from 2026-07-31. Same utilisation SHAPE, opposite meaning, and only the ratio
+  // to the cell's own peak separates them - which is the mistake I made in prose before catching it.
+  const cell = (util, wrps, peak) => ({
+    cost_core_utilisation: seal(util),
+    cost_window_rps: seal(wrps),
+    frontier: [{ p99_bound_us: null, rps: seal(peak), concurrency: seal(8), p99_us: seal(1000), lower_bound: false }],
+  });
+
+  // tensorzero: 2.1% of cores, but the window carried 200 rps against a 13,303 peak - 2% of it.
+  // Idle cores there say NOTHING about saturation at peak.
+  const tz = app.costSaturation(cell(0.021, 200, 13303));
+  assert.equal(tz.verdict, null, "too far below peak to be a verdict");
+  assert.match(tz.why, /too far below it/);
+
+  // one-api: the SAME 2-3% utilisation, but at 95% of its peak - so it genuinely is not CPU-bound.
+  const oa = app.costSaturation(cell(0.026, 35, 37));
+  assert.equal(oa.verdict, "headroom");
+  assert.match(oa.why, /something other than CPU/);
+
+  // litellm-rust: 96% of cores at 94% of its peak - the peak IS its own wall.
+  const lr = app.costSaturation(cell(0.961, 43527, 46187));
+  assert.equal(lr.verdict, "cpu-bound");
+  assert.match(lr.why, /own CPU wall/);
+
+  // Absent inputs yield no claim at all, rather than a claim built on a missing number.
+  assert.equal(app.costSaturation({}), null);
+  assert.equal(app.costSaturation(cell(0.5, 100, 0)), null);
+});
+
 test("NOISE: the table marks the boundary where its own ranking stops meaning anything", () => {
   // The 2026-07-30 fleet resolved 8.27%. These four rows are a ranking at the top and a coin toss in
   // the middle, and the reader cannot tell which without being told.
