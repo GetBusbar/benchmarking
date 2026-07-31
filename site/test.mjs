@@ -2267,6 +2267,25 @@ test("NOISE: the rig's resolution is DERIVED from box qualification, never a cho
   assert.equal(app.rigResolutionPct(mixed), 5);
 });
 
+test("NOISE: the table marks the boundary where its own ranking stops meaning anything", () => {
+  // The 2026-07-30 fleet resolved 8.27%. These four rows are a ranking at the top and a coin toss in
+  // the middle, and the reader cannot tell which without being told.
+  const col = { id: "rps", get: (g) => ({ v: g.v }) };
+  const rows = [{ key: "a", v: 48394 }, { key: "b", v: 46031 }, { key: "c", v: 25101 }, { key: "d", v: 24500 }];
+  const tied = app.tiedRuns(rows, col, {}, 8.27);
+  assert.ok(tied.has("b"), "46,031 is 4.9% from 48,394 - inside the rig's resolution, so not a ranking");
+  assert.ok(!tied.has("c"), "25,101 is far below 46,031 - a real finding, must NOT be marked");
+  assert.ok(tied.has("d"), "24,500 is 2.4% from 25,101 - also inside it");
+  assert.ok(!tied.has("a"), "the first row has nothing above it to tie with");
+
+  // NOTHING is marked when the resolution is unknown. Asserting a tie needs a figure, and a board
+  // with one box has no spread to derive one from - so it must not claim ties either way.
+  assert.equal(app.tiedRuns(rows, col, {}, null).size, 0);
+
+  // A column that renders its own cell is not a ranking this can reason about.
+  assert.equal(app.tiedRuns(rows, { id: "x", render: () => "<td/>" }, {}, 8.27).size, 0);
+});
+
 test("NOISE: two values closer than the rig can resolve are NOT a ranking", () => {
   // busbar 46,031 vs litellm-rust 48,394 is 4.9% apart, and the 2026-07-30 fleet could only resolve
   // 8.27%. Presenting that as a ranking claims a difference the rig never demonstrated.

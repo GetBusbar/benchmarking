@@ -836,3 +836,13 @@ td.memcurve.na { color: var(--fg-mute); }
 .rss-pair { display: flex; flex-direction: column; gap: .35rem; }
 .rss-half { display: flex; flex-direction: column; }
 .rss-label { font-size: .68rem; line-height: 1.2; text-align: left; }
+
+/* ROWS THE SORTED COLUMN CANNOT SEPARATE.
+   A table sorted by a column implies the order carries information. When two adjacent values are
+   closer than the rig's own measurement resolution (derived from how far identical boxes drift on
+   the same qualification), the order between them records which box they landed on. The rule is
+   drawn ABOVE the tied row rather than colouring it: a tint reads as a status the gateway has, and
+   this is a statement about the BOUNDARY between two rows, not about either one. */
+tbody tr.tied-above > td {
+  border-top: 1px dashed var(--grid, rgba(154, 164, 178, .45));
+}

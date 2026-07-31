@@ -1099,6 +1099,27 @@ function rigResolutionPct(data = (typeof state !== "undefined" ? state.data : nu
   return out;
 }
 
+/* tiedRuns(rows, col, state, pct): the keys of rows the SORTED column cannot separate from the row
+   directly above them.
+
+   A table sorted by a column implies the order carries information. When two adjacent values are
+   closer than the rig's own resolution, the order between them records which box they landed on -
+   not a finding. Marking that boundary is the difference between publishing a measurement and
+   publishing a coin toss with a decimal point.
+
+   ONLY THE SORTED COLUMN, because a tie on some other column is not what the reader is being shown a
+   ranking of. And nothing is marked when the resolution is unknown (a single box, so no spread to
+   observe): asserting a tie needs a figure, and we do not invent one. */
+function tiedRuns(rows, col, st, pct) {
+  const out = new Set();
+  if (pct == null || !col || col.render || typeof col.get !== "function") return out;
+  for (let i = 1; i < rows.length; i++) {
+    const a = col.get(rows[i - 1], st), b = col.get(rows[i], st);
+    if (a && b && indistinguishable(a.v, b.v, pct)) out.add(rows[i].key);
+  }
+  return out;
+}
+
 /* indistinguishable(a, b, pct): are two published values closer than the rig can resolve?
    Relative to the LARGER value, so the comparison means the same thing at 19 rps and at 49,000. */
 function indistinguishable(a, b, pct) {
@@ -3007,8 +3028,17 @@ function renderTable() {
   const tiebreak = cols.find((c) => c.id === VIEW_TIEBREAK[view]);
   rows = rows.slice().sort(rowComparator(col, state.sortDesc, tiebreak));
 
+  /* WHICH ROWS THE SORTED COLUMN CANNOT ACTUALLY SEPARATE.
+     The table ranks by one column, and a rank implies the order means something. When two adjacent
+     values are closer than the rig can resolve (rigResolutionPct, derived from how far identical
+     boxes drift on the same qualification), the order between them is which box they landed on -
+     not a finding. Marking them is the difference between publishing a measurement and publishing
+     a coin toss with a decimal point.
+     Only the SORTED column is considered: a tie on some other column is not what the reader is
+     being shown a ranking of. */
+  const tiedWithPrev = tiedRuns(rows, col, state, rigResolutionPct(state.data));
   tbody.innerHTML = rows.map((g) =>
-    `<tr data-gw="${esc(g.key)}">` + cols.map((c) => {
+    `<tr data-gw="${esc(g.key)}"${tiedWithPrev.has(g.key) ? ' class="tied-above" title="Within the rig\u2019s own measurement resolution of the row above - this ordering is not a finding"' : ""}>` + cols.map((c) => {
       const sc = c.id === state.sortCol ? " sorted-col" : "";
       if (c.render) {
         // render columns emit their own <td>; tint the sorted one by injecting the class.
@@ -4925,7 +4955,7 @@ if (NODE) {
     perCellMemory, memoryCells, hasPerCellMemory, widestDialect, chosenMemory, memoryFor,
     idleAcrossCells, neverPlateaued, worstGrowth, memCellTip, neverPlateauedPill,
     idleStatic, memShape, memGrowing, memShaped,
-    hasMatrixGrid, matrixFailureReason, matrixRoster, hasCost, rigResolutionPct, indistinguishable,
+    hasMatrixGrid, matrixFailureReason, matrixRoster, hasCost, rigResolutionPct, indistinguishable, tiedRuns,
     laneRecord, lanePathNote, perfSweepSeries, concAt,
     // THE FRONTIER: the constants (mirrored from seal.mjs and checked against it), the readers every
     // surface goes through, and the two renderers that make the curve's SHAPE legible. Exported because the
