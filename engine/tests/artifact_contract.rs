@@ -39,11 +39,24 @@ use otb_engine::record::{
 // THE SIX THROUGHPUT SCALARS ARE GONE, replaced by `CellPerf.frontier` - a sequence, so its absences
 // are keyed per bound (`frontier.10ms.rps`) rather than by a field name and cannot be listed here. Their
 // own contract is asserted directly in `record.rs`, which is where the per-bound keys are built.
-const PERF_METRICS: [&str; 4] = [
+const PERF_METRICS: [&str; 13] = [
     "added_latency_p50_us",
     "added_latency_p99_us",
     "gateway_c1_p99_us",
     "direct_c1_p99_us",
+    // THE COST GROUP. A null in any of these must carry a reason like any other metric, and for two
+    // of them the reason is a REFUSAL rather than a gap: a window with failures publishes no cost,
+    // and a window on a swapping box has its cost marked a harness fault. An unexplained null there
+    // reads as "not implemented" when the truth is "measured, and deliberately withheld".
+    "cpu_us_per_request",
+    "rps_per_cpu_second",
+    "cost_window_conc",
+    "cost_window_ok",
+    "cost_window_rps",
+    "cost_core_utilisation",
+    "cost_threads",
+    "cost_nonvol_ctxt_per_request",
+    "cost_majflt",
 ];
 const STREAM_METRICS: [&str; 8] = [
     "added_ttft_p50_us",
@@ -102,6 +115,19 @@ fn measured_perf() -> CellPerf {
         added_latency_p99_us: Measurement::Measured(480),
         gateway_c1_p99_us: Measurement::Measured(2_000),
         direct_c1_p99_us: Measurement::Measured(1_520),
+        // THE COST GROUP, because "fully measured" means every field the engine declares - not every
+        // field it declared when this fixture was written. Leaving these at their absent default made
+        // a cell that this test calls fully measured carry nine absences, which is precisely the
+        // contradiction it exists to catch. It caught it.
+        cpu_us_per_request: Measurement::Measured(273.0),
+        rps_per_cpu_second: Measurement::Measured(3_663.0),
+        cost_window_conc: Measurement::Measured(8),
+        cost_window_ok: Measurement::Measured(70_150.0),
+        cost_window_rps: Measurement::Measured(11_690.0),
+        cost_core_utilisation: Measurement::Measured(0.794),
+        cost_threads: Measurement::Measured(12.0),
+        cost_nonvol_ctxt_per_request: Measurement::Measured(0.31),
+        cost_majflt: Measurement::Measured(0.0),
         frontier: vec![otb_engine::record::FrontierReading {
             p99_bound_us: Some(10_000),
             rps: Measurement::Measured(31_000.0),
