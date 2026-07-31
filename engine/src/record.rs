@@ -427,6 +427,15 @@ pub struct CellPerf {
     pub cost_window_conc: Measurement<i64>,
     /// Threads in the gateway's tree during the cost window. Not a rate: it is the shape of the
     /// concurrency model, thread-per-connection against async, on evidence rather than on a claim.
+    /// Utilisation of the cores the gateway was PINNED to, across the cost window. 1.0 = every
+    /// pinned core fully busy.
+    ///
+    /// THIS IS WHAT MAKES A PEAK INTERPRETABLE. A throughput number alone cannot say whether a
+    /// gateway stopped because it ran out of CPU or because something else bound it - and reading
+    /// that off the shape of a latency curve is how the ceiling was called wrong twice on
+    /// 2026-07-30. Near 1.0 the peak is a real wall; well below it, the wall is elsewhere.
+    #[serde(default = "measurement_default")]
+    pub cost_core_utilisation: Measurement<f64>,
     #[serde(default = "measurement_default")]
     pub cost_threads: Measurement<f64>,
     /// Involuntary context switches per request - the scheduler taking the CPU away, which is what a
@@ -861,6 +870,7 @@ mod tests {
             cpu_us_per_request: Measurement::Measured(37.5),
             rps_per_cpu_second: Measurement::Measured(26_666.0),
             cost_window_conc: Measurement::Measured(8),
+            cost_core_utilisation: Measurement::Measured(0.97),
             cost_threads: Measurement::Measured(9.0),
             cost_nonvol_ctxt_per_request: Measurement::Measured(0.25),
             cost_majflt: Measurement::Measured(0.0),

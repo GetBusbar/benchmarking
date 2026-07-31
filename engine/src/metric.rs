@@ -1764,6 +1764,7 @@ impl Metric for Cost {
             "cpu_us_per_request",
             "rps_per_cpu_second",
             "cost_window_conc",
+            "cost_core_utilisation",
             "cost_threads",
             "cost_nonvol_ctxt_per_request",
             "cost_majflt",
@@ -1792,7 +1793,7 @@ impl Metric for Cost {
         let path = crate::run::path_for(ctx.cfg, ctx.dialect, &ctx.id.egress);
         let headers = crate::run::headers_for(ctx.cfg, ctx.dialect, &ctx.id.egress);
 
-        let (stats, cost) = crate::run::load_window_costed(
+        let (stats, cost, util) = crate::run::load_window_costed(
             ctx.cfg,
             &path,
             &body,
@@ -1824,6 +1825,10 @@ impl Metric for Cost {
                 "cost_window_conc",
                 Measurement::Measured(f64::from(COST_WINDOW_CONCURRENCY)),
             ),
+            // THE READING THAT SAYS WHETHER THE PEAK IS A CEILING. At ~1.0 the gateway had filled the
+            // cores it was given and the throughput number is a wall; well below it, the limit is
+            // somewhere else and the peak means something else.
+            ("cost_core_utilisation", util),
             ("cost_threads", cost.threads_end),
             ("cost_nonvol_ctxt_per_request", cost.nonvol_ctxt_per_request),
             ("cost_majflt", cost.majflt),
