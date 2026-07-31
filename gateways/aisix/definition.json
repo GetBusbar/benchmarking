@@ -45,7 +45,7 @@
     "000000",
     "000000"
   ],
-  "matrix_note": "For the six chat-wire dialects benchmarked here, AISIX v0.7.0 exposes OpenAI Chat Completions (/v1/chat/completions), OpenAI Responses (/v1/responses), and Anthropic Messages (/v1/messages) ingress; it has no native Gemini, Cohere, or Bedrock ingress. This harness config wires only OpenAI and Anthropic egress to the mock upstream; Vertex requires OAuth2, Cohere has no adapter, and Bedrock requires SigV4/AWS credentials.",
+  "matrix_note": "For the six chat-wire dialects benchmarked here, AISIX v0.7.0 exposes OpenAI Chat Completions (/v1/chat/completions), OpenAI Responses (/v1/responses), and Anthropic Messages (/v1/messages) ingress; it has no native Gemini, Cohere, or Bedrock ingress. This harness config wires only OpenAI and Anthropic egress to the mock upstream; Vertex requires OAuth2, Cohere is supported through its OpenAI-compatible endpoint rather than a native Cohere-wire adapter, and Bedrock requires SigV4/AWS credentials.",
   "model": "gpt-4o-mini",
   "name": "aisix",
   "path": "/v1/chat/completions",
