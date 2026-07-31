@@ -223,6 +223,11 @@ fn main() -> ExitCode {
                 sweep_duration_s: 2,
                 probe_timeout: Duration::from_secs(10),
                 load_cores: std::env::var("LOADCORES").ok(),
+                // `smoke` drives an ALREADY-RUNNING gateway that this process did not pin, so there
+                // is no core list it can honestly claim. Empty means the cost window reports
+                // utilisation as absent rather than measuring some other process's cores and
+                // labelling the result this gateway's.
+                gw_cores: String::new(),
                 // `smoke` drives an already-running gateway and takes no manifest, so it has no
                 // declared identity to measure memory against. An empty match resolves to nothing -
                 // enforced in `supervise::select_matches`, because the `pgrep -f ""` this used to be

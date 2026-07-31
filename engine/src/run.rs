@@ -34,6 +34,13 @@ pub struct RunConfig {
     pub probe_timeout: Duration,
     /// CPU list the load generator is pinned to, e.g. "4-9". None only in tests.
     pub load_cores: Option<String>,
+    /// The CPU list the GATEWAY is pinned to, exactly as taskset was given it.
+    ///
+    /// Carried so the cost window can report utilisation of those cores and nothing else: the box
+    /// also runs the mock and the load generator on their own cores, and a machine-wide figure would
+    /// blend three processes and describe none of them. It reads the SAME declaration the pinning
+    /// used rather than a second list that could drift from it.
+    pub gw_cores: String,
     /// Headers this gateway needs on every request, whatever the cell.
     pub static_headers: Vec<(String, String)>,
     /// Headers that select an egress column, keyed by dialect. Empty for a gateway that routes by
@@ -654,7 +661,21 @@ pub fn load_window_costed(
     body: &str,
     headers: &[(String, String)],
     concurrency: u32,
-) -> (Option<GenStats>, crate::procsample::WindowCost) {
+) -> (
+    Option<GenStats>,
+    crate::procsample::WindowCost,
+    crate::measurement::Measurement<f64>,
+) {
+    // The pinned-core utilisation is read from the SAME declaration taskset was given. An empty
+    // spec (the `smoke` path, which drives a gateway this process never pinned) yields no cores and
+    // therefore an absent utilisation - measuring some other process's cores and labelling the
+    // result this gateway's would be worse than reporting nothing.
+    let cores = crate::procsample::parse_cores(&cfg.gw_cores);
+    let cpu_before = if cores.is_empty() {
+        None
+    } else {
+        crate::procsample::cpu_busy_total(&crate::rss::RealProc, &cores)
+    };
     let pid = crate::rss::root_pid(&cfg.runtime).copied();
     let before = match pid {
         Some(p) => crate::procsample::sample_live(p),
@@ -680,7 +701,20 @@ pub fn load_window_costed(
     // other's too.
     let requests = stats.as_ref().map(|s| s.ok).unwrap_or(0);
     let cost = crate::procsample::cost(&before, &after, requests, cfg.sweep_duration_s as f64);
-    (stats, cost)
+    let cpu_after = if cores.is_empty() {
+        None
+    } else {
+        crate::procsample::cpu_busy_total(&crate::rss::RealProc, &cores)
+    };
+    let util = if cores.is_empty() {
+        crate::measurement::Measurement::absent_because(
+            crate::measurement::Absent::NotMeasured,
+            "this run declares no gateway core pinning, so there is no core set whose utilisation              could be attributed to the gateway",
+        )
+    } else {
+        crate::procsample::utilisation(cpu_before, cpu_after)
+    };
+    (stats, cost, util)
 }
 
 /// The same load window, driven at an EXPLICIT address rather than the gateway's.
@@ -2418,6 +2452,9 @@ pub fn run_grid_streaming(
 #[cfg(test)]
 pub(crate) fn test_fixture(gw: SocketAddr, mock: SocketAddr) -> RunConfig {
     RunConfig {
+        // The test fixture pins nothing, so it declares no cores: utilisation is absent rather than
+        // a figure borrowed from whatever else the test host happens to be running.
+        gw_cores: String::new(),
         gateway_addr: gw,
         mock_addr: mock,
         model: "m".into(),

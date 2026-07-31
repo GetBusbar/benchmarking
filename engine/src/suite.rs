@@ -210,6 +210,7 @@ fn judge_cost(
     out.cpu_us_per_request = f("cpu_us_per_request");
     out.rps_per_cpu_second = f("rps_per_cpu_second");
     out.cost_window_conc = as_i64(metrics.get("cost_window_conc"));
+    out.cost_core_utilisation = f("cost_core_utilisation");
     out.cost_threads = f("cost_threads");
     out.cost_nonvol_ctxt_per_request = f("cost_nonvol_ctxt_per_request");
     out.cost_majflt = f("cost_majflt");
@@ -721,6 +722,7 @@ fn qualify_box(cfg: &SuiteConfig, history: &[f64]) -> serde_json::Value {
         sweep_duration_s: cfg.sweep_duration_s,
         probe_timeout: Duration::from_secs(10),
         load_cores: cfg.load_cores.clone(),
+        gw_cores: cfg.gw_cores.clone(),
         // No gateway is in this path at all, so there is no gateway process to attribute anything to.
         static_headers: Vec::new(),
         egress_headers: Default::default(),
@@ -886,6 +888,7 @@ pub fn run_suite_with(
         sweep_duration_s: cfg.sweep_duration_s,
         probe_timeout: Duration::from_secs(10),
         load_cores: cfg.load_cores.clone(),
+        gw_cores: cfg.gw_cores.clone(),
         // How to put this gateway back at rest, so the memory group can read an idle that is
         // actually idle. Built from the SAME manifest declaration the initial launch used, so a
         // restart cannot differ from the launch it is repeating. `None` for a manifest that declares
@@ -1297,6 +1300,7 @@ fn withhold_refuted_perf(p: CellPerf, why: &str) -> CellPerf {
         cpu_us_per_request: withheld_f(),
         rps_per_cpu_second: withheld_f(),
         cost_window_conc: withheld(),
+        cost_core_utilisation: withheld_f(),
         cost_threads: withheld_f(),
         cost_nonvol_ctxt_per_request: withheld_f(),
         cost_majflt: withheld_f(),
