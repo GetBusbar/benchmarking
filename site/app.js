@@ -510,6 +510,17 @@ function metric(env, fmt = fmtInt) {
        attribution charges the rig to the subject, which is the one thing this board exists not to do.
        The detail already names the culprit; this reads it. */
     const rigSide = !!(detail && /(direct-to-mock leg|from the mock directly|did not hold on re-measurement)/.test(detail));
+    /* A LOWER BOUND IS A NUMBER, AND WE HAVE ONE. When the sustained-stream bisection failed to
+       converge, the ascending sweep still PROVED rungs before anything failed, and the seal carries the
+       highest of them (seal.mjs's provenStreamFloor). Rendering ">= 4,096 streams" instead of
+       "unconfirmed" is not a softening: it is the difference between "we could not pin the maximum" and
+       "we have nothing", and on this board those were displayed identically. The row stays na:true - it
+       must not sort or rank as if the maximum were known - but it stops implying the gateway failed. */
+    if (env && env.floor != null)
+      return { v: null, text: `≥ ${fmtInt(env.floor)}`, na: true, floor: env.floor, rigSide,
+               note: `proven floor: every rung up to ${fmtInt(env.floor)} concurrent streams passed the `
+                   + `stream gate before any failure. The search could not pin the maximum above it — `
+                   + (detail || ""), env };
     const text = rigSide ? "unconfirmed"
       : reason === "not_measured" ? "not measured"
       : reason === "harness_error" ? "rig fault"
