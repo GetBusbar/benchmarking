@@ -1764,6 +1764,8 @@ impl Metric for Cost {
             "cpu_us_per_request",
             "rps_per_cpu_second",
             "cost_window_conc",
+            "cost_window_ok",
+            "cost_window_rps",
             "cost_core_utilisation",
             "cost_threads",
             "cost_nonvol_ctxt_per_request",
@@ -1825,6 +1827,16 @@ impl Metric for Cost {
                 "cost_window_conc",
                 Measurement::Measured(f64::from(COST_WINDOW_CONCURRENCY)),
             ),
+            // THE WINDOW'S OWN LOAD, published so the cost is CHECKABLE.
+            //
+            // Without these, `cpu_us_per_request` is unverifiable: it can only be re-derived from the
+            // request count it was divided by, and that count lived nowhere. Auditing the first
+            // cost-carrying snapshot, I could not tell whether a low utilisation meant the gateway
+            // was cheap or the window had simply carried less load than the sweep's rung at the same
+            // concurrency - two opposite readings of the same number, with nothing in the artifact to
+            // separate them. Every published number must re-derive from what is published beside it.
+            ("cost_window_ok", Measurement::Measured(stats.ok as f64)),
+            ("cost_window_rps", Measurement::Measured(stats.rps())),
             // THE READING THAT SAYS WHETHER THE PEAK IS A CEILING. At ~1.0 the gateway had filled the
             // cores it was given and the throughput number is a wall; well below it, the limit is
             // somewhere else and the peak means something else.

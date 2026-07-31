@@ -112,6 +112,7 @@ export const UNGATED_LAT_FIELDS = ["added_latency_p50_us", "added_latency_p99_us
 // Leaving any of them out would let it ship as a bare unsealed scalar: the peak_rss_hwm_mib bug again.
 export const UNGATED_COST_FIELDS = [
   "cpu_us_per_request", "rps_per_cpu_second", "cost_window_conc", "cost_core_utilisation",
+  "cost_window_ok", "cost_window_rps",
   "cost_threads", "cost_nonvol_ctxt_per_request", "cost_majflt",
 ];
 // UNGATED, latency/rate-shaped, on a stream record.

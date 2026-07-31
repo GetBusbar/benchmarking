@@ -210,6 +210,8 @@ fn judge_cost(
     out.cpu_us_per_request = f("cpu_us_per_request");
     out.rps_per_cpu_second = f("rps_per_cpu_second");
     out.cost_window_conc = as_i64(metrics.get("cost_window_conc"));
+    out.cost_window_ok = f("cost_window_ok");
+    out.cost_window_rps = f("cost_window_rps");
     out.cost_core_utilisation = f("cost_core_utilisation");
     out.cost_threads = f("cost_threads");
     out.cost_nonvol_ctxt_per_request = f("cost_nonvol_ctxt_per_request");
@@ -1335,6 +1337,8 @@ fn withhold_refuted_perf(p: CellPerf, why: &str) -> CellPerf {
         cpu_us_per_request: withheld_f(),
         rps_per_cpu_second: withheld_f(),
         cost_window_conc: withheld(),
+        cost_window_ok: withheld_f(),
+        cost_window_rps: withheld_f(),
         cost_core_utilisation: withheld_f(),
         cost_threads: withheld_f(),
         cost_nonvol_ctxt_per_request: withheld_f(),

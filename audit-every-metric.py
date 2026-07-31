@@ -38,7 +38,7 @@ NON_NEGATIVE = {
     # (`procsample::cost` returns HarnessError rather than subtracting into a negative) - so if one
     # ever reaches the artifact, the refusal has been bypassed and this is the second line of defence.
     "cpu_us_per_request", "rps_per_cpu_second", "cost_window_conc", "cost_threads",
-    "cost_core_utilisation",
+    "cost_core_utilisation", "cost_window_ok", "cost_window_rps",
     "cost_nonvol_ctxt_per_request", "cost_majflt",
 }
 # THERE IS NO p50<=p99 CHECK HERE, AND THE ONE THAT USED TO BE WAS UNSOUND.
