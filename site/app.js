@@ -1049,6 +1049,28 @@ function hasPerCellMemory(data = (typeof state !== "undefined" ? state.data : nu
   PER_CELL_MEM_CACHE.set(data, yes);
   return yes;
 }
+/* hasCost(data): does ANY gateway on this board carry a measured cost-per-request?
+   The cost columns follow the per-cell-memory precedent above and appear only when the board can
+   answer them. This is not hiding an absence: every OTHER column shows "not measured" per row,
+   because a row that lacks one metric still has the rest. A cost column on a board measured before
+   the capture existed would be n/a on EVERY row - a column that asks a question nothing on the page
+   can answer, which is noise rather than disclosure. It lights up by itself on the first board that
+   carries the field. */
+const COST_CACHE = new WeakMap();
+function hasCost(data = (typeof state !== "undefined" ? state.data : null)) {
+  if (!data || typeof data !== "object") return false;
+  if (COST_CACHE.has(data)) return COST_CACHE.get(data);
+  const yes = (data.gateways || []).some((g) => {
+    const cells = [g.best_cell, g.translation_cell].filter(Boolean);
+    // THROUGH mval(), not a raw .value read. C5 exists because a raw read bypasses the
+    // below_resolution rule (an envelope whose value is null but whose reason means "measured, too
+    // small to weigh" IS a measurement), and the lint caught this line the first time it was
+    // written the other way.
+    return cells.some((c) => mval(c.cpu_us_per_request) != null);
+  });
+  COST_CACHE.set(data, yes);
+  return yes;
+}
 // The data bundle a (possibly synthetic) state refers to; falls back to the live state's.
 function stateData(st) {
   return (st && st.data) || (typeof state !== "undefined" ? state.data : null);
@@ -1694,6 +1716,22 @@ const COLUMN_SETS = {
        use - which is exactly what the two columns this replaces did ("Sustained RPS (20 ms upstream)", with
        a tooltip asserting a p99 < 1 s bar the engine never enforced, over a metric read at 20 ms).
        Switching the bound re-reads this column and re-sorts the table in front of the reader. */
+    /* WHAT A REQUEST COST, beside what it delivered. `costOnly` keeps these off a board that cannot
+       answer them (see hasCost); they light up on the first run carrying the capture.
+       WHY THIS COLUMN EXISTS AT ALL: the throughput column stops describing the GATEWAY the moment
+       one saturates its pinned cores - past that it describes the box, and two gateways at the wall
+       read the same however different they are. Cost per request has no such ceiling: at saturation
+       both deliver the same rps by definition, and the one doing less work per request still reads
+       lower. Ascending, because less CPU per request is better. */
+    { id: "cpu", label: "CPU per request (\u00b5s)", desc: false, costOnly: true,
+      title: () => `Microseconds of gateway CPU - user plus system, summed across its whole process tree - spent per completed request, ` +
+        `measured at a fixed concurrency held identical for every gateway (published beside it as the cost window). ` +
+        `Unlike peak throughput this does not stop separating gateways once they saturate their cores. ` +
+        `A window with any failure publishes no cost: CPU divided by only the successes would describe the failures, not the work.`,
+      get: (g) => chooserPerfCell(g, "cpu_us_per_request", fmt2) },
+    { id: "rpscpu", label: "Requests per CPU-second", desc: true, costOnly: true,
+      title: "The same fact the way a box is sized: completed requests per second of gateway CPU burned. Higher is cheaper to run.",
+      get: (g) => chooserPerfCell(g, "rps_per_cpu_second", fmtInt) },
     { id: "rps", label: () => boundColLabel(selectedBound()), desc: true,
       title: () => `The most requests/sec the chosen cell carried ${boundClause(selectedBound())} and it failed no request it accepted, with the concurrency it was observed at. ` +
         `One of ${BOUND_CHOICES.length} readings of the SAME concurrency sweep published on every cell - switch the bound above to re-rank the board. ` +
@@ -1880,8 +1918,10 @@ function txt(x) { return typeof x === "function" ? String(x() ?? "") : String(x 
    perCellOnly exists only where the data can fill it: the published board still carries bundles measured
    before per-cell memory, and a growth column that reads n/a on all thirteen rows would be noise. */
 function columnsFor(view, data = (typeof state !== "undefined" ? state.data : null)) {
-  const cols = COLUMN_SETS[view] || COLUMN_SETS.performance;
-  return hasPerCellMemory(data) ? cols : cols.filter((c) => !c.perCellOnly);
+  let cols = COLUMN_SETS[view] || COLUMN_SETS.performance;
+  if (!hasPerCellMemory(data)) cols = cols.filter((c) => !c.perCellOnly);
+  if (!hasCost(data)) cols = cols.filter((c) => !c.costOnly);
+  return cols;
 }
 /* rowComparator(col, desc): the roster's row order for one column and one direction.
    THE NAME TIEBREAK IS NOT PART OF WHAT THE READER ASKED TO REVERSE. Toggling a column to descending
@@ -4847,7 +4887,7 @@ if (NODE) {
     perCellMemory, memoryCells, hasPerCellMemory, widestDialect, chosenMemory, memoryFor,
     idleAcrossCells, neverPlateaued, worstGrowth, memCellTip, neverPlateauedPill,
     idleStatic, memShape, memGrowing, memShaped,
-    hasMatrixGrid, matrixFailureReason, matrixRoster,
+    hasMatrixGrid, matrixFailureReason, matrixRoster, hasCost,
     laneRecord, lanePathNote, perfSweepSeries, concAt,
     // THE FRONTIER: the constants (mirrored from seal.mjs and checked against it), the readers every
     // surface goes through, and the two renderers that make the curve's SHAPE legible. Exported because the
