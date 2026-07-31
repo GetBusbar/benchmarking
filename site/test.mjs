@@ -2039,7 +2039,7 @@ test("memory recovery column: present shows the value, absent renders muted n/a 
     memory_read: memRec({ idle_rss_mib: 40, peak_rss_mib: 1000, recovered_rss_mib: null }) };
   const naCell = app.memCell(noRec, "recovered_rss_mib", String);
   assert.equal(naCell.na, true, "an absent recovered_rss_mib must render n/a");
-  assert.equal(naCell.text, "n/a");
+  assert.equal(naCell.text, "not measured");
   assert.equal(naCell.v, null, "an absent recovered_rss_mib carries a null value, never 0");
   // The Memory tab carries the Recovered column, gated best = min (lower recovery releases more).
   const col = app.COLUMN_SETS.memory.find((c) => c.id === "memrecov");
@@ -2989,7 +2989,7 @@ test("Memory tab renders idle/peak/recovered/sparkline, n/a when a field is abse
   // An absent-field gateway: n/a everywhere, no fabricated 0, the curve cell reads n/a (no line).
   const bare = { key: "b", display: "B", lang: "Rust", memory_read: memRec({ idle_rss_mib: 40, peak_rss_mib: null, recovered_rss_mib: null }) };
   assert.equal(cols.find((c) => c.id === "memrecov").get(bare).na, true);
-  assert.equal(cols.find((c) => c.id === "memrecov").get(bare).text, "n/a");
+  assert.equal(cols.find((c) => c.id === "memrecov").get(bare).text, "not measured");
   assert.equal(curve.get(bare).na, true, "no series → the curve column reads n/a");
   assert.ok(/n\/a/.test(curve.render(bare)) && !/<svg/.test(curve.render(bare)), "no series → n/a, never a fabricated line");
   // A gateway with no memory record at all → n/a, never a crash.
@@ -3148,7 +3148,7 @@ test("#3 CLASS: a MEASURED stream-sustain failure renders differently from an un
   assert.equal(failed.text, "0");
   assert.equal(failed.na, false);
   assert.match(failed.note, /MEASURED FAILURE/);
-  assert.equal(unmeasured.text, "n/a");
+  assert.equal(unmeasured.text, "not measured");
   assert.equal(unmeasured.na, true);
   assert.match(unmeasured.note, /not measured/);
   // AND THERE IS NO THIRD STATE. This used to assert that a rig-limited 1300 was one - a suppressed
@@ -3180,7 +3180,7 @@ test("a measured FAILURE renders red with its counts, never as the n/a an untest
   // A leg that was merely NOISY (some ok, some fail) is not a total failure and stays n/a.
   const noisy = app.metric(sealMetric(null, { absent: { reason: "not_measured",
     detail: "the gateway leg at c=1 was not clean: 497 ok, 3 fail" } }), String);
-  assert.equal(noisy.text, "n/a");
+  assert.equal(noisy.text, "not measured");
   assert.ok(!noisy.failed);
   // The engine emits the IDENTICAL sentence for the DIRECT-TO-MOCK leg - that is OUR reference rig
   // failing, not the gateway. It must NOT get the red gateway-blaming render: plain n/a, with the
@@ -3188,13 +3188,16 @@ test("a measured FAILURE renders red with its counts, never as the n/a an untest
   const directDetail = "the direct-to-mock leg at c=1 was not clean: 0 ok, 8123 fail";
   const direct = app.metric(sealMetric(null, { absent: { reason: "not_measured",
     detail: directDetail } }), String);
-  assert.equal(direct.text, "n/a", "a rig-side total failure renders as plain n/a");
+  // A RIG-SIDE FAILURE IS NOT THE GATEWAY'S. This rendered as a plain "n/a" in the gateway's own
+  // column, which charges our reference leg to the subject. It now reads "unconfirmed".
+  assert.equal(direct.text, "unconfirmed", "a rig-side failure must not read as a gateway hole");
+  assert.equal(direct.rigSide, true);
   assert.ok(!direct.failed, "the failed flag blames the gateway; the direct leg must never carry it");
   assert.equal(direct.note, directDetail, "the full detail stays on the tooltip");
   // The streaming shape of the same distinction: no frame from the mock directly is a rig problem.
   const directFrames = app.metric(sealMetric(null, { absent: { reason: "not_measured",
     detail: "no stream frame arrived from the mock directly, so there is nothing to difference" } }), String);
-  assert.equal(directFrames.text, "n/a");
+  assert.equal(directFrames.text, "unconfirmed");
   assert.ok(!directFrames.failed);
 });
 
@@ -3555,7 +3558,7 @@ test("#27 CLASS: every RSS field is NULL-SAFE - a null RSS renders 'not measured
   const st = { data: bundle, mode: "same", sameDialect: "openai", view: "memory" };
   const cell = app.memCell(g, "steady_state_rss_mib", String, st);
   assert.equal(cell.na, true);
-  assert.equal(cell.text, "n/a");
+  assert.equal(cell.text, "not measured");
   assert.equal(cell.v, null);
   // (c) #14: the window durations RENDER from the data, not from a hard-coded "60 s" - and they now have
   //     to be found on the CELL, which is where the producer writes them.
@@ -3585,7 +3588,7 @@ test("#27: a fallback stream record with NULL counts seals to not-measured, neve
     assert.equal(rec[k].reason, "not_measured");
   }
   const g = { key: "n", display: "n", lang: "Rust", streaming: rec };
-  assert.equal(app.streamCell(g, "streams_sustained", String).text, "n/a");
+  assert.equal(app.streamCell(g, "streams_sustained", String).text, "not measured");
 });
 
 /* ---- AUDIT GROUP B: the lints + the coverage oracle now have RED-BEFORE proofs ------------------- */

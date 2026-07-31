@@ -495,7 +495,26 @@ function metric(env, fmt = fmtInt) {
       return { v: null, text: `failed · 0/${fmtInt(Number(okFail[2]))}`, na: true, failed: true, note: detail, env };
     if (detail && /no stream frame arrived from the gateway/.test(detail))
       return { v: null, text: "failed · 0 frames", na: true, failed: true, note: detail, env };
-    return { v: null, text: "n/a", na: true, note: detail || noteText(env && env.reason), env: env || null };
+    /* "n/a" MEANS NOT APPLICABLE - the gateway does not serve this pairing - AND NOTHING ELSE.
+       It was the fall-through for every remaining absence, which put two opposite findings under one
+       label. `not_served` and `untestable` are capability limits: the question does not apply to this
+       gateway, and n/a is exactly right. `not_measured` is the opposite - the harness ran, got a
+       result, and refused to publish it. busbar's streaming is the case that shows the cost:
+       "the bisection proved c=4093, but it did not hold on re-measurement" is a gateway that
+       demonstrably streams, rendered identically to one that cannot stream at all.
+       The reasons are already distinct in the data; only the label collapsed them. */
+    const reason = env && env.reason;
+    /* AND WHEN OUR OWN RIG IS WHY, THE ROW MUST SAY SO. The engine emits the same absence shape when
+       the DIRECT-TO-MOCK leg failed, or when its own search found a rung and could not confirm it -
+       neither of which is a fact about the gateway. Rendering those in the gateway's column with no
+       attribution charges the rig to the subject, which is the one thing this board exists not to do.
+       The detail already names the culprit; this reads it. */
+    const rigSide = !!(detail && /(direct-to-mock leg|from the mock directly|did not hold on re-measurement)/.test(detail));
+    const text = rigSide ? "unconfirmed"
+      : reason === "not_measured" ? "not measured"
+      : reason === "harness_error" ? "rig fault"
+      : "n/a";
+    return { v: null, text, na: true, rigSide, note: detail || noteText(reason), env: env || null };
   }
   // A CERTIFIED NUMBER CAN CARRY MORE THAN ONE THING WORTH SAYING, so the note is composed rather than
   // being whichever single token the envelope happened to have: the zero's meaning, the paced-match
