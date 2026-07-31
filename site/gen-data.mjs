@@ -25,7 +25,7 @@ import { readdirSync, readFileSync, statSync, existsSync, mkdirSync, copyFileSyn
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
-import { sealMetric, sealFrontier, makeSource, SWEEP, UNGATED_LAT_FIELDS, UNGATED_COST_FIELDS, DEFAULT_BOUND_MS, frontierAt, UNGATED_STREAM_FIELDS, isMetricField, zeroNoteFor } from "./seal.mjs";
+import { sealMetric, sealFrontier, makeSource, SWEEP, UNGATED_LAT_FIELDS, UNGATED_COST_FIELDS, DEFAULT_BOUND_MS, frontierAt, UNGATED_STREAM_FIELDS, isMetricField, zeroNoteFor, provenStreamFloor } from "./seal.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = process.argv[2] || join(HERE, "..");
@@ -340,6 +340,15 @@ const gateways = gatewayKeys.map((key) => {
     // STREAMING projection (matrix single source): the BEST DIAGONAL cell's streaming - the SAME
     // (ingress==egress) cell the headline perf is projected from (one source of truth). Only when the
     // diagonal ACTUALLY STREAMED (stream_served===true); a non-streaming cell leaves g.streaming absent.
+    /* PROJECTED FROM THE HEADLINE CELL AND ONLY THAT CELL. A fallback to "whichever cell converged"
+       was tried and reverted: R4 requires the streaming and perf headlines to name the SAME cell, and
+       it is right to. Two headline lanes describing different cells is how a reader ends up comparing
+       a gateway's best streaming against another's worst perf without either row saying so.
+
+       When this cell's sustained search did not converge, the honest answer is that the HEADLINE has
+       no sustained figure - and the Same/Custom cell chooser is where the reader goes for the cells
+       that do. Filling the headline from elsewhere would trade a visible gap for an invisible
+       inconsistency. */
     if (bc) {
       const cell = g.matrix.upstreams?.[bc.dialect]?.cells?.[bc.dialect];
       if (cell && cell.stream && cell.stream.stream_served === true) {
@@ -561,6 +570,14 @@ function sealStreamRecord(s, absences = null, cpuSource = null) {
     headroom: streamHeadroom, ceiling: streamCeiling,
     zeroNote: zeroNoteFor("streams_sustained"),
     absent: abs("streams_sustained") });
+  // The floor rides ON the absent envelope, never AS its value. `value` stays null and `certified` stays
+  // false, so every existing consumer and every oracle sees exactly the absence they saw before; only a
+  // surface that knows to look for a lower bound finds one, and it is obliged to render it as a bound
+  // (">= N"), because a floor printed as a peak is the same lie as a peak printed without its evidence.
+  if (rec.streams_sustained.value == null) {
+    const streamFloor = provenStreamFloor(s);
+    if (streamFloor != null) rec.streams_sustained.floor = streamFloor;
+  }
   // NO cpu_fps. Retired: of the 16 cells that published both it and `streams_sustained_fps` (the rate
   // at the PROVEN delivery boundary), 4 had it INVERTED below that boundary, 5 were redundant within 1%,
   // and 7 were measured at a concurrency where the delivery gate did not hold - a frame rate recorded

@@ -13,6 +13,7 @@
 // real committed sweep data through the stub canvas.
 
 import { execFileSync } from "node:child_process";
+import { provenStreamFloor } from "./seal.mjs";
 import { readFileSync, writeFileSync, mkdtempSync, mkdirSync, rmSync, existsSync, readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
@@ -6468,4 +6469,65 @@ test("UI: column geometry is FIXED, so changing a filter never moves a column si
   for (const cls of ["reading-none", "reading-tail", "zero-why"])
     assert.match(css, new RegExp(`\\.${cls} \\{[^}]*white-space:\\s*normal`),
       `.${cls} must wrap inside its declared column rather than widening it`);
+});
+
+/* THE PROVEN-FLOOR RULE. When the sustained-stream bisection fails to converge the board still has
+   evidence - the rungs the ascending sweep passed before anything failed - and publishes the highest of
+   them as a LOWER bound. These are the ways that rule can go wrong: counting a rung that passed AFTER a
+   failure (the sweep is contaminated past that point), inventing a floor where the search converged
+   (there is a measured maximum, so a floor would be noise), applying a stricter gate to the floor than
+   the bisection applied to the peak, or letting the floor sort/rank as if the maximum were known. */
+test("the proven floor is the ascending prefix only, and never outranks a measured maximum", () => {
+  // The floor stops at the FIRST failure, even when higher rungs pass afterwards. busbar's real cell
+  // passed c=6144 AFTER failing c=8192; counting it would publish a number the contaminated half of the
+  // sweep produced.
+  // THE PREFIX RULE, on synthetic sweeps - the sealed bundle drops sweep_streams, so this is the only
+  // place the prefix behaviour can actually be made to fail.
+  const rung = (conc, passed) => ({ conc, passed, frames: 8, frames_expected: 8, stalls: 0, stream_errors: 0 });
+  const floorOf = (rungs) => provenStreamFloor({ sweep_streams: rungs });
+  assert.equal(floorOf([rung(1, true), rung(2, true), rung(4, false), rung(3, true)]), 2,
+    "the prefix ends at the first failure - a rung that passed AFTER it came off a contaminated sweep");
+  assert.equal(floorOf([rung(1, false)]), null, "no passing prefix means no floor, not a zero");
+  assert.equal(floorOf([]), null, "an empty sweep has proved nothing");
+  assert.equal(floorOf(null), null, "and a missing sweep must not throw");
+  assert.equal(floorOf([rung(1, true), rung(2, true)]), 2, "an all-passing sweep floors at its top rung");
+  // A rung the gate PASSED counts even if it dropped frames - the floor must not be stricter than the
+  // bisection it stands in for (agentgateway drops one frame per stream at every rung).
+  const lossy = { conc: 9, passed: true, frames: 7, frames_expected: 8, stalls: 0, stream_errors: 0 };
+  assert.equal(floorOf([rung(1, true), lossy]), 9,
+    "the floor must use the bisection's own gate, dropped frames and all");
+
+  // AND ON THE REAL BUNDLE: busbar's cell did not converge, so it must carry a floor.
+  const cell = data.gateways.find((x) => x.key === 'busbar').matrix.upstreams.anthropic.cells.anthropic;
+  assert.equal(cell.stream.streams_sustained.floor, 4096,
+    'busbar anthropic>anthropic proved every rung to 4096 before the sweep first failed');
+
+  // It is a bound, not a value: the envelope stays absent so nothing ranks it as a maximum.
+  assert.equal(cell.stream.streams_sustained.value, null, "a floor must not become the value");
+  assert.equal(cell.stream.streams_sustained.certified, false, "and must not certify the absence");
+  const m = app.metric(cell.stream.streams_sustained);
+  assert.ok(m.na === true, "the rendered row must stay na:true so it cannot sort as a known maximum");
+  assert.match(m.text, /^≥ /, "and must render as a bound, never as a bare number");
+
+  // A converged cell gets NO floor - it has a measured maximum already.
+  let converged = 0;
+  for (const g of data.gateways)
+    for (const up of Object.values(g.matrix?.upstreams || {}))
+      for (const c of Object.values(up.cells || {})) {
+        const s = c.stream;
+        if (!s || s.stream_served !== true) continue;
+        if (s.streams_sustained.value != null) {
+          converged++;
+          assert.equal(s.streams_sustained.floor, undefined,
+            `${g.key}: a converged bisection must publish its maximum and no floor`);
+        }
+      }
+  assert.ok(converged > 0, "this data must contain converged cells or the branch above is untested");
+
+  // agentgateway is the real gate-parity case (one dropped frame per stream at every rung); the
+  // synthetic `lossy` rung above is what can actually fail, but assert the real cell kept its floor too.
+  const agCell = data.gateways.find((x) => x.key === 'agentgateway').matrix?.upstreams?.anthropic?.cells?.openai;
+  if (agCell?.stream && agCell.stream.streams_sustained.value == null)
+    assert.ok(agCell.stream.streams_sustained.floor > 0,
+      'a rung the bisection gate passed must count toward the floor, dropped frames and all');
 });
