@@ -499,6 +499,20 @@ impl CellPerf {
             added_latency_p99_us,
             gateway_c1_p99_us,
             direct_c1_p99_us,
+            // THE COST FIELDS, and leaving them out reintroduced the exact bug the comment below
+            // describes. They published a bare `null` with the reason nowhere - which for cost is
+            // worse than for most fields, because the two most likely reasons are REFUSALS the
+            // reader must see: the window had failures, or the box was swapping. An unexplained
+            // null reads as "not implemented"; the truth was "measured, and deliberately withheld".
+            cpu_us_per_request,
+            rps_per_cpu_second,
+            cost_window_conc,
+            cost_window_ok,
+            cost_window_rps,
+            cost_core_utilisation,
+            cost_threads,
+            cost_nonvol_ctxt_per_request,
+            cost_majflt,
         );
         // AND EVERY FRONTIER READING'S OWN ABSENCES, keyed by the bound they belong to.
         //
@@ -869,6 +883,69 @@ pub struct StreamingProjection {
 
 #[cfg(test)]
 mod tests {
+    /// EVERY SCALAR MEASUREMENT ON `CellPerf` MUST BE REACHABLE BY `absences()`.
+    ///
+    /// This is a STRUCTURAL guard, not a list to maintain: it serialises a perf record whose scalars
+    /// are all absent, then asserts that every key which serialised to `null` has a reason in the
+    /// sibling map. A field added to the struct but forgotten in `absences_of!` publishes a bare
+    /// `null` with its reason nowhere - the one state the whole `Measurement` design exists to
+    /// prevent.
+    ///
+    /// It has now happened twice. The frontier hit it (a Vec, unreachable by the macro) and the
+    /// comment written then did not stop me doing it again with the nine cost fields, which shipped
+    /// to a real box and published unexplained nulls. A comment warning about a trap is not a guard
+    /// against it.
+    #[test]
+    fn every_absent_perf_scalar_carries_a_reason() {
+        use crate::measurement::{Absent, Measurement};
+        // All-absent, each with a reason, so anything that loses one is visible.
+        let mut p = CellPerf::default();
+        macro_rules! blank {
+            ($($f:ident),* $(,)?) => {$(
+                p.$f = Measurement::absent_because(Absent::NotMeasured, concat!("test: ", stringify!($f)));
+            )*};
+        }
+        blank!(
+            added_latency_p50_us,
+            added_latency_p99_us,
+            gateway_c1_p99_us,
+            direct_c1_p99_us,
+            cpu_us_per_request,
+            rps_per_cpu_second,
+            cost_window_conc,
+            cost_window_ok,
+            cost_window_rps,
+            cost_core_utilisation,
+            cost_threads,
+            cost_nonvol_ctxt_per_request,
+            cost_majflt,
+        );
+        // NOT MEASUREMENTS, so they are given values rather than exempted by name: `c1_note` and
+        // `reverify_note` are prose and `egress_reverified` is a verdict flag. None of the three is a
+        // quantity that can be "absent for a reason", and a null there means "nothing to say", not a
+        // lost number. Filling them keeps this test about MEASUREMENTS without an exclusion list that
+        // a future non-measurement field would silently need adding to.
+        p.c1_note = Some("test".into());
+        p.reverify_note = Some("test".into());
+        p.egress_reverified = Some(true);
+
+        let reasons = p.absences();
+        let json = serde_json::to_value(&p).expect("serialises");
+        let obj = json.as_object().expect("an object");
+        let mut orphans: Vec<&str> = Vec::new();
+        for (k, v) in obj {
+            // Only scalars that serialised to null are measurements that went absent; arrays and
+            // strings are evidence or prose and are not this map's business.
+            if v.is_null() && !reasons.contains_key(k.as_str()) {
+                orphans.push(k.as_str());
+            }
+        }
+        assert!(
+            orphans.is_empty(),
+            "these absent fields published a null with no reason: {orphans:?} - add them to absences_of! in CellPerf::absences"
+        );
+    }
+
     fn sample_perf() -> CellPerf {
         CellPerf {
             added_latency_p50_us: Measurement::Measured(40_939),
