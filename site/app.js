@@ -2591,12 +2591,47 @@ function fmtTick(v) {
   return String(Math.round(v));
 }
 
+/* hidpi(canvas, ctx): draw at the display's real resolution, present at CSS size.
+
+   A canvas whose backing store matches its CSS size is UPSCALED by the browser on any display with a
+   device pixel ratio above 1, so every glyph is interpolated and the text reads soft. Sizing the
+   backing store to css x dpr and scaling the context once puts one canvas pixel on one device pixel.
+
+   RETURNS THE CSS DIMENSIONS, and callers must use those for all geometry: after `ctx.scale(dpr,dpr)`
+   the drawing coordinate system is CSS pixels, so reading `canvas.width` back would be off by the
+   ratio. The CSS size is stashed on the element because hit-testing runs later, from a different
+   function, long after the backing store was resized - that is exactly where this goes wrong quietly,
+   giving a chart that looks right and whose hover lands in the wrong place.
+
+   Idempotent: re-entered on every redraw, and a canvas already scaled must not be scaled again. */
+function hidpi(canvas, ctx) {
+  // `dataset` and `setTransform` are DOM/2D-context features a headless test stub need not provide,
+  // and this must degrade to "draw at the size you were given" rather than throw - the geometry it
+  // returns has to be right in node, where the only thing under test is the drawing logic.
+  const ds = canvas.dataset || {};
+  const dpr = (typeof window !== "undefined" && window.devicePixelRatio) || 1;
+  const cssW = Number(ds.cssw) || canvas.width;
+  const cssH = Number(ds.cssh) || canvas.height;
+  if (canvas.dataset) {
+    canvas.dataset.cssw = String(cssW);
+    canvas.dataset.cssh = String(cssH);
+  }
+  const want = Math.round(cssW * dpr);
+  if (dpr !== 1 && canvas.width !== want) {
+    canvas.width = want;
+    canvas.height = Math.round(cssH * dpr);
+  }
+  if (typeof ctx.setTransform === "function") ctx.setTransform(1, 0, 0, 1, 0, 0);
+  if (dpr !== 1 && typeof ctx.scale === "function") ctx.scale(dpr, dpr);
+  return { W: cssW, H: cssH };
+}
+
 function drawSweep(canvas, series, opts = {}) {
   const ctx = canvas.getContext && canvas.getContext("2d");
   if (!ctx) return null;
   const drawable = series.filter((s) => s.points && s.points.length);
   const pts = drawable.flatMap((s) => s.points);
-  const W = canvas.width, H = canvas.height;
+  const { W, H } = hidpi(canvas, ctx);
   ctx.clearRect(0, 0, W, H);
   // padB carries the x tick labels, the axis title AND the legend row. The legend used to be drawn
   // top-right INSIDE the plot, which is exactly where a saturating throughput curve peaks - so it
@@ -2723,8 +2758,13 @@ function attachSweepHover(canvas, series, opts) {
     const geo = redraw();
     if (!geo) return;
     const r = canvas.getBoundingClientRect();
-    const mx = (ev.clientX - r.left) * (canvas.width / r.width);
-    const my = (ev.clientY - r.top) * (canvas.height / r.height);
+    // THROUGH THE CSS SIZE, never the backing store: hidpi() enlarged the latter by the device pixel
+    // ratio, so `canvas.width / r.width` would scale every hit by that ratio and put the readout on
+    // the wrong point on a retina display.
+    const cssW = Number(canvas.dataset.cssw) || canvas.width;
+    const cssH = Number(canvas.dataset.cssh) || canvas.height;
+    const mx = (ev.clientX - r.left) * (cssW / r.width);
+    const my = (ev.clientY - r.top) * (cssH / r.height);
     let best = null;
     for (const s of geo.series) for (const p of s.points) {
       const d = Math.hypot(geo.X(p.x) - mx, geo.Y(p.y) - my);
@@ -4426,23 +4466,7 @@ function renderCharts() {
 function drawRankedBars(canvas, rows, metric, theme = {}) {
   const ctx = canvas && canvas.getContext && canvas.getContext("2d");
   if (!ctx) return null;
-  /* DRAW AT THE DISPLAY'S REAL RESOLUTION, PRESENT AT CSS SIZE.
-     A canvas whose backing store is 900px wide, stretched by CSS to 900 CSS pixels on a 2x display,
-     is being upscaled by the browser: every glyph is interpolated and the text reads soft. Sizing the
-     backing store to width x dpr and scaling the context once puts one canvas pixel on one device
-     pixel, which is the difference between "blurry chart" and "sharp chart" - nothing else here
-     changes. Guarded because a headless canvas has no window. */
-  const cssW = canvas.width, cssH = canvas.height;
-  const dpr = (typeof window !== "undefined" && window.devicePixelRatio) || 1;
-  if (dpr !== 1) {
-    // Both dimensions scale, so the attribute aspect ratio is unchanged and the stylesheet's
-    // `width:100%; height:auto` still presents it responsively. No inline size is set: CSS owns
-    // presentation, this owns resolution.
-    canvas.width = Math.round(cssW * dpr);
-    canvas.height = Math.round(cssH * dpr);
-    ctx.scale(dpr, dpr);
-  }
-  const W = cssW, H = cssH;
+  const { W, H } = hidpi(canvas, ctx);
   const padL = 150, padR = 90, padT = 18, padB = 26;
   ctx.clearRect(0, 0, W, H);
   const fg = theme.fg || "#9aa4b2", grid = theme.grid || "rgba(154,164,178,.18)";
