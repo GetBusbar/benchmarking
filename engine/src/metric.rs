@@ -137,6 +137,7 @@ pub const METRICS: &[&dyn Metric] = &[
     &Streaming,
     &AddedLatency,
     &StreamsSustained,
+    &Cost,
 ];
 
 /// Run every metric against one served cell.
@@ -1731,6 +1732,117 @@ impl Metric for StreamsSustained {
                 ..Series::default()
             },
         }
+    }
+}
+
+/// WHAT THE CELL COST, at one concurrency shared by every gateway.
+///
+/// The throughput ladder answers "how fast" and stops answering it the moment a gateway saturates
+/// its pinned cores - past that point it measures the box. Cost per request does not have that
+/// ceiling: at saturation two gateways deliver the same rps BY DEFINITION, and the one doing less
+/// work per request still reads lower. It is also the figure that maps to money.
+///
+/// ONE CONCURRENCY, DECLARED, AND THE SAME FOR EVERYONE. There is no concurrency that is
+/// sub-saturation for every entrant - this field spans 19 rps to 49,000 - so "matched load" is
+/// impossible and matched CONCURRENCY is the honest substitute. The number is published beside the
+/// cost so a reader knows what was held constant, rather than having to trust that something was.
+pub struct Cost;
+
+/// The rung every gateway's cost is taken at. Small enough that the fast entrants are not yet
+/// queueing on their own cores, large enough that a gateway which only performs with concurrency is
+/// not judged on a serial round trip. It is NOT tuned per gateway: the instant this varies by
+/// entrant, the column stops being a comparison.
+pub const COST_WINDOW_CONCURRENCY: u32 = 8;
+
+impl Metric for Cost {
+    fn name(&self) -> &'static str {
+        "cost"
+    }
+
+    fn fields(&self) -> &'static [&'static str] {
+        &[
+            "cpu_us_per_request",
+            "rps_per_cpu_second",
+            "cost_window_conc",
+            "cost_threads",
+            "cost_nonvol_ctxt_per_request",
+            "cost_majflt",
+        ]
+    }
+
+    fn measure(&self, ctx: &CellCtx<'_>) -> Measured {
+        let all_absent = |detail: String| -> Measured {
+            let f: Filled = self
+                .fields()
+                .iter()
+                .map(|x| {
+                    (
+                        *x,
+                        Measurement::absent_because(Absent::NotMeasured, detail.clone()),
+                    )
+                })
+                .collect();
+            f.into()
+        };
+
+        // The same request every other window on this cell drives, from the same helpers: a cost
+        // measured against a different question is not this cell's cost.
+        let model = crate::run::model_for(ctx.cfg, &ctx.id.egress);
+        let body = ctx.dialect.body(&model);
+        let path = crate::run::path_for(ctx.cfg, ctx.dialect, &ctx.id.egress);
+        let headers = crate::run::headers_for(ctx.cfg, ctx.dialect, &ctx.id.egress);
+
+        let (stats, cost) = crate::run::load_window_costed(
+            ctx.cfg,
+            &path,
+            &body,
+            &headers,
+            COST_WINDOW_CONCURRENCY,
+        );
+
+        let Some(stats) = stats else {
+            return all_absent(format!(
+                "no load window completed at c={COST_WINDOW_CONCURRENCY}, so there is nothing to \
+                 charge a cost against"
+            ));
+        };
+        // A WINDOW WITH FAILURES IS NOT A COST READING. CPU spent refusing requests is real CPU, but
+        // dividing it by the requests that succeeded would report a gateway that failed most of the
+        // window as extravagantly expensive - a statement about the failure, not about the work.
+        if stats.fail > 0 {
+            return all_absent(format!(
+                "the c={COST_WINDOW_CONCURRENCY} cost window had {} failure(s) alongside {} success(es); \
+                 CPU divided by only the successes would describe the failures, not the work",
+                stats.fail, stats.ok
+            ));
+        }
+
+        let mut f: Filled = vec![
+            ("cpu_us_per_request", cost.cpu_us_per_request),
+            ("rps_per_cpu_second", cost.rps_per_cpu_second),
+            (
+                "cost_window_conc",
+                Measurement::Measured(f64::from(COST_WINDOW_CONCURRENCY)),
+            ),
+            ("cost_threads", cost.threads_end),
+            ("cost_nonvol_ctxt_per_request", cost.nonvol_ctxt_per_request),
+            ("cost_majflt", cost.majflt),
+        ];
+        // A SWAPPING BOX IS NOT A SLOW GATEWAY. Major faults mean pages came from disk during the
+        // window, so what was timed is the disk. The numbers still publish - a reader must see why the
+        // row looks wrong rather than find a hole - but the cost figures are re-flagged as a HARNESS
+        // fault so nothing ranks on them.
+        if cost.swapped {
+            let why = "the box took major page faults during this window, so it was swapping and \
+                       this cost describes the disk rather than the gateway"
+                .to_string();
+            for (name, m) in f.iter_mut() {
+                if matches!(*name, "cpu_us_per_request" | "rps_per_cpu_second") {
+                    *m = Measurement::absent_because(Absent::HarnessError, why.clone());
+                }
+            }
+        }
+        f.into()
     }
 }
 
