@@ -33,6 +33,12 @@ NON_NEGATIVE = {
     "streams_sustained", "streams_sustained_fps",
     "idle_rss_mib", "steady_state_rss_mib", "peak_rss_mib", "peak_rss_hwm_mib", "recovered_rss_mib",
     "time_to_plateau_s", "load_s", "idle_window_s", "recovery_window_s",
+    # COST. Every one of these is a count, a duration or a rate derived from two monotonic counters,
+    # so none can be negative. A negative here is the pid-reuse case the engine already refuses
+    # (`procsample::cost` returns HarnessError rather than subtracting into a negative) - so if one
+    # ever reaches the artifact, the refusal has been bypassed and this is the second line of defence.
+    "cpu_us_per_request", "rps_per_cpu_second", "cost_window_conc", "cost_threads",
+    "cost_nonvol_ctxt_per_request", "cost_majflt",
 }
 # THERE IS NO p50<=p99 CHECK HERE, AND THE ONE THAT USED TO BE WAS UNSOUND.
 #
