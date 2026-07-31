@@ -156,6 +156,15 @@ def main():
     c, o = run("audit-every-metric.py", mutate(memory__idle_rss_mib=-5.0))
     expect("a negative RSS FAILS", c, o, True, "negative")
 
+    # RED: a NEGATIVE cost per request. The engine already refuses this at the counters - a backwards
+    # counter (pid reuse) becomes Absent::HarnessError rather than a subtraction into a negative - so
+    # a negative reaching the artifact means that refusal was bypassed. This is the second line of
+    # defence, and it exists because a negative CPU time is an impossible number, and by this
+    # project's rule an impossible number is an ENGINE bug that must never be published as a gateway
+    # property.
+    c, o = run("audit-every-metric.py", mutate(perf__cpu_us_per_request=-12.5))
+    expect("a NEGATIVE cpu_us_per_request FAILS", c, o, True, "negative")
+
     # RED: a peak below the steady state it peaked from.
     c, o = run("audit-every-metric.py", mutate(memory__peak_rss_mib=50.0))
     expect("a peak below its own steady state FAILS", c, o, True)
