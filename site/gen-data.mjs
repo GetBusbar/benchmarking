@@ -25,7 +25,7 @@ import { readdirSync, readFileSync, statSync, existsSync, mkdirSync, copyFileSyn
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
-import { sealMetric, sealFrontier, makeSource, SWEEP, UNGATED_LAT_FIELDS, UNGATED_COST_FIELDS, UNGATED_STREAM_FIELDS, isMetricField, zeroNoteFor } from "./seal.mjs";
+import { sealMetric, sealFrontier, makeSource, SWEEP, UNGATED_LAT_FIELDS, UNGATED_COST_FIELDS, DEFAULT_BOUND_MS, frontierAt, UNGATED_STREAM_FIELDS, isMetricField, zeroNoteFor } from "./seal.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = process.argv[2] || join(HERE, "..");
@@ -44,6 +44,41 @@ const SUITES = ["perf", "stream", "streamcpu", "xlate", "matrix"];
 // Imported from seal.mjs - the ONE vocabulary check-consistency also imports, so the two can never lag
 // each other. RSS fields are sealed BY DISCOVERY (RSS_FIELD_RE), never from a whitelist (audit #11).
 const UNGATED_LAT = UNGATED_LAT_FIELDS;
+
+/* THE PRICE, AS A NUMBER RATHER THAN A PHRASE.
+   us-east-1 on-demand for the 4-core slice the gateway under test is pinned to. It is disclosed here
+   and rendered in every caption that shows a dollar figure, so a reader on different pricing can
+   rescale rather than having to trust the word "cheap". Override with GATEWAY_HOURLY_USD.
+
+   Moved here from charts.py when the static chart pipeline was retired: the derivation is the board's,
+   not a chart's, and leaving it in a script that only ran to draw PNGs meant deleting the PNGs would
+   have silently deleted the metric. */
+const GATEWAY_HOURLY_USD = Number(process.env.GATEWAY_HOURLY_USD || 0.1632);
+
+/* costLanes(cell): req/s per $/hr and $ per 1M requests, from the frontier reading AT THE DEFAULT
+   BOUND - so the dollar figures and the throughput column describe the SAME operating point.
+
+   Cost is a rate divided by a price, so it inherits whatever qualification the rate carried. The
+   bound is therefore named on every surface that shows the result; a dollar figure must never imply
+   a tail it was not computed at.
+
+   `cost_per_million` is ABSENT at rate 0, not 0. At zero the quotient is undefined, and 0 is the
+   CHEAPEST value on a lower-is-better axis - so a gateway that held nothing under the bound would
+   render as free, the best possible result, while ranking last. `rps_per_dollar` keeps its 0 because
+   zero requests per dollar genuinely is zero. 0 is a number; n/a is not. */
+function costLanes(cell) {
+  const r = frontierAt((cell || {}).frontier, DEFAULT_BOUND_MS);
+  const rate = r && r.rps && typeof r.rps.value === "number" ? r.rps.value : 0;
+  return {
+    rps_per_dollar: sealMetric(rate > 0 ? rate / GATEWAY_HOURLY_USD : 0),
+    cost_per_million_usd: sealMetric(
+      rate > 0 ? (GATEWAY_HOURLY_USD / (rate * 3600)) * 1e6 : null,
+      { absent: rate > 0 ? null : { reason: "not_measured", detail: `no rung held the ${DEFAULT_BOUND_MS} ms bound, so cost per request is undefined rather than zero` } },
+    ),
+    priced_at_bound_ms: DEFAULT_BOUND_MS,
+    gateway_hourly_usd: GATEWAY_HOURLY_USD,
+  };
+}
 
 // ---- gateway manifests ------------------------------------------------------
 // The version a manifest pins, as a short human string. Image tag for a container gateway, short
@@ -294,6 +329,10 @@ const gateways = gatewayKeys.map((key) => {
     const bc = bestCell(g.matrix);
     if (bc) g.best_cell = sealPerfCell(bc, { ingress: bc.dialect, egress: bc.dialect, dialect: bc.dialect },
       makeSource("matrix", SWEEP.DIAGONAL, build, at), bc.absences);
+    // THE DOLLAR LANES RIDE ON THE CANONICAL CELL, derived from its frontier reading at the default
+    // bound - the same cell and the same operating point the throughput column ranks, so the two can
+    // never describe different runs of the same gateway.
+    if (g.best_cell) Object.assign(g.best_cell, costLanes(g.best_cell));
     // The gateway's TRANSLATION cell (openai in -> best non-openai egress).
     const tc = translationCell(g.matrix);
     if (tc) g.translation_cell = sealPerfCell(tc, { ingress: tc.ingress, egress: tc.egress },

@@ -45,24 +45,28 @@ const HOME_VIEW = "home";
 // A `frontier` TAB rather than six more columns on Performance, or a taller Performance page: the whole
 // curve is a different question ("what shape is this gateway") from the ranking ("who is fastest at my
 // bound"), and the layout rule here is that less scrolling wins even at the cost of another tab.
-const VIEWS = ["gateways", "memory", "performance", "frontier", "streaming", "matrix", "method"];
-const VIEW_LABELS = { gateways: "Gateways", memory: "Memory", performance: "Performance", frontier: "Frontier", streaming: "Streaming", matrix: "Protocol matrix", method: "Method" };
+const VIEWS = ["gateways", "memory", "performance", "frontier", "streaming", "charts", "matrix", "method"];
+const VIEW_LABELS = { gateways: "Gateways", memory: "Memory", performance: "Performance", frontier: "Frontier", streaming: "Streaming", charts: "Charts", matrix: "Protocol matrix", method: "Method" };
 // The default (bare /gateways) view: the roster overview.
 const DEFAULT_VIEW = "gateways";
 // The tabs whose columns read a PERF/STREAM cell of the one 6x6 run (Peak | Same | Custom).
-const PERF_VIEWS = new Set(["performance", "frontier", "streaming"]);
+const PERF_VIEWS = new Set(["performance", "frontier", "streaming", "charts"]);
 // The views that render the shared results table (#view-table).
 const TABLE_VIEWS = new Set(["performance", "frontier", "streaming", "memory"]);
 // The views the CELL CHOOSER drives. Memory chooses its cell like every other lane, with its OWN
 // mode set (below).
-const CHOOSER_VIEWS = new Set(["performance", "frontier", "streaming", "memory"]);
+const CHOOSER_VIEWS = new Set(["performance", "frontier", "streaming", "memory", "charts"]);
 // The views whose numbers are READ AT A TAIL-LATENCY BOUND, so the bound selector belongs on them. It is
 // not a global control: nothing on Streaming or Memory is read at a bound, and a control that changed
 // nothing would imply those numbers had a bound too.
-const BOUND_VIEWS = new Set(["performance", "frontier"]);
+const BOUND_VIEWS = new Set(["performance", "frontier", "charts"]);
 // Maps retired view names onto the current tabs so old shared links keep resolving. `translation`
 // aliases to `performance` (its ?xin/?xout still decode into the Custom in/out below).
-const VIEW_ALIASES = { results: "performance", charts: "method", peak: "performance", matched: "performance", passthrough: "performance", translation: "performance" };
+// `charts: "method"` WAS HERE and is gone: it pointed a retired /charts tab at Method, and Charts is a
+// real tab again. `resolveView` checks VIEWS first, so the alias was already shadowed - leaving it
+// would have been a dead entry claiming a redirect that no longer happens. An old /gateways/charts
+// link now lands on the Charts tab, which is what the URL says.
+const VIEW_ALIASES = { results: "performance", peak: "performance", matched: "performance", passthrough: "performance", translation: "performance" };
 // Each perf tab's default (and honest headline) sort column; a clean URL omits the sort when it
 // equals this, and switching tabs snaps to it unless the URL pins another.
 // Streaming defaults to added TTFT (asc), NOT streams-sustained: the sustained count saturates at the
@@ -1097,6 +1101,56 @@ function rigResolutionPct(data = (typeof state !== "undefined" ? state.data : nu
   const out = drifts.length >= 2 ? Math.max(...drifts) - Math.min(...drifts) : null;
   RESOLUTION_CACHE.set(data, out);
   return out;
+}
+
+/* ---- the Charts tab -----------------------------------------------------------------------------
+
+   WHAT THIS REPLACED. The board used to ship 25 static PNGs drawn by a python script: nine metrics,
+   each rendered twice (full field and "top 5"), plus three frontier views. They were a SECOND SURFACE
+   publishing the same numbers, and on 2026-07-31 the chart toolchain silently failed to regenerate and
+   shipped one run's images beside another run's data.
+
+   A picture cannot answer a question asked after it was drawn, and that is not a small complaint here:
+   half those files existed because "top 5" had to be decided at render time, by one metric, before the
+   reader arrived. A tab that re-draws answers it at read time instead - change the bound, change the
+   cell, change the metric, and every chart follows.
+
+   ONE REGISTRY, because the metrics are structurally identical: a number per gateway, a direction, a
+   formatter. A chart per metric would be nine near-copies drifting apart. */
+const CHART_METRICS = [
+  { id: "cpu", label: "CPU per request", unit: "µs", log: true, desc: false,
+    note: "Microseconds of gateway CPU per completed request, measured at one concurrency held identical for every gateway. Lower is better.",
+    get: (g, st) => mval((chooserCellPerf(g, st) || {}).cpu_us_per_request) },
+  { id: "rpsdollar", label: "Requests per $/hr", unit: "req/s per $/hr", log: true, desc: true,
+    note: "Requests per second per dollar of hourly instance cost, at the selected bound. Higher is better.",
+    get: (g, st) => mval((chooserCellPerf(g, st) || {}).rps_per_dollar) },
+  { id: "permillion", label: "Cost per million requests", unit: "USD", log: true, desc: false,
+    note: "Instance cost to serve a million requests at the selected bound. Lower is better.",
+    get: (g, st) => mval((chooserCellPerf(g, st) || {}).cost_per_million_usd) },
+  { id: "lat", label: "Added latency (p99)", unit: "µs", log: true, desc: false,
+    note: "Gateway p99 minus direct-to-mock p99 at concurrency 1. Lower is better.",
+    get: (g, st) => mval((chooserCellPerf(g, st) || {}).added_latency_p99_us) },
+  { id: "rps", label: "Throughput at the selected bound", unit: "req/s", log: false, desc: true,
+    note: "The most requests/sec the chosen cell carried while 99% of requests finished under the selected bound. Higher is better.",
+    get: (g, st) => { const r = frontierAt(frontierOf(chooserCellPerf(g, st)), selectedBound(st)); return r ? mval(r.rps) : null; } },
+  { id: "rss", label: "Peak memory", unit: "MiB", log: false, desc: false,
+    note: "Highest resident memory observed while the fixed load ran on the chosen cell. Lower is better.",
+    get: (g, st) => mval((chooserCellMemory(g, st) || {}).peak_rss_mib) },
+];
+
+/* LOG SCALE IS NOT A PREFERENCE ON SOME OF THESE, IT IS THE ONLY HONEST AXIS.
+   Cost per request spans 89 µs to 199,333 µs on the current board - 2,247x. On a linear axis twelve
+   gateways collapse into a single pixel beside the slowest one, which renders the comparison the chart
+   exists to make unreadable. Metrics whose spread is bounded (throughput, memory) stay linear, because
+   a log axis there would flatten differences that are real and readable. */
+function chartRows(metric, gateways, st) {
+  const rows = [];
+  for (const g of gateways || []) {
+    const v = metric.get(g, st);
+    if (typeof v === "number" && Number.isFinite(v)) rows.push({ key: g.key, name: g.name || g.key, v, g });
+  }
+  rows.sort((a, b) => (metric.desc ? b.v - a.v : a.v - b.v));
+  return rows;
 }
 
 /* costSaturation(cell): whether a cell's core utilisation may be read as a saturation verdict.
@@ -4999,7 +5053,7 @@ if (NODE) {
     perCellMemory, memoryCells, hasPerCellMemory, widestDialect, chosenMemory, memoryFor,
     idleAcrossCells, neverPlateaued, worstGrowth, memCellTip, neverPlateauedPill,
     idleStatic, memShape, memGrowing, memShaped,
-    hasMatrixGrid, matrixFailureReason, matrixRoster, hasCost, rigResolutionPct, indistinguishable, tiedRuns, costSaturation,
+    hasMatrixGrid, matrixFailureReason, matrixRoster, hasCost, rigResolutionPct, indistinguishable, tiedRuns, costSaturation, CHART_METRICS, chartRows,
     laneRecord, lanePathNote, perfSweepSeries, concAt,
     // THE FRONTIER: the constants (mirrored from seal.mjs and checked against it), the readers every
     // surface goes through, and the two renderers that make the curve's SHAPE legible. Exported because the
