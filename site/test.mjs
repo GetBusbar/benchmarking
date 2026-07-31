@@ -2400,7 +2400,12 @@ test("COST: the cost columns appear only on a board that can answer them, and re
   assert.equal(cpu.desc, false, "less CPU per request is better, so it sorts ascending");
   const st = { data: withCost, mode: "peak", bound: 10 };
   assert.equal(cpu.get(withCost.gateways[0], st).v, 37.5);
-  assert.equal(cols.find((c) => c.id === "rpscpu").get(withCost.gateways[0], st).v, 26666);
+  // AND ITS RECIPROCAL IS NOT BESIDE IT. 1 CPU-second is a million microseconds, so
+  // rps_per_cpu_second is 1,000,000 / cpu_us_per_request - the same measurement inverted. Two columns
+  // that multiply to a constant read as corroboration while carrying one number between them. It
+  // lives on the Charts tab instead, where it asks a different question.
+  assert.equal(cols.find((c) => c.id === "rpscpu"), undefined,
+    "requests-per-CPU-second must not sit beside CPU-per-request: they are one number, inverted");
 });
 
 test("COST: an absent cost renders 'not measured', never a 0 that would look infinitely efficient", () => {
