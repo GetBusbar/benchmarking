@@ -105,6 +105,15 @@ export function displayedValue(raw, { absentReason = null } = {}) {
 }
 // UNGATED, latency-shaped, on a perf cell.
 export const UNGATED_LAT_FIELDS = ["added_latency_p50_us", "added_latency_p99_us", "gateway_c1_p99_us", "direct_c1_p99_us"];
+// UNGATED, cost-shaped, on a perf record. WHAT THE CELL COST rather than what it delivered - the
+// answer that does not stop describing the gateway once it saturates its cores. Listed explicitly
+// (rather than discovered by pattern) because these are six unrelated shapes - a duration, a rate, a
+// concurrency, two counts and a fault total - with no common suffix a regex could key on safely.
+// Leaving any of them out would let it ship as a bare unsealed scalar: the peak_rss_hwm_mib bug again.
+export const UNGATED_COST_FIELDS = [
+  "cpu_us_per_request", "rps_per_cpu_second", "cost_window_conc",
+  "cost_threads", "cost_nonvol_ctxt_per_request", "cost_majflt",
+];
 // UNGATED, latency/rate-shaped, on a stream record.
 export const UNGATED_STREAM_FIELDS = ["added_ttft_p50_us", "added_ttft_p99_us", "added_gap_p50_us", "added_gap_p99_us"];
 // RSS metrics are sealed BY DISCOVERY, not by a whitelist: ANY RSS-in-MiB field the producer emits is a
@@ -122,6 +131,7 @@ export const UNGATED_MEM_FIELDS = ["growth_rate_mib_per_min", "time_to_plateau_s
 // (what to seal) and check-consistency (what must BE an envelope) use.
 export function isMetricField(k) {
   return THROUGHPUT_FIELDS.includes(k) || UNGATED_LAT_FIELDS.includes(k) ||
+    UNGATED_COST_FIELDS.includes(k) ||
     UNGATED_STREAM_FIELDS.includes(k) || UNGATED_MEM_FIELDS.includes(k) ||
     k === "streams_sustained_fps" || RSS_FIELD_RE.test(k);
 }

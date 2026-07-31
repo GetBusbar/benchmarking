@@ -25,7 +25,7 @@ import { readdirSync, readFileSync, statSync, existsSync, mkdirSync, copyFileSyn
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
-import { sealMetric, sealFrontier, makeSource, SWEEP, UNGATED_LAT_FIELDS, UNGATED_STREAM_FIELDS, isMetricField, zeroNoteFor } from "./seal.mjs";
+import { sealMetric, sealFrontier, makeSource, SWEEP, UNGATED_LAT_FIELDS, UNGATED_COST_FIELDS, UNGATED_STREAM_FIELDS, isMetricField, zeroNoteFor } from "./seal.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = process.argv[2] || join(HERE, "..");
@@ -453,6 +453,12 @@ function absentEntryFor(absences, prefix, k) {
 function sealPerfCellPerf(perf, absences = null) {
   const rec = {};
   for (const k of UNGATED_LAT)
+    rec[k] = sealMetric(perf[k], { absent: absentEntryFor(absences, "perf", k) });
+  // WHAT THE CELL COST. Sealed exactly like the latency fields, and for the same reason: an absent
+  // cost must arrive carrying WHY it is absent. Every snapshot taken before the capture existed has
+  // none of these, and "not measured" is the only honest rendering - a 0 would make a gateway that
+  // was never measured look infinitely efficient.
+  for (const k of UNGATED_COST_FIELDS)
     rec[k] = sealMetric(perf[k], { absent: absentEntryFor(absences, "perf", k) });
   // THE THROUGHPUT ANSWER: one reading per declared tail-latency bound, off one sweep.
   //
