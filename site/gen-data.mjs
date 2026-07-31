@@ -25,6 +25,7 @@ import { readdirSync, readFileSync, statSync, existsSync, mkdirSync, copyFileSyn
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
+import { snapshotCellCoords, isStrictSubset, layerScopedMatrix } from "./snapshots.mjs";
 import { sealMetric, sealFrontier, makeSource, SWEEP, UNGATED_LAT_FIELDS, UNGATED_COST_FIELDS, DEFAULT_BOUND_MS, frontierAt, UNGATED_STREAM_FIELDS, isMetricField, zeroNoteFor } from "./seal.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -179,6 +180,37 @@ function newestSnapshot(key) {
   return best;
 }
 
+/* The snapshot the board should render for `key`: the newest FULL run, with every strictly-scoped
+   newer run layered over it oldest-first (so the newest measurement of any cell wins). */
+function resolvedSnapshot(key) {
+  if (!existsSync(SNAP_DIR)) return null;
+  const snaps = [];
+  for (const f of readdirSync(SNAP_DIR)) {
+    if (!f.startsWith(`result_${key}_`) || !f.endsWith(".json")) continue;
+    const snap = readJson(join(SNAP_DIR, f));
+    if (!snap) continue;
+    snap.__file = f;
+    snap.__ms = snap.measured_at ? Date.parse(snap.measured_at) : 0;
+    snap.__coords = snapshotCellCoords(snap.matrix);
+    snaps.push(snap);
+  }
+  if (!snaps.length) return null;
+  snaps.sort((a, b) => a.__ms - b.__ms);
+  const widest = snaps.reduce((m, s) => (s.__coords.size > m.__coords.size ? s : m), snaps[0]);
+  // The base is the newest run that is NOT a strict subset of the widest - i.e. a full run.
+  const fulls = snaps.filter((s) => !isStrictSubset(s.__coords, widest.__coords));
+  const base = fulls[fulls.length - 1];
+  const scopedNewer = snaps.filter((s) => isStrictSubset(s.__coords, widest.__coords) && s.__ms >= base.__ms);
+  if (!scopedNewer.length) return base;
+  const out = structuredClone(base);
+  out.__file = base.__file;
+  let m = base.matrix;
+  for (const sc of scopedNewer) m = layerScopedMatrix(m, sc.matrix, sc);
+  out.matrix = m;
+  out.__layered_from = scopedNewer.map((s) => s.__file);
+  return out;
+}
+
 // GitHub star snapshot for the Gateways overview: a COMMITTED build-time file
 // (gateways/stars.json, refreshed by `node gateways/fetch-stars.mjs`), never a live
 // API call, so the bundle stays reproducible and CI needs no network. Absent file or
@@ -221,7 +253,7 @@ const gateways = gatewayKeys.map((key) => {
   // drift class. A gateway with no snapshot yet keeps the per-suite read path above (transition; null-
   // safe). The snapshot's matrix carries the SAME sealed-envelope-producing cells, so projection is
   // unchanged. Its inline config.files replace the config/<gw>.txt sidecar read.
-  const snap = newestSnapshot(key);
+  const snap = resolvedSnapshot(key);
   if (snap) {
     // RECENCY, not existence (audit #5). An older snapshot must NEVER shadow a newer results/matrix/<gw>.json
     // (a matrix-only re-run writes the per-suite file; the snapshot archive can trail it). Compare the two
