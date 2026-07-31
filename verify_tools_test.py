@@ -165,6 +165,23 @@ def main():
     c, o = run("audit-every-metric.py", mutate(perf__cpu_us_per_request=-12.5))
     expect("a NEGATIVE cpu_us_per_request FAILS", c, o, True, "negative")
 
+    # RED: a gateway that burned more CPU than its pinned cores accumulated. Physically impossible,
+    # and it means the process is NOT confined to the cores being measured - which would make the
+    # whole four-core comparable basis a false claim rather than a small error.
+    # 1000 requests x 20,000us = 20 CPU-s over a 10s window on 4 cores = 50% implied, against a
+    # measured 1% - far past the deliberately loose 3x tolerance.
+    c, o = run("audit-every-metric.py", mutate(
+        perf__cost_window_ok=1000, perf__cost_window_rps=100,
+        perf__cpu_us_per_request=20000, perf__cost_core_utilisation=0.01))
+    expect("a gateway burning more CPU than its pinned cores FAILS", c, o, True, "pinned cores")
+
+    # ACCEPT: the honest direction. Implied BELOW measured is expected - the utilisation window spans
+    # slightly more wall time than the load window - and must not be flagged.
+    c, o = run("audit-every-metric.py", mutate(
+        perf__cost_window_ok=198, perf__cost_window_rps=32,
+        perf__cpu_us_per_request=3485, perf__cost_core_utilisation=0.025))
+    expect("the real one-api cost window is ACCEPTED (implied 2.8% vs measured 2.5%)", c, o, False)
+
     # RED: a peak below the steady state it peaked from.
     c, o = run("audit-every-metric.py", mutate(memory__peak_rss_mib=50.0))
     expect("a peak below its own steady state FAILS", c, o, True)
