@@ -21,18 +21,18 @@ fully open source. Don't take our word for it - read the code and re-run it.
 **Ran on:** AWS `m7g.2xlarge` Graviton3 (ARM64, 8 cores), Ubuntu 24.04 - the gateway under test
 pinned to 4 of them (an `m7g.xlarge`-class slice, the same 4 vCPU / $0.04-per-vCPU machine class the
 gateways-under-test benchmark themselves on); the mock + load generator get the other 4. The exact
-instance type and vCPU count are recorded in every `results/*.json` and printed at the top of each
-report page.
+instance type and vCPU count are recorded in every `results/*.json` and shown on the board.
 
-Full, auto-generated result pages (regenerated from the raw JSON on every run - no hand-typed numbers):
+**The board is at [onthebench.ai](https://onthebench.ai)** - the complete field, live, regenerated
+from the committed snapshots in [`results/snapshots/`](results/snapshots/). Every gateway that could
+not serve a pairing is marked there rather than hidden, and every absent number carries the reason it
+is absent.
 
-- **[Top 5 gateways →](results/reports/top5/)** - the top 5 by lowest added latency, the same five on every chart.
-- **[All gateways →](results/reports/all/)** - the complete field, including any that couldn't serve the endpoint (marked, not hidden).
+It ranks at any of the declared tail-latency bounds and re-sorts in front of you, which is the part a
+static page cannot do: the ranking depends on the bound you accept, and there is no single answer to
+bake in.
 
-Each page shows added latency (µs), RPS ceiling, idle/peak memory, whether the gateway served, and the
-exact build/commit measured, plus the charts below.
-
-> Numbers land here as runs complete. Re-run `run-on-ec2.sh` and these pages + charts update in place.
+> Numbers land as runs complete. Re-run `run-on-ec2.sh` and the board updates from the new snapshots.
 
 ## Prerequisites
 
