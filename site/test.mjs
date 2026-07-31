@@ -912,7 +912,10 @@ test("unknown paths land on home; unknown views land on the category overview", 
   assert.equal(app.decodeUrl("/gateways/matched", "").view, "performance");
   assert.equal(app.decodeUrl("/gateways/passthrough", "").view, "performance");
   assert.equal(app.decodeUrl("/gateways/translation", "").view, "performance");
-  assert.equal(app.decodeUrl("/gateways/charts", "").view, "method");
+  // `charts` used to be an example of an UNKNOWN view here. It is a real tab now, so the fixture had
+  // to change or the test would assert that a live tab redirects away from itself.
+  assert.equal(app.decodeUrl("/gateways/charts", "").view, "charts");
+  assert.equal(app.decodeUrl("/gateways/no-such-tab", "").view, "gateways");
   // the documented deep link shape
   const st = app.decodeUrl("/gateways/matrix", "?sort=mempeak&dir=asc");
   assert.equal(st.view, "matrix");
@@ -994,11 +997,15 @@ test("star counts format compactly and degrade to null", () => {
   assert.equal(app.fmtStars(undefined), null);
 });
 
-test("the unified tab order: Gateways · Memory · Performance · Frontier · Streaming · matrix · method", () => {
+test("the unified tab order: Gateways · Memory · Performance · Frontier · Streaming · Charts · matrix · method", () => {
   // FRONTIER SITS BESIDE PERFORMANCE, not at the end: it is the same measurement read every published way,
   // and a reader who has just looked at a ranking at one bound is one tab away from the whole curve. The
   // order is asserted because it is the reading order of the board, not an implementation detail.
-  assert.deepEqual(app.VIEWS, ["gateways", "memory", "performance", "frontier", "streaming", "matrix", "method"]);
+  //
+  // CHARTS SITS AFTER THE TABLES IT DRAWS FROM, and before the matrix/method reference tabs. It replaced
+  // 25 static PNGs; the reading order is "the numbers, then the same numbers as a picture", not a
+  // gallery a reader meets before knowing what is in it.
+  assert.deepEqual(app.VIEWS, ["gateways", "memory", "performance", "frontier", "streaming", "charts", "matrix", "method"]);
   assert.equal(app.VIEW_LABELS.gateways, "Gateways");
   assert.equal(app.VIEW_LABELS.memory, "Memory");
   assert.equal(app.VIEW_LABELS.performance, "Performance");
@@ -5428,7 +5435,9 @@ test("FRONTIER: the bound is in the URL, is a fixed point, and a bound the board
   assert.equal(app.decodeUrl("/gateways/performance", "?bound=").bound, app.DEFAULT_BOUND_MS);
   // The selector is offered ONLY where something is read at a bound: a control over the memory columns
   // would imply those numbers had a tail-latency bound too.
-  assert.deepEqual([...app.BOUND_VIEWS].sort(), ["frontier", "performance"]);
+  // Charts joins them: its throughput and dollar metrics are READ AT A BOUND, and a chart that ignored
+  // the selector while sitting beside tables that honour it would be showing a different question.
+  assert.deepEqual([...app.BOUND_VIEWS].sort(), ["charts", "frontier", "performance"]);
   for (const v of ["streaming", "memory"]) assert.ok(!app.BOUND_VIEWS.has(v), `${v} is not read at a bound`);
   assert.ok(!app.encodeUrl({ ...app.newState(), view: "memory", bound: 1 }).includes("bound="),
     "a memory link must not carry a bound it does not use");
