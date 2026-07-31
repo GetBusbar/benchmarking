@@ -92,6 +92,23 @@ pub trait CounterSource: ProcSource {
     }
 }
 
+/// The real filesystem. `RealProc` already implements the tree half of this (`ppid_map`/`status`)
+/// for the RSS sampler, so extending it here keeps ONE resolution of "which processes are the
+/// gateway" rather than a second one that could drift from it.
+impl CounterSource for crate::rss::RealProc {
+    fn stat(&self, pid: u32) -> Option<String> {
+        std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()
+    }
+    fn io(&self, pid: u32) -> Option<String> {
+        std::fs::read_to_string(format!("/proc/{pid}/io")).ok()
+    }
+}
+
+/// Sample the live process tree rooted at `root_pid`.
+pub fn sample_live(root_pid: u32) -> Measurement<Counters> {
+    sample(&crate::rss::RealProc, root_pid)
+}
+
 /// The field AFTER the command name, by zero-based index into what follows the LAST `)`.
 ///
 /// Indexing from the last `)` rather than by splitting the whole line is not defensive tidiness: a
