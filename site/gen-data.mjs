@@ -979,25 +979,12 @@ for (const g of gateways) {
   g.stale = ageDays > MAX_GATEWAY_AGE_DAYS;
 }
 
-// ---- charts: copy results/*.png into site/charts/ ---------------------------
-const resultsDir = join(ROOT, "results");
-const chartFiles = existsSync(resultsDir)
-  // Governance is not a neutral-board metric (the governed suite is a non-default, busbar-only
-  // launch), so its chart is excluded from the public gallery even if the PNG is present.
-  ? readdirSync(resultsDir).filter((f) => f.endsWith(".png") && !f.includes("governed")).sort()
-  : [];
-mkdirSync(join(OUT, "charts"), { recursive: true });
-const charts = [];
-for (const f of chartFiles) {
-  const bytes = readFileSync(join(resultsDir, f));
-  writeFileSync(join(OUT, "charts", f), bytes);
-  // Content-hash cache-buster: the filename is stable across runs, so a browser would
-  // serve a stale cached PNG when the chart content changes. Append a short hash of the
-  // bytes so the query changes only when the image actually does.
-  const v = createHash("sha1").update(bytes).digest("hex").slice(0, 8);
-  charts.push({ file: `charts/${f}?v=${v}` });
-}
-
+// ---- NO CHART PNGs ----------------------------------------------------------
+// This copied results/*.png into site/charts/ and listed them in `data.json.charts` so the board
+// could render 25 pre-drawn images. The Charts tab draws from the board itself now, at the bound
+// and cell the reader selected, so there is no PNG to ship and no list to keep in sync. The key is
+// REMOVED rather than emitted empty: `charts: []` would tell a future reader the board has charts
+// and found none this run, which is a different and untrue statement.
 // ---- fonts: copy the repo's bundled Inter faces -----------------------------
 const fontsDir = join(ROOT, "assets", "fonts");
 if (existsSync(fontsDir)) {
@@ -1093,7 +1080,6 @@ const data = {
   benchmark_version: boardEngine,
   repo: "https://github.com/GetBusbar/benchmarking",
   gateways,
-  charts,
 };
 // Omit the key entirely rather than publish `{}` when no boardEngine row has it yet: app.js reads
 // `data.definitions` null-safely, and an empty object is indistinguishable from "every metric here
@@ -1163,4 +1149,4 @@ let thinnedFrom = 0, thinnedTo = 0;
 // whitespace shipped to every reader for a file no human opens by hand.
 writeFileSync(join(OUT, "data.json"), JSON.stringify(data) + "\n");
 if (thinnedFrom) console.log(`gen-data: rss samples ${thinnedFrom} -> ${thinnedTo} for drawing (full series stay in the snapshots)`);
-console.log(`gen-data: ${gateways.length} gateways, ${charts.length} charts -> ${join(OUT, "data.json")}`);
+console.log(`gen-data: ${gateways.length} gateways -> ${join(OUT, "data.json")}`);

@@ -3637,138 +3637,20 @@ test("#15/#20 RED: the C5 accessor-routing lint FIRES on the access style the co
   assert.deepEqual(checkMod.lintAccessorRouting(
     "function metric(env, fmt) {\n  if (!isEnvelope(env) || env.value == null) return null;\n  return fmt(env.value);\n}\n",
     "fake.js", "js").errors, []);
-  // NON-app.js readers are covered too (charts.py's Python equivalent).
+  // The lint stays LANGUAGE-GENERAL even though app.js is the only reader today: a second reader in
+  // another language is exactly what charts.py was, and the rule that caught it should survive it.
   const badPy = 'def draw(bc):\n    env = bc.get("added_latency_p99_us")\n    if _is_env(env):\n        return env.get("value")\n';
   assert.ok(checkMod.lintAccessorRouting(badPy, "fake.py", "py").errors.length >= 1,
     "the routing lint must cover non-app.js readers");
-  // AND the repo's own two files are CLEAN (the two real violations this lint should have caught are fixed).
-  for (const [rel, lang] of [["app.js", "js"], ["../charts.py", "py"]])
-    assert.deepEqual(checkMod.lintAccessorRouting(readFileSync(join(HERE, rel), "utf8"), rel, lang).errors, []);
+  // AND the repo's own reader is CLEAN.
+  assert.deepEqual(checkMod.lintAccessorRouting(readFileSync(join(HERE, "app.js"), "utf8"), "app.js", "js").errors, []);
 });
 
-test("#2/#22 RED: the per-lane chart-provenance lint and the cross-language caption parity assertion FIRE", () => {
-  // Per-lane: a lane with NO disclosure must be caught, not merely whether `_sweep_label(` appears
-  // anywhere in the file.
-  const missingStream = 'x = _sweep_label({"sweep": r.get("_perf_source")}) + _sweep_label({"sweep": r.get("_xlate_source")})';
-  const r = checkMod.lintChartLaneProvenance(missingStream);
-  assert.equal(r.errors.length, 1);
-  assert.match(r.errors[0], /_stream_source/);
-  const allLanes = missingStream + ' + _sweep_label({"sweep": r.get("_stream_source")})';
-  assert.deepEqual(checkMod.lintChartLaneProvenance(allLanes).errors, []);
-  // and the REAL charts.py has every lane wired.
-  assert.deepEqual(checkMod.lintChartLaneProvenance(readFileSync(join(ROOT, "charts.py"), "utf8")).errors, []);
-  // A drifted key on either side must be caught.
-  const py = 'SWEEP_CAPTION = {\n    "6x6-diagonal", "perf-suite",\n}\n';
-  const drift = checkMod.lintCaptionParity(py, ["6x6-diagonal", "perf-suite", "stream-suite"]);
-  assert.equal(drift.errors.length, 1);
-  assert.match(drift.errors[0], /"stream-suite" exists in app.js but NOT in charts.py/);
-  const other = checkMod.lintCaptionParity('SWEEP_CAPTION = {\n    "a", "b",\n}\n', ["a"]);
-  assert.ok(other.errors.some((e) => /"b" exists in charts.py but NOT in app.js/.test(e)));
-  // and the REAL pair is in sync.
-  assert.deepEqual(checkMod.lintCaptionParity(readFileSync(join(ROOT, "charts.py"), "utf8"),
-    Object.keys(app.SWEEP_CAPTION)).errors, []);
-});
-
-testWithMatrixDonor("#16/#19 RED: R2's own failure path fires, and R1 coverage is claimed only after a real comparison", () => {
-  // #19: the missing.length branch - never exercised by any test before. An EMPTY bundle exercises no
-  // required branch at all, so R2 must FAIL rather than silently pass on an inert check.
-  const empty = checkConsistency({ gateways: [] }, app).errors;
-  assert.ok(empty.some((e) => e.startsWith("R2: coverage")),
-    `R2 must FAIL when required branches are never exercised; got ${JSON.stringify(empty)}`);
-  assert.match(empty.find((e) => e.startsWith("R2: coverage")), /an inert check is itself a failure/);
-  // #16: R1.oracle must NOT be reported covered when the oracle compared NOTHING. A gateway that
-  // publishes matrix-sourced numbers with no comparable raw cell claims no coverage - and (#18) an
-  // unverifiable matrix publish is itself an error, not a silent exemption.
-  const g = { key: "no-such-gateway-on-disk", display: "x", lang: "Rust",
-    best_cell: bcCell(), measured_at: "2026-07-24T00:00:00Z" };
-  const res = checkConsistency({ gateways: [g] }, app);
-  assert.ok(!res.cover.has("R1.oracle"), "R1.oracle must not be covered when no comparison happened");
-  assert.ok(res.errors.some((e) => e.includes("independent oracle cannot verify")),
-    `#18: an unverifiable matrix-sourced publish must be an ERROR, not an exemption; got ${JSON.stringify(res.errors)}`);
-  // The REAL bundle does compare, and does claim the coverage.
-  assert.ok(checkConsistency(data, app).cover.has("R1.oracle"));
-});
-
-// ---- #21 CLASS: the oracle cannot go inert for ANY gateway ---------------------------------------
-// Coverage is reconciled PER GATEWAY against the set that publishes matrix-sourced numbers, so a single
-// oracled row can never satisfy the coverage gate for gateways that were never compared.
-testWithMatrixDonor("#21 CLASS: EVERY matrix-publishing gateway is independently oracled (no per-gateway bypass)", () => {
-  const res = checkConsistency(data, app);
-  assert.ok(!res.errors.some((e) => e.startsWith("R2: coverage")),
-    `no gateway may be left unoracled; got ${JSON.stringify(res.errors.filter((e) => e.startsWith("R2")))}`);
-  // Prove a snapshot-sourced row is really compared, not just a per-suite one: corrupt one and require
-  // R1 to catch it.
-  const d = clone();
-  const g = d.gateways.find((x) => x.matrix_from_snapshot === true
-    && x.best_cell && x.best_cell.source && x.best_cell.source.kind === "matrix");
-  assert.ok(g, "the bundle must contain a snapshot-sourced matrix gateway for this class test to mean anything");
-  // Corrupted on a surviving envelope field (it used to be `rps_max_proxy`, which no producer emits):
-  // the class is "is this row compared at all", and any sealed metric on it proves that.
-  g.best_cell.added_latency_p99_us = { value: (app.mval(g.best_cell.added_latency_p99_us) || 0) + 9999, certified: true, suppressed: false };
-  const e = checkConsistency(d, app).errors;
-  assert.ok(e.some((x) => x.startsWith("R1:") && x.includes(g.key) && x.includes("added_latency_p99_us")),
-    `a corrupted SNAPSHOT-sourced envelope must be caught by the oracle; got: ${JSON.stringify(e.filter((x) => x.startsWith("R1")))}`);
-});
-
-// ---- #21 CLASS: R3 - the oracle must verify the SAME run the board published ----------------------
-// An oracle that reads a different artifact than gen-data projected from is worse than no oracle: it
-// reports green while verifying the wrong file. R3 reconciles the two selections by measured_at.
-testWithData("#21 CLASS: R3 catches the board rendering a different run than the oracle resolved", () => {
-  assert.ok(checkConsistency(data, app).cover.has("R3.selection"),
-    "R3 must actually run on the live bundle");
-  const d = clone();
-  const g = d.gateways.find((x) => x.matrix && x.matrix.measured_at);
-  g.matrix.measured_at = "2020-01-01T00:00:00Z";   // the board claims a run the disk does not have
-  const e = checkConsistency(d, app).errors;
-  assert.ok(e.some((x) => x.startsWith("R3:") && x.includes(g.key) && x.includes("stale/mis-selected")),
-    `R3 must flag a published run that no on-disk artifact backs; got: ${JSON.stringify(e.filter((x) => x.startsWith("R3")))}`);
-  // ...and the provenance claim itself must match what is on disk.
-  const d2 = clone();
-  const g2 = d2.gateways.find((x) => x.matrix_from_snapshot === true);
-  delete g2.matrix_from_snapshot;
-  assert.ok(checkConsistency(d2, app).errors.some((x) => x.startsWith("R3:") && x.includes("provenance disagreement")),
-    "R3 must flag a bundle whose matrix_from_snapshot claim disagrees with the disk");
-});
-
-testWithMultiSurfaceDonor("#17: the independent oracle covers EVERY matrix cell, translation, streaming and memory - not 2 fields", () => {
-  // RED-before, per surface: corrupt ONE sealed envelope on each previously-UNORACLED surface and assert
-  // the oracle catches it. Before this change only best_cell's two RPS fields were compared, so each of
-  // these mutations shipped undetected.
-  const surfaces = [
-    ["a non-best matrix CELL", (g) => {
-      for (const [eg, up] of Object.entries(g.matrix.upstreams || {}))
-        for (const [ing, c] of Object.entries((up && up.cells) || {})) {
-          if (!(c && c.perf && c.perf.added_latency_p99_us && c.perf.added_latency_p99_us.value != null)) continue;
-          if (ing === g.best_cell.path.dialect && eg === g.best_cell.path.dialect) continue;
-          c.perf.added_latency_p99_us = { value: 999999, certified: true, suppressed: false };
-          return `matrix[${ing}->${eg}]`;
-        }
-      return null;
-    }],
-    ["the TRANSLATION cell", (g) => {
-      if (!(g.translation_cell && g.translation_cell.source.kind === "matrix")) return null;
-      g.translation_cell.added_latency_p99_us = { value: 424242, certified: true, suppressed: false };
-      return "translation_cell";
-    }],
-    ["a best_cell LATENCY field (ungated, previously unoracled)", (g) => {
-      g.best_cell.added_latency_p50_us = { value: 777777, certified: true, suppressed: false };
-      return "best_cell.added_latency_p50_us";
-    }],
-  ];
-  let checked = 0;
-  for (const [label, mutate] of surfaces) {
-    const d = clone();
-    const g = richestMatrixGw(d);
-    const where = mutate(g);
-    if (!where) continue;
-    checked += 1;
-    const e = checkConsistency(d, app).errors.filter((x) => x.startsWith("R1:"));
-    assert.ok(e.some((x) => x.includes(g.key)),
-      `the oracle must catch a corrupted envelope on ${label}; got ${JSON.stringify(e)}`);
-  }
-  assert.ok(checked >= 2, `expected the real bundle to exercise several oracled surfaces, got ${checked}`);
-});
-
+/* #2/#22 RETIRED WITH THE PIPELINE THEY GUARDED.
+   These asserted that charts.py disclosed provenance per lane, and that its caption vocabulary matched
+   app.js's. Both existed because the board had a SECOND renderer in another language publishing the
+   same numbers. There is one renderer now, so there is no second vocabulary to drift and no lane to
+   leave undisclosed - and a test that reads a deleted file fails for the wrong reason. */
 test("#21: C6 fires on an INJECTED frontier inversion - the assertion cannot silently pass when a row is absent", () => {
   /* Drive the invariant DIRECTLY on an injected cell rather than a named gateway's live data, so the
      assertion cannot skip vacuously when that gateway's file is missing or its inversion resolves.
@@ -4701,11 +4583,10 @@ test("SITE-05: the C3 lint sees every quoting style, and its exemption is a swee
   assert.deepEqual(fires('rec.source = { kind: "matrix", sweep: "6x6-diagonal" };'), []);
   assert.deepEqual(fires(`rec.source = { kind: 'matrix', sweep: '6x6-diagonal' };`), []);
   assert.deepEqual(fires('lbl = _sweep_label({"sweep": "6x6-diagonal"})'), []);
-  // and the repo's own two scanned files stay clean under the stricter lint
+  // and the repo's own scanned file stays clean under the stricter lint. The python fixtures above
+  // stay: the lint is language-general, and a second renderer is exactly what it was written for.
   const appSrc = readFileSync(join(HERE, "app.js"), "utf8");
   assert.deepEqual(checkMod.lintSweepKeys(appSrc, "app.js", region).errors, []);
-  assert.deepEqual(checkMod.lintSweepKeys(readFileSync(join(HERE, "..", "charts.py"), "utf8"), "charts.py",
-    { enter: /SWEEP_CAPTION\s*=|def _sweep_label/, exit: /^def (?!_sweep_label)/ }).errors, []);
 });
 
 // SITE-06. The C5 routing lint knew one spelling of "read the raw number off the envelope". A reader
@@ -4727,9 +4608,8 @@ test("SITE-06: the C5 lint catches bracket, bracket-chain and destructuring read
   // python's bracket spelling of the same read
   const py = 'def draw(bc):\n    env = bc.get("added_latency_p99_us")\n    if _is_env(env):\n        return env["value"]\n';
   assert.ok(checkMod.lintAccessorRouting(py, "fake.py", "py").errors.length >= 1);
-  // and the repo's own readers are still clean under the wider lint
-  for (const [rel, lang] of [["app.js", "js"], ["../charts.py", "py"]])
-    assert.deepEqual(checkMod.lintAccessorRouting(readFileSync(join(HERE, rel), "utf8"), rel, lang).errors, []);
+  // and the repo's own reader is still clean under the wider lint
+  assert.deepEqual(checkMod.lintAccessorRouting(readFileSync(join(HERE, "app.js"), "utf8"), "app.js", "js").errors, []);
 });
 
 // ---- the C5 lint polices the WHOLE sealed vocabulary, not four names of it (round-2 audit) --------
