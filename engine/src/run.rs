@@ -983,6 +983,14 @@ pub const SUSTAINED_MAX_FAIL_RATIO: f64 = 0.001;
 /// Each step halves the concurrency, so this bounds the walk at a few doublings below the
 /// bisection's answer - far enough to find a rung that genuinely holds, short enough that a cell
 /// cannot spend its whole budget here.
+/// Rungs at or below this drive too few sockets for draining to matter, and pausing after them is
+/// pure schedule cost across a field sweep.
+const STREAM_SETTLE_FREE_BELOW: u32 = 512;
+/// One second of drain per 1,000 concurrent streams the last window drove.
+const STREAM_SETTLE_MS_PER_1K: u64 = 1_000;
+/// The cap. Deliberately shorter than TIME_WAIT: the queues, the descriptor table and the run queue
+/// drain in far less than that, and those are what move the next window's result.
+const STREAM_SETTLE_MAX_MS: u64 = 10_000;
 const MAX_CEILING_STEPDOWNS: usize = 4;
 
 /// WHY the sustained-stream search ended without a ceiling.
@@ -1003,6 +1011,10 @@ enum StreamStop {
     WindowUnavailable { at: u32 },
     /// The step-down budget was genuinely spent without finding a rung that holds.
     BudgetExhausted,
+    /// A rung failed at a concurrency this same cell had ALREADY proved clean. Never the gateway's
+    /// result: a gate that fails at 3,088 after passing 6,144 is measuring how far the rig has
+    /// drained, not what the gateway can carry.
+    RigContaminated { at: u32, proven: u32 },
 }
 
 impl StreamStop {
@@ -1010,9 +1022,9 @@ impl StreamStop {
     /// Filing our own shortfall under `NotMeasured` would put it among the gateway's results.
     fn absent_kind(self) -> Absent {
         match self {
-            StreamStop::RigRanShort { .. } | StreamStop::WindowUnavailable { .. } => {
-                Absent::HarnessError
-            }
+            StreamStop::RigRanShort { .. }
+            | StreamStop::WindowUnavailable { .. }
+            | StreamStop::RigContaminated { .. } => Absent::HarnessError,
             _ => Absent::NotMeasured,
         }
     }
@@ -1036,6 +1048,12 @@ impl StreamStop {
             StreamStop::WindowUnavailable { at } => format!(
                 "the bisection proved c={proved}, but re-measurement could not take a window at all \
                  at c={at} - a rig failure, so nothing is published about the gateway here"
+            ),
+            StreamStop::RigContaminated { at, proven } => format!(
+                "the bisection proved c={proved}, but re-measurement failed at c={at} - a concurrency \
+                 THIS CELL had already carried cleanly up to c={proven}. A rung cannot fail below one \
+                 it has already passed because of the gateway, so this is our rig not having drained \
+                 between windows, and nothing is published about the gateway here"
             ),
             StreamStop::BudgetExhausted => format!(
                 "the bisection proved c={proved}, but that concurrency did not hold the stream gate \
@@ -1483,6 +1501,34 @@ fn stream_errored(o: &crate::http::SseOutcome) -> bool {
 /// `dialect` is the wire the request speaks, and it is not optional here: without it the delivery
 /// ratio counts protocol scaffolding as delivered tokens (ledger RIG-11), which is the one place the
 /// distinction changes a published verdict.
+/// LET THE HOST DRAIN BETWEEN STREAM WINDOWS, SCALED TO WHAT THE LAST ONE DROVE.
+///
+/// A window at c=6,176 leaves that many sockets working through FIN_WAIT/TIME_WAIT and that many
+/// descriptors coming back. The very next window opens its own connections into whatever is left, so
+/// a rung measured immediately after a big one is measuring the residue as much as the gateway.
+///
+/// This is not a hypothesis. On the 2026-07-31 board the sustained-stream bisection failed to
+/// converge on 6 cells across 4 independent gateways, and every one carried the same impossible
+/// signature: a rung failing at a concurrency THAT SAME CELL had already carried cleanly minutes
+/// earlier (busbar failed c=3,088 after passing c=4,096 and c=6,144 with zero errors; agentgateway
+/// failed c=1,357 after c=2,048; one-api failed c=170 after c=256). The engine already knew this
+/// effect existed - `stream_rig_ceiling` sleeps for exactly this reason, in a comment that names
+/// draining sockets - but it settled only AFTER the ladder, protecting the reference measurement and
+/// not the ladder's own re-measurements, which are the numbers that actually get published.
+///
+/// Proportional rather than flat: the small rungs need nothing and a flat pause large enough for
+/// c=8,192 would be pure cost on every one of them. Capped, because this runs inside a field sweep
+/// and an uncapped term is a schedule nobody predicted.
+fn settle_after_streams(concurrency: u32) {
+    if concurrency <= STREAM_SETTLE_FREE_BELOW {
+        return;
+    }
+    let ms = u64::from(concurrency) * STREAM_SETTLE_MS_PER_1K / 1000;
+    std::thread::sleep(std::time::Duration::from_millis(
+        ms.min(STREAM_SETTLE_MAX_MS),
+    ));
+}
+
 pub fn stream_window(
     addr: SocketAddr,
     path: &str,
@@ -1879,6 +1925,18 @@ pub fn sweep_streams_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> Cel
         // re-measuring it at all.
         Some(c) => match p.points.iter().find(|pt| pt.concurrency == c).map(|pt| pt.fps) {
             Some(v) => {
+                /* THE TOP OF THIS CELL'S OWN UNCONTAMINATED ASCENDING PREFIX - every rung from the
+                   first up to and including it passed, before anything in this cell had failed. It is
+                   the only concurrency figure in scope that is certainly NOT an artefact of a busy
+                   host, because nothing had been driven hard yet when it was taken. Used below as the
+                   line under which a failure cannot honestly be the gateway's. */
+                let proven_clean = p
+                    .points
+                    .iter()
+                    .take_while(|pt| pt.passed)
+                    .map(|pt| pt.concurrency)
+                    .max()
+                    .unwrap_or(0);
                 let mut ceiling = c;
                 let mut first_fps = v;
                 let mut winner: Option<(u32, f64)> = None;
@@ -1890,6 +1948,8 @@ pub fn sweep_streams_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> Cel
                     let mut total = 1usize;
                     let mut rates = vec![first_fps];
                     for _ in 1..crate::search::WINDOWS_PER_RUNG {
+                        // The previous window at this same concurrency is still draining off the host.
+                        settle_after_streams(ceiling);
                         let Some(w) = stream_window(cfg.gateway_addr, &p.path, &p.body, &p.headers, p.dialect, ceiling) else {
                             continue;
                         };
@@ -1952,6 +2012,10 @@ pub fn sweep_streams_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> Cel
                         "streams: c={ceiling} held the gate in only {held} of {total} windows - stepping down to c={next}"
                     );
                     ceiling = next;
+                    // We just drove `ceiling * 2` streams through this host; the stepped rung is the
+                    // measurement most exposed to that residue, because it is the one that decides
+                    // whether the search ends with a number or with nothing.
+                    settle_after_streams(next * 2);
                     // The stepped rung's own first window seeds the next iteration's `held = 1`,
                     // so it must actually HOLD the gate to be that vote - `confirm_ceiling` has the
                     // same rule. Seeding with a failing window let a rung reach majority with only
@@ -1962,10 +2026,54 @@ pub fn sweep_streams_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> Cel
                             let passed = streams_gate_passes(&w);
                             p.points.push(point_of(&w, passed));
                             if !passed {
-                                stop = StreamStop::SteppedRungFailed { at: ceiling };
-                                break;
+                                /* A RUNG CANNOT FAIL BELOW ONE IT HAS ALREADY PASSED, so when it does,
+                                   the gateway is not what changed. `proven_clean` is the top of THIS
+                                   cell's own uncontaminated ascending prefix; a failure at or under it
+                                   is the rig, and filing it as `SteppedRungFailed` charged the gateway
+                                   for our own undrained host on 6 cells of the 2026-07-31 board.
+
+                                   One full-cap retry first, because the cheap explanation - not enough
+                                   drain - is also the likeliest, and it costs one window to rule out.
+                                   If it holds this time the search simply carries on and publishes a
+                                   number, which is the outcome all of this is for. */
+                                /* AND ONLY WHERE THE MECHANISM CAN ACTUALLY EXIST. Draining sockets
+                                   explain a rung failing under a proven one at c=3,088; they explain
+                                   nothing at c=1 under c=2, where there is no residue to speak of and
+                                   a failure is simply a failure. Gating on the same threshold the
+                                   settle uses keeps this from becoming a universal excuse that
+                                   relabels every real gateway failure as our fault - the mirror image
+                                   of the bug it fixes, and the more dangerous of the two, because it
+                                   flatters the subject. */
+                                let contaminated =
+                                    proven_clean > STREAM_SETTLE_FREE_BELOW && ceiling <= proven_clean;
+                                let recovered = if contaminated {
+                                    eprintln!(
+                                        "streams: c={ceiling} failed the gate although this cell already                                          carried c={proven_clean} cleanly - settling and re-taking the window"
+                                    );
+                                    std::thread::sleep(std::time::Duration::from_millis(STREAM_SETTLE_MAX_MS));
+                                    match stream_window(cfg.gateway_addr, &p.path, &p.body, &p.headers, p.dialect, ceiling) {
+                                        Some(w2) => {
+                                            let passed2 = streams_gate_passes(&w2);
+                                            p.points.push(point_of(&w2, passed2));
+                                            if passed2 { first_fps = w2.fps(); }
+                                            passed2
+                                        }
+                                        None => false,
+                                    }
+                                } else {
+                                    false
+                                };
+                                if !recovered {
+                                    stop = if contaminated {
+                                        StreamStop::RigContaminated { at: ceiling, proven: proven_clean }
+                                    } else {
+                                        StreamStop::SteppedRungFailed { at: ceiling }
+                                    };
+                                    break;
+                                }
+                            } else {
+                                first_fps = w.fps();
                             }
-                            first_fps = w.fps();
                         }
                         None => {
                             stop = StreamStop::WindowUnavailable { at: ceiling };
@@ -4823,6 +4931,118 @@ mod stream_stop_tests {
         assert!(
             rig.contains("RIG ran short") && rig.contains("not the gateway"),
             "the rig's own shortfall must name itself rather than reading as the gateway's failure: {rig}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod contamination_tests {
+    use super::*;
+
+    /// The guard must NOT fire where draining cannot explain anything - otherwise it becomes a
+    /// universal excuse that relabels real gateway failures as rig faults, which flatters the
+    /// subject and is the more dangerous mirror of the bug it fixes.
+    #[test]
+    fn the_contamination_guard_only_applies_where_draining_could_explain_it() {
+        let fires = |proven: u32, at: u32| proven > STREAM_SETTLE_FREE_BELOW && at <= proven;
+        assert!(fires(4096, 3088), "busbar's real case must be caught");
+        assert!(
+            !fires(2, 1),
+            "a rung failing at c=1 under c=2 has no residue to blame"
+        );
+        assert!(
+            !fires(4096, 5000),
+            "a failure ABOVE the proven rung is ordinary evidence"
+        );
+        assert!(
+            !fires(STREAM_SETTLE_FREE_BELOW, 8),
+            "at or below the settle threshold, no excuse"
+        );
+    }
+
+    /* A RUNG FAILING BELOW ONE THE SAME CELL ALREADY PASSED IS OURS, AND MUST BE FILED AS OURS.
+    This is the whole point of the variant: `Absent::NotMeasured` puts a finding among the
+    GATEWAY's results, which is what happened to 6 cells on the 2026-07-31 board. */
+    #[test]
+    fn a_contaminated_rung_is_a_harness_error_and_never_the_gateways_result() {
+        assert_eq!(
+            StreamStop::RigContaminated {
+                at: 3088,
+                proven: 4096
+            }
+            .absent_kind(),
+            Absent::HarnessError,
+            "a rung failing below a proven-clean one is the rig; filing it as NotMeasured charges \
+             the gateway for our own undrained host"
+        );
+        // The endings that ARE about the gateway must stay that way, or this variant has just
+        // laundered every real failure into a rig excuse.
+        assert_eq!(
+            StreamStop::SteppedRungFailed { at: 100 }.absent_kind(),
+            Absent::NotMeasured
+        );
+        assert_eq!(
+            StreamStop::BudgetExhausted.absent_kind(),
+            Absent::NotMeasured
+        );
+        assert_eq!(
+            StreamStop::FloorReached { last: 8 }.absent_kind(),
+            Absent::NotMeasured
+        );
+    }
+
+    /// The sentence has to carry BOTH concurrencies, because the impossibility is the relation
+    /// between them - either number alone reads like an ordinary failure.
+    #[test]
+    fn the_contaminated_reason_names_the_rung_and_what_the_cell_had_already_carried() {
+        let d = StreamStop::RigContaminated {
+            at: 3088,
+            proven: 4096,
+        }
+        .describe(6176, 6);
+        assert!(d.contains("c=3088"), "must name the rung that failed: {d}");
+        assert!(
+            d.contains("c=4096"),
+            "must name what this cell already carried: {d}"
+        );
+        assert!(
+            d.contains("c=6176"),
+            "must name what the bisection proved: {d}"
+        );
+    }
+
+    /* THE SETTLE IS PROPORTIONAL, FREE AT THE BOTTOM, AND CAPPED. Each of those is load-bearing: a
+    flat pause sized for c=8,192 would be pure schedule cost on the dozen small rungs every cell
+    walks through, and an uncapped one is a field sweep whose duration nobody predicted. */
+    #[test]
+    fn the_stream_settle_is_free_below_the_threshold_and_capped_above_it() {
+        let ms = |c: u32| {
+            if c <= STREAM_SETTLE_FREE_BELOW {
+                0
+            } else {
+                (u64::from(c) * STREAM_SETTLE_MS_PER_1K / 1000).min(STREAM_SETTLE_MAX_MS)
+            }
+        };
+        assert_eq!(ms(1), 0, "a single stream leaves nothing to drain");
+        assert_eq!(
+            ms(STREAM_SETTLE_FREE_BELOW),
+            0,
+            "at the threshold it is still free"
+        );
+        assert!(
+            ms(STREAM_SETTLE_FREE_BELOW + 1) > 0,
+            "and just above it, it is not"
+        );
+        assert!(
+            ms(2048) > ms(1024),
+            "it must scale with what the last window drove"
+        );
+        assert_eq!(ms(100_000), STREAM_SETTLE_MAX_MS, "and it must be bounded");
+        // busbar's real case: the c=3,088 step-down that failed after c=6,144 passed clean.
+        assert!(
+            ms(6176) >= 6_000,
+            "the rungs that actually broke must get a real pause, got {}",
+            ms(6176)
         );
     }
 }
