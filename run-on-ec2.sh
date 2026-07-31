@@ -823,6 +823,19 @@ bench_gateway_once() {
 
   glog_echo "installing deps (bare base: docker + psutil; the rig is a prebuilt download, and each"
   glog_echo "gateway installs its OWN prereqs via gw_prereqs - no blanket build toolchain on every box)"
+  # RETRIED ON A CONNECTION FAILURE, because one timed-out connect must not cost a healthy box.
+  #
+  # On 2026-07-31 three gateways died here to `ssh: connect to host ...: Operation timed out` - a
+  # single transient connect against boxes that were fine. The liveness probe above is already
+  # retried for exactly this reason; this call, which does the actual work, was one-shot, so the whole
+  # box was torn down on the strength of one answer from a machine still settling.
+  #
+  # ONLY rc=255 IS RETRIED. That is ssh's own "could not establish the session"; any other non-zero is
+  # the REMOTE script failing, and re-running apt because docker refused to start would just fail the
+  # same way more slowly while hiding the real reason. The provisioning block is idempotent (every
+  # step is a wait, an install, or a retry loop), so repeating it after a lost connection is safe.
+  local prov_rc=0
+  for _try in 1 2 3; do
   ssh $SSHOPT ubuntu@"$ip" 'set -e
     # WAIT FOR THE BOX TO FINISH BOOTING BEFORE ASKING IT FOR ROOT.
     #
@@ -1000,7 +1013,11 @@ bench_gateway_once() {
       exit 1
     fi
     python3 -m pip install --user -q --break-system-packages psutil 2>/dev/null || pip3 install -q psutil || true' >>"$glog" 2>&1
-  local prov_rc=$?
+  prov_rc=$?
+  [ "$prov_rc" -ne 255 ] && break
+  glog_echo "ssh could not establish a session for provisioning (rc=255, attempt $_try/3) - retrying rather than losing the box"
+  sleep 10
+  done
   # A FAILED PROVISION MUST END THE BOX, not be discovered as a broken gateway later.
   #
   # This exit code was previously ignored. The remote block runs under `set -e`, so a failed apt

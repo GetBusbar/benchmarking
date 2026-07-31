@@ -612,6 +612,41 @@ fn metric_definitions() -> std::collections::BTreeMap<String, String> {
         .map(|us| format!("{}ms", us / 1000))
         .collect();
     d.insert(
+        "perf.cost".to_string(),
+        format!(
+            "WHAT A REQUEST COST, in microseconds of gateway CPU. User plus system time, summed \
+             across the gateway's whole PROCESS TREE (a gateway that forks workers keeps its CPU in \
+             the children, and a parent-only reading would report a busy gateway as idle), sampled \
+             as the DIFFERENCE across one load window and divided by the requests that window \
+             actually completed. \
+             \
+             WHY IT EXISTS BESIDE THROUGHPUT. Peak rps is a SATURATION number: once a gateway fills \
+             the cores it is pinned to, the ladder stops describing the gateway and starts describing \
+             the box, and two gateways at that wall read the same however different they are. Cost per \
+             request has no such ceiling - at saturation both serve the same rate by definition, and \
+             the one doing less work per request still reads lower. It is also the figure that maps to \
+             money, since half the CPU serves the same traffic on half the instance. \
+             \
+             MEASURED AT ONE CONCURRENCY, c={COST_CONC}, HELD IDENTICAL FOR EVERY GATEWAY and published \
+             as `cost_window_conc`. No single concurrency is below saturation for a field spanning \
+             double-digit to five-figure rps, so matched LOAD is impossible and matched CONCURRENCY is \
+             the honest substitute - and it is stated rather than assumed. \
+             \
+             REFUSED, NOT ESTIMATED, IN TWO CASES. A window with ANY failure publishes no cost at all: \
+             CPU spent refusing requests is real, but dividing it by only the successes would describe \
+             the failures rather than the work. And a window with major page faults means the box was \
+             SWAPPING, so what was timed is the disk - those numbers publish with `cost_majflt` \
+             non-zero and the cost itself marked a harness fault, so a reader sees why the row looks \
+             wrong instead of finding a hole. \
+             \
+             `cost_core_utilisation` is the fraction of the PINNED cores busy across that same window. \
+             It is what makes a peak interpretable: near 1.0 the gateway had filled the cores it was \
+             given and its throughput number is a real ceiling; well below it, the limit is somewhere \
+             else and the peak means something else.",
+            COST_CONC = crate::metric::COST_WINDOW_CONCURRENCY
+        ),
+    );
+    d.insert(
         "perf.frontier".to_string(),
         format!(
             "THROUGHPUT AT A TAIL LATENCY YOU ACCEPT. For each declared bound, the most requests/sec \
@@ -1510,6 +1545,27 @@ mod tests {
     // reasoning carefully about our numbers reasoned about a test we never ran. This asserts the
     // published text is generated FROM the constants, by checking it says what those constants
     // currently say. Change a constant without regenerating and this fails.
+    #[test]
+    fn the_cost_definition_names_the_concurrency_that_was_actually_used() {
+        // GENERATED FROM THE CONSTANT, not retyped beside it. The whole value of the cost column is
+        // that every gateway was measured at the SAME concurrency; a definition naming a different
+        // number than the code used would describe a comparison that never happened, and is exactly
+        // the drift this file's definitions exist to make impossible.
+        let d = super::metric_definitions();
+        let c = d.get("perf.cost").expect("cost has a definition");
+        assert!(
+            c.contains(&format!("c={}", crate::metric::COST_WINDOW_CONCURRENCY)),
+            "the cost definition must name the concurrency the window ran at"
+        );
+        // It must also state the two refusals, because a reader who does not know a failed window
+        // publishes NO cost will read an absent cell as a missing measurement rather than a refusal.
+        assert!(
+            c.contains("failure"),
+            "must state that a failed window publishes no cost"
+        );
+        assert!(c.contains("SWAPPING"), "must state the major-fault case");
+    }
+
     #[test]
     fn the_published_definitions_are_generated_from_the_constants_that_ran() {
         let d = super::metric_definitions();
