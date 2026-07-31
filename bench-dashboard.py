@@ -101,15 +101,24 @@ PHASE_RE = re.compile(r"\[phase\] (\S+) (\S+)")
 # per-phase seconds, so the table can be re-derived from the real field distribution once it lands.
 # These are strictly better than what they replace either way: the old numbers predated both changes.
 PHASE_COST = {
-    "throughput": 0.295,
-    "memory": 0.656,
-    "streaming": 0.005,
-    "added_latency": 0.022,
-    "streams_sustained": 0.022,
+    # RENORMALISED WHEN `cost` WAS ADDED, not appended to. The weights are a fraction of ONE cell and
+    # the self-test asserts they sum to exactly 1.0, so a sixth group cannot simply be bolted on -
+    # doing that would claim a cell is 101.1% of itself and quietly skew every ETA.
+    #
+    # `cost` runs ONE load window; `added_latency` runs TWO (gateway leg and direct leg) for 0.022, so
+    # one window is ~0.011. The other five keep their measured proportions exactly - each is its old
+    # weight over the new total - and the rounding drift is absorbed into the largest, `memory`,
+    # where a 1e-6 adjustment is far below the noise in the estimate it feeds.
+    "throughput": 0.29179,
+    "memory": 0.648862,
+    "streaming": 0.004946,
+    "added_latency": 0.021761,
+    "streams_sustained": 0.021761,
+    "cost": 0.01088,
 }
 # Fraction of a cell already done when a given phase STARTS, in the order the engine runs them
 # (metric::METRICS, in that order).
-PHASE_ORDER = ["throughput", "memory", "streaming", "added_latency", "streams_sustained"]
+PHASE_ORDER = ["throughput", "memory", "streaming", "added_latency", "streams_sustained", "cost"]
 
 
 def cell_fraction_done(phase_name):
