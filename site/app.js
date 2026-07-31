@@ -45,8 +45,8 @@ const HOME_VIEW = "home";
 // A `frontier` TAB rather than six more columns on Performance, or a taller Performance page: the whole
 // curve is a different question ("what shape is this gateway") from the ranking ("who is fastest at my
 // bound"), and the layout rule here is that less scrolling wins even at the cost of another tab.
-const VIEWS = ["gateways", "memory", "performance", "frontier", "streaming", "charts", "matrix", "method"];
-const VIEW_LABELS = { gateways: "Gateways", memory: "Memory", performance: "Performance", frontier: "Frontier", streaming: "Streaming", charts: "Charts", matrix: "Protocol matrix", method: "Method" };
+const VIEWS = ["gateways", "memory", "performance", "frontier", "streaming", "matrix", "charts", "method"];
+const VIEW_LABELS = { gateways: "Gateways", memory: "Memory", performance: "Performance", frontier: "Frontier", streaming: "Streaming", matrix: "Protocol matrix", charts: "Charts", method: "Method" };
 // The default (bare /gateways) view: the roster overview.
 const DEFAULT_VIEW = "gateways";
 // The tabs whose columns read a PERF/STREAM cell of the one 6x6 run (Peak | Same | Custom).
@@ -2781,6 +2781,10 @@ function chartTheme() {
   const cs = getComputedStyle(document.documentElement);
   return {
     fg: cs.getPropertyValue("--fg-dim").trim() || "#9aa4b2",
+    // THE DATA LABELS ARE NOT AXIS CHROME. `--fg-dim` is the muted grey for gridlines and tick marks;
+    // using it for the gateway names and their values renders the actual content at chrome contrast,
+    // which reads as blurry even when the pixels are sharp. Those get `--fg`, the body text colour.
+    ink: cs.getPropertyValue("--fg").trim() || "#e6edf3",
     grid: cs.getPropertyValue("--grid").trim() || "rgba(154,164,178,.18)",
   };
 }
@@ -4422,10 +4426,27 @@ function renderCharts() {
 function drawRankedBars(canvas, rows, metric, theme = {}) {
   const ctx = canvas && canvas.getContext && canvas.getContext("2d");
   if (!ctx) return null;
-  const W = canvas.width, H = canvas.height;
+  /* DRAW AT THE DISPLAY'S REAL RESOLUTION, PRESENT AT CSS SIZE.
+     A canvas whose backing store is 900px wide, stretched by CSS to 900 CSS pixels on a 2x display,
+     is being upscaled by the browser: every glyph is interpolated and the text reads soft. Sizing the
+     backing store to width x dpr and scaling the context once puts one canvas pixel on one device
+     pixel, which is the difference between "blurry chart" and "sharp chart" - nothing else here
+     changes. Guarded because a headless canvas has no window. */
+  const cssW = canvas.width, cssH = canvas.height;
+  const dpr = (typeof window !== "undefined" && window.devicePixelRatio) || 1;
+  if (dpr !== 1) {
+    // Both dimensions scale, so the attribute aspect ratio is unchanged and the stylesheet's
+    // `width:100%; height:auto` still presents it responsively. No inline size is set: CSS owns
+    // presentation, this owns resolution.
+    canvas.width = Math.round(cssW * dpr);
+    canvas.height = Math.round(cssH * dpr);
+    ctx.scale(dpr, dpr);
+  }
+  const W = cssW, H = cssH;
   const padL = 150, padR = 90, padT = 18, padB = 26;
   ctx.clearRect(0, 0, W, H);
   const fg = theme.fg || "#9aa4b2", grid = theme.grid || "rgba(154,164,178,.18)";
+  const ink = theme.ink || fg;
   const vals = rows.map((r) => r.v);
   const hi = Math.max(...vals);
   // A log axis cannot plot 0 or a negative, and both are real states here (a measured zero rate).
@@ -4459,7 +4480,7 @@ function drawRankedBars(canvas, rows, metric, theme = {}) {
     // never rank, never brand, so it cannot be read as favouring an entrant.
     ctx.fillStyle = LANG_COLORS[r.g.lang] || LANG_COLORS.Other;
     ctx.fillRect(padL, y - rowH * 0.32, w, rowH * 0.64);
-    ctx.fillStyle = fg;
+    ctx.fillStyle = ink;
     ctx.textAlign = "right";
     ctx.fillText(r.name, padL - 8, y);
     ctx.textAlign = "left";
