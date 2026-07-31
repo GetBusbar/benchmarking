@@ -45,7 +45,7 @@
     "000000",
     "000000"
   ],
-  "matrix_note": "AISIX v0.5.0 registers only openai (/v1/chat/completions), openai-responses (/v1/responses) and anthropic (/v1/messages) INGRESS routes - no gemini/cohere/bedrock ingress (lib.rs build_router) - and only its openai + anthropic EGRESS adapters take a plain overridable api_base with a dummy key; gemini (vertex, OAuth2), cohere (no adapter) and bedrock (SigV4 + JSON AWS creds) are grey by that capability/auth limit",
+  "matrix_note": "AISIX v0.7.0 registers only openai (/v1/chat/completions), openai-responses (/v1/responses) and anthropic (/v1/messages) INGRESS routes - no gemini/cohere/bedrock ingress (lib.rs build_router) - and only its openai + anthropic EGRESS adapters take a plain overridable api_base with a dummy key; gemini (vertex, OAuth2), cohere (no adapter) and bedrock (SigV4 + JSON AWS creds) are grey by that capability/auth limit",
   "model": "gpt-4o-mini",
   "name": "aisix",
   "path": "/v1/chat/completions",
