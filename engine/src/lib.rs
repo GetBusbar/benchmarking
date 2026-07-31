@@ -23,6 +23,7 @@ pub mod manifest;
 pub mod measurement;
 pub mod metric;
 pub mod probe;
+pub mod procsample;
 pub mod qualify;
 pub mod record;
 pub mod reverify;

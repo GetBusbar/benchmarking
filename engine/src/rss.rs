@@ -89,7 +89,7 @@ fn read_ppid(pid: u32) -> Option<u32> {
 /// deduplicated by construction: a `BTreeSet` insert that reports "already present" halts that
 /// branch of the walk, which is what makes a cycle (or a pid reachable by more than one path)
 /// terminate and count once rather than looping or double-counting.
-fn tree_pids(root: u32, ppid_map: &BTreeMap<u32, u32>) -> BTreeSet<u32> {
+pub(crate) fn tree_pids(root: u32, ppid_map: &BTreeMap<u32, u32>) -> BTreeSet<u32> {
     let mut seen = BTreeSet::new();
     seen.insert(root);
     let mut frontier = vec![root];
