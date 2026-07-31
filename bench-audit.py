@@ -297,6 +297,19 @@ ABSENCE_CARRYING_FIELDS = {
         # direction and would police the wrong shape anyway; the frontier's own null-carries-a-reason
         # invariant is `check_every_absent_frontier_reading_has_a_reason`.
         "added_latency_p50_us", "added_latency_p99_us", "gateway_c1_p99_us", "direct_c1_p99_us",
+        # THE COST GROUP. Every one of these can be absent for a reason a reader must see, and two of
+        # those reasons are REFUSALS rather than gaps: a window with any failure publishes no cost
+        # (CPU divided by only the successes would describe the failures, not the work), and a window
+        # on a swapping box has its cost marked a harness fault. A null with the reason missing reads
+        # as "not implemented" when the truth is "measured, and deliberately withheld".
+        #
+        # This list fell behind the engine when the fields were added, and the mirror check caught it
+        # exactly as designed - reporting that every check built on this list was silently blind to
+        # nine fields. That is the second cross-file mirror the cost work has broken (bench-dashboard
+        # PHASE_ORDER was the first), and both were caught by their own guard rather than by review.
+        "cpu_us_per_request", "rps_per_cpu_second", "cost_window_conc", "cost_window_ok",
+        "cost_window_rps", "cost_core_utilisation", "cost_threads",
+        "cost_nonvol_ctxt_per_request", "cost_majflt",
     ],
     "stream": [
         # `cpu_fps` and `cpu_fps_concurrency` are deleted from `CellStream` (with `sweep_cpu_fps`), same
