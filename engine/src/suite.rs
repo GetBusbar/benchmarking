@@ -173,6 +173,7 @@ fn judge_cell(
 ) -> Judged {
     let mut out = empty_perf();
     judge_added_latency(&mut out, metrics);
+    judge_cost(&mut out, metrics);
     Judged { perf: out }
 }
 
@@ -185,6 +186,33 @@ fn judge_added_latency(
     out.gateway_c1_p99_us = as_i64(metrics.get("gateway_c1_p99_us"));
     out.direct_c1_p99_us = as_i64(metrics.get("direct_c1_p99_us"));
     out.c1_note = c1_note(metrics);
+}
+
+/// Carry the cost group's fields onto the record.
+///
+/// A STRAIGHT CARRY, WITH NO JUDGEMENT APPLIED, on purpose. Every suppression this column could want
+/// has already been decided where the evidence is: the metric refuses a window that had failures
+/// (CPU divided by only the successes would describe the failures, not the work) and re-flags the
+/// cost as a harness fault when the box was swapping. Re-deciding any of that here, away from the
+/// counters, is how two rules drift apart and the artifact ends up disagreeing with itself.
+fn judge_cost(
+    out: &mut CellPerf,
+    metrics: &std::collections::BTreeMap<&'static str, Measurement<f64>>,
+) {
+    let f = |k: &str| -> Measurement<f64> {
+        metrics.get(k).cloned().unwrap_or_else(|| {
+            Measurement::absent_because(
+                Absent::NotMeasured,
+                format!("the cost group published no {k} for this cell"),
+            )
+        })
+    };
+    out.cpu_us_per_request = f("cpu_us_per_request");
+    out.rps_per_cpu_second = f("rps_per_cpu_second");
+    out.cost_window_conc = as_i64(metrics.get("cost_window_conc"));
+    out.cost_threads = f("cost_threads");
+    out.cost_nonvol_ctxt_per_request = f("cost_nonvol_ctxt_per_request");
+    out.cost_majflt = f("cost_majflt");
 }
 
 /// HOW MUCH IS BEHIND THE c=1 PERCENTILES.
@@ -1255,11 +1283,23 @@ fn withhold_refuted_perf(p: CellPerf, why: &str) -> CellPerf {
          dialect, so this number was taken over a wire that is not this pairing: {why}"
     );
     let withheld = || Measurement::absent_because(Absent::NotServed, detail.clone());
+    // The same withholding for the f64-typed fields; one detail string, two element types.
+    let withheld_f =
+        || -> Measurement<f64> { Measurement::absent_because(Absent::NotServed, detail.clone()) };
     CellPerf {
         added_latency_p50_us: withheld(),
         added_latency_p99_us: withheld(),
         gateway_c1_p99_us: withheld(),
         direct_c1_p99_us: withheld(),
+        // THE COST GOES TOO, for exactly the reason the latency legs do: CPU burned serving a wire
+        // that is not this pairing is not this pairing's cost. Withholding the rate while publishing
+        // what it cost would leave a cost-per-request for a request the cell never served.
+        cpu_us_per_request: withheld_f(),
+        rps_per_cpu_second: withheld_f(),
+        cost_window_conc: withheld(),
+        cost_threads: withheld_f(),
+        cost_nonvol_ctxt_per_request: withheld_f(),
+        cost_majflt: withheld_f(),
         // THE FRONTIER GOES TOO, for the reason the sweeps do: every reading in it is rps against
         // concurrency measured over a wire that is not this pairing, and a reading is as much a
         // published number as a ceiling drawn from it.

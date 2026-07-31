@@ -405,6 +405,39 @@ pub struct CellPerf {
     pub gateway_c1_p99_us: Measurement<i64>,
     #[serde(default = "measurement_default")]
     pub direct_c1_p99_us: Measurement<i64>,
+    /// WHAT A REQUEST COST, in microseconds of gateway CPU.
+    ///
+    /// The throughput answer stops describing the gateway the moment it saturates its pinned cores;
+    /// this does not. At saturation two gateways deliver the same rps by definition, and the one
+    /// doing less work per request still reads lower here - which is also the figure that maps to
+    /// money, since half the CPU serves the same traffic on half the instance.
+    ///
+    /// ABSENT ON EVERY SNAPSHOT TAKEN BEFORE THIS EXISTED, and absent is the only honest rendering:
+    /// a 0 would make a gateway that was never measured look infinitely efficient.
+    #[serde(default = "measurement_default")]
+    pub cpu_us_per_request: Measurement<f64>,
+    /// The same fact the way an operator sizes a box: requests served per second of CPU burned.
+    #[serde(default = "measurement_default")]
+    pub rps_per_cpu_second: Measurement<f64>,
+    /// The concurrency the two above were taken at, published because it is what was HELD CONSTANT.
+    /// No single concurrency is sub-saturation across a field spanning 19 to 49,000 rps, so matched
+    /// concurrency is the honest substitute for matched load - and a reader has to be able to see
+    /// which it was rather than trust that something was.
+    #[serde(default = "measurement_default")]
+    pub cost_window_conc: Measurement<i64>,
+    /// Threads in the gateway's tree during the cost window. Not a rate: it is the shape of the
+    /// concurrency model, thread-per-connection against async, on evidence rather than on a claim.
+    #[serde(default = "measurement_default")]
+    pub cost_threads: Measurement<f64>,
+    /// Involuntary context switches per request - the scheduler taking the CPU away, which is what a
+    /// saturated core looks like from inside the process. The best single explainer of a tail.
+    #[serde(default = "measurement_default")]
+    pub cost_nonvol_ctxt_per_request: Measurement<f64>,
+    /// Major faults during the cost window. NON-ZERO MEANS THE BOX WAS SWAPPING, so the window timed
+    /// the disk; the cost figures above are re-flagged as a harness fault when this is not 0, and
+    /// this number publishes so a reader sees WHY rather than finding a hole.
+    #[serde(default = "measurement_default")]
+    pub cost_majflt: Measurement<f64>,
     /// THE FRONTIER: one reading per declared tail-latency bound, ascending, with the failure-only
     /// reading last. The published throughput answer, replacing `rps_max_proxy` /
     /// `rps_sustained_20ms`.
@@ -823,6 +856,14 @@ mod tests {
             added_latency_p99_us: Measurement::Measured(40_945),
             gateway_c1_p99_us: Measurement::Measured(41_026),
             direct_c1_p99_us: Measurement::Measured(81),
+            // A cost the fixture can round-trip: the point of this test is that every field survives
+            // serialisation, so a field left at its default would pass vacuously.
+            cpu_us_per_request: Measurement::Measured(37.5),
+            rps_per_cpu_second: Measurement::Measured(26_666.0),
+            cost_window_conc: Measurement::Measured(8),
+            cost_threads: Measurement::Measured(9.0),
+            cost_nonvol_ctxt_per_request: Measurement::Measured(0.25),
+            cost_majflt: Measurement::Measured(0.0),
             // The throughput answer is the FRONTIER now. The six scalars this fixture used to carry -
             // `rps_max_proxy` / `rps_sustained_20ms` and their concurrency twins - were one sweep
             // summarised twice by a chosen ceiling, and they are gone from the artifact.
