@@ -2274,6 +2274,34 @@ test("NOISE: the rig's resolution is DERIVED from box qualification, never a cho
   assert.equal(app.rigResolutionPct(mixed), 5);
 });
 
+test("CHARTS: the tab draws from the live board, ranks by the metric's own direction, and drops nobody silently", () => {
+  // The registry is what replaced 25 PNGs. Every entry must be drawable: a label, a direction, a
+  // getter. A metric that cannot say which way is better cannot be ranked.
+  assert.ok(app.CHART_METRICS.length >= 4);
+  for (const m of app.CHART_METRICS) {
+    assert.ok(m.id && m.label && typeof m.get === "function", `chart metric ${m.id} is not drawable`);
+    assert.equal(typeof m.desc, "boolean", `${m.id} must declare which direction is better`);
+  }
+
+  // COST IS ON A LOG AXIS AND THAT IS NOT A PREFERENCE. The real board spans 89us to 199,333us -
+  // 2,247x - and on a linear axis twelve of fourteen gateways are a single pixel beside the slowest.
+  const cpu = app.CHART_METRICS.find((m) => m.id === "cpu");
+  assert.equal(cpu.log, true, "cost per request must be logarithmic");
+  assert.equal(cpu.desc, false, "less CPU per request is better");
+
+  // Ranking uses the metric's direction, not a fixed order.
+  const mk = (key, v) => ({ key, name: key, lang: "Rust", best_cell: { ...bcCell({}), cpu_us_per_request: seal(v) } });
+  const st = { data: null, mode: "peak", bound: 10 };
+  const rows = app.chartRows(cpu, [mk("slow", 199333), mk("fast", 89), mk("mid", 273)], st);
+  assert.deepEqual(rows.map((r) => r.key), ["fast", "mid", "slow"], "lower-is-better sorts ascending");
+
+  // A gateway with no value is EXCLUDED FROM THE BARS but is not lost - renderCharts names it under
+  // the chart. A chart that silently omits rows reports a tidier field than the one measured, and on
+  // this board an absent number usually means a refusal a reader needs to see.
+  const withHole = app.chartRows(cpu, [mk("has", 100), { key: "none", name: "none", lang: "Go", best_cell: bcCell({}) }], st);
+  assert.deepEqual(withHole.map((r) => r.key), ["has"]);
+});
+
 test("SATURATION: a utilisation figure cannot be read as a verdict unless the window reached the peak", () => {
   // The real numbers from 2026-07-31. Same utilisation SHAPE, opposite meaning, and only the ratio
   // to the cell's own peak separates them - which is the mistake I made in prose before catching it.

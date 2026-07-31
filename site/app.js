@@ -4421,30 +4421,118 @@ function chartCaption(file) {
   return (top5 ? "Top 5 by lowest added latency, the same five on every chart. " : "All gateways. ") + body;
 }
 
+/* renderCharts(): the Charts tab - horizontal ranked bars, drawn from the live board.
+
+   REPLACED 25 STATIC PNGs. Half of those existed only because "top 5" had to be decided at render
+   time, by one metric, before the reader arrived; the rest froze one bound and one cell into an
+   image. Here the metric is a control, the bound and cell come from the selectors every other tab
+   honours, and "top 5" is a row count rather than a decision baked into a filename.
+
+   A GATEWAY WITH NO VALUE IS LISTED, NOT DROPPED. A chart that silently omits the rows it cannot
+   draw reports a smaller, tidier field than the one that was measured - and on this board an absent
+   number usually means a refusal (the cell was not served, the window had failures) that a reader
+   needs to see. They are named under the chart with their reason. */
 function renderCharts() {
-  const gallery = document.getElementById("chart-gallery");
-  const charts = state.data.charts || [];
-  if (!charts.length) {
-    gallery.innerHTML = `<p class="muted">No chart PNGs are committed yet.</p>`;
+  const panel = document.getElementById("chart-panel");
+  const controls = document.getElementById("chart-controls");
+  const note = document.getElementById("chart-note");
+  if (!panel || !controls) return;
+  const metric = CHART_METRICS.find((m) => m.id === state.chartMetric) || CHART_METRICS[0];
+
+  controls.innerHTML =
+    `<label class="chart-metric">Metric
+       <select id="chart-metric-select">${CHART_METRICS.map((m) =>
+         `<option value="${esc(m.id)}"${m.id === metric.id ? " selected" : ""}>${esc(m.label)}</option>`).join("")}
+       </select>
+     </label>`;
+  const sel = document.getElementById("chart-metric-select");
+  if (sel) sel.addEventListener("change", (e) => { state.chartMetric = e.target.value; renderCharts(); });
+
+  const roster = applyFilters(state.data.gateways || [], state);
+  const rows = chartRows(metric, roster, state);
+  const missing = roster.filter((g) => !rows.some((r) => r.key === g.key));
+
+  if (!rows.length) {
+    panel.innerHTML = `<p class="muted">No gateway on this board carries ${esc(metric.label)} yet.</p>`;
+    note.textContent = "";
     return;
   }
-  /* full-field charts first, then top5 variants */
-  const ordered = charts.slice().sort((a, b) =>
-    (a.file.includes("top5_") - b.file.includes("top5_")) || a.file.localeCompare(b.file));
-  /* Root-absolute src: the page URL may be a deep path (/gateways/charts), so a
-     relative charts/ path would resolve under the route, not the site root. */
-  gallery.innerHTML = ordered.map((c) =>
-    `<figure data-src="/${esc(c.file)}"><img src="/${esc(c.file)}" alt="${esc(chartCaption(c.file))}" loading="lazy"><figcaption>${esc(chartCaption(c.file))}</figcaption></figure>`
-  ).join("");
-  gallery.querySelectorAll("figure").forEach((f) => {
-    f.addEventListener("click", () => {
-      const box = document.createElement("div");
-      box.className = "lightbox";
-      box.innerHTML = `<img src="${esc(f.dataset.src)}" alt="">`;
-      box.addEventListener("click", () => box.remove());
-      document.body.appendChild(box);
-    });
+  panel.innerHTML = `<canvas id="chart-canvas" width="900" height="${Math.max(160, rows.length * 30 + 60)}"></canvas>`;
+  drawRankedBars(document.getElementById("chart-canvas"), rows, metric, chartTheme());
+
+  note.innerHTML = esc(metric.note) +
+    (metric.log ? " Drawn on a LOG scale: this metric spans orders of magnitude, and a linear axis would collapse most of the field into the width of a line." : "") +
+    (missing.length
+      ? `<br>Not shown (no value on the chosen cell): ${missing.map((g) => esc(g.name || g.key)).join(", ")}.`
+      : "");
+}
+
+/* drawRankedBars: one bar per gateway, longest-first by the metric's own direction.
+
+   LOG WHERE THE METRIC SAYS SO. Cost per request spans 2,247x on the current board; on a linear axis
+   twelve of fourteen gateways are a single pixel wide beside the slowest, which destroys the very
+   comparison the chart exists to make. Gridlines fall on decades and are labelled in the metric's own
+   units, so the scale is readable as "ten times" rather than as an unlabelled curve. */
+function drawRankedBars(canvas, rows, metric, theme = {}) {
+  const ctx = canvas && canvas.getContext && canvas.getContext("2d");
+  if (!ctx) return null;
+  const W = canvas.width, H = canvas.height;
+  const padL = 150, padR = 90, padT = 18, padB = 26;
+  ctx.clearRect(0, 0, W, H);
+  const fg = theme.fg || "#9aa4b2", grid = theme.grid || "rgba(154,164,178,.18)";
+  const vals = rows.map((r) => r.v);
+  const hi = Math.max(...vals);
+  // A log axis cannot plot 0 or a negative, and both are real states here (a measured zero rate).
+  // Those rows draw at the axis floor with their value still labelled, rather than being dropped.
+  const lo = metric.log ? Math.min(...vals.filter((v) => v > 0)) : 0;
+  const X = (v) => {
+    if (!metric.log) return padL + (v / (hi || 1)) * (W - padL - padR);
+    if (!(v > 0)) return padL;
+    const a = Math.log10(lo || 1), b = Math.log10(hi || 1);
+    return padL + (b > a ? (Math.log10(v) - a) / (b - a) : 1) * (W - padL - padR);
+  };
+  const rowH = (H - padT - padB) / rows.length;
+
+  ctx.font = "11px Inter, sans-serif";
+  ctx.textBaseline = "middle";
+  if (metric.log && hi > 0) {
+    ctx.textAlign = "center";
+    for (let d = Math.floor(Math.log10(lo || 1)); d <= Math.ceil(Math.log10(hi)); d++) {
+      const x = X(Math.pow(10, d));
+      if (x < padL || x > W - padR) continue;
+      ctx.strokeStyle = grid;
+      ctx.beginPath(); ctx.moveTo(x, padT); ctx.lineTo(x, H - padB); ctx.stroke();
+      ctx.fillStyle = fg;
+      ctx.fillText(fmtChartTick(Math.pow(10, d), metric.unit), x, H - padB + 10);
+    }
+  }
+  rows.forEach((r, i) => {
+    const y = padT + i * rowH + rowH / 2;
+    const w = Math.max(2, X(r.v) - padL);
+    // The SAME language palette every other surface uses. Colour is a neutral property here:
+    // never rank, never brand, so it cannot be read as favouring an entrant.
+    ctx.fillStyle = LANG_COLORS[r.g.lang] || LANG_COLORS.Other;
+    ctx.fillRect(padL, y - rowH * 0.32, w, rowH * 0.64);
+    ctx.fillStyle = fg;
+    ctx.textAlign = "right";
+    ctx.fillText(r.name, padL - 8, y);
+    ctx.textAlign = "left";
+    ctx.fillText(fmtChartValue(r.v, metric.unit), padL + w + 6, y);
   });
+  return { X, padL };
+}
+
+/* A decade label in the metric's own units: "100 µs" reads, "0.0001 s" does not. */
+function fmtChartTick(v, unit) {
+  if (unit === "µs") return v >= 1e6 ? `${v / 1e6} s` : v >= 1000 ? `${v / 1000} ms` : `${v} µs`;
+  if (unit === "USD") return v >= 1 ? `$${v}` : `$${v.toFixed(String(v).length)}`;
+  return fmtTick(v);
+}
+function fmtChartValue(v, unit) {
+  if (unit === "µs") return v >= 1000 ? `${fmt1(v / 1000)} ms` : `${fmtInt(v)} µs`;
+  if (unit === "USD") return v < 0.01 ? `$${v.toFixed(4)}` : `$${fmt2(v)}`;
+  if (unit === "MiB") return `${fmt1(v)} MiB`;
+  return fmtInt(v);
 }
 
 /* ---- method links + footer -------------------------------------------------- */
