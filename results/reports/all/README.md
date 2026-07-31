@@ -7,7 +7,7 @@ Every number below is regenerated from the raw `results/*.json` - re-run `run-al
 | Gateway | Added latency (p99) | req/s @ p99 &lt; 10 ms, zero failures | Idle RAM | Steady-state RAM | Built |
 |---|--:|--:|--:|--:|---|
 | [LiteLLM · Rust](https://github.com/BerriAI/litellm) | 98 µs | 48,394 <sub>(+1% from 1 ms to no bound)</sub> | - | - | `litellm-ai-gateway` |
-| [Busbar](https://github.com/GetBusbar/busbar) | 114 µs | 47,557 <sub>(+4% from 1 ms to no bound)</sub> | 7 MiB | 241 MiB | `getbusbar/busbar:1.4.1` |
+| [Busbar](https://github.com/GetBusbar/busbar) | 115 µs | 48,959 <sub>(+3% from 1 ms to no bound)</sub> | 7 MiB | 248 MiB | `getbusbar/busbar:1.4.1` |
 | [agentgateway](https://github.com/agentgateway/agentgateway) | 227 µs | 25,090 <sub>(+8% from 1 ms to no bound)</sub> | 25 MiB | 47 MiB | `ghcr.io/agentgateway/agentgateway:v1.4.0` |
 | [AISIX (api7)](https://github.com/api7/aisix) | 267 µs | 17,746 <sub>(+0% from 1 ms to no bound)</sub> | 67 MiB | 358 MiB | `target/release/aisix` |
 | [Helicone](https://github.com/Helicone/ai-gateway) | 284 µs | 15,770 <sub>(+7% from 1 ms to no bound)</sub> | 43 MiB | 56 MiB | `target/release/ai-gateway` |
@@ -31,7 +31,7 @@ The most req/s each gateway carried while 99% of requests finished under the col
 | Gateway | p99 &lt; 1 ms | p99 &lt; 5 ms | p99 &lt; 10 ms | p99 &lt; 50 ms | p99 &lt; 100 ms | no bound | at 10 ms: concurrency, observed tail |
 |---|--:|--:|--:|--:|--:|--:|---|
 | [LiteLLM · Rust](https://github.com/BerriAI/litellm) | 47,849 | 48,394 | 48,394 | 48,394 | 48,394 | 48,394 | c=64, p99 2.07 ms, c=256 broke it |
-| [Busbar](https://github.com/GetBusbar/busbar) | 45,856 | 47,557 | 47,557 | 47,557 | 47,557 | 47,557 | c=128, p99 4.44 ms, c=256 broke it |
+| [Busbar](https://github.com/GetBusbar/busbar) | 47,516 | 48,959 | 48,959 | 48,959 | 48,959 | 48,959 | c=64, p99 2.08 ms, c=256 broke it |
 | [agentgateway](https://github.com/agentgateway/agentgateway) | 23,297 | 25,090 | 25,090 | 25,090 | 25,090 | 25,090 | c=32, p99 2 ms, c=256 broke it |
 | [AISIX (api7)](https://github.com/api7/aisix) | 17,672 | 17,746 | 17,746 | 17,746 | 17,746 | 17,746 | c=16, p99 1.41 ms, c=128 broke it |
 | [Helicone](https://github.com/Helicone/ai-gateway) | 14,799 | 15,564 | 15,770 | 15,770 | 15,770 | 15,770 | c=64, p99 6.65 ms, c=128 broke it |
@@ -54,7 +54,7 @@ Every rung of the same sweep the frontier readings above are taken from, summari
 | Gateway | req/s at lowest c | peak req/s (at c) | gain (rate × / concurrency ×) | saturates (95% of peak) | p99 at lowest c → at top c | first c that failed a request | top c probed |
 |---|--:|--:|--:|--:|--:|--:|--:|
 | [LiteLLM · Rust](https://github.com/BerriAI/litellm) | 8,680 at c=1 | 48,351 at c=64 | 5.6× / 64× | c=16 | 131 µs → 4.86 s | none | c=32768 |
-| [Busbar](https://github.com/GetBusbar/busbar) | 7,572 at c=1 | 47,433 at c=64 | 6.3× / 64× | c=16 | 148 µs → 0 µs | c=512 | c=512 |
+| [Busbar](https://github.com/GetBusbar/busbar) | 7,909 at c=1 | 48,700 at c=64 | 6.2× / 64× | c=16 | 144 µs → 4.44 s | none | c=32768 |
 | [agentgateway](https://github.com/agentgateway/agentgateway) | 4,484 at c=1 | 24,993 at c=64 | 5.6× / 64× | c=16 | 279 µs → 595 ms | none | c=32768 |
 | [AISIX (api7)](https://github.com/api7/aisix) | 4,293 at c=1 | 17,638 at c=16 | 4.1× / 16× | c=8 | 257 µs → 3.86 s | none | c=32768 |
 | [Helicone](https://github.com/Helicone/ai-gateway) | 3,443 at c=1 | 15,710 at c=64 | 4.6× / 64× | c=16 | 316 µs → 32.9 ms | c=64 | c=256 |
@@ -77,7 +77,7 @@ Same box, same mock, one gateway at a time. Streaming figures are the overhead t
 | Gateway | Added TTFT (p99) | Added per-token (p99) | SSE streams | Translated req/s @ p99 &lt; 10 ms, 20 ms model delay |
 |---|--:|--:|--:|--:|
 | [LiteLLM · Rust](https://github.com/BerriAI/litellm) | 169 µs | 19 µs | 3,137 (12,960 fps) | n/a |
-| [Busbar](https://github.com/GetBusbar/busbar) | 246 µs | 11 µs | ✕ not measured | 40,747 (openai → cohere) |
+| [Busbar](https://github.com/GetBusbar/busbar) | 251 µs | 2 µs | ✕ not measured | 42,442 (openai → cohere) |
 | [agentgateway](https://github.com/agentgateway/agentgateway) | 372 µs | ≤ rig resolution | 2,479 (10,022 fps) | 22,972 (openai → anthropic) |
 | [AISIX (api7)](https://github.com/api7/aisix) | 535 µs | 39 µs | 4,232 (17,123 fps) | 16,630 (openai → anthropic) |
 | [Helicone](https://github.com/Helicone/ai-gateway) | 461 µs | 14 µs | 255 (12,121 fps) | 15,578 (openai → anthropic) |
@@ -93,35 +93,35 @@ Same box, same mock, one gateway at a time. Streaming figures are the overhead t
 
 **✕** cells are measured refusals, not gaps: the gateway was offered the load and could not do the thing (buffered instead of streaming, rejected the Anthropic shape, or has no native key/limit governance). **n/a** = that suite hasn't been run for this gateway yet.
 
-![frontier_shape](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/frontier_shape.png?v=202607310528)
+![frontier_shape](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/frontier_shape.png?v=202607310539)
 
-![frontier_shapes_key](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/frontier_shapes_key.png?v=202607310528)
+![frontier_shapes_key](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/frontier_shapes_key.png?v=202607310539)
 
-![frontier_climb](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/frontier_climb.png?v=202607310528)
+![frontier_climb](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/frontier_climb.png?v=202607310539)
 
-![added_latency](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/added_latency.png?v=202607310528)
+![added_latency](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/added_latency.png?v=202607310539)
 
-![frontier_rps_at_bound](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/frontier_rps_at_bound.png?v=202607310528)
+![frontier_rps_at_bound](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/frontier_rps_at_bound.png?v=202607310539)
 
-![memory_rss](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/memory_rss.png?v=202607310528)
+![memory_rss](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/memory_rss.png?v=202607310539)
 
-![memory_recovery](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/memory_recovery.png?v=202607310528)
+![memory_recovery](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/memory_recovery.png?v=202607310539)
 
-![rps_per_dollar](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/rps_per_dollar.png?v=202607310528)
+![rps_per_dollar](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/rps_per_dollar.png?v=202607310539)
 
-![cost_per_million](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/cost_per_million.png?v=202607310528)
+![cost_per_million](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/cost_per_million.png?v=202607310539)
 
-![stream_added_ttft](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/stream_added_ttft.png?v=202607310528)
+![stream_added_ttft](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/stream_added_ttft.png?v=202607310539)
 
-![stream_added_gap](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/stream_added_gap.png?v=202607310528)
+![stream_added_gap](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/stream_added_gap.png?v=202607310539)
 
-![stream_sustained](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/stream_sustained.png?v=202607310528)
+![stream_sustained](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/stream_sustained.png?v=202607310539)
 
-![xlate_frontier_rps_at_bound](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/xlate_frontier_rps_at_bound.png?v=202607310528)
+![xlate_frontier_rps_at_bound](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/xlate_frontier_rps_at_bound.png?v=202607310539)
 
-![xlate_added_latency](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/xlate_added_latency.png?v=202607310528)
+![xlate_added_latency](https://raw.githubusercontent.com/GetBusbar/benchmarking/main/results/xlate_added_latency.png?v=202607310539)
 
 ---
 Method: added latency = gateway p99 − direct-to-mock p99 at concurrency 1; a frontier reading = the highest req/s any probed concurrency carried while 99% of requests finished under the STATED bound and the gateway failed none it accepted (readings are published at 1, 5, 10, 50, 100 ms and with no bound; the columns above use 10 ms, and every caption names the bound it used); cost figures divide that 10 ms reading by $0.1632/hr for the pinned 4-core (m7g.xlarge) slice; RSS idle = after first 200, steady state = the level the RSS settled at under load. Same box, same mock, same load, one gateway at a time. Each gateway's source ref is pinned in its own `gateways/<name>/definition.json`; the built commit is in each row.
 
-<sub>Page + charts regenerated **2026-07-31 05:28 UTC** from the raw `results/*.json`.</sub>
+<sub>Page + charts regenerated **2026-07-31 05:39 UTC** from the raw `results/*.json`.</sub>
