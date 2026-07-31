@@ -70,6 +70,19 @@ NON_NEGATIVE = {
 # equals the difference of its own published legs - the statement that is actually true of them.
 
 
+# The gateway's pinned core count, and how far the two samplers may disagree before it is a defect.
+#
+# NOT TUNING KNOBS. `run-on-ec2.sh` pins the gateway to CORES=0-3, so four is the divisor the
+# utilisation fraction is taken over - if that split changes, this must change with it or the check
+# silently compares against the wrong denominator. The tolerance is deliberately LOOSE (3x) because
+# the honest direction of disagreement is one-sided: the utilisation window spans a little more wall
+# time than the load window, so implied-from-CPU runs BELOW measured. Only the impossible direction
+# is flagged - a gateway appearing to burn more CPU than its cores accumulated, which means it is not
+# confined to them and the comparable-basis claim is false.
+COST_PINNED_CORES = 4
+COST_UTIL_TOLERANCE = 3.0
+
+
 def num(v):
     if isinstance(v, dict):
         v = v.get("value")
@@ -187,6 +200,36 @@ def main():
                         f"{at}: sampled peak ({peak:.1f} MiB) exceeds kernel HWM ({hwm:.1f} MiB) by "
                         f"{(peak - hwm):.1f} MiB ({(peak / hwm - 1) * 100:.2f}%) - transient-worker artefact"
                     )
+
+                # THE COST WINDOW MUST AGREE WITH ITSELF, and with the cores it ran on.
+                #
+                # Two INDEPENDENT instruments produce these numbers: /proc/<pid>/stat sums the
+                # gateway's process tree, /proc/stat reads the pinned cores. Nothing makes them agree
+                # by construction, so comparing them is a real check rather than the tautology I
+                # first wrote (cpu_us_per_request x rps_per_cpu_second is 1,000,000 by definition -
+                # the same quantity inverted - and it "passed" while telling me nothing).
+                #
+                # The gateway cannot burn more CPU than its pinned cores accumulated. It can burn
+                # LESS, and legitimately does: the cores are shared with nothing else here, but the
+                # utilisation window spans slightly more wall time than the load window. So this is
+                # bounded generously and only fires on a real contradiction - the case that would
+                # mean the process is not confined to the cores we are measuring, and the whole
+                # comparable-basis claim is false.
+                pf = cell.get("perf") or {}
+                ok, wrps = num(pf.get("cost_window_ok")), num(pf.get("cost_window_rps"))
+                cpu_us, util = num(pf.get("cpu_us_per_request")), num(pf.get("cost_core_utilisation"))
+                cores = COST_PINNED_CORES
+                if None not in (ok, wrps, cpu_us, util) and wrps > 0 and util > 0 and ok > 0:
+                    wall = ok / wrps
+                    cpu_s = ok * cpu_us / 1e6
+                    implied = cpu_s / (wall * cores)
+                    if implied > util * COST_UTIL_TOLERANCE:
+                        problems.append(
+                            f"{at}: the gateway burned {cpu_s:.3f} CPU-s but its {cores} pinned cores "
+                            f"only reported {util * 100:.2f}% busy over {wall:.2f}s (implying {implied * 100:.2f}%) - "
+                            f"a process cannot use more CPU than the cores it is pinned to, so either the "
+                            f"pinning is not in force or the two samplers are describing different processes"
+                        )
 
                 st = cell.get("stream") or {}
                 if st.get("stream_served") is True:
