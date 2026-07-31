@@ -104,6 +104,120 @@ impl CounterSource for crate::rss::RealProc {
     }
 }
 
+/// Busy and total jiffies across a SET of cores, from `/proc/stat`.
+///
+/// THIS IS THE READING THAT SETTLES THE CEILING QUESTION. When two gateways converge on the same
+/// peak, the ladder cannot say whether they are equally fast or equally stuck - and on 2026-07-30
+/// that was inferred from the shape of two p99 curves, wrongly, twice. Utilisation of the cores the
+/// gateway is PINNED to answers it directly: at ~100% the wall is the gateway's own CPU and the peak
+/// is a real ceiling; well below it, the wall is somewhere else and the peak means something else.
+///
+/// Only the pinned cores are summed. The box also runs the mock and the load generator on their own
+/// cores, so a machine-wide figure would blend three processes and describe none of them.
+pub fn cpu_busy_total<S: SystemStatSource>(source: &S, cores: &[u32]) -> Option<(u64, u64)> {
+    let text = source.system_stat()?;
+    let mut busy = 0u64;
+    let mut total = 0u64;
+    let mut seen = false;
+    for line in text.lines() {
+        let mut it = line.split_whitespace();
+        let Some(tag) = it.next() else { continue };
+        // `cpu` with no index is the machine-wide aggregate and must NOT be summed alongside the
+        // per-core lines: counting it would double every core it already contains.
+        let Some(idx) = tag.strip_prefix("cpu").and_then(|n| n.parse::<u32>().ok()) else {
+            continue;
+        };
+        if !cores.contains(&idx) {
+            continue;
+        }
+        let f: Vec<u64> = it.filter_map(|v| v.parse::<u64>().ok()).collect();
+        // user nice system idle iowait irq softirq steal ...
+        if f.len() < 5 {
+            continue;
+        }
+        seen = true;
+        let sum: u64 = f.iter().sum();
+        // IDLE AND IOWAIT ARE BOTH NOT-BUSY. iowait is a core with nothing to run while a request is
+        // outstanding; counting it as busy would report a blocked gateway as a saturated one, which
+        // is the opposite of what this measurement exists to distinguish.
+        let idle = f[3] + f[4];
+        total += sum;
+        busy += sum.saturating_sub(idle);
+    }
+    seen.then_some((busy, total))
+}
+
+/// Where the machine-wide CPU table comes from, split out so the arithmetic is fixture-testable.
+pub trait SystemStatSource {
+    fn system_stat(&self) -> Option<String>;
+}
+
+impl SystemStatSource for crate::rss::RealProc {
+    fn system_stat(&self) -> Option<String> {
+        std::fs::read_to_string("/proc/stat").ok()
+    }
+}
+
+/// Utilisation of `cores` across a window, as a FRACTION (1.0 = every pinned core fully busy).
+///
+/// Absent rather than 0 when it cannot be taken, and absent rather than a number when the window
+/// advanced no total jiffies at all - a zero-length window has no utilisation, and reporting 0%
+/// would say the cores were idle when nothing was actually observed.
+pub fn utilisation(start: Option<(u64, u64)>, end: Option<(u64, u64)>) -> Measurement<f64> {
+    let (Some((b0, t0)), Some((b1, t1))) = (start, end) else {
+        return Measurement::absent_because(
+            Absent::NotMeasured,
+            "the pinned cores could not be read from /proc/stat, so utilisation is unknown",
+        );
+    };
+    let (Some(db), Some(dt)) = (b1.checked_sub(b0), t1.checked_sub(t0)) else {
+        return Measurement::absent_because(
+            Absent::HarnessError,
+            format!("a /proc/stat counter went backwards across the window (busy {b0} -> {b1}, total {t0} -> {t1})"),
+        );
+    };
+    if dt == 0 {
+        return Measurement::absent_because(
+            Absent::NotMeasured,
+            "the pinned cores advanced no jiffies across this window, so there is no utilisation to report",
+        );
+    }
+    Measurement::Measured(db as f64 / dt as f64)
+}
+
+/// Parse a taskset-style CPU list ("4-7", "0,2,4", "4-5,8") into core indices.
+///
+/// The gateway's pinning is declared as exactly this string, so utilisation must read the SAME
+/// declaration rather than a second list that could disagree with what taskset was actually given.
+pub fn parse_cores(spec: &str) -> Vec<u32> {
+    let mut out = Vec::new();
+    for part in spec.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        match part.split_once('-') {
+            Some((a, b)) => {
+                if let (Ok(a), Ok(b)) = (a.trim().parse::<u32>(), b.trim().parse::<u32>()) {
+                    // An inverted range is a typo in a manifest, not a request for zero cores; taking
+                    // min..=max keeps it meaning what it plainly says.
+                    for c in a.min(b)..=a.max(b) {
+                        out.push(c);
+                    }
+                }
+            }
+            None => {
+                if let Ok(c) = part.parse::<u32>() {
+                    out.push(c);
+                }
+            }
+        }
+    }
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
 /// Sample the live process tree rooted at `root_pid`.
 pub fn sample_live(root_pid: u32) -> Measurement<Counters> {
     sample(&crate::rss::RealProc, root_pid)
@@ -512,6 +626,74 @@ mod tests {
         assert_eq!(c.vol_ctxt_per_request, Measurement::Measured(10.0));
         assert_eq!(c.rchar_per_request, Measurement::Measured(100.0));
         assert_eq!(c.wchar_per_request, Measurement::Measured(200.0));
+    }
+
+    struct Stat(String);
+    impl SystemStatSource for Stat {
+        fn system_stat(&self) -> Option<String> {
+            Some(self.0.clone())
+        }
+    }
+
+    #[test]
+    fn only_the_pinned_cores_are_summed_and_the_aggregate_line_is_ignored() {
+        // The `cpu` line with no index already CONTAINS every core; summing it beside the per-core
+        // lines would double-count the whole machine. The box also runs the mock and the load
+        // generator on their own cores, so a machine-wide figure would describe none of the three.
+        let s = Stat(
+            "cpu  9999 0 9999 9999 0 0 0 0 0 0\n             cpu0 100 0 0 900 0 0 0 0 0 0\n             cpu4 300 0 0 700 0 0 0 0 0 0\n             cpu5 500 0 0 500 0 0 0 0 0 0\n"
+                .to_string(),
+        );
+        // cpu4+cpu5 only: busy 300+500=800, total 1000+1000=2000
+        assert_eq!(cpu_busy_total(&s, &[4, 5]), Some((800, 2000)));
+    }
+
+    #[test]
+    fn iowait_counts_as_not_busy() {
+        // A core with nothing to run while a request is outstanding is not a saturated core.
+        // Counting iowait as busy would report a BLOCKED gateway as a maxed-out one - the exact
+        // opposite of the distinction this measurement exists to make.
+        let s = Stat("cpu4 100 0 0 100 800 0 0 0 0 0\n".to_string());
+        let (busy, total) = cpu_busy_total(&s, &[4]).expect("readable");
+        assert_eq!(total, 1000);
+        assert_eq!(busy, 100, "800 jiffies of iowait are idle, not work");
+    }
+
+    #[test]
+    fn utilisation_is_a_fraction_of_the_pinned_set() {
+        // 900 busy of 1000 total across the window = 90% of the pinned cores.
+        assert_eq!(
+            utilisation(Some((100, 1000)), Some((1000, 2000))),
+            Measurement::Measured(0.9)
+        );
+    }
+
+    #[test]
+    fn an_unreadable_or_backwards_or_empty_window_is_absent_not_zero() {
+        // Absent, never 0: reporting 0% would claim the cores were idle when nothing was observed.
+        assert!(matches!(
+            utilisation(None, Some((1, 2))),
+            Measurement::Absent { .. }
+        ));
+        match utilisation(Some((500, 1000)), Some((10, 20))) {
+            Measurement::Absent { reason, .. } => assert_eq!(reason, Absent::HarnessError),
+            other => panic!("a backwards counter must not produce a number: {other:?}"),
+        }
+        // A window that advanced no jiffies has no utilisation to report.
+        assert!(matches!(
+            utilisation(Some((5, 10)), Some((5, 10))),
+            Measurement::Absent { .. }
+        ));
+    }
+
+    #[test]
+    fn a_taskset_cpu_list_parses_the_way_taskset_reads_it() {
+        assert_eq!(parse_cores("4-7"), vec![4, 5, 6, 7]);
+        assert_eq!(parse_cores("0,2,4"), vec![0, 2, 4]);
+        assert_eq!(parse_cores("4-5,8"), vec![4, 5, 8]);
+        // An inverted range is a manifest typo, not a request for zero cores.
+        assert_eq!(parse_cores("7-4"), vec![4, 5, 6, 7]);
+        assert_eq!(parse_cores(""), Vec::<u32>::new());
     }
 
     #[test]
