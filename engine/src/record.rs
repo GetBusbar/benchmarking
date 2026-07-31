@@ -427,6 +427,16 @@ pub struct CellPerf {
     pub cost_window_conc: Measurement<i64>,
     /// Threads in the gateway's tree during the cost window. Not a rate: it is the shape of the
     /// concurrency model, thread-per-connection against async, on evidence rather than on a claim.
+    /// Requests the cost window actually completed, and the rate it carried.
+    ///
+    /// PUBLISHED SO THE COST IS CHECKABLE. `cpu_us_per_request` is CPU divided by this count, and
+    /// without it the figure re-derives from nothing. It also separates two opposite readings of a
+    /// low utilisation - a genuinely cheap gateway, or a window that simply carried less load than
+    /// the sweep did at the same concurrency - which are indistinguishable without knowing the load.
+    #[serde(default = "measurement_default")]
+    pub cost_window_ok: Measurement<f64>,
+    #[serde(default = "measurement_default")]
+    pub cost_window_rps: Measurement<f64>,
     /// Utilisation of the cores the gateway was PINNED to, across the cost window. 1.0 = every
     /// pinned core fully busy.
     ///
@@ -870,6 +880,8 @@ mod tests {
             cpu_us_per_request: Measurement::Measured(37.5),
             rps_per_cpu_second: Measurement::Measured(26_666.0),
             cost_window_conc: Measurement::Measured(8),
+            cost_window_ok: Measurement::Measured(2048.0),
+            cost_window_rps: Measurement::Measured(341.0),
             cost_core_utilisation: Measurement::Measured(0.97),
             cost_threads: Measurement::Measured(9.0),
             cost_nonvol_ctxt_per_request: Measurement::Measured(0.25),
