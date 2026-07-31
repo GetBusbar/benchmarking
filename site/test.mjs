@@ -2246,6 +2246,48 @@ test("stripRigPaths scrubs absolute bench-box paths from diagnostic notes", () =
   assert.ok(!na.note.includes("/home/"));
 });
 
+test("NOISE: the rig's resolution is DERIVED from box qualification, never a chosen constant", () => {
+  // Every box runs the same qualification before measuring, and identical boxes still land apart.
+  // That spread IS what the rig cannot resolve - a measurement, not a policy. A hard-coded 1% or 2%
+  // would be an undeclared rule deciding which published comparisons count.
+  const board = (drifts) => ({
+    gateways: drifts.map((d, i) => ({ key: `g${i}`, rig: { box_qualify: { drift_pct: d } } })),
+  });
+  // The real 2026-07-30 field: 13 identical boxes spanning -6.22%..+2.05%.
+  assert.ok(Math.abs(app.rigResolutionPct(board([-6.22, -1.04, 1.86, 2.05, -0.38])) - 8.27) < 1e-9);
+
+  // ONE box has no spread to observe. Inventing a floor from a single sample is exactly the magic
+  // number this exists to avoid, so it reports that it cannot say.
+  assert.equal(app.rigResolutionPct(board([1.5])), null);
+  assert.equal(app.rigResolutionPct({ gateways: [] }), null);
+
+  // A gateway whose qualification is absent contributes nothing rather than counting as 0 drift -
+  // a missing measurement is not a perfectly-calibrated box.
+  const mixed = { gateways: [{ key: "a", rig: { box_qualify: { drift_pct: -3 } } }, { key: "b" }, { key: "c", rig: { box_qualify: { drift_pct: 2 } } }] };
+  assert.equal(app.rigResolutionPct(mixed), 5);
+});
+
+test("NOISE: two values closer than the rig can resolve are NOT a ranking", () => {
+  // busbar 46,031 vs litellm-rust 48,394 is 4.9% apart, and the 2026-07-30 fleet could only resolve
+  // 8.27%. Presenting that as a ranking claims a difference the rig never demonstrated.
+  assert.equal(app.indistinguishable(46031, 48394, 8.27), true);
+  // A gap wider than the rig's own spread IS a finding.
+  assert.equal(app.indistinguishable(25101, 48394, 8.27), false);
+  // RELATIVE TO THE LARGER VALUE, so the rule means the same thing at the bottom of the board as at
+  // the top. 19 vs 20 is 5% apart and 49,000 vs 50,000 is 2% - both inside a rig that resolves 8.27%,
+  // and both correctly tied. The absolute gaps (1 and 1,000) differ by three orders of magnitude,
+  // which is exactly why an absolute threshold could not serve this board.
+  assert.equal(app.indistinguishable(19, 20, 8.27), true);
+  assert.equal(app.indistinguishable(49000, 50000, 8.27), true);
+  // And a small-value pair that IS resolvable stays resolvable: 19 vs 25 is 24% apart.
+  assert.equal(app.indistinguishable(19, 25, 8.27), false);
+  // Two MEASURED zeros are the same measurement, not an undefined ratio.
+  assert.equal(app.indistinguishable(0, 0, 8.27), true);
+  // With no resolution known (a single box), nothing may be declared indistinguishable: that would
+  // be asserting a tie on the strength of a figure we just said we could not derive.
+  assert.equal(app.indistinguishable(100, 101, null), false);
+});
+
 test("COST: the cost columns appear only on a board that can answer them, and read through the envelope", () => {
   // ADDITIVE, NOT A REPLACEMENT. The existing columns are untouched; these follow the per-cell-memory
   // precedent and appear only when the board carries the field.

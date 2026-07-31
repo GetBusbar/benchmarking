@@ -1071,6 +1071,44 @@ function hasCost(data = (typeof state !== "undefined" ? state.data : null)) {
   COST_CACHE.set(data, yes);
   return yes;
 }
+/* rigResolutionPct(data): the smallest DIFFERENCE this rig can actually resolve, derived from the
+   board itself rather than chosen.
+
+   Every box runs the SAME qualification before it measures anything, and `box_qualify.drift_pct` is
+   how far that box landed from the shared baseline. Those boxes are identical by construction - same
+   instance type, same image, same mock - so the spread between the luckiest and unluckiest box is a
+   direct measurement of what the rig cannot tell apart. Two gateways closer than that did not
+   demonstrate a difference; they demonstrated which box they happened to land on.
+
+   DERIVED, NOT PICKED. A hard-coded "1%" or "2%" would be a rule nobody measured deciding which
+   published comparisons count - and this project's whole position is that no undeclared rule may
+   author a number. The figure moves with the fleet: a tighter fleet resolves finer, and a noisier one
+   honestly admits it resolves less.
+
+   Null when fewer than two boxes report a drift: with one box there is no spread to observe, and
+   inventing a floor from a single sample would be the magic number this exists to avoid. */
+const RESOLUTION_CACHE = new WeakMap();
+function rigResolutionPct(data = (typeof state !== "undefined" ? state.data : null)) {
+  if (!data || typeof data !== "object") return null;
+  if (RESOLUTION_CACHE.has(data)) return RESOLUTION_CACHE.get(data);
+  const drifts = (data.gateways || [])
+    .map((g) => g && g.rig && g.rig.box_qualify && g.rig.box_qualify.drift_pct)
+    .filter((v) => typeof v === "number" && Number.isFinite(v));
+  const out = drifts.length >= 2 ? Math.max(...drifts) - Math.min(...drifts) : null;
+  RESOLUTION_CACHE.set(data, out);
+  return out;
+}
+
+/* indistinguishable(a, b, pct): are two published values closer than the rig can resolve?
+   Relative to the LARGER value, so the comparison means the same thing at 19 rps and at 49,000. */
+function indistinguishable(a, b, pct) {
+  if (typeof pct !== "number" || !(pct > 0)) return false;
+  if (typeof a !== "number" || typeof b !== "number") return false;
+  const hi = Math.max(Math.abs(a), Math.abs(b));
+  if (hi === 0) return true;                       // two measured zeros are the same measurement
+  return (Math.abs(a - b) / hi) * 100 < pct;
+}
+
 // The data bundle a (possibly synthetic) state refers to; falls back to the live state's.
 function stateData(st) {
   return (st && st.data) || (typeof state !== "undefined" ? state.data : null);
@@ -4887,7 +4925,7 @@ if (NODE) {
     perCellMemory, memoryCells, hasPerCellMemory, widestDialect, chosenMemory, memoryFor,
     idleAcrossCells, neverPlateaued, worstGrowth, memCellTip, neverPlateauedPill,
     idleStatic, memShape, memGrowing, memShaped,
-    hasMatrixGrid, matrixFailureReason, matrixRoster, hasCost,
+    hasMatrixGrid, matrixFailureReason, matrixRoster, hasCost, rigResolutionPct, indistinguishable,
     laneRecord, lanePathNote, perfSweepSeries, concAt,
     // THE FRONTIER: the constants (mirrored from seal.mjs and checked against it), the readers every
     // surface goes through, and the two renderers that make the curve's SHAPE legible. Exported because the
