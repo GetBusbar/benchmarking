@@ -18,10 +18,12 @@ fully open source. Don't take our word for it - read the code and re-run it.
 
 ## Results
 
-**Ran on:** AWS `m7g.2xlarge` Graviton3 (ARM64, 8 cores), Ubuntu 24.04 - the gateway under test
-pinned to 4 of them (an `m7g.xlarge`-class slice, the same 4 vCPU / $0.04-per-vCPU machine class the
-gateways-under-test benchmark themselves on); the mock + load generator get the other 4. The exact
-instance type and vCPU count are recorded in every `results/*.json` and shown on the board.
+**Ran on:** AWS `m7g.4xlarge` Graviton3 (ARM64, 16 cores - Graviton does not hyperthread, so
+1 vCPU = 1 core), Ubuntu 24.04. The gateway under test is pinned to **4 cores** (an
+`m7g.xlarge`-class slice, the 4-vCPU class gateways commonly publish against); the **load generator
+gets 6** and the **mock gets 6**, so neither can starve the other or bottleneck the gateway. One
+dedicated box per gateway. The exact instance type, core split and arch are recorded in every
+snapshot and shown on the board.
 
 **The board is at [onthebench.ai](https://onthebench.ai)** - the complete field, live, regenerated
 from the committed snapshots in [`results/snapshots/`](results/snapshots/). Every gateway that could
@@ -63,10 +65,9 @@ Requires awscli v2 (configured), `ssh` and `rsync`. Every gateway gets its own f
 `m7g.4xlarge`, so no gateway inherits another's page cache or disk state, and the wall clock is
 the slowest single gateway rather than the sum of all of them.
 
-One run measures **latency, throughput, and memory** for every gateway on the same box, then
-regenerates the charts and the report pages. Out comes `results/matrix/<gateway>.json` (the
-passthrough/translation/streaming/memory measurements), `results/reports/{all,top5}/README.md`, and
-the chart PNGs.
+One run measures **latency, throughput, memory and cost** for every gateway on the same box. Out
+comes one snapshot per gateway in `results/snapshots/` - every rung of every sweep, every RSS sample,
+and the engine commit that measured it - which is what the board is generated from.
 
 ### On a fresh cloud box (nothing to install)
 
@@ -128,6 +129,24 @@ faster.
   re-derivable from the rungs rather than taken on trust. The sequence is monotone by construction:
   relaxing a bound only adds rungs to the set the maximum is taken over.
 
+- **cost per request (µs of CPU)** - user plus system time across the gateway's whole process tree,
+  sampled as the difference across one load window and divided by the requests that window completed.
+  Measured at ONE concurrency held identical for every gateway, published beside it, because matched
+  load is impossible across a field spanning double digits to five figures of req/s.
+
+  This exists because peak throughput is a SATURATION number: once a gateway fills the cores it was
+  given, the ladder stops describing the gateway and starts describing the box, and two gateways at
+  that wall read the same however different they are. Cost per request has no such ceiling - at
+  saturation both serve the same rate by definition, and the one doing less work per request still
+  reads lower. It is also the figure that maps to money. On the current board it spans **89 µs to
+  199,333 µs per request**, a range peak throughput cannot express.
+
+  Published with it: the utilisation of the pinned cores over that same window, which is what makes a
+  peak interpretable. Near 100% the peak is the gateway's own CPU wall; well below it, something else
+  is holding it and more CPU would not help. A window with any failure publishes no cost at all (CPU
+  divided by only the successes would describe the failures, not the work), and a window on a box
+  taking major page faults has its cost flagged as a harness fault, because what was timed is the disk.
+
 The matrix's best same-dialect diagonal cell IS this passthrough measurement (the retired standalone
 `perf/` suite is gone; gen-data projects the board's headline perf from the matrix cell).
 
@@ -188,9 +207,10 @@ Bedrock clients sign with AWS SigV4, and a gateway that answers 401/403 to the p
 records `"unprobed_auth"` (distinct from false) with the evidence, because the harness does not
 forge signatures and a red it did not earn would be a lie. Each cell writes
 `{served, status, verdict_note, body_snippet}` to `results/matrix/<gateway>.json`, valid JSON
-always, exit 0 always. v1 records no per-cell latency (the load generator only speaks the OpenAI
-and Anthropic shapes today) and fixes the upstream to the OpenAI dialect; the full six-by-six grid
-with every upstream dialect is future work. Manifests may override `GW_MATRIX_PATH_OPENAI`,
+always, exit 0 always. The full grid is no longer future work: every served cell now carries its own
+added latency, its own throughput frontier, its own memory window and its own cost, measured against
+every upstream dialect - which is why busbar, the only entrant serving all 36 pairings, takes about
+ten hours while a gateway serving one takes minutes. Manifests may override `GW_MATRIX_PATH_OPENAI`,
 `GW_MATRIX_PATH_RESPONSES`, `GW_MATRIX_PATH_ANTHROPIC` (defaults to the shared
 `GW_ANTHROPIC_PATH`), `GW_MATRIX_PATH_GEMINI`, `GW_MATRIX_PATH_COHERE`, `GW_MATRIX_PATH_BEDROCK`;
 most need nothing. The same guard (rejecting an untranslated passthrough body as a false positive) is
@@ -214,11 +234,14 @@ in CI by the `mock-shape` job.
 
 ## Methodology - the choices, explained
 
-**Machine.** `m7g.2xlarge` - 8 real Graviton3 cores (Graviton doesn't hyperthread: 1 vCPU = 1 core).
-The **gateway under test is pinned to 4 cores** (= an `m7g.xlarge`, the 4-vCPU class AIGatewayBench
-uses); the **mock + load generator get the other 4**, isolated. That's stricter than a co-located
-4-vCPU run where the load tool steals cycles from the gateway - here the gateway gets a clean 4 cores
-and the harness can't bottleneck it. All loopback; no network noise.
+**Machine.** `m7g.4xlarge` - 16 real Graviton3 cores (Graviton doesn't hyperthread: 1 vCPU = 1
+core). The **gateway under test is pinned to 4 cores** (= an `m7g.xlarge`, the 4-vCPU class gateways
+commonly publish against); the **load generator gets 6** and the **mock gets 6**, each isolated on
+its own cores. That is stricter than a co-located 4-vCPU run where the load tool steals cycles from
+the gateway - here the gateway gets a clean 4 cores and neither the harness nor the upstream can
+bottleneck it. The pinning is enforced with `--cpuset-cpus` (containers) and `taskset` (native), and
+verified: a container inspects as `CpusetCpus: 0-3` with a matching host affinity. All loopback; no
+network noise.
 
 **The mock.** A deterministic Rust server (`mock/`) that answers all six wire protocols by path and
 holds hundreds of thousands of concurrent requests so it's never the limit. One knob: `MOCK_TTFT_MS`,
@@ -267,15 +290,14 @@ cannot read RSS at all withholds the plateau verdict as **null** rather than ass
 
 ## Add a gateway
 
-Drop a directory under [`gateways/`](gateways/) with a `gateway.sh` manifest - four variables, four
-functions. The runners are gateway-agnostic; there is nothing else to edit. See
-[`gateways/README.md`](gateways/README.md).
+Drop a directory under [`gateways/`](gateways/) with a `definition.json` manifest. The runners are
+gateway-agnostic; there is nothing else to edit. See [`gateways/README.md`](gateways/README.md).
 
 ## Honesty notes (the receipts)
 
 - **Source refs are config, not defaults buried in a script.** Each gateway's ref is pinned in its
-  own `gateways/<name>/gateway.sh`, next to that manifest's disclosure of what it deviates from and
-  why, and every pin is overridable from the environment; the *actual* version/commit built is
+  own `gateways/<name>/definition.json`, next to that manifest's disclosure of what it deviates from
+  and why, and every pin is overridable from the environment; the *actual* version/commit built is
   written into each result's `build` field. "You used an old branch" is answerable by pointing at the
   manifest and the recorded commit.
 - **Each gateway is launched the only way it actually serves the endpoint.** For example,
@@ -283,7 +305,7 @@ functions. The runners are gateway-agnostic; there is nothing else to edit. See
   under its `python-config` reader (the lean env config returns `400`) - verified against its own
   source. We launch it that way and record what it costs, rather than quoting an idle number from a
   config that doesn't serve. The reasoning is in
-  [`gateways/litellm-rust/gateway.sh`](gateways/litellm-rust/gateway.sh).
+  [`gateways/litellm-rust/definition.json`](gateways/litellm-rust/definition.json).
 - **The mock is deterministic and dumb** - it answers any path with a fixed small body (OpenAI shape,
   or Anthropic shape for `/messages`), so the number is the *gateway's* cost, not the upstream's.
 - **The chart colors by measurement, not by name.** Green goes to whichever gateway measured lowest.
