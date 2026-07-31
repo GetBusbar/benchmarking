@@ -997,15 +997,15 @@ test("star counts format compactly and degrade to null", () => {
   assert.equal(app.fmtStars(undefined), null);
 });
 
-test("the unified tab order: Gateways · Memory · Performance · Frontier · Streaming · Charts · matrix · method", () => {
+test("the unified tab order: Gateways · Memory · Performance · Frontier · Streaming · matrix · Charts · method", () => {
   // FRONTIER SITS BESIDE PERFORMANCE, not at the end: it is the same measurement read every published way,
   // and a reader who has just looked at a ranking at one bound is one tab away from the whole curve. The
   // order is asserted because it is the reading order of the board, not an implementation detail.
   //
-  // CHARTS SITS AFTER THE TABLES IT DRAWS FROM, and before the matrix/method reference tabs. It replaced
-  // 25 static PNGs; the reading order is "the numbers, then the same numbers as a picture", not a
-  // gallery a reader meets before knowing what is in it.
-  assert.deepEqual(app.VIEWS, ["gateways", "memory", "performance", "frontier", "streaming", "charts", "matrix", "method"]);
+  // CHARTS SITS AFTER EVERY DATA TAB, next to Method. It replaced 25 static PNGs, and the reading
+  // order is "the numbers, then the same numbers as a picture" - a gallery a reader meets before
+  // knowing what is in it teaches nothing.
+  assert.deepEqual(app.VIEWS, ["gateways", "memory", "performance", "frontier", "streaming", "matrix", "charts", "method"]);
   assert.equal(app.VIEW_LABELS.gateways, "Gateways");
   assert.equal(app.VIEW_LABELS.memory, "Memory");
   assert.equal(app.VIEW_LABELS.performance, "Performance");
