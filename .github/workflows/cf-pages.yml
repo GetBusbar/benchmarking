@@ -3,16 +3,15 @@
 # Replaces the GitHub Pages workflow (pages.yml). Once this is confirmed green
 # and the nameserver cutover to Cloudflare is complete, pages.yml can be deleted.
 #
-# This deploy is SELF-SUFFICIENT on charts: gen-data.mjs emits the canonical site/data.json,
-# charts.py regenerates the PNGs FROM that canonical data (+ results/*.json for the non-perf
-# suites), then gen-data.mjs runs again to copy the fresh PNGs + fonts into site/. So a plain
-# `results/` commit always deploys fresh, mutually consistent charts + data in one shot - no
-# dependency on render-charts.yml's timing (whose regenerated-PNG commit carries [skip ci] and
-# would otherwise leave the deployed charts a push behind).
+# ONE ARTIFACT, ONE PASS. gen-data.mjs scans gateways/*/definition.json + results/**/*.json and
+# emits site/data.json; the finished site/ directory is what wrangler uploads. Charts are drawn in
+# the browser from that same bundle, so a `results/` commit deploys data and charts that cannot
+# disagree - they are the same file.
 #
-# gen-data.mjs scans gateways/*/definition.json + results/**/*.json, copies the chart
-# PNGs and bundled fonts into site/, and the finished site/ directory is the
-# artifact that wrangler uploads to Cloudflare Pages.
+# This used to build the bundle, shell out to charts.py to redraw 25 PNGs, then run gen-data AGAIN
+# to copy them back in, and it depended on render-charts.yml's timing not to leave the deployed
+# images a push behind. On 2026-07-31 that pipeline silently failed to regenerate and shipped one
+# run's charts beside another run's numbers.
 #
 # Requires two repo secrets (Settings -> Secrets and variables -> Actions):
 #   CLOUDFLARE_API_TOKEN   token with Pages:Edit on the account
@@ -26,11 +25,9 @@ on:
       - "results/**"
       - "gateways/**"
       - "site/**"
-      # This job regenerates the PNGs with charts.py, so a charts.py-only change must redeploy.
       # Without this it did not: the only workflow it triggered was render-charts, whose
       # regenerated-PNG commit carries [skip ci], which this file's own header says it does not want
       # to depend on. The chart code could change and the deployed board keep the old images.
-      - "charts.py"
       - ".github/workflows/cf-pages.yml"
   workflow_dispatch:
 
@@ -54,7 +51,7 @@ jobs:
           python-version: "3.12"
       # ORDER MATTERS (single canonical source): gen-data.mjs FIRST emits site/data.json, the
       # canonical per-gateway passthrough/translation records (matrix per-cell sweep, with
-      # perf/xlate-suite fallback). charts.py then READS that bundle, so every PNG shows exactly
+      # perf/xlate-suite fallback). The site READS that bundle, so every chart shows exactly
       # the numbers the site table ranks. The second gen-data pass copies the fresh PNGs into
       # site/charts/ and re-stamps data.json; both artifacts come from the one results tree in
       # this same checkout, so they can never diverge. The consistency guard (site/test.mjs)
@@ -66,13 +63,11 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: node gateways/fetch-stars.mjs || echo "stars refresh failed; deploying the committed snapshot"
+      # ONE PASS NOW, not three. This used to build the bundle, run charts.py to redraw 25 PNGs from
+      # it, then run gen-data AGAIN to copy those PNGs in and re-stamp them. The Charts tab draws from
+      # the bundle in the browser, so there is nothing to redraw and nothing to copy - and the deploy
+      # no longer installs matplotlib to render images the site does not read.
       - name: Generate canonical site data
-        run: node site/gen-data.mjs
-      - name: Regenerate charts from the canonical data
-        run: |
-          python3 -m pip install --quiet matplotlib
-          python3 charts.py
-      - name: Refresh site data + copy fresh chart PNGs
         run: node site/gen-data.mjs
       # THE SHIPPED BUNDLE, not a regenerated stand-in. site/test.mjs below re-runs gen-data into a
       # temp dir and checks THAT bundle; the file wrangler actually uploads is site/data.json, which

@@ -12,9 +12,6 @@ on:
       - "Cargo.toml"
       - "Cargo.lock"
       - ".cargo/config.toml"
-      - "charts.py"
-      - "charts_test.py"
-      - "charts_definitions_test.py"
       - "mock/**"
       - "gateways/**"
       - "lib/**"
@@ -61,9 +58,6 @@ on:
       - "Cargo.toml"
       - "Cargo.lock"
       - ".cargo/config.toml"
-      - "charts.py"
-      - "charts_test.py"
-      - "charts_definitions_test.py"
       - "mock/**"
       - "gateways/**"
       - "lib/**"
@@ -133,28 +127,6 @@ jobs:
           rustup target add aarch64-unknown-linux-musl
           cargo build --release --target aarch64-unknown-linux-musl --bin otb
           file target/aarch64-unknown-linux-musl/release/otb
-
-  charts:
-    # Gates charts.py's validity/ranking rules directly. (The JS side is gated by the `site` job at
-    # the bottom of this file; it used to run ONLY in cf-pages.yml, which is why it was reachable
-    # only on a board that could be built.)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      # charts.py's validity gate + top-N ranking (the matrix-sole-source rewrite artifact) had ZERO
-      # Python tests (MEDIUM-R3-6): check-consistency asserts site==chart by calling JS re-implementations,
-      # never the real Python rules, so a regression to _proj_streaming (cpu_valid/sust_valid), _topn_keys
-      # (eligibility + sort direction), _served, or the null-TTFT suppression (M3) would keep every test
-      # green while the PNGs drew a bar for a row the table hides. Gate the Python rules directly. No
-      # matplotlib needed (render() is not exercised).
-      - name: Charts validity-gate test (streamcpu/sustained/TTFT gates + top-N ranking)
-        run: python3 charts_test.py
-      # charts_test.py proves each honesty gate on the ONE lane where its defect happened; this one
-      # holds the CLASS, driving every Chart in CHARTS through the real _topn_keys. It shipped
-      # running nowhere, which is the failure mode this file keeps re-learning: the chart added
-      # tomorrow gets the same eligibility discipline only if something executes the check.
-      - name: Every chart definition obeys the same eligibility/ranking rules (class test)
-        run: python3 charts_definitions_test.py
 
   audit:
     # THE CROSS-METRIC INVARIANTS, AND THE PROOF THEY CAN FAIL.

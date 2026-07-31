@@ -612,33 +612,18 @@ export function lintCoverageWiring(src, branches) {
   return { errors, live };
 }
 
-// (3) PER-LANE chart provenance (C3b): assert PER LANE, not merely that `_sweep_label(` appears
-// somewhere in charts.py, so a lane can never ship PNGs with zero provenance disclosure while its
-// siblings disclose theirs. Each lane's own `_<lane>_source` stamp must be fed to _sweep_label.
-export const CHART_PROVENANCE_LANES = ["_perf_source", "_xlate_source", "_stream_source"];
-export function lintChartLaneProvenance(chartsSrc) {
-  const errors = [];
-  const flat = chartsSrc.replace(/\s+/g, " ");
-  for (const lane of CHART_PROVENANCE_LANES) {
-    if (!new RegExp(`_sweep_label\\(\\s*\\{\\s*"sweep":\\s*r\\.get\\(\\s*"${lane}"`).test(flat))
-      errors.push(`C3: charts.py lane ${lane} never reaches _sweep_label - that lane's PNGs publish numbers with NO provenance disclosure while its sibling lanes disclose theirs`);
-  }
-  return { errors, scanned: !!chartsSrc };
-}
-
-// (4) CROSS-LANGUAGE caption parity (C3c): parse charts.py's SWEEP_CAPTION key set and compare it to
-// app.js's, so the two caption vocabularies can never silently drift (a key added on one side only
-// would render on one surface and throw on the other).
-export function lintCaptionParity(chartsSrc, jsCaptionKeys) {
-  const errors = [];
-  const m = chartsSrc.match(/SWEEP_CAPTION\s*=\s*\{([\s\S]*?)\}/);
-  if (!m) return { errors: [`C3: charts.py has no SWEEP_CAPTION key set to compare with app.js (the caption vocabularies cannot be proven in sync)`], scanned: false };
-  const pyKeys = new Set([...m[1].matchAll(/"([^"]+)"/g)].map((x) => x[1]));
-  const js = new Set(jsCaptionKeys);
-  for (const k of js) if (!pyKeys.has(k)) errors.push(`C3: SWEEP_CAPTION key "${k}" exists in app.js but NOT in charts.py (the caption vocabularies have drifted)`);
-  for (const k of pyKeys) if (!js.has(k)) errors.push(`C3: SWEEP_CAPTION key "${k}" exists in charts.py but NOT in app.js (the caption vocabularies have drifted)`);
-  return { errors, scanned: true };
-}
+// C3b AND C3c ARE GONE WITH THE PIPELINE THEY POLICED.
+//
+// C3b asserted that each of charts.py's three lanes fed its own `_<lane>_source` stamp to
+// `_sweep_label`, so no lane could ship PNGs carrying numbers with no provenance disclosure. C3c
+// parsed charts.py's SWEEP_CAPTION key set and compared it to app.js's, so two caption vocabularies
+// in two languages could not drift apart.
+//
+// Both existed because the board had a SECOND renderer, written in another language, publishing the
+// same numbers with its own captions. It does not any more: the Charts tab draws from the bundle in
+// the browser, so there is one renderer, one caption vocabulary, and nothing to hold in sync. A guard
+// that parses a deleted file cannot fail honestly - it fails because the file is absent, which is not
+// the defect it was written to catch.
 
 // ---- the INDEPENDENT ORACLE (Design F R1) --------------------------------------------------------
 // Re-derive what a metric MUST publish from the RAW artifact, through a path DISJOINT from
@@ -1117,12 +1102,10 @@ export function checkConsistency(data, app, opts = {}) {
   // tokens (6x6-diagonal, …) from appearing as a user-facing string literal outside SWEEP_CAPTION/seal
   // (a key leaking into prose is the drift), and (b) assert the LANES pathNotes route through caption().
   const appSrc = readSrc("app.js");
-  const chartsSrc = readSrc("../charts.py");
   // (a) the SWEEP-KEY tokens must not appear as a bare string literal in a caption renderer. They live
-  // ONLY in SWEEP_CAPTION (app.js), the _sweep_label/SWEEP_CAPTION set (charts.py), and seal.mjs (data).
+  // ONLY in SWEEP_CAPTION (app.js) and seal.mjs (data). charts.py was the second renderer and is gone.
   for (const [src, name, region] of [
     [appSrc, "app.js", { enter: /const SWEEP_CAPTION\s*=/, exit: /^\};\s*$/m }],
-    [chartsSrc, "charts.py", { enter: /SWEEP_CAPTION\s*=|def _sweep_label/, exit: /^def (?!_sweep_label)/ }],
   ]) {
     const r = lintSweepKeys(src, name, region);
     errors.push(...r.errors);
@@ -1132,22 +1115,11 @@ export function checkConsistency(data, app, opts = {}) {
   if (!/pathNote:\s*\(j\)\s*=>\s*j && j\.source \? caption\(j\)/.test(appSrc.replace(/\s+/g, " ")))
     errors.push(`C3: app.js LANES pathNotes must route provenance through caption(j) (found a pathNote not using caption())`);
   else covered("C3.route");
-  // AUDIT #2: PER-LANE, not "the string _sweep_label( appears somewhere in the file".
-  {
-    const r = lintChartLaneProvenance(chartsSrc);
-    errors.push(...r.errors);
-    if (r.scanned) covered("C3.route");
-  }
-  // AUDIT #22: the cross-language caption parity charts.py's comment claimed but nothing asserted.
-  {
-    const r = lintCaptionParity(chartsSrc, Object.keys(app.SWEEP_CAPTION || {}));
-    errors.push(...r.errors);
-    if (r.scanned) covered("C3.parity");
-  }
 
   // ---- C5 lint: every sealed-metric read routes through metric()/mval() ----
   // Taint-based and whole-file, applied to both app.js and charts.py.
-  for (const [src, name, lang] of [[appSrc, "app.js", "js"], [chartsSrc, "charts.py", "py"]]) {
+  // ONE RENDERER, so one file to lint. charts.py was the second and is deleted.
+  for (const [src, name, lang] of [[appSrc, "app.js", "js"]]) {
     const r = lintAccessorRouting(src, name, lang);
     errors.push(...r.errors);
     if (r.scanned) covered("C5.lint");
@@ -1160,7 +1132,7 @@ export function checkConsistency(data, app, opts = {}) {
   // ---- R2 coverage: every declared invariant branch must be exercised --------
   const CHECK_BRANCHES = [
     "C1.field", "C1.certified", "C1.mock_bound", "C2.suppressed",
-    "C3.stamp", "C3.lint", "C3.route", "C3.parity", "C4.cell", "C4.leak", "C6.cell", "R1.oracle",
+    "C3.stamp", "C3.lint", "C3.route", "C4.cell", "C4.leak", "C6.cell", "R1.oracle",
     "R3.selection", "R4.selection", "C7.hwm", "C5.route", "C5.lint", "C8.engine", "C1.timings",
   ];
   // WIRING FIRST, COVERAGE SECOND. Whether each declared branch still HAS a call site is a question
@@ -1191,7 +1163,9 @@ export function checkConsistency(data, app, opts = {}) {
   // oracle's own coverage token was outside the set the test walked, which is why deleting the line
   // that tags it failed nothing. The returned REQUIRED is now what this bundle is ACTUALLY required to
   // cover, and the unconditional floor is returned beside it under its own name.
-  const REQUIRED_ALWAYS = ["C1.field", "C1.certified", "C3.stamp", "C3.route", "C3.parity",
+  // C3.parity is gone: it compared charts.py's caption vocabulary to app.js's, and there is only
+  // one renderer now, so there is no second vocabulary that could drift from it.
+  const REQUIRED_ALWAYS = ["C1.field", "C1.certified", "C3.stamp", "C3.route",
     "C3.lint", "C5.lint", "C4.cell", "C5.route"];
   // The oracle branches are required whenever the bundle publishes ANY matrix-sourced number; a gateway
   // that publishes matrix numbers with no on-disk matrix is already an error above (its numbers are
