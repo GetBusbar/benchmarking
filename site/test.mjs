@@ -13,6 +13,7 @@
 // real committed sweep data through the stub canvas.
 
 import { execFileSync } from "node:child_process";
+import { snapshotCellCoords, isStrictSubset, layerScopedMatrix } from "./snapshots.mjs";
 import { readFileSync, writeFileSync, mkdtempSync, mkdirSync, rmSync, existsSync, readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
@@ -6468,4 +6469,46 @@ test("UI: column geometry is FIXED, so changing a filter never moves a column si
   for (const cls of ["reading-none", "reading-tail", "zero-why"])
     assert.match(css, new RegExp(`\\.${cls} \\{[^}]*white-space:\\s*normal`),
       `.${cls} must wrap inside its declared column rather than widening it`);
+});
+
+/* SCOPED RE-RUN LAYERING. A 4-cell re-run must not delete 32 measured cells, and a cell it DID
+   measure must win and carry its own provenance. Both directions matter: refuse to layer and the
+   re-run is pointless; layer too eagerly and a genuine re-run that found less is silently discarded. */
+test("a scoped re-run layers over the full run instead of replacing it", () => {
+  const cell = (served, tag) => ({ served, stream: { stream_served: true, tag } });
+  const mk = (coords) => {
+    const m = { upstreams: {}, cells: {} };
+    for (const [eg, ing, tag] of coords) {
+      (m.upstreams[eg] ??= { cells: {} }).cells[ing] = cell(true, tag);
+      m.cells[ing] = m.upstreams[eg].cells[ing];
+    }
+    return m;
+  };
+  const full = mk([["openai", "openai", "old"], ["openai", "anthropic", "old"],
+                   ["gemini", "openai", "old"], ["gemini", "cohere", "old"]]);
+  const scoped = mk([["openai", "openai", "new"]]);
+
+  const fullC = snapshotCellCoords(full), scopedC = snapshotCellCoords(scoped);
+  assert.equal(fullC.size, 4);
+  assert.ok(isStrictSubset(scopedC, fullC), "1 of 4 cells is a strict subset and must be treated as scoped");
+  assert.ok(!isStrictSubset(fullC, fullC), "an identical cell set is NOT a subset - a full re-run replaces");
+  assert.ok(!isStrictSubset(new Set(["x|y"]), fullC), "a set with a foreign coord is not a subset");
+
+  const merged = layerScopedMatrix(full, scoped, { build: "beef", measured_at: "2026-08-01T00:00:00Z", __file: "s.json" });
+  assert.equal(snapshotCellCoords(merged).size, 4, "layering must not drop the 3 cells it never looked at");
+  assert.equal(merged.upstreams.openai.cells.openai.stream.tag, "new", "the re-measured cell must win");
+  assert.equal(merged.upstreams.gemini.cells.cohere.stream.tag, "old", "and the untouched ones must survive");
+
+  // Provenance: the layered cell says which run produced it; the untouched ones make no such claim.
+  assert.equal(merged.upstreams.openai.cells.openai.__run.build, "beef",
+    "a spliced cell must carry the run that measured it, or the board dates it by its neighbours");
+  assert.equal(merged.upstreams.gemini.cells.cohere.__run, undefined,
+    "a cell that was not re-measured must not be stamped with a run that never touched it");
+  assert.deepEqual(merged.__layered.cells, ["openai>openai"], "the matrix records exactly what was layered");
+
+  // The v1-compat top-level row must not disagree with the grid it mirrors.
+  assert.equal(merged.cells.openai.stream.tag, "new", "the v1 row must follow the layered grid");
+
+  // The input must not be mutated - gen-data layers repeatedly over a shared base.
+  assert.equal(full.upstreams.openai.cells.openai.stream.tag, "old", "layering must be pure");
 });
