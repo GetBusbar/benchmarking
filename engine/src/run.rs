@@ -632,6 +632,57 @@ pub fn load_window(
     load_window_at(cfg, cfg.gateway_addr, path, body, headers, concurrency)
 }
 
+/// The same window, plus WHAT THE GATEWAY SPENT SERVING IT.
+///
+/// The counters are read from the gateway's process tree immediately before and after the window, so
+/// the difference covers this window and nothing else. That ordering is the whole design: an absolute
+/// `utime` carries the process's startup, its config parse and every earlier window, and charging
+/// those to this window's requests would make CELL ORDER look like a gateway property - the first
+/// cell measured would always look the most expensive.
+///
+/// The cost is `Absent`, never zero, whenever it cannot be taken: the pid may not resolve (the
+/// gateway is not up, or the runtime hides it), `/proc` may not exist (a non-Linux host), or a
+/// counter may go backwards (pid reuse - see `procsample::cost`). A gateway that we failed to
+/// measure must never read as a gateway that used no CPU.
+///
+/// SAMPLING IS NOT FREE AND IS DELIBERATELY OUTSIDE THE WINDOW. Both reads walk `/proc` once, which
+/// is the same scan the RSS sampler already performs on a timer; doing them before and after rather
+/// than during means the observation cost cannot land inside the interval being measured.
+pub fn load_window_costed(
+    cfg: &RunConfig,
+    path: &str,
+    body: &str,
+    headers: &[(String, String)],
+    concurrency: u32,
+) -> (Option<GenStats>, crate::procsample::WindowCost) {
+    let pid = crate::rss::root_pid(&cfg.runtime).copied();
+    let before = match pid {
+        Some(p) => crate::procsample::sample_live(p),
+        None => crate::measurement::Measurement::absent_because(
+            crate::measurement::Absent::NotMeasured,
+            "the gateway's root pid did not resolve, so its cost cannot be attributed to this window",
+        ),
+    };
+    let stats = load_window_at(cfg, cfg.gateway_addr, path, body, headers, concurrency);
+    // Re-resolve rather than reuse `pid`: a gateway is free to restart between the two reads, and a
+    // second sample taken from a DIFFERENT process would be subtracted from the first as though it
+    // were the same one. Re-resolving means a restart shows up as a backwards counter, which
+    // `procsample::cost` already refuses as a harness error rather than publishing a negative.
+    let after = match crate::rss::root_pid(&cfg.runtime).copied() {
+        Some(p) => crate::procsample::sample_live(p),
+        None => crate::measurement::Measurement::absent_because(
+            crate::measurement::Absent::NotMeasured,
+            "the gateway's root pid did not resolve after the window",
+        ),
+    };
+    // Requests come from the window's OWN completed count, never from its published rate: the rate is
+    // already a derived figure, and deriving cost from a derivation makes one number's error the
+    // other's too.
+    let requests = stats.as_ref().map(|s| s.ok).unwrap_or(0);
+    let cost = crate::procsample::cost(&before, &after, requests, cfg.sweep_duration_s as f64);
+    (stats, cost)
+}
+
 /// The same load window, driven at an EXPLICIT address rather than the gateway's.
 ///
 /// The added-latency group's baseline leg has to put load on the mock directly, using the exact same

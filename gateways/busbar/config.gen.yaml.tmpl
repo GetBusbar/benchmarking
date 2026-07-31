@@ -1,17 +1,17 @@
 listen: "127.0.0.1:{GW_PORT}"
 providers:
   mock-openai:
-    api_key: { env: BENCH_MOCK_KEY }
+    api_key: {{ env: BENCH_MOCK_KEY }}
   mock-responses:
-    api_key: { env: BENCH_MOCK_KEY }
+    api_key: {{ env: BENCH_MOCK_KEY }}
   mock-anthropic:
-    api_key: { env: BENCH_MOCK_KEY }
+    api_key: {{ env: BENCH_MOCK_KEY }}
   mock-gemini:
-    api_key: { env: BENCH_MOCK_KEY }
+    api_key: {{ env: BENCH_MOCK_KEY }}
   mock-cohere:
-    api_key: { env: BENCH_MOCK_KEY }
+    api_key: {{ env: BENCH_MOCK_KEY }}
   mock-bedrock:
-    api_key: { env: BENCH_BEDROCK_KEY }
+    api_key: {{ env: BENCH_BEDROCK_KEY }}
 models:
   gpt-4o-mini:
     # OOTB canonical (OpenAI) lane — the perf/memory/throughput default. max_concurrent is OPTIONAL
