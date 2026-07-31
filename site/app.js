@@ -510,17 +510,6 @@ function metric(env, fmt = fmtInt) {
        attribution charges the rig to the subject, which is the one thing this board exists not to do.
        The detail already names the culprit; this reads it. */
     const rigSide = !!(detail && /(direct-to-mock leg|from the mock directly|did not hold on re-measurement)/.test(detail));
-    /* A LOWER BOUND IS A NUMBER, AND WE HAVE ONE. When the sustained-stream bisection failed to
-       converge, the ascending sweep still PROVED rungs before anything failed, and the seal carries the
-       highest of them (seal.mjs's provenStreamFloor). Rendering ">= 4,096 streams" instead of
-       "unconfirmed" is not a softening: it is the difference between "we could not pin the maximum" and
-       "we have nothing", and on this board those were displayed identically. The row stays na:true - it
-       must not sort or rank as if the maximum were known - but it stops implying the gateway failed. */
-    if (env && env.floor != null)
-      return { v: null, text: `≥ ${fmtInt(env.floor)}`, na: true, floor: env.floor, rigSide,
-               note: `proven floor: every rung up to ${fmtInt(env.floor)} concurrent streams passed the `
-                   + `stream gate before any failure. The search could not pin the maximum above it — `
-                   + (detail || ""), env };
     const text = rigSide ? "unconfirmed"
       : reason === "not_measured" ? "not measured"
       : reason === "harness_error" ? "rig fault"
@@ -1547,9 +1536,22 @@ function chooserPerfCell(g, key, fmt, st = state) {
 function chooserCellStream(g, st = state) {
   if (st.mode === "peak") return canonicalStreaming(g);
   const [ingress, egress] = chooserDialects(g, st);
+  /* SAME READS THE CELL, NOT THE PROJECTED HEADLINE. `canonicalStreaming(g)` is ONE record - the
+     diagonal the headline was projected from - so asking for any OTHER diagonal returned null even when
+     the matrix carried a fully measured cell for it. On the 2026-07-31 board that hid real streaming
+     numbers for 9 of the 14 gateways under "Same -> Anthropic": agentgateway had 468us TTFT and 4,356
+     sustained streams, busbar had 264us, litellm-rust 217us, and every one of them rendered n/a beside
+     the five gateways that genuinely cannot serve the pairing. Two opposite findings, one label.
+
+     Same and Custom differ only in that Same names one dialect for both ends, so they read the matrix
+     the same way. The diagonal-only rule below was never a measurement fact - it was the projection's
+     shape leaking into the chooser. */
   if (st.mode === "same") {
-    const cs = canonicalStreaming(g);
-    return cs && cs.path && cs.path.dialect === ingress ? cs : null;   // only the diagonal it was measured on
+    const upSame = g.matrix && g.matrix.upstreams && g.matrix.upstreams[ingress];
+    const cellSame = upSame && upSame.cells && upSame.cells[ingress];
+    const rawSame = cellSame && cellSame.served === true && cellSame.stream
+      && cellSame.stream.stream_served === true ? cellSame.stream : null;
+    return rawSame ? stampChosen({ stream_served: true, ...rawSame }, g, ingress, ingress, "stream-") : null;
   }
   // custom: a per-cell stream record if the matrix carries one for this exact pair (else n/a). The cell's
   // .stream is ALREADY sealed in-place by gen-data, so no re-gating is needed — envelopes carry the truth.

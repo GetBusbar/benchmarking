@@ -302,39 +302,3 @@ export function frontierAt(frontier, boundMs) {
 export function isEnvelope(x) {
   return x != null && typeof x === "object" && typeof x.certified === "boolean";
 }
-
-/* provenStreamFloor(s): the highest stream concurrency this cell proved CLEANLY, or null.
-
-   THE DEFECT THIS EXISTS FOR IS OURS, NOT THE GATEWAY'S. The sustained-stream bisection sometimes fails
-   to converge: it proves a rung, then the SAME rung fails on re-measurement, and the stepped-down rung
-   fails too. On the 2026-07-31 board that hit 6 cells across 4 independent gateways, and every one of
-   them carries the identical signature - exactly one failed rung at a concurrency the ascending sweep
-   had ALREADY passed with zero errors and zero missing frames (busbar failed c=3088 after passing
-   c=4096 and c=6144 clean; agentgateway failed c=1357 after c=2048; one-api failed c=170 after c=256).
-
-   A gate that fails at 3,088 after passing 6,144 is not measuring the gateway - it is measuring how far
-   the rig has drained since the previous window. Attributing it to the gateway would break the second
-   project invariant, so we do not.
-
-   THE DECLARED RULE, applied identically to every gateway: when the bisection does not converge, publish
-   the highest concurrency the UNCONTAMINATED ascending prefix proved - every rung from the first up to
-   and including it passed, before any failure occurred in this cell - and publish it as a LOWER BOUND,
-   never as a peak. It is a floor by construction and so cannot flatter anyone; the true sustained figure
-   "Passed" means passed THE BISECTION'S OWN GATE, and nothing stricter. An earlier draft of this rule
-   also demanded zero dropped frames, which sounds more careful and is in fact a fourth-invariant
-   violation: it invents a second, undeclared standard that no gateway was measured against. It silently
-   excluded agentgateway, whose cell drops exactly one frame per stream at EVERY rung - a real, declared
-   trait the gate tolerates - so the one gateway with a consistent quirk lost a number it had earned.
-   Same gate for the floor as for the peak, or the two are not comparable.
-
-   This reads only committed sweep data, so it regenerates from the snapshots with no re-run. */
-export function provenStreamFloor(s) {
-  const sweep = Array.isArray(s && s.sweep_streams) ? s.sweep_streams : null;
-  if (!sweep || !sweep.length) return null;
-  let floor = null;
-  for (const r of sweep) {
-    if (!r || r.passed !== true) break;             // the prefix ends at the FIRST failure, whatever it was
-    if (floor == null || r.conc > floor) floor = r.conc;
-  }
-  return floor;
-}
