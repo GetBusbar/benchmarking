@@ -1880,15 +1880,19 @@ const COLUMN_SETS = {
        read the same however different they are. Cost per request has no such ceiling: at saturation
        both deliver the same rps by definition, and the one doing less work per request still reads
        lower. Ascending, because less CPU per request is better. */
+    /* REQUESTS PER CPU-SECOND IS NOT A SECOND COLUMN HERE, because it is not a second number.
+       1 CPU-second IS a million microseconds, so `rps_per_cpu_second` is exactly
+       1,000,000 / cpu_us_per_request - the same measurement inverted. Printed side by side they read
+       as corroboration and are nothing of the kind: 88.7 us/req and 11,273 req/CPU-s multiply to
+       1,000,000 by construction, which is the same tautology that once made a cost "cross-check"
+       pass while proving nothing. It lives on the Charts tab, where it answers a different question
+       (how much traffic per unit of CPU you are buying) rather than restating this one. */
     { id: "cpu", label: "CPU per request (\u00b5s)", desc: false, costOnly: true,
       title: () => `Microseconds of gateway CPU - user plus system, summed across its whole process tree - spent per completed request, ` +
         `measured at a fixed concurrency held identical for every gateway (published beside it as the cost window). ` +
         `Unlike peak throughput this does not stop separating gateways once they saturate their cores. ` +
         `A window with any failure publishes no cost: CPU divided by only the successes would describe the failures, not the work.`,
       get: (g) => chooserPerfCell(g, "cpu_us_per_request", fmt2) },
-    { id: "rpscpu", label: "Requests per CPU-second", desc: true, costOnly: true,
-      title: "The same fact the way a box is sized: completed requests per second of gateway CPU burned. Higher is cheaper to run.",
-      get: (g) => chooserPerfCell(g, "rps_per_cpu_second", fmtInt) },
     { id: "rps", label: () => boundColLabel(selectedBound()), desc: true,
       title: () => `The most requests/sec the chosen cell carried ${boundClause(selectedBound())} and it failed no request it accepted, with the concurrency it was observed at. ` +
         `One of ${BOUND_CHOICES.length} readings of the SAME concurrency sweep published on every cell - switch the bound above to re-rank the board. ` +
@@ -2976,30 +2980,15 @@ function notesFold(notes) {
   return `<details class="metric-defs table-notes"><summary>How to read this table</summary>` +
     lines.map((l) => `<p>${esc(l)}</p>`).join("") + `</details>`;
 }
-/* Memory tab: show the memory-recovery + memory-rss charts (charts.py PNGs) under the per-gateway table.
-   Hidden on Performance/Streaming. Same lightbox behaviour as the main gallery. Absent PNGs → hidden. */
-function renderMemoryCharts(view) {
-  const box = document.getElementById("memory-charts");
-  if (!box) return;
-  const show = view === "memory";
-  box.classList.toggle("hidden", !show);
-  if (!show) return;
-  const gallery = document.getElementById("memory-chart-gallery");
-  const charts = (state.data.charts || []).filter((c) => /memory/i.test(c.file));
-  if (!charts.length) { box.classList.add("hidden"); return; }
-  const ordered = charts.slice().sort((a, b) =>
-    (a.file.includes("top5_") - b.file.includes("top5_")) || a.file.localeCompare(b.file));
-  gallery.innerHTML = ordered.map((c) =>
-    `<figure data-src="/${esc(c.file)}"><img src="/${esc(c.file)}" alt="${esc(chartCaption(c.file))}" loading="lazy"><figcaption>${esc(chartCaption(c.file))}</figcaption></figure>`
-  ).join("");
-  gallery.querySelectorAll("figure").forEach((f) => f.addEventListener("click", () => {
-    const lb = document.createElement("div");
-    lb.className = "lightbox";
-    lb.innerHTML = `<img src="${esc(f.dataset.src)}" alt="">`;
-    lb.addEventListener("click", () => lb.remove());
-    document.body.appendChild(lb);
-  }));
-}
+/* THE MEMORY TAB HAS NO CHART BLOCK, and that is the shape of the whole board now: tables are tables,
+   and every chart lives on the Charts tab.
+
+   It used to append two static PNGs under the memory table. They could not follow the cell selector
+   sitting directly above them - a reader switching from Min to Max cell watched the table change and
+   the pictures stay put, which is worse than having no pictures: it implies the images describe the
+   selection when they describe whatever was rendered hours earlier. One place for charts, all of them
+   live, is both simpler to read and impossible to get out of sync. */
+
 /* ---- DECLARED COLUMN GEOMETRY -------------------------------------------------
    THE OWNER: "changing filters shouldn't change column widths, just an annoyance." Measured across filter
    combos on the live board, every table view drifted at every width. The frontier tab at 1440, first body
@@ -3106,7 +3095,6 @@ function renderTable() {
     state.sortDesc = dc ? dc.desc !== false : true;
   }
   updateTableCaption(view);
-  renderMemoryCharts(view);
 
   thead.innerHTML = theadHtml(cols, state);
   /* THE DECLARED GEOMETRY, re-stated whenever the column set changes. A <colgroup> has to be a child of the
@@ -4379,48 +4367,6 @@ function renderMatrix() {
 }
 
 /* ---- charts gallery --------------------------------------------------------- */
-const CHART_CAPTIONS = {
-  /* "REPRESENTATIVE", never "best" or "peak": the record these charts read is best_cell, which prefers the
-     openai diagonal and otherwise ranks on added latency (gen-data.mjs `bestCell`). It is one cell, chosen
-     without ever reading a throughput number, so no caption here may describe its rate as a maximum the
-     gateway reached - kong's diagonals span 3,903 → 22,891 req/s and "the most it carried" was wrong by ~6x. */
-  added_latency: "Added latency vs direct-to-mock, p99 in microseconds, concurrency 1, on each gateway's representative same-dialect passthrough (the same canonical record the table ranks). Lower is better.",
-  /* DELETED: `rps_sustained_20ms` and `rps_max_proxy`. Both captioned the same concurrency sweep collapsed
-     to one number, and the first asserted a qualifying bar of "p99 under 1 s, error rate under 0.1 percent"
-     that no gate in the engine ever enforced. The charts that replace them name their bound in the picture
-     itself, and these captions say the same thing in the same words the board's columns use. */
-  frontier_rps_at_bound: `Throughput at a named tail-latency bound: the req/s each gateway's representative same-dialect passthrough carried ${boundClause(DEFAULT_BOUND_MS)} and it failed no request it accepted. One of ${BOUND_CHOICES.length} readings of the same sweep published on every cell - the Frontier tab shows them all. Higher is better.`,
-  xlate_frontier_rps_at_bound: `Cross-protocol translation: the req/s each gateway's canonical translation path carried (direction named on the bar) ${boundClause(DEFAULT_BOUND_MS)} and it failed no request it accepted, under a 20 ms model delay. Higher is better.`,
-  frontier_shape: "One panel per gateway: throughput at every published tail-latency bound, on a shared log scale. Read the SHAPE, not the level - a flat panel holds its rate even when you demand a tight tail, a rising one needs a loose tail to go fast, and those two are completely different machines even when their headline numbers match.",
-  // The two charts that read the SWEEP rather than the frontier: what the gateway bought for each doubling
-  // of concurrency, and the vocabulary for reading those curves. Captioned here because the gallery renders
-  // from this table and an uncaptioned panel is a picture with no claim attached.
-  frontier_climb: "What each doubling of concurrency actually bought: throughput and tail latency against concurrency, log-log, one panel per gateway. A rate line that is already horizontal while the tail climbs means extra concurrency buys latency and nothing else.",
-  frontier_shapes_key: "ILLUSTRATIVE, not measured: four drawn archetypes of the climb curves above, each naming a gateway on the current board that shows it. No axis numbers, because there is no data in it.",
-  memory_rss: "Process RSS in MiB: cold idle vs the steady state reached under an identical fixed load, on the SAME cell for every gateway (a process cold-started for that cell, the load run until the RSS is steady). A gateway whose RSS never went steady has no steady state and is drawn not-measured, with its growth rate on the bar. Lower is better.",
-  memory_recovery: "RSS 60 s after the fixed load stops (recovered) vs the steady state under load: does the gateway release the memory it took? Lower recovery is better.",
-  cost_per_million: "Instance cost per million requests at the canonical sustained rate. Lower is better.",
-  rps_per_dollar: "Canonical sustained RPS per dollar of hourly instance cost. Higher is better.",
-  stream_added_ttft: "Streaming: added time-to-first-token vs direct-to-mock, p99. Lower is better.",
-  stream_added_gap: "Streaming: added inter-frame (per-token) latency vs direct-to-mock, p99. Lower is better.",
-  stream_sustained: "Streaming: max concurrent SSE streams sustained without frame loss or stalls. Higher is better.",
-  // DELETED: `streamcpu_fps`. The metric behind it (`cpu_fps`) is retired - it counted relay frames/sec
-  // without the delivery gate, so dropping frames could raise the score. charts.py deleted the chart; a
-  // caption for a PNG nothing emits is dead vocabulary, and a committed stale PNG would keep it alive.
-  xlate_added_latency: "Translation on each gateway's canonical path (direction named on the bar; matrix per-cell sweep): added latency p99. Lower is better.",
-};
-function chartCaption(file) {
-  const base = file.replace(/^charts\//, "").replace(/\?.*$/, "").replace(/\.png$/, "");
-  const top5 = base.startsWith("top5_");
-  const key = top5 ? base.slice(5) : base;
-  const body = CHART_CAPTIONS[key] || key.replace(/_/g, " ");
-  // The top5 subset is selected ONCE, by lowest added latency, and the SAME five gateways are
-  // drawn on every top5 chart (charts.py _ranked()[:5]). Said explicitly so a reader is never
-  // surprised that a top5 RPS chart can omit the true #4 by RPS: the cut is by latency, not
-  // re-computed per metric.
-  return (top5 ? "Top 5 by lowest added latency, the same five on every chart. " : "All gateways. ") + body;
-}
-
 /* renderCharts(): the Charts tab - horizontal ranked bars, drawn from the live board.
 
    REPLACED 25 STATIC PNGs. Half of those existed only because "top 5" had to be decided at render
