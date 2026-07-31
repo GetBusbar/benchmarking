@@ -1621,27 +1621,11 @@ if ! python3 "$HERE/history/append.py"; then
 fi
 
 # ── regenerate charts + reports locally from the collected JSONs ──────────────────────────────────
-log "regenerating charts + reports locally"
-# Out of $TMPDIR for the reason the key is: a reaped venv does not fail loudly, it fails as a
-# skipped chart regen that publishes stale pictures beside fresh numbers.
-VENV="$BENCH_STATE_DIR/bench-charts-venv"
-# A HALF-REAPED VENV IS WORSE THAN A MISSING ONE: the directory test passes, pip is gutted, and the
-# failure surfaces as "matplotlib not importable" long after the point where it could be fixed. Probe
-# the interpreter, not the directory, and rebuild from scratch when it cannot import its own pip.
-if ! "$VENV/bin/python" -c "import pip" >/dev/null 2>&1; then
-  rm -rf "$VENV"
-  python3 -m venv "$VENV" >/dev/null 2>&1 || log "WARNING python3 -m venv failed - charts may not render (is python3-venv installed?)"
-fi
-"$VENV/bin/python" -m pip install -q matplotlib >/dev/null 2>&1 || log "WARNING pip install matplotlib failed in the charts venv - charts.py will likely fail below"
-# Warn loudly if matplotlib is genuinely absent BEFORE invoking charts.py, so a broken toolchain is a
-# visible warning rather than a soft-logged no-op that leaves a "completed" run with no charts.
-"$VENV/bin/python" -c 'import matplotlib' 2>/dev/null || log "WARNING matplotlib not importable in the charts venv - charts will NOT be regenerated this run"
-if "$VENV/bin/python" "$HERE/charts.py"; then
-  log "charts + reports regenerated"
-else
-  log "local chart regen failed (matplotlib?) - JSON results are still in results/; run charts.py yourself"
-fi
-log "done - results/reports/{all,top5}/README.md + results/*.png"
+# NO LOCAL CHART REGEN. The static pipeline (charts.py, 25 PNGs, the report pages) is retired: the
+# board draws its charts in the browser from the same bundle the tables read, so there is nothing to
+# redraw here and nothing that can ship a run behind the numbers beside it - which is exactly what
+# happened on 2026-07-31, when this step silently failed and published one run's images against
+# another run's data.
 
 # ── final publish sweep: history + regenerated charts/reports ─────────────────────────────────────
 # The per-gateway incremental publishes above push each gateway's result as its box finishes, but the
