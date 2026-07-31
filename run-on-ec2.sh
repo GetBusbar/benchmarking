@@ -506,7 +506,7 @@ teardown() {
   aws ec2 describe-instances --filters "Name=tag:run,Values=$RUN_ID" \
     "Name=instance-state-name,Values=running,pending" --query 'Reservations[].Instances[].InstanceId' --output text 2>/dev/null \
     | tr '\t' '\n' | grep -E '^i-' | xargs -r -n25 aws ec2 terminate-instances --output text --instance-ids >/dev/null 2>&1
-  if [[ "$CREATED_KEY" == 1 ]]; then aws ec2 delete-key-pair --key-name "$KEYNAME" >/dev/null 2>&1 || true; rm -f "$KEYFILE"; fi
+  if [[ "$CREATED_KEY" == 1 ]]; then aws ec2 delete-key-pair --key-name "$KEYNAME" >/dev/null 2>&1 || true; rm -f "$KEYFILE" "$KEYFILE.awsid"; fi
   if [[ "$CREATED_SG" == 1 ]]; then
     # The just-terminated instances are `shutting-down`, not `running/pending`, but they STILL hold
     # ENI associations to this SG for a short window - so an IMMEDIATE delete-security-group fails with
@@ -530,12 +530,33 @@ teardown() {
 }
 trap teardown EXIT INT TERM
 
-if [[ ! -s "$KEYFILE" ]] || ! aws ec2 describe-key-pairs --key-names "$KEYNAME" >/dev/null 2>&1; then
+# EXISTENCE IS NOT CORRESPONDENCE, and assuming it was cost a whole launch on 2026-07-31.
+#
+# The old test asked only whether the local key file exists and whether AWS still has a keypair of
+# that name. Both were true and they did not MATCH: an earlier recovery had minted a fresh local key
+# (after $TMPDIR was reaped) while the AWS keypair still carried the ORIGINAL public key. Fourteen
+# boxes launched with a public key whose private half no longer existed anywhere, and every one of
+# them failed with "ssh never came up" - a message that describes the symptom and hides the cause.
+#
+# The pair is now bound by the KeyPairId AWS assigned when we created it, recorded in a sidecar. If
+# the sidecar is missing (a key that arrived by some other route, like that recovery) or names a
+# different id (the AWS pair was deleted and recreated), the local key CANNOT open a box launched
+# with the current pair, so both are rebuilt. Rebuilding is safe here and destructive later, which is
+# why it happens once at startup rather than on a failure mid-run.
+KEYID_FILE="$KEYFILE.awsid"
+_aws_keyid="$(aws ec2 describe-key-pairs --key-names "$KEYNAME" --query 'KeyPairs[0].KeyPairId' --output text 2>/dev/null || true)"
+_local_keyid="$(cat "$KEYID_FILE" 2>/dev/null || true)"
+if [[ ! -s "$KEYFILE" || -z "$_aws_keyid" || "$_aws_keyid" == "None" || "$_local_keyid" != "$_aws_keyid" ]]; then
+  if [[ -s "$KEYFILE" && -n "$_aws_keyid" && "$_local_keyid" != "$_aws_keyid" ]]; then
+    echo "[key] local key does not correspond to AWS keypair $KEYNAME (recorded '${_local_keyid:-none}' vs live '$_aws_keyid') - rebuilding both, or every box would refuse it"
+  fi
   aws ec2 delete-key-pair --key-name "$KEYNAME" >/dev/null 2>&1 || true
-  rm -f "$KEYFILE"
+  rm -f "$KEYFILE" "$KEYID_FILE"
   # Create the private key under a 077 umask so it is 600 from birth - no sub-millisecond window at the
   # default umask between create and chmod. The chmod stays as a belt-and-braces backstop.
   ( umask 077; aws ec2 create-key-pair --key-name "$KEYNAME" --query KeyMaterial --output text > "$KEYFILE" ); chmod 600 "$KEYFILE"
+  # Record the id the key belongs to, so the NEXT run can tell correspondence from mere existence.
+  aws ec2 describe-key-pairs --key-names "$KEYNAME" --query 'KeyPairs[0].KeyPairId' --output text > "$KEYID_FILE" 2>/dev/null || true
   CREATED_KEY=1
 fi
 SG=$(aws ec2 describe-security-groups --group-names "$SGNAME" --query 'SecurityGroups[0].GroupId' --output text 2>/dev/null || true)
