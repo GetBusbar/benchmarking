@@ -376,7 +376,28 @@ case "$ARCH" in
   *) echo "unknown ARCH='$ARCH' (use arm64 or x86)"; exit 2 ;;
 esac
 HW_LABEL="AWS ${ITYPE} (${CPU_LABEL}, 16 cores / 64 GB). Gateway-under-test pinned to 4 cores (the comparable basis); mock and load generator on 6 cores each so the mock never bottlenecks the streaming sweep. Ubuntu 24.04. One dedicated box per gateway."
-KEYNAME="gateway-bench-key"; KEYFILE="${TMPDIR:-/tmp}/${KEYNAME}.pem"; SGNAME="gateway-bench-sg"
+# LONG-LIVED STATE DOES NOT LIVE IN $TMPDIR, BECAUSE THE OS REAPS IT MID-RUN.
+#
+# On 2026-07-30 macOS purged this directory DURING a ten-hour field run and took two things with it:
+#   - the ssh PRIVATE KEY, after which the last running box was unreachable. AWS never re-issues a
+#     private key, so its results were nearly stranded on a machine scheduled to self-terminate;
+#     recovery took EC2 Instance Connect to push a temporary key and re-authorise a fresh one.
+#   - the charts virtualenv, which it did not delete outright - it left the directory standing with a
+#     gutted pip and a hollow matplotlib, so the final publish logged "matplotlib not importable" and
+#     shipped YESTERDAY's charts beside today's numbers.
+#
+# Neither is temporary data. The keypair is reused across invocations BY DESIGN (see the keypair
+# comment below: recreating it invalidates every box a concurrent run launched), and the venv is a
+# build cache. $TMPDIR reaps by age, so the longer a run lasts the more likely it is to lose them -
+# it fails exactly when the stakes are highest. $BENCH_STATE_DIR is overridable for CI or a sandbox.
+BENCH_STATE_DIR="${BENCH_STATE_DIR:-$HOME/.cache/gateway-bench}"
+mkdir -p "$BENCH_STATE_DIR" 2>/dev/null || true
+KEYNAME="gateway-bench-key"; KEYFILE="$BENCH_STATE_DIR/${KEYNAME}.pem"; SGNAME="gateway-bench-sg"
+# Migrate a key from the old $TMPDIR location rather than silently minting a new one: a mint deletes
+# and recreates the AWS keypair, which would lock us out of any box a run in flight had launched.
+if [[ ! -s "$KEYFILE" && -s "${TMPDIR:-/tmp}/${KEYNAME}.pem" ]]; then
+  mv "${TMPDIR:-/tmp}/${KEYNAME}.pem" "$KEYFILE" && chmod 600 "$KEYFILE"
+fi
 SSHOPT="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=12 -i $KEYFILE"
 
 # NOTE ON PLACEMENT: `harvest` sits HERE, below KEYFILE/SSHOPT, not up with `kill`. It needs the ssh
@@ -1541,9 +1562,17 @@ fi
 
 # ── regenerate charts + reports locally from the collected JSONs ──────────────────────────────────
 log "regenerating charts + reports locally"
-VENV="${TMPDIR:-/tmp}/bench-charts-venv"
-if [[ ! -d "$VENV" ]]; then python3 -m venv "$VENV" >/dev/null 2>&1 || log "WARNING python3 -m venv failed - charts may not render (is python3-venv installed?)"; fi
-"$VENV/bin/pip" install -q matplotlib >/dev/null 2>&1 || log "WARNING pip install matplotlib failed in the charts venv - charts.py will likely fail below"
+# Out of $TMPDIR for the reason the key is: a reaped venv does not fail loudly, it fails as a
+# skipped chart regen that publishes stale pictures beside fresh numbers.
+VENV="$BENCH_STATE_DIR/bench-charts-venv"
+# A HALF-REAPED VENV IS WORSE THAN A MISSING ONE: the directory test passes, pip is gutted, and the
+# failure surfaces as "matplotlib not importable" long after the point where it could be fixed. Probe
+# the interpreter, not the directory, and rebuild from scratch when it cannot import its own pip.
+if ! "$VENV/bin/python" -c "import pip" >/dev/null 2>&1; then
+  rm -rf "$VENV"
+  python3 -m venv "$VENV" >/dev/null 2>&1 || log "WARNING python3 -m venv failed - charts may not render (is python3-venv installed?)"
+fi
+"$VENV/bin/python" -m pip install -q matplotlib >/dev/null 2>&1 || log "WARNING pip install matplotlib failed in the charts venv - charts.py will likely fail below"
 # Warn loudly if matplotlib is genuinely absent BEFORE invoking charts.py, so a broken toolchain is a
 # visible warning rather than a soft-logged no-op that leaves a "completed" run with no charts.
 "$VENV/bin/python" -c 'import matplotlib' 2>/dev/null || log "WARNING matplotlib not importable in the charts venv - charts will NOT be regenerated this run"
