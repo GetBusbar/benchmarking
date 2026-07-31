@@ -94,10 +94,21 @@ def check(path):
                     f"'added latency' is negative - the two legs are not comparable and the difference "
                     f"is not overhead"
                 )
-            # p50 must not exceed p99 from the same distribution. Cheap, and it catches a swap.
-            a50, a99 = num(perf.get("added_latency_p50_us")), added
-            if a50 is not None and a50 > a99:
-                problems.append(f"{at}: added_latency p50 ({a50}) exceeds p99 ({a99})")
+            # NO p50<=p99 CHECK, AND THE ONE REMOVED FROM HERE WAS UNSOUND FOR THE SAME REASON AS ITS
+            # TWIN IN audit-every-metric.py - which is the point worth recording, because the two were
+            # written in one sitting and the second was missed when the first was found.
+            #
+            # It read "p50 must not exceed p99 from the same distribution. Cheap, and it catches a
+            # swap." Both added_latency figures are DIFFERENCES (gateway leg minus direct leg), not one
+            # distribution, and a difference does not inherit monotonicity: constant gateway overhead
+            # under a stretching direct baseline is smaller at p99 than at p50 with nothing out of
+            # order. The sibling rule fired on agentgateway in the 2026-07-30 field run (added_gap
+            # p50=4us vs p99=3us); this one had simply not been unlucky yet.
+            #
+            # Catching a SWAP was a fair motive, but it cannot be done from the differences alone, and
+            # the swap it would catch is indistinguishable from a legitimate reading. What this tool
+            # does prove - that each added figure equals the difference of its own published legs - is
+            # the statement that is actually true of these numbers, and it stays.
 
             st = cell.get("stream") or {}
             if listof(st.get("ttft_gw_samples")) and listof(st.get("ttft_direct_samples")):

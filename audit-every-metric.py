@@ -34,12 +34,33 @@ NON_NEGATIVE = {
     "idle_rss_mib", "steady_state_rss_mib", "peak_rss_mib", "peak_rss_hwm_mib", "recovered_rss_mib",
     "time_to_plateau_s", "load_s", "idle_window_s", "recovery_window_s",
 }
-# (p50 field, p99 field) pairs from one distribution: p50 must not exceed p99.
-PERCENTILE_PAIRS = [
-    ("added_latency_p50_us", "added_latency_p99_us"),
-    ("added_ttft_p50_us", "added_ttft_p99_us"),
-    ("added_gap_p50_us", "added_gap_p99_us"),
-]
+# THERE IS NO p50<=p99 CHECK HERE, AND THE ONE THAT USED TO BE WAS UNSOUND.
+#
+# It read "(p50 field, p99 field) pairs from one distribution: p50 must not exceed p99" and listed
+# added_latency, added_ttft and added_gap. Not one of those is from one distribution. Every `added_*`
+# figure is a DIFFERENCE of two distributions' percentiles:
+#
+#     added_gap_p50 = gateway_gap_p50 - direct_gap_p50
+#     added_gap_p99 = gateway_gap_p99 - direct_gap_p99
+#
+# A difference does not inherit monotonicity from its operands. Nothing forces
+# (X50 - Y50) <= (X99 - Y99): a gateway whose overhead is roughly constant while the DIRECT baseline's
+# own tail stretches produces a smaller added figure at p99 than at p50, with no percentile anywhere
+# out of order. The rule held most of the time only because gateway overhead usually grows with the
+# tail, which is a tendency, not an invariant.
+#
+# It fired on the 2026-07-30 field run: agentgateway anthropic>anthropic, added_gap p50=4us vs
+# p99=3us. That is a legitimate reading one microsecond apart over 100 samples, and the gate called it
+# a defect. Acting on it would have meant "fixing" an engine that was computing correctly - the exact
+# inversion of this project's rule that an impossible number is an engine bug, because the number was
+# never impossible.
+#
+# The sound version of this check needs the RAW legs, and the snapshot does not carry them: the stream
+# block publishes only added_* (plus sample counts), and the perf block publishes direct/gateway at p99
+# only, with no p50 leg. So there is nothing here to check monotonically today. The mechanism is
+# DELETED rather than left as an empty list, because a gate that cannot fire reads like coverage and
+# is not. What the added_* figures ARE checked against is verify-latency.py, which proves each one
+# equals the difference of its own published legs - the statement that is actually true of them.
 
 
 def num(v):
@@ -129,10 +150,6 @@ def main():
                             problems.append(f"{at}: {key} is not a finite number ({val!r})")
                         if field in NON_NEGATIVE and val < 0:
                             problems.append(f"{at}: {key} is negative ({val}) - not possible for this quantity")
-                    for lo_f, hi_f in PERCENTILE_PAIRS:
-                        lo, hi = num(block.get(lo_f)), num(block.get(hi_f))
-                        if lo is not None and hi is not None and lo > hi:
-                            problems.append(f"{at}: {block_name}.{lo_f} ({lo}) exceeds {hi_f} ({hi})")
 
                 # CROSS-FIELD AGREEMENTS, each one a fact two numbers must both tell.
                 mem = cell.get("memory") or {}

@@ -142,8 +142,11 @@ def main():
     expect("a difference published without its legs FAILS", c, o, True)
 
     # RED: p50 above p99 from one distribution is impossible.
+    # ACCEPTED, not failed: added_latency p50/p99 are DIFFERENCES of two distributions' percentiles,
+    # so p50 > p99 is a legitimate reading, not a swap. This assertion used to demand a FAILURE, which
+    # is how the unsound rule stayed green here while its twin fired on real field data.
     c, o = run("verify-latency.py", mutate(perf__added_latency_p50_us=500))
-    expect("a p50 above its own p99 FAILS", c, o, True)
+    expect("an added_latency p50 above its p99 is ACCEPTED (a difference, not one distribution)", c, o, False)
 
     print("audit-every-metric.py:")
     c, o = run("audit-every-metric.py", CLEAN_CELL)
@@ -160,6 +163,20 @@ def main():
     # RED: recovered above peak - it cannot recover to above its own maximum.
     c, o = run("audit-every-metric.py", mutate(memory__recovered_rss_mib=9999.0))
     expect("a recovered value above the peak FAILS", c, o, True)
+
+    # ACCEPT, AND THIS ONE GUARDS AGAINST A GATE COMING BACK RATHER THAN GOING MISSING.
+    # audit-every-metric.py used to assert p50 <= p99 across added_latency / added_ttft / added_gap,
+    # under a comment claiming they were "pairs from one distribution". They are DIFFERENCES of two
+    # distributions' percentiles (gateway leg minus direct leg), and a difference does not inherit
+    # monotonicity: a constant gateway overhead under a stretching DIRECT baseline gives a smaller
+    # added figure at p99 than at p50 with no percentile anywhere out of order.
+    # It fired on the real 2026-07-30 field run - agentgateway anthropic>anthropic, added_gap p50=4us
+    # vs p99=3us - and acting on it would have meant "fixing" an engine that was computing correctly.
+    # These pin that a legitimate inverted DIFFERENCE is accepted, so the unsound rule cannot return.
+    c, o = run("audit-every-metric.py", mutate(stream__added_gap_p50_us=4, stream__added_gap_p99_us=3))
+    expect("an added_gap p50 above its p99 is ACCEPTED (a difference, not one distribution)", c, o, False)
+    c, o = run("audit-every-metric.py", mutate(perf__added_latency_p50_us=900, perf__added_latency_p99_us=800))
+    expect("an added_latency p50 above its p99 is ACCEPTED (same reason)", c, o, False)
 
     # THE SILENT-PASS GUARD: the tool must actually iterate cells, not print PASS over an empty walk.
     # This is the failure mode that would make every other assertion here vacuous.
