@@ -1415,9 +1415,28 @@ REMOTE
     glog_echo "could not upload the remote run script to the box"
   fi
   local run_failed=0
+  local launch_conn_lost=0
   if [ "$launch_rc" -ne 0 ]; then
-    glog_echo "detached otb launch FAILED (ssh rc=$launch_rc) - could not start the remote run"
-    run_failed=1
+    if [ "$launch_rc" -eq 255 ]; then
+      # rc=255 IS SSH'S OWN "THE SESSION BROKE", NOT "THE RUN DID NOT START".
+      #
+      # helicone lost a full 36-cell run to this on 2026-07-31. The launch ssh hung for seventy
+      # minutes and then dropped with 255; the box had meanwhile finished every cell and written its
+      # snapshot, which the pull below retrieved successfully - and the orchestrator still declared
+      # "could not start the remote run" and discarded the gateway, with the contradicting evidence
+      # printed four lines later.
+      #
+      # The launch command backgrounds the work with `setsid nohup`, so the session dropping says
+      # nothing about whether the run started. What answers that is EVIDENCE: the .run-done sentinel
+      # and a fresh snapshot. So this is recorded and deferred rather than treated as fatal here -
+      # if the run truly never started there will be no sentinel and no fresh snapshot, and the
+      # existing checks below will fail it on those grounds instead.
+      glog_echo "detached otb launch ssh dropped (rc=255) - the session broke, which does not say whether the run started; deferring to the sentinel and the snapshot"
+      launch_conn_lost=1
+    else
+      glog_echo "detached otb launch FAILED (ssh rc=$launch_rc) - could not start the remote run"
+      run_failed=1
+    fi
   fi
 
   # ── incremental pull loop: while the remote run is alive (no .run-done sentinel yet) and the box is
@@ -1502,6 +1521,9 @@ REMOTE
   local snap_fresh=0
   if [ "$reachable" -eq 1 ] && pull_snapshots; then snap_fresh=1; fi
   if [ "$snap_fresh" -eq 0 ]; then
+    if [ "$launch_conn_lost" -eq 1 ]; then
+      glog_echo "the launch ssh dropped (rc=255) AND no fresh snapshot arrived - so the run genuinely did not start, rather than the session merely breaking"
+    fi
     glog_echo "NO FRESH SNAPSHOT for $gw - this run measured nothing, so it publishes nothing and the board keeps whatever it already had"
   fi
   # DONE means a CLEAN run that MEASURED something and was fully pulled. Anything less is INCOMPLETE, so
