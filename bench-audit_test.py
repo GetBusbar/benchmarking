@@ -126,7 +126,60 @@ def frontier_with(i, **field_over):
 # one direction of one comparison against a deleted scalar. Its strictly stronger successor,
 # `check_frontier_is_rederivable_from_its_sweep`, recomputes all four fields of every reading (rate,
 # concurrency, tail, boundary rung) from the rungs and demands equality both ways. Tested below.
+
+# ── traces, for the SEARCH-TRACE checks ───────────────────────────────────────────────────────────
+#
+# `cell()` carries no `sweep_streams`, so every trace check returns early on it - which makes it a
+# valid accept-side fixture but a weak one: a check that never runs accepts everything. These build
+# real ladders so both sides are proven against a trace the check actually reads.
+def rung(conc, passed=True, **over):
+    r = {"conc": conc, "passed": passed, "streams": conc, "stream_errors": 0 if passed else conc,
+         "frames": 64 * conc, "frames_expected": 64 * conc, "stalls": 0}
+    r.update(over)
+    return r
+
+
+def trace_cell(rungs, sustained=128, absence_detail=None):
+    """A served streaming cell whose search left `rungs` behind."""
+    c = cell()
+    c["stream"] = {"stream_served": True, "streams_sustained": sustained, "sweep_streams": rungs}
+    if absence_detail is not None:
+        c["absences"] = {"stream.streams_sustained": {"reason": "not_measured", "detail": absence_detail}}
+    return c
+
+
+# A ladder that climbs cleanly and stops at a confirmed rung - the shape every trace check must accept.
+CLEAN_TRACE = [rung(1), rung(2), rung(4), rung(8), rung(16, passed=False),
+               rung(12), rung(12), rung(12)]
+
 REJECTS = [
+    # ── the SEARCH TRACE's own reject cases ───────────────────────────────────────────────────────
+    #
+    # These five are why this board could return PASS ten times while eight cells had silently given
+    # up: every other check reads the published NUMBER, and a number that was never produced has
+    # nothing to check. Each of these reads what the search DID.
+    (audit.check_search_spent_its_budget,
+     trace_cell([rung(1), rung(2), rung(4), rung(8), rung(16, passed=False), rung(15, passed=False)],
+                sustained=None, absence_detail="the stepped-down rung failed its first window"),
+     "a search that published nothing but stopped at c=15 having already carried c=8, probing "
+     "nothing in between - plano anthropic>anthropic"),
+    (audit.check_no_rung_fails_below_one_already_carried,
+     trace_cell([rung(1), rung(2), rung(4), rung(8), rung(16, passed=False), rung(6, passed=False)],
+                sustained=None, absence_detail="it did not hold on re-measurement"),
+     "a rung failing BELOW one the same cell already carried, with the absence naming nothing else "
+     "that changed - impossible for the gateway alone"),
+    (audit.check_published_rung_held_a_majority,
+     trace_cell([rung(1), rung(2), rung(4), rung(4, passed=False), rung(4, passed=False)], sustained=4),
+     "a published rung that LOST its own windows - the summary disagreeing with its evidence"),
+    (audit.check_a_wedged_gateway_is_named_as_one,
+     trace_cell([rung(1), rung(2), rung(4), rung(8, passed=False), rung(6, passed=False),
+                 rung(5, passed=False), rung(4, passed=False), rung(3, passed=False)],
+                sustained=None, absence_detail="the bisection did not hold"),
+     "a gateway that stopped serving and never resumed, published as silence - aisix"),
+    (audit.check_no_rig_side_error_is_charged_to_the_gateway,
+     trace_cell([rung(1), rung(2, passed=False, stream_errors_connect_failed=2)], sustained=None,
+                absence_detail="x"),
+     "connections THIS HOST could not make, counted against the gateway"),
     (audit.check_sweep_carries_its_latency,
      cell(perf__sweep_max_proxy=[{"conc": 64, "rps": 10_000, "p99_us": None, "fail": None}]),
      "throughput windows published without the p99 they measured"),
