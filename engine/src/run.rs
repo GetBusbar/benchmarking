@@ -5715,13 +5715,13 @@ mod search_simulator {
                     live.fetch_add(1, Ordering::SeqCst);
                     let _lane = Lane(Arc::clone(&live));
                     /* LET THE WHOLE WINDOW ARRIVE BEFORE JUDGING IT. Deciding on the count at the
-                       instant each request lands measures arrival order, not concurrency: a fast
-                       lane completes and releases before its peers connect, so a window at c=64 was
-                       presenting ~40 simultaneous requests and passed on a gateway capped at 40.
-                       That made the harness's fidelity depend on scheduling - it passed alone and
-                       failed under a parallel test run, which is a fixture nobody can trust.
-                       Waiting a beat lets every lane of the window land, so the count is the
-                       window's real concurrency. */
+                    instant each request lands measures arrival order, not concurrency: a fast
+                    lane completes and releases before its peers connect, so a window at c=64 was
+                    presenting ~40 simultaneous requests and passed on a gateway capped at 40.
+                    That made the harness's fidelity depend on scheduling - it passed alone and
+                    failed under a parallel test run, which is a fixture nobody can trust.
+                    Waiting a beat lets every lane of the window land, so the count is the
+                    window's real concurrency. */
                     std::thread::sleep(std::time::Duration::from_millis(60));
                     let n = live.load(Ordering::SeqCst);
                     let (cap, short, wedge_at) = match model {
