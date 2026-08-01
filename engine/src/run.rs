@@ -1015,6 +1015,20 @@ enum StreamStop {
     /// result: a gate that fails at 3,088 after passing 6,144 is measuring how far the rig has
     /// drained, not what the gateway can carry.
     RigContaminated { at: u32, proven: u32 },
+    /// The gateway stopped serving after an overload and did not come back on its own. THIS ONE IS
+    /// ABOUT THE GATEWAY, and it is a finding rather than a gap: aisix passed every rung to c=8,192,
+    /// was pushed to c=16,384, and then failed seventeen consecutive windows including c=4,096 which
+    /// it had just carried cleanly. A ceiling cannot be measured on a process that never recovers,
+    /// but "it does not recover" is exactly what a reader wants to know, so it is published as the
+    /// reason instead of an unexplained absence.
+    ///
+    /// `restart_cleared` records whether a restart brought it back - which is the difference between
+    /// "wedged until restarted" and "wedged and stayed wedged", and the two are not the same claim.
+    GatewayDidNotRecover {
+        at: u32,
+        proven: u32,
+        restart_cleared: bool,
+    },
 }
 
 impl StreamStop {
@@ -1025,6 +1039,9 @@ impl StreamStop {
             StreamStop::RigRanShort { .. }
             | StreamStop::WindowUnavailable { .. }
             | StreamStop::RigContaminated { .. } => Absent::HarnessError,
+            // A gateway that does not recover from overload is the GATEWAY's result, so it must not
+            // be filed under our own faults - that would be the attribution error in reverse.
+            StreamStop::GatewayDidNotRecover { .. } => Absent::NotMeasured,
             _ => Absent::NotMeasured,
         }
     }
@@ -1054,6 +1071,17 @@ impl StreamStop {
                  THIS CELL had already carried cleanly up to c={proven}. A rung cannot fail below one \
                  it has already passed because of the gateway, so this is our rig not having drained \
                  between windows, and nothing is published about the gateway here"
+            ),
+            StreamStop::GatewayDidNotRecover { at, proven, restart_cleared } => format!(
+                "the gateway stopped serving after being pushed past c={proven} and did not recover: \
+                 c={at} failed repeatedly although this cell had already carried it cleanly{}. No \
+                 sustained ceiling is published because a ceiling cannot be measured on a process \
+                 that is no longer serving - but that it does not recover is itself the finding",
+                if restart_cleared {
+                    ", and it served again only after the harness restarted it"
+                } else {
+                    ", and a restart did not bring it back either"
+                }
             ),
             StreamStop::BudgetExhausted => format!(
                 "the bisection proved c={proved}, but that concurrency did not hold the stream gate \
@@ -2131,7 +2159,31 @@ pub fn sweep_streams_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> Cel
                         };
                         break;
                     }
-                    let next = ceiling / 2;
+                    /* STEP DOWN INSIDE THE BRACKET, NOT BY HALVING.
+                       Halving throws away everything the ascending sweep and the bisection just
+                       established. busbar proved every rung to c=4,096, bisected to c=6,176, failed
+                       to confirm it - and then halved to c=3,088, a concurrency it had already
+                       carried cleanly, discarding the entire 4,096..6,176 bracket the search had
+                       spent fifteen rungs narrowing. The true ceiling was never below 4,096; it was
+                       just under 6,176 (a later run confirmed 5,120).
+
+                       The known-good floor is the top of this cell's own uncontaminated ascending
+                       prefix, falling back to the search's lower bound. Bisecting between it and the
+                       failed rung keeps every rung the search already paid for and converges toward
+                       the boundary instead of collapsing away from it.
+
+                       Halving survives only as the fallback for when there IS no bracket - the
+                       confirmation failed at the known-good rung itself, so nothing below it is
+                       known and there is no information to bisect. */
+                    let known_good = if proven_clean > 0 { proven_clean.max(lo) } else { lo };
+                    let next = if known_good < ceiling {
+                        let mid = known_good + (ceiling - known_good) / 2;
+                        // A bracket one rung wide bisects to its own floor; stepping to `ceiling`
+                        // would loop forever, so the floor is the honest next probe.
+                        if mid >= ceiling { known_good } else { mid }
+                    } else {
+                        ceiling / 2
+                    };
                     if next < lo.max(1) || next == ceiling {
                         stop = StreamStop::FloorReached { last: ceiling };
                         break;
@@ -2191,12 +2243,73 @@ pub fn sweep_streams_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> Cel
                                 } else {
                                     false
                                 };
-                                if !recovered {
-                                    stop = if contaminated {
-                                        StreamStop::RigContaminated { at: ceiling, proven: proven_clean }
-                                    } else {
-                                        StreamStop::SteppedRungFailed { at: ceiling }
+                                /* A SETTLE DID NOT BRING IT BACK, SO ASK WHETHER ANYTHING WILL.
+                                   The remaining explanations are opposite: our rig is still dirty,
+                                   or the GATEWAY stopped serving and is not coming back on its own.
+                                   Restarting is the one experiment that separates them, and the
+                                   harness already owns this process's lifetime - the memory group
+                                   stops and starts it every cell, and the probe loop restarts it
+                                   mid-grid for a refused connection.
+
+                                   A number is deliberately NOT published on the far side of this.
+                                   Whatever a restarted gateway carries is a fact about a fresh
+                                   process, not about the one that just served fifteen rungs, and
+                                   quietly folding it into the same sustained figure would publish
+                                   two different processes as one measurement. What gets published
+                                   instead is the finding: it did not recover. */
+                                if !recovered && contaminated {
+                                    let restart_cleared = match cfg.relaunch.as_ref() {
+                                        Some(spec) => {
+                                            eprintln!(
+                                                "streams: c={ceiling} still fails after settling although this cell \
+                                                 carried c={proven_clean} - restarting the gateway to find out whether \
+                                                 it stopped serving or the rig is still dirty"
+                                            );
+                                            match restart_to_rest(spec, &cfg.relaunch_launcher, &cfg.relaunch_commands) {
+                                                Ok(()) => stream_window(cfg.gateway_addr, &p.path, &p.body, &p.headers, p.dialect, ceiling)
+                                                    .map(|w3| {
+                                                        let passed3 = streams_gate_passes(&w3);
+                                                        p.points.push(point_of(&w3, passed3));
+                                                        passed3
+                                                    })
+                                                    .unwrap_or(false),
+                                                Err(e) => {
+                                                    eprintln!("streams: the gateway could not be restarted: {e}");
+                                                    false
+                                                }
+                                            }
+                                        }
+                                        // No declared relaunch means the harness does not own this
+                                        // process and must not bounce it; the honest reading stays
+                                        // the rig-side one it already had.
+                                        None => false,
                                     };
+                                    /* THE RESTART IS THE ATTRIBUTION TEST, and its two outcomes
+                                       point at opposite culprits.
+
+                                       Cleared by a restart: the process that had been serving was
+                                       wedged, a fresh one is not, and the host was the same
+                                       throughout - so it is the GATEWAY that did not recover.
+
+                                       NOT cleared: a brand-new gateway process still cannot carry a
+                                       rung this cell already carried. The gateway is the thing that
+                                       just changed and the failure did not, which leaves the host as
+                                       the variable - so this stays OURS. Calling it a gateway
+                                       failure here would be the flattering direction of the same
+                                       error, and the one nobody would catch. */
+                                    stop = if restart_cleared {
+                                        StreamStop::GatewayDidNotRecover {
+                                            at: ceiling,
+                                            proven: proven_clean,
+                                            restart_cleared,
+                                        }
+                                    } else {
+                                        StreamStop::RigContaminated { at: ceiling, proven: proven_clean }
+                                    };
+                                    break;
+                                }
+                                if !recovered {
+                                    stop = StreamStop::SteppedRungFailed { at: ceiling };
                                     break;
                                 }
                             } else {
@@ -5298,6 +5411,189 @@ mod stream_error_kind_tests {
                 !stream_errored(&outcome(None, 0, end)),
                 "the rig running out is never the gateway's error rate"
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod stepdown_tests {
+    /// The step-down rule, extracted so it can be exercised without a rig. Mirrors the branch in
+    /// `cell_streams`: bisect the bracket when there is one, halve only when there is not.
+    fn next_rung(proven_clean: u32, lo: u32, ceiling: u32) -> u32 {
+        let known_good = if proven_clean > 0 {
+            proven_clean.max(lo)
+        } else {
+            lo
+        };
+        if known_good < ceiling {
+            let mid = known_good + (ceiling - known_good) / 2;
+            if mid >= ceiling {
+                known_good
+            } else {
+                mid
+            }
+        } else {
+            ceiling / 2
+        }
+    }
+
+    /* THE DEFECT THIS REPLACES, ON THE REAL NUMBERS. busbar proved every rung to 4,096, bisected to
+    6,176, could not confirm it, and halved to 3,088 - below a concurrency it had already carried
+    cleanly, discarding the whole bracket. A later run confirmed the true ceiling at 5,120, which
+    is inside the bracket halving threw away and nowhere near 3,088. */
+    #[test]
+    fn the_step_down_stays_inside_the_bracket_the_search_paid_for() {
+        let next = next_rung(4096, 1, 6176);
+        assert!(
+            next > 4096,
+            "must not step below a rung this cell already carried cleanly, got {next}"
+        );
+        assert!(
+            next < 6176,
+            "must step below the rung that failed confirmation, got {next}"
+        );
+        assert_eq!(next, 5136, "bisects the bracket");
+        assert_ne!(next, 3088, "the old halving answer must not survive");
+    }
+
+    /// Halving is still right when there is NO bracket - confirmation failed at the known-good rung
+    /// itself, so nothing below it is known and there is nothing to bisect.
+    #[test]
+    fn halving_survives_only_where_there_is_no_information_to_bisect() {
+        assert_eq!(
+            next_rung(8192, 1, 8192),
+            4096,
+            "no bracket: fall back to halving"
+        );
+        assert_eq!(
+            next_rung(0, 1, 1024),
+            512,
+            "nothing proven clean: bisect from the search floor"
+        );
+    }
+
+    /// The search must always make progress downward, or it loops until the step-down budget runs
+    /// out and publishes nothing - the exact failure this whole change exists to remove.
+    #[test]
+    fn every_step_makes_downward_progress() {
+        for (pc, lo, ceil) in [
+            (4096u32, 1u32, 6176u32),
+            (100, 1, 101),
+            (2, 1, 3),
+            (1, 1, 2),
+            (0, 1, 2),
+        ] {
+            let n = next_rung(pc, lo, ceil);
+            assert!(
+                n < ceil,
+                "step-down from {ceil} (proven {pc}) must go DOWN, got {n}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod gateway_recovery_tests {
+    use super::*;
+
+    /* THE WHOLE POINT IS THAT THIS ONE IS THEIRS. A gateway that stops serving after an overload and
+    does not come back is a finding about the gateway, so filing it under HarnessError would be
+    the attribution error running in reverse - hiding a real gateway limitation behind our own
+    fault, which is just as dishonest as the inverse and rather more flattering. */
+    #[test]
+    fn a_gateway_that_never_recovers_is_the_gateways_result() {
+        assert_eq!(
+            StreamStop::GatewayDidNotRecover {
+                at: 4096,
+                proven: 8192,
+                restart_cleared: true
+            }
+            .absent_kind(),
+            Absent::NotMeasured,
+            "a gateway that will not serve again is not a rig fault"
+        );
+        // And the rig-side ones must stay rig-side, or this variant has laundered them.
+        assert_eq!(
+            StreamStop::RigContaminated {
+                at: 3088,
+                proven: 4096
+            }
+            .absent_kind(),
+            Absent::HarnessError
+        );
+    }
+
+    /// "Wedged until restarted" and "wedged and stayed wedged" are different claims about the
+    /// gateway, and a reader deciding whether to run it in production needs to know which.
+    #[test]
+    fn the_reason_distinguishes_a_restart_that_helped_from_one_that_did_not() {
+        let cleared = StreamStop::GatewayDidNotRecover {
+            at: 4096,
+            proven: 8192,
+            restart_cleared: true,
+        }
+        .describe(8192, 6);
+        let stuck = StreamStop::GatewayDidNotRecover {
+            at: 4096,
+            proven: 8192,
+            restart_cleared: false,
+        }
+        .describe(8192, 6);
+        assert!(
+            cleared.contains("only after the harness restarted it"),
+            "{cleared}"
+        );
+        assert!(stuck.contains("a restart did not bring it back"), "{stuck}");
+        assert_ne!(cleared, stuck, "the two outcomes must not read identically");
+        for d in [&cleared, &stuck] {
+            assert!(d.contains("c=8192"), "must name what it had carried: {d}");
+            assert!(d.contains("c=4096"), "must name the rung that failed: {d}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod restart_attribution_tests {
+    use super::*;
+
+    /* THE RESTART IS AN ATTRIBUTION TEST AND ITS TWO OUTCOMES BLAME OPPOSITE THINGS. Getting this
+    backwards is not a cosmetic error: "a restart fixed it" means the gateway was wedged, while
+    "a restart did not fix it" means a brand-new process still fails, which leaves our host as the
+    only thing that changed. The second is the flattering direction - it would let us print a
+    gateway limitation we caused - so it is the one worth a test. */
+    fn stop_for(restart_cleared: bool, at: u32, proven: u32) -> StreamStop {
+        if restart_cleared {
+            StreamStop::GatewayDidNotRecover {
+                at,
+                proven,
+                restart_cleared,
+            }
+        } else {
+            StreamStop::RigContaminated { at, proven }
+        }
+    }
+
+    #[test]
+    fn a_restart_that_helps_blames_the_gateway_and_one_that_does_not_blames_us() {
+        assert_eq!(
+            stop_for(true, 4096, 8192).absent_kind(),
+            Absent::NotMeasured,
+            "a restart clearing it proves the old process was wedged - that is the gateway's"
+        );
+        assert_eq!(
+            stop_for(false, 4096, 8192).absent_kind(),
+            Absent::HarnessError,
+            "a FRESH gateway still failing a rung it carried leaves the host as the variable - ours"
+        );
+    }
+
+    /// Both reasons must name the rung and what the cell had carried, because the impossibility is
+    /// the relation between them - either number alone reads like an ordinary failure.
+    #[test]
+    fn both_outcomes_explain_themselves_with_both_concurrencies() {
+        for cleared in [true, false] {
+            let d = stop_for(cleared, 4096, 8192).describe(8192, 6);
+            assert!(d.contains("c=4096") && d.contains("c=8192"), "{d}");
         }
     }
 }
