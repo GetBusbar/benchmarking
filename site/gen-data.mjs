@@ -69,12 +69,42 @@ const GATEWAY_HOURLY_USD = Number(process.env.GATEWAY_HOURLY_USD || 0.1632);
    zero requests per dollar genuinely is zero. 0 is a number; n/a is not. */
 function costLanes(cell) {
   const r = frontierAt((cell || {}).frontier, DEFAULT_BOUND_MS);
-  const rate = r && r.rps && typeof r.rps.value === "number" ? r.rps.value : 0;
+  /* AN ABSENT RATE IS NOT A ZERO RATE, AND BOTH LANES USED TO SAY IT WAS.
+     `rate` collapsed "no measurement" into the same 0 as "measured zero", and that 0 went through
+     `sealMetric` with no absence - emerging CERTIFIED. On the 2026-07-31 board one-api, plano and
+     tensorzero each carried `rps.reason = "below_resolution"` at the 10ms bound and published
+     `rps_per_dollar: {value: 0, certified: true}` beside it: the board asserting, as a measurement,
+     that three competitors deliver zero requests per dollar, and ranking them last on a
+     higher-is-better axis for it. Neither lane is in seal.mjs's vocabulary, so `isMetricField` is
+     false for them and check-consistency never compared either against the raw artifact - which is
+     why it shipped.
+
+     The paragraph above is still right about a MEASURED zero: 0 requests per dollar genuinely is 0,
+     and n/a is not. The defect was never the zero, it was treating absence as one.
+
+     Both lanes now carry the RATE's own reason and detail. `cost_per_million_usd` used to stamp a
+     hardcoded `not_measured` over it, flattening "measured, and it could not hold the bound" into
+     "nothing was measured here" - the exact reason-flattening seal.mjs exists to prevent, and the
+     reading that flatters the gateway. */
+  const rateEnv = r && r.rps;
+  const rate = rateEnv && typeof rateEnv.value === "number" ? rateEnv.value : null;
+  const rateAbsent = rate == null
+    ? {
+        reason: (rateEnv && rateEnv.reason) || "not_measured",
+        detail: (rateEnv && rateEnv.detail)
+          || `no reading resolved at the ${DEFAULT_BOUND_MS} ms bound, so this lane is undefined rather than zero`,
+      }
+    : null;
   return {
-    rps_per_dollar: sealMetric(rate > 0 ? rate / GATEWAY_HOURLY_USD : 0),
+    rps_per_dollar: sealMetric(rate == null ? null : rate / GATEWAY_HOURLY_USD, { absent: rateAbsent }),
     cost_per_million_usd: sealMetric(
       rate > 0 ? (GATEWAY_HOURLY_USD / (rate * 3600)) * 1e6 : null,
-      { absent: rate > 0 ? null : { reason: "not_measured", detail: `no rung held the ${DEFAULT_BOUND_MS} ms bound, so cost per request is undefined rather than zero` } },
+      {
+        absent: rateAbsent
+          || (rate === 0
+            ? { reason: "not_applicable", detail: "the gateway carried zero throughput at this bound, so cost per request is undefined rather than infinite" }
+            : null),
+      },
     ),
     priced_at_bound_ms: DEFAULT_BOUND_MS,
     gateway_hourly_usd: GATEWAY_HOURLY_USD,

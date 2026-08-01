@@ -6512,3 +6512,42 @@ test("a scoped re-run layers over the full run instead of replacing it", () => {
   // The input must not be mutated - gen-data layers repeatedly over a shared base.
   assert.equal(full.upstreams.openai.cells.openai.stream.tag, "old", "layering must be pure");
 });
+
+/* A DERIVED LANE MAY NOT BE MORE CERTAIN THAN WHAT IT IS DERIVED FROM.
+   The dollar lanes are computed from the frontier rate at the priced bound. When that rate is
+   absent, `rate` used to collapse to 0 and `rps_per_dollar` published {value: 0, certified: true} -
+   the board asserting as a MEASUREMENT that a gateway delivers zero requests per dollar, and
+   ranking it last on a higher-is-better axis for it. It shipped on one-api, plano and tensorzero
+   because neither lane is in seal.mjs's vocabulary, so `isMetricField` is false for them and
+   check-consistency never compared either against the raw artifact. Nothing was watching. */
+test("the dollar lanes are never more certain than the rate they are derived from", () => {
+  let checkedAbsent = 0, checkedMeasured = 0;
+  for (const g of data.gateways) {
+    const bc = g.best_cell;
+    if (!bc || !bc.frontier) continue;
+    const reading = bc.frontier.find((f) => f.bound_ms === bc.priced_at_bound_ms);
+    if (!reading || !reading.rps) continue;
+    const rate = reading.rps;
+    for (const lane of ["rps_per_dollar", "cost_per_million_usd"]) {
+      const env = bc[lane];
+      if (!env) continue;
+      if (rate.value == null) {
+        checkedAbsent++;
+        assert.equal(env.value, null,
+          `${g.key}.${lane} publishes ${env.value} while its rate is absent (${rate.reason})`);
+        assert.equal(env.certified, false, `${g.key}.${lane} certifies a value it never measured`);
+        // And it must carry the RATE's reason, not a flattened stand-in: "measured, and it could
+        // not hold the bound" is a different finding from "nothing was measured here", and the
+        // second is the one that flatters the gateway.
+        assert.equal(env.reason, rate.reason,
+          `${g.key}.${lane} reports ${env.reason} where the rate says ${rate.reason} - a flattened reason`);
+      } else if (rate.value > 0 && lane === "rps_per_dollar") {
+        checkedMeasured++;
+        assert.equal(env.certified, true, `${g.key}.${lane} must certify a rate that WAS measured`);
+        assert.ok(env.value > 0, `${g.key}.${lane} must be positive for a positive rate`);
+      }
+    }
+  }
+  assert.ok(checkedAbsent > 0, "this board must contain an absent-rate cell or the guard is untested");
+  assert.ok(checkedMeasured > 0, "and a measured one, or it only proves the absent half");
+});
