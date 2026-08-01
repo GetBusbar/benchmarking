@@ -231,7 +231,29 @@ export function sealMetric(value, opts = {}) {
     if (absent && absent.detail) env.detail = absent.detail;
     return env;
   }
-  const num = Number(value);
+  /* A NON-NUMBER MUST NOT WEAR THE CERTIFIED BADGE. `Number("n/a")` is NaN, `NaN === 0` is false,
+     so it fell straight to the certified branch - and `JSON.stringify(NaN)` is `null`. The bundle
+     then carried `{value: null, certified: true}`: a bare null with no reason, in a shape that
+     matches none of the three documented envelope forms above, and which `isEnvelope` and the C2
+     guard both wave through. This file already uses `Number.isFinite` one function away in
+     `numOrNull` and for headroom/ceiling; the value path was the one that did not. */
+  /* AND THE COERCION ITSELF IS THE HAZARD, not just NaN. `Number("")` is 0, `Number([])` is 0,
+     `Number(" ")` is 0 - all finite, so a finiteness check alone would have certified an empty
+     string as a MEASURED ZERO, which is the same fabrication in a quieter costume. Only a number,
+     or a string that actually spells one, is a measurement. */
+  const numeric =
+    typeof value === "number" || (typeof value === "string" && value.trim() !== "");
+  const num = numeric ? Number(value) : NaN;
+  if (!Number.isFinite(num)) {
+    return {
+      value: null,
+      certified: false,
+      suppressed: false,
+      reason: (absent && absent.reason) || "not_measured",
+      detail: (absent && absent.detail)
+        || `the producer supplied ${JSON.stringify(value)}, which is not a finite number`,
+    };
+  }
   // A measured zero is honest and certified, and its NOTE names what the zero means (see zeroNote) - but
   // ONLY for the fields that have such a meaning. An unannotated zero stays a bare 0 rather than
   // borrowing a throughput sentence.

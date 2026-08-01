@@ -6551,3 +6551,22 @@ test("the dollar lanes are never more certain than the rate they are derived fro
   assert.ok(checkedAbsent > 0, "this board must contain an absent-rate cell or the guard is untested");
   assert.ok(checkedMeasured > 0, "and a measured one, or it only proves the absent half");
 });
+
+/* A NON-NUMBER MUST NOT BE CERTIFIED. Number("n/a") is NaN, NaN === 0 is false, so a non-numeric
+   raw fell to sealMetric's certified branch and JSON.stringify turned it into null - publishing
+   {value: null, certified: true}, a bare null wearing the certified badge, in a shape none of the
+   three documented envelope forms allow. */
+test("sealMetric refuses to certify anything that is not a finite number", () => {
+  for (const bad of ["n/a", "", NaN, Infinity, -Infinity, {}, [1, 2]]) {
+    const env = sealMetric(bad);
+    assert.equal(env.certified, false, `sealMetric certified ${JSON.stringify(bad)}`);
+    assert.equal(env.value, null, `sealMetric published a value for ${JSON.stringify(bad)}`);
+    assert.ok(env.reason, `an absence must carry a reason, ${JSON.stringify(bad)} carried none`);
+  }
+  // And the real cases are untouched: a measured zero is still certified, as is any finite number.
+  assert.equal(sealMetric(0).certified, true, "a measured zero is a real number");
+  assert.equal(sealMetric(0).value, 0);
+  assert.equal(sealMetric(12.5).value, 12.5);
+  // A numeric string is still a number - the producer's shape, not a fabrication.
+  assert.equal(sealMetric("42").value, 42);
+});
