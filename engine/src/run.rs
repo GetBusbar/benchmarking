@@ -2099,7 +2099,25 @@ pub fn sweep_streams_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> Cel
                 // Defaults to the budget case, which is what the loop ends on when nothing else
                 // interrupts it; every other exit overwrites this at its own `break`.
                 let mut stop = StreamStop::BudgetExhausted;
+                /* A STEPPED RUNG WHOSE SEED WINDOW FAILS MUST STEP DOWN AGAIN, NOT END THE SEARCH.
+                   plano `anthropic>anthropic` is what this costs: the ascending sweep carried c=64,
+                   the bisection settled on c=79, confirmation failed, the step-down bisected to
+                   c=71, its first window failed - and the search stopped there, with every
+                   concurrency between 64 and 71 untried and most of the step-down budget unspent.
+                   The cell published an absence where a number was almost certainly available.
+
+                   What it must NOT do is give that rung its confirmation windows anyway: a rung that
+                   could not seed has not earned a vote, and crediting it is how a gate-failing window
+                   folds into a published figure. So the failed seed buys another step-down and
+                   nothing else - the rung is abandoned, the bracket narrows, and the search carries
+                   on with the budget it has left. */
+                let mut seed_failed = false;
                 for _ in 0..MAX_CEILING_STEPDOWNS {
+                    if seed_failed {
+                        // The rung below is abandoned unconfirmed; fall straight to another
+                        // step-down rather than voting on a window that never held.
+                        seed_failed = false;
+                    } else {
                     let mut held = 1usize; // the bisection's own winning window is a real vote
                     let mut total = 1usize;
                     let mut rates = vec![first_fps];
@@ -2159,6 +2177,7 @@ pub fn sweep_streams_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> Cel
                         };
                         break;
                     }
+                    }
                     /* STEP DOWN INSIDE THE BRACKET, NOT BY HALVING.
                        Halving throws away everything the ascending sweep and the bisection just
                        established. busbar proved every rung to c=4,096, bisected to c=6,176, failed
@@ -2188,9 +2207,7 @@ pub fn sweep_streams_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> Cel
                         stop = StreamStop::FloorReached { last: ceiling };
                         break;
                     }
-                    eprintln!(
-                        "streams: c={ceiling} held the gate in only {held} of {total} windows - stepping down to c={next}"
-                    );
+                    eprintln!("streams: c={ceiling} did not hold - stepping down to c={next}");
                     ceiling = next;
                     // We just drove `ceiling * 2` streams through this host; the stepped rung is the
                     // measurement most exposed to that residue, because it is the one that decides
@@ -2309,8 +2326,12 @@ pub fn sweep_streams_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> Cel
                                     break;
                                 }
                                 if !recovered {
+                                    // One vote against the rung, not a verdict on the search. Abandon
+                                    // this rung unconfirmed and narrow again on the next pass; if the
+                                    // budget runs out first the stop below is what publishes.
                                     stop = StreamStop::SteppedRungFailed { at: ceiling };
-                                    break;
+                                    seed_failed = true;
+                                    continue;
                                 }
                             } else {
                                 first_fps = w.fps();
@@ -3324,7 +3345,7 @@ while True:
     }
 
     #[test]
-    fn a_stepped_down_stream_rung_whose_fresh_window_fails_ends_the_search_without_a_vote() {
+    fn a_stepped_down_stream_rung_whose_fresh_window_fails_never_votes_for_itself() {
         let gw = sse_ladder_server(|n| n <= 3 || n >= 16);
         let cfg = cfg_for(gw, gw);
         let id = CellId::new("openai", "openai");
@@ -3339,17 +3360,21 @@ while True:
             None,
             "no rung held a majority of real windows, so nothing was proven sustained"
         );
-        // TIGHTENED, not relaxed. It used to accept the generic "did not hold the stream gate",
-        // which was the ONE sentence every ending shared - so this assertion passed for endings that
-        // had nothing to do with a stepped-down rung, including a RIG shortfall. This test's own name
-        // says which ending it builds, so it now demands that ending's own words.
+        /* THE ENDING MOVED, ON PURPOSE, AND THE TWO ASSERTIONS ABOVE ARE THE ONES THAT MATTER.
+        A failed seed used to END the search right there, which cost plano `anthropic>anthropic`
+        its number: c=71 failed one window and every concurrency down to the c=64 it had already
+        carried went untried. A failed seed now abandons that rung unconfirmed and buys another
+        step-down, so this fixture - which fails every rung in 4..15 - walks to the bottom of its
+        range and ends at the FLOOR instead.
+
+        What has not changed, and is what this test is for: the rung that could not seed never got
+        a vote, and nothing was published. Still asserted above, still the invariant. */
         assert!(
             r.fps
                 .detail()
                 .unwrap_or_default()
-                .contains("failed the stream gate on its first window"),
-            "the absence must name THIS ending - a stepped-down rung failing its first window - \
-             rather than a sentence shared with every other way the search can end: {:?}",
+                .contains("reached the bottom of the searched range"),
+            "the absence must name the ending the search actually reached: {:?}",
             r.fps.detail()
         );
     }
