@@ -230,12 +230,36 @@ function resolvedSnapshot(key) {
   // The base is the newest run that is NOT a strict subset of the widest - i.e. a full run.
   const fulls = snaps.filter((s) => !isStrictSubset(s.__coords, widest.__coords));
   const base = fulls[fulls.length - 1];
-  const scopedNewer = snaps.filter((s) => isStrictSubset(s.__coords, widest.__coords) && s.__ms >= base.__ms);
+  /* SUBSET OF THE BASE, NOT OF THE WIDEST. Subset-ness only means anything relative to the run being
+     layered ONTO: a scoped re-run is a subset of the GRID, not necessarily of some historical
+     snapshot. Testing against `widest` misclassified any re-run that touched a coordinate the widest
+     run lacked - add a 7th dialect, re-run `OTB_DIALECTS=openai,vertex`, and its 4 cells contain
+     `vertex|openai`, which the old 36-cell run never had. Not a subset of `widest`, so it landed in
+     `fulls`, became the base by recency, and 33 measured cells vanished from the board. That is the
+     exact failure this module was written to prevent, arriving through the door next to the one it
+     was watching. */
+  const scopedNewer = snaps.filter((s) => isStrictSubset(s.__coords, base.__coords) && s.__ms >= base.__ms);
   if (!scopedNewer.length) return base;
   const out = structuredClone(base);
   out.__file = base.__file;
   let m = base.matrix;
-  for (const sc of scopedNewer) m = layerScopedMatrix(m, sc.matrix, sc);
+  for (const sc of scopedNewer) {
+    /* AND EACH SCOPED RUN IS SCREENED ON ITS OWN FLAGS. The degraded-mode refusal below reads
+       `snap.matrix`, which by then is the LAYERED result carrying the BASE run's mode flags -
+       `layerScopedMatrix` copies cells and nothing else. So every scoped snapshot that layered in was
+       exempt from the guard, and a `verify-local` smoke run with `cell_perf_sweep: false` could
+       replace the headline cell of a clean field run while the guard read the base's `true` and threw
+       nothing. Screening here, per run, is the only place the scoped run's own flags still exist. */
+    const degraded = snapshotDegradedMode(sc.matrix);
+    if (degraded) {
+      throw new Error(
+        `gen-data: REFUSING to layer a DEGRADED-MODE re-run into ${key}. ${sc.__file} ` +
+        `(measured_at ${sc.measured_at}) ran with ${degraded} - those phases were switched OFF, so it ` +
+        `is a local smoke run, not a measurement, and its cells would replace measured ones.\n` +
+        `  Fix: delete or move that snapshot out of results/snapshots/.`);
+    }
+    m = layerScopedMatrix(m, sc.matrix, sc);
+  }
   out.matrix = m;
   out.__layered_from = scopedNewer.map((s) => s.__file);
   return out;
