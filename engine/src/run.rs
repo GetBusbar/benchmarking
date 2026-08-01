@@ -1257,6 +1257,10 @@ pub struct StreamWindow {
     /// delivery shortfall, and the two are separate halves of the README's gate.
     pub streams: u64,
     pub errored: u64,
+    /// `errored`, split by ATTRIBUTION. Always sums to `errored`.
+    pub error_kinds: StreamErrorKinds,
+    /// The host's socket/descriptor state sampled just BEFORE this window opened its connections.
+    pub host_before: HostState,
     /// EVERY SSE event dispatched, across every lane. What `fps` is computed from, and what anything
     /// asking "did this stream at all" wants.
     ///
@@ -1450,6 +1454,106 @@ fn stalls_in(offsets: &[u64]) -> u64 {
 /// every other signal here reads clean; folding it into the delivery ratio instead would let a
 /// gateway that streams NOTHING be averaged away against lanes that did, and at high concurrency a
 /// handful of buffering lanes would vanish entirely.
+/// WHAT THE HOST LOOKED LIKE WHEN A WINDOW RAN.
+///
+/// A rung that fails at a concurrency the same cell already carried cleanly is either the gateway
+/// changing its mind or the host not having recovered, and no amount of staring at pass/fail can
+/// tell those apart. These are the counters that separate them, sampled immediately before the
+/// window opens its connections:
+///
+///   * `tw` - sockets in TIME_WAIT across the box (`/proc/net/sockstat`). The residue a previous
+///     window leaves behind, and the one that takes tens of seconds to clear.
+///   * `tcp_inuse` / `tcp_alloc` - live and allocated TCP sockets, so a leak shows as a floor that
+///     never returns rather than a spike that does.
+///   * `fds` - open descriptors in THIS process (`/proc/self/fd`), which is where a loadgen holding
+///     a reader per stream would show up.
+///
+/// All absent on a non-Linux host, which is honest rather than zero: a zero here would read as
+/// "the box was clean" on a machine that simply cannot answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct HostState {
+    pub tw: Option<u64>,
+    pub tcp_inuse: Option<u64>,
+    pub tcp_alloc: Option<u64>,
+    pub fds: Option<u64>,
+}
+
+impl HostState {
+    pub fn sample() -> Self {
+        let sockstat = std::fs::read_to_string("/proc/net/sockstat").unwrap_or_default();
+        // "TCP: inuse 5 orphan 0 tw 12 alloc 20 mem 2" - read by NAME, never by position: the field
+        // set differs across kernels and a positional read would silently return someone else's
+        // number rather than nothing.
+        let field = |name: &str| -> Option<u64> {
+            let line = sockstat.lines().find(|l| l.starts_with("TCP:"))?;
+            let mut it = line.split_whitespace();
+            while let Some(tok) = it.next() {
+                if tok == name {
+                    return it.next().and_then(|v| v.parse().ok());
+                }
+            }
+            None
+        };
+        Self {
+            tw: field("tw"),
+            tcp_inuse: field("inuse"),
+            tcp_alloc: field("alloc"),
+            fds: std::fs::read_dir("/proc/self/fd")
+                .ok()
+                .map(|d| d.count() as u64),
+        }
+    }
+    fn to_json(self) -> serde_json::Value {
+        serde_json::json!({
+            "tw": self.tw, "tcp_inuse": self.tcp_inuse,
+            "tcp_alloc": self.tcp_alloc, "fds": self.fds,
+        })
+    }
+}
+
+/// WHY a stream errored, not just THAT it did. One `errored` count cannot answer the only question
+/// worth asking about a failed rung - was it us or them - and that ambiguity is why the
+/// sustained-stream defect went undiagnosed: "636 of 8192 streams errored" reads like a gateway
+/// collapse and reads exactly the same when the peer reset every one of them for a reason of ours.
+///
+/// These are attribution classes, not error codes. `Refused`/`Reset` is the peer declining a
+/// connection it was asked for; `Status` is the peer answering and saying no; `NoFrames` is a 2xx
+/// that never produced an event; `Malformed`/`NotEventStream` is the peer speaking something that is
+/// not SSE. Rig-side ends (`RigExhausted`, `RigRefused`) never reach here - `stream_window` discards
+/// the whole window for those, so they cannot be laundered into a gateway's error rate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct StreamErrorKinds {
+    /// The peer refused, reset, or was unreachable - the connection never carried a request.
+    pub connect_failed: u64,
+    /// The peer answered with a non-2xx status.
+    pub status: u64,
+    /// A 2xx that delivered no event at all.
+    pub no_frames: u64,
+    /// The peer answered 2xx but did not speak a well-formed event stream.
+    pub not_event_stream: u64,
+}
+
+impl StreamErrorKinds {
+    pub fn total(&self) -> u64 {
+        self.connect_failed + self.status + self.no_frames + self.not_event_stream
+    }
+    fn add(&mut self, o: &crate::http::SseOutcome) {
+        use crate::http::SseEnd;
+        // ORDER MATTERS AND MIRRORS `stream_errored`: a lane that never connected has no status and
+        // no frames, so testing frames first would file every refused connection as "no frames" and
+        // erase the distinction this type exists for.
+        if matches!(o.end, SseEnd::ConnectionFailed(_)) {
+            self.connect_failed += 1;
+        } else if !o.status.is_some_and(|s| (200..300).contains(&s)) {
+            self.status += 1;
+        } else if matches!(o.end, SseEnd::Malformed(_) | SseEnd::NotAnEventStream(_)) {
+            self.not_event_stream += 1;
+        } else {
+            self.no_frames += 1;
+        }
+    }
+}
+
 fn stream_errored(o: &crate::http::SseOutcome) -> bool {
     // THE RIG RUNNING OUT IS NOT AN ERRORED STREAM. A lane that could not get a source port never
     // asked the gateway anything, and counting it here published our own exhaustion as the gateway's
@@ -1588,6 +1692,11 @@ pub fn stream_window(
     let body = body.to_string();
     let headers = headers.to_vec();
 
+    // SAMPLED HERE, before a single connection is opened, because the question this answers is what
+    // the window INHERITED - not what it left behind. Sampling after would measure this window's own
+    // sockets and could never distinguish a dirty start from a busy finish.
+    let host_before = HostState::sample();
+
     let (outcomes, panicked, elapsed_s): (Vec<crate::http::SseOutcome>, usize, f64) =
         rt.block_on(async move {
             let mut lanes = Vec::with_capacity(concurrency as usize);
@@ -1635,6 +1744,8 @@ pub fn stream_window(
         concurrency,
         streams: 0,
         errored: 0,
+        error_kinds: StreamErrorKinds::default(),
+        host_before,
         frames: 0,
         expected_frames: 0,
         content_frames: 0,
@@ -1675,6 +1786,7 @@ pub fn stream_window(
         w.expected_content_frames += content_budget;
         if stream_errored(&o) {
             w.errored += 1;
+            w.error_kinds.add(&o);
         }
         w.frames += o.frame_offsets_us.len() as u64;
         w.content_frames += o.content_frames;
@@ -1774,6 +1886,13 @@ pub struct StreamPoint {
     pub expected_content_frames: u64,
     pub streams: u64,
     pub errored: u64,
+    /// `errored`, split by attribution - see `StreamErrorKinds`. Rides on the POINT, not just the
+    /// window, because the sweep array is the only record that survives into the snapshot, and a
+    /// failed rung whose cause is not recorded there cannot be diagnosed after the box is gone.
+    pub error_kinds: StreamErrorKinds,
+    /// The host state this rung was measured against - see `HostState`. On the POINT because the
+    /// sweep array is what survives into the snapshot.
+    pub host_before: HostState,
     pub stalls: u64,
     /// WHY the gate failed, from `streams_gate_verdict`, when it did. A failing rung publishes the
     /// clause that tripped with the counts that tripped it, so "no rung passed" is never a bare
@@ -1798,6 +1917,13 @@ impl StreamPoint {
             "content_frames_expected": self.expected_content_frames,
             "streams": self.streams,
             "stream_errors": self.errored,
+            // THE BREAKDOWN, always emitted (zeros included) so a clean rung and an unrecorded one
+            // are distinguishable in the snapshot.
+            "stream_errors_connect_failed": self.error_kinds.connect_failed,
+            "stream_errors_status": self.error_kinds.status,
+            "stream_errors_no_frames": self.error_kinds.no_frames,
+            "stream_errors_not_event_stream": self.error_kinds.not_event_stream,
+            "host_before": self.host_before.to_json(),
             "stalls": self.stalls,
         });
         if let (Some(why), Some(obj)) = (&self.why, v.as_object_mut()) {
@@ -1818,6 +1944,8 @@ fn point_of(w: &StreamWindow, passed: bool) -> StreamPoint {
         expected_content_frames: w.expected_content_frames,
         streams: w.streams,
         errored: w.errored,
+        error_kinds: w.error_kinds,
+        host_before: w.host_before,
         stalls: w.stalls,
         why: if passed {
             None
@@ -3506,6 +3634,8 @@ while True:
             concurrency,
             streams,
             errored: 0,
+            error_kinds: StreamErrorKinds::default(),
+            host_before: HostState::default(),
             frames: streams * budget,
             expected_frames: streams * budget,
             content_frames: streams * content,
@@ -4771,6 +4901,8 @@ while True:
             concurrency: 1024,
             streams: 1024,
             errored: 0,
+            error_kinds: StreamErrorKinds::default(),
+            host_before: HostState::default(),
             frames: 65_536,
             expected_frames: 65_536,
             content_frames: 64_512,
@@ -4791,6 +4923,8 @@ while True:
             concurrency: 1024,
             streams: 1024,
             errored: 0,
+            error_kinds: StreamErrorKinds::default(),
+            host_before: HostState::default(),
             frames: 65_536,
             expected_frames: 65_536,
             content_frames: 64_513,
@@ -4816,6 +4950,8 @@ while True:
             concurrency: 256,
             streams: 256,
             errored: 0,
+            error_kinds: StreamErrorKinds::default(),
+            host_before: HostState::default(),
             // Well over the mock's own event layout: pings between every delta.
             frames: 40_000,
             expected_frames: 16_384,
@@ -4840,6 +4976,8 @@ while True:
             concurrency: 8,
             streams: 8,
             errored: 0,
+            error_kinds: StreamErrorKinds::default(),
+            host_before: HostState::default(),
             frames: 512,
             expected_frames: 512,
             content_frames: 504,
@@ -5044,5 +5182,122 @@ mod contamination_tests {
             "the rungs that actually broke must get a real pause, got {}",
             ms(6176)
         );
+    }
+}
+
+#[cfg(test)]
+mod stream_error_kind_tests {
+    use super::*;
+    use crate::http::{SseEnd, SseOutcome};
+
+    fn outcome(status: Option<u16>, frames: usize, end: SseEnd) -> SseOutcome {
+        SseOutcome {
+            status,
+            frames: vec!["x".into(); frames],
+            frame_offsets_us: vec![1; frames],
+            content_frames: frames as u64,
+            end,
+        }
+    }
+
+    /* THE WHOLE POINT IS ATTRIBUTION, so the ordering inside `add` is load-bearing rather than
+    stylistic. A refused connection has no status and no frames; if frames were tested first,
+    every refused connection would be filed as "no frames" and the one distinction this type
+    exists to draw - the peer declining a connection vs the peer answering badly - would be
+    erased in exactly the case we need it. */
+    #[test]
+    fn each_error_is_filed_under_the_thing_that_actually_went_wrong() {
+        let mut k = StreamErrorKinds::default();
+        k.add(&outcome(
+            None,
+            0,
+            SseEnd::ConnectionFailed("refused".into()),
+        ));
+        assert_eq!(
+            (k.connect_failed, k.no_frames),
+            (1, 0),
+            "a refused connection must not be filed as 'answered 2xx but sent nothing'"
+        );
+
+        let mut k = StreamErrorKinds::default();
+        k.add(&outcome(Some(503), 0, SseEnd::StreamClosed));
+        assert_eq!(
+            (k.status, k.no_frames),
+            (1, 0),
+            "a non-2xx is a status error, not a frame famine"
+        );
+
+        let mut k = StreamErrorKinds::default();
+        k.add(&outcome(Some(200), 0, SseEnd::StreamClosed));
+        assert_eq!(
+            k.no_frames, 1,
+            "a 2xx that delivered nothing is its own finding"
+        );
+
+        let mut k = StreamErrorKinds::default();
+        k.add(&outcome(
+            Some(200),
+            3,
+            SseEnd::NotAnEventStream("text/html".into()),
+        ));
+        assert_eq!(
+            k.not_event_stream, 1,
+            "a 2xx that is not SSE is a protocol error"
+        );
+
+        let mut k = StreamErrorKinds::default();
+        k.add(&outcome(
+            Some(200),
+            3,
+            SseEnd::Malformed("bad frame".into()),
+        ));
+        assert_eq!(
+            k.not_event_stream, 1,
+            "malformed shares the protocol-error class"
+        );
+    }
+
+    /// The breakdown must account for every error, or a reader subtracting the parts from the total
+    /// finds a remainder with no name and learns nothing.
+    #[test]
+    fn the_kinds_sum_to_the_errored_count() {
+        let outcomes = [
+            outcome(None, 0, SseEnd::ConnectionFailed("reset".into())),
+            outcome(Some(502), 0, SseEnd::StreamClosed),
+            outcome(Some(200), 0, SseEnd::Timeout),
+            outcome(Some(200), 2, SseEnd::Malformed("x".into())),
+        ];
+        let mut k = StreamErrorKinds::default();
+        let mut errored = 0u64;
+        for o in &outcomes {
+            if stream_errored(o) {
+                errored += 1;
+                k.add(o);
+            }
+        }
+        assert_eq!(
+            k.total(),
+            errored,
+            "every counted error must land in exactly one class"
+        );
+        assert_eq!(
+            errored, 4,
+            "this fixture must actually produce errors to be testing anything"
+        );
+    }
+
+    /// Rig-side ends never reach the classifier - `stream_window` discards the whole window - so they
+    /// must not be classifiable as a gateway error even if one leaked through.
+    #[test]
+    fn rig_side_ends_are_not_gateway_errors() {
+        for end in [
+            SseEnd::RigExhausted("EADDRNOTAVAIL".into()),
+            SseEnd::RigRefused("no credential".into()),
+        ] {
+            assert!(
+                !stream_errored(&outcome(None, 0, end)),
+                "the rig running out is never the gateway's error rate"
+            );
+        }
     }
 }
