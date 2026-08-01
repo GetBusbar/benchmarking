@@ -612,6 +612,19 @@ def check_a_wedged_gateway_is_named_as_one(name, c):
     tail = [r.get("passed") is True for r in rungs[-5:]]
     if any(tail):
         return
+    # A WEDGE IS A FAILURE BELOW WHAT THE CELL ALREADY CARRIED, not merely a run of failures at the
+    # end. A budget-exhausted step-down ALWAYS ends on a run of failures - that is its shape - and
+    # agentgateway anthropic>openai showed it: proven clean to c=2048, then five failures walking
+    # 3170 -> 2118, every one of them ABOVE 2048. The gateway never stopped serving anything it had
+    # held; it just did not converge above what it carried, which is ordinary non-convergence and is
+    # already reported as such.
+    #
+    # This fired mid-run as a violation, the second false positive of its kind. The impossible
+    # signature - and the only one that means the process stopped serving - is a tail failure at or
+    # under the top of the uncontaminated ascending prefix.
+    clean = proven_clean_top(rungs)
+    if clean <= 0 or not any((r.get("conc") or 0) <= clean for r in rungs[-5:]):
+        return
     absences = c.get("absences") or {}
     detail = ((absences.get("stream.streams_sustained") or {}).get("detail") or "").lower()
     if "recover" not in detail and "restart" not in detail:
