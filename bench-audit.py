@@ -446,6 +446,174 @@ def check_stream_capacity_is_a_number(name, c):
                    f"streaming cell - a search that stops producing must say why")
 
 
+# ── the SEARCH TRACE's invariants ────────────────────────────────────────────────────────────────
+#
+# EVERY CHECK ABOVE READS THE PUBLISHED NUMBER. None of them read `sweep_streams`, the trace of the
+# search that produced it - and that is exactly how this file returned PASS ten times over a board in
+# which eight cells had silently given up. `check_stream_capacity_is_a_number` even accepts those on
+# purpose: an absence carrying prose ("the bisection proved c=6144 and could not reconfirm it") reads
+# as a search that ran, failed honestly, and said why. It cannot tell that apart from a search that
+# quit with most of its budget unspent, because it never looks at what the search actually did.
+#
+# These checks close that. The bar is the same as the frontier's: re-derive from the evidence and
+# demand agreement, rather than trust the summary. The trace is published on every streaming cell, so
+# the search's own behaviour is auditable from committed JSON with no rig and no box - which is where
+# every defect of this class should have been caught, and was not.
+#
+# Old snapshots predate the typed-error and host-state fields; a check that needs them skips rather
+# than fails, because absent evidence is not evidence of a defect.
+
+
+def stream_trace(c):
+    """The rungs a streaming cell's search actually probed, in order, or None."""
+    st = c.get("stream") or {}
+    if st.get("stream_served") is not True:
+        return None
+    sw = st.get("sweep_streams")
+    return sw if isinstance(sw, list) and sw else None
+
+
+def proven_clean_top(rungs):
+    """The highest concurrency the UNCONTAMINATED ascending prefix carried - every rung from the
+    first up to and including it passed, before anything in this cell had failed."""
+    top = 0
+    for r in rungs:
+        if r.get("passed") is not True:
+            break
+        top = max(top, r.get("conc") or 0)
+    return top
+
+
+def check_search_spent_its_budget(name, c):
+    """A search that publishes nothing must have RUN OUT, not stopped early.
+
+    plano `anthropic>anthropic` is the case: the ascending sweep carried c=64, the bisection settled
+    on c=79, confirmation failed, the step-down bisected to c=71, its first window failed - and the
+    search ended there, with every concurrency between 64 and 71 untried and most of its step-down
+    budget unspent. A rung is confirmed by MAJORITY, not by its first window (one-api's published 266
+    came from `[pass, pass, fail]`), so one failing window is a vote, not a verdict.
+
+    The signature is a gap: the search stopped at a rung strictly above a concurrency it had already
+    carried, having probed nothing in between. That is room it declined to use, and the cell paid for
+    it with an absence where a number was available.
+    """
+    rungs = stream_trace(c)
+    if not rungs:
+        return
+    st = c.get("stream") or {}
+    if st.get("streams_sustained") is not None:
+        return
+    clean = proven_clean_top(rungs)
+    if clean <= 0:
+        return
+    lowest = min(r.get("conc") or 0 for r in rungs[1:]) if len(rungs) > 1 else 0
+    if lowest <= clean + 1:
+        return                                   # it walked down to (or below) what it had carried
+    between = [r for r in rungs if clean < (r.get("conc") or 0) < lowest]
+    if not between:
+        yield (f"{name}: the search published nothing but stopped at c={lowest} while it had already "
+               f"carried c={clean}, probing none of the {lowest - clean - 1} concurrencies between - "
+               f"it gave up with budget unspent, and a majority-confirmed rung may well be in there")
+
+
+def check_no_rung_fails_below_one_already_carried(name, c):
+    """A rung cannot fail below one the same cell has already carried cleanly - unless something
+    other than the gateway changed, and then the absence must SAY so.
+
+    This is the signature that took six cells off the 2026-07-31 board. It is either our rig failing
+    to drain between windows or a gateway that stopped serving after an overload, and both are
+    findings; what is not acceptable is publishing it as an ordinary failure with no attribution.
+    """
+    rungs = stream_trace(c)
+    if not rungs:
+        return
+    clean = proven_clean_top(rungs)
+    if clean <= 0:
+        return
+    below = [r.get("conc") for r in rungs if r.get("passed") is not True and (r.get("conc") or 0) <= clean]
+    if not below:
+        return
+    absences = c.get("absences") or {}
+    detail = ((absences.get("stream.streams_sustained") or {}).get("detail") or "").lower()
+    named = any(k in detail for k in ("already carried", "did not recover", "drain", "rig", "restart"))
+    if not named:
+        yield (f"{name}: rung(s) {sorted(set(below))} failed at or below c={clean}, which this cell had "
+               f"already carried cleanly - impossible for the gateway alone, and the absence does not "
+               f"name what else changed")
+
+
+def check_published_rung_held_a_majority(name, c):
+    """The published sustained figure must be a rung whose windows in the trace actually held.
+
+    The engine confirms by majority and the trace records every window, so this is re-derivable. A
+    published rung that lost its own windows would mean the summary and the evidence disagree - the
+    one defect the design cannot rule out structurally.
+    """
+    rungs = stream_trace(c)
+    if not rungs:
+        return
+    st = c.get("stream") or {}
+    sus = st.get("streams_sustained")
+    if sus is None:
+        return
+    at = [r.get("passed") is True for r in rungs if (r.get("conc") or 0) == sus]
+    if not at:
+        yield (f"{name}: publishes streams_sustained={sus} but the trace contains no window at that "
+               f"concurrency - the number did not come from this sweep")
+        return
+    if sum(at) * 2 <= len(at):
+        yield (f"{name}: publishes streams_sustained={sus} on {sum(at)} of {len(at)} windows - the "
+               f"engine's own rule is a majority, so this rung was not confirmed")
+
+
+def check_a_wedged_gateway_is_named_as_one(name, c):
+    """A gateway that stops serving and never resumes must be reported as that, not as a bare absence.
+
+    aisix carried every rung to c=8,192, was pushed to c=16,384, then failed seventeen consecutive
+    windows including c=4,096 which it had just served. "It does not recover from overload" is the
+    single most useful thing a reader could learn from that cell, and it was published as silence.
+    """
+    rungs = stream_trace(c)
+    if not rungs or len(rungs) < 6:
+        return
+    tail = [r.get("passed") is True for r in rungs[-5:]]
+    if any(tail):
+        return
+    absences = c.get("absences") or {}
+    detail = ((absences.get("stream.streams_sustained") or {}).get("detail") or "").lower()
+    if "recover" not in detail and "restart" not in detail:
+        yield (f"{name}: the last 5 rungs all failed - the gateway stopped serving and did not come "
+               f"back - but the absence does not say so")
+
+
+def check_no_rig_side_error_is_charged_to_the_gateway(name, c):
+    """A connection this HOST could not make is never the gateway's error.
+
+    The engine discards a whole window on `RigExhausted`, so a counted connect-failure means the peer
+    refused - but the typed breakdown is what makes that checkable rather than assumed. Skipped on
+    snapshots that predate the typed fields.
+    """
+    rungs = stream_trace(c)
+    if not rungs:
+        return
+    if not any("stream_errors_connect_failed" in r for r in rungs):
+        return
+    bad = [(r.get("conc"), r.get("stream_errors_connect_failed")) for r in rungs
+           if (r.get("stream_errors_connect_failed") or 0) > 0]
+    for conc, n in bad:
+        yield (f"{name}: c={conc} counted {n} connect-failure(s) against the gateway - a connection "
+               f"that was never made is not a stream the gateway failed to serve")
+
+
+TRACE_CHECKS = [
+    check_search_spent_its_budget,
+    check_no_rung_fails_below_one_already_carried,
+    check_published_rung_held_a_majority,
+    check_a_wedged_gateway_is_named_as_one,
+    check_no_rig_side_error_is_charged_to_the_gateway,
+]
+
+
 # ── the frontier's invariants ─────────────────────────────────────────────────────────────────────
 #
 # `perf.frontier` is SIX READINGS OF ONE RUNG SET, published beside the rung set itself
@@ -996,7 +1164,7 @@ CELL_CHECKS = [
     check_no_bare_absence,
     check_declared_fields_are_carried,
     check_stream_capacity_is_a_number,
-] + FRONTIER_CHECKS
+] + FRONTIER_CHECKS + TRACE_CHECKS
 
 def parse_rust_absences(text, struct_name):
     """The exact field list `struct_name::absences()` walks, read out of record.rs's own
