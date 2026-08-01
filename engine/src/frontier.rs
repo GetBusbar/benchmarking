@@ -199,11 +199,30 @@ pub fn read_at(rungs: &[Rung], bound: Option<u64>) -> Option<Reading> {
     // The boundary proof: the lowest concurrency ABOVE the winner that did not qualify. Read from the
     // rungs rather than assumed, so a sweep that never probed higher reports no boundary instead of
     // an invented one.
-    let first_disqualified_conc = rungs
+    /* A CONCURRENCY IS DISQUALIFIED ONLY IF NONE OF ITS WINDOWS QUALIFIED.
+    `rungs` are PER WINDOW - `climb_rungs` emits WINDOWS_PER_RUNG of them at each concurrency, and
+    every published sweep shows each concurrency three times. Taking the min over any single
+    non-qualifying rung therefore let ONE unlucky window disqualify its whole concurrency: on the
+    2026-07-31 board, 36 of 456 published readings named a boundary at a concurrency where the
+    majority of windows had qualified (busbar openai-responses>bedrock and both aisix cells name
+    c=1024, which qualified in 2 of its 3 windows).
+
+    That number is the reading's boundary PROOF - the evidence for "this is where it stopped" -
+    so naming a concurrency the gateway demonstrably held is exactly the claim it exists to
+    support, inverted. The true boundary is the lowest concurrency above the winner at which the
+    gateway did not qualify in ANY window. */
+    let mut disqualified: Vec<u32> = rungs
         .iter()
-        .filter(|r| r.concurrency > best.concurrency && !r.qualifies(bound))
+        .filter(|r| r.concurrency > best.concurrency)
         .map(|r| r.concurrency)
-        .min();
+        .filter(|c| {
+            !rungs
+                .iter()
+                .any(|r| r.concurrency == *c && r.qualifies(bound))
+        })
+        .collect();
+    disqualified.sort_unstable();
+    let first_disqualified_conc = disqualified.first().copied();
     // The top of what we ASKED FOR, over every rung probed - qualifying or not, since a rung that failed
     // is still a rung we looked at and is exactly what proves we did not stop early.
     let top_probed_conc = rungs.iter().map(|r| r.concurrency).max().unwrap_or(0);
@@ -649,5 +668,63 @@ mod absence_attribution_tests {
             d.contains("that reported a tail"),
             "the sentence must be scoped to the rungs it can actually speak for: {d}"
         );
+    }
+}
+
+#[cfg(test)]
+mod boundary_proof_tests {
+    use super::*;
+
+    fn r(concurrency: u32, rps: f64, p99_ms: u64, fail: u64) -> Rung {
+        Rung {
+            concurrency,
+            rps,
+            p99_us: Some(p99_ms * 1_000),
+            ok: 10_000,
+            fail,
+        }
+    }
+
+    /* ONE UNLUCKY WINDOW MUST NOT DISQUALIFY ITS WHOLE CONCURRENCY. Rungs are per-window, so this
+    filter used to name a boundary at a concurrency the gateway had demonstrably held - 36 of 456
+    published readings on the 2026-07-31 board did exactly that. The boundary is a reading's
+    PROOF that it stopped where it says; naming a concurrency that qualified inverts it. */
+    #[test]
+    fn a_concurrency_that_qualified_in_any_window_is_not_the_boundary() {
+        let rungs = vec![
+            r(64, 900.0, 4, 0),
+            r(256, 850.0, 4, 0),
+            r(256, 850.0, 4, 0),
+            r(256, 840.0, 4, 2), // one dirty window at a concurrency that otherwise held
+            r(1024, 800.0, 40, 0), // the real boundary: over the 5ms bound in every window
+        ];
+        let reading = read_at(&rungs, Some(5_000)).expect("a reading must resolve");
+        assert_eq!(
+            reading.first_disqualified_conc,
+            Some(1024),
+            "c=256 qualified in 2 of 3 windows, so it is not where the gateway stopped"
+        );
+    }
+
+    /// And a concurrency that failed in EVERY window is still reported, or the fix has blinded the
+    /// proof entirely.
+    #[test]
+    fn a_concurrency_that_failed_every_window_is_still_the_boundary() {
+        let rungs = vec![
+            r(64, 900.0, 4, 0),
+            r(256, 850.0, 40, 0),
+            r(256, 850.0, 40, 0),
+            r(256, 840.0, 40, 0),
+        ];
+        let reading = read_at(&rungs, Some(5_000)).expect("a reading must resolve");
+        assert_eq!(reading.first_disqualified_conc, Some(256));
+    }
+
+    /// A sweep that never probed higher reports no boundary rather than an invented one.
+    #[test]
+    fn a_sweep_that_stopped_at_the_winner_names_no_boundary() {
+        let rungs = vec![r(64, 900.0, 4, 0), r(64, 900.0, 4, 0)];
+        let reading = read_at(&rungs, Some(5_000)).expect("a reading must resolve");
+        assert_eq!(reading.first_disqualified_conc, None);
     }
 }
