@@ -183,22 +183,6 @@ REJECTS = [
     (audit.check_sweep_carries_its_latency,
      cell(perf__sweep_max_proxy=[{"conc": 64, "rps": 10_000, "p99_us": None, "fail": None}]),
      "throughput windows published without the p99 they measured"),
-    (audit.check_ttft_percentiles_are_ordered, cell(stream__added_ttft_p99_us=50),
-     "a p99 below the p50 from the same sample set"),
-    # REMOVED: check_rate_and_concurrency_travel_together paired `rps_sustained_20ms` with
-    # `rps_sustained_20ms_concurrency`, and `rps_max_proxy` with `conc_at_peak` - all four fields
-    # deleted. A rate and its concurrency are no longer two sibling keys that can drift apart; they
-    # are two fields of one `Reading` object emitted from one `frontier::read_at` call, which cannot
-    # exist without both. What CAN still go wrong - a reading's concurrency naming a rung that did not
-    # actually carry its published rate - is caught by `check_frontier_is_rederivable_from_its_sweep`
-    # (tested above) and by `check_every_absent_frontier_reading_has_a_reason` for the absent case
-    # (tested below).
-    #
-    # REMOVED (RE-POINTED, NOT DROPPED): check_rate_is_physically_possible read
-    # `rps_max_proxy / conc_at_peak`, both deleted. The defect class it guarded - a rate divided by the
-    # wrong thing - is a property of any published rate/concurrency pair and did not go away with the
-    # scalars, so it moved to `check_frontier_rate_is_physically_possible` (tested above), which runs
-    # the same arithmetic up to six times per cell instead of once.
     (audit.check_no_bare_absence, cell(stream__added_gap_p50_us=None),
      "a null metric with no reason in absences (a bare hole)"),
     # The other half of the hole: `check_no_bare_absence` reads `f in blk and blk[f] is None`, so a

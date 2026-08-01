@@ -234,19 +234,22 @@ def check_sweep_carries_its_latency(name, c):
         yield f"{name}: all {len(pts)} throughput windows published without the p99 they measured"
 
 
-def check_ttft_percentiles_are_ordered(name, c):
-    """p99 cannot sit below p50 when both come from one sample set.
-
-    Distinct from a difference-of-percentiles, which genuinely has no ordering: `added_gap_p99_us`
-    below `added_gap_p50_us` is legal, because each is an independent difference between two legs'
-    matched percentiles. A guard that conflated the two fired on plano and would have failed the
-    build for all fourteen gateways.
-    """
-    st = c.get("stream") or {}
-    a, b = st.get("added_ttft_p50_us"), st.get("added_ttft_p99_us")
-    if a is not None and b is not None and b < a:
-        yield f"{name}: added_ttft p99 {b} sits below p50 {a}"
-
+# REMOVED: check_ttft_percentiles_are_ordered. Its own docstring carved out the exact reason it was
+# unsound - "distinct from a difference-of-percentiles, which genuinely has no ordering:
+# added_gap_p99_us below added_gap_p50_us is legal, because each is an independent difference between
+# two legs' matched percentiles" - and then applied the rule to `added_ttft`, which is built the
+# identical way (`added_ttft_at` subtracts the direct leg's percentile from the gateway leg's, one
+# percentile at a time). The carve-out was right; it just was not applied consistently.
+#
+# It fired on litellm-rust anthropic>anthropic in the 2026-08-01 run (p99 177 below p50 182) - real,
+# correct data - and, because CI gates on this file, would have failed the build for a board that was
+# fine. That is the third copy of this same unsound rule found in this project; the other two were
+# deleted from audit-every-metric.py and verify-latency.py for the same reason.
+#
+# Nothing replaces it because there is nothing sound left to point it at: every percentile this
+# artifact publishes (added_ttft_p50/p99, added_gap_p50/p99, added_latency_p50/p99) is a DIFFERENCE.
+# The raw single-population legs are not on the wire, so no ordering invariant exists to check. A
+# guard that cannot be stated soundly is worse than no guard - it fails honest boards.
 
 # REMOVED: check_rate_and_concurrency_travel_together. It paired `rps_sustained_20ms` with
 # `rps_sustained_20ms_concurrency` and `rps_max_proxy` with `conc_at_peak`, and the failure it guarded was
@@ -941,10 +944,23 @@ def check_frontier_is_rederivable_from_its_sweep(name, c, ok_known=True):
         # qualifying. Absent is not a hole here - it is the positive finding that the sweep ran out of
         # range while this bound still held, which is why `first_disqualified_conc` is the one reading
         # field the engine deliberately keeps OUT of the absences map (see `CellPerf::absences`).
+        #
+        # RE-DERIVED PER CONCURRENCY, NOT PER RUNG. Rungs are per WINDOW - each concurrency appears
+        # WINDOWS_PER_RUNG times - so taking the min over any single non-qualifying rung let ONE
+        # unlucky window disqualify its whole concurrency. helicone openai>openai in the 2026-08-01
+        # run is the case: c=128 qualified in 1 of its 3 windows and failed the other two, so the old
+        # rule called 128 the boundary while the gateway had demonstrably held it; c=256 qualified in
+        # none, and is the honest answer.
+        #
+        # "Any qualifying window" is the right test because it is exactly how the WINNER is chosen -
+        # `read_at` maximises over qualifying rungs, so a concurrency with one qualifying window is
+        # eligible to win. A boundary rule stricter than the winner rule could name a concurrency the
+        # same reading might have been taken at.
         if isinstance(pub_conc, (int, float)):
-            above = [q["conc"] for q in rungs
-                     if isinstance(q.get("conc"), (int, float)) and q["conc"] > pub_conc
-                     and not rung_qualifies(q, bound)]
+            concs_above = {q["conc"] for q in rungs
+                           if isinstance(q.get("conc"), (int, float)) and q["conc"] > pub_conc}
+            above = [c for c in concs_above
+                     if not any(rung_qualifies(q, bound) for q in rungs if q.get("conc") == c)]
             expect_fd = min(above) if above else None
             got_fd = r.get("first_disqualified_conc")
             if got_fd != expect_fd:
@@ -1190,7 +1206,6 @@ FRONTIER_CHECKS = [
 
 CELL_CHECKS = [
     check_sweep_carries_its_latency,
-    check_ttft_percentiles_are_ordered,
     check_no_bare_absence,
     check_declared_fields_are_carried,
     check_stream_capacity_is_a_number,
