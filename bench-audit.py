@@ -490,6 +490,11 @@ def proven_clean_top(rungs):
     return top
 
 
+# Mirrors engine/src/run.rs's MAX_CEILING_STEPDOWNS. A copy rather than a read because this file
+# audits committed artifacts and must not depend on the engine source that produced them.
+MAX_CEILING_STEPDOWNS = 4
+
+
 def check_search_spent_its_budget(name, c):
     """A search that publishes nothing must have RUN OUT, not stopped early.
 
@@ -520,6 +525,20 @@ def check_search_spent_its_budget(name, c):
     lowest = rungs[-1].get("conc") or 0
     if lowest <= clean + 1:
         return                                   # it walked down to (or below) what it had carried
+    # A SEARCH THAT SPENT ITS DECLARED BUDGET DID NOT GIVE UP - it ran out, which is a different
+    # finding and not a defect. plano anthropic>anthropic on the 2026-08-01 run is the case: the
+    # bisection proved c=224, confirmation failed, and the step-down walked 176 -> 152 -> 140 -> 134,
+    # four rungs, exactly MAX_CEILING_STEPDOWNS. This check could only see the gap between the last
+    # rung and the carried one, so it read a fully-spent budget as an abandoned one and would have
+    # stopped a 14-box run for it.
+    #
+    # Counting distinct concurrencies probed BELOW the bisected ceiling is the budget as the trace
+    # shows it. At the cap the honest reading is "our search range was too small for this cell",
+    # which belongs in the run's write-up, not in a defect report.
+    stepped = {r.get("conc") for r in rungs if clean < (r.get("conc") or 0)}
+    walked_down = len([c for c in stepped if c < max(stepped)])
+    if walked_down >= MAX_CEILING_STEPDOWNS:
+        return
     between = [r for r in rungs if clean < (r.get("conc") or 0) < lowest]
     if not between:
         yield (f"{name}: the search published nothing but stopped at c={lowest} while it had already "
