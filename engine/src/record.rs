@@ -779,6 +779,19 @@ pub struct CellMemory {
     pub shape: Measurement<f64>,
     #[serde(default = "measurement_default")]
     pub idle_shape: Measurement<f64>,
+    /* THE IDLE-LEAK VERDICT AND ITS RATE. `Memory` declares twelve fields and measures all twelve;
+    `CellMemory` carried ten, and these were the two with nowhere to land - so they were computed
+    on every served cell and then dropped, with no field, no null and no absence entry. The board
+    renders "at rest, before any load" with no verdict because `site/app.js` reads exactly these
+    two names and gets `undefined`.
+
+    A gateway whose RSS climbs at idle - which `metric.rs` calls the most damning memory result
+    there is - published identically to one holding perfectly flat. A missing key and a null mean
+    different things, and only one of them is honest. */
+    #[serde(default = "measurement_default")]
+    pub idle_static: Measurement<f64>,
+    #[serde(default = "measurement_default")]
+    pub idle_growth_rate_mib_per_min: Measurement<f64>,
     #[serde(default, deserialize_with = "null_as_empty_vec")]
     pub rss_series: Vec<RssSample>,
     /// The IDLE window's own readings, so the board can draw what the process did while nothing was
@@ -811,6 +824,8 @@ impl CellMemory {
             load_s,
             shape,
             idle_shape,
+            idle_static,
+            idle_growth_rate_mib_per_min,
         )
     }
 }

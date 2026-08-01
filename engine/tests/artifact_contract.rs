@@ -97,7 +97,13 @@ const DERIVED_STREAM_METRICS: [&str; 2] = [
 /// contract about settled ones.
 const CONDITIONAL_MEMORY_METRICS: [&str; 2] = ["shape", "idle_shape"];
 
-const MEMORY_METRICS: [&str; 9] = [
+// `idle_static` and `idle_growth_rate_mib_per_min` joined this list when they stopped being dropped
+// on the floor. The memory group declared and measured them on every served cell and `CellMemory`
+// had nowhere to put them, so they reached the artifact as neither a number nor a null - a missing
+// key, which is the one thing the group's own contract says must never happen. They are ordinary
+// numeric metrics (a settled idle window publishes 1.0 and its fitted slope), so they are held to
+// "measured means a number" like the rest.
+const MEMORY_METRICS: [&str; 11] = [
     "idle_rss_mib",
     "steady_state_rss_mib",
     "recovered_rss_mib",
@@ -107,6 +113,8 @@ const MEMORY_METRICS: [&str; 9] = [
     "load_s",
     "time_to_plateau_s",
     "growth_rate_mib_per_min",
+    "idle_static",
+    "idle_growth_rate_mib_per_min",
 ];
 
 fn measured_perf() -> CellPerf {
@@ -162,6 +170,8 @@ fn measured_memory() -> CellMemory {
         steady_state_rss_mib: Measurement::Measured(120.0),
         recovered_rss_mib: Measurement::Measured(60.0),
         peak_rss_mib: Measurement::Measured(180.0),
+        idle_static: Measurement::Measured(1.0),
+        idle_growth_rate_mib_per_min: Measurement::Measured(0.02),
         peak_rss_hwm_mib: Measurement::Measured(185.0),
         time_to_plateau_s: Measurement::Measured(72.0),
         growth_rate_mib_per_min: Measurement::Measured(0.3),
