@@ -545,6 +545,30 @@ impl CellPerf {
             // own `lower_bound: true` states directly. Publishing it as an absence too would put one
             // fact in the artifact twice, in two vocabularies, which is what this map exists to avoid.
         }
+        /* AND EVERY RUNG'S OWN ABSENCES, for exactly the reason the frontier's are here.
+        `sweep_max_proxy` is a Vec of `SweepPoint`s whose `ok`/`rps`/`p99_us`/`fail` are
+        `Measurement`s, so `absences_of!` cannot reach them and nothing else walked the Vec: a rung
+        the generator returned no window for (`search`'s default `reading: None`) published
+        `{"conc":1024,"ok":null,"rps":6209.0,"p99_us":null,"fail":null}` with its reasons nowhere.
+        Three bare nulls - and these are the very inputs `frontier::Rung::served_cleanly` is
+        published for, so an external checker reading `ok: null` could not tell "no requests
+        completed" from "no window was recorded", which is the distinction that cost a real false
+        alarm on plano and had to be settled by hand.
+
+        Keyed by CONCURRENCY and its window ordinal rather than by array index, on the frontier's
+        own reasoning: the index is an artifact of ordering, while c=1024's second window is an
+        identity that survives a rung being inserted before it. The `absences_of!` guard cannot
+        police a Vec, so this is the only place these can be stated. */
+        let mut seen_at: BTreeMap<i64, usize> = BTreeMap::new();
+        for pt in &self.sweep_max_proxy {
+            let n = seen_at.entry(pt.conc).or_insert(0);
+            let at = format!("sweep.c{}.w{}", pt.conc, *n + 1);
+            *n += 1;
+            pt.ok.record_absence(&format!("{at}.ok"), &mut out);
+            pt.rps.record_absence(&format!("{at}.rps"), &mut out);
+            pt.p99_us.record_absence(&format!("{at}.p99_us"), &mut out);
+            pt.fail.record_absence(&format!("{at}.fail"), &mut out);
+        }
         out
     }
 }
@@ -1622,5 +1646,91 @@ mod derived_stream_absence_tests {
         let a = s.absences();
         assert!(!a.contains_key("streams_sustained_mock_ceiling"));
         assert!(!a.contains_key("streams_sustained_headroom"));
+    }
+}
+
+#[cfg(test)]
+mod sweep_rung_absence_tests {
+    use super::*;
+
+    fn rung(conc: i64, measured: bool) -> SweepPoint {
+        // Generic: this fixture mixes Measurement<i64> (the counts) with Measurement<f64> (the rate),
+        // and a closure would fix itself to whichever it saw first.
+        fn gone<T>() -> Measurement<T> {
+            Measurement::absent_because(Absent::NotMeasured, "no window was recorded".to_string())
+        }
+        SweepPoint {
+            conc,
+            ok: if measured {
+                Measurement::Measured(10_000)
+            } else {
+                gone()
+            },
+            rps: if measured {
+                Measurement::Measured(6209.0)
+            } else {
+                gone()
+            },
+            p99_us: if measured {
+                Measurement::Measured(4200)
+            } else {
+                gone()
+            },
+            fail: if measured {
+                Measurement::Measured(0)
+            } else {
+                gone()
+            },
+        }
+    }
+
+    /* A RUNG'S NULLS ARE PUBLISHED NULLS. sweep_max_proxy is a Vec, so absences_of! cannot reach the
+    Measurements inside it and nothing else walked it - a rung the generator returned no window
+    for published three bare nulls with its reasons nowhere. These are the very inputs
+    frontier::Rung::served_cleanly is published for, so a checker reading ok: null could not tell
+    "no requests completed" from "no window was recorded". */
+    #[test]
+    fn an_unmeasured_rung_states_a_reason_for_every_null_it_publishes() {
+        let p = CellPerf {
+            sweep_max_proxy: vec![rung(1024, false)],
+            ..Default::default()
+        };
+        let a = p.absences();
+        for f in ["ok", "rps", "p99_us", "fail"] {
+            let k = format!("sweep.c1024.w1.{f}");
+            assert!(
+                a.contains_key(&k),
+                "{k} published a bare null; keys were {:?}",
+                a.keys()
+            );
+        }
+    }
+
+    /// Keyed by concurrency AND window ordinal, so repeated windows at one concurrency do not
+    /// collide - three windows per rung is the normal shape, and a collision would silently drop two
+    /// of every three reasons.
+    #[test]
+    fn repeated_windows_at_one_concurrency_get_distinct_keys() {
+        let p = CellPerf {
+            sweep_max_proxy: vec![rung(64, false), rung(64, false), rung(64, false)],
+            ..Default::default()
+        };
+        let a = p.absences();
+        for w in 1..=3 {
+            assert!(
+                a.contains_key(&format!("sweep.c64.w{w}.ok")),
+                "window {w} lost its reason"
+            );
+        }
+    }
+
+    /// A fully measured rung needs no entry at all.
+    #[test]
+    fn a_measured_rung_publishes_no_absence() {
+        let p = CellPerf {
+            sweep_max_proxy: vec![rung(64, true)],
+            ..Default::default()
+        };
+        assert!(p.absences().keys().all(|k| !k.starts_with("sweep.")));
     }
 }
