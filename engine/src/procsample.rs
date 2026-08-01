@@ -38,7 +38,9 @@ use std::collections::BTreeMap;
 /// factor across the whole board and would be caught by the first sanity check against wall time.
 const USER_HZ: f64 = 100.0;
 
-/// Raw counters read from one process tree at one instant. Absolute values - only differences of
+/// Raw counters read from one process tree at one instant. Absolute values - with ONE deliberate
+/// exception on the way out (`threads_end` publishes a LEVEL, because "how many threads did it hold"
+/// is not a question a delta answers; see its own note) only differences of
 /// two of these are ever published.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Counters {

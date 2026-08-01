@@ -758,8 +758,9 @@ pub enum SseEnd {
     /// A DELIVERY SHORTFALL, NOT AN ERRORED STREAM, and the two must stay apart: the peer answered
     /// 200, framed correctly and kept sending - it just spent the whole ceiling on events that
     /// carried no token. `stream_errored` therefore leaves it alone and the delivery ratio fails the
-    /// gate on the count, which is the honest reading. It is also the only end that says the read
-    /// stopped for OUR bound rather than the stream's own: a caller seeing this knows the ceiling
+    /// gate on the count, which is the honest reading. It is one of two ends that say the read
+    /// stopped for OUR bound rather than the stream's own (`FrameBudgetReached` is the other, and
+    /// the satisfied version of it): a caller seeing this knows the ceiling
     /// binds here and can weigh the counts accordingly.
     EventCeilingReached,
     /// The deadline passed. On a stream that goes quiet this is expected and is not an error by
@@ -1489,23 +1490,33 @@ pub async fn post_json_sse_async(
         Err(why) => return ended(SseEnd::RigRefused(why)),
     };
 
-    let connect = tokio::time::timeout(timeout, tokio::net::TcpStream::connect(addr));
+    /* ONE DEADLINE FOR THE WHOLE LANE, exactly as the blocking lane does.
+    This gave `timeout` to the connect, another `timeout` to the write, and then started a FRESH
+    `timeout` for the reads - so a lane could legitimately run to 3x what its caller asked for,
+    while this function's own doc says "the only thing that differs between the two lanes is who
+    owns the waiting". `stream_window` sizes its search on the assumption that a lane is bounded
+    by STREAM_TIMEOUT, so an overrunning window costs the whole run wall-clock the schedule never
+    budgeted, and the two lanes' timeout-derived samples were not the same quantity. */
+    let lane_deadline = tokio::time::Instant::now() + timeout;
+
+    let connect = tokio::time::timeout_at(lane_deadline, tokio::net::TcpStream::connect(addr));
     let mut stream = match connect.await {
         Ok(Ok(s)) => s,
         Ok(Err(e)) => return ended(connect_end(&e)),
         Err(_) => return ended(SseEnd::Timeout),
     };
 
-    match tokio::time::timeout(timeout, stream.write_all(&request)).await {
+    match tokio::time::timeout_at(lane_deadline, stream.write_all(&request)).await {
         Ok(Ok(())) => {}
         Ok(Err(e)) => return failed(format!("connection dropped while sending the request: {e}")),
         Err(_) => return ended(SseEnd::Timeout),
     }
 
     // Clock from the WRITE, exactly as the blocking lane does, so a slow handshake is not charged to
-    // the gateway's first token and the two lanes' numbers mean the same thing.
+    // the gateway's first token and the two lanes' numbers mean the same thing. The DEADLINE is the
+    // lane's, set before the connect; only the TTFT origin is the write.
     let sent_at = std::time::Instant::now();
-    let deadline = tokio::time::Instant::now() + timeout;
+    let deadline = lane_deadline;
     let mut reader = SseReader::new(budget, dialect);
     let mut buf = vec![0u8; 16 * 1024];
     loop {

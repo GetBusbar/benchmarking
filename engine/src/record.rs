@@ -425,8 +425,7 @@ pub struct CellPerf {
     /// which it was rather than trust that something was.
     #[serde(default = "measurement_default")]
     pub cost_window_conc: Measurement<i64>,
-    /// Threads in the gateway's tree during the cost window. Not a rate: it is the shape of the
-    /// concurrency model, thread-per-connection against async, on evidence rather than on a claim.
+
     /// Requests the cost window actually completed, and the rate it carried.
     ///
     /// PUBLISHED SO THE COST IS CHECKABLE. `cpu_us_per_request` is CPU divided by this count, and
@@ -447,6 +446,10 @@ pub struct CellPerf {
     #[serde(default = "measurement_default")]
     pub cost_core_utilisation: Measurement<f64>,
     #[serde(default = "measurement_default")]
+    /// Threads in the gateway's tree during the cost window. Not a rate: it is the shape of the
+    /// concurrency model, thread-per-connection against async, on evidence rather than on a claim.
+    /// (This paragraph sat on `cost_window_ok` - a completed-request COUNT - so one field's doc
+    /// stated two mutually exclusive definitions while this one had none.)
     pub cost_threads: Measurement<f64>,
     /// Involuntary context switches per request - the scheduler taking the CPU away, which is what a
     /// saturated core looks like from inside the process. The best single explainer of a tail.
@@ -626,7 +629,10 @@ pub struct CellStream {
     /// `added_ttft_p99_us`. A failed probe was dropped inside a `filter_map`, so a percentile over
     /// three lucky samples published identically to one over a hundred - and with a single survivor the
     /// p50 and p99 ranks collapse to the same index, which reads as a perfectly coherent pair. Mirrors
-    /// `CellPerf`'s `gateway_c1_samples`/`direct_c1_samples`, which exist for exactly this.
+    /// the `gateway_c1_samples`/`direct_c1_samples` METRIC-SURFACE keys, which exist for exactly
+    /// this. They are not `CellPerf` fields and never reach the wire - `suite` consumes them only to
+    /// format `c1_note` - so the sample weight behind the added-latency percentiles is recoverable
+    /// from the prose and not from a field.
     #[serde(default = "measurement_default")]
     pub ttft_gw_samples: Measurement<i64>,
     #[serde(default = "measurement_default")]

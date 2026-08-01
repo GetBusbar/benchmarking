@@ -13,7 +13,7 @@
 //
 // CEILING metrics (peak throughput, cpu-bound frames/sec) rise and then PLATEAU: past saturation
 // more concurrency buys queueing rather than throughput (Little's Law), so the curve wobbles around
-// a level instead of falling away from a summit. `saturation_plateau` measures every rung the same
+// a level instead of falling away from a summit. `climb_rungs` measures every rung the same
 // way - the same windows, the same median, the same spread - and stops when two consecutive rungs
 // stop buying more than that rung's own measured wobble.
 //
@@ -204,9 +204,19 @@ impl Ladder {
 // ─────────────────────────────────────────── bisect_ceiling ───────────────────────────────────────
 
 /// The result of a gate-ceiling bisection: `Measured(n)` iff `n` passes and `n+1` was measured and
-/// failed (or `n == 0`, the measured "nothing sustains this gate" answer). `Absent(SearchExhausted)`
-/// iff the top of the range still passed -- the true ceiling is at least `max_conc`, but that is a lower
-/// bound the search chose, not a ceiling the gate proved, so it is never published as one.
+/// failed (or `n == 0`, the measured "nothing sustains this gate" answer).
+///
+/// `Absent(SearchExhausted)` covers TWO OPPOSITE ENDINGS, and the "iff" that stood here claimed one:
+///   * the top of the range still passed - the true ceiling is at least `max_conc`, a LOWER bound
+///     the search chose rather than a ceiling the gate proved; and
+///   * the search FLOOR already failed - the ceiling is below `min_conc`, an UPPER bound.
+///
+/// Both are honestly absent and both carry a `detail` that says which happened, so no number is
+/// wrong today. But the token is the only machine-readable field, and a consumer branching on it
+/// cannot tell "carries fewer than the floor" from "carries more than the ceiling" - which is the
+/// same defect `frontier.rs` refuses by name for its own pair of absences. Splitting it needs a new
+/// vocabulary variant carried through `token()`, the python field lists and the site's seal, so it
+/// is recorded rather than done in the hour before a field run.
 #[derive(Debug, Clone, Serialize)]
 pub struct BisectResult {
     pub ceiling: Measurement<u32>,
@@ -228,7 +238,7 @@ pub fn bisect_ceiling<P: Probe>(probe: &mut P, min_conc: u32, max_conc: u32) -> 
     // before the ladder is built, so a configured floor of 0 (`OTB_MIN_CONC=0`) asked the gateway
     // for zero concurrent requests and then anchored the whole bisection on whatever that window
     // claimed - a "pass" at c=0 is a window that sent nothing and lost nothing, so it passes any
-    // gate by construction. `saturation_plateau_gated` already carries the same floor for the same
+    // gate by construction. `climb_rungs` already carries the same floor for the same
     // reason; this is that rule applied to the search that was still missing it.
     let min_conc = min_conc.max(1);
     let max_conc = max_conc.max(1);
@@ -270,7 +280,7 @@ pub fn bisect_ceiling<P: Probe>(probe: &mut P, min_conc: u32, max_conc: u32) -> 
     // CLIMB TO THE FAILURE; NEVER OPEN AT THE TOP OF THE RANGE.
     //
     // This probed `max_conc` as its first move after the floor, so the opening request of the
-    // streams gate was the whole range at once. That is the same defect `saturation_plateau` already
+    // streams gate was the whole range at once. That is the same defect the plateau climb already
     // carries a comment about - "a start derived from the range made a WIDER range open with a
     // HIGHER first probe, which is how a 1..65536 run began by asking for 32768 concurrent
     // connections" - and raising the engine ceiling to 65536 made this one strictly worse: the first
@@ -366,7 +376,8 @@ pub fn nearest_rank_median(sorted: &[f64]) -> Option<f64> {
 /// wants off them - see `frontier.rs`, which reads the throughput answer at six different tail-latency
 /// bounds from one call to this.
 ///
-/// THIS REPLACED `saturation_plateau`, and the difference is the whole point. That function climbed AND
+/// THIS REPLACED the old `saturation_plateau` (since deleted; these are the only references left to
+/// it, and they are historical). The difference is the whole point: that function climbed AND
 /// decided: it judged each rung against its own measured wobble floored at `WOBBLE_FLOOR = 0.02`,
 /// counted `FLAT_RUNGS_TO_STOP = 3` consecutive non-improvers, required `MIN_SATURATION_CONC = 16`
 /// before believing saturation, and then picked a winner with `published_winner`. Four chosen numbers,
@@ -868,7 +879,7 @@ mod tests {
         assert_eq!(fwd, rev);
     }
 
-    // ── saturation_plateau ──────────────────────────────────────────────────────────────────────
+    // ── climb_rungs ─────────────────────────────────────────────────────────────────────────────
 }
 
 #[cfg(test)]
