@@ -937,6 +937,15 @@ pub struct SseReader {
     status: Option<u16>,
     /// Data lines accumulated for the event that has not been dispatched yet.
     pending: Option<String>,
+    /* EVENT BOUNDARIES SEEN, INCLUDING THE ONES CARRYING NO `data:`.
+    `frames` only grows for events that carried a data line, so the `Content` budget's event
+    ceiling - the thing standing between this read and a peer that pings forever - could not see
+    a comment keepalive (`:\n\n`) or a bare `event: ping\n\n` at all. Those are the canonical SSE
+    keepalive and what most reverse proxies inject, so against such a peer the ceiling never
+    fired and every lane in the window burned the full STREAM_TIMEOUT instead of returning
+    `EventCeilingReached`. Counting dispatches rather than data frames makes the documented bound
+    actually hold. */
+    events_seen: usize,
     frames: Vec<String>,
     offsets_us: Vec<u64>,
     budget: SseBudget,
@@ -961,6 +970,7 @@ impl SseReader {
             body_scanned: 0,
             status: None,
             pending: None,
+            events_seen: 0,
             frames: Vec::new(),
             offsets_us: Vec::new(),
             budget: budget.into(),
@@ -1215,6 +1225,8 @@ impl SseReader {
                     ))));
                 }
             } else if stripped.is_empty() {
+                // The blank line IS the event boundary, whether or not the event carried data.
+                self.events_seen += 1;
                 self.flush_pending(elapsed_us);
                 if let Some(end) = self.budget_reached() {
                     return Some(self.finish_with(end));
@@ -1238,7 +1250,7 @@ impl SseReader {
             } => {
                 if self.content_frames >= frames {
                     Some(SseEnd::FrameBudgetReached)
-                } else if self.frames.len() >= event_ceiling {
+                } else if self.events_seen >= event_ceiling {
                     // Short of the content asked for, and out of events to wait for it in. Reported
                     // as its own end so the shortfall is not read as a satisfied budget.
                     Some(SseEnd::EventCeilingReached)
@@ -1283,13 +1295,29 @@ fn take_front(buf: &mut Vec<u8>, scanned: &mut usize, upto: usize) -> Vec<u8> {
 
 /// Byte offset just past the blank line that ends the response head, if it has all arrived.
 fn find_head_end(buf: &[u8]) -> Option<usize> {
-    buf.windows(4)
-        .position(|w| w == b"\r\n\r\n")
-        .map(|i| i + 4)
-        .or_else(|| {
-            // Tolerate bare-LF heads, which some minimal peers (and this repo's own test servers) emit.
-            buf.windows(2).position(|w| w == b"\n\n").map(|i| i + 2)
-        })
+    /* THE EARLIER TERMINATOR WINS, because both searches run over a buffer that already contains
+    BODY bytes from the same read. This used to consult the bare-LF form only when no `\r\n\r\n`
+    existed ANYWHERE, so a CRLF pair occurring later in the SSE body beat the bare-LF blank line
+    that actually ended the head - and everything between them was drained as if it were head.
+
+    Concretely, for a peer that sends an LF-terminated head and CRLF-terminated frames (both legal;
+    SSE permits CRLF line endings) arriving in one segment:
+
+        HTTP/1.1 200 OK\nContent-Type: text/event-stream\n\ndata: alpha\r\n\r\ndata: beta\n\n
+
+    the head was taken as ending after `data: alpha`, that frame was never seen by the body
+    reader, and time-to-first-token was credited to the SECOND frame. A silently lost frame and an
+    overstated TTFT, on a gateway doing nothing wrong.
+
+    `\r\n\r\n` is `0D 0A 0D 0A` and does not contain `0A 0A`, so the two searches cannot match
+    inside one another and `min` is exactly "whichever blank line came first". */
+    let crlf = buf.windows(4).position(|w| w == b"\r\n\r\n").map(|i| i + 4);
+    // Tolerate bare-LF heads, which some minimal peers (and this repo's own test servers) emit.
+    let lf = buf.windows(2).position(|w| w == b"\n\n").map(|i| i + 2);
+    match (crlf, lf) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    }
 }
 
 /// POSTs like `post_json`, then reads Server-Sent-Event `data:` frames off the response body
@@ -1338,13 +1366,35 @@ pub fn post_json_sse(
     };
 
     let write_deadline = deadline.saturating_duration_since(Instant::now());
+    /* RUNNING OUT OF OUR OWN CLOCK IS A TIMEOUT, NOT THE PEER REFUSING.
+    `set_write_timeout` rejects a zero duration (`InvalidInput`, "cannot set a 0 duration
+    timeout"), and `write_deadline` is exactly zero whenever the connect consumed the whole
+    budget - routine at the concurrencies `stream_window` drives. This returned
+    `ConnectionFailed`, whose own doc two hundred lines up says "by the PEER's doing (refused,
+    unreachable, reset)", so `run::StreamErrorKinds` filed it under `connect_failed` and
+    `stream_errored` counted it against the gateway. A lane that ran out of OUR clock was charged
+    to them.
+
+    The blocking non-streaming lane already calls this same event `Outcome::TimedOut`; the two
+    lanes simply disagreed. `Timeout` is also what the caller gets if the deadline expires one
+    microsecond later, so this removes a discontinuity as well as a misattribution. */
+    if write_deadline.is_zero() {
+        return SseOutcome {
+            status: None,
+            frames: Vec::new(),
+            frame_offsets_us: Vec::new(),
+            content_frames: 0,
+            end: SseEnd::Timeout,
+        };
+    }
     if stream.set_write_timeout(Some(write_deadline)).is_err() {
         return SseOutcome {
             status: None,
             frames: Vec::new(),
             frame_offsets_us: Vec::new(),
             content_frames: 0,
-            end: SseEnd::ConnectionFailed("could not set a write deadline".to_string()),
+            // A non-zero deadline the OS still refused is our socket, not their server.
+            end: SseEnd::RigExhausted("could not set a write deadline on the socket".to_string()),
         };
     }
     if let Err(e) = stream.write_all(&request) {
@@ -3441,6 +3491,52 @@ mod head_cap_tests {
         assert!(
             msg.contains("exceeds the") && msg.contains("byte cap"),
             "the refusal must name the cap that fired rather than reading to the deadline: {msg}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod head_terminator_tests {
+    use super::*;
+
+    /* A CRLF PAIR IN THE BODY MUST NOT BE MISTAKEN FOR THE END OF THE HEAD. The bare-LF fallback
+    used to fire only when no CRLF existed anywhere in the buffer, and the buffer already holds
+    body bytes - so an LF-terminated head followed by CRLF-terminated frames lost its first
+    frame and credited TTFT to the second. */
+    #[test]
+    fn the_earlier_blank_line_ends_the_head_whichever_form_it_takes() {
+        let mixed = b"HTTP/1.1 200 OK\nContent-Type: text/event-stream\n\ndata: alpha\r\n\r\ndata: beta\n\n";
+        let end = find_head_end(mixed).expect("head must be found");
+        let body = &mixed[end..];
+        assert!(
+            body.starts_with(b"data: alpha"),
+            "the first frame must survive; body began {:?}",
+            String::from_utf8_lossy(&body[..body.len().min(24)])
+        );
+    }
+
+    /// The ordinary all-CRLF head must still end at its own blank line, not at a later one.
+    #[test]
+    fn a_normal_crlf_head_ends_at_its_own_blank_line() {
+        let normal = b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\ndata: one\r\n\r\n";
+        let end = find_head_end(normal).expect("head must be found");
+        assert!(normal[end..].starts_with(b"data: one"));
+    }
+
+    /// And an all-LF stream is unchanged.
+    #[test]
+    fn an_all_lf_head_is_unchanged() {
+        let lf = b"HTTP/1.1 200 OK\nx: 1\n\ndata: one\n\n";
+        let end = find_head_end(lf).expect("head must be found");
+        assert!(lf[end..].starts_with(b"data: one"));
+    }
+
+    /// An incomplete head is still "not yet", not a wrong answer.
+    #[test]
+    fn a_head_that_has_not_arrived_yet_is_none() {
+        assert_eq!(
+            find_head_end(b"HTTP/1.1 200 OK\r\ncontent-type: text/"),
+            None
         );
     }
 }

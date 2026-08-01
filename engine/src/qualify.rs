@@ -123,7 +123,17 @@ pub fn judge(
     band_pct: f64,
     sense: Sense,
 ) -> (Outcome, Measurement<f64>) {
-    let Some(&obs) = observed.value() else {
+    /* PRESENT IS NOT THE SAME AS USABLE. This screened `observed` for presence only, so a
+    `Measured(NaN)` - a value this crate constructs directly - passed straight through, reached
+    `drift_pct`, tripped its `!observed.is_finite()` arm, and came back `None`. `judge` then
+    reported the ONE thing that branch is allowed to mean: "baseline is not a usable number",
+    blaming a baseline that was perfectly fine for a broken observation.
+
+    And it did so as `Skipped`, which means the gate does not fire. A qualification check that
+    silently declines to run on a NaN observation is worse than a wrong reason: the box passes.
+    A non-finite observation is exactly "the stage produced no usable observation", so it takes
+    that branch, with that outcome. */
+    let Some(&obs) = observed.value().filter(|v| v.is_finite()) else {
         return (
             Outcome::Fail,
             Measurement::absent_because(
@@ -141,6 +151,8 @@ pub fn judge(
     match drift_pct(obs, base) {
         // A gate must never fail on a value it never obtained: an unusable baseline means this
         // particular check does not fire, which is not the same as the observation being unmeasured.
+        // Now unambiguous: `obs` is finite by construction above, so the only way `drift_pct`
+        // declines is an unusable BASELINE, which is what this says.
         None => (
             Outcome::Skipped,
             Measurement::absent_because(Absent::NotMeasured, "baseline is not a usable number"),
@@ -388,5 +400,65 @@ mod tests {
             "a token this build does not publish must not be guessed at"
         );
         assert_eq!(Outcome::from_token(""), None);
+    }
+}
+
+#[cfg(test)]
+mod nonfinite_observation_tests {
+    use super::*;
+
+    /* A NaN OBSERVATION MUST FAIL THE GATE, NOT SKIP IT. `judge` screened `observed` for presence
+    only, so `Measured(NaN)` reached `drift_pct`, came back `None`, and was reported as
+    "baseline is not a usable number" with outcome `Skipped` - blaming a healthy baseline, and
+    letting the box qualify on a measurement that does not exist. */
+    #[test]
+    fn a_non_finite_observation_fails_and_does_not_blame_the_baseline() {
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let (outcome, m) = judge(
+                Measurement::Measured(bad),
+                Measurement::Measured(100.0),
+                4.0,
+                Sense::LowerIsBetter,
+            );
+            assert_eq!(
+                outcome,
+                Outcome::Fail,
+                "{bad} must fail the gate, not skip it"
+            );
+            let d = m.detail().unwrap_or_default();
+            assert!(
+                d.contains("no usable observation"),
+                "a broken observation must not be reported as a baseline problem: {d}"
+            );
+        }
+    }
+
+    /// And a genuinely unusable BASELINE must still read as one, or the fix has just swapped the lie.
+    #[test]
+    fn an_unusable_baseline_still_reads_as_a_baseline_problem() {
+        let (outcome, m) = judge(
+            Measurement::Measured(100.0),
+            Measurement::Measured(0.0),
+            4.0,
+            Sense::LowerIsBetter,
+        );
+        assert_eq!(outcome, Outcome::Skipped);
+        assert!(m
+            .detail()
+            .unwrap_or_default()
+            .contains("baseline is not a usable number"));
+    }
+
+    /// A healthy pair must be unaffected.
+    #[test]
+    fn a_finite_observation_against_a_finite_baseline_still_judges_normally() {
+        let (outcome, m) = judge(
+            Measurement::Measured(101.0),
+            Measurement::Measured(100.0),
+            4.0,
+            Sense::LowerIsBetter,
+        );
+        assert_eq!(outcome, Outcome::Pass);
+        assert!(m.value().is_some(), "a judged pair must publish its drift");
     }
 }
