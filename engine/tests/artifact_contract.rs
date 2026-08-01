@@ -159,6 +159,12 @@ fn measured_stream() -> CellStream {
         streams_sustained_fps: Measurement::Measured(39_000.0),
         ttft_gw_samples: Measurement::Measured(100),
         ttft_direct_samples: Measurement::Measured(100),
+        // DERIVED, AND NOW HELD TO THE SAME BAR. These were absent in this "fully measured" fixture
+        // and went unnoticed because the absence guard only ran when the PARENT was absent. A cell
+        // that measured its sustained figure and could also state the ceiling it is a fraction of has
+        // both, so a fixture claiming to be fully measured must carry them.
+        streams_sustained_mock_ceiling: Some(41_000.0),
+        streams_sustained_headroom: Some(0.951),
         ..CellStream::default()
     }
 }
