@@ -336,6 +336,12 @@ ABSENCE_CARRYING_FIELDS = {
         # check_no_bare_absence's "a served cell publishes a number", which is why that check reads
         # SHAPE_FIELDS below and lets a reasoned absence stand.
         "shape", "idle_shape",
+        # The idle window's own verdict and its fitted slope. The memory group measured both on every
+        # served cell and CellMemory had nowhere to put them, so they reached the artifact as neither
+        # a number nor a null - a missing key, invisible to every check built on this list. They are
+        # ordinary numeric metrics (a settled idle window publishes 1.0 and its slope), so unlike the
+        # shape fields they ARE held to 'a served cell publishes a number'.
+        "idle_static", "idle_growth_rate_mib_per_min",
     ],
 }
 
