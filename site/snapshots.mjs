@@ -24,6 +24,17 @@ export function snapshotCellCoords(m) {
   if (!m || typeof m !== "object") return out;
   for (const [egress, up] of Object.entries(m.upstreams || {}))
     for (const ingress of Object.keys((up && up.cells) || {})) out.add(`${egress}|${ingress}`);
+  /* THE v1 TOP-LEVEL ROW COUNTS TOO. A v1-shaped matrix carries its cells under a bare `cells` map
+     with no `upstreams`, and this returned an EMPTY set for it - and an empty set is a strict subset
+     of everything, so such a snapshot could never be the base and layered nothing either. The newest
+     run would be silently deleted from the board with no warning. `normalizeMatrix` and `app.js`
+     both still treat that row as real measured cells, so counting zero of them here was this
+     module disagreeing with the rest of the pipeline about what a cell is.
+
+     The egress is unknown in that shape, hence the `v1` sentinel: it makes the coords comparable
+     within v1 and keeps a v1 snapshot from ever looking like a subset of a v2 one, which is the
+     honest answer when the two shapes cannot be aligned cell-for-cell. */
+  if (!out.size) for (const ingress of Object.keys(m.cells || {})) out.add(`v1|${ingress}`);
   return out;
 }
 export function isStrictSubset(a, b) {
@@ -58,6 +69,16 @@ export function layerScopedMatrix(base, scoped, scopedSnap) {
       }
     }
   }
-  merged.__layered = { from: stamp, cells: layered.sort() };
+  /* APPEND, NEVER OVERWRITE. `resolvedSnapshot` layers each scoped run in turn onto the result of
+     the last, and this rebuilt the record from scratch every pass - so with two scoped re-runs the
+     published provenance disclosed only the most recent one, and the cells from the earlier run
+     read as if they had come from the base. The per-cell `__run` stamps survived, which is what
+     bounded the damage, but `__layered` is the summary a reader actually looks at. */
+  const prior = Array.isArray(base.__layered?.runs) ? base.__layered.runs : [];
+  merged.__layered = {
+    from: stamp,
+    cells: layered.sort(),
+    runs: [...prior, { from: stamp, cells: layered.sort() }],
+  };
   return merged;
 }

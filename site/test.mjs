@@ -6570,3 +6570,48 @@ test("sealMetric refuses to certify anything that is not a finite number", () =>
   // A numeric string is still a number - the producer's shape, not a fabrication.
   assert.equal(sealMetric("42").value, 42);
 });
+
+/* A v1-SHAPED SNAPSHOT IS NOT AN EMPTY ONE. snapshotCellCoords only walked `upstreams`, so a matrix
+   carrying its cells under the bare v1 `cells` row counted ZERO coords - and an empty set is a
+   strict subset of everything, so such a snapshot could never be the base and layered nothing
+   either. The newest run would vanish from the board with no warning, while normalizeMatrix and
+   app.js both still treat that row as real measured cells. */
+test("a v1-shaped matrix contributes coords instead of reading as empty", () => {
+  const v1 = { cells: { openai: { served: true }, anthropic: { served: true } } };
+  const coords = snapshotCellCoords(v1);
+  assert.equal(coords.size, 2, "the v1 row's cells must count");
+  // And it must not read as a subset of a v2 run, which would let a v2 run silently swallow it.
+  const v2 = snapshotCellCoords({ upstreams: { openai: { cells: { openai: {}, anthropic: {} } } } });
+  assert.ok(!isStrictSubset(coords, v2), "v1 and v2 coords are not alignable cell-for-cell");
+  // A v2 matrix that also carries an empty compat row is unaffected - the live shape.
+  const both = snapshotCellCoords({ upstreams: { openai: { cells: { openai: {} } } }, cells: {} });
+  assert.equal(both.size, 1);
+});
+
+/* __layered IS THE SUMMARY A READER LOOKS AT, and it was rebuilt from scratch on every pass - so
+   with two scoped re-runs it disclosed only the most recent, and the earlier run's cells read as if
+   they came from the base. The per-cell __run stamps survived, which bounded the damage. */
+test("layering two scoped runs discloses both, not just the last", () => {
+  const cell = (tag) => ({ served: true, stream: { stream_served: true, tag } });
+  const mk = (coords) => {
+    const m = { upstreams: {}, cells: {} };
+    for (const [eg, ing, tag] of coords) (m.upstreams[eg] ??= { cells: {} }).cells[ing] = cell(tag);
+    return m;
+  };
+  const base = mk([["openai", "openai", "old"], ["openai", "anthropic", "old"], ["gemini", "cohere", "old"]]);
+  const runA = mk([["openai", "openai", "A"]]);
+  const runB = mk([["openai", "anthropic", "B"]]);
+
+  let m = layerScopedMatrix(base, runA, { build: "aaa", measured_at: "2026-08-01T01:00:00Z", __file: "a.json" });
+  m = layerScopedMatrix(m, runB, { build: "bbb", measured_at: "2026-08-01T02:00:00Z", __file: "b.json" });
+
+  assert.equal(m.upstreams.openai.cells.openai.stream.tag, "A", "run A's cell must survive run B");
+  assert.equal(m.upstreams.openai.cells.anthropic.stream.tag, "B");
+  assert.equal(m.upstreams.gemini.cells.cohere.stream.tag, "old", "untouched cells keep the base");
+
+  const runs = m.__layered.runs;
+  assert.equal(runs.length, 2, `both scoped runs must be disclosed, got ${JSON.stringify(runs)}`);
+  assert.deepEqual(runs.map((r) => r.from.file), ["a.json", "b.json"]);
+  assert.deepEqual(runs[0].cells, ["openai>openai"]);
+  assert.deepEqual(runs[1].cells, ["anthropic>openai"]);
+});
