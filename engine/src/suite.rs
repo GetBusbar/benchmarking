@@ -334,6 +334,8 @@ fn cell_memory(
         idle_rss_series,
         shape: take("memory_shape"),
         idle_shape: take("memory_idle_shape"),
+        idle_static: take("memory_idle_static"),
+        idle_growth_rate_mib_per_min: take("memory_idle_growth_rate_mib_per_min"),
         ..Default::default()
     }
 }
@@ -798,7 +800,12 @@ fn qualify_box(cfg: &SuiteConfig, history: &[f64]) -> serde_json::Value {
         "band_pct": QUALIFY_BAND_PCT,
         "concurrency": QUALIFY_CONCURRENCY,
         "observed_rps": observed.value().copied(),
-        "observed_absent_reason": observed.reason().map(|r| format!("{r:?}")),
+        // THE ARTIFACT'S OWN VOCABULARY, not a Rust Debug tag. Every other null in this snapshot
+        // says "not_measured"; this said "NotMeasured", so a consumer branching on the published
+        // token did not recognise it - and the absence's detail, the only statement of WHY the box
+        // was judged, was dropped entirely.
+        "observed_absent_reason": observed.reason().map(|r| r.token()),
+        "observed_absent_detail": observed.detail(),
         "baseline_rps": baseline.value().copied(),
         "drift_pct": drift.value().copied(),
         "baseline_samples": history.len(),
@@ -1159,10 +1166,32 @@ pub fn run_suite_with(
                 _ => result.outcome.note.clone().unwrap_or_default(),
             },
             perf,
+            /* MEMORY IS WITHHELD ON A REFUTED CELL TOO. `withhold_if_refuted` took only perf and
+            stream, and memory was built independently right here - so a cell PROVEN to have
+            forwarded the ingress request rather than translating it published every perf and
+            stream number as `not_served` with evidence, and its `peak_rss_mib` untouched beside
+            them. `withhold_refuted_perf`'s own rule is "CPU burned serving a wire that is not
+            this pairing is not this pairing's cost", and RSS is that rule verbatim: the load
+            window drove this cell's path/model/headers, which re-verification just proved is not
+            this pairing.
+
+            It reached the board, too: `site/gen-data.mjs` reads memory solely from the per-cell
+            window, gates only on `cell.served === true` - still true for a refuted cell - and
+            never looks at `perf_dropped`. */
             memory: result
                 .metrics
                 .as_ref()
-                .map(|m| cell_memory(m, result.series.as_ref())),
+                .map(|m| cell_memory(m, result.series.as_ref()))
+                .map(
+                    |mem| match (result.reverify.verified, &result.reverify.note) {
+                        (Some(false), note) => withhold_refuted_memory(
+                            mem,
+                            note.as_deref()
+                                .unwrap_or("no evidence was recorded with the refutation"),
+                        ),
+                        _ => mem,
+                    },
+                ),
             stream,
             // What this cell COST, per metric group. Owned strings because the record is
             // deserialisable and a &'static str key cannot come back off disk.
@@ -1369,6 +1398,39 @@ fn withhold_refuted_perf(p: CellPerf, why: &str) -> CellPerf {
 /// is a statement about the GATEWAY - it answered by speaking some other dialect upstream), the
 /// mock's own evidence as the detail so no null is bare, and the sweeps dropped because a rung
 /// measured on a misrouted wire is as much a published number as the ceiling drawn from it.
+/// Every measured field of a refuted cell's memory window, withheld with the reason - same rule and
+/// same wording as `withhold_refuted_perf`, applied to the resource the load window consumed.
+///
+/// The series are cleared as well as the scalars: a curve drawn from a window served over the wrong
+/// wire is the same false claim as a number taken from it, and the board draws whatever it is given.
+fn withhold_refuted_memory(m: crate::record::CellMemory, why: &str) -> crate::record::CellMemory {
+    let detail = format!(
+        "withheld: re-verification proved the request did not reach the mock as this cell's egress \
+         dialect, so this window measured a wire that is not this pairing: {why}"
+    );
+    fn withheld<T>(detail: &str) -> Measurement<T> {
+        Measurement::absent_because(Absent::NotServed, detail.to_string())
+    }
+    crate::record::CellMemory {
+        idle_rss_mib: withheld(&detail),
+        steady_state_rss_mib: withheld(&detail),
+        recovered_rss_mib: withheld(&detail),
+        peak_rss_mib: withheld(&detail),
+        peak_rss_hwm_mib: withheld(&detail),
+        time_to_plateau_s: withheld(&detail),
+        growth_rate_mib_per_min: withheld(&detail),
+        plateaued: withheld(&detail),
+        load_s: withheld(&detail),
+        shape: withheld(&detail),
+        idle_shape: withheld(&detail),
+        idle_static: withheld(&detail),
+        idle_growth_rate_mib_per_min: withheld(&detail),
+        rss_series: Vec::new(),
+        idle_rss_series: Vec::new(),
+        ..m
+    }
+}
+
 fn withhold_refuted_stream(s: crate::record::CellStream, why: &str) -> crate::record::CellStream {
     let detail = format!(
         "withheld: re-verification proved the request did not reach the mock as this cell's egress \
