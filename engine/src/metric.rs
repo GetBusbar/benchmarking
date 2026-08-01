@@ -956,22 +956,52 @@ impl Metric for Memory {
             // for both. It published `NotMeasured` with "too few readings fell inside the settle
             // window" - on a FULL window - whenever a non-finite sample made the window unjudgeable,
             // filing a harness malfunction as a coverage gap and erasing the rig-vs-gateway distinction.
-            crate::stats::Verdict::Undecidable(cause) => (
-                None,
-                Measurement::absent_because(cause.absent_kind(), cause.detail("settle window")),
-            ),
+            crate::stats::Verdict::Undecidable(cause) => {
+                /* AND THE SHAPE CANNOT CLAIM IT SETTLED EITHER. `memory_shape`'s default reads "a
+                settled window has no unsettled shape to describe", which is right beside `Steady`
+                and wrong beside this: the verdict's whole content is that we could NOT tell
+                whether it settled. These details ride into the board's tooltips verbatim, so the
+                cell said "we could not determine this" on one field and "it settled" on the one
+                next to it, about the same window. */
+                memory_shape =
+                    Measurement::absent_because(cause.absent_kind(), cause.detail("settle window"));
+                (
+                    None,
+                    Measurement::absent_because(cause.absent_kind(), cause.detail("settle window")),
+                )
+            }
         };
         // THE SAME PLATEAU TEST THE LOAD WINDOW USES, pointed at the idle window. Reusing it rather
         // than inventing a second rule means "still" means the same thing on both halves of the
         // curve, and a reader comparing them is comparing like with like.
+        /* NO IDLE WINDOW AT ALL IS NOT A THIN ONE. `idle_series` is only filled on the path where
+        the harness owns the gateway's lifetime and the restart found a fresh tree; on every other
+        path it stays EMPTY because no idle window was ever opened. Both defaults below described
+        a window that ran - "produced too few readings", "a settled idle window" - so a cell that
+        correctly said "the harness does not own this gateway's lifetime" on `memory_idle_mib`
+        published, right beside it, three fields telling two different false stories about a 60s
+        sampling window that never existed. */
+        let no_idle_window = idle_series.is_empty();
+        let never_ran =
+            "no idle window was opened for this cell, so nothing was sampled - which is \
+                         not the same as sampling and finding too little"
+                .to_string();
         let mut idle_shape = Measurement::absent_because(
             Absent::NotMeasured,
-            "a settled idle window has no unsettled shape to describe".to_string(),
+            if no_idle_window {
+                never_ran.clone()
+            } else {
+                "a settled idle window has no unsettled shape to describe".to_string()
+            },
         );
         let (idle_static, idle_growth) = if idle_series.len() < 2 {
-            let why = format!(
-                "the {MEMORY_IDLE_S}s idle window produced too few readings to say whether memory moved"
-            );
+            let why = if no_idle_window {
+                never_ran.clone()
+            } else {
+                format!(
+                    "the {MEMORY_IDLE_S}s idle window produced too few readings to say whether memory moved"
+                )
+            };
             (
                 Measurement::absent_because(Absent::NotMeasured, why.clone()),
                 Measurement::absent_because(Absent::NotMeasured, why),
@@ -1715,11 +1745,33 @@ impl Metric for StreamsSustained {
             Some(v) => Measurement::Measured(*v),
             None => carry(&found.fps),
         };
-        // Mirrors the rate's reason rather than inventing a second one, exactly as `Throughput` and
-        // `Throughput` does for its own concurrency field.
+        /* THE HEADLINE FIELD KEEPS ITS EVIDENCE. `fps` goes through `carry`, which preserves the
+        detail; this used bare `absent()`, which drops it - so the rate published
+        "still passing at the top of the range (4096)" while `streams_sustained`, the field this
+        group is NAMED after, published a bare token with nothing to re-derive it from. The
+        reader got the explanation on the sibling and a shrug on the number they came for.
+
+        It also prefers the CONCURRENCY's own reason now. Mirroring the rate's was only correct
+        while the two could not disagree; if the search ever resolves a rate without a
+        concurrency, the old code discarded whatever the concurrency actually said and published
+        `not_measured` over it.
+
+        (The comment that stood here cited `Throughput`'s concurrency field as precedent. That
+        field does not exist - `Throughput::fields()` returns `&[]` - and where `Throughput` does
+        carry an absence it uses `carry_i`, which preserves the detail, i.e. the opposite of what
+        this code did.) */
         let conc = match found.concurrency.value() {
             Some(c) => Measurement::Measured(f64::from(*c)),
-            None => Measurement::absent(found.fps.reason().cloned().unwrap_or(Absent::NotMeasured)),
+            None => match (
+                found.concurrency.reason().cloned(),
+                found.concurrency.detail(),
+            ) {
+                (Some(r), Some(d)) => Measurement::absent_because(r, d),
+                (Some(r), None) => Measurement::absent(r),
+                // No reason of its own: the rate came from the same search, so its reason is the
+                // honest stand-in - detail included, which is the whole point.
+                (None, _) => carry(&found.fps),
+            },
         };
         Measured {
             fields: vec![("streams_sustained", conc), ("streams_sustained_fps", fps)],
