@@ -55,3 +55,6 @@ gateways/*/launch.log
 # every control combination x three widths. Regenerable from the working tree in one command, and a
 # committed set would be a stale picture of a CSS file that moved - the CSS is the durable artifact.
 results/screenshots/
+
+# Internal working notes - never published to the public board repo.
+KICKOFF.md
