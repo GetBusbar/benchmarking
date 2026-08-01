@@ -506,7 +506,12 @@ def check_search_spent_its_budget(name, c):
     clean = proven_clean_top(rungs)
     if clean <= 0:
         return
-    lowest = min(r.get("conc") or 0 for r in rungs[1:]) if len(rungs) > 1 else 0
+    # WHERE THE SEARCH STOPPED, not the smallest rung it ever probed. Taking the minimum over every
+    # rung included the ascending prefix's own c=1 and c=2, so `lowest` was always <= clean + 1 and
+    # this check returned early on every cell in existence - it had never fired once, including on
+    # the plano cell it was written from. Caught by its own reject fixture in bench-audit_test.py,
+    # which is the entire reason that file demands one.
+    lowest = rungs[-1].get("conc") or 0
     if lowest <= clean + 1:
         return                                   # it walked down to (or below) what it had carried
     between = [r for r in rungs if clean < (r.get("conc") or 0) < lowest]
