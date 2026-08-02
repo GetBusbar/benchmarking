@@ -5,8 +5,8 @@
 # under new semantics ("allowed_pools: [] now means NO pools"), so the two versions cannot share one
 # file and "identical config, only the binary differs" was never available here.
 #
-# The migration is the whole diff, and it is mechanical: six `api_key_env: X` became
-# `api_key: {env: X}`. No limit, pool, or routing surface changed, and `busbar --validate` accepts
+# The migration is the whole diff, and it is mechanical: six providers moved from the flat
+# api_key_env form to the nested api_key/env form. No limit, pool, or routing surface changed, and `busbar --validate` accepts
 # the result (6 providers, 6 models). providers.gen.yaml.tmpl needs NO migration - the 1.4.1 shape
 # validates unchanged under 1.5.0 - so it is byte-identical to the 1.4.1 manifest's.
 #
