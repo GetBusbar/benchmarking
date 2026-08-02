@@ -40,6 +40,10 @@
       [
         "BUSBAR_PROVIDERS",
         "/work/providers.yaml"
+      ],
+      [
+        "BUSBAR_ADMIN_TOKEN",
+        "bench-admin-token"
       ]
     ],
     "image": "getbusbar/busbar:1.5.0",
