@@ -276,7 +276,7 @@ const starsSnap = readJson(join(gatewaysDir, "stars.json")) || {};
 // the per-gateway records are the public bundle shape and definitions are a board-level projection
 // (data.definitions), not a per-row field - so this stays a private side table, never emitted raw.
 const snapshotDefinitionsByKey = new Map();
-const gateways = gatewayKeys.map((key) => {
+const allGateways = gatewayKeys.map((key) => {
   const meta = parseManifest(readFileSync(join(gatewaysDir, key, "definition.json"), "utf8"));
   const g = {
     key,
@@ -547,7 +547,36 @@ const gateways = gatewayKeys.map((key) => {
   // NULL-SAFE: a snapshot with no rig block renders "not recorded", never a fabricated digest.
   g.rig = (g.matrix && g.matrix.rig) || null;
   return g;
-});
+})
+/* A GATEWAY NOBODY HAS MEASURED IS NOT A ROW.
+   Every gateway with a definition became a row, measured or not, which was harmless while the only
+   definitions were the fourteen on the board. Adding busbar-150 changed that: its manifest has to be
+   pushed for the boxes to fetch it, so the moment it existed the public board grew a row reading
+   "Busbar 1.5.0" with no matrix, no best_cell and no snapshot behind it.
+
+   An empty row is not a disclosure, it is an implication - a reader sees a gateway that apparently
+   has nothing to show, when the truth is nobody has run it yet. The board's rule is that an absence
+   carries a reason; a gateway with no measurement at all has no absence to explain, because there is
+   no cell to be absent.
+
+   A gateway REJOINS the board the moment a snapshot lands for it. Nothing here decides what may be
+   published - it decides what has been measured. */
+  ;
+const wasMeasured = (g) => Boolean(g.matrix || g.snapshot_file || g.perf || g.stream || g.memory);
+// ...BUT AN ALL-EMPTY BOARD KEEPS ITS DECLARED ROWS. The two situations are not the same shape.
+// An unmeasured row misleads by COMPARISON - it only reads as "this gateway has nothing to show"
+// because it sits beside rows that do. A board where nothing at all has been measured draws no
+// comparison; it is the honest empty bundle a fresh checkout produces, with n/a on every row, and
+// the site suite itself depends on gen-data emitting it rather than throwing (a clean clone commits
+// no snapshots, so this file would otherwise die at its own gen-data call before its first
+// assertion - a suite that gates nothing while reading as an unrelated failure).
+const gateways = allGateways.some(wasMeasured)
+  ? allGateways.filter((g) => {
+      if (wasMeasured(g)) return true;
+      console.log(`gen-data: skipping ${g.key} - no snapshot, no suite result, nothing measured yet`);
+      return false;
+    })
+  : allGateways;
 
 // Matrix v1 results carry one upstream shape (fixed openai) as top-level `cells`; v2 carries the
 // full 6x6 under `upstreams.<egress>.cells` plus the same top-level compat row. Normalize v1 into
