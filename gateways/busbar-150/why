@@ -17,8 +17,8 @@ error_map      boot      # REQUIRED per provider in v1.4.1 and still in v1.5.0 -
 #
 # CONFIG SHAPE: config.gen.yaml.tmpl is the output of `busbar --migrate-config` run on the 1.4.1
 #               config. 1.5.0 REFUSES a 1.x config rather than booting it under changed semantics,
-#               so the two versions cannot share one file. The whole diff is six api_key_env -> 
-#               api_key:{env:} ; providers.gen.yaml.tmpl needed no migration at all.
+#               so the two versions cannot share one file. The whole diff is six api_key_env to the nested
+#               api_key/env form; providers.gen.yaml.tmpl needed no migration at all.
 models         ingress   # the client-facing model table
 gpt-4o-mini*   ingress   # the model name each matrix column asks for; selects that column's provider
 provider       upstream  # which provider backs this model
