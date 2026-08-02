@@ -1,31 +1,41 @@
-listen: "127.0.0.1:{GW_PORT}"
+# busbar 1.5.0 config.
+#
+# PRODUCED BY BUSBAR'S OWN MIGRATOR, not hand-written: `busbar --migrate-config` run against the
+# 1.4.1 config this board publishes. 1.5.0 refuses a 1.x config outright rather than booting it
+# under new semantics ("allowed_pools: [] now means NO pools"), so the two versions cannot share one
+# file and "identical config, only the binary differs" was never available here.
+#
+# The migration is the whole diff, and it is mechanical: six `api_key_env: X` became
+# `api_key: {env: X}`. No limit, pool, or routing surface changed, and `busbar --validate` accepts
+# the result (6 providers, 6 models). providers.gen.yaml.tmpl needs NO migration - the 1.4.1 shape
+# validates unchanged under 1.5.0 - so it is byte-identical to the 1.4.1 manifest's.
+#
+# max_concurrent: 8000 is CARRIED OVER, matching 1.4.1 exactly. The v1.5.0 source types it
+# Option<usize>, but the published image still requires it, and keeping the same value is what makes
+# the two rows comparable on the axis that matters.
+
+listen: 127.0.0.1:{GW_PORT}
 providers:
   mock-openai:
-    api_key_env: BENCH_MOCK_KEY
+    api_key:
+      env: BENCH_MOCK_KEY
   mock-responses:
-    api_key_env: BENCH_MOCK_KEY
+    api_key:
+      env: BENCH_MOCK_KEY
   mock-anthropic:
-    api_key_env: BENCH_MOCK_KEY
+    api_key:
+      env: BENCH_MOCK_KEY
   mock-gemini:
-    api_key_env: BENCH_MOCK_KEY
+    api_key:
+      env: BENCH_MOCK_KEY
   mock-cohere:
-    api_key_env: BENCH_MOCK_KEY
+    api_key:
+      env: BENCH_MOCK_KEY
   mock-bedrock:
-    api_key_env: BENCH_BEDROCK_KEY
+    api_key:
+      env: BENCH_BEDROCK_KEY
 models:
   gpt-4o-mini:
-    # OOTB canonical (OpenAI) lane — the perf/memory/throughput default. IDENTICAL to the 1.4.1
-    # manifest, deliberately: the two versions are compared on the same config so the only thing
-    # differing between the rows is the binary.
-    #
-    # max_concurrent stays. The v1.5.0 SOURCE TAG makes it `Option<usize>`, and I removed it on that
-    # basis - the released image then refused to boot: "models.gpt-4o-mini: missing field
-    # `max_concurrent`". The published image (Docker Hub 05:29 UTC) predates the v1.5.0 tag (05:54
-    # UTC) by 25 minutes, so it is not built from that source. The artifact a user pulls is what this
-    # board measures, and it requires the field.
-    #
-    # 8000 sits above the sweep's winning band so it is a ceiling, not the limiter.
-    # max_requests: -1 = unmetered.
     provider: mock-openai
     max_concurrent: 8000
   gpt-4o-mini-responses:
