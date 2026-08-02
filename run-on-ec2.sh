@@ -637,6 +637,15 @@ publish_gateway() { # gw glog_echo_fn
     # unchanged HEAD would push (trivially succeeds), and the gateway's row would silently NOT update
     # while the publish reported success. On a stage failure, log loudly and exit non-zero so the box's
     # return code counts it as a real publish issue.
+    # HOLD THE NUMBERS BACK WHEN ASKED. The snapshot is still pulled and still lands in
+    # results/snapshots/ locally; what BENCH_NO_PUBLISH=1 skips is the commit and push, so a run can
+    # be reviewed before its numbers become public. Used for a gateway being evaluated before anyone
+    # decides it belongs on the board - the definition has to be pushed for the boxes to fetch it,
+    # but the measurements do not.
+    if [[ "${BENCH_NO_PUBLISH:-0}" == "1" ]]; then
+      echo "[$gw] BENCH_NO_PUBLISH=1 - snapshot pulled and kept LOCAL; not committing, not pushing"
+      exit 0
+    fi
     if ! git -C "$HERE" add -- "${paths[@]}"; then
       echo "[$gw] publish: git add FAILED (result staged nothing; NOT pushing an empty change) - aborting this publish"
       exit 1
