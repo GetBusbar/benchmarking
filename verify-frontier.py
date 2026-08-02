@@ -27,6 +27,7 @@
 # and the engine rejected would be reported here as a disagreement to investigate, never hidden.
 
 import glob
+import os
 import json
 import sys
 
@@ -129,7 +130,14 @@ def derive(rungs, bound_us):
     # the whole tool down mid-board. Treating an absent rate as the lowest candidate keeps the rung
     # eligible (which is the point of admitting it) without letting it win a maximum it cannot state.
     best = min(ok, key=lambda r: (-(r["rps"] if r["rps"] is not None else 0.0), r["conc"]))
-    above = [r["conc"] for r in rungs if r["conc"] > best["conc"] and not qualifies(r, bound_us)]
+    # A CONCURRENCY IS DISQUALIFIED, NOT A RUNG. Rungs are recorded PER WINDOW (WINDOWS_PER_RUNG=3),
+    # so every concurrency appears three times and one unlucky window is not a verdict on the level.
+    # Asking "is there any failing rung above best" condemned concurrencies that two of their three
+    # windows carried cleanly - the engine and bench-audit.py were both corrected to ask instead
+    # "did NO window at this concurrency qualify", and this oracle was left behind on the old rule.
+    # It re-derived 2 where the engine published 4 on portkey and called the engine wrong.
+    above = [c for c in sorted({r["conc"] for r in rungs if r["conc"] > best["conc"]})
+             if not any(r["conc"] == c and qualifies(r, bound_us) for r in rungs)]
     top = max((r["conc"] for r in rungs), default=0)
     return {
         "rps": best["rps"],
@@ -235,10 +243,61 @@ def check(path, bounds_us, verbose):
     return gw, eng, cells, problems
 
 
+def equivalent_instrument(engines):
+    """True when every engine seen is attested to the SAME built binary in instrument-equivalence.json."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "site", "instrument-equivalence.json")
+    try:
+        with open(path) as f:
+            doc = json.load(f)
+    except Exception:
+        return False
+    groups = doc.get("instruments") or doc.get("equivalent") or []
+    for grp in (groups.values() if isinstance(groups, dict) else groups):
+        commits = grp.get("commits") if isinstance(grp, dict) else None
+        if not commits:
+            continue
+        short = {c[:7] for c in commits}
+        if all(e[:7] in short for e in engines):
+            return True
+    return False
+
+
+def published_paths():
+    """The snapshots the BOARD publishes - not every artifact that has ever landed in the directory.
+
+    This globbed `results/snapshots/*.json`, which mixes the current board in with every superseded
+    run still on disk. The 2026-07-31 field run was measured before `first_disqualified_conc` was
+    corrected from a per-RUNG to a per-CONCURRENCY rule, so its snapshots genuinely carry the old
+    wrong value - 36 of them. Re-deriving those against the corrected rule made this tool fail
+    permanently on data no reader can see, which trains the operator to treat FAIL as background
+    noise. That is worse than no oracle: the next real problem arrives into a channel already
+    dismissed.
+
+    Superseded files are not deleted and not silently skipped - the count is printed, and any path
+    passed explicitly on the command line is still checked, so the old run stays auditable on demand.
+    """
+    board = os.path.join(os.path.dirname(os.path.abspath(__file__)), "site", "data.json")
+    every = sorted(glob.glob("results/snapshots/*.json"))
+    try:
+        with open(board) as f:
+            want = {os.path.basename(g["snapshot_file"])
+                    for g in json.load(f).get("gateways", []) if g.get("snapshot_file")}
+    except Exception:
+        return every
+    if not want:
+        return every
+    keep = [p for p in every if os.path.basename(p) in want]
+    skipped = len(every) - len(keep)
+    if skipped:
+        print(f"checking the {len(keep)} snapshot(s) the board publishes "
+              f"({skipped} superseded file(s) on disk not checked - pass a path to check one)")
+    return keep
+
+
 def main():
     args = [a for a in sys.argv[1:] if not a.startswith("-")]
     verbose = "-v" in sys.argv or "--verbose" in sys.argv
-    paths = args or sorted(glob.glob("results/snapshots/*.json"))
+    paths = args or published_paths()
     bounds = declared_bounds_us()
     print(f"declared bounds (from {ENGINE_FRONTIER}): {[b//1000 for b in bounds]} ms + unbounded")
     total_cells = 0
@@ -260,7 +319,14 @@ def main():
     print(f"\n{'=' * 78}")
     print(f"re-derived {total_cells} cell(s) carrying a frontier")
     if len(engines) > 1:
-        print(f"MIXED ENGINES: {dict((k, len(v)) for k, v in engines.items())} - not comparable")
+        # DIFFERENT COMMITS ARE NOT AUTOMATICALLY DIFFERENT INSTRUMENTS. `instrument-equivalence.json`
+        # admits several commits as one instrument only on identical `otb --release` sha256 - a built
+        # binary, not a reasoned diff. Calling an attested set "not comparable" would contradict the
+        # board's own C8 evidence and read as a defect where there is none.
+        if equivalent_instrument(engines):
+            print(f"engines {sorted(engines)} - one instrument by attested identical binary (C8)")
+        else:
+            print(f"MIXED ENGINES: {dict((k, len(v)) for k, v in engines.items())} - not comparable")
     for x in all_problems:
         print(f"  PROBLEM: {x}")
     if all_problems:
