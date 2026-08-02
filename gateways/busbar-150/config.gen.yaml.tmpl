@@ -1,0 +1,40 @@
+listen: "127.0.0.1:{GW_PORT}"
+providers:
+  mock-openai:
+    api_key_env: BENCH_MOCK_KEY
+  mock-responses:
+    api_key_env: BENCH_MOCK_KEY
+  mock-anthropic:
+    api_key_env: BENCH_MOCK_KEY
+  mock-gemini:
+    api_key_env: BENCH_MOCK_KEY
+  mock-cohere:
+    api_key_env: BENCH_MOCK_KEY
+  mock-bedrock:
+    api_key_env: BENCH_BEDROCK_KEY
+models:
+  gpt-4o-mini:
+    # OOTB canonical (OpenAI) lane — the perf/memory/throughput default.
+    #
+    # NO max_concurrent, AND THAT IS THE MINIMAL CONFIG FOR THIS VERSION. In v1.4.1 the field was
+    # REQUIRED (a bare usize, no serde default) so the 1.4.1 manifest must set it, and 8000 sat above
+    # the sweep's winning band as a ceiling rather than a limiter. In v1.5.0 it is
+    # `Option<usize>` and the source says so outright: "max_concurrent is an OPT-IN limiter: omitted
+    # (None) = UNBOUNDED". So the bare minimum required to run no longer includes it.
+    #
+    # Carrying 8000 over would not have been neutral: busbar's stream sweep probes past c=8192, so
+    # the cap binds inside the measured range and would have handicapped 1.5.0 against the very
+    # thing a user gets by installing it. The config-necessity rule - every gateway config is the
+    # bare minimum required to run - decides this on its own.
+    # max_requests: -1 = unmetered.
+    provider: mock-openai
+  gpt-4o-mini-responses:
+    provider: mock-responses
+  gpt-4o-mini-anthropic:
+    provider: mock-anthropic
+  gpt-4o-mini-gemini:
+    provider: mock-gemini
+  gpt-4o-mini-cohere:
+    provider: mock-cohere
+  gpt-4o-mini-bedrock:
+    provider: mock-bedrock
