@@ -32,7 +32,7 @@
   "lang": "Rust",
   "launch": {
     "args": [],
-    "image": "getbusbar/busbar:1.4.1",
+    "image": "getbusbar/busbar:1.5.0",
     "kind": "docker",
     "mounts": [
       {
@@ -65,5 +65,6 @@
     "container": "busbar-bench",
     "image": "getbusbar/busbar:1.5.0",
     "kind": "docker"
-  }
+  },
+  "version": "1.5.0"
 }
