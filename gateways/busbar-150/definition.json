@@ -59,12 +59,12 @@
   ],
   "matrix_note": "busbar declares full 6x6 translation support",
   "model": "gpt-4o-mini",
-  "name": "busbar",
+  "name": "busbar-150",
   "path": "/v1/chat/completions",
   "port": 8080,
   "repo": "https://github.com/GetBusbar/busbar",
   "runtime": {
-    "container": "busbar-bench",
+    "container": "busbar-150-bench",
     "kind": "docker"
   }
 }
