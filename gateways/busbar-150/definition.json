@@ -32,30 +32,20 @@
   "lang": "Rust",
   "launch": {
     "args": [],
-    "env": [
-      [
-        "BUSBAR_CONFIG",
-        "/work/config.yaml"
-      ],
-      [
-        "BUSBAR_PROVIDERS",
-        "/work/providers.yaml"
-      ],
-      [
-        "BUSBAR_ADMIN_TOKEN",
-        "bench-admin-token"
-      ]
-    ],
     "image": "getbusbar/busbar:1.5.0",
     "kind": "docker",
     "mounts": [
       {
-        "container_path": "/work/config.yaml",
+        "container_path": "/etc/busbar/config.yaml",
         "host_path": "config.gen.yaml"
       },
       {
-        "container_path": "/work/providers.yaml",
+        "container_path": "/etc/busbar/providers.yaml",
         "host_path": "providers.gen.yaml"
+      },
+      {
+        "container_path": "/etc/busbar/busbar-signing.key",
+        "host_path": "busbar-signing.key"
       }
     ]
   },
