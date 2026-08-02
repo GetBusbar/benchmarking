@@ -63,8 +63,6 @@
   "repo": "https://github.com/GetBusbar/busbar",
   "runtime": {
     "container": "busbar-bench",
-    "image": "getbusbar/busbar:1.5.0",
     "kind": "docker"
-  },
-  "version": "1.5.0"
+  }
 }
