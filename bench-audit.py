@@ -625,9 +625,18 @@ def check_a_wedged_gateway_is_named_as_one(name, c):
     clean = proven_clean_top(rungs)
     if clean <= 0 or not any((r.get("conc") or 0) <= clean for r in rungs[-5:]):
         return
-    absences = c.get("absences") or {}
-    detail = ((absences.get("stream.streams_sustained") or {}).get("detail") or "").lower()
-    if "recover" not in detail and "restart" not in detail:
+    entry = (c.get("absences") or {}).get("stream.streams_sustained") or {}
+    detail = (entry.get("detail") or "").lower()
+    # AN ABSENCE FILED AS THE RIG'S HAS ALREADY ANSWERED THIS. The engine's own contamination guard
+    # reaches the same conclusion by a stricter route - it saw a rung fail below one the cell had
+    # carried and said so in the reason token - so demanding the words "recover" or "restart" on top
+    # of that is this check grading prose rather than reading the finding. busbar
+    # anthropic>anthropic came back reason=harness_error with the impossibility spelled out, and this
+    # still called it unexplained: the third false positive of the same family, all of them from
+    # keyword-matching a sentence instead of asking what the absence claims.
+    if entry.get("reason") in ("harness_error", "rig_limited"):
+        return
+    if "recover" not in detail and "restart" not in detail and "already carried" not in detail:
         yield (f"{name}: the last 5 rungs all failed - the gateway stopped serving and did not come "
                f"back - but the absence does not say so")
 
