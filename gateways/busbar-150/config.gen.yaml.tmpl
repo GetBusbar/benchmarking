@@ -53,3 +53,17 @@ models:
   gpt-4o-mini-bedrock:
     provider: mock-bedrock
     max_concurrent: 8000
+
+# AUTH OFF, TO MATCH WHAT 1.4.1 ACTUALLY RAN.
+#
+# The 1.4.1 config on this board has no auth block at all, and 1.4.1 permitted that. 1.5.0 refuses to
+# boot silently in that state - it hardened - so the posture has to be declared rather than implied.
+# `chain: []` is busbar's own documented dev setting ("the open front door: development only, loud
+# startup warning"), and it is the ONLY setting that keeps the two rows comparable: with a real auth
+# chain, 1.5.0 would verify a signed key on every request while 1.4.1 verified nothing, and the delta
+# would be measuring authentication rather than the gateway.
+#
+# It is not a favour to 1.5.0 either - busbar logs an ERROR and two WARNs about it on every boot, and
+# the board's rule is the bare minimum required to run.
+auth:
+  chain: []

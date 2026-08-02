@@ -32,18 +32,26 @@
   "lang": "Rust",
   "launch": {
     "args": [],
+    "env": [
+      [
+        "BUSBAR_CONFIG",
+        "/work/config.yaml"
+      ],
+      [
+        "BUSBAR_PROVIDERS",
+        "/work/providers.yaml"
+      ]
+    ],
     "image": "getbusbar/busbar:1.5.0",
     "kind": "docker",
     "mounts": [
       {
-        "container_path": "/etc/busbar/config.yaml",
-        "host_path": "config.gen.yaml",
-        "read_only": true
+        "container_path": "/work/config.yaml",
+        "host_path": "config.gen.yaml"
       },
       {
-        "container_path": "/etc/busbar/providers.yaml",
-        "host_path": "providers.gen.yaml",
-        "read_only": true
+        "container_path": "/work/providers.yaml",
+        "host_path": "providers.gen.yaml"
       }
     ]
   },
