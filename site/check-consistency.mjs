@@ -828,6 +828,20 @@ export function checkConsistency(data, app, opts = {}) {
     if (inTimings) return;
     for (const [k, v] of Object.entries(node)) {
       if (k === "timings_s") { covered("C1.timings"); continue; }
+      /* `absences` IS A REASON MAP, NOT A METRIC BLOCK, and it is skipped whole for the same reason
+         `timings_s` is: its keys are metric names but its values are {reason, detail} records, which
+         are not envelopes and are never supposed to be.
+
+         It only surfaced when memory absences started appearing on refuted cells. The perf and
+         stream entries were already there and passed silently because `isMetricField` is false for
+         "perf.added_latency_p50_us" and true for "memory.peak_rss_mib" - the memory vocabulary
+         registers its prefixed names and the others do not - so C1 was inspecting one third of this
+         map and ignoring the rest. Reading a reason record as a partial envelope is a false
+         positive whichever third it lands on.
+
+         The map's own contract - every published null carries a reason - is checked by the absence
+         invariants and by bench-audit.py, which is where it belongs. */
+      if (k === "absences") { covered("C1.absences"); continue; }
       if (k.endsWith("_mock_bound")) {
         errors.push(`C1: ${path}.${k} - a raw *_mock_bound flag survives in the bundle (must be consumed at seal time)`);
         covered("C1.mock_bound");
@@ -1133,7 +1147,7 @@ export function checkConsistency(data, app, opts = {}) {
   const CHECK_BRANCHES = [
     "C1.field", "C1.certified", "C1.mock_bound", "C2.suppressed",
     "C3.stamp", "C3.lint", "C3.route", "C4.cell", "C4.leak", "C6.cell", "R1.oracle",
-    "R3.selection", "R4.selection", "C7.hwm", "C5.route", "C5.lint", "C8.engine", "C1.timings",
+    "R3.selection", "R4.selection", "C7.hwm", "C5.route", "C5.lint", "C8.engine", "C1.timings", "C1.absences",
   ];
   // WIRING FIRST, COVERAGE SECOND. Whether each declared branch still HAS a call site is a question
   // about this file, answerable without a single gateway, and it is never downgraded by how full the

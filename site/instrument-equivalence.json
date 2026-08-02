@@ -22,6 +22,24 @@
         },
         "verified_at": "2026-07-28T05:50:00Z"
       }
+    },
+    {
+      "id": "otb-f1514a1f",
+      "commits": [
+        "0f658fb4df8be90acf549799b843f06d68d2133b",
+        "6790312026255052c63db7eaa37bf5ad2dd93d24",
+        "f2fda44f74cec7eabecab721265fad06b4eed712"
+      ],
+      "reason": "The 2026-08-02 field run landed across three commits because it was rebuilt in stages: seven gateways re-ran after a network event killed their orchestrator, busbar re-ran after its box hit the 8h cost cap mid-grid, and six re-ran to move off an engine whose record.rs genuinely differed. Nothing under engine/ changed between these three - the commits carry site, audit and gateway-manifest work - so re-running fourteen gateways to move those files would have changed no measurement.",
+      "evidence": {
+        "method": "cargo build --release --bin otb at each commit in a separate detached git worktree, same host and toolchain, hashed with shasum -a 256. Also verified pairwise that git diff engine/ between the three commits is empty - but the binaries are the admissible evidence, and the diff is only how the entry was found worth checking.",
+        "otb_release_sha256": {
+          "0f658fb4df8be90acf549799b843f06d68d2133b": "f1514a1f4b1473ff9e4d24a902217896a9f39a37bc44e6553b49951db0b2ce40",
+          "6790312026255052c63db7eaa37bf5ad2dd93d24": "f1514a1f4b1473ff9e4d24a902217896a9f39a37bc44e6553b49951db0b2ce40",
+          "f2fda44f74cec7eabecab721265fad06b4eed712": "f1514a1f4b1473ff9e4d24a902217896a9f39a37bc44e6553b49951db0b2ce40"
+        },
+        "verified_at": "2026-08-02T19:00:00Z"
+      }
     }
   ]
 }
