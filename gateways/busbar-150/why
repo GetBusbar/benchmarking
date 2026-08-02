@@ -17,11 +17,10 @@ error_map      boot      # REQUIRED per provider in v1.4.1 and still in v1.5.0 -
 models         ingress   # the client-facing model table
 gpt-4o-mini*   ingress   # the model name each matrix column asks for; selects that column's provider
 provider       upstream  # which provider backs this model
-# max_concurrent  REMOVED for v1.5.0. It was a bare `usize` with no serde default in v1.4.1, so that
-#                 manifest must set it; in v1.5.0 it is `Option<usize>` and the source states
-#                 "omitted (None) = UNBOUNDED", so the bare minimum to run no longer includes it.
-#                 Keeping the 8000 from the 1.4.1 config would not have been neutral either: the
-#                 stream sweep probes past c=8192, so the cap binds inside the measured range.
+max_concurrent boot      # still REQUIRED by the published 1.5.0 IMAGE (it refuses to boot without
+#                         it) even though the v1.5.0 source tag types it Option<usize> - the image
+#                         was pushed 25 min BEFORE that tag existed. Same value as 1.4.1 so the two
+#                         rows differ only by binary.
 BENCH_MOCK_KEY    boot   # the credential api_key_env names (dummy; the mock ignores it)
 BENCH_BEDROCK_KEY boot   # bedrock SigV4 ACCESS:SECRET pair, same
 governance    boot
