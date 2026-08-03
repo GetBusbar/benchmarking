@@ -2100,8 +2100,34 @@ const COLUMN_SETS = {
         const m = memoryFor(g, st);
         const c = memCell(g, "growth_rate_mib_per_min", fmt1, st);
         if (c.na || !m) return c;
-        if (m.plateaued === false)
-          return { ...c, text: `${c.text} (leak)`, note: "This cell never went steady: the load stopped at the cap with RSS still climbing at this rate, so there is no steady state to report and a longer load would have produced a larger number." };
+        if (m.plateaued === false) {
+          /* THE SUFFIX FOLLOWS THE SHAPE, NOT MERELY "DID NOT SETTLE".
+             This appended "(leak)" to every unsettled cell whatever its direction, so agentgateway
+             published "-0.4 (leak)" - a NEGATIVE rate, memory being RELEASED, labelled as the one
+             thing it is the opposite of - under a note that said "with RSS still climbing at this
+             rate". The drawer three hundred lines up already got this right from the same field
+             ("still RELEASING memory when the cap was reached, not growing"); the column did not, so
+             one board rendered one fact two ways and the wrong one was the one on the table.
+             `memShape` reads the engine's own verdict. A record with no shape (an older board, a
+             withheld verdict) gets the neutral wording rather than a guess. */
+          const sh = memShape(m);
+          if (sh === "releasing")
+            return { ...c, text: `${c.text} (releasing)`, note: "This cell never went steady, but it was RELEASING memory when the load hit the cap - the rate is negative. That is the opposite of a leak: a longer load would not have produced a larger number." };
+          if (sh === "swinging")
+            return { ...c, text: `${c.text} (swing)`, note: "This cell never went steady, but it did not grow either: RSS swung around a level it kept returning to. This rate is how fast the window happened to be moving when it closed - a fact about the sampling instant, not a leak." };
+          if (sh === "climbing")
+            return { ...c, text: `${c.text} (leak)`, note: "This cell never went steady: the load stopped at the cap with RSS still climbing at this rate, so there is no steady state to report and a longer load would have produced a larger number." };
+          /* NO SHAPE PUBLISHED (an older board, a withheld verdict): fall back to the SIGN of the
+             rate, which is a reading rather than a guess. A positive rate is a climb whether or not a
+             verdict came with it, and a negative one is not a leak under any verdict. Only a rate
+             that is absent or exactly zero leaves the direction genuinely unestablished. */
+          const gr = mval(m.growth_rate_mib_per_min);
+          if (gr != null && gr > 0)
+            return { ...c, text: `${c.text} (leak)`, note: "This cell never went steady: the load stopped at the cap with RSS still climbing at this rate, so there is no steady state to report and a longer load would have produced a larger number." };
+          if (gr != null && gr < 0)
+            return { ...c, text: `${c.text} (releasing)`, note: "This cell never went steady, but the rate is negative - it was RELEASING memory when the load hit the cap, which is the opposite of a leak." };
+          return { ...c, text: `${c.text} (no steady state)`, note: "This cell never went steady, and neither a shape verdict nor a non-zero rate establishes which way RSS was moving." };
+        }
         return { ...c, note: c.note || "Settled: RSS had stopped climbing when the load was terminated." };
       } },
     { id: "memrecov", label: () => `Recovered @${memWindowLabel(boardMemWindows().recovery)} (MiB)`, desc: false,

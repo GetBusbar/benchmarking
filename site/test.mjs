@@ -2429,6 +2429,36 @@ test("COST: the cost columns appear only on a board that can answer them, and re
 // was on the page, so a reader saw "53.6 µs" beside "82,328 req/s" with nothing saying they came from
 // different windows - and multiplying them yields 4.41 cores on a 4-core box: an impossible number
 // assembled from two correct ones.
+// A NEGATIVE GROWTH RATE IS NOT A LEAK. agentgateway published "-0.4 (leak)" on the live board: memory
+// being RELEASED, labelled as the one thing it is the opposite of, under a note asserting RSS was
+// "still climbing at this rate". The drawer already read the engine's shape verdict correctly from the
+// same field; the column ignored it, so one board rendered one fact two contradictory ways.
+test("MEMORY: the growth suffix follows the measured shape, so a falling cell is never called a leak", () => {
+  const seal = (v) => ({ value: v, certified: true, suppressed: false });
+  // shape: 1 climbing, 0 swinging, -1 releasing (engine codes, read via mcode not mval - 0 is real).
+  const cellWith = (rate, shape) => ({
+    key: "g", display: "g",
+    matrix: { upstreams: { openai: { cells: { openai: { served: true, memory: {
+      plateaued: false, growth_rate_mib_per_min: seal(rate), shape: seal(shape),
+      steady_state_rss_mib: seal(null), peak_rss_mib: seal(42),
+    } } } } } },
+  });
+  const suffix = (rate, shape) => {
+    const data = { gateways: [cellWith(rate, shape)] };
+    const saved = app.state.data;
+    try {
+      app.state.data = data;
+      const col = app.COLUMN_SETS.memory.find((c) => c.id === "memgrowth");
+      const st = { data, mode: "same", sameDialect: "openai", bound: 10 };
+      return col.get(data.gateways[0], st).text || "";
+    } finally { app.state.data = saved; }
+  };
+  assert.match(suffix(-0.4, -1), /releasing/, "a falling cell says releasing");
+  assert.doesNotMatch(suffix(-0.4, -1), /leak/, "and is NEVER called a leak - this is the reported bug");
+  assert.match(suffix(12.5, 1), /leak/, "a climbing cell is still called a leak, which is the point of the column");
+  assert.match(suffix(0.3, 0), /swing/, "an oscillating cell says swing");
+});
+
 test("COST: the CPU column names the concurrency its window ran at, from the data", () => {
   const seal = (v) => ({ value: v, certified: true, suppressed: false });
   const withCost = { gateways: [{ key: "a",
