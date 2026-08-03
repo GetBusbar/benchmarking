@@ -882,7 +882,35 @@ export function checkConsistency(data, app, opts = {}) {
   walk({ gateways: data.gateways || [] }, "data");
 
   // ---- C4: single path + no legacy leak --------------------------------------
+  // ---- C9: a row suppressed for engine mismatch must be suppressed COMPLETELY -------------------
+  //
+  // OTB_SINGLE_ENGINE keeps the board single-instrument by blanking rows an older harness measured,
+  // rather than mixing them in or overriding C8. That is honest only if "blank" means blank: a row
+  // that kept ONE stale measurement while the rest went n/a would put another instrument's number on
+  // the board with nothing marking it, which is worse than the mix C8 refuses, because the mix at
+  // least declares itself.
+  //
+  // So suppression is VERIFIED here, not trusted, and the list is the bundle's own published claim -
+  // an exemption a bundle can grant itself is not a check. A key on that list must carry no
+  // measurement of any kind, and must say what it is waiting for.
+  const suppressedKeys = new Set(
+    Array.isArray(data.suppressed_for_engine) ? data.suppressed_for_engine : []);
   for (const g of data.gateways || []) {
+    if (suppressedKeys.has(g.key)) {
+      covered("C9.suppressed");
+      const leaked = ["matrix", "best_cell", "translation_cell", "streaming", "memory",
+                      "snapshot_file", "rig", "measured_at", "lane_measured_at"]
+        .filter((k) => g[k] != null);
+      if (leaked.length)
+        errors.push(`C9: ${g.key} is listed in suppressed_for_engine (n/a pending re-measurement) but still publishes ${leaked.join(", ")} - a partly-suppressed row puts another engine's number on the board with nothing marking it`);
+      if (!g.awaiting_engine)
+        errors.push(`C9: ${g.key} is suppressed but carries no awaiting_engine - a blank row must say whether it is blank because nothing was measured or because the board moved to a harness it has not been re-measured on`);
+      if (g.engine && g.engine.current === true)
+        errors.push(`C9: ${g.key} is suppressed as not-current but its own engine stamp claims current - suppression and the stamp disagree about the same fact`);
+      // Nothing below applies: the row publishes no numbers, so there is nothing to oracle, no
+      // provenance to agree about, and no envelope to seal.
+      continue;
+    }
     // No raw legacy suite object may survive in the emitted bundle (they are the stale reservoir).
     for (const suite of ["perf", "stream", "streamcpu", "xlate"]) {
       if (g[suite] != null) { errors.push(`C4: ${g.key}.${suite} - a raw legacy suite object leaked into the bundle`); covered("C4.leak"); }
@@ -1148,6 +1176,9 @@ export function checkConsistency(data, app, opts = {}) {
     "C1.field", "C1.certified", "C1.mock_bound", "C2.suppressed",
     "C3.stamp", "C3.lint", "C3.route", "C4.cell", "C4.leak", "C6.cell", "R1.oracle",
     "R3.selection", "R4.selection", "C7.hwm", "C5.route", "C5.lint", "C8.engine", "C1.timings", "C1.absences",
+    // Not REQUIRED: a board where every row is on the current engine suppresses nothing, and that is
+    // the normal, healthy state. Declared so the branch is guarded when it does fire.
+    "C9.suppressed",
   ];
   // WIRING FIRST, COVERAGE SECOND. Whether each declared branch still HAS a call site is a question
   // about this file, answerable without a single gateway, and it is never downgraded by how full the

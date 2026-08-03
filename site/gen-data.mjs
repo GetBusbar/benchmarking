@@ -1143,6 +1143,56 @@ for (const g of gateways) {
     : { sha: null, short: null, current: false };
 }
 
+// ---- OTB_SINGLE_ENGINE: n/a beats a mixed board ---------------------------------------------
+//
+// C8 refuses to publish a board whose columns were measured by different harnesses, and it is right
+// to: a ranking across two instruments compares the instruments as much as the gateways. But the
+// only two ways out of it were both bad. Re-measure the whole field - hours and real money, to
+// republish numbers that had not changed - or override the guard, which publishes the mix anyway and
+// leaves the reader to notice a red marker.
+//
+// There is a third answer, and it is the honest one: show the gateways the CURRENT engine measured,
+// and show n/a for the ones it has not reached yet. A row measured by an older engine is not wrong,
+// but it is not comparable, and "we have not measured this on this harness yet" is a true statement
+// that a blank cell already means. The board stays single-instrument by construction rather than by
+// override, so C8 passes because there is genuinely nothing mixed - a suppressed row publishes no
+// matrix numbers, so it is not a matrix publisher, so there is no second engine to disagree about.
+//
+// This also makes a partial re-run publishable AS IT LANDS: each gateway's numbers appear the moment
+// that gateway is re-measured on the current engine, instead of the whole field waiting for the
+// slowest box.
+//
+// IDENTITY IS A WHITELIST, deliberately. Blacklisting the measurement fields would mean every future
+// field added to a row leaks through suppression by default, and the failure would be silent and
+// exactly wrong - stale numbers from another instrument, presented as current. What survives is what
+// a never-measured gateway already carries, so a suppressed row and an unmeasured one are the same
+// shape, which is the shape the site already renders as n/a.
+//
+// AND THE STRIPPED FIELDS ARE SET TO NULL, NOT DELETED. Several are null-safe-by-contract - `rig` is
+// assigned on every row precisely so provenance is EXPLICIT rather than absent (see `g.rig =` above),
+// and the render path leans on that. Deleting them turns "measured nothing" into "this key never
+// existed", which is a different claim and one the bundle's own tests refuse.
+const SINGLE_ENGINE = process.env.OTB_SINGLE_ENGINE === "1";
+const suppressedForEngine = [];
+if (SINGLE_ENGINE && boardEngine != null) {
+  const IDENTITY = new Set([
+    "key", "display", "lang", "cls", "repo", "version",
+    "stars", "stars_as_of", "first_commit", "engine",
+  ]);
+  for (const g of gateways) {
+    if (g.engine.current) continue;
+    for (const k of Object.keys(g)) if (!IDENTITY.has(k)) g[k] = null;
+    // WHY this row is blank, on the row itself. A reader who sees n/a is owed the difference between
+    // "this gateway was measured and had nothing to show" and "this gateway has not been re-measured
+    // on the harness that produced everything else on screen".
+    g.awaiting_engine = boardEngine.slice(0, 7);
+    suppressedForEngine.push(g.key);
+  }
+  if (suppressedForEngine.length)
+    console.log(`gen-data: OTB_SINGLE_ENGINE - ${suppressedForEngine.length} row(s) show n/a pending ` +
+      `re-measurement on ${boardEngine.slice(0, 7)}: ${suppressedForEngine.join(", ")}`);
+}
+
 // METRIC DEFINITIONS FOR THE BOARD (task: project data.definitions): the engine's own prose for what
 // each metric is, generated from its own constants (engine/src/suite.rs metric_definitions) so the
 // definition displayed can never drift from the enforcement it describes - see the p99<1s-vs-20ms
@@ -1193,6 +1243,10 @@ const data = {
   // reader had no way to tell WHICH harness produced the numbers or whether a row was measured by an
   // older one. The board states its own engine, and every row states the engine that measured it.
   benchmark_version: boardEngine,
+  // WHICH ROWS ARE BLANK ON PURPOSE. Published so the board can say it out loud rather than leaving
+  // a reader to infer it from a field on each row, and so a later run can tell "nothing suppressed"
+  // (single-engine board) apart from "the flag was off" (a mix would have been refused by C8).
+  suppressed_for_engine: SINGLE_ENGINE ? suppressedForEngine.slice().sort() : null,
   repo: "https://github.com/GetBusbar/benchmarking",
   gateways,
 };
