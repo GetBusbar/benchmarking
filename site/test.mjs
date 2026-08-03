@@ -2498,6 +2498,27 @@ test("CONC: pinning a rung ranks every gateway at that rung, and never invents o
   } finally { app.state.data = savedData; app.state.conc = savedConc; }
 });
 
+// THE CONTROL ITSELF: a dropdown that opens on "Best", offering only rungs the run actually drove.
+test("CONC: the selector defaults to Best and offers only the rungs the run drove", () => {
+  const seal = (v) => ({ value: v, certified: true, suppressed: false });
+  const data = { gateways: [
+    { key: "a", display: "a", best_cell: { ...bcCell({}), rungs: [
+      { conc: 8, rps: seal(1), p99_us: 1, windows: 3, clean_windows: 3 },
+      { conc: 32, rps: seal(2), p99_us: 1, windows: 3, clean_windows: 3 }] } },
+    { key: "b", display: "b", best_cell: { ...bcCell({}), rungs: [
+      { conc: 32, rps: seal(3), p99_us: 1, windows: 3, clean_windows: 3 },
+      { conc: 128, rps: seal(4), p99_us: 1, windows: 3, clean_windows: 3 }] } },
+  ] };
+  // The union of what any gateway drove, ascending - not a list named in the code.
+  assert.deepEqual(app.concChoices(data), [8, 32, 128]);
+  // A board with no rungs offers nothing, so the control can hide rather than show a lone "Best".
+  assert.deepEqual(app.concChoices({ gateways: [{ key: "old", best_cell: bcCell({}) }] }), []);
+  // Best is the default: a control that opened on a pinned rung would answer a question the reader has
+  // not asked, and the peak IS the honest headline for a single gateway.
+  assert.equal(app.selectedConc({ conc: null }), null);
+  assert.equal(app.selectedConc({ conc: 128 }), 128);
+});
+
 // A pinned rung has to survive being shared: the entire use is sending someone the same-concurrency view.
 test("CONC: the pinned rung round-trips through the URL", () => {
   const st = app.decodeUrl("/gateways/performance", "?conc=128");
@@ -6591,7 +6612,15 @@ test("UI: the two filter axes are ONE labelled control block, not two ragged row
   // BOTH AXES ARE NAMED. The cell chooser's label is the half that did not exist.
   assert.match(block, /class="flabel"[^>]*id="bound-legend">Tail-latency bound</, "the bound axis names itself");
   assert.match(block, /class="flabel"[^>]*id="mode-legend">/, "and so does the cell axis, which never used to");
-  assert.equal((block.match(/class="flabel"/g) || []).length, 2, "exactly two axes, exactly two labels");
+  // EVERY AXIS IS NAMED - which is the invariant, rather than the COUNT of axes. This asserted exactly
+  // two, which froze the layout at the two that existed: adding the concurrency axis (which the board
+  // needs, so a comparison can be pinned to one rung) failed a test whose actual subject was that an
+  // axis had no label at all. One label per control group, no unnamed chips, any number of axes.
+  const groups = (block.match(/class="control-group/g) || []).length;
+  const labels = (block.match(/class="flabel"/g) || []).length;
+  assert.ok(groups >= 2, `the block carries the axes: ${groups}`);
+  assert.equal(labels, groups, `every axis names itself: ${labels} labels for ${groups} control groups`);
+  assert.ok(block.includes('id="conc-chooser"'), "and the concurrency axis is one of them");
   // The seg keeps its accessible name pointed at the visible label rather than duplicating it in an attribute.
   assert.match(block, /id="mode-seg"[^>]*aria-labelledby="mode-legend"/, "the mode seg is labelled by the visible label");
 
