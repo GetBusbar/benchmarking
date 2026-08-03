@@ -139,6 +139,19 @@
         </div>
         <span class="fnote muted" id="bound-note"></span>
       </div>
+      <!-- THE CONCURRENCY the throughput column is read at. "Best" - each gateway at the rung where ITS
+           OWN throughput peaked - is the default, because that is the honest headline for a single
+           gateway. Pinning a rung is what makes the COMPARISON unimpeachable: every row then reports the
+           same concurrency, so "77,248 @ 128 conc" beside "44,475 @ 32 conc" - which reads as four times
+           the concurrency handed to one entrant - becomes two numbers taken at the identical rung.
+           Options come from the run (every concurrency any gateway actually drove), never a list here. -->
+      <div class="control-group conc-chooser hidden" id="conc-chooser">
+        <span class="flabel" id="conc-legend">Concurrency</span>
+        <div class="fcontrols">
+          <select id="conc-select" aria-labelledby="conc-legend"></select>
+        </div>
+        <span class="fnote muted" id="conc-note"></span>
+      </div>
       <!-- Cell chooser (Performance, Streaming, Memory): which cell(s) of the one 6x6 run to show, plus the
            dialect dropdown(s) each mode needs. The MODE BUTTONS are rendered by app.js (renderFilters),
            because the tabs offer different mode sets: Peak | Same | Custom on the perf lanes, Min | Max |

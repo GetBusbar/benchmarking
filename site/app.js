@@ -3426,6 +3426,17 @@ function initFilterControls() {
     if (!btn) return;
     selectBound(btn.dataset.bound === "none" ? null : Number(btn.dataset.bound));
   });
+  /* THE CONCURRENCY SELECTOR. Re-renders the filters too, because the note under it changes with the
+     selection - "each gateway at the concurrency where its own throughput peaked" is a different claim
+     from "every gateway at the same rung", and the control has to say which one is on screen. */
+  const csel = document.getElementById("conc-select");
+  if (csel) csel.addEventListener("change", () => {
+    const v = Number(csel.value);
+    state.conc = csel.value === "" || !Number.isFinite(v) ? null : v;
+    renderFilters();
+    renderTable();
+    syncUrl(true);
+  });
   const onSame = () => { state.sameDialect = same.value; renderTable(); syncUrl(true); };
   const onCustom = () => { state.xlateIn = cin.value; state.xlateOut = cout.value; renderTable(); syncUrl(true); };
   if (same) same.addEventListener("change", onSame);
@@ -3473,9 +3484,40 @@ function renderBoundChooser() {
   const note = document.getElementById("bound-note");
   if (note) note.textContent = `showing the req/s each gateway's chosen cell carried ${boundClause(sel)}`;
 }
+/* THE CONCURRENCY CONTROL. "Best" is the default and the first option, because each gateway's own peak
+   is the honest headline for a single gateway - and because a control that opens on a pinned rung would
+   be quietly answering a question the reader had not asked yet.
+
+   The options are the rungs the RUN drove, gathered from the published readings, so a board swept over
+   a different ladder offers that ladder. A rung no gateway drove is not offered, and a gateway that
+   skipped an offered rung reads n/a on it rather than being interpolated.
+
+   Hidden entirely when the board carries no rungs (an older bundle), because a selector with only
+   "Best" in it is a control that does nothing. */
+function renderConcChooser() {
+  const wrap = document.getElementById("conc-chooser");
+  const sel = document.getElementById("conc-select");
+  if (!wrap || !sel) return;
+  const choices = concChoices(state.data);
+  const offer = CHOOSER_VIEWS.has(state.view) && state.view !== "memory" && choices.length > 0;
+  wrap.classList.toggle("hidden", !offer);
+  if (!offer) return;
+  const cur = selectedConc(state);
+  sel.innerHTML = [
+    `<option value=""${cur == null ? " selected" : ""}>Best (each gateway's peak)</option>`,
+    ...choices.map((c) =>
+      `<option value="${c}"${c === cur ? " selected" : ""}>${esc(fmtInt(c))} concurrent</option>`),
+  ].join("");
+  const note = document.getElementById("conc-note");
+  if (note)
+    note.textContent = cur == null
+      ? "each gateway at the concurrency where its own throughput peaked"
+      : `every gateway at the same rung - ${fmtInt(cur)} concurrent requests in flight`;
+}
 function renderFilters() {
   document.getElementById("search").value = state.q;
   renderBoundChooser();
+  renderConcChooser();
   for (const [, name] of CAPS) { const el = document.getElementById(`f-${name}`); if (el) el.checked = state[CAPS.find(([, n]) => n === name)[0]]; }
   // Cell chooser: paint the buttons THIS view offers, mark the active one, and show only the dropdown(s)
   // that mode needs (Same → one dialect; Custom → in→out pair; Own cell/Min/Max → none). The `peak` mode is
