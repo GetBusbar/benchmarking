@@ -120,7 +120,20 @@ const MEM_CHOOSER_MODES = new Set(["min", "max", "same", "custom"]);
 // its own lowest steady-state cell, so nobody drops out of the default view, and the row states the
 // size of the set the minimum came from so the comparison discloses its own basis.
 function modesFor(view) { return view === "memory" ? MEM_CHOOSER_MODES : CHOOSER_MODES; }
-function defaultMode(view) { return view === "memory" ? "min" : "peak"; }
+/* THE PERF LANES DEFAULT TO SAME, NOT OWN CELL, so the first thing a reader sees is like-for-like.
+   `peak` puts every gateway on its OWN representative diagonal, which means the default view could sit
+   busbar's openai>openai (82,328 req/s) directly beside litellm-rust's anthropic>anthropic (44,475) and
+   invite the ratio between them. Those are different cells: on the SAME cell the gap is 1.70x, not
+   1.85x, and the "Tested on" pill said so all along in a column most readers never read.
+   A ranking is a comparison, and a comparison of two different measurements is not one. Own cell stays
+   one click away (it is the honest view of what each gateway is BEST at, and the only mode that shows
+   every gateway at once); it is simply not the one we hand somebody first. */
+function defaultMode(view) { return view === "memory" ? "min" : "same"; }
+/* The dialect a Same-mode view opens on before any data has loaded. widestDialect() answers this from
+   the run and is always preferred; this is only the pre-data fallback, and it is the value newState()
+   seeds, so "is this dialect the default" has one answer both the encoder and the state agree on. */
+const DEFAULT_SAME_DIALECT = "openai";
+function seededSameDialect(data) { return widestDialect(data) || DEFAULT_SAME_DIALECT; }
 /* Which chooser family a view belongs to. The perf lanes offer Peak/Same/Custom; memory offers
    Min/Max/Same/Custom. They overlap on Same/Custom but not on the mode most readers want, which is
    why a single carried-across `mode` cannot serve both. */
@@ -2389,7 +2402,7 @@ function newState() {
     // The mode each chooser family was last left on, so crossing tabs restores the reader's own
     // choice rather than the coercion the other family forced. Never encoded into the URL: a link
     // carries ONE mode, for the view it names.
-    modeMemo: { perf: "peak", memory: "min" },
+    modeMemo: { perf: "same", memory: "min" },
     needStream: false,
     needXlate: false,
     // CELL CHOOSER (Performance + Streaming): which cell(s) of the ONE 6x6 run to show.
@@ -2397,8 +2410,8 @@ function newState() {
     //   mode "same"   → sameDialect's diagonal (X→X) for every gateway.
     //   mode "custom" → xlateIn→xlateOut cell (any pair, incl. translation) for every gateway.
     //   mode "min"/"max" → MEMORY ONLY: this gateway's lowest / highest steady-state cell.
-    mode: "peak",
-    sameDialect: "openai",
+    mode: "same",
+    sameDialect: DEFAULT_SAME_DIALECT,
     /* Was the Same dialect pinned by the URL? Memory's Same default is the WIDEST-COVERAGE dialect,
        computed from the data at boot, and a pinned ?d= must survive that seeding. */
     sameDialectPinned: false,
@@ -2460,7 +2473,11 @@ function encodeUrl(st) {
     if (mode === "same") {
       // Memory's Same default is the widest-coverage dialect, derived from the run rather than named, so
       // the pristine memory URL stays clean when the dialect IS that default.
-      const isDefault = st.view === "memory" && st.sameDialect === widestDialect(st.data);
+      // Any view whose DEFAULT mode is Same seeds its dialect from the run (widestDialect), so a
+      // pristine URL for that view stays clean. This was memory-only when memory was the only such
+      // view; the perf lanes now default to Same too, and a default that encoded ?d= would mean the
+      // "default state round-trips to a bare /gateways" contract no longer held.
+      const isDefault = defaultMode(st.view) === "same" && st.sameDialect === seededSameDialect(st.data);
       if (!isDefault) p.set("d", st.sameDialect);
     } else if (mode === "custom") { p.set("in", st.xlateIn); p.set("out", st.xlateOut); }
   }
@@ -2533,7 +2550,13 @@ function decodeUrl(pathname, search, hash) {
   // (xin/xout, from the retired Matched tab) — a legacy ?xin/?xout link lands in Custom mode on the
   // pinned pair, exactly the cell the old Matched tab showed.
   const mode = p.get("mode");
+  // NO ?mode= MEANS THE VIEW'S OWN DEFAULT, stated rather than inherited. This carried whatever the
+  // fresh state happened to hold, which was harmless only while that value (`peak`) was a mode memory
+  // does not offer, so memory fell through to Min. The perf default is now `same`, which memory DOES
+  // offer, so a bare /gateways/memory started decoding as Same - memory silently losing the Min
+  // default it declares because another view changed its own. A view's default is the view's to state.
   if (CHOOSER_MODES.has(mode) || MEM_CHOOSER_MODES.has(mode)) st.mode = mode;
+  else st.mode = defaultMode(st.view);
   if (MATRIX_CELLS.includes(p.get("d"))) { st.sameDialect = p.get("d"); st.sameDialectPinned = true; }
   const cin = p.get("in") || p.get("xin");
   const cout = p.get("out") || p.get("xout");
@@ -5057,7 +5080,15 @@ function applyState(st) {
    arrival at memory (and at boot when memory IS the arrival tab), so a tab gets the default it declares
    rather than another tab's. */
 function seedMemorySameDialect() {
-  if (state.view !== "memory" || state.sameDialectPinned || !state.data) return;
+  // EVERY CHOOSER VIEW, not memory alone. This was memory-only because the perf lanes defaulted to Own
+  // cell, where no dialect is selected and seeding one would silently rewrite a deep link's ?d=. Those
+  // lanes now default to Same, so the dialect IS their selection, and opening them on a hardcoded
+  // `openai` rather than the dialect the run says most of the field can be compared on would be the
+  // same editorial choice widestDialect exists to avoid.
+  //
+  // The invariant that actually protects deep links is unchanged and is the one below: a pinned ?d=
+  // always wins. Keying on the view name never protected anything a pin did not already protect.
+  if (!CHOOSER_VIEWS.has(state.view) || state.sameDialectPinned || !state.data) return;
   const w = widestDialect(state.data);
   if (w) state.sameDialect = w;
 }
