@@ -12,7 +12,7 @@
       "template": "config.gen.yaml.tmpl"
     }
   ],
-  "display": "Busbar 1.5.0",
+  "display": "Busbar 1.5.1",
   "egress": [
     "openai",
     "openai-responses",
@@ -32,7 +32,7 @@
   "lang": "Rust",
   "launch": {
     "args": [],
-    "image": "getbusbar/busbar:1.5.0",
+    "image": "getbusbar/busbar:1.5.1",
     "kind": "docker",
     "mounts": [
       {
@@ -42,10 +42,6 @@
       {
         "container_path": "/etc/busbar/providers.yaml",
         "host_path": "providers.gen.yaml"
-      },
-      {
-        "container_path": "/etc/busbar/busbar-signing.key",
-        "host_path": "busbar-signing.key"
       }
     ]
   },
@@ -59,12 +55,12 @@
   ],
   "matrix_note": "busbar declares full 6x6 translation support",
   "model": "gpt-4o-mini",
-  "name": "busbar-150",
+  "name": "busbar-151",
   "path": "/v1/chat/completions",
   "port": 8080,
   "repo": "https://github.com/GetBusbar/busbar",
   "runtime": {
-    "container": "busbar-150-bench",
+    "container": "busbar-151-bench",
     "kind": "docker"
   }
 }

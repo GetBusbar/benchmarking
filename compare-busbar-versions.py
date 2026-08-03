@@ -2,7 +2,7 @@
 """Side-by-side: busbar 1.4.1 (published board) vs busbar 1.5.0 (private evaluation).
 
 Reads the 1.4.1 numbers from its committed snapshot and the 1.5.0 numbers from whatever the
-evaluation box has written so far - the live `busbar-150.json`, pulled partial, or final snapshot -
+evaluation box has written so far - the live `busbar-151.json`, pulled partial, or final snapshot -
 so a cell can be compared the moment it lands rather than at the end of an 11-hour grid.
 
 Every figure is printed with its own absence reason when it has one. A blank cell here means the
@@ -92,9 +92,9 @@ pairs = sys.argv[1:] or ["openai>openai"]
 
 old_doc = load(newest(os.path.join(HERE, "results/snapshots/result_busbar_2026-08-02*.json"))
                or newest(os.path.join(HERE, "results/snapshots/result_busbar_*.json")))
-new_path = (newest(os.path.join(HERE, "results/snapshots/result_busbar-150_*.json"))
-            or (os.path.join(HERE, "results/partial/busbar-150.json")
-                if os.path.exists(os.path.join(HERE, "results/partial/busbar-150.json")) else None))
+new_path = (newest(os.path.join(HERE, "results/snapshots/result_busbar-151_*.json"))
+            or (os.path.join(HERE, "results/partial/busbar-151.json")
+                if os.path.exists(os.path.join(HERE, "results/partial/busbar-151.json")) else None))
 new_doc = load(new_path)
 
 print(f"busbar 1.4.1 (published board)  <-  {os.path.basename(newest(os.path.join(HERE,'results/snapshots/result_busbar_2026-08-02*.json')) or '?')}")
