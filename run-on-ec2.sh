@@ -26,15 +26,17 @@ CREATED_KEY=0; CREATED_SG=0   # only delete the shared key/SG on exit if THIS in
 
 # Box self-terminate safety net: `shutdown -h +N` is the leaked-box backstop, armed at cloud-init
 # (minutes before the matrix clock starts, since apt + docker + rsync + gateway build take ~5-10 min
-# first) so the box clock leads the matrix clock by that same startup lead. Matrix raises its own
-# wall-clock ceiling to the same 480 min (matrix/run.sh: HARNESS_SUITE_CEIL_S default 28800 when
-# MATRIX_SWEEP=1), deliberately equal to this box net: on a genuinely wedged gateway, AWS terminates the
-# box a few minutes before the matrix ceiling would have tripped, so a wedged box forfeits its partial
-# results to AWS termination rather than exiting cleanly with a capped grid, which is intended, since a
-# partial grid from a wedged run is not something worth publishing anyway. Both are overridable; raise
-# BOTH together, keeping the box net at or above the matrix ceiling, if a gateway legitimately needs
-# more than 8 h.
-BENCH_MAX_MIN="${BENCH_MAX_MIN:-480}"
+# first) so the box clock leads the matrix clock by that same startup lead. This is the ONLY ceiling on
+# a run: the engine has no wall-clock cap of its own, so whatever this says is how long a grid gets.
+#
+# WHY IT IS 720 AND NOT 480. It was 480, sized for a 36-cell grid at the pace the field ran in 2026-07.
+# busbar 1.5.0 measures at ~15-17 min/cell, so its grid needs ~9-10 h, and on 2026-08-02 the box hit
+# `shutdown -h` at exactly 8 h with 24 of 36 cells done - the run was over before it started and nobody
+# compared the ETA to the box's own lifetime. A ceiling only protects against a LEAKED box; sizing it
+# under the work it is meant to survive turns the cost net into the thing that kills the measurement.
+# So: keep it comfortably above the slowest grid the field runs, and let `watch-busbar.sh` be the thing
+# that shouts when a run's ETA crosses it. Raise it further, do not lower it, for a slower entrant.
+BENCH_MAX_MIN="${BENCH_MAX_MIN:-720}"
 # How long a FINISHED box keeps itself alive so its results can still be pulled. The boot-time
 # backstop is sized for the work; this one is sized for the harvest, and the box swaps to it as soon as
 # it writes `.run-done`. Bounded, so a forgotten box still cannot bleed cost indefinitely.
@@ -810,9 +812,9 @@ bench_gateway_once() {
   # provision. COST SAFETY NET: the box self-terminates after BENCH_MAX_MIN minutes no matter what, so
   # even if this orchestrator is killed (its RETURN-trap never fires), the box shuts itself down and
   # `instance-initiated-shutdown-behavior=terminate` makes that a terminate, not a stop. A leaked box can
-  # therefore bleed cost for at most BENCH_MAX_MIN, never indefinitely. BENCH_MAX_MIN is set equal to the
-  # matrix suite's own 480-min ceiling (see the BENCH_MAX_MIN block at the top of this file for why they
-  # are deliberately equal, and which of the two fires first on a wedged box).
+  # therefore bleed cost for at most BENCH_MAX_MIN, never indefinitely. It is also the ONLY ceiling the
+  # run has - the engine caps nothing - so it must sit ABOVE the slowest grid the field measures, never
+  # at it. See the BENCH_MAX_MIN block at the top of this file for the run it killed when it did not.
   iid=$(aws ec2 run-instances --image-id "$AMI" --instance-type "$ITYPE" --key-name "$KEYNAME" \
     --security-group-ids "$SG" \
     --instance-initiated-shutdown-behavior terminate \
@@ -1392,9 +1394,9 @@ echo $? > .run-done
 
 # A FINISHED BOX MUST NOT BE DESTROYED BY A TIMER SIZED FOR THE WORK.
 #
-# The boot-time backstop is `shutdown -h +BENCH_MAX_MIN`, and BENCH_MAX_MIN is deliberately EQUAL to
-# the suite's own ceiling. That is right for a wedged box and wrong for a finished one: a gateway that
-# uses most of its budget crosses the line with almost no margin left, and the root volume is
+# The boot-time backstop is `shutdown -h +BENCH_MAX_MIN`, sized for the work. That is right for a
+# wedged box and wrong for a finished one: a gateway that uses most of its budget crosses the line
+# with almost no margin left, and the root volume is
 # DeleteOnTermination=true, so when the timer fires AWS deletes the disk carrying results nobody pulled.
 #
 # That is not hypothetical. On 2026-07-29 four gateways completed full 36-cell runs and sat unharvested
