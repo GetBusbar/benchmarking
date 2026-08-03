@@ -1093,6 +1093,25 @@ function hasPerCellMemory(data = (typeof state !== "undefined" ? state.data : nu
    can answer, which is noise rather than disclosure. It lights up by itself on the first board that
    carries the field. */
 const COST_CACHE = new WeakMap();
+/* costWindowConc(data): the concurrency every gateway's CPU-per-request was measured at.
+   THE NUMBER THAT STOPS THE COST FIGURE BEING MULTIPLIED BY THE PEAK RATE. The board publishes a peak
+   req/s at the concurrency the frontier chose (busbar: 82,328 at c=64) and a CPU-per-request at a
+   DIFFERENT, fixed concurrency held identical for every entrant (c=8). Both are labelled in the
+   artifact - `cost_window_conc` has been in every snapshot - but nothing rendered it, so the page
+   showed "53.6 µs" beside "82,328 req/s" with no sign they came from different windows. Multiply them
+   and you get 4.41 cores on a 4-core box: an impossible number assembled from two correct ones, which
+   is the most damaging way for a real measurement to be read.
+   Read from the data rather than hardcoded, because the engine's COST_WINDOW_CONCURRENCY can change
+   and a stale literal here would mislabel every row. Null when the board carries no cost. */
+function costWindowConc(data = (typeof state !== "undefined" ? state.data : null)) {
+  for (const g of (data && data.gateways) || []) {
+    for (const cell of [g.best_cell, g.translation_cell]) {
+      const v = mval(cell && cell.cost_window_conc);
+      if (Number.isFinite(v)) return v;
+    }
+  }
+  return null;
+}
 function hasCost(data = (typeof state !== "undefined" ? state.data : null)) {
   if (!data || typeof data !== "object") return false;
   if (COST_CACHE.has(data)) return COST_CACHE.get(data);
@@ -1932,7 +1951,9 @@ const COLUMN_SETS = {
        1,000,000 by construction, which is the same tautology that once made a cost "cross-check"
        pass while proving nothing. It lives on the Charts tab, where it answers a different question
        (how much traffic per unit of CPU you are buying) rather than restating this one. */
-    { id: "cpu", label: "CPU per request (\u00b5s)", desc: false, costOnly: true,
+    { id: "cpu", label: () => { const c = costWindowConc();
+        return c == null ? "CPU per request (\u00b5s)" : `CPU per request (\u00b5s @ c=${c})`; },
+      desc: false, costOnly: true,
       title: () => `Microseconds of gateway CPU - user plus system, summed across its whole process tree - spent per completed request, ` +
         `measured at a fixed concurrency held identical for every gateway (published beside it as the cost window). ` +
         `Unlike peak throughput this does not stop separating gateways once they saturate their cores. ` +
@@ -5195,7 +5216,7 @@ if (NODE) {
     perCellMemory, memoryCells, hasPerCellMemory, widestDialect, chosenMemory, memoryFor,
     idleAcrossCells, neverPlateaued, worstGrowth, memCellTip, neverPlateauedPill,
     idleStatic, memShape, memGrowing, memShaped,
-    hasMatrixGrid, matrixFailureReason, matrixRoster, hasCost, rigResolutionPct, indistinguishable, tiedRuns, costSaturation, CHART_METRICS, chartRows,
+    hasMatrixGrid, matrixFailureReason, matrixRoster, hasCost, costWindowConc, rigResolutionPct, indistinguishable, tiedRuns, costSaturation, CHART_METRICS, chartRows,
     laneRecord, lanePathNote, perfSweepSeries, concAt,
     // THE FRONTIER: the constants (mirrored from seal.mjs and checked against it), the readers every
     // surface goes through, and the two renderers that make the curve's SHAPE legible. Exported because the
