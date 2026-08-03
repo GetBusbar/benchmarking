@@ -325,7 +325,21 @@ ARCH="${ARCH:-arm64}"
 #
 # Everything else still counts, including UNTRACKED files: a new gateways/<name>/ directory is
 # untracked and absolutely does change what runs.
-BENCH_ENGINE_COMMIT="$(git -C "$HERE" rev-parse HEAD 2>/dev/null || echo '')"
+# THE STAMP MUST NAME THE COMMIT THE BOXES ACTUALLY RAN, which is $BENCH_COMMIT - the tree they fetch
+# by `git ls-tree` - and NOT this machine's HEAD.
+#
+# These are the same value only when BENCH_COMMIT is left to default. Override it to pin a run to an
+# older engine (the whole point of pinning: re-measure lagging gateways on the harness the rest of the
+# board already used) and the two diverge silently: the boxes build the pinned tree and the artifact is
+# stamped with whatever the operator's checkout happened to be sitting on.
+#
+# That is not cosmetic. The engine stamp is C8's entire input. On 2026-08-03 thirteen gateways were
+# re-measured pinned to 80030c2f specifically so the board would be ONE instrument; they were stamped
+# 7fd350ed - a local commit that touched no engine file - and the board concluded it was mixed and
+# blanked the one row that was genuinely on the pinned engine. The measurements were right and the
+# label was wrong, which is the worst shape of this bug: nothing looks broken, and the conclusion is
+# inverted. A stamp that can name a commit the run never used is not provenance.
+BENCH_ENGINE_COMMIT="${BENCH_COMMIT:-$(git -C "$HERE" rev-parse HEAD 2>/dev/null || echo '')}"
 if [ -n "$(git -C "$HERE" status --porcelain -- . ':(exclude)results' 2>/dev/null)" ]; then BENCH_ENGINE_DIRTY=1; else BENCH_ENGINE_DIRTY=0; fi
 export BENCH_ENGINE_COMMIT BENCH_ENGINE_DIRTY
 

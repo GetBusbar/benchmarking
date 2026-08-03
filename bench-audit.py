@@ -127,8 +127,53 @@ FRONTIER_RS_RE = re.compile(r"pub const P99_BOUNDS_US:\s*\[u64;\s*\d+\]\s*=\s*\[
 MAX_RPS_PER_CONNECTION = 20_000
 
 
+def _instrument_map():
+    """commit sha -> instrument id, from site/instrument-equivalence.json.
+
+    THE INSTRUMENT, NOT THE COMMIT - the same grouping C8 and gen-data use. Two commits whose built
+    binaries are byte-identical are one instrument, so pinning the audit to a raw sha would drop rows
+    that were measured by the very same binary. That is how busbar-150 fell out of this audit while
+    being on the board: it was stamped 80030c2f and the rest 7fd350ed, commits that build identical
+    bytes. An entry is only honoured here if it carries the artifact evidence its own file demands.
+    """
+    p = os.path.join(HERE, "site", "instrument-equivalence.json")
+    out = {}
+    try:
+        doc = json.load(open(p))
+    except Exception:
+        return out
+    for inst in doc.get("instruments") or []:
+        commits = inst.get("commits") or []
+        ev = ((inst.get("evidence") or {}).get("otb_release_sha256")) or {}
+        hashes = list(ev.values())
+        if not inst.get("id") or not commits:
+            continue
+        # No artifact evidence, or hashes that disagree, means the entry proves nothing.
+        if len(hashes) < len(commits) or len(set(hashes)) != 1:
+            continue
+        for c in commits:
+            out[c] = inst["id"]
+    return out
+
+
+def _same_instrument(sha, engine, imap):
+    """Does `sha` belong to the instrument identified by `engine` (a sha prefix or an instrument id)?"""
+    if not engine:
+        return True
+    if sha.startswith(engine):
+        return True
+    mine = imap.get(sha)
+    if mine is None:
+        return False
+    # `engine` may be an instrument id, or any sha belonging to that instrument.
+    if mine == engine:
+        return True
+    return any(mine == inst for c, inst in imap.items() if c.startswith(engine))
+
+
 def load(engine=None, gateway=None):
-    """The newest snapshot per gateway, pinned to one engine so a board is audited as a board."""
+    """The newest snapshot per gateway, pinned to one INSTRUMENT so a board is audited as a board."""
+    imap = _instrument_map()
     by_gw = {}
     for f in snapshot_paths():
         try:
@@ -140,7 +185,7 @@ def load(engine=None, gateway=None):
         sha = ((d.get("rig") or {}).get("engine") or {}).get("commit") or ""
         if not gw or (gateway and gw != gateway):
             continue
-        if engine and not sha.startswith(engine):
+        if not _same_instrument(sha, engine, imap):
             continue
         by_gw[gw] = (f, d, sha)
     return by_gw
@@ -484,7 +529,13 @@ def stream_trace(c):
 
 def proven_clean_top(rungs):
     """The highest concurrency the UNCONTAMINATED ascending prefix carried - every rung from the
-    first up to and including it passed, before anything in this cell had failed."""
+    first up to and including it passed, before anything in this cell had failed.
+
+    This is the ASCENDING PREFIX and nothing else: it deliberately stops at the first failed window,
+    so the concurrency it returns is one the cell reached before anything in it had gone wrong. What
+    counts as a violation relative to that top is decided by the caller - see the note there on why a
+    failure AT the top is the search working and only a failure BELOW it is a finding.
+    """
     top = 0
     for r in rungs:
         if r.get("passed") is not True:
@@ -563,7 +614,17 @@ def check_no_rung_fails_below_one_already_carried(name, c):
     clean = proven_clean_top(rungs)
     if clean <= 0:
         return
-    below = [r.get("conc") for r in rungs if r.get("passed") is not True and (r.get("conc") or 0) <= clean]
+    # BELOW, NOT AT. This read `<= clean`, which flags the search's own terminating condition: the
+    # ascending sweep probes a rung once, that probe passes, confirmation at the SAME concurrency then
+    # fails, and the engine steps down and publishes the lower rung. apisix anthropic>anthropic did
+    # exactly that - c=16384 passed the sweep, lost both confirmation windows, and 8192 was published
+    # after holding 4 of 4 - and it was reported as "impossible for the gateway alone".
+    #
+    # A failure AT the top is how a ceiling is found. A failure strictly BELOW a concurrency the cell
+    # already carried is the thing that has no gateway-only explanation, which is what the docstring
+    # above has always said ("cannot fail BELOW one the same cell has already carried") and what the
+    # 2026-07-31 six-cell case actually looked like. The comparison now matches the claim.
+    below = [r.get("conc") for r in rungs if r.get("passed") is not True and (r.get("conc") or 0) < clean]
     if not below:
         return
     absences = c.get("absences") or {}
@@ -1430,7 +1491,7 @@ def main():
         sha = ((d.get("rig") or {}).get("engine") or {}).get("commit") or ""
         if not gw or (args.gateway and gw != args.gateway) or gw in snaps:
             continue
-        if not sha.startswith(engine):
+        if not _same_instrument(sha, engine, _instrument_map()):
             skipped[gw] = sha[:7] or "no engine stamp"
 
     violations = collections.defaultdict(list)
