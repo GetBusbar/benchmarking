@@ -1083,8 +1083,14 @@ impl Metric for Memory {
                             Absent::NotMeasured,
                             // Reason strings ride into the board's tooltips verbatim, so this one states
                             // what the window measured and stops there - no verdict on the gateway.
-                            "memory reached no steady state inside the load cap, so there is no time-to-plateau"
-                                .to_string(),
+                            //
+                            // AND IT NAMES THE SHAPE, because "no steady state" describes two opposite
+                            // gateways. busbar openai>openai ends the window at -0.43 MiB/min - still
+                            // RELEASING memory - and read identically to one still climbing. `Shape`
+                            // already exists for exactly this ("the opposite of a leak, and it must
+                            // never be labelled as one") and was being discarded one line before the
+                            // sentence a reader actually sees.
+                            no_plateau_detail(&verdict),
                         ),
                     },
                 ),
@@ -1806,6 +1812,33 @@ pub struct Cost;
 /// entrant, the column stops being a comparison.
 pub const COST_WINDOW_CONCURRENCY: u32 = 8;
 
+/// Why a cell has no time-to-plateau, in the words a reader sees.
+///
+/// IT NAMES THE SHAPE, because "no steady state" describes two opposite gateways. busbar
+/// openai>openai ends its window at -0.43 MiB/min - still RELEASING memory - and read identically to
+/// one still climbing toward a leak. `Shape` exists for exactly this distinction ("the opposite of a
+/// leak, and it must never be labelled as one") and was being discarded one line before the sentence
+/// that reaches the board.
+///
+/// Pure, so the wording can be tested: this string is the whole finding for a reader who never opens
+/// the artifact.
+fn no_plateau_detail(verdict: &crate::stats::Verdict) -> String {
+    match verdict {
+        crate::stats::Verdict::NotSteady { shape, .. } => format!(
+            "memory was still {} when the {MEMORY_LOAD_S}s load window closed, so it has no \
+             time-to-plateau; its rate is published beside this",
+            match shape {
+                crate::stats::Shape::Climbing => "climbing",
+                crate::stats::Shape::Falling => "falling - releasing memory, not leaking it",
+                crate::stats::Shape::Oscillating =>
+                    "oscillating with no net trend - it returns to where it was, which is not a leak",
+            }
+        ),
+        _ => "memory reached no steady state inside the load cap, so there is no time-to-plateau"
+            .to_string(),
+    }
+}
+
 impl Metric for Cost {
     fn name(&self) -> &'static str {
         "cost"
@@ -1917,6 +1950,52 @@ impl Metric for Cost {
 
 #[cfg(test)]
 mod tests {
+    /* A GATEWAY HANDING MEMORY BACK MUST NEVER READ LIKE ONE LEAKING IT.
+    
+       39 cells on the 2026-08-03 board carry no time-to-plateau, and they got one sentence between
+       them: "memory reached no steady state inside the load cap". busbar has the most (11), and its
+       openai>openai cell ends the window at -0.43 MiB/min - RELEASING memory - which is the opposite
+       of the reading that sentence invites. `Shape` already separated these three cases; the string
+       a reader actually sees did not. */
+    #[test]
+    fn the_no_plateau_reason_says_which_way_memory_was_moving() {
+        use crate::stats::{Shape, Verdict};
+        let rate = crate::measurement::Measurement::Measured(-0.43);
+        let falling = no_plateau_detail(&Verdict::NotSteady {
+            growth_rate_mib_per_min: rate.clone(),
+            shape: Shape::Falling,
+        });
+        assert!(falling.contains("falling"), "{falling}");
+        assert!(falling.contains("not leaking it"), "a falling gateway must be told apart from a leak: {falling}");
+
+        let climbing = no_plateau_detail(&Verdict::NotSteady {
+            growth_rate_mib_per_min: rate.clone(),
+            shape: Shape::Climbing,
+        });
+        assert!(climbing.contains("climbing"), "{climbing}");
+        assert!(!climbing.contains("not leaking"), "a climbing gateway must NOT be excused: {climbing}");
+
+        let osc = no_plateau_detail(&Verdict::NotSteady {
+            growth_rate_mib_per_min: rate,
+            shape: Shape::Oscillating,
+        });
+        assert!(osc.contains("oscillating"), "{osc}");
+        assert!(osc.contains("returns to where it was"), "{osc}");
+
+        // The three must not read alike: that identical wording is the whole defect.
+        assert_ne!(falling, climbing);
+        assert_ne!(falling, osc);
+        assert_ne!(climbing, osc);
+
+        // A window that could not be JUDGED is a different claim from one that moved, and keeps the
+        // wording that says so rather than borrowing a shape it never established.
+        let undecidable = no_plateau_detail(&Verdict::Undecidable(
+            crate::stats::Undecidable::WindowTooShort,
+        ));
+        assert!(undecidable.contains("no steady state"), "{undecidable}");
+        assert!(!undecidable.contains("climbing") && !undecidable.contains("falling"), "{undecidable}");
+    }
+
     // EVERY `Series` FIELD MUST SURVIVE THE ACCUMULATOR.
     //
     // `process_cell_with` merges each group's Series into the cell's with a hand-written chain, one
