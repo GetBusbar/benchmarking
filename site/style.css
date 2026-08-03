@@ -584,12 +584,14 @@ td.failcell {
    line of 0.76rem text run to 1440px is not a sentence anyone reads.
    The bound must be legible as WORDS and not only as a highlighted button: the defect this whole surface
    exists to prevent is a reader inferring a bar the test never enforced. */
-/* Explicitly the THIRD row, so it sits BELOW both axes rather than between them. In DOM order it belongs to
-   the bound axis (it explains the bound), but auto-placed it split the two axis rows apart and they stopped
-   reading as a pair - which is the one thing this block exists to make legible. Explicit placement does not
-   advance the auto cursor, so the cell axis still lands on row 2, and when the bound axis is hidden this
-   element is hidden with it and the row simply does not exist. */
-.filters .fnote { grid-column: 2; grid-row: 3; font-size: .76rem; max-width: 46rem; margin: 0; }
+/* IN THE CONTROLS COLUMN, ON THE ROW AFTER ITS OWN AXIS - not pinned to a fixed row.
+   This was `grid-row: 3`, correct while exactly ONE axis had a sentence: it put the note below both axes
+   so they read as a pair. A second axis with a sentence (concurrency) then landed in the SAME cell and the
+   two rendered on top of each other, illegibly - a hardcoded row cannot hold more than one occupant.
+   Column 2 keeps every sentence starting at its chips' left edge; the row is left to auto-placement so
+   each note follows the axis it explains, which is also what makes it obvious WHICH control it describes
+   once there is more than one. A hidden axis still takes its own note with it. */
+.filters .fnote { grid-column: 2; font-size: .76rem; max-width: 46rem; margin: 0; }
 .filters .fnote:empty { display: none; }
 /* CONSISTENT CHIP GEOMETRY WITHIN AN AXIS. "1 ms" and "no bound" are the same kind of choice, so they are
    the same size of target; six chips of six different widths was the other half of "ugly". Centred, because
