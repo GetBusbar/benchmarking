@@ -41,6 +41,24 @@ concurrency:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    # NEVER PUBLISH A MIXED BOARD; PUBLISH n/a INSTEAD.
+    #
+    # C8 refuses a board whose columns were measured by different harness engines, and it is right to:
+    # a ranking across two instruments compares the instruments as much as the gateways. Its only two
+    # exits were both bad - re-measure the entire field (hours and real money to republish numbers that
+    # did not change), or override the guard and ship the mix anyway.
+    #
+    # This is the third exit, and it is the publishing POLICY for this board: show what the current
+    # engine measured, show n/a for what it has not reached yet, and say so on the row and in the
+    # bundle. A partial re-run therefore publishes AS IT LANDS - each gateway appears the moment it is
+    # re-measured - and the board is single-instrument at every intermediate state rather than at the
+    # end only. Declared here, in the workflow, so the policy is committed and reviewable rather than
+    # living in whatever shell happened to run the build.
+    #
+    # On a field where every row is already current this is a no-op: nothing is suppressed and the
+    # bundle records `suppressed_for_engine: []`.
+    env:
+      OTB_SINGLE_ENGINE: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

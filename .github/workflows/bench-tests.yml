@@ -219,6 +219,12 @@ jobs:
     # cf-pages keeps its own copy of test.mjs as the pre-deploy guard: that one must gate the thing
     # being shipped. This job is what makes the suite gate the SOURCE.
     runs-on: ubuntu-latest
+    # SAME PUBLISHING POLICY THE DEPLOY USES. site/test.mjs builds its OWN bundle from this checkout,
+    # so without this it would gate a differently-built board than the one cf-pages ships - the suite
+    # would fail C8 on a mix that the deployed board never contains. See the long note in
+    # cf-pages.yml for why n/a beats both re-measuring the field and overriding the guard.
+    env:
+      OTB_SINGLE_ENGINE: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

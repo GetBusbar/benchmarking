@@ -4979,6 +4979,54 @@ test("C8: the mixed-board override demands a reason and returns it for publicati
     "what was overridden is recorded, not just that something was");
 });
 
+// ---- C9: n/a beats a mixed board, and "blank" must mean blank -----------------------------------
+//
+// OTB_SINGLE_ENGINE is the third answer to C8, between re-measuring the whole field and overriding
+// the guard: show what the current engine measured, blank what it has not reached. That is only
+// honest if suppression is TOTAL. A row that went n/a everywhere except one surviving number would
+// put an older instrument's reading on the board with nothing marking it - strictly worse than the
+// mix C8 refuses, because the mix at least declares itself. So the bundle's own suppression claim is
+// verified rather than trusted: an exemption a bundle grants itself is not a check.
+test("C9: a row claiming suppression must publish NOTHING, and say what it waits for", () => {
+  const base = () => ({
+    suppressed_for_engine: ["kong"],
+    gateways: [{
+      key: "kong", display: "Kong", awaiting_engine: "80030c2",
+      engine: { sha: "a".repeat(40), short: "aaaaaaa", current: false },
+      matrix: null, best_cell: null, rig: null, snapshot_file: null,
+    }],
+  });
+  const c9 = (data) => checkMod.checkConsistency(data, {}, { syntheticFixture: true })
+    .errors.filter((e) => e.startsWith("C9:"));
+
+  assert.deepEqual(c9(base()), [], "a fully-blank suppressed row is fine");
+
+  // ONE surviving measurement is the whole failure mode. Each of these is a separate door into it.
+  for (const field of ["matrix", "best_cell", "translation_cell", "streaming", "snapshot_file", "rig"]) {
+    const d = base();
+    d.gateways[0][field] = { source: { kind: "matrix" } };
+    const errs = c9(d);
+    assert.equal(errs.length, 1, `a suppressed row keeping ${field} must be refused`);
+    assert.match(errs[0], new RegExp(field), "and the message must name what leaked");
+  }
+
+  // A blank row owes the reader the DIFFERENCE between "measured nothing" and "not re-measured yet".
+  const noWhy = base();
+  delete noWhy.gateways[0].awaiting_engine;
+  assert.match(c9(noWhy).join("\n"), /carries no awaiting_engine/);
+
+  // Suppression and the row's own engine stamp cannot disagree about the same fact.
+  const disagrees = base();
+  disagrees.gateways[0].engine.current = true;
+  assert.match(c9(disagrees).join("\n"), /suppression and the stamp disagree/i);
+
+  // AND THE GUARD MUST NOT FIRE ON A BOARD THAT SUPPRESSES NOTHING - the normal, healthy state.
+  const clean = base();
+  clean.suppressed_for_engine = [];
+  clean.gateways[0].matrix = { served: true };
+  assert.deepEqual(c9(clean), [], "an unsuppressed row is C9's business not at all");
+});
+
 // ---- the shipped attestation is itself valid ----------------------------------------------------
 // The file in the repo is data the publish path trusts, so it is tested like code: it must parse, and
 // every entry in it must meet the evidence rule it states for itself.
