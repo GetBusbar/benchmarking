@@ -6639,6 +6639,16 @@ test("UI: the two filter axes are ONE labelled control block, not two ragged row
   assert.ok(note, "the explanatory sentence has its own rule");
   assert.match(note[0], /grid-column:\s*2/, "it starts at the chips' left edge, not the label's");
   assert.match(note[0], /max-width:/, "and is capped rather than running to whatever width the page happens to be");
+  /* AND IT IS NOT PINNED TO A FIXED ROW. `grid-row: 3` was correct while exactly one axis had a
+     sentence; the concurrency axis added a second, both were placed in the same cell, and they
+     rendered on top of each other. A hardcoded row cannot hold two occupants, and the block now has
+     three axes - so the row is left to auto-placement and each sentence follows the axis it explains. */
+  assert.doesNotMatch(note[0], /grid-row:/,
+    `the note's row must not be hardcoded, or a second axis's sentence overlaps the first: ${note[0]}`);
+  // More than one axis carries a sentence now, which is what broke the fixed row.
+  const html2 = readFileSync(join(HERE, "index.html"), "utf8");
+  const notes = (html2.match(/class="fnote muted"/g) || []).length;
+  assert.ok(notes >= 2, `the block carries ${notes} explanatory sentences; the layout must hold them all`);
 
   // CONSISTENT CHIP GEOMETRY across both axes: "1 ms" and "100 ms" must not be two different-sized chips.
   assert.match(css, /#bound-seg \.seg-btn \{[^}]*min-width:/,
