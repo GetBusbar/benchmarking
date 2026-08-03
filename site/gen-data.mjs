@@ -26,6 +26,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 import { snapshotCellCoords, isStrictSubset, layerScopedMatrix } from "./snapshots.mjs";
+import { instrumentOf } from "./check-consistency.mjs";
 import { sealMetric, sealFrontier, makeSource, SWEEP, UNGATED_LAT_FIELDS, UNGATED_COST_FIELDS, DEFAULT_BOUND_MS, frontierAt, UNGATED_STREAM_FIELDS, isMetricField, zeroNoteFor } from "./seal.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -1129,15 +1130,40 @@ if (existsSync(redirects) && OUT !== HERE) copyFileSync(redirects, join(OUT, "_r
 //
 // The board's version is the engine of the most recently measured row, which is the one a re-run
 // moves forward. A row whose engine differs from it is marked, and the site renders that in red.
-const engineOf = (g) => (g && g.rig && g.rig.engine && g.rig.engine.commit) || null;
+// THE INSTRUMENT, NOT THE COMMIT - the same resolution C8 uses, from the same file.
+//
+// C8 groups the board by instrument: commits whose BUILT BINARIES are byte-identical are one
+// instrument, attested in site/instrument-equivalence.json. This function compared raw shas, so
+// gen-data and check-consistency disagreed about what "the same engine" means - C8 would pass a board
+// that gen-data then marked as mixed and (under OTB_SINGLE_ENGINE) blanked. Two commits that provably
+// build the same binary cannot be a real difference in one place and not the other.
+//
+// Falls back to the raw sha for any commit the file does not attest, which is the safe default: an
+// unlisted commit is its own instrument, so silence never merges anything.
+const equivalence = (() => {
+  const f = join(HERE, "instrument-equivalence.json");
+  if (!existsSync(f)) return new Map();
+  return instrumentOf(readFileSync(f, "utf8"));
+})();
+const engineOf = (g) => {
+  const sha = (g && g.rig && g.rig.engine && g.rig.engine.commit) || null;
+  return sha == null ? null : (equivalence.get(sha) || sha);
+};
+// The raw commit, for the per-row stamp a reader sees. The instrument decides COMPARABILITY; the sha
+// is still what identifies the exact tree, and collapsing it here would hide which commit ran.
+const engineShaOf = (g) => (g && g.rig && g.rig.engine && g.rig.engine.commit) || null;
 const newestRow = gateways
   .filter((g) => displayedMeasuredMs(g) > 0)
   .sort((a, b) => displayedMeasuredMs(b) - displayedMeasuredMs(a))[0];
 const boardEngine = engineOf(newestRow);
 for (const g of gateways) {
-  const sha = engineOf(g);
+  // `sha` is what ran; `inst` is what it is comparable TO. A row is current when its INSTRUMENT
+  // matches the board's, so two commits proven to build the same binary both read as current while
+  // the row still reports the exact commit that produced it.
+  const sha = engineShaOf(g);
+  const inst = engineOf(g);
   g.engine = sha
-    ? { sha, short: sha.slice(0, 7), current: boardEngine == null || sha === boardEngine }
+    ? { sha, short: sha.slice(0, 7), current: boardEngine == null || inst === boardEngine }
     // A row with no engine stamp predates the stamp entirely; saying so is better than implying it
     // matches, and better than omitting the field so the render site has to guess.
     : { sha: null, short: null, current: false };

@@ -40,6 +40,22 @@
         },
         "verified_at": "2026-08-02T19:00:00Z"
       }
+    },
+    {
+      "id": "otb-e97eb008",
+      "commits": [
+        "80030c2fe13e9312f7cddd5db4c5908a1e54d94e",
+        "7fd350ed5ecc7cd60953a33d78afc15fd8ec74d7"
+      ],
+      "reason": "busbar 1.5.0 measured at 80030c2f. The other thirteen were then re-measured PINNED to that same commit (BENCH_COMMIT=80030c2f) precisely so the board would be one instrument - and they came back stamped 7fd350ed, because run-on-ec2.sh derived the stamp from the operator's local HEAD instead of the commit the boxes fetch. They ran the pinned tree; only the label was wrong. 7fd350ed is 80030c2f plus one board commit (drop the 1.4.1 declaration, move a star record, add a snapshot) and touches no engine file. The stamping bug itself is fixed in the same change that adds this entry, so the two can no longer diverge; this entry exists because the artifacts on disk were already stamped by the broken path and re-running fourteen gateways to correct a label would change no measurement.",
+      "evidence": {
+        "method": "cargo build --release --bin otb at each commit in a separate detached git worktree, same host and toolchain, hashed with shasum -a 256. `git diff 80030c2f 7fd350ed -- engine/` is also empty, but the binaries are the admissible evidence and the diff is only what made the entry worth checking.",
+        "otb_release_sha256": {
+          "80030c2fe13e9312f7cddd5db4c5908a1e54d94e": "e97eb00893a1c6c4c4960c27920313b92ad1b00e6ca0e2a0b056760808ea0a60",
+          "7fd350ed5ecc7cd60953a33d78afc15fd8ec74d7": "e97eb00893a1c6c4c4960c27920313b92ad1b00e6ca0e2a0b056760808ea0a60"
+        },
+        "verified_at": "2026-08-03T18:10:00Z"
+      }
     }
   ]
 }
