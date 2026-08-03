@@ -2450,6 +2450,65 @@ test("MEMORY: the growth cell states the rate and passes no verdict", () => {
   assert.equal(app.SHOW_GROWTH_VERDICT, false, "the switch is off; flip it to true to bring the words back");
 });
 
+/* THE CONCURRENCY SELECTOR: the answer to "you gave busbar 4x the concurrency".
+
+   The default column shows each gateway at the rung where ITS throughput peaked - a measurement, not a
+   setting - but it renders as "77,248 @ 128 conc" beside "44,475 @ 32 conc", and a screenshot of that
+   cannot defend itself. Pinning a rung makes every row report the same concurrency, so whatever is
+   left is the gateway. The refutation was already measured: at c=128 litellm-rust carries 47,825,
+   within 0.5% of its own peak, and busbar leads at every rung. */
+test("CONC: pinning a rung ranks every gateway at that rung, and never invents one", () => {
+  const seal = (v) => ({ value: v, certified: true, suppressed: false });
+  const gw = (key, rungs) => ({
+    key, display: key,
+    best_cell: { ...bcCell({}), rungs, source: { kind: "matrix", sweep: "6x6-perf" } },
+  });
+  const data = { gateways: [
+    gw("fast", [{ conc: 32, rps: seal(75460), p99_us: 654, windows: 3, clean_windows: 3 },
+                { conc: 128, rps: seal(77018), p99_us: 2669, windows: 3, clean_windows: 3 }]),
+    gw("slow", [{ conc: 32, rps: seal(48042), p99_us: 1030, windows: 3, clean_windows: 3 },
+                { conc: 128, rps: seal(47825), p99_us: 4380, windows: 3, clean_windows: 3 }]),
+    // Never drove 128: it has no reading there and must not be given one.
+    gw("shallow", [{ conc: 32, rps: seal(9000), p99_us: 900, windows: 3, clean_windows: 3 }]),
+  ] };
+  const savedData = app.state.data, savedConc = app.state.conc;
+  try {
+    app.state.data = data;
+    const col = app.COLUMN_SETS.performance.find((c) => c.id === "rps");
+    const at = (conc, key) => {
+      app.state.conc = conc;
+      return col.get(data.gateways.find((g) => g.key === key), { data, mode: "peak", bound: 10, conc });
+    };
+    // THE SAME RUNG FOR EVERY ROW, and no per-row "@ N conc" - the header says it once.
+    assert.equal(at(32, "fast").v, 75460);
+    assert.equal(at(32, "slow").v, 48042);
+    assert.doesNotMatch(at(32, "fast").text, /conc/, "the rung is in the header, not repeated per row");
+    // And the ratio holds at the other rung, which is the whole point: 1.61x at 128, 1.57x at 32.
+    assert.equal(at(128, "fast").v, 77018);
+    assert.equal(at(128, "slow").v, 47825);
+    // A GATEWAY THAT NEVER DROVE THE RUNG READS n/a. Interpolating between the rungs it did drive
+    // would be the board inventing a measurement it never took.
+    const missing = at(128, "shallow");
+    assert.ok(missing.na, "no reading at a rung this gateway never drove");
+    assert.match(missing.note || "", /did not drive/, missing.note);
+    // Unpinned, the column goes back to each gateway's own peak, which still names its concurrency.
+    app.state.conc = null;
+    const peak = col.get(data.gateways[0], { data, mode: "peak", bound: 10, conc: null });
+    assert.ok(peak.na || /conc/.test(peak.text), `the peak view still states its rung: ${peak.text}`);
+  } finally { app.state.data = savedData; app.state.conc = savedConc; }
+});
+
+// A pinned rung has to survive being shared: the entire use is sending someone the same-concurrency view.
+test("CONC: the pinned rung round-trips through the URL", () => {
+  const st = app.decodeUrl("/gateways/performance", "?conc=128");
+  assert.equal(st.conc, 128);
+  const url = app.encodeUrl({ ...st, data: null });
+  assert.match(url, /conc=128/, url);
+  assert.equal(app.decodeUrl("/gateways/performance", "").conc, null, "unpinned by default");
+  assert.equal(app.decodeUrl("/gateways/performance", "?conc=nonsense").conc, null,
+    "a concurrency the run never drove does not pin the board");
+});
+
 test("COST: the CPU column names the concurrency its window ran at, from the data", () => {
   const seal = (v) => ({ value: v, certified: true, suppressed: false });
   const withCost = { gateways: [{ key: "a",

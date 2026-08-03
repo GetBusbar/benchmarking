@@ -306,6 +306,54 @@ export function sealFrontier(readings, absences = null) {
     };
   });
 }
+/* THE RATE EVERY GATEWAY CARRIED AT THE SAME CONCURRENCY, sealed, so the board can be read
+   apples-to-apples on a rung instead of on each gateway's own peak.
+
+   WHY THIS EXISTS. The ranked column shows each gateway at the concurrency where ITS throughput
+   peaked, which is a measurement and not a setting - but it renders as "77,248 @ 128 conc" beside
+   "44,475 @ 32 conc", and that reads as four times the concurrency handed to one entrant. The
+   information that refutes it was already published (`sweep` carries every rung both gateways drove)
+   and no surface could show it: at c=128, the rung busbar is displayed at, litellm-rust does 47,825 -
+   within 0.5% of its own published peak. The advantage is 1.6x at every rung from 1 to 256, which is
+   the fact the peak-vs-peak view cannot state.
+
+   MEDIAN OF THE CLEAN WINDOWS AT THAT RUNG, because the sweep drives each concurrency
+   WINDOWS_PER_RUNG times and a single window is noise near saturation - the same discipline every
+   other repeated measurement on this board reports under. A window that FAILED requests is not a rate:
+   it is excluded, and a rung with no clean window publishes a suppressed envelope rather than a
+   number, so "it dropped requests here" can never render as throughput. */
+export function sealRungs(sweep) {
+  if (!Array.isArray(sweep) || !sweep.length) return [];
+  const byConc = new Map();
+  for (const w of sweep) {
+    const c = numOrNull(w && w.conc);
+    if (c == null) continue;
+    if (!byConc.has(c)) byConc.set(c, []);
+    byConc.get(c).push(w);
+  }
+  return [...byConc.keys()].sort((a, b) => a - b).map((conc) => {
+    const windows = byConc.get(conc);
+    const clean = windows.filter((w) => Number.isFinite(w.rps) && (w.fail ?? 0) === 0);
+    const rates = clean.map((w) => w.rps).sort((a, b) => a - b);
+    const tails = clean.map((w) => w.p99_us).filter(Number.isFinite).sort((a, b) => a - b);
+    const med = (xs) => (xs.length ? xs[Math.floor((xs.length - 1) / 2)] : null);
+    return {
+      conc,
+      // A rung whose every window dropped requests has no rate to publish. The reason travels with it
+      // rather than the cell simply reading n/a, because "it failed here" is the finding.
+      rps: sealMetric(med(rates), {
+        absent: clean.length
+          ? null
+          : { reason: "not_measured",
+              detail: `every window at c=${conc} failed requests, so no clean rate was carried there` },
+      }),
+      p99_us: med(tails),
+      windows: windows.length,
+      clean_windows: clean.length,
+    };
+  });
+}
+
 // The engine writes an absent number as `null`; anything else is a number or is not publishable.
 function numOrNull(v) {
   return Number.isFinite(v) ? v : null;

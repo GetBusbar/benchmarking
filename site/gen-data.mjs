@@ -27,7 +27,7 @@ import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 import { snapshotCellCoords, isStrictSubset, layerScopedMatrix } from "./snapshots.mjs";
 import { instrumentOf } from "./check-consistency.mjs";
-import { sealMetric, sealFrontier, makeSource, SWEEP, UNGATED_LAT_FIELDS, UNGATED_COST_FIELDS, DEFAULT_BOUND_MS, frontierAt, UNGATED_STREAM_FIELDS, isMetricField, zeroNoteFor } from "./seal.mjs";
+import { sealMetric, sealFrontier, sealRungs, makeSource, SWEEP, UNGATED_LAT_FIELDS, UNGATED_COST_FIELDS, DEFAULT_BOUND_MS, frontierAt, UNGATED_STREAM_FIELDS, isMetricField, zeroNoteFor } from "./seal.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = process.argv[2] || join(HERE, "..");
@@ -624,8 +624,13 @@ function sealPerfCellPerf(perf, absences = null) {
   rec.frontier = sealFrontier(perf.frontier, absences);
   // The rungs every reading was taken from, so a reader can re-derive the whole frontier rather than
   // taking it on trust. It rides as a plain field: it is evidence, not a metric.
-  if (Array.isArray(perf.sweep_max_proxy) && perf.sweep_max_proxy.length)
+  if (Array.isArray(perf.sweep_max_proxy) && perf.sweep_max_proxy.length) {
     rec.sweep = perf.sweep_max_proxy;
+    // AND THE SAME RUNGS AS A SEALED READING, so the board can be compared at ONE concurrency rather
+    // than at each gateway's own peak. `sweep` above is evidence; this is the metric, median of the
+    // clean windows at each rung, and it is what the concurrency selector ranks on.
+    rec.rungs = sealRungs(perf.sweep_max_proxy);
+  }
   if (perf.egress_reverified != null) rec.egress_reverified = perf.egress_reverified;
   // The verdict without its evidence is an assertion. egress_reverified is the fairness guard's boolean
   // (did this gateway actually TRANSLATE to the egress dialect, or just proxy the ingress request

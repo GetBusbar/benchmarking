@@ -611,6 +611,44 @@ const BOUND_GROUP_LABEL = "Req/s · 99% of requests under:";
 function boundColId(ms) { return ms == null ? "fnone" : `f${ms}`; }
 // The reader's currently-selected bound, read defensively: these helpers are called from renderers the
 // node suite drives with a hand-built state, and from column labels that take no arguments.
+/* THE CONCURRENCY THE BOARD IS RANKED AT, or null for each gateway's own peak.
+
+   WHY IT EXISTS. The default column shows every gateway at the concurrency where ITS OWN throughput
+   peaked. That is a measurement, not a setting - each gateway is driven up the identical ladder and
+   the rung is where it topped out - but it RENDERS as "77,248 @ 128 conc" beside "44,475 @ 32 conc",
+   which reads as four times the concurrency handed to one entrant. The first person to screenshot it
+   says so, and they are reading the pixels correctly even though the conclusion is wrong.
+
+   The refutation was already measured and had nowhere to appear: at c=128 - the rung busbar is shown
+   at - litellm-rust carries 47,825, within 0.5% of its own peak, and busbar leads by 1.6x at EVERY
+   rung from 1 to 256. A stable ratio across the whole ladder is the proof that the concurrency
+   difference is not doing the work; peak-vs-peak cannot show it and a tooltip cannot fix a
+   screenshot.
+
+   So: pick a rung, and every row reports what it carried THERE. A gateway that never drove that rung
+   reads n/a rather than being interpolated - it is not a measurement we took. */
+function selectedConc(st = (typeof state !== "undefined" ? state : null)) {
+  if (!st || st.conc == null) return null;
+  return Number.isFinite(st.conc) ? st.conc : null;
+}
+/* The rung readings for the chosen cell, or [] for a record measured before rungs were published. */
+function rungsOf(rec) {
+  return rec && Array.isArray(rec.rungs) ? rec.rungs : [];
+}
+/* The sealed reading at one concurrency, or null when this gateway never drove that rung. */
+function rungAt(rec, conc) {
+  return rungsOf(rec).find((r) => r.conc === conc) || null;
+}
+/* Every concurrency ANY gateway on this board drove, ascending: the choices the selector offers.
+   Derived from the run rather than listed here, so a board swept over a different ladder offers that
+   ladder instead of one named in the code. */
+function concChoices(data = (typeof state !== "undefined" ? state.data : null)) {
+  const seen = new Set();
+  for (const g of (data && data.gateways) || [])
+    for (const rec of [g.best_cell, g.translation_cell])
+      for (const r of rungsOf(rec)) if (Number.isFinite(r.conc)) seen.add(r.conc);
+  return [...seen].sort((a, b) => a - b);
+}
 function selectedBound(st = (typeof state !== "undefined" ? state : null)) {
   if (!st || !("bound" in st)) return DEFAULT_BOUND_MS;
   return st.bound === null || FRONTIER_BOUNDS_MS.includes(st.bound) ? st.bound : DEFAULT_BOUND_MS;
@@ -1824,6 +1862,29 @@ function concAt(env) {
 function frontierChooserCell(g, st = state, boundMs = selectedBound(st)) {
   const p = chooserCellPerf(g, st);
   if (!p) return { v: null, text: "n/a", na: true };
+  /* PINNED TO ONE RUNG, when the reader asks for it. Every row then reports what it carried at the
+     SAME concurrency, which is the only way the table can answer "you gave busbar 4x the concurrency"
+     - the rung is identical, so whatever is left is the gateway. No "@ N conc" suffix here: the
+     concurrency is in the column header, once, because it is the same for every row. */
+  const conc = selectedConc(st);
+  if (conc != null) {
+    const r = rungAt(p, conc);
+    if (!r) {
+      // NOT INTERPOLATED. A gateway that never drove this rung has no reading there, and inventing one
+      // between the rungs it did drive would be the board making up a measurement.
+      return { v: null, text: "n/a", na: true,
+               note: `This gateway did not drive c=${fmtInt(conc)}; the rungs it did drive are on its curve.` };
+    }
+    const v = mval(r.rps);
+    if (v == null)
+      return { v: null, text: "n/a", na: true, note: naText(r.rps) };
+    return { v, text: fmtRate(v), na: false,
+             note: `Observed at c=${fmtInt(conc)}, the same rung every row on this table reports. `
+                 + `The tail it produced there was ${fmtTail(r.p99_us)}.`
+                 + (r.clean_windows < r.windows
+                     ? ` ${r.clean_windows} of ${r.windows} windows at this rung carried no failures; the rate is their median.`
+                     : ` Median of ${r.windows} windows.`) };
+  }
   const cell = frontierCell(p, boundMs);
   const rd = cell.reading;
   if (cell.na || !rd || rd.concurrency == null) return cell;
@@ -1957,7 +2018,13 @@ const COLUMN_SETS = {
         `Unlike peak throughput this does not stop separating gateways once they saturate their cores. ` +
         `A window with any failure publishes no cost: CPU divided by only the successes would describe the failures, not the work.`,
       get: (g) => chooserPerfCell(g, "cpu_us_per_request", fmt2) },
-    { id: "rps", label: () => boundColLabel(selectedBound()), desc: true,
+    /* THE HEADER CARRIES THE PIN, once, for the whole column. With a rung selected every row reports
+       the same concurrency, so repeating "@ 128 conc" on each line would be noise - and stating it in
+       the header is what makes a screenshot of this table self-explanatory, which is the entire point
+       of the selector. */
+    { id: "rps", label: () => (selectedConc() != null
+        ? `Req/s @ ${fmtInt(selectedConc())} conc · same rung, every row`
+        : boundColLabel(selectedBound())), desc: true,
       title: () => `The most requests/sec the chosen cell carried ${boundClause(selectedBound())} and it failed no request it accepted, with the concurrency it was observed at. ` +
         `One of ${BOUND_CHOICES.length} readings of the SAME concurrency sweep published on every cell - switch the bound above to re-rank the board. ` +
         `A "≥" is a floor: the sweep ran out of ladder while that concurrency was still qualifying. Hover a cell for the tail it actually produced and the concurrency that stopped qualifying above it.`,
@@ -2522,6 +2589,9 @@ function encodeUrl(st) {
   // (Peak on the perf lanes, Same on memory); Same carries the picked dialect (?mode=same&d=openai),
   // Custom the pinned pair (?mode=custom&in=anthropic&out=openai), so a link reproduces exactly the
   // cell(s) the view shows. Memory encodes its own modes (?mode=min / ?mode=max) and never Peak.
+  // A PINNED RUNG TRAVELS IN THE LINK. The whole value of this view is being able to send someone
+  // "here is the same-concurrency comparison" and have them land on exactly it.
+  if (st.conc != null) p.set("conc", String(st.conc));
   if (CHOOSER_VIEWS.has(st.view)) {
     const mode = st.view === "memory" ? memoryMode(st) : st.mode;
     if (mode !== defaultMode(st.view)) p.set("mode", mode);
@@ -2600,6 +2670,10 @@ function decodeUrl(pathname, search, hash) {
   // CELL CHOOSER decoding. New clean params (mode/d/in/out) plus the legacy translation params
   // (xin/xout, from the retired Matched tab) — a legacy ?xin/?xout link lands in Custom mode on the
   // pinned pair, exactly the cell the old Matched tab showed.
+  const rawConc = Number(p.get("conc"));
+  // Only a rung the run actually drove is accepted; anything else falls back to the peak view rather
+  // than pinning the board to a concurrency nothing was measured at.
+  st.conc = Number.isFinite(rawConc) && rawConc > 0 ? rawConc : null;
   const mode = p.get("mode");
   if (CHOOSER_MODES.has(mode) || MEM_CHOOSER_MODES.has(mode)) st.mode = mode;
   if (MATRIX_CELLS.includes(p.get("d"))) { st.sameDialect = p.get("d"); st.sameDialectPinned = true; }
@@ -5232,7 +5306,7 @@ if (NODE) {
     perCellMemory, memoryCells, hasPerCellMemory, widestDialect, chosenMemory, memoryFor,
     idleAcrossCells, neverPlateaued, worstGrowth, memCellTip, neverPlateauedPill,
     idleStatic, memShape, memGrowing, memShaped,
-    hasMatrixGrid, matrixFailureReason, matrixRoster, hasCost, costWindowConc, SHOW_GROWTH_VERDICT, rigResolutionPct, indistinguishable, tiedRuns, costSaturation, CHART_METRICS, chartRows,
+    hasMatrixGrid, matrixFailureReason, matrixRoster, hasCost, costWindowConc, SHOW_GROWTH_VERDICT, selectedConc, concChoices, rungAt, rigResolutionPct, indistinguishable, tiedRuns, costSaturation, CHART_METRICS, chartRows,
     laneRecord, lanePathNote, perfSweepSeries, concAt,
     // THE FRONTIER: the constants (mirrored from seal.mjs and checked against it), the readers every
     // surface goes through, and the two renderers that make the curve's SHAPE legible. Exported because the
