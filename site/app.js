@@ -1373,6 +1373,17 @@ function neverPlateaued(g) {
    phrase - NEVER SETTLES, in red, beside a rate the column calls a leak rate - the second gateway is
    accused of the first one's defect. The engine now separates them; everything below reads its verdict
    and never re-derives one from the series. */
+/* SHOW A WORD BESIDE THE GROWTH RATE, OR LET THE NUMBER SPEAK.
+
+   OFF. The rate and its sign already say everything: +12.5 MiB/min is a leak whether or not we print
+   the word, and -0.4 is not one whether or not we print it. Adding a verdict only creates a way to be
+   wrong about somebody else's product - which is exactly what happened, with 22 cells labelled
+   "(leak)" while their memory was falling.
+   The shape is still measured, still published in the artifact, and still spelled out in the drawer
+   and the tooltip where there is room to be accurate. This is only about the word in the table cell.
+   Set to true to bring the suffixes back; the wording below is kept correct so that switch stays
+   honest rather than needing to be rewritten first. */
+const SHOW_GROWTH_VERDICT = false;
 function memShape(rec) {
   // mcode, not mval: 0 is a real shape code here, so an absence must not decay into "it swung".
   const c = mcode(rec && (rec.shape ?? rec.memory_shape));
@@ -2100,6 +2111,16 @@ const COLUMN_SETS = {
         const m = memoryFor(g, st);
         const c = memCell(g, "growth_rate_mib_per_min", fmt1, st);
         if (c.na || !m) return c;
+        if (m.plateaued === false && !SHOW_GROWTH_VERDICT) {
+          // The note still explains what the number means - it is a tooltip with room for a sentence,
+          // not a verdict stamped on the cell.
+          const gr0 = mval(m.growth_rate_mib_per_min);
+          return { ...c, note: gr0 != null && gr0 > 0
+            ? "This cell never went steady: the load stopped at the cap with RSS still climbing at this rate, so there is no steady state to report and a longer load would have produced a larger number."
+            : gr0 != null && gr0 < 0
+            ? "This cell never went steady, but the rate is negative - it was releasing memory when the load hit the cap."
+            : "This cell never went steady; neither a shape verdict nor a non-zero rate establishes which way RSS was moving." };
+        }
         if (m.plateaued === false) {
           /* THE SUFFIX FOLLOWS THE SHAPE, NOT MERELY "DID NOT SETTLE".
              This appended "(leak)" to every unsettled cell whatever its direction, so agentgateway
@@ -5242,7 +5263,7 @@ if (NODE) {
     perCellMemory, memoryCells, hasPerCellMemory, widestDialect, chosenMemory, memoryFor,
     idleAcrossCells, neverPlateaued, worstGrowth, memCellTip, neverPlateauedPill,
     idleStatic, memShape, memGrowing, memShaped,
-    hasMatrixGrid, matrixFailureReason, matrixRoster, hasCost, costWindowConc, rigResolutionPct, indistinguishable, tiedRuns, costSaturation, CHART_METRICS, chartRows,
+    hasMatrixGrid, matrixFailureReason, matrixRoster, hasCost, costWindowConc, SHOW_GROWTH_VERDICT, rigResolutionPct, indistinguishable, tiedRuns, costSaturation, CHART_METRICS, chartRows,
     laneRecord, lanePathNote, perfSweepSeries, concAt,
     // THE FRONTIER: the constants (mirrored from seal.mjs and checked against it), the readers every
     // surface goes through, and the two renderers that make the curve's SHAPE legible. Exported because the

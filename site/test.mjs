@@ -2433,7 +2433,7 @@ test("COST: the cost columns appear only on a board that can answer them, and re
 // being RELEASED, labelled as the one thing it is the opposite of, under a note asserting RSS was
 // "still climbing at this rate". The drawer already read the engine's shape verdict correctly from the
 // same field; the column ignored it, so one board rendered one fact two contradictory ways.
-test("MEMORY: the growth suffix follows the measured shape, so a falling cell is never called a leak", () => {
+test("MEMORY: the growth cell states the rate and passes no verdict", () => {
   const seal = (v) => ({ value: v, certified: true, suppressed: false });
   // shape: 1 climbing, 0 swinging, -1 releasing (engine codes, read via mcode not mval - 0 is real).
   const cellWith = (rate, shape) => ({
@@ -2453,10 +2453,16 @@ test("MEMORY: the growth suffix follows the measured shape, so a falling cell is
       return col.get(data.gateways[0], st).text || "";
     } finally { app.state.data = saved; }
   };
-  assert.match(suffix(-0.4, -1), /releasing/, "a falling cell says releasing");
-  assert.doesNotMatch(suffix(-0.4, -1), /leak/, "and is NEVER called a leak - this is the reported bug");
-  assert.match(suffix(12.5, 1), /leak/, "a climbing cell is still called a leak, which is the point of the column");
-  assert.match(suffix(0.3, 0), /swing/, "an oscillating cell says swing");
+  // THE TABLE PRINTS THE NUMBER AND NOTHING ELSE (SHOW_GROWTH_VERDICT = false). The rate and its sign
+  // are the finding: +12.5 is a leak whether or not the word is printed, and -0.4 is not one whether
+  // or not it is. A verdict beside the number only creates a way to be wrong about somebody else's
+  // product, which is what happened - 22 cells read "(leak)" while their memory was falling.
+  for (const [rate, shape] of [[-0.4, -1], [12.5, 1], [0.3, 0]]) {
+    const t = suffix(rate, shape);
+    assert.doesNotMatch(t, /leak|releasing|swing/, `the cell states the rate alone: ${t}`);
+    assert.match(t, /-?[0-9]/, `and the rate itself is still there: ${t}`);
+  }
+  assert.equal(app.SHOW_GROWTH_VERDICT, false, "the switch is off; flip it to true to bring the words back");
 });
 
 test("COST: the CPU column names the concurrency its window ran at, from the data", () => {
@@ -3941,7 +3947,9 @@ test("memory Min/Max: a cell that never went steady is not a candidate (no stead
   const cust = memState([g], { mode: "custom", xlateIn: "openai", xlateOut: "gemini" });
   assert.equal(memCol("mempeak").get(g, cust).na, true, "no steady state was reached, so none is published");
   const growth = memCol("memgrowth").get(g, cust);
-  assert.equal(growth.text, "14.2 (leak)", "the growth rate IS the reading when no steady state was reached");
+  // The rate IS the reading when no steady state was reached, and it stands on its own: the table
+  // passes no verdict on it (SHOW_GROWTH_VERDICT = false).
+  assert.equal(growth.text, "14.2", "the growth rate IS the reading when no steady state was reached");
   assert.match(growth.note, /never went steady/);
 });
 
@@ -4439,7 +4447,7 @@ test("gen-data SEALS the per-cell memory window: no published memory number ship
   const st = { ...app.newState(), view: "memory", mode: "min", data: bundle };
   assert.equal(app.neverPlateaued(g), true);
   assert.equal(app.hasPerCellMemory(bundle), true);
-  assert.equal(app.COLUMN_SETS.memory.find((c) => c.id === "memgrowth").get(g, st).text, "6.4 (leak)");
+  assert.equal(app.COLUMN_SETS.memory.find((c) => c.id === "memgrowth").get(g, st).text, "6.4");
 });
 
 // ---- the matrix grid shows EVERY gateway, including one that produced no matrix -----------------
