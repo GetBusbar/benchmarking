@@ -1,0 +1,62 @@
+# busbar 1.5.0 — the minimum config that boots. Nothing here tunes performance.
+#
+# Two settings are not defaults, and both are forced by the environment rather than chosen:
+#
+# auth.chain: [] — the board's rule is the bare minimum required to run, and every other gateway here
+# runs its data plane unauthenticated. busbar 1.5.0 refuses to boot with no auth block at all, so the
+# open posture has to be declared instead of implied. This is busbar's own documented dev setting and
+# it costs us: the image logs an ERROR and two WARNs about it on every boot.
+#
+# auth.signing_key.file — /etc/busbar is read-only in the image, and 1.5.0 otherwise generates and
+# persists an ed25519 key on first boot, which fails with 'Permission denied'. Pointing at a mounted
+# file removes the need to write. With chain: [] this key signs nothing the benchmark exercises.
+#
+# NO max_concurrent, DELIBERATELY. It was carried at 8000 to keep this row comparable with 1.4.1,
+# which is no longer on the board, so the reason is gone - and it was never out-of-the-box: busbar's
+# own source calls it "an OPT-IN limiter: omitted (None) = UNBOUNDED" (main.rs), and the published
+# 1.5.0 image validates this file without it ("ok: config valid - 6 provider(s), 6 model(s)").
+#
+# It also silently capped our own measurement. A cap cannot flatter a gateway, only limit it, and at
+# the throughput frontier's operating point (c=64) 8000 is nowhere near binding - but STREAMS are
+# long-lived, so 8,192 concurrent streams sit above it. The streaming sweep carried c=4096 and failed
+# c=8192, which is exactly where a 8,000 limit bites, and the ceiling search then spent its whole
+# budget bisecting a bracket our own config had created. No other gateway on this board declares a
+# concurrency limit of any kind, so carrying one here measured our configuration, not our gateway.
+
+listen: 127.0.0.1:{GW_PORT}
+providers:
+  mock-openai:
+    api_key:
+      env: BENCH_MOCK_KEY
+  mock-responses:
+    api_key:
+      env: BENCH_MOCK_KEY
+  mock-anthropic:
+    api_key:
+      env: BENCH_MOCK_KEY
+  mock-gemini:
+    api_key:
+      env: BENCH_MOCK_KEY
+  mock-cohere:
+    api_key:
+      env: BENCH_MOCK_KEY
+  mock-bedrock:
+    api_key:
+      env: BENCH_BEDROCK_KEY
+models:
+  gpt-4o-mini:
+    provider: mock-openai
+  gpt-4o-mini-responses:
+    provider: mock-responses
+  gpt-4o-mini-anthropic:
+    provider: mock-anthropic
+  gpt-4o-mini-gemini:
+    provider: mock-gemini
+  gpt-4o-mini-cohere:
+    provider: mock-cohere
+  gpt-4o-mini-bedrock:
+    provider: mock-bedrock
+auth:
+  chain: []
+  signing_key:
+    file: /etc/busbar/busbar-signing.key

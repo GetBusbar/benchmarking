@@ -1,0 +1,35 @@
+# Why every setting, env var, header and command this gateway uses is here.
+#
+# The rule, from the published methodology: a setting may appear only if it is needed to boot the
+# process at all, to point an upstream at the test mock instead of a real provider, to expose an
+# ingress path the matrix exercises, or to bind the port and cores the rig requires. One claim per
+# line: <pattern> <boot|upstream|ingress|bind>. Anything unclaimed is a lint failure, and a claim
+# that matches nothing is a stale claim and also a failure.
+#
+# Migrated from GW_CONFIG_WHY in gateway.sh, which is dead code the lint was still reading.
+listen         bind      # the port the harness drives
+providers      upstream  # the provider table
+mock-*         upstream  # one provider per protocol, each base_url -> the mock
+protocol       upstream  # which upstream dialect that provider speaks
+base_url       upstream  # -> the mock
+api_key_env    boot      # names the env var holding the credential; a provider without one fails load
+error_map      boot      # REQUIRED per provider in v1.4.1 and still in v1.5.0 - no serde default
+#
+# CONFIG SHAPE: config.gen.yaml.tmpl is the output of `busbar --migrate-config` run on the 1.4.1
+#               config. 1.5.0 REFUSES a 1.x config rather than booting it under changed semantics,
+#               so the two versions cannot share one file. The whole diff is six api_key_env to the nested
+#               api_key/env form; providers.gen.yaml.tmpl needed no migration at all.
+models         ingress   # the client-facing model table
+gpt-4o-mini*   ingress   # the model name each matrix column asks for; selects that column's provider
+provider       upstream  # which provider backs this model
+max_concurrent boot      # still REQUIRED by the published 1.5.0 IMAGE (it refuses to boot without
+#                         it) even though the v1.5.0 source tag types it Option<usize> - the image
+#                         was pushed 25 min BEFORE that tag existed. Same value as 1.4.1 so the two
+#                         rows differ only by binary.
+BENCH_MOCK_KEY    boot   # the credential api_key_env names (dummy; the mock ignores it)
+BENCH_BEDROCK_KEY boot   # bedrock SigV4 ACCESS:SECRET pair, same
+governance    boot
+enabled       boot      # without it admin_token is inert and the key mint 401s
+db_path       boot      # the default file cannot be opened on the bench's read-only working dir
+admin_token   boot      # activates the admin plane the lane mints its virtual key over
+admin_listen  bind      # the admin plane has its own listener; the mint has to know the port
