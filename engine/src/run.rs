@@ -1032,6 +1032,27 @@ enum StreamStop {
 }
 
 impl StreamStop {
+    /// May the search fall back to confirming the cell's own proven-clean floor?
+    ///
+    /// ONLY WHERE THE HOST IS NOT THE SUSPECT. The floor fallback re-measures a rung on the same box
+    /// that just failed several, so it is only meaningful when the failures were the gateway's or the
+    /// budget's. `RigRanShort`, `WindowUnavailable` and `RigContaminated` all say the instrument is
+    /// the variable, and a number taken on a host we have just accused would be exactly the
+    /// attribution error the rest of this enum exists to prevent - with the flattering sign, because
+    /// it would publish a figure where honesty published none.
+    ///
+    /// `GatewayDidNotRecover` is excluded for the opposite reason: the process serving the fallback
+    /// window is not the process the sweep measured, so whatever it carries is not this cell's
+    /// ceiling. "It does not recover" is the finding, and it must not be overwritten by a number.
+    fn floor_fallback_ok(self) -> bool {
+        matches!(
+            self,
+            StreamStop::BudgetExhausted
+                | StreamStop::FloorReached { .. }
+                | StreamStop::SteppedRungFailed { .. }
+        )
+    }
+
     /// A rig failure is a `HarnessError`; everything else is a measurement that did not resolve.
     /// Filing our own shortfall under `NotMeasured` would put it among the gateway's results.
     fn absent_kind(self) -> Absent {
@@ -2343,6 +2364,63 @@ pub fn sweep_streams_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> Cel
                         }
                     }
                 }
+                /* THE FLOOR THE SEARCH ALREADY PROVED IS A RESULT, NOT A LEFTOVER.
+                
+                   The step-down budget converges toward `proven_clean` without ever re-testing it:
+                   busbar openai>openai carried c=4,096 on the ascending sweep, bisected to c=5,652,
+                   lost both confirmation windows, and spent all four step-downs at 4,874 / 4,485 /
+                   4,290 / 4,193 - every one of them ABOVE the rung it had already carried. The cell
+                   then published nothing, on a board where the same gateway is the subject. Three
+                   busbar cells, and seven across the field, read `unconfirmed` for this reason.
+                
+                   "We could not confirm 5,652" and "we know nothing" are different statements. The
+                   first is true; the second is what an absence says. So when the search is otherwise
+                   out of budget, the floor gets the confirmation the bisected rung got: a full set of
+                   windows, the same majority rule, the same median-of-holds. It publishes a
+                   CONSERVATIVE number - the ceiling is somewhere above it - and that is the honest
+                   shape of what the search learned.
+                
+                   It costs WINDOWS_PER_RUNG windows and only on the failure path. It cannot inflate a
+                   result: `proven_clean` is a rung this cell drove cleanly during its own ascent, and
+                   it still has to hold a majority now to be published at all. */
+                if winner.is_none() && proven_clean > 0 && stop.floor_fallback_ok() {
+                    eprintln!(
+                        "streams: the ceiling search is out of budget; confirming the floor this cell \
+                         already carried (c={proven_clean}) rather than publishing nothing"
+                    );
+                    settle_after_streams(ceiling.max(proven_clean) * 2);
+                    let mut held = 0usize;
+                    let mut total = 0usize;
+                    let mut rates: Vec<f64> = Vec::new();
+                    for _ in 0..crate::search::WINDOWS_PER_RUNG {
+                        if let Some(w) = stream_window(
+                            cfg.gateway_addr, &p.path, &p.body, &p.headers, p.dialect, proven_clean,
+                        ) {
+                            let passed = streams_gate_passes(&w);
+                            p.points.push(point_of(&w, passed));
+                            total += 1;
+                            if passed {
+                                held += 1;
+                                rates.push(w.fps());
+                            }
+                        }
+                        settle_after_streams(proven_clean);
+                    }
+                    if stream_ceiling_confirmed(total, held) {
+                        rates.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                        if let Some(fps) = crate::search::nearest_rank_median(&rates) {
+                            eprintln!("streams: floor c={proven_clean} confirmed at {fps:.0} fps");
+                            winner = Some((proven_clean, fps));
+                        }
+                    } else {
+                        // The floor did not hold either, so the absence stands and keeps the reason
+                        // the search already had. A rung that cannot be reconfirmed is not a ceiling.
+                        eprintln!(
+                            "streams: floor c={proven_clean} held {held} of {total} windows - not \
+                             confirmed, so the cell keeps its absence"
+                        );
+                    }
+                }
                 match winner {
                     Some((conc, fps)) => CellStreams {
                         concurrency: Measurement::Measured(conc),
@@ -2884,6 +2962,45 @@ pub(crate) fn test_fixture(gw: SocketAddr, mock: SocketAddr) -> RunConfig {
 
 #[cfg(test)]
 mod tests {
+    /* THE FLOOR FALLBACK'S GATE, which decides whether a cell publishes a conservative number or an
+       absence. The fallback re-measures on the SAME host that just failed several rungs, so it is
+       only meaningful when the host was not the suspect - and the flattering direction of this error
+       (publishing a figure where honesty published none) is the one nobody would catch. */
+    #[test]
+    fn floor_fallback_only_where_the_host_is_not_the_suspect() {
+        // The search ran out of room or budget: the gateway and the rig are both innocent so far, and
+        // the rung the cell already carried is a real, conservative result.
+        assert!(StreamStop::BudgetExhausted.floor_fallback_ok());
+        assert!(StreamStop::FloorReached { last: 4193 }.floor_fallback_ok());
+        assert!(StreamStop::SteppedRungFailed { at: 4193 }.floor_fallback_ok());
+
+        // OUR instrument is the variable. A number taken on a host we have just accused would be
+        // exactly the attribution error the enum exists to prevent.
+        assert!(!StreamStop::RigRanShort { measured: 1, wanted: 3 }.floor_fallback_ok());
+        assert!(!StreamStop::WindowUnavailable { at: 4096 }.floor_fallback_ok());
+        assert!(!StreamStop::RigContaminated { at: 4096, proven: 4096 }.floor_fallback_ok());
+
+        // And a gateway that had to be restarted is no longer the process the sweep measured, so
+        // whatever a fresh one carries is not this cell's ceiling. "It does not recover" is the
+        // finding and must not be overwritten by a number.
+        assert!(!StreamStop::GatewayDidNotRecover { at: 8192, proven: 4096, restart_cleared: true }
+            .floor_fallback_ok());
+        assert!(!StreamStop::GatewayDidNotRecover { at: 8192, proven: 4096, restart_cleared: false }
+            .floor_fallback_ok());
+    }
+
+    /* AND THE FLOOR STILL HAS TO EARN IT. The fallback publishes only what the same majority rule
+       every other repeated measurement uses would publish, so a floor that wins one window of three -
+       the shape that made the bisected rung unpublishable in the first place - stays unpublished. */
+    #[test]
+    fn the_floor_is_published_only_on_the_same_majority_every_other_rate_needs() {
+        assert!(stream_ceiling_confirmed(3, 3), "three of three holds");
+        assert!(stream_ceiling_confirmed(3, 2), "two of three is a majority");
+        assert!(!stream_ceiling_confirmed(3, 1), "one of three is the busbar c=5,652 shape");
+        assert!(!stream_ceiling_confirmed(3, 0), "none of three publishes nothing");
+        assert!(!stream_ceiling_confirmed(2, 2), "a short window set is not a confirmation");
+    }
+
     #[test]
     fn the_stream_bound_is_physical_and_the_runaway_cap_never_participates() {
         // A CAP CHOSEN NEAR WHERE MEASUREMENTS LIVE BECOMES PART OF THE MEASUREMENT. The first version
@@ -3363,27 +3480,25 @@ while True:
             Some(1),
             "the stepped-down rung must not publish on the strength of its own failing seed window"
         );
+        /* AND WHAT IT PUBLISHES INSTEAD IS THE FLOOR IT ACTUALLY CARRIED.
+        This asserted `None` - correct while a search out of budget gave up entirely. It no longer
+        does: the rung the cell proved on its own ascent gets the same confirmation the bisected
+        rung got, so a cell that demonstrably carries c=2 publishes 2 rather than an absence
+        claiming nothing is known. This fixture serves every rung at or below 3, so 2 is a true
+        reading, and it is conservative - the real ceiling is somewhere above it.
+
+        THE INVARIANT THIS TEST IS NAMED FOR IS UNTOUCHED AND IS THE ASSERTION ABOVE: the stepped
+        rung that could not seed (c=1) never voted for itself. What is published is a rung that held
+        a majority of fresh windows, which is the bar every other rate on this board has to clear. */
         assert_eq!(
             r.concurrency.value().copied(),
-            None,
-            "no rung held a majority of real windows, so nothing was proven sustained"
+            Some(2),
+            "the floor this cell proved on its own ascent is published, not the rung that failed to seed"
         );
-        /* THE ENDING MOVED, ON PURPOSE, AND THE TWO ASSERTIONS ABOVE ARE THE ONES THAT MATTER.
-        A failed seed used to END the search right there, which cost plano `anthropic>anthropic`
-        its number: c=71 failed one window and every concurrency down to the c=64 it had already
-        carried went untried. A failed seed now abandons that rung unconfirmed and buys another
-        step-down, so this fixture - which fails every rung in 4..15 - walks to the bottom of its
-        range and ends at the FLOOR instead.
-
-        What has not changed, and is what this test is for: the rung that could not seed never got
-        a vote, and nothing was published. Still asserted above, still the invariant. */
         assert!(
+            r.fps.value().is_some_and(|v| *v > 0.0),
+            "a published ceiling carries the rate that was measured at it: {:?}",
             r.fps
-                .detail()
-                .unwrap_or_default()
-                .contains("reached the bottom of the searched range"),
-            "the absence must name the ending the search actually reached: {:?}",
-            r.fps.detail()
         );
     }
 
