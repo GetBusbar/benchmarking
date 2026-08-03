@@ -988,9 +988,46 @@ pub const SUSTAINED_MAX_FAIL_RATIO: f64 = 0.001;
 const STREAM_SETTLE_FREE_BELOW: u32 = 512;
 /// One second of drain per 1,000 concurrent streams the last window drove.
 const STREAM_SETTLE_MS_PER_1K: u64 = 1_000;
-/// The cap. Deliberately shorter than TIME_WAIT: the queues, the descriptor table and the run queue
-/// drain in far less than that, and those are what move the next window's result.
-const STREAM_SETTLE_MAX_MS: u64 = 10_000;
+/// The backstop, and it is ONE TIME_WAIT GENERATION rather than a round number.
+///
+/// This was 10s, "deliberately shorter than TIME_WAIT" on the theory that the queues and descriptor
+/// table drain in far less. The board disagreed: cells that had carried c=4,096 still failed at
+/// c=4,107..4,193 after their 4-5s, and TIME_WAIT is exactly the residue `HostState` names as "the
+/// one that takes tens of seconds to clear". Since the wait now ends on the OBSERVED counter, this
+/// bounds only the pathological case - and 60s is the longest a closed socket can physically need.
+/// Past it the host is not draining, it is broken, which is a finding rather than a longer wait.
+const STREAM_SETTLE_MAX_MS: u64 = 60_000;
+/// How often the drain condition is re-read. A /proc/net/sockstat read is one small file; 50ms keeps
+/// the wait tight on the small rungs (where it now costs milliseconds instead of seconds) without
+/// making the poll itself measurable.
+const STREAM_SETTLE_POLL_MS: u64 = 50;
+/// How far above this cell's own starting TIME_WAIT count still counts as drained.
+///
+/// A bench box is never perfectly idle: the mock and the load generator hold their own sockets, and
+/// the gateway keeps a pool. Demanding an exact return to baseline would time out on every window
+/// and turn the backstop into the schedule. The tolerance is a multiple of the count the cell STARTED
+/// at, so it scales with whatever that particular box considers quiet rather than being a number
+/// chosen here.
+const STREAM_SETTLE_TW_TOLERANCE: u64 = 2;
+
+thread_local! {
+    /// The TIME_WAIT count this cell began with, times the tolerance: the level `settle_after_streams`
+    /// waits to come back down to.
+    ///
+    /// PER CELL, NOT PER PROCESS. A run measures 36 cells back to back and the box's quiet level
+    /// drifts across them (a gateway restarts, a previous cell's pool ages out). Sampling once at
+    /// startup would have every later cell waiting on a number taken before any of them ran.
+    /// `None` on a host with no /proc/net/sockstat, which is what makes the caller fall back to the
+    /// clock instead of waiting on a signal that will never arrive.
+    static STREAM_SETTLE_TW_BASELINE: std::cell::RefCell<Option<u64>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Record what "quiet" means for the cell about to be measured. Called once, before its ladder.
+pub fn arm_stream_settle_baseline() {
+    let tw = HostState::sample().tw.map(|t| t * STREAM_SETTLE_TW_TOLERANCE + 64);
+    STREAM_SETTLE_TW_BASELINE.with(|b| *b.borrow_mut() = tw);
+}
 const MAX_CEILING_STEPDOWNS: usize = 4;
 
 /// WHY the sustained-stream search ended without a ceiling.
@@ -1669,17 +1706,69 @@ fn stream_errored(o: &crate::http::SseOutcome) -> bool {
 /// draining sockets - but it settled only AFTER the ladder, protecting the reference measurement and
 /// not the ladder's own re-measurements, which are the numbers that actually get published.
 ///
-/// Proportional rather than flat: the small rungs need nothing and a flat pause large enough for
-/// c=8,192 would be pure cost on every one of them. Capped, because this runs inside a field sweep
-/// and an uncapped term is a schedule nobody predicted.
+/// WAIT FOR THE HOST TO SAY IT HAS DRAINED, RATHER THAN GUESSING HOW LONG THAT TAKES.
+///
+/// This slept `concurrency * 1s/1000`, capped at 10s. A duration is the wrong shape for this: no
+/// constant is right for every gateway and every rung, and the field showed it failing in BOTH
+/// directions at once. Too long: 1,647 windows above the free-below threshold, averaging 3.3s of
+/// unconditional sleep, is 91.8 MINUTES of pure waiting in a single field run. Too short: cells that
+/// had carried c=4,096 still failed at c=4,107..4,193 after their 4-5s, which is the residue this
+/// function exists to absorb, and the old cap was deliberately set BELOW one TIME_WAIT generation on
+/// the theory that the queues drain much faster. The data says otherwise.
+///
+/// The signal was already being collected and never acted on. `HostState` samples `tw` - sockets in
+/// TIME_WAIT from /proc/net/sockstat - immediately before every window, and the comment on it names
+/// this exact purpose: telling "the gateway changed its mind" apart from "the host had not
+/// recovered". So the wait now ENDS when the host is observably back, which is short on a small rung
+/// and long on a large one without either being chosen in advance.
+///
+/// THE 60s BACKSTOP IS ONE TIME_WAIT GENERATION, not a round number: it is the longest recovery a
+/// closed socket can physically need. Past it the host is not draining, it is broken, and that is a
+/// finding to report rather than a wait to extend.
 fn settle_after_streams(concurrency: u32) {
     if concurrency <= STREAM_SETTLE_FREE_BELOW {
         return;
     }
-    let ms = u64::from(concurrency) * STREAM_SETTLE_MS_PER_1K / 1000;
-    std::thread::sleep(std::time::Duration::from_millis(
-        ms.min(STREAM_SETTLE_MAX_MS),
-    ));
+    let baseline = STREAM_SETTLE_TW_BASELINE.with(|b| *b.borrow());
+    let Some(target) = baseline else {
+        // No baseline means no /proc to read (a non-Linux host, or the first call). Fall back to the
+        // proportional sleep: an unobservable host still needs SOME pause, and the old behaviour is
+        // the honest default when the condition cannot be evaluated.
+        let ms = u64::from(concurrency) * STREAM_SETTLE_MS_PER_1K / 1000;
+        std::thread::sleep(std::time::Duration::from_millis(ms.min(STREAM_SETTLE_MAX_MS)));
+        return;
+    };
+    let started = std::time::Instant::now();
+    let deadline = std::time::Duration::from_millis(STREAM_SETTLE_MAX_MS);
+    loop {
+        let now = HostState::sample();
+        match now.tw {
+            // Drained: TIME_WAIT is back within the tolerance of where this cell started. The
+            // tolerance exists because a box is never perfectly idle - the mock and the load
+            // generator hold their own sockets - so demanding an exact return would always time out.
+            Some(tw) if tw <= target => return,
+            // The counter stopped being readable mid-sweep. Waiting on a signal that no longer
+            // exists would burn the whole backstop on every window, so this falls back to the clock.
+            None => {
+                std::thread::sleep(std::time::Duration::from_millis(
+                    (u64::from(concurrency) * STREAM_SETTLE_MS_PER_1K / 1000)
+                        .min(STREAM_SETTLE_MAX_MS),
+                ));
+                return;
+            }
+            Some(_) => {}
+        }
+        if started.elapsed() >= deadline {
+            eprintln!(
+                "streams: the host has not drained to tw<={target} in {}s after c={concurrency} \
+                 (tw={:?}) - measuring anyway, and the rung that follows carries that residue",
+                deadline.as_secs(),
+                now.tw
+            );
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(STREAM_SETTLE_POLL_MS));
+    }
 }
 
 pub fn stream_window(
@@ -2067,6 +2156,11 @@ fn stream_target(cfg: &RunConfig, id: &CellId) -> Option<StreamTarget> {
 /// `sweep_sustained_cell`. Once enough concurrent streams are in flight that frames start arriving
 /// late or short, adding more does not bring them back.
 pub fn sweep_streams_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> CellStreams {
+    // WHAT "DRAINED" MEANS FOR THIS CELL, read before it drives anything. Every settle in this
+    // ladder waits to come back to this level, so it has to be taken while the box is as quiet as it
+    // will be - and re-taken per cell, because a run measures 36 of them back to back and the quiet
+    // level drifts as gateways restart and pools age out.
+    arm_stream_settle_baseline();
     let Some(t) = stream_target(cfg, id) else {
         return CellStreams {
             concurrency: Measurement::absent(Absent::Untestable),
@@ -2962,6 +3056,46 @@ pub(crate) fn test_fixture(gw: SocketAddr, mock: SocketAddr) -> RunConfig {
 
 #[cfg(test)]
 mod tests {
+    /* THE DRAIN WAITS ON A CONDITION, AND THE CONDITION HAS TO BE REACHABLE.
+    
+       A settle that can never be satisfied turns the 60s backstop into the schedule: 1,647 windows
+       above the free-below threshold would become 27 HOURS of waiting in a field run. The tolerance
+       is what keeps it reachable on a box that is never perfectly idle, so it is asserted directly. */
+    #[test]
+    fn the_drain_target_is_reachable_on_a_box_that_is_never_perfectly_idle() {
+        // The baseline is the cell's own starting count, scaled - not a number chosen here. A box
+        // that starts with 200 sockets in TIME_WAIT must not be asked to return to 0.
+        let quiet = 200u64;
+        let target = quiet * STREAM_SETTLE_TW_TOLERANCE + 64;
+        assert!(target > quiet, "the target must sit ABOVE the level the cell started at");
+        // The mock and the load generator hold their own sockets throughout, so a window that closes
+        // cleanly still leaves the box above where it began. That has to read as drained.
+        assert!(quiet + 100 <= target, "ordinary residue still counts as drained");
+        // And a box still holding thousands of dying sockets from a c=8,192 window does NOT.
+        assert!(quiet + 8_000 > target, "a real backlog is not mistaken for quiet");
+
+        // An idle box reads 0 and must still get a usable target rather than an impossible one.
+        assert_eq!(0 * STREAM_SETTLE_TW_TOLERANCE + 64, 64, "an idle box still has headroom");
+    }
+
+    /* AND THE BACKSTOP IS ONE TIME_WAIT GENERATION, which is the point of the number. It was 10s,
+       deliberately UNDER TIME_WAIT, and the board showed cells failing rungs they had already carried
+       after 4-5s of it. A closed socket cannot need longer than a generation; past that the host is
+       broken rather than busy. */
+    #[test]
+    fn the_settle_backstop_covers_a_full_time_wait_generation() {
+        assert!(
+            STREAM_SETTLE_MAX_MS >= 60_000,
+            "a backstop under one TIME_WAIT generation cannot absorb the residue it exists for"
+        );
+        // The poll has to be fine enough that a small rung's wait is milliseconds, not seconds: the
+        // whole gain over the old fixed sleep is that a rung which drains at once stops paying.
+        assert!(
+            STREAM_SETTLE_POLL_MS <= 100,
+            "a coarse poll would reintroduce the fixed cost this replaced"
+        );
+    }
+
     /* THE FLOOR FALLBACK'S GATE, which decides whether a cell publishes a conservative number or an
        absence. The fallback re-measures on the SAME host that just failed several rungs, so it is
        only meaningful when the host was not the suspect - and the flattering direction of this error
