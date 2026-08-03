@@ -2237,10 +2237,18 @@ test("naText keeps long diagnostic notes out of cell values", () => {
 test("streaming latency cells annotate >=1ms values with their ms equivalent", () => {
   const cols = app.COLUMN_SETS.streaming;
   const sttft = cols.find((c) => c.id === "sttft");
-  const big = { streaming: streamRec({ added_ttft_p99_us: 596693 }) };
-  assert.equal(sttft.get(big).text, "596,693 (596.7 ms)");
-  const small = { streaming: streamRec({ added_ttft_p99_us: 397 }) };
-  assert.equal(sttft.get(small).text, "397");
+  // These getters read the GLOBAL state rather than a passed one, and the streaming lane's default is
+  // now Same - which selects a matrix cell these fixtures deliberately do not have (they carry only a
+  // projected `streaming` record). Own cell is the mode that reads that record, and this test is about
+  // the ms annotation, not about cell selection.
+  const savedMode = app.state.mode;
+  try {
+    app.state.mode = "peak";
+    const big = { streaming: streamRec({ added_ttft_p99_us: 596693 }) };
+    assert.equal(sttft.get(big).text, "596,693 (596.7 ms)");
+    const small = { streaming: streamRec({ added_ttft_p99_us: 397 }) };
+    assert.equal(sttft.get(small).text, "397");
+  } finally { app.state.mode = savedMode; }
 });
 
 test("stripRigPaths scrubs absolute bench-box paths from diagnostic notes", () => {
@@ -2399,8 +2407,15 @@ test("COST: the cost columns appear only on a board that can answer them, and re
   const cpu = cols.find((c) => c.id === "cpu");
   assert.ok(cpu, "the cost column appears once the board can answer it");
   assert.equal(cpu.desc, false, "less CPU per request is better, so it sorts ascending");
+  // THE COLUMN GETTER READS THE GLOBAL STATE, not the `st` it is handed (get: (g) => ...), so the mode
+  // has to be pinned there for the duration. This test is about whether the cost columns appear and
+  // read through the envelope, not about which cell the chooser picks.
   const st = { data: withCost, mode: "peak", bound: 10 };
-  assert.equal(cpu.get(withCost.gateways[0], st).v, 37.5);
+  const savedMode = app.state.mode, savedData = app.state.data;
+  try {
+    app.state.mode = "peak"; app.state.data = withCost;
+    assert.equal(cpu.get(withCost.gateways[0], st).v, 37.5);
+  } finally { app.state.mode = savedMode; app.state.data = savedData; }
   // AND ITS RECIPROCAL IS NOT BESIDE IT. 1 CPU-second is a million microseconds, so
   // rps_per_cpu_second is 1,000,000 / cpu_us_per_request - the same measurement inverted. Two columns
   // that multiply to a constant read as corroboration while carrying one number between them. It
@@ -3026,15 +3041,25 @@ test("URL round-trips the chooser mode + selection (peak / same / custom)", () =
     const u = new URL(url, "https://onthebench.ai");
     return { st, back: app.decodeUrl(u.pathname, u.search), url };
   };
-  // Peak is the clean default: no mode param.
-  const peak = rt("/gateways/performance", "");
+  // SAME is the clean default now: no mode param, and no ?d= either while the dialect is the seeded
+  // one. The perf lanes moved off Own cell so the first view a reader gets is like-for-like.
+  const dflt = rt("/gateways/performance", "");
+  assert.equal(dflt.st.mode, "same");
+  assert.ok(!dflt.url.includes("mode="), `the default is clean: ${dflt.url}`);
+  assert.ok(!dflt.url.includes("d="), `and carries no dialect while it is the seeded one: ${dflt.url}`);
+  // Own cell is still a first-class mode and still round-trips under its URL-contract token.
+  const peak = rt("/gateways/performance", "?mode=peak");
   assert.equal(peak.st.mode, "peak");
-  assert.ok(!peak.url.includes("mode="), `peak is clean: ${peak.url}`);
+  assert.equal(peak.back.mode, "peak", "?mode=peak survives a round trip");
+  assert.ok(peak.url.includes("mode=peak"), `own cell is now explicit in the URL: ${peak.url}`);
   // Same carries the dialect.
   const same = rt("/gateways/performance", "?mode=same&d=anthropic");
   assert.equal(same.st.mode, "same");
   assert.equal(same.st.sameDialect, "anthropic");
-  assert.ok(same.url.includes("mode=same") && same.url.includes("d=anthropic"), same.url);
+  // Same is the perf default, so the MODE goes unspelled; the DIALECT is still carried because it is
+  // not the seeded one, and that is what makes the link reproduce the exact cell.
+  assert.ok(!same.url.includes("mode="), `the default mode stays unspelled: ${same.url}`);
+  assert.ok(same.url.includes("d=anthropic"), same.url);
   assert.equal(same.back.mode, "same");
   assert.equal(same.back.sameDialect, "anthropic");
   // Custom carries the in→out pair.
@@ -3807,7 +3832,8 @@ test("memory chooser RED: Peak is not offered, not decodable, and cannot select 
   assert.equal(app.decodeUrl("/gateways/memory", "?mode=peak").mode, "min",
     "a ?mode=peak link opened on the memory tab must fall back to memory's default, Min");
   assert.equal(app.decodeUrl("/gateways/performance", "?mode=peak").mode, "peak", "the perf tabs still decode Peak");
-  assert.equal(app.decodeUrl("/gateways/performance", "?mode=min").mode, "peak", "Min is not a perf mode");
+  assert.equal(app.decodeUrl("/gateways/performance", "?mode=min").mode, "same",
+    "Min is not a perf mode, so it falls back to the perf default (Same)");
   assert.equal(app.resolveMode("peak", "memory"), "min");
   assert.equal(app.memoryMode({ mode: "peak" }), "min", "the memory choke point can never return Peak");
   // (3) BEHAVIOURAL: a gateway whose throughput-peak cell is memory-heavy and whose identity cell is
@@ -4125,7 +4151,9 @@ test("memory URL codec: the new modes round-trip, and old memory links keep work
   assert.equal(old.sortCol, "mempeak");
   assert.equal(old.mode, "min", "an old memory link with no mode lands on memory's default, Min");
   // The perf lanes' encoding is untouched.
-  assert.equal(rt("/gateways/performance", "?mode=same&d=openai"), "/gateways/performance?mode=same&d=openai");
+  // Same is now the perf default and openai is the seeded dialect, so this pristine link is clean at
+  // both ends: nothing to spell, and it still decodes back to exactly that cell.
+  assert.equal(rt("/gateways/performance", "?mode=same&d=openai"), "/gateways/performance");
   assert.equal(rt("/gateways/performance", ""), "/gateways/performance");
 });
 
@@ -4871,9 +4899,14 @@ test("TOOL-01: a skipped test is recorded as a skip, not counted as a pass, and 
 });
 
 // SITE-15. sanitizeState seeded the data-derived Same dialect for the WHOLE state at boot, so a deep
-// link into performance or streaming - tabs whose own default is the declared one, which is exactly why
-// syncUrl omits ?d= on memory only - had its dialect rewritten from the data before it rendered a row.
-test("SITE-15: the data-derived Same dialect is seeded for the MEMORY tab, not for every arrival", () => {
+// link's dialect could be rewritten from the data before it rendered a row.
+//
+// WHAT GUARDS THAT IS THE PIN, NOT THE VIEW NAME. This asserted "memory seeds, performance does not",
+// which was true only because the perf lanes then defaulted to Own cell, where no dialect is selected
+// at all. They now default to Same - the dialect IS their selection - so seeding them is required, and
+// opening them on a hardcoded `openai` would be exactly the editorial choice widestDialect exists to
+// avoid. The deep-link protection is unchanged and is asserted below: a pinned ?d= always wins.
+test("SITE-15: every chooser view seeds Same from the run, and a pinned ?d= still wins", () => {
   const st = app.state;
   const saved = { view: st.view, d: st.sameDialect, pinned: st.sameDialectPinned, data: st.data };
   const gw = (key) => ({ key, display: key, lang: "Rust",
@@ -4881,21 +4914,28 @@ test("SITE-15: the data-derived Same dialect is seeded for the MEMORY tab, not f
   try {
     st.data = { gateways: [gw("a"), gw("b")] };
     assert.equal(app.widestDialect(st.data), "anthropic", "fixture: the field's widest cell is anthropic");
+    // The lanes that show a chosen cell all take the dialect the RUN says is widest.
+    for (const view of ["performance", "streaming", "memory"]) {
+      st.sameDialectPinned = false;
+      st.sameDialect = "openai";
+      st.view = view;
+      app.seedMemorySameDialect();
+      assert.equal(st.sameDialect, "anthropic", `${view} takes the data-derived Same dialect`);
+    }
+    // A pin beats the data on every one of them: this is what keeps a shared link reproducing its cell.
+    for (const view of ["performance", "streaming", "memory"]) {
+      st.sameDialect = "openai";
+      st.sameDialectPinned = true;
+      st.view = view;
+      app.seedMemorySameDialect();
+      assert.equal(st.sameDialect, "openai", `a ?d= in the URL still wins on ${view}`);
+    }
+    // A view with no cell chooser has no dialect to seed and must not acquire one.
     st.sameDialectPinned = false;
     st.sameDialect = "openai";
-    st.view = "performance";
+    st.view = "gateways";
     app.seedMemorySameDialect();
-    assert.equal(st.sameDialect, "openai", "a non-memory arrival keeps the dialect default it declares");
-    st.view = "streaming";
-    app.seedMemorySameDialect();
-    assert.equal(st.sameDialect, "openai");
-    st.view = "memory";
-    app.seedMemorySameDialect();
-    assert.equal(st.sameDialect, "anthropic", "and memory gets the data-derived default it asks for");
-    st.sameDialect = "openai";
-    st.sameDialectPinned = true;
-    app.seedMemorySameDialect();
-    assert.equal(st.sameDialect, "openai", "a ?d= in the URL still wins on memory");
+    assert.equal(st.sameDialect, "openai", "a non-chooser view is left alone");
   } finally {
     st.view = saved.view; st.sameDialect = saved.d; st.sameDialectPinned = saved.pinned; st.data = saved.data;
   }
