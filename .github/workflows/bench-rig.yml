@@ -41,11 +41,26 @@ jobs:
           cp target/release/mock "mock-${{ matrix.arch }}"
 
       - name: Build the engine (Rust, native ${{ matrix.arch }})
+        env:
+          # THE BINARY CARRIES THE COMMIT IT WAS BUILT FROM, so a bench box can ask it rather than
+          # trust the label the orchestrator passes. The boxes DOWNLOAD this artifact; without this
+          # the only record of which engine measured a board was an env var set from someone else's
+          # checkout - and on 2026-08-03 that stamped a snapshot 0ce7a907 while the binary was the
+          # previous release, because the fixes were on a branch and this workflow only rebuilds on
+          # a push to main. run-on-ec2.sh now refuses to measure when the two disagree.
+          OTB_BUILD_COMMIT: ${{ github.sha }}
         run: |
           # Native, on a runner of the target arch, for the same reason the mock is: a bench box
           # then needs no toolchain, which is what keeps every box identical.
           cargo build --release --bin otb
           cp target/release/otb "otb-${{ matrix.arch }}"
+          # The artifact must be able to answer for itself before it is published.
+          built_from="$(./otb-${{ matrix.arch }} engine-commit 2>/dev/null || true)"
+          if [ "$built_from" != "${{ github.sha }}" ]; then
+            echo "refusing to publish: otb reports '$built_from', expected '${{ github.sha }}'" >&2
+            exit 1
+          fi
+          echo "otb-${{ matrix.arch }} reports its build commit: $built_from"
 
       - name: Publish to the rolling `rig` release
         env:

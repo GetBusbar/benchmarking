@@ -1372,6 +1372,44 @@ if [ ! -x ./otb ]; then
   echo 126 > .run-done
   exit 0
 fi
+# THE LABEL MUST BE WHAT WAS PULLED, AND THE BINARY IS ASKED RATHER THAN TRUSTED.
+#
+# This box DOWNLOADS the engine from the rolling `rig` release; it does not build it. The commit that
+# lands in every artifact came from BENCH_ENGINE_COMMIT, which the orchestrator set from its OWN
+# checkout - so the stamp recorded what the operator intended to run, and nothing compared it to the
+# binary that ran.
+#
+# 2026-08-03: a snapshot was stamped 0ce7a907 and measured by an engine containing no line of it. The
+# fixes were pushed to a branch, bench-rig.yml only rebuilds the release on a push to `main`, and every
+# box fetched the previous artifact. Grepping the binary on the box for two strings that exist only in
+# the newer commit found neither. A whole validation run measured the wrong engine and said otherwise.
+#
+# The binary now carries the commit it was built from, so the two can be compared. A mismatch is fatal:
+# a run that cannot prove which engine it used cannot produce a comparable measurement, and publishing
+# one anyway is how a board ends up mixing instruments while every row claims the same stamp.
+_otb_built_from="$(./otb engine-commit 2>/dev/null | tr -d '[:space:]')"
+if [ -z "$_otb_built_from" ]; then
+  echo "ENGINE STAMP UNVERIFIABLE: the fetched otb reports no build commit."
+  echo "  It predates the baked-in stamp, so which engine this box would measure on cannot be"
+  echo "  established. Rebuild the rig release (bench-rig.yml) from the commit you intend to run."
+  echo 126 > .run-done
+  exit 0
+fi
+if [ -n "$BENCH_ENGINE_COMMIT" ] && [ "$_otb_built_from" != "$BENCH_ENGINE_COMMIT" ]; then
+  echo "ENGINE MISMATCH - refusing to measure."
+  echo "  the run would stamp : $BENCH_ENGINE_COMMIT"
+  echo "  the binary is from  : $_otb_built_from"
+  echo "  The rig release has not been rebuilt from the commit this run pins. bench-rig.yml rebuilds"
+  echo "  it on a push to main touching engine/** or mock/**, or on workflow_dispatch."
+  echo 126 > .run-done
+  exit 0
+fi
+echo "[rig] engine verified: otb built from ${_otb_built_from} matches the commit this run stamps"
+# AND THE STAMP IS THE BINARY'S OWN ANSWER FROM HERE ON. The two are equal by the check above, so
+# this changes nothing today - it changes what happens the day they diverge again. Deriving the
+# published commit from the artifact means the stamp cannot outlive the check that verified it.
+BENCH_ENGINE_COMMIT="$_otb_built_from"
+export BENCH_ENGINE_COMMIT
 # THE MOCK RUNS PINNED, IN ITS OWN PROCESS, on its own cores. The three-way split - gateway 0-3,
 # load generator 4-9, mock 10-15 - IS the comparability basis of every published number, so a mock
 # sharing cores with either of the others measures a different machine.

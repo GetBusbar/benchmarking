@@ -704,6 +704,21 @@ fn main() -> ExitCode {
             println!("{}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
         }
+        /* THE COMMIT THIS BINARY WAS BUILT FROM, read back out of the binary itself.
+        
+           The boxes do not build the engine, they download it, and the commit recorded in every
+           artifact came from an environment variable the orchestrator set from its own checkout.
+           That stamp said what the operator INTENDED to run. On 2026-08-03 a snapshot was stamped
+           0ce7a907 and measured by a binary containing no line of it - the fixes were on a branch,
+           the release only rebuilds on a push to main, and the boxes fetched the previous artifact.
+        
+           So the run asks the binary, and refuses to measure when the answer disagrees with the
+           commit it is about to stamp. Empty output means the build could not establish its own
+           commit, which the caller must treat as unverifiable rather than as a match. */
+        Some("engine-commit") => {
+            println!("{}", env!("OTB_ENGINE_COMMIT"));
+            ExitCode::SUCCESS
+        }
         // The shell is handed an ALREADY-WINDOWED file, so window over everything here to match.
         Some("plateau-check") => {
             let samples = read_samples();
