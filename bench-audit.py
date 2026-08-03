@@ -1373,6 +1373,77 @@ def check_absence_fields_mirror_the_engine():
 UNREADABLE_DECLARATIONS: dict = {}
 
 
+def check_the_cost_window_obeys_its_own_arithmetic():
+    """Every cell's cost fields must cross-check to the SAME core count the rig pinned.
+
+    THIS IS THE ONE INVARIANT THAT MAKES A THROUGHPUT NUMBER ANSWERABLE. The board publishes a peak
+    rate at one concurrency and a CPU-per-request at another (COST_WINDOW_CONCURRENCY, declared and
+    identical for every entrant), and multiplying across those two windows is the arithmetic that
+    makes a real number look impossible: busbar's 82,328 req/s times its 53.6 us/req reads as 4.41
+    cores on a 4-core box. The defence is not an assertion that the peak is fine, it is that the cost
+    window is INTERNALLY consistent - and that is checkable from three fields that are already
+    published, with no new measurement and no reference to a core count the artifact does not carry:
+
+        cpu_us_per_request * cost_window_rps / 1e6  ==  cores * cost_core_utilisation
+
+    so `rps * cpu / 1e6 / utilisation` is the core count each cell IMPLIES. The rig pins every gateway
+    to the same cores, so every cell on the board must imply the same number. It does: 4.02 across
+    gateways spanning 9 req/s to 63,532 req/s and 60 us to 220,893 us per request. Three fields
+    measured independently, agreeing to half a percent over four orders of magnitude, is what says the
+    cost numbers describe the machine rather than each other.
+
+    A cell whose three fields disagree has one of them wrong, and there is no way to tell which from
+    the outside - which is exactly why this fires rather than picking a winner.
+
+    TWO EXCLUSIONS, BOTH COUNTED, NEITHER A FORGIVENESS. A check that silently drops most of its
+    subjects is the inert-check failure this file exists to catch, so both are reported.
+
+      * LOW UTILISATION. It is the denominator, so a cell that barely loaded its cores (one-api at
+        0.021, tensorzero at 0.018) turns rounding in the numerator into whole cores of error.
+      * TOO FEW REQUESTS. `cost_window_rps` is published ROUNDED TO A WHOLE NUMBER, so a slow cell's
+        rate carries up to half a request per second of quantisation. plano proves it: the same
+        gateway, three cells, implying 4.13 / 4.35 / 4.01 cores on windows of 56 / 94 / 125 requests -
+        the error shrinking as the count grows, which is the signature of rounding and not of a
+        gateway. A 94-request window cannot check a one-percent identity, and pretending otherwise
+        would mean tuning the tolerance until the arithmetic stopped complaining.
+    """
+    UTIL_FLOOR = 0.20
+    # Half a request per second of rounding is under a tenth of a percent by here, which is an order
+    # of magnitude inside the tolerance below.
+    MIN_WINDOW_REQUESTS = 500
+    TOLERANCE = 0.08
+    implied = []
+    skipped = 0
+    for gw, (f, d, sha) in load(engine=None).items():
+        ups = ((d.get("matrix") or {}).get("upstreams")) or {}
+        for eg, u in ups.items():
+            for ing, c in (u.get("cells") or {}).items():
+                if c.get("served") is not True:
+                    continue
+                p = c.get("perf") or {}
+                rps, cpu, util = (p.get("cost_window_rps"), p.get("cpu_us_per_request"),
+                                  p.get("cost_core_utilisation"))
+                if not all(isinstance(x, (int, float)) for x in (rps, cpu, util)):
+                    continue
+                ok = p.get("cost_window_ok")
+                if util < UTIL_FLOOR or rps <= 0 or not isinstance(ok, (int, float)) or ok < MIN_WINDOW_REQUESTS:
+                    skipped += 1
+                    continue
+                implied.append((f"{gw} {ing}>{eg}", rps * cpu / 1e6 / util))
+    if len(implied) < 2:
+        return
+    med = sorted(x for _, x in implied)[len(implied) // 2]
+    off = [(name, v) for name, v in implied if abs(v - med) / med > TOLERANCE]
+    if off:
+        worst = sorted(off, key=lambda x: -abs(x[1] - med))[:4]
+        yield (f"the cost window's own arithmetic disagrees on {len(off)} of {len(implied)} cell(s): "
+               f"cpu_us_per_request x cost_window_rps / utilisation implies {med:.2f} cores across the "
+               f"board but " + ", ".join(f"{n} implies {v:.2f}" for n, v in worst) +
+               f" - three independently measured fields that cannot all be right"
+               + (f" ({skipped} cell(s) excluded as uncheckable: under {UTIL_FLOOR:.0%} utilisation or "
+                  f"under {MIN_WINDOW_REQUESTS} requests in the window)" if skipped else ""))
+
+
 def check_every_declaration_is_readable():
     """A gateway whose definition.json will not parse had its declaration check SKIPPED.
 
@@ -1557,7 +1628,8 @@ def main():
     board_checks = (
                     check_absence_fields_mirror_the_engine,
                     check_frontier_bounds_agree_with_the_engine,
-                    check_every_declaration_is_readable)
+                    check_every_declaration_is_readable,
+                    check_the_cost_window_obeys_its_own_arithmetic)
     for check in board_checks:
         for v in check():
             violations[check.__name__].append(v)

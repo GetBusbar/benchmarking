@@ -2424,6 +2424,35 @@ test("COST: the cost columns appear only on a board that can answer them, and re
     "requests-per-CPU-second must not sit beside CPU-per-request: they are one number, inverted");
 });
 
+// THE COST COLUMN MUST SAY WHICH WINDOW IT IS. The board publishes a peak rate at the concurrency the
+// frontier chose and a CPU-per-request at a fixed, different one. Both are in the artifact and only one
+// was on the page, so a reader saw "53.6 µs" beside "82,328 req/s" with nothing saying they came from
+// different windows - and multiplying them yields 4.41 cores on a 4-core box: an impossible number
+// assembled from two correct ones.
+test("COST: the CPU column names the concurrency its window ran at, from the data", () => {
+  const seal = (v) => ({ value: v, certified: true, suppressed: false });
+  const withCost = { gateways: [{ key: "a",
+    best_cell: { ...bcCell({}), cpu_us_per_request: seal(53.6), cost_window_conc: seal(8) } }] };
+  assert.equal(app.costWindowConc(withCost), 8);
+  const savedData = app.state.data;
+  try {
+    app.state.data = withCost;
+    const cpu = app.columnsFor("performance", withCost).find((c) => c.id === "cpu");
+    const label = typeof cpu.label === "function" ? cpu.label() : cpu.label;
+    assert.match(label, /c=8/, `the column states its window: ${label}`);
+    // NOT HARDCODED: the engine's COST_WINDOW_CONCURRENCY can move, and a stale literal would
+    // mislabel every row on the board.
+    const moved = { gateways: [{ key: "a",
+      best_cell: { ...bcCell({}), cpu_us_per_request: seal(9), cost_window_conc: seal(64) } }] };
+    app.state.data = moved;
+    const movedLabel = (() => { const c = app.columnsFor("performance", moved).find((x) => x.id === "cpu");
+      return typeof c.label === "function" ? c.label() : c.label; })();
+    assert.match(movedLabel, /c=64/, `the label follows the data: ${movedLabel}`);
+  } finally { app.state.data = savedData; }
+  // A board with no cost carries no claim about a window either.
+  assert.equal(app.costWindowConc({ gateways: [{ key: "a", best_cell: bcCell({}) }] }), null);
+});
+
 test("COST: an absent cost renders 'not measured', never a 0 that would look infinitely efficient", () => {
   // A gateway measured before the capture existed carries a null envelope. Rendering that as 0 would
   // make the LEAST-measured gateway look like the cheapest one on the board.
