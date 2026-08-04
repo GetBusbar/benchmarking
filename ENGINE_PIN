@@ -1,0 +1,26 @@
+f3adbb1315b26129f5e317af5279decefb1cea8f engine-v1
+# THE INSTRUMENT. First field is the commit and it is the authority; second is the tag, and it is
+# only a label. A tag can be force-moved, a content hash cannot, so the run verifies the tag still
+# resolves here and refuses if it does not - the same rule gateways/*/build.sh applies to gateway
+# pins, for the same reason: a moving ref makes two runs weeks apart incomparable while reporting
+# the same string. Every row on the board is measured by this engine, and a board whose rows were
+# measured by different engines is not a comparison - it is two experiments printed in one table.
+#
+# This file exists so that fact does not depend on anyone remembering a sha. run-on-ec2.sh reads it
+# as the default BENCH_ENGINE_COMMIT, so the normal case - a new gateway version, a config change, a
+# re-measure of one lagging row - is pinned to the frozen engine without anyone passing anything.
+#
+# WHAT DOES NOT REQUIRE CHANGING THIS FILE, which is nearly everything:
+#   a gateway's pinned version, its config templates, its capability declaration, a new gateway, the
+#   site, the auditors, this script. None of them are the instrument. Re-measure the affected rows
+#   against this pin and the board stays one instrument, because it is one instrument.
+#
+# WHAT REQUIRES CHANGING IT: a genuine fix to engine/ or mock/ - the measurement itself. That is a
+# board-wide event and costs a full fourteen-gateway re-run, because a number measured by the old
+# engine and a number measured by the new one cannot share a table. Do not change this line to make
+# a run go green. run-on-ec2.sh refuses to launch when the tree's engine/ and mock/ differ from this
+# commit's, and that refusal is the feature: it is the difference between a frozen instrument and a
+# remembered intention.
+#
+# Changing it means: rebuild the rig release from the new commit (bench-rig.yml, push to main
+# touching engine/** or mock/**), update this file, re-run all fourteen.

@@ -339,9 +339,67 @@ ARCH="${ARCH:-arm64}"
 # blanked the one row that was genuinely on the pinned engine. The measurements were right and the
 # label was wrong, which is the worst shape of this bug: nothing looks broken, and the conclusion is
 # inverted. A stamp that can name a commit the run never used is not provenance.
-BENCH_ENGINE_COMMIT="${BENCH_COMMIT:-$(git -C "$HERE" rev-parse HEAD 2>/dev/null || echo '')}"
+#
+# BUT THE ENGINE IS `engine/` AND `mock/`, NOT THE REPOSITORY.
+#
+# Deriving the engine stamp from the tree commit says "any commit is a new instrument", and that is
+# false in the direction that costs the most. A commit that bumps one gateway's pinned version -
+# aisix v0.5.0 -> v0.7.0, busbar 1.5.1 -> 1.5.2 - changes what that ONE gateway is, and changes the
+# harness not at all. Under the old rule re-measuring that gateway stamped a commit nobody else on
+# the board carried, so C8 called a board mixed that was not mixed, and the only way to publish the
+# new version was to re-run all fourteen. That is a five-hundred-dollar accounting error: the board
+# would have been re-measuring an instrument that had not moved, to fix a label that was wrong.
+#
+# So the two are separate values. BENCH_COMMIT is the TREE the boxes fetch (gateway pins, configs,
+# harness scripts). BENCH_ENGINE_COMMIT is the INSTRUMENT, and it may lag the tree - that is the
+# normal case, because gateway updates land after an engine freeze and the whole point of the freeze
+# is that they do not disturb it.
+#
+# The decoupling is only safe if it is PROVEN rather than asserted, so when the two differ the engine
+# subtrees must be byte-identical. Git object ids are content hashes, so this is a proof, not a diff
+# read by a model or a human: identical tree ids mean identical bytes in every file underneath. If
+# they differ by so much as a comment the run is refused, because then the pinned binary genuinely is
+# not this tree's engine and the stamp would be the same lie in a new place.
+BENCH_COMMIT="${BENCH_COMMIT:-$(git -C "$HERE" rev-parse HEAD 2>/dev/null || echo '')}"
+# The frozen instrument, from ENGINE_PIN - so the common case (a gateway version bump, re-measured
+# against the board's engine) needs nothing passed on the command line. Falling back to the tree
+# commit keeps a repo without the file working exactly as before.
+_engine_pin=""; _engine_tag=""
+if [ -r "$HERE/ENGINE_PIN" ]; then
+  read -r _engine_pin _engine_tag _ < "$HERE/ENGINE_PIN" || true
+  case "$_engine_pin" in *[!0-9a-f]*|"") _engine_pin=""; _engine_tag="" ;; esac
+fi
+# THE TAG IS A LABEL AND THE SHA IS THE AUTHORITY, so a moved tag is caught rather than followed.
+# Annotated tags resolve to a tag OBJECT, not a commit, so the deref is required - without it this
+# compares a tag id against a commit id and refuses every single time.
+if [ -n "$_engine_tag" ] && git -C "$HERE" rev-parse -q --verify "refs/tags/$_engine_tag" >/dev/null 2>&1; then
+  _tag_commit="$(git -C "$HERE" rev-parse "refs/tags/${_engine_tag}^{commit}" 2>/dev/null || echo '')"
+  if [ "$_tag_commit" != "$_engine_pin" ]; then
+    echo "REFUSING: ENGINE_PIN names tag $_engine_tag, but that tag no longer points at the pinned commit." >&2
+    echo "  ENGINE_PIN commit : $_engine_pin" >&2
+    echo "  $_engine_tag resolves to : ${_tag_commit:-<unresolvable>}" >&2
+    echo "  A tag was moved. Restore it, or update ENGINE_PIN deliberately and re-run the whole board." >&2
+    exit 1
+  fi
+fi
+BENCH_ENGINE_COMMIT="${BENCH_ENGINE_COMMIT:-${_engine_pin:-$BENCH_COMMIT}}"
+if [ -n "$BENCH_ENGINE_COMMIT" ] && [ "$BENCH_ENGINE_COMMIT" != "$BENCH_COMMIT" ]; then
+  for _sub in engine mock; do
+    _tree_sub="$(git -C "$HERE" rev-parse "${BENCH_COMMIT}:${_sub}" 2>/dev/null || echo 'unreadable-in-tree')"
+    _eng_sub="$(git -C "$HERE" rev-parse "${BENCH_ENGINE_COMMIT}:${_sub}" 2>/dev/null || echo 'unreadable-in-engine')"
+    if [ "$_tree_sub" != "$_eng_sub" ]; then
+      echo "REFUSING: $_sub/ differs between the tree this run fetches and the engine it claims." >&2
+      echo "  tree   $BENCH_COMMIT -> $_sub = $_tree_sub" >&2
+      echo "  engine $BENCH_ENGINE_COMMIT -> $_sub = $_eng_sub" >&2
+      echo "  BENCH_ENGINE_COMMIT may only lag BENCH_COMMIT while the harness itself is untouched." >&2
+      echo "  Rebuild the rig release from the engine you intend to measure on, and pin to that." >&2
+      exit 1
+    fi
+  done
+  echo "[pin] tree ${BENCH_COMMIT:0:12}, engine ${BENCH_ENGINE_COMMIT:0:12} - engine/ and mock/ proven identical"
+fi
 if [ -n "$(git -C "$HERE" status --porcelain -- . ':(exclude)results' 2>/dev/null)" ]; then BENCH_ENGINE_DIRTY=1; else BENCH_ENGINE_DIRTY=0; fi
-export BENCH_ENGINE_COMMIT BENCH_ENGINE_DIRTY
+export BENCH_COMMIT BENCH_ENGINE_COMMIT BENCH_ENGINE_DIRTY
 
 # THE BOX HAS NO HISTORY, SO THE ORCHESTRATOR HANDS IT ONE.
 #
