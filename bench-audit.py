@@ -519,12 +519,26 @@ def check_stream_capacity_is_a_number(name, c):
 
 
 def stream_trace(c):
-    """The rungs a streaming cell's search actually probed, in order, or None."""
+    """The RUNGS a streaming cell's search actually probed, in order, or None.
+
+    RUNGS, not every window. The band-aware engine's trace also carries recovery CANARIES (tiny
+    windows that prove the gateway has come back before a verdict-bearing window is taken) and the
+    attribution CONTROL (the same request driven at the MOCK on the failure path), each tagged with
+    `role`. Neither is a verdict about the gateway at a concurrency: a canary failing during a
+    declared cooldown is the recovery machinery doing its job, and a control window's counts belong
+    to the mock's leg. Folding either into these checks produces exactly the misreadings they exist
+    to catch - a mock-leg connect failure "charged to the gateway", a passing control masking a
+    genuine wedge in the tail. Older snapshots carry no `role`; every untagged window is a rung,
+    which is what they all were.
+    """
     st = c.get("stream") or {}
     if st.get("stream_served") is not True:
         return None
     sw = st.get("sweep_streams")
-    return sw if isinstance(sw, list) and sw else None
+    if not isinstance(sw, list) or not sw:
+        return None
+    sw = [r for r in sw if r.get("role", "rung") == "rung"]
+    return sw or None
 
 
 def proven_clean_top(rungs):

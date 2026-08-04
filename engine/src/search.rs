@@ -169,7 +169,7 @@ impl<'p, P: Probe> Search<'p, P> {
 /// A rule that lives in one function protects one function. This is the rule as code, used by both,
 /// so "where do we probe next" has a single answer and cannot drift again. `no_search_leaps_past_the
 /// _ladder_it_climbed` holds every search in this module to it, including any added later.
-struct Ladder {
+pub(crate) struct Ladder {
     current: u32,
     max: u32,
 }
@@ -178,21 +178,21 @@ impl Ladder {
     /// Starts AT THE FLOOR, always. The opening request a gateway sees must never be a function of
     /// how wide the range was set: that is what makes a wider search a more dangerous one, and it is
     /// the defect this type exists to make unrepresentable.
-    fn from_floor(min_conc: u32, max_conc: u32) -> Self {
+    pub(crate) fn from_floor(min_conc: u32, max_conc: u32) -> Self {
         Self {
             current: min_conc.max(1),
             max: max_conc,
         }
     }
 
-    fn floor(&self) -> u32 {
+    pub(crate) fn floor(&self) -> u32 {
         self.current
     }
 
     /// The next rung: double, never past the top. `None` once the top has been reached, so a caller
     /// cannot loop forever on a saturating multiply. Doubling zero is zero, which is why the floor is
     /// clamped to 1 above rather than trusted from the caller.
-    fn next(&mut self) -> Option<u32> {
+    pub(crate) fn next(&mut self) -> Option<u32> {
         if self.current >= self.max {
             return None;
         }

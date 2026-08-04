@@ -1038,35 +1038,31 @@ const MAX_CEILING_STEPDOWNS: usize = 4;
 /// whole board is built to avoid, and it is invisible: the sentence reads like a measurement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StreamStop {
-    /// The rig could not complete its windows at this concurrency. Never the gateway's result.
-    RigRanShort { measured: usize, wanted: usize },
-    /// Halving reached the floor of the searched range without finding a rung that holds.
-    FloorReached { last: u32 },
-    /// A stepped-down rung failed the gate on its very first window.
-    SteppedRungFailed { at: u32 },
-    /// The window could not be taken at all at this concurrency.
-    WindowUnavailable { at: u32 },
-    /// The step-down budget was genuinely spent without finding a rung that holds.
-    BudgetExhausted,
-    /// A rung failed at a concurrency this same cell had ALREADY proved clean. Never the gateway's
-    /// result: a gate that fails at 3,088 after passing 6,144 is measuring how far the rig has
-    /// drained, not what the gateway can carry.
+    /// The rig could not take a window at this concurrency. Never the gateway's result: the search
+    /// ends with what it has rather than walking a verdict down on our own missing windows.
+    RigRanShort { at: u32 },
+    /// Re-measurement failed at a concurrency this cell had already proved, AND the control window
+    /// - the same request driven at the MOCK with the gateway out of the path - was not clean
+    /// either (or could not run). The reference instrument is the suspect, so nothing here may be
+    /// charged to the gateway.
     RigContaminated { at: u32, proven: u32 },
     /// The gateway stopped serving after an overload and did not come back on its own. THIS ONE IS
-    /// ABOUT THE GATEWAY, and it is a finding rather than a gap: aisix passed every rung to c=8,192,
-    /// was pushed to c=16,384, and then failed seventeen consecutive windows including c=4,096 which
-    /// it had just carried cleanly. A ceiling cannot be measured on a process that never recovers,
-    /// but "it does not recover" is exactly what a reader wants to know, so it is published as the
-    /// reason instead of an unexplained absence.
+    /// ABOUT THE GATEWAY, and it is issued only after the control window proved the mock leg clean
+    /// at the same concurrency - so "the rig was dirty" has been tested and excluded, not assumed
+    /// away. It is a finding rather than a gap: aisix passed every rung to c=8,192, was pushed to
+    /// c=16,384, and then failed seventeen consecutive windows including c=4,096 which it had just
+    /// carried cleanly. A ceiling cannot be measured on a process that never recovers, but "it
+    /// does not recover" is exactly what a reader wants to know, so it is published as the reason
+    /// instead of an unexplained absence.
     ///
-    /// `restart_cleared` records whether a restart brought it back - which is the difference between
-    /// "wedged until restarted" and "wedged and stayed wedged", and the two are not the same claim.
+    /// `restart_cleared` records whether a restart brought it back - which is the difference
+    /// between "wedged until restarted" and "wedged and stayed wedged", and the two are not the
+    /// same claim.
     ///
-    /// `None` is a THIRD state and not a synonym for `Some(false)`: no restart was attempted, so
-    /// nothing is known about whether one would have helped. The floor fallback reaches this verdict
-    /// without ever restarting the gateway, and `Some(false)` prints "a restart did not bring it back
-    /// either" - a claim about an experiment that never ran. Publishing that would be the same
-    /// attribution error this enum exists to prevent, just pointed at the gateway.
+    /// `None` is a THIRD state and not a synonym for `Some(false)`: no restart was attempted (the
+    /// harness does not own this process, or the restart itself failed), so nothing is known about
+    /// whether one would have helped, and `Some(false)` would print "a restart did not bring it
+    /// back either" - a claim about an experiment that never ran.
     GatewayDidNotRecover {
         at: u32,
         proven: u32,
@@ -1075,66 +1071,30 @@ enum StreamStop {
 }
 
 impl StreamStop {
-    /// May the search fall back to confirming the cell's own proven-clean floor?
-    ///
-    /// ONLY WHERE THE HOST IS NOT THE SUSPECT. The floor fallback re-measures a rung on the same box
-    /// that just failed several, so it is only meaningful when the failures were the gateway's or the
-    /// budget's. `RigRanShort`, `WindowUnavailable` and `RigContaminated` all say the instrument is
-    /// the variable, and a number taken on a host we have just accused would be exactly the
-    /// attribution error the rest of this enum exists to prevent - with the flattering sign, because
-    /// it would publish a figure where honesty published none.
-    ///
-    /// `GatewayDidNotRecover` is excluded for the opposite reason: the process serving the fallback
-    /// window is not the process the sweep measured, so whatever it carries is not this cell's
-    /// ceiling. "It does not recover" is the finding, and it must not be overwritten by a number.
-    fn floor_fallback_ok(self) -> bool {
-        matches!(
-            self,
-            StreamStop::BudgetExhausted
-                | StreamStop::FloorReached { .. }
-                | StreamStop::SteppedRungFailed { .. }
-        )
-    }
-
     /// A rig failure is a `HarnessError`; everything else is a measurement that did not resolve.
     /// Filing our own shortfall under `NotMeasured` would put it among the gateway's results.
     fn absent_kind(self) -> Absent {
         match self {
-            StreamStop::RigRanShort { .. }
-            | StreamStop::WindowUnavailable { .. }
-            | StreamStop::RigContaminated { .. } => Absent::HarnessError,
-            // A gateway that does not recover from overload is the GATEWAY's result, so it must not
-            // be filed under our own faults - that would be the attribution error in reverse.
+            StreamStop::RigRanShort { .. } | StreamStop::RigContaminated { .. } => {
+                Absent::HarnessError
+            }
+            // A gateway that does not recover from overload is the GATEWAY's result, so it must
+            // not be filed under our own faults - that would be the attribution error in reverse.
             StreamStop::GatewayDidNotRecover { .. } => Absent::NotMeasured,
-            _ => Absent::NotMeasured,
         }
     }
 
-    fn describe(self, proved: u32, budget: usize) -> String {
+    fn describe(self) -> String {
         match self {
-            StreamStop::RigRanShort { measured, wanted } => format!(
-                "the bisection proved c={proved}, but re-measurement completed only {measured} of \
-                 {wanted} windows - the RIG ran short, not the gateway, so no ceiling is published \
-                 rather than one walked down on our own missing windows"
-            ),
-            StreamStop::FloorReached { last } => format!(
-                "the bisection proved c={proved}, but it did not hold on re-measurement and halving \
-                 reached the bottom of the searched range at c={last} without finding a concurrency \
-                 that did"
-            ),
-            StreamStop::SteppedRungFailed { at } => format!(
-                "the bisection proved c={proved}, but it did not hold on re-measurement and the \
-                 stepped-down rung at c={at} failed the stream gate on its first window"
-            ),
-            StreamStop::WindowUnavailable { at } => format!(
-                "the bisection proved c={proved}, but re-measurement could not take a window at all \
-                 at c={at} - a rig failure, so nothing is published about the gateway here"
+            StreamStop::RigRanShort { at } => format!(
+                "the RIG could not take a stream window at c={at}, so the search ended with what \
+                 it had rather than charging our own missing window to the gateway"
             ),
             StreamStop::RigContaminated { at, proven } => format!(
-                "the bisection proved c={proved}, but re-measurement failed at c={at} - a concurrency \
-                 THIS CELL had already carried cleanly up to c={proven}. A rung cannot fail below one \
-                 it has already passed because of the gateway, so this is our rig not having drained \
-                 between windows, and nothing is published about the gateway here"
+                "re-measurement failed at c={at} although this cell had already carried \
+                 c={proven} cleanly, and the control window driven at the mock was not clean \
+                 either - the reference instrument is the suspect, so nothing is published about \
+                 the gateway here"
             ),
             StreamStop::GatewayDidNotRecover { at, proven, restart_cleared } => format!(
                 "the gateway stopped serving after being pushed past c={proven} and did not recover: \
@@ -1146,10 +1106,6 @@ impl StreamStop {
                     Some(false) => ", and a restart did not bring it back either",
                     None => "",
                 }
-            ),
-            StreamStop::BudgetExhausted => format!(
-                "the bisection proved c={proved}, but that concurrency did not hold the stream gate \
-                 on re-measurement and stepping down found none that did within {budget} attempts"
             ),
         }
     }
@@ -1986,23 +1942,6 @@ pub fn stream_window(
     Some(w)
 }
 
-/// May a stream ceiling be PUBLISHED from these windows? Pure, so the rule can be tested without a
-/// socket - the same reason `window_refusal` and `cpu_fps_result_from_search` are separate.
-///
-/// TWO CONDITIONS, and the stream path used to carry only the second. A window that could not run is
-/// skipped without incrementing `total`, so two absent repeats left the count at 1 of 1 and `1 * 2 > 1`
-/// published the bisection's single unrepeated window as a confirmed ceiling. Both absent paths -
-/// `SseEnd::RigExhausted` when the host runs out of ephemeral ports or descriptors, and a panicked
-/// lane - are reachable exactly at the top rung, so the shrinking denominator was likeliest precisely
-/// where the published number matters most.
-///
-/// `confirm_ceiling` refuses the same input on the throughput side, and its comment says why: one
-/// lucky window is how a sustained figure lands ABOVE the peak measured from the same sweep, which is
-/// the inversion class C6 catches downstream. Every other rate on this board is a median of
-/// `WINDOWS_PER_RUNG` windows; so is this one, or it is not published.
-fn stream_ceiling_confirmed(total: usize, held: usize) -> bool {
-    total >= crate::search::WINDOWS_PER_RUNG && held * 2 > total
-}
 
 /// Why a stream window must be DISCARDED rather than published, or `None` when it may stand.
 ///
@@ -2063,6 +2002,11 @@ pub struct StreamPoint {
     /// clause that tripped with the counts that tripped it, so "no rung passed" is never a bare
     /// absence a reader has to re-derive from the raw counts.
     pub why: Option<String>,
+    /// Which question this window was asking - a rung's vote, a canary's recovery probe, or an
+    /// attribution control driven at the mock. In the record because the sweep array is the only
+    /// evidence that survives the box, and a reader counting rungs must not count recovery probes
+    /// (or worse, a MOCK-leg control) as verdicts about the gateway.
+    pub role: StreamRole,
 }
 
 impl StreamPoint {
@@ -2096,6 +2040,13 @@ impl StreamPoint {
             "stream_errors_not_event_stream": self.error_kinds.not_event_stream,
             "host_before": self.host_before.to_json(),
             "stalls": self.stalls,
+            // Always emitted, so a reader filtering rungs never mistakes an untagged point for one:
+            // a canary or control folded into a rung count would misstate what was measured.
+            "role": match self.role {
+                StreamRole::Rung => "rung",
+                StreamRole::Canary => "canary",
+                StreamRole::Control => "control",
+            },
         });
         if let (Some(why), Some(obj)) = (&self.why, v.as_object_mut()) {
             obj.insert("why".to_string(), serde_json::json!(why));
@@ -2109,10 +2060,11 @@ impl StreamPoint {
     }
 }
 
-fn point_of(w: &StreamWindow, passed: bool) -> StreamPoint {
+fn point_of(w: &StreamWindow, passed: bool, role: StreamRole) -> StreamPoint {
     StreamPoint {
         concurrency: w.concurrency,
         passed,
+        role,
         fps: w.fps(),
         frames: w.frames,
         expected_frames: w.expected_frames,
@@ -2132,31 +2084,6 @@ fn point_of(w: &StreamWindow, passed: bool) -> StreamPoint {
 }
 
 /// Drives concurrent streams at one concurrency for the streams-sustained GATE.
-struct StreamGateProbe {
-    addr: SocketAddr,
-    path: String,
-    body: String,
-    headers: Vec<(String, String)>,
-    dialect: Dialect,
-    points: Vec<StreamPoint>,
-}
-
-impl Probe for StreamGateProbe {
-    fn probe(&mut self, concurrency: u32) -> Option<Sample> {
-        let w = stream_window(
-            self.addr,
-            &self.path,
-            &self.body,
-            &self.headers,
-            self.dialect,
-            concurrency,
-        )?;
-        let passed = streams_gate_passes(&w);
-        self.points.push(point_of(&w, passed));
-        Some(Sample::new(w.fps(), passed))
-    }
-}
-
 /// What a stream search found on one cell.
 pub struct CellStreams {
     /// The winning concurrency (a gate ceiling, or the concurrency a peak happened at).
@@ -2193,6 +2120,259 @@ fn stream_target(cfg: &RunConfig, id: &CellId) -> Option<StreamTarget> {
 /// `bisect_ceiling`, not `saturation_plateau`: this is a monotone pass/fail gate in concurrency, exactly like
 /// `sweep_sustained_cell`. Once enough concurrent streams are in flight that frames start arriving
 /// late or short, adding more does not bring them back.
+// ─────────────────────────── the band-aware stream-ceiling search ─────────────────────────────
+//
+// WHY THE BISECTION LEFT. `bisect_ceiling` models pass/fail at a concurrency as a deterministic
+// monotone gate. Three boards of data say the boundary is neither: near the edge a window fails
+// with a probability that rises across a ±5-10% BAND (1.4.1 openai>openai walked
+// `6112F 6096P 6104F 6100P 6102P 6103F 6102F` - every one-window verdict in that zone is a coin
+// flip), and the outcome is HISTORY-DEPENDENT, because a failed window arms the gateway's own
+// recovery machinery (busbar's breaker, reproduced live: 100% 503 with `retry-after: 108 -> 106 ->
+// 103` counting down, at a concurrency the same process had just carried cleanly). A bisection
+// hunting a sharp edge inside that band lands wherever luck puts it, and then spends its
+// confirmation and every step-down ABOVE the proven floor - re-arming the breaker on each probe.
+// The same software published 4,492 / nothing / 4,559 across three runs. That is not measurement
+// noise; it is the wrong model.
+//
+// WHAT THE PUBLISHED NUMBER NOW MEANS: the highest concurrency that held the gate in
+// WINDOWS_PER_RUNG consecutive windows, each taken on a gateway that a CANARY first proved
+// recovered. Acceptance is (1-p)^3, which collapses onto the band's lower shoulder - the only sharp
+// feature the band has - so two runs of the same software agree. The cost is stated plainly: the
+// number reads conservative (the single-window edge above it stays disclosed in the points), and
+// ±1-stream precision is gone, deliberately: ±1 on a figure with ±5% run-to-run spread was fake
+// precision, bought at ~12 windows a cell driven inside the band.
+//
+// A PURE STATE MACHINE OVER A DRIVER, exactly as `bisect_ceiling` is pure over `Probe`, and for the
+// same reason: the pathologies this exists to survive - the band, the cooldown, the wedge - can be
+// simulated, so the searches that failed on the 2026-08-03 board are FIXTURES here, not memories.
+
+/// One window as the pure search needs to see it. The driver owns everything else about it
+/// (recording the point, the gate's clauses, the socket).
+pub struct DriverWindow {
+    pub passed: bool,
+    pub fps: f64,
+}
+
+/// Which question a window is asking, so the driver can record it as what it is. A canary is not a
+/// rung: it proves the gateway has RECOVERED enough to be worth asking a real question, and its
+/// verdict must never count toward any concurrency's votes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamRole {
+    Rung,
+    Canary,
+    /// The attribution control: the same window driven at the MOCK. Never produced by the pure
+    /// search (the shell drives it on the failure path); named here so every window in the record
+    /// carries one vocabulary.
+    Control,
+}
+
+/// What the pure search asks of the world.
+pub trait StreamSearchDriver {
+    /// Drive one window at `conc`. `None` means the RIG could not run it - the same contract as
+    /// `stream_window` returning `None` - and the search must stop rather than read our own
+    /// shortfall as the gateway's.
+    fn window(&mut self, conc: u32, role: StreamRole) -> Option<DriverWindow>;
+    /// Let the host drain after ~`streams` concurrent streams were in flight.
+    fn settle(&mut self, streams: u32);
+}
+
+/// How every ceiling-search verdict leaves the pure machine. The shell maps these onto
+/// measurements, absences, and - for the two wedge-shaped ones - the attribution experiments.
+#[derive(Debug, Clone, PartialEq)]
+pub enum StreamSearchOutcome {
+    /// The floor rung itself failed, and failed again when retried on a proven-recovered gateway:
+    /// a measured zero, exactly as `bisect_ceiling`'s bottom-fails case was.
+    NothingSustains,
+    /// Every rung to the top of the range held; the RANGE ended, not the gateway.
+    LowerBound { top: u32 },
+    /// `conc` held WINDOWS_PER_RUNG consecutive recovery-gated windows; `fps` is their median.
+    Published { conc: u32, fps: f64 },
+    /// The rig could not run a window at `at`. Ours, and the search ends rather than walking the
+    /// ceiling down on our own missing windows.
+    RigRanShort { at: u32 },
+    /// After a failure at `after`, even the tiny canary at `canary` never passed within its
+    /// budget: the gateway is not recovering on any timescale the search can wait out. The shell
+    /// owes this the attribution experiments before anything is published about whose fault it is.
+    CanaryNeverRecovered { canary: u32, after: u32, proven: u32 },
+    /// Every descent candidate failed its reliability windows - including `proven`, the top of the
+    /// cell's own clean ascent. The shell owes this the attribution experiments too.
+    FloorFailed { proven: u32, failed_at: u32 },
+}
+
+/// Descent ratio between candidates: 7/8 spans the doubling bracket `[C, 2C]` in ~5 steps, which
+/// fits the step-down budget with the floor appended. Chosen against the alternative of keeping
+/// ±1 bisection precision, which the band makes meaningless - see the module note.
+const STREAM_DESCENT_NUM: u64 = 7;
+const STREAM_DESCENT_DEN: u64 = 8;
+/// The canary's size relative to the proven floor. An eighth of a concurrency the cell carried
+/// cleanly is far below any band, so a canary that fails is not "near the edge" - it is a gateway
+/// still refusing traffic it has already served, i.e. a cooldown in progress.
+const STREAM_CANARY_DIVISOR: u32 = 8;
+/// Canary attempts (each preceded by a settle) before the search concludes the gateway is not
+/// recovering. Five settles at the 60s backstop is five minutes: past that, "still cooling down"
+/// and "wedged" are not worth distinguishing by waiting longer - the attribution experiments
+/// distinguish them by acting.
+const STREAM_CANARY_RETRIES: usize = 5;
+
+/// One recovery-gated reliability attempt: WINDOWS_PER_RUNG consecutive windows at `c`, all of
+/// which must hold. `Ok(Some(fps))` = held (median); `Ok(None)` = a window failed the gate;
+/// `Err` = the outcome that must end the whole search (rig short / canary never recovered).
+fn stream_rung_reliable<D: StreamSearchDriver>(
+    d: &mut D,
+    c: u32,
+    canary: u32,
+    proven: u32,
+) -> Result<Option<f64>, StreamSearchOutcome> {
+    // THE RECOVERY GATE. Every reliability attempt opens on a gateway a canary just proved
+    // recovered, so a candidate's verdict is about the CANDIDATE, not about whatever cooldown the
+    // previous failure armed. This is what converts the breaker from an invisible confounder into
+    // bounded, measured waiting - and a cooldown that outlasts the budget is itself the finding.
+    let mut recovered = false;
+    for _ in 0..STREAM_CANARY_RETRIES {
+        d.settle(c.saturating_mul(2));
+        match d.window(canary, StreamRole::Canary) {
+            None => return Err(StreamSearchOutcome::RigRanShort { at: canary }),
+            Some(w) if w.passed => {
+                recovered = true;
+                break;
+            }
+            Some(_) => {}
+        }
+    }
+    if !recovered {
+        return Err(StreamSearchOutcome::CanaryNeverRecovered {
+            canary,
+            after: c,
+            proven,
+        });
+    }
+    let mut rates = Vec::with_capacity(crate::search::WINDOWS_PER_RUNG);
+    for i in 0..crate::search::WINDOWS_PER_RUNG {
+        if i > 0 {
+            d.settle(c);
+        }
+        match d.window(c, StreamRole::Rung) {
+            None => return Err(StreamSearchOutcome::RigRanShort { at: c }),
+            Some(w) if w.passed => rates.push(w.fps),
+            // One failed window fails the attempt outright: the published rule is
+            // WINDOWS_PER_RUNG CONSECUTIVE holds, and a majority here is how a rung failing half
+            // its windows got published while its sibling published nothing.
+            Some(_) => return Ok(None),
+        }
+    }
+    rates.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    Ok(crate::search::nearest_rank_median(&rates))
+}
+
+/// The search itself: ascend to the first failure, retry that rung once on a proven-recovered
+/// gateway (a blip or a breaker echo must not truncate the whole climb - 1.4.1
+/// anthropic>anthropic carried 8,192 cleanly, was driven at 16,384 once, and then never passed
+/// another window at ANY concurrency), then descend geometrically, requiring every published rung
+/// to hold WINDOWS_PER_RUNG consecutive recovery-gated windows.
+pub fn stream_ceiling_search<D: StreamSearchDriver>(
+    d: &mut D,
+    lo: u32,
+    hi: u32,
+) -> StreamSearchOutcome {
+    let (lo, hi) = if lo <= hi { (lo, hi) } else { (hi, lo) };
+    let mut ladder = crate::search::Ladder::from_floor(lo, hi);
+    let mut proven = 0u32;
+    let mut c = ladder.floor();
+    let c_fail = loop {
+        match d.window(c, StreamRole::Rung) {
+            None => return StreamSearchOutcome::RigRanShort { at: c },
+            Some(w) if w.passed => proven = c,
+            Some(_) => break c,
+        }
+        match ladder.next() {
+            Some(next) => {
+                d.settle(c);
+                c = next;
+            }
+            None => return StreamSearchOutcome::LowerBound { top: c },
+        }
+    };
+    let canary = (proven / STREAM_CANARY_DIVISOR).max(1);
+    // RETRY THE FAILED RUNG, once. It holding WINDOWS_PER_RUNG windows on a recovered gateway
+    // proves the ascent failure was not the edge - so the climb RESUMES, at most once, rather than
+    // the whole bracket above being written off on one window's evidence.
+    let mut failed_at = c_fail;
+    let retried = stream_rung_reliable(d, c_fail, canary, proven);
+    // A gateway that NEVER served cannot "fail to recover": with nothing proven, a canary that
+    // never passes and a floor that fails are the same measured zero the bottom-fails case always
+    // was, and the wedge sentence ("carried it cleanly") would be a claim about an ascent that
+    // never happened.
+    if proven == 0 {
+        match &retried {
+            // The retried floor held: fall through to the ordinary resume logic below - the range
+            // above it is untested and must not be forfeited to one bad opening window.
+            Ok(Some(_)) => {}
+            Ok(None) | Err(StreamSearchOutcome::CanaryNeverRecovered { .. }) => {
+                return StreamSearchOutcome::NothingSustains
+            }
+            Err(out) => return out.clone(),
+        }
+    }
+    match retried {
+        Err(out) => return out,
+        Ok(Some(fps)) => {
+            // The resume happens AT MOST ONCE by construction: the resumed climb's own failure
+            // falls straight through to the descent below and never re-enters this retry.
+            if c_fail < hi {
+                proven = c_fail;
+                let mut ladder = crate::search::Ladder::from_floor(c_fail, hi);
+                let resumed_fail = loop {
+                    match ladder.next() {
+                        Some(next) => {
+                            d.settle(c_fail);
+                            match d.window(next, StreamRole::Rung) {
+                                None => return StreamSearchOutcome::RigRanShort { at: next },
+                                Some(w) if w.passed => proven = next,
+                                Some(_) => break next,
+                            }
+                        }
+                        None => return StreamSearchOutcome::LowerBound { top: hi },
+                    }
+                };
+                failed_at = resumed_fail;
+            } else {
+                return StreamSearchOutcome::Published { conc: c_fail, fps };
+            }
+        }
+        Ok(None) => {}
+    }
+    if proven == 0 {
+        // The floor itself cannot hold even when recovery-gated: a measured zero.
+        return StreamSearchOutcome::NothingSustains;
+    }
+    // GEOMETRIC DESCENT from the rung that failed, floored at the cell's own proven ascent - which
+    // is ALWAYS tried, budget notwithstanding: the step-down budgets of the retired search
+    // converged toward the floor without ever testing it, and that is precisely how three busbar
+    // cells and seven across the field published nothing.
+    let canary = (proven / STREAM_CANARY_DIVISOR).max(1);
+    let mut candidates = Vec::new();
+    let mut x = failed_at as u64;
+    for _ in 0..MAX_CEILING_STEPDOWNS {
+        x = (x * STREAM_DESCENT_NUM) / STREAM_DESCENT_DEN;
+        if x as u32 <= proven {
+            break;
+        }
+        candidates.push(x as u32);
+    }
+    candidates.push(proven);
+    for cand in candidates {
+        match stream_rung_reliable(d, cand, canary, proven) {
+            Err(out) => return out,
+            Ok(Some(fps)) => return StreamSearchOutcome::Published { conc: cand, fps },
+            Ok(None) => failed_at = cand,
+        }
+    }
+    StreamSearchOutcome::FloorFailed {
+        proven,
+        failed_at,
+    }
+}
+
 pub fn sweep_streams_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> CellStreams {
     // WHAT "DRAINED" MEANS FOR THIS CELL, read before it drives anything. Every settle in this
     // ladder waits to come back to this level, so it has to be taken while the box is as quiet as it
@@ -2206,522 +2386,176 @@ pub fn sweep_streams_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> Cel
             points: Vec::new(),
         };
     };
-    let mut p = StreamGateProbe {
-        addr: cfg.gateway_addr,
-        path: t.path,
-        body: t.body,
-        headers: t.headers,
-        dialect: t.dialect,
-        points: Vec::new(),
-    };
     // The stream ceiling, not the caller's request ceiling: see `stream_connection_ceiling`.
     let hi = hi.min(stream_connection_ceiling());
     let lo = lo.min(hi);
-    let r = search::bisect_ceiling(&mut p, lo, hi);
-    match r.ceiling.copied() {
-        // `bisect_ceiling`'s own MEASURED "nothing sustains this gate": there is no rung to read a
-        // rate back from, so the rate is a real zero rather than a lookup that would miss.
-        Some(0) => CellStreams {
+    /// The socketed shell of the pure search: drives real windows, records every one as a
+    /// role-tagged point so the snapshot distinguishes a rung's vote from a canary's recovery
+    /// probe from an attribution control.
+    struct SocketDriver<'a> {
+        addr: SocketAddr,
+        path: &'a str,
+        body: &'a str,
+        headers: &'a [(String, String)],
+        dialect: Dialect,
+        points: Vec<StreamPoint>,
+    }
+    impl StreamSearchDriver for SocketDriver<'_> {
+        fn window(&mut self, conc: u32, role: StreamRole) -> Option<DriverWindow> {
+            let w = stream_window(self.addr, self.path, self.body, self.headers, self.dialect, conc)?;
+            let passed = streams_gate_passes(&w);
+            self.points.push(point_of(&w, passed, role));
+            Some(DriverWindow { passed, fps: w.fps() })
+        }
+        fn settle(&mut self, streams: u32) {
+            settle_after_streams(streams);
+        }
+    }
+    let mut d = SocketDriver {
+        addr: cfg.gateway_addr,
+        path: &t.path,
+        body: &t.body,
+        headers: &t.headers,
+        dialect: t.dialect,
+        points: Vec::new(),
+    };
+    let outcome = stream_ceiling_search(&mut d, lo, hi);
+    let mut points = d.points;
+    match outcome {
+        // The floor rung failed even when retried on a proven-recovered gateway: a measured zero,
+        // exactly as the retired bisection's bottom-fails case was.
+        StreamSearchOutcome::NothingSustains => CellStreams {
             concurrency: Measurement::Measured(0),
             fps: Measurement::Measured(0.0),
-            points: p.points,
+            points,
         },
-        // CONFIRMED, for the same reason the sustained ceiling is: `bisect_ceiling` walks up until ONE
-        // window fails, so it lands exactly on the boundary - the highest concurrency that passed
-        // once. Re-measuring the sustained ceilings of the 2026-07-28 run found 9 of 48 held their
-        // gate in only 1 of 3 windows. This gate is STRICTER (every expected frame must arrive, no
-        // stalls), so a boundary rung here is if anything more likely to be marginal, and nothing was
-        // re-measuring it at all.
-        Some(c) => match p.points.iter().find(|pt| pt.concurrency == c).map(|pt| pt.fps) {
-            Some(v) => {
-                /* THE TOP OF THIS CELL'S OWN UNCONTAMINATED ASCENDING PREFIX - every rung from the
-                   first up to and including it passed, before anything in this cell had failed. It is
-                   the only concurrency figure in scope that is certainly NOT an artefact of a busy
-                   host, because nothing had been driven hard yet when it was taken. Used below as the
-                   line under which a failure cannot honestly be the gateway's. */
-                let proven_clean = p
-                    .points
-                    .iter()
-                    .take_while(|pt| pt.passed)
-                    .map(|pt| pt.concurrency)
-                    .max()
-                    .unwrap_or(0);
-                let mut ceiling = c;
-                let mut first_fps = v;
-                let mut winner: Option<(u32, f64)> = None;
-                // Defaults to the budget case, which is what the loop ends on when nothing else
-                // interrupts it; every other exit overwrites this at its own `break`.
-                let mut stop = StreamStop::BudgetExhausted;
-                /* A STEPPED RUNG WHOSE SEED WINDOW FAILS MUST STEP DOWN AGAIN, NOT END THE SEARCH.
-                   plano `anthropic>anthropic` is what this costs: the ascending sweep carried c=64,
-                   the bisection settled on c=79, confirmation failed, the step-down bisected to
-                   c=71, its first window failed - and the search stopped there, with every
-                   concurrency between 64 and 71 untried and most of the step-down budget unspent.
-                   The cell published an absence where a number was almost certainly available.
+        StreamSearchOutcome::Published { conc, fps } => CellStreams {
+            concurrency: Measurement::Measured(conc),
+            fps: Measurement::Measured(fps),
+            points,
+        },
+        // No failure anywhere in the range: publishing the top would report our own search bound
+        // as the gateway's ceiling. Same wording the bisection used, because it is the same fact.
+        StreamSearchOutcome::LowerBound { top } => CellStreams {
+            concurrency: Measurement::absent(Absent::SearchExhausted),
+            fps: Measurement::absent_because(
+                Absent::SearchExhausted,
+                format!(
+                    "c={top} still passes at the top of the search range; the true ceiling is at least {top}"
+                ),
+            ),
+            points,
+        },
+        StreamSearchOutcome::RigRanShort { at } => {
+            let stop = StreamStop::RigRanShort { at };
+            CellStreams {
+                concurrency: Measurement::absent(Absent::NotMeasured),
+                fps: Measurement::absent_because(stop.absent_kind(), stop.describe()),
+                points,
+            }
+        }
+        /* THE TWO WEDGE-SHAPED OUTCOMES get the attribution experiments before anything is said
+           about whose fault the absence is. A canary that never recovers and a floor that fails
+           its reliability windows are the same claim at different sizes - "the gateway no longer
+           serves what it served" - and both were being published as bare absences for three
+           boards running. */
+        StreamSearchOutcome::CanaryNeverRecovered { canary, proven, .. } => {
+            let stop = attribute_stream_wedge(cfg, &t, &mut points, canary, proven);
+            CellStreams {
+                concurrency: Measurement::absent(Absent::NotMeasured),
+                fps: Measurement::absent_because(stop.absent_kind(), stop.describe()),
+                points,
+            }
+        }
+        StreamSearchOutcome::FloorFailed { proven, .. } => {
+            let stop = attribute_stream_wedge(cfg, &t, &mut points, proven, proven);
+            CellStreams {
+                concurrency: Measurement::absent(Absent::NotMeasured),
+                fps: Measurement::absent_because(stop.absent_kind(), stop.describe()),
+                points,
+            }
+        }
+    }
+}
 
-                   What it must NOT do is give that rung its confirmation windows anyway: a rung that
-                   could not seed has not earned a vote, and crediting it is how a gate-failing window
-                   folds into a published figure. So the failed seed buys another step-down and
-                   nothing else - the rung is abandoned, the bracket narrows, and the search carries
-                   on with the budget it has left. */
-                let mut seed_failed = false;
-                for _ in 0..MAX_CEILING_STEPDOWNS {
-                    if seed_failed {
-                        // The rung below is abandoned unconfirmed; fall straight to another
-                        // step-down rather than voting on a window that never held.
-                        seed_failed = false;
-                    } else {
-                    let mut held = 1usize; // the bisection's own winning window is a real vote
-                    let mut total = 1usize;
-                    let mut rates = vec![first_fps];
-                    for _ in 1..crate::search::WINDOWS_PER_RUNG {
-                        // The previous window at this same concurrency is still draining off the host.
-                        settle_after_streams(ceiling);
-                        let Some(w) = stream_window(cfg.gateway_addr, &p.path, &p.body, &p.headers, p.dialect, ceiling) else {
-                            continue;
-                        };
-                        let passed = streams_gate_passes(&w);
-                        p.points.push(point_of(&w, passed));
-                        total += 1;
-                        if passed {
-                            held += 1;
-                            rates.push(w.fps());
-                        }
+/// The attribution experiments for a wedge-shaped search outcome, run in evidence order.
+///
+/// THE CONTROL WINDOW comes first: the same request at the same concurrency, driven at the MOCK
+/// with the gateway out of the path, judged on ERROR COUNTS ALONE and never on its rate - core
+/// partitioning makes the direct leg's timing incomparable (see the mock-ceiling note), but a
+/// non-2xx is a non-2xx on any schedule. If the reference instrument itself cannot carry this
+/// concurrency cleanly right now, nothing the gateway did is attributable and the verdict is
+/// RigContaminated - the unflattering-to-us direction, which is the one nobody would catch if it
+/// were wrong.
+///
+/// THE RESTART runs only when the control proved the rig clean: a fresh process on a proven-clean
+/// host either carries the rung (the wedge lived in the old process's accumulated state - a
+/// breaker holding a declared cooldown is exactly this, and the reproduction against busbar 1.5.2
+/// watched `retry-after: 108 -> 106 -> 103` count down across three all-503 windows) or it does
+/// not, and the finding stands with the experiment on the record. The number a restarted process
+/// carries is deliberately never published - a fresh process is not the one this cell measured.
+fn attribute_stream_wedge(
+    cfg: &RunConfig,
+    t: &StreamTarget,
+    points: &mut Vec<StreamPoint>,
+    at: u32,
+    proven: u32,
+) -> StreamStop {
+    let mock_leg_clean = match stream_window(cfg.mock_addr, &t.path, &t.body, &t.headers, t.dialect, at)
+    {
+        Some(cw) => {
+            eprintln!(
+                "streams: control window at the mock, c={at}: {} of {} streams errored",
+                cw.errored, cw.streams
+            );
+            let clean = cw.errored == 0;
+            let passed = streams_gate_passes(&cw);
+            points.push(point_of(&cw, passed, StreamRole::Control));
+            Some(clean)
+        }
+        // A control that could not run proves nothing about the gateway either way - treated
+        // exactly as a dirty control below.
+        None => None,
+    };
+    if mock_leg_clean == Some(true) {
+        let restart_cleared = match cfg.relaunch.as_ref() {
+            Some(spec) => {
+                eprintln!(
+                    "streams: the mock leg is clean at c={at}, so the wedge is on the gateway's \
+                     side of the socket - restarting it to learn whether the wedge lives in the \
+                     process's own accumulated state"
+                );
+                match restart_to_rest(spec, &cfg.relaunch_launcher, &cfg.relaunch_commands) {
+                    Ok(()) => stream_window(
+                        cfg.gateway_addr, &t.path, &t.body, &t.headers, t.dialect, at,
+                    )
+                    .map(|w3| {
+                        let passed3 = streams_gate_passes(&w3);
+                        points.push(point_of(&w3, passed3, StreamRole::Rung));
+                        Some(passed3)
+                    })
+                    .unwrap_or(None),
+                    Err(e) => {
+                        eprintln!("streams: the gateway could not be restarted: {e}");
+                        None
                     }
-                    // THE SAME TWO-PART RULE `confirm_ceiling` USES, not just its majority half.
-                    //
-                    // A window that could not RUN takes the `continue` above without incrementing
-                    // `total`, so two absent repeats left this at 1 of 1 - and `1 * 2 > 1` is true, so
-                    // the bisection's single unrepeated window was published as a confirmed ceiling
-                    // along with its own raw fps. Both absent paths are reachable exactly here, at the
-                    // top rung: `SseEnd::RigExhausted` when the host runs out of ephemeral ports or
-                    // descriptors, and a panicked lane. So the shrinking denominator was likeliest
-                    // precisely where the number matters most.
-                    //
-                    // `confirm_ceiling` refuses this input on the throughput side and says why: one
-                    // lucky window is how a sustained figure lands ABOVE the peak from the same sweep.
-                    // The stream copy carried the majority test and dropped the minimum-window half,
-                    // and the comment claiming it "runs the same majority rule" was true only of the
-                    // half that survived. A rate here is a median of WINDOWS_PER_RUNG windows or it is
-                    // not published.
-                    if stream_ceiling_confirmed(total, held) {
-                        // The published rate is the median of the windows that HELD, matching how
-                        // every other repeated measurement in this engine reports.
-                        rates.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                        let fps = crate::search::nearest_rank_median(&rates).unwrap_or(first_fps);
-                        winner = Some((ceiling, fps));
-                        break;
-                    }
-                    if total < crate::search::WINDOWS_PER_RUNG {
-                        // (see `stream_ceiling_confirmed`)
-                        // THE RIG RAN SHORT, NOT THE GATEWAY. Stepping down would walk the ceiling
-                        // down on our own missing windows and charge the gateway for them, so this
-                        // ends the search with no winner and the cell publishes an absence carrying
-                        // the reason - the same choice `confirm_ceiling` makes.
-                        eprintln!(
-                            "streams: c={ceiling} could only be measured in {total} of {} windows - \
-                             the rig ran short, so no ceiling is published rather than one taken from \
-                             a single window",
-                            crate::search::WINDOWS_PER_RUNG
-                        );
-                        stop = StreamStop::RigRanShort {
-                            measured: total,
-                            wanted: crate::search::WINDOWS_PER_RUNG,
-                        };
-                        break;
-                    }
-                    }
-                    /* STEP DOWN INSIDE THE BRACKET, NOT BY HALVING.
-                       Halving throws away everything the ascending sweep and the bisection just
-                       established. busbar proved every rung to c=4,096, bisected to c=6,176, failed
-                       to confirm it - and then halved to c=3,088, a concurrency it had already
-                       carried cleanly, discarding the entire 4,096..6,176 bracket the search had
-                       spent fifteen rungs narrowing. The true ceiling was never below 4,096; it was
-                       just under 6,176 (a later run confirmed 5,120).
-
-                       The known-good floor is the top of this cell's own uncontaminated ascending
-                       prefix, falling back to the search's lower bound. Bisecting between it and the
-                       failed rung keeps every rung the search already paid for and converges toward
-                       the boundary instead of collapsing away from it.
-
-                       Halving survives only as the fallback for when there IS no bracket - the
-                       confirmation failed at the known-good rung itself, so nothing below it is
-                       known and there is no information to bisect. */
-                    let known_good = if proven_clean > 0 { proven_clean.max(lo) } else { lo };
-                    let next = if known_good < ceiling {
-                        let mid = known_good + (ceiling - known_good) / 2;
-                        // A bracket one rung wide bisects to its own floor; stepping to `ceiling`
-                        // would loop forever, so the floor is the honest next probe.
-                        if mid >= ceiling { known_good } else { mid }
-                    } else {
-                        ceiling / 2
-                    };
-                    if next < lo.max(1) || next == ceiling {
-                        stop = StreamStop::FloorReached { last: ceiling };
-                        break;
-                    }
-                    eprintln!("streams: c={ceiling} did not hold - stepping down to c={next}");
-                    ceiling = next;
-                    // We just drove `ceiling * 2` streams through this host; the stepped rung is the
-                    // measurement most exposed to that residue, because it is the one that decides
-                    // whether the search ends with a number or with nothing.
-                    settle_after_streams(next * 2);
-                    // The stepped rung's own first window seeds the next iteration's `held = 1`,
-                    // so it must actually HOLD the gate to be that vote - `confirm_ceiling` has the
-                    // same rule. Seeding with a failing window let a rung reach majority with only
-                    // one real hold out of three, folding a gate-failing window's rate into the
-                    // published sustained figure.
-                    match stream_window(cfg.gateway_addr, &p.path, &p.body, &p.headers, p.dialect, ceiling) {
-                        Some(w) => {
-                            let passed = streams_gate_passes(&w);
-                            p.points.push(point_of(&w, passed));
-                            if !passed {
-                                /* A RUNG CANNOT FAIL BELOW ONE IT HAS ALREADY PASSED, so when it does,
-                                   the gateway is not what changed. `proven_clean` is the top of THIS
-                                   cell's own uncontaminated ascending prefix; a failure at or under it
-                                   is the rig, and filing it as `SteppedRungFailed` charged the gateway
-                                   for our own undrained host on 6 cells of the 2026-07-31 board.
-
-                                   One full-cap retry first, because the cheap explanation - not enough
-                                   drain - is also the likeliest, and it costs one window to rule out.
-                                   If it holds this time the search simply carries on and publishes a
-                                   number, which is the outcome all of this is for. */
-                                /* AND ONLY WHERE THE MECHANISM CAN ACTUALLY EXIST. Draining sockets
-                                   explain a rung failing under a proven one at c=3,088; they explain
-                                   nothing at c=1 under c=2, where there is no residue to speak of and
-                                   a failure is simply a failure. Gating on the same threshold the
-                                   settle uses keeps this from becoming a universal excuse that
-                                   relabels every real gateway failure as our fault - the mirror image
-                                   of the bug it fixes, and the more dangerous of the two, because it
-                                   flatters the subject. */
-                                let contaminated =
-                                    proven_clean > STREAM_SETTLE_FREE_BELOW && ceiling <= proven_clean;
-                                let recovered = if contaminated {
-                                    eprintln!(
-                                        "streams: c={ceiling} failed the gate although this cell already                                          carried c={proven_clean} cleanly - settling and re-taking the window"
-                                    );
-                                    std::thread::sleep(std::time::Duration::from_millis(STREAM_SETTLE_MAX_MS));
-                                    match stream_window(cfg.gateway_addr, &p.path, &p.body, &p.headers, p.dialect, ceiling) {
-                                        Some(w2) => {
-                                            let passed2 = streams_gate_passes(&w2);
-                                            p.points.push(point_of(&w2, passed2));
-                                            if passed2 { first_fps = w2.fps(); }
-                                            passed2
-                                        }
-                                        None => false,
-                                    }
-                                } else {
-                                    false
-                                };
-                                /* A SETTLE DID NOT BRING IT BACK, SO ASK WHETHER ANYTHING WILL.
-                                   The remaining explanations are opposite: our rig is still dirty,
-                                   or the GATEWAY stopped serving and is not coming back on its own.
-                                   Restarting is the one experiment that separates them, and the
-                                   harness already owns this process's lifetime - the memory group
-                                   stops and starts it every cell, and the probe loop restarts it
-                                   mid-grid for a refused connection.
-
-                                   A number is deliberately NOT published on the far side of this.
-                                   Whatever a restarted gateway carries is a fact about a fresh
-                                   process, not about the one that just served fifteen rungs, and
-                                   quietly folding it into the same sustained figure would publish
-                                   two different processes as one measurement. What gets published
-                                   instead is the finding: it did not recover. */
-                                if !recovered && contaminated {
-                                    let restart_cleared = match cfg.relaunch.as_ref() {
-                                        Some(spec) => {
-                                            eprintln!(
-                                                "streams: c={ceiling} still fails after settling although this cell \
-                                                 carried c={proven_clean} - restarting the gateway to find out whether \
-                                                 it stopped serving or the rig is still dirty"
-                                            );
-                                            match restart_to_rest(spec, &cfg.relaunch_launcher, &cfg.relaunch_commands) {
-                                                Ok(()) => stream_window(cfg.gateway_addr, &p.path, &p.body, &p.headers, p.dialect, ceiling)
-                                                    .map(|w3| {
-                                                        let passed3 = streams_gate_passes(&w3);
-                                                        p.points.push(point_of(&w3, passed3));
-                                                        passed3
-                                                    })
-                                                    .unwrap_or(false),
-                                                Err(e) => {
-                                                    eprintln!("streams: the gateway could not be restarted: {e}");
-                                                    false
-                                                }
-                                            }
-                                        }
-                                        // No declared relaunch means the harness does not own this
-                                        // process and must not bounce it; the honest reading stays
-                                        // the rig-side one it already had.
-                                        None => false,
-                                    };
-                                    /* THE RESTART IS THE ATTRIBUTION TEST, and its two outcomes
-                                       point at opposite culprits.
-
-                                       Cleared by a restart: the process that had been serving was
-                                       wedged, a fresh one is not, and the host was the same
-                                       throughout - so it is the GATEWAY that did not recover.
-
-                                       NOT cleared: a brand-new gateway process still cannot carry a
-                                       rung this cell already carried. The gateway is the thing that
-                                       just changed and the failure did not, which leaves the host as
-                                       the variable - so this stays OURS. Calling it a gateway
-                                       failure here would be the flattering direction of the same
-                                       error, and the one nobody would catch. */
-                                    stop = if restart_cleared {
-                                        StreamStop::GatewayDidNotRecover {
-                                            at: ceiling,
-                                            proven: proven_clean,
-                                            restart_cleared: Some(restart_cleared),
-                                        }
-                                    } else {
-                                        StreamStop::RigContaminated { at: ceiling, proven: proven_clean }
-                                    };
-                                    break;
-                                }
-                                if !recovered {
-                                    // One vote against the rung, not a verdict on the search. Abandon
-                                    // this rung unconfirmed and narrow again on the next pass; if the
-                                    // budget runs out first the stop below is what publishes.
-                                    stop = StreamStop::SteppedRungFailed { at: ceiling };
-                                    seed_failed = true;
-                                    continue;
-                                }
-                            } else {
-                                first_fps = w.fps();
-                            }
-                        }
-                        None => {
-                            stop = StreamStop::WindowUnavailable { at: ceiling };
-                            break;
-                        }
-                    }
-                }
-                /* THE FLOOR THE SEARCH ALREADY PROVED IS A RESULT, NOT A LEFTOVER.
-                
-                   The step-down budget converges toward `proven_clean` without ever re-testing it:
-                   busbar openai>openai carried c=4,096 on the ascending sweep, bisected to c=5,652,
-                   lost both confirmation windows, and spent all four step-downs at 4,874 / 4,485 /
-                   4,290 / 4,193 - every one of them ABOVE the rung it had already carried. The cell
-                   then published nothing, on a board where the same gateway is the subject. Three
-                   busbar cells, and seven across the field, read `unconfirmed` for this reason.
-                
-                   "We could not confirm 5,652" and "we know nothing" are different statements. The
-                   first is true; the second is what an absence says. So when the search is otherwise
-                   out of budget, the floor gets the confirmation the bisected rung got: a full set of
-                   windows, the same majority rule, the same median-of-holds. It publishes a
-                   CONSERVATIVE number - the ceiling is somewhere above it - and that is the honest
-                   shape of what the search learned.
-                
-                   It costs WINDOWS_PER_RUNG windows and only on the failure path. It cannot inflate a
-                   result: `proven_clean` is a rung this cell drove cleanly during its own ascent, and
-                   it still has to hold a majority now to be published at all. */
-                if winner.is_none() && proven_clean > 0 && stop.floor_fallback_ok() {
-                    eprintln!(
-                        "streams: the ceiling search is out of budget; confirming the floor this cell \
-                         already carried (c={proven_clean}) rather than publishing nothing"
-                    );
-                    settle_after_streams(ceiling.max(proven_clean) * 2);
-                    let mut held = 0usize;
-                    let mut total = 0usize;
-                    let mut rates: Vec<f64> = Vec::new();
-                    for _ in 0..crate::search::WINDOWS_PER_RUNG {
-                        if let Some(w) = stream_window(
-                            cfg.gateway_addr, &p.path, &p.body, &p.headers, p.dialect, proven_clean,
-                        ) {
-                            let passed = streams_gate_passes(&w);
-                            p.points.push(point_of(&w, passed));
-                            total += 1;
-                            if passed {
-                                held += 1;
-                                rates.push(w.fps());
-                            }
-                        }
-                        settle_after_streams(proven_clean);
-                    }
-                    if stream_ceiling_confirmed(total, held) {
-                        rates.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                        if let Some(fps) = crate::search::nearest_rank_median(&rates) {
-                            eprintln!("streams: floor c={proven_clean} confirmed at {fps:.0} fps");
-                            winner = Some((proven_clean, fps));
-                        }
-                    } else {
-                        /* A FLOOR THAT FAILS EVERY WINDOW IS A FINDING, NOT A MISSING NUMBER.
-
-                        This kept the reason the search already had, and that under-reported the most
-                        useful thing in the cell. `proven_clean` is a concurrency THIS cell carried
-                        cleanly on the way up; failing every window there afterwards means it can no
-                        longer serve what it already served. "the stepped-down rung at c=4127 failed"
-                        describes a rung nobody asked about and omits that the floor at c=4096 then
-                        failed three times out of three.
-
-                        On 2026-08-04 that shape appeared on nine cells across three gateways -
-                        busbar-151, agentgateway and aisix - and every one published the stepped-rung
-                        sentence. bench-audit's `check_a_wedged_gateway_is_named_as_one` caught all
-                        nine; the previous engine passed the same invariant only because it never
-                        re-measured the floor, so the wedge was there and nothing looked.
-
-                        ONLY WHEN NOTHING HELD. `stream_ceiling_confirmed` is a MAJORITY rule, so
-                        "not confirmed" also covers holding one window of three - that is a gateway
-                        flapping at its limit, which is ordinary non-convergence and already reported
-                        as such. Upgrading that to "stopped serving" would overstate it in the
-                        unflattering direction, which is no more honest than the flattering one. */
-                        if held == 0 && total > 0 {
-                            eprintln!(
-                                "streams: floor c={proven_clean} failed all {total} windows - the \
-                                 gateway no longer serves a concurrency it had already carried"
-                            );
-                            /* TWO EXPERIMENTS BEFORE THE VERDICT, because "it no longer serves what
-                               it served" has three explanations and this code used to pick one
-                               without testing any of them.
-
-                               THE CONTROL WINDOW comes first: the same concurrency, the same
-                               request, driven at the MOCK with the gateway out of the path, judged
-                               on ERROR COUNTS ALONE and never on its rate - core partitioning makes
-                               the direct leg's timing incomparable (see the mock-ceiling note), but
-                               a non-2xx is a non-2xx on any schedule. If the reference instrument
-                               itself cannot carry this concurrency cleanly right now, then nothing
-                               the gateway did in the failing windows is attributable, and the
-                               verdict is RigContaminated - the unflattering-to-us direction, which
-                               is the one nobody would catch if it were wrong.
-
-                               THE RESTART runs only when the control proved the rig clean: a fresh
-                               process on a proven-clean host either carries the floor (the wedge
-                               lived in the old process's accumulated state - a breaker holding a
-                               declared cooldown is exactly this, and the reproduction against
-                               busbar 1.5.2 watched `retry-after: 108 -> 106 -> 103` count down
-                               across three all-503 windows) or it does not (the finding stands,
-                               with the experiment on the record). The number a restarted process
-                               carries is deliberately still not published - a fresh process is not
-                               the one this cell measured. */
-                            let mock_leg_clean = match stream_window(
-                                cfg.mock_addr, &p.path, &p.body, &p.headers, p.dialect, proven_clean,
-                            ) {
-                                Some(cw) => {
-                                    eprintln!(
-                                        "streams: control window at the mock, c={proven_clean}: \
-                                         {} of {} streams errored",
-                                        cw.errored, cw.streams
-                                    );
-                                    Some(cw.errored == 0)
-                                }
-                                // A control that could not run proves nothing about the gateway
-                                // either way - treated exactly as a dirty control below.
-                                None => None,
-                            };
-                            if mock_leg_clean == Some(true) {
-                                let restart_cleared = match cfg.relaunch.as_ref() {
-                                    Some(spec) => {
-                                        eprintln!(
-                                            "streams: the mock leg is clean at c={proven_clean}, so \
-                                             the wedge is on the gateway's side of the socket - \
-                                             restarting it to learn whether the wedge lives in the \
-                                             process's own accumulated state"
-                                        );
-                                        match restart_to_rest(spec, &cfg.relaunch_launcher, &cfg.relaunch_commands) {
-                                            Ok(()) => stream_window(
-                                                cfg.gateway_addr, &p.path, &p.body, &p.headers, p.dialect, proven_clean,
-                                            )
-                                            .map(|w3| {
-                                                let passed3 = streams_gate_passes(&w3);
-                                                p.points.push(point_of(&w3, passed3));
-                                                Some(passed3)
-                                            })
-                                            .unwrap_or(None),
-                                            Err(e) => {
-                                                eprintln!("streams: the gateway could not be restarted: {e}");
-                                                None
-                                            }
-                                        }
-                                    }
-                                    // No declared relaunch: the harness does not own this process
-                                    // and must not bounce it. `None` says "untried", which is true.
-                                    None => None,
-                                };
-                                stop = StreamStop::GatewayDidNotRecover {
-                                    at: proven_clean,
-                                    proven: proven_clean,
-                                    restart_cleared,
-                                };
-                            } else {
-                                // The control errored or could not run: the reference leg is not
-                                // clean, so charging the gateway would launder our state into its
-                                // row. Ours, loudly.
-                                eprintln!(
-                                    "streams: the control window at the mock was NOT clean at \
-                                     c={proven_clean} - the floor failure cannot be attributed to \
-                                     the gateway"
-                                );
-                                stop = StreamStop::RigContaminated {
-                                    at: proven_clean,
-                                    proven: proven_clean,
-                                };
-                            }
-                        } else {
-                            eprintln!(
-                                "streams: floor c={proven_clean} held {held} of {total} windows - not \
-                                 confirmed, so the cell keeps its absence"
-                            );
-                        }
-                    }
-                }
-                match winner {
-                    Some((conc, fps)) => CellStreams {
-                        concurrency: Measurement::Measured(conc),
-                        fps: Measurement::Measured(fps),
-                        points: p.points,
-                    },
-                    // THE REASON IS THE ONE THAT ACTUALLY HAPPENED, not one sentence for five outcomes.
-                    //
-                    // This was a single hardcoded string - "stepping down found none that did within N
-                    // attempts" - emitted for EVERY way the search ends without a winner. There are five,
-                    // and they are not the same fact:
-                    //
-                    //   * the rig could not complete its windows          (OUR failure, and the code says
-                    //                                                      so five lines up before
-                    //                                                      breaking with this message)
-                    //   * the step-down floor was reached
-                    //   * a stepped rung's first window failed the gate
-                    //   * the window could not be taken at all
-                    //   * the step-down budget was genuinely exhausted
-                    //
-                    // Reporting a RIG shortfall as "the gateway did not hold the gate" is the precise
-                    // error this board exists to avoid, and it was doing it in a sentence that reads like
-                    // a measurement. It also made two opposite findings render identically: busbar
-                    // delivering ZERO frames on re-measurement and litellm-rust degrading gracefully near
-                    // a real ceiling of ~3,144 streams got the same words, so the site could not tell a
-                    // gateway's collapse from our own instrument giving up.
-                    None => CellStreams {
-                        concurrency: Measurement::absent(Absent::NotMeasured),
-                        fps: Measurement::absent_because(
-                            stop.absent_kind(),
-                            stop.describe(c, MAX_CEILING_STEPDOWNS),
-                        ),
-                        points: p.points,
-                    },
                 }
             }
-            // The search memoises every probe, so the winning rung is always in hand; if it somehow
-            // were not, the ceiling publishes with an unmeasured rate rather than an invented one.
-            None => CellStreams {
-                concurrency: Measurement::Measured(c),
-                fps: Measurement::absent_because(
-                    Absent::NotMeasured,
-                    format!("the stream ceiling c={c} was proven, but its frames/sec reading was not retained"),
-                ),
-                points: p.points,
-            },
-        },
-        None => CellStreams {
-            concurrency: Measurement::absent(r.ceiling.reason().cloned().unwrap_or(Absent::NotMeasured)),
-            // The search's own reason AND its evidence travel, exactly as `sweep_sustained_cell`
-            // carries `bisect_ceiling`'s.
-            fps: match (r.ceiling.reason().cloned(), r.ceiling.detail()) {
-                (Some(reason), Some(detail)) => Measurement::absent_because(reason, detail),
-                (Some(reason), None) => Measurement::absent(reason),
-                (None, _) => Measurement::absent(Absent::NotMeasured),
-            },
-            points: p.points,
-        },
+            // No declared relaunch: the harness does not own this process and must not bounce
+            // it. `None` says "untried", which is true.
+            None => None,
+        };
+        StreamStop::GatewayDidNotRecover {
+            at,
+            proven,
+            restart_cleared,
+        }
+    } else {
+        eprintln!(
+            "streams: the control window at the mock was NOT clean at c={at} - the failure \
+             cannot be attributed to the gateway"
+        );
+        StreamStop::RigContaminated { at, proven }
     }
 }
 
@@ -3245,44 +3079,6 @@ mod tests {
         );
     }
 
-    /* THE FLOOR FALLBACK'S GATE, which decides whether a cell publishes a conservative number or an
-       absence. The fallback re-measures on the SAME host that just failed several rungs, so it is
-       only meaningful when the host was not the suspect - and the flattering direction of this error
-       (publishing a figure where honesty published none) is the one nobody would catch. */
-    #[test]
-    fn floor_fallback_only_where_the_host_is_not_the_suspect() {
-        // The search ran out of room or budget: the gateway and the rig are both innocent so far, and
-        // the rung the cell already carried is a real, conservative result.
-        assert!(StreamStop::BudgetExhausted.floor_fallback_ok());
-        assert!(StreamStop::FloorReached { last: 4193 }.floor_fallback_ok());
-        assert!(StreamStop::SteppedRungFailed { at: 4193 }.floor_fallback_ok());
-
-        // OUR instrument is the variable. A number taken on a host we have just accused would be
-        // exactly the attribution error the enum exists to prevent.
-        assert!(!StreamStop::RigRanShort { measured: 1, wanted: 3 }.floor_fallback_ok());
-        assert!(!StreamStop::WindowUnavailable { at: 4096 }.floor_fallback_ok());
-        assert!(!StreamStop::RigContaminated { at: 4096, proven: 4096 }.floor_fallback_ok());
-
-        // And a gateway that had to be restarted is no longer the process the sweep measured, so
-        // whatever a fresh one carries is not this cell's ceiling. "It does not recover" is the
-        // finding and must not be overwritten by a number.
-        assert!(!StreamStop::GatewayDidNotRecover { at: 8192, proven: 4096, restart_cleared: Some(true) }
-            .floor_fallback_ok());
-        assert!(!StreamStop::GatewayDidNotRecover { at: 8192, proven: 4096, restart_cleared: Some(false) }
-            .floor_fallback_ok());
-    }
-
-    /* AND THE FLOOR STILL HAS TO EARN IT. The fallback publishes only what the same majority rule
-       every other repeated measurement uses would publish, so a floor that wins one window of three -
-       the shape that made the bisected rung unpublishable in the first place - stays unpublished. */
-    #[test]
-    fn the_floor_is_published_only_on_the_same_majority_every_other_rate_needs() {
-        assert!(stream_ceiling_confirmed(3, 3), "three of three holds");
-        assert!(stream_ceiling_confirmed(3, 2), "two of three is a majority");
-        assert!(!stream_ceiling_confirmed(3, 1), "one of three is the busbar c=5,652 shape");
-        assert!(!stream_ceiling_confirmed(3, 0), "none of three publishes nothing");
-        assert!(!stream_ceiling_confirmed(2, 2), "a short window set is not a confirmation");
-    }
 
     #[test]
     fn the_stream_bound_is_physical_and_the_runaway_cap_never_participates() {
@@ -3409,44 +3205,6 @@ mod tests {
             super::stream_pacing_interval_ms() > 0,
             "the live reader can never return zero"
         );
-    }
-
-    // ONE LUCKY WINDOW MUST NOT BECOME A CONFIRMED STREAM CEILING.
-    //
-    // The confirmation loop opens `held = 1, total = 1` because the bisection's own winning window is
-    // a real vote, then takes WINDOWS_PER_RUNG-1 repeats. A repeat that cannot RUN is skipped WITHOUT
-    // incrementing `total`, so two absent repeats left 1 of 1 - and the majority test alone reads that
-    // as a pass, publishing the single unrepeated window as the ceiling plus its own raw fps as
-    // streams_sustained_fps. Both absent paths (RigExhausted on ports/descriptors, a panicked lane)
-    // bite hardest at the top rung, which is exactly where the published number comes from.
-    //
-    // `confirm_ceiling` refuses the same input on the throughput side and explains that one lucky
-    // window is how a sustained figure lands ABOVE the peak from the same sweep. The stream copy kept
-    // the majority half and dropped the minimum-window half, while its comment claimed to run "the
-    // same majority rule" - true only of the half that survived.
-    #[test]
-    fn a_stream_ceiling_needs_as_many_windows_as_any_other_rung() {
-        let n = crate::search::WINDOWS_PER_RUNG;
-        assert!(
-            !super::stream_ceiling_confirmed(1, 1),
-            "1 of 1 is the bisection's own window with both repeats absent - not a confirmation"
-        );
-        assert!(
-            !super::stream_ceiling_confirmed(2, 2),
-            "2 of 2 is still short of a climb rung: one absent repeat must not lower the bar"
-        );
-        // A full set that genuinely held publishes.
-        assert!(
-            super::stream_ceiling_confirmed(n, n),
-            "every window held: publish"
-        );
-        // A full set with a real majority publishes; a real minority does not. This is the half that
-        // already worked, asserted so a fix to the other half cannot quietly remove it.
-        assert!(
-            super::stream_ceiling_confirmed(3, 2),
-            "2 of 3 held is a majority"
-        );
-        assert!(!super::stream_ceiling_confirmed(3, 1), "1 of 3 held is not");
     }
 
     // A WINDOW THAT LOST LANES MUST BE DISCARDED, LOUDLY.
@@ -3754,34 +3512,56 @@ while True:
 
     #[test]
     fn a_stepped_down_stream_rung_whose_fresh_window_fails_never_votes_for_itself() {
-        let gw = sse_ladder_server(|n| n <= 3 || n >= 16);
+        /* THE SCRIPT, BY CONNECTION NUMBER, walks the band-aware search's exact window order for
+        lo=1, hi=4 and makes every rung above the proven floor fail while every recovery canary
+        passes:
+          conns 1..=3    ascent: c=1 (conn 1) and c=2 (conns 2-3) pass; proven floor = 2
+          conns 4..=7    ascent: c=4 fails -> the retry machinery arms
+          conn  8        recovery canary (c=1) passes: the gateway is provably serving again
+          conns 9..=12   the retry of c=4 fails its first reliability window
+          conn  13       canary before the descent candidate c=3 passes
+          conns 14..=16  candidate c=3 fails its first window
+          conn  17       canary before the floor candidate c=2 passes
+          conns 18..=23  c=2 holds all WINDOWS_PER_RUNG windows -> published
+        A rung that failed (c=4, twice; c=3 once) never votes for itself, the canaries that passed
+        at c=1 never vote for c=1, and what publishes is the floor the cell actually proved. */
+        let gw = sse_ladder_server(|n| n <= 3 || n == 8 || n == 13 || n >= 17);
         let cfg = cfg_for(gw, gw);
         let id = CellId::new("openai", "openai");
         let r = sweep_streams_cell(&cfg, &id, 1, 4);
         assert_ne!(
             r.concurrency.value().copied(),
             Some(1),
-            "the stepped-down rung must not publish on the strength of its own failing seed window"
+            "a canary passing at c=1 must never publish c=1 - a recovery probe is not a rung's vote"
         );
-        /* AND WHAT IT PUBLISHES INSTEAD IS THE FLOOR IT ACTUALLY CARRIED.
-        This asserted `None` - correct while a search out of budget gave up entirely. It no longer
-        does: the rung the cell proved on its own ascent gets the same confirmation the bisected
-        rung got, so a cell that demonstrably carries c=2 publishes 2 rather than an absence
-        claiming nothing is known. This fixture serves every rung at or below 3, so 2 is a true
-        reading, and it is conservative - the real ceiling is somewhere above it.
-
-        THE INVARIANT THIS TEST IS NAMED FOR IS UNTOUCHED AND IS THE ASSERTION ABOVE: the stepped
-        rung that could not seed (c=1) never voted for itself. What is published is a rung that held
-        a majority of fresh windows, which is the bar every other rate on this board has to clear. */
+        assert_ne!(
+            r.concurrency.value().copied(),
+            Some(4),
+            "a rung that failed its reliability windows must not publish on one lucky retry seed"
+        );
         assert_eq!(
             r.concurrency.value().copied(),
             Some(2),
-            "the floor this cell proved on its own ascent is published, not the rung that failed to seed"
+            "the floor this cell proved on its own ascent is published, not the rung that failed"
         );
         assert!(
             r.fps.value().is_some_and(|v| *v > 0.0),
             "a published ceiling carries the rate that was measured at it: {:?}",
             r.fps
+        );
+        // And the record says which window was which: the canaries are tagged, so a reader
+        // counting rungs cannot mistake a recovery probe for a verdict about the gateway.
+        assert!(
+            r.points.iter().any(|pt| pt.role == StreamRole::Canary && pt.concurrency == 1),
+            "the recovery canaries must survive into the record, tagged as what they are"
+        );
+        assert!(
+            r.points
+                .iter()
+                .filter(|pt| pt.concurrency == 2 && pt.role == StreamRole::Rung && pt.passed)
+                .count()
+                >= crate::search::WINDOWS_PER_RUNG,
+            "the published floor must show its consecutive held windows in the record"
         );
     }
 
@@ -5542,23 +5322,16 @@ while True:
 mod stream_stop_tests {
     use super::*;
 
-    // ONE SENTENCE FOR FIVE OUTCOMES WAS THE BUG, so the test is that the five outcomes say five
-    // different things - and that the two which are OURS are attributed to the harness.
+    // ONE SENTENCE FOR EVERY OUTCOME WAS THE ORIGINAL BUG, so the surviving outcomes must
+    // still say different things - and the one that is OURS must be attributed to the harness.
     #[test]
     fn each_way_the_stream_search_ends_reports_its_own_cause() {
-        let proved = 3144;
-        let budget = MAX_CEILING_STEPDOWNS;
         let cases = [
-            StreamStop::RigRanShort {
-                measured: 1,
-                wanted: 3,
-            },
-            StreamStop::FloorReached { last: 4 },
-            StreamStop::SteppedRungFailed { at: 1572 },
-            StreamStop::WindowUnavailable { at: 786 },
-            StreamStop::BudgetExhausted,
+            StreamStop::RigRanShort { at: 786 },
+            StreamStop::RigContaminated { at: 3088, proven: 4096 },
+            StreamStop::GatewayDidNotRecover { at: 4096, proven: 4096, restart_cleared: None },
         ];
-        let texts: Vec<String> = cases.iter().map(|c| c.describe(proved, budget)).collect();
+        let texts: Vec<String> = cases.iter().map(|c| c.describe()).collect();
         for (i, a) in texts.iter().enumerate() {
             for (j, b) in texts.iter().enumerate() {
                 assert!(
@@ -5566,58 +5339,19 @@ mod stream_stop_tests {
                     "two different endings publish the SAME sentence, which is the defect: {a}"
                 );
             }
-            assert!(
-                a.contains("3144"),
-                "every reason names the concurrency the bisection proved"
-            );
         }
-
-        // THE ATTRIBUTION, which is the half that matters. A window the RIG failed to take is not a
-        // fact about the gateway, and filing it under NotMeasured would put our shortfall among the
-        // gateway's results.
+        // THE ATTRIBUTION, which is the half that matters. A window the RIG failed to take is not
+        // a fact about the gateway, and filing it under NotMeasured would put our shortfall among
+        // the gateway's results.
+        let rig = StreamStop::RigRanShort { at: 786 }.describe();
         assert!(
-            matches!(
-                StreamStop::RigRanShort {
-                    measured: 1,
-                    wanted: 3
-                }
-                .absent_kind(),
-                Absent::HarnessError
-            ),
-            "a rig shortfall must be a HarnessError, not a gateway measurement"
-        );
-        assert!(
-            matches!(
-                StreamStop::WindowUnavailable { at: 1 }.absent_kind(),
-                Absent::HarnessError
-            ),
-            "a window we could not take is our failure"
-        );
-        assert!(
-            matches!(
-                StreamStop::BudgetExhausted.absent_kind(),
-                Absent::NotMeasured
-            ),
-            "exhausting the step-down budget IS a statement about the gateway"
-        );
-        assert!(
-            matches!(
-                StreamStop::SteppedRungFailed { at: 1 }.absent_kind(),
-                Absent::NotMeasured
-            ),
-            "a rung that failed the gate is the gateway's result"
-        );
-
-        // And the rig case must SAY it was the rig, in words a reader of the board will see.
-        let rig = StreamStop::RigRanShort {
-            measured: 1,
-            wanted: 3,
-        }
-        .describe(proved, budget);
-        assert!(
-            rig.contains("RIG ran short") && rig.contains("not the gateway"),
+            rig.contains("RIG") && rig.contains("c=786"),
             "the rig's own shortfall must name itself rather than reading as the gateway's failure: {rig}"
         );
+        assert!(matches!(
+            StreamStop::RigRanShort { at: 786 }.absent_kind(),
+            Absent::HarnessError
+        ));
     }
 }
 
@@ -5625,26 +5359,6 @@ mod stream_stop_tests {
 mod contamination_tests {
     use super::*;
 
-    /// The guard must NOT fire where draining cannot explain anything - otherwise it becomes a
-    /// universal excuse that relabels real gateway failures as rig faults, which flatters the
-    /// subject and is the more dangerous mirror of the bug it fixes.
-    #[test]
-    fn the_contamination_guard_only_applies_where_draining_could_explain_it() {
-        let fires = |proven: u32, at: u32| proven > STREAM_SETTLE_FREE_BELOW && at <= proven;
-        assert!(fires(4096, 3088), "busbar's real case must be caught");
-        assert!(
-            !fires(2, 1),
-            "a rung failing at c=1 under c=2 has no residue to blame"
-        );
-        assert!(
-            !fires(4096, 5000),
-            "a failure ABOVE the proven rung is ordinary evidence"
-        );
-        assert!(
-            !fires(STREAM_SETTLE_FREE_BELOW, 8),
-            "at or below the settle threshold, no excuse"
-        );
-    }
 
     /* A RUNG FAILING BELOW ONE THE SAME CELL ALREADY PASSED IS OURS, AND MUST BE FILED AS OURS.
     This is the whole point of the variant: `Absent::NotMeasured` puts a finding among the
@@ -5661,18 +5375,11 @@ mod contamination_tests {
             "a rung failing below a proven-clean one is the rig; filing it as NotMeasured charges \
              the gateway for our own undrained host"
         );
-        // The endings that ARE about the gateway must stay that way, or this variant has just
+        // The ending that IS about the gateway must stay that way, or this variant has just
         // laundered every real failure into a rig excuse.
         assert_eq!(
-            StreamStop::SteppedRungFailed { at: 100 }.absent_kind(),
-            Absent::NotMeasured
-        );
-        assert_eq!(
-            StreamStop::BudgetExhausted.absent_kind(),
-            Absent::NotMeasured
-        );
-        assert_eq!(
-            StreamStop::FloorReached { last: 8 }.absent_kind(),
+            StreamStop::GatewayDidNotRecover { at: 100, proven: 100, restart_cleared: None }
+                .absent_kind(),
             Absent::NotMeasured
         );
     }
@@ -5685,15 +5392,15 @@ mod contamination_tests {
             at: 3088,
             proven: 4096,
         }
-        .describe(6176, 6);
+        .describe();
         assert!(d.contains("c=3088"), "must name the rung that failed: {d}");
         assert!(
             d.contains("c=4096"),
             "must name what this cell already carried: {d}"
         );
         assert!(
-            d.contains("c=6176"),
-            "must name what the bisection proved: {d}"
+            d.contains("control window"),
+            "must name the experiment that cleared the gateway: {d}"
         );
     }
 
@@ -5888,6 +5595,7 @@ mod stream_error_kind_tests {
         let p = StreamPoint {
             concurrency: 4096,
             passed: false,
+            role: StreamRole::Rung,
             fps: 0.0,
             frames: 0,
             expected_frames: 0,
@@ -6051,13 +5759,13 @@ mod gateway_recovery_tests {
             proven: 8192,
             restart_cleared: Some(true),
         }
-        .describe(8192, 6);
+        .describe();
         let stuck = StreamStop::GatewayDidNotRecover {
             at: 4096,
             proven: 8192,
             restart_cleared: Some(false),
         }
-        .describe(8192, 6);
+        .describe();
         assert!(
             cleared.contains("only after the harness restarted it"),
             "{cleared}"
@@ -6083,7 +5791,7 @@ mod gateway_recovery_tests {
             proven: 4096,
             restart_cleared: None,
         }
-        .describe(4594, 4);
+        .describe();
         assert!(
             !untried.contains("restart"),
             "must not mention a restart that was never attempted: {untried}"
@@ -6098,7 +5806,7 @@ mod gateway_recovery_tests {
             proven: 4096,
             restart_cleared: Some(false),
         }
-        .describe(4594, 4);
+        .describe();
         assert_ne!(
             untried, stuck,
             "'no restart attempted' and 'a restart did not help' are different claims"
@@ -6121,10 +5829,7 @@ mod gateway_recovery_tests {
             restart_cleared: None,
         };
         assert_eq!(stop.absent_kind(), Absent::NotMeasured);
-        // And it must never then be overwritten by a fallback number: the finding outranks a figure
-        // taken from a process that is no longer the one the sweep measured.
-        assert!(!stop.floor_fallback_ok());
-        let d = stop.describe(4594, 4);
+        let d = stop.describe();
         assert!(
             d.contains("does not recover") || d.contains("did not recover"),
             "the absence must name the wedge, not the rung above it: {d}"
@@ -6172,7 +5877,7 @@ mod restart_attribution_tests {
     #[test]
     fn both_outcomes_explain_themselves_with_both_concurrencies() {
         for cleared in [true, false] {
-            let d = stop_for(cleared, 4096, 8192).describe(8192, 6);
+            let d = stop_for(cleared, 4096, 8192).describe();
             assert!(d.contains("c=4096") && d.contains("c=8192"), "{d}");
         }
     }
@@ -6471,6 +6176,268 @@ mod search_simulator {
                 at.iter().filter(|x| **x).count() * 2 > at.len(),
                 "{m:?}: published c={v} on {:?} - not a majority",
                 at
+            );
+        }
+    }
+}
+
+/* ═══════════════════════════ the band-aware search, against simulated gateways ══════════════════
+The pathologies the search exists to survive cannot be produced on demand by a live socket, which
+is exactly why the search is pure over a driver: the band, the breaker cooldown, and the wedge are
+SIMULATED here, and the searches that failed on the 2026-08-03 board are fixtures rather than
+memories. The probabilities below are calibrated from that board's own points arrays. */
+#[cfg(test)]
+mod band_search_tests {
+    use super::*;
+
+    /// A simulated gateway: a logistic failure band around `edge`, plus a breaker that arms on any
+    /// failed window and hard-fails EVERYTHING for `cooldown_len` settles - the busbar 1.5.x shape,
+    /// reproduced live on 2026-08-04 (`retry-after: 108 -> 106 -> 103`, 100% 503 at a concurrency
+    /// the same process had just carried cleanly).
+    ///
+    /// Deterministic: xorshift64* seeded per test, no wall clock, no OS randomness - the same seed
+    /// replays the same search, which is what makes a failed invariant debuggable.
+    struct BandProbe {
+        edge: f64,
+        width: f64,
+        rng: u64,
+        cooldown: u32,
+        cooldown_len: u32,
+        /// Window indices (0-based, in call order) forced to fail regardless of the band - for
+        /// scripting a one-off blip below the edge.
+        blips: Vec<usize>,
+        calls: usize,
+        /// Every window driven, in order: (concurrency, role, passed).
+        record: Vec<(u32, StreamRole, bool)>,
+    }
+
+    impl BandProbe {
+        fn new(seed: u64, edge: f64, width: f64, cooldown_len: u32) -> Self {
+            Self {
+                edge,
+                width,
+                rng: seed.max(1),
+                cooldown: 0,
+                cooldown_len,
+                blips: Vec::new(),
+                calls: 0,
+                record: Vec::new(),
+            }
+        }
+        fn rand01(&mut self) -> f64 {
+            // xorshift64*: enough randomness for a Bernoulli draw, zero dependencies.
+            let mut x = self.rng;
+            x ^= x >> 12;
+            x ^= x << 25;
+            x ^= x >> 27;
+            self.rng = x;
+            (x.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 11) as f64 / (1u64 << 53) as f64
+        }
+        fn p_fail(&self, c: u32) -> f64 {
+            let x = (c as f64 - self.edge) / self.width;
+            1.0 / (1.0 + (-x).exp())
+        }
+    }
+
+    impl StreamSearchDriver for BandProbe {
+        fn window(&mut self, conc: u32, role: StreamRole) -> Option<DriverWindow> {
+            let i = self.calls;
+            self.calls += 1;
+            let fail = if self.cooldown > 0 {
+                true
+            } else if self.blips.contains(&i) {
+                true
+            } else {
+                let p = self.p_fail(conc);
+                self.rand01() < p
+            };
+            if fail && self.cooldown == 0 {
+                self.cooldown = self.cooldown_len;
+            }
+            self.record.push((conc, role, !fail));
+            Some(DriverWindow {
+                passed: !fail,
+                fps: conc as f64 * 10.0,
+            })
+        }
+        fn settle(&mut self, _streams: u32) {
+            self.cooldown = self.cooldown.saturating_sub(1);
+        }
+    }
+
+    /* THE REPRODUCIBILITY INVARIANT - the one the retired bisection provably fails, and the reason
+    the redesign exists. Identical software published 4,492 / nothing / 4,559 across three real
+    runs; against a fixed band, a hundred seeded searches must land inside ONE geometric step of
+    each other and almost never publish an absence. */
+    #[test]
+    fn a_hundred_runs_against_one_band_agree_to_within_one_descent_step() {
+        let mut published = Vec::new();
+        let mut absences = 0usize;
+        for seed in 1..=100u64 {
+            let mut p = BandProbe::new(seed, 4600.0, 92.0, 2);
+            match stream_ceiling_search(&mut p, 1, 16_384) {
+                StreamSearchOutcome::Published { conc, .. } => published.push(conc),
+                _ => absences += 1,
+            }
+        }
+        assert!(
+            absences <= 5,
+            "a band with a firm floor must almost always yield a number; got {absences} absences \
+             of 100 - the exact famine the redesign exists to end"
+        );
+        let (min, max) = (
+            *published.iter().min().expect("some published"),
+            *published.iter().max().expect("some published"),
+        );
+        let step = STREAM_DESCENT_DEN as f64 / STREAM_DESCENT_NUM as f64;
+        assert!(
+            (max as f64) / (min as f64) <= step * 1.05,
+            "published values spread {min}..{max}, wider than one descent step - the search is \
+             still sampling the band instead of its floor"
+        );
+    }
+
+    /* THE 1.4.1 anthropic>anthropic FIXTURE. The real cell carried c=8,192 cleanly, was driven
+    once at 16,384, and never passed another window at ANY concurrency - the breaker held every
+    subsequent verdict hostage and the cell published nothing. The recovery gate is the fix: the
+    canary burns the cooldown down BEFORE each verdict-bearing window, so the floor the cell
+    proved publishes. */
+    #[test]
+    fn a_cooldown_after_one_overdriven_rung_no_longer_starves_the_floor() {
+        // Edge just above 8,192 so every rung to 8,192 passes on merit, every descent candidate
+        // above it genuinely fails, and 16,384 arms a 3-settle cooldown - the shape the retired
+        // search never recovered from. (An edge set well above the proven rung is a DIFFERENT
+        // fixture: the first version of this test used 12,000 and the search correctly published
+        // 10,976 - a candidate legitimately below the edge - which is it finding MORE than the
+        // 1.4.1 board's floor, not the starvation this test pins.)
+        let mut p = BandProbe::new(7, 8_600.0, 60.0, 3);
+        match stream_ceiling_search(&mut p, 1, 16_384) {
+            StreamSearchOutcome::Published { conc, .. } => assert_eq!(
+                conc, 8_192,
+                "the floor the cell proved is the number; the cooldown above it is the finding"
+            ),
+            other => panic!(
+                "the 1.4.1 shape must publish its proven floor, not {other:?} - that absence is \
+                 the exact defect on record"
+            ),
+        }
+    }
+
+    /// A cooldown longer than the canary budget IS the wedge: the search must say so - and say it
+    /// as the wedge outcome the shell owes the attribution experiments to, never as a bare miss.
+    #[test]
+    fn a_cooldown_that_outlasts_the_canary_budget_is_the_wedge_finding() {
+        let mut p = BandProbe::new(11, 12_000.0, 100.0, 1_000);
+        match stream_ceiling_search(&mut p, 1, 16_384) {
+            StreamSearchOutcome::CanaryNeverRecovered { proven, canary, .. } => {
+                assert_eq!(proven, 8_192);
+                assert_eq!(canary, 8_192 / STREAM_CANARY_DIVISOR);
+            }
+            other => panic!("a never-ending cooldown must surface as the wedge, not {other:?}"),
+        }
+    }
+
+    /// One spurious failure far below the edge must not truncate the climb: the retry proves the
+    /// rung on a recovered gateway and the ascent RESUMES. The retired bisection instead treated
+    /// the blip as its upper bracket and searched permanently below it.
+    #[test]
+    fn one_blip_below_the_edge_does_not_truncate_the_climb() {
+        let mut p = BandProbe::new(3, 1.0e12, 1.0, 0);
+        // The ascent from 1 doubles: 1, 2, 4, ... 256 is the 9th window (index 8). Force exactly
+        // that one to fail.
+        p.blips = vec![8];
+        match stream_ceiling_search(&mut p, 1, 4_096) {
+            StreamSearchOutcome::LowerBound { top } => assert_eq!(
+                top, 4_096,
+                "after the blip is retried clean the climb must run the whole range"
+            ),
+            other => panic!("a single blip truncated the search into {other:?}"),
+        }
+    }
+
+    /// A gateway that never serves anything is a measured zero - never the wedge sentence, whose
+    /// "carried it cleanly" would claim an ascent that never happened.
+    #[test]
+    fn a_gateway_that_never_served_is_a_zero_not_a_wedge() {
+        let mut p = BandProbe::new(5, 0.0, 1.0, 0);
+        assert_eq!(
+            stream_ceiling_search(&mut p, 1, 4_096),
+            StreamSearchOutcome::NothingSustains
+        );
+    }
+
+    /// The rig running short ends the search as OURS, from any phase it strikes in.
+    #[test]
+    fn a_window_the_rig_cannot_run_ends_the_search_as_ours() {
+        struct RigDies {
+            after: usize,
+            calls: usize,
+        }
+        impl StreamSearchDriver for RigDies {
+            fn window(&mut self, conc: u32, _role: StreamRole) -> Option<DriverWindow> {
+                self.calls += 1;
+                if self.calls > self.after {
+                    return None;
+                }
+                Some(DriverWindow {
+                    passed: true,
+                    fps: conc as f64,
+                })
+            }
+            fn settle(&mut self, _streams: u32) {}
+        }
+        let mut d = RigDies { after: 3, calls: 0 };
+        assert!(matches!(
+            stream_ceiling_search(&mut d, 1, 4_096),
+            StreamSearchOutcome::RigRanShort { at: 8 }
+        ));
+    }
+
+    /* OVER-EDGE EXPOSURE IS BOUNDED. Every window driven above the published value re-arms
+    whatever recovery machinery the gateway has, so the search must spend them sparingly: the
+    ascent's one discovery, one bounded retry, at most one resumed discovery, and each descent
+    candidate's attempt. The retired search had no such bound - its confirmation, every step-down
+    and the floor re-test all sat above the proven floor. */
+    #[test]
+    fn windows_above_the_published_value_are_bounded() {
+        for seed in 1..=50u64 {
+            let mut p = BandProbe::new(seed, 4_600.0, 92.0, 2);
+            let out = stream_ceiling_search(&mut p, 1, 16_384);
+            let StreamSearchOutcome::Published { conc, .. } = out else {
+                continue;
+            };
+            let over = p
+                .record
+                .iter()
+                .filter(|(c, role, _)| *role == StreamRole::Rung && *c > conc)
+                .count();
+            let bound = 1 // the ascent's discovery of the failing rung
+                + crate::search::WINDOWS_PER_RUNG // the retry of that rung
+                + 1 // the resumed ascent's own discovery
+                + (MAX_CEILING_STEPDOWNS + 1) * crate::search::WINDOWS_PER_RUNG; // candidates
+            assert!(
+                over <= bound,
+                "seed {seed}: {over} windows above the published c={conc}, bound {bound}"
+            );
+        }
+    }
+
+    /// Canary verdicts never vote: no canary window's concurrency may be what publishes unless
+    /// rung windows at that concurrency earned it themselves.
+    #[test]
+    fn a_canary_pass_is_never_a_rungs_vote() {
+        let mut p = BandProbe::new(13, 4_600.0, 92.0, 2);
+        if let StreamSearchOutcome::Published { conc, .. } = stream_ceiling_search(&mut p, 1, 16_384)
+        {
+            let rung_holds = p
+                .record
+                .iter()
+                .filter(|(c, role, passed)| *c == conc && *role == StreamRole::Rung && *passed)
+                .count();
+            assert!(
+                rung_holds >= crate::search::WINDOWS_PER_RUNG,
+                "published c={conc} must be backed by {} consecutive RUNG holds, not canary passes",
+                crate::search::WINDOWS_PER_RUNG
             );
         }
     }
