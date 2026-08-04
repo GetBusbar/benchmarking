@@ -24,6 +24,11 @@
     "first_commit": "2026-05-29",
     "as_of": "2026-07-24"
   },
+  "busbar-152": {
+    "stars": 110,
+    "first_commit": "2026-05-29",
+    "as_of": "2026-07-24"
+  },
   "gomodel": {
     "stars": 1014,
     "first_commit": "2025-12-13",

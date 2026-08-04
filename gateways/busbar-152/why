@@ -1,0 +1,22 @@
+# Why every setting, env var, header and command this gateway uses is here.
+#
+# The rule, from the published methodology: a setting may appear only if it is needed to boot the
+# process at all, to point an upstream at the test mock instead of a real provider, to expose an
+# ingress path the matrix exercises, or to bind the port and cores the rig requires. One claim per
+# line: <pattern> <boot|upstream|ingress|bind>. Anything unclaimed is a lint failure, and a claim
+# that matches nothing is a stale claim and also a failure.
+#
+# Each `boot` claim below was checked against the published image: the setting was removed, and kept
+# only where the image then failed to validate or run.
+listen         bind      # the port the harness drives
+providers      boot      # a required field: omitting it fails with "missing field `providers`"
+mock-*         upstream  # one provider per protocol, each base_url -> the mock
+protocol       upstream  # which upstream dialect that provider speaks
+base_url       upstream  # -> the mock
+api_key        boot      # the secret reference busbar reads; bedrock's SigV4 lane cannot sign without it
+env            boot      # names the variable holding that credential
+models         ingress   # the client-facing model table
+gpt-4o-mini*   ingress   # the model name each matrix column asks for; selects that column's provider
+provider       upstream  # which provider backs this model
+BENCH_MOCK_KEY    boot   # the credential api_key names (dummy; the mock ignores it)
+BENCH_BEDROCK_KEY boot   # bedrock SigV4 ACCESS:SECRET pair, same
