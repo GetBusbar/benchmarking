@@ -1061,10 +1061,16 @@ enum StreamStop {
     ///
     /// `restart_cleared` records whether a restart brought it back - which is the difference between
     /// "wedged until restarted" and "wedged and stayed wedged", and the two are not the same claim.
+    ///
+    /// `None` is a THIRD state and not a synonym for `Some(false)`: no restart was attempted, so
+    /// nothing is known about whether one would have helped. The floor fallback reaches this verdict
+    /// without ever restarting the gateway, and `Some(false)` prints "a restart did not bring it back
+    /// either" - a claim about an experiment that never ran. Publishing that would be the same
+    /// attribution error this enum exists to prevent, just pointed at the gateway.
     GatewayDidNotRecover {
         at: u32,
         proven: u32,
-        restart_cleared: bool,
+        restart_cleared: Option<bool>,
     },
 }
 
@@ -1135,10 +1141,10 @@ impl StreamStop {
                  c={at} failed repeatedly although this cell had already carried it cleanly{}. No \
                  sustained ceiling is published because a ceiling cannot be measured on a process \
                  that is no longer serving - but that it does not recover is itself the finding",
-                if restart_cleared {
-                    ", and it served again only after the harness restarted it"
-                } else {
-                    ", and a restart did not bring it back either"
+                match restart_cleared {
+                    Some(true) => ", and it served again only after the harness restarted it",
+                    Some(false) => ", and a restart did not bring it back either",
+                    None => "",
                 }
             ),
             StreamStop::BudgetExhausted => format!(
@@ -2433,7 +2439,7 @@ pub fn sweep_streams_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> Cel
                                         StreamStop::GatewayDidNotRecover {
                                             at: ceiling,
                                             proven: proven_clean,
-                                            restart_cleared,
+                                            restart_cleared: Some(restart_cleared),
                                         }
                                     } else {
                                         StreamStop::RigContaminated { at: ceiling, proven: proven_clean }
@@ -2507,12 +2513,44 @@ pub fn sweep_streams_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> Cel
                             winner = Some((proven_clean, fps));
                         }
                     } else {
-                        // The floor did not hold either, so the absence stands and keeps the reason
-                        // the search already had. A rung that cannot be reconfirmed is not a ceiling.
-                        eprintln!(
-                            "streams: floor c={proven_clean} held {held} of {total} windows - not \
-                             confirmed, so the cell keeps its absence"
-                        );
+                        /* A FLOOR THAT FAILS EVERY WINDOW IS A FINDING, NOT A MISSING NUMBER.
+
+                        This kept the reason the search already had, and that under-reported the most
+                        useful thing in the cell. `proven_clean` is a concurrency THIS cell carried
+                        cleanly on the way up; failing every window there afterwards means it can no
+                        longer serve what it already served. "the stepped-down rung at c=4127 failed"
+                        describes a rung nobody asked about and omits that the floor at c=4096 then
+                        failed three times out of three.
+
+                        On 2026-08-04 that shape appeared on nine cells across three gateways -
+                        busbar-151, agentgateway and aisix - and every one published the stepped-rung
+                        sentence. bench-audit's `check_a_wedged_gateway_is_named_as_one` caught all
+                        nine; the previous engine passed the same invariant only because it never
+                        re-measured the floor, so the wedge was there and nothing looked.
+
+                        ONLY WHEN NOTHING HELD. `stream_ceiling_confirmed` is a MAJORITY rule, so
+                        "not confirmed" also covers holding one window of three - that is a gateway
+                        flapping at its limit, which is ordinary non-convergence and already reported
+                        as such. Upgrading that to "stopped serving" would overstate it in the
+                        unflattering direction, which is no more honest than the flattering one. */
+                        if held == 0 && total > 0 {
+                            eprintln!(
+                                "streams: floor c={proven_clean} failed all {total} windows - the \
+                                 gateway no longer serves a concurrency it had already carried"
+                            );
+                            stop = StreamStop::GatewayDidNotRecover {
+                                at: proven_clean,
+                                proven: proven_clean,
+                                // No restart was attempted on this path, and `Some(false)` would
+                                // claim one was tried and failed.
+                                restart_cleared: None,
+                            };
+                        } else {
+                            eprintln!(
+                                "streams: floor c={proven_clean} held {held} of {total} windows - not \
+                                 confirmed, so the cell keeps its absence"
+                            );
+                        }
                     }
                 }
                 match winner {
@@ -3117,9 +3155,9 @@ mod tests {
         // And a gateway that had to be restarted is no longer the process the sweep measured, so
         // whatever a fresh one carries is not this cell's ceiling. "It does not recover" is the
         // finding and must not be overwritten by a number.
-        assert!(!StreamStop::GatewayDidNotRecover { at: 8192, proven: 4096, restart_cleared: true }
+        assert!(!StreamStop::GatewayDidNotRecover { at: 8192, proven: 4096, restart_cleared: Some(true) }
             .floor_fallback_ok());
-        assert!(!StreamStop::GatewayDidNotRecover { at: 8192, proven: 4096, restart_cleared: false }
+        assert!(!StreamStop::GatewayDidNotRecover { at: 8192, proven: 4096, restart_cleared: Some(false) }
             .floor_fallback_ok());
     }
 
@@ -5788,7 +5826,7 @@ mod gateway_recovery_tests {
             StreamStop::GatewayDidNotRecover {
                 at: 4096,
                 proven: 8192,
-                restart_cleared: true
+                restart_cleared: Some(true)
             }
             .absent_kind(),
             Absent::NotMeasured,
@@ -5812,13 +5850,13 @@ mod gateway_recovery_tests {
         let cleared = StreamStop::GatewayDidNotRecover {
             at: 4096,
             proven: 8192,
-            restart_cleared: true,
+            restart_cleared: Some(true),
         }
         .describe(8192, 6);
         let stuck = StreamStop::GatewayDidNotRecover {
             at: 4096,
             proven: 8192,
-            restart_cleared: false,
+            restart_cleared: Some(false),
         }
         .describe(8192, 6);
         assert!(
@@ -5831,6 +5869,67 @@ mod gateway_recovery_tests {
             assert!(d.contains("c=8192"), "must name what it had carried: {d}");
             assert!(d.contains("c=4096"), "must name the rung that failed: {d}");
         }
+    }
+
+    /// A restart that never happened must not be reported as one that failed.
+    ///
+    /// The floor fallback reaches "it no longer serves what it carried" WITHOUT restarting the
+    /// gateway, so it has no evidence either way. `Some(false)` prints "a restart did not bring it
+    /// back either", which is a claim about an experiment that never ran - the same manufactured
+    /// certainty this enum exists to prevent, just pointed at the gateway instead of the rig.
+    #[test]
+    fn an_unattempted_restart_is_not_reported_as_a_failed_one() {
+        let untried = StreamStop::GatewayDidNotRecover {
+            at: 4096,
+            proven: 4096,
+            restart_cleared: None,
+        }
+        .describe(4594, 4);
+        assert!(
+            !untried.contains("restart"),
+            "must not mention a restart that was never attempted: {untried}"
+        );
+        // It must still deliver the finding itself, which is the whole point of the upgrade.
+        assert!(
+            untried.contains("did not recover") && untried.contains("c=4096"),
+            "must still name the wedge and the concurrency it had carried: {untried}"
+        );
+        let stuck = StreamStop::GatewayDidNotRecover {
+            at: 4096,
+            proven: 4096,
+            restart_cleared: Some(false),
+        }
+        .describe(4594, 4);
+        assert_ne!(
+            untried, stuck,
+            "'no restart attempted' and 'a restart did not help' are different claims"
+        );
+    }
+
+    /// The floor fallback's own verdict must be reachable, and must be the GATEWAY's result.
+    ///
+    /// bench-audit's `check_a_wedged_gateway_is_named_as_one` reads the absence text, so a cell that
+    /// fails every window at its own proven floor has to SAY that. Nine cells across three gateways
+    /// published the stepped-rung sentence instead on 2026-08-04; this pins the contract that made
+    /// them wrong. It is filed as NotMeasured rather than HarnessError because a gateway that stops
+    /// serving is the gateway's result - filing it under our own faults would be the attribution
+    /// error in reverse.
+    #[test]
+    fn a_floor_that_fails_every_window_is_the_gateways_finding() {
+        let stop = StreamStop::GatewayDidNotRecover {
+            at: 4096,
+            proven: 4096,
+            restart_cleared: None,
+        };
+        assert_eq!(stop.absent_kind(), Absent::NotMeasured);
+        // And it must never then be overwritten by a fallback number: the finding outranks a figure
+        // taken from a process that is no longer the one the sweep measured.
+        assert!(!stop.floor_fallback_ok());
+        let d = stop.describe(4594, 4);
+        assert!(
+            d.contains("does not recover") || d.contains("did not recover"),
+            "the absence must name the wedge, not the rung above it: {d}"
+        );
     }
 }
 
@@ -5848,7 +5947,7 @@ mod restart_attribution_tests {
             StreamStop::GatewayDidNotRecover {
                 at,
                 proven,
-                restart_cleared,
+                restart_cleared: Some(restart_cleared),
             }
         } else {
             StreamStop::RigContaminated { at, proven }
