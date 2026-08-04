@@ -510,11 +510,24 @@ function metric(env, fmt = fmtInt) {
        attribution charges the rig to the subject, which is the one thing this board exists not to do.
        The detail already names the culprit; this reads it. */
     const rigSide = !!(detail && /(direct-to-mock leg|from the mock directly|did not hold on re-measurement)/.test(detail));
-    const text = rigSide ? "unconfirmed"
+    /* AND WHEN THE GATEWAY IS WHY, THE ROW MUST SAY THAT TOO - the other direction of the same
+       attribution rule, and the direction a reader would not catch on their own. The engine's
+       wedge verdict ("the gateway stopped serving ... did not recover") is issued only after its
+       own attribution experiments cleared the rig: a control window at the mock proved the
+       reference leg clean at that exact concurrency, and (where the harness owns the process) a
+       restart separated "wedged process" from "wedged host". Rendering that as a neutral
+       "not measured" - or worse, sweeping it into rig-side "unconfirmed" - launders a reproducible
+       gateway collapse into instrument noise. busbar 1.5.x is the case on record: a breaker
+       cooldown shedding 100% of streams with a retry-after countdown, at a concurrency the same
+       process had carried cleanly minutes before. Checked BEFORE rigSide so no future overlap in
+       the sentences can flip the verdict back in the flattering direction. */
+    const wedged = !!(detail && /gateway stopped serving/.test(detail));
+    const text = wedged ? "did not recover"
+      : rigSide ? "unconfirmed"
       : reason === "not_measured" ? "not measured"
       : reason === "harness_error" ? "rig fault"
       : "n/a";
-    return { v: null, text, na: true, rigSide, note: detail || noteText(reason), env: env || null };
+    return { v: null, text, na: true, rigSide: rigSide && !wedged, failed: wedged, note: detail || noteText(reason), env: env || null };
   }
   // A CERTIFIED NUMBER CAN CARRY MORE THAN ONE THING WORTH SAYING, so the note is composed rather than
   // being whichever single token the envelope happened to have: the zero's meaning, the paced-match

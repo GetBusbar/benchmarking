@@ -3347,6 +3347,26 @@ test("a measured FAILURE renders red with its counts, never as the n/a an untest
   assert.ok(!directFrames.failed);
 });
 
+test("a gateway the engine PROVED wedged renders as the gateway's own finding, not instrument noise", () => {
+  // The engine issues this sentence only after its attribution experiments cleared the rig: a
+  // control window at the mock was clean at the exact concurrency, and (where the harness owns the
+  // process) a restart separated wedged-process from wedged-host. busbar 1.5.x is the case on
+  // record - a breaker cooldown shedding 100% of streams with a retry-after countdown, at a
+  // concurrency the same process had carried cleanly. Rendering it "not measured" (or sweeping it
+  // into rig-side "unconfirmed") launders a reproducible gateway collapse into instrument noise.
+  const wedgeDetail = "the gateway stopped serving after being pushed past c=4096 and did not " +
+    "recover: c=4096 failed repeatedly although this cell had already carried it cleanly, and it " +
+    "served again only after the harness restarted it. No sustained ceiling is published because " +
+    "a ceiling cannot be measured on a process that is no longer serving - but that it does not " +
+    "recover is itself the finding";
+  const wedged = app.metric(sealMetric(null, { absent: { reason: "not_measured",
+    detail: wedgeDetail } }), String);
+  assert.equal(wedged.text, "did not recover", "the finding is the cell text");
+  assert.equal(wedged.failed, true, "a proven gateway wedge carries the gateway-blaming render");
+  assert.ok(!wedged.rigSide, "a verdict the rig was cleared of must not read rig-side");
+  assert.equal(wedged.note, wedgeDetail, "the full evidence chain stays on the tooltip");
+});
+
 test("a measured zero's meaning is VISIBLE on the table cell, not only in a hover tooltip", () => {
   // The 2026-07-28 board rendered rps_sustained_20ms=0 as a bare "0" beside a real maximum, which
   // reads as "this gateway does nothing". The td writer now prints the short reason under the number.
