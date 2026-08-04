@@ -1613,12 +1613,27 @@ impl HostState {
 /// that never produced an event; `Malformed`/`NotEventStream` is the peer speaking something that is
 /// not SSE. Rig-side ends (`RigExhausted`, `RigRefused`) never reach here - `stream_window` discards
 /// the whole window for those, so they cannot be laundered into a gateway's error rate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct StreamErrorKinds {
     /// The peer refused, reset, or was unreachable - the connection never carried a request.
     pub connect_failed: u64,
     /// The peer answered with a non-2xx status.
     pub status: u64,
+    /// `status`, split by the CODE the peer actually sent. Sums to `status`.
+    ///
+    /// The count alone is why the 2026-08-03 board could not be diagnosed from its own snapshot:
+    /// nine cells across three gateways published "N of M streams errored" where every single error
+    /// was the same code, and the code was the finding. busbar answered `503` with a `retry-after`
+    /// countdown - its breaker had opened and declared a two-minute outage - and that reads
+    /// identically to a bag of mixed 502s in a bare count. A `BTreeMap` (not `HashMap`) so the JSON
+    /// serialization is deterministic and two snapshots of the same behaviour diff clean.
+    pub status_codes: std::collections::BTreeMap<u16, u64>,
+    /// The largest `Retry-After` (delta-seconds) any non-2xx in this window carried, if any did.
+    ///
+    /// A peer that names its own cooldown has converted "requests failed" into "the peer declared an
+    /// outage of a stated length", and the stated length is what lets a reader check whether the
+    /// windows that followed were measured inside it. See `http::SseOutcome::retry_after_s`.
+    pub retry_after_max_s: Option<u64>,
     /// A 2xx that delivered no event at all.
     pub no_frames: u64,
     /// The peer answered 2xx but did not speak a well-formed event stream.
@@ -1638,6 +1653,12 @@ impl StreamErrorKinds {
             self.connect_failed += 1;
         } else if !o.status.is_some_and(|s| (200..300).contains(&s)) {
             self.status += 1;
+            // `0` is "the head never parsed a status at all", kept distinct from every real code
+            // rather than dropped: a count that sums to `status` is the invariant readers get.
+            *self.status_codes.entry(o.status.unwrap_or(0)).or_insert(0) += 1;
+            if let Some(ra) = o.retry_after_s {
+                self.retry_after_max_s = Some(self.retry_after_max_s.map_or(ra, |m| m.max(ra)));
+            }
         } else if matches!(o.end, SseEnd::Malformed(_) | SseEnd::NotAnEventStream(_)) {
             self.not_event_stream += 1;
         } else {
@@ -2065,6 +2086,12 @@ impl StreamPoint {
             // are distinguishable in the snapshot.
             "stream_errors_connect_failed": self.error_kinds.connect_failed,
             "stream_errors_status": self.error_kinds.status,
+            // THE CODES THEMSELVES, keyed as strings because JSON object keys are strings. Emitted
+            // even when empty for the same reason the zero counts above are: a clean rung and an
+            // unrecorded one must be distinguishable in the snapshot.
+            "stream_errors_status_codes": self.error_kinds.status_codes.iter()
+                .map(|(code, n)| (code.to_string(), serde_json::json!(n)))
+                .collect::<serde_json::Map<String, serde_json::Value>>(),
             "stream_errors_no_frames": self.error_kinds.no_frames,
             "stream_errors_not_event_stream": self.error_kinds.not_event_stream,
             "host_before": self.host_before.to_json(),
@@ -2072,6 +2099,11 @@ impl StreamPoint {
         });
         if let (Some(why), Some(obj)) = (&self.why, v.as_object_mut()) {
             obj.insert("why".to_string(), serde_json::json!(why));
+        }
+        // Only when a non-2xx actually carried one: an absent header and a header of 0 are not the
+        // same claim, and `null` on every clean rung would be noise pretending to be a record.
+        if let (Some(ra), Some(obj)) = (self.error_kinds.retry_after_max_s, v.as_object_mut()) {
+            obj.insert("stream_errors_retry_after_max_s".to_string(), serde_json::json!(ra));
         }
         v
     }
@@ -2088,7 +2120,7 @@ fn point_of(w: &StreamWindow, passed: bool) -> StreamPoint {
         expected_content_frames: w.expected_content_frames,
         streams: w.streams,
         errored: w.errored,
-        error_kinds: w.error_kinds,
+        error_kinds: w.error_kinds.clone(),
         host_before: w.host_before,
         stalls: w.stalls,
         why: if passed {
@@ -2538,13 +2570,92 @@ pub fn sweep_streams_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> Cel
                                 "streams: floor c={proven_clean} failed all {total} windows - the \
                                  gateway no longer serves a concurrency it had already carried"
                             );
-                            stop = StreamStop::GatewayDidNotRecover {
-                                at: proven_clean,
-                                proven: proven_clean,
-                                // No restart was attempted on this path, and `Some(false)` would
-                                // claim one was tried and failed.
-                                restart_cleared: None,
+                            /* TWO EXPERIMENTS BEFORE THE VERDICT, because "it no longer serves what
+                               it served" has three explanations and this code used to pick one
+                               without testing any of them.
+
+                               THE CONTROL WINDOW comes first: the same concurrency, the same
+                               request, driven at the MOCK with the gateway out of the path, judged
+                               on ERROR COUNTS ALONE and never on its rate - core partitioning makes
+                               the direct leg's timing incomparable (see the mock-ceiling note), but
+                               a non-2xx is a non-2xx on any schedule. If the reference instrument
+                               itself cannot carry this concurrency cleanly right now, then nothing
+                               the gateway did in the failing windows is attributable, and the
+                               verdict is RigContaminated - the unflattering-to-us direction, which
+                               is the one nobody would catch if it were wrong.
+
+                               THE RESTART runs only when the control proved the rig clean: a fresh
+                               process on a proven-clean host either carries the floor (the wedge
+                               lived in the old process's accumulated state - a breaker holding a
+                               declared cooldown is exactly this, and the reproduction against
+                               busbar 1.5.2 watched `retry-after: 108 -> 106 -> 103` count down
+                               across three all-503 windows) or it does not (the finding stands,
+                               with the experiment on the record). The number a restarted process
+                               carries is deliberately still not published - a fresh process is not
+                               the one this cell measured. */
+                            let mock_leg_clean = match stream_window(
+                                cfg.mock_addr, &p.path, &p.body, &p.headers, p.dialect, proven_clean,
+                            ) {
+                                Some(cw) => {
+                                    eprintln!(
+                                        "streams: control window at the mock, c={proven_clean}: \
+                                         {} of {} streams errored",
+                                        cw.errored, cw.streams
+                                    );
+                                    Some(cw.errored == 0)
+                                }
+                                // A control that could not run proves nothing about the gateway
+                                // either way - treated exactly as a dirty control below.
+                                None => None,
                             };
+                            if mock_leg_clean == Some(true) {
+                                let restart_cleared = match cfg.relaunch.as_ref() {
+                                    Some(spec) => {
+                                        eprintln!(
+                                            "streams: the mock leg is clean at c={proven_clean}, so \
+                                             the wedge is on the gateway's side of the socket - \
+                                             restarting it to learn whether the wedge lives in the \
+                                             process's own accumulated state"
+                                        );
+                                        match restart_to_rest(spec, &cfg.relaunch_launcher, &cfg.relaunch_commands) {
+                                            Ok(()) => stream_window(
+                                                cfg.gateway_addr, &p.path, &p.body, &p.headers, p.dialect, proven_clean,
+                                            )
+                                            .map(|w3| {
+                                                let passed3 = streams_gate_passes(&w3);
+                                                p.points.push(point_of(&w3, passed3));
+                                                Some(passed3)
+                                            })
+                                            .unwrap_or(None),
+                                            Err(e) => {
+                                                eprintln!("streams: the gateway could not be restarted: {e}");
+                                                None
+                                            }
+                                        }
+                                    }
+                                    // No declared relaunch: the harness does not own this process
+                                    // and must not bounce it. `None` says "untried", which is true.
+                                    None => None,
+                                };
+                                stop = StreamStop::GatewayDidNotRecover {
+                                    at: proven_clean,
+                                    proven: proven_clean,
+                                    restart_cleared,
+                                };
+                            } else {
+                                // The control errored or could not run: the reference leg is not
+                                // clean, so charging the gateway would launder our state into its
+                                // row. Ours, loudly.
+                                eprintln!(
+                                    "streams: the control window at the mock was NOT clean at \
+                                     c={proven_clean} - the floor failure cannot be attributed to \
+                                     the gateway"
+                                );
+                                stop = StreamStop::RigContaminated {
+                                    at: proven_clean,
+                                    proven: proven_clean,
+                                };
+                            }
                         } else {
                             eprintln!(
                                 "streams: floor c={proven_clean} held {held} of {total} windows - not \
@@ -4693,6 +4804,7 @@ while True:
             end: crate::http::SseEnd::RigExhausted(
                 "Cannot assign requested address (os error 99)".into(),
             ),
+            retry_after_s: None,
         };
         assert!(
             !stream_errored(&ours),
@@ -4706,6 +4818,7 @@ while True:
             frame_offsets_us: Vec::new(),
             content_frames: 0,
             end: crate::http::SseEnd::ConnectionFailed("Connection refused (os error 111)".into()),
+            retry_after_s: None,
         };
         assert!(
             stream_errored(&theirs),
@@ -4719,6 +4832,7 @@ while True:
             frame_offsets_us: Vec::new(),
             content_frames: 0,
             end: crate::http::SseEnd::NotAnEventStream("application/json".into()),
+            retry_after_s: None,
         };
         assert!(stream_errored(&not_sse));
     }
@@ -4905,6 +5019,7 @@ while True:
             frame_offsets_us: Vec::new(),
             content_frames: 0,
             end: crate::http::SseEnd::RigRefused("a header we will not send".into()),
+            retry_after_s: None,
         };
         assert!(
             !stream_errored(&refused),
@@ -5630,6 +5745,7 @@ mod stream_error_kind_tests {
             frame_offsets_us: vec![1; frames],
             content_frames: frames as u64,
             end,
+            retry_after_s: None,
         }
     }
 
@@ -5717,6 +5833,89 @@ mod stream_error_kind_tests {
             errored, 4,
             "this fixture must actually produce errors to be testing anything"
         );
+    }
+
+    /* THE CODE IS THE FINDING, so the classifier keeps it. Nine cells of the 2026-08-03 board
+    published "N of M streams errored" where every error was the same `503` carrying a
+    `retry-after` countdown - a breaker cooldown, diagnosable from the code and the header and
+    from nothing else the rig recorded. The count alone made a self-declared outage read
+    identically to a bag of mixed 502s. */
+    #[test]
+    fn status_errors_keep_their_codes_and_the_declared_cooldown() {
+        let mut k = StreamErrorKinds::default();
+        let mut with_retry = outcome(Some(503), 0, SseEnd::StreamClosed);
+        with_retry.retry_after_s = Some(108);
+        k.add(&with_retry);
+        let mut with_shorter_retry = outcome(Some(503), 0, SseEnd::StreamClosed);
+        with_shorter_retry.retry_after_s = Some(32);
+        k.add(&with_shorter_retry);
+        k.add(&outcome(Some(502), 0, SseEnd::StreamClosed));
+        // A head that never parsed a status still counts under `status` via code 0, so the
+        // histogram keeps summing to the class count instead of leaking entries.
+        k.add(&outcome(None, 0, SseEnd::StreamClosed));
+
+        assert_eq!(k.status_codes.get(&503), Some(&2));
+        assert_eq!(k.status_codes.get(&502), Some(&1));
+        assert_eq!(k.status_codes.get(&0), Some(&1));
+        assert_eq!(
+            k.status_codes.values().sum::<u64>(),
+            k.status,
+            "the histogram must sum to the class it splits, or a reader reconciling them finds \
+             errors with no code and codes with no error"
+        );
+        assert_eq!(
+            k.retry_after_max_s,
+            Some(108),
+            "the LONGEST declared cooldown is the one that bounds every window that follows"
+        );
+
+        // And a connect failure records no code: it has none, and inventing one would file the
+        // peer-declined class under the peer-answered one.
+        let mut k = StreamErrorKinds::default();
+        k.add(&outcome(None, 0, SseEnd::ConnectionFailed("reset".into())));
+        assert!(k.status_codes.is_empty());
+        assert_eq!(k.retry_after_max_s, None);
+    }
+
+    /// The histogram must survive into the snapshot, or the box dies with the diagnosis: the sweep
+    /// array is the only record of a failed rung that outlives the run.
+    #[test]
+    fn the_point_publishes_the_codes_and_the_cooldown() {
+        let mut k = StreamErrorKinds::default();
+        let mut o = outcome(Some(503), 0, SseEnd::StreamClosed);
+        o.retry_after_s = Some(103);
+        k.add(&o);
+        let p = StreamPoint {
+            concurrency: 4096,
+            passed: false,
+            fps: 0.0,
+            frames: 0,
+            expected_frames: 0,
+            content_frames: 0,
+            expected_content_frames: 0,
+            streams: 4096,
+            errored: 1,
+            error_kinds: k,
+            host_before: HostState::default(),
+            stalls: 0,
+            why: None,
+        };
+        let v = p.to_json();
+        assert_eq!(v["stream_errors_status_codes"]["503"], 1);
+        assert_eq!(v["stream_errors_retry_after_max_s"], 103);
+
+        // A clean rung emits an EMPTY map, not an absent key: a clean rung and an unrecorded one
+        // must be distinguishable in the snapshot. The cooldown key is the opposite case - absent
+        // when nothing declared one - because "no header" and "a header of 0" are different claims.
+        let clean = StreamPoint {
+            error_kinds: StreamErrorKinds::default(),
+            errored: 0,
+            passed: true,
+            ..p
+        };
+        let v = clean.to_json();
+        assert!(v["stream_errors_status_codes"].as_object().is_some_and(|m| m.is_empty()));
+        assert!(v.get("stream_errors_retry_after_max_s").is_none());
     }
 
     /// Rig-side ends never reach the classifier - `stream_window` discards the whole window - so they

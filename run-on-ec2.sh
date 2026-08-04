@@ -1392,7 +1392,16 @@ echo "[rig] loadgen/mock fd limit: $(ulimit -Sn) (hard $(ulimit -Hn))"
 # of that knob - it permits reuse for OUTBOUND connections only.
 sudoq sysctl -w net.ipv4.ip_local_port_range="16384 65535" >/dev/null 2>&1 || true
 sudoq sysctl -w net.ipv4.tcp_tw_reuse=1 >/dev/null 2>&1 || true
-echo "[rig] ephemeral ports: $(cat /proc/sys/net/ipv4/ip_local_port_range 2>/dev/null || echo unknown) (tw_reuse=$(cat /proc/sys/net/ipv4/tcp_tw_reuse 2>/dev/null || echo unknown))"
+# somaxconn is the OTHER HALF of the mock's stated listen backlog (mock/src/main.rs asks for 16384;
+# the kernel truncates a listen() above somaxconn SILENTLY, so without this the mock's number is a
+# comment). The stream searches spawn every lane before the clock starts, and a gateway that opens
+# one upstream connection per stream presents the mock with the whole rung as one SYN burst - at the
+# default queue, what overflows surfaces on the board as the GATEWAY's connect errors, and an
+# error-rate breaker can convert a handful of those into a self-declared outage. Same number, both
+# knobs, stated in both places. tcp_max_syn_backlog for the half-open queue the same burst fills first.
+sudoq sysctl -w net.core.somaxconn=16384 >/dev/null 2>&1 || true
+sudoq sysctl -w net.ipv4.tcp_max_syn_backlog=16384 >/dev/null 2>&1 || true
+echo "[rig] ephemeral ports: $(cat /proc/sys/net/ipv4/ip_local_port_range 2>/dev/null || echo unknown) (tw_reuse=$(cat /proc/sys/net/ipv4/tcp_tw_reuse 2>/dev/null || echo unknown), somaxconn=$(cat /proc/sys/net/core/somaxconn 2>/dev/null || echo unknown))"
 # The checkout is sparse (gateways + lib only), so results/ does not exist here and the snapshot
 # writer does not create its own output directory - it reports an error and writes nothing.
 mkdir -p results/snapshots

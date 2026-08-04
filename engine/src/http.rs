@@ -826,6 +826,17 @@ pub struct SseOutcome {
     /// is claimed about which events were content and this reads exactly as `frames` does.
     pub content_frames: u64,
     pub end: SseEnd,
+    /// The `Retry-After` header's value in seconds, when the response head carried one that parsed.
+    ///
+    /// Captured because it is the difference between two findings that a bare non-2xx count cannot
+    /// separate: a gateway failing requests, and a gateway that has DECLARED an outage of a stated
+    /// length and is shedding everything until it lapses. busbar 1.5.2, driven past its edge in a
+    /// controlled reproduction, answered 100% `503` with `retry-after: 108 -> 106 -> 103` across
+    /// three consecutive windows - a breaker cooldown counting itself down, visible in the header
+    /// and in nothing else the rig recorded. Delta-seconds only (`Retry-After: <http-date>` does not
+    /// parse here): every peer this rig has met sends the delta form, and a date would need a clock
+    /// to be meaningful in a snapshot read weeks later.
+    pub retry_after_s: Option<u64>,
 }
 
 // ─────────────────────────────────── the transport-agnostic SSE reader ───────────────────────────
@@ -957,6 +968,8 @@ pub struct SseReader {
     /// does.
     dialect: Option<crate::ingress::Dialect>,
     content_frames: u64,
+    /// See `SseOutcome::retry_after_s`; captured off the head in `try_head`.
+    retry_after_s: Option<u64>,
     finished: Option<SseEnd>,
 }
 
@@ -977,6 +990,7 @@ impl SseReader {
             budget: budget.into(),
             dialect,
             content_frames: 0,
+            retry_after_s: None,
             finished: None,
         }
     }
@@ -1072,6 +1086,7 @@ impl SseReader {
             frame_offsets_us: self.offsets_us,
             content_frames: self.content_frames,
             end,
+            retry_after_s: self.retry_after_s,
         }
     }
 
@@ -1112,6 +1127,8 @@ impl SseReader {
                 headers.push((name.trim().to_string(), value.trim().to_string()));
             }
         }
+        // Delta-seconds only, by design - see `SseOutcome::retry_after_s`.
+        self.retry_after_s = header_value(&headers, "retry-after").and_then(|v| v.trim().parse().ok());
         // A content-type that is present and is not an event stream settles it immediately: waiting
         // out the deadline would learn nothing. A MISSING content-type is not a refusal - the frames
         // decide - so a peer that streams without announcing it is still read.
@@ -1349,6 +1366,7 @@ pub fn post_json_sse(
                 frame_offsets_us: Vec::new(),
                 content_frames: 0,
                 end: SseEnd::RigRefused(why),
+                retry_after_s: None,
             }
         }
     };
@@ -1362,6 +1380,7 @@ pub fn post_json_sse(
                 frame_offsets_us: Vec::new(),
                 content_frames: 0,
                 end: connect_end(&e),
+                retry_after_s: None,
             }
         }
     };
@@ -1386,6 +1405,7 @@ pub fn post_json_sse(
             frame_offsets_us: Vec::new(),
             content_frames: 0,
             end: SseEnd::Timeout,
+            retry_after_s: None,
         };
     }
     if stream.set_write_timeout(Some(write_deadline)).is_err() {
@@ -1396,6 +1416,7 @@ pub fn post_json_sse(
             content_frames: 0,
             // A non-zero deadline the OS still refused is our socket, not their server.
             end: SseEnd::RigExhausted("could not set a write deadline on the socket".to_string()),
+            retry_after_s: None,
         };
     }
     if let Err(e) = stream.write_all(&request) {
@@ -1406,6 +1427,7 @@ pub fn post_json_sse(
                 frame_offsets_us: Vec::new(),
                 content_frames: 0,
                 end: SseEnd::Timeout,
+                retry_after_s: None,
             }
         } else {
             SseOutcome {
@@ -1416,6 +1438,7 @@ pub fn post_json_sse(
                 end: SseEnd::ConnectionFailed(format!(
                     "connection dropped while sending the request: {e}"
                 )),
+                retry_after_s: None,
             }
         };
     }
@@ -1481,6 +1504,7 @@ pub async fn post_json_sse_async(
         frame_offsets_us: Vec::new(),
         content_frames: 0,
         end,
+        retry_after_s: None,
     };
     let failed = |e: String| ended(SseEnd::ConnectionFailed(e));
 
@@ -3503,6 +3527,44 @@ mod head_cap_tests {
             msg.contains("exceeds the") && msg.contains("byte cap"),
             "the refusal must name the cap that fired rather than reading to the deadline: {msg}"
         );
+    }
+
+    /* A PEER THAT NAMES ITS OWN COOLDOWN MUST NOT HAVE THE NAME DROPPED ON THE FLOOR. busbar's
+    breaker answers `503` with `retry-after: <seconds counting down>` - the one piece of evidence
+    that separates "requests failed" from "the peer declared an outage of a stated length", and
+    the head parser was reading the header and discarding it. Non-2xx heads end the read
+    (`NotAnEventStream` via content-type, or frames deciding), so the capture has to happen in
+    `try_head` itself, before the outcome is sealed. */
+    #[test]
+    fn a_non_2xx_head_keeps_its_status_code_and_retry_after() {
+        let mut r = SseReader::new(64usize, None);
+        let head = b"HTTP/1.1 503 Service Unavailable\r\ncontent-type: application/json\r\nretry-after: 108\r\ncontent-length: 2\r\n\r\n{}";
+        let step = r.feed(head, 0);
+        // application/json settles it immediately - and the evidence must already be in hand.
+        assert!(matches!(step, Step::Done(SseEnd::NotAnEventStream(_))));
+        let out = r.finish(SseEnd::StreamClosed);
+        assert_eq!(out.status, Some(503));
+        assert_eq!(
+            out.retry_after_s,
+            Some(108),
+            "the declared cooldown is the finding; dropping it made a breaker outage \
+             indistinguishable from scattered failures"
+        );
+    }
+
+    /// An HTTP-date `Retry-After` does not parse as delta-seconds and must read as absent rather
+    /// than as a garbage number; a head with no header at all reads the same, because "not stated"
+    /// is one claim however it comes about.
+    #[test]
+    fn a_retry_after_that_is_not_delta_seconds_reads_as_absent() {
+        let mut r = SseReader::new(64usize, None);
+        let head = b"HTTP/1.1 503 x\r\nretry-after: Tue, 04 Aug 2026 17:00:00 GMT\r\ncontent-type: application/json\r\n\r\n";
+        let _ = r.feed(head, 0);
+        assert_eq!(r.finish(SseEnd::StreamClosed).retry_after_s, None);
+
+        let mut r = SseReader::new(64usize, None);
+        let _ = r.feed(b"HTTP/1.1 503 x\r\ncontent-type: application/json\r\n\r\n", 0);
+        assert_eq!(r.finish(SseEnd::StreamClosed).retry_after_s, None);
     }
 }
 

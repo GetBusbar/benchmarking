@@ -74,7 +74,6 @@ use hyper::service::service_fn;
 use hyper::{Request, Response};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto;
-use tokio::net::TcpListener;
 use tokio_stream::wrappers::ReceiverStream;
 
 const OPENAI: &[u8] = br#"{"id":"chatcmpl-x","object":"chat.completion","created":1,"model":"mock","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12}}"#;
@@ -579,10 +578,30 @@ async fn main() {
     // not be fatal on the first try. lib/harness.sh's mock_stop_wait is the primary defense (it waits
     // for the port to actually free); this retry only covers the race it occasionally still loses.
     // Still fatal if the port never frees within the deadline.
+    //
+    // THE LISTEN BACKLOG IS PART OF THE INSTRUMENT, so it is stated rather than inherited.
+    // `TcpListener::bind` listens with a backlog of 1024, silently. A gateway that opens one
+    // upstream connection per in-flight stream presents this listener with the WHOLE RUNG AT ONCE -
+    // the stream searches spawn every lane before the clock starts, so c=8,192 at the top of the
+    // ladder is ~8,192 near-simultaneous SYNs into a queue of 1,024. What overflows does not fail
+    // HERE: the kernel drops the handshake, the GATEWAY's connect blocks into retransmit, its
+    // upstream timeout fires first, and the loss surfaces on the board as the gateway's own non-2xx.
+    // Worse than the mischarge itself: a gateway with an error-rate breaker can convert a handful of
+    // these into a self-declared outage (the busbar 1.5.2 reproduction watched 18 connect errors in
+    // ~15,000 requests arm a ~110s cooldown that then shed every stream at a concurrency the same
+    // process had just carried cleanly). The reference instrument must not be the spark. 16,384
+    // sits above the top of the stream ladder's burst; the kernel clamps it to net.core.somaxconn,
+    // which run-on-ec2.sh raises to match - a backlog request above somaxconn is truncated
+    // SILENTLY, so the sysctl is not optional hygiene, it is the other half of this number.
     let listener = {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
         loop {
-            match TcpListener::bind(addr).await {
+            let bound = tokio::net::TcpSocket::new_v4().and_then(|s| {
+                s.set_reuseaddr(true)?;
+                s.bind(addr)?;
+                s.listen(16_384)
+            });
+            match bound {
                 Ok(l) => break l,
                 Err(e) if std::time::Instant::now() < deadline => {
                     eprintln!("mock: bind {addr} failed ({e}); the previous mock may still hold the port - retrying");
