@@ -103,9 +103,20 @@ except Exception: print(0)' 2>/dev/null || echo 0)\"
   fi
   log "otb=$alive cells=$cells/$CELLS_TOTAL ($held)$verdict"
   # Loud, separate, and unmissable: the summary line above scrolls past in a log nobody reads closely.
+  #
+  # THE REMEDY IS AN IN-PLACE CLOCK EXTENSION, NOT A RELAUNCH. This used to say "Raise BENCH_MAX_MIN
+  # and relaunch NOW", which throws away every cell already measured to fix a number that can be
+  # changed on the live box in two seconds: the death clock is `shutdown -h +N`, a cost backstop and
+  # not part of the instrument, and `shutdown -c` + a new `shutdown -h` moves it without touching the
+  # measurement. The 2026-08-05 busbar-152 run is the case: the breach fired (on checkpoint-stale
+  # arithmetic, as it happened - see the per-cell checkpoint note in engine/src/suite.rs - but the
+  # remedy is the same when the breach is real), the clock was extended in place, and the run kept
+  # every cell. Relaunching remains the advice ONLY when the box is already gone.
   [ -n "$verdict" ] && case "$verdict" in *"WILL NOT FINISH"*)
     log "DEADLINE BREACH - this grid cannot complete before the box self-terminates."
-    log "  Raise BENCH_MAX_MIN and relaunch NOW, or accept a partial grid. Waiting changes nothing." ;;
+    log "  EXTEND THE CLOCK IN PLACE - the measurement is untouched and no cell is lost:"
+    log "    ssh -i \$BENCH_STATE_DIR/gateway-bench-key.pem ubuntu@$IP 'sudo shutdown -c; sudo shutdown -h +720'"
+    log "  Relaunching forfeits every measured cell and is only right if the box is already dead." ;;
   esac
 
   # NEVER READ "NOT STARTED YET" AS "FINISHED". At launch the box is still provisioning and `otb` is

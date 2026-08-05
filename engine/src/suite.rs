@@ -1043,63 +1043,32 @@ pub fn run_suite_with(
 
     let mut upstreams: HashMap<String, Upstream> = HashMap::new();
     let mut any_served = false;
-    let mut last_egress: Option<String> = None;
     let mut written: Option<Paths> = None;
 
-    // WRITTEN INCREMENTALLY, after every egress column, not held in memory and written once at the
-    // end: these runs take hours on a box with a hard self-termination timer, so a run interrupted
+    // WRITTEN INCREMENTALLY, after EVERY CELL, not held in memory and written once at the end:
+    // these runs take hours on a box with a hard self-termination timer, so a run interrupted
     // partway through must not lose every cell it already measured. Partial progress that survives
     // is worth more than a complete result that might not arrive.
     //
-    // A PROMOTE-GUARD TRIP ON ONE OF THESE CHECKPOINTS IS NOT THE SAME EVENT AS ON THE FINAL WRITE.
-    // Every checkpoint before the last is, by construction, thinner than the finished run it is
-    // partway through, so tripping the guard against a fuller prior snapshot already on disk is
-    // expected mid-run, not a sign the run went bad. Propagating it with `?` used to abort this whole
-    // function - discarding every cell already measured for the rest of the grid and never reaching
-    // the final flush that would have carried the complete run. So a checkpoint trip is logged and
-    // skipped; only the FINAL flush below, once every column has been measured, may make the guard's
-    // refusal fatal.
-    // STREAMED, so the checkpoint above is a checkpoint. This was `for result in run_grid_with(...)`,
-    // which returns a Vec: the whole grid had to finish before the loop began, so the per-column
+    // PER CELL, NOT PER EGRESS COLUMN, and the 2026-08-05 busbar-152 run is why. The checkpoint is
+    // also the only progress signal the outside world has: watch-busbar's deadline arithmetic - the
+    // thing that decides whether a run can finish before the box self-terminates - reads the pulled
+    // checkpoint's cell count. At column granularity that count was up to five cells stale, and
+    // during a streamable cell's long search the projection declared DEADLINE BREACH and told the
+    // operator to relaunch a healthy run that was in fact pacing fine (17/36 served while the
+    // checkpoint still said 12). A checkpoint cadence coarser than the decision it feeds turns the
+    // watchdog into a false-alarm generator. A cell is ~14-30 minutes of measurement; serializing
+    // the snapshot costs seconds. The write is atomic (tmp+rename in write_snapshot), so a reader
+    // never sees a torn file.
+    //
+    // STREAMED, so the checkpoint really is one. This was `for result in run_grid_with(...)`,
+    // which returns a Vec: the whole grid had to finish before the loop began, so the incremental
     // flush - and the promise in the comment above it - could never fire on an interrupted run.
     // Busbar measured 16 of 36 cells over four hours and not one of them reached disk.
     run::run_grid_streaming(&rc, cfg.min_conc, cfg.max_conc, metrics, &mut |result| {
         let id = &result.outcome.id;
         let ing = id.ingress.clone();
         let eg = id.egress.clone();
-
-        if last_egress.as_deref() != Some(eg.as_str()) {
-            if let Some(finished_egress) = &last_egress {
-                match flush(cfg, &upstreams, any_served, Some(box_qualify.clone())) {
-                    Ok(paths) => written = Some(paths),
-                    Err(SnapshotError::PromoteGuard {
-                        existing_served,
-                        incoming_served,
-                    }) => {
-                        eprintln!(
-                            "suite: checkpoint after egress column {finished_egress} not written yet \
-                             ({incoming_served} served so far vs {existing_served} on disk) - \
-                             continuing to measure the rest of the grid"
-                        );
-                    }
-                    // A CHECKPOINT THAT FAILS TO WRITE MUST NOT DISCARD THE CELLS STILL TO COME.
-                    // This used to `return Err`, abandoning the rest of the grid over a write that
-                    // the FINAL flush is about to attempt again anyway - the same reasoning the
-                    // promote-guard arm above already applies, arriving by a different error. The
-                    // failure is remembered, not swallowed: if the final write also fails, that is
-                    // the error the run reports, and if it succeeds the run really is fine and this
-                    // was transient. Either way, hours of measurement are not thrown away over a
-                    // mid-run disk hiccup.
-                    Err(e) => {
-                        eprintln!(
-                            "suite: checkpoint after egress column {finished_egress} failed to \
-                             write ({e}) - continuing to measure; the final write decides the run"
-                        );
-                    }
-                }
-            }
-            last_egress = Some(eg.clone());
-        }
 
         // THE EVIDENCE FOR THE VERDICT, not just the verdict: `status` and `body_snippet` are
         // recorded on every cell, so an artifact can say what the gateway actually answered instead
@@ -1204,6 +1173,7 @@ pub fn run_suite_with(
 
         // Read before `entry` takes ownership of the key.
         let configurable = cfg.manifest.egress.iter().any(|e| e == &eg);
+        let cell_label = format!("{ing}>{eg}");
         upstreams
             .entry(eg)
             // `configurable` is whether this gateway can be POINTED at this upstream at all, which
@@ -1220,6 +1190,31 @@ pub fn run_suite_with(
             })
             .cells
             .insert(ing, cell);
+
+        // THE CHECKPOINT, per cell - see the module note above on why this cadence is load-bearing.
+        // A PROMOTE-GUARD TRIP HERE IS NOT THE SAME EVENT AS ON THE FINAL WRITE: every checkpoint
+        // before the last is thinner than the finished run it is partway through, so tripping the
+        // guard against a fuller prior snapshot on disk is expected mid-run. Logged and skipped;
+        // only the FINAL flush below may make the guard's refusal fatal. Likewise a checkpoint that
+        // fails to write must not discard the cells still to come - the final write decides the run.
+        match flush(cfg, &upstreams, any_served, Some(box_qualify.clone())) {
+            Ok(paths) => written = Some(paths),
+            Err(SnapshotError::PromoteGuard {
+                existing_served,
+                incoming_served,
+            }) => {
+                eprintln!(
+                    "suite: checkpoint after {cell_label} not written yet ({incoming_served} served \
+                     so far vs {existing_served} on disk) - continuing to measure the rest of the grid"
+                );
+            }
+            Err(e) => {
+                eprintln!(
+                    "suite: checkpoint after {cell_label} failed to write ({e}) - continuing to \
+                     measure; the final write decides the run"
+                );
+            }
+        }
     });
 
     // The final write always happens, so a grid with a single egress column is not lost.
