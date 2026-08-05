@@ -27,11 +27,20 @@
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-IP="${1:?usage: watch-busbar.sh <ip> [gateway-key]}"
+IP="${1:?usage: watch-busbar.sh <ip> [gateway-key] [reference-snapshot.json]}"
 # The snapshot is named for the gateway KEY, and the field runs more than one busbar at a time
 # (1.4.1 and 1.5.0 are separate entrants). Defaulting to `busbar` and hardcoding it are different
 # things: hardcoded, this script silently watched a file the 1.5.0 box never writes.
 GW="${2:-busbar}"
+# THE EARLY VERDICT, and the busbar-152 run is why it exists. That run measured 18 cells over five
+# and a half hours to establish a fact - "1.5.2 is throughput-identical to 1.5.1" - that its first
+# three cells already showed. Nobody quits on a hunch mid-run; people quit on a stated verdict. So
+# when a REFERENCE snapshot is given (the prior version's committed row), every pull prints the
+# median delta over the cells measured so far, and from three cells on it says plainly whether the
+# run is still telling you anything the reference does not. The verdict is ADVICE - this script
+# never kills anything (see the header: insurance that can destroy what it insures is not
+# insurance). The operator quits, with a number in hand instead of a feeling.
+REF="${3:-}"
 KEYFILE="${BENCH_STATE_DIR:-$HOME/.cache/gateway-bench}/gateway-bench-key.pem"
 SSHCMD="ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=25 -i $KEYFILE"
 PARTIAL="$HERE/results/partial"
@@ -40,6 +49,24 @@ CELLS_TOTAL=36
 
 log() { printf '[%s] busbar-watch: %s\n' "$(date -u +%H:%M:%S)" "$*"; }
 mkdir -p "$PARTIAL"
+
+compare_to_ref() {  # per-cell peak-rps deltas vs the reference row: "n=<matched> median=<pct> max=<pct>"
+  python3 -c "
+import json,sys,statistics
+def peaks(p):
+    d=json.load(open(p)); out={}
+    for un,u in (d.get('matrix',{}).get('upstreams') or {}).items():
+        for cn,c in (u.get('cells') or {}).items():
+            fr=(c.get('perf') or {}).get('frontier') or []
+            r=[f.get('rps') or 0 for f in fr]
+            if r and max(r)>0: out[(un,cn)]=max(r)
+    return out
+try:
+    new,ref=peaks(sys.argv[1]),peaks(sys.argv[2])
+    ds=[(new[k]-ref[k])/ref[k]*100 for k in new if k in ref and ref[k]]
+    if ds: print(f'n={len(ds)} median={statistics.median(ds):+.1f} max={max(ds,key=abs):+.1f}')
+except Exception: pass" "$1" "$2" 2>/dev/null
+}
 
 count_cells() {  # count measured cells in a snapshot file, on stdin's behalf
   python3 -c "
@@ -78,6 +105,22 @@ except Exception: print(0)' 2>/dev/null || echo 0)\"
   if rsync -az --timeout=120 -e "$SSHCMD" "ubuntu@$IP:$REMOTE_SNAP" "$PARTIAL/$GW.json" 2>/dev/null; then
     got="$(count_cells "$PARTIAL/$GW.json")"
     held="partial held locally: ${got:-0}"
+    if [ -n "$REF" ] && [ -r "$REF" ]; then
+      cmp="$(compare_to_ref "$PARTIAL/$GW.json" "$REF")"
+      if [ -n "$cmp" ]; then
+        n="${cmp#n=}"; n="${n%% *}"
+        maxpct="${cmp##*max=}"
+        held="$held | vs ref: $cmp"
+        # From three matched cells, say it outright. |max| under 5% means not one measured cell has
+        # moved past run-to-run noise (box qualification drift alone is ~2%): the run is re-proving
+        # the reference at ~15 minutes a cell.
+        absmax="${maxpct#+}"; absmax="${absmax#-}"; absmax="${absmax%%.*}"
+        if [ "${n:-0}" -ge 3 ] && [ "${absmax:-99}" -lt 5 ]; then
+          log "EARLY VERDICT after $n cells: no cell differs from the reference by 5% or more."
+          log "  Every further cell costs ~15 min to restate this. Quitting now keeps the evidence pulled so far."
+        fi
+      fi
+    fi
   else
     held="pull failed this poll - previous partial kept"
   fi
