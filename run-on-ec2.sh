@@ -1546,8 +1546,19 @@ done
 # Refuse the run outright if the setup is wrong, rather than discovering it as a gateway that will
 # not boot after the box-hours are already spent.
 ./otb validate "gateways/$gw" || { echo 127 > .run-done; exit 0; }
+# PIN THE ENGINE TO THE LOAD-GENERATOR'S CORES. The gateway is pinned to $CORES and the mock to
+# $MOCKCORES, each launched under its own `taskset`; the THROUGHPUT generator re-execs itself under
+# `taskset -c $LOADCORES` too. But `stream_window`'s load is generated IN-PROCESS (an in-process tokio
+# runtime, one task per lane), so it inherits otb's own affinity - and otb was unpinned, i.e. free to
+# run on all 16 cores including the gateway's 0-3 during the exact streaming-sustain windows being
+# measured. That silently lets rig load-generation contend with the gateway and depress its streaming
+# ceiling - the README's "the load generator gets 6 [cores] ... so neither can starve the other"
+# invariant, unmet for streaming cells. Pinning otb itself to $LOADCORES puts every rig-side load path
+# (throughput child AND in-process streaming lanes) on the generator's cores; taskset children it
+# launches (`taskset -c $CORES <gateway>`, mock) still set their OWN affinity, so the gateway and mock
+# keep their cores. Box-qualify/validate/metrics are light and unaffected.
 OTB_GW_CORES=$CORES LOADCORES=$LOADCORES \
-  ./otb run "gateways/$gw" 127.0.0.1:8000 results/snapshots
+  taskset -c "$LOADCORES" ./otb run "gateways/$gw" 127.0.0.1:8000 results/snapshots
 echo $? > .run-done
 
 # A FINISHED BOX MUST NOT BE DESTROYED BY A TIMER SIZED FOR THE WORK.

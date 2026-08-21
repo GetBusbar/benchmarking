@@ -239,7 +239,12 @@ pub fn host_connection_ceiling() -> u32 {
             }
         })
         .unwrap_or(STOCK_LINUX_RANGE);
-    let usable = hi - lo + 1;
+    largest_pow2_le(hi - lo + 1)
+}
+
+/// The largest power of two `<= usable` (and at least 1). Both concurrency ceilings round down to a
+/// power of two the same way; extracted so the two derivations cannot silently diverge.
+fn largest_pow2_le(usable: u32) -> u32 {
     let mut ceiling = 1u32;
     while ceiling * 2 <= usable {
         ceiling *= 2;
@@ -330,12 +335,9 @@ pub fn stream_connection_ceiling() -> u32 {
 /// exact shape of a guard that cannot fail. The numbers that mattered came from the bench box, and
 /// this is what lets them be asserted from anywhere.
 fn stream_ceiling_from(soft_fds: u32, port_ceiling: u32) -> u32 {
-    let usable = (soft_fds / 3).max(1);
-    let mut ceiling = 1u32;
-    while ceiling * 2 <= usable {
-        ceiling *= 2;
-    }
-    ceiling.min(port_ceiling).min(STREAM_RUNAWAY_CAP)
+    largest_pow2_le((soft_fds / 3).max(1))
+        .min(port_ceiling)
+        .min(STREAM_RUNAWAY_CAP)
 }
 
 /// a real status with a healthy rig is the gateway's own answer, no HTTP answer at all is not.
@@ -679,11 +681,6 @@ pub fn load_window_costed(
     // result this gateway's would be worse than reporting nothing.
     let started = std::time::Instant::now();
     let cores = crate::procsample::parse_cores(&cfg.gw_cores);
-    let cpu_before = if cores.is_empty() {
-        None
-    } else {
-        crate::procsample::cpu_busy_total(&crate::rss::RealProc, &cores)
-    };
     let pid = crate::rss::root_pid(&cfg.runtime).copied();
     let before = match pid {
         Some(p) => crate::procsample::sample_live(p),
@@ -709,11 +706,6 @@ pub fn load_window_costed(
     // other's too.
     let requests = stats.as_ref().map(|s| s.ok).unwrap_or(0);
     let cost = crate::procsample::cost(&before, &after, requests, cfg.sweep_duration_s as f64);
-    let cpu_after = if cores.is_empty() {
-        None
-    } else {
-        crate::procsample::cpu_busy_total(&crate::rss::RealProc, &cores)
-    };
     // UTILISATION IS DERIVED FROM THE GATEWAY OWN CPU, NOT FROM /proc/stat. It was the other way
     // round for exactly one field run, and tensorzero proved it wrong.
     //
@@ -748,10 +740,6 @@ pub fn load_window_costed(
             "the window reported no elapsed time, so utilisation cannot be divided out",
         ),
     };
-    // The tick-sampled reading is computed but NOT published as utilisation. Kept so the two can be
-    // compared deliberately: where a gateway is continuously busy they agree, and a large gap is
-    // itself the signal that the workload is bursty.
-    let _tick_sampled = crate::procsample::utilisation(cpu_before, cpu_after);
     (stats, cost, util)
 }
 
@@ -1107,7 +1095,14 @@ impl StreamStop {
             // A gateway that does not recover from overload is the GATEWAY's result, so it must not
             // be filed under our own faults - that would be the attribution error in reverse.
             StreamStop::GatewayDidNotRecover { .. } => Absent::NotMeasured,
-            _ => Absent::NotMeasured,
+            // EXHAUSTIVE ON PURPOSE, not a `_` wildcard: a search that exhausted its range
+            // (FloorReached) or whose stepped-down rung failed (SteppedRungFailed) is a measurement
+            // that did not resolve, filed as NotMeasured. Naming them forces a new StreamStop variant
+            // to make this attribution decision at compile time rather than defaulting silently into
+            // the "measurement did not resolve" bucket.
+            StreamStop::FloorReached { .. }
+            | StreamStop::SteppedRungFailed { .. }
+            | StreamStop::BudgetExhausted => Absent::NotMeasured,
         }
     }
 
@@ -1293,9 +1288,14 @@ pub fn mock_frame_ceiling_fps(concurrency: u32) -> f64 {
 /// So both sides now read the same variable and the default matches the mock's own. Nothing in the
 /// field sets it today, which is exactly why the divergence would not have been noticed.
 pub fn stream_pacing_interval_ms() -> u64 {
-    std::env::var("MOCK_STREAM_INTERVAL_MS")
-        .ok()
-        .and_then(|v| v.trim().parse().ok())
+    pacing_interval_from(std::env::var("MOCK_STREAM_INTERVAL_MS").ok().as_deref())
+}
+
+/// The pace derivation, PURE - the same "testable without the box" shape as `stream_ceiling_from`, so
+/// the parse-and-reject rules are checked with explicit inputs instead of by `set_var`-ing a
+/// process-global that every concurrent sibling reading `stall_bound_us()` would race.
+fn pacing_interval_from(raw: Option<&str>) -> u64 {
+    raw.and_then(|v| v.trim().parse().ok())
         // A PACE OF ZERO IS NOT A PACE. A parsed 0 drove `stall_bound_us()` to 0, which makes EVERY
         // inter-frame gap - including a gap of nothing - count as a stall, so both stream metrics fail
         // on every rung of every cell and the board reads it as the gateway going quiet. The mock
@@ -1523,7 +1523,13 @@ pub fn streams_gate_verdict(w: &StreamWindow) -> Option<String> {
 
 /// The stall bound in microseconds: `STREAM_STALL_MULTIPLIER` times the mock's own delta pacing.
 fn stall_bound_us() -> u64 {
-    stream_pacing_interval_ms() * STREAM_STALL_MULTIPLIER * 1_000
+    stall_bound_us_at(stream_pacing_interval_ms())
+}
+
+/// The bound derivation, PURE, for the same reason `pacing_interval_from` is: a test can assert the
+/// `pacing -> bound` relation at any pace without touching the env var.
+fn stall_bound_us_at(pacing_ms: u64) -> u64 {
+    pacing_ms * STREAM_STALL_MULTIPLIER * 1_000
 }
 
 /// How many gaps in one lane's frame arrivals exceeded the stall bound.
@@ -1533,9 +1539,15 @@ fn stall_bound_us() -> u64 {
 /// merely slow to start rather than one that goes quiet mid-stream, which is what the README's rule
 /// is about.
 fn stalls_in(offsets: &[u64]) -> u64 {
+    stalls_in_bounded(offsets, stall_bound_us())
+}
+
+/// Counting against an EXPLICIT bound, so the stall logic is testable without the env-var pace: pass
+/// `stall_bound_us_at(pace)` for whichever pace the test is exercising.
+fn stalls_in_bounded(offsets: &[u64], bound_us: u64) -> u64 {
     offsets
         .windows(2)
-        .filter(|w| w[1].saturating_sub(w[0]) > stall_bound_us())
+        .filter(|w| w[1].saturating_sub(w[0]) > bound_us)
         .count() as u64
 }
 
@@ -2369,7 +2381,11 @@ pub fn sweep_streams_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> Cel
                                     eprintln!(
                                         "streams: c={ceiling} failed the gate although this cell already                                          carried c={proven_clean} cleanly - settling and re-taking the window"
                                     );
-                                    std::thread::sleep(std::time::Duration::from_millis(STREAM_SETTLE_MAX_MS));
+                                    // Drain the host the same adaptive way every other rung does -
+                                    // poll TIME_WAIT and return as soon as it clears - instead of the
+                                    // flat STREAM_SETTLE_MAX_MS this one path used, which turned the
+                                    // backstop into the schedule on a box that had already drained.
+                                    settle_after_streams(ceiling);
                                     match stream_window(cfg.gateway_addr, &p.path, &p.body, &p.headers, p.dialect, ceiling) {
                                         Some(w2) => {
                                             let passed2 = streams_gate_passes(&w2);
@@ -2826,6 +2842,9 @@ pub fn run_grid_streaming(
     // shard measures a COMPLETE egress column. `None` ⇒ full square grid (unchanged).
     let egresses = cfg.egress_dialects.as_deref().unwrap_or(&cfg.dialects);
     let total_cells = egresses.len() * cfg.dialects.len();
+    // NOT a redundant alias: a nested scope below reuses the name `total` for a cost-seconds float,
+    // so the cost line references the grid count as `total_cells` (unshadowed) while progress lines
+    // use `total`. Collapsing the two collides with that shadow.
     let total = total_cells;
     let mut done = 0usize;
     // Set when a mid-grid restart FAILED: from that point the harness cannot vouch for the
@@ -4144,8 +4163,9 @@ while True:
         );
     }
 
-    // "no stream stalls past 2x the pacing interval". ONE stall anywhere fails the rung: a stall is a
-    // user-visible gap in a token stream, not a rate to be averaged away across lanes.
+    // "no stream stalls past STREAM_STALL_MULTIPLIER x the pacing interval" (10x, not the original 2x
+    // - see the constant's own doc for why 2x was retired). ONE stall anywhere fails the rung: a stall
+    // is a user-visible gap in a token stream, not a rate to be averaged away across lanes.
     #[test]
     fn a_single_stall_anywhere_fails_the_whole_rung() {
         let mut w = clean_stream_window(1000, 1000);
@@ -4280,7 +4300,7 @@ while True:
             w.expected_frames, w.frames,
             "a full-budget peer leaves no shortfall"
         );
-        // NOT `stalls == 0`. A stall is a frame gap wider than twice the mock's pace, so on a
+        // NOT `stalls == 0`. A stall is a frame gap wider than STREAM_STALL_MULTIPLIER x the mock's pace, so on a
         // machine running the rest of this suite in parallel it is a fact about the machine: this
         // asserted zero and observed 2 whenever a neighbouring window test ran beside it. What the
         // window is actually being held to is that stalls do not stop a clean full-delivery window
@@ -4601,35 +4621,37 @@ while True:
     // a cadence nothing is producing, with no error anywhere.
     #[test]
     fn the_stall_bound_tracks_the_pace_the_mock_was_actually_told_to_use() {
-        // Default: the mock's own default, so the field behaviour is unchanged.
-        std::env::remove_var("MOCK_STREAM_INTERVAL_MS");
-        assert_eq!(stream_pacing_interval_ms(), 20);
-        assert_eq!(stall_bound_us(), 20 * STREAM_STALL_MULTIPLIER * 1_000);
+        // Tests the PURE derivations (`pacing_interval_from` / `stall_bound_us_at` /
+        // `stalls_in_bounded`) with explicit paces, NOT by mutating the process-global
+        // `MOCK_STREAM_INTERVAL_MS`: that env var is read by `stall_bound_us()` on every streaming
+        // sibling test, so `set_var`-ing it here raced them (a healthy stream judged against a 5ms
+        // bound this test had installed). Same "derivation is testable without the box" discipline as
+        // `stream_ceiling_from`.
+
+        // Default: unset (and blank/garbage) resolves to the mock's own default, field behaviour
+        // unchanged.
+        assert_eq!(pacing_interval_from(None), 20);
+        assert_eq!(pacing_interval_from(Some("not-a-number")), 20);
+        assert_eq!(pacing_interval_from(Some("0")), 20, "a pace of zero is not a pace");
+        assert_eq!(pacing_interval_from(Some("100")), 100);
+        assert_eq!(stall_bound_us_at(20), 20 * STREAM_STALL_MULTIPLIER * 1_000);
 
         // A slower model: gaps that were stalls at 20ms are ordinary at 100ms, and a bound that
         // stayed at 20 would call a healthy stream stalled on every frame.
-        std::env::set_var("MOCK_STREAM_INTERVAL_MS", "100");
-        assert_eq!(stall_bound_us(), 100 * STREAM_STALL_MULTIPLIER * 1_000);
+        assert_eq!(stall_bound_us_at(100), 100 * STREAM_STALL_MULTIPLIER * 1_000);
         let gaps_at_100ms: Vec<u64> = (0..8).map(|i| i * 100_000).collect();
         assert_eq!(
-            stalls_in(&gaps_at_100ms),
+            stalls_in_bounded(&gaps_at_100ms, stall_bound_us_at(100)),
             0,
             "a stream keeping the mock's own pace never stalls"
         );
 
         // A faster model: the bound tightens with it, so a gateway that lags is still caught.
-        std::env::set_var("MOCK_STREAM_INTERVAL_MS", "5");
-        assert_eq!(stall_bound_us(), 5 * STREAM_STALL_MULTIPLIER * 1_000);
+        assert_eq!(stall_bound_us_at(5), 5 * STREAM_STALL_MULTIPLIER * 1_000);
         assert!(
-            stalls_in(&gaps_at_100ms) > 0,
+            stalls_in_bounded(&gaps_at_100ms, stall_bound_us_at(5)) > 0,
             "at a 5ms pace those same 100ms gaps are stalls"
         );
-
-        // Garbage is not a pace: fall back to the mock's default rather than to zero, which would
-        // make every gap a stall.
-        std::env::set_var("MOCK_STREAM_INTERVAL_MS", "not-a-number");
-        assert_eq!(stream_pacing_interval_ms(), 20);
-        std::env::remove_var("MOCK_STREAM_INTERVAL_MS");
     }
 
     // THE CEILING IS THE HOST'S, AND EVERY NUMBER IN IT IS READ OR DERIVED.
