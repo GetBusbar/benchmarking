@@ -580,7 +580,26 @@ teardown() {
   aws ec2 describe-instances --filters "Name=tag:run,Values=$RUN_ID" \
     "Name=instance-state-name,Values=running,pending" --query 'Reservations[].Instances[].InstanceId' --output text 2>/dev/null \
     | tr '\t' '\n' | grep -E '^i-' | xargs -r -n25 aws ec2 terminate-instances --output text --instance-ids >/dev/null 2>&1
-  if [[ "$CREATED_KEY" == 1 ]]; then aws ec2 delete-key-pair --key-name "$KEYNAME" >/dev/null 2>&1 || true; rm -f "$KEYFILE" "$KEYFILE.awsid"; fi
+  if [[ "$CREATED_KEY" == 1 ]]; then
+    # ROBUST SHARED-KEY LIFETIME: the key must outlive every box that uses it, not merely this
+    # invocation. `CREATED_KEY` alone is not enough - a run that CREATES the key but finishes before a
+    # CONCURRENT run's boxes would delete it out from under them, rugging their ssh/rsync mid-grid with
+    # "Permission denied (publickey)". Observed 2026-08-21: a 6-cell aisix run created the key, a 36-cell
+    # busbar run 7 min later reused it (CREATED_KEY=0), aisix finished first and its teardown deleted the
+    # shared keypair + local .pem, orphaning the still-measuring busbar box. So: delete the shared key
+    # ONLY when no OTHER bench box is still alive (this run's own boxes were just terminated above and are
+    # `shutting-down`, hence excluded by state); otherwise leave the durable key for them. A leaked key
+    # costs nothing, and `run-on-ec2.sh kill` stays the global sweep for the shared key/SG.
+    _live_others="$(aws ec2 describe-instances \
+      --filters "Name=tag:purpose,Values=gateway-bench" "Name=instance-state-name,Values=running,pending" \
+      --query 'Reservations[].Instances[].[InstanceId,Tags[?Key==`run`]|[0].Value]' --output text 2>/dev/null \
+      | awk -v r="$RUN_ID" 'NF && $2!=r {print $1}')"
+    if [[ -z "$_live_others" ]]; then
+      aws ec2 delete-key-pair --key-name "$KEYNAME" >/dev/null 2>&1 || true; rm -f "$KEYFILE" "$KEYFILE.awsid"
+    else
+      echo "[key] other bench boxes still running ($(echo $_live_others | tr '\n' ' ')) - keeping shared key $KEYNAME durable; \`run-on-ec2.sh kill\` sweeps it once they are done" >&2
+    fi
+  fi
   if [[ "$CREATED_SG" == 1 ]]; then
     # The just-terminated instances are `shutting-down`, not `running/pending`, but they STILL hold
     # ENI associations to this SG for a short window - so an IMMEDIATE delete-security-group fails with
@@ -624,13 +643,36 @@ if [[ ! -s "$KEYFILE" || -z "$_aws_keyid" || "$_aws_keyid" == "None" || "$_local
   if [[ -s "$KEYFILE" && -n "$_aws_keyid" && "$_local_keyid" != "$_aws_keyid" ]]; then
     echo "[key] local key does not correspond to AWS keypair $KEYNAME (recorded '${_local_keyid:-none}' vs live '$_aws_keyid') - rebuilding both, or every box would refuse it"
   fi
-  aws ec2 delete-key-pair --key-name "$KEYNAME" >/dev/null 2>&1 || true
-  rm -f "$KEYFILE" "$KEYID_FILE"
-  # Create the private key under a 077 umask so it is 600 from birth - no sub-millisecond window at the
-  # default umask between create and chmod. The chmod stays as a belt-and-braces backstop.
-  ( umask 077; aws ec2 create-key-pair --key-name "$KEYNAME" --query KeyMaterial --output text > "$KEYFILE" ); chmod 600 "$KEYFILE"
-  # Record the id the key belongs to, so the NEXT run can tell correspondence from mere existence.
-  aws ec2 describe-key-pairs --key-names "$KEYNAME" --query 'KeyPairs[0].KeyPairId' --output text > "$KEYID_FILE" 2>/dev/null || true
+  # ROBUST REBUILD (mirror of the teardown fix): regenerating mints a NEW public key that already-running
+  # boxes do NOT trust, so a blind rebuild while a concurrent grid is in flight locks us out of it. If we
+  # still hold the local PRIVATE key AND bench boxes are live, RE-IMPORT that key's public half under
+  # $KEYNAME instead - new boxes then trust the very key the running ones already do, and the local key is
+  # kept (not deleted). Only regenerate from scratch when nothing is running to lock out.
+  _key_reimported=0
+  if [[ -s "$KEYFILE" ]] && _pub="$(ssh-keygen -y -f "$KEYFILE" 2>/dev/null)" && [[ -n "$_pub" ]]; then
+    _live_boxes="$(aws ec2 describe-instances --filters "Name=tag:purpose,Values=gateway-bench" \
+      "Name=instance-state-name,Values=running,pending" --query 'Reservations[].Instances[].InstanceId' \
+      --output text 2>/dev/null | tr -d '[:space:]')"
+    if [[ -n "$_live_boxes" ]]; then
+      echo "[key] $KEYNAME missing/mismatched but bench boxes are live - re-importing the local key's public half so their ssh keeps working (not regenerating)"
+      _pub_tmp="$(mktemp)"; printf '%s\n' "$_pub" > "$_pub_tmp"
+      aws ec2 delete-key-pair --key-name "$KEYNAME" >/dev/null 2>&1 || true
+      if aws ec2 import-key-pair --key-name "$KEYNAME" --public-key-material "fileb://$_pub_tmp" >/dev/null 2>&1; then
+        aws ec2 describe-key-pairs --key-names "$KEYNAME" --query 'KeyPairs[0].KeyPairId' --output text > "$KEYID_FILE" 2>/dev/null || true
+        chmod 600 "$KEYFILE"; CREATED_KEY=1; _key_reimported=1
+      fi
+      rm -f "$_pub_tmp"
+    fi
+  fi
+  if [[ "$_key_reimported" != 1 ]]; then
+    aws ec2 delete-key-pair --key-name "$KEYNAME" >/dev/null 2>&1 || true
+    rm -f "$KEYFILE" "$KEYID_FILE"
+    # Create the private key under a 077 umask so it is 600 from birth - no sub-millisecond window at the
+    # default umask between create and chmod. The chmod stays as a belt-and-braces backstop.
+    ( umask 077; aws ec2 create-key-pair --key-name "$KEYNAME" --query KeyMaterial --output text > "$KEYFILE" ); chmod 600 "$KEYFILE"
+    # Record the id the key belongs to, so the NEXT run can tell correspondence from mere existence.
+    aws ec2 describe-key-pairs --key-names "$KEYNAME" --query 'KeyPairs[0].KeyPairId' --output text > "$KEYID_FILE" 2>/dev/null || true
+  fi
   CREATED_KEY=1
 fi
 SG=$(aws ec2 describe-security-groups --group-names "$SGNAME" --query 'SecurityGroups[0].GroupId' --output text 2>/dev/null || true)
