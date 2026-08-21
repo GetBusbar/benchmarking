@@ -220,6 +220,8 @@ fn main() -> ExitCode {
                 model: args.get(3).cloned().unwrap_or_else(|| "gpt-4o-mini".into()),
                 auth: "dummy".into(),
                 dialects: vec![Dialect::Openai, Dialect::Anthropic, Dialect::Gemini],
+                // `smoke` walks the full small grid; no egress sharding.
+                egress_dialects: None,
                 sweep_duration_s: 2,
                 probe_timeout: Duration::from_secs(10),
                 load_cores: std::env::var("LOADCORES").ok(),
@@ -389,6 +391,21 @@ fn main() -> ExitCode {
                     return ExitCode::from(2);
                 }
             };
+            // OTB_EGRESS restricts ONLY the egress axis for a sharded run (one box measures a subset
+            // of egress upstreams; ingress stays the full `dialects` set). Unset/empty ⇒ None ⇒ the
+            // full square grid, unchanged. Parsed with the same validator as OTB_DIALECTS.
+            let egress_dialects = match std::env::var("OTB_EGRESS") {
+                Ok(v) if !v.trim().is_empty() => {
+                    match otb_engine::ingress::dialects_from(Some(v.as_str())) {
+                        Ok(d) => Some(d),
+                        Err(e) => {
+                            eprintln!("{e}");
+                            return ExitCode::from(2);
+                        }
+                    }
+                }
+                _ => None,
+            };
             let env_u32 = |k: &str, d: u32| {
                 std::env::var(k)
                     .ok()
@@ -420,6 +437,7 @@ fn main() -> ExitCode {
                 mock_addr: mk,
                 results_dir: results_dir.into(),
                 dialects,
+                egress_dialects,
                 sweep_duration_s: arg_f64(&args, 4, 6.0) as u64,
                 load_cores: std::env::var("LOADCORES").ok(),
                 // THE ENGINE'S OWN DEFAULT, not an orchestrator setting: a real field run must

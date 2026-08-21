@@ -30,6 +30,13 @@ pub struct RunConfig {
     /// Dialects to walk. Both axes use the same set: ingress is what the client speaks, egress is
     /// what the upstream speaks.
     pub dialects: Vec<Dialect>,
+    /// EGRESS-axis restriction for a SHARDED run. `None` ⇒ egress uses `dialects` (the full square
+    /// grid, unchanged from before this field existed). `Some(subset)` ⇒ walk only those egress
+    /// columns while keeping the FULL `dialects` ingress set, so one box can measure a subset of
+    /// egress upstreams with the gateway still configured for ALL of them — routing is identical to
+    /// a full run because the config render is independent of the walk. See
+    /// docs/DESIGN-sharded-field-run.md.
+    pub egress_dialects: Option<Vec<Dialect>>,
     pub sweep_duration_s: u64,
     pub probe_timeout: Duration,
     /// CPU list the load generator is pinned to, e.g. "4-9". None only in tests.
@@ -2815,14 +2822,17 @@ pub fn run_grid_streaming(
     metrics: &[&dyn metric::Metric],
     on_cell: &mut dyn FnMut(CellResult),
 ) {
-    let total_cells = cfg.dialects.len() * cfg.dialects.len();
+    // Egress axis may be a subset (a shard); ingress axis is always the full dialect set so each
+    // shard measures a COMPLETE egress column. `None` ⇒ full square grid (unchanged).
+    let egresses = cfg.egress_dialects.as_deref().unwrap_or(&cfg.dialects);
+    let total_cells = egresses.len() * cfg.dialects.len();
     let total = total_cells;
     let mut done = 0usize;
     // Set when a mid-grid restart FAILED: from that point the harness cannot vouch for the
     // gateway's state (it may be up but half-configured), so every remaining cell is recorded as
     // untestable naming our failure instead of being measured into a false gateway verdict.
     let mut restart_poisoned: Option<String> = None;
-    for eg in &cfg.dialects {
+    for eg in egresses {
         for ing in &cfg.dialects {
             let id = CellId::new(ing.as_str(), eg.as_str());
             done += 1;
@@ -3034,6 +3044,7 @@ pub(crate) fn test_fixture(gw: SocketAddr, mock: SocketAddr) -> RunConfig {
         egress_models: Default::default(),
         auth: "dummy".into(),
         dialects: vec![Dialect::Openai],
+        egress_dialects: None,
         sweep_duration_s: 1,
         probe_timeout: Duration::from_secs(2),
         load_cores: None,
@@ -3061,6 +3072,54 @@ mod tests {
        A settle that can never be satisfied turns the 60s backstop into the schedule: 1,647 windows
        above the free-below threshold would become 27 HOURS of waiting in a field run. The tolerance
        is what keeps it reachable on a box that is never perfectly idle, so it is asserted directly. */
+
+    // SHARDING: OTB_EGRESS decouples the egress axis from ingress. A matrix that declares nothing
+    // capable makes every cell short-circuit to `not_configurable` and `continue` WITHOUT touching
+    // the network, so the grid walk is observable in a unit test. We assert that restricting
+    // `egress_dialects` yields whole egress columns (subset of egress × FULL ingress), not a square
+    // sub-grid the way `dialects` would.
+    #[test]
+    fn egress_dialects_restricts_egress_columns_keeping_full_ingress() {
+        let addr: SocketAddr = "127.0.0.1:9".parse().unwrap(); // discard port; never contacted here
+        let mut cfg = test_fixture(addr, addr);
+        cfg.dialects = Dialect::ALL.to_vec(); // full 6 ingress dialects
+        cfg.matrix = vec!["000000".to_string(); 6]; // nothing capable -> all not_configurable, no I/O
+
+        let walk = |cfg: &RunConfig| {
+            let mut ids: Vec<CellId> = Vec::new();
+            run_grid_streaming(cfg, 1, 1, &[], &mut |c| ids.push(c.outcome.id.clone()));
+            ids
+        };
+
+        // None => the full square grid, unchanged.
+        cfg.egress_dialects = None;
+        assert_eq!(walk(&cfg).len(), 36, "None keeps the full 6x6 grid");
+
+        // One egress column => 6 cells (that egress x all six ingress).
+        cfg.egress_dialects = Some(vec![Dialect::Openai]);
+        let shard = walk(&cfg);
+        assert_eq!(shard.len(), 6, "one egress column is a FULL ingress column, not one cell");
+        assert!(
+            shard.iter().all(|id| id.egress == "openai"),
+            "every cell in the shard is the selected egress"
+        );
+        let ingresses: std::collections::BTreeSet<&str> =
+            shard.iter().map(|id| id.ingress.as_str()).collect();
+        assert_eq!(ingresses.len(), 6, "all six ingress rows are measured within the shard");
+
+        // Two egress columns => 12 cells; egress set is exactly the requested subset.
+        cfg.egress_dialects = Some(vec![Dialect::Openai, Dialect::Anthropic]);
+        let two = walk(&cfg);
+        assert_eq!(two.len(), 12);
+        let egresses: std::collections::BTreeSet<&str> =
+            two.iter().map(|id| id.egress.as_str()).collect();
+        assert_eq!(
+            egresses,
+            ["anthropic", "openai"].into_iter().collect(),
+            "only the requested egress columns are walked"
+        );
+    }
+
     #[test]
     fn the_drain_target_is_reachable_on_a_box_that_is_never_perfectly_idle() {
         // The baseline is the cell's own starting count, scaled - not a number chosen here. A box

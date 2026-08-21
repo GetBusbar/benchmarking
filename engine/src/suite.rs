@@ -27,6 +27,10 @@ pub struct SuiteConfig {
     pub mock_addr: SocketAddr,
     pub results_dir: std::path::PathBuf,
     pub dialects: Vec<Dialect>,
+    /// EGRESS-axis restriction for a sharded run (one box measures a subset of egress upstreams with
+    /// the gateway still fully configured). `None` ⇒ full square grid. Threaded straight into
+    /// `RunConfig::egress_dialects`. See docs/DESIGN-sharded-field-run.md.
+    pub egress_dialects: Option<Vec<Dialect>>,
     pub sweep_duration_s: u64,
     pub min_conc: u32,
     pub max_conc: u32,
@@ -758,6 +762,8 @@ fn qualify_box(cfg: &SuiteConfig, history: &[f64]) -> serde_json::Value {
         egress_models: Default::default(),
         auth: cfg.manifest.auth.clone(),
         dialects: vec![Dialect::Openai],
+        // Qualification is a single openai>openai probe; no egress restriction applies.
+        egress_dialects: None,
         sweep_duration_s: cfg.sweep_duration_s,
         probe_timeout: Duration::from_secs(10),
         load_cores: cfg.load_cores.clone(),
@@ -929,6 +935,7 @@ pub fn run_suite_with(
         egress_models: cfg.manifest.egress_models.clone(),
         auth: cfg.manifest.auth.clone(),
         dialects: cfg.dialects.clone(),
+        egress_dialects: cfg.egress_dialects.clone(),
         sweep_duration_s: cfg.sweep_duration_s,
         probe_timeout: Duration::from_secs(10),
         load_cores: cfg.load_cores.clone(),
@@ -1742,6 +1749,7 @@ mod tests {
             mock_addr: mock,
             results_dir: dir.to_path_buf(),
             dialects: vec![Dialect::Openai],
+            egress_dialects: None,
             sweep_duration_s: 1,
             min_conc: 1,
             max_conc: 2,
