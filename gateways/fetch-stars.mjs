@@ -22,6 +22,24 @@ import { fileURLToPath } from "node:url";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const OUT = join(HERE, "stars.json");
 
+// The previously-committed snapshot, read ONCE up front. A transient per-gateway manifest/URL glitch
+// (a definition.json mid-edit, a repo field briefly malformed) must NOT silently drop that gateway's
+// already-committed star count: the write below overwrites the WHOLE file from `out`, so a key missing
+// from `out` disappears from the deployed board. On a soft-skip we fall back to this prior entry instead
+// of omitting the key. Best-effort: a missing/unreadable prior file just means no fallback is available.
+let prior = {};
+try { prior = JSON.parse(readFileSync(OUT, "utf8")) || {}; } catch { prior = {}; }
+
+// keepPriorOrWarn(key, why): reuse the committed count for `key` if we have one, else warn it is dropped.
+function keepPriorOrWarn(key, why) {
+  if (prior[key]) {
+    out[key] = prior[key];
+    console.warn(`skip ${key}: ${why} - KEEPING the previously-committed star count`);
+  } else {
+    console.warn(`skip ${key}: ${why} and no prior stars.json entry to fall back to - count omitted`);
+  }
+}
+
 const keys = readdirSync(HERE).filter((d) => {
   try {
     return statSync(join(HERE, d)).isDirectory() && existsSync(join(HERE, d, "definition.json"));
@@ -60,12 +78,12 @@ for (const key of keys) {
   try {
     repo = JSON.parse(readFileSync(join(HERE, key, "definition.json"), "utf8")).repo ?? null;
   } catch {
-    console.warn(`skip ${key}: definition.json is unreadable or not JSON`);
+    keepPriorOrWarn(key, "definition.json is unreadable or not JSON");
     continue;
   }
   const slug = repo && repo.match(/github\.com\/([^/]+\/[^/\s#?]+)/)?.[1];
   if (!slug) {
-    console.warn(`skip ${key}: no parsable github repo (${repo})`);
+    keepPriorOrWarn(key, `no parsable github repo (${repo})`);
     continue;
   }
   if (!cache.has(slug)) {

@@ -323,8 +323,9 @@ fn cell_memory(
         time_to_plateau_s: take("memory_time_to_plateau_s"),
         load_s,
         plateaued,
-        // Both windows disclose their own length. idle_window_s has been null since the field was
-        // declared, because idle was one instantaneous read and there was no window to name.
+        // Both windows disclose their own length. idle_window_s names the MEMORY_IDLE_S-second idle
+        // read described in the `protocol` string above ("{}s idle read at rest"), so it is
+        // Some(MEMORY_IDLE_S), not null.
         idle_window_s: Some(crate::metric::MEMORY_IDLE_S as i64),
         // THE SLICE THE NUMBER CAME FROM, not the length of the wait. This published
         // `MEMORY_RECOVERY_S` (60) while `recovered_rss_mib` is the median over the trailing
@@ -534,9 +535,19 @@ fn judge_streams_sustained(
         .unwrap_or_else(missing);
 
     let (Some(&value), Some(&conc_f)) = (fps.value(), conc_m.value()) else {
-        let absent: Measurement<f64> = carry_absence(&fps);
-        out.streams_sustained = carry_absence(&absent);
-        out.streams_sustained_fps = absent;
+        // streams_sustained is named after the CONCURRENCY search, so its absence must speak with the
+        // concurrency metric's OWN reason/detail when it has one - not the fps leg's. Mirrors
+        // metric.rs Streaming::measure, which was deliberately fixed to stop discarding what the
+        // concurrency search actually said; reading only `carry_absence(&fps)` here re-introduced that
+        // exact bug one layer up, so a concurrency search that failed with a distinct reason would
+        // publish the fps leg's token and evidence under the concurrency's own field. Only when conc_m
+        // carries no absence of its own (it measured, but fps did not) does it fall back to fps.
+        out.streams_sustained = if conc_m.reason().is_some() {
+            carry_absence(&conc_m)
+        } else {
+            carry_absence(&fps)
+        };
+        out.streams_sustained_fps = carry_absence(&fps);
         return;
     };
     let conc = conc_f as u32;
@@ -753,7 +764,11 @@ const QUALIFY_BAND_PCT: f64 = 20.0;
 /// incident it exists to prevent is running a full matrix on a bad box, so gating the run on a Fail
 /// is the natural next step - but that changes what a run DOES, and it is a decision to take
 /// deliberately rather than as a side effect of wiring the module in.
-fn qualify_box(cfg: &SuiteConfig, history: &[f64]) -> serde_json::Value {
+fn qualify_box(
+    cfg: &SuiteConfig,
+    history: &[f64],
+    quiesce_failure: Option<&str>,
+) -> serde_json::Value {
     let direct = RunConfig {
         gateway_addr: cfg.mock_addr,
         mock_addr: cfg.mock_addr,
@@ -792,6 +807,25 @@ fn qualify_box(cfg: &SuiteConfig, history: &[f64]) -> serde_json::Value {
     };
     let id = crate::cell::CellId::new(Dialect::Openai.as_str(), Dialect::Openai.as_str());
     let observed = run::measure_at(&direct, &id, QUALIFY_CONCURRENCY);
+
+    // A FAILED QUIESCE INVALIDATES THE OBSERVATION. The recorder's per-request lock deflates the mock's
+    // rate, so a reading taken while it could not be turned off is not a trustworthy measurement of this
+    // box - and letting it through as a Pass/Seed would seed the rolling baseline with a contaminated
+    // number that then gates every later run toward itself. Replace it with an explicit HarnessError so
+    // `judge` returns a Fail-with-no-observation (which `qualifies_as_baseline` excludes, so it never
+    // seeds, and `box_qualify_blocks_publish` does not gate on, since nothing was measured). The
+    // quiesce-succeeds path leaves `observed` exactly as measured.
+    let observed = match quiesce_failure {
+        Some(why) => Measurement::absent_because(
+            Absent::HarnessError,
+            format!(
+                "the mock's recorder could not be quiesced before this box was qualified ({why}), so \
+                 the observed rate was taken against a recording mock and cannot be trusted or seed a \
+                 baseline"
+            ),
+        ),
+        None => observed,
+    };
 
     let baseline = crate::qualify::rolling_baseline(history.to_vec());
     let (outcome, drift) = crate::qualify::judge(
@@ -898,6 +932,31 @@ fn qualify_history_on_disk(results_dir: &Path) -> Vec<f64> {
     out
 }
 
+/// Does this `box_qualify` verdict forbid publishing a grid on this box?
+///
+/// TRUE for a MEASURED regression only: the outcome is `fail` AND an `observed_rps` was actually taken.
+/// That is the finding's incident - a box whose gateway-free throughput collapsed past the band, so
+/// measuring the 6x6 on it would publish a rig fault as a gateway regression.
+///
+/// It deliberately does NOT gate a `fail` that carries no observation. `qualify::judge` maps an ABSENT
+/// observation to `Fail` too ("we cannot qualify a box we failed to measure"), but "the qualify stage
+/// produced no reading at all" is a different condition from "throughput has collapsed past the band":
+/// it is what a transient qualify-window hiccup looks like, and aborting the whole run on it - rather
+/// than on a real, measured collapse - would be a new mis-attribution of its own. So only a box that
+/// was measured and came back low is refused here; `pass`, `seed` and `skip` proceed unchanged.
+fn box_qualify_blocks_publish(box_qualify: &serde_json::Value) -> bool {
+    let failed = box_qualify
+        .pointer("/outcome")
+        .and_then(serde_json::Value::as_str)
+        .and_then(crate::qualify::Outcome::from_token)
+        == Some(crate::qualify::Outcome::Fail);
+    let measured = box_qualify
+        .pointer("/observed_rps")
+        .and_then(serde_json::Value::as_f64)
+        .is_some();
+    failed && measured
+}
+
 /// Run the whole suite for one gateway and write its snapshot.
 pub fn run_suite(cfg: &SuiteConfig, gateway_addr: SocketAddr) -> Result<Paths, SnapshotError> {
     run_suite_with(cfg, gateway_addr, crate::metric::METRICS)
@@ -940,10 +999,7 @@ pub fn run_suite_with(
         probe_timeout: Duration::from_secs(10),
         load_cores: cfg.load_cores.clone(),
         gw_cores: cfg.gw_cores.clone(),
-        // How to put this gateway back at rest, so the memory group can read an idle that is
-        // actually idle. Built from the SAME manifest declaration the initial launch used, so a
-        // restart cannot differ from the launch it is repeating. `None` for a manifest that declares
-        // no launch: the harness does not own that gateway's lifetime and must not bounce it.
+        // The manifest path this run measured, carried through verbatim.
         declared_path: cfg.manifest.path.clone(),
         cell_paths: cfg
             .manifest
@@ -952,6 +1008,10 @@ pub fn run_suite_with(
         matrix_note: cfg.manifest.matrix_note.clone(),
         untestable_cells: cfg.manifest.untestable.clone(),
         untestable_note: cfg.manifest.untestable_note.clone(),
+        // How to put this gateway back at rest, so the memory group can read an idle that is
+        // actually idle. Built from the SAME manifest declaration the initial launch used, so a
+        // restart cannot differ from the launch it is repeating. `None` for a manifest that declares
+        // no launch: the harness does not own that gateway's lifetime and must not bounce it.
         relaunch: cfg
             .manifest
             .launch_spec(
@@ -1039,14 +1099,48 @@ pub fn run_suite_with(
     // boots the mock with MOCK_RECORD=1 would take that one window, the one whose rate becomes this
     // box's rolling baseline, against a recording mock while every window after it runs against a
     // quiet one.
-    if let Some(why) = crate::reverify::quiesce_recorder(&rc) {
+    // AND A FAILED QUIESCE POISONS THE QUALIFY WINDOW, so it is not merely logged. If the recorder
+    // could not be turned off, the qualification below runs against a recording mock, whose per-request
+    // lock deflates the observed rate - and that deflated rate is exactly what would seed this box's
+    // rolling baseline and gate every LATER run toward itself. So the failure is threaded into
+    // `qualify_box`, which then refuses to let the qualify observation be trusted or seed a baseline
+    // (see there); the quiesce-succeeds path is unchanged.
+    let quiesce_failure = crate::reverify::quiesce_recorder(&rc);
+    if let Some(why) = &quiesce_failure {
         eprintln!("suite: the mock's recorder could not be quiesced before the run: {why}");
     }
 
     // THE BOX IS QUALIFIED BEFORE THE GRID, not after. The verdict is about the machine every
     // number below is measured on, so taking it afterwards would judge a box using a reading taken
     // once the run had already finished loading it.
-    let box_qualify = qualify_box(cfg, &qualify_history(Path::new(&cfg.results_dir)));
+    let box_qualify = qualify_box(
+        cfg,
+        &qualify_history(Path::new(&cfg.results_dir)),
+        quiesce_failure.as_deref(),
+    );
+
+    // AND THE VERDICT GATES THE GRID. `qualify_box` only RECORDS the outcome; acting on it is the
+    // other half. A box whose gateway-free throughput has COLLAPSED PAST THE BAND must not measure the
+    // 6x6 - doing so publishes a rig fault as a gateway regression, the exact incident qualify.rs
+    // exists to prevent. Refuse before the grid: no cells are measured, no snapshot is written, and
+    // `otb run` exits non-zero (bin/otb.rs), which the orchestrator reads as "this box measured
+    // nothing" and leaves the committed row untouched, mirroring the box-replace path. See
+    // `box_qualify_blocks_publish` for exactly which verdicts gate; `pass`/`seed`/`skip` proceed as
+    // before.
+    if box_qualify_blocks_publish(&box_qualify) {
+        return Err(SnapshotError::BoxUnqualified {
+            observed_rps: box_qualify
+                .pointer("/observed_rps")
+                .and_then(serde_json::Value::as_f64),
+            baseline_rps: box_qualify
+                .pointer("/baseline_rps")
+                .and_then(serde_json::Value::as_f64),
+            drift_pct: box_qualify
+                .pointer("/drift_pct")
+                .and_then(serde_json::Value::as_f64),
+            band_pct: QUALIFY_BAND_PCT,
+        });
+    }
 
     let mut upstreams: HashMap<String, Upstream> = HashMap::new();
     let mut any_served = false;
@@ -2135,6 +2229,57 @@ mod tests {
         assert_eq!(out.gateway_c1_p99_us.copied(), None);
     }
 
+    // THE COST COLUMN IS THE ONE THAT MAPS TO MONEY, and judge_cost carries eight cost_* fields plus
+    // the two headline per-request figures straight off the metric surface. A dropped field or a
+    // mistyped key (cost_window_ok vs cost_window_rps) would publish a wrong or missing cost with every
+    // end-to-end test still green, since none of them assert on a cost_* field. This pins the wiring.
+    #[test]
+    fn cost_fields_are_taken_straight_from_the_metric_surface() {
+        let mut out = empty_perf();
+        let mut metrics: std::collections::BTreeMap<&'static str, Measurement<f64>> =
+            std::collections::BTreeMap::new();
+        metrics.insert("cpu_us_per_request", Measurement::Measured(1234.0));
+        metrics.insert("rps_per_cpu_second", Measurement::Measured(56.0));
+        metrics.insert("cost_window_conc", Measurement::Measured(2048.0));
+        metrics.insert("cost_window_ok", Measurement::Measured(177_452.0));
+        metrics.insert("cost_window_rps", Measurement::Measured(44_363.0));
+        metrics.insert("cost_core_utilisation", Measurement::Measured(0.87));
+        metrics.insert("cost_threads", Measurement::Measured(12.0));
+        metrics.insert("cost_nonvol_ctxt_per_request", Measurement::Measured(3.0));
+        metrics.insert("cost_majflt", Measurement::Measured(0.0));
+        judge_cost(&mut out, &metrics);
+        assert_eq!(out.cpu_us_per_request.copied(), Some(1234.0));
+        assert_eq!(out.rps_per_cpu_second.copied(), Some(56.0));
+        assert_eq!(out.cost_window_conc.copied(), Some(2048));
+        assert_eq!(out.cost_window_ok.copied(), Some(177_452.0));
+        assert_eq!(out.cost_window_rps.copied(), Some(44_363.0));
+        assert_eq!(out.cost_core_utilisation.copied(), Some(0.87));
+        assert_eq!(out.cost_threads.copied(), Some(12.0));
+        assert_eq!(out.cost_nonvol_ctxt_per_request.copied(), Some(3.0));
+        assert_eq!(out.cost_majflt.copied(), Some(0.0));
+    }
+
+    // A cost field the group declined to fill must publish an absence naming the missing key, never a
+    // silently-missing key nor a zero - the same discipline judge_added_latency holds.
+    #[test]
+    fn a_missing_cost_field_carries_an_absence_naming_the_key() {
+        let mut out = empty_perf();
+        let mut metrics: std::collections::BTreeMap<&'static str, Measurement<f64>> =
+            std::collections::BTreeMap::new();
+        // Only one field present; every other cost_* field is absent.
+        metrics.insert("cpu_us_per_request", Measurement::Measured(1000.0));
+        judge_cost(&mut out, &metrics);
+        assert_eq!(out.cpu_us_per_request.copied(), Some(1000.0));
+        assert_eq!(out.rps_per_cpu_second.copied(), None);
+        assert!(out
+            .rps_per_cpu_second
+            .detail()
+            .unwrap_or_default()
+            .contains("rps_per_cpu_second"));
+        assert_eq!(out.cost_majflt.copied(), None);
+        assert_eq!(out.cost_window_conc.copied(), None);
+    }
+
     // NOT COVERED HERE BY DESIGN: an end-to-end suite test driving the whole pipeline with the gateway
     // and mock pointed at the same server. `cfg_for`'s fixture (sweep_duration_s: 1, max_conc: 2) is too
     // tight for `search::saturation_plateau` to complete even one probe before its own deadline
@@ -2268,6 +2413,51 @@ mod tests {
         assert_eq!(
             out.streams_sustained.reason(),
             Some(&Absent::SearchExhausted)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // WHEN THE TWO LEGS CARRY DIFFERENT ABSENCES, streams_sustained - named after the CONCURRENCY
+    // search - must publish the CONCURRENCY metric's own reason and detail, not the fps leg's. Reading
+    // only `carry_absence(&fps)` here re-introduced, one layer up in suite.rs, the exact discard bug
+    // metric.rs Streaming::measure was fixed to avoid.
+    #[test]
+    fn streams_sustained_absence_speaks_with_the_concurrency_metrics_own_reason_not_the_fps_legs() {
+        let dir = tmpdir("streams-absent-attribution");
+        let gw = serve(200);
+        let cfg = cfg_for(&dir, gw);
+        let mut out = crate::record::CellStream::default();
+        let mut metrics: std::collections::BTreeMap<&'static str, Measurement<f64>> =
+            std::collections::BTreeMap::new();
+        // The fps leg is absent for one reason...
+        metrics.insert(
+            "streams_sustained_fps",
+            Measurement::absent_because(Absent::RigLimited, "fps leg says rig-limited"),
+        );
+        // ...while the concurrency search failed for a DIFFERENT reason with its own evidence.
+        metrics.insert(
+            "streams_sustained",
+            Measurement::absent_because(
+                Absent::SearchExhausted,
+                "c=65536 still passes at the top of the search range",
+            ),
+        );
+        judge_streams_sustained(&cfg, Dialect::Openai, &mut out, &metrics);
+        // streams_sustained must carry the CONCURRENCY leg's reason and evidence.
+        assert_eq!(
+            out.streams_sustained.reason(),
+            Some(&Absent::SearchExhausted),
+            "streams_sustained must speak with the concurrency metric's reason, not the fps leg's"
+        );
+        assert!(out
+            .streams_sustained
+            .detail()
+            .unwrap_or_default()
+            .contains("65536"));
+        // and streams_sustained_fps carries the fps leg's own reason.
+        assert_eq!(
+            out.streams_sustained_fps.reason(),
+            Some(&Absent::RigLimited)
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2440,6 +2630,9 @@ mod tests {
     // seeds cannot catch the box it exists to catch.
     #[test]
     fn a_handed_baseline_lets_the_box_qualification_actually_judge() {
+        // Serialise against any other test that reads or writes OTB_QUALIFY_BASELINE: cargo runs these
+        // on many threads, and this test flips the var while run_suite_with-driving tests read it.
+        let _env = crate::env_lock();
         let empty = std::path::Path::new("/nonexistent-results-dir-for-this-test");
         // What the field had: nothing on disk, and nothing handed over.
         std::env::remove_var("OTB_QUALIFY_BASELINE");
@@ -2486,6 +2679,115 @@ mod tests {
         assert_eq!(judge_at(300_000.0), "fail");
 
         std::env::remove_var("OTB_QUALIFY_BASELINE");
+    }
+
+    // A BOX THAT FAILS QUALIFICATION ON A MEASURED REGRESSION MUST NOT PUBLISH.
+    //
+    // `qualify_box` only recorded the verdict; `run_suite_with` now acts on it via
+    // `box_qualify_blocks_publish`. The gate fires on a MEASURED collapse - outcome `fail` with an
+    // `observed_rps` actually taken - which is the finding's incident (a rig fault that would publish
+    // as a gateway regression). It must NOT fire on `pass`/`seed`/`skip`, nor on a `fail` that carries
+    // no observation (a qualify stage that produced no reading is a different condition from a measured
+    // collapse). Tested as a pure predicate because the suite's own fixture cannot drive a real qualify
+    // window: the loadgen child is the TEST binary, which has no `loadgen` subcommand, so every
+    // in-test qualify observation is absent - which is exactly why the gate must not fire on an absent
+    // observation, or every run_suite_with test would abort.
+    #[test]
+    fn box_qualify_gate_fires_only_on_a_measured_regression() {
+        use serde_json::json;
+        // The finding's incident: a real 300k rps against a ~498k baseline, judged `fail`.
+        assert!(
+            box_qualify_blocks_publish(&json!({
+                "outcome": "fail",
+                "observed_rps": 300_000.0,
+                "baseline_rps": 498_000.0,
+                "drift_pct": -39.7
+            })),
+            "a measured throughput collapse must block publishing"
+        );
+        // A `fail` with NO observation (the in-test case, and a transient qualify hiccup) does NOT gate.
+        assert!(
+            !box_qualify_blocks_publish(&json!({ "outcome": "fail", "observed_rps": null })),
+            "a fail with no observation is not a measured collapse and must not abort the run"
+        );
+        // Every other verdict proceeds, observation present or not.
+        for outcome in ["pass", "seed", "skip"] {
+            assert!(
+                !box_qualify_blocks_publish(&json!({
+                    "outcome": outcome,
+                    "observed_rps": 480_000.0
+                })),
+                "{outcome} must never gate the grid"
+            );
+        }
+    }
+
+    // AND THE END-TO-END COROLLARY: because the in-test qualify observation is always absent, a full
+    // run_suite_with must PROCEED (the grid runs, a snapshot is written) rather than aborting on that
+    // absence - this is what keeps the ten sibling run_suite_with tests green while the gate is armed.
+    #[test]
+    fn an_unmeasurable_qualification_does_not_abort_the_run() {
+        let _env = crate::env_lock();
+        std::env::remove_var("OTB_QUALIFY_BASELINE");
+        let dir = tmpdir("qualify-gate-absent-observed");
+        let gw = serve(200);
+        let cfg = cfg_for(&dir, gw);
+        let result = run_suite_with(&cfg, gw, &[]);
+        assert!(
+            result.is_ok(),
+            "an absent qualify observation is not a measured collapse and must not block the run, got {result:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // A FAILED QUIESCE MUST NOT PRODUCE A TRUSTED QUALIFY OBSERVATION. If the mock's recorder could not
+    // be turned off before qualification, the observed rate was taken against a recording mock (its
+    // per-request lock deflates the rate) and must never seed the rolling baseline - which would gate
+    // every later run toward that contaminated number. `qualify_box` now takes the quiesce failure and
+    // records the observation as a HarnessError, an outcome `qualifies_as_baseline` excludes.
+    #[test]
+    fn a_failed_quiesce_does_not_seed_the_qualification_baseline() {
+        let _env = crate::env_lock();
+        std::env::remove_var("OTB_QUALIFY_BASELINE");
+        let dir = tmpdir("qualify-quiesce-fail");
+        let gw = serve(200);
+        let cfg = cfg_for(&dir, gw);
+
+        // With a quiesce failure, the qualify observation is invalidated: a HarnessError naming the
+        // quiesce fault, and an outcome that does NOT qualify as a baseline.
+        let bad = qualify_box(&cfg, &[], Some("the recorder could not be turned off"));
+        assert_eq!(
+            bad.pointer("/observed_absent_reason").and_then(|v| v.as_str()),
+            Some("harness_error"),
+            "a quiesce-contaminated qualification must be a harness error, not a trusted reading: {bad}"
+        );
+        assert!(
+            bad.pointer("/observed_absent_detail")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .contains("quiesced"),
+            "the reason must name the quiesce fault: {bad}"
+        );
+        let bad_outcome = bad
+            .pointer("/outcome")
+            .and_then(|v| v.as_str())
+            .and_then(crate::qualify::Outcome::from_token)
+            .expect("a published outcome token");
+        assert!(
+            !bad_outcome.qualifies_as_baseline(),
+            "a quiesce-contaminated qualification must never seed a baseline, got {bad_outcome:?}"
+        );
+
+        // The normal (quiesce-succeeds) path is unchanged: no quiesce HarnessError is stamped.
+        let ok = qualify_box(&cfg, &[], None);
+        assert!(
+            !ok.pointer("/observed_absent_detail")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .contains("quiesced"),
+            "the quiesce-succeeds path must not carry a quiesce fault: {ok}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // WHAT IT RAN ON MUST REACH THE ARTIFACT.

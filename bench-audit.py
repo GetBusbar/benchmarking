@@ -380,9 +380,8 @@ ABSENCE_CARRYING_FIELDS = {
         "plateaued", "load_s",
         # Absent BECAUSE the measurement succeeded: these describe HOW a window failed to settle, so a
         # window that DID settle has no shape to publish and says exactly that. They are listed here
-        # for the reason every other field is - a null must carry a reason - and NOT held to
-        # check_no_bare_absence's "a served cell publishes a number", which is why that check reads
-        # SHAPE_FIELDS below and lets a reasoned absence stand.
+        # for the reason every other field is - a null must carry a reason in the absences map, which
+        # check_no_bare_absence enforces uniformly for them just like every other field.
         "shape", "idle_shape",
         # The idle window's own verdict and its fitted slope. The memory group measured both on every
         # served cell and CellMemory had nowhere to put them, so they reached the artifact as neither
@@ -392,9 +391,6 @@ ABSENCE_CARRYING_FIELDS = {
         "idle_static", "idle_growth_rate_mib_per_min",
     ],
 }
-
-# The fields whose absence is a RESULT rather than a gap. See the note in ABSENCE_CARRYING_FIELDS.
-SHAPE_FIELDS = {"memory": {"shape", "idle_shape"}}
 
 # The absence reasons that legitimately excuse a CAPACITY metric from being a number. Everything
 # else must be a number - a gateway that failed the gate at every rung is a measured 0, not a hole.

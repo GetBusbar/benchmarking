@@ -17,6 +17,10 @@
 set -uo pipefail
 export AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-us-east-1}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"   # this repo (benchmarking) root
+# If the `cd` failed (checkout moved/unmounted/deleted mid-run), the `&&` short-circuits before `pwd`
+# and HERE is the EMPTY string - which `set -u` does NOT catch (it is defined, just empty), so a later
+# `rm -rf "$HERE"/bin` would parse as `rm -rf /bin` on the operator's own trusted box. Refuse to run.
+[ -n "$HERE" ] && [ -d "$HERE" ] || { echo "FATAL: could not resolve script directory (checkout moved?)" >&2; exit 1; }
 
 # Per-invocation run id: every box THIS run launches is tagged run=$RUN_ID, and teardown filters on
 # it so a second (or concurrent) invocation never terminates the first run's boxes or pulls the rug on
@@ -292,8 +296,12 @@ if [[ "${1:-}" == "kill" || "${1:-}" == "--kill" ]]; then
   # safe to clear.
   rm -f "$HERE"/results/fanout-*.log
   rm -f "$HERE"/results/*/.incoming-*.json "$HERE"/results/config/.incoming-*.txt
+  # Per-RUN_ID box-qualification scratch (skipped-*/measured-*): one pair leaks per invocation and
+  # nothing else ever removes them, so sweep them here with the rest of the run scratch.
+  rm -f "$HERE"/results/box-qualify/skipped-*.txt "$HERE"/results/box-qualify/measured-*.txt
+  rm -rf "$HERE"/results/.reservations
   rm -rf "$HERE"/bin
-  echo "local cleanup: fanout logs, cached rig binaries, and pull-staging files cleared"
+  echo "local cleanup: fanout logs, cached rig binaries, box-qualify scratch, and pull-staging files cleared"
   exit 0
 fi
 
@@ -367,7 +375,17 @@ BENCH_COMMIT="${BENCH_COMMIT:-$(git -C "$HERE" rev-parse HEAD 2>/dev/null || ech
 _engine_pin=""; _engine_tag=""
 if [ -r "$HERE/ENGINE_PIN" ]; then
   read -r _engine_pin _engine_tag _ < "$HERE/ENGINE_PIN" || true
-  case "$_engine_pin" in *[!0-9a-f]*|"") _engine_pin=""; _engine_tag="" ;; esac
+  # A MALFORMED first field (non-empty but not a lowercase-hex commit) is NOT the same as an ABSENT
+  # pin. Silently blanking it - as this used to - falls BENCH_ENGINE_COMMIT back to the tree commit,
+  # which makes the mismatch guard below a no-op (engine==tree by construction) and lets the run
+  # measure on an unverified engine while stamping the snapshot as the frozen instrument. Refuse loudly.
+  case "$_engine_pin" in
+    "") _engine_tag="" ;;                        # empty/blank line: no pin, fall back to the tree commit
+    *[!0-9a-f]*)
+      echo "REFUSING: ENGINE_PIN's first field is not a lowercase-hex commit: '$_engine_pin'" >&2
+      echo "  A corrupted/truncated pin would silently disable the engine-pin guard. Fix ENGINE_PIN and re-run." >&2
+      exit 1 ;;
+  esac
 fi
 # THE TAG IS A LABEL AND THE SHA IS THE AUTHORITY, so a moved tag is caught rather than followed.
 # Annotated tags resolve to a tag OBJECT, not a commit, so the deref is required - without it this
@@ -594,10 +612,14 @@ teardown() {
       --filters "Name=tag:purpose,Values=gateway-bench" "Name=instance-state-name,Values=running,pending" \
       --query 'Reservations[].Instances[].[InstanceId,Tags[?Key==`run`]|[0].Value]' --output text 2>/dev/null \
       | awk -v r="$RUN_ID" 'NF && $2!=r {print $1}')"
-    if [[ -z "$_live_others" ]]; then
+    # Also honor any OTHER invocation's pre-launch reservation: a sibling past preflight but not yet
+    # tagged has no instance for the query above to see, but it DOES have a reservation file. Keeping the
+    # key on a stale reservation is the safe error (a leaked key costs nothing; `kill` sweeps it).
+    _other_resv="$(find "$RESV_DIR" -type f ! -name "$RUN_ID" 2>/dev/null | head -1)"
+    if [[ -z "$_live_others" && -z "$_other_resv" ]]; then
       aws ec2 delete-key-pair --key-name "$KEYNAME" >/dev/null 2>&1 || true; rm -f "$KEYFILE" "$KEYFILE.awsid"
     else
-      echo "[key] other bench boxes still running ($(echo $_live_others | tr '\n' ' ')) - keeping shared key $KEYNAME durable; \`run-on-ec2.sh kill\` sweeps it once they are done" >&2
+      echo "[key] another bench run is still live (boxes: $(echo $_live_others | tr '\n' ' ')${_other_resv:+; reservation: $(basename "$_other_resv")}) - keeping shared key $KEYNAME durable; \`run-on-ec2.sh kill\` sweeps it once they are done" >&2
     fi
   fi
   if [[ "$CREATED_SG" == 1 ]]; then
@@ -620,7 +642,19 @@ teardown() {
     fi
     aws ec2 delete-security-group --group-id "$SG" >/dev/null 2>&1 || true
   fi
+  # Drop this run's pre-launch reservation LAST, so a sibling still deciding whether to keep the shared
+  # key sees it right up until this invocation is truly done.
+  [ -n "${RESV_FILE:-}" ] && rm -f "$RESV_FILE" 2>/dev/null || true
 }
+
+# PRE-LAUNCH RESERVATION (audit u9-concurrency-3). teardown's shared-key deletion above only sees boxes
+# ALREADY tagged purpose=gateway-bench; a sibling invocation that has PASSED preflight but not yet reached
+# its first run-instances call is invisible to that query, so a short run finishing in that window could
+# delete the shared key out from under the sibling before its first box launches (InvalidKeyPair.NotFound).
+# Record a lightweight per-RUN_ID reservation file the moment THIS invocation starts - BEFORE preflight -
+# and have teardown honor any OTHER live reservation as a reason to keep the durable key.
+RESV_DIR="$HERE/results/.reservations"; mkdir -p "$RESV_DIR"
+RESV_FILE="$RESV_DIR/$RUN_ID"; : > "$RESV_FILE"
 trap teardown EXIT INT TERM
 
 # EXISTENCE IS NOT CORRESPONDENCE, and assuming it was cost a whole launch on 2026-07-31.
@@ -1307,8 +1341,9 @@ FILELIST
   # error, exactly like a missing suite JSON.
   pull_snapshots() {
     mkdir -p "$HERE/results/snapshots"
-    local attempt rc before after
+    local attempt rc before after before_list after_list
     before=$(ls -1 "$HERE"/results/snapshots/result_"$gw"_*.json 2>/dev/null | wc -l | tr -d ' ')
+    before_list=$(ls -1 "$HERE"/results/snapshots/result_"$gw"_*.json 2>/dev/null | sort)
     for attempt in 1 2 3 4; do
       # Filter with rsync's OWN --include/--exclude rather than a wildcard in the remote path: a remote
       # glob only works if the remote shell expands it, which rsync's --protect-args (default-on in some
@@ -1321,7 +1356,25 @@ FILELIST
       if [[ $rc -eq 0 ]]; then
         after=$(ls -1 "$HERE"/results/snapshots/result_"$gw"_*.json 2>/dev/null | wc -l | tr -d ' ')
         if [[ "${after:-0}" -gt "${before:-0}" ]]; then
-          glog_echo "pulled snapshots/result_${gw}_*.json ($(( after - before )) new, ${after} on disk)"; return 0
+          glog_echo "pulled snapshots/result_${gw}_*.json ($(( after - before )) new, ${after} on disk)"
+          # SHARD STAGING (RUN_ID-scoped collection). When this invocation is ONE shard of a sharded
+          # run, run-sharded.sh exports OTB_SHARD_STAGE=<its own private per-run dir>. Hand THIS box's
+          # freshly-pulled single-egress snapshot(s) straight into that dir and OUT of the shared
+          # canonical results/snapshots/. The file came from THIS box over rsync, so it is unambiguously
+          # this invocation's output: the collector never has to guess by mtime (which would let a
+          # concurrent same-gateway run's snapshot be scooped), and a single-column partial never sits in
+          # the canonical dir where the board or a later merge could read it as a finished row.
+          if [ -n "${OTB_SHARD_STAGE:-}" ]; then
+            mkdir -p "$OTB_SHARD_STAGE"
+            after_list=$(ls -1 "$HERE"/results/snapshots/result_"$gw"_*.json 2>/dev/null | sort)
+            comm -13 <(printf '%s\n' "$before_list") <(printf '%s\n' "$after_list") \
+              | while IFS= read -r f; do
+                  [ -n "$f" ] && [ -e "$f" ] || continue
+                  mv "$f" "$OTB_SHARD_STAGE/" \
+                    && glog_echo "staged $(basename "$f") -> OTB_SHARD_STAGE (shard collection, out of the canonical dir)"
+                done
+          fi
+          return 0
         fi
         glog_echo "no NEW snapshot artifact on the box for $gw (${after} already on disk)"; return 1
       fi
@@ -1577,7 +1630,23 @@ echo $? > .run-done
 # orchestrator now has a known amount of time to come back (see `run-on-ec2.sh harvest`) instead of
 # racing whatever happened to be left of the work budget.
 sudoq shutdown -c 2>/dev/null || true
-sudoq shutdown -h +__HARVEST_GRACE_MIN__ 2>/dev/null || true
+# NEVER LEAVE A FINISHED BOX WITH NO TIMER. sudoq gives up on flapping passwordless sudo after ~16s;
+# if the re-arm below fails after the cancel above already succeeded, the box would be left uncapped -
+# a finished box burning cost forever if the orchestrator is also down (the exact case harvest mode is
+# for). So retry the harvest re-arm, and if it STILL fails, fall back to re-arming the original,
+# longer boot backstop rather than leaving the box with no self-terminate timer at all.
+_armed=0
+for _try in 1 2 3 4 5; do
+  if sudoq shutdown -h +__HARVEST_GRACE_MIN__ 2>/dev/null; then _armed=1; break; fi
+  sleep 5
+done
+if [ "$_armed" != 1 ]; then
+  if sudoq shutdown -h +__BENCH_MAX_MIN__ 2>/dev/null; then
+    echo "[box] WARNING: harvest re-arm failed; fell back to the +__BENCH_MAX_MIN__ min boot backstop so cost stays capped"
+  else
+    echo "[box] WARNING: could NOT arm any self-terminate timer - this box must be terminated by hand"
+  fi
+fi
 echo "[box] run finished; results held for __HARVEST_GRACE_MIN__ min for harvest, then self-terminate"
 REMOTE
   )"
@@ -1585,6 +1654,7 @@ REMOTE
   # heredoc precisely so nothing in it is interpreted locally, which also means it cannot read an
   # orchestrator variable.
   _run_sh="${_run_sh//__HARVEST_GRACE_MIN__/$HARVEST_GRACE_MIN}"
+  _run_sh="${_run_sh//__BENCH_MAX_MIN__/$BENCH_MAX_MIN}"
   printf '%s\n' "$_run_sh" | ssh $SSHOPT ubuntu@"$ip" "cat > ~/benchmarking/.run.sh" >>"$glog" 2>&1
   local launch_rc=$?
   if [ "$launch_rc" -eq 0 ]; then
@@ -1787,17 +1857,29 @@ if [ ! -s "$FRESH_SNAPSHOTS" ]; then
   log "NO GATEWAY MEASURED ANYTHING THIS RUN - not appending history, not regenerating charts, not pushing."
   log "  The board keeps exactly what it had. Re-run the gateways above; their fanout logs say why each failed."
   publish_lock_release
+  rm -f "$QUALIFY_SKIPPED" "$FRESH_SNAPSHOTS"   # per-RUN_ID scratch; nothing else removes it
   exit "$fail"
 fi
 log "$(wc -l < "$FRESH_SNAPSHOTS" | tr -d ' ') gateway(s) produced a fresh snapshot this run - regenerating and publishing from them"
 
 # ── append this run to the append-only history (results/history/<gw>.jsonl) ─────────────────────
-# Do NOT swallow a failure with `|| true`: a malformed result JSON or an unwritable
-# results/history/ would otherwise complete the run "successfully" with the append-only history
-# silently missing the whole run. Log loudly and count it as a run-level issue instead.
-if ! python3 "$HERE/history/append.py"; then
-  log "WARNING history/append.py FAILED - the append-only history was NOT updated for this run (investigate results/ JSON validity + results/history writability)"
-  fail=$((fail+1))
+# GATED ON PUBLISH. A shard sub-invocation (run-sharded.sh) runs this script with PUBLISH=0 and
+# OTB_EGRESS set to ONE egress column: its snapshot is a real but PARTIAL (single-column) measurement.
+# append.py dedupes by (suite, measured_at) with no notion of egress-column completeness, so letting
+# each shard append would permanently record N-1 incomplete-grid rows keyed by their own measured_at
+# alongside the one legitimate merged row. So only a publishing run appends here; run-sharded.sh appends
+# ONCE over the MERGED snapshot after its merge. A local PUBLISH=0 dry run likewise skips the append (it
+# is not publishing anything, and the append only matters as the prelude to a push).
+# Do NOT swallow a failure with `|| true`: a malformed result JSON or an unwritable results/history/
+# would otherwise complete the run "successfully" with the append-only history silently missing the
+# whole run. Log loudly and count it as a run-level issue instead.
+if [[ "$PUBLISH" == "1" ]]; then
+  if ! python3 "$HERE/history/append.py"; then
+    log "WARNING history/append.py FAILED - the append-only history was NOT updated for this run (investigate results/ JSON validity + results/history writability)"
+    fail=$((fail+1))
+  fi
+else
+  log "PUBLISH=0 - not appending to the per-gateway history here (a shard run appends once over the merged snapshot; a dry run appends nothing)"
 fi
 
 # ── regenerate charts + reports locally from the collected JSONs ──────────────────────────────────
@@ -1866,5 +1948,8 @@ else
 fi
 # Clean up the publish lock artifacts this run created.
 publish_lock_release
+# Per-RUN_ID box-qualification scratch (results/box-qualify/skipped-*/measured-*): one pair per
+# invocation, and nothing else on any exit path removes them. Drop this run's pair here.
+rm -f "$QUALIFY_SKIPPED" "$FRESH_SNAPSHOTS"
 
 exit "$fail"

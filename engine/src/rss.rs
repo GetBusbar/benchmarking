@@ -759,10 +759,31 @@ mod tests {
         fn total_depends_only_on_the_set_of_pids_not_on_path_multiplicity(
             kb1 in 1u64..100_000,
             kb2 in 1u64..100_000,
+            kb3 in 1u64..100_000,
         ) {
-            let star = FakeProc::default().rss(1, kb1).child(2, 1).rss(2, kb2);
-            let chain = FakeProc::default().rss(1, kb1).child(2, 1).rss(2, kb2);
-            prop_assert_eq!(rss(&star, 1).copied(), rss(&chain, 1).copied());
+            // The SAME pid set {1,2,3} with the SAME readings, arranged as two GENUINELY DIFFERENT
+            // topologies. The previous version built `star` and `chain` from byte-identical fixture
+            // code, so the assertion compared one input to itself and would have passed even if the
+            // tree walk were broken. These are different graph shapes: only a walk that sums the set
+            // of readable pids (not the paths to them) gives both the same total.
+            //
+            // star: root 1 with two DIRECT children 2 and 3.
+            let star = FakeProc::default()
+                .rss(1, kb1)
+                .child(2, 1)
+                .rss(2, kb2)
+                .child(3, 1)
+                .rss(3, kb3);
+            // chain: root 1 -> 2 -> 3, the same three pids at increasing depth.
+            let chain = FakeProc::default()
+                .rss(1, kb1)
+                .child(2, 1)
+                .rss(2, kb2)
+                .child(3, 2)
+                .rss(3, kb3);
+            let expected = Some((kb1 + kb2 + kb3) as f64 / 1024.0);
+            prop_assert_eq!(rss(&star, 1).copied(), expected);
+            prop_assert_eq!(rss(&chain, 1).copied(), expected);
         }
     }
 }

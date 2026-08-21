@@ -5,8 +5,10 @@
 //
 // A contaminated box - one whose peak throughput has collapsed - must not run a full 6x6 and have the
 // result published as a gateway regression. It replays a known load with no gateway in the path and
-// compares the throughput against a rolling baseline (`PEAK_DRIFT_PCT`), and that verdict is published
-// as `rig.box_qualify` inside the snapshot.
+// compares the throughput against a rolling baseline within a drift band, and that verdict is
+// published as `rig.box_qualify` inside the snapshot. THE LIVE BAND IS `suite::QUALIFY_BAND_PCT`
+// (20%), the only value any real call site passes into `judge`; there is no separate throughput-drift
+// constant in this module, so editing the band means editing that one constant in `suite.rs`.
 //
 // ONE STAGE, NOT TWO. This header used to describe a stage 1 that compared the box's gateway-free
 // LATENCY FLOOR against its own baseline, ahead of the throughput stage. That stage is not wired:
@@ -19,7 +21,6 @@ use crate::measurement::{Absent, Measurement};
 use serde::{Deserialize, Serialize};
 
 pub const FLOOR_DRIFT_PCT: f64 = 4.0;
-pub const PEAK_DRIFT_PCT: f64 = 25.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

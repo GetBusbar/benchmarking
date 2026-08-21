@@ -50,8 +50,7 @@ def listof(v):
     return v if isinstance(v, list) else None
 
 
-def check(path):
-    d = json.load(open(path))
+def check(d):
     gw = d.get("gateway", "?")
     problems, checked, unverifiable = [], 0, 0
     ttft_with_samples = 0
@@ -124,10 +123,12 @@ def main():
     allp = []
     for p in paths:
         try:
-            gw, n, u, t, probs = check(p)
+            d = json.load(open(p))
         except Exception as e:  # a snapshot mid-write during a live run is not a defect
             print(f"  SKIP {p}: {e}")
             continue
+        # An exception INSIDE the re-derivation is a real failure, not a mid-write race - let it surface.
+        gw, n, u, t, probs = check(d)
         total += n
         unver += u
         ttft += t

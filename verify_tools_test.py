@@ -258,6 +258,22 @@ def main():
     c, o = run("verify-turnover.py", good)
     expect("a DISCLOSED floor passes", c, o, False, "DISCLOSED FLOOR")
 
+    # ACCEPT, and the one branch nothing here reached: CLIFF-THAT-MATTERS (`live`). The winner's next
+    # rung up FAILED and was NOT slower - here it produced NO rate at all (fail=900, rps=None), the
+    # exact shape verify-turnover.py's own docstring names (c=512, fail=900). That drives the `if b is
+    # None:` crash-guard: without it the report formats a None rate with `,.0f` and raises TypeError,
+    # crashing on precisely its worked example. This asserts the tool does NOT crash, discloses it as
+    # CLIFF-THAT-MATTERS, and (a cliff is a disclosure, not a gate) still exits zero.
+    matters = copy.deepcopy(CLEAN_CELL)
+    matters["perf"]["sweep_max_proxy"] = [
+        {"conc": 8, "ok": 100, "rps": 100.0, "p99_us": 900, "fail": 0},
+        {"conc": 16, "ok": 120, "rps": 120.0, "p99_us": 1500, "fail": 0},
+        {"conc": 32, "ok": 0, "rps": None, "p99_us": None, "fail": 900},  # failed all: NO rate to report
+    ]
+    c, o = run("verify-turnover.py", matters)
+    expect("a cliff whose failing rung was FASTER (here: no rate at all) is CLIFF-THAT-MATTERS, not a crash",
+           c, o, False, "CLIFF-THAT-MATTERS (1)")
+
     print()
     if FAILURES:
         for f in FAILURES:

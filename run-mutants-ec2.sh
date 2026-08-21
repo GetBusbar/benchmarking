@@ -15,6 +15,11 @@ KEYNAME="gateway-bench-key"; KEYFILE="$STATE/${KEYNAME}.pem"
 SGNAME="gateway-bench-sg"
 ITYPE="${MUTANT_ITYPE:-m7g.8xlarge}"          # 32 vCPU Graviton; same arch family as the bench boxes
 JOBS="${MUTANT_JOBS:-12}"                      # test processes in flight; see the note by --jobs below
+# COST BACKSTOP CEILING, in minutes. The EXIT/INT/TERM trap terminates the box while THIS orchestrator
+# is alive - but a closed terminal, SIGKILL or a laptop sleep kills the trap before it fires, and the
+# poll loop can also wedge on a stuck ssh. So the box also self-terminates at boot time no matter what,
+# exactly like every run-on-ec2.sh box, capping a leaked box at MUTANT_MAX_MIN rather than indefinitely.
+MAXMIN="${MUTANT_MAX_MIN:-1440}"               # 24h; well above a parallel mutants sweep, never at it
 SSM="/aws/service/canonical/ubuntu/server/24.04/stable/current/arm64/hvm/ebs-gp3/ami-id"
 SSHOPT="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=15 -i $KEYFILE"
 OUT="$HERE/results/mutants"
@@ -44,6 +49,8 @@ trap cleanup EXIT INT TERM
 log "launching $ITYPE for mutants @ $SHA"
 IID="$(aws ec2 run-instances --image-id "$AMI" --instance-type "$ITYPE" --key-name "$KEYNAME" \
   --security-group-ids "$SG" \
+  --instance-initiated-shutdown-behavior terminate \
+  --user-data "$(printf '#!/bin/bash\nshutdown -h +%s\n' "$MAXMIN")" \
   --block-device-mappings 'DeviceName=/dev/sda1,Ebs={VolumeSize=60,VolumeType=gp3}' \
   --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=engine-mutants}]' \
   --query 'Instances[0].InstanceId' --output text)" || exit 1
@@ -92,7 +99,11 @@ REMOTE
 log "waiting for completion (polling every 5m)"
 while :; do
   sleep 300
-  done_now="$(ssh $SSHOPT "ubuntu@$IP" 'pgrep -c cargo-mutants || echo 0' 2>/dev/null || echo "?")"
+  # `pgrep -c` prints 0 AND exits non-zero when nothing matches, so `|| echo 0` appended a SECOND zero
+  # and the string became "0\n0" - which never equals "0", so a FINISHED box would be polled forever
+  # (watch-orphans.sh carries this same fix). head -1 takes pgrep's own answer.
+  done_now="$(ssh $SSHOPT "ubuntu@$IP" 'pgrep -c cargo-mutants 2>/dev/null | head -1' 2>/dev/null | tr -d '\r\n ' || echo "?")"
+  [[ -z "$done_now" ]] && done_now=0
   tail_now="$(ssh $SSHOPT "ubuntu@$IP" 'tail -1 ~/mutants.log 2>/dev/null' 2>/dev/null || true)"
   log "mutants running=$done_now | $tail_now"
   [[ "$done_now" == "0" ]] && break

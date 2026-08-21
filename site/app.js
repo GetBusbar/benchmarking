@@ -1198,10 +1198,10 @@ const CHART_METRICS = [
     note: "Microseconds of gateway CPU per completed request, measured at one concurrency held identical for every gateway. Lower is better.",
     get: (g, st) => mval((chooserCellPerf(g, st) || {}).cpu_us_per_request) },
   { id: "rpsdollar", label: "Requests per $/hr", unit: "req/s per $/hr", log: true, desc: true,
-    note: "Requests per second per dollar of hourly instance cost, at the selected bound. Higher is better.",
+    note: `Requests per second per dollar of hourly instance cost, priced at the board's fixed ${DEFAULT_BOUND_MS} ms bound (NOT the bound selector above - the dollar lanes are computed once at the pricing bound so the throughput and cost columns describe the same operating point). Higher is better.`,
     get: (g, st) => mval((chooserCellPerf(g, st) || {}).rps_per_dollar) },
   { id: "permillion", label: "Cost per million requests", unit: "USD", log: true, desc: false,
-    note: "Instance cost to serve a million requests at the selected bound. Lower is better.",
+    note: `Instance cost to serve a million requests, priced at the board's fixed ${DEFAULT_BOUND_MS} ms bound (NOT the bound selector above). Lower is better.`,
     get: (g, st) => mval((chooserCellPerf(g, st) || {}).cost_per_million_usd) },
   { id: "lat", label: "Added latency (p99)", unit: "µs", log: true, desc: false,
     note: "Gateway p99 minus direct-to-mock p99 at concurrency 1. Lower is better.",
@@ -3596,7 +3596,13 @@ const cellState = (cell) =>
             // grey, unlike every case above it.
             : cell.served === "failed" ? ["failed", "not served"]
               : isHarnessGap(cell) ? ["unverified", "not verified"]
-              : ["failed", "not served"];
+                // LEGACY red: served===false with its own reason (wrong_answer) is a genuine
+                // gateway-side defect. Kept explicit so the neutral default below cannot swallow it.
+                : cell.served === false ? ["failed", "not served"]
+                  // An UNRECOGNISED served token (a future engine state carrying its own reason, which
+                  // makes isHarnessGap return false) must NOT be painted red and blamed on the gateway -
+                  // mis-attribution is the core failure mode. Render it neutral/unverified instead.
+                  : ["unverified", "not verified"];
 
 function laneStamp(j) {
   const bits = [];

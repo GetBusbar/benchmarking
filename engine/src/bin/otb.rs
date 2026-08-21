@@ -289,9 +289,11 @@ fn main() -> ExitCode {
             use otb_engine::manifest::Manifest;
             use otb_engine::suite::{run_suite, SuiteConfig};
             let Some(manifest_path) = args.get(1) else {
-                eprintln!(
-                    "usage: otb run <manifest.json> <gateway ip:port> <mock ip:port> [results_dir]"
-                );
+                // Matches the real parser (and the second banner below): args[1]=gateway dir/manifest,
+                // args[2]=mock address, args[3]=results_dir, args[4]=sweep_s. The gateway's OWN address
+                // is NOT an argument - it comes from the manifest's declared port (or OTB_GATEWAY_ADDR).
+                eprintln!("usage: otb run <gateway dir> <mock ip:port> [results_dir] [sweep_s]");
+                eprintln!("  the gateway's own address comes from its definition; OTB_GATEWAY_ADDR overrides it");
                 return ExitCode::from(2);
             };
             // A gateway is a DIRECTORY, not a file: definition.json plus whatever sidecars it has.
@@ -680,12 +682,50 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
-            let mut paths: Vec<std::path::PathBuf> = entries
-                .filter_map(|e| e.ok().map(|e| e.path()))
-                .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("json"))
-                .collect();
+            // REFUSE, don't drop. A read_dir entry that errors (transient EIO, a permissions bit, a
+            // file removed mid-listing on a self-terminating box) must abort the merge, not vanish
+            // silently: the old `.filter_map(|e| e.ok()..)` threw that entry away, and since nothing
+            // tracks the expected shard count, merge_snapshots would then publish a merged row quietly
+            // missing a whole egress column - the exact silent-mis-attribution RULES.md forbids.
+            let mut paths: Vec<std::path::PathBuf> = Vec::new();
+            for entry in entries {
+                let entry = match entry {
+                    Ok(e) => e,
+                    Err(e) => {
+                        eprintln!(
+                            "cannot list a shard entry in {shard_dir}: {e} - refusing to merge \
+                             (a shard dropped by a read error would silently lose an egress column)"
+                        );
+                        return ExitCode::FAILURE;
+                    }
+                };
+                let p = entry.path();
+                if p.extension().and_then(|x| x.to_str()) == Some("json") {
+                    paths.push(p);
+                }
+            }
             paths.sort();
+            // A shard snapshot is kilobytes; a wildly larger file is a corrupt/truncated artifact or a
+            // runaway series, and reading it whole would inflate the merge's footprint with nothing
+            // bounding it. Cap the per-shard read at a size no legitimate snapshot approaches.
+            const MAX_SHARD_BYTES: u64 = 32 * 1024 * 1024;
             for p in &paths {
+                match std::fs::metadata(p) {
+                    Ok(m) if m.len() > MAX_SHARD_BYTES => {
+                        eprintln!(
+                            "shard {} is {} bytes, over the {MAX_SHARD_BYTES}-byte cap - refusing to \
+                             read (a corrupt or oversized shard must not be merged)",
+                            p.display(),
+                            m.len()
+                        );
+                        return ExitCode::FAILURE;
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        eprintln!("cannot stat shard {}: {e}", p.display());
+                        return ExitCode::FAILURE;
+                    }
+                }
                 match std::fs::read_to_string(p)
                     .map_err(|e| e.to_string())
                     .and_then(|s| {
@@ -736,14 +776,32 @@ fn main() -> ExitCode {
             let targets: Vec<std::path::PathBuf> = if args.len() > 1 {
                 args[1..].iter().map(std::path::PathBuf::from).collect()
             } else {
-                // No argument: check the whole field, which is what CI wants.
-                let mut all: Vec<_> = std::fs::read_dir("gateways")
-                    .into_iter()
-                    .flatten()
-                    .flatten()
-                    .map(|e| e.path())
-                    .filter(|p| p.join("definition.json").is_file())
-                    .collect();
+                // No argument: check the whole field, which is what CI wants. A gateways directory
+                // that cannot be LISTED, or an entry that cannot be READ, is a HARD failure here - the
+                // old `.into_iter().flatten().flatten()` silently dropped both, so a permissions bit or
+                // an NFS hiccup shrank `targets` and validate reported "N of N ready" for a smaller N
+                // and exited SUCCESS, masking a broken gateway directory as if it simply did not exist.
+                let read = match std::fs::read_dir("gateways") {
+                    Ok(r) => r,
+                    Err(e) => {
+                        eprintln!("otb validate: cannot list the gateways directory: {e}");
+                        return ExitCode::FAILURE;
+                    }
+                };
+                let mut all = Vec::new();
+                for entry in read {
+                    let entry = match entry {
+                        Ok(e) => e,
+                        Err(e) => {
+                            eprintln!("otb validate: cannot read a gateways directory entry: {e}");
+                            return ExitCode::FAILURE;
+                        }
+                    };
+                    let p = entry.path();
+                    if p.join("definition.json").is_file() {
+                        all.push(p);
+                    }
+                }
                 all.sort();
                 all
             };
@@ -795,16 +853,16 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         /* THE COMMIT THIS BINARY WAS BUILT FROM, read back out of the binary itself.
-        
-           The boxes do not build the engine, they download it, and the commit recorded in every
-           artifact came from an environment variable the orchestrator set from its own checkout.
-           That stamp said what the operator INTENDED to run. On 2026-08-03 a snapshot was stamped
-           0ce7a907 and measured by a binary containing no line of it - the fixes were on a branch,
-           the release only rebuilds on a push to main, and the boxes fetched the previous artifact.
-        
-           So the run asks the binary, and refuses to measure when the answer disagrees with the
-           commit it is about to stamp. Empty output means the build could not establish its own
-           commit, which the caller must treat as unverifiable rather than as a match. */
+
+        The boxes do not build the engine, they download it, and the commit recorded in every
+        artifact came from an environment variable the orchestrator set from its own checkout.
+        That stamp said what the operator INTENDED to run. On 2026-08-03 a snapshot was stamped
+        0ce7a907 and measured by a binary containing no line of it - the fixes were on a branch,
+        the release only rebuilds on a push to main, and the boxes fetched the previous artifact.
+
+        So the run asks the binary, and refuses to measure when the answer disagrees with the
+        commit it is about to stamp. Empty output means the build could not establish its own
+        commit, which the caller must treat as unverifiable rather than as a match. */
         Some("engine-commit") => {
             println!("{}", env!("OTB_ENGINE_COMMIT"));
             ExitCode::SUCCESS

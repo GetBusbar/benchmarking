@@ -168,6 +168,15 @@ pub fn select_matches(table: &[ProcEntry], pattern: &str, self_pid: u32) -> Vec<
 /// The pids a `proc_match` names on this box right now, harness excluded. Shared by the stop path
 /// here and by `rss::RealPids`, so the process a memory reading is taken from is the same process
 /// this file signals.
+///
+/// KNOWN, ACCEPTED TOCTOU: this snapshot is taken from `ps` and the pids are handed to `kill` a moment
+/// later. Between the two, a matched gateway pid can exit and the kernel can recycle that pid number
+/// onto an unrelated process, which would then receive the signal instead. The window is microseconds
+/// wide and the box would have to be spawning many short-lived processes into exactly that gap, so the
+/// residual risk is accepted rather than closed with a re-check that has its own (narrower) race;
+/// noted explicitly because the failure mode - signalling the wrong process - is the rig-vs-gateway
+/// mis-attribution class this repo treats as its core failure, and a silent race is worse than a
+/// disclosed one.
 pub fn matching_pids(pattern: &str) -> Vec<u32> {
     select_matches(&process_table(), pattern, std::process::id())
 }
@@ -287,11 +296,25 @@ impl Lifecycle for RealLifecycle {
 
     fn is_alive(&self, runtime: &Runtime, port: u16) -> bool {
         let process_alive = match runtime {
-            Runtime::Docker { .. } => Command::new("docker")
-                .args(["inspect", "-f", "{{.State.Running}}", &runtime.identity()])
-                .output()
-                .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "true")
-                .unwrap_or(false),
+            Runtime::Docker { .. } => {
+                match Command::new("docker")
+                    .args(["inspect", "-f", "{{.State.Running}}", &runtime.identity()])
+                    .output()
+                {
+                    // docker RAN and answered: a successful "true" is alive; a successful "false" or a
+                    // non-zero exit ("No such object" after this run's own `rm -f`) is confirmed gone.
+                    Ok(o) => {
+                        o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "true"
+                    }
+                    // docker COULD NOT BE INVOKED at all (exec error, ENOMEM spawning it): we did not
+                    // determine the container's state. "Could not determine" must NOT collapse into
+                    // "confirmed dead" the way it used to via `.unwrap_or(false)` - a false "gone" lets
+                    // stop_and_wait return Ok prematurely and the retry loop start a fresh container on
+                    // the same host-networked port a still-alive prior one may hold. Treat unknown as
+                    // alive so the supervisor keeps waiting/escalating rather than racing a new start.
+                    Err(_) => true,
+                }
+            }
             Runtime::Native { proc_match } => !matching_pids(proc_match).is_empty(),
         };
         process_alive || matches!(port_state(port), PortState::Held)

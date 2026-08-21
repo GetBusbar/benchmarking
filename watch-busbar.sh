@@ -36,7 +36,21 @@ KEYFILE="${BENCH_STATE_DIR:-$HOME/.cache/gateway-bench}/gateway-bench-key.pem"
 SSHCMD="ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=25 -i $KEYFILE"
 PARTIAL="$HERE/results/partial"
 REMOTE_SNAP="/home/ubuntu/benchmarking/results/snapshots/$GW.json"
-CELLS_TOTAL=36
+# The grid size (ingress x egress) for the ETA/deadline projection, read from the gateway's OWN
+# manifest rather than hardcoded - a gateway declaring a grid other than 6x6 would otherwise be
+# projected against the wrong denominator. Falls back to 36 when the manifest is absent (e.g. the
+# default `busbar` key has no gateways/<key> dir of its own).
+CELLS_TOTAL="$(python3 -c "
+import json,sys
+try:
+    d=json.load(open(sys.argv[1]))
+    eg=len(d.get('egress') or [])
+    mx=d.get('matrix') or []
+    ing=len(mx) if mx else len(d.get('ingress') or [])
+    print((ing or eg)*eg)
+except Exception:
+    print(0)" "$HERE/gateways/$GW/definition.json" 2>/dev/null || echo 0)"
+[[ "$CELLS_TOTAL" =~ ^[0-9]+$ ]] && (( CELLS_TOTAL > 0 )) || CELLS_TOTAL=36
 
 log() { printf '[%s] busbar-watch: %s\n' "$(date -u +%H:%M:%S)" "$*"; }
 mkdir -p "$PARTIAL"

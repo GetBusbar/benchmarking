@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
-"""Side-by-side: busbar 1.4.1 (published board) vs busbar 1.5.0 (private evaluation).
+"""Side-by-side: busbar 1.4.1 (published board) vs the private-eval busbar build.
 
-Reads the 1.4.1 numbers from its committed snapshot and the 1.5.0 numbers from whatever the
+The private-eval build's display name is read from its own gateways/busbar-151/definition.json (so the
+label never drifts from the version actually measured), NOT hardcoded here.
+
+Reads the 1.4.1 numbers from its committed snapshot and the private-eval numbers from whatever the
 evaluation box has written so far - the live `busbar-151.json`, pulled partial, or final snapshot -
 so a cell can be compared the moment it lands rather than at the end of an 11-hour grid.
 
@@ -88,6 +91,16 @@ ROWS = [
 ]
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+def gateway_display(gw, fallback):
+    """The gateway's own declared display name, so a version label never drifts from the data it
+    prints. The private-eval snapshots come from gateways/<gw>/definition.json's build."""
+    d = load(os.path.join(HERE, "gateways", gw, "definition.json")) or {}
+    return d.get("display") or fallback
+
+
+NEW_DISPLAY = gateway_display("busbar-151", "Busbar 1.5.1")
 pairs = sys.argv[1:] or ["openai>openai"]
 
 old_doc = load(newest(os.path.join(HERE, "results/snapshots/result_busbar_2026-08-02*.json"))
@@ -98,7 +111,7 @@ new_path = (newest(os.path.join(HERE, "results/snapshots/result_busbar-151_*.jso
 new_doc = load(new_path)
 
 print(f"busbar 1.4.1 (published board)  <-  {os.path.basename(newest(os.path.join(HERE,'results/snapshots/result_busbar_2026-08-02*.json')) or '?')}")
-print(f"busbar 1.5.0 (private eval)     <-  {os.path.basename(new_path) if new_path else 'not written yet'}")
+print(f"{NEW_DISPLAY} (private eval)  <-  {os.path.basename(new_path) if new_path else 'not written yet'}")
 print()
 
 for pair in pairs:
@@ -106,9 +119,9 @@ for pair in pairs:
     a, b = cell_of(old_doc, ing, eg), cell_of(new_doc, ing, eg)
     print(f"=== {ing} > {eg} ===")
     if not b:
-        print("  1.5.0 has not written this cell yet\n")
+        print(f"  {NEW_DISPLAY} has not written this cell yet\n")
         continue
-    print(f"  {'metric':<20} {'1.4.1':<28} {'1.5.0':<28}")
+    print(f"  {'metric':<20} {'1.4.1':<28} {NEW_DISPLAY:<28}")
     for label, block, field, unit, higher_better in ROWS:
         av, ar = num(a, block, field)
         bv, br = num(b, block, field)

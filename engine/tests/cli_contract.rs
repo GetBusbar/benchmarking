@@ -251,3 +251,68 @@ fn smoke_without_addresses_is_a_usage_error() {
     assert_eq!(out.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&out.stderr).contains("usage: otb smoke"));
 }
+
+// ---- merge: the sharded-run join, from outside the process --------------------------------------
+
+fn unique_tmp(name: &str) -> std::path::PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!(
+        "otb-cli-merge-{name}-{}-{nanos}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).expect("mk tmp dir");
+    dir
+}
+
+#[test]
+fn merge_of_an_empty_shard_dir_is_a_failure_not_a_silent_success() {
+    // A merge over zero shards must not quietly publish an empty row: a sharded run that produced no
+    // shard files is a failed run, and the board must keep what it had.
+    let shard_dir = unique_tmp("empty-in");
+    let out_dir = unique_tmp("empty-out");
+    let out = otb()
+        .args(["merge"])
+        .arg(&shard_dir)
+        .arg(&out_dir)
+        .output()
+        .expect("run otb merge");
+    assert!(
+        !out.status.success(),
+        "an empty shard dir must fail, not publish an empty merged row"
+    );
+    let _ = std::fs::remove_dir_all(&shard_dir);
+    let _ = std::fs::remove_dir_all(&out_dir);
+}
+
+#[test]
+fn merge_refuses_an_oversized_shard_naming_the_size_cap() {
+    // A corrupt/oversized shard file must be REFUSED at a bounded size, not read whole into memory.
+    // Before the cap, an over-large file reached read_to_string and failed only as "not a readable
+    // snapshot"; now it is rejected on its size, up front, with the cap named. A 33 MiB file clears
+    // the 32 MiB ceiling while staying cheap to write (the merge bails at the metadata check, before
+    // any read), so this stays a fast test.
+    let shard_dir = unique_tmp("big-in");
+    let out_dir = unique_tmp("big-out");
+    let big = shard_dir.join("shard-openai.json");
+    std::fs::write(&big, vec![b'x'; 33 * 1024 * 1024]).expect("write oversized shard");
+    let out = otb()
+        .args(["merge"])
+        .arg(&shard_dir)
+        .arg(&out_dir)
+        .output()
+        .expect("run otb merge");
+    assert!(
+        !out.status.success(),
+        "an oversized shard must be refused, not read unbounded"
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("cap") && err.contains("byte"),
+        "the refusal must name the size cap it tripped, got: {err}"
+    );
+    let _ = std::fs::remove_dir_all(&shard_dir);
+    let _ = std::fs::remove_dir_all(&out_dir);
+}

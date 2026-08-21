@@ -287,8 +287,14 @@ impl Window {
             // interval `elapsed_s` measures, and counting it inflates the same rate from the other
             // end.
             (None, _) => false,
-            // The window is open. `end` is published before the stop flag, so a task that has not
-            // seen an end has not passed one.
+            // The window is open. `end` is published before the stop flag, so a task that has already
+            // seen the stop flag has necessarily seen the end too. BOUNDED IMPRECISION, NOT zero: a
+            // worker whose completion `at` lands in the narrow gap AFTER the main task read `ended`
+            // but BEFORE `window.end.set(ended)` becomes visible still observes `(Some, None)` and is
+            // counted, even though its timestamp is logically just past the end. The window is
+            // microseconds wide and the effect is at most a handful of extra `ok`s per lane; it is
+            // accepted by design rather than closed with a fence on the hot path (which would perturb
+            // the very rate this measures).
             (Some(s), None) => at >= *s,
             (Some(s), Some(e)) => at >= *s && at <= *e,
         }
@@ -728,8 +734,10 @@ pub fn run(cfg: &GenConfig) -> GenStats {
         // ramp is no longer a meaningful share of the window, and timing the sleep alone is what
         // the original comment always said this measured.
         // AND THE SAME WINDOW IS WHAT COUNTS. `start` opens the interval the tasks credit their
-        // completions to; `end` closes it, published BEFORE the stop flag so no task can be past the
-        // end without being able to see it. Everything that completes in the drain after `end` is
+        // completions to; `end` closes it, published BEFORE the stop flag so any task that has seen
+        // the stop has also seen the end (a task past the end is bounded-racy only in the microsecond
+        // gap before this `set` is visible - see `Window::contains`). Everything that completes in the
+        // drain after `end` is
         // real work that finished outside the interval `elapsed_s` measures, and counting it into
         // `ok` raised rps by one free success per lane - worst at high concurrency with slow
         // responses, which is precisely where the peak search is looking.

@@ -148,13 +148,13 @@ def derive(rungs, bound_us):
     }
 
 
-def check(path, bounds_us, verbose):
-    d = json.load(open(path))
+def check(d, bounds_us, verbose):
     gw = d.get("gateway", "?")
     eng = ((d.get("rig") or {}).get("engine") or {}).get("commit", "?")[:7]
     problems = []
     cells = 0
     curves = []
+    frontierless = []  # served cells with no frontier - honest ONLY if the whole snapshot lacks one
     for eg, up in ((d.get("matrix") or {}).get("upstreams") or {}).items():
         for ing, cell in (up.get("cells") or {}).items():
             if cell.get("served") is not True:
@@ -164,7 +164,9 @@ def check(path, bounds_us, verbose):
             at = f"{gw} {ing}>{eg}"
             if not fr:
                 # A cell with no frontier is only honest if NO cell in this snapshot has one (the
-                # artifact predates the metric). Mixed is a dropped reading.
+                # artifact predates the metric). Mixed is a dropped reading - defer the verdict until
+                # we know whether any sibling cell DID publish a frontier.
+                frontierless.append(at)
                 continue
             cells += 1
             rungs = rungs_of(perf)
@@ -232,6 +234,11 @@ def check(path, bounds_us, verbose):
                     break
             spread = (max(present) / min(present)) if present and min(present) else None
             curves.append((at, row, spread, max((r["conc"] for r in rungs), default=0), len(rungs)))
+    # Mixed = a dropped reading. If ANY served cell in this snapshot published a frontier, then every
+    # served cell that DID NOT is an omission, not an honest metric-predates-the-artifact absence.
+    if cells > 0:
+        for at in frontierless:
+            problems.append(f"{at}: served but publishes no frontier while sibling cells do - mixed is a dropped reading")
     if verbose:
         for at, row, spread, top, nrungs in curves:
             print(f"\n--- {at}   ({nrungs} rungs, top c={top}"
@@ -305,10 +312,12 @@ def main():
     engines = {}
     for p in paths:
         try:
-            gw, eng, cells, problems = check(p, bounds, verbose)
+            d = json.load(open(p))
         except Exception as e:  # a snapshot mid-write during a live run is not a defect
             print(f"  SKIP {p}: {e}")
             continue
+        # An exception INSIDE the re-derivation is a real failure, not a mid-write race - let it surface.
+        gw, eng, cells, problems = check(d, bounds, verbose)
         if cells == 0:
             continue
         engines.setdefault(eng, []).append(gw)

@@ -16,6 +16,10 @@ on:
       - "gateways/**"
       - "lib/**"
       - "run-on-ec2.sh"
+      # history/append.py is the append-only, git-tracked, tamper-evident record; without this path an
+      # edit that regressed its nesting/dedup (audit P1-11, and the top-level-vs-matrix nesting bug) fired
+      # NO workflow and ran NO test - the same paths-as-decoration defect the rig-delivery job documents.
+      - "history/**"
       # The audit gate's own subjects. Without these, an edit that broke bench-audit.py (the exact
       # wrong-key-path class its header describes) or a results push that violated every invariant
       # never triggered the job that exists to catch it - the same paths-as-decoration defect the
@@ -62,6 +66,10 @@ on:
       - "gateways/**"
       - "lib/**"
       - "run-on-ec2.sh"
+      # history/append.py is the append-only, git-tracked, tamper-evident record; without this path an
+      # edit that regressed its nesting/dedup (audit P1-11, and the top-level-vs-matrix nesting bug) fired
+      # NO workflow and ran NO test - the same paths-as-decoration defect the rig-delivery job documents.
+      - "history/**"
       # The audit gate's own subjects. Without these, an edit that broke bench-audit.py (the exact
       # wrong-key-path class its header describes) or a results push that violated every invariant
       # never triggered the job that exists to catch it - the same paths-as-decoration defect the
@@ -188,6 +196,26 @@ jobs:
       - uses: actions/checkout@v4
       - name: The fetch lands files with the mode the commit recorded
         run: bash lib/fetch_modes_test.sh
+      # These lib/ guards existed on disk but ran NOWHERE - lib/** was a path trigger while only
+      # fetch_modes_test.sh was invoked, so a regression in the promote guard (RULES.md's "never
+      # overwrite a better snapshot with a worse one"), the concurrent-publish lock, or the
+      # box-reachability poll shipped green. Run them all here.
+      - name: The promote guard never lets a boot/build failure overwrite a served result
+        run: python3 lib/promote_guard_test.py
+      - name: Concurrent-publish lock (unique per-publish token, owner-only release, flock path)
+        run: bash lib/publish_lock_test.sh
+      - name: Box-reachability poll retries a transient ssh failure before declaring a box gone
+        run: bash lib/box_reachable_test.sh
+      # The provenance chain RULES.md calls the project's core: which instrument each run used.
+      - name: Rig provenance (fetch fallback order, origin labels, results-scoped engine dirty flag)
+        run: bash lib/rig_test.sh
+      # The shared-key lifetime filter behind the 2026-08-21 key-stranding incident.
+      - name: Shared-key teardown filter excludes only this run's own boxes
+        run: bash lib/teardown_filter_test.sh
+      # The append-only history collector: nesting (top-level vs data['matrix']), the dedup-by-
+      # (suite, measured_at) contract, and the dropped-row / garbage-line error paths.
+      - name: Append-only history preserves the nested matrix measurements (and dedups)
+        run: python3 history/append_test.py
 
   mock-shape:
     # The mock must never bottleneck and must serve every dialect identically; its per-dialect

@@ -28,6 +28,7 @@
    address bar to path form without reloading. The rendered state is identical either way. */
 import { createRequire } from "node:module";
 import { mkdir, writeFile } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 const { chromium } = createRequire(import.meta.url)("playwright");
 
@@ -36,11 +37,15 @@ const OUT = process.env.OUT_DIR || path.resolve(import.meta.dirname, "../results
 
 /* Mirrors of app.js's own constants. Kept as literals rather than imported because app.js is a
    browser script with top-level side effects; the assertion below is what keeps them honest. */
-const VIEWS = ["gateways", "memory", "performance", "frontier", "streaming", "matrix", "method"];
+const VIEWS = ["gateways", "memory", "performance", "frontier", "streaming", "matrix", "charts", "method"];
 const TABLE_VIEWS = new Set(["performance", "frontier", "streaming", "memory"]);
-// The bound selector renders on these two ONLY (app.js BOUND_VIEWS): nothing on Streaming or Memory
-// is read at a tail-latency bound, so a bound combo there would photograph a control that is not there.
-const BOUND_VIEWS = new Set(["performance", "frontier"]);
+// Views with a CELL CHOOSER (mode selector): the shared-table views PLUS Charts, which chooses its cell
+// like the table views but renders bars instead of a table. Photograph mode combos for all of them.
+const MODE_VIEWS = new Set([...TABLE_VIEWS, "charts"]);
+// The bound selector renders on these ONLY (app.js BOUND_VIEWS): nothing on Streaming or Memory is read
+// at a tail-latency bound, so a bound combo there would photograph a control that is not there. Charts
+// IS read at a bound (its throughput bars follow the selector), so it belongs here too.
+const BOUND_VIEWS = new Set(["performance", "frontier", "charts"]);
 // `peak` is a URL CONTRACT whose control now reads "Own cell". The token must stay `peak` in these URLs.
 const PERF_MODES = ["peak", "same", "custom"];
 const MEM_MODES = ["min", "max", "same", "custom"];
@@ -52,12 +57,35 @@ const WIDTHS = [1440, 1024, 768];
 
 function modesFor(view) { return view === "memory" ? MEM_MODES : PERF_MODES; }
 
+/* THE ASSERTION THE HEADER PROMISES. The VIEWS/BOUND_VIEWS above are hand-copied literals of app.js's
+   own constants; without this they drift silently (as they had - the Charts tab was missing from both,
+   so it was never photographed). Rather than import app.js (a browser script with top-level side
+   effects), read its source and compare the two constants token-for-token, failing loudly on any drift. */
+function appJsList(src, name, kind) {
+  const re = kind === "set"
+    ? new RegExp(`const ${name} = new Set\\(\\[([^\\]]*)\\]`)
+    : new RegExp(`const ${name} = \\[([^\\]]*)\\]`);
+  const m = src.match(re);
+  if (!m) throw new Error(`screenshot-matrix mirror check: could not find ${name} in app.js`);
+  return m[1].split(",").map((s) => s.trim().replace(/^["']|["']$/g, "")).filter(Boolean);
+}
+(function assertMirrorsMatchAppJs() {
+  const src = readFileSync(path.resolve(import.meta.dirname, "app.js"), "utf8");
+  const appViews = appJsList(src, "VIEWS", "array");
+  if (appViews.join(",") !== VIEWS.join(","))
+    throw new Error(`screenshot-matrix VIEWS mirror drifted from app.js:\n  app.js: ${appViews}\n  here:   ${VIEWS}`);
+  const appBound = appJsList(src, "BOUND_VIEWS", "set").slice().sort();
+  const localBound = [...BOUND_VIEWS].sort();
+  if (appBound.join(",") !== localBound.join(","))
+    throw new Error(`screenshot-matrix BOUND_VIEWS mirror drifted from app.js:\n  app.js: ${appBound}\n  here:   ${localBound}`);
+})();
+
 /* The combinations to photograph. Only TABLE_VIEWS get mode, only BOUND_VIEWS get bound: generating
    ?mode= on the roster would produce N identical PNGs and hide the real matrix in the noise. */
 function combos() {
   const out = [];
   for (const view of VIEWS) {
-    if (!TABLE_VIEWS.has(view)) { out.push({ view, mode: null, bound: null }); continue; }
+    if (!MODE_VIEWS.has(view)) { out.push({ view, mode: null, bound: null }); continue; }
     for (const mode of modesFor(view)) {
       if (!BOUND_VIEWS.has(view)) { out.push({ view, mode, bound: null }); continue; }
       for (const bound of BOUNDS) out.push({ view, mode, bound });
@@ -120,7 +148,7 @@ async function main() {
       await page.goto(urlFor(c), { waitUntil: "networkidle" });
       // The table is rendered from data.json after fetch; wait for real rows, not just load.
       await page.waitForFunction(
-        () => document.querySelectorAll("#view-table:not(.hidden) tbody tr, #view-gateways:not(.hidden) tbody tr, #view-matrix:not(.hidden) tbody tr, #view-method:not(.hidden) *").length > 0,
+        () => document.querySelectorAll("#view-table:not(.hidden) tbody tr, #view-gateways:not(.hidden) tbody tr, #view-matrix:not(.hidden) tbody tr, #view-charts:not(.hidden) canvas, #view-method:not(.hidden) *").length > 0,
         null, { timeout: 15000 },
       ).catch(() => problems.push(`no rows: ${urlFor(c)} @${w}`));
       const f = path.join(OUT, name(c, w));

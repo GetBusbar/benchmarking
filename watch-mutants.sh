@@ -25,7 +25,11 @@ trap finish EXIT INT TERM
 mkdir -p "$OUT"
 while :; do
   sleep 300
-  alive="$(ssh $SSHOPT "ubuntu@$IP" 'pgrep -c cargo-mutants || echo 0' 2>/dev/null || echo "?")"
+  # `pgrep -c` prints 0 AND exits non-zero when nothing matches, so `|| echo 0` appended a SECOND zero
+  # and the string became "0\n0" - which never equals "0", so a FINISHED box would be polled forever
+  # (watch-orphans.sh carries this same fix). head -1 takes pgrep's own answer.
+  alive="$(ssh $SSHOPT "ubuntu@$IP" 'pgrep -c cargo-mutants 2>/dev/null | head -1' 2>/dev/null | tr -d '\r\n ' || echo "?")"
+  [[ -z "$alive" ]] && alive=0
   line="$(ssh $SSHOPT "ubuntu@$IP" 'tail -1 ~/mutants.log 2>/dev/null' 2>/dev/null || true)"
   log "running=$alive | $line"
   # Pull the partial report as we go, so a box that dies late still leaves evidence behind.

@@ -125,7 +125,10 @@ _rig_engine_json(){
   local sha="${BENCH_ENGINE_COMMIT:-}" dirty="${BENCH_ENGINE_DIRTY:-}"
   if [ -z "$sha" ] && [ -n "${RIG_ROOT:-}" ] && git -C "$RIG_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
     sha="$(git -C "$RIG_ROOT" rev-parse HEAD 2>/dev/null)"
-    if [ -n "$(git -C "$RIG_ROOT" status --porcelain 2>/dev/null)" ]; then dirty=1; else dirty=0; fi
+    # SCOPE OUT results/, exactly as run-on-ec2.sh's preflight/stamp logic does: a prior PUBLISH=0 run
+    # leaves results/ uncommitted, and a bare `status --porcelain` would flag the tree dirty from that
+    # churn alone and stamp rig.engine.dirty:true even though engine/mock are byte-identical to HEAD.
+    if [ -n "$(git -C "$RIG_ROOT" status --porcelain -- . ':(exclude)results' 2>/dev/null)" ]; then dirty=1; else dirty=0; fi
   fi
   [ -n "$sha" ] || { printf 'null'; return; }
   printf '{"commit": %s, "dirty": %s}' "$(_rig_json_str "$sha")" "$([ "$dirty" = 1 ] && echo true || echo false)"

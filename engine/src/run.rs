@@ -226,6 +226,18 @@ pub(crate) fn headers_for(
 /// enables `net.ipv4.tcp_tw_reuse` before a run and the kernel recycles them for new outbound
 /// connections. Widening the range or changing that policy needs no change here: this reads whatever
 /// the host is actually configured to do.
+/// The largest power of two that is `<= n` (at least 1). Both the request-connection ceiling and the
+/// stream-connection ceiling round their usable budget down to a power of two this way; factored into
+/// one helper so an off-by-one, a `usable == 0` edge, or a rounding-rule change cannot land on one
+/// ceiling and not the other and silently give request- and stream-concurrency different rounding.
+fn largest_pow2_leq(n: u32) -> u32 {
+    let mut ceiling = 1u32;
+    while ceiling * 2 <= n {
+        ceiling *= 2;
+    }
+    ceiling
+}
+
 pub fn host_connection_ceiling() -> u32 {
     // Linux's compiled-in default, used only when the real one cannot be read.
     const STOCK_LINUX_RANGE: (u32, u32) = (32_768, 60_999);
@@ -239,17 +251,8 @@ pub fn host_connection_ceiling() -> u32 {
             }
         })
         .unwrap_or(STOCK_LINUX_RANGE);
-    largest_pow2_le(hi - lo + 1)
-}
-
-/// The largest power of two `<= usable` (and at least 1). Both concurrency ceilings round down to a
-/// power of two the same way; extracted so the two derivations cannot silently diverge.
-fn largest_pow2_le(usable: u32) -> u32 {
-    let mut ceiling = 1u32;
-    while ceiling * 2 <= usable {
-        ceiling *= 2;
-    }
-    ceiling
+    let usable = hi - lo + 1;
+    largest_pow2_leq(usable)
 }
 
 /// The concurrency ceiling for a HELD-OPEN STREAM, which is a different physical bound from a request.
@@ -335,7 +338,8 @@ pub fn stream_connection_ceiling() -> u32 {
 /// exact shape of a guard that cannot fail. The numbers that mattered came from the bench box, and
 /// this is what lets them be asserted from anywhere.
 fn stream_ceiling_from(soft_fds: u32, port_ceiling: u32) -> u32 {
-    largest_pow2_le((soft_fds / 3).max(1))
+    let usable = (soft_fds / 3).max(1);
+    largest_pow2_leq(usable)
         .min(port_ceiling)
         .min(STREAM_RUNAWAY_CAP)
 }
@@ -480,6 +484,17 @@ fn probe_cell_once(cfg: &RunConfig, id: &CellId, mock_healthy: bool) -> (Served,
         Outcome::ConnectionFailed(e) => (
             Served::Untestable(format!("no connection to the gateway: {e}")),
             Some("the connection was refused".to_string()),
+        ),
+        // OURS, NOT THE GATEWAY'S: the rig ran out of ephemeral ports or descriptors before it ever
+        // dialed out. Same `Served::Untestable` shape as `ConnectionFailed` (nothing was learned about
+        // the gateway either way), but the evidence text must say whose fault this was; retried the
+        // same as a transient connection failure, since the resource may free up before the next
+        // attempt.
+        Outcome::RigExhausted(e) => (
+            Served::Untestable(format!(
+                "the rig ran out of its own connection resources: {e}"
+            )),
+            Some("the rig, not the gateway, ran out of ports or descriptors".to_string()),
         ),
         Outcome::TimedOut => (
             Served::Untestable("the gateway accepted the connection and never answered".into()),
@@ -792,7 +807,7 @@ pub fn load_window_at(
             }
             None => std::process::Command::new(exe),
         };
-        let out = cmd
+        let child = cmd
             .args(["loadgen", &addr, path, &conc, &dur, body])
             // The credential rides in the ENVIRONMENT, not the argument list: a token on a command
             // line is visible in `ps` to every user on the box for the life of the window.
@@ -801,7 +816,8 @@ pub fn load_window_at(
                 crate::loadgen::encode_headers(headers),
             )
             .stderr(std::process::Stdio::inherit())
-            .output();
+            .stdout(std::process::Stdio::piped())
+            .spawn();
         // THE ONE FAILURE THAT KILLS EVERY WINDOW IN THE RUN WAS THE SILENT ONE.
         //
         // This was `.output().ok()?`, which discards the spawn/IO error entirely. If `taskset` is not
@@ -812,8 +828,8 @@ pub fn load_window_at(
         // on the rig. Every neighbouring path already reports its cause (spawn_failed, rig_refused, the
         // HarnessError below, gen.rs's runtime-build failure); this one, uniquely, did not - and it is
         // the only one whose blast radius is the whole run rather than one window.
-        let out = match out {
-            Ok(out) => out,
+        let mut child = match child {
+            Ok(child) => child,
             Err(e) => {
                 eprintln!(
                     "loadgen: could not run the load generator ({e}) - this is a rig fault, not the \
@@ -822,7 +838,68 @@ pub fn load_window_at(
                 return None;
             }
         };
-        let line = String::from_utf8_lossy(&out.stdout);
+        // AND A WALL-CLOCK BACKSTOP ON THE WAIT. The child bounds itself with its own `--duration`, but
+        // a genuinely wedged child (a stuck syscall, a connection that never times out, a bug in its
+        // accounting loop) leaves the parent blocked forever right here - `.output()` had no external
+        // deadline, so the whole run silently stalled at that cell until the box's cost timer tore it
+        // down, losing every later cell's provenance with no diagnostic. The backstop sits far above
+        // any healthy window (twice the configured duration plus 30s of spawn/settle slack), so it only
+        // fires on a wedge and never perturbs a window that completes on time - a healthy child exits
+        // long before the deadline and its stdout is read exactly as `.output()` read it.
+        let stdout_reader = child.stdout.take().map(|mut s| {
+            std::thread::spawn(move || {
+                use std::io::Read;
+                let mut buf = Vec::new();
+                let _ = s.read_to_end(&mut buf);
+                buf
+            })
+        });
+        let deadline = std::time::Instant::now()
+            + std::time::Duration::from_secs(
+                cfg.sweep_duration_s.saturating_mul(2).saturating_add(30),
+            );
+        let exited = loop {
+            match child.try_wait() {
+                Ok(Some(_status)) => break true,
+                Ok(None) => {
+                    if std::time::Instant::now() >= deadline {
+                        break false;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                Err(e) => {
+                    eprintln!(
+                        "loadgen: could not wait on the load generator child ({e}) - a rig fault, not \
+                         the gateway's; this window is unmeasured"
+                    );
+                    // Reap and join identically to the wedge path below: kill, then `wait()` so the
+                    // child is not left a zombie, and join the reader so its thread does not leak.
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    if let Some(r) = stdout_reader {
+                        let _ = r.join();
+                    }
+                    return None;
+                }
+            }
+        };
+        if !exited {
+            eprintln!(
+                "loadgen: the load generator child did not exit within its wall-clock backstop at \
+                 c={concurrency} - the child wedged (a rig/harness fault, not the gateway's), so it is \
+                 killed and this window is unmeasured rather than the whole run stalling here"
+            );
+            let _ = child.kill();
+            let _ = child.wait();
+            if let Some(r) = stdout_reader {
+                let _ = r.join();
+            }
+            return None;
+        }
+        let stdout_bytes = stdout_reader
+            .and_then(|r| r.join().ok())
+            .unwrap_or_default();
+        let line = String::from_utf8_lossy(&stdout_bytes);
         let parsed = crate::loadgen::parse_ugen_line(line.trim());
         // OUR OWN WIRE CONTRACT BREAKING IS NOT AN EMPTY WINDOW.
         //
@@ -1020,7 +1097,9 @@ thread_local! {
 
 /// Record what "quiet" means for the cell about to be measured. Called once, before its ladder.
 pub fn arm_stream_settle_baseline() {
-    let tw = HostState::sample().tw.map(|t| t * STREAM_SETTLE_TW_TOLERANCE + 64);
+    let tw = HostState::sample()
+        .tw
+        .map(|t| t * STREAM_SETTLE_TW_TOLERANCE + 64);
     STREAM_SETTLE_TW_BASELINE.with(|b| *b.borrow_mut() = tw);
 }
 const MAX_CEILING_STEPDOWNS: usize = 4;
@@ -1088,12 +1167,22 @@ impl StreamStop {
     /// A rig failure is a `HarnessError`; everything else is a measurement that did not resolve.
     /// Filing our own shortfall under `NotMeasured` would put it among the gateway's results.
     fn absent_kind(self) -> Absent {
+        // EXHAUSTIVE ON PURPOSE, no wildcard. This file is fanatical about rig-fault-vs-gateway-fault
+        // attribution, and the flattering direction (silently filing a new rig-side failure under
+        // NotMeasured, "the gateway's bucket") is the more dangerous one to get wrong. Naming every
+        // variant makes a new StreamStop fail to compile here until it is classified, rather than
+        // defaulting into that bucket.
         match self {
             StreamStop::RigRanShort { .. }
             | StreamStop::WindowUnavailable { .. }
             | StreamStop::RigContaminated { .. } => Absent::HarnessError,
             // A gateway that does not recover from overload is the GATEWAY's result, so it must not
-            // be filed under our own faults - that would be the attribution error in reverse.
+            // be filed under our own faults - that would be the attribution error in reverse. NOTE:
+            // this intentionally uses the coarse `NotMeasured` token even though the finding IS about
+            // the gateway; `describe()` above carries the gateway-attributable detail string.
+            // `measurement::Absent::is_about_gateway()` returns true only for `NotServed`, so it would
+            // NOT classify this case as gateway-attributable - a latent mismatch that matters only if
+            // a future consumer starts reading `is_about_gateway()` to decide what to surface.
             StreamStop::GatewayDidNotRecover { .. } => Absent::NotMeasured,
             // EXHAUSTIVE ON PURPOSE, not a `_` wildcard: a search that exhausted its range
             // (FloorReached) or whose stepped-down rung failed (SteppedRungFailed) is a measurement
@@ -1644,6 +1733,21 @@ impl StreamErrorKinds {
     }
     fn add(&mut self, o: &crate::http::SseOutcome) {
         use crate::http::SseEnd;
+        // RIG FAULTS ARE NOT GATEWAY STREAM ERRORS, and must never land in any of the four buckets
+        // below. `RigExhausted` (the rig out of ephemeral ports/descriptors) and `RigRefused` (our own
+        // refusal to send) were never asked of the gateway, so bucketing either - it would fall to the
+        // `status` arm below, since such a lane carries no 2xx status - would publish a rig fault as a
+        // gateway stream-error, the exact inversion `stream_errored` was written to prevent. Both call
+        // sites gate on `stream_errored()` (which returns false for these) BEFORE calling add(), so
+        // this is unreachable today; the guard keeps it that way if a future caller reaches add()
+        // directly - a no-op here, and a loud debug failure so the omission is caught in test.
+        debug_assert!(
+            !matches!(o.end, SseEnd::RigExhausted(_) | SseEnd::RigRefused(_)),
+            "StreamErrorKinds::add must be gated behind stream_errored(); a rig fault reached it"
+        );
+        if matches!(o.end, SseEnd::RigExhausted(_) | SseEnd::RigRefused(_)) {
+            return;
+        }
         // ORDER MATTERS AND MIRRORS `stream_errored`: a lane that never connected has no status and
         // no frames, so testing frames first would file every refused connection as "no frames" and
         // erase the distinction this type exists for.
@@ -1754,7 +1858,9 @@ fn settle_after_streams(concurrency: u32) {
         // proportional sleep: an unobservable host still needs SOME pause, and the old behaviour is
         // the honest default when the condition cannot be evaluated.
         let ms = u64::from(concurrency) * STREAM_SETTLE_MS_PER_1K / 1000;
-        std::thread::sleep(std::time::Duration::from_millis(ms.min(STREAM_SETTLE_MAX_MS)));
+        std::thread::sleep(std::time::Duration::from_millis(
+            ms.min(STREAM_SETTLE_MAX_MS),
+        ));
         return;
     };
     let started = std::time::Instant::now();
@@ -2842,10 +2948,6 @@ pub fn run_grid_streaming(
     // shard measures a COMPLETE egress column. `None` ⇒ full square grid (unchanged).
     let egresses = cfg.egress_dialects.as_deref().unwrap_or(&cfg.dialects);
     let total_cells = egresses.len() * cfg.dialects.len();
-    // NOT a redundant alias: a nested scope below reuses the name `total` for a cost-seconds float,
-    // so the cost line references the grid count as `total_cells` (unshadowed) while progress lines
-    // use `total`. Collapsing the two collides with that shadow.
-    let total = total_cells;
     let mut done = 0usize;
     // Set when a mid-grid restart FAILED: from that point the harness cannot vouch for the
     // gateway's state (it may be up but half-configured), so every remaining cell is recorded as
@@ -2856,7 +2958,7 @@ pub fn run_grid_streaming(
             let id = CellId::new(ing.as_str(), eg.as_str());
             done += 1;
             if let Some(why) = &restart_poisoned {
-                eprintln!("[cell {done}/{total}] {id}: untestable (harness: restart failed earlier in the grid)");
+                eprintln!("[cell {done}/{total_cells}] {id}: untestable (harness: restart failed earlier in the grid)");
                 on_cell(CellResult {
                     outcome: CellOutcome::untestable(id, why.clone()),
                     metrics: None,
@@ -2882,7 +2984,7 @@ pub fn run_grid_streaming(
                 // finishes. A box that dies mid-run leaves this trail in .run.log for whatever it
                 // reached, and a live run can be tailed for real progress instead of going dark
                 // until the sentinel lands.
-                eprintln!("[cell {done}/{total}] {id}: untestable");
+                eprintln!("[cell {done}/{total_cells}] {id}: untestable");
                 on_cell(CellResult {
                     outcome: CellOutcome::untestable(id, note),
                     metrics: None,
@@ -2903,7 +3005,7 @@ pub fn run_grid_streaming(
                 } else {
                     cfg.matrix_note.clone()
                 };
-                eprintln!("[cell {done}/{total}] {id}: not_configurable");
+                eprintln!("[cell {done}/{total_cells}] {id}: not_configurable");
                 on_cell(CellResult {
                     outcome: CellOutcome::not_configurable(id, note),
                     metrics: None,
@@ -2927,7 +3029,7 @@ pub fn run_grid_streaming(
             // is not worth thinking about; the wrong verdict is.
             let healthy = mock_healthy(cfg);
             if !healthy {
-                eprintln!("[cell {done}/{total}] {id}: the mock did not answer its own health check - nothing observed here is attributable to the gateway");
+                eprintln!("[cell {done}/{total_cells}] {id}: the mock did not answer its own health check - nothing observed here is attributable to the gateway");
             }
             let mut served = probe_cell(cfg, &id, healthy);
             // A GATEWAY THAT DIED TAKES THE REST OF THE GRID WITH IT, UNLESS SOMETHING RESTARTS IT.
@@ -2945,12 +3047,12 @@ pub fn run_grid_streaming(
             // the cell records exactly what it recorded before.
             if let (Served::Untestable(ref why), Some(spec)) = (&served, cfg.relaunch.as_ref()) {
                 if why.contains("no connection") {
-                    eprintln!("[cell {done}/{total}] {id}: {why} - restarting the gateway before writing off the rest of the grid");
+                    eprintln!("[cell {done}/{total_cells}] {id}: {why} - restarting the gateway before writing off the rest of the grid");
                     match restart_to_rest(spec, &cfg.relaunch_launcher, &cfg.relaunch_commands) {
                         Ok(()) => {
                             served = probe_cell(cfg, &id, healthy);
                             eprintln!(
-                                "[cell {done}/{total}] {id}: after restart, {}",
+                                "[cell {done}/{total_cells}] {id}: after restart, {}",
                                 if served.is_measurable() {
                                     "it answers"
                                 } else {
@@ -2967,7 +3069,7 @@ pub fn run_grid_streaming(
                         // asking a gateway whose state the harness can no longer vouch for.
                         Err(e) => {
                             eprintln!(
-                                "[cell {done}/{total}] {id}: the gateway could not be restarted: {e} - refusing to measure the rest of the grid against an unvouched process"
+                                "[cell {done}/{total_cells}] {id}: the gateway could not be restarted: {e} - refusing to measure the rest of the grid against an unvouched process"
                             );
                             restart_poisoned = Some(format!(
                                 "a mid-grid restart failed ({e}), so the harness can no longer vouch for the gateway's state; measuring on would publish our failure as the gateway's"
@@ -3036,7 +3138,7 @@ pub fn run_grid_streaming(
                 Served::NotConfigurable(_) => "not_configurable".to_string(),
                 Served::UnprobedAuth(ev) => format!("unprobed_auth (HTTP {})", ev.status),
             };
-            eprintln!("[cell {done}/{total}] {}: {label}", outcome.id);
+            eprintln!("[cell {done}/{total_cells}] {}: {label}", outcome.id);
             on_cell(CellResult {
                 outcome,
                 metrics,
@@ -3087,10 +3189,10 @@ pub(crate) fn test_fixture(gw: SocketAddr, mock: SocketAddr) -> RunConfig {
 #[cfg(test)]
 mod tests {
     /* THE DRAIN WAITS ON A CONDITION, AND THE CONDITION HAS TO BE REACHABLE.
-    
-       A settle that can never be satisfied turns the 60s backstop into the schedule: 1,647 windows
-       above the free-below threshold would become 27 HOURS of waiting in a field run. The tolerance
-       is what keeps it reachable on a box that is never perfectly idle, so it is asserted directly. */
+
+    A settle that can never be satisfied turns the 60s backstop into the schedule: 1,647 windows
+    above the free-below threshold would become 27 HOURS of waiting in a field run. The tolerance
+    is what keeps it reachable on a box that is never perfectly idle, so it is asserted directly. */
 
     // SHARDING: OTB_EGRESS decouples the egress axis from ingress. A matrix that declares nothing
     // capable makes every cell short-circuit to `not_configurable` and `continue` WITHOUT touching
@@ -3117,14 +3219,22 @@ mod tests {
         // One egress column => 6 cells (that egress x all six ingress).
         cfg.egress_dialects = Some(vec![Dialect::Openai]);
         let shard = walk(&cfg);
-        assert_eq!(shard.len(), 6, "one egress column is a FULL ingress column, not one cell");
+        assert_eq!(
+            shard.len(),
+            6,
+            "one egress column is a FULL ingress column, not one cell"
+        );
         assert!(
             shard.iter().all(|id| id.egress == "openai"),
             "every cell in the shard is the selected egress"
         );
         let ingresses: std::collections::BTreeSet<&str> =
             shard.iter().map(|id| id.ingress.as_str()).collect();
-        assert_eq!(ingresses.len(), 6, "all six ingress rows are measured within the shard");
+        assert_eq!(
+            ingresses.len(),
+            6,
+            "all six ingress rows are measured within the shard"
+        );
 
         // Two egress columns => 12 cells; egress set is exactly the requested subset.
         cfg.egress_dialects = Some(vec![Dialect::Openai, Dialect::Anthropic]);
@@ -3145,39 +3255,62 @@ mod tests {
         // that starts with 200 sockets in TIME_WAIT must not be asked to return to 0.
         let quiet = 200u64;
         let target = quiet * STREAM_SETTLE_TW_TOLERANCE + 64;
-        assert!(target > quiet, "the target must sit ABOVE the level the cell started at");
+        assert!(
+            target > quiet,
+            "the target must sit ABOVE the level the cell started at"
+        );
         // The mock and the load generator hold their own sockets throughout, so a window that closes
         // cleanly still leaves the box above where it began. That has to read as drained.
-        assert!(quiet + 100 <= target, "ordinary residue still counts as drained");
+        assert!(
+            quiet + 100 <= target,
+            "ordinary residue still counts as drained"
+        );
         // And a box still holding thousands of dying sockets from a c=8,192 window does NOT.
-        assert!(quiet + 8_000 > target, "a real backlog is not mistaken for quiet");
+        assert!(
+            quiet + 8_000 > target,
+            "a real backlog is not mistaken for quiet"
+        );
 
         // An idle box reads 0 and must still get a usable target rather than an impossible one.
-        assert_eq!(0 * STREAM_SETTLE_TW_TOLERANCE + 64, 64, "an idle box still has headroom");
+        // `idle` is bound rather than written `0 *` inline so the formula, not a literal zero, is what
+        // is exercised (and clippy's erasing_op does not flag a tautology on a real input).
+        let idle = 0u64;
+        assert_eq!(
+            idle * STREAM_SETTLE_TW_TOLERANCE + 64,
+            64,
+            "an idle box still has headroom"
+        );
     }
 
     /* AND THE BACKSTOP IS ONE TIME_WAIT GENERATION, which is the point of the number. It was 10s,
-       deliberately UNDER TIME_WAIT, and the board showed cells failing rungs they had already carried
-       after 4-5s of it. A closed socket cannot need longer than a generation; past that the host is
-       broken rather than busy. */
+    deliberately UNDER TIME_WAIT, and the board showed cells failing rungs they had already carried
+    after 4-5s of it. A closed socket cannot need longer than a generation; past that the host is
+    broken rather than busy. */
     #[test]
     fn the_settle_backstop_covers_a_full_time_wait_generation() {
-        assert!(
-            STREAM_SETTLE_MAX_MS >= 60_000,
-            "a backstop under one TIME_WAIT generation cannot absorb the residue it exists for"
-        );
+        // Compile-time assertions on the constants themselves: a `const {}` block states the invariant
+        // where it can never be a runtime tautology (clippy's assertions_on_constants), and a violation
+        // fails the build rather than a test run.
+        const {
+            assert!(
+                STREAM_SETTLE_MAX_MS >= 60_000,
+                "a backstop under one TIME_WAIT generation cannot absorb the residue it exists for"
+            );
+        }
         // The poll has to be fine enough that a small rung's wait is milliseconds, not seconds: the
         // whole gain over the old fixed sleep is that a rung which drains at once stops paying.
-        assert!(
-            STREAM_SETTLE_POLL_MS <= 100,
-            "a coarse poll would reintroduce the fixed cost this replaced"
-        );
+        const {
+            assert!(
+                STREAM_SETTLE_POLL_MS <= 100,
+                "a coarse poll would reintroduce the fixed cost this replaced"
+            );
+        }
     }
 
     /* THE FLOOR FALLBACK'S GATE, which decides whether a cell publishes a conservative number or an
-       absence. The fallback re-measures on the SAME host that just failed several rungs, so it is
-       only meaningful when the host was not the suspect - and the flattering direction of this error
-       (publishing a figure where honesty published none) is the one nobody would catch. */
+    absence. The fallback re-measures on the SAME host that just failed several rungs, so it is
+    only meaningful when the host was not the suspect - and the flattering direction of this error
+    (publishing a figure where honesty published none) is the one nobody would catch. */
     #[test]
     fn floor_fallback_only_where_the_host_is_not_the_suspect() {
         // The search ran out of room or budget: the gateway and the rig are both innocent so far, and
@@ -3188,29 +3321,54 @@ mod tests {
 
         // OUR instrument is the variable. A number taken on a host we have just accused would be
         // exactly the attribution error the enum exists to prevent.
-        assert!(!StreamStop::RigRanShort { measured: 1, wanted: 3 }.floor_fallback_ok());
+        assert!(!StreamStop::RigRanShort {
+            measured: 1,
+            wanted: 3
+        }
+        .floor_fallback_ok());
         assert!(!StreamStop::WindowUnavailable { at: 4096 }.floor_fallback_ok());
-        assert!(!StreamStop::RigContaminated { at: 4096, proven: 4096 }.floor_fallback_ok());
+        assert!(!StreamStop::RigContaminated {
+            at: 4096,
+            proven: 4096
+        }
+        .floor_fallback_ok());
 
         // And a gateway that had to be restarted is no longer the process the sweep measured, so
         // whatever a fresh one carries is not this cell's ceiling. "It does not recover" is the
         // finding and must not be overwritten by a number.
-        assert!(!StreamStop::GatewayDidNotRecover { at: 8192, proven: 4096, restart_cleared: true }
-            .floor_fallback_ok());
-        assert!(!StreamStop::GatewayDidNotRecover { at: 8192, proven: 4096, restart_cleared: false }
-            .floor_fallback_ok());
+        assert!(!StreamStop::GatewayDidNotRecover {
+            at: 8192,
+            proven: 4096,
+            restart_cleared: true
+        }
+        .floor_fallback_ok());
+        assert!(!StreamStop::GatewayDidNotRecover {
+            at: 8192,
+            proven: 4096,
+            restart_cleared: false
+        }
+        .floor_fallback_ok());
     }
 
     /* AND THE FLOOR STILL HAS TO EARN IT. The fallback publishes only what the same majority rule
-       every other repeated measurement uses would publish, so a floor that wins one window of three -
-       the shape that made the bisected rung unpublishable in the first place - stays unpublished. */
+    every other repeated measurement uses would publish, so a floor that wins one window of three -
+    the shape that made the bisected rung unpublishable in the first place - stays unpublished. */
     #[test]
     fn the_floor_is_published_only_on_the_same_majority_every_other_rate_needs() {
         assert!(stream_ceiling_confirmed(3, 3), "three of three holds");
         assert!(stream_ceiling_confirmed(3, 2), "two of three is a majority");
-        assert!(!stream_ceiling_confirmed(3, 1), "one of three is the busbar c=5,652 shape");
-        assert!(!stream_ceiling_confirmed(3, 0), "none of three publishes nothing");
-        assert!(!stream_ceiling_confirmed(2, 2), "a short window set is not a confirmation");
+        assert!(
+            !stream_ceiling_confirmed(3, 1),
+            "one of three is the busbar c=5,652 shape"
+        );
+        assert!(
+            !stream_ceiling_confirmed(3, 0),
+            "none of three publishes nothing"
+        );
+        assert!(
+            !stream_ceiling_confirmed(2, 2),
+            "a short window set is not a confirmation"
+        );
     }
 
     #[test]
@@ -4632,13 +4790,20 @@ while True:
         // unchanged.
         assert_eq!(pacing_interval_from(None), 20);
         assert_eq!(pacing_interval_from(Some("not-a-number")), 20);
-        assert_eq!(pacing_interval_from(Some("0")), 20, "a pace of zero is not a pace");
+        assert_eq!(
+            pacing_interval_from(Some("0")),
+            20,
+            "a pace of zero is not a pace"
+        );
         assert_eq!(pacing_interval_from(Some("100")), 100);
         assert_eq!(stall_bound_us_at(20), 20 * STREAM_STALL_MULTIPLIER * 1_000);
 
         // A slower model: gaps that were stalls at 20ms are ordinary at 100ms, and a bound that
         // stayed at 20 would call a healthy stream stalled on every frame.
-        assert_eq!(stall_bound_us_at(100), 100 * STREAM_STALL_MULTIPLIER * 1_000);
+        assert_eq!(
+            stall_bound_us_at(100),
+            100 * STREAM_STALL_MULTIPLIER * 1_000
+        );
         let gaps_at_100ms: Vec<u64> = (0..8).map(|i| i * 100_000).collect();
         assert_eq!(
             stalls_in_bounded(&gaps_at_100ms, stall_bound_us_at(100)),

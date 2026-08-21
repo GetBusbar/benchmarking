@@ -25,6 +25,16 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # PARITY WITH cf-pages.yml, because this workflow is STILL LIVE (pages: write / id-token: write) and
+    # fires on the same push paths. Without OTB_SINGLE_ENGINE=1 gen-data.mjs would NOT suppress rows a
+    # newer engine has not re-measured (its SINGLE_ENGINE gate only activates when this is literally "1"),
+    # and without the consistency gates below this job would upload a mixed-instrument or internally
+    # inconsistent board straight to the still-live GitHub Pages URL - the exact state cf-pages.yml's
+    # policy exists to prevent. This workflow can be deleted outright once the Cloudflare nameserver
+    # cutover is complete (see cf-pages.yml's header); until then it must not ship a board cf-pages would
+    # refuse.
+    env:
+      OTB_SINGLE_ENGINE: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -32,6 +42,15 @@ jobs:
           node-version: 22
       - name: Generate site data
         run: node site/gen-data.mjs
+      # Gate the bundle BEFORE upload, exactly as cf-pages.yml does: structural invariants on the file
+      # being deployed, then the per-surface coverage siblings, then the table==drawer==compare==charts
+      # consistency guard. A red here must block the artifact upload, not ship past it.
+      - name: Structural invariants C1-C5 on the bundle being deployed
+        run: node site/check-consistency.mjs site/data.json
+      - name: Site coverage siblings (URL codec fixed points, one envelope one story)
+        run: node site/test-coverage.mjs
+      - name: Consistency guard (table == drawer == compare == charts)
+        run: node site/test.mjs
       - uses: actions/upload-pages-artifact@v3
         with:
           path: site

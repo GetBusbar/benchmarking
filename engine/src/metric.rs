@@ -486,6 +486,73 @@ fn steady_is_believable(samples_before: usize, samples_now: usize) -> bool {
     samples_now > samples_before
 }
 
+/// Does the load loop declare the sampler gone this pass? YES when the series it snapshots added
+/// NOTHING since a previous pass that already held samples - and deliberately WITHOUT consulting the
+/// plateau verdict.
+///
+/// A live sampler at ten reads a second adds hundreds of samples across one load window, so a series
+/// that stopped growing is a sampler that stopped - dead or wedged (a `/proc` read that returns `None`
+/// on every poll keeps the thread alive and silent, which `sampler.join()` cannot see). This once hung
+/// off `verdict.is_steady()`, on the reasoning that a frozen tail reads flat; but a tail that froze
+/// while the gateway was still CLIMBING reads `NotSteady` on every later pass, so that interleaving
+/// never tripped the gate and looped to the cap, publishing the frozen tail as the gateway's own result.
+/// The count is the only honest discriminator, so the count is all this consults.
+///
+/// The `samples_before > 0` guard keeps the very first pass - before any sample has landed - from being
+/// mistaken for a stall.
+fn sampler_is_dead(samples_before: usize, samples_now: usize) -> bool {
+    samples_before > 0 && !steady_is_believable(samples_before, samples_now)
+}
+
+/// `memory_time_to_plateau_s`, RECONCILED WITH THE PUBLISHED VERDICT. `settled_at` is latched from the
+/// first MID-LOAD window that read steady; `memory_plateaued` is taken over the WHOLE load and may
+/// disagree (a cell flat at 90s that then climbed for 200s more is `NotSteady`). Publishing the latched
+/// 90 beside a `plateaued = false` is two fields telling opposite stories about one window, so the settle
+/// time survives only when the final verdict still agrees the cell settled.
+fn time_to_plateau(settled_at: Option<i64>, final_verdict: &crate::stats::Verdict) -> Option<i64> {
+    if final_verdict.is_steady() {
+        settled_at
+    } else {
+        None
+    }
+}
+
+/// `recovered_rss_mib`: the settled level after the load has been gone for the recovery window, as the
+/// median over the trailing `MEMORY_RECOVERY_MEDIAN_S` of the series.
+///
+/// GUARDED AGAINST A RECOVERY-WINDOW SAMPLER STALL. The cut anchors to the LAST sample the sampler ever
+/// pushed, not to wall-clock now, so a sampler that silently stops adding samples during the
+/// `MEMORY_RECOVERY_S` recovery sleep freezes that anchor mid-recovery and the median would describe a
+/// still-descending level rather than the settled tail. The in-loop `sampler_is_dead` check cannot see
+/// this one - the load loop has already exited, and a stall here leaves `sampler_died` false and
+/// `sampler.join()` Ok (no panic). So it is caught here the same count-growth way: if the series added
+/// no samples across the whole recovery window (`sampler_is_dead` over the pre-recovery count), the
+/// figure is a rig-instrument failure and is flagged `HarnessError` rather than published as a real
+/// recovered reading. A HEALTHY recovery adds hundreds of samples, so the guard is false and the number
+/// is computed byte-identically to before.
+fn recovered_rss(
+    taken: &[crate::stats::Sample],
+    samples_before_recovery: usize,
+) -> Measurement<f64> {
+    if sampler_is_dead(samples_before_recovery, taken.len()) {
+        return Measurement::absent_because(
+            Absent::HarnessError,
+            format!(
+                "the RSS sampler added no samples across the {MEMORY_RECOVERY_S}s recovery window, so \
+                 a 'recovered' median would describe where our instrument stopped, mid-descent, rather \
+                 than the level the gateway settled at"
+            ),
+        );
+    }
+    let cut = taken.last().map(|s| s.t_s).unwrap_or(0.0) - MEMORY_RECOVERY_MEDIAN_S as f64;
+    let tail: Vec<f64> = taken
+        .iter()
+        .filter(|s| s.t_s >= cut)
+        .map(|s| s.mib)
+        .collect();
+    crate::stats::median(&tail)
+}
+
 /// Has the series existed long enough for a steadiness verdict to MEAN anything?
 ///
 /// `stats::window` selects by timestamp - everything at or after `last.t_s - window_s` - so a series
@@ -779,7 +846,11 @@ impl Metric for Memory {
             // GATEWAY'S CALM. See `steady_is_believable`.
             let span = taken.last().map(|s| s.t_s).unwrap_or(0.0)
                 - taken.first().map(|s| s.t_s).unwrap_or(0.0);
-            let grew = steady_is_believable(samples_before, taken.len());
+            // STALL DETECTION IS INDEPENDENT OF THE VERDICT, and that is the whole fix. Gating it on
+            // `Steady` only caught the stall when the frozen tail happened to read flat; a tail that
+            // froze while the gateway was still climbing reads `NotSteady` on every later pass, so that
+            // interleaving looped to the cap and published the frozen tail as the gateway's settled peak.
+            let dead = sampler_is_dead(samples_before, taken.len());
             samples_before = taken.len();
             // TOO SOON TO BELIEVE IT. Not a failure and not the gateway's answer - just a window that
             // has not lasted long enough for `plateau_check`'s thresholds to mean what they were chosen
@@ -788,11 +859,11 @@ impl Metric for Memory {
                 verdict =
                     crate::stats::Verdict::Undecidable(crate::stats::Undecidable::WindowTooShort);
             }
-            if verdict.is_steady() && !grew {
+            if dead {
                 eprintln!(
-                    "memory: the RSS series stopped growing at {} samples while the load window was \
-                     still running - the sampler thread is gone, so 'steady' here is the absence of \
-                     measurement rather than a reading of the gateway",
+                    "memory: the RSS series stopped growing at {} samples across a full load window - \
+                     the sampler thread is gone (dead or wedged), so every reading from here describes \
+                     our instrument rather than the gateway",
                     taken.len()
                 );
                 sampler_died = true;
@@ -843,6 +914,12 @@ impl Metric for Memory {
             }
         }
 
+        // settled_at WAS LATCHED MID-LOAD; the verdict just recomputed above is taken over the WHOLE
+        // load and is the one `memory_plateaued` publishes. Keep the settle time only when the two
+        // agree, so `memory_time_to_plateau_s` can never read "settled at 90s" beside a `plateaued`
+        // of false. See `time_to_plateau`.
+        let settled_at = time_to_plateau(settled_at, &verdict);
+
         // The kernel's high-water mark is read BEFORE the recovery window, while it still describes
         // the loaded process. It survives the load ending, but reading it here keeps it beside the
         // peak it belongs to.
@@ -852,6 +929,14 @@ impl Metric for Memory {
         //
         // The sampler is still running, so this is simply a minute of quiet appended to the same
         // series. What it shows is whether the gateway hands memory back, which a peak cannot say.
+        //
+        // The count of samples HELD BEFORE the recovery sleep, so a sampler that silently stalls
+        // DURING recovery can be caught the same count-growth way `sampler_is_dead` catches a load-loop
+        // stall. The in-loop check cannot see this one: the load loop has already exited, so a stall
+        // here leaves `sampler_died` false and `sampler.join()` Ok (no panic), and the recovered cut -
+        // anchored to the LAST sample the sampler ever pushed - would then select a mid-recovery /
+        // mid-descent tail and publish a real-looking level the process never settled at.
+        let samples_before_recovery = series.lock().map(|s| s.len()).unwrap_or(0);
         std::thread::sleep(std::time::Duration::from_secs(MEMORY_RECOVERY_S));
 
         stop.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -915,16 +1000,9 @@ impl Metric for Memory {
         let taken: Vec<crate::stats::Sample> = series.lock().map(|s| s.clone()).unwrap_or_default();
 
         // RECOVERED: where the curve ends, after the load has been gone for a minute. Taken from the
-        // trailing recovery window rather than the single last reading, so one sample cannot set it.
-        let recovered = {
-            let cut = taken.last().map(|s| s.t_s).unwrap_or(0.0) - MEMORY_RECOVERY_MEDIAN_S as f64;
-            let tail: Vec<f64> = taken
-                .iter()
-                .filter(|s| s.t_s >= cut)
-                .map(|s| s.mib)
-                .collect();
-            crate::stats::median(&tail)
-        };
+        // trailing recovery window rather than the single last reading, so one sample cannot set it -
+        // and guarded against a recovery-window sampler stall. See `recovered_rss`.
+        let recovered = recovered_rss(&taken, samples_before_recovery);
         // The plateau verdict, published rather than kept. "Never settled" is a real finding about a
         // gateway and it must arrive WITH the rate it was climbing at, which is what NotSteady
         // carries; "we could not tell" stays a third, distinct answer.
@@ -1064,10 +1142,7 @@ impl Metric for Memory {
                 ("memory_hwm_mib", hwm),
                 ("memory_recovered_mib", recovered),
                 ("memory_growth_rate_mib_per_min", growth),
-                (
-                    "memory_load_s",
-                    Measurement::Measured(load_s as f64),
-                ),
+                ("memory_load_s", Measurement::Measured(load_s as f64)),
                 (
                     "memory_plateaued",
                     match plateaued {
@@ -1095,7 +1170,11 @@ impl Metric for Memory {
                     },
                 ),
             ],
-            series: Series { rss, idle_rss: idle_rss_samples, ..Series::default() },
+            series: Series {
+                rss,
+                idle_rss: idle_rss_samples,
+                ..Series::default()
+            },
         }
     }
 }
@@ -1329,31 +1408,26 @@ impl Metric for Streaming {
         //
         // The sample set is the distribution now, for both. It is also the better one: 100 samples
         // per leg against the single stream the p50 used to come from.
+        // A gateway cannot be faster than the upstream it proxies, so a negative difference is noise;
+        // `BelowResolution` beats clamping it to a zero that claims the gateway added nothing. A leg
+        // with no samples has no percentile at all, so that is `NotMeasured`. See `added_percentile_diff`.
         let added_ttft_at = |pct: f64| {
-            match (ttft_pct(&gw_ttfts, pct), ttft_pct(&direct_ttfts, pct)) {
-            (Some(g), Some(d)) if g >= d => Measurement::Measured(g - d),
-            // A gateway cannot be faster than the upstream it proxies, so a negative difference is
-            // noise - and saying so beats clamping it to a zero that claims the gateway added
-            // nothing measurable. Same rule as the gap percentiles above. `BelowResolution`, not
-            // `NotMeasured`: this is the comparison's best possible outcome, and the site renders
-            // the two apart.
-            (Some(g), Some(d)) => Measurement::absent_because(
-                Absent::BelowResolution,
-                format!(
-                    "the gateway's own time to first token at this percentile ({g:.0}us) came in under \
-                     the mock's ({d:.0}us), which a proxy cannot really do - the added TTFT here is \
-                     below what this rig can resolve"
-                ),
-            ),
-            // Absent, not zero, when either leg produced nothing: a leg with no samples has no
-            // percentile, and a 0 would read as "the gateway added nothing".
-            _ => Measurement::absent_because(
-                Absent::NotMeasured,
-                format!(
-                    "no time-to-first-token arrived on one of the two legs across {STREAM_TTFT_SAMPLES} samples, so there is no distribution to difference"
-                ),
-            ),
-        }
+            added_percentile_diff(
+                ttft_pct(&gw_ttfts, pct),
+                ttft_pct(&direct_ttfts, pct),
+                |g, d| {
+                    format!(
+                        "the gateway's own time to first token at this percentile ({g:.0}us) came in \
+                         under the mock's ({d:.0}us), which a proxy cannot really do - the added TTFT \
+                         here is below what this rig can resolve"
+                    )
+                },
+                || {
+                    format!(
+                        "no time-to-first-token arrived on one of the two legs across {STREAM_TTFT_SAMPLES} samples, so there is no distribution to difference"
+                    )
+                },
+            )
         };
         let added_ttft_p50 = added_ttft_at(0.50);
         let added_ttft_p99 = added_ttft_at(0.99);
@@ -1383,22 +1457,22 @@ impl Metric for Streaming {
         // Absent with the reason instead. "Too small for this rig to see" is a different statement
         // from "zero", and only one of them is true.
         let added_gap_at = |pct: f64| {
-            match (gap_pct(&through_gateway, pct), gap_pct(&direct, pct)) {
-            (Some(g), Some(d)) if g >= d => Measurement::Measured(g - d),
-            (Some(g), Some(d)) => Measurement::absent_because(
-                Absent::BelowResolution,
-                format!(
-                    "the gateway's own inter-frame gap at this percentile ({g:.0}us) came in under the \
-                     mock's ({d:.0}us), which a proxy cannot really do - the added gap here is below \
-                     what this rig can resolve against the mock's {}ms pacing",
-                    crate::run::stream_pacing_interval_ms()
-                ),
-            ),
-            _ => Measurement::absent_because(
-                Absent::NotMeasured,
-                "a single frame on one of the two legs leaves no inter-frame gap to difference".to_string(),
-            ),
-        }
+            added_percentile_diff(
+                gap_pct(&through_gateway, pct),
+                gap_pct(&direct, pct),
+                |g, d| {
+                    format!(
+                        "the gateway's own inter-frame gap at this percentile ({g:.0}us) came in under \
+                         the mock's ({d:.0}us), which a proxy cannot really do - the added gap here is \
+                         below what this rig can resolve against the mock's {}ms pacing",
+                        crate::run::stream_pacing_interval_ms()
+                    )
+                },
+                || {
+                    "a single frame on one of the two legs leaves no inter-frame gap to difference"
+                        .to_string()
+                },
+            )
         };
 
         let fields: Filled = vec![
@@ -1472,6 +1546,31 @@ fn added_latency_diff(gateway_us: u64, direct_us: u64) -> Measurement<f64> {
                  below what this rig can resolve"
             ),
         )
+    }
+}
+
+/// The added-latency decision shared by `Streaming::measure`'s TTFT and inter-frame-gap percentiles
+/// (the streaming analogue of `added_latency_diff`, over already-resolved percentile values rather than
+/// raw c=1 readings). Given a gateway value and a direct value at the SAME percentile: a gateway slower
+/// than the mock is the measured difference; a gateway FASTER than the mock is `BelowResolution`, never
+/// a clamped 0 (a proxy cannot beat the upstream it forwards, so a negative raw difference is noise this
+/// rig cannot resolve - the exact defect that produced p99-below-p50 pairs on the 2026-07-28 board); and
+/// either leg with no percentile at all is `NotMeasured`, because there is no distribution to difference.
+/// The two detail strings are supplied by the caller because TTFT and gap phrase them differently.
+/// Extracted (behaviour unchanged) so the resolution-guard decision is unit-tested directly; the
+/// closures that used to inline it are only reachable past an early return no `Streaming` test hits.
+fn added_percentile_diff(
+    gateway: Option<f64>,
+    direct: Option<f64>,
+    below_resolution_detail: impl FnOnce(f64, f64) -> String,
+    absent_detail: impl FnOnce() -> String,
+) -> Measurement<f64> {
+    match (gateway, direct) {
+        (Some(g), Some(d)) if g >= d => Measurement::Measured(g - d),
+        (Some(g), Some(d)) => {
+            Measurement::absent_because(Absent::BelowResolution, below_resolution_detail(g, d))
+        }
+        _ => Measurement::absent_because(Absent::NotMeasured, absent_detail()),
     }
 }
 
@@ -1905,58 +2004,67 @@ impl Metric for Cost {
             ));
         }
 
-        let mut f: Filled = vec![
-            ("cpu_us_per_request", cost.cpu_us_per_request),
-            ("rps_per_cpu_second", cost.rps_per_cpu_second),
-            (
-                "cost_window_conc",
-                Measurement::Measured(f64::from(COST_WINDOW_CONCURRENCY)),
-            ),
-            // THE WINDOW'S OWN LOAD, published so the cost is CHECKABLE.
-            //
-            // Without these, `cpu_us_per_request` is unverifiable: it can only be re-derived from the
-            // request count it was divided by, and that count lived nowhere. Auditing the first
-            // cost-carrying snapshot, I could not tell whether a low utilisation meant the gateway
-            // was cheap or the window had simply carried less load than the sweep's rung at the same
-            // concurrency - two opposite readings of the same number, with nothing in the artifact to
-            // separate them. Every published number must re-derive from what is published beside it.
-            ("cost_window_ok", Measurement::Measured(stats.ok as f64)),
-            ("cost_window_rps", Measurement::Measured(stats.rps())),
-            // THE READING THAT SAYS WHETHER THE PEAK IS A CEILING. At ~1.0 the gateway had filled the
-            // cores it was given and the throughput number is a wall; well below it, the limit is
-            // somewhere else and the peak means something else.
-            ("cost_core_utilisation", util),
-            ("cost_threads", cost.threads_end),
-            ("cost_nonvol_ctxt_per_request", cost.nonvol_ctxt_per_request),
-            ("cost_majflt", cost.majflt),
-        ];
-        // A SWAPPING BOX IS NOT A SLOW GATEWAY. Major faults mean pages came from disk during the
-        // window, so what was timed is the disk. The numbers still publish - a reader must see why the
-        // row looks wrong rather than find a hole - but the cost figures are re-flagged as a HARNESS
-        // fault so nothing ranks on them.
-        if cost.swapped {
-            let why = "the box took major page faults during this window, so it was swapping and \
-                       this cost describes the disk rather than the gateway"
-                .to_string();
-            for (name, m) in f.iter_mut() {
-                if matches!(*name, "cpu_us_per_request" | "rps_per_cpu_second") {
-                    *m = Measurement::absent_because(Absent::HarnessError, why.clone());
-                }
+        cost_fields(cost, stats.ok as f64, stats.rps(), util).into()
+    }
+}
+
+/// Shape the cost metric's published fields from one window's counters, applying the swapping re-flag.
+/// PURE and standalone so the field carry-through AND the re-flag are unit-testable: every `Cost`
+/// early return (no window / failures in the window) fires before this point, so no test that drives
+/// `Cost::measure` against a fixture ever reaches this shaping otherwise.
+///
+/// A SWAPPING BOX IS NOT A SLOW GATEWAY. Major faults (`cost.swapped`) mean pages came from disk during
+/// the window, so what was timed is the disk. The numbers still publish - a reader must see why the row
+/// looks wrong rather than find a hole - but `cpu_us_per_request`/`rps_per_cpu_second` are re-flagged
+/// HARNESS faults so nothing ranks on a figure that timed the disk.
+fn cost_fields(
+    cost: crate::procsample::WindowCost,
+    ok: f64,
+    rps: f64,
+    util: Measurement<f64>,
+) -> Filled {
+    // THE WINDOW'S OWN LOAD (`cost_window_ok`/`cost_window_rps`) is published so the cost is CHECKABLE:
+    // `cpu_us_per_request` can only be re-derived from the request count it was divided by, and that
+    // count must live beside it rather than nowhere. Every published number re-derives from what is
+    // published beside it.
+    let mut f: Filled = vec![
+        ("cpu_us_per_request", cost.cpu_us_per_request),
+        ("rps_per_cpu_second", cost.rps_per_cpu_second),
+        (
+            "cost_window_conc",
+            Measurement::Measured(f64::from(COST_WINDOW_CONCURRENCY)),
+        ),
+        ("cost_window_ok", Measurement::Measured(ok)),
+        ("cost_window_rps", Measurement::Measured(rps)),
+        // THE READING THAT SAYS WHETHER THE PEAK IS A CEILING. At ~1.0 the gateway had filled the cores
+        // it was given and the throughput number is a wall; well below it, the limit is elsewhere.
+        ("cost_core_utilisation", util),
+        ("cost_threads", cost.threads_end),
+        ("cost_nonvol_ctxt_per_request", cost.nonvol_ctxt_per_request),
+        ("cost_majflt", cost.majflt),
+    ];
+    if cost.swapped {
+        let why = "the box took major page faults during this window, so it was swapping and \
+                   this cost describes the disk rather than the gateway"
+            .to_string();
+        for (name, m) in f.iter_mut() {
+            if matches!(*name, "cpu_us_per_request" | "rps_per_cpu_second") {
+                *m = Measurement::absent_because(Absent::HarnessError, why.clone());
             }
         }
-        f.into()
     }
+    f
 }
 
 #[cfg(test)]
 mod tests {
     /* A GATEWAY HANDING MEMORY BACK MUST NEVER READ LIKE ONE LEAKING IT.
-    
-       39 cells on the 2026-08-03 board carry no time-to-plateau, and they got one sentence between
-       them: "memory reached no steady state inside the load cap". busbar has the most (11), and its
-       openai>openai cell ends the window at -0.43 MiB/min - RELEASING memory - which is the opposite
-       of the reading that sentence invites. `Shape` already separated these three cases; the string
-       a reader actually sees did not. */
+
+    39 cells on the 2026-08-03 board carry no time-to-plateau, and they got one sentence between
+    them: "memory reached no steady state inside the load cap". busbar has the most (11), and its
+    openai>openai cell ends the window at -0.43 MiB/min - RELEASING memory - which is the opposite
+    of the reading that sentence invites. `Shape` already separated these three cases; the string
+    a reader actually sees did not. */
     #[test]
     fn the_no_plateau_reason_says_which_way_memory_was_moving() {
         use crate::stats::{Shape, Verdict};
@@ -1966,14 +2074,20 @@ mod tests {
             shape: Shape::Falling,
         });
         assert!(falling.contains("falling"), "{falling}");
-        assert!(falling.contains("not leaking it"), "a falling gateway must be told apart from a leak: {falling}");
+        assert!(
+            falling.contains("not leaking it"),
+            "a falling gateway must be told apart from a leak: {falling}"
+        );
 
         let climbing = no_plateau_detail(&Verdict::NotSteady {
             growth_rate_mib_per_min: rate.clone(),
             shape: Shape::Climbing,
         });
         assert!(climbing.contains("climbing"), "{climbing}");
-        assert!(!climbing.contains("not leaking"), "a climbing gateway must NOT be excused: {climbing}");
+        assert!(
+            !climbing.contains("not leaking"),
+            "a climbing gateway must NOT be excused: {climbing}"
+        );
 
         let osc = no_plateau_detail(&Verdict::NotSteady {
             growth_rate_mib_per_min: rate,
@@ -1993,7 +2107,10 @@ mod tests {
             crate::stats::Undecidable::WindowTooShort,
         ));
         assert!(undecidable.contains("no steady state"), "{undecidable}");
-        assert!(!undecidable.contains("climbing") && !undecidable.contains("falling"), "{undecidable}");
+        assert!(
+            !undecidable.contains("climbing") && !undecidable.contains("falling"),
+            "{undecidable}"
+        );
     }
 
     // EVERY `Series` FIELD MUST SURVIVE THE ACCUMULATOR.
@@ -2131,6 +2248,222 @@ mod tests {
     }
 
     use super::*;
+
+    // DEFECT 1 - a frozen tail is the sampler dying, even when the tail reads NotSteady.
+    #[test]
+    fn a_stalled_sampler_is_caught_on_count_alone_not_on_the_verdict() {
+        // The interleaving the old verdict-gated check missed: the series stopped growing (150 -> 150)
+        // while the frozen tail still trends upward, so `plateau_check` would call it NotSteady and a
+        // `verdict.is_steady()` gate would never fire. The count says it plainly.
+        assert!(
+            sampler_is_dead(150, 150),
+            "no new samples since a pass that had 150 is a dead sampler"
+        );
+        // Healthy: the series grows every pass, so a live sampler is never called dead - which is what
+        // keeps every passing cell publishing exactly the numbers it does today.
+        assert!(!sampler_is_dead(150, 190));
+        // First pass, nothing captured yet: too early to conclude a stall, keep measuring.
+        assert!(!sampler_is_dead(0, 0));
+    }
+
+    // DEFECT 2 - time-to-plateau may never contradict the published verdict.
+    #[test]
+    fn time_to_plateau_never_contradicts_the_final_verdict() {
+        use crate::stats::{Shape, Verdict};
+        let rate = crate::measurement::Measurement::Measured(3.0);
+        // Latched at 90s mid-load, then climbed for the rest of the load: the FULL-window verdict is
+        // NotSteady, so there is NO time-to-plateau. Publishing 90 here is the contradiction.
+        assert_eq!(
+            time_to_plateau(
+                Some(90),
+                &Verdict::NotSteady {
+                    growth_rate_mib_per_min: rate.clone(),
+                    shape: Shape::Climbing
+                }
+            ),
+            None
+        );
+        // A genuinely settled cell keeps its settle time - the number every passing memory cell publishes.
+        assert_eq!(
+            time_to_plateau(
+                Some(90),
+                &Verdict::Steady {
+                    growth_rate_mib_per_min: rate.clone()
+                }
+            ),
+            Some(90)
+        );
+        // Undecidable is not "it settled": no time-to-plateau.
+        assert_eq!(
+            time_to_plateau(
+                Some(90),
+                &Verdict::Undecidable(crate::stats::Undecidable::WindowTooShort)
+            ),
+            None
+        );
+        // No mid-load steady reading at all stays absent regardless of verdict.
+        assert_eq!(
+            time_to_plateau(
+                None,
+                &Verdict::Steady {
+                    growth_rate_mib_per_min: rate
+                }
+            ),
+            None
+        );
+    }
+
+    // recovered_rss must catch a sampler that stalled DURING the recovery window (a stall the in-loop
+    // check cannot see, because the load loop has already exited and there is no panic), and it must
+    // leave a HEALTHY recovery's number exactly as it was.
+    #[test]
+    fn recovered_rss_flags_a_recovery_window_stall_but_leaves_a_healthy_number_unchanged() {
+        use crate::stats::Sample;
+        // A full series: 40 one-second samples, all at 100 MiB (a gateway that fully released and sat
+        // flat through recovery). The trailing MEMORY_RECOVERY_MEDIAN_S median is 100.
+        let taken: Vec<Sample> = (0..40)
+            .map(|i| Sample {
+                t_s: i as f64,
+                mib: 100.0,
+            })
+            .collect();
+
+        // HEALTHY: the sampler kept adding samples through recovery (5 held before, 40 after). The
+        // number is identical to the raw median over the same trailing-window tail.
+        let cut = taken.last().unwrap().t_s - MEMORY_RECOVERY_MEDIAN_S as f64;
+        let tail: Vec<f64> = taken
+            .iter()
+            .filter(|s| s.t_s >= cut)
+            .map(|s| s.mib)
+            .collect();
+        assert_eq!(
+            recovered_rss(&taken, 5),
+            crate::stats::median(&tail),
+            "a live recovery must publish the identical number it does today"
+        );
+        assert_eq!(recovered_rss(&taken, 5), Measurement::Measured(100.0));
+
+        // STALLED: the sampler added NO samples across the recovery window (40 held before, still 40
+        // after), so the cut would select a frozen/mid-descent tail. Flagged HarnessError, not a number.
+        let stalled = recovered_rss(&taken, 40);
+        assert!(
+            !stalled.is_measured(),
+            "a frozen recovery tail must not publish a number"
+        );
+        assert_eq!(stalled.reason(), Some(&Absent::HarnessError));
+
+        // The `samples_before > 0` guard: an empty pre-recovery count is NOT a stall (it is the
+        // ordinary first-ever state), so it computes normally rather than falsely flagging.
+        assert!(recovered_rss(&taken, 0).is_measured());
+    }
+
+    // THE REAL RESOLUTION-GUARD DECISION, tested directly. The live `added_ttft_at`/`added_gap_at`
+    // closures inside Streaming::measure route through this; every Streaming test hits an early return
+    // before them, so before this extraction the g>=d-vs-BelowResolution rule (the p99-below-p50 defect
+    // it prevents) had no direct coverage. A gateway that came in FASTER than the mock must publish
+    // BelowResolution, never a clamped zero.
+    #[test]
+    fn added_percentile_diff_is_below_resolution_when_the_gateway_beats_the_mock_never_a_zero() {
+        // Gateway slower than the mock: the measured difference.
+        assert_eq!(
+            added_percentile_diff(
+                Some(4300.0),
+                Some(4000.0),
+                |_, _| String::new(),
+                String::new
+            )
+            .copied(),
+            Some(300.0)
+        );
+        // Equal at the percentile: a real measured zero (both legs the same), which IS allowed.
+        assert_eq!(
+            added_percentile_diff(
+                Some(4000.0),
+                Some(4000.0),
+                |_, _| String::new(),
+                String::new
+            )
+            .copied(),
+            Some(0.0)
+        );
+        // Gateway FASTER than the mock: impossible for a proxy, so BelowResolution, not a clamped 0.
+        let faster = added_percentile_diff(
+            Some(3500.0),
+            Some(4000.0),
+            |_, _| String::new(),
+            String::new,
+        );
+        assert!(
+            !faster.is_measured(),
+            "a faster-than-mock reading must not be a measured zero"
+        );
+        assert_eq!(faster.reason(), Some(&Absent::BelowResolution));
+        // A missing leg has no percentile to difference: NotMeasured, not zero.
+        for (g, d) in [(None, Some(4000.0)), (Some(4000.0), None), (None, None)] {
+            assert_eq!(
+                added_percentile_diff(g, d, |_, _| String::new(), String::new).reason(),
+                Some(&Absent::NotMeasured)
+            );
+        }
+    }
+
+    // THE COST SHAPING AND ITS SWAP RE-FLAG, tested directly. Cost::measure's early returns (no window
+    // / failures in the window) fire before this shaping, so no fixture-driven Cost::measure test ever
+    // reached it. A typo in the swap re-flag arm - forgetting to re-flag rps_per_cpu_second, or
+    // re-flagging a field that should stay measured - would silently publish a swapping box's cost as
+    // trustworthy, and this pins exactly which fields flip.
+    #[test]
+    fn cost_fields_reflag_only_the_cpu_figures_when_the_box_swapped() {
+        use crate::procsample::WindowCost;
+        let m = Measurement::Measured;
+        let win = |swapped| WindowCost {
+            cpu_us: m(1000.0),
+            cpu_us_per_request: m(1234.0),
+            rps_per_cpu_second: m(56.0),
+            majflt: m(0.0),
+            threads_end: m(12.0),
+            nonvol_ctxt_per_request: m(3.0),
+            swapped,
+        };
+        let get = |f: &Filled, k: &str| {
+            f.iter()
+                .find(|(n, _)| *n == k)
+                .map(|(_, v)| v.clone())
+                .unwrap_or_else(|| panic!("missing cost field {k}"))
+        };
+
+        // Not swapping: every field carried straight through, including the checkable window load.
+        let clean = cost_fields(win(false), 177_452.0, 44_363.0, m(0.87));
+        assert_eq!(get(&clean, "cpu_us_per_request"), m(1234.0));
+        assert_eq!(get(&clean, "rps_per_cpu_second"), m(56.0));
+        assert_eq!(get(&clean, "cost_window_ok"), m(177_452.0));
+        assert_eq!(get(&clean, "cost_window_rps"), m(44_363.0));
+        assert_eq!(get(&clean, "cost_core_utilisation"), m(0.87));
+        assert_eq!(get(&clean, "cost_threads"), m(12.0));
+        assert_eq!(get(&clean, "cost_nonvol_ctxt_per_request"), m(3.0));
+        assert_eq!(get(&clean, "cost_majflt"), m(0.0));
+        assert_eq!(
+            get(&clean, "cost_window_conc"),
+            m(f64::from(COST_WINDOW_CONCURRENCY))
+        );
+
+        // Swapping: ONLY the two per-request CPU figures re-flag HarnessError; every other field stays.
+        let swapped = cost_fields(win(true), 177_452.0, 44_363.0, m(0.87));
+        assert_eq!(
+            get(&swapped, "cpu_us_per_request").reason(),
+            Some(&Absent::HarnessError)
+        );
+        assert_eq!(
+            get(&swapped, "rps_per_cpu_second").reason(),
+            Some(&Absent::HarnessError)
+        );
+        assert_eq!(get(&swapped, "cost_window_ok"), m(177_452.0));
+        assert_eq!(get(&swapped, "cost_window_rps"), m(44_363.0));
+        assert_eq!(get(&swapped, "cost_core_utilisation"), m(0.87));
+        assert_eq!(get(&swapped, "cost_threads"), m(12.0));
+        assert_eq!(get(&swapped, "cost_nonvol_ctxt_per_request"), m(3.0));
+        assert_eq!(get(&swapped, "cost_majflt"), m(0.0));
+    }
 
     /// A group that lies: it declares two fields and returns one. The engine must fill the gap with
     /// an absence carrying a reason, never leave the key out, because a missing key and a null are

@@ -86,6 +86,7 @@ fn handle(stream: TcpStream, stop: Arc<AtomicBool>) {
         let mut content_length = 0usize;
         let mut saw_request_line = false;
         let mut authenticated = false;
+        let mut request_target = String::new();
 
         loop {
             let mut line = String::new();
@@ -96,6 +97,9 @@ fn handle(stream: TcpStream, stop: Arc<AtomicBool>) {
             }
             if !saw_request_line {
                 saw_request_line = true;
+                // "POST /path HTTP/1.1" -> capture the path, so the control plane can be answered
+                // without auth (see the /__mock/ branch below).
+                request_target = line.split_whitespace().nth(1).unwrap_or("").to_string();
             }
             let trimmed = line.trim_end();
             if trimmed.is_empty() {
@@ -127,6 +131,28 @@ fn handle(stream: TcpStream, stop: Arc<AtomicBool>) {
             if reader.read_exact(&mut request_body).is_err() {
                 return;
             }
+        }
+
+        // THE MOCK'S CONTROL PLANE IS SERVED WITHOUT AUTH, exactly as the real mock-upstream serves
+        // /__mock/record, /__mock/reset and /__mock/state before any auth check. box_qualify quiesces
+        // the recorder (POST /__mock/record) before it measures, and a fixture that 401'd that control
+        // call would wrongly invalidate the qualification (the quiesce-gates-qualify guard treats a
+        // failed quiesce as a contaminated observation). A minimal valid state document (recording:
+        // false) is enough: the engine only checks the control call succeeded, and parse_state needs a
+        // `recording` flag.
+        if request_target.starts_with("/__mock/") {
+            let body = br#"{"ok":true,"recording":false,"dialects":{}}"#;
+            let head = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n",
+                body.len()
+            );
+            if out.write_all(head.as_bytes()).is_err()
+                || out.write_all(body).is_err()
+                || out.flush().is_err()
+            {
+                return;
+            }
+            continue;
         }
 
         // AN UNAUTHENTICATED REQUEST IS REFUSED, whatever it asked for. This is what makes every
@@ -283,7 +309,9 @@ fn a_real_run_writes_a_snapshot_with_the_cell_it_measured() {
     let snap = run_engine(&results, &manifest, addr);
 
     assert_eq!(snap["gateway"], "e2e");
-    assert_eq!(snap["schema_version"], 1);
+    // schema_version 2 is what a real run stamps (suite.rs) since the sharded per-column provenance
+    // (box_qualify/hardware on each Upstream) landed; this assertion tracked the old schema 1.
+    assert_eq!(snap["schema_version"], 2);
     assert_eq!(snap["arch"], "e2e");
 
     // The grid was one dialect, so exactly one cell, and the fixture answers 200, so it is served.

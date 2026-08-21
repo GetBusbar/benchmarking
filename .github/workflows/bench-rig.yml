@@ -27,10 +27,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust
-        run: |
-          curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      # Install Rust via the pinned action rather than piping sh.rustup.rs into a shell. This job holds
+      # contents:write + GH_TOKEN and publishes the otb/mock binaries every bench box downloads as the
+      # frozen instrument; the build-commit self-check below runs AFTER the toolchain install and cannot
+      # catch a compromised toolchain that still compiles the correct source. dtolnay/rust-toolchain is
+      # the same install path bench-tests.yml already trusts.
+      - uses: dtolnay/rust-toolchain@stable
 
       - name: Build mock (Rust, native ${{ matrix.arch }})
         run: |

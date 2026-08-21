@@ -140,14 +140,12 @@ def cell_fraction_done(phase_name):
 IP_RE = re.compile(r"ip=([0-9.]+)")
 TS_RE = re.compile(r"^\[(\d\d):(\d\d):(\d\d)\]")
 
-# A cell whose verdict is one of these was skipped or refused, and cost almost nothing. Anything else
-# was measured, and is what the remaining time is actually made of.
-CHEAP = ("not_configurable", "untestable", "unprobed_auth")
-# A CELL IS SERVED ONLY IF THE ENGINE SAID SO. This used to count anything whose verdict was not one
-# of CHEAP, which is fail-open: a new line shaped like `[cell N/M] <id>: <anything>` silently became a
-# served cell. That happened the day a per-cell cost breakdown was added under the same prefix - every
-# measured cell counted twice, gateways showed "10/8 served", and the ETA hit zero while they were
-# still running. Listing what DOES count means an unrecognised line is ignored rather than believed.
+# A CELL IS SERVED ONLY IF THE ENGINE SAID SO. This used to count anything whose verdict was not a
+# cheap skip/refusal ("not_configurable", "untestable", "unprobed_auth"), which is fail-open: a new
+# line shaped like `[cell N/M] <id>: <anything>` silently became a served cell. That happened the day a
+# per-cell cost breakdown was added under the same prefix - every measured cell counted twice, gateways
+# showed "10/8 served", and the ETA hit zero while they were still running. Listing what DOES count
+# means an unrecognised line is ignored rather than believed.
 MEASURED = ("served", "failed")
 
 

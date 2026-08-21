@@ -138,10 +138,22 @@ pub fn parse_state(body: &[u8]) -> Result<MockState, String> {
                         .get("count")
                         .and_then(serde_json::Value::as_u64)
                         .unwrap_or(0),
-                    body_ok: row
-                        .get("body_ok")
-                        .and_then(serde_json::Value::as_bool)
-                        .unwrap_or(false),
+                    // A PRESENT-BUT-WRONG-TYPED body_ok is a malformed document, not a `false`. Since
+                    // verdict() checks count>0 before reading body_ok, a doc with count already >0 but
+                    // body_ok of the wrong JSON type used to default to false and produce a REFUTED -
+                    // a false accusation of a dialect-shape failure - when the real cause is the mock's
+                    // document being malformed. Refuse it so the caller falls back to `unchecked`
+                    // ("THREE ANSWERS, NOT TWO"). A genuinely ABSENT body_ok stays false, the same way
+                    // an absent count stays 0, for an older document that never carried the field.
+                    body_ok: match row.get("body_ok") {
+                        None => false,
+                        Some(serde_json::Value::Bool(b)) => *b,
+                        Some(other) => {
+                            return Err(format!(
+                                "dialect '{name}' has a non-boolean body_ok: {other}"
+                            ))
+                        }
+                    },
                     last_path: row
                         .get("last_path")
                         .and_then(serde_json::Value::as_str)
@@ -414,12 +426,52 @@ fn control_failed(outcome: Outcome) -> Option<String> {
         Outcome::RigRefused(why) => Some(format!(
             "the rig refused to send this control-plane request: {why}"
         )),
+        // Ours, not the peer's: see `Outcome::RigExhausted`. Filed the same way `RigRefused` is - a
+        // reason this control-plane call is unusable, never evidence about the gateway or mock.
+        Outcome::RigExhausted(e) => Some(format!(
+            "the rig ran out of its own connection resources before the peer could be asked: {e}"
+        )),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // control_failed must attribute a rig fault to the RIG, never to the gateway/mock it was asking.
+    // A rig that ran out of its own ports/descriptors (Outcome::RigExhausted) is ours: the control
+    // request was never delivered, so the re-verification is unusable for a reason that says nothing
+    // about the peer. This pins that the RigExhausted arm names the rig; if it were removed (falling
+    // through to a bucket that reads as the peer failing) the assertion would break.
+    #[test]
+    fn control_failed_attributes_a_rig_exhaustion_to_the_rig_not_the_peer() {
+        let why = control_failed(Outcome::RigExhausted("EMFILE (os error 24)".to_string()))
+            .expect("a rig-exhausted control call is a failure, not a success");
+        assert!(
+            why.contains("rig ran out"),
+            "a rig exhaustion must be named as the rig's own resource fault, got {why:?}"
+        );
+        assert!(
+            !why.to_ascii_lowercase().contains("gateway"),
+            "it must not read as the gateway (or mock) failing, got {why:?}"
+        );
+        // Filed the same way the sibling rig-side refusal is, and distinctly from a genuine peer-side
+        // connection failure (which IS a claim about the peer's endpoint).
+        let refused = control_failed(Outcome::RigRefused("smuggled header".to_string()))
+            .expect("a rig-refused control call is a failure");
+        assert!(refused.contains("rig refused"), "got {refused:?}");
+        let peer = control_failed(Outcome::ConnectionFailed("refused".to_string()))
+            .expect("a connection failure is a failure");
+        assert!(
+            peer.contains("no connection"),
+            "a genuine peer-side connection failure stays a connection failure, got {peer:?}"
+        );
+        // A timeout is the peer not answering, distinct again from a rig-side resource fault.
+        assert_eq!(
+            control_failed(Outcome::TimedOut).as_deref(),
+            Some("timed out")
+        );
+    }
 
     fn state(recording: bool, rows: &[(&str, u64, bool)]) -> MockState {
         let mut dialects = std::collections::BTreeMap::new();
@@ -463,6 +515,24 @@ mod tests {
     fn a_document_without_the_recording_flag_is_an_error_not_a_silent_false() {
         assert!(parse_state(br#"{"dialects":{}}"#).is_err());
         assert!(parse_state(b"not json at all").is_err());
+    }
+
+    // A PRESENT-BUT-WRONG-TYPED body_ok is a malformed document, not a `false`. With count already >0,
+    // defaulting a mistyped body_ok to false used to make verdict() publish a REFUTED - a false
+    // accusation of a dialect-shape failure - when the real cause is the mock's document being
+    // malformed. parse_state must refuse it so the caller falls back to `unchecked`.
+    #[test]
+    fn a_non_boolean_body_ok_is_a_parse_error_not_a_defaulted_false() {
+        // count>0 with body_ok as a STRING: the exact shape that would otherwise refute.
+        let doc = br#"{"recording":true,"dialects":{"openai":{"count":5,"body_ok":"yes","last_path":"/v1/chat/completions","last_snippet":""}}}"#;
+        assert!(
+            parse_state(doc).is_err(),
+            "a non-boolean body_ok must be refused rather than read as false and refuted"
+        );
+        // A genuinely ABSENT body_ok still parses (older document), defaulting to false like count.
+        let absent = br#"{"recording":true,"dialects":{"openai":{"count":0,"last_path":"","last_snippet":""}}}"#;
+        let s = parse_state(absent).expect("an absent body_ok is not a malformed document");
+        assert!(!s.dialects["openai"].body_ok);
     }
 
     // ── the verdict ─────────────────────────────────────────────────────────────────────────────
@@ -684,12 +754,13 @@ mod tests {
     }
 
     // THE DEFECT THIS PINS: if the single re-verification request to the GATEWAY fails (here,
-    // nothing is listening on the gateway address at all, the cheapest way to force
-    // `control_failed` to fire on the send at reverify.rs:302-308), `reverify_cell` returns early at
-    // line 309-313 without ever reaching the `set_recording(cfg, false)` call at line 319. The
-    // recorder the mock was told to turn ON at line 278 is left ON, so every load window the suite
-    // runs on this cell (and any cell after it, until some later re-verify happens to succeed) is
-    // measured against a recording - and therefore slower - mock.
+    // nothing is listening on the gateway address at all, the cheapest way to force `control_failed`
+    // to fire on the gateway send inside `drive_and_read`), the driver returns early without ever
+    // reaching the matching `set_recording(cfg, false)`. The recorder the mock was told to turn ON by
+    // the earlier `set_recording(cfg, true)` is left ON, so every load window the suite runs on this
+    // cell (and any cell after it, until some later re-verify happens to succeed) is measured against
+    // a recording - and therefore slower - mock. (Call sites named rather than line-numbered: the
+    // numbers this comment used to cite had drifted from the file.)
     #[test]
     fn a_failed_gateway_request_must_not_leave_the_mocks_recorder_on() {
         let recording = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));

@@ -64,8 +64,12 @@ def _matrix_extra(data):
     mem = data.get("memory")
     if isinstance(mem, dict):
         out["memory"] = {k: mem[k] for k in MEM_KEEP if k in mem}
+    # The per-cell grid lives UNDER data["matrix"] (engine/src/record.rs: Matrix.upstreams), never at the
+    # top level. Reading data.get("upstreams") here found nothing on every real snapshot, so diagonal_perf/
+    # diagonal_stream/diagonal_memory were silently empty for every matrix run since the schema nested them.
+    matrix = data.get("matrix") or {}
     perf, stream = {}, {}
-    ups = data.get("upstreams")
+    ups = matrix.get("upstreams")
     if isinstance(ups, dict):
         for eg, up in ups.items():
             cell = ((up or {}).get("cells") or {}).get(eg)
@@ -105,40 +109,68 @@ def _matrix_extra(data):
         out["diagonal_memory"] = mem_cells
     return out
 
-def _write_record(suite, gw, data):
-    """Build one history row from a result JSON and append it if new. Returns True if written."""
+def _write_record(suite, gw, data, label="?"):
+    """Build one history row from a result JSON and append it if new.
+
+    Returns (written, issues): `written` True iff a row was appended; `issues` a list of human-readable
+    problems worth surfacing (a parseable-but-measured_at-less result, or an unparseable existing history
+    line). A missing measured_at is NOT the same fact as an already-recorded dedup no-op - both return
+    written=False, but the former is a DROPPED row and must be visible, so it carries an issue.
+    """
+    issues = []
     measured = data.get("measured_at")
     if not measured:
-        return False
+        msg = (f"{label}: parseable result with NO measured_at - its history row was DROPPED "
+               f"(distinct from a normal already-recorded dedup no-op)")
+        print(f"history: WARNING {msg}", file=sys.stderr)
+        return False, [msg]
     rec = {"suite": suite, "measured_at": measured,
            "arch": data.get("arch"), "hardware": data.get("hardware")}
+    # The matrix suite nests served/matrix_version/egress_configured/sweep_*/p99_ceiling_ms/cells/upstreams
+    # UNDER data["matrix"] (engine/src/record.rs: Matrix), NOT at the top level. Overlay the matrix object
+    # so the KEEP copy and the cells/diagonal extraction reach them; top-level fields (build, arch,
+    # hardware, measured_at) still resolve because the matrix object does not carry them.
+    matrix = (data.get("matrix") or {}) if suite == "matrix" else {}
+    src = {**data, **matrix} if suite == "matrix" else data
     for k in KEEP[suite]:
-        if k in data:
-            rec[k] = data[k]
+        if k in src:
+            rec[k] = src[k]
     if suite == "matrix":
-        if isinstance(data.get("cells"), dict):
-            rec["cells"] = {k: v.get("served") for k, v in data["cells"].items()}
+        cells = matrix.get("cells")
+        if isinstance(cells, dict):
+            rec["cells"] = {k: v.get("served") for k, v in cells.items()}
         rec.update(_matrix_extra(data))
     hist_path = os.path.join(HIST, gw + ".jsonl")
     seen = set()
     if os.path.exists(hist_path):
-        for line in open(hist_path):
+        for ln, line in enumerate(open(hist_path), 1):
+            if not line.strip():
+                continue
             try:
                 j = json.loads(line)
                 seen.add((j.get("suite"), j.get("measured_at")))
             except Exception:
-                pass
+                # A truncated/garbage existing line (e.g. a prior append interrupted by the box's shutdown
+                # timer) must NOT be silently dropped: its (suite, measured_at) key is then missing from
+                # `seen`, so reprocessing the same run would append a DUPLICATE row, breaking the file's
+                # append-only "an existing pair is skipped, never rewritten" contract. Surface it loudly.
+                msg = (f"{gw}.jsonl line {ln}: existing history line is not valid JSON - its dedup key "
+                       f"cannot be read, risking a duplicate row")
+                print(f"history: WARNING {msg}", file=sys.stderr)
+                issues.append(msg)
     if (suite, measured) in seen:
-        return False
+        return False, issues
     with open(hist_path, "a") as f:
         f.write(json.dumps(rec, separators=(",", ":")) + "\n")
-    return True
+    return True, issues
 
 
 def main():
     os.makedirs(HIST, exist_ok=True)
     added = 0
     skipped = []   # result files that failed to parse (corrupt/truncated) - each is a LOST history row
+    issues = []    # non-fatal-parse problems worth an exit-1: dropped measured_at-less rows, garbage
+                   # existing history lines - each is distinct from the harmless dedup no-op
     for suite in SUITES:
         d = os.path.join(RES, suite)
         if not os.path.isdir(d):
@@ -160,8 +192,10 @@ def main():
                 print(f"history: SKIPPED corrupt {suite}/{fn}: {e}", file=sys.stderr)
                 skipped.append(f"{suite}/{fn}")
                 continue
-            if _write_record(suite, gw, data):
+            written, probs = _write_record(suite, gw, data, f"{suite}/{fn}")
+            if written:
                 added += 1
+            issues += probs
     # THE ENGINE NO LONGER WRITES THE PER-SUITE DIRECTORIES ABOVE: it writes only
     # results/snapshots/<gw>.json (current) and results/snapshots/result_<gw>_<measured_at>.json
     # (timestamped). Both hold the matrix-shaped result, so ingest them the same way, keyed by the
@@ -182,12 +216,17 @@ def main():
             gw = data.get("gateway")
             if not gw:
                 continue
-            if _write_record("matrix", gw, data):
+            written, probs = _write_record("matrix", gw, data, f"snapshots/{fn}")
+            if written:
                 added += 1
+            issues += probs
     print(f"history: appended {added} record(s)")
     if skipped:
         print(f"history: WARNING {len(skipped)} corrupt result file(s) skipped - "
               f"their history row(s) were LOST: {', '.join(skipped)}", file=sys.stderr)
+    if skipped or issues:
+        # Any of these leaves the append-only history less complete/trustworthy than the caller believes,
+        # so exit non-zero to fire the caller's `if ! append.py` guard rather than print clean success.
         return 1
     return 0
 

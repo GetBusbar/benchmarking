@@ -9,7 +9,10 @@
 //   /responses             -> OpenAI Responses
 //   /messages              -> Anthropic Messages
 //   …:generateContent      -> Google Gemini
-//   /converse | /model/…   -> AWS Bedrock (Converse)
+//   /converse | /model/… | /invoke -> AWS Bedrock. NOTE: /converse is Bedrock Converse; /invoke is
+//        Bedrock InvokeModel, a genuinely distinct AWS API. Both are answered with the SAME
+//        Converse-shaped body today - a deliberate conflation, called out here so the label is not
+//        read as a promise that /invoke gets an InvokeModel-shaped envelope.
 //   /v2/chat | /v1/chat    -> Cohere
 //   (anything else)        -> OpenAI chat.completion (safe default)
 //
@@ -72,7 +75,7 @@ use http_body_util::{BodyExt, Full, Limited, StreamBody};
 use hyper::body::{Bytes, Frame, Incoming};
 use hyper::service::service_fn;
 use hyper::{Request, Response};
-use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use hyper_util::server::conn::auto;
 use tokio::net::TcpListener;
 use tokio_stream::wrappers::ReceiverStream;
@@ -91,6 +94,10 @@ const MODELS_OPENAI: &[u8] = br#"{"object":"list","data":[{"id":"gpt-4o-mini","o
 const MODELS_ANTHROPIC: &[u8] = br#"{"data":[{"id":"claude-3-5-sonnet","type":"model","display_name":"Claude 3.5 Sonnet"},{"id":"claude-3-5-haiku","type":"model","display_name":"Claude 3.5 Haiku"}],"has_more":false}"#;
 const MODELS_GEMINI: &[u8] = br#"{"models":[{"name":"models/gemini-1.5-pro","displayName":"Gemini 1.5 Pro"},{"name":"models/gemini-1.5-flash","displayName":"Gemini 1.5 Flash"}]}"#;
 const MODELS_COHERE: &[u8] = br#"{"models":[{"name":"command-r","endpoints":["chat"]},{"name":"command-r-plus","endpoints":["chat"]}]}"#;
+// AWS Bedrock ListFoundationModels shape (modelSummaries / modelId), distinct from every other
+// provider's catalog so a bedrock-configured gateway discovers a routable model of its own instead
+// of the openai fallback.
+const MODELS_BEDROCK: &[u8] = br#"{"modelSummaries":[{"modelId":"mock.claude-3-5-sonnet-v1:0","modelName":"Mock Sonnet","providerName":"Mock"},{"modelId":"mock.titan-text-v1","modelName":"Mock Titan","providerName":"Mock"}]}"#;
 
 /// The model-list body for a .../models request. All provider base URLs point at this one mock, so
 /// the provider is inferred from the request PATH: a gateway configured for the anthropic/gemini/
@@ -101,7 +108,13 @@ fn models_for(path: &str) -> &'static [u8] {
         MODELS_GEMINI
     } else if path.contains("/anthropic") || path.contains("/v1/messages") {
         MODELS_ANTHROPIC
-    } else if path.contains("/v2/") || path.contains("/cohere") {
+    } else if path.contains("/converse") || path.contains("/model/") || path.contains("/invoke") {
+        // Bedrock base (same markers body_for/dialect_for route Bedrock on). Checked before the
+        // Cohere/openai fallbacks so a bedrock models path does not fall through to MODELS_OPENAI.
+        MODELS_BEDROCK
+    } else if path.contains("/v2/") || path.contains("/cohere") || path.contains("/v1/chat") {
+        // Cohere v2 (/v2/, /cohere) and Cohere v1 (/v1/chat). A bare /v1/models stays openai below,
+        // since openai and cohere-v1 share that exact path and openai is the safe default.
         MODELS_COHERE
     } else {
         MODELS_OPENAI
@@ -339,6 +352,14 @@ impl StreamFrames {
     }
 }
 
+/// Parse a numeric knob (env var or CLI value) after trimming surrounding whitespace. Shell exports,
+/// CI variables and generated env files routinely carry a trailing newline; a bare `parse()` fails on
+/// them and a `.ok()` then swallows the failure, so both sides of the measurement must trim. Returns
+/// None on an empty or unparseable value so the caller can decide between a default and a hard error.
+fn trimmed_parse<T: std::str::FromStr>(v: &str) -> Option<T> {
+    v.trim().parse().ok()
+}
+
 /// Does the request body ask for streaming? Cheap substring scan - no JSON parse on the hot path.
 fn wants_stream(body: &[u8]) -> bool {
     body.windows(13).any(|w| w == b"\"stream\":true")
@@ -348,6 +369,32 @@ fn wants_stream(body: &[u8]) -> bool {
 // Same cap engine/src/http.rs enforces on the client side (MAX_BODY_BYTES there). A gateway (or a
 // bug in one) sending an enormous body must not exhaust this process's memory across an 8-hour run.
 const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
+
+// FREE THE ACCEPT-LOOP PERMIT FROM A STALLED PEER, without severing a legitimate long-lived connection.
+// serve_connection() holds one of the accept loop's conn_permits for its whole life; a peer that opens
+// a connection and then stalls (never sends the next request's headers, or sends a Content-Length and
+// never finishes the body) would otherwise park that task forever and, enough times over an 8-hour run,
+// shrink the mock's own accept throughput - which then gets charged to whichever gateway is being
+// measured. These are BETWEEN-REQUEST / stalled-read idle bounds, NOT a blanket connection timeout: an
+// h2c connection actively multiplexing requests, or an h1 keep-alive connection serving back-to-back,
+// resets these on every request and is never cut. Overridable in test builds so the timeout test does
+// not burn the production duration.
+//
+//   CONN_HEADER_TIMEOUT - max wait for a request's headers to arrive (h1 slowloris / idle-between-requests).
+//   H2_KEEPALIVE        - h2c PING interval/timeout, so a dead multiplexed peer is detected and dropped.
+//   BODY_READ_TIMEOUT   - max wait to drain a request body once its headers are in (mid-body stall).
+#[cfg(not(test))]
+const CONN_HEADER_TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(test)]
+const CONN_HEADER_TIMEOUT: Duration = Duration::from_millis(200);
+#[cfg(not(test))]
+const H2_KEEPALIVE: Duration = Duration::from_secs(30);
+#[cfg(test)]
+const H2_KEEPALIVE: Duration = Duration::from_millis(200);
+#[cfg(not(test))]
+const BODY_READ_TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(test)]
+const BODY_READ_TIMEOUT: Duration = Duration::from_millis(200);
 
 type OutBody = http_body_util::combinators::BoxBody<Bytes, Infallible>;
 
@@ -452,12 +499,48 @@ async fn handle(
     // believes it enabled the recorder and did not would read an empty record as a gateway failing to
     // translate.
     if path == "/__mock/record" {
-        let body = match Limited::new(req.into_body(), MAX_BODY_BYTES)
-            .collect()
-            .await
-        {
-            Ok(c) => c.to_bytes(),
-            Err(_) => Bytes::new(),
+        // BOUNDED IN TIME as well as size, exactly like the request-drain path below: a control POST
+        // that sends a Content-Length and then stalls mid-body would otherwise park this task and leak
+        // its accept-loop permit forever. See BODY_READ_TIMEOUT.
+        let collected = tokio::time::timeout(
+            BODY_READ_TIMEOUT,
+            Limited::new(req.into_body(), MAX_BODY_BYTES).collect(),
+        )
+        .await;
+        let body = match collected {
+            Ok(Ok(c)) => c.to_bytes(),
+            // A transport-level read failure here (dropped connection, malformed chunk) is NOT a
+            // malformed control message. Coercing it to an empty body used to produce the same 400 as
+            // "body said neither on nor off", so a control-plane hiccup read as the harness sending a
+            // bad control body - and the harness would then read the empty record as the gateway
+            // never forwarding. Surface it as a distinct 500 with a log instead.
+            Ok(Err(e)) => {
+                eprintln!("mock: /__mock/record control body could not be read: {e}");
+                return Ok(Response::builder()
+                    .status(hyper::StatusCode::INTERNAL_SERVER_ERROR)
+                    .header("content-type", "application/json")
+                    .body(
+                        Full::new(Bytes::from_static(
+                            b"{\"ok\":false,\"error\":\"control body could not be read\"}",
+                        ))
+                        .boxed(),
+                    )
+                    .unwrap());
+            }
+            // The control body stalled mid-read past BODY_READ_TIMEOUT: answer 408 and let the task
+            // return, freeing its permit rather than parking on a peer that went quiet.
+            Err(_elapsed) => {
+                return Ok(Response::builder()
+                    .status(hyper::StatusCode::REQUEST_TIMEOUT)
+                    .header("content-type", "application/json")
+                    .body(
+                        Full::new(Bytes::from_static(
+                            b"{\"ok\":false,\"error\":\"control body timed out\"}",
+                        ))
+                        .boxed(),
+                    )
+                    .unwrap());
+            }
         };
         return Ok(match wants_recording(&body) {
             Some(on) => {
@@ -482,17 +565,51 @@ async fn handle(
     let body = body_for(&path);
     // Drain the request body so the connection stays keep-alive; only the stream flag is looked at.
     // Capped at MAX_BODY_BYTES: an unbounded read here lets one oversized (or buggy) gateway request
-    // exhaust this process's memory over an 8-hour run.
-    let reqbody = match Limited::new(req.into_body(), MAX_BODY_BYTES)
-        .collect()
-        .await
-    {
-        Ok(c) => c.to_bytes(),
-        Err(_) => {
+    // exhaust this process's memory over an 8-hour run. BOUNDED IN TIME as well: a peer that sends a
+    // Content-Length and then never finishes the body would otherwise park this task (and the accept
+    // loop's permit it holds) forever - see BODY_READ_TIMEOUT. A well-behaved request's body arrives at
+    // once, so this only fires on a genuine mid-body stall, answered 408 so the connection can move on.
+    let collected = tokio::time::timeout(
+        BODY_READ_TIMEOUT,
+        Limited::new(req.into_body(), MAX_BODY_BYTES).collect(),
+    )
+    .await;
+    let reqbody = match collected {
+        Ok(Ok(c)) => c.to_bytes(),
+        // Limited::collect returns a boxed error for BOTH its own cap breach (LengthLimitError) and
+        // any inner transport fault (a mid-request connection reset, a malformed chunk). Only the
+        // former is an oversized body; folding both into 413 would label a rig/connection hiccup as
+        // the gateway having sent an over-cap request. Downcast to tell them apart.
+        Ok(Err(e)) => {
+            let (status, msg) = if e
+                .downcast_ref::<http_body_util::LengthLimitError>()
+                .is_some()
+            {
+                (hyper::StatusCode::PAYLOAD_TOO_LARGE, "payload too large")
+            } else {
+                (
+                    hyper::StatusCode::BAD_REQUEST,
+                    "request body could not be read",
+                )
+            };
             return Ok(Response::builder()
-                .status(hyper::StatusCode::PAYLOAD_TOO_LARGE)
+                .status(status)
                 .header("content-type", "application/json")
-                .body(Full::new(Bytes::from_static(b"{\"error\":\"payload too large\"}")).boxed())
+                .body(Full::new(Bytes::from(format!("{{\"error\":\"{msg}\"}}"))).boxed())
+                .unwrap());
+        }
+        // The body stalled mid-read past BODY_READ_TIMEOUT: answer 408 and let the connection task
+        // return, freeing its accept-loop permit rather than parking on a peer that went quiet.
+        Err(_elapsed) => {
+            return Ok(Response::builder()
+                .status(hyper::StatusCode::REQUEST_TIMEOUT)
+                .header("content-type", "application/json")
+                .body(
+                    Full::new(Bytes::from_static(
+                        b"{\"error\":\"request body timed out\"}",
+                    ))
+                    .boxed(),
+                )
                 .unwrap());
         }
     };
@@ -531,7 +648,15 @@ async fn main() {
     let args: Vec<String> = std::env::args().collect();
     if let Some(i) = args.iter().position(|a| a == "-port" || a == "--port") {
         if let Some(v) = args.get(i + 1) {
-            port = v.parse().unwrap_or(8000);
+            // Loud, not silent: a `-port` value that fails to parse (empty shell substitution, a
+            // trailing-whitespace value, a typo) used to fall back to 8000 with no signal, so the
+            // mock would bind a port nobody asked for and every connection the harness aimed at the
+            // intended port would fail or hit a stale instance - published as a gateway defect. Trim
+            // like every other knob and abort visibly rather than defaulting a bad argument.
+            match trimmed_parse::<u16>(v) {
+                Some(p) => port = p,
+                None => panic!("mock: -port argument {v:?} is not a valid u16 port; refusing to silently bind {port}"),
+            }
         }
     }
     // TRIMMED, for the reason the block below spells out at length: this knob sat three lines above a
@@ -541,7 +666,7 @@ async fn main() {
     // the TTFT they set was in effect.
     let ttft_ms: u64 = std::env::var("MOCK_TTFT_MS")
         .ok()
-        .and_then(|v| v.trim().parse().ok())
+        .and_then(|v| trimmed_parse(&v))
         .unwrap_or(0);
     // TRIMMED, BECAUSE THE ENGINE TRIMS. These knobs are read on BOTH sides of the measurement: the
     // mock paces frames by them, and the engine reads MOCK_STREAM_INTERVAL_MS to know what pace to
@@ -553,7 +678,7 @@ async fn main() {
     let envn = |k: &str, d: u64| {
         std::env::var(k)
             .ok()
-            .and_then(|v| v.trim().parse().ok())
+            .and_then(|v| trimmed_parse(&v))
             .unwrap_or(d)
     };
     let s_chunks = envn("MOCK_STREAM_CHUNKS", 64) as u32;
@@ -640,7 +765,22 @@ async fn main() {
             // provider) exercise that path, while h1-only gateways are served exactly as before. No
             // TLS: keeps the mock cheap so it stays off the critical path. (An opt-in TLS+ALPN variant
             // can be added later for a separate full-realism column.)
-            let _ = auto::Builder::new(TokioExecutor::new())
+            let mut builder = auto::Builder::new(TokioExecutor::new());
+            // BETWEEN-REQUEST IDLE BOUNDS so a stalled peer cannot hold its accept-loop permit forever
+            // (see CONN_HEADER_TIMEOUT). NOT a blanket connection timeout: an h1 keep-alive connection
+            // serving back-to-back resets header_read_timeout each request, and an h2c connection
+            // actively multiplexing answers keep-alive PINGs, so a busy connection is never cut - only a
+            // genuinely idle/stalled one is. header_read_timeout requires a timer, hence TokioTimer.
+            builder
+                .http1()
+                .timer(TokioTimer::new())
+                .header_read_timeout(CONN_HEADER_TIMEOUT);
+            builder
+                .http2()
+                .timer(TokioTimer::new())
+                .keep_alive_interval(Some(H2_KEEPALIVE))
+                .keep_alive_timeout(H2_KEEPALIVE);
+            let _ = builder
                 .serve_connection(
                     io,
                     service_fn(move |r| {
@@ -662,9 +802,9 @@ async fn main() {
 mod tests {
     use super::{
         body_for, dialect_for, handle, json_escape, models_for, request_shape_ok, send_frame,
-        state_json, wants_recording, wants_stream, Arc, BodyExt, Bytes, Frame, Full, Limited,
-        RecordFlag, Recorder, StreamFrames, ANTHROPIC, DIALECTS, MAX_BODY_BYTES, OPENAI,
-        SSE_SEND_TIMEOUT,
+        state_json, trimmed_parse, wants_recording, wants_stream, Arc, BodyExt, Bytes, Frame, Full,
+        Limited, RecordFlag, Recorder, StreamFrames, ANTHROPIC, BEDROCK, BODY_READ_TIMEOUT, COHERE,
+        DIALECTS, GEMINI, MAX_BODY_BYTES, OPENAI, RESPONSES, SSE_SEND_TIMEOUT,
     };
     use hyper::service::service_fn;
     use hyper_util::rt::TokioIo;
@@ -819,6 +959,137 @@ mod tests {
         }
         // The query-string form, which is how some clients ask.
         assert!(String::from_utf8_lossy(body_for("/v1/models?limit=100")).contains("gpt-4o-mini"));
+    }
+
+    // Bedrock and Cohere-v1 bases must ALSO get their own catalog, not the openai fallback: a gateway
+    // that discovers models against a bedrock or cohere-v1 base and is handed gpt-4o-mini registers no
+    // routable model and every later cell it should serve is published as a gateway failure that is
+    // really the mock's incomplete catalog.
+    #[test]
+    fn bedrock_and_cohere_v1_model_lists_are_not_the_openai_fallback() {
+        // A bedrock models path (same /model/ marker body_for routes bedrock on) gets the Bedrock
+        // ListFoundationModels shape, not the openai catalog.
+        let bedrock = String::from_utf8_lossy(models_for("/model/foo/models")).into_owned();
+        assert!(
+            bedrock.contains("modelSummaries"),
+            "bedrock base must advertise a bedrock catalog, got {bedrock}"
+        );
+        assert!(
+            !bedrock.contains("gpt-4o"),
+            "bedrock base must not fall back to the openai catalog, got {bedrock}"
+        );
+        // A cohere v1 base (/v1/chat) gets the cohere catalog.
+        let cohere = String::from_utf8_lossy(models_for("/v1/chat/models")).into_owned();
+        assert!(
+            cohere.contains("command-r"),
+            "cohere v1 base must advertise the cohere catalog, got {cohere}"
+        );
+        assert!(
+            !cohere.contains("gpt-4o"),
+            "cohere v1 base must not fall back to the openai catalog, got {cohere}"
+        );
+        // The shared /v1/models path stays openai (openai and cohere-v1 collide here; openai wins).
+        assert!(String::from_utf8_lossy(models_for("/v1/models")).contains("gpt-4o-mini"));
+    }
+
+    // ── fair token accounting across dialects ───────────────────────────────────────────────────
+    //
+    // Every dialect's static body must advertise the SAME 10 prompt / 2 completion / 12 total token
+    // triple (under that dialect's own field names). Any downstream metric the engine derives from the
+    // mock's advertised usage would otherwise be computed against a different reference for one dialect
+    // than the other five, silently breaking the fair-comparison guarantee. A routing-marker check
+    // alone (the older test) does not catch a token-count typo in one dialect's body.
+    #[test]
+    fn every_dialect_body_advertises_the_same_token_counts() {
+        let s = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
+        let openai = s(OPENAI);
+        assert!(
+            openai.contains("\"prompt_tokens\":10"),
+            "openai prompt {openai}"
+        );
+        assert!(
+            openai.contains("\"completion_tokens\":2"),
+            "openai completion {openai}"
+        );
+        assert!(
+            openai.contains("\"total_tokens\":12"),
+            "openai total {openai}"
+        );
+        let responses = s(RESPONSES);
+        assert!(
+            responses.contains("\"input_tokens\":10"),
+            "responses input {responses}"
+        );
+        assert!(
+            responses.contains("\"output_tokens\":2"),
+            "responses output {responses}"
+        );
+        assert!(
+            responses.contains("\"total_tokens\":12"),
+            "responses total {responses}"
+        );
+        let anthropic = s(ANTHROPIC);
+        assert!(
+            anthropic.contains("\"input_tokens\":10"),
+            "anthropic input {anthropic}"
+        );
+        assert!(
+            anthropic.contains("\"output_tokens\":2"),
+            "anthropic output {anthropic}"
+        );
+        let gemini = s(GEMINI);
+        assert!(
+            gemini.contains("\"promptTokenCount\":10"),
+            "gemini prompt {gemini}"
+        );
+        assert!(
+            gemini.contains("\"candidatesTokenCount\":2"),
+            "gemini candidates {gemini}"
+        );
+        assert!(
+            gemini.contains("\"totalTokenCount\":12"),
+            "gemini total {gemini}"
+        );
+        let bedrock = s(BEDROCK);
+        assert!(
+            bedrock.contains("\"inputTokens\":10"),
+            "bedrock input {bedrock}"
+        );
+        assert!(
+            bedrock.contains("\"outputTokens\":2"),
+            "bedrock output {bedrock}"
+        );
+        assert!(
+            bedrock.contains("\"totalTokens\":12"),
+            "bedrock total {bedrock}"
+        );
+        let cohere = s(COHERE);
+        assert!(
+            cohere.contains("\"input_tokens\":10"),
+            "cohere input {cohere}"
+        );
+        assert!(
+            cohere.contains("\"output_tokens\":2"),
+            "cohere output {cohere}"
+        );
+    }
+
+    // ── numeric knob parsing (the whitespace-trim fix) ──────────────────────────────────────────
+    //
+    // MOCK_TTFT_MS, MOCK_STREAM_INTERVAL_MS/CHUNKS/CHUNK_BYTES and the -port argument all read through
+    // trimmed_parse. A value carrying whitespace (a shell export, a CI variable, a generated env
+    // file's trailing newline) must still parse; dropping the `.trim()` would silently fall back to the
+    // default while the engine (whose own reader trims) judges against the operator's intended value.
+    #[test]
+    fn trimmed_parse_tolerates_surrounding_whitespace_but_still_rejects_garbage() {
+        assert_eq!(trimmed_parse::<u64>("20"), Some(20));
+        assert_eq!(trimmed_parse::<u64>("20\n"), Some(20));
+        assert_eq!(trimmed_parse::<u64>("  20  "), Some(20));
+        assert_eq!(trimmed_parse::<u64>("\t20\r\n"), Some(20));
+        assert_eq!(trimmed_parse::<u16>(" 9001 "), Some(9001u16));
+        assert_eq!(trimmed_parse::<u64>(""), None);
+        assert_eq!(trimmed_parse::<u64>("   "), None);
+        assert_eq!(trimmed_parse::<u64>("not-a-number"), None);
     }
 
     // ── stream detection ────────────────────────────────────────────────────────────────────────
@@ -1269,6 +1540,73 @@ mod tests {
             res.is_ok(),
             "a body at exactly the cap must not be rejected"
         );
+    }
+
+    // A PEER THAT PROMISES A BODY AND NEVER FINISHES IT MUST NOT PARK THE CONNECTION TASK FOREVER.
+    // serve_connection holds one of the accept loop's permits for its whole life; a request that sends
+    // a Content-Length and then stalls mid-body would, without a bound, leave `Limited::collect` awaiting
+    // forever and leak that permit. Enough of them shrink the mock's own accept throughput, which is
+    // then charged to whichever gateway is being measured. handle() bounds the body read by
+    // BODY_READ_TIMEOUT and answers 408 so the task can return and free its permit.
+    #[tokio::test]
+    async fn a_stalled_request_body_times_out_408_instead_of_parking_the_connection() {
+        let listener = match TcpListener::bind("127.0.0.1:0").await {
+            Ok(l) => l,
+            Err(e) => panic!("loopback bind must succeed in a test sandbox: {e}"),
+        };
+        let addr = match listener.local_addr() {
+            Ok(a) => a,
+            Err(e) => panic!("bound listener must report its local addr: {e}"),
+        };
+        let frames = Arc::new(StreamFrames::build(1, 0, 1));
+        let recorder: Arc<Recorder> = Arc::new(Recorder::default());
+        let recording: Arc<RecordFlag> = Arc::new(RecordFlag::new(false));
+        tokio::spawn(async move {
+            let (stream, _) = match listener.accept().await {
+                Ok(s) => s,
+                Err(e) => panic!("test server accept must succeed: {e}"),
+            };
+            let io = TokioIo::new(stream);
+            let _ = hyper::server::conn::http1::Builder::new()
+                .serve_connection(
+                    io,
+                    service_fn(move |r| {
+                        handle(r, 0, frames.clone(), recorder.clone(), recording.clone())
+                    }),
+                )
+                .await;
+        });
+
+        let mut client = match TcpStream::connect(addr).await {
+            Ok(c) => c,
+            Err(e) => panic!("test client connect must succeed: {e}"),
+        };
+        // Declare a 1000-byte body, then send only a handful and stall - never the rest, never a close.
+        let req_head =
+            "POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\nContent-Length: 1000\r\nConnection: close\r\n\r\n";
+        if let Err(e) = client.write_all(req_head.as_bytes()).await {
+            panic!("writing the request head must succeed: {e}");
+        }
+        if let Err(e) = client.write_all(b"partial").await {
+            panic!("writing the partial body must succeed: {e}");
+        }
+
+        // Bounded well above BODY_READ_TIMEOUT so a regression back to an unbounded body read fails
+        // this test on the assertion (or the read timeout) rather than hanging the whole suite.
+        let mut resp = Vec::new();
+        let read = tokio::time::timeout(SSE_SEND_TIMEOUT * 40, client.read_to_end(&mut resp)).await;
+        assert!(
+            read.is_ok(),
+            "the server must answer the stalled body within its own timeout, not hang the connection"
+        );
+        let status_line = String::from_utf8_lossy(&resp[..resp.len().min(32)]).into_owned();
+        assert!(
+            status_line.contains("408"),
+            "a stalled body must get 408 Request Timeout, got: {status_line:?}"
+        );
+        // Keep BODY_READ_TIMEOUT referenced so the test's intent (this is the knob under test) is
+        // explicit even though the server-side value is what fires.
+        assert!(BODY_READ_TIMEOUT.as_millis() > 0);
     }
 
     // ── accept loop connection cap ──────────────────────────────────────────────────────────────

@@ -30,13 +30,19 @@ fn require_f64(fields: &BTreeMap<&str, &str>, key: &str, line: &str) -> Result<f
             .and_then(|n| {
                 // A non-finite rate is the child reporting something impossible; refuse it here rather
                 // than letting an infinity reach a cast that would SATURATE into a plausible-looking
-                // 9,223,372,036,854,775,807.
-                if n.is_finite() {
-                    Ok(n)
-                } else {
+                // 9,223,372,036,854,775,807. A NEGATIVE rate is equally impossible for a real
+                // measurement (throughput is ok/elapsed, both non-negative) and is refused the same way
+                // rather than parsed into a Measured value.
+                if !n.is_finite() {
                     Err(format!(
                         "non-finite field '{key}={v}' in stats line: '{line}'"
                     ))
+                } else if n < 0.0 {
+                    Err(format!(
+                        "negative field '{key}={v}' in stats line: '{line}'"
+                    ))
+                } else {
+                    Ok(n)
                 }
             }),
     }
@@ -47,7 +53,40 @@ fn require_i64(fields: &BTreeMap<&str, &str>, key: &str, line: &str) -> Result<i
         None => Err(format!("missing field '{key}' in stats line: '{line}'")),
         Some(v) => v
             .parse::<i64>()
-            .map_err(|_| format!("non-numeric field '{key}={v}' in stats line: '{line}'")),
+            .map_err(|_| format!("non-numeric field '{key}={v}' in stats line: '{line}'"))
+            // Every i64 field here is a count or a microsecond latency; a negative one is physically
+            // impossible and, like a non-numeric one, is a corrupt line rather than a value to publish.
+            .and_then(|n| {
+                if n < 0 {
+                    Err(format!(
+                        "negative field '{key}={v}' in stats line: '{line}'"
+                    ))
+                } else {
+                    Ok(n)
+                }
+            }),
+    }
+}
+
+/// An OPTIONAL non-negative count field. `None` (the field is absent) is a legitimate 0 - "none
+/// reported" by an older generator, per this module's doc. But a field that is PRESENT and fails to
+/// parse (or is negative) is a corrupt line, refused the same way the required fields are rather than
+/// silently collapsed to the same 0 as "absent" - which would read as a trustworthy zero.
+fn optional_i64(fields: &BTreeMap<&str, &str>, key: &str, line: &str) -> Result<i64, String> {
+    match fields.get(key) {
+        None => Ok(0),
+        Some(v) => v
+            .parse::<i64>()
+            .map_err(|_| format!("non-numeric field '{key}={v}' in stats line: '{line}'"))
+            .and_then(|n| {
+                if n < 0 {
+                    Err(format!(
+                        "negative field '{key}={v}' in stats line: '{line}'"
+                    ))
+                } else {
+                    Ok(n)
+                }
+            }),
     }
 }
 
@@ -100,14 +139,8 @@ fn parse_ugen_fields(line: &str) -> Result<UgenStats, String> {
         p50_us: require_i64(&fields, "p50us", line)?,
         p99_us: require_i64(&fields, "p99us", line)?,
         ok: require_i64(&fields, "ok", line)?,
-        rig_refused: fields
-            .get("rigrefused")
-            .and_then(|v| v.parse::<i64>().ok())
-            .unwrap_or(0),
-        budget_exceeded: fields
-            .get("budgetexceeded")
-            .and_then(|v| v.parse::<i64>().ok())
-            .unwrap_or(0),
+        rig_refused: optional_i64(&fields, "rigrefused", line)?,
+        budget_exceeded: optional_i64(&fields, "budgetexceeded", line)?,
         spawn_failed: fields
             .get("spawnfailed")
             .map(|v| v.trim() != "0" && !v.trim().is_empty())
@@ -396,6 +429,64 @@ mod sub_one_rate_roundtrip_tests {
                 parse_ugen_line(&line).into_value().is_none(),
                 "a non-finite rate must be refused: {line}"
             );
+        }
+    }
+
+    // A NEGATIVE rate is as impossible as a non-finite one (throughput is ok/elapsed, both
+    // non-negative) and must be refused rather than parsed into a Measured value a caller could
+    // publish as negative throughput.
+    #[test]
+    fn a_negative_rate_is_refused_rather_than_measured() {
+        let line = "rps=-4 fail=0 p50=1.0 p99=2.0 p50us=1000 p99us=2000 ok=1000";
+        let m = parse_ugen_line(line);
+        assert!(m.value().is_none(), "a negative rate must not be Measured");
+        assert_eq!(m.reason(), Some(&Absent::HarnessError));
+        assert!(m.detail().unwrap_or_default().contains("rps=-4"));
+    }
+
+    // A NEGATIVE count or latency is a corrupt line, not a measurement: none of fail/p50us/p99us/ok
+    // can be below zero.
+    #[test]
+    fn a_negative_count_or_latency_is_refused() {
+        for line in [
+            "rps=10 fail=-1 p50=1.0 p99=2.0 p50us=1000 p99us=2000 ok=40",
+            "rps=10 fail=0 p50=1.0 p99=2.0 p50us=-500 p99us=2000 ok=40",
+            "rps=10 fail=0 p50=1.0 p99=2.0 p50us=1000 p99us=2000 ok=-3",
+        ] {
+            let m = parse_ugen_line(line);
+            assert!(
+                m.value().is_none(),
+                "a negative count/latency must be refused: {line}"
+            );
+            assert_eq!(m.reason(), Some(&Absent::HarnessError));
+        }
+    }
+
+    // The optional counts distinguish ABSENT (legitimately 0, "none reported") from PRESENT-BUT-BAD
+    // (a corrupt line). A garbled rigrefused/budgetexceeded value must fail the whole line, not read
+    // as a trustworthy zero the way a defaulted `.ok()` did.
+    #[test]
+    fn an_unparseable_optional_count_fails_the_line_rather_than_defaulting_to_zero() {
+        // Absent is a real zero.
+        let absent = parse_ugen_line("rps=10 fail=0 p50=1.0 p99=2.0 p50us=1000 p99us=2000 ok=40")
+            .into_value()
+            .expect("a line without the optional counts still parses");
+        assert_eq!(absent.rig_refused, 0);
+        assert_eq!(absent.budget_exceeded, 0);
+        // Present but unparseable/negative is a HarnessError, not a defaulted 0.
+        for bad in [
+            "rigrefused=NaN",
+            "rigrefused=-2",
+            "budgetexceeded=x",
+            "budgetexceeded=-1",
+        ] {
+            let line = format!("rps=10 fail=0 p50=1.0 p99=2.0 p50us=1000 p99us=2000 ok=40 {bad}");
+            let m = parse_ugen_line(&line);
+            assert!(
+                m.value().is_none(),
+                "a present-but-bad optional count must be refused: {line}"
+            );
+            assert_eq!(m.reason(), Some(&Absent::HarnessError));
         }
     }
 }

@@ -36,6 +36,10 @@ __pycache__/
 # orchestrator ships back onto the box. The DURABLE record is rig.box_qualify inside each snapshot
 # (results/snapshots/), which is committed — these are the working files that produced it.
 results/box-qualify/
+# write_snapshot's per-gateway advisory lockfile (flock rendezvous point held across the promote
+# guard's read->decide->rename critical section). Working-directory plumbing, never a result, so it
+# must not be committed alongside the snapshot JSON.
+results/**/.snapshot-lock-*
 target/
 
 # Rendered gateway config. The TEMPLATE (*.tmpl) is the source and is tracked; what the harness

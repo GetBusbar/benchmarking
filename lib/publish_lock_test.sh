@@ -53,5 +53,34 @@ check "the holder's token is still in the lockdir" "$(cat "${PUBLISH_LOCK}.d/tok
 PUBLISH_LOCK_OWNED=1 PUBLISH_LOCK_TOKEN="$holder_tok" publish_lock_release
 check "the true owner release removes the lockdir" "$([ -d "${PUBLISH_LOCK}.d" ] && echo yes || echo no)" "no"
 
+# ── SECOND PASS: the flock path (the branch Linux EC2 boxes actually take) ──────────────────────────
+# The pass above hid flock to force the mkdir spin-lock fallback. But the LIVE orchestrator on Linux has
+# flock installed and takes the flock branch (exec 9>LOCK; flock -w 600 9), which nothing exercised - a
+# regression there (the -w 600 ceiling dropped, or the `exec 9>&-` fd-close on release removed) would
+# ship green. So run the SHIPPED functions again UNMOCKED and assert the real acquire / mutual-exclusion
+# / release + fd-cleanup. (The 600s timeout ceiling itself is not waited on - that would hang the suite;
+# mutual exclusion is proved with a non-blocking external probe against the same lock file.)
+unset -f command   # stop hiding flock; exercise the real primary path
+if command -v flock >/dev/null 2>&1; then
+  PUBLISH_LOCK="$(mktemp -u)"
+  publish_lock_acquire "[flockA]" echo >/dev/null
+  check "flock path: acquire sets a lock fd" "$([ -n "${PUBLISH_LOCK_FD:-}" ] && echo yes || echo no)" "yes"
+  check "flock path: acquire did NOT fall back to the mkdir token path" "${PUBLISH_LOCK_OWNED:-0}" "0"
+  # While held, an external NON-blocking flock on the same file must fail: the lock really serializes.
+  if ( exec 9>"$PUBLISH_LOCK"; flock -n 9 ); then held_probe=free; else held_probe=blocked; fi
+  check "flock path: the lock is genuinely held (a peer cannot take it)" "$held_probe" "blocked"
+  # Release closes the fd (no half-open leak); the same file can then be locked again.
+  publish_lock_release
+  check "flock path: release clears the lock fd" "$([ -z "${PUBLISH_LOCK_FD:-}" ] && echo yes || echo no)" "yes"
+  if ( exec 9>"$PUBLISH_LOCK"; flock -n 9 ); then after_probe=free; else after_probe=blocked; fi
+  check "flock path: after release the lock is free again" "$after_probe" "free"
+  # Re-acquire/re-release must still work (fd 9 reusable).
+  publish_lock_acquire "[flockB]" echo >/dev/null
+  check "flock path: re-acquire after release succeeds" "$([ -n "${PUBLISH_LOCK_FD:-}" ] && echo yes || echo no)" "yes"
+  publish_lock_release
+else
+  echo "skip - flock not installed on this host; the flock-path pass runs on Linux EC2 (mkdir path covered above)"
+fi
+
 if [ "$fail" = 0 ]; then echo "all publish-lock token tests passed"; exit 0; fi
 echo "PUBLISH-LOCK TESTS FAILED"; exit 1

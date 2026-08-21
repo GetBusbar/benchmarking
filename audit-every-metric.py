@@ -70,19 +70,6 @@ NON_NEGATIVE = {
 # equals the difference of its own published legs - the statement that is actually true of them.
 
 
-# The gateway's pinned core count, and how far the two samplers may disagree before it is a defect.
-#
-# NOT TUNING KNOBS. `run-on-ec2.sh` pins the gateway to CORES=0-3, so four is the divisor the
-# utilisation fraction is taken over - if that split changes, this must change with it or the check
-# silently compares against the wrong denominator. The tolerance is deliberately LOOSE (3x) because
-# the honest direction of disagreement is one-sided: the utilisation window spans a little more wall
-# time than the load window, so implied-from-CPU runs BELOW measured. Only the impossible direction
-# is flagged - a gateway appearing to burn more CPU than its cores accumulated, which means it is not
-# confined to them and the comparable-basis claim is false.
-COST_PINNED_CORES = 4
-COST_UTIL_TOLERANCE = 3.0
-
-
 def num(v):
     if isinstance(v, dict):
         v = v.get("value")
@@ -195,7 +182,7 @@ def main():
                 # 0.3 MiB (0.6%) on agentgateway's 48 MiB tree and 11.5 MiB (1.33%) on bifrost's 876 MiB
                 # one. Board-wide: 32 of 92 cells overshoot, median 0.22%, and the only cell above 1% is
                 # the largest tree on the board. That is the artefact's signature, not a defect's.
-                if hwm is not None and peak is not None and peak > hwm:
+                if hwm is not None and hwm != 0 and peak is not None and peak > hwm:
                     warnings.append(
                         f"{at}: sampled peak ({peak:.1f} MiB) exceeds kernel HWM ({hwm:.1f} MiB) by "
                         f"{(peak - hwm):.1f} MiB ({(peak / hwm - 1) * 100:.2f}%) - transient-worker artefact"

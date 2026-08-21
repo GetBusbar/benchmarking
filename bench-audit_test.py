@@ -306,6 +306,27 @@ def main():
         if list(audit.check_stream_capacity_is_a_number("t", explained)):
             failures.append("check_stream_capacity_is_a_number rejected an absence that explains itself")
 
+    # ── check_search_spent_its_budget: the budget-EXHAUSTED accept side ────────────────────────────
+    #
+    # The REJECTS entry above proves the GAVE-UP branch (a gap the search declined to probe). Its own
+    # accept short-circuit `if walked_down >= MAX_CEILING_STEPDOWNS: return` had no positive fixture: a
+    # search that spent its FULL step-down budget ran OUT, it did not give up, and must be accepted even
+    # though it stopped at a rung above the one it carried. This is the plano anthropic>anthropic shape
+    # from the 2026-08-01 run - the bisection proved c=224, confirmation failed, and the step-down
+    # walked 176 -> 152 -> 140 -> 134, exactly MAX_CEILING_STEPDOWNS rungs. Delete or invert that
+    # short-circuit and this block fires; the REJECTS-side gap fixture would still pass, so only this
+    # catches it.
+    with isolated(failures, "check_search_spent_its_budget: budget-exhausted accept side"):
+        spent = [rung(32), rung(64), rung(224, passed=False), rung(176, passed=False),
+                 rung(152, passed=False), rung(140, passed=False), rung(134, passed=False)]
+        assert len({r["conc"] for r in spent if r["conc"] > 64 and r["conc"] < 224}) == audit.MAX_CEILING_STEPDOWNS
+        budget_spent = trace_cell(spent, sustained=None,
+                                  absence_detail="the bisection proved c=224 but no stepped-down rung "
+                                                 "held within MAX_CEILING_STEPDOWNS attempts")
+        if list(audit.check_search_spent_its_budget("t", budget_spent)):
+            failures.append("check_search_spent_its_budget flagged a search that spent its FULL "
+                            "step-down budget - a run-out is not a give-up")
+
     # ── the omitted-field check, both ways (ledger TOOL-04) ───────────────────────────────────────
     #
     # ACCEPT: a cell that carries every declared field passes, whether the field holds a number or an

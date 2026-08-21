@@ -78,6 +78,11 @@ pub enum Outcome {
     /// The TCP connection itself could not be made or was severed before any response existed.
     /// The gateway may genuinely never have seen the request; this must never carry a status.
     ConnectionFailed(String),
+    /// The connection could not be made because THIS HOST ran out: ephemeral source ports
+    /// (EADDRNOTAVAIL/EADDRINUSE) or file descriptors (EMFILE/ENFILE). Never a claim about the
+    /// peer - see `SseEnd::RigExhausted`, which is the same fact on the streaming lane. A caller
+    /// must file this as a rig/harness fault, never as evidence the gateway did not answer.
+    RigExhausted(String),
     /// The deadline passed with nothing usable read yet. Distinct from `ConnectionFailed`: the
     /// connection was live, the peer just never (yet) answered. A hung gateway must not hang the
     /// suite, so this is always reached within the caller's timeout, never later.
@@ -612,8 +617,10 @@ fn send(
     let mut stream = match TcpStream::connect_timeout(&addr, timeout) {
         Ok(s) => s,
         // A refused or unreachable connection is the one case that is unambiguously "never
-        // reached": no bytes of ours ever left for the peer to act on.
-        Err(e) => return Outcome::ConnectionFailed(e.to_string()),
+        // reached": no bytes of ours ever left for the peer to act on. But which side never
+        // reached matters: EADDRNOTAVAIL/EMFILE/ENFILE mean THIS HOST never dialed out, not
+        // that the peer declined - see `connect_outcome`.
+        Err(e) => return connect_outcome(e),
     };
 
     let mut request = Vec::new();
@@ -667,9 +674,25 @@ fn send(
         return read_chunked_body(&mut stream, deadline, &raw).map_status(status, &resp_headers);
     }
 
-    if let Some(len) =
-        header_value(&resp_headers, "content-length").and_then(|v| v.trim().parse::<usize>().ok())
-    {
+    // A Content-Length that is PRESENT but does not parse is a malformed response, not an absent
+    // header: swallowing the parse failure with `.ok()` used to fall through to close-delimited
+    // framing, so a garbled length ("12,4") read exactly like no length at all and whatever bytes
+    // arrived before the peer closed were handed back as a clean Response. Refuse it instead - a
+    // declared length that parses but is short already errors, and a present-but-unparseable one is
+    // no more trustworthy.
+    let declared_len = match header_value(&resp_headers, "content-length") {
+        Some(v) => match v.trim().parse::<usize>() {
+            Ok(len) => Some(len),
+            Err(_) => {
+                return malformed(
+                    &raw,
+                    format!("unparseable Content-Length '{v}' - refusing to frame the body"),
+                )
+            }
+        },
+        None => None,
+    };
+    if let Some(len) = declared_len {
         return match read_exact_deadline(&mut stream, deadline, len) {
             ReadOutcome::Full(body) => Outcome::Response(HttpResponse {
                 status,
@@ -1085,6 +1108,17 @@ impl SseReader {
     fn try_head(&mut self) -> Option<Step> {
         let from = self.raw_scanned.saturating_sub(3);
         let Some(cut) = find_head_end(&self.raw[from..]).map(|c| from + c) else {
+            // Bound the HEAD phase the same 256 KiB way read_head does on the blocking lane. Without
+            // this the head is only caught by the 8 MiB MAX_BODY_BYTES body cap in feed() - 32x
+            // larger - so a peer that streams endless short, legal header lines with no terminating
+            // blank line grows this reader to ~8 MiB per lane before rejection, materially worse at
+            // the tens-to-hundreds of concurrent SSE lanes stream_window opens. "One validator,
+            // three lanes" - the SSE head must be capped like the other two.
+            if self.raw.len() > MAX_HEAD_BYTES {
+                return Some(self.finish_with(SseEnd::Malformed(format!(
+                    "SSE response head exceeds the {MAX_HEAD_BYTES} byte cap - refusing to keep reading headers"
+                ))));
+            }
             self.raw_scanned = self.raw.len();
             return Some(Step::NeedMore);
         };
@@ -1536,17 +1570,36 @@ pub async fn post_json_sse_async(
     }
 }
 
-/// WHICH SIDE FAILED TO CONNECT.
+/// WHICH SIDE FAILED TO CONNECT, shared by every lane that opens a `TcpStream`: the blocking
+/// probe/re-verify lane (`send`), the blocking SSE lane, and the async SSE lane all hit the same OS
+/// errors and must never independently redefine "ours" vs "the peer's" - that drift is exactly how
+/// ledger RIG-12 happened to `unsendable_request`.
 ///
+/// EADDRNOTAVAIL/EADDRINUSE means this host has no ephemeral source port left; EMFILE/ENFILE mean it
+/// has no descriptor left. Neither is the gateway declining anything - it was never asked.
+fn is_rig_exhaustion(e: &std::io::Error) -> bool {
+    matches!(
+        e.kind(),
+        std::io::ErrorKind::AddrNotAvailable | std::io::ErrorKind::AddrInUse
+    ) || matches!(e.raw_os_error(), Some(23) | Some(24))
+}
+
+/// The same classification, for the blocking non-streaming lane (`send`). Kept as a separate function
+/// rather than a generic over `SseEnd`/`Outcome` because the two enums are otherwise unrelated types
+/// with no shared trait, and the one thing that must stay shared is the predicate, not the wrapping.
+fn connect_outcome(e: std::io::Error) -> Outcome {
+    if is_rig_exhaustion(&e) {
+        Outcome::RigExhausted(e.to_string())
+    } else {
+        Outcome::ConnectionFailed(e.to_string())
+    }
+}
+
 /// EADDRNOTAVAIL means this host has no ephemeral source port left; EMFILE/ENFILE mean it has no
 /// descriptor left. Neither is the gateway declining anything - it was never asked. Everything else
 /// (refused, unreachable, reset) is the peer's, and stays a connection failure.
 fn connect_end(e: &std::io::Error) -> SseEnd {
-    let ours = matches!(
-        e.kind(),
-        std::io::ErrorKind::AddrNotAvailable | std::io::ErrorKind::AddrInUse
-    ) || matches!(e.raw_os_error(), Some(23) | Some(24));
-    if ours {
+    if is_rig_exhaustion(e) {
         SseEnd::RigExhausted(e.to_string())
     } else {
         SseEnd::ConnectionFailed(e.to_string())
@@ -1770,6 +1823,37 @@ mod tests {
         assert!(
             matches!(outcome, Outcome::ConnectionFailed(_)),
             "expected ConnectionFailed, got {outcome:?}"
+        );
+    }
+
+    // THE RIG RUNNING OUT OF ITS OWN PORTS/DESCRIPTORS IS NOT THE GATEWAY REFUSING. `send`'s connect
+    // step folded every error into `ConnectionFailed`; the streaming lane already split this (see
+    // `connect_end`/`SseEnd::RigExhausted`), and the blocking lane must too, or a rig-side resource
+    // exhaustion reads on the board as the gateway refusing connections. Pins the variant, not the
+    // platform-dependent Display text, and covers the negative case (genuine refusal stays
+    // ConnectionFailed) in the same test.
+    #[test]
+    fn a_rig_out_of_ports_is_rig_exhausted_never_connection_failed() {
+        assert!(
+            matches!(
+                connect_outcome(std::io::Error::from_raw_os_error(24)), // EMFILE
+                Outcome::RigExhausted(_)
+            ),
+            "EMFILE is this host out of descriptors, not the gateway refusing"
+        );
+        assert!(
+            matches!(
+                connect_outcome(std::io::Error::from(std::io::ErrorKind::AddrNotAvailable)),
+                Outcome::RigExhausted(_)
+            ),
+            "EADDRNOTAVAIL is this host out of ephemeral ports, not the gateway refusing"
+        );
+        assert!(
+            matches!(
+                connect_outcome(std::io::Error::from(std::io::ErrorKind::ConnectionRefused)),
+                Outcome::ConnectionFailed(_)
+            ),
+            "a genuine refusal must stay ConnectionFailed"
         );
     }
 
@@ -2137,6 +2221,27 @@ mod tests {
             "the declaration must be refused without waiting on the read, took {:?}",
             start.elapsed()
         );
+    }
+
+    // A Content-Length that is PRESENT but does not parse must be Malformed, NOT read as an absent
+    // header. Swallowing the parse failure with `.ok()` used to fall through to close-delimited
+    // framing, so a garbled length read exactly like no length and whatever bytes arrived before the
+    // peer closed were handed back as a clean, well-formed Response.
+    #[test]
+    fn a_present_but_unparseable_content_length_is_malformed_not_close_delimited() {
+        let addr = spawn_server(|mut conn| {
+            let _ = read_request_head(&conn);
+            // Garbled but present. If this fell through to close-delimited framing, "partial" would
+            // come back as a clean body when the connection closes.
+            let _ = conn.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 12,4\r\n\r\npartial");
+        });
+        match post_json(addr, "/x", b"{}", &[], Duration::from_secs(5)) {
+            Outcome::Malformed { message, .. } => assert!(
+                message.contains("Content-Length"),
+                "the verdict must name the unparseable length rather than framing the body, got {message:?}"
+            ),
+            other => panic!("a present-but-unparseable Content-Length must be Malformed, got {other:?}"),
+        }
     }
 
     // A CLOSE-DELIMITED BODY HAS NO DECLARATION TO CAP - the peer just streams until it closes the
@@ -2891,6 +2996,32 @@ mod tests {
             "fragmented feed took {fragmented_elapsed:?} vs {whole_elapsed:?} for the same bytes \
              delivered whole - drain_body looks like it is rescanning from index 0 on every feed()"
         );
+    }
+
+    // The SSE head phase must be bounded the same 256 KiB way read_head bounds the blocking lane. A
+    // peer that streams endless short, legal header lines and never sends the terminating blank line
+    // used to grow this reader to the 8 MiB body cap - 32x larger - before rejection, materially
+    // worse across the many concurrent SSE lanes stream_window opens. The head must be refused at
+    // MAX_HEAD_BYTES, before the body cap is ever reached.
+    #[test]
+    fn an_endless_sse_head_is_refused_at_the_head_cap_not_the_body_cap() {
+        let mut head = b"HTTP/1.1 200 OK\r\n".to_vec();
+        // Fill past MAX_HEAD_BYTES with legal header lines and NEVER send the blank-line terminator.
+        while head.len() <= MAX_HEAD_BYTES {
+            head.extend_from_slice(b"x-pad: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\r\n");
+        }
+        assert!(
+            head.len() < MAX_BODY_BYTES,
+            "the head must cross the head cap well before the 8 MiB body cap for this test to prove the head bound"
+        );
+        let mut r = SseReader::new(usize::MAX, None);
+        match r.feed(&head, 0) {
+            Step::Done(SseEnd::Malformed(msg)) => assert!(
+                msg.contains("cap"),
+                "an over-cap head must name the cap it exceeded, got {msg:?}"
+            ),
+            other => panic!("an endless SSE head must be refused at the head cap, got {other:?}"),
+        }
     }
 
     // THE PROPERTY THAT MATTERS MOST: how the bytes were split across reads must not change what was

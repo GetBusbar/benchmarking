@@ -53,9 +53,11 @@ SERVED_MATRIX = {
 all_dead = {
     "served": False,
     "serve_error": "HTTP 000 on POST /v1/chat/completions",  # NO anchored "failed to boot after" marker
+    # upstream-level served:true matches what the real engine ALWAYS emits once an egress row exists
+    # (engine/src/suite.rs) — it is NOT a per-cell verdict, so the guard must decide from the cells below.
     "upstreams": {
-        "openai": {"served": False, "cells": {"openai": {"served": False, "status": "000"}}},
-        "anthropic": {"served": False, "cells": {"anthropic": {"served": False, "status": "000"}}},
+        "openai": {"served": True, "cells": {"openai": {"served": False, "status": "000"}}},
+        "anthropic": {"served": True, "cells": {"anthropic": {"served": False, "status": "000"}}},
     },
 }
 check("all-dead matrix (every cell 000, no marker) must NOT overwrite a served result", guard("matrix", SERVED_MATRIX, all_dead), 1)
@@ -70,9 +72,11 @@ warm_502 = {
     "served": False,
     "serve_error": "failed to boot after 5 attempts: HTTP 502 on POST /v1/chat/completions",
     "cells": {"openai": {"served": "not_verified", "status": "502"}},
+    # upstream-level served:true is exactly what the engine emits here (a row exists per egress); the
+    # honest per-cell verdict is not_verified. The guard must NOT trust the upstream flag.
     "upstreams": {
-        "openai": {"served": False, "cells": {"openai": {"served": "not_verified", "status": "502"}}},
-        "anthropic": {"served": False, "cells": {"anthropic": {"served": "not_verified", "status": "503"}}},
+        "openai": {"served": True, "cells": {"openai": {"served": "not_verified", "status": "502"}}},
+        "anthropic": {"served": True, "cells": {"anthropic": {"served": "not_verified", "status": "503"}}},
     },
 }
 check("502-warm boot-failed matrix (all 5xx + anchored marker) must NOT overwrite a served result", guard("matrix", SERVED_MATRIX, warm_502), 1)
@@ -83,9 +87,10 @@ check("502-warm boot-failed matrix (all 5xx + anchored marker) must NOT overwrit
 warm_502_no_marker = {
     "served": False,
     "serve_error": "HTTP 502",  # NO anchored "failed to boot after" marker
+    # upstream served:true as the real engine emits — verdict must come from the not_verified cells.
     "upstreams": {
-        "openai": {"served": False, "cells": {"openai": {"served": "not_verified", "status": "502"}}},
-        "anthropic": {"served": False, "cells": {"anthropic": {"served": "not_verified", "status": "500"}}},
+        "openai": {"served": True, "cells": {"openai": {"served": "not_verified", "status": "502"}}},
+        "anthropic": {"served": True, "cells": {"anthropic": {"served": "not_verified", "status": "500"}}},
     },
 }
 check("all-5xx matrix (no marker) is a boot-failure signature → must KEEP a served result", guard("matrix", SERVED_MATRIX, warm_502_no_marker), 1)

@@ -35,8 +35,11 @@
 // THE COMPARISON MUST STILL BE FAIR, for the reason it always had to be. A winner measured at c=740
 // against a reference measured at c=2048 compares two different operating points, and the rig is not
 // equally fast at every concurrency. So the reference is always taken AT THE OBSERVATION'S OWN
-// CONCURRENCY - `suite::stream_rig_ceiling` derives it there from the mock's declared pacing, and
-// `suite::rig_ceiling` measures it there for the throughput metrics. A headroom figure computed across
+// CONCURRENCY - `suite::stream_rig_ceiling` derives it there from the mock's declared pacing for the
+// STREAM metrics. The throughput metrics no longer compute a rig ceiling or headroom at all: the old
+// `suite::rig_ceiling` that measured the mock's throughput at the winner's concurrency was removed
+// with peak-throughput suppression (see `suite::judge_cell`), and the throughput answer now comes
+// from the FRONTIER off the sweep's own rungs (see `frontier.rs`). A headroom figure computed across
 // two operating points would be a misleading fact rather than an honest one, which is worse than the
 // verdict it replaced.
 

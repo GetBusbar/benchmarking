@@ -71,9 +71,12 @@ pub struct WindowCost {
     pub majflt: Measurement<f64>,
     pub threads_end: Measurement<f64>,
     pub nonvol_ctxt_per_request: Measurement<f64>,
-    pub vol_ctxt_per_request: Measurement<f64>,
-    pub rchar_per_request: Measurement<f64>,
-    pub wchar_per_request: Measurement<f64>,
+    // NO vol_ctxt/rchar/wchar PER-REQUEST FIELDS. They were derived here identically to
+    // `nonvol_ctxt_per_request` and then dropped - no `record.rs` key, no `metric.rs`/`suite.rs`
+    // reader ever consumed them, so the per-request derivation was pure dead work. Removed rather than
+    // published: publishing them is an additive schema decision, not a code-correctness fix. The RAW
+    // counters (`Counters::vol_ctxt`/`rchar`/`wchar`) are still sampled and parse-tested below, left
+    // available should a future field want them, but no unread per-request figure is computed from them.
     /// TRUE means the numbers above exist but must not be trusted: the box took major faults during
     /// the window. Published WITH the numbers rather than instead of them, so a reader sees why a row
     /// looks wrong instead of finding a hole where an explanation should be.
@@ -339,9 +342,6 @@ pub fn cost(
             majflt: absent(Absent::NotMeasured, why),
             threads_end: absent(Absent::NotMeasured, why),
             nonvol_ctxt_per_request: absent(Absent::NotMeasured, why),
-            vol_ctxt_per_request: absent(Absent::NotMeasured, why),
-            rchar_per_request: absent(Absent::NotMeasured, why),
-            wchar_per_request: absent(Absent::NotMeasured, why),
             swapped: false,
         };
     };
@@ -384,7 +384,16 @@ pub fn cost(
     };
 
     let majflt_d = delta(a.majflt, b.majflt, "major faults");
-    let swapped = matches!(majflt_d, Ok(n) if n > 0);
+    // `swapped` is what makes Cost::measure re-flag cpu_us_per_request/rps_per_cpu_second as a
+    // HarnessError. A backwards majflt (Err) is pid-identity churn - the process tree the two samples
+    // read is not the same one - and that same corrupted identity feeds cpu_jiffies, which can still
+    // look forward-moving for the REUSED pid and publish a clean Measured CPU cost off a tainted read.
+    // So an Err taints the window exactly the way a positive majflt does, not the way a clean zero
+    // does: only Ok(0) leaves the cost figures trusted.
+    let swapped = match &majflt_d {
+        Ok(n) => *n > 0,
+        Err(_) => true,
+    };
 
     WindowCost {
         cpu_us,
@@ -405,12 +414,7 @@ pub fn cost(
             ),
             "nonvoluntary context switches",
         ),
-        vol_ctxt_per_request: per(
-            delta(a.vol_ctxt, b.vol_ctxt, "voluntary context switches"),
-            "voluntary context switches",
-        ),
-        rchar_per_request: per(delta(a.rchar, b.rchar, "rchar"), "rchar"),
-        wchar_per_request: per(delta(a.wchar, b.wchar, "wchar"), "wchar"),
+        // No per-request derivation of vol_ctxt/rchar/wchar: nothing publishes them (see WindowCost).
         swapped,
     }
 }
@@ -577,6 +581,34 @@ mod tests {
         );
     }
 
+    // A BACKWARDS majflt TAINTS THE WHOLE WINDOW, not just its own field. Pid-identity churn makes
+    // majflt go backwards (correctly HarnessError on the majflt field), but the SAME reused pid can
+    // leave cpu_jiffies looking forward-moving, so cpu_us_per_request/rps_per_cpu_second would publish
+    // as clean Measured off a read the sibling majflt field already knows is corrupt. `swapped` must
+    // be set so Cost::measure re-flags those cost figures too - the same treatment a positive majflt
+    // gets, not the trusted treatment a clean Ok(0) gets.
+    #[test]
+    fn a_backwards_majflt_raises_the_swapped_flag_so_the_cost_figures_are_re_flagged() {
+        let a = Measurement::Measured(Counters {
+            cpu_jiffies: 100,
+            majflt: 10,
+            ..Default::default()
+        });
+        // cpu_jiffies moves FORWARD (the reused pid's own time) while majflt moves BACKWARD.
+        let b = Measurement::Measured(Counters {
+            cpu_jiffies: 1100,
+            majflt: 2,
+            ..Default::default()
+        });
+        let c = cost(&a, &b, 10_000, 10.0);
+        assert!(
+            c.swapped,
+            "a backwards majflt is pid churn and must taint the window like a positive majflt does"
+        );
+        // The majflt field itself is already a HarnessError; the point of the flag is the cost figures.
+        assert!(matches!(c.majflt, Measurement::Absent { .. }));
+    }
+
     #[test]
     fn zero_requests_cannot_be_divided_by_and_is_absent_not_infinite() {
         let a = Measurement::Measured(Counters {
@@ -605,29 +637,23 @@ mod tests {
         }
     }
 
+    // Only the NONVOLUNTARY context-switch rate is published (a saturated-core signal). The voluntary
+    // switches and rchar/wchar byte counters are still SAMPLED into `Counters` (and parse-tested), but
+    // no per-request figure is derived from them, so there is nothing to assert here for those.
     #[test]
-    fn context_switches_and_byte_counters_are_per_request_deltas() {
+    fn the_nonvoluntary_context_switch_rate_is_a_per_request_delta() {
         let a = Measurement::Measured(Counters {
             cpu_jiffies: 0,
             nonvol_ctxt: 100,
-            vol_ctxt: 200,
-            rchar: 1000,
-            wchar: 2000,
             ..Default::default()
         });
         let b = Measurement::Measured(Counters {
             cpu_jiffies: 10,
             nonvol_ctxt: 600,
-            vol_ctxt: 1200,
-            rchar: 11_000,
-            wchar: 22_000,
             ..Default::default()
         });
         let c = cost(&a, &b, 100, 1.0);
         assert_eq!(c.nonvol_ctxt_per_request, Measurement::Measured(5.0));
-        assert_eq!(c.vol_ctxt_per_request, Measurement::Measured(10.0));
-        assert_eq!(c.rchar_per_request, Measurement::Measured(100.0));
-        assert_eq!(c.wchar_per_request, Measurement::Measured(200.0));
     }
 
     struct Stat(String);

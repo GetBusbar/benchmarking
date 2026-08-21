@@ -707,6 +707,19 @@ impl Manifest {
                 });
             }
         }
+        // egress_headers go on the wire exactly as `headers` do (see `headers_for`), so an unexpanded
+        // `$VAR` here is the same fault: an `x-api-key: $ANTHROPIC_KEY` that never expanded sends the
+        // literal string as the credential, the gateway rejects it, and that egress column publishes
+        // served:false as a GATEWAY capability gap when the harness sent a bogus credential of its own
+        // making. Scan them the same way rather than leaving this one map unchecked.
+        for h in self.egress_headers.values().flatten() {
+            if h.contains('$') {
+                return Err(ManifestError::UnexpandedVariable {
+                    field: "egress_headers",
+                    raw: h.clone(),
+                });
+            }
+        }
         if self.runtime.declared_identity().contains('$') {
             return Err(ManifestError::UnexpandedVariable {
                 field: "runtime identity",
@@ -1826,6 +1839,25 @@ mod tests {
             m.validate(),
             Err(ManifestError::UnexpandedVariable {
                 field: "runtime identity",
+                ..
+            })
+        ));
+
+        // egress_headers go on the wire exactly as `headers` do, so an unexpanded credential there is
+        // the same fault - and it used to slip through because validate() scanned only `headers`.
+        let m = Manifest {
+            egress_headers: [(
+                "anthropic".to_string(),
+                vec!["x-api-key: $ANTHROPIC_KEY".to_string()],
+            )]
+            .into_iter()
+            .collect(),
+            ..docker_manifest()
+        };
+        assert!(matches!(
+            m.validate(),
+            Err(ManifestError::UnexpandedVariable {
+                field: "egress_headers",
                 ..
             })
         ));

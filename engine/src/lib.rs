@@ -37,3 +37,17 @@ pub mod suite;
 pub mod supervise;
 
 pub use measurement::{Absent, Measurement};
+
+/// A single process-wide lock for tests that mutate process-global env vars (MOCK_STREAM_INTERVAL_MS,
+/// OTB_QUALIFY_BASELINE, ...). `cargo test` runs the crate's unit tests on many threads by default, so
+/// a test that flips an env var another test reads is a data race with no code defect - a CI flake.
+/// Every test that sets/removes such a var (and every test that reads one whose value it depends on)
+/// takes this guard first, serialising them against each other while leaving env-free tests fully
+/// parallel. Poison-tolerant: a test that panics while holding it must not wedge the rest of the suite.
+#[cfg(test)]
+pub(crate) fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}

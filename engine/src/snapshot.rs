@@ -62,6 +62,17 @@ pub enum SnapshotError {
     UnresolvableHeader {
         detail: String,
     },
+    /// The box failed `box_qualify` against its rolling baseline, so its loopback throughput has
+    /// regressed past the band. Refused rather than published: a full grid measured on hardware
+    /// positively identified as contaminated is a rig fault dressed as a gateway regression, exactly
+    /// the incident `qualify` exists to prevent. No snapshot is written; the orchestrator sees a
+    /// non-zero exit + no fresh snapshot and leaves the committed row untouched.
+    BoxUnqualified {
+        observed_rps: Option<f64>,
+        baseline_rps: Option<f64>,
+        drift_pct: Option<f64>,
+        band_pct: f64,
+    },
 }
 
 impl std::fmt::Display for SnapshotError {
@@ -85,6 +96,12 @@ impl std::fmt::Display for SnapshotError {
                  measure with no headers, because every cell would fail to serve and the board would \
                  report the GATEWAY as not serving when the harness dropped its headers"
             ),
+            SnapshotError::BoxUnqualified { observed_rps, baseline_rps, drift_pct, band_pct } => write!(
+                f,
+                "box failed qualification (observed {observed_rps:?} rps vs baseline {baseline_rps:?}, \
+                 drift {drift_pct:?}% past the {band_pct}% band) - refusing to measure or publish a grid \
+                 on a box whose throughput has collapsed"
+            ),
         }
     }
 }
@@ -96,7 +113,8 @@ impl std::error::Error for SnapshotError {
             SnapshotError::Json(source) => Some(source),
             SnapshotError::PromoteGuard { .. }
             | SnapshotError::UnsafeName { .. }
-            | SnapshotError::UnresolvableHeader { .. } => None,
+            | SnapshotError::UnresolvableHeader { .. }
+            | SnapshotError::BoxUnqualified { .. } => None,
         }
     }
 }
@@ -178,10 +196,17 @@ fn atomic_write(dir: &Path, target: &Path, bytes: &[u8]) -> Result<(), SnapshotE
         return Err(err);
     }
 
-    fs::rename(&tmp_path, target).map_err(|source| SnapshotError::Io {
-        path: target.to_path_buf(),
-        source,
-    })?;
+    // A rename failure (a stale file or directory at the target, a permissions hiccup, EIO/ENOSPC)
+    // must also drop the fsynced temp file, exactly as the write/sync branch above does. Without this
+    // every failed promotion left one snapshot-sized `.snapshot-tmp-*` behind in a long-lived
+    // results/snapshots directory, accumulating unboundedly across repeated failed runs.
+    if let Err(source) = fs::rename(&tmp_path, target) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(SnapshotError::Io {
+            path: target.to_path_buf(),
+            source,
+        });
+    }
 
     let dir_handle = fs::File::open(dir).map_err(|source| SnapshotError::Io {
         path: dir.to_path_buf(),
@@ -263,10 +288,27 @@ fn safe_component(raw: &str, what: &'static str) -> Result<String, SnapshotError
 /// path: the historical copy is already durable, the current file is not, and the caller sees an
 /// `Io` error naming the current path.
 pub fn write_snapshot(dir: &Path, snapshot: &ResultSnapshot) -> Result<Paths, SnapshotError> {
-    let current_path = dir.join(format!(
-        "{}.json",
-        safe_component(&snapshot.gateway, "gateway")?
-    ));
+    let safe_gw = safe_component(&snapshot.gateway, "gateway")?;
+    let current_path = dir.join(format!("{safe_gw}.json"));
+
+    // ADVISORY PER-GATEWAY LOCK, held for the WHOLE critical section (read-existing -> promote guard
+    // -> both renames), so two overlapping write_snapshot calls against the same gateway directory
+    // cannot both observe the same stale `existing` snapshot, both pass the guard, and race the final
+    // rename - the TOCTOU that would let a thinner run overwrite a fuller one the guard exists to
+    // protect. `std::fs::File::lock` is an OS advisory lock (flock on unix): the kernel releases it
+    // automatically when `lock_file` (or the whole process) drops, including on a crash, so there is
+    // no separate unlock/cleanup path to get wrong and no stuck-lock risk on a self-terminating box.
+    // The single-writer path - one engine publishing one gateway - takes an uncontended lock, one
+    // fast syscall, and is otherwise byte-identical.
+    let lock_path = dir.join(format!(".snapshot-lock-{safe_gw}"));
+    let lock_file = fs::File::create(&lock_path).map_err(|source| SnapshotError::Io {
+        path: lock_path.clone(),
+        source,
+    })?;
+    lock_file.lock().map_err(|source| SnapshotError::Io {
+        path: lock_path.clone(),
+        source,
+    })?;
 
     if let Some(existing) = read_existing(&current_path)? {
         let existing_keys = served_cell_keys(&existing.matrix);
@@ -352,7 +394,17 @@ impl std::error::Error for MergeError {}
 fn sum_opt_i64(it: impl Iterator<Item = Option<i64>>) -> Option<i64> {
     let mut acc: Option<i64> = None;
     for v in it.flatten() {
-        acc = Some(acc.unwrap_or(0) + v);
+        // checked_add, not `+`: an extreme duration_s in one shard (a corrupt/hand-edited artifact, a
+        // box crash mid-write) would otherwise panic an overflow-checked build or wrap to a NEGATIVE
+        // duration in release and publish it silently. Saturate with a loud diagnostic instead.
+        let base = acc.unwrap_or(0);
+        acc = Some(base.checked_add(v).unwrap_or_else(|| {
+            eprintln!(
+                "merge: summed duration/phase seconds overflowed i64 (a shard carried an extreme \
+                 value) - saturating to i64::MAX rather than wrapping to a negative"
+            );
+            i64::MAX
+        }));
     }
     acc
 }
@@ -379,8 +431,10 @@ fn sum_phase(shards: &[ResultSnapshot]) -> Option<crate::record::PhaseSeconds> {
 ///
 /// Each shard's OWN box-qualification (`rig.box_qualify`) and `hardware` are per-column — recorded
 /// onto the `Upstream` blocks it contributes, so the merged row keeps every box's qualification as
-/// evidence. Snapshot-level provenance (`hardware`, `rig`) stays the first shard's, as the canonical
-/// merge-time value; per-column truth lives on the upstreams.
+/// evidence. Snapshot-level provenance (`hardware`, `rig`) is taken from the EARLIEST-measuring shard
+/// (min `measured_at`) — the same shard whose `measured_at` becomes the merged row's — so it is a
+/// deterministic, traceable fact rather than an artifact of filename sort order (`otb merge` feeds
+/// shards sorted by filename). Per-column truth still lives on the upstreams.
 ///
 /// Publish ONLY the merged result through `write_snapshot`. Never write an individual single-column
 /// shard into the canonical dir — it would trip the promote guard against a fuller prior.
@@ -421,7 +475,8 @@ pub fn merge_snapshots(shards: &[ResultSnapshot]) -> Result<ResultSnapshot, Merg
     }
 
     // Union the egress columns — disjoint — stamping each with the box that measured it.
-    let mut upstreams: std::collections::HashMap<String, crate::record::Upstream> = Default::default();
+    let mut upstreams: std::collections::HashMap<String, crate::record::Upstream> =
+        Default::default();
     for s in shards {
         let bq = s.rig.as_ref().and_then(|r| r.box_qualify.clone());
         for (egress, up) in &s.matrix.upstreams {
@@ -453,7 +508,18 @@ pub fn merge_snapshots(shards: &[ResultSnapshot]) -> Result<ResultSnapshot, Merg
     // the first shard that produced one.
     let streaming = shards.iter().find_map(|s| s.streaming.clone());
 
-    let mut merged = first.clone();
+    // Base the merged row on the EARLIEST-measuring shard, not `first` (filename-first). Every field
+    // copied here that is not overwritten below is an INVARIANT already proven identical across shards
+    // (schema_version, gateway, build, arch, config, definitions, matrix.gateway/build, rig identity),
+    // so cloning any shard is correct for those — but snapshot-level `hardware`/`rig` are per-box, and
+    // this makes them trace to a principled box (the first to measure) rather than to sort order.
+    let canonical = shards
+        .iter()
+        .enumerate()
+        .min_by_key(|(_, s)| s.measured_at.clone())
+        .map(|(i, _)| i)
+        .unwrap_or(0);
+    let mut merged = shards[canonical].clone();
     merged.measured_at = measured_at.clone();
     merged.started_at = started_at.clone();
     merged.finished_at = finished_at.clone();
@@ -546,8 +612,20 @@ mod tests {
 
     #[test]
     fn merges_disjoint_egress_columns_with_per_column_provenance() {
-        let a = shard("gw", "openai", "boxA", serde_json::json!({"box":"A"}), "2026-08-21T00-00-02Z");
-        let b = shard("gw", "anthropic", "boxB", serde_json::json!({"box":"B"}), "2026-08-21T00-00-01Z");
+        let a = shard(
+            "gw",
+            "openai",
+            "boxA",
+            serde_json::json!({"box":"A"}),
+            "2026-08-21T00-00-02Z",
+        );
+        let b = shard(
+            "gw",
+            "anthropic",
+            "boxB",
+            serde_json::json!({"box":"B"}),
+            "2026-08-21T00-00-01Z",
+        );
         let m = merge_snapshots(&[a, b]).expect("disjoint shards merge");
 
         let mut keys: Vec<_> = m.matrix.upstreams.keys().cloned().collect();
@@ -557,8 +635,14 @@ mod tests {
         // measured_at is the EARLIEST — it names the historical file.
         assert_eq!(m.measured_at, "2026-08-21T00-00-01Z");
         // Each column keeps the box that measured it, as fairness evidence.
-        assert_eq!(m.matrix.upstreams["openai"].hardware.as_deref(), Some("boxA"));
-        assert_eq!(m.matrix.upstreams["anthropic"].hardware.as_deref(), Some("boxB"));
+        assert_eq!(
+            m.matrix.upstreams["openai"].hardware.as_deref(),
+            Some("boxA")
+        );
+        assert_eq!(
+            m.matrix.upstreams["anthropic"].hardware.as_deref(),
+            Some("boxB")
+        );
         assert_eq!(
             m.matrix.upstreams["openai"].box_qualify,
             Some(serde_json::json!({"box":"A"}))
@@ -569,8 +653,20 @@ mod tests {
 
     #[test]
     fn rejects_overlapping_egress_columns() {
-        let a = shard("gw", "openai", "boxA", serde_json::json!({}), "2026-08-21T00-00-01Z");
-        let b = shard("gw", "openai", "boxB", serde_json::json!({}), "2026-08-21T00-00-02Z");
+        let a = shard(
+            "gw",
+            "openai",
+            "boxA",
+            serde_json::json!({}),
+            "2026-08-21T00-00-01Z",
+        );
+        let b = shard(
+            "gw",
+            "openai",
+            "boxB",
+            serde_json::json!({}),
+            "2026-08-21T00-00-02Z",
+        );
         assert_eq!(
             merge_snapshots(&[a, b]),
             Err(MergeError::OverlappingEgress {
@@ -581,27 +677,200 @@ mod tests {
 
     #[test]
     fn refuses_shards_that_are_not_the_same_experiment() {
-        let base = shard("gw", "openai", "boxA", serde_json::json!({}), "2026-08-21T00-00-01Z");
+        let base = shard(
+            "gw",
+            "openai",
+            "boxA",
+            serde_json::json!({}),
+            "2026-08-21T00-00-01Z",
+        );
         // Different gateway.
-        let other = shard("OTHER", "anthropic", "boxB", serde_json::json!({}), "2026-08-21T00-00-02Z");
+        let other = shard(
+            "OTHER",
+            "anthropic",
+            "boxB",
+            serde_json::json!({}),
+            "2026-08-21T00-00-02Z",
+        );
         assert_eq!(
             merge_snapshots(&[base.clone(), other]),
             Err(MergeError::Mismatch { field: "gateway" })
         );
         // Same gateway, different build.
-        let mut b2 = shard("gw", "anthropic", "boxB", serde_json::json!({}), "2026-08-21T00-00-02Z");
+        let mut b2 = shard(
+            "gw",
+            "anthropic",
+            "boxB",
+            serde_json::json!({}),
+            "2026-08-21T00-00-02Z",
+        );
         b2.build = "img:2".to_string();
         assert_eq!(
             merge_snapshots(&[base.clone(), b2]),
             Err(MergeError::Mismatch { field: "build" })
         );
         // Same gateway/build, different rig identity (release moved under the same tag).
-        let mut b3 = shard("gw", "anthropic", "boxB", serde_json::json!({}), "2026-08-21T00-00-02Z");
+        let mut b3 = shard(
+            "gw",
+            "anthropic",
+            "boxB",
+            serde_json::json!({}),
+            "2026-08-21T00-00-02Z",
+        );
         b3.rig.as_mut().unwrap().release_url = Some("moved".to_string());
         assert_eq!(
             merge_snapshots(&[base, b3]),
             Err(MergeError::Mismatch { field: "rig" })
         );
+    }
+
+    // Every field in merge_snapshots' INVARIANTS list must be enforced, not just the three
+    // (gateway/build/rig) the older test covered. A copy-paste bug that compared a field to itself, or
+    // a dropped arm, would let two shards built with a different rendered config, diverging metric
+    // definitions, a different arch, or a mismatched matrix.gateway/matrix.build merge into ONE board
+    // row - a silent violation of the ONE FROZEN INSTRUMENT rule. One case per named invariant so any
+    // single dropped comparison turns exactly one of these red.
+    #[test]
+    fn refuses_shards_that_disagree_on_any_named_invariant() {
+        let base = shard(
+            "gw",
+            "openai",
+            "boxA",
+            serde_json::json!({}),
+            "2026-08-21T00-00-01Z",
+        );
+
+        // schema_version.
+        let mut s = shard(
+            "gw",
+            "anthropic",
+            "boxB",
+            serde_json::json!({}),
+            "2026-08-21T00-00-02Z",
+        );
+        s.schema_version = 99;
+        assert_eq!(
+            merge_snapshots(&[base.clone(), s]),
+            Err(MergeError::Mismatch {
+                field: "schema_version"
+            })
+        );
+
+        // arch.
+        let mut s = shard(
+            "gw",
+            "anthropic",
+            "boxB",
+            serde_json::json!({}),
+            "2026-08-21T00-00-02Z",
+        );
+        s.arch = Some("x86_64".to_string());
+        assert_eq!(
+            merge_snapshots(&[base.clone(), s]),
+            Err(MergeError::Mismatch { field: "arch" })
+        );
+
+        // config (rendered gateway config files).
+        let mut s = shard(
+            "gw",
+            "anthropic",
+            "boxB",
+            serde_json::json!({}),
+            "2026-08-21T00-00-02Z",
+        );
+        s.config
+            .files
+            .insert("router.yaml".to_string(), "routes: []".to_string());
+        assert_eq!(
+            merge_snapshots(&[base.clone(), s]),
+            Err(MergeError::Mismatch { field: "config" })
+        );
+
+        // definitions (metric definitions text).
+        let mut s = shard(
+            "gw",
+            "anthropic",
+            "boxB",
+            serde_json::json!({}),
+            "2026-08-21T00-00-02Z",
+        );
+        s.definitions
+            .insert("ttft".to_string(), "time to first token".to_string());
+        assert_eq!(
+            merge_snapshots(&[base.clone(), s]),
+            Err(MergeError::Mismatch {
+                field: "definitions"
+            })
+        );
+
+        // matrix.gateway (kept distinct from the top-level gateway, which is checked first).
+        let mut s = shard(
+            "gw",
+            "anthropic",
+            "boxB",
+            serde_json::json!({}),
+            "2026-08-21T00-00-02Z",
+        );
+        s.matrix.gateway = "OTHER".to_string();
+        assert_eq!(
+            merge_snapshots(&[base.clone(), s]),
+            Err(MergeError::Mismatch {
+                field: "matrix.gateway"
+            })
+        );
+
+        // matrix.build.
+        let mut s = shard(
+            "gw",
+            "anthropic",
+            "boxB",
+            serde_json::json!({}),
+            "2026-08-21T00-00-02Z",
+        );
+        s.matrix.build = "img:2".to_string();
+        assert_eq!(
+            merge_snapshots(&[base, s]),
+            Err(MergeError::Mismatch {
+                field: "matrix.build"
+            })
+        );
+    }
+
+    // Snapshot-level hardware/rig provenance must trace to a PRINCIPLED box (the earliest-measuring
+    // shard), not to whatever shard sits first in the caller's slice - `otb merge` hands shards in
+    // FILENAME order, so `first.clone()` made the published top-level provenance an artifact of a
+    // filename sort. Feed the earliest-measuring shard SECOND so slice-order and measured-at-order
+    // disagree: the old code took boxA (slice-first); the fix takes boxB (earliest).
+    #[test]
+    fn top_level_provenance_is_the_earliest_measuring_shard_not_slice_order() {
+        let a = shard(
+            "gw",
+            "openai",
+            "boxA",
+            serde_json::json!({"box":"A"}),
+            "2026-08-21T00-00-02Z",
+        );
+        let b = shard(
+            "gw",
+            "anthropic",
+            "boxB",
+            serde_json::json!({"box":"B"}),
+            "2026-08-21T00-00-01Z",
+        );
+        // Slice order [a, b]: `a` (boxA, 02Z) is first, `b` (boxB, 01Z) measured earliest.
+        let m = merge_snapshots(&[a, b]).expect("disjoint shards merge");
+        assert_eq!(
+            m.hardware.as_deref(),
+            Some("boxB"),
+            "top-level hardware traces to the earliest-measuring box, not slice order"
+        );
+        assert_eq!(
+            m.rig.as_ref().and_then(|r| r.box_qualify.clone()),
+            Some(serde_json::json!({"box":"B"})),
+            "top-level rig (incl. box_qualify) traces to the earliest-measuring box"
+        );
+        // And it agrees with the measured_at the merged row publishes.
+        assert_eq!(m.measured_at, "2026-08-21T00-00-01Z");
     }
 
     #[test]
@@ -611,13 +880,22 @@ mod tests {
 
     #[test]
     fn single_shard_merges_to_itself() {
-        let a = shard("gw", "openai", "boxA", serde_json::json!({"box":"A"}), "2026-08-21T00-00-01Z");
+        let a = shard(
+            "gw",
+            "openai",
+            "boxA",
+            serde_json::json!({"box":"A"}),
+            "2026-08-21T00-00-01Z",
+        );
         let m = merge_snapshots(std::slice::from_ref(&a)).expect("one shard merges");
         assert_eq!(
             m.matrix.upstreams.keys().cloned().collect::<Vec<_>>(),
             vec!["openai".to_string()]
         );
-        assert_eq!(m.matrix.upstreams["openai"].hardware.as_deref(), Some("boxA"));
+        assert_eq!(
+            m.matrix.upstreams["openai"].hardware.as_deref(),
+            Some("boxA")
+        );
     }
 
     #[test]
@@ -626,8 +904,20 @@ mod tests {
         // fields (box_qualify/hardware) through a real write→read→merge→write.
         let dir = unique_dir("merge-from-disk");
         fs::create_dir_all(&dir).unwrap();
-        let a = shard("gw", "openai", "boxA", serde_json::json!({"box":"A"}), "2026-08-21T00-00-02Z");
-        let b = shard("gw", "anthropic", "boxB", serde_json::json!({"box":"B"}), "2026-08-21T00-00-01Z");
+        let a = shard(
+            "gw",
+            "openai",
+            "boxA",
+            serde_json::json!({"box":"A"}),
+            "2026-08-21T00-00-02Z",
+        );
+        let b = shard(
+            "gw",
+            "anthropic",
+            "boxB",
+            serde_json::json!({"box":"B"}),
+            "2026-08-21T00-00-01Z",
+        );
         for (i, s) in [&a, &b].iter().enumerate() {
             fs::write(
                 dir.join(format!("shard{i}.json")),
@@ -892,6 +1182,19 @@ mod tests {
             !dir.join("gw.json").exists(),
             "nothing may be promoted to the current file while its historical copy is missing"
         );
+        // AND THE FSYNCED TEMP FILE MUST BE CLEANED UP. The rename to the historical target fails (a
+        // directory sits there), and atomic_write must remove its `.snapshot-tmp-*` on that failure -
+        // otherwise every failed promotion leaves one snapshot-sized orphan behind in a long-lived
+        // results/snapshots directory, accumulating across repeated failed runs.
+        let litter: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains("snapshot-tmp"))
+            .collect();
+        assert!(
+            litter.is_empty(),
+            "a rename failure must not leave its temp file behind, found {litter:?}"
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -929,6 +1232,47 @@ mod tests {
             litter.is_empty(),
             "no temp file should survive a successful write"
         );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // THE RACE THE GUARD LOGIC ALONE CANNOT CATCH: two overlapping write_snapshot calls against the
+    // same gateway directory must serialize, not both read the same stale `existing` and race the
+    // final rename. Proven from the side a single-threaded test CAN drive deterministically: acquire
+    // the same per-gateway lock write_snapshot must also take, from OUTSIDE write_snapshot, then
+    // assert a concurrent write_snapshot call blocks until that external holder releases it.
+    #[test]
+    fn write_snapshot_serializes_against_a_concurrent_holder_of_the_gateway_lock() {
+        let dir = unique_dir("advisory-lock");
+        let snap = snapshot_with_served_cells("gw", "2026-08-21T00-00-00Z", 1);
+
+        // Simulate a second write_snapshot call already inside its own critical section: take the
+        // exact lock this write_snapshot call must also take before it may proceed.
+        let lock_path = dir.join(".snapshot-lock-gw");
+        let holder = fs::File::create(&lock_path).unwrap();
+        holder.lock().unwrap();
+
+        let dir2 = dir.clone();
+        let snap2 = snap.clone();
+        let handle = std::thread::spawn(move || write_snapshot(&dir2, &snap2));
+
+        // Give the writer thread every chance to run. Today, if write_snapshot never touched any lock
+        // file, it would complete almost immediately regardless of `holder` - this sleep is generous
+        // slack, not a tight race window.
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(
+            !handle.is_finished(),
+            "write_snapshot must block while a concurrent writer holds the per-gateway lock, not \
+             race past it and risk promoting a stale/worse snapshot"
+        );
+
+        holder.unlock().unwrap();
+        drop(holder);
+        handle
+            .join()
+            .unwrap()
+            .expect("write proceeds once the lock is free");
+        assert!(dir.join("gw.json").exists());
 
         let _ = fs::remove_dir_all(&dir);
     }

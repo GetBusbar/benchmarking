@@ -465,15 +465,7 @@ const allGateways = gatewayKeys.map((key) => {
       streams_sustained_mock_ceiling: g.stream.stream_mock_ceiling ?? null,
       streams_sustained_headroom: g.stream.stream_headroom ?? null,
 
-    }, dia, makeSource("stream-fallback", SWEEP.STREAM_SUITE, g.stream.build ?? null, g.stream.measured_at ?? null),
-    null,
-    // cpu_fps CAME FROM THE OTHER SUITE, SO IT CARRIES THE OTHER SUITE'S STAMP. The record's own stamp
-    // is the stream suite's build + measured_at; cpu_fps is produced by the SEPARATE streamcpu suite,
-    // which runs on its own cadence, so stamping it with the record's provenance dated a number to a
-    // run that never produced it. It is only carried when the two genuinely disagree - on a row where
-    // both suites ran together the record's stamp already tells the truth, and repeating it on the
-    // envelope would be bundle bloat for no added disclosure.
-    cpuFpsSourceFor(g));
+    }, dia, makeSource("stream-fallback", SWEEP.STREAM_SUITE, g.stream.build ?? null, g.stream.measured_at ?? null));
   }
   if (!g.best_cell && g.perf && g.perf.served === true && g.perf.added_latency_p99_us != null) {
     // No swept diagonal, but the perf suite ran the gateway's default passthrough. Seal it into the same
@@ -648,10 +640,7 @@ function sealPerfCell(perf, path, source, absences = null) {
 }
 // sealStreamRecord: a raw stream record -> {<sealed metrics>} (no path/source). Used for the canonical g.streaming AND
 // for sealing every matrix cell's own .stream in-place (so the popup reads envelopes).
-// `cpuSource`: the provenance stamp for cpu_fps ALONE, when that number came from a different run than
-// the rest of the record (the legacy stream-suite fallback below reads it from the SEPARATE streamcpu
-// suite). Null on every matrix path, where one cell produced the whole record.
-function sealStreamRecord(s, absences = null, cpuSource = null) {
+function sealStreamRecord(s, absences = null) {
   const rec = {};
   const abs = (k) => absentEntryFor(absences, "stream", k);
   for (const k of UNGATED_STREAM_FIELDS)
@@ -686,22 +675,10 @@ function sealStreamRecord(s, absences = null, cpuSource = null) {
   // at the PROVEN delivery boundary), 4 had it INVERTED below that boundary, 5 were redundant within 1%,
   // and 7 were measured at a concurrency where the delivery gate did not hold - a frame rate recorded
   // while dropping frames. See the engine's `run.rs` for the per-gateway numbers.
-  void cpuSource;
   return rec;
 }
-function sealStreaming(s, dialect, source, absences = null, cpuSource = null) {
-  return { path: { dialect }, source, stream_served: true, ...sealStreamRecord(s, absences, cpuSource) };
-}
-// cpuFpsSourceFor(g): the provenance stamp cpu_fps needs OF ITS OWN on the legacy stream-suite fallback
-// row, or null when the record's own stamp already describes it. cpu_fps is measured by the streamcpu
-// suite and the rest of the record by the stream suite; they are separate runs with separate build +
-// measured_at, so the record's single stamp is the truth for one of them and a fabrication for the other
-// whenever they differ. Hoisted, so the per-gateway pass above can call it.
-function cpuFpsSourceFor(g) {
-  if (!g.streamcpu || g.streamcpu.streamcpu_frames_per_sec == null) return null;
-  const build = g.streamcpu.build ?? null, at = g.streamcpu.measured_at ?? null;
-  const sameRun = build === (g.stream.build ?? null) && at === (g.stream.measured_at ?? null);
-  return sameRun ? null : makeSource("stream-fallback", SWEEP.STREAM_SUITE, build, at);
+function sealStreaming(s, dialect, source, absences = null) {
+  return { path: { dialect }, source, stream_served: true, ...sealStreamRecord(s, absences) };
 }
 // matrixHasCellMemory(m): does this matrix carry a per-cell memory window on any served cell? The memory
 // lane's freshness stamp ages by the matrix that produced those windows, so the lane must know whether it

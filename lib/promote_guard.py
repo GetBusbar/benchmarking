@@ -63,17 +63,18 @@ def is_served(doc, suite):
     if doc is None:
         return False
     if suite == "matrix":
-        # matrix: "served" at all if the gateway configured+served any upstream cell.
-        ups = doc.get("upstreams") or {}
-        for u in ups.values():
-            if isinstance(u, dict) and u.get("served"):
-                return True
-        # HIGH-R3-H1: the old `bool(doc.get("cells"))` fallback treated a fully-populated grid of
-        # exclusively NOT-served cells (e.g. a process that listens but warms 502 under every egress —
-        # a real boot failure) as "served", short-circuiting is_boot_failure() before the anchored
-        # marker / all-dead check could veto it → a boot-failed matrix promoted over prior good data
-        # and blanked the row. Require at least one cell that ACTUALLY served (served True/"verified"),
-        # matching _matrix_all_dead's own served test, so a grid of not_verified cells is not "served".
+        # matrix: "served" at all if the gateway ACTUALLY served any cell.
+        #
+        # HIGH-R3-H1: do NOT trust the top-level `upstreams.<eg>.served` flag. The engine
+        # (engine/src/suite.rs, `.or_insert_with(|| Upstream { served: true, .. })`) sets that flag
+        # unconditionally the moment the FIRST cell row for an egress exists — it means "the egress
+        # configuration itself came up", NOT a per-cell serve verdict (engine/src/record.rs). Trusting
+        # it treated a fully-populated grid of exclusively NOT-served cells (e.g. a process that listens
+        # but warms 502 under every egress — a real boot failure) as "served", short-circuiting
+        # is_boot_failure() before the anchored marker / all-dead check could veto it → a boot-failed
+        # matrix promoted over prior good data and blanked the row. Decide SOLELY from the per-cell loop:
+        # require at least one cell that ACTUALLY served (served True/"verified"), matching
+        # _matrix_all_dead's own served test, so a grid of not_verified cells is not "served".
         for c in _matrix_cells(doc):
             if c.get("served") is True or c.get("served") == "verified":
                 return True
@@ -166,7 +167,7 @@ def is_boot_failure(doc, suite):
 def main():
     if len(sys.argv) != 4:
         print("usage: promote_guard.py <suite> <existing> <incoming>", file=sys.stderr)
-        return 0  # fail-open on misuse: do not block the pipeline, just promote
+        return 1  # fail CLOSED on misuse: keep existing rather than promote unvalidated data
     suite, existing_path, incoming_path = sys.argv[1], sys.argv[2], sys.argv[3]
     incoming = load(incoming_path)
     if incoming is None or incoming is UNREADABLE:

@@ -541,6 +541,59 @@ fn signal_tree(signal: &str, pids: &[u32]) {
 /// already confirmed dead (or the kill budget gave up), so a `wait` there reaps instantly rather than
 /// hanging; `spawn()`'s own backstop cleanup uses `try_wait` instead, since a stale child there might
 /// genuinely still be alive and must never block a fresh spawn.
+/// Strip ANSI/OSC escape sequences and other non-printable control bytes from text captured from the
+/// GATEWAY-UNDER-TEST (its `docker logs`), before that text is embedded in a `LaunchError` Display and
+/// printed to the operator's terminal via `eprintln!` during an unattended multi-hour run. RULES.md
+/// treats the gateway's own output as potentially hostile: a gateway that prints an OSC 52
+/// clipboard-write or a cursor/title escape on a startup failure would otherwise have that sequence
+/// executed against the operator's terminal emulator. Newlines and tabs are kept so a multi-line log
+/// tail stays readable; every other C0/C1 control and the CSI/OSC sequences that begin with ESC are
+/// dropped.
+fn strip_terminal_controls(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\x1b' => match chars.peek() {
+                // CSI: ESC [ params/intermediates ... final byte in 0x40..=0x7e.
+                Some('[') => {
+                    chars.next();
+                    while let Some(&p) = chars.peek() {
+                        chars.next();
+                        if ('\u{40}'..='\u{7e}').contains(&p) {
+                            break;
+                        }
+                    }
+                }
+                // OSC: ESC ] ... terminated by BEL (0x07) or ST (ESC \).
+                Some(']') => {
+                    chars.next();
+                    while let Some(c2) = chars.next() {
+                        if c2 == '\x07' {
+                            break;
+                        }
+                        if c2 == '\x1b' {
+                            if chars.peek() == Some(&'\\') {
+                                chars.next();
+                            }
+                            break;
+                        }
+                    }
+                }
+                // Any other two-character escape: drop ESC and the byte that follows it.
+                _ => {
+                    chars.next();
+                }
+            },
+            '\n' | '\t' => out.push(c),
+            // Drop every other C0 control (including CR and BEL), DEL, and the C1 range.
+            c if (c as u32) < 0x20 || c as u32 == 0x7f || (0x80..=0x9f).contains(&(c as u32)) => {}
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 fn reap_native_child(slot: &mut Option<std::process::Child>, blocking: bool) {
     if let Some(mut child) = slot.take() {
         if blocking {
@@ -649,10 +702,18 @@ impl Launcher for RealLauncher {
     }
 
     fn stop(&mut self, spec: &LaunchSpec) {
-        let _ = supervise::stop_and_wait(&spec.runtime, spec.port, Duration::from_secs(5));
-        // `stop_and_wait` above already confirmed the process is no longer alive (or gave up trying),
-        // so a blocking `wait` here reaps a zombie rather than hanging on a live one.
-        reap_native_child(&mut self.native_child, true);
+        // ONLY BLOCKING-REAP ONCE THE PROCESS IS CONFIRMED GONE. A blocking `wait()` on a process the
+        // kernel has not released hangs forever - and stop_and_wait returns Err(StillHeld) exactly
+        // when it could NOT confirm death (e.g. a native child stuck in an uninterruptible D state on
+        // an overloaded box, where even SIGKILL cannot reap it until its I/O completes). This used to
+        // discard that Err and then blocking-`wait()` unconditionally, so a single stuck gateway could
+        // hang the whole run (launch's retry loop calls stop() between attempts) until the box's
+        // external cost timer tore it down. On Err, reap non-blocking instead: the zombie is collected
+        // on a later attempt or at process exit, but the run is never wedged.
+        match supervise::stop_and_wait(&spec.runtime, spec.port, Duration::from_secs(5)) {
+            Ok(()) => reap_native_child(&mut self.native_child, true),
+            Err(_still_held) => reap_native_child(&mut self.native_child, false),
+        }
     }
 
     fn port_snapshot(&mut self, spec: &LaunchSpec) -> PortState {
@@ -675,7 +736,9 @@ impl Launcher for RealLauncher {
         // A container that died at startup usually says why on stderr, so both streams are kept.
         let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
         text.push_str(&String::from_utf8_lossy(&out.stderr));
-        let text = text.trim().to_string();
+        // Sanitize before this reaches any error Display / eprintln: the gateway's own log bytes are
+        // untrusted and must not carry terminal escape sequences to the operator's console.
+        let text = strip_terminal_controls(&text).trim().to_string();
         (!text.is_empty()).then_some(text)
     }
 }
@@ -1323,6 +1386,130 @@ mod tests {
         assert!(
             format!("{err}").contains("unknown field"),
             "and it must reach the operator in the rendered message"
+        );
+    }
+
+    // A REFUSAL FROM `spawn` MUST CARRY ITS REASON. For docker, `spawn`'s own stderr is (per its doc)
+    // the ONLY place a rejected mount, a cpuset the daemon will not honour, or a name collision ever
+    // appears - the container never gets far enough to have a log. Every launcher double used to
+    // return Ok(()) from spawn, so `last_spawn_error`'s capture and its rendering in NeverReady were
+    // untested; a regression dropping `last_spawn_error = Some(why)` would leave every test green
+    // while a real refusal silently lost its explanation.
+    #[test]
+    fn a_spawn_refusal_is_carried_into_the_never_ready_error() {
+        struct Refusing;
+        impl Launcher for Refusing {
+            fn run_pre_launch(&mut self, _s: &PreLaunchStep) -> Result<(), String> {
+                Ok(())
+            }
+            fn spawn(&mut self, _s: &LaunchSpec) -> Result<(), String> {
+                Err("docker: invalid mount config: /tmp/gw.yaml not found".to_string())
+            }
+            fn is_ready(&mut self, _s: &LaunchSpec) -> bool {
+                true // never reached: a refused spawn is not ready-checked
+            }
+            fn stop(&mut self, _s: &LaunchSpec) {}
+            fn port_snapshot(&mut self, _s: &LaunchSpec) -> PortState {
+                PortState::Free
+            }
+        }
+        let err =
+            launch(&mut Refusing, &docker_spec(), 2).expect_err("a refused spawn never readies");
+        let LaunchError::NeverReady {
+            last_spawn_error, ..
+        } = &err
+        else {
+            panic!("expected NeverReady, got {err:?}");
+        };
+        assert_eq!(
+            last_spawn_error.as_deref(),
+            Some("docker: invalid mount config: /tmp/gw.yaml not found"),
+            "the spawn refusal's reason must survive into the error"
+        );
+        assert!(
+            format!("{err}").contains("invalid mount config"),
+            "and it must reach the operator in the rendered message"
+        );
+    }
+
+    // AN EARLIER ATTEMPT'S EXPLANATION MUST NOT BE ERASED BY A LATER ATTEMPT THAT CANNOT BE INSPECTED.
+    // `last_output` is updated only `if let Some(said) = diagnostics(..)`, so a later attempt whose
+    // container could not be read (diagnostics returns None) must PRESERVE the first attempt's text
+    // rather than overwrite it. A regression to an unconditional overwrite would erase the real first
+    // reason on a later uninspectable attempt.
+    #[test]
+    fn a_later_uninspectable_attempt_does_not_erase_an_earlier_reason() {
+        struct FirstOnly {
+            attempt: u32,
+        }
+        impl Launcher for FirstOnly {
+            fn run_pre_launch(&mut self, _s: &PreLaunchStep) -> Result<(), String> {
+                Ok(())
+            }
+            fn spawn(&mut self, _s: &LaunchSpec) -> Result<(), String> {
+                self.attempt += 1;
+                Ok(())
+            }
+            fn is_ready(&mut self, _s: &LaunchSpec) -> bool {
+                false
+            }
+            fn stop(&mut self, _s: &LaunchSpec) {}
+            fn port_snapshot(&mut self, _s: &LaunchSpec) -> PortState {
+                PortState::Free
+            }
+            fn diagnostics(&mut self, _s: &LaunchSpec) -> Option<String> {
+                // Attempt 1 has a log; attempt 2's container could not be inspected.
+                if self.attempt == 1 {
+                    Some("config: unknown field `nope`".to_string())
+                } else {
+                    None
+                }
+            }
+        }
+        let err = launch(&mut FirstOnly { attempt: 0 }, &docker_spec(), 2)
+            .expect_err("it never becomes ready");
+        let LaunchError::NeverReady { last_output, .. } = &err else {
+            panic!("expected NeverReady, got {err:?}");
+        };
+        assert_eq!(
+            last_output.as_deref(),
+            Some("config: unknown field `nope`"),
+            "attempt 1's reason must survive an attempt 2 whose log could not be read"
+        );
+    }
+
+    // ---- untrusted gateway log sanitisation --------------------------------------------------------
+
+    // The gateway-under-test's own `docker logs` output is captured verbatim and reaches the
+    // operator's terminal via eprintln!. RULES.md treats it as potentially hostile, so escape
+    // sequences must be stripped before that happens: an OSC 52 clipboard-write or a title/cursor CSI
+    // printed on a startup failure must not be executed against the operator's terminal emulator.
+    #[test]
+    fn terminal_control_sequences_are_stripped_but_text_and_newlines_survive() {
+        // A CSI colour sequence, an OSC 52 clipboard write (BEL-terminated), a bare BEL, and a raw
+        // ESC, wrapped around real log text spanning two lines.
+        let hostile =
+            "boot ok\n\x1b[31mERROR\x1b[0m: \x1b]52;c;cGVk=\x07bad flag\x07\x1bX done\ttab";
+        let clean = strip_terminal_controls(hostile);
+        assert!(!clean.contains('\x1b'), "no ESC may survive: {clean:?}");
+        assert!(!clean.contains('\x07'), "no BEL may survive: {clean:?}");
+        assert!(
+            clean.contains("ERROR"),
+            "visible text must survive: {clean:?}"
+        );
+        assert!(
+            clean.contains("bad flag"),
+            "visible text must survive: {clean:?}"
+        );
+        assert!(
+            clean.contains('\n'),
+            "newlines are kept so the tail stays readable: {clean:?}"
+        );
+        assert!(clean.contains('\t'), "tabs are kept: {clean:?}");
+        // The OSC payload between ESC] and BEL must be gone, not just the framing.
+        assert!(
+            !clean.contains("52;c"),
+            "the OSC body must be dropped too: {clean:?}"
         );
     }
 }

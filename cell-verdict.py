@@ -13,7 +13,8 @@ new since last call.
   cell-verdict.py --baseline <snap.json> --new <partial.json> --state <state.json> [--count-only]
 
 A cell counts as "measured" once it has a frontier RPS at the 10ms p99 bound; latency (added p50/p99,
-c=1 p99, cpu us/req) rides along as corroboration. Absences print their own reason rather than a zero.
+c=1 p99, cpu us/req) rides along as corroboration. An absent corroboration figure prints an em-dash
+(—) rather than a zero, so a missing measurement is never shown as a real value.
 """
 import argparse
 import json
@@ -52,6 +53,8 @@ def frontier_rps(cell, bound_us=BOUND_US):
 
 
 def perf_num(cell, field):
+    if not cell:
+        return None
     return ((cell.get("perf") or {}) or {}).get(field)
 
 
