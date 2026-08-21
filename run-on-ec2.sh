@@ -1372,6 +1372,12 @@ FILELIST
     # what a field measurement always uses.
     printf 'export OTB_DIALECTS=%q OTB_MIN_CONC=%q OTB_MAX_CONC=%q\n' \
       "${OTB_DIALECTS:-}" "${OTB_MIN_CONC:-}" "${OTB_MAX_CONC:-}"
+    # SHARDING: restrict the EGRESS axis to a subset (one box = one egress column) while ingress stays
+    # full. Unset for a normal run (the engine then walks the full square grid, byte-identical to
+    # before this line). run-sharded.sh sets this per box; see docs/DESIGN-sharded-field-run.md. An
+    # engine that predates OTB_EGRESS simply ignores it and walks the full grid, which the merge step
+    # then rejects as overlapping columns rather than publishing a wrong number.
+    printf 'export OTB_EGRESS=%q\n' "${OTB_EGRESS:-}"
     # gw is the orchestrator's loop variable and is not otherwise exported to the box, so it must be
     # written literally here (not `\$gw`, which would reach the box as an unset name).
     printf 'gw=%q\n' "$gw"
