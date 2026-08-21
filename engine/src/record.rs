@@ -257,6 +257,18 @@ pub struct Upstream {
     /// Ingress dialect -> the cell probed through this egress.
     #[serde(default)]
     pub cells: HashMap<String, Cell>,
+    /// SHARDED RUNS ONLY. When a gateway's grid is measured across N boxes (one egress column per
+    /// box), each column is measured on a DIFFERENT box, so its box-qualification and hardware are
+    /// column-specific and recorded here rather than only in the snapshot-level `rig`/`hardware`
+    /// (which then hold the merge box's own, or the canonical, values). `None` for a single-box run
+    /// where the snapshot-level provenance already describes every column. Opaque JSON, same shape
+    /// as `rig.box_qualify`. See docs/DESIGN-sharded-field-run.md.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub box_qualify: Option<serde_json::Value>,
+    /// The hardware string of the box that measured THIS egress column, when sharded. `None` for a
+    /// single-box run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hardware: Option<String>,
 }
 
 /// Whether/how a cell was served. Not a `Measurement`: this is a verdict label, not a number a chart
@@ -1338,6 +1350,8 @@ mod tests {
             egress_config: Some("default".to_string()),
             serve_error: String::new(),
             cells,
+            box_qualify: None,
+            hardware: None,
         }
     }
 
@@ -1384,7 +1398,7 @@ mod tests {
 
     fn sample_record() -> ResultSnapshot {
         ResultSnapshot {
-            schema_version: 1,
+            schema_version: 2,
             definitions: Default::default(),
             gateway: "gw".to_string(),
             build: "gw:1.0.0".to_string(),

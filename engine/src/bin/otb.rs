@@ -658,6 +658,78 @@ fn main() -> ExitCode {
                 }
             }
         }
+        // Merge the per-shard snapshots of ONE sharded gateway run into a single board snapshot.
+        //
+        //   otb merge <shard_dir> <out_dir>
+        //
+        // Reads every `*.json` in <shard_dir> as a ResultSnapshot (each is one box's egress column(s)),
+        // merges by union of disjoint egress columns with the invariant/provenance rules in
+        // snapshot::merge_snapshots, and writes the merged result to <out_dir> via write_snapshot (the
+        // same atomic + promote-guarded path a single-box run uses). Only the MERGED result is written
+        // to the canonical dir; the individual shard files are never published directly.
+        Some("merge") => {
+            let (Some(shard_dir), Some(out_dir)) = (args.get(1), args.get(2)) else {
+                eprintln!("usage: otb merge <shard_dir> <out_dir>");
+                return ExitCode::from(2);
+            };
+            let mut shards = Vec::new();
+            let entries = match std::fs::read_dir(shard_dir) {
+                Ok(e) => e,
+                Err(e) => {
+                    eprintln!("cannot read shard dir {shard_dir}: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let mut paths: Vec<std::path::PathBuf> = entries
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("json"))
+                .collect();
+            paths.sort();
+            for p in &paths {
+                match std::fs::read_to_string(p)
+                    .map_err(|e| e.to_string())
+                    .and_then(|s| {
+                        serde_json::from_str::<otb_engine::record::ResultSnapshot>(&s)
+                            .map_err(|e| e.to_string())
+                    }) {
+                    Ok(snap) => shards.push(snap),
+                    Err(e) => {
+                        eprintln!("shard {} is not a readable snapshot: {e}", p.display());
+                        return ExitCode::FAILURE;
+                    }
+                }
+            }
+            if shards.is_empty() {
+                eprintln!("no *.json shards found in {shard_dir}");
+                return ExitCode::FAILURE;
+            }
+            let merged = match otb_engine::snapshot::merge_snapshots(&shards) {
+                Ok(m) => m,
+                Err(e) => {
+                    eprintln!("merge refused ({} shards): {e}", shards.len());
+                    return ExitCode::FAILURE;
+                }
+            };
+            if let Err(e) = std::fs::create_dir_all(out_dir) {
+                eprintln!("cannot create {out_dir}: {e}");
+                return ExitCode::FAILURE;
+            }
+            match otb_engine::snapshot::write_snapshot(std::path::Path::new(out_dir), &merged) {
+                Ok(w) => {
+                    println!(
+                        "merged {} shard(s) -> {} ({} egress column(s))",
+                        shards.len(),
+                        w.current.display(),
+                        merged.matrix.upstreams.len()
+                    );
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("merged snapshot not written: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
         // Check a gateway's setup without running anything, and say everything that is wrong.
         Some("validate") => {
             use otb_engine::manifest::Manifest;

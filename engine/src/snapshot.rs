@@ -317,6 +317,159 @@ pub fn write_snapshot(dir: &Path, snapshot: &ResultSnapshot) -> Result<Paths, Sn
     })
 }
 
+/// Why a set of shard snapshots could not be merged into one board row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MergeError {
+    /// No shards were given.
+    Empty,
+    /// A field that MUST be identical across shards — the proof they measured the same gateway build
+    /// on the same instrument — differed. Named so the operator sees WHAT disagreed.
+    Mismatch { field: &'static str },
+    /// Two shards both measured the same egress column. Shards must own DISJOINT columns; an overlap
+    /// means the shard plan double-counted, and a silent union would drop one box's numbers.
+    OverlappingEgress { egress: String },
+}
+
+impl std::fmt::Display for MergeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MergeError::Empty => write!(f, "no shards to merge"),
+            MergeError::Mismatch { field } => write!(
+                f,
+                "shards disagree on `{field}` - they are not the same experiment and must not share a row"
+            ),
+            MergeError::OverlappingEgress { egress } => write!(
+                f,
+                "two shards both measured egress `{egress}` - shards must own disjoint egress columns"
+            ),
+        }
+    }
+}
+impl std::error::Error for MergeError {}
+
+/// Sum a set of `Option<i64>`, yielding `None` only when every input was `None` (so a merged run with
+/// no timing recorded stays absent rather than reporting a spurious 0).
+fn sum_opt_i64(it: impl Iterator<Item = Option<i64>>) -> Option<i64> {
+    let mut acc: Option<i64> = None;
+    for v in it.flatten() {
+        acc = Some(acc.unwrap_or(0) + v);
+    }
+    acc
+}
+
+fn sum_phase(shards: &[ResultSnapshot]) -> Option<crate::record::PhaseSeconds> {
+    let phases: Vec<_> = shards.iter().filter_map(|s| s.phase_s.clone()).collect();
+    if phases.is_empty() {
+        return None;
+    }
+    Some(crate::record::PhaseSeconds {
+        build: sum_opt_i64(phases.iter().map(|p| p.build)),
+        matrix_6x6: sum_opt_i64(phases.iter().map(|p| p.matrix_6x6)),
+        memory_window: sum_opt_i64(phases.iter().map(|p| p.memory_window)),
+    })
+}
+
+/// Merge N per-shard snapshots — each carrying a DISJOINT subset of `matrix.upstreams` (one or more
+/// egress columns measured on its own box) — into ONE snapshot shaped exactly like a single-box run.
+///
+/// INVARIANTS (identical across every shard, else the merge refuses): `schema_version`, `gateway`,
+/// `build`, `arch`, rendered `config`, metric `definitions`, the rig's engine/mock/release identity,
+/// and `matrix.gateway`/`matrix.build`. A violated invariant means the shards did not measure the
+/// same gateway build on the same instrument, so they may not share a board row.
+///
+/// Each shard's OWN box-qualification (`rig.box_qualify`) and `hardware` are per-column — recorded
+/// onto the `Upstream` blocks it contributes, so the merged row keeps every box's qualification as
+/// evidence. Snapshot-level provenance (`hardware`, `rig`) stays the first shard's, as the canonical
+/// merge-time value; per-column truth lives on the upstreams.
+///
+/// Publish ONLY the merged result through `write_snapshot`. Never write an individual single-column
+/// shard into the canonical dir — it would trip the promote guard against a fuller prior.
+pub fn merge_snapshots(shards: &[ResultSnapshot]) -> Result<ResultSnapshot, MergeError> {
+    let (first, rest) = shards.split_first().ok_or(MergeError::Empty)?;
+
+    // rig IDENTITY = engine + mock + release_url; box_qualify and ugen are per-box and excluded.
+    let rig_identity = |s: &ResultSnapshot| {
+        s.rig
+            .as_ref()
+            .map(|r| (r.engine.clone(), r.mock.clone(), r.release_url.clone()))
+    };
+    for s in rest {
+        let bad = if s.schema_version != first.schema_version {
+            Some("schema_version")
+        } else if s.gateway != first.gateway {
+            Some("gateway")
+        } else if s.build != first.build {
+            Some("build")
+        } else if s.arch != first.arch {
+            Some("arch")
+        } else if s.config != first.config {
+            Some("config")
+        } else if s.definitions != first.definitions {
+            Some("definitions")
+        } else if rig_identity(s) != rig_identity(first) {
+            Some("rig")
+        } else if s.matrix.gateway != first.matrix.gateway {
+            Some("matrix.gateway")
+        } else if s.matrix.build != first.matrix.build {
+            Some("matrix.build")
+        } else {
+            None
+        };
+        if let Some(field) = bad {
+            return Err(MergeError::Mismatch { field });
+        }
+    }
+
+    // Union the egress columns — disjoint — stamping each with the box that measured it.
+    let mut upstreams: std::collections::HashMap<String, crate::record::Upstream> = Default::default();
+    for s in shards {
+        let bq = s.rig.as_ref().and_then(|r| r.box_qualify.clone());
+        for (egress, up) in &s.matrix.upstreams {
+            let mut up = up.clone();
+            up.box_qualify = bq.clone();
+            up.hardware = s.hardware.clone();
+            if upstreams.insert(egress.clone(), up).is_some() {
+                return Err(MergeError::OverlappingEgress {
+                    egress: egress.clone(),
+                });
+            }
+        }
+    }
+
+    // Combine the per-shard scalars. measured_at names the historical file, so the canonical (min)
+    // wins; started/finished bracket the whole sharded run; duration/phase sum the total box-work.
+    let measured_at = shards
+        .iter()
+        .map(|s| s.measured_at.clone())
+        .min()
+        .unwrap_or_default();
+    let started_at = shards.iter().filter_map(|s| s.started_at.clone()).min();
+    let finished_at = shards.iter().filter_map(|s| s.finished_at.clone()).max();
+    let duration_s = sum_opt_i64(shards.iter().map(|s| s.duration_s));
+    let phase_s = sum_phase(shards);
+    let served = shards.iter().any(|s| s.matrix.served);
+    // The best-diagonal streaming projection is a quick-glance convenience; each shard already
+    // projects its own diagonal, and the cell it references is present in the merged matrix. Carry
+    // the first shard that produced one.
+    let streaming = shards.iter().find_map(|s| s.streaming.clone());
+
+    let mut merged = first.clone();
+    merged.measured_at = measured_at.clone();
+    merged.started_at = started_at.clone();
+    merged.finished_at = finished_at.clone();
+    merged.duration_s = duration_s;
+    merged.phase_s = phase_s.clone();
+    merged.streaming = streaming;
+    merged.matrix.upstreams = upstreams;
+    merged.matrix.served = served;
+    merged.matrix.measured_at = measured_at;
+    merged.matrix.started_at = started_at;
+    merged.matrix.finished_at = finished_at;
+    merged.matrix.duration_s = duration_s;
+    merged.matrix.phase_s = phase_s;
+    Ok(merged)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -355,6 +508,159 @@ mod tests {
 
     use crate::record::{Cell, ConfigFiles, Upstream};
     use std::collections::HashMap;
+
+    // ── merge_snapshots ───────────────────────────────────────────────────────────────────────
+    // A shard snapshot: one egress column measured on its own box, with box-specific hardware and
+    // qualification. Built off `snapshot_of` (one served cell), re-keyed to the chosen egress, with
+    // the invariant fields (build/arch/config/rig identity) held identical across shards so the
+    // ONLY thing under test is the union + per-column provenance.
+    fn shard(
+        gateway: &str,
+        egress: &str,
+        hardware: &str,
+        qualify: serde_json::Value,
+        measured_at: &str,
+    ) -> ResultSnapshot {
+        let mut s = snapshot_of(gateway, measured_at, 1, 0);
+        let up = s
+            .matrix
+            .upstreams
+            .remove("eg")
+            .expect("snapshot_of keys one upstream under 'eg'");
+        s.matrix.upstreams.insert(egress.to_string(), up);
+        s.schema_version = 2;
+        s.build = "img:1".to_string();
+        s.matrix.build = "img:1".to_string();
+        s.arch = Some("arm64".to_string());
+        s.hardware = Some(hardware.to_string());
+        s.rig = Some(crate::record::RigProvenance {
+            arch: Some("arm64".to_string()),
+            release_url: Some("rig-url".to_string()),
+            engine: None,
+            mock: None,
+            ugen: None,
+            box_qualify: Some(qualify),
+        });
+        s
+    }
+
+    #[test]
+    fn merges_disjoint_egress_columns_with_per_column_provenance() {
+        let a = shard("gw", "openai", "boxA", serde_json::json!({"box":"A"}), "2026-08-21T00-00-02Z");
+        let b = shard("gw", "anthropic", "boxB", serde_json::json!({"box":"B"}), "2026-08-21T00-00-01Z");
+        let m = merge_snapshots(&[a, b]).expect("disjoint shards merge");
+
+        let mut keys: Vec<_> = m.matrix.upstreams.keys().cloned().collect();
+        keys.sort();
+        assert_eq!(keys, vec!["anthropic".to_string(), "openai".to_string()]);
+        assert!(m.matrix.served, "served is OR across shards");
+        // measured_at is the EARLIEST — it names the historical file.
+        assert_eq!(m.measured_at, "2026-08-21T00-00-01Z");
+        // Each column keeps the box that measured it, as fairness evidence.
+        assert_eq!(m.matrix.upstreams["openai"].hardware.as_deref(), Some("boxA"));
+        assert_eq!(m.matrix.upstreams["anthropic"].hardware.as_deref(), Some("boxB"));
+        assert_eq!(
+            m.matrix.upstreams["openai"].box_qualify,
+            Some(serde_json::json!({"box":"A"}))
+        );
+        // Both columns' served cells survive the union.
+        assert_eq!(served_cell_keys(&m.matrix).len(), 2);
+    }
+
+    #[test]
+    fn rejects_overlapping_egress_columns() {
+        let a = shard("gw", "openai", "boxA", serde_json::json!({}), "2026-08-21T00-00-01Z");
+        let b = shard("gw", "openai", "boxB", serde_json::json!({}), "2026-08-21T00-00-02Z");
+        assert_eq!(
+            merge_snapshots(&[a, b]),
+            Err(MergeError::OverlappingEgress {
+                egress: "openai".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn refuses_shards_that_are_not_the_same_experiment() {
+        let base = shard("gw", "openai", "boxA", serde_json::json!({}), "2026-08-21T00-00-01Z");
+        // Different gateway.
+        let other = shard("OTHER", "anthropic", "boxB", serde_json::json!({}), "2026-08-21T00-00-02Z");
+        assert_eq!(
+            merge_snapshots(&[base.clone(), other]),
+            Err(MergeError::Mismatch { field: "gateway" })
+        );
+        // Same gateway, different build.
+        let mut b2 = shard("gw", "anthropic", "boxB", serde_json::json!({}), "2026-08-21T00-00-02Z");
+        b2.build = "img:2".to_string();
+        assert_eq!(
+            merge_snapshots(&[base.clone(), b2]),
+            Err(MergeError::Mismatch { field: "build" })
+        );
+        // Same gateway/build, different rig identity (release moved under the same tag).
+        let mut b3 = shard("gw", "anthropic", "boxB", serde_json::json!({}), "2026-08-21T00-00-02Z");
+        b3.rig.as_mut().unwrap().release_url = Some("moved".to_string());
+        assert_eq!(
+            merge_snapshots(&[base, b3]),
+            Err(MergeError::Mismatch { field: "rig" })
+        );
+    }
+
+    #[test]
+    fn empty_shard_set_is_an_error() {
+        assert_eq!(merge_snapshots(&[]), Err(MergeError::Empty));
+    }
+
+    #[test]
+    fn single_shard_merges_to_itself() {
+        let a = shard("gw", "openai", "boxA", serde_json::json!({"box":"A"}), "2026-08-21T00-00-01Z");
+        let m = merge_snapshots(std::slice::from_ref(&a)).expect("one shard merges");
+        assert_eq!(
+            m.matrix.upstreams.keys().cloned().collect::<Vec<_>>(),
+            vec!["openai".to_string()]
+        );
+        assert_eq!(m.matrix.upstreams["openai"].hardware.as_deref(), Some("boxA"));
+    }
+
+    #[test]
+    fn shards_survive_a_json_round_trip_and_merge_from_disk() {
+        // Mirrors the `otb merge` subcommand end to end, and exercises the new per-Upstream serde
+        // fields (box_qualify/hardware) through a real write→read→merge→write.
+        let dir = unique_dir("merge-from-disk");
+        fs::create_dir_all(&dir).unwrap();
+        let a = shard("gw", "openai", "boxA", serde_json::json!({"box":"A"}), "2026-08-21T00-00-02Z");
+        let b = shard("gw", "anthropic", "boxB", serde_json::json!({"box":"B"}), "2026-08-21T00-00-01Z");
+        for (i, s) in [&a, &b].iter().enumerate() {
+            fs::write(
+                dir.join(format!("shard{i}.json")),
+                serde_json::to_string(s).unwrap(),
+            )
+            .unwrap();
+        }
+        let loaded: Vec<ResultSnapshot> = (0..2)
+            .map(|i| {
+                let text = fs::read_to_string(dir.join(format!("shard{i}.json"))).unwrap();
+                serde_json::from_str(&text).unwrap()
+            })
+            .collect();
+        let merged = merge_snapshots(&loaded).expect("shards merge from disk");
+
+        let out = unique_dir("merge-from-disk-out");
+        fs::create_dir_all(&out).unwrap();
+        write_snapshot(&out, &merged).expect("merged snapshot writes");
+        let written: ResultSnapshot =
+            serde_json::from_str(&fs::read_to_string(out.join("gw.json")).unwrap()).unwrap();
+
+        let mut keys: Vec<_> = written.matrix.upstreams.keys().cloned().collect();
+        keys.sort();
+        assert_eq!(keys, vec!["anthropic".to_string(), "openai".to_string()]);
+        assert_eq!(
+            written.matrix.upstreams["openai"].hardware.as_deref(),
+            Some("boxA")
+        );
+        assert_eq!(
+            written.matrix.upstreams["anthropic"].box_qualify,
+            Some(serde_json::json!({"box":"B"}))
+        );
+    }
 
     fn unique_dir(name: &str) -> PathBuf {
         let nanos = SystemTime::now()
@@ -416,6 +722,8 @@ mod tests {
                 egress_config: None,
                 serve_error: String::new(),
                 cells,
+                box_qualify: None,
+                hardware: None,
             },
         );
         Matrix {
@@ -769,6 +1077,8 @@ mod tests {
                 egress_config: None,
                 serve_error: String::new(),
                 cells: existing_cells,
+                box_qualify: None,
+                hardware: None,
             },
         );
 
@@ -784,6 +1094,8 @@ mod tests {
                 egress_config: None,
                 serve_error: String::new(),
                 cells: incoming_cells,
+                box_qualify: None,
+                hardware: None,
             },
         );
 

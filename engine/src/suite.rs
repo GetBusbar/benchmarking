@@ -1559,7 +1559,7 @@ fn flush(
     let build =
         gateway_build(cfg).unwrap_or_else(|| format!("otb-engine {}", env!("CARGO_PKG_VERSION")));
     let snap = ResultSnapshot {
-        schema_version: 1,
+        schema_version: 2,
         definitions: metric_definitions(),
         config: rendered_config(cfg),
         gateway: cfg.manifest.name.clone(),
@@ -1963,7 +1963,7 @@ mod tests {
             },
         );
         let seed = ResultSnapshot {
-            schema_version: 1,
+            schema_version: 2,
             definitions: Default::default(),
             gateway: "gw".into(),
             measured_at: "2020-01-01T00-00-00Z".into(),
