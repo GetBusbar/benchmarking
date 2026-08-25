@@ -1,0 +1,68 @@
+{
+  "auth": "dummy",
+  "cell_paths": {
+    "bedrock>bedrock": "/model/{HIGRESS_BEDROCK_MODEL}/converse",
+    "gemini>gemini": "/v1beta/models/{HIGRESS_GEMINI_MODEL}:generateContent"
+  },
+  "class": "API gateway",
+  "config": [],
+  "config_files": [
+    {
+      "output": "data/mcpbridges/default.gen.yaml",
+      "template": "data/mcpbridges/default.gen.yaml.tmpl"
+    },
+    {
+      "output": "data/ingresses/bench.gen.yaml",
+      "template": "data/ingresses/bench.gen.yaml.tmpl"
+    }
+  ],
+  "constants": {
+    "HIGRESS_BEDROCK_MODEL": "anthropic.claude-3-sonnet-20240229-v1:0",
+    "HIGRESS_GEMINI_MODEL": "gpt-4o-mini-gemini"
+  },
+  "display": "Higress",
+  "egress": [
+    "openai",
+    "openai-responses",
+    "anthropic",
+    "gemini",
+    "cohere",
+    "bedrock"
+  ],
+  "lang": "Other",
+  "launch": {
+    "args": [],
+    "image": "higress-registry.cn-hangzhou.cr.aliyuncs.com/higress/all-in-one:2.2.4",
+    "kind": "docker",
+    "mounts": [
+      {
+        "container_path": "/data/mcpbridges/default.yaml",
+        "host_path": "data/mcpbridges/default.gen.yaml",
+        "read_only": true
+      },
+      {
+        "container_path": "/data/ingresses/bench.yaml",
+        "host_path": "data/ingresses/bench.gen.yaml",
+        "read_only": true
+      }
+    ]
+  },
+  "matrix": [
+    "100000",
+    "010000",
+    "001000",
+    "000100",
+    "000010",
+    "000001"
+  ],
+  "matrix_note": "Higress 2.2.4 runs as the official all-in-one image with file-based config: one McpBridge static registry aimed at the mock and one six-path Ingress to it, so every served cell is same-dialect verbatim passthrough on the diagonal. The cross-dialect cells need the ai-proxy wasm plugin's per-ingress provider bindings (WasmPlugin matchRules), which this one-static-config manifest has not been verified against, so they are grey by that configuration limit rather than measured false. Upstream selection by request header - the mechanism other entrants use to light up cross columns on one path - is not configured because the Ingress resource Higress's file config speaks has no header matcher.",
+  "model": "gpt-4o-mini",
+  "name": "higress",
+  "path": "/v1/chat/completions",
+  "port": 8080,
+  "repo": "https://github.com/alibaba/higress",
+  "runtime": {
+    "container": "higress-bench",
+    "kind": "docker"
+  }
+}
