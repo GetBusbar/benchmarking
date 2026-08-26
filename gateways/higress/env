@@ -1,0 +1,7 @@
+# The all-in-one image starts Envoy with --concurrency=${GATEWAY_CONCURRENCY:-16}, so the image
+# default is 16 workers regardless of how many cores the container is pinned to - on the 4 pinned
+# cores that is 12 extra spinning workers fighting the mock and the load generator. This is the
+# gateway's OWN knob (not one of the runtime-standard names the harness sets centrally for every
+# entrant), so it is declared here, from {NCORE}, exactly once.
+GATEWAY_CONCURRENCY={NCORE}
+USE_PLUGIN_SERVER=off

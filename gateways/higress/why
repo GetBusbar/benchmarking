@@ -1,0 +1,67 @@
+# Why each declared setting exists. One claim per setting; the config lint fails on any setting
+# that is declared and not claimed here.
+
+image higress-registry.cn-hangzhou.cr.aliyuncs.com/higress/all-in-one:2.2.4
+  The project's official standalone artifact (one container: file-based apiserver + controller +
+  pilot + Envoy gateway + console), pinned to the 2.2.4 release. Verified multi-arch against the
+  registry manifest on 2026-08-25: linux/amd64 + linux/arm64, so it runs natively on both arches
+  this benchmark fields. The registry is Aliyun Hangzhou; a pull from an AWS box is slow but
+  unauthenticated and works.
+
+port 8080
+  The image's own GATEWAY_HTTP_PORT default. Nothing in this harness depends on the number; we do
+  not restate the env var, we just bind the gateway where it already listens.
+
+env GATEWAY_CONCURRENCY={NCORE}
+  bind. start-gateway.sh launches Envoy with --concurrency=${GATEWAY_CONCURRENCY:-16}; the image
+  default of 16 workers on the 4 pinned cores would oversubscribe the box the mock and load
+  generator share. This is the gateway's own knob (the harness sets only runtime-standard names
+  like GOMAXPROCS centrally), so it is declared per-gateway, from {NCORE}, exactly as the manifest
+  spec's one exception allows.
+
+env USE_PLUGIN_SERVER=off
+  measure. The all-in-one image defaults this to on, which keeps the built-in plugin server - a
+  resident nginx listening on 8002 inside the container - serving Wasm plugin images to Envoy over
+  local HTTP; base.sh normalizes off/false/no to off, and with it off start-plugin-server.sh exits
+  at boot. This manifest configures no Wasm plugin anywhere - no WasmPlugin resource, no plugin
+  annotation on the Ingress, and the McpBridge is used purely as a static registry - so that nginx
+  can never answer a request, and the project's own deploy-by-docker table says the alternative
+  source it enables (the public image server) is only consulted when a Wasm plugin must be
+  fetched, which nothing here ever does. This is the manifest's one turn-off of a default-on
+  component, made on the same minimality principle the rest of the config lives by: the process
+  exists to serve a capability this deployment does not configure, and leaving it on would count
+  an idle nginx's RSS in figures that already honestly carry the console JVM's.
+
+mount data/mcpbridges/default.gen.yaml -> /data/mcpbridges/default.yaml (read-only)
+  upstream. The all-in-one bootstrap (start-apiserver.sh) copies its defaults into /data with
+  cp -n, so an existing file at this path survives and ours - pointing the sole static registry at
+  the mock - is the config the controller actually loads. Read-only because the gateway has no
+  reason to rewrite its own input, and a writable mount would let a run mutate what the next run
+  reads. The rest of /data stays container-writable, which the bootstrap needs.
+
+mount data/ingresses/bench.gen.yaml -> /data/ingresses/bench.yaml (read-only)
+  ingress. One Ingress with the six canonical dialect paths, all to mock.static: each is a prefix
+  route in the dialect's own shape, so every served cell is same-dialect passthrough. The gemini
+  and bedrock paths embed their cell's model constants, and cell_paths mirrors the same constants
+  into the probe path, so route and probe agree by construction.
+
+matrix: the diagonal only
+  This manifest configures no ai-proxy plugin, so it makes no translation claim: an openai request
+  leaves as openai, /v1/messages in leaves as /v1/messages. The cross-dialect cells would need a
+  WasmPlugin with per-ingress provider bindings; that is a real capability of the project but one
+  this one-static-config manifest has not been verified against, and an unverified green is the
+  one thing this benchmark refuses to publish. They are grey (undeclared), not red.
+
+auth dummy
+  The routes forward whatever credential the client presents; the mock accepts any. The value
+  satisfies the manifest's own field, it is not a secret.
+
+RSS includes the console JVM
+  MODE=full is required for a self-contained container (MODE=gateway hangs waiting for a pilot that
+  is not running), and full mode includes the console - a JVM. The memory figures therefore report
+  the whole all-in-one process tree, which is the honest cost of running Higress the way this
+  artifact ships; quoting an Envoy-only number would describe a deployment that does not exist.
+
+lang Other
+  The data plane is Envoy (C++) and the control plane is Go; the board colours by one
+  implementation language, and mixed does not get to pick the flattering half.

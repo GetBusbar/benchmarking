@@ -1,0 +1,19 @@
+# The upstream registry this run drives: the harness's mock, on the host loopback. This file
+# replaces the image's own default McpBridge (whose only registry is the console at 8001); the
+# all-in-one bootstrap copies its defaults into /data with cp -n, so a file that already exists at
+# this path is left alone and this one wins. 127.0.0.1 reaches the mock because the harness
+# launches every container with host networking - the same fact apisix's override.endpoint and
+# kong's upstream_url rely on. Shape mirrors the image's own all-in-one/config/mcpbridges/default.yaml.
+apiVersion: networking.higress.io/v1
+kind: McpBridge
+metadata:
+  name: default
+  namespace: higress-system
+  creationTimestamp: "2000-01-01T00:00:00Z"
+  resourceVersion: "1"
+spec:
+  registries:
+  - domain: "127.0.0.1:{MOCK_PORT}"
+    name: mock
+    port: {MOCK_PORT}
+    type: static
