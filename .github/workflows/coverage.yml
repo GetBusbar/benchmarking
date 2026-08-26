@@ -1,0 +1,40 @@
+name: coverage
+
+# Non-gating Codecov coverage. Separate from bench-tests.yml so it can never
+# affect the required checks. Self-contained workspace (engine/ + mock/, no
+# sibling busbar checkout needed). The whole job is continue-on-error and the
+# upload is fail_ci_if_error: false, so a coverage hiccup never blocks a merge.
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+
+permissions:
+  contents: read
+
+jobs:
+  coverage:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Generate coverage
+        run: cargo llvm-cov --workspace --ignore-run-fail --lcov --output-path lcov.info
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          slug: ${{ github.repository }}
+          files: lcov.info
+          fail_ci_if_error: false
