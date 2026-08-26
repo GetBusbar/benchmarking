@@ -20,7 +20,7 @@
   "lang": "Go",
   "launch": {
     "args": [],
-    "image": "enterpilot/gomodel:0.1.63",
+    "image": "enterpilot/gomodel:0.1.82",
     "kind": "docker",
     "mounts": []
   },
