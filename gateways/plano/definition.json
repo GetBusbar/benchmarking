@@ -25,7 +25,7 @@
   "lang": "Rust",
   "launch": {
     "args": [],
-    "image": "katanemo/plano:0.4.29",
+    "image": "katanemo/plano:0.4.36",
     "kind": "docker",
     "mounts": [
       {

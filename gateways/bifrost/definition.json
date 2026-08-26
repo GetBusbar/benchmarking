@@ -29,7 +29,7 @@
   "lang": "Go",
   "launch": {
     "args": [],
-    "image": "maximhq/bifrost:v1.6.6",
+    "image": "maximhq/bifrost:v1.6.11",
     "kind": "docker",
     "mounts": [
       {
