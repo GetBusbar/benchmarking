@@ -1,0 +1,64 @@
+# One Ingress, six prefix paths, one destination: each path is a wire dialect's own canonical
+# route (the same paths engine ingress.rs probes), so each diagonal cell is verbatim passthrough -
+# the request leaves in the dialect it arrived in, and the mock's shape recording can tell. The
+# gemini and bedrock paths embed their cell's model, which the manifest declares as constants and
+# mirrors into cell_paths so the probe and this route agree by construction, not by copy-paste.
+# Shape mirrors the image's own all-in-one/config/ingresses/*.yaml (labels, timestamps and the
+# resource-definer marker included - the file-based apiserver serves these as k8s objects).
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: bench-diagonal
+  namespace: higress-system
+  creationTimestamp: "2000-01-01T00:00:00Z"
+  resourceVersion: "1"
+  labels:
+    higress.io/resource-definer: higress
+  annotations:
+    higress.io/destination: mock.static
+spec:
+  rules:
+    - http:
+        paths:
+        - backend:
+            resource:
+              apiGroup: networking.higress.io
+              kind: McpBridge
+              name: default
+          path: /v1/chat/completions
+          pathType: Prefix
+        - backend:
+            resource:
+              apiGroup: networking.higress.io
+              kind: McpBridge
+              name: default
+          path: /v1/responses
+          pathType: Prefix
+        - backend:
+            resource:
+              apiGroup: networking.higress.io
+              kind: McpBridge
+              name: default
+          path: /v1/messages
+          pathType: Prefix
+        - backend:
+            resource:
+              apiGroup: networking.higress.io
+              kind: McpBridge
+              name: default
+          path: /v2/chat
+          pathType: Prefix
+        - backend:
+            resource:
+              apiGroup: networking.higress.io
+              kind: McpBridge
+              name: default
+          path: "/v1beta/models/{HIGRESS_GEMINI_MODEL}:generateContent"
+          pathType: Prefix
+        - backend:
+            resource:
+              apiGroup: networking.higress.io
+              kind: McpBridge
+              name: default
+          path: "/model/{HIGRESS_BEDROCK_MODEL}/converse"
+          pathType: Prefix
