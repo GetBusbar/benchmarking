@@ -5250,18 +5250,16 @@ test("freshness guard PUBLISHES a board with nothing measured on it (empty is no
   assert.ok(!data.gateways[0].best_cell, "with nothing measured there is no projected record to show");
   assert.ok(data.generated_at, "the bundle still stamps when it was generated");
 });
-// ---- a gateway NOBODY HAS MEASURED is not a row, once anything else has been -----------------------
+// ---- a DECLARED entrant is a row from the moment its definition lands (owner policy 2026-08-26) ----
 //
-// busbar-150's manifest had to be committed for the benchmark boxes to fetch it, and the moment it
-// existed the PUBLIC board grew a row reading "Busbar 1.5.0" with no matrix, no best_cell and no
-// snapshot behind it - beside fourteen rows carrying full 6x6 grids. That is not a disclosure, it is
-// an implication: the reader sees a gateway that apparently has nothing to show, when the truth is
-// that nobody has run it yet. An absence on this board carries a reason; a gateway with no
-// measurement at all has no absence to explain, because there is no cell to be absent.
-//
-// The rule is scoped to boards that HAVE data - the test above pins the all-empty board keeping its
-// declared rows, and these two must not be collapsed into one rule in either direction.
-test("a declared-but-unmeasured gateway is off a board that has data (n/a beside real rows implies)", () => {
+// The board used to drop a gateway with no measurement so an unmeasured row could not read, beside
+// full grids, as "this one has nothing to show". The owner reversed that: the roster is meant to show
+// what is ON the bench, so a declared-but-unrun entrant (e.g. higress between its merge and its first
+// field run) appears immediately, rendering n/a on every lane with a version and contributor from its
+// manifest. It is a disclosed PENDING entrant, not a hidden one; the same row fills with numbers the
+// moment a snapshot lands. This test pins that: `ghost` is declared, never run, and MUST be a row
+// beside the measured `alpha`, carrying a null measured_at rather than fabricated data.
+test("a declared-but-unmeasured gateway is a row (n/a) beside measured ones", () => {
   const root = mkdtempSync(join(tmpdir(), "site-unmeasured-"));
   for (const name of ["alpha", "ghost"]) {
     mkdirSync(join(root, "gateways", name), { recursive: true });
@@ -5285,8 +5283,11 @@ test("a declared-but-unmeasured gateway is off a board that has data (n/a beside
   assert.ok(!err, `expected an honest board, got: ${err}`);
   const keys = data.gateways.map((g) => g.key || g.name);
   assert.ok(keys.includes("alpha"), "the measured gateway must be on the board");
-  assert.ok(!keys.includes("ghost"),
-    `a gateway nobody has measured must not be a row beside measured ones, got: ${JSON.stringify(keys)}`);
+  assert.ok(keys.includes("ghost"),
+    `a declared entrant must be a row even before measurement, got: ${JSON.stringify(keys)}`);
+  const ghost = data.gateways.find((g) => (g.key || g.name) === "ghost");
+  assert.equal(ghost.measured_at, null, "an unmeasured entrant carries a null measured_at, not fabricated data");
+  assert.ok(!ghost.matrix, "an unmeasured entrant has no matrix behind it");
 });
 // ---- the rig's ceiling is a FACT ABOUT THE COMPARISON, never a reason to withhold ------------------
 // This test's title used to be "matching a PACED upstream publishes the value; matching a CAPACITY still
