@@ -272,6 +272,13 @@ function resolvedSnapshot(key) {
 // absent key degrades to null; the site renders those muted.
 const starsSnap = readJson(join(gatewaysDir, "stars.json")) || {};
 
+// OUTSIDE CONTRIBUTORS, keyed by gateway. Editorial credit, kept in a SITE-ONLY file the engine
+// never parses - a contributor field in definition.json would change the engine's Manifest schema,
+// and the engine is a frozen instrument (ENGINE_PIN): a schema change there is a board-wide re-run.
+// This file is not the instrument, so crediting @moonming and @geekspeng costs no re-measurement.
+// Shape: { "<gatewayKey>": [ { "handle": "...", "name": "...", "url": "https://..." }, ... ] }.
+const contributorsBook = readJson(join(HERE, "contributors.json")) || {};
+
 // snapshotDefinitionsByKey: gateway key -> the metric-definitions map off the SAME snapshot that
 // became that gateway's g.matrix (see the capture below). Kept OUT of the gateway object itself -
 // the per-gateway records are the public bundle shape and definitions are a board-level projection
@@ -284,6 +291,17 @@ const allGateways = gatewayKeys.map((key) => {
     display: meta.display || key,
     lang: meta.lang || "Other",
     cls: meta.cls || "Gateway",
+    // Outside contributors (from the site-only contributorsBook), sanitised the same way g.repo is:
+    // app.js renders handle/name esc()'d but interpolates url RAW into an href, so only https://
+    // profile URLs survive - a bad/missing url drops to null and the cell renders the handle as
+    // plain text rather than a link.
+    contributed_by: (Array.isArray(contributorsBook[key]) ? contributorsBook[key] : [])
+      .filter((c) => c && typeof c.handle === "string" && c.handle.trim())
+      .map((c) => ({
+        handle: c.handle,
+        name: (typeof c.name === "string" && c.name.trim()) ? c.name : c.handle,
+        url: (typeof c.url === "string" && /^https:\/\/[^\s"'<>]+$/.test(c.url)) ? c.url : null,
+      })),
     // Only accept an https:// repo URL. app.js interpolates g.repo RAW into href="${g.repo}" at four
     // render sites (display is esc()'d, href is not), so a manifest GW_REPO like
     // `x" onfocus=alert(...) autofocus="` or a `javascript:` scheme would inject on the public board.

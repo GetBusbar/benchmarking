@@ -307,7 +307,13 @@ tbody tr { cursor: pointer; }
 #gateways-table thead th[data-dir="asc"]::after { content: " \25B2"; font-size: .7em; color: var(--fg-mute); }
 #gateways-table thead th[data-dir="desc"]::after { content: " \25BC"; font-size: .7em; color: var(--fg-mute); }
 #gateways-table tbody tr { cursor: pointer; }
-#gateways-table td.cls { color: var(--fg-dim); }
+/* Contributors cell: outside people who submitted/maintain an entrant. A first-party row renders a
+   muted dash; a credited row shows @handle chips linking to GitHub. The link colour is the normal
+   accent so it reads as "click me", and it stops the row-click so the profile opens instead of the
+   drawer. */
+#gateways-table td.contrib { color: var(--fg-dim); white-space: nowrap; }
+#gateways-table td.contrib .contrib-link { color: var(--accent); text-decoration: none; }
+#gateways-table td.contrib a.contrib-link:hover { text-decoration: underline; }
 
 /* drawer (per-gateway slide-over) */
 .backdrop { position: fixed; inset: 0; background: var(--overlay); z-index: 60; }
